@@ -59,6 +59,7 @@ pub trait DownloadClient: Send + Sync {
     /// Add a torrent paused, with only `wanted` file indices selected, into `download_dir`.
     async fn add(&self, src: TorrentSource, download_dir: &Path, wanted: &[u32], seed: SeedPolicy) -> Result<ClientTorrentId>;
     async fn set_wanted(&self, id: &ClientTorrentId, wanted: &[u32]) -> Result<()>;
+    async fn set_seed_policy(&self, id: &ClientTorrentId, seed: SeedPolicy) -> Result<()>;
     async fn start(&self, id: &ClientTorrentId) -> Result<()>;
     async fn stop(&self, id: &ClientTorrentId) -> Result<()>;
     async fn status(&self, id: &ClientTorrentId) -> Result<TorrentStatus>;          // per-file progress included
