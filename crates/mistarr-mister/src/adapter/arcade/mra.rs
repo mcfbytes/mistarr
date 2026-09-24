@@ -421,7 +421,7 @@ fn too_big() -> Error {
 /// # Errors
 ///
 /// An I/O error when the file cannot be read; reading fails with `InvalidData` when the
-/// text no longer decodes to [`Inline::len`] bytes, as when the file changed.
+/// text does not decode to [`Inline::len`] bytes, as when the file changed after [`read`].
 ///
 /// ```
 /// use std::io::Read as _;

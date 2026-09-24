@@ -89,14 +89,14 @@ impl File {
 
 /// Preference of a storage kind under a header rule; the lowest present is taken.
 fn rank(rule: HeaderRule, kind: Kind) -> u8 {
-    match (rule, kind) {
-        (HeaderRule::Ines | HeaderRule::A78 | HeaderRule::Lnx, Kind::Headerless)
-        | (HeaderRule::N64, Kind::BigEndian) => 0,
-        (_, Kind::Plain) => 1,
-        (_, Kind::BigEndian) => 2,
-        (_, Kind::Other) => 3,
-        (_, Kind::Headered) => 4,
-        (_, Kind::Headerless) => 5,
+    match kind {
+        Kind::Headerless if rule.strips_header() => 0,
+        Kind::BigEndian if rule == HeaderRule::N64 => 0,
+        Kind::Plain => 1,
+        Kind::BigEndian => 2,
+        Kind::Other => 3,
+        Kind::Headered => 4,
+        Kind::Headerless => 5,
     }
 }
 
