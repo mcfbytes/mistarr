@@ -432,7 +432,7 @@ pub fn bind_dat_name(name: &str) -> Option<&'static Platform> {
     let mut best: Option<(usize, &'static Platform)> = None;
     for (row, re) in compiled() {
         if let Some(m) = re.find(&norm) {
-            if best.map_or(true, |(len, _)| m.len() > len) {
+            if best.is_none_or(|(len, _)| m.len() > len) {
                 best = Some((m.len(), row));
             }
         }
