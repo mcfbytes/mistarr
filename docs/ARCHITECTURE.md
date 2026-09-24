@@ -141,9 +141,11 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    file that does not parse, or repeats a loaded source, moves to
    `sources/rejected/` with a `<name>.reason.txt`.
 2. For a magnet, the source is `resolving`. A light `resolve_magnet` job adds
-   it to the client paused into `staging/<infohash>/` with nothing wanted,
-   then asks the client for its file list every 15 s. Once the list arrives
-   every file is left unwanted and the source is bound like a `.torrent`.
+   it to the client paused into `staging/<infohash>/` with nothing wanted and
+   starts it, since a paused magnet never fetches metadata, then asks the
+   client for its file list every 15 s. Once the list arrives every file is
+   set unwanted, the torrent is stopped and the source is bound like a
+   `.torrent`.
    With no client detected the source stays `resolving` with a reason and is
    retried when one appears.
 3. For each file in the torrent, normalise the leaf name and look it up

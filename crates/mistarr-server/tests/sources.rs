@@ -5,9 +5,16 @@ mod common;
 use std::path::PathBuf;
 
 use common::{boot, boot_with, config_in, eventually, get, request, request_bytes, Booted, Sse};
-use mistarr_clients::fake::{FakeResponse, FakeServer};
+use mistarr_clients::fake::{FakeResponse, FakeScgiServer, FakeServer, ScgiReply};
+use mistarr_clients::xmlrpc::Value as Xml;
+use mistarr_server::config::ClientChoice;
 use mistarr_server::db::sources::fixtures::seed_rom;
 use serde_json::{json, Value};
+
+/// Transmission's answer to the existence check before start and stop.
+fn exists() -> FakeResponse {
+    FakeResponse::success(json!({ "torrents": [{ "id": 1 }] }))
+}
 
 /// A synthetic infohash of one repeated byte.
 fn hash(byte: u8) -> String {
@@ -327,6 +334,8 @@ async fn magnet_resolves_through_the_client() {
         json!({ "torrents": [{ "wanted": [] }] }),
     ));
     fake.push(FakeResponse::success(json!({})));
+    fake.push(exists());
+    fake.push(FakeResponse::success(json!({})));
     fake.push(FakeResponse::success(
         json!({ "torrents": [{ "name": "Magnet Set", "files": [] }] }),
     ));
@@ -346,6 +355,8 @@ async fn magnet_resolves_through_the_client() {
     fake.push(FakeResponse::success(
         json!({ "torrents": [{ "wanted": [true, true, true] }] }),
     ));
+    fake.push(FakeResponse::success(json!({})));
+    fake.push(exists());
     fake.push(FakeResponse::success(json!({})));
 
     let dir = tempfile::tempdir().expect("tempdir");
@@ -378,7 +389,29 @@ async fn magnet_resolves_through_the_client() {
     assert_eq!(files["items"][1]["confidence"], "size");
 
     let bodies = fake.bodies();
-    assert_eq!(bodies.len(), 8, "{bodies:?}");
+    let methods: Vec<&str> = bodies
+        .iter()
+        .map(|b| b["method"].as_str().unwrap_or(""))
+        .collect();
+    // The scripted listing only lines up if the torrent was started first.
+    assert_eq!(
+        methods,
+        [
+            "session-get",
+            "torrent-add",
+            "torrent-get",
+            "torrent-set",
+            "torrent-get",
+            "torrent-start",
+            "torrent-get",
+            "torrent-get",
+            "torrent-get",
+            "torrent-set",
+            "torrent-get",
+            "torrent-stop",
+        ]
+    );
+    assert_eq!(bodies[6]["arguments"]["fields"], json!(["name", "files"]));
     let add = &bodies[1];
     assert_eq!(add["method"], "torrent-add");
     assert_eq!(add["arguments"]["paused"], true);
@@ -388,6 +421,120 @@ async fn magnet_resolves_through_the_client() {
         add["arguments"]["download-dir"],
         staging.to_string_lossy().as_ref()
     );
-    assert_eq!(bodies[7]["arguments"]["files-unwanted"], json!([0, 1, 2]));
+    assert_eq!(bodies[9]["arguments"]["files-unwanted"], json!([0, 1, 2]));
+    b.running.shutdown().await.expect("shutdown");
+}
+
+fn xml_ok() -> ScgiReply {
+    ScgiReply::Value(Xml::Int(0))
+}
+
+fn xml_multicall(values: Vec<Xml>) -> ScgiReply {
+    ScgiReply::multicall(values)
+}
+
+#[tokio::test]
+async fn magnet_resolves_through_rtorrent() {
+    let fake = FakeScgiServer::start().await.expect("fake");
+    let h = hash(0xcd);
+    fake.push(ScgiReply::fault(-501, "Could not find info-hash."));
+    fake.push(xml_ok());
+    fake.push(xml_ok());
+    fake.push(xml_multicall(vec![Xml::Int(1), Xml::Int(0)]));
+    fake.push(xml_ok());
+    fake.push(xml_multicall(vec![Xml::Int(1), Xml::Array(vec![])]));
+    let row = |p: &str, n: i64| Xml::Array(vec![Xml::from(p), Xml::Int(n)]);
+    fake.push(xml_multicall(vec![
+        Xml::Int(0),
+        Xml::Array(vec![
+            row("NES/Example Quest (USA).nes", 40_976),
+            row("NES/Third Tale (Europe).nes", 65_552),
+        ]),
+    ]));
+    fake.push(xml_multicall(vec![Xml::Int(0), Xml::Int(2)]));
+    fake.push(xml_multicall(vec![Xml::Int(0), Xml::Int(0)]));
+    fake.push(xml_ok());
+    fake.push(xml_ok());
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = config_in(dir.path());
+    config.client.kind = ClientChoice::Rtorrent;
+    config.client.url = fake.addr();
+    let b = boot_with(dir, config).await;
+    seed_catalog(&b);
+    let mut sse = Sse::open(b.addr(), "/api/v1/events", &[]).await;
+    let uri = format!("magnet:?xt=urn:btih:{h}&dn=Rt%20Set");
+    std::fs::write(sources_dir(&b).join("rt.magnet"), format!("{uri}\n")).expect("write");
+    sse.until(r#""state":"bound""#).await;
+
+    let s = only_source(&b).await;
+    assert_eq!(s["platform_id"], "nes");
+    assert_eq!(s["matched_count"], 2);
+    let calls = fake.calls();
+    let names: Vec<String> = calls
+        .iter()
+        .map(|(m, p)| match (m.as_str(), p.first()) {
+            ("system.multicall", Some(Xml::Array(list))) => {
+                let first = list.first().and_then(|c| match c {
+                    Xml::Struct(fields) => fields.iter().find(|(k, _)| k == "methodName"),
+                    _ => None,
+                });
+                match first {
+                    Some((_, Xml::String(inner))) => format!("multi:{inner}"),
+                    _ => "multi:?".to_owned(),
+                }
+            }
+            _ => m.clone(),
+        })
+        .collect();
+    // The scripted listing only lines up if the torrent was started first.
+    assert_eq!(
+        names,
+        [
+            "d.hash",
+            "load.normal",
+            "d.directory.set",
+            "multi:d.is_meta",
+            "d.start",
+            "multi:d.is_meta",
+            "multi:d.is_meta",
+            "multi:d.is_meta",
+            "multi:f.priority.set",
+            "d.update_priorities",
+            "d.stop",
+        ]
+    );
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn concurrent_uploads_of_one_name_keep_both() {
+    let b = boot().await;
+    seed_catalog(&b);
+    let body = |set: &str| {
+        let mut body = b"--bnd\r\nContent-Disposition: form-data; name=\"file\"; filename=\"same.torrent\"\r\n\r\n".to_vec();
+        body.extend_from_slice(&matching_set(set));
+        body.extend_from_slice(b"\r\n--bnd--\r\n");
+        body
+    };
+    let (one, two) = (body("First Set"), body("Second Set"));
+    let multipart = "multipart/form-data; boundary=bnd";
+    let path = "/api/v1/sources/upload";
+    let (a, c) = tokio::join!(
+        request_bytes(b.addr(), "POST", path, multipart, &one),
+        request_bytes(b.addr(), "POST", path, multipart, &two),
+    );
+    assert_eq!((a.status, c.status), (202, 202), "{} {}", a.body, c.body);
+    let mut files = [a.json()["file"].clone(), c.json()["file"].clone()];
+    files.sort_by_key(ToString::to_string);
+    assert_eq!(files, [json!("same (1).torrent"), json!("same.torrent")]);
+    eventually("both sources", || async { sources(&b).await.len() == 2 }).await;
+    let mut names: Vec<String> = sources(&b)
+        .await
+        .iter()
+        .map(|s| s["display_name"].as_str().unwrap_or("").to_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["First Set", "Second Set"]);
     b.running.shutdown().await.expect("shutdown");
 }

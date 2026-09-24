@@ -62,8 +62,9 @@ pub struct SourceImport {
     pub path: PathBuf,
 }
 
-/// Adds a resolving magnet to the client if needed and binds it once the
-/// client lists its files. Leaves a reason on the source while it waits.
+/// Adds a resolving magnet to the client with nothing wanted and starts it so
+/// the client fetches metadata; once the client lists the files, leaves them
+/// unwanted, stops the torrent and binds the source. Leaves a reason while it waits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResolveMagnet {
     /// The resolving source.
@@ -337,6 +338,11 @@ impl Job for ResolveMagnet {
                 .await
             {
                 Ok(added) => {
+                    // A paused magnet never fetches metadata; with nothing
+                    // wanted, starting it transfers only the file list.
+                    if let Err(e) = client.start(&added).await {
+                        return note(app, &row, &unanswered(&e)).await;
+                    }
                     let stored = added.as_str().to_owned();
                     app.db
                         .write(move |c| rows::set_client_id(c, id, Some(&stored)))
@@ -359,6 +365,9 @@ impl Job for ResolveMagnet {
         };
         if let Err(e) = client.set_wanted(&torrent, &[]).await {
             tracing::warn!(source = %id, error = %e, "cannot clear the magnet's file selection");
+        }
+        if let Err(e) = client.stop(&torrent).await {
+            tracing::warn!(source = %id, error = %e, "cannot stop the resolved magnet");
         }
         let files: Vec<TorrentFile> = listed
             .into_iter()

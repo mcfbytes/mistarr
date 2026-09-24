@@ -1,6 +1,7 @@
 //! The Sources routes of `docs/API.md`.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use axum::body::Bytes;
@@ -24,6 +25,9 @@ use crate::jobs::Scheduler;
 
 /// Largest accepted upload; set torrents with many files run to a few MiB.
 const UPLOAD_LIMIT: usize = 16 * 1024 * 1024;
+
+/// Names tried per upload: `name`, then `name (1)` onwards.
+const PLACE_ATTEMPTS: u32 = 100;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -266,10 +270,20 @@ async fn upload(
         return Err(ApiError::bad_request(DUPLICATE));
     }
     let dir = app.config().paths.sources();
-    let path = tokio::task::spawn_blocking(move || place(&dir, &name, &bytes))
+    let placed = tokio::task::spawn_blocking(move || place(&dir, &name, &bytes))
         .await
-        .map_err(|e| crate::Error::Task(e.to_string()))?
-        .map_err(crate::Error::Io)?;
+        .map_err(|e| crate::Error::Task(e.to_string()))?;
+    let path = match placed {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(ApiError::new(
+                StatusCode::CONFLICT,
+                "conflict",
+                "A file with this name is already waiting in the sources directory.",
+            ))
+        }
+        Err(e) => return Err(crate::Error::Io(e).into()),
+    };
     let file = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -278,25 +292,44 @@ async fn upload(
     Ok((StatusCode::ACCEPTED, Json(Uploaded { file, job_id })).into_response())
 }
 
-/// Writes `bytes` to a free name in `dir` through a temporary file, so the
-/// scanner never sees a partial file. Returns the final path.
+/// Writes `bytes` under `name`, or `name (N)` when taken, in `dir`. The name
+/// is claimed with `create_new` and filled by renaming a uniquely named
+/// temporary file over the claim, so concurrent uploads never share a path.
+/// `AlreadyExists` when no free name is found.
 fn place(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
     std::fs::create_dir_all(dir)?;
     let (stem, ext) = name.rsplit_once('.').unwrap_or((name, ""));
-    let mut target = dir.join(name);
-    let mut n = 1;
-    while target.exists() {
-        target = dir.join(format!("{stem} ({n}).{ext}"));
-        n += 1;
+    let target = (0..PLACE_ATTEMPTS)
+        .map(|n| match n {
+            0 => dir.join(name),
+            n => dir.join(format!("{stem} ({n}).{ext}")),
+        })
+        .find_map(|candidate| {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&candidate)
+            {
+                Ok(_) => Some(Ok(candidate)),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => None,
+                Err(e) => Some(Err(e)),
+            }
+        })
+        .unwrap_or_else(|| {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "no free file name",
+            ))
+        })?;
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".upload-{}-{n}.part", std::process::id()));
+    let written = std::fs::write(&tmp, bytes).and_then(|()| std::fs::rename(&tmp, &target));
+    if let Err(e) = written {
+        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(&target);
+        return Err(e);
     }
-    let tmp = dir.join(format!(
-        ".{}.part",
-        target
-            .file_name()
-            .map_or_else(String::new, |f| f.to_string_lossy().into_owned())
-    ));
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(&tmp, &target)?;
     Ok(target)
 }
 
@@ -406,5 +439,38 @@ mod tests {
         );
         assert_eq!(std::fs::read(&b).expect("read"), b"2");
         assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 2);
+    }
+
+    #[test]
+    fn concurrent_placements_keep_every_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let placed: Vec<PathBuf> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8u8)
+                .map(|i| s.spawn(move || place(root, "c.torrent", &[i]).expect("place")))
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().expect("join"))
+                .collect()
+        });
+        let mut contents: Vec<u8> = placed
+            .iter()
+            .map(|p| std::fs::read(p).expect("read")[0])
+            .collect();
+        contents.sort_unstable();
+        assert_eq!(contents, (0..8).collect::<Vec<u8>>());
+        assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 8);
+    }
+
+    #[test]
+    fn placing_reports_when_no_name_is_free() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("f.magnet"), b"x").expect("write");
+        for n in 1..PLACE_ATTEMPTS {
+            std::fs::write(dir.path().join(format!("f ({n}).magnet")), b"x").expect("write");
+        }
+        let err = place(dir.path(), "f.magnet", b"y").expect_err("full");
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
     }
 }

@@ -6,8 +6,9 @@ set headers, the `apikey` query parameter; otherwise the answer is 401. All
 list endpoints take `?limit=&offset=` (default 100, capped at 1000) and return
 `{ items: [...], total: n }`. Errors are `{ error: { code, message } }` with an
 appropriate status; codes are `bad_request`, `unauthorized`, `not_found`,
-`method_not_allowed`, `not_implemented` and `internal`. A documented route whose
-work package has not landed answers 501 `not_implemented`. The SPA is served
+`method_not_allowed`, `conflict`, `not_implemented` and `internal`. A
+documented route whose work package has not landed answers 501
+`not_implemented`. The SPA is served
 from `/` and every unknown non-API path returns `index.html`; unknown paths
 under `/api` return 404 JSON.
 
@@ -102,8 +103,9 @@ torrent is in the client. `seed_policy` is `"none"`, `"client"` or
 `/sources/upload` takes `multipart/form-data` with one `.torrent` file part,
 or a JSON body `{ magnet }`. A file that does not parse, or repeats a source
 that is already loaded, is a 400. Otherwise the file is written into
-`sources/` and the answer is 202 `{ file, job_id }`; the import then emits
-`source.changed`.
+`sources/` under its name, or `name (N)` when that is taken (409 `conflict`
+when no such name is free), and the answer is 202 `{ file, job_id }`; the
+import then emits `source.changed`.
 
 `PUT /sources/{id}` body fields are all optional. `platform_id` binds or
 rebinds the source to that platform, matching its files against it only, and
