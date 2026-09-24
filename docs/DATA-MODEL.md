@@ -123,7 +123,8 @@ CREATE TABLE sources (                  -- one per torrent the user dropped in
   client_id     TEXT,                  -- id in the download client once added, else NULL
   added_at      INTEGER NOT NULL,
   suggested_platform_id TEXT REFERENCES platforms(id),  -- guessed from the torrent's names, no DAT needed
-  user_unbound  INTEGER NOT NULL DEFAULT 0   -- 1 after the user unbound it; never bound automatically again
+  user_unbound  INTEGER NOT NULL DEFAULT 0,  -- 1 after the user unbound it; never bound automatically again
+  map_stamp     TEXT                   -- the platform's live roms the files were last mapped against
 );
 CREATE INDEX sources_state ON sources(state);
 
@@ -132,8 +133,8 @@ CREATE TABLE torrent_files (
   file_index    INTEGER NOT NULL,
   path          TEXT NOT NULL,         -- inside the torrent, without the torrent's name
   size          INTEGER NOT NULL,
-  rom_id        INTEGER REFERENCES roms(id),   -- best name or base-name match, may be NULL
-  confidence    TEXT,                  -- 'name' | 'base', NULL when unmatched
+  rom_id        INTEGER REFERENCES roms(id),   -- best name match, or the rom a hash proved; may be NULL
+  confidence    TEXT,                  -- 'hash' | 'name' | 'base', NULL when unmatched
   PRIMARY KEY (source_id, file_index)
 );
 CREATE INDEX torrent_files_rom ON torrent_files(rom_id);
@@ -195,7 +196,10 @@ never repeating the pair `torrent_files` holds (VERIFICATION.md
 "Pre-download matching"). A file is available for a rom when either table
 pairs them, its source is `bound`, and no `bad` download of that rom used the
 file; choosing a file for a download, the title's availability and a
-source's `matched_count` read the union of both tables.
+source's `matched_count` read the union of both tables. Once an import
+proves by hash which rom a file is, its `torrent_files` row names that rom
+with confidence `hash` and its candidates are dropped; mapping never changes
+such a row again.
 
 ## State machines
 
@@ -228,9 +232,15 @@ cancelled   (from wanted, queued, transferring or checking)
   it on its own.
 - `bad` also ends a cartridge download whose file hashed to another live,
   non-BIOS version in the wanted entry's clone group: the file is placed and
-  verified as that version, the error reads "The file in this source is a
-  different version: <name>.", and the file stops being offered for the
-  wanted rom.
+  verified as that version (or kept, when the library already holds it
+  verified), the error reads "the file in this source is a different
+  version: <name>", and the file stops being offered for the wanted rom.
+- A `bad` row is the record that its file is not its rom. When it ends so
+  after placing another version, or after quarantining a file picked from a
+  `fuzzy` or `size` candidate, and the title is still wanted with no verified
+  file and no open download of the rom, a new download of the rom opens:
+  `queued` on the next best file, else `wanted`, carrying the same error so
+  the history shows.
 - `done`, `bad`, `failed`, `cancelled`: terminal. `failed` may be retried,
   which returns it to `queued` on the same torrent_file; `bad` never retries
   the same torrent_file. Cancelling a `transferring` or `checking` row

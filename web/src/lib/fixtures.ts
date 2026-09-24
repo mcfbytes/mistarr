@@ -395,9 +395,19 @@ export function fixtureSourceFiles(): SourceFile[] {
       rom_id: 1,
       rom_name: 'Example Quest (USA).nes',
       title_id: 1,
-      confidence: 'name'
+      confidence: 'name',
+      candidates: []
     },
-    { file_index: 1, path: 'Sample Racer (USA).nes', size: 262144, rom_id: null, rom_name: null, title_id: null, confidence: null }
+    {
+      file_index: 1,
+      path: 'Sample Racer (USA).nes',
+      size: 262144,
+      rom_id: null,
+      rom_name: null,
+      title_id: null,
+      confidence: null,
+      candidates: [{ rom_id: 2, rom_name: 'Sample Racer (World).nes', title_id: 2, confidence: 'fuzzy' }]
+    }
   ];
 }
 

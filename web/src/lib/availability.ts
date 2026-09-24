@@ -1,6 +1,7 @@
 import type { MatchConfidence, TitleAvailability } from './types';
 
 const LABELS: Record<MatchConfidence, string> = {
+  hash: 'hash match',
   name: 'name match',
   base: 'name and size',
   fuzzy: 'name guess',

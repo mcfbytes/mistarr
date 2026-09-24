@@ -53,7 +53,8 @@ a want toggle. Infinite scroll in pages of 60.
 **Title** (`/t/{id}`). Every variant in the group with region, revision,
 flags, file state, and which sources have it: one line per file, as "nova.nes
 in Example Pack (name guess)", with the confidence read as "name match",
-"name and size", "name guess" or "size only", or "None available". Want per variant. Play for a
+"hash match", "name match", "name and size", "name guess" or "size only", or
+"None available". Want per variant. Play for a
 variant whose files are all in the collection. Rename action for misnamed
 files. Art tabs: boxart, title, snap.
 

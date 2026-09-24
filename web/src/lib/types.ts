@@ -142,7 +142,7 @@ export interface TitleVariant {
 }
 
 /** How a torrent file was matched to a rom, strongest first. */
-export type MatchConfidence = 'name' | 'base' | 'fuzzy' | 'size';
+export type MatchConfidence = 'hash' | 'name' | 'base' | 'fuzzy' | 'size';
 
 /** A file of a bound source that may hold a rom of the variant. */
 export interface TitleAvailability {
@@ -224,7 +224,15 @@ export interface IncomingFile {
   modified: number;
 }
 
-export type SourceFileConfidence = 'name' | 'base' | null;
+export type SourceFileConfidence = 'hash' | 'name' | 'base' | null;
+
+/** A rom a torrent file may hold, by a fuzzy or size-only guess. */
+export interface SourceFileCandidate {
+  rom_id: number;
+  rom_name: string;
+  title_id: number;
+  confidence: MatchConfidence;
+}
 
 export interface SourceFile {
   file_index: number;
@@ -234,6 +242,7 @@ export interface SourceFile {
   rom_name: string | null;
   title_id: number | null;
   confidence: SourceFileConfidence;
+  candidates: SourceFileCandidate[];
 }
 
 export type DownloadState =

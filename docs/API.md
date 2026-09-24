@@ -159,8 +159,8 @@ roms }`, live variants first, and each rom is `{ id, name, size, crc32, md5, sha
 file_id, file_state, file_path }` for its best file, verified first.
 `availability` lists the files of bound sources that may hold a live rom of
 the variant, strongest first, as `{ source_id, source_name, file_index, path,
-rom_id, confidence }`, where `confidence` is `name`, `base`, `fuzzy` or
-`size` (VERIFICATION.md "Pre-download matching"), and
+rom_id, confidence }`, where `confidence` is `hash`, `name`, `base`, `fuzzy`
+or `size` (VERIFICATION.md "Pre-download matching"), and
 `torrent_files_available` counts its distinct files. `source`
 is `dat` or `mra`. An MRA variant adds `mra: { setname, rbf, path,
 missing_zips, md5_check, md5_detail }`, where `missing_zips` are paths
@@ -244,9 +244,11 @@ is kept. A source with a download that is queued, transferring, checking or
 importing is a 400; its other downloads are kept with `source_id` `null`.
 
 `/sources/{id}/files` items: `{ file_index, path, size, rom_id, rom_name,
-title_id, confidence }`, where `path` is inside the torrent and `confidence`
-is `"name"`, `"base"` or `null` when no name tier matched; fuzzy and
-size-only candidates show on the title instead.
+title_id, confidence, candidates }`, where `path` is inside the torrent,
+`confidence` is `"hash"`, `"name"`, `"base"` or `null` when no rom is
+matched, and `candidates` lists the further roms the file may be, strongest
+first, as `{ rom_id, rom_name, title_id, confidence }`. A file counts toward
+the source's `matched_count` exactly when it has a matched rom or a candidate.
 
 ## Incoming files
 

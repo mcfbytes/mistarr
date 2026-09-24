@@ -237,17 +237,24 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    in `torrent_candidates` (VERIFICATION.md "Pre-download matching"). Move
    the file to `sources/loaded/` and emit `source.changed`. A `.torrent` is
    not told to the client until something is wanted. When a DAT loads titles
-   for a platform, every source bound to it is mapped again, with the rebind
-   of step 4.
+   for a platform, the rebind of step 4 runs and a background
+   `remap_sources` job maps every source bound to that platform again: each
+   source is skipped when its `map_stamp` shows the platform's live roms did
+   not change, and otherwise only the rows that changed are written, 2 000
+   per transaction, with its hit rate refreshed and `source.changed` sent
+   only when its mapping changed. At startup the same job runs once for
+   every mapped source when any bound source has no stamp yet.
 
 ### Wanted and transfer
 
 1. The user marks a title as wanted. mistarr creates a download for each of
    its roms without a verified file, choosing the best `torrent_file` for it
    across bound sources, from its `torrent_files` matches and its
-   `torrent_candidates` alike: an exact size match first, then the stronger
-   confidence (`name`, `base`, `fuzzy`, `size`), then the source with fewer
-   open downloads. A file a `bad` download of the rom used is never chosen.
+   `torrent_candidates` alike: a file a hash proved or a name tier matched
+   before any `fuzzy` or `size` candidate, then, within that tier, a size
+   match (exact, or with the platform's header on top), then the stronger
+   confidence (`hash`, `name`, `base`, `fuzzy`, `size`), then the source
+   with fewer open downloads. A file a `bad` download of the rom used is never chosen.
    With no such file the download is `wanted` until a source binds that has
    one. Two wanted versions may share one file.
 2. A light `transfer` job takes `queued` downloads per source. If the torrent
@@ -283,16 +290,24 @@ does nothing.
    byte-identical regional variants and identical disc tracks resolve to the
    wanted rom. Only when nothing of the entry matches is the rest of the DAT
    searched. A cartridge file that is a live rom of another live, non-BIOS
-   entry in the wanted entry's clone group is placed and verified as that
-   version, through steps 3 to 5 for it; the wanted download becomes `bad`
-   with "The file in this source is a different version: <name>.", and the
-   pair of that file and the wanted rom is dropped from `torrent_files` and
-   `torrent_candidates`. When another download of the same file placed it
-   first, the wanted download ends the same way. Any other file is a
-   mismatch: the download becomes
+   entry in the wanted entry's clone group is that version: the wanted
+   download becomes `bad` with "the file in this source is a different
+   version: <name>", the file is recorded as proven to be that rom, and the
+   wanted rom is wanted again (DATA-MODEL.md "downloads.state"). The file is
+   placed and verified as that version through steps 3 to 5 for it, and the
+   version's other open downloads are cancelled as redundant; when the
+   library already holds that version verified, nothing is written and
+   `import_log` records `skipped_existing` against the file it holds; when
+   the version's place holds an unverified file, that file is never
+   replaced and the staged file is quarantined instead. When another
+   download of the same file placed or kept it first, a later one ends the
+   same way; this is never inferred for a file inside a zip. Any other file
+   is a mismatch: the download becomes
    `bad` and the file moves to `staging/quarantine/<infohash>/` beside a
    `<name>.report.txt` naming the expected rom, the actual hashes and the
-   other entry it matches, if any. An entry flagged `bios` is refused: the
+   other entry it matches, if any; when the download's file was only a
+   `fuzzy` or `size` candidate, the rom is wanted again on its next best
+   file. An entry flagged `bios` is refused: the
    download is `failed` and the file stays in staging. A zip an MRA title
    names is verified and placed as PLATFORMS.md "MRA import" describes.
 2. A romset or arcade zip verifies only when every member is a rom of the
