@@ -252,6 +252,8 @@ mod tests {
             Some("0123456789abcdef0123456789abcdef"),
         );
         insert("arcade", "mame/b.zip", None);
+        insert("arcade", "mame/a#b.zip", None);
+        insert("arcade", "mame/C.ZIP#c.bin", None);
         insert("nes", "NES/c.zip#c.nes", None);
         conn.execute(
             "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 'placed', '{}')",
@@ -275,7 +277,16 @@ mod tests {
             .expect("query")
             .collect::<rusqlite::Result<_>>()
             .expect("rows");
-        assert_eq!(left, ["NES/c.zip#c.nes", "mame/a.zip#b.bin", "mame/b.zip"]);
+        assert_eq!(
+            left,
+            [
+                "NES/c.zip#c.nes",
+                "mame/a#b.zip",
+                "mame/a.zip#b.bin",
+                "mame/b.zip"
+            ],
+            "a presence row whose zip name holds `#` stays; members of any case go"
+        );
         let logged: Option<i64> = conn
             .query_row("SELECT file_id FROM import_log", [], |r| r.get(0))
             .expect("log");

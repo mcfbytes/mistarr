@@ -194,8 +194,16 @@ fn discover_units(games_root: &Path, platform: &Platform) -> (Vec<Unit>, Vec<Str
                     continue;
                 }
             };
+            let entries = match all_entries(entries) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!(path = %dir.display(), error = %e, "cannot read directory; keeping its rows");
+                    unreadable.push(name.clone());
+                    continue;
+                }
+            };
             let mut has_loose_file = false;
-            for entry in entries.flatten() {
+            for entry in entries {
                 let path = entry.path();
                 if path.is_dir() {
                     let sub = entry.file_name().to_string_lossy().into_owned();
@@ -261,6 +269,12 @@ fn readable<T>(dir: &Path, listed: io::Result<T>) -> Option<T> {
         .ok()
 }
 
+/// Every entry of a directory listing, or the first error: an entry that fails partway
+/// makes the whole directory unreadable, so no later file's row is pruned for it.
+pub(crate) fn all_entries<T>(entries: impl Iterator<Item = io::Result<T>>) -> io::Result<Vec<T>> {
+    entries.collect()
+}
+
 /// The paths every directory entry in a unit resolved to, sorted for a
 /// deterministic scan order; empty when `dir` is gone, an error when it cannot be read.
 fn list_files(dir: &Path) -> io::Result<Vec<(PathBuf, String)>> {
@@ -269,8 +283,8 @@ fn list_files(dir: &Path) -> io::Result<Vec<(PathBuf, String)>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let mut out: Vec<(PathBuf, String)> = entries
-        .flatten()
+    let mut out: Vec<(PathBuf, String)> = all_entries(entries)?
+        .into_iter()
         .filter(|e| e.path().is_file())
         .map(|e| {
             let path = e.path();
@@ -1195,6 +1209,14 @@ mod tests {
         let disc = platforms::by_id("psx").expect("psx");
         assert!(!accepts_extension(disc, "zip"));
         assert!(accepts_extension(disc, "cue"));
+    }
+
+    #[test]
+    fn an_entry_error_partway_makes_the_listing_fail() {
+        let fine: Vec<io::Result<u8>> = vec![Ok(1), Ok(2)];
+        assert_eq!(all_entries(fine.into_iter()).expect("listed"), [1, 2]);
+        let broken: Vec<io::Result<u8>> = vec![Ok(1), Err(io::Error::other("EIO")), Ok(3)];
+        assert!(all_entries(broken.into_iter()).is_err());
     }
 
     #[test]

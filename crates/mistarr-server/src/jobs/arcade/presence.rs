@@ -19,7 +19,7 @@ use crate::db::arcade as arcade_rows;
 use crate::db::files::{self, FileId, FileRow, FileState, Hashed};
 use crate::db::Db;
 use crate::error::Result;
-use crate::jobs::scan::{extension, file_meta};
+use crate::jobs::scan::{all_entries, extension, file_meta};
 use crate::jobs::JobContext;
 
 /// Zips stated, looked up and written per batch; each batch is one write transaction.
@@ -94,8 +94,9 @@ fn zip_names(dir: &Path) -> io::Result<Vec<String>> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let mut out: Vec<String> = entries
-        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+    let mut out: Vec<String> = all_entries(entries)?
+        .into_iter()
+        .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| extension(Path::new(n)).as_deref() == Some("zip"))
         .collect();
     out.sort_unstable_by(|a, b| cmp_nocase(a, b));
