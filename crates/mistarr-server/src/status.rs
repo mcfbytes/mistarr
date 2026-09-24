@@ -31,7 +31,8 @@ pub struct Status {
     /// The manual override in force.
     #[serde(rename = "override")]
     pub manual_override: Option<Override>,
-    /// Heavy jobs held by the gate, oldest first; empty while it is open.
+    /// Queued and paused jobs on held lanes, heavy first, oldest first;
+    /// empty while no lane is held.
     pub waiting: Vec<WaitingJob>,
     /// Free bytes on the filesystem holding the data directory.
     pub disk_free_bytes: Option<u64>,
@@ -118,8 +119,8 @@ pub fn job_detail(payload: &serde_json::Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Why a job on `lane` in `state` is not running, from the gate: `None`
-/// unless it is a heavy job waiting while the gate is closed.
+/// Why a queued or paused job on `lane` is not running, from the gate; `None`
+/// while its lane is not held. See [`GateState::hold`].
 ///
 /// ```
 /// use mistarr_server::db::jobs::JobState;
@@ -131,10 +132,13 @@ pub fn job_detail(payload: &serde_json::Value) -> Option<String> {
 /// ```
 #[must_use]
 pub fn hold_reason(gate: &GateState, lane: &str, state: JobState) -> Option<String> {
-    if lane != Lane::Heavy.as_str() || !matches!(state, JobState::Queued | JobState::Paused) {
+    if !matches!(state, JobState::Queued | JobState::Paused) {
         return None;
     }
-    match gate.pause_reason()? {
+    let lane = [Lane::Heavy, Lane::Background, Lane::Light]
+        .into_iter()
+        .find(|l| l.as_str() == lane)?;
+    match gate.hold(lane)? {
         PauseReason::Core => Some(format!(
             "Paused while {} is running",
             gate.corename.as_deref().unwrap_or("a core")
@@ -154,20 +158,25 @@ pub async fn snapshot(app: &AppState) -> Status {
             None
         });
     let gate = app.gate.state();
-    let waiting = if gate.paused() {
-        app.db
-            .read(|c| jobs::open_in_lane(c, Lane::Heavy.as_str()))
+    let mut waiting = Vec::new();
+    for lane in [Lane::Heavy, Lane::Background] {
+        if gate.hold(lane).is_none() {
+            continue;
+        }
+        let rows = app
+            .db
+            .read(move |c| jobs::open_in_lane(c, lane.as_str()))
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "cannot list waiting jobs");
                 Vec::new()
-            })
-            .iter()
-            .map(WaitingJob::from_row)
-            .collect()
-    } else {
-        Vec::new()
-    };
+            });
+        waiting.extend(
+            rows.iter()
+                .filter(|r| r.state != JobState::Running)
+                .map(WaitingJob::from_row),
+        );
+    }
     let data = app.config().paths.data;
     Status {
         version: env!("CARGO_PKG_VERSION"),

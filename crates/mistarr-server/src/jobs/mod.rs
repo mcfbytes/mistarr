@@ -42,7 +42,7 @@ pub const INTERRUPTED: &str = "interrupted by a restart";
 pub enum Lane {
     /// Hashing, scanning, placing files: one at a time, held by the gate.
     Heavy,
-    /// DAT and source parsing: one at a time, never held, yielding while a core runs.
+    /// DAT and source parsing: one at a time, held only by a manual pause, yielding while a core runs.
     Background,
     /// Client polling, detection and transfers: one at a time, never held.
     Light,
@@ -128,8 +128,8 @@ impl JobContext {
         Ok(())
     }
 
-    /// Fails with [`Error::Cancelled`] once the server is shutting down. For
-    /// heavy jobs, also waits while the gate is closed, marking the row `paused`.
+    /// Fails with [`Error::Cancelled`] once the server is shutting down. While
+    /// the job's lane is held, waits, marking the row `paused`; see [`gate::GateState::hold`].
     ///
     /// # Errors
     ///
@@ -139,12 +139,12 @@ impl JobContext {
         if *stop.borrow() {
             return Err(Error::Cancelled);
         }
-        if self.lane != Lane::Heavy || !self.app.gate.state().paused() {
+        if self.app.gate.state().hold(self.lane).is_none() {
             return Ok(());
         }
         set_state(&self.app, self.id, JobState::Paused).await?;
         tokio::select! {
-            () = self.app.gate.wait_open() => {}
+            () = self.app.gate.wait_free(self.lane) => {}
             _ = stop.wait_for(|s| *s) => return Err(Error::Cancelled),
         }
         set_state(&self.app, self.id, JobState::Running).await
@@ -289,7 +289,7 @@ impl Scheduler {
             };
             app.events.publish(EventKind::JobProgress, &queued);
             app.scheduler.dispatch(id, job)?;
-            if lane == Lane::Heavy && app.gate.state().paused() {
+            if app.gate.state().hold(lane).is_some() {
                 publish_status(app).await;
             }
         }
@@ -326,8 +326,8 @@ impl Scheduler {
     }
 }
 
-/// Runs queued jobs one at a time until shutdown. A heavy job waits for the
-/// gate before it starts and stays `queued` meanwhile.
+/// Runs queued jobs one at a time until shutdown. A job waits while its lane
+/// is held before it starts and stays `queued` meanwhile.
 async fn lane(
     app: Arc<AppState>,
     lane: Lane,
@@ -343,11 +343,9 @@ async fn lane(
         let Some(Queued { id, job }) = next else {
             break;
         };
-        if lane == Lane::Heavy {
-            tokio::select! {
-                () = app.gate.wait_open() => {}
-                _ = stop.wait_for(|s| *s) => break,
-            }
+        tokio::select! {
+            () = app.gate.wait_free(lane) => {}
+            _ = stop.wait_for(|s| *s) => break,
         }
         if let Err(e) = execute(&app, id, job.as_ref(), lane).await {
             tracing::warn!(job = %id, error = %e, "cannot record job state");
@@ -603,6 +601,29 @@ mod tests {
         }
         assert_eq!(kinds.first(), Some(&EventKind::JobProgress), "queued first");
         assert!(kinds.contains(&EventKind::Status), "waiting list refreshed");
+    }
+
+    #[tokio::test]
+    async fn a_manual_pause_holds_the_background_lane_but_a_core_does_not() {
+        let (_dir, app) = state();
+        Scheduler::start(&app);
+        app.gate.set_override(Some(Override::Paused));
+        let (job, ran) = probe(Lane::Background, false, 5);
+        let id = Scheduler::enqueue(&app, job).await.expect("enqueue");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_state(&app, id, JobState::Queued).await;
+        let status = crate::status::snapshot(&app).await;
+        assert_eq!(status.waiting.len(), 1, "the held job is listed");
+        app.gate.set_override(None);
+        tokio::time::timeout(Duration::from_secs(2), ran.notified())
+            .await
+            .expect("ran after resume");
+        app.gate.set_corename(Some("SNES".into()));
+        let (job, ran) = probe(Lane::Background, false, 6);
+        Scheduler::enqueue(&app, job).await.expect("enqueue");
+        tokio::time::timeout(Duration::from_secs(2), ran.notified())
+            .await
+            .expect("ran while a core runs");
     }
 
     #[tokio::test]

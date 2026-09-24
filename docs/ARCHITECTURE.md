@@ -119,8 +119,16 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    each member of a zip is a separate DAT, and a file whose import job failed
    is enqueued again on a later listing. The `dat_import` job runs on the
    background lane, so a loaded core does not hold it. Parse Logiqx
-   `<datafile>` with `quick-xml`, streaming, one transaction per DAT. Reject anything else and
-   move it to `dats/rejected/` with a `<name>.reason.txt` beside it.
+   `<datafile>` with `quick-xml`, streaming. Each game is parsed outside the
+   database's write lock and appended to `dat_stage` in chunks of 2,000
+   games, one short transaction per chunk; one transaction then applies the
+   stage (steps 3 to 5), so readers see the old titles or the new ones and
+   never part of a DAT. A parse error empties the stage and changes nothing
+   else. Reject anything else and move it to `dats/rejected/` with a
+   `<name>.reason.txt` beside it. The apply holds the writer for the SQL
+   alone; scans and imports resolve rom ids on the read connection and
+   write afterwards, so one that straddles an apply records a rom id that
+   is still a row, retired or not, as it would had it finished just before.
 2. Identify the platform from the DAT header name using the table in
    PLATFORMS.md, falling back to the platform an earlier version of the same
    name was bound to. A header without a name takes the member's or file's
@@ -324,7 +332,7 @@ Jobs run on three serial lanes, one job at a time each:
 | Lane | Jobs | While a core runs |
 |---|---|---|
 | heavy | `scan`, `import`, `arcade_catalog` | Held: a queued job does not start and a running one stops at its next file boundary, `paused`. |
-| background | `dat_import`, `recompute_1g1r`, `source_import` | Runs. A DAT parse sleeps 20 ms every 200 entries, on top of the process's `nice` level. |
+| background | `dat_import`, `recompute_1g1r`, `source_import` | Runs. A DAT parse sleeps 20 ms every 200 entries, on top of the process's `nice` level. Held, like the heavy lane, by a manual pause. |
 | light | `detect_client`, `transfer`, `resolve_magnet`, `deselect` | Runs. |
 
 The CORENAME watcher polls `/tmp/CORENAME` every 2 s. When the value is not
@@ -332,9 +340,11 @@ The CORENAME watcher polls `/tmp/CORENAME` every 2 s. When the value is not
 running" rate limits. When it returns to `MENU` everything resumes. This is
 a scheduler-level gate, not something each job needs to know about.
 
-While the gate is closed, `/system/status` lists the held heavy jobs as
-`waiting`, and each of them carries a `reason` in `/system/jobs`, so the UI
-can say what waits and why. "Run now" (`POST /system/resume`) opens the gate
+"Pause" (`POST /system/pause`) holds the heavy and background lanes; a DAT
+parse in progress waits at its next 200 entries. While a lane is held,
+`/system/status` lists its queued and paused jobs as `waiting`, and each of
+them carries a `reason` in `/system/jobs`, so the UI can say what waits and
+why. "Run now" (`POST /system/resume`) opens the gate
 until CORENAME changes or the heavy queue drains, whichever comes first;
 after that, new heavy work waits for the core again.
 

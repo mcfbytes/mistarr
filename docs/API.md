@@ -32,7 +32,7 @@ under `/api` return 404 JSON.
 | POST | `/system/wizard/done` | The user finished or dismissed the wizard; it stops opening by itself. Returns the wizard body. |
 | POST | `/system/scan` | Enqueue a library scan. Body `{ platform_id? }`. |
 | POST | `/system/cores` | Detect installed cores again, for the wizard's detected-cores step. |
-| POST | `/system/pause` / `/system/resume` | Manual scheduler gate, overrides CORENAME until CORENAME next changes; `resume` ("Run now") also ends once the heavy queue drains. Returns the status body. |
+| POST | `/system/pause` / `/system/resume` | Manual scheduler gate, overrides CORENAME until CORENAME next changes; `pause` holds the heavy and background lanes; `resume` ("Run now") also ends once the heavy queue drains. Returns the status body. |
 | GET | `/system/jobs` | Queued, running and paused jobs with progress. |
 | POST | `/system/client/start` | Start an installed client that is not running: `{ kind }`, `transmission` or `rtorrent`. Returns the status body. |
 | GET | `/system/settings` / PUT | The config subset that is editable at runtime. |
@@ -59,10 +59,12 @@ Buildroot_MiSTer's init script for it exists and `transmission_opt_in`
 whether its opt-in directory does (DOWNLOAD-CLIENTS.md "Starting a stopped
 client"). `corename` is `null` when the file does not exist.
 `pause_reason` is `"core"`, `"manual"` or `null`; `override` is `"paused"`,
-`"running"` or `null`. `waiting` lists the heavy-lane jobs the closed gate
-holds, oldest first, as `{ id, kind, state, detail }`, where `detail` is the
-file name or platform the job is about or `null`; it is empty while the gate
-is open. `disk_free_bytes` is for the filesystem holding the data directory.
+`"running"` or `null`. `waiting` lists the queued and paused jobs of the
+lanes that are held, heavy lane first, oldest first, as
+`{ id, kind, state, detail }`, where `detail` is the file name or platform
+the job is about or `null`. Running jobs are not in it. A running core holds
+the heavy lane; a manual pause holds the heavy and background lanes. It is
+empty while nothing is held. `disk_free_bytes` is for the filesystem holding the data directory.
 `launch` is `"ready"`, `"disabled"` when `prefs.launch` is off, or
 `"unavailable"` when MiSTer Main's command FIFO does not exist.
 
@@ -83,7 +85,7 @@ the queued arcade catalogue or `null`.
 `/system/jobs` items: `{ id, kind, lane, payload, state, progress, reason,
 created_at, updated_at }`, where `lane` is `heavy`, `background` or `light`
 (ARCHITECTURE.md "Pausing for the core"), `state` is `queued`, `running` or
-`paused`, and `reason` says why a held heavy job is not running, such as
+`paused`, and `reason` says why a job on a held lane is not running, such as
 `"Paused while NES is running"` or `"Paused by the user"`, else `null`. A
 failed job's `progress` is `{ error }`.
 
@@ -247,7 +249,8 @@ directory, newest first. Items are `{ file, size, state, reason, job_id,
 progress, modified }`. `state` is `waiting` (not picked up yet, or its job
 is queued), `importing` (its job is running) or `rejected`. `reason` says
 why a file waits ("Waiting for the file to stop changing.", "Queued behind
-a.dat.", or the hold reason of a job paused for a core) or why it was
+a.dat.", or "Paused by the user" while a manual pause holds the background
+lane; a running core never holds it) or why it was
 rejected, from its `.reason.txt`. `job_id` and `progress` are the open
 `dat_import` or `source_import` job's. A loaded file leaves this list and
 appears in `/dats` or `/sources`. The SPA re-reads the list on

@@ -32,6 +32,11 @@ CREATE TABLE dat_versions (
   UNIQUE (dat_name, version)
 );
 
+CREATE TABLE dat_stage (          -- the DAT being imported, parsed outside the write lock and applied at once
+  seq  INTEGER PRIMARY KEY,
+  game TEXT NOT NULL              -- one parsed game with its roms, as JSON
+);
+
 CREATE TABLE titles (                   -- one per <game>; the browse unit
   id            INTEGER PRIMARY KEY,
   platform_id   TEXT NOT NULL REFERENCES platforms(id),
