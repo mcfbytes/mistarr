@@ -80,6 +80,29 @@ fn entries_take_the_file_stem_when_the_mra_has_no_name() {
 }
 
 #[test]
+fn entry_names_are_trimmed_and_collapsed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("Example Quest.mra");
+    let entry = |name: &str| {
+        fs::write(
+            &path,
+            format!(
+                "<misterromdescription><name>{name}</name><rom zip=\"exq.zip\"/></misterromdescription>"
+            ),
+        )
+        .expect("write");
+        read_entry(&("Example Quest.mra".to_owned(), path.clone()))
+            .expect("entry")
+            .name
+    };
+    assert_eq!(
+        entry("\n  Example\t\tQuest  (World)\n"),
+        "Example Quest (World)"
+    );
+    assert_eq!(entry("  \n\t "), "Example Quest");
+}
+
+#[test]
 fn zips_are_found_case_insensitively_with_their_md5() {
     let dir = tempfile::tempdir().expect("tempdir");
     let games = dir.path();
@@ -115,6 +138,30 @@ fn zips_are_found_case_insensitively_with_their_md5() {
     };
     assert_eq!(check_stamp(&entry, &zips), None);
     assert!(check_stamp(&entry, &zips[..1]).is_some_and(|s| s.contains("mame/exblast.zip")));
+}
+
+#[test]
+fn zip_directories_are_found_case_insensitively() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let games = dir.path();
+    write_zip(&games.join("hbmame/Sub/exhb.zip"), &[("a.bin", b"A")]);
+    write_zip(&games.join("mame/exblast.zip"), &[("a.bin", b"A")]);
+    let mra = mra::parse(
+        mra_xml(
+            "Example Blaster",
+            r#"<rom index="0" zip="/HBMAME/sub/EXHB.zip|/HBMame/SUB/exhb.zip"/>
+               <rom index="1" zip="../MAME/exblast.zip"/>"#,
+        )
+        .as_bytes(),
+    )
+    .expect("parse");
+    let dirs = mra.zip_paths().into_iter().map(|z| z.dir).collect();
+    let index = ZipIndex::build(games, dirs);
+    let zips = zips_of(&mra, &index);
+    assert!(!zips.is_empty());
+    for z in &zips {
+        assert!(z.on_disk.is_some(), "{}", z.path.rel_path());
+    }
 }
 
 /// Builds `games/mame` with the zips and returns the index and a verify result.

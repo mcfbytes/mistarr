@@ -10,8 +10,8 @@ use crate::{Error, Result};
 /// Largest rom the assembler builds or hashes, a guard against runaway `repeat` values.
 pub const MAX_ROM_BYTES: u64 = 512 * 1024 * 1024;
 
-/// Read size while streaming a part.
-const CHUNK: usize = 64 * 1024;
+/// Largest `repeat` a part may carry; MRAs use small counts to fill padding.
+pub const MAX_REPEAT: u64 = 4096;
 
 /// Where named parts are read from.
 pub trait PartSource {
@@ -99,6 +99,22 @@ impl PartSource for NoParts {
 
 fn refuse(reason: impl Into<String>) -> Error {
     Error::MraUnsupported(reason.into())
+}
+
+fn too_large() -> Error {
+    refuse(format!("rom is larger than {MAX_ROM_BYTES} bytes"))
+}
+
+/// `a + b`, refused on overflow.
+fn add(a: u64, b: u64) -> Result<u64> {
+    a.checked_add(b)
+        .ok_or_else(|| refuse("offset arithmetic overflows"))
+}
+
+/// `a + b` as a memory index, refused on overflow.
+fn add_usize(a: usize, b: usize) -> Result<usize> {
+    a.checked_add(b)
+        .ok_or_else(|| refuse("offset arithmetic overflows"))
 }
 
 /// Where each input byte of a part lands inside an output word.
@@ -237,50 +253,75 @@ impl Walker {
         layout: &Layout,
         src: &mut dyn PartSource,
     ) -> Result<()> {
-        let mut k = 0;
-        let Some(name) = &p.name else {
-            let total = (p.data.len() as u64).saturating_mul(p.repeat);
-            if total.saturating_add(self.fed) > MAX_ROM_BYTES {
-                return Err(refuse(format!("rom is larger than {MAX_ROM_BYTES} bytes")));
+        if p.repeat > MAX_REPEAT {
+            return Err(refuse(format!(
+                "part repeat {} is above {MAX_REPEAT}",
+                p.repeat
+            )));
+        }
+        let named;
+        let bytes: &[u8] = match &p.name {
+            None => &p.data,
+            Some(name) => {
+                named = self.read_named(p, name, rom_zips, src)?;
+                &named
             }
-            for _ in 0..p.repeat {
-                self.feed(&p.data, layout, &mut k)?;
-            }
-            return Self::whole_words(k);
         };
+        if bytes.is_empty() && p.repeat > 1 {
+            return Err(refuse(format!(
+                "part {} is empty and repeated {} times",
+                p.name.as_deref().unwrap_or("(inline)"),
+                p.repeat
+            )));
+        }
+        let total = (bytes.len() as u64)
+            .checked_mul(p.repeat)
+            .ok_or_else(too_large)?;
+        if add(self.fed, total)? > MAX_ROM_BYTES {
+            return Err(too_large());
+        }
+        let mut k = 0;
+        for _ in 0..p.repeat {
+            self.feed(bytes, layout, &mut k)?;
+        }
+        Self::whole_words(k)
+    }
+
+    /// Reads a named part's bytes once: the member from the first of its zips holding it,
+    /// after `offset`, up to `length`, never more than the rom may still grow by.
+    fn read_named(
+        &self,
+        p: &Part,
+        name: &str,
+        rom_zips: &[String],
+        src: &mut dyn PartSource,
+    ) -> Result<Vec<u8>> {
         let zips = if p.zips.is_empty() { rom_zips } else { &p.zips };
         if zips.is_empty() {
             return Err(refuse(format!("part {name} names no zip")));
         }
-        let mut buf = vec![0u8; CHUNK];
-        for _ in 0..p.repeat {
-            let missing = || Error::MissingPart {
-                part: name.clone(),
-                zips: zips.join("|"),
+        let budget = MAX_ROM_BYTES.saturating_sub(self.fed);
+        for zip in zips {
+            let Some(mut reader) = src.open(zip, name, p.crc)? else {
+                continue;
             };
-            let mut found = None;
-            for zip in zips {
-                if src.open(zip, name, p.crc)?.is_some() {
-                    found = Some(zip);
-                    break;
-                }
-            }
-            let zip = found.ok_or_else(missing)?;
-            let mut reader = src.open(zip, name, p.crc)?.ok_or_else(missing)?;
             let skipped = io::copy(&mut (&mut reader).take(p.offset), &mut io::sink())?;
             if skipped < p.offset {
                 return Err(refuse(format!("offset of part {name} is past its end")));
             }
-            let mut body = reader.take(p.length.unwrap_or(u64::MAX));
-            loop {
-                let n = body.read(&mut buf)?;
-                if n == 0 {
-                    break;
-                }
-                self.feed(&buf[..n], layout, &mut k)?;
+            let over = budget.saturating_add(1);
+            let limit = p.length.map_or(over, |l| l.min(over));
+            let mut bytes = Vec::new();
+            reader.take(limit).read_to_end(&mut bytes)?;
+            if bytes.len() as u64 > budget {
+                return Err(too_large());
             }
+            return Ok(bytes);
         }
-        Self::whole_words(k)
+        Err(Error::MissingPart {
+            part: name.to_owned(),
+            zips: zips.join("|"),
+        })
     }
 
     fn whole_words(k: usize) -> Result<()> {
@@ -294,31 +335,31 @@ impl Walker {
     }
 
     fn feed(&mut self, chunk: &[u8], layout: &Layout, k: &mut usize) -> Result<()> {
-        self.fed += chunk.len() as u64;
+        self.fed = add(self.fed, chunk.len() as u64)?;
         if self.fed > MAX_ROM_BYTES {
-            return Err(refuse(format!("rom is larger than {MAX_ROM_BYTES} bytes")));
+            return Err(too_large());
         }
         self.md5.update(chunk);
         for &b in chunk {
-            let at = self.lens[layout.idx] + layout.offsets[*k];
+            let at = add(self.lens[layout.idx], layout.offsets[*k])?;
             if let Some(data) = &mut self.data {
                 let at = usize::try_from(at).map_err(|_| refuse("rom does not fit in memory"))?;
                 if data.len() <= at {
-                    data.resize(at + 1, 0);
+                    data.resize(add_usize(at, 1)?, 0);
                 }
                 data[at] = b;
             }
             *k += 1;
             if *k == layout.offsets.len() {
                 *k = 0;
-                self.lens[layout.idx] += layout.unit;
+                self.lens[layout.idx] = add(self.lens[layout.idx], layout.unit)?;
             }
         }
         Ok(())
     }
 
     fn patch(&mut self, p: &Patch) -> Result<()> {
-        let end = p.offset + p.data.len() as u64;
+        let end = add(p.offset, p.data.len() as u64)?;
         if end > self.lens[0] {
             return Err(refuse(format!(
                 "patch at {} runs past the rom end {}",
@@ -327,8 +368,9 @@ impl Walker {
         }
         if let Some(data) = &mut self.data {
             let start = usize::try_from(p.offset).map_err(|_| refuse("patch offset too large"))?;
-            if data.len() < start + p.data.len() {
-                data.resize(start + p.data.len(), 0);
+            let end = add_usize(start, p.data.len())?;
+            if data.len() < end {
+                data.resize(end, 0);
             }
             for (slot, b) in data[start..].iter_mut().zip(&p.data) {
                 *slot = if p.xor { *slot ^ b } else { *b };

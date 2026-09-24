@@ -149,12 +149,13 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    for every platform or for `arcade`, and by `POST /system/cores`. It reads
    every `.mra` under `_Arcade`, four folder levels deep including
    `_alternatives`, without following symlinked folders.
-2. Each MRA becomes one `arcade` title named by its `<name>` (the file stem
-   when absent) with one rom per zip it names; see PLATFORMS.md "MRA
-   catalogue". MRAs are read shallowest first and a later MRA with a name
-   already taken is skipped. Titles whose MRA is gone are retired.
-3. Each zip is looked up case-insensitively under `games/` and its presence
-   stored on its rom. A title whose MRA carries an `md5` and whose zips are
+2. Each MRA becomes one `arcade` title named by its `<name>`, trimmed with
+   inner whitespace collapsed (the file stem when that is empty), with one rom
+   per zip it names; see PLATFORMS.md "MRA catalogue". MRAs are read
+   shallowest first and a later MRA with a name already taken is skipped.
+   Titles whose MRA is gone are retired.
+3. Each zip is looked up under `games/`, directories and file name
+   case-insensitively, and its presence stored on its rom. A title whose MRA carries an `md5` and whose zips are
    all present is checked by assembling its roms (PLATFORMS.md "MRA
    assembly"); the check reruns only when the MRA or one of its zips changes
    size or mtime. Nothing is ever fetched, rebuilt, merged or split.

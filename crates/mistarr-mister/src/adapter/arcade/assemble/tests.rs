@@ -260,3 +260,67 @@ fn layout_matches_mister_rom_data() {
     assert_eq!(l.offsets, [1, 0]);
     assert!(layout(Some("0123456789abcdef0"), 8).is_err());
 }
+
+#[test]
+fn empty_parts_may_not_repeat() {
+    let mut src = Mem::with(&[("exblast.zip", "empty.bin", b"")]);
+    for xml in [
+        r#"<rom zip="exblast.zip"><part name="empty.bin" repeat="2"/></rom>"#,
+        r#"<rom zip="exblast.zip"><part name="empty.bin" repeat="0xffffffffffffffff"/></rom>"#,
+        r#"<rom><part repeat="3"></part></rom>"#,
+    ] {
+        assert!(
+            matches!(md5(&rom(xml), &mut src), Err(Error::MraUnsupported(_))),
+            "{xml}"
+        );
+    }
+    let once = rom(r#"<rom zip="exblast.zip"><part name="empty.bin"/><part>01</part></rom>"#);
+    assert_eq!(assemble(&once, &mut src).expect("assemble").data, [1]);
+}
+
+#[test]
+fn repeats_read_a_named_part_once_and_are_capped() {
+    let mut src = Mem::with(&[("exblast.zip", "a.bin", b"AB")]);
+    let r = rom(r#"<rom zip="exblast.zip"><part name="a.bin" repeat="3"/></rom>"#);
+    assert_eq!(assemble(&r, &mut src).expect("assemble").data, b"ABABAB");
+    assert_eq!(src.1, ["exblast.zip#a.bin"]);
+
+    let over = rom(&format!(
+        r#"<rom zip="exblast.zip"><part name="a.bin" repeat="{}"/></rom>"#,
+        MAX_REPEAT + 1
+    ));
+    assert!(matches!(
+        md5(&over, &mut src),
+        Err(Error::MraUnsupported(_))
+    ));
+
+    let big = vec![0u8; 256 * 1024];
+    let mut src = Mem::with(&[("exblast.zip", "big.bin", &big)]);
+    let r = rom(&format!(
+        r#"<rom zip="exblast.zip"><part name="big.bin" repeat="{MAX_REPEAT}"/></rom>"#
+    ));
+    match md5(&r, &mut src) {
+        Err(Error::MraUnsupported(m)) => assert!(m.contains("larger than"), "{m}"),
+        other => panic!("expected refusal, got {other:?}"),
+    }
+}
+
+#[test]
+fn overflowing_offsets_are_refused() {
+    let mut src = Mem::with(&[("exblast.zip", "a.bin", b"ABCD")]);
+    for xml in [
+        r#"<rom zip="exblast.zip"><part name="a.bin"/><patch offset="0xffffffffffffffff">01 02</patch></rom>"#,
+        r#"<rom zip="exblast.zip"><part name="a.bin" offset="0xffffffffffffffff"/></rom>"#,
+        r#"<rom zip="exblast.zip"><part name="a.bin" offset="0xffffffffffffffff" length="0xffffffffffffffff"/></rom>"#,
+    ] {
+        let r = rom(xml);
+        assert!(
+            matches!(assemble(&r, &mut src), Err(Error::MraUnsupported(_))),
+            "{xml}"
+        );
+        assert!(
+            matches!(md5(&r, &mut src), Err(Error::MraUnsupported(_))),
+            "{xml}"
+        );
+    }
+}

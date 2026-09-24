@@ -296,9 +296,14 @@ fn read_entry((rel, path): &(String, PathBuf)) -> Option<Entry> {
     };
     let stem = Path::new(rel)
         .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
+        .map(|s| collapse(&s.to_string_lossy()))
         .unwrap_or_default();
-    let name = mra.name.clone().filter(|n| !n.is_empty()).unwrap_or(stem);
+    let name = mra
+        .name
+        .as_deref()
+        .map(collapse)
+        .filter(|n| !n.is_empty())
+        .unwrap_or(stem);
     if name.is_empty() {
         return None;
     }
@@ -310,8 +315,34 @@ fn read_entry((rel, path): &(String, PathBuf)) -> Option<Entry> {
     })
 }
 
-/// The zip files present in each directory under `games/`, keyed by lowercase name,
-/// since exFAT, where MiSTer keeps them, is case-insensitive.
+/// `text` trimmed, with each run of whitespace inside it made one space.
+fn collapse(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// `dir` (`/`-separated, relative to `games`) on disk, each component matched exactly
+/// or else case-insensitively, as exFAT would.
+fn resolve_dir(games: &Path, dir: &str) -> Option<PathBuf> {
+    let mut path = games.to_path_buf();
+    for part in dir.split('/').filter(|c| !c.is_empty()) {
+        let exact = path.join(part);
+        if exact.is_dir() {
+            path = exact;
+            continue;
+        }
+        let want = part.to_lowercase();
+        path = fs::read_dir(&path)
+            .ok()?
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().to_lowercase() == want)
+            .map(|e| e.path())
+            .find(|p| p.is_dir())?;
+    }
+    Some(path)
+}
+
+/// The zip files present in each directory under `games/`, directories and files keyed by
+/// lowercase name, since exFAT, where MiSTer keeps them, is case-insensitive.
 #[derive(Debug, Clone, Default)]
 struct ZipIndex {
     dirs: HashMap<String, HashMap<String, PathBuf>>,
@@ -323,11 +354,12 @@ impl ZipIndex {
             dirs: HashMap::new(),
         };
         for dir in dirs {
-            if index.dirs.contains_key(&dir) {
+            let key = dir.to_lowercase();
+            if index.dirs.contains_key(&key) {
                 continue;
             }
             let mut files = HashMap::new();
-            if let Ok(rd) = fs::read_dir(games.join(&dir)) {
+            if let Some(rd) = resolve_dir(games, &dir).and_then(|d| fs::read_dir(d).ok()) {
                 for e in rd.flatten() {
                     if e.path().is_file() {
                         let name = e.file_name().to_string_lossy().to_lowercase();
@@ -335,13 +367,15 @@ impl ZipIndex {
                     }
                 }
             }
-            index.dirs.insert(dir, files);
+            index.dirs.insert(key, files);
         }
         index
     }
 
     fn find(&self, zip: &ZipPath) -> Option<&PathBuf> {
-        self.dirs.get(&zip.dir)?.get(&zip.file.to_lowercase())
+        self.dirs
+            .get(&zip.dir.to_lowercase())?
+            .get(&zip.file.to_lowercase())
     }
 }
 
