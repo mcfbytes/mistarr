@@ -39,7 +39,7 @@ CREATE TABLE titles (                   -- one per <game>; the browse unit
   regions       TEXT NOT NULL,         -- json array
   languages     TEXT NOT NULL,         -- json array
   revision      TEXT,
-  flags         TEXT NOT NULL,         -- json array: bios, beta, proto, demo, sample, unlicensed, ...
+  flags         TEXT NOT NULL,         -- json array: bios, beta, proto, demo, sample, unl, ...
   is_1g1r_pick  INTEGER NOT NULL DEFAULT 0,
   wanted        INTEGER NOT NULL DEFAULT 0,
   retired       INTEGER NOT NULL DEFAULT 0,

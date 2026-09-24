@@ -7,6 +7,10 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+#![warn(clippy::pedantic)]
+
+pub mod dat;
+pub mod naming;
 
 /// 1G1R selection and clone-group inference.
 pub mod select;

@@ -9,7 +9,10 @@ streaming mode so a 50 MB DAT does not need to be held in memory twice.
 Extract per game: `name`, `cloneof`, `romof`, `description`, `category`,
 and per rom: `name`, `size`, `crc`, `md5`, `sha1`, `status` (default `good`),
 `header`. Ignore everything else. Reject files whose root element is not
-`datafile` or that have no games.
+`datafile` or that have no games. Hash attributes are stored lowercase and
+must have their full hex length; a malformed hash, size or status rejects the
+file. `dat::DatStream` yields one game at a time for importers that write as
+they read.
 
 Both No-Intro and Redump distribute zipped daily packs. Accept `.zip` and
 load every `.dat` or `.xml` member as a separate DAT.
@@ -24,23 +27,31 @@ No-Intro names follow a convention: `Title (Region[, Region]) (Language[,...])
 (Rev N) (Beta) (Proto) (Demo) (Sample) (Unl) [b] ...`. Redump adds `(Disc N)`
 and `(Track N)` on roms. Parse into:
 
-- `base_name`: everything before the first parenthesised tag
-- `regions`: from the first tag whose tokens are all known region names
-- `languages`: from a tag whose tokens are all two-letter codes
-- `revision`: `Rev N`, `v1.1`, `(Alt)`, `(Beta N)` etc, kept as a string with a
-  sortable rank
-- `flags`: `bios`, `beta`, `proto`, `demo`, `sample`, `unl`, `pirate`,
-  `program`, `baddump` from `[b]`, plus `disc:N` for Redump
+- `base_name`: everything before the first parenthesised or bracketed tag,
+  after any leading bracket tags such as `[BIOS]`
+- `regions`: from the first tag whose comma-separated tokens include at least
+  one known region name; unknown tokens in that tag are kept as written
+- `languages`: from the first tag whose tokens are all two-letter codes
+  (`En`), optionally with a subtag (`Zh-Hant`, `Pt-BR`)
+- `revision`: `Rev N`, `Rev A`, `v1.1`, `(Alt N)`, `(Beta N)`, `(Proto N)`,
+  kept as the tag text with a sortable rank. The rank orders by version
+  (`Rev N` counts as `v1.N`, an untagged name as `v1.0`), then stage (proto,
+  beta, release), then the beta or proto number, then the alt number
+- `flags`: `bios` (also from a `[BIOS]` prefix), `beta`, `proto`, `demo` (also
+  `Kiosk`), `sample`, `unl`, `pirate`, `program`, `baddump` from `[b]`, plus
+  `disc:N` for Redump
 
 Parsing is table-driven and lives in `mistarr-core::naming` with a large unit
 test corpus of synthetic names. Unknown tags are kept in `flags` as `other:...`
-and never cause a parse failure.
+(bracket tags keep their brackets, as `other:[!]`) and never cause a parse
+failure.
 
 ## Clone grouping
 
 Use `cloneof` when the DAT provides it. Otherwise group by
-`(platform_id, base_name)` and elect the parent as the variant that would win
-1G1R under default preferences. This inference is marked `inferred` on the
+`(platform_id, naming::group_key(parsed))`, which is `base_name` passed
+through the pre-download match normalisation below, and elect the parent as
+the variant that would win 1G1R under default preferences. This inference is marked `inferred` on the
 title so the UI can show it and a later parent/clone DAT can replace it.
 
 ## 1G1R selection
@@ -93,9 +104,9 @@ and note the alternates in the file's detail.
 ## Pre-download matching
 
 Torrent file lists carry names and sizes only. Match a torrent file to a rom
-by: exact name match, then name match after normalising unicode, case, and
-the libretro-style character substitutions, then base_name plus size. Record
-the confidence. Post-download hashing is authoritative and can reassign the
+by: exact name match, then name match after `naming::normalize_for_match`
+(NFKC, lowercase, each of ``&*/:`<>?\|"`` replaced by `_`, whitespace runs
+collapsed), then base_name plus size. Record the confidence. Post-download hashing is authoritative and can reassign the
 file to a different rom; when that happens the UI shows the original
 expectation and the actual match.
 
