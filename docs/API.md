@@ -123,11 +123,18 @@ status body, whose `client` says whether it did.
 core_present, enabled }` plus `counts: { titles, have, wanted, unmatched_files,
 failing_check, partial }`: clone groups the default browse shows, groups with
 a verified variant, groups with a wanted variant, and `unmatched_files` on
-disk that match no rom, which a scan never finds for arcade since it skips
-arcade entirely. `failing_check` and `partial` are 0 outside arcade; for
-arcade they read the arcade catalogue's own state instead: live MRA sets
-with every zip present whose md5 check did not match, and live MRA sets
-naming zips of which only some are present. `PUT` answers with the
+disk that match no rom, always 0 for arcade, whose own state is reported
+through `failing_check` and `partial` instead. Those two count clone groups
+under the same visibility rules as `titles`/`have`/`wanted` (a variant flagged
+with a hidden flag does not count): a group counts toward `failing_check`
+when one of its visible variants is a live MRA set whose md5 check is
+`mismatch` or `missing_part` and none of its visible variants counts as
+`have`; a group counts toward `partial` when one of its visible variants
+names some, but not every, zip present and none of its visible variants
+counts as `have`. A group with a have-verified visible variant never counts
+toward either, even when another of its variants is failing or partial.
+`PUT` answers with the
+same item. Binding answers 202 `{ dat_version_id, platform_id, job_id }` and
 the import job loads the titles, then publishes `dat.loaded`; a version that
 is already bound or retired is a 400. When the job cannot load it, because its
 file is gone from `dats/loaded/` or a newer version of the same DAT name is

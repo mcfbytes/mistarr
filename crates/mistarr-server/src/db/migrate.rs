@@ -179,6 +179,8 @@ mod tests {
         // Noise the generic scan wrote: no rom matched, so rom_id is NULL.
         insert("mame/exampleset.zip#a.bin", "unverified", None);
         insert("hbmame/otherset.zip#b.bin", "unverified", None);
+        // A zip the old scan could not open at all: one bare-path row, no `#member`.
+        insert("mame/unreadable.zip", "unverified", None);
         // Rows the MRA import path legitimately records: rom_id always set.
         insert("mame/exampleset.zip#c.bin", "unverified", Some(rom_id));
         insert("mame/exampleset.zip#d.bin", "verified", Some(rom_id));
@@ -189,6 +191,12 @@ mod tests {
             [],
         )
         .expect("insert");
+        conn.execute(
+            "INSERT INTO scan_progress (platform_id, done_dirs, updated_at)
+             VALUES ('arcade', '[]', 0), ('nes', '[]', 0)",
+            [],
+        )
+        .expect("insert progress");
 
         let cleanup = MIGRATIONS
             .iter()
@@ -212,6 +220,15 @@ mod tests {
                 "mame/exampleset.zip#d.bin",
             ]
         );
+
+        let progress: Vec<String> = conn
+            .prepare("SELECT platform_id FROM scan_progress ORDER BY platform_id")
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(progress, ["nes"], "arcade never resumes a scan");
     }
 
     #[test]

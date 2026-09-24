@@ -309,10 +309,20 @@ fn view_counts_a_title_once_whatever_its_roms_and_files() {
 
 /// A minimal MRA title fixture, one row per unique `(name, setname)`.
 fn arcade_title<'a>(name: &'a str, setname: &'a str) -> crate::db::arcade::MraTitle<'a> {
+    arcade_title_grouped(name, setname, "")
+}
+
+/// [`arcade_title`] with an explicit `group_key`, so `recompute_platform` clusters it
+/// with every other title sharing the same key into one clone group.
+fn arcade_title_grouped<'a>(
+    name: &'a str,
+    setname: &'a str,
+    group_key: &'a str,
+) -> crate::db::arcade::MraTitle<'a> {
     crate::db::arcade::MraTitle {
         name,
         base_name: name,
-        group_key: "",
+        group_key,
         regions: &[],
         languages: &[],
         revision: None,
@@ -387,6 +397,120 @@ fn counts_report_arcade_sets_failing_check_or_partly_present() {
     assert_eq!(arcade.titles, 3);
     assert_eq!(arcade.failing_check, 1);
     assert_eq!(arcade.partial, 1);
+}
+
+#[test]
+fn a_refused_check_does_not_count_as_failing() {
+    let c = conn();
+    let v = crate::db::arcade::mra_version(&c, "arcade", 1).expect("version");
+    let t = crate::db::arcade::upsert_title(
+        &c,
+        "arcade",
+        v,
+        &arcade_title("Example Blaster", "exblast"),
+        &[crate::db::arcade::MraZip {
+            name: "exblast.zip",
+            zip_dir: "mame",
+            md5: None,
+            present: true,
+        }],
+    )
+    .expect("upsert");
+    crate::db::arcade::set_check(&c, t, Some("refused"), None, None).expect("check");
+
+    let counts = counts(&c, &[]).expect("counts");
+    let arcade = counts.get("arcade").expect("arcade");
+    assert_eq!(
+        arcade.failing_check, 0,
+        "a refused check is neither mismatch nor missing_part"
+    );
+}
+
+/// `failing_check` and `partial` count clone groups, not raw titles: a group with a
+/// have-verified visible variant never counts even when one of its other variants
+/// fails, and a group with neither counts toward both when it has both kinds.
+#[test]
+fn failing_check_and_partial_count_clone_groups_not_titles() {
+    let c = conn();
+    let v = crate::db::arcade::mra_version(&c, "arcade", 1).expect("version");
+    let zip = |name: &'static str, present: bool| crate::db::arcade::MraZip {
+        name,
+        zip_dir: "mame",
+        md5: None,
+        present,
+    };
+
+    // Group 1 (group_key "mra:example blaster"): a have-verified main variant
+    // plus a mismatched alternate.
+    let main = crate::db::arcade::upsert_title(
+        &c,
+        "arcade",
+        v,
+        &arcade_title_grouped("Example Blaster", "exblast", "mra:example blaster"),
+        &[zip("exblast.zip", true)],
+    )
+    .expect("upsert");
+    crate::db::arcade::set_check(&c, main, Some("match"), None, None).expect("check");
+    let alt = crate::db::arcade::upsert_title(
+        &c,
+        "arcade",
+        v,
+        &arcade_title_grouped("Example Blaster (set 2)", "exblast2", "mra:example blaster"),
+        &[zip("exblast2.zip", true)],
+    )
+    .expect("upsert");
+    crate::db::arcade::set_check(&c, alt, Some("mismatch"), None, None).expect("check");
+
+    // Group 2 (group_key "mra:example quest"): no have-verified variant, one
+    // failing and one partly present.
+    let failing = crate::db::arcade::upsert_title(
+        &c,
+        "arcade",
+        v,
+        &arcade_title_grouped("Example Quest", "exquest", "mra:example quest"),
+        &[zip("exquest.zip", true)],
+    )
+    .expect("upsert");
+    crate::db::arcade::set_check(&c, failing, Some("missing_part"), None, None).expect("check");
+    let partial = crate::db::arcade::upsert_title(
+        &c,
+        "arcade",
+        v,
+        &arcade_title_grouped("Example Quest (set 2)", "exquest2", "mra:example quest"),
+        &[zip("exquest2.zip", true), zip("exquest2b.zip", false)],
+    )
+    .expect("upsert");
+
+    // The real grouping path: matching group_key clusters both pairs into one
+    // clone group each, exactly as a catalogue run would.
+    recompute_platform(&c, "arcade", &Prefs::default()).expect("recompute");
+    let parent_of = |id: crate::db::titles::TitleId| -> i64 {
+        c.query_row("SELECT parent_id FROM titles WHERE id = ?1", [id.0], |r| {
+            r.get(0)
+        })
+        .expect("parent")
+    };
+    assert_eq!(
+        parent_of(main),
+        parent_of(alt),
+        "the two blasters share one clone group"
+    );
+    assert_eq!(
+        parent_of(failing),
+        parent_of(partial),
+        "the two quests share one clone group"
+    );
+
+    let counts = counts(&c, &[]).expect("counts");
+    let arcade = counts.get("arcade").expect("arcade");
+    assert_eq!(
+        arcade.failing_check, 1,
+        "group 1's mismatched alt does not count because its main is have"
+    );
+    assert_eq!(
+        arcade.partial, 1,
+        "only group 2, which has no have-verified variant, counts"
+    );
 }
 
 #[test]

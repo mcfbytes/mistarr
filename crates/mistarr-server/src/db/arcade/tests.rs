@@ -312,6 +312,14 @@ fn import_reads_find_zip_roms_their_titles_and_dat_entries() {
         ),
         (main, "exblast.zip", "mame", "Example.mra")
     );
+    assert_eq!(
+        zip_rom_id(&c, "arcade", "MAME", "EXBLAST.zip").expect("lookup"),
+        Some(rom)
+    );
+    assert_eq!(
+        zip_rom_id(&c, "arcade", "mame", "nosuch.zip").expect("lookup"),
+        None
+    );
     let naming = titles_naming(&c, "arcade", "MAME", "EXBLAST.zip").expect("naming");
     assert_eq!(
         naming.iter().map(|(t, _)| *t).collect::<Vec<_>>(),

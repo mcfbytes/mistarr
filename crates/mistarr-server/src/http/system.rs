@@ -20,13 +20,12 @@ use crate::events::EventKind;
 use crate::jobs::dat_import::Recompute;
 use crate::jobs::detect_client::{detect_and_store, ClientStatus, DetectClient};
 use crate::jobs::gate::Override;
-use crate::jobs::scan::ScanJob;
+use crate::jobs::scan::{is_arcade, ScanJob};
 use crate::jobs::Scheduler;
 use crate::status::{hold_reason, snapshot, wizard_status, Status};
 use axum::http::StatusCode;
 use mistarr_clients::launch::Launcher;
 use mistarr_clients::ClientKind;
-use mistarr_mister::platforms::by_id as mister_platform_by_id;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -51,18 +50,12 @@ struct ScanBody {
 
 #[derive(Debug, Serialize)]
 struct ScanResponse {
-    /// `null` when scanning `arcade` alone finds nothing for the arcade
-    /// catalogue to do, since no separate scan job is queued for it.
+    /// `null` for a request naming `arcade` alone: it never gets a generic
+    /// scan job, only the arcade catalogue queued as `arcade_job_id`.
     job_id: Option<JobId>,
     /// The arcade catalogue queued with a scan of every platform or of `arcade`.
     #[serde(skip_serializing_if = "Option::is_none")]
     arcade_job_id: Option<JobId>,
-}
-
-/// Whether `id` is the arcade platform, whose presence and verification come
-/// from the arcade catalogue rather than a library scan.
-fn is_arcade(id: &PlatformId) -> bool {
-    mister_platform_by_id(&id.0).is_some_and(mistarr_mister::platforms::Platform::is_arcade)
 }
 
 async fn scan(

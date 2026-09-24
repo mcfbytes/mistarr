@@ -309,7 +309,9 @@ async fn rescans_follow_mra_and_zip_changes() {
 }
 
 /// A manual scan of `arcade` queues only the catalogue: no generic scan job walks
-/// `games/mame` as if its zips were cartridges, so `files` never gains rows for them.
+/// `games/mame` as if every zip were a cartridge, so `files` never gains an orphan
+/// row for a zip nothing knows about; the catalogue's own presence pass is what
+/// records rows, and only for zips the DAT or a live MRA title actually names.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_manual_arcade_scan_queues_only_the_catalogue() {
     let b = boot_arcade().await;
@@ -340,22 +342,21 @@ async fn a_manual_arcade_scan_queues_only_the_catalogue() {
         "no generic scan job is ever queued for arcade"
     );
 
-    let file_rows: i64 = b
+    // Every row the presence pass wrote (from the boot-time catalogue run) is
+    // linked to a rom: no orphan noise the way the old generic scan left behind.
+    let orphan_rows: i64 = b
         .running
         .app
         .db
         .read_blocking(|c| {
             Ok(c.query_row(
-                "SELECT COUNT(*) FROM files WHERE platform_id = 'arcade'",
+                "SELECT COUNT(*) FROM files WHERE platform_id = 'arcade' AND rom_id IS NULL",
                 [],
                 |r| r.get(0),
             )?)
         })
         .expect("count");
-    assert_eq!(
-        file_rows, 0,
-        "arcade zips are never walked and hashed member by member"
-    );
+    assert_eq!(orphan_rows, 0, "no unmatched member ever gets a row");
     b.running.shutdown().await.expect("shutdown");
 }
 

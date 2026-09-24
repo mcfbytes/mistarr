@@ -104,12 +104,18 @@ pub async fn enqueue_if_games_dir_exists(
     .map(Some)
 }
 
+/// Whether `id` is the arcade platform, whose presence and verification come
+/// from the arcade catalogue rather than a library scan.
+pub(crate) fn is_arcade(id: &PlatformId) -> bool {
+    platforms::by_id(&id.0).is_some_and(Platform::is_arcade)
+}
+
 /// Enqueues one [`ScanJob`] per enabled platform, skipping the arcade platform,
 /// whose presence and verification come from the arcade catalogue instead.
 async fn fan_out(ctx: &JobContext) -> Result<()> {
     let rows = ctx.app.db.read(platform_rows::list).await?;
     for row in rows.into_iter().filter(|r| r.enabled) {
-        if platforms::by_id(&row.id.0).is_some_and(Platform::is_arcade) {
+        if is_arcade(&row.id) {
             continue;
         }
         let job = ScanJob {
@@ -232,7 +238,7 @@ impl Throttle {
 
 /// The paths every directory entry in a unit resolved to, sorted for a
 /// deterministic scan order.
-fn list_files(dir: &Path) -> Vec<(PathBuf, String)> {
+pub(crate) fn list_files(dir: &Path) -> Vec<(PathBuf, String)> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -253,7 +259,14 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     let platform = platforms::by_id(&id.0)
         .ok_or_else(|| Error::Job(format!("unknown platform `{}`", id.0)))?;
     if platform.is_arcade() {
-        // Defensive: callers no longer enqueue this, but never walk arcade zips as cartridges.
+        // Defensive: arcade zips are never walked as cartridges, even called directly.
+        ctx.app
+            .db
+            .write({
+                let id = id.clone();
+                move |c| files::clear_scan_progress(c, &id)
+            })
+            .await?;
         return Ok(());
     }
     let games_root = ctx.app.config().paths.games.clone();
@@ -336,7 +349,8 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         .await
 }
 
-fn file_meta(path: &Path) -> io::Result<(i64, i64)> {
+/// A file's size and mtime, as stored in `files`.
+pub(crate) fn file_meta(path: &Path) -> io::Result<(i64, i64)> {
     let meta = fs::metadata(path)?;
     let size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
     let mtime = meta
@@ -346,7 +360,8 @@ fn file_meta(path: &Path) -> io::Result<(i64, i64)> {
     Ok((size, mtime))
 }
 
-fn extension(path: &Path) -> Option<String> {
+/// `path`'s extension, lowercased.
+pub(crate) fn extension(path: &Path) -> Option<String> {
     path.extension()
         .and_then(|e| e.to_str())
         .map(str::to_ascii_lowercase)
@@ -465,7 +480,7 @@ fn commit_unit(
 
 /// Matches a fully hashed payload and decides its state, per
 /// `docs/DATA-MODEL.md` "files.state".
-fn classify(
+pub(crate) fn classify(
     conn: &Connection,
     platform_id: &PlatformId,
     actual_name: &str,
@@ -493,7 +508,7 @@ fn classify(
     Ok((Some(m.rom_id), state))
 }
 
-fn unchanged(
+pub(crate) fn unchanged(
     conn: &Connection,
     platform_id: &PlatformId,
     rel_path: &str,
@@ -605,7 +620,12 @@ async fn scan_flat_unit(
 
 /// An unmatched or unreadable file's row: no hash was trusted enough to
 /// classify it, so it is recorded `unverified` rather than aborting the scan.
-fn unverified_row(rel_path: String, size: i64, mtime: i64, crc32: Option<String>) -> NewFile {
+pub(crate) fn unverified_row(
+    rel_path: String,
+    size: i64,
+    mtime: i64,
+    crc32: Option<String>,
+) -> NewFile {
     NewFile {
         rel_path,
         size,
