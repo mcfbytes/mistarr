@@ -8,7 +8,7 @@ use unicode_normalization::UnicodeNormalization;
 mod tests;
 
 /// A release region as written in a No-Intro or Redump region tag.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
 // Each variant is the region its name spells; `REGIONS` gives the tag text.
 #[allow(missing_docs)]
@@ -21,40 +21,84 @@ pub enum Region {
     Argentina,
     Australia,
     Austria,
+    Belarus,
     Belgium,
+    Bosnia,
     Brazil,
+    Bulgaria,
     Canada,
+    Chile,
     China,
+    Colombia,
     Croatia,
+    Cyprus,
+    Czech,
     Denmark,
+    Ecuador,
+    Egypt,
+    Estonia,
     Finland,
     France,
     Germany,
     Greece,
     HongKong,
+    Hungary,
+    Iceland,
     India,
+    Indonesia,
+    Iran,
+    Iraq,
     Ireland,
     Israel,
     Italy,
+    Jordan,
+    Kazakhstan,
     Korea,
+    Kuwait,
     LatinAmerica,
+    Latvia,
+    Lebanon,
+    Lithuania,
+    Luxembourg,
+    Macao,
+    Malaysia,
+    Malta,
     Mexico,
+    Morocco,
     Netherlands,
     NewZealand,
+    Nigeria,
     Norway,
+    Pakistan,
+    Peru,
+    Philippines,
     Poland,
     Portugal,
+    Qatar,
+    Romania,
     Russia,
+    SaudiArabia,
     Scandinavia,
+    Serbia,
     Singapore,
+    Slovakia,
+    Slovenia,
     SouthAfrica,
     Spain,
     Sweden,
     Switzerland,
     Taiwan,
+    Thailand,
     Turkey,
+    Uae,
     Uk,
+    Ukraine,
+    Uruguay,
+    Venezuela,
+    Vietnam,
     Unknown,
+    /// A token in a region tag that is not in the table, kept as written.
+    Other(String),
 }
 
 /// Region tag spellings, matched case-insensitively. The first spelling is canonical.
@@ -67,40 +111,88 @@ const REGIONS: &[(&str, Region)] = &[
     ("Argentina", Region::Argentina),
     ("Australia", Region::Australia),
     ("Austria", Region::Austria),
+    ("Belarus", Region::Belarus),
     ("Belgium", Region::Belgium),
+    ("Bosnia", Region::Bosnia),
     ("Brazil", Region::Brazil),
+    ("Bulgaria", Region::Bulgaria),
     ("Canada", Region::Canada),
+    ("Chile", Region::Chile),
     ("China", Region::China),
+    ("Colombia", Region::Colombia),
     ("Croatia", Region::Croatia),
+    ("Cyprus", Region::Cyprus),
+    ("Czech", Region::Czech),
     ("Denmark", Region::Denmark),
+    ("Ecuador", Region::Ecuador),
+    ("Egypt", Region::Egypt),
+    ("Estonia", Region::Estonia),
     ("Finland", Region::Finland),
     ("France", Region::France),
     ("Germany", Region::Germany),
     ("Greece", Region::Greece),
     ("Hong Kong", Region::HongKong),
+    ("Hungary", Region::Hungary),
+    ("Iceland", Region::Iceland),
     ("India", Region::India),
+    ("Indonesia", Region::Indonesia),
+    ("Iran", Region::Iran),
+    ("Iraq", Region::Iraq),
     ("Ireland", Region::Ireland),
     ("Israel", Region::Israel),
     ("Italy", Region::Italy),
+    ("Jordan", Region::Jordan),
+    ("Kazakhstan", Region::Kazakhstan),
     ("Korea", Region::Korea),
+    ("Kuwait", Region::Kuwait),
     ("Latin America", Region::LatinAmerica),
+    ("Latvia", Region::Latvia),
+    ("Lebanon", Region::Lebanon),
+    ("Lithuania", Region::Lithuania),
+    ("Luxembourg", Region::Luxembourg),
+    ("Macao", Region::Macao),
+    ("Malaysia", Region::Malaysia),
+    ("Malta", Region::Malta),
     ("Mexico", Region::Mexico),
+    ("Morocco", Region::Morocco),
     ("Netherlands", Region::Netherlands),
     ("New Zealand", Region::NewZealand),
+    ("Nigeria", Region::Nigeria),
     ("Norway", Region::Norway),
+    ("Pakistan", Region::Pakistan),
+    ("Peru", Region::Peru),
+    ("Philippines", Region::Philippines),
     ("Poland", Region::Poland),
     ("Portugal", Region::Portugal),
+    ("Qatar", Region::Qatar),
+    ("Romania", Region::Romania),
     ("Russia", Region::Russia),
+    ("Saudi Arabia", Region::SaudiArabia),
     ("Scandinavia", Region::Scandinavia),
+    ("Serbia", Region::Serbia),
     ("Singapore", Region::Singapore),
+    ("Slovakia", Region::Slovakia),
+    ("Slovenia", Region::Slovenia),
     ("South Africa", Region::SouthAfrica),
     ("Spain", Region::Spain),
     ("Sweden", Region::Sweden),
     ("Switzerland", Region::Switzerland),
     ("Taiwan", Region::Taiwan),
+    ("Thailand", Region::Thailand),
     ("Turkey", Region::Turkey),
+    ("UAE", Region::Uae),
     ("UK", Region::Uk),
+    ("Ukraine", Region::Ukraine),
+    ("Uruguay", Region::Uruguay),
+    ("Venezuela", Region::Venezuela),
+    ("Vietnam", Region::Vietnam),
+    ("Czech Republic", Region::Czech),
+    ("Czechia", Region::Czech),
+    ("South Korea", Region::Korea),
+    ("Macau", Region::Macao),
+    ("United Arab Emirates", Region::Uae),
     ("United Kingdom", Region::Uk),
+    ("Holland", Region::Netherlands),
     ("Unknown", Region::Unknown),
 ];
 
@@ -118,20 +210,24 @@ impl Region {
         REGIONS
             .iter()
             .find(|(label, _)| label.eq_ignore_ascii_case(name))
-            .map(|&(_, region)| region)
+            .map(|(_, region)| region.clone())
     }
 
-    /// The canonical tag spelling, e.g. `USA` or `Hong Kong`.
+    /// The canonical tag spelling, e.g. `USA` or `Hong Kong`; `Other` gives its own text.
     ///
     /// ```
     /// use mistarr_core::naming::Region;
     /// assert_eq!(Region::HongKong.name(), "Hong Kong");
+    /// assert_eq!(Region::Other("Atlantis".into()).name(), "Atlantis");
     /// ```
     #[must_use]
-    pub fn name(self) -> &'static str {
+    pub fn name(&self) -> &str {
+        if let Region::Other(text) = self {
+            return text;
+        }
         REGIONS
             .iter()
-            .find(|&&(_, region)| region == self)
+            .find(|(_, region)| region == self)
             .map_or("Unknown", |&(label, _)| label)
     }
 }
@@ -246,7 +342,7 @@ impl fmt::Display for Revision {
 pub struct ParsedName {
     /// Text before the first tag, trimmed; a leading `[BIOS]` is not part of it.
     pub base_name: String,
-    /// From the first tag whose tokens are all known regions.
+    /// From the first tag with a known region; its unknown tokens become [`Region::Other`].
     pub regions: Vec<Region>,
     /// From the first tag whose tokens are all language codes such as `En` or `Zh-Hant`.
     pub languages: Vec<String>,
@@ -474,15 +570,23 @@ fn apply_paren(parsed: &mut ParsedName, rev: &mut RevisionBuilder, tag: &str) {
     }
 }
 
+/// A region tag has at least one known region; unknown tokens are kept as [`Region::Other`].
 fn parse_regions(tag: &str) -> Option<Vec<Region>> {
     let mut regions = Vec::new();
+    let mut known = false;
     for token in tag.split(',') {
-        let region = Region::from_name(token)?;
+        let region = match Region::from_name(token) {
+            Some(region) => {
+                known = true;
+                region
+            }
+            None => Region::Other(token.trim().to_owned()),
+        };
         if !regions.contains(&region) {
             regions.push(region);
         }
     }
-    Some(regions)
+    known.then_some(regions)
 }
 
 fn parse_languages(tag: &str) -> Option<Vec<String>> {

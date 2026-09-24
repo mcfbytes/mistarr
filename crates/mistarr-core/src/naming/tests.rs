@@ -84,7 +84,6 @@ fn explicit_cases() -> Vec<Case> {
         case("Example Quest (USA) (Japan)", "Example Quest")
             .r(&[Usa])
             .f(&["other:Japan"]),
-        case("Example Quest (USA, Atlantis)", "Example Quest").f(&["other:USA, Atlantis"]),
         case("Example Quest (Atlantis)", "Example Quest").f(&["other:Atlantis"]),
         case("Example Quest (Europe) (En,Fr,De)", "Example Quest")
             .r(&[Europe])
@@ -450,15 +449,41 @@ fn revision_rank_equivalences() {
 
 #[test]
 fn region_table_round_trips() {
-    for &(label, region) in REGIONS {
-        assert_eq!(Region::from_name(label), Some(region), "{label}");
-        assert_eq!(Region::from_name(&label.to_ascii_uppercase()), Some(region));
-        assert_eq!(Region::from_name(region.name()), Some(region));
+    for (label, region) in REGIONS {
+        let found = Some(region.clone());
+        assert_eq!(Region::from_name(label), found, "{label}");
+        assert_eq!(Region::from_name(&label.to_ascii_uppercase()), found);
+        assert_eq!(Region::from_name(region.name()), found);
+        assert!(!matches!(region, Region::Other(_)));
     }
+    assert!(REGIONS.len() >= 80);
     assert_eq!(Region::Uk.name(), "UK");
+    assert_eq!(Region::from_name("United Arab Emirates"), Some(Region::Uae));
+    assert_eq!(Region::Other("Atlantis".into()).to_string(), "Atlantis");
     assert_eq!(Region::Usa.to_string(), "USA");
     assert_eq!(Region::from_name(" Europe "), Some(Europe));
     assert_eq!(Region::from_name(""), None);
+}
+
+#[test]
+fn region_tags_with_unknown_tokens() {
+    let p = parse_name("Example Quest (Europe, Thailand) (En)");
+    assert_eq!(p.regions, [Europe, Region::Thailand]);
+    assert_eq!(p.languages, ["En"]);
+    assert!(p.flags.is_empty());
+
+    let p = parse_name("Example Quest (Europe, Atlantis, USA) (Rev 1)");
+    assert_eq!(p.regions, [Europe, Region::Other("Atlantis".into()), Usa]);
+    assert_eq!(p.revision.map(|r| r.label).as_deref(), Some("Rev 1"));
+    assert!(p.flags.is_empty());
+
+    let p = parse_name("Example Quest (Atlantis, Lemuria) (Japan)");
+    assert_eq!(p.regions, [Japan]);
+    assert_eq!(p.flags, [Flag::Other("Atlantis, Lemuria".into())]);
+
+    let p = parse_name("Example Quest (Atlantis, USA) (Europe, Lemuria)");
+    assert_eq!(p.regions, [Region::Other("Atlantis".into()), Usa]);
+    assert_eq!(p.flags, [Flag::Other("Europe, Lemuria".into())]);
 }
 
 #[test]

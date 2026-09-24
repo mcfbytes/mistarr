@@ -29,8 +29,8 @@ and `(Track N)` on roms. Parse into:
 
 - `base_name`: everything before the first parenthesised or bracketed tag,
   after any leading bracket tags such as `[BIOS]`
-- `regions`: from the first tag whose comma-separated tokens are all known
-  region names
+- `regions`: from the first tag whose comma-separated tokens include at least
+  one known region name; unknown tokens in that tag are kept as written
 - `languages`: from the first tag whose tokens are all two-letter codes
   (`En`), optionally with a subtag (`Zh-Hant`, `Pt-BR`)
 - `revision`: `Rev N`, `Rev A`, `v1.1`, `(Alt N)`, `(Beta N)`, `(Proto N)`,
