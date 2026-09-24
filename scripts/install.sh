@@ -13,6 +13,7 @@ SCRIPTS_DIR="$ROOT/Scripts"
 BIN="$INSTALL_DIR/mistarr"
 PREV="$BIN.prev"
 LAUNCHER="$SCRIPTS_DIR/mistarr.sh"
+PREV_LAUNCHER="$LAUNCHER.prev"
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -35,21 +36,38 @@ http_get() {
 # since the board has no `file` command.
 is_arm_elf() {
     [ -f "$1" ] || return 1
+    command -v od >/dev/null 2>&1 || return 1
     head -c 20 "$1" 2>/dev/null | od -An -tx1 -v | tr -d '\n' | awk '
+        BEGIN { ok = 0 }
         {
             n = split($0, b, " ")
-            if (n < 20) { exit 1 }
-            if (b[1] != "7f" || b[2] != "45" || b[3] != "4c" || b[4] != "46") { exit 1 }
-            if (b[5] != "01") { exit 1 }
-            if (b[19] != "28" || b[20] != "00") { exit 1 }
-        }'
+            if (n < 20) { next }
+            if (b[1] != "7f" || b[2] != "45" || b[3] != "4c" || b[4] != "46") { next }
+            if (b[5] != "01") { next }
+            if (b[19] != "28" || b[20] != "00") { next }
+            ok = 1
+        }
+        END { exit !ok }'
 }
 
-# Restores the previous binary after a failed upgrade, if one was saved.
+# Restores the previous binary and launcher after a failed install, if any
+# were saved, and restarts that previous version.
 restore_prev() {
+    restored=0
     if [ -f "$PREV" ]; then
         cp "$PREV" "$BIN" && chmod +x "$BIN"
-        echo "restored the previous binary after a failed install"
+        restored=1
+    fi
+    if [ -f "$PREV_LAUNCHER" ]; then
+        cp "$PREV_LAUNCHER" "$LAUNCHER" && chmod +x "$LAUNCHER"
+        restored=1
+    fi
+    [ "$restored" = 1 ] || return 0
+    echo "restored the previous binary and launcher after a failed install"
+    if [ -x "$LAUNCHER" ] && MISTARR_ROOT="$ROOT" "$LAUNCHER" start; then
+        echo "restarted the previous version of mistarr"
+    else
+        echo "failed to restart the previous version of mistarr" >&2
     fi
 }
 
@@ -131,6 +149,9 @@ install_release() {
     if [ -f "$BIN" ]; then
         cp "$BIN" "$PREV"
     fi
+    if [ -f "$LAUNCHER" ]; then
+        cp "$LAUNCHER" "$PREV_LAUNCHER"
+    fi
 
     if ! cp "$ex/mistarr" "$BIN"; then
         echo "failed to install the new binary" >&2
@@ -153,8 +174,6 @@ install_release() {
         restore_prev
         exit 1
     fi
-
-    rm -f "$PREV"
 }
 
 main() {

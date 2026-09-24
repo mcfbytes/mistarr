@@ -31,8 +31,13 @@ jobs:
       - run: cp scripts/install.sh install.sh
       - run: tar -C dist/stage -czf mistarr-armv7.tar.gz mistarr mistarr.sh install.sh
       - run: sha256sum mistarr-armv7.tar.gz > mistarr-armv7.tar.gz.sha256
-      - name: Read the release notes from the tag message
+      - name: Check whether the pushed tag is annotated
+        id: tagtype
+        if: github.event_name == 'push'
+        run: echo "type=$(git cat-file -t "$GITHUB_REF_NAME")" >> "$GITHUB_OUTPUT"
+      - name: Read the release notes from the tag's annotation
         id: notes
+        if: github.event_name == 'push' && steps.tagtype.outputs.type == 'tag'
         run: |
           subject=$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME")
           body=$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")
@@ -46,10 +51,20 @@ jobs:
             echo
             echo "NOTES_EOF"
           } >> "$GITHUB_OUTPUT"
-      - uses: softprops/action-gh-release@v2
+      - name: Publish the release, setting the body from the tag's annotation
+        if: github.event_name == 'push' && steps.tagtype.outputs.type == 'tag'
+        uses: softprops/action-gh-release@v2
         with:
           files: |
             mistarr-armv7.tar.gz
             mistarr-armv7.tar.gz.sha256
             install.sh
           body: ${{ steps.notes.outputs.notes }}
+      - name: Publish the release, leaving its body untouched
+        if: github.event_name == 'release' || steps.tagtype.outputs.type != 'tag'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            mistarr-armv7.tar.gz
+            mistarr-armv7.tar.gz.sha256
+            install.sh

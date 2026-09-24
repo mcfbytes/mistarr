@@ -128,9 +128,10 @@ no links to content of any kind (PRINCIPLES.md).
 create a new tag `vX.Y.Z` for it, and publish. The release's own body is used
 as written; CI builds the binary and attaches the three assets to it.
 
-**From the command line**: push an annotated tag matching `v*`, for example
+**From the command line**: push a tag matching `v*`, for example
 `git tag -a v1.2.3 -m "v1.2.3" && git push origin v1.2.3`. CI builds and
-creates the release, with the tag's annotation as the release body.
+creates the release. An annotated tag's message becomes the release body; a
+lightweight tag creates the release with no body.
 
 Both paths run the same workflow and land on the same release for a given
 tag, so publishing through the UI and then pushing the tag (or the reverse)

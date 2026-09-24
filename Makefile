@@ -31,7 +31,7 @@ release: cross
 	cp scripts/mistarr.sh dist/stage/mistarr.sh
 	cp scripts/install.sh dist/stage/install.sh
 	tar -C dist/stage -czf $(DIST) mistarr mistarr.sh install.sh
-	sha256sum $(DIST) > $(DIST).sha256
+	cd dist && sha256sum mistarr-armv7.tar.gz > mistarr-armv7.tar.gz.sha256
 	rm -rf dist/stage
 
 clean:

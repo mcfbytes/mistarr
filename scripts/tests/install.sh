@@ -68,6 +68,7 @@ write_arm_binary() {
 write_launcher_stub() {
     cat > "$1" <<'STUB'
 #!/bin/sh
+# stub-kind: normal
 case "${1:-}" in
     stop) echo "mistarr stopped" ;;
     start) echo "mistarr started" ;;
@@ -127,6 +128,62 @@ publish_bad_binary_release() {
     rm -rf "$stage"
 }
 
+# Publishes a release whose binary is a genuinely empty file.
+publish_empty_binary_release() {
+    tag="$1"
+    mkdir -p "$srv/repos/mcfbytes/mistarr/releases/tags" "$srv/download/$tag"
+    printf '{"tag_name": "%s"}' "$tag" > "$srv/repos/mcfbytes/mistarr/releases/tags/$tag"
+
+    stage=$(mktemp -d)
+    : > "$stage/mistarr"
+    write_launcher_stub "$stage/mistarr.sh"
+    echo "install stub" > "$stage/install.sh"
+    tar -C "$stage" -czf "$srv/download/$tag/mistarr-armv7.tar.gz" mistarr mistarr.sh install.sh
+    (cd "$srv/download/$tag" && sha256sum mistarr-armv7.tar.gz) \
+        > "$srv/download/$tag/mistarr-armv7.tar.gz.sha256"
+    rm -rf "$stage"
+}
+
+# A launcher stub whose bare invocation always fails, simulating mistarr
+# failing to start after an upgrade.
+write_crashing_launcher_stub() {
+    cat > "$1" <<'STUB'
+#!/bin/sh
+# stub-kind: crashing
+case "${1:-}" in
+    stop) echo "mistarr stopped" ;;
+    start) echo "mistarr started" ;;
+    status) echo "mistarr not running" ;;
+    "")
+        echo "mistarr failed to start"
+        exit 1
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+STUB
+    chmod +x "$1"
+}
+
+# Publishes a release whose binary and checksum are fine but whose launcher
+# fails to start, to exercise the rollback path.
+publish_crashing_release() {
+    tag="$1"
+    binary_marker="$2"
+    mkdir -p "$srv/repos/mcfbytes/mistarr/releases/tags" "$srv/download/$tag"
+    printf '{"tag_name": "%s"}' "$tag" > "$srv/repos/mcfbytes/mistarr/releases/tags/$tag"
+
+    stage=$(mktemp -d)
+    write_arm_binary "$stage/mistarr" "$binary_marker"
+    write_crashing_launcher_stub "$stage/mistarr.sh"
+    echo "install stub" > "$stage/install.sh"
+    tar -C "$stage" -czf "$srv/download/$tag/mistarr-armv7.tar.gz" mistarr mistarr.sh install.sh
+    (cd "$srv/download/$tag" && sha256sum mistarr-armv7.tar.gz) \
+        > "$srv/download/$tag/mistarr-armv7.tar.gz.sha256"
+    rm -rf "$stage"
+}
+
 set_latest() {
     printf '{"tag_name": "%s"}' "$1" > "$srv/repos/mcfbytes/mistarr/releases/latest"
 }
@@ -173,8 +230,8 @@ expect "$(cat "$root2/mistarr/mistarr.toml")" "CONFIG" "upgrade preserves the co
 expect "$(cat "$root2/mistarr/dats/sample.dat")" "a-dat-file" "upgrade preserves watched directories"
 grep -q "UPGRADED-BINARY-V1-1" "$root2/mistarr/mistarr" \
     || { fail=$((fail + 1)); echo "FAIL: upgrade wrote the new binary"; }
-[ -f "$root2/mistarr/mistarr.prev" ] \
-    && { fail=$((fail + 1)); echo "FAIL: successful upgrade leaves a .prev file behind"; }
+grep -q "OLD-BINARY-V0" "$root2/mistarr/mistarr.prev" \
+    || { fail=$((fail + 1)); echo "FAIL: a successful upgrade keeps the previous binary as .prev for manual rollback"; }
 
 # Checksum mismatch is refused, leaving the previous binary intact.
 root3="$work/root3"
@@ -201,6 +258,20 @@ code=$?
 expect_contains "$out" "not an ARM ELF" "non-ARM binary is reported"
 grep -q "GOOD-PREVIOUS-BINARY-2" "$root4/mistarr/mistarr" \
     || { fail=$((fail + 1)); echo "FAIL: non-ARM binary must not touch the previous binary"; }
+
+# An empty binary file is refused rather than accepted by an ARM-ELF check
+# that fails open on no input.
+root4b="$work/root4b"
+mkdir -p "$root4b/mistarr" "$root4b/Scripts"
+write_arm_binary "$root4b/mistarr/mistarr" GOOD-PREVIOUS-BINARY-3
+write_launcher_stub "$root4b/Scripts/mistarr.sh"
+publish_empty_binary_release v3.1.0
+out=$(run_install "$root4b" "$no_tty" v3.1.0)
+code=$?
+[ "$code" -ne 0 ] || { fail=$((fail + 1)); echo "FAIL: empty binary must exit non-zero"; }
+expect_contains "$out" "not an ARM ELF" "empty binary is reported"
+grep -q "GOOD-PREVIOUS-BINARY-3" "$root4b/mistarr/mistarr" \
+    || { fail=$((fail + 1)); echo "FAIL: empty binary must not touch the previous binary"; }
 
 # An explicit version argument hits /releases/tags/<version>, not "latest".
 root5="$work/root5"
@@ -240,6 +311,25 @@ out=$(printf 'unrelated piped bytes\n' | env MISTARR_ROOT="$root7" MISTARR_RELEA
 code=$?
 [ "$code" -eq 0 ] || { fail=$((fail + 1)); echo "FAIL: run with a reachable tty exits 0: $out"; }
 expect_contains "$out" "answer=y" "the prompt reads from the tty override, not the piped stdin"
+
+# A binary that fails to start rolls both the binary and the launcher back
+# to the previous release and restarts it.
+root8="$work/root8"
+mkdir -p "$root8/mistarr" "$root8/Scripts"
+write_arm_binary "$root8/mistarr/mistarr" GOOD-BEFORE-CRASH
+write_launcher_stub "$root8/Scripts/mistarr.sh"
+publish_crashing_release v6.0.0 CRASHING-NEW-BINARY
+out=$(run_install "$root8" "$no_tty" v6.0.0)
+code=$?
+[ "$code" -ne 0 ] || { fail=$((fail + 1)); echo "FAIL: a failed start must exit non-zero"; }
+expect_contains "$out" "restored the previous binary and launcher after a failed install" \
+    "a failed start reports the rollback"
+expect_contains "$out" "restarted the previous version of mistarr" \
+    "a failed start reports the restart of the previous version"
+grep -q "GOOD-BEFORE-CRASH" "$root8/mistarr/mistarr" \
+    || { fail=$((fail + 1)); echo "FAIL: a failed start must restore the previous binary"; }
+grep -q "stub-kind: normal" "$root8/Scripts/mistarr.sh" \
+    || { fail=$((fail + 1)); echo "FAIL: a failed start must restore the previous launcher"; }
 
 if [ "$fail" -eq 0 ]; then
     echo "all tests passed"
