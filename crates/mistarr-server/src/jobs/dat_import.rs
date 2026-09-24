@@ -17,6 +17,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
+use super::gate::GateState;
 use super::{scan, wizard, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
 use crate::config::PrefsConfig;
@@ -40,6 +41,12 @@ pub const REJECTED_DIR: &str = "rejected";
 
 /// Games read between checks for shutdown.
 const CANCEL_EVERY: u64 = 500;
+
+/// Games stored between pauses while a core runs, so the parse never holds a CPU for long.
+const YIELD_EVERY: u64 = 200;
+
+/// How long each of those pauses lasts.
+const YIELD_FOR: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// The 1G1R preferences of `[prefs]`; hide names that are not selection flags are ignored.
 ///
@@ -163,6 +170,7 @@ struct Request {
     prefs: Prefs,
     now: i64,
     stop: watch::Receiver<bool>,
+    gate: watch::Receiver<GateState>,
 }
 
 #[async_trait]
@@ -183,7 +191,7 @@ impl Job for DatImport {
     }
 
     fn lane(&self) -> Lane {
-        Lane::Heavy
+        Lane::Background
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
@@ -286,6 +294,7 @@ impl DatImport {
                 prefs: prefs(&ctx.app.config().prefs),
                 now: crate::unix_now(),
                 stop: ctx.app.shutdown_signal(),
+                gate: ctx.app.gate.subscribe(),
             };
             let path = self.path.clone();
             let outcome = ctx
@@ -441,6 +450,9 @@ fn import_member<R: BufRead>(
         games += 1;
         if games % CANCEL_EVERY == 0 && *req.stop.borrow() {
             return Err(Error::Cancelled);
+        }
+        if games % YIELD_EVERY == 0 && req.gate.borrow().core_running() {
+            std::thread::sleep(YIELD_FOR);
         }
         if let Some(p) = &platform {
             clone_of |= game.clone_of.is_some();
@@ -629,7 +641,7 @@ impl Job for Recompute {
     }
 
     fn lane(&self) -> Lane {
-        Lane::Heavy
+        Lane::Background
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {

@@ -21,7 +21,7 @@ use crate::jobs::detect_client::DetectClient;
 use crate::jobs::gate::Override;
 use crate::jobs::scan::ScanJob;
 use crate::jobs::Scheduler;
-use crate::status::{snapshot, wizard_status, Status};
+use crate::status::{hold_reason, snapshot, wizard_status, Status};
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -162,16 +162,32 @@ async fn resume(State(app): State<Arc<AppState>>) -> Json<Status> {
     Json(snapshot(&app).await)
 }
 
+/// A `/system/jobs` item: the row plus why it is not running, if the gate holds it.
+#[derive(Debug, Serialize)]
+struct JobItem {
+    #[serde(flatten)]
+    row: JobRow,
+    reason: Option<String>,
+}
+
 async fn list_jobs(
     State(app): State<Arc<AppState>>,
     paging: Result<Query<Paging>, QueryRejection>,
-) -> Result<Json<Page<JobRow>>, ApiError> {
+) -> Result<Json<Page<JobItem>>, ApiError> {
     let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let (limit, offset) = paging.resolve();
-    let (items, total) = app
+    let (rows, total) = app
         .db
         .read(move |c| jobs::list_active(c, limit, offset))
         .await?;
+    let gate = app.gate.state();
+    let items = rows
+        .into_iter()
+        .map(|row| JobItem {
+            reason: hold_reason(&gate, &row.lane, row.state),
+            row,
+        })
+        .collect();
     Ok(Json(Page { items, total }))
 }
 

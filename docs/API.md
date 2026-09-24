@@ -27,7 +27,7 @@ under `/api` return 404 JSON.
 | GET | `/system/wizard` | Which first-run steps are complete. |
 | POST | `/system/scan` | Enqueue a library scan. Body `{ platform_id? }`. |
 | POST | `/system/cores` | Detect installed cores again, for the wizard's detected-cores step. |
-| POST | `/system/pause` / `/system/resume` | Manual scheduler gate, overrides CORENAME until CORENAME next changes. Returns the status body. |
+| POST | `/system/pause` / `/system/resume` | Manual scheduler gate, overrides CORENAME until CORENAME next changes; `resume` ("Run now") also ends once the heavy queue drains. Returns the status body. |
 | GET | `/system/jobs` | Queued, running and paused jobs with progress. |
 | GET | `/system/settings` / PUT | The config subset that is editable at runtime. |
 
@@ -40,6 +40,7 @@ under `/api` return 404 JSON.
               "reachable": true, "version": "4.0.5", "rtorrent_on_path": false,
               "checked_at": 1700000000 },
   "corename": "MENU", "paused": false, "pause_reason": null, "override": null,
+  "waiting": [],
   "disk_free_bytes": 1000000, "rss_bytes": 1000000, "launch": "ready"
 }
 ```
@@ -47,9 +48,12 @@ under `/api` return 404 JSON.
 `client` is `null` before the first detection and has `kind: null` when no
 client answered. `corename` is `null` when the file does not exist.
 `pause_reason` is `"core"`, `"manual"` or `null`; `override` is `"paused"`,
-`"running"` or `null`. `disk_free_bytes` is for the filesystem holding the
-data directory. `launch` is `"ready"`, `"disabled"` when `prefs.launch` is
-off, or `"unavailable"` when MiSTer Main's command FIFO does not exist.
+`"running"` or `null`. `waiting` lists the heavy-lane jobs the closed gate
+holds, oldest first, as `{ id, kind, state, detail }`, where `detail` is the
+file name or platform the job is about or `null`; it is empty while the gate
+is open. `disk_free_bytes` is for the filesystem holding the data directory.
+`launch` is `"ready"`, `"disabled"` when `prefs.launch` is off, or
+`"unavailable"` when MiSTer Main's command FIFO does not exist.
 
 `/system/wizard` body: `{ paths, dats, client, sources, open_on_start }`, all
 booleans. `paths` is true when the games directory exists, `dats` when any DAT
@@ -62,9 +66,12 @@ is an `_Arcade` directory or stored MRA titles). `/system/cores` answers `{
 platforms, arcade_job_id }`: the ids of platforms whose core is installed, and
 the queued arcade catalogue or `null`.
 
-`/system/jobs` items: `{ id, kind, payload, state, progress, created_at,
-updated_at }`, where `state` is `queued`, `running` or `paused` and a failed
-job's `progress` is `{ error }`.
+`/system/jobs` items: `{ id, kind, lane, payload, state, progress, reason,
+created_at, updated_at }`, where `lane` is `heavy`, `background` or `light`
+(ARCHITECTURE.md "Pausing for the core"), `state` is `queued`, `running` or
+`paused`, and `reason` says why a held heavy job is not running, such as
+`"Paused while NES is running"` or `"Paused by the user"`, else `null`. A
+failed job's `progress` is `{ error }`.
 
 `/system/settings` body: `{ client, limits, prefs }` with the fields of the
 same sections of `mistarr.toml`. PUT takes any subset of the three sections;
@@ -268,7 +275,7 @@ connection that falls further behind is closed and, on reconnecting, gets
 | Event | Data |
 |---|---|
 | `status` | Same shape as `/system/status`, sent on change and every 30 s. |
-| `job.progress` | `{ id, kind, state, progress }` |
+| `job.progress` | `{ id, kind, state, progress }`; also sent with `state: "queued"` and `progress: null` when a job is queued |
 | `dat.loaded` / `dat.rejected` | `{ dat_version_id, file, platform_id }` / `{ file, reason }`; one per DAT in a pack, `file` as dropped |
 | `source.changed` | `{ source_id, state, platform_id? }` |
 | `download.changed` | `{ download_id, state, progress }` |

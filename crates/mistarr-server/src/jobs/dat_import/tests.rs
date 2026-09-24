@@ -38,6 +38,7 @@ fn request(stop: bool, bind: Option<Bind>) -> Request {
         prefs: Prefs::default(),
         now: 1,
         stop: watch::channel(stop).1,
+        gate: watch::channel(GateState::default()).1,
     }
 }
 

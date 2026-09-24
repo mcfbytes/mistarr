@@ -14,7 +14,7 @@ torrent client that ships with the image, and moves verified files into the
 | Roughly 490 MiB RAM visible to Linux, shared with the MiSTer process | Idle RSS target under 30 MiB, hard ceiling 64 MiB. No in-memory torrent metadata for set torrents; file lists live in SQLite. |
 | SD card, exFAT, ~10-20 MB/s writes | Stage and rename on the same filesystem, never copy. Throttle hashing with `ionice`. No symlinks, case-insensitive names. |
 | Stock image is Buildroot 2021 with glibc 2.31 | musl static linking, no OpenSSL, `rustls` only. |
-| MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing and imports while it is anything other than `MENU`. Transfers continue at a reduced rate limit. |
+| MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing, scans and file placement while it is anything other than `MENU`. DAT and source parsing continue at low priority; transfers continue at a reduced rate limit. |
 | Torrent client already present | Stock image ships rtorrent; Buildroot_MiSTer ships Transmission. mistarr never embeds a client. |
 | Content neutrality | See PRINCIPLES.md. No sources in the tree; watched directories are the only input path. |
 
@@ -93,6 +93,9 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 
 1. Load config from `/media/fat/mistarr/mistarr.toml`, or defaults.
 2. Open or create SQLite at `/media/fat/mistarr/mistarr.db`, run migrations.
+   Read CORENAME once, so the gate is closed from the start while a core is
+   loaded, then reconcile the jobs a previous process left open (see
+   "Pausing for the core").
 3. Detect the download client: probe Transmission RPC on `127.0.0.1:9091`,
    then rtorrent SCGI at the configured socket or `127.0.0.1:5000`. If neither
    answers and `rtorrent` is on `PATH`, offer to launch it with a generated rc
@@ -112,8 +115,9 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    enqueues an import once the file's mtime is 2 s old and its size held
    between two listings. Accept `.dat`, `.xml`, and `.zip` containing either;
    each member of a zip is a separate DAT, and a file whose import job failed
-   is enqueued again on a later listing. Parse Logiqx `<datafile>` with
-   `quick-xml`, streaming, one transaction per DAT. Reject anything else and
+   is enqueued again on a later listing. The `dat_import` job runs on the
+   background lane, so a loaded core does not hold it. Parse Logiqx
+   `<datafile>` with `quick-xml`, streaming, one transaction per DAT. Reject anything else and
    move it to `dats/rejected/` with a `<name>.reason.txt` beside it.
 2. Identify the platform from the DAT header name using the table in
    PLATFORMS.md, falling back to the platform an earlier version of the same
@@ -172,7 +176,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 
 1. A `.torrent` or `.magnet` appears in `sources/`, found by a scan every
    10 s once its size has held for two scans, or written there by
-   `POST /sources/upload`. A light `source_import` job per file parses it. A
+   `POST /sources/upload`. A `source_import` job per file, on the background
+   lane, parses it. A
    file that does not parse, or repeats a loaded source, moves to
    `sources/rejected/` with a `<name>.reason.txt`.
 2. For a magnet, the source is `resolving`. A light `resolve_magnet` job adds
@@ -299,11 +304,36 @@ The CORENAME watcher then sees the core and pauses heavy jobs as below.
 
 ### Pausing for the core
 
+Jobs run on three serial lanes, one job at a time each:
+
+| Lane | Jobs | While a core runs |
+|---|---|---|
+| heavy | `scan`, `import`, `arcade_catalog` | Held: a queued job does not start and a running one stops at its next file boundary, `paused`. |
+| background | `dat_import`, `recompute_1g1r`, `source_import` | Runs. A DAT parse sleeps 20 ms every 200 entries, on top of the process's `nice` level. |
+| light | `detect_client`, `transfer`, `resolve_magnet`, `deselect` | Runs. |
+
 The CORENAME watcher polls `/tmp/CORENAME` every 2 s. When the value is not
-`MENU` the scheduler pauses hash and import jobs at the next file boundary and
-asks the client to apply the "core running" rate limits. When it returns to
-`MENU` everything resumes. This is a scheduler-level gate, not something each
-job needs to know about.
+`MENU` the gate closes for the heavy lane and the poller applies the "core
+running" rate limits. When it returns to `MENU` everything resumes. This is
+a scheduler-level gate, not something each job needs to know about.
+
+While the gate is closed, `/system/status` lists the held heavy jobs as
+`waiting`, and each of them carries a `reason` in `/system/jobs`, so the UI
+can say what waits and why. "Run now" (`POST /system/resume`) opens the gate
+until CORENAME changes or the heavy queue drains, whichever comes first;
+after that, new heavy work waits for the core again.
+
+`scan`, `arcade_catalog` and `recompute_1g1r` are singletons per payload: a
+request joins a queued or paused job of the same kind and payload instead of
+queueing another. Any other kind joins only a job that has not started.
+
+At startup the scheduler takes over the queued, running and paused rows the
+previous process left. The first row of each kind and payload goes back on
+its lane under its own id when the kind can be re-run (`scan`,
+`arcade_catalog`, `dat_import` of a dropped file, `recompute_1g1r`,
+`source_import`, `import`); other kinds fail with "interrupted by a
+restart", and repeats of a kind and payload are deleted. A job stopped by a
+shutdown is left `queued` for this.
 
 ## Resource budgets
 

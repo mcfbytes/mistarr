@@ -284,10 +284,6 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
         if added > 0 {
             tracing::info!(added, "seeded platforms");
         }
-        let interrupted = db::jobs::fail_interrupted(c, crate::unix_now())?;
-        if !interrupted.is_empty() {
-            tracing::warn!(count = interrupted.len(), "marked interrupted jobs failed");
-        }
         let unfinished = db::files::platforms_with_progress(c)?;
         Ok((
             settings::get_json::<RuntimeSettings>(c, keys::RUNTIME),
@@ -305,6 +301,20 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     }
     let scan_interval = config.jobs.scan_interval_minutes;
     let app = AppState::new(config, db, options);
+    // The gate starts closed for a loaded core, so no heavy job slips through before the first poll.
+    app.gate
+        .set_corename(corename::read(&app.options.corename_path));
+
+    // Jobs a previous process left open go back on their lanes before anything new is queued.
+    let reconciled = jobs::reconcile(&app).await?;
+    if reconciled != jobs::Reconciled::default() {
+        tracing::info!(
+            requeued = reconciled.requeued,
+            failed = reconciled.failed,
+            dropped = reconciled.dropped,
+            "reconciled unfinished jobs"
+        );
+    }
 
     // Step 3: download client.
     Scheduler::run_inline(&app, Arc::new(DetectClient)).await?;

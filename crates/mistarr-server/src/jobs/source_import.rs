@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::{wizard, Job, JobContext, Scheduler};
+use super::{wizard, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::sources::{self as rows, NewSource, SourceId, SourceRow, SourceState, SqlDatIndex};
 use crate::error::Result;
@@ -79,6 +79,10 @@ impl Job for SourceImport {
 
     fn payload(&self) -> Value {
         json!({ "path": self.path.to_string_lossy() })
+    }
+
+    fn lane(&self) -> Lane {
+        Lane::Background
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {

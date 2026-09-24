@@ -161,7 +161,8 @@ CREATE TABLE jobs (
   state         TEXT NOT NULL,         -- 'queued' | 'running' | 'paused' | 'done' | 'failed'
   progress      TEXT,                  -- json, job specific
   created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
+  updated_at    INTEGER NOT NULL,
+  lane          TEXT NOT NULL DEFAULT 'light'   -- 'heavy' | 'background' | 'light'
 );
 ```
 

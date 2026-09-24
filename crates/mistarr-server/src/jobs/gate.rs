@@ -158,6 +158,29 @@ impl Gate {
         })
     }
 
+    /// Clears a `Running` override, for when the heavy queue it was set to
+    /// release has drained. Returns true if it was set.
+    ///
+    /// ```
+    /// use mistarr_server::jobs::gate::{Gate, Override};
+    /// let gate = Gate::new();
+    /// gate.set_corename(Some("SNES".into()));
+    /// gate.set_override(Some(Override::Running));
+    /// assert!(gate.end_run_now());
+    /// assert!(gate.state().paused());
+    /// assert!(!gate.end_run_now());
+    /// ```
+    #[allow(clippy::must_use_candidate)] // Callers may ignore whether it changed.
+    pub fn end_run_now(&self) -> bool {
+        self.tx.send_if_modified(|s| {
+            if s.manual != Some(Override::Running) {
+                return false;
+            }
+            s.manual = None;
+            true
+        })
+    }
+
     /// Returns once the gate is open; immediately if it already is.
     ///
     /// ```
