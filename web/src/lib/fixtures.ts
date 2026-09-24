@@ -191,6 +191,34 @@ export function fixtureTitle(id: number): TitleDetail {
             file_path: null
           }
         ]
+      },
+      {
+        id: id * 10 + 2,
+        name: `${base} System (BIOS)`,
+        regions: ['World'],
+        languages: [],
+        revision: null,
+        flags: ['bios'],
+        is_1g1r_pick: false,
+        wanted: false,
+        retired: false,
+        inferred: false,
+        dat_version_id: 1,
+        torrent_files_available: 0,
+        roms: [
+          {
+            id: id * 100 + 2,
+            name: `${base} System (BIOS).bin`,
+            size: 8192,
+            crc32: '0badc0de',
+            md5: null,
+            sha1: null,
+            status: 'good',
+            file_state: 'verified',
+            file_id: id * 1000 + 2,
+            file_path: `NES/${base} System (BIOS).bin`
+          }
+        ]
       }
     ]
   };

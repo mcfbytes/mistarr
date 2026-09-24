@@ -202,7 +202,8 @@ parameters, in the `launch` column of the table in `mistarr-mister`. The
 first core with an installed `.rbf` is used, and of its files the newest by
 the `_YYYYMMDD` date in the name; undated files rank last. Files are looked
 for in `_Console`, `_Computer`, `_Other` and `_Arcade` and one folder below,
-but a file under `_Arcade` only for a core the row marks as living there.
+but a file under `_Arcade` only for a core the row marks as living there;
+installed-core detection then marks that row present as well as `arcade`.
 `rbf` is the chosen file's path relative to the SD root without its date
 suffix and extension. `path` climbs from the core's games folder to `/` and
 names the file absolutely. Attribute values are XML-escaped and paths with

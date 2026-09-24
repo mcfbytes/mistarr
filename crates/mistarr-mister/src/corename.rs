@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use mistarr_core::PlatformId;
 
-use crate::platforms::{by_id, for_core, Platform};
+use crate::platforms::{by_id, for_core, Platform, PLATFORMS};
 use crate::Result;
 
 /// Directories under the SD root that hold `.rbf` cores.
@@ -54,7 +54,8 @@ pub fn read_corename(path: &Path) -> Result<CoreState> {
 }
 
 /// Lists `.rbf` cores under the [`CORE_DIRS`] of `root` and one level of subfolders,
-/// deduplicated by name and sorted. Every core under `_Arcade` maps to the arcade platform.
+/// deduplicated by name and sorted. Every core under `_Arcade` maps to the arcade platform,
+/// and also to any row whose launch cores claim it by name.
 ///
 /// ```
 /// let root = std::env::temp_dir().join("mistarr-doc-cores");
@@ -76,8 +77,9 @@ pub fn installed_cores(root: &Path) -> Vec<InstalledCore> {
         .map(|(name, arcade)| InstalledCore {
             platforms: if arcade {
                 by_id("arcade")
-                    .map(Platform::platform_id)
                     .into_iter()
+                    .chain(claimed_arcade_core(&name))
+                    .map(Platform::platform_id)
                     .collect()
             } else {
                 for_core(&name).iter().map(|p| p.platform_id()).collect()
@@ -85,6 +87,15 @@ pub fn installed_cores(root: &Path) -> Vec<InstalledCore> {
             name,
         })
         .collect()
+}
+
+/// Rows whose launch cores name `core` as living under `_Arcade`.
+fn claimed_arcade_core(core: &str) -> impl Iterator<Item = &'static Platform> + '_ {
+    PLATFORMS.iter().filter(move |p| {
+        p.launch
+            .iter()
+            .any(|c| c.arcade_dir && c.name.eq_ignore_ascii_case(core))
+    })
 }
 
 /// One `.rbf` file found under a [`CORE_DIRS`] directory.
@@ -218,6 +229,19 @@ mod tests {
                 core.name
             );
         }
+    }
+
+    #[test]
+    fn an_arcade_core_a_row_claims_also_maps_to_that_row() {
+        let root = scratch("claimed-arcade");
+        std::fs::create_dir_all(root.join("_Arcade/cores")).expect("mkdir");
+        std::fs::write(root.join("_Arcade/cores/JTNGP_20240101.rbf"), b"").expect("write");
+        let cores = installed_cores(&root);
+        let ngp = cores.iter().find(|c| c.name == "JTNGP").expect("core");
+        assert_eq!(
+            ngp.platforms,
+            [PlatformId("arcade".into()), PlatformId("ngp".into())]
+        );
     }
 
     #[test]

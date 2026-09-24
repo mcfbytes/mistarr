@@ -499,6 +499,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_claimed_arcade_core_marks_its_row_present() {
+        let (dir, app) = testutil::state();
+        let cores = dir.path().join("_Arcade/cores");
+        std::fs::create_dir_all(&cores).expect("mkdir");
+        std::fs::write(cores.join("jtngp_20240101.rbf"), b"").expect("write");
+        detect_cores(&app).expect("detect");
+        let rows = app.db.read(db::platforms::list).await.expect("list");
+        let mut present: Vec<_> = rows
+            .iter()
+            .filter(|r| r.core_present)
+            .map(|r| r.id.0.as_str())
+            .collect();
+        present.sort_unstable();
+        assert_eq!(present, ["arcade", "ngp"]);
+    }
+
+    #[tokio::test]
     async fn client_handle_follows_detection() {
         let (_dir, app) = testutil::state();
         assert!(app.client().is_none());

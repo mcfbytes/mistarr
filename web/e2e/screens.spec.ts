@@ -63,6 +63,14 @@ test('Play starts an entry that is in the collection', async ({ page }) => {
   await expect(page.getByText('Started on the MiSTer.')).toBeVisible();
 });
 
+test('Play is hidden for a BIOS entry even when its file is present', async ({ page }) => {
+  await page.goto('/#/t/1');
+  const biosRow = page.getByRole('row', { name: /\(BIOS\)/ });
+  await expect(biosRow).toHaveCount(1);
+  await expect(biosRow.getByText('verified')).toBeVisible();
+  await expect(biosRow.getByRole('button', { name: 'Play' })).toHaveCount(0);
+});
+
 test('Start core is offered with its reason when it cannot run', async ({ page }) => {
   await page.goto('/#/p/nes');
   const start = page.getByRole('button', { name: 'Start core' });
