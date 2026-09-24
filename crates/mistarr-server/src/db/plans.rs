@@ -144,6 +144,14 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
             "activity imports",
             Box::new(|c| drop(imports::list(c, 50, 0).expect("imports"))),
         ),
+        (
+            "group refresh",
+            Box::new(|c| {
+                c.execute("INSERT INTO title_groups_dirty (parent_id) VALUES (1)", [])
+                    .expect("mark");
+                groups::flush(c).expect("flush");
+            }),
+        ),
     ];
     let mut out = Vec::new();
     for (name, read) in reads {
@@ -156,9 +164,13 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
 }
 
 /// The whole-table walks the hot reads may make, each bounded or inherent.
-const ALLOWED_SCANS: [(&str, &str); 12] = [
-    // One group's availability rows, gathered by index and then sorted.
+const ALLOWED_SCANS: [(&str, &str); 15] = [
+    // The sort over one group's availability rows, which the union gathers by rom.
     ("title detail", "SCAN (subquery-"),
+    // A refresh walks at most one chunk of the dirty list and that chunk's grouped rows.
+    ("group refresh", "SCAN title_groups_dirty"),
+    ("group refresh", "SCAN b"),
+    ("group refresh", "SCAN g"),
     // Every platform's counts read every group once, and MRA titles through their
     // partial index; the tables have one row per group and per MRA.
     ("counts", "SCAN g"),
@@ -210,4 +222,48 @@ fn hot_reads_walk_indexes_not_growing_tables() {
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// The lines of every plan `name` runs whose statement contains `sql`.
+fn plan_of(reads: &[(&str, String, Vec<String>)], name: &str, sql: &str) -> Vec<String> {
+    let lines: Vec<String> = reads
+        .iter()
+        .filter(|(n, s, _)| *n == name && s.contains(sql))
+        .flat_map(|(_, _, p)| p.iter().cloned())
+        .collect();
+    assert!(!lines.is_empty(), "{name}: no statement with {sql}");
+    lines
+}
+
+/// Title detail reaches torrent files and candidates through the group's roms, never
+/// by walking a bound source's files.
+#[test]
+fn title_detail_seeks_torrent_rows_by_rom() {
+    let reads = hot_reads();
+    let plan = plan_of(&reads, "title detail", "torrent_candidates");
+    let has = |p: &str| plan.iter().any(|l| l.contains(p));
+    assert!(
+        has("SEARCH tf USING INDEX torrent_files_rom (rom_id=?)"),
+        "{plan:?}"
+    );
+    assert!(
+        has("SEARCH c USING INDEX torrent_candidates_rom (rom_id=?)"),
+        "{plan:?}"
+    );
+    assert!(!has("sources_state"), "{plan:?}");
+    let first = plan
+        .iter()
+        .find(|l| l.contains(" tf ") || l.contains(" c "))
+        .expect("torrent rows");
+    assert!(first.contains("(rom_id=?)"), "{plan:?}");
+}
+
+/// The group refresh reaches titles by group root and files by rom.
+#[test]
+fn the_group_refresh_seeks_by_group_root_and_rom() {
+    let reads = hot_reads();
+    let plan = plan_of(&reads, "group refresh", "INSERT INTO title_groups (");
+    let has = |p: &str| plan.iter().any(|l| l.contains(p));
+    assert!(has("titles_group_root (group_root=?)"), "{plan:?}");
+    assert!(has("files_rom (rom_id=?)"), "{plan:?}");
 }

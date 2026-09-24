@@ -652,9 +652,8 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
     while let Some(r) = rows.next()? {
         out.entry(r.get(0)?).or_default().unmatched_files = unsigned(r.get(1)?);
     }
-    // Per visible MRA title: whether it is failing its md5 check or partly present.
-    // Grouped by clone group and joined to title_groups' own `have` so a group with
-    // any have-verified visible variant never also counts as failing or partial.
+    // Per visible MRA title, failing its md5 check or partly present, by clone group;
+    // a group with a have-verified variant in title_groups counts as neither.
     let mut stmt = conn.prepare(&format!(
         "WITH mra AS (
            SELECT t.platform_id, t.group_root AS parent_id,

@@ -512,20 +512,21 @@ pub struct Availability {
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn for_group(conn: &Connection, parent: TitleId) -> Result<Vec<(TitleId, Availability)>> {
     let group = "FROM titles t JOIN roms r ON r.title_id = t.id AND r.retired = 0";
+    // Unary `+` keeps `sources_state` out, so the plan starts from the group, not every source.
     let sql = format!(
         "SELECT title_id, source_id, display_name, file_index, path, rom_id, confidence FROM (
            SELECT t.id AS title_id, tf.source_id, s.display_name, tf.file_index, tf.path,
                   r.id AS rom_id, tf.confidence
            {group}
            JOIN torrent_files tf ON tf.rom_id = r.id
-           JOIN sources s ON s.id = tf.source_id AND s.state = 'bound'
+           JOIN sources s ON s.id = tf.source_id AND +s.state = 'bound'
            WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)) AND {bad_tf}
            UNION ALL
            SELECT t.id, c.source_id, s.display_name, c.file_index, tf.path, r.id, c.confidence
            {group}
            JOIN torrent_candidates c ON c.rom_id = r.id
            JOIN torrent_files tf ON tf.source_id = c.source_id AND tf.file_index = c.file_index
-           JOIN sources s ON s.id = c.source_id AND s.state = 'bound'
+           JOIN sources s ON s.id = c.source_id AND +s.state = 'bound'
            WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)) AND {bad_c}
          )
          ORDER BY title_id, {rank}, source_id, file_index, rom_id",
