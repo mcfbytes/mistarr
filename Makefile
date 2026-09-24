@@ -29,7 +29,9 @@ release: cross
 	mkdir -p dist/stage
 	cp $(BIN) dist/stage/mistarr
 	cp scripts/mistarr.sh dist/stage/mistarr.sh
-	tar -C dist/stage -czf $(DIST) mistarr mistarr.sh
+	cp scripts/install.sh dist/stage/install.sh
+	tar -C dist/stage -czf $(DIST) mistarr mistarr.sh install.sh
+	sha256sum $(DIST) > $(DIST).sha256
 	rm -rf dist/stage
 
 clean:

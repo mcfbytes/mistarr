@@ -1,7 +1,12 @@
 name: release
 on:
+  release:
+    types: [published]
   push:
     tags: ["v*"]
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 permissions:
   contents: write
 jobs:
@@ -22,13 +27,29 @@ jobs:
       - run: mkdir -p dist/stage
       - run: cp target/armv7-unknown-linux-musleabihf/release/mistarr dist/stage/mistarr
       - run: cp scripts/mistarr.sh dist/stage/mistarr.sh
-      - run: tar -C dist/stage -czf mistarr-armv7.tar.gz mistarr mistarr.sh
-      - name: Write release notes from the tag message only
+      - run: cp scripts/install.sh dist/stage/install.sh
+      - run: cp scripts/install.sh install.sh
+      - run: tar -C dist/stage -czf mistarr-armv7.tar.gz mistarr mistarr.sh install.sh
+      - run: sha256sum mistarr-armv7.tar.gz > mistarr-armv7.tar.gz.sha256
+      - name: Read the release notes from the tag message
+        id: notes
         run: |
-          git tag -l --format='%(contents:subject)' "${{ github.ref_name }}" > release-notes.txt
-          echo >> release-notes.txt
-          git tag -l --format='%(contents:body)' "${{ github.ref_name }}" >> release-notes.txt
+          subject=$(git tag -l --format='%(contents:subject)' "$GITHUB_REF_NAME")
+          body=$(git tag -l --format='%(contents:body)' "$GITHUB_REF_NAME")
+          notes="$subject"
+          if [ -n "$body" ]; then
+            notes=$(printf '%s\n\n%s' "$notes" "$body")
+          fi
+          {
+            echo "notes<<NOTES_EOF"
+            printf '%s' "$notes"
+            echo
+            echo "NOTES_EOF"
+          } >> "$GITHUB_OUTPUT"
       - uses: softprops/action-gh-release@v2
         with:
-          files: mistarr-armv7.tar.gz
-          body_path: release-notes.txt
+          files: |
+            mistarr-armv7.tar.gz
+            mistarr-armv7.tar.gz.sha256
+            install.sh
+          body: ${{ steps.notes.outputs.notes }}
