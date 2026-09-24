@@ -79,10 +79,17 @@ reason, importing with progress, rejected with the reason on its own line
 under the name, plus this session's uploads with their outcome. Each
 rejected file has Retry, which moves it back into `dats/` so a file fixed
 in place loads again, and Delete, which asks once more before removing it.
-Then the loaded DAT versions, current ones sorted by platform: name and
-file, platform or "Not bound", version, game count, loaded time and state;
-replaced and retired versions fold under "Older versions". Live over SSE,
-as in the wizard.
+The upload note names the watched directory from `/system/status`
+`dats_dir`. Then the loaded DATs with the count of every stored version, one
+entry per DAT family on a platform (VERIFICATION.md "DAT families"), current
+ones first and sorted by platform: name and file, platform or "Not bound",
+version, game count, loaded time and state, with the family's other versions
+folded under "Older versions" beside the reason each is not current. A
+current version has Remove, which asks once more, saying its games leave the
+catalogue while files on the card stay, before `DELETE /dats/{id}`. Focus
+moves to the confirming button and back to Remove on Keep; every button's
+label names its file or version, and an `aria-live` line reports each
+result. Live over SSE, as in the wizard.
 
 **System** (`/system`). Status, client with the same start offer as the
 wizard, CORENAME, paused indicator with manual override, launch state,

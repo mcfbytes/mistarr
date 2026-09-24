@@ -42,13 +42,14 @@
 
   @media (max-width: 420px) {
     nav {
+      flex-wrap: wrap;
       gap: 0.1em;
       padding: 0.5em calc(var(--gutter) / 2);
-      font-size: 0.95em;
+      font-size: 0.9em;
     }
 
     a {
-      padding: 0.4em 0.45em;
+      padding: 0.4em 0.35em;
     }
   }
 </style>

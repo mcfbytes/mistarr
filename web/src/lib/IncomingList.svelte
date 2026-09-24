@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { api, errorMessage } from './api';
   import { getIncoming, loadIncoming, patchIncoming, scheduleIncoming, type Watched } from './stores/incoming.svelte';
   import { addUpload, dismissUpload, getUploads } from './stores/uploads.svelte';
@@ -15,7 +15,9 @@
 
   const isMock = import.meta.env.VITE_MOCK === '1';
   let confirming = $state<string | null>(null);
-  let busy = $state<string | null>(null);
+  let busy = $state<Set<string>>(new Set());
+  let announcement = $state('');
+  let list = $state<HTMLUListElement>();
 
   onMount(() => {
     void loadIncoming(which).catch(() => undefined);
@@ -66,42 +68,82 @@
     return { text: 'Uploaded, waiting for the import to start', kind: 'muted' };
   }
 
+  function setBusy(file: string, on: boolean): void {
+    busy = new Set(on ? [...busy, file] : [...busy].filter((f) => f !== file));
+  }
+
+  // Focuses the button `action` of the row for `file` once the list has re-rendered.
+  async function focusOn(file: string, action: string): Promise<void> {
+    await tick();
+    const rows = list?.querySelectorAll<HTMLButtonElement>(`button[data-action="${action}"]`) ?? [];
+    const target = [...rows].find((b) => b.dataset.file === file);
+    target?.focus();
+  }
+
+  async function focusList(): Promise<void> {
+    await tick();
+    list?.focus();
+  }
+
+  function ask(f: IncomingFile): void {
+    confirming = f.file;
+    void focusOn(f.file, 'confirm');
+  }
+
+  function keep(f: IncomingFile): void {
+    confirming = null;
+    void focusOn(f.file, 'delete');
+  }
+
   // Moves the file back into dats/; the list shows it waiting until the next read.
   async function retry(f: IncomingFile): Promise<void> {
-    busy = f.file;
+    setBusy(f.file, true);
     try {
       if (isMock) {
         patchIncoming(which, f.file, { ...f, state: 'waiting', reason: 'Queued.' });
-        return;
+      } else {
+        const up = await api.retryRejectedDat(f.file);
+        addUpload({ kind: which, file: up.file, jobId: up.job_id });
+        patchIncoming(which, f.file, { ...f, file: up.file, state: 'waiting', reason: 'Queued.', job_id: up.job_id });
+        scheduleIncoming(which);
       }
-      const up = await api.retryRejectedDat(f.file);
-      addUpload({ kind: which, file: up.file, jobId: up.job_id });
-      patchIncoming(which, f.file, { ...f, file: up.file, state: 'waiting', reason: 'Queued.', job_id: up.job_id });
-      scheduleIncoming(which);
+      announcement = `${f.file} queued to load again.`;
+      await focusList();
     } catch (err) {
       showToast(`${f.file}: ${errorMessage(err)}`);
+      announcement = `${f.file}: ${errorMessage(err)}`;
     } finally {
-      busy = null;
+      setBusy(f.file, false);
     }
   }
 
   async function remove(f: IncomingFile): Promise<void> {
     confirming = null;
-    busy = f.file;
+    setBusy(f.file, true);
     try {
       if (!isMock) {
         await api.deleteRejectedDat(f.file);
       }
       patchIncoming(which, f.file, null);
+      announcement = `${f.file} deleted.`;
+      await focusList();
     } catch (err) {
       showToast(`${f.file}: ${errorMessage(err)}`);
+      announcement = `${f.file}: ${errorMessage(err)}`;
+      void focusOn(f.file, 'delete');
     } finally {
-      busy = null;
+      setBusy(f.file, false);
     }
   }
 </script>
 
-<ul class="incoming" aria-label={which === 'dats' ? 'Files in dats' : 'Files in sources'}>
+{#if canManage}<p class="live" aria-live="polite">{announcement}</p>{/if}
+<ul
+  class="incoming"
+  aria-label={which === 'dats' ? 'Files in dats' : 'Files in sources'}
+  tabindex="-1"
+  bind:this={list}
+>
   {#each files as f (f.file)}
     <li class:rejected={f.state === 'rejected'}>
       <span class="name">{f.file}</span>
@@ -110,14 +152,34 @@
         {#if f.reason}<p class="reason">{f.reason}</p>{/if}
         {#if canManage}
           <span class="actions">
-            <button type="button" disabled={busy === f.file} onclick={() => retry(f)}>Retry</button>
+            <button
+              type="button"
+              data-file={f.file}
+              data-action="retry"
+              aria-label={`Retry ${f.file}`}
+              disabled={busy.has(f.file)}
+              onclick={() => retry(f)}>Retry</button
+            >
             {#if confirming === f.file}
-              <button type="button" class="danger" disabled={busy === f.file} onclick={() => remove(f)}>
-                Delete the file
-              </button>
-              <button type="button" onclick={() => (confirming = null)}>Keep</button>
+              <button
+                type="button"
+                class="danger"
+                data-file={f.file}
+                data-action="confirm"
+                aria-label={`Delete the file ${f.file}`}
+                disabled={busy.has(f.file)}
+                onclick={() => remove(f)}>Delete the file</button
+              >
+              <button type="button" aria-label={`Keep ${f.file}`} onclick={() => keep(f)}>Keep</button>
             {:else}
-              <button type="button" disabled={busy === f.file} onclick={() => (confirming = f.file)}>Delete</button>
+              <button
+                type="button"
+                data-file={f.file}
+                data-action="delete"
+                aria-label={`Delete ${f.file}`}
+                disabled={busy.has(f.file)}
+                onclick={() => ask(f)}>Delete</button
+              >
             {/if}
           </span>
         {/if}
@@ -134,7 +196,9 @@
     <li>
       <span class="name">{u.file}</span>
       <span class={outcome.kind}>{outcome.text}</span>
-      <button type="button" class="link" onclick={() => dismissUpload(u.jobId)}>Dismiss</button>
+      <button type="button" class="link" aria-label={`Dismiss ${u.file}`} onclick={() => dismissUpload(u.jobId)}
+        >Dismiss</button
+      >
     </li>
   {/each}
   {#if files.length === 0 && uploads.length === 0}
@@ -143,6 +207,11 @@
 </ul>
 
 <style>
+  .live {
+    margin: 0;
+    font-size: 0.85em;
+  }
+
   .incoming {
     list-style: none;
     padding: 0;

@@ -245,6 +245,7 @@ export const fixtureStatus: SystemStatus = {
   override: null,
   waiting: [{ id: 2, kind: 'scan', state: 'queued', detail: 'nes' }],
   disk_free_bytes: 12_400_000_000,
+  dats_dir: '/media/fat/mistarr/dats',
   rss_bytes: 41_000_000,
   launch: 'ready'
 };
@@ -272,7 +273,22 @@ export const fixtureDats: DatVersion[] = [
     loaded_at: 1_770_000_000,
     superseded_by: null,
     game_count: 240,
-    retired: false
+    retired: false,
+    family: 'example console dat',
+    reason: null
+  },
+  {
+    id: 5,
+    platform_id: 'nes',
+    dat_name: 'mistarr samples - Nintendo Entertainment System (Headered)',
+    version: '1',
+    source_file: 'mistarr samples - Nintendo Entertainment System (Headered).dat',
+    loaded_at: 1_770_010_800,
+    superseded_by: null,
+    game_count: 4,
+    retired: false,
+    family: 'mistarr samples - nintendo entertainment system',
+    reason: null
   },
   {
     id: 3,
@@ -283,7 +299,22 @@ export const fixtureDats: DatVersion[] = [
     loaded_at: 1_770_007_200,
     superseded_by: null,
     game_count: 310,
-    retired: false
+    retired: false,
+    family: 'example vendor - mega drive - genesis',
+    reason: null
+  },
+  {
+    id: 4,
+    platform_id: 'megadrive',
+    dat_name: 'Example Vendor - Mega Drive - Genesis',
+    version: '20251201-000000',
+    source_file: 'Example Vendor - Mega Drive - Genesis (20251201-000000).dat',
+    loaded_at: 1_769_000_000,
+    superseded_by: 3,
+    game_count: 305,
+    retired: false,
+    family: 'example vendor - mega drive - genesis',
+    reason: 'Replaced by Example Vendor - Mega Drive - Genesis (DB Export) version 20260101-000000'
   },
   {
     id: 2,
@@ -294,7 +325,9 @@ export const fixtureDats: DatVersion[] = [
     loaded_at: 1_770_003_600,
     superseded_by: null,
     game_count: 88,
-    retired: false
+    retired: false,
+    family: 'unbound sample dat',
+    reason: null
   }
 ];
 
