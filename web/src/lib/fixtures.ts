@@ -141,11 +141,12 @@ export function fixtureTitles(platformId: string, count = 60, filters: TitleFilt
 }
 
 /**
- * Mock latency in ms of a title search for `q`, read from localStorage
- * `mistarr.mockDelayMs`: a number for every search, or an object of numbers by
- * search text with `*` as the default. A negative value makes the search fail.
+ * Mock latency in ms of page `page` of a title search for `q`, read from
+ * localStorage `mistarr.mockDelayMs`: a number for every request, or an object
+ * of numbers keyed `q#page` or `q`, with `*` as the default. A negative value
+ * makes the request fail.
  */
-export function mockDelayMs(q: string): number {
+export function mockDelayMs(q: string, page: number): number {
   try {
     const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockDelayMs') ?? '0');
     if (typeof parsed === 'number') {
@@ -153,7 +154,7 @@ export function mockDelayMs(q: string): number {
     }
     if (parsed !== null && typeof parsed === 'object') {
       const byQuery = parsed as Record<string, unknown>;
-      const ms = byQuery[q] ?? byQuery['*'];
+      const ms = byQuery[`${q}#${page}`] ?? byQuery[q] ?? byQuery['*'];
       return typeof ms === 'number' ? ms : 0;
     }
   } catch {

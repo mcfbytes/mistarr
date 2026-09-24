@@ -63,3 +63,55 @@ test('a failed search says so and offers Retry', async ({ page }) => {
   await expect(alert.getByRole('button', { name: 'Retry' })).toBeVisible();
   await expect(page.getByText('No titles match.')).toHaveCount(0);
 });
+
+function ids(page: Page): Promise<string[]> {
+  return page
+    .locator('.grid a.poster')
+    .evaluateAll((els) => els.map((e) => e.getAttribute('href') ?? ''));
+}
+
+async function scrollForMore(page: Page, count: number): Promise<void> {
+  await expect(async () => {
+    await page.mouse.wheel(0, 50_000);
+    expect(await page.locator('.grid a.poster').count()).toBeGreaterThanOrEqual(count);
+  }).toPass({ timeout: 5000 });
+}
+
+test('a failed next page is loaded again after Retry, never skipped', async ({ page }) => {
+  await page.goto('/#/p/nes');
+  await expect(names(page).first()).toBeVisible();
+  await scrollForMore(page, 120);
+  const expected = (await ids(page)).slice(0, 120);
+
+  await page.evaluate(() => localStorage.setItem('mistarr.mockDelayMs', '{"#1": -1}'));
+  await page.reload();
+  await expect(names(page).first()).toBeVisible();
+  await page.mouse.wheel(0, 50_000);
+  await expect(page.getByRole('alert')).toContainText('Titles could not be loaded');
+
+  await page.evaluate(() => localStorage.removeItem('mistarr.mockDelayMs'));
+  await page.getByRole('button', { name: 'Retry' }).click();
+  await expect(page.getByRole('alert')).toHaveCount(0);
+  await scrollForMore(page, 120);
+  expect((await ids(page)).slice(0, 120)).toEqual(expected);
+});
+
+test('a background reload stops when the user searches', async ({ page }) => {
+  await page.goto('/#/p/nes');
+  await expect(names(page).first()).toBeVisible();
+  await scrollForMore(page, 120);
+
+  await page.evaluate(() => {
+    localStorage.setItem('mistarr.mockDelayMs', '{"": 1000}');
+    const w = window as unknown as { mistarrReloadTitles: () => Promise<void> };
+    void w.mistarrReloadTitles();
+  });
+  await page.getByPlaceholder('Search').fill('Mock');
+  await expect(names(page).first()).toHaveText('Mock Manor (USA)');
+
+  // Past the reload's due time for every page it had, only the search's rows show.
+  await page.waitForTimeout(2500);
+  for (const name of await names(page).allTextContents()) {
+    expect(name).toBe('Mock Manor (USA)');
+  }
+});

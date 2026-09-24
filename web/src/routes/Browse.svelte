@@ -123,13 +123,20 @@
   });
 
   async function loadMore(): Promise<void> {
-    if (loadingMore || groups.length >= total) {
+    if (loadingMore || loadError || groups.length >= total) {
       return;
     }
     loadingMore = true;
-    page += 1;
-    await loadTitlesPage(platformId, filters(), page);
+    // The page advances only once it has landed, so a failure never skips rows.
+    if (await loadTitlesPage(platformId, filters(), page + 1)) {
+      page += 1;
+    }
     loadingMore = false;
+  }
+
+  function retry(): void {
+    page = 0;
+    void loadTitlesPage(platformId, filters(), 0);
   }
 
   function sentinel(node: HTMLElement): { destroy(): void } {
@@ -233,17 +240,18 @@
     </p>
   {/if}
 
-  <div class="status" aria-live="polite">
+  <div class="status">
+    <span class="hidden-text" aria-live="polite">{loading ? 'Loading titles' : ''}</span>
     {#if loading}
-      <div class="busy" role="progressbar" aria-label="Loading titles"></div>
-    {/if}
-    {#if loadError}
-      <p class="error" role="alert">
-        Titles could not be loaded: {loadError}
-        <button onclick={() => void loadTitlesPage(platformId, filters(), 0)}>Retry</button>
-      </p>
+      <div class="busy" role="progressbar" aria-label="Loading titles" aria-valuetext="Loading"></div>
     {/if}
   </div>
+  {#if loadError}
+    <p class="error" role="alert">
+      Titles could not be loaded: {loadError}
+      <button onclick={retry}>Retry</button>
+    </p>
+  {/if}
 
   <div class="grid" class:dimmed={loading} aria-busy={loading}>
     {#each groups as group (group.parent_id)}
@@ -359,6 +367,15 @@
       animation: none;
       background-size: 100% 100%;
     }
+  }
+
+  .hidden-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
   .error {
