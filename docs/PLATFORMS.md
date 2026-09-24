@@ -9,12 +9,21 @@ considered done (see WORKPLAN WP-04).
 
 Platform ids are the stable slugs used in the database and API.
 
+A DAT header name binds to a row by its "DAT name matches" patterns. The DAT
+name is lowercased, bracketed groups such as `(Headered)` are dropped and every
+run of other non-alphanumeric characters becomes one space, so
+`Sega - Mega CD & Sega CD` and `Sega - Mega CD - Sega CD` compare equal. A
+pattern must match on word boundaries, and the longest match across all rows
+wins: `Game Boy Color` binds to `gbc`, not `gb`, and `PC Engine CD` binds to
+`pcecd`, not `pce`. BIOS file names are the ones each core's documentation
+gives; confirm them on the board together with the **verify** rows.
+
 ## Cartridge and handheld
 
 | id | DAT name matches | core dir | ext written | adapter notes |
 |---|---|---|---|---|
 | `nes` | `Nintendo Entertainment System`, `NES` | `NES` | `.nes` | Use the **headered** No-Intro DAT. The core needs an iNES header. If only the headerless DAT is loaded, hash with the 16-byte header stripped for matching, but never strip on disk. |
-| `fds` | `Famicom Disk System` | `NES` | `.fds` | Same directory as NES. Needs FDS BIOS: report only. |
+| `fds` | `Famicom Disk System`, `Family Computer Disk System` | `NES` | `.fds` | Same directory as NES. Needs BIOS `boot0.rom`: report only. |
 | `snes` | `Super Nintendo Entertainment System`, `Super Famicom`, `Satellaview` | `SNES` | `.sfc` | Strip 512-byte copier headers on `.smc` when hashing and on disk. |
 | `n64` | `Nintendo 64` | `N64` | `.z64` | Use the **BigEndian** DAT. Convert `.v64`/`.n64` to big-endian on placement. |
 | `gb` | `Game Boy` (not Color/Advance) | `GAMEBOY` | `.gb` | **verify** dir name. |
@@ -31,8 +40,8 @@ Platform ids are the stable slugs used in the database and API.
 | `atari5200` | `Atari 5200` | `Atari5200` | `.a52` | |
 | `atari7800` | `Atari 7800` | `Atari7800` | `.a78` | Headered DAT. |
 | `lynx` | `Atari Lynx` | `AtariLynx` | `.lnx` | Headered DAT. |
-| `coleco` | `ColecoVision` | `Coleco` | `.col` | Needs BIOS: report only. |
-| `intv` | `Intellivision` | `Intellivision` | `.int` | Needs BIOS: report only. |
+| `coleco` | `ColecoVision` | `Coleco` | `.col` | Needs BIOS `boot0.rom`: report only. |
+| `intv` | `Intellivision` | `Intellivision` | `.int` | Needs BIOS `boot0.rom`: report only. |
 | `ws` | `WonderSwan` | `WonderSwan` | `.ws` | |
 | `wsc` | `WonderSwan Color` | `WonderSwan` | `.wsc` | |
 | `ngp` | `Neo Geo Pocket` | `NGP` | `.ngp` | **verify** dir name; igir has no entry. |
@@ -50,18 +59,18 @@ never zipped. CHD is accepted on scan but not produced.
 
 | id | DAT name matches | core dir | adapter notes |
 |---|---|---|---|
-| `psx` | `Sony - PlayStation` | `PSX` | Needs BIOS: report only. |
-| `saturn` | `Sega - Saturn` | `Saturn` | Needs BIOS: report only. |
-| `megacd` | `Sega - Mega CD - Sega CD` | `MegaCD` | Needs BIOS: report only. |
-| `pcecd` | `PC Engine CD - TurboGrafx-CD` | `TGFX16-CD` | Needs system card: report only. |
-| `neocd` | `Neo Geo CD` | `NeoGeo-CD` | **verify** dir. |
+| `psx` | `PlayStation` at the end of the name, so later consoles do not bind | `PSX` | Needs BIOS `boot.rom`: report only. |
+| `saturn` | `Sega - Saturn` | `Saturn` | Needs BIOS `boot.rom`: report only. |
+| `megacd` | `Mega CD - Sega CD` | `MegaCD` | Needs BIOS `cd_bios.rom`: report only. |
+| `pcecd` | `PC Engine CD - TurboGrafx-CD` | `TGFX16-CD` | Needs system card `cd_bios.rom`: report only. |
+| `neocd` | `Neo Geo CD` | `NeoGeo-CD` | **verify** dir. Needs BIOS `top-sp1.bin`: report only. |
 
 ## Special adapters
 
-| id | core dir | adapter notes |
-|---|---|---|
-| `neogeo` | `NeoGeo` | Cartridge games are romsets: a directory or zip per game whose internal layout the core expects, described by a `romsets.xml` the core ships. The adapter treats the DAT `<game>` as the unit, places the zip whole, and verifies member hashes against the DAT rather than the zip's own hash. Needs BIOS: report only. |
-| `arcade` | `mame` (under `games/`) with MRAs in `_Arcade` | Wanted list is derived from MRA files: each MRA names the zips it needs. The adapter parses every MRA, lists missing zips, and places zips whole. Verification uses the MRA's `md5` where present and the loaded MAME DAT otherwise. No romset rebuilding, merging or splitting. |
+| id | DAT name matches | core dir | adapter notes |
+|---|---|---|---|
+| `neogeo` | `Neo Geo` | `NeoGeo` | Cartridge games are romsets: a directory or zip per game whose internal layout the core expects, described by a `romsets.xml` the core ships. The adapter treats the DAT `<game>` as the unit, places the zip whole, and verifies member hashes against the DAT rather than the zip's own hash. A staged directory is placed whole as a directory. Needs BIOS `000-lo.lo`, `sfix.sfix`, `sp-s2.sp1`: report only. |
+| `arcade` | `MAME`, `Arcade` | `mame` (under `games/`) with MRAs in `_Arcade` | Wanted list is derived from MRA files: each MRA names the zips it needs. The adapter parses every MRA, lists missing zips, and places zips whole. Verification uses the MRA's `md5` where present and the loaded MAME DAT otherwise. No romset rebuilding, merging or splitting. A staged directory is zipped under the set name. |
 
 ## Computers
 
@@ -75,10 +84,17 @@ Every adapter implements `CoreAdapter` from ARCHITECTURE.md and must provide:
 
 - `games_dir`: the directory above, plus any legacy aliases accepted on scan.
 - `accepts`: whether a path on disk is loadable as-is (extension, zipped or
-  not, header present).
+  not, header present). Cartridge rows without a content rule also accept a
+  `.zip`; NES, SNES and N64 accept only files whose header or byte order they
+  can check.
 - `plan_placement`: the final relative path and the list of transformations.
   Transformations are limited to: unzip, zip, add header, strip header, swap
-  byte order, create directory, rename. Nothing else.
+  byte order, create directory, rename. Nothing else. Staging paths in a step
+  are relative to the directory holding the staged item; library paths and
+  the final path are relative to `games/`. Cartridge files are unzipped and
+  named `<DAT entry name>.<ext written>`. Disc tracks take the DAT rom names,
+  which are the names a DAT-verified cue already references, so a cue is
+  never rewritten.
 - `requires_bios`: the BIOS filename the core documents, for the status
   screen. The adapter never handles the file.
 
