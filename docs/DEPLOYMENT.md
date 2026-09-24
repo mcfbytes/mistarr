@@ -22,9 +22,21 @@ Build:
 ```sh
 cargo install cargo-zigbuild
 rustup target add armv7-unknown-linux-musleabihf
+# zig itself: the `zig` binary on PATH, or `pip install ziglang`
 (cd web && npm ci && npm run build)
 cargo zigbuild --release --target armv7-unknown-linux-musleabihf -p mistarr-server
 ```
+
+Or `make cross`, which builds the SPA first and then runs the same
+`cargo zigbuild` line; `make release` does that and also produces
+`dist/mistarr-armv7.tar.gz`. `make check` runs the full local gate: fmt,
+clippy, workspace tests, the web checks, and the principles gate. `make web`
+builds only the SPA, and `make clean` removes `target/`, `dist/` and
+`web/dist`.
+
+The binary at `target/armv7-unknown-linux-musleabihf/release/mistarr` is
+statically linked and stripped, measured at 2,985,296 bytes (2.85 MiB) with
+the SPA embedded.
 
 Dependencies must build for this target without a C toolchain surprise:
 `rustls` with `ring`, never OpenSSL or `aws-lc-rs`; `rusqlite` with
@@ -65,10 +77,11 @@ sets the level, `info` by default. No syslog dependency.
 ## Runtime checks on the board
 
 `mistarr doctor` prints: binary is static, paths writable, free space,
-detected client and its version, installed cores, CORENAME, memory available,
-and the result of hashing 64 MiB of zeros for throughput (`--hash-mib N`
-changes the size). It reads the same config as the server and needs no running
-server. This is what a bug report should include.
+detected client and its version, whether `rtorrent` is on `PATH`, installed
+cores, CORENAME, memory available, and the result of hashing 64 MiB of zeros
+for throughput (`--hash-mib N` changes the size). It reads the same config as
+the server and needs no running server. This is what a bug report should
+include.
 
 ## Releases
 
