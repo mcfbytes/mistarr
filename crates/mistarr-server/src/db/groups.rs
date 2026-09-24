@@ -477,11 +477,12 @@ pub(crate) fn visible(
     let mut variant = String::from("v.parent_id = g.parent_id AND v.retired = 0");
     let mut args = Vec::new();
     if !hidden.is_empty() {
-        variant.push_str(&format!(
+        variant.push_str(
             " AND NOT EXISTS (SELECT 1 FROM title_flags f
-                              WHERE f.title_id = v.id AND f.flag IN ({}))",
-            placeholders(hidden.len())
-        ));
+                              WHERE f.title_id = v.id AND f.flag IN (",
+        );
+        variant.push_str(&placeholders(hidden.len()));
+        variant.push_str("))");
         args.extend(hidden.iter().map(|h| Value::Text(h.clone())));
     }
     if let Some(r) = region {

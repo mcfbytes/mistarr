@@ -32,7 +32,7 @@ fn traced(c: &Connection, f: impl FnOnce(&Connection)) -> Vec<String> {
     c.trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, Some(record));
     f(c);
     c.trace_v2(TraceEventCodes::empty(), None);
-    TRACED.with(|t| t.take())
+    TRACED.with(RefCell::take)
 }
 
 fn plan(c: &Connection, sql: &str) -> Vec<String> {
@@ -93,6 +93,9 @@ fn seeded() -> Connection {
     c
 }
 
+/// A read under test.
+type Read<'a> = Box<dyn FnOnce(&Connection) + 'a>;
+
 /// Every hot read with the plan of each statement it runs.
 fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
     let c = seeded();
@@ -104,7 +107,7 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
         sort: Sort::Have,
         ..Browse::default()
     };
-    let reads: Vec<(&'static str, Box<dyn FnOnce(&Connection)>)> = vec![
+    let reads: Vec<(&str, Read)> = vec![
         (
             "browse",
             Box::new(|c| drop(titles::browse(c, "nes", &search, 60, 0).expect("browse"))),

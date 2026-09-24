@@ -110,12 +110,12 @@ fn build(conn: &mut Connection) -> Duration {
     let tx = conn.transaction().expect("tx");
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
     for (p, (platform, count)) in PLATFORMS.iter().enumerate() {
-        tx.execute(
+        exec(
+            &tx,
             "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
              VALUES (?1, ?1 || ' synthetic', '1', 'synthetic.dat', 0, ?2)",
             params![platform, i64::try_from(*count).expect("count")],
-        )
-        .expect("version");
+        );
         let version = tx.last_insert_rowid();
         let mut parent = 0;
         let mut base = String::new();
@@ -132,32 +132,32 @@ fn build(conn: &mut Connection) -> Duration {
                 flags.push("beta".into());
             }
             let name = format!("{base} ({region})");
-            tx.execute(
+            exec(
+                &tx,
                 "INSERT INTO titles (platform_id, dat_version_id, name, base_name, is_1g1r_pick, wanted)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![platform, version, name, base, i % 3 == 0, i % 97 == 0],
-            )
-            .expect("title");
+            );
             let id = tx.last_insert_rowid();
             if i % 3 == 0 {
                 parent = id;
             }
-            tx.execute(
+            exec(
+                &tx,
                 "UPDATE titles SET parent_id = ?2 WHERE id = ?1",
                 params![id, parent],
-            )
-            .expect("parent");
+            );
             titles::set_flags(&tx, titles::TitleId(id), &flags).expect("flags");
-            tx.execute(
+            exec(
+                &tx,
                 "INSERT INTO title_regions (title_id, pos, region) VALUES (?1, 0, ?2)",
                 params![id, region],
-            )
-            .expect("region");
-            tx.execute(
+            );
+            exec(
+                &tx,
                 "INSERT INTO roms (title_id, name, size, status) VALUES (?1, ?2, 16, 'good')",
                 params![id, format!("{name}.bin")],
-            )
-            .expect("rom");
+            );
             let rom = tx.last_insert_rowid();
             let files: &[(&str, bool)] = if p == 0 {
                 &[
@@ -177,17 +177,25 @@ fn build(conn: &mut Connection) -> Duration {
                 } else {
                     state
                 };
-                tx.execute(
+                exec(
+                    &tx,
                     "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
                      VALUES (?1, ?2, 16, 0, ?3, ?4, 0)",
                     params![platform, format!("{platform}/{id}-{k}.bin"), linked.then_some(rom), state],
-                )
-                .expect("file");
+                );
             }
         }
     }
     db::commit(tx).expect("commit");
     start.elapsed()
+}
+
+/// Runs `sql` through the statement cache.
+fn exec(c: &Connection, sql: &str, args: impl rusqlite::Params) {
+    c.prepare_cached(sql)
+        .expect("prepare")
+        .execute(args)
+        .expect(sql);
 }
 
 /// The median of `runs` timings of `f`, with its last result.

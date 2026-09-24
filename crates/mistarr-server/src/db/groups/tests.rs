@@ -474,6 +474,7 @@ fn nth(c: &Connection, table: &str, k: usize) -> Option<i64> {
     .ok()
 }
 
+#[allow(clippy::too_many_lines)] // One arm per kind of write.
 fn apply(c: &Connection, op: &Op, seq: &mut u32) {
     let title = |k| nth(c, "titles", k);
     let rom = |k| nth(c, "roms", k);
@@ -675,7 +676,11 @@ fn run_ops(ops: &[Op]) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
+    #![proptest_config(ProptestConfig {
+        cases: 48,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn random_writes_keep_the_table_equal_to_the_old_view(ops in proptest::collection::vec(op(), 1..60)) {
