@@ -31,6 +31,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/system/status", get(status))
         .route("/system/wizard", get(wizard))
+        .route("/system/wizard/done", post(wizard_done))
         .route("/system/scan", post(scan))
         .route("/system/cores", post(cores))
         .route("/system/pause", post(pause))
@@ -148,13 +149,45 @@ struct Wizard {
 
 async fn wizard(State(app): State<Arc<AppState>>) -> Result<Json<Wizard>, ApiError> {
     let w = wizard_status(&app).await?;
+    let dismissed = app
+        .db
+        .read(|c| settings::get_json::<bool>(c, keys::WIZARD_DISMISSED))
+        .await?
+        .unwrap_or(false);
     Ok(Json(Wizard {
         paths: w.paths,
         dats: w.dats,
         client: w.client,
         sources: w.sources,
-        open_on_start: !w.dats,
+        open_on_start: !dismissed && !w.dats,
     }))
+}
+
+/// `POST /system/wizard/done`: the user finished or dismissed the wizard, so
+/// it no longer opens by itself.
+async fn wizard_done(State(app): State<Arc<AppState>>) -> Result<Json<Wizard>, ApiError> {
+    app.db
+        .write(|c| settings::set_json(c, keys::WIZARD_DISMISSED, &true))
+        .await?;
+    wizard(State(app)).await
+}
+
+/// Rejects a remote path map entry without two absolute paths, which would
+/// otherwise rewrite every path the client reports.
+fn check_path_map(patch: &SettingsPatch) -> Result<(), ApiError> {
+    let Some(client) = &patch.client else {
+        return Ok(());
+    };
+    let bad = client
+        .remote_path_map
+        .iter()
+        .any(|m| !m.remote.is_absolute() || !m.local.is_absolute());
+    if bad {
+        return Err(ApiError::bad_request(
+            "Each remote path map entry needs an absolute remote path and an absolute local path.",
+        ));
+    }
+    Ok(())
 }
 
 /// `POST /system/client/start` body.
@@ -266,6 +299,7 @@ async fn put_settings(
 ) -> Result<Json<RuntimeSettings>, ApiError> {
     let patch: SettingsPatch =
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    check_path_map(&patch)?;
     let prefs_before = app.config().prefs;
     let (runtime, client_changed) = app.update_settings(&patch).await?;
     if client_changed {

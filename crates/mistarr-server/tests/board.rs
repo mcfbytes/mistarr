@@ -241,6 +241,51 @@ async fn a_set_torrent_waits_for_its_dat_and_then_binds() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_wizard_opens_until_dismissed_and_settings_keep_its_state() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = config_in(dir.path());
+    let booted = boot_with(dir, config).await;
+    let addr = booted.addr();
+    let wizard = json_of(&booted, "/api/v1/system/wizard").await;
+    assert_eq!(wizard["open_on_start"], true);
+
+    let mut settings = json_of(&booted, "/api/v1/system/settings").await;
+    let put = |body: String| async move {
+        request(addr, "PUT", "/api/v1/system/settings", &[], Some(&body)).await
+    };
+    settings["client"]["remote_path_map"] = serde_json::json!([{ "remote": "", "local": "" }]);
+    let r = put(settings.to_string()).await;
+    assert_eq!(r.status, 400, "a blank mapping is refused: {}", r.body);
+    let map =
+        serde_json::json!([{ "remote": "/downloads", "local": "/media/fat/mistarr/staging" }]);
+    settings["client"]["remote_path_map"] = map.clone();
+    assert_eq!(put(settings.to_string()).await.status, 200);
+    let saved = json_of(&booted, "/api/v1/system/settings").await;
+    assert_eq!(saved["client"]["remote_path_map"], map);
+    settings["client"]["remote_path_map"] = serde_json::json!([]);
+    assert_eq!(put(settings.to_string()).await.status, 200);
+    let saved = json_of(&booted, "/api/v1/system/settings").await;
+    assert_eq!(saved["client"]["remote_path_map"], serde_json::json!([]));
+    assert_eq!(json_of(&booted, "/api/v1/system/wizard").await, wizard);
+
+    let r = request(addr, "POST", "/api/v1/system/wizard/done", &[], None).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["open_on_start"], false);
+    assert_eq!(put(settings.to_string()).await.status, 200);
+    let Booted { dir, running } = booted;
+    running.shutdown().await.expect("shutdown");
+    let config = config_in(dir.path());
+    let again = boot_with(dir, config).await;
+    let wizard = json_of(&again, "/api/v1/system/wizard").await;
+    assert_eq!(
+        wizard["open_on_start"], false,
+        "dismissal survives a restart"
+    );
+    assert_eq!(wizard["dats"], false, "steps still report what is missing");
+    again.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_transmission_runs_the_opt_in_service() {
     let dir = tempfile::tempdir().expect("tempdir");
     let config = config_in(dir.path());

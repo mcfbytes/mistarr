@@ -14,6 +14,8 @@ pub mod keys {
     pub const RUNTIME: &str = "config.runtime";
     /// JSON `bool`: whether the wizard-completion scan already fired.
     pub const WIZARD_SCAN_DONE: &str = "wizard.scan_done";
+    /// JSON `bool`: whether the user finished or dismissed the wizard once.
+    pub const WIZARD_DISMISSED: &str = "wizard.dismissed";
 }
 
 /// Reads a value.

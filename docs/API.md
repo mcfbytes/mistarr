@@ -25,6 +25,7 @@ under `/api` return 404 JSON.
 |---|---|---|
 | GET | `/system/status` | Version, uptime, client kind and reachability, CORENAME, paused state, disk free, RSS. |
 | GET | `/system/wizard` | Which first-run steps are complete. |
+| POST | `/system/wizard/done` | The user finished or dismissed the wizard; it stops opening by itself. Returns the wizard body. |
 | POST | `/system/scan` | Enqueue a library scan. Body `{ platform_id? }`. |
 | POST | `/system/cores` | Detect installed cores again, for the wizard's detected-cores step. |
 | POST | `/system/pause` / `/system/resume` | Manual scheduler gate, overrides CORENAME until CORENAME next changes; `resume` ("Run now") also ends once the heavy queue drains. Returns the status body. |
@@ -64,7 +65,10 @@ is open. `disk_free_bytes` is for the filesystem holding the data directory.
 `/system/wizard` body: `{ paths, dats, client, sources, open_on_start }`, all
 booleans. `paths` is true when the games directory exists, `dats` when any DAT
 version was ever loaded, `client` when detection found a client, `sources`
-when any source exists, and `open_on_start` when no DAT was ever loaded.
+when any source exists, and `open_on_start` while no DAT was ever loaded and
+the wizard was never finished or dismissed (`POST /system/wizard/done`,
+stored in `settings` as `wizard.dismissed`). Once it is false the SPA shows
+the incomplete steps as a checklist instead of redirecting.
 
 `/system/scan` answers `{ job_id }`, plus `arcade_job_id` when the scan
 covers every platform or `arcade` and the arcade catalogue was queued (there
@@ -82,10 +86,11 @@ failed job's `progress` is `{ error }`.
 `/system/settings` body: `{ client, limits, prefs }` with the fields of the
 same sections of `mistarr.toml`. PUT takes any subset of the three sections;
 each section present replaces the stored one whole, with absent fields taking
-their defaults. Other keys are a 400. Saved values take precedence over the
-file on later starts. Changing `client` re-runs client detection; changing
+their defaults. Other keys are a 400, as is a `remote_path_map` entry whose
+`remote` or `local` is not an absolute path. Saved values take precedence over
+the file on later starts. Changing `client` re-runs client detection; changing
 the 1G1R fields of `prefs` recomputes the picks; changing `prefs.launch`
-publishes `status`.
+publishes `status`; saving never touches the wizard's state.
 
 `/system/client/start` is a 409 `conflict` while a detected client answers,
 a 400 when `kind` is not installed, and a 500 `internal` naming the failure
