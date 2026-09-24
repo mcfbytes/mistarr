@@ -1,0 +1,14 @@
+# Domains of known ROM distribution sites: CI deny list only.
+emuparadise.me
+emuparadise.org
+coolrom.com
+romsbay.com
+romsonline.com
+roms-download.com
+freeroms.com
+emulator-zone.com
+loveroms.com
+gameroms.com
+romspure.com
+ziperto.com
+romsget.com
