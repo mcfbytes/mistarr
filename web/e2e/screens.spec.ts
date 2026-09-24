@@ -121,7 +121,7 @@ test('a path mapping can be removed and a half-filled one is refused', async ({ 
   await page.getByRole('button', { name: 'Add mapping' }).click();
   await page.getByLabel('Remote path').fill('/downloads');
   await page.getByRole('button', { name: 'Save' }).click();
-  await expect(page.getByText(/needs an absolute remote path and an absolute local path/)).toBeVisible();
+  await expect(page.getByText(/needs a remote path and an absolute local path/)).toBeVisible();
 });
 
 test('an unbound source offers its suggested platform', async ({ page }) => {

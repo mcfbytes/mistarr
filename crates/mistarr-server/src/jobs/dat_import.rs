@@ -517,8 +517,9 @@ fn store_game(
 }
 
 /// Queues an automatic scan for each platform a DAT just loaded titles for,
-/// deduped so several DATs in one pack queue at most one each, then checks
-/// whether the wizard just became complete.
+/// deduped so several DATs in one pack queue at most one each, binds waiting
+/// sources once for the whole pack, then checks whether the wizard just
+/// became complete.
 async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
     let mut queued = HashSet::new();
     for l in loaded {
@@ -531,8 +532,10 @@ async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
         if let Err(e) = scan::enqueue_if_games_dir_exists(app, platform).await {
             tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue automatic scan");
         }
-        if let Err(e) = super::source_import::rebind_after_dat(app, platform).await {
-            tracing::warn!(platform = %platform.0, error = %e, "cannot bind waiting sources");
+    }
+    if !queued.is_empty() {
+        if let Err(e) = super::source_import::rebind_after_dat(app).await {
+            tracing::warn!(error = %e, "cannot bind waiting sources");
         }
     }
     if let Err(e) = wizard::on_change(app).await {

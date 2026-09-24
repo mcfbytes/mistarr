@@ -152,6 +152,7 @@ async fn update(
             let tx = c.transaction()?;
             if let Some(p) = &platform {
                 source_import::bind_to(&tx, id, p.as_ref())?;
+                rows::set_user_unbound(&tx, id, p.is_none())?;
             }
             if let Some(s) = &stored_seed {
                 rows::set_seed_policy(&tx, id, s)?;

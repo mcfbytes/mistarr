@@ -172,22 +172,23 @@ async fn wizard_done(State(app): State<Arc<AppState>>) -> Result<Json<Wizard>, A
     wizard(State(app)).await
 }
 
-/// Rejects a remote path map entry without two absolute paths, which would
-/// otherwise rewrite every path the client reports.
+/// Rejects a remote path map entry whose remote path is blank, which would
+/// match every path the client reports, or whose local path is not absolute.
+/// The remote side is the client's own spelling, so `C:\\x` or `C:/x` pass.
 fn check_path_map(patch: &SettingsPatch) -> Result<(), ApiError> {
     let Some(client) = &patch.client else {
         return Ok(());
     };
-    let bad = client
-        .remote_path_map
-        .iter()
-        .any(|m| !m.remote.is_absolute() || !m.local.is_absolute());
-    if bad {
+    if client.remote_path_map.iter().any(|m| !path_map_entry_ok(m)) {
         return Err(ApiError::bad_request(
-            "Each remote path map entry needs an absolute remote path and an absolute local path.",
+            "Each remote path map entry needs a remote path and an absolute local path.",
         ));
     }
     Ok(())
+}
+
+fn path_map_entry_ok(m: &mistarr_clients::PathMapping) -> bool {
+    !m.remote.to_string_lossy().trim().is_empty() && m.local.is_absolute()
 }
 
 /// `POST /system/client/start` body.
@@ -320,4 +321,22 @@ async fn put_settings(
         app.events.publish(EventKind::Status, &status);
     }
     Ok(Json(runtime))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mistarr_clients::PathMapping;
+
+    #[test]
+    fn path_map_entries_need_a_remote_and_an_absolute_local() {
+        let ok = |r: &str, l: &str| path_map_entry_ok(&PathMapping::new(r, l));
+        assert!(ok("/downloads", "/media/fat/mistarr/staging"));
+        assert!(ok("C:\\Downloads", "/media/fat/mistarr/staging"));
+        assert!(ok("C:/Downloads", "/media/fat/mistarr/staging"));
+        assert!(!ok("", "/media/fat/mistarr/staging"));
+        assert!(!ok("  ", "/media/fat/mistarr/staging"));
+        assert!(!ok("/downloads", "staging"));
+        assert!(!ok("/downloads", ""));
+    }
 }

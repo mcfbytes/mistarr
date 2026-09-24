@@ -199,12 +199,17 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    `sources.bind_threshold` (default 0.6). Below that, the source is
    `unbound` and the user picks a platform or discards it.
    Independently of any DAT, the platform table's DAT-name patterns are
-   matched against the dropped file's stem, the torrent's info name and each
-   directory holding at least half of its files; the longest match over all
-   of them is stored as the suggested platform, shown on the source and
-   named in its reason. When a DAT later loads titles for a platform, every
-   unbound source suggesting it is bound to it, and the other unbound
-   sources are scored again.
+   matched against the dropped file's stem and the torrent's info name,
+   taking the longest match within each name. If either matches, those
+   decide; otherwise the matching directories that hold the most files
+   decide, among those holding at least half of them. Two different
+   platforms at the deciding level mean no suggestion. The suggestion is
+   stored, shown on the source and named in its reason. After a DAT pack
+   loads, unbound sources are bound again once: to the suggested platform
+   when its hit rate reaches the threshold and no other platform scores
+   higher, otherwise as above. A source the user unbound is never bound
+   automatically, and `source.changed` is sent only for sources whose state
+   or platform changed.
 5. Store the file list in `torrent_files` with the matched `rom_id` and its
    confidence where one exists. Move the file to `sources/loaded/` and emit
    `source.changed`. A `.torrent` is not told to the client until something

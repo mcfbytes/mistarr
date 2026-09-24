@@ -6,9 +6,9 @@
     const rows = map
       .map((m) => ({ remote: m.remote.trim(), local: m.local.trim() }))
       .filter((m) => m.remote !== '' || m.local !== '');
-    const bad = rows.findIndex((m) => !m.remote.startsWith('/') || !m.local.startsWith('/'));
+    const bad = rows.findIndex((m) => m.remote === '' || !m.local.startsWith('/'));
     if (bad >= 0) {
-      return { error: `Mapping ${bad + 1} needs an absolute remote path and an absolute local path.` };
+      return { error: `Mapping ${bad + 1} needs a remote path and an absolute local path.` };
     }
     return { map: rows };
   }

@@ -87,7 +87,8 @@ failed job's `progress` is `{ error }`.
 same sections of `mistarr.toml`. PUT takes any subset of the three sections;
 each section present replaces the stored one whole, with absent fields taking
 their defaults. Other keys are a 400, as is a `remote_path_map` entry whose
-`remote` or `local` is not an absolute path. Saved values take precedence over
+`remote` is blank or whose `local` is not an absolute path; `remote` is the
+client's own spelling, so `C:\Torrents` or `C:/Torrents` is accepted. Saved values take precedence over
 the file on later starts. Changing `client` re-runs client detection; changing
 the 1G1R fields of `prefs` recomputes the picks; changing `prefs.launch`
 publishes `status`; saving never touches the wizard's state.
@@ -217,7 +218,9 @@ import then emits `source.changed`.
 
 `PUT /sources/{id}` body fields are all optional. `platform_id` binds or
 rebinds the source to that platform, matching its files against it only, and
-`null` unbinds it; both are a 400 while the source has no file list.
+`null` unbinds it and keeps it from being bound automatically after later
+DAT loads until the user binds it again; both are a 400 while the source has
+no file list.
 `state` is `"disabled"` or `"enabled"`, which returns the source to `bound`,
 `unbound` or `resolving` as its files and platform say. A disabled source
 stays disabled when rebound. The answer is the updated item.

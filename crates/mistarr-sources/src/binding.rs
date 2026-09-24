@@ -253,24 +253,33 @@ pub fn match_files(
         .collect()
 }
 
-/// Names that may say which platform a torrent is for, without any DAT: the
-/// dropped file's stem, the torrent's info name, and every directory in the
-/// file paths that holds at least half of the files, in that order.
+/// Names that may say which platform a torrent is for, without any DAT.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NameHints {
+    /// The dropped file's stem and the torrent's info name.
+    pub names: [String; 2],
+    /// Each directory holding at least half of the files, with how many it
+    /// holds, in order of first appearance.
+    pub dirs: Vec<(String, usize)>,
+}
+
+/// The [`NameHints`] of a torrent dropped as `origin_file`.
 ///
 /// ```
 /// use mistarr_sources::binding::name_hints;
 /// use mistarr_sources::torrent::TorrentFile;
 /// let files = vec![TorrentFile { index: 0, path: "Sets/Example System/a.zip".into(), size: 1 }];
 /// let hints = name_hints("Example Pack.torrent", "Example Pack", &files);
-/// assert_eq!(hints, ["Example Pack", "Example Pack", "Sets", "Example System"]);
+/// assert_eq!(hints.names, ["Example Pack", "Example Pack"]);
+/// assert_eq!(hints.dirs, [("Sets".to_owned(), 1), ("Example System".to_owned(), 1)]);
 /// ```
 #[must_use]
-pub fn name_hints(origin_file: &str, info_name: &str, files: &[TorrentFile]) -> Vec<String> {
+pub fn name_hints(origin_file: &str, info_name: &str, files: &[TorrentFile]) -> NameHints {
     let stem = origin_file
         .strip_suffix(".torrent")
         .or_else(|| origin_file.strip_suffix(".magnet"))
         .unwrap_or(origin_file);
-    let mut hints = vec![stem.to_owned(), info_name.to_owned()];
+    let names = [stem.to_owned(), info_name.to_owned()];
     let mut counts: HashMap<&str, usize> = HashMap::new();
     let mut order: Vec<&str> = Vec::new();
     for file in files {
@@ -291,13 +300,14 @@ pub fn name_hints(origin_file: &str, info_name: &str, files: &[TorrentFile]) -> 
         }
     }
     let half = files.len().div_ceil(2);
-    hints.extend(
-        order
-            .into_iter()
-            .filter(|d| counts.get(d).is_some_and(|&n| n >= half))
-            .map(str::to_owned),
-    );
-    hints
+    let dirs = order
+        .into_iter()
+        .filter_map(|d| {
+            let n = counts.get(d).copied().unwrap_or(0);
+            (n >= half).then(|| (d.to_owned(), n))
+        })
+        .collect();
+    NameHints { names, dirs }
 }
 
 #[cfg(test)]
@@ -325,8 +335,10 @@ mod tests {
             file(3, "loose.txt"),
         ];
         let hints = name_hints("pack.magnet", "Pack", &files);
-        assert_eq!(hints, ["pack", "Pack", "Top", "System A"]);
-        assert_eq!(name_hints("x", "y", &[]), ["x", "y"]);
+        assert_eq!(hints.names, ["pack", "Pack"]);
+        let dirs: Vec<(&str, usize)> = hints.dirs.iter().map(|(d, n)| (d.as_str(), *n)).collect();
+        assert_eq!(dirs, [("Top", 3), ("System A", 2)]);
+        assert!(name_hints("x", "y", &[]).dirs.is_empty());
     }
 
     proptest! {
@@ -341,14 +353,15 @@ mod tests {
                 .map(|(i, p)| file(u32::try_from(i).unwrap_or(0), p))
                 .collect();
             let hints = name_hints(&format!("{origin}.torrent"), &info, &files);
-            prop_assert_eq!(&hints[0], &origin);
-            prop_assert_eq!(&hints[1], &info);
-            for hint in &hints[2..] {
+            prop_assert_eq!(&hints.names[0], &origin);
+            prop_assert_eq!(&hints.names[1], &info);
+            for (hint, n) in &hints.dirs {
                 prop_assert!(!hint.contains(".bin"));
                 let holding = files
                     .iter()
                     .filter(|f| f.path.split('/').rev().skip(1).any(|d| d == hint))
                     .count();
+                prop_assert_eq!(holding, *n);
                 prop_assert!(holding * 2 >= files.len());
             }
         }
@@ -363,7 +376,7 @@ mod tests {
                 .map(|(i, l)| file(u32::try_from(i).unwrap_or(0), &format!("{dir}/{l}.zip")))
                 .collect();
             let hints = name_hints("a", "b", &files);
-            prop_assert!(hints[2..].contains(&dir));
+            prop_assert!(hints.dirs.contains(&(dir.clone(), leaves.len())));
         }
     }
 

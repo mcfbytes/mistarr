@@ -348,14 +348,30 @@ pub fn set_suggestion(
     Ok(())
 }
 
-/// Unbound sources with their suggested platform, oldest first.
+/// Records whether the user unbound the source, which keeps it out of
+/// [`list_unbound`].
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn set_user_unbound(conn: &Connection, id: SourceId, unbound: bool) -> Result<()> {
+    conn.execute(
+        "UPDATE sources SET user_unbound = ?2 WHERE id = ?1",
+        params![id.0, unbound],
+    )?;
+    Ok(())
+}
+
+/// Unbound sources the user did not unbind, with their suggested platform,
+/// oldest first.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn list_unbound(conn: &Connection) -> Result<Vec<(SourceId, Option<PlatformId>)>> {
     let mut stmt = conn.prepare(
-        "SELECT id, suggested_platform_id FROM sources WHERE state = 'unbound' ORDER BY id",
+        "SELECT id, suggested_platform_id FROM sources
+         WHERE state = 'unbound' AND user_unbound = 0 ORDER BY id",
     )?;
     let rows = stmt
         .query_map([], |r| {

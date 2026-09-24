@@ -256,8 +256,14 @@ async fn the_wizard_opens_until_dismissed_and_settings_keep_its_state() {
     settings["client"]["remote_path_map"] = serde_json::json!([{ "remote": "", "local": "" }]);
     let r = put(settings.to_string()).await;
     assert_eq!(r.status, 400, "a blank mapping is refused: {}", r.body);
-    let map =
-        serde_json::json!([{ "remote": "/downloads", "local": "/media/fat/mistarr/staging" }]);
+    settings["client"]["remote_path_map"] =
+        serde_json::json!([{ "remote": "/downloads", "local": "staging" }]);
+    let r = put(settings.to_string()).await;
+    assert_eq!(r.status, 400, "a relative local path is refused: {}", r.body);
+    let map = serde_json::json!([
+        { "remote": "/downloads", "local": "/media/fat/mistarr/staging" },
+        { "remote": "C:\\Torrents", "local": "/media/fat/mistarr/staging" }
+    ]);
     settings["client"]["remote_path_map"] = map.clone();
     assert_eq!(put(settings.to_string()).await.status, 200);
     let saved = json_of(&booted, "/api/v1/system/settings").await;

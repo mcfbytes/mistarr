@@ -21,7 +21,8 @@ screen works at 360 px wide with a 16 px gutter and no horizontal scroll.
    Start Transmission and Start rtorrent buttons, with a note that starting
    Transmission through its init script makes it start at boot. Remote path
    map with a Remove button per row; blank rows are dropped and a row
-   without two absolute paths is refused before saving.
+   without a remote path or with a relative local path is refused before
+   saving.
 4. Sources: drop zone and the watched-directory path, the files still in
    `sources/` listed as in step 2, and the added sources with their state and
    reason. Seed policy explained with its default shown. Nothing about where

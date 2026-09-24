@@ -113,7 +113,8 @@ CREATE TABLE sources (                  -- one per torrent the user dropped in
   total_size    INTEGER NOT NULL DEFAULT 0,
   client_id     TEXT,                  -- id in the download client once added, else NULL
   added_at      INTEGER NOT NULL,
-  suggested_platform_id TEXT REFERENCES platforms(id)   -- guessed from the torrent's names, no DAT needed
+  suggested_platform_id TEXT REFERENCES platforms(id),  -- guessed from the torrent's names, no DAT needed
+  user_unbound  INTEGER NOT NULL DEFAULT 0   -- 1 after the user unbound it; never bound automatically again
 );
 CREATE INDEX sources_state ON sources(state);
 

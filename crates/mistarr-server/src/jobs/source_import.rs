@@ -273,7 +273,9 @@ pub fn suggest(
     files: &[TorrentFile],
 ) -> Result<Option<PlatformId>> {
     let hints = binding::name_hints(origin_file, info_name, files);
-    let guess = mistarr_mister::platforms::guess_platform(hints.iter().map(String::as_str))
+    let dirs = hints.dirs.iter().map(|(d, n)| (d.as_str(), *n));
+    let names = hints.names.iter().map(String::as_str);
+    let guess = mistarr_mister::platforms::guess_platform(names, dirs)
         .map(mistarr_mister::platforms::Platform::platform_id);
     rows::set_suggestion(conn, id, guess.as_ref())?;
     Ok(guess)
@@ -309,30 +311,30 @@ pub fn awaiting_dat_reason(platform_name: &str) -> String {
     format!("Looks like {platform_name}. No DAT for it is loaded yet; it binds once one loads.")
 }
 
-/// Binds the unbound sources again after a DAT loaded titles for `platform`:
-/// those suggesting `platform` are bound to it, the others bind if they now
-/// reach the threshold. Publishes `source.changed` for each and returns how many bound.
+/// Binds the unbound sources again after a DAT loaded titles for a platform,
+/// skipping those the user unbound. A source binds to its suggested platform
+/// when that reaches the threshold and no other platform scores higher, else
+/// as [`bind_best`] decides. Publishes `source.changed` only for sources whose
+/// state or platform changed, and returns how many bound.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub async fn rebind_after_dat(app: &AppState, platform: &PlatformId) -> Result<usize> {
+pub async fn rebind_after_dat(app: &AppState) -> Result<usize> {
     let threshold = app.config().sources.bind_threshold;
-    let platform = platform.clone();
-    let rows_after = app
+    let changed = app
         .db
         .write(move |c| {
             let tx = c.transaction()?;
             let mut out = Vec::new();
             for (id, suggested) in rows::list_unbound(&tx)? {
-                if suggested.as_ref() == Some(&platform) {
-                    bind_to(&tx, id, Some(&platform))?;
-                } else {
-                    let files = rows::torrent_files(&tx, id)?;
-                    bind_best(&tx, id, &files, threshold)?;
-                }
-                if let Some(row) = rows::get(&tx, id)? {
-                    out.push(row);
+                let before = rows::get(&tx, id)?;
+                rebind_one(&tx, id, suggested.as_ref(), threshold)?;
+                let after = rows::get(&tx, id)?;
+                if let (Some(b), Some(a)) = (before, after) {
+                    if (b.state, &b.platform_id) != (a.state, &a.platform_id) {
+                        out.push(a);
+                    }
                 }
             }
             tx.commit()?;
@@ -340,7 +342,7 @@ pub async fn rebind_after_dat(app: &AppState, platform: &PlatformId) -> Result<u
         })
         .await?;
     let mut bound = 0;
-    for row in &rows_after {
+    for row in &changed {
         if row.state == SourceState::Bound {
             bound += 1;
             tracing::info!(source = %row.id, platform = ?row.platform_id, "source bound after a DAT loaded");
@@ -348,6 +350,42 @@ pub async fn rebind_after_dat(app: &AppState, platform: &PlatformId) -> Result<u
         publish_changed(app, row);
     }
     Ok(bound)
+}
+
+/// Binds one unbound source to `suggested` when it reaches `threshold` and
+/// scores at least as well as the best platform, else as [`bind_best`] does.
+fn rebind_one(
+    conn: &Connection,
+    id: SourceId,
+    suggested: Option<&PlatformId>,
+    threshold: f32,
+) -> Result<()> {
+    let files = rows::torrent_files(conn, id)?;
+    let Some(platform) = suggested else {
+        return bind_best(conn, id, &files, threshold);
+    };
+    rows::refresh_match_keys(conn)?;
+    let index = SqlDatIndex::new(conn);
+    let hits = binding::match_files(&files, platform, &index)
+        .iter()
+        .filter(|(_, rom, _)| rom.is_some())
+        .count();
+    // File counts are far below 2^24, so the rate is exact enough.
+    #[allow(clippy::cast_precision_loss)]
+    let rate = if files.is_empty() {
+        0.0
+    } else {
+        hits as f32 / files.len() as f32
+    };
+    let beaten = match binding::bind(&files, &index, threshold) {
+        Binding::Bound(best, best_rate) => best != *platform && best_rate > rate,
+        Binding::Unbound(_) => false,
+    };
+    if rate >= threshold && !beaten {
+        bind_to(conn, id, Some(platform))
+    } else {
+        bind_best(conn, id, &files, threshold)
+    }
 }
 
 /// Binds a source to `platform` chosen by the user, matching its files against
@@ -697,14 +735,34 @@ mod tests {
                 Ok(id)
             })
             .expect("db");
-        let bound = rebind_after_dat(&app, &PlatformId("gb".into()))
-            .await
-            .expect("rebind");
-        assert_eq!(bound, 1);
+        let mut events = app.events.subscribe(None).live;
+        assert_eq!(rebind_after_dat(&app).await.expect("rebind"), 0);
+        assert!(events.try_recv().is_err(), "an unchanged source is not announced");
+        let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");
+        assert_eq!(row.expect("row").state, SourceState::Unbound, "half is below 60%");
+
+        app.db
+            .write_blocking(|c| seed_rom(c, "gb", "Other Tale (USA).gb", 8, "[]"))
+            .expect("seed");
+        let other = app
+            .db
+            .write_blocking(|c| {
+                let other = source(c, &"0d".repeat(20), &files);
+                suggest(c, other, "pack2.torrent", "Example Pack", &files)?;
+                bind_to(c, other, None)?;
+                rows::set_user_unbound(c, other, true)?;
+                Ok(other)
+            })
+            .expect("db");
+        assert_eq!(rebind_after_dat(&app).await.expect("rebind"), 1);
+        assert!(events.try_recv().is_ok(), "the bound source is announced");
+        assert!(events.try_recv().is_err(), "only once");
         let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");
         let row = row.expect("row");
         assert_eq!(row.platform_id, Some(PlatformId("gb".into())));
-        assert_eq!((row.state, row.matched_count), (SourceState::Bound, 1));
+        assert_eq!((row.state, row.matched_count), (SourceState::Bound, 2));
+        let kept = app.db.read(move |c| rows::get(c, other)).await.expect("get");
+        assert_eq!(kept.expect("row").state, SourceState::Unbound, "the user unbound it");
     }
 
     #[tokio::test]
