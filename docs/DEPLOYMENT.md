@@ -52,7 +52,7 @@ any dynamic dependency, checked with `file` on the output.
   mistarr.toml            # optional config
   mistarr.db              # SQLite
   mistarr.lock            # held by the running server; a second one on this directory exits
-  mistarr.pid, .start.lock/   # written by Scripts/mistarr.sh
+  mistarr.pid, .start.lock # written by Scripts/mistarr.sh
   dats/                   # watched: drop DATs here
   dats/loaded/            # moved here after import
   dats/rejected/          # with a .reason.txt beside each file
@@ -117,8 +117,8 @@ dependency.
 Only one server runs per data directory. The server takes an exclusive lock
 on `mistarr.lock` before opening the database and exits with "another
 mistarr is already running" when it cannot. `mistarr.sh start` also
-serialises itself through the `.start.lock` directory, taking over a lock
-whose starting shell is gone, and writes `mistarr.pid` as soon as the daemon
+serialises itself through the `.start.lock` file, created exclusively and
+holding the starting shell's pid, taking over a lock whose shell is gone, and writes `mistarr.pid` as soon as the daemon
 is spawned, so a start from `user-startup.sh` racing a manual start from the
 Scripts menu launches one daemon.
 

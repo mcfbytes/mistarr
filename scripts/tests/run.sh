@@ -221,16 +221,15 @@ expect_prefix "$out" "mistarr running" "the racing start left a live pidfile"
 "$script" stop >/dev/null
 
 # A start lock left by a start that died does not block the next one.
-mkdir "$root/mistarr/.start.lock"
 sleep 100 &
 dead=$!
 kill "$dead" 2>/dev/null
 wait "$dead" 2>/dev/null
-echo "$dead" > "$root/mistarr/.start.lock/pid"
+echo "$dead" > "$root/mistarr/.start.lock"
 out=$("$script" start)
 expect_prefix "$out" "mistarr started" "a stale start lock is taken over"
 "$script" stop >/dev/null
-[ -d "$root/mistarr/.start.lock" ] && {
+[ -e "$root/mistarr/.start.lock" ] && {
     fail=$((fail + 1))
     echo "FAIL: the start lock is released"
 }

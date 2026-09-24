@@ -41,19 +41,25 @@ is_running() {
     return 0
 }
 
+# Creates the lock file holding our pid; noclobber makes the create exclusive.
+create_start_lock() {
+    (set -C; echo $$ > "$STARTLOCK") 2>/dev/null
+}
+
 # Takes the start lock; a lock left by a start that died is taken over.
 take_start_lock() {
-    if mkdir "$STARTLOCK" 2>/dev/null; then
-        echo $$ > "$STARTLOCK/pid"
-        return 0
+    create_start_lock && return 0
+    holder=$(cat "$STARTLOCK" 2>/dev/null)
+    # The holder writes its pid just after creating the file; give it that moment.
+    if [ -z "$holder" ]; then
+        sleep 1
+        holder=$(cat "$STARTLOCK" 2>/dev/null)
     fi
-    holder=$(cat "$STARTLOCK/pid" 2>/dev/null)
     if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
         return 1
     fi
-    rm -rf "$STARTLOCK"
-    mkdir "$STARTLOCK" 2>/dev/null || return 1
-    echo $$ > "$STARTLOCK/pid"
+    rm -f "$STARTLOCK"
+    create_start_lock
 }
 
 do_start() {
@@ -63,7 +69,7 @@ do_start() {
     fi
     start_locked
     status=$?
-    rm -rf "$STARTLOCK"
+    rm -f "$STARTLOCK"
     return "$status"
 }
 
