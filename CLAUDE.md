@@ -92,7 +92,8 @@ back what the review finds, and merges into `master`. Agents never merge,
 never push to `master`, and never rewrite another branch's history.
 
 Commit messages: an imperative subject line under 60 characters, a body that
-says what and why, no model names, no session narration.
+says what and why, no session narration. End with the attribution trailer
+lines the session provides, when it provides them.
 
 ## What "done" means for a package
 
