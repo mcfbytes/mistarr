@@ -56,12 +56,15 @@ CREATE TABLE titles (                   -- one per <game>; the browse unit
   mra_check     TEXT,                  -- md5 check: 'match' | 'mismatch' | 'missing_part' | 'refused', NULL when not run
   mra_detail    TEXT,                  -- why the check did not match
   mra_stamp     TEXT,                  -- MRA and zip sizes and mtimes the check ran against
+  mra_file_stamp TEXT,                 -- MRA file size and mtime when the title was last stored from it
+  mra_seen      INTEGER,               -- the arcade catalogue run that last found the MRA file
   UNIQUE (dat_version_id, name)
 );
 CREATE INDEX titles_platform_base ON titles(platform_id, base_name);
 CREATE INDEX titles_parent ON titles(parent_id);
 CREATE INDEX titles_group ON titles(platform_id, inferred, group_key);
 CREATE INDEX titles_source ON titles(platform_id, source);
+CREATE INDEX titles_mra_path ON titles(platform_id, mra_path) WHERE source = 'mra';
 
 CREATE TABLE roms (                     -- one per <rom>; the file unit
   id            INTEGER PRIMARY KEY,
@@ -246,7 +249,10 @@ one `dat_versions` row with `source = 'mra'` and `dat_name` `_Arcade`, which
 `/dats`, the wizard and DAT loads never see. DAT supersession, reloads and
 `DELETE /dats/{id}` only retire `source = 'dat'` titles; an MRA title is
 retired when a catalogue run no longer finds its MRA, and revived, with its
-id and `wanted`, when the MRA returns. Its roms are the zips it names, with
+id and `wanted`, when the MRA returns. Each run takes the next `mra_seen`
+number and stamps every title whose MRA it finds, so the titles it did not
+stamp are the ones to retire; a live title whose `mra_file_stamp` still
+matches its file is stamped without reading the MRA again. Its roms are the zips it names, with
 `size` 0, the MRA's `md5` or none, `zip_dir` and `present`. MRA titles are
 `inferred` with a `group_key` prefixed `mra:`, so they never group with DAT
 entries.

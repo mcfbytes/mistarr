@@ -70,6 +70,10 @@ pub struct MraTitle<'a> {
     pub rbf: Option<&'a str>,
     /// The MRA file relative to `_Arcade`.
     pub mra_path: &'a str,
+    /// Size and mtime of the MRA file read.
+    pub file_stamp: &'a str,
+    /// The catalogue run storing it, from [`next_run`].
+    pub run: i64,
 }
 
 /// One zip an MRA names, as a rom of its title.
@@ -85,8 +89,7 @@ pub struct MraZip<'a> {
     pub present: bool,
 }
 
-/// Marks the live MRA titles of `platform` pending before a catalogue run, so
-/// [`retire_absent`] retires those whose MRA is gone. Run both in one transaction.
+/// The number of a new catalogue run of `platform`, above every run stamped on its titles.
 ///
 /// # Errors
 ///
@@ -95,16 +98,35 @@ pub struct MraZip<'a> {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert_eq!(mistarr_server::db::arcade::begin_load(&conn, "arcade").unwrap(), 0);
+/// assert_eq!(mistarr_server::db::arcade::next_run(&conn, "arcade").unwrap(), 1);
 /// ```
-pub fn begin_load(conn: &Connection, platform: &str) -> Result<usize> {
-    Ok(conn.execute(
-        "UPDATE titles SET retired = 2 WHERE platform_id = ?1 AND source = 'mra' AND retired = 0",
+pub fn next_run(conn: &Connection, platform: &str) -> Result<i64> {
+    Ok(conn.query_row(
+        "SELECT COALESCE(MAX(mra_seen), 0) + 1 FROM titles WHERE platform_id = ?1 AND source = 'mra'",
         [platform],
+        |r| r.get(0),
     )?)
 }
 
-/// Retires the MRA titles still pending from [`begin_load`]. Returns how many.
+/// Stamps title `id` as found by catalogue run `run` without changing anything else.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::{arcade, titles::TitleId};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// arcade::touch(&conn, TitleId(1), 1).unwrap();
+/// ```
+pub fn touch(conn: &Connection, id: TitleId, run: i64) -> Result<()> {
+    conn.prepare_cached("UPDATE titles SET mra_seen = ?2 WHERE id = ?1")?
+        .execute(params![id.0, run])?;
+    Ok(())
+}
+
+/// Retires the live MRA titles of `platform` that run `run` did not find. Returns how many.
 ///
 /// # Errors
 ///
@@ -113,14 +135,34 @@ pub fn begin_load(conn: &Connection, platform: &str) -> Result<usize> {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert_eq!(mistarr_server::db::arcade::retire_absent(&conn, "arcade").unwrap(), 0);
+/// assert_eq!(mistarr_server::db::arcade::retire_unseen(&conn, "arcade", 1).unwrap(), 0);
 /// ```
-pub fn retire_absent(conn: &Connection, platform: &str) -> Result<usize> {
+pub fn retire_unseen(conn: &Connection, platform: &str, run: i64) -> Result<usize> {
     Ok(conn.execute(
         "UPDATE titles SET retired = 1, is_1g1r_pick = 0
-         WHERE platform_id = ?1 AND source = 'mra' AND retired = 2",
-        [platform],
+         WHERE platform_id = ?1 AND source = 'mra' AND retired = 0 AND mra_seen IS NOT ?2",
+        params![platform, run],
     )?)
+}
+
+/// Live MRA titles of `platform`.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert_eq!(mistarr_server::db::arcade::live_count(&conn, "arcade").unwrap(), 0);
+/// ```
+pub fn live_count(conn: &Connection, platform: &str) -> Result<u64> {
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM titles WHERE platform_id = ?1 AND source = 'mra' AND retired = 0",
+        [platform],
+        |r| r.get(0),
+    )?;
+    Ok(u64::try_from(n).unwrap_or(0))
 }
 
 /// Stores an MRA title and its zips, reusing the MRA title of the same name so
@@ -138,7 +180,7 @@ pub fn retire_absent(conn: &Connection, platform: &str) -> Result<usize> {
 /// let v = arcade::mra_version(&conn, "arcade", 1).unwrap();
 /// let t = MraTitle { name: "Example Blaster", base_name: "Example Blaster", group_key: "mra:example blaster",
 ///     regions: &[], languages: &[], revision: None, flags: &[], setname: Some("exblast"),
-///     rbf: Some("excore"), mra_path: "Example Blaster.mra" };
+///     rbf: Some("excore"), mra_path: "Example Blaster.mra", file_stamp: "10:1", run: 1 };
 /// let zips = [MraZip { name: "exblast.zip", zip_dir: "mame", md5: None, present: false }];
 /// let id = arcade::upsert_title(&conn, "arcade", v, &t, &zips).unwrap();
 /// assert_eq!(arcade::upsert_title(&conn, "arcade", v, &t, &zips).unwrap(), id);
@@ -162,7 +204,7 @@ pub fn upsert_title(
         conn.prepare_cached(
             "UPDATE titles SET dat_version_id = ?2, base_name = ?3, regions = ?4, languages = ?5,
                revision = ?6, flags = ?7, group_key = ?8, setname = ?9, rbf = ?10,
-               mra_path = ?11, inferred = 1, retired = 0
+               mra_path = ?11, mra_file_stamp = ?12, mra_seen = ?13, inferred = 1, retired = 0
              WHERE id = ?1",
         )?
         .execute(params![
@@ -176,7 +218,9 @@ pub fn upsert_title(
             t.group_key,
             t.setname,
             t.rbf,
-            t.mra_path
+            t.mra_path,
+            t.file_stamp,
+            t.run
         ])?;
         conn.prepare_cached("UPDATE roms SET retired = 1 WHERE title_id = ?1")?
             .execute([id])?;
@@ -184,8 +228,9 @@ pub fn upsert_title(
     } else {
         conn.prepare_cached(
             "INSERT INTO titles (platform_id, dat_version_id, name, base_name, regions, languages,
-               revision, flags, group_key, inferred, source, setname, rbf, mra_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 'mra', ?10, ?11, ?12)",
+               revision, flags, group_key, inferred, source, setname, rbf, mra_path,
+               mra_file_stamp, mra_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 'mra', ?10, ?11, ?12, ?13, ?14)",
         )?
         .execute(params![
             platform,
@@ -199,7 +244,9 @@ pub fn upsert_title(
             t.group_key,
             t.setname,
             t.rbf,
-            t.mra_path
+            t.mra_path,
+            t.file_stamp,
+            t.run
         ])?;
         let id = conn.last_insert_rowid();
         conn.prepare_cached("UPDATE titles SET parent_id = id WHERE id = ?1")?
@@ -223,18 +270,20 @@ pub fn upsert_title(
     Ok(TitleId(id))
 }
 
-/// A live MRA title with the stamp its md5 check last ran against.
+/// A live MRA title as the catalogue last stored it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckState {
+pub struct StoredMra {
     /// The title.
     pub id: TitleId,
-    /// Its MRA file relative to `_Arcade`.
-    pub mra_path: String,
-    /// Stamp of the last check, `None` when none ran.
-    pub stamp: Option<String>,
+    /// Its name.
+    pub name: String,
+    /// Size and mtime of the MRA file it was stored from.
+    pub file_stamp: Option<String>,
+    /// Stamp of the last md5 check, `None` when none ran.
+    pub check_stamp: Option<String>,
 }
 
-/// Every live MRA title of `platform` with its last check stamp.
+/// The live MRA title of `platform` stored from the MRA file `mra_path`, if any.
 ///
 /// # Errors
 ///
@@ -243,18 +292,81 @@ pub struct CheckState {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(mistarr_server::db::arcade::check_states(&conn, "arcade").unwrap().is_empty());
+/// assert!(mistarr_server::db::arcade::stored_mra(&conn, "arcade", "x.mra").unwrap().is_none());
 /// ```
-pub fn check_states(conn: &Connection, platform: &str) -> Result<Vec<CheckState>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, COALESCE(mra_path, ''), mra_stamp FROM titles
-         WHERE platform_id = ?1 AND source = 'mra' AND retired = 0 ORDER BY id",
+pub fn stored_mra(conn: &Connection, platform: &str, mra_path: &str) -> Result<Option<StoredMra>> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT id, name, mra_file_stamp, mra_stamp FROM titles
+             WHERE platform_id = ?1 AND source = 'mra' AND mra_path = ?2 AND retired = 0
+             ORDER BY id LIMIT 1",
+        )?
+        .query_row(params![platform, mra_path], |r| {
+            Ok(StoredMra {
+                id: TitleId(r.get(0)?),
+                name: r.get(1)?,
+                file_stamp: r.get(2)?,
+                check_stamp: r.get(3)?,
+            })
+        })
+        .optional()?)
+}
+
+/// Whether `platform` has a live MRA title.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(!mistarr_server::db::arcade::has_titles(&conn, "arcade").unwrap());
+/// ```
+pub fn has_titles(conn: &Connection, platform: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM titles WHERE platform_id = ?1 AND source = 'mra' AND retired = 0)",
+        [platform],
+        |r| r.get(0),
+    )?)
+}
+
+/// A live zip rom of an MRA title.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredZip {
+    /// Zip file name.
+    pub name: String,
+    /// Directory under `games/` it is read from.
+    pub zip_dir: String,
+    /// Whether it was on disk when last looked for.
+    pub present: bool,
+    /// Whether an MRA `<rom>` with an md5 names it.
+    pub has_md5: bool,
+}
+
+/// The live zips of MRA title `id`, in the order they were first stored.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::{arcade, titles::TitleId};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(arcade::zip_roms(&conn, TitleId(1)).unwrap().is_empty());
+/// ```
+pub fn zip_roms(conn: &Connection, id: TitleId) -> Result<Vec<StoredZip>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT name, COALESCE(zip_dir, ''), present, md5 IS NOT NULL FROM roms
+         WHERE title_id = ?1 AND retired = 0 ORDER BY id",
     )?;
-    let rows = stmt.query_map([platform], |r| {
-        Ok(CheckState {
-            id: TitleId(r.get(0)?),
-            mra_path: r.get(1)?,
-            stamp: r.get(2)?,
+    let rows = stmt.query_map([id.0], |r| {
+        Ok(StoredZip {
+            name: r.get(0)?,
+            zip_dir: r.get(1)?,
+            present: r.get(2)?,
+            has_md5: r.get(3)?,
         })
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -279,10 +391,10 @@ pub fn set_check(
     detail: Option<&str>,
     stamp: Option<&str>,
 ) -> Result<()> {
-    conn.execute(
+    conn.prepare_cached(
         "UPDATE titles SET mra_check = ?2, mra_detail = ?3, mra_stamp = ?4 WHERE id = ?1",
-        params![id.0, check, detail, stamp],
-    )?;
+    )?
+    .execute(params![id.0, check, detail, stamp])?;
     Ok(())
 }
 

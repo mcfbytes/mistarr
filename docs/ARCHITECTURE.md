@@ -153,19 +153,25 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 ### Arcade catalogue
 
 1. A heavy `arcade_catalog` job, queued at startup, by `POST /system/scan`
-   for every platform or for `arcade`, and by `POST /system/cores`. It reads
+   for every platform or for `arcade`, and by `POST /system/cores`. It lists
    every `.mra` under `_Arcade`, four folder levels deep including
-   `_alternatives`, without following symlinked folders.
+   `_alternatives`, and leaves out symlinks, symlinked folders, the Arcade
+   Organizer's `_Organized` tree and second names of one file (same device
+   and inode); see PLATFORMS.md "MRA catalogue".
 2. Each MRA becomes one `arcade` title named by its `<name>`, trimmed with
    inner whitespace collapsed (the file stem when that is empty), with one rom
-   per zip it names; see PLATFORMS.md "MRA catalogue". MRAs are read
-   shallowest first and a later MRA with a name already taken is skipped.
-   Titles whose MRA is gone are retired.
+   per zip it names. MRAs are taken shallowest first and a later MRA with a
+   name already taken is skipped. An MRA whose size and mtime match those its
+   live title was stored from is not read again. The job works in batches of
+   64 files, each read, checked and written in one short transaction, and
+   reports `{ done, total, parsed, checked }` as it goes. Titles whose MRA is
+   gone are retired at the end.
 3. Each zip is looked up under `games/`, directories and file name
    case-insensitively, and its presence stored on its rom. A title whose MRA carries an `md5` and whose zips are
    all present is checked by assembling its roms (PLATFORMS.md "MRA
-   assembly"); the check reruns only when the MRA or one of its zips changes
-   size or mtime. Placing one of its zips reruns this for every title naming
+   assembly"), streaming each part from its zip; the check reruns only when
+   the MRA or one of its zips changes size or mtime, so each MRA is read at
+   most once per run. Placing one of its zips reruns this for every title naming
    that zip. Nothing is ever fetched, rebuilt, merged or split.
 
 ### Source import

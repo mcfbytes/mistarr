@@ -83,6 +83,19 @@ present or missing in `games/NeoGeo`. Nothing else is done with them.
 
 ### MRA catalogue
 
+The catalogue reads the real MRA files once each. Under `_Arcade` it skips
+every symlink (file or folder), any
+folder named `_Organized` in any letter case, which the Arcade Organizer
+fills with thousands of symlinks to the same MRAs, and a second path to a
+file already listed (a hard link, same device and inode). `_alternatives`
+holds distinct MRAs and is read. An MRA is refused unread above 1 MiB.
+
+MRA markup is read the way MiSTer's loader reads it: element and attribute
+names in any letter case, so `<ROM>` closed by `</rom>` is one element; an
+end tag closes the innermost open element of its name, a stray end tag is
+ignored and an unknown entity is kept as written. A file that ends inside
+an element is refused.
+
 The arcade catalogue job (ARCHITECTURE.md "Arcade catalogue") turns each MRA
 into one `arcade` title with `source = 'mra'`: `<name>`, `<setname>` and
 `<rbf>` are kept, the name is parsed for regions and flags like a DAT name,

@@ -51,7 +51,7 @@ fn mras_are_listed_shallowest_first_without_following_depth_limits() {
         fs::create_dir_all(p.parent().expect("parent")).expect("mkdir");
         fs::write(p, b"<m/>").expect("write");
     }
-    let found: Vec<String> = list_mras(root).into_iter().map(|(r, _)| r).collect();
+    let found: Vec<String> = list_mras(root).into_iter().map(|l| l.rel).collect();
     assert_eq!(
         found,
         [
@@ -64,6 +64,25 @@ fn mras_are_listed_shallowest_first_without_following_depth_limits() {
 }
 
 #[test]
+fn links_and_the_organizer_tree_are_not_listed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    let main = root.join("Example Blaster.mra");
+    fs::write(&main, b"<m/>").expect("write");
+    fs::hard_link(&main, root.join("Example Blaster copy.mra")).expect("hard link");
+    fs::create_dir_all(root.join("_ORGANIZED/_By Year/_1990s")).expect("mkdir");
+    fs::write(root.join("_ORGANIZED/_By Year/real.mra"), b"<m/>").expect("write");
+    std::os::unix::fs::symlink(&main, root.join("_ORGANIZED/_By Year/_1990s/eb.mra"))
+        .expect("symlink");
+    fs::create_dir_all(root.join("_Links")).expect("mkdir");
+    std::os::unix::fs::symlink(&main, root.join("_Links/eb.mra")).expect("symlink");
+    let found = list_mras(root);
+    let rels: Vec<&str> = found.iter().map(|l| l.rel.as_str()).collect();
+    assert_eq!(rels, ["Example Blaster copy.mra"]);
+    assert_eq!(found[0].stamp, file_stamp(&main).expect("stamp"));
+}
+
+#[test]
 fn entries_take_the_file_stem_when_the_mra_has_no_name() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("Example Quest.mra");
@@ -72,11 +91,11 @@ fn entries_take_the_file_stem_when_the_mra_has_no_name() {
         r#"<misterromdescription><rom zip="exq.zip"/></misterromdescription>"#,
     )
     .expect("write");
-    let e = read_entry(&("Example Quest.mra".to_owned(), path.clone())).expect("entry");
+    let e = read_entry("Example Quest.mra", &path).expect("entry");
     assert_eq!(e.name, "Example Quest");
     assert!(!e.stamp.is_empty());
     fs::write(&path, "<broken").expect("write");
-    assert!(read_entry(&("Example Quest.mra".to_owned(), path)).is_none());
+    assert!(read_entry("Example Quest.mra", &path).is_none());
 }
 
 #[test]
@@ -91,9 +110,7 @@ fn entry_names_are_trimmed_and_collapsed() {
             ),
         )
         .expect("write");
-        read_entry(&("Example Quest.mra".to_owned(), path.clone()))
-            .expect("entry")
-            .name
+        read_entry("Example Quest.mra", &path).expect("entry").name
     };
     assert_eq!(
         entry("\n  Example\t\tQuest  (World)\n"),
@@ -130,14 +147,9 @@ fn zips_are_found_case_insensitively_with_their_md5() {
             ("hbmame/exhb.zip".to_owned(), false, false),
         ]
     );
-    let entry = Entry {
-        rel: "x.mra".into(),
-        name: "x".into(),
-        mra: mra.clone(),
-        stamp: "1:1".into(),
-    };
-    assert_eq!(check_stamp(&entry, &zips), None);
-    assert!(check_stamp(&entry, &zips[..1]).is_some_and(|s| s.contains("mame/exblast.zip")));
+    assert_eq!(check_stamp("1:1", &mra, &zips), None);
+    let stamp = check_stamp("1:1", &mra, &zips[..1]).expect("stamp");
+    assert!(stamp.starts_with("1:1;mame/exblast.zip:"), "{stamp}");
 }
 
 #[test]
@@ -249,19 +261,10 @@ async fn the_job_stores_retires_and_checks() {
     .expect("write");
     write_zip(&games.join("mame/exblast.zip"), &[("cpu.bin", b"CPU0")]);
 
-    Scheduler::run_inline(&app, Arc::new(ArcadeCatalog))
-        .await
-        .expect("run");
-    let states = app
-        .db
-        .read(|c| rows::check_states(c, PLATFORM))
-        .await
-        .expect("states");
-    assert_eq!(states.len(), 2);
-    let main = states
-        .iter()
-        .find(|s| s.mra_path == "Example Blaster.mra")
-        .expect("main");
+    let progress = run(&app).await;
+    assert_eq!(counts(&progress), (2, 1));
+    assert_eq!(progress["mras"], 2);
+    let main = stored(&app, "Example Blaster.mra").await.expect("main");
     let id = main.id;
     let info = app
         .db
@@ -273,18 +276,101 @@ async fn the_job_stores_retires_and_checks() {
     assert!(info.missing_zips.is_empty());
     assert_eq!(info.setname.as_deref(), Some("exblast"));
 
+    let progress = run(&app).await;
+    assert_eq!(counts(&progress), (0, 0));
+    assert_eq!(
+        stored(&app, "Example Blaster.mra").await,
+        Some(main.clone())
+    );
+
+    fs::remove_file(games.join("mame/exblast.zip")).expect("rm");
+    let progress = run(&app).await;
+    assert_eq!(counts(&progress), (0, 0));
+    let info = app
+        .db
+        .read(move |c| rows::info(c, id))
+        .await
+        .expect("info")
+        .expect("mra");
+    assert_eq!(info.missing_zips, ["mame/exblast.zip"]);
+    assert_eq!(info.md5_check, None);
+
+    write_zip(&games.join("mame/exblast.zip"), &[("cpu.bin", b"CPU1")]);
+    let progress = run(&app).await;
+    assert_eq!(counts(&progress), (1, 1));
+    let info = app
+        .db
+        .read(move |c| rows::info(c, id))
+        .await
+        .expect("info")
+        .expect("mra");
+    assert_eq!(info.md5_check.as_deref(), Some("mismatch"));
+
     fs::remove_file(arcade.join("Example Blaster.mra")).expect("rm");
     assert!(enqueue_if_relevant(&app).await.expect("enqueue").is_some());
-    Scheduler::run_inline(&app, Arc::new(ArcadeCatalog))
+    let progress = run(&app).await;
+    assert_eq!(
+        (&progress["mras"], &progress["retired"]),
+        (&1.into(), &1.into())
+    );
+    assert_eq!(stored(&app, "Example Blaster.mra").await, None);
+    let alt = "_alternatives/_Example Blaster/Example Blaster (set 2).mra";
+    assert!(stored(&app, alt).await.is_some());
+}
+
+/// `(parsed, checked)` of a final progress.
+fn counts(progress: &serde_json::Value) -> (u64, u64) {
+    let n = |k: &str| progress[k].as_u64().expect("count");
+    (n("parsed"), n("checked"))
+}
+
+/// Runs the catalogue and returns its final progress.
+async fn run(app: &Arc<AppState>) -> serde_json::Value {
+    let id = Scheduler::run_inline(app, Arc::new(ArcadeCatalog))
         .await
         .expect("run");
-    let states = app
+    let row = app
         .db
-        .read(|c| rows::check_states(c, PLATFORM))
+        .read(move |c| crate::db::jobs::get(c, id))
         .await
-        .expect("states");
-    assert_eq!(states.len(), 1);
-    assert!(states[0].mra_path.starts_with("_alternatives/"));
+        .expect("job")
+        .expect("row");
+    assert_eq!(
+        row.state,
+        crate::db::jobs::JobState::Done,
+        "{:?}",
+        row.progress
+    );
+    row.progress.expect("progress")
+}
+
+async fn stored(app: &Arc<AppState>, rel: &str) -> Option<rows::StoredMra> {
+    let rel = rel.to_owned();
+    app.db
+        .read(move |c| rows::stored_mra(c, PLATFORM, &rel))
+        .await
+        .expect("stored")
+}
+
+#[tokio::test]
+async fn the_shallowest_mra_keeps_a_shared_name() {
+    let (dir, app) = state();
+    let arcade = dir.path().join(ARCADE_DIR);
+    fs::create_dir_all(arcade.join("_alternatives")).expect("mkdir");
+    let body = mra_xml("Example Blaster", r#"<rom index="0" zip="exblast.zip"/>"#);
+    fs::write(arcade.join("_alternatives/Example Blaster.mra"), &body).expect("write");
+    run(&app).await;
+    assert!(stored(&app, "_alternatives/Example Blaster.mra")
+        .await
+        .is_some());
+    fs::write(arcade.join("Example Blaster.mra"), &body).expect("write");
+    let progress = run(&app).await;
+    assert_eq!(progress["parsed"], 1);
+    assert_eq!(progress["mras"], 1);
+    assert!(stored(&app, "Example Blaster.mra").await.is_some());
+    assert!(stored(&app, "_alternatives/Example Blaster.mra")
+        .await
+        .is_none());
 }
 
 #[tokio::test]
