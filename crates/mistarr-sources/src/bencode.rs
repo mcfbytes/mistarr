@@ -185,6 +185,11 @@ fn valid_int_digits(s: &[u8]) -> bool {
 }
 
 fn decode_bytes(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, SourceError> {
+    raw_bytes(data, pos).map(<[u8]>::to_vec)
+}
+
+/// Reads a string's `<len>:` prefix, leaving `*pos` at its first byte.
+fn string_len(data: &[u8], pos: &mut usize) -> Result<usize, SourceError> {
     let start = *pos;
     while byte_at(data, *pos)? != b':' {
         *pos += 1;
@@ -206,15 +211,7 @@ fn decode_bytes(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, SourceError> {
     if len > MAX_STRING_LEN {
         return Err(SourceError::StringTooLarge(MAX_STRING_LEN));
     }
-    let end = pos
-        .checked_add(len)
-        .ok_or(SourceError::MalformedBencode(start))?;
-    if end > data.len() {
-        return Err(SourceError::MalformedBencode(start));
-    }
-    let bytes = data[*pos..end].to_vec();
-    *pos = end;
-    Ok(bytes)
+    Ok(len)
 }
 
 fn decode_list(data: &[u8], pos: &mut usize, depth: u32) -> Result<Value, SourceError> {
@@ -229,34 +226,183 @@ fn decode_list(data: &[u8], pos: &mut usize, depth: u32) -> Result<Value, Source
     }
 }
 
-/// One entry of a top-level dict: its key, value, and the exact byte range
-/// in the input the value came from.
-pub(crate) type TopLevelEntry = (Vec<u8>, Value, std::ops::Range<usize>);
+/// A bencode value borrowed from its input. Lists and dicts keep their encoded bytes
+/// and are walked on demand, so reading a large torrent allocates nothing per entry.
+/// A `Raw` comes only from [`Raw::parse`], which checks the whole value first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Raw<'a> {
+    /// A signed integer.
+    Int(i64),
+    /// A byte string.
+    Bytes(&'a [u8]),
+    /// A list, as its encoding `l...e`.
+    List(&'a [u8]),
+    /// A dict, as its encoding `d...e`.
+    Dict(&'a [u8]),
+}
 
-/// Decodes a top-level dict, returning each entry's key, value, and the
-/// exact byte range in `data` the value came from (before any re-encoding).
-/// Used to hash a torrent's `info` dict over its original bytes.
-pub(crate) fn decode_top_level_dict(data: &[u8]) -> Result<Vec<TopLevelEntry>, SourceError> {
-    let mut pos = 0usize;
-    if byte_at(data, pos)? != b'd' {
-        return Err(SourceError::MalformedBencode(pos));
+impl<'a> Raw<'a> {
+    /// Checks one complete value at the start of `data` under the limits of [`decode`] and
+    /// returns it with its encoded length; bytes after it are the caller's.
+    ///
+    /// # Errors
+    ///
+    /// As [`decode`], except that trailing bytes are not an error.
+    ///
+    /// ```
+    /// use mistarr_sources::bencode::Raw;
+    /// let (v, len) = Raw::parse(b"d1:ai1ee4:tail").unwrap();
+    /// assert_eq!(len, 8);
+    /// assert_eq!(v.get("a"), Some(Raw::Int(1)));
+    /// ```
+    pub fn parse(data: &'a [u8]) -> Result<(Self, usize), SourceError> {
+        let mut pos = 0;
+        let value = raw_value(data, &mut pos, 0)?;
+        Ok((value, pos))
     }
-    pos += 1;
-    let mut entries = Vec::new();
-    loop {
-        if byte_at(data, pos)? == b'e' {
-            pos += 1;
-            break;
+
+    /// The text, if this is a byte string of valid UTF-8.
+    ///
+    /// ```
+    /// use mistarr_sources::bencode::Raw;
+    /// assert_eq!(Raw::parse(b"2:ok").unwrap().0.as_str(), Some("ok"));
+    /// ```
+    #[must_use]
+    pub fn as_str(self) -> Option<&'a str> {
+        match self {
+            Raw::Bytes(b) => std::str::from_utf8(b).ok(),
+            _ => None,
         }
-        let key = decode_bytes(data, &mut pos)?;
-        let value_start = pos;
-        let value = decode_value(data, &mut pos, 0)?;
-        entries.push((key, value, value_start..pos));
     }
-    if pos != data.len() {
-        return Err(SourceError::TrailingData);
+
+    /// The integer, if this is one.
+    ///
+    /// ```
+    /// use mistarr_sources::bencode::Raw;
+    /// assert_eq!(Raw::parse(b"i7e").unwrap().0.as_int(), Some(7));
+    /// ```
+    #[must_use]
+    pub fn as_int(self) -> Option<i64> {
+        match self {
+            Raw::Int(v) => Some(v),
+            _ => None,
+        }
     }
-    Ok(entries)
+
+    /// Each item of a list in order; nothing for any other value.
+    ///
+    /// ```
+    /// use mistarr_sources::bencode::Raw;
+    /// let (list, _) = Raw::parse(b"li1ei2ee").unwrap();
+    /// assert_eq!(list.items().filter_map(Raw::as_int).collect::<Vec<_>>(), [1, 2]);
+    /// ```
+    pub fn items(self) -> impl Iterator<Item = Raw<'a>> {
+        let body = match self {
+            Raw::List(b) => inner(b),
+            _ => &[][..],
+        };
+        let mut pos = 0;
+        std::iter::from_fn(move || {
+            if pos >= body.len() {
+                return None;
+            }
+            raw_value(body, &mut pos, 0).ok()
+        })
+    }
+
+    /// Each `(key, value, encoded value)` of a dict in order; nothing for any other value.
+    ///
+    /// ```
+    /// use mistarr_sources::bencode::Raw;
+    /// let (dict, _) = Raw::parse(b"d1:ai1e1:b2:xye").unwrap();
+    /// let keys: Vec<&[u8]> = dict.entries().map(|(k, _, _)| k).collect();
+    /// assert_eq!(keys, [b"a", b"b"]);
+    /// ```
+    pub fn entries(self) -> impl Iterator<Item = (&'a [u8], Raw<'a>, &'a [u8])> {
+        let body = match self {
+            Raw::Dict(b) => inner(b),
+            _ => &[][..],
+        };
+        let mut pos = 0;
+        std::iter::from_fn(move || {
+            if pos >= body.len() {
+                return None;
+            }
+            let key = raw_bytes(body, &mut pos).ok()?;
+            let start = pos;
+            let value = raw_value(body, &mut pos, 0).ok()?;
+            Some((key, value, &body[start..pos]))
+        })
+    }
+
+    /// The value under `key` in a dict, the first one when a key repeats, as clients read it.
+    ///
+    /// ```
+    /// use mistarr_sources::bencode::Raw;
+    /// let (dict, _) = Raw::parse(b"d4:name2:ok4:name2:noe").unwrap();
+    /// assert_eq!(dict.get("name").and_then(Raw::as_str), Some("ok"));
+    /// assert_eq!(dict.get("absent"), None);
+    /// ```
+    #[must_use]
+    pub fn get(self, key: &str) -> Option<Raw<'a>> {
+        self.entries()
+            .find(|(k, _, _)| *k == key.as_bytes())
+            .map(|(_, v, _)| v)
+    }
+}
+
+/// The body of an encoded list or dict without its `l`/`d` and `e`; empty for a `Raw`
+/// built by hand from bytes too short to hold them.
+fn inner(encoded: &[u8]) -> &[u8] {
+    encoded
+        .get(1..encoded.len().saturating_sub(1))
+        .unwrap_or_default()
+}
+
+/// Reads one value at `*pos`, checking all of it, and leaves `*pos` just past it.
+fn raw_value<'a>(data: &'a [u8], pos: &mut usize, depth: u32) -> Result<Raw<'a>, SourceError> {
+    if depth > MAX_DEPTH {
+        return Err(SourceError::NestingTooDeep(MAX_DEPTH));
+    }
+    let start = *pos;
+    match byte_at(data, start)? {
+        b'i' => match decode_int(data, pos)? {
+            Value::Int(v) => Ok(Raw::Int(v)),
+            _ => Err(SourceError::MalformedBencode(start)),
+        },
+        b'0'..=b'9' => raw_bytes(data, pos).map(Raw::Bytes),
+        b'l' => {
+            *pos += 1;
+            while byte_at(data, *pos)? != b'e' {
+                raw_value(data, pos, depth + 1)?;
+            }
+            *pos += 1;
+            Ok(Raw::List(&data[start..*pos]))
+        }
+        b'd' => {
+            *pos += 1;
+            while byte_at(data, *pos)? != b'e' {
+                raw_bytes(data, pos)?;
+                raw_value(data, pos, depth + 1)?;
+            }
+            *pos += 1;
+            Ok(Raw::Dict(&data[start..*pos]))
+        }
+        _ => Err(SourceError::MalformedBencode(start)),
+    }
+}
+
+/// A byte string at `*pos`, borrowed.
+fn raw_bytes<'a>(data: &'a [u8], pos: &mut usize) -> Result<&'a [u8], SourceError> {
+    let start = *pos;
+    let len = string_len(data, pos)?;
+    let end = pos
+        .checked_add(len)
+        .filter(|&e| e <= data.len())
+        .ok_or(SourceError::MalformedBencode(start))?;
+    let bytes = &data[*pos..end];
+    *pos = end;
+    Ok(bytes)
 }
 
 fn decode_dict(data: &[u8], pos: &mut usize, depth: u32) -> Result<Value, SourceError> {
@@ -389,10 +535,81 @@ mod tests {
         assert_eq!(encode(&v), b"d3:cow3:moo4:spam4:eggse");
     }
 
+    /// The owned value a borrowed one stands for.
+    fn owned(raw: Raw<'_>) -> Value {
+        match raw {
+            Raw::Int(v) => Value::Int(v),
+            Raw::Bytes(b) => Value::Bytes(b.to_vec()),
+            Raw::List(_) => Value::List(raw.items().map(owned).collect()),
+            Raw::Dict(_) => Value::Dict(
+                raw.entries()
+                    .map(|(k, v, _)| (k.to_vec(), owned(v)))
+                    .collect(),
+            ),
+        }
+    }
+
+    #[test]
+    fn raw_walks_nested_values_in_place() {
+        let data = b"d4:infod5:filesld6:lengthi3e4:pathl1:a1:beee4:name1:xe1:zi-2ee";
+        let (top, len) = Raw::parse(data).unwrap();
+        assert_eq!(len, data.len());
+        let (_, info, bytes) = top.entries().next().unwrap();
+        assert_eq!(bytes, &data[7..data.len() - 8]);
+        let file = info.get("files").unwrap().items().next().unwrap();
+        assert_eq!(file.get("length").and_then(Raw::as_int), Some(3));
+        let path: Vec<&str> = file
+            .get("path")
+            .unwrap()
+            .items()
+            .filter_map(Raw::as_str)
+            .collect();
+        assert_eq!(path, ["a", "b"]);
+        assert_eq!(top.get("z"), Some(Raw::Int(-2)));
+        assert_eq!(Raw::Int(1).items().count(), 0);
+        assert_eq!(Raw::Bytes(b"x").entries().count(), 0);
+        for hand_built in [&b""[..], b"l", b"le", b"lxe", b"li1"] {
+            assert_eq!(Raw::List(hand_built).items().count(), 0);
+            assert_eq!(Raw::Dict(hand_built).entries().count(), 0);
+        }
+        assert!(matches!(
+            Raw::parse(b"l1:a"),
+            Err(SourceError::MalformedBencode(_))
+        ));
+        assert!(matches!(
+            Raw::parse(b"5:ab"),
+            Err(SourceError::MalformedBencode(_))
+        ));
+    }
+
     proptest::proptest! {
         #[test]
         fn never_panics(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..256)) {
             let _ = decode(&bytes);
+            let _ = Raw::parse(&bytes);
+        }
+
+        #[test]
+        fn raw_agrees_with_decode(bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..256)) {
+            let whole = Raw::parse(&bytes).ok().filter(|(_, len)| *len == bytes.len());
+            match (decode(&bytes), whole) {
+                (Ok(v), Some((raw, _))) => proptest::prop_assert_eq!(owned(raw), v),
+                (Err(_), None) => {}
+                (d, r) => proptest::prop_assert!(false, "decode {:?}, raw {:?}", d, r),
+            }
+        }
+
+        #[test]
+        fn raw_reads_what_encode_writes(
+            words in proptest::collection::vec("[a-z]{0,6}", 0..8),
+            n in proptest::prelude::any::<i64>(),
+        ) {
+            let list = Value::List(words.iter().map(|w| Value::Bytes(w.clone().into_bytes())).collect());
+            let dict = Value::Dict([(b"l".to_vec(), list), (b"n".to_vec(), Value::Int(n))].into());
+            let data = encode(&dict);
+            let (raw, len) = Raw::parse(&data).unwrap();
+            proptest::prop_assert_eq!(len, data.len());
+            proptest::prop_assert_eq!(owned(raw), dict);
         }
     }
 }

@@ -163,24 +163,37 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    members that cannot match anything.
 3. Match by SHA1, then MD5, then CRC32 plus size. Record `verified`,
    `unverified` (no DAT match) or `misnamed` (match but wrong filename).
-4. Scans are resumable: progress is committed per directory.
+4. Scans are resumable: hashed rows are written 256 at a time and the
+   finished directories at most every 2 s. A directory not yet recorded as
+   finished is walked again after a restart, and its unchanged files are not
+   hashed again.
 
 ### Arcade catalogue
 
 1. A heavy `arcade_catalog` job, queued at startup, by `POST /system/scan`
-   for every platform or for `arcade`, and by `POST /system/cores`. It reads
+   for every platform or for `arcade`, and by `POST /system/cores`. It lists
    every `.mra` under `_Arcade`, four folder levels deep including
-   `_alternatives`, without following symlinked folders.
+   `_alternatives`, follows symlinks to files, and leaves out symlinked
+   folders, the Arcade Organizer's `_Organized` tree and second names of one
+   file (same device and inode); see PLATFORMS.md "MRA catalogue".
 2. Each MRA becomes one `arcade` title named by its `<name>`, trimmed with
    inner whitespace collapsed (the file stem when that is empty), with one rom
-   per zip it names; see PLATFORMS.md "MRA catalogue". MRAs are read
-   shallowest first and a later MRA with a name already taken is skipped.
-   Titles whose MRA is gone are retired.
+   per zip it names. MRAs are taken shallowest first and a later MRA with a
+   name already taken is skipped. An MRA whose size, mtime and parser version
+   match those its live title was stored from is not read again, and one that
+   cannot be read keeps its title and check until it can. The job works in
+   batches of 64 files, each read, checked and written in one short
+   transaction, and reports `{ done, total, parsed, checked }` as it goes.
+   Titles whose MRA is gone are retired at the end, and the 1G1R picks are
+   recomputed then when a batch stored a title or a title retired; a batch
+   that stores marks the platform in `settings`, so a run stopped before its
+   end leaves the recompute to the next.
 3. Each zip is looked up under `games/`, directories and file name
    case-insensitively, and its presence stored on its rom. A title whose MRA carries an `md5` and whose zips are
    all present is checked by assembling its roms (PLATFORMS.md "MRA
-   assembly"); the check reruns only when the MRA or one of its zips changes
-   size or mtime. Placing one of its zips reruns this for every title naming
+   assembly"), streaming each part from its zip; the check reruns only when
+   the MRA or one of its zips changes size or mtime, so each MRA is read at
+   most once per run. Placing one of its zips reruns this for every title naming
    that zip. Nothing is ever fetched, rebuilt, merged or split.
 
 ### Source import
@@ -188,9 +201,9 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 1. A `.torrent` or `.magnet` appears in `sources/`, found by a scan every
    10 s once its size has held for two scans, or written there by
    `POST /sources/upload`. A `source_import` job per file, on the background
-   lane, parses it. A
-   file that does not parse, or repeats a loaded source, moves to
-   `sources/rejected/` with a `<name>.reason.txt`.
+   lane, parses it, reading the bencode in place so only the file list is
+   built. A file over 16 MiB, one that does not parse, or one that repeats a
+   loaded source moves to `sources/rejected/` with a `<name>.reason.txt`.
 2. For a magnet, the source is `resolving`. A light `resolve_magnet` job adds
    it to the client paused into `staging/<infohash>/` with nothing wanted and
    starts it, since a paused magnet never fetches metadata. While it is
@@ -366,12 +379,37 @@ shutdown is left `queued` for this.
 |---|---|
 | Binary size, stripped, with SPA | under 8 MiB |
 | Idle RSS | under 30 MiB |
-| Peak RSS during scan or import | under 64 MiB |
+| Peak RSS during scan or import | under 64 MiB, checked per job by `tests/memory.rs` |
 | tokio worker threads | 2 |
-| SQLite page cache | 2 MiB |
+| Blocking threads (SQLite, hashing, file work) | at most 4 |
+| Stack per runtime thread | 1 MiB reserved, touched pages only in RSS |
+| Soft `RLIMIT_DATA` | `[memory] data_limit_mib`, 192 MiB, never below 64 |
+| SQLite page cache | 2 MiB, 1 MiB on each of the two connections |
+| SQLite other | `mmap_size = 0`, `temp_store = FILE` under `<data>/tmp` (`SQLITE_TMPDIR`, set at startup and emptied of stale files, since the board's `/tmp` is RAM), WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB |
+| SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk |
 | Hashing buffer | 256 KiB, one file at a time |
+| Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches |
+| `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
 | SPA bundle, gzipped | under 200 KiB |
 | Concurrent client RPC calls | 1, serialised |
+
+The data limit is set in `main` before the runtime starts, so thread stacks
+and heap both count against it. `RLIMIT_DATA` rather than `RLIMIT_AS`
+because it counts only private writable memory (brk, anonymous mappings,
+thread stacks), which is what a runaway allocation grows, and not the
+binary, the SQLite shared-memory index or reserved address space. An
+allocation past it fails and Rust aborts the process, which ends one daemon
+instead of starving the MiSTer process of memory on a board without swap.
+
+The launcher runs the daemon under `nice -n 10` and `ionice -c 3` where the
+board has them, and heavy jobs stop at their next file boundary while a core
+runs. Heavy work has no thread of its own to lower further: it shares the
+blocking pool with request handlers.
+
+A DAT loads in one write transaction, so the WAL file can grow to the size
+of the pages that DAT touches while it loads; it is cut back to 1 MiB at the
+next checkpoint. Page memory stays within the cache either way, since SQLite
+spills dirty pages to the WAL.
 
 ## Configuration
 
@@ -411,6 +449,9 @@ bind_threshold = 0.6        # lowest per-platform hit rate, 0 to 1, that binds a
 
 [jobs]
 scan_interval_minutes = 1440   # a daily rescan by default, 0 disables it
+
+[memory]
+data_limit_mib = 192        # soft RLIMIT_DATA set at startup, at least 64; 0 keeps the inherited limit
 ```
 
 The file is `--config FILE` if given, else `<data>/mistarr.toml` when it
@@ -418,8 +459,8 @@ exists, where `<data>` is `--data DIR` or `/media/fat/mistarr`; `--data`
 also overrides `paths.data` and `--listen` overrides `server.listen`. The
 `client`, `limits` and `prefs` sections are editable through
 `/system/settings`; saved values live in the `settings` table and take
-precedence over the file on every start. `server`, `paths`, `sources` and
-`jobs` need a restart.
+precedence over the file on every start. `server`, `paths`, `sources`,
+`jobs` and `memory` need a restart.
 
 ## Non-goals
 

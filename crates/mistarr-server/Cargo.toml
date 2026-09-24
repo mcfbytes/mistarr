@@ -35,7 +35,7 @@ clap = { version = "4", default-features = false, features = ["std", "derive", "
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 rust-embed = "8"
-rustix = { version = "1", default-features = false, features = ["std", "fs"] }
+rustix = { version = "1", default-features = false, features = ["std", "fs", "process"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "fs", "signal", "macros"] }
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
 zip = { version = "4", default-features = false, features = ["deflate-flate2-zlib-rs"] }

@@ -18,6 +18,7 @@ pub mod incoming;
 pub mod jobs;
 pub mod lock;
 pub mod logging;
+pub mod memory;
 pub mod status;
 
 pub use error::{Error, Result};

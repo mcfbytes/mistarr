@@ -1,9 +1,10 @@
 //! Arcade catalogue: the MRA files under `_Arcade` become titles of the arcade platform;
-//! see `docs/PLATFORMS.md` "Special adapters" and "MRA assembly".
+//! see `docs/ARCHITECTURE.md` "Arcade catalogue" and `docs/PLATFORMS.md` "MRA catalogue".
 
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -16,9 +17,11 @@ use serde_json::json;
 use super::dat_import::prefs;
 use super::{Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
-use crate::db::arcade::{self as rows, MraTitle, MraZip};
+use crate::db::arcade::{self as rows, MraTitle, MraZip, StoredMra, StoredZip};
+use crate::db::dats::DatVersionId;
 use crate::db::jobs::JobId;
 use crate::db::titles::{self, TitleId};
+use crate::db::Db;
 use crate::error::{Error, Result};
 
 /// `jobs.kind` of [`ArcadeCatalog`].
@@ -33,7 +36,11 @@ pub const ARCADE_DIR: &str = "_Arcade";
 /// Deepest subfolder of `_Arcade` searched for MRA files.
 const MAX_DEPTH: usize = 4;
 
-/// MRA files parsed per blocking task, between checkpoints.
+/// Folders under `_Arcade` never searched, lowercase: the Arcade Organizer's tree holds
+/// only links to MRA files found elsewhere.
+const SKIPPED_DIRS: &[&str] = &["_organized"];
+
+/// MRA files handled per blocking task and write transaction.
 const BATCH: usize = 64;
 
 /// Reads every MRA under `_Arcade`, upserts one title per MRA, retires the titles
@@ -63,10 +70,7 @@ impl Job for ArcadeCatalog {
 /// [`Error::Db`] when the job cannot be recorded.
 pub async fn enqueue_if_relevant(app: &Arc<AppState>) -> Result<Option<JobId>> {
     let dir = app.config().paths.root.join(ARCADE_DIR);
-    let known = app
-        .db
-        .read(|c| Ok(!rows::check_states(c, PLATFORM)?.is_empty()))
-        .await?;
+    let known = app.db.read(|c| rows::has_titles(c, PLATFORM)).await?;
     if !dir.is_dir() && !known {
         return Ok(None);
     }
@@ -75,10 +79,18 @@ pub async fn enqueue_if_relevant(app: &Arc<AppState>) -> Result<Option<JobId>> {
         .map(Some)
 }
 
-/// One parsed MRA file.
-#[derive(Debug, Clone)]
-struct Entry {
+/// One `.mra` file found under `_Arcade`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Listed {
+    /// Path relative to `_Arcade`, `/`-separated.
     rel: String,
+    /// Parser version, size and mtime, as [`mra_stamp`] writes them.
+    stamp: String,
+}
+
+/// One parsed MRA file.
+#[derive(Debug)]
+struct Entry {
     name: String,
     mra: Mra,
     /// Size and mtime of the MRA file.
@@ -93,153 +105,382 @@ struct Zip {
     on_disk: Option<PathBuf>,
 }
 
+/// An md5 check outcome as stored: the check and its detail, `None` when none applies.
+type Outcome = Option<(&'static str, Option<String>)>;
+
+/// What a batch writes for one MRA file.
+enum Title {
+    /// A new or changed MRA, stored in full.
+    Stored {
+        rel: String,
+        stamp: String,
+        name: String,
+        setname: Option<String>,
+        rbf: Option<String>,
+        zips: Vec<Zip>,
+    },
+    /// An unchanged MRA: its title is stamped and the presence of each zip that changed updated.
+    Kept {
+        id: TitleId,
+        present: Vec<(String, String, bool)>,
+    },
+}
+
+/// The md5 check an item still needs.
+enum Pending {
+    /// The stored check still holds.
+    Keep,
+    /// Store this outcome and stamp; `(None, None)` clears the check.
+    Set(Outcome, Option<String>),
+    /// Check against `stamp`, with the MRA parsed already or read again from `rel`.
+    Run {
+        mra: Option<Mra>,
+        rel: String,
+        stamp: String,
+    },
+}
+
+struct Item {
+    title: Title,
+    check: Pending,
+}
+
+/// What a run carries between batches: the zips found so far and the names taken.
+#[derive(Default)]
+struct Pass {
+    index: ZipIndex,
+    claimed: HashSet<String>,
+    parsed: u64,
+    checked: u64,
+}
+
+impl Pass {
+    /// Takes `name` for this run; false when a shallower MRA already has it.
+    fn claim(&mut self, name: &str, rel: &str) -> bool {
+        let fresh = self.claimed.insert(name.to_lowercase());
+        if !fresh {
+            tracing::debug!(mra = %rel, "another MRA already has this name; skipped");
+        }
+        fresh
+    }
+}
+
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T> {
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|e| Error::Task(e.to_string()))
 }
 
+/// Lists the MRA files, then per batch reads the new and changed ones, runs the md5 checks
+/// whose inputs moved and stores the batch, so memory follows the batch, not the catalogue.
 async fn catalogue(ctx: &JobContext) -> Result<()> {
     let config = ctx.app.config();
-    let (dir, games) = (config.paths.root.join(ARCADE_DIR), config.paths.games);
+    let arcade = config.paths.root.join(ARCADE_DIR);
+    let games = config.paths.games;
     ctx.checkpoint().await?;
-    let found = blocking(move || list_mras(&dir)).await?;
-    let mut entries: Vec<Entry> = Vec::with_capacity(found.len());
-    for batch in found.chunks(BATCH) {
-        ctx.checkpoint().await?;
-        let batch = batch.to_vec();
-        entries.extend(
-            blocking(move || batch.iter().filter_map(read_entry).collect::<Vec<_>>()).await?,
-        );
-    }
-    let mut seen: HashSet<String> = HashSet::with_capacity(entries.len());
-    entries.retain(|e| {
-        let fresh = seen.insert(e.name.to_lowercase());
-        if !fresh {
-            tracing::debug!(mra = %e.rel, "another MRA already has this name; skipped");
-        }
-        fresh
-    });
-    let index = blocking({
-        let dirs: Vec<String> = entries
-            .iter()
-            .flat_map(|e| e.mra.zip_paths().into_iter().map(|z| z.dir))
-            .collect();
-        move || Arc::new(ZipIndex::build(&games, dirs))
+    let listed = blocking({
+        let arcade = arcade.clone();
+        move || list_mras(&arcade)
     })
     .await?;
-    let zips: Vec<Vec<Zip>> = entries.iter().map(|e| zips_of(&e.mra, &index)).collect();
-
-    ctx.checkpoint().await?;
-    let prefs = prefs(&config.prefs);
-    let stored = {
-        let entries = entries.clone();
-        let zips = zips.clone();
-        ctx.app
-            .db
-            .write(move |c| store(c, &entries, &zips, &prefs))
-            .await?
-    };
-    let retired = stored.retired;
-    let states = ctx.app.db.read(|c| rows::check_states(c, PLATFORM)).await?;
-    let mut checked = 0u64;
-    for (entry, (zips, id)) in entries.iter().zip(zips.iter().zip(&stored.ids)) {
-        let prior = states
-            .iter()
-            .find(|s| s.id == *id)
-            .and_then(|s| s.stamp.clone());
-        let stamp = check_stamp(entry, zips);
-        if stamp == prior {
-            continue;
-        }
+    let total = listed.len();
+    let (version, run) = ctx
+        .app
+        .db
+        .write(|c| {
+            let version = rows::mra_version(c, PLATFORM, crate::unix_now())?;
+            Ok((version, rows::next_run(c, PLATFORM)?))
+        })
+        .await?;
+    let mut pass = Pass::default();
+    for (n, batch) in listed.chunks(BATCH).enumerate() {
         ctx.checkpoint().await?;
-        let outcome = if stamp.is_some() {
-            let (mra, index) = (entry.mra.clone(), Arc::clone(&index));
-            checked += 1;
-            blocking(move || verify(&mra, &index)).await?
-        } else {
-            None
-        };
-        let id = *id;
-        ctx.app
-            .db
-            .write(move |c| {
-                let (check, detail) = outcome.map_or((None, None), |(c, d)| (Some(c), d));
-                let stamp = check.and(stamp);
-                rows::set_check(c, id, check, detail.as_deref(), stamp.as_deref())
+        let (db, arcade2, games2, batch) = (
+            ctx.app.db.clone(),
+            arcade.clone(),
+            games.clone(),
+            batch.to_vec(),
+        );
+        let (back, items) = blocking(move || {
+            let items = scan_batch(&db, &arcade2, &games2, &batch, &mut pass);
+            (pass, items)
+        })
+        .await?;
+        pass = back;
+        let mut items = items?;
+        for item in &mut items {
+            let Pending::Run { mra, rel, stamp } = &mut item.check else {
+                continue;
+            };
+            ctx.checkpoint().await?;
+            let (mra, rel, stamp, arcade2) =
+                (mra.take(), rel.clone(), stamp.clone(), arcade.clone());
+            let (back, done) = blocking(move || {
+                let done = run_check(&arcade2, &mut pass, mra, &rel, stamp);
+                (pass, done)
             })
             .await?;
+            pass = back;
+            item.check = done;
+        }
+        ctx.app
+            .db
+            .write(move |c| store_batch(c, version, run, items))
+            .await?;
+        ctx.progress(json!({
+            "done": ((n + 1) * BATCH).min(total),
+            "total": total,
+            "parsed": pass.parsed,
+            "checked": pass.checked,
+        }))
+        .await?;
     }
+    ctx.checkpoint().await?;
+    let prefs = prefs(&config.prefs);
+    let (retired, live) = ctx
+        .app
+        .db
+        .write(move |c| {
+            let tx = c.transaction()?;
+            let retired = rows::retire_unseen(&tx, PLATFORM, run)?;
+            let live = rows::live_count(&tx, PLATFORM)?;
+            crate::db::dats::set_game_count(&tx, version, live)?;
+            if retired > 0 || rows::recompute_pending(&tx, PLATFORM)? {
+                titles::recompute_platform(&tx, PLATFORM, &prefs)?;
+                rows::set_recompute_pending(&tx, PLATFORM, false)?;
+            }
+            tx.commit()?;
+            Ok((retired, live))
+        })
+        .await?;
     ctx.progress(json!({
-        "mras": entries.len(),
+        "done": total,
+        "total": total,
+        "mras": live,
+        "parsed": pass.parsed,
         "retired": retired,
-        "checked": checked,
+        "checked": pass.checked,
     }))
     .await
 }
 
-/// What [`store`] wrote.
-struct Stored {
-    ids: Vec<TitleId>,
-    retired: usize,
-}
-
-fn store(
-    conn: &mut rusqlite::Connection,
-    entries: &[Entry],
-    zips: &[Vec<Zip>],
-    prefs: &mistarr_core::select::Prefs,
-) -> Result<Stored> {
-    let tx = conn.transaction()?;
-    let version = rows::mra_version(&tx, PLATFORM, crate::unix_now())?;
-    rows::begin_load(&tx, PLATFORM)?;
-    let mut ids = Vec::with_capacity(entries.len());
-    for (e, zips) in entries.iter().zip(zips) {
-        let parsed = parse_name(&e.name);
-        let regions: Vec<String> = parsed.regions.iter().map(|r| r.name().to_owned()).collect();
-        let flags = parsed.flag_labels();
-        let key = format!("mra:{}", group_key(&parsed));
-        let base = if parsed.base_name.is_empty() {
-            e.name.as_str()
-        } else {
-            parsed.base_name.as_str()
+/// Reads the MRA files of `batch` that are new or changed and decides the md5 check of each.
+fn scan_batch(
+    db: &Db,
+    arcade: &Path,
+    games: &Path,
+    batch: &[Listed],
+    pass: &mut Pass,
+) -> Result<Vec<Item>> {
+    let mut items = Vec::with_capacity(batch.len());
+    for listed in batch {
+        let stored = db.read_blocking(|c| rows::stored_mra(c, PLATFORM, &listed.rel))?;
+        if let Some(s) = stored
+            .as_ref()
+            .filter(|s| s.file_stamp.as_deref() == Some(listed.stamp.as_str()))
+        {
+            if pass.claim(&s.name, &listed.rel) {
+                let zips = db.read_blocking(|c| rows::zip_roms(c, s.id))?;
+                items.push(kept(s, listed, &zips, games, &mut pass.index));
+            }
+            continue;
+        }
+        pass.parsed += 1;
+        let Some(entry) = read_entry(&listed.rel, &arcade.join(&listed.rel)) else {
+            // A stored title whose MRA cannot be read now stays as it was until it can.
+            if let Some(s) = stored.filter(|s| pass.claim(&s.name, &listed.rel)) {
+                items.push(Item {
+                    title: Title::Kept {
+                        id: s.id,
+                        present: Vec::new(),
+                    },
+                    check: Pending::Keep,
+                });
+            }
+            continue;
         };
-        let title = MraTitle {
-            name: &e.name,
-            base_name: base,
-            group_key: &key,
-            regions: &regions,
-            languages: &parsed.languages,
-            revision: parsed.revision.as_ref().map(|r| r.label.as_str()),
-            flags: &flags,
-            setname: e.mra.setname.as_deref().filter(|s| !s.is_empty()),
-            rbf: e.mra.rbf.as_deref().filter(|s| !s.is_empty()),
-            mra_path: &e.rel,
+        if !pass.claim(&entry.name, &listed.rel) {
+            continue;
+        }
+        let dirs = entry.mra.zip_paths().into_iter().map(|z| z.dir);
+        pass.index.extend(games, dirs);
+        let zips = zips_of(&entry.mra, &pass.index);
+        let stamp = check_stamp(&listed.stamp, &entry.mra, &zips);
+        let Entry { name, mra, .. } = entry;
+        let (setname, rbf) = (mra.setname.clone(), mra.rbf.clone());
+        let check = match stamp {
+            Some(stamp) => Pending::Run {
+                mra: Some(mra),
+                rel: listed.rel.clone(),
+                stamp,
+            },
+            None => Pending::Set(None, None),
         };
-        let rom_zips: Vec<MraZip<'_>> = zips
-            .iter()
-            .map(|z| MraZip {
-                name: &z.path.file,
-                zip_dir: &z.path.dir,
-                md5: z.md5.as_deref(),
-                present: z.on_disk.is_some(),
-            })
-            .collect();
-        ids.push(rows::upsert_title(
-            &tx, PLATFORM, version, &title, &rom_zips,
-        )?);
+        items.push(Item {
+            title: Title::Stored {
+                rel: listed.rel.clone(),
+                stamp: listed.stamp.clone(),
+                name,
+                setname,
+                rbf,
+                zips,
+            },
+            check,
+        });
     }
-    let retired = rows::retire_absent(&tx, PLATFORM)?;
-    crate::db::dats::set_game_count(&tx, version, entries.len() as u64)?;
-    titles::recompute_platform(&tx, PLATFORM, prefs)?;
-    tx.commit()?;
-    Ok(Stored { ids, retired })
+    Ok(items)
 }
 
-/// Every `.mra` under `dir`, relative path first, shallowest and then alphabetical first.
-/// Symlinked directories are not followed.
-fn list_mras(dir: &Path) -> Vec<(String, PathBuf)> {
-    fn walk(dir: &Path, rel: &str, depth: usize, out: &mut Vec<(String, PathBuf)>) {
+/// An unchanged MRA's title, its zips looked up again and its md5 check redone when one moved.
+fn kept(
+    s: &StoredMra,
+    listed: &Listed,
+    zips: &[StoredZip],
+    games: &Path,
+    index: &mut ZipIndex,
+) -> Item {
+    index.extend(games, zips.iter().map(|z| z.zip_dir.clone()));
+    let found: Vec<(ZipPath, Option<PathBuf>)> = zips
+        .iter()
+        .map(|z| {
+            let path = ZipPath {
+                dir: z.zip_dir.clone(),
+                file: z.name.clone(),
+            };
+            let on_disk = index.find(&path);
+            (path, on_disk)
+        })
+        .collect();
+    let present = zips
+        .iter()
+        .zip(&found)
+        .filter(|(z, (_, on_disk))| z.present != on_disk.is_some())
+        .map(|(z, (_, on_disk))| (z.name.clone(), z.zip_dir.clone(), on_disk.is_some()))
+        .collect();
+    let stamp = if zips.iter().any(|z| z.has_md5) {
+        joined_stamp(&listed.stamp, &found)
+    } else {
+        None
+    };
+    let check = match stamp {
+        s2 if s2 == s.check_stamp => Pending::Keep,
+        Some(stamp) => Pending::Run {
+            mra: None,
+            rel: listed.rel.clone(),
+            stamp,
+        },
+        None => Pending::Set(None, None),
+    };
+    Item {
+        title: Title::Kept { id: s.id, present },
+        check,
+    }
+}
+
+/// Runs one md5 check, reading the MRA again when it was not parsed in this batch.
+fn run_check(
+    arcade: &Path,
+    pass: &mut Pass,
+    mra: Option<Mra>,
+    rel: &str,
+    stamp: String,
+) -> Pending {
+    let mra = if let Some(m) = mra {
+        m
+    } else {
+        pass.parsed += 1;
+        match read_entry(rel, &arcade.join(rel)) {
+            Some(e) => e.mra,
+            // An MRA that cannot be read now keeps its last check until it can.
+            None => return Pending::Keep,
+        }
+    };
+    pass.checked += 1;
+    let outcome = verify(&mra, &pass.index);
+    let stamp = outcome.as_ref().and(Some(stamp));
+    Pending::Set(outcome, stamp)
+}
+
+/// Writes one batch in one transaction, marking the picks stale when it stores a title.
+fn store_batch(
+    conn: &mut rusqlite::Connection,
+    version: DatVersionId,
+    run: i64,
+    items: Vec<Item>,
+) -> Result<()> {
+    let tx = conn.transaction()?;
+    if items
+        .iter()
+        .any(|i| matches!(i.title, Title::Stored { .. }))
+    {
+        rows::set_recompute_pending(&tx, PLATFORM, true)?;
+    }
+    for Item { title, check } in items {
+        let id = match title {
+            Title::Stored {
+                rel,
+                stamp,
+                name,
+                setname,
+                rbf,
+                zips,
+            } => {
+                let parsed = parse_name(&name);
+                let regions: Vec<String> =
+                    parsed.regions.iter().map(|r| r.name().to_owned()).collect();
+                let flags = parsed.flag_labels();
+                let key = format!("mra:{}", group_key(&parsed));
+                let base = if parsed.base_name.is_empty() {
+                    name.as_str()
+                } else {
+                    parsed.base_name.as_str()
+                };
+                let title = MraTitle {
+                    name: &name,
+                    base_name: base,
+                    group_key: &key,
+                    regions: &regions,
+                    languages: &parsed.languages,
+                    revision: parsed.revision.as_ref().map(|r| r.label.as_str()),
+                    flags: &flags,
+                    setname: setname.as_deref().filter(|s| !s.is_empty()),
+                    rbf: rbf.as_deref().filter(|s| !s.is_empty()),
+                    mra_path: &rel,
+                    file_stamp: &stamp,
+                    run,
+                };
+                let rom_zips: Vec<MraZip<'_>> = zips
+                    .iter()
+                    .map(|z| MraZip {
+                        name: &z.path.file,
+                        zip_dir: &z.path.dir,
+                        md5: z.md5.as_deref(),
+                        present: z.on_disk.is_some(),
+                    })
+                    .collect();
+                rows::upsert_title(&tx, PLATFORM, version, &title, &rom_zips)?
+            }
+            Title::Kept { id, present } => {
+                rows::touch(&tx, id, run)?;
+                for (file, dir, on_disk) in &present {
+                    rows::set_zip_present(&tx, id, file, dir, *on_disk)?;
+                }
+                id
+            }
+        };
+        if let Pending::Set(outcome, stamp) = check {
+            let (check, detail) = outcome.map_or((None, None), |(c, d)| (Some(c), d));
+            rows::set_check(&tx, id, check, detail.as_deref(), stamp.as_deref())?;
+        }
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+/// Every `.mra` under `dir`, shallowest and then alphabetical first, with its stamp. Links to
+/// files are followed; linked folders, folders in [`SKIPPED_DIRS`] and second names of one file are left out.
+fn list_mras(dir: &Path) -> Vec<Listed> {
+    fn walk(dir: &Path, rel: &str, depth: usize, out: &mut Vec<(Listed, (u64, u64))>) {
         let Ok(entries) = fs::read_dir(dir) else {
             return;
         };
@@ -253,40 +494,65 @@ fn list_mras(dir: &Path) -> Vec<(String, PathBuf)> {
             } else {
                 format!("{rel}/{name}")
             };
-            let path = entry.path();
             if kind.is_dir() {
-                if depth < MAX_DEPTH {
-                    walk(&path, &rel, depth + 1, out);
+                let skipped = SKIPPED_DIRS.contains(&name.to_lowercase().as_str());
+                if depth < MAX_DEPTH && !skipped {
+                    walk(&entry.path(), &rel, depth + 1, out);
                 }
-            } else if Path::new(&name)
-                .extension()
-                .is_some_and(|e| e.eq_ignore_ascii_case("mra"))
+            } else if (kind.is_file() || kind.is_symlink())
+                && Path::new(&name)
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("mra"))
             {
-                out.push((rel, path));
+                // Follows a link to its file, so the inode dedupe sees the target.
+                let Ok(meta) = fs::metadata(entry.path()) else {
+                    continue;
+                };
+                if meta.is_file() {
+                    let stamp = mra_stamp(&meta);
+                    out.push((Listed { rel, stamp }, (meta.dev(), meta.ino())));
+                }
             }
         }
     }
-    let mut out = Vec::new();
-    walk(dir, "", 0, &mut out);
-    out.sort_by(|a, b| {
+    let mut found = Vec::new();
+    walk(dir, "", 0, &mut found);
+    found.sort_by(|a, b| {
         let depth = |s: &str| s.matches('/').count();
-        depth(&a.0).cmp(&depth(&b.0)).then_with(|| a.0.cmp(&b.0))
+        depth(&a.0.rel)
+            .cmp(&depth(&b.0.rel))
+            .then_with(|| a.0.rel.cmp(&b.0.rel))
     });
-    out
+    let mut files = HashSet::with_capacity(found.len());
+    found
+        .into_iter()
+        .filter(|(_, id)| files.insert(*id))
+        .map(|(l, _)| l)
+        .collect()
 }
 
 /// Size and modification time in nanoseconds, so a rewrite within one second still counts.
-fn file_stamp(path: &Path) -> Option<String> {
-    let meta = fs::metadata(path).ok()?;
+fn stamp_of(meta: &fs::Metadata) -> String {
     let mtime = meta
         .modified()
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok())
         .map_or(0, |d| d.as_nanos());
-    Some(format!("{}:{mtime}", meta.len()))
+    format!("{}:{mtime}", meta.len())
 }
 
-fn read_entry((rel, path): &(String, PathBuf)) -> Option<Entry> {
+/// [`stamp_of`] the file at `path`.
+fn file_stamp(path: &Path) -> Option<String> {
+    fs::metadata(path).ok().map(|m| stamp_of(&m))
+}
+
+/// [`stamp_of`] an MRA file behind the parser version, so a parser change rereads every MRA.
+fn mra_stamp(meta: &fs::Metadata) -> String {
+    format!("p{}:{}", mra::PARSER_VERSION, stamp_of(meta))
+}
+
+/// Parses the MRA at `path`, named by its `<name>` or else by the stem of `rel`.
+fn read_entry(rel: &str, path: &Path) -> Option<Entry> {
     let mra = match mra::read(path) {
         Ok(m) => m,
         Err(e) => {
@@ -308,9 +574,10 @@ fn read_entry((rel, path): &(String, PathBuf)) -> Option<Entry> {
         return None;
     }
     Some(Entry {
-        rel: rel.clone(),
         name,
-        stamp: file_stamp(path).unwrap_or_default(),
+        stamp: fs::metadata(path)
+            .map(|m| mra_stamp(&m))
+            .unwrap_or_default(),
         mra,
     })
 }
@@ -341,41 +608,58 @@ fn resolve_dir(games: &Path, dir: &str) -> Option<PathBuf> {
     Some(path)
 }
 
-/// The zip files present in each directory under `games/`, directories and files keyed by
-/// lowercase name, since exFAT, where MiSTer keeps them, is case-insensitive.
+/// A directory on disk and its file names keyed by lowercase name.
+type Listing = (PathBuf, HashMap<String, String>);
+
+/// The files of each directory under `games/` an MRA reads zips from, directories and
+/// files keyed by lowercase name, since exFAT, where MiSTer keeps them, is case-insensitive.
 #[derive(Debug, Clone, Default)]
 pub(super) struct ZipIndex {
-    dirs: HashMap<String, HashMap<String, PathBuf>>,
+    /// Per lowercase directory, where it is and its file names by lowercase name.
+    dirs: HashMap<String, Option<Listing>>,
 }
 
 impl ZipIndex {
+    /// An index of `dirs` under `games`.
     pub(super) fn build(games: &Path, dirs: Vec<String>) -> Self {
-        let mut index = Self {
-            dirs: HashMap::new(),
-        };
-        for dir in dirs {
-            let key = dir.to_lowercase();
-            if index.dirs.contains_key(&key) {
-                continue;
-            }
-            let mut files = HashMap::new();
-            if let Some(rd) = resolve_dir(games, &dir).and_then(|d| fs::read_dir(d).ok()) {
-                for e in rd.flatten() {
-                    if e.path().is_file() {
-                        let name = e.file_name().to_string_lossy().to_lowercase();
-                        files.insert(name, e.path());
-                    }
-                }
-            }
-            index.dirs.insert(key, files);
-        }
+        let mut index = Self::default();
+        index.extend(games, dirs);
         index
     }
 
-    pub(super) fn find(&self, zip: &ZipPath) -> Option<&PathBuf> {
-        self.dirs
-            .get(&zip.dir.to_lowercase())?
+    /// Lists each of `dirs` not listed yet.
+    pub(super) fn extend(&mut self, games: &Path, dirs: impl IntoIterator<Item = String>) {
+        for dir in dirs {
+            let key = dir.to_lowercase();
+            if self.dirs.contains_key(&key) {
+                continue;
+            }
+            let listed = resolve_dir(games, &dir).map(|path| {
+                let files = fs::read_dir(&path)
+                    .map(|rd| {
+                        rd.flatten()
+                            .filter(|e| {
+                                e.file_type().is_ok_and(|t| t.is_file()) || e.path().is_file()
+                            })
+                            .map(|e| {
+                                let name = e.file_name().to_string_lossy().into_owned();
+                                (name.to_lowercase(), name)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                (path, files)
+            });
+            self.dirs.insert(key, listed);
+        }
+    }
+
+    /// Where `zip` is on disk, if listed and present.
+    pub(super) fn find(&self, zip: &ZipPath) -> Option<PathBuf> {
+        let (dir, files) = self.dirs.get(&zip.dir.to_lowercase())?.as_ref()?;
+        files
             .get(&zip.file.to_lowercase())
+            .map(|name| dir.join(name))
     }
 }
 
@@ -394,28 +678,44 @@ fn zips_of(mra: &Mra, index: &ZipIndex) -> Vec<Zip> {
                         .any(|z| zip_location(z).as_ref() == Some(&path))
                 })
                 .and_then(|r| r.md5.clone());
-            let on_disk = index.find(&path).cloned();
+            let on_disk = index.find(&path);
             Zip { path, md5, on_disk }
         })
         .collect()
 }
 
-/// What the md5 check of an entry depends on, or `None` when it cannot run:
-/// no `<rom>` carries an md5, or a zip is missing.
-fn check_stamp(entry: &Entry, zips: &[Zip]) -> Option<String> {
-    let any_md5 = entry
-        .mra
+/// What the md5 check of an MRA stamped `mra_stamp` depends on, or `None` when it cannot
+/// run: no `<rom>` carries an md5, or a zip is missing.
+fn check_stamp(mra_stamp: &str, mra: &Mra, zips: &[Zip]) -> Option<String> {
+    let any_md5 = mra
         .roms
         .iter()
         .any(|r| r.md5.is_some() && !r.zips.is_empty());
-    if !any_md5 || zips.is_empty() {
+    if !any_md5 {
         return None;
     }
-    let mut stamp = entry.stamp.clone();
-    for z in zips {
-        let path = z.on_disk.as_ref()?;
+    let found: Vec<(ZipPath, Option<PathBuf>)> = zips
+        .iter()
+        .map(|z| (z.path.clone(), z.on_disk.clone()))
+        .collect();
+    joined_stamp(mra_stamp, &found)
+}
+
+/// `mra_stamp` followed by each zip's place and stamp in place order, so the order the MRA or
+/// the database lists zips in never counts; `None` without zips or with one missing.
+fn joined_stamp(mra_stamp: &str, zips: &[(ZipPath, Option<PathBuf>)]) -> Option<String> {
+    if zips.is_empty() {
+        return None;
+    }
+    let mut placed = zips
+        .iter()
+        .map(|(place, on_disk)| Some((place.rel_path(), on_disk.as_ref()?)))
+        .collect::<Option<Vec<_>>>()?;
+    placed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let mut stamp = mra_stamp.to_owned();
+    for (place, path) in placed {
         stamp.push(';');
-        stamp.push_str(&z.path.rel_path());
+        stamp.push_str(&place);
         stamp.push(':');
         stamp.push_str(&file_stamp(path).unwrap_or_default());
     }
@@ -448,7 +748,7 @@ impl<'a> ZipSource<'a> {
         let z = zip_location(zip)?;
         match &self.staged {
             Some((s, path)) if same_zip(s, &z) => Some(path.clone()),
-            _ => self.index.find(&z).cloned(),
+            _ => self.index.find(&z),
         }
     }
 }
@@ -599,13 +899,13 @@ pub(super) fn refresh(
 ) -> Vec<Refreshed> {
     let mut out = Vec::with_capacity(titles.len());
     for (id, rel) in titles {
-        let Some(entry) = read_entry(&(rel.clone(), arcade_dir.join(rel))) else {
+        let Some(entry) = read_entry(rel, &arcade_dir.join(rel)) else {
             continue;
         };
         let dirs = entry.mra.zip_paths().into_iter().map(|z| z.dir).collect();
         let index = ZipIndex::build(games, dirs);
         let zips = zips_of(&entry.mra, &index);
-        let stamp = check_stamp(&entry, &zips);
+        let stamp = check_stamp(&entry.stamp, &entry.mra, &zips);
         let check = stamp.as_ref().and_then(|_| verify(&entry.mra, &index));
         out.push(Refreshed {
             id: *id,

@@ -27,6 +27,15 @@ use crate::error::{Error, Result};
 /// Page cache per connection in KiB; two connections share the 2 MiB budget.
 const CACHE_KIB: i64 = 1024;
 
+/// WAL pages written before an automatic checkpoint, about 1 MiB of 4 KiB pages.
+const WAL_AUTOCHECKPOINT: i64 = 256;
+
+/// Size the WAL file is cut back to after a checkpoint, in bytes.
+const JOURNAL_SIZE_LIMIT: i64 = 1024 * 1024;
+
+/// Heap SQLite tries to stay under, process-wide, by shedding cached pages.
+const SOFT_HEAP_LIMIT: i64 = 8 * 1024 * 1024;
+
 /// How long a statement waits on a lock held by the other connection.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -38,6 +47,9 @@ pub struct Db {
 }
 
 struct Inner {
+    /// One permit, taken before a write reaches the blocking pool, so writers waiting
+    /// their turn hold no blocking thread and reads keep running.
+    write_turn: Arc<tokio::sync::Semaphore>,
     writer: Mutex<Connection>,
     reader: Mutex<Connection>,
     path: PathBuf,
@@ -66,6 +78,7 @@ impl Db {
         reader.pragma_update(None, "query_only", true)?;
         Ok(Self {
             inner: Arc::new(Inner {
+                write_turn: Arc::new(tokio::sync::Semaphore::new(1)),
                 writer: Mutex::new(writer),
                 reader: Mutex::new(reader),
                 path: path.to_path_buf(),
@@ -122,7 +135,7 @@ impl Db {
         f(&conn)
     }
 
-    /// [`Db::write_blocking`] on tokio's blocking pool.
+    /// [`Db::write_blocking`] on tokio's blocking pool, once no other async write is running.
     ///
     /// # Errors
     ///
@@ -132,10 +145,17 @@ impl Db {
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
-        let db = self.clone();
-        tokio::task::spawn_blocking(move || db.write_blocking(f))
+        let turn = Arc::clone(&self.inner.write_turn)
+            .acquire_owned()
             .await
-            .map_err(|e| Error::Task(e.to_string()))?
+            .map_err(|_| Error::Poisoned)?;
+        let db = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _turn = turn;
+            db.write_blocking(f)
+        })
+        .await
+        .map_err(|e| Error::Task(e.to_string()))?
     }
 
     /// [`Db::read_blocking`] on tokio's blocking pool.
@@ -155,7 +175,35 @@ impl Db {
     }
 }
 
-/// Applies the connection pragmas every connection shares.
+/// The environment variable SQLite reads for its temporary file directory.
+pub const SQLITE_TMPDIR: &str = "SQLITE_TMPDIR";
+
+/// Creates `dir` for SQLite's temporary files and removes the files a previous run left
+/// there; the caller then points [`SQLITE_TMPDIR`] at it before any connection opens.
+///
+/// # Errors
+///
+/// [`Error::Io`] when `dir` cannot be created or listed.
+///
+/// ```
+/// let dir = std::env::temp_dir().join("mistarr-doc-sqlite-tmp");
+/// mistarr_server::db::prepare_temp_dir(&dir).unwrap();
+/// assert!(dir.is_dir());
+/// ```
+pub fn prepare_temp_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        if entry.file_type().is_ok_and(|t| t.is_file()) {
+            if let Err(e) = std::fs::remove_file(entry.path()) {
+                tracing::warn!(error = %e, "cannot remove a stale SQLite temporary file");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Applies the connection pragmas every connection shares; the memory-related ones are
+/// listed in `docs/ARCHITECTURE.md` "Resource budgets".
 fn configure(conn: &Connection) -> Result<()> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
     let mode: String =
@@ -166,6 +214,11 @@ fn configure(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.pragma_update(None, "cache_size", -CACHE_KIB)?;
+    conn.pragma_update(None, "mmap_size", 0)?;
+    conn.pragma_update(None, "temp_store", "FILE")?;
+    conn.pragma_update(None, "wal_autocheckpoint", WAL_AUTOCHECKPOINT)?;
+    conn.pragma_update_and_check(None, "journal_size_limit", JOURNAL_SIZE_LIMIT, |_| Ok(()))?;
+    conn.pragma_update_and_check(None, "soft_heap_limit", SOFT_HEAP_LIMIT, |_| Ok(()))?;
     Ok(())
 }
 
@@ -200,10 +253,111 @@ mod tests {
     }
 
     #[test]
+    fn connections_keep_memory_and_the_wal_small() {
+        let (_dir, db) = testutil::db();
+        for read in [true, false] {
+            let pragma = |c: &Connection, name: &str| -> Result<i64> {
+                Ok(c.pragma_query_value(None, name, |r| r.get(0))?)
+            };
+            let values = |c: &Connection| -> Result<[i64; 5]> {
+                Ok([
+                    pragma(c, "mmap_size")?,
+                    pragma(c, "temp_store")?,
+                    pragma(c, "wal_autocheckpoint")?,
+                    pragma(c, "journal_size_limit")?,
+                    pragma(c, "soft_heap_limit")?,
+                ])
+            };
+            let got = if read {
+                db.read_blocking(values)
+            } else {
+                db.write_blocking(|c| values(c))
+            }
+            .expect("pragmas");
+            assert_eq!(
+                got,
+                [
+                    0,
+                    1,
+                    WAL_AUTOCHECKPOINT,
+                    JOURNAL_SIZE_LIMIT,
+                    SOFT_HEAP_LIMIT
+                ]
+            );
+        }
+    }
+
+    #[test]
+    fn the_temp_dir_is_created_and_emptied_of_stale_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tmp = dir.path().join("data/tmp");
+        prepare_temp_dir(&tmp).expect("create");
+        std::fs::write(tmp.join("etilqs_stale"), b"x").expect("write");
+        std::fs::create_dir(tmp.join("keep")).expect("mkdir");
+        prepare_temp_dir(&tmp).expect("clear");
+        let left: Vec<_> = std::fs::read_dir(&tmp)
+            .expect("list")
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left, ["keep"]);
+    }
+
+    #[test]
     fn reader_cannot_write() {
         let (_dir, db) = testutil::db();
         let r = db.read_blocking(|c| Ok(settings::set(c, "k", "v")));
         assert!(r.expect("lock").is_err());
+    }
+
+    #[test]
+    fn reads_run_while_writers_queue_behind_a_long_write() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(2)
+            .enable_time()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let (_dir, db) = testutil::db();
+            let (held, holding) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let long = tokio::spawn({
+                let db = db.clone();
+                async move {
+                    db.write(move |_| {
+                        held.send(()).ok();
+                        released.recv().ok();
+                        Ok(())
+                    })
+                    .await
+                }
+            });
+            while holding.try_recv().is_err() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let queued: Vec<_> = (0..4)
+                .map(|i| {
+                    let db = db.clone();
+                    tokio::spawn(async move {
+                        db.write(move |c| settings::set(c, "k", &i.to_string()))
+                            .await
+                    })
+                })
+                .collect();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let read =
+                tokio::time::timeout(Duration::from_secs(5), db.read(migrate::current_version))
+                    .await;
+            assert!(
+                read.is_ok_and(|r| r.is_ok()),
+                "a read waited on queued writers"
+            );
+            release.send(()).expect("release");
+            long.await.expect("join").expect("long write");
+            for q in queued {
+                q.await.expect("join").expect("queued write");
+            }
+        });
     }
 
     #[tokio::test]

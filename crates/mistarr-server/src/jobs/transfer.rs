@@ -284,8 +284,8 @@ async fn metainfo(app: &AppState, row: &SourceRow) -> Option<Vec<u8>> {
         .join(mistarr_sources::watch::LOADED_DIR)
         .join(&row.origin_file);
     let bytes = tokio::fs::read(&path).await.ok()?;
-    let meta = torrent::parse_torrent(&bytes).ok()?;
-    (InfoHash::from_bytes(meta.infohash).to_string() == row.infohash).then_some(bytes)
+    let hash = torrent::infohash(&bytes).ok()?;
+    (InfoHash::from_bytes(hash).to_string() == row.infohash).then_some(bytes)
 }
 
 #[async_trait]

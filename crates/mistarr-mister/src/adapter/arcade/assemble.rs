@@ -13,6 +13,9 @@ pub const MAX_ROM_BYTES: u64 = 512 * 1024 * 1024;
 /// Largest `repeat` a part may carry; MRAs use small counts to fill padding.
 pub const MAX_REPEAT: u64 = 4096;
 
+/// Bytes read at a time when [`md5`] streams a part from its zip.
+const STREAM_CHUNK: usize = 64 * 1024;
+
 /// Where named parts are read from.
 pub trait PartSource {
     /// Opens member `name` of zip `zip` (an MRA zip name, e.g. `exblast.zip`), or, when no
@@ -259,6 +262,12 @@ impl Walker {
                 p.repeat
             )));
         }
+        if p.repeat == 0 {
+            return Ok(());
+        }
+        if let (Some(name), None) = (&p.name, &self.data) {
+            return self.stream_named(p, name, rom_zips, layout, src);
+        }
         let named;
         let bytes: &[u8] = match &p.name {
             None => &p.data,
@@ -317,6 +326,80 @@ impl Walker {
                 return Err(too_large());
             }
             return Ok(bytes);
+        }
+        Err(Error::MissingPart {
+            part: name.to_owned(),
+            zips: zips.join("|"),
+        })
+    }
+
+    /// Feeds a named part straight from its member in [`STREAM_CHUNK`] pieces, opening the
+    /// member again for each repeat, for a digest that keeps no rom bytes; refuses exactly
+    /// what [`Walker::part`] does when it reads the part whole.
+    fn stream_named(
+        &mut self,
+        p: &Part,
+        name: &str,
+        rom_zips: &[String],
+        layout: &Layout,
+        src: &mut dyn PartSource,
+    ) -> Result<()> {
+        let zips = if p.zips.is_empty() { rom_zips } else { &p.zips };
+        if zips.is_empty() {
+            return Err(refuse(format!("part {name} names no zip")));
+        }
+        let mut k = 0;
+        for rep in 0..p.repeat {
+            let before = self.fed;
+            self.stream_once(p, name, zips, layout, src, &mut k)?;
+            if rep > 0 {
+                continue;
+            }
+            let once = self.fed - before;
+            if once == 0 && p.repeat > 1 {
+                return Err(refuse(format!(
+                    "part {name} is empty and repeated {} times",
+                    p.repeat
+                )));
+            }
+            let rest = once.checked_mul(p.repeat - 1).ok_or_else(too_large)?;
+            if add(self.fed, rest)? > MAX_ROM_BYTES {
+                return Err(too_large());
+            }
+        }
+        Self::whole_words(k)
+    }
+
+    /// Feeds one pass of a named part from the first of `zips` holding it.
+    fn stream_once(
+        &mut self,
+        p: &Part,
+        name: &str,
+        zips: &[String],
+        layout: &Layout,
+        src: &mut dyn PartSource,
+        k: &mut usize,
+    ) -> Result<()> {
+        for zip in zips {
+            let Some(mut reader) = src.open(zip, name, p.crc)? else {
+                continue;
+            };
+            let skipped = io::copy(&mut (&mut reader).take(p.offset), &mut io::sink())?;
+            if skipped < p.offset {
+                return Err(refuse(format!("offset of part {name} is past its end")));
+            }
+            let mut reader = reader.take(p.length.unwrap_or(u64::MAX));
+            let mut buf = vec![0; STREAM_CHUNK];
+            loop {
+                let n = match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                self.feed(&buf[..n], layout, k)?;
+            }
+            return Ok(());
         }
         Err(Error::MissingPart {
             part: name.to_owned(),

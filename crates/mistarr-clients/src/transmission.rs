@@ -8,6 +8,7 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use hyper::body::Bytes;
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
@@ -18,15 +19,15 @@ use crate::{
     FileProgress, InfoHash, Result, SeedPolicy, TorrentSource, TorrentState, TorrentStatus,
 };
 
-/// Fields requested by [`DownloadClient::status`].
-const STATUS_FIELDS: [&str; 12] = [
+/// Fields requested by [`DownloadClient::status`]: `fileStats` without `files`, whose
+/// names would make a large torrent's reply exceed the body limit on every poll.
+const STATUS_FIELDS: [&str; 11] = [
     "id",
     "hashString",
     "status",
-    "percentDone",
+    "leftUntilDone",
     "error",
     "errorString",
-    "files",
     "fileStats",
     "rateDownload",
     "rateUpload",
@@ -141,13 +142,24 @@ impl Transmission {
         self
     }
 
-    /// Sends one RPC, renewing the session id once on a 409.
+    /// Sends one RPC, renewing the session id once on a 409, and returns its `arguments`.
     async fn rpc(
         &self,
         session: &mut Option<String>,
         method: &str,
         arguments: Value,
     ) -> Result<Value> {
+        self.rpc_as(session, method, arguments).await
+    }
+
+    /// [`Transmission::rpc`] with `arguments` read straight into `T`, so a large reply
+    /// never becomes a JSON tree.
+    async fn rpc_as<T: DeserializeOwned + Default>(
+        &self,
+        session: &mut Option<String>,
+        method: &str,
+        arguments: Value,
+    ) -> Result<T> {
         let body = Bytes::from(json!({ "method": method, "arguments": arguments }).to_string());
         for _ in 0..2 {
             let headers = Headers {
@@ -172,22 +184,18 @@ impl Transmission {
         ))
     }
 
-    /// `torrent-get` for one torrent; [`ClientError::NotFound`] if absent.
-    async fn get_one(
+    /// `torrent-get` for one torrent read as `T`; [`ClientError::NotFound`] if absent.
+    async fn get_one<T: DeserializeOwned>(
         &self,
         session: &mut Option<String>,
         id: &ClientTorrentId,
         fields: &[&str],
-    ) -> Result<Value> {
+    ) -> Result<T> {
         let args = json!({ "ids": [id.as_str()], "fields": fields });
-        let reply = self.rpc(session, "torrent-get", args).await?;
-        let torrents = match reply {
-            Value::Object(mut args) => args.remove("torrents"),
-            _ => None,
-        };
-        match torrents {
-            Some(Value::Array(list)) => list.into_iter().next().ok_or(ClientError::NotFound),
-            _ => Err(ClientError::Protocol("torrent-get without torrents".into())),
+        let reply: Torrents<T> = self.rpc_as(session, "torrent-get", args).await?;
+        match reply.torrents {
+            Some(list) => list.into_iter().next().ok_or(ClientError::NotFound),
+            None => Err(ClientError::Protocol("torrent-get without torrents".into())),
         }
     }
 
@@ -197,8 +205,7 @@ impl Transmission {
         session: &mut Option<String>,
         id: &ClientTorrentId,
     ) -> Result<Vec<bool>> {
-        let torrent = self.get_one(session, id, &["wanted"]).await?;
-        let raw: WantedOnly = serde_json::from_value(torrent).map_err(protocol)?;
+        let raw: WantedOnly = self.get_one(session, id, &["wanted"]).await?;
         Ok(raw.wanted.into_iter().map(Flag::into_bool).collect())
     }
 
@@ -284,7 +291,7 @@ impl Transmission {
 
     async fn simple(&self, method: &str, id: &ClientTorrentId, extra: Value) -> Result<()> {
         let mut session = self.session.lock().await;
-        self.get_one(&mut session, id, &["id"]).await?;
+        self.get_one::<Value>(&mut session, id, &["id"]).await?;
         let mut args = Map::new();
         args.insert("ids".into(), json!([id.as_str()]));
         if let Value::Object(extra) = extra {
@@ -391,7 +398,7 @@ impl DownloadClient for Transmission {
 
     async fn set_seed_policy(&self, id: &ClientTorrentId, seed: SeedPolicy) -> Result<()> {
         let mut session = self.session.lock().await;
-        self.get_one(&mut session, id, &["id"]).await?;
+        self.get_one::<Value>(&mut session, id, &["id"]).await?;
         self.apply_seed(&mut session, id, &seed, false).await
     }
 
@@ -405,17 +412,15 @@ impl DownloadClient for Transmission {
 
     async fn status(&self, id: &ClientTorrentId) -> Result<TorrentStatus> {
         let mut session = self.session.lock().await;
-        let torrent = self.get_one(&mut session, id, &STATUS_FIELDS).await?;
+        let raw: RawTorrent = self.get_one(&mut session, id, &STATUS_FIELDS).await?;
         drop(session);
-        let raw: RawTorrent = serde_json::from_value(torrent).map_err(protocol)?;
         raw.into_status()
     }
 
     async fn files(&self, id: &ClientTorrentId) -> Result<Vec<ClientFile>> {
         let mut session = self.session.lock().await;
-        let torrent = self.get_one(&mut session, id, &["name", "files"]).await?;
+        let raw: RawListing = self.get_one(&mut session, id, &["name", "files"]).await?;
         drop(session);
-        let raw: RawListing = serde_json::from_value(torrent).map_err(protocol)?;
         raw.into_files()
     }
 
@@ -452,18 +457,37 @@ fn protocol(e: impl std::fmt::Display) -> ClientError {
     ClientError::Protocol(e.to_string())
 }
 
-fn parse_reply(body: &[u8]) -> Result<Value> {
+/// A reply's `arguments` as `T`, or its `result` as the error when that is not `success`.
+fn parse_reply<T: DeserializeOwned + Default>(body: &[u8]) -> Result<T> {
     #[derive(Deserialize)]
-    struct Reply {
+    struct Reply<T> {
         result: String,
         #[serde(default)]
-        arguments: Value,
+        arguments: T,
     }
-    let reply: Reply = serde_json::from_slice(body).map_err(protocol)?;
-    if reply.result == "success" {
-        Ok(reply.arguments)
-    } else {
-        Err(ClientError::Protocol(reply.result))
+    #[derive(Deserialize)]
+    struct Head {
+        result: String,
+    }
+    match serde_json::from_slice::<Reply<T>>(body) {
+        Ok(reply) if reply.result == "success" => Ok(reply.arguments),
+        Ok(reply) => Err(ClientError::Protocol(reply.result)),
+        Err(e) => match serde_json::from_slice::<Head>(body) {
+            Ok(head) if head.result != "success" => Err(ClientError::Protocol(head.result)),
+            _ => Err(protocol(e)),
+        },
+    }
+}
+
+/// The `arguments` of a `torrent-get` reply.
+#[derive(Deserialize)]
+struct Torrents<T> {
+    torrents: Option<Vec<T>>,
+}
+
+impl<T> Default for Torrents<T> {
+    fn default() -> Self {
+        Self { torrents: None }
     }
 }
 
@@ -523,8 +547,9 @@ struct RawTorrent {
     error: i64,
     #[serde(default)]
     error_string: String,
+    /// Bytes of the wanted files still missing; `None` when the reply leaves it out.
     #[serde(default)]
-    files: Vec<RawFile>,
+    left_until_done: Option<u64>,
     #[serde(default)]
     file_stats: Vec<RawFileStat>,
     #[serde(default)]
@@ -535,11 +560,6 @@ struct RawTorrent {
     upload_ratio: f64,
     #[serde(default)]
     is_finished: bool,
-}
-
-#[derive(Deserialize)]
-struct RawFile {
-    length: u64,
 }
 
 #[derive(Deserialize)]
@@ -589,19 +609,20 @@ impl RawTorrent {
     fn into_status(self) -> Result<TorrentStatus> {
         let infohash = InfoHash::from_hex(&self.hash_string)
             .ok_or_else(|| protocol(format!("bad hashString {:?}", self.hash_string)))?;
-        if self.files.len() != self.file_stats.len() {
-            return Err(protocol("files and fileStats differ in length"));
-        }
+        // With nothing left every wanted file is whole, so its size is what the client has.
+        let all_done = self.left_until_done == Some(0);
         let files = self
-            .files
+            .file_stats
             .into_iter()
-            .zip(self.file_stats)
             .zip(0u32..)
-            .map(|((file, stat), index)| FileProgress {
-                index,
-                bytes_done: stat.bytes_completed,
-                size: file.length,
-                wanted: stat.wanted.into_bool(),
+            .map(|(stat, index)| {
+                let wanted = stat.wanted.into_bool();
+                FileProgress {
+                    index,
+                    bytes_done: stat.bytes_completed,
+                    size: (wanted && all_done).then_some(stat.bytes_completed),
+                    wanted,
+                }
             })
             .collect();
         let state = if self.error == LOCAL_ERROR {

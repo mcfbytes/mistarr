@@ -207,20 +207,24 @@ fn push_extend(fake: &FakeServer, wanted: [bool; 4]) {
 
 /// A `torrent-get` status reply with `status` and bytes done per file.
 fn status(hash: &str, code: i64, done: [u64; 4], error: i64) -> FakeResponse {
-    let files: Vec<Value> = FILES
-        .iter()
-        .map(|(n, len)| json!({ "name": format!("{SET}/NES/{n}"), "length": len }))
-        .collect();
     // The readme (index 1) and the third rom are never selected in these tests.
+    let wanted = |i: usize| i % 2 == 0 && i < 3;
     let stats: Vec<Value> = done
         .iter()
-        .zip(0..)
-        .map(|(d, i)| json!({ "bytesCompleted": d, "wanted": i % 2 == 0 && i < 3 }))
+        .enumerate()
+        .map(|(i, d)| json!({ "bytesCompleted": d, "wanted": wanted(i) }))
         .collect();
+    let left: u64 = FILES
+        .iter()
+        .zip(done)
+        .enumerate()
+        .filter(|(i, _)| wanted(*i))
+        .map(|(_, ((_, len), d))| len - d)
+        .sum();
     FakeResponse::success(json!({ "torrents": [{
-        "id": 1, "hashString": hash, "status": code, "percentDone": 0.0,
+        "id": 1, "hashString": hash, "status": code, "leftUntilDone": left,
         "error": error, "errorString": if error == 3 { "No space left" } else { "" },
-        "files": files, "fileStats": stats, "rateDownload": 0, "rateUpload": 0,
+        "fileStats": stats, "rateDownload": 0, "rateUpload": 0,
         "uploadRatio": 0.0, "isFinished": false
     }] }))
 }

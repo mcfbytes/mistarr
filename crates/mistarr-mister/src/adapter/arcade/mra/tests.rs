@@ -168,11 +168,110 @@ fn truncated_document_is_an_error() {
 }
 
 #[test]
-fn unknown_entity_is_an_error() {
-    assert!(matches!(
-        parse(b"<m><name>&bogus;</name></m>"),
-        Err(Error::Mra(_))
-    ));
+fn unknown_entity_stays_as_written() {
+    let mra = parse(b"<m><name>A &bogus; B</name></m>").expect("parse");
+    assert_eq!(mra.name.as_deref(), Some("A &bogus; B"));
+}
+
+const MIXED_CASE: &str = r#"<?xml version="1.0"?>
+<MisterRomDescription>
+  <Name>Example Blaster</NAME>
+  <SetName>exblast</setname>
+  <RBF>examplecore</Rbf>
+  <ROM Index="1" ZIP="exblast.zip" MD5="0123456789ABCDEF0123456789abcdef">
+    <PART Name="a.bin" CRC="0000000A" Offset="0x10"/>
+    <Interleave OUTPUT="16">
+      <Part name="even.bin" MAP="01"></part>
+      <part NAME="odd.bin" map="10"></PART>
+    </interleave>
+    <Patch OFFSET="1">FF</patch>
+  </rom>
+</misterromdescription>"#;
+
+#[test]
+fn tag_and_attribute_case_is_ignored() {
+    let mixed = parse(MIXED_CASE.as_bytes()).expect("parse");
+    let lower = parse(MIXED_CASE.to_ascii_lowercase().as_bytes()).expect("parse");
+    assert_eq!(mixed.name.as_deref(), Some("Example Blaster"));
+    assert_eq!(mixed.setname.as_deref(), Some("exblast"));
+    assert_eq!(mixed.rbf.as_deref(), Some("examplecore"));
+    assert_eq!(mixed.zips, ["exblast.zip"]);
+    let rom = &mixed.roms[0];
+    assert_eq!(rom.index, 1);
+    assert_eq!(rom.md5.as_deref(), Some("0123456789abcdef0123456789abcdef"));
+    assert!(matches!(&rom.items[0], RomItem::Part(p) if p.crc == Some(10) && p.offset == 16));
+    assert!(matches!(&rom.items[1], RomItem::Interleave(il) if il.parts.len() == 2));
+    assert!(matches!(&rom.items[2], RomItem::Patch(p) if p.data == [0xff]));
+    assert_eq!(mixed.roms, lower.roms);
+}
+
+#[test]
+fn stray_and_unclosed_elements_are_tolerated() {
+    let mra = parse(
+        b"<misterromdescription><name>Example</b> Blaster</name>\
+          <rom zip=\"exblast.zip\"><part name=\"a.bin\"></rom>\
+          <rbf>excore</rbf></misterromdescription>",
+    )
+    .expect("parse");
+    assert_eq!(mra.name.as_deref(), Some("Example Blaster"));
+    assert_eq!(mra.rbf.as_deref(), Some("excore"));
+    assert!(
+        matches!(&mra.roms[0].items[0], RomItem::Part(p) if p.name.as_deref() == Some("a.bin"))
+    );
+}
+
+#[test]
+fn an_unclosed_field_keeps_out_rom_data_and_is_capped() {
+    let hex = "00 ".repeat(400);
+    let xml = format!(
+        "<misterromdescription><setname>exblast<rom zip=\"exblast.zip\">\
+         <part>{hex}</part></rom>{}</misterromdescription>",
+        "x".repeat(1000)
+    );
+    let mra = parse(xml.as_bytes()).expect("parse");
+    let setname = mra.setname.expect("setname");
+    assert!(setname.starts_with("exblast"));
+    assert!(!setname.contains("00"));
+    assert_eq!(setname.len(), MAX_FIELD_BYTES);
+    assert!(matches!(&mra.roms[0].items[0], RomItem::Part(p) if p.data.len() == 400));
+    let wide = format!("<m><name>{}</name></m>", "é".repeat(300));
+    let name = parse(wide.as_bytes()).expect("parse").name.expect("name");
+    assert!(name.len() <= MAX_FIELD_BYTES && name.chars().all(|c| c == 'é'));
+}
+
+#[test]
+fn read_refuses_an_oversized_file() {
+    let dir = crate::adapter::testutil::scratch("mra-big");
+    let path = dir.join("big.mra");
+    let pad = " ".repeat(usize::try_from(MAX_MRA_BYTES).expect("fits"));
+    std::fs::write(&path, format!("<m>{pad}</m>")).expect("write");
+    assert!(matches!(read(&path), Err(Error::Mra(m)) if m.contains("larger")));
+}
+
+/// `text` with each ASCII letter upper-cased where `mask` has a set bit, cycling the mask.
+fn recase(text: &str, mask: &[bool]) -> String {
+    text.chars()
+        .zip(mask.iter().cycle())
+        .map(|(c, &up)| if up { c.to_ascii_uppercase() } else { c })
+        .collect()
+}
+
+/// An MRA whose markup, not its values, is recased by `mask`.
+fn recased_mra(name: &str, zip: &str, index: u32, mask: &[bool]) -> String {
+    let t = |s: &str| recase(s, mask);
+    format!(
+        "<{m}><{n}>{name}</{n2}><{r} {i}=\"{index}\" {z}=\"{zip}\"><{p} {pn}=\"a.bin\"/></{r2}></{m2}>",
+        m = t("misterromdescription"),
+        m2 = t("MISTERROMDESCRIPTION"),
+        n = t("name"),
+        n2 = t("NAME"),
+        r = t("rom"),
+        r2 = t("ROM"),
+        i = t("index"),
+        z = t("zip"),
+        p = t("part"),
+        pn = t("name"),
+    )
 }
 
 #[test]
@@ -236,6 +335,20 @@ proptest! {
     #[test]
     fn parse_never_panics(s in ".{0,200}") {
         let _ = parse(s.as_bytes());
+    }
+
+    #[test]
+    fn markup_case_never_changes_the_result(
+        name in "[A-Za-z0-9 ]{1,20}",
+        zip in "[a-z0-9]{1,8}\\.zip",
+        index in 0u32..8,
+        mask in proptest::collection::vec(any::<bool>(), 1..16),
+    ) {
+        let mixed = parse(recased_mra(&name, &zip, index, &mask).as_bytes()).expect("parse");
+        let plain = parse(recased_mra(&name, &zip, index, &[false]).as_bytes()).expect("parse");
+        prop_assert_eq!(&mixed, &plain);
+        prop_assert_eq!(mixed.roms[0].index, index);
+        prop_assert_eq!(mixed.zips, vec![zip]);
     }
 
     #[test]

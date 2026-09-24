@@ -261,7 +261,7 @@ pub enum TorrentState {
 ///
 /// ```
 /// use mistarr_clients::FileProgress;
-/// let f = FileProgress { index: 0, bytes_done: 10, size: 10, wanted: true };
+/// let f = FileProgress { index: 0, bytes_done: 10, size: Some(10), wanted: true };
 /// assert!(f.is_complete());
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,22 +270,37 @@ pub struct FileProgress {
     pub index: u32,
     /// Bytes of this file the client has verified.
     pub bytes_done: u64,
-    /// Size of the file in bytes.
-    pub size: u64,
+    /// Size of the file in bytes; `None` when the client's status leaves sizes to
+    /// [`DownloadClient::files`] and the metainfo, as Transmission's does for an unfinished torrent.
+    pub size: Option<u64>,
     /// Whether the client is set to download this file.
     pub wanted: bool,
 }
 
 impl FileProgress {
-    /// True when every byte of the file is present.
+    /// True when every byte of the file is present; false while its size is unknown.
     ///
     /// ```
     /// use mistarr_clients::FileProgress;
-    /// assert!(!FileProgress { index: 0, bytes_done: 1, size: 2, wanted: true }.is_complete());
+    /// assert!(!FileProgress { index: 0, bytes_done: 1, size: Some(2), wanted: true }.is_complete());
+    /// assert!(!FileProgress { index: 0, bytes_done: 2, size: None, wanted: true }.is_complete());
     /// ```
     #[must_use]
     pub fn is_complete(&self) -> bool {
-        self.bytes_done == self.size
+        self.size == Some(self.bytes_done)
+    }
+
+    /// The file's size as the client reports it, else `known`, its size from the metainfo.
+    ///
+    /// ```
+    /// use mistarr_clients::FileProgress;
+    /// let f = FileProgress { index: 0, bytes_done: 2, size: None, wanted: true };
+    /// assert_eq!(f.size_or(2), 2);
+    /// assert_eq!(FileProgress { size: Some(4), ..f }.size_or(2), 4);
+    /// ```
+    #[must_use]
+    pub fn size_or(&self, known: u64) -> u64 {
+        self.size.unwrap_or(known)
     }
 }
 
@@ -313,13 +328,13 @@ pub struct ClientFile {
 /// let st = TorrentStatus {
 ///     infohash: InfoHash::from_bytes([7; 20]),
 ///     state: TorrentState::Downloading,
-///     files: vec![FileProgress { index: 0, bytes_done: 4, size: 4, wanted: true }],
+///     files: vec![FileProgress { index: 0, bytes_done: 4, size: Some(4), wanted: true }],
 ///     ratio: 0.0,
 ///     down_rate: 0,
 ///     up_rate: 0,
 ///     is_finished: false,
 /// };
-/// assert!(st.file_done(0));
+/// assert!(st.file_done(0, 4));
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub struct TorrentStatus {
@@ -341,27 +356,54 @@ pub struct TorrentStatus {
 }
 
 impl TorrentStatus {
-    /// True when file `index` is complete and the client is not checking,
-    /// which is when the importer may take it (docs/DOWNLOAD-CLIENTS.md).
+    /// True when file `index`, of `size` bytes by the metainfo, is complete and the client
+    /// is not checking, which is when the importer may take it (docs/DOWNLOAD-CLIENTS.md).
     ///
     /// ```
     /// use mistarr_clients::{FileProgress, InfoHash, TorrentState, TorrentStatus};
-    /// let st = TorrentStatus {
+    /// let mut st = TorrentStatus {
     ///     infohash: InfoHash::from_bytes([7; 20]),
     ///     state: TorrentState::Checking,
-    ///     files: vec![FileProgress { index: 0, bytes_done: 4, size: 4, wanted: true }],
+    ///     files: vec![FileProgress { index: 0, bytes_done: 4, size: None, wanted: true }],
     ///     ratio: 0.0, down_rate: 0, up_rate: 0, is_finished: false,
     /// };
-    /// assert!(!st.file_done(0));
-    /// assert!(!st.file_done(9));
+    /// assert!(!st.file_done(0, 4));
+    /// st.state = TorrentState::Downloading;
+    /// assert!(st.file_done(0, 4));
+    /// assert!(!st.file_done(0, 5));
+    /// assert!(!st.file_done(9, 4));
     /// ```
     #[must_use]
-    pub fn file_done(&self, index: u32) -> bool {
+    pub fn file_done(&self, index: u32, size: u64) -> bool {
         self.state != TorrentState::Checking
             && self
-                .files
-                .iter()
-                .any(|f| f.index == index && f.is_complete())
+                .file(index)
+                .is_some_and(|f| f.bytes_done == f.size_or(size))
+    }
+
+    /// Progress of file `index`. Clients list files in index order, so this is a direct
+    /// lookup, falling back to a search for a list that is not.
+    ///
+    /// ```
+    /// use mistarr_clients::{FileProgress, InfoHash, TorrentState, TorrentStatus};
+    /// let file = |index| FileProgress { index, bytes_done: 0, size: Some(4), wanted: true };
+    /// let st = TorrentStatus {
+    ///     infohash: InfoHash::from_bytes([7; 20]),
+    ///     state: TorrentState::Downloading,
+    ///     files: vec![file(0), file(1), file(5)],
+    ///     ratio: 0.0, down_rate: 0, up_rate: 0, is_finished: false,
+    /// };
+    /// assert_eq!(st.file(1).map(|f| f.index), Some(1));
+    /// assert_eq!(st.file(5).map(|f| f.index), Some(5));
+    /// assert!(st.file(2).is_none());
+    /// ```
+    #[must_use]
+    pub fn file(&self, index: u32) -> Option<&FileProgress> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.files.get(i))
+            .filter(|f| f.index == index)
+            .or_else(|| self.files.iter().find(|f| f.index == index))
     }
 }
 

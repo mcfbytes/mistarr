@@ -78,6 +78,36 @@ cargo run -p mistarr-fixture -- set ./out
 cargo run -p mistarr-fixture -- tracker --loopback-as auto
 ```
 
+## Memory budget
+
+`crates/mistarr-server/tests/memory.rs` holds each heavy job to the peak RSS
+budget in ARCHITECTURE.md "Resource budgets". Every test generates its
+inputs in a temporary directory, starts the built `mistarr` binary on it as
+a child process, waits for the job through the database, and reads the
+child's `VmHWM` from `/proc/<pid>/status`, so one job's peak never counts
+against another and the numbers include everything the real daemon runs.
+
+| Test | Input | Asserts |
+|---|---|---|
+| `arcade_catalogue_stays_under_budget` | `_Arcade` with 1 000 MRAs of 24 parts, 50 under `_alternatives`, 5 hard links, every tenth MRA in mixed tag case, one MRA repeating a 32 MiB part four times, and an `_Organized` tree of 1 000 folders holding 15 000 symlinks to them; a zip per MRA | every MRA stored and its md5 matched, each distinct MRA read once, and an unchanged rerun reads and checks none |
+| `dat_and_torrent_import_stay_under_budget` | a 50 MB Logiqx DAT of about 200 000 games, then a torrent of 50 000 files named after them | every game stored, every torrent file stored and matched |
+| `scan_stays_under_budget` | 16 000 loose and 2 000 zipped GBA files and 1 000 PSX folders of a cue and a bin | a `files` row per file and zip member |
+| `a_tiny_memory_limit_is_raised_to_the_floor` | `[memory] data_limit_mib = 2` | the process runs with the 64 MiB floor, or a lower inherited limit |
+
+Each server started also checks that `/proc/<pid>/limits` shows the default
+192 MiB data limit, or the lower limit the test run inherited, and that its
+SQLite temporary directory exists. Besides the 64 MiB budget, each job's peak
+must stay within 12 or 16 MiB of a server that runs no job, measured once
+per run, so a regression shows before it reaches the budget. The suite runs in `cargo test --workspace` in debug
+builds and takes about a minute; the budget holds there on x86-64 with room
+to spare, and a release build for armv7 needs less, with half the pointer
+size and a smaller binary. `make memory` runs it one test at a time and
+prints each peak:
+
+```sh
+make memory
+```
+
 ## 3. End-to-end on a board with real, open-licensed content
 
 For manual verification on a DE10-Nano, use homebrew whose licence permits
@@ -116,7 +146,8 @@ CI records them; a regression over 20 percent fails the build. On the board,
 
 ## What CI runs
 
-- `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on x86-64.
+- `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on x86-64,
+  which includes the memory budget suite above.
 - The `e2e` job: installs `transmission-daemon` and `rtorrent`, runs
   `make e2e` with both required, and uploads `target/e2e-logs` on failure.
 - `cargo zigbuild --target armv7-unknown-linux-musleabihf`, then `file`

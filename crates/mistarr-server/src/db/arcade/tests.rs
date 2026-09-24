@@ -11,6 +11,10 @@ fn conn() -> Connection {
 }
 
 fn mra(c: &Connection, name: &str, zips: &[(&str, bool)]) -> TitleId {
+    mra_run(c, name, zips, 1)
+}
+
+fn mra_run(c: &Connection, name: &str, zips: &[(&str, bool)], run: i64) -> TitleId {
     let v = mra_version(c, "arcade", 1).expect("version");
     let key = format!("mra:{}", name.to_lowercase());
     let t = MraTitle {
@@ -24,6 +28,8 @@ fn mra(c: &Connection, name: &str, zips: &[(&str, bool)]) -> TitleId {
         setname: Some("exblast"),
         rbf: Some("excore"),
         mra_path: "Example.mra",
+        file_stamp: "10:1",
+        run,
     };
     let zips: Vec<MraZip<'_>> = zips
         .iter()
@@ -80,8 +86,22 @@ fn have_follows_zip_presence_and_the_md5_check() {
     assert_eq!(browse(&c)[0].1, 0);
     set_check(&c, full, Some("refused"), None, Some("s")).expect("check");
     assert_eq!(browse(&c)[0].1, 1);
-    let states = check_states(&c, "arcade").expect("states");
-    assert_eq!(states[0].stamp.as_deref(), Some("s"));
+    let stored = stored_mra(&c, "arcade", "Example.mra")
+        .expect("stored")
+        .expect("title");
+    assert_eq!(stored.id, full);
+    assert_eq!(stored.check_stamp.as_deref(), Some("s"));
+    assert_eq!(stored.file_stamp.as_deref(), Some("10:1"));
+    let zips = zip_roms(&c, part).expect("zips");
+    let got: Vec<(&str, bool, bool)> = zips
+        .iter()
+        .map(|z| (z.name.as_str(), z.present, z.has_md5))
+        .collect();
+    assert_eq!(
+        got,
+        [("exquest.zip", true, true), ("exparent2.zip", false, true)]
+    );
+    assert_eq!(zips[0].zip_dir, "mame");
 }
 
 #[test]
@@ -89,11 +109,17 @@ fn rescans_keep_ids_and_retire_what_is_gone() {
     let c = conn();
     let a = mra(&c, "Example Blaster", &[("exblast.zip", false)]);
     let b = mra(&c, "Example Quest", &[("exquest.zip", false)]);
+    let d = mra(&c, "Example Racer", &[("exrace.zip", false)]);
     c.execute("UPDATE titles SET wanted = 1 WHERE id = ?1", [a.0])
         .expect("want");
-    begin_load(&c, "arcade").expect("begin");
-    assert_eq!(mra(&c, "Example Blaster", &[("exblast.zip", true)]), a);
-    assert_eq!(retire_absent(&c, "arcade").expect("retire"), 1);
+    let run = next_run(&c, "arcade").expect("run");
+    assert_eq!(run, 2);
+    assert_eq!(
+        mra_run(&c, "Example Blaster", &[("exblast.zip", true)], run),
+        a
+    );
+    touch(&c, d, run).expect("touch");
+    assert_eq!(retire_unseen(&c, "arcade", run).expect("retire"), 1);
     let (retired, wanted): (bool, bool) = c
         .query_row(
             "SELECT (SELECT retired FROM titles WHERE id = ?1), (SELECT wanted FROM titles WHERE id = ?2)",
@@ -102,7 +128,9 @@ fn rescans_keep_ids_and_retire_what_is_gone() {
         )
         .expect("row");
     assert!(retired && wanted);
-    assert_eq!(check_states(&c, "arcade").expect("states").len(), 1);
+    assert_eq!(live_count(&c, "arcade").expect("count"), 2);
+    assert!(has_titles(&c, "arcade").expect("has"));
+    assert_eq!(next_run(&c, "arcade").expect("run"), 3);
 }
 
 #[test]
