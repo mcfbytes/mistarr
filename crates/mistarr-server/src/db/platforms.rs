@@ -68,7 +68,7 @@ pub fn seed(conn: &mut Connection, table: &[Platform]) -> Result<usize> {
         }
     }
     let after = count(&tx)?;
-    tx.commit()?;
+    super::commit(tx)?;
     Ok(after.saturating_sub(before))
 }
 
@@ -168,7 +168,7 @@ pub fn set_core_present(conn: &mut Connection, present: &[PlatformId]) -> Result
             stmt.execute([&id.0])?;
         }
     }
-    tx.commit()?;
+    super::commit(tx)?;
     Ok(())
 }
 

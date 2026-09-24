@@ -6,6 +6,11 @@ schema after all of them. All timestamps are
 Unix seconds. All hashes are stored as lowercase hex text so they can be
 compared with DAT values without conversion.
 
+JSON may stage data or carry opaque blobs; nothing filters or joins on JSON.
+The JSON columns are `dat_stage.game`, `scan_progress.done_dirs`,
+`import_log.detail`, `jobs.payload`, `jobs.progress` and `settings.value`;
+anything a query compares is a real column or a row of its own table.
+
 ## Tables
 
 ```sql
@@ -48,10 +53,7 @@ CREATE TABLE titles (                   -- one per <game>; the browse unit
   base_name     TEXT NOT NULL,         -- name with region/rev/lang tags stripped
   parent_id     INTEGER REFERENCES titles(id),   -- clone group root in its own DAT, self if parent
   group_root    INTEGER REFERENCES titles(id),   -- effective clone group; see "Effective groups"
-  regions       TEXT NOT NULL,         -- json array
-  languages     TEXT NOT NULL,         -- json array
   revision      TEXT,
-  flags         TEXT NOT NULL,         -- json array: bios, beta, proto, demo, sample, unl, ...
   is_1g1r_pick  INTEGER NOT NULL DEFAULT 0,
   wanted        INTEGER NOT NULL DEFAULT 0,
   retired       INTEGER NOT NULL DEFAULT 0,
@@ -79,6 +81,29 @@ BEGIN UPDATE titles SET group_root = NEW.parent_id WHERE id = NEW.id; END;
 CREATE INDEX titles_group ON titles(platform_id, inferred, group_key);
 CREATE INDEX titles_source ON titles(platform_id, source);
 CREATE INDEX titles_mra_path ON titles(platform_id, mra_path) WHERE source = 'mra';
+
+-- A title's regions, languages and flags, in name order (`pos`).
+CREATE TABLE title_flags (             -- bios, beta, proto, demo, sample, unl, ...
+  title_id      INTEGER NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+  pos           INTEGER NOT NULL,
+  flag          TEXT NOT NULL,
+  PRIMARY KEY (title_id, flag)
+) WITHOUT ROWID;
+CREATE INDEX title_flags_flag ON title_flags(flag, title_id);
+CREATE TABLE title_regions (
+  title_id      INTEGER NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+  pos           INTEGER NOT NULL,
+  region        TEXT NOT NULL,
+  PRIMARY KEY (title_id, region)
+) WITHOUT ROWID;
+CREATE INDEX title_regions_region ON title_regions(region COLLATE NOCASE, title_id);
+CREATE TABLE title_languages (
+  title_id      INTEGER NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
+  pos           INTEGER NOT NULL,
+  language      TEXT NOT NULL,
+  PRIMARY KEY (title_id, language)
+) WITHOUT ROWID;
+CREATE INDEX title_languages_language ON title_languages(language, title_id);
 
 CREATE TABLE roms (                     -- one per <rom>; the file unit
   id            INTEGER PRIMARY KEY,
@@ -116,6 +141,7 @@ CREATE TABLE files (                    -- what is on disk under games/
   UNIQUE (platform_id, rel_path)
 );
 CREATE INDEX files_rom ON files(rom_id);
+CREATE INDEX files_state ON files(state, platform_id);
 CREATE INDEX files_rel_lower ON files(platform_id, lower(rel_path));   -- arcade rows match zips ignoring case
 
 CREATE TABLE sources (                  -- one per torrent the user dropped in
@@ -176,6 +202,7 @@ CREATE TABLE downloads (
 CREATE INDEX downloads_state ON downloads(state);
 CREATE INDEX downloads_source ON downloads(source_id, file_index);
 CREATE INDEX downloads_rom ON downloads(rom_id);
+CREATE INDEX downloads_recent ON downloads(updated_at DESC, id DESC);
 
 CREATE TABLE import_log (
   id            INTEGER PRIMARY KEY,
@@ -196,8 +223,11 @@ CREATE TABLE jobs (
   progress      TEXT,                  -- json, job specific
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL,
-  lane          TEXT NOT NULL DEFAULT 'light'   -- 'heavy' | 'background' | 'light'
+  lane          TEXT NOT NULL DEFAULT 'light',  -- 'heavy' | 'background' | 'light'
+  subject       TEXT NOT NULL DEFAULT ''        -- dedupe key: payload fields as name 0x1F value, sorted, joined by 0x1E
 );
+CREATE INDEX jobs_subject ON jobs(kind, subject, state);
+CREATE INDEX jobs_state ON jobs(state, id);
 ```
 
 `torrent_files.rom_id` holds one rom, but one file can be a candidate for
@@ -334,45 +364,103 @@ links away, the members it leaves take their lowest live id as their root, so
 a group's id is always a title whose `group_root` is itself. A group's members
 are the titles whose `group_root` is its id.
 
-## Derived views
+## Derived tables
 
-The browse screen needs one row per effective clone group with have/wanted
-counts. Keep this as a SQL view so both the API and tests use the same
-definition. Its `parent_id` column is the group's `titles.group_root`. Roms and
-files are aggregated per title first, so a title with several roms or several
-files per rom counts once:
+`title_groups` holds one row per effective clone group and platform, the browse
+unit; its `parent_id` is the group's `titles.group_root`.
+It is a table kept equal to its inputs, not a view, so browse and the
+platform counts read one indexed row per group instead of aggregating every
+title, rom and file of a platform per request.
 
 ```sql
-CREATE VIEW title_groups AS
-SELECT g.parent_id, g.platform_id, p.base_name, p.name,
-       g.variants, g.have_verified, g.wanted, g.has_pick, g.pick_id, g.newest_id
-FROM (
-  SELECT v.platform_id, v.parent_id,
-         COUNT(*) AS variants,
-         SUM(v.roms > 0 AND v.roms_verified = v.roms) AS have_verified,
-         SUM(v.wanted) AS wanted,
-         MAX(v.is_1g1r_pick) AS has_pick,
-         MAX(CASE WHEN v.is_1g1r_pick = 1 THEN v.id END) AS pick_id,
-         MAX(v.id) AS newest_id
-  FROM (
-    SELECT t.platform_id, t.group_root AS parent_id, t.id, t.wanted, t.is_1g1r_pick,
-           COUNT(DISTINCT r.id) AS roms,
-           COUNT(DISTINCT CASE WHEN f.state = 'verified'
-                                 OR (r.present = 1
-                                     AND COALESCE(t.mra_check, '') NOT IN ('mismatch', 'missing_part'))
-                               THEN r.id END) AS roms_verified
-    FROM titles t
-    LEFT JOIN roms r ON r.title_id = t.id AND r.retired = 0
-    LEFT JOIN files f ON f.rom_id = r.id
-    WHERE t.retired = 0
-    GROUP BY t.platform_id, t.group_root, t.id
-  ) v
-  GROUP BY v.platform_id, v.parent_id
-) g
-JOIN titles p ON p.id = g.parent_id;
+CREATE TABLE title_groups (
+  parent_id     INTEGER NOT NULL,
+  platform_id   TEXT NOT NULL,
+  base_name     TEXT NOT NULL,         -- the root title's
+  name          TEXT NOT NULL,         -- the root title's
+  variants      INTEGER NOT NULL,
+  have_verified INTEGER NOT NULL,
+  wanted        INTEGER NOT NULL,
+  has_pick      INTEGER NOT NULL,
+  pick_id       INTEGER,
+  newest_id     INTEGER NOT NULL,
+  source        TEXT NOT NULL,         -- the root title's: 'dat' | 'mra'
+  lean_flags    INTEGER NOT NULL,      -- least known-flag bits of a live variant
+  unflagged_regions INTEGER NOT NULL,  -- region bits of the variants with no known flag
+  flag_union    INTEGER NOT NULL,      -- flag bits of every live variant
+  region_union  INTEGER NOT NULL,      -- region bits of every live variant
+  split         INTEGER NOT NULL,      -- the root title is on another platform
+  PRIMARY KEY (parent_id, platform_id)
+) WITHOUT ROWID;
+CREATE INDEX title_groups_name ON title_groups(platform_id, base_name COLLATE NOCASE, parent_id);
+CREATE INDEX title_groups_have ON title_groups(platform_id, (have_verified > 0) DESC, base_name COLLATE NOCASE, parent_id);
+CREATE INDEX title_groups_recent ON title_groups(platform_id, newest_id DESC);
+CREATE INDEX title_groups_split ON title_groups(platform_id, parent_id) WHERE split;
+
+CREATE TABLE title_groups_dirty (parent_id INTEGER PRIMARY KEY);   -- groups a write changed
+CREATE TABLE known_flags (name TEXT PRIMARY KEY, bit INTEGER NOT NULL) WITHOUT ROWID;
+CREATE TABLE known_regions (name TEXT PRIMARY KEY COLLATE NOCASE, bit INTEGER NOT NULL) WITHOUT ROWID;
+
+CREATE VIEW title_search_source AS      -- the platform id between 0x1F sentinels
+  SELECT id, base_name, char(31) || platform_id || char(31) AS platform FROM titles;
+CREATE VIRTUAL TABLE title_search USING fts5(
+  base_name, platform, content = 'title_search_source', content_rowid = 'id',
+  tokenize = 'trigram');
 ```
 
-`variants` counts live titles, `have_verified` the live titles whose every
+The group columns keep the meaning they have always had. Roms and files are
+aggregated per title first, so a title with several roms or several files per
+rom counts once. `variants` counts live titles, `have_verified` the live titles whose every
 live rom has a `verified` file, or for an MRA title is present with no failed
 md5 check, `wanted` the wanted live titles, and
 `newest_id` orders groups by when their newest entry first appeared.
+
+The summary columns are bit sets: each flag in `known_flags` and each region
+in `known_regions` has a bit, and `1 << 62` stands for any other value. The
+flags `prefs.hide` holds by default (bios, beta, proto, demo, sample,
+program) take the highest known bits, so `lean_flags`, the smallest
+known-flag value of any live variant, is free of them exactly when some
+variant is. Browse visibility (hidden flags, a region, required flags) needs
+a live variant that passes all three at once. With the default hide list
+alone `lean_flags` decides; otherwise the bits prefilter and short-cut, and
+the remaining groups check their variants' flag and region rows.
+
+`crates/mistarr-server/src/db/groups.rs` holds the one query that computes a
+group from its inputs, grouped by `titles.group_root`; every
+refresh, rebuild and check uses it.
+
+### Keeping it current
+
+Triggers on `titles` (its `group_root` among the watched columns), `roms`,
+`files`, `title_flags` and `title_regions`
+insert the affected group roots into `title_groups_dirty` (a root is marked
+once per transaction). `db::commit`, the only way a write transaction
+commits, recomputes the dirty groups and empties the list before `COMMIT`,
+so readers never see a group out of step with its titles. It refreshes
+4096 roots per statement, so a DAT load that dirties a whole platform keeps
+SQLite's temporary tables small. A write made outside a
+transaction is settled by the writer connection right after, with a warning
+in the log.
+
+`title_search` indexes each title's `base_name` and its platform id, wrapped
+in 0x1F so `nes` never matches inside `snes`, with trigrams; the title
+triggers keep it in the same transaction, including a title that moves
+platform. A search `MATCH`es the platform's phrase and the term together;
+since a group's root title can sit on another platform, `split` marks
+those rows and the search adds them from `title_groups_split`
+(ARCHITECTURE.md "Resource budgets").
+
+`mistarr doctor` compares the table and the search index with a fresh
+computation and reports drift; `mistarr doctor --rebuild-groups` recomputes
+both.
+
+### Indexes
+
+Every hot read (browse, counts, title detail, launch, want, best file, the
+sources, downloads, jobs and import lists) seeks through an index. The
+exceptions are inherent or bounded: the platform counts read every group
+once and MRA titles through `titles_mra_path`, unfiltered totals count a
+whole table, and pages in id order stop at their limit. The test
+`db::plans::hot_reads_walk_indexes_not_growing_tables` prints each plan and
+fails on any other scan.
+

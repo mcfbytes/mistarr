@@ -6,6 +6,7 @@
 #![warn(clippy::pedantic)]
 
 pub mod app;
+pub mod bench;
 pub mod cli;
 pub mod client;
 pub mod config;
@@ -20,6 +21,7 @@ pub mod lock;
 pub mod logging;
 pub mod memory;
 pub mod status;
+pub mod synth;
 
 pub use error::{Error, Result};
 

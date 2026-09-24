@@ -464,7 +464,7 @@ mod tests {
         std::fs::write(loaded.join(&origin), &bytes).expect("write");
         app.db
             .write_blocking(|c| {
-                let rom = seed_rom(c, "nes", &name, 16, "[]")?;
+                let rom = seed_rom(c, "nes", &name, 16, &[])?;
                 let title: i64 =
                     c.query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
                         r.get(0)

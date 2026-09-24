@@ -301,7 +301,7 @@ mod tests {
             },
         )
         .expect("source");
-        let rom = sources::fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 10, "[]")
+        let rom = sources::fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 10, &[])
             .expect("rom");
         let title: i64 = c
             .query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
@@ -326,10 +326,10 @@ mod tests {
         );
         assert!(torrent_path(&c, src, 1).expect("path").is_none());
 
-        let alt = sources::fixtures::seed_rom(&c, "nes", "Example Quest (USA) (Alt).nes", 10, "[]")
+        let alt = sources::fixtures::seed_rom(&c, "nes", "Example Quest (USA) (Alt).nes", 10, &[])
             .expect("rom");
         let other =
-            sources::fixtures::seed_rom(&c, "nes", "Other Tale (USA).nes", 10, "[]").expect("rom");
+            sources::fixtures::seed_rom(&c, "nes", "Other Tale (USA).nes", 10, &[]).expect("rom");
         let title_of = |rom: i64| {
             c.query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
                 r.get(0).map(TitleId)
@@ -411,9 +411,9 @@ mod tests {
             })
             .collect();
         sources::replace_files(&c, src, &files).expect("files");
-        let rom = sources::fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 10, "[]")
+        let rom = sources::fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 10, &[])
             .expect("rom");
-        let alt = sources::fixtures::seed_rom(&c, "nes", "Example Quest (USA) (Alt).nes", 10, "[]")
+        let alt = sources::fixtures::seed_rom(&c, "nes", "Example Quest (USA) (Alt).nes", 10, &[])
             .expect("alt");
         c.execute(
             "UPDATE titles SET wanted = 1, parent_id = (SELECT title_id FROM roms WHERE id = ?1)

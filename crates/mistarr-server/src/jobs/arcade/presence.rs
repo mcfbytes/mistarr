@@ -270,7 +270,7 @@ fn write_changes(
     for (id, size, mtime, crc) in &changes.reverify {
         files::reverify(&tx, *id, *size, *mtime, crc, now)?;
     }
-    tx.commit()?;
+    crate::db::commit(tx)?;
     Ok((changes.record.len(), dropped))
 }
 
@@ -333,7 +333,7 @@ async fn prune_dir(
                 .write(move |c| {
                     let tx = c.transaction()?;
                     let n = files::delete_paths(&tx, &p, &doomed)?;
-                    tx.commit()?;
+                    crate::db::commit(tx)?;
                     Ok(n)
                 })
                 .await?;

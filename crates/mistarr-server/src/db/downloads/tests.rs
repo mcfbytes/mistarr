@@ -81,7 +81,7 @@ fn states_round_trip_and_follow_the_machine() {
 #[test]
 fn best_file_prefers_size_then_name_then_load_then_id() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, "[]").expect("rom");
+    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
     let wrong_size = source(
         &c,
         1,
@@ -107,7 +107,7 @@ fn best_file_prefers_size_then_name_then_load_then_id() {
     assert_eq!(best_file(&c, rom).expect("best"), candidate(by_name, 1));
 
     let title = title_of(&c, rom);
-    let other = seed_rom(&c, "nes", "Second Try (USA).nes", 8, "[]").expect("rom");
+    let other = seed_rom(&c, "nes", "Second Try (USA).nes", 8, &[]).expect("rom");
     let busy = create(
         &c,
         &NewDownload {
@@ -142,7 +142,7 @@ fn best_file_prefers_size_then_name_then_load_then_id() {
 #[test]
 fn want_title_queues_or_waits_and_skips_open_and_verified_roms() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, "[]").expect("rom");
+    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
     let title = title_of(&c, rom);
     let wanted = want_title(&c, title, 5).expect("want");
     assert_eq!(wanted.len(), 1);
@@ -183,7 +183,7 @@ fn want_title_queues_or_waits_and_skips_open_and_verified_roms() {
 #[test]
 fn transitions_progress_and_lookups() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, "[]").expect("rom");
+    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
     let src = source(
         &c,
         1,
@@ -262,7 +262,7 @@ fn transitions_progress_and_lookups() {
 #[test]
 fn retry_and_cancel() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, "[]").expect("rom");
+    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
     let title = title_of(&c, rom);
     let src = source(
         &c,
@@ -321,7 +321,7 @@ fn retry_and_cancel() {
 #[test]
 fn cancel_group_reports_started_downloads() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, "[]").expect("rom");
+    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
     let title = title_of(&c, rom);
     let src = source(
         &c,
@@ -363,7 +363,7 @@ fn cancel_group_reports_started_downloads() {
 #[test]
 fn deleting_a_source_keeps_finished_downloads_without_it() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, "[]").expect("rom");
+    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
     let src = source(
         &c,
         1,
@@ -409,7 +409,7 @@ fn works_on_the_file_database() {
 #[test]
 fn name_tier_files_beat_candidates_and_a_header_on_top_counts_as_the_size() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, "[]").expect("rom");
+    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
     let guessed = source(&c, 1, &[("example.nes", 16, None, Confidence::Unmatched)]);
     let change = crate::db::candidates::Change {
         add: vec![(0, rom, "fuzzy")],

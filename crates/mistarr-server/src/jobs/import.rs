@@ -549,7 +549,7 @@ impl Placing<'_> {
                     detail: &detail,
                 };
                 let settled = quarantined.record(&tx, crate::unix_now())?;
-                tx.commit()?;
+                crate::db::commit(tx)?;
                 Ok(settled)
             })
             .await?;
@@ -745,7 +745,7 @@ impl Placing<'_> {
                     &detail,
                 )?;
                 let settled = redirect.settle(&tx, id, now)?;
-                tx.commit()?;
+                crate::db::commit(tx)?;
                 Ok(settled)
             })
             .await?;
@@ -787,7 +787,7 @@ impl Placing<'_> {
             .write(move |c| {
                 let tx = c.transaction()?;
                 let settled = redirect.settle(&tx, id, crate::unix_now())?;
-                tx.commit()?;
+                crate::db::commit(tx)?;
                 Ok(settled)
             })
             .await?;
@@ -1232,7 +1232,7 @@ impl Placing<'_> {
                     }
                     (_, false) => {}
                 }
-                tx.commit()?;
+                crate::db::commit(tx)?;
                 Ok((done, settled))
             })
             .await

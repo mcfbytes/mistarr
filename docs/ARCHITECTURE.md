@@ -482,6 +482,7 @@ shutdown is left `queued` for this.
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
 | Arcade presence pass | 500 zips per batch, stat only unless import rows of a changed zip need its central directory; the listing's names and the live MRA zip set persist across batches |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
+| Browse page or search, with its total | under 100 ms on the board with every major platform's DAT loaded; `tests/browse.rs` holds a host bound and `mistarr bench-search` measures the board |
 | SPA bundle, gzipped | under 200 KiB |
 | Concurrent client RPC calls | 1, serialised |
 
@@ -502,6 +503,48 @@ A DAT loads in one write transaction, so the WAL file can grow to the size
 of the pages that DAT touches while it loads; it is cut back to 1 MiB at the
 next checkpoint. Page memory stays within the cache either way, since SQLite
 spills dirty pages to the WAL.
+
+Every write transaction commits through `db::commit`, which first refreshes
+the clone groups its writes touched in `title_groups` (DATA-MODEL.md
+"Derived tables"). Browse and the platform counts then read one indexed row
+per group; a page and its total cost about as much as reading the page, and
+the refresh adds about 0.1 s on the host to a 15 000-game DAT's first load.
+
+A search of three or more characters asks `title_search` for the browsed
+platform's sentinel-wrapped id and the term in one `MATCH`, adds the
+platform's groups whose parent title is on another platform through the
+partial `title_groups_split` index, and confirms each candidate with
+`LIKE`. Shorter searches run `LIKE` over the platform's `title_groups_name`
+range, whose cost follows the platform's group count. The default
+(`titles::SEARCH_SHAPE`) is the shape with the best worst case on the board
+with real DATs loaded; `mistarr bench-search` compares it with `LIKE` alone
+and the trigram index without the platform filter. Board medians in ms, 16
+DATs and 41 000 titles loaded, warm cache:
+
+| platform | search | groups | like | fts | fts-platform |
+|---|---|---|---|---|---|
+| nes | none | 3699 | 87.3 | 87.1 | 87.2 |
+| nes | `the` | 335 | 48.3 | 78.3 | 48.5 |
+| nes | `sta` | 85 | 53.7 | 52.8 | 39.7 |
+| nes | `man` | 127 | 46.5 | 49.5 | 36.7 |
+| nes | `super` | 197 | 57.3 | 62.1 | 46.8 |
+| nes | `vex` | 0 | 52.4 | 24.9 | 28.6 |
+| snes | `the` | 233 | 25.3 | 69.0 | 31.2 |
+| snes | `super` | 351 | 32.8 | 49.1 | 43.3 |
+| psx | none | 6345 | 42.6 | 42.5 | 42.6 |
+| psx | `sta` | 572 | 59.1 | 38.0 | 40.3 |
+| psx | `man` | 271 | 57.5 | 37.9 | 33.6 |
+| psx | `world` | 135 | 73.3 | 48.4 | 53.1 |
+| psx | `super` | 208 | 89.2 | 68.8 | 65.2 |
+| psx | `vex` | 0 | 89.7 | 41.7 | 46.1 |
+
+Searches of one or two letters take the same path in every shape. The worst
+case over three or more letters was 89.7 ms for `LIKE`, 78.3 ms for the plain
+index and 65.2 ms with the platform filter. On the host every shape takes
+under 3 ms for the same data and the ranking does not carry over. Keeping
+`title_search` current costs
+about 1 s on the host per 15 000-game first load, against 0.5 s for the load
+without it.
 
 ## Configuration
 

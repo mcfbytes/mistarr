@@ -254,7 +254,7 @@ async fn retire(
         .write(move |c| {
             let tx = c.transaction()?;
             let row = dats::retire(&tx, DatVersionId(id), crate::unix_now())?;
-            tx.commit()?;
+            crate::db::commit(tx)?;
             Ok(row)
         })
         .await?

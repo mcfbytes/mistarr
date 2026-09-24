@@ -4,6 +4,24 @@ use mistarr_core::naming::group_key;
 
 const DAT: &str = "Maker - Game Boy";
 
+/// [`super::browse`] after refreshing the groups the test's autocommit writes left dirty.
+fn browse(
+    c: &Connection,
+    platform: &str,
+    filter: &Browse,
+    limit: u32,
+    offset: u32,
+) -> Result<(Vec<GroupRow>, u64)> {
+    groups::flush(c)?;
+    super::browse(c, platform, filter, limit, offset)
+}
+
+/// [`super::counts`] after the same refresh.
+fn counts(c: &Connection, hidden: &[String]) -> Result<HashMap<String, Counts>> {
+    groups::flush(c)?;
+    super::counts(c, hidden)
+}
+
 fn conn() -> Connection {
     let mut c = Connection::open_in_memory().expect("open");
     crate::db::migrate::apply(&mut c).expect("migrate");
@@ -157,14 +175,18 @@ fn upsert_keeps_ids_across_versions_and_retires_dropped_roms() {
         ),
         id
     );
-    let (dv, regions): (i64, String) = c
+    let dv: i64 = c
         .query_row(
-            "SELECT dat_version_id, regions FROM titles WHERE id = ?1",
+            "SELECT dat_version_id FROM titles WHERE id = ?1",
             [id.0],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
         .expect("title");
-    assert_eq!((dv, regions.as_str()), (v2.0, r#"["Europe"]"#));
+    assert_eq!(dv, v2.0);
+    assert_eq!(
+        tags_of(&c, id.0, Tag::Regions).expect("regions"),
+        ["Europe"]
+    );
     let roms: Vec<(String, String, bool)> = c
         .prepare("SELECT name, status, retired FROM roms WHERE title_id = ?1 ORDER BY name")
         .expect("prepare")
@@ -278,6 +300,7 @@ fn view_counts_a_title_once_whatever_its_roms_and_files() {
     file(&c, Some(t1), "saga/t1.bin", "verified");
     file(&c, Some(t1), "copy/t1.bin", "verified");
     let have = |c: &Connection| -> (i64, i64) {
+        groups::flush(c).expect("flush");
         c.query_row(
             "SELECT variants, have_verified FROM title_groups WHERE parent_id = ?1",
             [disc.0],
@@ -757,6 +780,93 @@ fn want_refuses_bios_and_retired_and_unwant_cancels_queued_downloads() {
 }
 
 #[test]
+fn browse_walks_an_index_in_every_sort_order() {
+    let c = conn();
+    plain(&c);
+    let hidden: Vec<String> = ["bios", "beta"].map(str::to_owned).to_vec();
+    for (sort, index) in [
+        (Sort::Name, "title_groups_name"),
+        (Sort::Have, "title_groups_have"),
+        (Sort::Recent, "title_groups_recent"),
+    ] {
+        for shape in SearchShape::ALL {
+            let filter = Browse {
+                hidden: hidden.clone(),
+                q: Some("quest".into()),
+                sort,
+                ..Browse::default()
+            };
+            let clause = browse_clause(&c, "gb", &filter, shape).expect("clause");
+            let args = clause
+                .args
+                .iter()
+                .cloned()
+                .chain([Value::from(60), Value::from(0)]);
+            let plan: Vec<String> = c
+                .prepare(&format!("EXPLAIN QUERY PLAN {}", page_sql(&clause, sort)))
+                .expect("prepare")
+                .query_map(params_from_iter(args), |r| r.get(3))
+                .expect("query")
+                .collect::<rusqlite::Result<_>>()
+                .expect("rows");
+            let plan = plan.join("\n");
+            assert!(plan.contains(index), "{sort:?}: {plan}");
+            assert!(!plan.contains("TEMP B-TREE"), "{sort:?}: {plan}");
+            assert!(plan.contains("titles_group_root"), "{sort:?}: {plan}");
+            let fts = shape != SearchShape::Like;
+            assert_eq!(
+                plan.contains("LIST SUBQUERY"),
+                fts,
+                "{sort:?} {shape:?}: {plan}"
+            );
+            assert_eq!(
+                plan.contains("SCAN title_search VIRTUAL TABLE"),
+                fts,
+                "{sort:?} {shape:?}: {plan}"
+            );
+        }
+    }
+    assert_eq!(SEARCH_SHAPE, SearchShape::FtsPlatform);
+}
+
+#[test]
+fn every_search_shape_finds_the_same_groups() {
+    let mut c = conn();
+    crate::synth::seed(&mut c, 0.05, 2).expect("seed");
+    let hidden: Vec<String> = ["bios", "beta"].map(str::to_owned).to_vec();
+    for (platform, q) in [
+        ("nes", "sta"),
+        ("snes", "the"),
+        ("gb", "an"),
+        ("psx", "Vexmir"),
+        ("nes", ""),
+    ] {
+        let filter = Browse {
+            q: Some(q.to_owned()).filter(|q| !q.is_empty()),
+            hidden: hidden.clone(),
+            ..Browse::default()
+        };
+        let pages: Vec<_> = SearchShape::ALL
+            .into_iter()
+            .map(|s| browse_with(&c, platform, &filter, 60, 0, s).expect("browse"))
+            .collect();
+        assert!(pages.windows(2).all(|w| w[0] == w[1]), "{platform} {q}");
+    }
+    // The sentinels keep one platform's id from matching inside another's.
+    for platform in ["nes", "snes", "gb", "gbc"] {
+        let count = |sql: &str| -> i64 { c.query_row(sql, [platform], |r| r.get(0)).expect(sql) };
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM title_search
+                 WHERE title_search MATCH 'platform : \"' || char(31) || ?1 || char(31) || '\"'"
+            ),
+            count("SELECT COUNT(*) FROM titles WHERE platform_id = ?1"),
+            "{platform}"
+        );
+    }
+}
+
+#[test]
 fn removing_a_dat_retires_its_roms_unwants_and_cancels_queued_downloads() {
     let c = conn();
     let v = plain(&c);
@@ -791,32 +901,4 @@ fn removing_a_dat_retires_its_roms_unwants_and_cancels_queued_downloads() {
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
     assert_eq!(states, ["cancelled", "cancelled", "transferring"]);
-}
-
-#[test]
-fn browse_uses_indexes_for_the_group_lookups() {
-    let c = conn();
-    let plan: Vec<String> = c
-        .prepare(&format!(
-            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM title_groups g WHERE {BROWSE_WHERE}"
-        ))
-        .expect("prepare")
-        .query_map(
-            params![
-                "gb",
-                None::<String>,
-                "any",
-                "any",
-                "[]",
-                None::<String>,
-                "[]"
-            ],
-            |r| r.get(3),
-        )
-        .expect("query")
-        .collect::<rusqlite::Result<_>>()
-        .expect("rows");
-    let plan = plan.join("\n");
-    assert!(plan.contains("titles_group_root"), "{plan}");
-    assert!(plan.contains("files_rom"), "{plan}");
 }

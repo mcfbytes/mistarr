@@ -512,20 +512,21 @@ pub struct Availability {
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn for_group(conn: &Connection, parent: TitleId) -> Result<Vec<(TitleId, Availability)>> {
     let group = "FROM titles t JOIN roms r ON r.title_id = t.id AND r.retired = 0";
+    // Unary `+` keeps `sources_state` out, so the plan starts from the group, not every source.
     let sql = format!(
         "SELECT title_id, source_id, display_name, file_index, path, rom_id, confidence FROM (
            SELECT t.id AS title_id, tf.source_id, s.display_name, tf.file_index, tf.path,
                   r.id AS rom_id, tf.confidence
            {group}
            JOIN torrent_files tf ON tf.rom_id = r.id
-           JOIN sources s ON s.id = tf.source_id AND s.state = 'bound'
+           JOIN sources s ON s.id = tf.source_id AND +s.state = 'bound'
            WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)) AND {bad_tf}
            UNION ALL
            SELECT t.id, c.source_id, s.display_name, c.file_index, tf.path, r.id, c.confidence
            {group}
            JOIN torrent_candidates c ON c.rom_id = r.id
            JOIN torrent_files tf ON tf.source_id = c.source_id AND tf.file_index = c.file_index
-           JOIN sources s ON s.id = c.source_id AND s.state = 'bound'
+           JOIN sources s ON s.id = c.source_id AND +s.state = 'bound'
            WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)) AND {bad_c}
          )
          ORDER BY title_id, {rank}, source_id, file_index, rom_id",
@@ -596,7 +597,9 @@ impl SizeIndex for SqlSizeIndex<'_> {
                 "SELECT r.id, r.match_base, COALESCE(t.group_root, t.parent_id, t.id)
                  FROM roms r JOIN titles t ON t.id = r.title_id
                  WHERE r.size IN (?2, ?3) AND t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0
-                   AND r.match_base IS NOT NULL AND t.flags NOT LIKE '%\"bios\"%'
+                   AND r.match_base IS NOT NULL
+                   AND NOT EXISTS (SELECT 1 FROM title_flags f
+                                   WHERE f.title_id = t.id AND f.flag = 'bios')
                  ORDER BY r.id",
             )?;
             let bare = size.checked_sub(self.header).filter(|_| self.header > 0);
@@ -679,8 +682,8 @@ mod tests {
     #[test]
     fn a_proof_survives_a_stale_change_and_foreign_proofs_drop() {
         let c = conn();
-        let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, "[]").expect("rom");
-        let b = seed_rom(&c, "nes", "Nova Quest (World) (Alt).nes", 16, "[]").expect("rom");
+        let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, &[]).expect("rom");
+        let b = seed_rom(&c, "nes", "Nova Quest (World) (Alt).nes", 16, &[]).expect("rom");
         let src = source(&c, "0c", SourceState::Bound);
         assert!(stored(&c, src).expect("stored").is_empty());
         let stale = diff(
@@ -740,8 +743,8 @@ mod tests {
     #[test]
     fn candidates_are_stored_ranked_listed_and_dropped() {
         let c = conn();
-        let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, "[]").expect("rom");
-        let b = seed_rom(&c, "nes", "Nova Quest (World) (Alt).nes", 16, "[]").expect("rom");
+        let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, &[]).expect("rom");
+        let b = seed_rom(&c, "nes", "Nova Quest (World) (Alt).nes", 16, &[]).expect("rom");
         let src = source(&c, "0a", SourceState::Bound);
         let found = [
             (0, RomRef(b), Confidence::Size),
@@ -786,8 +789,8 @@ mod tests {
     #[test]
     fn a_mapped_or_proven_pair_is_not_a_candidate_and_files_cascade() {
         let c = conn();
-        let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, "[]").expect("rom");
-        let b = seed_rom(&c, "nes", "Nova Quest (World) (Alt).nes", 16, "[]").expect("rom");
+        let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, &[]).expect("rom");
+        let b = seed_rom(&c, "nes", "Nova Quest (World) (Alt).nes", 16, &[]).expect("rom");
         let src = source(&c, "0b", SourceState::Bound);
         let matches = [(0, Some(RomRef(a)), Confidence::Name)];
         let found = [
@@ -832,10 +835,10 @@ mod tests {
     #[test]
     fn size_index_reads_live_roms_of_one_platform_with_their_group() {
         let c = conn();
-        let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, "[]").expect("rom");
-        seed_rom(&c, "nes", "Boot (World).nes", 16, r#"["bios"]"#).expect("bios");
-        seed_rom(&c, "snes", "Nova Quest (World).sfc", 16, "[]").expect("snes");
-        let other = seed_rom(&c, "nes", "Other (World).nes", 8, "[]").expect("other");
+        let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, &[]).expect("rom");
+        seed_rom(&c, "nes", "Boot (World).nes", 16, &["bios"]).expect("bios");
+        seed_rom(&c, "snes", "Nova Quest (World).sfc", 16, &[]).expect("snes");
+        let other = seed_rom(&c, "nes", "Other (World).nes", 8, &[]).expect("other");
         sources::refresh_match_keys(&c).expect("keys");
         let nes = PlatformId("nes".into());
         let index = SqlSizeIndex::new(&c, &nes);
@@ -862,7 +865,7 @@ mod tests {
         assert!(tier("x").contains("'base'"));
         assert!(not_bad("1", "2", "3").contains("b.rom_id = 1"));
         let before = rom_stamp(&c, &nes).expect("stamp");
-        seed_rom(&c, "nes", "New (World).nes", 8, "[]").expect("new");
+        seed_rom(&c, "nes", "New (World).nes", 8, &[]).expect("new");
         assert_ne!(rom_stamp(&c, &nes).expect("stamp"), before);
         let before = rom_stamp(&c, &nes).expect("stamp");
         c.execute("UPDATE dat_versions SET loaded_at = loaded_at + 1", [])

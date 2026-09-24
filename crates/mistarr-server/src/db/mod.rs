@@ -7,6 +7,7 @@ pub mod dats;
 pub mod downloads;
 pub mod downloads_import;
 pub mod files;
+pub mod groups;
 pub mod imports;
 pub mod jobs;
 pub mod launch;
@@ -21,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 
 use crate::error::{Error, Result};
 
@@ -115,7 +116,12 @@ impl Db {
     /// ```
     pub fn write_blocking<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
         let mut conn = self.inner.writer.lock().map_err(|_| Error::Poisoned)?;
-        f(&mut conn)
+        let out = f(&mut conn);
+        // A failed settle leaves the groups dirty for the next commit; `f`'s own result stands.
+        if let Err(e) = settle(&mut conn) {
+            tracing::error!(error = %e, "title groups not refreshed after a write");
+        }
+        out
     }
 
     /// Runs `f` on the read-only connection on the calling thread.
@@ -176,6 +182,36 @@ impl Db {
     }
 }
 
+/// Commits `tx` after bringing `title_groups` up to date with the writes it holds, so
+/// readers never see the one without the other. Every write transaction commits here.
+///
+/// # Errors
+///
+/// [`Error::Db`] when the refresh or the commit fails; the transaction is then rolled back.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let tx = conn.transaction().unwrap();
+/// tx.execute("UPDATE titles SET wanted = 1", []).unwrap();
+/// mistarr_server::db::commit(tx).unwrap();
+/// ```
+pub fn commit(tx: Transaction<'_>) -> Result<()> {
+    groups::flush(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Refreshes groups an autocommit write left dirty, in a transaction of their own, and
+/// warns, since a writer that commits through [`commit`] never leaves any.
+fn settle(conn: &mut Connection) -> Result<()> {
+    if !conn.is_autocommit() || !groups::pending(conn)? {
+        return Ok(());
+    }
+    tracing::warn!("title groups refreshed after an autocommit write");
+    commit(conn.transaction()?)
+}
+
 /// The environment variable SQLite reads for its temporary file directory.
 pub const SQLITE_TMPDIR: &str = "SQLITE_TMPDIR";
 
@@ -203,6 +239,50 @@ pub fn prepare_temp_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Opens `path` read-only with the reader's memory settings, for measuring queries on a
+/// database a server may be using; it never writes or migrates.
+///
+/// # Errors
+///
+/// [`Error::Db`] when the file cannot be opened.
+///
+/// ```
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = dir.path().join("ro.db");
+/// mistarr_server::db::Db::open(&path).unwrap();
+/// let conn = mistarr_server::db::open_read_only(&path).unwrap();
+/// assert!(conn.execute("CREATE TABLE x (y)", []).is_err());
+/// ```
+pub fn open_read_only(path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    conn.pragma_update(None, "query_only", true)?;
+    conn.pragma_update(None, "cache_size", -CACHE_KIB)?;
+    conn.pragma_update(None, "mmap_size", 0)?;
+    Ok(conn)
+}
+
+/// Whether the database has a table named `name`.
+///
+/// # Errors
+///
+/// [`Error::Db`] on SQLite failure.
+///
+/// ```
+/// let conn = rusqlite::Connection::open_in_memory().unwrap();
+/// assert!(!mistarr_server::db::has_table(&conn, "titles").unwrap());
+/// ```
+pub fn has_table(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [name],
+        |r| r.get(0),
+    )?)
+}
+
 /// Applies the connection pragmas every connection shares; the memory-related ones are
 /// listed in `docs/ARCHITECTURE.md` "Resource budgets".
 fn configure(conn: &Connection) -> Result<()> {
@@ -222,6 +302,9 @@ fn configure(conn: &Connection) -> Result<()> {
     conn.pragma_update_and_check(None, "soft_heap_limit", SOFT_HEAP_LIMIT, |_| Ok(()))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod plans;
 
 #[cfg(test)]
 pub(crate) mod testutil {

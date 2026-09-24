@@ -54,9 +54,9 @@ fn seed_catalog(b: &Booted) {
         .app
         .db
         .write_blocking(|c| {
-            seed_rom(c, "nes", "Example Quest (USA).nes", 40_976, "[]")?;
-            seed_rom(c, "nes", "Second Try (Japan).nes", 24_592, "[]")?;
-            seed_rom(c, "nes", "Third Tale (Europe).nes", 65_552, "[]")?;
+            seed_rom(c, "nes", "Example Quest (USA).nes", 40_976, &[])?;
+            seed_rom(c, "nes", "Second Try (Japan).nes", 24_592, &[])?;
+            seed_rom(c, "nes", "Third Tale (Europe).nes", 65_552, &[])?;
             Ok(())
         })
         .expect("seed");

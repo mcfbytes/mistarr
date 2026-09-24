@@ -46,7 +46,7 @@ pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
         .query_row(
             &format!(
                 "SELECT t.platform_id,
-                        EXISTS (SELECT 1 FROM json_each(t.flags) WHERE value = 'bios'),
+                        EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.flag = 'bios'),
                         t.source, t.mra_path,
                         (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0),
                         (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0
@@ -174,8 +174,7 @@ mod tests {
         file(&c, &pid, "NES/a.nes", rom, FileState::Pending);
         let got = title(&c, TitleId(t)).expect("read").expect("title");
         assert!(!got.complete && got.files.is_empty());
-        c.execute("UPDATE titles SET flags = '[\"bios\"]' WHERE id = ?1", [t])
-            .expect("flag");
+        crate::db::titles::set_flags(&c, TitleId(t), &["bios".to_owned()]).expect("flag");
         assert!(title(&c, TitleId(t)).expect("read").expect("title").bios);
     }
 

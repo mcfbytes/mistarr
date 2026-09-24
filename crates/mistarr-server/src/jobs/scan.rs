@@ -522,7 +522,7 @@ fn commit_unit(
     if let Some(done_dirs) = done_dirs {
         files::save_scan_progress(&tx, platform_id, done_dirs, now)?;
     }
-    tx.commit()?;
+    crate::db::commit(tx)?;
     Ok(written)
 }
 

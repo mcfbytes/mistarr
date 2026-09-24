@@ -47,6 +47,9 @@ pub enum Error {
     /// File system access failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// A benchmark command refused its database file.
+    #[error("bench: {0}")]
+    Bench(String),
 }
 
 /// Result alias for this crate.

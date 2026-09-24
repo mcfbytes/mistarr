@@ -332,7 +332,7 @@ fn prepare_catalog(c: &mut rusqlite::Connection) -> Result<Prepared> {
     let tx = c.transaction()?;
     db::dats::refresh_families(&tx)?;
     let resolved = db::dats::resolve_families(&tx)?;
-    tx.commit()?;
+    crate::db::commit(tx)?;
     Ok((
         settings::get_json::<RuntimeSettings>(c, keys::RUNTIME),
         unfinished,

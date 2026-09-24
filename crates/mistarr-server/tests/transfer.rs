@@ -65,7 +65,7 @@ fn seed_catalog(b: &Booted) -> [i64; 3] {
         .write_blocking(|c| {
             let mut out = [0; 3];
             for (slot, (name, size)) in [FILES[0], FILES[2], FILES[3]].into_iter().enumerate() {
-                let rom = seed_rom(c, "nes", name, size, "[]")?;
+                let rom = seed_rom(c, "nes", name, size, &[])?;
                 out[slot] = c.query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
                     r.get(0)
                 })?;

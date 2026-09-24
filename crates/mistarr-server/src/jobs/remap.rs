@@ -227,7 +227,7 @@ pub async fn remap_one(app: &AppState, id: SourceId) -> Result<bool> {
                     return Ok(false);
                 }
                 candidates::apply(&tx, id, &piece)?;
-                tx.commit()?;
+                crate::db::commit(tx)?;
                 Ok(true)
             })
             .await?;
@@ -438,7 +438,7 @@ mod tests {
         assert_eq!(found, [b], "an unstamped source is stale");
         app.db
             .write_blocking(|c| {
-                seed_rom(c, "nes", "Nova Quest (World).nes", 16, "[]")?;
+                seed_rom(c, "nes", "Nova Quest (World).nes", 16, &[])?;
                 Ok(())
             })
             .expect("seed");
@@ -477,8 +477,8 @@ mod tests {
         assert!(!remap_one(&app, id).await.expect("remap"), "no rom changed");
         app.db
             .write_blocking(|c| {
-                seed_rom(c, "nes", "Nova Quest (World).nes", 16, "[]")?;
-                seed_rom(c, "nes", "Other Tale (USA).nes", 8, "[]")?;
+                seed_rom(c, "nes", "Nova Quest (World).nes", 16, &[])?;
+                seed_rom(c, "nes", "Other Tale (USA).nes", 8, &[])?;
                 Ok(())
             })
             .expect("seed");
@@ -516,7 +516,7 @@ mod tests {
         let (id, a, b) = app
             .db
             .write_blocking(|c| {
-                let a = seed_rom(c, "nes", "Nova Quest (World).nes", 16, "[]")?;
+                let a = seed_rom(c, "nes", "Nova Quest (World).nes", 16, &[])?;
                 c.execute(
                     "INSERT INTO dat_versions (platform_id, dat_name, version, source_file,
                                                loaded_at, game_count)
@@ -525,9 +525,8 @@ mod tests {
                 )?;
                 let other = c.last_insert_rowid();
                 c.execute(
-                    "INSERT INTO titles (platform_id, dat_version_id, name, base_name, regions,
-                                         languages, flags)
-                     VALUES ('nes', ?1, 'Nova Quest (World)', 'Nova Quest', '[]', '[]', '[]')",
+                    "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
+                     VALUES ('nes', ?1, 'Nova Quest (World)', 'Nova Quest')",
                     [other],
                 )?;
                 let title = c.last_insert_rowid();

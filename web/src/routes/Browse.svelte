@@ -1,7 +1,14 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { findPlatform, loadPlatforms } from '../lib/stores/platforms.svelte';
-  import { getGroups, getGroupsTotal, loadTitlesPage, patchGroup } from '../lib/stores/titles.svelte';
+  import {
+    getGroups,
+    getGroupsError,
+    getGroupsTotal,
+    isGroupsLoading,
+    loadTitlesPage,
+    patchGroup
+  } from '../lib/stores/titles.svelte';
   import { titleUrl } from '../lib/router.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
@@ -17,8 +24,11 @@
   const { platformId }: Props = $props();
 
   const isMock = import.meta.env.VITE_MOCK === '1';
+  /** Typing pauses this long before the search runs. */
+  const SEARCH_DEBOUNCE_MS = 250;
 
   let q = $state('');
+  let search = $state('');
   let have = $state<HaveFilter>('any');
   let wanted = $state<HaveFilter>('any');
   let region = $state('');
@@ -52,6 +62,8 @@
   }
   const groups = $derived(getGroups());
   const total = $derived(getGroupsTotal());
+  const loading = $derived(isGroupsLoading());
+  const loadError = $derived(getGroupsError());
   // Requiring a flag the server hides by default would otherwise always
   // yield an empty grid, so force "show hidden" on for that combination.
   const forcedByFlags = $derived(requireFlags.filter((f) => hideList.includes(f)));
@@ -59,7 +71,7 @@
 
   function filters(): TitleFilters {
     return {
-      q: q || undefined,
+      q: search.trim() || undefined,
       have,
       wanted,
       region: region || undefined,
@@ -91,8 +103,16 @@
   }
 
   $effect(() => {
+    const next = q;
+    const timer = setTimeout(() => {
+      search = next;
+    }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  });
+
+  $effect(() => {
     void platformId;
-    void q;
+    void search;
     void have;
     void wanted;
     void region;
@@ -103,13 +123,20 @@
   });
 
   async function loadMore(): Promise<void> {
-    if (loadingMore || groups.length >= total) {
+    if (loadingMore || loadError || groups.length >= total) {
       return;
     }
     loadingMore = true;
-    page += 1;
-    await loadTitlesPage(platformId, filters(), page);
+    // The page advances only once it has landed, so a failure never skips rows.
+    if (await loadTitlesPage(platformId, filters(), page + 1)) {
+      page += 1;
+    }
     loadingMore = false;
+  }
+
+  function retry(): void {
+    page = 0;
+    void loadTitlesPage(platformId, filters(), 0);
   }
 
   function sentinel(node: HTMLElement): { destroy(): void } {
@@ -213,7 +240,20 @@
     </p>
   {/if}
 
-  <div class="grid">
+  <div class="status">
+    <span class="hidden-text" aria-live="polite">{loading ? 'Loading titles' : ''}</span>
+    {#if loading}
+      <div class="busy" role="progressbar" aria-label="Loading titles" aria-valuetext="Loading"></div>
+    {/if}
+  </div>
+  {#if loadError}
+    <p class="error" role="alert">
+      Titles could not be loaded: {loadError}
+      <button onclick={retry}>Retry</button>
+    </p>
+  {/if}
+
+  <div class="grid" class:dimmed={loading} aria-busy={loading}>
     {#each groups as group (group.parent_id)}
       <a class="poster" href={titleUrl(group.parent_id)}>
         <img src={group.art?.boxart ?? placeholderArt} alt="" loading="lazy" onerror={onArtError} />
@@ -232,7 +272,7 @@
       </a>
     {/each}
   </div>
-  {#if groups.length === 0}
+  {#if groups.length === 0 && !loading && !loadError}
     <p class="muted">No titles match.</p>
   {:else if groups.length < total}
     <div use:sentinel class="sentinel"></div>
@@ -292,6 +332,55 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
     gap: 1em;
+    transition: opacity 0.15s;
+  }
+
+  .grid.dimmed {
+    opacity: 0.5;
+  }
+
+  .status {
+    min-height: 3px;
+    margin: -0.5em 0 0.5em;
+  }
+
+  .busy {
+    height: 3px;
+    border-radius: 2px;
+    background: linear-gradient(90deg, transparent, var(--accent), transparent);
+    background-size: 40% 100%;
+    background-repeat: no-repeat;
+    animation: sweep 1s linear infinite;
+  }
+
+  @keyframes sweep {
+    from {
+      background-position: -40% 0;
+    }
+    to {
+      background-position: 140% 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .busy {
+      animation: none;
+      background-size: 100% 100%;
+    }
+  }
+
+  .hidden-text {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  .error {
+    margin: 0.5em 0;
+    color: var(--danger);
   }
 
   .sentinel {

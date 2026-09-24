@@ -249,8 +249,6 @@ pub fn upsert_title(
     t: &MraTitle<'_>,
     zips: &[MraZip<'_>],
 ) -> Result<TitleId> {
-    let json = |xs: &[String]| serde_json::to_string(xs).unwrap_or_else(|_| "[]".to_owned());
-    let (regions, languages, flags) = (json(t.regions), json(t.languages), json(t.flags));
     let existing: Option<i64> = conn
         .prepare_cached(
             "SELECT id FROM titles WHERE platform_id = ?1 AND source = 'mra' AND name = ?2",
@@ -259,19 +257,16 @@ pub fn upsert_title(
         .optional()?;
     let id = if let Some(id) = existing {
         conn.prepare_cached(
-            "UPDATE titles SET dat_version_id = ?2, base_name = ?3, regions = ?4, languages = ?5,
-               revision = ?6, flags = ?7, group_key = ?8, setname = ?9, rbf = ?10,
-               mra_path = ?11, mra_file_stamp = ?12, mra_seen = ?13, inferred = 1, retired = 0
+            "UPDATE titles SET dat_version_id = ?2, base_name = ?3, revision = ?4, group_key = ?5,
+               setname = ?6, rbf = ?7, mra_path = ?8, mra_file_stamp = ?9, mra_seen = ?10,
+               inferred = 1, retired = 0
              WHERE id = ?1",
         )?
         .execute(params![
             id,
             version.0,
             t.base_name,
-            regions,
-            languages,
             t.revision,
-            flags,
             t.group_key,
             t.setname,
             t.rbf,
@@ -284,20 +279,16 @@ pub fn upsert_title(
         id
     } else {
         conn.prepare_cached(
-            "INSERT INTO titles (platform_id, dat_version_id, name, base_name, regions, languages,
-               revision, flags, group_key, inferred, source, setname, rbf, mra_path,
-               mra_file_stamp, mra_seen)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 'mra', ?10, ?11, ?12, ?13, ?14)",
+            "INSERT INTO titles (platform_id, dat_version_id, name, base_name, revision,
+               group_key, inferred, source, setname, rbf, mra_path, mra_file_stamp, mra_seen)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 1, 'mra', ?7, ?8, ?9, ?10, ?11)",
         )?
         .execute(params![
             platform,
             version.0,
             t.name,
             t.base_name,
-            regions,
-            languages,
             t.revision,
-            flags,
             t.group_key,
             t.setname,
             t.rbf,
@@ -310,6 +301,7 @@ pub fn upsert_title(
             .execute([id])?;
         id
     };
+    super::titles::store_lists(conn, id, t.regions, t.languages, t.flags)?;
     let mut stmt = conn.prepare_cached(
         "INSERT INTO roms (title_id, name, size, md5, status, zip_dir, present, retired)
          VALUES (?1, ?2, 0, ?3, 'good', ?4, ?5, 0)

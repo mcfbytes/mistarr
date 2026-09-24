@@ -441,10 +441,11 @@ impl Placing<'_> {
         self.app()
             .db
             .write(move |c| {
+                let tx = c.transaction()?;
                 for (rel, rom) in &rows {
-                    files::mark_verified(c, &pid, rel, *rom)?;
+                    files::mark_verified(&tx, &pid, rel, *rom)?;
                 }
-                Ok(())
+                crate::db::commit(tx)
             })
             .await
     }

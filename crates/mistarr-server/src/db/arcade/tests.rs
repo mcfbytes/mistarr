@@ -49,6 +49,7 @@ fn recompute(c: &Connection) {
 }
 
 fn browse(c: &Connection) -> Vec<(String, u64)> {
+    crate::db::groups::flush(c).expect("flush");
     titles::browse(c, "arcade", &Browse::default(), 100, 0)
         .expect("browse")
         .0
@@ -223,6 +224,7 @@ fn the_browse_shows_mra_titles_alone_once_there_are_any() {
     dat_game(&c, "1", "exblast");
     recompute(&c);
     assert_eq!(browse(&c).len(), 1);
+    crate::db::groups::flush(&c).expect("flush");
     let counts = titles::counts(&c, &[]).expect("counts");
     assert_eq!(counts["arcade"].titles, 1);
     mra(&c, "Example Blaster", &[("exblast.zip", true)]);
@@ -230,6 +232,7 @@ fn the_browse_shows_mra_titles_alone_once_there_are_any() {
     recompute(&c);
     let names: Vec<String> = browse(&c).into_iter().map(|(n, _)| n).collect();
     assert_eq!(names, ["Example Blaster", "Example Quest"]);
+    crate::db::groups::flush(&c).expect("flush");
     let counts = titles::counts(&c, &[]).expect("counts");
     assert_eq!((counts["arcade"].titles, counts["arcade"].have), (2, 1));
 }

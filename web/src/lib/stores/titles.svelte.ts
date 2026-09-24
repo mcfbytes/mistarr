@@ -1,5 +1,5 @@
-import { api } from '../api';
-import { fixtureTitle, fixtureTitles } from '../fixtures';
+import { api, errorMessage } from '../api';
+import { fixtureTitle, fixtureTitles, mockDelayMs } from '../fixtures';
 import type { FileState, TitleDetail, TitleFilters, TitleGroup } from '../types';
 
 const isMock = import.meta.env.VITE_MOCK === '1';
@@ -8,11 +8,15 @@ const PAGE_SIZE = 60;
 let groups = $state<TitleGroup[]>([]);
 let groupsTotal = $state(0);
 let groupsPlatform = $state<string | null>(null);
+let groupsLoading = $state(false);
+let groupsError = $state<string | null>(null);
 let lastFilters: TitleFilters = {};
 let lastPage = 0;
 let detail = $state<TitleDetail | null>(null);
 let detailId: number | null = null;
 let groupsController: AbortController | null = null;
+/** Counts the loads a user asked for, so a background reload stops once one starts. */
+let userLoads = 0;
 let detailToken = 0;
 
 export function getGroups(): TitleGroup[] {
@@ -23,58 +27,123 @@ export function getGroupsTotal(): number {
   return groupsTotal;
 }
 
+/** True while a page the user asked for is on its way. */
+export function isGroupsLoading(): boolean {
+  return groupsLoading;
+}
+
+/** Why the latest page failed to load, or null. */
+export function getGroupsError(): string | null {
+  return groupsError;
+}
+
+/** Waits `ms`, or less when `signal` aborts first. */
+function pause(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    signal.addEventListener('abort', () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
+async function mockTitles(
+  platformId: string,
+  filters: TitleFilters,
+  page: number,
+  signal: AbortSignal
+): Promise<{ items: TitleGroup[]; total: number }> {
+  const ms = mockDelayMs(filters.q ?? '', page);
+  await pause(Math.abs(ms), signal);
+  if (ms < 0) {
+    throw new Error('Mock search failed.');
+  }
+  const all = fixtureTitles(platformId, 240, filters);
+  return { items: all, total: all.length };
+}
+
 export function getDetail(): TitleDetail | null {
   return detail;
 }
 
+/**
+ * Loads one page of groups, aborting the request before it so only the newest
+ * answer lands, and resolves to whether this page landed. A `quiet` load
+ * refreshes in place without the loading state.
+ */
 export async function loadTitlesPage(
   platformId: string,
   filters: TitleFilters,
-  page: number
-): Promise<void> {
+  page: number,
+  quiet = false
+): Promise<boolean> {
   groupsController?.abort();
   const controller = new AbortController();
   groupsController = controller;
   lastFilters = filters;
-  lastPage = page;
+  if (!quiet) {
+    userLoads += 1;
+  }
 
   if (groupsPlatform !== platformId && page === 0) {
     groups = [];
   }
   groupsPlatform = platformId;
-  const offset = page * PAGE_SIZE;
-  if (isMock) {
-    const all = fixtureTitles(platformId, 240, filters);
-    const slice = all.slice(offset, offset + PAGE_SIZE);
-    groups = page === 0 ? slice : [...groups, ...slice];
-    groupsTotal = all.length;
-    return;
+  if (!quiet) {
+    groupsLoading = true;
   }
+  const offset = page * PAGE_SIZE;
   try {
-    const res = await api.titles(platformId, filters, PAGE_SIZE, offset, controller.signal);
+    const res = isMock
+      ? await mockTitles(platformId, filters, page, controller.signal).then((all) => ({
+          items: all.items.slice(offset, offset + PAGE_SIZE),
+          total: all.total
+        }))
+      : await api.titles(platformId, filters, PAGE_SIZE, offset, controller.signal);
     if (controller.signal.aborted) {
-      return;
+      return false;
     }
     groups = page === 0 ? res.items : [...groups, ...res.items];
     groupsTotal = res.total;
+    groupsError = null;
+    lastPage = page;
+    return true;
   } catch (err) {
     if (!controller.signal.aborted) {
-      throw err;
+      groupsError = errorMessage(err);
+    }
+    return false;
+  } finally {
+    if (groupsController === controller) {
+      groupsLoading = false;
     }
   }
 }
 
+/**
+ * Re-fetches every loaded page in place. It stops as soon as a page fails or a
+ * load the user asked for starts, so it never lands results for stale filters.
+ */
 export async function reloadTitles(): Promise<void> {
   // Snapshot before reloading: page 0 would otherwise reset lastPage first.
   const platform = groupsPlatform;
   const filters = lastFilters;
   const pages = lastPage;
+  const loads = userLoads;
   if (platform) {
     for (let p = 0; p <= pages; p += 1) {
-      await loadTitlesPage(platform, filters, p);
+      if (userLoads !== loads || !(await loadTitlesPage(platform, filters, p, true))) {
+        return;
+      }
     }
   }
   await refreshDetail();
+}
+
+if (isMock && typeof window !== 'undefined') {
+  // Lets the mock e2e suite stand in for the server's file.changed events.
+  (window as unknown as { mistarrReloadTitles: () => Promise<void> }).mistarrReloadTitles = reloadTitles;
 }
 
 // Re-fetches the open title without clearing it first, so the page only

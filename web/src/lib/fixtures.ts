@@ -108,6 +108,7 @@ export function fixtureTitles(platformId: string, count = 60, filters: TitleFilt
     .split(',')
     .map((f) => f.trim().toLowerCase())
     .filter((f) => f.length > 0);
+  const q = filters.q?.trim().toLowerCase() ?? '';
   const rows: TitleGroup[] = [];
   for (let i = 0; i < count; i += 1) {
     const flags = flagsFor(i);
@@ -118,6 +119,9 @@ export function fixtureTitles(platformId: string, count = 60, filters: TitleFilt
       continue;
     }
     const base = exampleNames[i % exampleNames.length] ?? 'Example Quest';
+    if (q && !base.toLowerCase().includes(q)) {
+      continue;
+    }
     const name = `${base} (USA)`;
     rows.push({
       parent_id: i + 1,
@@ -134,6 +138,29 @@ export function fixtureTitles(platformId: string, count = 60, filters: TitleFilt
     });
   }
   return rows;
+}
+
+/**
+ * Mock latency in ms of page `page` of a title search for `q`, read from
+ * localStorage `mistarr.mockDelayMs`: a number for every request, or an object
+ * of numbers keyed `q#page` or `q`, with `*` as the default. A negative value
+ * makes the request fail.
+ */
+export function mockDelayMs(q: string, page: number): number {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockDelayMs') ?? '0');
+    if (typeof parsed === 'number') {
+      return parsed;
+    }
+    if (parsed !== null && typeof parsed === 'object') {
+      const byQuery = parsed as Record<string, unknown>;
+      const ms = byQuery[`${q}#${page}`] ?? byQuery[q] ?? byQuery['*'];
+      return typeof ms === 'number' ? ms : 0;
+    }
+  } catch {
+    // Storage blocked or the value is not JSON: no delay.
+  }
+  return 0;
 }
 
 export function fixtureTitle(id: number): TitleDetail {

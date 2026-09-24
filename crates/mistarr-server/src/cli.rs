@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::config::Config;
+use crate::db::titles::SearchShape;
 use crate::error::Result;
 
 /// `mistarr [--config FILE] [--data DIR] [--listen ADDR] [serve | doctor]`.
@@ -30,7 +31,7 @@ pub struct Cli {
 }
 
 /// Subcommands.
-#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[derive(Debug, Clone, PartialEq, Subcommand)]
 pub enum Command {
     /// Run the server.
     Serve,
@@ -39,7 +40,47 @@ pub enum Command {
         /// MiB of zeros hashed for the throughput line.
         #[arg(long, default_value_t = crate::doctor::DEFAULT_HASH_MIB)]
         hash_mib: u32,
+        /// Recompute the browse groups first; run it while the server is stopped.
+        #[arg(long)]
+        rebuild_groups: bool,
     },
+    /// Write the synthetic benchmark catalogue into a new database file.
+    #[command(hide = true)]
+    BenchSeed {
+        /// Database file to create; must not exist.
+        #[arg(long, value_name = "PATH")]
+        db: PathBuf,
+        /// Catalogue size; 1 is a full set of DATs.
+        #[arg(long, default_value_t = 1.0)]
+        scale: f64,
+    },
+    /// Time browse searches on a database file, opened read-only.
+    #[command(hide = true)]
+    BenchSearch {
+        /// Database file to read.
+        #[arg(long, value_name = "PATH")]
+        db: PathBuf,
+        /// Platform id to browse.
+        #[arg(long)]
+        platform: String,
+        /// Search text; empty times the unsearched page.
+        #[arg(long, default_value = "")]
+        term: String,
+        /// Timed runs per shape.
+        #[arg(long, default_value_t = 20)]
+        iterations: u32,
+        /// Shapes to time (like, fts, fts-platform); every shape when omitted.
+        #[arg(long = "shape", value_parser = parse_shape)]
+        shapes: Vec<SearchShape>,
+    },
+}
+
+/// A `--shape` value.
+fn parse_shape(s: &str) -> std::result::Result<SearchShape, String> {
+    SearchShape::from_name(s).ok_or_else(|| {
+        let names: Vec<&str> = SearchShape::ALL.iter().map(|s| s.name()).collect();
+        format!("expected one of {}", names.join(", "))
+    })
 }
 
 impl Cli {
@@ -84,12 +125,74 @@ mod tests {
     fn flags_parse_before_and_after_the_subcommand() {
         let cli = Cli::try_parse_from(["mistarr", "doctor", "--hash-mib", "2", "--data", "/d"])
             .expect("parse");
-        assert_eq!(cli.command(), Command::Doctor { hash_mib: 2 });
+        assert_eq!(
+            cli.command(),
+            Command::Doctor {
+                hash_mib: 2,
+                rebuild_groups: false
+            }
+        );
         assert_eq!(cli.data.as_deref(), Some(std::path::Path::new("/d")));
+        let cli = Cli::try_parse_from(["mistarr", "doctor", "--rebuild-groups"]).expect("parse");
+        assert!(matches!(
+            cli.command(),
+            Command::Doctor {
+                rebuild_groups: true,
+                ..
+            }
+        ));
         let cli =
             Cli::try_parse_from(["mistarr", "--listen", "0.0.0.0:1", "serve"]).expect("parse");
         assert_eq!(cli.command(), Command::Serve);
         assert!(Cli::try_parse_from(["mistarr", "bogus"]).is_err());
+    }
+
+    #[test]
+    fn bench_commands_parse_shapes_and_defaults() {
+        let cli = Cli::try_parse_from([
+            "mistarr",
+            "bench-search",
+            "--db",
+            "/tmp/b.db",
+            "--platform",
+            "nes",
+            "--term",
+            "sta",
+            "--shape",
+            "like",
+            "--shape",
+            "fts-platform",
+        ])
+        .expect("parse");
+        assert_eq!(
+            cli.command(),
+            Command::BenchSearch {
+                db: "/tmp/b.db".into(),
+                platform: "nes".into(),
+                term: "sta".into(),
+                iterations: 20,
+                shapes: vec![SearchShape::Like, SearchShape::FtsPlatform],
+            }
+        );
+        assert!(Cli::try_parse_from([
+            "mistarr",
+            "bench-search",
+            "--db",
+            "b.db",
+            "--platform",
+            "nes",
+            "--shape",
+            "grep"
+        ])
+        .is_err());
+        let cli = Cli::try_parse_from(["mistarr", "bench-seed", "--db", "s.db"]).expect("parse");
+        assert_eq!(
+            cli.command(),
+            Command::BenchSeed {
+                db: "s.db".into(),
+                scale: 1.0
+            }
+        );
     }
 
     #[test]

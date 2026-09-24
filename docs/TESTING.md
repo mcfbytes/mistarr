@@ -111,6 +111,67 @@ prints each peak:
 make memory
 ```
 
+## Browse speed
+
+`crates/mistarr-server/src/synth.rs` generates the catalogue every query
+test uses: DAT-sized sets for every major platform (disc sets with a cue and
+several tracks, headered cartridge sets, 2 500 arcade MRAs and an add-on
+family), about 42 000 titles and 82 000 roms at full scale, in clone groups
+of three variants on average with regions, languages, revisions, flags and
+some files in each state. Names are synthetic words from Zipf-skewed
+syllables, so common trigrams such as `the`, `sta` and `man` are common on
+every platform; two placed words are rare everywhere and common everywhere
+but the browsed platforms. The plan test, the browse benchmark, the random
+write test and `mistarr bench-seed` all use it.
+
+`crates/mistarr-server/tests/browse.rs` seeds the full catalogue and checks
+the default page equals the reference aggregation query's and is at least
+five times faster. It then times every search shape (`titles::SearchShape`)
+on the NES, SNES and PSX sets for a rare word, common trigrams, two-letter
+terms below the trigram length, a word common elsewhere but rare on the
+browsed platform, and no search, asserts every shape returns the same page
+and total, and prints the table. The default shape's worst case must stay
+under 100 ms, in debug builds too. Host timings do not rank the shapes the
+way the board does, so the default follows the real-DAT board numbers in
+ARCHITECTURE.md "Resource budgets", and the plan tests assert it asks
+`title_search` for the platform's phrase:
+
+```sh
+cargo test --release -p mistarr-server --test browse -- --include-ignored --nocapture
+```
+
+The ignored test in the same file times a 15 000-game DAT load with the
+group refresh and search index, without the index, and with neither, and
+prints the on-disk size of the index, the group table and the flag, region
+and language tables.
+
+On the board, two hidden subcommands measure the same queries. `bench-seed`
+writes the synthetic catalogue into a new file and refuses a path that
+exists, so it never touches an install's database; `bench-search` opens any
+database file read-only, with the server's 1 MiB reader cache, and prints the
+groups matched and the min, median and 95th percentile time of each shape
+(`--shape like|fts|fts-platform`, repeatable; every shape when omitted):
+
+```sh
+mistarr bench-seed --db /tmp/bench.db            # --scale 0.5 for half the size
+mistarr bench-search --db /tmp/bench.db --platform psx --term sta --iterations 50
+mistarr bench-search --db /media/fat/mistarr/mistarr.db --platform snes --term the --shape like
+```
+
+`db::groups::tests` starts from a small synthetic catalogue with groups
+split across platforms, runs random
+sequences of writes to titles, roms, files, flags and regions through the
+real triggers and commits, and after every commit compares the table, the
+counts and every browse filter combination in every search shape with the
+reference aggregation query kept in the test. `db::plans` prints the query
+plan of every hot read and fails on a scan of a growing table.
+
+The web e2e suite drives the Browse screen against the mock API with a
+latency from localStorage `mistarr.mockDelayMs`: a number, or an object of
+numbers keyed `search#page` or `search` with `*` as the default; negative
+fails the request. It checks the loading bar, stale answers, a background
+reload overtaken by a search, a failed next page and the error state.
+
 ## 3. End-to-end on a board with real, open-licensed content
 
 For manual verification on a DE10-Nano, use homebrew whose licence permits

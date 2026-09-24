@@ -7,12 +7,14 @@ use std::fmt;
 use mistarr_core::naming::{parse_name, ParsedName};
 use mistarr_core::select::{infer_groups, select_1g1r, Prefs, Variant};
 use mistarr_core::PlatformId;
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::types::Value;
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
 use super::arcade::MraInfo;
 use super::candidates::Availability;
 use super::dats::DatVersionId;
+use super::groups::{self, Clause};
 use crate::error::Result;
 
 /// A `titles.id`.
@@ -66,17 +68,113 @@ pub struct RomInput<'a> {
     pub header: Option<&'a str>,
 }
 
-fn json(xs: &[String]) -> String {
-    serde_json::to_string(xs).unwrap_or_else(|_| "[]".to_owned())
-}
-
 /// A non-negative SQLite integer as `u64`.
 fn unsigned(n: i64) -> u64 {
     u64::try_from(n).unwrap_or(0)
 }
 
-fn parse_list(text: &str) -> Vec<String> {
-    serde_json::from_str(text).unwrap_or_default()
+/// A title's list stored in its own table, one row per value in DAT order.
+#[derive(Debug, Clone, Copy)]
+enum Tag {
+    Flags,
+    Regions,
+    Languages,
+}
+
+impl Tag {
+    /// The table and its value column.
+    fn table(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Flags => ("title_flags", "flag"),
+            Self::Regions => ("title_regions", "region"),
+            Self::Languages => ("title_languages", "language"),
+        }
+    }
+}
+
+/// Title `id`'s `tag` values in order.
+fn tags_of(conn: &Connection, id: i64, tag: Tag) -> Result<Vec<String>> {
+    let (table, column) = tag.table();
+    let rows = conn
+        .prepare_cached(&format!(
+            "SELECT {column} FROM {table} WHERE title_id = ?1 ORDER BY pos"
+        ))?
+        .query_map([id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+/// Replaces title `id`'s `tag` values with `values`, keeping the first of repeats, and
+/// writes nothing when they are unchanged so the title's group stays clean.
+fn store_tags(conn: &Connection, id: i64, tag: Tag, values: &[String]) -> Result<()> {
+    let mut wanted: Vec<&str> = Vec::with_capacity(values.len());
+    for v in values {
+        if !wanted.contains(&v.as_str()) {
+            wanted.push(v);
+        }
+    }
+    if tags_of(conn, id, tag)?
+        .iter()
+        .map(String::as_str)
+        .eq(wanted.iter().copied())
+    {
+        return Ok(());
+    }
+    let (table, column) = tag.table();
+    conn.prepare_cached(&format!("DELETE FROM {table} WHERE title_id = ?1"))?
+        .execute([id])?;
+    let mut insert = conn.prepare_cached(&format!(
+        "INSERT INTO {table} (title_id, pos, {column}) VALUES (?1, ?2, ?3)"
+    ))?;
+    for (pos, v) in wanted.iter().enumerate() {
+        insert.execute(params![id, i64::try_from(pos).unwrap_or(i64::MAX), v])?;
+    }
+    Ok(())
+}
+
+/// Stores a title's regions, languages and flags in their tables.
+pub(crate) fn store_lists(
+    conn: &Connection,
+    id: i64,
+    regions: &[String],
+    languages: &[String],
+    flags: &[String],
+) -> Result<()> {
+    store_tags(conn, id, Tag::Regions, regions)?;
+    store_tags(conn, id, Tag::Languages, languages)?;
+    store_tags(conn, id, Tag::Flags, flags)
+}
+
+/// Replaces the flags of title `id`, in order.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure, including a title that does not exist.
+///
+/// ```
+/// use mistarr_server::db::titles::{set_flags, TitleId};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(set_flags(&conn, TitleId(1), &[]).is_ok());
+/// ```
+pub fn set_flags(conn: &Connection, id: TitleId, flags: &[String]) -> Result<()> {
+    store_tags(conn, id.0, Tag::Flags, flags)
+}
+
+/// The flags of title `id`, in order.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::titles::{flags_of, TitleId};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(flags_of(&conn, TitleId(1)).unwrap().is_empty());
+/// ```
+pub fn flags_of(conn: &Connection, id: TitleId) -> Result<Vec<String>> {
+    tags_of(conn, id.0, Tag::Flags)
 }
 
 /// Stores a game under `version`, reusing the title of the same name from any version
@@ -116,22 +214,17 @@ pub fn upsert_title(
         )?
         .query_row(params![t.name, version.0, platform], |r| r.get(0))
         .optional()?;
-    let (regions, languages, flags) = (json(t.regions), json(t.languages), json(t.flags));
     let id = if let Some(id) = existing {
         conn.prepare_cached(
             "UPDATE titles SET platform_id = ?1, dat_version_id = ?2, base_name = ?3,
-               regions = ?4, languages = ?5, revision = ?6, flags = ?7, clone_of = ?8,
-               group_key = ?9, retired = 0
-             WHERE id = ?10",
+               revision = ?4, clone_of = ?5, group_key = ?6, retired = 0
+             WHERE id = ?7",
         )?
         .execute(params![
             platform,
             version.0,
             t.base_name,
-            regions,
-            languages,
             t.revision,
-            flags,
             t.clone_of,
             t.group_key,
             id
@@ -141,19 +234,16 @@ pub fn upsert_title(
         id
     } else {
         conn.prepare_cached(
-            "INSERT INTO titles (platform_id, dat_version_id, name, base_name, regions,
-               languages, revision, flags, clone_of, group_key)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO titles (platform_id, dat_version_id, name, base_name, revision,
+               clone_of, group_key)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         )?
         .execute(params![
             platform,
             version.0,
             t.name,
             t.base_name,
-            regions,
-            languages,
             t.revision,
-            flags,
             t.clone_of,
             t.group_key
         ])?;
@@ -162,6 +252,7 @@ pub fn upsert_title(
             .execute([id])?;
         id
     };
+    store_lists(conn, id, t.regions, t.languages, t.flags)?;
     let mut stmt = conn.prepare_cached(
         "INSERT INTO roms (title_id, name, size, crc32, md5, sha1, status, header, retired)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)
@@ -352,16 +443,30 @@ pub fn recompute_platform(conn: &Connection, platform: &str, prefs: &Prefs) -> R
             }
         },
     )?;
-    conn.execute(
-        "UPDATE titles SET is_1g1r_pick = 0 WHERE platform_id = ?1 AND is_1g1r_pick = 1",
-        [platform],
-    )?;
-    let mut stmt = conn.prepare_cached("UPDATE titles SET is_1g1r_pick = 1 WHERE id = ?1")?;
-    for id in &picks {
-        stmt.execute([id])?;
-    }
     out.picks = u64::try_from(picks.len()).unwrap_or(u64::MAX);
+    store_picks(conn, platform, picks)?;
     Ok(out)
+}
+
+/// Sets `is_1g1r_pick` on exactly `picks` among `platform`'s titles, writing only the
+/// rows that change so unchanged groups stay clean.
+fn store_picks(conn: &Connection, platform: &str, mut picks: Vec<i64>) -> Result<()> {
+    picks.sort_unstable();
+    picks.dedup();
+    let current: Vec<i64> = conn
+        .prepare_cached(
+            "SELECT id FROM titles WHERE platform_id = ?1 AND is_1g1r_pick = 1 ORDER BY id",
+        )?
+        .query_map([platform], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut set = conn.prepare_cached("UPDATE titles SET is_1g1r_pick = ?2 WHERE id = ?1")?;
+    for &id in current.iter().filter(|id| picks.binary_search(id).is_err()) {
+        set.execute([id, 0])?;
+    }
+    for &id in picks.iter().filter(|id| current.binary_search(id).is_err()) {
+        set.execute([id, 1])?;
+    }
+    Ok(())
 }
 
 /// Recomputes `group_root` on `platform` from scratch. Every title starts in its own
@@ -485,12 +590,11 @@ fn each_signature(
     Ok(())
 }
 
-/// Keeps a group of `title_groups g` only when it is an MRA title or its platform has no
-/// live MRA title, so a platform with MRAs browses its MRA catalogue alone.
-const MRA_ONLY: &str =
-    "(EXISTS (SELECT 1 FROM titles s WHERE s.id = g.parent_id AND s.source = 'mra')
-    OR NOT EXISTS (SELECT 1 FROM titles m WHERE m.platform_id = g.platform_id
-                   AND m.source = 'mra' AND m.retired = 0))";
+/// Keeps a group of `title_groups g` only when its parent is an MRA title or its platform
+/// has no live MRA title, so a platform with MRAs browses its MRA catalogue alone.
+const MRA_ONLY: &str = "(g.source = 'mra' OR g.platform_id NOT IN (
+    SELECT p.id FROM platforms p WHERE EXISTS (
+      SELECT 1 FROM titles m WHERE m.platform_id = p.id AND m.source = 'mra' AND m.retired = 0)))";
 
 /// Catalog counts of one platform for `GET /platforms`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
@@ -525,18 +629,15 @@ pub struct Counts {
 /// ```
 pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Counts>> {
     let mut out: HashMap<String, Counts> = HashMap::new();
-    let hidden_json = json(hidden);
+    let mut clause = Clause::default();
+    clause.and(MRA_ONLY, []);
+    groups::visible(&mut clause, hidden, None, &[]);
     let mut stmt = conn.prepare(&format!(
-        "SELECT g.platform_id, COUNT(*), COALESCE(SUM(g.have_verified > 0), 0),
-                COALESCE(SUM(g.wanted > 0), 0)
-         FROM title_groups g
-         WHERE {MRA_ONLY} AND EXISTS (
-           SELECT 1 FROM titles v WHERE v.group_root = g.parent_id AND v.retired = 0
-             AND NOT EXISTS (SELECT 1 FROM json_each(v.flags) f
-                             WHERE f.value IN (SELECT value FROM json_each(?1))))
-         GROUP BY g.platform_id"
+        "SELECT g.platform_id, COUNT(*), SUM(g.have_verified > 0), SUM(g.wanted > 0)
+         FROM title_groups g WHERE {} GROUP BY g.platform_id",
+        clause.sql()
     ))?;
-    let mut rows = stmt.query([&hidden_json])?;
+    let mut rows = stmt.query(params_from_iter(&clause.args))?;
     while let Some(r) = rows.next()? {
         let e = out.entry(r.get(0)?).or_default();
         e.titles = unsigned(r.get(1)?);
@@ -551,9 +652,9 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
     while let Some(r) = rows.next()? {
         out.entry(r.get(0)?).or_default().unmatched_files = unsigned(r.get(1)?);
     }
-    // Per visible MRA title in an effective clone group: any failing its md5 check, any partly
-    // present. A NULL `mra_check` (never run) is not failing; COALESCE keeps each aggregate non-NULL.
-    let mut stmt = conn.prepare(
+    // Per visible MRA title, failing its md5 check or partly present, by clone group;
+    // a group with a have-verified variant in title_groups counts as neither.
+    let mut stmt = conn.prepare(&format!(
         "WITH mra AS (
            SELECT t.platform_id, t.group_root AS parent_id,
                   MAX(COALESCE(t.mra_check IN ('mismatch', 'missing_part'), 0)) AS any_failing,
@@ -563,8 +664,8 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
                                   WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 0)) AS any_partial
            FROM titles t
            WHERE t.source = 'mra' AND t.retired = 0
-             AND NOT EXISTS (SELECT 1 FROM json_each(t.flags) f
-                             WHERE f.value IN (SELECT value FROM json_each(?1)))
+             AND NOT EXISTS (SELECT 1 FROM title_flags f
+                             WHERE f.title_id = t.id AND f.flag IN ({}))
            GROUP BY t.platform_id, t.group_root
          )
          SELECT g.platform_id,
@@ -572,8 +673,9 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
                 COALESCE(SUM(m.any_partial AND g.have_verified = 0), 0)
          FROM mra m JOIN title_groups g ON g.platform_id = m.platform_id AND g.parent_id = m.parent_id
          GROUP BY g.platform_id",
-    )?;
-    let mut rows = stmt.query([&hidden_json])?;
+        groups::placeholders(hidden.len())
+    ))?;
+    let mut rows = stmt.query(params_from_iter(hidden))?;
     while let Some(r) = rows.next()? {
         let e = out.entry(r.get(0)?).or_default();
         e.failing_check = unsigned(r.get(1)?);
@@ -592,16 +694,6 @@ pub enum Tri {
     Yes,
     /// Only non-matching groups.
     No,
-}
-
-impl Tri {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Any => "any",
-            Self::Yes => "yes",
-            Self::No => "no",
-        }
-    }
 }
 
 /// Browse order.
@@ -660,20 +752,149 @@ pub struct GroupRow {
     pub has_pick: bool,
 }
 
-const BROWSE_WHERE: &str = "
-    g.platform_id = ?1
-    AND (?2 IS NULL OR g.base_name LIKE ?2 ESCAPE '\\')
-    AND (?3 = 'any' OR (?3 = 'yes') = (g.have_verified > 0))
-    AND (?4 = 'any' OR (?4 = 'yes') = (g.wanted > 0))
-    AND EXISTS (
-      SELECT 1 FROM titles v WHERE v.group_root = g.parent_id AND v.retired = 0
-        AND NOT EXISTS (SELECT 1 FROM json_each(v.flags) f
-                        WHERE f.value IN (SELECT value FROM json_each(?5)))
-        AND (?6 IS NULL OR EXISTS (SELECT 1 FROM json_each(v.regions) r
-                                   WHERE r.value = ?6 COLLATE NOCASE))
-        AND NOT EXISTS (SELECT 1 FROM json_each(?7) w
-                        WHERE NOT EXISTS (SELECT 1 FROM json_each(v.flags) f
-                                          WHERE f.value = w.value)))";
+/// How a search of three or more characters finds its groups; shorter ones always use
+/// [`SearchShape::Like`]. `mistarr bench-search` times each on a real database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SearchShape {
+    /// `LIKE` over the platform's `title_groups_name` range.
+    Like,
+    /// The trigram index over every platform, probed while walking the platform's groups.
+    Fts,
+    /// The trigram index, filtered to the platform's sentinel-wrapped id in the same `MATCH`,
+    /// plus the platform's groups whose parent title is on another platform.
+    FtsPlatform,
+}
+
+impl SearchShape {
+    /// Every shape, in [`SearchShape::name`] order.
+    pub const ALL: [Self; 3] = [Self::Like, Self::Fts, Self::FtsPlatform];
+
+    /// The shape's command-line name.
+    ///
+    /// ```
+    /// use mistarr_server::db::titles::SearchShape;
+    /// assert_eq!(SearchShape::from_name(SearchShape::Fts.name()), Some(SearchShape::Fts));
+    /// ```
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Like => "like",
+            Self::Fts => "fts",
+            Self::FtsPlatform => "fts-platform",
+        }
+    }
+
+    /// The shape named `name`.
+    ///
+    /// ```
+    /// use mistarr_server::db::titles::SearchShape;
+    /// assert_eq!(SearchShape::from_name("like"), Some(SearchShape::Like));
+    /// assert_eq!(SearchShape::from_name("grep"), None);
+    /// ```
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.name() == name)
+    }
+}
+
+/// The shape [`browse`] uses: the best worst case on real DATs on the board; see
+/// `docs/TESTING.md` "Browse speed".
+pub const SEARCH_SHAPE: SearchShape = SearchShape::FtsPlatform;
+
+/// The conditions of a browse request on `platform`, over `title_groups g`.
+fn browse_clause(
+    conn: &Connection,
+    platform: &str,
+    filter: &Browse,
+    shape: SearchShape,
+) -> Result<Clause> {
+    let mut clause = Clause::default();
+    clause.and("g.platform_id = ?", [Value::Text(platform.to_owned())]);
+    let mra: bool = conn
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM titles
+             WHERE platform_id = ?1 AND source = 'mra' AND retired = 0)",
+        )?
+        .query_row([platform], |r| r.get(0))?;
+    if mra {
+        clause.and("g.source = 'mra'", []);
+    }
+    if let Some(q) = filter.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
+        if q.chars().count() >= TRIGRAM {
+            match shape {
+                SearchShape::Like => {}
+                SearchShape::Fts => clause.and(SEARCH, [Value::Text(phrase(q))]),
+                SearchShape::FtsPlatform => clause.and(
+                    SEARCH_PLATFORM,
+                    [
+                        Value::Text(format!(
+                            "platform : \"\u{1f}{platform}\u{1f}\" AND base_name : {}",
+                            phrase(q)
+                        )),
+                        Value::Text(platform.to_owned()),
+                    ],
+                ),
+            }
+        }
+        // The index folds all of Unicode's case; LIKE keeps the ASCII-only match exact.
+        clause.and(
+            "g.base_name LIKE ? ESCAPE '\\'",
+            [Value::Text(like_pattern(q))],
+        );
+    }
+    match filter.have {
+        Tri::Any => {}
+        Tri::Yes => clause.and("g.have_verified > 0", []),
+        Tri::No => clause.and("g.have_verified = 0", []),
+    }
+    match filter.wanted {
+        Tri::Any => {}
+        Tri::Yes => clause.and("g.wanted > 0", []),
+        Tri::No => clause.and("g.wanted = 0", []),
+    }
+    groups::visible(
+        &mut clause,
+        &filter.hidden,
+        filter.region.as_deref(),
+        &filter.flags,
+    );
+    Ok(clause)
+}
+
+/// The page query for `clause` in `sort` order, taking `LIMIT` and `OFFSET` last.
+fn page_sql(clause: &Clause, sort: Sort) -> String {
+    let order = match sort {
+        Sort::Name => "g.base_name COLLATE NOCASE, g.parent_id",
+        Sort::Have => "g.have_verified > 0 DESC, g.base_name COLLATE NOCASE, g.parent_id",
+        Sort::Recent => "g.newest_id DESC",
+    };
+    format!(
+        "SELECT g.parent_id, g.platform_id, g.base_name, g.name, g.pick_id, k.name,
+                g.variants, g.have_verified, g.wanted, g.has_pick
+         FROM title_groups g LEFT JOIN titles k ON k.id = g.pick_id
+         WHERE {} ORDER BY {order} LIMIT ? OFFSET ?",
+        clause.sql()
+    )
+}
+
+/// Shortest search the trigram index can serve; shorter ones scan the platform's names.
+const TRIGRAM: usize = 3;
+
+/// Keeps groups whose parent's base name contains the phrase bound to `?`, found through
+/// `title_search` and probed while the platform's name index is walked in order.
+const SEARCH: &str = "g.parent_id IN (SELECT rowid FROM title_search WHERE title_search MATCH ?)";
+
+/// [`SEARCH`] with a `MATCH` limited to the platform, plus the platform's groups whose
+/// parent is elsewhere, found through the partial `title_groups_split` index.
+const SEARCH_PLATFORM: &str = "g.parent_id IN (
+    SELECT rowid FROM title_search WHERE title_search MATCH ?
+    UNION ALL SELECT s.parent_id FROM title_groups s WHERE s.platform_id = ? AND s.split)";
+
+/// `q` as one FTS5 phrase, so every character is literal.
+fn phrase(q: &str) -> String {
+    format!("\"{}\"", q.replace('"', "\"\""))
+}
 
 fn like_pattern(q: &str) -> String {
     let mut out = String::with_capacity(q.len() + 2);
@@ -708,43 +929,46 @@ pub fn browse(
     limit: u32,
     offset: u32,
 ) -> Result<(Vec<GroupRow>, u64)> {
-    let q = filter
-        .q
-        .as_deref()
-        .map(str::trim)
-        .filter(|q| !q.is_empty())
-        .map(like_pattern);
-    let hidden = json(&filter.hidden);
-    let flags = json(&filter.flags);
-    let args = params![
-        platform,
-        q,
-        filter.have.as_str(),
-        filter.wanted.as_str(),
-        hidden,
-        filter.region,
-        flags,
-        limit,
-        offset
-    ];
-    let total: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM title_groups g WHERE {BROWSE_WHERE} AND {MRA_ONLY}"),
-        &args[..7],
-        |r| r.get(0),
-    )?;
-    let order = match filter.sort {
-        Sort::Name => "g.base_name COLLATE NOCASE, g.parent_id",
-        Sort::Have => "g.have_verified > 0 DESC, g.base_name COLLATE NOCASE, g.parent_id",
-        Sort::Recent => "g.newest_id DESC",
-    };
-    let mut stmt = conn.prepare(&format!(
-        "SELECT g.parent_id, g.platform_id, g.base_name, g.name, g.pick_id, k.name,
-                g.variants, g.have_verified, g.wanted, g.has_pick
-         FROM title_groups g LEFT JOIN titles k ON k.id = g.pick_id
-         WHERE {BROWSE_WHERE} AND {MRA_ONLY} ORDER BY {order} LIMIT ?8 OFFSET ?9"
-    ))?;
+    browse_with(conn, platform, filter, limit, offset, SEARCH_SHAPE)
+}
+
+/// [`browse`] with the search done by `shape`, for comparing shapes.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::titles::{browse_with, Browse, SearchShape};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let filter = Browse { q: Some("quest".into()), ..Browse::default() };
+/// let (rows, total) = browse_with(&conn, "nes", &filter, 10, 0, SearchShape::Like).unwrap();
+/// assert!(rows.is_empty() && total == 0);
+/// ```
+pub fn browse_with(
+    conn: &Connection,
+    platform: &str,
+    filter: &Browse,
+    limit: u32,
+    offset: u32,
+    shape: SearchShape,
+) -> Result<(Vec<GroupRow>, u64)> {
+    let clause = browse_clause(conn, platform, filter, shape)?;
+    let total: i64 = conn
+        .prepare_cached(&format!(
+            "SELECT COUNT(*) FROM title_groups g WHERE {}",
+            clause.sql()
+        ))?
+        .query_row(params_from_iter(&clause.args), |r| r.get(0))?;
+    let mut stmt = conn.prepare_cached(&page_sql(&clause, filter.sort))?;
+    let args = clause
+        .args
+        .iter()
+        .cloned()
+        .chain([Value::from(limit), Value::from(offset)]);
     let rows = stmt
-        .query_map(args, |r| {
+        .query_map(params_from_iter(args), |r| {
             Ok(GroupRow {
                 parent_id: TitleId(r.get(0)?),
                 platform_id: PlatformId(r.get(1)?),
@@ -879,22 +1103,46 @@ fn variant_row(r: &Row<'_>) -> rusqlite::Result<VariantRow> {
     Ok(VariantRow {
         id: TitleId(r.get(0)?),
         name: r.get(1)?,
-        regions: parse_list(&r.get::<_, String>(2)?),
-        languages: parse_list(&r.get::<_, String>(3)?),
-        revision: r.get(4)?,
-        flags: parse_list(&r.get::<_, String>(5)?),
-        is_1g1r_pick: r.get(6)?,
-        wanted: r.get(7)?,
-        retired: r.get(8)?,
-        inferred: r.get(9)?,
-        dat_version_id: DatVersionId(r.get(10)?),
+        regions: Vec::new(),
+        languages: Vec::new(),
+        revision: r.get(2)?,
+        flags: Vec::new(),
+        is_1g1r_pick: r.get(3)?,
+        wanted: r.get(4)?,
+        retired: r.get(5)?,
+        inferred: r.get(6)?,
+        dat_version_id: DatVersionId(r.get(7)?),
         roms: Vec::new(),
         torrent_files_available: 0,
         availability: Vec::new(),
-        source: r.get(11)?,
+        source: r.get(8)?,
         mra: None,
         romset: None,
     })
+}
+
+/// Fills the regions, languages and flags of the variants of the group rooted at `gid`.
+fn fill_lists(conn: &Connection, gid: TitleId, variants: &mut [VariantRow]) -> Result<()> {
+    for tag in [Tag::Regions, Tag::Languages, Tag::Flags] {
+        let (table, column) = tag.table();
+        let mut stmt = conn.prepare_cached(&format!(
+            "SELECT x.title_id, x.{column} FROM titles t JOIN {table} x ON x.title_id = t.id
+             WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
+             ORDER BY x.title_id, x.pos"
+        ))?;
+        let mut rows = stmt.query([gid.0])?;
+        while let Some(r) = rows.next()? {
+            let (title, value): (i64, String) = (r.get(0)?, r.get(1)?);
+            if let Some(v) = variants.iter_mut().find(|v| v.id.0 == title) {
+                match tag {
+                    Tag::Regions => v.regions.push(value),
+                    Tag::Languages => v.languages.push(value),
+                    Tag::Flags => v.flags.push(value),
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The clone group containing title `id`, or `None` when there is no such title.
@@ -924,7 +1172,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
         return Ok(None);
     };
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.name, t.regions, t.languages, t.revision, t.flags, t.is_1g1r_pick,
+        "SELECT t.id, t.name, t.revision, t.is_1g1r_pick,
                 t.wanted, t.retired, t.inferred, t.dat_version_id, t.source
          FROM titles t WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
          ORDER BY t.retired, t.is_1g1r_pick DESC, t.name",
@@ -932,6 +1180,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
     let mut variants: Vec<VariantRow> = stmt
         .query_map([gid.0], variant_row)?
         .collect::<rusqlite::Result<_>>()?;
+    fill_lists(conn, gid, &mut variants)?;
     let mut stmt = conn.prepare(
         "SELECT r.title_id, r.id, r.name, r.size, r.crc32, r.md5, r.sha1, r.status,
                 f.id, f.state, f.rel_path
@@ -1013,7 +1262,7 @@ pub enum WantRefused {
 pub fn want(conn: &Connection, id: TitleId) -> Result<std::result::Result<(), WantRefused>> {
     let row: Option<(bool, bool)> = conn
         .query_row(
-            "SELECT retired, EXISTS (SELECT 1 FROM json_each(flags) WHERE value = 'bios')
+            "SELECT retired, EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = titles.id AND f.flag = 'bios')
              FROM titles WHERE id = ?1",
             [id.0],
             |r| Ok((r.get(0)?, r.get(1)?)),
