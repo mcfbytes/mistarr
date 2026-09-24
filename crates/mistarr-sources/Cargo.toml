@@ -11,3 +11,9 @@ rust-version.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 mistarr-core = { path = "../mistarr-core" }
+sha1 = "0.10.7"
+unicode-normalization = "0.1.25"
+
+[dev-dependencies]
+proptest = "1.8.0"
+tempfile = "3.27.0"

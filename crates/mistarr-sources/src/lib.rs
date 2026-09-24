@@ -7,5 +7,14 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+#![warn(clippy::pedantic)]
 
+pub mod bencode;
+pub mod binding;
+mod error;
+pub mod magnet;
+pub mod torrent;
+pub mod watch;
+
+pub use error::SourceError;
 pub use mistarr_core::PlatformId;
