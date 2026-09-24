@@ -128,7 +128,10 @@ on the NES, SNES and PSX sets for a rare word, common trigrams, two-letter
 terms below the trigram length, a word common elsewhere but rare on the
 browsed platform, and no search, asserts every shape returns the same page
 and total, and prints the table. The default shape's worst case must stay
-under 100 ms, and in release builds within a quarter of the best shape's:
+under 100 ms, in debug builds too. Host timings do not rank the shapes the
+way the board does, so the default follows the real-DAT board numbers in
+ARCHITECTURE.md "Resource budgets", and the plan tests assert it asks
+`title_search` for the platform's phrase:
 
 ```sh
 cargo test --release -p mistarr-server --test browse -- --include-ignored --nocapture
@@ -152,7 +155,8 @@ mistarr bench-search --db /tmp/bench.db --platform psx --term sta --iterations 5
 mistarr bench-search --db /media/fat/mistarr/mistarr.db --platform snes --term the --shape like
 ```
 
-`db::groups::tests` starts from a small synthetic catalogue, runs random
+`db::groups::tests` starts from a small synthetic catalogue with groups
+split across platforms, runs random
 sequences of writes to titles, roms, files, flags and regions through the
 real triggers and commits, and after every commit compares the table, the
 counts and every browse filter combination in every search shape with the

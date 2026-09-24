@@ -322,15 +322,17 @@ CREATE TABLE title_groups (
   pick_id       INTEGER,
   newest_id     INTEGER NOT NULL,
   source        TEXT NOT NULL,         -- the parent's: 'dat' | 'mra'
-  unflagged     INTEGER NOT NULL,      -- a live variant carries no known flag
-  unflagged_regions INTEGER NOT NULL,  -- region bits of those variants
+  lean_flags    INTEGER NOT NULL,      -- least known-flag bits of a live variant
+  unflagged_regions INTEGER NOT NULL,  -- region bits of the variants with no known flag
   flag_union    INTEGER NOT NULL,      -- flag bits of every live variant
   region_union  INTEGER NOT NULL,      -- region bits of every live variant
+  split         INTEGER NOT NULL,      -- the parent title is on another platform
   PRIMARY KEY (parent_id, platform_id)
 ) WITHOUT ROWID;
 CREATE INDEX title_groups_name ON title_groups(platform_id, base_name COLLATE NOCASE, parent_id);
 CREATE INDEX title_groups_have ON title_groups(platform_id, (have_verified > 0) DESC, base_name COLLATE NOCASE, parent_id);
 CREATE INDEX title_groups_recent ON title_groups(platform_id, newest_id DESC);
+CREATE INDEX title_groups_split ON title_groups(platform_id, parent_id) WHERE split;
 
 CREATE TABLE title_groups_dirty (parent_id INTEGER PRIMARY KEY);   -- groups a write changed
 CREATE TABLE known_flags (name TEXT PRIMARY KEY, bit INTEGER NOT NULL) WITHOUT ROWID;
@@ -351,12 +353,14 @@ md5 check, `wanted` the wanted live titles, and
 `newest_id` orders groups by when their newest entry first appeared.
 
 The summary columns are bit sets: each flag in `known_flags` and each region
-in `known_regions` has a bit, and `1 << 62` stands for any other value.
-Browse visibility (hidden flags, a region, required flags) needs a live
-variant that passes all three at once, so the bits only prefilter and
-short-cut: `unflagged` or `unflagged_regions` settles the default view for
-almost every group, and the remaining groups check their variants' flag and
-region rows.
+in `known_regions` has a bit, and `1 << 62` stands for any other value. The
+flags `prefs.hide` holds by default (bios, beta, proto, demo, sample,
+program) take the highest known bits, so `lean_flags`, the smallest
+known-flag value of any live variant, is free of them exactly when some
+variant is. Browse visibility (hidden flags, a region, required flags) needs
+a live variant that passes all three at once. With the default hide list
+alone `lean_flags` decides; otherwise the bits prefilter and short-cut, and
+the remaining groups check their variants' flag and region rows.
 
 `crates/mistarr-server/src/db/groups.rs` holds the one query that computes a
 group from its inputs, including the group root (`titles.parent_id`); every
@@ -377,8 +381,9 @@ in the log.
 `title_search` indexes each title's `base_name` and its platform id, wrapped
 in 0x1F so `nes` never matches inside `snes`, with trigrams; the title
 triggers keep it in the same transaction, including a title that moves
-platform. Browse searches with `LIKE` on the platform's `title_groups_name`
-range; the index serves the trigram shapes `mistarr bench-search` compares
+platform. A search `MATCH`es the platform's phrase and the term together;
+since a group's parent title can sit on another platform, `split` marks
+those rows and the search adds them from `title_groups_split`
 (ARCHITECTURE.md "Resource budgets").
 
 `mistarr doctor` compares the table and the search index with a fresh

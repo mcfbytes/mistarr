@@ -437,17 +437,41 @@ the clone groups its writes touched in `title_groups` (DATA-MODEL.md
 per group; a page and its total cost about as much as reading the page, and
 the refresh adds about 0.1 s on the host to a 15 000-game DAT's first load.
 
-Search runs `LIKE` over the browsed platform's `title_groups_name` range,
-which the index covers, so its cost follows the platform's group count and
-never the rest of the catalogue. Two trigram shapes over `title_search` are
-kept for measurement: the plain index, whose cost follows a term's matches
-across every platform, and a `MATCH` that also filters on the platform's
-sentinel-wrapped id, whose cost follows the term's matches plus the
-platform's titles. On the synthetic full catalogue (42 000 titles) the worst
-host case was 1.5 ms for `LIKE`, 3.8 ms with the platform filter and 8.0 ms
-for the plain index, so `LIKE` is the default (`titles::SEARCH_SHAPE`).
-Keeping `title_search` current costs about 0.9 s on the host per
-15 000-game first load, against 0.5 s for the load without it.
+A search of three or more characters asks `title_search` for the browsed
+platform's sentinel-wrapped id and the term in one `MATCH`, adds the
+platform's groups whose parent title is on another platform through the
+partial `title_groups_split` index, and confirms each candidate with
+`LIKE`. Shorter searches run `LIKE` over the platform's `title_groups_name`
+range, whose cost follows the platform's group count. The default
+(`titles::SEARCH_SHAPE`) is the shape with the best worst case on the board
+with real DATs loaded; `mistarr bench-search` compares it with `LIKE` alone
+and the trigram index without the platform filter. Board medians in ms, 16
+DATs and 41 000 titles loaded, warm cache:
+
+| platform | search | groups | like | fts | fts-platform |
+|---|---|---|---|---|---|
+| nes | none | 3699 | 87.3 | 87.1 | 87.2 |
+| nes | `the` | 335 | 48.3 | 78.3 | 48.5 |
+| nes | `sta` | 85 | 53.7 | 52.8 | 39.7 |
+| nes | `man` | 127 | 46.5 | 49.5 | 36.7 |
+| nes | `super` | 197 | 57.3 | 62.1 | 46.8 |
+| nes | `vex` | 0 | 52.4 | 24.9 | 28.6 |
+| snes | `the` | 233 | 25.3 | 69.0 | 31.2 |
+| snes | `super` | 351 | 32.8 | 49.1 | 43.3 |
+| psx | none | 6345 | 42.6 | 42.5 | 42.6 |
+| psx | `sta` | 572 | 59.1 | 38.0 | 40.3 |
+| psx | `man` | 271 | 57.5 | 37.9 | 33.6 |
+| psx | `world` | 135 | 73.3 | 48.4 | 53.1 |
+| psx | `super` | 208 | 89.2 | 68.8 | 65.2 |
+| psx | `vex` | 0 | 89.7 | 41.7 | 46.1 |
+
+Searches of one or two letters take the same path in every shape. The worst
+case over three or more letters was 89.7 ms for `LIKE`, 78.3 ms for the plain
+index and 65.2 ms with the platform filter. On the host every shape takes
+under 3 ms for the same data and the ranking does not carry over. Keeping
+`title_search` current costs
+about 1 s on the host per 15 000-game first load, against 0.5 s for the load
+without it.
 
 ## Configuration
 
