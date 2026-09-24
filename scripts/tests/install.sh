@@ -10,6 +10,22 @@ work=$(mktemp -d)
 fail=0
 srv_pid=""
 
+# Stand in for the board's BusyBox: tar without gzip support, od without -t/-A.
+shims="$work/bin"
+mkdir -p "$shims"
+if command -v busybox >/dev/null 2>&1; then
+    cat > "$shims/tar" <<'EOS'
+#!/bin/sh
+case " $* " in *" -xzf "*|*" -z"*|*"z"*" -f "*) echo "tar: invalid option -- 'z'" >&2; exit 1;; esac
+exec busybox tar "$@"
+EOS
+    printf '#!/bin/sh\nexit 1\n' > "$shims/od"
+    printf '#!/bin/sh\nexec busybox hexdump "$@"\n' > "$shims/hexdump"
+    chmod +x "$shims/tar" "$shims/od" "$shims/hexdump"
+    PATH="$shims:$PATH"
+    export PATH
+fi
+
 cleanup() {
     [ -n "$srv_pid" ] && kill "$srv_pid" 2>/dev/null
     rm -rf "$srv" "$work"

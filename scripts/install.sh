@@ -36,8 +36,15 @@ http_get() {
 # since the board has no `file` command.
 is_arm_elf() {
     [ -f "$1" ] || return 1
-    command -v od >/dev/null 2>&1 || return 1
-    head -c 20 "$1" 2>/dev/null | od -An -tx1 -v | tr -d '\n' | awk '
+    # od's -t and -A are optional in BusyBox, so fall back to hexdump.
+    if command -v od >/dev/null 2>&1 && od -An -tx1 -v /dev/null >/dev/null 2>&1; then
+        bytes=$(head -c 20 "$1" 2>/dev/null | od -An -tx1 -v | tr -d '\n')
+    elif command -v hexdump >/dev/null 2>&1; then
+        bytes=$(head -c 20 "$1" 2>/dev/null | hexdump -v -e '1/1 "%02x "')
+    else
+        return 1
+    fi
+    echo "$bytes" | awk '
         BEGIN { ok = 0 }
         {
             n = split($0, b, " ")
@@ -115,7 +122,8 @@ download_and_verify() {
 extract_and_check() {
     ex="$tmp/extract"
     mkdir -p "$ex"
-    if ! tar -C "$ex" -xzf "$tmp/dl/mistarr-armv7.tar.gz" mistarr mistarr.sh; then
+    # BusyBox tar may lack -z on the board; gunzip is always present.
+    if ! gunzip -c "$tmp/dl/mistarr-armv7.tar.gz" | tar -C "$ex" -xf - mistarr mistarr.sh; then
         echo "failed to extract the release tarball" >&2
         exit 1
     fi
