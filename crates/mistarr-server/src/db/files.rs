@@ -378,8 +378,15 @@ pub fn delete_missing(
     let existing = existing_paths(conn, platform_id)?;
     let keep: std::collections::HashSet<&str> = keep.iter().map(String::as_str).collect();
     let mut removed = 0;
+    // A row's import_log entry outlives it; clear the dangling reference first,
+    // since import_log.file_id has no ON DELETE action of its own.
+    let mut unlog = conn.prepare(
+        "UPDATE import_log SET file_id = NULL
+         WHERE file_id = (SELECT id FROM files WHERE platform_id = ?1 AND rel_path = ?2)",
+    )?;
     let mut stmt = conn.prepare("DELETE FROM files WHERE platform_id = ?1 AND rel_path = ?2")?;
     for path in existing.iter().filter(|p| !keep.contains(p.as_str())) {
+        unlog.execute(params![platform_id.0, path])?;
         removed += stmt.execute(params![platform_id.0, path])?;
     }
     Ok(removed)
@@ -760,6 +767,28 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(find_by_path(&c, &pid, "keep.nes").expect("find").is_some());
         assert!(find_by_path(&c, &pid, "gone.nes").expect("find").is_none());
+    }
+
+    /// A file an import placed and logged can still be pruned once it is gone from
+    /// disk: `import_log.file_id` is cleared first, since the FK has no delete action.
+    #[test]
+    fn delete_missing_clears_the_dangling_import_log_reference() {
+        let c = conn();
+        let pid = PlatformId("nes".into());
+        let h = Hashed::default();
+        let id =
+            upsert(&c, &pid, "gone.nes", 1, 1, &h, None, FileState::Verified, 1).expect("insert");
+        c.execute(
+            "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 'placed', '{}')",
+            [id.0],
+        )
+        .expect("log");
+        let removed = delete_missing(&c, &pid, &[]).expect("delete");
+        assert_eq!(removed, 1);
+        let logged: Option<i64> = c
+            .query_row("SELECT file_id FROM import_log", [], |r| r.get(0))
+            .expect("row");
+        assert_eq!(logged, None);
     }
 
     /// `keep` is deduplicated through a set rather than scanned per row, so a

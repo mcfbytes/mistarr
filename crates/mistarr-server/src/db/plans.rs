@@ -176,10 +176,13 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
 }
 
 /// The whole-table walks the hot reads may make, each bounded or inherent.
-const ALLOWED_SCANS: [(&str, &str); 9] = [
-    // Every platform's counts read every group once; the table has one row per group.
+const ALLOWED_SCANS: [(&str, &str); 11] = [
+    // Every platform's counts read every group once, and MRA titles through their
+    // partial index; the tables have one row per group and per MRA.
     ("counts", "SCAN g"),
     ("counts", "SCAN p"),
+    ("counts", "SCAN t USING INDEX titles_mra_path"),
+    ("counts", "SCAN m"),
     // Pages in rowid order stop at the limit; unfiltered totals count a whole table.
     ("sources list", "SCAN s"),
     ("sources list", "SCAN sources"),

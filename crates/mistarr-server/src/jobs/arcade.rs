@@ -1,6 +1,8 @@
 //! Arcade catalogue: the MRA files under `_Arcade` become titles of the arcade platform;
 //! see `docs/ARCHITECTURE.md` "Arcade catalogue" and `docs/PLATFORMS.md` "MRA catalogue".
 
+mod presence;
+
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, Read};
@@ -253,6 +255,9 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
             Ok((retired, live))
         })
         .await?;
+    // Runs after titles are committed, so a zip an MRA newly names this run is
+    // already visible to the presence pass's live-MRA lookup.
+    let stats = presence::run(ctx).await?;
     ctx.progress(json!({
         "done": total,
         "total": total,
@@ -260,6 +265,8 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
         "parsed": pass.parsed,
         "retired": retired,
         "checked": pass.checked,
+        "presence_zips": stats.zips,
+        "presence_pruned": stats.pruned,
     }))
     .await
 }

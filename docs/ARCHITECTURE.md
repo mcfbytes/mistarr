@@ -153,9 +153,14 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    platform's games directory already exists (deduped per platform, so a
    zipped pack of several DATs queues one scan each), or once, full, the
    first time every wizard step reports done. Walk each platform's
-   `games/<Core>` directory and its other accepted directories (`games/hbmame`
-   for arcade). Skip while a core is running; the timer goes through the same
-   heavy lane as the others, so it waits for the gate too.
+   `games/<Core>` directory and its other accepted directories, except
+   arcade: its zips are never walked as cartridges, since presence and
+   verification there come only from the arcade catalogue's own presence
+   pass, its md5 check, and the import path (PLATFORMS.md "MRA catalogue").
+   A manual scan of `arcade` queues the arcade catalogue instead
+   (`POST /system/scan`, API.md "System"). Skip
+   while a core is running; the timer goes through the same heavy lane as
+   the others, so it waits for the gate too.
 2. For each file, compare size and mtime with `files`. Unchanged files are
    skipped. New or changed files are hashed in one streaming pass with the
    platform's header rule. Zip members are hashed through the decompressor,
@@ -195,6 +200,19 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    the MRA or one of its zips changes size or mtime, so each MRA is read at
    most once per run. Placing one of its zips reruns this for every title naming
    that zip. Nothing is ever fetched, rebuilt, merged or split.
+4. Arcade presence pass: after titles are stored and retired, the same job
+   walks every zip directly under `games/mame` and `games/hbmame`, in
+   batches, reading each one's central directory only (member names, sizes
+   and CRC32; never decompressed). A member whose CRC32 and size match a
+   loaded DAT's rom is recorded against it, at CRC32 level rather than the
+   scan's full hash. A member of a zip a live MRA names, that no DAT
+   matches, is recorded `unverified` against the MRA's own zip rom, giving
+   the next import's `verify_siblings` a row to promote once it reads that
+   zip as a sibling; without this row the promotion was a silent no-op. A
+   zip that fails to open gets one bare-path row and a warning, not a
+   failed job. The pass is incremental by each zip's size and mtime, like a
+   scan, and ends by deleting `files` rows for this platform whose zip or
+   member it did not see, so a zip removed from disk drops out of `have`.
 
 ### Source import
 
@@ -389,6 +407,7 @@ shutdown is left `queued` for this.
 | SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk |
 | Hashing buffer | 256 KiB, one file at a time |
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches |
+| Arcade presence pass | 500 zips per batch, central directory only, never decompressed |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
 | SPA bundle, gzipped | under 200 KiB |
 | Concurrent client RPC calls | 1, serialised |

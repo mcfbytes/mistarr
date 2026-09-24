@@ -149,6 +149,108 @@ mod tests {
     }
 
     #[test]
+    fn arcade_scan_cleanup_prunes_scan_noise_but_keeps_import_rows() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+        // A real MRA zip rom, the kind the import path always links `files.rom_id` to.
+        let version = crate::db::arcade::mra_version(&conn, "arcade", 1).expect("version");
+        let title = crate::db::arcade::upsert_title(
+            &conn,
+            "arcade",
+            version,
+            &crate::db::arcade::MraTitle {
+                name: "Example Blaster",
+                base_name: "Example Blaster",
+                group_key: "",
+                regions: &[],
+                languages: &[],
+                revision: None,
+                flags: &[],
+                setname: Some("exblast"),
+                rbf: Some("core"),
+                mra_path: "x.mra",
+                file_stamp: "1:1",
+                run: 1,
+            },
+            &[crate::db::arcade::MraZip {
+                name: "exampleset.zip",
+                zip_dir: "mame",
+                md5: None,
+                present: true,
+            }],
+        )
+        .expect("upsert");
+        let rom_id: i64 = conn
+            .query_row("SELECT id FROM roms WHERE title_id = ?1", [title.0], |r| {
+                r.get(0)
+            })
+            .expect("rom id");
+
+        let insert = |rel_path: &str, state: &str, rom_id: Option<i64>| {
+            conn.execute(
+                "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
+                 VALUES ('arcade', ?1, 4, 0, ?2, ?3, 0)",
+                params![rel_path, rom_id, state],
+            )
+            .expect("insert");
+        };
+        // Noise the generic scan wrote: no rom matched, so rom_id is NULL.
+        insert("mame/exampleset.zip#a.bin", "unverified", None);
+        insert("hbmame/otherset.zip#b.bin", "unverified", None);
+        // A zip the old scan could not open at all: one bare-path row, no `#member`.
+        insert("mame/unreadable.zip", "unverified", None);
+        // Rows the MRA import path legitimately records: rom_id always set.
+        insert("mame/exampleset.zip#c.bin", "unverified", Some(rom_id));
+        insert("mame/exampleset.zip#d.bin", "verified", Some(rom_id));
+        // A non-arcade platform's stray file must survive untouched.
+        conn.execute(
+            "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
+             VALUES ('nes', 'NES/stray.bin', 4, 0, NULL, 'unverified', 0)",
+            [],
+        )
+        .expect("insert");
+        conn.execute(
+            "INSERT INTO scan_progress (platform_id, done_dirs, updated_at)
+             VALUES ('arcade', '[]', 0), ('nes', '[]', 0)",
+            [],
+        )
+        .expect("insert progress");
+
+        let cleanup = MIGRATIONS
+            .iter()
+            .find(|m| m.name == "0012_arcade_scan_cleanup")
+            .expect("migration present");
+        conn.execute_batch(cleanup.sql).expect("cleanup");
+
+        let mut left: Vec<String> = conn
+            .prepare("SELECT rel_path FROM files ORDER BY rel_path")
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "NES/stray.bin",
+                "mame/exampleset.zip#c.bin",
+                "mame/exampleset.zip#d.bin",
+            ]
+        );
+
+        let progress: Vec<String> = conn
+            .prepare("SELECT platform_id FROM scan_progress ORDER BY platform_id")
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(progress, ["nes"], "arcade never resumes a scan");
+    }
+
+    #[test]
     fn apply_is_idempotent() {
         let mut conn = Connection::open_in_memory().expect("open");
         let first = apply(&mut conn).expect("first");

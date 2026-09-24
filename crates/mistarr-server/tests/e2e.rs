@@ -462,7 +462,7 @@ async fn download_states(addr: std::net::SocketAddr) -> Vec<(i64, String)> {
     out
 }
 
-/// Every platform's `(id, have, unverified)` where it has titles.
+/// Every platform's `(id, have, unmatched_files)` where it has titles.
 async fn counts(addr: std::net::SocketAddr) -> Vec<(String, i64, i64)> {
     items(addr, "/api/v1/platforms")
         .await
@@ -472,7 +472,9 @@ async fn counts(addr: std::net::SocketAddr) -> Vec<(String, i64, i64)> {
             (
                 p["id"].as_str().expect("id").to_owned(),
                 p["counts"]["have"].as_i64().expect("have"),
-                p["counts"]["unverified"].as_i64().expect("unverified"),
+                p["counts"]["unmatched_files"]
+                    .as_i64()
+                    .expect("unmatched_files"),
             )
         })
         .collect()
