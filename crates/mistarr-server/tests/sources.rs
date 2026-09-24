@@ -337,6 +337,7 @@ async fn magnet_resolves_through_the_client() {
     fake.push(FakeResponse::success(
         json!({ "torrents": [{ "wanted": [] }] }),
     ));
+    fake.push(FakeResponse::success(json!({})));
     fake.push(exists());
     fake.push(FakeResponse::success(json!({})));
     fake.push(FakeResponse::success(
@@ -406,6 +407,7 @@ async fn magnet_resolves_through_the_client() {
             "session-get",
             "torrent-add",
             "torrent-get",
+            "torrent-set",
             "torrent-get",
             "torrent-start",
             "torrent-get",
@@ -416,7 +418,7 @@ async fn magnet_resolves_through_the_client() {
             "torrent-set",
         ]
     );
-    assert_eq!(bodies[5]["arguments"]["fields"], json!(["name", "files"]));
+    assert_eq!(bodies[6]["arguments"]["fields"], json!(["name", "files"]));
     let add = &bodies[1];
     assert_eq!(add["method"], "torrent-add");
     assert_eq!(add["arguments"]["paused"], true);
@@ -426,7 +428,7 @@ async fn magnet_resolves_through_the_client() {
         add["arguments"]["download-dir"],
         staging.to_string_lossy().as_ref()
     );
-    assert_eq!(bodies[10]["arguments"]["files-unwanted"], json!([0, 1, 2]));
+    assert_eq!(bodies[11]["arguments"]["files-unwanted"], json!([0, 1, 2]));
     b.running.shutdown().await.expect("shutdown");
 }
 

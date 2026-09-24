@@ -84,12 +84,21 @@ fn records_header(rule: HeaderRule) -> bool {
 /// Never in practice; reading from memory cannot fail.
 pub fn rom_from_bytes(name: &str, data: &[u8], rule: HeaderRule) -> Result<Rom> {
     let hashes = hash_reader(data, rule, None).map_err(io_at(Path::new(name)))?;
-    Ok(rom(name, hashes, data, rule))
+    Ok(rom(
+        name,
+        hashes,
+        data,
+        u64::try_from(data.len()).unwrap_or(u64::MAX),
+        rule,
+    ))
 }
 
-fn rom(name: &str, hashes: HashSet, head: &[u8], rule: HeaderRule) -> Rom {
-    let skipped = usize::try_from(hashes.size).map_or(0, |size| head.len().saturating_sub(size));
-    let header = (records_header(rule) && skipped > 0).then(|| head[..skipped].to_vec());
+/// A rom whose header, if the rule skipped one, is the first `total - size`
+/// bytes of `head`, the start of an item `total` bytes long.
+fn rom(name: &str, hashes: HashSet, head: &[u8], total: u64, rule: HeaderRule) -> Rom {
+    let skipped = usize::try_from(total.saturating_sub(hashes.size)).unwrap_or(usize::MAX);
+    let header = (records_header(rule) && skipped > 0 && skipped <= head.len())
+        .then(|| head[..skipped].to_vec());
     Rom {
         name: name.to_owned(),
         hashes,
@@ -101,7 +110,8 @@ fn rom(name: &str, hashes: HashSet, head: &[u8], rule: HeaderRule) -> Rom {
 fn rom_from_file(path: &Path, name: &str, rule: HeaderRule) -> Result<Rom> {
     let file = File::open(path).map_err(io_at(path))?;
     let hashes = hash_reader(BufReader::new(file), rule, None).map_err(io_at(path))?;
-    Ok(rom(name, hashes, &read_head(path)?, rule))
+    let total = std::fs::metadata(path).map_err(io_at(path))?.len();
+    Ok(rom(name, hashes, &read_head(path)?, total, rule))
 }
 
 fn read_head(path: &Path) -> Result<Vec<u8>> {
@@ -143,7 +153,7 @@ fn roms_from_zip(path: &Path, rule: HeaderRule) -> Result<Vec<Rom>> {
             .take(512)
             .read_to_end(&mut head)
             .map_err(io_at(path))?;
-        out.push(rom(&m.name, hashes, &head, rule));
+        out.push(rom(&m.name, hashes, &head, m.size, rule));
     }
     Ok(out)
 }
@@ -337,6 +347,31 @@ mod tests {
         assert_eq!(rom.hashes.size, 4);
         assert_eq!(rom.header.as_deref(), Some(&ines(b"")[..]));
         assert_eq!(plain.header, None);
+    }
+
+    #[test]
+    fn a_large_headered_file_records_its_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: Vec<u8> = (0..32 * 1024u32)
+            .map(|i| u8::try_from(i % 251).unwrap())
+            .collect();
+        std::fs::write(dir.path().join("Large Example (USA).nes"), ines(&body)).unwrap();
+        let mut buf = Vec::new();
+        let mut z = zip::ZipWriter::new(Cursor::new(&mut buf));
+        z.start_file(
+            "Large Zip (USA).nes",
+            zip::write::SimpleFileOptions::default(),
+        )
+        .unwrap();
+        z.write_all(&ines(&body)).unwrap();
+        z.finish().unwrap();
+        std::fs::write(dir.path().join("Large Zip (USA).zip"), &buf).unwrap();
+        let games = games_from_dir(dir.path(), platform("nes").unwrap()).unwrap();
+        for g in &games {
+            let rom = &g.roms[0];
+            assert_eq!(rom.hashes.size, 32 * 1024, "{}", g.name);
+            assert_eq!(rom.header.as_deref(), Some(&ines(b"")[..]), "{}", g.name);
+        }
     }
 
     #[test]

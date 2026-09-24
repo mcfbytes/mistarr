@@ -56,7 +56,7 @@ array as "all files". An empty list is never sent to mean "none".
 | files | `torrent-get` fields `name, files`; an empty `files` list is "metadata pending". A multi-file torrent's file names start with `<name>/`, which is stripped |
 | remove | `torrent-get` `id`, then `torrent-remove` with `delete-local-data` |
 | rate limits | `session-set` `speed-limit-down`, `speed-limit-down-enabled`, same for up; no limit or 0 sends only `*-enabled: false` |
-| seed policy | On add and `set_seed_policy` (after a `torrent-get` `id` existence check): `torrent-set` `seedRatioMode: 1` (use this torrent's limit) with `seedRatioLimit` N for "until ratio N". "Client default" and "none" send `seedRatioMode: 0` (session default), skipped on a fresh add where it is already 0; under "none" the poller stops the torrent, never Transmission. |
+| seed policy | On add and `set_seed_policy` (after a `torrent-get` `id` existence check): `torrent-set` `seedRatioMode: 1` (use this torrent's limit) with `seedRatioLimit` N for "until ratio N". "None" sends `seedRatioMode: 2` (unlimited), so a session ratio limit never stops the torrent and only the poller does. "Client default" sends `seedRatioMode: 0` (session default), skipped on a fresh add where it is already 0. |
 
 `fileStats[i].bytesCompleted` divided by `files[i].length` is the per-file
 progress. A file is complete when equal and the torrent is not in
