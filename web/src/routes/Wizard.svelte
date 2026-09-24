@@ -6,7 +6,7 @@
   import { getPlatforms, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { getDats, loadDats } from '../lib/stores/dats.svelte';
   import { getStatus, getWizard, loadStatus, loadWizard } from '../lib/stores/status.svelte';
-  import { fixtureDats, fixtureSettings } from '../lib/fixtures';
+  import { fixtureCores, fixtureDats, fixtureSettings } from '../lib/fixtures';
   import type { Settings } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -18,6 +18,9 @@
   let sourceFileInput = $state<HTMLInputElement>();
   let sourceMagnet = $state('');
   let settings = $state<Settings | null>(null);
+  let detectedCores = $state<string[]>([]);
+  let detectingCores = $state(false);
+  let coresRan = false;
 
   onMount(() => {
     void loadPlatforms();
@@ -27,12 +30,35 @@
     void loadSettings();
   });
 
+  $effect(() => {
+    if (step === 0 && !coresRan) {
+      coresRan = true;
+      void runCoreDetection();
+    }
+  });
+
+  async function runCoreDetection(): Promise<void> {
+    if (isMock) {
+      detectedCores = fixtureCores.platforms;
+      return;
+    }
+    detectingCores = true;
+    try {
+      const result = await api.cores();
+      detectedCores = result.platforms;
+      await loadPlatforms();
+    } catch (err) {
+      showToast(errorMessage(err));
+    } finally {
+      detectingCores = false;
+    }
+  }
+
   async function loadSettings(): Promise<void> {
     settings = isMock ? fixtureSettings : await api.settings();
   }
 
   const platforms = $derived(getPlatforms());
-  const detectedCores = $derived(platforms.filter((p) => p.core_present));
   const dats = $derived(isMock ? fixtureDats : getDats());
   const status = $derived(getStatus());
   const wizard = $derived(getWizard());
@@ -51,6 +77,10 @@
 
   function finish(): void {
     navigate('/');
+  }
+
+  function platformName(id: string): string {
+    return platforms.find((p) => p.id === id)?.name ?? id;
   }
 
   async function uploadDat(): Promise<void> {
@@ -128,9 +158,12 @@
       <p>Root directory: <code>/media/fat</code></p>
       <p>Games directory: <code>/media/fat/games</code></p>
       <p class="muted">Detected cores:</p>
+      <button type="button" onclick={runCoreDetection} disabled={detectingCores}>
+        {detectingCores ? 'Detecting…' : 'Re-detect'}
+      </button>
       <ul>
-        {#each detectedCores as p (p.id)}
-          <li>{p.name}</li>
+        {#each detectedCores as id (id)}
+          <li>{platformName(id)}</li>
         {:else}
           <li class="muted">None detected yet.</li>
         {/each}

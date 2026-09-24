@@ -6,6 +6,8 @@ use serde::Serialize;
 
 use crate::app::AppState;
 use crate::db::settings::{self, keys};
+use crate::db::system::wizard_counts;
+use crate::error::Result;
 use crate::jobs::detect_client::ClientStatus;
 use crate::jobs::gate::{Override, PauseReason};
 
@@ -56,6 +58,48 @@ pub async fn snapshot(app: &AppState) -> Status {
         disk_free_bytes: free_bytes(&data),
         rss_bytes: rss_bytes(),
     }
+}
+
+/// Which first-run steps are complete, per `docs/API.md` "System".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(clippy::struct_excessive_bools)] // One flag per wizard step is the JSON shape.
+pub struct WizardStatus {
+    /// The games directory exists.
+    pub paths: bool,
+    /// Any DAT version was ever loaded.
+    pub dats: bool,
+    /// Client detection found one.
+    pub client: bool,
+    /// Any source exists.
+    pub sources: bool,
+}
+
+impl WizardStatus {
+    /// Every step reports done.
+    #[must_use]
+    pub fn complete(self) -> bool {
+        self.paths && self.dats && self.client && self.sources
+    }
+}
+
+/// Builds the wizard status from the config, `dat_versions`, `sources` and
+/// the last client detection.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] or [`crate::Error::Stored`] when settings cannot be read.
+pub async fn wizard_status(app: &AppState) -> Result<WizardStatus> {
+    let counts = app.db.read(wizard_counts).await?;
+    let client = app
+        .db
+        .read(|c| settings::get_json::<ClientStatus>(c, keys::CLIENT_DETECTED))
+        .await?;
+    Ok(WizardStatus {
+        paths: app.config().paths.games.is_dir(),
+        dats: counts.dat_versions > 0,
+        client: client.is_some_and(|c| c.kind.is_some()),
+        sources: counts.sources > 0,
+    })
 }
 
 /// Bytes available to unprivileged users on the filesystem holding `path`.

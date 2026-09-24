@@ -1,4 +1,5 @@
 import type {
+  CoresResult,
   DatVersion,
   Download,
   DownloadState,
@@ -108,6 +109,7 @@ export const api = {
   wizard: (): Promise<WizardStatus> => request('/system/wizard'),
   scan: (platformId?: string): Promise<{ job_id: number }> =>
     request('/system/scan', { method: 'POST', body: JSON.stringify({ platform_id: platformId }) }),
+  cores: (): Promise<CoresResult> => request('/system/cores', { method: 'POST' }),
   pause: (): Promise<SystemStatus> => request('/system/pause', { method: 'POST' }),
   resume: (): Promise<SystemStatus> => request('/system/resume', { method: 'POST' }),
   jobs: (): Promise<Paged<Job>> => request('/system/jobs'),

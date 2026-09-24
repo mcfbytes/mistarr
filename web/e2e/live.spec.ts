@@ -29,8 +29,12 @@ test('wizard completes and uploads a synthetic DAT', async ({ page }) => {
   await page.goto('/');
   await expect(page).toHaveURL(/#\/wizard$/);
 
-  // Step 1: paths.
+  // Step 1: paths, with the detected-cores re-detect button.
   await expect(page.getByRole('heading', { name: 'Paths' })).toBeVisible();
+  await expect(page.getByText('None detected yet.')).toBeVisible({ timeout: 10_000 });
+  await page.getByRole('button', { name: 'Re-detect' }).click();
+  await expect(page.getByRole('button', { name: 'Re-detect' })).toBeVisible({ timeout: 10_000 });
+  await expect(page.getByText('None detected yet.')).toBeVisible();
   await page.getByRole('button', { name: 'Next' }).click();
 
   // Step 2: DATs.

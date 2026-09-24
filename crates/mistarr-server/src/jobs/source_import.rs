@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::{Job, JobContext, Scheduler};
+use super::{wizard, Job, JobContext, Scheduler};
 use crate::app::AppState;
 use crate::db::sources::{self as rows, NewSource, SourceId, SourceRow, SourceState, SqlDatIndex};
 use crate::error::Result;
@@ -105,6 +105,9 @@ impl Job for SourceImport {
                 ctx.progress(json!({ "file": origin, "source_id": row.id, "state": row.state }))
                     .await?;
                 publish_changed(&ctx.app, &row);
+                if let Err(e) = wizard::on_change(&ctx.app).await {
+                    tracing::warn!(error = %e, "cannot check wizard completion");
+                }
                 if row.state == SourceState::Resolving {
                     let job = Arc::new(ResolveMagnet { source_id: row.id });
                     Scheduler::enqueue(&ctx.app, job).await?;

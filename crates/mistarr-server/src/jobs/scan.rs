@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -18,8 +19,10 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
-use super::{Job, JobContext, Lane};
+use super::{Job, JobContext, Lane, Scheduler};
+use crate::app::AppState;
 use crate::db::files::{self, FileId, FileState, NewFile};
+use crate::db::jobs::JobId;
 use crate::db::platforms as platform_rows;
 use crate::error::{Error, Result};
 use crate::events::EventKind;
@@ -51,6 +54,37 @@ impl Job for ScanJob {
             Some(id) => scan_platform(ctx, id).await,
         }
     }
+}
+
+/// Enqueues a scan of `platform_id` when its games directory already exists,
+/// for a DAT that just finished loading. `None` when there is nothing to
+/// walk yet; the caller dedupes several DATs from one pack before calling.
+///
+/// # Errors
+///
+/// [`Error::Db`] when the job cannot be recorded.
+pub async fn enqueue_if_games_dir_exists(
+    app: &Arc<AppState>,
+    platform_id: &PlatformId,
+) -> Result<Option<JobId>> {
+    let Some(platform) = platforms::by_id(&platform_id.0) else {
+        return Ok(None);
+    };
+    let games_root = app.config().paths.games;
+    let present = std::iter::once(platform.core_dir)
+        .chain(platform.legacy_dirs.iter().copied())
+        .any(|name| games_root.join(name).is_dir());
+    if !present {
+        return Ok(None);
+    }
+    Scheduler::enqueue(
+        app,
+        Arc::new(ScanJob {
+            platform_id: Some(platform_id.clone()),
+        }),
+    )
+    .await
+    .map(Some)
 }
 
 /// Enqueues one [`ScanJob`] per enabled platform.
@@ -818,6 +852,37 @@ fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Result<Vec<New
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::testutil::state;
+    use crate::db::jobs as job_rows;
+
+    #[tokio::test]
+    async fn scan_is_queued_only_when_the_games_dir_exists() {
+        let (_dir, app) = state();
+        let nes = PlatformId("nes".into());
+        assert_eq!(
+            enqueue_if_games_dir_exists(&app, &nes).await.expect("run"),
+            None,
+            "no NES directory yet"
+        );
+        fs::create_dir_all(app.config().paths.games.join("NES")).expect("mkdir");
+        let id = enqueue_if_games_dir_exists(&app, &nes)
+            .await
+            .expect("run")
+            .expect("queued");
+        let row = app
+            .db
+            .read(move |c| job_rows::get(c, id))
+            .await
+            .expect("read")
+            .expect("row");
+        assert_eq!(row.kind, "scan");
+        assert!(
+            enqueue_if_games_dir_exists(&app, &PlatformId("no-such".into()))
+                .await
+                .expect("run")
+                .is_none()
+        );
+    }
 
     #[test]
     fn header_rule_names_map() {

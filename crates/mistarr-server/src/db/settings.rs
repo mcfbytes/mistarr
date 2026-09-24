@@ -12,6 +12,8 @@ pub mod keys {
     pub const CLIENT_DETECTED: &str = "client.detected";
     /// JSON [`crate::config::RuntimeSettings`] saved through the API.
     pub const RUNTIME: &str = "config.runtime";
+    /// JSON `bool`: whether the wizard-completion scan already fired.
+    pub const WIZARD_SCAN_DONE: &str = "wizard.scan_done";
 }
 
 /// Reads a value.

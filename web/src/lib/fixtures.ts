@@ -1,4 +1,5 @@
 import type {
+  CoresResult,
   DatVersion,
   Download,
   ImportLogEntry,
@@ -220,6 +221,11 @@ export const fixtureWizard: WizardStatus = {
   client: false,
   sources: false,
   open_on_start: false
+};
+
+export const fixtureCores: CoresResult = {
+  platforms: fixturePlatforms.filter((p) => p.core_present).map((p) => p.id),
+  arcade_job_id: null
 };
 
 export const fixtureDats: DatVersion[] = [

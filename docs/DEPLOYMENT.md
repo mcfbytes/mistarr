@@ -108,6 +108,10 @@ Logs go to `/media/fat/mistarr/mistarr.log` and stderr. The file rotates at
 2 MiB and keeps two generations, `mistarr.log.1` and `mistarr.log.2`. `RUST_LOG`
 sets the level, `info` by default. No syslog dependency.
 
+`[jobs] scan_interval_minutes` in `mistarr.toml` defaults to 1440: a daily
+rescan of the whole library. Set it to 0 to disable the timer and rely on the
+automatic and manual scans instead; the change needs a restart.
+
 ## Runtime checks on the board
 
 `mistarr doctor` prints: binary is static, paths writable, free space,

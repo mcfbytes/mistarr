@@ -7,7 +7,7 @@ use mistarr_clients::detect::{self, DetectConfig};
 use mistarr_clients::{ClientKind, DownloadClient, Transmission};
 use serde::{Deserialize, Serialize};
 
-use super::{Job, JobContext};
+use super::{wizard, Job, JobContext};
 use crate::config::ClientConfig;
 use crate::db::settings::{self, keys};
 use crate::error::Result;
@@ -110,6 +110,9 @@ impl Job for DetectClient {
         ctx.app.refresh_client(&status);
         let snapshot = crate::status::snapshot(&ctx.app).await;
         ctx.app.events.publish(EventKind::Status, &snapshot);
+        if let Err(e) = wizard::on_change(&ctx.app).await {
+            tracing::warn!(error = %e, "cannot check wizard completion");
+        }
         Ok(())
     }
 }

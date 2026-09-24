@@ -494,4 +494,53 @@ mod tests {
         assert_eq!(o.corename_path, PathBuf::from("/tmp/CORENAME"));
         assert_eq!(o.corename_poll, Duration::from_secs(2));
     }
+
+    /// The timer queues its scan on the heavy lane, so it sits behind the
+    /// gate rather than running while a core is loaded.
+    #[tokio::test]
+    async fn scan_timer_waits_for_the_gate() {
+        let (_dir, app) = testutil::state();
+        app.gate.set_corename(Some("SNES".into()));
+        Scheduler::start(&app);
+        // One tick, then stop the loop so exactly one scan is ever queued.
+        let timer = tokio::spawn(scan_on_timer(Arc::clone(&app), Duration::from_millis(20)));
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        timer.abort();
+        let _ = timer.await;
+
+        let n = app
+            .db
+            .read(|c| db::jobs::count_kind(c, "scan"))
+            .await
+            .expect("count");
+        assert_eq!(n, 1, "exactly one scan queued while paused");
+        let (rows, _) = app
+            .db
+            .read(|c| db::jobs::list_active(c, 10, 0))
+            .await
+            .expect("list");
+        let scan = rows.iter().find(|r| r.kind == "scan").expect("queued");
+        let id = scan.id;
+        assert_eq!(
+            scan.state,
+            db::jobs::JobState::Queued,
+            "must not run while the core gate is closed"
+        );
+
+        app.gate
+            .set_corename(Some(crate::jobs::gate::MENU.to_owned()));
+        for _ in 0..200 {
+            let row = app
+                .db
+                .read(move |c| db::jobs::get(c, id))
+                .await
+                .expect("read")
+                .expect("row");
+            if row.state == db::jobs::JobState::Done {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("scan never ran once the gate opened");
+    }
 }

@@ -10,6 +10,7 @@ pub mod poll;
 pub mod scan;
 pub mod source_import;
 pub mod transfer;
+pub mod wizard;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
