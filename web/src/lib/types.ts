@@ -231,7 +231,7 @@ export interface IncomingFile {
 
 export type SourceFileConfidence = 'hash' | 'name' | 'base' | null;
 
-/** A rom a torrent file may hold, by a fuzzy or size-only guess. */
+/** A further rom a torrent file may hold, from any mapping tier, beyond its matched one. */
 export interface SourceFileCandidate {
   rom_id: number;
   rom_name: string;

@@ -254,14 +254,18 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    confidence where one exists, and the further candidate roms of every tier
    in `torrent_candidates` (VERIFICATION.md "Pre-download matching"). Move
    the file to `sources/loaded/` and emit `source.changed`. A `.torrent` is
-   not told to the client until something is wanted. When a DAT loads titles
-   for a platform, the rebind of step 4 runs and a background
-   `remap_sources` job maps every source bound to that platform again: each
-   source is skipped when its `map_stamp` shows the platform's live roms did
-   not change, and otherwise only the rows that changed are written, 2 000
-   per transaction, with its hit rate refreshed and `source.changed` sent
-   only when its mapping changed. At startup the same job runs once for
-   every mapped source when any bound source has no stamp yet.
+   not told to the client until something is wanted. Binding and mapping
+   share one pass over the files, and a source with nothing stored gets its
+   matches written straight. When a DAT loads titles for a platform, the
+   rebind of step 4 runs and a background `remap_sources` job maps every
+   source bound to that platform again; the same job is queued when a DAT is
+   retired, when the arcade catalogue changes titles, and, for every
+   platform, at each start. A source is skipped when its `map_stamp` equals
+   the platform's current stamp (its live DAT versions with their load times,
+   and its live roms), and otherwise only the rows that changed are written,
+   2 000 per transaction, with its hit rate refreshed and `source.changed`
+   sent only when its mapping changed. A row an import proved by hash is
+   never overwritten, and rebinding to the same platform keeps it.
 
 ### Wanted and transfer
 

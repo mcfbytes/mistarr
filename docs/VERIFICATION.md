@@ -161,12 +161,14 @@ size, or of that size plus the platform's header, comes first.
 
 A pair a `bad` download already ruled out is not stored again. The mapping is
 worked out when the source binds or is rebound, and again for every source
-bound to a platform when a DAT load changes that platform's live roms; the
-source's `map_stamp` records which roms it was worked out against, so an
-unchanged platform is skipped. Unbinding or removing a source drops its
+bound to a platform when that platform's DATs or live roms change; the
+source's `map_stamp` records the DAT versions and roms it was worked out
+against, so an unchanged platform is skipped. Unbinding or removing a source drops its
 candidates. Post-download hashing is authoritative: once an import proves a
 file to be a rom, `torrent_files` names that rom with confidence `hash`, the
-file loses its candidates and no later mapping changes it. See ARCHITECTURE.md
+file loses its candidates and no later mapping changes it, nor does
+rebinding the source to the same platform. Only a file itself is proven,
+never a zip from one of its members. See ARCHITECTURE.md
 "Import" for a file that turns out to be another version.
 
 ## Trust

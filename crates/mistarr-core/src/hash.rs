@@ -229,9 +229,10 @@ fn hash_with_magic_skip<R: Read>(
 }
 
 fn hash_smc<R: Read>(mut r: R, size_hint: Option<u64>) -> io::Result<HashSet> {
+    let header = SMC_HEADER as u64;
     if let Some(size) = size_hint {
-        if size % 1024 == 512 {
-            discard(&mut r, 512)?;
+        if size % 1024 == header {
+            discard(&mut r, SMC_HEADER)?;
         }
         return hash_stream(r, &[]);
     }
@@ -250,16 +251,16 @@ fn hash_smc<R: Read>(mut r: R, size_hint: Option<u64>) -> io::Result<HashSet> {
         whole.update(chunk);
         let pos_before = total;
         total += n as u64;
-        if pos_before >= 512 {
+        if pos_before >= header {
             skipped.update(chunk);
-        } else if total > 512 {
-            // pos_before < 512 here, so the difference always fits in usize.
+        } else if total > header {
+            // pos_before < header here, so the difference always fits in usize.
             #[allow(clippy::cast_possible_truncation)]
-            let split = (512 - pos_before) as usize;
+            let split = (header - pos_before) as usize;
             skipped.update(&chunk[split..]);
         }
     }
-    Ok(if total % 1024 == 512 {
+    Ok(if total % 1024 == header {
         skipped.finish()
     } else {
         whole.finish()

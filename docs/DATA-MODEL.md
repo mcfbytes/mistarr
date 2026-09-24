@@ -124,7 +124,7 @@ CREATE TABLE sources (                  -- one per torrent the user dropped in
   added_at      INTEGER NOT NULL,
   suggested_platform_id TEXT REFERENCES platforms(id),  -- guessed from the torrent's names, no DAT needed
   user_unbound  INTEGER NOT NULL DEFAULT 0,  -- 1 after the user unbound it; never bound automatically again
-  map_stamp     TEXT                   -- the platform's live roms the files were last mapped against
+  map_stamp     TEXT                   -- the platform's live DAT versions and roms the files were last mapped against
 );
 CREATE INDEX sources_state ON sources(state);
 
