@@ -322,6 +322,7 @@ impl Running {
 /// [`Error::AlreadyRunning`] when another server uses the data directory,
 /// [`Error::Io`] when a directory cannot be created or the address cannot be
 /// bound, [`Error::Db`] or [`Error::Migration`] when the database cannot be opened.
+#[allow(clippy::too_many_lines)] // startup is one ordered sequence of steps, read top to bottom
 pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     // Step 1, loading the config, is the caller's.
     for dir in config.paths.layout() {
@@ -386,8 +387,9 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
         .await?;
     }
 
-    // The arcade catalogue reads the MRA files under `_Arcade`.
+    // The arcade catalogue reads the MRA files under `_Arcade`; unstamped sources map again.
     jobs::arcade::enqueue_if_relevant(&app).await?;
+    jobs::remap::enqueue_if_unstamped(&app).await?;
 
     // Step 5: watchers, scheduler and HTTP.
     let mut tasks = Vec::new();

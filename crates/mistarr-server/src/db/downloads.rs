@@ -532,16 +532,26 @@ pub struct Candidate {
     pub file_index: u32,
 }
 
-/// The best `torrent_file` for `rom` across bound sources: an exact size match
-/// first, then the stronger confidence (name, base, fuzzy, size), then the
-/// source with fewer selected downloads, then the lowest source id. Files
-/// mapped to the rom and its candidates compete alike. A file that already
-/// gave this rom a `bad` download is never chosen.
+/// The best `torrent_file` for `rom` across bound sources: a hash-proven or
+/// name-tier match before any fuzzy or size-only candidate, then, within
+/// that tier, a size match (exact, or with the header the platform's hashing
+/// skips on top), then the stronger confidence (hash, name, base, fuzzy,
+/// size), then the source with fewer selected downloads, then the lowest
+/// source id. A file that already gave this rom a `bad` download is never chosen.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn best_file(conn: &Connection, rom: i64) -> Result<Option<Candidate>> {
+    let platform: Option<String> = conn
+        .query_row(
+            "SELECT t.platform_id FROM roms r JOIN titles t ON t.id = r.title_id WHERE r.id = ?1",
+            [rom],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let header = platform.map_or(0, |p| super::candidates::header_len(&PlatformId(p)));
+    let header = i64::try_from(header).unwrap_or(0);
     Ok(conn
         .prepare_cached(&format!(
             "SELECT m.source_id, m.file_index FROM (
@@ -556,15 +566,16 @@ pub fn best_file(conn: &Connection, rom: i64) -> Result<Option<Candidate>> {
              JOIN sources s ON s.id = m.source_id AND s.state = 'bound'
              JOIN roms r ON r.id = ?1
              WHERE {bad}
-             ORDER BY m.size = r.size DESC, {rank},
+             ORDER BY {tier}, (m.size = r.size OR m.size = r.size + ?2) DESC, {rank},
                (SELECT COUNT(*) FROM downloads a
                 WHERE a.source_id = s.id AND a.state IN ({SELECTED})),
                s.id, m.file_index
              LIMIT 1",
             bad = super::candidates::not_bad("?1", "m.source_id", "m.file_index"),
             rank = super::candidates::rank("m.confidence"),
+            tier = super::candidates::tier("m.confidence"),
         ))?
-        .query_row([rom], |r| {
+        .query_row(params![rom, header], |r| {
             Ok(Candidate {
                 source_id: SourceId(r.get(0)?),
                 file_index: r.get(1)?,

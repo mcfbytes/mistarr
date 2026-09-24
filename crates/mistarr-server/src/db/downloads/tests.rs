@@ -405,3 +405,36 @@ fn works_on_the_file_database() {
         .expect("count");
     assert_eq!(n, 0);
 }
+
+#[test]
+fn name_tier_files_beat_candidates_and_a_header_on_top_counts_as_the_size() {
+    let c = conn();
+    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, "[]").expect("rom");
+    let guessed = source(&c, 1, &[("example.nes", 16, None, Confidence::Unmatched)]);
+    let change = crate::db::candidates::Change {
+        add: vec![(0, rom, "fuzzy")],
+        ..Default::default()
+    };
+    crate::db::candidates::apply(&c, guessed, &change).expect("candidate");
+    assert_eq!(best_file(&c, rom).expect("best"), candidate(guessed, 0));
+    let odd = source(
+        &c,
+        2,
+        &[("Example Quest (USA).nes", 17, Some(rom), Confidence::Name)],
+    );
+    assert_eq!(
+        best_file(&c, rom).expect("best"),
+        candidate(odd, 0),
+        "tier first"
+    );
+    let headered = source(
+        &c,
+        3,
+        &[("Example Quest.nes", 32, Some(rom), Confidence::Base)],
+    );
+    assert_eq!(
+        best_file(&c, rom).expect("best"),
+        candidate(headered, 0),
+        "a size with the iNES header on top matches"
+    );
+}

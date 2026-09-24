@@ -7,7 +7,6 @@ use async_trait::async_trait;
 use mistarr_clients::{ClientError, ClientTorrentId, InfoHash, SeedPolicy, TorrentSource};
 use mistarr_core::PlatformId;
 use mistarr_sources::binding::{self, Binding};
-use mistarr_sources::fuzzy;
 use mistarr_sources::torrent::TorrentFile;
 use mistarr_sources::watch::{self, Scanner};
 use mistarr_sources::{magnet, torrent};
@@ -15,9 +14,10 @@ use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{json, Value};
 
+use super::remap::{map_files, RemapSources};
 use super::{wizard, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
-use crate::db::candidates::{self, SqlSizeIndex};
+use crate::db::candidates;
 use crate::db::sources::{self as rows, NewSource, SourceId, SourceRow, SourceState, SqlDatIndex};
 use crate::error::Result;
 use crate::events::EventKind;
@@ -293,55 +293,6 @@ pub fn bind_best(
     keep_disabled(conn, id, state, reason.as_deref())
 }
 
-/// Maps the source's `files` to the roms of `platform` by every tier in
-/// `docs/VERIFICATION.md` "Pre-download matching": the best name match per
-/// file into `torrent_files`, and the other roms of that tier plus the fuzzy
-/// and size-only candidates of the files left over into `torrent_candidates`.
-/// Returns how many files the name tiers matched.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure.
-pub fn map_files(
-    conn: &Connection,
-    id: SourceId,
-    platform: &PlatformId,
-    files: &[TorrentFile],
-) -> Result<usize> {
-    rows::refresh_match_keys(conn)?;
-    let mapping = binding::map_files(files, platform, &SqlDatIndex::new(conn));
-    rows::set_matches(conn, id, &mapping.matches)?;
-    let unmatched = mapping.unmatched(files);
-    let hits = files.len() - unmatched.len();
-    let extensions = fuzzy_extensions(platform);
-    let size_index = SqlSizeIndex::new(conn, platform);
-    let mut found = mapping.extra;
-    found.extend(fuzzy::candidates(&unmatched, &extensions, &size_index));
-    candidates::replace(conn, id, &found)?;
-    Ok(hits)
-}
-
-/// The extensions the fuzzy tiers consider for `platform`: those its core
-/// loads, plus `zip` for a cartridge platform, whose importer reads a zip.
-///
-/// ```
-/// use mistarr_core::PlatformId;
-/// use mistarr_server::jobs::source_import::fuzzy_extensions;
-/// assert_eq!(fuzzy_extensions(&PlatformId("nes".into())), ["nes", "zip"]);
-/// assert!(fuzzy_extensions(&PlatformId("none".into())).is_empty());
-/// ```
-#[must_use]
-pub fn fuzzy_extensions(platform: &PlatformId) -> Vec<&'static str> {
-    let Some(row) = mistarr_mister::platforms::by_id(&platform.0) else {
-        return Vec::new();
-    };
-    let mut out = row.load_extensions.to_vec();
-    if row.kind == mistarr_mister::platforms::Kind::Cartridge && !out.contains(&"zip") {
-        out.push("zip");
-    }
-    out
-}
-
 /// Guesses the source's platform from its names, with no DAT, and stores it;
 /// see `mistarr_mister::platforms::guess_platform`.
 ///
@@ -395,32 +346,22 @@ pub fn awaiting_dat_reason(platform_name: &str) -> String {
 }
 
 /// Binds the unbound sources again after a DAT loaded titles for `platforms`,
-/// skipping those the user unbound, and maps the sources already bound to
-/// one of `platforms` again. A source binds to its suggested platform
+/// skipping those the user unbound, and queues a [`RemapSources`] for the
+/// sources already bound to one of `platforms`. A source binds to its suggested platform
 /// when that reaches the threshold and no other platform scores higher, else
 /// as [`bind_best`] decides. Publishes `source.changed` for sources whose
-/// state or platform changed and for those mapped again, and returns how many bound.
+/// state or platform changed, and returns how many bound.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub async fn rebind_after_dat(app: &AppState, platforms: &[PlatformId]) -> Result<usize> {
+pub async fn rebind_after_dat(app: &Arc<AppState>, platforms: &[PlatformId]) -> Result<usize> {
     let threshold = app.config().sources.bind_threshold;
-    let platforms = platforms.to_vec();
-    let (mapped, changed) = app
+    let platforms_queued = platforms.to_vec();
+    let changed = app
         .db
         .write(move |c| {
             let tx = c.transaction()?;
-            let mut mapped = Vec::new();
-            for id in rows::list_on_platforms(&tx, &platforms)? {
-                let Some(row) = rows::get(&tx, id)? else {
-                    continue;
-                };
-                if let Some(platform) = &row.platform_id {
-                    map_files(&tx, id, platform, &rows::torrent_files(&tx, id)?)?;
-                    mapped.extend(rows::get(&tx, id)?);
-                }
-            }
             let mut out = Vec::new();
             for (id, suggested) in rows::list_unbound(&tx)? {
                 let before = rows::get(&tx, id)?;
@@ -433,11 +374,14 @@ pub async fn rebind_after_dat(app: &AppState, platforms: &[PlatformId]) -> Resul
                 }
             }
             tx.commit()?;
-            Ok((mapped, out))
+            Ok(out)
         })
         .await?;
-    for row in &mapped {
-        publish_changed(app, row);
+    if !platforms_queued.is_empty() {
+        let job = RemapSources {
+            platforms: Some(platforms_queued),
+        };
+        Scheduler::enqueue(app, Arc::new(job)).await?;
     }
     let mut bound = 0;
     for row in &changed {
@@ -847,21 +791,24 @@ mod tests {
         let mut events = app.events.subscribe(None).live;
         let nes = [PlatformId("nes".into())];
         assert_eq!(rebind_after_dat(&app, &nes).await.expect("rebind"), 0);
-        assert!(events.try_recv().is_ok(), "the mapped source is announced");
+        let queued = app
+            .db
+            .read(|c| crate::db::jobs::count_kind(c, super::super::remap::KIND))
+            .await;
+        assert_eq!(queued.expect("count"), 1);
+        let job = RemapSources {
+            platforms: Some(nes.to_vec()),
+        };
+        Scheduler::run_inline(&app, Arc::new(job))
+            .await
+            .expect("run");
+        let mut seen = false;
+        while let Ok(ev) = events.try_recv() {
+            seen |= ev.kind == EventKind::SourceChanged;
+        }
+        assert!(seen, "the mapped source is announced");
         let n = app.db.read(move |c| Ok(candidate_count(c, id))).await;
         assert_eq!(n.expect("count"), 1);
-    }
-
-    #[test]
-    fn fuzzy_extensions_follow_the_platform_table() {
-        assert_eq!(
-            fuzzy_extensions(&PlatformId("snes".into())),
-            ["sfc", "smc", "zip"]
-        );
-        assert_eq!(
-            fuzzy_extensions(&PlatformId("psx".into())),
-            ["cue", "iso", "chd"]
-        );
     }
 
     #[test]

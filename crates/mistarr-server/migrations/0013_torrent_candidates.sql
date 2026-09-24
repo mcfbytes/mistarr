@@ -12,3 +12,4 @@ CREATE TABLE torrent_candidates (
 CREATE INDEX torrent_candidates_rom ON torrent_candidates(rom_id);
 CREATE INDEX roms_size ON roms(size);
 UPDATE torrent_files SET confidence = 'base' WHERE confidence = 'size';
+ALTER TABLE sources ADD COLUMN map_stamp TEXT;   -- the platform's rom stamp the files were last mapped against

@@ -9,6 +9,7 @@ use mistarr_sources::torrent::TorrentFile;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
+use super::candidates::FileCandidate;
 use crate::error::Result;
 
 /// Roms given match keys per statement batch in [`refresh_match_keys`].
@@ -192,8 +193,10 @@ pub struct FileRow {
     pub rom_name: Option<String>,
     /// The matched rom's title.
     pub title_id: Option<i64>,
-    /// `name` or `base`, `None` when unmatched.
+    /// `hash`, `name` or `base`, `None` when unmatched.
     pub confidence: Option<String>,
+    /// The file's candidate roms, strongest first.
+    pub candidates: Vec<FileCandidate>,
 }
 
 const COLUMNS: &str = "s.id, s.infohash, s.display_name, s.origin_file, s.platform_id,
@@ -407,6 +410,62 @@ pub fn list_on_platforms(conn: &Connection, platforms: &[PlatformId]) -> Result<
     Ok(out)
 }
 
+/// Sources other than resolving ones that have a platform, by id.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn list_mapped(conn: &Connection) -> Result<Vec<SourceId>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM sources WHERE platform_id IS NOT NULL AND state != 'resolving' ORDER BY id",
+    )?;
+    let ids = stmt
+        .query_map([], |r| r.get(0).map(SourceId))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(ids)
+}
+
+/// Whether a source with a platform has never been mapped with a stamp.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn any_unstamped(conn: &Connection) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sources WHERE platform_id IS NOT NULL
+           AND state != 'resolving' AND map_stamp IS NULL)",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
+/// The rom stamp the source's files were last mapped against.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn map_stamp(conn: &Connection, id: SourceId) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT map_stamp FROM sources WHERE id = ?1", [id.0], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .flatten())
+}
+
+/// Stores the rom stamp the source's files were mapped against.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn set_map_stamp(conn: &Connection, id: SourceId, stamp: Option<&str>) -> Result<()> {
+    conn.execute(
+        "UPDATE sources SET map_stamp = ?2 WHERE id = ?1",
+        params![id.0, stamp],
+    )?;
+    Ok(())
+}
+
 /// True when `platform` has live titles from a DAT file.
 ///
 /// # Errors
@@ -582,9 +641,19 @@ pub fn files(
                 rom_name: r.get(4)?,
                 title_id: r.get(5)?,
                 confidence: r.get(6)?,
+                candidates: Vec::new(),
             })
         })?
-        .collect::<rusqlite::Result<_>>()?;
+        .collect::<rusqlite::Result<Vec<FileRow>>>()?;
+    let mut rows = rows;
+    if let (Some(first), Some(last)) = (rows.first(), rows.last()) {
+        let (from, to) = (first.file_index, last.file_index);
+        for (index, found) in super::candidates::of_files(conn, id, from, to)? {
+            if let Some(row) = rows.iter_mut().find(|r| r.file_index == index) {
+                row.candidates.push(found);
+            }
+        }
+    }
     Ok((rows, total))
 }
 
@@ -803,6 +872,12 @@ mod tests {
         set_binding(&c, a, Some(&nes()), Some(1.0)).expect("bind");
         let snes = PlatformId("snes".into());
         assert_eq!(list_on_platforms(&c, &[snes, nes()]).expect("on"), [a]);
+        assert_eq!(list_mapped(&c).expect("mapped"), [a]);
+        assert!(any_unstamped(&c).expect("unstamped"));
+        assert_eq!(map_stamp(&c, a).expect("stamp"), None);
+        set_map_stamp(&c, a, Some("1:2:3")).expect("set");
+        assert_eq!(map_stamp(&c, a).expect("stamp").as_deref(), Some("1:2:3"));
+        assert!(!any_unstamped(&c).expect("unstamped"));
     }
 
     #[test]
