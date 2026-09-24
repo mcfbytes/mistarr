@@ -6,7 +6,18 @@ export interface ClientStatus {
   reachable: boolean;
   version: string | null;
   rtorrent_on_path: boolean;
+  transmission_on_path: boolean;
+  transmission_service: boolean;
+  transmission_opt_in: boolean;
   checked_at: number;
+}
+
+/** A heavy job the closed gate holds. */
+export interface WaitingJob {
+  id: number;
+  kind: string;
+  state: JobState;
+  detail: string | null;
 }
 
 export type PauseReason = 'core' | 'manual' | null;
@@ -21,6 +32,7 @@ export interface SystemStatus {
   paused: boolean;
   pause_reason: PauseReason;
   override: Override;
+  waiting: WaitingJob[];
   disk_free_bytes: number | null;
   rss_bytes: number | null;
   launch: LaunchState;
@@ -182,6 +194,20 @@ export interface Source {
   total_size: number;
   client_id: string | null;
   added_at: number;
+  suggested_platform_id: string | null;
+}
+
+export type IncomingState = 'waiting' | 'importing' | 'rejected';
+
+/** A file in `dats/` or `sources/` that has not loaded. */
+export interface IncomingFile {
+  file: string;
+  size: number;
+  state: IncomingState;
+  reason: string | null;
+  job_id: number | null;
+  progress: Record<string, unknown> | null;
+  modified: number;
 }
 
 export type SourceFileConfidence = 'name' | 'size' | null;
@@ -238,12 +264,16 @@ export interface ImportLogEntry {
 
 export type JobState = 'queued' | 'running' | 'paused' | 'done' | 'failed';
 
+export type JobLane = 'heavy' | 'background' | 'light';
+
 export interface Job {
   id: number;
   kind: string;
+  lane: JobLane;
   payload: Record<string, unknown>;
   state: JobState;
   progress: Record<string, unknown> | null;
+  reason: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -304,7 +334,7 @@ export interface SseStatusEvent {
 
 export interface SseJobProgressEvent {
   name: 'job.progress';
-  data: { id: number; kind: string; state: JobState; progress: Record<string, unknown> };
+  data: { id: number; kind: string; state: JobState; progress: Record<string, unknown> | null };
 }
 
 export interface SseDatLoadedEvent {

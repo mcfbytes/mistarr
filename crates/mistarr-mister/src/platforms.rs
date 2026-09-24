@@ -540,6 +540,52 @@ pub fn by_id(id: &str) -> Option<&'static Platform> {
 /// ```
 #[must_use]
 pub fn bind_dat_name(name: &str) -> Option<&'static Platform> {
+    best_match(name).map(|(_, row)| row)
+}
+
+/// Guesses a platform with no DAT loaded from a torrent's `names` (the dropped
+/// file's stem and its info name) and its `dirs`, each with the number of
+/// files it holds. Each name is matched as in [`bind_dat_name`]. The names
+/// decide when any matches; otherwise the matching directories that hold the
+/// most files do. Two platforms at the deciding level mean no guess.
+///
+/// ```
+/// use mistarr_mister::platforms::guess_platform;
+/// let names = ["Example_Archive - No-Intro", "Nintendo - Super Nintendo Entertainment System"];
+/// assert_eq!(guess_platform(names, []).map(|p| p.id), Some("snes"));
+/// let dirs = [("Nintendo - Game Boy", 4), ("Nintendo - Game Boy Color", 4)];
+/// assert!(guess_platform(["Example Archive"], dirs).is_none());
+/// ```
+#[must_use]
+pub fn guess_platform<'a>(
+    names: impl IntoIterator<Item = &'a str>,
+    dirs: impl IntoIterator<Item = (&'a str, usize)>,
+) -> Option<&'static Platform> {
+    let from_names: Vec<&'static Platform> = names.into_iter().filter_map(bind_dat_name).collect();
+    if !from_names.is_empty() {
+        return unanimous(&from_names);
+    }
+    let matched: Vec<(usize, &'static Platform)> = dirs
+        .into_iter()
+        .filter_map(|(dir, n)| bind_dat_name(dir).map(|p| (n, p)))
+        .collect();
+    let top = matched.iter().map(|(n, _)| *n).max()?;
+    let deciding: Vec<&'static Platform> = matched
+        .into_iter()
+        .filter(|(n, _)| *n == top)
+        .map(|(_, p)| p)
+        .collect();
+    unanimous(&deciding)
+}
+
+/// The one platform every entry names, or `None` when they differ or there are none.
+fn unanimous(found: &[&'static Platform]) -> Option<&'static Platform> {
+    let first = *found.first()?;
+    found.iter().all(|p| p.id == first.id).then_some(first)
+}
+
+/// The longest pattern match in `name` and its row.
+fn best_match(name: &str) -> Option<(usize, &'static Platform)> {
     let norm = normalise(name);
     let mut best: Option<(usize, &'static Platform)> = None;
     for (row, re) in compiled() {
@@ -549,7 +595,7 @@ pub fn bind_dat_name(name: &str) -> Option<&'static Platform> {
             }
         }
     }
-    best.map(|(_, row)| row)
+    best
 }
 
 /// Rows whose core is the `.rbf` named `core` (date suffix already removed).
@@ -858,5 +904,96 @@ mod tests {
     #[ignore = "needs a MiSTer SD card at MISTARR_BOARD_ROOT"]
     fn board_verify_neocd() {
         assert_board_dir("neocd");
+    }
+
+    fn guess(names: &[&str]) -> Option<&'static str> {
+        guess_platform(names.iter().copied(), []).map(|p| p.id)
+    }
+
+    fn guess_dirs(dirs: &[(&str, usize)]) -> Option<&'static str> {
+        guess_platform(["Example Archive"], dirs.iter().copied()).map(|p| p.id)
+    }
+
+    #[test]
+    fn a_set_torrent_is_guessed_from_its_names() {
+        let file = "Example_Archive - No-Intro - Nintendo - Super Nintendo Entertainment System";
+        assert_eq!(guess(&[file]), Some("snes"));
+        assert_eq!(
+            guess(&["Example_Archive", "No-Intro", "Nintendo - Game Boy Color"]),
+            Some("gbc")
+        );
+        assert_eq!(guess(&["Maker - Game Boy", "Maker - Game Boy Color"]), None);
+        assert_eq!(
+            guess(&["Maker - Game Boy Color", "Nintendo - Game Boy Color"]),
+            Some("gbc")
+        );
+        assert_eq!(guess(&["Sony - PlayStation (2026)"]), Some("psx"));
+        assert_eq!(guess(&[]), None);
+        assert_eq!(guess(&["Example_Archive", "misc"]), None);
+    }
+
+    #[test]
+    fn directories_decide_by_file_count_when_the_names_do_not() {
+        let half = [("Nintendo - Game Boy", 5), ("Nintendo - Game Boy Color", 5)];
+        assert_eq!(guess_dirs(&half), None, "a 50/50 split is no guess");
+        let most = [("Nintendo - Game Boy", 3), ("Nintendo - Game Boy Color", 7)];
+        assert_eq!(guess_dirs(&most), Some("gbc"));
+        let nested = [("Sets", 8), ("Nintendo - Game Boy", 8), ("misc", 8)];
+        assert_eq!(guess_dirs(&nested), Some("gb"));
+        let named = guess_platform(["Sega - Mega Drive - Genesis"], most).map(|p| p.id);
+        assert_eq!(
+            named,
+            Some("megadrive"),
+            "the names outrank the directories"
+        );
+    }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Separator-only noise, which never forms a platform word.
+        fn noise() -> impl Strategy<Value = String> {
+            "[ _.0-9-]{0,12}"
+        }
+
+        proptest! {
+            #[test]
+            fn never_panics(names in prop::collection::vec(".{0,40}", 0..6)) {
+                let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                let dirs = refs.iter().map(|d| (*d, d.len()));
+                let _ = guess_platform(refs.clone(), dirs);
+            }
+
+            #[test]
+            fn a_playlist_name_in_noise_is_guessed_as_its_dat_binding(
+                row in 0..PLATFORMS.len(), before in noise(), after in "[ _.-]{0,6}"
+            ) {
+                let playlist = PLATFORMS[row].libretro_playlist;
+                let wrapped = format!("{before} - {playlist}{after}");
+                let want = bind_dat_name(playlist).map(|p| p.id);
+                prop_assert_eq!(guess(&[&wrapped]), want);
+                prop_assert_eq!(guess(&["Example Archive", &wrapped, "misc"]), want);
+            }
+
+            #[test]
+            fn the_guess_is_what_every_matching_name_binds(
+                names in prop::collection::vec("[A-Za-z _-]{0,30}", 0..5)
+            ) {
+                let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                let got = guess(&refs);
+                let each: Vec<_> = refs.iter().filter_map(|n| bind_dat_name(n).map(|p| p.id)).collect();
+                let agreed = each.first().filter(|f| each.iter().all(|e| e == *f)).copied();
+                prop_assert_eq!(got, agreed);
+            }
+
+            #[test]
+            fn names_that_disagree_give_no_guess_in_any_order(swap: bool) {
+                let (a, b) = ("Maker - Game Boy", "Maker - Game Boy Advance");
+                let names = if swap { [b, a] } else { [a, b] };
+                prop_assert_eq!(guess(&names), None);
+                prop_assert_eq!(guess(&[b]), Some("gba"));
+            }
+        }
     }
 }

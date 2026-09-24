@@ -3,6 +3,8 @@
 use serde::Serialize;
 use tokio::sync::watch;
 
+use super::Lane;
+
 /// The value MiSTer writes to CORENAME while the menu is loaded.
 pub const MENU: &str = "MENU";
 
@@ -72,6 +74,30 @@ impl GateState {
     #[must_use]
     pub fn paused(&self) -> bool {
         self.pause_reason().is_some()
+    }
+
+    /// Why jobs on `lane` are held: the heavy lane follows the gate, the
+    /// background lane only a manual pause, the light lane never.
+    ///
+    /// ```
+    /// use mistarr_server::jobs::gate::{GateState, Override, PauseReason};
+    /// use mistarr_server::jobs::Lane;
+    /// let core = GateState { corename: Some("SNES".into()), manual: None };
+    /// assert_eq!(core.hold(Lane::Heavy), Some(PauseReason::Core));
+    /// assert_eq!(core.hold(Lane::Background), None);
+    /// let user = GateState { corename: None, manual: Some(Override::Paused) };
+    /// assert_eq!(user.hold(Lane::Background), Some(PauseReason::Manual));
+    /// assert_eq!(user.hold(Lane::Light), None);
+    /// ```
+    #[must_use]
+    pub fn hold(&self, lane: Lane) -> Option<PauseReason> {
+        match lane {
+            Lane::Heavy => self.pause_reason(),
+            Lane::Background => {
+                (self.manual == Some(Override::Paused)).then_some(PauseReason::Manual)
+            }
+            Lane::Light => None,
+        }
     }
 }
 
@@ -158,6 +184,29 @@ impl Gate {
         })
     }
 
+    /// Clears a `Running` override, for when the heavy queue it was set to
+    /// release has drained. Returns true if it was set.
+    ///
+    /// ```
+    /// use mistarr_server::jobs::gate::{Gate, Override};
+    /// let gate = Gate::new();
+    /// gate.set_corename(Some("SNES".into()));
+    /// gate.set_override(Some(Override::Running));
+    /// assert!(gate.end_run_now());
+    /// assert!(gate.state().paused());
+    /// assert!(!gate.end_run_now());
+    /// ```
+    #[allow(clippy::must_use_candidate)] // Callers may ignore whether it changed.
+    pub fn end_run_now(&self) -> bool {
+        self.tx.send_if_modified(|s| {
+            if s.manual != Some(Override::Running) {
+                return false;
+            }
+            s.manual = None;
+            true
+        })
+    }
+
     /// Returns once the gate is open; immediately if it already is.
     ///
     /// ```
@@ -166,9 +215,21 @@ impl Gate {
     /// # });
     /// ```
     pub async fn wait_open(&self) {
+        self.wait_free(Lane::Heavy).await;
+    }
+
+    /// Waits until jobs on `lane` are no longer held; see [`GateState::hold`].
+    ///
+    /// ```
+    /// # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
+    /// let gate = mistarr_server::jobs::gate::Gate::new();
+    /// gate.wait_free(mistarr_server::jobs::Lane::Background).await;
+    /// # });
+    /// ```
+    pub async fn wait_free(&self, lane: Lane) {
         let mut rx = self.tx.subscribe();
         // The sender lives in `self`, so the channel cannot close while this borrow is held.
-        let _ = rx.wait_for(|s| !s.paused()).await;
+        let _ = rx.wait_for(|s| s.hold(lane).is_none()).await;
     }
 }
 

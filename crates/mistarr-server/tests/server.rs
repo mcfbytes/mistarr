@@ -93,6 +93,7 @@ async fn status_has_the_documented_shape() {
     assert_eq!(s["paused"], false);
     assert!(s["pause_reason"].is_null());
     assert!(s["override"].is_null());
+    assert_eq!(s["waiting"], serde_json::json!([]));
     assert!(s["disk_free_bytes"].is_u64());
     assert!(s["rss_bytes"].as_u64().is_some_and(|b| b > 0));
     booted.running.shutdown().await.expect("shutdown");
@@ -439,7 +440,7 @@ async fn concurrent_settings_puts_keep_both_sections() {
 async fn shutdown_leaves_no_job_lane_running() {
     let booted = boot().await;
     let app = std::sync::Arc::clone(&booted.running.app);
-    assert_eq!(app.scheduler.lanes_alive(), 2);
+    assert_eq!(app.scheduler.lanes_alive(), 3);
     booted.running.shutdown().await.expect("shutdown");
     assert_eq!(app.scheduler.lanes_alive(), 0);
 }

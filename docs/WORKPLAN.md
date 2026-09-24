@@ -74,6 +74,7 @@ code. Guidance:
 | WP-24 | Import wanted MRA zips | Opus | 14, 19 | A wanted arcade zip is placed whole and verified by MRA md5 assembly, by MAME DAT members, or recorded unverified; multi-zip MRAs complete in any order. |
 | WP-25 | Scan automation and wizard cores | Sonnet | 11, 19 | Scans run after a DAT loads for a platform with a games directory, once when the wizard completes, and daily by default; the wizard's cores step calls `POST /system/cores`. |
 | WP-26 | Launch games and cores | Opus | 14, 19, 25 | `POST /titles/{id}/launch` starts an entry in the collection through an MGL or its MRA and `POST /platforms/{id}/launch-core` starts the newest core, via a non-blocking write to MiSTer Main's FIFO; 404, 409 and 503 as API.md says; `prefs.launch` turns it off; the Title and Browse screens offer Play and Start core with an inline reason when unavailable. |
+| WP-27 | First board test fixes | Opus | 10, 12, 13, 15, 17 | DAT and source parsing run in an ungated background lane while a core is loaded, and held heavy jobs are listed with a Run now action; the wizard and Sources list the files in `dats/` and `sources/` with their state live; an installed but stopped client can be started and is re-detected; path mappings can be removed and blank ones are refused; the wizard opens once; unbound sources carry a suggested platform and rebind when its DAT loads; each log line is written once and a second instance refuses to start. |
 
 ## Suggested fan-out
 

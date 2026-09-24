@@ -17,12 +17,15 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
+use super::gate::GateState;
 use super::{scan, wizard, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
 use crate::config::PrefsConfig;
+use crate::db::dat_stage::{self, StagedGame, StagedRom};
 use crate::db::dats::{self, DatVersionId, NewVersion};
 use crate::db::jobs::{JobId, JobState};
-use crate::db::titles::{self, RomInput, TitleInput};
+use crate::db::titles;
+use crate::db::Db;
 use crate::error::{Error, Result};
 use crate::events::EventKind;
 
@@ -40,6 +43,18 @@ pub const REJECTED_DIR: &str = "rejected";
 
 /// Games read between checks for shutdown.
 const CANCEL_EVERY: u64 = 500;
+
+/// Games parsed between pauses while a core runs, so the parse never holds a CPU for long.
+const YIELD_EVERY: u64 = 200;
+
+/// How often a parse held by a manual pause looks again.
+const PAUSED_POLL: Duration = Duration::from_millis(250);
+
+/// Games parsed per write to `dat_stage`; the write lock is free between them.
+const STAGE_CHUNK: usize = 2000;
+
+/// How long each of those pauses lasts.
+const YIELD_FOR: std::time::Duration = std::time::Duration::from_millis(20);
 
 /// The 1G1R preferences of `[prefs]`; hide names that are not selection flags are ignored.
 ///
@@ -163,6 +178,7 @@ struct Request {
     prefs: Prefs,
     now: i64,
     stop: watch::Receiver<bool>,
+    gate: watch::Receiver<GateState>,
 }
 
 #[async_trait]
@@ -183,7 +199,7 @@ impl Job for DatImport {
     }
 
     fn lane(&self) -> Lane {
-        Lane::Heavy
+        Lane::Background
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
@@ -268,7 +284,7 @@ impl DatImport {
         fail(reasons.join("\n"))
     }
 
-    /// Imports every member, one write transaction each, checkpointing between them.
+    /// Imports every member on a blocking thread, checkpointing between them.
     async fn import_members(
         &self,
         ctx: &JobContext,
@@ -286,13 +302,14 @@ impl DatImport {
                 prefs: prefs(&ctx.app.config().prefs),
                 now: crate::unix_now(),
                 stop: ctx.app.shutdown_signal(),
+                gate: ctx.app.gate.subscribe(),
             };
             let path = self.path.clone();
-            let outcome = ctx
-                .app
-                .db
-                .write(move |c| import_from(c, &path, member, &req))
-                .await?;
+            let db = ctx.app.db.clone();
+            let outcome =
+                tokio::task::spawn_blocking(move || import_from(&db, &path, member, &req))
+                    .await
+                    .map_err(|e| Error::Task(e.to_string()))??;
             if let Outcome::Loaded(l) = &outcome {
                 games += l.games;
             }
@@ -352,16 +369,11 @@ fn is_dat_name(name: &str) -> bool {
     !name.ends_with('/') && matches!(extension(Path::new(name)).as_str(), "dat" | "xml")
 }
 
-/// Opens a member for streaming and imports it.
-fn import_from(
-    conn: &mut Connection,
-    path: &Path,
-    member: Member,
-    req: &Request,
-) -> Result<Outcome> {
+/// Opens a member for streaming and imports it. Runs on a blocking thread.
+fn import_from(db: &Db, path: &Path, member: Member, req: &Request) -> Result<Outcome> {
     let file = File::open(path)?;
     match member {
-        Member::Plain => import_member(conn, BufReader::new(file), req, ""),
+        Member::Plain => import_member(db, BufReader::new(file), req, ""),
         Member::Zip(index) => {
             let mut archive = match zip::ZipArchive::new(BufReader::new(file)) {
                 Ok(a) => a,
@@ -372,19 +384,16 @@ fn import_from(
                 Err(e) => return Ok(Outcome::Rejected(format!("invalid zip archive: {e}"))),
             };
             let name = entry.name().to_owned();
-            import_member(conn, BufReader::new(entry), req, &name)
+            import_member(db, BufReader::new(entry), req, &name)
         }
     }
 }
 
-/// Streams one DAT into the database in a single transaction. A parse error
-/// rolls the transaction back and becomes [`Outcome::Rejected`].
-fn import_member<R: BufRead>(
-    conn: &mut Connection,
-    reader: R,
-    req: &Request,
-    member: &str,
-) -> Result<Outcome> {
+/// Streams one DAT into `dat_stage` in chunks of [`STAGE_CHUNK`] games, each
+/// its own short write, then applies it in one transaction so readers see the
+/// old titles or the new ones, never a mix. A parse error becomes
+/// [`Outcome::Rejected`] and leaves the catalog untouched.
+fn import_member<R: BufRead>(db: &Db, reader: R, req: &Request, member: &str) -> Result<Outcome> {
     let prefix = if member.is_empty() {
         String::new()
     } else {
@@ -411,102 +420,142 @@ fn import_member<R: BufRead>(
         Some(b) => Some(b.platform.0.clone()),
         None => mistarr_mister::bind_dat_name(&dat_name).map(|p| p.id.to_owned()),
     };
-    let tx = conn.transaction()?;
-    let plan = dats::upsert_version(
-        &tx,
-        &NewVersion {
-            dat_name: &dat_name,
-            version: &header.version,
-            source_file: &req.source_file,
-            platform: bound.as_deref(),
-            now: req.now,
-        },
-    )?;
-    if req.bind.is_some() && !plan.current {
-        return Ok(Outcome::Rejected(format!(
+    let new = NewVersion {
+        dat_name: &dat_name,
+        version: &header.version,
+        source_file: &req.source_file,
+        platform: bound.as_deref(),
+        now: req.now,
+    };
+    let newer = || {
+        Outcome::Rejected(format!(
             "{prefix}a newer version of {dat_name} is loaded; bind that version instead"
-        )));
+        ))
+    };
+    let (planned, current) = db.read_blocking(|c| dats::plan_version(c, &new))?;
+    if req.bind.is_some() && !current {
+        return Ok(newer());
     }
-    let platform = plan.platform_id.clone().filter(|_| plan.current);
-    if platform.is_some() {
-        dats::begin_load(&tx, plan.id)?;
+    let staging = planned.is_some() && current;
+    if staging {
+        db.write_blocking(|c| dat_stage::clear(c))?;
     }
     let mut games = 0u64;
     let mut clone_of = false;
+    let mut chunk = Vec::new();
     for game in stream {
         let game = match game {
             Ok(g) => g,
-            Err(e) => return Ok(Outcome::Rejected(format!("{prefix}{e}"))),
+            Err(e) => {
+                db.write_blocking(|c| dat_stage::clear(c))?;
+                return Ok(Outcome::Rejected(format!("{prefix}{e}")));
+            }
         };
         games += 1;
-        if games % CANCEL_EVERY == 0 && *req.stop.borrow() {
-            return Err(Error::Cancelled);
-        }
-        if let Some(p) = &platform {
+        pace(req, games)?;
+        if staging {
             clone_of |= game.clone_of.is_some();
-            store_game(&tx, &p.0, plan.id, &dat_name, &game)?;
+            chunk.push(staged(&game));
+            if chunk.len() >= STAGE_CHUNK {
+                db.write_blocking(|c| append_chunk(c, &chunk))?;
+                chunk.clear();
+            }
         }
     }
-    dats::set_game_count(&tx, plan.id, games)?;
-    let mut retired = 0;
-    if let Some(p) = &platform {
-        titles::link_parents(&tx, plan.id, clone_of)?;
-        retired = dats::retire_absent(&tx, plan.id)?;
-        titles::recompute_platform(&tx, &p.0, &req.prefs)?;
+    if !chunk.is_empty() {
+        db.write_blocking(|c| append_chunk(c, &chunk))?;
     }
-    tx.commit()?;
-    Ok(Outcome::Loaded(Loaded {
-        version: plan.id,
-        platform: plan.platform_id,
-        games,
-        has_titles: platform.is_some(),
-        retired,
-    }))
+    db.write_blocking(|c| {
+        let tx = c.transaction()?;
+        let plan = dats::upsert_version(&tx, &new)?;
+        if req.bind.is_some() && !plan.current {
+            return Ok(newer());
+        }
+        let platform = plan.platform_id.clone().filter(|_| plan.current && staging);
+        if let Some(p) = &platform {
+            dats::begin_load(&tx, plan.id)?;
+            dat_stage::apply(&tx, &p.0, plan.id, &dat_name)?;
+        }
+        dats::set_game_count(&tx, plan.id, games)?;
+        let mut retired = 0;
+        if let Some(p) = &platform {
+            titles::link_parents(&tx, plan.id, clone_of)?;
+            retired = dats::retire_absent(&tx, plan.id)?;
+            titles::recompute_platform(&tx, &p.0, &req.prefs)?;
+        }
+        dat_stage::clear(&tx)?;
+        tx.commit()?;
+        Ok(Outcome::Loaded(Loaded {
+            version: plan.id,
+            platform: plan.platform_id,
+            games,
+            has_titles: platform.is_some(),
+            retired,
+        }))
+    })
 }
 
-/// Parses a game's name and writes it with its roms.
-fn store_game(
-    conn: &Connection,
-    platform: &str,
-    version: DatVersionId,
-    dat_name: &str,
-    game: &DatGame,
-) -> Result<()> {
-    let parsed = parse_name(&game.name);
-    let regions: Vec<String> = parsed.regions.iter().map(|r| r.name().to_owned()).collect();
-    let flags = parsed.flag_labels();
-    let revision = parsed.revision.as_ref().map(|r| r.label.as_str());
-    let key = group_key(&parsed);
-    let title = TitleInput {
-        name: &game.name,
-        base_name: &parsed.base_name,
-        group_key: &key,
-        clone_of: game.clone_of.as_deref(),
-        regions: &regions,
-        languages: &parsed.languages,
-        revision,
-        flags: &flags,
-    };
-    let roms: Vec<RomInput<'_>> = game
-        .roms
-        .iter()
-        .map(|r| RomInput {
-            name: &r.name,
-            size: r.size,
-            crc32: r.crc32.as_deref(),
-            md5: r.md5.as_deref(),
-            sha1: r.sha1.as_deref(),
-            status: r.status.as_str(),
-            header: r.header.as_deref(),
-        })
-        .collect();
-    titles::upsert_title(conn, platform, version, dat_name, &title, &roms)?;
+/// Stops on shutdown, sleeps briefly while a core runs and waits out a
+/// manual pause, which holds the background lane; checked every few games.
+fn pace(req: &Request, games: u64) -> Result<()> {
+    if games % CANCEL_EVERY == 0 && *req.stop.borrow() {
+        return Err(Error::Cancelled);
+    }
+    if games % YIELD_EVERY != 0 {
+        return Ok(());
+    }
+    if req.gate.borrow().core_running() {
+        std::thread::sleep(YIELD_FOR);
+    }
+    while req.gate.borrow().hold(Lane::Background).is_some() {
+        if *req.stop.borrow() {
+            return Err(Error::Cancelled);
+        }
+        std::thread::sleep(PAUSED_POLL);
+    }
     Ok(())
 }
 
+/// Appends one chunk of parsed games to the stage in its own transaction.
+fn append_chunk(conn: &mut Connection, chunk: &[StagedGame]) -> Result<()> {
+    let tx = conn.transaction()?;
+    dat_stage::append(&tx, chunk)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Parses a game's name into the row its title is stored from.
+fn staged(game: &DatGame) -> StagedGame {
+    let parsed = parse_name(&game.name);
+    StagedGame {
+        name: game.name.clone(),
+        base_name: parsed.base_name.clone(),
+        group_key: group_key(&parsed),
+        clone_of: game.clone_of.clone(),
+        regions: parsed.regions.iter().map(|r| r.name().to_owned()).collect(),
+        languages: parsed.languages.clone(),
+        revision: parsed.revision.as_ref().map(|r| r.label.clone()),
+        flags: parsed.flag_labels(),
+        roms: game
+            .roms
+            .iter()
+            .map(|r| StagedRom {
+                name: r.name.clone(),
+                size: r.size,
+                crc32: r.crc32.clone(),
+                md5: r.md5.clone(),
+                sha1: r.sha1.clone(),
+                status: r.status.as_str().to_owned(),
+                header: r.header.clone(),
+            })
+            .collect(),
+    }
+}
+
 /// Queues an automatic scan for each platform a DAT just loaded titles for,
-/// deduped so several DATs in one pack queue at most one each, then checks
-/// whether the wizard just became complete.
+/// deduped so several DATs in one pack queue at most one each, binds waiting
+/// sources once for the whole pack, then checks whether the wizard just
+/// became complete.
 async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
     let mut queued = HashSet::new();
     for l in loaded {
@@ -518,6 +567,11 @@ async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
         }
         if let Err(e) = scan::enqueue_if_games_dir_exists(app, platform).await {
             tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue automatic scan");
+        }
+    }
+    if !queued.is_empty() {
+        if let Err(e) = super::source_import::rebind_after_dat(app).await {
+            tracing::warn!(error = %e, "cannot bind waiting sources");
         }
     }
     if let Err(e) = wizard::on_change(app).await {
@@ -629,7 +683,7 @@ impl Job for Recompute {
     }
 
     fn lane(&self) -> Lane {
-        Lane::Heavy
+        Lane::Background
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {

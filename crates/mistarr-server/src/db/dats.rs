@@ -85,22 +85,15 @@ pub struct VersionPlan {
     pub current: bool,
 }
 
-/// Inserts or refreshes the `(dat_name, version)` row and applies supersession:
-/// a version whose string is not below the newest live one of the same name
-/// becomes current and supersedes the others; an older one is stored superseded.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure.
-///
-/// ```
-/// use mistarr_server::db::dats::{upsert_version, NewVersion};
-/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let v = NewVersion { dat_name: "Test Console", version: "1", source_file: "a.dat", platform: None, now: 1 };
-/// assert!(upsert_version(&conn, &v).unwrap().current);
-/// ```
-pub fn upsert_version(conn: &Connection, v: &NewVersion<'_>) -> Result<VersionPlan> {
+/// What [`upsert_version`] reads before it writes.
+struct Decision {
+    existing: Option<i64>,
+    inherited: Option<String>,
+    current: bool,
+    superseded_by: Option<i64>,
+}
+
+fn decide(conn: &Connection, v: &NewVersion<'_>) -> Result<Decision> {
     let existing: Option<i64> = conn
         .query_row(
             "SELECT id FROM dat_versions WHERE dat_name = ?1 AND version = ?2 AND source = 'dat'",
@@ -138,6 +131,63 @@ pub fn upsert_version(conn: &Connection, v: &NewVersion<'_>) -> Result<VersionPl
     } else {
         newest.map(|(id, _)| id)
     };
+    Ok(Decision {
+        existing,
+        inherited,
+        current,
+        superseded_by,
+    })
+}
+
+/// What [`upsert_version`] would decide for `v`, without writing: the platform
+/// the version would be bound to and whether it would be current.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::dats::{plan_version, NewVersion};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let v = NewVersion { dat_name: "Test Console", version: "1", source_file: "a.dat", platform: None, now: 1 };
+/// assert_eq!(plan_version(&conn, &v).unwrap(), (None, true));
+/// ```
+pub fn plan_version(conn: &Connection, v: &NewVersion<'_>) -> Result<(Option<PlatformId>, bool)> {
+    let d = decide(conn, v)?;
+    let stored: Option<String> = match d.existing {
+        Some(id) => conn.query_row(
+            "SELECT platform_id FROM dat_versions WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )?,
+        None => None,
+    };
+    Ok((d.inherited.or(stored).map(PlatformId), d.current))
+}
+
+/// Inserts or refreshes the `(dat_name, version)` row and applies supersession:
+/// a version whose string is not below the newest live one of the same name
+/// becomes current and supersedes the others; an older one is stored superseded.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::dats::{upsert_version, NewVersion};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let v = NewVersion { dat_name: "Test Console", version: "1", source_file: "a.dat", platform: None, now: 1 };
+/// assert!(upsert_version(&conn, &v).unwrap().current);
+/// ```
+pub fn upsert_version(conn: &Connection, v: &NewVersion<'_>) -> Result<VersionPlan> {
+    let Decision {
+        existing,
+        inherited,
+        current,
+        superseded_by,
+    } = decide(conn, v)?;
     let id = if let Some(id) = existing {
         conn.execute(
             "UPDATE dat_versions SET source_file = ?2, loaded_at = ?3,

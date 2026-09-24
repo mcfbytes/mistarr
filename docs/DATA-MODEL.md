@@ -32,6 +32,11 @@ CREATE TABLE dat_versions (
   UNIQUE (dat_name, version)
 );
 
+CREATE TABLE dat_stage (          -- the DAT being imported, parsed outside the write lock and applied at once
+  seq  INTEGER PRIMARY KEY,
+  game TEXT NOT NULL              -- one parsed game with its roms, as JSON
+);
+
 CREATE TABLE titles (                   -- one per <game>; the browse unit
   id            INTEGER PRIMARY KEY,
   platform_id   TEXT NOT NULL REFERENCES platforms(id),
@@ -112,7 +117,9 @@ CREATE TABLE sources (                  -- one per torrent the user dropped in
   file_count    INTEGER NOT NULL DEFAULT 0,
   total_size    INTEGER NOT NULL DEFAULT 0,
   client_id     TEXT,                  -- id in the download client once added, else NULL
-  added_at      INTEGER NOT NULL
+  added_at      INTEGER NOT NULL,
+  suggested_platform_id TEXT REFERENCES platforms(id),  -- guessed from the torrent's names, no DAT needed
+  user_unbound  INTEGER NOT NULL DEFAULT 0   -- 1 after the user unbound it; never bound automatically again
 );
 CREATE INDEX sources_state ON sources(state);
 
@@ -161,7 +168,8 @@ CREATE TABLE jobs (
   state         TEXT NOT NULL,         -- 'queued' | 'running' | 'paused' | 'done' | 'failed'
   progress      TEXT,                  -- json, job specific
   created_at    INTEGER NOT NULL,
-  updated_at    INTEGER NOT NULL
+  updated_at    INTEGER NOT NULL,
+  lane          TEXT NOT NULL DEFAULT 'light'   -- 'heavy' | 'background' | 'light'
 );
 ```
 

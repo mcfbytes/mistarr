@@ -32,6 +32,9 @@ pub enum ClientError {
         /// How many files the torrent has.
         file_count: usize,
     },
+    /// An installed client could not be started, or is not installed.
+    #[error("cannot start the download client: {0}")]
+    Launch(String),
     /// The torrent came from a magnet and the client has no metadata yet.
     #[error("the download client has no metadata for this torrent yet")]
     MetadataPending,

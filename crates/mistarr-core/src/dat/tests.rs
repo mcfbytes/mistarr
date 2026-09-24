@@ -293,6 +293,72 @@ fn rom_status_strings() {
     assert_eq!(RomStatus::parse(""), None);
 }
 
+/// A datfile shaped like a No-Intro export: schema attributes on the root, an
+/// `<id>`, long legal elements in the header, and `id`/`cloneofid` on games.
+fn no_intro_shaped(games: usize) -> String {
+    let legal = "Synthetic notice text for the fixture only. ".repeat(80);
+    let mut xml = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE datafile PUBLIC "-//Logiqx//DTD ROM Management Datafile//EN" "https://example.invalid/datafile.dtd">
+<datafile xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="https://example.invalid/schema https://example.invalid/schema/datfile_v3.xsd">
+	<header>
+		<id>49</id>
+		<name>Nintendo - Super Nintendo Entertainment System</name>
+		<description>Nintendo - Super Nintendo Entertainment System</description>
+		<version>20260101-000000</version>
+		<author>fixture, tester &amp; others</author>
+		<homepage>Example group</homepage>
+		<url>https://example.invalid/</url>
+		<trademarks>{legal}</trademarks>
+		<piracy>{legal}</piracy>
+		<clrmamepro forcenodump="required"/>
+	</header>
+"#
+    );
+    for i in 0..games {
+        let clone = if i % 2 == 1 {
+            format!(" cloneofid=\"{:04}\"", i - 1)
+        } else {
+            String::new()
+        };
+        write!(
+            xml,
+            "\t<game name=\"Example Title {i} (USA)\" id=\"{i:04}\"{clone}>\n\t\t<description>Example Title {i} (USA)</description>\n\t\t<rom name=\"Example Title {i} (USA).sfc\" size=\"{size}\" crc=\"{i:08x}\" md5=\"{MD5}\" sha1=\"{SHA1}\" sha256=\"{MD5}{MD5}\" status=\"verified\" serial=\"SYN-{i:04}\"/>\n\t</game>\n",
+            size = 1024 + i,
+        )
+        .unwrap();
+    }
+    xml.push_str("</datafile>\n");
+    xml
+}
+
+#[test]
+fn no_intro_shaped_header_and_games_parse() {
+    let xml = no_intro_shaped(50);
+    let stream = DatStream::new(BufReader::new(xml.as_bytes())).unwrap();
+    let h = stream.header().clone();
+    assert_eq!(h.name, "Nintendo - Super Nintendo Entertainment System");
+    assert_eq!(h.description, h.name);
+    assert_eq!(h.version, "20260101-000000");
+    assert_eq!(h.author.as_deref(), Some("fixture, tester & others"));
+    assert_eq!(h.homepage.as_deref(), Some("Example group"));
+    assert_eq!(h.url.as_deref(), Some("https://example.invalid/"));
+    let games: Vec<DatGame> = stream.map(Result::unwrap).collect();
+    assert_eq!(games.len(), 50);
+    assert_eq!(games[1].name, "Example Title 1 (USA)");
+    assert_eq!(games[1].roms[0].status, RomStatus::Verified);
+    assert_eq!(games[1].roms[0].size, 1025);
+    let zipped = zip_of(&[(
+        "Nintendo - Super Nintendo Entertainment System (20260101-000000).dat",
+        xml.as_bytes(),
+        CompressionMethod::Deflated,
+    )]);
+    let mut pack = parse_dat_pack(Cursor::new(zipped)).unwrap();
+    let member = pack.next().unwrap().unwrap();
+    assert_eq!(member.dat.header, h);
+    assert_eq!(member.dat.games.len(), 50);
+}
+
 fn synthetic_dat(games: usize) -> String {
     let mut xml = String::from("<datafile><header><name>Example System</name></header>");
     for i in 0..games {

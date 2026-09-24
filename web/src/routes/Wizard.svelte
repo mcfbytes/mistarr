@@ -7,6 +7,13 @@
   import { getDats, loadDats } from '../lib/stores/dats.svelte';
   import { getStatus, getWizard, loadStatus, loadWizard } from '../lib/stores/status.svelte';
   import { fixtureCores, fixtureDats, fixtureSettings } from '../lib/fixtures';
+  import { getSources, loadSources } from '../lib/stores/sources.svelte';
+  import { scheduleIncoming, type Watched } from '../lib/stores/incoming.svelte';
+  import { addUpload } from '../lib/stores/uploads.svelte';
+  import IncomingList from '../lib/IncomingList.svelte';
+  import ClientStart from '../lib/ClientStart.svelte';
+  import HeldBanner from '../lib/HeldBanner.svelte';
+  import PathMapEditor, { cleanPathMap } from '../lib/PathMapEditor.svelte';
   import type { Settings } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -22,6 +29,8 @@
   let coresResult = $state<string[] | null>(null);
   let detectingCores = $state(false);
   let coresChecked = false;
+  let clientError = $state<string | null>(null);
+  let clientSaved = $state(false);
 
   onMount(() => {
     void loadPlatforms();
@@ -29,6 +38,9 @@
     void loadStatus();
     void loadWizard();
     void loadSettings();
+    void loadSources().catch(() => undefined);
+    // Leaving the wizard any way at all counts as dismissing it.
+    return () => void dismiss();
   });
 
   const platforms = $derived(getPlatforms());
@@ -70,6 +82,7 @@
   const dats = $derived(isMock ? fixtureDats : getDats());
   const status = $derived(getStatus());
   const wizard = $derived(getWizard());
+  const sources = $derived(getSources());
 
   function next(): void {
     if (step < steps.length - 1) {
@@ -83,7 +96,23 @@
     next();
   }
 
-  function finish(): void {
+  let dismissed = false;
+
+  // Marks setup as seen so a reload lands on the library, not back here.
+  async function dismiss(): Promise<void> {
+    if (dismissed || isMock) {
+      return;
+    }
+    dismissed = true;
+    try {
+      await api.wizardDone();
+    } catch (err) {
+      showToast(errorMessage(err));
+    }
+  }
+
+  async function finish(): Promise<void> {
+    await dismiss();
     navigate('/');
   }
 
@@ -91,38 +120,23 @@
     return platforms.find((p) => p.id === id)?.name ?? id;
   }
 
-  async function uploadDat(): Promise<void> {
-    const file = datFileInput?.files?.[0];
-    if (!file || isMock) {
+  // Upload only enqueues the import; the list below follows it to the end.
+  async function upload(which: Watched, input: HTMLInputElement | undefined): Promise<void> {
+    const files = Array.from(input?.files ?? []);
+    if (isMock) {
       return;
     }
-    try {
-      await api.uploadDat(file);
-      await loadDats();
-    } catch (err) {
-      showToast(errorMessage(err));
-    } finally {
-      if (datFileInput) {
-        datFileInput.value = '';
+    for (const file of files) {
+      try {
+        const up = which === 'dats' ? await api.uploadDat(file) : await api.uploadSource(file);
+        addUpload({ kind: which, file: up.file, jobId: up.job_id });
+      } catch (err) {
+        showToast(`${file.name}: ${errorMessage(err)}`);
       }
     }
-  }
-
-  async function uploadSource(): Promise<void> {
-    const file = sourceFileInput?.files?.[0];
-    if (!file || isMock) {
-      return;
-    }
-    try {
-      // Upload only enqueues the import; the wizard store updates itself
-      // from the source.changed event once it lands.
-      await api.uploadSource(file);
-    } catch (err) {
-      showToast(errorMessage(err));
-    } finally {
-      if (sourceFileInput) {
-        sourceFileInput.value = '';
-      }
+    scheduleIncoming(which);
+    if (input) {
+      input.value = '';
     }
   }
 
@@ -132,7 +146,9 @@
       return;
     }
     try {
-      await api.addMagnet(uri);
+      const up = await api.addMagnet(uri);
+      addUpload({ kind: 'sources', file: up.file, jobId: up.job_id });
+      scheduleIncoming('sources');
       sourceMagnet = '';
     } catch (err) {
       showToast(errorMessage(err));
@@ -140,18 +156,30 @@
   }
 
   async function saveClientSettings(): Promise<void> {
-    if (!settings || isMock) {
+    if (!settings) {
       return;
     }
+    clientSaved = false;
+    const cleaned = cleanPathMap(settings.client.remote_path_map);
+    if ('error' in cleaned) {
+      clientError = cleaned.error;
+      return;
+    }
+    clientError = null;
+    const client = { ...settings.client, remote_path_map: cleaned.map };
     try {
-      settings = await api.putSettings({ client: settings.client });
-      await loadStatus();
+      settings = isMock ? { ...settings, client } : await api.putSettings({ client });
+      clientSaved = true;
+      if (!isMock) {
+        await loadStatus();
+      }
     } catch (err) {
-      showToast(errorMessage(err));
+      clientError = errorMessage(err);
     }
   }
 </script>
 
+<HeldBanner />
 <div class="page">
   <h1>First run</h1>
   <ol class="steps">
@@ -182,7 +210,15 @@
       <h2>DATs</h2>
       <p>Drop Logiqx DAT files or zipped DAT packs here, or place them in:</p>
       <p><code>/media/fat/mistarr/dats</code></p>
-      <input bind:this={datFileInput} type="file" accept=".dat,.xml,.zip" onchange={uploadDat} />
+      <input
+        bind:this={datFileInput}
+        type="file"
+        accept=".dat,.xml,.zip"
+        multiple
+        onchange={() => upload('dats', datFileInput)}
+      />
+      <p class="muted">Waiting in <code>dats/</code>:</p>
+      <IncomingList which="dats" />
       <p class="muted">Loaded DATs:</p>
       <ul>
         {#each dats as dat (dat.id)}
@@ -203,29 +239,16 @@
       {:else}
         <p>Detection result: <strong>not run yet</strong></p>
       {/if}
+      <ClientStart />
       {#if settings}
         <h3>Remote path map</h3>
-        {#each settings.client.remote_path_map as mapping, i (i)}
-          <div class="mapping">
-            <label>
-              Remote path
-              <input type="text" placeholder="/downloads" bind:value={mapping.remote} />
-            </label>
-            <label>
-              Local path
-              <input type="text" placeholder="/media/fat/mistarr/staging" bind:value={mapping.local} />
-            </label>
-          </div>
-        {/each}
-        <button
-          type="button"
-          onclick={() =>
-            settings &&
-            (settings.client.remote_path_map = [...settings.client.remote_path_map, { remote: '', local: '' }])}
-        >
-          Add mapping
-        </button>
-        <button class="primary" onclick={saveClientSettings}>Save</button>
+        <p class="muted">Only needed when the client sees its downloads under different paths.</p>
+        <PathMapEditor bind:map={settings.client.remote_path_map} />
+        <p>
+          <button class="primary" onclick={saveClientSettings}>Save</button>
+          {#if clientSaved}<span class="muted">Saved.</span>{/if}
+        </p>
+        {#if clientError}<p class="error">{clientError}</p>{/if}
       {/if}
     </section>
   {:else}
@@ -233,12 +256,31 @@
       <h2>Sources</h2>
       <p>Drop <code>.torrent</code> or <code>.magnet</code> files here, or place them in:</p>
       <p><code>/media/fat/mistarr/sources</code></p>
-      <input bind:this={sourceFileInput} type="file" accept=".torrent" onchange={uploadSource} />
+      <input
+        bind:this={sourceFileInput}
+        type="file"
+        accept=".torrent"
+        multiple
+        onchange={() => upload('sources', sourceFileInput)}
+      />
       <label>
         Or a magnet link
         <input type="text" placeholder="magnet:?xt=..." bind:value={sourceMagnet} />
       </label>
       <button onclick={addSourceMagnet}>Add</button>
+      <p class="muted">Waiting in <code>sources/</code>:</p>
+      <IncomingList which="sources" />
+      <p class="muted">Added sources:</p>
+      <ul>
+        {#each sources as source (source.id)}
+          <li>
+            {source.display_name} — {source.platform_id ? platformName(source.platform_id) : source.state}
+            {#if source.reason}<span class="muted">({source.reason})</span>{/if}
+          </li>
+        {:else}
+          <li class="muted">None added yet.</li>
+        {/each}
+      </ul>
       <h3>Seed policy</h3>
       <p>Each source keeps its own seeding setting. Default: <strong>none</strong>.</p>
       <ul>
@@ -293,9 +335,12 @@
     margin: 0.5em 0;
   }
 
-  .mapping {
-    display: flex;
-    gap: 0.6em;
+  .error {
+    color: var(--danger);
+  }
+
+  li {
+    overflow-wrap: anywhere;
   }
 
   .actions {

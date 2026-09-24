@@ -5,11 +5,24 @@ use super::*;
 use crate::app::testutil::state;
 use crate::db::jobs::{self as rows, JobState};
 
-fn conn() -> Connection {
-    let mut c = Connection::open_in_memory().expect("open");
-    crate::db::migrate::apply(&mut c).expect("migrate");
-    crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-    c
+/// A database in its own temporary directory, dropped with it.
+struct TestDb {
+    _dir: tempfile::TempDir,
+    db: Db,
+}
+
+impl TestDb {
+    fn with<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
+        self.db.write_blocking(f)
+    }
+}
+
+fn conn() -> TestDb {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = Db::open(&dir.path().join("t.db")).expect("open");
+    db.write_blocking(|c| crate::db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS))
+        .expect("seed");
+    TestDb { _dir: dir, db }
 }
 
 /// A Logiqx DAT with games `(name, cloneof)`, one rom each.
@@ -38,11 +51,12 @@ fn request(stop: bool, bind: Option<Bind>) -> Request {
         prefs: Prefs::default(),
         now: 1,
         stop: watch::channel(stop).1,
+        gate: watch::channel(GateState::default()).1,
     }
 }
 
-fn import(c: &mut Connection, xml: &str, req: &Request) -> Outcome {
-    import_member(c, Cursor::new(xml.as_bytes()), req, "").expect("import")
+fn import(c: &TestDb, xml: &str, req: &Request) -> Outcome {
+    import_member(&c.db, Cursor::new(xml.as_bytes()), req, "").expect("import")
 }
 
 fn loaded(o: Outcome) -> Loaded {
@@ -52,19 +66,20 @@ fn loaded(o: Outcome) -> Loaded {
     }
 }
 
-fn count(c: &Connection, sql: &str) -> i64 {
-    c.query_row(sql, [], |r| r.get(0)).expect("count")
+fn count(c: &TestDb, sql: &str) -> i64 {
+    c.with(|x| Ok(x.query_row(sql, [], |r| r.get(0))?))
+        .expect("count")
 }
 
 #[test]
 fn rom_header_attributes_are_stored() {
-    let mut c = conn();
+    let c = conn();
     let xml = "<datafile><header><name>Maker - Nintendo Entertainment System</name></header>\
         <game name=\"Example Quest (USA)\"><rom name=\"a.nes\" size=\"4\" crc=\"0a0b0c0d\" \
         header=\"4E 45 53 1A\"/></game></datafile>";
-    loaded(import(&mut c, xml, &request(false, None)));
+    loaded(import(&c, xml, &request(false, None)));
     let header: Option<String> = c
-        .query_row("SELECT header FROM roms", [], |r| r.get(0))
+        .with(|x| Ok(x.query_row("SELECT header FROM roms", [], |r| r.get(0))?))
         .expect("header");
     assert_eq!(header.as_deref(), Some("4E 45 53 1A"));
 }
@@ -83,7 +98,7 @@ fn prefs_map_known_hide_flags() {
 
 #[test]
 fn bound_dats_load_titles_and_pick() {
-    let mut c = conn();
+    let c = conn();
     let xml = dat(
         "Maker - Game Boy",
         "1",
@@ -92,7 +107,7 @@ fn bound_dats_load_titles_and_pick() {
             ("Example Quest (USA)", None),
         ],
     );
-    let l = loaded(import(&mut c, &xml, &request(false, None)));
+    let l = loaded(import(&c, &xml, &request(false, None)));
     assert_eq!(l.platform, Some(PlatformId("gb".into())));
     assert_eq!((l.games, l.has_titles, l.retired), (2, true, 0));
     let picks = count(
@@ -106,9 +121,9 @@ fn bound_dats_load_titles_and_pick() {
 
 #[test]
 fn unbound_dats_store_only_the_version() {
-    let mut c = conn();
+    let c = conn();
     let xml = dat("Test Console", "1", &[("Example Quest (USA)", None)]);
-    let l = loaded(import(&mut c, &xml, &request(false, None)));
+    let l = loaded(import(&c, &xml, &request(false, None)));
     assert_eq!((l.platform, l.has_titles, l.games), (None, false, 1));
     assert_eq!(count(&c, "SELECT COUNT(*) FROM titles"), 0);
 
@@ -120,10 +135,10 @@ fn unbound_dats_store_only_the_version() {
     };
     let other = dat("Other Console", "1", &[("Example Quest (USA)", None)]);
     assert_eq!(
-        import(&mut c, &other, &request(false, Some(bind.clone()))),
+        import(&c, &other, &request(false, Some(bind.clone()))),
         Outcome::Skipped
     );
-    let bound = loaded(import(&mut c, &xml, &request(false, Some(bind))));
+    let bound = loaded(import(&c, &xml, &request(false, Some(bind))));
     assert_eq!(bound.version, l.version);
     assert_eq!(bound.platform, Some(PlatformId("nes".into())));
     assert_eq!(
@@ -134,7 +149,7 @@ fn unbound_dats_store_only_the_version() {
 
 #[test]
 fn clone_of_groups_and_nameless_headers_fall_back_to_the_file() {
-    let mut c = conn();
+    let c = conn();
     let xml = dat(
         "Maker - Game Boy",
         "1",
@@ -143,32 +158,35 @@ fn clone_of_groups_and_nameless_headers_fall_back_to_the_file() {
             ("Example Quest (USA)", None),
         ],
     );
-    loaded(import(&mut c, &xml, &request(false, None)));
+    loaded(import(&c, &xml, &request(false, None)));
     assert_eq!(count(&c, "SELECT COUNT(DISTINCT parent_id) FROM titles"), 1);
     assert_eq!(count(&c, "SELECT SUM(inferred) FROM titles"), 0);
 
     let nameless = "<datafile><game name=\"A\"><rom name=\"a\" size=\"1\"/></game></datafile>";
-    let l = loaded(import(&mut c, nameless, &request(false, None)));
-    let row = dats::get(&c, l.version).expect("get").expect("row");
+    let l = loaded(import(&c, nameless, &request(false, None)));
+    let row = c
+        .with(|x| dats::get(x, l.version))
+        .expect("get")
+        .expect("row");
     assert_eq!(row.dat_name, "t");
 }
 
 #[test]
 fn malformed_dats_are_rejected_and_roll_back() {
-    let mut c = conn();
+    let c = conn();
     let good = dat("Maker - Game Boy", "1", &[("Example Quest (USA)", None)]);
     let broken = good.replace(
         "</datafile>",
         "<game name=\"Cut\"><rom name=\"x\" size=\"z\"/>",
     );
-    let o = import(&mut c, &broken, &request(false, None));
+    let o = import(&c, &broken, &request(false, None));
     assert!(
         matches!(&o, Outcome::Rejected(r) if r.contains("size")),
         "{o:?}"
     );
     assert_eq!(count(&c, "SELECT COUNT(*) FROM dat_versions"), 0);
     let o = import_member(
-        &mut c,
+        &c.db,
         Cursor::new(b"<html/>".as_slice()),
         &request(false, None),
         "m.dat",
@@ -181,19 +199,44 @@ fn malformed_dats_are_rejected_and_roll_back() {
 }
 
 #[test]
+fn a_dat_over_several_stage_chunks_applies_at_once() {
+    let c = conn();
+    let names: Vec<String> = (0..=STAGE_CHUNK * 2)
+        .map(|i| format!("Game {i} (USA)"))
+        .collect();
+    let games: Vec<(&str, Option<&str>)> = names.iter().map(|n| (n.as_str(), None)).collect();
+    let xml = dat("Maker - Game Boy", "1", &games);
+    let broken = xml.replace(
+        "</datafile>",
+        "<game name=\"Cut\"><rom name=\"x\" size=\"z\"/>",
+    );
+    let o = import(&c, &broken, &request(false, None));
+    assert!(matches!(o, Outcome::Rejected(_)), "{o:?}");
+    assert_eq!(
+        count(&c, "SELECT COUNT(*) FROM titles"),
+        0,
+        "nothing half-loaded"
+    );
+    assert_eq!(count(&c, "SELECT COUNT(*) FROM dat_stage"), 0);
+    let l = loaded(import(&c, &xml, &request(false, None)));
+    let all = i64::try_from(names.len()).expect("fits");
+    assert_eq!(l.games, u64::try_from(all).expect("fits"));
+    assert_eq!(
+        count(&c, "SELECT COUNT(*) FROM titles WHERE retired = 0"),
+        all
+    );
+    assert_eq!(count(&c, "SELECT COUNT(*) FROM dat_stage"), 0);
+}
+
+#[test]
 fn a_long_import_stops_on_shutdown() {
-    let mut c = conn();
+    let c = conn();
     let names: Vec<String> = (0..=CANCEL_EVERY)
         .map(|i| format!("Game {i} (USA)"))
         .collect();
     let games: Vec<(&str, Option<&str>)> = names.iter().map(|n| (n.as_str(), None)).collect();
     let xml = dat("Maker - Game Boy", "1", &games);
-    let r = import_member(
-        &mut c,
-        Cursor::new(xml.as_bytes()),
-        &request(true, None),
-        "",
-    );
+    let r = import_member(&c.db, Cursor::new(xml.as_bytes()), &request(true, None), "");
     assert!(matches!(r, Err(Error::Cancelled)));
     assert_eq!(count(&c, "SELECT COUNT(*) FROM titles"), 0);
 }
@@ -339,21 +382,26 @@ async fn recompute_is_enqueued_for_every_platform() {
 
 #[test]
 fn nameless_members_take_their_own_names() {
-    let mut c = conn();
+    let c = conn();
     let nameless = "<datafile><game name=\"A\"><rom name=\"a\" size=\"1\"/></game></datafile>";
     let req = request(false, None);
     let a = import_member(
-        &mut c,
+        &c.db,
         Cursor::new(nameless.as_bytes()),
         &req,
         "sub/Alpha.dat",
     )
     .expect("import");
     let b =
-        import_member(&mut c, Cursor::new(nameless.as_bytes()), &req, "Beta.xml").expect("import");
+        import_member(&c.db, Cursor::new(nameless.as_bytes()), &req, "Beta.xml").expect("import");
     let (a, b) = (loaded(a), loaded(b));
     assert_ne!(a.version, b.version, "members of one pack do not collide");
-    let name = |id| dats::get(&c, id).expect("get").expect("row").dat_name;
+    let name = |id| {
+        c.with(|x| dats::get(x, id))
+            .expect("get")
+            .expect("row")
+            .dat_name
+    };
     assert_eq!(
         (name(a.version), name(b.version)),
         ("Alpha".to_owned(), "Beta".to_owned())
@@ -362,15 +410,15 @@ fn nameless_members_take_their_own_names() {
 
 #[test]
 fn reloading_a_version_with_fewer_games_retires_the_rest() {
-    let mut c = conn();
+    let c = conn();
     let both = dat(
         "Maker - Game Boy",
         "1",
         &[("Example Quest (USA)", None), ("Example Tale (USA)", None)],
     );
-    loaded(import(&mut c, &both, &request(false, None)));
+    loaded(import(&c, &both, &request(false, None)));
     let one = dat("Maker - Game Boy", "1", &[("Example Quest (USA)", None)]);
-    let l = loaded(import(&mut c, &one, &request(false, None)));
+    let l = loaded(import(&c, &one, &request(false, None)));
     assert_eq!(l.retired, 1);
     assert_eq!(
         count(
@@ -390,11 +438,11 @@ fn reloading_a_version_with_fewer_games_retires_the_rest() {
 
 #[test]
 fn binding_an_older_version_is_rejected_and_rolled_back() {
-    let mut c = conn();
+    let c = conn();
     let v1 = dat("Test Console", "1", &[("Example Quest (USA)", None)]);
-    let old = loaded(import(&mut c, &v1, &request(false, None)));
+    let old = loaded(import(&c, &v1, &request(false, None)));
     loaded(import(
-        &mut c,
+        &c,
         &dat("Test Console", "2", &[("Example Quest (USA)", None)]),
         &request(false, None),
     ));
@@ -404,12 +452,15 @@ fn binding_an_older_version_is_rejected_and_rolled_back() {
         dat_name: "Test Console".into(),
         dat_version: "1".into(),
     };
-    let o = import(&mut c, &v1, &request(false, Some(bind)));
+    let o = import(&c, &v1, &request(false, Some(bind)));
     assert!(
         matches!(&o, Outcome::Rejected(r) if r.contains("newer version")),
         "{o:?}"
     );
-    let row = dats::get(&c, old.version).expect("get").expect("row");
+    let row = c
+        .with(|x| dats::get(x, old.version))
+        .expect("get")
+        .expect("row");
     assert_eq!(row.platform_id, None);
     assert_eq!(count(&c, "SELECT COUNT(*) FROM titles"), 0);
 }

@@ -157,7 +157,8 @@ pub async fn run(config: &Config, hash_mib: u32, out: &mut impl Write) -> io::Re
         }
     }
 
-    let client = detect_client::probe(&config.client).await;
+    let launcher = mistarr_clients::launch::Launcher::board(&config.paths.data);
+    let client = detect_client::probe(&config.client, &launcher).await;
     match (&client.kind, &client.url) {
         (Some(kind), Some(url)) => {
             let version = client.version.as_deref().unwrap_or("version unknown");

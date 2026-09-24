@@ -321,6 +321,10 @@ impl Poller {
                 self.unreachable = true;
                 tracing::warn!(failures = self.failures, "download client unreachable");
                 set_reachable(app, false).await?;
+                if app.options.redetect_on_unreachable {
+                    // The client may have been restarted elsewhere; look again.
+                    app.redetect.notify_one();
+                }
             }
         } else if answered {
             self.failures = 0;
@@ -607,15 +611,25 @@ mod tests {
             version: None,
             rtorrent_on_path: false,
             checked_at: 0,
+            ..ClientStatus::default()
         };
         app.db
             .write(move |c| settings::set_json(c, keys::CLIENT_DETECTED, &detected))
             .await
             .expect("store");
         let mut p = Poller::new();
-        for _ in 0..FAILURES_BEFORE_UNREACHABLE {
+        let wait = std::time::Duration::from_millis(50);
+        for _ in 1..FAILURES_BEFORE_UNREACHABLE {
             p.record(&app, true, false).await.expect("record");
         }
+        let early = tokio::time::timeout(wait, app.redetect.notified()).await;
+        assert!(
+            early.is_err(),
+            "re-detection before the client is unreachable"
+        );
+        p.record(&app, true, false).await.expect("record");
+        let asked = tokio::time::timeout(wait, app.redetect.notified()).await;
+        assert!(asked.is_ok(), "no re-detection once unreachable");
         assert_eq!(p.cadence(&app).await.expect("cadence"), Cadence::Backoff);
         let read = |app: Arc<AppState>| async move {
             app.db
