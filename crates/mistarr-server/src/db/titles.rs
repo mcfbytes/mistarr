@@ -12,6 +12,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
 use super::arcade::MraInfo;
+use super::candidates::Availability;
 use super::dats::DatVersionId;
 use super::groups::{self, Clause};
 use crate::error::Result;
@@ -176,9 +177,9 @@ pub fn flags_of(conn: &Connection, id: TitleId) -> Result<Vec<String>> {
     tags_of(conn, id.0, Tag::Flags)
 }
 
-/// Stores a game under `version`, reusing the title of the same name from any
-/// version of `dat_name` so ids, `wanted` and file provenance survive a new
-/// version. Roms the game no longer lists are marked retired.
+/// Stores a game under `version`, reusing the title of the same name from any version
+/// of its DAT family on the same platform, so ids, `wanted` and file provenance survive
+/// a new version. Roms the game no longer lists are marked retired.
 ///
 /// # Errors
 ///
@@ -193,23 +194,25 @@ pub fn flags_of(conn: &Connection, id: TitleId) -> Result<Vec<String>> {
 /// let version = dats::upsert_version(&conn, &v).unwrap().id;
 /// let t = titles::TitleInput { name: "Example Quest (USA)", base_name: "Example Quest",
 ///     group_key: "example quest", clone_of: None, regions: &[], languages: &[], revision: None, flags: &[] };
-/// let id = titles::upsert_title(&conn, "gb", version, "Maker - Game Boy", &t, &[]).unwrap();
-/// assert_eq!(titles::upsert_title(&conn, "gb", version, "Maker - Game Boy", &t, &[]).unwrap(), id);
+/// let id = titles::upsert_title(&conn, "gb", version, &t, &[]).unwrap();
+/// assert_eq!(titles::upsert_title(&conn, "gb", version, &t, &[]).unwrap(), id);
 /// ```
 pub fn upsert_title(
     conn: &Connection,
     platform: &str,
     version: DatVersionId,
-    dat_name: &str,
     t: &TitleInput<'_>,
     roms: &[RomInput<'_>],
 ) -> Result<TitleId> {
     let existing: Option<i64> = conn
         .prepare_cached(
-            "SELECT t.id FROM dat_versions d JOIN titles t ON t.dat_version_id = d.id AND t.name = ?2
-             WHERE d.dat_name = ?1 ORDER BY d.id = ?3 DESC, d.loaded_at DESC LIMIT 1",
+            // Unary plus keeps the lookup on (dat_version_id, name), not a platform-wide index.
+            "SELECT t.id FROM dat_versions d JOIN titles t ON t.dat_version_id = d.id AND t.name = ?1
+             WHERE d.family = (SELECT family FROM dat_versions WHERE id = ?2)
+               AND +t.source = 'dat' AND +t.platform_id = ?3
+             ORDER BY d.id = ?2 DESC, d.loaded_at DESC LIMIT 1",
         )?
-        .query_row(params![dat_name, t.name, version.0], |r| r.get(0))
+        .query_row(params![t.name, version.0, platform], |r| r.get(0))
         .optional()?;
     let id = if let Some(id) = existing {
         conn.prepare_cached(
@@ -372,9 +375,10 @@ fn grouped(
 const BAD_DUMP: &str =
     "EXISTS (SELECT 1 FROM roms r WHERE r.title_id = t.id AND r.retired = 0 AND r.status = 'baddump')";
 
-/// Re-elects inferred clone parents under default preferences, then stores the
-/// 1G1R pick of every live clone group on `platform` under `prefs`.
-/// Run it inside a transaction.
+/// Re-elects inferred clone parents under default preferences, recomputes each title's
+/// effective group (`group_root`) so titles that different DAT versions list with the same
+/// roms share one, then stores the 1G1R pick of every live effective group on `platform`
+/// under `prefs`. Run it inside a transaction.
 ///
 /// # Errors
 ///
@@ -420,14 +424,15 @@ pub fn recompute_platform(conn: &Connection, platform: &str, prefs: &Prefs) -> R
             stmt.execute([id, parent])?;
         }
     }
+    link_shared_titles(conn, platform)?;
 
     let mut out = Recomputed::default();
     let mut picks: Vec<i64> = Vec::new();
     grouped(
         conn,
         &format!(
-            "SELECT CAST(t.parent_id AS TEXT), t.id, t.name, {BAD_DUMP} FROM titles t
-             WHERE t.platform_id = ?1 AND t.retired = 0 ORDER BY t.parent_id, t.id"
+            "SELECT CAST(t.group_root AS TEXT), t.id, t.name, {BAD_DUMP} FROM titles t
+             WHERE t.platform_id = ?1 AND t.retired = 0 ORDER BY t.group_root, t.id"
         ),
         platform,
         |group| {
@@ -464,6 +469,127 @@ fn store_picks(conn: &Connection, platform: &str, mut picks: Vec<i64>) -> Result
     Ok(())
 }
 
+/// Recomputes `group_root` on `platform` from scratch. Every title starts in its own
+/// DAT's group (`parent_id`). A title of a live version whose live roms equal, by hash,
+/// those of a title in the largest live version then links to that title's group; one
+/// shared only among the other versions links to the group of its earliest version. Only
+/// a single title ever links, never a group, so two groups of one DAT never merge; the
+/// members left behind by a root that linked away take their lowest live id as root.
+fn link_shared_titles(conn: &Connection, platform: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE titles SET group_root = parent_id
+         WHERE platform_id = ?1 AND group_root IS NOT parent_id",
+        [platform],
+    )?;
+    let versions: Vec<i64> = conn
+        .prepare_cached(
+            "SELECT id FROM dat_versions
+             WHERE platform_id = ?1 AND source = 'dat' AND retired = 0 AND superseded_by IS NULL
+             ORDER BY game_count DESC, id",
+        )?
+        .query_map([platform], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let Some((&largest, rest)) = versions.split_first() else {
+        return Ok(());
+    };
+    let mut rest = rest.to_vec();
+    if rest.is_empty() {
+        return Ok(());
+    }
+    rest.sort_unstable();
+    // Titles outside the largest version by signature, in version order: (version, id, parent).
+    let mut others: HashMap<u64, Vec<(i64, i64, i64)>> = HashMap::new();
+    for &version in &rest {
+        each_signature(conn, version, |id, parent, sig| {
+            others.entry(sig).or_default().push((version, id, parent));
+        })?;
+    }
+    let mut anchors: HashMap<u64, i64> = HashMap::new();
+    each_signature(conn, largest, |_, parent, sig| {
+        if others.contains_key(&sig) {
+            anchors.entry(sig).or_insert(parent);
+        }
+    })?;
+    let mut link = conn.prepare_cached("UPDATE titles SET group_root = ?2 WHERE id = ?1")?;
+    for (sig, titles) in &others {
+        let (first_version, root) = match anchors.get(sig) {
+            Some(&root) => (largest, root),
+            None => (titles[0].0, titles[0].2),
+        };
+        for (_, id, _) in titles.iter().filter(|t| t.0 != first_version) {
+            link.execute([*id, root])?;
+        }
+    }
+    reroot_stranded(conn, platform)
+}
+
+/// Gives each group whose root title linked into another group a new root: its lowest
+/// live member, or its lowest member when none is live.
+fn reroot_stranded(conn: &Connection, platform: &str) -> Result<()> {
+    let moves: Vec<(i64, i64)> = conn
+        .prepare_cached(
+            "SELECT m.group_root,
+                    COALESCE(MIN(CASE WHEN m.retired = 0 THEN m.id END), MIN(m.id))
+             FROM titles r JOIN titles m ON m.group_root = r.id AND m.id != r.id
+             WHERE r.platform_id = ?1 AND r.group_root IS NOT r.id
+             GROUP BY m.group_root",
+        )?
+        .query_map([platform], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut set = conn.prepare_cached("UPDATE titles SET group_root = ?2 WHERE group_root = ?1")?;
+    for (old, new) in moves {
+        set.execute([old, new])?;
+    }
+    Ok(())
+}
+
+/// Calls `each(id, parent, signature)` for every live title of `version` with roms that
+/// all carry a hash; the signature hashes the rom keys whatever their order.
+fn each_signature(
+    conn: &Connection,
+    version: i64,
+    mut each: impl FnMut(i64, i64, u64),
+) -> Result<()> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut stmt = conn.prepare_cached(
+        "SELECT t.id, t.parent_id, COALESCE(r.sha1, r.md5, r.crc32 || ':' || r.size)
+         FROM titles t JOIN roms r ON r.title_id = t.id AND r.retired = 0
+         WHERE t.dat_version_id = ?1 AND t.retired = 0 AND t.source = 'dat'
+         ORDER BY t.id",
+    )?;
+    let mut rows = stmt.query([version])?;
+    // Per title: id, parent, sum of key hashes, rom count, whether every rom had a key.
+    let mut open: Option<(i64, i64, u64, u64, bool)> = None;
+    let mut settle = |t: Option<(i64, i64, u64, u64, bool)>| {
+        if let Some((id, parent, sum, n, true)) = t {
+            let mut h = DefaultHasher::new();
+            (sum, n).hash(&mut h);
+            each(id, parent, h.finish());
+        }
+    };
+    while let Some(r) = rows.next()? {
+        let (id, parent): (i64, i64) = (r.get(0)?, r.get(1)?);
+        let key: Option<String> = r.get(2)?;
+        if open.is_none_or(|o| o.0 != id) {
+            settle(open.take());
+            open = Some((id, parent, 0, 0, true));
+        }
+        if let Some(o) = open.as_mut() {
+            match key {
+                Some(k) => {
+                    let mut h = DefaultHasher::new();
+                    k.hash(&mut h);
+                    o.2 = o.2.wrapping_add(h.finish());
+                    o.3 += 1;
+                }
+                None => o.4 = false,
+            }
+        }
+    }
+    settle(open.take());
+    Ok(())
+}
+
 /// Keeps a group of `title_groups g` only when its parent is an MRA title or its platform
 /// has no live MRA title, so a platform with MRAs browses its MRA catalogue alone.
 const MRA_ONLY: &str = "(g.source = 'mra' OR g.platform_id NOT IN (
@@ -475,18 +601,17 @@ const MRA_ONLY: &str = "(g.source = 'mra' OR g.platform_id NOT IN (
 pub struct Counts {
     /// Clone groups with a visible live variant.
     pub titles: u64,
-    /// Groups with at least one fully verified variant.
+    /// Of those, groups with at least one fully verified live variant, hidden or not.
     pub have: u64,
-    /// Groups with at least one wanted variant.
+    /// Of those, groups with at least one wanted live variant, hidden or not.
     pub wanted: u64,
-    /// Files on disk that match no rom, outside arcade; arcade's own unverified
-    /// rows are covered by `failing_check` and `partial` instead.
+    /// `unverified` files on disk, outside arcade; always 0 for arcade.
     pub unmatched_files: u64,
     /// Groups with a visible MRA variant whose md5 check is `mismatch` or
-    /// `missing_part`, and no visible variant counted as `have`; 0 outside arcade.
+    /// `missing_part` and no fully verified live variant, hidden or not; 0 outside arcade.
     pub failing_check: u64,
-    /// Groups with a visible MRA variant that has some, but not every, named
-    /// zip present, and no visible variant counted as `have`; 0 outside arcade.
+    /// Groups with a visible MRA variant that has some, but not every, named zip
+    /// present and no fully verified live variant, hidden or not; 0 outside arcade.
     pub partial: u64,
 }
 
@@ -532,8 +657,8 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
     // any have-verified visible variant never also counts as failing or partial.
     let mut stmt = conn.prepare(&format!(
         "WITH mra AS (
-           SELECT t.platform_id, t.parent_id,
-                  MAX(t.mra_check IN ('mismatch', 'missing_part')) AS any_failing,
+           SELECT t.platform_id, t.group_root AS parent_id,
+                  MAX(COALESCE(t.mra_check IN ('mismatch', 'missing_part'), 0)) AS any_failing,
                   MAX(EXISTS (SELECT 1 FROM roms r
                               WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 1)
                       AND EXISTS (SELECT 1 FROM roms r
@@ -542,7 +667,7 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
            WHERE t.source = 'mra' AND t.retired = 0
              AND NOT EXISTS (SELECT 1 FROM title_flags f
                              WHERE f.title_id = t.id AND f.flag IN ({}))
-           GROUP BY t.platform_id, t.parent_id
+           GROUP BY t.platform_id, t.group_root
          )
          SELECT g.platform_id,
                 COALESCE(SUM(m.any_failing AND g.have_verified = 0), 0),
@@ -877,7 +1002,7 @@ pub fn browse_with(
 pub fn group_of(conn: &Connection, id: TitleId) -> Result<Option<TitleId>> {
     Ok(conn
         .query_row(
-            "SELECT COALESCE(parent_id, id) FROM titles WHERE id = ?1",
+            "SELECT COALESCE(group_root, parent_id, id) FROM titles WHERE id = ?1",
             [id.0],
             |r| r.get(0).map(TitleId),
         )
@@ -937,8 +1062,10 @@ pub struct VariantRow {
     pub dat_version_id: DatVersionId,
     /// Live roms.
     pub roms: Vec<RomRow>,
-    /// Torrent files from bound sources matched to any of the roms.
+    /// Distinct files of bound sources in [`VariantRow::availability`].
     pub torrent_files_available: u64,
+    /// Files of bound sources mapped to a live rom or a candidate for one, strongest first.
+    pub availability: Vec<Availability>,
     /// `dat` for a DAT entry, `mra` for an arcade title read from an MRA file.
     pub source: String,
     /// MRA details, for an MRA title.
@@ -987,8 +1114,9 @@ fn variant_row(r: &Row<'_>) -> rusqlite::Result<VariantRow> {
         inferred: r.get(6)?,
         dat_version_id: DatVersionId(r.get(7)?),
         roms: Vec::new(),
-        torrent_files_available: unsigned(r.get(8)?),
-        source: r.get(9)?,
+        torrent_files_available: 0,
+        availability: Vec::new(),
+        source: r.get(8)?,
         mra: None,
         romset: None,
     })
@@ -1000,7 +1128,8 @@ fn fill_lists(conn: &Connection, gid: TitleId, variants: &mut [VariantRow]) -> R
         let (table, column) = tag.table();
         let mut stmt = conn.prepare_cached(&format!(
             "SELECT x.title_id, x.{column} FROM titles t JOIN {table} x ON x.title_id = t.id
-             WHERE t.parent_id = ?1 OR t.id = ?1 ORDER BY x.title_id, x.pos"
+             WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
+             ORDER BY x.title_id, x.pos"
         ))?;
         let mut rows = stmt.query([gid.0])?;
         while let Some(r) = rows.next()? {
@@ -1045,11 +1174,8 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
     };
     let mut stmt = conn.prepare(
         "SELECT t.id, t.name, t.revision, t.is_1g1r_pick,
-                t.wanted, t.retired, t.inferred, t.dat_version_id,
-                (SELECT COUNT(*) FROM torrent_files tf JOIN roms r ON r.id = tf.rom_id
-                 WHERE r.title_id = t.id AND r.retired = 0),
-                t.source
-         FROM titles t WHERE t.parent_id = ?1 OR t.id = ?1
+                t.wanted, t.retired, t.inferred, t.dat_version_id, t.source
+         FROM titles t WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
          ORDER BY t.retired, t.is_1g1r_pick DESC, t.name",
     )?;
     let mut variants: Vec<VariantRow> = stmt
@@ -1065,7 +1191,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
            ORDER BY CASE x.state WHEN 'verified' THEN 0 WHEN 'misnamed' THEN 1
                                  WHEN 'bad' THEN 2 ELSE 3 END, x.id
            LIMIT 1)
-         WHERE t.parent_id = ?1 OR t.id = ?1
+         WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
          ORDER BY r.title_id, r.name",
     )?;
     let mut rows = stmt.query([gid.0])?;
@@ -1085,6 +1211,17 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
         };
         if let Some(v) = variants.iter_mut().find(|v| v.id.0 == title) {
             v.roms.push(rom);
+        }
+    }
+    for (title, found) in super::candidates::for_group(conn, gid)? {
+        if let Some(v) = variants.iter_mut().find(|v| v.id == title) {
+            let seen = |a: &Availability| {
+                (a.source_id, a.file_index) == (found.source_id, found.file_index)
+            };
+            if !v.availability.iter().any(seen) {
+                v.torrent_files_available += 1;
+            }
+            v.availability.push(found);
         }
     }
     for v in variants.iter_mut().filter(|v| v.source == "mra") {
@@ -1158,13 +1295,13 @@ pub fn want(conn: &Connection, id: TitleId) -> Result<std::result::Result<(), Wa
 /// ```
 pub fn unwant_group(conn: &Connection, parent: TitleId, now: i64) -> Result<usize> {
     let n = conn.execute(
-        "UPDATE titles SET wanted = 0 WHERE (parent_id = ?1 OR id = ?1) AND wanted = 1",
+        "UPDATE titles SET wanted = 0 WHERE (group_root = ?1 OR (id = ?1 AND group_root IS NULL)) AND wanted = 1",
         [parent.0],
     )?;
     conn.execute(
         "UPDATE downloads SET state = 'cancelled', updated_at = ?2
          WHERE state IN ('wanted', 'queued')
-           AND title_id IN (SELECT id FROM titles WHERE parent_id = ?1 OR id = ?1)",
+           AND title_id IN (SELECT id FROM titles WHERE group_root = ?1 OR (id = ?1 AND group_root IS NULL))",
         params![parent.0, now],
     )?;
     Ok(n)

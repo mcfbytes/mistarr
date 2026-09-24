@@ -1,6 +1,7 @@
 //! SQLite access; the schema is `docs/DATA-MODEL.md`. All SQL lives in this module's children.
 
 pub mod arcade;
+pub mod candidates;
 pub mod dat_stage;
 pub mod dats;
 pub mod downloads;
@@ -65,7 +66,7 @@ impl Db {
     /// [`Error::Migration`] when a migration fails.
     ///
     /// ```
-    /// let dir = std::env::temp_dir().join("mistarr-doc-db-open");
+    /// let dir = std::env::temp_dir().join(format!("mistarr-doc-db-open-{}", std::process::id()));
     /// std::fs::create_dir_all(&dir).unwrap();
     /// let db = mistarr_server::db::Db::open(&dir.join("t.db")).unwrap();
     /// assert!(db.path().ends_with("t.db"));
@@ -90,7 +91,7 @@ impl Db {
     /// The database file.
     ///
     /// ```
-    /// # let dir = std::env::temp_dir().join("mistarr-doc-db-path");
+    /// # let dir = std::env::temp_dir().join(format!("mistarr-doc-db-path-{}", std::process::id()));
     /// # std::fs::create_dir_all(&dir).unwrap();
     /// let db = mistarr_server::db::Db::open(&dir.join("p.db")).unwrap();
     /// assert!(db.path().is_file());
@@ -107,7 +108,7 @@ impl Db {
     /// Whatever `f` returns, or [`Error::Poisoned`].
     ///
     /// ```
-    /// # let dir = std::env::temp_dir().join("mistarr-doc-db-wb");
+    /// # let dir = std::env::temp_dir().join(format!("mistarr-doc-db-wb-{}", std::process::id()));
     /// # std::fs::create_dir_all(&dir).unwrap();
     /// # let db = mistarr_server::db::Db::open(&dir.join("w.db")).unwrap();
     /// use mistarr_server::db::settings;
@@ -130,7 +131,7 @@ impl Db {
     /// Whatever `f` returns, or [`Error::Poisoned`].
     ///
     /// ```
-    /// # let dir = std::env::temp_dir().join("mistarr-doc-db-rb");
+    /// # let dir = std::env::temp_dir().join(format!("mistarr-doc-db-rb-{}", std::process::id()));
     /// # std::fs::create_dir_all(&dir).unwrap();
     /// # let db = mistarr_server::db::Db::open(&dir.join("r.db")).unwrap();
     /// let n = db.read_blocking(mistarr_server::db::migrate::current_version).unwrap();

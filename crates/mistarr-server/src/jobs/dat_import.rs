@@ -9,7 +9,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
-use mistarr_core::dat::{DatGame, DatStream};
+use mistarr_core::dat::{
+    export_name, export_parents, split_version, DatGame, DatHeader, DatStream, ExportOptions,
+};
+use mistarr_core::hash::HeaderRule;
 use mistarr_core::naming::{group_key, parse_name};
 use mistarr_core::select::{HiddenFlag, Prefs};
 use mistarr_core::PlatformId;
@@ -23,6 +26,7 @@ use crate::app::AppState;
 use crate::config::PrefsConfig;
 use crate::db::dat_stage::{self, StagedGame, StagedRom};
 use crate::db::dats::{self, DatVersionId, NewVersion};
+use crate::db::files::{self, FileRow, FileState};
 use crate::db::jobs::{JobId, JobState};
 use crate::db::titles;
 use crate::db::Db;
@@ -38,8 +42,7 @@ pub const RECOMPUTE_KIND: &str = "recompute_1g1r";
 /// Subdirectory of `dats/` for files that loaded.
 pub const LOADED_DIR: &str = "loaded";
 
-/// Subdirectory of `dats/` for files that did not.
-pub const REJECTED_DIR: &str = "rejected";
+pub use crate::incoming::{REASON_SUFFIX, REJECTED_DIR};
 
 /// Games read between checks for shutdown.
 const CANCEL_EVERY: u64 = 500;
@@ -127,7 +130,8 @@ impl DatImport {
     /// use mistarr_server::jobs::{dat_import::DatImport, Job};
     /// let row = DatVersionRow { id: DatVersionId(3), platform_id: None, dat_name: "Test Console".into(),
     ///     version: "1".into(), source_file: "t.dat".into(), loaded_at: 0, superseded_by: None,
-    ///     game_count: 1, retired: false };
+    ///     game_count: 1, retired: false, family: "test console".into(), reason: None,
+    ///     suggested: Vec::new() };
     /// let job = DatImport::bind(&row, "nes", "/d/loaded".as_ref());
     /// assert_eq!(job.payload()["dat_version_id"], 3);
     /// ```
@@ -369,60 +373,200 @@ fn is_dat_name(name: &str) -> bool {
     !name.ends_with('/') && matches!(extension(Path::new(name)).as_str(), "dat" | "xml")
 }
 
-/// Opens a member for streaming and imports it. Runs on a blocking thread.
+/// Opens a member for streaming and imports it, reading a DB export twice so its
+/// clones are linked. Runs on a blocking thread.
 fn import_from(db: &Db, path: &Path, member: Member, req: &Request) -> Result<Outcome> {
+    let parents = match with_member(path, member, |r, name| {
+        Ok(export_parents(r).map_err(|e| rejected(name, &e)))
+    })? {
+        Ok(Ok(p)) => p,
+        Ok(Err(reason)) | Err(reason) => return Ok(Outcome::Rejected(reason)),
+    };
+    match with_member(path, member, |r, name| {
+        import_stream(db, r, req, name, parents)
+    })? {
+        Ok(outcome) => Ok(outcome),
+        Err(reason) => Ok(Outcome::Rejected(reason)),
+    }
+}
+
+/// Runs `f` on a fresh buffered reader of `member` and its name in the zip, empty for a
+/// plain file; `Err` holds why a zip member cannot be opened.
+fn with_member<T>(
+    path: &Path,
+    member: Member,
+    f: impl FnOnce(&mut dyn BufRead, &str) -> Result<T>,
+) -> Result<std::result::Result<T, String>> {
     let file = File::open(path)?;
     match member {
-        Member::Plain => import_member(db, BufReader::new(file), req, ""),
+        Member::Plain => f(&mut BufReader::new(file), "").map(Ok),
         Member::Zip(index) => {
             let mut archive = match zip::ZipArchive::new(BufReader::new(file)) {
                 Ok(a) => a,
-                Err(e) => return Ok(Outcome::Rejected(format!("invalid zip archive: {e}"))),
+                Err(e) => return Ok(Err(format!("invalid zip archive: {e}"))),
             };
             let entry = match archive.by_index(index) {
                 Ok(e) => e,
-                Err(e) => return Ok(Outcome::Rejected(format!("invalid zip archive: {e}"))),
+                Err(e) => return Ok(Err(format!("invalid zip archive: {e}"))),
             };
             let name = entry.name().to_owned();
-            import_member(db, BufReader::new(entry), req, &name)
+            let out = f(&mut BufReader::new(entry), &name);
+            out.map(Ok)
         }
     }
 }
 
-/// Streams one DAT into `dat_stage` in chunks of [`STAGE_CHUNK`] games, each
-/// its own short write, then applies it in one transaction so readers see the
-/// old titles or the new ones, never a mix. A parse error becomes
-/// [`Outcome::Rejected`] and leaves the catalog untouched.
-fn import_member<R: BufRead>(db: &Db, reader: R, req: &Request, member: &str) -> Result<Outcome> {
-    let prefix = if member.is_empty() {
-        String::new()
+/// A rejection reason, naming the zip member it came from.
+fn rejected(member: &str, e: &dyn std::fmt::Display) -> String {
+    if member.is_empty() {
+        e.to_string()
     } else {
-        format!("{member}: ")
+        format!("{member}: {e}")
+    }
+}
+
+/// Streams one Logiqx DAT, or a DB export whose clones stay unlinked; see [`import_stream`].
+#[cfg(test)]
+fn import_member<R: BufRead>(db: &Db, reader: R, req: &Request, member: &str) -> Result<Outcome> {
+    import_stream(db, reader, req, member, None)
+}
+
+/// The DAT name and version a member is stored under, and the platform it loads into.
+struct Identity {
+    name: String,
+    version: String,
+    platform: Option<String>,
+}
+
+/// A DB export's identity: the name from the member's name, else the dropped file's,
+/// else the member's or file's stem less a final version group, which becomes the
+/// version; a plain file being bound keeps its stored name.
+fn export_identity(req: &Request, member: &str) -> Identity {
+    let named = [member, req.file_stem.as_str()]
+        .into_iter()
+        .filter(|n| !n.is_empty())
+        .find_map(export_name);
+    let (name, version) = match (&req.bind, named) {
+        (Some(b), _) if member.is_empty() => (b.dat_name.clone(), b.dat_version.clone()),
+        (_, Some(n)) => (n.dat_name, n.version),
+        _ => {
+            let stem = if member.is_empty() {
+                req.file_stem.clone()
+            } else {
+                stem(Path::new(member))
+            };
+            let (name, version) = split_version(&stem);
+            (name.to_owned(), version.to_owned())
+        }
     };
-    let stream = match DatStream::new(reader) {
-        Ok(s) => s,
-        Err(e) => return Ok(Outcome::Rejected(format!("{prefix}{e}"))),
-    };
-    let header = stream.header().clone();
-    let dat_name = match (&req.bind, member) {
+    let platform = platform_for(req, &name);
+    Identity {
+        name,
+        version,
+        platform,
+    }
+}
+
+/// A Logiqx DAT's identity: its header name, else the member's stem, else the file's.
+fn logiqx_identity(req: &Request, member: &str, header: &DatHeader) -> Identity {
+    let name = match (&req.bind, member) {
         _ if !header.name.trim().is_empty() => header.name.clone(),
         (_, m) if !m.is_empty() => stem(Path::new(m)),
         // A plain file holds one DAT; its stored name survives the rename into loaded/.
         (Some(b), _) => b.dat_name.clone(),
         (None, _) => req.file_stem.clone(),
     };
+    let platform = platform_for(req, &name);
+    Identity {
+        name,
+        version: header.version.clone(),
+        platform,
+    }
+}
+
+/// How a DB export's files become roms on `platform`: its header rule, the extensions it
+/// loads, and the one it writes, else the first it loads.
+fn export_options(platform: Option<&str>, parents: HashMap<String, String>) -> ExportOptions {
+    let row = platform.and_then(mistarr_mister::platforms::by_id);
+    ExportOptions {
+        header_rule: row.map_or(HeaderRule::None, |p| HeaderRule::from_name(p.header_rule)),
+        extension: row
+            .and_then(|p| {
+                p.extension_written
+                    .or_else(|| p.load_extensions.first().copied())
+            })
+            .map(str::to_owned),
+        load_extensions: row
+            .map(|p| p.load_extensions.iter().map(|e| (*e).to_owned()).collect())
+            .unwrap_or_default(),
+        parents,
+    }
+}
+
+/// The platform a DAT named `dat_name` loads into: the one being bound, else the table's.
+fn platform_for(req: &Request, dat_name: &str) -> Option<String> {
+    match &req.bind {
+        Some(b) => Some(b.platform.0.clone()),
+        None => mistarr_mister::bind_dat_name(dat_name).map(|p| p.id.to_owned()),
+    }
+}
+
+/// Opens the game stream of one DAT with the identity it is stored under; a DB export
+/// is identified first, since its platform decides which files become roms.
+fn open_stream<R: BufRead>(
+    reader: R,
+    req: &Request,
+    member: &str,
+    parents: Option<HashMap<String, String>>,
+) -> std::result::Result<(DatStream<R>, Identity), mistarr_core::dat::DatError> {
+    let Some(parents) = parents else {
+        let stream = DatStream::new(reader)?;
+        let id = logiqx_identity(req, member, stream.header());
+        return Ok((stream, id));
+    };
+    let mut id = export_identity(req, member);
+    let options = export_options(id.platform.as_deref(), parents);
+    let stream = DatStream::with_options(reader, options)?;
+    if !stream.header().version.trim().is_empty() {
+        id.version.clone_from(&stream.header().version);
+    }
+    Ok((stream, id))
+}
+
+/// Streams one DAT into `dat_stage` in chunks of [`STAGE_CHUNK`] games, each
+/// its own short write, then applies it in one transaction so readers see the
+/// old titles or the new ones, never a mix. A parse error becomes
+/// [`Outcome::Rejected`] and leaves the catalog untouched. `parents` is a DB
+/// export's archive index, `None` for a Logiqx DAT.
+fn import_stream<R: BufRead>(
+    db: &Db,
+    reader: R,
+    req: &Request,
+    member: &str,
+    parents: Option<HashMap<String, String>>,
+) -> Result<Outcome> {
+    let prefix = if member.is_empty() {
+        String::new()
+    } else {
+        format!("{member}: ")
+    };
+    let (stream, id) = match open_stream(reader, req, member, parents) {
+        Ok(opened) => opened,
+        Err(e) => return Ok(Outcome::Rejected(format!("{prefix}{e}"))),
+    };
+    let Identity {
+        name: dat_name,
+        version,
+        platform: bound,
+    } = id;
     if let Some(b) = &req.bind {
-        if b.dat_name != dat_name || b.dat_version != header.version {
+        if b.dat_name != dat_name || b.dat_version != version {
             return Ok(Outcome::Skipped);
         }
     }
-    let bound = match &req.bind {
-        Some(b) => Some(b.platform.0.clone()),
-        None => mistarr_mister::bind_dat_name(&dat_name).map(|p| p.id.to_owned()),
-    };
     let new = NewVersion {
         dat_name: &dat_name,
-        version: &header.version,
+        version: &version,
         source_file: &req.source_file,
         platform: bound.as_deref(),
         now: req.now,
@@ -474,7 +618,7 @@ fn import_member<R: BufRead>(db: &Db, reader: R, req: &Request, member: &str) ->
         let platform = plan.platform_id.clone().filter(|_| plan.current && staging);
         if let Some(p) = &platform {
             dats::begin_load(&tx, plan.id)?;
-            dat_stage::apply(&tx, &p.0, plan.id, &dat_name)?;
+            dat_stage::apply(&tx, &p.0, plan.id)?;
         }
         dats::set_game_count(&tx, plan.id, games)?;
         let mut retired = 0;
@@ -524,18 +668,34 @@ fn append_chunk(conn: &mut Connection, chunk: &[StagedGame]) -> Result<()> {
     Ok(())
 }
 
-/// Parses a game's name into the row its title is stored from.
+/// Parses a game's name into the row its title is stored from; regions, languages and
+/// stage flags the name lacks come from the DAT's own fields.
 fn staged(game: &DatGame) -> StagedGame {
     let parsed = parse_name(&game.name);
+    let mut regions: Vec<String> = parsed.regions.iter().map(|r| r.name().to_owned()).collect();
+    if regions.is_empty() {
+        regions.clone_from(&game.regions);
+    }
+    let languages = if parsed.languages.is_empty() {
+        game.languages.clone()
+    } else {
+        parsed.languages.clone()
+    };
+    let mut flags = parsed.flag_labels();
+    for flag in game.status_flags() {
+        if !parsed.flags.contains(&flag) {
+            flags.push(flag.to_string());
+        }
+    }
     StagedGame {
         name: game.name.clone(),
         base_name: parsed.base_name.clone(),
         group_key: group_key(&parsed),
         clone_of: game.clone_of.clone(),
-        regions: parsed.regions.iter().map(|r| r.name().to_owned()).collect(),
-        languages: parsed.languages.clone(),
+        regions,
+        languages,
         revision: parsed.revision.as_ref().map(|r| r.label.clone()),
-        flags: parsed.flag_labels(),
+        flags,
         roms: game
             .roms
             .iter()
@@ -552,7 +712,8 @@ fn staged(game: &DatGame) -> StagedGame {
     }
 }
 
-/// Queues an automatic scan for each platform a DAT just loaded titles for,
+/// Queues the recompute job, which matches files of retired roms again, and an
+/// automatic scan for each platform a DAT just loaded titles for,
 /// deduped so several DATs in one pack queue at most one each, binds waiting
 /// sources once for the whole pack, then checks whether the wizard just
 /// became complete.
@@ -565,12 +726,17 @@ async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
         if !queued.insert(platform.clone()) {
             continue;
         }
+        // Files of roms the load retired are matched again in the background.
+        if let Err(e) = Scheduler::enqueue(app, Arc::new(Recompute::new(&platform.0))).await {
+            tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue the recompute");
+        }
         if let Err(e) = scan::enqueue_if_games_dir_exists(app, platform).await {
             tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue automatic scan");
         }
     }
     if !queued.is_empty() {
-        if let Err(e) = super::source_import::rebind_after_dat(app).await {
+        let platforms: Vec<_> = queued.into_iter().collect();
+        if let Err(e) = super::source_import::rebind_after_dat(app, &platforms).await {
             tracing::warn!(error = %e, "cannot bind waiting sources");
         }
     }
@@ -604,7 +770,7 @@ fn reject(app: &AppState, path: &Path, file: &str, reason: &str) -> Result<()> {
     let target = unique_path(&dir, file);
     std::fs::rename(path, &target)?;
     let mut reason_path = target.into_os_string();
-    reason_path.push(".reason.txt");
+    reason_path.push(REASON_SUFFIX);
     std::fs::write(reason_path, format!("{reason}\n"))?;
     tracing::warn!(file, reason, "DAT rejected");
     publish_rejected(app, file, reason);
@@ -638,7 +804,100 @@ pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
         .unwrap_or(candidate)
 }
 
-/// Recomputes the 1G1R picks of one platform under the current preferences.
+/// Files matched again per transaction by [`rematch_chunk`].
+const REMATCH_CHUNK: u32 = 256;
+
+/// Matches up to [`REMATCH_CHUNK`] files of retired roms on `platform` again, by their
+/// stored hashes against live roms only, and returns how many it took. A cartridge file
+/// takes the state a scan would give it; a disc track is classified again with the other
+/// tracks of its directory by the scan's all-or-nothing rule. A file no live rom lists
+/// becomes `unverified`.
+///
+/// # Errors
+///
+/// [`Error::Db`] on SQLite failure.
+pub(crate) fn rematch_chunk(conn: &Connection, platform: &PlatformId) -> Result<usize> {
+    let disc = mistarr_mister::platforms::by_id(&platform.0)
+        .is_some_and(|p| p.kind == mistarr_mister::Kind::Disc);
+    let orphans = files::retired_matches(conn, platform, REMATCH_CHUNK)?;
+    let mut units: Vec<&str> = Vec::new();
+    for f in &orphans {
+        if let Some((dir, _)) = f.rel_path.rsplit_once('/').filter(|_| disc) {
+            if !units.contains(&dir) {
+                units.push(dir);
+            }
+            continue;
+        }
+        let (rom, state) = match live_match(conn, platform, f)? {
+            None => (None, FileState::Unverified),
+            Some(m) => {
+                let own = f
+                    .rel_path
+                    .rsplit_once('#')
+                    .map_or(f.rel_path.as_str(), |(_, m)| m);
+                let state = if m.status == "baddump" {
+                    FileState::Bad
+                } else if files::basename(&m.name) == files::basename(own) {
+                    FileState::Verified
+                } else {
+                    FileState::Misnamed
+                };
+                (Some(m.rom_id), state)
+            }
+        };
+        files::set_match(conn, f.id, rom, state)?;
+    }
+    for dir in units {
+        let rows = files::in_directory(conn, platform, dir)?;
+        let mut tracks = Vec::with_capacity(rows.len());
+        for f in &rows {
+            tracks.push(scan::Track {
+                rel_path: f.rel_path.clone(),
+                name: files::basename(&f.rel_path).to_owned(),
+                size: f.size,
+                mtime: f.mtime,
+                hashes: stored_hashes(f),
+                matched: live_match(conn, platform, f)?,
+            });
+        }
+        for (f, t) in rows.iter().zip(scan::classify_disc_tracks(conn, tracks)?) {
+            files::set_match(conn, f.id, t.rom_id, t.state)?;
+        }
+    }
+    Ok(orphans.len())
+}
+
+/// The live rom a file's stored hashes match, if it has any hash.
+fn live_match(
+    conn: &Connection,
+    platform: &PlatformId,
+    f: &FileRow,
+) -> Result<Option<files::RomMatch>> {
+    if f.crc32.is_none() && f.md5.is_none() && f.sha1.is_none() {
+        return Ok(None);
+    }
+    let hash = |h: &Option<String>| h.clone().unwrap_or_default();
+    files::match_live_rom(
+        conn,
+        platform,
+        &hash(&f.sha1),
+        &hash(&f.md5),
+        &hash(&f.crc32),
+        f.size,
+    )
+}
+
+fn stored_hashes(f: &FileRow) -> Option<mistarr_core::HashSet> {
+    Some(mistarr_core::HashSet {
+        size: u64::try_from(f.size).ok()?,
+        crc32: f.crc32.clone()?,
+        md5: f.md5.clone()?,
+        sha1: f.sha1.clone()?,
+    })
+}
+
+/// Matches files of retired roms again, recomputes the 1G1R picks of one platform
+/// under the current preferences, then queues a re-map of its bound sources.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recompute {
     platform: PlatformId,
@@ -687,6 +946,23 @@ impl Job for Recompute {
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
+        loop {
+            ctx.checkpoint().await?;
+            let platform = self.platform.clone();
+            let taken = ctx
+                .app
+                .db
+                .write(move |c| {
+                    let tx = c.transaction()?;
+                    let taken = rematch_chunk(&tx, &platform)?;
+                    crate::db::commit(tx)?;
+                    Ok(taken)
+                })
+                .await?;
+            if taken < REMATCH_CHUNK as usize {
+                break;
+            }
+        }
         ctx.checkpoint().await?;
         let prefs = prefs(&ctx.app.config().prefs);
         let platform = self.platform.0.clone();
@@ -701,7 +977,10 @@ impl Job for Recompute {
             })
             .await?;
         ctx.progress(json!({ "groups": r.groups, "picks": r.picks }))
-            .await
+            .await?;
+        // Groups are settled now; a re-map that ran earlier stored a stamp without them.
+        super::remap::enqueue(&ctx.app, Some(vec![self.platform.clone()])).await;
+        Ok(())
     }
 }
 

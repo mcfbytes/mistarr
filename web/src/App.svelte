@@ -13,6 +13,7 @@
   import TitleScreen from './routes/Title.svelte';
   import Activity from './routes/Activity.svelte';
   import Sources from './routes/Sources.svelte';
+  import Dats from './routes/Dats.svelte';
   import System from './routes/System.svelte';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -96,6 +97,8 @@
     <Activity />
   {:else if route.name === 'sources'}
     <Sources />
+  {:else if route.name === 'dats'}
+    <Dats />
   {:else if route.name === 'system'}
     <System />
   {:else}

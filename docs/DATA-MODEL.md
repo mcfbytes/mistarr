@@ -34,8 +34,11 @@ CREATE TABLE dat_versions (
   game_count    INTEGER NOT NULL,
   retired       INTEGER NOT NULL DEFAULT 0,   -- set by DELETE /dats/{id}
   source        TEXT NOT NULL DEFAULT 'dat',  -- 'dat' | 'mra': the one row MRA titles belong to
+  family        TEXT NOT NULL DEFAULT '',     -- dat::family_key of dat_name, refreshed at open
   UNIQUE (dat_name, version)
 );
+CREATE INDEX dat_versions_family ON dat_versions(family, platform_id);
+-- family: dat::family_key of dat_name, rewritten from the names at every start.
 
 CREATE TABLE dat_stage (          -- the DAT being imported, parsed outside the write lock and applied at once
   seq  INTEGER PRIMARY KEY,
@@ -48,7 +51,8 @@ CREATE TABLE titles (                   -- one per <game>; the browse unit
   dat_version_id INTEGER NOT NULL REFERENCES dat_versions(id),
   name          TEXT NOT NULL,         -- full DAT game name
   base_name     TEXT NOT NULL,         -- name with region/rev/lang tags stripped
-  parent_id     INTEGER REFERENCES titles(id),   -- clone group root, self if parent
+  parent_id     INTEGER REFERENCES titles(id),   -- clone group root in its own DAT, self if parent
+  group_root    INTEGER REFERENCES titles(id),   -- effective clone group; see "Effective groups"
   revision      TEXT,
   is_1g1r_pick  INTEGER NOT NULL DEFAULT 0,
   wanted        INTEGER NOT NULL DEFAULT 0,
@@ -69,6 +73,11 @@ CREATE TABLE titles (                   -- one per <game>; the browse unit
 );
 CREATE INDEX titles_platform_base ON titles(platform_id, base_name);
 CREATE INDEX titles_parent ON titles(parent_id);
+CREATE INDEX titles_group_root ON titles(group_root);
+CREATE TRIGGER titles_group_root_insert AFTER INSERT ON titles
+BEGIN UPDATE titles SET group_root = NEW.parent_id WHERE id = NEW.id; END;
+CREATE TRIGGER titles_group_root_parent AFTER UPDATE OF parent_id ON titles
+BEGIN UPDATE titles SET group_root = NEW.parent_id WHERE id = NEW.id; END;
 CREATE INDEX titles_group ON titles(platform_id, inferred, group_key);
 CREATE INDEX titles_source ON titles(platform_id, source);
 CREATE INDEX titles_mra_path ON titles(platform_id, mra_path) WHERE source = 'mra';
@@ -116,11 +125,12 @@ CREATE INDEX roms_md5  ON roms(md5);
 CREATE INDEX roms_crc  ON roms(crc32, size);
 CREATE INDEX roms_match_name ON roms(match_name);
 CREATE INDEX roms_match_base ON roms(match_base, size);
+CREATE INDEX roms_size ON roms(size);
 
 CREATE TABLE files (                    -- what is on disk under games/
   id            INTEGER PRIMARY KEY,
   platform_id   TEXT NOT NULL REFERENCES platforms(id),
-  rel_path      TEXT NOT NULL,         -- relative to games/, e.g. 'NES/a.zip#b.nes' for a zip member
+  rel_path      TEXT NOT NULL,         -- relative to games/, e.g. 'NES/a.zip#b.nes' for a zip member, 'mame/a.zip' for an arcade presence row
   size          INTEGER NOT NULL,
   mtime         INTEGER NOT NULL,
   crc32 TEXT, md5 TEXT, sha1 TEXT,
@@ -132,6 +142,7 @@ CREATE TABLE files (                    -- what is on disk under games/
 );
 CREATE INDEX files_rom ON files(rom_id);
 CREATE INDEX files_state ON files(state, platform_id);
+CREATE INDEX files_rel_lower ON files(platform_id, lower(rel_path));   -- arcade rows match zips ignoring case
 
 CREATE TABLE sources (                  -- one per torrent the user dropped in
   id            INTEGER PRIMARY KEY,
@@ -148,7 +159,8 @@ CREATE TABLE sources (                  -- one per torrent the user dropped in
   client_id     TEXT,                  -- id in the download client once added, else NULL
   added_at      INTEGER NOT NULL,
   suggested_platform_id TEXT REFERENCES platforms(id),  -- guessed from the torrent's names, no DAT needed
-  user_unbound  INTEGER NOT NULL DEFAULT 0   -- 1 after the user unbound it; never bound automatically again
+  user_unbound  INTEGER NOT NULL DEFAULT 0,  -- 1 after the user unbound it; never bound automatically again
+  map_stamp     TEXT                   -- the platform's live DAT versions and roms the files were last mapped against
 );
 CREATE INDEX sources_state ON sources(state);
 
@@ -157,11 +169,22 @@ CREATE TABLE torrent_files (
   file_index    INTEGER NOT NULL,
   path          TEXT NOT NULL,         -- inside the torrent, without the torrent's name
   size          INTEGER NOT NULL,
-  rom_id        INTEGER REFERENCES roms(id),   -- best pre-download match, may be NULL
-  confidence    TEXT,                  -- 'name' | 'size', NULL when unmatched
+  rom_id        INTEGER REFERENCES roms(id),   -- best name match, or the rom a hash proved; may be NULL
+  confidence    TEXT,                  -- 'hash' | 'name' | 'base', NULL when unmatched
   PRIMARY KEY (source_id, file_index)
 );
 CREATE INDEX torrent_files_rom ON torrent_files(rom_id);
+
+CREATE TABLE torrent_candidates (       -- further roms a file may be; one file, many roms
+  source_id     INTEGER NOT NULL,
+  file_index    INTEGER NOT NULL,
+  rom_id        INTEGER NOT NULL REFERENCES roms(id),
+  confidence    TEXT NOT NULL,         -- 'name' | 'base' | 'fuzzy' | 'size'
+  PRIMARY KEY (source_id, file_index, rom_id),
+  FOREIGN KEY (source_id, file_index)
+    REFERENCES torrent_files(source_id, file_index) ON DELETE CASCADE
+) WITHOUT ROWID;
+CREATE INDEX torrent_candidates_rom ON torrent_candidates(rom_id);
 
 CREATE TABLE downloads (
   id            INTEGER PRIMARY KEY,
@@ -189,6 +212,7 @@ CREATE TABLE import_log (
   action        TEXT NOT NULL,         -- 'placed' | 'replaced' | 'quarantined' | 'skipped_existing' | 'renamed'
   detail        TEXT NOT NULL          -- json
 );
+CREATE INDEX import_log_file ON import_log(file_id);
 
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE jobs (
@@ -205,6 +229,18 @@ CREATE TABLE jobs (
 CREATE INDEX jobs_subject ON jobs(kind, subject, state);
 CREATE INDEX jobs_state ON jobs(state, id);
 ```
+
+`torrent_files.rom_id` holds one rom, but one file can be a candidate for
+several: a short name such as `nova.nes` fits two versions of the same size.
+Those further roms, from every mapping tier, live in `torrent_candidates`,
+never repeating the pair `torrent_files` holds (VERIFICATION.md
+"Pre-download matching"). A file is available for a rom when either table
+pairs them, its source is `bound`, and no `bad` download of that rom used the
+file; choosing a file for a download, the title's availability and a
+source's `matched_count` read the union of both tables. Once an import
+proves by hash which rom a file is, its `torrent_files` row names that rom
+with confidence `hash` and its candidates are dropped; mapping never changes
+such a row again.
 
 ## State machines
 
@@ -235,6 +271,17 @@ cancelled   (from wanted, queued, transferring or checking)
   torrent once no download of its source is queued, transferring or checking
   and every file selected in the client is complete; the client never stops
   it on its own.
+- `bad` also ends a cartridge download whose file hashed to another live,
+  non-BIOS version in the wanted entry's clone group: the file is placed and
+  verified as that version (or kept, when the library already holds it
+  verified), the error reads "the file in this source is a different
+  version: <name>", and the file stops being offered for the wanted rom.
+- A `bad` row is the record that its file is not its rom. When it ends so
+  after placing another version, or after quarantining a file picked from a
+  `fuzzy` or `size` candidate, and the title is still wanted with no verified
+  file and no open download of the rom, a new download of the rom opens:
+  `queued` on the next best file, else `wanted`, carrying the same error so
+  the history shows.
 - `done`, `bad`, `failed`, `cancelled`: terminal. `failed` may be retried,
   which returns it to `queued` on the same torrent_file; `bad` never retries
   the same torrent_file. Cancelling a `transferring` or `checking` row
@@ -255,7 +302,8 @@ single-file one. It is the path mistarr sees, after the remote path map.
 - `misnamed`: hash matches a rom, name differs. The UI offers rename.
 - `unverified`: no rom matches in any loaded DAT. A member of an imported MRA
   zip the md5 check did not read, or that no hash source covers, is
-  `unverified` with `rom_id` set to the zip's rom.
+  `unverified` with `rom_id` set to the zip's rom, and so is the presence row
+  `mame/<zip>` the arcade presence pass writes for a zip a live MRA names.
 - `bad`: matches a rom flagged `baddump`.
 
 ### sources.state
@@ -302,9 +350,24 @@ titles are `inferred` and every live inferred title of the platform is
 regrouped by `(platform_id, group_key)` after each load, electing the parent
 that wins 1G1R under default preferences.
 
+### Effective groups
+
+`titles.group_root` is the effective clone group, the one column every
+grouping reads: browse, `title_groups`, group detail, want and unwant, 1G1R
+and the platform counts. The triggers keep it equal to `parent_id` whenever
+`parent_id` is written. `titles::recompute_platform` rebuilds it from scratch
+for the platform: every title back to its `parent_id`, then each title that
+another live DAT on the platform lists with the same roms linked to that
+title's group (VERIFICATION.md "DAT families"). Only single titles link, so
+`parent_id` always holds each DAT's own parent/clone data. When a group's root
+links away, the members it leaves take their lowest live id as their root, so
+a group's id is always a title whose `group_root` is itself. A group's members
+are the titles whose `group_root` is its id.
+
 ## Derived tables
 
-`title_groups` holds one row per clone group and platform, the browse unit.
+`title_groups` holds one row per effective clone group and platform, the browse
+unit; its `parent_id` is the group's `titles.group_root`.
 It is a table kept equal to its inputs, not a view, so browse and the
 platform counts read one indexed row per group instead of aggregating every
 title, rom and file of a platform per request.
@@ -313,20 +376,20 @@ title, rom and file of a platform per request.
 CREATE TABLE title_groups (
   parent_id     INTEGER NOT NULL,
   platform_id   TEXT NOT NULL,
-  base_name     TEXT NOT NULL,         -- the parent's
-  name          TEXT NOT NULL,         -- the parent's
+  base_name     TEXT NOT NULL,         -- the root title's
+  name          TEXT NOT NULL,         -- the root title's
   variants      INTEGER NOT NULL,
   have_verified INTEGER NOT NULL,
   wanted        INTEGER NOT NULL,
   has_pick      INTEGER NOT NULL,
   pick_id       INTEGER,
   newest_id     INTEGER NOT NULL,
-  source        TEXT NOT NULL,         -- the parent's: 'dat' | 'mra'
+  source        TEXT NOT NULL,         -- the root title's: 'dat' | 'mra'
   lean_flags    INTEGER NOT NULL,      -- least known-flag bits of a live variant
   unflagged_regions INTEGER NOT NULL,  -- region bits of the variants with no known flag
   flag_union    INTEGER NOT NULL,      -- flag bits of every live variant
   region_union  INTEGER NOT NULL,      -- region bits of every live variant
-  split         INTEGER NOT NULL,      -- the parent title is on another platform
+  split         INTEGER NOT NULL,      -- the root title is on another platform
   PRIMARY KEY (parent_id, platform_id)
 ) WITHOUT ROWID;
 CREATE INDEX title_groups_name ON title_groups(platform_id, base_name COLLATE NOCASE, parent_id);
@@ -363,18 +426,19 @@ alone `lean_flags` decides; otherwise the bits prefilter and short-cut, and
 the remaining groups check their variants' flag and region rows.
 
 `crates/mistarr-server/src/db/groups.rs` holds the one query that computes a
-group from its inputs, including the group root (`titles.parent_id`); every
+group from its inputs, grouped by `titles.group_root`; every
 refresh, rebuild and check uses it.
 
 ### Keeping it current
 
-Triggers on `titles`, `roms`, `files`, `title_flags` and `title_regions`
+Triggers on `titles` (its `group_root` among the watched columns), `roms`,
+`files`, `title_flags` and `title_regions`
 insert the affected group roots into `title_groups_dirty` (a root is marked
 once per transaction). `db::commit`, the only way a write transaction
 commits, recomputes the dirty groups and empties the list before `COMMIT`,
-so readers never see a group out of step with its titles. A transaction
-with more than 4096 dirty groups, a DAT load for instance, rebuilds its
-platforms' rows in one statement instead. A write made outside a
+so readers never see a group out of step with its titles. It refreshes
+4096 roots per statement, so a DAT load that dirties a whole platform keeps
+SQLite's temporary tables small. A write made outside a
 transaction is settled by the writer connection right after, with a warning
 in the log.
 
@@ -382,7 +446,7 @@ in the log.
 in 0x1F so `nes` never matches inside `snes`, with trigrams; the title
 triggers keep it in the same transaction, including a title that moves
 platform. A search `MATCH`es the platform's phrase and the term together;
-since a group's parent title can sit on another platform, `split` marks
+since a group's root title can sit on another platform, `split` marks
 those rows and the search adds them from `title_groups_split`
 (ARCHITECTURE.md "Resource budgets").
 

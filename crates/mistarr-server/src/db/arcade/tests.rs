@@ -185,7 +185,7 @@ fn dat_game(c: &Connection, version: &str, name: &str) -> TitleId {
         status: "good",
         header: None,
     };
-    let id = titles::upsert_title(c, "arcade", v, "MAME", &t, &[rom]).expect("upsert");
+    let id = titles::upsert_title(c, "arcade", v, &t, &[rom]).expect("upsert");
     dats::retire_absent(c, v).expect("retire");
     id
 }
@@ -206,7 +206,7 @@ fn dat_loads_never_touch_mra_titles() {
     assert!(retired(d));
     let mra_version = mra_version(&c, "arcade", 2).expect("version");
     assert!(dats::get(&c, mra_version).expect("get").is_none());
-    assert!(dats::retire(&c, mra_version).expect("retire").is_none());
+    assert!(dats::retire(&c, mra_version, 1).expect("retire").is_none());
     assert!(!retired(m));
     let (items, total) = dats::list(&c, 10, 0).expect("list");
     assert_eq!((items.len(), total), (2, 2));
@@ -315,14 +315,12 @@ fn import_reads_find_zip_roms_their_titles_and_dat_entries() {
         ),
         (main, "exblast.zip", "mame", "Example.mra")
     );
-    assert_eq!(
-        zip_rom_id(&c, "arcade", "MAME", "EXBLAST.zip").expect("lookup"),
-        Some(rom)
-    );
-    assert_eq!(
-        zip_rom_id(&c, "arcade", "mame", "nosuch.zip").expect("lookup"),
-        None
-    );
+    let live = live_zip_roms(&c, "arcade").expect("live zips");
+    let naming = live.get("mame/exblast.zip").expect("named");
+    assert_eq!(naming.len(), 2, "both titles' roms, whatever their case");
+    assert_eq!(naming[0], rom, "lowest first");
+    assert!(live.contains_key("mame/exparent.zip"));
+    assert!(!live.contains_key("mame/nosuch.zip"));
     let naming = titles_naming(&c, "arcade", "MAME", "EXBLAST.zip").expect("naming");
     assert_eq!(
         naming.iter().map(|(t, _)| *t).collect::<Vec<_>>(),

@@ -4,6 +4,9 @@ use proptest::prelude::*;
 use rusqlite::params;
 
 use super::*;
+use mistarr_core::select::Prefs;
+
+use crate::db::dats::{self, DatVersionId};
 use crate::db::titles::{self, Browse, Counts, GroupRow, SearchShape, Sort, TitleId, Tri};
 
 /// The reference aggregation query for `title_groups`, as a view the table must equal.
@@ -19,7 +22,7 @@ FROM (
          MAX(CASE WHEN v.is_1g1r_pick = 1 THEN v.id END) AS pick_id,
          MAX(v.id) AS newest_id
   FROM (
-    SELECT t.platform_id, t.parent_id, t.id, t.wanted, t.is_1g1r_pick,
+    SELECT t.platform_id, t.group_root AS parent_id, t.id, t.wanted, t.is_1g1r_pick,
            COUNT(DISTINCT r.id) AS roms,
            COUNT(DISTINCT CASE WHEN f.state = 'verified'
                                  OR (r.present = 1
@@ -29,7 +32,7 @@ FROM (
     LEFT JOIN roms r ON r.title_id = t.id AND r.retired = 0
     LEFT JOIN files f ON f.rom_id = r.id
     WHERE t.retired = 0
-    GROUP BY t.platform_id, t.parent_id, t.id
+    GROUP BY t.platform_id, t.group_root, t.id
   ) v
   GROUP BY v.platform_id, v.parent_id
 ) g
@@ -43,7 +46,7 @@ const REFERENCE_BROWSE_WHERE: &str = "
     AND (?3 = 'any' OR (?3 = 'yes') = (g.have_verified > 0))
     AND (?4 = 'any' OR (?4 = 'yes') = (g.wanted > 0))
     AND EXISTS (
-      SELECT 1 FROM titles v WHERE v.parent_id = g.parent_id AND v.retired = 0
+      SELECT 1 FROM titles v WHERE v.group_root = g.parent_id AND v.retired = 0
         AND NOT EXISTS (SELECT 1 FROM (SELECT flag AS value FROM title_flags WHERE title_id = v.id) f
                         WHERE f.value IN (SELECT value FROM json_each(?5)))
         AND (?6 IS NULL OR EXISTS (SELECT 1 FROM (SELECT region AS value FROM title_regions
@@ -82,8 +85,8 @@ fn seeded_conn() -> Connection {
     let tx = c.transaction().expect("tx");
     for (from, to) in [("nes", "gb"), ("gb", "nes"), ("psx", "nes")] {
         tx.execute(
-            "UPDATE titles SET platform_id = ?2 WHERE id = (SELECT MIN(parent_id) FROM titles
-             WHERE platform_id = ?1 AND parent_id <> id AND retired = 0)",
+            "UPDATE titles SET platform_id = ?2 WHERE id = (SELECT MIN(group_root) FROM titles
+             WHERE platform_id = ?1 AND group_root <> id AND retired = 0)",
             [from, to],
         )
         .expect("split");
@@ -230,7 +233,7 @@ fn reference_counts(c: &Connection, hidden: &[String]) -> HashMap<String, (u64, 
             "SELECT g.platform_id, COUNT(*), SUM(g.have_verified > 0), SUM(g.wanted > 0)
              FROM reference_groups g
              WHERE {REFERENCE_MRA_ONLY} AND EXISTS (
-               SELECT 1 FROM titles v WHERE v.parent_id = g.parent_id AND v.retired = 0
+               SELECT 1 FROM titles v WHERE v.group_root = g.parent_id AND v.retired = 0
                  AND NOT EXISTS (SELECT 1 FROM title_flags f
                                  WHERE f.title_id = v.id AND f.flag IN (SELECT value FROM json_each(?1))))
              GROUP BY g.platform_id"
@@ -396,6 +399,13 @@ enum Op {
         title: usize,
         parent: usize,
     },
+    Link {
+        title: usize,
+        root: usize,
+    },
+    Recompute {
+        platform: usize,
+    },
     Retire {
         title: usize,
         retired: u8,
@@ -472,6 +482,8 @@ fn op() -> impl Strategy<Value = Op> {
                 platform, base, flags: flags & 0x3f, regions: regions & 0x3f, parent, mra, retired, wanted
             }),
         2 => (i(), i()).prop_map(|(title, parent)| Op::SetParent { title, parent }),
+        2 => (i(), i()).prop_map(|(title, root)| Op::Link { title, root }),
+        1 => (0..3usize).prop_map(|platform| Op::Recompute { platform }),
         1 => (i(), 0..3u8).prop_map(|(title, retired)| Op::Retire { title, retired }),
         1 => (i(), any::<bool>()).prop_map(|(title, wanted)| Op::Want { title, wanted }),
         1 => (i(), any::<bool>()).prop_map(|(title, pick)| Op::Pick { title, pick }),
@@ -553,6 +565,15 @@ fn apply(c: &Connection, op: &Op, seq: &mut u32) {
             if let (Some(t), Some(p)) = (title(t), title(parent)) {
                 run("UPDATE titles SET parent_id = ?2 WHERE id = ?1", &[&t, &p]);
             }
+        }
+        Op::Link { title: t, root } => {
+            if let (Some(t), Some(r)) = (title(t), title(root)) {
+                run("UPDATE titles SET group_root = ?2 WHERE id = ?1", &[&t, &r]);
+            }
+        }
+        Op::Recompute { platform } => {
+            titles::recompute_platform(c, PLATFORMS[platform], &Prefs::default())
+                .expect("recompute");
         }
         Op::Retire { title: t, retired } => {
             if let Some(t) = title(t) {
@@ -801,11 +822,11 @@ fn a_fixed_sequence_covers_every_write() {
 }
 
 #[test]
-fn a_large_transaction_rebuilds_whole_platforms() {
+fn a_large_transaction_refreshes_in_chunks() {
     let mut c = conn();
     let tx = c.transaction().expect("tx");
     let mut seq = 0;
-    for i in 0..usize::try_from(REBUILD_OVER + 50).expect("usize") {
+    for i in 0..usize::try_from(2 * FLUSH_CHUNK + 50).expect("usize") {
         apply(
             &tx,
             &Op::AddTitle {
@@ -824,7 +845,7 @@ fn a_large_transaction_rebuilds_whole_platforms() {
     let dirty: i64 = tx
         .query_row("SELECT COUNT(*) FROM title_groups_dirty", [], |r| r.get(0))
         .expect("dirty");
-    assert!(dirty > REBUILD_OVER);
+    assert!(dirty > 2 * FLUSH_CHUNK);
     crate::db::commit(tx).expect("commit");
     assert_eq!(rows(&c, "title_groups"), rows(&c, "reference_groups"));
     assert!(check(&c).expect("check").is_consistent());
@@ -877,7 +898,6 @@ fn refresh_rebuild_and_check_agree() {
         (2, 2, true),
         "{drift:?}"
     );
-    assert_eq!(rebuild_platform(&c, "gb").expect("platform"), 6);
     let tx = c.transaction().expect("tx");
     assert_eq!(rebuild(&tx).expect("rebuild"), 6);
     crate::db::commit(tx).expect("commit");
@@ -1037,7 +1057,9 @@ fn the_migration_builds_the_table_from_existing_rows() {
          INSERT INTO titles (id, platform_id, dat_version_id, name, base_name, regions, languages, flags, parent_id, wanted)
            VALUES (1, 'gb', 1, 'A (USA)', 'A', '[\"USA\"]', '[]', '[]', 1, 1),
                   (2, 'gb', 1, 'A (Japan) (Beta)', 'A', '[\"Japan\"]', '[]', '[\"beta\"]', 1, 0),
-                  (3, 'gb', 1, 'B (Europe)', 'B', '[\"Europe\"]', '[]', '[\"bios\"]', 3, 0);
+                  (3, 'gb', 1, 'B (Europe)', 'B', '[\"Europe\"]', '[]', '[\"bios\"]', 3, 0),
+                  (4, 'gb', 1, 'A (Europe)', 'A', '[\"Europe\"]', '[]', '[]', 4, 0);
+         UPDATE titles SET group_root = 1 WHERE id = 4;
          INSERT INTO roms (id, title_id, name, size) VALUES (1, 1, 'a.bin', 4), (2, 3, 'b.bin', 4);
          INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
            VALUES ('gb', 'a.bin', 4, 0, 1, 'verified', 0);",
@@ -1150,4 +1172,43 @@ fn visibility_uses_the_summary_before_the_variants() {
     );
     assert_eq!(c.args.len(), 5);
     assert!(c.sql().contains("g.flag_union & 64 = 64"), "{}", c.sql());
+}
+
+/// Loads two DAT versions of one platform whose titles share roms, links them, then
+/// retires the larger one; the table follows `group_root` through every step.
+#[test]
+fn linking_across_dats_and_retiring_one_keeps_the_table_equal_to_the_reference() {
+    let mut c = conn();
+    let tx = c.transaction().expect("tx");
+    tx.execute_batch(
+        "INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at, game_count)
+           VALUES (2, 'nes', 'Test A', '1', 'a.dat', 0, 3), (3, 'nes', 'Test B', '1', 'b.dat', 0, 2);
+         INSERT INTO titles (id, platform_id, dat_version_id, name, base_name, parent_id)
+           VALUES (10, 'nes', 2, 'Alpha Quest (USA)', 'Alpha Quest', 10),
+                  (11, 'nes', 2, 'Alpha Quest (Japan)', 'Alpha Quest', 10),
+                  (12, 'nes', 2, 'Beta Star (USA)', 'Beta Star', 12),
+                  (20, 'nes', 3, 'Alpha Quest (World)', 'Alpha Quest', 20),
+                  (21, 'nes', 3, 'Alpha Quest (Europe)', 'Alpha Quest', 20);
+         INSERT INTO roms (title_id, name, size, sha1)
+           VALUES (10, 'a.nes', 4, 'aa'), (11, 'b.nes', 4, 'bb'), (12, 'c.nes', 4, 'cc'),
+                  (20, 'a.nes', 4, 'aa'), (21, 'd.nes', 4, 'dd');",
+    )
+    .expect("rows");
+    titles::recompute_platform(&tx, "nes", &Prefs::default()).expect("recompute");
+    crate::db::commit(tx).expect("commit");
+    let root = |c: &Connection, id: i64| -> i64 {
+        c.query_row("SELECT group_root FROM titles WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .expect("root")
+    };
+    assert_eq!((root(&c, 20), root(&c, 21)), (10, 21));
+    assert_matches_reference(&c);
+
+    let tx = c.transaction().expect("tx");
+    dats::retire(&tx, DatVersionId(2), 0).expect("retire");
+    titles::recompute_platform(&tx, "nes", &Prefs::default()).expect("recompute");
+    crate::db::commit(tx).expect("commit");
+    assert_eq!((root(&c, 20), root(&c, 21)), (20, 20));
+    assert_matches_reference(&c);
 }

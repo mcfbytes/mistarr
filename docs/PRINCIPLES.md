@@ -23,7 +23,8 @@ here as a hard constraint that overrides any task instruction.
 
 ## 2. The user supplies every input
 
-- DATs: the user drops Logiqx XML or zipped DAT packs into `dats/`.
+- DATs: the user drops Logiqx XML, zipped DAT packs or a No-Intro DB export
+  (XML, or zipped) into `dats/`.
 - Torrents: the user drops `.torrent` or `.magnet` files into `sources/`.
 - The app may parse, validate, bind and organise these. It may not obtain them.
 - Documentation describes the directories and the accepted formats. It does

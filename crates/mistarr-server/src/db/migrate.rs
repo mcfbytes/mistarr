@@ -153,7 +153,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().expect("open");
         apply(&mut conn).expect("apply");
         crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-        // A real MRA zip rom, the kind the import path always links `files.rom_id` to.
+        // An MRA zip rom, as import and presence rows link `files.rom_id` to.
         let version = crate::db::arcade::mra_version(&conn, "arcade", 1).expect("version");
         let title = crate::db::arcade::upsert_title(
             &conn,
@@ -195,15 +195,15 @@ mod tests {
             )
             .expect("insert");
         };
-        // Noise the generic scan wrote: no rom matched, so rom_id is NULL.
+        // Library scan rows that matched no rom: rom_id is NULL.
         insert("mame/exampleset.zip#a.bin", "unverified", None);
         insert("hbmame/otherset.zip#b.bin", "unverified", None);
-        // A zip the old scan could not open at all: one bare-path row, no `#member`.
+        // A library scan's row for a zip it could not open: bare path, no rom.
         insert("mame/unreadable.zip", "unverified", None);
-        // Rows the MRA import path legitimately records: rom_id always set.
+        // Import rows: rom_id always set.
         insert("mame/exampleset.zip#c.bin", "unverified", Some(rom_id));
         insert("mame/exampleset.zip#d.bin", "verified", Some(rom_id));
-        // A non-arcade platform's stray file must survive untouched.
+        // Another platform's unmatched file is untouched.
         conn.execute(
             "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
              VALUES ('nes', 'NES/stray.bin', 4, 0, NULL, 'unverified', 0)",
@@ -248,6 +248,76 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .expect("rows");
         assert_eq!(progress, ["nes"], "arcade never resumes a scan");
+    }
+
+    #[test]
+    fn arcade_presence_migration_indexes_and_drops_md5_less_member_rows() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+        let insert = |platform: &str, rel_path: &str, md5: Option<&str>| -> i64 {
+            conn.execute(
+                "INSERT INTO files (platform_id, rel_path, size, mtime, md5, state, scanned_at)
+                 VALUES (?1, ?2, 4, 0, ?3, 'verified', 0)",
+                params![platform, rel_path, md5],
+            )
+            .expect("insert");
+            conn.last_insert_rowid()
+        };
+        let stale = insert("arcade", "mame/a.zip#a.bin", None);
+        insert(
+            "arcade",
+            "mame/a.zip#b.bin",
+            Some("0123456789abcdef0123456789abcdef"),
+        );
+        insert("arcade", "mame/b.zip", None);
+        insert("arcade", "mame/a#b.zip", None);
+        insert("arcade", "mame/C.ZIP#c.bin", None);
+        insert("nes", "NES/c.zip#c.nes", None);
+        conn.execute(
+            "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 'placed', '{}')",
+            [stale],
+        )
+        .expect("log");
+
+        let presence = MIGRATIONS
+            .iter()
+            .find(|m| m.name == "0013_arcade_presence")
+            .expect("migration present");
+        let rerun = presence
+            .sql
+            .replace("CREATE INDEX", "CREATE INDEX IF NOT EXISTS");
+        conn.execute_batch(&rerun).expect("migrate");
+
+        let left: Vec<String> = conn
+            .prepare("SELECT rel_path FROM files ORDER BY rel_path")
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(
+            left,
+            [
+                "NES/c.zip#c.nes",
+                "mame/a#b.zip",
+                "mame/a.zip#b.bin",
+                "mame/b.zip"
+            ],
+            "a presence row whose zip name holds `#` stays; members of any case go"
+        );
+        let logged: Option<i64> = conn
+            .query_row("SELECT file_id FROM import_log", [], |r| r.get(0))
+            .expect("log");
+        assert_eq!(logged, None, "the log entry outlives the row");
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM import_log WHERE file_id = 1",
+                [],
+                |r| r.get(3),
+            )
+            .expect("plan");
+        assert!(plan.contains("import_log_file"), "{plan}");
     }
 
     #[test]

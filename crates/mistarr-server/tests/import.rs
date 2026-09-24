@@ -341,6 +341,48 @@ async fn a_mismatch_is_quarantined_with_a_report() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_transfer_whose_dat_was_removed_is_quarantined_saying_so() {
+    let b = boot().await;
+    let good = payload(4, 64);
+    let (title, rom) = entry(
+        &b,
+        "nes",
+        "Example Quest (USA)",
+        "Example Quest (USA).nes",
+        &hash_of(&good),
+    );
+    b.running
+        .app
+        .db
+        .write_blocking(move |c| {
+            let version: i64 = c.query_row(
+                "SELECT dat_version_id FROM titles WHERE id = ?1",
+                [title],
+                |r| r.get(0),
+            )?;
+            mistarr_server::db::dats::retire(
+                c,
+                mistarr_server::db::dats::DatVersionId(version),
+                1,
+            )?;
+            Ok(())
+        })
+        .expect("remove");
+    let src = source(&b, None);
+    let staged = stage(&b, "NES/Example Quest (USA).nes", &good);
+    let id = hand_off(&b, rom, src, 0, &staged);
+    let row = settled(&b, id, DownloadState::Bad).await;
+    assert!(
+        row.error
+            .as_deref()
+            .is_some_and(|e| e.contains("was removed")),
+        "{row:?}"
+    );
+    assert!(!games(&b).join(NES_TARGET).exists());
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_existing_verified_target_is_kept() {
     let b = boot().await;
     let body = payload(6, 256);

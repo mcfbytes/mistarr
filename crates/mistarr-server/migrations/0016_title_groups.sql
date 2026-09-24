@@ -56,22 +56,22 @@ INSERT INTO known_regions (name, bit) VALUES
   ('Taiwan', 524288), ('UK', 1048576), ('Latin America', 2097152);
 
 CREATE TABLE title_groups (
-  parent_id         INTEGER NOT NULL,
+  parent_id         INTEGER NOT NULL,  -- the group root: titles.group_root of its variants
   platform_id       TEXT NOT NULL,
-  base_name         TEXT NOT NULL,     -- the parent's
-  name              TEXT NOT NULL,     -- the parent's
+  base_name         TEXT NOT NULL,     -- the root title's
+  name              TEXT NOT NULL,     -- the root title's
   variants          INTEGER NOT NULL,
   have_verified     INTEGER NOT NULL,
   wanted            INTEGER NOT NULL,
   has_pick          INTEGER NOT NULL,
   pick_id           INTEGER,
   newest_id         INTEGER NOT NULL,
-  source            TEXT NOT NULL,     -- the parent's: 'dat' | 'mra'
-  lean_flags        INTEGER NOT NULL,  -- least known-flag bits of a live variant of the parent
+  source            TEXT NOT NULL,     -- the root title's: 'dat' | 'mra'
+  lean_flags        INTEGER NOT NULL,  -- least known-flag bits of a live variant
   unflagged_regions INTEGER NOT NULL,  -- region bits of those variants
-  flag_union        INTEGER NOT NULL,  -- flag bits of every live variant of the parent
-  region_union      INTEGER NOT NULL,  -- region bits of every live variant of the parent
-  split             INTEGER NOT NULL,  -- the parent title is on another platform than the group
+  flag_union        INTEGER NOT NULL,  -- flag bits of every live variant
+  region_union      INTEGER NOT NULL,  -- region bits of every live variant
+  split             INTEGER NOT NULL,  -- the root title is on another platform than the group
   PRIMARY KEY (parent_id, platform_id)
 ) WITHOUT ROWID;
 CREATE INDEX title_groups_name ON title_groups(platform_id, base_name COLLATE NOCASE, parent_id);
@@ -83,7 +83,7 @@ CREATE INDEX title_groups_split ON title_groups(platform_id, parent_id) WHERE sp
 -- The triggers test membership rather than use OR IGNORE, which an upsert overrides.
 CREATE TABLE title_groups_dirty (parent_id INTEGER PRIMARY KEY);
 INSERT INTO title_groups_dirty (parent_id)
-  SELECT DISTINCT parent_id FROM titles WHERE parent_id IS NOT NULL;
+  SELECT DISTINCT group_root FROM titles WHERE group_root IS NOT NULL;
 
 -- Substring search over base names; trigram keeps LIKE's "contains" and the triggers keep it in step.
 -- `platform` is the id between 0x1F sentinels, so one MATCH filters by platform without substrings.
@@ -98,17 +98,17 @@ CREATE TRIGGER titles_insert_groups AFTER INSERT ON titles BEGIN
   INSERT INTO title_search (rowid, base_name, platform)
     VALUES (NEW.id, NEW.base_name, char(31) || NEW.platform_id || char(31));
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT DISTINCT x FROM (SELECT NEW.parent_id AS x UNION SELECT NEW.id)
+    SELECT DISTINCT x FROM (SELECT COALESCE(NEW.group_root, NEW.parent_id) AS x UNION SELECT NEW.id)
     WHERE x IS NOT NULL AND x NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 CREATE TRIGGER titles_update_groups
-AFTER UPDATE OF platform_id, parent_id, retired, wanted, is_1g1r_pick, mra_check ON titles
-WHEN OLD.platform_id IS NOT NEW.platform_id OR OLD.parent_id IS NOT NEW.parent_id
+AFTER UPDATE OF platform_id, group_root, retired, wanted, is_1g1r_pick, mra_check ON titles
+WHEN OLD.platform_id IS NOT NEW.platform_id OR OLD.group_root IS NOT NEW.group_root
   OR OLD.retired IS NOT NEW.retired OR OLD.wanted IS NOT NEW.wanted
   OR OLD.is_1g1r_pick IS NOT NEW.is_1g1r_pick OR OLD.mra_check IS NOT NEW.mra_check BEGIN
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT DISTINCT x FROM (SELECT OLD.parent_id AS x UNION SELECT NEW.parent_id)
+    SELECT DISTINCT x FROM (SELECT OLD.group_root AS x UNION SELECT NEW.group_root)
     WHERE x IS NOT NULL AND x NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
@@ -132,89 +132,89 @@ CREATE TRIGGER titles_delete_groups AFTER DELETE ON titles BEGIN
   INSERT INTO title_search (title_search, rowid, base_name, platform)
     VALUES ('delete', OLD.id, OLD.base_name, char(31) || OLD.platform_id || char(31));
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT DISTINCT x FROM (SELECT OLD.parent_id AS x UNION SELECT OLD.id)
+    SELECT DISTINCT x FROM (SELECT OLD.group_root AS x UNION SELECT OLD.id)
     WHERE x IS NOT NULL AND x NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 CREATE TRIGGER title_flags_insert_groups AFTER INSERT ON title_flags BEGIN
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT parent_id FROM titles WHERE id = NEW.title_id AND parent_id IS NOT NULL
-      AND parent_id NOT IN (SELECT parent_id FROM title_groups_dirty);
+    SELECT group_root FROM titles WHERE id = NEW.title_id AND group_root IS NOT NULL
+      AND group_root NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 CREATE TRIGGER title_flags_delete_groups AFTER DELETE ON title_flags BEGIN
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT parent_id FROM titles WHERE id = OLD.title_id AND parent_id IS NOT NULL
-      AND parent_id NOT IN (SELECT parent_id FROM title_groups_dirty);
+    SELECT group_root FROM titles WHERE id = OLD.title_id AND group_root IS NOT NULL
+      AND group_root NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 CREATE TRIGGER title_flags_update_groups AFTER UPDATE ON title_flags BEGIN
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT DISTINCT parent_id FROM titles WHERE id IN (OLD.title_id, NEW.title_id)
-      AND parent_id IS NOT NULL AND parent_id NOT IN (SELECT parent_id FROM title_groups_dirty);
+    SELECT DISTINCT group_root FROM titles WHERE id IN (OLD.title_id, NEW.title_id)
+      AND group_root IS NOT NULL AND group_root NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 CREATE TRIGGER title_regions_insert_groups AFTER INSERT ON title_regions BEGIN
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT parent_id FROM titles WHERE id = NEW.title_id AND parent_id IS NOT NULL
-      AND parent_id NOT IN (SELECT parent_id FROM title_groups_dirty);
+    SELECT group_root FROM titles WHERE id = NEW.title_id AND group_root IS NOT NULL
+      AND group_root NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 CREATE TRIGGER title_regions_delete_groups AFTER DELETE ON title_regions BEGIN
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT parent_id FROM titles WHERE id = OLD.title_id AND parent_id IS NOT NULL
-      AND parent_id NOT IN (SELECT parent_id FROM title_groups_dirty);
+    SELECT group_root FROM titles WHERE id = OLD.title_id AND group_root IS NOT NULL
+      AND group_root NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 CREATE TRIGGER title_regions_update_groups AFTER UPDATE ON title_regions BEGIN
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT DISTINCT parent_id FROM titles WHERE id IN (OLD.title_id, NEW.title_id)
-      AND parent_id IS NOT NULL AND parent_id NOT IN (SELECT parent_id FROM title_groups_dirty);
+    SELECT DISTINCT group_root FROM titles WHERE id IN (OLD.title_id, NEW.title_id)
+      AND group_root IS NOT NULL AND group_root NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 CREATE TRIGGER roms_insert_groups AFTER INSERT ON roms WHEN NEW.retired = 0 BEGIN
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT parent_id FROM titles WHERE id = NEW.title_id AND parent_id IS NOT NULL
-      AND parent_id NOT IN (SELECT parent_id FROM title_groups_dirty);
+    SELECT group_root FROM titles WHERE id = NEW.title_id AND group_root IS NOT NULL
+      AND group_root NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 CREATE TRIGGER roms_update_groups AFTER UPDATE OF title_id, retired, present ON roms
 WHEN (OLD.retired = 0 OR NEW.retired = 0) AND (OLD.title_id IS NOT NEW.title_id
   OR OLD.retired IS NOT NEW.retired OR OLD.present IS NOT NEW.present) BEGIN
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT DISTINCT parent_id FROM titles WHERE id IN (OLD.title_id, NEW.title_id)
-      AND parent_id IS NOT NULL AND parent_id NOT IN (SELECT parent_id FROM title_groups_dirty);
+    SELECT DISTINCT group_root FROM titles WHERE id IN (OLD.title_id, NEW.title_id)
+      AND group_root IS NOT NULL AND group_root NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 CREATE TRIGGER roms_delete_groups AFTER DELETE ON roms WHEN OLD.retired = 0 BEGIN
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT parent_id FROM titles WHERE id = OLD.title_id AND parent_id IS NOT NULL
-      AND parent_id NOT IN (SELECT parent_id FROM title_groups_dirty);
+    SELECT group_root FROM titles WHERE id = OLD.title_id AND group_root IS NOT NULL
+      AND group_root NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 CREATE TRIGGER files_insert_groups AFTER INSERT ON files
 WHEN NEW.rom_id IS NOT NULL AND NEW.state = 'verified' BEGIN
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT t.parent_id FROM roms r JOIN titles t ON t.id = r.title_id
-    WHERE r.id = NEW.rom_id AND t.parent_id IS NOT NULL
-      AND t.parent_id NOT IN (SELECT parent_id FROM title_groups_dirty);
+    SELECT t.group_root FROM roms r JOIN titles t ON t.id = r.title_id
+    WHERE r.id = NEW.rom_id AND t.group_root IS NOT NULL
+      AND t.group_root NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 CREATE TRIGGER files_update_groups AFTER UPDATE OF rom_id, state ON files
 WHEN (OLD.state = 'verified' OR NEW.state = 'verified')
   AND (OLD.rom_id IS NOT NEW.rom_id OR OLD.state IS NOT NEW.state) BEGIN
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT DISTINCT t.parent_id FROM roms r JOIN titles t ON t.id = r.title_id
-    WHERE r.id IN (OLD.rom_id, NEW.rom_id) AND t.parent_id IS NOT NULL
-      AND t.parent_id NOT IN (SELECT parent_id FROM title_groups_dirty);
+    SELECT DISTINCT t.group_root FROM roms r JOIN titles t ON t.id = r.title_id
+    WHERE r.id IN (OLD.rom_id, NEW.rom_id) AND t.group_root IS NOT NULL
+      AND t.group_root NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 CREATE TRIGGER files_delete_groups AFTER DELETE ON files
 WHEN OLD.rom_id IS NOT NULL AND OLD.state = 'verified' BEGIN
   INSERT INTO title_groups_dirty (parent_id)
-    SELECT t.parent_id FROM roms r JOIN titles t ON t.id = r.title_id
-    WHERE r.id = OLD.rom_id AND t.parent_id IS NOT NULL
-      AND t.parent_id NOT IN (SELECT parent_id FROM title_groups_dirty);
+    SELECT t.group_root FROM roms r JOIN titles t ON t.id = r.title_id
+    WHERE r.id = OLD.rom_id AND t.group_root IS NOT NULL
+      AND t.group_root NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
 -- Jobs deduplicate on a normalised key of their payload's fields, never on the JSON text.

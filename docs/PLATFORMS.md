@@ -22,7 +22,7 @@ gives; confirm them on the board together with the **verify** rows.
 
 | id | DAT name matches | core dir | ext written | adapter notes |
 |---|---|---|---|---|
-| `nes` | `Nintendo Entertainment System`, `NES` | `NES` | `.nes` | Use the **headered** No-Intro DAT. The core needs an iNES header. If only the headerless DAT is loaded, hash with the 16-byte header stripped for matching, but never strip on disk. |
+| `nes` | `Nintendo Entertainment System`, `NES` | `NES` | `.nes` | Use the **headered** No-Intro DAT. The core needs an iNES header. If only the headerless DAT is loaded, hash with the 16-byte header stripped for matching, but never strip on disk. From a DB export the headerless entries are used, and placement adds the header back from the recorded `header` attribute (VERIFICATION.md "DB export"). |
 | `fds` | `Famicom Disk System`, `Family Computer Disk System` | `NES` | `.fds` | Same directory as NES. Needs BIOS `boot0.rom`: report only. |
 | `snes` | `Super Nintendo Entertainment System`, `Super Famicom`, `Satellaview` | `SNES` | `.sfc` | Strip 512-byte copier headers on `.smc` when hashing and on disk. |
 | `n64` | `Nintendo 64` | `N64` | `.z64` | Use the **BigEndian** DAT. Convert `.v64`/`.n64` to big-endian on placement. |
@@ -89,7 +89,10 @@ the Arcade Organizer fills with thousands of symlinks to the same MRAs, and
 a second path to a file already listed (a hard link or a symlink to it, same
 device and inode). A symlink to an MRA file elsewhere is followed.
 `_alternatives` holds distinct MRAs and is read. An MRA is refused unread
-above 1 MiB.
+above 16 MiB, a sanity bound: inline part data makes some a few MiB. The
+catalogue streams each file, keeping its metadata, zip references and rom
+structure; the hex of an inline part is checked as it passes and left in the
+file, recorded by its place, so no payload is held across a batch.
 
 An MRA is read again only when its size or modification time changes, or
 when the parser version changes. exFAT and FAT keep modification times to
@@ -116,23 +119,25 @@ plain zip name from `games/mame/`, a name starting with `/` from `games/`
 leaves `games/` is ignored. A title counts as have when every zip it names is
 present and its md5 check is not `mismatch` or `missing_part`.
 
-A library scan never walks the arcade platform's directories: hashing every
-member of every MAME zip on every scan is needless CPU and SD reads. Arcade
-is instead verified through three paths, all run by the arcade catalogue job
-(ARCHITECTURE.md "Arcade presence pass"), never a scan:
+Arcade on MiSTer runs from MRAs, so arcade needs MRAs under `_Arcade`: a
+MAME or HBMAME DAT with no MRAs is not a supported setup. A library scan
+never walks the arcade platform's directories; hashing every member of every
+MAME zip on every scan is needless CPU and SD reads. Arcade state comes from
+three places, never a scan:
 
-1. An MRA title's own md5 check, "MRA assembly" below.
-2. The presence pass: after storing titles, the same job reads every zip's
-   central directory under `games/mame` and `games/hbmame`, never
-   decompressing a member. A member whose CRC32 and size match a loaded
-   DAT's rom is recorded against it, at CRC32 level rather than a full hash;
-   this is how a DAT entry loaded for `arcade` (`source = 'dat'`) is ever
-   marked `have`, since nothing else scans it. A member of a zip a live MRA
-   names, that no DAT matches, is recorded `unverified` against the MRA's
-   own zip rom, so the next import's md5 check has a row to promote once it
-   reads that zip as a sibling. The pass prunes `files` rows whose zip or
-   member is gone, and is incremental by each zip's size and mtime.
-3. The import path, "MRA import" below, for a zip mistarr places itself.
+1. An MRA title's zip presence and md5 check, "MRA assembly" below, run by
+   the arcade catalogue job.
+2. The presence pass the same job runs after storing titles (ARCHITECTURE.md
+   "Arcade catalogue", step 4): it tracks which zips named by live MRAs exist
+   under `games/mame` and `games/hbmame` from a stat of each, giving such a
+   zip an `unverified` row against the MRA's zip rom that an md5 check reading
+   it as a sibling promotes, and it prunes `files` rows whose zip is gone. It
+   verifies nothing by itself.
+3. The import path, "MRA import" below, for a zip mistarr places. A loaded
+   MAME or HBMAME DAT only adds verification here: when an imported zip's MRA
+   carries no md5, its members are checked against the DAT entry of the same
+   set name with full hashes. A zip the user copies in is never checked
+   against a DAT.
 
 While any live MRA title exists, the arcade browse lists MRA titles only,
 and wanting an MRA title creates downloads only for its missing zips.
@@ -149,7 +154,7 @@ the rom from this subset and refuses anything else by name:
 |---|---|
 | `<part name zip crc>` | the member from the part's `zip`, else the rom's, trying each of a `\|` list in order; found by exact name, then case-insensitive name, then `crc` |
 | `offset`, `length`, `repeat` | numbers as C `strtoul` reads them (`0x` hex, leading-zero octal, decimal); `length="0"` takes the rest; `repeat="0"` emits nothing and reads nothing; the md5 check streams a named part again from its zip for each repeat, holding no part in memory; an offset past the end, `repeat` above 4096, an empty part repeated, and any offset or length that overflows are refused |
-| `<part>hex</part>` | inline bytes, digit pairs separated by spaces, commas or newlines |
+| `<part>hex</part>` | inline bytes, digit pairs separated by spaces, commas or newlines; the md5 check, one MRA at a time, decodes them again from the file straight into the digest, for each repeat, holding no payload |
 | `<interleave input="8" output="8..64">` | parts spread by `map`, hex digits read from the right, one per output byte: the k-th non-zero digit `d` writes input byte k of each word at output byte `first + d - 1 + gaps`, `first` being the first non-zero digit's position and `gaps` the zero digits after it so far; a missing `map` is `1`; a part that is not a whole number of words is refused |
 | `<patch offset operation="xor">hex</patch>` | overwrite or exclusive-or into the assembled bytes; past the end is refused |
 | `map` outside `<interleave>`, other `input` widths, `<group>` and any other element inside `<rom>` | refused |

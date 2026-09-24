@@ -186,6 +186,24 @@ export function fixtureTitle(id: number): TitleDetail {
         inferred: false,
         dat_version_id: 1,
         torrent_files_available: 2,
+        availability: [
+          {
+            source_id: 1,
+            source_name: 'Example Pack',
+            file_index: 0,
+            path: `NES/${base} (USA).nes`,
+            rom_id: id * 100,
+            confidence: 'name'
+          },
+          {
+            source_id: 2,
+            source_name: 'examplepack1.0',
+            file_index: 3,
+            path: 'example.nes',
+            rom_id: id * 100,
+            confidence: 'fuzzy'
+          }
+        ],
         roms: [
           {
             id: id * 100,
@@ -213,7 +231,17 @@ export function fixtureTitle(id: number): TitleDetail {
         retired: false,
         inferred: false,
         dat_version_id: 1,
-        torrent_files_available: 0,
+        torrent_files_available: 1,
+        availability: [
+          {
+            source_id: 2,
+            source_name: 'examplepack1.0',
+            file_index: 3,
+            path: 'example.nes',
+            rom_id: id * 100 + 1,
+            confidence: 'fuzzy'
+          }
+        ],
         roms: [
           {
             id: id * 100 + 1,
@@ -242,6 +270,7 @@ export function fixtureTitle(id: number): TitleDetail {
         inferred: false,
         dat_version_id: 1,
         torrent_files_available: 0,
+        availability: [],
         roms: [
           {
             id: id * 100 + 2,
@@ -281,6 +310,7 @@ export const fixtureStatus: SystemStatus = {
   override: null,
   waiting: [{ id: 2, kind: 'scan', state: 'queued', detail: 'nes' }],
   disk_free_bytes: 12_400_000_000,
+  dats_dir: '/media/fat/mistarr/dats',
   rss_bytes: 41_000_000,
   launch: 'ready'
 };
@@ -308,7 +338,52 @@ export const fixtureDats: DatVersion[] = [
     loaded_at: 1_770_000_000,
     superseded_by: null,
     game_count: 240,
-    retired: false
+    retired: false,
+    family: 'example console dat',
+    reason: null,
+    suggested: []
+  },
+  {
+    id: 5,
+    platform_id: 'nes',
+    dat_name: 'mistarr samples - Nintendo Entertainment System (Headered)',
+    version: '1',
+    source_file: 'mistarr samples - Nintendo Entertainment System (Headered).dat',
+    loaded_at: 1_770_010_800,
+    superseded_by: null,
+    game_count: 4,
+    retired: false,
+    family: 'mistarr samples - nintendo entertainment system',
+    reason: null,
+    suggested: []
+  },
+  {
+    id: 3,
+    platform_id: 'megadrive',
+    dat_name: 'Example Vendor - Mega Drive - Genesis (DB Export)',
+    version: '20260101-000000',
+    source_file: 'Example Vendor - Mega Drive - Genesis (DB Export) (20260101-000000).zip',
+    loaded_at: 1_770_007_200,
+    superseded_by: null,
+    game_count: 310,
+    retired: false,
+    family: 'example vendor - mega drive - genesis',
+    reason: null,
+    suggested: []
+  },
+  {
+    id: 4,
+    platform_id: 'megadrive',
+    dat_name: 'Example Vendor - Mega Drive - Genesis',
+    version: '20251201-000000',
+    source_file: 'Example Vendor - Mega Drive - Genesis (20251201-000000).dat',
+    loaded_at: 1_769_000_000,
+    superseded_by: 3,
+    game_count: 305,
+    retired: false,
+    family: 'example vendor - mega drive - genesis',
+    reason: 'Replaced by Example Vendor - Mega Drive - Genesis (DB Export) version 20260101-000000',
+    suggested: []
   },
   {
     id: 2,
@@ -319,7 +394,10 @@ export const fixtureDats: DatVersion[] = [
     loaded_at: 1_770_003_600,
     superseded_by: null,
     game_count: 88,
-    retired: false
+    retired: false,
+    family: 'unbound sample dat',
+    reason: null,
+    suggested: []
   }
 ];
 
@@ -371,6 +449,16 @@ export const fixtureIncomingDats: IncomingFile[] = [
     modified: 1_770_040_000
   },
   {
+    file: 'Example Handheld (20260101).xml',
+    size: 4_096,
+    state: 'rejected',
+    reason:
+      'root element is <softwarelist>; expected a Logiqx DAT (<datafile>) or a No-Intro DB export (<header> followed by <datafile>)',
+    job_id: null,
+    progress: null,
+    modified: 1_770_039_500
+  },
+  {
     file: 'notes.txt',
     size: 12,
     state: 'rejected',
@@ -402,9 +490,19 @@ export function fixtureSourceFiles(): SourceFile[] {
       rom_id: 1,
       rom_name: 'Example Quest (USA).nes',
       title_id: 1,
-      confidence: 'name'
+      confidence: 'name',
+      candidates: []
     },
-    { file_index: 1, path: 'Sample Racer (USA).nes', size: 262144, rom_id: null, rom_name: null, title_id: null, confidence: null }
+    {
+      file_index: 1,
+      path: 'Sample Racer (USA).nes',
+      size: 262144,
+      rom_id: null,
+      rom_name: null,
+      title_id: null,
+      confidence: null,
+      candidates: [{ rom_id: 2, rom_name: 'Sample Racer (World).nes', title_id: 2, confidence: 'fuzzy' }]
+    }
   ];
 }
 

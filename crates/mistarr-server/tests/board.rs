@@ -351,6 +351,65 @@ async fn start_transmission_runs_the_opt_in_service() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rejected_dat_can_be_retried_after_a_fix_or_deleted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = config_in(dir.path());
+    let booted = boot_with(dir, config).await;
+    let mut events = booted.running.app.events.subscribe(None).live;
+    let dats = booted.dir.path().join("data/dats");
+    drop_file(&dats, "fixed.dat", b"<softwarelist/>");
+    drop_file(&dats, "junk.xml", b"<other/>");
+    wait_event(&mut events, EventKind::DatRejected, "fixed.dat").await;
+    wait_event(&mut events, EventKind::DatRejected, "junk.xml").await;
+
+    let path = "/api/v1/dats/rejected/fixed.dat/retry";
+    let refused = common::request_plain(booted.addr(), "POST", path, &[], None).await;
+    assert_eq!(refused.status, 403, "{}", refused.body);
+    std::fs::write(dats.join("rejected/fixed.dat"), no_intro_dat("1", 2)).expect("fix");
+    let r = request(booted.addr(), "POST", path, &[], None).await;
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert_eq!(r.json()["file"], "fixed.dat");
+    assert!(r.json()["job_id"].is_number());
+    wait_event(&mut events, EventKind::DatLoaded, "fixed.dat").await;
+    assert!(dats.join("loaded/fixed.dat").is_file());
+    assert!(!dats.join("rejected/fixed.dat.reason.txt").exists());
+
+    let gone = request(booted.addr(), "POST", path, &[], None).await;
+    assert_eq!(gone.status, 404, "{}", gone.body);
+    let bad = request(
+        booted.addr(),
+        "DELETE",
+        "/api/v1/dats/rejected/..%2Fx",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(bad.status, 400, "{}", bad.body);
+    let del = "/api/v1/dats/rejected/junk.xml";
+    let r = request(booted.addr(), "DELETE", del, &[], None).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    assert!(!dats.join("rejected/junk.xml").exists());
+    assert!(!dats.join("rejected/junk.xml.reason.txt").exists());
+    let listed = json_of(&booted, "/api/v1/dats/incoming").await;
+    assert_eq!(listed["total"], 0, "{listed}");
+
+    let loaded = json_of(&booted, "/api/v1/dats").await;
+    let id = loaded["items"][0]["id"].as_i64().expect("id");
+    let remove = format!("/api/v1/dats/{id}");
+    let refused = common::request_plain(booted.addr(), "DELETE", &remove, &[], None).await;
+    assert_eq!(refused.status, 403, "{}", refused.body);
+    let r = request(booted.addr(), "DELETE", &remove, &[], None).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    let after = json_of(&booted, "/api/v1/dats").await;
+    assert_eq!(after["items"][0]["retired"], true, "{after}");
+    assert!(after["items"][0]["reason"].is_string(), "{after}");
+    assert!(dats.join("loaded/fixed.dat").is_file(), "the file stays");
+    let missing = request(booted.addr(), "DELETE", "/api/v1/dats/999", &[], None).await;
+    assert_eq!(missing.status, 404, "{}", missing.body);
+    booted.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn incoming_files_show_why_they_are_not_loaded() {
     let booted = boot_with_core(tempfile::tempdir().expect("tempdir")).await;
     let mut events = booted.running.app.events.subscribe(None).live;

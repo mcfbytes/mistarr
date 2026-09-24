@@ -15,9 +15,10 @@ const BUF_SIZE: usize = 256 * 1024;
 /// Header handling applied while hashing, one variant per row of the
 /// "Header rules" table in `docs/PLATFORMS.md`.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HeaderRule {
     /// Hash the whole file.
+    #[default]
     None,
     /// iNES: skip the 16-byte header when it starts with `NES\x1a`.
     Ines,
@@ -31,6 +32,62 @@ pub enum HeaderRule {
     /// normalise to big-endian while hashing.
     N64,
 }
+
+impl HeaderRule {
+    /// The rule a platform table `header_rule` name stands for; unknown names hash whole files.
+    ///
+    /// ```
+    /// use mistarr_core::hash::HeaderRule;
+    /// assert_eq!(HeaderRule::from_name("ines"), HeaderRule::Ines);
+    /// assert_eq!(HeaderRule::from_name("none"), HeaderRule::None);
+    /// assert_eq!(HeaderRule::from_name("other"), HeaderRule::None);
+    /// ```
+    #[must_use]
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "ines" => Self::Ines,
+            "smc" => Self::Smc,
+            "a78" => Self::A78,
+            "lnx" => Self::Lnx,
+            "n64" => Self::N64,
+            _ => Self::None,
+        }
+    }
+
+    /// Whether the rule drops a header a headered DAT would include in its hashes.
+    ///
+    /// ```
+    /// use mistarr_core::hash::HeaderRule;
+    /// assert!(HeaderRule::Lnx.strips_header());
+    /// assert!(!HeaderRule::Smc.strips_header());
+    /// ```
+    #[must_use]
+    pub fn strips_header(self) -> bool {
+        matches!(self, Self::Ines | Self::A78 | Self::Lnx)
+    }
+
+    /// Bytes of header the rule skips when it finds one, 0 when it skips none.
+    ///
+    /// ```
+    /// use mistarr_core::hash::HeaderRule;
+    /// assert_eq!((HeaderRule::Ines.header_len(), HeaderRule::N64.header_len()), (16, 0));
+    /// ```
+    #[must_use]
+    pub fn header_len(self) -> u64 {
+        match self {
+            Self::Ines => INES_HEADER as u64,
+            Self::Smc => SMC_HEADER as u64,
+            Self::A78 => A78_HEADER as u64,
+            Self::Lnx => LNX_HEADER as u64,
+            Self::None | Self::N64 => 0,
+        }
+    }
+}
+
+const INES_HEADER: usize = 16;
+const SMC_HEADER: usize = 512;
+const A78_HEADER: usize = 128;
+const LNX_HEADER: usize = 64;
 
 /// Error reading a zip archive's central directory or one of its members.
 #[derive(Debug, thiserror::Error)]
@@ -119,12 +176,12 @@ fn hex(bytes: &[u8]) -> String {
 pub fn hash_reader<R: Read>(r: R, rule: HeaderRule, size_hint: Option<u64>) -> io::Result<HashSet> {
     match rule {
         HeaderRule::None => hash_stream(r, &[]),
-        HeaderRule::Ines => hash_with_magic_skip(r, 4, 16, |p| p == b"NES\x1a"),
+        HeaderRule::Ines => hash_with_magic_skip(r, 4, INES_HEADER, |p| p == b"NES\x1a"),
         HeaderRule::Smc => hash_smc(r, size_hint),
-        HeaderRule::A78 => {
-            hash_with_magic_skip(r, 10, 128, |p| p.len() >= 10 && &p[1..10] == b"ATARI7800")
-        }
-        HeaderRule::Lnx => hash_with_magic_skip(r, 4, 64, |p| p == b"LYNX"),
+        HeaderRule::A78 => hash_with_magic_skip(r, 10, A78_HEADER, |p| {
+            p.len() >= 10 && &p[1..10] == b"ATARI7800"
+        }),
+        HeaderRule::Lnx => hash_with_magic_skip(r, 4, LNX_HEADER, |p| p == b"LYNX"),
         HeaderRule::N64 => hash_n64(r),
     }
 }
@@ -186,9 +243,10 @@ fn hash_with_magic_skip<R: Read>(
 }
 
 fn hash_smc<R: Read>(mut r: R, size_hint: Option<u64>) -> io::Result<HashSet> {
+    let header = SMC_HEADER as u64;
     if let Some(size) = size_hint {
-        if size % 1024 == 512 {
-            discard(&mut r, 512)?;
+        if size % 1024 == header {
+            discard(&mut r, SMC_HEADER)?;
         }
         return hash_stream(r, &[]);
     }
@@ -207,16 +265,16 @@ fn hash_smc<R: Read>(mut r: R, size_hint: Option<u64>) -> io::Result<HashSet> {
         whole.update(chunk);
         let pos_before = total;
         total += n as u64;
-        if pos_before >= 512 {
+        if pos_before >= header {
             skipped.update(chunk);
-        } else if total > 512 {
-            // pos_before < 512 here, so the difference always fits in usize.
+        } else if total > header {
+            // pos_before < header here, so the difference always fits in usize.
             #[allow(clippy::cast_possible_truncation)]
-            let split = (512 - pos_before) as usize;
+            let split = (header - pos_before) as usize;
             skipped.update(&chunk[split..]);
         }
     }
-    Ok(if total % 1024 == 512 {
+    Ok(if total % 1024 == header {
         skipped.finish()
     } else {
         whole.finish()
@@ -393,6 +451,21 @@ impl Md5Stream {
 mod tests {
     use super::*;
     use std::io::{Cursor, Write};
+
+    #[test]
+    fn rules_name_and_measure_their_headers() {
+        for (name, rule, len) in [
+            ("none", HeaderRule::None, 0),
+            ("ines", HeaderRule::Ines, 16),
+            ("smc", HeaderRule::Smc, 512),
+            ("a78", HeaderRule::A78, 128),
+            ("lnx", HeaderRule::Lnx, 64),
+            ("n64", HeaderRule::N64, 0),
+        ] {
+            assert_eq!(HeaderRule::from_name(name), rule);
+            assert_eq!(rule.header_len(), len);
+        }
+    }
 
     #[test]
     fn md5_stream_matches_one_pass() {

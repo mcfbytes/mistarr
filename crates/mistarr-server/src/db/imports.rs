@@ -184,6 +184,29 @@ pub fn rom(conn: &Connection, id: i64) -> Result<Option<EntryRom>> {
         .optional()?)
 }
 
+/// Whether rom `id` or its title is retired, as after its DAT was removed; false for none.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(!mistarr_server::db::imports::rom_retired(&conn, 1).unwrap());
+/// ```
+pub fn rom_retired(conn: &Connection, id: i64) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT r.retired = 1 OR t.retired = 1 FROM roms r JOIN titles t ON t.id = r.title_id
+             WHERE r.id = ?1",
+            [id],
+            |r| r.get(0),
+        )
+        .optional()?
+        .unwrap_or(false))
+}
+
 /// The title owning rom `rom_id`.
 ///
 /// # Errors

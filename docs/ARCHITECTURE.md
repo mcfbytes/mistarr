@@ -42,7 +42,7 @@ contracts in this document.
 
 | Crate | Responsibility | Depends on |
 |---|---|---|
-| `mistarr-core` | Domain types. Logiqx DAT parser. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. | none |
+| `mistarr-core` | Domain types. DAT parser for Logiqx XML and No-Intro DB exports. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. | none |
 | `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
 | `mistarr-sources` | Watched-directory scanner. `.torrent` (bencode) and `.magnet` parsing into a file list. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
 | `mistarr-clients` | `DownloadClient` trait. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping. | none |
@@ -118,9 +118,9 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    between two listings. Accept `.dat`, `.xml`, and `.zip` containing either;
    each member of a zip is a separate DAT, and a file whose import job failed
    is enqueued again on a later listing. The `dat_import` job runs on the
-   background lane, so a loaded core does not hold it. Parse Logiqx
-   `<datafile>` with `quick-xml`, streaming. Each game is parsed outside the
-   database's write lock and appended to `dat_stage` in chunks of 2,000
+   background lane, so a loaded core does not hold it. Parse the DAT
+   (Logiqx, or a DB export read twice for its parents) with `quick-xml`,
+   streaming. Each game is parsed outside the database's write lock and appended to `dat_stage` in chunks of 2,000
    games, one short transaction per chunk; one transaction then applies the
    stage (steps 3 to 5), so readers see the old titles or the new ones and
    never part of a DAT. A parse error empties the stage and changes nothing
@@ -131,13 +131,20 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    is still a row, retired or not, as it would had it finished just before.
 2. Identify the platform from the DAT header name using the table in
    PLATFORMS.md, falling back to the platform an earlier version of the same
-   name was bound to. A header without a name takes the member's or file's
-   stem as dropped. Unknown DAT names are stored as an unbound
+   family was bound to. A header without a name takes the member's or file's
+   stem as dropped; a DB export takes `<System> (DB Export)` from its member's
+   or file's name (VERIFICATION.md "DB export"). Unknown DAT names are stored as an unbound
    `dat_versions` row the user can bind in the UI; binding re-reads the file
    from `dats/loaded/` and loads its titles.
 3. Upsert `dat_versions`, then `titles` and `roms`. A newer version of the same
-   DAT name supersedes the old one: entries not present in the new DAT are
-   marked `retired`, never deleted, so verified files keep their provenance.
+   DAT family on the same platform supersedes the old one, whether it comes
+   as a Logiqx DAT or a DB export (VERIFICATION.md "DAT families"); other
+   families on the platform stay live. Titles of the same name are reused
+   across the family's versions, and entries not present in the new DAT are
+   marked `retired`, never deleted. The platform's recompute job is queued;
+   it matches files of roms that retired again against the live roms by
+   their stored hashes, in chunks, or marks them `unverified`, recomputes the
+   picks and then queues a re-map of the platform's bound sources.
 4. Parent/clone data is read from `cloneof` attributes when present. When
    absent, clone groups are inferred by normalising the name (strip region,
    revision, language and flag tags) so 1G1R still works with plain DATs.
@@ -155,8 +162,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    first time every wizard step reports done. Walk each platform's
    `games/<Core>` directory and its other accepted directories, except
    arcade: its zips are never walked as cartridges, since presence and
-   verification there come only from the arcade catalogue's own presence
-   pass, its md5 check, and the import path (PLATFORMS.md "MRA catalogue").
+   verification there come only from the arcade catalogue, its presence
+   pass and md5 check, and the import path (PLATFORMS.md "MRA catalogue").
    A manual scan of `arcade` queues the arcade catalogue instead
    (`POST /system/scan`, API.md "System"). Skip
    while a core is running; the timer goes through the same heavy lane as
@@ -168,7 +175,9 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    members that cannot match anything.
 3. Match by SHA1, then MD5, then CRC32 plus size. Record `verified`,
    `unverified` (no DAT match) or `misnamed` (match but wrong filename).
-4. Scans are resumable: hashed rows are written 256 at a time and the
+4. Rows the walk did not see are deleted at the end, except under a
+   directory that exists but could not be listed, whose rows are kept.
+5. Scans are resumable: hashed rows are written 256 at a time and the
    finished directories at most every 2 s. A directory not yet recorded as
    finished is walked again after a restart, and its unchanged files are not
    hashed again.
@@ -201,18 +210,46 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    most once per run. Placing one of its zips reruns this for every title naming
    that zip. Nothing is ever fetched, rebuilt, merged or split.
 4. Arcade presence pass: after titles are stored and retired, the same job
-   walks every zip directly under `games/mame` and `games/hbmame`, in
-   batches, reading each one's central directory only (member names, sizes
-   and CRC32; never decompressed). A member whose CRC32 and size match a
-   loaded DAT's rom is recorded against it, at CRC32 level rather than the
-   scan's full hash. A member of a zip a live MRA names, that no DAT
-   matches, is recorded `unverified` against the MRA's own zip rom, giving
-   the next import's `verify_siblings` a row to promote once it reads that
-   zip as a sibling; without this row the promotion was a silent no-op. A
-   zip that fails to open gets one bare-path row and a warning, not a
-   failed job. The pass is incremental by each zip's size and mtime, like a
-   scan, and ends by deleting `files` rows for this platform whose zip or
-   member it did not see, so a zip removed from disk drops out of `have`.
+   tracks which zips named by live MRAs are on disk. It takes the set of zips
+   live MRA titles name once per run, `{dir}/{name}` lowercased, each with
+   every live zip rom naming it, then lists `games/mame` and `games/hbmame`
+   and, 500 zips per batch, stats each zip (size and mtime), looks up its
+   existing `files` rows with the reader held for that lookup only, and
+   writes the batch in one transaction. Rows are matched to a zip ignoring
+   ASCII case, as exFAT names files (the `files_rel_lower` index), and keep
+   the spelling they were written with. A member row's zip is its
+   `rel_path` up to the first `.zip#`, in any case. The rules per zip:
+   - Member rows (`dir/name.zip#member`, written by the import path) stand
+     for the zip. While every one carries the zip's mtime they are never
+     touched. When the mtime moved, the zip's central directory is read
+     (never decompressed): a member with the same size and CRC32 keeps its
+     hashes and state and takes the new mtime; one whose size or CRC32
+     changed gets them recorded, loses its md5 and sha1, keeps `rom_id` and
+     becomes `unverified` until an import or md5 check promotes it again; a
+     member no longer in the zip loses its row. A zip that cannot be read is
+     logged and keeps every row as it was.
+   - Otherwise a zip a live MRA names gets one presence row,
+     `dir/name.zip`, `unverified`, no hashes, `rom_id` the lowest live zip
+     rom naming it. It is left as it is while the zip's size and mtime are
+     unchanged and its `rom_id` is one of the live zip roms naming the zip,
+     so a row `verify_siblings` promoted under any of those MRAs stays
+     `verified`; any other change rewrites it `unverified`. A presence row
+     is removed once member rows exist for its zip or no live MRA names the
+     zip, so the rows follow MRAs added and removed even when no zip
+     changed. A second spelling of one zip's presence row is removed.
+   - Only a stat is needed to track presence; the central directory is read
+     only for member rows of a changed zip. A zip that cannot be stated is
+     logged and its rows are kept.
+   A directory that exists but cannot be listed (an I/O or permission
+   error) is logged and skipped for the run: nothing under it is recorded
+   or pruned. The pass then walks each directory's rows a page at a time and
+   deletes those whose zip is neither listed nor on disk, keeping a row
+   whose zip's existence cannot be checked, and clearing their
+   `import_log` references in the same statement set, so a zip removed from
+   disk drops out of `have`. Memory holds the directory listing's names, the
+   live MRA zip set and one batch. It never records a row without a
+   `rom_id`, and never verifies anything itself: a DAT-sourced arcade title
+   is verified only when a zip is imported (PLATFORMS.md "MRA import").
 
 ### Source import
 
@@ -233,7 +270,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    retried every 15 s.
 3. For each file in the torrent, normalise the leaf name and look it up
    against every loaded DAT by name, then by base name plus size. Compute
-   per-platform hit rates.
+   per-platform hit rates. The fuzzy and size-only tiers of
+   VERIFICATION.md "Pre-download matching" do not count toward the rate.
 4. Bind the source to the platform with the best rate at or above
    `sources.bind_threshold` (default 0.6). Below that, the source is
    `unbound` and the user picks a platform or discards it.
@@ -250,17 +288,36 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    automatically, and `source.changed` is sent only for sources whose state
    or platform changed.
 5. Store the file list in `torrent_files` with the matched `rom_id` and its
-   confidence where one exists. Move the file to `sources/loaded/` and emit
-   `source.changed`. A `.torrent` is not told to the client until something
-   is wanted.
+   confidence where one exists, and the further candidate roms of every tier
+   in `torrent_candidates` (VERIFICATION.md "Pre-download matching"). Move
+   the file to `sources/loaded/` and emit `source.changed`. A `.torrent` is
+   not told to the client until something is wanted. Binding and mapping
+   share one pass over the files, and a source with nothing stored gets its
+   matches written straight. When a DAT loads titles for a platform, the
+   rebind of step 4 runs and a background `remap_sources` job maps every
+   source bound to that platform again; the same job is queued when a DAT is
+   retired, when an arcade catalogue run stores or retires titles, and, for
+   every platform, at each start. A source is skipped when its `map_stamp`
+   equals the platform's current stamp: its live DAT versions with their load
+   times, leaving out the MRA catalogue's version, whose load time every run
+   touches, and the count and ids of its live roms. Otherwise only the rows
+   that changed are written, 2 000 per transaction, with its hit rate
+   refreshed and `source.changed` sent only when its mapping changed. A row
+   an import proved by hash is never overwritten, and rebinding to the same
+   platform keeps it; unbinding forgets every match, proofs included.
 
 ### Wanted and transfer
 
 1. The user marks a title as wanted. mistarr creates a download for each of
    its roms without a verified file, choosing the best `torrent_file` for it
-   across bound sources: an exact size match first, then a name match, then
-   the source with fewer open downloads. With no such file the download is
-   `wanted` until a source binds that has one.
+   across bound sources, from its `torrent_files` matches and its
+   `torrent_candidates` alike: a file a hash proved or a name tier matched
+   before any `fuzzy` or `size` candidate, then, within that tier, a size
+   match (exact, or with the platform's header on top), then the stronger
+   confidence (`hash`, `name`, `base`, `fuzzy`, `size`), then the source
+   with fewer open downloads. A file a `bad` download of the rom used is never chosen.
+   With no such file the download is `wanted` until a source binds that has
+   one. Two wanted versions may share one file.
 2. A light `transfer` job takes `queued` downloads per source. If the torrent
    is not yet in the client, create `staging/<infohash>/` (rtorrent makes only
    the last level of a download path) and add the torrent paused to it, through
@@ -293,10 +350,25 @@ does nothing.
    staged zip, and match it against the roms of the download's own entry, so
    byte-identical regional variants and identical disc tracks resolve to the
    wanted rom. Only when nothing of the entry matches is the rest of the DAT
-   searched, and the file is a mismatch either way: the download becomes
+   searched. A cartridge file that is a live rom of another live, non-BIOS
+   entry in the wanted entry's clone group is that version: the wanted
+   download becomes `bad` with "the file in this source is a different
+   version: <name>", the file is recorded as proven to be that rom, and the
+   wanted rom is wanted again (DATA-MODEL.md "downloads.state"). The file is
+   placed and verified as that version through steps 3 to 5 for it, and the
+   version's other open downloads are cancelled as redundant; when the
+   library already holds that version verified, nothing is written and
+   `import_log` records `skipped_existing` against the file it holds; when
+   the version's place holds an unverified file, that file is never
+   replaced and the staged file is quarantined instead. When another
+   download of the same file placed or kept it first, a later one ends the
+   same way; this is never inferred for a file inside a zip. Any other file
+   is a mismatch: the download becomes
    `bad` and the file moves to `staging/quarantine/<infohash>/` beside a
    `<name>.report.txt` naming the expected rom, the actual hashes and the
-   other entry it matches, if any. An entry flagged `bios` is refused: the
+   other entry it matches, if any; when the download's file was only a
+   `fuzzy` or `size` candidate, the rom is wanted again on its next best
+   file. An entry flagged `bios` is refused: the
    download is `failed` and the file stays in staging. A zip an MRA title
    names is verified and placed as PLATFORMS.md "MRA import" describes.
 2. A romset or arcade zip verifies only when every member is a rom of the
@@ -322,7 +394,8 @@ does nothing.
    of a zip placed whole, as `a.zip#member`), which marks the title `have`,
    log the action in `import_log`, set the downloads `done` and emit
    `import.done`.
-6. Once a source has a `done` download and none queued, transferring,
+6. Once a source has a download that placed its file (`done`, or `bad`
+   after placing another version) and none queued, transferring,
    checking or importing, and its seed policy is `none`, remove the torrent
    from the client without deleting data, clear `sources.client_id` and
    remove the empty directories under `staging/<infohash>/`.
@@ -406,8 +479,8 @@ shutdown is left `queued` for this.
 | SQLite other | `mmap_size = 0`, `temp_store = FILE` under `<data>/tmp` (`SQLITE_TMPDIR`, set at startup and emptied of stale files, since the board's `/tmp` is RAM), WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB |
 | SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk |
 | Hashing buffer | 256 KiB, one file at a time |
-| Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches |
-| Arcade presence pass | 500 zips per batch, central directory only, never decompressed |
+| Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
+| Arcade presence pass | 500 zips per batch, stat only unless import rows of a changed zip need its central directory; the listing's names and the live MRA zip set persist across batches |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
 | Browse page or search, with its total | under 100 ms on the board with every major platform's DAT loaded; `tests/browse.rs` holds a host bound and `mistarr bench-search` measures the board |
 | SPA bundle, gzipped | under 200 KiB |

@@ -366,6 +366,275 @@ async fn the_job_moves_files_and_publishes_events() {
         .expect("get")
         .expect("row");
     assert_eq!(row.progress, Some(json!({ "groups": 1, "picks": 1 })));
+    let remaps = app
+        .db
+        .read(|c| crate::db::jobs::count_kind(c, crate::jobs::remap::KIND))
+        .await
+        .expect("count");
+    assert_eq!(remaps, 1, "a recompute queues a re-map of its platform");
+}
+
+/// A DB export of two NES games, the clone listed first, each with a headered and a headerless file.
+fn db_export(version: &str) -> String {
+    let file = |id: u8, sha1: char| {
+        format!(
+            "<source><details section=\"Trusted Dump\"/>\
+             <file extension=\"nes\" size=\"32784\" crc32=\"0000000{id}\" sha1=\"{}\" header=\"4E 45 53 1A 02 01\" format=\"Headered\"/>\
+             <file extension=\"unh\" size=\"32768\" crc32=\"1000000{id}\" sha1=\"{}\" format=\"Headerless\"/></source>",
+            "e".repeat(40),
+            sha1.to_string().repeat(40),
+        )
+    };
+    format!(
+        "<?xml version=\"1.0\"?><header><version>{version}</version></header><datafile>\
+         <game name=\"Example Quest (USA)\"><archive number=\"0002\" clone=\"0001\" region=\"USA\" languages=\"En\"/>{}{}</game>\
+         <game name=\"Example Quest (Japan)\"><archive number=\"0001\" clone=\"P\" region=\"Japan\" languages=\"Ja\"/>{}</game>\
+         </datafile>",
+        file(1, 'a'),
+        file(1, 'a'),
+        file(2, 'b'),
+    )
+}
+
+#[tokio::test]
+async fn a_zipped_db_export_loads_headerless_roms_with_clones() {
+    let (_dir, app) = state();
+    let dats_dir = app.config().paths.dats();
+    std::fs::create_dir_all(&dats_dir).expect("mkdir");
+    let stem = "Example Vendor - Nintendo Entertainment System (DB Export) (20260101-000000)";
+    let pack = dats_dir.join(format!("{stem}.zip"));
+    let member = format!("{stem}.xml");
+    std::fs::write(&pack, zip_of(&[(&member, &db_export("20260101-000000"))])).expect("write");
+    let id = Scheduler::run_inline(&app, Arc::new(DatImport::new(&pack)))
+        .await
+        .expect("run");
+    let row = app
+        .db
+        .read(move |c| rows::get(c, id))
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.state, JobState::Done, "{:?}", row.progress);
+    let (name, version, platform): (String, String, Option<String>) = app
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT dat_name, version, platform_id FROM dat_versions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+        .expect("version");
+    assert_eq!(
+        name,
+        "Example Vendor - Nintendo Entertainment System (DB Export)"
+    );
+    assert_eq!(version, "20260101-000000");
+    assert_eq!(platform.as_deref(), Some("nes"));
+    let roms: Vec<(String, String, i64, String, String, bool)> = app
+        .db
+        .read(|c| {
+            let mut stmt = c.prepare(
+                "SELECT t.name, r.name, r.size, r.sha1,
+                        (SELECT json_group_array(language) FROM
+                          (SELECT language FROM title_languages WHERE title_id = t.id ORDER BY pos)),
+                        t.parent_id = p.id
+                 FROM roms r JOIN titles t ON t.id = r.title_id
+                 JOIN titles p ON p.name = 'Example Quest (Japan)' ORDER BY t.name",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+        .await
+        .expect("roms");
+    assert_eq!(roms.len(), 2, "{roms:?}");
+    assert_eq!(roms[1].0, "Example Quest (USA)");
+    assert_eq!(roms[1].1, "Example Quest (USA).nes");
+    assert_eq!(roms[1].2, 32_768);
+    assert_eq!(roms[1].3, "a".repeat(40));
+    assert_eq!(roms[1].4, "[\"En\"]");
+    assert!(roms[1].5, "the clone is grouped under its parent");
+    assert!(dats_dir.join(format!("loaded/{stem}.zip")).is_file());
+}
+
+#[test]
+fn a_plain_db_export_takes_its_name_from_the_file() {
+    let c = conn();
+    let mut req = request(false, None);
+    req.file_stem = "Example Vendor - Game Boy (DB Export) (7)".into();
+    let xml = db_export("").replace("<version></version>", "");
+    let o = import_stream(
+        &c.db,
+        Cursor::new(xml.as_bytes()),
+        &req,
+        "",
+        export_parents(xml.as_bytes()).expect("index"),
+    )
+    .expect("import");
+    let l = loaded(o);
+    assert_eq!(l.platform.map(|p| p.0).as_deref(), Some("gb"));
+    let version: String = c
+        .with(|x| Ok(x.query_row("SELECT version FROM dat_versions", [], |r| r.get(0))?))
+        .expect("version");
+    assert_eq!(version, "7");
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM roms WHERE name LIKE '%.gb' AND size = 32768"
+        ),
+        2,
+        "only the unh file matches the platform's image, named with its extension"
+    );
+}
+
+/// One export game per file set: `(extension, format, size, header bytes)`, plus a save extra.
+fn export_game(files: &[Sample]) -> String {
+    let mut x = String::from(
+        "<header/><datafile><game name=\"Example Quest (World)\"><archive number=\"1\" clone=\"P\"/><source>",
+    );
+    for (i, (ext, format, size, header)) in files.iter().enumerate() {
+        let header = if *header > 0 {
+            format!(" header=\"{}\"", "4e".repeat(*header))
+        } else {
+            String::new()
+        };
+        write!(
+            x,
+            "<file extension=\"{ext}\" format=\"{format}\" size=\"{size}\" crc32=\"{:08x}\"{header}/>",
+            i + 1
+        )
+        .expect("write");
+    }
+    x.push_str("<file extension=\"sav\" size=\"8\" crc32=\"0000ffff\" item=\"Save\"/>");
+    x.push_str("</source></game></datafile>");
+    x
+}
+
+/// A file of a representative export: extension, format, size and header length.
+type Sample = (String, &'static str, u64, usize);
+
+/// The file sets a representative export lists for `id`, and the rom name and size wanted.
+fn representative(id: &str, loads: &[&str]) -> Vec<(Vec<Sample>, String, u64)> {
+    let named = |ext: &str| format!("Example Quest (World).{ext}");
+    let f = |ext: &str, format, size, header| (ext.to_owned(), format, size, header);
+    match id {
+        "nes" => vec![(
+            vec![
+                f("nes", "Headered", 1040, 16),
+                f("unh", "Headerless", 1024, 0),
+            ],
+            named("nes"),
+            1024,
+        )],
+        "atari7800" => vec![(
+            vec![
+                f("a78", "Headered", 1152, 128),
+                f("bin", "Headerless", 1024, 0),
+            ],
+            named("a78"),
+            1024,
+        )],
+        "lynx" => vec![(
+            vec![
+                f("lnx", "Headered", 1088, 64),
+                f("lyx", "Headerless", 1024, 0),
+            ],
+            named("lnx"),
+            1024,
+        )],
+        "n64" => vec![(
+            vec![
+                f("z64", "BigEndian", 64, 0),
+                f("v64", "ByteSwapped", 64, 0),
+                f("n64", "LittleEndian", 64, 0),
+            ],
+            named("z64"),
+            64,
+        )],
+        "sgx" => vec![(vec![f("pce", "", 64, 0)], named("sgx"), 64)],
+        _ if loads.is_empty() => vec![(vec![f("zip", "", 64, 0)], named("zip"), 64)],
+        _ => loads
+            .iter()
+            .map(|e| (vec![f(e, "", 64, 0)], named(e), 64))
+            .collect(),
+    }
+}
+
+#[test]
+fn every_platform_takes_one_image_from_a_representative_export() {
+    for p in &mistarr_mister::platforms::PLATFORMS {
+        for (files, name, size) in representative(p.id, p.load_extensions) {
+            let xml = export_game(&files);
+            let dat = mistarr_core::dat::parse_dat_with(
+                xml.as_bytes(),
+                export_options(Some(p.id), HashMap::new()),
+            )
+            .expect("parse");
+            let roms = &dat.games[0].roms;
+            assert_eq!(roms.len(), 1, "{} from {files:?}: {roms:?}", p.id);
+            assert_eq!(roms[0].name, name, "{}", p.id);
+            assert_eq!(roms[0].size, size, "{}", p.id);
+        }
+    }
+}
+
+#[test]
+fn archive_status_adds_the_stage_flags_a_name_lacks() {
+    let c = conn();
+    let req = request(false, None);
+    let xml = "<header><version>1</version></header><datafile>\
+        <game name=\"Example Quest (USA)\"><archive number=\"0001\" clone=\"P\" status=\"Proto 2\"/></game>\
+        <game name=\"Example Quest (USA) (Beta)\"><archive number=\"0002\" clone=\"0001\" status=\"Beta\"/></game>\
+        </datafile>";
+    let mut req = req;
+    req.file_stem = "Example Vendor - Nintendo Entertainment System (DB Export) (1)".into();
+    loaded(
+        import_stream(
+            &c.db,
+            Cursor::new(xml.as_bytes()),
+            &req,
+            "",
+            export_parents(xml.as_bytes()).expect("index"),
+        )
+        .expect("import"),
+    );
+    let flags = |name: &str| -> String {
+        let name = name.to_owned();
+        c.with(move |x| {
+            Ok(x.query_row(
+                "SELECT (SELECT json_group_array(flag) FROM
+                       (SELECT flag FROM title_flags WHERE title_id = t.id ORDER BY pos))
+                     FROM titles t WHERE t.name = ?1",
+                [name],
+                |r| r.get(0),
+            )?)
+        })
+        .expect("flags")
+    };
+    assert_eq!(flags("Example Quest (USA)"), "[\"proto\"]");
+    assert_eq!(flags("Example Quest (USA) (Beta)"), "[\"beta\"]");
+}
+
+#[test]
+fn unknown_xml_is_rejected_naming_the_formats() {
+    let c = conn();
+    let o = import(&c, "<softwarelist/>", &request(false, None));
+    match o {
+        Outcome::Rejected(r) => assert!(r.contains("DB export"), "{r}"),
+        other => panic!("{other:?}"),
+    }
 }
 
 #[tokio::test]
@@ -441,11 +710,15 @@ fn binding_an_older_version_is_rejected_and_rolled_back() {
     let c = conn();
     let v1 = dat("Test Console", "1", &[("Example Quest (USA)", None)]);
     let old = loaded(import(&c, &v1, &request(false, None)));
-    loaded(import(
-        &c,
-        &dat("Test Console", "2", &[("Example Quest (USA)", None)]),
-        &request(false, None),
-    ));
+    let v2 = dat("Test Console", "2", &[("Example Quest (USA)", None)]);
+    let newer = loaded(import(&c, &v2, &request(false, None)));
+    let bind_newer = Bind {
+        version: newer.version,
+        platform: PlatformId("nes".into()),
+        dat_name: "Test Console".into(),
+        dat_version: "2".into(),
+    };
+    assert!(loaded(import(&c, &v2, &request(false, Some(bind_newer)))).has_titles);
     let bind = Bind {
         version: old.version,
         platform: PlatformId("nes".into()),
@@ -462,7 +735,30 @@ fn binding_an_older_version_is_rejected_and_rolled_back() {
         .expect("get")
         .expect("row");
     assert_eq!(row.platform_id, None);
-    assert_eq!(count(&c, "SELECT COUNT(*) FROM titles"), 0);
+    assert_eq!(
+        count(&c, "SELECT COUNT(*) FROM titles"),
+        1,
+        "only the bound newer version"
+    );
+}
+
+#[test]
+fn an_unbound_version_never_blocks_binding_one_of_its_family() {
+    let c = conn();
+    let v1 = dat("Test Console", "1", &[("Example Quest (USA)", None)]);
+    let old = loaded(import(&c, &v1, &request(false, None)));
+    loaded(import(
+        &c,
+        &dat("Test Console", "2", &[("Example Quest (USA)", None)]),
+        &request(false, None),
+    ));
+    let bind = Bind {
+        version: old.version,
+        platform: PlatformId("nes".into()),
+        dat_name: "Test Console".into(),
+        dat_version: "1".into(),
+    };
+    assert!(loaded(import(&c, &v1, &request(false, Some(bind)))).has_titles);
 }
 
 async fn job_state(app: &AppState, id: crate::db::jobs::JobId) -> rows::JobRow {
@@ -551,4 +847,400 @@ fn a_forgotten_file_is_reported_again() {
     assert!(w.poll(dir.path()).is_empty());
     w.forget(&a);
     assert_eq!(w.poll(dir.path()), std::slice::from_ref(&a));
+}
+
+const NES_LOGIQX: &str = "Example Vendor - Nintendo Entertainment System (Headered)";
+const NES_SAMPLES: &str = "Example Samples - Nintendo Entertainment System (Headered)";
+
+/// Loads a DB export under the file name `stem` at time `now`.
+fn import_export(c: &TestDb, xml: &str, stem: &str, now: i64) -> Loaded {
+    let mut req = request(false, None);
+    req.file_stem = stem.into();
+    req.now = now;
+    let parents = export_parents(xml.as_bytes()).expect("index");
+    loaded(import_stream(&c.db, Cursor::new(xml.as_bytes()), &req, "", parents).expect("import"))
+}
+
+fn import_at(c: &TestDb, xml: &str, now: i64) -> Loaded {
+    let mut req = request(false, None);
+    req.now = now;
+    loaded(import(c, xml, &req))
+}
+
+#[test]
+fn an_export_after_a_logiqx_dat_of_the_system_leaves_one_live_set() {
+    let c = conn();
+    let games = [
+        ("Example Quest (Japan)", None),
+        ("Example Quest (USA)", Some("Example Quest (Japan)")),
+        ("Mock Manor (World)", None),
+    ];
+    let logiqx = import_at(&c, &dat(NES_LOGIQX, "20260101-000000", &games), 1);
+    assert_eq!(logiqx.platform.as_ref().map(|p| p.0.as_str()), Some("nes"));
+    let stem = "Example Vendor - Nintendo Entertainment System (DB Export) (20260102-000000)";
+    let export = import_export(&c, &db_export(""), stem, 2);
+    assert_eq!(export.platform, logiqx.platform);
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM dat_versions WHERE superseded_by IS NULL"
+        ),
+        1
+    );
+    assert_eq!(
+        count(&c, "SELECT COUNT(*) FROM titles WHERE retired = 0"),
+        2,
+        "the titles the export lists, once each"
+    );
+    assert_eq!(
+        count(&c, "SELECT COUNT(*) FROM titles"),
+        3,
+        "titles of the same name are reused across forms"
+    );
+    let older = import_at(&c, &dat(NES_LOGIQX, "20260101-120000", &games), 3);
+    assert!(!older.has_titles, "an older version loaded later stays out");
+    assert_eq!(
+        count(&c, "SELECT COUNT(*) FROM titles WHERE retired = 0"),
+        2
+    );
+}
+
+/// Stores files `(path, crc32, rom id)` of 4 bytes on NES, removes `version` as
+/// `DELETE /dats/{id}` does and recomputes; returns how many files were matched again.
+fn remove_with_files(c: &TestDb, version: DatVersionId, files: &[(&str, &str, i64)]) -> usize {
+    c.with(|x| {
+        let nes = PlatformId("nes".into());
+        for (path, crc, id) in files {
+            let hashed = crate::db::files::Hashed {
+                crc32: Some(crc),
+                md5: None,
+                sha1: None,
+                header_rule: None,
+            };
+            let state = crate::db::files::FileState::Misnamed;
+            crate::db::files::upsert(x, &nes, path, 4, 1, &hashed, Some(*id), state, 1)?;
+        }
+        dats::retire(x, version, 1)?;
+        let matched = rematch_chunk(x, &nes)?;
+        titles::recompute_platform(x, "nes", &Prefs::default())?;
+        Ok(matched)
+    })
+    .expect("remove")
+}
+
+#[test]
+fn an_add_on_dat_coexists_and_shares_groups_by_rom() {
+    let c = conn();
+    let official = [("Example Quest (USA)", None), ("Mock Manor (World)", None)];
+    import_at(&c, &dat(NES_LOGIQX, "1", &official), 1);
+    let samples = [
+        ("Example Quest (USA) (Sample Copy)", None),
+        ("Mock Manor (World) (Sample Copy)", None),
+        ("Sample Only (World)", None),
+    ];
+    let added = import_at(&c, &dat(NES_SAMPLES, "1", &samples), 2);
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM dat_versions WHERE superseded_by IS NULL"
+        ),
+        2
+    );
+    assert_eq!(
+        count(&c, "SELECT COUNT(*) FROM titles WHERE retired = 0"),
+        5
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(DISTINCT group_root) FROM titles WHERE retired = 0"
+        ),
+        3,
+        "a game both DATs list with the same roms is one group"
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM titles WHERE retired = 0 AND is_1g1r_pick = 1"
+        ),
+        3
+    );
+    let rom = |name: &str| {
+        count(
+            &c,
+            &format!("SELECT r.id FROM roms r JOIN titles t ON t.id = r.title_id WHERE t.name = '{name}'"),
+        )
+    };
+    let (shared, own) = (
+        rom("Example Quest (USA) (Sample Copy)"),
+        rom("Sample Only (World)"),
+    );
+    let files = [("a.bin", "00000000", shared), ("b.bin", "00000002", own)];
+    assert_eq!(remove_with_files(&c, added.version, &files), 2);
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM files WHERE rom_id IS NULL AND state = 'unverified'"
+        ),
+        1,
+        "a file only the removed DAT listed becomes unmatched"
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT r.id FROM files f JOIN roms r ON r.id = f.rom_id WHERE f.rel_path = 'a.bin'"
+        ),
+        rom("Example Quest (USA)"),
+        "a file another live DAT lists matches it again"
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(DISTINCT group_root) FROM titles WHERE retired = 0"
+        ),
+        2
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM dat_versions WHERE superseded_by IS NULL AND retired = 0"
+        ),
+        1
+    );
+}
+
+#[test]
+fn an_export_header_lets_placement_add_it_back() {
+    let c = conn();
+    let header = "4E 45 53 1A 02 01 00 00 00 00 00 00 00 00 00 00";
+    let xml = format!(
+        "<header/><datafile><game name=\"Example Quest (World)\"><archive number=\"1\" clone=\"P\"/><source>\
+         <file extension=\"nes\" size=\"32784\" crc32=\"00000001\" header=\"{header}\" format=\"Headered\"/>\
+         <file extension=\"unh\" size=\"32768\" crc32=\"00000002\" format=\"Headerless\"/>\
+         </source></game></datafile>"
+    );
+    let stem = "Example Vendor - Nintendo Entertainment System (DB Export) (1)";
+    import_export(&c, &xml, stem, 1);
+    let (name, size, stored): (String, i64, String) = c
+        .with(|x| {
+            Ok(x.query_row("SELECT name, size, header FROM roms", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?)
+        })
+        .expect("rom");
+    let bytes = crate::jobs::import::parse_header(&stored).expect("hex");
+    assert_eq!(bytes.len(), 16);
+    let entry = mistarr_mister::DatEntry {
+        name: "Example Quest (World)".into(),
+        roms: vec![mistarr_mister::DatRom {
+            name,
+            size: u64::try_from(size).expect("size"),
+            header: Some(bytes.clone()),
+        }],
+    };
+    let staged = mistarr_mister::StagedFile {
+        path: "x.nes".into(),
+        size: u64::try_from(size).expect("size"),
+        kind: mistarr_mister::StagedKind::File,
+        head: vec![0xA9, 0x00],
+        members: Vec::new(),
+    };
+    let nes = mistarr_mister::adapter_for(&PlatformId("nes".into())).expect("nes");
+    let plan = nes.plan_placement(&entry, &staged).expect("plan");
+    assert!(
+        plan.steps.contains(&mistarr_mister::Step::AddHeader {
+            file: "x.nes".into(),
+            bytes
+        }),
+        "{plan:?}"
+    );
+}
+
+#[test]
+fn an_add_on_never_merges_two_groups_of_one_dat() {
+    let c = conn();
+    let official = [("Alpha Game (World)", None), ("Beta Game (World)", None)];
+    import_at(&c, &dat(NES_LOGIQX, "1", &official), 1);
+    let groups = |c: &TestDb| {
+        (
+            count(
+                c,
+                "SELECT COUNT(DISTINCT group_root) FROM titles WHERE retired = 0",
+            ),
+            count(
+                c,
+                "SELECT COUNT(*) FROM titles WHERE retired = 0 AND is_1g1r_pick = 1",
+            ),
+        )
+    };
+    assert_eq!(groups(&c), (2, 2));
+    let add_on = [
+        ("Gamma Pack (World)", None),
+        ("Delta Pack (World)", Some("Gamma Pack (World)")),
+    ];
+    let added = import_at(&c, &dat(NES_SAMPLES, "1", &add_on), 2);
+    assert_eq!(
+        groups(&c),
+        (2, 2),
+        "each add-on title joins the group of its match, and the two groups stay apart"
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(DISTINCT parent_id) FROM titles WHERE retired = 0"
+        ),
+        3,
+        "parent_id keeps each DAT's own clone groups"
+    );
+    remove_with_files(&c, added.version, &[]);
+    assert_eq!(groups(&c), (2, 2));
+}
+
+#[test]
+fn a_clone_left_by_its_linked_parent_keeps_a_group_of_its_own() {
+    let c = conn();
+    let official = [
+        ("Alpha Game (World)", None),
+        ("Beta Game (World)", None),
+        ("Zeta Game (World)", None),
+    ];
+    import_at(&c, &dat(NES_LOGIQX, "1", &official), 1);
+    let add_on = format!(
+        "<datafile><header><name>{NES_SAMPLES}</name><version>1</version></header>\
+         <game name=\"Gamma Pack (World)\"><rom name=\"0.bin\" size=\"4\" crc=\"00000000\"/></game>\
+         <game name=\"Delta Pack (World)\" cloneof=\"Gamma Pack (World)\">\
+         <rom name=\"3.bin\" size=\"4\" crc=\"00000003\"/></game></datafile>"
+    );
+    let added = import_at(&c, &add_on, 2);
+    let id = |name: &str| {
+        count(
+            &c,
+            &format!("SELECT id FROM titles WHERE name = '{name}' AND retired = 0"),
+        )
+    };
+    let (alpha, gamma, delta) = (
+        id("Alpha Game (World)"),
+        id("Gamma Pack (World)"),
+        id("Delta Pack (World)"),
+    );
+    let root_of = |t: i64| count(&c, &format!("SELECT group_root FROM titles WHERE id = {t}"));
+    assert_eq!(root_of(gamma), alpha, "the parent links to its match");
+    assert_eq!(root_of(delta), delta, "the clone roots its own group");
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM titles t JOIN titles r ON r.id = t.group_root
+             WHERE t.retired = 0 AND r.group_root IS NOT r.id"
+        ),
+        0,
+        "no title keeps a root that left its group"
+    );
+    assert_eq!(count(&c, "SELECT COUNT(*) FROM title_groups"), 4);
+    let members = format!("SELECT COUNT(*) FROM titles WHERE group_root = {delta}");
+    assert_eq!(count(&c, &members), 1);
+    remove_with_files(&c, added.version, &[]);
+    let live = "SELECT COUNT(DISTINCT group_root) FROM titles WHERE retired = 0";
+    assert_eq!(count(&c, live), 3);
+}
+
+#[test]
+fn one_family_on_two_platforms_keeps_separate_titles() {
+    let c = conn();
+    let t = titles::TitleInput {
+        name: "Example Quest (World)",
+        base_name: "Example Quest",
+        group_key: "example quest",
+        clone_of: None,
+        regions: &[],
+        languages: &[],
+        revision: None,
+        flags: &[],
+    };
+    let ids = c
+        .with(|x| {
+            let mut ids = Vec::new();
+            for (version, platform) in [("1", "gb"), ("2", "gbc")] {
+                let v = dats::upsert_version(
+                    x,
+                    &NewVersion {
+                        dat_name: "Example Vendor - Example Handheld",
+                        version,
+                        source_file: "h.dat",
+                        platform: Some(platform),
+                        now: 1,
+                    },
+                )?;
+                assert!(v.current, "{platform}");
+                ids.push(titles::upsert_title(x, platform, v.id, &t, &[])?);
+            }
+            Ok(ids)
+        })
+        .expect("titles");
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(
+        count(&c, "SELECT COUNT(*) FROM titles WHERE platform_id = 'gb'"),
+        1
+    );
+}
+
+#[test]
+fn a_disc_track_is_matched_again_under_the_all_or_nothing_rule() {
+    let c = conn();
+    let psx = PlatformId("psx".into());
+    let h = |n: u8| mistarr_core::HashSet {
+        size: 4,
+        crc32: format!("{n:08x}"),
+        md5: format!("{n:032x}"),
+        sha1: format!("{n:040x}"),
+    };
+    let track = |n: u8| format!("Example Disc (USA) (Track {n}).bin");
+    let states = c
+        .with(|x| {
+            let old = files::seed_title_fixture(x, &psx, "Example Disc (USA)")?;
+            let new = files::seed_title_fixture(x, &psx, "Example Disc (USA) (Rev 1)")?;
+            for n in 1..=3 {
+                files::seed_rom_for_title_fixture(x, new, &track(n), &h(n), "good")?;
+            }
+            for n in 1..=2 {
+                let rom = files::seed_rom_for_title_fixture(x, old, &track(n), &h(n), "good")?;
+                let sums = h(n);
+                let hashed = files::Hashed {
+                    crc32: Some(&sums.crc32),
+                    md5: Some(&sums.md5),
+                    sha1: Some(&sums.sha1),
+                    header_rule: Some("none"),
+                };
+                let path = format!("PSX/Example Disc (USA)/{}", track(n));
+                files::upsert(
+                    x,
+                    &psx,
+                    &path,
+                    4,
+                    1,
+                    &hashed,
+                    Some(rom),
+                    FileState::Verified,
+                    1,
+                )?;
+            }
+            x.execute("UPDATE titles SET retired = 1 WHERE id = ?1", [old])?;
+            assert_eq!(rematch_chunk(x, &psx)?, 2);
+            let rows: Vec<(String, bool)> = x
+                .prepare(
+                    "SELECT f.state, t.name = 'Example Disc (USA) (Rev 1)' FROM files f
+                     JOIN roms r ON r.id = f.rom_id JOIN titles t ON t.id = r.title_id",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+        .expect("rematch");
+    assert_eq!(
+        states,
+        [
+            ("unverified".to_owned(), true),
+            ("unverified".to_owned(), true)
+        ],
+        "two of the live title's three tracks are not a complete game"
+    );
 }

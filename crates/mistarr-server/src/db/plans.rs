@@ -156,7 +156,9 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
 }
 
 /// The whole-table walks the hot reads may make, each bounded or inherent.
-const ALLOWED_SCANS: [(&str, &str); 11] = [
+const ALLOWED_SCANS: [(&str, &str); 12] = [
+    // One group's availability rows, gathered by index and then sorted.
+    ("title detail", "SCAN (subquery-"),
     // Every platform's counts read every group once, and MRA titles through their
     // partial index; the tables have one row per group and per MRA.
     ("counts", "SCAN g"),

@@ -2,7 +2,7 @@
 //! index; see `docs/DATA-MODEL.md` "Derived tables".
 
 use rusqlite::types::Value;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 
 use crate::error::Result;
 
@@ -49,8 +49,8 @@ pub const OTHER: i64 = 1 << 62;
 /// Every known flag bit.
 const KNOWN_FLAG_MASK: i64 = (1 << KNOWN_FLAGS.len()) - 1;
 
-/// More dirty groups than this rebuild their whole platforms instead.
-const REBUILD_OVER: i64 = 4096;
+/// Dirty groups refreshed per statement, which bounds the statement's temporary tables.
+const FLUSH_CHUNK: i64 = 4096;
 
 /// The columns of `title_groups`, in table order.
 const COLUMNS: &str = "parent_id, platform_id, base_name, name, variants, have_verified, wanted,
@@ -100,10 +100,8 @@ fn or_all(expr: &str, count: usize) -> String {
 /// Which titles a recomputation covers.
 #[derive(Clone, Copy)]
 enum Scope {
-    /// Groups whose parent is in `title_groups_dirty`.
+    /// Groups whose root is in `title_groups_dirty` and at most `?1`.
     Dirty,
-    /// Groups on the platform bound to `?1`.
-    Platform,
     /// Every group.
     All,
 }
@@ -113,12 +111,8 @@ enum Scope {
 fn select(scope: Scope) -> String {
     let (members, parents) = match scope {
         Scope::Dirty => (
-            "t.parent_id IN (SELECT parent_id FROM title_groups_dirty)",
-            "t.parent_id IN (SELECT parent_id FROM title_groups_dirty)",
-        ),
-        Scope::Platform => (
-            "t.platform_id = ?1",
-            "t.parent_id IN (SELECT parent_id FROM titles WHERE platform_id = ?1 AND retired = 0)",
+            "t.group_root IN (SELECT parent_id FROM title_groups_dirty WHERE parent_id <= ?1)",
+            "t.group_root IN (SELECT parent_id FROM title_groups_dirty WHERE parent_id <= ?1)",
         ),
         Scope::All => ("1", "1"),
     };
@@ -140,7 +134,7 @@ fn select(scope: Scope) -> String {
                   MAX(CASE WHEN v.is_1g1r_pick = 1 THEN v.id END) AS pick_id,
                   MAX(v.id) AS newest_id
            FROM (
-             SELECT t.platform_id, t.parent_id, t.id, t.wanted, t.is_1g1r_pick,
+             SELECT t.platform_id, t.group_root AS parent_id, t.id, t.wanted, t.is_1g1r_pick,
                     (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0) AS roms,
                     (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0
                        AND ((r.present = 1
@@ -148,14 +142,14 @@ fn select(scope: Scope) -> String {
                             OR EXISTS (SELECT 1 FROM files f
                                        WHERE f.rom_id = r.id AND f.state = 'verified')))
                       AS roms_verified
-             FROM titles t WHERE t.retired = 0 AND t.parent_id IS NOT NULL AND {members}
+             FROM titles t WHERE t.retired = 0 AND t.group_root IS NOT NULL AND {members}
            ) v
            GROUP BY v.platform_id, v.parent_id
          ) g
          JOIN titles p ON p.id = g.parent_id
          JOIN (
            WITH b AS MATERIALIZED (
-             SELECT t.parent_id,
+             SELECT t.group_root AS parent_id,
                     (SELECT COALESCE(SUM(DISTINCT COALESCE(k.bit, {OTHER})), 0)
                      FROM title_flags f LEFT JOIN known_flags k ON k.name = f.flag
                      WHERE f.title_id = t.id) AS fb,
@@ -163,7 +157,7 @@ fn select(scope: Scope) -> String {
                      FROM title_regions r
                      LEFT JOIN known_regions k ON k.name = r.region COLLATE NOCASE
                      WHERE r.title_id = t.id) AS rb
-             FROM titles t WHERE t.retired = 0 AND t.parent_id IS NOT NULL AND {parents}
+             FROM titles t WHERE t.retired = 0 AND t.group_root IS NOT NULL AND {parents}
            )
            SELECT b.parent_id, MIN(b.fb & {KNOWN_FLAG_MASK}) AS lean_flags,
                   {unflagged_regions} AS unflagged_regions,
@@ -173,20 +167,22 @@ fn select(scope: Scope) -> String {
     )
 }
 
-/// Recomputes the rows of the groups in `title_groups_dirty` and empties it.
-fn refresh_dirty(conn: &Connection) -> Result<usize> {
+/// Recomputes the rows of the dirty groups rooted at `upto` or below and takes them off
+/// the list; returns how many rows they have now.
+fn refresh_dirty(conn: &Connection, upto: i64) -> Result<usize> {
     conn.prepare_cached(
-        "DELETE FROM title_groups WHERE parent_id IN (SELECT parent_id FROM title_groups_dirty)",
+        "DELETE FROM title_groups
+         WHERE parent_id IN (SELECT parent_id FROM title_groups_dirty WHERE parent_id <= ?1)",
     )?
-    .execute([])?;
+    .execute([upto])?;
     let rows = conn
         .prepare_cached(&format!(
             "INSERT INTO title_groups ({COLUMNS}) {}",
             select(Scope::Dirty)
         ))?
-        .execute([])?;
-    conn.prepare_cached("DELETE FROM title_groups_dirty")?
-        .execute([])?;
+        .execute([upto])?;
+    conn.prepare_cached("DELETE FROM title_groups_dirty WHERE parent_id <= ?1")?
+        .execute([upto])?;
     Ok(rows)
 }
 
@@ -208,32 +204,7 @@ pub(crate) fn refresh_groups(
     for id in parent_ids {
         mark.execute([id.0])?;
     }
-    refresh_dirty(conn)
-}
-
-/// Recomputes every `title_groups` row of `platform` and returns how many it has.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure.
-///
-/// ```
-/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert_eq!(mistarr_server::db::groups::rebuild_platform(&conn, "nes").unwrap(), 0);
-/// ```
-pub fn rebuild_platform(conn: &Connection, platform: &str) -> Result<usize> {
-    conn.execute(
-        "DELETE FROM title_groups WHERE platform_id = ?1",
-        [platform],
-    )?;
-    Ok(conn.execute(
-        &format!(
-            "INSERT INTO title_groups ({COLUMNS}) {}",
-            select(Scope::Platform)
-        ),
-        [platform],
-    )?)
+    refresh_dirty(conn, i64::MAX)
 }
 
 /// Recomputes the whole table and the search index, and empties the dirty list;
@@ -254,19 +225,20 @@ pub fn rebuild(conn: &Connection) -> Result<usize> {
         [],
     )?;
     conn.execute("DELETE FROM title_groups", [])?;
-    let rows = conn.execute(
-        &format!(
-            "INSERT INTO title_groups ({COLUMNS}) {}",
-            select(Scope::All)
-        ),
+    conn.execute("DELETE FROM title_groups_dirty", [])?;
+    conn.execute(
+        "INSERT INTO title_groups_dirty (parent_id)
+         SELECT DISTINCT group_root FROM titles WHERE group_root IS NOT NULL",
         [],
     )?;
-    conn.execute("DELETE FROM title_groups_dirty", [])?;
-    Ok(rows)
+    flush(conn)?;
+    let rows: i64 = conn.query_row("SELECT COUNT(*) FROM title_groups", [], |r| r.get(0))?;
+    Ok(usize::try_from(rows).unwrap_or(0))
 }
 
-/// Refreshes the groups the triggers marked dirty in this transaction and empties the
-/// list; returns how many groups were dirty. [`super::commit`] calls it before committing.
+/// Refreshes the groups the triggers marked dirty in this transaction, [`FLUSH_CHUNK`]
+/// roots at a time, and empties the list; returns how many groups were dirty.
+/// [`super::commit`] calls it before committing.
 ///
 /// # Errors
 ///
@@ -278,32 +250,25 @@ pub fn rebuild(conn: &Connection) -> Result<usize> {
 /// assert_eq!(mistarr_server::db::groups::flush(&conn).unwrap(), 0);
 /// ```
 pub fn flush(conn: &Connection) -> Result<usize> {
-    let dirty: i64 = conn
-        .prepare_cached("SELECT COUNT(*) FROM (SELECT 1 FROM title_groups_dirty LIMIT ?1)")?
-        .query_row([REBUILD_OVER + 1], |r| r.get(0))?;
-    if dirty == 0 {
-        return Ok(0);
+    let mut dirty = 0;
+    loop {
+        let upto: Option<i64> = conn
+            .prepare_cached(
+                "SELECT parent_id FROM title_groups_dirty ORDER BY parent_id LIMIT 1 OFFSET ?1",
+            )?
+            .query_row([FLUSH_CHUNK - 1], |r| r.get(0))
+            .optional()?;
+        let n: i64 = conn
+            .prepare_cached("SELECT COUNT(*) FROM title_groups_dirty WHERE parent_id <= ?1")?
+            .query_row([upto.unwrap_or(i64::MAX)], |r| r.get(0))?;
+        if n > 0 {
+            refresh_dirty(conn, upto.unwrap_or(i64::MAX))?;
+        }
+        dirty += usize::try_from(n).unwrap_or(0);
+        if upto.is_none() {
+            return Ok(dirty);
+        }
     }
-    if dirty <= REBUILD_OVER {
-        refresh_dirty(conn)?;
-        return Ok(usize::try_from(dirty).unwrap_or(0));
-    }
-    let dirty: i64 = conn.query_row("SELECT COUNT(*) FROM title_groups_dirty", [], |r| r.get(0))?;
-    let platforms: Vec<String> = conn
-        .prepare(
-            "SELECT platform_id FROM titles
-             WHERE parent_id IN (SELECT parent_id FROM title_groups_dirty)
-             UNION
-             SELECT platform_id FROM title_groups
-             WHERE parent_id IN (SELECT parent_id FROM title_groups_dirty)",
-        )?
-        .query_map([], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    for p in &platforms {
-        rebuild_platform(conn, p)?;
-    }
-    conn.execute("DELETE FROM title_groups_dirty", [])?;
-    Ok(usize::try_from(dirty).unwrap_or(0))
 }
 
 /// Whether writes are waiting for [`flush`]; readers never see this outside a crash
@@ -461,7 +426,7 @@ pub(crate) fn placeholders(n: usize) -> String {
     vec!["?"; n].join(", ")
 }
 
-/// Adds to `clause` the browse visibility of group `g`: a live variant of its parent
+/// Adds to `clause` the browse visibility of group `g`: a live variant of its root
 /// carries none of `hidden`, has `region` when given, and carries every one of `required`.
 /// The summary columns decide most groups; the rest check each variant's flag and region rows.
 pub(crate) fn visible(
@@ -517,7 +482,7 @@ pub(crate) fn visible(
     } else {
         None
     };
-    let mut variant = String::from("v.parent_id = g.parent_id AND v.retired = 0");
+    let mut variant = String::from("v.group_root = g.parent_id AND v.retired = 0");
     let mut args = Vec::new();
     if !hidden.is_empty() {
         variant.push_str(

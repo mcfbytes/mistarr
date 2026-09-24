@@ -254,7 +254,7 @@ fn load(c: &mut Connection, maintained: bool) -> Duration {
     };
     let plan = dats::upsert_version(&tx, &v).expect("version");
     dats::begin_load(&tx, plan.id).expect("begin");
-    dat_stage::apply(&tx, "snes", plan.id, v.dat_name).expect("apply");
+    dat_stage::apply(&tx, "snes", plan.id).expect("apply");
     titles::link_parents(&tx, plan.id, false).expect("link");
     dats::retire_absent(&tx, plan.id).expect("retire");
     titles::recompute_platform(&tx, "snes", &mistarr_core::select::Prefs::default())

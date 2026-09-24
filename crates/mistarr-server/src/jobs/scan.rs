@@ -166,21 +166,44 @@ struct Unit {
 /// cartridge, romset or arcade platform; the per-title subdirectories of
 /// those for a disc platform, plus the top directory itself when it also
 /// holds loose track files directly. Only directories that exist are
-/// returned.
-fn discover_units(games_root: &Path, platform: &Platform) -> Vec<Unit> {
+/// returned, with the ids of top directories that exist but cannot be read.
+fn discover_units(games_root: &Path, platform: &Platform) -> (Vec<Unit>, Vec<String>) {
     let top_names = std::iter::once(platform.core_dir).chain(platform.legacy_dirs.iter().copied());
-    let top_dirs: Vec<(String, PathBuf)> = top_names
-        .map(|name| (name.to_owned(), games_root.join(name)))
-        .filter(|(_, p)| p.is_dir())
-        .collect();
+    let mut unreadable = Vec::new();
+    let mut top_dirs: Vec<(String, PathBuf)> = Vec::new();
+    for name in top_names {
+        let path = games_root.join(name);
+        match fs::metadata(&path) {
+            Ok(m) if m.is_dir() => top_dirs.push((name.to_owned(), path)),
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "cannot read directory; keeping its rows");
+                unreadable.push(name.to_owned());
+            }
+        }
+    }
     let mut units = if platform.kind == Kind::Disc {
         let mut units = Vec::new();
         for (name, dir) in &top_dirs {
-            let Ok(entries) = fs::read_dir(dir) else {
-                continue;
+            let entries = match fs::read_dir(dir) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!(path = %dir.display(), error = %e, "cannot read directory; keeping its rows");
+                    unreadable.push(name.clone());
+                    continue;
+                }
+            };
+            let entries = match all_entries(entries) {
+                Ok(entries) => entries,
+                Err(e) => {
+                    tracing::warn!(path = %dir.display(), error = %e, "cannot read directory; keeping its rows");
+                    unreadable.push(name.clone());
+                    continue;
+                }
             };
             let mut has_loose_file = false;
-            for entry in entries.flatten() {
+            for entry in entries {
                 let path = entry.path();
                 if path.is_dir() {
                     let sub = entry.file_name().to_string_lossy().into_owned();
@@ -207,7 +230,7 @@ fn discover_units(games_root: &Path, platform: &Platform) -> Vec<Unit> {
             .collect()
     };
     units.sort_by(|a, b| a.id.cmp(&b.id));
-    units
+    (units, unreadable)
 }
 
 /// Throttles `file.changed` to at most 10 per second by dropping the rest;
@@ -236,14 +259,32 @@ impl Throttle {
     }
 }
 
+/// A unit's listing, or `None` with a warning when its directory cannot be read,
+/// so its rows are kept rather than pruned.
+fn readable<T>(dir: &Path, listed: io::Result<T>) -> Option<T> {
+    listed
+        .map_err(|e| {
+            tracing::warn!(path = %dir.display(), error = %e, "cannot read directory; keeping its rows");
+        })
+        .ok()
+}
+
+/// Every entry of a directory listing, or the first error: an entry that fails partway
+/// makes the whole directory unreadable, so no later file's row is pruned for it.
+pub(crate) fn all_entries<T>(entries: impl Iterator<Item = io::Result<T>>) -> io::Result<Vec<T>> {
+    entries.collect()
+}
+
 /// The paths every directory entry in a unit resolved to, sorted for a
-/// deterministic scan order.
-pub(crate) fn list_files(dir: &Path) -> Vec<(PathBuf, String)> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
+/// deterministic scan order; empty when `dir` is gone, an error when it cannot be read.
+fn list_files(dir: &Path) -> io::Result<Vec<(PathBuf, String)>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
-    let mut out: Vec<(PathBuf, String)> = entries
-        .flatten()
+    let mut out: Vec<(PathBuf, String)> = all_entries(entries)?
+        .into_iter()
         .filter(|e| e.path().is_file())
         .map(|e| {
             let path = e.path();
@@ -252,7 +293,7 @@ pub(crate) fn list_files(dir: &Path) -> Vec<(PathBuf, String)> {
         })
         .collect();
     out.sort_by(|a, b| a.1.cmp(&b.1));
-    out
+    Ok(out)
 }
 
 async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
@@ -271,9 +312,10 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     }
     let games_root = ctx.app.config().paths.games.clone();
     let pid = id.clone();
-    let units = tokio::task::spawn_blocking(move || discover_units(&games_root, platform))
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+    let (units, mut unreadable) =
+        tokio::task::spawn_blocking(move || discover_units(&games_root, platform))
+            .await
+            .map_err(|e| Error::Task(e.to_string()))?;
 
     let existing = ctx
         .app
@@ -312,13 +354,19 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     for unit in remaining {
         ctx.checkpoint().await?;
         let unit_seen = if platform.kind == Kind::Disc {
-            let (rows, seen) = scan_disc_unit(ctx, &pid, &unit.id, &unit.path).await?;
-            sink.rows.extend(rows);
-            seen
+            scan_disc_unit(ctx, &pid, &unit.id, &unit.path)
+                .await?
+                .map(|(rows, seen)| {
+                    sink.rows.extend(rows);
+                    seen
+                })
         } else {
             scan_flat_unit(&mut sink, platform, &unit.id, &unit.path).await?
         };
-        keep.extend(unit_seen);
+        match unit_seen {
+            Some(seen) => keep.extend(seen),
+            None => unreadable.push(unit.id.clone()),
+        }
         done_set.insert(unit.id.clone());
         // Progress is a resume hint: an unsaved unit is walked again and its files skip hashing.
         let save = saved.elapsed() >= PROGRESS_EVERY;
@@ -340,11 +388,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     let (pid3, keep2) = (pid.clone(), keep);
     ctx.app
         .db
-        .write(move |c| {
-            let tx = c.transaction()?;
-            files::delete_missing(&tx, &pid3, &keep2)?;
-            crate::db::commit(tx)
-        })
+        .write(move |c| files::delete_missing(c, &pid3, &keep2, &unreadable))
         .await?;
     let pid4 = pid.clone();
     ctx.app
@@ -484,7 +528,7 @@ fn commit_unit(
 
 /// Matches a fully hashed payload and decides its state, per
 /// `docs/DATA-MODEL.md` "files.state".
-pub(crate) fn classify(
+fn classify(
     conn: &Connection,
     platform_id: &PlatformId,
     actual_name: &str,
@@ -512,7 +556,7 @@ pub(crate) fn classify(
     Ok((Some(m.rom_id), state))
 }
 
-pub(crate) fn unchanged(
+fn unchanged(
     conn: &Connection,
     platform_id: &PlatformId,
     rel_path: &str,
@@ -527,20 +571,23 @@ pub(crate) fn unchanged(
 }
 
 /// Walks one cartridge, romset or arcade directory, handing each row to `sink`, and
-/// returns every path it saw. Hashing runs outside any database lock; only the read
-/// connection is touched, and briefly, one file at a time.
+/// returns every path it saw, or `None` when the directory cannot be read. Hashing runs
+/// outside any database lock; only the read connection is touched, one file at a time.
 async fn scan_flat_unit(
     sink: &mut Sink<'_>,
     platform: &'static Platform,
     unit_id: &str,
     dir: &Path,
-) -> Result<Vec<String>> {
+) -> Result<Option<Vec<String>>> {
     let (ctx, platform_id) = (sink.ctx, sink.platform_id.clone());
     let platform_id = &platform_id;
     let dir_owned = dir.to_path_buf();
-    let entries = tokio::task::spawn_blocking(move || list_files(&dir_owned))
+    let listed = tokio::task::spawn_blocking(move || list_files(&dir_owned))
         .await
         .map_err(|e| Error::Task(e.to_string()))?;
+    let Some(entries) = readable(dir, listed) else {
+        return Ok(None);
+    };
     let rule = header_rule(platform.header_rule);
     let mut seen = Vec::new();
     for (path, name) in entries {
@@ -619,17 +666,12 @@ async fn scan_flat_unit(
         };
         sink.push(row).await?;
     }
-    Ok(seen)
+    Ok(Some(seen))
 }
 
 /// An unmatched or unreadable file's row: no hash was trusted enough to
 /// classify it, so it is recorded `unverified` rather than aborting the scan.
-pub(crate) fn unverified_row(
-    rel_path: String,
-    size: i64,
-    mtime: i64,
-    crc32: Option<String>,
-) -> NewFile {
+fn unverified_row(rel_path: String, size: i64, mtime: i64, crc32: Option<String>) -> NewFile {
     NewFile {
         rel_path,
         size,
@@ -748,13 +790,13 @@ async fn scan_zip_unit(
 /// One hashed track of a disc game directory, before the all-or-nothing rule
 /// decides its final state. `hashes` is `None` when the track could not be
 /// read; it is then always `unverified`.
-struct Track {
-    rel_path: String,
-    name: String,
-    size: i64,
-    mtime: i64,
-    hashes: Option<Hashes>,
-    matched: Option<files::RomMatch>,
+pub(crate) struct Track {
+    pub(crate) rel_path: String,
+    pub(crate) name: String,
+    pub(crate) size: i64,
+    pub(crate) mtime: i64,
+    pub(crate) hashes: Option<Hashes>,
+    pub(crate) matched: Option<files::RomMatch>,
 }
 
 /// The stored hashes of an unchanged track, reused instead of re-hashing.
@@ -792,11 +834,14 @@ async fn scan_disc_unit(
     platform_id: &PlatformId,
     unit_id: &str,
     dir: &Path,
-) -> Result<(Vec<NewFile>, Vec<String>)> {
+) -> Result<Option<(Vec<NewFile>, Vec<String>)>> {
     let dir_owned = dir.to_path_buf();
-    let entries = tokio::task::spawn_blocking(move || list_files(&dir_owned))
+    let listed = tokio::task::spawn_blocking(move || list_files(&dir_owned))
         .await
         .map_err(|e| Error::Task(e.to_string()))?;
+    let Some(entries) = readable(dir, listed) else {
+        return Ok(None);
+    };
 
     let mut tracks: Vec<Track> = Vec::new();
     let mut seen = Vec::new();
@@ -880,7 +925,7 @@ async fn scan_disc_unit(
         });
     }
     if tracks.is_empty() {
-        return Ok((Vec::new(), seen));
+        return Ok(Some((Vec::new(), seen)));
     }
 
     let rows = ctx
@@ -888,12 +933,12 @@ async fn scan_disc_unit(
         .db
         .read(move |c| classify_disc_tracks(c, tracks))
         .await?;
-    Ok((rows, seen))
+    Ok(Some((rows, seen)))
 }
 
 /// Decides each track's final state from the all-or-nothing rule, evaluated
 /// once per matched title rather than once for the whole directory.
-fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Result<Vec<NewFile>> {
+pub(crate) fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Result<Vec<NewFile>> {
     let mut groups: HashMap<i64, Vec<usize>> = HashMap::new();
     for (i, t) in tracks.iter().enumerate() {
         if let Some(m) = &t.matched {
@@ -1068,6 +1113,48 @@ mod tests {
         );
     }
 
+    /// A unit whose directory cannot be listed (EACCES here) keeps its rows rather than
+    /// losing every one to the prune; skipped when permissions do not apply (root).
+    #[tokio::test]
+    async fn an_unreadable_unit_keeps_its_rows() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (_dir, app) = state();
+        let nes = app.config().paths.games.join("NES");
+        fs::create_dir_all(&nes).expect("mkdir");
+        let pid = PlatformId("nes".into());
+        app.db
+            .write_blocking({
+                let pid = pid.clone();
+                move |c| {
+                    let h = files::Hashed::default();
+                    files::upsert(c, &pid, "NES/a.nes", 1, 1, &h, None, FileState::Verified, 1)
+                        .map(|_| ())
+                }
+            })
+            .expect("seed");
+        fs::set_permissions(&nes, fs::Permissions::from_mode(0o000)).expect("chmod");
+        let denied = fs::read_dir(&nes).is_err();
+        if denied {
+            Scheduler::run_inline(
+                &app,
+                Arc::new(ScanJob {
+                    platform_id: Some(pid.clone()),
+                }),
+            )
+            .await
+            .expect("run");
+        }
+        fs::set_permissions(&nes, fs::Permissions::from_mode(0o755)).expect("chmod back");
+        if !denied {
+            return;
+        }
+        let kept = app
+            .db
+            .read_blocking(move |c| files::find_by_path(c, &pid, "NES/a.nes"))
+            .expect("find");
+        assert!(kept.is_some(), "an unreadable directory prunes nothing");
+    }
+
     #[tokio::test]
     async fn scan_job_run_directly_against_arcade_is_a_no_op() {
         let (_dir, app) = state();
@@ -1125,12 +1212,20 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_error_partway_makes_the_listing_fail() {
+        let fine: Vec<io::Result<u8>> = vec![Ok(1), Ok(2)];
+        assert_eq!(all_entries(fine.into_iter()).expect("listed"), [1, 2]);
+        let broken: Vec<io::Result<u8>> = vec![Ok(1), Err(io::Error::other("EIO")), Ok(3)];
+        assert!(all_entries(broken.into_iter()).is_err());
+    }
+
+    #[test]
     fn discover_units_flat_for_cartridge_and_nested_for_disc() {
         let dir = tempfile::tempdir().expect("tempdir");
         let nes_dir = dir.path().join("NES");
         fs::create_dir_all(&nes_dir).expect("mkdir");
         let cart = platforms::by_id("nes").expect("nes");
-        let units = discover_units(dir.path(), cart);
+        let (units, _) = discover_units(dir.path(), cart);
         assert_eq!(
             units.iter().map(|u| u.id.as_str()).collect::<Vec<_>>(),
             ["NES"]
@@ -1139,7 +1234,7 @@ mod tests {
         let psx_dir = dir.path().join("PSX").join("Example Quest (USA)");
         fs::create_dir_all(&psx_dir).expect("mkdir");
         let disc = platforms::by_id("psx").expect("psx");
-        let units = discover_units(dir.path(), disc);
+        let (units, _) = discover_units(dir.path(), disc);
         assert_eq!(units[0].id, "PSX/Example Quest (USA)");
     }
 
@@ -1153,7 +1248,7 @@ mod tests {
         fs::write(psx_dir.join("Loose Quest (USA).iso"), b"data").expect("write");
         fs::create_dir_all(psx_dir.join("Example Quest (USA)")).expect("mkdir");
         let disc = platforms::by_id("psx").expect("psx");
-        let units = discover_units(dir.path(), disc);
+        let (units, _) = discover_units(dir.path(), disc);
         let mut ids: Vec<&str> = units.iter().map(|u| u.id.as_str()).collect();
         ids.sort_unstable();
         assert_eq!(ids, ["PSX", "PSX/Example Quest (USA)"]);

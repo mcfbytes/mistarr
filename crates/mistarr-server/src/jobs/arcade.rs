@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mistarr_core::naming::{group_key, parse_name};
+use mistarr_core::PlatformId;
 use mistarr_mister::adapter::arcade::assemble::{self, PartSource};
 use mistarr_mister::adapter::arcade::mra::{self, zip_location, Mra, MraRom, ZipPath};
 use serde_json::json;
@@ -239,24 +240,15 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
     }
     ctx.checkpoint().await?;
     let prefs = prefs(&config.prefs);
-    let (retired, live) = ctx
+    let (retired, live, changed) = ctx
         .app
         .db
-        .write(move |c| {
-            let tx = c.transaction()?;
-            let retired = rows::retire_unseen(&tx, PLATFORM, run)?;
-            let live = rows::live_count(&tx, PLATFORM)?;
-            crate::db::dats::set_game_count(&tx, version, live)?;
-            if retired > 0 || rows::recompute_pending(&tx, PLATFORM)? {
-                titles::recompute_platform(&tx, PLATFORM, &prefs)?;
-                rows::set_recompute_pending(&tx, PLATFORM, false)?;
-            }
-            crate::db::commit(tx)?;
-            Ok((retired, live))
-        })
+        .write(move |c| settle_titles(c, version, run, &prefs))
         .await?;
-    // Runs after titles are committed, so a zip an MRA newly names this run is
-    // already visible to the presence pass's live-MRA lookup.
+    if changed {
+        super::remap::enqueue(&ctx.app, Some(vec![PlatformId(PLATFORM.into())])).await;
+    }
+    // After titles are committed, so the presence pass sees this run's live MRA zips.
     let stats = presence::run(ctx).await?;
     ctx.progress(json!({
         "done": total,
@@ -266,6 +258,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
         "retired": retired,
         "checked": pass.checked,
         "presence_zips": stats.zips,
+        "presence_recorded": stats.recorded,
         "presence_pruned": stats.pruned,
     }))
     .await
@@ -406,6 +399,28 @@ fn run_check(
     let outcome = verify(&mra, &pass.index);
     let stamp = outcome.as_ref().and(Some(stamp));
     Pending::Set(outcome, stamp)
+}
+
+/// Retires the MRA titles run `run` did not see, records the live count and
+/// recomputes the picks when titles changed; returns the retired and live
+/// counts and whether this run stored or retired any title.
+fn settle_titles(
+    conn: &mut rusqlite::Connection,
+    version: DatVersionId,
+    run: i64,
+    prefs: &mistarr_core::select::Prefs,
+) -> Result<(usize, u64, bool)> {
+    let tx = conn.transaction()?;
+    let retired = rows::retire_unseen(&tx, PLATFORM, run)?;
+    let live = rows::live_count(&tx, PLATFORM)?;
+    crate::db::dats::set_game_count(&tx, version, live)?;
+    let changed = retired > 0 || rows::recompute_pending(&tx, PLATFORM)?;
+    if changed {
+        titles::recompute_platform(&tx, PLATFORM, prefs)?;
+        rows::set_recompute_pending(&tx, PLATFORM, false)?;
+    }
+    crate::db::commit(tx)?;
+    Ok((retired, live, changed))
 }
 
 /// Writes one batch in one transaction, marking the picks stale when it stores a title.

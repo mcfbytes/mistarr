@@ -8,8 +8,9 @@
   import { getStatus, getWizard, loadStatus, loadWizard } from '../lib/stores/status.svelte';
   import { fixtureCores, fixtureDats, fixtureSettings } from '../lib/fixtures';
   import { getSources, loadSources } from '../lib/stores/sources.svelte';
-  import { scheduleIncoming, type Watched } from '../lib/stores/incoming.svelte';
+  import { scheduleIncoming } from '../lib/stores/incoming.svelte';
   import { addUpload } from '../lib/stores/uploads.svelte';
+  import { uploadFiles } from '../lib/upload';
   import IncomingList from '../lib/IncomingList.svelte';
   import ClientStart from '../lib/ClientStart.svelte';
   import HeldBanner from '../lib/HeldBanner.svelte';
@@ -120,26 +121,6 @@
     return platforms.find((p) => p.id === id)?.name ?? id;
   }
 
-  // Upload only enqueues the import; the list below follows it to the end.
-  async function upload(which: Watched, input: HTMLInputElement | undefined): Promise<void> {
-    const files = Array.from(input?.files ?? []);
-    if (isMock) {
-      return;
-    }
-    for (const file of files) {
-      try {
-        const up = which === 'dats' ? await api.uploadDat(file) : await api.uploadSource(file);
-        addUpload({ kind: which, file: up.file, jobId: up.job_id });
-      } catch (err) {
-        showToast(`${file.name}: ${errorMessage(err)}`);
-      }
-    }
-    scheduleIncoming(which);
-    if (input) {
-      input.value = '';
-    }
-  }
-
   async function addSourceMagnet(): Promise<void> {
     const uri = sourceMagnet.trim();
     if (!uri || isMock) {
@@ -208,14 +189,14 @@
   {:else if step === 1}
     <section class="card">
       <h2>DATs</h2>
-      <p>Drop Logiqx DAT files or zipped DAT packs here, or place them in:</p>
+      <p>Drop Logiqx DAT files, No-Intro database exports or zipped DAT packs here, or place them in:</p>
       <p><code>/media/fat/mistarr/dats</code></p>
       <input
         bind:this={datFileInput}
         type="file"
         accept=".dat,.xml,.zip"
         multiple
-        onchange={() => upload('dats', datFileInput)}
+        onchange={() => uploadFiles('dats', datFileInput)}
       />
       <p class="muted">Waiting in <code>dats/</code>:</p>
       <IncomingList which="dats" />
@@ -261,7 +242,7 @@
         type="file"
         accept=".torrent"
         multiple
-        onchange={() => upload('sources', sourceFileInput)}
+        onchange={() => uploadFiles('sources', sourceFileInput)}
       />
       <label>
         Or a magnet link

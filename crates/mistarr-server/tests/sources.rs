@@ -161,7 +161,7 @@ async fn dropped_torrent_binds_and_records_matches() {
             (
                 json!("NES/Second Try (Europe).nes"),
                 json!("Second Try (Japan).nes"),
-                json!("size")
+                json!("base")
             ),
             (
                 json!("NES/Third Tale (Europe).nes"),
@@ -393,7 +393,7 @@ async fn magnet_resolves_through_the_client() {
         .await
         .json();
     assert_eq!(files["items"][0]["path"], "NES/Example Quest (USA).nes");
-    assert_eq!(files["items"][1]["confidence"], "size");
+    assert_eq!(files["items"][1]["confidence"], "base");
 
     let bodies = fake.bodies();
     let methods: Vec<&str> = bodies

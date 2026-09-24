@@ -229,6 +229,17 @@ fn rows(b: &Booted, zip_rel: &str) -> Vec<FileRow> {
         .expect("rows")
 }
 
+/// The state and rom of zip `zip_rel`'s own presence row, if it has one.
+fn presence(b: &Booted, zip_rel: &str) -> Option<(FileState, Option<i64>)> {
+    let zip_rel = zip_rel.to_owned();
+    b.running
+        .app
+        .db
+        .read_blocking(move |c| files::find_by_path(c, &PlatformId("arcade".into()), &zip_rel))
+        .expect("row")
+        .map(|r| (r.state, r.rom_id))
+}
+
 fn states(rows: &[FileRow]) -> Vec<(String, FileState, Option<i64>)> {
     rows.iter()
         .map(|r| (r.rel_path.clone(), r.state, r.rom_id))
@@ -243,9 +254,8 @@ fn log(b: &Booted) -> Vec<imports::LogRow> {
         .expect("log")
 }
 
-/// Triggers the arcade catalogue, which now also runs the presence pass over
-/// `games/mame` and `games/hbmame`. The caller polls for the effect it wants
-/// with `eventually`, since the run may join one already queued or running.
+/// Triggers the arcade catalogue and its presence pass. The caller polls for the
+/// effect it wants, since the run may join one already queued or running.
 async fn rerun_catalogue(b: &Booted) {
     let r = request(
         b.addr(),
@@ -896,18 +906,14 @@ async fn a_user_placed_sibling_zip_is_promoted_once_its_pair_is_imported() {
     );
     rerun_catalogue(&b).await;
     eventually("the presence pass to record the sibling", || async {
-        !rows(&b, "mame/exparent.zip").is_empty()
+        presence(&b, "mame/exparent.zip").is_some()
     })
     .await;
     let parent_rom = zip_rom(&b, "exparent.zip");
     assert_eq!(
-        states(&rows(&b, "mame/exparent.zip")),
-        [(
-            "mame/exparent.zip#b.bin".into(),
-            FileState::Unverified,
-            Some(parent_rom)
-        )],
-        "the presence pass gives verify_siblings a row to promote"
+        presence(&b, "mame/exparent.zip"),
+        Some((FileState::Unverified, Some(parent_rom))),
+        "the presence pass gives verify_siblings one row for the zip to promote"
     );
 
     let rom = zip_rom(&b, "exblast.zip");
@@ -917,13 +923,9 @@ async fn a_user_placed_sibling_zip_is_promoted_once_its_pair_is_imported() {
     settled(&b, id, DownloadState::Done).await;
 
     assert_eq!(
-        states(&rows(&b, "mame/exparent.zip")),
-        [(
-            "mame/exparent.zip#b.bin".into(),
-            FileState::Verified,
-            Some(parent_rom)
-        )],
-        "the user-placed sibling's member is promoted, not left unverified forever"
+        presence(&b, "mame/exparent.zip"),
+        Some((FileState::Verified, Some(parent_rom))),
+        "the user-placed sibling is promoted once the md5 check reads it"
     );
     assert_eq!(have(&b, "Example Blaster").await, 1);
     b.running.shutdown().await.expect("shutdown");

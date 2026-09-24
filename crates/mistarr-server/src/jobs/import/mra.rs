@@ -412,7 +412,7 @@ impl Placing<'_> {
     }
 
     /// Marks the members an md5 match read from zips already in `games/` verified, as
-    /// the zips of this title they belong to.
+    /// the zips of this title they belong to, and each such zip's presence row too.
     async fn verify_siblings(&self, read: &[(PathBuf, String)], staged: &Path) -> Result<()> {
         let mut rows: Vec<(String, i64)> = Vec::new();
         for (path, member) in read.iter().filter(|(p, _)| p != staged) {
@@ -428,7 +428,11 @@ impl Placing<'_> {
             else {
                 continue;
             };
-            rows.push((format!("{}#{member}", rel_string(rel)), rom.id));
+            let zip_rel = rel_string(rel);
+            rows.push((format!("{zip_rel}#{member}"), rom.id));
+            if !rows.iter().any(|(r, _)| *r == zip_rel) {
+                rows.push((zip_rel, rom.id));
+            }
         }
         if rows.is_empty() {
             return Ok(());

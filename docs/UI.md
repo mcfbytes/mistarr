@@ -13,7 +13,8 @@ screen works at 360 px wide with a 16 px gutter and no horizontal scroll.
 
 **Wizard** (`/wizard`). Four steps, each skippable:
 1. Paths: confirm root and games directory, show detected cores.
-2. DATs: drop zone and the watched-directory path. Lists the files still in
+2. DATs: drop zone and the watched-directory path, taking Logiqx DATs, No-Intro
+   database exports and zipped packs. Lists the files still in
    `dats/`, each waiting (with the reason), importing (with progress) or
    rejected (with the reason), then this session's uploads with their
    outcome, then the loaded DATs and the platform each bound to.
@@ -54,7 +55,10 @@ loading a thin progress bar shows and the current results stay visible,
 dimmed and marked `aria-busy`; a failed load shows an alert with Retry.
 
 **Title** (`/t/{id}`). Every variant in the group with region, revision,
-flags, file state, and which sources have it. Want per variant. Play for a
+flags, file state, and which sources have it: one line per file, as "nova.nes
+in Example Pack (name guess)", with the confidence read as "name match",
+"hash match", "name match", "name and size", "name guess" or "size only", or
+"None available". Want per variant. Play for a
 variant whose files are all in the collection. Rename action for misnamed
 files. Art tabs: boxart, title, snap.
 
@@ -72,6 +76,26 @@ matched count, seed policy, client status. Bind and disable actions.
 Unbound sources have a platform picker and, when the names suggest one, a
 "Bind to" button for the suggested platform. Above the table, the files still
 in `sources/` and this session's uploads, as in the wizard.
+
+**DATs** (`/dats`). Its own nav entry, between Sources and System, since
+DATs arrive and fail on their own schedule like sources do. An upload
+control taking several `.dat`, `.xml` or `.zip` files, the same upload as
+the wizard's. The files still in `dats/` as in the wizard: waiting with the
+reason, importing with progress, rejected with the reason on its own line
+under the name, plus this session's uploads with their outcome. Each
+rejected file has Retry, which moves it back into `dats/` so a file fixed
+in place loads again, and Delete, which asks once more before removing it.
+The upload note names the watched directory from `/system/status`
+`dats_dir`. Then the loaded DATs with the count of every stored version, one
+entry per DAT family on a platform (VERIFICATION.md "DAT families"), current
+ones first and sorted by platform: name and file, platform or "Not bound",
+version, game count, loaded time and state, with the family's other versions
+folded under "Older versions" beside the reason each is not current. A
+current version has Remove, which asks once more, saying its games leave the
+catalogue while files on the card stay, before `DELETE /dats/{id}`. Focus
+moves to the confirming button and back to Remove on Keep; every button's
+label names its file or version, and an `aria-live` line reports each
+result. Live over SSE, as in the wizard.
 
 **System** (`/system`). Status, client with the same start offer as the
 wizard, CORENAME, paused indicator with manual override, launch state,

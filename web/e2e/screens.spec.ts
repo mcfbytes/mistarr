@@ -7,6 +7,7 @@ const routes = [
   { name: 'title', hash: '#/t/1' },
   { name: 'activity', hash: '#/activity' },
   { name: 'sources', hash: '#/sources' },
+  { name: 'dats', hash: '#/dats' },
   { name: 'system', hash: '#/system' }
 ];
 
@@ -27,6 +28,11 @@ for (const viewport of viewports) {
         return doc.scrollWidth - doc.clientWidth;
       });
       expect(overflow).toBeLessThanOrEqual(1);
+      const navClipped = await page.evaluate(() => {
+        const nav = document.querySelector('nav');
+        return nav ? nav.scrollWidth - nav.clientWidth : 0;
+      });
+      expect(navClipped, 'every nav link fits without scrolling').toBeLessThanOrEqual(1);
 
       await page.screenshot({
         path: `e2e/out/${route.name}-${viewport.name}.png`,
@@ -111,7 +117,7 @@ test('the wizard lists files waiting in dats and sources', async ({ page }) => {
   await page.getByRole('button', { name: 'Next' }).click();
   const dats = page.getByRole('list', { name: 'Files in dats' });
   await expect(dats.getByText('Importing')).toBeVisible();
-  await expect(dats.getByText(/Rejected: not a DAT/)).toBeVisible();
+  await expect(dats.getByText(/^not a DAT/)).toBeVisible();
 
   await page.getByRole('button', { name: 'Next' }).click();
   await page.getByRole('button', { name: 'Next' }).click();
@@ -135,4 +141,91 @@ test('a path mapping can be removed and a half-filled one is refused', async ({ 
 test('an unbound source offers its suggested platform', async ({ page }) => {
   await page.goto('/#/sources');
   await expect(page.getByRole('button', { name: /^Bind to / })).toBeVisible();
+});
+
+test('the DATs screen lists loaded versions and incoming files', async ({ page }) => {
+  await page.goto('/#/');
+  await page.getByRole('link', { name: 'DATs' }).click();
+  await expect(page).toHaveURL(/#\/dats$/);
+
+  const loaded = page.getByRole('list', { name: 'Loaded DATs' });
+  const family = (name: RegExp) =>
+    loaded.getByRole('listitem').filter({ has: page.getByRole('heading', { name }) });
+  const exportItem = family(/DB Export/);
+  await expect(exportItem).toContainText('Sega Mega Drive');
+  await expect(exportItem).toContainText('20260101-000000');
+  await expect(exportItem).toContainText('310');
+  await expect(exportItem).toContainText('Current');
+  await exportItem.getByText('Older versions (1)').click();
+  await expect(exportItem.getByRole('list', { name: /^Older versions of/ })).toContainText(
+    'Replaced by Example Vendor - Mega Drive - Genesis (DB Export) version 20260101-000000'
+  );
+  await expect(family(/Unbound Sample DAT/)).toContainText('Not bound');
+  await expect(family(/^mistarr samples/)).toContainText('Current');
+  await expect(family(/^Example Console DAT/)).toContainText('Current');
+  await expect(page.getByRole('heading', { name: /Loaded/ })).toContainText('5 versions');
+  await expect(page.getByText('/media/fat/mistarr/dats')).toBeVisible();
+
+  const upload = page.getByLabel('Add DAT files');
+  await expect(upload).toHaveAttribute('accept', '.dat,.xml,.zip');
+  await expect(upload).toHaveAttribute('multiple', '');
+
+  const incoming = page.getByRole('list', { name: 'Files in dats' });
+  await expect(incoming.getByText('Importing')).toBeVisible();
+  await expect(incoming.getByText(/1 of 1 files|0 of 1 files/)).toBeVisible();
+  await expect(incoming.getByText(/expected a Logiqx DAT .* or a No-Intro DB export/)).toBeVisible();
+});
+
+test('a rejected DAT can be retried or deleted', async ({ page }) => {
+  await page.goto('/#/dats');
+  const incoming = page.getByRole('list', { name: 'Files in dats' });
+  const rejected = incoming.getByRole('listitem').filter({ hasText: 'Example Handheld (20260101).xml' });
+  await rejected.getByRole('button', { name: 'Retry Example Handheld (20260101).xml' }).click();
+  await expect(rejected).toContainText('Waiting: Queued.');
+  await expect(rejected.getByRole('button', { name: /^Retry/ })).toHaveCount(0);
+  await expect(page.getByText('Example Handheld (20260101).xml queued to load again.')).toBeVisible();
+
+  const notes = incoming.getByRole('listitem').filter({ hasText: 'notes.txt' });
+  const del = notes.getByRole('button', { name: 'Delete notes.txt', exact: true });
+  await del.click();
+  await expect(notes.getByRole('button', { name: 'Delete the file notes.txt' })).toBeFocused();
+  await notes.getByRole('button', { name: 'Keep notes.txt' }).click();
+  await expect(del).toBeFocused();
+  await del.click();
+  await notes.getByRole('button', { name: 'Delete the file notes.txt' }).click();
+  await expect(incoming.getByText('notes.txt')).toHaveCount(0);
+  await expect(page.getByText('notes.txt deleted.')).toBeVisible();
+});
+
+test('a loaded DAT is removed only after a confirmation that files stay', async ({ page }) => {
+  await page.goto('/#/dats');
+  const label = 'Unbound Sample DAT version 20260102';
+  const remove = page.getByRole('button', { name: `Remove ${label}`, exact: true });
+  await remove.click();
+  const confirm = page.getByRole('button', { name: `Remove ${label} from the catalogue` });
+  await expect(confirm).toBeFocused();
+  await expect(page.getByText(/Files on the card stay where they are/)).toBeVisible();
+  await page.getByRole('button', { name: `Keep ${label}` }).click();
+  await expect(remove).toBeFocused();
+  await remove.click();
+  await confirm.click();
+  await expect(page.getByText(`${label} removed. Files on the card stay where they are.`)).toBeVisible();
+  const item = page
+    .getByRole('list', { name: 'Loaded DATs' })
+    .getByRole('listitem')
+    .filter({ has: page.getByRole('heading', { name: 'Unbound Sample DAT' }) });
+  await expect(item).toContainText('Removed; its games are no longer listed');
+  await expect(item.getByRole('button', { name: /^Remove/ })).toHaveCount(0);
+  await expect(page.getByRole('heading', { name: 'Unbound Sample DAT' })).toBeFocused();
+});
+
+test('the title lists each file that may hold a variant with its confidence', async ({ page }) => {
+  await page.goto('/#/t/1');
+  const pick = page.getByRole('row', { name: /\(USA\) \(pick\)/ });
+  await expect(pick.getByText('Sample Racer (USA).nes in Example Pack (name match)')).toBeVisible();
+  await expect(pick.getByText('example.nes in examplepack1.0 (name guess)')).toBeVisible();
+  const europe = page.getByRole('row', { name: /\(Europe\)/ });
+  await expect(europe.getByText('example.nes in examplepack1.0 (name guess)')).toBeVisible();
+  const bios = page.getByRole('row', { name: /\(BIOS\)/ });
+  await expect(bios.getByText('None available')).toBeVisible();
 });

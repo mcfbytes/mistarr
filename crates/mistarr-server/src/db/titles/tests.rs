@@ -78,7 +78,7 @@ fn add(
             header: None,
         })
         .collect();
-    upsert_title(c, "gb", v, DAT, &t, &roms).expect("upsert")
+    upsert_title(c, "gb", v, &t, &roms).expect("upsert")
 }
 
 fn rom(c: &Connection, title: TitleId, name: &str) -> i64 {
@@ -420,6 +420,39 @@ fn counts_report_arcade_sets_failing_check_or_partly_present() {
     assert_eq!(arcade.titles, 3);
     assert_eq!(arcade.failing_check, 1);
     assert_eq!(arcade.partial, 1);
+}
+
+/// An MRA title never checked (its zip is absent) leaves every aggregate NULL
+/// unless each is wrapped in `COALESCE`; the counts still read as zeros.
+#[test]
+fn counts_read_zero_for_an_unchecked_mra_title_with_its_zip_absent() {
+    let c = conn();
+    let v = crate::db::arcade::mra_version(&c, "arcade", 1).expect("version");
+    crate::db::arcade::upsert_title(
+        &c,
+        "arcade",
+        v,
+        &arcade_title("Example Blaster", "exblast"),
+        &[crate::db::arcade::MraZip {
+            name: "exblast.zip",
+            zip_dir: "mame",
+            md5: None,
+            present: false,
+        }],
+    )
+    .expect("upsert");
+    let counts = counts(&c, &[]).expect("counts");
+    assert_eq!(
+        counts.get("arcade"),
+        Some(&Counts {
+            titles: 1,
+            have: 0,
+            wanted: 0,
+            unmatched_files: 0,
+            failing_check: 0,
+            partial: 0
+        })
+    );
 }
 
 #[test]
@@ -779,7 +812,7 @@ fn browse_walks_an_index_in_every_sort_order() {
             let plan = plan.join("\n");
             assert!(plan.contains(index), "{sort:?}: {plan}");
             assert!(!plan.contains("TEMP B-TREE"), "{sort:?}: {plan}");
-            assert!(plan.contains("titles_parent"), "{sort:?}: {plan}");
+            assert!(plan.contains("titles_group_root"), "{sort:?}: {plan}");
             let fts = shape != SearchShape::Like;
             assert_eq!(
                 plan.contains("LIST SUBQUERY"),
@@ -831,4 +864,41 @@ fn every_search_shape_finds_the_same_groups() {
             "{platform}"
         );
     }
+}
+
+#[test]
+fn removing_a_dat_retires_its_roms_unwants_and_cancels_queued_downloads() {
+    let c = conn();
+    let v = plain(&c);
+    let usa = id_of(&c, "Example Quest (USA)");
+    assert_eq!(want(&c, usa).expect("want"), Ok(()));
+    let q = rom(&c, usa, "q.bin");
+    c.execute_batch(
+        "INSERT INTO sources (infohash, display_name, origin_file, state, added_at)
+         VALUES ('00', 'n', 'a.torrent', 'bound', 0);",
+    )
+    .expect("source");
+    for state in ["queued", "wanted", "transferring"] {
+        c.execute(
+            "INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, created_at, updated_at)
+             VALUES (?1, ?2, 1, 0, ?3, 0, 0)",
+            params![usa.0, q, state],
+        )
+        .expect("download");
+    }
+    assert!(dats::retire(&c, v, 5).expect("retire").is_some());
+    let count = |sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).expect("count") };
+    assert_eq!(count("SELECT COUNT(*) FROM roms WHERE retired = 0"), 0);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM titles WHERE wanted = 1 OR retired = 0"),
+        0
+    );
+    let states: Vec<String> = c
+        .prepare("SELECT state FROM downloads ORDER BY id")
+        .expect("prepare")
+        .query_map([], |r| r.get(0))
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows");
+    assert_eq!(states, ["cancelled", "cancelled", "transferring"]);
 }
