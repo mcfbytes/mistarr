@@ -193,7 +193,6 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
         })
         .await?;
     let mut pass = Pass::default();
-    let mut stored = 0;
     for (n, batch) in listed.chunks(BATCH).enumerate() {
         ctx.checkpoint().await?;
         let (db, arcade2, games2, batch) = (
@@ -224,10 +223,6 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
             pass = back;
             item.check = done;
         }
-        stored += items
-            .iter()
-            .filter(|i| matches!(i.title, Title::Stored { .. }))
-            .count();
         ctx.app
             .db
             .write(move |c| store_batch(c, version, run, items))
@@ -250,8 +245,9 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
             let retired = rows::retire_unseen(&tx, PLATFORM, run)?;
             let live = rows::live_count(&tx, PLATFORM)?;
             crate::db::dats::set_game_count(&tx, version, live)?;
-            if stored > 0 || retired > 0 {
+            if retired > 0 || rows::recompute_pending(&tx, PLATFORM)? {
                 titles::recompute_platform(&tx, PLATFORM, &prefs)?;
+                rows::set_recompute_pending(&tx, PLATFORM, false)?;
             }
             tx.commit()?;
             Ok((retired, live))
@@ -405,7 +401,7 @@ fn run_check(
     Pending::Set(outcome, stamp)
 }
 
-/// Writes one batch in one transaction.
+/// Writes one batch in one transaction, marking the picks stale when it stores a title.
 fn store_batch(
     conn: &mut rusqlite::Connection,
     version: DatVersionId,
@@ -413,6 +409,12 @@ fn store_batch(
     items: Vec<Item>,
 ) -> Result<()> {
     let tx = conn.transaction()?;
+    if items
+        .iter()
+        .any(|i| matches!(i.title, Title::Stored { .. }))
+    {
+        rows::set_recompute_pending(&tx, PLATFORM, true)?;
+    }
     for Item { title, check } in items {
         let id = match title {
             Title::Stored {

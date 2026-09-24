@@ -165,6 +165,61 @@ pub fn live_count(conn: &Connection, platform: &str) -> Result<u64> {
     Ok(u64::try_from(n).unwrap_or(0))
 }
 
+/// The `settings` key marking that `platform`'s 1G1R picks lag its stored titles.
+fn recompute_key(platform: &str) -> String {
+    format!("mra.recompute_pending.{platform}")
+}
+
+/// Marks or clears that `platform` needs its 1G1R picks recomputed, so a catalogue run
+/// that stops after storing titles leaves the recompute to the next run.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::arcade;
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// arcade::set_recompute_pending(&conn, "arcade", true).unwrap();
+/// assert!(arcade::recompute_pending(&conn, "arcade").unwrap());
+/// arcade::set_recompute_pending(&conn, "arcade", false).unwrap();
+/// assert!(!arcade::recompute_pending(&conn, "arcade").unwrap());
+/// ```
+pub fn set_recompute_pending(conn: &Connection, platform: &str, pending: bool) -> Result<()> {
+    let key = recompute_key(platform);
+    if pending {
+        conn.prepare_cached("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, '1')")?
+            .execute([key])?;
+    } else {
+        conn.prepare_cached("DELETE FROM settings WHERE key = ?1")?
+            .execute([key])?;
+    }
+    Ok(())
+}
+
+/// Whether [`set_recompute_pending`] marked `platform`.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(!mistarr_server::db::arcade::recompute_pending(&conn, "arcade").unwrap());
+/// ```
+pub fn recompute_pending(conn: &Connection, platform: &str) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM settings WHERE key = ?1",
+            [recompute_key(platform)],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
 /// Stores an MRA title and its zips, reusing the MRA title of the same name so
 /// ids and `wanted` survive a re-scan. Zips the MRA no longer names are retired.
 ///

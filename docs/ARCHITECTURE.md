@@ -158,17 +158,21 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 1. A heavy `arcade_catalog` job, queued at startup, by `POST /system/scan`
    for every platform or for `arcade`, and by `POST /system/cores`. It lists
    every `.mra` under `_Arcade`, four folder levels deep including
-   `_alternatives`, and leaves out symlinks, symlinked folders, the Arcade
-   Organizer's `_Organized` tree and second names of one file (same device
-   and inode); see PLATFORMS.md "MRA catalogue".
+   `_alternatives`, follows symlinks to files, and leaves out symlinked
+   folders, the Arcade Organizer's `_Organized` tree and second names of one
+   file (same device and inode); see PLATFORMS.md "MRA catalogue".
 2. Each MRA becomes one `arcade` title named by its `<name>`, trimmed with
    inner whitespace collapsed (the file stem when that is empty), with one rom
    per zip it names. MRAs are taken shallowest first and a later MRA with a
-   name already taken is skipped. An MRA whose size and mtime match those its
-   live title was stored from is not read again. The job works in batches of
-   64 files, each read, checked and written in one short transaction, and
-   reports `{ done, total, parsed, checked }` as it goes. Titles whose MRA is
-   gone are retired at the end.
+   name already taken is skipped. An MRA whose size, mtime and parser version
+   match those its live title was stored from is not read again, and one that
+   cannot be read keeps its title and check until it can. The job works in
+   batches of 64 files, each read, checked and written in one short
+   transaction, and reports `{ done, total, parsed, checked }` as it goes.
+   Titles whose MRA is gone are retired at the end, and the 1G1R picks are
+   recomputed then when a batch stored a title or a title retired; a batch
+   that stores marks the platform in `settings`, so a run stopped before its
+   end leaves the recompute to the next.
 3. Each zip is looked up under `games/`, directories and file name
    case-insensitively, and its presence stored on its rom. A title whose MRA carries an `md5` and whose zips are
    all present is checked by assembling its roms (PLATFORMS.md "MRA

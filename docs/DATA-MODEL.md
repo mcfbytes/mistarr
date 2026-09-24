@@ -252,7 +252,9 @@ retired when a catalogue run no longer finds its MRA, and revived, with its
 id and `wanted`, when the MRA returns. Each run takes the next `mra_seen`
 number and stamps every title whose MRA it finds, so the titles it did not
 stamp are the ones to retire; a live title whose `mra_file_stamp` still
-matches its file is stamped without reading the MRA again. Its roms are the zips it names, with
+matches its file is stamped without reading the MRA again. A run that
+stores a title sets the `settings` key `mra.recompute_pending.arcade`, and
+the run that recomputes the picks deletes it. Its roms are the zips it names, with
 `size` 0, the MRA's `md5` or none, `zip_dir` and `present`. MRA titles are
 `inferred` with a `group_key` prefixed `mra:`, so they never group with DAT
 entries.

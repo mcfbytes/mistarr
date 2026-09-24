@@ -447,6 +447,67 @@ async fn an_unreadable_mra_keeps_its_title_and_check() {
     assert_eq!(check(app.clone()).await.as_deref(), Some("match"));
 }
 
+async fn picks(app: &Arc<AppState>) -> i64 {
+    app.db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT COUNT(*) FROM titles WHERE platform_id = 'arcade' AND is_1g1r_pick = 1",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .await
+        .expect("picks")
+}
+
+#[tokio::test]
+async fn a_run_stopped_after_storing_leaves_the_picks_to_the_next() {
+    let (dir, app) = state();
+    let arcade = dir.path().join(ARCADE_DIR);
+    let games = dir.path().join("games");
+    fs::create_dir_all(&arcade).expect("mkdir");
+    for name in ["Example Blaster", "Example Quest"] {
+        let body = mra_xml(name, r#"<rom index="0" zip="exblast.zip"/>"#);
+        fs::write(arcade.join(format!("{name}.mra")), body).expect("write");
+    }
+    let (version, run_no) = app
+        .db
+        .write(|c| {
+            let v = rows::mra_version(c, PLATFORM, 1)?;
+            Ok((v, rows::next_run(c, PLATFORM)?))
+        })
+        .await
+        .expect("version");
+    let db = app.db.clone();
+    let items = blocking(move || {
+        scan_batch(
+            &db,
+            &arcade,
+            &games,
+            &list_mras(&arcade),
+            &mut Pass::default(),
+        )
+    })
+    .await
+    .expect("task")
+    .expect("batch");
+    app.db
+        .write(move |c| store_batch(c, version, run_no, items))
+        .await
+        .expect("store");
+    assert_eq!(picks(&app).await, 0);
+
+    let progress = run(&app).await;
+    assert_eq!(counts(&progress), (0, 0));
+    assert_eq!(picks(&app).await, 2);
+    let pending = app
+        .db
+        .read(|c| rows::recompute_pending(c, PLATFORM))
+        .await
+        .expect("pending");
+    assert!(!pending);
+}
+
 #[tokio::test]
 async fn nothing_is_queued_without_mra_files_or_titles() {
     let (_dir, app) = state();
