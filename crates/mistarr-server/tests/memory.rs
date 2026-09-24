@@ -27,6 +27,7 @@ const ALTERNATIVES: usize = 50;
 const ORGANIZED_DIRS: usize = 1000;
 const LINKS_PER_DIR: usize = 15;
 const DAT_BYTES: usize = 50 * 1024 * 1024;
+const EXPORT_BYTES: usize = 16 * 1024 * 1024;
 const TORRENT_FILES: usize = 50_000;
 const LOOSE_FILES: usize = 16_000;
 const ZIPPED_FILES: usize = 2_000;
@@ -420,6 +421,66 @@ fn big_dat(path: &Path) -> usize {
     games
 }
 
+/// A zipped No-Intro DB export of about `EXPORT_BYTES` of XML binding to NES: each game
+/// has two sources repeating a headered and a headerless file, and clone groups of three
+/// reference their parent's archive number. Returns the number of games.
+fn big_export(path: &Path) -> usize {
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    let file = std::fs::File::create(path).expect("create");
+    let mut zip = zip::ZipWriter::new(BufWriter::new(file));
+    let member = "Example Vendor - Nintendo Entertainment System (DB Export) (20260101-000000).xml";
+    zip.start_file(member, zip::write::SimpleFileOptions::default())
+        .expect("start");
+    zip.write_all(
+        b"<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<header>\n\t<version>20260101-000000</version>\n\
+          \t<author>tester</author>\n</header>\n<datafile>\n",
+    )
+    .expect("write");
+    let regions = ["USA", "Europe", "Japan"];
+    let (mut written, mut games) = (0, 0);
+    while written < EXPORT_BYTES {
+        let name = game_name(games, &regions);
+        let parent = games - games % 3;
+        let clone = if parent == games {
+            "P".to_owned()
+        } else {
+            format!("{:06}", parent + 1)
+        };
+        let size = rom_size(games);
+        let mut sources = String::new();
+        for s in 0..2 {
+            let _ = write!(
+                sources,
+                "\t\t<source>\n\t\t\t<details id=\"{s}\" section=\"Trusted Dump\" region=\"{r}\"/>\n\
+                 \t\t\t<file id=\"{s}1\" extension=\"nes\" size=\"{h}\" crc32=\"{}\" md5=\"{}\" sha1=\"{}\" \
+                 header=\"4E 45 53 1A 02 01 00 00 00 00 00 00 00 00 00 00\" format=\"Headered\"/>\n\
+                 \t\t\t<file id=\"{s}2\" extension=\"unh\" size=\"{size}\" crc32=\"{}\" md5=\"{}\" sha1=\"{}\" \
+                 format=\"Headerless\"/>\n\t\t</source>\n",
+                hex_of(games + 3, 8),
+                hex_of(games + 5, 32),
+                hex_of(games + 9, 40),
+                hex_of(games, 8),
+                hex_of(games + 7, 32),
+                hex_of(games + 13, 40),
+                r = regions[games % 3],
+                h = size + 16,
+            );
+        }
+        let game = format!(
+            "\t<game name=\"{name}\">\n\t\t<archive number=\"{:06}\" clone=\"{clone}\" name=\"{name}\" \
+             region=\"{r}\" languages=\"En\"/>\n{sources}\t</game>\n",
+            games + 1,
+            r = regions[games % 3],
+        );
+        written += game.len();
+        zip.write_all(game.as_bytes()).expect("write");
+        games += 1;
+    }
+    zip.write_all(b"</datafile>\n").expect("write");
+    zip.finish().expect("finish");
+    games
+}
+
 fn game_name(i: usize, regions: &[&str]) -> String {
     format!("Example Game {:06} ({})", i / 3, regions[i % 3])
 }
@@ -546,6 +607,33 @@ fn dat_and_torrent_import_stay_under_budget() {
     assert_eq!(usize::try_from(files).expect("count"), TORRENT_FILES);
     assert_eq!(usize::try_from(matched).expect("count"), TORRENT_FILES);
     assert_budget("source_import", peak, 16);
+}
+
+#[test]
+fn db_export_import_stays_under_budget() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let games = big_export(
+        &dir.path()
+            .join("data/dats/Example Vendor - NES (DB Export) (20260101-000000).zip"),
+    );
+    println!("DB export of {games} games");
+
+    let server = Server::start(dir.path());
+    let rows = server.wait_jobs("dat_import", 1);
+    let titles = server.count("SELECT COUNT(*) FROM titles WHERE retired = 0");
+    let headerless = server.count(
+        "SELECT COUNT(*) FROM roms WHERE name LIKE '%.nes' AND header IS NOT NULL AND size < 100000",
+    );
+    let clones = server.count("SELECT COUNT(*) FROM titles WHERE parent_id <> id");
+    let peak = server.stop("dat_import, DB export");
+    assert_eq!(rows[0].0, "done", "{}", rows[0].1);
+    assert_eq!(usize::try_from(titles).expect("count"), games);
+    assert_eq!(usize::try_from(headerless).expect("count"), games);
+    assert_eq!(
+        usize::try_from(clones).expect("count"),
+        games - games.div_ceil(3)
+    );
+    assert_budget("dat_import, DB export", peak, 12);
 }
 
 #[test]

@@ -42,7 +42,7 @@ contracts in this document.
 
 | Crate | Responsibility | Depends on |
 |---|---|---|
-| `mistarr-core` | Domain types. Logiqx DAT parser. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. | none |
+| `mistarr-core` | Domain types. DAT parser for Logiqx XML and No-Intro DB exports. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. | none |
 | `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
 | `mistarr-sources` | Watched-directory scanner. `.torrent` (bencode) and `.magnet` parsing into a file list. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
 | `mistarr-clients` | `DownloadClient` trait. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping. | none |
@@ -118,9 +118,9 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    between two listings. Accept `.dat`, `.xml`, and `.zip` containing either;
    each member of a zip is a separate DAT, and a file whose import job failed
    is enqueued again on a later listing. The `dat_import` job runs on the
-   background lane, so a loaded core does not hold it. Parse Logiqx
-   `<datafile>` with `quick-xml`, streaming. Each game is parsed outside the
-   database's write lock and appended to `dat_stage` in chunks of 2,000
+   background lane, so a loaded core does not hold it. Parse the DAT
+   (Logiqx, or a DB export read twice for its parents) with `quick-xml`,
+   streaming. Each game is parsed outside the database's write lock and appended to `dat_stage` in chunks of 2,000
    games, one short transaction per chunk; one transaction then applies the
    stage (steps 3 to 5), so readers see the old titles or the new ones and
    never part of a DAT. A parse error empties the stage and changes nothing
@@ -132,7 +132,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 2. Identify the platform from the DAT header name using the table in
    PLATFORMS.md, falling back to the platform an earlier version of the same
    name was bound to. A header without a name takes the member's or file's
-   stem as dropped. Unknown DAT names are stored as an unbound
+   stem as dropped; a DB export takes `<System> (DB Export)` from its member's
+   or file's name (VERIFICATION.md "DB export"). Unknown DAT names are stored as an unbound
    `dat_versions` row the user can bind in the UI; binding re-reads the file
    from `dats/loaded/` and loads its titles.
 3. Upsert `dat_versions`, then `titles` and `roms`. A newer version of the same

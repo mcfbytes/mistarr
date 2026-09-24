@@ -368,6 +368,135 @@ async fn the_job_moves_files_and_publishes_events() {
     assert_eq!(row.progress, Some(json!({ "groups": 1, "picks": 1 })));
 }
 
+/// A DB export of two NES games, the clone listed first, each with a headered and a headerless file.
+fn db_export(version: &str) -> String {
+    let file = |id: u8, sha1: char| {
+        format!(
+            "<source><details section=\"Trusted Dump\"/>\
+             <file extension=\"nes\" size=\"32784\" crc32=\"0000000{id}\" sha1=\"{}\" header=\"4E 45 53 1A 02 01\" format=\"Headered\"/>\
+             <file extension=\"unh\" size=\"32768\" crc32=\"1000000{id}\" sha1=\"{}\" format=\"Headerless\"/></source>",
+            "e".repeat(40),
+            sha1.to_string().repeat(40),
+        )
+    };
+    format!(
+        "<?xml version=\"1.0\"?><header><version>{version}</version></header><datafile>\
+         <game name=\"Example Quest (USA)\"><archive number=\"0002\" clone=\"0001\" region=\"USA\" languages=\"En\"/>{}{}</game>\
+         <game name=\"Example Quest (Japan)\"><archive number=\"0001\" clone=\"P\" region=\"Japan\" languages=\"Ja\"/>{}</game>\
+         </datafile>",
+        file(1, 'a'),
+        file(1, 'a'),
+        file(2, 'b'),
+    )
+}
+
+#[tokio::test]
+async fn a_zipped_db_export_loads_headerless_roms_with_clones() {
+    let (_dir, app) = state();
+    let dats_dir = app.config().paths.dats();
+    std::fs::create_dir_all(&dats_dir).expect("mkdir");
+    let stem = "Example Vendor - Nintendo Entertainment System (DB Export) (20260101-000000)";
+    let pack = dats_dir.join(format!("{stem}.zip"));
+    let member = format!("{stem}.xml");
+    std::fs::write(&pack, zip_of(&[(&member, &db_export("20260101-000000"))])).expect("write");
+    let id = Scheduler::run_inline(&app, Arc::new(DatImport::new(&pack)))
+        .await
+        .expect("run");
+    let row = app
+        .db
+        .read(move |c| rows::get(c, id))
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.state, JobState::Done, "{:?}", row.progress);
+    let (name, version, platform): (String, String, Option<String>) = app
+        .db
+        .read(|c| {
+            Ok(c.query_row(
+                "SELECT dat_name, version, platform_id FROM dat_versions",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?)
+        })
+        .await
+        .expect("version");
+    assert_eq!(
+        name,
+        "Example Vendor - Nintendo Entertainment System (DB Export)"
+    );
+    assert_eq!(version, "20260101-000000");
+    assert_eq!(platform.as_deref(), Some("nes"));
+    let roms: Vec<(String, String, i64, String, String, bool)> = app
+        .db
+        .read(|c| {
+            let mut stmt = c.prepare(
+                "SELECT t.name, r.name, r.size, r.sha1, t.languages, t.parent_id = p.id
+                 FROM roms r JOIN titles t ON t.id = r.title_id
+                 JOIN titles p ON p.name = 'Example Quest (Japan)' ORDER BY t.name",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+        .await
+        .expect("roms");
+    assert_eq!(roms.len(), 2, "{roms:?}");
+    assert_eq!(roms[1].0, "Example Quest (USA)");
+    assert_eq!(roms[1].1, "Example Quest (USA).nes");
+    assert_eq!(roms[1].2, 32_768);
+    assert_eq!(roms[1].3, "a".repeat(40));
+    assert_eq!(roms[1].4, "[\"En\"]");
+    assert!(roms[1].5, "the clone is grouped under its parent");
+    assert!(dats_dir.join(format!("loaded/{stem}.zip")).is_file());
+}
+
+#[test]
+fn a_plain_db_export_takes_its_name_from_the_file() {
+    let c = conn();
+    let mut req = request(false, None);
+    req.file_stem = "Example Vendor - Game Boy (DB Export) (7)".into();
+    let xml = db_export("").replace("<version></version>", "");
+    let o = import_stream(
+        &c.db,
+        Cursor::new(xml.as_bytes()),
+        &req,
+        "",
+        export_parents(xml.as_bytes()).expect("index"),
+    )
+    .expect("import");
+    let l = loaded(o);
+    assert_eq!(l.platform.map(|p| p.0).as_deref(), Some("gb"));
+    let version: String = c
+        .with(|x| Ok(x.query_row("SELECT version FROM dat_versions", [], |r| r.get(0))?))
+        .expect("version");
+    assert_eq!(version, "7");
+    assert_eq!(
+        count(&c, "SELECT COUNT(*) FROM roms WHERE name LIKE '%.nes'"),
+        2,
+        "no header rule on gb, so the headered file is taken"
+    );
+}
+
+#[test]
+fn unknown_xml_is_rejected_naming_the_formats() {
+    let c = conn();
+    let o = import(&c, "<softwarelist/>", &request(false, None));
+    match o {
+        Outcome::Rejected(r) => assert!(r.contains("DB export"), "{r}"),
+        other => panic!("{other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn recompute_is_enqueued_for_every_platform() {
     let (_dir, app) = state();
