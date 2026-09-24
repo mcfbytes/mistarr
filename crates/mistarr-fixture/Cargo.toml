@@ -22,7 +22,7 @@ mistarr-core = { path = "../mistarr-core" }
 mistarr-mister = { path = "../mistarr-mister" }
 mistarr-sources = { path = "../mistarr-sources" }
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
-sha1 = "0.10"
+sha1 = "0.11"
 zip = { version = "4", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]

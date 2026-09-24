@@ -4,6 +4,7 @@ use std::io::{self, BufRead, BufReader, Read, Seek as _, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 
+use mistarr_core::xml::{check_utf8, lossy, EscapeInvalid};
 use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
@@ -254,15 +255,13 @@ pub fn parse(xml: &[u8]) -> Result<Mra> {
 /// `file` set, left in that file as [`Part::inline`] so no payload is held.
 fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra> {
     let bom = skip_bom(&mut input)?;
-    let mut reader = Reader::from_reader(input);
+    let mut reader = Reader::from_reader(EscapeInvalid::new(input));
     reader.config_mut().check_end_names = false;
     let mut buf = Vec::new();
     let mut mra = Mra::default();
     let mut open: Vec<(String, Option<Field>)> = Vec::new();
     let mut rom: Option<RomBuilder> = None;
     let keep = file.is_none();
-    // Bytes of a BOM and inline hex read here, which the XML reader does not count.
-    let mut taken = bom;
     loop {
         if let Some(RomBuilder {
             open: Some(Open::Part(part, hex, None, _)),
@@ -271,15 +270,15 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
         }) = &mut rom
         {
             if part.name.is_none() {
-                taken += take_text(reader.get_mut(), hex, keep.then_some(&mut part.data))?;
+                take_text(reader.get_mut(), hex, keep.then_some(&mut part.data))?;
             }
         }
-        let before = reader.buffer_position() + taken;
+        let before = bom + reader.get_ref().position();
         buf.clear();
         let event = reader.read_event_into(&mut buf).map_err(xml_err)?;
         let at = Pos {
             before,
-            after: reader.buffer_position() + taken,
+            after: bom + reader.get_ref().position(),
             file,
         };
         let field = open.last().and_then(|(_, f)| *f);
@@ -304,11 +303,11 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
                 );
             }
             Event::Text(t) => {
-                let t = t.decode().map_err(xml_err)?;
+                utf8(&t)?;
                 text(&t, field, &mut mra, &mut rom, keep);
             }
             Event::CData(c) => {
-                let c = c.decode().map_err(xml_err)?;
+                utf8(&c)?;
                 text(&c, field, &mut mra, &mut rom, keep);
             }
             Event::GeneralRef(r) => text(&resolve_ref(&r)?, field, &mut mra, &mut rom, keep),
@@ -346,25 +345,23 @@ fn skip_bom<R: BufRead>(input: &mut R) -> io::Result<u64> {
 }
 
 /// Decodes plain text up to the next `<` or `&` straight from `input`, a buffer at a time,
-/// so a large inline part is never held as one text event. Returns the bytes consumed.
+/// so a large inline part is never held as one text event.
 fn take_text<R: BufRead>(
     input: &mut R,
     hex: &mut Hex,
     mut out: Option<&mut Vec<u8>>,
-) -> io::Result<u64> {
-    let mut consumed = 0;
+) -> io::Result<()> {
     loop {
         let buf = input.fill_buf()?;
         let stop = buf.iter().position(|&b| b == b'<' || b == b'&');
         let n = stop.unwrap_or(buf.len());
         if n == 0 {
-            return Ok(consumed);
+            return Ok(());
         }
         hex.feed(&buf[..n], out.as_deref_mut());
         input.consume(n);
-        consumed += n as u64;
         if stop.is_some() {
-            return Ok(consumed);
+            return Ok(());
         }
     }
 }
@@ -381,12 +378,18 @@ fn resolve_ref(r: &quick_xml::events::BytesRef<'_>) -> Result<String> {
     if let Some(c) = r.resolve_char_ref().map_err(xml_err)? {
         return Ok(c.to_string());
     }
-    let name = r.decode().map_err(xml_err)?;
-    Ok(resolve_predefined_entity(&name).map_or_else(|| format!("&{name};"), str::to_owned))
+    let name: &str = r;
+    utf8(name)?;
+    Ok(resolve_predefined_entity(name).map_or_else(|| format!("&{name};"), str::to_owned))
 }
 
 fn xml_err(e: impl std::fmt::Display) -> Error {
     Error::Mra(e.to_string())
+}
+
+/// Fails on text read from bytes that are not UTF-8.
+fn utf8(s: &str) -> Result<()> {
+    check_utf8(s).map_err(|e| xml_err(quick_xml::Error::from(e)))
 }
 
 /// Largest MRA file read, a sanity bound: inline part data makes some a few MiB.
@@ -451,7 +454,7 @@ pub fn open_inline(inline: &Inline) -> io::Result<InlineReader> {
     let mut file = std::fs::File::open(&inline.file)?;
     file.seek(SeekFrom::Start(inline.start))?;
     let span = inline.end.saturating_sub(inline.start);
-    let mut reader = Reader::from_reader(BufReader::new(file.take(span)));
+    let mut reader = Reader::from_reader(EscapeInvalid::new(BufReader::new(file.take(span))));
     reader.config_mut().check_end_names = false;
     Ok(InlineReader {
         reader,
@@ -466,7 +469,7 @@ pub fn open_inline(inline: &Inline) -> io::Result<InlineReader> {
 
 /// Decoded bytes of one inline part, produced a file buffer at a time.
 pub struct InlineReader {
-    reader: Reader<BufReader<io::Take<std::fs::File>>>,
+    reader: Reader<EscapeInvalid<BufReader<io::Take<std::fs::File>>>>,
     buf: Vec<u8>,
     out: Vec<u8>,
     at: usize,
@@ -503,8 +506,8 @@ impl InlineReader {
                 .read_event_into(&mut self.buf)
                 .map_err(|e| bad(&e))?;
             let chunk: std::borrow::Cow<'_, str> = match event {
-                Event::Text(t) => t.decode().map_err(|e| bad(&e))?,
-                Event::CData(c) => c.decode().map_err(|e| bad(&e))?,
+                Event::Text(t) => t.into_inner(),
+                Event::CData(c) => c.into_inner(),
                 Event::GeneralRef(r) => resolve_ref(&r).map_err(|e| bad(&e))?.into(),
                 Event::Eof => {
                     self.done = true;
@@ -516,6 +519,7 @@ impl InlineReader {
                 }
                 _ => continue,
             };
+            utf8(&chunk).map_err(|e| bad(&e))?;
             self.hex.feed(chunk.as_bytes(), Some(&mut self.out));
         }
         Ok(true)
@@ -669,17 +673,18 @@ fn attrs(e: &BytesStart<'_>) -> Result<Vec<(String, String)>> {
     e.attributes()
         .map(|a| {
             let a = a.map_err(xml_err)?;
-            let key = String::from_utf8_lossy(a.key.local_name().as_ref()).to_ascii_lowercase();
+            let key = lossy(a.key.local_name().as_ref()).to_ascii_lowercase();
             let value = a
                 .normalized_value(XmlVersion::Implicit1_0)
                 .map_err(xml_err)?;
+            utf8(&value)?;
             Ok((key, value.into_owned()))
         })
         .collect()
 }
 
-fn tag(name: &[u8]) -> String {
-    String::from_utf8_lossy(name).to_ascii_lowercase()
+fn tag(name: &str) -> String {
+    lossy(name).to_ascii_lowercase()
 }
 
 fn start(e: &BytesStart<'_>, rom: &mut Option<RomBuilder>, after: u64) -> Result<()> {
@@ -901,7 +906,7 @@ impl Field {
 }
 
 fn read_attributes(e: &BytesStart<'_>, mra: &mut Mra) -> Result<()> {
-    let is_rom = e.local_name().as_ref().eq_ignore_ascii_case(b"rom");
+    let is_rom = e.local_name().as_ref().eq_ignore_ascii_case("rom");
     for (key, value) in attrs(e)? {
         match key.as_str() {
             "zip" => {

@@ -244,11 +244,11 @@ fn parsed_path(doc: &str) -> String {
     let mut reader = Reader::from_str(doc);
     loop {
         match reader.read_event().expect("well-formed") {
-            Event::Empty(e) if e.local_name().as_ref() == b"file" => {
+            Event::Empty(e) if e.local_name().as_ref() == "file" => {
                 let attr = e
                     .attributes()
                     .map(|a| a.expect("attribute"))
-                    .find(|a| a.key.local_name().as_ref() == b"path")
+                    .find(|a| a.key.local_name().as_ref() == "path")
                     .expect("path attribute");
                 return attr
                     .normalized_value(XmlVersion::Implicit1_0)

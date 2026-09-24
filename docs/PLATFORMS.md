@@ -105,7 +105,9 @@ names in any letter case, so `<ROM>` closed by `</rom>` is one element; an
 end tag closes the innermost open element of its name, a stray end tag is
 ignored and an unknown entity is kept as written. A file that ends inside
 an element is refused. `<name>`, `<setname>` and `<rbf>` keep at most 256
-bytes, and a `<rom>` inside one left open never adds to it.
+bytes, and a `<rom>` inside one left open never adds to it. Text that is not
+UTF-8 follows VERIFICATION.md "Text encoding": refused in text and
+attribute values, passed over in comments.
 
 The arcade catalogue job (ARCHITECTURE.md "Arcade catalogue") turns each MRA
 into one `arcade` title with `source = 'mra'`: `<name>`, `<setname>` and

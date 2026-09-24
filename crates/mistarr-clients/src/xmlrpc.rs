@@ -417,25 +417,19 @@ impl<'a> Parser<'a> {
         loop {
             let event = self.reader.read_event().map_err(|e| bad(&e))?;
             let tok = match event {
-                Event::Start(e) => {
-                    Tok::Open(String::from_utf8_lossy(e.local_name().as_ref()).into_owned())
-                }
-                Event::End(e) => {
-                    Tok::Close(String::from_utf8_lossy(e.local_name().as_ref()).into_owned())
-                }
+                Event::Start(e) => Tok::Open(e.local_name().as_ref().to_owned()),
+                Event::End(e) => Tok::Close(e.local_name().as_ref().to_owned()),
                 Event::Text(t) => {
-                    let s = t.xml10_content().map_err(|e| bad(&e))?;
+                    let s = t.xml10_content();
                     text.get_or_insert_with(String::new).push_str(&s);
                     continue;
                 }
                 Event::CData(c) => {
-                    let s = c.decode().map_err(|e| bad(&e))?;
-                    text.get_or_insert_with(String::new).push_str(&s);
+                    text.get_or_insert_with(String::new).push_str(&c);
                     continue;
                 }
                 Event::GeneralRef(r) => {
-                    let name = r.decode().map_err(|e| bad(&e))?;
-                    let s = unescape(&format!("&{name};"))
+                    let s = unescape(&format!("&{};", &*r))
                         .map_err(|e| bad(&e))?
                         .into_owned();
                     text.get_or_insert_with(String::new).push_str(&s);
