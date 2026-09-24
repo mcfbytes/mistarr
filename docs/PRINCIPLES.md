@@ -63,7 +63,15 @@ homebrew whose licence permits redistribution, imported by the tester from the
 author's own release. See [TESTING.md](TESTING.md). No test, fixture or
 screenshot may show a commercial title, even as a filename.
 
-## 7. Trademarks and branding
+## 7. Sample content lives elsewhere
+
+Demonstration material (open-licensed homebrew with a DAT and a torrent)
+is kept in the separate `mistarr-samples` repository, never in this tree,
+the binary or a release. Every entry there carries a licence-evidence file
+naming the author's own licence statement. mistarr never fetches or
+mentions it; users load it through the same directories as anything else.
+
+## 8. Trademarks and branding
 
 Platform names are used descriptively in the DAT-to-directory table because
 that is what the directories are called. No console logos, no manufacturer

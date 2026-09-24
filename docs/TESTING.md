@@ -56,7 +56,8 @@ permit redistribution. Two examples with public source repositories:
 - **Nova the Squirrel 2** (SNES): same author and licensing, repository
   `NovaSquirrel/NovaTheSquirrel2`.
 
-Internet Archive items also expose a `.torrent` per item, and items whose
+Packaged samples with licence evidence live in the `mistarr-samples`
+repository. Internet Archive items also expose a `.torrent` per item, and items whose
 metadata carries a Creative Commons or public domain licence are usable for
 this purpose. Check the licence field on the item before using it. Do not add
 item identifiers to this repository; the tester chooses.
