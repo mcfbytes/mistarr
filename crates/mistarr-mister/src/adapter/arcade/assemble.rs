@@ -262,7 +262,10 @@ impl Walker {
                 p.repeat
             )));
         }
-        if let (Some(name), None, 1) = (&p.name, &self.data, p.repeat) {
+        if p.repeat == 0 {
+            return Ok(());
+        }
+        if let (Some(name), None) = (&p.name, &self.data) {
             return self.stream_named(p, name, rom_zips, layout, src);
         }
         let named;
@@ -330,8 +333,9 @@ impl Walker {
         })
     }
 
-    /// Feeds a named part emitted once straight from its member in [`STREAM_CHUNK`] pieces,
-    /// for a digest that keeps no rom bytes; refuses exactly what [`Walker::read_named`] does.
+    /// Feeds a named part straight from its member in [`STREAM_CHUNK`] pieces, opening the
+    /// member again for each repeat, for a digest that keeps no rom bytes; refuses exactly
+    /// what [`Walker::part`] does when it reads the part whole.
     fn stream_named(
         &mut self,
         p: &Part,
@@ -344,6 +348,38 @@ impl Walker {
         if zips.is_empty() {
             return Err(refuse(format!("part {name} names no zip")));
         }
+        let mut k = 0;
+        for rep in 0..p.repeat {
+            let before = self.fed;
+            self.stream_once(p, name, zips, layout, src, &mut k)?;
+            if rep > 0 {
+                continue;
+            }
+            let once = self.fed - before;
+            if once == 0 && p.repeat > 1 {
+                return Err(refuse(format!(
+                    "part {name} is empty and repeated {} times",
+                    p.repeat
+                )));
+            }
+            let rest = once.checked_mul(p.repeat - 1).ok_or_else(too_large)?;
+            if add(self.fed, rest)? > MAX_ROM_BYTES {
+                return Err(too_large());
+            }
+        }
+        Self::whole_words(k)
+    }
+
+    /// Feeds one pass of a named part from the first of `zips` holding it.
+    fn stream_once(
+        &mut self,
+        p: &Part,
+        name: &str,
+        zips: &[String],
+        layout: &Layout,
+        src: &mut dyn PartSource,
+        k: &mut usize,
+    ) -> Result<()> {
         for zip in zips {
             let Some(mut reader) = src.open(zip, name, p.crc)? else {
                 continue;
@@ -354,7 +390,6 @@ impl Walker {
             }
             let mut reader = reader.take(p.length.unwrap_or(u64::MAX));
             let mut buf = vec![0; STREAM_CHUNK];
-            let mut k = 0;
             loop {
                 let n = match reader.read(&mut buf) {
                     Ok(0) => break,
@@ -362,9 +397,9 @@ impl Walker {
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                     Err(e) => return Err(e.into()),
                 };
-                self.feed(&buf[..n], layout, &mut k)?;
+                self.feed(&buf[..n], layout, k)?;
             }
-            return Self::whole_words(k);
+            return Ok(());
         }
         Err(Error::MissingPart {
             part: name.to_owned(),

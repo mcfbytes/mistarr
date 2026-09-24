@@ -306,6 +306,27 @@ fn repeats_read_a_named_part_once_and_are_capped() {
 }
 
 #[test]
+fn the_digest_streams_each_repeat_and_skips_repeat_zero() {
+    let big: Vec<u8> = (0..STREAM_CHUNK + 5)
+        .map(|i| u8::try_from(i % 253).expect("byte"))
+        .collect();
+    let mut src = Mem::with(&[("exblast.zip", "a.bin", &big)]);
+    let r = rom(r#"<rom zip="exblast.zip"><part name="a.bin" offset="1" repeat="3"/></rom>"#);
+    let whole = assemble(&r, &mut src).expect("assemble");
+    assert_eq!(whole.data.len(), 3 * (big.len() - 1));
+    src.1.clear();
+    assert_eq!(md5(&r, &mut src).expect("md5"), whole.md5);
+    assert_eq!(src.1.len(), 3);
+
+    src.1.clear();
+    let none =
+        rom(r#"<rom zip="exblast.zip"><part name="gone.bin" repeat="0"/><part>01</part></rom>"#);
+    assert_eq!(md5(&none, &mut src).expect("md5"), md5_of(&[1]));
+    assert_eq!(assemble(&none, &mut src).expect("assemble").data, [1]);
+    assert!(src.1.is_empty());
+}
+
+#[test]
 fn overflowing_offsets_are_refused() {
     let mut src = Mem::with(&[("exblast.zip", "a.bin", b"ABCD")]);
     for xml in [
