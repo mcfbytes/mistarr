@@ -9,6 +9,7 @@ use mistarr_sources::torrent::TorrentFile;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
+use super::candidates::FileCandidate;
 use crate::error::Result;
 
 /// Roms given match keys per statement batch in [`refresh_match_keys`].
@@ -106,20 +107,22 @@ pub fn seed_from_text(text: &str) -> Option<SeedPolicy> {
     }
 }
 
-/// The `torrent_files.confidence` text, `None` for an unmatched file.
+/// The `confidence` text of `torrent_files` and `torrent_candidates`, `None` for an unmatched file.
 ///
 /// ```
 /// use mistarr_server::db::sources::confidence_text;
 /// use mistarr_sources::binding::Confidence;
-/// assert_eq!(confidence_text(Confidence::Size), Some("size"));
+/// assert_eq!(confidence_text(Confidence::Base), Some("base"));
 /// assert_eq!(confidence_text(Confidence::Unmatched), None);
 /// ```
 #[must_use]
 pub fn confidence_text(c: Confidence) -> Option<&'static str> {
     match c {
         Confidence::Name => Some("name"),
+        Confidence::Base => Some("base"),
+        Confidence::Fuzzy => Some("fuzzy"),
         Confidence::Size => Some("size"),
-        Confidence::Unmatched => None,
+        _ => None,
     }
 }
 
@@ -146,7 +149,7 @@ pub struct SourceRow {
     pub seed_policy: String,
     /// Files in the torrent.
     pub file_count: u64,
-    /// Files with a matched rom.
+    /// Files with a matched rom or a candidate rom.
     pub matched_count: u64,
     /// Sum of file sizes.
     pub total_size: u64,
@@ -190,14 +193,18 @@ pub struct FileRow {
     pub rom_name: Option<String>,
     /// The matched rom's title.
     pub title_id: Option<i64>,
-    /// `name` or `size`, `None` when unmatched.
+    /// `hash`, `name` or `base`, `None` when unmatched.
     pub confidence: Option<String>,
+    /// The file's candidate roms, strongest first.
+    pub candidates: Vec<FileCandidate>,
 }
 
 const COLUMNS: &str = "s.id, s.infohash, s.display_name, s.origin_file, s.platform_id,
     s.bind_score, s.state, s.reason, s.seed_policy, s.file_count, s.total_size,
     s.client_id, s.added_at,
-    (SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id AND f.rom_id IS NOT NULL),
+    (SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id
+       AND (f.rom_id IS NOT NULL OR EXISTS (SELECT 1 FROM torrent_candidates c
+             WHERE c.source_id = f.source_id AND c.file_index = f.file_index))),
     s.suggested_platform_id";
 
 /// Reads a non-negative integer column; SQLite stores it as `i64`.
@@ -384,6 +391,86 @@ pub fn list_unbound(conn: &Connection) -> Result<Vec<(SourceId, Option<PlatformI
     Ok(rows)
 }
 
+/// Sources other than resolving ones whose platform is one of `platforms`, by id.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn list_on_platforms(conn: &Connection, platforms: &[PlatformId]) -> Result<Vec<SourceId>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id FROM sources WHERE platform_id = ?1 AND state != 'resolving' ORDER BY id",
+    )?;
+    let mut out = Vec::new();
+    for p in platforms {
+        let ids = stmt.query_map([&p.0], |r| r.get(0).map(SourceId))?;
+        out.extend(ids.collect::<rusqlite::Result<Vec<_>>>()?);
+    }
+    out.sort_unstable_by_key(|s| s.0);
+    out.dedup();
+    Ok(out)
+}
+
+/// Sources other than resolving ones that have a platform, by id.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn list_mapped(conn: &Connection) -> Result<Vec<SourceId>> {
+    let mut stmt = conn.prepare(
+        "SELECT id FROM sources WHERE platform_id IS NOT NULL AND state != 'resolving' ORDER BY id",
+    )?;
+    let ids = stmt
+        .query_map([], |r| r.get(0).map(SourceId))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(ids)
+}
+
+/// The rom stamp the source's files were last mapped against.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn map_stamp(conn: &Connection, id: SourceId) -> Result<Option<String>> {
+    Ok(conn
+        .query_row("SELECT map_stamp FROM sources WHERE id = ?1", [id.0], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .flatten())
+}
+
+/// The platform a source is bound to and the stamp it was mapped against,
+/// `None` when it has no platform.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn mapped_against(
+    conn: &Connection,
+    id: SourceId,
+) -> Result<Option<(PlatformId, Option<String>)>> {
+    Ok(conn
+        .query_row(
+            "SELECT platform_id, map_stamp FROM sources WHERE id = ?1 AND platform_id IS NOT NULL",
+            [id.0],
+            |r| Ok((PlatformId(r.get(0)?), r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// Stores the rom stamp the source's files were mapped against.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn set_map_stamp(conn: &Connection, id: SourceId, stamp: Option<&str>) -> Result<()> {
+    conn.execute(
+        "UPDATE sources SET map_stamp = ?2 WHERE id = ?1",
+        params![id.0, stamp],
+    )?;
+    Ok(())
+}
+
 /// True when `platform` has live titles from a DAT file.
 ///
 /// # Errors
@@ -457,18 +544,34 @@ pub fn set_binding(
     Ok(())
 }
 
-/// Replaces the source's file list, clearing matches, and updates its counts.
+/// Replaces the source's file list, clearing matches and candidates but
+/// keeping each hash proof whose file keeps its index, path and size, and
+/// updates its counts.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn replace_files(conn: &Connection, id: SourceId, files: &[TorrentFile]) -> Result<()> {
+    let proofs: Vec<(u32, String, i64, i64)> = conn
+        .prepare_cached(
+            "SELECT file_index, path, size, rom_id FROM torrent_files
+             WHERE source_id = ?1 AND confidence = 'hash' AND rom_id IS NOT NULL",
+        )?
+        .query_map([id.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
     conn.execute("DELETE FROM torrent_files WHERE source_id = ?1", [id.0])?;
     let mut stmt = conn.prepare_cached(
         "INSERT INTO torrent_files (source_id, file_index, path, size) VALUES (?1, ?2, ?3, ?4)",
     )?;
     for f in files {
         stmt.execute(params![id.0, f.index, f.path, sql_int(f.size)])?;
+    }
+    let mut proven = conn.prepare_cached(
+        "UPDATE torrent_files SET rom_id = ?5, confidence = 'hash'
+         WHERE source_id = ?1 AND file_index = ?2 AND path = ?3 AND size = ?4",
+    )?;
+    for (index, path, size, rom) in proofs {
+        proven.execute(params![id.0, index, path, size, rom])?;
     }
     let total: u64 = files.iter().map(|f| f.size).sum();
     conn.execute(
@@ -478,6 +581,20 @@ pub fn replace_files(conn: &Connection, id: SourceId, files: &[TorrentFile]) -> 
             i64::try_from(files.len()).unwrap_or(i64::MAX),
             sql_int(total)
         ],
+    )?;
+    Ok(())
+}
+
+/// Forgets every file's matched rom and confidence, hash proofs included.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn clear_matches(conn: &Connection, id: SourceId) -> Result<()> {
+    conn.execute(
+        "UPDATE torrent_files SET rom_id = NULL, confidence = NULL
+         WHERE source_id = ?1 AND rom_id IS NOT NULL",
+        [id.0],
     )?;
     Ok(())
 }
@@ -559,9 +676,19 @@ pub fn files(
                 rom_name: r.get(4)?,
                 title_id: r.get(5)?,
                 confidence: r.get(6)?,
+                candidates: Vec::new(),
             })
         })?
-        .collect::<rusqlite::Result<_>>()?;
+        .collect::<rusqlite::Result<Vec<FileRow>>>()?;
+    let mut rows = rows;
+    if let (Some(first), Some(last)) = (rows.first(), rows.last()) {
+        let (from, to) = (first.file_index, last.file_index);
+        for (index, found) in super::candidates::of_files(conn, id, from, to)? {
+            if let Some(row) = rows.iter_mut().find(|r| r.file_index == index) {
+                row.candidates.push(found);
+            }
+        }
+    }
     Ok((rows, total))
 }
 
@@ -776,6 +903,18 @@ mod tests {
         assert!(platform_has_dat(&c, &nes()).expect("dat"));
         set_suggestion(&c, a, None).expect("clear");
         assert_eq!(list_unbound(&c).expect("list"), [(a, None)]);
+        assert!(list_on_platforms(&c, &[nes()]).expect("on").is_empty());
+        set_binding(&c, a, Some(&nes()), Some(1.0)).expect("bind");
+        let snes = PlatformId("snes".into());
+        assert_eq!(list_on_platforms(&c, &[snes, nes()]).expect("on"), [a]);
+        assert_eq!(list_mapped(&c).expect("mapped"), [a]);
+        assert_eq!(map_stamp(&c, a).expect("stamp"), None);
+        set_map_stamp(&c, a, Some("1:2:3")).expect("set");
+        assert_eq!(map_stamp(&c, a).expect("stamp").as_deref(), Some("1:2:3"));
+        assert_eq!(
+            mapped_against(&c, a).expect("against"),
+            Some((nes(), Some("1:2:3".to_owned())))
+        );
     }
 
     #[test]
@@ -855,7 +994,19 @@ mod tests {
             (None, None)
         );
         assert_eq!(torrent_files(&c, id).expect("list"), list);
-        replace_files(&c, id, &list[..1]).expect("replace");
+        crate::db::candidates::prove(&c, id, 0, rom).expect("prove");
+        replace_files(&c, id, &list).expect("replace");
+        let rows = files(&c, id, 10, 0).expect("files").0;
+        assert_eq!(
+            rows[0].confidence.as_deref(),
+            Some("hash"),
+            "a proof survives"
+        );
+        clear_matches(&c, id).expect("clear");
+        assert_eq!(get(&c, id).expect("get").expect("row").matched_count, 0);
+        crate::db::candidates::prove(&c, id, 0, rom).expect("prove");
+        let moved = [file(0, "Sub/Other.nes", 16)];
+        replace_files(&c, id, &moved).expect("replace");
         assert_eq!(get(&c, id).expect("get").expect("row").matched_count, 0);
         assert_eq!(open_download_count(&c, id).expect("downloads"), 0);
         assert!(delete(&c, id).expect("delete"));
@@ -904,7 +1055,7 @@ mod tests {
             .into_iter()
             .map(|(_, _, c)| c)
             .collect();
-        assert_eq!(confidences, [Confidence::Name, Confidence::Size]);
+        assert_eq!(confidences, [Confidence::Name, Confidence::Base]);
     }
 
     #[test]
@@ -927,6 +1078,8 @@ mod tests {
             assert_eq!(SourceState::parse(s).map(SourceState::as_str), Some(s));
         }
         assert_eq!(confidence_text(Confidence::Name), Some("name"));
+        assert_eq!(confidence_text(Confidence::Fuzzy), Some("fuzzy"));
+        assert_eq!(confidence_text(Confidence::Size), Some("size"));
     }
 
     #[test]

@@ -7,6 +7,7 @@ pub mod detect_client;
 pub mod gate;
 pub mod import;
 pub mod poll;
+pub mod remap;
 pub mod scan;
 pub mod source_import;
 pub mod transfer;
@@ -454,6 +455,7 @@ pub fn revive(kind: &str, payload: &Value) -> Option<Arc<dyn Job>> {
         source_import::IMPORT_KIND => Arc::new(source_import::SourceImport {
             path: text("path")?.into(),
         }),
+        remap::KIND => Arc::new(remap::RemapSources::from_payload(payload)),
         import::KIND => Arc::new(import::ImportJob {
             download_id: crate::db::downloads::DownloadId(payload.get("download_id")?.as_i64()?),
         }),
@@ -845,6 +847,8 @@ mod tests {
             ("recompute_1g1r", json!({ "platform_id": "nes" })),
             ("source_import", json!({ "path": "/s/a.torrent" })),
             ("import", json!({ "download_id": 3 })),
+            ("remap_sources", json!({ "platforms": null })),
+            ("remap_sources", json!({ "platforms": ["nes"] })),
         ] {
             let job = revive(kind, &payload).expect(kind);
             assert_eq!((job.kind(), job.payload()), (kind, payload));

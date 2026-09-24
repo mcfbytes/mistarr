@@ -133,7 +133,7 @@ async fn cancel(
 
 /// Announces cancelled downloads and, for those the client had started,
 /// queues a [`Deselect`] per source so the client stops fetching them.
-pub(super) async fn after_cancel(app: &Arc<AppState>, cancelled: &[Cancelled]) {
+pub(crate) async fn after_cancel(app: &Arc<AppState>, cancelled: &[Cancelled]) {
     let ids = cancelled.iter().map(|c| c.id).collect();
     if let Err(e) = transfer::publish_ids(app, ids).await {
         tracing::warn!(error = %e, "cannot announce cancelled downloads");

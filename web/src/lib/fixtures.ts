@@ -159,6 +159,24 @@ export function fixtureTitle(id: number): TitleDetail {
         inferred: false,
         dat_version_id: 1,
         torrent_files_available: 2,
+        availability: [
+          {
+            source_id: 1,
+            source_name: 'Example Pack',
+            file_index: 0,
+            path: `NES/${base} (USA).nes`,
+            rom_id: id * 100,
+            confidence: 'name'
+          },
+          {
+            source_id: 2,
+            source_name: 'examplepack1.0',
+            file_index: 3,
+            path: 'example.nes',
+            rom_id: id * 100,
+            confidence: 'fuzzy'
+          }
+        ],
         roms: [
           {
             id: id * 100,
@@ -186,7 +204,17 @@ export function fixtureTitle(id: number): TitleDetail {
         retired: false,
         inferred: false,
         dat_version_id: 1,
-        torrent_files_available: 0,
+        torrent_files_available: 1,
+        availability: [
+          {
+            source_id: 2,
+            source_name: 'examplepack1.0',
+            file_index: 3,
+            path: 'example.nes',
+            rom_id: id * 100 + 1,
+            confidence: 'fuzzy'
+          }
+        ],
         roms: [
           {
             id: id * 100 + 1,
@@ -215,6 +243,7 @@ export function fixtureTitle(id: number): TitleDetail {
         inferred: false,
         dat_version_id: 1,
         torrent_files_available: 0,
+        availability: [],
         roms: [
           {
             id: id * 100 + 2,
@@ -375,9 +404,19 @@ export function fixtureSourceFiles(): SourceFile[] {
       rom_id: 1,
       rom_name: 'Example Quest (USA).nes',
       title_id: 1,
-      confidence: 'name'
+      confidence: 'name',
+      candidates: []
     },
-    { file_index: 1, path: 'Sample Racer (USA).nes', size: 262144, rom_id: null, rom_name: null, title_id: null, confidence: null }
+    {
+      file_index: 1,
+      path: 'Sample Racer (USA).nes',
+      size: 262144,
+      rom_id: null,
+      rom_name: null,
+      title_id: null,
+      confidence: null,
+      candidates: [{ rom_id: 2, rom_name: 'Sample Racer (World).nes', title_id: 2, confidence: 'fuzzy' }]
+    }
   ];
 }
 

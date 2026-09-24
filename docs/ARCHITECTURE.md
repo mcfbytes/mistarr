@@ -263,7 +263,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    retried every 15 s.
 3. For each file in the torrent, normalise the leaf name and look it up
    against every loaded DAT by name, then by base name plus size. Compute
-   per-platform hit rates.
+   per-platform hit rates. The fuzzy and size-only tiers of
+   VERIFICATION.md "Pre-download matching" do not count toward the rate.
 4. Bind the source to the platform with the best rate at or above
    `sources.bind_threshold` (default 0.6). Below that, the source is
    `unbound` and the user picks a platform or discards it.
@@ -280,17 +281,36 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    automatically, and `source.changed` is sent only for sources whose state
    or platform changed.
 5. Store the file list in `torrent_files` with the matched `rom_id` and its
-   confidence where one exists. Move the file to `sources/loaded/` and emit
-   `source.changed`. A `.torrent` is not told to the client until something
-   is wanted.
+   confidence where one exists, and the further candidate roms of every tier
+   in `torrent_candidates` (VERIFICATION.md "Pre-download matching"). Move
+   the file to `sources/loaded/` and emit `source.changed`. A `.torrent` is
+   not told to the client until something is wanted. Binding and mapping
+   share one pass over the files, and a source with nothing stored gets its
+   matches written straight. When a DAT loads titles for a platform, the
+   rebind of step 4 runs and a background `remap_sources` job maps every
+   source bound to that platform again; the same job is queued when a DAT is
+   retired, when an arcade catalogue run stores or retires titles, and, for
+   every platform, at each start. A source is skipped when its `map_stamp`
+   equals the platform's current stamp: its live DAT versions with their load
+   times, leaving out the MRA catalogue's version, whose load time every run
+   touches, and the count and ids of its live roms. Otherwise only the rows
+   that changed are written, 2 000 per transaction, with its hit rate
+   refreshed and `source.changed` sent only when its mapping changed. A row
+   an import proved by hash is never overwritten, and rebinding to the same
+   platform keeps it; unbinding forgets every match, proofs included.
 
 ### Wanted and transfer
 
 1. The user marks a title as wanted. mistarr creates a download for each of
    its roms without a verified file, choosing the best `torrent_file` for it
-   across bound sources: an exact size match first, then a name match, then
-   the source with fewer open downloads. With no such file the download is
-   `wanted` until a source binds that has one.
+   across bound sources, from its `torrent_files` matches and its
+   `torrent_candidates` alike: a file a hash proved or a name tier matched
+   before any `fuzzy` or `size` candidate, then, within that tier, a size
+   match (exact, or with the platform's header on top), then the stronger
+   confidence (`hash`, `name`, `base`, `fuzzy`, `size`), then the source
+   with fewer open downloads. A file a `bad` download of the rom used is never chosen.
+   With no such file the download is `wanted` until a source binds that has
+   one. Two wanted versions may share one file.
 2. A light `transfer` job takes `queued` downloads per source. If the torrent
    is not yet in the client, create `staging/<infohash>/` (rtorrent makes only
    the last level of a download path) and add the torrent paused to it, through
@@ -323,10 +343,25 @@ does nothing.
    staged zip, and match it against the roms of the download's own entry, so
    byte-identical regional variants and identical disc tracks resolve to the
    wanted rom. Only when nothing of the entry matches is the rest of the DAT
-   searched, and the file is a mismatch either way: the download becomes
+   searched. A cartridge file that is a live rom of another live, non-BIOS
+   entry in the wanted entry's clone group is that version: the wanted
+   download becomes `bad` with "the file in this source is a different
+   version: <name>", the file is recorded as proven to be that rom, and the
+   wanted rom is wanted again (DATA-MODEL.md "downloads.state"). The file is
+   placed and verified as that version through steps 3 to 5 for it, and the
+   version's other open downloads are cancelled as redundant; when the
+   library already holds that version verified, nothing is written and
+   `import_log` records `skipped_existing` against the file it holds; when
+   the version's place holds an unverified file, that file is never
+   replaced and the staged file is quarantined instead. When another
+   download of the same file placed or kept it first, a later one ends the
+   same way; this is never inferred for a file inside a zip. Any other file
+   is a mismatch: the download becomes
    `bad` and the file moves to `staging/quarantine/<infohash>/` beside a
    `<name>.report.txt` naming the expected rom, the actual hashes and the
-   other entry it matches, if any. An entry flagged `bios` is refused: the
+   other entry it matches, if any; when the download's file was only a
+   `fuzzy` or `size` candidate, the rom is wanted again on its next best
+   file. An entry flagged `bios` is refused: the
    download is `failed` and the file stays in staging. A zip an MRA title
    names is verified and placed as PLATFORMS.md "MRA import" describes.
 2. A romset or arcade zip verifies only when every member is a rom of the
@@ -352,7 +387,8 @@ does nothing.
    of a zip placed whole, as `a.zip#member`), which marks the title `have`,
    log the action in `import_log`, set the downloads `done` and emit
    `import.done`.
-6. Once a source has a `done` download and none queued, transferring,
+6. Once a source has a download that placed its file (`done`, or `bad`
+   after placing another version) and none queued, transferring,
    checking or importing, and its seed policy is `none`, remove the torrent
    from the client without deleting data, clear `sources.client_id` and
    remove the empty directories under `staging/<infohash>/`.
