@@ -145,7 +145,7 @@ pub(super) fn read_head(path: &Path, member: Option<&str>) -> Result<Vec<u8>, Ha
 #[must_use]
 pub fn parse_header(text: &str) -> Option<Vec<u8>> {
     let hex: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if hex.is_empty() || hex.len() % 2 != 0 {
+    if hex.is_empty() || !hex.len().is_multiple_of(2) {
         return None;
     }
     hex.chunks(2)

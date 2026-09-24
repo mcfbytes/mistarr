@@ -10,7 +10,9 @@ const LABELS: Record<MatchConfidence, string> = {
 
 /** How a match's confidence reads on the title screen. */
 export function confidenceLabel(confidence: MatchConfidence): string {
-  return LABELS[confidence] ?? confidence;
+  // A confidence the server adds before this build knows it reads as itself.
+  const labels: Partial<Record<string, string>> = LABELS;
+  return labels[confidence] ?? confidence;
 }
 
 /** One line per file that may hold a rom, e.g. "nova.nes in Example Pack (name guess)". */

@@ -1,0 +1,8 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"]
+  },
+  "include": ["vite.config.ts", "svelte.config.js", "eslint.config.js"],
+  "exclude": ["node_modules"]
+}

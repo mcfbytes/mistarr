@@ -349,8 +349,10 @@ fn parse(buf: &[u8]) -> Option<ScgiRequest> {
         .map(|f| String::from_utf8_lossy(f).into_owned())
         .collect();
     let headers: Vec<(String, String)> = fields
-        .chunks_exact(2)
-        .map(|p| (p[0].clone(), p[1].clone()))
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|[k, v]| (k.clone(), v.clone()))
         .collect();
     let body_len: usize = headers
         .iter()

@@ -14,7 +14,8 @@
   import IncomingList from '../lib/IncomingList.svelte';
   import ClientStart from '../lib/ClientStart.svelte';
   import HeldBanner from '../lib/HeldBanner.svelte';
-  import PathMapEditor, { cleanPathMap } from '../lib/PathMapEditor.svelte';
+  import PathMapEditor from '../lib/PathMapEditor.svelte';
+  import { cleanPathMap } from '../lib/pathmap';
   import type { Settings } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -89,7 +90,7 @@
     if (step < steps.length - 1) {
       step += 1;
     } else {
-      finish();
+      void finish();
     }
   }
 

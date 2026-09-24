@@ -10,22 +10,25 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with: { components: "rustfmt, clippy" }
+      # Installs the pinned toolchain, components and targets from rust-toolchain.toml.
+      - run: rustup toolchain install
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
   e2e:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      # Installs the pinned toolchain, components and targets from rust-toolchain.toml.
+      - run: rustup toolchain install
       - run: sudo apt-get update && sudo apt-get install -y transmission-daemon rtorrent
       # The package starts a system daemon; the suite runs its own on free ports.
       - run: sudo systemctl stop transmission-daemon || true
+      # Ubuntu's AppArmor profile confines the daemon to /var/lib; the suite's config is under /tmp.
+      - run: sudo apparmor_parser -R /etc/apparmor.d/transmission
       - name: make e2e
         shell: bash
         env:
@@ -39,22 +42,22 @@ jobs:
           name: e2e-logs
           path: target/e2e-logs
   principles:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - run: sh scripts/principles-gate.sh
   shell:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - run: shellcheck -s sh scripts/mistarr.sh scripts/tests/run.sh
       - run: sh scripts/tests/run.sh
   web:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
-        with: { node-version: "22", cache: "npm", cache-dependency-path: web/package-lock.json }
+        with: { node-version: "24", cache: "npm", cache-dependency-path: web/package-lock.json }
       - working-directory: web
         run: npm ci
       - working-directory: web
@@ -66,14 +69,17 @@ jobs:
       - working-directory: web
         run: npm run size
   cross:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: goto-bus-stop/setup-zig@v2
-      - run: cargo install cargo-zigbuild
+      # Installs the pinned toolchain, components and targets from rust-toolchain.toml.
+      - run: rustup toolchain install
+      # Zig is the C cross-compiler and linker cargo-zigbuild drives for the bundled C code.
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.15.2 }
+      - run: cargo install --locked cargo-zigbuild@0.23.4
       - uses: actions/setup-node@v7
-        with: { node-version: "22", cache: "npm", cache-dependency-path: web/package-lock.json }
+        with: { node-version: "24", cache: "npm", cache-dependency-path: web/package-lock.json }
       - working-directory: web
         run: npm ci && npm run build
       - run: rustup target add armv7-unknown-linux-musleabihf

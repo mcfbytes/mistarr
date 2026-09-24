@@ -17,12 +17,13 @@ panic = "abort"
 strip = true
 ```
 
-Build:
+Build, with the versions CI uses (Node 24, the toolchain in
+`rust-toolchain.toml`):
 
 ```sh
-cargo install cargo-zigbuild
+cargo install --locked cargo-zigbuild@0.23.4
 rustup target add armv7-unknown-linux-musleabihf
-# zig itself: the `zig` binary on PATH, or `pip install ziglang`
+# zig 0.15.2 itself: the `zig` binary on PATH, or `pip install ziglang==0.15.2`
 (cd web && npm ci && npm run build)
 cargo zigbuild --release --target armv7-unknown-linux-musleabihf -p mistarr-server
 ```

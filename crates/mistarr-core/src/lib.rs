@@ -11,6 +11,7 @@
 
 pub mod dat;
 pub mod naming;
+pub mod xml;
 
 /// 1G1R selection and clone-group inference.
 pub mod select;

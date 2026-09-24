@@ -7,7 +7,7 @@ const isMock = import.meta.env.VITE_MOCK === '1';
 export type Watched = 'dats' | 'sources';
 
 let lists = $state<Record<Watched, IncomingFile[]>>({ dats: [], sources: [] });
-const timers: Partial<Record<Watched, ReturnType<typeof setTimeout>>> = {};
+const timers: Record<Watched, ReturnType<typeof setTimeout> | undefined> = { dats: undefined, sources: undefined };
 
 export function getIncoming(which: Watched): IncomingFile[] {
   return lists[which];
@@ -37,7 +37,7 @@ export function scheduleIncoming(which: Watched): void {
     return;
   }
   timers[which] = setTimeout(() => {
-    delete timers[which];
+    timers[which] = undefined;
     void loadIncoming(which).catch(() => undefined);
   }, 300);
 }

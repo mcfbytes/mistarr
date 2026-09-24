@@ -4,7 +4,8 @@
   import { fixtureSettings } from '../lib/fixtures';
   import { api, errorMessage } from '../lib/api';
   import ClientStart from '../lib/ClientStart.svelte';
-  import PathMapEditor, { cleanPathMap } from '../lib/PathMapEditor.svelte';
+  import PathMapEditor from '../lib/PathMapEditor.svelte';
+  import { cleanPathMap } from '../lib/pathmap';
   import type { Settings } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -147,7 +148,7 @@
         <input
           type="text"
           value={csv(settings.prefs.regions)}
-          oninput={(e) => settings && (settings.prefs.regions = fromCsv((e.currentTarget as HTMLInputElement).value))}
+          oninput={(e) => settings && (settings.prefs.regions = fromCsv(e.currentTarget.value))}
         />
       </label>
       <label>
@@ -156,7 +157,7 @@
           type="text"
           value={csv(settings.prefs.languages)}
           oninput={(e) =>
-            settings && (settings.prefs.languages = fromCsv((e.currentTarget as HTMLInputElement).value))}
+            settings && (settings.prefs.languages = fromCsv(e.currentTarget.value))}
         />
       </label>
       <label>
@@ -168,7 +169,7 @@
         <input
           type="text"
           value={csv(settings.prefs.hide)}
-          oninput={(e) => settings && (settings.prefs.hide = fromCsv((e.currentTarget as HTMLInputElement).value))}
+          oninput={(e) => settings && (settings.prefs.hide = fromCsv(e.currentTarget.value))}
         />
       </label>
 

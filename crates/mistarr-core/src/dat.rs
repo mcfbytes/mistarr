@@ -10,6 +10,7 @@ use quick_xml::{Reader, XmlVersion};
 use serde::{Deserialize, Serialize};
 
 use crate::hash::HeaderRule;
+use crate::xml::{check_utf8, lossy, EscapeInvalid};
 
 mod export;
 mod family;
@@ -375,7 +376,7 @@ pub fn export_parents<R: BufRead>(reader: R) -> Result<Option<HashMap<String, St
 /// Iterator over the games of a DAT, holding one game in memory at a time.
 /// Yields [`DatError::NoGames`] once if the document ends without any game.
 pub struct DatStream<R: BufRead> {
-    reader: Reader<R>,
+    reader: Reader<EscapeInvalid<R>>,
     buf: Vec<u8>,
     header: DatHeader,
     format: DatFormat,
@@ -426,7 +427,7 @@ impl<R: BufRead> DatStream<R> {
 
     fn open(reader: R, options: ExportOptions, index_only: bool) -> Result<Self, DatError> {
         let mut stream = DatStream {
-            reader: Reader::from_reader(reader),
+            reader: Reader::from_reader(EscapeInvalid::new(reader)),
             buf: Vec::new(),
             header: DatHeader::default(),
             format: DatFormat::Logiqx,
@@ -472,9 +473,14 @@ impl<R: BufRead> DatStream<R> {
 
     fn xml_error(&self, source: quick_xml::Error) -> DatError {
         DatError::Xml {
-            position: self.reader.buffer_position(),
+            position: self.reader.get_ref().position(),
             source,
         }
+    }
+
+    /// Fails on a value read from bytes that are not UTF-8.
+    fn utf8(&self, value: &str) -> Result<(), DatError> {
+        check_utf8(value).map_err(|e| self.xml_error(e.into()))
     }
 
     fn read_event(&mut self) -> Result<Event<'static>, DatError> {
@@ -490,23 +496,23 @@ impl<R: BufRead> DatStream<R> {
         let mut after_header = false;
         loop {
             match self.read_event()? {
-                Event::Start(e) if e.local_name().as_ref() == b"datafile" => return Ok(()),
-                Event::Empty(e) if e.local_name().as_ref() == b"datafile" => {
+                Event::Start(e) if e.local_name().as_ref() == "datafile" => return Ok(()),
+                Event::Empty(e) if e.local_name().as_ref() == "datafile" => {
                     self.done = true;
                     return Ok(());
                 }
-                Event::Start(e) if !after_header && e.local_name().as_ref() == b"header" => {
+                Event::Start(e) if !after_header && e.local_name().as_ref() == "header" => {
                     self.format = DatFormat::DbExport;
                     after_header = true;
                     self.read_header()?;
                 }
-                Event::Empty(e) if !after_header && e.local_name().as_ref() == b"header" => {
+                Event::Empty(e) if !after_header && e.local_name().as_ref() == "header" => {
                     self.format = DatFormat::DbExport;
                     after_header = true;
                 }
                 Event::Start(e) | Event::Empty(e) => {
                     return Err(DatError::NotDatafile {
-                        root: String::from_utf8_lossy(e.name().as_ref()).into_owned(),
+                        root: lossy(e.name().as_ref()),
                     })
                 }
                 Event::Eof => return Err(DatError::Truncated),
@@ -521,12 +527,12 @@ impl<R: BufRead> DatStream<R> {
         while !self.done {
             match self.read_event()? {
                 Event::Start(e) => match e.local_name().as_ref() {
-                    b"game" | b"machine" => return self.read_game(&e, true).map(Some),
-                    b"header" => self.read_header()?,
+                    "game" | "machine" => return self.read_game(&e, true).map(Some),
+                    "header" => self.read_header()?,
                     _ => self.skip(&e)?,
                 },
                 Event::Empty(e) => {
-                    if matches!(e.local_name().as_ref(), b"game" | b"machine") {
+                    if matches!(e.local_name().as_ref(), "game" | "machine") {
                         return self.read_game(&e, false).map(Some);
                     }
                 }
@@ -559,26 +565,26 @@ impl<R: BufRead> DatStream<R> {
         loop {
             match self.read_event()? {
                 Event::Start(e) => {
-                    if e.local_name().as_ref() == b"clrmamepro" {
-                        self.header.clrmamepro_header = self.attr(&e, b"header")?;
+                    if e.local_name().as_ref() == "clrmamepro" {
+                        self.header.clrmamepro_header = self.attr(&e, "header")?;
                     }
                     let text = self.read_text()?;
                     let h = &mut self.header;
                     match e.local_name().as_ref() {
-                        b"name" => h.name = text,
-                        b"description" => h.description = text,
-                        b"version" => h.version = text,
-                        b"date" => h.date = Some(text),
-                        b"author" => h.author = Some(text),
-                        b"homepage" => h.homepage = Some(text),
-                        b"url" => h.url = Some(text),
-                        b"comment" => h.comment = Some(text),
+                        "name" => h.name = text,
+                        "description" => h.description = text,
+                        "version" => h.version = text,
+                        "date" => h.date = Some(text),
+                        "author" => h.author = Some(text),
+                        "homepage" => h.homepage = Some(text),
+                        "url" => h.url = Some(text),
+                        "comment" => h.comment = Some(text),
                         _ => {}
                     }
                 }
                 Event::Empty(e) => {
-                    if e.local_name().as_ref() == b"clrmamepro" {
-                        self.header.clrmamepro_header = self.attr(&e, b"header")?;
+                    if e.local_name().as_ref() == "clrmamepro" {
+                        self.header.clrmamepro_header = self.attr(&e, "header")?;
                     }
                 }
                 Event::End(_) => return Ok(()),
@@ -594,14 +600,17 @@ impl<R: BufRead> DatStream<R> {
         loop {
             match self.read_event()? {
                 Event::Text(t) => {
-                    text.push_str(&t.xml10_content().map_err(|e| self.xml_error(e.into()))?);
+                    text.push_str(&t.xml10_content());
                 }
                 Event::CData(t) => {
-                    text.push_str(&t.decode().map_err(|e| self.xml_error(e.into()))?);
+                    text.push_str(&t);
                 }
                 Event::GeneralRef(r) => text.push_str(&self.resolve_ref(&r)?),
                 Event::Start(e) => self.skip(&e)?,
-                Event::End(_) => return Ok(text.trim().to_owned()),
+                Event::End(_) => {
+                    self.utf8(&text)?;
+                    return Ok(text.trim().to_owned());
+                }
                 Event::Eof => return Err(DatError::Truncated),
                 _ => {}
             }
@@ -613,17 +622,19 @@ impl<R: BufRead> DatStream<R> {
         if let Some(c) = r.resolve_char_ref().map_err(|e| self.xml_error(e))? {
             return Ok(c.to_string());
         }
-        let name = r.decode().map_err(|e| self.xml_error(e.into()))?;
-        Ok(resolve_predefined_entity(&name).map_or_else(|| format!("&{name};"), str::to_owned))
+        let name: &str = r;
+        self.utf8(name)?;
+        Ok(resolve_predefined_entity(name).map_or_else(|| format!("&{name};"), str::to_owned))
     }
 
-    fn attr(&self, e: &BytesStart<'_>, key: &[u8]) -> Result<Option<String>, DatError> {
+    fn attr(&self, e: &BytesStart<'_>, key: &str) -> Result<Option<String>, DatError> {
         for attr in e.attributes() {
             let attr = attr.map_err(|err| self.xml_error(err.into()))?;
             if attr.key.local_name().as_ref() == key {
                 let value: Cow<'_, str> = attr
-                    .decoded_and_normalized_value(XmlVersion::Implicit1_0, self.reader.decoder())
+                    .normalized_value(XmlVersion::Implicit1_0)
                     .map_err(|err| self.xml_error(err))?;
+                self.utf8(&value)?;
                 return Ok(Some(value.into_owned()));
             }
         }
@@ -636,7 +647,7 @@ impl<R: BufRead> DatStream<R> {
         has_body: bool,
     ) -> Result<(DatGame, Option<String>), DatError> {
         let name = self
-            .attr(start, b"name")?
+            .attr(start, "name")?
             .ok_or_else(|| DatError::MissingAttribute {
                 element: "game",
                 attribute: "name",
@@ -655,8 +666,8 @@ impl<R: BufRead> DatStream<R> {
             roms: Vec::new(),
         };
         if !export {
-            game.clone_of = self.attr(start, b"cloneof")?;
-            game.rom_of = self.attr(start, b"romof")?;
+            game.clone_of = self.attr(start, "cloneof")?;
+            game.rom_of = self.attr(start, "romof")?;
         }
         let mut archive = export::Archive::default();
         let mut sources = Vec::new();
@@ -664,32 +675,32 @@ impl<R: BufRead> DatStream<R> {
             loop {
                 match self.read_event()? {
                     Event::Start(e) => match e.local_name().as_ref() {
-                        b"description" if !export => game.description = Some(self.read_text()?),
-                        b"category" if !export => {
+                        "description" if !export => game.description = Some(self.read_text()?),
+                        "category" if !export => {
                             let text = self.read_text()?;
                             game.category.get_or_insert(text);
                         }
-                        b"rom" if !export => {
+                        "rom" if !export => {
                             game.roms.push(self.read_rom(&e, &game.name)?);
                             self.skip(&e)?;
                         }
-                        b"release" if !export => {
+                        "release" if !export => {
                             self.read_release(&e, &mut game)?;
                             self.skip(&e)?;
                         }
-                        b"archive" if export => {
+                        "archive" if export => {
                             archive = self.read_archive(&e)?;
                             self.skip(&e)?;
                         }
-                        b"source" if export && !self.index_only => {
+                        "source" if export && !self.index_only => {
                             sources.push(self.read_source(&game.name)?);
                         }
                         _ => self.skip(&e)?,
                     },
                     Event::Empty(e) => match e.local_name().as_ref() {
-                        b"rom" if !export => game.roms.push(self.read_rom(&e, &game.name)?),
-                        b"release" if !export => self.read_release(&e, &mut game)?,
-                        b"archive" if export => archive = self.read_archive(&e)?,
+                        "rom" if !export => game.roms.push(self.read_rom(&e, &game.name)?),
+                        "release" if !export => self.read_release(&e, &mut game)?,
+                        "archive" if export => archive = self.read_archive(&e)?,
                         _ => {}
                     },
                     Event::End(_) => break,
@@ -712,8 +723,8 @@ impl<R: BufRead> DatStream<R> {
 
     /// Adds a `<release>`'s region and languages to the game's, each once.
     fn read_release(&self, e: &BytesStart<'_>, game: &mut DatGame) -> Result<(), DatError> {
-        let region = self.attr(e, b"region")?;
-        let language = self.attr(e, b"language")?;
+        let region = self.attr(e, "region")?;
+        let language = self.attr(e, "language")?;
         export::extend_unique(&mut game.regions, export::split_list(region.as_deref()));
         export::extend_unique(&mut game.languages, export::split_list(language.as_deref()));
         Ok(())
@@ -721,11 +732,11 @@ impl<R: BufRead> DatStream<R> {
 
     fn read_archive(&self, e: &BytesStart<'_>) -> Result<export::Archive, DatError> {
         Ok(export::Archive {
-            number: self.attr(e, b"number")?.filter(|n| !n.trim().is_empty()),
-            clone: self.attr(e, b"clone")?,
-            region: self.attr(e, b"region")?,
-            languages: self.attr(e, b"languages")?,
-            status: self.attr(e, b"status")?,
+            number: self.attr(e, "number")?.filter(|n| !n.trim().is_empty()),
+            clone: self.attr(e, "clone")?,
+            region: self.attr(e, "region")?,
+            languages: self.attr(e, "languages")?,
+            status: self.attr(e, "status")?,
         })
     }
 
@@ -740,7 +751,7 @@ impl<R: BufRead> DatStream<R> {
                 Event::Eof => return Err(DatError::Truncated),
                 _ => continue,
             };
-            if e.local_name().as_ref() == b"file" {
+            if e.local_name().as_ref() == "file" {
                 source.files.extend(self.read_file(&e, game)?);
             }
             if body {
@@ -751,7 +762,7 @@ impl<R: BufRead> DatStream<R> {
 
     /// Reads one `<file>`; an `item` extra that fails to parse is `None`, never an error.
     fn read_file(&self, e: &BytesStart<'_>, game: &str) -> Result<Option<export::File>, DatError> {
-        let item = self.attr(e, b"item").ok().flatten();
+        let item = self.attr(e, "item").ok().flatten();
         match (self.read_file_attrs(e, game, item.clone()), item) {
             (Ok(file), _) => Ok(Some(file)),
             (Err(_), Some(_)) => Ok(None),
@@ -766,23 +777,23 @@ impl<R: BufRead> DatStream<R> {
         item: Option<String>,
     ) -> Result<export::File, DatError> {
         let size_text = self
-            .attr(e, b"size")?
+            .attr(e, "size")?
             .ok_or_else(|| DatError::MissingAttribute {
                 element: "file",
                 attribute: "size",
                 game: game.to_owned(),
             })?;
         Ok(export::File {
-            extension: self.attr(e, b"extension")?.unwrap_or_default(),
-            format: self.attr(e, b"format")?.unwrap_or_default(),
+            extension: self.attr(e, "extension")?.unwrap_or_default(),
+            format: self.attr(e, "format")?.unwrap_or_default(),
             size: parse_size(game, &size_text)?,
             crc32: self.hex(e, "crc32", 8, game)?,
             md5: self.hex(e, "md5", 32, game)?,
             sha1: self.hex(e, "sha1", 40, game)?,
-            header: self.attr(e, b"header")?.filter(|h| !h.trim().is_empty()),
+            header: self.attr(e, "header")?.filter(|h| !h.trim().is_empty()),
             item,
-            forcename: self.attr(e, b"forcename")?,
-            bad: self.attr(e, b"bad")?.is_some_and(|v| v.trim() == "1"),
+            forcename: self.attr(e, "forcename")?,
+            bad: self.attr(e, "bad")?.is_some_and(|v| v.trim() == "1"),
         })
     }
 
@@ -794,7 +805,7 @@ impl<R: BufRead> DatStream<R> {
         len: usize,
         game: &str,
     ) -> Result<Option<String>, DatError> {
-        match self.attr(e, key.as_bytes())? {
+        match self.attr(e, key)? {
             None => Ok(None),
             Some(v) if v.trim().is_empty() => Ok(None),
             Some(v) => {
@@ -818,10 +829,10 @@ impl<R: BufRead> DatStream<R> {
             attribute,
             game: game.to_owned(),
         };
-        let name = self.attr(e, b"name")?.ok_or_else(|| missing("name"))?;
-        let size_text = self.attr(e, b"size")?.ok_or_else(|| missing("size"))?;
+        let name = self.attr(e, "name")?.ok_or_else(|| missing("name"))?;
+        let size_text = self.attr(e, "size")?.ok_or_else(|| missing("size"))?;
         let size = parse_size(game, &size_text)?;
-        let status = match self.attr(e, b"status")? {
+        let status = match self.attr(e, "status")? {
             None => RomStatus::Good,
             Some(v) => RomStatus::parse(&v).ok_or_else(|| DatError::InvalidAttribute {
                 game: game.to_owned(),
@@ -833,7 +844,7 @@ impl<R: BufRead> DatStream<R> {
         let md5 = self.hex(e, "md5", 32, game)?;
         let sha1 = self.hex(e, "sha1", 40, game)?;
         Ok(DatRom {
-            header: self.attr(e, b"header")?,
+            header: self.attr(e, "header")?,
             name,
             size,
             crc32,

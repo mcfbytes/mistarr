@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use mistarr_core::xml::{check_utf8, lossy, EscapeInvalid};
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
 
@@ -41,19 +42,22 @@ pub struct Romsets {
 /// ```
 pub fn parse_romsets(xml: &[u8]) -> Result<Romsets> {
     let err = |e: &dyn std::fmt::Display| Error::Romsets(e.to_string());
-    let mut reader = Reader::from_reader(xml);
+    let mut reader = Reader::from_reader(EscapeInvalid::new(xml));
+    let mut buf = Vec::new();
     let mut out = Romsets::default();
     loop {
-        match reader.read_event().map_err(|e| err(&e))? {
+        buf.clear();
+        match reader.read_event_into(&mut buf).map_err(|e| err(&e))? {
             Event::Start(e) | Event::Empty(e)
-                if e.local_name().as_ref().eq_ignore_ascii_case(b"romset") =>
+                if e.local_name().as_ref().eq_ignore_ascii_case("romset") =>
             {
                 for a in e.attributes() {
                     let a = a.map_err(|e| err(&e))?;
-                    if a.key.local_name().as_ref() == b"name" {
+                    if a.key.local_name().as_ref() == "name" {
                         let v = a
                             .normalized_value(XmlVersion::Implicit1_0)
                             .map_err(|e| err(&e))?;
+                        check_utf8(&v).map_err(|e| err(&quick_xml::Error::from(e)))?;
                         let v = v.trim().to_owned();
                         if !v.is_empty() && !out.sets.contains(&v) {
                             out.sets.push(v);
@@ -62,7 +66,7 @@ pub fn parse_romsets(xml: &[u8]) -> Result<Romsets> {
                 }
             }
             Event::Comment(c) => {
-                let text = String::from_utf8_lossy(&c).into_owned();
+                let text = lossy(&c);
                 for line in text.lines().map(str::trim) {
                     if is_file_name(line) && !out.bios.iter().any(|b| b == line) {
                         out.bios.push(line.to_owned());
@@ -242,6 +246,18 @@ Files that must be present:
         assert_eq!(r.bios, ["exbios.rom", "ex-lo.lo", "exfix.fix"]);
         assert!(matches!(
             parse_romsets(b"<romsets><romset name=\"a\"></oops>"),
+            Err(Error::Romsets(_))
+        ));
+        let latin1 = parse_romsets(
+            b"<!-- Caf\xe9\n  exbios.rom\n--><romsets><romset name=\"a\"/></romsets>",
+        )
+        .expect("parse");
+        assert_eq!(
+            (latin1.sets, latin1.bios),
+            (vec!["a".to_owned()], vec!["exbios.rom".to_owned()])
+        );
+        assert!(matches!(
+            parse_romsets(b"<romsets><romset name=\"\xe9\"/></romsets>"),
             Err(Error::Romsets(_))
         ));
     }

@@ -144,6 +144,24 @@ fn malformed_xml_is_an_error() {
 }
 
 #[test]
+fn non_utf8_is_refused_in_text_and_skipped_in_comments() {
+    assert!(matches!(
+        parse(b"<misterromdescription><name>Caf\xe9</name></misterromdescription>"),
+        Err(Error::Mra(_))
+    ));
+    assert!(matches!(
+        parse(b"<misterromdescription><rom zip=\"\xe9.zip\"/></misterromdescription>"),
+        Err(Error::Mra(_))
+    ));
+    let mra = parse(
+        b"\xef\xbb\xbf<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><!-- Caf\xe9 -->\
+          <misterromdescription><setname>exblast</setname></misterromdescription>",
+    )
+    .expect("parse");
+    assert_eq!(mra.setname.as_deref(), Some("exblast"));
+}
+
+#[test]
 fn cdata_and_character_references_are_kept() {
     let mra = parse(
         b"<misterromdescription><name>Example &#38; Co &#x26; Blaster</name>\
@@ -338,6 +356,22 @@ fn a_read_mra_leaves_inline_data_in_the_file() {
         items[3],
         RomItem::Unsupported("inline part data is not hex".into())
     );
+
+    // A BOM and a Latin-1 comment shift the part; its offsets stay in input bytes.
+    let mut shifted = b"\xef\xbb\xbf<!-- \xe9 -->".to_vec();
+    shifted.extend_from_slice(xml.as_bytes());
+    std::fs::write(&path, &shifted).expect("rewrite");
+    let mra = read(&path).expect("read latin-1 comment");
+    let RomItem::Part(big) = &mra.roms[0].items[0] else {
+        panic!("{:?}", mra.roms)
+    };
+    let mut bytes = Vec::new();
+    let inline = big.inline.as_ref().expect("inline");
+    open_inline(inline)
+        .expect("open")
+        .read_to_end(&mut bytes)
+        .expect("read");
+    assert_eq!(bytes, [1u8, 2, 3].repeat(1000));
 
     std::fs::write(&path, xml.replace("01 02 03", "01 02 0Z")).expect("rewrite");
     let mut changed = Vec::new();

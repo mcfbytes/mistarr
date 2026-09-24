@@ -162,6 +162,47 @@ fn clrmamepro_with_body() {
     assert_eq!(dat.header.clrmamepro_header.as_deref(), Some("h.xml"));
 }
 
+#[test]
+fn bom_is_skipped_on_the_reader_path() {
+    let xml = "\u{feff}<?xml version='1.0' encoding='UTF-8'?><datafile><game name='Caf\u{e9}'/></datafile>";
+    let dat = parse_dat_reader(BufReader::with_capacity(2, xml.as_bytes())).unwrap();
+    assert_eq!(dat.games[0].name, "Caf\u{e9}");
+}
+
+#[test]
+fn non_utf8_name_is_rejected_with_its_input_offset() {
+    let xml = b"<datafile>\n<game name='Example Caf\xe9 (Europe)'/></datafile>";
+    for dat in [
+        parse_dat(xml),
+        parse_dat_reader(BufReader::with_capacity(3, &xml[..])),
+    ] {
+        match dat {
+            Err(DatError::Xml { position, .. }) => assert_eq!(position, 47),
+            other => panic!("{other:?}"),
+        }
+    }
+    let text = b"<datafile><header><name>Caf\xe9</name></header><game name='x'/></datafile>";
+    assert!(matches!(parse_dat(text), Err(DatError::Xml { .. })));
+    let cdata = b"<datafile><header><name><![CDATA[\xe9]]></name></header></datafile>";
+    assert!(matches!(parse_dat(cdata), Err(DatError::Xml { .. })));
+}
+
+#[test]
+fn non_utf8_bytes_the_parser_ignores_never_fail() {
+    let xml = b"<?xml version='1.0' encoding='ISO-8859-1'?>\n<!-- Caf\xe9 -->\
+        <datafile><?pi \xe9?><header><name>N</name></header><unknown>\xe9</unknown>\
+        <game name='Example Quest (USA)' note='\xe9'><extra>\xe9</extra>\
+        <rom name='a.bin' size='1' x\xe9='1'/></game></datafile>";
+    for dat in [
+        parse_dat(xml).unwrap(),
+        parse_dat_reader(BufReader::with_capacity(1, &xml[..])).unwrap(),
+    ] {
+        assert_eq!(dat.header.name, "N");
+        assert_eq!(dat.games[0].name, "Example Quest (USA)");
+        assert_eq!(dat.games[0].roms[0].name, "a.bin");
+    }
+}
+
 fn err(xml: &str) -> DatError {
     parse_dat(xml.as_bytes()).unwrap_err()
 }

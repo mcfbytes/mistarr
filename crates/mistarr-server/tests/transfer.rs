@@ -208,7 +208,7 @@ fn push_extend(fake: &FakeServer, wanted: [bool; 4]) {
 /// A `torrent-get` status reply with `status` and bytes done per file.
 fn status(hash: &str, code: i64, done: [u64; 4], error: i64) -> FakeResponse {
     // The readme (index 1) and the third rom are never selected in these tests.
-    let wanted = |i: usize| i % 2 == 0 && i < 3;
+    let wanted = |i: usize| i.is_multiple_of(2) && i < 3;
     let stats: Vec<Value> = done
         .iter()
         .enumerate()

@@ -22,6 +22,22 @@ Regions and languages come from the name (see "Name parsing"); a DAT's own
 fields (`<release>` or the export's `archive`) fill them only when the name
 has none, which is common for languages.
 
+### Text encoding
+
+DATs, MRAs and `romsets.xml` are read as UTF-8. A leading UTF-8 byte order
+mark is skipped and the `encoding` of an XML declaration is ignored; nothing
+is transcoded, and UTF-16 is not supported. `mistarr_core::xml::EscapeInvalid`
+sits between the file and the XML reader and escapes each byte that is not
+part of a valid UTF-8 sequence, so a non-UTF-8 byte fails the file only where
+the parser uses its value: a name, element text or an attribute it reads.
+A DAT error names the byte offset in the file, counting a byte order mark;
+for bad element text it is the offset of the closing tag. The same bytes in
+a comment, a processing instruction, an element or attribute the parser
+ignores, or a tag name pass without effect, so a Latin-1 comment or unknown
+tag never fails a DAT. The escapes are the code points U+10FF80 to U+10FFFF,
+so a value that holds one of them, written literally or as a character
+reference such as `&#x10FFE9;`, is refused too.
+
 ### DB export
 
 A No-Intro database export is two top-level elements, `<header>` and then

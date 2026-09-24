@@ -140,8 +140,8 @@ export const api = {
     offset: number,
     signal?: AbortSignal
   ): Promise<Paged<TitleGroup>> =>
-    request(`/platforms/${platformId}/titles${query({ ...filters, limit, offset })}`, { signal }),
-  title: (id: number, signal?: AbortSignal): Promise<TitleDetail> => request(`/titles/${id}`, { signal }),
+    request(`/platforms/${platformId}/titles${query({ ...filters, limit, offset })}`, { signal: signal ?? null }),
+  title: (id: number, signal?: AbortSignal): Promise<TitleDetail> => request(`/titles/${id}`, { signal: signal ?? null }),
   want: (id: number, variantId?: number): Promise<TitleDetail> =>
     request(`/titles/${id}/want`, { method: 'POST', body: JSON.stringify({ variant_id: variantId }) }),
   unwant: (id: number): Promise<TitleDetail> => request(`/titles/${id}/want`, { method: 'DELETE' }),
@@ -235,6 +235,8 @@ export class EventSubscriber {
       // connection failed or was aborted, handled by the disconnect signal below
     }
     this.onStateChange(false);
+    // close() can run during the awaits above.
+    // eslint-disable-next-line @typescript-eslint/no-unnecessary-condition
     if (!this.closed) {
       const wait = this.backoff;
       this.backoff = Math.min(this.backoff * 2, RECONNECT_MAX_MS);

@@ -358,7 +358,7 @@ fn assert_matches_reference(c: &Connection) {
                     sort: sorts[(n / 2) % 3],
                 };
                 let platform = PLATFORMS[n % PLATFORMS.len()];
-                let (limit, offset) = if n % 4 == 0 { (3, 1) } else { (50, 0) };
+                let (limit, offset) = if n.is_multiple_of(4) { (3, 1) } else { (50, 0) };
                 let want = reference_browse(c, platform, &f, limit, offset);
                 for shape in SearchShape::ALL {
                     let got =

@@ -302,12 +302,12 @@ fn swap_into(data: &[u8], order: N64Order, out: &mut [u8]) {
     match order {
         N64Order::Big => {}
         N64Order::Swap16 => {
-            for pair in out.chunks_exact_mut(2) {
+            for pair in out.as_chunks_mut::<2>().0 {
                 pair.swap(0, 1);
             }
         }
         N64Order::Swap32 => {
-            for quad in out.chunks_exact_mut(4) {
+            for quad in out.as_chunks_mut::<4>().0 {
                 quad.swap(0, 3);
                 quad.swap(1, 2);
             }
@@ -609,13 +609,13 @@ mod tests {
         z64.extend_from_slice(&payload[4..]);
 
         let mut v64 = vec![0x37, 0x80, 0x40, 0x12];
-        for chunk in payload[4..].chunks_exact(2) {
+        for chunk in payload[4..].as_chunks::<2>().0 {
             v64.push(chunk[1]);
             v64.push(chunk[0]);
         }
 
         let mut n64 = vec![0x40, 0x12, 0x37, 0x80];
-        for chunk in payload[4..].chunks_exact(4) {
+        for chunk in payload[4..].as_chunks::<4>().0 {
             n64.extend_from_slice(&[chunk[3], chunk[2], chunk[1], chunk[0]]);
         }
 
