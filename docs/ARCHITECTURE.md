@@ -47,6 +47,7 @@ contracts in this document.
 | `mistarr-sources` | Watched-directory scanner. `.torrent` (bencode) and `.magnet` parsing into a file list. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
 | `mistarr-clients` | `DownloadClient` trait. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping. | none |
 | `mistarr-server` | The binary. axum HTTP server, SQLite via `rusqlite` (bundled), job scheduler, SSE event bus, embedded SPA via `rust-embed`, config, first-run wizard state, CLI flags. | all |
+| `mistarr-fixture` | Development tool, never shipped: synthetic DATs, `.torrent` files, the synthetic set and a local tracker for the tests in TESTING.md. | core, mister, sources |
 | `web/` | Svelte 5 + Vite + TypeScript SPA. Built to `web/dist`, embedded at compile time. | API.md |
 
 ### Key traits
@@ -202,7 +203,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    the source with fewer open downloads. With no such file the download is
    `wanted` until a source binds that has one.
 2. A light `transfer` job takes `queued` downloads per source. If the torrent
-   is not yet in the client, add it paused to `staging/<infohash>/`, through
+   is not yet in the client, create `staging/<infohash>/` (rtorrent makes only
+   the last level of a download path) and add the torrent paused to it, through
    the remote path map, with only the selected files wanted and the source's
    seed policy. If it is, extend the wanted set. Start it. A magnet whose
    metadata is pending keeps its downloads queued.
@@ -212,16 +214,19 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    `download.changed`, only for rows that moved.
 4. When a file reaches 100 percent and the client reports it checked, the
    download becomes `importing` with its `staged_path`, which hands it to the
-   importer. If every selected file in the torrent is done and the seed policy
-   is `none`, the torrent is stopped; the importer removes it from the client,
-   without deleting data, once the files are placed.
+   importer. Under seed policy `none` neither client stops a torrent on its
+   own; the poller stops it once no download of its source is queued,
+   transferring or checking and every file selected in the client is
+   complete. The importer removes it from the client, without deleting data,
+   once the files are placed. A later want on a stopped torrent extends the
+   selection and starts it again.
 
 ### Import
 
 A heavy `import` job runs per download in `importing`. The importer enqueues
-one for every such row at startup and whenever `download.changed` reports a
-download entering `importing`, unless a job for it is already queued or
-running. A download that fails or is cancelled also wakes the `importing`
+one for every such row at startup, oldest first, and whenever
+`download.changed` reports a download entering `importing`, unless a job for
+it is already queued or running. A download that fails or is cancelled also wakes the `importing`
 tracks of its entry that wait for it. A job whose row has left `importing`
 does nothing.
 

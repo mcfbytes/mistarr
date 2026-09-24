@@ -273,7 +273,8 @@ impl Transmission {
             // A newly added torrent already follows the session default.
             SeedPolicy::Client if fresh => return Ok(()),
             SeedPolicy::Client => json!({ "seedRatioMode": 0 }),
-            SeedPolicy::None => json!({ "seedRatioMode": 1, "seedRatioLimit": 0.0 }),
+            // Unlimited, so only the server stops it, whatever the session limit.
+            SeedPolicy::None => json!({ "seedRatioMode": 2 }),
             SeedPolicy::Ratio { ratio } => {
                 json!({ "seedRatioMode": 1, "seedRatioLimit": f64::from(*ratio) })
             }

@@ -190,8 +190,10 @@ cancelled   (from wanted, queued, transferring or checking)
 - `checking`: client reports 100 percent, waiting for the client's own hash
   check to confirm. A failed check returns the row to `transferring`.
 - `importing`: the client has the whole file checked; `staged_path` is set and
-  the importer owns the row. A torrent whose every selected file is here and
-  whose seed policy is `none` is stopped, not removed.
+  the importer owns the row. Under seed policy `none` the poller stops a
+  torrent once no download of its source is queued, transferring or checking
+  and every file selected in the client is complete; the client never stops
+  it on its own.
 - `done`, `bad`, `failed`, `cancelled`: terminal. `failed` may be retried,
   which returns it to `queued` on the same torrent_file; `bad` never retries
   the same torrent_file. Cancelling a `transferring` or `checking` row

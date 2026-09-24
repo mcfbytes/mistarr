@@ -831,6 +831,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mistarr-fixture"
+version = "0.0.1"
+dependencies = [
+ "anyhow",
+ "clap",
+ "mistarr-core",
+ "mistarr-mister",
+ "mistarr-sources",
+ "sha1",
+ "tempfile",
+ "thiserror",
+ "zip",
+]
+
+[[package]]
 name = "mistarr-mister"
 version = "0.0.1"
 dependencies = [
@@ -853,6 +868,7 @@ dependencies = [
  "futures-util",
  "mistarr-clients",
  "mistarr-core",
+ "mistarr-fixture",
  "mistarr-mister",
  "mistarr-server",
  "mistarr-sources",

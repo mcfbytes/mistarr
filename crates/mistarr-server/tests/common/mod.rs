@@ -222,9 +222,14 @@ impl Sse {
 
     /// Reads until `text` contains `needle`, failing after five seconds.
     pub async fn until(&mut self, needle: &str) {
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        self.until_count(needle, 1, Duration::from_secs(5)).await;
+    }
+
+    /// Reads until `text` contains `needle` at least `n` times, failing after `limit`.
+    pub async fn until_count(&mut self, needle: &str, n: usize, limit: Duration) {
+        let deadline = tokio::time::Instant::now() + limit;
         let mut buf = [0u8; 4096];
-        while !self.text.contains(needle) {
+        while self.text.matches(needle).count() < n {
             let n = tokio::time::timeout_at(deadline, self.stream.read(&mut buf))
                 .await
                 .unwrap_or_else(|_| panic!("no {needle:?} in:\n{}", self.text))

@@ -94,9 +94,28 @@ pub fn to_remote(map: &[PathMapping], local: &Path) -> PathBuf {
         )
 }
 
+/// Creates `local`, the staging directory a torrent is added into, because
+/// rtorrent creates only the last level of a download path. A failure is
+/// logged and left to the client, which may reach the directory another way.
+pub async fn prepare_download_dir(local: &Path) {
+    if let Err(e) = tokio::fs::create_dir_all(local).await {
+        tracing::warn!(dir = %local.display(), error = %e, "cannot create the download directory");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn download_dirs_are_created_with_their_parents() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = root.path().join("staging").join("ab");
+        prepare_download_dir(&dir).await;
+        assert!(dir.is_dir());
+        prepare_download_dir(&dir).await;
+        assert!(dir.is_dir());
+    }
 
     fn status(kind: Option<ClientKind>, url: Option<&str>) -> ClientStatus {
         ClientStatus {

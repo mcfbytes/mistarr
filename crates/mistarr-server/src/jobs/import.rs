@@ -137,7 +137,12 @@ async fn sweep(app: &Arc<AppState>) {
         .read(|c| downloads::list(c, &[DownloadState::Importing], u32::MAX, 0))
         .await;
     match rows {
-        Ok((rows, _)) => enqueue(app, rows.into_iter().map(|r| r.id).collect()).await,
+        Ok((rows, _)) => {
+            // Oldest first, as the downloads were handed over.
+            let mut ids: Vec<DownloadId> = rows.into_iter().map(|r| r.id).collect();
+            ids.sort_by_key(|id| id.0);
+            enqueue(app, ids).await;
+        }
         Err(e) => tracing::warn!(error = %e, "cannot list downloads to import"),
     }
 }
@@ -243,12 +248,15 @@ async fn import(ctx: &JobContext, id: DownloadId) -> Result<()> {
         source: &source,
         entry: &entry,
     };
-    match platform.kind {
+    let outcome = match platform.kind {
         _ if entry.from_mra => placing.mra(&row).await,
         Kind::Disc => placing.disc().await,
         Kind::Romset | Kind::Arcade => placing.romset(&row).await,
         _ => placing.single(&row).await,
-    }
+    };
+    // Any outcome may be the source's last open download, a quarantine included.
+    placing.release_torrent().await;
+    outcome
 }
 
 /// A payload matched to a rom of the wanted entry and bound for `games/`.
@@ -851,7 +859,6 @@ impl Placing<'_> {
                     .record(targets, &stats, pieces, ids, true, note)
                     .await?;
                 self.announce(ids, &done);
-                self.release_torrent().await;
                 Ok(true)
             }
             Ok(Placed::Partly(stats, error)) => {

@@ -6,6 +6,7 @@ members = [
     "crates/mistarr-sources",
     "crates/mistarr-clients",
     "crates/mistarr-server",
+    "crates/mistarr-fixture",
 ]
 
 [workspace.package]

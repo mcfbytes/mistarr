@@ -211,9 +211,11 @@ fn status(hash: &str, code: i64, done: [u64; 4], error: i64) -> FakeResponse {
         .iter()
         .map(|(n, len)| json!({ "name": format!("{SET}/NES/{n}"), "length": len }))
         .collect();
+    // The readme (index 1) and the third rom are never selected in these tests.
     let stats: Vec<Value> = done
         .iter()
-        .map(|d| json!({ "bytesCompleted": d, "wanted": true }))
+        .zip(0..)
+        .map(|(d, i)| json!({ "bytesCompleted": d, "wanted": i % 2 == 0 && i < 3 }))
         .collect();
     FakeResponse::success(json!({ "torrents": [{
         "id": 1, "hashString": hash, "status": code, "percentDone": 0.0,
@@ -256,7 +258,7 @@ async fn want_adds_selects_starts_extends_and_polls_through_transmission() {
     let staging = app.config().paths.staging().join(&h);
     assert_eq!(add["download-dir"], staging.to_string_lossy().as_ref());
     assert_eq!(add["files-unwanted"], json!([1, 2, 3]));
-    assert_eq!(bodies[2]["arguments"]["seedRatioLimit"], 0.0);
+    assert_eq!(bodies[2]["arguments"]["seedRatioMode"], 2);
     assert_eq!(bodies[4]["arguments"]["ids"], json!([h]));
     let d = download_of(&b, quest).await;
     assert_eq!(
@@ -686,7 +688,6 @@ async fn want_extend_and_poll_through_rtorrent() {
     files[2].1 = 2;
     fake.push(rt_status(1, 0, 0, &files));
     fake.push(xml_ok());
-    fake.push(xml_ok());
     assert_eq!(poller.tick(app).await.expect("tick"), Cadence::Idle);
     assert_eq!(download_of(&b, second).await["state"], "importing");
     let tail: Vec<String> = rt_names(&fake).into_iter().skip(10).collect();
@@ -698,7 +699,6 @@ async fn want_extend_and_poll_through_rtorrent() {
             "multi:d.state",
             "multi:d.state",
             "multi:d.state",
-            "d.stop",
             "d.stop"
         ]
     );

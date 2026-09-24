@@ -1073,3 +1073,49 @@ async fn a_finished_torrent_without_seeding_leaves_the_client() {
     assert_eq!(client_id, None);
     b.running.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_quarantine_that_settles_the_source_releases_the_torrent() {
+    let fake = FakeServer::start().await.expect("fake");
+    fake.push(FakeResponse::success(json!({ "version": "4.0.5" })));
+    fake.push(FakeResponse::success(json!({ "torrents": [{ "id": 1 }] })));
+    fake.push(FakeResponse::success(json!({})));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = config_in(dir.path());
+    config.client.url = fake.url();
+    let b = boot_with(dir, config).await;
+    let (_, placed) = entry(
+        &b,
+        "gba",
+        "Example Quest (USA)",
+        "Example Quest (USA).gba",
+        &hash_of(&payload(13, 512)),
+    );
+    let (_, wrong) = entry(
+        &b,
+        "gba",
+        "Sample Saga (USA)",
+        "Sample Saga (USA).gba",
+        &hash_of(&payload(14, 512)),
+    );
+    let hash = infohash();
+    let src = source(&b, Some(&hash));
+    b.running
+        .app
+        .db
+        .write_blocking(move |c| {
+            downloads_import::insert_fixture(c, placed, src, 0, "done", None)?;
+            sources::set_seed_policy(c, src, &SeedPolicy::None)
+        })
+        .expect("done download");
+    let staged = stage(&b, "GBA/Sample Saga (USA).gba", &payload(15, 512));
+    let id = hand_off(&b, wrong, src, 1, &staged);
+    settled(&b, id, DownloadState::Bad).await;
+    eventually("the torrent removed", || async {
+        fake.bodies()
+            .iter()
+            .any(|v| v["method"] == "torrent-remove")
+    })
+    .await;
+    b.running.shutdown().await.expect("shutdown");
+}

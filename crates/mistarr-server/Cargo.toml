@@ -43,5 +43,6 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["s
 
 [dev-dependencies]
 mistarr-server = { path = ".", features = ["test-support"] }
+mistarr-fixture = { path = "../mistarr-fixture" }
 tempfile = "3"
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros"] }
