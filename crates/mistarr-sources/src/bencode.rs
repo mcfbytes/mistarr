@@ -379,7 +379,7 @@ mod tests {
     #[test]
     fn rejects_excessive_nesting() {
         let mut data = vec![b'l'; MAX_DEPTH as usize + 2];
-        data.extend(std::iter::repeat(b'e').take(MAX_DEPTH as usize + 2));
+        data.extend(std::iter::repeat_n(b'e', MAX_DEPTH as usize + 2));
         assert!(matches!(decode(&data), Err(SourceError::NestingTooDeep(_))));
     }
 
