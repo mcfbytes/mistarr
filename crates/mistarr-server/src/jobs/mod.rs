@@ -3,6 +3,7 @@
 pub mod corename;
 pub mod detect_client;
 pub mod gate;
+pub mod scan;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};

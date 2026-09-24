@@ -15,7 +15,7 @@ use crate::error::{Error, Result};
 use crate::events::{EventBus, EventKind};
 use crate::jobs::detect_client::DetectClient;
 use crate::jobs::gate::Gate;
-use crate::jobs::{corename, Scheduler};
+use crate::jobs::{self, corename, Scheduler};
 
 /// Runtime knobs that are not part of `mistarr.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,7 +178,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
 
     // Step 2: database, migrations, platform seed, runtime settings.
     let db = Db::open(&config.paths.db())?;
-    let stored = db.write_blocking(|c| {
+    let (stored, unfinished_scans) = db.write_blocking(|c| {
         let added = db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS)?;
         if added > 0 {
             tracing::info!(added, "seeded platforms");
@@ -187,7 +187,11 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
         if !interrupted.is_empty() {
             tracing::warn!(count = interrupted.len(), "marked interrupted jobs failed");
         }
-        Ok(settings::get_json::<RuntimeSettings>(c, keys::RUNTIME))
+        let unfinished = db::files::platforms_with_progress(c)?;
+        Ok((
+            settings::get_json::<RuntimeSettings>(c, keys::RUNTIME),
+            unfinished,
+        ))
     })?;
     let stored = stored.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "ignoring unreadable saved settings; using the config file");
@@ -198,6 +202,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
         config.limits = rt.limits;
         config.prefs = rt.prefs;
     }
+    let scan_interval = config.jobs.scan_interval_minutes;
     let app = AppState::new(config, db, options);
 
     // Step 3: download client.
@@ -205,6 +210,18 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
 
     // Step 4: installed cores.
     detect_cores(&app)?;
+
+    // Resume any scan left unfinished by a previous run.
+    for platform_id in unfinished_scans {
+        tracing::info!(platform = %platform_id.0, "resuming interrupted scan");
+        Scheduler::enqueue(
+            &app,
+            Arc::new(jobs::scan::ScanJob {
+                platform_id: Some(platform_id),
+            }),
+        )
+        .await?;
+    }
 
     // Step 5: watchers, scheduler and HTTP.
     let mut tasks = Vec::new();
@@ -214,6 +231,12 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
         corename::watch(&opts.corename_path, opts.corename_poll, gate).await;
     }));
     tasks.push(tokio::spawn(publish_gate_changes(Arc::clone(&app))));
+    if scan_interval > 0 {
+        tasks.push(tokio::spawn(scan_on_timer(
+            Arc::clone(&app),
+            Duration::from_secs(u64::from(scan_interval) * 60),
+        )));
+    }
     Scheduler::start(&app);
 
     let listener = tokio::net::TcpListener::bind(app.config().server.listen.as_str()).await?;
@@ -246,6 +269,24 @@ fn detect_cores(app: &AppState) -> Result<()> {
     tracing::info!(platforms = present.len(), "installed cores detected");
     app.db
         .write_blocking(|c| db::platforms::set_core_present(c, &present))
+}
+
+/// Enqueues a full library scan every `interval`, from `[jobs] scan_interval_minutes`.
+async fn scan_on_timer(app: Arc<AppState>, interval: Duration) {
+    let mut stop = app.shutdown_signal();
+    let mut ticker = tokio::time::interval(interval);
+    ticker.tick().await;
+    loop {
+        tokio::select! {
+            _ = ticker.tick() => {}
+            _ = stop.wait_for(|s| *s) => return,
+        }
+        if let Err(e) =
+            Scheduler::enqueue(&app, Arc::new(jobs::scan::ScanJob { platform_id: None })).await
+        {
+            tracing::warn!(error = %e, "cannot enqueue scheduled scan");
+        }
+    }
 }
 
 /// Publishes `status` whenever the gate changes.

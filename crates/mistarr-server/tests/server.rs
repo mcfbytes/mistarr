@@ -364,7 +364,6 @@ async fn unimplemented_routes_answer_501_and_unknown_ones_404() {
         ("PUT", "/api/v1/platforms/nes"),
         ("POST", "/api/v1/titles/1/want"),
         ("DELETE", "/api/v1/titles/1/want"),
-        ("POST", "/api/v1/system/scan"),
         ("GET", "/api/v1/imports"),
     ] {
         let r = request(addr, method, path, &[], Some("{}")).await;

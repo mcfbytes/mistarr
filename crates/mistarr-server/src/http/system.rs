@@ -7,16 +7,18 @@ use axum::extract::rejection::QueryRejection;
 use axum::extract::{Query, State};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::Serialize;
+use mistarr_core::PlatformId;
+use serde::{Deserialize, Serialize};
 
 use super::{ApiError, Page, Paging};
 use crate::app::AppState;
 use crate::config::{RuntimeSettings, SettingsPatch};
-use crate::db::jobs::{self, JobRow};
+use crate::db::jobs::{self, JobId, JobRow};
 use crate::db::settings::{self, keys};
 use crate::db::system::wizard_counts;
 use crate::jobs::detect_client::DetectClient;
 use crate::jobs::gate::Override;
+use crate::jobs::scan::ScanJob;
 use crate::jobs::Scheduler;
 use crate::status::{snapshot, Status};
 
@@ -24,10 +26,39 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/system/status", get(status))
         .route("/system/wizard", get(wizard))
+        .route("/system/scan", post(scan))
         .route("/system/pause", post(pause))
         .route("/system/resume", post(resume))
         .route("/system/jobs", get(list_jobs))
         .route("/system/settings", get(get_settings).put(put_settings))
+}
+
+/// `POST /system/scan` body: an omitted or empty body scans every platform.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ScanBody {
+    platform_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ScanResponse {
+    job_id: JobId,
+}
+
+async fn scan(
+    State(app): State<Arc<AppState>>,
+    body: Bytes,
+) -> Result<Json<ScanResponse>, ApiError> {
+    let body: ScanBody = if body.is_empty() {
+        ScanBody::default()
+    } else {
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
+    };
+    let job = ScanJob {
+        platform_id: body.platform_id.map(PlatformId),
+    };
+    let job_id = Scheduler::enqueue(&app, Arc::new(job)).await?;
+    Ok(Json(ScanResponse { job_id }))
 }
 
 async fn status(State(app): State<Arc<AppState>>) -> Json<Status> {

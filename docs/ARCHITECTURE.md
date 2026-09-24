@@ -227,6 +227,9 @@ regions   = ["USA", "World", "Europe", "Japan"]
 languages = ["En"]
 prefer_latest_revision = true
 hide = ["bios", "beta", "proto", "demo", "sample", "program"]
+
+[jobs]
+scan_interval_minutes = 0   # 0 = manual only; otherwise a full scan is enqueued on this timer
 ```
 
 The file is `--config FILE` if given, else `<data>/mistarr.toml` when it
@@ -234,7 +237,8 @@ exists, where `<data>` is `--data DIR` or `/media/fat/mistarr`; `--data`
 also overrides `paths.data` and `--listen` overrides `server.listen`. The
 `client`, `limits` and `prefs` sections are editable through
 `/system/settings`; saved values live in the `settings` table and take
-precedence over the file on every start. `server` and `paths` need a restart.
+precedence over the file on every start. `server`, `paths` and `jobs` need a
+restart.
 
 ## Non-goals
 
