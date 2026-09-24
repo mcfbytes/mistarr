@@ -119,23 +119,25 @@ plain zip name from `games/mame/`, a name starting with `/` from `games/`
 leaves `games/` is ignored. A title counts as have when every zip it names is
 present and its md5 check is not `mismatch` or `missing_part`.
 
-A library scan never walks the arcade platform's directories: hashing every
-member of every MAME zip on every scan is needless CPU and SD reads. Arcade
-is instead verified through three paths, all run by the arcade catalogue job
-(ARCHITECTURE.md "Arcade presence pass"), never a scan:
+Arcade on MiSTer runs from MRAs, so arcade needs MRAs under `_Arcade`: a
+MAME or HBMAME DAT with no MRAs is not a supported setup. A library scan
+never walks the arcade platform's directories; hashing every member of every
+MAME zip on every scan is needless CPU and SD reads. Arcade state comes from
+three places, never a scan:
 
-1. An MRA title's own md5 check, "MRA assembly" below.
-2. The presence pass: after storing titles, the same job reads every zip's
-   central directory under `games/mame` and `games/hbmame`, never
-   decompressing a member. A member whose CRC32 and size match a loaded
-   DAT's rom is recorded against it, at CRC32 level rather than a full hash;
-   this is how a DAT entry loaded for `arcade` (`source = 'dat'`) is ever
-   marked `have`, since nothing else scans it. A member of a zip a live MRA
-   names, that no DAT matches, is recorded `unverified` against the MRA's
-   own zip rom, so the next import's md5 check has a row to promote once it
-   reads that zip as a sibling. The pass prunes `files` rows whose zip or
-   member is gone, and is incremental by each zip's size and mtime.
-3. The import path, "MRA import" below, for a zip mistarr places itself.
+1. An MRA title's zip presence and md5 check, "MRA assembly" below, run by
+   the arcade catalogue job.
+2. The presence pass the same job runs after storing titles (ARCHITECTURE.md
+   "Arcade catalogue", step 4): it tracks which zips named by live MRAs exist
+   under `games/mame` and `games/hbmame` from a stat of each, giving such a
+   zip an `unverified` row against the MRA's zip rom that an md5 check reading
+   it as a sibling promotes, and it prunes `files` rows whose zip is gone. It
+   verifies nothing by itself.
+3. The import path, "MRA import" below, for a zip mistarr places. A loaded
+   MAME or HBMAME DAT only adds verification here: when an imported zip's MRA
+   carries no md5, its members are checked against the DAT entry of the same
+   set name with full hashes. A zip the user copies in is never checked
+   against a DAT.
 
 While any live MRA title exists, the arcade browse lists MRA titles only,
 and wanting an MRA title creates downloads only for its missing zips.

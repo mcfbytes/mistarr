@@ -60,9 +60,9 @@ export interface PlatformCounts {
   wanted: number;
   /** Files on disk that match no rom; always 0 for arcade, which a scan never walks. */
   unmatched_files: number;
-  /** Live MRA sets with every zip present whose md5 check did not match; 0 outside arcade. */
+  /** Clone groups with a visible MRA variant failing its md5 check and no verified variant; 0 outside arcade. */
   failing_check: number;
-  /** Live MRA sets with some, but not every, named zip present; 0 outside arcade. */
+  /** Clone groups with a visible MRA variant missing some of its zips and no verified variant; 0 outside arcade. */
   partial: number;
 }
 
@@ -142,8 +142,22 @@ export interface TitleVariant {
   dat_version_id: number;
   roms: TitleRom[];
   torrent_files_available: number;
+  availability: TitleAvailability[];
   source?: 'dat' | 'mra';
   mra?: TitleMra;
+}
+
+/** How a torrent file was matched to a rom, strongest first. */
+export type MatchConfidence = 'hash' | 'name' | 'base' | 'fuzzy' | 'size';
+
+/** A file of a bound source that may hold a rom of the variant. */
+export interface TitleAvailability {
+  source_id: number;
+  source_name: string;
+  file_index: number;
+  path: string;
+  rom_id: number;
+  confidence: MatchConfidence;
 }
 
 export interface TitleMra {
@@ -222,7 +236,15 @@ export interface IncomingFile {
   modified: number;
 }
 
-export type SourceFileConfidence = 'name' | 'size' | null;
+export type SourceFileConfidence = 'hash' | 'name' | 'base' | null;
+
+/** A further rom a torrent file may hold, from any mapping tier, beyond its matched one. */
+export interface SourceFileCandidate {
+  rom_id: number;
+  rom_name: string;
+  title_id: number;
+  confidence: MatchConfidence;
+}
 
 export interface SourceFile {
   file_index: number;
@@ -232,6 +254,7 @@ export interface SourceFile {
   rom_name: string | null;
   title_id: number | null;
   confidence: SourceFileConfidence;
+  candidates: SourceFileCandidate[];
 }
 
 export type DownloadState =

@@ -12,6 +12,12 @@ use std::time::{Duration, Instant};
 use crate::rtorrent::RC_MARKER;
 use crate::{ClientError, ClientKind, Result};
 
+/// `errno` for exec of a file another process still has open for writing.
+const ETXTBSY: i32 = 26;
+
+/// Spawn attempts after an `ETXTBSY`, with a growing pause between them.
+const SPAWN_RETRIES: u64 = 5;
+
 /// The directory whose presence makes the `Buildroot_MiSTer` init script start Transmission.
 pub const TRANSMISSION_OPT_IN: &str = "/media/fat/linux/transmission";
 
@@ -203,13 +209,21 @@ impl Launcher {
             cmd.env("PATH", path);
         }
         let (log, from) = self.open_log()?;
-        let child = cmd
-            .stdin(Stdio::null())
+        cmd.stdin(Stdio::null())
             .stdout(log.try_clone()?)
-            .stderr(log)
-            .spawn()
-            .map_err(|e| ClientError::Launch(e.to_string()))?;
-        Ok((child, from))
+            .stderr(log);
+        let mut tries = 0u64;
+        loop {
+            match cmd.spawn() {
+                Ok(child) => return Ok((child, from)),
+                // A script still open for writing elsewhere fails exec with ETXTBSY; it clears.
+                Err(e) if e.raw_os_error() == Some(ETXTBSY) && tries < SPAWN_RETRIES => {
+                    tries += 1;
+                    std::thread::sleep(Duration::from_millis(20 * tries));
+                }
+                Err(e) => return Err(ClientError::Launch(e.to_string())),
+            }
+        }
     }
 
     /// Runs `cmd` to completion within `timeout`; a non-zero exit is an error
@@ -384,6 +398,24 @@ mod tests {
         script(dir.path(), "S92transmission", "exec /bin/sleep 30");
         let err = l.start(ClientKind::Transmission).expect_err("overruns");
         assert!(err.to_string().contains("still running"), "{err}");
+    }
+
+    #[test]
+    fn a_script_still_open_for_writing_starts_once_released() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let l = launcher(dir.path());
+        script(dir.path(), "S92transmission", "exit 0");
+        let writer = OpenOptions::new()
+            .append(true)
+            .open(&l.transmission_init)
+            .expect("open for writing");
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(40));
+            drop(writer);
+        });
+        l.start(ClientKind::Transmission)
+            .expect("starts after ETXTBSY clears");
+        release.join().expect("join");
     }
 
     #[test]

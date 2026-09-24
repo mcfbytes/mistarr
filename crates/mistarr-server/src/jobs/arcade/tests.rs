@@ -513,3 +513,30 @@ async fn nothing_is_queued_without_mra_files_or_titles() {
     let (_dir, app) = state();
     assert_eq!(enqueue_if_relevant(&app).await.expect("enqueue"), None);
 }
+
+#[tokio::test]
+async fn an_unchanged_catalogue_leaves_bound_sources_mapped() {
+    let (dir, app) = state();
+    let arcade = dir.path().join(ARCADE_DIR);
+    fs::create_dir_all(&arcade).expect("mkdir");
+    let body = mra_xml("Example Blaster", r#"<rom index="0" zip="exblast.zip"/>"#);
+    fs::write(arcade.join("Example Blaster.mra"), &body).expect("write");
+    let remaps = || async {
+        app.db
+            .read(|c| crate::db::jobs::count_kind(c, crate::jobs::remap::KIND))
+            .await
+            .expect("count")
+    };
+    let stamp = || async {
+        app.db
+            .read(|c| crate::db::candidates::rom_stamp(c, &PlatformId(PLATFORM.into())))
+            .await
+            .expect("stamp")
+    };
+    run(&app).await;
+    assert_eq!(remaps().await, 1, "a stored title re-maps");
+    let first = stamp().await;
+    run(&app).await;
+    assert_eq!(remaps().await, 1, "nothing changed, nothing queued");
+    assert_eq!(stamp().await, first, "a bound source stays current");
+}

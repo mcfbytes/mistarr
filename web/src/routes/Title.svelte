@@ -6,6 +6,7 @@
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { findPlatform, loadPlatforms, platformsLoaded } from '../lib/stores/platforms.svelte';
   import { canPlay, launchBlocker } from '../lib/launch';
+  import { availabilityLine } from '../lib/availability';
 
   interface Props {
     titleId: number;
@@ -160,7 +161,13 @@
                 <div>{rom.file_state ?? 'missing'}</div>
               {/each}
             </td>
-            <td>{variant.torrent_files_available} available</td>
+            <td class="sources">
+              {#each variant.availability as found (`${found.source_id}:${found.file_index}:${found.rom_id}`)}
+                <div>{availabilityLine(found)}</div>
+              {:else}
+                <div class="muted">None available</div>
+              {/each}
+            </td>
             <td>
               {#if playableIds.has(variant.id)}
                 <button class="primary" disabled={busy || playBlocker !== null} onclick={() => play(variant.id)}>
@@ -220,6 +227,10 @@
     padding: 0.4em;
     border-bottom: 1px solid var(--border);
     vertical-align: top;
+  }
+
+  td.sources div {
+    overflow-wrap: anywhere;
   }
 
   tr.retired {

@@ -261,6 +261,7 @@ async fn retire(
         .ok_or_else(|| ApiError::not_found("no such DAT version"))?;
     if let Some(p) = row.platform_id {
         Scheduler::enqueue(&app, Arc::new(Recompute::new(&p.0))).await?;
+        crate::jobs::remap::enqueue(&app, Some(vec![p])).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }

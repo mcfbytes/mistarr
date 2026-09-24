@@ -123,20 +123,18 @@ status body, whose `client` says whether it did.
 
 `/platforms` items are the platform row `{ id, name, core_dir, kind,
 core_present, enabled }` plus `counts: { titles, have, wanted, unmatched_files,
-failing_check, partial }`: clone groups the default browse shows, groups with
-a verified variant, groups with a wanted variant, and `unmatched_files` on
-disk that match no rom, always 0 for arcade, whose own state is reported
-through `failing_check` and `partial` instead. Those two count clone groups
-under the same visibility rules as `titles`/`have`/`wanted` (a variant flagged
-with a hidden flag does not count): a group counts toward `failing_check`
-when one of its visible variants is a live MRA set whose md5 check is
-`mismatch` or `missing_part` and none of its visible variants counts as
-`have`; a group counts toward `partial` when one of its visible variants
-names some, but not every, zip present and none of its visible variants
-counts as `have`. A group with a have-verified visible variant never counts
-toward either, even when another of its variants is failing or partial.
-`PUT` answers with the
-same item. Binding answers 202 `{ dat_version_id, platform_id, job_id }` and
+failing_check, partial }`. `titles` counts the clone groups the default browse
+shows: groups with at least one live variant not flagged with a hidden flag
+(only MRA groups while the platform has a live MRA title). The other group counts count among those groups, and look at every live
+variant of a group, hidden ones included: `have` counts groups with a fully
+verified variant, `wanted` groups with a wanted variant. `failing_check`
+counts groups where a visible live MRA variant's md5 check is `mismatch` or
+`missing_part`, and `partial` groups where a visible live MRA variant has
+some, but not every, zip it names present; neither counts a group that has a
+fully verified variant, hidden or not, so a group counted in `have` is never
+in either. `unmatched_files` counts `unverified` files on disk, and is always
+0 for arcade, whose state `failing_check` and `partial` report instead.
+`PUT` answers with the same item. Binding answers 202 `{ dat_version_id, platform_id, job_id }` and
 the import job loads the titles, then publishes `dat.loaded`; a version that
 is already bound or retired is a 400. When the job cannot load it, because its
 file is gone from `dats/loaded/` or a newer version of the same DAT name is
@@ -171,9 +169,14 @@ and `/platforms` counts only them.
 `/titles/{id}` takes any title of the group and answers `{ parent_id,
 platform_id, base_name, pick_variant_id, art, variants }`. Each variant is `{
 id, name, regions, languages, revision, flags, is_1g1r_pick, wanted, retired,
-inferred, dat_version_id, torrent_files_available, source, roms }`, live
-variants first, and each rom is `{ id, name, size, crc32, md5, sha1, status,
-file_id, file_state, file_path }` for its best file, verified first. `source`
+inferred, dat_version_id, torrent_files_available, availability, source,
+roms }`, live variants first, and each rom is `{ id, name, size, crc32, md5, sha1, status,
+file_id, file_state, file_path }` for its best file, verified first.
+`availability` lists the files of bound sources that may hold a live rom of
+the variant, strongest first, as `{ source_id, source_name, file_index, path,
+rom_id, confidence }`, where `confidence` is `hash`, `name`, `base`, `fuzzy`
+or `size` (VERIFICATION.md "Pre-download matching"), and
+`torrent_files_available` counts its distinct files. `source`
 is `dat` or `mra`. An MRA variant adds `mra: { setname, rbf, path,
 missing_zips, md5_check, md5_detail }`, where `missing_zips` are paths
 relative to `games/` and `md5_check` is `match`, `mismatch`, `missing_part`,
@@ -248,7 +251,8 @@ allowed `Host`.
 
 `/sources` items: `{ id, infohash, display_name, origin_file, platform_id,
 bind_score, state, reason, seed_policy, file_count, matched_count,
-total_size, client_id, added_at, suggested_platform_id }`. `reason` says why
+total_size, client_id, added_at, suggested_platform_id }`. `matched_count`
+counts files matched to a rom or holding a candidate rom. `reason` says why
 a source is `resolving` or `unbound` and is otherwise `null`; `client_id` is
 set once the torrent is in the client. `suggested_platform_id` is the
 platform the torrent's names point at, found without any DAT
@@ -278,8 +282,11 @@ is kept. A source with a download that is queued, transferring, checking or
 importing is a 400; its other downloads are kept with `source_id` `null`.
 
 `/sources/{id}/files` items: `{ file_index, path, size, rom_id, rom_name,
-title_id, confidence }`, where `path` is inside the torrent and `confidence`
-is `"name"`, `"size"` or `null` when no rom matched.
+title_id, confidence, candidates }`, where `path` is inside the torrent,
+`confidence` is `"hash"`, `"name"`, `"base"` or `null` when no rom is
+matched, and `candidates` lists the further roms the file may be, strongest
+first, as `{ rom_id, rom_name, title_id, confidence }`. A file counts toward
+the source's `matched_count` exactly when it has a matched rom or a candidate.
 
 ## Incoming files
 

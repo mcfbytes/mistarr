@@ -218,3 +218,14 @@ test('a loaded DAT is removed only after a confirmation that files stay', async 
   await expect(item.getByRole('button', { name: /^Remove/ })).toHaveCount(0);
   await expect(page.getByRole('heading', { name: 'Unbound Sample DAT' })).toBeFocused();
 });
+
+test('the title lists each file that may hold a variant with its confidence', async ({ page }) => {
+  await page.goto('/#/t/1');
+  const pick = page.getByRole('row', { name: /\(USA\) \(pick\)/ });
+  await expect(pick.getByText('Sample Racer (USA).nes in Example Pack (name match)')).toBeVisible();
+  await expect(pick.getByText('example.nes in examplepack1.0 (name guess)')).toBeVisible();
+  const europe = page.getByRole('row', { name: /\(Europe\)/ });
+  await expect(europe.getByText('example.nes in examplepack1.0 (name guess)')).toBeVisible();
+  const bios = page.getByRole('row', { name: /\(BIOS\)/ });
+  await expect(bios.getByText('None available')).toBeVisible();
+});

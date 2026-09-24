@@ -2,7 +2,7 @@
 
 pub mod catalog;
 mod dats;
-mod downloads;
+pub(crate) mod downloads;
 mod events;
 mod imports;
 mod launch;

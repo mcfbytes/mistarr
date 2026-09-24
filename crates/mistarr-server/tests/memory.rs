@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use mistarr_core::hash::Md5Stream;
 use mistarr_sources::bencode::{self, Value};
-use serde_json::Value as Json;
+use serde_json::{json, Value as Json};
 
 /// Peak RSS budget during scan or import, `docs/ARCHITECTURE.md` "Resource budgets".
 const BUDGET_KIB: u64 = 64 * 1024;
@@ -32,10 +32,16 @@ const EXPORT_BYTES: usize = 16 * 1024 * 1024;
 const LARGE_MRAS: usize = 16;
 const INLINE_BYTES: usize = 1024 * 1024;
 const TORRENT_FILES: usize = 50_000;
+/// Every this many torrent files one is named loosely, so the fuzzy tier reads its size's roms.
+const LOOSE_EVERY: usize = 10;
 const LOOSE_FILES: usize = 16_000;
 const ZIPPED_FILES: usize = 2_000;
 const DISC_DIRS: usize = 1_000;
 const PRESENCE_ZIPS: usize = 30_000;
+const PRESENCE_MEMBERS: usize = 10;
+const PRESENCE_MRAS: usize = 3_000;
+/// Longest the catalogue with its presence pass may take, generous for shared CI runners.
+const PRESENCE_TIME: Duration = Duration::from_secs(60);
 
 /// A running `mistarr serve` over one data directory.
 struct Server {
@@ -497,14 +503,19 @@ fn rom_size(i: usize) -> u64 {
     16_384 + (i as u64 % 64) * 1024
 }
 
-/// A multi-file torrent of `TORRENT_FILES` files named after the DAT's roms.
+/// A multi-file torrent of `TORRENT_FILES` files named after the DAT's roms,
+/// every [`LOOSE_EVERY`]th only loosely, which leaves the name tiers to the fuzzy one.
 fn big_torrent(path: &Path) {
     let regions = ["USA", "Europe", "Japan"];
     let files: Vec<Value> = (0..TORRENT_FILES)
         .map(|i| {
             let mut f = std::collections::BTreeMap::new();
             f.insert(b"length".to_vec(), Value::Int(rom_size(i) as i64));
-            let name = format!("{}.nes", game_name(i, &regions));
+            let name = if i % LOOSE_EVERY == LOOSE_EVERY - 1 {
+                format!("example_game_{i}.nes")
+            } else {
+                format!("{}.nes", game_name(i, &regions))
+            };
             f.insert(
                 b"path".to_vec(),
                 Value::List(vec![
@@ -559,36 +570,63 @@ fn games_tree(root: &Path) -> usize {
     LOOSE_FILES + ZIPPED_FILES + DISC_DIRS * 2
 }
 
-/// `PRESENCE_ZIPS` small zips under `games/mame` that no MRA names and no DAT
-/// matches: the presence pass's worst case, reading every central directory and
-/// writing nothing. An empty `_Arcade` so the catalogue still queues at startup.
-fn presence_tree(root: &Path) -> usize {
+/// `PRESENCE_ZIPS` zips of `PRESENCE_MEMBERS` members under `games/mame`, and
+/// `PRESENCE_MRAS` MRAs naming every tenth zip plus one absent zip each tenth MRA.
+/// Returns the number of zips and of present zips an MRA names.
+fn presence_tree(root: &Path) -> (usize, usize) {
     let mame = root.join("games/mame");
-    std::fs::create_dir_all(root.join("_Arcade")).expect("mkdir");
+    let arcade = root.join("_Arcade");
     for i in 0..PRESENCE_ZIPS {
-        let body = bytes_for(i, 64);
+        let bodies: Vec<(String, Vec<u8>)> = (0..PRESENCE_MEMBERS)
+            .map(|m| (format!("m{m}.bin"), bytes_for(i * PRESENCE_MEMBERS + m, 32)))
+            .collect();
+        let members: Vec<(&str, &[u8])> = bodies
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice()))
+            .collect();
+        write(&mame.join(format!("exg{i:05}.zip")), &zip_of(&members));
+    }
+    let step = PRESENCE_ZIPS / PRESENCE_MRAS;
+    for t in 0..PRESENCE_MRAS {
+        let zips = if t % 10 == 0 {
+            format!("exg{:05}.zip|exabsent{t:04}.zip", t * step)
+        } else {
+            format!("exg{:05}.zip", t * step)
+        };
+        let mra = format!(
+            "<misterromdescription><name>Example Game {t:04}</name><rbf>excore</rbf>\
+             <rom index=\"0\" zip=\"{zips}\"><part name=\"m0.bin\"/></rom></misterromdescription>"
+        );
         write(
-            &mame.join(format!("exg{i:05}.zip")),
-            &zip_of(&[("a.bin", &body)]),
+            &arcade.join(format!("Example Game {t:04}.mra")),
+            mra.as_bytes(),
         );
     }
-    PRESENCE_ZIPS
+    (PRESENCE_ZIPS, PRESENCE_MRAS)
 }
 
 #[test]
 fn arcade_presence_pass_stays_under_budget() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let zips = presence_tree(dir.path());
+    let (zips, named) = presence_tree(dir.path());
 
     let server = Server::start(dir.path());
+    let started = Instant::now();
     let rows = server.wait_jobs("arcade_catalog", 1);
+    let took = started.elapsed();
     let files = server.count("SELECT COUNT(*) FROM files WHERE platform_id = 'arcade'");
     let peak = server.stop("arcade_presence");
     let (state, progress) = &rows[0];
-    println!("progress: {progress}");
+    println!("progress: {progress}, catalogue with presence pass took {took:?}");
     assert_eq!(state, "done", "{progress}");
     assert_eq!(progress["presence_zips"], zips);
-    assert_eq!(files, 0, "nothing names or matches any of these zips");
+    assert_eq!(progress["presence_recorded"], named);
+    assert_eq!(
+        usize::try_from(files).expect("count"),
+        named,
+        "one row per named zip"
+    );
+    assert!(took < PRESENCE_TIME, "took {took:?}");
     assert_budget("arcade_presence", peak, 16);
 }
 
@@ -609,7 +647,7 @@ fn arcade_catalogue_stays_under_budget() {
     assert_eq!(usize::try_from(titles).expect("count"), distinct);
     assert_eq!(usize::try_from(matched).expect("count"), distinct);
     assert_eq!(progress["parsed"], distinct, "each distinct MRA read once");
-    assert_budget("arcade_catalog", peak, 13);
+    assert_budget("arcade_catalog", peak, 12);
 
     let server = Server::start(dir.path());
     let rows = server.wait_jobs("arcade_catalog", 2);
@@ -621,7 +659,7 @@ fn arcade_catalogue_stays_under_budget() {
         progress["checked"], 0,
         "unchanged sets are not checked again"
     );
-    assert_budget("arcade_catalog rerun", peak, 13);
+    assert_budget("arcade_catalog rerun", peak, 12);
 }
 
 /// `_Arcade` with `LARGE_MRAS` MRAs of about 3 MB each, one `<part>` of inline hex beside a
@@ -688,14 +726,44 @@ fn dat_and_torrent_import_stay_under_budget() {
 
     big_torrent(&dir.path().join("data/sources/example.torrent"));
     let server = Server::start(dir.path());
+    let start = Instant::now();
     let rows = server.wait_jobs("source_import", 1);
+    println!("source_import took {:?}", start.elapsed());
     let files = server.count("SELECT COUNT(*) FROM torrent_files");
     let matched = server.count("SELECT COUNT(*) FROM torrent_files WHERE rom_id IS NOT NULL");
+    let candidates = server.count("SELECT COUNT(*) FROM torrent_candidates");
     let peak = server.stop("source_import");
     assert_eq!(rows[0].0, "done", "{}", rows[0].1);
     assert_eq!(usize::try_from(files).expect("count"), TORRENT_FILES);
-    assert_eq!(usize::try_from(matched).expect("count"), TORRENT_FILES);
-    assert_budget("source_import", peak, 16);
+    let loose = TORRENT_FILES / LOOSE_EVERY;
+    assert_eq!(
+        usize::try_from(matched).expect("count"),
+        TORRENT_FILES - loose
+    );
+    assert_eq!(
+        candidates, 0,
+        "a loose name matching thousands of roms is ambiguous"
+    );
+    assert_budget("source_import", peak, 12);
+
+    // A stale stamp makes the start's re-map work out every file of the source again.
+    let db = rusqlite::Connection::open(dir.path().join("data/mistarr.db")).expect("open db");
+    db.execute("UPDATE sources SET map_stamp = 'stale'", [])
+        .expect("stale");
+    drop(db);
+    let server = Server::start(dir.path());
+    let rows = server.wait_jobs("remap_sources", 3);
+    let remapped = server.count("SELECT COUNT(*) FROM torrent_files WHERE rom_id IS NOT NULL");
+    let peak = server.stop("remap_sources");
+    let last = rows.last().expect("remap");
+    assert_eq!(
+        (last.0.as_str(), &last.1["total"]),
+        ("done", &json!(1)),
+        "{}",
+        last.1
+    );
+    assert_eq!(remapped, matched, "the same mapping");
+    assert_budget("remap_sources", peak, 12);
 }
 
 #[test]

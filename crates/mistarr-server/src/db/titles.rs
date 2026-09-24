@@ -11,6 +11,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
 use super::arcade::MraInfo;
+use super::candidates::Availability;
 use super::dats::DatVersionId;
 use crate::error::Result;
 
@@ -475,18 +476,17 @@ const MRA_ONLY: &str =
 pub struct Counts {
     /// Clone groups with a visible live variant.
     pub titles: u64,
-    /// Groups with at least one fully verified variant.
+    /// Of those, groups with at least one fully verified live variant, hidden or not.
     pub have: u64,
-    /// Groups with at least one wanted variant.
+    /// Of those, groups with at least one wanted live variant, hidden or not.
     pub wanted: u64,
-    /// Files on disk that match no rom, outside arcade; arcade's own unverified
-    /// rows are covered by `failing_check` and `partial` instead.
+    /// `unverified` files on disk, outside arcade; always 0 for arcade.
     pub unmatched_files: u64,
     /// Groups with a visible MRA variant whose md5 check is `mismatch` or
-    /// `missing_part`, and no visible variant counted as `have`; 0 outside arcade.
+    /// `missing_part` and no fully verified live variant, hidden or not; 0 outside arcade.
     pub failing_check: u64,
-    /// Groups with a visible MRA variant that has some, but not every, named
-    /// zip present, and no visible variant counted as `have`; 0 outside arcade.
+    /// Groups with a visible MRA variant that has some, but not every, named zip
+    /// present and no fully verified live variant, hidden or not; 0 outside arcade.
     pub partial: u64,
 }
 
@@ -506,7 +506,8 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
     let mut out: HashMap<String, Counts> = HashMap::new();
     let hidden_json = json(hidden);
     let mut stmt = conn.prepare(&format!(
-        "SELECT g.platform_id, COUNT(*), SUM(g.have_verified > 0), SUM(g.wanted > 0)
+        "SELECT g.platform_id, COUNT(*), COALESCE(SUM(g.have_verified > 0), 0),
+                COALESCE(SUM(g.wanted > 0), 0)
          FROM title_groups g
          WHERE {MRA_ONLY} AND EXISTS (
            SELECT 1 FROM titles v WHERE v.group_root = g.parent_id AND v.retired = 0
@@ -529,13 +530,12 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
     while let Some(r) = rows.next()? {
         out.entry(r.get(0)?).or_default().unmatched_files = unsigned(r.get(1)?);
     }
-    // Per visible MRA title: whether it is failing its md5 check or partly present.
-    // Grouped by effective clone group and joined to title_groups' own `have` so a group with
-    // any have-verified visible variant never also counts as failing or partial.
+    // Per visible MRA title in an effective clone group: any failing its md5 check, any partly
+    // present. A NULL `mra_check` (never run) is not failing; COALESCE keeps each aggregate non-NULL.
     let mut stmt = conn.prepare(
         "WITH mra AS (
            SELECT t.platform_id, t.group_root AS parent_id,
-                  MAX(t.mra_check IN ('mismatch', 'missing_part')) AS any_failing,
+                  MAX(COALESCE(t.mra_check IN ('mismatch', 'missing_part'), 0)) AS any_failing,
                   MAX(EXISTS (SELECT 1 FROM roms r
                               WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 1)
                       AND EXISTS (SELECT 1 FROM roms r
@@ -547,8 +547,8 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
            GROUP BY t.platform_id, t.group_root
          )
          SELECT g.platform_id,
-                SUM(m.any_failing AND g.have_verified = 0),
-                SUM(m.any_partial AND g.have_verified = 0)
+                COALESCE(SUM(m.any_failing AND g.have_verified = 0), 0),
+                COALESCE(SUM(m.any_partial AND g.have_verified = 0), 0)
          FROM mra m JOIN title_groups g ON g.platform_id = m.platform_id AND g.parent_id = m.parent_id
          GROUP BY g.platform_id",
     )?;
@@ -816,8 +816,10 @@ pub struct VariantRow {
     pub dat_version_id: DatVersionId,
     /// Live roms.
     pub roms: Vec<RomRow>,
-    /// Torrent files from bound sources matched to any of the roms.
+    /// Distinct files of bound sources in [`VariantRow::availability`].
     pub torrent_files_available: u64,
+    /// Files of bound sources mapped to a live rom or a candidate for one, strongest first.
+    pub availability: Vec<Availability>,
     /// `dat` for a DAT entry, `mra` for an arcade title read from an MRA file.
     pub source: String,
     /// MRA details, for an MRA title.
@@ -866,8 +868,9 @@ fn variant_row(r: &Row<'_>) -> rusqlite::Result<VariantRow> {
         inferred: r.get(9)?,
         dat_version_id: DatVersionId(r.get(10)?),
         roms: Vec::new(),
-        torrent_files_available: unsigned(r.get(11)?),
-        source: r.get(12)?,
+        torrent_files_available: 0,
+        availability: Vec::new(),
+        source: r.get(11)?,
         mra: None,
         romset: None,
     })
@@ -901,10 +904,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
     };
     let mut stmt = conn.prepare(
         "SELECT t.id, t.name, t.regions, t.languages, t.revision, t.flags, t.is_1g1r_pick,
-                t.wanted, t.retired, t.inferred, t.dat_version_id,
-                (SELECT COUNT(*) FROM torrent_files tf JOIN roms r ON r.id = tf.rom_id
-                 WHERE r.title_id = t.id AND r.retired = 0),
-                t.source
+                t.wanted, t.retired, t.inferred, t.dat_version_id, t.source
          FROM titles t WHERE t.group_root = ?1 OR t.id = ?1
          ORDER BY t.retired, t.is_1g1r_pick DESC, t.name",
     )?;
@@ -940,6 +940,17 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
         };
         if let Some(v) = variants.iter_mut().find(|v| v.id.0 == title) {
             v.roms.push(rom);
+        }
+    }
+    for (title, found) in super::candidates::for_group(conn, gid)? {
+        if let Some(v) = variants.iter_mut().find(|v| v.id == title) {
+            let seen = |a: &Availability| {
+                (a.source_id, a.file_index) == (found.source_id, found.file_index)
+            };
+            if !v.availability.iter().any(seen) {
+                v.torrent_files_available += 1;
+            }
+            v.availability.push(found);
         }
     }
     for v in variants.iter_mut().filter(|v| v.source == "mra") {

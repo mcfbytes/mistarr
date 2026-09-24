@@ -356,17 +356,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     let lock = crate::lock::InstanceLock::acquire(&config.paths.data)?;
 
     // Step 2: database, migrations, platform seed, runtime settings.
-    let db = Db::open(&config.paths.db())?;
-    let (stored, unfinished_scans, resolved) = db.write_blocking(prepare_catalog)?;
-    let stored = stored.unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "ignoring unreadable saved settings; using the config file");
-        None
-    });
-    if let Some(rt) = stored {
-        config.client = rt.client;
-        config.limits = rt.limits;
-        config.prefs = rt.prefs;
-    }
+    let (db, unfinished_scans, resolved) = open_db(&mut config)?;
     let scan_interval = config.jobs.scan_interval_minutes;
     let app = AppState::new(config, db, options);
     // The gate starts closed for a loaded core, so no heavy job slips through before the first poll.
@@ -398,42 +388,10 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     // Step 4: installed cores.
     detect_cores(&app)?;
 
-    // Resume any scan left unfinished by a previous run; arcade never gets one.
-    resume_scans(&app, unfinished_scans).await?;
-
-    // The arcade catalogue reads the MRA files under `_Arcade`.
-    jobs::arcade::enqueue_if_relevant(&app).await?;
+    queue_startup_jobs(&app, unfinished_scans).await?;
 
     // Step 5: watchers, scheduler and HTTP.
-    let mut tasks = Vec::new();
-    let opts = app.options.clone();
-    let gate = Arc::clone(&app.gate);
-    tasks.push(tokio::spawn(async move {
-        corename::watch(&opts.corename_path, opts.corename_poll, gate).await;
-    }));
-    tasks.push(tokio::spawn(publish_gate_changes(Arc::clone(&app))));
-    if scan_interval > 0 {
-        tasks.push(tokio::spawn(scan_on_timer(
-            Arc::clone(&app),
-            Duration::from_secs(u64::from(scan_interval) * 60),
-        )));
-    }
-    Scheduler::start(&app);
-    tasks.push(tokio::spawn(source_import::watch(Arc::clone(&app))));
-    tasks.push(tokio::spawn(source_import::resolve_pending(Arc::clone(
-        &app,
-    ))));
-    tasks.push(tokio::spawn(crate::jobs::dat_import::watch(Arc::clone(
-        &app,
-    ))));
-    tasks.push(tokio::spawn(crate::jobs::import::watch(Arc::clone(&app))));
-    tasks.push(tokio::spawn(transfer::watch(Arc::clone(&app))));
-    tasks.push(tokio::spawn(poll::run(Arc::clone(&app))));
-    tasks.push(tokio::spawn(crate::jobs::detect_client::watch(Arc::clone(
-        &app,
-    ))));
-    tasks.push(tokio::spawn(poll::follow_gate(Arc::clone(&app))));
-
+    let tasks = spawn_tasks(&app, scan_interval);
     let listener = tokio::net::TcpListener::bind(app.config().server.listen.as_str()).await?;
     let addr = listener.local_addr()?;
     let router = crate::http::router(Arc::clone(&app));
@@ -457,9 +415,79 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     })
 }
 
+/// Opens the database, prepares the catalog and applies the saved runtime
+/// settings to `config`; returns the database, the platforms whose scan a
+/// previous run left unfinished, and the platforms whose DAT families resolved.
+fn open_db(
+    config: &mut Config,
+) -> Result<(
+    Db,
+    Vec<mistarr_core::PlatformId>,
+    Vec<mistarr_core::PlatformId>,
+)> {
+    let db = Db::open(&config.paths.db())?;
+    let (stored, unfinished, resolved) = db.write_blocking(prepare_catalog)?;
+    let stored = stored.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "ignoring unreadable saved settings; using the config file");
+        None
+    });
+    if let Some(rt) = stored {
+        config.client = rt.client;
+        config.limits = rt.limits;
+        config.prefs = rt.prefs;
+    }
+    Ok((db, unfinished, resolved))
+}
+
+/// Queues the jobs every start runs: unfinished scans (never arcade's), the
+/// arcade catalogue, and a re-map of the bound sources whose roms changed.
+async fn queue_startup_jobs(
+    app: &Arc<AppState>,
+    unfinished: Vec<mistarr_core::PlatformId>,
+) -> Result<()> {
+    resume_scans(app, unfinished).await?;
+    jobs::arcade::enqueue_if_relevant(app).await?;
+    let remap = jobs::remap::RemapSources { platforms: None };
+    Scheduler::enqueue(app, Arc::new(remap)).await?;
+    Ok(())
+}
+
+/// Starts the scheduler and the watchers that run until shutdown.
+fn spawn_tasks(app: &Arc<AppState>, scan_interval: u32) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut tasks = Vec::new();
+    let opts = app.options.clone();
+    let gate = Arc::clone(&app.gate);
+    tasks.push(tokio::spawn(async move {
+        corename::watch(&opts.corename_path, opts.corename_poll, gate).await;
+    }));
+    tasks.push(tokio::spawn(publish_gate_changes(Arc::clone(app))));
+    if scan_interval > 0 {
+        tasks.push(tokio::spawn(scan_on_timer(
+            Arc::clone(app),
+            Duration::from_secs(u64::from(scan_interval) * 60),
+        )));
+    }
+    Scheduler::start(app);
+    tasks.push(tokio::spawn(source_import::watch(Arc::clone(app))));
+    tasks.push(tokio::spawn(source_import::resolve_pending(Arc::clone(
+        app,
+    ))));
+    tasks.push(tokio::spawn(crate::jobs::dat_import::watch(Arc::clone(
+        app,
+    ))));
+    tasks.push(tokio::spawn(crate::jobs::import::watch(Arc::clone(app))));
+    tasks.push(tokio::spawn(transfer::watch(Arc::clone(app))));
+    tasks.push(tokio::spawn(poll::run(Arc::clone(app))));
+    tasks.push(tokio::spawn(crate::jobs::detect_client::watch(Arc::clone(
+        app,
+    ))));
+    tasks.push(tokio::spawn(poll::follow_gate(Arc::clone(app))));
+
+    tasks
+}
+
 /// Re-enqueues each platform's scan left unfinished by a previous run, skipping
-/// arcade: its progress is never saved, but a stale row from an older build is
-/// defensively skipped here too.
+/// arcade, which has no library scan whatever `scan_progress` holds.
 async fn resume_scans(
     app: &Arc<AppState>,
     unfinished: Vec<mistarr_core::PlatformId>,

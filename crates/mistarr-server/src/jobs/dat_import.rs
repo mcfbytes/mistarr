@@ -735,7 +735,8 @@ async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
         }
     }
     if !queued.is_empty() {
-        if let Err(e) = super::source_import::rebind_after_dat(app).await {
+        let platforms: Vec<_> = queued.into_iter().collect();
+        if let Err(e) = super::source_import::rebind_after_dat(app, &platforms).await {
             tracing::warn!(error = %e, "cannot bind waiting sources");
         }
     }
