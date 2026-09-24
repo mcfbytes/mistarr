@@ -48,7 +48,12 @@ do_start() {
         echo "mistarr binary not found at $BIN"
         return 1
     fi
-    nice -n 10 ionice -c 3 "$BIN" </dev/null >>"$LOGFILE" 2>&1 &
+    # Either applet may be absent from the board's BusyBox; use what is there.
+    prio=""
+    command -v nice >/dev/null 2>&1 && prio="nice -n 10"
+    command -v ionice >/dev/null 2>&1 && prio="$prio ionice -c 3"
+    # shellcheck disable=SC2086
+    $prio "$BIN" </dev/null >>"$LOGFILE" 2>&1 &
     pid=$!
     sleep 1
     if ! kill -0 "$pid" 2>/dev/null; then
