@@ -324,3 +324,31 @@ fn overflowing_offsets_are_refused() {
         );
     }
 }
+
+#[test]
+fn streamed_md5_matches_the_assembled_rom_across_chunks() {
+    let big: Vec<u8> = (0..3 * STREAM_CHUNK + 6)
+        .map(|i| u8::try_from(i % 251).expect("byte"))
+        .collect();
+    let odd: Vec<u8> = big.iter().rev().copied().collect();
+    let mut src = Mem::with(&[
+        ("exblast.zip", "a.bin", &big),
+        ("exblast.zip", "b.bin", &odd),
+    ]);
+    let r = rom(
+        r#"<rom zip="exblast.zip"><part name="a.bin" offset="3" length="0x30001"/>
+           <interleave output="16"><part name="a.bin" map="01"/><part name="b.bin" map="10"/></interleave>
+           <part name="b.bin" repeat="2" length="4"/></rom>"#,
+    );
+    let out = assemble(&r, &mut src).expect("assemble");
+    assert_eq!(md5(&r, &mut src).expect("md5"), out.md5);
+    let odd_words = rom(
+        r#"<rom zip="exblast.zip"><interleave output="16"><part name="a.bin" length="3" map="12"/></interleave></rom>"#,
+    );
+    assert!(matches!(
+        md5(&odd_words, &mut src),
+        Err(Error::MraUnsupported(_))
+    ));
+    let past = rom(r#"<rom zip="exblast.zip"><part name="a.bin" offset="0x100000"/></rom>"#);
+    assert!(matches!(md5(&past, &mut src), Err(Error::MraUnsupported(m)) if m.contains("past")));
+}
