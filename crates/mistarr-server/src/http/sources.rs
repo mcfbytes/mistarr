@@ -188,9 +188,15 @@ async fn remove(
 ) -> Result<StatusCode, ApiError> {
     let id = source_id(id)?;
     let row = load(&app, id).await?;
-    if app.db.read(move |c| rows::download_count(c, id)).await? > 0 {
+    if app
+        .db
+        .read(move |c| rows::open_download_count(c, id))
+        .await?
+        > 0
+    {
         return Err(ApiError::bad_request(
-            "This source has downloads. Cancel them before removing it.",
+            "This source has downloads that are queued, transferring, checking or importing. \
+             Cancel them or let them finish before removing it.",
         ));
     }
     if let (Some(cid), Some(client)) = (&row.client_id, app.client()) {

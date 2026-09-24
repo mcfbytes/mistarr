@@ -120,15 +120,18 @@ CREATE TABLE downloads (
   id            INTEGER PRIMARY KEY,
   title_id      INTEGER NOT NULL REFERENCES titles(id),
   rom_id        INTEGER NOT NULL REFERENCES roms(id),
-  source_id     INTEGER NOT NULL REFERENCES sources(id),
-  file_index    INTEGER NOT NULL,
+  source_id     INTEGER REFERENCES sources(id) ON DELETE SET NULL,  -- NULL while 'wanted' or once the source is deleted
+  file_index    INTEGER,                         -- NULL while 'wanted'
   state         TEXT NOT NULL,         -- see state machine
-  progress      REAL NOT NULL DEFAULT 0,
-  staged_path   TEXT,
-  error         TEXT,
+  progress      REAL NOT NULL DEFAULT 0,         -- 0 to 1
+  staged_path   TEXT,                  -- local path of the finished file, set on 'importing'
+  error         TEXT,                  -- why it failed, shown to the user
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
+CREATE INDEX downloads_state ON downloads(state);
+CREATE INDEX downloads_source ON downloads(source_id, file_index);
+CREATE INDEX downloads_rom ON downloads(rom_id);
 
 CREATE TABLE import_log (
   id            INTEGER PRIMARY KEY,
@@ -142,7 +145,7 @@ CREATE TABLE import_log (
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE jobs (
   id            INTEGER PRIMARY KEY,
-  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'poll' | 'detect_client' | 'dat_import' | 'recompute_1g1r' | 'source_import' | 'resolve_magnet'
+  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'poll' | 'detect_client' | 'dat_import' | 'recompute_1g1r' | 'source_import' | 'resolve_magnet' | 'transfer' | 'deselect'
   payload       TEXT NOT NULL,         -- json
   state         TEXT NOT NULL,         -- 'queued' | 'running' | 'paused' | 'done' | 'failed'
   progress      TEXT,                  -- json, job specific
@@ -156,23 +159,40 @@ CREATE TABLE jobs (
 ### downloads.state
 
 ```
-wanted ──▶ queued ──▶ transferring ──▶ checking ──▶ importing ──▶ done
-   │          │             │             │            │
-   │          │             ▼             ▼            ▼
-   │          └────────▶ failed ◀────────┘         bad (hash mismatch, quarantined)
+wanted ──▶ queued ──▶ transferring ◀──▶ checking ──▶ importing ──▶ done
+   │        ▲   │           │                │            │
+   │        │   ▼           ▼                ▼            ▼
+   │        └─ failed ◀─────┴────────────────┘           bad (hash mismatch, quarantined)
    ▼
-cancelled
+cancelled   (from wanted, queued, transferring or checking)
 ```
 
 - `wanted`: title marked, no torrent_file chosen yet (no bound source has it).
-- `queued`: torrent_file chosen, not yet told to the client or client paused by
-  the core gate.
-- `transferring`: client reports progress below 100 percent.
+  `source_id` and `file_index` are NULL. Every transfer pass, and every
+  `source.changed`, re-checks these rows and queues those that now have a file.
+- `queued`: torrent_file chosen, not yet started in the client. A row stays
+  here while no client is detected, the client does not answer, or a magnet's
+  metadata is still pending.
+- `transferring`: the client was told to fetch the file, or reports it below
+  100 percent. A file the client reports complete and checked in one poll
+  goes straight to `importing`.
 - `checking`: client reports 100 percent, waiting for the client's own hash
-  check to confirm.
-- `importing`: mistarr is hashing and placing the file.
+  check to confirm. A failed check returns the row to `transferring`.
+- `importing`: the client has the whole file checked; `staged_path` is set and
+  the importer owns the row. A torrent whose every selected file is here and
+  whose seed policy is `none` is stopped, not removed.
 - `done`, `bad`, `failed`, `cancelled`: terminal. `failed` may be retried,
-  which returns it to `queued`; `bad` never retries the same torrent_file.
+  which returns it to `queued` on the same torrent_file; `bad` never retries
+  the same torrent_file. Cancelling a `transferring` or `checking` row
+  deselects its file in the client and stops the torrent when nothing of it
+  is selected any more. `importing` rows cannot be cancelled.
+- One rom has at most one row outside the terminal states; wanting a title
+  again skips roms that have one or that already have a verified file.
+
+`staged_path` is `<paths.data>/staging/<infohash>/<name>/<path>` for a
+multi-file torrent, where `<name>` is `sources.display_name` and `<path>` is
+`torrent_files.path`, and `<paths.data>/staging/<infohash>/<path>` for a
+single-file one. It is the path mistarr sees, after the remote path map.
 
 ### files.state
 

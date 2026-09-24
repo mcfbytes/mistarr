@@ -14,9 +14,10 @@ use serde::{Deserialize, Serialize};
 use super::{ApiError, Page, Paging};
 use crate::app::AppState;
 use crate::db::files::FileId;
-use crate::db::platforms;
 use crate::db::titles::{self, Browse, GroupDetail, GroupRow, Sort, TitleId, Tri, WantRefused};
+use crate::db::{downloads, platforms};
 use crate::jobs::import::{self, RenameError};
+use crate::jobs::transfer;
 
 /// The libretro thumbnail server, the one external URL family the app names.
 const THUMBNAILS: &str = "https://thumbnails.libretro.com";
@@ -246,9 +247,26 @@ async fn want(
             ApiError::bad_request("no variant is selectable under the current preferences")
         })?,
     };
-    let result = app.db.write(move |c| titles::want(c, target)).await?;
+    let result = app
+        .db
+        .write(move |c| {
+            let tx = c.transaction()?;
+            let wanted = titles::want(&tx, target)?;
+            let created = match wanted {
+                Ok(()) => downloads::want_title(&tx, target, crate::unix_now())?,
+                Err(_) => Vec::new(),
+            };
+            tx.commit()?;
+            Ok(wanted.map(|()| created))
+        })
+        .await?;
     match result {
-        Ok(()) => {}
+        Ok(created) => {
+            for (id, state) in created {
+                transfer::publish(&app, id, state, 0.0);
+            }
+            transfer::kick(&app).await;
+        }
         Err(WantRefused::Missing) => return Err(ApiError::not_found("no such title")),
         Err(WantRefused::Retired) => {
             return Err(ApiError::bad_request("the entry is retired from its DAT"))
@@ -267,9 +285,18 @@ async fn unwant(
     let id = title_id(id)?;
     let current = load_detail(&app, id).await?;
     let group = current.detail.parent_id;
-    app.db
-        .write(move |c| titles::unwant_group(c, group, crate::unix_now()))
+    let cancelled = app
+        .db
+        .write(move |c| {
+            let tx = c.transaction()?;
+            let now = crate::unix_now();
+            let cancelled = downloads::cancel_group(&tx, group, now)?;
+            titles::unwant_group(&tx, group, now)?;
+            tx.commit()?;
+            Ok(cancelled)
+        })
         .await?;
+    super::downloads::after_cancel(&app, &cancelled).await;
     Ok(Json(load_detail(&app, id).await?))
 }
 
@@ -298,6 +325,11 @@ async fn rename(
             format!("{path} already exists"),
         )),
         Err(RenameError::Server(e)) => Err(e.into()),
+        Err(RenameError::Io(message)) => Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            message,
+        )),
         Err(e) => Err(ApiError::bad_request(e.to_string())),
     }
 }

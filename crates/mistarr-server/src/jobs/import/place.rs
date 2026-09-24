@@ -1,4 +1,5 @@
-//! Applies placement steps within staging and `games/`; see `docs/PLATFORMS.md` "Adapter contract".
+//! Applies placement steps within staging and `games/`; see `docs/PLATFORMS.md`
+//! "Adapter contract" and `docs/ARCHITECTURE.md` "Import".
 
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
@@ -57,13 +58,16 @@ fn io_err(path: &Path) -> impl FnOnce(io::Error) -> PlaceError + '_ {
     }
 }
 
-/// The directories a plan may touch: staging paths resolve against the
-/// directory holding `staged`, library paths against `games`.
+/// The directories a plan may touch. Staging paths are read from `scratch`
+/// when a step already wrote them there, else from the directory holding the
+/// staged item, and are always written to `scratch`, so originals are never
+/// changed before the final renames. Library paths resolve against `games`.
 #[derive(Debug, Clone)]
 pub struct Roots {
     staging: PathBuf,
     work: PathBuf,
     staged: PathBuf,
+    scratch: PathBuf,
     games: PathBuf,
 }
 
@@ -73,16 +77,23 @@ fn is_plain(rel: &Path) -> bool {
 }
 
 impl Roots {
-    /// Roots for a staged item under `staging`, creating `games` when missing.
+    /// Roots for a staged item under `staging`, with an empty scratch directory
+    /// `scratch` inside staging; creates `games` and `scratch` when missing.
     ///
     /// # Errors
     ///
-    /// [`PlaceError::Outside`] when `staged` is not inside `staging`,
-    /// [`PlaceError::Io`] when a directory cannot be resolved.
-    pub fn new(staging: &Path, staged: &Path, games: &Path) -> Result<Self, PlaceError> {
+    /// [`PlaceError::Outside`] when `staged` or `scratch` is not inside
+    /// `staging`, [`PlaceError::Io`] when a directory cannot be resolved.
+    pub fn new(
+        staging: &Path,
+        staged: &Path,
+        scratch: &Path,
+        games: &Path,
+    ) -> Result<Self, PlaceError> {
         fs::create_dir_all(games).map_err(io_err(games))?;
         let staging = staging.canonicalize().map_err(io_err(staging))?;
         let games = games.canonicalize().map_err(io_err(games))?;
+        let inside = |p: &Path| p.starts_with(&staging) && !p.starts_with(&games);
         let name = staged
             .file_name()
             .ok_or_else(|| PlaceError::Outside(staged.to_path_buf()))?;
@@ -90,14 +101,20 @@ impl Roots {
             .parent()
             .ok_or_else(|| PlaceError::Outside(staged.to_path_buf()))?;
         let work = parent.canonicalize().map_err(io_err(parent))?;
-        if !work.starts_with(&staging) || work.starts_with(&games) {
+        if !inside(&work) {
             return Err(PlaceError::Outside(staged.to_path_buf()));
+        }
+        fs::create_dir_all(scratch).map_err(io_err(scratch))?;
+        let scratch = scratch.canonicalize().map_err(io_err(scratch))?;
+        if !inside(&scratch) || scratch == staging || work.starts_with(&scratch) {
+            return Err(PlaceError::Outside(scratch));
         }
         let staged = work.join(name);
         Ok(Self {
             staging,
             work,
             staged,
+            scratch,
             games,
         })
     }
@@ -108,23 +125,45 @@ impl Roots {
         &self.staged
     }
 
-    /// The directory staging paths resolve against.
+    /// The scratch directory steps write to.
     #[must_use]
-    pub fn work(&self) -> &Path {
-        &self.work
+    pub fn scratch(&self) -> &Path {
+        &self.scratch
     }
 
-    /// Resolves a staging path.
+    /// Where a staging path is read from: its scratch copy when a step wrote
+    /// one, else the original beside the staged item.
     ///
     /// # Errors
     ///
     /// [`PlaceError::Outside`] unless `rel` is a plain relative path.
-    pub fn stage(&self, rel: &Path) -> Result<PathBuf, PlaceError> {
-        if is_plain(rel) {
-            Ok(self.work.join(rel))
-        } else {
-            Err(PlaceError::Outside(rel.to_path_buf()))
+    pub fn read(&self, rel: &Path) -> Result<PathBuf, PlaceError> {
+        if !is_plain(rel) {
+            return Err(PlaceError::Outside(rel.to_path_buf()));
         }
+        let written = self.scratch.join(rel);
+        Ok(if written.exists() {
+            written
+        } else {
+            self.work.join(rel)
+        })
+    }
+
+    /// Where a step writes a staging path, creating its parent in scratch.
+    ///
+    /// # Errors
+    ///
+    /// [`PlaceError::Outside`] unless `rel` is a plain relative path,
+    /// [`PlaceError::Io`] when the parent cannot be created.
+    pub fn write(&self, rel: &Path) -> Result<PathBuf, PlaceError> {
+        if !is_plain(rel) {
+            return Err(PlaceError::Outside(rel.to_path_buf()));
+        }
+        let path = self.scratch.join(rel);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(io_err(parent))?;
+        }
+        Ok(path)
     }
 
     /// Resolves a library path.
@@ -157,17 +196,16 @@ impl Roots {
         }
     }
 
-    /// Removes a staged file or directory that will not be placed.
+    /// Removes a staged file or directory that will not be placed; a missing one is fine.
     ///
     /// # Errors
     ///
     /// [`PlaceError::Outside`] when `path` is not inside staging, [`PlaceError::Io`]
     /// when it cannot be removed.
     pub fn discard(&self, path: &Path) -> Result<(), PlaceError> {
-        let parent = path
-            .parent()
-            .and_then(|p| p.canonicalize().ok())
-            .ok_or_else(|| PlaceError::Outside(path.to_path_buf()))?;
+        let Some(parent) = path.parent().and_then(|p| p.canonicalize().ok()) else {
+            return Ok(());
+        };
         if !parent.starts_with(&self.staging) || parent.starts_with(&self.games) {
             return Err(PlaceError::Outside(path.to_path_buf()));
         }
@@ -180,6 +218,11 @@ impl Roots {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(io_err(path)(e)),
             _ => Ok(()),
         }
+    }
+
+    /// Removes the scratch directory and everything the steps wrote there.
+    pub fn rollback(&self) {
+        let _ = fs::remove_dir_all(&self.scratch);
     }
 }
 
@@ -212,13 +255,62 @@ pub fn same_filesystem(a: &Path, b: &Path) -> Result<bool, PlaceError> {
     }
 }
 
-/// Applies `steps` in order; the first failure stops the rest.
+/// True for the steps that touch `games/`: they run last, in [`commit`].
+#[must_use]
+pub fn is_library_step(step: &Step) -> bool {
+    matches!(step, Step::CreateDir { .. } | Step::Rename { .. })
+}
+
+/// Applies every staging step in order, writing only to scratch.
 ///
 /// # Errors
 ///
-/// The failing step's [`PlaceError`].
+/// The failing step's [`PlaceError`]; the caller rolls back.
+pub fn prepare(steps: &[Step], roots: &Roots) -> Result<(), PlaceError> {
+    steps
+        .iter()
+        .filter(|s| !is_library_step(s))
+        .try_for_each(|s| apply_step(s, roots))
+}
+
+/// The library paths a [`commit`] moved into place before it stopped.
+#[derive(Debug)]
+pub struct Partial {
+    /// Rename targets that landed, as library paths.
+    pub landed: Vec<PathBuf>,
+    /// Why the next step failed.
+    pub error: PlaceError,
+}
+
+/// Applies the library steps in order and returns the rename targets that landed.
+///
+/// # Errors
+///
+/// [`Partial`] with the targets that landed before the failing step.
+pub fn commit(steps: &[Step], roots: &Roots) -> Result<Vec<PathBuf>, Partial> {
+    let mut landed = Vec::new();
+    for step in steps.iter().filter(|s| is_library_step(s)) {
+        if let Err(error) = apply_step(step, roots) {
+            return Err(Partial { landed, error });
+        }
+        if let Step::Rename { to, .. } = step {
+            landed.push(to.clone());
+        }
+    }
+    Ok(landed)
+}
+
+/// [`prepare`] then [`commit`], rolling back scratch when preparing fails.
+///
+/// # Errors
+///
+/// The first failure; renames that landed stay in place.
 pub fn apply(steps: &[Step], roots: &Roots) -> Result<(), PlaceError> {
-    steps.iter().try_for_each(|s| apply_step(s, roots))
+    if let Err(e) = prepare(steps, roots) {
+        roots.rollback();
+        return Err(e);
+    }
+    commit(steps, roots).map(drop).map_err(|p| p.error)
 }
 
 /// Applies one of the seven permitted steps.
@@ -229,13 +321,13 @@ pub fn apply(steps: &[Step], roots: &Roots) -> Result<(), PlaceError> {
 /// for a rename across filesystems, else the I/O or archive failure.
 pub fn apply_step(step: &Step, roots: &Roots) -> Result<(), PlaceError> {
     match step {
-        Step::Unzip { member, to } => unzip(roots.staged(), member, &roots.stage(to)?),
-        Step::Zip { from, to } => zip_dir(&roots.stage(from)?, &roots.stage(to)?),
-        Step::AddHeader { file, bytes } => rewrite(&roots.stage(file)?, |r, w| {
+        Step::Unzip { member, to } => unzip(roots.staged(), member, &roots.write(to)?),
+        Step::Zip { from, to } => zip_dir(&roots.read(from)?, &roots.write(to)?),
+        Step::AddHeader { file, bytes } => rewrite(roots, file, |r, w| {
             w.write_all(bytes)?;
             io::copy(r, w).map(drop)
         }),
-        Step::StripHeader { file, len } => rewrite(&roots.stage(file)?, |r, w| {
+        Step::StripHeader { file, len } => rewrite(roots, file, |r, w| {
             let skipped = io::copy(&mut r.take(*len), &mut io::sink())?;
             if skipped < *len {
                 return Err(io::Error::new(
@@ -245,15 +337,13 @@ pub fn apply_step(step: &Step, roots: &Roots) -> Result<(), PlaceError> {
             }
             io::copy(r, w).map(drop)
         }),
-        Step::SwapByteOrder { file, from } => {
-            rewrite(&roots.stage(file)?, |r, w| swap_order(r, w, *from))
-        }
+        Step::SwapByteOrder { file, from } => rewrite(roots, file, |r, w| swap_order(r, w, *from)),
         Step::CreateDir { path } => {
             let dir = roots.library(path)?;
             fs::create_dir_all(&dir).map_err(io_err(&dir))
         }
         Step::Rename { from, to } => {
-            let (src, dst) = (roots.stage(from)?, roots.library(to)?);
+            let (src, dst) = (roots.read(from)?, roots.library(to)?);
             move_path(&src, &dst).map_err(|e| match e {
                 PlaceError::CrossDevice { .. } => roots.cross_device(),
                 other => other,
@@ -372,25 +462,27 @@ fn collect_files(
     Ok(())
 }
 
-/// Rewrites `path` through `f` into a sibling file, then renames it over the original.
+/// Streams staging file `rel` through `f` into its scratch copy.
 fn rewrite(
-    path: &Path,
+    roots: &Roots,
+    rel: &Path,
     f: impl FnOnce(&mut BufReader<File>, &mut BufWriter<File>) -> io::Result<()>,
 ) -> Result<(), PlaceError> {
-    let name = path
+    let (src, dst) = (roots.read(rel)?, roots.write(rel)?);
+    let name = dst
         .file_name()
-        .ok_or_else(|| PlaceError::Outside(path.to_path_buf()))?;
-    let tmp = path.with_file_name(format!(".{}.part", name.to_string_lossy()));
-    let src = File::open(path).map_err(io_err(path))?;
-    let mut r = BufReader::with_capacity(BUF_SIZE, src);
-    let dst = File::create(&tmp).map_err(io_err(&tmp))?;
-    let mut w = BufWriter::with_capacity(BUF_SIZE, dst);
+        .ok_or_else(|| PlaceError::Outside(rel.to_path_buf()))?;
+    let tmp = dst.with_file_name(format!(".{}.part", name.to_string_lossy()));
+    let input = File::open(&src).map_err(io_err(&src))?;
+    let mut r = BufReader::with_capacity(BUF_SIZE, input);
+    let output = File::create(&tmp).map_err(io_err(&tmp))?;
+    let mut w = BufWriter::with_capacity(BUF_SIZE, output);
     let written = f(&mut r, &mut w)
         .and_then(|()| w.flush())
-        .and_then(|()| fs::rename(&tmp, path));
+        .and_then(|()| fs::rename(&tmp, &dst));
     if let Err(e) = written {
         let _ = fs::remove_file(&tmp);
-        return Err(io_err(path)(e));
+        return Err(io_err(&src)(e));
     }
     Ok(())
 }
@@ -452,7 +544,8 @@ mod tests {
     }
 
     fn roots(t: &Tree) -> Roots {
-        Roots::new(&t.staging, &t.item, &t.games).expect("roots")
+        let scratch = t.staging.join(".import/1");
+        Roots::new(&t.staging, &t.item, &scratch, &t.games).expect("roots")
     }
 
     fn read(p: &Path) -> Vec<u8> {
@@ -460,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn unzip_extracts_one_member_beside_the_archive() {
+    fn unzip_extracts_one_member_into_scratch() {
         let mut buf = Vec::new();
         let mut z = zip::ZipWriter::new(Cursor::new(&mut buf));
         z.start_file("inner/a.bin", zip::write::SimpleFileOptions::default())
@@ -474,7 +567,11 @@ mod tests {
             to: "a.bin".into(),
         };
         apply_step(&step, &r).expect("unzip");
-        assert_eq!(read(&r.work().join("a.bin")), b"payload");
+        assert_eq!(read(&r.scratch().join("a.bin")), b"payload");
+        assert_eq!(
+            r.read(Path::new("a.bin")).expect("read"),
+            r.scratch().join("a.bin")
+        );
         assert!(matches!(apply_step(&step, &r), Err(PlaceError::Exists(_))));
         let missing = Step::Unzip {
             member: "nope".into(),
@@ -490,7 +587,7 @@ mod tests {
     fn zip_packs_a_staging_directory() {
         let t = tree("x.bin", b"x");
         let r = roots(&t);
-        let set = r.work().join("set");
+        let set = t.item.with_file_name("set");
         fs::create_dir_all(set.join("sub")).expect("mkdir");
         fs::write(set.join("a.rom"), b"aa").expect("write");
         fs::write(set.join("sub/b.rom"), b"bbb").expect("write");
@@ -499,14 +596,14 @@ mod tests {
             to: "set.zip".into(),
         };
         apply_step(&step, &r).expect("zip");
-        let file = File::open(r.work().join("set.zip")).expect("open");
+        let file = File::open(r.scratch().join("set.zip")).expect("open");
         let members = mistarr_core::hash::zip_members(file).expect("members");
         let names: Vec<_> = members.iter().map(|m| (m.name.as_str(), m.size)).collect();
         assert_eq!(names, [("a.rom", 2), ("sub/b.rom", 3)]);
     }
 
     #[test]
-    fn add_and_strip_header_rewrite_in_place() {
+    fn header_steps_write_to_scratch_and_leave_the_original() {
         let t = tree("g.bin", b"body");
         let r = roots(&t);
         let add = Step::AddHeader {
@@ -514,20 +611,20 @@ mod tests {
             bytes: b"HEAD".to_vec(),
         };
         apply_step(&add, &r).expect("add");
-        assert_eq!(read(&t.item), b"HEADbody");
+        assert_eq!(read(&t.item), b"body");
+        assert_eq!(read(&r.scratch().join("g.bin")), b"HEADbody");
         let strip = Step::StripHeader {
             file: "g.bin".into(),
             len: 4,
         };
         apply_step(&strip, &r).expect("strip");
-        assert_eq!(read(&t.item), b"body");
+        assert_eq!(read(&r.scratch().join("g.bin")), b"body");
         let too_long = Step::StripHeader {
             file: "g.bin".into(),
             len: 99,
         };
         assert!(apply_step(&too_long, &r).is_err());
-        assert_eq!(read(&t.item), b"body");
-        assert_eq!(fs::read_dir(r.work()).expect("list").count(), 1);
+        assert_eq!(fs::read_dir(r.scratch()).expect("list").count(), 1);
     }
 
     #[test]
@@ -539,7 +636,10 @@ mod tests {
             from: ByteOrder::ByteSwapped,
         };
         apply_step(&step, &r).expect("swap");
-        assert_eq!(read(&t.item), [0x80, 0x37, 0x12, 0x40, 2, 1, 9]);
+        assert_eq!(
+            read(&r.scratch().join("g.v64")),
+            [0x80, 0x37, 0x12, 0x40, 2, 1, 9]
+        );
         let mut out = Vec::new();
         swap_order(
             &mut Cursor::new([0x40, 0x12, 0x37, 0x80]),
@@ -590,6 +690,52 @@ mod tests {
     }
 
     #[test]
+    fn a_failed_prepare_rolls_back_and_touches_nothing() {
+        let t = tree("g.nes", b"body");
+        let r = roots(&t);
+        let steps = [
+            Step::AddHeader {
+                file: "g.nes".into(),
+                bytes: b"HEAD".to_vec(),
+            },
+            Step::StripHeader {
+                file: "missing.nes".into(),
+                len: 1,
+            },
+            Step::Rename {
+                from: "g.nes".into(),
+                to: "NES/g.nes".into(),
+            },
+        ];
+        assert!(apply(&steps, &r).is_err());
+        assert_eq!(read(&t.item), b"body");
+        assert!(!r.scratch().exists());
+        assert!(!t.games.join("NES").exists());
+    }
+
+    #[test]
+    fn commit_reports_the_renames_that_landed() {
+        let t = tree("a.bin", b"a");
+        let r = roots(&t);
+        let steps = [
+            Step::Rename {
+                from: "a.bin".into(),
+                to: "PSX/Set/a.bin".into(),
+            },
+            Step::Rename {
+                from: "b.bin".into(),
+                to: "PSX/Set/b.bin".into(),
+            },
+        ];
+        prepare(&steps, &r).expect("prepare");
+        let partial = commit(&steps, &r).expect_err("b.bin is missing");
+        assert_eq!(partial.landed, [PathBuf::from("PSX/Set/a.bin")]);
+        assert!(matches!(partial.error, PlaceError::Io { .. }));
+        assert!(t.games.join("PSX/Set/a.bin").is_file());
+        assert!(is_library_step(&steps[0]));
+    }
+
+    #[test]
     fn paths_outside_staging_or_games_are_refused() {
         let t = tree("t.bin", b"x");
         let r = roots(&t);
@@ -619,13 +765,19 @@ mod tests {
         let elsewhere = t.games.join("x.bin");
         fs::create_dir_all(&t.games).expect("mkdir");
         fs::write(&elsewhere, b"x").expect("write");
+        let scratch = t.staging.join(".import/2");
         assert!(matches!(
-            Roots::new(&t.staging, &elsewhere, &t.games),
+            Roots::new(&t.staging, &elsewhere, &scratch, &t.games),
+            Err(PlaceError::Outside(_))
+        ));
+        assert!(matches!(
+            Roots::new(&t.staging, &t.item, &t.games.join("s"), &t.games),
             Err(PlaceError::Outside(_))
         ));
         assert!(matches!(r.discard(&elsewhere), Err(PlaceError::Outside(_))));
         r.discard(&t.item).expect("discard");
         assert!(!t.item.exists());
+        r.discard(&t.item).expect("already gone");
     }
 
     #[cfg(target_os = "linux")]

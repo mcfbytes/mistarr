@@ -58,6 +58,7 @@ any dynamic dependency, checked with `file` on the output.
   sources/loaded/
   staging/                # client download dir
   staging/quarantine/     # hash mismatches, with report
+  staging/.import/        # importer scratch, removed after each import
   rtorrent.rc, rtorrent.sock, rtorrent-session/   # only if mistarr started rtorrent
 /media/fat/Scripts/mistarr.sh      # start/stop/status from the MiSTer Scripts menu
 ```

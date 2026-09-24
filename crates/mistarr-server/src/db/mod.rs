@@ -1,6 +1,7 @@
 //! SQLite access; the schema is `docs/DATA-MODEL.md`. All SQL lives in this module's children.
 
 pub mod dats;
+pub mod downloads;
 pub mod downloads_import;
 pub mod files;
 pub mod imports;

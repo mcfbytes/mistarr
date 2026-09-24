@@ -221,6 +221,49 @@ pub fn move_to(
     Ok(())
 }
 
+/// Deletes one file row.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn delete(conn: &Connection, id: FileId) -> Result<()> {
+    conn.execute("DELETE FROM files WHERE id = ?1", [id.0])?;
+    Ok(())
+}
+
+/// The member rows the scanner keeps for zip `zip_rel`, stored as `zip_rel#member`.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn zip_member_rows(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    zip_rel: &str,
+) -> Result<Vec<FileRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM files WHERE platform_id = ?1 AND substr(rel_path, 1, ?2) = ?3
+         ORDER BY rel_path"
+    ))?;
+    let prefix = format!("{zip_rel}#");
+    let len = i64::try_from(prefix.chars().count()).unwrap_or(i64::MAX);
+    let rows = stmt.query_map(params![platform_id.0, len, prefix], from_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Whether rom `rom_id` has a `verified` file.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn has_verified(conn: &Connection, rom_id: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM files WHERE rom_id = ?1 AND state = 'verified')",
+        [rom_id],
+        |r| r.get(0),
+    )?)
+}
+
 /// Every hashed field a file row records, when the file was hashed this pass.
 #[derive(Debug, Clone, Default)]
 pub struct Hashed<'a> {
@@ -922,6 +965,58 @@ mod tests {
             ("NES/b.nes", FileState::Verified, 7)
         );
         assert!(get(&c, FileId(999)).expect("get").is_none());
+    }
+
+    #[test]
+    fn zip_members_verified_roms_and_deletes() {
+        let c = conn();
+        let pid = PlatformId("neogeo".into());
+        let h = Hashed::default();
+        let rom =
+            seed_rom_fixture(&c, &pid, "Example Set", "a.rom", &hashes(3), "good").expect("rom");
+        assert!(!has_verified(&c, rom).expect("none"));
+        let a = upsert(
+            &c,
+            &pid,
+            "NeoGeo/set.zip#a.rom",
+            1,
+            1,
+            &h,
+            Some(rom),
+            FileState::Verified,
+            1,
+        )
+        .expect("a");
+        upsert(
+            &c,
+            &pid,
+            "NeoGeo/set.zip#b.rom",
+            1,
+            1,
+            &h,
+            None,
+            FileState::Unverified,
+            1,
+        )
+        .expect("b");
+        upsert(
+            &c,
+            &pid,
+            "NeoGeo/set.zip2#c.rom",
+            1,
+            1,
+            &h,
+            None,
+            FileState::Unverified,
+            1,
+        )
+        .expect("c");
+        let rows = zip_member_rows(&c, &pid, "NeoGeo/set.zip").expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert!(has_verified(&c, rom).expect("some"));
+        delete(&c, a).expect("delete");
+        assert!(get(&c, a).expect("get").is_none());
+        assert!(!has_verified(&c, rom).expect("gone"));
     }
 
     #[test]
