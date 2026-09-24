@@ -11,7 +11,7 @@ use super::ApiError;
 use crate::app::AppState;
 
 /// `(method, path)` of every documented route not implemented yet.
-pub(super) const STUBS: &[(&str, &str)] = &[("GET", "/imports")];
+pub(super) const STUBS: &[(&str, &str)] = &[];
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     let mut router = Router::new();

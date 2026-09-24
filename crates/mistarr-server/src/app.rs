@@ -316,6 +316,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     tasks.push(tokio::spawn(crate::jobs::dat_import::watch(Arc::clone(
         &app,
     ))));
+    tasks.push(tokio::spawn(crate::jobs::import::watch(Arc::clone(&app))));
     tasks.push(tokio::spawn(transfer::watch(Arc::clone(&app))));
     tasks.push(tokio::spawn(poll::run(Arc::clone(&app))));
     tasks.push(tokio::spawn(poll::follow_gate(Arc::clone(&app))));

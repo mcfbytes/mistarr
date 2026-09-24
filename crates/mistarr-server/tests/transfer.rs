@@ -13,6 +13,7 @@ use mistarr_server::db::downloads::{self as rows, DownloadState};
 use mistarr_server::db::sources::fixtures::seed_rom;
 use mistarr_server::events::{Event, EventKind};
 use mistarr_server::jobs::poll::{Cadence, Poller};
+use mistarr_server::jobs::{Job, JobContext, Lane, Scheduler};
 use serde_json::{json, Value};
 use tokio::sync::broadcast::Receiver;
 
@@ -149,6 +150,33 @@ async fn boot_transmission(fake: &FakeServer) -> Booted {
     boot_with(dir, config).await
 }
 
+/// Occupies the heavy lane so the importer leaves `importing` rows alone
+/// while a test observes the handoff; notify the returned handle to release it.
+struct Hold(std::sync::Arc<tokio::sync::Notify>);
+
+#[async_trait::async_trait]
+impl Job for Hold {
+    fn kind(&self) -> &'static str {
+        "hold"
+    }
+
+    fn lane(&self) -> Lane {
+        Lane::Heavy
+    }
+
+    async fn run(&self, _ctx: &JobContext) -> mistarr_server::Result<()> {
+        self.0.notified().await;
+        Ok(())
+    }
+}
+
+async fn hold_imports(b: &Booted) -> std::sync::Arc<tokio::sync::Notify> {
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    let job = std::sync::Arc::new(Hold(std::sync::Arc::clone(&release)));
+    Scheduler::enqueue(&b.running.app, job).await.expect("hold");
+    release
+}
+
 fn ok() -> FakeResponse {
     FakeResponse::success(json!({}))
 }
@@ -206,6 +234,7 @@ fn methods(fake: &FakeServer) -> Vec<String> {
 async fn want_adds_selects_starts_extends_and_polls_through_transmission() {
     let fake = FakeServer::start().await.expect("fake");
     let b = boot_transmission(&fake).await;
+    let hold = hold_imports(&b).await;
     let [quest, second, _] = seed_catalog(&b);
     drop_source(&b).await;
     let h = set_hash();
@@ -295,6 +324,7 @@ async fn want_adds_selects_starts_extends_and_polls_through_transmission() {
     let tail: Vec<String> = methods(&fake).into_iter().rev().take(3).collect();
     assert_eq!(tail, ["torrent-stop", "torrent-get", "torrent-get"]);
     assert_eq!(poller.failures(), 0);
+    hold.notify_one();
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -576,6 +606,7 @@ async fn want_extend_and_poll_through_rtorrent() {
     config.client.kind = ClientChoice::Rtorrent;
     config.client.url = fake.addr();
     let b = boot_with(dir, config).await;
+    let hold = hold_imports(&b).await;
     let [quest, second, _] = seed_catalog(&b);
     drop_source(&b).await;
     let app = &b.running.app;
@@ -677,6 +708,7 @@ async fn want_extend_and_poll_through_rtorrent() {
         .await
         .expect("count");
     assert_eq!(n, 2);
+    hold.notify_one();
     b.running.shutdown().await.expect("shutdown");
 }
 

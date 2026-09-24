@@ -13,8 +13,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{ApiError, Page, Paging};
 use crate::app::AppState;
+use crate::db::files::FileId;
 use crate::db::titles::{self, Browse, GroupDetail, GroupRow, Sort, TitleId, Tri, WantRefused};
 use crate::db::{downloads, platforms};
+use crate::jobs::import::{self, RenameError};
 use crate::jobs::transfer;
 
 /// The libretro thumbnail server, the one external URL family the app names.
@@ -298,16 +300,38 @@ async fn unwant(
     Ok(Json(load_detail(&app, id).await?))
 }
 
+/// `POST /titles/{id}/rename` body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RenameBody {
+    file_id: i64,
+}
+
 async fn rename(
     State(app): State<Arc<AppState>>,
     id: Result<Path<i64>, PathRejection>,
+    body: Bytes,
 ) -> Result<Json<DetailOut>, ApiError> {
-    load_detail(&app, title_id(id)?).await?;
-    Err(ApiError::new(
-        StatusCode::NOT_IMPLEMENTED,
-        "not_implemented",
-        "renaming files is done by the importer, which is not in this build",
-    ))
+    let id = title_id(id)?;
+    let body: RenameBody =
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let group = load_detail(&app, id).await?.detail.parent_id;
+    match import::rename(&app, group, FileId(body.file_id)).await {
+        Ok(_) => Ok(Json(load_detail(&app, id).await?)),
+        Err(RenameError::NotFound) => Err(ApiError::not_found("no such file in this title")),
+        Err(RenameError::Conflict(path)) => Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "conflict",
+            format!("{path} already exists"),
+        )),
+        Err(RenameError::Server(e)) => Err(e.into()),
+        Err(RenameError::Io(message)) => Err(ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            message,
+        )),
+        Err(e) => Err(ApiError::bad_request(e.to_string())),
+    }
 }
 
 #[cfg(test)]

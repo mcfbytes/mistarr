@@ -356,14 +356,9 @@ async fn wizard_and_jobs_report_state() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn unimplemented_routes_answer_501_and_unknown_ones_404() {
+async fn unknown_routes_answer_404_and_wrong_methods_405() {
     let booted = boot().await;
     let addr = booted.addr();
-    for (method, path) in [("GET", "/api/v1/imports")] {
-        let r = request(addr, method, path, &[], Some("{}")).await;
-        assert_eq!(r.status, 501, "{method} {path}");
-        assert_eq!(r.json()["error"]["code"], "not_implemented");
-    }
     let r = get(addr, "/api/v1/nope").await;
     assert_eq!(r.status, 404);
     assert_eq!(r.json()["error"]["code"], "not_found");

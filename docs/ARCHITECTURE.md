@@ -193,17 +193,49 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 
 ### Import
 
-1. Hash the staged file. Match against the DAT. A mismatch marks the download
-   `bad` and leaves the file in `staging/quarantine/` with a report; it is
-   never placed.
-2. Ask the platform's `CoreAdapter` for a placement plan. Apply it: unzip if
-   the core cannot read zips or the plan says so, add or strip a header, fix
-   byte order, create a per-title directory for multi-file disc images and
-   move every track.
-3. Rename into `games/<Core>/` on the same filesystem. If the target exists
-   and is verified, keep the existing file and discard the new one. If it
-   exists and is unverified, replace it and record the previous name.
-4. Update `files`, mark the title `have`, emit `import.done`.
+A heavy `import` job runs per download in `importing`. The importer enqueues
+one for every such row at startup and whenever `download.changed` reports a
+download entering `importing`, unless a job for it is already queued or
+running. A download that fails or is cancelled also wakes the `importing`
+tracks of its entry that wait for it. A job whose row has left `importing`
+does nothing.
+
+1. Hash the staged file with the platform's header rule, every member of a
+   staged zip, and match it against the roms of the download's own entry, so
+   byte-identical regional variants and identical disc tracks resolve to the
+   wanted rom. Only when nothing of the entry matches is the rest of the DAT
+   searched, and the file is a mismatch either way: the download becomes
+   `bad` and the file moves to `staging/quarantine/<infohash>/` beside a
+   `<name>.report.txt` naming the expected rom, the actual hashes and the
+   other entry it matches, if any. An entry flagged `bios` is refused: the
+   download is `failed` and the file stays in staging.
+2. A romset or arcade zip verifies only when every member is a rom of the
+   entry and every rom of the entry is a member. A disc entry waits until
+   every track is `importing` and is placed together; when a track is missing
+   and nothing of the entry is still transferring, its downloads become
+   `failed` and the tracks stay in staging.
+3. Ask the platform's `CoreAdapter` for a placement plan from the DAT entry
+   and the staged item (its zip members, and the first bytes that decide an
+   iNES header or N64 byte order). Its staging steps (unzip, zip, header, byte
+   order) run first and write only to `staging/.import/<download id>/`,
+   leaving the staged files untouched; any failure there removes that
+   directory and leaves the download `failed` and retryable.
+4. Then create directories and rename into `games/<Core>/` on the same
+   filesystem; staging and `games/` on different filesystems fail the import
+   with both paths named. If the target exists and is verified, keep the
+   existing file and discard the new one. If it exists and is not verified,
+   replace it and record the previous file. When a rename fails partway, the
+   files that landed are recorded and the downloads become `failed`; a retry
+   treats a track whose staged file is gone but whose rom has a verified file
+   as placed, and completes the rest.
+5. Update `files` with the rows the library scan would write (one per member
+   of a zip placed whole, as `a.zip#member`), which marks the title `have`,
+   log the action in `import_log`, set the downloads `done` and emit
+   `import.done`.
+6. Once a source has a `done` download and none queued, transferring,
+   checking or importing, and its seed policy is `none`, remove the torrent
+   from the client without deleting data, clear `sources.client_id` and
+   remove the empty directories under `staging/<infohash>/`.
 
 ### Pausing for the core
 

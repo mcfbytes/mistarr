@@ -263,6 +263,35 @@ pub fn find_queued(conn: &Connection, kind: &str, payload: &Value) -> Result<Opt
         .optional()?)
 }
 
+/// The oldest job of `kind` with `payload` that has not finished: queued,
+/// running or paused.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::jobs::{self, JobState};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let p = serde_json::json!({});
+/// let id = jobs::insert(&conn, "import", &p, 1).unwrap();
+/// jobs::set_state(&conn, id, JobState::Running, 2).unwrap();
+/// assert_eq!(jobs::find_open(&conn, "import", &p).unwrap(), Some(id));
+/// jobs::set_state(&conn, id, JobState::Done, 3).unwrap();
+/// assert_eq!(jobs::find_open(&conn, "import", &p).unwrap(), None);
+/// ```
+pub fn find_open(conn: &Connection, kind: &str, payload: &Value) -> Result<Option<JobId>> {
+    Ok(conn
+        .query_row(
+            "SELECT id FROM jobs WHERE kind = ?1 AND payload = ?2
+               AND state IN ('queued', 'running', 'paused') ORDER BY id LIMIT 1",
+            params![kind, payload.to_string()],
+            |r| r.get(0).map(JobId),
+        )
+        .optional()?)
+}
+
 /// Number of jobs of `kind` in any state.
 ///
 /// # Errors

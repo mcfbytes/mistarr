@@ -2,7 +2,9 @@
 
 pub mod dats;
 pub mod downloads;
+pub mod downloads_import;
 pub mod files;
+pub mod imports;
 pub mod jobs;
 pub mod migrate;
 pub mod platforms;

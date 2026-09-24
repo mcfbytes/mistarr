@@ -185,6 +185,85 @@ pub fn find_by_path(
         .optional()?)
 }
 
+/// Reads one file row.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn get(conn: &Connection, id: FileId) -> Result<Option<FileRow>> {
+    Ok(conn
+        .query_row(
+            &format!("SELECT {COLUMNS} FROM files WHERE id = ?1"),
+            [id.0],
+            from_row,
+        )
+        .optional()?)
+}
+
+/// Moves a row to `rel_path` with a new state and mtime, after the file was
+/// renamed on disk.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure, including a row already at `rel_path`.
+pub fn move_to(
+    conn: &Connection,
+    id: FileId,
+    rel_path: &str,
+    state: FileState,
+    mtime: i64,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE files SET rel_path = ?2, state = ?3, mtime = ?4, scanned_at = ?5 WHERE id = ?1",
+        params![id.0, rel_path, state.as_str(), mtime, now],
+    )?;
+    Ok(())
+}
+
+/// Deletes one file row.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn delete(conn: &Connection, id: FileId) -> Result<()> {
+    conn.execute("DELETE FROM files WHERE id = ?1", [id.0])?;
+    Ok(())
+}
+
+/// The member rows the scanner keeps for zip `zip_rel`, stored as `zip_rel#member`.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn zip_member_rows(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    zip_rel: &str,
+) -> Result<Vec<FileRow>> {
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM files WHERE platform_id = ?1 AND substr(rel_path, 1, ?2) = ?3
+         ORDER BY rel_path"
+    ))?;
+    let prefix = format!("{zip_rel}#");
+    let len = i64::try_from(prefix.chars().count()).unwrap_or(i64::MAX);
+    let rows = stmt.query_map(params![platform_id.0, len, prefix], from_row)?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Whether rom `rom_id` has a `verified` file.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn has_verified(conn: &Connection, rom_id: i64) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM files WHERE rom_id = ?1 AND state = 'verified')",
+        [rom_id],
+        |r| r.get(0),
+    )?)
+}
+
 /// Every hashed field a file row records, when the file was hashed this pass.
 #[derive(Debug, Clone, Default)]
 pub struct Hashed<'a> {
@@ -281,7 +360,7 @@ pub fn delete_missing(
 
 /// Finds the rom a hashed payload matches under
 /// `docs/VERIFICATION.md` "Matching order", scoped to one platform and
-/// preferring a title whose `dat_version` is not superseded.
+/// preferring a live rom, then a title whose `dat_version` is not superseded.
 ///
 /// # Errors
 ///
@@ -298,7 +377,8 @@ pub fn match_rom(
          FROM roms r JOIN titles t ON t.id = r.title_id
          JOIN dat_versions d ON d.id = t.dat_version_id
          WHERE t.platform_id = ?1 AND ";
-    const ORDER: &str = " ORDER BY d.superseded_by IS NULL DESC, d.id DESC LIMIT 1";
+    const ORDER: &str = " ORDER BY (r.retired = 0 AND t.retired = 0) DESC,
+         d.superseded_by IS NULL DESC, d.id DESC LIMIT 1";
     let row = |r: &Row<'_>| -> rusqlite::Result<RomMatch> {
         Ok(RomMatch {
             rom_id: r.get(0)?,
@@ -859,6 +939,102 @@ mod tests {
         assert_eq!(counts.verified, 2);
         assert_eq!(counts.unverified, 1);
         assert_eq!(counts.bad, 0);
+    }
+
+    #[test]
+    fn get_and_move_to_follow_a_rename() {
+        let c = conn();
+        let pid = PlatformId("nes".into());
+        let h = Hashed::default();
+        let id = upsert(
+            &c,
+            &pid,
+            "NES/a.nes",
+            1,
+            1,
+            &h,
+            None,
+            FileState::Misnamed,
+            1,
+        )
+        .expect("insert");
+        move_to(&c, id, "NES/b.nes", FileState::Verified, 7, 8).expect("move");
+        let row = get(&c, id).expect("get").expect("row");
+        assert_eq!(
+            (row.rel_path.as_str(), row.state, row.mtime),
+            ("NES/b.nes", FileState::Verified, 7)
+        );
+        assert!(get(&c, FileId(999)).expect("get").is_none());
+    }
+
+    #[test]
+    fn zip_members_verified_roms_and_deletes() {
+        let c = conn();
+        let pid = PlatformId("neogeo".into());
+        let h = Hashed::default();
+        let rom =
+            seed_rom_fixture(&c, &pid, "Example Set", "a.rom", &hashes(3), "good").expect("rom");
+        assert!(!has_verified(&c, rom).expect("none"));
+        let a = upsert(
+            &c,
+            &pid,
+            "NeoGeo/set.zip#a.rom",
+            1,
+            1,
+            &h,
+            Some(rom),
+            FileState::Verified,
+            1,
+        )
+        .expect("a");
+        upsert(
+            &c,
+            &pid,
+            "NeoGeo/set.zip#b.rom",
+            1,
+            1,
+            &h,
+            None,
+            FileState::Unverified,
+            1,
+        )
+        .expect("b");
+        upsert(
+            &c,
+            &pid,
+            "NeoGeo/set.zip2#c.rom",
+            1,
+            1,
+            &h,
+            None,
+            FileState::Unverified,
+            1,
+        )
+        .expect("c");
+        let rows = zip_member_rows(&c, &pid, "NeoGeo/set.zip").expect("rows");
+        assert_eq!(rows.len(), 2);
+        assert!(has_verified(&c, rom).expect("some"));
+        delete(&c, a).expect("delete");
+        assert!(get(&c, a).expect("get").is_none());
+        assert!(!has_verified(&c, rom).expect("gone"));
+    }
+
+    #[test]
+    fn match_rom_prefers_a_live_rom() {
+        let c = conn();
+        let pid = PlatformId("nes".into());
+        let h = hashes(3);
+        let dv = seed_dat_version(&c, &pid, "only");
+        let gone = seed_title(&c, &pid, dv, "Gone Quest");
+        seed_rom(&c, gone, "Gone Quest.nes", &h, "good");
+        c.execute("UPDATE roms SET retired = 1 WHERE title_id = ?1", [gone])
+            .expect("retire");
+        let live = seed_title(&c, &pid, dv, "Live Quest");
+        seed_rom(&c, live, "Live Quest.nes", &h, "good");
+        let m = match_rom(&c, &pid, &h.sha1, &h.md5, &h.crc32, 3)
+            .expect("match")
+            .expect("found");
+        assert_eq!(m.name, "Live Quest.nes");
     }
 
     #[test]
