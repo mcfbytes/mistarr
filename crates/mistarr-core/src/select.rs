@@ -121,7 +121,7 @@ pub struct Variant {
 pub struct Rank {
     unlicensed_or_pirate: bool,
     region_rank: usize,
-    lacks_preferred_language: bool,
+    language_rank: u8,
     revision_key: i64,
     is_bad_dump: bool,
     name_len: usize,
@@ -180,10 +180,19 @@ pub fn rank(variant: &Variant, prefs: &Prefs) -> Rank {
         .filter_map(|r| prefs.regions.iter().position(|p| p == r))
         .min()
         .unwrap_or(prefs.regions.len());
-    let lacks_preferred_language = !variant
-        .languages
-        .iter()
-        .any(|l| prefs.languages.iter().any(|p| p == l));
+    // Untagged names carry no language claim, so they sit between a match and a mismatch.
+    let language_rank = match variant.languages.is_empty() {
+        true => 1,
+        false
+            if variant
+                .languages
+                .iter()
+                .any(|l| prefs.languages.contains(l)) =>
+        {
+            0
+        }
+        false => 2,
+    };
     let revision = i64::from(variant.revision_rank.unwrap_or(0));
     let revision_key = if prefs.prefer_latest_revision {
         -revision
@@ -193,7 +202,7 @@ pub fn rank(variant: &Variant, prefs: &Prefs) -> Rank {
     Rank {
         unlicensed_or_pirate,
         region_rank,
-        lacks_preferred_language,
+        language_rank,
         revision_key,
         is_bad_dump: !variant.good_dump,
         name_len: variant.name.len(),
@@ -243,42 +252,34 @@ pub struct Group {
 }
 
 /// Groups `items` by their key and elects a parent per group with
-/// [`select_1g1r`] under [`Prefs::default`], putting it first in
-/// `member_ids`. Output order is by key, for a deterministic result.
+/// [`select_1g1r`] under `prefs`, putting it first in `member_ids`.
+/// Output order is by key, for a deterministic result.
 ///
 /// ```
-/// use mistarr_core::select::infer_groups;
-/// let groups = infer_groups(vec![(2, "Example Quest".to_string()), (1, "Example Quest".to_string())].into_iter());
-/// assert_eq!(groups[0].key, "Example Quest");
-/// assert_eq!(groups[0].member_ids.len(), 2);
+/// use mistarr_core::select::{infer_groups, Prefs, Variant};
+/// let v = |id, name: &str, region: &str| Variant {
+///     id, name: name.to_string(), regions: vec![region.to_string()],
+///     languages: vec![], revision_rank: None, flags: vec![], good_dump: true,
+/// };
+/// let items = vec![
+///     ("Example Quest".to_string(), v(1, "Example Quest (Japan)", "Japan")),
+///     ("Example Quest".to_string(), v(2, "Example Quest (USA)", "USA")),
+/// ];
+/// let groups = infer_groups(items.into_iter(), &Prefs::default());
+/// assert_eq!(groups[0].member_ids, vec![2, 1]);
 /// ```
 #[must_use]
-pub fn infer_groups(items: impl Iterator<Item = (u64, String)>) -> Vec<Group> {
-    let mut by_key: BTreeMap<String, Vec<u64>> = BTreeMap::new();
-    for (id, key) in items {
-        by_key.entry(key).or_default().push(id);
+pub fn infer_groups(items: impl Iterator<Item = (String, Variant)>, prefs: &Prefs) -> Vec<Group> {
+    let mut by_key: BTreeMap<String, Vec<Variant>> = BTreeMap::new();
+    for (key, variant) in items {
+        by_key.entry(key).or_default().push(variant);
     }
-    let prefs = Prefs::default();
     by_key
         .into_iter()
-        .map(|(key, mut ids)| {
-            ids.sort_unstable();
-            // Names are unknown here, so all members share the group key as
-            // a stand-in name and selection falls back to the id tie-break.
-            let variants: Vec<Variant> = ids
-                .iter()
-                .map(|&id| Variant {
-                    id,
-                    name: key.clone(),
-                    regions: Vec::new(),
-                    languages: Vec::new(),
-                    revision_rank: None,
-                    flags: Vec::new(),
-                    good_dump: true,
-                })
-                .collect();
-            let parent_id = select_1g1r(&variants, &prefs).map(|v| v.id);
-            let mut member_ids = ids;
+        .map(|(key, variants)| {
+            let parent_id = select_1g1r(&variants, prefs).map(|v| v.id);
+            let mut member_ids: Vec<u64> = variants.iter().map(|v| v.id).collect();
+            member_ids.sort_unstable();
             if let Some(parent_id) = parent_id {
                 member_ids.retain(|&id| id != parent_id);
                 member_ids.insert(0, parent_id);
@@ -684,38 +685,62 @@ mod tests {
     }
 
     #[test]
-    fn infer_groups_groups_by_key_and_marks_inferred() {
+    fn infer_groups_groups_by_key_and_elects_the_1g1r_winner() {
+        let mut japan = base(1, "Example Quest (Japan)");
+        japan.regions = vec!["Japan".to_string()];
+        let mut bios = base(3, "Example Quest (USA) (BIOS)");
+        bios.flags = vec!["bios".to_string()];
         let items = vec![
-            (1, "Example Quest".to_string()),
-            (2, "Example Quest".to_string()),
-            (3, "Other Adventure".to_string()),
+            ("Example Quest".to_string(), japan),
+            ("Example Quest".to_string(), base(2, "Example Quest (USA)")),
+            ("Example Quest".to_string(), bios),
+            (
+                "Other Adventure".to_string(),
+                base(4, "Other Adventure (USA)"),
+            ),
         ];
-        let groups = infer_groups(items.into_iter());
+        let groups = infer_groups(items.into_iter(), &Prefs::default());
         assert_eq!(groups.len(), 2);
         assert!(groups.iter().all(|g| g.inferred));
         let eq = groups.iter().find(|g| g.key == "Example Quest").unwrap();
-        assert_eq!(eq.member_ids, vec![1, 2]);
+        assert_eq!(eq.member_ids, vec![2, 1, 3]);
     }
 
     #[test]
     fn infer_groups_is_deterministic_regardless_of_input_order() {
-        let forward = vec![
-            (1, "Example Quest".to_string()),
-            (2, "Example Quest".to_string()),
-        ];
-        let reversed = vec![
-            (2, "Example Quest".to_string()),
-            (1, "Example Quest".to_string()),
-        ];
+        let forward = || {
+            vec![
+                ("Example Quest".to_string(), base(1, "Example Quest (USA)")),
+                (
+                    "Example Quest".to_string(),
+                    base(2, "Example Quest (USA) (Rev 1)"),
+                ),
+            ]
+        };
+        let mut reversed = forward();
+        reversed.reverse();
         assert_eq!(
-            infer_groups(forward.into_iter()),
-            infer_groups(reversed.into_iter())
+            infer_groups(forward().into_iter(), &Prefs::default()),
+            infer_groups(reversed.into_iter(), &Prefs::default())
         );
     }
 
     #[test]
+    fn untagged_language_ranks_between_match_and_mismatch() {
+        let prefs = Prefs::default();
+        let mut en = base(1, "Example Quest (USA) (En)");
+        en.languages = vec!["En".to_string()];
+        let mut untagged = base(2, "Example Quest (USA)");
+        untagged.languages = Vec::new();
+        let mut fr = base(3, "Example Quest (USA) (Fr)");
+        fr.languages = vec!["Fr".to_string()];
+        assert!(rank(&en, &prefs) < rank(&untagged, &prefs));
+        assert!(rank(&untagged, &prefs) < rank(&fr, &prefs));
+    }
+
+    #[test]
     fn infer_groups_empty_input_yields_no_groups() {
-        assert!(infer_groups(std::iter::empty()).is_empty());
+        assert!(infer_groups(std::iter::empty(), &Prefs::default()).is_empty());
     }
 
     proptest::proptest! {
