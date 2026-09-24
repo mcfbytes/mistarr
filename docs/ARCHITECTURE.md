@@ -79,7 +79,7 @@ pub trait CoreAdapter: Send + Sync {
 
 // mistarr-core
 pub struct HashSet { pub size: u64, pub crc32: u32, pub md5: [u8;16], pub sha1: [u8;20] }
-pub fn hash_reader<R: Read>(r: R, header: Option<HeaderRule>) -> io::Result<HashSet>;
+pub fn hash_reader<R: Read>(r: R, rule: HeaderRule) -> io::Result<HashSet>;
 pub fn parse_dat(xml: &[u8]) -> Result<Dat>;
 pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 ```

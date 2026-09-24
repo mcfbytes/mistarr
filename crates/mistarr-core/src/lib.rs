@@ -8,6 +8,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// One-pass hashing and platform header rules.
+pub mod hash;
+
 /// Stable platform identifier, e.g. `nes`, `megadrive`, `psx`.
 /// The full table lives in `docs/PLATFORMS.md` and in `mistarr-mister`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
