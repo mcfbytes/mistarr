@@ -25,11 +25,11 @@ fn bench_hash(c: &mut Criterion) {
     let v64 = deterministic_bytes([0x37, 0x80, 0x40, 0x12]);
 
     c.bench_function("hash_reader 64MiB rule=None", |b| {
-        b.iter(|| hash_reader(Cursor::new(black_box(&plain)), HeaderRule::None).unwrap());
+        b.iter(|| hash_reader(Cursor::new(black_box(&plain)), HeaderRule::None, None).unwrap());
     });
 
     c.bench_function("hash_reader 64MiB rule=N64", |b| {
-        b.iter(|| hash_reader(Cursor::new(black_box(&v64)), HeaderRule::N64).unwrap());
+        b.iter(|| hash_reader(Cursor::new(black_box(&v64)), HeaderRule::N64, None).unwrap());
     });
 }
 

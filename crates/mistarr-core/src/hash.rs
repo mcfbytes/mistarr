@@ -1,6 +1,6 @@
 //! One-pass CRC32/MD5/SHA1 hashing and the platform header rules of
-//! `docs/PLATFORMS.md` "Header rules", plus a zip central-directory
-//! pre-check. See `docs/VERIFICATION.md` "Hashing".
+//! `docs/PLATFORMS.md` "Header rules", plus a zip member pre-check from
+//! the central directory. See `docs/VERIFICATION.md` "Hashing".
 
 use std::io::{self, Read, Seek};
 
@@ -101,6 +101,10 @@ fn hex(bytes: &[u8]) -> String {
 /// Computes CRC32, MD5 and SHA1 in one streaming pass, applying `rule` to
 /// the byte stream first. Never buffers more than a small header probe.
 ///
+/// `size_hint` is the file's total size, when the caller already knows it
+/// (filesystem metadata, or a zip member's uncompressed size). `HeaderRule::Smc`
+/// uses it to decide in one pass instead of hashing the stream twice.
+///
 /// # Errors
 ///
 /// Returns an error if reading from `r` fails.
@@ -109,14 +113,14 @@ fn hex(bytes: &[u8]) -> String {
 /// use mistarr_core::hash::{hash_reader, HeaderRule};
 /// use std::io::Cursor;
 ///
-/// let hashes = hash_reader(Cursor::new(b"abc"), HeaderRule::None).unwrap();
+/// let hashes = hash_reader(Cursor::new(b"abc"), HeaderRule::None, None).unwrap();
 /// assert_eq!(hashes.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
 /// ```
-pub fn hash_reader<R: Read>(r: R, rule: HeaderRule) -> io::Result<HashSet> {
+pub fn hash_reader<R: Read>(r: R, rule: HeaderRule, size_hint: Option<u64>) -> io::Result<HashSet> {
     match rule {
         HeaderRule::None => hash_stream(r, &[]),
         HeaderRule::Ines => hash_with_magic_skip(r, 4, 16, |p| p == b"NES\x1a"),
-        HeaderRule::Smc => hash_smc(r),
+        HeaderRule::Smc => hash_smc(r, size_hint),
         HeaderRule::A78 => {
             hash_with_magic_skip(r, 10, 128, |p| p.len() >= 10 && &p[1..10] == b"ATARI7800")
         }
@@ -181,9 +185,15 @@ fn hash_with_magic_skip<R: Read>(
     }
 }
 
-// Runs whole-file and header-skipped hashers in parallel; the SMC decision
-// needs the total size, only known once the stream is exhausted.
-fn hash_smc<R: Read>(mut r: R) -> io::Result<HashSet> {
+fn hash_smc<R: Read>(mut r: R, size_hint: Option<u64>) -> io::Result<HashSet> {
+    if let Some(size) = size_hint {
+        if size % 1024 == 512 {
+            discard(&mut r, 512)?;
+        }
+        return hash_stream(r, &[]);
+    }
+    // No size known up front: run whole-file and header-skipped hashers in
+    // parallel and pick the right one once the total size is known at EOF.
     let mut whole = Hashers::new();
     let mut skipped = Hashers::new();
     let mut buf = vec![0u8; BUF_SIZE];
@@ -277,8 +287,12 @@ fn hash_n64<R: Read>(mut r: R) -> io::Result<HashSet> {
     Ok(h.finish())
 }
 
-/// Reads only a zip's central directory and lists every member's name,
-/// uncompressed size and stored CRC32.
+/// Lists every member's name, uncompressed size and stored CRC32 from a
+/// zip's central directory. Reading a member's data start also requires its
+/// local header, so this seeks once per member, but never decompresses or
+/// decrypts one: a member with an unsupported compression method or without
+/// a password still lists successfully, for the pre-check in
+/// `docs/VERIFICATION.md` "Hashing" to mark it `unverified` on CRC alone.
 ///
 /// # Errors
 ///
@@ -302,7 +316,9 @@ pub fn zip_members<R: Read + Seek>(r: R) -> Result<Vec<ZipMember>, HashError> {
     let mut archive = zip::ZipArchive::new(r)?;
     let mut members = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
-        let file = archive.by_index(i)?;
+        // by_index_raw never builds a decompressor or decryptor, so an
+        // unsupported method or an encrypted member still yields metadata.
+        let file = archive.by_index_raw(i)?;
         members.push(ZipMember {
             name: file.name().to_string(),
             size: file.size(),
@@ -339,7 +355,8 @@ pub fn hash_zip_member<R: Read + Seek>(
 ) -> Result<HashSet, HashError> {
     let mut archive = zip::ZipArchive::new(r)?;
     let file = archive.by_name(name)?;
-    Ok(hash_reader(file, rule)?)
+    let size_hint = Some(file.size());
+    Ok(hash_reader(file, rule, size_hint)?)
 }
 
 #[cfg(test)]
@@ -358,7 +375,7 @@ mod tests {
     #[test]
     fn reference_vectors_empty() {
         let (crc, md5, sha1) = empty();
-        let h = hash_reader(Cursor::new(b""), HeaderRule::None).unwrap();
+        let h = hash_reader(Cursor::new(b""), HeaderRule::None, None).unwrap();
         assert_eq!(h.size, 0);
         assert_eq!(h.crc32, crc);
         assert_eq!(h.md5, md5);
@@ -367,7 +384,7 @@ mod tests {
 
     #[test]
     fn reference_vectors_abc() {
-        let h = hash_reader(Cursor::new(b"abc"), HeaderRule::None).unwrap();
+        let h = hash_reader(Cursor::new(b"abc"), HeaderRule::None, None).unwrap();
         assert_eq!(h.size, 3);
         assert_eq!(h.crc32, "352441c2");
         assert_eq!(h.md5, "900150983cd24fb0d6963f7d28e17f72");
@@ -377,7 +394,7 @@ mod tests {
     #[test]
     fn reference_vectors_million_a() {
         let data = vec![b'a'; 1_000_000];
-        let h = hash_reader(Cursor::new(data), HeaderRule::None).unwrap();
+        let h = hash_reader(Cursor::new(data), HeaderRule::None, None).unwrap();
         assert_eq!(h.size, 1_000_000);
         assert_eq!(h.sha1, "34aa973cd4c4daa4f61eeb2bdbad27316534016f");
         assert_eq!(h.md5, "7707d6ae4e027c70eea2a935c2296f21");
@@ -388,33 +405,53 @@ mod tests {
         let mut data = b"NES\x1a".to_vec();
         data.extend(std::iter::repeat(0u8).take(12));
         data.extend_from_slice(b"abc");
-        let h = hash_reader(Cursor::new(data), HeaderRule::Ines).unwrap();
+        let h = hash_reader(Cursor::new(data), HeaderRule::Ines, None).unwrap();
         assert_eq!(h.size, 3);
         assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
     }
 
     #[test]
     fn ines_hashes_whole_file_when_absent() {
-        let h = hash_reader(Cursor::new(b"abc"), HeaderRule::Ines).unwrap();
+        let h = hash_reader(Cursor::new(b"abc"), HeaderRule::Ines, None).unwrap();
         assert_eq!(h.size, 3);
         assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
     }
 
     #[test]
-    fn smc_strips_512_when_size_matches() {
+    fn smc_strips_512_when_size_matches_no_hint() {
         let mut data = vec![0xffu8; 512];
         data.extend(vec![0u8; 1024]);
-        let h = hash_reader(Cursor::new(data), HeaderRule::Smc).unwrap();
+        let h = hash_reader(Cursor::new(data), HeaderRule::Smc, None).unwrap();
         assert_eq!(h.size, 1024);
-        let expect = hash_reader(Cursor::new(vec![0u8; 1024]), HeaderRule::None).unwrap();
+        let expect = hash_reader(Cursor::new(vec![0u8; 1024]), HeaderRule::None, None).unwrap();
         assert_eq!(h, expect);
     }
 
     #[test]
-    fn smc_hashes_whole_file_when_size_does_not_match() {
+    fn smc_hashes_whole_file_when_size_does_not_match_no_hint() {
         let data = vec![0u8; 1024];
-        let h = hash_reader(Cursor::new(data.clone()), HeaderRule::Smc).unwrap();
-        let expect = hash_reader(Cursor::new(data), HeaderRule::None).unwrap();
+        let h = hash_reader(Cursor::new(data.clone()), HeaderRule::Smc, None).unwrap();
+        let expect = hash_reader(Cursor::new(data), HeaderRule::None, None).unwrap();
+        assert_eq!(h, expect);
+    }
+
+    #[test]
+    fn smc_strips_512_when_size_hint_matches() {
+        let mut data = vec![0xffu8; 512];
+        data.extend(vec![0u8; 1024]);
+        let size = data.len() as u64;
+        let h = hash_reader(Cursor::new(data), HeaderRule::Smc, Some(size)).unwrap();
+        assert_eq!(h.size, 1024);
+        let expect = hash_reader(Cursor::new(vec![0u8; 1024]), HeaderRule::None, None).unwrap();
+        assert_eq!(h, expect);
+    }
+
+    #[test]
+    fn smc_hashes_whole_file_when_size_hint_does_not_match() {
+        let data = vec![0u8; 1024];
+        let size = data.len() as u64;
+        let h = hash_reader(Cursor::new(data.clone()), HeaderRule::Smc, Some(size)).unwrap();
+        let expect = hash_reader(Cursor::new(data), HeaderRule::None, None).unwrap();
         assert_eq!(h, expect);
     }
 
@@ -424,14 +461,14 @@ mod tests {
         data.extend_from_slice(b"ATARI7800");
         data.extend(vec![0u8; 128 - 10]);
         data.extend_from_slice(b"abc");
-        let h = hash_reader(Cursor::new(data), HeaderRule::A78).unwrap();
+        let h = hash_reader(Cursor::new(data), HeaderRule::A78, None).unwrap();
         assert_eq!(h.size, 3);
         assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
     }
 
     #[test]
     fn a78_hashes_whole_file_when_absent() {
-        let h = hash_reader(Cursor::new(b"abc"), HeaderRule::A78).unwrap();
+        let h = hash_reader(Cursor::new(b"abc"), HeaderRule::A78, None).unwrap();
         assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
     }
 
@@ -440,14 +477,14 @@ mod tests {
         let mut data = b"LYNX".to_vec();
         data.extend(vec![0u8; 60]);
         data.extend_from_slice(b"abc");
-        let h = hash_reader(Cursor::new(data), HeaderRule::Lnx).unwrap();
+        let h = hash_reader(Cursor::new(data), HeaderRule::Lnx, None).unwrap();
         assert_eq!(h.size, 3);
         assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
     }
 
     #[test]
     fn lnx_hashes_whole_file_when_absent() {
-        let h = hash_reader(Cursor::new(b"abc"), HeaderRule::Lnx).unwrap();
+        let h = hash_reader(Cursor::new(b"abc"), HeaderRule::Lnx, None).unwrap();
         assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
     }
 
@@ -468,9 +505,9 @@ mod tests {
             n64.extend_from_slice(&[chunk[3], chunk[2], chunk[1], chunk[0]]);
         }
 
-        let z = hash_reader(Cursor::new(z64), HeaderRule::N64).unwrap();
-        let v = hash_reader(Cursor::new(v64), HeaderRule::N64).unwrap();
-        let n = hash_reader(Cursor::new(n64), HeaderRule::N64).unwrap();
+        let z = hash_reader(Cursor::new(z64), HeaderRule::N64, None).unwrap();
+        let v = hash_reader(Cursor::new(v64), HeaderRule::N64, None).unwrap();
+        let n = hash_reader(Cursor::new(n64), HeaderRule::N64, None).unwrap();
         assert_eq!(z, v);
         assert_eq!(z, n);
     }
@@ -478,8 +515,8 @@ mod tests {
     #[test]
     fn n64_unrecognised_header_is_hashed_as_is() {
         let data = vec![0u8; 8];
-        let h = hash_reader(Cursor::new(data.clone()), HeaderRule::N64).unwrap();
-        let expect = hash_reader(Cursor::new(data), HeaderRule::None).unwrap();
+        let h = hash_reader(Cursor::new(data.clone()), HeaderRule::N64, None).unwrap();
+        let expect = hash_reader(Cursor::new(data), HeaderRule::None, None).unwrap();
         assert_eq!(h, expect);
     }
 
@@ -502,6 +539,116 @@ mod tests {
         assert_eq!(members[0].name, "rom.bin");
         assert_eq!(members[0].size, 3);
         assert_eq!(members[0].crc32, "352441c2");
+    }
+
+    // Hand-assembled: the `zip` crate's writer refuses a compression method
+    // it cannot encode, but listing must not decode anything to succeed.
+    // Buffers here are a few dozen bytes, so length casts never truncate.
+    #[allow(clippy::cast_possible_truncation)]
+    fn build_mixed_method_zip() -> Vec<u8> {
+        fn entry(
+            buf: &mut Vec<u8>,
+            offsets: &mut Vec<u32>,
+            name: &[u8],
+            method: u16,
+            data: &[u8],
+            crc32: u32,
+        ) {
+            offsets.push(buf.len() as u32);
+            buf.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
+            buf.extend_from_slice(&20u16.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&method.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&crc32.to_le_bytes());
+            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(name);
+            buf.extend_from_slice(data);
+        }
+
+        fn central(
+            buf: &mut Vec<u8>,
+            name: &[u8],
+            method: u16,
+            size: u32,
+            crc32: u32,
+            offset: u32,
+        ) {
+            buf.extend_from_slice(&0x0201_4b50u32.to_le_bytes());
+            buf.extend_from_slice(&20u16.to_le_bytes());
+            buf.extend_from_slice(&20u16.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&method.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&0u16.to_le_bytes());
+            buf.extend_from_slice(&crc32.to_le_bytes());
+            buf.extend_from_slice(&size.to_le_bytes());
+            buf.extend_from_slice(&size.to_le_bytes());
+            buf.extend_from_slice(&(name.len() as u16).to_le_bytes());
+            buf.extend_from_slice(&[0u8; 8]);
+            buf.extend_from_slice(&0u32.to_le_bytes());
+            buf.extend_from_slice(&offset.to_le_bytes());
+            buf.extend_from_slice(name);
+        }
+
+        let mut buf = Vec::new();
+        let mut offsets = Vec::new();
+        entry(
+            &mut buf,
+            &mut offsets,
+            b"stored.bin",
+            0,
+            b"abc",
+            0x3524_41c2,
+        );
+        entry(
+            &mut buf,
+            &mut offsets,
+            b"bzip2.bin",
+            12,
+            b"garbage",
+            0xdead_beef,
+        );
+
+        let cd_start = buf.len() as u32;
+        central(&mut buf, b"stored.bin", 0, 3, 0x3524_41c2, offsets[0]);
+        central(&mut buf, b"bzip2.bin", 12, 7, 0xdead_beef, offsets[1]);
+        let cd_size = buf.len() as u32 - cd_start;
+
+        buf.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        buf.extend_from_slice(&2u16.to_le_bytes());
+        buf.extend_from_slice(&cd_size.to_le_bytes());
+        buf.extend_from_slice(&cd_start.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf
+    }
+
+    #[test]
+    fn zip_members_lists_unsupported_method_without_decoding() {
+        let members = zip_members(Cursor::new(build_mixed_method_zip())).unwrap();
+        assert_eq!(members.len(), 2);
+        assert_eq!(members[0].name, "stored.bin");
+        assert_eq!(members[0].size, 3);
+        assert_eq!(members[1].name, "bzip2.bin");
+        assert_eq!(members[1].size, 7);
+        assert_eq!(members[1].crc32, "deadbeef");
+    }
+
+    #[test]
+    fn hash_zip_member_still_fails_to_decompress_unsupported_method() {
+        let err = hash_zip_member(
+            Cursor::new(build_mixed_method_zip()),
+            "bzip2.bin",
+            HeaderRule::None,
+        );
+        assert!(err.is_err());
     }
 
     #[test]

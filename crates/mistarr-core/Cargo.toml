@@ -13,7 +13,7 @@ serde.workspace = true
 crc32fast = "1"
 md-5 = "0.10"
 sha1 = "0.10"
-zip = { version = "4", default-features = false, features = ["deflate"] }
+zip = { version = "4", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 
 [dev-dependencies]
 criterion = { version = "0.7", default-features = false, features = ["cargo_bench_support"] }
