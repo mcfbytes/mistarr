@@ -17,10 +17,14 @@ pub mod fake;
 mod http;
 mod metainfo;
 mod path_map;
+pub mod rtorrent;
+mod scgi;
 pub mod transmission;
+pub mod xmlrpc;
 
 pub use error::ClientError;
 pub use path_map::{PathMapping, RemotePathMap};
+pub use rtorrent::Rtorrent;
 pub use transmission::Transmission;
 
 /// Result type of every client operation.

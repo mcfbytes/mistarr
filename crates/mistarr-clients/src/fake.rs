@@ -1,4 +1,4 @@
-//! In-process HTTP server that records requests and replays scripted responses.
+//! In-process HTTP and SCGI servers that record requests and replay scripted responses.
 
 use std::collections::VecDeque;
 use std::io;
@@ -9,6 +9,10 @@ use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+
+mod scgi;
+
+pub use scgi::{FakeScgiServer, ScgiReply, ScgiRequest};
 
 const MAX_HEAD: usize = 64 * 1024;
 
@@ -299,7 +303,7 @@ impl Drop for FakeServer {
     }
 }
 
-fn lock(state: &Mutex<State>) -> MutexGuard<'_, State> {
+fn lock<T>(state: &Mutex<T>) -> MutexGuard<'_, T> {
     state.lock().unwrap_or_else(PoisonError::into_inner)
 }
 

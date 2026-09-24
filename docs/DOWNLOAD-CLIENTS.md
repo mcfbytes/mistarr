@@ -27,6 +27,7 @@ At startup, and again when the user presses "re-detect":
 directory.default.set = /media/fat/mistarr/staging
 session.path.set = /media/fat/mistarr/rtorrent-session
 network.scgi.open_local = /media/fat/mistarr/rtorrent.sock
+network.xmlrpc.size_limit.set = 8M
 dht.mode.set = auto
 protocol.pex.set = yes
 throttle.global_down.max_rate.set_kb = 0
@@ -66,21 +67,37 @@ error state; tracker warnings and errors do not.
 
 ## rtorrent
 
-XML-RPC over SCGI. Implement the SCGI framing by hand; it is a netstring
-header plus body. Use the `xmlrpc` crate for encoding. rtorrent's XML-RPC size
-limit is configurable and defaults small; set `network.xmlrpc.size_limit.set`
-in the generated rc and, when talking to a user's rtorrent, batch file
-commands with `system.multicall` in chunks of 500.
+XML-RPC over SCGI. The SCGI framing is implemented by hand: a netstring
+header of `CONTENT_LENGTH` (first) and `SCGI=1`, then the body; the reply's
+CGI-style headers are stripped. XML-RPC is a small encoder and decoder on
+quick-xml, since the `xmlrpc` crate pulls in a blocking HTTP client.
+rtorrent's XML-RPC size limit is configurable and defaults small; the
+generated rc raises it with `network.xmlrpc.size_limit.set`, and file
+commands are always batched with `system.multicall` in chunks of 500 so a
+user's own rtorrent accepts them too.
+
+Every command after `load.*` takes the uppercase hex infohash as its target,
+and file commands take `<HASH>:f<index>`. `load.*` does not return the hash,
+so mistarr computes it: SHA-1 of the metainfo's `info` dictionary, or the
+`xt=urn:btih:` value (hex or base32) of a magnet. rtorrent answers an unknown
+hash with a fault naming the info-hash, which maps to "not found".
 
 | Operation | commands |
 |---|---|
-| add | `load.raw` (bytes) or `load.start`-less `load.normal` for magnets, with `d.directory.set` and `d.priority.set`; then for every file `f.priority.set` 0 (off) or 1 (normal); then `d.check_hash` is not needed. |
-| set_wanted | `f.priority.set` per index, `d.update_priorities` |
+| add | `d.hash` to see whether rtorrent already has it. If not, `load.raw` (`""`, base64 bytes) or `load.normal` (`""`, magnet), both of which leave the torrent stopped, then `d.directory.set`. The file count comes from the metainfo on a fresh add, else from `d.is_meta` and `d.size_files`; a magnet still fetching metadata gets no selection. Then `f.priority.set` 0 (off) or 1 (normal) for every file and `d.update_priorities`. An existing torrent skips the load and directory and gets the selection and seed policy, so a retried add repairs a half-applied one. |
+| set_wanted | `d.is_meta` and `d.size_files`, then `f.priority.set` for every index and `d.update_priorities` |
 | start / stop | `d.start` / `d.stop` |
-| status | `d.multicall2` for `d.hash, d.name, d.state, d.complete, d.bytes_done, d.size_bytes, d.ratio, d.message`; `f.multicall` for `f.path, f.size_bytes, f.completed_chunks, f.size_chunks, f.priority` |
-| remove | `d.erase`, and delete data ourselves if requested, since rtorrent does not |
-| rate limits | `throttle.global_down.max_rate.set_kb`, `throttle.global_up.max_rate.set_kb` |
-| seed policy | rtorrent has no per-torrent ratio; use `d.stop` when `d.ratio` passes the policy, evaluated on each poll. `set_seed_policy` replaces the policy the poll evaluates. |
+| status | One `system.multicall` on the hash: `d.state, d.is_active, d.complete, d.is_hash_checking, d.ratio, d.down.rate, d.up.rate, d.message, d.is_meta`, and `f.multicall` for `f.size_bytes, f.completed_chunks, f.size_chunks, f.priority`. `d.multicall2` is not used because it lists every torrent in a view on each call. |
+| remove | With data: `d.directory`, `d.is_multi_file` and `f.multicall` `f.path` first. Then `d.erase`, and delete the listed files ourselves, since rtorrent does not, through the remote path map; a multi-file torrent's emptied directories go too. |
+| rate limits | `throttle.global_down.max_rate.set_kb`, `throttle.global_up.max_rate.set_kb` with `""` and KiB/s; no limit sends 0 |
+| seed policy | rtorrent has no per-torrent ratio. The client keeps each torrent's policy in memory and `status` sends `d.stop` when a seeding torrent's `d.ratio` (thousandths) reaches it; "none" stops as soon as it seeds, "client default" never. `set_seed_policy` checks the torrent with `d.hash` and replaces the policy. The poller re-applies policies after a restart. |
+
+Per-file progress is `f.size_bytes` prorated by `f.completed_chunks` over
+`f.size_chunks`, so a file reads complete only when all its chunks are.
+A file is wanted when `f.priority` is above 0. Status mapping: hashing is
+checking; an inactive torrent with a `d.message` not starting `Tracker:` is
+the error state; otherwise `d.state = 0` or inactive is stopped, every wanted
+file complete (or `d.complete`) is seeding, anything else is downloading.
 
 The add sequence for a selective download must be: load paused, set every
 priority, then start. Loading started grabs the first pieces of every file
