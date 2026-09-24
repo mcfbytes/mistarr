@@ -154,9 +154,14 @@ and `/platforms` counts only them.
 `/titles/{id}` takes any title of the group and answers `{ parent_id,
 platform_id, base_name, pick_variant_id, art, variants }`. Each variant is `{
 id, name, regions, languages, revision, flags, is_1g1r_pick, wanted, retired,
-inferred, dat_version_id, torrent_files_available, source, roms }`, live
-variants first, and each rom is `{ id, name, size, crc32, md5, sha1, status,
-file_id, file_state, file_path }` for its best file, verified first. `source`
+inferred, dat_version_id, torrent_files_available, availability, source,
+roms }`, live variants first, and each rom is `{ id, name, size, crc32, md5, sha1, status,
+file_id, file_state, file_path }` for its best file, verified first.
+`availability` lists the files of bound sources that may hold a live rom of
+the variant, strongest first, as `{ source_id, source_name, file_index, path,
+rom_id, confidence }`, where `confidence` is `name`, `base`, `fuzzy` or
+`size` (VERIFICATION.md "Pre-download matching"), and
+`torrent_files_available` counts its distinct files. `source`
 is `dat` or `mra`. An MRA variant adds `mra: { setname, rbf, path,
 missing_zips, md5_check, md5_detail }`, where `missing_zips` are paths
 relative to `games/` and `md5_check` is `match`, `mismatch`, `missing_part`,
@@ -208,7 +213,8 @@ answers 204 and recomputes the platform's picks.
 
 `/sources` items: `{ id, infohash, display_name, origin_file, platform_id,
 bind_score, state, reason, seed_policy, file_count, matched_count,
-total_size, client_id, added_at, suggested_platform_id }`. `reason` says why
+total_size, client_id, added_at, suggested_platform_id }`. `matched_count`
+counts files matched to a rom or holding a candidate rom. `reason` says why
 a source is `resolving` or `unbound` and is otherwise `null`; `client_id` is
 set once the torrent is in the client. `suggested_platform_id` is the
 platform the torrent's names point at, found without any DAT
@@ -239,7 +245,8 @@ importing is a 400; its other downloads are kept with `source_id` `null`.
 
 `/sources/{id}/files` items: `{ file_index, path, size, rom_id, rom_name,
 title_id, confidence }`, where `path` is inside the torrent and `confidence`
-is `"name"`, `"size"` or `null` when no rom matched.
+is `"name"`, `"base"` or `null` when no name tier matched; fuzzy and
+size-only candidates show on the title instead.
 
 ## Incoming files
 

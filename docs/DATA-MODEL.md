@@ -91,6 +91,7 @@ CREATE INDEX roms_md5  ON roms(md5);
 CREATE INDEX roms_crc  ON roms(crc32, size);
 CREATE INDEX roms_match_name ON roms(match_name);
 CREATE INDEX roms_match_base ON roms(match_base, size);
+CREATE INDEX roms_size ON roms(size);
 
 CREATE TABLE files (                    -- what is on disk under games/
   id            INTEGER PRIMARY KEY,
@@ -131,11 +132,22 @@ CREATE TABLE torrent_files (
   file_index    INTEGER NOT NULL,
   path          TEXT NOT NULL,         -- inside the torrent, without the torrent's name
   size          INTEGER NOT NULL,
-  rom_id        INTEGER REFERENCES roms(id),   -- best pre-download match, may be NULL
-  confidence    TEXT,                  -- 'name' | 'size', NULL when unmatched
+  rom_id        INTEGER REFERENCES roms(id),   -- best name or base-name match, may be NULL
+  confidence    TEXT,                  -- 'name' | 'base', NULL when unmatched
   PRIMARY KEY (source_id, file_index)
 );
 CREATE INDEX torrent_files_rom ON torrent_files(rom_id);
+
+CREATE TABLE torrent_candidates (       -- further roms a file may be; one file, many roms
+  source_id     INTEGER NOT NULL,
+  file_index    INTEGER NOT NULL,
+  rom_id        INTEGER NOT NULL REFERENCES roms(id),
+  confidence    TEXT NOT NULL,         -- 'name' | 'base' | 'fuzzy' | 'size'
+  PRIMARY KEY (source_id, file_index, rom_id),
+  FOREIGN KEY (source_id, file_index)
+    REFERENCES torrent_files(source_id, file_index) ON DELETE CASCADE
+) WITHOUT ROWID;
+CREATE INDEX torrent_candidates_rom ON torrent_candidates(rom_id);
 
 CREATE TABLE downloads (
   id            INTEGER PRIMARY KEY,
@@ -176,6 +188,15 @@ CREATE TABLE jobs (
 );
 ```
 
+`torrent_files.rom_id` holds one rom, but one file can be a candidate for
+several: a short name such as `nova.nes` fits two versions of the same size.
+Those further roms, from every mapping tier, live in `torrent_candidates`,
+never repeating the pair `torrent_files` holds (VERIFICATION.md
+"Pre-download matching"). A file is available for a rom when either table
+pairs them, its source is `bound`, and no `bad` download of that rom used the
+file; choosing a file for a download, the title's availability and a
+source's `matched_count` read the union of both tables.
+
 ## State machines
 
 ### downloads.state
@@ -205,6 +226,11 @@ cancelled   (from wanted, queued, transferring or checking)
   torrent once no download of its source is queued, transferring or checking
   and every file selected in the client is complete; the client never stops
   it on its own.
+- `bad` also ends a cartridge download whose file hashed to another live,
+  non-BIOS version in the wanted entry's clone group: the file is placed and
+  verified as that version, the error reads "The file in this source is a
+  different version: <name>.", and the file stops being offered for the
+  wanted rom.
 - `done`, `bad`, `failed`, `cancelled`: terminal. `failed` may be retried,
   which returns it to `queued` on the same torrent_file; `bad` never retries
   the same torrent_file. Cancelling a `transferring` or `checking` row

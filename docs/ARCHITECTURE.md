@@ -215,7 +215,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    retried every 15 s.
 3. For each file in the torrent, normalise the leaf name and look it up
    against every loaded DAT by name, then by base name plus size. Compute
-   per-platform hit rates.
+   per-platform hit rates. The fuzzy and size-only tiers of
+   VERIFICATION.md "Pre-download matching" do not count toward the rate.
 4. Bind the source to the platform with the best rate at or above
    `sources.bind_threshold` (default 0.6). Below that, the source is
    `unbound` and the user picks a platform or discards it.
@@ -232,17 +233,23 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    automatically, and `source.changed` is sent only for sources whose state
    or platform changed.
 5. Store the file list in `torrent_files` with the matched `rom_id` and its
-   confidence where one exists. Move the file to `sources/loaded/` and emit
-   `source.changed`. A `.torrent` is not told to the client until something
-   is wanted.
+   confidence where one exists, and the further candidate roms of every tier
+   in `torrent_candidates` (VERIFICATION.md "Pre-download matching"). Move
+   the file to `sources/loaded/` and emit `source.changed`. A `.torrent` is
+   not told to the client until something is wanted. When a DAT loads titles
+   for a platform, every source bound to it is mapped again, with the rebind
+   of step 4.
 
 ### Wanted and transfer
 
 1. The user marks a title as wanted. mistarr creates a download for each of
    its roms without a verified file, choosing the best `torrent_file` for it
-   across bound sources: an exact size match first, then a name match, then
-   the source with fewer open downloads. With no such file the download is
-   `wanted` until a source binds that has one.
+   across bound sources, from its `torrent_files` matches and its
+   `torrent_candidates` alike: an exact size match first, then the stronger
+   confidence (`name`, `base`, `fuzzy`, `size`), then the source with fewer
+   open downloads. A file a `bad` download of the rom used is never chosen.
+   With no such file the download is `wanted` until a source binds that has
+   one. Two wanted versions may share one file.
 2. A light `transfer` job takes `queued` downloads per source. If the torrent
    is not yet in the client, create `staging/<infohash>/` (rtorrent makes only
    the last level of a download path) and add the torrent paused to it, through
@@ -275,7 +282,14 @@ does nothing.
    staged zip, and match it against the roms of the download's own entry, so
    byte-identical regional variants and identical disc tracks resolve to the
    wanted rom. Only when nothing of the entry matches is the rest of the DAT
-   searched, and the file is a mismatch either way: the download becomes
+   searched. A cartridge file that is a live rom of another live, non-BIOS
+   entry in the wanted entry's clone group is placed and verified as that
+   version, through steps 3 to 5 for it; the wanted download becomes `bad`
+   with "The file in this source is a different version: <name>.", and the
+   pair of that file and the wanted rom is dropped from `torrent_files` and
+   `torrent_candidates`. When another download of the same file placed it
+   first, the wanted download ends the same way. Any other file is a
+   mismatch: the download becomes
    `bad` and the file moves to `staging/quarantine/<infohash>/` beside a
    `<name>.report.txt` naming the expected rom, the actual hashes and the
    other entry it matches, if any. An entry flagged `bios` is refused: the
@@ -304,7 +318,8 @@ does nothing.
    of a zip placed whole, as `a.zip#member`), which marks the title `have`,
    log the action in `import_log`, set the downloads `done` and emit
    `import.done`.
-6. Once a source has a `done` download and none queued, transferring,
+6. Once a source has a download that placed its file (`done`, or `bad`
+   after placing another version) and none queued, transferring,
    checking or importing, and its seed policy is `none`, remove the torrent
    from the client without deleting data, clear `sources.client_id` and
    remove the empty directories under `staging/<infohash>/`.

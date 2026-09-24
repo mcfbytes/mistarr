@@ -103,12 +103,49 @@ and note the alternates in the file's detail.
 
 ## Pre-download matching
 
-Torrent file lists carry names and sizes only. Match a torrent file to a rom
-by: exact name match, then name match after `naming::normalize_for_match`
-(NFKC, lowercase, each of ``&*/:`<>?\|"`` replaced by `_`, whitespace runs
-collapsed), then base_name plus size. Record the confidence. Post-download hashing is authoritative and can reassign the
-file to a different rom; when that happens the UI shows the original
-expectation and the actual match.
+Torrent file lists carry names and sizes only, so a match only decides which
+file to offer for a rom; the hashes after the transfer decide what the file
+is. Once a source is bound to a platform, each file's leaf name is matched
+against that platform's live, non-BIOS roms in tiers, and the confidence of
+the tier is recorded:
+
+| Tier | Rule | Confidence |
+|---|---|---|
+| 1 | Exact name, or name after `naming::normalize_for_match` (NFKC, lowercase, each of ``&*/:`<>?\|"`` replaced by `_`, whitespace runs collapsed) | `name` |
+| 2 | Base name (before the first parenthesised tag) plus size | `base` |
+| 3 | Fuzzy: size plus a name signal, for files tiers 1 and 2 left unmatched | `fuzzy` |
+| 4 | Size only, under the narrow rule below | `size` |
+
+Tiers 1 and 2 store their first rom in `torrent_files` and every further rom
+the same tier found for the file in `torrent_candidates`. Tiers 3 and 4 run
+only on files whose extension the platform loads (PLATFORMS.md), plus `zip`
+for a cartridge platform; `7z` is never considered, since the importer cannot
+read it. They write `torrent_candidates` only.
+
+- **Size.** A candidate rom's size equals the file's, or the file's less the
+  header the platform's hashing skips (16 bytes for iNES, 64 for Lynx, 128
+  for Atari 7800, 512 for an SMC copier header). Roms are looked up by size
+  through the `roms_size` index, one query per distinct file size.
+- **Name signal.** Both names are split into lowercase runs of letters and
+  digits; tokens made only of digits, and the version tags `vN`, `rev`, `ver`
+  and `version`, are dropped. The file stem's tokens and the rom's
+  `match_base` tokens give a signal when one set is a non-empty subset of the
+  other (a prefix is one), or when both spell the same letters run together:
+  `nova` and `novathesquirrel` both signal with "nova the squirrel", and
+  `example_quest_v2` with "example quest". A stem of fillers alone never
+  signals.
+- **Fuzzy.** A file names every rom of its size with a signal, unless more
+  than 8 do; such a name is ambiguous and gets none.
+- **Size only.** When tier 3 finds nothing for a file, it names every rom of
+  its size, provided there are 1 to 4 such roms and the file is the only
+  file of the torrent with a considered extension that tiers 1 and 2 left
+  unmatched. A set torrent never meets this.
+
+A pair a `bad` download already ruled out is not stored again. The mapping is
+recomputed when the source binds or is rebound, and for every source bound to
+a platform when a DAT loads titles for that platform; unbinding or removing a
+source drops its candidates. Post-download hashing is authoritative; see
+ARCHITECTURE.md "Import" for a file that turns out to be another version.
 
 ## Trust
 

@@ -90,7 +90,7 @@ against another and the numbers include everything the real daemon runs.
 | Test | Input | Asserts |
 |---|---|---|
 | `arcade_catalogue_stays_under_budget` | `_Arcade` with 1 000 MRAs of 24 parts, 50 under `_alternatives`, 5 hard links, every tenth MRA in mixed tag case, one MRA repeating a 32 MiB part four times, and an `_Organized` tree of 1 000 folders holding 15 000 symlinks to them; a zip per MRA | every MRA stored and its md5 matched, each distinct MRA read once, and an unchanged rerun reads and checks none |
-| `dat_and_torrent_import_stay_under_budget` | a 50 MB Logiqx DAT of about 200 000 games, then a torrent of 50 000 files named after them | every game stored, every torrent file stored and matched |
+| `dat_and_torrent_import_stay_under_budget` | a 50 MB Logiqx DAT of about 200 000 games, then a torrent of 50 000 files named after them, every tenth only loosely (`example_game_<n>.nes`) so the fuzzy tier reads thousands of roms per size | every game stored, every torrent file stored, the rest matched by name, and no candidate for the ambiguous loose names |
 | `scan_stays_under_budget` | 16 000 loose and 2 000 zipped GBA files and 1 000 PSX folders of a cue and a bin | a `files` row per file and zip member |
 | `a_tiny_memory_limit_is_raised_to_the_floor` | `[memory] data_limit_mib = 2` | the process runs with the 64 MiB floor, or a lower inherited limit |
 
