@@ -7,6 +7,7 @@ import type {
   Paged,
   Platform,
   Settings,
+  SettingsPatch,
   Source,
   SourceFile,
   SseEvent,
@@ -91,22 +92,33 @@ function query(params: Record<string, string | number | boolean | undefined>): s
   return s ? `?${s}` : '';
 }
 
+export interface Uploaded {
+  file: string;
+  job_id: number;
+}
+
+export interface Binding {
+  dat_version_id: number;
+  platform_id: string;
+  job_id: number;
+}
+
 export const api = {
   status: (): Promise<SystemStatus> => request('/system/status'),
   wizard: (): Promise<WizardStatus> => request('/system/wizard'),
-  scan: (platformId?: string): Promise<void> =>
+  scan: (platformId?: string): Promise<{ job_id: number }> =>
     request('/system/scan', { method: 'POST', body: JSON.stringify({ platform_id: platformId }) }),
-  pause: (): Promise<void> => request('/system/pause', { method: 'POST' }),
-  resume: (): Promise<void> => request('/system/resume', { method: 'POST' }),
+  pause: (): Promise<SystemStatus> => request('/system/pause', { method: 'POST' }),
+  resume: (): Promise<SystemStatus> => request('/system/resume', { method: 'POST' }),
   jobs: (): Promise<Paged<Job>> => request('/system/jobs'),
   settings: (): Promise<Settings> => request('/system/settings'),
-  putSettings: (settings: Settings): Promise<Settings> =>
-    request('/system/settings', { method: 'PUT', body: JSON.stringify(settings) }),
+  putSettings: (patch: SettingsPatch): Promise<Settings> =>
+    request('/system/settings', { method: 'PUT', body: JSON.stringify(patch) }),
 
   platforms: (): Promise<Paged<Platform>> => request('/platforms'),
   setPlatform: (id: string, enabled: boolean): Promise<Platform> =>
     request(`/platforms/${id}`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
-  bindPlatformDat: (id: string, datVersionId: number): Promise<void> =>
+  bindPlatformDat: (id: string, datVersionId: number): Promise<Binding> =>
     request(`/platforms/${id}/dat`, { method: 'POST', body: JSON.stringify({ dat_version_id: datVersionId }) }),
 
   titles: (
@@ -118,14 +130,14 @@ export const api = {
   ): Promise<Paged<TitleGroup>> =>
     request(`/platforms/${platformId}/titles${query({ ...filters, limit, offset })}`, { signal }),
   title: (id: number, signal?: AbortSignal): Promise<TitleDetail> => request(`/titles/${id}`, { signal }),
-  want: (id: number, variantId?: number): Promise<void> =>
+  want: (id: number, variantId?: number): Promise<TitleDetail> =>
     request(`/titles/${id}/want`, { method: 'POST', body: JSON.stringify({ variant_id: variantId }) }),
-  unwant: (id: number): Promise<void> => request(`/titles/${id}/want`, { method: 'DELETE' }),
-  rename: (id: number, fileId: number): Promise<void> =>
+  unwant: (id: number): Promise<TitleDetail> => request(`/titles/${id}/want`, { method: 'DELETE' }),
+  rename: (id: number, fileId: number): Promise<TitleDetail> =>
     request(`/titles/${id}/rename`, { method: 'POST', body: JSON.stringify({ file_id: fileId }) }),
 
   dats: (): Promise<Paged<DatVersion>> => request('/dats'),
-  uploadDat: (file: File): Promise<DatVersion> => {
+  uploadDat: (file: File): Promise<Uploaded> => {
     const form = new FormData();
     form.append('file', file);
     return request('/dats/upload', { method: 'POST', body: form });
@@ -133,24 +145,24 @@ export const api = {
   deleteDat: (id: number): Promise<void> => request(`/dats/${id}`, { method: 'DELETE' }),
 
   sources: (): Promise<Paged<Source>> => request('/sources'),
-  uploadSource: (file: File): Promise<Source> => {
+  uploadSource: (file: File): Promise<Uploaded> => {
     const form = new FormData();
     form.append('file', file);
     return request('/sources/upload', { method: 'POST', body: form });
   },
-  addMagnet: (magnet: string): Promise<Source> =>
+  addMagnet: (magnet: string): Promise<Uploaded> =>
     request('/sources/upload', { method: 'POST', body: JSON.stringify({ magnet }) }),
   updateSource: (
     id: number,
-    patch: { platform_id?: string; seed_policy?: string; state?: string }
+    patch: { platform_id?: string | null; seed_policy?: string; state?: string }
   ): Promise<Source> => request(`/sources/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteSource: (id: number): Promise<void> => request(`/sources/${id}`, { method: 'DELETE' }),
   sourceFiles: (id: number): Promise<Paged<SourceFile>> => request(`/sources/${id}/files`),
 
   downloads: (state?: DownloadState): Promise<Paged<Download>> =>
     request(`/downloads${query({ state })}`),
-  retryDownload: (id: number): Promise<void> => request(`/downloads/${id}/retry`, { method: 'POST' }),
-  cancelDownload: (id: number): Promise<void> => request(`/downloads/${id}`, { method: 'DELETE' }),
+  retryDownload: (id: number): Promise<Download> => request(`/downloads/${id}/retry`, { method: 'POST' }),
+  cancelDownload: (id: number): Promise<Download> => request(`/downloads/${id}`, { method: 'DELETE' }),
   imports: (): Promise<Paged<ImportLogEntry>> => request('/imports')
 };
 
@@ -219,6 +231,7 @@ export class EventSubscriber {
     let buffer = '';
     let eventName = '';
     let dataLines: string[] = [];
+    let id: string | null = null;
 
     while (true) {
       const { done, value } = await reader.read();
@@ -234,8 +247,12 @@ export class EventSubscriber {
           if (dataLines.length > 0 && eventName) {
             this.dispatch(eventName, dataLines.join('\n'));
           }
+          if (id !== null) {
+            this.lastEventId = id;
+          }
           eventName = '';
           dataLines = [];
+          id = null;
           continue;
         }
         if (line.startsWith('event:')) {
@@ -243,7 +260,8 @@ export class EventSubscriber {
         } else if (line.startsWith('data:')) {
           dataLines.push(line.slice(5).trim());
         } else if (line.startsWith('id:')) {
-          this.lastEventId = line.slice(3).trim();
+          // Ids are opaque `<epoch>-<seq>` strings; only `resync` and `status` omit one.
+          id = line.slice(3).trim();
         }
       }
     }

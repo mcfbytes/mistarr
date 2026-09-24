@@ -1,6 +1,6 @@
 import { api } from '../api';
 import { fixtureTitle, fixtureTitles } from '../fixtures';
-import type { TitleDetail, TitleFilters, TitleGroup } from '../types';
+import type { FileState, TitleDetail, TitleFilters, TitleGroup } from '../types';
 
 const isMock = import.meta.env.VITE_MOCK === '1';
 const PAGE_SIZE = 60;
@@ -8,7 +8,10 @@ const PAGE_SIZE = 60;
 let groups = $state<TitleGroup[]>([]);
 let groupsTotal = $state(0);
 let groupsPlatform = $state<string | null>(null);
+let lastFilters: TitleFilters = {};
+let lastPage = 0;
 let detail = $state<TitleDetail | null>(null);
+let detailId: number | null = null;
 let groupsController: AbortController | null = null;
 let detailToken = 0;
 
@@ -32,6 +35,8 @@ export async function loadTitlesPage(
   groupsController?.abort();
   const controller = new AbortController();
   groupsController = controller;
+  lastFilters = filters;
+  lastPage = page;
 
   if (groupsPlatform !== platformId && page === 0) {
     groups = [];
@@ -59,8 +64,49 @@ export async function loadTitlesPage(
   }
 }
 
+export async function reloadTitles(): Promise<void> {
+  // Snapshot before reloading: page 0 would otherwise reset lastPage first.
+  const platform = groupsPlatform;
+  const filters = lastFilters;
+  const pages = lastPage;
+  if (platform) {
+    for (let p = 0; p <= pages; p += 1) {
+      await loadTitlesPage(platform, filters, p);
+    }
+  }
+  await refreshDetail();
+}
+
+// Re-fetches the open title without clearing it first, so the page only
+// swaps once the new detail arrives instead of flashing blank.
+async function refreshDetail(): Promise<void> {
+  if (detailId === null) {
+    return;
+  }
+  const id = detailId;
+  const token = detailToken;
+  const next = isMock ? fixtureTitle(id) : await api.title(id);
+  if (token === detailToken && detailId === id) {
+    detail = next;
+  }
+}
+
+export function applyFileChanged(fileId: number, state: FileState): void {
+  if (!detail) {
+    return;
+  }
+  detail = {
+    ...detail,
+    variants: detail.variants.map((v) => ({
+      ...v,
+      roms: v.roms.map((r) => (r.file_id === fileId ? { ...r, file_state: state } : r))
+    }))
+  };
+}
+
 export async function loadTitleDetail(id: number): Promise<void> {
   const token = ++detailToken;
+  detailId = id;
   detail = null;
   const next = isMock ? fixtureTitle(id) : await api.title(id);
   if (token === detailToken) {
@@ -70,6 +116,7 @@ export async function loadTitleDetail(id: number): Promise<void> {
 
 export function clearDetail(): void {
   detail = null;
+  detailId = null;
   detailToken += 1;
 }
 
@@ -77,12 +124,6 @@ export function patchGroup(parentId: number, patch: Partial<TitleGroup>): void {
   groups = groups.map((g) => (g.parent_id === parentId ? { ...g, ...patch } : g));
 }
 
-export function setVariantWanted(variantId: number, wanted: boolean): void {
-  if (!detail) {
-    return;
-  }
-  detail = {
-    ...detail,
-    variants: detail.variants.map((v) => (v.id === variantId ? { ...v, wanted } : v))
-  };
+export function setDetail(next: TitleDetail): void {
+  detail = next;
 }

@@ -1,8 +1,9 @@
 <script lang="ts">
   import './app.css';
   import { getRoute, navigate } from './lib/router.svelte';
-  import { getWizard, isConnected, loadWizard } from './lib/stores/status.svelte';
+  import { getWizard, isConnected, isUnauthorized, loadWizard, setUnauthorized } from './lib/stores/status.svelte';
   import { startEvents } from './lib/stores/events';
+  import { ApiError, setApiKey } from './lib/api';
   import Nav from './lib/Nav.svelte';
   import Toasts from './lib/Toasts.svelte';
   import Wizard from './routes/Wizard.svelte';
@@ -13,48 +14,85 @@
   import Sources from './routes/Sources.svelte';
   import System from './routes/System.svelte';
 
-  startEvents();
+  const isMock = import.meta.env.VITE_MOCK === '1';
+  let apiKeyInput = $state('');
+  let wizardRetryMs = 1000;
 
+  // Keeps retrying with backoff on any failure but 401, so a slow-starting
+  // server still gets the SSE stream and eventually the wizard redirect.
   async function checkFirstRun(): Promise<void> {
-    await loadWizard();
+    try {
+      await loadWizard();
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setUnauthorized(true);
+        return;
+      }
+      setTimeout(() => void checkFirstRun(), wizardRetryMs);
+      wizardRetryMs = Math.min(wizardRetryMs * 2, 30000);
+      return;
+    }
+    wizardRetryMs = 1000;
+    setUnauthorized(false);
     const wizard = getWizard();
-    if (wizard && !wizard.steps.paths && getRoute().name !== 'wizard') {
+    if (wizard && (!wizard.paths || wizard.open_on_start) && getRoute().name !== 'wizard') {
       navigate('/wizard');
     }
   }
 
-  void checkFirstRun();
+  startEvents();
+  if (!isMock) {
+    void checkFirstRun();
+  }
+
+  function submitApiKey(): void {
+    setApiKey(apiKeyInput.trim() || null);
+    apiKeyInput = '';
+    void checkFirstRun();
+  }
 
   const route = $derived(getRoute());
   const connected = $derived(isConnected());
+  const unauthorized = $derived(isUnauthorized());
 </script>
 
-{#if route.name !== 'wizard'}
-  <Nav />
-{/if}
-
-{#if !connected && route.name !== 'wizard'}
-  <div class="banner">Disconnected from server. Reconnecting…</div>
-{/if}
-
-<Toasts />
-
-{#if route.name === 'wizard'}
-  <Wizard />
-{:else if route.name === 'platforms'}
-  <Platforms />
-{:else if route.name === 'browse'}
-  <Browse platformId={route.params.id ?? ''} />
-{:else if route.name === 'title'}
-  <TitleScreen titleId={Number(route.params.id ?? 0)} />
-{:else if route.name === 'activity'}
-  <Activity />
-{:else if route.name === 'sources'}
-  <Sources />
-{:else if route.name === 'system'}
-  <System />
+{#if unauthorized}
+  <div class="page">
+    <h1>API key required</h1>
+    <p class="muted">This server requires an API key. Enter it to continue.</p>
+    <form onsubmit={(e) => e.preventDefault()}>
+      <input type="password" placeholder="API key" bind:value={apiKeyInput} />
+      <button class="primary" onclick={submitApiKey}>Continue</button>
+    </form>
+  </div>
 {:else}
-  <div class="page">Not found.</div>
+  {#if route.name !== 'wizard'}
+    <Nav />
+  {/if}
+
+  {#if !connected && route.name !== 'wizard'}
+    <div class="banner">Disconnected from server. Reconnecting…</div>
+  {/if}
+
+  <Toasts />
+
+  {#if route.name === 'wizard'}
+    <Wizard />
+  {:else if route.name === 'platforms'}
+    <Platforms />
+  {:else if route.name === 'browse'}
+    <Browse platformId={route.params.id ?? ''} />
+  {:else if route.name === 'title'}
+    <TitleScreen titleId={Number(route.params.id ?? 0)} />
+  {:else if route.name === 'activity'}
+    <Activity />
+  {:else if route.name === 'sources'}
+    <Sources />
+  {:else if route.name === 'system'}
+    <System />
+  {:else}
+    <div class="page">Not found.</div>
+  {/if}
 {/if}
 
 <style>

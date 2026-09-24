@@ -1,6 +1,8 @@
 <script lang="ts">
-  import { clearDetail, getDetail, loadTitleDetail, setVariantWanted } from '../lib/stores/titles.svelte';
-  import { api } from '../lib/api';
+  import { clearDetail, getDetail, loadTitleDetail, setDetail } from '../lib/stores/titles.svelte';
+  import { api, errorMessage } from '../lib/api';
+  import { showToast } from '../lib/stores/toast.svelte';
+  import { fixtureTitle } from '../lib/fixtures';
 
   interface Props {
     titleId: number;
@@ -10,6 +12,7 @@
 
   const isMock = import.meta.env.VITE_MOCK === '1';
   let tab = $state<'boxart' | 'title' | 'snap'>('boxart');
+  let busy = $state(false);
 
   $effect(() => {
     clearDetail();
@@ -19,22 +22,51 @@
   const detail = $derived(getDetail());
 
   async function want(variantId: number): Promise<void> {
-    if (!isMock) {
-      await api.want(titleId, variantId);
+    busy = true;
+    try {
+      if (isMock) {
+        setDetail({
+          ...fixtureTitle(titleId),
+          variants: (detail?.variants ?? []).map((v) => (v.id === variantId ? { ...v, wanted: true } : v))
+        });
+      } else {
+        setDetail(await api.want(titleId, variantId));
+      }
+    } catch (err) {
+      showToast(errorMessage(err));
+    } finally {
+      busy = false;
     }
-    setVariantWanted(variantId, true);
   }
 
-  async function unwant(variantId: number): Promise<void> {
-    if (!isMock) {
-      await api.unwant(titleId);
+  async function unwant(): Promise<void> {
+    busy = true;
+    try {
+      if (isMock) {
+        setDetail({
+          ...fixtureTitle(titleId),
+          variants: (detail?.variants ?? []).map((v) => ({ ...v, wanted: false }))
+        });
+      } else {
+        setDetail(await api.unwant(titleId));
+      }
+    } catch (err) {
+      showToast(errorMessage(err));
+    } finally {
+      busy = false;
     }
-    setVariantWanted(variantId, false);
   }
 
   async function rename(fileId: number): Promise<void> {
-    if (!isMock) {
-      await api.rename(titleId, fileId);
+    busy = true;
+    try {
+      if (!isMock) {
+        setDetail(await api.rename(titleId, fileId));
+      }
+    } catch (err) {
+      showToast(errorMessage(err));
+    } finally {
+      busy = false;
     }
   }
 
@@ -47,14 +79,16 @@
   {#if detail}
     <h1>{detail.base_name}</h1>
 
-    <div class="art">
-      <div class="tabs">
-        <button class:primary={tab === 'boxart'} onclick={() => (tab = 'boxart')}>Boxart</button>
-        <button class:primary={tab === 'title'} onclick={() => (tab = 'title')}>Title</button>
-        <button class:primary={tab === 'snap'} onclick={() => (tab = 'snap')}>Snap</button>
+    {#if detail.art}
+      <div class="art">
+        <div class="tabs">
+          <button class:primary={tab === 'boxart'} onclick={() => (tab = 'boxart')}>Boxart</button>
+          <button class:primary={tab === 'title'} onclick={() => (tab = 'title')}>Title</button>
+          <button class:primary={tab === 'snap'} onclick={() => (tab = 'snap')}>Snap</button>
+        </div>
+        <img src={detail.art[tab]} alt="" onerror={onArtError} />
       </div>
-      <img src={detail.art[tab]} alt="" onerror={onArtError} />
-    </div>
+    {/if}
 
     <div class="table-wrap">
     <table>
@@ -71,7 +105,7 @@
       </thead>
       <tbody>
         {#each detail.variants as variant (variant.id)}
-          <tr>
+          <tr class:retired={variant.retired}>
             <td>{variant.name}{variant.is_1g1r_pick ? ' (pick)' : ''}</td>
             <td>{variant.regions.join(', ')}</td>
             <td>{variant.revision ?? '—'}</td>
@@ -83,14 +117,16 @@
             </td>
             <td>{variant.torrent_files_available} available</td>
             <td>
-              {#if variant.wanted}
-                <button onclick={() => unwant(variant.id)}>Unwant</button>
-              {:else}
-                <button class="primary" onclick={() => want(variant.id)}>Want</button>
+              {#if !variant.retired}
+                {#if variant.wanted}
+                  <button disabled={busy} onclick={unwant}>Unwant</button>
+                {:else}
+                  <button class="primary" disabled={busy} onclick={() => want(variant.id)}>Want</button>
+                {/if}
               {/if}
               {#each variant.roms as rom (rom.id)}
                 {#if rom.file_state === 'misnamed' && rom.file_id}
-                  <button onclick={() => rename(rom.file_id as number)}>Rename</button>
+                  <button disabled={busy} onclick={() => rename(rom.file_id as number)}>Rename</button>
                 {/if}
               {/each}
             </td>
@@ -134,5 +170,9 @@
     padding: 0.4em;
     border-bottom: 1px solid var(--border);
     vertical-align: top;
+  }
+
+  tr.retired {
+    opacity: 0.6;
   }
 </style>
