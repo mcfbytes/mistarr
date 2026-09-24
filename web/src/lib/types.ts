@@ -136,8 +136,22 @@ export interface TitleVariant {
   dat_version_id: number;
   roms: TitleRom[];
   torrent_files_available: number;
+  availability: TitleAvailability[];
   source?: 'dat' | 'mra';
   mra?: TitleMra;
+}
+
+/** How a torrent file was matched to a rom, strongest first. */
+export type MatchConfidence = 'name' | 'base' | 'fuzzy' | 'size';
+
+/** A file of a bound source that may hold a rom of the variant. */
+export interface TitleAvailability {
+  source_id: number;
+  source_name: string;
+  file_index: number;
+  path: string;
+  rom_id: number;
+  confidence: MatchConfidence;
 }
 
 export interface TitleMra {
@@ -210,7 +224,7 @@ export interface IncomingFile {
   modified: number;
 }
 
-export type SourceFileConfidence = 'name' | 'size' | null;
+export type SourceFileConfidence = 'name' | 'base' | null;
 
 export interface SourceFile {
   file_index: number;

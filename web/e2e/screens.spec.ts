@@ -128,3 +128,14 @@ test('an unbound source offers its suggested platform', async ({ page }) => {
   await page.goto('/#/sources');
   await expect(page.getByRole('button', { name: /^Bind to / })).toBeVisible();
 });
+
+test('the title lists each file that may hold a variant with its confidence', async ({ page }) => {
+  await page.goto('/#/t/1');
+  const pick = page.getByRole('row', { name: /\(USA\) \(pick\)/ });
+  await expect(pick.getByText('Sample Racer (USA).nes in Example Pack (name match)')).toBeVisible();
+  await expect(pick.getByText('example.nes in examplepack1.0 (name guess)')).toBeVisible();
+  const europe = page.getByRole('row', { name: /\(Europe\)/ });
+  await expect(europe.getByText('example.nes in examplepack1.0 (name guess)')).toBeVisible();
+  const bios = page.getByRole('row', { name: /\(BIOS\)/ });
+  await expect(bios.getByText('None available')).toBeVisible();
+});

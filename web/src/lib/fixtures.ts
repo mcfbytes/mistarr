@@ -150,6 +150,24 @@ export function fixtureTitle(id: number): TitleDetail {
         inferred: false,
         dat_version_id: 1,
         torrent_files_available: 2,
+        availability: [
+          {
+            source_id: 1,
+            source_name: 'Example Pack',
+            file_index: 0,
+            path: `NES/${base} (USA).nes`,
+            rom_id: id * 100,
+            confidence: 'name'
+          },
+          {
+            source_id: 2,
+            source_name: 'examplepack1.0',
+            file_index: 3,
+            path: 'example.nes',
+            rom_id: id * 100,
+            confidence: 'fuzzy'
+          }
+        ],
         roms: [
           {
             id: id * 100,
@@ -177,7 +195,17 @@ export function fixtureTitle(id: number): TitleDetail {
         retired: false,
         inferred: false,
         dat_version_id: 1,
-        torrent_files_available: 0,
+        torrent_files_available: 1,
+        availability: [
+          {
+            source_id: 2,
+            source_name: 'examplepack1.0',
+            file_index: 3,
+            path: 'example.nes',
+            rom_id: id * 100 + 1,
+            confidence: 'fuzzy'
+          }
+        ],
         roms: [
           {
             id: id * 100 + 1,
@@ -206,6 +234,7 @@ export function fixtureTitle(id: number): TitleDetail {
         inferred: false,
         dat_version_id: 1,
         torrent_files_available: 0,
+        availability: [],
         roms: [
           {
             id: id * 100 + 2,
