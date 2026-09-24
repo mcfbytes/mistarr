@@ -278,22 +278,140 @@ async fn add_large_torrent_fails_when_selection_did_not_apply() {
     assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
 }
 
+fn duplicate(byte: u8) -> FakeResponse {
+    FakeResponse::success(json!({
+        "torrent-duplicate": { "id": 7, "name": "test", "hashString": hash(byte).to_uppercase() }
+    }))
+}
+
 #[tokio::test]
-async fn add_duplicate_returns_existing_id_unchanged() {
+async fn add_duplicate_reapplies_selection_and_seed() {
     let (fake, client) = setup().await;
-    fake.push(FakeResponse::success(json!({
-        "torrent-duplicate": { "id": 7, "name": "test", "hashString": hash(0xa5).to_uppercase() }
-    })));
+    let meta = synthetic_metainfo(3);
+    fake.push(duplicate(0xa5));
+    fake.push(FakeResponse::success(json!({})));
+    fake.push(FakeResponse::success(json!({})));
     let got = client
         .add(
-            TorrentSource::Metainfo(synthetic_metainfo(2)),
+            TorrentSource::Metainfo(meta.clone()),
             Path::new("/staging/d"),
             &[0],
-            SeedPolicy::None,
+            SeedPolicy::Ratio { ratio: 2.0 },
         )
         .await
         .expect("add");
     assert_eq!(got, id(0xa5));
+    let h = hash(0xa5);
+    assert_eq!(
+        fake.bodies(),
+        vec![
+            rpc(
+                "torrent-add",
+                json!({
+                    "download-dir": "/staging/d",
+                    "paused": true,
+                    "metainfo": BASE64.encode(&meta),
+                    "files-unwanted": [1, 2],
+                })
+            ),
+            rpc(
+                "torrent-set",
+                json!({ "ids": [h], "files-wanted": [0], "files-unwanted": [1, 2] })
+            ),
+            rpc(
+                "torrent-set",
+                json!({ "ids": [h], "seedRatioMode": 1, "seedRatioLimit": 2.0 })
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn add_duplicate_magnet_reads_count_and_restores_client_policy() {
+    let (fake, client) = setup().await;
+    let magnet = format!("magnet:?xt=urn:btih:{}", hash(0xa8));
+    fake.push(duplicate(0xa8));
+    fake.push(wanted_reply(&[true, true]));
+    fake.push(FakeResponse::success(json!({})));
+    fake.push(FakeResponse::success(json!({})));
+    client
+        .add(
+            TorrentSource::Magnet(magnet),
+            Path::new("/staging/m"),
+            &[1],
+            SeedPolicy::Client,
+        )
+        .await
+        .expect("add");
+    let h = hash(0xa8);
+    let bodies = fake.bodies();
+    assert_eq!(bodies.len(), 4);
+    assert_eq!(
+        bodies[1],
+        rpc("torrent-get", json!({ "ids": [h], "fields": ["wanted"] }))
+    );
+    assert_eq!(
+        bodies[2],
+        rpc(
+            "torrent-set",
+            json!({ "ids": [h], "files-wanted": [1], "files-unwanted": [0] })
+        )
+    );
+    assert_eq!(
+        bodies[3],
+        rpc("torrent-set", json!({ "ids": [h], "seedRatioMode": 0 }))
+    );
+}
+
+#[tokio::test]
+async fn set_seed_policy_checks_existence_then_sets_ratio() {
+    let (fake, client) = setup().await;
+    fake.push(exists());
+    fake.push(FakeResponse::success(json!({})));
+    client
+        .set_seed_policy(&id(0xe1), SeedPolicy::None)
+        .await
+        .expect("seed");
+    let h = hash(0xe1);
+    assert_eq!(
+        fake.bodies(),
+        vec![
+            rpc("torrent-get", json!({ "ids": [h], "fields": ["id"] })),
+            rpc(
+                "torrent-set",
+                json!({ "ids": [h], "seedRatioMode": 1, "seedRatioLimit": 0.0 })
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn set_seed_policy_client_restores_session_default() {
+    let (fake, client) = setup().await;
+    fake.push(exists());
+    fake.push(FakeResponse::success(json!({})));
+    client
+        .set_seed_policy(&id(0xe2), SeedPolicy::Client)
+        .await
+        .expect("seed");
+    assert_eq!(
+        fake.bodies()[1],
+        rpc(
+            "torrent-set",
+            json!({ "ids": [hash(0xe2)], "seedRatioMode": 0 })
+        )
+    );
+}
+
+#[tokio::test]
+async fn set_seed_policy_unknown_torrent_is_not_found() {
+    let (fake, client) = setup().await;
+    fake.push(FakeResponse::success(json!({ "torrents": [] })));
+    let err = client
+        .set_seed_policy(&id(0xe3), SeedPolicy::Client)
+        .await
+        .expect_err("missing");
+    assert!(matches!(err, ClientError::NotFound), "{err:?}");
     assert_eq!(fake.requests().len(), 1);
 }
 

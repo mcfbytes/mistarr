@@ -267,13 +267,17 @@ impl Transmission {
         session: &mut Option<String>,
         id: &ClientTorrentId,
         seed: &SeedPolicy,
+        fresh: bool,
     ) -> Result<()> {
-        let limit = match seed {
-            SeedPolicy::Client => return Ok(()),
-            SeedPolicy::None => 0.0,
-            SeedPolicy::Ratio { ratio } => f64::from(*ratio),
+        let fields = match seed {
+            // A newly added torrent already follows the session default.
+            SeedPolicy::Client if fresh => return Ok(()),
+            SeedPolicy::Client => json!({ "seedRatioMode": 0 }),
+            SeedPolicy::None => json!({ "seedRatioMode": 1, "seedRatioLimit": 0.0 }),
+            SeedPolicy::Ratio { ratio } => {
+                json!({ "seedRatioMode": 1, "seedRatioLimit": f64::from(*ratio) })
+            }
         };
-        let fields = json!({ "seedRatioMode": 1, "seedRatioLimit": limit });
         self.torrent_set(session, id, fields).await
     }
 
@@ -348,29 +352,28 @@ impl DownloadClient for Transmission {
         let reply = self
             .rpc(&mut session, "torrent-add", Value::Object(args))
             .await?;
-        if let Some(dup) = reply.get("torrent-duplicate") {
-            return torrent_id(dup);
-        }
-        let id =
-            torrent_id(reply.get("torrent-added").ok_or_else(|| {
-                ClientError::Protocol("torrent-add without torrent-added".into())
-            })?)?;
-        match known_count {
-            Some(count) if count > Self::LARGE_TORRENT_FILES => {
+        let (id, fresh) = match (reply.get("torrent-added"), reply.get("torrent-duplicate")) {
+            (Some(added), _) => (torrent_id(added)?, true),
+            (None, Some(dup)) => (torrent_id(dup)?, false),
+            (None, None) => {
+                return Err(ClientError::Protocol(
+                    "torrent-add without torrent-added".into(),
+                ))
+            }
+        };
+        let sent_with_add = fresh && known_count.is_some_and(|c| c <= Self::LARGE_TORRENT_FILES);
+        if !sent_with_add {
+            let count = match known_count {
+                Some(count) => count,
+                None => self.wanted_flags(&mut session, &id).await?.len(),
+            };
+            if count > 0 {
+                check_indices(&wanted, count)?;
                 self.apply_selection(&mut session, &id, count, &wanted)
                     .await?;
             }
-            Some(_) => {}
-            None => {
-                let count = self.wanted_flags(&mut session, &id).await?.len();
-                if count > 0 {
-                    check_indices(&wanted, count)?;
-                    self.apply_selection(&mut session, &id, count, &wanted)
-                        .await?;
-                }
-            }
         }
-        self.apply_seed(&mut session, &id, &seed).await?;
+        self.apply_seed(&mut session, &id, &seed, fresh).await?;
         Ok(id)
     }
 
@@ -383,6 +386,12 @@ impl DownloadClient for Transmission {
         }
         check_indices(&wanted, count)?;
         self.apply_selection(&mut session, id, count, &wanted).await
+    }
+
+    async fn set_seed_policy(&self, id: &ClientTorrentId, seed: SeedPolicy) -> Result<()> {
+        let mut session = self.session.lock().await;
+        self.get_one(&mut session, id, &["id"]).await?;
+        self.apply_seed(&mut session, id, &seed, false).await
     }
 
     async fn start(&self, id: &ClientTorrentId) -> Result<()> {

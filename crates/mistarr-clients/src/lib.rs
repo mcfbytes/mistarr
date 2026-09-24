@@ -371,8 +371,8 @@ pub trait DownloadClient: Send + Sync {
     /// Adds a torrent paused into `download_dir` with only the `wanted` file
     /// indices selected and `seed` applied, and returns its id.
     ///
-    /// If the client already has the torrent, returns its id and changes
-    /// nothing; use [`DownloadClient::set_wanted`] to extend the selection.
+    /// If the client already has the torrent, `wanted` replaces its selection
+    /// and `seed` is applied, so retrying a failed `add` repairs it.
     /// For a magnet whose metadata the client does not have yet, the
     /// selection is not applied: call `set_wanted` once `status` lists files.
     async fn add(
@@ -386,6 +386,9 @@ pub trait DownloadClient: Send + Sync {
     /// Replaces the set of wanted files; every other file is deselected.
     /// Returns [`ClientError::MetadataPending`] for a magnet without metadata.
     async fn set_wanted(&self, id: &ClientTorrentId, wanted: &[u32]) -> Result<()>;
+
+    /// Applies a seeding policy to a torrent already in the client.
+    async fn set_seed_policy(&self, id: &ClientTorrentId, seed: SeedPolicy) -> Result<()>;
 
     /// Starts or resumes transfer.
     async fn start(&self, id: &ClientTorrentId) -> Result<()>;
