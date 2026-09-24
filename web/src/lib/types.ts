@@ -178,6 +178,8 @@ export interface DatVersion {
   family: string;
   /** Why the version is not current; `null` for a current one. */
   reason: string | null;
+  /** For an unbound version, the platforms its family is current on. */
+  suggested: string[];
 }
 
 export type SeedPolicy = 'none' | 'client' | `ratio:${string}`;

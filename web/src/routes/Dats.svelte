@@ -36,13 +36,13 @@
 
   // One entry per family on a platform: the current version, else the newest, then the rest.
   const families = $derived.by((): Family[] => {
-    const byKey = new Map<string, DatVersion[]>();
+    const byKey: Record<string, DatVersion[]> = {};
     for (const d of dats) {
-      const key = `${d.platform_id ?? ''}|${d.family || d.dat_name}`;
-      byKey.set(key, [...(byKey.get(key) ?? []), d]);
+      const key = familyKey(d);
+      byKey[key] = [...(byKey[key] ?? []), d];
     }
     const out: Family[] = [];
-    for (const [key, rows] of byKey) {
+    for (const [key, rows] of Object.entries(byKey)) {
       const sorted = [...rows].sort((a, b) => b.loaded_at - a.loaded_at || b.id - a.id);
       const head = sorted.find(isCurrent) ?? sorted[0];
       if (head) {
@@ -56,6 +56,11 @@
         a.head.dat_name.localeCompare(b.head.dat_name)
     );
   });
+
+  /** A family on a platform, stable across the versions that come and go in it. */
+  function familyKey(d: DatVersion): string {
+    return `${d.platform_id ?? ''}|${d.family || d.dat_name}`;
+  }
 
   function isCurrent(d: DatVersion): boolean {
     return !d.retired && d.superseded_by === null;
@@ -109,7 +114,9 @@
       markDatRemoved(d.id);
       announcement = `${label(d)} removed. Files on the card stay where they are.`;
       await tick();
-      document.getElementById(`dat-${d.id}`)?.focus();
+      const key = familyKey(d);
+      const headings = document.querySelectorAll<HTMLElement>('h3[data-family]');
+      [...headings].find((h) => h.dataset.family === key)?.focus();
     } catch (err) {
       announcement = `${label(d)}: ${errorMessage(err)}`;
       void focusButton(d.id, 'remove');
@@ -151,9 +158,15 @@
       {#each families as f (f.key)}
         {@const d = f.head}
         <li class="card family" class:inactive={!isCurrent(d)}>
-          <h3 id={`dat-${d.id}`} tabindex="-1">{d.dat_name}</h3>
+          <h3 data-family={f.key} tabindex="-1">{d.dat_name}</h3>
           <dl>
-            <div><dt>Platform</dt><dd>{platformName(d.platform_id)}</dd></div>
+            <div>
+              <dt>Platform</dt>
+              <dd>
+                {platformName(d.platform_id)}{#if !d.platform_id && d.suggested.length > 0}; its
+                  family is loaded for {d.suggested.map(platformName).join(', ')}{/if}
+              </dd>
+            </div>
             <div><dt>Version</dt><dd>{d.version || '—'}</dd></div>
             <div><dt>Games</dt><dd>{d.game_count}</dd></div>
             <div><dt>Loaded</dt><dd>{loadedAt(d)}</dd></div>

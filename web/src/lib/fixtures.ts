@@ -275,7 +275,8 @@ export const fixtureDats: DatVersion[] = [
     game_count: 240,
     retired: false,
     family: 'example console dat',
-    reason: null
+    reason: null,
+    suggested: []
   },
   {
     id: 5,
@@ -288,7 +289,8 @@ export const fixtureDats: DatVersion[] = [
     game_count: 4,
     retired: false,
     family: 'mistarr samples - nintendo entertainment system',
-    reason: null
+    reason: null,
+    suggested: []
   },
   {
     id: 3,
@@ -301,7 +303,8 @@ export const fixtureDats: DatVersion[] = [
     game_count: 310,
     retired: false,
     family: 'example vendor - mega drive - genesis',
-    reason: null
+    reason: null,
+    suggested: []
   },
   {
     id: 4,
@@ -314,7 +317,8 @@ export const fixtureDats: DatVersion[] = [
     game_count: 305,
     retired: false,
     family: 'example vendor - mega drive - genesis',
-    reason: 'Replaced by Example Vendor - Mega Drive - Genesis (DB Export) version 20260101-000000'
+    reason: 'Replaced by Example Vendor - Mega Drive - Genesis (DB Export) version 20260101-000000',
+    suggested: []
   },
   {
     id: 2,
@@ -327,7 +331,8 @@ export const fixtureDats: DatVersion[] = [
     game_count: 88,
     retired: false,
     family: 'unbound sample dat',
-    reason: null
+    reason: null,
+    suggested: []
   }
 ];
 

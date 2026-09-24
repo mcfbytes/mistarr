@@ -24,17 +24,22 @@ export async function loadDats(): Promise<void> {
     total = dats.length;
     return;
   }
-  const rows: DatVersion[] = [];
-  let count = 0;
-  do {
-    const page = await api.dats(PAGE, rows.length);
-    rows.push(...page.items);
+  // Keyed by id, so a row that shifts pages while a load lands in between appears once.
+  const byId: Record<number, DatVersion> = {};
+  let offset = 0;
+  let count: number;
+  for (;;) {
+    const page = await api.dats(PAGE, offset);
     count = page.total;
-    if (page.items.length === 0) {
+    for (const d of page.items) {
+      byId[d.id] = d;
+    }
+    offset += page.items.length;
+    if (page.items.length === 0 || offset >= count) {
       break;
     }
-  } while (rows.length < count);
-  dats = rows;
+  }
+  dats = Object.values(byId).sort((a, b) => b.loaded_at - a.loaded_at || b.id - a.id);
   total = count;
 }
 
