@@ -25,6 +25,12 @@ export async function loadIncoming(which: Watched): Promise<void> {
   lists = { ...lists, [which]: page.items };
 }
 
+/** Replaces or removes one listed file until the next read of the list. */
+export function patchIncoming(which: Watched, file: string, next: IncomingFile | null): void {
+  const rest = lists[which].filter((f) => f.file !== file);
+  lists = { ...lists, [which]: next ? [next, ...rest] : rest };
+}
+
 // Events arrive in bursts while a pack loads; one re-read per burst is enough.
 export function scheduleIncoming(which: Watched): void {
   if (isMock || timers[which]) {

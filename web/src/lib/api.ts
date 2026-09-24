@@ -156,6 +156,10 @@ export const api = {
     return request('/dats/upload', { method: 'POST', body: form });
   },
   deleteDat: (id: number): Promise<void> => request(`/dats/${id}`, { method: 'DELETE' }),
+  retryRejectedDat: (file: string): Promise<Uploaded> =>
+    request(`/dats/rejected/${encodeURIComponent(file)}/retry`, { method: 'POST' }),
+  deleteRejectedDat: (file: string): Promise<void> =>
+    request(`/dats/rejected/${encodeURIComponent(file)}`, { method: 'DELETE' }),
 
   sources: (): Promise<Paged<Source>> => request('/sources'),
   uploadSource: (file: File): Promise<Uploaded> => {

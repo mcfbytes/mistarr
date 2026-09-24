@@ -275,6 +275,17 @@ export const fixtureDats: DatVersion[] = [
     retired: false
   },
   {
+    id: 3,
+    platform_id: 'megadrive',
+    dat_name: 'Example Vendor - Mega Drive - Genesis (DB Export)',
+    version: '20260101-000000',
+    source_file: 'Example Vendor - Mega Drive - Genesis (DB Export) (20260101-000000).zip',
+    loaded_at: 1_770_007_200,
+    superseded_by: null,
+    game_count: 310,
+    retired: false
+  },
+  {
     id: 2,
     platform_id: null,
     dat_name: 'Unbound Sample DAT',
@@ -333,6 +344,16 @@ export const fixtureIncomingDats: IncomingFile[] = [
     job_id: 7,
     progress: { members: 1, done: 0, games: 1200 },
     modified: 1_770_040_000
+  },
+  {
+    file: 'Example Handheld (20260101).xml',
+    size: 4_096,
+    state: 'rejected',
+    reason:
+      'root element is <softwarelist>; expected a Logiqx DAT (<datafile>) or a No-Intro DB export (<header> followed by <datafile>)',
+    job_id: null,
+    progress: null,
+    modified: 1_770_039_500
   },
   {
     file: 'notes.txt',

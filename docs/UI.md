@@ -13,7 +13,8 @@ screen works at 360 px wide with a 16 px gutter and no horizontal scroll.
 
 **Wizard** (`/wizard`). Four steps, each skippable:
 1. Paths: confirm root and games directory, show detected cores.
-2. DATs: drop zone and the watched-directory path. Lists the files still in
+2. DATs: drop zone and the watched-directory path, taking Logiqx DATs, No-Intro
+   database exports and zipped packs. Lists the files still in
    `dats/`, each waiting (with the reason), importing (with progress) or
    rejected (with the reason), then this session's uploads with their
    outcome, then the loaded DATs and the platform each bound to.
@@ -69,6 +70,19 @@ matched count, seed policy, client status. Bind and disable actions.
 Unbound sources have a platform picker and, when the names suggest one, a
 "Bind to" button for the suggested platform. Above the table, the files still
 in `sources/` and this session's uploads, as in the wizard.
+
+**DATs** (`/dats`). Its own nav entry, between Sources and System, since
+DATs arrive and fail on their own schedule like sources do. An upload
+control taking several `.dat`, `.xml` or `.zip` files, the same upload as
+the wizard's. The files still in `dats/` as in the wizard: waiting with the
+reason, importing with progress, rejected with the reason on its own line
+under the name, plus this session's uploads with their outcome. Each
+rejected file has Retry, which moves it back into `dats/` so a file fixed
+in place loads again, and Delete, which asks once more before removing it.
+Then the loaded DAT versions, current ones sorted by platform: name and
+file, platform or "Not bound", version, game count, loaded time and state;
+replaced and retired versions fold under "Older versions". Live over SSE,
+as in the wizard.
 
 **System** (`/system`). Status, client with the same start offer as the
 wizard, CORENAME, paused indicator with manual override, launch state,

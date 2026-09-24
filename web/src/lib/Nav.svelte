@@ -7,6 +7,7 @@
     { hash: '#/', label: 'Platforms', match: ['platforms', 'browse'] },
     { hash: '#/activity', label: 'Activity', match: ['activity'] },
     { hash: '#/sources', label: 'Sources', match: ['sources'] },
+    { hash: '#/dats', label: 'DATs', match: ['dats'] },
     { hash: '#/system', label: 'System', match: ['system'] }
   ];
 </script>
@@ -37,5 +38,17 @@
   a.active {
     color: var(--fg);
     background: var(--bg-raised);
+  }
+
+  @media (max-width: 420px) {
+    nav {
+      gap: 0.1em;
+      padding: 0.5em calc(var(--gutter) / 2);
+      font-size: 0.95em;
+    }
+
+    a {
+      padding: 0.4em 0.45em;
+    }
   }
 </style>

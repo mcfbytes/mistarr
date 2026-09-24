@@ -7,6 +7,7 @@ const routes = [
   { name: 'title', hash: '#/t/1' },
   { name: 'activity', hash: '#/activity' },
   { name: 'sources', hash: '#/sources' },
+  { name: 'dats', hash: '#/dats' },
   { name: 'system', hash: '#/system' }
 ];
 
@@ -103,7 +104,7 @@ test('the wizard lists files waiting in dats and sources', async ({ page }) => {
   await page.getByRole('button', { name: 'Next' }).click();
   const dats = page.getByRole('list', { name: 'Files in dats' });
   await expect(dats.getByText('Importing')).toBeVisible();
-  await expect(dats.getByText(/Rejected: not a DAT/)).toBeVisible();
+  await expect(dats.getByText(/^not a DAT/)).toBeVisible();
 
   await page.getByRole('button', { name: 'Next' }).click();
   await page.getByRole('button', { name: 'Next' }).click();
@@ -127,4 +128,43 @@ test('a path mapping can be removed and a half-filled one is refused', async ({ 
 test('an unbound source offers its suggested platform', async ({ page }) => {
   await page.goto('/#/sources');
   await expect(page.getByRole('button', { name: /^Bind to / })).toBeVisible();
+});
+
+test('the DATs screen lists loaded versions and incoming files', async ({ page }) => {
+  await page.goto('/#/');
+  await page.getByRole('link', { name: 'DATs' }).click();
+  await expect(page).toHaveURL(/#\/dats$/);
+
+  const loaded = page.getByRole('table', { name: 'Loaded DATs' });
+  const exportRow = loaded.getByRole('row', { name: /DB Export/ });
+  await expect(exportRow).toContainText('Sega Mega Drive');
+  await expect(exportRow).toContainText('20260101-000000');
+  await expect(exportRow).toContainText('310');
+  await expect(loaded.getByRole('row', { name: /Unbound Sample DAT/ })).toContainText('Not bound');
+
+  const upload = page.getByLabel('Add DAT files');
+  await expect(upload).toHaveAttribute('accept', '.dat,.xml,.zip');
+  await expect(upload).toHaveAttribute('multiple', '');
+
+  const incoming = page.getByRole('list', { name: 'Files in dats' });
+  await expect(incoming.getByText('Importing')).toBeVisible();
+  await expect(incoming.getByText(/1 of 1 files|0 of 1 files/)).toBeVisible();
+  await expect(incoming.getByText(/expected a Logiqx DAT .* or a No-Intro DB export/)).toBeVisible();
+});
+
+test('a rejected DAT can be retried or deleted', async ({ page }) => {
+  await page.goto('/#/dats');
+  const incoming = page.getByRole('list', { name: 'Files in dats' });
+  const rejected = incoming.getByRole('listitem').filter({ hasText: 'Example Handheld (20260101).xml' });
+  await rejected.getByRole('button', { name: 'Retry' }).click();
+  await expect(rejected).toContainText('Waiting: Queued.');
+  await expect(rejected.getByRole('button', { name: 'Retry' })).toHaveCount(0);
+
+  const notes = incoming.getByRole('listitem').filter({ hasText: 'notes.txt' });
+  await notes.getByRole('button', { name: 'Delete' }).click();
+  await notes.getByRole('button', { name: 'Keep' }).click();
+  await expect(notes).toBeVisible();
+  await notes.getByRole('button', { name: 'Delete' }).click();
+  await notes.getByRole('button', { name: 'Delete the file' }).click();
+  await expect(incoming.getByText('notes.txt')).toHaveCount(0);
 });
