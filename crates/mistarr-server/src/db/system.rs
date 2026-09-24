@@ -7,7 +7,7 @@ use crate::error::Result;
 /// Row counts that decide which wizard steps are complete.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct WizardCounts {
-    /// Rows in `dat_versions`, retired or not.
+    /// Rows in `dat_versions` loaded from DAT files, retired or not.
     pub dat_versions: u64,
     /// Rows in `sources`.
     pub sources: u64,
@@ -27,7 +27,7 @@ pub struct WizardCounts {
 /// ```
 pub fn wizard_counts(conn: &Connection) -> Result<WizardCounts> {
     let (dats, sources): (i64, i64) = conn.query_row(
-        "SELECT (SELECT COUNT(*) FROM dat_versions), (SELECT COUNT(*) FROM sources)",
+        "SELECT (SELECT COUNT(*) FROM dat_versions WHERE source = 'dat'), (SELECT COUNT(*) FROM sources)",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;

@@ -103,7 +103,7 @@ pub struct VersionPlan {
 pub fn upsert_version(conn: &Connection, v: &NewVersion<'_>) -> Result<VersionPlan> {
     let existing: Option<i64> = conn
         .query_row(
-            "SELECT id FROM dat_versions WHERE dat_name = ?1 AND version = ?2",
+            "SELECT id FROM dat_versions WHERE dat_name = ?1 AND version = ?2 AND source = 'dat'",
             params![v.dat_name, v.version],
             |r| r.get(0),
         )
@@ -113,7 +113,7 @@ pub fn upsert_version(conn: &Connection, v: &NewVersion<'_>) -> Result<VersionPl
         None => conn
             .query_row(
                 "SELECT platform_id FROM dat_versions
-                 WHERE dat_name = ?1 AND platform_id IS NOT NULL
+                 WHERE dat_name = ?1 AND platform_id IS NOT NULL AND source = 'dat'
                  ORDER BY loaded_at DESC, id DESC LIMIT 1",
                 [v.dat_name],
                 |r| r.get(0),
@@ -124,6 +124,7 @@ pub fn upsert_version(conn: &Connection, v: &NewVersion<'_>) -> Result<VersionPl
         .query_row(
             "SELECT id, version FROM dat_versions
              WHERE dat_name = ?1 AND superseded_by IS NULL AND retired = 0 AND id IS NOT ?2
+               AND source = 'dat'
              ORDER BY loaded_at DESC, id DESC LIMIT 1",
             params![v.dat_name, existing],
             |r| Ok((r.get(0)?, r.get(1)?)),
@@ -164,7 +165,7 @@ pub fn upsert_version(conn: &Connection, v: &NewVersion<'_>) -> Result<VersionPl
     if current {
         conn.execute(
             "UPDATE dat_versions SET superseded_by = ?1
-             WHERE dat_name = ?2 AND id != ?1 AND superseded_by IS NULL",
+             WHERE dat_name = ?2 AND id != ?1 AND superseded_by IS NULL AND source = 'dat'",
             params![id, v.dat_name],
         )?;
     }
@@ -219,7 +220,7 @@ pub fn set_game_count(conn: &Connection, id: DatVersionId, count: u64) -> Result
 /// ```
 pub fn begin_load(conn: &Connection, id: DatVersionId) -> Result<usize> {
     Ok(conn.execute(
-        "UPDATE titles SET retired = 2 WHERE dat_version_id = ?1 AND retired = 0",
+        "UPDATE titles SET retired = 2 WHERE dat_version_id = ?1 AND retired = 0 AND source = 'dat'",
         [id.0],
     )?)
 }
@@ -242,13 +243,13 @@ pub fn begin_load(conn: &Connection, id: DatVersionId) -> Result<usize> {
 pub fn retire_absent(conn: &Connection, id: DatVersionId) -> Result<usize> {
     let others = conn.execute(
         "UPDATE titles SET retired = 1, is_1g1r_pick = 0
-         WHERE retired = 0 AND dat_version_id IN (
+         WHERE retired = 0 AND source = 'dat' AND dat_version_id IN (
            SELECT o.id FROM dat_versions o JOIN dat_versions n ON n.dat_name = o.dat_name
            WHERE n.id = ?1 AND o.id != ?1)",
         [id.0],
     )?;
     let pending = conn.execute(
-        "UPDATE titles SET retired = 1, is_1g1r_pick = 0 WHERE dat_version_id = ?1 AND retired = 2",
+        "UPDATE titles SET retired = 1, is_1g1r_pick = 0 WHERE dat_version_id = ?1 AND retired = 2 AND source = 'dat'",
         [id.0],
     )?;
     Ok(others + pending)
@@ -273,7 +274,7 @@ pub fn retire(conn: &Connection, id: DatVersionId) -> Result<Option<DatVersionRo
     };
     conn.execute("UPDATE dat_versions SET retired = 1 WHERE id = ?1", [id.0])?;
     conn.execute(
-        "UPDATE titles SET retired = 1, is_1g1r_pick = 0 WHERE dat_version_id = ?1",
+        "UPDATE titles SET retired = 1, is_1g1r_pick = 0 WHERE dat_version_id = ?1 AND source = 'dat'",
         [id.0],
     )?;
     Ok(Some(row))
@@ -294,7 +295,7 @@ pub fn retire(conn: &Connection, id: DatVersionId) -> Result<Option<DatVersionRo
 pub fn get(conn: &Connection, id: DatVersionId) -> Result<Option<DatVersionRow>> {
     Ok(conn
         .query_row(
-            &format!("SELECT {COLUMNS} FROM dat_versions WHERE id = ?1"),
+            &format!("SELECT {COLUMNS} FROM dat_versions WHERE id = ?1 AND source = 'dat'"),
             [id.0],
             from_row,
         )
@@ -314,9 +315,13 @@ pub fn get(conn: &Connection, id: DatVersionId) -> Result<Option<DatVersionRow>>
 /// assert!(items.is_empty() && total == 0);
 /// ```
 pub fn list(conn: &Connection, limit: u32, offset: u32) -> Result<(Vec<DatVersionRow>, u64)> {
-    let total: i64 = conn.query_row("SELECT COUNT(*) FROM dat_versions", [], |r| r.get(0))?;
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM dat_versions WHERE source = 'dat'",
+        [],
+        |r| r.get(0),
+    )?;
     let mut stmt = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM dat_versions ORDER BY loaded_at DESC, id DESC LIMIT ?1 OFFSET ?2"
+        "SELECT {COLUMNS} FROM dat_versions WHERE source = 'dat' ORDER BY loaded_at DESC, id DESC LIMIT ?1 OFFSET ?2"
     ))?;
     let rows = stmt
         .query_map(params![limit, offset], from_row)?

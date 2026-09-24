@@ -28,6 +28,7 @@ CREATE TABLE dat_versions (
   superseded_by INTEGER REFERENCES dat_versions(id),
   game_count    INTEGER NOT NULL,
   retired       INTEGER NOT NULL DEFAULT 0,   -- set by DELETE /dats/{id}
+  source        TEXT NOT NULL DEFAULT 'dat',  -- 'dat' | 'mra': the one row MRA titles belong to
   UNIQUE (dat_name, version)
 );
 
@@ -48,11 +49,19 @@ CREATE TABLE titles (                   -- one per <game>; the browse unit
   clone_of      TEXT,                  -- the DAT's cloneof, verbatim
   group_key     TEXT NOT NULL DEFAULT '',   -- naming::group_key of the name
   inferred      INTEGER NOT NULL DEFAULT 0, -- parent chosen by group_key, not cloneof
+  source        TEXT NOT NULL DEFAULT 'dat', -- 'dat' | 'mra': an MRA title is never retired by a DAT
+  setname       TEXT,                  -- MRA <setname>
+  rbf           TEXT,                  -- MRA <rbf>
+  mra_path      TEXT,                  -- MRA file relative to _Arcade
+  mra_check     TEXT,                  -- md5 check: 'match' | 'mismatch' | 'missing_part' | 'refused', NULL when not run
+  mra_detail    TEXT,                  -- why the check did not match
+  mra_stamp     TEXT,                  -- MRA and zip sizes and mtimes the check ran against
   UNIQUE (dat_version_id, name)
 );
 CREATE INDEX titles_platform_base ON titles(platform_id, base_name);
 CREATE INDEX titles_parent ON titles(parent_id);
 CREATE INDEX titles_group ON titles(platform_id, inferred, group_key);
+CREATE INDEX titles_source ON titles(platform_id, source);
 
 CREATE TABLE roms (                     -- one per <rom>; the file unit
   id            INTEGER PRIMARY KEY,
@@ -65,6 +74,8 @@ CREATE TABLE roms (                     -- one per <rom>; the file unit
   match_base    TEXT,                  -- base name of match_name
   retired       INTEGER NOT NULL DEFAULT 0,       -- no longer listed by the title's DAT entry
   header        TEXT,                  -- the DAT's header attribute, verbatim: hex bytes an adapter may prepend
+  zip_dir       TEXT,                  -- MRA roms: directory under games/ holding the zip
+  present       INTEGER NOT NULL DEFAULT 0,       -- MRA roms: the zip was on disk at the last catalogue run
   UNIQUE (title_id, name)
 );
 CREATE INDEX roms_sha1 ON roms(sha1);
@@ -145,7 +156,7 @@ CREATE TABLE import_log (
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE jobs (
   id            INTEGER PRIMARY KEY,
-  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'poll' | 'detect_client' | 'dat_import' | 'recompute_1g1r' | 'source_import' | 'resolve_magnet' | 'transfer' | 'deselect'
+  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'poll' | 'detect_client' | 'dat_import' | 'recompute_1g1r' | 'source_import' | 'resolve_magnet' | 'transfer' | 'deselect' | 'arcade_catalog'
   payload       TEXT NOT NULL,         -- json
   state         TEXT NOT NULL,         -- 'queued' | 'running' | 'paused' | 'done' | 'failed'
   progress      TEXT,                  -- json, job specific
@@ -224,6 +235,18 @@ A version whose string sorts below the newest live one of its name is stored
 already superseded and does not touch titles. An unbound version stores only
 its `dat_versions` row; binding it re-reads the file from `dats/loaded/`.
 
+### MRA titles
+
+Arcade titles read from MRA files have `source = 'mra'` and all belong to
+one `dat_versions` row with `source = 'mra'` and `dat_name` `_Arcade`, which
+`/dats`, the wizard and DAT loads never see. DAT supersession, reloads and
+`DELETE /dats/{id}` only retire `source = 'dat'` titles; an MRA title is
+retired when a catalogue run no longer finds its MRA, and revived, with its
+id and `wanted`, when the MRA returns. Its roms are the zips it names, with
+`size` 0, the MRA's `md5` or none, `zip_dir` and `present`. MRA titles are
+`inferred` with a `group_key` prefixed `mra:`, so they never group with DAT
+entries.
+
 `parent_id` comes from `clone_of` when the DAT has any `cloneof`, else the
 titles are `inferred` and every live inferred title of the platform is
 regrouped by `(platform_id, group_key)` after each load, electing the parent
@@ -251,7 +274,10 @@ FROM (
   FROM (
     SELECT t.platform_id, t.parent_id, t.id, t.wanted, t.is_1g1r_pick,
            COUNT(DISTINCT r.id) AS roms,
-           COUNT(DISTINCT CASE WHEN f.state = 'verified' THEN r.id END) AS roms_verified
+           COUNT(DISTINCT CASE WHEN f.state = 'verified'
+                                 OR (r.present = 1
+                                     AND COALESCE(t.mra_check, '') NOT IN ('mismatch', 'missing_part'))
+                               THEN r.id END) AS roms_verified
     FROM titles t
     LEFT JOIN roms r ON r.title_id = t.id AND r.retired = 0
     LEFT JOIN files f ON f.rom_id = r.id
@@ -264,5 +290,6 @@ JOIN titles p ON p.id = g.parent_id;
 ```
 
 `variants` counts live titles, `have_verified` the live titles whose every
-live rom has a `verified` file, `wanted` the wanted live titles, and
+live rom has a `verified` file, or for an MRA title is present with no failed
+md5 check, `wanted` the wanted live titles, and
 `newest_id` orders groups by when their newest entry first appeared.

@@ -361,6 +361,7 @@ pub fn delete_missing(
 /// Finds the rom a hashed payload matches under
 /// `docs/VERIFICATION.md` "Matching order", scoped to one platform and
 /// preferring a live rom, then a title whose `dat_version` is not superseded.
+/// Only DAT titles match; MRA roms are zips found by the arcade catalogue.
 ///
 /// # Errors
 ///
@@ -376,7 +377,7 @@ pub fn match_rom(
     const SELECT: &str = "SELECT r.id, r.title_id, r.name, r.status
          FROM roms r JOIN titles t ON t.id = r.title_id
          JOIN dat_versions d ON d.id = t.dat_version_id
-         WHERE t.platform_id = ?1 AND ";
+         WHERE t.platform_id = ?1 AND t.source = 'dat' AND ";
     const ORDER: &str = " ORDER BY (r.retired = 0 AND t.retired = 0) DESC,
          d.superseded_by IS NULL DESC, d.id DESC LIMIT 1";
     let row = |r: &Row<'_>| -> rusqlite::Result<RomMatch> {
@@ -433,7 +434,7 @@ pub fn crc_candidate_exists(
     Ok(conn.query_row(
         "SELECT EXISTS(
            SELECT 1 FROM roms r JOIN titles t ON t.id = r.title_id
-           WHERE t.platform_id = ?1 AND r.crc32 = ?2 AND r.size = ?3)",
+           WHERE t.platform_id = ?1 AND t.source = 'dat' AND r.crc32 = ?2 AND r.size = ?3)",
         params![platform_id.0, crc32, size],
         |r| r.get(0),
     )?)

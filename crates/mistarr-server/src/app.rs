@@ -294,6 +294,9 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
         .await?;
     }
 
+    // The arcade catalogue reads the MRA files under `_Arcade`.
+    jobs::arcade::enqueue_if_relevant(&app).await?;
+
     // Step 5: watchers, scheduler and HTTP.
     let mut tasks = Vec::new();
     let opts = app.options.clone();
@@ -343,14 +346,15 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     })
 }
 
-/// Marks platforms whose core is installed under the SD root.
-fn detect_cores(app: &AppState) -> Result<()> {
+/// Marks platforms whose core is installed under the SD root and returns them.
+pub(crate) fn detect_cores(app: &AppState) -> Result<Vec<mistarr_core::PlatformId>> {
     let root = app.config().paths.root;
     let cores = mistarr_mister::corename::installed_cores(&root);
     let present: Vec<_> = cores.into_iter().flat_map(|c| c.platforms).collect();
     tracing::info!(platforms = present.len(), "installed cores detected");
     app.db
-        .write_blocking(|c| db::platforms::set_core_present(c, &present))
+        .write_blocking(|c| db::platforms::set_core_present(c, &present))?;
+    Ok(present)
 }
 
 /// Enqueues a full library scan every `interval`, from `[jobs] scan_interval_minutes`.

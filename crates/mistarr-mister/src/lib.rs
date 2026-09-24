@@ -44,6 +44,20 @@ pub enum Error {
     /// An MRA file is not well-formed XML.
     #[error("MRA is not valid XML: {0}")]
     Mra(String),
+    /// An MRA rom uses content the assembler does not implement.
+    #[error("MRA content not supported: {0}")]
+    MraUnsupported(String),
+    /// A named MRA part is in none of the zips it may come from.
+    #[error("part `{part}` is not in {zips}")]
+    MissingPart {
+        /// Member name.
+        part: String,
+        /// The zips tried, `|`-separated.
+        zips: String,
+    },
+    /// A Neo Geo `romsets.xml` is not well-formed XML.
+    #[error("romsets.xml is not valid XML: {0}")]
+    Romsets(String),
     /// Reading a board file failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),

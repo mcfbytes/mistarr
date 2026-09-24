@@ -99,7 +99,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    request.
 4. Detect installed cores by listing the `_Console`, `_Computer`, `_Arcade`
    and `_Other` directories. Platforms whose core is absent are shown but
-   collapsed.
+   collapsed. When `_Arcade` exists, or MRA titles are stored, queue the
+   arcade catalogue.
 5. Start the watched-directory scanner, the CORENAME watcher, the job
    scheduler and the HTTP server on port 8420.
 6. If no DAT has ever been loaded, the UI opens on the wizard.
@@ -141,6 +142,23 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 3. Match by SHA1, then MD5, then CRC32 plus size. Record `verified`,
    `unverified` (no DAT match) or `misnamed` (match but wrong filename).
 4. Scans are resumable: progress is committed per directory.
+
+### Arcade catalogue
+
+1. A heavy `arcade_catalog` job, queued at startup, by `POST /system/scan`
+   for every platform or for `arcade`, and by `POST /system/cores`. It reads
+   every `.mra` under `_Arcade`, four folder levels deep including
+   `_alternatives`, without following symlinked folders.
+2. Each MRA becomes one `arcade` title named by its `<name>`, trimmed with
+   inner whitespace collapsed (the file stem when that is empty), with one rom
+   per zip it names; see PLATFORMS.md "MRA catalogue". MRAs are read
+   shallowest first and a later MRA with a name already taken is skipped.
+   Titles whose MRA is gone are retired.
+3. Each zip is looked up under `games/`, directories and file name
+   case-insensitively, and its presence stored on its rom. A title whose MRA carries an `md5` and whose zips are
+   all present is checked by assembling its roms (PLATFORMS.md "MRA
+   assembly"); the check reruns only when the MRA or one of its zips changes
+   size or mtime. Nothing is ever fetched, rebuilt, merged or split.
 
 ### Source import
 
@@ -208,7 +226,9 @@ does nothing.
    `bad` and the file moves to `staging/quarantine/<infohash>/` beside a
    `<name>.report.txt` naming the expected rom, the actual hashes and the
    other entry it matches, if any. An entry flagged `bios` is refused: the
-   download is `failed` and the file stays in staging.
+   download is `failed` and the file stays in staging. So is an MRA entry,
+   whose roms name zips but not their contents; a set is imported through
+   its MAME DAT entry.
 2. A romset or arcade zip verifies only when every member is a rom of the
    entry and every rom of the entry is a member. A disc entry waits until
    every track is `importing` and is placed together; when a track is missing

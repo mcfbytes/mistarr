@@ -29,6 +29,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route("/system/status", get(status))
         .route("/system/wizard", get(wizard))
         .route("/system/scan", post(scan))
+        .route("/system/cores", post(cores))
         .route("/system/pause", post(pause))
         .route("/system/resume", post(resume))
         .route("/system/jobs", get(list_jobs))
@@ -45,6 +46,9 @@ struct ScanBody {
 #[derive(Debug, Serialize)]
 struct ScanResponse {
     job_id: JobId,
+    /// The arcade catalogue queued with a scan of every platform or of `arcade`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    arcade_job_id: Option<JobId>,
 }
 
 async fn scan(
@@ -60,9 +64,43 @@ async fn scan(
         Some(raw) => Some(validate_platform(&app, raw).await?),
         None => None,
     };
+    let arcade = platform_id
+        .as_ref()
+        .is_none_or(|p| p.0 == crate::jobs::arcade::PLATFORM);
     let job = ScanJob { platform_id };
     let job_id = Scheduler::enqueue(&app, Arc::new(job)).await?;
-    Ok(Json(ScanResponse { job_id }))
+    let arcade_job_id = if arcade {
+        crate::jobs::arcade::enqueue_if_relevant(&app).await?
+    } else {
+        None
+    };
+    Ok(Json(ScanResponse {
+        job_id,
+        arcade_job_id,
+    }))
+}
+
+/// `POST /system/cores` answer.
+#[derive(Debug, Serialize)]
+struct CoresResponse {
+    platforms: Vec<PlatformId>,
+    arcade_job_id: Option<JobId>,
+}
+
+/// Detects installed cores again, for the wizard's detected-cores step, and
+/// queues the arcade catalogue when there are MRA files to read.
+async fn cores(State(app): State<Arc<AppState>>) -> Result<Json<CoresResponse>, ApiError> {
+    let platforms = {
+        let app = Arc::clone(&app);
+        tokio::task::spawn_blocking(move || crate::app::detect_cores(&app))
+            .await
+            .map_err(|e| crate::Error::Task(e.to_string()))??
+    };
+    let arcade_job_id = crate::jobs::arcade::enqueue_if_relevant(&app).await?;
+    Ok(Json(CoresResponse {
+        platforms,
+        arcade_job_id,
+    }))
 }
 
 /// Looks up `raw` among the seeded platforms, for `POST /system/scan`.

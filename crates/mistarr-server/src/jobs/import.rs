@@ -46,6 +46,10 @@ pub const KIND: &str = "import";
 /// Why a BIOS entry is never imported, from `docs/PRINCIPLES.md` section 3.
 const BIOS_REFUSED: &str = "BIOS entries are never imported";
 
+/// MRA titles name zips without their contents, so nothing can verify a staged one.
+const MRA_REFUSED: &str =
+    "an MRA entry names zips, not their contents; import the set through its MAME DAT entry";
+
 const OUTSIDE_STAGING: &str = "the staged file is outside the staging directory";
 
 /// Imports one download in `importing`; a disc entry's tracks are imported together.
@@ -225,6 +229,9 @@ async fn import(ctx: &JobContext, id: DownloadId) -> Result<()> {
     };
     if entry.is_bios() {
         return fail(app, &[id], BIOS_REFUSED).await;
+    }
+    if entry.from_mra {
+        return fail(app, &[id], MRA_REFUSED).await;
     }
     let (Some(platform), Some(adapter)) = (
         platforms::by_id(&entry.platform_id.0),

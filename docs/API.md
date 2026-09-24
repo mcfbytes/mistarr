@@ -19,6 +19,7 @@ under `/api` return 404 JSON.
 | GET | `/system/status` | Version, uptime, client kind and reachability, CORENAME, paused state, disk free, RSS. |
 | GET | `/system/wizard` | Which first-run steps are complete. |
 | POST | `/system/scan` | Enqueue a library scan. Body `{ platform_id? }`. |
+| POST | `/system/cores` | Detect installed cores again, for the wizard's detected-cores step. |
 | POST | `/system/pause` / `/system/resume` | Manual scheduler gate, overrides CORENAME until CORENAME next changes. Returns the status body. |
 | GET | `/system/jobs` | Queued, running and paused jobs with progress. |
 | GET | `/system/settings` / PUT | The config subset that is editable at runtime. |
@@ -46,6 +47,12 @@ data directory.
 booleans. `paths` is true when the games directory exists, `dats` when any DAT
 version was ever loaded, `client` when detection found a client, `sources`
 when any source exists, and `open_on_start` when no DAT was ever loaded.
+
+`/system/scan` answers `{ job_id }`, plus `arcade_job_id` when the scan
+covers every platform or `arcade` and the arcade catalogue was queued (there
+is an `_Arcade` directory or stored MRA titles). `/system/cores` answers `{
+platforms, arcade_job_id }`: the ids of platforms whose core is installed, and
+the queued arcade catalogue or `null`.
 
 `/system/jobs` items: `{ id, kind, payload, state, progress, created_at,
 updated_at }`, where `state` is `queued`, `running` or `paused` and a failed
@@ -97,14 +104,23 @@ whose only variants are hidden appears. `sort=recent` puts groups whose
 newest entry was added last first. Items are the `title_groups` row `{
 parent_id, platform_id, base_name, name, pick_id, pick_name, variants,
 have_verified, wanted, has_pick }` plus `art` for the pick, or the parent
-without one.
+without one. While the
+platform has MRA titles (PLATFORMS.md "MRA catalogue") only they are listed,
+and `/platforms` counts only them.
 
 `/titles/{id}` takes any title of the group and answers `{ parent_id,
 platform_id, base_name, pick_variant_id, art, variants }`. Each variant is `{
 id, name, regions, languages, revision, flags, is_1g1r_pick, wanted, retired,
-inferred, dat_version_id, torrent_files_available, roms }`, live variants
-first, and each rom is `{ id, name, size, crc32, md5, sha1, status, file_id,
-file_state, file_path }` for its best file, verified first. `want` and
+inferred, dat_version_id, torrent_files_available, source, roms }`, live
+variants first, and each rom is `{ id, name, size, crc32, md5, sha1, status,
+file_id, file_state, file_path }` for its best file, verified first. `source`
+is `dat` or `mra`. An MRA variant adds `mra: { setname, rbf, path,
+missing_zips, md5_check, md5_detail }`, where `missing_zips` are paths
+relative to `games/` and `md5_check` is `match`, `mismatch`, `missing_part`,
+`refused` or `null` when not run. A Neo Geo variant adds `romset: { listed,
+present }`, with `listed` `null` when `games/NeoGeo/romsets.xml` is absent,
+and the group adds `bios: [{ name, present }]` for the BIOS files that file
+names; these are reported only. `want` and
 `DELETE want` answer with the same body. `want` is a 400 when the variant is
 not in the group, is retired or is a BIOS entry, or when no variant is
 selectable and none was named.
@@ -127,7 +143,7 @@ canonical path with no file on disk is removed.
 | POST | `/dats/upload` | multipart; same handling as dropping into `dats/`. |
 | DELETE | `/dats/{id}` | Retire; files keep their provenance. |
 
-`/dats` items are `dat_versions` rows, newest first: `{ id, platform_id,
+`/dats` items are `dat_versions` rows loaded from DAT files, newest first: `{ id, platform_id,
 dat_name, version, source_file, loaded_at, superseded_by, game_count, retired
 }`. `source_file` is the name under `dats/loaded/`, which gains ` (N)` before
 the extension when the name is taken. Upload takes one `file` part named

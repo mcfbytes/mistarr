@@ -13,7 +13,7 @@ use crate::{Error, Result};
 pub mod arcade;
 mod cart;
 mod disc;
-mod neogeo;
+pub mod neogeo;
 
 /// Placement rules for one MiSTer core.
 ///
