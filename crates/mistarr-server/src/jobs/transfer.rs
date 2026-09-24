@@ -254,6 +254,7 @@ async fn add(
     let config = app.config();
     let local = config.paths.staging().join(&row.infohash);
     let dir = crate::client::to_remote(&config.client.remote_path_map, &local);
+    crate::client::prepare_download_dir(&local).await;
     let seed = sources::seed_from_text(&row.seed_policy).unwrap_or(SeedPolicy::None);
     match client
         .add(TorrentSource::Metainfo(bytes), &dir, wanted, seed)

@@ -242,11 +242,14 @@ async fn import(ctx: &JobContext, id: DownloadId) -> Result<()> {
         source: &source,
         entry: &entry,
     };
-    match platform.kind {
+    let outcome = match platform.kind {
         Kind::Disc => placing.disc().await,
         Kind::Romset | Kind::Arcade => placing.romset(&row).await,
         _ => placing.single(&row).await,
-    }
+    };
+    // Any outcome may be the source's last open download, a quarantine included.
+    placing.release_torrent().await;
+    outcome
 }
 
 /// A payload matched to a rom of the wanted entry and bound for `games/`.
@@ -806,7 +809,6 @@ impl Placing<'_> {
             Ok(Placed::All(stats)) => {
                 let done = self.record(targets, &stats, pieces, ids, true).await?;
                 self.announce(ids, &done);
-                self.release_torrent().await;
                 Ok(())
             }
             Ok(Placed::Partly(stats, error)) => {

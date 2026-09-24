@@ -77,6 +77,10 @@ generated rc raises it with `network.xmlrpc.size_limit.set`, and file
 commands are always batched with `system.multicall` in chunks of 500 so a
 user's own rtorrent accepts them too.
 
+rtorrent creates only the last level of a download directory, so mistarr
+creates `staging/<infohash>/` before every add; a torrent loaded into a
+missing parent fails with "Could not create directory".
+
 Every command after `load.*` takes the uppercase hex infohash as its target,
 and file commands take `<HASH>:f<index>`. `load.*` does not return the hash,
 so mistarr computes it: SHA-1 of the metainfo's `info` dictionary, or the

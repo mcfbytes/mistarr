@@ -10,6 +10,26 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y transmission-daemon rtorrent
+      # The package starts a system daemon; the suite runs its own on free ports.
+      - run: sudo systemctl stop transmission-daemon || true
+      - name: make e2e
+        shell: bash
+        env:
+          MISTARR_E2E_REQUIRE: transmission-daemon,rtorrent
+        run: |
+          mkdir -p target/e2e-logs
+          make e2e 2>&1 | tee target/e2e-logs/cargo-test.log
+      - if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-logs
+          path: target/e2e-logs
   principles:
     runs-on: ubuntu-latest
     steps:

@@ -332,6 +332,7 @@ impl Job for ResolveMagnet {
             let config = app.config();
             let local = config.paths.staging().join(&row.infohash);
             let dir = crate::client::to_remote(&config.client.remote_path_map, &local);
+            crate::client::prepare_download_dir(&local).await;
             let seed = rows::seed_from_text(&row.seed_policy).unwrap_or(SeedPolicy::None);
             match client
                 .add(TorrentSource::Magnet(uri), &dir, &[], seed)
