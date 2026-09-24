@@ -4,12 +4,13 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use mistarr_server::app::{self, Options, Running};
 use mistarr_server::config::Config;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 
 pub struct Booted {
     pub dir: tempfile::TempDir,
@@ -26,10 +27,16 @@ impl Booted {
     }
 }
 
-/// A closed local port, so client detection never probes the host's defaults.
+/// A port held bound but not listening for the whole process, so connecting is
+/// refused and no fake in a concurrent test can take it over.
 pub fn closed_url() -> String {
-    let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
-    let addr = l.local_addr().expect("addr");
+    static HELD: OnceLock<(TcpSocket, SocketAddr)> = OnceLock::new();
+    let (_, addr) = HELD.get_or_init(|| {
+        let s = TcpSocket::new_v4().expect("socket");
+        s.bind("127.0.0.1:0".parse().expect("addr")).expect("bind");
+        let addr = s.local_addr().expect("addr");
+        (s, addr)
+    });
     format!("http://{addr}/transmission/rpc")
 }
 
