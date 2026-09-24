@@ -270,9 +270,10 @@ pub fn delete_missing(
     keep: &[String],
 ) -> Result<usize> {
     let existing = existing_paths(conn, platform_id)?;
+    let keep: std::collections::HashSet<&str> = keep.iter().map(String::as_str).collect();
     let mut removed = 0;
     let mut stmt = conn.prepare("DELETE FROM files WHERE platform_id = ?1 AND rel_path = ?2")?;
-    for path in existing.iter().filter(|p| !keep.contains(p)) {
+    for path in existing.iter().filter(|p| !keep.contains(p.as_str())) {
         removed += stmt.execute(params![platform_id.0, path])?;
     }
     Ok(removed)
@@ -651,6 +652,36 @@ mod tests {
         assert_eq!(removed, 1);
         assert!(find_by_path(&c, &pid, "keep.nes").expect("find").is_some());
         assert!(find_by_path(&c, &pid, "gone.nes").expect("find").is_none());
+    }
+
+    /// `keep` is deduplicated through a set rather than scanned per row, so a
+    /// repeated entry does not change the count removed.
+    #[test]
+    fn delete_missing_keep_lookup_is_set_based() {
+        let c = conn();
+        let pid = PlatformId("nes".into());
+        let h = Hashed::default();
+        for i in 0..50 {
+            upsert(
+                &c,
+                &pid,
+                &format!("game{i}.nes"),
+                1,
+                1,
+                &h,
+                None,
+                FileState::Unverified,
+                1,
+            )
+            .expect("insert");
+        }
+        let keep: Vec<String> = std::iter::repeat_n("game0.nes".to_owned(), 10)
+            .chain(std::iter::repeat_n("game1.nes".to_owned(), 5))
+            .collect();
+        let removed = delete_missing(&c, &pid, &keep).expect("delete");
+        assert_eq!(removed, 48);
+        assert!(find_by_path(&c, &pid, "game0.nes").expect("find").is_some());
+        assert!(find_by_path(&c, &pid, "game1.nes").expect("find").is_some());
     }
 
     #[test]

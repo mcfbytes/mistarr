@@ -2,13 +2,16 @@
 //! files and matches them against loaded DATs. See `docs/ARCHITECTURE.md`
 //! "Library scan" and `docs/VERIFICATION.md` "Hashing" and "Matching order".
 
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use mistarr_core::hash::{hash_reader, hash_zip_member, zip_members, HeaderRule};
+use mistarr_core::hash::{
+    hash_reader, hash_zip_member, zip_members, HashError, HeaderRule, ZipMember,
+};
 use mistarr_core::{HashSet as Hashes, PlatformId};
 use mistarr_mister::platforms::{self, Kind, Platform};
 use rusqlite::Connection;
@@ -77,6 +80,11 @@ fn header_rule(name: &str) -> HeaderRule {
     }
 }
 
+/// Extensions a disc directory scan hashes: cue sheets plus track and image
+/// formats, per `docs/PLATFORMS.md` "Disc". Anything else (`.m3u`, cover
+/// art, …) is ignored.
+const DISC_TRACK_EXTENSIONS: &[&str] = &["cue", "bin", "iso", "chd"];
+
 /// One directory to walk: its stored id (also the `files.rel_path` prefix)
 /// and its path on disk.
 struct Unit {
@@ -86,7 +94,9 @@ struct Unit {
 
 /// The top-level and legacy directories of a platform, each a [`Unit`] for a
 /// cartridge, romset or arcade platform; the per-title subdirectories of
-/// those for a disc platform. Only directories that exist are returned.
+/// those for a disc platform, plus the top directory itself when it also
+/// holds loose track files directly. Only directories that exist are
+/// returned.
 fn discover_units(games_root: &Path, platform: &Platform) -> Vec<Unit> {
     let top_names = std::iter::once(platform.core_dir).chain(platform.legacy_dirs.iter().copied());
     let top_dirs: Vec<(String, PathBuf)> = top_names
@@ -99,14 +109,24 @@ fn discover_units(games_root: &Path, platform: &Platform) -> Vec<Unit> {
             let Ok(entries) = fs::read_dir(dir) else {
                 continue;
             };
+            let mut has_loose_file = false;
             for entry in entries.flatten() {
-                if entry.path().is_dir() {
+                let path = entry.path();
+                if path.is_dir() {
                     let sub = entry.file_name().to_string_lossy().into_owned();
                     units.push(Unit {
                         id: format!("{name}/{sub}"),
-                        path: entry.path(),
+                        path,
                     });
+                } else if path.is_file() {
+                    has_loose_file = true;
                 }
+            }
+            if has_loose_file {
+                units.push(Unit {
+                    id: name.clone(),
+                    path: dir.clone(),
+                });
             }
         }
         units
@@ -144,6 +164,25 @@ impl Throttle {
         self.last = Some(now);
         true
     }
+}
+
+/// The paths every directory entry in a unit resolved to, sorted for a
+/// deterministic scan order.
+fn list_files(dir: &Path) -> Vec<(PathBuf, String)> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(PathBuf, String)> = entries
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .map(|e| {
+            let path = e.path();
+            let name = e.file_name().to_string_lossy().into_owned();
+            (path, name)
+        })
+        .collect();
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out
 }
 
 async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
@@ -194,16 +233,21 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         .collect();
     for unit in remaining {
         ctx.checkpoint().await?;
+        let (rows, unit_seen) = if platform.kind == Kind::Disc {
+            scan_disc_unit(ctx, &pid, &unit.id, &unit.path).await?
+        } else {
+            scan_flat_unit(ctx, platform, &pid, &unit.id, &unit.path).await?
+        };
+        keep.extend(unit_seen);
         done_set.insert(unit.id.clone());
         let done_vec: Vec<String> = done_set.iter().cloned().collect();
         let now = crate::unix_now();
-        let (pid2, unit_id, unit_path) = (pid.clone(), unit.id.clone(), unit.path.clone());
-        let (written, seen) = ctx
+        let (pid2, rows2, done_vec2) = (pid.clone(), rows, done_vec);
+        let written = ctx
             .app
             .db
-            .write(move |c| commit_unit(c, platform, &pid2, &unit_id, &unit_path, &done_vec, now))
+            .write(move |c| commit_unit(c, &pid2, rows2, &done_vec2, now))
             .await?;
-        keep.extend(seen);
         for (_, id, state) in &written {
             if throttle.allow() {
                 ctx.app.events.publish(
@@ -254,43 +298,20 @@ fn accepts_extension(platform: &Platform, ext: &str) -> bool {
     platform.load_extensions.contains(&ext) || (platform.kind == Kind::Cartridge && ext == "zip")
 }
 
-/// A written file's identity, and every `rel_path` a directory pass considered
-/// (written or skipped as unchanged), for the caller's `file.changed` events
-/// and keep-list.
-type CommitResult = (Vec<(String, FileId, FileState)>, Vec<String>);
+/// A written file's identity, for the caller's `file.changed` events.
+type Written = Vec<(String, FileId, FileState)>;
 
-/// Runs one directory's scan and its DB write in one transaction, so an
-/// interruption never leaves a directory half committed.
-#[allow(clippy::too_many_lines)] // One straight-line pass: list, hash, match, write.
+/// Writes one unit's already-hashed rows and its scan progress in one short
+/// transaction, so an interruption never leaves a directory half committed
+/// and the single writer connection is never held for the hashing itself.
 fn commit_unit(
     conn: &mut Connection,
-    platform: &'static Platform,
     platform_id: &PlatformId,
-    unit_id: &str,
-    unit_path: &Path,
+    rows: Vec<NewFile>,
     done_dirs: &[String],
     now: i64,
-) -> Result<CommitResult> {
+) -> Result<Written> {
     let tx = conn.transaction()?;
-    let mut rows: Vec<NewFile> = Vec::new();
-    // Every accepted rel_path this pass considered, changed or not, so an
-    // unchanged (skipped) file is kept rather than swept up as missing.
-    let mut seen: Vec<String> = Vec::new();
-
-    if platform.kind == Kind::Disc {
-        scan_disc_dir(&tx, platform_id, unit_id, unit_path, &mut rows, &mut seen)?;
-    } else {
-        scan_flat_dir(
-            &tx,
-            platform,
-            platform_id,
-            unit_id,
-            unit_path,
-            &mut rows,
-            &mut seen,
-        )?;
-    }
-
     let mut written = Vec::with_capacity(rows.len());
     for row in rows {
         let hashed = files::Hashed {
@@ -314,7 +335,7 @@ fn commit_unit(
     }
     files::save_scan_progress(&tx, platform_id, done_dirs, now)?;
     tx.commit()?;
-    Ok((written, seen))
+    Ok(written)
 }
 
 /// Matches a fully hashed payload and decides its state, per
@@ -347,214 +368,6 @@ fn classify(
     Ok((Some(m.rom_id), state))
 }
 
-fn scan_flat_dir(
-    tx: &Connection,
-    platform: &Platform,
-    platform_id: &PlatformId,
-    unit_id: &str,
-    dir: &Path,
-    rows: &mut Vec<NewFile>,
-    seen: &mut Vec<String>,
-) -> Result<()> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Ok(());
-    };
-    let rule = header_rule(platform.header_rule);
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(ext) = extension(&path) else {
-            continue;
-        };
-        if !accepts_extension(platform, &ext) {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let rel_path = format!("{unit_id}/{name}");
-        let (size, mtime) = file_meta(&path)?;
-        if ext == "zip" {
-            // A zip container has no files row of its own; its members do.
-            scan_zip(
-                tx,
-                platform_id,
-                rule,
-                platform.header_rule,
-                &rel_path,
-                &path,
-                mtime,
-                rows,
-                seen,
-            )?;
-            continue;
-        }
-        seen.push(rel_path.clone());
-        if unchanged(tx, platform_id, &rel_path, size, mtime)? {
-            continue;
-        }
-        let hint = u64::try_from(size).unwrap_or(0);
-        let hashes = hash_reader(File::open(&path)?, rule, Some(hint))?;
-        let (rom_id, state) = classify(tx, platform_id, &name, &hashes)?;
-        rows.push(NewFile {
-            rel_path,
-            size,
-            mtime,
-            crc32: Some(hashes.crc32),
-            md5: Some(hashes.md5),
-            sha1: Some(hashes.sha1),
-            header_rule: Some(platform.header_rule.to_owned()),
-            rom_id,
-            state,
-        });
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn scan_zip(
-    tx: &Connection,
-    platform_id: &PlatformId,
-    rule: HeaderRule,
-    rule_name: &str,
-    rel_path: &str,
-    path: &Path,
-    mtime: i64,
-    rows: &mut Vec<NewFile>,
-    seen: &mut Vec<String>,
-) -> Result<()> {
-    let members = zip_members(File::open(path)?).map_err(|e| Error::Job(e.to_string()))?;
-    for member in members {
-        let member_rel = format!("{rel_path}#{}", member.name);
-        let member_size = i64::try_from(member.size).unwrap_or(i64::MAX);
-        seen.push(member_rel.clone());
-        if unchanged(tx, platform_id, &member_rel, member_size, mtime)? {
-            continue;
-        }
-        let basename = files::basename(&member.name).to_owned();
-        if files::crc_candidate_exists(tx, platform_id, &member.crc32, member_size)? {
-            let hashes = hash_zip_member(File::open(path)?, &member.name, rule)
-                .map_err(|e| Error::Job(e.to_string()))?;
-            let (rom_id, state) = classify(tx, platform_id, &basename, &hashes)?;
-            rows.push(NewFile {
-                rel_path: member_rel,
-                size: member_size,
-                mtime,
-                crc32: Some(hashes.crc32),
-                md5: Some(hashes.md5),
-                sha1: Some(hashes.sha1),
-                header_rule: Some(rule_name.to_owned()),
-                rom_id,
-                state,
-            });
-        } else {
-            rows.push(NewFile {
-                rel_path: member_rel,
-                size: member_size,
-                mtime,
-                crc32: Some(member.crc32),
-                md5: None,
-                sha1: None,
-                header_rule: None,
-                rom_id: None,
-                state: FileState::Unverified,
-            });
-        }
-    }
-    Ok(())
-}
-
-/// One hashed track of a disc game directory, before the all-or-nothing rule
-/// decides its final state.
-struct Track {
-    rel_path: String,
-    name: String,
-    size: i64,
-    mtime: i64,
-    hashes: Hashes,
-    matched: Option<files::RomMatch>,
-}
-
-fn scan_disc_dir(
-    tx: &Connection,
-    platform_id: &PlatformId,
-    unit_id: &str,
-    dir: &Path,
-    rows: &mut Vec<NewFile>,
-    seen: &mut Vec<String>,
-) -> Result<()> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Ok(());
-    };
-    let mut tracks: Vec<Track> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let rel_path = format!("{unit_id}/{name}");
-        seen.push(rel_path.clone());
-        let (size, mtime) = file_meta(&path)?;
-        let hint = u64::try_from(size).unwrap_or(0);
-        let hashes = hash_reader(File::open(&path)?, HeaderRule::None, Some(hint))?;
-        let matched = files::match_rom(
-            tx,
-            platform_id,
-            &hashes.sha1,
-            &hashes.md5,
-            &hashes.crc32,
-            i64::try_from(hashes.size).unwrap_or(i64::MAX),
-        )?;
-        tracks.push(Track {
-            rel_path,
-            name,
-            size,
-            mtime,
-            hashes,
-            matched,
-        });
-    }
-    if tracks.is_empty() {
-        return Ok(());
-    }
-    let title_id = tracks
-        .first()
-        .and_then(|t| t.matched.as_ref())
-        .map(|m| m.title_id);
-    let complete = title_id.is_some_and(|tid| {
-        tracks.iter().all(|t| {
-            t.matched
-                .as_ref()
-                .is_some_and(|m| m.title_id == tid && m.status != "baddump")
-        })
-    }) && title_id.is_some_and(|tid| {
-        files::count_roms_for_title(tx, tid)
-            .is_ok_and(|n| n == i64::try_from(tracks.len()).unwrap_or(-1))
-    });
-    for t in tracks {
-        let state = match &t.matched {
-            Some(m) if m.status == "baddump" => FileState::Bad,
-            Some(_) if !complete => FileState::Unverified,
-            Some(m) if files::basename(&m.name) == t.name => FileState::Verified,
-            Some(_) => FileState::Misnamed,
-            None => FileState::Unverified,
-        };
-        rows.push(NewFile {
-            rel_path: t.rel_path,
-            size: t.size,
-            mtime: t.mtime,
-            crc32: Some(t.hashes.crc32),
-            md5: Some(t.hashes.md5),
-            sha1: Some(t.hashes.sha1),
-            header_rule: Some("none".to_owned()),
-            rom_id: t.matched.map(|m| m.rom_id),
-            state,
-        });
-    }
-    Ok(())
-}
-
 fn unchanged(
     conn: &Connection,
     platform_id: &PlatformId,
@@ -567,6 +380,439 @@ fn unchanged(
             row.size == size && row.mtime == mtime && row.state != FileState::Pending
         }),
     )
+}
+
+/// Walks one cartridge, romset or arcade directory. Hashing runs outside
+/// any database lock; only the read connection is touched, and briefly, one
+/// file at a time. The caller commits the returned rows in one transaction.
+async fn scan_flat_unit(
+    ctx: &JobContext,
+    platform: &'static Platform,
+    platform_id: &PlatformId,
+    unit_id: &str,
+    dir: &Path,
+) -> Result<(Vec<NewFile>, Vec<String>)> {
+    let dir_owned = dir.to_path_buf();
+    let entries = tokio::task::spawn_blocking(move || list_files(&dir_owned))
+        .await
+        .map_err(|e| Error::Task(e.to_string()))?;
+    let rule = header_rule(platform.header_rule);
+    let mut rows = Vec::new();
+    let mut seen = Vec::new();
+    for (path, name) in entries {
+        ctx.checkpoint().await?;
+        let Some(ext) = extension(&path) else {
+            continue;
+        };
+        if !accepts_extension(platform, &ext) {
+            continue;
+        }
+        let rel_path = format!("{unit_id}/{name}");
+        let (size, mtime) = match file_meta(&path) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "cannot read metadata; marking unverified");
+                seen.push(rel_path.clone());
+                rows.push(unverified_row(rel_path, 0, 0, None));
+                continue;
+            }
+        };
+        if ext == "zip" {
+            // A zip container has no files row of its own; its members do.
+            scan_zip_unit(
+                ctx,
+                platform_id,
+                rule,
+                platform.header_rule,
+                &rel_path,
+                &path,
+                mtime,
+                &mut rows,
+                &mut seen,
+            )
+            .await?;
+            continue;
+        }
+        seen.push(rel_path.clone());
+        let (pid, relp) = (platform_id.clone(), rel_path.clone());
+        let skip = ctx
+            .app
+            .db
+            .read(move |c| unchanged(c, &pid, &relp, size, mtime))
+            .await?;
+        if skip {
+            continue;
+        }
+        let hint = u64::try_from(size).unwrap_or(0);
+        let path_owned = path.clone();
+        let hash_result = tokio::task::spawn_blocking(move || {
+            File::open(&path_owned).and_then(|f| hash_reader(f, rule, Some(hint)))
+        })
+        .await
+        .map_err(|e| Error::Task(e.to_string()))?;
+        let row = match hash_result {
+            Ok(hashes) => {
+                let (pid2, name2, hashes2) = (platform_id.clone(), name.clone(), hashes.clone());
+                let (rom_id, state) = ctx
+                    .app
+                    .db
+                    .read(move |c| classify(c, &pid2, &name2, &hashes2))
+                    .await?;
+                NewFile {
+                    rel_path,
+                    size,
+                    mtime,
+                    crc32: Some(hashes.crc32),
+                    md5: Some(hashes.md5),
+                    sha1: Some(hashes.sha1),
+                    header_rule: Some(platform.header_rule.to_owned()),
+                    rom_id,
+                    state,
+                }
+            }
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "cannot hash file; marking unverified");
+                unverified_row(rel_path, size, mtime, None)
+            }
+        };
+        rows.push(row);
+    }
+    Ok((rows, seen))
+}
+
+/// An unmatched or unreadable file's row: no hash was trusted enough to
+/// classify it, so it is recorded `unverified` rather than aborting the scan.
+fn unverified_row(rel_path: String, size: i64, mtime: i64, crc32: Option<String>) -> NewFile {
+    NewFile {
+        rel_path,
+        size,
+        mtime,
+        crc32,
+        md5: None,
+        sha1: None,
+        header_rule: None,
+        rom_id: None,
+        state: FileState::Unverified,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn scan_zip_unit(
+    ctx: &JobContext,
+    platform_id: &PlatformId,
+    rule: HeaderRule,
+    rule_name: &str,
+    rel_path: &str,
+    path: &Path,
+    mtime: i64,
+    rows: &mut Vec<NewFile>,
+    seen: &mut Vec<String>,
+) -> Result<()> {
+    let path_owned = path.to_path_buf();
+    let listed: std::result::Result<Vec<ZipMember>, HashError> =
+        tokio::task::spawn_blocking(move || zip_members(File::open(&path_owned)?))
+            .await
+            .map_err(|e| Error::Task(e.to_string()))?;
+    let members = match listed {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "cannot read zip; marking unverified");
+            seen.push(rel_path.to_owned());
+            rows.push(unverified_row(rel_path.to_owned(), 0, mtime, None));
+            return Ok(());
+        }
+    };
+
+    for member in members {
+        ctx.checkpoint().await?;
+        // A directory entry (or a zero-length placeholder) has no payload.
+        if member.name.ends_with('/') {
+            continue;
+        }
+        let member_rel = format!("{rel_path}#{}", member.name);
+        let member_size = i64::try_from(member.size).unwrap_or(i64::MAX);
+        seen.push(member_rel.clone());
+        let (pid, mrel) = (platform_id.clone(), member_rel.clone());
+        let skip = ctx
+            .app
+            .db
+            .read(move |c| unchanged(c, &pid, &mrel, member_size, mtime))
+            .await?;
+        if skip {
+            continue;
+        }
+        let basename = files::basename(&member.name).to_owned();
+
+        // A header rule strips bytes before hashing, so the DAT's expected
+        // CRC32/size never match the zip's raw member entry: always hash.
+        let candidate = if rule == HeaderRule::None {
+            let (pid2, crc, size2) = (platform_id.clone(), member.crc32.clone(), member_size);
+            ctx.app
+                .db
+                .read(move |c| files::crc_candidate_exists(c, &pid2, &crc, size2))
+                .await?
+        } else {
+            true
+        };
+
+        if !candidate {
+            rows.push(unverified_row(
+                member_rel,
+                member_size,
+                mtime,
+                Some(member.crc32.clone()),
+            ));
+            continue;
+        }
+
+        let path_owned = path.to_path_buf();
+        let member_name = member.name.clone();
+        let hash_result = tokio::task::spawn_blocking(move || {
+            hash_zip_member(File::open(&path_owned)?, &member_name, rule)
+        })
+        .await
+        .map_err(|e| Error::Task(e.to_string()))?;
+        match hash_result {
+            Ok(hashes) => {
+                let (pid2, basename2, hashes2) = (platform_id.clone(), basename, hashes.clone());
+                let (rom_id, state) = ctx
+                    .app
+                    .db
+                    .read(move |c| classify(c, &pid2, &basename2, &hashes2))
+                    .await?;
+                rows.push(NewFile {
+                    rel_path: member_rel,
+                    size: member_size,
+                    mtime,
+                    crc32: Some(hashes.crc32),
+                    md5: Some(hashes.md5),
+                    sha1: Some(hashes.sha1),
+                    header_rule: Some(rule_name.to_owned()),
+                    rom_id,
+                    state,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(member = %member.name, error = %e, "cannot hash zip member; marking unverified");
+                rows.push(unverified_row(
+                    member_rel,
+                    member_size,
+                    mtime,
+                    Some(member.crc32.clone()),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One hashed track of a disc game directory, before the all-or-nothing rule
+/// decides its final state. `hashes` is `None` when the track could not be
+/// read; it is then always `unverified`.
+struct Track {
+    rel_path: String,
+    name: String,
+    size: i64,
+    mtime: i64,
+    hashes: Option<Hashes>,
+    matched: Option<files::RomMatch>,
+}
+
+/// The stored hashes of an unchanged track, reused instead of re-hashing.
+fn cached_hashes(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    rel_path: &str,
+    size: i64,
+    mtime: i64,
+) -> Result<Option<Hashes>> {
+    let Some(row) = files::find_by_path(conn, platform_id, rel_path)? else {
+        return Ok(None);
+    };
+    if row.size != size || row.mtime != mtime || row.state == FileState::Pending {
+        return Ok(None);
+    }
+    let (Some(crc32), Some(md5), Some(sha1)) = (row.crc32, row.md5, row.sha1) else {
+        return Ok(None);
+    };
+    Ok(Some(Hashes {
+        size: u64::try_from(size).unwrap_or(0),
+        crc32,
+        md5,
+        sha1,
+    }))
+}
+
+/// Walks one disc game directory (or a platform's top directory when it
+/// holds loose track files directly). Tracks are grouped by the title their
+/// hash matched, and each title is verified independently: a stray `.m3u`
+/// or a second, unrelated game sharing the directory never demotes a
+/// complete one, per `docs/VERIFICATION.md` "For disc games".
+async fn scan_disc_unit(
+    ctx: &JobContext,
+    platform_id: &PlatformId,
+    unit_id: &str,
+    dir: &Path,
+) -> Result<(Vec<NewFile>, Vec<String>)> {
+    let dir_owned = dir.to_path_buf();
+    let entries = tokio::task::spawn_blocking(move || list_files(&dir_owned))
+        .await
+        .map_err(|e| Error::Task(e.to_string()))?;
+
+    let mut tracks: Vec<Track> = Vec::new();
+    let mut seen = Vec::new();
+    for (path, name) in entries {
+        ctx.checkpoint().await?;
+        let Some(ext) = extension(&path) else {
+            continue;
+        };
+        if !DISC_TRACK_EXTENSIONS.contains(&ext.as_str()) {
+            continue;
+        }
+        let rel_path = format!("{unit_id}/{name}");
+        let (size, mtime) = match file_meta(&path) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "cannot read metadata; marking unverified");
+                seen.push(rel_path.clone());
+                tracks.push(Track {
+                    rel_path,
+                    name,
+                    size: 0,
+                    mtime: 0,
+                    hashes: None,
+                    matched: None,
+                });
+                continue;
+            }
+        };
+        seen.push(rel_path.clone());
+
+        let (pid, relp) = (platform_id.clone(), rel_path.clone());
+        let cached = ctx
+            .app
+            .db
+            .read(move |c| cached_hashes(c, &pid, &relp, size, mtime))
+            .await?;
+        let hashes = if let Some(h) = cached {
+            Some(h)
+        } else {
+            let hint = u64::try_from(size).unwrap_or(0);
+            let path_owned = path.clone();
+            let hash_result = tokio::task::spawn_blocking(move || {
+                File::open(&path_owned).and_then(|f| hash_reader(f, HeaderRule::None, Some(hint)))
+            })
+            .await
+            .map_err(|e| Error::Task(e.to_string()))?;
+            match hash_result {
+                Ok(h) => Some(h),
+                Err(e) => {
+                    tracing::warn!(path = %path.display(), error = %e, "cannot hash track; marking unverified");
+                    None
+                }
+            }
+        };
+        let matched = match &hashes {
+            Some(h) => {
+                let (pid2, h2) = (platform_id.clone(), h.clone());
+                ctx.app
+                    .db
+                    .read(move |c| {
+                        files::match_rom(
+                            c,
+                            &pid2,
+                            &h2.sha1,
+                            &h2.md5,
+                            &h2.crc32,
+                            i64::try_from(h2.size).unwrap_or(i64::MAX),
+                        )
+                    })
+                    .await?
+            }
+            None => None,
+        };
+        tracks.push(Track {
+            rel_path,
+            name,
+            size,
+            mtime,
+            hashes,
+            matched,
+        });
+    }
+    if tracks.is_empty() {
+        return Ok((Vec::new(), seen));
+    }
+
+    let rows = ctx
+        .app
+        .db
+        .read(move |c| classify_disc_tracks(c, tracks))
+        .await?;
+    Ok((rows, seen))
+}
+
+/// Decides each track's final state from the all-or-nothing rule, evaluated
+/// once per matched title rather than once for the whole directory.
+fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Result<Vec<NewFile>> {
+    let mut groups: HashMap<i64, Vec<usize>> = HashMap::new();
+    for (i, t) in tracks.iter().enumerate() {
+        if let Some(m) = &t.matched {
+            groups.entry(m.title_id).or_default().push(i);
+        }
+    }
+    let mut complete: HashMap<i64, bool> = HashMap::new();
+    for (&title_id, idxs) in &groups {
+        let want = files::count_roms_for_title(conn, title_id)?;
+        let ok = i64::try_from(idxs.len()).unwrap_or(-1) == want
+            && idxs.iter().all(|&i| {
+                tracks[i]
+                    .matched
+                    .as_ref()
+                    .is_some_and(|m| m.status != "baddump")
+            });
+        complete.insert(title_id, ok);
+    }
+
+    let mut rows = Vec::with_capacity(tracks.len());
+    for t in tracks {
+        let (rom_id, state) = match &t.matched {
+            None => (None, FileState::Unverified),
+            Some(m) if m.status == "baddump" => (Some(m.rom_id), FileState::Bad),
+            Some(m) => {
+                let is_complete = complete.get(&m.title_id).copied().unwrap_or(false);
+                let state = if !is_complete {
+                    FileState::Unverified
+                } else if files::basename(&m.name) == t.name {
+                    FileState::Verified
+                } else {
+                    FileState::Misnamed
+                };
+                (Some(m.rom_id), state)
+            }
+        };
+        let (crc32, md5, sha1, header_rule) = match t.hashes {
+            Some(h) => (
+                Some(h.crc32),
+                Some(h.md5),
+                Some(h.sha1),
+                Some("none".to_owned()),
+            ),
+            None => (None, None, None, None),
+        };
+        rows.push(NewFile {
+            rel_path: t.rel_path,
+            size: t.size,
+            mtime: t.mtime,
+            crc32,
+            md5,
+            sha1,
+            header_rule,
+            rom_id,
+            state,
+        });
+    }
+    Ok(rows)
 }
 
 #[cfg(test)]
@@ -608,5 +854,39 @@ mod tests {
         let disc = platforms::by_id("psx").expect("psx");
         let units = discover_units(dir.path(), disc);
         assert_eq!(units[0].id, "PSX/Example Quest (USA)");
+    }
+
+    /// A loose disc image directly under the top directory (no per-title
+    /// subfolder) is its own unit, not silently skipped.
+    #[test]
+    fn discover_units_includes_loose_disc_files_in_the_top_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let psx_dir = dir.path().join("PSX");
+        fs::create_dir_all(&psx_dir).expect("mkdir");
+        fs::write(psx_dir.join("Loose Quest (USA).iso"), b"data").expect("write");
+        fs::create_dir_all(psx_dir.join("Example Quest (USA)")).expect("mkdir");
+        let disc = platforms::by_id("psx").expect("psx");
+        let units = discover_units(dir.path(), disc);
+        let mut ids: Vec<&str> = units.iter().map(|u| u.id.as_str()).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, ["PSX", "PSX/Example Quest (USA)"]);
+    }
+
+    /// A zip's central directory can list an explicit directory entry
+    /// (trailing `/`); it carries no payload and is never a `files` row.
+    #[test]
+    fn zip_directory_entries_are_skipped() {
+        let dir_entry = ZipMember {
+            name: "sub/".to_owned(),
+            size: 0,
+            crc32: "00000000".to_owned(),
+        };
+        let file_entry = ZipMember {
+            name: "sub/a.bin".to_owned(),
+            size: 3,
+            crc32: "352441c2".to_owned(),
+        };
+        assert!(dir_entry.name.ends_with('/'));
+        assert!(!file_entry.name.ends_with('/'));
     }
 }

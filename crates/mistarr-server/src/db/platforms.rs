@@ -2,7 +2,7 @@
 
 use mistarr_core::PlatformId;
 use mistarr_mister::{Kind, Platform};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 use crate::error::Result;
@@ -116,6 +116,37 @@ pub fn list(conn: &Connection) -> Result<Vec<PlatformRow>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// One platform by id, or `None` if it does not exist.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_core::PlatformId;
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(mistarr_server::db::platforms::find(&conn, &PlatformId("nes".into())).unwrap().is_none());
+/// ```
+pub fn find(conn: &Connection, id: &PlatformId) -> Result<Option<PlatformRow>> {
+    conn.query_row(
+        "SELECT id, name, core_dir, kind, core_present, enabled FROM platforms WHERE id = ?1",
+        [&id.0],
+        |r| {
+            Ok(PlatformRow {
+                id: PlatformId(r.get(0)?),
+                name: r.get(1)?,
+                core_dir: r.get(2)?,
+                kind: r.get(3)?,
+                core_present: r.get(4)?,
+                enabled: r.get(5)?,
+            })
+        },
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 /// Sets `core_present` to 1 for `present` and 0 for every other platform.
 ///
 /// # Errors
@@ -180,6 +211,19 @@ mod tests {
             .map(|r| r.id.0)
             .collect();
         assert_eq!(present, ["snes"]);
+    }
+
+    #[test]
+    fn find_returns_the_row_or_none() {
+        let mut c = conn();
+        seed(&mut c, &PLATFORMS).expect("seed");
+        let nes = find(&c, &PlatformId("nes".into()))
+            .expect("find")
+            .expect("row");
+        assert_eq!(nes.core_dir, "NES");
+        assert!(find(&c, &PlatformId("no-such-platform".into()))
+            .expect("find")
+            .is_none());
     }
 
     #[test]

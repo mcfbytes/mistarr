@@ -14,6 +14,7 @@ use super::{ApiError, Page, Paging};
 use crate::app::AppState;
 use crate::config::{RuntimeSettings, SettingsPatch};
 use crate::db::jobs::{self, JobId, JobRow};
+use crate::db::platforms;
 use crate::db::settings::{self, keys};
 use crate::db::system::wizard_counts;
 use crate::jobs::detect_client::DetectClient;
@@ -54,11 +55,37 @@ async fn scan(
     } else {
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
     };
-    let job = ScanJob {
-        platform_id: body.platform_id.map(PlatformId),
+    let platform_id = match body.platform_id {
+        Some(raw) => Some(validate_platform(&app, raw).await?),
+        None => None,
     };
+    let job = ScanJob { platform_id };
     let job_id = Scheduler::enqueue(&app, Arc::new(job)).await?;
     Ok(Json(ScanResponse { job_id }))
+}
+
+/// Looks up `raw` among the seeded platforms, for `POST /system/scan`.
+///
+/// # Errors
+///
+/// [`ApiError`] 404 when no such platform exists, 400 when it is disabled.
+async fn validate_platform(app: &AppState, raw: String) -> Result<PlatformId, ApiError> {
+    let id = PlatformId(raw);
+    let row = app
+        .db
+        .read({
+            let id = id.clone();
+            move |c| platforms::find(c, &id)
+        })
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("no such platform `{}`", id.0)))?;
+    if !row.enabled {
+        return Err(ApiError::bad_request(format!(
+            "platform `{}` is disabled",
+            id.0
+        )));
+    }
+    Ok(id)
 }
 
 async fn status(State(app): State<Arc<AppState>>) -> Json<Status> {
