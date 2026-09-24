@@ -193,17 +193,23 @@ canonical path with no file on disk is removed.
 
 `/dats` items are `dat_versions` rows loaded from DAT files, newest first: `{ id, platform_id,
 dat_name, version, source_file, loaded_at, superseded_by, game_count, retired,
-family, reason }`. `family` is the DAT family key (VERIFICATION.md "DAT
-families"); `reason` says why a version is not current, `null` for a current
-one. `total` counts every version, so a client pages with `limit` and `offset`. `source_file` is the name under `dats/loaded/`, which gains ` (N)` before
+family, reason, suggested }`. `family` is the DAT family key (VERIFICATION.md
+"DAT families"); `reason` says why a version is not current, `null` for a
+current one; `suggested` lists, for an unbound version, the platforms its
+family is current on, and is empty otherwise. `total` counts every version,
+so a client pages with `limit` and `offset`. `source_file` is the name under `dats/loaded/`, which gains ` (N)` before
 the extension when the name is taken. Upload takes one `file` part named
 `.dat`, `.xml` or `.zip`, writes it into `dats/` and answers 202 `{ file,
 job_id }`; the result arrives as `dat.loaded` or `dat.rejected`. Retiring
-removes a loaded version: its titles and roms retire, files matched to them
-are matched again against the live DATs by their stored hashes (or become
-`unverified`), and the platform's picks are recomputed; it answers 204, or
-404 for an unknown id. No file on disk is touched, and an older version of the
-same family stays superseded.
+removes a loaded version: in one transaction its titles and their roms
+retire, `wanted` is cleared on those titles and their downloads in `wanted`
+or `queued` are cancelled. It answers 204, or 404 for an unknown id, and
+queues the platform's recompute job, which matches files of retired roms
+again against the live roms by their stored hashes (or marks them
+`unverified`) and recomputes the picks. A download already transferring
+finishes and is placed only if its file matches a live rom of its entry;
+otherwise it is quarantined with a reason saying the DAT was removed. No file
+on disk is touched, and an older version of the same family stays superseded.
 
 `{file}` in the two `rejected` routes is a file name as `/dats/incoming`
 lists it, percent-encoded; a name with a `/` or `\`, a leading `.` or the

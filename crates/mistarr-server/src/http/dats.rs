@@ -242,8 +242,8 @@ fn remove_if_present(path: &FsPath) -> Result<(), ApiError> {
     }
 }
 
-/// `DELETE /dats/{id}`: retires a loaded version and its titles, matches the files of
-/// their roms again against the live DATs, and queues a 1G1R recompute. Files stay on disk.
+/// `DELETE /dats/{id}`: retires a loaded version with its titles and roms, unwants them and
+/// queues the recompute job, which matches their files again and recomputes 1G1R.
 async fn retire(
     State(app): State<Arc<AppState>>,
     id: Result<Path<i64>, PathRejection>,
@@ -253,10 +253,7 @@ async fn retire(
         .db
         .write(move |c| {
             let tx = c.transaction()?;
-            let row = dats::retire(&tx, DatVersionId(id))?;
-            if let Some(p) = row.as_ref().and_then(|r| r.platform_id.as_ref()) {
-                crate::db::files::rematch_retired(&tx, p)?;
-            }
+            let row = dats::retire(&tx, DatVersionId(id), crate::unix_now())?;
             tx.commit()?;
             Ok(row)
         })

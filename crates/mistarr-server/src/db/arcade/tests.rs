@@ -205,7 +205,7 @@ fn dat_loads_never_touch_mra_titles() {
     assert!(retired(d));
     let mra_version = mra_version(&c, "arcade", 2).expect("version");
     assert!(dats::get(&c, mra_version).expect("get").is_none());
-    assert!(dats::retire(&c, mra_version).expect("retire").is_none());
+    assert!(dats::retire(&c, mra_version, 1).expect("retire").is_none());
     assert!(!retired(m));
     let (items, total) = dats::list(&c, 10, 0).expect("list");
     assert_eq!((items.len(), total), (2, 2));

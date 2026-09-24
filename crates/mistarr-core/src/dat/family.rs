@@ -38,7 +38,8 @@ impl fmt::Display for DatFamily {
 }
 
 /// The family of a DAT name: lowercased, without [`FORMAT_MARKERS`] groups anywhere or
-/// version groups at the end, whitespace collapsed.
+/// `(…)` and `[…]` version groups at the end, whitespace collapsed. `X (2)` and `X` are
+/// deliberately one family. A name that is nothing but such groups keeps its whole text.
 ///
 /// ```
 /// use mistarr_core::dat::family_key;
@@ -69,12 +70,38 @@ pub fn family_key(name: &str) -> DatFamily {
         rest = &rest[open + len + 1..];
     }
     kept.push_str(rest);
-    let mut key = kept.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut key = collapse(&kept);
     while let Some(start) = trailing_version(&key) {
         key.truncate(start);
         key.truncate(key.trim_end().len());
     }
+    if key.is_empty() {
+        key = collapse(name);
+    }
     DatFamily(key.to_lowercase())
+}
+
+fn collapse(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// A version string as numbers that sort in release order: its digit runs, so
+/// `20260101-000000` sorts before `20260102` and `1.9` before `1.10`. `None` without digits.
+///
+/// ```
+/// use mistarr_core::dat::version_order;
+/// assert!(version_order("1.10") > version_order("1.9"));
+/// assert!(version_order("20260102") > version_order("20260101-235959"));
+/// assert_eq!(version_order("none"), None);
+/// ```
+#[must_use]
+pub fn version_order(version: &str) -> Option<Vec<u64>> {
+    let runs: Vec<u64> = version
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|r| !r.is_empty())
+        .map(|r| r.parse().unwrap_or(u64::MAX))
+        .collect();
+    (!runs.is_empty()).then_some(runs)
 }
 
 /// Splits a final `(…)` group made of a date or version off a name: the name before it,
@@ -115,10 +142,13 @@ fn is_marker(group: &str) -> bool {
     })
 }
 
-/// Where a final `(…)` group made of a version or date starts.
+/// Where a final `(…)` or `[…]` group made of a version or date starts.
 fn trailing_version(key: &str) -> Option<usize> {
-    let body = key.strip_suffix(')')?;
-    let open = body.rfind('(')?;
+    let (body, open) = match key.strip_suffix(')') {
+        Some(body) => (body, '('),
+        None => (key.strip_suffix(']')?, '['),
+    };
+    let open = body.rfind(open)?;
     let inner = body[open + 1..].trim();
     let digits = inner.strip_prefix(['v', 'V']).unwrap_or(inner);
     let version = digits.chars().any(|c| c.is_ascii_digit())
@@ -164,6 +194,20 @@ mod tests {
             family_key("Example (Unclosed").as_str(),
             "example (unclosed"
         );
+        assert_eq!(
+            family_key("Example System [v1.2]").as_str(),
+            "example system"
+        );
+        assert_eq!(
+            family_key("Example System (20260101) (Headered) [Retool]").as_str(),
+            "example system"
+        );
+        assert_eq!(family_key("(Headered)").as_str(), "(headered)");
+        assert_eq!(
+            family_key("(DB Export) (20260101)").as_str(),
+            "(db export) (20260101)"
+        );
+        assert_eq!(family_key("MAME").as_str(), "mame");
         assert_eq!(family_key("Example").to_string(), "example");
     }
 
@@ -175,7 +219,7 @@ mod tests {
         }
 
         #[test]
-        fn a_marker_never_changes_the_family(name in "[A-Za-z0-9 ._-]{0,30}", v in 0u32..99_999) {
+        fn a_marker_never_changes_the_family(name in "[A-Za-z][A-Za-z0-9 ._-]{0,30}", v in 0u32..99_999) {
             let export = format!("{name} (DB Export) ({v})");
             prop_assert_eq!(family_key(&export), family_key(&format!("{name} (Headered)")));
         }

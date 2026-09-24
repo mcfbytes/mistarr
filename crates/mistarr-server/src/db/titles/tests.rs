@@ -516,6 +516,43 @@ fn want_refuses_bios_and_retired_and_unwant_cancels_queued_downloads() {
 }
 
 #[test]
+fn removing_a_dat_retires_its_roms_unwants_and_cancels_queued_downloads() {
+    let c = conn();
+    let v = plain(&c);
+    let usa = id_of(&c, "Example Quest (USA)");
+    assert_eq!(want(&c, usa).expect("want"), Ok(()));
+    let q = rom(&c, usa, "q.bin");
+    c.execute_batch(
+        "INSERT INTO sources (infohash, display_name, origin_file, state, added_at)
+         VALUES ('00', 'n', 'a.torrent', 'bound', 0);",
+    )
+    .expect("source");
+    for state in ["queued", "wanted", "transferring"] {
+        c.execute(
+            "INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, created_at, updated_at)
+             VALUES (?1, ?2, 1, 0, ?3, 0, 0)",
+            params![usa.0, q, state],
+        )
+        .expect("download");
+    }
+    assert!(dats::retire(&c, v, 5).expect("retire").is_some());
+    let count = |sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).expect("count") };
+    assert_eq!(count("SELECT COUNT(*) FROM roms WHERE retired = 0"), 0);
+    assert_eq!(
+        count("SELECT COUNT(*) FROM titles WHERE wanted = 1 OR retired = 0"),
+        0
+    );
+    let states: Vec<String> = c
+        .prepare("SELECT state FROM downloads ORDER BY id")
+        .expect("prepare")
+        .query_map([], |r| r.get(0))
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows");
+    assert_eq!(states, ["cancelled", "cancelled", "transferring"]);
+}
+
+#[test]
 fn browse_uses_indexes_for_the_group_lookups() {
     let c = conn();
     let plan: Vec<String> = c
@@ -539,6 +576,6 @@ fn browse_uses_indexes_for_the_group_lookups() {
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
     let plan = plan.join("\n");
-    assert!(plan.contains("titles_parent"), "{plan}");
+    assert!(plan.contains("titles_group_root"), "{plan}");
     assert!(plan.contains("files_rom"), "{plan}");
 }

@@ -73,7 +73,6 @@ impl Db {
         let mut writer = Connection::open(path)?;
         configure(&writer)?;
         migrate::apply(&mut writer)?;
-        dats::refresh_families(&writer)?;
         let reader = Connection::open(path)?;
         configure(&reader)?;
         reader.pragma_update(None, "query_only", true)?;

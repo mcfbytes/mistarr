@@ -314,6 +314,32 @@ impl Running {
     }
 }
 
+/// What startup reads and settles in the database before anything runs: saved runtime
+/// settings, the platforms with an unfinished scan, and those whose DAT families resolved.
+type Prepared = (
+    Result<Option<RuntimeSettings>>,
+    Vec<mistarr_core::PlatformId>,
+    Vec<mistarr_core::PlatformId>,
+);
+
+/// Seeds the platforms, refreshes DAT family keys and leaves one current version per family.
+fn prepare_catalog(c: &mut rusqlite::Connection) -> Result<Prepared> {
+    let added = db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS)?;
+    if added > 0 {
+        tracing::info!(added, "seeded platforms");
+    }
+    let unfinished = db::files::platforms_with_progress(c)?;
+    let tx = c.transaction()?;
+    db::dats::refresh_families(&tx)?;
+    let resolved = db::dats::resolve_families(&tx)?;
+    tx.commit()?;
+    Ok((
+        settings::get_json::<RuntimeSettings>(c, keys::RUNTIME),
+        unfinished,
+        resolved,
+    ))
+}
+
 /// Runs the startup sequence and returns once the HTTP server is listening.
 /// The data directory stays locked to this server until it is shut down.
 ///
@@ -331,17 +357,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
 
     // Step 2: database, migrations, platform seed, runtime settings.
     let db = Db::open(&config.paths.db())?;
-    let (stored, unfinished_scans) = db.write_blocking(|c| {
-        let added = db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS)?;
-        if added > 0 {
-            tracing::info!(added, "seeded platforms");
-        }
-        let unfinished = db::files::platforms_with_progress(c)?;
-        Ok((
-            settings::get_json::<RuntimeSettings>(c, keys::RUNTIME),
-            unfinished,
-        ))
-    })?;
+    let (stored, unfinished_scans, resolved) = db.write_blocking(prepare_catalog)?;
     let stored = stored.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "ignoring unreadable saved settings; using the config file");
         None
@@ -366,6 +382,14 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
             dropped = reconciled.dropped,
             "reconciled unfinished jobs"
         );
+    }
+
+    for platform in &resolved {
+        Scheduler::enqueue(
+            &app,
+            Arc::new(jobs::dat_import::Recompute::new(&platform.0)),
+        )
+        .await?;
     }
 
     // Step 3: download client.

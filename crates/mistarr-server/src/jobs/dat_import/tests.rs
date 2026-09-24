@@ -699,11 +699,15 @@ fn binding_an_older_version_is_rejected_and_rolled_back() {
     let c = conn();
     let v1 = dat("Test Console", "1", &[("Example Quest (USA)", None)]);
     let old = loaded(import(&c, &v1, &request(false, None)));
-    loaded(import(
-        &c,
-        &dat("Test Console", "2", &[("Example Quest (USA)", None)]),
-        &request(false, None),
-    ));
+    let v2 = dat("Test Console", "2", &[("Example Quest (USA)", None)]);
+    let newer = loaded(import(&c, &v2, &request(false, None)));
+    let bind_newer = Bind {
+        version: newer.version,
+        platform: PlatformId("nes".into()),
+        dat_name: "Test Console".into(),
+        dat_version: "2".into(),
+    };
+    assert!(loaded(import(&c, &v2, &request(false, Some(bind_newer)))).has_titles);
     let bind = Bind {
         version: old.version,
         platform: PlatformId("nes".into()),
@@ -720,7 +724,30 @@ fn binding_an_older_version_is_rejected_and_rolled_back() {
         .expect("get")
         .expect("row");
     assert_eq!(row.platform_id, None);
-    assert_eq!(count(&c, "SELECT COUNT(*) FROM titles"), 0);
+    assert_eq!(
+        count(&c, "SELECT COUNT(*) FROM titles"),
+        1,
+        "only the bound newer version"
+    );
+}
+
+#[test]
+fn an_unbound_version_never_blocks_binding_one_of_its_family() {
+    let c = conn();
+    let v1 = dat("Test Console", "1", &[("Example Quest (USA)", None)]);
+    let old = loaded(import(&c, &v1, &request(false, None)));
+    loaded(import(
+        &c,
+        &dat("Test Console", "2", &[("Example Quest (USA)", None)]),
+        &request(false, None),
+    ));
+    let bind = Bind {
+        version: old.version,
+        platform: PlatformId("nes".into()),
+        dat_name: "Test Console".into(),
+        dat_version: "1".into(),
+    };
+    assert!(loaded(import(&c, &v1, &request(false, Some(bind)))).has_titles);
 }
 
 async fn job_state(app: &AppState, id: crate::db::jobs::JobId) -> rows::JobRow {
@@ -882,8 +909,8 @@ fn remove_with_files(c: &TestDb, version: DatVersionId, files: &[(&str, &str, i6
             let state = crate::db::files::FileState::Misnamed;
             crate::db::files::upsert(x, &nes, path, 4, 1, &hashed, Some(*id), state, 1)?;
         }
-        dats::retire(x, version)?;
-        let matched = crate::db::files::rematch_retired(x, &nes)?;
+        dats::retire(x, version, 1)?;
+        let matched = rematch_chunk(x, &nes)?;
         titles::recompute_platform(x, "nes", &Prefs::default())?;
         Ok(matched)
     })
@@ -915,7 +942,7 @@ fn an_add_on_dat_coexists_and_shares_groups_by_rom() {
     assert_eq!(
         count(
             &c,
-            "SELECT COUNT(DISTINCT parent_id) FROM titles WHERE retired = 0"
+            "SELECT COUNT(DISTINCT group_root) FROM titles WHERE retired = 0"
         ),
         3,
         "a game both DATs list with the same roms is one group"
@@ -958,7 +985,7 @@ fn an_add_on_dat_coexists_and_shares_groups_by_rom() {
     assert_eq!(
         count(
             &c,
-            "SELECT COUNT(DISTINCT parent_id) FROM titles WHERE retired = 0"
+            "SELECT COUNT(DISTINCT group_root) FROM titles WHERE retired = 0"
         ),
         2
     );
@@ -1015,5 +1042,147 @@ fn an_export_header_lets_placement_add_it_back() {
             bytes
         }),
         "{plan:?}"
+    );
+}
+
+#[test]
+fn an_add_on_never_merges_two_groups_of_one_dat() {
+    let c = conn();
+    let official = [("Alpha Game (World)", None), ("Beta Game (World)", None)];
+    import_at(&c, &dat(NES_LOGIQX, "1", &official), 1);
+    let groups = |c: &TestDb| {
+        (
+            count(
+                c,
+                "SELECT COUNT(DISTINCT group_root) FROM titles WHERE retired = 0",
+            ),
+            count(
+                c,
+                "SELECT COUNT(*) FROM titles WHERE retired = 0 AND is_1g1r_pick = 1",
+            ),
+        )
+    };
+    assert_eq!(groups(&c), (2, 2));
+    let add_on = [
+        ("Gamma Pack (World)", None),
+        ("Delta Pack (World)", Some("Gamma Pack (World)")),
+    ];
+    let added = import_at(&c, &dat(NES_SAMPLES, "1", &add_on), 2);
+    assert_eq!(
+        groups(&c),
+        (2, 2),
+        "each add-on title joins the group of its match, and the two groups stay apart"
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(DISTINCT parent_id) FROM titles WHERE retired = 0"
+        ),
+        3,
+        "parent_id keeps each DAT's own clone groups"
+    );
+    remove_with_files(&c, added.version, &[]);
+    assert_eq!(groups(&c), (2, 2));
+}
+
+#[test]
+fn one_family_on_two_platforms_keeps_separate_titles() {
+    let c = conn();
+    let t = titles::TitleInput {
+        name: "Example Quest (World)",
+        base_name: "Example Quest",
+        group_key: "example quest",
+        clone_of: None,
+        regions: &[],
+        languages: &[],
+        revision: None,
+        flags: &[],
+    };
+    let ids = c
+        .with(|x| {
+            let mut ids = Vec::new();
+            for (version, platform) in [("1", "gb"), ("2", "gbc")] {
+                let v = dats::upsert_version(
+                    x,
+                    &NewVersion {
+                        dat_name: "Example Vendor - Example Handheld",
+                        version,
+                        source_file: "h.dat",
+                        platform: Some(platform),
+                        now: 1,
+                    },
+                )?;
+                assert!(v.current, "{platform}");
+                ids.push(titles::upsert_title(x, platform, v.id, &t, &[])?);
+            }
+            Ok(ids)
+        })
+        .expect("titles");
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(
+        count(&c, "SELECT COUNT(*) FROM titles WHERE platform_id = 'gb'"),
+        1
+    );
+}
+
+#[test]
+fn a_disc_track_is_matched_again_under_the_all_or_nothing_rule() {
+    let c = conn();
+    let psx = PlatformId("psx".into());
+    let h = |n: u8| mistarr_core::HashSet {
+        size: 4,
+        crc32: format!("{n:08x}"),
+        md5: format!("{n:032x}"),
+        sha1: format!("{n:040x}"),
+    };
+    let track = |n: u8| format!("Example Disc (USA) (Track {n}).bin");
+    let states = c
+        .with(|x| {
+            let old = files::seed_title_fixture(x, &psx, "Example Disc (USA)")?;
+            let new = files::seed_title_fixture(x, &psx, "Example Disc (USA) (Rev 1)")?;
+            for n in 1..=3 {
+                files::seed_rom_for_title_fixture(x, new, &track(n), &h(n), "good")?;
+            }
+            for n in 1..=2 {
+                let rom = files::seed_rom_for_title_fixture(x, old, &track(n), &h(n), "good")?;
+                let sums = h(n);
+                let hashed = files::Hashed {
+                    crc32: Some(&sums.crc32),
+                    md5: Some(&sums.md5),
+                    sha1: Some(&sums.sha1),
+                    header_rule: Some("none"),
+                };
+                let path = format!("PSX/Example Disc (USA)/{}", track(n));
+                files::upsert(
+                    x,
+                    &psx,
+                    &path,
+                    4,
+                    1,
+                    &hashed,
+                    Some(rom),
+                    FileState::Verified,
+                    1,
+                )?;
+            }
+            x.execute("UPDATE titles SET retired = 1 WHERE id = ?1", [old])?;
+            assert_eq!(rematch_chunk(x, &psx)?, 2);
+            let rows: Vec<(String, bool)> = x
+                .prepare(
+                    "SELECT f.state, t.name = 'Example Disc (USA) (Rev 1)' FROM files f
+                     JOIN roms r ON r.id = f.rom_id JOIN titles t ON t.id = r.title_id",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok(rows)
+        })
+        .expect("rematch");
+    assert_eq!(
+        states,
+        [
+            ("unverified".to_owned(), true),
+            ("unverified".to_owned(), true)
+        ],
+        "two of the live title's three tracks are not a complete game"
     );
 }

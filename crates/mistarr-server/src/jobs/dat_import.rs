@@ -26,6 +26,7 @@ use crate::app::AppState;
 use crate::config::PrefsConfig;
 use crate::db::dat_stage::{self, StagedGame, StagedRom};
 use crate::db::dats::{self, DatVersionId, NewVersion};
+use crate::db::files::{self, FileRow, FileState};
 use crate::db::jobs::{JobId, JobState};
 use crate::db::titles;
 use crate::db::Db;
@@ -623,7 +624,6 @@ fn import_stream<R: BufRead>(
         if let Some(p) = &platform {
             titles::link_parents(&tx, plan.id, clone_of)?;
             retired = dats::retire_absent(&tx, plan.id)?;
-            crate::db::files::rematch_retired(&tx, p)?;
             titles::recompute_platform(&tx, &p.0, &req.prefs)?;
         }
         dat_stage::clear(&tx)?;
@@ -711,7 +711,8 @@ fn staged(game: &DatGame) -> StagedGame {
     }
 }
 
-/// Queues an automatic scan for each platform a DAT just loaded titles for,
+/// Queues the recompute job, which matches files of retired roms again, and an
+/// automatic scan for each platform a DAT just loaded titles for,
 /// deduped so several DATs in one pack queue at most one each, binds waiting
 /// sources once for the whole pack, then checks whether the wizard just
 /// became complete.
@@ -723,6 +724,10 @@ async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
         };
         if !queued.insert(platform.clone()) {
             continue;
+        }
+        // Files of roms the load retired are matched again in the background.
+        if let Err(e) = Scheduler::enqueue(app, Arc::new(Recompute::new(&platform.0))).await {
+            tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue the recompute");
         }
         if let Err(e) = scan::enqueue_if_games_dir_exists(app, platform).await {
             tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue automatic scan");
@@ -797,7 +802,100 @@ pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
         .unwrap_or(candidate)
 }
 
-/// Recomputes the 1G1R picks of one platform under the current preferences.
+/// Files matched again per transaction by [`rematch_chunk`].
+const REMATCH_CHUNK: u32 = 256;
+
+/// Matches up to [`REMATCH_CHUNK`] files of retired roms on `platform` again, by their
+/// stored hashes against live roms only, and returns how many it took. A cartridge file
+/// takes the state a scan would give it; a disc track is classified again with the other
+/// tracks of its directory by the scan's all-or-nothing rule. A file no live rom lists
+/// becomes `unverified`.
+///
+/// # Errors
+///
+/// [`Error::Db`] on SQLite failure.
+pub(crate) fn rematch_chunk(conn: &Connection, platform: &PlatformId) -> Result<usize> {
+    let disc = mistarr_mister::platforms::by_id(&platform.0)
+        .is_some_and(|p| p.kind == mistarr_mister::Kind::Disc);
+    let orphans = files::retired_matches(conn, platform, REMATCH_CHUNK)?;
+    let mut units: Vec<&str> = Vec::new();
+    for f in &orphans {
+        if let Some((dir, _)) = f.rel_path.rsplit_once('/').filter(|_| disc) {
+            if !units.contains(&dir) {
+                units.push(dir);
+            }
+            continue;
+        }
+        let (rom, state) = match live_match(conn, platform, f)? {
+            None => (None, FileState::Unverified),
+            Some(m) => {
+                let own = f
+                    .rel_path
+                    .rsplit_once('#')
+                    .map_or(f.rel_path.as_str(), |(_, m)| m);
+                let state = if m.status == "baddump" {
+                    FileState::Bad
+                } else if files::basename(&m.name) == files::basename(own) {
+                    FileState::Verified
+                } else {
+                    FileState::Misnamed
+                };
+                (Some(m.rom_id), state)
+            }
+        };
+        files::set_match(conn, f.id, rom, state)?;
+    }
+    for dir in units {
+        let rows = files::in_directory(conn, platform, dir)?;
+        let mut tracks = Vec::with_capacity(rows.len());
+        for f in &rows {
+            tracks.push(scan::Track {
+                rel_path: f.rel_path.clone(),
+                name: files::basename(&f.rel_path).to_owned(),
+                size: f.size,
+                mtime: f.mtime,
+                hashes: stored_hashes(f),
+                matched: live_match(conn, platform, f)?,
+            });
+        }
+        for (f, t) in rows.iter().zip(scan::classify_disc_tracks(conn, tracks)?) {
+            files::set_match(conn, f.id, t.rom_id, t.state)?;
+        }
+    }
+    Ok(orphans.len())
+}
+
+/// The live rom a file's stored hashes match, if it has any hash.
+fn live_match(
+    conn: &Connection,
+    platform: &PlatformId,
+    f: &FileRow,
+) -> Result<Option<files::RomMatch>> {
+    if f.crc32.is_none() && f.md5.is_none() && f.sha1.is_none() {
+        return Ok(None);
+    }
+    let hash = |h: &Option<String>| h.clone().unwrap_or_default();
+    files::match_live_rom(
+        conn,
+        platform,
+        &hash(&f.sha1),
+        &hash(&f.md5),
+        &hash(&f.crc32),
+        f.size,
+    )
+}
+
+fn stored_hashes(f: &FileRow) -> Option<mistarr_core::HashSet> {
+    Some(mistarr_core::HashSet {
+        size: u64::try_from(f.size).ok()?,
+        crc32: f.crc32.clone()?,
+        md5: f.md5.clone()?,
+        sha1: f.sha1.clone()?,
+    })
+}
+
+/// Matches files of retired roms again, then recomputes the 1G1R picks of one platform
+/// under the current preferences.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recompute {
     platform: PlatformId,
@@ -846,6 +944,23 @@ impl Job for Recompute {
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
+        loop {
+            ctx.checkpoint().await?;
+            let platform = self.platform.clone();
+            let taken = ctx
+                .app
+                .db
+                .write(move |c| {
+                    let tx = c.transaction()?;
+                    let taken = rematch_chunk(&tx, &platform)?;
+                    tx.commit()?;
+                    Ok(taken)
+                })
+                .await?;
+            if taken < REMATCH_CHUNK as usize {
+                break;
+            }
+        }
         ctx.checkpoint().await?;
         let prefs = prefs(&ctx.app.config().prefs);
         let platform = self.platform.0.clone();

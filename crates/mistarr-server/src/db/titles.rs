@@ -78,9 +78,9 @@ fn parse_list(text: &str) -> Vec<String> {
     serde_json::from_str(text).unwrap_or_default()
 }
 
-/// Stores a game under `version`, reusing the title of the same name from any
-/// version of its DAT family so ids, `wanted` and file provenance survive a new
-/// version. Roms the game no longer lists are marked retired.
+/// Stores a game under `version`, reusing the title of the same name from any version
+/// of its DAT family on the same platform, so ids, `wanted` and file provenance survive
+/// a new version. Roms the game no longer lists are marked retired.
 ///
 /// # Errors
 ///
@@ -107,11 +107,13 @@ pub fn upsert_title(
 ) -> Result<TitleId> {
     let existing: Option<i64> = conn
         .prepare_cached(
+            // Unary plus keeps the lookup on (dat_version_id, name), not a platform-wide index.
             "SELECT t.id FROM dat_versions d JOIN titles t ON t.dat_version_id = d.id AND t.name = ?1
-             WHERE d.family = (SELECT family FROM dat_versions WHERE id = ?2) AND t.source = 'dat'
+             WHERE d.family = (SELECT family FROM dat_versions WHERE id = ?2)
+               AND +t.source = 'dat' AND +t.platform_id = ?3
              ORDER BY d.id = ?2 DESC, d.loaded_at DESC LIMIT 1",
         )?
-        .query_row(params![t.name, version.0], |r| r.get(0))
+        .query_row(params![t.name, version.0, platform], |r| r.get(0))
         .optional()?;
     let (regions, languages, flags) = (json(t.regions), json(t.languages), json(t.flags));
     let id = if let Some(id) = existing {
@@ -281,9 +283,10 @@ fn grouped(
 const BAD_DUMP: &str =
     "EXISTS (SELECT 1 FROM roms r WHERE r.title_id = t.id AND r.retired = 0 AND r.status = 'baddump')";
 
-/// Re-elects inferred clone parents under default preferences, joins the clone groups
-/// of titles that different DAT versions list with the same roms, then stores the 1G1R
-/// pick of every live clone group on `platform` under `prefs`. Run it inside a transaction.
+/// Re-elects inferred clone parents under default preferences, recomputes each title's
+/// effective group (`group_root`) so titles that different DAT versions list with the same
+/// roms share one, then stores the 1G1R pick of every live effective group on `platform`
+/// under `prefs`. Run it inside a transaction.
 ///
 /// # Errors
 ///
@@ -329,15 +332,15 @@ pub fn recompute_platform(conn: &Connection, platform: &str, prefs: &Prefs) -> R
             stmt.execute([id, parent])?;
         }
     }
-    join_duplicate_groups(conn, platform)?;
+    link_shared_titles(conn, platform)?;
 
     let mut out = Recomputed::default();
     let mut picks: Vec<i64> = Vec::new();
     grouped(
         conn,
         &format!(
-            "SELECT CAST(t.parent_id AS TEXT), t.id, t.name, {BAD_DUMP} FROM titles t
-             WHERE t.platform_id = ?1 AND t.retired = 0 ORDER BY t.parent_id, t.id"
+            "SELECT CAST(t.group_root AS TEXT), t.id, t.name, {BAD_DUMP} FROM titles t
+             WHERE t.platform_id = ?1 AND t.retired = 0 ORDER BY t.group_root, t.id"
         ),
         platform,
         |group| {
@@ -360,23 +363,19 @@ pub fn recompute_platform(conn: &Connection, platform: &str, prefs: &Prefs) -> R
     Ok(out)
 }
 
-/// Joins clone groups across DAT versions: a title whose live roms, by hash, equal those
-/// of a title from another live version moves its whole group under the older group's
-/// parent. Groups joined by an earlier run return to their own DAT's parents first. Only
-/// the versions other than the largest are held in memory; the largest is streamed.
-fn join_duplicate_groups(conn: &Connection, platform: &str) -> Result<()> {
+/// Recomputes `group_root` on `platform` from scratch. Every title starts in its own
+/// DAT's group (`parent_id`). A title of a live version whose live roms equal, by hash,
+/// those of a title in the largest live version then links to that title's group; one
+/// shared only among the other versions links to the group of its earliest version. Only
+/// a single title ever links, never a group, so two groups of one DAT never merge.
+fn link_shared_titles(conn: &Connection, platform: &str) -> Result<()> {
     conn.execute(
-        "UPDATE titles SET parent_id = COALESCE(
-           (SELECT p.id FROM titles p
-            WHERE p.dat_version_id = titles.dat_version_id AND p.name = titles.clone_of),
-           id)
-         WHERE platform_id = ?1 AND source = 'dat' AND inferred = 0
-           AND (SELECT q.dat_version_id FROM titles q WHERE q.id = titles.parent_id)
-               IS NOT dat_version_id",
+        "UPDATE titles SET group_root = parent_id
+         WHERE platform_id = ?1 AND group_root IS NOT parent_id",
         [platform],
     )?;
     let versions: Vec<i64> = conn
-        .prepare(
+        .prepare_cached(
             "SELECT id FROM dat_versions
              WHERE platform_id = ?1 AND source = 'dat' AND retired = 0 AND superseded_by IS NULL
              ORDER BY game_count DESC, id",
@@ -386,38 +385,46 @@ fn join_duplicate_groups(conn: &Connection, platform: &str) -> Result<()> {
     let Some((&largest, rest)) = versions.split_first() else {
         return Ok(());
     };
+    let mut rest = rest.to_vec();
     if rest.is_empty() {
         return Ok(());
     }
-    let mut first: HashMap<u64, (i64, i64)> = HashMap::new();
-    let mut root: HashMap<i64, i64> = HashMap::new();
-    for &version in rest {
-        each_signature(conn, version, |parent, sig| {
-            let (seen, seen_parent) = *first.entry(sig).or_insert((version, parent));
-            if seen != version {
-                union(&mut root, parent, seen_parent);
-            }
+    rest.sort_unstable();
+    // Titles outside the largest version by signature, in version order: (version, id, parent).
+    let mut others: HashMap<u64, Vec<(i64, i64, i64)>> = HashMap::new();
+    for &version in &rest {
+        each_signature(conn, version, |id, parent, sig| {
+            others.entry(sig).or_default().push((version, id, parent));
         })?;
     }
-    each_signature(conn, largest, |parent, sig| {
-        if let Some(&(_, seen_parent)) = first.get(&sig) {
-            union(&mut root, parent, seen_parent);
+    let mut anchors: HashMap<u64, i64> = HashMap::new();
+    each_signature(conn, largest, |_, parent, sig| {
+        if others.contains_key(&sig) {
+            anchors.entry(sig).or_insert(parent);
         }
     })?;
-    let mut update =
-        conn.prepare_cached("UPDATE titles SET parent_id = ?2 WHERE parent_id = ?1")?;
-    let groups: Vec<i64> = root.keys().copied().collect();
-    for group in groups {
-        update.execute([group, find(&root, group)])?;
+    let mut link = conn.prepare_cached("UPDATE titles SET group_root = ?2 WHERE id = ?1")?;
+    for (sig, titles) in &others {
+        let (first_version, root) = match anchors.get(sig) {
+            Some(&root) => (largest, root),
+            None => (titles[0].0, titles[0].2),
+        };
+        for (_, id, _) in titles.iter().filter(|t| t.0 != first_version) {
+            link.execute([*id, root])?;
+        }
     }
     Ok(())
 }
 
-/// Calls `each(parent, signature)` for every live title of `version` with roms that all
-/// carry a hash; the signature hashes the rom keys whatever their order.
-fn each_signature(conn: &Connection, version: i64, mut each: impl FnMut(i64, u64)) -> Result<()> {
+/// Calls `each(id, parent, signature)` for every live title of `version` with roms that
+/// all carry a hash; the signature hashes the rom keys whatever their order.
+fn each_signature(
+    conn: &Connection,
+    version: i64,
+    mut each: impl FnMut(i64, i64, u64),
+) -> Result<()> {
     use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare_cached(
         "SELECT t.id, t.parent_id, COALESCE(r.sha1, r.md5, r.crc32 || ':' || r.size)
          FROM titles t JOIN roms r ON r.title_id = t.id AND r.retired = 0
          WHERE t.dat_version_id = ?1 AND t.retired = 0 AND t.source = 'dat'
@@ -427,10 +434,10 @@ fn each_signature(conn: &Connection, version: i64, mut each: impl FnMut(i64, u64
     // Per title: id, parent, sum of key hashes, rom count, whether every rom had a key.
     let mut open: Option<(i64, i64, u64, u64, bool)> = None;
     let mut settle = |t: Option<(i64, i64, u64, u64, bool)>| {
-        if let Some((_, parent, sum, n, true)) = t {
+        if let Some((id, parent, sum, n, true)) = t {
             let mut h = DefaultHasher::new();
             (sum, n).hash(&mut h);
-            each(parent, h.finish());
+            each(id, parent, h.finish());
         }
     };
     while let Some(r) = rows.next()? {
@@ -454,22 +461,6 @@ fn each_signature(conn: &Connection, version: i64, mut each: impl FnMut(i64, u64
     }
     settle(open.take());
     Ok(())
-}
-
-/// Joins the trees of `a` and `b` under the smaller root.
-fn union(root: &mut HashMap<i64, i64>, a: i64, b: i64) {
-    let (a, b) = (find(root, a), find(root, b));
-    if a != b {
-        root.insert(a.max(b), a.min(b));
-    }
-}
-
-/// The root of `id` in a union-find forest stored as child to parent.
-fn find(root: &HashMap<i64, i64>, mut id: i64) -> i64 {
-    while let Some(&up) = root.get(&id) {
-        id = up;
-    }
-    id
 }
 
 /// Keeps a group of `title_groups g` only when it is an MRA title or its platform has no
@@ -510,7 +501,7 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
         "SELECT g.platform_id, COUNT(*), SUM(g.have_verified > 0), SUM(g.wanted > 0)
          FROM title_groups g
          WHERE {MRA_ONLY} AND EXISTS (
-           SELECT 1 FROM titles v WHERE v.parent_id = g.parent_id AND v.retired = 0
+           SELECT 1 FROM titles v WHERE v.group_root = g.parent_id AND v.retired = 0
              AND NOT EXISTS (SELECT 1 FROM json_each(v.flags) f
                              WHERE f.value IN (SELECT value FROM json_each(?1))))
          GROUP BY g.platform_id"
@@ -616,7 +607,7 @@ const BROWSE_WHERE: &str = "
     AND (?3 = 'any' OR (?3 = 'yes') = (g.have_verified > 0))
     AND (?4 = 'any' OR (?4 = 'yes') = (g.wanted > 0))
     AND EXISTS (
-      SELECT 1 FROM titles v WHERE v.parent_id = g.parent_id AND v.retired = 0
+      SELECT 1 FROM titles v WHERE v.group_root = g.parent_id AND v.retired = 0
         AND NOT EXISTS (SELECT 1 FROM json_each(v.flags) f
                         WHERE f.value IN (SELECT value FROM json_each(?5)))
         AND (?6 IS NULL OR EXISTS (SELECT 1 FROM json_each(v.regions) r
@@ -727,7 +718,7 @@ pub fn browse(
 pub fn group_of(conn: &Connection, id: TitleId) -> Result<Option<TitleId>> {
     Ok(conn
         .query_row(
-            "SELECT COALESCE(parent_id, id) FROM titles WHERE id = ?1",
+            "SELECT COALESCE(group_root, parent_id, id) FROM titles WHERE id = ?1",
             [id.0],
             |r| r.get(0).map(TitleId),
         )
@@ -876,7 +867,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
                 (SELECT COUNT(*) FROM torrent_files tf JOIN roms r ON r.id = tf.rom_id
                  WHERE r.title_id = t.id AND r.retired = 0),
                 t.source
-         FROM titles t WHERE t.parent_id = ?1 OR t.id = ?1
+         FROM titles t WHERE t.group_root = ?1 OR t.id = ?1
          ORDER BY t.retired, t.is_1g1r_pick DESC, t.name",
     )?;
     let mut variants: Vec<VariantRow> = stmt
@@ -891,7 +882,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
            ORDER BY CASE x.state WHEN 'verified' THEN 0 WHEN 'misnamed' THEN 1
                                  WHEN 'bad' THEN 2 ELSE 3 END, x.id
            LIMIT 1)
-         WHERE t.parent_id = ?1 OR t.id = ?1
+         WHERE t.group_root = ?1 OR t.id = ?1
          ORDER BY r.title_id, r.name",
     )?;
     let mut rows = stmt.query([gid.0])?;
@@ -984,13 +975,13 @@ pub fn want(conn: &Connection, id: TitleId) -> Result<std::result::Result<(), Wa
 /// ```
 pub fn unwant_group(conn: &Connection, parent: TitleId, now: i64) -> Result<usize> {
     let n = conn.execute(
-        "UPDATE titles SET wanted = 0 WHERE (parent_id = ?1 OR id = ?1) AND wanted = 1",
+        "UPDATE titles SET wanted = 0 WHERE (group_root = ?1 OR id = ?1) AND wanted = 1",
         [parent.0],
     )?;
     conn.execute(
         "UPDATE downloads SET state = 'cancelled', updated_at = ?2
          WHERE state IN ('wanted', 'queued')
-           AND title_id IN (SELECT id FROM titles WHERE parent_id = ?1 OR id = ?1)",
+           AND title_id IN (SELECT id FROM titles WHERE group_root = ?1 OR id = ?1)",
         params![parent.0, now],
     )?;
     Ok(n)

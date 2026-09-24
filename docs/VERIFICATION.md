@@ -101,28 +101,57 @@ list supersedes. That list is the DAT's family, keyed by
    `mistarr_core::dat::FORMAT_MARKERS` (`db export`, `headered`,
    `headerless`, `parent clone`, `retool`, `bigendian`, `byteswapped`,
    `littleendian`), optionally followed by a date or version.
-2. Drop final `(…)` groups made of a date or version: digits with `.`, `-`,
-   `_`, `:` or spaces, optionally after a `v`.
-3. Collapse whitespace and lowercase.
+2. Drop final `(…)` or `[…]` groups made of a date or version: digits with
+   `.`, `-`, `_`, `:` or spaces, optionally after a `v`. Markers are dropped
+   first, so a version group followed only by markers goes too.
+3. Collapse whitespace and lowercase. A name that is nothing but such groups
+   keeps its whole text, lowercased, so it never shares an empty key.
 
 So `Example Vendor - Example System (Headered)` and `Example Vendor - Example
 System (DB Export)` are one family, `example vendor - example system`, and
-`Example Samples - Example System (Headered)` is another. The key is stored
+`Example Samples - Example System (Headered)` is another. `X (2)` and `X` are
+deliberately one family: a bare number reads as a version. The key is stored
 in `dat_versions.family` and refreshed from the names at every start.
 
-A load supersedes the current version of its family on its platform when its
-version string is not below that version's; an unbound version counts toward
-every platform. An older version loaded later is stored superseded by the
-current one and its titles are not loaded; `/dats` gives the reason. Removing
-a version (`DELETE /dats/{id}`) retires its titles and roms and does not
-bring back an older superseded version: the file is dropped again for that.
+Supersession runs within a family among versions bound to the same platform,
+or among unbound versions; an unbound version never supersedes or blocks a
+bound one, and binding a version applies the rule for its new platform.
+Versions are compared by `mistarr_core::dat::version_order`, the numbers of
+their digit runs, so `20260101-000000` and `20260102` compare as dates and
+`1.9` sorts before `1.10` whatever form each came in. When either side has
+no digits, as a DB export named without a version, the one loaded later is
+newer. A load not older than the current version supersedes it; an older
+version loaded later is stored superseded by the current one, its titles are
+not loaded, and `/dats` gives the reason. A new unbound version inherits the
+platform its family is bound to only when that is a single platform;
+otherwise it stays unbound and `/dats` lists the platforms its family is
+current on as `suggested`. At every start, after the keys are refreshed, a
+family left with several current versions on one platform keeps the newest
+and the others supersede, their titles retire, and the platform's picks are
+recomputed.
 
-Two live families on a platform may list the same game. After each load and
-each recompute, a title whose live roms equal, by hash, those of a title from
-another version joins its whole clone group to the group of the older title,
-so browse shows the game once and 1G1R picks one of its variants. Titles with
-a rom without any hash are never joined. Groups joined this way return to
-their own DAT's parents before the next join, so removing a DAT undoes it.
+Removing a version (`DELETE /dats/{id}`) retires its titles and their roms,
+clears `wanted` on them and cancels their downloads that have not started,
+as unwanting does. It does not bring back an older superseded version: the
+file is dropped again for that. A transfer already in progress finishes; it
+is placed only if its file matches a live rom of its entry, else it is
+quarantined with a reason saying the DAT was removed. The recompute job then
+matches the files of retired roms again against live roms, by their stored
+hashes and in chunks of 256 per transaction: a cartridge file takes the
+state a scan would give it, a disc track is classified again with the other
+tracks of its directory under the all-or-nothing rule of "For disc games",
+and a file no live rom lists becomes `unverified`. Loads queue the same job.
+
+Two live families on a platform may list the same game. Each title keeps its
+own DAT's clone parent in `titles.parent_id`; its effective group is
+`titles.group_root`, which browse, `title_groups`, 1G1R and the counts use.
+Every recompute rebuilds `group_root` from scratch: each title starts at its
+`parent_id`; then a title whose live roms equal, by hash, those of a title in
+the largest live version on the platform links to that title's group, and a
+title shared only among the other versions links to the group of its
+earliest version. Only a single title links, never a group, so two groups of
+one DAT never merge through a third-party title, and removing a DAT undoes
+its links. Titles with a rom without any hash never link.
 
 ## Name parsing
 

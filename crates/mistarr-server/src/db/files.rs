@@ -430,39 +430,28 @@ fn match_among(
         })
     };
     if let Some(m) = conn
-        .query_row(
-            &format!("{select}r.sha1 = ?2{ORDER}"),
-            params![platform_id.0, sha1],
-            row,
-        )
+        .prepare_cached(&format!("{select}r.sha1 = ?2{ORDER}"))?
+        .query_row(params![platform_id.0, sha1], row)
         .optional()?
     {
         return Ok(Some(m));
     }
     if let Some(m) = conn
-        .query_row(
-            &format!("{select}r.sha1 IS NULL AND r.md5 = ?2{ORDER}"),
-            params![platform_id.0, md5],
-            row,
-        )
+        .prepare_cached(&format!("{select}r.sha1 IS NULL AND r.md5 = ?2{ORDER}"))?
+        .query_row(params![platform_id.0, md5], row)
         .optional()?
     {
         return Ok(Some(m));
     }
     Ok(conn
-        .query_row(
-            &format!(
-                "{select}r.sha1 IS NULL AND r.md5 IS NULL AND r.crc32 = ?2 AND r.size = ?3{ORDER}"
-            ),
-            params![platform_id.0, crc32, size],
-            row,
-        )
+        .prepare_cached(&format!(
+            "{select}r.sha1 IS NULL AND r.md5 IS NULL AND r.crc32 = ?2 AND r.size = ?3{ORDER}"
+        ))?
+        .query_row(params![platform_id.0, crc32, size], row)
         .optional()?)
 }
 
-/// Matches again every file on `platform_id` whose rom or title is retired, by its stored
-/// hashes against live roms only: a match sets the rom and state as a scan would, and
-/// no match leaves the file `unverified`. Returns how many files changed.
+/// Up to `limit` files on `platform_id` matched to a rom that is retired or whose title is.
 ///
 /// # Errors
 ///
@@ -472,48 +461,111 @@ fn match_among(
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let nes = mistarr_core::PlatformId("nes".into());
-/// assert_eq!(mistarr_server::db::files::rematch_retired(&conn, &nes).unwrap(), 0);
+/// assert!(mistarr_server::db::files::retired_matches(&conn, &nes, 10).unwrap().is_empty());
 /// ```
-pub fn rematch_retired(conn: &Connection, platform_id: &PlatformId) -> Result<usize> {
-    let orphans: Vec<(i64, String, i64, [Option<String>; 3])> = conn
-        .prepare(
-            "SELECT f.id, f.rel_path, f.size, f.sha1, f.md5, f.crc32
-             FROM files f JOIN roms r ON r.id = f.rom_id JOIN titles t ON t.id = r.title_id
-             WHERE f.platform_id = ?1 AND t.source = 'dat' AND (r.retired = 1 OR t.retired = 1)",
+pub fn retired_matches(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    limit: u32,
+) -> Result<Vec<FileRow>> {
+    let cols = COLUMNS
+        .split(", ")
+        .map(|c| format!("f.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(conn
+        .prepare_cached(&format!(
+            "SELECT {cols} FROM files f JOIN roms r ON r.id = f.rom_id
+             JOIN titles t ON t.id = r.title_id
+             WHERE f.platform_id = ?1 AND t.source = 'dat' AND (r.retired = 1 OR t.retired = 1)
+             ORDER BY f.id LIMIT ?2"
+        ))?
+        .query_map(params![platform_id.0, limit], from_row)?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// The files of `platform_id` directly inside the directory `dir` (relative to `games/`).
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let psx = mistarr_core::PlatformId("psx".into());
+/// assert!(mistarr_server::db::files::in_directory(&conn, &psx, "PSX/Example").unwrap().is_empty());
+/// ```
+pub fn in_directory(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    dir: &str,
+) -> Result<Vec<FileRow>> {
+    let prefix = format!("{dir}/");
+    let rows: Vec<FileRow> = conn
+        .prepare_cached(&format!(
+            "SELECT {COLUMNS} FROM files WHERE platform_id = ?1 AND substr(rel_path, 1, ?3) = ?2"
+        ))?
+        .query_map(
+            params![
+                platform_id.0,
+                prefix,
+                i64::try_from(prefix.chars().count()).unwrap_or(i64::MAX)
+            ],
+            from_row,
         )?
-        .query_map([&platform_id.0], |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                [r.get(3)?, r.get(4)?, r.get(5)?],
-            ))
-        })?
         .collect::<rusqlite::Result<_>>()?;
-    let mut update =
-        conn.prepare_cached("UPDATE files SET rom_id = ?2, state = ?3 WHERE id = ?1")?;
-    for (id, rel_path, size, [sha1, md5, crc32]) in &orphans {
-        let hashes = [sha1, md5, crc32].map(|h| h.as_deref().unwrap_or(""));
-        let live = "r.retired = 0 AND t.retired = 0 AND ";
-        let (rom, state) = match match_among(conn, platform_id, hashes, *size, live)? {
-            Some(m) => {
-                let own = rel_path
-                    .rsplit_once('#')
-                    .map_or(rel_path.as_str(), |(_, m)| m);
-                let state = if m.status == "baddump" {
-                    FileState::Bad
-                } else if basename(&m.name) == basename(own) {
-                    FileState::Verified
-                } else {
-                    FileState::Misnamed
-                };
-                (Some(m.rom_id), state)
-            }
-            None => (None, FileState::Unverified),
-        };
-        update.execute(params![id, rom, state.as_str()])?;
-    }
-    Ok(orphans.len())
+    Ok(rows
+        .into_iter()
+        .filter(|r| !r.rel_path[prefix.len()..].contains('/'))
+        .collect())
+}
+
+/// [`match_rom`] over live roms of live titles only.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let nes = mistarr_core::PlatformId("nes".into());
+/// assert!(mistarr_server::db::files::match_live_rom(&conn, &nes, "", "", "0", 1).unwrap().is_none());
+/// ```
+pub fn match_live_rom(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    sha1: &str,
+    md5: &str,
+    crc32: &str,
+    size: i64,
+) -> Result<Option<RomMatch>> {
+    let live = "r.retired = 0 AND t.retired = 0 AND ";
+    match_among(conn, platform_id, [sha1, md5, crc32], size, live)
+}
+
+/// Sets the matched rom and state of one file.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::files::{set_match, FileId, FileState};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// set_match(&conn, FileId(1), None, FileState::Unverified).unwrap();
+/// ```
+pub fn set_match(
+    conn: &Connection,
+    id: FileId,
+    rom_id: Option<i64>,
+    state: FileState,
+) -> Result<()> {
+    conn.prepare_cached("UPDATE files SET rom_id = ?2, state = ?3 WHERE id = ?1")?
+        .execute(params![id.0, rom_id, state.as_str()])?;
+    Ok(())
 }
 
 /// Whether any rom of this platform has this CRC32 and size, the pre-check

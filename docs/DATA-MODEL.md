@@ -33,6 +33,7 @@ CREATE TABLE dat_versions (
   UNIQUE (dat_name, version)
 );
 CREATE INDEX dat_versions_family ON dat_versions(family, platform_id);
+-- family: dat::family_key of dat_name, rewritten from the names at every start.
 
 CREATE TABLE dat_stage (          -- the DAT being imported, parsed outside the write lock and applied at once
   seq  INTEGER PRIMARY KEY,
@@ -45,7 +46,8 @@ CREATE TABLE titles (                   -- one per <game>; the browse unit
   dat_version_id INTEGER NOT NULL REFERENCES dat_versions(id),
   name          TEXT NOT NULL,         -- full DAT game name
   base_name     TEXT NOT NULL,         -- name with region/rev/lang tags stripped
-  parent_id     INTEGER REFERENCES titles(id),   -- clone group root, self if parent
+  parent_id     INTEGER REFERENCES titles(id),   -- clone group root in its own DAT, self if parent
+  group_root    INTEGER REFERENCES titles(id),   -- effective clone group; see "Effective groups"
   regions       TEXT NOT NULL,         -- json array
   languages     TEXT NOT NULL,         -- json array
   revision      TEXT,
@@ -69,6 +71,11 @@ CREATE TABLE titles (                   -- one per <game>; the browse unit
 );
 CREATE INDEX titles_platform_base ON titles(platform_id, base_name);
 CREATE INDEX titles_parent ON titles(parent_id);
+CREATE INDEX titles_group_root ON titles(group_root);
+CREATE TRIGGER titles_group_root_insert AFTER INSERT ON titles
+BEGIN UPDATE titles SET group_root = NEW.parent_id WHERE id = NEW.id; END;
+CREATE TRIGGER titles_group_root_parent AFTER UPDATE OF parent_id ON titles
+BEGIN UPDATE titles SET group_root = NEW.parent_id WHERE id = NEW.id; END;
 CREATE INDEX titles_group ON titles(platform_id, inferred, group_key);
 CREATE INDEX titles_source ON titles(platform_id, source);
 CREATE INDEX titles_mra_path ON titles(platform_id, mra_path) WHERE source = 'mra';
@@ -274,10 +281,22 @@ titles are `inferred` and every live inferred title of the platform is
 regrouped by `(platform_id, group_key)` after each load, electing the parent
 that wins 1G1R under default preferences.
 
+### Effective groups
+
+`titles.group_root` is the effective clone group, the one column every
+grouping reads: browse, `title_groups`, group detail, want and unwant, 1G1R
+and the platform counts. The triggers keep it equal to `parent_id` whenever
+`parent_id` is written. `titles::recompute_platform` rebuilds it from scratch
+for the platform: every title back to its `parent_id`, then each title that
+another live DAT on the platform lists with the same roms linked to that
+title's group (VERIFICATION.md "DAT families"). Only single titles link, so
+`parent_id` always holds each DAT's own parent/clone data.
+
 ## Derived views
 
-The browse screen needs one row per clone group with have/wanted counts. Keep
-this as a SQL view so both the API and tests use the same definition. Roms and
+The browse screen needs one row per effective clone group with have/wanted
+counts. Keep this as a SQL view so both the API and tests use the same
+definition. Its `parent_id` column is the group's `titles.group_root`. Roms and
 files are aggregated per title first, so a title with several roms or several
 files per rom counts once:
 
@@ -294,7 +313,7 @@ FROM (
          MAX(CASE WHEN v.is_1g1r_pick = 1 THEN v.id END) AS pick_id,
          MAX(v.id) AS newest_id
   FROM (
-    SELECT t.platform_id, t.parent_id, t.id, t.wanted, t.is_1g1r_pick,
+    SELECT t.platform_id, t.group_root AS parent_id, t.id, t.wanted, t.is_1g1r_pick,
            COUNT(DISTINCT r.id) AS roms,
            COUNT(DISTINCT CASE WHEN f.state = 'verified'
                                  OR (r.present = 1
@@ -304,7 +323,7 @@ FROM (
     LEFT JOIN roms r ON r.title_id = t.id AND r.retired = 0
     LEFT JOIN files f ON f.rom_id = r.id
     WHERE t.retired = 0
-    GROUP BY t.platform_id, t.parent_id, t.id
+    GROUP BY t.platform_id, t.group_root, t.id
   ) v
   GROUP BY v.platform_id, v.parent_id
 ) g

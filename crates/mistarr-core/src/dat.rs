@@ -15,7 +15,7 @@ mod export;
 mod family;
 
 pub use export::{export_name, ExportName};
-pub use family::{family_key, split_version, DatFamily, FORMAT_MARKERS};
+pub use family::{family_key, split_version, version_order, DatFamily, FORMAT_MARKERS};
 
 #[cfg(test)]
 mod tests;
