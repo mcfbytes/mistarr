@@ -3,6 +3,7 @@ import type {
   DatVersion,
   Download,
   ImportLogEntry,
+  IncomingFile,
   Job,
   Platform,
   Settings,
@@ -160,7 +161,7 @@ export function fixtureTitle(id: number): TitleDetail {
             status: 'verified',
             file_state: 'verified',
             file_id: id * 1000,
-            file_path: `nes/${base}.nes`
+            file_path: `NES/${base}.nes`
           }
         ]
       },
@@ -191,6 +192,34 @@ export function fixtureTitle(id: number): TitleDetail {
             file_path: null
           }
         ]
+      },
+      {
+        id: id * 10 + 2,
+        name: `${base} System (BIOS)`,
+        regions: ['World'],
+        languages: [],
+        revision: null,
+        flags: ['bios'],
+        is_1g1r_pick: false,
+        wanted: false,
+        retired: false,
+        inferred: false,
+        dat_version_id: 1,
+        torrent_files_available: 0,
+        roms: [
+          {
+            id: id * 100 + 2,
+            name: `${base} System (BIOS).bin`,
+            size: 8192,
+            crc32: '0badc0de',
+            md5: null,
+            sha1: null,
+            status: 'good',
+            file_state: 'verified',
+            file_id: id * 1000 + 2,
+            file_path: `NES/${base} System (BIOS).bin`
+          }
+        ]
       }
     ]
   };
@@ -205,14 +234,19 @@ export const fixtureStatus: SystemStatus = {
     reachable: true,
     version: null,
     rtorrent_on_path: true,
+    transmission_on_path: false,
+    transmission_service: false,
+    transmission_opt_in: false,
     checked_at: 1_770_000_000
   },
   corename: 'FCEUmm',
-  paused: false,
-  pause_reason: null,
+  paused: true,
+  pause_reason: 'core',
   override: null,
+  waiting: [{ id: 2, kind: 'scan', state: 'queued', detail: 'nes' }],
   disk_free_bytes: 12_400_000_000,
-  rss_bytes: 41_000_000
+  rss_bytes: 41_000_000,
+  launch: 'ready'
 };
 
 export const fixtureWizard: WizardStatus = {
@@ -268,7 +302,8 @@ export const fixtureSources: Source[] = [
     matched_count: 238,
     total_size: 900_000_000,
     client_id: 'abc123',
-    added_at: 1_770_010_000
+    added_at: 1_770_010_000,
+    suggested_platform_id: 'nes'
   },
   {
     id: 2,
@@ -278,13 +313,47 @@ export const fixtureSources: Source[] = [
     platform_id: null,
     bind_score: null,
     state: 'unbound',
-    reason: 'No platform reached the binding threshold.',
+    reason: 'Looks like Game Boy. No DAT for it is loaded yet; it binds once one loads.',
     seed_policy: 'none',
     file_count: 60,
     matched_count: 12,
     total_size: 300_000_000,
     client_id: null,
-    added_at: 1_770_020_000
+    added_at: 1_770_020_000,
+    suggested_platform_id: 'gb'
+  }
+];
+
+export const fixtureIncomingDats: IncomingFile[] = [
+  {
+    file: 'Example Console (20260101).zip',
+    size: 180_000,
+    state: 'importing',
+    reason: null,
+    job_id: 7,
+    progress: { members: 1, done: 0, games: 1200 },
+    modified: 1_770_040_000
+  },
+  {
+    file: 'notes.txt',
+    size: 12,
+    state: 'rejected',
+    reason: 'not a DAT: expected a .dat, .xml or .zip file',
+    job_id: null,
+    progress: null,
+    modified: 1_770_039_000
+  }
+];
+
+export const fixtureIncomingSources: IncomingFile[] = [
+  {
+    file: 'Example bundle three.torrent',
+    size: 40_000,
+    state: 'waiting',
+    reason: 'Waiting for the file to stop changing.',
+    job_id: null,
+    progress: null,
+    modified: 1_770_041_000
   }
 ];
 
@@ -365,12 +434,25 @@ export const fixtureImports: ImportLogEntry[] = [
 export const fixtureJobs: Job[] = [
   {
     id: 1,
-    kind: 'scan',
-    payload: {},
+    kind: 'dat_import',
+    lane: 'background',
+    payload: { path: '/media/fat/mistarr/dats/Example Console (20260101).zip' },
     state: 'running',
-    progress: { scanned: 120, total: 240 },
+    progress: { members: 1, done: 0, games: 1200 },
+    reason: null,
     created_at: 1_770_032_000,
     updated_at: 1_770_032_500
+  },
+  {
+    id: 2,
+    kind: 'scan',
+    lane: 'heavy',
+    payload: { platform_id: 'nes' },
+    state: 'queued',
+    progress: null,
+    reason: 'Paused while FCEUmm is running',
+    created_at: 1_770_032_100,
+    updated_at: 1_770_032_100
   }
 ];
 
@@ -381,6 +463,7 @@ export const fixtureSettings: Settings = {
     regions: ['USA', 'World', 'Europe', 'Japan'],
     languages: ['En'],
     prefer_latest_revision: true,
-    hide: ['bios', 'beta', 'proto', 'demo', 'sample', 'program']
+    hide: ['bios', 'beta', 'proto', 'demo', 'sample', 'program'],
+    launch: true
   }
 };

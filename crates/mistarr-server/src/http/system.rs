@@ -15,22 +15,29 @@ use crate::app::AppState;
 use crate::config::{RuntimeSettings, SettingsPatch};
 use crate::db::jobs::{self, JobId, JobRow};
 use crate::db::platforms;
+use crate::db::settings::{self, keys};
+use crate::events::EventKind;
 use crate::jobs::dat_import::Recompute;
-use crate::jobs::detect_client::DetectClient;
+use crate::jobs::detect_client::{detect_and_store, ClientStatus, DetectClient};
 use crate::jobs::gate::Override;
 use crate::jobs::scan::ScanJob;
 use crate::jobs::Scheduler;
-use crate::status::{snapshot, wizard_status, Status};
+use crate::status::{hold_reason, snapshot, wizard_status, Status};
+use axum::http::StatusCode;
+use mistarr_clients::launch::Launcher;
+use mistarr_clients::ClientKind;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/system/status", get(status))
         .route("/system/wizard", get(wizard))
+        .route("/system/wizard/done", post(wizard_done))
         .route("/system/scan", post(scan))
         .route("/system/cores", post(cores))
         .route("/system/pause", post(pause))
         .route("/system/resume", post(resume))
         .route("/system/jobs", get(list_jobs))
+        .route("/system/client/start", post(start_client))
         .route("/system/settings", get(get_settings).put(put_settings))
 }
 
@@ -142,13 +149,113 @@ struct Wizard {
 
 async fn wizard(State(app): State<Arc<AppState>>) -> Result<Json<Wizard>, ApiError> {
     let w = wizard_status(&app).await?;
+    let dismissed = app
+        .db
+        .read(|c| settings::get_json::<bool>(c, keys::WIZARD_DISMISSED))
+        .await?
+        .unwrap_or(false);
     Ok(Json(Wizard {
         paths: w.paths,
         dats: w.dats,
         client: w.client,
         sources: w.sources,
-        open_on_start: !w.dats,
+        open_on_start: !dismissed && !w.dats,
     }))
+}
+
+/// `POST /system/wizard/done`: records that the user finished or dismissed the
+/// wizard, which then stays closed on load.
+async fn wizard_done(State(app): State<Arc<AppState>>) -> Result<Json<Wizard>, ApiError> {
+    app.db
+        .write(|c| settings::set_json(c, keys::WIZARD_DISMISSED, &true))
+        .await?;
+    wizard(State(app)).await
+}
+
+/// Rejects a remote path map entry whose remote path is blank, which would
+/// match every path the client reports, or whose local path is not absolute.
+/// The remote side is the client's own spelling, so `C:\\x` or `C:/x` pass.
+fn check_path_map(patch: &SettingsPatch) -> Result<(), ApiError> {
+    let Some(client) = &patch.client else {
+        return Ok(());
+    };
+    if client.remote_path_map.iter().any(|m| !path_map_entry_ok(m)) {
+        return Err(ApiError::bad_request(
+            "Each remote path map entry needs a remote path and an absolute local path.",
+        ));
+    }
+    Ok(())
+}
+
+fn path_map_entry_ok(m: &mistarr_clients::PathMapping) -> bool {
+    !m.remote.to_string_lossy().trim().is_empty() && m.local.is_absolute()
+}
+
+/// `POST /system/client/start` body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartBody {
+    kind: ClientKind,
+}
+
+/// Starts an installed client that is not running, then detects again until it
+/// answers or `client_start_wait` passes; see `docs/DOWNLOAD-CLIENTS.md`.
+async fn start_client(
+    State(app): State<Arc<AppState>>,
+    body: Bytes,
+) -> Result<Json<Status>, ApiError> {
+    let body: StartBody =
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let Ok(_starting) = app.client_start.try_lock() else {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "busy",
+            "A download client is already being started.",
+        ));
+    };
+    let current = app
+        .db
+        .read(|c| settings::get_json::<ClientStatus>(c, keys::CLIENT_DETECTED))
+        .await?;
+    if current.is_some_and(|c| c.usable()) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "conflict",
+            "A download client is already running.",
+        ));
+    }
+    let launcher = app.launcher();
+    if !launcher_offers(&launcher, body.kind) {
+        return Err(ApiError::bad_request(format!(
+            "{} is not installed on this system.",
+            body.kind
+        )));
+    }
+    tracing::info!(kind = body.kind.as_str(), "starting the download client");
+    tokio::task::spawn_blocking(move || launcher.start(body.kind))
+        .await
+        .map_err(|e| crate::Error::Task(e.to_string()))?
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;
+    let deadline = tokio::time::Instant::now() + app.options.client_start_wait;
+    loop {
+        let found = detect_and_store(&app, true).await?;
+        if found.usable() || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    Ok(Json(snapshot(&app).await))
+}
+
+fn launcher_offers(launcher: &Launcher, kind: ClientKind) -> bool {
+    let installed = launcher.installed();
+    match kind {
+        ClientKind::Transmission => {
+            installed.transmission_on_path || installed.transmission_service
+        }
+        ClientKind::Rtorrent => installed.rtorrent_on_path,
+        _ => false,
+    }
 }
 
 async fn pause(State(app): State<Arc<AppState>>) -> Json<Status> {
@@ -161,16 +268,32 @@ async fn resume(State(app): State<Arc<AppState>>) -> Json<Status> {
     Json(snapshot(&app).await)
 }
 
+/// A `/system/jobs` item: the row plus why it is not running, if the gate holds it.
+#[derive(Debug, Serialize)]
+struct JobItem {
+    #[serde(flatten)]
+    row: JobRow,
+    reason: Option<String>,
+}
+
 async fn list_jobs(
     State(app): State<Arc<AppState>>,
     paging: Result<Query<Paging>, QueryRejection>,
-) -> Result<Json<Page<JobRow>>, ApiError> {
+) -> Result<Json<Page<JobItem>>, ApiError> {
     let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let (limit, offset) = paging.resolve();
-    let (items, total) = app
+    let (rows, total) = app
         .db
         .read(move |c| jobs::list_active(c, limit, offset))
         .await?;
+    let gate = app.gate.state();
+    let items = rows
+        .into_iter()
+        .map(|row| JobItem {
+            reason: hold_reason(&gate, &row.lane, row.state),
+            row,
+        })
+        .collect();
     Ok(Json(Page { items, total }))
 }
 
@@ -184,13 +307,36 @@ async fn put_settings(
 ) -> Result<Json<RuntimeSettings>, ApiError> {
     let patch: SettingsPatch =
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    check_path_map(&patch)?;
     let prefs_before = app.config().prefs;
     let (runtime, client_changed) = app.update_settings(&patch).await?;
     if client_changed {
         Scheduler::enqueue(&app, Arc::new(DetectClient)).await?;
     }
-    if runtime.prefs != prefs_before {
+    if !runtime.prefs.same_selection(&prefs_before) {
         Recompute::enqueue_all(&app).await?;
     }
+    if runtime.prefs.launch != prefs_before.launch {
+        let status = snapshot(&app).await;
+        app.events.publish(EventKind::Status, &status);
+    }
     Ok(Json(runtime))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mistarr_clients::PathMapping;
+
+    #[test]
+    fn path_map_entries_need_a_remote_and_an_absolute_local() {
+        let ok = |r: &str, l: &str| path_map_entry_ok(&PathMapping::new(r, l));
+        assert!(ok("/downloads", "/media/fat/mistarr/staging"));
+        assert!(ok("C:\\Downloads", "/media/fat/mistarr/staging"));
+        assert!(ok("C:/Downloads", "/media/fat/mistarr/staging"));
+        assert!(!ok("", "/media/fat/mistarr/staging"));
+        assert!(!ok("  ", "/media/fat/mistarr/staging"));
+        assert!(!ok("/downloads", "staging"));
+        assert!(!ok("/downloads", ""));
+    }
 }

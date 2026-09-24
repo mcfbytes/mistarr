@@ -16,18 +16,22 @@ use crate::{
     TorrentState, TorrentStatus,
 };
 
+/// First line of every rc mistarr writes; an rc without it belongs to the user.
+pub const RC_MARKER: &str =
+    "# Written by mistarr on every start. Delete this line to keep your own edits.";
+
 /// The rc mistarr writes when it starts rtorrent itself; the same text as in
-/// `docs/DOWNLOAD-CLIENTS.md` "Detection".
+/// `docs/DOWNLOAD-CLIENTS.md` "Starting a stopped client".
 const RECOMMENDED_RC: &str = "\
-directory.default.set = /media/fat/mistarr/staging
-session.path.set = /media/fat/mistarr/rtorrent-session
-network.scgi.open_local = /media/fat/mistarr/rtorrent.sock
+# Written by mistarr on every start. Delete this line to keep your own edits.
+directory.default.set = \"/media/fat/mistarr/staging\"
+session.path.set = \"/media/fat/mistarr/rtorrent-session\"
+network.scgi.open_port = 127.0.0.1:5000
 network.xmlrpc.size_limit.set = 8M
 dht.mode.set = auto
 protocol.pex.set = yes
 throttle.global_down.max_rate.set_kb = 0
 throttle.global_up.max_rate.set_kb = 0
-system.daemon.set = true
 ";
 
 /// Status commands sent per torrent, in the order [`RawStatus`] reads them.
@@ -48,8 +52,9 @@ const STATUS_COMMANDS: [&str; 10] = [
 /// raised `network.xmlrpc.size_limit.set` that a user's own rtorrent may lack.
 ///
 /// ```
-/// let rc = mistarr_clients::rtorrent::recommended_rc();
-/// assert!(rc.contains("network.scgi.open_local = /media/fat/mistarr/rtorrent.sock"));
+/// use mistarr_clients::rtorrent::{recommended_rc, RC_MARKER};
+/// assert!(recommended_rc().starts_with(RC_MARKER));
+/// assert!(recommended_rc().contains("network.scgi.open_port = 127.0.0.1:5000"));
 /// ```
 #[must_use]
 pub fn recommended_rc() -> &'static str {

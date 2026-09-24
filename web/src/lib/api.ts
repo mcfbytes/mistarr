@@ -1,10 +1,13 @@
 import type {
+  ClientKind,
   CoresResult,
+  IncomingFile,
   DatVersion,
   Download,
   DownloadState,
   ImportLogEntry,
   Job,
+  Launched,
   Paged,
   Platform,
   Settings,
@@ -46,6 +49,7 @@ function headers(isFormData: boolean, extra?: Record<string, string>): Record<st
   const key = getApiKey();
   return {
     ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+    'X-Mistarr': '1',
     ...(key ? { 'X-Api-Key': key } : {}),
     ...extra
   };
@@ -113,6 +117,11 @@ export const api = {
   pause: (): Promise<SystemStatus> => request('/system/pause', { method: 'POST' }),
   resume: (): Promise<SystemStatus> => request('/system/resume', { method: 'POST' }),
   jobs: (): Promise<Paged<Job>> => request('/system/jobs'),
+  wizardDone: (): Promise<WizardStatus> => request('/system/wizard/done', { method: 'POST' }),
+  startClient: (kind: ClientKind): Promise<SystemStatus> =>
+    request('/system/client/start', { method: 'POST', body: JSON.stringify({ kind }) }),
+  datsIncoming: (): Promise<Paged<IncomingFile>> => request('/dats/incoming'),
+  sourcesIncoming: (): Promise<Paged<IncomingFile>> => request('/sources/incoming'),
   settings: (): Promise<Settings> => request('/system/settings'),
   putSettings: (patch: SettingsPatch): Promise<Settings> =>
     request('/system/settings', { method: 'PUT', body: JSON.stringify(patch) }),
@@ -122,6 +131,7 @@ export const api = {
     request(`/platforms/${id}`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
   bindPlatformDat: (id: string, datVersionId: number): Promise<Binding> =>
     request(`/platforms/${id}/dat`, { method: 'POST', body: JSON.stringify({ dat_version_id: datVersionId }) }),
+  launchCore: (id: string): Promise<Launched> => request(`/platforms/${id}/launch-core`, { method: 'POST' }),
 
   titles: (
     platformId: string,
@@ -137,6 +147,7 @@ export const api = {
   unwant: (id: number): Promise<TitleDetail> => request(`/titles/${id}/want`, { method: 'DELETE' }),
   rename: (id: number, fileId: number): Promise<TitleDetail> =>
     request(`/titles/${id}/rename`, { method: 'POST', body: JSON.stringify({ file_id: fileId }) }),
+  launchTitle: (id: number): Promise<Launched> => request(`/titles/${id}/launch`, { method: 'POST' }),
 
   dats: (): Promise<Paged<DatVersion>> => request('/dats'),
   uploadDat: (file: File): Promise<Uploaded> => {

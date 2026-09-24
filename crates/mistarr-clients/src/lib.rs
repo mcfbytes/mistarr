@@ -15,6 +15,7 @@ mod error;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
 mod http;
+pub mod launch;
 mod metainfo;
 mod path_map;
 pub mod rtorrent;

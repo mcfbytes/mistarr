@@ -207,6 +207,90 @@ the `libretro_playlist` column of the table in `mistarr-mister`.
 | `atari5200` | Atari - 5200 | `neogeo` | SNK - Neo Geo |
 | | | `arcade` | MAME |
 
+## Launch parameters
+
+Starting a DAT entry (ARCHITECTURE.md "Launching") writes an MGL file:
+
+```xml
+<mistergamedescription>
+  <rbf>_Console/NES</rbf>
+  <file delay="2" type="f" index="1" path="../../../../../media/fat/games/NES/Example Quest (USA).nes"/>
+</mistergamedescription>
+```
+
+Each row names its launch cores in order of preference, each with its own
+parameters, in the `launch` column of the table in `mistarr-mister`. The
+first core with an installed `.rbf` is used, and of its files the newest by
+the `_YYYYMMDD` date in the name; undated files rank last. Files are looked
+for in `_Console`, `_Computer`, `_Other` and `_Arcade` and one folder below,
+but a file under `_Arcade` only for a core the row marks as living there;
+installed-core detection then marks that row present as well as `arcade`.
+`rbf` is the chosen file's path relative to the SD root without its date
+suffix and extension. `path` climbs from the core's games folder to `/` and
+names the file absolutely. Attribute values are XML-escaped and paths with
+control characters are refused.
+
+| column | meaning |
+|---|---|
+| type | `f` loads the file into the core, `s` mounts it as a disc or disk image |
+| index | the core's file-slot index |
+| delay | seconds Main waits after loading the core before handing it the file |
+
+The file handed over is:
+
+- for a disc, the first cue sheet among the entry's files whose `FILE`
+  entries all exist beside it, else its `.chd` or `.iso`; every track must
+  be `verified`;
+- for a romset, its zip, or its set directory `games/NeoGeo/<set>`;
+- otherwise its file. Only the first `.zip#`, compared case-insensitively,
+  separates a zip from its member, which Main opens as `a.zip/b.nes`; any
+  other `#` is part of a name.
+
+Arcade titles have no row: an MRA title starts with `load_core` on its
+`.mra`. The community convention for the Neo Geo core loads `.neo` files
+through an MGL; mistarr places romsets as zips or directories, so the
+`neogeo` row hands over the romset itself and is the least certain of all.
+
+Every row is **verify**: the values follow the community launcher tables
+and are confirmed on the board. `board_verify_launch_cores` in
+`platforms.rs` checks that each row finds a core on the card; the slot
+values are confirmed by starting a game of each platform from the UI.
+
+| id | core | type | index | delay |
+|---|---|---|---|---|
+| `nes` | NES | `f` | 1 | 2 |
+| `fds` | NES | `f` | 1 | 2 |
+| `snes` | SNES | `f` | 0 | 2 |
+| `n64` | N64 | `f` | 1 | 1 |
+| `gb` | Gameboy | `f` | 1 | 2 |
+| `gbc` | Gameboy | `f` | 1 | 2 |
+| `gba` | GBA | `f` | 1 | 2 |
+| `megadrive` | MegaDrive, then Genesis | `f` | 1 | 1 |
+| `s32x` | S32X | `f` | 1 | 1 |
+| `sms` | SMS | `f` | 1 | 1 |
+| `gg` | SMS | `f` | 2 | 1 |
+| `sg1000` | ColecoVision | `f` | 0 | 1 |
+| `pce` | TurboGrafx16 | `f` | 0 | 1 |
+| `sgx` | TurboGrafx16 | `f` | 1 | 1 |
+| `atari2600` | Atari2600, then Atari7800 | `f` | 1 | 1 |
+| `atari5200` | Atari5200 | `s` | 1 | 1 |
+| `atari7800` | Atari7800 | `f` | 1 | 1 |
+| `lynx` | AtariLynx | `f` | 1 | 1 |
+| `coleco` | ColecoVision | `f` | 1 | 1 |
+| `intv` | Intellivision | `f` | 1 | 1 |
+| `ws` | WonderSwan | `f` | 1 | 1 |
+| `wsc` | WonderSwan | `f` | 1 | 1 |
+| `ngp` | jtngp, under `_Arcade` too | `f` | 1 | 2 |
+| `vectrex` | Vectrex | `f` | 1 | 1 |
+| `pokemini` | PokemonMini | `f` | 1 | 1 |
+| `sv` | SuperVision | `f` | 1 | 1 |
+| `psx` | PSX | `s` | 1 | 1 |
+| `saturn` | Saturn | `s` | 0 | 2 |
+| `megacd` | MegaCD | `s` | 0 | 1 |
+| `pcecd` | TurboGrafx16 | `s` | 0 | 1 |
+| `neocd` | NeoGeo | `s` | 1 | 1 |
+| `neogeo` | NeoGeo | `f` | 1 | 1 |
+
 ## Computers
 
 Computer cores use disk and tape images with TOSEC-style DATs and inconsistent

@@ -14,7 +14,7 @@ torrent client that ships with the image, and moves verified files into the
 | Roughly 490 MiB RAM visible to Linux, shared with the MiSTer process | Idle RSS target under 30 MiB, hard ceiling 64 MiB. No in-memory torrent metadata for set torrents; file lists live in SQLite. |
 | SD card, exFAT, ~10-20 MB/s writes | Stage and rename on the same filesystem, never copy. Throttle hashing with `ionice`. No symlinks, case-insensitive names. |
 | Stock image is Buildroot 2021 with glibc 2.31 | musl static linking, no OpenSSL, `rustls` only. |
-| MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing and imports while it is anything other than `MENU`. Transfers continue at a reduced rate limit. |
+| MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing, scans and file placement while it is anything other than `MENU`. DAT and source parsing continue at low priority; transfers continue at a reduced rate limit. |
 | Torrent client already present | Stock image ships rtorrent; Buildroot_MiSTer ships Transmission. mistarr never embeds a client. |
 | Content neutrality | See PRINCIPLES.md. No sources in the tree; watched directories are the only input path. |
 
@@ -43,7 +43,7 @@ contracts in this document.
 | Crate | Responsibility | Depends on |
 |---|---|---|
 | `mistarr-core` | Domain types. Logiqx DAT parser. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. | none |
-| `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. | core |
+| `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
 | `mistarr-sources` | Watched-directory scanner. `.torrent` (bencode) and `.magnet` parsing into a file list. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
 | `mistarr-clients` | `DownloadClient` trait. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping. | none |
 | `mistarr-server` | The binary. axum HTTP server, SQLite via `rusqlite` (bundled), job scheduler, SSE event bus, embedded SPA via `rust-embed`, config, first-run wizard state, CLI flags. | all |
@@ -93,11 +93,16 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 
 1. Load config from `/media/fat/mistarr/mistarr.toml`, or defaults.
 2. Open or create SQLite at `/media/fat/mistarr/mistarr.db`, run migrations.
+   Read CORENAME once, so the gate is closed from the start while a core is
+   loaded, then reconcile the jobs a previous process left open (see
+   "Pausing for the core").
 3. Detect the download client: probe Transmission RPC on `127.0.0.1:9091`,
    then rtorrent SCGI at the configured socket or `127.0.0.1:5000`. If neither
    answers and `rtorrent` is on `PATH`, offer to launch it with a generated rc
-   pointing at the staging directory. Record the result; do not retry on every
-   request.
+   pointing at the staging directory; if `transmission-daemon` is installed,
+   offer to start it (DOWNLOAD-CLIENTS.md "Starting a stopped client").
+   Record the result; do not retry on every request, but re-detect every
+   minute while no client answers.
 4. Detect installed cores by listing the `_Console`, `_Computer`, `_Arcade`
    and `_Other` directories. Platforms whose core is absent are shown but
    collapsed. When `_Arcade` exists, or MRA titles are stored, queue the
@@ -112,9 +117,18 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    enqueues an import once the file's mtime is 2 s old and its size held
    between two listings. Accept `.dat`, `.xml`, and `.zip` containing either;
    each member of a zip is a separate DAT, and a file whose import job failed
-   is enqueued again on a later listing. Parse Logiqx `<datafile>` with
-   `quick-xml`, streaming, one transaction per DAT. Reject anything else and
-   move it to `dats/rejected/` with a `<name>.reason.txt` beside it.
+   is enqueued again on a later listing. The `dat_import` job runs on the
+   background lane, so a loaded core does not hold it. Parse Logiqx
+   `<datafile>` with `quick-xml`, streaming. Each game is parsed outside the
+   database's write lock and appended to `dat_stage` in chunks of 2,000
+   games, one short transaction per chunk; one transaction then applies the
+   stage (steps 3 to 5), so readers see the old titles or the new ones and
+   never part of a DAT. A parse error empties the stage and changes nothing
+   else. Reject anything else and move it to `dats/rejected/` with a
+   `<name>.reason.txt` beside it. The apply holds the writer for the SQL
+   alone; scans and imports resolve rom ids on the read connection and
+   write afterwards, so one that straddles an apply records a rom id that
+   is still a row, retired or not, as it would had it finished just before.
 2. Identify the platform from the DAT header name using the table in
    PLATFORMS.md, falling back to the platform an earlier version of the same
    name was bound to. A header without a name takes the member's or file's
@@ -128,8 +142,9 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    absent, clone groups are inferred by normalising the name (strip region,
    revision, language and flag tags) so 1G1R still works with plain DATs.
 5. Recompute the platform's 1G1R picks, move the file to `dats/loaded/` and
-   emit `dat.loaded` on the event bus. Changing `prefs` recomputes the picks
-   of every platform.
+   emit `dat.loaded` on the event bus, then bind the unbound sources waiting
+   for that platform ("Source import" step 4). Changing `prefs` recomputes the
+   picks of every platform.
 
 ### Library scan
 
@@ -185,10 +200,10 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 
 1. A `.torrent` or `.magnet` appears in `sources/`, found by a scan every
    10 s once its size has held for two scans, or written there by
-   `POST /sources/upload`. A light `source_import` job per file parses it,
-   reading the bencode in place so only the file list is built. A file over
-   16 MiB, one that does not parse, or one that repeats a loaded source moves
-   to `sources/rejected/` with a `<name>.reason.txt`.
+   `POST /sources/upload`. A `source_import` job per file, on the background
+   lane, parses it, reading the bencode in place so only the file list is
+   built. A file over 16 MiB, one that does not parse, or one that repeats a
+   loaded source moves to `sources/rejected/` with a `<name>.reason.txt`.
 2. For a magnet, the source is `resolving`. A light `resolve_magnet` job adds
    it to the client paused into `staging/<infohash>/` with nothing wanted and
    starts it, since a paused magnet never fetches metadata. While it is
@@ -204,6 +219,18 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 4. Bind the source to the platform with the best rate at or above
    `sources.bind_threshold` (default 0.6). Below that, the source is
    `unbound` and the user picks a platform or discards it.
+   Independently of any DAT, the platform table's DAT-name patterns are
+   matched against the dropped file's stem and the torrent's info name,
+   taking the longest match within each name. If either matches, those
+   decide; otherwise the matching directories that hold the most files
+   decide, among those holding at least half of them. Two different
+   platforms at the deciding level mean no suggestion. The suggestion is
+   stored, shown on the source and named in its reason. After a DAT pack
+   loads, unbound sources are bound again once: to the suggested platform
+   when its hit rate reaches the threshold and no other platform scores
+   higher, otherwise as above. A source the user unbound is never bound
+   automatically, and `source.changed` is sent only for sources whose state
+   or platform changed.
 5. Store the file list in `torrent_files` with the matched `rom_id` and its
    confidence where one exists. Move the file to `sources/loaded/` and emit
    `source.changed`. A `.torrent` is not told to the client until something
@@ -282,13 +309,69 @@ does nothing.
    from the client without deleting data, clear `sources.client_id` and
    remove the empty directories under `staging/<infohash>/`.
 
+### Launching
+
+A title in the collection, or a platform's core alone, can be started from
+the UI through MiSTer Main's command FIFO, `/dev/MiSTer_cmd` (API.md
+"Launching"). Every path comes from the database and the SD card, never
+from the request.
+
+1. `prefs.launch` must be on and the FIFO must exist; otherwise nothing is
+   written. Launches are serialised by one lock held from planning to the
+   write, and a launch within 3 s of the last one sent is refused as busy,
+   so two taps never start two cores. The FIFO is opened write-only and
+   non-blocking for each command, so a Main that is not reading fails at
+   once instead of stalling a worker.
+2. The core is chosen from the platform row's launch cores in order
+   (PLATFORMS.md "Launch parameters"): the first name with an installed
+   `.rbf`, and of those the newest by the `_YYYYMMDD` date in its name. A
+   bare core is started with `load_core <path>`.
+3. A DAT entry needs a `verified`, `misnamed` or `bad` file for every live
+   rom; a disc needs every track `verified` and loads the first cue sheet
+   whose `FILE` entries all exist beside it. mistarr writes a new MGL naming
+   the core and the entry's file with that core's parameters, as
+   `/tmp/mistarr-<millis>-<seq>.mgl` (tmpfs on the board), keeps the newest
+   three, and sends `load_core` on it.
+4. An MRA title with every zip present and no failed md5 check is started
+   with `load_core` on its `.mra` file; a stored MRA path that is not plain
+   names below `_Arcade` is refused.
+
+The CORENAME watcher then sees the core and pauses heavy jobs as below.
+
 ### Pausing for the core
 
+Jobs run on three serial lanes, one job at a time each:
+
+| Lane | Jobs | While a core runs |
+|---|---|---|
+| heavy | `scan`, `import`, `arcade_catalog` | Held: a queued job does not start and a running one stops at its next file boundary, `paused`. |
+| background | `dat_import`, `recompute_1g1r`, `source_import` | Runs. A DAT parse sleeps 20 ms every 200 entries, on top of the process's `nice` level. Held, like the heavy lane, by a manual pause. |
+| light | `detect_client`, `transfer`, `resolve_magnet`, `deselect` | Runs. |
+
 The CORENAME watcher polls `/tmp/CORENAME` every 2 s. When the value is not
-`MENU` the scheduler pauses hash and import jobs at the next file boundary and
-asks the client to apply the "core running" rate limits. When it returns to
-`MENU` everything resumes. This is a scheduler-level gate, not something each
-job needs to know about.
+`MENU` the gate closes for the heavy lane and the poller applies the "core
+running" rate limits. When it returns to `MENU` everything resumes. This is
+a scheduler-level gate, not something each job needs to know about.
+
+"Pause" (`POST /system/pause`) holds the heavy and background lanes; a DAT
+parse in progress waits at its next 200 entries. While a lane is held,
+`/system/status` lists its queued and paused jobs as `waiting`, and each of
+them carries a `reason` in `/system/jobs`, so the UI can say what waits and
+why. "Run now" (`POST /system/resume`) opens the gate
+until CORENAME changes or the heavy queue drains, whichever comes first;
+after that, new heavy work waits for the core again.
+
+`scan`, `arcade_catalog` and `recompute_1g1r` are singletons per payload: a
+request joins a queued or paused job of the same kind and payload instead of
+queueing another. Any other kind joins only a job that has not started.
+
+At startup the scheduler takes over the queued, running and paused rows the
+previous process left. The first row of each kind and payload goes back on
+its lane under its own id when the kind can be re-run (`scan`,
+`arcade_catalog`, `dat_import` of a dropped file, `recompute_1g1r`,
+`source_import`, `import`); other kinds fail with "interrupted by a
+restart", and repeats of a kind and payload are deleted. A job stopped by a
+shutdown is left `queued` for this.
 
 ## Resource budgets
 
@@ -303,7 +386,7 @@ job needs to know about.
 | Soft `RLIMIT_DATA` | `[memory] data_limit_mib`, 192 MiB, never below 64 |
 | SQLite page cache | 2 MiB, 1 MiB on each of the two connections |
 | SQLite other | `mmap_size = 0`, `temp_store = FILE` under `<data>/tmp` (`SQLITE_TMPDIR`, set at startup and emptied of stale files, since the board's `/tmp` is RAM), WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB |
-| SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads |
+| SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk |
 | Hashing buffer | 256 KiB, one file at a time |
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
@@ -336,6 +419,7 @@ spills dirty pages to the WAL.
 [server]
 listen = "0.0.0.0:8420"
 api_key = ""                 # empty means LAN-open, like the *arr default
+allowed_hosts = []           # extra Host names for writes, e.g. ["nas.example", "*.home.arpa"]
 
 [paths]
 root      = "/media/fat"
@@ -358,6 +442,7 @@ regions   = ["USA", "World", "Europe", "Japan"]
 languages = ["En"]
 prefer_latest_revision = true
 hide = ["bios", "beta", "proto", "demo", "sample", "program"]
+launch = true               # allow starting cores and games from the UI
 
 [sources]
 bind_threshold = 0.6        # lowest per-platform hit rate, 0 to 1, that binds a source
@@ -379,8 +464,8 @@ precedence over the file on every start. `server`, `paths`, `sources`,
 
 ## Non-goals
 
-- No emulation, no launching of games, no save management. MiSTer Remote and
-  friends do that.
+- No emulation and no save management. Launching hands a command to MiSTer
+  Main and stops there.
 - No metadata providers beyond libretro thumbnails. No IGDB, no ScreenScraper,
   no API keys.
 - No embedded torrent client.

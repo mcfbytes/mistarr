@@ -8,7 +8,9 @@ Three layers. All of them run on x86-64 in CI; only the last needs a board.
   name parsing corpus, header rules, hashing against known vectors, 1G1R
   selection tables, cue parsing.
 - `mistarr-mister`: every adapter's `plan_placement` and `accepts` against
-  synthetic inputs; MRA parsing; DAT-name to platform binding.
+  synthetic inputs; MRA parsing; DAT-name to platform binding; MGL building
+  and escaping, core selection and the command FIFO against a real FIFO in a
+  temporary directory.
 - `mistarr-sources`: bencode parsing, binding score computation, name
   normalisation.
 - `mistarr-clients`: each RPC implementation against a recorded fake that

@@ -6,6 +6,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use mistarr_clients::DownloadClient;
+use mistarr_mister::launch::{CommandSink, FifoSink};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -46,6 +47,24 @@ pub struct Options {
     pub poll_idle: Duration,
     /// Poll interval after repeated client failures.
     pub poll_backoff: Duration,
+    /// The FIFO MiSTer Main reads commands from.
+    pub command_path: PathBuf,
+    /// Directory the launch MGL is written to; tmpfs on the board, so the SD card is spared.
+    pub launch_dir: PathBuf,
+    /// How long after one launch another is refused as `busy`.
+    pub launch_gap: Duration,
+    /// How often client detection re-runs while no client answers.
+    pub redetect_poll: Duration,
+    /// Whether the poller asks for re-detection once the client is unreachable.
+    pub redetect_on_unreachable: bool,
+    /// The directory that opts the `Buildroot_MiSTer` Transmission service in.
+    pub transmission_opt_in: PathBuf,
+    /// The `Buildroot_MiSTer` Transmission init script.
+    pub transmission_init: PathBuf,
+    /// Where installed clients are looked for; `None` reads `PATH`.
+    pub client_search_path: Option<std::ffi::OsString>,
+    /// How long `POST /system/client/start` waits for the client to answer.
+    pub client_start_wait: Duration,
 }
 
 impl Default for Options {
@@ -63,6 +82,15 @@ impl Default for Options {
             poll_active: Duration::from_secs(5),
             poll_idle: Duration::from_secs(60),
             poll_backoff: Duration::from_secs(300),
+            command_path: PathBuf::from(mistarr_mister::launch::COMMAND_PATH),
+            launch_dir: PathBuf::from("/tmp"),
+            launch_gap: Duration::from_secs(3),
+            redetect_poll: Duration::from_secs(60),
+            redetect_on_unreachable: true,
+            transmission_opt_in: PathBuf::from(mistarr_clients::launch::TRANSMISSION_OPT_IN),
+            transmission_init: PathBuf::from(mistarr_clients::launch::TRANSMISSION_INIT),
+            client_search_path: None,
+            client_start_wait: Duration::from_secs(10),
         }
     }
 }
@@ -84,9 +112,18 @@ pub struct AppState {
     pub options: Options,
     /// Wakes the download poller to re-check its cadence after a transfer starts.
     pub poll_wake: tokio::sync::Notify,
+    /// Wakes client re-detection, as when a client that answered stops answering.
+    pub redetect: tokio::sync::Notify,
+    /// Serialises client detection so an older probe never overwrites a newer one.
+    pub(crate) detect_lock: tokio::sync::Mutex<()>,
+    /// Held while `POST /system/client/start` runs, so a second one is `busy`.
+    pub(crate) client_start: tokio::sync::Mutex<()>,
     shutdown: watch::Sender<bool>,
     settings_write: tokio::sync::Mutex<()>,
     client: RwLock<Option<(ClientKey, Arc<dyn DownloadClient>)>>,
+    commands: RwLock<Arc<dyn CommandSink>>,
+    /// Serialises launches and holds when the last one was sent.
+    pub(crate) launch_lock: tokio::sync::Mutex<Option<Instant>>,
 }
 
 impl AppState {
@@ -100,12 +137,32 @@ impl AppState {
             gate: Arc::new(Gate::new()),
             scheduler: Scheduler::new(),
             started: Instant::now(),
-            options,
             poll_wake: tokio::sync::Notify::new(),
+            redetect: tokio::sync::Notify::new(),
+            detect_lock: tokio::sync::Mutex::new(()),
+            client_start: tokio::sync::Mutex::new(()),
             shutdown: watch::Sender::new(false),
             settings_write: tokio::sync::Mutex::new(()),
             client: RwLock::new(None),
+            commands: RwLock::new(Arc::new(FifoSink::new(&options.command_path))),
+            launch_lock: tokio::sync::Mutex::new(None),
+            options,
         })
+    }
+
+    /// Where launch commands for MiSTer Main go: the FIFO at `options.command_path`.
+    #[must_use]
+    pub fn command_sink(&self) -> Arc<dyn CommandSink> {
+        Arc::clone(&self.commands.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Replaces the command sink, for tests that record launches.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_command_sink(&self, sink: Arc<dyn CommandSink>) {
+        *self
+            .commands
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = sink;
     }
 
     /// The download client from the last `detect_client` run, or `None` when
@@ -123,15 +180,24 @@ impl AppState {
             .map(|(_, c)| Arc::clone(c))
     }
 
-    /// Points [`AppState::client`] at what `status` found, keeping the current
-    /// handle when nothing it was built from changed.
+    /// Points [`AppState::client`] at what `status` found. The current handle
+    /// stays unless the probe answered from a different client, or only the
+    /// path map changed; a probe that found nothing never drops it.
     pub fn refresh_client(&self, status: &ClientStatus) {
-        let key = ClientKey::from_detection(status, &self.config().client);
-        let mut slot = self.client.write().unwrap_or_else(PoisonError::into_inner);
-        if slot.as_ref().map(|(k, _)| k) == key.as_ref() {
+        let Some(key) = ClientKey::from_detection(status, &self.config().client) else {
             return;
+        };
+        let mut slot = self.client.write().unwrap_or_else(PoisonError::into_inner);
+        let replace = match slot.as_ref() {
+            None => true,
+            Some((k, _)) if *k == key => false,
+            Some((k, _)) => status.reachable || (k.kind == key.kind && k.url == key.url),
+        };
+        if replace {
+            if let Some(client) = key.build() {
+                *slot = Some((key, client));
+            }
         }
-        *slot = key.and_then(|k| k.build().map(|c| (k, c)));
     }
 
     /// Installs `client` as the detected client, for tests that script one in process.
@@ -143,6 +209,18 @@ impl AppState {
             path_map: Vec::new(),
         };
         *self.client.write().unwrap_or_else(PoisonError::into_inner) = Some((key, client));
+    }
+
+    /// Where installed clients are looked for and how they are started.
+    #[must_use]
+    pub fn launcher(&self) -> mistarr_clients::launch::Launcher {
+        mistarr_clients::launch::Launcher {
+            transmission_opt_in: self.options.transmission_opt_in.clone(),
+            transmission_init: self.options.transmission_init.clone(),
+            data_dir: self.config().paths.data,
+            search_path: self.options.client_search_path.clone(),
+            timeout: mistarr_clients::launch::START_TIMEOUT,
+        }
     }
 
     /// A copy of the effective config.
@@ -207,6 +285,7 @@ pub struct Running {
     pub app: Arc<AppState>,
     server: JoinHandle<std::io::Result<()>>,
     tasks: Vec<JoinHandle<()>>,
+    _lock: crate::lock::InstanceLock,
 }
 
 impl Running {
@@ -236,9 +315,11 @@ impl Running {
 }
 
 /// Runs the startup sequence and returns once the HTTP server is listening.
+/// The data directory stays locked to this server until it is shut down.
 ///
 /// # Errors
 ///
+/// [`Error::AlreadyRunning`] when another server uses the data directory,
 /// [`Error::Io`] when a directory cannot be created or the address cannot be
 /// bound, [`Error::Db`] or [`Error::Migration`] when the database cannot be opened.
 pub async fn start(mut config: Config, options: Options) -> Result<Running> {
@@ -246,6 +327,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     for dir in config.paths.layout() {
         std::fs::create_dir_all(&dir)?;
     }
+    let lock = crate::lock::InstanceLock::acquire(&config.paths.data)?;
 
     // Step 2: database, migrations, platform seed, runtime settings.
     let db = Db::open(&config.paths.db())?;
@@ -253,10 +335,6 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
         let added = db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS)?;
         if added > 0 {
             tracing::info!(added, "seeded platforms");
-        }
-        let interrupted = db::jobs::fail_interrupted(c, crate::unix_now())?;
-        if !interrupted.is_empty() {
-            tracing::warn!(count = interrupted.len(), "marked interrupted jobs failed");
         }
         let unfinished = db::files::platforms_with_progress(c)?;
         Ok((
@@ -275,6 +353,20 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     }
     let scan_interval = config.jobs.scan_interval_minutes;
     let app = AppState::new(config, db, options);
+    // The gate starts closed for a loaded core, so no heavy job slips through before the first poll.
+    app.gate
+        .set_corename(corename::read(&app.options.corename_path));
+
+    // Jobs a previous process left open go back on their lanes before anything new is queued.
+    let reconciled = jobs::reconcile(&app).await?;
+    if reconciled != jobs::Reconciled::default() {
+        tracing::info!(
+            requeued = reconciled.requeued,
+            failed = reconciled.failed,
+            dropped = reconciled.dropped,
+            "reconciled unfinished jobs"
+        );
+    }
 
     // Step 3: download client.
     Scheduler::run_inline(&app, Arc::new(DetectClient)).await?;
@@ -322,6 +414,9 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     tasks.push(tokio::spawn(crate::jobs::import::watch(Arc::clone(&app))));
     tasks.push(tokio::spawn(transfer::watch(Arc::clone(&app))));
     tasks.push(tokio::spawn(poll::run(Arc::clone(&app))));
+    tasks.push(tokio::spawn(crate::jobs::detect_client::watch(Arc::clone(
+        &app,
+    ))));
     tasks.push(tokio::spawn(poll::follow_gate(Arc::clone(&app))));
 
     let listener = tokio::net::TcpListener::bind(app.config().server.listen.as_str()).await?;
@@ -343,6 +438,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
         app,
         server,
         tasks,
+        _lock: lock,
     })
 }
 
@@ -390,6 +486,11 @@ pub(crate) mod testutil {
 
     /// App state over a fresh database with paths inside the returned directory.
     pub fn state() -> (tempfile::TempDir, Arc<AppState>) {
+        state_with(|_| {})
+    }
+
+    /// [`state`] with its options adjusted by `f`.
+    pub fn state_with(f: impl FnOnce(&mut Options)) -> (tempfile::TempDir, Arc<AppState>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut config = Config::default();
         config.paths.root = dir.path().to_path_buf();
@@ -401,10 +502,14 @@ pub(crate) mod testutil {
             db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS).map(|_| ())
         })
         .expect("seed");
-        let options = Options {
+        let mut options = Options {
             corename_path: dir.path().join("CORENAME"),
+            command_path: dir.path().join("MiSTer_cmd"),
+            launch_dir: dir.path().to_path_buf(),
+            launch_gap: Duration::ZERO,
             ..Options::default()
         };
+        f(&mut options);
         (dir, AppState::new(config, db, options))
     }
 }
@@ -460,6 +565,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_claimed_arcade_core_marks_its_row_present() {
+        let (dir, app) = testutil::state();
+        let cores = dir.path().join("_Arcade/cores");
+        std::fs::create_dir_all(&cores).expect("mkdir");
+        std::fs::write(cores.join("jtngp_20240101.rbf"), b"").expect("write");
+        detect_cores(&app).expect("detect");
+        let rows = app.db.read(db::platforms::list).await.expect("list");
+        let mut present: Vec<_> = rows
+            .iter()
+            .filter(|r| r.core_present)
+            .map(|r| r.id.0.as_str())
+            .collect();
+        present.sort_unstable();
+        assert_eq!(present, ["arcade", "ngp"]);
+    }
+
+    #[tokio::test]
     async fn client_handle_follows_detection() {
         let (_dir, app) = testutil::state();
         assert!(app.client().is_none());
@@ -470,6 +592,7 @@ mod tests {
             version: None,
             rtorrent_on_path: false,
             checked_at: 0,
+            ..ClientStatus::default()
         };
         app.refresh_client(&found);
         let first = app.client().expect("client");
@@ -480,12 +603,24 @@ mod tests {
         });
         app.refresh_client(&found);
         assert!(!Arc::ptr_eq(&first, &app.client().expect("client")));
+        let second = app.client().expect("client");
         app.refresh_client(&ClientStatus {
             kind: None,
             url: None,
-            ..found
+            ..found.clone()
         });
-        assert!(app.client().is_none());
+        assert!(Arc::ptr_eq(&second, &app.client().expect("kept")));
+        let other = ClientStatus {
+            url: Some("127.0.0.1:2".into()),
+            ..found.clone()
+        };
+        app.refresh_client(&other);
+        assert!(Arc::ptr_eq(&second, &app.client().expect("kept")));
+        app.refresh_client(&ClientStatus {
+            reachable: true,
+            ..other
+        });
+        assert!(!Arc::ptr_eq(&second, &app.client().expect("replaced")));
     }
 
     #[test]
@@ -493,6 +628,17 @@ mod tests {
         let o = Options::default();
         assert_eq!(o.corename_path, PathBuf::from("/tmp/CORENAME"));
         assert_eq!(o.corename_poll, Duration::from_secs(2));
+        assert_eq!(o.command_path, PathBuf::from("/dev/MiSTer_cmd"));
+        assert_eq!(o.launch_dir, PathBuf::from("/tmp"));
+        assert_eq!(o.launch_gap, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn command_sink_is_replaceable() {
+        let (_dir, app) = testutil::state();
+        assert!(!app.command_sink().present());
+        app.set_command_sink(Arc::new(mistarr_mister::launch::RecordingSink::new()));
+        assert!(app.command_sink().present());
     }
 
     /// The timer queues its scan on the heavy lane, so it sits behind the

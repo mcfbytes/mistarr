@@ -1,4 +1,4 @@
-//! Background jobs: the [`Job`] trait, two serial lanes and the gate; see `docs/ARCHITECTURE.md`.
+//! Background jobs: the [`Job`] trait, three serial lanes and the gate; see `docs/ARCHITECTURE.md`.
 
 pub mod arcade;
 pub mod corename;
@@ -30,13 +30,38 @@ use crate::events::EventKind;
 /// Finished rows kept in `jobs` for the activity screen.
 const KEEP_FINISHED: u32 = 200;
 
+/// Kinds whose whole work a paused run of the same payload still covers, so a
+/// second request never queues behind it.
+pub const SINGLETON_KINDS: [&str; 3] = [arcade::KIND, scan::KIND, dat_import::RECOMPUTE_KIND];
+
+/// Error recorded on a job a previous process left unfinished and that is not re-run.
+pub const INTERRUPTED: &str = "interrupted by a restart";
+
 /// Which serial queue a job runs on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Lane {
-    /// Hashing, scanning and importing: one at a time, held by the gate.
+    /// Hashing, scanning, placing files: one at a time, held by the gate.
     Heavy,
-    /// Client polling, detection and binding: one at a time, never held.
+    /// DAT and source parsing: one at a time, held only by a manual pause, yielding while a core runs.
+    Background,
+    /// Client polling, detection and transfers: one at a time, never held.
     Light,
+}
+
+impl Lane {
+    /// The `jobs.lane` value.
+    ///
+    /// ```
+    /// assert_eq!(mistarr_server::jobs::Lane::Background.as_str(), "background");
+    /// ```
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Heavy => "heavy",
+            Self::Background => "background",
+            Self::Light => "light",
+        }
+    }
 }
 
 /// A unit of background work. Later packages add implementations and enqueue
@@ -54,6 +79,12 @@ pub trait Job: Send + Sync {
     /// The lane to run on.
     fn lane(&self) -> Lane {
         Lane::Light
+    }
+
+    /// True when a request joins a job of the same kind and payload that is
+    /// waiting at the gate, not only one still queued; see [`SINGLETON_KINDS`].
+    fn singleton(&self) -> bool {
+        SINGLETON_KINDS.contains(&self.kind())
     }
 
     /// Does the work. Heavy jobs call [`JobContext::checkpoint`] at file boundaries.
@@ -97,8 +128,8 @@ impl JobContext {
         Ok(())
     }
 
-    /// Fails with [`Error::Cancelled`] once the server is shutting down. For
-    /// heavy jobs, also waits while the gate is closed, marking the row `paused`.
+    /// Fails with [`Error::Cancelled`] once the server is shutting down. While
+    /// the job's lane is held, waits, marking the row `paused`; see [`gate::GateState::hold`].
     ///
     /// # Errors
     ///
@@ -108,12 +139,12 @@ impl JobContext {
         if *stop.borrow() {
             return Err(Error::Cancelled);
         }
-        if self.lane == Lane::Light || !self.app.gate.state().paused() {
+        if self.app.gate.state().hold(self.lane).is_none() {
             return Ok(());
         }
         set_state(&self.app, self.id, JobState::Paused).await?;
         tokio::select! {
-            () = self.app.gate.wait_open() => {}
+            () = self.app.gate.wait_free(self.lane) => {}
             _ = stop.wait_for(|s| *s) => return Err(Error::Cancelled),
         }
         set_state(&self.app, self.id, JobState::Running).await
@@ -141,15 +172,13 @@ struct Queued {
     job: Arc<dyn Job>,
 }
 
-type Receivers = (
-    mpsc::UnboundedReceiver<Queued>,
-    mpsc::UnboundedReceiver<Queued>,
-);
+const LANES: [Lane; 3] = [Lane::Heavy, Lane::Background, Lane::Light];
 
-/// Queues jobs onto the two lanes and records them in `jobs`.
+type Receivers = Vec<(Lane, mpsc::UnboundedReceiver<Queued>)>;
+
+/// Queues jobs onto the three lanes and records them in `jobs`.
 pub struct Scheduler {
-    heavy: mpsc::UnboundedSender<Queued>,
-    light: mpsc::UnboundedSender<Queued>,
+    senders: Vec<(Lane, mpsc::UnboundedSender<Queued>)>,
     receivers: Mutex<Option<Receivers>>,
     lanes: Mutex<Vec<JoinHandle<()>>>,
     alive: Arc<AtomicUsize>,
@@ -174,12 +203,16 @@ impl Scheduler {
     /// A scheduler whose lanes start with [`Scheduler::start`].
     #[must_use]
     pub fn new() -> Self {
-        let (heavy, heavy_rx) = mpsc::unbounded_channel();
-        let (light, light_rx) = mpsc::unbounded_channel();
+        let (senders, receivers) = LANES
+            .iter()
+            .map(|&lane| {
+                let (tx, rx) = mpsc::unbounded_channel();
+                ((lane, tx), (lane, rx))
+            })
+            .unzip();
         Self {
-            heavy,
-            light,
-            receivers: Mutex::new(Some((heavy_rx, light_rx))),
+            senders,
+            receivers: Mutex::new(Some(receivers)),
             lanes: Mutex::new(Vec::new()),
             alive: Arc::new(AtomicUsize::new(0)),
         }
@@ -214,12 +247,12 @@ impl Scheduler {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take();
-        let Some((heavy, light)) = taken else {
+        let Some(receivers) = taken else {
             return;
         };
         let sched = &app.scheduler;
         let mut lanes = sched.lanes.lock().unwrap_or_else(PoisonError::into_inner);
-        for (kind, rx) in [(Lane::Heavy, heavy), (Lane::Light, light)] {
+        for (kind, rx) in receivers {
             sched.alive.fetch_add(1, Ordering::SeqCst);
             let guard = LaneGuard(Arc::clone(&sched.alive));
             lanes.push(tokio::spawn(lane(Arc::clone(app), kind, rx, guard)));
@@ -227,32 +260,52 @@ impl Scheduler {
     }
 
     /// Records a queued job and hands it to its lane. A job with the same kind
-    /// and payload that has not started yet is returned instead of a second one.
+    /// and payload that has not started yet is returned instead of a second
+    /// one; for a [`Job::singleton`], so is one waiting at the gate.
     ///
     /// # Errors
     ///
     /// [`crate::Error::Db`] when the row cannot be written, [`crate::Error::Job`]
     /// when the lane has stopped.
     pub async fn enqueue(app: &Arc<AppState>, job: Arc<dyn Job>) -> Result<JobId> {
-        let (kind, payload) = (job.kind(), job.payload());
+        let (kind, payload, lane) = (job.kind(), job.payload(), job.lane());
+        let singleton = job.singleton();
         let (id, fresh) = app
             .db
             .write(move |c| {
-                if let Some(id) = rows::find_queued(c, kind, &payload)? {
+                if let Some(id) = rows::find_queued(c, kind, &payload, singleton)? {
                     return Ok((id, false));
                 }
-                Ok((rows::insert(c, kind, &payload, crate::unix_now())?, true))
+                let id = rows::insert(c, kind, &payload, lane.as_str(), crate::unix_now())?;
+                Ok((id, true))
             })
             .await?;
         if fresh {
-            let tx = match job.lane() {
-                Lane::Heavy => &app.scheduler.heavy,
-                Lane::Light => &app.scheduler.light,
+            let queued = ProgressEvent {
+                id,
+                kind,
+                state: JobState::Queued,
+                progress: &Value::Null,
             };
-            tx.send(Queued { id, job })
-                .map_err(|_| crate::Error::Job("scheduler has stopped".to_owned()))?;
+            app.events.publish(EventKind::JobProgress, &queued);
+            app.scheduler.dispatch(id, job)?;
+            if app.gate.state().hold(lane).is_some() {
+                publish_status(app).await;
+            }
         }
         Ok(id)
+    }
+
+    /// Hands an already recorded job to its lane.
+    fn dispatch(&self, id: JobId, job: Arc<dyn Job>) -> Result<()> {
+        let lane = job.lane();
+        let tx = self
+            .senders
+            .iter()
+            .find_map(|(l, tx)| (*l == lane).then_some(tx))
+            .ok_or_else(|| crate::Error::Job("no such lane".to_owned()))?;
+        tx.send(Queued { id, job })
+            .map_err(|_| crate::Error::Job("scheduler has stopped".to_owned()))
     }
 
     /// Records and runs a job on the calling task, bypassing the lanes and
@@ -266,15 +319,15 @@ impl Scheduler {
         let (kind, payload) = (job.kind(), job.payload());
         let id = app
             .db
-            .write(move |c| rows::insert(c, kind, &payload, crate::unix_now()))
+            .write(move |c| rows::insert(c, kind, &payload, "light", crate::unix_now()))
             .await?;
         execute(app, id, job.as_ref(), Lane::Light).await?;
         Ok(id)
     }
 }
 
-/// Runs queued jobs one at a time until shutdown. A heavy job waits for the
-/// gate before it starts and stays `queued` meanwhile.
+/// Runs queued jobs one at a time until shutdown. A job waits while its lane
+/// is held before it starts and stays `queued` meanwhile.
 async fn lane(
     app: Arc<AppState>,
     lane: Lane,
@@ -290,16 +343,123 @@ async fn lane(
         let Some(Queued { id, job }) = next else {
             break;
         };
-        if lane == Lane::Heavy {
-            tokio::select! {
-                () = app.gate.wait_open() => {}
-                _ = stop.wait_for(|s| *s) => break,
-            }
+        tokio::select! {
+            () = app.gate.wait_free(lane) => {}
+            _ = stop.wait_for(|s| *s) => break,
         }
         if let Err(e) = execute(&app, id, job.as_ref(), lane).await {
             tracing::warn!(job = %id, error = %e, "cannot record job state");
         }
+        if lane == Lane::Heavy {
+            after_heavy(&app).await;
+        }
     }
+}
+
+/// Once the heavy queue drains, ends a "Run now" override so later work
+/// waits for the core again; otherwise refreshes the waiting list in `status`.
+async fn after_heavy(app: &Arc<AppState>) {
+    let open = app
+        .db
+        .read(|c| rows::open_in_lane(c, Lane::Heavy.as_str()))
+        .await;
+    match open {
+        Ok(rows) if rows.is_empty() => {
+            if app.gate.end_run_now() {
+                tracing::info!("heavy queue drained; run-now override ended");
+            }
+        }
+        Ok(_) if app.gate.state().core_running() => publish_status(app).await,
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "cannot read the heavy queue"),
+    }
+}
+
+async fn publish_status(app: &AppState) {
+    let status = crate::status::snapshot(app).await;
+    app.events.publish(EventKind::Status, &status);
+}
+
+/// What [`reconcile`] did with the jobs a previous process left open.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Reconciled {
+    /// Re-queued under their own ids.
+    pub requeued: usize,
+    /// Failed as [`INTERRUPTED`], for kinds that are not re-run.
+    pub failed: usize,
+    /// Deleted as repeats of an earlier row with the same kind and payload.
+    pub dropped: usize,
+}
+
+/// Takes over the queued, running and paused rows a previous process left:
+/// the first row of each kind and payload goes back on its lane under its
+/// own id when [`revive`] knows the kind, else fails as [`INTERRUPTED`];
+/// later repeats are deleted. Run it before anything else is enqueued.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] when the rows cannot be read or written,
+/// [`crate::Error::Job`] when a lane has stopped.
+pub async fn reconcile(app: &Arc<AppState>) -> Result<Reconciled> {
+    let open = app.db.read(rows::open_rows).await?;
+    let mut seen = std::collections::HashSet::new();
+    let mut done = Reconciled::default();
+    for row in open {
+        let id = row.id;
+        if !seen.insert((row.kind.clone(), row.payload.to_string())) {
+            app.db.write(move |c| rows::delete(c, id)).await?;
+            done.dropped += 1;
+            continue;
+        }
+        let now = crate::unix_now();
+        if let Some(job) = revive(&row.kind, &row.payload) {
+            let lane = job.lane().as_str();
+            app.db
+                .write(move |c| rows::requeue(c, id, lane, now))
+                .await?;
+            app.scheduler.dispatch(id, job)?;
+            done.requeued += 1;
+        } else {
+            app.db
+                .write(move |c| rows::fail(c, id, INTERRUPTED, now))
+                .await?;
+            done.failed += 1;
+        }
+    }
+    Ok(done)
+}
+
+/// Rebuilds a job from its stored kind and payload, for the kinds that are
+/// safe to run again after a restart; `None` for the rest.
+///
+/// ```
+/// use mistarr_server::jobs::revive;
+/// assert!(revive("arcade_catalog", &serde_json::json!({})).is_some());
+/// assert!(revive("dat_import", &serde_json::json!({"path": "/d/a.dat"})).is_some());
+/// assert!(revive("detect_client", &serde_json::json!({})).is_none());
+/// ```
+#[must_use]
+pub fn revive(kind: &str, payload: &Value) -> Option<Arc<dyn Job>> {
+    let text = |key: &str| payload.get(key).and_then(Value::as_str);
+    let job: Arc<dyn Job> = match kind {
+        arcade::KIND => Arc::new(arcade::ArcadeCatalog),
+        scan::KIND => Arc::new(scan::ScanJob {
+            platform_id: text("platform_id").map(|p| mistarr_core::PlatformId(p.to_owned())),
+        }),
+        // A bind request names a version; the user repeats it from the UI instead.
+        dat_import::KIND if payload.get("dat_version_id").is_none() => Arc::new(
+            dat_import::DatImport::new(std::path::Path::new(text("path")?)),
+        ),
+        dat_import::RECOMPUTE_KIND => Arc::new(dat_import::Recompute::new(text("platform_id")?)),
+        source_import::IMPORT_KIND => Arc::new(source_import::SourceImport {
+            path: text("path")?.into(),
+        }),
+        import::KIND => Arc::new(import::ImportJob {
+            download_id: crate::db::downloads::DownloadId(payload.get("download_id")?.as_i64()?),
+        }),
+        _ => return None,
+    };
+    Some(job)
 }
 
 /// Runs one job and records its outcome; only bookkeeping failures are returned.
@@ -314,6 +474,11 @@ async fn execute(app: &Arc<AppState>, id: JobId, job: &dyn Job, lane: Lane) -> R
     tracing::debug!(job = %id, kind = ctx.kind, "job started");
     let (state, progress) = match job.run(&ctx).await {
         Ok(()) => (JobState::Done, None),
+        // Left queued so the next start runs it again; see `reconcile`.
+        Err(Error::Cancelled) if *app.shutdown_signal().borrow() => {
+            tracing::debug!(job = %id, kind = ctx.kind, "job stopped for shutdown");
+            return set_state(app, id, JobState::Queued).await;
+        }
         Err(e) => {
             tracing::warn!(job = %id, kind = ctx.kind, error = %e, "job failed");
             (JobState::Failed, Some(json!({ "error": e.to_string() })))
@@ -427,9 +592,38 @@ mod tests {
             .await
             .expect("ran after resume");
         wait_state(&app, id, JobState::Done).await;
-        let ev = events.recv().await.expect("progress event");
-        assert_eq!(ev.kind, EventKind::JobProgress);
-        assert!(ev.data.contains(r#""kind":"probe""#));
+        let mut kinds = Vec::new();
+        while let Ok(ev) = events.try_recv() {
+            kinds.push(ev.kind);
+            if ev.kind == EventKind::JobProgress {
+                assert!(ev.data.contains(r#""kind":"probe""#));
+            }
+        }
+        assert_eq!(kinds.first(), Some(&EventKind::JobProgress), "queued first");
+        assert!(kinds.contains(&EventKind::Status), "waiting list refreshed");
+    }
+
+    #[tokio::test]
+    async fn a_manual_pause_holds_the_background_lane_but_a_core_does_not() {
+        let (_dir, app) = state();
+        Scheduler::start(&app);
+        app.gate.set_override(Some(Override::Paused));
+        let (job, ran) = probe(Lane::Background, false, 5);
+        let id = Scheduler::enqueue(&app, job).await.expect("enqueue");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_state(&app, id, JobState::Queued).await;
+        let status = crate::status::snapshot(&app).await;
+        assert_eq!(status.waiting.len(), 1, "the held job is listed");
+        app.gate.set_override(None);
+        tokio::time::timeout(Duration::from_secs(2), ran.notified())
+            .await
+            .expect("ran after resume");
+        app.gate.set_corename(Some("SNES".into()));
+        let (job, ran) = probe(Lane::Background, false, 6);
+        Scheduler::enqueue(&app, job).await.expect("enqueue");
+        tokio::time::timeout(Duration::from_secs(2), ran.notified())
+            .await
+            .expect("ran while a core runs");
     }
 
     #[tokio::test]
@@ -503,7 +697,7 @@ mod tests {
     async fn stop_cancels_a_running_heavy_job_and_ends_the_lanes() {
         let (_dir, app) = state();
         Scheduler::start(&app);
-        assert_eq!(app.scheduler.lanes_alive(), 2);
+        assert_eq!(app.scheduler.lanes_alive(), 3);
         let (job, started, _release) = blocker(Lane::Heavy);
         let id = Scheduler::enqueue(&app, job).await.expect("enqueue");
         started.notified().await;
@@ -517,10 +711,147 @@ mod tests {
         assert_eq!(app.scheduler.lanes_alive(), 0);
         let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");
         let row = row.expect("row");
-        assert_eq!(row.state, JobState::Failed);
-        assert_eq!(
-            row.progress,
-            Some(json!({"error": "cancelled by shutdown"}))
+        assert_eq!(row.state, JobState::Queued, "left for the next start");
+        assert_eq!(row.lane, "heavy");
+    }
+
+    #[tokio::test]
+    async fn background_lane_runs_while_a_core_holds_the_heavy_lane() {
+        let (_dir, app) = state();
+        Scheduler::start(&app);
+        app.gate.set_corename(Some("SNES".into()));
+        let (heavy, _) = probe(Lane::Heavy, false, 10);
+        let held = Scheduler::enqueue(&app, heavy).await.expect("enqueue");
+        let (job, ran) = probe(Lane::Background, false, 11);
+        let id = Scheduler::enqueue(&app, job).await.expect("enqueue");
+        tokio::time::timeout(Duration::from_secs(2), ran.notified())
+            .await
+            .expect("ran while the core runs");
+        wait_state(&app, id, JobState::Done).await;
+        wait_state(&app, held, JobState::Queued).await;
+        let status = crate::status::snapshot(&app).await;
+        assert_eq!(status.waiting.len(), 1);
+        assert_eq!(status.waiting[0].id, held);
+    }
+
+    #[tokio::test]
+    async fn run_now_lasts_until_the_heavy_queue_drains() {
+        let (_dir, app) = state();
+        Scheduler::start(&app);
+        app.gate.set_corename(Some("SNES".into()));
+        let (job, ran) = probe(Lane::Heavy, false, 12);
+        let id = Scheduler::enqueue(&app, job).await.expect("enqueue");
+        app.gate.set_override(Some(Override::Running));
+        tokio::time::timeout(Duration::from_secs(2), ran.notified())
+            .await
+            .expect("ran after run now");
+        wait_state(&app, id, JobState::Done).await;
+        for _ in 0..200 {
+            if app.gate.state().manual.is_none() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(app.gate.state().manual, None);
+        assert!(
+            app.gate.state().paused(),
+            "later work waits for the core again"
         );
+    }
+
+    /// Stays in `run` at a checkpoint, so the row is `paused` while the gate is closed.
+    struct Singleton;
+
+    #[async_trait]
+    impl Job for Singleton {
+        fn kind(&self) -> &'static str {
+            arcade::KIND
+        }
+        fn lane(&self) -> Lane {
+            Lane::Heavy
+        }
+        async fn run(&self, ctx: &JobContext) -> Result<()> {
+            loop {
+                ctx.checkpoint().await?;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn a_singleton_joins_a_paused_run() {
+        let (_dir, app) = state();
+        Scheduler::start(&app);
+        let first = Scheduler::enqueue(&app, Arc::new(Singleton))
+            .await
+            .expect("enqueue");
+        wait_state(&app, first, JobState::Running).await;
+        app.gate.set_corename(Some("NES".into()));
+        wait_state(&app, first, JobState::Paused).await;
+        let again = Scheduler::enqueue(&app, Arc::new(Singleton))
+            .await
+            .expect("enqueue");
+        assert_eq!(first, again);
+        app.begin_shutdown();
+        app.scheduler.stop(Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test]
+    async fn reconcile_requeues_known_kinds_and_drops_repeats() {
+        let (dir, app) = state();
+        let dat = dir.path().join("gone.dat");
+        let (scan, repeat, poll) = app
+            .db
+            .write(move |c| {
+                let path = json!({ "path": dat });
+                let scan = rows::insert(c, "dat_import", &path, "heavy", 1)?;
+                rows::set_state(c, scan, JobState::Paused, 1)?;
+                let repeat = rows::insert(c, "dat_import", &path, "heavy", 1)?;
+                let poll = rows::insert(c, "detect_client", &json!({}), "light", 1)?;
+                Ok((scan, repeat, poll))
+            })
+            .await
+            .expect("seed");
+        let done = reconcile(&app).await.expect("reconcile");
+        assert_eq!(
+            done,
+            Reconciled {
+                requeued: 1,
+                failed: 1,
+                dropped: 1
+            }
+        );
+        let get = |id| {
+            let app = Arc::clone(&app);
+            async move { app.db.read(move |c| rows::get(c, id)).await.expect("get") }
+        };
+        let revived = get(scan).await.expect("row");
+        assert_eq!(
+            (revived.state, revived.lane.as_str()),
+            (JobState::Queued, "background")
+        );
+        assert!(get(repeat).await.is_none());
+        let failed = get(poll).await.expect("row");
+        assert_eq!(failed.progress, Some(json!({ "error": INTERRUPTED })));
+        Scheduler::start(&app);
+        wait_state(&app, scan, JobState::Done).await;
+    }
+
+    #[test]
+    fn revive_covers_the_rerunnable_kinds() {
+        for (kind, payload) in [
+            ("scan", json!({ "platform_id": null })),
+            ("scan", json!({ "platform_id": "nes" })),
+            ("recompute_1g1r", json!({ "platform_id": "nes" })),
+            ("source_import", json!({ "path": "/s/a.torrent" })),
+            ("import", json!({ "download_id": 3 })),
+        ] {
+            let job = revive(kind, &payload).expect(kind);
+            assert_eq!((job.kind(), job.payload()), (kind, payload));
+        }
+        let bind = json!({ "path": "/d/a.dat", "dat_version_id": 1, "platform_id": "nes" });
+        assert!(revive("dat_import", &bind).is_none());
+        assert!(revive("import", &json!({})).is_none());
+        assert_eq!(Lane::Heavy.as_str(), "heavy");
     }
 }

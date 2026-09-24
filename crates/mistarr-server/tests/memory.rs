@@ -134,9 +134,10 @@ impl Server {
         let mut s = TcpStream::connect(("127.0.0.1", self.port)).expect("connect");
         write!(
             s,
-            "POST /api/v1{path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\
-             Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
-            body.len()
+            "POST /api/v1{path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\
+             X-Mistarr: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len(),
+            port = self.port,
         )
         .expect("write");
         let mut reply = String::new();

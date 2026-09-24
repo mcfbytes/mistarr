@@ -27,6 +27,9 @@ use crate::db::platforms as platform_rows;
 use crate::error::{Error, Result};
 use crate::events::EventKind;
 
+/// `jobs.kind` of [`ScanJob`].
+pub const KIND: &str = "scan";
+
 /// A library scan: one platform, or every enabled platform fanned out as
 /// one job each.
 pub struct ScanJob {
@@ -37,7 +40,7 @@ pub struct ScanJob {
 #[async_trait]
 impl Job for ScanJob {
     fn kind(&self) -> &'static str {
-        "scan"
+        KIND
     }
 
     fn payload(&self) -> Value {
@@ -970,7 +973,7 @@ mod tests {
             .db
             .write({
                 let payload = nes_payload.clone();
-                move |c| job_rows::insert(c, "scan", &payload, 0)
+                move |c| job_rows::insert(c, "scan", &payload, "heavy", 0)
             })
             .await
             .expect("insert");

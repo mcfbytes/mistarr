@@ -1,8 +1,8 @@
 //! MiSTer specifics: the DAT-name to `games/<Core>` table, the `CoreAdapter`
 //! trait and its implementations, installed-core detection, the
-//! `/tmp/CORENAME` watcher and MRA parsing.
+//! `/tmp/CORENAME` watcher, MRA parsing and launching through MiSTer Main.
 //!
-//! See `docs/PLATFORMS.md` and `docs/WORKPLAN.md` WP-04 and WP-19.
+//! See `docs/PLATFORMS.md` and `docs/WORKPLAN.md` WP-04, WP-19 and WP-26.
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
@@ -11,6 +11,7 @@
 pub mod adapter;
 pub mod corename;
 pub mod input;
+pub mod launch;
 pub mod platforms;
 
 pub use adapter::{adapter_for, ByteOrder, CoreAdapter, PlacementPlan, Step};
@@ -58,6 +59,18 @@ pub enum Error {
     /// A Neo Geo `romsets.xml` is not well-formed XML.
     #[error("romsets.xml is not valid XML: {0}")]
     Romsets(String),
+    /// A path cannot be written into an MGL or a command line.
+    #[error("path `{0}` cannot be passed to MiSTer Main")]
+    UnsafePath(String),
+    /// The MiSTer command FIFO does not exist, as on a machine that is not a MiSTer.
+    #[error("the MiSTer command interface is not present on this machine")]
+    CommandAbsent,
+    /// The command FIFO exists but MiSTer Main is not reading it.
+    #[error("MiSTer Main is not reading commands")]
+    NotListening,
+    /// The command FIFO is full or took only part of the command.
+    #[error("MiSTer Main did not take the command")]
+    CommandBusy,
     /// Reading a board file failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),

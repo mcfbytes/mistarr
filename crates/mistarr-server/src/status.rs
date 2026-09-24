@@ -5,11 +5,13 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::app::AppState;
+use crate::db::jobs::{self, JobId, JobRow, JobState};
 use crate::db::settings::{self, keys};
 use crate::db::system::wizard_counts;
 use crate::error::Result;
 use crate::jobs::detect_client::ClientStatus;
-use crate::jobs::gate::{Override, PauseReason};
+use crate::jobs::gate::{GateState, Override, PauseReason};
+use crate::jobs::Lane;
 
 /// `GET /system/status` and the `status` event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -29,10 +31,120 @@ pub struct Status {
     /// The manual override in force.
     #[serde(rename = "override")]
     pub manual_override: Option<Override>,
+    /// Queued and paused jobs on held lanes, heavy first, oldest first;
+    /// empty while no lane is held.
+    pub waiting: Vec<WaitingJob>,
     /// Free bytes on the filesystem holding the data directory.
     pub disk_free_bytes: Option<u64>,
     /// Resident set size of this process.
     pub rss_bytes: Option<u64>,
+    /// Whether cores and games can be launched.
+    pub launch: LaunchState,
+}
+
+/// Whether the launch routes can start anything, as `/system/status` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LaunchState {
+    /// Launching is allowed and MiSTer Main's command interface exists.
+    Ready,
+    /// `prefs.launch` is off.
+    Disabled,
+    /// No command interface, as on a machine that is not a MiSTer.
+    Unavailable,
+}
+
+/// The launch state from `prefs.launch` and the command sink.
+pub fn launch_state(app: &AppState) -> LaunchState {
+    if !app.config().prefs.launch {
+        LaunchState::Disabled
+    } else if app.command_sink().present() {
+        LaunchState::Ready
+    } else {
+        LaunchState::Unavailable
+    }
+}
+
+/// One heavy job held by the gate, as `/system/status` lists it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WaitingJob {
+    /// The job's row.
+    pub id: JobId,
+    /// Its kind.
+    pub kind: String,
+    /// `queued`, or `paused` when it stopped at a checkpoint.
+    pub state: JobState,
+    /// The file name or platform the job is about, when its payload names one.
+    pub detail: Option<String>,
+}
+
+impl WaitingJob {
+    /// The summary of a job row.
+    ///
+    /// ```
+    /// use mistarr_server::db::jobs::{JobId, JobRow, JobState};
+    /// let row = JobRow { id: JobId(1), kind: "scan".into(), lane: "heavy".into(),
+    ///     payload: serde_json::json!({"platform_id": "nes"}), state: JobState::Queued,
+    ///     progress: None, created_at: 0, updated_at: 0 };
+    /// let w = mistarr_server::status::WaitingJob::from_row(&row);
+    /// assert_eq!(w.detail.as_deref(), Some("nes"));
+    /// ```
+    #[must_use]
+    pub fn from_row(row: &JobRow) -> Self {
+        Self {
+            id: row.id,
+            kind: row.kind.clone(),
+            state: row.state,
+            detail: job_detail(&row.payload),
+        }
+    }
+}
+
+/// The file name in a payload's `path`, else its `platform_id`.
+///
+/// ```
+/// let p = serde_json::json!({"path": "/data/dats/a.dat"});
+/// assert_eq!(mistarr_server::status::job_detail(&p).as_deref(), Some("a.dat"));
+/// assert_eq!(mistarr_server::status::job_detail(&serde_json::json!({})), None);
+/// ```
+#[must_use]
+pub fn job_detail(payload: &serde_json::Value) -> Option<String> {
+    if let Some(path) = payload.get("path").and_then(serde_json::Value::as_str) {
+        let name = Path::new(path).file_name()?;
+        return Some(name.to_string_lossy().into_owned());
+    }
+    payload
+        .get("platform_id")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_owned)
+}
+
+/// Why a queued or paused job on `lane` is not running, from the gate; `None`
+/// while its lane is not held. See [`GateState::hold`].
+///
+/// ```
+/// use mistarr_server::db::jobs::JobState;
+/// use mistarr_server::jobs::gate::GateState;
+/// let gate = GateState { corename: Some("SNES".into()), manual: None };
+/// let why = mistarr_server::status::hold_reason(&gate, "heavy", JobState::Queued);
+/// assert_eq!(why.as_deref(), Some("Paused while SNES is running"));
+/// assert!(mistarr_server::status::hold_reason(&gate, "background", JobState::Queued).is_none());
+/// ```
+#[must_use]
+pub fn hold_reason(gate: &GateState, lane: &str, state: JobState) -> Option<String> {
+    if !matches!(state, JobState::Queued | JobState::Paused) {
+        return None;
+    }
+    let lane = [Lane::Heavy, Lane::Background, Lane::Light]
+        .into_iter()
+        .find(|l| l.as_str() == lane)?;
+    match gate.hold(lane)? {
+        PauseReason::Core => Some(format!(
+            "Paused while {} is running",
+            gate.corename.as_deref().unwrap_or("a core")
+        )),
+        PauseReason::Manual => Some("Paused by the user".to_owned()),
+    }
 }
 
 /// Builds the status body from the gate, settings and the host.
@@ -46,6 +158,25 @@ pub async fn snapshot(app: &AppState) -> Status {
             None
         });
     let gate = app.gate.state();
+    let mut waiting = Vec::new();
+    for lane in [Lane::Heavy, Lane::Background] {
+        if gate.hold(lane).is_none() {
+            continue;
+        }
+        let rows = app
+            .db
+            .read(move |c| jobs::open_in_lane(c, lane.as_str()))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "cannot list waiting jobs");
+                Vec::new()
+            });
+        waiting.extend(
+            rows.iter()
+                .filter(|r| r.state != JobState::Running)
+                .map(WaitingJob::from_row),
+        );
+    }
     let data = app.config().paths.data;
     Status {
         version: env!("CARGO_PKG_VERSION"),
@@ -54,9 +185,11 @@ pub async fn snapshot(app: &AppState) -> Status {
         pause_reason: gate.pause_reason(),
         paused: gate.paused(),
         manual_override: gate.manual,
+        waiting,
         corename: gate.corename,
         disk_free_bytes: free_bytes(&data),
         rss_bytes: rss_bytes(),
+        launch: launch_state(app),
     }
 }
 
@@ -174,5 +307,18 @@ mod tests {
         assert!(s.client.is_none());
         let json = serde_json::to_value(&s).expect("json");
         assert!(json.get("override").is_some());
+        assert_eq!(json["launch"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn launch_state_follows_prefs_and_sink() {
+        let (_dir, app) = state();
+        assert_eq!(launch_state(&app), LaunchState::Unavailable);
+        app.set_command_sink(std::sync::Arc::new(
+            mistarr_mister::launch::RecordingSink::new(),
+        ));
+        assert_eq!(launch_state(&app), LaunchState::Ready);
+        app.update_config(|c| c.prefs.launch = false);
+        assert_eq!(launch_state(&app), LaunchState::Disabled);
     }
 }

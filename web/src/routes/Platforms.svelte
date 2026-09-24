@@ -4,6 +4,7 @@
   import { platformUrl } from '../lib/router.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
+  import SetupHints from '../lib/SetupHints.svelte';
 
   onMount(() => {
     void loadPlatforms();
@@ -46,6 +47,7 @@
 
 <div class="page">
   <h1>Platforms</h1>
+  <SetupHints />
   <div class="grid">
     {#each present as platform (platform.id)}
       <div class="card">

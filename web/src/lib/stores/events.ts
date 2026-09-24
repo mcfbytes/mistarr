@@ -1,18 +1,22 @@
 import { EventSubscriber } from '../api';
 import type { SseEvent } from '../types';
-import { applyStatus, loadWizard, setConnected } from './status.svelte';
+import { applyStatus, loadStatus, loadWizard, setConnected } from './status.svelte';
 import { applySourceChanged, loadSources } from './sources.svelte';
 import { applyDownloadChanged, loadDownloads, loadImports } from './downloads.svelte';
-import { applyJobProgress, loadJobs } from './jobs.svelte';
+import { applyJobProgress, loadJobs, resetFinished } from './jobs.svelte';
 import { applyDatLoaded, loadDats } from './dats.svelte';
 import { loadPlatforms } from './platforms.svelte';
 import { applyFileChanged, reloadTitles } from './titles.svelte';
+import { loadIncoming, scheduleIncoming } from './incoming.svelte';
+import { markUploadsStale } from './uploads.svelte';
 
 let subscriber: EventSubscriber | null = null;
 
 // Re-fetches every hydrated store; the server asks for this when a
 // reconnect's replay may have gaps.
 async function resync(): Promise<void> {
+  resetFinished();
+  markUploadsStale();
   await Promise.all([
     loadPlatforms(),
     loadDats(),
@@ -21,7 +25,10 @@ async function resync(): Promise<void> {
     loadImports(),
     loadJobs(),
     loadWizard(),
-    reloadTitles()
+    loadStatus(),
+    reloadTitles(),
+    loadIncoming('dats'),
+    loadIncoming('sources')
   ]);
 }
 
@@ -55,6 +62,7 @@ function handle(event: SseEvent): void {
       break;
     case 'source.changed':
       applySourceChanged(event.data.source_id, event.data.state, event.data.platform_id);
+      scheduleIncoming('sources');
       void loadWizard();
       break;
     case 'download.changed':
@@ -62,12 +70,19 @@ function handle(event: SseEvent): void {
       break;
     case 'job.progress':
       applyJobProgress(event.data.id, event.data.kind, event.data.state, event.data.progress);
+      if (event.data.kind === 'dat_import') {
+        scheduleIncoming('dats');
+      } else if (event.data.kind === 'source_import') {
+        scheduleIncoming('sources');
+      }
       break;
     case 'dat.loaded':
       applyDatLoaded();
+      scheduleIncoming('dats');
       void loadWizard();
       break;
     case 'dat.rejected':
+      scheduleIncoming('dats');
       break;
     case 'import.done':
       void loadImports();

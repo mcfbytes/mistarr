@@ -81,6 +81,7 @@ mod tests {
                     version: None,
                     rtorrent_on_path: false,
                     checked_at: 0,
+                    ..ClientStatus::default()
                 };
                 settings::set_json(c, keys::CLIENT_DETECTED, &status)
             })

@@ -17,7 +17,8 @@ STUB
 chmod +x "$root/mistarr/mistarr"
 
 MISTARR_ROOT="$root"
-export MISTARR_ROOT
+MISTARR_RUNDIR="$root/run"
+export MISTARR_ROOT MISTARR_RUNDIR
 
 fail=0
 
@@ -199,6 +200,96 @@ count2=$(grep -c "$resolved_self" "$root/linux/user-startup.sh")
     echo "FAIL: start-at-boot line is idempotent (count $count2)"
 }
 "$script" stop >/dev/null
+
+# Racing starts, as user-startup.sh and a manual start at boot: one daemon.
+cp "$root/mistarr/mistarr" "$root/mistarr/mistarr.good"
+cat > "$root/mistarr/mistarr" <<STUB
+#!/bin/sh
+echo \$\$ >> "$root/mistarr/launches"
+trap 'exit 0' TERM
+while :; do sleep 1; done
+STUB
+chmod +x "$root/mistarr/mistarr"
+"$script" start >/dev/null &
+"$script" start >/dev/null &
+"$script" start >/dev/null
+wait
+sleep 1
+launches=$(wc -l < "$root/mistarr/launches")
+expect "$launches" "1" "racing starts launch one daemon"
+out=$("$script" status)
+expect_prefix "$out" "mistarr running" "the racing start left a live pidfile"
+"$script" stop >/dev/null
+
+# A start lock left by a start that died does not block the next one.
+lock="$root/run/mistarr.start.lock"
+sleep 100 &
+dead=$!
+kill "$dead" 2>/dev/null
+wait "$dead" 2>/dev/null
+echo "$dead" > "$lock"
+out=$("$script" start)
+expect_prefix "$out" "mistarr started" "a stale start lock is taken over"
+"$script" stop >/dev/null
+[ -e "$lock" ] && {
+    fail=$((fail + 1))
+    echo "FAIL: the start lock is released"
+}
+
+# A lock naming a live process that is not a start of this script is stale too.
+sleep 100 &
+other=$!
+echo "$other" > "$lock"
+out=$("$script" start)
+expect_prefix "$out" "mistarr started" "a lock held by another program is taken over"
+"$script" stop >/dev/null
+kill "$other" 2>/dev/null
+cp "$root/mistarr/mistarr.good" "$root/mistarr/mistarr"
+chmod +x "$root/mistarr/mistarr"
+
+# The supervisor restarts a daemon that crashes after starting.
+rm -f "$root/mistarr/launches" "$root/mistarr/mistarr.log"
+cat > "$root/mistarr/mistarr" <<STUB
+#!/bin/sh
+echo \$\$ >> "$root/mistarr/launches"
+trap 'exit 0' TERM
+if [ "\$(wc -l < "$root/mistarr/launches")" -eq 1 ]; then
+    sleep 3
+    exit 7
+fi
+while :; do sleep 1; done
+STUB
+chmod +x "$root/mistarr/mistarr"
+out=$(MISTARR_BACKOFF=1 "$script" start)
+expect_prefix "$out" "mistarr started" "a supervised start reports the daemon"
+sleep 5
+expect "$(wc -l < "$root/mistarr/launches")" "2" "a crashed daemon is started again"
+expect_contains "$(cat "$root/mistarr/mistarr.log")" "status 7; restarting in 1 s" "the restart is logged"
+out=$("$script" status)
+expect_prefix "$out" "mistarr running" "the restarted daemon is running"
+"$script" stop >/dev/null
+expect_file_absent "$root/mistarr/supervisor.pid" "stop ends the supervisor"
+sleep 2
+expect "$(wc -l < "$root/mistarr/launches")" "2" "nothing restarts after stop"
+
+# Repeated crashes make the supervisor give up.
+rm -f "$root/mistarr/launches" "$root/mistarr/mistarr.log"
+cat > "$root/mistarr/mistarr" <<STUB
+#!/bin/sh
+echo \$\$ >> "$root/mistarr/launches"
+sleep 3
+exit 9
+STUB
+chmod +x "$root/mistarr/mistarr"
+out=$(MISTARR_BACKOFF=1 MISTARR_CRASH_LIMIT=2 "$script" start)
+expect_prefix "$out" "mistarr started" "a daemon that crashes later still starts"
+sleep 9
+expect_contains "$(cat "$root/mistarr/mistarr.log")" "giving up" "the supervisor gives up"
+expect_file_absent "$root/mistarr/supervisor.pid" "a supervisor that gave up is gone"
+out=$("$script" status)
+expect "$out" "mistarr not running" "nothing runs after giving up"
+cp "$root/mistarr/mistarr.good" "$root/mistarr/mistarr"
+chmod +x "$root/mistarr/mistarr"
 
 if ! sh "$here/install.sh"; then
     fail=$((fail + 1))

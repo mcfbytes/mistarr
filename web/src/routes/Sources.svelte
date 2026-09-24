@@ -4,6 +4,9 @@
   import { getPlatforms, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
+  import { scheduleIncoming } from '../lib/stores/incoming.svelte';
+  import { addUpload } from '../lib/stores/uploads.svelte';
+  import IncomingList from '../lib/IncomingList.svelte';
   import type { SeedPolicy } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -92,20 +95,26 @@
     }
   }
 
+  function platformName(id: string): string {
+    return platforms.find((p) => p.id === id)?.name ?? id;
+  }
+
   async function upload(): Promise<void> {
-    const file = fileInput?.files?.[0];
-    if (!file || isMock) {
+    const files = Array.from(fileInput?.files ?? []);
+    if (isMock) {
       return;
     }
-    try {
-      await api.uploadSource(file);
-      await loadSources();
-    } catch (err) {
-      showToast(errorMessage(err));
-    } finally {
-      if (fileInput) {
-        fileInput.value = '';
+    for (const file of files) {
+      try {
+        const up = await api.uploadSource(file);
+        addUpload({ kind: 'sources', file: up.file, jobId: up.job_id });
+      } catch (err) {
+        showToast(`${file.name}: ${errorMessage(err)}`);
       }
+    }
+    scheduleIncoming('sources');
+    if (fileInput) {
+      fileInput.value = '';
     }
   }
 
@@ -115,9 +124,10 @@
       return;
     }
     try {
-      await api.addMagnet(uri);
+      const up = await api.addMagnet(uri);
+      addUpload({ kind: 'sources', file: up.file, jobId: up.job_id });
+      scheduleIncoming('sources');
       magnet = '';
-      await loadSources();
     } catch (err) {
       showToast(errorMessage(err));
     }
@@ -130,7 +140,7 @@
   <form class="card upload" onsubmit={(e) => e.preventDefault()}>
     <label>
       Add a .torrent file
-      <input bind:this={fileInput} type="file" accept=".torrent" onchange={upload} />
+      <input bind:this={fileInput} type="file" accept=".torrent" multiple onchange={upload} />
     </label>
     <label>
       Or a magnet link
@@ -138,6 +148,9 @@
     </label>
     <button class="primary" onclick={addMagnet}>Add</button>
   </form>
+
+  <h2>Waiting in <code>sources/</code></h2>
+  <IncomingList which="sources" />
 
   {#if sources.length === 0}
     <p>No sources yet. Place a .torrent or .magnet file in <code>/media/fat/mistarr/sources</code> or drop one here.</p>
@@ -173,6 +186,11 @@
                     <option value={p.id}>{p.name}</option>
                   {/each}
                 </select>
+                {#if source.suggested_platform_id}
+                  <button class="suggest" onclick={() => source.suggested_platform_id && bind(source.id, source.suggested_platform_id)}>
+                    Bind to {platformName(source.suggested_platform_id)}
+                  </button>
+                {/if}
               {/if}
             </td>
             <td>{source.state}{source.reason ? ` — ${source.reason}` : ''}</td>
@@ -235,6 +253,12 @@
     text-align: left;
     padding: 0.4em;
     border-bottom: 1px solid var(--border);
+  }
+
+  .suggest {
+    display: block;
+    margin-top: 0.3em;
+    font-size: 0.9em;
   }
 
   .row-actions {

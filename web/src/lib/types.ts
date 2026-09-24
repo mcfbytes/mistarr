@@ -6,10 +6,22 @@ export interface ClientStatus {
   reachable: boolean;
   version: string | null;
   rtorrent_on_path: boolean;
+  transmission_on_path: boolean;
+  transmission_service: boolean;
+  transmission_opt_in: boolean;
   checked_at: number;
 }
 
+/** A heavy job the closed gate holds. */
+export interface WaitingJob {
+  id: number;
+  kind: string;
+  state: JobState;
+  detail: string | null;
+}
+
 export type PauseReason = 'core' | 'manual' | null;
+export type LaunchState = 'ready' | 'disabled' | 'unavailable';
 export type Override = 'paused' | 'running' | null;
 
 export interface SystemStatus {
@@ -20,8 +32,10 @@ export interface SystemStatus {
   paused: boolean;
   pause_reason: PauseReason;
   override: Override;
+  waiting: WaitingJob[];
   disk_free_bytes: number | null;
   rss_bytes: number | null;
+  launch: LaunchState;
 }
 
 export interface WizardStatus {
@@ -122,6 +136,22 @@ export interface TitleVariant {
   dat_version_id: number;
   roms: TitleRom[];
   torrent_files_available: number;
+  source?: 'dat' | 'mra';
+  mra?: TitleMra;
+}
+
+export interface TitleMra {
+  setname: string | null;
+  rbf: string | null;
+  path: string | null;
+  missing_zips: string[];
+  md5_check: 'match' | 'mismatch' | 'missing_part' | 'refused' | null;
+  md5_detail: string | null;
+}
+
+export interface Launched {
+  core: string;
+  file: string | null;
 }
 
 export interface TitleDetail {
@@ -164,6 +194,20 @@ export interface Source {
   total_size: number;
   client_id: string | null;
   added_at: number;
+  suggested_platform_id: string | null;
+}
+
+export type IncomingState = 'waiting' | 'importing' | 'rejected';
+
+/** A file in `dats/` or `sources/` that has not loaded. */
+export interface IncomingFile {
+  file: string;
+  size: number;
+  state: IncomingState;
+  reason: string | null;
+  job_id: number | null;
+  progress: Record<string, unknown> | null;
+  modified: number;
 }
 
 export type SourceFileConfidence = 'name' | 'size' | null;
@@ -220,12 +264,16 @@ export interface ImportLogEntry {
 
 export type JobState = 'queued' | 'running' | 'paused' | 'done' | 'failed';
 
+export type JobLane = 'heavy' | 'background' | 'light';
+
 export interface Job {
   id: number;
   kind: string;
+  lane: JobLane;
   payload: Record<string, unknown>;
   state: JobState;
   progress: Record<string, unknown> | null;
+  reason: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -255,6 +303,7 @@ export interface PrefsSettings {
   languages: string[];
   prefer_latest_revision: boolean;
   hide: string[];
+  launch: boolean;
 }
 
 export interface Settings {
@@ -285,7 +334,7 @@ export interface SseStatusEvent {
 
 export interface SseJobProgressEvent {
   name: 'job.progress';
-  data: { id: number; kind: string; state: JobState; progress: Record<string, unknown> };
+  data: { id: number; kind: string; state: JobState; progress: Record<string, unknown> | null };
 }
 
 export interface SseDatLoadedEvent {

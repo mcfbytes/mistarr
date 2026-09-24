@@ -93,6 +93,9 @@ pub struct ServerConfig {
     pub listen: String,
     /// Value required in `X-Api-Key`; empty leaves the API open on the LAN.
     pub api_key: String,
+    /// Host names, beyond the built-in ones, that state-changing requests may
+    /// address; `*.name` allows every subdomain. See `docs/API.md`.
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -100,6 +103,7 @@ impl Default for ServerConfig {
         Self {
             listen: "0.0.0.0:8420".to_owned(),
             api_key: String::new(),
+            allowed_hosts: Vec::new(),
         }
     }
 }
@@ -276,7 +280,7 @@ impl Default for LimitsConfig {
     }
 }
 
-/// `[prefs]`: 1G1R preferences and the flags hidden by default.
+/// `[prefs]`: 1G1R preferences, the flags hidden by default and whether games may be launched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PrefsConfig {
@@ -288,6 +292,26 @@ pub struct PrefsConfig {
     pub prefer_latest_revision: bool,
     /// DAT flags hidden in the catalog.
     pub hide: Vec<String>,
+    /// Whether the API may start cores and games through MiSTer Main.
+    pub launch: bool,
+}
+
+impl PrefsConfig {
+    /// Whether `other` picks and hides the same entries, ignoring settings that do not touch 1G1R.
+    ///
+    /// ```
+    /// use mistarr_server::config::PrefsConfig;
+    /// let a = PrefsConfig::default();
+    /// assert!(a.same_selection(&PrefsConfig { launch: false, ..a.clone() }));
+    /// assert!(!a.same_selection(&PrefsConfig { hide: vec![], ..a.clone() }));
+    /// ```
+    #[must_use]
+    pub fn same_selection(&self, other: &Self) -> bool {
+        self.regions == other.regions
+            && self.languages == other.languages
+            && self.prefer_latest_revision == other.prefer_latest_revision
+            && self.hide == other.hide
+    }
 }
 
 impl Default for PrefsConfig {
@@ -298,6 +322,7 @@ impl Default for PrefsConfig {
             languages: owned(&["En"]),
             prefer_latest_revision: true,
             hide: owned(&["bios", "beta", "proto", "demo", "sample", "program"]),
+            launch: true,
         }
     }
 }
@@ -428,6 +453,7 @@ mod tests {
         assert_eq!(c.client.kind, ClientChoice::Auto);
         assert_eq!(c.prefs.regions[0], "USA");
         assert!(c.prefs.prefer_latest_revision);
+        assert!(c.prefs.launch);
         assert_eq!(c.jobs.scan_interval_minutes, 1440);
     }
 
@@ -464,6 +490,7 @@ mod tests {
             down_kbps_core = 1
             [prefs]
             regions = ["Europe"]
+            launch = false
             [sources]
             bind_threshold = 0.8
         "#;
@@ -475,6 +502,7 @@ mod tests {
         assert_eq!(c.limits.up_kbps_core, 64);
         assert_eq!(c.prefs.regions, ["Europe"]);
         assert_eq!(c.prefs.languages, ["En"]);
+        assert!(!c.prefs.launch);
         assert!((c.sources.bind_threshold - 0.8).abs() < f32::EPSILON);
         assert!((Config::default().sources.bind_threshold - 0.6).abs() < f32::EPSILON);
         assert_eq!(c.paths.db(), Path::new("/r/m/mistarr.db"));
