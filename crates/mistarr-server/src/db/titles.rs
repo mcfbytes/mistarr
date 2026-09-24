@@ -375,8 +375,13 @@ pub struct Counts {
     pub have: u64,
     /// Groups with at least one wanted variant.
     pub wanted: u64,
-    /// Files on disk that match no rom.
-    pub unverified: u64,
+    /// Files on disk that match no rom; a scan never runs against arcade,
+    /// so this is always 0 there.
+    pub unmatched_files: u64,
+    /// Live MRA sets with every zip present whose md5 check did not match; 0 outside arcade.
+    pub failing_check: u64,
+    /// Live MRA sets with some, but not every, named zip present; 0 outside arcade.
+    pub partial: u64,
 }
 
 /// [`Counts`] per platform id, counting the groups the default browse shows
@@ -393,6 +398,7 @@ pub struct Counts {
 /// ```
 pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Counts>> {
     let mut out: HashMap<String, Counts> = HashMap::new();
+    let hidden_json = json(hidden);
     let mut stmt = conn.prepare(&format!(
         "SELECT g.platform_id, COUNT(*), SUM(g.have_verified > 0), SUM(g.wanted > 0)
          FROM title_groups g
@@ -402,7 +408,7 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
                              WHERE f.value IN (SELECT value FROM json_each(?1))))
          GROUP BY g.platform_id"
     ))?;
-    let mut rows = stmt.query([json(hidden)])?;
+    let mut rows = stmt.query([&hidden_json])?;
     while let Some(r) = rows.next()? {
         let e = out.entry(r.get(0)?).or_default();
         e.titles = unsigned(r.get(1)?);
@@ -414,7 +420,26 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
     )?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        out.entry(r.get(0)?).or_default().unverified = unsigned(r.get(1)?);
+        out.entry(r.get(0)?).or_default().unmatched_files = unsigned(r.get(1)?);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT t.platform_id,
+                SUM(t.mra_check IS NOT NULL AND t.mra_check <> 'match'
+                    AND NOT EXISTS (SELECT 1 FROM roms r
+                                    WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 0)),
+                SUM(EXISTS (SELECT 1 FROM roms r WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 1)
+                    AND EXISTS (SELECT 1 FROM roms r WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 0))
+         FROM titles t
+         WHERE t.source = 'mra' AND t.retired = 0
+           AND NOT EXISTS (SELECT 1 FROM json_each(t.flags) f
+                           WHERE f.value IN (SELECT value FROM json_each(?1)))
+         GROUP BY t.platform_id",
+    )?;
+    let mut rows = stmt.query([&hidden_json])?;
+    while let Some(r) = rows.next()? {
+        let e = out.entry(r.get(0)?).or_default();
+        e.failing_check = unsigned(r.get(1)?);
+        e.partial = unsigned(r.get(2)?);
     }
     Ok(out)
 }

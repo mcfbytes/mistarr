@@ -299,10 +299,94 @@ fn view_counts_a_title_once_whatever_its_roms_and_files() {
             titles: 1,
             have: 1,
             wanted: 1,
-            unverified: 1
+            unmatched_files: 1,
+            failing_check: 0,
+            partial: 0
         })
     );
     assert!(!counts.contains_key("nes"));
+}
+
+/// A minimal MRA title fixture, one row per unique `(name, setname)`.
+fn arcade_title<'a>(name: &'a str, setname: &'a str) -> crate::db::arcade::MraTitle<'a> {
+    crate::db::arcade::MraTitle {
+        name,
+        base_name: name,
+        group_key: "",
+        regions: &[],
+        languages: &[],
+        revision: None,
+        flags: &[],
+        setname: Some(setname),
+        rbf: Some("core"),
+        mra_path: "x.mra",
+        file_stamp: "1:1",
+        run: 1,
+    }
+}
+
+#[test]
+fn counts_report_arcade_sets_failing_check_or_partly_present() {
+    let c = conn();
+    let v = crate::db::arcade::mra_version(&c, "arcade", 1).expect("version");
+    // A complete set whose md5 check failed.
+    let mismatched = crate::db::arcade::upsert_title(
+        &c,
+        "arcade",
+        v,
+        &arcade_title("Example Blaster", "exblast"),
+        &[crate::db::arcade::MraZip {
+            name: "exblast.zip",
+            zip_dir: "mame",
+            md5: None,
+            present: true,
+        }],
+    )
+    .expect("upsert");
+    crate::db::arcade::set_check(&c, mismatched, Some("mismatch"), None, None).expect("check");
+    // A set naming two zips, only one of them present.
+    crate::db::arcade::upsert_title(
+        &c,
+        "arcade",
+        v,
+        &arcade_title("Example Quest", "exquest"),
+        &[
+            crate::db::arcade::MraZip {
+                name: "exquest.zip",
+                zip_dir: "mame",
+                md5: None,
+                present: true,
+            },
+            crate::db::arcade::MraZip {
+                name: "exquest2.zip",
+                zip_dir: "mame",
+                md5: None,
+                present: false,
+            },
+        ],
+    )
+    .expect("upsert");
+    // A fully present, matching set: neither failing nor partial.
+    let matched = crate::db::arcade::upsert_title(
+        &c,
+        "arcade",
+        v,
+        &arcade_title("Example Homebrew", "exhb"),
+        &[crate::db::arcade::MraZip {
+            name: "exhb.zip",
+            zip_dir: "mame",
+            md5: None,
+            present: true,
+        }],
+    )
+    .expect("upsert");
+    crate::db::arcade::set_check(&c, matched, Some("match"), None, None).expect("check");
+
+    let counts = counts(&c, &[]).expect("counts");
+    let arcade = counts.get("arcade").expect("arcade");
+    assert_eq!(arcade.titles, 3);
+    assert_eq!(arcade.failing_check, 1);
+    assert_eq!(arcade.partial, 1);
 }
 
 #[test]

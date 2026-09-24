@@ -26,6 +26,7 @@ use crate::status::{hold_reason, snapshot, wizard_status, Status};
 use axum::http::StatusCode;
 use mistarr_clients::launch::Launcher;
 use mistarr_clients::ClientKind;
+use mistarr_mister::platforms::by_id as mister_platform_by_id;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -50,10 +51,18 @@ struct ScanBody {
 
 #[derive(Debug, Serialize)]
 struct ScanResponse {
-    job_id: JobId,
+    /// `null` when scanning `arcade` alone finds nothing for the arcade
+    /// catalogue to do, since no separate scan job is queued for it.
+    job_id: Option<JobId>,
     /// The arcade catalogue queued with a scan of every platform or of `arcade`.
     #[serde(skip_serializing_if = "Option::is_none")]
     arcade_job_id: Option<JobId>,
+}
+
+/// Whether `id` is the arcade platform, whose presence and verification come
+/// from the arcade catalogue rather than a library scan.
+fn is_arcade(id: &PlatformId) -> bool {
+    mister_platform_by_id(&id.0).is_some_and(mistarr_mister::platforms::Platform::is_arcade)
 }
 
 async fn scan(
@@ -69,12 +78,16 @@ async fn scan(
         Some(raw) => Some(validate_platform(&app, raw).await?),
         None => None,
     };
-    let arcade = platform_id
-        .as_ref()
-        .is_none_or(|p| p.0 == crate::jobs::arcade::PLATFORM);
-    let job = ScanJob { platform_id };
-    let job_id = Scheduler::enqueue(&app, Arc::new(job)).await?;
-    let arcade_job_id = if arcade {
+    let arcade_only = platform_id.as_ref().is_some_and(is_arcade);
+    let covers_arcade = platform_id.is_none() || arcade_only;
+    // Arcade never gets a generic scan job: its presence and verification
+    // come from the arcade catalogue, queued below as `arcade_job_id`.
+    let job_id = if arcade_only {
+        None
+    } else {
+        Some(Scheduler::enqueue(&app, Arc::new(ScanJob { platform_id })).await?)
+    };
+    let arcade_job_id = if covers_arcade {
         crate::jobs::arcade::enqueue_if_relevant(&app).await?
     } else {
         None

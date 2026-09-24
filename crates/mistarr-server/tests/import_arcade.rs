@@ -231,7 +231,8 @@ fn log(b: &Booted) -> Vec<imports::LogRow> {
         .expect("log")
 }
 
-/// Runs a library scan of the arcade platform and checks it keeps `zip_rel`'s rows as they were.
+/// Runs a library scan of the arcade platform and checks `zip_rel`'s rows are
+/// untouched, since a scan now skips arcade and only the import path writes them.
 async fn scan_agrees(b: &Booted, zip_rel: &str) {
     let key = |rows: Vec<FileRow>| {
         rows.into_iter()

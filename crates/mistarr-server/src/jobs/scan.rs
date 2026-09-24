@@ -73,6 +73,10 @@ pub async fn enqueue_if_games_dir_exists(
     let Some(platform) = platforms::by_id(&platform_id.0) else {
         return Ok(None);
     };
+    if platform.is_arcade() {
+        // Arcade presence and verification come from the arcade catalogue, never a scan.
+        return Ok(None);
+    }
     let row = app
         .db
         .read({
@@ -100,10 +104,14 @@ pub async fn enqueue_if_games_dir_exists(
     .map(Some)
 }
 
-/// Enqueues one [`ScanJob`] per enabled platform.
+/// Enqueues one [`ScanJob`] per enabled platform, skipping the arcade platform,
+/// whose presence and verification come from the arcade catalogue instead.
 async fn fan_out(ctx: &JobContext) -> Result<()> {
     let rows = ctx.app.db.read(platform_rows::list).await?;
     for row in rows.into_iter().filter(|r| r.enabled) {
+        if platforms::by_id(&row.id.0).is_some_and(Platform::is_arcade) {
+            continue;
+        }
         let job = ScanJob {
             platform_id: Some(row.id),
         };
@@ -244,6 +252,10 @@ fn list_files(dir: &Path) -> Vec<(PathBuf, String)> {
 async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     let platform = platforms::by_id(&id.0)
         .ok_or_else(|| Error::Job(format!("unknown platform `{}`", id.0)))?;
+    if platform.is_arcade() {
+        // Defensive: callers no longer enqueue this, but never walk arcade zips as cartridges.
+        return Ok(());
+    }
     let games_root = ctx.app.config().paths.games.clone();
     let pid = id.clone();
     let units = tokio::task::spawn_blocking(move || discover_units(&games_root, platform))
@@ -966,6 +978,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_dat_triggered_scan_never_queues_for_arcade() {
+        let (_dir, app) = state();
+        let arcade = PlatformId("arcade".into());
+        fs::create_dir_all(app.config().paths.games.join("mame")).expect("mkdir");
+        assert_eq!(
+            enqueue_if_games_dir_exists(&app, &arcade)
+                .await
+                .expect("run"),
+            None,
+            "arcade presence comes from the arcade catalogue, not a scan"
+        );
+    }
+
+    #[tokio::test]
     async fn fan_out_skips_a_platform_with_an_open_scan() {
         let (_dir, app) = state();
         let nes_payload = json!({ "platform_id": "nes" });
@@ -1011,6 +1037,33 @@ mod tests {
             1,
             "other platforms still get scanned"
         );
+        assert_eq!(
+            count_of(json!({ "platform_id": "arcade" })).await,
+            0,
+            "the fan-out never scans arcade zips as cartridges"
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_job_run_directly_against_arcade_is_a_no_op() {
+        let (_dir, app) = state();
+        let zip = app.config().paths.games.join("mame").join("exampleset.zip");
+        fs::create_dir_all(zip.parent().expect("parent")).expect("mkdir");
+        fs::write(&zip, b"not really a zip").expect("write");
+        Scheduler::run_inline(
+            &app,
+            Arc::new(ScanJob {
+                platform_id: Some(PlatformId("arcade".into())),
+            }),
+        )
+        .await
+        .expect("run");
+        let n: i64 = app
+            .db
+            .read(|c| Ok(c.query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))?))
+            .await
+            .expect("count");
+        assert_eq!(n, 0, "a direct arcade scan writes no files rows");
     }
 
     #[tokio::test]

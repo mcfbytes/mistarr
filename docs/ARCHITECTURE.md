@@ -153,9 +153,13 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    platform's games directory already exists (deduped per platform, so a
    zipped pack of several DATs queues one scan each), or once, full, the
    first time every wizard step reports done. Walk each platform's
-   `games/<Core>` directory and its other accepted directories (`games/hbmame`
-   for arcade). Skip while a core is running; the timer goes through the same
-   heavy lane as the others, so it waits for the gate too.
+   `games/<Core>` directory and its other accepted directories, except
+   arcade: its zips are never walked as cartridges, since presence and
+   verification there come only from the arcade catalogue and the import
+   path (PLATFORMS.md "MRA catalogue"). A manual scan of `arcade` queues the
+   arcade catalogue instead (`POST /system/scan`, API.md "System"). Skip
+   while a core is running; the timer goes through the same heavy lane as
+   the others, so it waits for the gate too.
 2. For each file, compare size and mtime with `files`. Unchanged files are
    skipped. New or changed files are hashed in one streaming pass with the
    platform's header rule. Zip members are hashed through the decompressor,

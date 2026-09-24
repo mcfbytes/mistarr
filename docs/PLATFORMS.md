@@ -116,9 +116,14 @@ plain zip name from `games/mame/`, a name starting with `/` from `games/`
 leaves `games/` is ignored. A title counts as have when every zip it names is
 present and its md5 check is not `mismatch` or `missing_part`.
 
-While any live MRA title exists, the arcade browse lists MRA titles only;
-DAT entries on the platform still verify zip members during a scan. MRA roms
-are never matched by the scanner, and wanting an MRA title creates downloads
+A library scan never walks the arcade platform's directories: hashing every
+member of every MAME zip on every scan is needless CPU and SD reads, since
+presence and verification for arcade come only from the arcade catalogue's
+md5 check and, for a zip mistarr placed, the import path. A DAT entry loaded
+for `arcade` (`source = 'dat'`) is therefore never marked `have` by a scan;
+only a zip mistarr imports for it, through an MRA's "MRA import" `dat`
+fallback, is ever verified. While any live MRA title exists, the arcade
+browse lists MRA titles only, and wanting an MRA title creates downloads
 only for its missing zips.
 
 ### MRA assembly

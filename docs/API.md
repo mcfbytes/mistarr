@@ -76,11 +76,15 @@ the wizard was never finished or dismissed (`POST /system/wizard/done`,
 stored in `settings` as `wizard.dismissed`). Once it is false the SPA shows
 the incomplete steps as a checklist instead of redirecting.
 
-`/system/scan` answers `{ job_id }`, plus `arcade_job_id` when the scan
-covers every platform or `arcade` and the arcade catalogue was queued (there
-is an `_Arcade` directory or stored MRA titles). `/system/cores` answers `{
-platforms, arcade_job_id }`: the ids of platforms whose core is installed, and
-the queued arcade catalogue or `null`.
+`/system/scan` answers `{ job_id, arcade_job_id }`. A scan of `arcade` queues
+no library scan, since arcade presence and verification come from the arcade
+catalogue: `job_id` is `null` and, as with a scan of every platform,
+`arcade_job_id` is the queued catalogue job when the scan covers arcade and
+there is an `_Arcade` directory or stored MRA titles to catalogue, else
+absent. Scanning any other platform sets `job_id` to its scan job and leaves
+`arcade_job_id` absent. `/system/cores` answers `{ platforms, arcade_job_id
+}`: the ids of platforms whose core is installed, and the queued arcade
+catalogue or `null`.
 
 `/system/jobs` items: `{ id, kind, lane, payload, state, progress, reason,
 created_at, updated_at }`, where `lane` is `heavy`, `background` or `light`
@@ -111,15 +115,19 @@ status body, whose `client` says whether it did.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/platforms` | All platforms with core_present, counts (titles, have, wanted, unverified). |
+| GET | `/platforms` | All platforms with core_present, counts (titles, have, wanted, unmatched_files, failing_check, partial). |
 | PUT | `/platforms/{id}` | `{ enabled }`. |
 | POST | `/platforms/{id}/dat` | Bind an unbound dat_version: `{ dat_version_id }`. |
 
 `/platforms` items are the platform row `{ id, name, core_dir, kind,
-core_present, enabled }` plus `counts: { titles, have, wanted, unverified }`:
-clone groups the default browse shows, groups with a verified variant, groups
-with a wanted variant, and `unverified` files on disk. `PUT` answers with the
-same item. Binding answers 202 `{ dat_version_id, platform_id, job_id }` and
+core_present, enabled }` plus `counts: { titles, have, wanted, unmatched_files,
+failing_check, partial }`: clone groups the default browse shows, groups with
+a verified variant, groups with a wanted variant, and `unmatched_files` on
+disk that match no rom, which a scan never finds for arcade since it skips
+arcade entirely. `failing_check` and `partial` are 0 outside arcade; for
+arcade they read the arcade catalogue's own state instead: live MRA sets
+with every zip present whose md5 check did not match, and live MRA sets
+naming zips of which only some are present. `PUT` answers with the
 the import job loads the titles, then publishes `dat.loaded`; a version that
 is already bound or retired is a 400. When the job cannot load it, because its
 file is gone from `dats/loaded/` or a newer version of the same DAT name is
