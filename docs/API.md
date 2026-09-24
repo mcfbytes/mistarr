@@ -224,10 +224,12 @@ retire, `wanted` is cleared on those titles and their downloads in `wanted`
 or `queued` are cancelled. It answers 204, or 404 for an unknown id, and
 queues the platform's recompute job, which matches files of retired roms
 again against the live roms by their stored hashes (or marks them
-`unverified`) and recomputes the picks. A download already transferring
-finishes and is placed only if its file matches a live rom of its entry;
-otherwise it is quarantined with a reason saying the DAT was removed. No file
-on disk is touched, and an older version of the same family stays superseded.
+`unverified`), recomputes the picks and queues a re-map of the platform's
+bound sources, which drops their hash proofs on the retired roms. A download
+already transferring finishes and is placed only if its file matches a live
+rom of its entry; otherwise it is quarantined with a reason saying the DAT was
+removed. No file on disk is touched, and an older version of the same family
+stays superseded.
 
 `{file}` in the two `rejected` routes is a file name as `/dats/incoming`
 lists it, percent-encoded; a name with a `/` or `\`, a leading `.` or the

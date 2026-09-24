@@ -501,7 +501,7 @@ pub fn cancel_group(conn: &Connection, parent: TitleId, now: i64) -> Result<Vec<
     let mut stmt = conn.prepare(
         "SELECT d.id, d.source_id, d.state IN ('transferring', 'checking') FROM downloads d
          JOIN titles t ON t.id = d.title_id
-         WHERE (t.group_root = ?1 OR t.id = ?1)
+         WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL))
            AND d.state IN ('wanted', 'queued', 'transferring', 'checking')
          ORDER BY d.id",
     )?;

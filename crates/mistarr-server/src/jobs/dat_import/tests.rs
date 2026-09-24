@@ -366,6 +366,12 @@ async fn the_job_moves_files_and_publishes_events() {
         .expect("get")
         .expect("row");
     assert_eq!(row.progress, Some(json!({ "groups": 1, "picks": 1 })));
+    let remaps = app
+        .db
+        .read(|c| crate::db::jobs::count_kind(c, crate::jobs::remap::KIND))
+        .await
+        .expect("count");
+    assert_eq!(remaps, 1, "a recompute queues a re-map of its platform");
 }
 
 /// A DB export of two NES games, the clone listed first, each with a headered and a headerless file.
@@ -1083,6 +1089,53 @@ fn an_add_on_never_merges_two_groups_of_one_dat() {
     );
     remove_with_files(&c, added.version, &[]);
     assert_eq!(groups(&c), (2, 2));
+}
+
+#[test]
+fn a_clone_left_by_its_linked_parent_keeps_a_group_of_its_own() {
+    let c = conn();
+    let official = [
+        ("Alpha Game (World)", None),
+        ("Beta Game (World)", None),
+        ("Zeta Game (World)", None),
+    ];
+    import_at(&c, &dat(NES_LOGIQX, "1", &official), 1);
+    let add_on = format!(
+        "<datafile><header><name>{NES_SAMPLES}</name><version>1</version></header>\
+         <game name=\"Gamma Pack (World)\"><rom name=\"0.bin\" size=\"4\" crc=\"00000000\"/></game>\
+         <game name=\"Delta Pack (World)\" cloneof=\"Gamma Pack (World)\">\
+         <rom name=\"3.bin\" size=\"4\" crc=\"00000003\"/></game></datafile>"
+    );
+    let added = import_at(&c, &add_on, 2);
+    let id = |name: &str| {
+        count(
+            &c,
+            &format!("SELECT id FROM titles WHERE name = '{name}' AND retired = 0"),
+        )
+    };
+    let (alpha, gamma, delta) = (
+        id("Alpha Game (World)"),
+        id("Gamma Pack (World)"),
+        id("Delta Pack (World)"),
+    );
+    let root_of = |t: i64| count(&c, &format!("SELECT group_root FROM titles WHERE id = {t}"));
+    assert_eq!(root_of(gamma), alpha, "the parent links to its match");
+    assert_eq!(root_of(delta), delta, "the clone roots its own group");
+    assert_eq!(
+        count(
+            &c,
+            "SELECT COUNT(*) FROM titles t JOIN titles r ON r.id = t.group_root
+             WHERE t.retired = 0 AND r.group_root IS NOT r.id"
+        ),
+        0,
+        "no title keeps a root that left its group"
+    );
+    assert_eq!(count(&c, "SELECT COUNT(*) FROM title_groups"), 4);
+    let members = format!("SELECT COUNT(*) FROM titles WHERE group_root = {delta}");
+    assert_eq!(count(&c, &members), 1);
+    remove_with_files(&c, added.version, &[]);
+    let live = "SELECT COUNT(DISTINCT group_root) FROM titles WHERE retired = 0";
+    assert_eq!(count(&c, live), 3);
 }
 
 #[test]

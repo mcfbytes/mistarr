@@ -143,7 +143,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    across the family's versions, and entries not present in the new DAT are
    marked `retired`, never deleted. The platform's recompute job is queued;
    it matches files of roms that retired again against the live roms by
-   their stored hashes, in chunks, or marks them `unverified`.
+   their stored hashes, in chunks, or marks them `unverified`, recomputes the
+   picks and then queues a re-map of the platform's bound sources.
 4. Parent/clone data is read from `cloneof` attributes when present. When
    absent, clone groups are inferred by normalising the name (strip region,
    revision, language and flag tags) so 1G1R still works with plain DATs.

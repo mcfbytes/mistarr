@@ -368,7 +368,8 @@ pub fn recompute_platform(conn: &Connection, platform: &str, prefs: &Prefs) -> R
 /// DAT's group (`parent_id`). A title of a live version whose live roms equal, by hash,
 /// those of a title in the largest live version then links to that title's group; one
 /// shared only among the other versions links to the group of its earliest version. Only
-/// a single title ever links, never a group, so two groups of one DAT never merge.
+/// a single title ever links, never a group, so two groups of one DAT never merge; the
+/// members left behind by a root that linked away take their lowest live id as root.
 fn link_shared_titles(conn: &Connection, platform: &str) -> Result<()> {
     conn.execute(
         "UPDATE titles SET group_root = parent_id
@@ -413,6 +414,26 @@ fn link_shared_titles(conn: &Connection, platform: &str) -> Result<()> {
         for (_, id, _) in titles.iter().filter(|t| t.0 != first_version) {
             link.execute([*id, root])?;
         }
+    }
+    reroot_stranded(conn, platform)
+}
+
+/// Gives each group whose root title linked into another group a new root: its lowest
+/// live member, or its lowest member when none is live.
+fn reroot_stranded(conn: &Connection, platform: &str) -> Result<()> {
+    let moves: Vec<(i64, i64)> = conn
+        .prepare_cached(
+            "SELECT m.group_root,
+                    COALESCE(MIN(CASE WHEN m.retired = 0 THEN m.id END), MIN(m.id))
+             FROM titles r JOIN titles m ON m.group_root = r.id AND m.id != r.id
+             WHERE r.platform_id = ?1 AND r.group_root IS NOT r.id
+             GROUP BY m.group_root",
+        )?
+        .query_map([platform], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut set = conn.prepare_cached("UPDATE titles SET group_root = ?2 WHERE group_root = ?1")?;
+    for (old, new) in moves {
+        set.execute([old, new])?;
     }
     Ok(())
 }
@@ -905,7 +926,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
     let mut stmt = conn.prepare(
         "SELECT t.id, t.name, t.regions, t.languages, t.revision, t.flags, t.is_1g1r_pick,
                 t.wanted, t.retired, t.inferred, t.dat_version_id, t.source
-         FROM titles t WHERE t.group_root = ?1 OR t.id = ?1
+         FROM titles t WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
          ORDER BY t.retired, t.is_1g1r_pick DESC, t.name",
     )?;
     let mut variants: Vec<VariantRow> = stmt
@@ -920,7 +941,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
            ORDER BY CASE x.state WHEN 'verified' THEN 0 WHEN 'misnamed' THEN 1
                                  WHEN 'bad' THEN 2 ELSE 3 END, x.id
            LIMIT 1)
-         WHERE t.group_root = ?1 OR t.id = ?1
+         WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
          ORDER BY r.title_id, r.name",
     )?;
     let mut rows = stmt.query([gid.0])?;
@@ -1024,13 +1045,13 @@ pub fn want(conn: &Connection, id: TitleId) -> Result<std::result::Result<(), Wa
 /// ```
 pub fn unwant_group(conn: &Connection, parent: TitleId, now: i64) -> Result<usize> {
     let n = conn.execute(
-        "UPDATE titles SET wanted = 0 WHERE (group_root = ?1 OR id = ?1) AND wanted = 1",
+        "UPDATE titles SET wanted = 0 WHERE (group_root = ?1 OR (id = ?1 AND group_root IS NULL)) AND wanted = 1",
         [parent.0],
     )?;
     conn.execute(
         "UPDATE downloads SET state = 'cancelled', updated_at = ?2
          WHERE state IN ('wanted', 'queued')
-           AND title_id IN (SELECT id FROM titles WHERE group_root = ?1 OR id = ?1)",
+           AND title_id IN (SELECT id FROM titles WHERE group_root = ?1 OR (id = ?1 AND group_root IS NULL))",
         params![parent.0, now],
     )?;
     Ok(n)

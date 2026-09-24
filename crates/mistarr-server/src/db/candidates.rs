@@ -369,8 +369,8 @@ pub fn prove(conn: &Connection, source: SourceId, index: u32, rom: i64) -> Resul
 /// A text that changes whenever the live roms of `platform` do, so a source
 /// mapped against the same text needs no new mapping: its live DAT versions
 /// with their load times, which catch a reload that updates roms in place,
-/// and the count and ids of its live roms. MRA versions are left out, since a
-/// catalogue run touches theirs every time; MRA roms change their ids when renamed.
+/// the count and ids of its live roms, and their effective groups. MRA versions are left
+/// out, since a catalogue run touches theirs every time; MRA roms change their ids when renamed.
 ///
 /// # Errors
 ///
@@ -381,6 +381,7 @@ pub fn rom_stamp(conn: &Connection, platform: &PlatformId) -> Result<String> {
                  FROM (SELECT id, loaded_at FROM dat_versions
                        WHERE platform_id = ?1 AND retired = 0 AND source != 'mra' ORDER BY id))
              || ';' || COUNT(*) || ':' || COALESCE(MAX(r.id), 0) || ':' || COALESCE(SUM(r.id), 0)
+             || ':' || COALESCE(SUM(COALESCE(t.group_root, t.id)), 0)
          FROM roms r JOIN titles t ON t.id = r.title_id
          WHERE t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0",
         [&platform.0],
@@ -518,14 +519,14 @@ pub fn for_group(conn: &Connection, parent: TitleId) -> Result<Vec<(TitleId, Ava
            {group}
            JOIN torrent_files tf ON tf.rom_id = r.id
            JOIN sources s ON s.id = tf.source_id AND s.state = 'bound'
-           WHERE (t.group_root = ?1 OR t.id = ?1) AND {bad_tf}
+           WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)) AND {bad_tf}
            UNION ALL
            SELECT t.id, c.source_id, s.display_name, c.file_index, tf.path, r.id, c.confidence
            {group}
            JOIN torrent_candidates c ON c.rom_id = r.id
            JOIN torrent_files tf ON tf.source_id = c.source_id AND tf.file_index = c.file_index
            JOIN sources s ON s.id = c.source_id AND s.state = 'bound'
-           WHERE (t.group_root = ?1 OR t.id = ?1) AND {bad_c}
+           WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)) AND {bad_c}
          )
          ORDER BY title_id, {rank}, source_id, file_index, rom_id",
         bad_tf = not_bad("r.id", "tf.source_id", "tf.file_index"),
@@ -870,6 +871,17 @@ mod tests {
             rom_stamp(&c, &nes).expect("stamp"),
             before,
             "a reload that updates roms in place moves the stamp"
+        );
+        let before = rom_stamp(&c, &nes).expect("stamp");
+        c.execute(
+            "UPDATE titles SET group_root = ?1 WHERE id = ?2",
+            [group, root],
+        )
+        .expect("regroup");
+        assert_ne!(
+            rom_stamp(&c, &nes).expect("stamp"),
+            before,
+            "a regroup moves it"
         );
     }
 }

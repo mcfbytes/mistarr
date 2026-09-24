@@ -896,8 +896,8 @@ fn stored_hashes(f: &FileRow) -> Option<mistarr_core::HashSet> {
     })
 }
 
-/// Matches files of retired roms again, then recomputes the 1G1R picks of one platform
-/// under the current preferences.
+/// Matches files of retired roms again, recomputes the 1G1R picks of one platform
+/// under the current preferences, then queues a re-map of its bound sources.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recompute {
     platform: PlatformId,
@@ -977,7 +977,10 @@ impl Job for Recompute {
             })
             .await?;
         ctx.progress(json!({ "groups": r.groups, "picks": r.picks }))
-            .await
+            .await?;
+        // Groups are settled now; a re-map that ran earlier stored a stamp without them.
+        super::remap::enqueue(&ctx.app, Some(vec![self.platform.clone()])).await;
+        Ok(())
     }
 }
 

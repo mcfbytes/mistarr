@@ -151,7 +151,9 @@ the largest live version on the platform links to that title's group, and a
 title shared only among the other versions links to the group of its
 earliest version. Only a single title links, never a group, so two groups of
 one DAT never merge through a third-party title, and removing a DAT undoes
-its links. Titles with a rom without any hash never link.
+its links. Titles with a rom without any hash never link. A clone whose
+parent linked away stays in its own DAT's group, which takes its lowest live
+id as the new root.
 
 ## Name parsing
 
@@ -293,13 +295,16 @@ size, or of that size plus the platform's header, comes first.
 
 A pair a `bad` download already ruled out is not stored again. The mapping is
 worked out when the source binds or is rebound, and again for every source
-bound to a platform when that platform's DATs or live roms change; the
-source's `map_stamp` records the DAT versions and roms it was worked out
-against, so an unchanged platform is skipped. Unbinding or removing a source drops its
-candidates and matches, hash proofs included. Post-download hashing is authoritative: once an import proves a
-file to be a rom, `torrent_files` names that rom with confidence `hash`, the
-file loses its candidates and no later mapping changes it, nor does
-rebinding the source to the same platform. Only a file itself is proven,
+bound to a platform when that platform's DATs, live roms or effective
+groups change, including after each recompute; the source's `map_stamp`
+records the DAT versions, roms and groups it was worked out against, so an
+unchanged platform is skipped. Unbinding or removing a source drops its
+candidates and matches, hash proofs included. Post-download hashing is
+authoritative: once an import proves a file to be a rom, `torrent_files`
+names that rom with confidence `hash`, the file loses its candidates and no
+later mapping changes it while the rom stays live, nor does rebinding the
+source to the same platform. A proof on a rom that retired, as when its DAT
+is removed, is dropped by the next mapping. Only a file itself is proven,
 never a zip from one of its members. See ARCHITECTURE.md
 "Import" for a file that turns out to be another version.
 

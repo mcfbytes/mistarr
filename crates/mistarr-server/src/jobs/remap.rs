@@ -201,7 +201,13 @@ pub async fn remap_one(app: &AppState, id: SourceId) -> Result<bool> {
     let Some((row, platform)) = current else {
         return Ok(false);
     };
-    app.db.write(|c| rows::refresh_match_keys(c)).await?;
+    let p = platform.clone();
+    app.db
+        .write(move |c| {
+            rows::refresh_match_keys(c)?;
+            candidates::drop_foreign_proofs(c, id, &p)
+        })
+        .await?;
     let p = platform.clone();
     let (planned, total) = app
         .db
@@ -501,5 +507,64 @@ mod tests {
             .await
             .expect("run all");
         assert!(!announced(&mut events), "nothing changed");
+    }
+
+    #[tokio::test]
+    async fn a_proof_on_a_removed_dat_moves_to_the_live_copy() {
+        let (_dir, app) = state();
+        let nes = PlatformId("nes".into());
+        let (id, a, b) = app
+            .db
+            .write_blocking(|c| {
+                let a = seed_rom(c, "nes", "Nova Quest (World).nes", 16, "[]")?;
+                c.execute(
+                    "INSERT INTO dat_versions (platform_id, dat_name, version, source_file,
+                                               loaded_at, game_count)
+                     VALUES ('nes', 'Other Vendor - Example', '1', 'o.dat', 0, 1)",
+                    [],
+                )?;
+                let other = c.last_insert_rowid();
+                c.execute(
+                    "INSERT INTO titles (platform_id, dat_version_id, name, base_name, regions,
+                                         languages, flags)
+                     VALUES ('nes', ?1, 'Nova Quest (World)', 'Nova Quest', '[]', '[]', '[]')",
+                    [other],
+                )?;
+                let title = c.last_insert_rowid();
+                c.execute(
+                    "INSERT INTO roms (title_id, name, size, status)
+                     VALUES (?1, 'Nova Quest (World).nes', 16, 'good')",
+                    [title],
+                )?;
+                let b = c.last_insert_rowid();
+                let files = [file(0, "Nova Quest (World).nes", 16)];
+                let id = source(c, &"2d".repeat(20), &files);
+                map_files(c, id, &nes, &files)?;
+                candidates::prove(c, id, 0, a)?;
+                let dat: i64 =
+                    c.query_row("SELECT title_id FROM roms WHERE id = ?1", [a], |r| r.get(0))?;
+                let dat: i64 = c.query_row(
+                    "SELECT dat_version_id FROM titles WHERE id = ?1",
+                    [dat],
+                    |r| r.get(0),
+                )?;
+                crate::db::dats::retire(c, crate::db::dats::DatVersionId(dat), 1)?;
+                Ok((id, a, b))
+            })
+            .expect("db");
+        assert!(remap_one(&app, id).await.expect("remap"));
+        let rom: Option<i64> = app
+            .db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT rom_id FROM torrent_files WHERE source_id = ?1 AND file_index = 0",
+                    [id.0],
+                    |r| r.get(0),
+                )?)
+            })
+            .await
+            .expect("rom");
+        assert_ne!(rom, Some(a), "the proof on the removed DAT is dropped");
+        assert_eq!(rom, Some(b));
     }
 }
