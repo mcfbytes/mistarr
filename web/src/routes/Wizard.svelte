@@ -39,6 +39,8 @@
     void loadWizard();
     void loadSettings();
     void loadSources().catch(() => undefined);
+    // Leaving the wizard any way at all counts as dismissing it.
+    return () => void dismiss();
   });
 
   const platforms = $derived(getPlatforms());
@@ -94,15 +96,23 @@
     next();
   }
 
+  let dismissed = false;
+
   // Marks setup as seen so a reload lands on the library, not back here.
-  async function finish(): Promise<void> {
-    if (!isMock) {
-      try {
-        await api.wizardDone();
-      } catch (err) {
-        showToast(errorMessage(err));
-      }
+  async function dismiss(): Promise<void> {
+    if (dismissed || isMock) {
+      return;
     }
+    dismissed = true;
+    try {
+      await api.wizardDone();
+    } catch (err) {
+      showToast(errorMessage(err));
+    }
+  }
+
+  async function finish(): Promise<void> {
+    await dismiss();
     navigate('/');
   }
 

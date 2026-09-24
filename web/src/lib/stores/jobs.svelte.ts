@@ -13,6 +13,7 @@ export interface FinishedJob {
 
 let jobs = $state<Job[]>([]);
 let finished = $state<Record<number, FinishedJob>>({});
+const FINISHED_KEEP = 50;
 let reloadTimer: ReturnType<typeof setTimeout> | null = null;
 
 export function getJobs(): Job[] {
@@ -25,6 +26,11 @@ export function getFinishedJob(id: number): FinishedJob | undefined {
 
 export async function loadJobs(): Promise<void> {
   jobs = isMock ? fixtureJobs : (await api.jobs()).items;
+}
+
+// After a resync the events that finished jobs may be lost; forget what is known.
+export function resetFinished(): void {
+  finished = {};
 }
 
 // Lane and hold reason come only from /system/jobs, so a new or moved job re-reads it.
@@ -45,7 +51,8 @@ export function applyJobProgress(
   progress: Record<string, unknown> | null
 ): void {
   if (state === 'done' || state === 'failed') {
-    finished = { ...finished, [id]: { kind, state, progress } };
+    const kept = Object.entries(finished).slice(-(FINISHED_KEEP - 1));
+    finished = { ...Object.fromEntries(kept), [id]: { kind, state, progress } };
     jobs = jobs.filter((j) => j.id !== id);
     return;
   }

@@ -28,13 +28,15 @@ screen works at 360 px wide with a 16 px gutter and no horizontal scroll.
    reason. Seed policy explained with its default shown. Nothing about where
    to obtain files.
 
-The app opens the wizard on load only while `open_on_start` is true. Finish
-calls `POST /system/wizard/done`, so a reload lands on Platforms afterwards.
+The app opens the wizard on load only while `open_on_start` is true. Finish,
+or leaving the wizard any other way, calls `POST /system/wizard/done`, so a
+reload lands on Platforms afterwards; the "Setup not finished" card opens it
+again.
 
 **Held-jobs banner.** On every screen, and at the top of the wizard, while
-the scheduler is paused and `waiting` is not empty: how many jobs are held,
-why (the running core or the user), which ones, and a Run now button that
-calls `POST /system/resume`.
+`waiting` is not empty: how many jobs are held, why (the running core, which
+holds scans and imports, or the user's Pause, which also holds DAT and source
+imports), which ones, and a Run now button that calls `POST /system/resume`.
 
 **Platforms** (`/`). One card per platform with core present, counts, and a
 scan button. Platforms whose core is absent are in a collapsed section. While
@@ -78,7 +80,10 @@ and the switch that allows launching, log tail.
 One store per API resource, hydrated on navigation and patched by SSE events.
 The incoming-file lists re-read `/dats/incoming` or `/sources/incoming` at
 most once per burst of `job.progress`, `dat.loaded`, `dat.rejected` or
-`source.changed` events.
+`source.changed` events, and `/sources` is re-read at most once per burst of
+`source.changed`. The outcomes of this session's uploads come from the last
+50 finished jobs; a resync forgets them, and an upload whose job is no longer
+known then says to look at the lists.
 No polling from the browser. The SSE connection shows a banner when
 disconnected and reconnects with backoff.
 

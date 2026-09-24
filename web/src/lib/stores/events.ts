@@ -3,17 +3,20 @@ import type { SseEvent } from '../types';
 import { applyStatus, loadStatus, loadWizard, setConnected } from './status.svelte';
 import { applySourceChanged, loadSources } from './sources.svelte';
 import { applyDownloadChanged, loadDownloads, loadImports } from './downloads.svelte';
-import { applyJobProgress, loadJobs } from './jobs.svelte';
+import { applyJobProgress, loadJobs, resetFinished } from './jobs.svelte';
 import { applyDatLoaded, loadDats } from './dats.svelte';
 import { loadPlatforms } from './platforms.svelte';
 import { applyFileChanged, reloadTitles } from './titles.svelte';
 import { loadIncoming, scheduleIncoming } from './incoming.svelte';
+import { markUploadsStale } from './uploads.svelte';
 
 let subscriber: EventSubscriber | null = null;
 
 // Re-fetches every hydrated store; the server asks for this when a
 // reconnect's replay may have gaps.
 async function resync(): Promise<void> {
+  resetFinished();
+  markUploadsStale();
   await Promise.all([
     loadPlatforms(),
     loadDats(),

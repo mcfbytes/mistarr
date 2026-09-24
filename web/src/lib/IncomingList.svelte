@@ -37,7 +37,7 @@
     return f.state === 'rejected' ? 'Rejected' : 'Waiting';
   }
 
-  function uploadOutcome(jobId: number): { text: string; kind: string } {
+  function uploadOutcome(jobId: number, stale: boolean): { text: string; kind: string } {
     const done = getFinishedJob(jobId);
     if (done?.state === 'done') {
       const games = progressText(done.progress);
@@ -49,6 +49,9 @@
     const running = getJobs().find((j) => j.id === jobId);
     if (running) {
       return { text: running.reason ?? `Import ${running.state}`, kind: 'muted' };
+    }
+    if (stale) {
+      return { text: 'Finished; the lists below show the result', kind: 'muted' };
     }
     return { text: 'Uploaded, waiting for the import to start', kind: 'muted' };
   }
@@ -65,7 +68,7 @@
     </li>
   {/each}
   {#each uploads as u (u.jobId)}
-    {@const outcome = uploadOutcome(u.jobId)}
+    {@const outcome = uploadOutcome(u.jobId, u.stale ?? false)}
     <li>
       <span class="name">{u.file}</span>
       <span class={outcome.kind}>{outcome.text}</span>
