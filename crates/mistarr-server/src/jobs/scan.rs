@@ -70,6 +70,16 @@ pub async fn enqueue_if_games_dir_exists(
     let Some(platform) = platforms::by_id(&platform_id.0) else {
         return Ok(None);
     };
+    let row = app
+        .db
+        .read({
+            let id = platform_id.clone();
+            move |c| platform_rows::find(c, &id)
+        })
+        .await?;
+    if !row.is_some_and(|r| r.enabled) {
+        return Ok(None);
+    }
     let games_root = app.config().paths.games;
     let present = std::iter::once(platform.core_dir)
         .chain(platform.legacy_dirs.iter().copied())
@@ -91,13 +101,22 @@ pub async fn enqueue_if_games_dir_exists(
 async fn fan_out(ctx: &JobContext) -> Result<()> {
     let rows = ctx.app.db.read(platform_rows::list).await?;
     for row in rows.into_iter().filter(|r| r.enabled) {
-        super::Scheduler::enqueue(
-            &ctx.app,
-            std::sync::Arc::new(ScanJob {
-                platform_id: Some(row.id),
-            }),
-        )
-        .await?;
+        let job = ScanJob {
+            platform_id: Some(row.id),
+        };
+        let payload = job.payload();
+        // A scan of this platform already queued or running (e.g. from the
+        // automatic per-platform trigger) does not need a second one.
+        let already_open = ctx
+            .app
+            .db
+            .read(move |c| crate::db::jobs::find_open(c, "scan", &payload))
+            .await?
+            .is_some();
+        if already_open {
+            continue;
+        }
+        super::Scheduler::enqueue(&ctx.app, std::sync::Arc::new(job)).await?;
     }
     Ok(())
 }
@@ -881,6 +900,70 @@ mod tests {
                 .await
                 .expect("run")
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn fan_out_skips_a_platform_with_an_open_scan() {
+        let (_dir, app) = state();
+        let nes_payload = json!({ "platform_id": "nes" });
+        let id = app
+            .db
+            .write({
+                let payload = nes_payload.clone();
+                move |c| job_rows::insert(c, "scan", &payload, 0)
+            })
+            .await
+            .expect("insert");
+        app.db
+            .write(move |c| job_rows::set_state(c, id, job_rows::JobState::Running, 0))
+            .await
+            .expect("running");
+
+        Scheduler::run_inline(&app, Arc::new(ScanJob { platform_id: None }))
+            .await
+            .expect("fan out");
+
+        let count_of = |payload: Value| {
+            let app = app.clone();
+            async move {
+                app.db
+                    .read(move |c| {
+                        Ok(c.query_row(
+                            "SELECT COUNT(*) FROM jobs WHERE kind = 'scan' AND payload = ?1",
+                            [payload.to_string()],
+                            |r| r.get::<_, i64>(0),
+                        )?)
+                    })
+                    .await
+                    .expect("count")
+            }
+        };
+        assert_eq!(
+            count_of(nes_payload).await,
+            1,
+            "the already-running nes scan is not duplicated"
+        );
+        assert_eq!(
+            count_of(json!({ "platform_id": "snes" })).await,
+            1,
+            "other platforms still get scanned"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_disabled_platform_is_not_queued() {
+        let (_dir, app) = state();
+        let nes = PlatformId("nes".into());
+        fs::create_dir_all(app.config().paths.games.join("NES")).expect("mkdir");
+        app.db
+            .write(|c| platform_rows::set_enabled(c, "nes", false).map(|_| ()))
+            .await
+            .expect("disable");
+        assert_eq!(
+            enqueue_if_games_dir_exists(&app, &nes).await.expect("run"),
+            None,
+            "disabled platforms are skipped, matching POST /system/scan"
         );
     }
 

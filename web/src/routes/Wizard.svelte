@@ -18,9 +18,10 @@
   let sourceFileInput = $state<HTMLInputElement>();
   let sourceMagnet = $state('');
   let settings = $state<Settings | null>(null);
-  let detectedCores = $state<string[]>([]);
+  // `null` until a fresh POST /system/cores answer replaces the boot-time result.
+  let coresResult = $state<string[] | null>(null);
   let detectingCores = $state(false);
-  let coresRan = false;
+  let coresChecked = false;
 
   onMount(() => {
     void loadPlatforms();
@@ -30,22 +31,30 @@
     void loadSettings();
   });
 
+  const platforms = $derived(getPlatforms());
+  const detectedCores = $derived(
+    coresResult ?? platforms.filter((p) => p.core_present).map((p) => p.id)
+  );
+
   $effect(() => {
-    if (step === 0 && !coresRan) {
-      coresRan = true;
-      void runCoreDetection();
+    if (step === 0 && !coresChecked) {
+      coresChecked = true;
+      // Only auto-run when boot detection (already reflected in `platforms`) found nothing.
+      if (!platforms.some((p) => p.core_present)) {
+        void runCoreDetection();
+      }
     }
   });
 
   async function runCoreDetection(): Promise<void> {
     if (isMock) {
-      detectedCores = fixtureCores.platforms;
+      coresResult = fixtureCores.platforms;
       return;
     }
     detectingCores = true;
     try {
       const result = await api.cores();
-      detectedCores = result.platforms;
+      coresResult = result.platforms;
       await loadPlatforms();
     } catch (err) {
       showToast(errorMessage(err));
@@ -58,7 +67,6 @@
     settings = isMock ? fixtureSettings : await api.settings();
   }
 
-  const platforms = $derived(getPlatforms());
   const dats = $derived(isMock ? fixtureDats : getDats());
   const status = $derived(getStatus());
   const wizard = $derived(getWizard());
