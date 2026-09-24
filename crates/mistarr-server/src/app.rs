@@ -266,6 +266,7 @@ pub struct Running {
     pub app: Arc<AppState>,
     server: JoinHandle<std::io::Result<()>>,
     tasks: Vec<JoinHandle<()>>,
+    _lock: crate::lock::InstanceLock,
 }
 
 impl Running {
@@ -295,9 +296,11 @@ impl Running {
 }
 
 /// Runs the startup sequence and returns once the HTTP server is listening.
+/// The data directory stays locked to this server until it is shut down.
 ///
 /// # Errors
 ///
+/// [`Error::AlreadyRunning`] when another server uses the data directory,
 /// [`Error::Io`] when a directory cannot be created or the address cannot be
 /// bound, [`Error::Db`] or [`Error::Migration`] when the database cannot be opened.
 pub async fn start(mut config: Config, options: Options) -> Result<Running> {
@@ -305,6 +308,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     for dir in config.paths.layout() {
         std::fs::create_dir_all(&dir)?;
     }
+    let lock = crate::lock::InstanceLock::acquire(&config.paths.data)?;
 
     // Step 2: database, migrations, platform seed, runtime settings.
     let db = Db::open(&config.paths.db())?;
@@ -415,6 +419,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
         app,
         server,
         tasks,
+        _lock: lock,
     })
 }
 

@@ -5,6 +5,8 @@
 ROOT="${MISTARR_ROOT:-/media/fat}"
 BIN="$ROOT/mistarr/mistarr"
 PIDFILE="$ROOT/mistarr/mistarr.pid"
+# Held by one start at a time; holds the starting shell's pid.
+STARTLOCK="$ROOT/mistarr/.start.lock"
 LOGFILE="$ROOT/mistarr/mistarr.log"
 STARTUP="$ROOT/linux/user-startup.sh"
 PORT="${MISTARR_PORT:-8420}"
@@ -39,7 +41,33 @@ is_running() {
     return 0
 }
 
+# Takes the start lock; a lock left by a start that died is taken over.
+take_start_lock() {
+    if mkdir "$STARTLOCK" 2>/dev/null; then
+        echo $$ > "$STARTLOCK/pid"
+        return 0
+    fi
+    holder=$(cat "$STARTLOCK/pid" 2>/dev/null)
+    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
+        return 1
+    fi
+    rm -rf "$STARTLOCK"
+    mkdir "$STARTLOCK" 2>/dev/null || return 1
+    echo $$ > "$STARTLOCK/pid"
+}
+
 do_start() {
+    if ! take_start_lock; then
+        echo "mistarr is already starting"
+        return 0
+    fi
+    start_locked
+    status=$?
+    rm -rf "$STARTLOCK"
+    return "$status"
+}
+
+start_locked() {
     if is_running; then
         echo "mistarr running (pid $(cat "$PIDFILE"))"
         return 0
@@ -55,6 +83,7 @@ do_start() {
     # shellcheck disable=SC2086
     $prio "$BIN" </dev/null >>"$LOGFILE" 2>&1 &
     pid=$!
+    echo "$pid" > "$PIDFILE"
     sleep 1
     if ! kill -0 "$pid" 2>/dev/null; then
         echo "mistarr failed to start"
@@ -62,7 +91,6 @@ do_start() {
         rm -f "$PIDFILE"
         return 1
     fi
-    echo "$pid" > "$PIDFILE"
     echo "mistarr started (pid $pid)"
 }
 

@@ -117,8 +117,9 @@ impl<'a> MakeWriter<'a> for RotatingFile {
     }
 }
 
-/// Installs the global subscriber: `RUST_LOG` or `info`, to stderr and to
-/// `log` when given.
+/// Installs the global subscriber: `RUST_LOG` or `info`, to `log` when given
+/// and to stderr, unless stderr already is that file, as when the launcher
+/// appends the daemon's output to it; each event is written once.
 ///
 /// # Errors
 ///
@@ -128,9 +129,10 @@ pub fn init(log: Option<&Path>) -> io::Result<()> {
     let file = log
         .map(|p| RotatingFile::open(p, MAX_BYTES, GENERATIONS))
         .transpose()?;
+    let to_stderr = log.is_none_or(|p| !same_file(io::stderr(), p));
     let registry = tracing_subscriber::registry()
         .with(filter)
-        .with(tracing_subscriber::fmt::layer().with_writer(io::stderr));
+        .with(to_stderr.then(|| tracing_subscriber::fmt::layer().with_writer(io::stderr)));
     let installed = match file {
         Some(file) => registry
             .with(tracing_subscriber::fmt::layer().with_writer(file))
@@ -143,9 +145,39 @@ pub fn init(log: Option<&Path>) -> io::Result<()> {
     Ok(())
 }
 
+/// True when `fd` is open on the file at `path`: same device and inode.
+///
+/// ```
+/// let path = std::env::temp_dir().join("mistarr-doc-same-file.log");
+/// let f = std::fs::File::create(&path).unwrap();
+/// assert!(mistarr_server::logging::same_file(&f, &path));
+/// assert!(!mistarr_server::logging::same_file(&f, std::path::Path::new("/")));
+/// ```
+#[allow(clippy::useless_conversion)] // `st_dev` and `st_ino` are not u64 on every target.
+pub fn same_file(fd: impl std::os::fd::AsFd, path: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(open), Ok(named)) = (rustix::fs::fstat(fd), std::fs::metadata(path)) else {
+        return false;
+    };
+    u64::try_from(open.st_dev).is_ok_and(|d| d == named.dev())
+        && u64::try_from(open.st_ino).is_ok_and(|i| i == named.ino())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn same_file_follows_the_inode_not_the_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("a.log");
+        let f = File::create(&path).expect("create");
+        assert!(same_file(&f, &path));
+        std::fs::rename(&path, dir.path().join("a.log.1")).expect("rotate");
+        File::create(&path).expect("recreate");
+        assert!(!same_file(&f, &path));
+        assert!(!same_file(&f, &dir.path().join("missing")));
+    }
 
     #[test]
     fn rotates_at_the_limit_and_keeps_two_generations() {

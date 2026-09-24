@@ -200,6 +200,43 @@ count2=$(grep -c "$resolved_self" "$root/linux/user-startup.sh")
 }
 "$script" stop >/dev/null
 
+# Racing starts, as user-startup.sh and a manual start at boot: one daemon.
+cp "$root/mistarr/mistarr" "$root/mistarr/mistarr.good"
+cat > "$root/mistarr/mistarr" <<STUB
+#!/bin/sh
+echo \$\$ >> "$root/mistarr/launches"
+trap 'exit 0' TERM
+while :; do sleep 1; done
+STUB
+chmod +x "$root/mistarr/mistarr"
+"$script" start >/dev/null &
+"$script" start >/dev/null &
+"$script" start >/dev/null
+wait
+sleep 1
+launches=$(wc -l < "$root/mistarr/launches")
+expect "$launches" "1" "racing starts launch one daemon"
+out=$("$script" status)
+expect_prefix "$out" "mistarr running" "the racing start left a live pidfile"
+"$script" stop >/dev/null
+
+# A start lock left by a start that died does not block the next one.
+mkdir "$root/mistarr/.start.lock"
+sleep 100 &
+dead=$!
+kill "$dead" 2>/dev/null
+wait "$dead" 2>/dev/null
+echo "$dead" > "$root/mistarr/.start.lock/pid"
+out=$("$script" start)
+expect_prefix "$out" "mistarr started" "a stale start lock is taken over"
+"$script" stop >/dev/null
+[ -d "$root/mistarr/.start.lock" ] && {
+    fail=$((fail + 1))
+    echo "FAIL: the start lock is released"
+}
+cp "$root/mistarr/mistarr.good" "$root/mistarr/mistarr"
+chmod +x "$root/mistarr/mistarr"
+
 if ! sh "$here/install.sh"; then
     fail=$((fail + 1))
     echo "FAIL: scripts/tests/install.sh"

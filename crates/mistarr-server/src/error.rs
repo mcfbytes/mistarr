@@ -41,6 +41,9 @@ pub enum Error {
     /// A job failed.
     #[error("job failed: {0}")]
     Job(String),
+    /// Another server holds the data directory's lock.
+    #[error("another mistarr is already running with data directory {}", .0.display())]
+    AlreadyRunning(std::path::PathBuf),
     /// File system access failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),

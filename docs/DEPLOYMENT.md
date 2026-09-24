@@ -51,6 +51,8 @@ any dynamic dependency, checked with `file` on the output.
   mistarr                 # the binary
   mistarr.toml            # optional config
   mistarr.db              # SQLite
+  mistarr.lock            # held by the running server; a second one on this directory exits
+  mistarr.pid, .start.lock/   # written by Scripts/mistarr.sh
   dats/                   # watched: drop DATs here
   dats/loaded/            # moved here after import
   dats/rejected/          # with a .reason.txt beside each file
@@ -105,9 +107,20 @@ the URL, and offers to enable start-at-boot by appending a line to
 and the image may additionally ship an init service; either way the script is
 the documented path so both images behave the same for users.
 
-Logs go to `/media/fat/mistarr/mistarr.log` and stderr. The file rotates at
-2 MiB and keeps two generations, `mistarr.log.1` and `mistarr.log.2`. `RUST_LOG`
-sets the level, `info` by default. No syslog dependency.
+Logs go to `/media/fat/mistarr/mistarr.log`, and to stderr unless stderr is
+that same file: the script appends the daemon's output to the log so that
+early startup errors land there, and each event is still written once. The
+file rotates at 2 MiB and keeps two generations, `mistarr.log.1` and
+`mistarr.log.2`. `RUST_LOG` sets the level, `info` by default. No syslog
+dependency.
+
+Only one server runs per data directory. The server takes an exclusive lock
+on `mistarr.lock` before opening the database and exits with "another
+mistarr is already running" when it cannot. `mistarr.sh start` also
+serialises itself through the `.start.lock` directory, taking over a lock
+whose starting shell is gone, and writes `mistarr.pid` as soon as the daemon
+is spawned, so a start from `user-startup.sh` racing a manual start from the
+Scripts menu launches one daemon.
 
 `[jobs] scan_interval_minutes` in `mistarr.toml` defaults to 1440: a daily
 rescan of the whole library. Set it to 0 to disable the timer and rely on the
