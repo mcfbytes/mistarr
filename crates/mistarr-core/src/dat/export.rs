@@ -19,11 +19,19 @@ pub(super) struct Archive {
 impl Archive {
     /// The parent's game name: `clone` holds the parent's archive number, `P` or nothing on a parent.
     pub(super) fn parent(&self, parents: &HashMap<String, String>, own: &str) -> Option<String> {
-        let clone = self.clone.as_deref()?.trim();
-        if clone.is_empty() || clone.eq_ignore_ascii_case("p") {
+        if self.is_parent() {
             return None;
         }
+        let clone = self.clone.as_deref()?.trim();
         parents.get(clone).filter(|name| *name != own).cloned()
+    }
+
+    /// Whether the game is a parent: `clone` is `P`, empty or absent.
+    pub(super) fn is_parent(&self) -> bool {
+        self.clone
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(|c| c.is_empty() || c.eq_ignore_ascii_case("p"))
     }
 }
 
@@ -49,8 +57,6 @@ pub(super) struct File {
     pub(super) forcename: Option<String>,
     /// `bad="1"`: a known bad dump.
     pub(super) bad: bool,
-    /// `mia="1"`: no dump is known.
-    pub(super) mia: bool,
 }
 
 /// How a file is stored, from its `format` attribute and extension.
@@ -68,7 +74,7 @@ impl File {
         let format = self.format.trim().to_ascii_lowercase();
         match format.as_str() {
             "headerless" => Kind::Headerless,
-            _ if self.extension.trim().eq_ignore_ascii_case("unh") => Kind::Headerless,
+            _ if self.headerless_extension() => Kind::Headerless,
             "headered" => Kind::Headered,
             "bigendian" => Kind::BigEndian,
             "" | "default" => Kind::Plain,
@@ -93,26 +99,55 @@ impl File {
         self.extension.trim().trim_start_matches('.')
     }
 
-    /// Whether the file is the game image: no `item`, and the image extension or the
-    /// headerless `unh`; without an image extension every file without `item` counts.
-    fn is_image(&self, extension: Option<&str>) -> bool {
+    /// Whether the extension names a headerless image: `unh`, or `lyx` for Lynx.
+    fn headerless_extension(&self) -> bool {
+        let own = self.own_extension();
+        own.eq_ignore_ascii_case("unh") || own.eq_ignore_ascii_case("lyx")
+    }
+
+    /// Whether the file is the game image: no `item`, and no extension, a headerless
+    /// extension, or one of `accepted`; with nothing accepted every file without `item` counts.
+    fn is_image(&self, accepted: &[&str]) -> bool {
         if self.item.is_some() {
             return false;
         }
         let own = self.own_extension();
-        extension.is_none_or(|ext| {
-            own.eq_ignore_ascii_case("unh") || own.eq_ignore_ascii_case(ext.trim_start_matches('.'))
-        })
+        accepted.is_empty()
+            || own.is_empty()
+            || self.headerless_extension()
+            || accepted.iter().any(|e| own.eq_ignore_ascii_case(e))
+    }
+
+    /// Whether the file is the headerless form of an image in `source`: its size plus the
+    /// image's `header` bytes is the image's size.
+    fn strips(&self, source: &Source, accepted: &[&str]) -> bool {
+        self.item.is_none()
+            && self.kind() == Kind::Headerless
+            && source.files.iter().any(|h| {
+                let header = h.header.as_deref().unwrap_or("");
+                let len = header.chars().filter(char::is_ascii_hexdigit).count() as u64 / 2;
+                h.kind() == Kind::Headered
+                    && h.is_image(accepted)
+                    && len > 0
+                    && self.size.checked_add(len) == Some(h.size)
+            })
     }
 
     fn status(&self) -> RomStatus {
-        if self.mia {
-            RomStatus::NoDump
-        } else if self.bad {
+        if self.bad {
             RomStatus::BadDump
         } else {
             RomStatus::Good
         }
+    }
+}
+
+/// Order of preference between dumps of one file: good, then bad, then none.
+fn status_rank(status: RomStatus) -> u8 {
+    match status {
+        RomStatus::Good | RomStatus::Verified => 0,
+        RomStatus::BadDump => 1,
+        RomStatus::NoDump => 2,
     }
 }
 
@@ -130,38 +165,54 @@ fn rank(rule: HeaderRule, kind: Kind) -> u8 {
 }
 
 /// The rom entries of a game: its image files of the preferred kind across every source,
-/// once per dump and per name, each named by `forcename` or `<game>.<extension>`. The
-/// image extension is the platform's, else that of the game's headered file.
+/// good dumps first, once per dump and per name. The images are the files
+/// [`File::is_image`] accepts under the platform's extensions; when there are none, a
+/// game's only distinct file without `item` is its image.
 pub(super) fn roms(game: &str, sources: &[Source], options: &ExportOptions) -> Vec<DatRom> {
     let rule = options.header_rule;
-    let headered = sources
-        .iter()
-        .flat_map(|s| &s.files)
+    let all = || {
+        sources
+            .iter()
+            .flat_map(|s| s.files.iter().map(move |f| (s, f)))
+    };
+    let headered = all()
+        .map(|(_, f)| f)
         .find(|f| f.item.is_none() && f.kind() == Kind::Headered && !f.own_extension().is_empty())
         .map(File::own_extension);
-    let image = options.extension.as_deref().or(headered);
-    let files = || {
-        sources.iter().flat_map(move |s| {
-            s.files
-                .iter()
-                .filter(move |f| f.is_image(image))
-                .map(move |f| (s, f))
-        })
-    };
-    let Some(best) = files().map(|(_, f)| rank(rule, f.kind())).min() else {
+    let mut accepted: Vec<&str> = options
+        .load_extensions
+        .iter()
+        .map(|e| trim_dot(e))
+        .collect();
+    accepted.extend(options.extension.as_deref().map(trim_dot));
+    if accepted.is_empty() {
+        accepted.extend(headered);
+    }
+    let mut images: Vec<(&Source, &File)> = all()
+        .filter(|(s, f)| f.is_image(&accepted) || f.strips(s, &accepted))
+        .collect();
+    let fallback = images.is_empty();
+    if fallback {
+        images = all().filter(|(_, f)| f.item.is_none()).collect();
+        let first = images.first().map(|(_, f)| f.key());
+        if images.iter().any(|(_, f)| Some(f.key()) != first) {
+            return Vec::new();
+        }
+    }
+    let Some(best) = images.iter().map(|(_, f)| rank(rule, f.kind())).min() else {
         return Vec::new();
     };
-    let sibling_ext = files()
-        .find(|(_, f)| f.kind() == Kind::Headered && !f.own_extension().is_empty())
-        .map(|(_, f)| f.own_extension().to_owned());
+    images.retain(|(_, f)| rank(rule, f.kind()) == best);
+    images.sort_by_key(|(_, f)| status_rank(f.status()));
+    let sibling = headered.or_else(|| accepted.first().copied());
     let mut out: Vec<DatRom> = Vec::new();
     let mut keys: Vec<String> = Vec::new();
-    for (source, file) in files().filter(|(_, f)| rank(rule, f.kind()) == best) {
+    for (source, file) in images {
         let key = file.key();
         if keys.contains(&key) {
             continue;
         }
-        let name = rom_name(game, file, options, sibling_ext.as_deref());
+        let name = rom_name(game, file, options, sibling, fallback);
         if out.iter().any(|r| r.name == name) {
             continue;
         }
@@ -188,9 +239,19 @@ pub(super) fn roms(game: &str, sources: &[Source], options: &ExportOptions) -> V
     out
 }
 
-/// The file's `forcename`, else `<game>.<ext>`, where a `.unh` or missing extension becomes
-/// the platform's, else the headered file's.
-fn rom_name(game: &str, file: &File, options: &ExportOptions, sibling: Option<&str>) -> String {
+fn trim_dot(ext: &str) -> &str {
+    ext.trim().trim_start_matches('.')
+}
+
+/// The file's `forcename`, else `<game>.<ext>`. A headerless, extensionless or `rename`d
+/// file takes the platform's written extension, else `sibling`.
+fn rom_name(
+    game: &str,
+    file: &File,
+    options: &ExportOptions,
+    sibling: Option<&str>,
+    rename: bool,
+) -> String {
     if let Some(name) = file
         .forcename
         .as_deref()
@@ -200,13 +261,13 @@ fn rom_name(game: &str, file: &File, options: &ExportOptions, sibling: Option<&s
         return name.to_owned();
     }
     let own = file.own_extension();
-    let ext = if own.is_empty() || own.eq_ignore_ascii_case("unh") {
+    let ext = if rename || own.is_empty() || file.kind() == Kind::Headerless {
         options
             .extension
             .as_deref()
+            .map(trim_dot)
             .or(sibling)
             .unwrap_or(own)
-            .trim_start_matches('.')
     } else {
         own
     };

@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 use crate::hash::HeaderRule;
 
 mod export;
+mod family;
 
 pub use export::{export_name, ExportName};
+pub use family::{family_key, split_version, DatFamily, FORMAT_MARKERS};
 
 #[cfg(test)]
 mod tests;
@@ -249,8 +251,11 @@ pub enum DatFormat {
 pub struct ExportOptions {
     /// Header rule of the platform the DAT binds to, which decides the file format taken.
     pub header_rule: HeaderRule,
-    /// The platform's extension, without the dot, for files stored as `.unh` or with none.
+    /// The extension the platform writes, without the dot, naming files stored as `.unh`,
+    /// with none, headerless, or taken as the only file of a game.
     pub extension: Option<String>,
+    /// Extensions the platform loads, without the dot; a file with one of them is an image.
+    pub load_extensions: Vec<String>,
     /// Archive number to game name, from [`export_parents`], resolving clone references.
     pub parents: HashMap<String, String>,
 }
@@ -337,7 +342,7 @@ fn collect<R: BufRead>(mut stream: DatStream<R>) -> Result<Dat, DatError> {
     })
 }
 
-/// The first pass over a DB export: every archive number and its game name, for
+/// The first pass over a DB export: the archive number and game name of every parent, for
 /// [`ExportOptions::parents`]. `None` for a Logiqx DAT, after reading only its first element.
 ///
 /// ```
@@ -510,7 +515,8 @@ impl<R: BufRead> DatStream<R> {
         }
     }
 
-    /// Next game at datafile level with its archive number, parsing a header met on the way.
+    /// Next game at datafile level with its archive number when it is a parent, parsing a
+    /// header met on the way.
     fn next_game(&mut self) -> Result<Option<(DatGame, Option<String>)>, DatError> {
         while !self.done {
             match self.read_event()? {
@@ -700,7 +706,8 @@ impl<R: BufRead> DatStream<R> {
             game.roms = export::roms(&game.name, &sources, &self.options);
         }
         self.count += 1;
-        Ok((game, archive.number))
+        let number = archive.number.clone().filter(|_| archive.is_parent());
+        Ok((game, number))
     }
 
     /// Adds a `<release>`'s region and languages to the game's, each once.
@@ -734,7 +741,7 @@ impl<R: BufRead> DatStream<R> {
                 _ => continue,
             };
             if e.local_name().as_ref() == b"file" {
-                source.files.push(self.read_file(&e, game)?);
+                source.files.extend(self.read_file(&e, game)?);
             }
             if body {
                 self.skip(&e)?;
@@ -742,7 +749,22 @@ impl<R: BufRead> DatStream<R> {
         }
     }
 
-    fn read_file(&self, e: &BytesStart<'_>, game: &str) -> Result<export::File, DatError> {
+    /// Reads one `<file>`; an `item` extra that fails to parse is `None`, never an error.
+    fn read_file(&self, e: &BytesStart<'_>, game: &str) -> Result<Option<export::File>, DatError> {
+        let item = self.attr(e, b"item").ok().flatten();
+        match (self.read_file_attrs(e, game, item.clone()), item) {
+            (Ok(file), _) => Ok(Some(file)),
+            (Err(_), Some(_)) => Ok(None),
+            (Err(err), None) => Err(err),
+        }
+    }
+
+    fn read_file_attrs(
+        &self,
+        e: &BytesStart<'_>,
+        game: &str,
+        item: Option<String>,
+    ) -> Result<export::File, DatError> {
         let size_text = self
             .attr(e, b"size")?
             .ok_or_else(|| DatError::MissingAttribute {
@@ -758,10 +780,9 @@ impl<R: BufRead> DatStream<R> {
             md5: self.hex(e, "md5", 32, game)?,
             sha1: self.hex(e, "sha1", 40, game)?,
             header: self.attr(e, b"header")?.filter(|h| !h.trim().is_empty()),
-            item: self.attr(e, b"item")?,
+            item,
             forcename: self.attr(e, b"forcename")?,
             bad: self.attr(e, b"bad")?.is_some_and(|v| v.trim() == "1"),
-            mia: self.attr(e, b"mia")?.is_some_and(|v| v.trim() == "1"),
         })
     }
 

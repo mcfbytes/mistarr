@@ -28,7 +28,7 @@ struct Game {
     sources: usize,
     /// `bad="1"` on the dump's files.
     bad: bool,
-    /// `mia="1"` on the dump's files, which wins over `bad`.
+    /// `mia="1"` on the dump's files, which leaves the dump verifiable.
     mia: bool,
     /// `forcename` on the dump's files.
     forcename: Option<String>,
@@ -193,9 +193,7 @@ fn logiqx_xml(games: &[Game]) -> String {
                 header_hex(&d.header)
             )
             .unwrap();
-            if g.mia {
-                x.push_str(" status=\"nodump\"");
-            } else if g.bad {
+            if g.bad {
                 x.push_str(" status=\"baddump\"");
             }
             x.push_str("/>");
@@ -222,7 +220,7 @@ fn ines_header(prg: u8) -> Vec<u8> {
 }
 
 /// A clone listed before its parent, a parent with two sources, a bad dump, a game without
-/// files, a missing dump, and a prototype by status only whose files carry a forced name.
+/// files, a dump marked missing, and a prototype by status only whose files carry a forced name.
 fn fixture() -> Vec<Game> {
     let dump = |seed, prg| Dump {
         size: 16_384 * u64::from(prg),
@@ -332,7 +330,11 @@ fn a_db_export_yields_headerless_roms_named_like_the_dat() {
     );
     assert_eq!(dat.games[2].roms[0].status, RomStatus::BadDump);
     assert!(dat.games[3].roms.is_empty());
-    assert_eq!(dat.games[4].roms[0].status, RomStatus::NoDump);
+    assert_eq!(
+        dat.games[4].roms[0].status,
+        RomStatus::Good,
+        "mia keeps the dump"
+    );
     let manor = &dat.games[5];
     assert_eq!(manor.roms[0].name, "Mock Manor (USA) (Alt).nes");
     assert_eq!(manor.roms[0].status, RomStatus::Good);
@@ -387,8 +389,9 @@ fn a_single_pass_leaves_clones_unlinked() {
     let games: Vec<DatGame> = stream.collect::<Result<_, _>>().unwrap();
     assert!(games.iter().all(|g| g.clone_of.is_none()));
     let parents = export_parents(xml.as_bytes()).unwrap().unwrap();
-    assert_eq!(parents.len(), 6);
+    assert_eq!(parents.len(), 5, "the clone is not indexed");
     assert_eq!(parents["0002"], "Example Quest (Japan)");
+    assert!(!parents.contains_key("0001"));
 }
 
 #[test]
@@ -438,6 +441,79 @@ fn a_headerless_file_without_a_platform_extension_takes_the_headered_one() {
     };
     let dat = parse_dat_with(xml.as_bytes(), options).unwrap();
     assert_eq!(dat.games[0].roms[0].name, "Example Quest (Japan).nes");
+}
+
+fn platform(rule: HeaderRule, written: &str, loads: &[&str]) -> ExportOptions {
+    ExportOptions {
+        header_rule: rule,
+        extension: Some(written.into()),
+        load_extensions: loads.iter().map(|e| (*e).to_owned()).collect(),
+        ..ExportOptions::default()
+    }
+}
+
+#[test]
+fn any_loaded_extension_is_an_image_and_a_lone_file_is_renamed() {
+    let xml = r#"<header/><datafile>
+      <game name="Example Quest (World)"><archive number="1" clone="P"/>
+      <source><file extension="gen" size="8" crc32="00000001"/>
+      <file extension="srm" size="8" crc32="00000002"/></source></game>
+      <game name="Sample Racer (World)"><archive number="2" clone="P"/>
+      <source><file extension="pce" size="8" crc32="00000003"/>
+      <file extension="txt" size="8" crc32="00000004" item="Manual"/></source></game>
+      <game name="Demo Dungeon (World)"><archive number="3" clone="P"/>
+      <source><file extension="aaa" size="8" crc32="00000005"/>
+      <file extension="bbb" size="8" crc32="00000006"/></source></game>
+    </datafile>"#;
+    let md = parse_dat_with(
+        xml.as_bytes(),
+        platform(HeaderRule::None, "md", &["md", "gen", "bin"]),
+    )
+    .unwrap();
+    assert_eq!(md.games[0].roms.len(), 1);
+    assert_eq!(md.games[0].roms[0].name, "Example Quest (World).gen");
+    let sgx = parse_dat_with(xml.as_bytes(), platform(HeaderRule::None, "sgx", &["sgx"])).unwrap();
+    assert_eq!(sgx.games[1].roms[0].name, "Sample Racer (World).sgx");
+    assert_eq!(sgx.games[1].roms[0].crc32.as_deref(), Some("00000003"));
+    assert!(
+        sgx.games[2].roms.is_empty(),
+        "two unknown files give no image"
+    );
+}
+
+#[test]
+fn lynx_takes_the_headerless_image_under_the_written_name() {
+    let xml = r#"<header/><datafile><game name="Example Quest (World)"><archive number="1" clone="P"/>
+      <source><file extension="lnx" size="80" crc32="00000001" header="4c594e5800" format="Headered"/>
+      <file extension="lyx" size="16" crc32="00000002" format="Headerless"/></source></game></datafile>"#;
+    let dat = parse_dat_with(xml.as_bytes(), platform(HeaderRule::Lnx, "lnx", &["lnx"])).unwrap();
+    let rom = &dat.games[0].roms[0];
+    assert_eq!(rom.name, "Example Quest (World).lnx");
+    assert_eq!(rom.crc32.as_deref(), Some("00000002"));
+    assert_eq!(rom.header.as_deref(), Some("4c594e5800"));
+}
+
+#[test]
+fn a_good_dump_wins_over_a_bad_one_of_the_same_name() {
+    let xml = r#"<header/><datafile><game name="Example Quest (World)"><archive number="1" clone="P"/>
+      <source><file extension="gb" size="8" crc32="00000001" bad="1"/></source>
+      <source><file extension="gb" size="8" crc32="00000002" mia="1"/></source></game></datafile>"#;
+    let dat = parse_dat_with(xml.as_bytes(), platform(HeaderRule::None, "gb", &["gb"])).unwrap();
+    assert_eq!(dat.games[0].roms.len(), 1);
+    assert_eq!(dat.games[0].roms[0].crc32.as_deref(), Some("00000002"));
+    assert_eq!(dat.games[0].roms[0].status, RomStatus::Good);
+}
+
+#[test]
+fn an_odd_extra_never_rejects_the_export() {
+    let xml = r#"<header/><datafile><game name="Example Quest (World)"><archive number="1" clone="P"/>
+      <source><file extension="gb" size="8" crc32="00000001"/>
+      <file extension="sav" size="" crc32="zz" item="Save"/>
+      <file item="Box"/></source></game></datafile>"#;
+    let dat = parse_dat_with(xml.as_bytes(), platform(HeaderRule::None, "gb", &["gb"])).unwrap();
+    assert_eq!(dat.games[0].roms.len(), 1);
+    let bad = xml.replace(r#"crc32="00000001""#, r#"crc32="zz""#);
+    assert!(parse_dat_with(bad.as_bytes(), ExportOptions::default()).is_err());
 }
 
 #[test]
