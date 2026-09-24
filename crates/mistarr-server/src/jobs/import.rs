@@ -32,11 +32,12 @@ use self::support::{
 };
 use super::{transfer, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
+use crate::db::candidates;
 use crate::db::downloads::{self, DownloadId, DownloadRow, DownloadState};
 use crate::db::files::{self, FileId, FileRow, FileState};
 use crate::db::imports::{self, EntryRom, ImportAction, TitleEntry};
 use crate::db::jobs as job_rows;
-use crate::db::sources::{self, SourceRow};
+use crate::db::sources::{self, SourceId, SourceRow};
 use crate::db::{downloads_import, titles::TitleId};
 use crate::error::{Error, Result};
 use crate::events::EventKind;
@@ -247,6 +248,7 @@ async fn import(ctx: &JobContext, id: DownloadId) -> Result<()> {
         adapter,
         source: &source,
         entry: &entry,
+        redirect: None,
     };
     let outcome = match platform.kind {
         _ if entry.from_mra => placing.mra(&row).await,
@@ -314,7 +316,7 @@ enum Placed {
     Partly(HashMap<String, (i64, i64)>, PlaceError),
 }
 
-/// One import in progress: the wanted entry, its platform and the torrent.
+/// One import in progress: the entry placed, its platform and the torrent.
 struct Placing<'a> {
     ctx: &'a JobContext,
     staging: PathBuf,
@@ -323,6 +325,51 @@ struct Placing<'a> {
     adapter: &'static dyn CoreAdapter,
     source: &'a SourceRow,
     entry: &'a TitleEntry,
+    /// Set when the file is another version than the one wanted.
+    redirect: Option<Redirect>,
+}
+
+/// How a download ends whose file hashed to another version of its entry:
+/// the file is placed as that version and the download ends `bad`.
+#[derive(Debug, Clone)]
+struct Redirect {
+    /// The download's error.
+    reason: String,
+    /// The file that turned out to be the other version.
+    source: SourceId,
+    file_index: Option<u32>,
+    /// The wanted rom, which that file is not.
+    rom_id: i64,
+}
+
+impl Redirect {
+    fn new(other: &str, row: &DownloadRow, source: SourceId) -> Self {
+        Self {
+            reason: different_version(other),
+            source,
+            file_index: row.file_index,
+            rom_id: row.rom_id,
+        }
+    }
+
+    /// Ends the download `bad` and forgets that its file may be the wanted rom.
+    fn settle(
+        &self,
+        c: &rusqlite::Connection,
+        id: DownloadId,
+        now: i64,
+    ) -> Result<Vec<DownloadId>> {
+        let moved = downloads::move_all(c, &[id], DownloadState::Bad, Some(&self.reason), now)?;
+        if let Some(index) = self.file_index {
+            candidates::drop_pair(c, self.source, index, self.rom_id)?;
+        }
+        Ok(moved)
+    }
+}
+
+/// The error of a download whose file is the entry named `other` of the same group.
+fn different_version(other: &str) -> String {
+    format!("The file in this source is a different version: {other}.")
 }
 
 impl Placing<'_> {
@@ -507,6 +554,11 @@ impl Placing<'_> {
         if self.already_placed(&local, row.rom_id).await? {
             return finish(app, &[row.id], DownloadState::Done, None).await;
         }
+        if !local.exists() {
+            if let Some(other) = self.placed_as_other(row).await? {
+                return self.settle_other(row, &other).await;
+            }
+        }
         self.ctx.checkpoint().await?;
         let candidates = match self.hash(&local).await? {
             Ok(h) => h,
@@ -517,10 +569,25 @@ impl Placing<'_> {
             pick_rom(&self.entry.roms, &c.hashes, Some(row.rom_id), name, &[]).map(|r| (c, r))
         });
         let Some((hashed, rom)) = hit else {
+            if let Some((hashed, other)) = self.other_version(&candidates).await? {
+                return self.place_other(row, &local, &hashed, &other).await;
+            }
             return self
                 .quarantine(row.id, row.rom_id, &local, &candidates)
                 .await;
         };
+        self.place_single(row.id, &local, hashed, rom).await
+    }
+
+    /// Places one staged file, or one member of a staged zip, as `rom` of this entry.
+    async fn place_single(
+        &self,
+        download: DownloadId,
+        local: &Path,
+        hashed: &Hashed,
+        rom: &EntryRom,
+    ) -> Result<()> {
+        let local = local.to_path_buf();
         let head = self.head(&local, hashed.member.as_deref()).await?;
         let size = fs::metadata(&local).map_or(0, |m| m.len());
         let staged = match &hashed.member {
@@ -548,14 +615,115 @@ impl Placing<'_> {
             roms: vec![dat_rom(rom)],
         };
         let piece = Piece {
-            download: row.id,
+            download,
             source: local.clone(),
             hashed: hashed.clone(),
             rom: rom.clone(),
             state: None,
         };
-        self.place(&dat, &staged, vec![piece], &[row.id], &[local])
+        self.place(&dat, &staged, vec![piece], &[download], &[local])
             .await
+    }
+
+    /// The first staged payload that is a live rom of another live, non-BIOS
+    /// entry in the wanted entry's clone group, with that entry.
+    async fn other_version(&self, actual: &[Hashed]) -> Result<Option<(Hashed, TitleEntry)>> {
+        let (pid, wanted, list) = (self.pid(), self.entry.id, actual.to_vec());
+        self.app()
+            .db
+            .read(move |c| {
+                for a in list {
+                    let h = &a.hashes;
+                    let size = i64::try_from(h.size).unwrap_or(i64::MAX);
+                    let Some(m) = files::match_rom(c, &pid, &h.sha1, &h.md5, &h.crc32, size)?
+                    else {
+                        continue;
+                    };
+                    let other = TitleId(m.title_id);
+                    if !downloads_import::other_version_of(c, wanted, other)? {
+                        continue;
+                    }
+                    let Some(entry) = imports::title_entry(c, other)? else {
+                        continue;
+                    };
+                    if !entry.is_bios() && entry.roms.iter().any(|r| r.id == m.rom_id) {
+                        return Ok(Some((a, entry)));
+                    }
+                }
+                Ok(None)
+            })
+            .await
+    }
+
+    /// Places a staged file that hashed to `other`, another version of the
+    /// wanted entry, as that version; the download then ends `bad` saying so.
+    async fn place_other(
+        &self,
+        row: &DownloadRow,
+        local: &Path,
+        hashed: &Hashed,
+        other: &TitleEntry,
+    ) -> Result<()> {
+        let name = hashed.member.as_deref();
+        let Some(rom) = pick_rom(&other.roms, &hashed.hashes, None, name, &[]) else {
+            return self
+                .quarantine(row.id, row.rom_id, local, std::slice::from_ref(hashed))
+                .await;
+        };
+        tracing::info!(download = %row.id, title = %other.id, "the file is another version of the wanted entry");
+        let placing = Placing {
+            ctx: self.ctx,
+            staging: self.staging.clone(),
+            games: self.games.clone(),
+            platform: self.platform,
+            adapter: self.adapter,
+            source: self.source,
+            entry: other,
+            redirect: Some(Redirect::new(&other.name, row, self.source.id)),
+        };
+        placing.place_single(row.id, local, hashed, rom).await
+    }
+
+    /// The entry of the same group a `done` download of this file placed,
+    /// when the file is gone because it was imported as that version.
+    async fn placed_as_other(&self, row: &DownloadRow) -> Result<Option<TitleEntry>> {
+        let (Some(index), source, wanted, rom) =
+            (row.file_index, self.source.id, self.entry.id, row.rom_id)
+        else {
+            return Ok(None);
+        };
+        self.app()
+            .db
+            .read(move |c| {
+                let Some(other) = downloads_import::done_on_file(c, source, index, rom)? else {
+                    return Ok(None);
+                };
+                if !downloads_import::other_version_of(c, wanted, other)? {
+                    return Ok(None);
+                }
+                imports::title_entry(c, other)
+            })
+            .await
+    }
+
+    /// Ends a download whose file an earlier import placed as `other`.
+    async fn settle_other(&self, row: &DownloadRow, other: &TitleEntry) -> Result<()> {
+        let redirect = Redirect::new(&other.name, row, self.source.id);
+        let id = row.id;
+        let moved = self
+            .app()
+            .db
+            .write(move |c| {
+                let tx = c.transaction()?;
+                let moved = redirect.settle(&tx, id, crate::unix_now())?;
+                tx.commit()?;
+                Ok(moved)
+            })
+            .await?;
+        for id in moved {
+            transfer::publish(self.app(), id, DownloadState::Bad, 1.0);
+        }
+        Ok(())
     }
 
     /// A romset or arcade download: a zip whose every member must be a rom of
@@ -916,8 +1084,13 @@ impl Placing<'_> {
 
     fn announce(&self, ids: &[DownloadId], done: &[(FileId, ImportAction)]) {
         let app = self.app();
+        let state = if self.redirect.is_some() {
+            DownloadState::Bad
+        } else {
+            DownloadState::Done
+        };
         for id in ids {
-            transfer::publish(app, *id, DownloadState::Done, 1.0);
+            transfer::publish(app, *id, state, 1.0);
         }
         for (file_id, action) in done {
             app.events.publish(
@@ -945,7 +1118,7 @@ impl Placing<'_> {
             stats: stats.clone(),
             note,
         };
-        let ids = ids.to_vec();
+        let (ids, redirect) = (ids.to_vec(), self.redirect.clone());
         self.app()
             .db
             .write(move |c| {
@@ -955,8 +1128,16 @@ impl Placing<'_> {
                 for t in &targets {
                     record_target(&tx, &scope, t, &pieces, now, &mut done)?;
                 }
-                if complete {
-                    downloads::move_all(&tx, &ids, DownloadState::Done, None, now)?;
+                match (&redirect, complete) {
+                    (Some(r), true) => {
+                        for id in &ids {
+                            r.settle(&tx, *id, now)?;
+                        }
+                    }
+                    (None, true) => {
+                        downloads::move_all(&tx, &ids, DownloadState::Done, None, now)?;
+                    }
+                    (_, false) => {}
                 }
                 tx.commit()?;
                 Ok(done)

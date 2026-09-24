@@ -34,6 +34,47 @@ pub fn torrent_path(conn: &Connection, source_id: SourceId, index: u32) -> Resul
         .optional()?)
 }
 
+/// Whether `other` is a live title in the clone group of `wanted`, other than `wanted` itself.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn other_version_of(conn: &Connection, wanted: TitleId, other: TitleId) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM titles w JOIN titles o
+               ON COALESCE(o.parent_id, o.id) = COALESCE(w.parent_id, w.id)
+             WHERE w.id = ?1 AND o.id = ?2 AND o.id != w.id AND o.retired = 0",
+            params![wanted.0, other.0],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// The title of the newest `done` download of file `index` in `source` for
+/// a rom other than `rom`.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn done_on_file(
+    conn: &Connection,
+    source: SourceId,
+    index: u32,
+    rom: i64,
+) -> Result<Option<TitleId>> {
+    Ok(conn
+        .query_row(
+            "SELECT title_id FROM downloads
+             WHERE source_id = ?1 AND file_index = ?2 AND state = 'done' AND rom_id != ?3
+             ORDER BY id DESC LIMIT 1",
+            params![source.0, index, rom],
+            |r| r.get(0).map(TitleId),
+        )
+        .optional()?)
+}
+
 /// Inserts a download row in `state` directly, standing in for the transfer
 /// poller in tests.
 ///
