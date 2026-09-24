@@ -73,6 +73,7 @@ code. Guidance:
 | WP-23 | Show-hidden browse semantics | Sonnet | 10, 15 | `hidden=show` disables the hide list independently of `flags`; the Browse screen has a Show hidden checkbox and a require-flags selector. |
 | WP-24 | Import wanted MRA zips | Opus | 14, 19 | A wanted arcade zip is placed whole and verified by MRA md5 assembly, by MAME DAT members, or recorded unverified; multi-zip MRAs complete in any order. |
 | WP-25 | Scan automation and wizard cores | Sonnet | 11, 19 | Scans run after a DAT loads for a platform with a games directory, once when the wizard completes, and daily by default; the wizard's cores step calls `POST /system/cores`. |
+| WP-28 | Memory budget at scale | Opus | 10 to 14, 19 | `tests/memory.rs` holds the arcade catalogue (1 000 MRAs plus an `_Organized` tree of 15 000 symlinks), a 50 MB DAT, a 50 000-file torrent and a 20 000-file scan under 64 MiB peak RSS, each in its own process; the catalogue reads each distinct MRA once and an unchanged rerun reads none; MRA markup is read case-insensitively; `[memory] data_limit_mib` sets a soft `RLIMIT_DATA` at startup. |
 
 ## Suggested fan-out
 

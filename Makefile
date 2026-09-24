@@ -5,7 +5,7 @@ E2E_LOGS ?= $(CURDIR)/target/e2e-logs
 # Falls back to the pip ziglang wheel's bundled zig when none is on PATH.
 ZIGDIR := $(shell python3 -c "import ziglang, os; print(os.path.dirname(ziglang.__file__))" 2>/dev/null)
 
-.PHONY: check e2e web cross release clean
+.PHONY: check e2e memory web cross release clean
 
 check:
 	cargo fmt --all --check
@@ -19,6 +19,10 @@ check:
 e2e:
 	mkdir -p $(E2E_LOGS)
 	MISTARR_E2E_LOGS=$(E2E_LOGS) cargo test -p mistarr-server --test e2e -- --nocapture --test-threads=1
+
+# docs/TESTING.md "Memory budget", one job at a time with each peak RSS printed.
+memory:
+	cargo test -p mistarr-server --test memory -- --nocapture --test-threads=1
 
 web:
 	cd web && npm ci && npm run build
