@@ -65,6 +65,9 @@ parallel on the work packages in `docs/WORKPLAN.md`. Read this file, then
 ## Stack
 
 - Workspace in `Cargo.toml`, crates under `crates/`.
+- Rust toolchain pinned in `rust-toolchain.toml`, with `rust-version` in
+  `Cargo.toml` matching it; it moves in a pull request of its own that fixes
+  any new lints.
 - axum, tokio (2 workers), rusqlite bundled, quick-xml, serde, rust-embed,
   rustls with ring where TLS is unavoidable, tracing for logs.
 - Web: Svelte 5, Vite, TypeScript, under `web/`. No component library.
