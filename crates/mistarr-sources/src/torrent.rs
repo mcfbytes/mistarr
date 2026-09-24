@@ -53,22 +53,7 @@ pub struct TorrentMeta {
 /// assert!(parse_torrent(b"d4:infoi1ee").is_err());
 /// ```
 pub fn parse_torrent(data: &[u8]) -> Result<TorrentMeta, SourceError> {
-    let (top, len) = Raw::parse(data)?;
-    if !matches!(top, Raw::Dict(_)) {
-        return Err(SourceError::MalformedBencode(0));
-    }
-    if len != data.len() {
-        return Err(SourceError::TrailingData);
-    }
-    let (info, info_bytes) = top
-        .entries()
-        .find(|(key, _, _)| *key == b"info")
-        .map(|(_, value, bytes)| (value, bytes))
-        .ok_or(SourceError::MissingInfoDict)?;
-    if !matches!(info, Raw::Dict(_)) {
-        return Err(SourceError::MissingInfoDict);
-    }
-
+    let (info, info_bytes) = info_of(data)?;
     let name = info
         .get("name")
         .and_then(Raw::as_str)
@@ -93,6 +78,43 @@ pub fn parse_torrent(data: &[u8]) -> Result<TorrentMeta, SourceError> {
         total_size,
         is_private,
     })
+}
+
+/// The v1 infohash of a `.torrent`, the SHA1 of its encoded `info` dict, without
+/// reading its file list.
+///
+/// # Errors
+///
+/// As [`parse_torrent`] for the file's structure; the `info` fields are not checked.
+///
+/// ```
+/// let h = mistarr_sources::torrent::infohash(b"d4:infod4:name1:x6:lengthi1eee").unwrap();
+/// assert_eq!(h.len(), 20);
+/// assert!(mistarr_sources::torrent::infohash(b"d4:infoi1ee").is_err());
+/// ```
+pub fn infohash(data: &[u8]) -> Result<[u8; 20], SourceError> {
+    let (_, info_bytes) = info_of(data)?;
+    Ok(Sha1::digest(info_bytes).into())
+}
+
+/// The `info` dict of a whole `.torrent` and its encoded bytes.
+fn info_of(data: &[u8]) -> Result<(Raw<'_>, &[u8]), SourceError> {
+    let (top, len) = Raw::parse(data)?;
+    if !matches!(top, Raw::Dict(_)) {
+        return Err(SourceError::MalformedBencode(0));
+    }
+    if len != data.len() {
+        return Err(SourceError::TrailingData);
+    }
+    let (info, info_bytes) = top
+        .entries()
+        .find(|(key, _, _)| *key == b"info")
+        .map(|(_, value, bytes)| (value, bytes))
+        .ok_or(SourceError::MissingInfoDict)?;
+    if !matches!(info, Raw::Dict(_)) {
+        return Err(SourceError::MissingInfoDict);
+    }
+    Ok((info, info_bytes))
 }
 
 fn parse_single_file(name: &str, length: i64) -> Result<Vec<TorrentFile>, SourceError> {
@@ -311,6 +333,7 @@ mod tests {
         let data = DictBuilder::new().field("info", info).build();
         let meta = parse_torrent(&data).unwrap();
         assert_eq!(meta.infohash, expected);
+        assert_eq!(infohash(&data).unwrap(), expected);
     }
 
     #[test]

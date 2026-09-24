@@ -357,10 +357,32 @@ impl TorrentStatus {
     #[must_use]
     pub fn file_done(&self, index: u32) -> bool {
         self.state != TorrentState::Checking
-            && self
-                .files
-                .iter()
-                .any(|f| f.index == index && f.is_complete())
+            && self.file(index).is_some_and(FileProgress::is_complete)
+    }
+
+    /// Progress of file `index`. Clients list files in index order, so this is a direct
+    /// lookup, falling back to a search for a list that is not.
+    ///
+    /// ```
+    /// use mistarr_clients::{FileProgress, InfoHash, TorrentState, TorrentStatus};
+    /// let file = |index| FileProgress { index, bytes_done: 0, size: 4, wanted: true };
+    /// let st = TorrentStatus {
+    ///     infohash: InfoHash::from_bytes([7; 20]),
+    ///     state: TorrentState::Downloading,
+    ///     files: vec![file(0), file(1), file(5)],
+    ///     ratio: 0.0, down_rate: 0, up_rate: 0, is_finished: false,
+    /// };
+    /// assert_eq!(st.file(1).map(|f| f.index), Some(1));
+    /// assert_eq!(st.file(5).map(|f| f.index), Some(5));
+    /// assert!(st.file(2).is_none());
+    /// ```
+    #[must_use]
+    pub fn file(&self, index: u32) -> Option<&FileProgress> {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.files.get(i))
+            .filter(|f| f.index == index)
+            .or_else(|| self.files.iter().find(|f| f.index == index))
     }
 }
 

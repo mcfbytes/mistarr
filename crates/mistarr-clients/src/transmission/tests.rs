@@ -833,3 +833,50 @@ async fn files_strip_the_torrent_name_and_wait_for_metadata() {
         )
     );
 }
+
+#[test]
+fn replies_parse_into_types_and_report_failures() {
+    let ok: Torrents<WantedOnly> =
+        parse_reply(br#"{"result":"success","arguments":{"torrents":[{"wanted":[1,true]}]}}"#)
+            .expect("parse");
+    let flags: Vec<bool> = ok
+        .torrents
+        .expect("torrents")
+        .remove(0)
+        .wanted
+        .into_iter()
+        .map(Flag::into_bool)
+        .collect();
+    assert_eq!(flags, [true, true]);
+    let missing: Torrents<Value> = parse_reply(br#"{"result":"success"}"#).expect("parse");
+    assert!(missing.torrents.is_none());
+    let failed = parse_reply::<Torrents<RawTorrent>>(
+        br#"{"result":"no such method","arguments":{"torrents":7}}"#,
+    );
+    assert!(matches!(failed, Err(ClientError::Protocol(m)) if m == "no such method"));
+    let garbled = parse_reply::<Torrents<RawTorrent>>(br#"{"result":"success","arguments":[]}"#);
+    assert!(matches!(garbled, Err(ClientError::Protocol(_))));
+}
+
+#[tokio::test]
+async fn status_of_a_large_torrent_reads_every_file() {
+    let (fake, client) = setup().await;
+    let n = 20_000u32;
+    let files: Vec<Value> = (0..n)
+        .map(|i| json!({ "name": format!("Set/Example {i:05}.bin"), "length": 4, "bytesCompleted": i % 5 }))
+        .collect();
+    let stats: Vec<Value> = (0..n)
+        .map(|i| json!({ "bytesCompleted": i % 5, "wanted": i % 2 == 0, "priority": 0 }))
+        .collect();
+    fake.push(FakeResponse::success(json!({ "torrents": [{
+        "id": 1, "hashString": hash(4), "status": 4, "percentDone": 0.5, "error": 0,
+        "errorString": "", "files": files, "fileStats": stats, "rateDownload": 0,
+        "rateUpload": 0, "uploadRatio": 0.0, "isFinished": false
+    }] })));
+    let st = client.status(&id(4)).await.expect("status");
+    assert_eq!(st.files.len(), 20_000);
+    assert!(st
+        .file(19_999)
+        .is_some_and(|f| f.bytes_done == 4 && !f.wanted));
+    assert!(st.file(4).is_some_and(FileProgress::is_complete));
+}

@@ -133,7 +133,7 @@ pub fn observe(status: &TorrentStatus, row: &PollRow, staging: &Path) -> Option<
             error: Some(format!("The download client stopped the torrent: {msg}")),
         });
     }
-    let file = status.files.iter().find(|f| f.index == row.file_index)?;
+    let file = status.file(row.file_index)?;
     // Byte counts stay far below 2^52, so the ratio is exact enough.
     #[allow(clippy::cast_precision_loss)]
     let progress = if file.size == 0 {
