@@ -63,6 +63,7 @@ pub trait DownloadClient: Send + Sync {
     async fn start(&self, id: &ClientTorrentId) -> Result<()>;
     async fn stop(&self, id: &ClientTorrentId) -> Result<()>;
     async fn status(&self, id: &ClientTorrentId) -> Result<TorrentStatus>;          // per-file progress included
+    async fn files(&self, id: &ClientTorrentId) -> Result<Vec<ClientFile>>;         // paths and sizes, MetadataPending until known
     async fn remove(&self, id: &ClientTorrentId, delete_data: bool) -> Result<()>;
     async fn set_rate_limits(&self, down_kbps: Option<u32>, up_kbps: Option<u32>) -> Result<()>;
 }
@@ -134,17 +135,30 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 
 ### Source import
 
-1. A `.torrent` or `.magnet` appears in `sources/`. Parse it. For a magnet,
-   ask the client to fetch metadata into a paused, nothing-wanted torrent, then
-   read the file list back; until then the source shows as `resolving`.
-2. For each file in the torrent, normalise the name and look it up against
-   every loaded DAT by name, then by size. Compute per-platform hit rates.
-3. Bind the source to the platform with the best rate above the threshold
-   (default 0.6). Below that, the source is `unbound` and the user picks a
-   platform or discards it.
-4. Store the file list in `torrent_files` with the matched `rom_id` where one
-   exists. Move the file to `sources/loaded/`. The client is not told about the
-   torrent until something is wanted.
+1. A `.torrent` or `.magnet` appears in `sources/`, found by a scan every
+   10 s once its size has held for two scans, or written there by
+   `POST /sources/upload`. A light `source_import` job per file parses it. A
+   file that does not parse, or repeats a loaded source, moves to
+   `sources/rejected/` with a `<name>.reason.txt`.
+2. For a magnet, the source is `resolving`. A light `resolve_magnet` job adds
+   it to the client paused into `staging/<infohash>/` with nothing wanted and
+   starts it, since a paused magnet never fetches metadata. While it is
+   started the job asks the client for its file list every 2 s, because once
+   metadata arrives the client wants every file. When the list appears the
+   torrent is stopped first, then every file is set unwanted and the source
+   is bound like a `.torrent`. A magnet not yet in the client, because none
+   is detected or the add failed, stays `resolving` with a reason and is
+   retried every 15 s.
+3. For each file in the torrent, normalise the leaf name and look it up
+   against every loaded DAT by name, then by base name plus size. Compute
+   per-platform hit rates.
+4. Bind the source to the platform with the best rate at or above
+   `sources.bind_threshold` (default 0.6). Below that, the source is
+   `unbound` and the user picks a platform or discards it.
+5. Store the file list in `torrent_files` with the matched `rom_id` and its
+   confidence where one exists. Move the file to `sources/loaded/` and emit
+   `source.changed`. A `.torrent` is not told to the client until something
+   is wanted.
 
 ### Wanted and transfer
 
@@ -227,6 +241,9 @@ regions   = ["USA", "World", "Europe", "Japan"]
 languages = ["En"]
 prefer_latest_revision = true
 hide = ["bios", "beta", "proto", "demo", "sample", "program"]
+
+[sources]
+bind_threshold = 0.6        # lowest per-platform hit rate, 0 to 1, that binds a source
 ```
 
 The file is `--config FILE` if given, else `<data>/mistarr.toml` when it
@@ -234,7 +251,8 @@ exists, where `<data>` is `--data DIR` or `/media/fat/mistarr`; `--data`
 also overrides `paths.data` and `--listen` overrides `server.listen`. The
 `client`, `limits` and `prefs` sections are editable through
 `/system/settings`; saved values live in the `settings` table and take
-precedence over the file on every start. `server` and `paths` need a restart.
+precedence over the file on every start. `server`, `paths` and `sources`
+need a restart.
 
 ## Non-goals
 

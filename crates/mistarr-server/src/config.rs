@@ -27,6 +27,24 @@ pub struct Config {
     pub limits: LimitsConfig,
     /// `[prefs]`.
     pub prefs: PrefsConfig,
+    /// `[sources]`.
+    pub sources: SourcesConfig,
+}
+
+/// `[sources]`: how a dropped source is bound to a platform.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SourcesConfig {
+    /// Lowest per-platform hit rate, 0 to 1, that binds a source.
+    pub bind_threshold: f32,
+}
+
+impl Default for SourcesConfig {
+    fn default() -> Self {
+        Self {
+            bind_threshold: 0.6,
+        }
+    }
 }
 
 /// `[server]`: where to listen and whether to require an API key.
@@ -382,6 +400,8 @@ mod tests {
             down_kbps_core = 1
             [prefs]
             regions = ["Europe"]
+            [sources]
+            bind_threshold = 0.8
         "#;
         let c = Config::parse(text).expect("parse");
         assert_eq!(c.server.api_key, "k");
@@ -391,6 +411,8 @@ mod tests {
         assert_eq!(c.limits.up_kbps_core, 64);
         assert_eq!(c.prefs.regions, ["Europe"]);
         assert_eq!(c.prefs.languages, ["En"]);
+        assert!((c.sources.bind_threshold - 0.8).abs() < f32::EPSILON);
+        assert!((Config::default().sources.bind_threshold - 0.6).abs() < f32::EPSILON);
         assert_eq!(c.paths.db(), Path::new("/r/m/mistarr.db"));
     }
 

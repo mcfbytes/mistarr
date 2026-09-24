@@ -54,11 +54,15 @@ CREATE TABLE roms (                     -- one per <rom>; the file unit
   size          INTEGER NOT NULL,
   crc32         TEXT, md5 TEXT, sha1 TEXT,
   status        TEXT NOT NULL DEFAULT 'nodump',   -- 'good' | 'baddump' | 'nodump' | 'verified'
+  match_name    TEXT,                  -- normalised leaf name for pre-download matching, filled by binding
+  match_base    TEXT,                  -- base name of match_name
   UNIQUE (title_id, name)
 );
 CREATE INDEX roms_sha1 ON roms(sha1);
 CREATE INDEX roms_md5  ON roms(md5);
 CREATE INDEX roms_crc  ON roms(crc32, size);
+CREATE INDEX roms_match_name ON roms(match_name);
+CREATE INDEX roms_match_base ON roms(match_base, size);
 
 CREATE TABLE files (                    -- what is on disk under games/
   id            INTEGER PRIMARY KEY,
@@ -82,19 +86,22 @@ CREATE TABLE sources (                  -- one per torrent the user dropped in
   platform_id   TEXT REFERENCES platforms(id),   -- NULL while unbound
   bind_score    REAL,                  -- hit rate that produced the binding
   state         TEXT NOT NULL,         -- 'resolving' | 'unbound' | 'bound' | 'disabled'
+  reason        TEXT,                  -- why it is resolving or unbound, shown to the user
   seed_policy   TEXT NOT NULL DEFAULT 'none',   -- 'none' | 'ratio:1.0' | 'client'
   file_count    INTEGER NOT NULL DEFAULT 0,
   total_size    INTEGER NOT NULL DEFAULT 0,
   client_id     TEXT,                  -- id in the download client once added, else NULL
   added_at      INTEGER NOT NULL
 );
+CREATE INDEX sources_state ON sources(state);
 
 CREATE TABLE torrent_files (
   source_id     INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
   file_index    INTEGER NOT NULL,
-  path          TEXT NOT NULL,
+  path          TEXT NOT NULL,         -- inside the torrent, without the torrent's name
   size          INTEGER NOT NULL,
   rom_id        INTEGER REFERENCES roms(id),   -- best pre-download match, may be NULL
+  confidence    TEXT,                  -- 'name' | 'size', NULL when unmatched
   PRIMARY KEY (source_id, file_index)
 );
 CREATE INDEX torrent_files_rom ON torrent_files(rom_id);
@@ -125,7 +132,7 @@ CREATE TABLE import_log (
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE jobs (
   id            INTEGER PRIMARY KEY,
-  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'poll' | 'bind' | 'detect_client'
+  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'poll' | 'source_import' | 'resolve_magnet' | 'detect_client'
   payload       TEXT NOT NULL,         -- json
   state         TEXT NOT NULL,         -- 'queued' | 'running' | 'paused' | 'done' | 'failed'
   progress      TEXT,                  -- json, job specific
@@ -167,7 +174,8 @@ cancelled
 
 ### sources.state
 
-- `resolving`: magnet added to the client, metadata not yet available.
+- `resolving`: a magnet whose file list is not known yet: no client, not yet
+  added, or the client is fetching metadata; `reason` says which.
 - `unbound`: file list known, no platform reached the binding threshold.
 - `bound`: attached to a platform, torrent_files populated.
 - `disabled`: user turned it off; existing downloads finish, nothing new is

@@ -6,8 +6,9 @@ set headers, the `apikey` query parameter; otherwise the answer is 401. All
 list endpoints take `?limit=&offset=` (default 100, capped at 1000) and return
 `{ items: [...], total: n }`. Errors are `{ error: { code, message } }` with an
 appropriate status; codes are `bad_request`, `unauthorized`, `not_found`,
-`method_not_allowed`, `not_implemented` and `internal`. A documented route whose
-work package has not landed answers 501 `not_implemented`. The SPA is served
+`method_not_allowed`, `conflict`, `not_implemented` and `internal`. A
+documented route whose work package has not landed answers 501
+`not_implemented`. The SPA is served
 from `/` and every unknown non-API path returns `index.html`; unknown paths
 under `/api` return 404 JSON.
 
@@ -91,6 +92,35 @@ file on later starts. Changing `client` re-runs client detection.
 | PUT | `/sources/{id}` | `{ platform_id?, seed_policy?, state? }` to bind, rebind, disable. |
 | DELETE | `/sources/{id}` | Remove from mistarr and, if present, the client. Never deletes placed files. |
 | GET | `/sources/{id}/files` | torrent_files with matched rom names. |
+
+`/sources` items: `{ id, infohash, display_name, origin_file, platform_id,
+bind_score, state, reason, seed_policy, file_count, matched_count,
+total_size, client_id, added_at }`. `reason` says why a source is
+`resolving` or `unbound` and is otherwise `null`; `client_id` is set once the
+torrent is in the client. `seed_policy` is `"none"`, `"client"` or
+`"ratio:N"` with N above 0.
+
+`/sources/upload` takes `multipart/form-data` with one `.torrent` file part,
+or a JSON body `{ magnet }`. A file that does not parse, or repeats a source
+that is already loaded, is a 400. Otherwise the file is written into
+`sources/` under its name, or `name (N)` when that is taken (409 `conflict`
+when no such name is free), and the answer is 202 `{ file, job_id }`; the
+import then emits `source.changed`.
+
+`PUT /sources/{id}` body fields are all optional. `platform_id` binds or
+rebinds the source to that platform, matching its files against it only, and
+`null` unbinds it; both are a 400 while the source has no file list.
+`state` is `"disabled"` or `"enabled"`, which returns the source to `bound`,
+`unbound` or `resolving` as its files and platform say. A disabled source
+stays disabled when rebound. The answer is the updated item.
+
+`DELETE /sources/{id}` answers 204. It removes the torrent from the client
+without deleting data; a client that does not answer is a 502 and the source
+is kept. A source with downloads is a 400.
+
+`/sources/{id}/files` items: `{ file_index, path, size, rom_id, rom_name,
+title_id, confidence }`, where `path` is inside the torrent and `confidence`
+is `"name"`, `"size"` or `null` when no rom matched.
 
 ## Downloads
 
