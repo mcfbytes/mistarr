@@ -132,8 +132,9 @@ which check applied as `verification` in `import_log`:
    naming the missing members.
 2. `mra_md5`, when every `<rom>` index the zip feeds has a `<rom>` with an
    `md5`: those roms are assembled as in "MRA assembly" from the staged zip
-   and the sibling zips already on disk. A match marks the members read
-   `verified` and the rest `unverified`; a mismatch quarantines the zip;
+   and the sibling zips already on disk. When every index matches, the
+   members read by the `<rom>` alternatives that matched are `verified` and
+   the rest `unverified`; a mismatch quarantines the zip;
    content the assembler refuses fails the download with the assembler's
    reason and leaves the zip in staging. While a part may come from a zip
    not yet on disk, the zip is placed with `unverified` members and the
@@ -141,9 +142,12 @@ which check applied as `verification` in `import_log`:
    the check runs over all of them and marks the members read from the
    earlier zips `verified`.
 3. `dat`, when a loaded DAT of the platform has a live entry named as the
-   zip without `.zip`: members are verified against it as a romset, and a
-   zip that does not match exactly is quarantined. An entry flagged `bios`
-   refuses the download.
+   zip without `.zip`, looked up by directory: a zip in `games/hbmame/`
+   only in DATs whose header name contains `HBMAME`, any other zip only in
+   the other DATs. Members are verified against it as a romset, and a zip
+   that does not match exactly is quarantined. An entry flagged `bios`
+   refuses the download on this path only; a zip the md5 covers is never
+   looked up in a DAT.
 4. `none`: the zip is placed with `unverified` members and the reason `no
    hash source`.
 

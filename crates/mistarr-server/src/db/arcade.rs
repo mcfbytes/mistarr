@@ -390,7 +390,8 @@ pub fn set_zip_present(
 }
 
 /// The live DAT entry of `platform` named `set`, as a MAME DAT names the zip `set.zip`:
-/// the exact name first, then one differing only in case.
+/// the exact name first, then one differing only in case. With `hbmame` only DATs whose
+/// header name contains `HBMAME` are searched, without it only the others.
 ///
 /// # Errors
 ///
@@ -399,16 +400,22 @@ pub fn set_zip_present(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(mistarr_server::db::arcade::dat_entry_named(&conn, "arcade", "exblast").unwrap().is_none());
+/// assert!(mistarr_server::db::arcade::dat_entry_named(&conn, "arcade", "exblast", false).unwrap().is_none());
 /// ```
-pub fn dat_entry_named(conn: &Connection, platform: &str, set: &str) -> Result<Option<TitleId>> {
+pub fn dat_entry_named(
+    conn: &Connection,
+    platform: &str,
+    set: &str,
+    hbmame: bool,
+) -> Result<Option<TitleId>> {
     Ok(conn
         .query_row(
             "SELECT t.id FROM titles t JOIN dat_versions v ON v.id = t.dat_version_id
              WHERE t.platform_id = ?1 AND t.source = 'dat' AND t.retired = 0
                AND v.superseded_by IS NULL AND v.retired = 0 AND lower(t.name) = lower(?2)
+               AND (instr(lower(v.dat_name), 'hbmame') > 0) = ?3
              ORDER BY t.name = ?2 DESC, t.id LIMIT 1",
-            params![platform, set],
+            params![platform, set, hbmame],
             |r| r.get(0).map(TitleId),
         )
         .optional()?)

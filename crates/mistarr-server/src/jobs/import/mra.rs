@@ -24,7 +24,8 @@ use crate::jobs::arcade::{self, check_rom, same_zip, Check, ZipIndex, ZipSource}
 /// What the MRA says about a staged zip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Verdict {
-    /// Every `<rom>` index the zip feeds matched its md5; the members read, by zip path.
+    /// Every `<rom>` index the zip feeds matched its md5; the members the matching
+    /// alternatives read, by zip path.
     Match(Vec<(PathBuf, String)>),
     /// The md5 applies but cannot decide this zip yet, and why.
     Open(String),
@@ -131,14 +132,19 @@ fn examine(mra: &Mra, zip: &ZipPath, staged: &Path, games: &Path) -> Verdict {
     }
     let mut src = ZipSource::new(&index, stand_in);
     let mut by_index: Vec<(u32, Outcome)> = Vec::new();
+    let mut matched: Vec<(PathBuf, String)> = Vec::new();
     for rom in &fed {
         let Some(expected) = &rom.md5 else {
             continue;
         };
+        let before = src.read.len();
         let (check, detail) = check_rom(rom, expected, &mut src);
         let detail = detail.unwrap_or_default();
         let outcome = match check {
-            Check::Match => Outcome::Match,
+            Check::Match => {
+                matched.extend(src.read.drain(before..));
+                Outcome::Match
+            }
             Check::Mismatch => Outcome::Mismatch(detail),
             Check::Refused => Outcome::Refused(detail),
             Check::MissingPart => {
@@ -167,7 +173,7 @@ fn examine(mra: &Mra, zip: &ZipPath, staged: &Path, games: &Path) -> Verdict {
         }
     }
     match by_index.into_iter().map(|(_, o)| o).max() {
-        None | Some(Outcome::Match) => Verdict::Match(src.read),
+        None | Some(Outcome::Match) => Verdict::Match(matched),
         Some(Outcome::Open(why)) => Verdict::Open(why),
         Some(Outcome::Mismatch(why)) => Verdict::Mismatch(why),
         Some(Outcome::Refused(why)) => Verdict::Refused(why),
@@ -260,6 +266,7 @@ fn decide(
             Vec::new(),
         ),
         Verdict::NoMd5 => match dat {
+            Some(entry) if entry.is_bios() => Action::Fail(BIOS_REFUSED.to_owned()),
             Some(entry) => {
                 let set = match_members(&entry.roms, members);
                 if !set.is_exact() {
@@ -295,7 +302,8 @@ fn decide(
     }
 }
 
-/// The zip rom `rom_id` names and the live DAT entry of the same set name, if any.
+/// The zip rom `rom_id` names and the live DAT entry of the same set name for its
+/// directory, if any: an HBMAME DAT for a `hbmame` zip, any other DAT otherwise.
 fn lookup(
     c: &rusqlite::Connection,
     rom_id: i64,
@@ -303,7 +311,9 @@ fn lookup(
     let Some(z) = arcade_rows::zip_rom(c, rom_id)? else {
         return Ok((None, None));
     };
-    let dat = match arcade_rows::dat_entry_named(c, arcade::PLATFORM, set_name(&z.name))? {
+    let hbmame = z.zip_dir.eq_ignore_ascii_case("hbmame");
+    let set = set_name(&z.name);
+    let dat = match arcade_rows::dat_entry_named(c, arcade::PLATFORM, set, hbmame)? {
         Some(t) => imports::title_entry(c, t)?,
         None => None,
     };
@@ -324,9 +334,6 @@ impl Placing<'_> {
         ) else {
             return fail(app, &ids, "the wanted zip is not in the catalog").await;
         };
-        if dat.as_ref().is_some_and(TitleEntry::is_bios) {
-            return fail(app, &ids, BIOS_REFUSED).await;
-        }
         let zip = ZipPath {
             dir: zip_rom.zip_dir.clone(),
             file: zip_rom.name.clone(),
@@ -544,6 +551,25 @@ mod tests {
             examine(&odd, &at("exblast.zip"), &staged, &games),
             Verdict::Refused(r) if r.contains("not supported")
         ));
+    }
+
+    #[test]
+    fn only_members_read_by_a_matching_alternative_count_as_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let staged = dir.path().join("staged.zip");
+        write_zip(&staged, &[("a.bin", b"AA"), ("x.bin", b"XX")]);
+        let (wrong, right) = (md5_of(&[b"nothing"]), md5_of(&[b"AA"]));
+        let alternatives = mra::parse(
+            format!(
+                r#"<m><rom index="0" zip="exblast.zip" md5="{wrong}"><part name="x.bin"/></rom>
+                   <rom index="0" zip="exblast.zip" md5="{right}"><part name="a.bin"/></rom></m>"#
+            )
+            .as_bytes(),
+        )
+        .expect("mra");
+        let games = dir.path().join("games");
+        let verdict = examine(&alternatives, &at("exblast.zip"), &staged, &games);
+        assert_eq!(verdict, Verdict::Match(vec![(staged, "a.bin".into())]));
     }
 
     #[test]

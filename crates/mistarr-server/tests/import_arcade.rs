@@ -570,6 +570,172 @@ async fn wanting_creates_one_download_per_missing_zip() {
     b.running.shutdown().await.expect("shutdown");
 }
 
+/// Seeds a DAT entry `set` on the arcade platform with one rom and names its DAT `dat_name`.
+fn dat_entry(b: &Booted, dat_name: &str, set: &str, rom: &str, data: &[u8], bios: bool) -> i64 {
+    let hashes = hash_reader(Cursor::new(data), HeaderRule::None, None).expect("hash");
+    let (dat_name, set, rom) = (dat_name.to_owned(), set.to_owned(), rom.to_owned());
+    b.running
+        .app
+        .db
+        .write_blocking(move |c| {
+            let t = files::seed_title_fixture(c, &PlatformId("arcade".into()), &set)?;
+            let id = files::seed_rom_for_title_fixture(c, t, &rom, &hashes, "good")?;
+            let flags = if bios { r#"["bios"]"# } else { "[]" };
+            c.execute(
+                "UPDATE titles SET flags = ?2 WHERE id = ?1",
+                rusqlite::params![t, flags],
+            )?;
+            c.execute(
+                "UPDATE dat_versions SET dat_name = ?2
+                 WHERE id = (SELECT dat_version_id FROM titles WHERE id = ?1)",
+                rusqlite::params![t, dat_name],
+            )?;
+            Ok(id)
+        })
+        .expect("dat")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_md5_covered_zip_imports_whatever_a_dat_flags_it() {
+    let md5 = md5_of(&[b"CPU0"]);
+    let roms =
+        format!(r#"<rom index="0" zip="exblast.zip" md5="{md5}"><part name="cpu.bin"/></rom>"#);
+    let b = boot_arcade(
+        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[],
+    )
+    .await;
+    dat_entry(&b, "MAME", "exblast", "cpu.bin", b"CPU0", true);
+    let rom = zip_rom(&b, "exblast.zip");
+    let src = source(&b);
+    let staged = stage(
+        &b,
+        "arcade/exblast.zip",
+        &zip_bytes(&[("cpu.bin", b"CPU0")]),
+    );
+    let id = hand_off(&b, rom, src, 0, &staged);
+    settled(&b, id, DownloadState::Done).await;
+    assert_eq!(log(&b)[0].detail["verification"], "mra_md5");
+    assert!(games(&b).join("mame/exblast.zip").is_file());
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dat_bios_entry_refuses_a_zip_only_it_would_verify() {
+    let roms = r#"<rom index="0" zip="exblast.zip"><part name="cpu.bin"/></rom>"#;
+    let b = boot_arcade(
+        &[("Example Blaster.mra", mra("Example Blaster", roms))],
+        &[],
+    )
+    .await;
+    dat_entry(&b, "MAME", "exblast", "cpu.bin", b"CPU0", true);
+    let rom = zip_rom(&b, "exblast.zip");
+    let src = source(&b);
+    let staged = stage(
+        &b,
+        "arcade/exblast.zip",
+        &zip_bytes(&[("cpu.bin", b"CPU0")]),
+    );
+    let id = hand_off(&b, rom, src, 0, &staged);
+    let row = settled(&b, id, DownloadState::Failed).await;
+    assert!(
+        row.error.as_deref().is_some_and(|e| e.contains("BIOS")),
+        "{:?}",
+        row.error
+    );
+    assert!(staged.is_file());
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn hbmame_zips_are_verified_only_by_an_hbmame_dat() {
+    let b = boot_arcade(
+        &[
+            (
+                "Example Blaster.mra",
+                mra(
+                    "Example Blaster",
+                    r#"<rom index="0" zip="/hbmame/exblast.zip"><part name="cpu.bin"/></rom>"#,
+                ),
+            ),
+            (
+                "Example Quest.mra",
+                mra(
+                    "Example Quest",
+                    r#"<rom index="0" zip="/hbmame/examplequest.zip"><part name="q.bin"/></rom>"#,
+                ),
+            ),
+        ],
+        &[],
+    )
+    .await;
+    dat_entry(&b, "MAME", "exblast", "cpu.bin", b"MAME", false);
+    let hb_rom = dat_entry(&b, "HBMAME", "examplequest", "q.bin", b"Q", false);
+    let src = source(&b);
+    let blast = stage(
+        &b,
+        "hb/exblast.zip",
+        &zip_bytes(&[("cpu.bin", b"HOMEBREW")]),
+    );
+    let id = hand_off(&b, zip_rom(&b, "exblast.zip"), src, 0, &blast);
+    settled(&b, id, DownloadState::Done).await;
+    assert_eq!(log(&b)[0].detail["verification"], "none");
+    assert_eq!(
+        rows(&b, "hbmame/exblast.zip")[0].state,
+        FileState::Unverified
+    );
+
+    let quest = stage(&b, "hb/examplequest.zip", &zip_bytes(&[("q.bin", b"Q")]));
+    let id = hand_off(&b, zip_rom(&b, "examplequest.zip"), src, 1, &quest);
+    settled(&b, id, DownloadState::Done).await;
+    assert_eq!(log(&b)[0].detail["verification"], "dat");
+    assert_eq!(
+        states(&rows(&b, "hbmame/examplequest.zip")),
+        [(
+            "hbmame/examplequest.zip#q.bin".into(),
+            FileState::Verified,
+            Some(hb_rom)
+        )]
+    );
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn members_read_by_a_failing_alternative_stay_unverified() {
+    let (wrong, right) = (md5_of(&[b"nothing"]), md5_of(&[b"CPU0"]));
+    let roms = format!(
+        r#"<rom index="0" zip="exblast.zip" md5="{wrong}"><part name="old.bin"/></rom>
+           <rom index="0" zip="exblast.zip" md5="{right}"><part name="cpu.bin"/></rom>"#
+    );
+    let b = boot_arcade(
+        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[],
+    )
+    .await;
+    let rom = zip_rom(&b, "exblast.zip");
+    let src = source(&b);
+    let body = zip_bytes(&[("cpu.bin", b"CPU0"), ("old.bin", b"OLD")]);
+    let staged = stage(&b, "arcade/exblast.zip", &body);
+    let id = hand_off(&b, rom, src, 0, &staged);
+    settled(&b, id, DownloadState::Done).await;
+    assert_eq!(
+        states(&rows(&b, "mame/exblast.zip")),
+        [
+            (
+                "mame/exblast.zip#cpu.bin".into(),
+                FileState::Verified,
+                Some(rom)
+            ),
+            (
+                "mame/exblast.zip#old.bin".into(),
+                FileState::Unverified,
+                Some(rom)
+            ),
+        ]
+    );
+    b.running.shutdown().await.expect("shutdown");
+}
+
 /// A two-zip MRA whose one md5 spans both zips, imported with `first` landing first.
 async fn two_zips_arrive(first: &str) {
     let md5 = md5_of(&[b"AAAA", b"BBBB"]);

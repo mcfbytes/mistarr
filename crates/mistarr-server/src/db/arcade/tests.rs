@@ -305,12 +305,19 @@ fn import_reads_find_zip_roms_their_titles_and_dat_entries() {
     let dat = dat_game(&c, "1", "exblast");
     assert!(zip_rom(&c, 0).expect("read").is_none());
     assert_eq!(
-        dat_entry_named(&c, "arcade", "ExBlast").expect("dat"),
+        dat_entry_named(&c, "arcade", "ExBlast", false).expect("dat"),
         Some(dat)
     );
-    assert_eq!(dat_entry_named(&c, "arcade", "exquest").expect("dat"), None);
     assert_eq!(
-        dat_entry_named(&c, "arcade", "Example Blaster").expect("dat"),
+        dat_entry_named(&c, "arcade", "exblast", true).expect("dat"),
+        None
+    );
+    assert_eq!(
+        dat_entry_named(&c, "arcade", "exquest", false).expect("dat"),
+        None
+    );
+    assert_eq!(
+        dat_entry_named(&c, "arcade", "Example Blaster", false).expect("dat"),
         None
     );
 }
