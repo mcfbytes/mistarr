@@ -23,9 +23,9 @@ use crate::app::AppState;
 use crate::config::PrefsConfig;
 use crate::db::dat_stage::{self, StagedGame, StagedRom};
 use crate::db::dats::{self, DatVersionId, NewVersion};
-use crate::db::Db;
 use crate::db::jobs::{JobId, JobState};
 use crate::db::titles;
+use crate::db::Db;
 use crate::error::{Error, Result};
 use crate::events::EventKind;
 
@@ -306,9 +306,10 @@ impl DatImport {
             };
             let path = self.path.clone();
             let db = ctx.app.db.clone();
-            let outcome = tokio::task::spawn_blocking(move || import_from(&db, &path, member, &req))
-                .await
-                .map_err(|e| Error::Task(e.to_string()))??;
+            let outcome =
+                tokio::task::spawn_blocking(move || import_from(&db, &path, member, &req))
+                    .await
+                    .map_err(|e| Error::Task(e.to_string()))??;
             if let Outcome::Loaded(l) = &outcome {
                 games += l.games;
             }

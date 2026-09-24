@@ -164,7 +164,10 @@ fn clone_of_groups_and_nameless_headers_fall_back_to_the_file() {
 
     let nameless = "<datafile><game name=\"A\"><rom name=\"a\" size=\"1\"/></game></datafile>";
     let l = loaded(import(&c, nameless, &request(false, None)));
-    let row = c.with(|x| dats::get(x, l.version)).expect("get").expect("row");
+    let row = c
+        .with(|x| dats::get(x, l.version))
+        .expect("get")
+        .expect("row");
     assert_eq!(row.dat_name, "t");
 }
 
@@ -182,7 +185,8 @@ fn malformed_dats_are_rejected_and_roll_back() {
         "{o:?}"
     );
     assert_eq!(count(&c, "SELECT COUNT(*) FROM dat_versions"), 0);
-    let o = import_member(&c.db,
+    let o = import_member(
+        &c.db,
         Cursor::new(b"<html/>".as_slice()),
         &request(false, None),
         "m.dat",
@@ -202,15 +206,25 @@ fn a_dat_over_several_stage_chunks_applies_at_once() {
         .collect();
     let games: Vec<(&str, Option<&str>)> = names.iter().map(|n| (n.as_str(), None)).collect();
     let xml = dat("Maker - Game Boy", "1", &games);
-    let broken = xml.replace("</datafile>", "<game name=\"Cut\"><rom name=\"x\" size=\"z\"/>");
+    let broken = xml.replace(
+        "</datafile>",
+        "<game name=\"Cut\"><rom name=\"x\" size=\"z\"/>",
+    );
     let o = import(&c, &broken, &request(false, None));
     assert!(matches!(o, Outcome::Rejected(_)), "{o:?}");
-    assert_eq!(count(&c, "SELECT COUNT(*) FROM titles"), 0, "nothing half-loaded");
+    assert_eq!(
+        count(&c, "SELECT COUNT(*) FROM titles"),
+        0,
+        "nothing half-loaded"
+    );
     assert_eq!(count(&c, "SELECT COUNT(*) FROM dat_stage"), 0);
     let l = loaded(import(&c, &xml, &request(false, None)));
     let all = i64::try_from(names.len()).expect("fits");
     assert_eq!(l.games, u64::try_from(all).expect("fits"));
-    assert_eq!(count(&c, "SELECT COUNT(*) FROM titles WHERE retired = 0"), all);
+    assert_eq!(
+        count(&c, "SELECT COUNT(*) FROM titles WHERE retired = 0"),
+        all
+    );
     assert_eq!(count(&c, "SELECT COUNT(*) FROM dat_stage"), 0);
 }
 
@@ -222,11 +236,7 @@ fn a_long_import_stops_on_shutdown() {
         .collect();
     let games: Vec<(&str, Option<&str>)> = names.iter().map(|n| (n.as_str(), None)).collect();
     let xml = dat("Maker - Game Boy", "1", &games);
-    let r = import_member(&c.db,
-        Cursor::new(xml.as_bytes()),
-        &request(true, None),
-        "",
-    );
+    let r = import_member(&c.db, Cursor::new(xml.as_bytes()), &request(true, None), "");
     assert!(matches!(r, Err(Error::Cancelled)));
     assert_eq!(count(&c, "SELECT COUNT(*) FROM titles"), 0);
 }
@@ -375,7 +385,8 @@ fn nameless_members_take_their_own_names() {
     let c = conn();
     let nameless = "<datafile><game name=\"A\"><rom name=\"a\" size=\"1\"/></game></datafile>";
     let req = request(false, None);
-    let a = import_member(&c.db,
+    let a = import_member(
+        &c.db,
         Cursor::new(nameless.as_bytes()),
         &req,
         "sub/Alpha.dat",
@@ -385,7 +396,12 @@ fn nameless_members_take_their_own_names() {
         import_member(&c.db, Cursor::new(nameless.as_bytes()), &req, "Beta.xml").expect("import");
     let (a, b) = (loaded(a), loaded(b));
     assert_ne!(a.version, b.version, "members of one pack do not collide");
-    let name = |id| c.with(|x| dats::get(x, id)).expect("get").expect("row").dat_name;
+    let name = |id| {
+        c.with(|x| dats::get(x, id))
+            .expect("get")
+            .expect("row")
+            .dat_name
+    };
     assert_eq!(
         (name(a.version), name(b.version)),
         ("Alpha".to_owned(), "Beta".to_owned())
@@ -441,7 +457,10 @@ fn binding_an_older_version_is_rejected_and_rolled_back() {
         matches!(&o, Outcome::Rejected(r) if r.contains("newer version")),
         "{o:?}"
     );
-    let row = c.with(|x| dats::get(x, old.version)).expect("get").expect("row");
+    let row = c
+        .with(|x| dats::get(x, old.version))
+        .expect("get")
+        .expect("row");
     assert_eq!(row.platform_id, None);
     assert_eq!(count(&c, "SELECT COUNT(*) FROM titles"), 0);
 }

@@ -51,8 +51,9 @@ any dynamic dependency, checked with `file` on the output.
   mistarr                 # the binary
   mistarr.toml            # optional config
   mistarr.db              # SQLite
-  mistarr.lock            # held by the running server; a second one on this directory exits
-  mistarr.pid, .start.lock # written by Scripts/mistarr.sh
+  mistarr.lock            # held by the running server; a second server exits
+  mistarr.pid             # the daemon, written by Scripts/mistarr.sh
+  supervisor.pid          # the script's restart loop
   dats/                   # watched: drop DATs here
   dats/loaded/            # moved here after import
   dats/rejected/          # with a .reason.txt beside each file
@@ -61,10 +62,12 @@ any dynamic dependency, checked with `file` on the output.
   staging/                # client download dir
   staging/quarantine/     # hash mismatches, with report
   staging/.import/        # importer scratch, removed after each import
-  rtorrent.rc, rtorrent-session/   # only if mistarr started rtorrent
+  rtorrent.rc            # only if mistarr started rtorrent
+  rtorrent-session/       # the same
   client-start.log        # output of client start commands
-  transmission/           # only if mistarr started transmission-daemon without an init script
-/media/fat/Scripts/mistarr.sh      # start/stop/status from the MiSTer Scripts menu
+  transmission/           # transmission-daemon started without an init script
+/media/fat/Scripts/mistarr.sh      # start/stop/status from the Scripts menu
+/tmp/mistarr.start.lock        # held while a start runs; a reboot clears it
 ```
 
 ## Installing on the board
@@ -117,11 +120,23 @@ dependency.
 
 Only one server runs per data directory. The server takes an exclusive lock
 on `mistarr.lock` before opening the database and exits with "another
-mistarr is already running" when it cannot. `mistarr.sh start` also
-serialises itself through the `.start.lock` file, created exclusively and
-holding the starting shell's pid, taking over a lock whose shell is gone, and writes `mistarr.pid` as soon as the daemon
-is spawned, so a start from `user-startup.sh` racing a manual start from the
-Scripts menu launches one daemon.
+mistarr is already running" when it cannot; on a filesystem without file
+locks it logs a warning and runs unlocked. `mistarr.sh start` also
+serialises itself through `/tmp/mistarr.start.lock`, created exclusively and
+holding the starting shell's pid. A lock whose pid is gone, or is not a
+`mistarr.sh` process, is replaced by renaming a new file over it and kept
+only if it still names this start a second later. A start from
+`user-startup.sh` racing a manual start from the Scripts menu therefore
+launches one daemon. `mistarr.pid` is removed only once the process it
+names has exited or runs something other than the binary.
+
+`mistarr.sh start` runs the daemon under a supervisor, a background copy of
+the script whose pid is in `supervisor.pid`. When the daemon exits with a
+non-zero status or a signal, the supervisor logs it to `mistarr.log` and
+starts it again after 5 s, doubling the wait on each crash up to 5 minutes.
+After 5 crashes within 10 minutes it logs that it gives up and exits. A
+clean exit is not restarted. `stop` ends the supervisor first, then the
+daemon; `status` reports a supervisor waiting to restart.
 
 `[jobs] scan_interval_minutes` in `mistarr.toml` defaults to 1440: a daily
 rescan of the whole library. Set it to 0 to disable the timer and rely on the

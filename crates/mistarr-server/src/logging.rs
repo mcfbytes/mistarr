@@ -40,7 +40,8 @@ impl RotatingFile {
     ///
     /// ```
     /// use std::io::Write;
-    /// let path = std::env::temp_dir().join("mistarr-doc-rotating.log");
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("rotating.log");
     /// let mut log = mistarr_server::logging::RotatingFile::open(&path, 1024, 2).unwrap();
     /// log.write_all(b"line\n").unwrap();
     /// ```
@@ -148,7 +149,8 @@ pub fn init(log: Option<&Path>) -> io::Result<()> {
 /// True when `fd` is open on the file at `path`: same device and inode.
 ///
 /// ```
-/// let path = std::env::temp_dir().join("mistarr-doc-same-file.log");
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = dir.path().join("same.log");
 /// let f = std::fs::File::create(&path).unwrap();
 /// assert!(mistarr_server::logging::same_file(&f, &path));
 /// assert!(!mistarr_server::logging::same_file(&f, std::path::Path::new("/")));

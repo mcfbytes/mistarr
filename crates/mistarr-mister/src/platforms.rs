@@ -923,7 +923,10 @@ mod tests {
             Some("gbc")
         );
         assert_eq!(guess(&["Maker - Game Boy", "Maker - Game Boy Color"]), None);
-        assert_eq!(guess(&["Maker - Game Boy Color", "Nintendo - Game Boy Color"]), Some("gbc"));
+        assert_eq!(
+            guess(&["Maker - Game Boy Color", "Nintendo - Game Boy Color"]),
+            Some("gbc")
+        );
         assert_eq!(guess(&["Sony - PlayStation (2026)"]), Some("psx"));
         assert_eq!(guess(&[]), None);
         assert_eq!(guess(&["Example_Archive", "misc"]), None);
@@ -938,7 +941,11 @@ mod tests {
         let nested = [("Sets", 8), ("Nintendo - Game Boy", 8), ("misc", 8)];
         assert_eq!(guess_dirs(&nested), Some("gb"));
         let named = guess_platform(["Sega - Mega Drive - Genesis"], most).map(|p| p.id);
-        assert_eq!(named, Some("megadrive"), "the names outrank the directories");
+        assert_eq!(
+            named,
+            Some("megadrive"),
+            "the names outrank the directories"
+        );
     }
 
     mod props {

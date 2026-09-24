@@ -245,7 +245,11 @@ impl HostAllowlist {
     pub fn new(hostname: Option<&str>, extra: &[String]) -> Self {
         let mut allow = Self {
             exact: vec!["localhost".to_owned()],
-            suffixes: vec![".local".to_owned(), ".lan".to_owned(), ".localhost".to_owned()],
+            suffixes: vec![
+                ".local".to_owned(),
+                ".lan".to_owned(),
+                ".localhost".to_owned(),
+            ],
         };
         for name in hostname.into_iter().chain(extra.iter().map(String::as_str)) {
             let name = name.trim().trim_end_matches('.').to_ascii_lowercase();

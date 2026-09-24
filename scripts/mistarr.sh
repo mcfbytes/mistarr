@@ -5,40 +5,67 @@
 ROOT="${MISTARR_ROOT:-/media/fat}"
 BIN="$ROOT/mistarr/mistarr"
 PIDFILE="$ROOT/mistarr/mistarr.pid"
-# Held by one start at a time; holds the starting shell's pid.
-STARTLOCK="$ROOT/mistarr/.start.lock"
+# The supervisor that restarts the daemon after a crash.
+SUPERFILE="$ROOT/mistarr/supervisor.pid"
+# Held by one start at a time; in /tmp so a reboot clears it.
+STARTLOCK="${MISTARR_RUNDIR:-/tmp}/mistarr.start.lock"
 LOGFILE="$ROOT/mistarr/mistarr.log"
 STARTUP="$ROOT/linux/user-startup.sh"
 PORT="${MISTARR_PORT:-8420}"
 # Resolved absolute path to this script, wherever it was invoked from.
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+NAME=$(basename "$0")
 STARTUP_LINE="[ -x $SELF ] && $SELF start &"
+# Restart backoff in seconds, and how many crashes within CRASH_WINDOW end it.
+BACKOFF_FIRST="${MISTARR_BACKOFF:-5}"
+BACKOFF_MAX=300
+CRASH_LIMIT="${MISTARR_CRASH_LIMIT:-5}"
+CRASH_WINDOW=600
 
-# True when $PIDFILE names a live process that is actually running $BIN.
-# Removes the pidfile when it is stale (dead pid, or pid reused by another process).
+# Appends a line from this script to the log.
+note() {
+    echo "$(date '+%Y-%m-%d %H:%M:%S') mistarr.sh: $*" >>"$LOGFILE"
+}
+
+# True when pid $1 is alive and its command line contains $2. Without /proc
+# or ps a live pid is trusted.
+runs() {
+    [ -n "$1" ] && kill -0 "$1" 2>/dev/null || return 1
+    if [ -r "/proc/$1/cmdline" ]; then
+        tr '\0' '\n' < "/proc/$1/cmdline" | grep -qF "$2"
+        return
+    fi
+    if command -v ps >/dev/null 2>&1; then
+        ps -p "$1" -o args= 2>/dev/null | grep -qF "$2"
+        return
+    fi
+    return 0
+}
+
+# True when $PIDFILE names a live process running $BIN. A pidfile naming a
+# dead pid, or one still not running $BIN a second later, is removed.
 is_running() {
     [ -f "$PIDFILE" ] || return 1
     pid=$(cat "$PIDFILE" 2>/dev/null)
-    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
-        rm -f "$PIDFILE"
-        return 1
+    runs "$pid" "$BIN" && return 0
+    # A daemon just forked has not exec'd $BIN yet; look once more.
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+        sleep 1
+        runs "$pid" "$BIN" && return 0
     fi
-    if [ -r "/proc/$pid/cmdline" ]; then
-        if tr '\0' '\n' < "/proc/$pid/cmdline" | grep -qF "$BIN"; then
-            return 0
-        fi
-        rm -f "$PIDFILE"
-        return 1
-    fi
-    if command -v ps >/dev/null 2>&1; then
-        if ps -p "$pid" -o args= 2>/dev/null | grep -qF "$BIN"; then
-            return 0
-        fi
-        rm -f "$PIDFILE"
-        return 1
-    fi
-    # No way to check the command line; trust a pid that answers kill -0.
-    return 0
+    [ "$(cat "$PIDFILE" 2>/dev/null)" = "$pid" ] && rm -f "$PIDFILE"
+    return 1
+}
+
+# Prints the supervisor's pid when one of ours is alive.
+supervisor_pid() {
+    sup=$(cat "$SUPERFILE" 2>/dev/null)
+    runs "$sup" "$NAME" && echo "$sup"
+}
+
+# True when pid $1 is a live start of this script.
+is_starter() {
+    runs "$1" "$NAME"
 }
 
 # Creates the lock file holding our pid; noclobber makes the create exclusive.
@@ -46,8 +73,10 @@ create_start_lock() {
     (set -C; echo $$ > "$STARTLOCK") 2>/dev/null
 }
 
-# Takes the start lock; a lock left by a start that died is taken over.
+# Takes the start lock. A lock whose holder is gone is replaced by renaming
+# our own file over it, then kept only if it still names us a second later.
 take_start_lock() {
+    mkdir -p "$(dirname "$STARTLOCK")" 2>/dev/null
     create_start_lock && return 0
     holder=$(cat "$STARTLOCK" 2>/dev/null)
     # The holder writes its pid just after creating the file; give it that moment.
@@ -55,11 +84,15 @@ take_start_lock() {
         sleep 1
         holder=$(cat "$STARTLOCK" 2>/dev/null)
     fi
-    if [ -n "$holder" ] && kill -0 "$holder" 2>/dev/null; then
-        return 1
-    fi
-    rm -f "$STARTLOCK"
-    create_start_lock
+    is_starter "$holder" && return 1
+    echo $$ > "$STARTLOCK.$$"
+    mv -f "$STARTLOCK.$$" "$STARTLOCK" || return 1
+    sleep 1
+    [ "$(cat "$STARTLOCK" 2>/dev/null)" = "$$" ]
+}
+
+release_start_lock() {
+    [ "$(cat "$STARTLOCK" 2>/dev/null)" = "$$" ] && rm -f "$STARTLOCK"
 }
 
 do_start() {
@@ -69,8 +102,68 @@ do_start() {
     fi
     start_locked
     status=$?
-    rm -f "$STARTLOCK"
+    release_start_lock
     return "$status"
+}
+
+# Runs the daemon, restarting it after an abnormal exit with a backoff that
+# doubles from BACKOFF_FIRST to BACKOFF_MAX, until CRASH_LIMIT crashes fall
+# within CRASH_WINDOW seconds. A clean exit or a stop ends it.
+supervise() {
+    # Let go of the caller's output, or a `$(mistarr.sh start)` never returns.
+    exec </dev/null >/dev/null 2>&1
+    stopping=0
+    child=""
+    sleeper=""
+    trap 'stopping=1; [ -n "$child" ] && kill "$child" 2>/dev/null; [ -n "$sleeper" ] && kill "$sleeper" 2>/dev/null' TERM INT
+    delay="$BACKOFF_FIRST"
+    crashes=""
+    # Either applet may be absent from the board's BusyBox; use what is there.
+    prio=""
+    command -v nice >/dev/null 2>&1 && prio="nice -n 10"
+    command -v ionice >/dev/null 2>&1 && prio="$prio ionice -c 3"
+    while [ "$stopping" -eq 0 ]; do
+        # shellcheck disable=SC2086
+        $prio "$BIN" </dev/null >>"$LOGFILE" 2>&1 &
+        child=$!
+        echo "$child" > "$PIDFILE"
+        wait "$child"
+        code=$?
+        # A trapped signal ends `wait` early; wait again for the exit status.
+        while kill -0 "$child" 2>/dev/null; do
+            wait "$child"
+            code=$?
+        done
+        [ "$(cat "$PIDFILE" 2>/dev/null)" = "$child" ] && rm -f "$PIDFILE"
+        child=""
+        [ "$stopping" -eq 1 ] && break
+        if [ "$code" -eq 0 ]; then
+            note "mistarr exited cleanly; not restarting"
+            break
+        fi
+        now=$(date +%s)
+        recent=""
+        n=0
+        for t in $crashes "$now"; do
+            if [ $((now - t)) -lt "$CRASH_WINDOW" ]; then
+                recent="$recent $t"
+                n=$((n + 1))
+            fi
+        done
+        crashes="$recent"
+        if [ "$n" -ge "$CRASH_LIMIT" ]; then
+            note "mistarr crashed $n times within $CRASH_WINDOW s (last status $code); giving up"
+            break
+        fi
+        note "mistarr exited with status $code; restarting in $delay s"
+        sleep "$delay" &
+        sleeper=$!
+        wait "$sleeper"
+        sleeper=""
+        delay=$((delay * 2))
+        [ "$delay" -gt "$BACKOFF_MAX" ] && delay="$BACKOFF_MAX"
+    done
+    [ "$(cat "$SUPERFILE" 2>/dev/null)" = "$(sh -c 'echo $PPID')" ] && rm -f "$SUPERFILE"
 }
 
 start_locked() {
@@ -78,52 +171,69 @@ start_locked() {
         echo "mistarr running (pid $(cat "$PIDFILE"))"
         return 0
     fi
+    sup=$(supervisor_pid)
+    if [ -n "$sup" ]; then
+        echo "mistarr is restarting after a crash (supervisor pid $sup)"
+        return 0
+    fi
     if [ ! -x "$BIN" ]; then
         echo "mistarr binary not found at $BIN"
         return 1
     fi
-    # Either applet may be absent from the board's BusyBox; use what is there.
-    prio=""
-    command -v nice >/dev/null 2>&1 && prio="nice -n 10"
-    command -v ionice >/dev/null 2>&1 && prio="$prio ionice -c 3"
-    # shellcheck disable=SC2086
-    $prio "$BIN" </dev/null >>"$LOGFILE" 2>&1 &
-    pid=$!
-    echo "$pid" > "$PIDFILE"
-    sleep 1
-    if ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$PIDFILE"
+    (supervise) </dev/null >/dev/null 2>&1 &
+    sup=$!
+    echo "$sup" > "$SUPERFILE"
+    sleep 2
+    if ! is_running; then
+        kill "$sup" 2>/dev/null
+        rm -f "$SUPERFILE"
         echo "mistarr failed to start"
         tail -n 20 "$LOGFILE" 2>/dev/null
-        rm -f "$PIDFILE"
         return 1
     fi
-    echo "mistarr started (pid $pid)"
+    echo "mistarr started (pid $(cat "$PIDFILE"))"
 }
 
-do_stop() {
-    if ! is_running; then
-        echo "mistarr not running"
-        rm -f "$PIDFILE"
-        return 0
-    fi
-    pid=$(cat "$PIDFILE")
-    kill "$pid" 2>/dev/null
+# Waits up to $2 seconds for pid $1 to exit, then kills it outright.
+reap() {
     i=0
-    while kill -0 "$pid" 2>/dev/null; do
+    while kill -0 "$1" 2>/dev/null; do
         i=$((i + 1))
-        if [ "$i" -ge 20 ]; then
-            kill -9 "$pid" 2>/dev/null
+        if [ "$i" -ge "$2" ]; then
+            kill -9 "$1" 2>/dev/null
             break
         fi
         sleep 1
     done
-    rm -f "$PIDFILE"
-    echo "mistarr stopped"
+}
+
+do_stop() {
+    sup=$(supervisor_pid)
+    [ -n "$sup" ] && kill "$sup" 2>/dev/null
+    if is_running; then
+        pid=$(cat "$PIDFILE")
+        kill "$pid" 2>/dev/null
+        reap "$pid" 20
+        [ "$(cat "$PIDFILE" 2>/dev/null)" = "$pid" ] && rm -f "$PIDFILE"
+        stopped=1
+    else
+        stopped=0
+    fi
+    [ -n "$sup" ] && reap "$sup" 5
+    rm -f "$SUPERFILE"
+    if [ "$stopped" -eq 1 ] || [ -n "$sup" ]; then
+        echo "mistarr stopped"
+    else
+        echo "mistarr not running"
+    fi
 }
 
 do_status() {
     if is_running; then
         echo "mistarr running (pid $(cat "$PIDFILE"))"
+    elif [ -n "$(supervisor_pid)" ]; then
+        echo "mistarr not running; restarting after a crash"
     else
         echo "mistarr not running"
     fi

@@ -412,14 +412,20 @@ mod tests {
         script(
             &dir.path().join("bin"),
             "rtorrent",
-            &format!("printf '%s|' \"$@\" > '{}'; exec /bin/sleep 3", marker.display()),
+            &format!(
+                "printf '%s|' \"$@\" > '{}'; exec /bin/sleep 3",
+                marker.display()
+            ),
         );
         let rc = l.data_dir.join("rtorrent.rc");
         std::fs::create_dir_all(&l.data_dir).expect("mkdir");
         std::fs::write(&rc, format!("{RC_MARKER}\nstale\n")).expect("write");
         l.start(ClientKind::Rtorrent).expect("start");
         let args = wait_for_file(&marker);
-        let want = format!("-n|-o|system.daemon.set=true|-o|import=\"{}\"|", rc.display());
+        let want = format!(
+            "-n|-o|system.daemon.set=true|-o|import=\"{}\"|",
+            rc.display()
+        );
         assert_eq!(args, want);
         let text = std::fs::read_to_string(&rc).expect("rc");
         assert!(text.starts_with(RC_MARKER) && !text.contains("stale"));

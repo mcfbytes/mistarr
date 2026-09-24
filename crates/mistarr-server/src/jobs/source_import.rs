@@ -737,9 +737,16 @@ mod tests {
             .expect("db");
         let mut events = app.events.subscribe(None).live;
         assert_eq!(rebind_after_dat(&app).await.expect("rebind"), 0);
-        assert!(events.try_recv().is_err(), "an unchanged source is not announced");
+        assert!(
+            events.try_recv().is_err(),
+            "an unchanged source is not announced"
+        );
         let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");
-        assert_eq!(row.expect("row").state, SourceState::Unbound, "half is below 60%");
+        assert_eq!(
+            row.expect("row").state,
+            SourceState::Unbound,
+            "half is below 60%"
+        );
 
         app.db
             .write_blocking(|c| seed_rom(c, "gb", "Other Tale (USA).gb", 8, "[]"))
@@ -761,8 +768,16 @@ mod tests {
         let row = row.expect("row");
         assert_eq!(row.platform_id, Some(PlatformId("gb".into())));
         assert_eq!((row.state, row.matched_count), (SourceState::Bound, 2));
-        let kept = app.db.read(move |c| rows::get(c, other)).await.expect("get");
-        assert_eq!(kept.expect("row").state, SourceState::Unbound, "the user unbound it");
+        let kept = app
+            .db
+            .read(move |c| rows::get(c, other))
+            .await
+            .expect("get");
+        assert_eq!(
+            kept.expect("row").state,
+            SourceState::Unbound,
+            "the user unbound it"
+        );
     }
 
     #[tokio::test]

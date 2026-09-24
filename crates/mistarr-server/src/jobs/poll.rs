@@ -623,7 +623,10 @@ mod tests {
             p.record(&app, true, false).await.expect("record");
         }
         let early = tokio::time::timeout(wait, app.redetect.notified()).await;
-        assert!(early.is_err(), "re-detection before the client is unreachable");
+        assert!(
+            early.is_err(),
+            "re-detection before the client is unreachable"
+        );
         p.record(&app, true, false).await.expect("record");
         let asked = tokio::time::timeout(wait, app.redetect.notified()).await;
         assert!(asked.is_ok(), "no re-detection once unreachable");

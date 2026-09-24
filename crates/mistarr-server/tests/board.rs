@@ -259,7 +259,11 @@ async fn the_wizard_opens_until_dismissed_and_settings_keep_its_state() {
     settings["client"]["remote_path_map"] =
         serde_json::json!([{ "remote": "/downloads", "local": "staging" }]);
     let r = put(settings.to_string()).await;
-    assert_eq!(r.status, 400, "a relative local path is refused: {}", r.body);
+    assert_eq!(
+        r.status, 400,
+        "a relative local path is refused: {}",
+        r.body
+    );
     let map = serde_json::json!([
         { "remote": "/downloads", "local": "/media/fat/mistarr/staging" },
         { "remote": "C:\\Torrents", "local": "/media/fat/mistarr/staging" }
@@ -332,7 +336,10 @@ async fn start_transmission_runs_the_opt_in_service() {
     assert_eq!(body["client"]["transmission_opt_in"], true);
     assert_eq!(start("rtorrent").await.status, 400);
 
-    let slow = format!("#!/bin/sh\n/bin/sleep 1\necho \"$1\" > '{}'\n", marker.display());
+    let slow = format!(
+        "#!/bin/sh\n/bin/sleep 1\necho \"$1\" > '{}'\n",
+        marker.display()
+    );
     std::fs::write(init.join("S92transmission"), slow).expect("write");
     let (a, b) = tokio::join!(start("transmission"), start("transmission"));
     let mut codes = [a.status, b.status];
