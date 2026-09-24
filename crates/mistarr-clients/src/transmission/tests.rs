@@ -605,13 +605,9 @@ fn status_torrent(status: i64, error: i64) -> Value {
         "id": 1,
         "hashString": hash(0xd1),
         "status": status,
-        "percentDone": 0.5,
+        "leftUntilDone": 50,
         "error": error,
         "errorString": if error == 0 { "" } else { "No space left" },
-        "files": [
-            { "bytesCompleted": 100, "length": 100, "name": "test/f0.bin" },
-            { "bytesCompleted": 0, "length": 50, "name": "test/f1.bin" },
-        ],
         "fileStats": [
             { "bytesCompleted": 100, "wanted": true, "priority": 0 },
             { "bytesCompleted": 0, "wanted": 0, "priority": 0 },
@@ -645,13 +641,13 @@ async fn status_reads_per_file_progress() {
             FileProgress {
                 index: 0,
                 bytes_done: 100,
-                size: 100,
+                size: None,
                 wanted: true
             },
             FileProgress {
                 index: 1,
                 bytes_done: 0,
-                size: 50,
+                size: None,
                 wanted: false
             },
         ]
@@ -661,7 +657,18 @@ async fn status_reads_per_file_progress() {
         (st.down_rate, st.up_rate, st.is_finished),
         (2048, 512, false)
     );
-    assert!(st.file_done(0));
+    assert!(st.file_done(0, 100));
+    assert!(!st.file_done(1, 50));
+}
+
+#[test]
+fn a_finished_selection_reports_its_sizes() {
+    let mut t = status_torrent(6, 0);
+    t["leftUntilDone"] = json!(0);
+    let st = convert(t).expect("valid");
+    assert_eq!(st.files[0].size, Some(100));
+    assert!(st.files[0].is_complete());
+    assert_eq!(st.files[1].size, None);
 }
 
 #[tokio::test]
@@ -713,10 +720,7 @@ fn special_ratios_are_mapped() {
 }
 
 #[test]
-fn mismatched_file_lists_are_rejected() {
-    let mut t = status_torrent(4, 0);
-    t["fileStats"] = json!([]);
-    assert!(matches!(convert(t), Err(ClientError::Protocol(_))));
+fn bad_hashes_are_rejected() {
     let mut t = status_torrent(4, 0);
     t["hashString"] = json!("short");
     assert!(matches!(convert(t), Err(ClientError::Protocol(_))));
@@ -862,15 +866,12 @@ fn replies_parse_into_types_and_report_failures() {
 async fn status_of_a_large_torrent_reads_every_file() {
     let (fake, client) = setup().await;
     let n = 20_000u32;
-    let files: Vec<Value> = (0..n)
-        .map(|i| json!({ "name": format!("Set/Example {i:05}.bin"), "length": 4, "bytesCompleted": i % 5 }))
-        .collect();
     let stats: Vec<Value> = (0..n)
         .map(|i| json!({ "bytesCompleted": i % 5, "wanted": i % 2 == 0, "priority": 0 }))
         .collect();
     fake.push(FakeResponse::success(json!({ "torrents": [{
-        "id": 1, "hashString": hash(4), "status": 4, "percentDone": 0.5, "error": 0,
-        "errorString": "", "files": files, "fileStats": stats, "rateDownload": 0,
+        "id": 1, "hashString": hash(4), "status": 4, "leftUntilDone": 9, "error": 0,
+        "errorString": "", "fileStats": stats, "rateDownload": 0,
         "rateUpload": 0, "uploadRatio": 0.0, "isFinished": false
     }] })));
     let st = client.status(&id(4)).await.expect("status");
@@ -878,5 +879,5 @@ async fn status_of_a_large_torrent_reads_every_file() {
     assert!(st
         .file(19_999)
         .is_some_and(|f| f.bytes_done == 4 && !f.wanted));
-    assert!(st.file(4).is_some_and(FileProgress::is_complete));
+    assert!(st.file_done(4, 4) && !st.file_done(3, 4));
 }

@@ -19,15 +19,15 @@ use crate::{
     FileProgress, InfoHash, Result, SeedPolicy, TorrentSource, TorrentState, TorrentStatus,
 };
 
-/// Fields requested by [`DownloadClient::status`].
-const STATUS_FIELDS: [&str; 12] = [
+/// Fields requested by [`DownloadClient::status`]: `fileStats` without `files`, whose
+/// names would make a large torrent's reply exceed the body limit on every poll.
+const STATUS_FIELDS: [&str; 11] = [
     "id",
     "hashString",
     "status",
-    "percentDone",
+    "leftUntilDone",
     "error",
     "errorString",
-    "files",
     "fileStats",
     "rateDownload",
     "rateUpload",
@@ -547,8 +547,9 @@ struct RawTorrent {
     error: i64,
     #[serde(default)]
     error_string: String,
+    /// Bytes of the wanted files still missing; `None` when the reply leaves it out.
     #[serde(default)]
-    files: Vec<RawFile>,
+    left_until_done: Option<u64>,
     #[serde(default)]
     file_stats: Vec<RawFileStat>,
     #[serde(default)]
@@ -559,11 +560,6 @@ struct RawTorrent {
     upload_ratio: f64,
     #[serde(default)]
     is_finished: bool,
-}
-
-#[derive(Deserialize)]
-struct RawFile {
-    length: u64,
 }
 
 #[derive(Deserialize)]
@@ -613,19 +609,20 @@ impl RawTorrent {
     fn into_status(self) -> Result<TorrentStatus> {
         let infohash = InfoHash::from_hex(&self.hash_string)
             .ok_or_else(|| protocol(format!("bad hashString {:?}", self.hash_string)))?;
-        if self.files.len() != self.file_stats.len() {
-            return Err(protocol("files and fileStats differ in length"));
-        }
+        // With nothing left every wanted file is whole, so its size is what the client has.
+        let all_done = self.left_until_done == Some(0);
         let files = self
-            .files
+            .file_stats
             .into_iter()
-            .zip(self.file_stats)
             .zip(0u32..)
-            .map(|((file, stat), index)| FileProgress {
-                index,
-                bytes_done: stat.bytes_completed,
-                size: file.length,
-                wanted: stat.wanted.into_bool(),
+            .map(|(stat, index)| {
+                let wanted = stat.wanted.into_bool();
+                FileProgress {
+                    index,
+                    bytes_done: stat.bytes_completed,
+                    size: (wanted && all_done).then_some(stat.bytes_completed),
+                    wanted,
+                }
             })
             .collect();
         let state = if self.error == LOCAL_ERROR {

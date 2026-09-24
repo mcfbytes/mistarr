@@ -498,7 +498,7 @@ async fn status_reports_per_file_progress() {
     let files: Vec<(u32, u64, u64, bool)> = st
         .files
         .iter()
-        .map(|f| (f.index, f.bytes_done, f.size, f.wanted))
+        .map(|f| (f.index, f.bytes_done, f.size.unwrap_or(u64::MAX), f.wanted))
         .collect();
     assert_eq!(
         files,
@@ -509,7 +509,7 @@ async fn status_reports_per_file_progress() {
             (3, 0, 0, true)
         ]
     );
-    assert!(st.file_done(0) && !st.file_done(1));
+    assert!(st.file_done(0, 100) && !st.file_done(1, 100));
 }
 
 #[tokio::test]

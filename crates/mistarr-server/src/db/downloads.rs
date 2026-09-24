@@ -746,6 +746,8 @@ pub struct PollRow {
     pub client_id: Option<String>,
     /// The source's seed policy text.
     pub seed_policy: String,
+    /// The file's size in bytes, from the metainfo.
+    pub size: u64,
 }
 
 /// Every transferring or checking download, grouped by source.
@@ -758,7 +760,7 @@ pub fn polled(conn: &Connection) -> Result<Vec<PollRow>> {
         .prepare(
             "SELECT d.id, d.state, d.progress, d.staged_path, d.source_id, d.file_index,
                     tf.path, s.infohash, s.display_name,
-                    s.file_count = 1 AND tf.path = s.display_name, s.client_id, s.seed_policy
+                    s.file_count = 1 AND tf.path = s.display_name, s.client_id, s.seed_policy, tf.size
              FROM downloads d
              JOIN sources s ON s.id = d.source_id
              JOIN torrent_files tf ON tf.source_id = d.source_id AND tf.file_index = d.file_index
@@ -779,6 +781,7 @@ pub fn polled(conn: &Connection) -> Result<Vec<PollRow>> {
                 single_file: r.get(9)?,
                 client_id: r.get(10)?,
                 seed_policy: r.get(11)?,
+                size: u64::try_from(r.get::<_, i64>(12)?).unwrap_or(0),
             })
         })?
         .collect::<rusqlite::Result<_>>()?;

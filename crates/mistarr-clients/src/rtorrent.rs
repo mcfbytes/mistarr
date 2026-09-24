@@ -704,7 +704,7 @@ fn read_files(v: &Value) -> Result<Vec<FileProgress>> {
             Ok(FileProgress {
                 index,
                 bytes_done,
-                size,
+                size: Some(size),
                 wanted: int(priority)? > 0,
             })
         })

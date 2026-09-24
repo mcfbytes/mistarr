@@ -81,7 +81,7 @@ pub struct Seen {
 /// let row = PollRow { id: DownloadId(1), state: DownloadState::Transferring, progress: 0.0,
 ///     staged_path: None, source_id: SourceId(1), file_index: 0, path: "NES/a.nes".into(),
 ///     infohash: "ab".into(), torrent_name: "Set".into(), single_file: false,
-///     client_id: None, seed_policy: "none".into() };
+///     client_id: None, seed_policy: "none".into(), size: 4 };
 /// let p = mistarr_server::jobs::poll::staged_path(Path::new("/s"), &row);
 /// assert_eq!(p, Path::new("/s/ab/Set/NES/a.nes"));
 /// ```
@@ -115,9 +115,9 @@ fn push_relative(out: &mut PathBuf, rel: &str) {
 /// let row = PollRow { id: DownloadId(1), state: DownloadState::Transferring, progress: 0.0,
 ///     staged_path: None, source_id: SourceId(1), file_index: 0, path: "a.nes".into(),
 ///     infohash: "ab".into(), torrent_name: "a.nes".into(), single_file: true,
-///     client_id: None, seed_policy: "none".into() };
+///     client_id: None, seed_policy: "none".into(), size: 4 };
 /// let st = TorrentStatus { infohash: InfoHash::from_bytes([0; 20]), state: TorrentState::Downloading,
-///     files: vec![FileProgress { index: 0, bytes_done: 1, size: 4, wanted: true }],
+///     files: vec![FileProgress { index: 0, bytes_done: 1, size: None, wanted: true }],
 ///     ratio: 0.0, down_rate: 0, up_rate: 0, is_finished: false };
 /// let seen = mistarr_server::jobs::poll::observe(&st, &row, Path::new("/s")).unwrap();
 /// assert_eq!((seen.state, seen.progress), (DownloadState::Transferring, 0.25));
@@ -134,16 +134,17 @@ pub fn observe(status: &TorrentStatus, row: &PollRow, staging: &Path) -> Option<
         });
     }
     let file = status.file(row.file_index)?;
+    let size = file.size_or(row.size);
     // Byte counts stay far below 2^52, so the ratio is exact enough.
     #[allow(clippy::cast_precision_loss)]
-    let progress = if file.size == 0 {
+    let progress = if size == 0 {
         1.0
     } else {
-        file.bytes_done.min(file.size) as f64 / file.size as f64
+        file.bytes_done.min(size) as f64 / size as f64
     };
-    let (state, staged) = if !file.is_complete() {
+    let (state, staged) = if file.bytes_done != size {
         (DownloadState::Transferring, None)
-    } else if status.file_done(row.file_index) {
+    } else if status.file_done(row.file_index, row.size) {
         let path = staged_path(staging, row);
         (
             DownloadState::Importing,
@@ -506,6 +507,7 @@ mod tests {
             single_file: single,
             client_id: Some("cd".into()),
             seed_policy: "none".into(),
+            size: if file_index == 1 { 0 } else { 8 },
         }
     }
 
@@ -517,13 +519,13 @@ mod tests {
                 FileProgress {
                     index: 0,
                     bytes_done: done,
-                    size: 8,
+                    size: Some(8),
                     wanted: true,
                 },
                 FileProgress {
                     index: 1,
                     bytes_done: 0,
-                    size: 0,
+                    size: Some(0),
                     wanted: false,
                 },
             ],
@@ -553,6 +555,28 @@ mod tests {
         assert!(observe(&status(TorrentState::Stopped, 0), &row(5, true), staging).is_none());
         let single = row(0, true);
         assert_eq!(staged_path(staging, &single), Path::new("/st/cd/Sub/x.nes"));
+    }
+
+    #[test]
+    fn sizes_the_client_leaves_out_come_from_the_metainfo() {
+        let staging = Path::new("/st");
+        let sizeless = |state, done| {
+            let mut st = status(state, done);
+            st.files.iter_mut().for_each(|f| f.size = None);
+            st
+        };
+        let r = row(0, false);
+        let s = observe(&sizeless(TorrentState::Downloading, 2), &r, staging).expect("seen");
+        assert_eq!((s.state, s.progress), (DownloadState::Transferring, 0.25));
+        let s = observe(&sizeless(TorrentState::Downloading, 8), &r, staging).expect("seen");
+        assert_eq!(s.state, DownloadState::Importing);
+        let s = observe(&sizeless(TorrentState::Checking, 8), &r, staging).expect("seen");
+        assert_eq!(s.state, DownloadState::Checking);
+        assert!(!should_stop(
+            &sizeless(TorrentState::Seeding, 8),
+            0,
+            &SeedPolicy::None
+        ));
     }
 
     #[test]
