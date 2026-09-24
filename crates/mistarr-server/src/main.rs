@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use clap::Parser as _;
 use mistarr_server::app::{self, Options};
 use mistarr_server::cli::{Cli, Command};
-use mistarr_server::{doctor, logging, memory};
+use mistarr_server::{db, doctor, logging, memory};
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
@@ -16,6 +16,12 @@ fn main() -> anyhow::Result<()> {
     // Set before any thread starts, so every stack and heap counts against it.
     let data_limit =
         memory::limit_data(config.memory.data_limit_mib).context("cannot set the memory limit")?;
+    if matches!(cli.command(), Command::Serve) {
+        let tmp = config.paths.tmp();
+        db::prepare_temp_dir(&tmp).with_context(|| format!("cannot create {}", tmp.display()))?;
+        // The board's /tmp is RAM; set before any thread starts, as the environment is shared.
+        std::env::set_var(db::SQLITE_TMPDIR, &tmp);
+    }
     let runtime = memory::runtime().context("cannot start the async runtime")?;
 
     match cli.command() {

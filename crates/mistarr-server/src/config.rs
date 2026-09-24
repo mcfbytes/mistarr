@@ -138,6 +138,16 @@ impl PathsConfig {
         self.data.join("mistarr.db")
     }
 
+    /// Where SQLite writes its temporary files, on the data disk.
+    ///
+    /// ```
+    /// assert!(mistarr_server::config::PathsConfig::default().tmp().ends_with("tmp"));
+    /// ```
+    #[must_use]
+    pub fn tmp(&self) -> PathBuf {
+        self.data.join("tmp")
+    }
+
     /// The log file; rotated copies sit beside it as `.1` and `.2`.
     ///
     /// ```

@@ -45,6 +45,9 @@ pub struct Db {
 }
 
 struct Inner {
+    /// One permit, taken before a write reaches the blocking pool, so writers waiting
+    /// their turn hold no blocking thread and reads keep running.
+    write_turn: Arc<tokio::sync::Semaphore>,
     writer: Mutex<Connection>,
     reader: Mutex<Connection>,
     path: PathBuf,
@@ -73,6 +76,7 @@ impl Db {
         reader.pragma_update(None, "query_only", true)?;
         Ok(Self {
             inner: Arc::new(Inner {
+                write_turn: Arc::new(tokio::sync::Semaphore::new(1)),
                 writer: Mutex::new(writer),
                 reader: Mutex::new(reader),
                 path: path.to_path_buf(),
@@ -129,7 +133,7 @@ impl Db {
         f(&conn)
     }
 
-    /// [`Db::write_blocking`] on tokio's blocking pool.
+    /// [`Db::write_blocking`] on tokio's blocking pool, once no other async write is running.
     ///
     /// # Errors
     ///
@@ -139,10 +143,17 @@ impl Db {
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
-        let db = self.clone();
-        tokio::task::spawn_blocking(move || db.write_blocking(f))
+        let turn = Arc::clone(&self.inner.write_turn)
+            .acquire_owned()
             .await
-            .map_err(|e| Error::Task(e.to_string()))?
+            .map_err(|_| Error::Poisoned)?;
+        let db = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _turn = turn;
+            db.write_blocking(f)
+        })
+        .await
+        .map_err(|e| Error::Task(e.to_string()))?
     }
 
     /// [`Db::read_blocking`] on tokio's blocking pool.
@@ -160,6 +171,33 @@ impl Db {
             .await
             .map_err(|e| Error::Task(e.to_string()))?
     }
+}
+
+/// The environment variable SQLite reads for its temporary file directory.
+pub const SQLITE_TMPDIR: &str = "SQLITE_TMPDIR";
+
+/// Creates `dir` for SQLite's temporary files and removes the files a previous run left
+/// there; the caller then points [`SQLITE_TMPDIR`] at it before any connection opens.
+///
+/// # Errors
+///
+/// [`Error::Io`] when `dir` cannot be created or listed.
+///
+/// ```
+/// let dir = std::env::temp_dir().join("mistarr-doc-sqlite-tmp");
+/// mistarr_server::db::prepare_temp_dir(&dir).unwrap();
+/// assert!(dir.is_dir());
+/// ```
+pub fn prepare_temp_dir(dir: &Path) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        if entry.file_type().is_ok_and(|t| t.is_file()) {
+            if let Err(e) = std::fs::remove_file(entry.path()) {
+                tracing::warn!(error = %e, "cannot remove a stale SQLite temporary file");
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Applies the connection pragmas every connection shares; the memory-related ones are
@@ -248,10 +286,76 @@ mod tests {
     }
 
     #[test]
+    fn the_temp_dir_is_created_and_emptied_of_stale_files() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let tmp = dir.path().join("data/tmp");
+        prepare_temp_dir(&tmp).expect("create");
+        std::fs::write(tmp.join("etilqs_stale"), b"x").expect("write");
+        std::fs::create_dir(tmp.join("keep")).expect("mkdir");
+        prepare_temp_dir(&tmp).expect("clear");
+        let left: Vec<_> = std::fs::read_dir(&tmp)
+            .expect("list")
+            .flatten()
+            .map(|e| e.file_name())
+            .collect();
+        assert_eq!(left, ["keep"]);
+    }
+
+    #[test]
     fn reader_cannot_write() {
         let (_dir, db) = testutil::db();
         let r = db.read_blocking(|c| Ok(settings::set(c, "k", "v")));
         assert!(r.expect("lock").is_err());
+    }
+
+    #[test]
+    fn reads_run_while_writers_queue_behind_a_long_write() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(2)
+            .enable_time()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let (_dir, db) = testutil::db();
+            let (held, holding) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let long = tokio::spawn({
+                let db = db.clone();
+                async move {
+                    db.write(move |_| {
+                        held.send(()).ok();
+                        released.recv().ok();
+                        Ok(())
+                    })
+                    .await
+                }
+            });
+            while holding.try_recv().is_err() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let queued: Vec<_> = (0..4)
+                .map(|i| {
+                    let db = db.clone();
+                    tokio::spawn(async move {
+                        db.write(move |c| settings::set(c, "k", &i.to_string()))
+                            .await
+                    })
+                })
+                .collect();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            let read =
+                tokio::time::timeout(Duration::from_secs(5), db.read(migrate::current_version))
+                    .await;
+            assert!(
+                read.is_ok_and(|r| r.is_ok()),
+                "a read waited on queued writers"
+            );
+            release.send(()).expect("release");
+            long.await.expect("join").expect("long write");
+            for q in queued {
+                q.await.expect("join").expect("queued write");
+            }
+        });
     }
 
     #[tokio::test]
