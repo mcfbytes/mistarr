@@ -14,7 +14,7 @@ Rules for every package:
 - Every public function has a unit test. Fixtures are synthetic.
 - `cargo fmt`, `cargo clippy -D warnings`, `cargo test` green before pushing.
 - Work on branch `wp-NN-<short-name>` from `master`, push it, and stop. The
-  orchestrator reviews and merges. No pull requests.
+  orchestrator opens the pull request, reviews it and merges it.
 - Comments two lines maximum, no history in files, Rust practices from
   CLAUDE.md.
 
@@ -85,7 +85,7 @@ WP-20, which can start any time after their dependencies.
 
 ## Review and merge
 
-When a branch is pushed the orchestrator runs a code review at high effort,
-applies or requests fixes, re-runs the commands in CLAUDE.md, and merges
-into `master` with a merge commit. Findings outside the package's scope
+When a branch is pushed the orchestrator opens a pull request, runs a code
+review at high effort, applies or requests fixes, and merges the pull request
+with a merge commit once CI is green. Findings outside the package's scope
 become new work-plan rows, not scope extensions.
