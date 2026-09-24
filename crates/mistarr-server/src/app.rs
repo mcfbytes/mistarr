@@ -26,6 +26,10 @@ pub struct Options {
     pub corename_poll: Duration,
     /// How often each SSE connection receives an unsolicited `status`.
     pub status_interval: Duration,
+    /// How often `dats/` is listed.
+    pub dats_poll: Duration,
+    /// How old a file's mtime must be before it is imported.
+    pub dats_min_age: Duration,
 }
 
 impl Default for Options {
@@ -34,6 +38,8 @@ impl Default for Options {
             corename_path: PathBuf::from(mistarr_mister::CORENAME_PATH),
             corename_poll: Duration::from_secs(2),
             status_interval: Duration::from_secs(30),
+            dats_poll: Duration::from_secs(10),
+            dats_min_age: Duration::from_secs(2),
         }
     }
 }
@@ -215,6 +221,9 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     }));
     tasks.push(tokio::spawn(publish_gate_changes(Arc::clone(&app))));
     Scheduler::start(&app);
+    tasks.push(tokio::spawn(crate::jobs::dat_import::watch(Arc::clone(
+        &app,
+    ))));
 
     let listener = tokio::net::TcpListener::bind(app.config().server.listen.as_str()).await?;
     let addr = listener.local_addr()?;

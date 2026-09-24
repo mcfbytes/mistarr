@@ -46,6 +46,8 @@ pub struct Platform {
     pub verify_on_board: bool,
     /// `.rbf` core names that load this platform, besides [`Platform::core_dir`].
     pub core_names: &'static [&'static str],
+    /// The libretro playlist name that thumbnail URLs are built from.
+    pub libretro_playlist: &'static str,
 }
 
 impl Platform {
@@ -74,6 +76,7 @@ const CART: Platform = Platform {
     bios: None,
     verify_on_board: false,
     core_names: &[],
+    libretro_playlist: "",
 };
 
 const DISC: Platform = Platform {
@@ -87,6 +90,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "nes",
         name: "Nintendo Entertainment System",
+        libretro_playlist: "Nintendo - Nintendo Entertainment System",
         core_dir: "NES",
         extension_written: Some("nes"),
         load_extensions: &["nes"],
@@ -97,6 +101,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "fds",
         name: "Famicom Disk System",
+        libretro_playlist: "Nintendo - Family Computer Disk System",
         core_dir: "NES",
         extension_written: Some("fds"),
         load_extensions: &["fds"],
@@ -107,6 +112,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "snes",
         name: "Super Nintendo Entertainment System",
+        libretro_playlist: "Nintendo - Super Nintendo Entertainment System",
         core_dir: "SNES",
         extension_written: Some("sfc"),
         load_extensions: &["sfc", "smc"],
@@ -121,6 +127,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "n64",
         name: "Nintendo 64",
+        libretro_playlist: "Nintendo - Nintendo 64",
         core_dir: "N64",
         extension_written: Some("z64"),
         load_extensions: &["z64", "v64", "n64"],
@@ -131,6 +138,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "gb",
         name: "Game Boy",
+        libretro_playlist: "Nintendo - Game Boy",
         core_dir: "GAMEBOY",
         extension_written: Some("gb"),
         load_extensions: &["gb"],
@@ -141,6 +149,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "gbc",
         name: "Game Boy Color",
+        libretro_playlist: "Nintendo - Game Boy Color",
         core_dir: "GAMEBOY",
         extension_written: Some("gbc"),
         load_extensions: &["gbc"],
@@ -151,6 +160,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "gba",
         name: "Game Boy Advance",
+        libretro_playlist: "Nintendo - Game Boy Advance",
         core_dir: "GBA",
         extension_written: Some("gba"),
         load_extensions: &["gba"],
@@ -160,6 +170,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "megadrive",
         name: "Mega Drive - Genesis",
+        libretro_playlist: "Sega - Mega Drive - Genesis",
         core_dir: "Genesis",
         legacy_dirs: &["MegaDrive"],
         extension_written: Some("md"),
@@ -171,6 +182,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "s32x",
         name: "32X",
+        libretro_playlist: "Sega - 32X",
         core_dir: "S32X",
         extension_written: Some("32x"),
         load_extensions: &["32x"],
@@ -180,6 +192,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "sms",
         name: "Master System - Mark III",
+        libretro_playlist: "Sega - Master System - Mark III",
         core_dir: "SMS",
         extension_written: Some("sms"),
         load_extensions: &["sms"],
@@ -189,6 +202,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "gg",
         name: "Game Gear",
+        libretro_playlist: "Sega - Game Gear",
         core_dir: "SMS",
         extension_written: Some("gg"),
         load_extensions: &["gg"],
@@ -198,6 +212,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "sg1000",
         name: "SG-1000",
+        libretro_playlist: "Sega - SG-1000",
         core_dir: "SG1000",
         extension_written: Some("sg"),
         load_extensions: &["sg"],
@@ -207,6 +222,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "pce",
         name: "PC Engine - TurboGrafx-16",
+        libretro_playlist: "NEC - PC Engine - TurboGrafx 16",
         core_dir: "TGFX16",
         extension_written: Some("pce"),
         load_extensions: &["pce"],
@@ -217,6 +233,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "sgx",
         name: "SuperGrafx",
+        libretro_playlist: "NEC - PC Engine SuperGrafx",
         core_dir: "TGFX16",
         extension_written: Some("sgx"),
         load_extensions: &["sgx"],
@@ -227,6 +244,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "atari2600",
         name: "Atari 2600",
+        libretro_playlist: "Atari - 2600",
         core_dir: "Atari2600",
         extension_written: Some("a26"),
         load_extensions: &["a26"],
@@ -236,6 +254,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "atari5200",
         name: "Atari 5200",
+        libretro_playlist: "Atari - 5200",
         core_dir: "Atari5200",
         extension_written: Some("a52"),
         load_extensions: &["a52"],
@@ -245,6 +264,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "atari7800",
         name: "Atari 7800",
+        libretro_playlist: "Atari - 7800",
         core_dir: "Atari7800",
         extension_written: Some("a78"),
         load_extensions: &["a78"],
@@ -255,6 +275,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "lynx",
         name: "Atari Lynx",
+        libretro_playlist: "Atari - Lynx",
         core_dir: "AtariLynx",
         extension_written: Some("lnx"),
         load_extensions: &["lnx"],
@@ -265,6 +286,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "coleco",
         name: "ColecoVision",
+        libretro_playlist: "Coleco - ColecoVision",
         core_dir: "Coleco",
         extension_written: Some("col"),
         load_extensions: &["col"],
@@ -276,6 +298,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "intv",
         name: "Intellivision",
+        libretro_playlist: "Mattel - Intellivision",
         core_dir: "Intellivision",
         extension_written: Some("int"),
         load_extensions: &["int"],
@@ -286,6 +309,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "ws",
         name: "WonderSwan",
+        libretro_playlist: "Bandai - WonderSwan",
         core_dir: "WonderSwan",
         extension_written: Some("ws"),
         load_extensions: &["ws"],
@@ -295,6 +319,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "wsc",
         name: "WonderSwan Color",
+        libretro_playlist: "Bandai - WonderSwan Color",
         core_dir: "WonderSwan",
         extension_written: Some("wsc"),
         load_extensions: &["wsc"],
@@ -304,6 +329,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "ngp",
         name: "Neo Geo Pocket",
+        libretro_playlist: "SNK - Neo Geo Pocket",
         core_dir: "NGP",
         extension_written: Some("ngp"),
         load_extensions: &["ngp", "ngc"],
@@ -314,6 +340,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "vectrex",
         name: "Vectrex",
+        libretro_playlist: "GCE - Vectrex",
         core_dir: "Vectrex",
         extension_written: Some("vec"),
         load_extensions: &["vec"],
@@ -323,6 +350,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "pokemini",
         name: "Pokemon Mini",
+        libretro_playlist: "Nintendo - Pokemon Mini",
         core_dir: "PokemonMini",
         extension_written: Some("min"),
         load_extensions: &["min"],
@@ -332,6 +360,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "sv",
         name: "Supervision",
+        libretro_playlist: "Watara - Supervision",
         core_dir: "SuperVision",
         extension_written: Some("sv"),
         load_extensions: &["sv"],
@@ -341,6 +370,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "psx",
         name: "PlayStation",
+        libretro_playlist: "Sony - PlayStation",
         core_dir: "PSX",
         dat_name_patterns: &["playstation$"],
         bios: Some("boot.rom"),
@@ -349,6 +379,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "saturn",
         name: "Sega Saturn",
+        libretro_playlist: "Sega - Saturn",
         core_dir: "Saturn",
         dat_name_patterns: &["sega saturn"],
         bios: Some("boot.rom"),
@@ -357,6 +388,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "megacd",
         name: "Mega CD - Sega CD",
+        libretro_playlist: "Sega - Mega-CD - Sega CD",
         core_dir: "MegaCD",
         dat_name_patterns: &["mega cd sega cd"],
         bios: Some("cd_bios.rom"),
@@ -365,6 +397,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "pcecd",
         name: "PC Engine CD - TurboGrafx-CD",
+        libretro_playlist: "NEC - PC Engine CD - TurboGrafx-CD",
         core_dir: "TGFX16-CD",
         dat_name_patterns: &["pc engine cd turbografx cd"],
         bios: Some("cd_bios.rom"),
@@ -374,6 +407,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "neocd",
         name: "Neo Geo CD",
+        libretro_playlist: "SNK - Neo Geo CD",
         core_dir: "NeoGeo-CD",
         dat_name_patterns: &["neo geo cd"],
         bios: Some("top-sp1.bin"),
@@ -384,6 +418,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "neogeo",
         name: "Neo Geo",
+        libretro_playlist: "SNK - Neo Geo",
         core_dir: "NeoGeo",
         kind: Kind::Romset,
         load_extensions: &["zip"],
@@ -394,6 +429,7 @@ pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "arcade",
         name: "Arcade",
+        libretro_playlist: "MAME",
         core_dir: "mame",
         kind: Kind::Arcade,
         load_extensions: &["zip"],
@@ -513,6 +549,7 @@ mod tests {
             assert!(!p.dat_name_patterns.is_empty(), "{}", p.id);
             assert!(!p.load_extensions.is_empty(), "{}", p.id);
             assert!(PLATFORMS[i + 1..].iter().all(|q| q.id != p.id), "{}", p.id);
+            assert!(!p.libretro_playlist.is_empty(), "{}", p.id);
             assert!(
                 ["none", "ines", "smc", "a78", "lnx", "n64"].contains(&p.header_rule),
                 "{}",

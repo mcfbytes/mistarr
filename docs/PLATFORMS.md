@@ -72,6 +72,31 @@ never zipped. CHD is accepted on scan but not produced.
 | `neogeo` | `Neo Geo` | `NeoGeo` | Cartridge games are romsets: a directory or zip per game whose internal layout the core expects, described by a `romsets.xml` the core ships. The adapter treats the DAT `<game>` as the unit, places the zip whole, and verifies member hashes against the DAT rather than the zip's own hash. A staged directory is placed whole as a directory. Needs BIOS `000-lo.lo`, `sfix.sfix`, `sp-s2.sp1`: report only. |
 | `arcade` | `MAME`, `Arcade` | `mame` (under `games/`) with MRAs in `_Arcade` | Wanted list is derived from MRA files: each MRA names the zips it needs. The adapter parses every MRA, lists missing zips, and places zips whole. Verification uses the MRA's `md5` where present and the loaded MAME DAT otherwise. No romset rebuilding, merging or splitting. A staged directory is zipped under the set name. |
 
+## Thumbnail playlists
+
+Art URLs (API.md "Art URLs") use the libretro playlist name of the platform,
+the `libretro_playlist` column of the table in `mistarr-mister`.
+
+| id | playlist | id | playlist |
+|---|---|---|---|
+| `nes` | Nintendo - Nintendo Entertainment System | `atari7800` | Atari - 7800 |
+| `fds` | Nintendo - Family Computer Disk System | `lynx` | Atari - Lynx |
+| `snes` | Nintendo - Super Nintendo Entertainment System | `coleco` | Coleco - ColecoVision |
+| `n64` | Nintendo - Nintendo 64 | `intv` | Mattel - Intellivision |
+| `gb` | Nintendo - Game Boy | `ws` | Bandai - WonderSwan |
+| `gbc` | Nintendo - Game Boy Color | `wsc` | Bandai - WonderSwan Color |
+| `gba` | Nintendo - Game Boy Advance | `ngp` | SNK - Neo Geo Pocket |
+| `megadrive` | Sega - Mega Drive - Genesis | `vectrex` | GCE - Vectrex |
+| `s32x` | Sega - 32X | `pokemini` | Nintendo - Pokemon Mini |
+| `sms` | Sega - Master System - Mark III | `sv` | Watara - Supervision |
+| `gg` | Sega - Game Gear | `psx` | Sony - PlayStation |
+| `sg1000` | Sega - SG-1000 | `saturn` | Sega - Saturn |
+| `pce` | NEC - PC Engine - TurboGrafx 16 | `megacd` | Sega - Mega-CD - Sega CD |
+| `sgx` | NEC - PC Engine SuperGrafx | `pcecd` | NEC - PC Engine CD - TurboGrafx-CD |
+| `atari2600` | Atari - 2600 | `neocd` | SNK - Neo Geo CD |
+| `atari5200` | Atari - 5200 | `neogeo` | SNK - Neo Geo |
+| | | `arcade` | MAME |
+
 ## Computers
 
 Computer cores use disk and tape images with TOSEC-style DATs and inconsistent

@@ -15,6 +15,7 @@ use crate::config::{RuntimeSettings, SettingsPatch};
 use crate::db::jobs::{self, JobRow};
 use crate::db::settings::{self, keys};
 use crate::db::system::wizard_counts;
+use crate::jobs::dat_import::Recompute;
 use crate::jobs::detect_client::DetectClient;
 use crate::jobs::gate::Override;
 use crate::jobs::Scheduler;
@@ -96,9 +97,13 @@ async fn put_settings(
 ) -> Result<Json<RuntimeSettings>, ApiError> {
     let patch: SettingsPatch =
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let prefs_before = app.config().prefs;
     let (runtime, client_changed) = app.update_settings(&patch).await?;
     if client_changed {
         Scheduler::enqueue(&app, Arc::new(DetectClient)).await?;
+    }
+    if runtime.prefs != prefs_before {
+        Recompute::enqueue_all(&app).await?;
     }
     Ok(Json(runtime))
 }

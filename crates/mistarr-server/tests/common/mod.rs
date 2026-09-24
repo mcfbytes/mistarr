@@ -50,6 +50,8 @@ pub fn options_in(dir: &Path) -> Options {
         corename_path: dir.join("CORENAME"),
         corename_poll: Duration::from_millis(20),
         status_interval: Duration::from_secs(3600),
+        dats_poll: Duration::from_millis(50),
+        dats_min_age: Duration::ZERO,
     }
 }
 

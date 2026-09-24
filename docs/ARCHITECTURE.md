@@ -105,19 +105,26 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 
 ### DAT import
 
-1. A file appears in `dats/`. Accept `.dat`, `.xml`, and `.zip` containing
-   either. Parse Logiqx `<datafile>` with `quick-xml`. Reject anything else and
-   move it to `dats/rejected/` with a reason file.
+1. A file appears in `dats/`. The watcher lists the directory every 10 s and
+   enqueues an import once the file's mtime is 2 s old and its size held
+   between two listings. Accept `.dat`, `.xml`, and `.zip` containing either;
+   each member of a zip is a separate DAT. Parse Logiqx `<datafile>` with
+   `quick-xml`, streaming, one transaction per DAT. Reject anything else and
+   move it to `dats/rejected/` with a `<name>.reason.txt` beside it.
 2. Identify the platform from the DAT header name using the table in
-   PLATFORMS.md. Unknown DAT names are stored as an unbound platform the user
-   can map in the UI.
+   PLATFORMS.md, falling back to the platform an earlier version of the same
+   name was bound to. Unknown DAT names are stored as an unbound
+   `dat_versions` row the user can bind in the UI; binding re-reads the file
+   from `dats/loaded/` and loads its titles.
 3. Upsert `dat_versions`, then `titles` and `roms`. A newer version of the same
    DAT name supersedes the old one: entries not present in the new DAT are
    marked `retired`, never deleted, so verified files keep their provenance.
 4. Parent/clone data is read from `cloneof` attributes when present. When
    absent, clone groups are inferred by normalising the name (strip region,
    revision, language and flag tags) so 1G1R still works with plain DATs.
-5. Move the file to `dats/loaded/` and emit `dat.loaded` on the event bus.
+5. Recompute the platform's 1G1R picks, move the file to `dats/loaded/` and
+   emit `dat.loaded` on the event bus. Changing `prefs` recomputes the picks
+   of every platform.
 
 ### Library scan
 
