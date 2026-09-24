@@ -82,8 +82,8 @@ unbound.
 |---|---|---|
 | GET | `/platforms/{id}/titles` | Rows from `title_groups`. Filters: `q`, `have` (yes/no/any), `wanted`, `region`, `flags`, `sort` (name/have/recent). |
 | GET | `/titles/{id}` | The group: every variant with its roms, file states, available torrent_files, the 1G1R pick and its art URL. |
-| POST | `/titles/{id}/want` | Mark the 1G1R pick wanted, or a specific variant with `{ variant_id }`. |
-| DELETE | `/titles/{id}/want` | Unmark. Cancels a not-yet-started download. |
+| POST | `/titles/{id}/want` | Mark the 1G1R pick wanted, or a specific variant with `{ variant_id }`, and create its downloads. |
+| DELETE | `/titles/{id}/want` | Unmark. Cancels the group's downloads that are not importing or finished. |
 | POST | `/titles/{id}/rename` | Apply the canonical name to a `misnamed` file. |
 
 Browse filters: `q` is a case-insensitive substring of the base name; `have`
@@ -155,7 +155,8 @@ stays disabled when rebound. The answer is the updated item.
 
 `DELETE /sources/{id}` answers 204. It removes the torrent from the client
 without deleting data; a client that does not answer is a 502 and the source
-is kept. A source with downloads is a 400.
+is kept. A source with a download that is queued, transferring, checking or
+importing is a 400; its other downloads are kept with `source_id` `null`.
 
 `/sources/{id}/files` items: `{ file_index, path, size, rom_id, rom_name,
 title_id, confidence }`, where `path` is inside the torrent and `confidence`
@@ -169,6 +170,25 @@ is `"name"`, `"size"` or `null` when no rom matched.
 | POST | `/downloads/{id}/retry` | `failed` back to `queued`. |
 | DELETE | `/downloads/{id}` | Cancel. |
 | GET | `/imports` | import_log, newest first. |
+
+`/downloads` items, most recently changed first: `{ id, title_id,
+title_name, platform_id, rom_id, rom_name, size, source_id, file_index,
+state, progress, staged_path, error, created_at, updated_at }`. `state` is
+one of `docs/DATA-MODEL.md` "downloads.state"; `progress` runs from 0 to 1;
+`source_id` and `file_index` are `null` while `wanted`. `?state=` takes one
+state or a comma list; an unknown name is a 400.
+
+`retry` and `DELETE` answer the updated item. `retry` is a 409 `conflict`
+unless the download is `failed`, or while another download of the same rom
+is open. `DELETE` is a 409 for a download that is importing or finished; a
+started download is also deselected in the client. Both are 404 for an
+unknown id.
+
+`POST /titles/{id}/want` creates one download per live rom of the variant
+that has no verified file and no open download, `queued` on the best
+torrent_file of a bound source (exact size first, then a name match, then
+the source with fewer open downloads, then the lowest source id) or
+`wanted` when no bound source has it, and emits `download.changed` for each.
 
 ## Events
 

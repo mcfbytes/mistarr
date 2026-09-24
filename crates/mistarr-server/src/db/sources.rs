@@ -492,23 +492,25 @@ pub fn files(
     Ok((rows, total))
 }
 
-/// Deletes a source and, by cascade, its files. Returns whether it existed.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure, including downloads still referring to it.
-pub fn delete(conn: &Connection, id: SourceId) -> Result<bool> {
-    Ok(conn.execute("DELETE FROM sources WHERE id = ?1", [id.0])? > 0)
-}
-
-/// Downloads that refer to the source.
+/// Deletes a source and, by cascade, its files. Its downloads keep their rows
+/// with `source_id` NULL. Returns whether it existed.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn download_count(conn: &Connection, id: SourceId) -> Result<u64> {
+pub fn delete(conn: &Connection, id: SourceId) -> Result<bool> {
+    Ok(conn.execute("DELETE FROM sources WHERE id = ?1", [id.0])? > 0)
+}
+
+/// Downloads of the source that are queued, transferring, checking or importing.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn open_download_count(conn: &Connection, id: SourceId) -> Result<u64> {
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM downloads WHERE source_id = ?1",
+        "SELECT COUNT(*) FROM downloads WHERE source_id = ?1
+           AND state IN ('queued', 'transferring', 'checking', 'importing')",
         [id.0],
         |r| uint(r, 0),
     )?)
@@ -765,7 +767,7 @@ mod tests {
         assert_eq!(torrent_files(&c, id).expect("list"), list);
         replace_files(&c, id, &list[..1]).expect("replace");
         assert_eq!(get(&c, id).expect("get").expect("row").matched_count, 0);
-        assert_eq!(download_count(&c, id).expect("downloads"), 0);
+        assert_eq!(open_download_count(&c, id).expect("downloads"), 0);
         assert!(delete(&c, id).expect("delete"));
         assert!(!delete(&c, id).expect("delete again"));
         assert_eq!(files(&c, id, 10, 0).expect("files").1, 0);

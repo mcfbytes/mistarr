@@ -359,12 +359,7 @@ async fn wizard_and_jobs_report_state() {
 async fn unimplemented_routes_answer_501_and_unknown_ones_404() {
     let booted = boot().await;
     let addr = booted.addr();
-    for (method, path) in [
-        ("GET", "/api/v1/downloads"),
-        ("POST", "/api/v1/downloads/1/retry"),
-        ("DELETE", "/api/v1/downloads/1"),
-        ("GET", "/api/v1/imports"),
-    ] {
+    for (method, path) in [("GET", "/api/v1/imports")] {
         let r = request(addr, method, path, &[], Some("{}")).await;
         assert_eq!(r.status, 501, "{method} {path}");
         assert_eq!(r.json()["error"]["code"], "not_implemented");
