@@ -75,21 +75,25 @@ parallel on the work packages in `docs/WORKPLAN.md`. Read this file, then
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --workspace
-(cd web && npm ci && npm run build && npm run check)
+(cd web && npm ci && npm run check && npm run lint && npm run build && npm run size)
+(cd web && npm run e2e)
+sh scripts/tests/run.sh && sh scripts/principles-gate.sh
 cargo zigbuild --release --target armv7-unknown-linux-musleabihf -p mistarr-server
 ```
 
-The first four must pass before a push. The fifth must pass for any change
-that adds a dependency.
+Everything but `cargo zigbuild` must pass before a push, and CI enforces
+most of it. `cargo zigbuild` must pass for any change that adds a dependency.
 
 ## Branch workflow
 
-There are no pull requests. Each work package is developed on a branch named
-`wp-NN-<short-name>` from `master`. When the package meets its acceptance
-criteria and the commands above pass, the agent pushes the branch and stops.
-The orchestrating session runs a code review on the branch, fixes or sends
-back what the review finds, and merges into `master`. Agents never merge,
-never push to `master`, and never rewrite another branch's history.
+Every change reaches `master` through a pull request. Each work package is
+developed on a branch named `wp-NN-<short-name>` from `master`. When the
+package meets its acceptance criteria and the commands above pass, the agent
+pushes the branch and stops. The orchestrating session opens the pull request,
+runs a code review, fixes or sends back what the review finds, and merges the
+pull request with a merge commit once CI is green. Agents never open or merge
+pull requests, never push to `master`, and never rewrite another branch's
+history.
 
 Commit messages: an imperative subject line under 60 characters, a body that
 says what and why, no session narration. End with the attribution trailer
