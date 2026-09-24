@@ -561,9 +561,9 @@ pub fn guess_platform<'a>(
     names: impl IntoIterator<Item = &'a str>,
     dirs: impl IntoIterator<Item = (&'a str, usize)>,
 ) -> Option<&'static Platform> {
-    let named: Vec<&'static Platform> = names.into_iter().filter_map(bind_dat_name).collect();
-    if !named.is_empty() {
-        return unanimous(&named);
+    let from_names: Vec<&'static Platform> = names.into_iter().filter_map(bind_dat_name).collect();
+    if !from_names.is_empty() {
+        return unanimous(&from_names);
     }
     let matched: Vec<(usize, &'static Platform)> = dirs
         .into_iter()

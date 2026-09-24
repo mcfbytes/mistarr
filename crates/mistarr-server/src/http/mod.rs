@@ -49,7 +49,10 @@ pub fn router(app: Arc<AppState>) -> Router {
         .merge(stubs::routes())
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
-        .layer(middleware::from_fn(refuse_cross_site))
+        .layer(middleware::from_fn_with_state(
+            Arc::new(HostAllowlist::for_board(&app.config().server.allowed_hosts)),
+            refuse_cross_site,
+        ))
         .layer(middleware::from_fn_with_state(key, require_key));
     Router::new()
         .nest("/api/v1", api)
@@ -220,20 +223,105 @@ async fn require_key(
     }
 }
 
+/// The `Host` names a state-changing request may address, against DNS
+/// rebinding: IP literals, `localhost`, `*.local`, `*.lan`, the board's own
+/// host name and the configured `server.allowed_hosts`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HostAllowlist {
+    exact: Vec<String>,
+    suffixes: Vec<String>,
+}
+
+impl HostAllowlist {
+    /// The built-in names plus `hostname` and `extra`; a `*.name` entry allows subdomains.
+    ///
+    /// ```
+    /// use mistarr_server::http::HostAllowlist;
+    /// let allow = HostAllowlist::new(Some("mister"), &["*.home.arpa".to_owned()]);
+    /// assert!(allow.allows("MiSTer:8420") && allow.allows("192.168.1.9:8420"));
+    /// assert!(allow.allows("nas.home.arpa") && !allow.allows("evil.example"));
+    /// ```
+    #[must_use]
+    pub fn new(hostname: Option<&str>, extra: &[String]) -> Self {
+        let mut allow = Self {
+            exact: vec!["localhost".to_owned()],
+            suffixes: vec![".local".to_owned(), ".lan".to_owned(), ".localhost".to_owned()],
+        };
+        for name in hostname.into_iter().chain(extra.iter().map(String::as_str)) {
+            let name = name.trim().trim_end_matches('.').to_ascii_lowercase();
+            match name.strip_prefix('*') {
+                Some(suffix) if suffix.starts_with('.') => allow.suffixes.push(suffix.to_owned()),
+                _ if !name.is_empty() => allow.exact.push(name),
+                _ => {}
+            }
+        }
+        allow
+    }
+
+    /// [`HostAllowlist::new`] with this machine's host name.
+    ///
+    /// ```
+    /// let allow = mistarr_server::http::HostAllowlist::for_board(&[]);
+    /// assert!(allow.allows("localhost"));
+    /// ```
+    #[must_use]
+    pub fn for_board(extra: &[String]) -> Self {
+        let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").ok();
+        Self::new(hostname.as_deref(), extra)
+    }
+
+    /// True when a `Host` header value, with or without a port, is allowed.
+    ///
+    /// ```
+    /// let allow = mistarr_server::http::HostAllowlist::new(None, &[]);
+    /// assert!(allow.allows("[::1]:8420") && !allow.allows("example.com"));
+    /// ```
+    #[must_use]
+    pub fn allows(&self, host: &str) -> bool {
+        let host = host.trim();
+        let name = if let Some(rest) = host.strip_prefix('[') {
+            rest.split_once(']').map_or(rest, |(ip, _)| ip)
+        } else {
+            match host.rsplit_once(':') {
+                Some((name, port))
+                    if !name.contains(':') && port.bytes().all(|b| b.is_ascii_digit()) =>
+                {
+                    name
+                }
+                _ => host,
+            }
+        };
+        let name = name.trim_end_matches('.').to_ascii_lowercase();
+        name.parse::<std::net::IpAddr>().is_ok()
+            || self.exact.contains(&name)
+            || self
+                .suffixes
+                .iter()
+                .any(|s| name.len() > s.len() && name.ends_with(s.as_str()))
+    }
+}
+
 /// Refuses state-changing requests another site could have sent; see `docs/API.md`.
-async fn refuse_cross_site(req: Request, next: Next) -> Response {
+async fn refuse_cross_site(
+    State(allow): State<Arc<HostAllowlist>>,
+    req: Request,
+    next: Next,
+) -> Response {
     if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
         return next.run(req).await;
     }
-    match cross_site(req.headers()) {
+    match cross_site(req.headers(), &allow) {
         None => next.run(req).await,
         Some(message) => ApiError::new(StatusCode::FORBIDDEN, "forbidden", message).into_response(),
     }
 }
 
 /// Why a state-changing request with these headers is refused, or `None` to allow it.
-fn cross_site(headers: &HeaderMap) -> Option<&'static str> {
+fn cross_site(headers: &HeaderMap, allow: &HostAllowlist) -> Option<&'static str> {
     let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    if !get("host").is_some_and(|h| allow.allows(h)) {
+        return Some("the request's Host is not a name this server answers to");
+    }
     if get("sec-fetch-site").is_some_and(|v| v.eq_ignore_ascii_case("cross-site")) {
         return Some("requests from another site are refused");
     }
@@ -290,6 +378,43 @@ mod tests {
             h.insert(*k, v.parse().expect("value"));
         }
         h
+    }
+
+    fn cross_site(h: &HeaderMap) -> Option<&'static str> {
+        super::cross_site(h, &HostAllowlist::new(Some("board"), &["b".to_owned()]))
+    }
+
+    #[test]
+    fn hosts_outside_the_allowlist_are_refused() {
+        let extra = ["nas.example".to_owned(), "*.home.arpa".to_owned()];
+        let allow = HostAllowlist::new(Some("mister\n"), &extra);
+        for ok in [
+            "127.0.0.1",
+            "10.0.0.5:8420",
+            "[::1]:8420",
+            "::1",
+            "localhost:8420",
+            "MiSTer.local",
+            "mister.lan:80",
+            "MISTER:8420",
+            "nas.example",
+            "a.home.arpa",
+            "mister.",
+        ] {
+            assert!(allow.allows(ok), "{ok}");
+        }
+        for bad in [
+            "evil.example",
+            "local",
+            ".lan",
+            "home.arpa",
+            "",
+            "mister.evil.example",
+        ] {
+            assert!(!allow.allows(bad), "{bad}");
+        }
+        let rebound = [("host", "evil.example:8420"), ("x-mistarr", "1")];
+        assert!(cross_site(&headers(&rebound)).is_some());
     }
 
     #[test]

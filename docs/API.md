@@ -7,8 +7,12 @@ Every API request other than `GET`, `HEAD` and `OPTIONS` must also come from
 the SPA's own origin: it needs the header `X-Mistarr: 1`, which the SPA
 sends on every request and a page on another site cannot set without a
 preflight, and it is refused when `Sec-Fetch-Site` is `cross-site` or an
-`Origin` header is present and does not name the request's `Host`. Refused
-requests answer 403 `forbidden`, checked after the API key. All
+`Origin` header is present and does not name the request's `Host`. Against
+DNS rebinding, its `Host` must also be an IP literal, `localhost`, a name
+ending in `.local`, `.lan` or `.localhost`, the board's own host name, or a
+name in `server.allowed_hosts`, where `*.name` allows every subdomain; any
+port is ignored. Refused requests answer 403 `forbidden`, checked after the
+API key. `GET`, `HEAD` and `OPTIONS` are not checked. All
 list endpoints take `?limit=&offset=` (default 100, capped at 1000) and return
 `{ items: [...], total: n }`. Errors are `{ error: { code, message } }` with an
 appropriate status; codes are `bad_request`, `unauthorized`, `forbidden`,
@@ -94,8 +98,9 @@ the 1G1R fields of `prefs` recomputes the picks; changing `prefs.launch`
 publishes `status`; saving never touches the wizard's state.
 
 `/system/client/start` is a 409 `conflict` while a detected client answers,
-a 400 when `kind` is not installed, and a 500 `internal` naming the failure
-when its start command fails. Otherwise it starts the client as
+a 409 `busy` while another start is running, a 400 when `kind` is not
+installed, and a 500 `internal` naming the failure when its start command
+fails, runs for more than 30 seconds, or, for rtorrent, exits at once. Otherwise it starts the client as
 DOWNLOAD-CLIENTS.md "Starting a stopped client" describes, detects again
 every second for up to ten seconds until the client answers, and returns the
 status body, whose `client` says whether it did.

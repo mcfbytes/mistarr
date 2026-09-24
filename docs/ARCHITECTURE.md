@@ -371,6 +371,7 @@ shutdown is left `queued` for this.
 [server]
 listen = "0.0.0.0:8420"
 api_key = ""                 # empty means LAN-open, like the *arr default
+allowed_hosts = []           # extra Host names for writes, e.g. ["nas.example", "*.home.arpa"]
 
 [paths]
 root      = "/media/fat"

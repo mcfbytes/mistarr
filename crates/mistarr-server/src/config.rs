@@ -74,6 +74,9 @@ pub struct ServerConfig {
     pub listen: String,
     /// Value required in `X-Api-Key`; empty leaves the API open on the LAN.
     pub api_key: String,
+    /// Host names, beyond the built-in ones, that state-changing requests may
+    /// address; `*.name` allows every subdomain. See `docs/API.md`.
+    pub allowed_hosts: Vec<String>,
 }
 
 impl Default for ServerConfig {
@@ -81,6 +84,7 @@ impl Default for ServerConfig {
         Self {
             listen: "0.0.0.0:8420".to_owned(),
             api_key: String::new(),
+            allowed_hosts: Vec::new(),
         }
     }
 }
