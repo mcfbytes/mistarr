@@ -185,12 +185,12 @@ fn exists() -> FakeResponse {
     FakeResponse::success(json!({ "torrents": [{ "id": 1 }] }))
 }
 
-/// The replies to a fresh add with seed policy `none`, then start.
+/// The replies to a fresh add with seed policy `none`, which keeps the
+/// session default and so needs no `torrent-set`, then start.
 fn push_add(fake: &FakeServer, hash: &str) {
     fake.push(FakeResponse::success(json!({
         "torrent-added": { "id": 1, "name": SET, "hashString": hash }
     })));
-    fake.push(ok());
     fake.push(exists());
     fake.push(ok());
 }
@@ -211,9 +211,11 @@ fn status(hash: &str, code: i64, done: [u64; 4], error: i64) -> FakeResponse {
         .iter()
         .map(|(n, len)| json!({ "name": format!("{SET}/NES/{n}"), "length": len }))
         .collect();
+    // The readme (index 1) and the third rom are never selected in these tests.
     let stats: Vec<Value> = done
         .iter()
-        .map(|d| json!({ "bytesCompleted": d, "wanted": true }))
+        .zip(0..)
+        .map(|(d, i)| json!({ "bytesCompleted": d, "wanted": i % 2 == 0 && i < 3 }))
         .collect();
     FakeResponse::success(json!({ "torrents": [{
         "id": 1, "hashString": hash, "status": code, "percentDone": 0.0,
@@ -248,7 +250,7 @@ async fn want_adds_selects_starts_extends_and_polls_through_transmission() {
     let bodies = fake.bodies();
     assert_eq!(
         methods(&fake)[1..],
-        ["torrent-add", "torrent-set", "torrent-get", "torrent-start"]
+        ["torrent-add", "torrent-get", "torrent-start"]
     );
     let add = &bodies[1]["arguments"];
     assert_eq!(add["paused"], true);
@@ -256,8 +258,7 @@ async fn want_adds_selects_starts_extends_and_polls_through_transmission() {
     let staging = app.config().paths.staging().join(&h);
     assert_eq!(add["download-dir"], staging.to_string_lossy().as_ref());
     assert_eq!(add["files-unwanted"], json!([1, 2, 3]));
-    assert_eq!(bodies[2]["arguments"]["seedRatioLimit"], 0.0);
-    assert_eq!(bodies[4]["arguments"]["ids"], json!([h]));
+    assert_eq!(bodies[3]["arguments"]["ids"], json!([h]));
     let d = download_of(&b, quest).await;
     assert_eq!(
         (d["file_index"].clone(), d["progress"].clone()),
@@ -280,11 +281,11 @@ async fn want_adds_selects_starts_extends_and_polls_through_transmission() {
     wait_state(&b, second, "transferring").await;
     let bodies = fake.bodies();
     assert_eq!(
-        methods(&fake)[5..],
+        methods(&fake)[4..],
         ["torrent-get", "torrent-set", "torrent-get", "torrent-start"]
     );
-    assert_eq!(bodies[6]["arguments"]["files-wanted"], json!([0, 2]));
-    assert_eq!(bodies[6]["arguments"]["files-unwanted"], json!([1, 3]));
+    assert_eq!(bodies[5]["arguments"]["files-wanted"], json!([0, 2]));
+    assert_eq!(bodies[5]["arguments"]["files-unwanted"], json!([1, 3]));
     changes(&mut rx);
 
     let mut poller = Poller::new();
@@ -361,14 +362,14 @@ async fn unwant_before_and_after_start() {
     fake.push(ok());
     unwant(&b, quest).await;
     assert_eq!(download_of(&b, quest).await["state"], "cancelled");
-    eventually("the deselect", || async { fake.bodies().len() == 10 }).await;
+    eventually("the deselect", || async { fake.bodies().len() == 9 }).await;
     let bodies = fake.bodies();
     assert_eq!(
-        methods(&fake)[6..],
+        methods(&fake)[5..],
         ["torrent-get", "torrent-stop", "torrent-get", "torrent-set"]
     );
     assert_eq!(
-        bodies[9]["arguments"]["files-unwanted"],
+        bodies[8]["arguments"]["files-unwanted"],
         json!([0, 1, 2, 3])
     );
     let detail = get(b.addr(), &format!("/api/v1/titles/{quest}"))
@@ -416,7 +417,7 @@ async fn failed_downloads_retry_and_the_api_guards_states() {
     assert_eq!(r.json()["state"], "queued");
     assert_eq!(r.json()["error"], Value::Null);
     wait_state(&b, quest, "transferring").await;
-    assert_eq!(fake.bodies()[9]["arguments"]["files-wanted"], json!([0]));
+    assert_eq!(fake.bodies()[8]["arguments"]["files-wanted"], json!([0]));
 
     let missing = request(b.addr(), "POST", "/api/v1/downloads/999/retry", &[], None).await;
     assert_eq!(missing.status, 404);
@@ -434,7 +435,7 @@ async fn failed_downloads_retry_and_the_api_guards_states() {
     assert_eq!(r.json()["state"], "cancelled");
     let r = request(b.addr(), "DELETE", &path, &[], None).await;
     assert_eq!(r.status, 409);
-    eventually("the deselect", || async { fake.bodies().len() == 16 }).await;
+    eventually("the deselect", || async { fake.bodies().len() == 15 }).await;
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -686,7 +687,6 @@ async fn want_extend_and_poll_through_rtorrent() {
     files[2].1 = 2;
     fake.push(rt_status(1, 0, 0, &files));
     fake.push(xml_ok());
-    fake.push(xml_ok());
     assert_eq!(poller.tick(app).await.expect("tick"), Cadence::Idle);
     assert_eq!(download_of(&b, second).await["state"], "importing");
     let tail: Vec<String> = rt_names(&fake).into_iter().skip(10).collect();
@@ -698,7 +698,6 @@ async fn want_extend_and_poll_through_rtorrent() {
             "multi:d.state",
             "multi:d.state",
             "multi:d.state",
-            "d.stop",
             "d.stop"
         ]
     );
@@ -779,7 +778,7 @@ async fn a_source_with_only_finished_downloads_can_be_deleted() {
     let cancel = format!("/api/v1/downloads/{other}");
     let r = request(b.addr(), "DELETE", &cancel, &[], None).await;
     assert_eq!(r.status, 200, "{}", r.body);
-    eventually("the deselect", || async { fake.bodies().len() == 13 }).await;
+    eventually("the deselect", || async { fake.bodies().len() == 12 }).await;
 
     fake.push(exists());
     fake.push(ok());

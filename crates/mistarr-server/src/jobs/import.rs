@@ -136,7 +136,12 @@ async fn sweep(app: &Arc<AppState>) {
         .read(|c| downloads::list(c, &[DownloadState::Importing], u32::MAX, 0))
         .await;
     match rows {
-        Ok((rows, _)) => enqueue(app, rows.into_iter().map(|r| r.id).collect()).await,
+        Ok((rows, _)) => {
+            // Oldest first, as the downloads were handed over.
+            let mut ids: Vec<DownloadId> = rows.into_iter().map(|r| r.id).collect();
+            ids.sort_by_key(|id| id.0);
+            enqueue(app, ids).await;
+        }
         Err(e) => tracing::warn!(error = %e, "cannot list downloads to import"),
     }
 }

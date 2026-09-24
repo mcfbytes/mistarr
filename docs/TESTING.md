@@ -44,17 +44,17 @@ skipped with a message when its client is missing:
 3. Boot the app on a temporary data directory, drop both DATs into `dats/`
    and wait for `dat.loaded`, drop both torrents into `sources/` and wait for
    them to bind.
-4. With `CORENAME` naming a core, so the core rate limit holds the
-   transfers back, want three titles through the API: the 1G1R pick of the
-   clone group (a zipped, headerless file), the disc game and the bad dump.
-   Then return `CORENAME` to `MENU`.
+4. Want three titles through the API: the 1G1R pick of the clone group (a
+   zipped, headerless file), the disc game and the bad dump.
 5. Wait for the downloads to pass `importing` and settle, then check the
    placement in `games/NES/` and `games/PSX/<title>/` under canonical names,
    the bad dump in `staging/quarantine/<infohash>/` with its report, the
    `import.done` events and the import log.
 6. Check that both torrents left the client under seed policy `none`, that
-   `POST /system/scan` finds every placed file verified, and that a restart
-   on the same data directory keeps downloads, sources, imports and counts.
+   `POST /system/scan` finds every placed file verified, that naming a core in
+   `CORENAME` sets the client's download limit to the core limit and `MENU`
+   lifts it, read over the client's own RPC, and that a restart on the same
+   data directory keeps downloads, sources, imports and counts.
 
 Run it locally with either client installed:
 

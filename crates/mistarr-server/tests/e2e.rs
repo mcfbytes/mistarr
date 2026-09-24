@@ -231,6 +231,85 @@ where
     }
 }
 
+/// The download limit the app applies while a core runs, in KiB/s.
+const CORE_DOWN_KBPS: u32 = 7;
+
+/// The client's global download limit in KiB/s, `None` when unlimited, read
+/// over its own RPC rather than through the app.
+async fn down_limit_kbps(kind: Kind, url: &str) -> Option<u32> {
+    match kind {
+        Kind::Transmission => {
+            let body = r#"{"method":"session-get","arguments":{"fields":["speed-limit-down","speed-limit-down-enabled"]}}"#;
+            let path = url.split_once("//").map_or(url, |(_, rest)| rest);
+            let (host, path) = path.split_once('/').expect("rpc path");
+            let mut session = String::new();
+            for _ in 0..2 {
+                let raw = raw_exchange(
+                    host,
+                    format!(
+                        "POST /{path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\
+                         X-Transmission-Session-Id: {session}\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await;
+                let text = String::from_utf8_lossy(&raw).into_owned();
+                if let Some(id) = text.lines().find_map(|l| {
+                    l.strip_prefix("X-Transmission-Session-Id: ")
+                        .filter(|_| text.starts_with("HTTP/1.1 409"))
+                }) {
+                    session = id.trim().to_owned();
+                    continue;
+                }
+                let json: Value = serde_json::from_str(text.split("\r\n\r\n").nth(1)?).ok()?;
+                let args = &json["arguments"];
+                return (args["speed-limit-down-enabled"] == true)
+                    .then(|| {
+                        args["speed-limit-down"]
+                            .as_u64()
+                            .and_then(|v| u32::try_from(v).ok())
+                    })
+                    .flatten();
+            }
+            None
+        }
+        Kind::Rtorrent => {
+            use mistarr_clients::xmlrpc::{
+                decode_response, encode_call, MethodResponse, Value as Xml,
+            };
+            let call = encode_call(
+                "throttle.global_down.max_rate",
+                &[Xml::String(String::new())],
+            );
+            let headers = format!("CONTENT_LENGTH\0{}\0SCGI\x001\0", call.len());
+            let mut req = format!("{}:{headers},", headers.len()).into_bytes();
+            req.extend_from_slice(&call);
+            let raw = raw_exchange(url, &req).await;
+            let start = raw.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
+            match decode_response(&raw[start..]).ok()? {
+                MethodResponse::Success(Xml::Int(bytes)) if bytes > 0 => {
+                    u32::try_from(bytes / 1024).ok()
+                }
+                _ => None,
+            }
+        }
+    }
+}
+
+/// Writes `request` to `addr` and reads until the peer closes.
+async fn raw_exchange(addr: &str, request: &[u8]) -> Vec<u8> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("connect");
+    stream.write_all(request).await.expect("write");
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut raw))
+        .await
+        .expect("reply in time")
+        .expect("read");
+    raw
+}
+
 /// What a timed-out wait prints: the app's rows and the downloading client's view.
 struct Probe {
     addr: std::net::SocketAddr,
@@ -471,8 +550,7 @@ async fn run(kind: Kind) {
     let mut config = config_in(&home);
     config.client.kind = kind.choice();
     config.client.url.clone_from(&leecher.url);
-    // Slow enough that no wanted file completes while the three wants arrive.
-    config.limits.down_kbps_core = 1;
+    config.limits.down_kbps_core = CORE_DOWN_KBPS;
     let running = start(&config, &home).await;
     let addr = running.addr;
     let paths = running.app.config().paths;
@@ -529,15 +607,6 @@ async fn run(kind: Kind) {
     }
     t.mark("sources bound");
 
-    // The user wants titles while a core runs, so every want lands before a
-    // file completes and seed policy `none` stops the torrent in between.
-    std::fs::write(home.join("CORENAME"), "NES").expect("corename");
-    probe
-        .wait("the core gate", Duration::from_secs(10), || async {
-            json(addr, "/api/v1/system/status").await["pause_reason"] == "core"
-        })
-        .await;
-    tokio::time::sleep(Duration::from_millis(500)).await;
     let hidden = items(addr, "/api/v1/platforms/nes/titles?q=Fixture%20System").await;
     assert!(hidden.is_empty(), "the BIOS entry is hidden: {hidden:?}");
     let quest = title(addr, set::CART_PLATFORM, "Example Quest").await;
@@ -565,7 +634,6 @@ async fn run(kind: Kind) {
         5,
         "one cart, one bad dump, three disc files"
     );
-    std::fs::write(home.join("CORENAME"), "MENU").expect("corename");
     t.mark("titles wanted");
 
     probe
@@ -680,6 +748,28 @@ async fn run(kind: Kind) {
     assert!(roms_verified(addr, wanted[0]).await);
     assert!(roms_verified(addr, wanted[2]).await);
     t.mark("scan verified");
+
+    std::fs::write(home.join("CORENAME"), "NES").expect("corename");
+    probe
+        .wait(
+            "the core download limit",
+            Duration::from_secs(10),
+            || async { down_limit_kbps(kind, &leecher.url).await == Some(CORE_DOWN_KBPS) },
+        )
+        .await;
+    assert_eq!(
+        json(addr, "/api/v1/system/status").await["pause_reason"],
+        "core"
+    );
+    std::fs::write(home.join("CORENAME"), "MENU").expect("corename");
+    probe
+        .wait(
+            "the menu download limit",
+            Duration::from_secs(10),
+            || async { down_limit_kbps(kind, &leecher.url).await.is_none() },
+        )
+        .await;
+    t.mark("core gate followed");
 
     let before = (
         download_states(addr).await,

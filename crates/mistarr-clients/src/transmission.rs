@@ -270,10 +270,10 @@ impl Transmission {
         fresh: bool,
     ) -> Result<()> {
         let fields = match seed {
-            // A newly added torrent already follows the session default.
-            SeedPolicy::Client if fresh => return Ok(()),
-            SeedPolicy::Client => json!({ "seedRatioMode": 0 }),
-            SeedPolicy::None => json!({ "seedRatioMode": 1, "seedRatioLimit": 0.0 }),
+            // A newly added torrent already follows the session default. Under
+            // "none" the server decides when to stop, so the client must not.
+            SeedPolicy::Client | SeedPolicy::None if fresh => return Ok(()),
+            SeedPolicy::Client | SeedPolicy::None => json!({ "seedRatioMode": 0 }),
             SeedPolicy::Ratio { ratio } => {
                 json!({ "seedRatioMode": 1, "seedRatioLimit": f64::from(*ratio) })
             }

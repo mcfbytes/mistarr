@@ -314,6 +314,37 @@ async fn add_rejected_by_rtorrent_is_a_protocol_error() {
 }
 
 #[tokio::test]
+async fn add_waits_for_a_load_that_lands_on_the_next_tick() {
+    let (fake, client) = setup().await;
+    for reply in [
+        not_found(),
+        ok(),
+        not_found(),
+        not_found(),
+        ok(),
+        ints(&[0]),
+        ok(),
+    ] {
+        fake.push(reply);
+    }
+    client
+        .add(
+            TorrentSource::Metainfo(synthetic_metainfo(1)),
+            Path::new("/s"),
+            &[0],
+            SeedPolicy::Client,
+        )
+        .await
+        .expect("add");
+    let methods = fake.methods();
+    assert_eq!(
+        methods.iter().filter(|m| *m == "d.directory.set").count(),
+        3,
+        "{methods:?}"
+    );
+}
+
+#[tokio::test]
 async fn add_checks_indices_and_sources_before_any_call() {
     let (fake, client) = setup().await;
     let err = client
@@ -672,13 +703,14 @@ async fn finished_is_derived_from_state_and_current_policy() {
 }
 
 #[tokio::test]
-async fn none_policy_stops_once_seeding_and_client_policy_never_does() {
+async fn neither_none_nor_client_policy_stops_in_the_client() {
     let (fake, client) = setup().await;
     add_existing(&fake, &client, 9, SeedPolicy::None).await;
     add_existing(&fake, &client, 10, SeedPolicy::Client).await;
     fake.push(Snapshot::default().reply());
-    fake.push(ok());
-    assert!(client.status(&id(9)).await.expect("status").is_finished);
+    let st = client.status(&id(9)).await.expect("status");
+    assert_eq!(st.state, TorrentState::Seeding);
+    assert!(!st.is_finished, "the server stops a none-policy torrent");
     fake.push(
         Snapshot {
             ratio: 50_000,
@@ -688,9 +720,7 @@ async fn none_policy_stops_once_seeding_and_client_policy_never_does() {
     );
     let st = client.status(&id(10)).await.expect("status");
     assert_eq!(st.state, TorrentState::Seeding);
-    let methods = fake.methods();
-    assert_eq!(methods.iter().filter(|m| *m == "d.stop").count(), 1);
-    assert_eq!(methods.last().map(String::as_str), Some("system.multicall"));
+    assert!(!fake.methods().iter().any(|m| m == "d.stop"));
 }
 
 #[tokio::test]
@@ -729,10 +759,16 @@ async fn set_seed_policy_adopts_an_untracked_torrent() {
     let (fake, client) = setup().await;
     fake.push(ScgiReply::Value(v(&t(13))));
     client
-        .set_seed_policy(&id(13), SeedPolicy::None)
+        .set_seed_policy(&id(13), SeedPolicy::Ratio { ratio: 0.5 })
         .await
         .expect("policy");
-    fake.push(Snapshot::default().reply());
+    fake.push(
+        Snapshot {
+            ratio: 1000,
+            ..Snapshot::default()
+        }
+        .reply(),
+    );
     fake.push(ok());
     assert!(client.status(&id(13)).await.expect("status").is_finished);
 }

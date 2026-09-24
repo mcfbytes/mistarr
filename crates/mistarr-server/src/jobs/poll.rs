@@ -304,7 +304,7 @@ impl Poller {
         for s in &changed {
             transfer::publish(app, s.id, s.state, s.progress);
         }
-        if handed && open == 0 && policy == SeedPolicy::None {
+        if handed && should_stop(&status, open, &policy) {
             if let Err(e) = client.stop(&id).await {
                 tracing::warn!(source = %source, error = %e, "cannot stop the finished torrent");
             }
@@ -427,6 +427,21 @@ pub fn limits_for(limits: &LimitsConfig, core: bool) -> (u32, u32) {
     }
 }
 
+/// Whether the poller stops a torrent: only under seed policy `none`, which
+/// neither client acts on by itself, once no download of its source is open
+/// and every file selected in the client is complete.
+#[must_use]
+pub fn should_stop(status: &TorrentStatus, open: usize, policy: &SeedPolicy) -> bool {
+    *policy == SeedPolicy::None
+        && open == 0
+        && status.state != TorrentState::Stopped
+        && status
+            .files
+            .iter()
+            .filter(|f| f.wanted)
+            .all(mistarr_clients::FileProgress::is_complete)
+}
+
 /// Applies the core limits each time CORENAME leaves `MENU` and the menu
 /// limits each time it returns, once per transition. While no client takes
 /// them, they are retried every [`Options::corename_poll`].
@@ -538,6 +553,28 @@ mod tests {
         assert!(observe(&status(TorrentState::Stopped, 0), &row(5, true), staging).is_none());
         let single = row(0, true);
         assert_eq!(staged_path(staging, &single), Path::new("/st/cd/Sub/x.nes"));
+    }
+
+    #[test]
+    fn only_a_settled_none_policy_torrent_is_stopped() {
+        let done = status(TorrentState::Seeding, 8);
+        assert!(should_stop(&done, 0, &SeedPolicy::None));
+        assert!(
+            !should_stop(&done, 1, &SeedPolicy::None),
+            "a download is open"
+        );
+        assert!(!should_stop(&done, 0, &SeedPolicy::Client));
+        assert!(!should_stop(&done, 0, &SeedPolicy::Ratio { ratio: 1.0 }));
+        let partial = status(TorrentState::Downloading, 4);
+        assert!(
+            !should_stop(&partial, 0, &SeedPolicy::None),
+            "a selected file is incomplete"
+        );
+        let stopped = status(TorrentState::Stopped, 8);
+        assert!(
+            !should_stop(&stopped, 0, &SeedPolicy::None),
+            "already stopped"
+        );
     }
 
     #[test]

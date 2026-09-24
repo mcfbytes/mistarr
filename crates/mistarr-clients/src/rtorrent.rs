@@ -118,6 +118,31 @@ impl Rtorrent {
         })
     }
 
+    /// Sets the download directory of a torrent just loaded. rtorrent may
+    /// finish a `load.*` on its next scheduler tick, so "not found" is retried
+    /// for up to [`Rtorrent::LOAD_SETTLE`] before the load counts as rejected.
+    async fn directory_after_load(&self, target: &str, dir: &str) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + Self::LOAD_SETTLE;
+        loop {
+            match self
+                .call("d.directory.set", &[target.into(), dir.into()])
+                .await
+            {
+                Err(ClientError::NotFound) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+                other => return other.map(drop).map_err(not_loaded),
+            }
+        }
+    }
+
+    /// How long a loaded torrent may take to appear in rtorrent.
+    ///
+    /// ```
+    /// assert_eq!(mistarr_clients::Rtorrent::LOAD_SETTLE.as_secs(), 2);
+    /// ```
+    pub const LOAD_SETTLE: Duration = Duration::from_secs(2);
+
     /// Sets the time allowed for one RPC.
     ///
     /// ```
@@ -282,9 +307,7 @@ impl DownloadClient for Rtorrent {
             // replaces the meta-download; load.raw and load.normal leave it stopped.
             let replay = directory_command(dir);
             self.call(method, &["".into(), data, replay.into()]).await?;
-            self.call("d.directory.set", &[target.as_str().into(), dir.into()])
-                .await
-                .map_err(not_loaded)?;
+            self.directory_after_load(&target, dir).await?;
         }
         let count = match known_count.filter(|_| fresh) {
             Some(count) => Some(count),
@@ -647,11 +670,12 @@ impl RawStatus {
         }
     }
 
+    /// Whether the client itself stops the torrent under `policy`; under
+    /// "none" the server stops it once the source is settled.
     fn passes(&self, policy: &SeedPolicy) -> bool {
         match policy {
-            SeedPolicy::None => true,
             SeedPolicy::Ratio { ratio } => self.ratio >= *ratio,
-            SeedPolicy::Client => false,
+            SeedPolicy::None | SeedPolicy::Client => false,
         }
     }
 }

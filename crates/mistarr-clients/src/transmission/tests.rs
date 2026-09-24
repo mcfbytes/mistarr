@@ -158,11 +158,10 @@ async fn credentials_are_sent_as_basic_auth() {
 }
 
 #[tokio::test]
-async fn add_deselects_unwanted_files_and_sets_seed_policy() {
+async fn add_deselects_unwanted_files_and_leaves_none_to_the_session_default() {
     let (fake, client) = setup().await;
     let meta = synthetic_metainfo(3);
     fake.push(added(0xa1));
-    fake.push(FakeResponse::success(json!({})));
     let got = client
         .add(
             TorrentSource::Metainfo(meta.clone()),
@@ -175,21 +174,15 @@ async fn add_deselects_unwanted_files_and_sets_seed_policy() {
     assert_eq!(got, id(0xa1));
     assert_eq!(
         fake.bodies(),
-        vec![
-            rpc(
-                "torrent-add",
-                json!({
-                    "download-dir": "/staging/x",
-                    "paused": true,
-                    "metainfo": BASE64.encode(&meta),
-                    "files-unwanted": [0, 2],
-                })
-            ),
-            rpc(
-                "torrent-set",
-                json!({ "ids": [hash(0xa1)], "seedRatioMode": 1, "seedRatioLimit": 0.0 })
-            ),
-        ]
+        vec![rpc(
+            "torrent-add",
+            json!({
+                "download-dir": "/staging/x",
+                "paused": true,
+                "metainfo": BASE64.encode(&meta),
+                "files-unwanted": [0, 2],
+            })
+        ),]
     );
 }
 
@@ -364,7 +357,7 @@ async fn add_duplicate_magnet_reads_count_and_restores_client_policy() {
 }
 
 #[tokio::test]
-async fn set_seed_policy_checks_existence_then_sets_ratio() {
+async fn set_seed_policy_none_checks_existence_then_uses_the_session_default() {
     let (fake, client) = setup().await;
     fake.push(exists());
     fake.push(FakeResponse::success(json!({})));
@@ -377,10 +370,7 @@ async fn set_seed_policy_checks_existence_then_sets_ratio() {
         fake.bodies(),
         vec![
             rpc("torrent-get", json!({ "ids": [h], "fields": ["id"] })),
-            rpc(
-                "torrent-set",
-                json!({ "ids": [h], "seedRatioMode": 1, "seedRatioLimit": 0.0 })
-            ),
+            rpc("torrent-set", json!({ "ids": [h], "seedRatioMode": 0 })),
         ]
     );
 }

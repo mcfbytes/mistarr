@@ -189,16 +189,19 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    `download.changed`, only for rows that moved.
 4. When a file reaches 100 percent and the client reports it checked, the
    download becomes `importing` with its `staged_path`, which hands it to the
-   importer. If every selected file in the torrent is done and the seed policy
-   is `none`, the torrent is stopped; the importer removes it from the client,
-   without deleting data, once the files are placed.
+   importer. Under seed policy `none` neither client stops a torrent on its
+   own; the poller stops it once no download of its source is queued,
+   transferring or checking and every file selected in the client is
+   complete. The importer removes it from the client, without deleting data,
+   once the files are placed. A later want on a stopped torrent extends the
+   selection and starts it again.
 
 ### Import
 
 A heavy `import` job runs per download in `importing`. The importer enqueues
-one for every such row at startup and whenever `download.changed` reports a
-download entering `importing`, unless a job for it is already queued or
-running. A download that fails or is cancelled also wakes the `importing`
+one for every such row at startup, oldest first, and whenever
+`download.changed` reports a download entering `importing`, unless a job for
+it is already queued or running. A download that fails or is cancelled also wakes the `importing`
 tracks of its entry that wait for it. A job whose row has left `importing`
 does nothing.
 
