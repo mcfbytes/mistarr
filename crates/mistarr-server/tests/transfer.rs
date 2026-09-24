@@ -679,3 +679,96 @@ async fn want_extend_and_poll_through_rtorrent() {
     assert_eq!(n, 2);
     b.running.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test]
+async fn refused_rate_limits_are_retried_until_the_client_takes_them() {
+    let fake = FakeServer::start().await.expect("fake");
+    let b = boot_transmission(&fake).await;
+    let sets = || {
+        fake.bodies()
+            .into_iter()
+            .filter(|x| x["method"] == "session-set")
+            .map(|x| x["arguments"]["speed-limit-down"].clone())
+            .collect::<Vec<_>>()
+    };
+    fake.push(FakeResponse::failure("busy"));
+    fake.push(ok());
+    std::fs::write(b.corename(), "SNES").expect("write");
+    eventually("the retried core limits", || async { sets().len() == 2 }).await;
+    assert_eq!(sets(), [json!(512), json!(512)]);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(sets().len(), 2, "no call once the limits are applied");
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn a_source_with_only_finished_downloads_can_be_deleted() {
+    let fake = FakeServer::start().await.expect("fake");
+    let b = boot_transmission(&fake).await;
+    let [quest, second, _] = seed_catalog(&b);
+    drop_source(&b).await;
+    let h = set_hash();
+    let app = &b.running.app;
+    push_add(&fake, &h);
+    assert_eq!(want(&b, quest).await.status, 200);
+    wait_state(&b, quest, "transferring").await;
+    push_extend(&fake, [true, false, false, false]);
+    assert_eq!(want(&b, second).await.status, 200);
+    wait_state(&b, second, "transferring").await;
+
+    let done = rows::DownloadId(download_of(&b, quest).await["id"].as_i64().expect("id"));
+    app.db
+        .write(move |c| {
+            for to in [DownloadState::Importing, DownloadState::Done] {
+                rows::move_all(c, &[done], to, None, 1)?;
+            }
+            Ok(())
+        })
+        .await
+        .expect("finish");
+    let source = get(b.addr(), "/api/v1/sources").await.json()["items"][0]["id"].clone();
+    let path = format!("/api/v1/sources/{source}");
+    let r = request(b.addr(), "DELETE", &path, &[], None).await;
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(
+        r.body
+            .contains("queued, transferring, checking or importing"),
+        "{}",
+        r.body
+    );
+
+    fake.push(exists());
+    fake.push(ok());
+    fake.push(FakeResponse::success(
+        json!({ "torrents": [{ "wanted": [false, false, true, false] }] }),
+    ));
+    fake.push(ok());
+    let other = download_of(&b, second).await["id"].clone();
+    let cancel = format!("/api/v1/downloads/{other}");
+    let r = request(b.addr(), "DELETE", &cancel, &[], None).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    eventually("the deselect", || async { fake.bodies().len() == 13 }).await;
+
+    fake.push(exists());
+    fake.push(ok());
+    let r = request(b.addr(), "DELETE", &path, &[], None).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    assert_eq!(
+        methods(&fake).last().map(String::as_str),
+        Some("torrent-remove")
+    );
+    let mut kept: Vec<(Value, Value)> = downloads(&b, "")
+        .await
+        .iter()
+        .map(|d| (d["state"].clone(), d["source_id"].clone()))
+        .collect();
+    kept.sort_by_key(|(s, _)| s.to_string());
+    assert_eq!(
+        kept,
+        [
+            (json!("cancelled"), Value::Null),
+            (json!("done"), Value::Null)
+        ]
+    );
+    b.running.shutdown().await.expect("shutdown");
+}

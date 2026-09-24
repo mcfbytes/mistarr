@@ -130,6 +130,7 @@ minutes; the next answered poll sets it reachable again.
 
 When CORENAME is not `MENU` the poller applies the `*_core` rate limits from
 config; when it returns to `MENU` it restores the `*_menu` limits, once per
-transition. A missing CORENAME counts as the menu. It does not
+transition. A missing CORENAME counts as the menu. Limits the client refuses,
+or that find no client, are retried at the CORENAME poll interval. It does not
 stop torrents, because stopping and starting a large set torrent is expensive
 in rtorrent.

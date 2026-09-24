@@ -134,6 +134,17 @@ impl AppState {
         *slot = key.and_then(|k| k.build().map(|c| (k, c)));
     }
 
+    /// Installs `client` as the detected client, for tests that script one in process.
+    #[cfg(test)]
+    pub(crate) fn set_client(&self, client: Arc<dyn DownloadClient>) {
+        let key = ClientKey {
+            kind: mistarr_clients::ClientKind::Transmission,
+            url: String::new(),
+            path_map: Vec::new(),
+        };
+        *self.client.write().unwrap_or_else(PoisonError::into_inner) = Some((key, client));
+    }
+
     /// A copy of the effective config.
     #[must_use]
     pub fn config(&self) -> Config {

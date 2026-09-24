@@ -119,7 +119,7 @@ CREATE TABLE downloads (
   id            INTEGER PRIMARY KEY,
   title_id      INTEGER NOT NULL REFERENCES titles(id),
   rom_id        INTEGER NOT NULL REFERENCES roms(id),
-  source_id     INTEGER REFERENCES sources(id),  -- NULL while 'wanted'
+  source_id     INTEGER REFERENCES sources(id) ON DELETE SET NULL,  -- NULL while 'wanted' or once the source is deleted
   file_index    INTEGER,                         -- NULL while 'wanted'
   state         TEXT NOT NULL,         -- see state machine
   progress      REAL NOT NULL DEFAULT 0,         -- 0 to 1

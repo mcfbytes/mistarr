@@ -134,7 +134,7 @@ impl Job for Transfer {
 
 /// Selects and starts one source's queued downloads; returns how many started.
 async fn start_source(
-    app: &AppState,
+    app: &Arc<AppState>,
     client: &dyn DownloadClient,
     source: SourceId,
 ) -> Result<(Flow, usize)> {
@@ -165,21 +165,23 @@ async fn start_source(
                     .write(move |c| sources::set_client_id(c, source, None))
                     .await?;
                 match add(app, client, &row, &wanted, &ids).await? {
-                    Some(id) => id,
-                    None => return Ok((Flow::Next, 0)),
+                    Ok(id) => id,
+                    Err(flow) => return Ok((flow, 0)),
                 }
             }
             Err(e) => return unanswered(app, &ids, &e).await,
         },
         None => match add(app, client, &row, &wanted, &ids).await? {
-            Some(id) => id,
-            None => return Ok((Flow::Next, 0)),
+            Ok(id) => id,
+            Err(flow) => return Ok((flow, 0)),
         },
     };
     if let Err(e) = client.start(&torrent).await {
         tracing::warn!(source = %source, error = %e, "cannot start the torrent");
         return Ok((Flow::Stop, 0));
     }
+    let expected = ids.len();
+    // Moving checks each row is still queued, so a row cancelled meanwhile stays cancelled.
     let moved = app
         .db
         .write(move |c| {
@@ -194,6 +196,10 @@ async fn start_source(
         .await?;
     let n = moved.len();
     publish_ids(app, moved).await?;
+    if n < expected {
+        let job = Arc::new(Deselect { source_id: source });
+        Scheduler::enqueue(app, job).await?;
+    }
     Ok((Flow::Next, n))
 }
 
@@ -227,14 +233,15 @@ async fn fail(app: &AppState, ids: &[DownloadId], error: &str) -> Result<()> {
 }
 
 /// Adds the source's torrent paused into `staging/<infohash>/`, mapped for the
-/// client, and records its id. `None` when the downloads were failed or must wait.
+/// client, and records its id. Otherwise the downloads were failed or must
+/// wait, and the flow says whether the pass carries on.
 async fn add(
     app: &AppState,
     client: &dyn DownloadClient,
     row: &SourceRow,
     wanted: &[u32],
     ids: &[DownloadId],
-) -> Result<Option<ClientTorrentId>> {
+) -> Result<std::result::Result<ClientTorrentId, Flow>> {
     let Some(bytes) = metainfo(app, row).await else {
         let why = if row.origin_file.ends_with(".magnet") {
             LOST_MAGNET
@@ -242,7 +249,7 @@ async fn add(
             MISSING_TORRENT
         };
         fail(app, ids, why).await?;
-        return Ok(None);
+        return Ok(Err(Flow::Next));
     };
     let config = app.config();
     let local = config.paths.staging().join(&row.infohash);
@@ -257,12 +264,9 @@ async fn add(
             app.db
                 .write(move |c| sources::set_client_id(c, source, Some(&stored)))
                 .await?;
-            Ok(Some(id))
+            Ok(Ok(id))
         }
-        Err(e) => {
-            unanswered(app, ids, &e).await?;
-            Ok(None)
-        }
+        Err(e) => Ok(Err(unanswered(app, ids, &e).await?.0)),
     }
 }
 
@@ -342,6 +346,222 @@ pub async fn watch(app: Arc<AppState>) {
 mod tests {
     use super::*;
     use crate::app::testutil::state;
+    use crate::db::downloads::{CancelOutcome, Candidate, NewDownload};
+    use crate::db::sources::fixtures::seed_rom;
+    use crate::db::sources::{NewSource, SourceState};
+    use crate::db::titles::TitleId;
+    use mistarr_clients::{ClientFile, ClientInfo, TorrentStatus};
+    use mistarr_sources::binding::{Confidence, RomRef};
+    use std::path::Path;
+    use std::sync::Mutex;
+    use std::time::Duration;
+    use tokio::sync::Notify;
+
+    /// An in-process client that records calls; `add` can wait for a release or fail.
+    #[derive(Default)]
+    struct Mock {
+        calls: Mutex<Vec<String>>,
+        add_entered: Notify,
+        release: Option<Notify>,
+        unreachable: bool,
+    }
+
+    impl Mock {
+        fn log(&self, call: String) {
+            self.calls.lock().expect("lock").push(call);
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().expect("lock").clone()
+        }
+    }
+
+    fn nope<T>() -> mistarr_clients::Result<T> {
+        Err(ClientError::Protocol("not scripted".into()))
+    }
+
+    #[async_trait]
+    impl DownloadClient for Mock {
+        async fn probe(&self) -> mistarr_clients::Result<ClientInfo> {
+            nope()
+        }
+        async fn add(
+            &self,
+            _src: TorrentSource,
+            _dir: &Path,
+            wanted: &[u32],
+            _seed: SeedPolicy,
+        ) -> mistarr_clients::Result<ClientTorrentId> {
+            self.log(format!("add:{wanted:?}"));
+            self.add_entered.notify_one();
+            if let Some(release) = &self.release {
+                release.notified().await;
+            }
+            if self.unreachable {
+                return Err(ClientError::Unreachable("down".into()));
+            }
+            Ok(ClientTorrentId::new("t"))
+        }
+        async fn set_wanted(
+            &self,
+            _id: &ClientTorrentId,
+            wanted: &[u32],
+        ) -> mistarr_clients::Result<()> {
+            self.log(format!("set_wanted:{wanted:?}"));
+            Ok(())
+        }
+        async fn set_seed_policy(
+            &self,
+            _id: &ClientTorrentId,
+            _seed: SeedPolicy,
+        ) -> mistarr_clients::Result<()> {
+            Ok(())
+        }
+        async fn start(&self, _id: &ClientTorrentId) -> mistarr_clients::Result<()> {
+            self.log("start".into());
+            Ok(())
+        }
+        async fn stop(&self, _id: &ClientTorrentId) -> mistarr_clients::Result<()> {
+            self.log("stop".into());
+            Ok(())
+        }
+        async fn status(&self, _id: &ClientTorrentId) -> mistarr_clients::Result<TorrentStatus> {
+            nope()
+        }
+        async fn files(&self, _id: &ClientTorrentId) -> mistarr_clients::Result<Vec<ClientFile>> {
+            nope()
+        }
+        async fn remove(&self, _id: &ClientTorrentId, _data: bool) -> mistarr_clients::Result<()> {
+            nope()
+        }
+        async fn set_rate_limits(
+            &self,
+            _down: Option<u32>,
+            _up: Option<u32>,
+        ) -> mistarr_clients::Result<()> {
+            nope()
+        }
+    }
+
+    /// A bound single-file source in `sources/loaded/` with one queued download.
+    fn seed(app: &AppState, byte: u8) -> (SourceId, DownloadId) {
+        let name = format!("Example Quest {byte} (USA).nes");
+        let bytes = format!(
+            "d4:infod6:lengthi16e4:name{}:{name}12:piece lengthi16384e6:pieces0:ee",
+            name.len()
+        )
+        .into_bytes();
+        let meta = torrent::parse_torrent(&bytes).expect("torrent");
+        let hash = InfoHash::from_bytes(meta.infohash).to_string();
+        let origin = format!("s{byte}.torrent");
+        let loaded = app
+            .config()
+            .paths
+            .sources()
+            .join(mistarr_sources::watch::LOADED_DIR);
+        std::fs::create_dir_all(&loaded).expect("mkdir");
+        std::fs::write(loaded.join(&origin), &bytes).expect("write");
+        app.db
+            .write_blocking(|c| {
+                let rom = seed_rom(c, "nes", &name, 16, "[]")?;
+                let title: i64 =
+                    c.query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
+                        r.get(0)
+                    })?;
+                let source = sources::insert(
+                    c,
+                    &NewSource {
+                        infohash: &hash,
+                        display_name: &name,
+                        origin_file: &origin,
+                        state: SourceState::Bound,
+                        reason: None,
+                        added_at: 0,
+                    },
+                )?;
+                sources::replace_files(c, source, &meta.files)?;
+                sources::set_matches(c, source, &[(0, Some(RomRef(rom)), Confidence::Name)])?;
+                let id = rows::create(
+                    c,
+                    &NewDownload {
+                        title_id: TitleId(title),
+                        rom_id: rom,
+                        file: Some(Candidate {
+                            source_id: source,
+                            file_index: 0,
+                        }),
+                        now: 0,
+                    },
+                )?;
+                Ok((source, id))
+            })
+            .expect("seed")
+    }
+
+    async fn state_of(app: &AppState, id: DownloadId) -> DownloadState {
+        app.db
+            .read(move |c| rows::get(c, id))
+            .await
+            .expect("get")
+            .expect("row")
+            .state
+    }
+
+    #[tokio::test]
+    async fn a_download_cancelled_while_adding_is_deselected() {
+        let (_dir, app) = state();
+        Scheduler::start(&app);
+        let mock = Arc::new(Mock {
+            release: Some(Notify::new()),
+            ..Mock::default()
+        });
+        app.set_client(Arc::clone(&mock) as Arc<dyn DownloadClient>);
+        let (_, id) = seed(&app, 1);
+        let run = tokio::spawn({
+            let app = Arc::clone(&app);
+            async move { Scheduler::run_inline(&app, Arc::new(Transfer)).await }
+        });
+        mock.add_entered.notified().await;
+        let cancelled = app
+            .db
+            .write(move |c| rows::cancel(c, id, 1))
+            .await
+            .expect("cancel");
+        assert!(matches!(
+            cancelled,
+            CancelOutcome::Cancelled(c) if !c.started
+        ));
+        if let Some(release) = &mock.release {
+            release.notify_one();
+        }
+        run.await.expect("join").expect("run");
+        assert_eq!(state_of(&app, id).await, DownloadState::Cancelled);
+        for _ in 0..200 {
+            if mock.calls().len() >= 4 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(mock.calls(), ["add:[0]", "start", "stop", "set_wanted:[]"]);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_client_during_add_stops_the_pass() {
+        let (_dir, app) = state();
+        let mock = Arc::new(Mock {
+            unreachable: true,
+            ..Mock::default()
+        });
+        app.set_client(Arc::clone(&mock) as Arc<dyn DownloadClient>);
+        let (_, first) = seed(&app, 1);
+        let (_, second) = seed(&app, 2);
+        Scheduler::run_inline(&app, Arc::new(Transfer))
+            .await
+            .expect("run");
+        assert_eq!(mock.calls(), ["add:[0]"]);
+        assert_eq!(state_of(&app, first).await, DownloadState::Queued);
+        assert_eq!(state_of(&app, second).await, DownloadState::Queued);
+    }
 
     #[tokio::test]
     async fn without_a_client_queued_downloads_wait() {

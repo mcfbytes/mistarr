@@ -155,7 +155,8 @@ stays disabled when rebound. The answer is the updated item.
 
 `DELETE /sources/{id}` answers 204. It removes the torrent from the client
 without deleting data; a client that does not answer is a 502 and the source
-is kept. A source with downloads is a 400.
+is kept. A source with a download that is queued, transferring, checking or
+importing is a 400; its other downloads are kept with `source_id` `null`.
 
 `/sources/{id}/files` items: `{ file_index, path, size, rom_id, rom_name,
 title_id, confidence }`, where `path` is inside the torrent and `confidence`

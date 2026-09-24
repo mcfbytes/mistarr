@@ -361,6 +361,43 @@ fn cancel_group_reports_started_downloads() {
 }
 
 #[test]
+fn deleting_a_source_keeps_finished_downloads_without_it() {
+    let c = conn();
+    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, "[]").expect("rom");
+    let src = source(
+        &c,
+        1,
+        &[("Example Quest (USA).nes", 16, Some(rom), Confidence::Name)],
+    );
+    let new = NewDownload {
+        title_id: title_of(&c, rom),
+        rom_id: rom,
+        file: candidate(src, 0),
+        now: 1,
+    };
+    let done = create(&c, &new).expect("create");
+    for to in [
+        DownloadState::Transferring,
+        DownloadState::Importing,
+        DownloadState::Done,
+    ] {
+        assert!(set_state(&c, done, to, 2).expect("move"));
+    }
+    let cancelled = create(&c, &new).expect("create");
+    let open = create(&c, &new).expect("create");
+    set_state(&c, cancelled, DownloadState::Cancelled, 3).expect("cancel");
+    assert_eq!(sources::open_download_count(&c, src).expect("count"), 1);
+    set_state(&c, open, DownloadState::Cancelled, 4).expect("cancel");
+    assert_eq!(sources::open_download_count(&c, src).expect("count"), 0);
+    assert!(sources::delete(&c, src).expect("delete"));
+    for id in [done, cancelled, open] {
+        assert_eq!(get(&c, id).expect("get").expect("kept").source_id, None);
+    }
+    let row = get(&c, done).expect("get").expect("row");
+    assert_eq!(row.state, DownloadState::Done);
+}
+
+#[test]
 fn works_on_the_file_database() {
     let (_dir, db) = crate::db::testutil::db();
     let n = db
