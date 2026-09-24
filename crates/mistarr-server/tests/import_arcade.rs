@@ -52,7 +52,9 @@ fn mra(name: &str, roms: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Boots with the given `_Arcade` files and waits for their titles.
+/// Boots with the given `_Arcade` files and waits for their titles and 1G1R picks:
+/// the catalogue job stores titles per batch but sets picks in a later, separate
+/// write, so a `want` right after titles appear can still race it.
 async fn boot_arcade(mras: &[(&str, Vec<u8>)], games: &[(&str, Vec<u8>)]) -> Booted {
     let dir = tempfile::tempdir().expect("tempdir");
     for (rel, body) in mras {
@@ -64,16 +66,16 @@ async fn boot_arcade(mras: &[(&str, Vec<u8>)], games: &[(&str, Vec<u8>)]) -> Boo
     let config = config_in(dir.path());
     let b = boot_with(dir, config).await;
     let want = mras.len();
-    eventually("the arcade catalogue", || async {
+    eventually("the arcade catalogue and its 1G1R picks", || async {
         let rows = browse(&b).await;
-        rows.len() == want
+        rows.len() == want && rows.iter().all(|(_, _, has_pick)| *has_pick)
     })
     .await;
     b
 }
 
-/// Browse rows of the arcade platform as `(name, have_verified)`.
-async fn browse(b: &Booted) -> Vec<(String, u64)> {
+/// Browse rows of the arcade platform as `(name, have_verified, has_pick)`.
+async fn browse(b: &Booted) -> Vec<(String, u64, bool)> {
     get(b.addr(), "/api/v1/platforms/arcade/titles")
         .await
         .json()["items"]
@@ -82,7 +84,11 @@ async fn browse(b: &Booted) -> Vec<(String, u64)> {
         .iter()
         .map(|i| {
             let name = i["name"].as_str().expect("name").to_owned();
-            (name, i["have_verified"].as_u64().expect("have"))
+            (
+                name,
+                i["have_verified"].as_u64().expect("have"),
+                i["has_pick"].as_bool().expect("has_pick"),
+            )
         })
         .collect()
 }
@@ -91,8 +97,8 @@ async fn have(b: &Booted, name: &str) -> u64 {
     browse(b)
         .await
         .into_iter()
-        .find(|(n, _)| n == name)
-        .map_or_else(|| panic!("no {name}"), |(_, h)| h)
+        .find(|(n, _, _)| n == name)
+        .map_or_else(|| panic!("no {name}"), |(_, h, _)| h)
 }
 
 fn title_id(b: &Booted, name: &str) -> i64 {
@@ -214,6 +220,17 @@ fn rows(b: &Booted, zip_rel: &str) -> Vec<FileRow> {
         .expect("rows")
 }
 
+/// The state and rom of zip `zip_rel`'s own presence row, if it has one.
+fn presence(b: &Booted, zip_rel: &str) -> Option<(FileState, Option<i64>)> {
+    let zip_rel = zip_rel.to_owned();
+    b.running
+        .app
+        .db
+        .read_blocking(move |c| files::find_by_path(c, &PlatformId("arcade".into()), &zip_rel))
+        .expect("row")
+        .map(|r| (r.state, r.rom_id))
+}
+
 fn states(rows: &[FileRow]) -> Vec<(String, FileState, Option<i64>)> {
     rows.iter()
         .map(|r| (r.rel_path.clone(), r.state, r.rom_id))
@@ -228,9 +245,8 @@ fn log(b: &Booted) -> Vec<imports::LogRow> {
         .expect("log")
 }
 
-/// Triggers the arcade catalogue, which now also runs the presence pass over
-/// `games/mame` and `games/hbmame`. The caller polls for the effect it wants
-/// with `eventually`, since the run may join one already queued or running.
+/// Triggers the arcade catalogue and its presence pass. The caller polls for the
+/// effect it wants, since the run may join one already queued or running.
 async fn rerun_catalogue(b: &Booted) {
     let r = request(
         b.addr(),
@@ -876,18 +892,14 @@ async fn a_user_placed_sibling_zip_is_promoted_once_its_pair_is_imported() {
     );
     rerun_catalogue(&b).await;
     eventually("the presence pass to record the sibling", || async {
-        !rows(&b, "mame/exparent.zip").is_empty()
+        presence(&b, "mame/exparent.zip").is_some()
     })
     .await;
     let parent_rom = zip_rom(&b, "exparent.zip");
     assert_eq!(
-        states(&rows(&b, "mame/exparent.zip")),
-        [(
-            "mame/exparent.zip#b.bin".into(),
-            FileState::Unverified,
-            Some(parent_rom)
-        )],
-        "the presence pass gives verify_siblings a row to promote"
+        presence(&b, "mame/exparent.zip"),
+        Some((FileState::Unverified, Some(parent_rom))),
+        "the presence pass gives verify_siblings one row for the zip to promote"
     );
 
     let rom = zip_rom(&b, "exblast.zip");
@@ -897,13 +909,9 @@ async fn a_user_placed_sibling_zip_is_promoted_once_its_pair_is_imported() {
     settled(&b, id, DownloadState::Done).await;
 
     assert_eq!(
-        states(&rows(&b, "mame/exparent.zip")),
-        [(
-            "mame/exparent.zip#b.bin".into(),
-            FileState::Verified,
-            Some(parent_rom)
-        )],
-        "the user-placed sibling's member is promoted, not left unverified forever"
+        presence(&b, "mame/exparent.zip"),
+        Some((FileState::Verified, Some(parent_rom))),
+        "the user-placed sibling is promoted once the md5 check reads it"
     );
     assert_eq!(have(&b, "Example Blaster").await, 1);
     b.running.shutdown().await.expect("shutdown");

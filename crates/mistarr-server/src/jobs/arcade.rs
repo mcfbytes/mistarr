@@ -248,8 +248,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
     if changed {
         super::remap::enqueue(&ctx.app, Some(vec![PlatformId(PLATFORM.into())])).await;
     }
-    // Runs after titles are committed, so a zip an MRA newly names this run is
-    // already visible to the presence pass's live-MRA lookup.
+    // After titles are committed, so the presence pass sees this run's live MRA zips.
     let stats = presence::run(ctx).await?;
     ctx.progress(json!({
         "done": total,
@@ -259,6 +258,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
         "retired": retired,
         "checked": pass.checked,
         "presence_zips": stats.zips,
+        "presence_recorded": stats.recorded,
         "presence_pruned": stats.pruned,
     }))
     .await

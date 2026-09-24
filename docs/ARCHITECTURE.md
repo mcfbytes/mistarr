@@ -155,8 +155,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    first time every wizard step reports done. Walk each platform's
    `games/<Core>` directory and its other accepted directories, except
    arcade: its zips are never walked as cartridges, since presence and
-   verification there come only from the arcade catalogue's own presence
-   pass, its md5 check, and the import path (PLATFORMS.md "MRA catalogue").
+   verification there come only from the arcade catalogue, its presence
+   pass and md5 check, and the import path (PLATFORMS.md "MRA catalogue").
    A manual scan of `arcade` queues the arcade catalogue instead
    (`POST /system/scan`, API.md "System"). Skip
    while a core is running; the timer goes through the same heavy lane as
@@ -168,7 +168,9 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    members that cannot match anything.
 3. Match by SHA1, then MD5, then CRC32 plus size. Record `verified`,
    `unverified` (no DAT match) or `misnamed` (match but wrong filename).
-4. Scans are resumable: hashed rows are written 256 at a time and the
+4. Rows the walk did not see are deleted at the end, except under a
+   directory that exists but could not be listed, whose rows are kept.
+5. Scans are resumable: hashed rows are written 256 at a time and the
    finished directories at most every 2 s. A directory not yet recorded as
    finished is walked again after a restart, and its unchanged files are not
    hashed again.
@@ -201,18 +203,46 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    most once per run. Placing one of its zips reruns this for every title naming
    that zip. Nothing is ever fetched, rebuilt, merged or split.
 4. Arcade presence pass: after titles are stored and retired, the same job
-   walks every zip directly under `games/mame` and `games/hbmame`, in
-   batches, reading each one's central directory only (member names, sizes
-   and CRC32; never decompressed). A member whose CRC32 and size match a
-   loaded DAT's rom is recorded against it, at CRC32 level rather than the
-   scan's full hash. A member of a zip a live MRA names, that no DAT
-   matches, is recorded `unverified` against the MRA's own zip rom, giving
-   the next import's `verify_siblings` a row to promote once it reads that
-   zip as a sibling; without this row the promotion was a silent no-op. A
-   zip that fails to open gets one bare-path row and a warning, not a
-   failed job. The pass is incremental by each zip's size and mtime, like a
-   scan, and ends by deleting `files` rows for this platform whose zip or
-   member it did not see, so a zip removed from disk drops out of `have`.
+   tracks which zips named by live MRAs are on disk. It takes the set of zips
+   live MRA titles name once per run, `{dir}/{name}` lowercased, each with
+   every live zip rom naming it, then lists `games/mame` and `games/hbmame`
+   and, 500 zips per batch, stats each zip (size and mtime), looks up its
+   existing `files` rows with the reader held for that lookup only, and
+   writes the batch in one transaction. Rows are matched to a zip ignoring
+   ASCII case, as exFAT names files (the `files_rel_lower` index), and keep
+   the spelling they were written with. A member row's zip is its
+   `rel_path` up to the first `.zip#`, in any case. The rules per zip:
+   - Member rows (`dir/name.zip#member`, written by the import path) stand
+     for the zip. While every one carries the zip's mtime they are never
+     touched. When the mtime moved, the zip's central directory is read
+     (never decompressed): a member with the same size and CRC32 keeps its
+     hashes and state and takes the new mtime; one whose size or CRC32
+     changed gets them recorded, loses its md5 and sha1, keeps `rom_id` and
+     becomes `unverified` until an import or md5 check promotes it again; a
+     member no longer in the zip loses its row. A zip that cannot be read is
+     logged and keeps every row as it was.
+   - Otherwise a zip a live MRA names gets one presence row,
+     `dir/name.zip`, `unverified`, no hashes, `rom_id` the lowest live zip
+     rom naming it. It is left as it is while the zip's size and mtime are
+     unchanged and its `rom_id` is one of the live zip roms naming the zip,
+     so a row `verify_siblings` promoted under any of those MRAs stays
+     `verified`; any other change rewrites it `unverified`. A presence row
+     is removed once member rows exist for its zip or no live MRA names the
+     zip, so the rows follow MRAs added and removed even when no zip
+     changed. A second spelling of one zip's presence row is removed.
+   - Only a stat is needed to track presence; the central directory is read
+     only for member rows of a changed zip. A zip that cannot be stated is
+     logged and its rows are kept.
+   A directory that exists but cannot be listed (an I/O or permission
+   error) is logged and skipped for the run: nothing under it is recorded
+   or pruned. The pass then walks each directory's rows a page at a time and
+   deletes those whose zip is neither listed nor on disk, keeping a row
+   whose zip's existence cannot be checked, and clearing their
+   `import_log` references in the same statement set, so a zip removed from
+   disk drops out of `have`. Memory holds the directory listing's names, the
+   live MRA zip set and one batch. It never records a row without a
+   `rom_id`, and never verifies anything itself: a DAT-sourced arcade title
+   is verified only when a zip is imported (PLATFORMS.md "MRA import").
 
 ### Source import
 
@@ -443,7 +473,7 @@ shutdown is left `queued` for this.
 | SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk |
 | Hashing buffer | 256 KiB, one file at a time |
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches |
-| Arcade presence pass | 500 zips per batch, central directory only, never decompressed |
+| Arcade presence pass | 500 zips per batch, stat only unless import rows of a changed zip need its central directory; the listing's names and the live MRA zip set persist across batches |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
 | SPA bundle, gzipped | under 200 KiB |
 | Concurrent client RPC calls | 1, serialised |

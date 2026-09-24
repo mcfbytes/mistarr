@@ -1,6 +1,8 @@
 //! MRA titles on the arcade platform: the catalogue the arcade job writes and the
 //! md5 check it records; see `docs/DATA-MODEL.md` "MRA titles".
 
+use std::collections::HashMap;
+
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
@@ -528,9 +530,8 @@ pub fn titles_naming(
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// The `roms.id` a live MRA title gives zip `name` in `zip_dir`, compared case-insensitively
-/// as exFAT does; the presence pass upserts a `files` row under this id for a zip an MRA
-/// references but no DAT matches, so `verify_siblings` has a row to promote.
+/// Every zip live MRA titles of `platform` name, keyed `{zip_dir}/{name}` in ASCII
+/// lowercase (exFAT compares names that way), to every live `roms.id` naming it, ascending.
 ///
 /// # Errors
 ///
@@ -539,25 +540,23 @@ pub fn titles_naming(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let found = mistarr_server::db::arcade::zip_rom_id(&conn, "arcade", "mame", "exblast.zip");
-/// assert!(found.unwrap().is_none());
+/// assert!(mistarr_server::db::arcade::live_zip_roms(&conn, "arcade").unwrap().is_empty());
 /// ```
-pub fn zip_rom_id(
-    conn: &Connection,
-    platform: &str,
-    zip_dir: &str,
-    name: &str,
-) -> Result<Option<i64>> {
-    Ok(conn
-        .query_row(
-            "SELECT r.id FROM roms r JOIN titles t ON t.id = r.title_id
-             WHERE t.platform_id = ?1 AND t.source = 'mra' AND t.retired = 0 AND r.retired = 0
-               AND lower(COALESCE(r.zip_dir, '')) = lower(?2) AND lower(r.name) = lower(?3)
-             ORDER BY r.id LIMIT 1",
-            params![platform, zip_dir, name],
-            |r| r.get(0),
-        )
-        .optional()?)
+pub fn live_zip_roms(conn: &Connection, platform: &str) -> Result<HashMap<String, Vec<i64>>> {
+    let mut stmt = conn.prepare(
+        "SELECT COALESCE(r.zip_dir, ''), r.name, r.id FROM roms r JOIN titles t ON t.id = r.title_id
+         WHERE t.platform_id = ?1 AND t.source = 'mra' AND t.retired = 0 AND r.retired = 0
+         ORDER BY r.id",
+    )?;
+    let mut rows = stmt.query([platform])?;
+    let mut out: HashMap<String, Vec<i64>> = HashMap::new();
+    while let Some(r) = rows.next()? {
+        let (dir, name, id): (String, String, i64) = (r.get(0)?, r.get(1)?, r.get(2)?);
+        out.entry(format!("{dir}/{name}").to_ascii_lowercase())
+            .or_default()
+            .push(id);
+    }
+    Ok(out)
 }
 
 /// Records whether zip `name` in `zip_dir` of MRA title `title` is on disk.

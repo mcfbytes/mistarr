@@ -242,14 +242,113 @@ pub fn zip_member_rows(
     platform_id: &PlatformId,
     zip_rel: &str,
 ) -> Result<Vec<FileRow>> {
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM files WHERE platform_id = ?1 AND substr(rel_path, 1, ?2) = ?3
+    // `zip#` up to `zip$` (`$` follows `#`) is an index range over the unique key.
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {COLUMNS} FROM files WHERE platform_id = ?1 AND rel_path >= ?2 AND rel_path < ?3
          ORDER BY rel_path"
     ))?;
-    let prefix = format!("{zip_rel}#");
-    let len = i64::try_from(prefix.chars().count()).unwrap_or(i64::MAX);
-    let rows = stmt.query_map(params![platform_id.0, len, prefix], from_row)?;
+    let (from, to) = (format!("{zip_rel}#"), format!("{zip_rel}$"));
+    let rows = stmt.query_map(params![platform_id.0, from, to], from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Rows of zip `zip_rel` matched ignoring ASCII case, as exFAT names files: its own
+/// presence rows (`zip_rel`) and its member rows (`zip_rel#member`), in `rel_path` order.
+/// Always uses the `files_rel_lower` index, never a scan of the platform's rows.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn zip_rows_nocase(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    zip_rel: &str,
+) -> Result<(Vec<FileRow>, Vec<FileRow>)> {
+    let key = zip_rel.to_ascii_lowercase();
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {COLUMNS} FROM files INDEXED BY files_rel_lower
+         WHERE platform_id = ?1 AND lower(rel_path) = ?2 ORDER BY rel_path"
+    ))?;
+    let bare = stmt
+        .query_map(params![platform_id.0, key], from_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {COLUMNS} FROM files INDEXED BY files_rel_lower
+         WHERE platform_id = ?1 AND lower(rel_path) >= ?2 AND lower(rel_path) < ?3
+         ORDER BY rel_path"
+    ))?;
+    let (from, to) = (format!("{key}#"), format!("{key}$"));
+    let members = stmt
+        .query_map(params![platform_id.0, from, to], from_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok((bare, members))
+}
+
+/// Up to `limit` `rel_path`s of `platform_id` under directory `dir` (`dir/...`) that sort
+/// after `after`, in order; a keyset page for walking one directory's rows in bounded memory.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn paths_under(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    dir: &str,
+    after: &str,
+    limit: usize,
+) -> Result<Vec<String>> {
+    // `dir/` up to `dir0` (`0` follows `/`) is every path inside `dir`.
+    let (from, to) = (format!("{dir}/"), format!("{dir}0"));
+    let after = if after < from.as_str() {
+        from.as_str()
+    } else {
+        after
+    };
+    let mut stmt = conn.prepare_cached(
+        "SELECT rel_path FROM files WHERE platform_id = ?1 AND rel_path > ?2 AND rel_path < ?3
+         ORDER BY rel_path LIMIT ?4",
+    )?;
+    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+    let rows = stmt.query_map(params![platform_id.0, after, to, limit], |r| r.get(0))?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Keeps a row whose file changed on disk but whose hashes still apply: only its
+/// `mtime` and `scanned_at` move.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn restamp(conn: &Connection, id: FileId, mtime: i64, now: i64) -> Result<()> {
+    conn.execute(
+        "UPDATE files SET mtime = ?2, scanned_at = ?3 WHERE id = ?1",
+        params![id.0, mtime, now],
+    )?;
+    Ok(())
+}
+
+/// Marks a row whose content changed for re-verification: the new size and CRC32
+/// are recorded, the hashes that no longer apply are cleared, `rom_id` is kept and
+/// the state becomes `unverified` until an import or md5 check promotes it again.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn reverify(
+    conn: &Connection,
+    id: FileId,
+    size: i64,
+    mtime: i64,
+    crc32: &str,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE files SET size = ?2, mtime = ?3, crc32 = ?4, md5 = NULL, sha1 = NULL,
+                          header_rule = NULL, state = 'unverified', scanned_at = ?5
+         WHERE id = ?1",
+        params![id.0, size, mtime, crc32, now],
+    )?;
+    Ok(())
 }
 
 /// Whether rom `rom_id` has a `verified` file.
@@ -364,30 +463,66 @@ pub fn existing_paths(conn: &Connection, platform_id: &PlatformId) -> Result<Vec
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
-/// Deletes every row of `platform_id` whose `rel_path` is not in `keep`.
-/// Returns the number of rows removed.
+/// Rows [`delete_missing`] removes per transaction.
+const DELETE_BATCH: usize = 500;
+
+/// Deletes the rows of `platform_id` at `paths`, first clearing the `import_log`
+/// references to them, since that foreign key has no delete action. Set-based: two
+/// statements for the whole slice; the caller owns the transaction. Returns rows removed.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn delete_paths(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    paths: &[String],
+) -> Result<usize> {
+    if paths.is_empty() {
+        return Ok(0);
+    }
+    let list = serde_json::to_string(paths).map_err(|e| crate::Error::Job(e.to_string()))?;
+    conn.execute(
+        "UPDATE import_log SET file_id = NULL
+         WHERE file_id IN (SELECT id FROM files WHERE platform_id = ?1
+                             AND rel_path IN (SELECT value FROM json_each(?2)))",
+        params![platform_id.0, list],
+    )?;
+    Ok(conn.execute(
+        "DELETE FROM files WHERE platform_id = ?1 AND rel_path IN (SELECT value FROM json_each(?2))",
+        params![platform_id.0, list],
+    )?)
+}
+
+/// Deletes every row of `platform_id` whose `rel_path` is not in `keep` and does not lie
+/// under a directory of `unreadable` (one the caller could not list, so its rows are kept),
+/// through [`delete_paths`] in batches of one transaction each. Returns the rows removed.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn delete_missing(
-    conn: &Connection,
+    conn: &mut Connection,
     platform_id: &PlatformId,
     keep: &[String],
+    unreadable: &[String],
 ) -> Result<usize> {
-    let existing = existing_paths(conn, platform_id)?;
     let keep: std::collections::HashSet<&str> = keep.iter().map(String::as_str).collect();
+    let under = |p: &str| {
+        unreadable.iter().any(|d| {
+            p.strip_prefix(d.as_str())
+                .is_some_and(|r| r.starts_with('/'))
+        })
+    };
+    let gone: Vec<String> = existing_paths(conn, platform_id)?
+        .into_iter()
+        .filter(|p| !keep.contains(p.as_str()) && !under(p))
+        .collect();
     let mut removed = 0;
-    // A row's import_log entry outlives it; clear the dangling reference first,
-    // since import_log.file_id has no ON DELETE action of its own.
-    let mut unlog = conn.prepare(
-        "UPDATE import_log SET file_id = NULL
-         WHERE file_id = (SELECT id FROM files WHERE platform_id = ?1 AND rel_path = ?2)",
-    )?;
-    let mut stmt = conn.prepare("DELETE FROM files WHERE platform_id = ?1 AND rel_path = ?2")?;
-    for path in existing.iter().filter(|p| !keep.contains(p.as_str())) {
-        unlog.execute(params![platform_id.0, path])?;
-        removed += stmt.execute(params![platform_id.0, path])?;
+    for batch in gone.chunks(DELETE_BATCH) {
+        let tx = conn.transaction()?;
+        removed += delete_paths(&tx, platform_id, batch)?;
+        tx.commit()?;
     }
     Ok(removed)
 }
@@ -736,7 +871,7 @@ mod tests {
 
     #[test]
     fn delete_missing_removes_only_absent_paths() {
-        let c = conn();
+        let mut c = conn();
         let pid = PlatformId("nes".into());
         let h = Hashed::default();
         upsert(
@@ -763,17 +898,17 @@ mod tests {
             1,
         )
         .expect("insert");
-        let removed = delete_missing(&c, &pid, &["keep.nes".to_owned()]).expect("delete");
+        let removed = delete_missing(&mut c, &pid, &["keep.nes".to_owned()], &[]).expect("delete");
         assert_eq!(removed, 1);
         assert!(find_by_path(&c, &pid, "keep.nes").expect("find").is_some());
         assert!(find_by_path(&c, &pid, "gone.nes").expect("find").is_none());
     }
 
     /// A file an import placed and logged can still be pruned once it is gone from
-    /// disk: `import_log.file_id` is cleared first, since the FK has no delete action.
+    /// disk: its `import_log.file_id` is cleared, since the FK has no delete action.
     #[test]
     fn delete_missing_clears_the_dangling_import_log_reference() {
-        let c = conn();
+        let mut c = conn();
         let pid = PlatformId("nes".into());
         let h = Hashed::default();
         let id =
@@ -783,7 +918,7 @@ mod tests {
             [id.0],
         )
         .expect("log");
-        let removed = delete_missing(&c, &pid, &[]).expect("delete");
+        let removed = delete_missing(&mut c, &pid, &[], &[]).expect("delete");
         assert_eq!(removed, 1);
         let logged: Option<i64> = c
             .query_row("SELECT file_id FROM import_log", [], |r| r.get(0))
@@ -791,11 +926,201 @@ mod tests {
         assert_eq!(logged, None);
     }
 
+    #[test]
+    fn zip_rows_and_directory_pages_use_key_ranges() {
+        let c = conn();
+        let pid = PlatformId("arcade".into());
+        let h = Hashed::default();
+        for rel in [
+            "mame/a.zip",
+            "mame/a.zip#x.bin",
+            "mame/a.zip#y.bin",
+            "mame/a.zip.zip#z.bin",
+            "mame/b.zip#x.bin",
+            "mame0.txt",
+            "hbmame/c.zip",
+        ] {
+            upsert(&c, &pid, rel, 1, 1, &h, None, FileState::Unverified, 1).expect("insert");
+        }
+        let members: Vec<String> = zip_member_rows(&c, &pid, "mame/a.zip")
+            .expect("members")
+            .into_iter()
+            .map(|r| r.rel_path)
+            .collect();
+        assert_eq!(members, ["mame/a.zip#x.bin", "mame/a.zip#y.bin"]);
+        let first = paths_under(&c, &pid, "mame", "", 3).expect("page");
+        assert_eq!(
+            first,
+            ["mame/a.zip", "mame/a.zip#x.bin", "mame/a.zip#y.bin"]
+        );
+        let rest = paths_under(&c, &pid, "mame", &first[2], 3).expect("page");
+        assert_eq!(rest, ["mame/a.zip.zip#z.bin", "mame/b.zip#x.bin"]);
+    }
+
+    #[test]
+    fn zip_rows_nocase_match_any_spelling() {
+        let c = conn();
+        let pid = PlatformId("arcade".into());
+        let h = Hashed::default();
+        for rel in [
+            "mame/Foo.zip",
+            "mame/Foo.zip#a.bin",
+            "mame/FOO.ZIP#b.bin",
+            "mame/foo2.zip",
+        ] {
+            upsert(&c, &pid, rel, 1, 1, &h, None, FileState::Unverified, 1).expect("insert");
+        }
+        let (bare, members) = zip_rows_nocase(&c, &pid, "mame/foo.zip").expect("rows");
+        let names = |rows: Vec<FileRow>| rows.into_iter().map(|r| r.rel_path).collect::<Vec<_>>();
+        assert_eq!(names(bare), ["mame/Foo.zip"]);
+        assert_eq!(names(members), ["mame/FOO.ZIP#b.bin", "mame/Foo.zip#a.bin"]);
+    }
+
+    #[test]
+    fn restamp_keeps_hashes_and_reverify_clears_them() {
+        let c = conn();
+        let pid = PlatformId("arcade".into());
+        let h = Hashed {
+            crc32: Some("0000abcd"),
+            md5: Some("m"),
+            sha1: Some("s"),
+            header_rule: Some("none"),
+        };
+        let rom = seed_rom_fixture(&c, &pid, "exampleset", "a", &hashes(1), "good").expect("rom");
+        let a = upsert(
+            &c,
+            &pid,
+            "mame/a.zip#a",
+            1,
+            1,
+            &h,
+            Some(rom),
+            FileState::Verified,
+            1,
+        )
+        .expect("insert");
+        let b = upsert(
+            &c,
+            &pid,
+            "mame/a.zip#b",
+            1,
+            1,
+            &h,
+            Some(rom),
+            FileState::Verified,
+            1,
+        )
+        .expect("insert");
+        restamp(&c, a, 9, 2).expect("restamp");
+        reverify(&c, b, 5, 9, "ffff0000", 2).expect("reverify");
+        let a = get(&c, a).expect("get").expect("row");
+        assert_eq!(
+            (a.mtime, a.state, a.md5.as_deref()),
+            (9, FileState::Verified, Some("m"))
+        );
+        let b = get(&c, b).expect("get").expect("row");
+        assert_eq!(
+            (
+                b.size,
+                b.mtime,
+                b.crc32.as_deref(),
+                b.md5,
+                b.sha1,
+                b.rom_id,
+                b.state
+            ),
+            (
+                5,
+                9,
+                Some("ffff0000"),
+                None,
+                None,
+                Some(rom),
+                FileState::Unverified
+            )
+        );
+    }
+
+    #[test]
+    fn delete_paths_removes_a_set_and_clears_its_log_references() {
+        let c = conn();
+        let pid = PlatformId("nes".into());
+        let h = Hashed::default();
+        let gone = upsert(&c, &pid, "a.nes", 1, 1, &h, None, FileState::Verified, 1).expect("a");
+        upsert(&c, &pid, "b.nes", 1, 1, &h, None, FileState::Verified, 1).expect("b");
+        let kept = upsert(&c, &pid, "c.nes", 1, 1, &h, None, FileState::Verified, 1).expect("c");
+        for id in [gone, kept] {
+            c.execute(
+                "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 'placed', '{}')",
+                [id.0],
+            )
+            .expect("log");
+        }
+        let paths = [
+            "a.nes".to_owned(),
+            "b.nes".to_owned(),
+            "nope.nes".to_owned(),
+        ];
+        assert_eq!(delete_paths(&c, &pid, &paths).expect("delete"), 2);
+        assert_eq!(delete_paths(&c, &pid, &[]).expect("delete"), 0);
+        let logged: Vec<Option<i64>> = c
+            .prepare("SELECT file_id FROM import_log ORDER BY id")
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(logged, [None, Some(kept.0)]);
+    }
+
+    #[test]
+    fn delete_missing_keeps_rows_under_an_unreadable_directory() {
+        let mut c = conn();
+        let pid = PlatformId("nes".into());
+        let h = Hashed::default();
+        for rel in ["NES/a.nes", "NES/sub/b.nes", "NESX/c.nes", "d.nes"] {
+            upsert(&c, &pid, rel, 1, 1, &h, None, FileState::Verified, 1).expect("insert");
+        }
+        let removed = delete_missing(&mut c, &pid, &[], &["NES".to_owned()]).expect("delete");
+        assert_eq!(removed, 2, "only rows outside NES/ go");
+        assert!(find_by_path(&c, &pid, "NES/a.nes").expect("find").is_some());
+        assert!(find_by_path(&c, &pid, "NES/sub/b.nes")
+            .expect("find")
+            .is_some());
+        assert!(find_by_path(&c, &pid, "NESX/c.nes")
+            .expect("find")
+            .is_none());
+    }
+
+    #[test]
+    fn delete_missing_spans_several_batches() {
+        let mut c = conn();
+        let pid = PlatformId("nes".into());
+        let h = Hashed::default();
+        let n = DELETE_BATCH * 2 + 7;
+        for i in 0..n {
+            upsert(
+                &c,
+                &pid,
+                &format!("g{i}.nes"),
+                1,
+                1,
+                &h,
+                None,
+                FileState::Unverified,
+                1,
+            )
+            .expect("insert");
+        }
+        assert_eq!(delete_missing(&mut c, &pid, &[], &[]).expect("delete"), n);
+        assert!(existing_paths(&c, &pid).expect("paths").is_empty());
+    }
+
     /// `keep` is deduplicated through a set rather than scanned per row, so a
     /// repeated entry does not change the count removed.
     #[test]
     fn delete_missing_keep_lookup_is_set_based() {
-        let c = conn();
+        let mut c = conn();
         let pid = PlatformId("nes".into());
         let h = Hashed::default();
         for i in 0..50 {
@@ -815,7 +1140,7 @@ mod tests {
         let keep: Vec<String> = std::iter::repeat_n("game0.nes".to_owned(), 10)
             .chain(std::iter::repeat_n("game1.nes".to_owned(), 5))
             .collect();
-        let removed = delete_missing(&c, &pid, &keep).expect("delete");
+        let removed = delete_missing(&mut c, &pid, &keep, &[]).expect("delete");
         assert_eq!(removed, 48);
         assert!(find_by_path(&c, &pid, "game0.nes").expect("find").is_some());
         assert!(find_by_path(&c, &pid, "game1.nes").expect("find").is_some());

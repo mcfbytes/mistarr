@@ -457,8 +457,7 @@ fn spawn_tasks(app: &Arc<AppState>, scan_interval: u32) -> Vec<tokio::task::Join
 }
 
 /// Re-enqueues each platform's scan left unfinished by a previous run, skipping
-/// arcade: its progress is never saved, but a stale row from an older build is
-/// defensively skipped here too.
+/// arcade, which has no library scan whatever `scan_progress` holds.
 async fn resume_scans(
     app: &Arc<AppState>,
     unfinished: Vec<mistarr_core::PlatformId>,

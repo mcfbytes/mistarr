@@ -399,6 +399,39 @@ fn counts_report_arcade_sets_failing_check_or_partly_present() {
     assert_eq!(arcade.partial, 1);
 }
 
+/// An MRA title never checked (its zip is absent) leaves every aggregate NULL
+/// unless each is wrapped in `COALESCE`; the counts still read as zeros.
+#[test]
+fn counts_read_zero_for_an_unchecked_mra_title_with_its_zip_absent() {
+    let c = conn();
+    let v = crate::db::arcade::mra_version(&c, "arcade", 1).expect("version");
+    crate::db::arcade::upsert_title(
+        &c,
+        "arcade",
+        v,
+        &arcade_title("Example Blaster", "exblast"),
+        &[crate::db::arcade::MraZip {
+            name: "exblast.zip",
+            zip_dir: "mame",
+            md5: None,
+            present: false,
+        }],
+    )
+    .expect("upsert");
+    let counts = counts(&c, &[]).expect("counts");
+    assert_eq!(
+        counts.get("arcade"),
+        Some(&Counts {
+            titles: 1,
+            have: 0,
+            wanted: 0,
+            unmatched_files: 0,
+            failing_check: 0,
+            partial: 0
+        })
+    );
+}
+
 #[test]
 fn a_refused_check_does_not_count_as_failing() {
     let c = conn();
