@@ -76,8 +76,9 @@
       return;
     }
     try {
+      // Upload only enqueues the import; the wizard store updates itself
+      // from the source.changed event once it lands.
       await api.uploadSource(file);
-      await loadWizard();
     } catch (err) {
       showToast(errorMessage(err));
     } finally {
@@ -95,7 +96,6 @@
     try {
       await api.addMagnet(uri);
       sourceMagnet = '';
-      await loadWizard();
     } catch (err) {
       showToast(errorMessage(err));
     }

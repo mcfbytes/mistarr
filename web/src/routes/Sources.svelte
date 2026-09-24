@@ -19,6 +19,13 @@
   let magnet = $state('');
   let fileInput: HTMLInputElement | undefined;
 
+  // The server may format a ratio as "1.0"; compare the parsed number so
+  // the select shows the matching option regardless of formatting.
+  function seedSelectValue(policy: string): string {
+    const ratio = policy.startsWith('ratio:') ? parseFloat(policy.slice('ratio:'.length)) : null;
+    return ratio !== null && Number.isFinite(ratio) ? `ratio:${ratio}` : policy;
+  }
+
   async function bind(id: number, platformId: string): Promise<void> {
     if (!platformId) {
       return;
@@ -173,7 +180,7 @@
             <td>{source.matched_count}</td>
             <td>
               <select
-                value={source.seed_policy}
+                value={seedSelectValue(source.seed_policy)}
                 onchange={(e) => setSeedPolicy(source.id, (e.currentTarget as HTMLSelectElement).value as SeedPolicy)}
               >
                 <option value="none">None</option>

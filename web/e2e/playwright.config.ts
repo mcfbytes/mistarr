@@ -7,6 +7,7 @@ const chromiumPath = process.env.PLAYWRIGHT_CHROMIUM_PATH;
 
 export default defineConfig({
   testDir: here,
+  testIgnore: /live\.spec\.ts/,
   outputDir: `${here}/out/artifacts`,
   fullyParallel: false,
   reporter: [['list']],

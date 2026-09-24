@@ -16,27 +16,32 @@
 
   const isMock = import.meta.env.VITE_MOCK === '1';
   let apiKeyInput = $state('');
+  let wizardRetryMs = 1000;
 
+  // Keeps retrying with backoff on any failure but 401, so a slow-starting
+  // server still gets the SSE stream and eventually the wizard redirect.
   async function checkFirstRun(): Promise<void> {
     try {
       await loadWizard();
     } catch (err) {
       if (err instanceof ApiError && err.status === 401) {
         setUnauthorized(true);
+        return;
       }
+      setTimeout(() => void checkFirstRun(), wizardRetryMs);
+      wizardRetryMs = Math.min(wizardRetryMs * 2, 30000);
       return;
     }
+    wizardRetryMs = 1000;
     setUnauthorized(false);
-    startEvents();
     const wizard = getWizard();
     if (wizard && (!wizard.paths || wizard.open_on_start) && getRoute().name !== 'wizard') {
       navigate('/wizard');
     }
   }
 
-  if (isMock) {
-    startEvents();
-  } else {
+  startEvents();
+  if (!isMock) {
     void checkFirstRun();
   }
 

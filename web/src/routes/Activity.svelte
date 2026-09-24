@@ -61,7 +61,7 @@
         {#if d.state === 'failed'}
           <button onclick={() => retry(d.id)}>Retry</button>
         {/if}
-        {#if !['done', 'cancelled', 'importing'].includes(d.state)}
+        {#if ['wanted', 'queued', 'transferring', 'checking'].includes(d.state)}
           <button onclick={() => cancel(d.id)}>Cancel</button>
         {/if}
       </div>
