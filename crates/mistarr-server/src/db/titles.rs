@@ -402,7 +402,8 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
     let mut out: HashMap<String, Counts> = HashMap::new();
     let hidden_json = json(hidden);
     let mut stmt = conn.prepare(&format!(
-        "SELECT g.platform_id, COUNT(*), SUM(g.have_verified > 0), SUM(g.wanted > 0)
+        "SELECT g.platform_id, COUNT(*), COALESCE(SUM(g.have_verified > 0), 0),
+                COALESCE(SUM(g.wanted > 0), 0)
          FROM title_groups g
          WHERE {MRA_ONLY} AND EXISTS (
            SELECT 1 FROM titles v WHERE v.parent_id = g.parent_id AND v.retired = 0
@@ -425,13 +426,12 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
     while let Some(r) = rows.next()? {
         out.entry(r.get(0)?).or_default().unmatched_files = unsigned(r.get(1)?);
     }
-    // Per visible MRA title: whether it is failing its md5 check or partly present.
-    // Grouped by clone group and joined to title_groups' own `have` so a group with
-    // any have-verified visible variant never also counts as failing or partial.
+    // Per clone group of visible MRA titles: any failing its md5 check, any partly present.
+    // A NULL `mra_check` (never run) is not failing; COALESCE keeps each aggregate non-NULL.
     let mut stmt = conn.prepare(
         "WITH mra AS (
            SELECT t.platform_id, t.parent_id,
-                  MAX(t.mra_check IN ('mismatch', 'missing_part')) AS any_failing,
+                  MAX(COALESCE(t.mra_check IN ('mismatch', 'missing_part'), 0)) AS any_failing,
                   MAX(EXISTS (SELECT 1 FROM roms r
                               WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 1)
                       AND EXISTS (SELECT 1 FROM roms r
@@ -443,8 +443,8 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
            GROUP BY t.platform_id, t.parent_id
          )
          SELECT g.platform_id,
-                SUM(m.any_failing AND g.have_verified = 0),
-                SUM(m.any_partial AND g.have_verified = 0)
+                COALESCE(SUM(m.any_failing AND g.have_verified = 0), 0),
+                COALESCE(SUM(m.any_partial AND g.have_verified = 0), 0)
          FROM mra m JOIN title_groups g ON g.platform_id = m.platform_id AND g.parent_id = m.parent_id
          GROUP BY g.platform_id",
     )?;
