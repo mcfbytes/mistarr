@@ -30,8 +30,9 @@
 
   const platform = $derived(findPlatform(platformId));
   const canStartCore = $derived(platform !== undefined && platform.kind !== 'arcade');
+  let statusFailed = $state(false);
   const coreBlocker = $derived(
-    launchBlocker(getStatus()?.launch) ??
+    launchBlocker(getStatus()?.launch, statusFailed) ??
       (platform && !platform.core_present ? 'No core for this platform is installed.' : null)
   );
   let coreBusy = $state(false);
@@ -78,7 +79,9 @@
     void loadPlatforms();
     void loadHideList();
     if (!getStatus()) {
-      void loadStatus().catch(() => undefined);
+      void loadStatus().catch(() => {
+        statusFailed = true;
+      });
     }
   });
 

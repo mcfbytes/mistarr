@@ -2,27 +2,36 @@
 //! `docs/PLATFORMS.md` "Launch parameters" and `docs/ARCHITECTURE.md` "Launching".
 
 use std::fmt::Write as _;
-use std::fs::File;
-use std::io::Write as _;
+use std::fs::{File, OpenOptions};
+use std::io::{Read as _, Write as _};
 use std::os::unix::fs::FileTypeExt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, PoisonError};
 
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 
 use crate::corename::{rbf_files, RbfFile};
-use crate::platforms::{for_core, Kind, Platform};
+use crate::platforms::{Kind, Platform};
 use crate::{Error, Result};
 
 /// The FIFO MiSTer Main reads commands from.
 pub const COMMAND_PATH: &str = "/dev/MiSTer_cmd";
 
-/// File name of the MGL written for each game launch, overwritten every time.
-pub const MGL_FILE: &str = "mistarr.mgl";
+/// Prefix of the MGL files written for game launches, one per launch.
+pub const MGL_PREFIX: &str = "mistarr-";
+
+/// How many launch MGL files are kept; older ones are removed after each write.
+pub const MGL_KEEP: usize = 3;
+
+static MGL_SEQ: AtomicU32 = AtomicU32::new(0);
 
 /// Longest command line written in one call; POSIX makes writes up to `PIPE_BUF` atomic.
 const PIPE_BUF: usize = 4096;
+
+/// Largest cue sheet read when checking its `FILE` entries.
+const CUE_LIMIT: u64 = 64 * 1024;
 
 /// How MiSTer Main hands a game file to a core: the `type` of an MGL `<file>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,7 +58,7 @@ impl LoadMode {
     }
 }
 
-/// The per-platform `<file>` parameters of an MGL.
+/// The `<file>` parameters of an MGL for one core.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaunchSlot {
     /// Load or mount.
@@ -58,8 +67,19 @@ pub struct LaunchSlot {
     pub index: u8,
     /// Seconds Main waits after loading the core before handing it the file.
     pub delay: u8,
-    /// The values must be confirmed against a live board.
+    /// The values must be confirmed against a live board; see `BOARD_LAUNCH` in the platform tests.
     pub verify_on_board: bool,
+}
+
+/// A core that can launch a platform's games, with the parameters that belong to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchCore {
+    /// The `.rbf` name without date suffix, compared case-insensitively.
+    pub name: &'static str,
+    /// The core may live under `_Arcade`; other rows never pick an `_Arcade` file.
+    pub arcade_dir: bool,
+    /// The MGL parameters for this core.
+    pub slot: LaunchSlot,
 }
 
 /// An installed core chosen to launch a platform.
@@ -69,11 +89,14 @@ pub struct CoreFile {
     pub path: PathBuf,
     /// The MGL `<rbf>` value: the path relative to the SD root without date or extension.
     pub mgl_rbf: String,
+    /// The MGL parameters of the chosen core.
+    pub slot: LaunchSlot,
 }
 
-/// The newest installed core that loads `platform`, by the `_YYYYMMDD` date in its
-/// name; undated files rank below dated ones and ties go to the shorter path.
-/// Cores under `_Arcade` are never chosen, since arcade games start from their MRA.
+/// The core that launches `platform`: the first of [`Platform::launch`] with an
+/// installed `.rbf`, and of those the newest by the `_YYYYMMDD` date in its name.
+/// Undated files rank below dated ones and ties go to the shorter path. An
+/// `_Arcade` file is chosen only for a core whose row names it with `arcade_dir`.
 ///
 /// ```
 /// let root = std::env::temp_dir().join("mistarr-doc-find-core");
@@ -85,19 +108,22 @@ pub struct CoreFile {
 /// ```
 #[must_use]
 pub fn find_core(root: &Path, platform: &Platform) -> Option<CoreFile> {
-    let best = rbf_files(root)
-        .into_iter()
-        .filter(|f| !f.arcade && for_core(&f.name).iter().any(|p| p.id == platform.id))
-        .max_by(|a, b| {
-            a.date
-                .cmp(&b.date)
-                .then_with(|| b.path.as_os_str().len().cmp(&a.path.as_os_str().len()))
-                .then_with(|| b.path.cmp(&a.path))
-        })?;
-    core_file(root, best)
+    let files = rbf_files(root);
+    platform.launch.iter().find_map(|core| {
+        let best = files
+            .iter()
+            .filter(|f| f.name.eq_ignore_ascii_case(core.name) && (core.arcade_dir || !f.arcade))
+            .max_by(|a, b| {
+                a.date
+                    .cmp(&b.date)
+                    .then_with(|| b.path.as_os_str().len().cmp(&a.path.as_os_str().len()))
+                    .then_with(|| b.path.cmp(&a.path))
+            })?;
+        core_file(root, best, core.slot)
+    })
 }
 
-fn core_file(root: &Path, rbf: RbfFile) -> Option<CoreFile> {
+fn core_file(root: &Path, rbf: &RbfFile, slot: LaunchSlot) -> Option<CoreFile> {
     let dir = rbf.path.parent()?.strip_prefix(root).ok()?;
     let mut mgl_rbf = String::new();
     for part in dir.components() {
@@ -106,33 +132,61 @@ fn core_file(root: &Path, rbf: RbfFile) -> Option<CoreFile> {
     }
     mgl_rbf.push_str(&rbf.name);
     Some(CoreFile {
-        path: rbf.path,
+        path: rbf.path.clone(),
         mgl_rbf,
+        slot,
     })
 }
 
-/// The path, relative to `games/`, that loads a title from its files' `rel_path`s:
-/// the cue sheet or single image of a disc, the zip or directory of a romset, the
-/// file of a cartridge. A zip member `a.zip#b.nes` becomes `a.zip/b.nes`, which
-/// Main opens inside the zip.
+/// Splits a `files.rel_path` at the first `.zip#`, compared case-insensitively,
+/// into the zip and the member inside it; any other `#` is part of a name.
+///
+/// ```
+/// use mistarr_mister::launch::split_zip_member;
+/// assert_eq!(split_zip_member("NES/a.ZIP#b.nes"), ("NES/a.ZIP", Some("b.nes")));
+/// assert_eq!(split_zip_member("NES/No #1.nes"), ("NES/No #1.nes", None));
+/// ```
+#[must_use]
+pub fn split_zip_member(rel_path: &str) -> (&str, Option<&str>) {
+    let lower = rel_path.to_ascii_lowercase();
+    match lower.find(".zip#") {
+        Some(at) => (&rel_path[..at + 4], Some(&rel_path[at + 5..])),
+        None => (rel_path, None),
+    }
+}
+
+/// The path, relative to `games/`, that loads a title from its files' `rel_path`s,
+/// reading cue sheets under `games`:
+/// - a disc loads the first cue sheet whose every `FILE` entry exists beside it,
+///   else its `.chd` or `.iso`;
+/// - a romset loads its zip or its set directory, the first folder under the platform's;
+/// - anything else loads its first file, a zip member `a.zip#b.nes` as `a.zip/b.nes`,
+///   which Main opens inside the zip.
 ///
 /// ```
 /// use mistarr_mister::launch::game_path;
 /// use mistarr_mister::platforms::Kind;
-/// assert_eq!(game_path(Kind::Cartridge, &["NES/a.zip#b.nes"]).as_deref(), Some("NES/a.zip/b.nes"));
-/// assert_eq!(game_path(Kind::Disc, &["PSX/G/g (Track 1).bin", "PSX/G/g.cue"]).as_deref(), Some("PSX/G/g.cue"));
+/// let games = std::path::Path::new("/nonexistent");
+/// assert_eq!(game_path(Kind::Cartridge, games, &["NES/a.zip#b.nes"]).as_deref(), Some("NES/a.zip/b.nes"));
+/// assert_eq!(game_path(Kind::Romset, games, &["NeoGeo/set"]).as_deref(), Some("NeoGeo/set"));
 /// ```
 #[must_use]
-pub fn game_path(kind: Kind, rel_paths: &[&str]) -> Option<String> {
+pub fn game_path(kind: Kind, games: &Path, rel_paths: &[&str]) -> Option<String> {
     match kind {
-        Kind::Disc => ["cue", "chd", "iso"].iter().find_map(|ext| {
-            rel_paths
-                .iter()
-                .find(|p| has_extension(p, ext))
-                .map(|p| p.replace('#', "/"))
-        }),
+        Kind::Disc => rel_paths
+            .iter()
+            .find(|p| has_extension(p, "cue") && cue_complete(&games.join(p)))
+            .or_else(|| {
+                ["chd", "iso"]
+                    .iter()
+                    .find_map(|ext| rel_paths.iter().find(|p| has_extension(p, ext)))
+            })
+            .map(|p| (*p).to_owned()),
         Kind::Romset => rel_paths.first().map(|p| romset_container(p)),
-        _ => rel_paths.first().map(|p| p.replace('#', "/")),
+        _ => rel_paths.first().map(|p| match split_zip_member(p) {
+            (zip, Some(member)) => format!("{zip}/{member}"),
+            (file, None) => file.to_owned(),
+        }),
     }
 }
 
@@ -141,20 +195,58 @@ fn has_extension(path: &str, ext: &str) -> bool {
         .is_some_and(|(_, e)| e.eq_ignore_ascii_case(ext))
 }
 
-/// `NeoGeo/set.zip#member` to `NeoGeo/set.zip`, `NeoGeo/set/member` to `NeoGeo/set`.
+/// The zip, or the set directory right below the platform's folder: a directory
+/// romset is recorded as `NeoGeo/set` and any deeper member path keeps that prefix.
 fn romset_container(rel_path: &str) -> String {
-    if let Some((zip, _)) = rel_path.split_once('#') {
+    if let (zip, Some(_)) = split_zip_member(rel_path) {
         return zip.to_owned();
     }
     let mut parts = rel_path.splitn(3, '/');
-    match (parts.next(), parts.next(), parts.next()) {
-        (Some(top), Some(set), Some(_)) => format!("{top}/{set}"),
+    match (parts.next(), parts.next()) {
+        (Some(top), Some(set)) => format!("{top}/{set}"),
         _ => rel_path.to_owned(),
     }
 }
 
+/// Whether the cue sheet at `cue` names at least one file and every file it names
+/// exists beside it; names that are absolute or leave the directory never count.
+fn cue_complete(cue: &Path) -> bool {
+    let Some(dir) = cue.parent() else {
+        return false;
+    };
+    let Ok(file) = File::open(cue) else {
+        return false;
+    };
+    let mut text = Vec::new();
+    if file.take(CUE_LIMIT).read_to_end(&mut text).is_err() {
+        return false;
+    }
+    let names = cue_files(&String::from_utf8_lossy(&text));
+    !names.is_empty()
+        && names.iter().all(|name| {
+            let rel = Path::new(name);
+            rel.components().all(|c| matches!(c, Component::Normal(_))) && dir.join(rel).is_file()
+        })
+}
+
+/// The file names of a cue sheet's `FILE` lines, quoted or bare.
+fn cue_files(text: &str) -> Vec<String> {
+    text.lines()
+        .filter_map(|line| {
+            let line = line.trim_start();
+            let rest = line.get(..5).filter(|k| k.eq_ignore_ascii_case("FILE "))?;
+            let rest = line[rest.len()..].trim_start();
+            let name = match rest.strip_prefix('"') {
+                Some(quoted) => quoted.split('"').next()?,
+                None => rest.split_whitespace().next()?,
+            };
+            Some(name.to_owned()).filter(|n| !n.is_empty())
+        })
+        .collect()
+}
+
 /// Builds an MGL document that starts core `rbf` (see [`CoreFile::mgl_rbf`]) and
-/// hands it the absolute path `game` with the platform's `slot` parameters.
+/// hands it the absolute path `game` with that core's `slot` parameters.
 ///
 /// # Errors
 ///
@@ -163,7 +255,7 @@ fn romset_container(rel_path: &str) -> String {
 ///
 /// ```
 /// use mistarr_mister::launch::{mgl, LaunchSlot, LoadMode};
-/// let slot = LaunchSlot { mode: LoadMode::File, index: 0, delay: 2, verify_on_board: true };
+/// let slot = LaunchSlot { mode: LoadMode::File, index: 1, delay: 2, verify_on_board: true };
 /// let doc = mgl("_Console/NES", slot, std::path::Path::new("/media/fat/games/NES/A & B.nes")).unwrap();
 /// assert!(doc.contains(r#"path="../../../../../media/fat/games/NES/A &amp; B.nes""#));
 /// ```
@@ -211,8 +303,9 @@ fn escape(s: &str) -> String {
     out
 }
 
-/// Writes `doc` to [`MGL_FILE`] in `dir` through a temporary file and a rename,
-/// so Main never reads a half-written document. Returns the file's path.
+/// Writes `doc` to a new `mistarr-<millis>-<seq>.mgl` in `dir`, created exclusively so
+/// no earlier launch's file is ever rewritten, then removes all but the newest
+/// [`MGL_KEEP`] such files. Returns the new file's path.
 ///
 /// # Errors
 ///
@@ -222,14 +315,44 @@ fn escape(s: &str) -> String {
 /// let dir = std::env::temp_dir().join("mistarr-doc-mgl");
 /// std::fs::create_dir_all(&dir).unwrap();
 /// let path = mistarr_mister::launch::write_mgl(&dir, "<mistergamedescription/>").unwrap();
-/// assert!(path.ends_with("mistarr.mgl"));
+/// assert!(path.extension().is_some_and(|e| e == "mgl"));
 /// ```
 pub fn write_mgl(dir: &Path, doc: &str) -> Result<PathBuf> {
-    let path = dir.join(MGL_FILE);
-    let tmp = dir.join(format!("{MGL_FILE}.tmp"));
-    std::fs::write(&tmp, doc)?;
-    std::fs::rename(&tmp, &path)?;
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    let (path, mut file) = loop {
+        // A process-wide sequence keeps names unique and in creation order within a millisecond.
+        let n = MGL_SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("{MGL_PREFIX}{millis:016}-{n:010}.mgl"));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(file) => break (path, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e.into()),
+        }
+    };
+    file.write_all(doc.as_bytes())?;
+    file.sync_all()?;
+    prune_mgl(dir);
     Ok(path)
+}
+
+/// Removes launch MGL files beyond the newest [`MGL_KEEP`]; names sort by creation.
+fn prune_mgl(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(std::result::Result::ok)
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with(MGL_PREFIX) && has_extension(n, "mgl"))
+        .collect();
+    names.sort_unstable();
+    let excess = names.len().saturating_sub(MGL_KEEP);
+    for old in &names[..excess] {
+        // A stale MGL that cannot be removed is harmless; the next launch tries again.
+        let _ = std::fs::remove_file(dir.join(old));
+    }
 }
 
 /// The `load_core` command line for an `.rbf`, `.mra` or `.mgl` at absolute `path`.

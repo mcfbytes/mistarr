@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use axum::http::StatusCode;
 use mistarr_core::{HashSet, PlatformId};
 use mistarr_mister::launch::{FakeOutcome, RecordingSink};
@@ -67,10 +69,11 @@ async fn a_verified_game_starts_through_an_mgl() {
         launched.file.as_deref(),
         Some("NES/Example Quest (USA).nes")
     );
-    let mgl = dir.path().join("mistarr.mgl");
+    let mgl = only_mgl(dir.path());
     assert_eq!(sink.lines(), [format!("load_core {}\n", mgl.display())]);
     let doc = std::fs::read_to_string(&mgl).expect("mgl");
     assert!(doc.contains("<rbf>_Console/NES</rbf>"), "{doc}");
+    assert!(doc.contains(r#"delay="2" type="f" index="1""#), "{doc}");
     let game = dir.path().join("games/NES/Example Quest (USA).nes");
     assert!(
         doc.contains(&format!("path=\"../../../../..{}\"", game.display())),
@@ -78,11 +81,30 @@ async fn a_verified_game_starts_through_an_mgl() {
     );
 }
 
+/// The one launch MGL written into `dir`.
+fn only_mgl(dir: &FsPath) -> PathBuf {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .expect("list")
+        .map(|e| e.expect("entry").path())
+        .filter(|p| p.extension().is_some_and(|e| e == "mgl"))
+        .collect();
+    found.sort();
+    found.pop().expect("an MGL was written")
+}
+
 #[tokio::test]
 async fn a_disc_starts_from_its_cue() {
     let (dir, app) = state();
     recording(&app);
     touch(dir.path(), "_Console/PSX_20240101.rbf");
+    let disc = dir.path().join("games/PSX/Example Disc");
+    std::fs::create_dir_all(&disc).expect("mkdir");
+    std::fs::write(
+        disc.join("Example Disc.cue"),
+        "FILE \"Example Disc (Track 1).bin\" BINARY\n",
+    )
+    .expect("cue");
+    std::fs::write(disc.join("Example Disc (Track 1).bin"), b"").expect("bin");
     let id = seed(
         &app,
         "psx",
@@ -100,8 +122,64 @@ async fn a_disc_starts_from_its_cue() {
         launched.file.as_deref(),
         Some("PSX/Example Disc/Example Disc.cue")
     );
-    let doc = std::fs::read_to_string(dir.path().join("mistarr.mgl")).expect("mgl");
+    let doc = std::fs::read_to_string(only_mgl(dir.path())).expect("mgl");
     assert!(doc.contains("type=\"s\""), "{doc}");
+}
+
+#[tokio::test]
+async fn a_disc_with_a_misnamed_track_is_refused() {
+    let (dir, app) = state();
+    let sink = recording(&app);
+    touch(dir.path(), "_Console/PSX_20240101.rbf");
+    let id = seed(
+        &app,
+        "psx",
+        &[
+            ("PSX/D/d.bin", FileState::Misnamed),
+            ("PSX/D/d.cue", FileState::Verified),
+        ],
+    )
+    .await;
+    let err = launch_title(&app, id).await.expect_err("misnamed track");
+    assert_eq!(err.status, StatusCode::CONFLICT);
+    assert!(sink.lines().is_empty());
+}
+
+#[tokio::test]
+async fn a_second_launch_within_the_gap_is_busy() {
+    let (dir, app) = crate::app::testutil::state_with(|o| o.launch_gap = Duration::from_secs(60));
+    let sink = recording(&app);
+    touch(dir.path(), "_Console/NES_20240101.rbf");
+    let id = seed(&app, "nes", &[("NES/a.nes", FileState::Verified)]).await;
+    launch_core(&app, "nes").await.expect("first");
+    let err = launch_title(&app, id).await.expect_err("busy");
+    assert_eq!((err.status, err.code), (StatusCode::CONFLICT, "busy"));
+    assert_eq!(sink.lines().len(), 1);
+}
+
+#[tokio::test]
+async fn failed_launches_do_not_hold_the_gap() {
+    let (dir, app) = crate::app::testutil::state_with(|o| o.launch_gap = Duration::from_secs(60));
+    recording(&app);
+    assert_eq!(status(launch_core(&app, "nes").await), StatusCode::CONFLICT);
+    touch(dir.path(), "_Console/NES_20240101.rbf");
+    assert_eq!(status(launch_core(&app, "nes").await), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn an_unwritable_launch_dir_is_an_internal_error() {
+    let (dir, app) =
+        crate::app::testutil::state_with(|o| o.launch_dir = "/nonexistent/launch".into());
+    let sink = recording(&app);
+    touch(dir.path(), "_Console/NES_20240101.rbf");
+    let id = seed(&app, "nes", &[("NES/a.nes", FileState::Verified)]).await;
+    let err = launch_title(&app, id).await.expect_err("no dir");
+    assert_eq!(
+        (err.status, err.code),
+        (StatusCode::INTERNAL_SERVER_ERROR, "internal")
+    );
+    assert_eq!(err.message, "the launch file could not be written");
+    assert!(sink.lines().is_empty());
 }
 
 #[tokio::test]
@@ -175,6 +253,28 @@ async fn an_mra_title_loads_its_mra() {
         StatusCode::CONFLICT,
         "no MRA on disk"
     );
+    touch(dir.path(), "outside.mra");
+    app.db
+        .write(move |c| {
+            c.execute(
+                "UPDATE titles SET mra_path = '../outside.mra' WHERE id = ?1",
+                [id.0],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("path");
+    assert_eq!(status(launch_title(&app, id).await), StatusCode::CONFLICT);
+    app.db
+        .write(move |c| {
+            c.execute(
+                "UPDATE titles SET mra_path = 'Example Blaster.mra' WHERE id = ?1",
+                [id.0],
+            )?;
+            Ok(())
+        })
+        .await
+        .expect("path");
     touch(dir.path(), "_Arcade/Example Blaster.mra");
     let launched = launch_title(&app, id).await.expect("launch");
     assert_eq!(launched.core, "_Arcade/Example Blaster.mra");

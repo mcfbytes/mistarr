@@ -367,6 +367,7 @@ fn options(dir: &Path) -> Options {
         poll_backoff: Duration::from_secs(5),
         command_path: dir.join("MiSTer_cmd"),
         launch_dir: dir.to_path_buf(),
+        launch_gap: Duration::ZERO,
     }
 }
 

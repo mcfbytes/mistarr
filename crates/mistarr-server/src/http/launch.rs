@@ -1,16 +1,19 @@
 //! The launch routes of `docs/API.md` "Launching": a title or a bare core, through
 //! MiSTer Main's command FIFO. Paths come from the database and the SD card only.
 
-use std::path::{Path as FsPath, PathBuf};
+use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::Arc;
+use std::time::Instant;
 
 use axum::extract::rejection::PathRejection;
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use mistarr_mister::launch::{self as mister, CommandSink};
 use mistarr_mister::platforms::{self as table, Kind};
 use serde::Serialize;
+use tokio::sync::MutexGuard;
 
 use super::ApiError;
 use crate::app::AppState;
@@ -77,11 +80,13 @@ fn command_error(e: mistarr_mister::Error) -> ApiError {
 ///
 /// # Errors
 ///
-/// [`ApiError`] 404 for an unknown title, 409 when launching is off or the title
-/// cannot start (not in the collection, a BIOS entry, no core or MRA on the card),
-/// 503 when MiSTer Main cannot take the command.
+/// [`ApiError`] 404 for an unknown title; 409 when launching is off, another
+/// launch was just sent (`busy`) or the title cannot start (not in the collection,
+/// a disc with a track that is not `verified`, a BIOS entry, no core or MRA on the
+/// card); 503 when MiSTer Main cannot take the command; 500 when the MGL cannot be written.
 pub async fn launch_title(app: &AppState, id: TitleId) -> Result<Launched, ApiError> {
     let sink = sink(app)?;
+    let mut last = exclusive(app).await?;
     let title = app
         .db
         .read(move |c| launch::title(c, id))
@@ -97,23 +102,38 @@ pub async fn launch_title(app: &AppState, id: TitleId) -> Result<Launched, ApiEr
     }
     let paths = app.config().paths;
     let dir = app.options.launch_dir.clone();
-    blocking(move || {
+    let launched = blocking(move || {
         let launched = plan_title(&title, &paths.root, &paths.games, &dir)?;
         sink.send(&launched.1).map_err(command_error)?;
         Ok(launched.0)
     })
-    .await
+    .await?;
+    *last = Some(Instant::now());
+    Ok(launched)
+}
+
+/// Holds the launch lock for the whole plan and send, refusing with 409 `busy`
+/// while the last launch is younger than `options.launch_gap`.
+async fn exclusive(app: &AppState) -> Result<MutexGuard<'_, Option<Instant>>, ApiError> {
+    let last = app.launch_lock.lock().await;
+    if last.is_some_and(|t| t.elapsed() < app.options.launch_gap) {
+        return Err(ApiError::busy(
+            "a launch was just sent; wait a few seconds before the next",
+        ));
+    }
+    Ok(last)
 }
 
 /// Starts the newest installed core of platform `id` with no game.
 ///
 /// # Errors
 ///
-/// [`ApiError`] 404 for an unknown platform, 409 when launching is off, no core
-/// for it is installed or it is the arcade platform, 503 when MiSTer Main cannot
-/// take the command.
+/// [`ApiError`] 404 for an unknown platform, 409 when launching is off, another
+/// launch was just sent (`busy`), no core for it is installed or it is the arcade
+/// platform, 503 when MiSTer Main cannot take the command.
 pub async fn launch_core(app: &AppState, id: &str) -> Result<Launched, ApiError> {
     let sink = sink(app)?;
+    let mut last = exclusive(app).await?;
     let lookup = id.to_owned();
     let known = app
         .db
@@ -129,7 +149,7 @@ pub async fn launch_core(app: &AppState, id: &str) -> Result<Launched, ApiError>
         ));
     }
     let root = app.config().paths.root;
-    blocking(move || {
+    let launched = blocking(move || {
         let core = mister::find_core(&root, row).ok_or_else(no_core)?;
         let line = mister::load_core(&core.path).map_err(command_error)?;
         sink.send(&line).map_err(command_error)?;
@@ -139,7 +159,9 @@ pub async fn launch_core(app: &AppState, id: &str) -> Result<Launched, ApiError>
             file: None,
         })
     })
-    .await
+    .await?;
+    *last = Some(Instant::now());
+    Ok(launched)
 }
 
 fn no_core() -> ApiError {
@@ -159,7 +181,14 @@ fn plan_title(
             .mra_path
             .as_deref()
             .ok_or_else(|| ApiError::conflict("the entry names no MRA file"))?;
-        let mra = root.join("_Arcade").join(rel);
+        let rel_path = FsPath::new(rel);
+        if !rel_path
+            .components()
+            .all(|c| matches!(c, Component::Normal(_)))
+        {
+            return Err(ApiError::conflict("the entry's MRA path leaves _Arcade"));
+        }
+        let mra = root.join("_Arcade").join(rel_path);
         if !mra.is_file() {
             return Err(ApiError::conflict(format!(
                 "_Arcade/{rel} is no longer on the SD card"
@@ -172,15 +201,27 @@ fn plan_title(
     }
     let row =
         table::by_id(&title.platform_id).ok_or_else(|| ApiError::not_found("no such platform"))?;
-    let slot = row
-        .launch
-        .ok_or_else(|| ApiError::conflict("this entry has no MRA to start it from"))?;
+    if row.launch.is_empty() {
+        return Err(ApiError::conflict("this entry has no MRA to start it from"));
+    }
+    if row.kind == Kind::Disc && !title.all_verified {
+        return Err(ApiError::conflict(
+            "every track of a disc must be verified before it is launched",
+        ));
+    }
     let core = mister::find_core(root, row).ok_or_else(no_core)?;
     let files: Vec<&str> = title.files.iter().map(String::as_str).collect();
-    let file = mister::game_path(row.kind, &files)
+    let file = mister::game_path(row.kind, games, &files)
         .ok_or_else(|| ApiError::conflict("the entry has no file the core can load"))?;
-    let doc = mister::mgl(&core.mgl_rbf, slot, &games.join(&file)).map_err(command_error)?;
-    let mgl = mister::write_mgl(dir, &doc).map_err(|e| crate::Error::Job(e.to_string()))?;
+    let doc = mister::mgl(&core.mgl_rbf, core.slot, &games.join(&file)).map_err(command_error)?;
+    let mgl = mister::write_mgl(dir, &doc).map_err(|e| {
+        tracing::warn!(dir = %dir.display(), error = %e, "cannot write the launch MGL");
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "the launch file could not be written",
+        )
+    })?;
     let line = mister::load_core(&mgl).map_err(command_error)?;
     tracing::info!(core = %core.mgl_rbf, file = %file, "game launched");
     let launched = Launched {

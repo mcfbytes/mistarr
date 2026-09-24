@@ -15,7 +15,7 @@ mod system;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
@@ -25,6 +25,9 @@ use crate::app::AppState;
 
 /// Header carrying the API key.
 pub const API_KEY_HEADER: &str = "x-api-key";
+
+/// Header every state-changing request must carry as `1`; a cross-site form cannot set it.
+pub const GUARD_HEADER: &str = "x-mistarr";
 
 /// Default and maximum page size of list endpoints.
 const DEFAULT_LIMIT: u32 = 100;
@@ -46,6 +49,7 @@ pub fn router(app: Arc<AppState>) -> Router {
         .merge(stubs::routes())
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
+        .layer(middleware::from_fn(refuse_cross_site))
         .layer(middleware::from_fn_with_state(key, require_key));
     Router::new()
         .nest("/api/v1", api)
@@ -102,6 +106,12 @@ impl ApiError {
     #[must_use]
     pub fn conflict(message: impl Into<String>) -> Self {
         Self::new(StatusCode::CONFLICT, "conflict", message)
+    }
+
+    /// 409 `busy`: the same action ran moments ago.
+    #[must_use]
+    pub fn busy(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "busy", message)
     }
 
     /// 503 `unavailable`: something outside the server cannot take the request.
@@ -189,6 +199,38 @@ async fn require_key(
     }
 }
 
+/// Refuses state-changing requests another site could have sent; see `docs/API.md`.
+async fn refuse_cross_site(req: Request, next: Next) -> Response {
+    if matches!(*req.method(), Method::GET | Method::HEAD | Method::OPTIONS) {
+        return next.run(req).await;
+    }
+    match cross_site(req.headers()) {
+        None => next.run(req).await,
+        Some(message) => ApiError::new(StatusCode::FORBIDDEN, "forbidden", message).into_response(),
+    }
+}
+
+/// Why a state-changing request with these headers is refused, or `None` to allow it.
+fn cross_site(headers: &HeaderMap) -> Option<&'static str> {
+    let get = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    if get("sec-fetch-site").is_some_and(|v| v.eq_ignore_ascii_case("cross-site")) {
+        return Some("requests from another site are refused");
+    }
+    if let Some(origin) = get("origin") {
+        let origin_host = origin.split_once("://").map(|(_, host)| host);
+        let same = origin_host
+            .zip(get("host"))
+            .is_some_and(|(o, h)| o.eq_ignore_ascii_case(h));
+        if !same {
+            return Some("the request's Origin does not match its Host");
+        }
+    }
+    if get(GUARD_HEADER) != Some("1") {
+        return Some("state-changing requests need the X-Mistarr: 1 header");
+    }
+    None
+}
+
 /// Compares without an early exit on the first differing byte.
 fn same(a: &str, b: &str) -> bool {
     a.len() == b.len()
@@ -219,6 +261,50 @@ mod tests {
         assert!(same("abc", "abc"));
         assert!(!same("abc", "abd"));
         assert!(!same("abc", "abcd"));
+    }
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, v.parse().expect("value"));
+        }
+        h
+    }
+
+    #[test]
+    fn cross_site_writes_are_refused() {
+        let ok = [("host", "board:8420"), ("x-mistarr", "1")];
+        assert_eq!(cross_site(&headers(&ok)), None);
+        let same_origin = [
+            ("host", "board:8420"),
+            ("origin", "http://Board:8420"),
+            ("x-mistarr", "1"),
+        ];
+        assert_eq!(cross_site(&headers(&same_origin)), None);
+        let same_site = [
+            ("host", "b"),
+            ("sec-fetch-site", "same-origin"),
+            ("x-mistarr", "1"),
+        ];
+        assert_eq!(cross_site(&headers(&same_site)), None);
+        for bad in [
+            &[("host", "board:8420")][..],
+            &[("host", "board:8420"), ("x-mistarr", "0")],
+            &[
+                ("host", "b"),
+                ("x-mistarr", "1"),
+                ("sec-fetch-site", "cross-site"),
+            ],
+            &[
+                ("host", "b"),
+                ("x-mistarr", "1"),
+                ("origin", "http://other.example"),
+            ],
+            &[("host", "b"), ("x-mistarr", "1"), ("origin", "null")],
+            &[("x-mistarr", "1"), ("origin", "http://b")],
+        ] {
+            assert!(cross_site(&headers(bad)).is_some(), "{bad:?}");
+        }
     }
 
     #[test]

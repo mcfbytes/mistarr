@@ -1,5 +1,3 @@
-use std::io::Read as _;
-
 use proptest::prelude::*;
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
@@ -66,52 +64,129 @@ fn undated_core_is_used_when_alone() {
 }
 
 #[test]
-fn aliases_map_and_arcade_cores_are_skipped() {
+fn row_core_names_choose_and_carry_their_parameters() {
     let root = fresh("find-alias");
-    touch(&root, "_Console/MegaDrive_20240101.rbf");
+    touch(&root, "_Console/Genesis_20240101.rbf");
     touch(&root, "_Console/TurboGrafx16_20240101.rbf");
+    touch(&root, "_Console/ColecoVision_20240101.rbf");
+    touch(&root, "_Console/Atari7800_20240101.rbf");
     touch(&root, "_Arcade/cores/NES_20990101.rbf");
-    assert_eq!(
-        find_core(&root, row("megadrive")).map(|c| c.mgl_rbf),
-        Some("_Console/MegaDrive".to_owned())
-    );
-    assert_eq!(
-        find_core(&root, row("pcecd")).map(|c| c.mgl_rbf),
-        Some("_Console/TurboGrafx16".to_owned())
-    );
-    assert!(find_core(&root, row("nes")).is_none());
-    assert!(find_core(&root, row("arcade")).is_none());
+    touch(&root, "_Arcade/cores/jtngp_20240101.rbf");
+    let rbf = |id: &str| find_core(&root, row(id)).map(|c| c.mgl_rbf);
+    assert_eq!(rbf("megadrive").as_deref(), Some("_Console/Genesis"));
+    assert_eq!(rbf("pcecd").as_deref(), Some("_Console/TurboGrafx16"));
+    assert_eq!(rbf("sg1000").as_deref(), Some("_Console/ColecoVision"));
+    assert_eq!(rbf("atari2600").as_deref(), Some("_Console/Atari7800"));
+    assert_eq!(rbf("ngp").as_deref(), Some("_Arcade/cores/jtngp"));
+    assert_eq!(rbf("nes"), None, "an _Arcade rbf needs an explicit row");
+    assert_eq!(rbf("arcade"), None);
+    let sg = find_core(&root, row("sg1000")).expect("core");
+    assert_eq!((sg.slot.index, sg.slot.delay), (0, 1));
+    let coleco = find_core(&root, row("coleco")).expect("core");
+    assert_eq!(coleco.path, sg.path);
+    assert_eq!((coleco.slot.index, coleco.slot.delay), (1, 1));
     assert!(find_core(&root.join("absent"), row("snes")).is_none());
 }
 
 #[test]
-fn game_paths_per_kind() {
+fn an_earlier_core_name_wins_over_a_fallback() {
+    let root = fresh("find-fallback");
+    touch(&root, "_Console/Atari7800_20250101.rbf");
+    touch(&root, "_Console/Atari2600_20200101.rbf");
+    let core = find_core(&root, row("atari2600")).expect("core");
+    assert_eq!(core.mgl_rbf, "_Console/Atari2600");
+}
+
+#[test]
+fn zip_members_split_only_after_a_zip() {
     assert_eq!(
-        game_path(Kind::Cartridge, &["NES/Example Quest (USA).nes"]).as_deref(),
+        split_zip_member("NES/a.zip#b.nes"),
+        ("NES/a.zip", Some("b.nes"))
+    );
+    assert_eq!(
+        split_zip_member("NES/A.Zip#b#2.nes"),
+        ("NES/A.Zip", Some("b#2.nes"))
+    );
+    assert_eq!(split_zip_member("NES/No #1.nes"), ("NES/No #1.nes", None));
+    assert_eq!(split_zip_member("NES/x.zipper#y"), ("NES/x.zipper#y", None));
+}
+
+#[test]
+fn game_paths_per_kind() {
+    let games = Path::new("/nonexistent");
+    let path = |kind, files: &[&str]| game_path(kind, games, files);
+    assert_eq!(
+        path(Kind::Cartridge, &["NES/Example Quest (USA).nes"]).as_deref(),
         Some("NES/Example Quest (USA).nes")
     );
     assert_eq!(
-        game_path(Kind::Cartridge, &["SNES/x.zip#x.sfc"]).as_deref(),
+        path(Kind::Cartridge, &["SNES/x.zip#x.sfc"]).as_deref(),
         Some("SNES/x.zip/x.sfc")
     );
     assert_eq!(
-        game_path(Kind::Disc, &["PSX/G/G (Track 1).bin", "PSX/G/G.CUE"]).as_deref(),
-        Some("PSX/G/G.CUE")
+        path(Kind::Cartridge, &["NES/Quest #2 (USA).nes"]).as_deref(),
+        Some("NES/Quest #2 (USA).nes")
     );
     assert_eq!(
-        game_path(Kind::Disc, &["Saturn/G/g.iso"]).as_deref(),
+        path(Kind::Cartridge, &["NES/Set #1.zip#Quest #2.nes"]).as_deref(),
+        Some("NES/Set #1.zip/Quest #2.nes")
+    );
+    assert_eq!(
+        path(Kind::Disc, &["Saturn/G/g.iso"]).as_deref(),
         Some("Saturn/G/g.iso")
     );
-    assert_eq!(game_path(Kind::Disc, &["PSX/G/g.bin"]), None);
+    assert_eq!(path(Kind::Disc, &["PSX/G/g.bin", "PSX/G/g.cue"]), None);
     assert_eq!(
-        game_path(Kind::Romset, &["NeoGeo/exset.zip#p1.bin"]).as_deref(),
+        path(Kind::Romset, &["NeoGeo/exset.zip#p1.bin"]).as_deref(),
         Some("NeoGeo/exset.zip")
     );
     assert_eq!(
-        game_path(Kind::Romset, &["NeoGeo/exset/p1.bin"]).as_deref(),
+        path(Kind::Romset, &["NeoGeo/exset"]).as_deref(),
         Some("NeoGeo/exset")
     );
-    assert_eq!(game_path(Kind::Cartridge, &[]), None);
+    assert_eq!(
+        path(Kind::Romset, &["NeoGeo/exset/sub/p1.bin"]).as_deref(),
+        Some("NeoGeo/exset")
+    );
+    assert_eq!(
+        path(Kind::Romset, &["NeoGeo/Set #1/p1.bin"]).as_deref(),
+        Some("NeoGeo/Set #1")
+    );
+    assert_eq!(path(Kind::Cartridge, &[]), None);
+}
+
+#[test]
+fn a_disc_loads_the_cue_whose_files_exist() {
+    let games = fresh("cue-pick");
+    std::fs::create_dir_all(games.join("PSX/G")).expect("mkdir");
+    std::fs::write(
+        games.join("PSX/G/broken.cue"),
+        "FILE \"gone.bin\" BINARY\n  TRACK 01 MODE2/2352\n",
+    )
+    .expect("write");
+    std::fs::write(
+        games.join("PSX/G/G.CUE"),
+        "REM x\nFILE \"G (Track 1).bin\" BINARY\nfile G2.bin BINARY\n",
+    )
+    .expect("write");
+    touch(&games, "PSX/G/G (Track 1).bin");
+    touch(&games, "PSX/G/G2.bin");
+    let files = ["PSX/G/G (Track 1).bin", "PSX/G/broken.cue", "PSX/G/G.CUE"];
+    assert_eq!(
+        game_path(Kind::Disc, &games, &files).as_deref(),
+        Some("PSX/G/G.CUE")
+    );
+    std::fs::write(games.join("PSX/G/G.CUE"), "FILE \"../G2.bin\" BINARY\n").expect("write");
+    assert_eq!(game_path(Kind::Disc, &games, &files), None);
+}
+
+#[test]
+fn cue_files_reads_quoted_and_bare_names() {
+    assert_eq!(
+        cue_files("FILE \"a b.bin\" BINARY\n  File c.bin WAVE\nFILEX d\nTRACK 01\n"),
+        ["a b.bin", "c.bin"]
+    );
+    assert!(cue_files("").is_empty());
 }
 
 #[test]
@@ -196,13 +271,19 @@ proptest! {
 }
 
 #[test]
-fn write_mgl_replaces_the_previous_file() {
+fn write_mgl_makes_a_new_file_and_keeps_the_last_few() {
     let dir = fresh("write-mgl");
-    let first = write_mgl(&dir, "one").expect("write");
-    let second = write_mgl(&dir, "two").expect("write");
-    assert_eq!(first, second);
-    assert_eq!(std::fs::read_to_string(&second).expect("read"), "two");
-    assert!(!dir.join("mistarr.mgl.tmp").exists());
+    touch(&dir, "other.mgl");
+    let paths: Vec<PathBuf> = (0..5)
+        .map(|i| write_mgl(&dir, &format!("doc {i}")).expect("write"))
+        .collect();
+    let mut unique = paths.clone();
+    unique.dedup();
+    assert_eq!(unique.len(), 5);
+    assert_eq!(std::fs::read_to_string(&paths[4]).expect("read"), "doc 4");
+    let kept: Vec<_> = paths.iter().filter(|p| p.exists()).collect();
+    assert_eq!(kept, paths[5 - MGL_KEEP..].iter().collect::<Vec<_>>());
+    assert!(dir.join("other.mgl").exists());
     assert!(write_mgl(&dir.join("absent"), "x").is_err());
 }
 

@@ -5,7 +5,7 @@
   import { fixtureTitle } from '../lib/fixtures';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { findPlatform, loadPlatforms, platformsLoaded } from '../lib/stores/platforms.svelte';
-  import { inCollection, launchBlocker } from '../lib/launch';
+  import { canPlay, launchBlocker } from '../lib/launch';
 
   interface Props {
     titleId: number;
@@ -24,15 +24,24 @@
 
   const detail = $derived(getDetail());
   const platform = $derived(detail ? findPlatform(detail.platform_id) : undefined);
-  const playable = $derived(detail?.variants.some((v) => !v.retired && inCollection(v)) ?? false);
+  let statusFailed = $state(false);
+  const playableIds = $derived(
+    new Set(
+      (detail?.variants ?? [])
+        .filter((v) => canPlay(v, detail?.platform_id ?? '', platform?.kind))
+        .map((v) => v.id)
+    )
+  );
   const playBlocker = $derived(
-    launchBlocker(getStatus()?.launch) ??
+    launchBlocker(getStatus()?.launch, statusFailed) ??
       (platform && !platform.core_present ? 'No core for this platform is installed.' : null)
   );
 
   $effect(() => {
     if (!getStatus()) {
-      void loadStatus().catch(() => undefined);
+      void loadStatus().catch(() => {
+        statusFailed = true;
+      });
     }
     if (!platformsLoaded()) {
       void loadPlatforms().catch(() => undefined);
@@ -122,7 +131,7 @@
       </div>
     {/if}
 
-    {#if playable && playBlocker}
+    {#if playableIds.size > 0 && playBlocker}
       <p class="muted reason">Play is unavailable: {playBlocker}</p>
     {/if}
 
@@ -153,7 +162,7 @@
             </td>
             <td>{variant.torrent_files_available} available</td>
             <td>
-              {#if !variant.retired && inCollection(variant)}
+              {#if playableIds.has(variant.id)}
                 <button class="primary" disabled={busy || playBlocker !== null} onclick={() => play(variant.id)}>
                   Play
                 </button>

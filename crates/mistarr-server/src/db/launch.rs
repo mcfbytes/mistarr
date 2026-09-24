@@ -23,6 +23,8 @@ pub struct LaunchTitle {
     /// Every live rom has a file on disk: a loadable file for a DAT entry, a
     /// present zip with no failed md5 check for an MRA title.
     pub complete: bool,
+    /// Every live rom has a `verified` file; a disc launches only then.
+    pub all_verified: bool,
     /// `rel_path` of the loadable files of its live roms, verified first.
     pub files: Vec<String>,
 }
@@ -52,7 +54,10 @@ pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
                                        WHERE f.rom_id = r.id AND f.state IN {LOADABLE})),
                         (SELECT COUNT(*) FROM roms r
                          WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 1),
-                        COALESCE(t.mra_check, '') IN ('mismatch', 'missing_part')
+                        COALESCE(t.mra_check, '') IN ('mismatch', 'missing_part'),
+                        (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0
+                           AND EXISTS (SELECT 1 FROM files f
+                                       WHERE f.rom_id = r.id AND f.state = 'verified'))
                  FROM titles t WHERE t.id = ?1"
             ),
             [id.0],
@@ -64,19 +69,22 @@ pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
                         source: r.get(2)?,
                         mra_path: r.get(3)?,
                         complete: false,
+                        all_verified: false,
                         files: Vec::new(),
                     },
                     r.get::<_, i64>(4)?,
                     r.get::<_, i64>(5)?,
                     r.get::<_, i64>(6)?,
                     r.get::<_, bool>(7)?,
+                    r.get::<_, i64>(8)?,
                 ))
             },
         )
         .optional()?;
-    let Some((mut title, roms, with_file, present, check_failed)) = row else {
+    let Some((mut title, roms, with_file, present, check_failed, verified)) = row else {
         return Ok(None);
     };
+    title.all_verified = roms > 0 && verified == roms;
     title.complete = roms > 0
         && if title.source == "mra" {
             present == roms && !check_failed
@@ -133,15 +141,22 @@ mod tests {
             files::seed_rom_for_title_fixture(&c, t, "g.bin", &hashes(), "good").expect("rom");
         file(&c, &pid, "PSX/G/g.cue", cue, FileState::Verified);
         let got = title(&c, TitleId(t)).expect("read").expect("title");
-        assert!(!got.complete);
+        assert!(!got.complete && !got.all_verified);
         assert_eq!(got.files, ["PSX/G/g.cue"]);
         file(&c, &pid, "PSX/G/g.bin", bin, FileState::Misnamed);
         let got = title(&c, TitleId(t)).expect("read").expect("title");
-        assert!(got.complete && !got.bios);
+        assert!(got.complete && !got.all_verified && !got.bios);
         assert_eq!(got.files, ["PSX/G/g.cue", "PSX/G/g.bin"]);
         assert_eq!(
             (got.platform_id.as_str(), got.source.as_str()),
             ("psx", "dat")
+        );
+        file(&c, &pid, "PSX/G/g.bin", bin, FileState::Verified);
+        assert!(
+            title(&c, TitleId(t))
+                .expect("read")
+                .expect("title")
+                .all_verified
         );
     }
 

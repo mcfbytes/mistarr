@@ -61,6 +61,7 @@ pub fn options_in(dir: &Path) -> Options {
         poll_backoff: Duration::from_secs(3600),
         command_path: dir.join("MiSTer_cmd"),
         launch_dir: dir.to_path_buf(),
+        launch_gap: Duration::ZERO,
     }
 }
 
@@ -99,8 +100,22 @@ impl Response {
     }
 }
 
-/// Sends one request with `Connection: close` and reads the whole response.
+/// Sends one request with `Connection: close` and the `X-Mistarr: 1` header the
+/// SPA sends, and reads the whole response.
 pub async fn request(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+    body: Option<&str>,
+) -> Response {
+    let mut all = vec![("X-Mistarr", "1")];
+    all.extend_from_slice(headers);
+    request_plain(addr, method, path, &all, body).await
+}
+
+/// [`request`] with exactly the given headers, as a page on another site could send.
+pub async fn request_plain(
     addr: SocketAddr,
     method: &str,
     path: &str,
@@ -145,7 +160,7 @@ pub async fn request_bytes(
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     let head = format!(
         "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
-         Content-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+         X-Mistarr: 1\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );
     stream.write_all(head.as_bytes()).await.expect("write");

@@ -86,11 +86,13 @@
     try {
       settings = isMock ? settings : await api.putSettings(settings);
       saved = true;
-      if (!isMock) {
-        await loadStatus();
-      }
     } catch (err) {
       settingsError = errorMessage(err);
+      return;
+    }
+    if (!isMock) {
+      // A failed refresh leaves the card as it was; SSE brings the next status.
+      await loadStatus().catch(() => undefined);
     }
   }
 </script>

@@ -51,6 +51,8 @@ pub struct Options {
     pub command_path: PathBuf,
     /// Directory the launch MGL is written to; tmpfs on the board, so the SD card is spared.
     pub launch_dir: PathBuf,
+    /// How long after one launch another is refused as `busy`.
+    pub launch_gap: Duration,
 }
 
 impl Default for Options {
@@ -70,6 +72,7 @@ impl Default for Options {
             poll_backoff: Duration::from_secs(300),
             command_path: PathBuf::from(mistarr_mister::launch::COMMAND_PATH),
             launch_dir: PathBuf::from("/tmp"),
+            launch_gap: Duration::from_secs(3),
         }
     }
 }
@@ -95,6 +98,8 @@ pub struct AppState {
     settings_write: tokio::sync::Mutex<()>,
     client: RwLock<Option<(ClientKey, Arc<dyn DownloadClient>)>>,
     commands: RwLock<Arc<dyn CommandSink>>,
+    /// Serialises launches and holds when the last one was sent.
+    pub(crate) launch_lock: tokio::sync::Mutex<Option<Instant>>,
 }
 
 impl AppState {
@@ -113,6 +118,7 @@ impl AppState {
             settings_write: tokio::sync::Mutex::new(()),
             client: RwLock::new(None),
             commands: RwLock::new(Arc::new(FifoSink::new(&options.command_path))),
+            launch_lock: tokio::sync::Mutex::new(None),
             options,
         })
     }
@@ -414,6 +420,11 @@ pub(crate) mod testutil {
 
     /// App state over a fresh database with paths inside the returned directory.
     pub fn state() -> (tempfile::TempDir, Arc<AppState>) {
+        state_with(|_| {})
+    }
+
+    /// [`state`] with its options adjusted by `f`.
+    pub fn state_with(f: impl FnOnce(&mut Options)) -> (tempfile::TempDir, Arc<AppState>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut config = Config::default();
         config.paths.root = dir.path().to_path_buf();
@@ -425,12 +436,14 @@ pub(crate) mod testutil {
             db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS).map(|_| ())
         })
         .expect("seed");
-        let options = Options {
+        let mut options = Options {
             corename_path: dir.path().join("CORENAME"),
             command_path: dir.path().join("MiSTer_cmd"),
             launch_dir: dir.path().to_path_buf(),
+            launch_gap: Duration::ZERO,
             ..Options::default()
         };
+        f(&mut options);
         (dir, AppState::new(config, db, options))
     }
 }
@@ -521,6 +534,7 @@ mod tests {
         assert_eq!(o.corename_poll, Duration::from_secs(2));
         assert_eq!(o.command_path, PathBuf::from("/dev/MiSTer_cmd"));
         assert_eq!(o.launch_dir, PathBuf::from("/tmp"));
+        assert_eq!(o.launch_gap, Duration::from_secs(3));
     }
 
     #[test]

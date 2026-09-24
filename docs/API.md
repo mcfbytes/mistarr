@@ -2,12 +2,18 @@
 
 Base path `/api/v1`. JSON in and out. When `server.api_key` is set every API
 request needs it in the `X-Api-Key` header or, for `EventSource`, which cannot
-set headers, the `apikey` query parameter; otherwise the answer is 401. All
+set headers, the `apikey` query parameter; otherwise the answer is 401.
+Every API request other than `GET`, `HEAD` and `OPTIONS` must also come from
+the SPA's own origin: it needs the header `X-Mistarr: 1`, which the SPA
+sends on every request and a page on another site cannot set without a
+preflight, and it is refused when `Sec-Fetch-Site` is `cross-site` or an
+`Origin` header is present and does not name the request's `Host`. Refused
+requests answer 403 `forbidden`, checked after the API key. All
 list endpoints take `?limit=&offset=` (default 100, capped at 1000) and return
 `{ items: [...], total: n }`. Errors are `{ error: { code, message } }` with an
-appropriate status; codes are `bad_request`, `unauthorized`, `not_found`,
-`method_not_allowed`, `conflict`, `not_implemented`, `unavailable` and
-`internal`. A
+appropriate status; codes are `bad_request`, `unauthorized`, `forbidden`,
+`not_found`, `method_not_allowed`, `conflict`, `busy`, `not_implemented`,
+`unavailable` and `internal`. A
 documented route whose work package has not landed answers 501
 `not_implemented`. The SPA is served
 from `/` and every unknown non-API path returns `index.html`; unknown paths
@@ -281,16 +287,32 @@ SD card (ARCHITECTURE.md "Launching"). Both answer `{ core, file }`: the
 `.rbf` or `.mra` loaded, relative to the SD root, and the game file handed
 to the core, relative to `games/`, or `null`.
 
-Both are a 409 `conflict` while `prefs.launch` is off and a 503
-`unavailable` when MiSTer Main's command FIFO does not exist, is not being
-read or does not take the command. `launch` is a 404 for an unknown title
-and a 409 when not every live rom has a `verified`, `misnamed` or `bad`
-file (for an MRA title: a zip is missing or its md5 check failed), for a
-BIOS entry, a DAT entry of the arcade platform, a platform without an
-installed core, or an MRA file no longer under `_Arcade`. `launch-core` is
-a 404 for an unknown platform and a 409 when no core is installed or for
-`arcade`, whose cores start from an MRA. Nothing is published on the event
-bus; the running core shows up in `status` through CORENAME.
+Both are a 409 `conflict` while `prefs.launch` is off, a 409 `busy` when
+another launch was sent less than 3 s before (launches are also serialised),
+and a 503 `unavailable` when MiSTer Main's command FIFO does not exist, is
+not being read or does not take the command.
+
+`launch` is a 404 for an unknown title and a 409 `conflict` when:
+
+- not every live rom has a `verified`, `misnamed` or `bad` file, or, for an
+  MRA title, a zip is missing or its md5 check failed;
+- a disc has a track that is not `verified`, or no cue sheet whose `FILE`
+  entries all exist beside it and no `.chd` or `.iso`;
+- the entry is a BIOS entry or a DAT entry of the arcade platform;
+- no launch core of the platform is installed;
+- the MRA file is no longer under `_Arcade`, or its stored path is not plain
+  names below it;
+- a path cannot be passed to Main: relative, not UTF-8, holding a control
+  character, or making the command longer than one FIFO write.
+
+It is a 500 `internal` with the message "the launch file could not be
+written" when the MGL cannot be created in the launch directory; the log
+names the directory and the error.
+
+`launch-core` is a 404 for an unknown platform and a 409 `conflict` when no
+launch core is installed or for `arcade`, whose cores start from an MRA.
+Nothing is published on the event bus; the running core shows up in
+`status` through CORENAME.
 
 ## Art URLs
 

@@ -53,7 +53,7 @@ async fn upload_dat(addr: SocketAddr, name: &str, bytes: &[u8]) -> common::Respo
     body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     let head = format!(
-        "POST /api/v1/dats/upload HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+        "POST /api/v1/dats/upload HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\nX-Mistarr: 1\r\n\
          Content-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\n\r\n",
         body.len()
     );

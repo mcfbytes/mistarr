@@ -47,6 +47,7 @@ function headers(isFormData: boolean, extra?: Record<string, string>): Record<st
   const key = getApiKey();
   return {
     ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+    'X-Mistarr': '1',
     ...(key ? { 'X-Api-Key': key } : {}),
     ...extra
   };

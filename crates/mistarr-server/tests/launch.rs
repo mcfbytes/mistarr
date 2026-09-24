@@ -4,7 +4,7 @@ mod common;
 
 use std::sync::Arc;
 
-use common::{boot, request};
+use common::{boot, request, request_plain};
 use mistarr_core::PlatformId;
 use mistarr_mister::launch::{CommandSink, RecordingSink};
 use mistarr_server::db::files::{self, FileState, Hashed};
@@ -117,5 +117,40 @@ async fn launch_routes_answer_with_documented_statuses() {
         409
     );
     assert_eq!(sink.lines().len(), 2);
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn writes_from_another_site_are_refused() {
+    let b = boot().await;
+    let addr = b.addr();
+    let path = "/api/v1/system/pause";
+    let r = request_plain(addr, "POST", path, &[], None).await;
+    assert_eq!(r.status, 403, "{}", r.body);
+    assert_eq!(r.json()["error"]["code"], "forbidden");
+    let cross = [("X-Mistarr", "1"), ("Sec-Fetch-Site", "cross-site")];
+    assert_eq!(
+        request_plain(addr, "POST", path, &cross, None).await.status,
+        403
+    );
+    let origin = [("X-Mistarr", "1"), ("Origin", "http://other.example")];
+    assert_eq!(
+        request_plain(addr, "POST", path, &origin, None)
+            .await
+            .status,
+        403
+    );
+    let own = format!("http://{addr}");
+    let same = [("X-Mistarr", "1"), ("Origin", own.as_str())];
+    assert_eq!(
+        request_plain(addr, "POST", path, &same, None).await.status,
+        200
+    );
+    assert_eq!(
+        request_plain(addr, "GET", "/api/v1/system/status", &[], None)
+            .await
+            .status,
+        200
+    );
     b.running.shutdown().await.expect("shutdown");
 }
