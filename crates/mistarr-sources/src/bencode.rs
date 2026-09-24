@@ -191,7 +191,11 @@ fn decode_bytes(data: &[u8], pos: &mut usize) -> Result<Vec<u8>, SourceError> {
     }
     let len_digits = &data[start..*pos];
     *pos += 1; // consume ':'
-    if len_digits.is_empty() || (len_digits.len() > 1 && len_digits[0] == b'0') {
+               // Reject non-digit bytes (e.g. a leading '+') and redundant leading zeros.
+    if len_digits.is_empty()
+        || !len_digits.iter().all(u8::is_ascii_digit)
+        || (len_digits.len() > 1 && len_digits[0] == b'0')
+    {
         return Err(SourceError::MalformedBencode(start));
     }
     let len_text =
@@ -223,6 +227,36 @@ fn decode_list(data: &[u8], pos: &mut usize, depth: u32) -> Result<Value, Source
         }
         items.push(decode_value(data, pos, depth + 1)?);
     }
+}
+
+/// One entry of a top-level dict: its key, value, and the exact byte range
+/// in the input the value came from.
+pub(crate) type TopLevelEntry = (Vec<u8>, Value, std::ops::Range<usize>);
+
+/// Decodes a top-level dict, returning each entry's key, value, and the
+/// exact byte range in `data` the value came from (before any re-encoding).
+/// Used to hash a torrent's `info` dict over its original bytes.
+pub(crate) fn decode_top_level_dict(data: &[u8]) -> Result<Vec<TopLevelEntry>, SourceError> {
+    let mut pos = 0usize;
+    if byte_at(data, pos)? != b'd' {
+        return Err(SourceError::MalformedBencode(pos));
+    }
+    pos += 1;
+    let mut entries = Vec::new();
+    loop {
+        if byte_at(data, pos)? == b'e' {
+            pos += 1;
+            break;
+        }
+        let key = decode_bytes(data, &mut pos)?;
+        let value_start = pos;
+        let value = decode_value(data, &mut pos, 0)?;
+        entries.push((key, value, value_start..pos));
+    }
+    if pos != data.len() {
+        return Err(SourceError::TrailingData);
+    }
+    Ok(entries)
 }
 
 fn decode_dict(data: &[u8], pos: &mut usize, depth: u32) -> Result<Value, SourceError> {
@@ -307,6 +341,11 @@ mod tests {
     fn decodes_bytes() {
         assert_eq!(decode(b"4:spam").unwrap(), Value::Bytes(b"spam".to_vec()));
         assert_eq!(decode(b"0:").unwrap(), Value::Bytes(Vec::new()));
+    }
+
+    #[test]
+    fn rejects_plus_sign_in_string_length() {
+        assert!(decode(b"1+:x").is_err());
     }
 
     #[test]

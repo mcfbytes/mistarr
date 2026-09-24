@@ -52,8 +52,11 @@ pub struct TorrentMeta {
 /// assert!(parse_torrent(b"d4:infoi1ee").is_err());
 /// ```
 pub fn parse_torrent(data: &[u8]) -> Result<TorrentMeta, SourceError> {
-    let root = bencode::decode(data)?;
-    let info = root.get("info").ok_or(SourceError::MissingInfoDict)?;
+    let entries = bencode::decode_top_level_dict(data)?;
+    let (_, info, info_span) = entries
+        .iter()
+        .find(|(key, _, _)| key.as_slice() == b"info")
+        .ok_or(SourceError::MissingInfoDict)?;
     if info.as_dict().is_none() {
         return Err(SourceError::MissingInfoDict);
     }
@@ -76,7 +79,7 @@ pub fn parse_torrent(data: &[u8]) -> Result<TorrentMeta, SourceError> {
     };
 
     let total_size = files.iter().map(|f| f.size).sum();
-    let infohash = infohash_of(info);
+    let infohash = infohash_of_span(data, info_span.clone());
 
     Ok(TorrentMeta {
         infohash,
@@ -128,12 +131,11 @@ fn parse_multi_file(list: &[Value]) -> Result<Vec<TorrentFile>, SourceError> {
     Ok(files)
 }
 
-// The infohash is SHA1 of the canonical bencoding of `info`. `Value::Dict`
-// keeps keys sorted, so re-encoding matches the original torrent's bytes.
-fn infohash_of(info: &Value) -> [u8; 20] {
-    let encoded = bencode::encode(info);
+// Hashing the raw input bytes (rather than re-encoding the parsed `Value`)
+// matches the client and tracker even when `info`'s keys are not sorted.
+fn infohash_of_span(data: &[u8], span: std::ops::Range<usize>) -> [u8; 20] {
     let mut hasher = Sha1::new();
-    hasher.update(&encoded);
+    hasher.update(&data[span]);
     hasher.finalize().into()
 }
 
@@ -167,6 +169,11 @@ mod tests {
 
         fn build(mut self) -> Vec<u8> {
             self.0.sort_by(|a, b| a.0.as_bytes().cmp(b.0.as_bytes()));
+            self.build_unsorted()
+        }
+
+        // Encodes fields in insertion order, for testing non-canonical input.
+        fn build_unsorted(mut self) -> Vec<u8> {
             let mut out = vec![b'd'];
             for (k, v) in self.0.drain(..) {
                 out.extend(benc_str(&k));
@@ -301,6 +308,26 @@ mod tests {
             .field("piece length", benc_int(16384))
             .field("pieces", benc_str(""))
             .build();
+        let expected: [u8; 20] = {
+            let mut hasher = Sha1::new();
+            hasher.update(&info);
+            hasher.finalize().into()
+        };
+        let data = DictBuilder::new().field("info", info).build();
+        let meta = parse_torrent(&data).unwrap();
+        assert_eq!(meta.infohash, expected);
+    }
+
+    #[test]
+    fn infohash_hashes_raw_span_with_unsorted_keys() {
+        // Canonical bencode sorts dict keys; this info dict deliberately does
+        // not, matching a non-canonical encoder in the wild.
+        let info = DictBuilder::new()
+            .field("name", benc_str("unsorted"))
+            .field("length", benc_int(4))
+            .field("piece length", benc_int(16384))
+            .field("pieces", benc_str(""))
+            .build_unsorted();
         let expected: [u8; 20] = {
             let mut hasher = Sha1::new();
             hasher.update(&info);

@@ -30,6 +30,7 @@ pub struct Magnet {
 /// ```
 pub fn parse_magnet(uri: &str) -> Result<Magnet, SourceError> {
     let query = uri
+        .trim()
         .strip_prefix("magnet:?")
         .ok_or(SourceError::NotAMagnetUri)?;
 
@@ -118,6 +119,8 @@ fn base32_val(c: char) -> Result<u8, SourceError> {
     }
 }
 
+// The `dn` parameter is form-encoded by common torrent clients, so `+` is a
+// space alongside `%20`.
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -130,7 +133,7 @@ fn percent_decode(s: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i]);
+        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
         i += 1;
     }
     String::from_utf8(out).unwrap_or_else(|_| s.to_owned())
@@ -165,6 +168,23 @@ mod tests {
         );
         let magnet = parse_magnet(&uri).unwrap();
         assert_eq!(magnet.display_name.as_deref(), Some("My Set"));
+    }
+
+    #[test]
+    fn trims_surrounding_whitespace_and_newline() {
+        let hex = "22".repeat(20);
+        let uri = format!("  magnet:?xt=urn:btih:{hex}\n");
+        assert_eq!(parse_magnet(&uri).unwrap().infohash, [0x22; 20]);
+    }
+
+    #[test]
+    fn plus_in_display_name_decodes_to_space() {
+        let hex = "33".repeat(20);
+        let uri = format!("magnet:?xt=urn:btih:{hex}&dn=My+Set+Name");
+        assert_eq!(
+            parse_magnet(&uri).unwrap().display_name.as_deref(),
+            Some("My Set Name")
+        );
     }
 
     #[test]

@@ -109,23 +109,36 @@ pub fn base_name(normalised: &str) -> &str {
     }
 }
 
+// The torrent's directory segments are not part of the rom's own name; only
+// the final path segment (the file name) is normalised and matched.
+fn leaf_name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
 fn candidates_for(
     file: &TorrentFile,
     index: &dyn DatIndex,
 ) -> Vec<(PlatformId, RomRef, Confidence)> {
-    let normalised = normalise_name(&file.path);
-    let by_name = index.by_normalised_name(&normalised);
-    if !by_name.is_empty() {
-        return by_name
-            .into_iter()
-            .map(|(p, r)| (p, r, Confidence::Name))
-            .collect();
-    }
-    index
-        .by_base_name_and_size(base_name(&normalised), file.size)
+    let normalised = normalise_name(leaf_name(&file.path));
+    let name_matches = index.by_normalised_name(&normalised);
+    let matched_platforms: HashSet<PlatformId> =
+        name_matches.iter().map(|(p, _)| p.clone()).collect();
+
+    let mut candidates: Vec<(PlatformId, RomRef, Confidence)> = name_matches
         .into_iter()
-        .map(|(p, r)| (p, r, Confidence::Size))
-        .collect()
+        .map(|(p, r)| (p, r, Confidence::Name))
+        .collect();
+
+    // A platform already matched by name keeps that stronger match; only
+    // platforms with no name match fall back to base name plus size.
+    let size_matches = index.by_base_name_and_size(base_name(&normalised), file.size);
+    candidates.extend(
+        size_matches
+            .into_iter()
+            .filter(|(p, _)| !matched_platforms.contains(p))
+            .map(|(p, r)| (p, r, Confidence::Size)),
+    );
+    candidates
 }
 
 /// The hit rate (fraction of `files` with at least one match) for every
@@ -376,6 +389,54 @@ mod tests {
         }];
         let matches = match_files(&files, &platform("genesis"), &dat);
         assert_eq!(matches, vec![(0, Some(RomRef(7)), Confidence::Size)]);
+    }
+
+    #[test]
+    fn matches_files_in_subdirectories_by_leaf_name_only() {
+        let mut by_name = BTreeMap::new();
+        by_name.insert(
+            "example quest (usa)".to_owned(),
+            vec![(platform("nes"), RomRef(1))],
+        );
+        let dat = FakeDat {
+            by_name,
+            by_size: BTreeMap::new(),
+        };
+        let files = vec![TorrentFile {
+            index: 0,
+            path: "Set/Sub.Dir/Example Quest (USA).nes".into(),
+            size: 10,
+        }];
+        let scores = score_platforms(&files, &dat);
+        assert_eq!(scores, vec![(platform("nes"), 1.0)]);
+    }
+
+    #[test]
+    fn size_fallback_applies_per_platform_alongside_a_name_match() {
+        let mut by_name = BTreeMap::new();
+        by_name.insert(
+            "matched (usa)".to_owned(),
+            vec![(platform("nes"), RomRef(1))],
+        );
+        let mut by_size = BTreeMap::new();
+        by_size.insert(
+            ("matched".to_owned(), 10),
+            vec![(platform("snes"), RomRef(2))],
+        );
+        let dat = FakeDat { by_name, by_size };
+        let files = vec![TorrentFile {
+            index: 0,
+            path: "Matched (USA).nes".into(),
+            size: 10,
+        }];
+
+        let scores = score_platforms(&files, &dat);
+        assert_eq!(scores.len(), 2);
+        assert!(scores.contains(&(platform("nes"), 1.0)));
+        assert!(scores.contains(&(platform("snes"), 1.0)));
+
+        let matches = match_files(&files, &platform("snes"), &dat);
+        assert_eq!(matches, vec![(0, Some(RomRef(2)), Confidence::Size)]);
     }
 
     #[test]
