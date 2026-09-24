@@ -1,6 +1,6 @@
 import { api } from '../api';
 import { fixtureJobs } from '../fixtures';
-import type { Job, JobKind } from '../types';
+import type { Job, JobState } from '../types';
 
 const isMock = import.meta.env.VITE_MOCK === '1';
 
@@ -14,11 +14,14 @@ export async function loadJobs(): Promise<void> {
   jobs = isMock ? fixtureJobs : (await api.jobs()).items;
 }
 
-export function applyJobProgress(id: number, kind: JobKind, progress: Record<string, unknown>): void {
+export function applyJobProgress(id: number, kind: string, state: JobState, progress: Record<string, unknown>): void {
   const exists = jobs.some((j) => j.id === id);
   if (exists) {
-    jobs = jobs.map((j) => (j.id === id ? { ...j, progress, state: 'running' } : j));
+    jobs = jobs.map((j) => (j.id === id ? { ...j, progress, state } : j));
   } else {
-    jobs = [...jobs, { id, kind, state: 'running', progress, created_at: Date.now() / 1000, updated_at: Date.now() / 1000 }];
+    jobs = [
+      ...jobs,
+      { id, kind, payload: {}, state, progress, created_at: Date.now() / 1000, updated_at: Date.now() / 1000 }
+    ];
   }
 }

@@ -17,8 +17,9 @@
 
   let q = $state('');
   let have = $state<HaveFilter>('any');
+  let wanted = $state<HaveFilter>('any');
   let region = $state('');
-  let showHidden = $state(false);
+  let showFlags = $state('');
   let page = $state(0);
   let loadingMore = $state(false);
 
@@ -30,9 +31,9 @@
     return {
       q: q || undefined,
       have,
+      wanted,
       region: region || undefined,
-      // 'all' includes titles normally hidden by their bios/beta/proto flags
-      flags: showHidden ? 'all' : undefined,
+      flags: showFlags || undefined,
       sort: 'name'
     };
   }
@@ -45,8 +46,9 @@
     void platformId;
     void q;
     void have;
+    void wanted;
     void region;
-    void showHidden;
+    void showFlags;
     page = 0;
     void loadTitlesPage(platformId, filters(), 0);
   });
@@ -75,20 +77,23 @@
     };
   }
 
-  async function toggleWant(parentId: number, wanted: number): Promise<void> {
-    const next = wanted > 0 ? 0 : 1;
+  async function toggleWant(parentId: number, pickId: number | null, currentlyWanted: number): Promise<void> {
+    if (pickId === null) {
+      return;
+    }
+    const next = currentlyWanted > 0 ? 0 : 1;
     patchGroup(parentId, { wanted: next });
     if (isMock) {
       return;
     }
     try {
       if (next > 0) {
-        await api.want(parentId);
+        await api.want(pickId);
       } else {
-        await api.unwant(parentId);
+        await api.unwant(pickId);
       }
     } catch (err) {
-      patchGroup(parentId, { wanted });
+      patchGroup(parentId, { wanted: currentlyWanted });
       showToast(errorMessage(err));
     }
   }
@@ -115,24 +120,27 @@
       <option value="yes">Have</option>
       <option value="no">Missing</option>
     </select>
+    <select bind:value={wanted}>
+      <option value="any">Wanted: any</option>
+      <option value="yes">Wanted</option>
+      <option value="no">Not wanted</option>
+    </select>
     <input type="text" placeholder="Region" bind:value={region} />
-    <label>
-      <input type="checkbox" bind:checked={showHidden} />
-      Show hidden flags
-    </label>
+    <input type="text" placeholder="Show hidden flags (bios, beta…)" bind:value={showFlags} />
   </form>
 
   <div class="grid">
     {#each groups as group (group.parent_id)}
       <a class="poster" href={titleUrl(group.parent_id)}>
-        <img src={group.art.boxart} alt="" loading="lazy" onerror={onArtError} />
-        <p class="name">{group.pick_name}</p>
+        <img src={group.art?.boxart ?? placeholderArt} alt="" loading="lazy" onerror={onArtError} />
+        <p class="name">{group.pick_name ?? group.name}</p>
         <p class="muted">{group.have_verified > 0 ? 'Have' : 'Missing'}</p>
         <button
           class:primary={group.wanted > 0}
+          disabled={group.pick_id === null}
           onclick={(e) => {
             e.preventDefault();
-            void toggleWant(group.parent_id, group.wanted);
+            void toggleWant(group.parent_id, group.pick_id, group.wanted);
           }}
         >
           {group.wanted > 0 ? 'Wanted' : 'Want'}

@@ -7,10 +7,7 @@
 
   const isMock = import.meta.env.VITE_MOCK === '1';
 
-  type SettingType = 'string' | 'number' | 'boolean';
-
-  let settings = $state<Settings>({});
-  let settingTypes = $state<Record<string, SettingType>>({});
+  let settings = $state<Settings | null>(null);
   let saved = $state(false);
   let settingsError = $state<string | null>(null);
   let statusError = $state<string | null>(null);
@@ -21,11 +18,7 @@
   });
 
   async function loadSettings(): Promise<void> {
-    const loaded = isMock ? fixtureSettings : await api.settings();
-    settings = loaded;
-    settingTypes = Object.fromEntries(
-      Object.entries(loaded).map(([key, value]) => [key, typeof value as SettingType])
-    );
+    settings = isMock ? fixtureSettings : await api.settings();
   }
 
   const status = $derived(getStatus());
@@ -47,26 +40,51 @@
     }
   }
 
-  function convert(key: string, raw: string | number | boolean): string | number | boolean {
-    const type = settingTypes[key] ?? 'string';
-    if (type === 'number') {
-      return Number(raw);
+  function csv(xs: string[]): string {
+    return xs.join(', ');
+  }
+
+  function fromCsv(text: string): string[] {
+    return text
+      .split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+  }
+
+  function addMapping(): void {
+    if (!settings) {
+      return;
     }
-    if (type === 'boolean') {
-      return raw === true || raw === 'true';
+    settings = {
+      ...settings,
+      client: {
+        ...settings.client,
+        remote_path_map: [...settings.client.remote_path_map, { remote: '', local: '' }]
+      }
+    };
+  }
+
+  function removeMapping(index: number): void {
+    if (!settings) {
+      return;
     }
-    return String(raw);
+    settings = {
+      ...settings,
+      client: {
+        ...settings.client,
+        remote_path_map: settings.client.remote_path_map.filter((_, i) => i !== index)
+      }
+    };
   }
 
   async function save(): Promise<void> {
+    if (!settings) {
+      return;
+    }
     settingsError = null;
     saved = false;
-    const payload: Settings = {};
-    for (const [key, value] of Object.entries(settings)) {
-      payload[key] = convert(key, value);
-    }
     try {
-      settings = isMock ? payload : await api.putSettings(payload);
+      settings = isMock ? settings : await api.putSettings(settings);
       saved = true;
     } catch (err) {
       settingsError = errorMessage(err);
@@ -80,40 +98,103 @@
   {#if status}
     <div class="card">
       <p>Version {status.version}</p>
-      <p>Uptime {Math.round(status.uptime / 60)} minutes</p>
-      <p>Client: {status.client_kind} — {status.client_reachable ? 'reachable' : 'unreachable'}</p>
+      <p>Uptime {Math.round(status.uptime_secs / 60)} minutes</p>
+      <p>
+        Client: {status.client?.kind ?? 'none'} —
+        {status.client?.reachable ? 'reachable' : 'unreachable'}
+      </p>
       <p>CORENAME: {status.corename ?? 'none'}</p>
-      <p>Disk free: {(status.disk_free / 1_000_000_000).toFixed(1)} GB</p>
-      <p>Memory: {(status.rss / 1_000_000).toFixed(0)} MB</p>
+      <p>Disk free: {status.disk_free_bytes ? (status.disk_free_bytes / 1_000_000_000).toFixed(1) : '—'} GB</p>
+      <p>Memory: {status.rss_bytes ? (status.rss_bytes / 1_000_000).toFixed(0) : '—'} MB</p>
       <p>
         Scheduler: {status.paused ? 'paused' : 'running'}
+        {#if status.pause_reason === 'core'}<span class="muted">(held for the running core)</span>{/if}
         <button onclick={togglePause}>{status.paused ? 'Resume' : 'Pause'}</button>
       </p>
       {#if statusError}<p class="error">{statusError}</p>{/if}
     </div>
   {/if}
 
-  <h2>Settings</h2>
-  <form class="card" onsubmit={(e) => e.preventDefault()}>
-    {#each Object.entries(settings) as [key, value] (key)}
+  {#if settings}
+    <h2>Settings</h2>
+    <form class="card settings" onsubmit={(e) => e.preventDefault()}>
+      <h3>Client</h3>
       <label>
-        {key}
+        Kind
+        <select bind:value={settings.client.kind}>
+          <option value="auto">Auto-detect</option>
+          <option value="transmission">Transmission</option>
+          <option value="rtorrent">rtorrent</option>
+        </select>
+      </label>
+      <label>
+        URL
+        <input type="text" placeholder="http://127.0.0.1:9091/transmission/rpc" bind:value={settings.client.url} />
+      </label>
+      <p class="muted">Remote path map</p>
+      {#each settings.client.remote_path_map as mapping, i (i)}
+        <div class="mapping">
+          <input type="text" placeholder="Remote path" bind:value={mapping.remote} />
+          <input type="text" placeholder="Local path" bind:value={mapping.local} />
+          <button type="button" onclick={() => removeMapping(i)}>Remove</button>
+        </div>
+      {/each}
+      <button type="button" onclick={addMapping}>Add mapping</button>
+
+      <h3>Limits (kbps, 0 is unlimited)</h3>
+      <label>
+        Download at menu
+        <input type="number" min="0" bind:value={settings.limits.down_kbps_menu} />
+      </label>
+      <label>
+        Download while a core runs
+        <input type="number" min="0" bind:value={settings.limits.down_kbps_core} />
+      </label>
+      <label>
+        Upload at menu
+        <input type="number" min="0" bind:value={settings.limits.up_kbps_menu} />
+      </label>
+      <label>
+        Upload while a core runs
+        <input type="number" min="0" bind:value={settings.limits.up_kbps_core} />
+      </label>
+
+      <h3>1G1R preferences</h3>
+      <label>
+        Region order
         <input
           type="text"
-          value={String(value)}
-          oninput={(e) => (settings = { ...settings, [key]: (e.currentTarget as HTMLInputElement).value })}
+          value={csv(settings.prefs.regions)}
+          oninput={(e) => settings && (settings.prefs.regions = fromCsv((e.currentTarget as HTMLInputElement).value))}
         />
       </label>
-    {/each}
-    <button class="primary" onclick={save}>Save</button>
-    {#if saved}<span class="muted">Saved.</span>{/if}
-    {#if settingsError}<p class="error">{settingsError}</p>{/if}
-  </form>
+      <label>
+        Language order
+        <input
+          type="text"
+          value={csv(settings.prefs.languages)}
+          oninput={(e) =>
+            settings && (settings.prefs.languages = fromCsv((e.currentTarget as HTMLInputElement).value))}
+        />
+      </label>
+      <label>
+        <input type="checkbox" bind:checked={settings.prefs.prefer_latest_revision} />
+        Prefer the highest revision
+      </label>
+      <label>
+        Hidden flags
+        <input
+          type="text"
+          value={csv(settings.prefs.hide)}
+          oninput={(e) => settings && (settings.prefs.hide = fromCsv((e.currentTarget as HTMLInputElement).value))}
+        />
+      </label>
 
-  <h2>Log tail</h2>
-  <pre class="card log">server started
-scan: nes complete
-scheduler: idle</pre>
+      <button class="primary" onclick={save}>Save</button>
+      {#if saved}<span class="muted">Saved.</span>{/if}
+      {#if settingsError}<p class="error">{settingsError}</p>{/if}
+    </form>
+  {/if}
 </div>
 
 <style>
@@ -122,12 +203,17 @@ scheduler: idle</pre>
     margin: 0.4em 0;
   }
 
-  .error {
-    color: var(--danger);
+  .settings h3 {
+    margin-top: 1em;
   }
 
-  .log {
-    white-space: pre-wrap;
-    font-size: 0.85em;
+  .mapping {
+    display: flex;
+    gap: 0.4em;
+    margin: 0.3em 0;
+  }
+
+  .error {
+    color: var(--danger);
   }
 </style>

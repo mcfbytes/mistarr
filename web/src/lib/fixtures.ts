@@ -52,9 +52,9 @@ export const fixturePlatforms: Platform[] = [
   }
 ];
 
-function artFor(platformCoreDir: string, datName: string) {
-  const clean = datName.replace(/[&*/:`<>?\\|"]/g, '_');
-  const base = `https://thumbnails.libretro.com/${encodeURIComponent(platformCoreDir)}`;
+function artFor(playlist: string, name: string) {
+  const clean = name.replace(/[&*/:`<>?\\|"]/g, '_');
+  const base = `https://thumbnails.libretro.com/${encodeURIComponent(playlist)}`;
   return {
     boxart: `${base}/Named_Boxarts/${encodeURIComponent(clean)}.png`,
     title: `${base}/Named_Titles/${encodeURIComponent(clean)}.png`,
@@ -79,11 +79,14 @@ export function fixtureTitles(platformId: string, count = 60): TitleGroup[] {
   const platform = fixturePlatforms.find((p) => p.id === platformId);
   const coreDir = platform?.core_dir ?? 'NES';
   return Array.from({ length: count }, (_, i) => {
-    const name = `${exampleNames[i % exampleNames.length]} (USA)`;
+    const base = exampleNames[i % exampleNames.length] ?? 'Example Quest';
+    const name = `${base} (USA)`;
     return {
       parent_id: i + 1,
       platform_id: platformId,
-      base_name: exampleNames[i % exampleNames.length] ?? 'Example Quest',
+      base_name: base,
+      name,
+      pick_id: i + 1,
       pick_name: name,
       variants: 1 + (i % 3),
       have_verified: i % 4 === 0 ? 1 : 0,
@@ -95,13 +98,14 @@ export function fixtureTitles(platformId: string, count = 60): TitleGroup[] {
 }
 
 export function fixtureTitle(id: number): TitleDetail {
-  const name = `${exampleNames[id % exampleNames.length]} (USA)`;
+  const base = exampleNames[id % exampleNames.length] ?? 'Example Quest';
+  const name = `${base} (USA)`;
   return {
     parent_id: id,
     platform_id: 'nes',
-    base_name: exampleNames[id % exampleNames.length] ?? 'Example Quest',
+    base_name: base,
     pick_variant_id: id * 10,
-    art: artFor('NES', name),
+    art: artFor('Nintendo - Nintendo Entertainment System', name),
     variants: [
       {
         id: id * 10,
@@ -112,36 +116,50 @@ export function fixtureTitle(id: number): TitleDetail {
         flags: [],
         is_1g1r_pick: true,
         wanted: false,
+        retired: false,
+        inferred: false,
+        dat_version_id: 1,
         torrent_files_available: 2,
         roms: [
           {
             id: id * 100,
-            name: `${exampleNames[id % exampleNames.length]}.nes`,
+            name: `${base}.nes`,
             size: 131072,
+            crc32: 'deadbeef',
+            md5: null,
+            sha1: null,
             status: 'verified',
             file_state: 'verified',
-            file_id: id * 1000
+            file_id: id * 1000,
+            file_path: `nes/${base}.nes`
           }
         ]
       },
       {
         id: id * 10 + 1,
-        name: `${exampleNames[id % exampleNames.length]} (Europe)`,
+        name: `${base} (Europe)`,
         regions: ['Europe'],
         languages: ['en', 'fr', 'de'],
         revision: 'Rev 1',
         flags: [],
         is_1g1r_pick: false,
         wanted: false,
+        retired: false,
+        inferred: false,
+        dat_version_id: 1,
         torrent_files_available: 0,
         roms: [
           {
             id: id * 100 + 1,
-            name: `${exampleNames[id % exampleNames.length]} (Europe).nes`,
+            name: `${base} (Europe).nes`,
             size: 131072,
+            crc32: 'baadf00d',
+            md5: null,
+            sha1: null,
             status: 'good',
             file_state: 'unverified',
-            file_id: null
+            file_id: null,
+            file_path: null
           }
         ]
       }
@@ -151,17 +169,29 @@ export function fixtureTitle(id: number): TitleDetail {
 
 export const fixtureStatus: SystemStatus = {
   version: '0.1.0-fixture',
-  uptime: 4521,
-  client_kind: 'rtorrent',
-  client_reachable: true,
+  uptime_secs: 4521,
+  client: {
+    kind: 'rtorrent',
+    url: 'scgi://127.0.0.1:5000',
+    reachable: true,
+    version: null,
+    rtorrent_on_path: true,
+    checked_at: 1_770_000_000
+  },
   corename: 'FCEUmm',
   paused: false,
-  disk_free: 12_400_000_000,
-  rss: 41_000_000
+  pause_reason: null,
+  override: null,
+  disk_free_bytes: 12_400_000_000,
+  rss_bytes: 41_000_000
 };
 
 export const fixtureWizard: WizardStatus = {
-  steps: { paths: true, dats: true, client: false, sources: false }
+  paths: true,
+  dats: true,
+  client: false,
+  sources: false,
+  open_on_start: false
 };
 
 export const fixtureDats: DatVersion[] = [
@@ -173,7 +203,8 @@ export const fixtureDats: DatVersion[] = [
     source_file: 'example-console.dat',
     loaded_at: 1_770_000_000,
     superseded_by: null,
-    game_count: 240
+    game_count: 240,
+    retired: false
   },
   {
     id: 2,
@@ -183,7 +214,8 @@ export const fixtureDats: DatVersion[] = [
     source_file: 'unbound-sample.dat',
     loaded_at: 1_770_003_600,
     superseded_by: null,
-    game_count: 88
+    game_count: 88,
+    retired: false
   }
 ];
 
@@ -196,11 +228,12 @@ export const fixtureSources: Source[] = [
     platform_id: 'nes',
     bind_score: 0.94,
     state: 'bound',
+    reason: null,
     seed_policy: 'ratio:1.0',
     file_count: 240,
     matched_count: 238,
     total_size: 900_000_000,
-    client_status: 'seeding',
+    client_id: 'abc123',
     added_at: 1_770_010_000
   },
   {
@@ -211,19 +244,28 @@ export const fixtureSources: Source[] = [
     platform_id: null,
     bind_score: null,
     state: 'unbound',
+    reason: 'No platform reached the binding threshold.',
     seed_policy: 'none',
     file_count: 60,
     matched_count: 12,
     total_size: 300_000_000,
-    client_status: null,
+    client_id: null,
     added_at: 1_770_020_000
   }
 ];
 
 export function fixtureSourceFiles(): SourceFile[] {
   return [
-    { file_index: 0, path: 'Example Quest (USA).nes', size: 131072, matched_rom_name: 'Example Quest (USA).nes' },
-    { file_index: 1, path: 'Sample Racer (USA).nes', size: 262144, matched_rom_name: null }
+    {
+      file_index: 0,
+      path: 'Example Quest (USA).nes',
+      size: 131072,
+      rom_id: 1,
+      rom_name: 'Example Quest (USA).nes',
+      title_id: 1,
+      confidence: 'name'
+    },
+    { file_index: 1, path: 'Sample Racer (USA).nes', size: 262144, rom_id: null, rom_name: null, title_id: null, confidence: null }
   ];
 }
 
@@ -232,9 +274,15 @@ export const fixtureDownloads: Download[] = [
     id: 1,
     title_id: 1,
     title_name: 'Example Quest (USA)',
+    platform_id: 'nes',
+    rom_id: 10,
+    rom_name: 'Example Quest (USA).nes',
+    size: 131072,
     source_id: 1,
+    file_index: 0,
     state: 'transferring',
     progress: 0.42,
+    staged_path: null,
     error: null,
     created_at: 1_770_030_000,
     updated_at: 1_770_030_500
@@ -243,9 +291,15 @@ export const fixtureDownloads: Download[] = [
     id: 2,
     title_id: 2,
     title_name: 'Sample Racer (USA)',
+    platform_id: 'nes',
+    rom_id: 11,
+    rom_name: 'Sample Racer (USA).nes',
+    size: 262144,
     source_id: 1,
+    file_index: 1,
     state: 'checking',
     progress: 1,
+    staged_path: null,
     error: null,
     created_at: 1_770_030_100,
     updated_at: 1_770_030_600
@@ -254,9 +308,15 @@ export const fixtureDownloads: Download[] = [
     id: 3,
     title_id: 3,
     title_name: 'Fixture Fighters (USA)',
+    platform_id: 'nes',
+    rom_id: 12,
+    rom_name: 'Fixture Fighters (USA).nes',
+    size: 65536,
     source_id: 2,
+    file_index: 0,
     state: 'failed',
     progress: 0.1,
+    staged_path: null,
     error: 'client unreachable',
     created_at: 1_770_030_200,
     updated_at: 1_770_030_700
@@ -264,14 +324,15 @@ export const fixtureDownloads: Download[] = [
 ];
 
 export const fixtureImports: ImportLogEntry[] = [
-  { id: 1, at: 1_770_031_000, download_id: 1, file_id: 10, action: 'placed', detail: '{}' },
-  { id: 2, at: 1_770_031_100, download_id: null, file_id: 11, action: 'skipped_existing', detail: '{}' }
+  { id: 1, at: 1_770_031_000, download_id: 1, file_id: 10, action: 'placed', detail: { rel_path: 'nes/Example Quest (USA).nes' } },
+  { id: 2, at: 1_770_031_100, download_id: null, file_id: 11, action: 'skipped_existing', detail: {} }
 ];
 
 export const fixtureJobs: Job[] = [
   {
     id: 1,
     kind: 'scan',
+    payload: {},
     state: 'running',
     progress: { scanned: 120, total: 240 },
     created_at: 1_770_032_000,
@@ -280,7 +341,12 @@ export const fixtureJobs: Job[] = [
 ];
 
 export const fixtureSettings: Settings = {
-  games_root: '/media/fat/games',
-  api_key_set: false,
-  scan_interval_minutes: 60
+  client: { kind: 'auto', url: '', remote_path_map: [] },
+  limits: { down_kbps_menu: 0, down_kbps_core: 512, up_kbps_menu: 0, up_kbps_core: 64 },
+  prefs: {
+    regions: ['USA', 'World', 'Europe', 'Japan'],
+    languages: ['En'],
+    prefer_latest_revision: true,
+    hide: ['bios', 'beta', 'proto', 'demo', 'sample', 'program']
+  }
 };

@@ -10,7 +10,8 @@
     "check": "svelte-check --tsconfig ./tsconfig.json",
     "lint": "eslint . --max-warnings=0",
     "size": "node scripts/check-size.mjs",
-    "e2e": "playwright test -c e2e/playwright.config.ts"
+    "e2e": "playwright test -c e2e/playwright.config.ts",
+    "e2e:live": "playwright test -c e2e/live.playwright.config.ts"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

@@ -1,22 +1,45 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getPlatforms, loadPlatforms } from '../lib/stores/platforms.svelte';
+  import { getPlatforms, loadPlatforms, patchPlatform } from '../lib/stores/platforms.svelte';
   import { platformUrl } from '../lib/router.svelte';
-  import { api } from '../lib/api';
+  import { api, errorMessage } from '../lib/api';
+  import { showToast } from '../lib/stores/toast.svelte';
 
   onMount(() => {
     void loadPlatforms();
   });
 
   const platforms = $derived(getPlatforms());
-  const present = $derived(platforms.filter((p) => p.core_present));
+  const present = $derived(platforms.filter((p) => p.core_present && p.enabled));
   const absent = $derived(platforms.filter((p) => !p.core_present));
+  const disabled = $derived(platforms.filter((p) => p.core_present && !p.enabled));
 
   const isMock = import.meta.env.VITE_MOCK === '1';
+  let scanning = $state<Record<string, boolean>>({});
 
   async function scan(id: string): Promise<void> {
-    if (!isMock) {
-      await api.scan(id);
+    scanning = { ...scanning, [id]: true };
+    try {
+      if (!isMock) {
+        await api.scan(id);
+      }
+    } catch (err) {
+      showToast(errorMessage(err));
+    } finally {
+      scanning = { ...scanning, [id]: false };
+    }
+  }
+
+  async function setEnabled(id: string, enabled: boolean): Promise<void> {
+    patchPlatform(id, { enabled });
+    if (isMock) {
+      return;
+    }
+    try {
+      await api.setPlatform(id, enabled);
+    } catch (err) {
+      patchPlatform(id, { enabled: !enabled });
+      showToast(errorMessage(err));
     }
   }
 </script>
@@ -31,10 +54,27 @@
           {platform.counts.have} have · {platform.counts.wanted} wanted · {platform.counts.unverified} unverified
           of {platform.counts.titles}
         </p>
-        <button onclick={() => scan(platform.id)}>Scan</button>
+        <div class="actions">
+          <button onclick={() => scan(platform.id)} disabled={scanning[platform.id]}>Scan</button>
+          <button onclick={() => setEnabled(platform.id, false)}>Disable</button>
+        </div>
       </div>
     {/each}
   </div>
+
+  {#if disabled.length > 0}
+    <details>
+      <summary>Disabled platforms ({disabled.length})</summary>
+      <div class="grid">
+        {#each disabled as platform (platform.id)}
+          <div class="card">
+            <h2>{platform.name}</h2>
+            <button onclick={() => setEnabled(platform.id, true)}>Enable</button>
+          </div>
+        {/each}
+      </div>
+    </details>
+  {/if}
 
   {#if absent.length > 0}
     <details>
@@ -57,6 +97,11 @@
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
     gap: 1em;
     margin-top: 1em;
+  }
+
+  .actions {
+    display: flex;
+    gap: 0.5em;
   }
 
   details {

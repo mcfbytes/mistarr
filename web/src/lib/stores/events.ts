@@ -1,15 +1,34 @@
 import { EventSubscriber } from '../api';
 import type { SseEvent } from '../types';
 import { applyStatus, setConnected } from './status.svelte';
-import { applySourceChanged } from './sources.svelte';
-import { applyDownloadChanged } from './downloads.svelte';
-import { applyJobProgress } from './jobs.svelte';
-import { applyDatLoaded } from './dats.svelte';
+import { applySourceChanged, loadSources } from './sources.svelte';
+import { applyDownloadChanged, loadDownloads, loadImports } from './downloads.svelte';
+import { applyJobProgress, loadJobs } from './jobs.svelte';
+import { applyDatLoaded, loadDats } from './dats.svelte';
+import { loadPlatforms } from './platforms.svelte';
+import { reloadTitles } from './titles.svelte';
 
 let subscriber: EventSubscriber | null = null;
 
+// Re-fetches every hydrated store; the server asks for this when a
+// reconnect's replay may have gaps.
+async function resync(): Promise<void> {
+  await Promise.all([
+    loadPlatforms(),
+    loadDats(),
+    loadSources(),
+    loadDownloads(),
+    loadImports(),
+    loadJobs(),
+    reloadTitles()
+  ]);
+}
+
 function handle(event: SseEvent): void {
   switch (event.name) {
+    case 'resync':
+      void resync();
+      break;
     case 'status':
       applyStatus(event.data);
       break;
@@ -20,10 +39,19 @@ function handle(event: SseEvent): void {
       applyDownloadChanged(event.data.download_id, event.data.state, event.data.progress);
       break;
     case 'job.progress':
-      applyJobProgress(event.data.id, event.data.kind, event.data.progress);
+      applyJobProgress(event.data.id, event.data.kind, event.data.state, event.data.progress);
       break;
     case 'dat.loaded':
-      applyDatLoaded(event.data.dat_version_id, event.data.file);
+      applyDatLoaded();
+      break;
+    case 'dat.rejected':
+      break;
+    case 'import.done':
+      void loadImports();
+      void reloadTitles();
+      break;
+    case 'file.changed':
+      void reloadTitles();
       break;
     default:
       break;

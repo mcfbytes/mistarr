@@ -1,7 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getDownloads, getImports, loadDownloads, loadImports } from '../lib/stores/downloads.svelte';
+  import { getDownloads, getImports, loadDownloads, loadImports, patchDownload } from '../lib/stores/downloads.svelte';
   import { getJobs, loadJobs } from '../lib/stores/jobs.svelte';
+  import { api, errorMessage } from '../lib/api';
+  import { showToast } from '../lib/stores/toast.svelte';
+
+  const isMock = import.meta.env.VITE_MOCK === '1';
 
   onMount(() => {
     void loadDownloads();
@@ -12,6 +16,32 @@
   const downloads = $derived(getDownloads());
   const imports = $derived(getImports());
   const jobs = $derived(getJobs());
+
+  async function retry(id: number): Promise<void> {
+    if (isMock) {
+      patchDownload(id, { state: 'queued', error: null });
+      return;
+    }
+    try {
+      const row = await api.retryDownload(id);
+      patchDownload(id, row);
+    } catch (err) {
+      showToast(errorMessage(err));
+    }
+  }
+
+  async function cancel(id: number): Promise<void> {
+    if (isMock) {
+      patchDownload(id, { state: 'cancelled' });
+      return;
+    }
+    try {
+      const row = await api.cancelDownload(id);
+      patchDownload(id, row);
+    } catch (err) {
+      showToast(errorMessage(err));
+    }
+  }
 </script>
 
 <div class="page">
@@ -20,12 +50,21 @@
   <h2>Downloads</h2>
   {#each downloads as d (d.id)}
     <div class="card row">
-      <div>
+      <div class="head">
         <strong>{d.title_name}</strong>
+        <span class="muted">{d.rom_name}</span>
         <span class="muted">{d.state}</span>
         {#if d.error}<span class="error">{d.error}</span>{/if}
       </div>
       <div class="progress"><span style={`width: ${Math.round(d.progress * 100)}%`}></span></div>
+      <div class="actions">
+        {#if d.state === 'failed'}
+          <button onclick={() => retry(d.id)}>Retry</button>
+        {/if}
+        {#if !['done', 'cancelled', 'importing'].includes(d.state)}
+          <button onclick={() => cancel(d.id)}>Cancel</button>
+        {/if}
+      </div>
     </div>
   {:else}
     <p class="muted">No downloads.</p>
@@ -56,10 +95,17 @@
     margin-bottom: 0.6em;
   }
 
-  .row > div:first-child {
+  .head {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.6em;
     margin-bottom: 0.3em;
+  }
+
+  .actions {
+    display: flex;
+    gap: 0.5em;
+    margin-top: 0.4em;
   }
 
   .error {

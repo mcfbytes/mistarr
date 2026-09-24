@@ -19,5 +19,10 @@ export function patchSource(id: number, patch: Partial<Source>): void {
 }
 
 export function applySourceChanged(sourceId: number, state: SourceState, platformId: string | null): void {
-  patchSource(sourceId, { state, platform_id: platformId });
+  const exists = sources.some((s) => s.id === sourceId);
+  if (exists) {
+    patchSource(sourceId, { state, platform_id: platformId });
+  } else {
+    void loadSources();
+  }
 }

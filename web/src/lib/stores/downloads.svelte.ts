@@ -23,6 +23,15 @@ export async function loadImports(): Promise<void> {
   imports = isMock ? fixtureImports : (await api.imports()).items;
 }
 
+export function patchDownload(id: number, patch: Partial<Download>): void {
+  downloads = downloads.map((d) => (d.id === id ? { ...d, ...patch } : d));
+}
+
 export function applyDownloadChanged(downloadId: number, state: DownloadState, progress: number): void {
-  downloads = downloads.map((d) => (d.id === downloadId ? { ...d, state, progress } : d));
+  const exists = downloads.some((d) => d.id === downloadId);
+  if (exists) {
+    patchDownload(downloadId, { state, progress });
+  } else {
+    void loadDownloads();
+  }
 }

@@ -7,6 +7,7 @@ const isMock = import.meta.env.VITE_MOCK === '1';
 let status = $state<SystemStatus | null>(null);
 let wizard = $state<WizardStatus | null>(null);
 let connected = $state(true);
+let unauthorized = $state(false);
 
 export function getStatus(): SystemStatus | null {
   return status;
@@ -22,6 +23,14 @@ export function isConnected(): boolean {
 
 export function setConnected(value: boolean): void {
   connected = value;
+}
+
+export function isUnauthorized(): boolean {
+  return unauthorized;
+}
+
+export function setUnauthorized(value: boolean): void {
+  unauthorized = value;
 }
 
 export async function loadStatus(): Promise<void> {

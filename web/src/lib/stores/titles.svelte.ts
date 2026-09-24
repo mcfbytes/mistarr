@@ -8,7 +8,10 @@ const PAGE_SIZE = 60;
 let groups = $state<TitleGroup[]>([]);
 let groupsTotal = $state(0);
 let groupsPlatform = $state<string | null>(null);
+let lastFilters: TitleFilters = {};
+let lastPage = 0;
 let detail = $state<TitleDetail | null>(null);
+let detailId: number | null = null;
 let groupsController: AbortController | null = null;
 let detailToken = 0;
 
@@ -32,6 +35,8 @@ export async function loadTitlesPage(
   groupsController?.abort();
   const controller = new AbortController();
   groupsController = controller;
+  lastFilters = filters;
+  lastPage = page;
 
   if (groupsPlatform !== platformId && page === 0) {
     groups = [];
@@ -59,8 +64,21 @@ export async function loadTitlesPage(
   }
 }
 
+export async function reloadTitles(): Promise<void> {
+  if (groupsPlatform) {
+    await loadTitlesPage(groupsPlatform, lastFilters, 0);
+    for (let p = 1; p <= lastPage; p += 1) {
+      await loadTitlesPage(groupsPlatform, lastFilters, p);
+    }
+  }
+  if (detailId !== null) {
+    await loadTitleDetail(detailId);
+  }
+}
+
 export async function loadTitleDetail(id: number): Promise<void> {
   const token = ++detailToken;
+  detailId = id;
   detail = null;
   const next = isMock ? fixtureTitle(id) : await api.title(id);
   if (token === detailToken) {
@@ -70,6 +88,7 @@ export async function loadTitleDetail(id: number): Promise<void> {
 
 export function clearDetail(): void {
   detail = null;
+  detailId = null;
   detailToken += 1;
 }
 
@@ -77,12 +96,6 @@ export function patchGroup(parentId: number, patch: Partial<TitleGroup>): void {
   groups = groups.map((g) => (g.parent_id === parentId ? { ...g, ...patch } : g));
 }
 
-export function setVariantWanted(variantId: number, wanted: boolean): void {
-  if (!detail) {
-    return;
-  }
-  detail = {
-    ...detail,
-    variants: detail.variants.map((v) => (v.id === variantId ? { ...v, wanted } : v))
-  };
+export function setDetail(next: TitleDetail): void {
+  detail = next;
 }
