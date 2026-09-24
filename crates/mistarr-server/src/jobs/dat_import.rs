@@ -21,6 +21,7 @@ use super::{Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
 use crate::config::PrefsConfig;
 use crate::db::dats::{self, DatVersionId, NewVersion};
+use crate::db::jobs::{JobId, JobState};
 use crate::db::titles::{self, RomInput, TitleInput};
 use crate::error::{Error, Result};
 use crate::events::EventKind;
@@ -157,7 +158,7 @@ struct Loaded {
 /// What one member import needs besides the connection.
 struct Request {
     source_file: String,
-    fallback_name: String,
+    file_stem: String,
     bind: Option<Bind>,
     prefs: Prefs,
     now: i64,
@@ -186,26 +187,12 @@ impl Job for DatImport {
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
-        if !self.path.is_file() {
-            return Ok(());
-        }
         let file = file_name(&self.path);
         if self.bind.is_some() {
-            let members = match list_members(&self.path) {
-                Ok(m) => m,
-                Err(reason) => return Err(Error::Job(reason)),
-            };
-            let outcomes = self.import_members(ctx, &members, &file).await?;
-            return match outcomes.iter().find_map(|o| match o {
-                Outcome::Loaded(l) => Some(l),
-                _ => None,
-            }) {
-                Some(l) => {
-                    publish_loaded(&ctx.app, l, &file);
-                    Ok(())
-                }
-                None => Err(Error::Job(format!("{file} no longer holds that DAT"))),
-            };
+            return self.run_bind(ctx, &file).await;
+        }
+        if !self.path.is_file() {
+            return Ok(());
         }
         let members = match list_members(&self.path) {
             Ok(m) => m,
@@ -248,6 +235,37 @@ impl Job for DatImport {
 }
 
 impl DatImport {
+    /// Loads the titles of an unbound version from its file in `dats/loaded/`.
+    /// Anything short of that publishes `dat.rejected` and fails the job.
+    async fn run_bind(&self, ctx: &JobContext, file: &str) -> Result<()> {
+        let fail = |reason: String| {
+            publish_rejected(&ctx.app, file, &reason);
+            Err(Error::Job(reason))
+        };
+        if !self.path.is_file() {
+            return fail(format!("{file} is no longer in dats/{LOADED_DIR}/"));
+        }
+        let members = match list_members(&self.path) {
+            Ok(m) => m,
+            Err(reason) => return fail(reason),
+        };
+        let mut reasons = Vec::new();
+        for outcome in self.import_members(ctx, &members, file).await? {
+            match outcome {
+                Outcome::Loaded(l) => {
+                    publish_loaded(&ctx.app, &l, file);
+                    return Ok(());
+                }
+                Outcome::Rejected(r) => reasons.push(r),
+                Outcome::Skipped => {}
+            }
+        }
+        if reasons.is_empty() {
+            reasons.push(format!("{file} no longer holds that DAT"));
+        }
+        fail(reasons.join("\n"))
+    }
+
     /// Imports every member, one write transaction each, checkpointing between them.
     async fn import_members(
         &self,
@@ -261,7 +279,7 @@ impl DatImport {
             ctx.checkpoint().await?;
             let req = Request {
                 source_file: source_file.to_owned(),
-                fallback_name: stem(&self.path),
+                file_stem: stem(&self.path),
                 bind: self.bind.clone(),
                 prefs: prefs(&ctx.app.config().prefs),
                 now: crate::unix_now(),
@@ -375,10 +393,12 @@ fn import_member<R: BufRead>(
         Err(e) => return Ok(Outcome::Rejected(format!("{prefix}{e}"))),
     };
     let header = stream.header().clone();
-    let dat_name = if header.name.trim().is_empty() {
-        req.fallback_name.clone()
-    } else {
-        header.name.clone()
+    let dat_name = match (&req.bind, member) {
+        _ if !header.name.trim().is_empty() => header.name.clone(),
+        (_, m) if !m.is_empty() => stem(Path::new(m)),
+        // A plain file holds one DAT; its stored name survives the rename into loaded/.
+        (Some(b), _) => b.dat_name.clone(),
+        (None, _) => req.file_stem.clone(),
     };
     if let Some(b) = &req.bind {
         if b.dat_name != dat_name || b.dat_version != header.version {
@@ -400,7 +420,15 @@ fn import_member<R: BufRead>(
             now: req.now,
         },
     )?;
+    if req.bind.is_some() && !plan.current {
+        return Ok(Outcome::Rejected(format!(
+            "{prefix}a newer version of {dat_name} is loaded; bind that version instead"
+        )));
+    }
     let platform = plan.platform_id.clone().filter(|_| plan.current);
+    if platform.is_some() {
+        dats::begin_load(&tx, plan.id)?;
+    }
     let mut games = 0u64;
     let mut clone_of = false;
     for game in stream {
@@ -629,6 +657,11 @@ impl DatWatcher {
         }
     }
 
+    /// Reports `path` again once it is stable, for a file whose import failed.
+    pub fn forget(&mut self, path: &Path) {
+        self.reported.remove(path);
+    }
+
     /// Regular files in `dir`, not dotfiles, that became stable since the last poll.
     pub fn poll(&mut self, dir: &Path) -> Vec<PathBuf> {
         let Ok(entries) = std::fs::read_dir(dir) else {
@@ -663,17 +696,37 @@ impl DatWatcher {
     }
 }
 
-/// Polls `dats/` every `options.dats_poll` and enqueues a [`DatImport`] per stable file.
+/// Polls `dats/` every `options.dats_poll` and enqueues a [`DatImport`] per
+/// stable file. A file whose job failed is enqueued again on a later poll.
 pub async fn watch(app: Arc<AppState>) {
     let dir = app.config().paths.dats();
     let mut watcher = DatWatcher::new(app.options.dats_min_age);
+    let mut pending: HashMap<PathBuf, JobId> = HashMap::new();
     let mut tick = tokio::time::interval(app.options.dats_poll);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
         tick.tick().await;
+        let mut finished = Vec::new();
+        for (path, &id) in &pending {
+            match app.db.read(move |c| crate::db::jobs::get(c, id)).await {
+                Ok(Some(row)) if row.state == JobState::Failed => {
+                    watcher.forget(path);
+                    finished.push(path.clone());
+                }
+                Ok(Some(row)) if !row.state.is_finished() => {}
+                Ok(_) => finished.push(path.clone()),
+                Err(e) => tracing::warn!(error = %e, "cannot read DAT import job"),
+            }
+        }
+        for path in finished {
+            pending.remove(&path);
+        }
         for path in watcher.poll(&dir) {
-            if let Err(e) = Scheduler::enqueue(&app, Arc::new(DatImport::new(&path))).await {
-                tracing::warn!(error = %e, "cannot enqueue DAT import");
+            match Scheduler::enqueue(&app, Arc::new(DatImport::new(&path))).await {
+                Ok(id) => {
+                    pending.insert(path, id);
+                }
+                Err(e) => tracing::warn!(error = %e, "cannot enqueue DAT import"),
             }
         }
     }

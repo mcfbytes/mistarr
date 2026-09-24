@@ -189,7 +189,8 @@ reuses the row with the same game name from any version of the same
 `dat_name`, moving its `dat_version_id` forward, so `titles.id`, `wanted` and
 the `files.rom_id` links survive an update. Titles left on older versions
 after a load are the entries the new version dropped; they get `retired = 1`
-and are never deleted. Roms a kept entry no longer lists get `roms.retired = 1`.
+and are never deleted, as do titles of the same version a reload of it no
+longer lists. Roms a kept entry no longer lists get `roms.retired = 1`.
 A version whose string sorts below the newest live one of its name is stored
 already superseded and does not touch titles. An unbound version stores only
 its `dat_versions` row; binding it re-reads the file from `dats/loaded/`.

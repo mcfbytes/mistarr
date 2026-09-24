@@ -70,7 +70,10 @@ clone groups the default browse shows, groups with a verified variant, groups
 with a wanted variant, and `unverified` files on disk. `PUT` answers with the
 same item. Binding answers 202 `{ dat_version_id, platform_id, job_id }` and
 the import job loads the titles, then publishes `dat.loaded`; a version that
-is already bound or retired is a 400.
+is already bound or retired is a 400. When the job cannot load it, because its
+file is gone from `dats/loaded/` or a newer version of the same DAT name is
+loaded, it publishes `dat.rejected` with the reason and the version stays
+unbound.
 
 ## Catalog
 

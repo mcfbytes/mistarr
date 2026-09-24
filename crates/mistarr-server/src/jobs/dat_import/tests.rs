@@ -33,7 +33,7 @@ fn dat(name: &str, version: &str, games: &[(&str, Option<&str>)]) -> String {
 fn request(stop: bool, bind: Option<Bind>) -> Request {
     Request {
         source_file: "t.dat".into(),
-        fallback_name: "t".into(),
+        file_stem: "t".into(),
         bind,
         prefs: Prefs::default(),
         now: 1,
@@ -322,4 +322,169 @@ async fn recompute_is_enqueued_for_every_platform() {
         .await
         .expect("count");
     assert_eq!(n, mistarr_mister::platforms::PLATFORMS.len() as u64);
+}
+
+#[test]
+fn nameless_members_take_their_own_names() {
+    let mut c = conn();
+    let nameless = "<datafile><game name=\"A\"><rom name=\"a\" size=\"1\"/></game></datafile>";
+    let req = request(false, None);
+    let a = import_member(
+        &mut c,
+        Cursor::new(nameless.as_bytes()),
+        &req,
+        "sub/Alpha.dat",
+    )
+    .expect("import");
+    let b =
+        import_member(&mut c, Cursor::new(nameless.as_bytes()), &req, "Beta.xml").expect("import");
+    let (a, b) = (loaded(a), loaded(b));
+    assert_ne!(a.version, b.version, "members of one pack do not collide");
+    let name = |id| dats::get(&c, id).expect("get").expect("row").dat_name;
+    assert_eq!(
+        (name(a.version), name(b.version)),
+        ("Alpha".to_owned(), "Beta".to_owned())
+    );
+}
+
+#[test]
+fn reloading_a_version_with_fewer_games_retires_the_rest() {
+    let mut c = conn();
+    let both = dat(
+        "Maker - Game Boy",
+        "1",
+        &[("Example Quest (USA)", None), ("Example Tale (USA)", None)],
+    );
+    loaded(import(&mut c, &both, &request(false, None)));
+    let one = dat("Maker - Game Boy", "1", &[("Example Quest (USA)", None)]);
+    let l = loaded(import(&mut c, &one, &request(false, None)));
+    assert_eq!(l.retired, 1);
+    assert_eq!(
+        count(
+            &c,
+            "SELECT retired FROM titles WHERE name = 'Example Tale (USA)'"
+        ),
+        1
+    );
+    assert_eq!(
+        count(
+            &c,
+            "SELECT retired FROM titles WHERE name = 'Example Quest (USA)'"
+        ),
+        0
+    );
+}
+
+#[test]
+fn binding_an_older_version_is_rejected_and_rolled_back() {
+    let mut c = conn();
+    let v1 = dat("Test Console", "1", &[("Example Quest (USA)", None)]);
+    let old = loaded(import(&mut c, &v1, &request(false, None)));
+    loaded(import(
+        &mut c,
+        &dat("Test Console", "2", &[("Example Quest (USA)", None)]),
+        &request(false, None),
+    ));
+    let bind = Bind {
+        version: old.version,
+        platform: PlatformId("nes".into()),
+        dat_name: "Test Console".into(),
+        dat_version: "1".into(),
+    };
+    let o = import(&mut c, &v1, &request(false, Some(bind)));
+    assert!(
+        matches!(&o, Outcome::Rejected(r) if r.contains("newer version")),
+        "{o:?}"
+    );
+    let row = dats::get(&c, old.version).expect("get").expect("row");
+    assert_eq!(row.platform_id, None);
+    assert_eq!(count(&c, "SELECT COUNT(*) FROM titles"), 0);
+}
+
+async fn job_state(app: &AppState, id: crate::db::jobs::JobId) -> rows::JobRow {
+    app.db
+        .read(move |c| rows::get(c, id))
+        .await
+        .expect("get")
+        .expect("row")
+}
+
+#[tokio::test]
+async fn binding_fails_loudly_and_finds_renamed_nameless_files() {
+    let (_dir, app) = state();
+    let dats_dir = app.config().paths.dats();
+    let loaded_dir = dats_dir.join(LOADED_DIR);
+    std::fs::create_dir_all(&loaded_dir).expect("mkdir");
+    let mut events = app.events.subscribe(None).live;
+    let nameless = |v: &str| {
+        format!("<datafile><header><version>{v}</version></header><game name=\"A\"><rom name=\"a\" size=\"1\"/></game></datafile>")
+    };
+    for v in ["1", "2"] {
+        let path = dats_dir.join("odd.dat");
+        std::fs::write(&path, nameless(v)).expect("write");
+        Scheduler::run_inline(&app, Arc::new(DatImport::new(&path)))
+            .await
+            .expect("run");
+    }
+    let (rows, _) = app.db.read(|c| dats::list(c, 10, 0)).await.expect("list");
+    let newest = rows.iter().find(|r| r.version == "2").expect("v2").clone();
+    assert_eq!(
+        (newest.dat_name.as_str(), newest.source_file.as_str()),
+        ("odd", "odd (1).dat")
+    );
+
+    let id = Scheduler::run_inline(&app, Arc::new(DatImport::bind(&newest, "nes", &loaded_dir)))
+        .await
+        .expect("run");
+    assert_eq!(job_state(&app, id).await.state, JobState::Done);
+    let v = newest.id;
+    let bound = app
+        .db
+        .read(move |c| dats::get(c, v))
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(bound.platform_id, Some(PlatformId("nes".into())));
+
+    let mut missing = rows.iter().find(|r| r.version == "1").expect("v1").clone();
+    missing.source_file = "gone.dat".into();
+    let id = Scheduler::run_inline(
+        &app,
+        Arc::new(DatImport::bind(&missing, "nes", &loaded_dir)),
+    )
+    .await
+    .expect("run");
+    assert_eq!(job_state(&app, id).await.state, JobState::Failed);
+    let mut rejected = None;
+    while let Ok(e) = events.try_recv() {
+        if e.kind == EventKind::DatRejected {
+            rejected = Some(e.data.clone());
+        }
+    }
+    let rejected = rejected.expect("dat.rejected");
+    assert!(
+        rejected.contains("gone.dat") && rejected.contains("no longer"),
+        "{rejected}"
+    );
+    let v = missing.id;
+    let row = app
+        .db
+        .read(move |c| dats::get(c, v))
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.platform_id, None, "still unbound");
+}
+
+#[test]
+fn a_forgotten_file_is_reported_again() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let a = dir.path().join("a.dat");
+    std::fs::write(&a, b"x").expect("write");
+    let mut w = DatWatcher::new(Duration::ZERO);
+    w.poll(dir.path());
+    assert_eq!(w.poll(dir.path()), std::slice::from_ref(&a));
+    assert!(w.poll(dir.path()).is_empty());
+    w.forget(&a);
+    assert_eq!(w.poll(dir.path()), std::slice::from_ref(&a));
 }

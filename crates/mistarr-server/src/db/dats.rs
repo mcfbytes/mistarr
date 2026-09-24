@@ -203,8 +203,29 @@ pub fn set_game_count(conn: &Connection, id: DatVersionId, count: u64) -> Result
     Ok(())
 }
 
-/// Marks titles of other versions of `id`'s DAT name retired: after a load
-/// they are exactly the entries the new version no longer lists. Returns how many.
+/// Marks the live titles of version `id` pending before it is loaded again, so
+/// [`retire_absent`] can tell the entries a reload of the same version dropped.
+/// Pending titles the load stores become live again. Run both in one transaction.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::dats::{self, DatVersionId};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert_eq!(dats::begin_load(&conn, DatVersionId(1)).unwrap(), 0);
+/// ```
+pub fn begin_load(conn: &Connection, id: DatVersionId) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE titles SET retired = 2 WHERE dat_version_id = ?1 AND retired = 0",
+        [id.0],
+    )?)
+}
+
+/// Marks retired the titles a load of `id` did not list: those left on other
+/// versions of its DAT name and those still pending from [`begin_load`]. Returns how many.
 ///
 /// # Errors
 ///
@@ -219,13 +240,18 @@ pub fn set_game_count(conn: &Connection, id: DatVersionId, count: u64) -> Result
 /// assert_eq!(dats::retire_absent(&conn, id).unwrap(), 0);
 /// ```
 pub fn retire_absent(conn: &Connection, id: DatVersionId) -> Result<usize> {
-    Ok(conn.execute(
+    let others = conn.execute(
         "UPDATE titles SET retired = 1, is_1g1r_pick = 0
          WHERE retired = 0 AND dat_version_id IN (
            SELECT o.id FROM dat_versions o JOIN dat_versions n ON n.dat_name = o.dat_name
            WHERE n.id = ?1 AND o.id != ?1)",
         [id.0],
-    )?)
+    )?;
+    let pending = conn.execute(
+        "UPDATE titles SET retired = 1, is_1g1r_pick = 0 WHERE dat_version_id = ?1 AND retired = 2",
+        [id.0],
+    )?;
+    Ok(others + pending)
 }
 
 /// Retires a version and every title still attached to it. Returns the row
@@ -399,6 +425,26 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .expect("rows");
         assert_eq!(retired, [(kept, false), (gone, true)]);
+    }
+
+    #[test]
+    fn reloading_the_same_version_retires_untouched_titles() {
+        let c = conn();
+        let v = upsert_version(&c, &new("1", Some("gb"), 1)).expect("v").id;
+        let kept = title(&c, v, "Kept");
+        let gone = title(&c, v, "Gone");
+        assert_eq!(begin_load(&c, v).expect("begin"), 2);
+        c.execute("UPDATE titles SET retired = 0 WHERE id = ?1", [kept])
+            .expect("touch");
+        assert_eq!(retire_absent(&c, v).expect("retire"), 1);
+        let retired: Vec<(i64, i64)> = c
+            .prepare("SELECT id, retired FROM titles ORDER BY id")
+            .expect("prepare")
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(retired, [(kept, 0), (gone, 1)]);
     }
 
     #[test]

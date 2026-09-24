@@ -580,3 +580,28 @@ async fn malformed_files_are_rejected_and_uploads_are_imported() {
     assert_eq!(w["dats"], true);
     booted.running.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_file_whose_import_failed_is_imported_again() {
+    let booted = boot().await;
+    let addr = booted.addr();
+    let app = Arc::clone(&booted.running.app);
+    let dir = dats_dir(&booted);
+    let loaded = dir.join("loaded");
+    std::fs::remove_dir(&loaded).expect("rmdir");
+    // A file where loaded/ should be makes the move fail after the commit.
+    std::fs::write(&loaded, b"").expect("block");
+    let mut events = app.events.subscribe(None).live;
+    drop_file(&dir, "gb.dat", gb_dat("1", &quest_games()).as_bytes());
+    wait_event(&mut events, EventKind::JobProgress, "\"state\":\"failed\"").await;
+    assert!(dir.join("gb.dat").is_file(), "the file stays for a retry");
+    std::fs::remove_file(&loaded).expect("unblock");
+    std::fs::create_dir(&loaded).expect("mkdir");
+    wait_event(&mut events, EventKind::DatLoaded, "gb.dat").await;
+    assert!(loaded.join("gb.dat").is_file());
+    assert_eq!(
+        json_of(addr, "/api/v1/platforms/gb/titles").await["total"],
+        1
+    );
+    booted.running.shutdown().await.expect("shutdown");
+}
