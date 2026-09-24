@@ -130,7 +130,8 @@ impl DatImport {
     /// use mistarr_server::jobs::{dat_import::DatImport, Job};
     /// let row = DatVersionRow { id: DatVersionId(3), platform_id: None, dat_name: "Test Console".into(),
     ///     version: "1".into(), source_file: "t.dat".into(), loaded_at: 0, superseded_by: None,
-    ///     game_count: 1, retired: false, family: "test console".into(), reason: None };
+    ///     game_count: 1, retired: false, family: "test console".into(), reason: None,
+    ///     suggested: Vec::new() };
     /// let job = DatImport::bind(&row, "nes", "/d/loaded".as_ref());
     /// assert_eq!(job.payload()["dat_version_id"], 3);
     /// ```
