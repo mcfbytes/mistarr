@@ -111,7 +111,7 @@ export interface Binding {
 export const api = {
   status: (): Promise<SystemStatus> => request('/system/status'),
   wizard: (): Promise<WizardStatus> => request('/system/wizard'),
-  scan: (platformId?: string): Promise<{ job_id: number }> =>
+  scan: (platformId?: string): Promise<{ job_id: number | null; arcade_job_id?: number }> =>
     request('/system/scan', { method: 'POST', body: JSON.stringify({ platform_id: platformId }) }),
   cores: (): Promise<CoresResult> => request('/system/cores', { method: 'POST' }),
   pause: (): Promise<SystemStatus> => request('/system/pause', { method: 'POST' }),

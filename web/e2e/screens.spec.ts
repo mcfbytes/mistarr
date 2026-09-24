@@ -97,6 +97,14 @@ test('the launch setting is editable', async ({ page }) => {
   await expect(allow).not.toBeChecked();
 });
 
+test('platform cards show have, wanted and titles, plus any nonzero extra', async ({ page }) => {
+  await page.goto('/#/');
+  await expect(page.getByText('180 have · 12 wanted · 240 titles · 4 unmatched files')).toBeVisible();
+  await expect(
+    page.getByText('978 have · 0 wanted · 1298 titles · 14 failing check · 6 partial')
+  ).toBeVisible();
+});
+
 test('held jobs show a banner with Run now', async ({ page }) => {
   await page.goto('/#/');
   const banner = page.getByRole('status').filter({ hasText: 'paused while FCEUmm is running' });

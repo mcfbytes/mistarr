@@ -119,10 +119,26 @@ plain zip name from `games/mame/`, a name starting with `/` from `games/`
 leaves `games/` is ignored. A title counts as have when every zip it names is
 present and its md5 check is not `mismatch` or `missing_part`.
 
-While any live MRA title exists, the arcade browse lists MRA titles only;
-DAT entries on the platform still verify zip members during a scan. MRA roms
-are never matched by the scanner, and wanting an MRA title creates downloads
-only for its missing zips.
+A library scan never walks the arcade platform's directories: hashing every
+member of every MAME zip on every scan is needless CPU and SD reads. Arcade
+is instead verified through three paths, all run by the arcade catalogue job
+(ARCHITECTURE.md "Arcade presence pass"), never a scan:
+
+1. An MRA title's own md5 check, "MRA assembly" below.
+2. The presence pass: after storing titles, the same job reads every zip's
+   central directory under `games/mame` and `games/hbmame`, never
+   decompressing a member. A member whose CRC32 and size match a loaded
+   DAT's rom is recorded against it, at CRC32 level rather than a full hash;
+   this is how a DAT entry loaded for `arcade` (`source = 'dat'`) is ever
+   marked `have`, since nothing else scans it. A member of a zip a live MRA
+   names, that no DAT matches, is recorded `unverified` against the MRA's
+   own zip rom, so the next import's md5 check has a row to promote once it
+   reads that zip as a sibling. The pass prunes `files` rows whose zip or
+   member is gone, and is incremental by each zip's size and mtime.
+3. The import path, "MRA import" below, for a zip mistarr places itself.
+
+While any live MRA title exists, the arcade browse lists MRA titles only,
+and wanting an MRA title creates downloads only for its missing zips.
 
 ### MRA assembly
 
@@ -178,12 +194,11 @@ which check applied as `verification` in `import_log`:
 The zip goes whole, never unpacked, to `games/mame/` or `games/hbmame/` as
 its MRA path says, under the MRA's file name; a zip read from any other
 directory is refused. `files` gets one row per member, linked to the DAT
-rom for `dat` and to the MRA title's zip rom otherwise, with the size and
-mtime a scan would record, so a following scan keeps them. Then the
-presence and md5 check of every MRA title naming the zip are redone, so a
-title shows have once all its zips are present and the check has not
-failed. Wanting a title creates one download per zip not on disk, and the
-zips may land in any order.
+rom for `dat` and to the MRA title's zip rom otherwise. Then the presence
+and md5 check of every MRA title naming the zip are redone, so a title
+shows have once all its zips are present and the check has not failed.
+Wanting a title creates one download per zip not on disk, and the zips may
+land in any order.
 
 ## Thumbnail playlists
 

@@ -66,6 +66,18 @@ impl Platform {
     pub fn platform_id(&self) -> PlatformId {
         PlatformId(self.id.to_owned())
     }
+
+    /// Whether presence and verification for this platform come from the
+    /// arcade catalogue (PLATFORMS.md "MRA catalogue") rather than a library scan.
+    ///
+    /// ```
+    /// assert!(mistarr_mister::platforms::by_id("arcade").unwrap().is_arcade());
+    /// assert!(!mistarr_mister::platforms::by_id("nes").unwrap().is_arcade());
+    /// ```
+    #[must_use]
+    pub fn is_arcade(&self) -> bool {
+        self.kind == Kind::Arcade
+    }
 }
 
 const CART: Platform = Platform {
