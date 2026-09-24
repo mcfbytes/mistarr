@@ -15,6 +15,10 @@ npm run size             # gzip budget check against dist/
 npm run e2e              # playwright screenshots of every screen, two viewports
 ```
 
+`npm run e2e` uses Playwright's own browser resolution by default. Set
+`PLAYWRIGHT_CHROMIUM_PATH` to point at a pre-installed Chromium binary
+(e.g. `/opt/pw-browsers/chromium`) when the default download is unavailable.
+
 Routing is a small hash-based router in `src/lib/router.svelte.ts` (under
 50 lines, zero dependencies) rather than a router package, since the whole
 app is seven flat routes with no nesting or transitions to justify one.

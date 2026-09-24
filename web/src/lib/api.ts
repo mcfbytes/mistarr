@@ -40,10 +40,10 @@ export function setApiKey(key: string | null): void {
   }
 }
 
-function headers(extra?: Record<string, string>): Record<string, string> {
+function headers(isFormData: boolean, extra?: Record<string, string>): Record<string, string> {
   const key = getApiKey();
   return {
-    'Content-Type': 'application/json',
+    ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
     ...(key ? { 'X-Api-Key': key } : {}),
     ...extra
   };
@@ -60,10 +60,15 @@ export class ApiError extends Error {
   }
 }
 
+export function errorMessage(err: unknown): string {
+  return err instanceof ApiError ? err.message : 'Something went wrong.';
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
+  const isFormData = init?.body instanceof FormData;
   const res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: { ...headers(), ...(init?.headers as Record<string, string> | undefined) }
+    headers: { ...headers(isFormData), ...(init?.headers as Record<string, string> | undefined) }
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as { error?: { code: string; message: string } } | null;
@@ -104,9 +109,15 @@ export const api = {
   bindPlatformDat: (id: string, datVersionId: number): Promise<void> =>
     request(`/platforms/${id}/dat`, { method: 'POST', body: JSON.stringify({ dat_version_id: datVersionId }) }),
 
-  titles: (platformId: string, filters: TitleFilters, limit: number, offset: number): Promise<Paged<TitleGroup>> =>
-    request(`/platforms/${platformId}/titles${query({ ...filters, limit, offset })}`),
-  title: (id: number): Promise<TitleDetail> => request(`/titles/${id}`),
+  titles: (
+    platformId: string,
+    filters: TitleFilters,
+    limit: number,
+    offset: number,
+    signal?: AbortSignal
+  ): Promise<Paged<TitleGroup>> =>
+    request(`/platforms/${platformId}/titles${query({ ...filters, limit, offset })}`, { signal }),
+  title: (id: number, signal?: AbortSignal): Promise<TitleDetail> => request(`/titles/${id}`, { signal }),
   want: (id: number, variantId?: number): Promise<void> =>
     request(`/titles/${id}/want`, { method: 'POST', body: JSON.stringify({ variant_id: variantId }) }),
   unwant: (id: number): Promise<void> => request(`/titles/${id}/want`, { method: 'DELETE' }),
@@ -117,12 +128,7 @@ export const api = {
   uploadDat: (file: File): Promise<DatVersion> => {
     const form = new FormData();
     form.append('file', file);
-    const key = getApiKey();
-    return request('/dats/upload', {
-      method: 'POST',
-      body: form,
-      headers: key ? { 'X-Api-Key': key } : undefined
-    });
+    return request('/dats/upload', { method: 'POST', body: form });
   },
   deleteDat: (id: number): Promise<void> => request(`/dats/${id}`, { method: 'DELETE' }),
 
@@ -130,12 +136,7 @@ export const api = {
   uploadSource: (file: File): Promise<Source> => {
     const form = new FormData();
     form.append('file', file);
-    const key = getApiKey();
-    return request('/sources/upload', {
-      method: 'POST',
-      body: form,
-      headers: key ? { 'X-Api-Key': key } : undefined
-    });
+    return request('/sources/upload', { method: 'POST', body: form });
   },
   addMagnet: (magnet: string): Promise<Source> =>
     request('/sources/upload', { method: 'POST', body: JSON.stringify({ magnet }) }),
@@ -201,8 +202,9 @@ export class EventSubscriber {
       this.onStateChange(true);
       await this.readStream(res.body);
     } catch {
-      this.onStateChange(false);
+      // connection failed or was aborted, handled by the disconnect signal below
     }
+    this.onStateChange(false);
     if (!this.closed) {
       const wait = this.backoff;
       this.backoff = Math.min(this.backoff * 2, RECONNECT_MAX_MS);

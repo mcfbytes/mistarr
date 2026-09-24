@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
-  import { getDetail, loadTitleDetail } from '../lib/stores/titles.svelte';
+  import { clearDetail, getDetail, loadTitleDetail, setVariantWanted } from '../lib/stores/titles.svelte';
   import { api } from '../lib/api';
 
   interface Props {
@@ -12,11 +11,8 @@
   const isMock = import.meta.env.VITE_MOCK === '1';
   let tab = $state<'boxart' | 'title' | 'snap'>('boxart');
 
-  onMount(() => {
-    void loadTitleDetail(titleId);
-  });
-
   $effect(() => {
+    clearDetail();
     void loadTitleDetail(titleId);
   });
 
@@ -26,12 +22,14 @@
     if (!isMock) {
       await api.want(titleId, variantId);
     }
+    setVariantWanted(variantId, true);
   }
 
-  async function unwant(): Promise<void> {
+  async function unwant(variantId: number): Promise<void> {
     if (!isMock) {
       await api.unwant(titleId);
     }
+    setVariantWanted(variantId, false);
   }
 
   async function rename(fileId: number): Promise<void> {
@@ -86,7 +84,7 @@
             <td>{variant.torrent_files_available} available</td>
             <td>
               {#if variant.wanted}
-                <button onclick={unwant}>Unwant</button>
+                <button onclick={() => unwant(variant.id)}>Unwant</button>
               {:else}
                 <button class="primary" onclick={() => want(variant.id)}>Want</button>
               {/if}

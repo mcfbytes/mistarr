@@ -1,9 +1,10 @@
 <script lang="ts">
   import './app.css';
-  import { getRoute } from './lib/router.svelte';
-  import { isConnected } from './lib/stores/status.svelte';
+  import { getRoute, navigate } from './lib/router.svelte';
+  import { getWizard, isConnected, loadWizard } from './lib/stores/status.svelte';
   import { startEvents } from './lib/stores/events';
   import Nav from './lib/Nav.svelte';
+  import Toasts from './lib/Toasts.svelte';
   import Wizard from './routes/Wizard.svelte';
   import Platforms from './routes/Platforms.svelte';
   import Browse from './routes/Browse.svelte';
@@ -13,6 +14,16 @@
   import System from './routes/System.svelte';
 
   startEvents();
+
+  async function checkFirstRun(): Promise<void> {
+    await loadWizard();
+    const wizard = getWizard();
+    if (wizard && !wizard.steps.paths && getRoute().name !== 'wizard') {
+      navigate('/wizard');
+    }
+  }
+
+  void checkFirstRun();
 
   const route = $derived(getRoute());
   const connected = $derived(isConnected());
@@ -25,6 +36,8 @@
 {#if !connected && route.name !== 'wizard'}
   <div class="banner">Disconnected from server. Reconnecting…</div>
 {/if}
+
+<Toasts />
 
 {#if route.name === 'wizard'}
   <Wizard />

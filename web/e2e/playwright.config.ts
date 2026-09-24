@@ -3,6 +3,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
 
 const here = dirname(fileURLToPath(import.meta.url));
+const chromiumPath = process.env.PLAYWRIGHT_CHROMIUM_PATH;
 
 export default defineConfig({
   testDir: here,
@@ -11,9 +12,7 @@ export default defineConfig({
   reporter: [['list']],
   use: {
     baseURL: 'http://localhost:4173',
-    launchOptions: {
-      executablePath: '/opt/pw-browsers/chromium'
-    }
+    launchOptions: chromiumPath ? { executablePath: chromiumPath } : {}
   },
   projects: [{ name: 'chromium', use: { ...devices['Desktop Chrome'] } }],
   webServer: {

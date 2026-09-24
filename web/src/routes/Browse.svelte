@@ -3,7 +3,8 @@
   import { findPlatform, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { getGroups, getGroupsTotal, loadTitlesPage, patchGroup } from '../lib/stores/titles.svelte';
   import { titleUrl } from '../lib/router.svelte';
-  import { api } from '../lib/api';
+  import { api, errorMessage } from '../lib/api';
+  import { showToast } from '../lib/stores/toast.svelte';
   import type { HaveFilter, TitleFilters } from '../lib/types';
 
   interface Props {
@@ -26,22 +27,28 @@
   const total = $derived(getGroupsTotal());
 
   function filters(): TitleFilters {
-    return { q: q || undefined, have, region: region || undefined, sort: 'name' };
-  }
-
-  async function reload(): Promise<void> {
-    page = 0;
-    await loadTitlesPage(platformId, filters(), 0);
+    return {
+      q: q || undefined,
+      have,
+      region: region || undefined,
+      // 'all' includes titles normally hidden by their bios/beta/proto flags
+      flags: showHidden ? 'all' : undefined,
+      sort: 'name'
+    };
   }
 
   onMount(() => {
     void loadPlatforms();
-    void reload();
   });
 
   $effect(() => {
     void platformId;
-    void reload();
+    void q;
+    void have;
+    void region;
+    void showHidden;
+    page = 0;
+    void loadTitlesPage(platformId, filters(), 0);
   });
 
   async function loadMore(): Promise<void> {
@@ -54,22 +61,35 @@
     loadingMore = false;
   }
 
-  function onScroll(e: Event): void {
-    const el = e.currentTarget as HTMLElement;
-    if (el.scrollTop + el.clientHeight > el.scrollHeight - 400) {
-      void loadMore();
-    }
+  function sentinel(node: HTMLElement): { destroy(): void } {
+    const observer = new IntersectionObserver((entries) => {
+      if (entries[0]?.isIntersecting) {
+        void loadMore();
+      }
+    });
+    observer.observe(node);
+    return {
+      destroy() {
+        observer.disconnect();
+      }
+    };
   }
 
   async function toggleWant(parentId: number, wanted: number): Promise<void> {
     const next = wanted > 0 ? 0 : 1;
     patchGroup(parentId, { wanted: next });
-    if (!isMock) {
+    if (isMock) {
+      return;
+    }
+    try {
       if (next > 0) {
         await api.want(parentId);
       } else {
         await api.unwant(parentId);
       }
+    } catch (err) {
+      patchGroup(parentId, { wanted });
+      showToast(errorMessage(err));
     }
   }
 
@@ -85,17 +105,17 @@
     );
 </script>
 
-<div class="page" onscroll={onScroll}>
+<div class="page">
   <h1>{platform?.name ?? platformId}</h1>
 
   <form class="filters" onsubmit={(e) => e.preventDefault()}>
-    <input type="search" placeholder="Search" bind:value={q} oninput={reload} />
-    <select bind:value={have} onchange={reload}>
+    <input type="search" placeholder="Search" bind:value={q} />
+    <select bind:value={have}>
       <option value="any">Any</option>
       <option value="yes">Have</option>
       <option value="no">Missing</option>
     </select>
-    <input type="text" placeholder="Region" bind:value={region} oninput={reload} />
+    <input type="text" placeholder="Region" bind:value={region} />
     <label>
       <input type="checkbox" bind:checked={showHidden} />
       Show hidden flags
@@ -122,6 +142,8 @@
   </div>
   {#if groups.length === 0}
     <p class="muted">No titles match.</p>
+  {:else if groups.length < total}
+    <div use:sentinel class="sentinel"></div>
   {/if}
 </div>
 
@@ -138,6 +160,10 @@
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
     gap: 1em;
+  }
+
+  .sentinel {
+    height: 1px;
   }
 
   .poster {

@@ -9,6 +9,8 @@ let groups = $state<TitleGroup[]>([]);
 let groupsTotal = $state(0);
 let groupsPlatform = $state<string | null>(null);
 let detail = $state<TitleDetail | null>(null);
+let groupsController: AbortController | null = null;
+let detailToken = 0;
 
 export function getGroups(): TitleGroup[] {
   return groups;
@@ -27,6 +29,10 @@ export async function loadTitlesPage(
   filters: TitleFilters,
   page: number
 ): Promise<void> {
+  groupsController?.abort();
+  const controller = new AbortController();
+  groupsController = controller;
+
   if (groupsPlatform !== platformId && page === 0) {
     groups = [];
   }
@@ -39,15 +45,44 @@ export async function loadTitlesPage(
     groupsTotal = all.length;
     return;
   }
-  const res = await api.titles(platformId, filters, PAGE_SIZE, offset);
-  groups = page === 0 ? res.items : [...groups, ...res.items];
-  groupsTotal = res.total;
+  try {
+    const res = await api.titles(platformId, filters, PAGE_SIZE, offset, controller.signal);
+    if (controller.signal.aborted) {
+      return;
+    }
+    groups = page === 0 ? res.items : [...groups, ...res.items];
+    groupsTotal = res.total;
+  } catch (err) {
+    if (!controller.signal.aborted) {
+      throw err;
+    }
+  }
 }
 
 export async function loadTitleDetail(id: number): Promise<void> {
-  detail = isMock ? fixtureTitle(id) : await api.title(id);
+  const token = ++detailToken;
+  detail = null;
+  const next = isMock ? fixtureTitle(id) : await api.title(id);
+  if (token === detailToken) {
+    detail = next;
+  }
+}
+
+export function clearDetail(): void {
+  detail = null;
+  detailToken += 1;
 }
 
 export function patchGroup(parentId: number, patch: Partial<TitleGroup>): void {
   groups = groups.map((g) => (g.parent_id === parentId ? { ...g, ...patch } : g));
+}
+
+export function setVariantWanted(variantId: number, wanted: boolean): void {
+  if (!detail) {
+    return;
+  }
+  detail = {
+    ...detail,
+    variants: detail.variants.map((v) => (v.id === variantId ? { ...v, wanted } : v))
+  };
 }

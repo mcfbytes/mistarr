@@ -2,13 +2,18 @@
   import { onMount } from 'svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { fixtureSettings } from '../lib/fixtures';
-  import { api } from '../lib/api';
+  import { api, errorMessage } from '../lib/api';
   import type { Settings } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
 
+  type SettingType = 'string' | 'number' | 'boolean';
+
   let settings = $state<Settings>({});
+  let settingTypes = $state<Record<string, SettingType>>({});
   let saved = $state(false);
+  let settingsError = $state<string | null>(null);
+  let statusError = $state<string | null>(null);
 
   onMount(() => {
     void loadStatus();
@@ -16,28 +21,56 @@
   });
 
   async function loadSettings(): Promise<void> {
-    settings = isMock ? fixtureSettings : await api.settings();
+    const loaded = isMock ? fixtureSettings : await api.settings();
+    settings = loaded;
+    settingTypes = Object.fromEntries(
+      Object.entries(loaded).map(([key, value]) => [key, typeof value as SettingType])
+    );
   }
 
   const status = $derived(getStatus());
 
   async function togglePause(): Promise<void> {
+    statusError = null;
     if (isMock) {
       return;
     }
-    if (status?.paused) {
-      await api.resume();
-    } else {
-      await api.pause();
+    try {
+      if (status?.paused) {
+        await api.resume();
+      } else {
+        await api.pause();
+      }
+      await loadStatus();
+    } catch (err) {
+      statusError = errorMessage(err);
     }
-    await loadStatus();
+  }
+
+  function convert(key: string, raw: string | number | boolean): string | number | boolean {
+    const type = settingTypes[key] ?? 'string';
+    if (type === 'number') {
+      return Number(raw);
+    }
+    if (type === 'boolean') {
+      return raw === true || raw === 'true';
+    }
+    return String(raw);
   }
 
   async function save(): Promise<void> {
-    if (!isMock) {
-      settings = await api.putSettings(settings);
+    settingsError = null;
+    saved = false;
+    const payload: Settings = {};
+    for (const [key, value] of Object.entries(settings)) {
+      payload[key] = convert(key, value);
     }
-    saved = true;
+    try {
+      settings = isMock ? payload : await api.putSettings(payload);
+      saved = true;
+    } catch (err) {
+      settingsError = errorMessage(err);
+    }
   }
 </script>
 
@@ -56,6 +89,7 @@
         Scheduler: {status.paused ? 'paused' : 'running'}
         <button onclick={togglePause}>{status.paused ? 'Resume' : 'Pause'}</button>
       </p>
+      {#if statusError}<p class="error">{statusError}</p>{/if}
     </div>
   {/if}
 
@@ -73,6 +107,7 @@
     {/each}
     <button class="primary" onclick={save}>Save</button>
     {#if saved}<span class="muted">Saved.</span>{/if}
+    {#if settingsError}<p class="error">{settingsError}</p>{/if}
   </form>
 
   <h2>Log tail</h2>
@@ -85,6 +120,10 @@ scheduler: idle</pre>
   label {
     display: block;
     margin: 0.4em 0;
+  }
+
+  .error {
+    color: var(--danger);
   }
 
   .log {

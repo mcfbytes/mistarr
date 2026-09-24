@@ -2,7 +2,8 @@
   import { onMount } from 'svelte';
   import { getSources, loadSources, patchSource } from '../lib/stores/sources.svelte';
   import { getPlatforms, loadPlatforms } from '../lib/stores/platforms.svelte';
-  import { api } from '../lib/api';
+  import { api, errorMessage } from '../lib/api';
+  import { showToast } from '../lib/stores/toast.svelte';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
 
@@ -15,16 +16,34 @@
   const platforms = $derived(getPlatforms());
 
   async function bind(id: number, platformId: string): Promise<void> {
+    const prev = sources.find((s) => s.id === id);
     patchSource(id, { platform_id: platformId, state: 'bound' });
-    if (!isMock) {
+    if (isMock) {
+      return;
+    }
+    try {
       await api.updateSource(id, { platform_id: platformId });
+    } catch (err) {
+      if (prev) {
+        patchSource(id, { platform_id: prev.platform_id, state: prev.state });
+      }
+      showToast(errorMessage(err));
     }
   }
 
   async function disable(id: number): Promise<void> {
+    const prev = sources.find((s) => s.id === id);
     patchSource(id, { state: 'disabled' });
-    if (!isMock) {
+    if (isMock) {
+      return;
+    }
+    try {
       await api.updateSource(id, { state: 'disabled' });
+    } catch (err) {
+      if (prev) {
+        patchSource(id, { state: prev.state });
+      }
+      showToast(errorMessage(err));
     }
   }
 </script>
