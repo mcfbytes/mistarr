@@ -241,13 +241,20 @@ async fn upload(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     let (name, bytes, infohash, is_torrent) = if content_type.starts_with("multipart/form-data") {
-        let (filename, data) = multipart_file(content_type, &body).ok_or_else(|| {
-            ApiError::bad_request("Send one .torrent file as multipart form data.")
-        })?;
-        let meta = torrent::parse_torrent(data)
-            .map_err(|e| ApiError::bad_request(format!("Not a valid .torrent file: {e}.")))?;
-        let name = file_name(&filename, "upload", "torrent");
-        (name, data.to_vec(), meta.infohash, true)
+        let content_type = content_type.to_owned();
+        // Parsing walks every file entry, so it stays off the async workers.
+        let (name, bytes, infohash) = tokio::task::spawn_blocking(move || {
+            let (filename, data) = multipart_file(&content_type, &body).ok_or_else(|| {
+                ApiError::bad_request("Send one .torrent file as multipart form data.")
+            })?;
+            let meta = torrent::parse_torrent(data)
+                .map_err(|e| ApiError::bad_request(format!("Not a valid .torrent file: {e}.")))?;
+            let name = file_name(&filename, "upload", "torrent");
+            Ok::<_, ApiError>((name, data.to_vec(), meta.infohash))
+        })
+        .await
+        .map_err(|e| crate::Error::Task(e.to_string()))??;
+        (name, bytes, infohash, true)
     } else {
         let req: MagnetBody = serde_json::from_slice(&body).map_err(|e| {
             ApiError::bad_request(format!(

@@ -51,6 +51,28 @@ pub struct SourceChanged<'a> {
     pub platform_id: Option<&'a PlatformId>,
 }
 
+/// The bytes of the file at `path`, or `None` when it holds more than [`MAX_SOURCE_BYTES`];
+/// never reads more than one byte past the limit, even from a file that grows meanwhile.
+///
+/// # Errors
+///
+/// The I/O error when the file cannot be opened or read.
+pub async fn read_bounded(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    use std::io::Read as _;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        let file = std::fs::File::open(&path)?;
+        if file.metadata()?.len() > MAX_SOURCE_BYTES {
+            return Ok(None);
+        }
+        let mut data = Vec::new();
+        file.take(MAX_SOURCE_BYTES + 1).read_to_end(&mut data)?;
+        Ok((data.len() as u64 <= MAX_SOURCE_BYTES).then_some(data))
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
 /// Publishes `source.changed` for a source row.
 pub fn publish_changed(app: &AppState, row: &SourceRow) {
     let body = SourceChanged {
@@ -89,29 +111,20 @@ impl Job for SourceImport {
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
-        let size = match tokio::fs::metadata(&self.path).await {
-            Ok(m) => m.len(),
+        let data = match read_bounded(&self.path).await {
+            Ok(d) => d,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
-        };
-        let data = if size > MAX_SOURCE_BYTES {
-            Vec::new()
-        } else {
-            match tokio::fs::read(&self.path).await {
-                Ok(d) => d,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-                Err(e) => return Err(e.into()),
-            }
         };
         let origin = self
             .path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let outcome = match self.path.extension().and_then(|e| e.to_str()) {
-            _ if size > MAX_SOURCE_BYTES => Err(TOO_LARGE.to_owned()),
-            Some("torrent") => import_torrent(&ctx.app, &origin, data).await?,
-            Some("magnet") => import_magnet(&ctx.app, &origin, &data).await?,
+        let outcome = match (self.path.extension().and_then(|e| e.to_str()), data) {
+            (_, None) => Err(TOO_LARGE.to_owned()),
+            (Some("torrent"), Some(data)) => import_torrent(&ctx.app, &origin, data).await?,
+            (Some("magnet"), Some(data)) => import_magnet(&ctx.app, &origin, &data).await?,
             _ => Err("Only .torrent and .magnet files are read.".to_owned()),
         };
         match outcome {
@@ -671,5 +684,21 @@ mod tests {
         let reason = std::fs::read_to_string(sources.join("rejected/big.torrent.reason.txt"))
             .expect("reason");
         assert!(reason.starts_with(TOO_LARGE), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn reads_are_bounded_by_the_source_limit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("a.torrent");
+        std::fs::write(&path, b"d4:infode").expect("write");
+        let read = read_bounded(&path).await.expect("read");
+        assert_eq!(read.as_deref(), Some(&b"d4:infode"[..]));
+        let f = std::fs::File::create(&path).expect("create");
+        f.set_len(MAX_SOURCE_BYTES).expect("grow");
+        drop(f);
+        let read = read_bounded(&path).await.expect("read").expect("fits");
+        assert_eq!(read.len() as u64, MAX_SOURCE_BYTES);
+        let missing = read_bounded(&dir.path().join("gone")).await;
+        assert!(missing.is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound));
     }
 }
