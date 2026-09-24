@@ -52,7 +52,9 @@ fn mra(name: &str, roms: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// Boots with the given `_Arcade` files and waits for their titles.
+/// Boots with the given `_Arcade` files and waits for their titles and 1G1R picks:
+/// the catalogue job stores titles per batch but sets picks in a later, separate
+/// write, so a `want` right after titles appear can still race it.
 async fn boot_arcade(mras: &[(&str, Vec<u8>)], games: &[(&str, Vec<u8>)]) -> Booted {
     let dir = tempfile::tempdir().expect("tempdir");
     for (rel, body) in mras {
@@ -64,16 +66,16 @@ async fn boot_arcade(mras: &[(&str, Vec<u8>)], games: &[(&str, Vec<u8>)]) -> Boo
     let config = config_in(dir.path());
     let b = boot_with(dir, config).await;
     let want = mras.len();
-    eventually("the arcade catalogue", || async {
+    eventually("the arcade catalogue and its 1G1R picks", || async {
         let rows = browse(&b).await;
-        rows.len() == want
+        rows.len() == want && rows.iter().all(|(_, _, has_pick)| *has_pick)
     })
     .await;
     b
 }
 
-/// Browse rows of the arcade platform as `(name, have_verified)`.
-async fn browse(b: &Booted) -> Vec<(String, u64)> {
+/// Browse rows of the arcade platform as `(name, have_verified, has_pick)`.
+async fn browse(b: &Booted) -> Vec<(String, u64, bool)> {
     get(b.addr(), "/api/v1/platforms/arcade/titles")
         .await
         .json()["items"]
@@ -82,7 +84,11 @@ async fn browse(b: &Booted) -> Vec<(String, u64)> {
         .iter()
         .map(|i| {
             let name = i["name"].as_str().expect("name").to_owned();
-            (name, i["have_verified"].as_u64().expect("have"))
+            (
+                name,
+                i["have_verified"].as_u64().expect("have"),
+                i["has_pick"].as_bool().expect("has_pick"),
+            )
         })
         .collect()
 }
@@ -91,8 +97,8 @@ async fn have(b: &Booted, name: &str) -> u64 {
     browse(b)
         .await
         .into_iter()
-        .find(|(n, _)| n == name)
-        .map_or_else(|| panic!("no {name}"), |(_, h)| h)
+        .find(|(n, _, _)| n == name)
+        .map_or_else(|| panic!("no {name}"), |(_, h, _)| h)
 }
 
 fn title_id(b: &Booted, name: &str) -> i64 {
