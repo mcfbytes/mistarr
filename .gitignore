@@ -1,6 +1,7 @@
 /target
 /web/node_modules
 /web/dist
+/web/e2e/out
 *.db
 *.db-wal
 *.db-shm
