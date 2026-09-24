@@ -25,6 +25,15 @@ use crate::error::{Error, Result};
 /// Page cache per connection in KiB; two connections share the 2 MiB budget.
 const CACHE_KIB: i64 = 1024;
 
+/// WAL pages written before an automatic checkpoint, about 1 MiB of 4 KiB pages.
+const WAL_AUTOCHECKPOINT: i64 = 256;
+
+/// Size the WAL file is cut back to after a checkpoint, in bytes.
+const JOURNAL_SIZE_LIMIT: i64 = 1024 * 1024;
+
+/// Heap SQLite tries to stay under, process-wide, by shedding cached pages.
+const SOFT_HEAP_LIMIT: i64 = 8 * 1024 * 1024;
+
 /// How long a statement waits on a lock held by the other connection.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -153,7 +162,8 @@ impl Db {
     }
 }
 
-/// Applies the connection pragmas every connection shares.
+/// Applies the connection pragmas every connection shares; the memory-related ones are
+/// listed in `docs/ARCHITECTURE.md` "Resource budgets".
 fn configure(conn: &Connection) -> Result<()> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
     let mode: String =
@@ -164,6 +174,11 @@ fn configure(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "synchronous", "NORMAL")?;
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.pragma_update(None, "cache_size", -CACHE_KIB)?;
+    conn.pragma_update(None, "mmap_size", 0)?;
+    conn.pragma_update(None, "temp_store", "FILE")?;
+    conn.pragma_update(None, "wal_autocheckpoint", WAL_AUTOCHECKPOINT)?;
+    conn.pragma_update_and_check(None, "journal_size_limit", JOURNAL_SIZE_LIMIT, |_| Ok(()))?;
+    conn.pragma_update_and_check(None, "soft_heap_limit", SOFT_HEAP_LIMIT, |_| Ok(()))?;
     Ok(())
 }
 
@@ -195,6 +210,41 @@ mod tests {
             .expect("pragmas");
         assert_eq!(mode, "wal");
         assert_eq!(cache, -CACHE_KIB);
+    }
+
+    #[test]
+    fn connections_keep_memory_and_the_wal_small() {
+        let (_dir, db) = testutil::db();
+        for read in [true, false] {
+            let pragma = |c: &Connection, name: &str| -> Result<i64> {
+                Ok(c.pragma_query_value(None, name, |r| r.get(0))?)
+            };
+            let values = |c: &Connection| -> Result<[i64; 5]> {
+                Ok([
+                    pragma(c, "mmap_size")?,
+                    pragma(c, "temp_store")?,
+                    pragma(c, "wal_autocheckpoint")?,
+                    pragma(c, "journal_size_limit")?,
+                    pragma(c, "soft_heap_limit")?,
+                ])
+            };
+            let got = if read {
+                db.read_blocking(values)
+            } else {
+                db.write_blocking(|c| values(c))
+            }
+            .expect("pragmas");
+            assert_eq!(
+                got,
+                [
+                    0,
+                    1,
+                    WAL_AUTOCHECKPOINT,
+                    JOURNAL_SIZE_LIMIT,
+                    SOFT_HEAP_LIMIT
+                ]
+            );
+        }
     }
 
     #[test]
