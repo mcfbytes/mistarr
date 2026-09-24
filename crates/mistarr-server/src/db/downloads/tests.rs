@@ -88,7 +88,7 @@ fn best_file_prefers_size_then_name_then_load_then_id() {
         &[("Example Quest (USA).nes", 17, Some(rom), Confidence::Name)],
     );
     assert_eq!(best_file(&c, rom).expect("best"), candidate(wrong_size, 0));
-    let by_size = source(&c, 2, &[("x.nes", 16, Some(rom), Confidence::Size)]);
+    let by_size = source(&c, 2, &[("x.nes", 16, Some(rom), Confidence::Base)]);
     assert_eq!(best_file(&c, rom).expect("best"), candidate(by_size, 0));
     let by_name = source(
         &c,

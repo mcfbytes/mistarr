@@ -106,20 +106,22 @@ pub fn seed_from_text(text: &str) -> Option<SeedPolicy> {
     }
 }
 
-/// The `torrent_files.confidence` text, `None` for an unmatched file.
+/// The `confidence` text of `torrent_files` and `torrent_candidates`, `None` for an unmatched file.
 ///
 /// ```
 /// use mistarr_server::db::sources::confidence_text;
 /// use mistarr_sources::binding::Confidence;
-/// assert_eq!(confidence_text(Confidence::Size), Some("size"));
+/// assert_eq!(confidence_text(Confidence::Base), Some("base"));
 /// assert_eq!(confidence_text(Confidence::Unmatched), None);
 /// ```
 #[must_use]
 pub fn confidence_text(c: Confidence) -> Option<&'static str> {
     match c {
         Confidence::Name => Some("name"),
+        Confidence::Base => Some("base"),
+        Confidence::Fuzzy => Some("fuzzy"),
         Confidence::Size => Some("size"),
-        Confidence::Unmatched => None,
+        _ => None,
     }
 }
 
@@ -146,7 +148,7 @@ pub struct SourceRow {
     pub seed_policy: String,
     /// Files in the torrent.
     pub file_count: u64,
-    /// Files with a matched rom.
+    /// Files with a matched rom or a candidate rom.
     pub matched_count: u64,
     /// Sum of file sizes.
     pub total_size: u64,
@@ -190,14 +192,16 @@ pub struct FileRow {
     pub rom_name: Option<String>,
     /// The matched rom's title.
     pub title_id: Option<i64>,
-    /// `name` or `size`, `None` when unmatched.
+    /// `name` or `base`, `None` when unmatched.
     pub confidence: Option<String>,
 }
 
 const COLUMNS: &str = "s.id, s.infohash, s.display_name, s.origin_file, s.platform_id,
     s.bind_score, s.state, s.reason, s.seed_policy, s.file_count, s.total_size,
     s.client_id, s.added_at,
-    (SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id AND f.rom_id IS NOT NULL),
+    (SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id
+       AND (f.rom_id IS NOT NULL OR EXISTS (SELECT 1 FROM torrent_candidates c
+             WHERE c.source_id = f.source_id AND c.file_index = f.file_index))),
     s.suggested_platform_id";
 
 /// Reads a non-negative integer column; SQLite stores it as `i64`.
@@ -382,6 +386,25 @@ pub fn list_unbound(conn: &Connection) -> Result<Vec<(SourceId, Option<PlatformI
         })?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
+}
+
+/// Sources other than resolving ones whose platform is one of `platforms`, by id.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn list_on_platforms(conn: &Connection, platforms: &[PlatformId]) -> Result<Vec<SourceId>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id FROM sources WHERE platform_id = ?1 AND state != 'resolving' ORDER BY id",
+    )?;
+    let mut out = Vec::new();
+    for p in platforms {
+        let ids = stmt.query_map([&p.0], |r| r.get(0).map(SourceId))?;
+        out.extend(ids.collect::<rusqlite::Result<Vec<_>>>()?);
+    }
+    out.sort_unstable_by_key(|s| s.0);
+    out.dedup();
+    Ok(out)
 }
 
 /// True when `platform` has live titles from a DAT file.
@@ -776,6 +799,10 @@ mod tests {
         assert!(platform_has_dat(&c, &nes()).expect("dat"));
         set_suggestion(&c, a, None).expect("clear");
         assert_eq!(list_unbound(&c).expect("list"), [(a, None)]);
+        assert!(list_on_platforms(&c, &[nes()]).expect("on").is_empty());
+        set_binding(&c, a, Some(&nes()), Some(1.0)).expect("bind");
+        let snes = PlatformId("snes".into());
+        assert_eq!(list_on_platforms(&c, &[snes, nes()]).expect("on"), [a]);
     }
 
     #[test]
@@ -904,7 +931,7 @@ mod tests {
             .into_iter()
             .map(|(_, _, c)| c)
             .collect();
-        assert_eq!(confidences, [Confidence::Name, Confidence::Size]);
+        assert_eq!(confidences, [Confidence::Name, Confidence::Base]);
     }
 
     #[test]
@@ -927,6 +954,8 @@ mod tests {
             assert_eq!(SourceState::parse(s).map(SourceState::as_str), Some(s));
         }
         assert_eq!(confidence_text(Confidence::Name), Some("name"));
+        assert_eq!(confidence_text(Confidence::Fuzzy), Some("fuzzy"));
+        assert_eq!(confidence_text(Confidence::Size), Some("size"));
     }
 
     #[test]

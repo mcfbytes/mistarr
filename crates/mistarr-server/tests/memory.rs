@@ -28,6 +28,8 @@ const ORGANIZED_DIRS: usize = 1000;
 const LINKS_PER_DIR: usize = 15;
 const DAT_BYTES: usize = 50 * 1024 * 1024;
 const TORRENT_FILES: usize = 50_000;
+/// Every this many torrent files one is named loosely, so the fuzzy tier reads its size's roms.
+const LOOSE_EVERY: usize = 10;
 const LOOSE_FILES: usize = 16_000;
 const ZIPPED_FILES: usize = 2_000;
 const DISC_DIRS: usize = 1_000;
@@ -428,14 +430,19 @@ fn rom_size(i: usize) -> u64 {
     16_384 + (i as u64 % 64) * 1024
 }
 
-/// A multi-file torrent of `TORRENT_FILES` files named after the DAT's roms.
+/// A multi-file torrent of `TORRENT_FILES` files named after the DAT's roms,
+/// every [`LOOSE_EVERY`]th only loosely, which leaves the name tiers to the fuzzy one.
 fn big_torrent(path: &Path) {
     let regions = ["USA", "Europe", "Japan"];
     let files: Vec<Value> = (0..TORRENT_FILES)
         .map(|i| {
             let mut f = std::collections::BTreeMap::new();
             f.insert(b"length".to_vec(), Value::Int(rom_size(i) as i64));
-            let name = format!("{}.nes", game_name(i, &regions));
+            let name = if i % LOOSE_EVERY == LOOSE_EVERY - 1 {
+                format!("example_game_{i}.nes")
+            } else {
+                format!("{}.nes", game_name(i, &regions))
+            };
             f.insert(
                 b"path".to_vec(),
                 Value::List(vec![
@@ -538,13 +545,24 @@ fn dat_and_torrent_import_stay_under_budget() {
 
     big_torrent(&dir.path().join("data/sources/example.torrent"));
     let server = Server::start(dir.path());
+    let start = Instant::now();
     let rows = server.wait_jobs("source_import", 1);
+    println!("source_import took {:?}", start.elapsed());
     let files = server.count("SELECT COUNT(*) FROM torrent_files");
     let matched = server.count("SELECT COUNT(*) FROM torrent_files WHERE rom_id IS NOT NULL");
+    let candidates = server.count("SELECT COUNT(*) FROM torrent_candidates");
     let peak = server.stop("source_import");
     assert_eq!(rows[0].0, "done", "{}", rows[0].1);
     assert_eq!(usize::try_from(files).expect("count"), TORRENT_FILES);
-    assert_eq!(usize::try_from(matched).expect("count"), TORRENT_FILES);
+    let loose = TORRENT_FILES / LOOSE_EVERY;
+    assert_eq!(
+        usize::try_from(matched).expect("count"),
+        TORRENT_FILES - loose
+    );
+    assert_eq!(
+        candidates, 0,
+        "a loose name matching thousands of roms is ambiguous"
+    );
     assert_budget("source_import", peak, 16);
 }
 

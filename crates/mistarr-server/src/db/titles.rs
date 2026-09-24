@@ -11,6 +11,7 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
 use super::arcade::MraInfo;
+use super::candidates::Availability;
 use super::dats::DatVersionId;
 use crate::error::Result;
 
@@ -674,8 +675,10 @@ pub struct VariantRow {
     pub dat_version_id: DatVersionId,
     /// Live roms.
     pub roms: Vec<RomRow>,
-    /// Torrent files from bound sources matched to any of the roms.
+    /// Distinct files of bound sources in [`VariantRow::availability`].
     pub torrent_files_available: u64,
+    /// Files of bound sources mapped to a live rom or a candidate for one, strongest first.
+    pub availability: Vec<Availability>,
     /// `dat` for a DAT entry, `mra` for an arcade title read from an MRA file.
     pub source: String,
     /// MRA details, for an MRA title.
@@ -724,8 +727,9 @@ fn variant_row(r: &Row<'_>) -> rusqlite::Result<VariantRow> {
         inferred: r.get(9)?,
         dat_version_id: DatVersionId(r.get(10)?),
         roms: Vec::new(),
-        torrent_files_available: unsigned(r.get(11)?),
-        source: r.get(12)?,
+        torrent_files_available: 0,
+        availability: Vec::new(),
+        source: r.get(11)?,
         mra: None,
         romset: None,
     })
@@ -759,10 +763,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
     };
     let mut stmt = conn.prepare(
         "SELECT t.id, t.name, t.regions, t.languages, t.revision, t.flags, t.is_1g1r_pick,
-                t.wanted, t.retired, t.inferred, t.dat_version_id,
-                (SELECT COUNT(*) FROM torrent_files tf JOIN roms r ON r.id = tf.rom_id
-                 WHERE r.title_id = t.id AND r.retired = 0),
-                t.source
+                t.wanted, t.retired, t.inferred, t.dat_version_id, t.source
          FROM titles t WHERE t.parent_id = ?1 OR t.id = ?1
          ORDER BY t.retired, t.is_1g1r_pick DESC, t.name",
     )?;
@@ -798,6 +799,17 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
         };
         if let Some(v) = variants.iter_mut().find(|v| v.id.0 == title) {
             v.roms.push(rom);
+        }
+    }
+    for (title, found) in super::candidates::for_group(conn, gid)? {
+        if let Some(v) = variants.iter_mut().find(|v| v.id == title) {
+            let seen = |a: &Availability| {
+                (a.source_id, a.file_index) == (found.source_id, found.file_index)
+            };
+            if !v.availability.iter().any(seen) {
+                v.torrent_files_available += 1;
+            }
+            v.availability.push(found);
         }
     }
     for v in variants.iter_mut().filter(|v| v.source == "mra") {

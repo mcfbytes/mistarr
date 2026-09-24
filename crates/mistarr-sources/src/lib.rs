@@ -12,6 +12,7 @@
 pub mod bencode;
 pub mod binding;
 mod error;
+pub mod fuzzy;
 pub mod magnet;
 pub mod torrent;
 pub mod watch;

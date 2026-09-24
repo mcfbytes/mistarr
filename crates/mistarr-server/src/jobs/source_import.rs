@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use mistarr_clients::{ClientError, ClientTorrentId, InfoHash, SeedPolicy, TorrentSource};
 use mistarr_core::PlatformId;
 use mistarr_sources::binding::{self, Binding};
+use mistarr_sources::fuzzy;
 use mistarr_sources::torrent::TorrentFile;
 use mistarr_sources::watch::{self, Scanner};
 use mistarr_sources::{magnet, torrent};
@@ -16,6 +17,7 @@ use serde_json::{json, Value};
 
 use super::{wizard, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
+use crate::db::candidates::{self, SqlSizeIndex};
 use crate::db::sources::{self as rows, NewSource, SourceId, SourceRow, SourceState, SqlDatIndex};
 use crate::error::Result;
 use crate::events::EventKind;
@@ -275,12 +277,12 @@ pub fn bind_best(
     let index = SqlDatIndex::new(conn);
     let (state, reason) = match binding::bind(files, &index, threshold) {
         Binding::Bound(platform, rate) => {
-            let matches = binding::match_files(files, &platform, &index);
-            rows::set_matches(conn, id, &matches)?;
+            map_files(conn, id, &platform, files)?;
             rows::set_binding(conn, id, Some(&platform), Some(f64::from(rate)))?;
             (SourceState::Bound, None)
         }
         Binding::Unbound(_) => {
+            candidates::clear(conn, id)?;
             rows::set_binding(conn, id, None, None)?;
             (
                 SourceState::Unbound,
@@ -289,6 +291,55 @@ pub fn bind_best(
         }
     };
     keep_disabled(conn, id, state, reason.as_deref())
+}
+
+/// Maps the source's `files` to the roms of `platform` by every tier in
+/// `docs/VERIFICATION.md` "Pre-download matching": the best name match per
+/// file into `torrent_files`, and the other roms of that tier plus the fuzzy
+/// and size-only candidates of the files left over into `torrent_candidates`.
+/// Returns how many files the name tiers matched.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn map_files(
+    conn: &Connection,
+    id: SourceId,
+    platform: &PlatformId,
+    files: &[TorrentFile],
+) -> Result<usize> {
+    rows::refresh_match_keys(conn)?;
+    let mapping = binding::map_files(files, platform, &SqlDatIndex::new(conn));
+    rows::set_matches(conn, id, &mapping.matches)?;
+    let unmatched = mapping.unmatched(files);
+    let hits = files.len() - unmatched.len();
+    let extensions = fuzzy_extensions(platform);
+    let size_index = SqlSizeIndex::new(conn, platform);
+    let mut found = mapping.extra;
+    found.extend(fuzzy::candidates(&unmatched, &extensions, &size_index));
+    candidates::replace(conn, id, &found)?;
+    Ok(hits)
+}
+
+/// The extensions the fuzzy tiers consider for `platform`: those its core
+/// loads, plus `zip` for a cartridge platform, whose importer reads a zip.
+///
+/// ```
+/// use mistarr_core::PlatformId;
+/// use mistarr_server::jobs::source_import::fuzzy_extensions;
+/// assert_eq!(fuzzy_extensions(&PlatformId("nes".into())), ["nes", "zip"]);
+/// assert!(fuzzy_extensions(&PlatformId("none".into())).is_empty());
+/// ```
+#[must_use]
+pub fn fuzzy_extensions(platform: &PlatformId) -> Vec<&'static str> {
+    let Some(row) = mistarr_mister::platforms::by_id(&platform.0) else {
+        return Vec::new();
+    };
+    let mut out = row.load_extensions.to_vec();
+    if row.kind == mistarr_mister::platforms::Kind::Cartridge && !out.contains(&"zip") {
+        out.push("zip");
+    }
+    out
 }
 
 /// Guesses the source's platform from its names, with no DAT, and stores it;
@@ -343,21 +394,33 @@ pub fn awaiting_dat_reason(platform_name: &str) -> String {
     format!("Looks like {platform_name}. No DAT for it is loaded yet; it binds once one loads.")
 }
 
-/// Binds the unbound sources again after a DAT loaded titles for a platform,
-/// skipping those the user unbound. A source binds to its suggested platform
+/// Binds the unbound sources again after a DAT loaded titles for `platforms`,
+/// skipping those the user unbound, and maps the sources already bound to
+/// one of `platforms` again. A source binds to its suggested platform
 /// when that reaches the threshold and no other platform scores higher, else
-/// as [`bind_best`] decides. Publishes `source.changed` only for sources whose
-/// state or platform changed, and returns how many bound.
+/// as [`bind_best`] decides. Publishes `source.changed` for sources whose
+/// state or platform changed and for those mapped again, and returns how many bound.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub async fn rebind_after_dat(app: &AppState) -> Result<usize> {
+pub async fn rebind_after_dat(app: &AppState, platforms: &[PlatformId]) -> Result<usize> {
     let threshold = app.config().sources.bind_threshold;
-    let changed = app
+    let platforms = platforms.to_vec();
+    let (mapped, changed) = app
         .db
         .write(move |c| {
             let tx = c.transaction()?;
+            let mut mapped = Vec::new();
+            for id in rows::list_on_platforms(&tx, &platforms)? {
+                let Some(row) = rows::get(&tx, id)? else {
+                    continue;
+                };
+                if let Some(platform) = &row.platform_id {
+                    map_files(&tx, id, platform, &rows::torrent_files(&tx, id)?)?;
+                    mapped.extend(rows::get(&tx, id)?);
+                }
+            }
             let mut out = Vec::new();
             for (id, suggested) in rows::list_unbound(&tx)? {
                 let before = rows::get(&tx, id)?;
@@ -370,9 +433,12 @@ pub async fn rebind_after_dat(app: &AppState) -> Result<usize> {
                 }
             }
             tx.commit()?;
-            Ok(out)
+            Ok((mapped, out))
         })
         .await?;
+    for row in &mapped {
+        publish_changed(app, row);
+    }
     let mut bound = 0;
     for row in &changed {
         if row.state == SourceState::Bound {
@@ -433,10 +499,7 @@ pub fn bind_to(conn: &Connection, id: SourceId, platform: Option<&PlatformId>) -
         rows::set_binding(conn, id, None, None)?;
         return keep_disabled(conn, id, SourceState::Unbound, None);
     };
-    rows::refresh_match_keys(conn)?;
-    let index = SqlDatIndex::new(conn);
-    let matches = binding::match_files(&files, platform, &index);
-    let hits = matches.iter().filter(|(_, rom, _)| rom.is_some()).count();
+    let hits = map_files(conn, id, platform, &files)?;
     // File counts are far below 2^52, so the rate is exact enough.
     #[allow(clippy::cast_precision_loss)]
     let rate = if files.is_empty() {
@@ -444,7 +507,6 @@ pub fn bind_to(conn: &Connection, id: SourceId, platform: Option<&PlatformId>) -
     } else {
         hits as f64 / files.len() as f64
     };
-    rows::set_matches(conn, id, &matches)?;
     rows::set_binding(conn, id, Some(platform), Some(rate))?;
     keep_disabled(conn, id, SourceState::Bound, None)
 }
@@ -711,6 +773,97 @@ mod tests {
         id
     }
 
+    fn candidate_count(c: &Connection, id: SourceId) -> i64 {
+        c.query_row(
+            "SELECT COUNT(*) FROM torrent_candidates WHERE source_id = ?1",
+            [id.0],
+            |r| r.get(0),
+        )
+        .expect("count")
+    }
+
+    #[test]
+    fn a_lone_rom_gets_fuzzy_and_size_candidates_and_unbinding_drops_them() {
+        let (_dir, app) = state();
+        app.db
+            .write_blocking(|c| {
+                let a = seed_rom(c, "nes", "Nova Quest (World).nes", 16, "[]")?;
+                let b = seed_rom(c, "nes", "Nova Quest (World) (Alt).nes", 16, "[]")?;
+                let nes = PlatformId("nes".into());
+                let files = [file(0, "nova.nes", 16), file(1, "nova.png", 16)];
+                let id = source(c, &"0e".repeat(20), &files);
+                assert_eq!(map_files(c, id, &nes, &files)?, 0);
+                let found = candidates::of_file(c, id, 0)?;
+                assert_eq!(found, [(a, "fuzzy".into()), (b, "fuzzy".into())]);
+                assert_eq!(rows::get(c, id)?.expect("row").matched_count, 1);
+
+                let lone = [file(0, "rom.nes", 16)];
+                let other = source(c, &"0f".repeat(20), &lone);
+                bind_to(c, other, Some(&nes))?;
+                assert_eq!(candidates::of_file(c, other, 0)?.len(), 2);
+                assert!(candidates::of_file(c, other, 0)?
+                    .iter()
+                    .all(|(_, k)| k == "size"));
+                bind_to(c, other, None)?;
+                assert_eq!(candidate_count(c, other), 0);
+                Ok(())
+            })
+            .expect("db");
+    }
+
+    #[test]
+    fn a_set_of_same_sized_files_gets_no_size_only_candidates() {
+        let (_dir, app) = state();
+        app.db
+            .write_blocking(|c| {
+                for i in 0..6 {
+                    seed_rom(c, "nes", &format!("Title {i} (World).nes"), 40_976, "[]")?;
+                }
+                let files: Vec<TorrentFile> = (0..2_000)
+                    .map(|i| file(i, &format!("Set/track {i}.nes"), 40_976))
+                    .collect();
+                let id = source(c, &"1a".repeat(20), &files);
+                bind_to(c, id, Some(&PlatformId("nes".into())))?;
+                assert_eq!(candidate_count(c, id), 0);
+                Ok(())
+            })
+            .expect("db");
+    }
+
+    #[tokio::test]
+    async fn a_dat_load_maps_its_bound_sources_again() {
+        let (_dir, app) = state();
+        let id = app
+            .db
+            .write_blocking(|c| {
+                let files = [file(0, "nova.nes", 16), file(1, "a.txt", 1)];
+                let id = source(c, &"1b".repeat(20), &files);
+                bind_to(c, id, Some(&PlatformId("nes".into())))?;
+                assert_eq!(candidate_count(c, id), 0);
+                seed_rom(c, "nes", "Nova Quest (World).nes", 16, "[]")?;
+                Ok(id)
+            })
+            .expect("db");
+        let mut events = app.events.subscribe(None).live;
+        let nes = [PlatformId("nes".into())];
+        assert_eq!(rebind_after_dat(&app, &nes).await.expect("rebind"), 0);
+        assert!(events.try_recv().is_ok(), "the mapped source is announced");
+        let n = app.db.read(move |c| Ok(candidate_count(c, id))).await;
+        assert_eq!(n.expect("count"), 1);
+    }
+
+    #[test]
+    fn fuzzy_extensions_follow_the_platform_table() {
+        assert_eq!(
+            fuzzy_extensions(&PlatformId("snes".into())),
+            ["sfc", "smc", "zip"]
+        );
+        assert_eq!(
+            fuzzy_extensions(&PlatformId("psx".into())),
+            ["cue", "iso", "chd"]
+        );
+    }
+
     #[test]
     fn best_binding_and_manual_binding() {
         let (_dir, app) = state();
@@ -768,7 +921,7 @@ mod tests {
             })
             .expect("db");
         let mut events = app.events.subscribe(None).live;
-        assert_eq!(rebind_after_dat(&app).await.expect("rebind"), 0);
+        assert_eq!(rebind_after_dat(&app, &[]).await.expect("rebind"), 0);
         assert!(
             events.try_recv().is_err(),
             "an unchanged source is not announced"
@@ -793,7 +946,7 @@ mod tests {
                 Ok(other)
             })
             .expect("db");
-        assert_eq!(rebind_after_dat(&app).await.expect("rebind"), 1);
+        assert_eq!(rebind_after_dat(&app, &[]).await.expect("rebind"), 1);
         assert!(events.try_recv().is_ok(), "the bound source is announced");
         assert!(events.try_recv().is_err(), "only once");
         let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");

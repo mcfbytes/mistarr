@@ -533,9 +533,10 @@ pub struct Candidate {
 }
 
 /// The best `torrent_file` for `rom` across bound sources: an exact size match
-/// first, then a name match over a size match, then the source with fewer
-/// selected downloads, then the lowest source id. A file that already gave
-/// this rom a `bad` download is never chosen.
+/// first, then the stronger confidence (name, base, fuzzy, size), then the
+/// source with fewer selected downloads, then the lowest source id. Files
+/// mapped to the rom and its candidates compete alike. A file that already
+/// gave this rom a `bad` download is never chosen.
 ///
 /// # Errors
 ///
@@ -543,18 +544,25 @@ pub struct Candidate {
 pub fn best_file(conn: &Connection, rom: i64) -> Result<Option<Candidate>> {
     Ok(conn
         .prepare_cached(&format!(
-            "SELECT tf.source_id, tf.file_index FROM torrent_files tf
-             JOIN sources s ON s.id = tf.source_id AND s.state = 'bound'
-             JOIN roms r ON r.id = tf.rom_id
-             WHERE tf.rom_id = ?1
-               AND NOT EXISTS (SELECT 1 FROM downloads b
-                               WHERE b.rom_id = tf.rom_id AND b.state = 'bad'
-                                 AND b.source_id = tf.source_id AND b.file_index = tf.file_index)
-             ORDER BY tf.size = r.size DESC, COALESCE(tf.confidence = 'name', 0) DESC,
+            "SELECT m.source_id, m.file_index FROM (
+               SELECT tf.source_id, tf.file_index, tf.size, tf.confidence
+               FROM torrent_files tf WHERE tf.rom_id = ?1
+               UNION ALL
+               SELECT c.source_id, c.file_index, tf.size, c.confidence
+               FROM torrent_candidates c
+               JOIN torrent_files tf ON tf.source_id = c.source_id AND tf.file_index = c.file_index
+               WHERE c.rom_id = ?1
+             ) m
+             JOIN sources s ON s.id = m.source_id AND s.state = 'bound'
+             JOIN roms r ON r.id = ?1
+             WHERE {bad}
+             ORDER BY m.size = r.size DESC, {rank},
                (SELECT COUNT(*) FROM downloads a
                 WHERE a.source_id = s.id AND a.state IN ({SELECTED})),
-               s.id, tf.file_index
-             LIMIT 1"
+               s.id, m.file_index
+             LIMIT 1",
+            bad = super::candidates::not_bad("?1", "m.source_id", "m.file_index"),
+            rank = super::candidates::rank("m.confidence"),
         ))?
         .query_row([rom], |r| {
             Ok(Candidate {
