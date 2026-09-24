@@ -56,7 +56,7 @@ CREATE TABLE titles (                   -- one per <game>; the browse unit
   mra_check     TEXT,                  -- md5 check: 'match' | 'mismatch' | 'missing_part' | 'refused', NULL when not run
   mra_detail    TEXT,                  -- why the check did not match
   mra_stamp     TEXT,                  -- MRA and zip sizes and mtimes the check ran against
-  mra_file_stamp TEXT,                 -- MRA file size and mtime when the title was last stored from it
+  mra_file_stamp TEXT,                 -- MRA parser version, file size and mtime when the title was last stored from it
   mra_seen      INTEGER,               -- the arcade catalogue run that last found the MRA file
   UNIQUE (dat_version_id, name)
 );

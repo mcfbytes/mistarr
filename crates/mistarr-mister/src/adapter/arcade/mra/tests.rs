@@ -221,6 +221,25 @@ fn stray_and_unclosed_elements_are_tolerated() {
 }
 
 #[test]
+fn an_unclosed_field_keeps_out_rom_data_and_is_capped() {
+    let hex = "00 ".repeat(400);
+    let xml = format!(
+        "<misterromdescription><setname>exblast<rom zip=\"exblast.zip\">\
+         <part>{hex}</part></rom>{}</misterromdescription>",
+        "x".repeat(1000)
+    );
+    let mra = parse(xml.as_bytes()).expect("parse");
+    let setname = mra.setname.expect("setname");
+    assert!(setname.starts_with("exblast"));
+    assert!(!setname.contains("00"));
+    assert_eq!(setname.len(), MAX_FIELD_BYTES);
+    assert!(matches!(&mra.roms[0].items[0], RomItem::Part(p) if p.data.len() == 400));
+    let wide = format!("<m><name>{}</name></m>", "é".repeat(300));
+    let name = parse(wide.as_bytes()).expect("parse").name.expect("name");
+    assert!(name.len() <= MAX_FIELD_BYTES && name.chars().all(|c| c == 'é'));
+}
+
+#[test]
 fn read_refuses_an_oversized_file() {
     let dir = crate::adapter::testutil::scratch("mra-big");
     let path = dir.join("big.mra");

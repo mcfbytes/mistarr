@@ -64,8 +64,9 @@ fn mras_are_listed_shallowest_first_without_following_depth_limits() {
 }
 
 #[test]
-fn links_and_the_organizer_tree_are_not_listed() {
+fn linked_files_are_listed_once_and_the_organizer_tree_never() {
     let dir = tempfile::tempdir().expect("tempdir");
+    let outside = tempfile::tempdir().expect("tempdir");
     let root = dir.path();
     let main = root.join("Example Blaster.mra");
     fs::write(&main, b"<m/>").expect("write");
@@ -76,10 +77,38 @@ fn links_and_the_organizer_tree_are_not_listed() {
         .expect("symlink");
     fs::create_dir_all(root.join("_Links")).expect("mkdir");
     std::os::unix::fs::symlink(&main, root.join("_Links/eb.mra")).expect("symlink");
+    let quest = outside.path().join("Example Quest.mra");
+    fs::write(&quest, b"<m/>").expect("write");
+    std::os::unix::fs::symlink(&quest, root.join("_Links/eq.mra")).expect("symlink");
+    std::os::unix::fs::symlink(outside.path(), root.join("_Linked dir")).expect("symlink");
     let found = list_mras(root);
     let rels: Vec<&str> = found.iter().map(|l| l.rel.as_str()).collect();
-    assert_eq!(rels, ["Example Blaster copy.mra"]);
-    assert_eq!(found[0].stamp, file_stamp(&main).expect("stamp"));
+    assert_eq!(rels, ["Example Blaster copy.mra", "_Links/eq.mra"]);
+    let meta = fs::metadata(&main).expect("meta");
+    assert_eq!(found[0].stamp, mra_stamp(&meta));
+    assert!(found[0]
+        .stamp
+        .starts_with(&format!("p{}:", mra::PARSER_VERSION)));
+}
+
+#[test]
+fn the_check_stamp_ignores_zip_order() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (a, b) = (dir.path().join("a.zip"), dir.path().join("b.zip"));
+    fs::write(&a, b"A").expect("write");
+    fs::write(&b, b"B").expect("write");
+    let place = |file: &str| ZipPath {
+        dir: "mame".into(),
+        file: file.into(),
+    };
+    let one = [
+        (place("a.zip"), Some(a.clone())),
+        (place("b.zip"), Some(b.clone())),
+    ];
+    let other = [(place("b.zip"), Some(b)), (place("a.zip"), Some(a))];
+    assert_eq!(joined_stamp("s", &one), joined_stamp("s", &other));
+    assert_eq!(joined_stamp("s", &[(place("c.zip"), None)]), None);
+    assert_eq!(joined_stamp("s", &[]), None);
 }
 
 #[test]
@@ -371,6 +400,51 @@ async fn the_shallowest_mra_keeps_a_shared_name() {
     assert!(stored(&app, "_alternatives/Example Blaster.mra")
         .await
         .is_none());
+}
+
+#[tokio::test]
+async fn an_unreadable_mra_keeps_its_title_and_check() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (dir, app) = state();
+    let arcade = dir.path().join(ARCADE_DIR);
+    let games = dir.path().join("games");
+    fs::create_dir_all(&arcade).expect("mkdir");
+    let md5 = md5_of(&[b"CPU0"]);
+    let path = arcade.join("Example Blaster.mra");
+    let rom =
+        format!(r#"<rom index="0" zip="exblast.zip" md5="{md5}"><part name="cpu.bin"/></rom>"#);
+    fs::write(&path, mra_xml("Example Blaster", &rom)).expect("write");
+    write_zip(&games.join("mame/exblast.zip"), &[("cpu.bin", b"CPU0")]);
+    run(&app).await;
+    let id = stored(&app, "Example Blaster.mra")
+        .await
+        .expect("stored")
+        .id;
+    let check = |app: Arc<AppState>| async move {
+        app.db
+            .read(move |c| rows::info(c, id))
+            .await
+            .expect("info")
+            .expect("mra")
+            .md5_check
+    };
+    assert_eq!(check(app.clone()).await.as_deref(), Some("match"));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
+    if File::open(&path).is_ok() {
+        return;
+    }
+    write_zip(
+        &games.join("mame/exblast.zip"),
+        &[("cpu.bin", b"CPU0"), ("x", b"")],
+    );
+    run(&app).await;
+    assert_eq!(check(app.clone()).await.as_deref(), Some("match"));
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
+    fs::write(&path, b"").expect("truncate");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
+    run(&app).await;
+    assert!(stored(&app, "Example Blaster.mra").await.is_some());
+    assert_eq!(check(app.clone()).await.as_deref(), Some("match"));
 }
 
 #[tokio::test]

@@ -84,7 +84,7 @@ pub async fn enqueue_if_relevant(app: &Arc<AppState>) -> Result<Option<JobId>> {
 struct Listed {
     /// Path relative to `_Arcade`, `/`-separated.
     rel: String,
-    /// Size and mtime, as [`file_stamp`] writes them.
+    /// Parser version, size and mtime, as [`mra_stamp`] writes them.
     stamp: String,
 }
 
@@ -279,15 +279,28 @@ fn scan_batch(
     let mut items = Vec::with_capacity(batch.len());
     for listed in batch {
         let stored = db.read_blocking(|c| rows::stored_mra(c, PLATFORM, &listed.rel))?;
-        if let Some(s) = stored.filter(|s| s.file_stamp.as_deref() == Some(listed.stamp.as_str())) {
+        if let Some(s) = stored
+            .as_ref()
+            .filter(|s| s.file_stamp.as_deref() == Some(listed.stamp.as_str()))
+        {
             if pass.claim(&s.name, &listed.rel) {
                 let zips = db.read_blocking(|c| rows::zip_roms(c, s.id))?;
-                items.push(kept(&s, listed, &zips, games, &mut pass.index));
+                items.push(kept(s, listed, &zips, games, &mut pass.index));
             }
             continue;
         }
         pass.parsed += 1;
         let Some(entry) = read_entry(&listed.rel, &arcade.join(&listed.rel)) else {
+            // A stored title whose MRA cannot be read now stays as it was until it can.
+            if let Some(s) = stored.filter(|s| pass.claim(&s.name, &listed.rel)) {
+                items.push(Item {
+                    title: Title::Kept {
+                        id: s.id,
+                        present: Vec::new(),
+                    },
+                    check: Pending::Keep,
+                });
+            }
             continue;
         };
         if !pass.claim(&entry.name, &listed.rel) {
@@ -382,7 +395,8 @@ fn run_check(
         pass.parsed += 1;
         match read_entry(rel, &arcade.join(rel)) {
             Some(e) => e.mra,
-            None => return Pending::Set(None, None),
+            // An MRA that cannot be read now keeps its last check until it can.
+            None => return Pending::Keep,
         }
     };
     pass.checked += 1;
@@ -461,8 +475,8 @@ fn store_batch(
     Ok(())
 }
 
-/// Every `.mra` under `dir`, shallowest and then alphabetical first, with its stamp.
-/// Symlinks, folders in [`SKIPPED_DIRS`] and second names of one file are left out.
+/// Every `.mra` under `dir`, shallowest and then alphabetical first, with its stamp. Links to
+/// files are followed; linked folders, folders in [`SKIPPED_DIRS`] and second names of one file are left out.
 fn list_mras(dir: &Path) -> Vec<Listed> {
     fn walk(dir: &Path, rel: &str, depth: usize, out: &mut Vec<(Listed, (u64, u64))>) {
         let Ok(entries) = fs::read_dir(dir) else {
@@ -483,16 +497,19 @@ fn list_mras(dir: &Path) -> Vec<Listed> {
                 if depth < MAX_DEPTH && !skipped {
                     walk(&entry.path(), &rel, depth + 1, out);
                 }
-            } else if kind.is_file()
+            } else if (kind.is_file() || kind.is_symlink())
                 && Path::new(&name)
                     .extension()
                     .is_some_and(|e| e.eq_ignore_ascii_case("mra"))
             {
-                let Ok(meta) = entry.metadata() else {
+                // Follows a link to its file, so the inode dedupe sees the target.
+                let Ok(meta) = fs::metadata(entry.path()) else {
                     continue;
                 };
-                let stamp = stamp_of(&meta);
-                out.push((Listed { rel, stamp }, (meta.dev(), meta.ino())));
+                if meta.is_file() {
+                    let stamp = mra_stamp(&meta);
+                    out.push((Listed { rel, stamp }, (meta.dev(), meta.ino())));
+                }
             }
         }
     }
@@ -527,6 +544,11 @@ fn file_stamp(path: &Path) -> Option<String> {
     fs::metadata(path).ok().map(|m| stamp_of(&m))
 }
 
+/// [`stamp_of`] an MRA file behind the parser version, so a parser change rereads every MRA.
+fn mra_stamp(meta: &fs::Metadata) -> String {
+    format!("p{}:{}", mra::PARSER_VERSION, stamp_of(meta))
+}
+
 /// Parses the MRA at `path`, named by its `<name>` or else by the stem of `rel`.
 fn read_entry(rel: &str, path: &Path) -> Option<Entry> {
     let mra = match mra::read(path) {
@@ -551,7 +573,9 @@ fn read_entry(rel: &str, path: &Path) -> Option<Entry> {
     }
     Some(Entry {
         name,
-        stamp: file_stamp(path).unwrap_or_default(),
+        stamp: fs::metadata(path)
+            .map(|m| mra_stamp(&m))
+            .unwrap_or_default(),
         mra,
     })
 }
@@ -675,16 +699,21 @@ fn check_stamp(mra_stamp: &str, mra: &Mra, zips: &[Zip]) -> Option<String> {
     joined_stamp(mra_stamp, &found)
 }
 
-/// `mra_stamp` followed by each zip's place and stamp; `None` without zips or with one missing.
+/// `mra_stamp` followed by each zip's place and stamp in place order, so the order the MRA or
+/// the database lists zips in never counts; `None` without zips or with one missing.
 fn joined_stamp(mra_stamp: &str, zips: &[(ZipPath, Option<PathBuf>)]) -> Option<String> {
     if zips.is_empty() {
         return None;
     }
+    let mut placed = zips
+        .iter()
+        .map(|(place, on_disk)| Some((place.rel_path(), on_disk.as_ref()?)))
+        .collect::<Option<Vec<_>>>()?;
+    placed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     let mut stamp = mra_stamp.to_owned();
-    for (place, on_disk) in zips {
-        let path = on_disk.as_ref()?;
+    for (place, path) in placed {
         stamp.push(';');
-        stamp.push_str(&place.rel_path());
+        stamp.push_str(&place);
         stamp.push(':');
         stamp.push_str(&file_stamp(path).unwrap_or_default());
     }

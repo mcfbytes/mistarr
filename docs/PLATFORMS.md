@@ -84,17 +84,25 @@ present or missing in `games/NeoGeo`. Nothing else is done with them.
 ### MRA catalogue
 
 The catalogue reads the real MRA files once each. Under `_Arcade` it skips
-every symlink (file or folder), any
-folder named `_Organized` in any letter case, which the Arcade Organizer
-fills with thousands of symlinks to the same MRAs, and a second path to a
-file already listed (a hard link, same device and inode). `_alternatives`
-holds distinct MRAs and is read. An MRA is refused unread above 1 MiB.
+symlinked folders, any folder named `_Organized` in any letter case, which
+the Arcade Organizer fills with thousands of symlinks to the same MRAs, and
+a second path to a file already listed (a hard link or a symlink to it, same
+device and inode). A symlink to an MRA file elsewhere is followed.
+`_alternatives` holds distinct MRAs and is read. An MRA is refused unread
+above 1 MiB.
+
+An MRA is read again only when its size or modification time changes, or
+when the parser version changes. exFAT and FAT keep modification times to
+2 seconds, so a rewrite that keeps the size within the same 2 seconds goes
+unnoticed until the next change; a scan from `POST /system/scan` after such
+an edit rereads nothing either, and touching the file later picks it up.
 
 MRA markup is read the way MiSTer's loader reads it: element and attribute
 names in any letter case, so `<ROM>` closed by `</rom>` is one element; an
 end tag closes the innermost open element of its name, a stray end tag is
 ignored and an unknown entity is kept as written. A file that ends inside
-an element is refused.
+an element is refused. `<name>`, `<setname>` and `<rbf>` keep at most 256
+bytes, and a `<rom>` inside one left open never adds to it.
 
 The arcade catalogue job (ARCHITECTURE.md "Arcade catalogue") turns each MRA
 into one `arcade` title with `source = 'mra'`: `<name>`, `<setname>` and

@@ -241,7 +241,8 @@ pub fn parse(xml: &[u8]) -> Result<Mra> {
         match event {
             Event::Start(e) => {
                 let name = tag(e.local_name().as_ref());
-                let f = Field::of(&name).or(field);
+                // A `<rom>` inside an unclosed field never feeds that field.
+                let f = Field::of(&name).or(field.filter(|_| name != "rom"));
                 open.push((name, f));
                 read_attributes(&e, &mut mra)?;
                 start(&e, &mut rom)?;
@@ -291,6 +292,12 @@ fn xml_err(e: impl std::fmt::Display) -> Error {
 
 /// Largest MRA file read; real ones are a few KiB, so a bigger one is refused.
 pub const MAX_MRA_BYTES: u64 = 1024 * 1024;
+
+/// Longest `<name>`, `<setname>` or `<rbf>` text kept, in bytes; the rest is dropped.
+pub const MAX_FIELD_BYTES: usize = 256;
+
+/// Version of what [`parse`] reads from an MRA; it changes whenever a file could parse differently.
+pub const PARSER_VERSION: u32 = 1;
 
 /// Reads and parses an MRA file of at most [`MAX_MRA_BYTES`].
 ///
@@ -613,13 +620,20 @@ impl Field {
         }
     }
 
+    /// Appends `text` up to [`MAX_FIELD_BYTES`], so an unclosed field cannot take in the document.
     fn append(self, mra: &mut Mra, text: &str) {
         let slot = match self {
             Self::Name => &mut mra.name,
             Self::Setname => &mut mra.setname,
             Self::Rbf => &mut mra.rbf,
-        };
-        slot.get_or_insert_with(String::new).push_str(text);
+        }
+        .get_or_insert_with(String::new);
+        let room = MAX_FIELD_BYTES.saturating_sub(slot.len());
+        let mut end = room.min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        slot.push_str(&text[..end]);
     }
 }
 
