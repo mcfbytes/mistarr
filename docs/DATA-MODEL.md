@@ -106,6 +106,7 @@ CREATE TABLE files (                    -- what is on disk under games/
   UNIQUE (platform_id, rel_path)
 );
 CREATE INDEX files_rom ON files(rom_id);
+CREATE INDEX files_rel_lower ON files(platform_id, lower(rel_path));   -- arcade rows match zips ignoring case
 
 CREATE TABLE sources (                  -- one per torrent the user dropped in
   id            INTEGER PRIMARY KEY,

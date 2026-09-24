@@ -232,9 +232,54 @@ mod tests {
     }
 
     #[test]
-    fn import_log_is_indexed_by_file() {
+    fn arcade_presence_migration_indexes_and_drops_md5_less_member_rows() {
         let mut conn = Connection::open_in_memory().expect("open");
         apply(&mut conn).expect("apply");
+        crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+        let insert = |platform: &str, rel_path: &str, md5: Option<&str>| -> i64 {
+            conn.execute(
+                "INSERT INTO files (platform_id, rel_path, size, mtime, md5, state, scanned_at)
+                 VALUES (?1, ?2, 4, 0, ?3, 'verified', 0)",
+                params![platform, rel_path, md5],
+            )
+            .expect("insert");
+            conn.last_insert_rowid()
+        };
+        let stale = insert("arcade", "mame/a.zip#a.bin", None);
+        insert(
+            "arcade",
+            "mame/a.zip#b.bin",
+            Some("0123456789abcdef0123456789abcdef"),
+        );
+        insert("arcade", "mame/b.zip", None);
+        insert("nes", "NES/c.zip#c.nes", None);
+        conn.execute(
+            "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 'placed', '{}')",
+            [stale],
+        )
+        .expect("log");
+
+        let presence = MIGRATIONS
+            .iter()
+            .find(|m| m.name == "0013_arcade_presence")
+            .expect("migration present");
+        let rerun = presence
+            .sql
+            .replace("CREATE INDEX", "CREATE INDEX IF NOT EXISTS");
+        conn.execute_batch(&rerun).expect("migrate");
+
+        let left: Vec<String> = conn
+            .prepare("SELECT rel_path FROM files ORDER BY rel_path")
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(left, ["NES/c.zip#c.nes", "mame/a.zip#b.bin", "mame/b.zip"]);
+        let logged: Option<i64> = conn
+            .query_row("SELECT file_id FROM import_log", [], |r| r.get(0))
+            .expect("log");
+        assert_eq!(logged, None, "the log entry outlives the row");
         let plan: String = conn
             .query_row(
                 "EXPLAIN QUERY PLAN SELECT id FROM import_log WHERE file_id = 1",

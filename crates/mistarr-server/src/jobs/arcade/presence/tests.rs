@@ -71,13 +71,26 @@ fn row(id: i64, rel: &str, size: i64, mtime: i64, rom: Option<i64>, state: FileS
 }
 
 #[test]
-fn zip_names_lists_only_zips_sorted_bytewise() {
+fn zip_names_lists_only_zips_ignoring_case_in_order() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_zip(&dir.path().join("b.zip"), &[("a.bin", b"A")]);
-    write_zip(&dir.path().join("B.ZIP"), &[("a.bin", b"A")]);
+    write_zip(&dir.path().join("A.ZIP"), &[("a.bin", b"A")]);
     fs::write(dir.path().join("notes.txt"), b"n").expect("write");
-    assert_eq!(zip_names(dir.path()), ["B.ZIP", "b.zip"]);
-    assert!(zip_names(&dir.path().join("absent")).is_empty());
+    assert_eq!(zip_names(dir.path()).expect("listed"), ["A.ZIP", "b.zip"]);
+    assert!(zip_names(&dir.path().join("absent"))
+        .expect("gone is empty")
+        .is_empty());
+}
+
+#[test]
+fn zip_names_fails_on_a_directory_it_cannot_read() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file = dir.path().join("mame");
+    fs::write(&file, b"not a directory").expect("write");
+    assert!(
+        zip_names(&file).is_err(),
+        "anything but NotFound is an error"
+    );
 }
 
 #[test]
@@ -94,13 +107,13 @@ fn stat_leaves_out_a_zip_it_cannot_stat() {
 fn an_mra_named_zip_with_no_rows_gets_one_presence_row() {
     let mut out = Changes::default();
     let z = zip("mame/a.zip", 10, 5);
-    assert!(decide(&z, Some(7), None, Vec::new(), &mut out).is_none());
+    assert!(decide(&z, &[7], Vec::new(), Vec::new(), &mut out).is_none());
     assert_eq!(out.record, [(z, 7)]);
     assert!(out.drop.is_empty());
 
     let mut out = Changes::default();
     let z = zip("mame/stray.zip", 10, 5);
-    assert!(decide(&z, None, None, Vec::new(), &mut out).is_none());
+    assert!(decide(&z, &[], Vec::new(), Vec::new(), &mut out).is_none());
     assert_eq!(out, Changes::default(), "a zip no MRA names gets nothing");
 }
 
@@ -110,7 +123,7 @@ fn a_presence_row_follows_its_zip_and_the_live_mra_set() {
     let promoted = row(1, "mame/a.zip", 10, 5, Some(7), FileState::Verified);
 
     let mut out = Changes::default();
-    decide(&z, Some(7), Some(promoted.clone()), Vec::new(), &mut out);
+    decide(&z, &[7], vec![promoted.clone()], Vec::new(), &mut out);
     assert_eq!(
         out,
         Changes::default(),
@@ -119,13 +132,7 @@ fn a_presence_row_follows_its_zip_and_the_live_mra_set() {
 
     let mut out = Changes::default();
     let touched = zip("mame/a.zip", 10, 6);
-    decide(
-        &touched,
-        Some(7),
-        Some(promoted.clone()),
-        Vec::new(),
-        &mut out,
-    );
+    decide(&touched, &[7], vec![promoted.clone()], Vec::new(), &mut out);
     assert_eq!(
         out.record,
         [(touched, 7)],
@@ -133,11 +140,37 @@ fn a_presence_row_follows_its_zip_and_the_live_mra_set() {
     );
 
     let mut out = Changes::default();
-    decide(&z, Some(8), Some(promoted.clone()), Vec::new(), &mut out);
-    assert_eq!(out.record, [(z.clone(), 8)], "another MRA rom names it now");
+    decide(&z, &[3, 7], vec![promoted.clone()], Vec::new(), &mut out);
+    assert_eq!(
+        out,
+        Changes::default(),
+        "promoted under another MRA naming the zip: kept"
+    );
 
     let mut out = Changes::default();
-    decide(&z, None, Some(promoted), Vec::new(), &mut out);
+    decide(&z, &[8], vec![promoted.clone()], Vec::new(), &mut out);
+    assert_eq!(
+        out.record,
+        [(z.clone(), 8)],
+        "only another MRA's rom names it now"
+    );
+
+    let mut out = Changes::default();
+    let spelled = row(1, "mame/A.zip", 10, 6, Some(7), FileState::Unverified);
+    let other = row(2, "mame/a.ZIP", 10, 6, Some(7), FileState::Unverified);
+    decide(&z, &[7], vec![spelled, other], Vec::new(), &mut out);
+    assert_eq!(
+        out.drop,
+        ["mame/a.ZIP"],
+        "one row per zip whatever its case"
+    );
+    assert_eq!(
+        out.record[0].0.rel, "mame/A.zip",
+        "rewritten at its own spelling"
+    );
+
+    let mut out = Changes::default();
+    decide(&z, &[], vec![promoted], Vec::new(), &mut out);
     assert_eq!(out.drop, ["mame/a.zip"], "no live MRA names it any more");
 }
 
@@ -147,14 +180,14 @@ fn member_rows_stand_for_the_zip_and_are_left_alone_while_it_is_unchanged() {
     let bare = row(1, "mame/a.zip", 10, 5, Some(7), FileState::Unverified);
     let member = row(2, "mame/a.zip#a.bin", 1, 5, Some(9), FileState::Verified);
     let mut out = Changes::default();
-    let rc = decide(&z, Some(7), Some(bare), vec![member.clone()], &mut out);
+    let rc = decide(&z, &[7], vec![bare], vec![member.clone()], &mut out);
     assert!(rc.is_none(), "an unchanged zip is never read");
     assert_eq!(out.drop, ["mame/a.zip"], "the presence row gives way");
     assert!(out.record.is_empty() && out.restamp.is_empty() && out.reverify.is_empty());
 
     let mut out = Changes::default();
     let moved = zip("mame/a.zip", 10, 6);
-    let rc = decide(&moved, Some(7), None, vec![member], &mut out).expect("recheck");
+    let rc = decide(&moved, &[7], Vec::new(), vec![member], &mut out).expect("recheck");
     assert_eq!(rc.members.len(), 1);
     assert_eq!(out, Changes::default());
 }
@@ -188,7 +221,7 @@ fn recheck_keeps_matching_members_and_marks_changed_ones() {
     let gone = row(3, "mame/a.zip#gone.bin", 4, 5, Some(9), FileState::Verified);
     let rc = Recheck {
         zip: zip("mame/a.zip", 99, 6),
-        rom: Some(7),
+        roms: vec![7],
         members: vec![same, changed, gone],
     };
     let mut out = Changes::default();
@@ -207,7 +240,7 @@ fn recheck_of_an_unreadable_zip_changes_nothing() {
     let member = row(2, "mame/a.zip#a.bin", 1, 5, Some(9), FileState::Verified);
     let rc = Recheck {
         zip: zip("mame/a.zip", 13, 6),
-        rom: Some(7),
+        roms: vec![7],
         members: vec![member],
     };
     let mut out = Changes::default();
@@ -223,7 +256,7 @@ fn recheck_records_a_presence_row_once_no_member_is_left() {
     let z = zip("mame/a.zip", 50, 6);
     let rc = Recheck {
         zip: z.clone(),
-        rom: Some(7),
+        roms: vec![7],
         members: vec![member],
     };
     let mut out = Changes::default();
@@ -260,7 +293,8 @@ fn plan_and_write_a_batch_against_the_database() {
             Ok(rom)
         })
         .expect("seed");
-    let live: HashMap<String, i64> = [("mame/a.zip".to_owned(), rom)].into_iter().collect();
+    let live: HashMap<String, Vec<i64>> =
+        [("mame/a.zip".to_owned(), vec![rom])].into_iter().collect();
     let names = [
         "A.zip".to_owned(),
         "b.zip".to_owned(),
@@ -290,14 +324,40 @@ fn plan_and_write_a_batch_against_the_database() {
 fn gone_keeps_listed_and_present_zips() {
     let dir = tempfile::tempdir().expect("tempdir");
     write_zip(&dir.path().join("mame/sub/nested.zip"), &[("a.bin", b"A")]);
-    let names = vec!["a.zip".to_owned()];
+    fs::write(dir.path().join("mame/plain"), b"a file").expect("write");
+    let names = vec!["a#b.zip".to_owned(), "c.zip".to_owned()];
     let page = vec![
-        "mame/a.zip".to_owned(),
-        "mame/a.zip#x.bin".to_owned(),
+        "mame/a#b.zip".to_owned(),
+        "mame/a#b.zip#x.bin".to_owned(),
+        "mame/C.ZIP#x.bin".to_owned(),
         "mame/sub/nested.zip#a.bin".to_owned(),
-        "mame/b.zip#x.bin".to_owned(),
+        "mame/plain/d.zip#x.bin".to_owned(),
+        "mame/e.zip#x.bin".to_owned(),
     ];
-    assert_eq!(gone(dir.path(), "mame", &names, page), ["mame/b.zip#x.bin"]);
+    assert_eq!(
+        gone(dir.path(), "mame", &names, page),
+        ["mame/e.zip#x.bin"],
+        "a `#` in a zip name, any case, a nested zip and an uncheckable path are kept"
+    );
+}
+
+#[test]
+fn recheck_splits_a_member_at_the_zip_not_the_first_hash() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    write_zip(&dir.path().join("mame/a#b.zip"), &[("x.bin", b"X")]);
+    let listed =
+        zip_members(File::open(dir.path().join("mame/a#b.zip")).expect("open")).expect("members");
+    let mut member = row(2, "mame/a#b.zip#x.bin", 1, 5, Some(9), FileState::Verified);
+    member.crc32 = Some(listed[0].crc32.clone());
+    let rc = Recheck {
+        zip: zip("mame/a#b.zip", 99, 6),
+        roms: vec![7],
+        members: vec![member],
+    };
+    let mut out = Changes::default();
+    recheck(dir.path(), rc, &mut out);
+    assert_eq!(out.restamp, [(FileId(2), 6)]);
+    assert!(out.drop.is_empty());
 }
 
 /// Writes `_Arcade/<name>.mra` naming zip `zip` in `games/mame`.
@@ -587,4 +647,91 @@ async fn deleting_a_zip_prunes_its_rows_and_have_drops() {
         })
         .expect("log");
     assert_eq!(logged, None, "the import_log entry outlives its row");
+}
+
+#[tokio::test]
+async fn a_directory_that_cannot_be_listed_keeps_its_rows() {
+    let (dir, app) = state();
+    let games = app.config().paths.games;
+    write_zip(&games.join("mame/exblast.zip"), &[("a.bin", b"AAAA")]);
+    write_mra(dir.path(), "Example Blaster", "exblast.zip");
+    catalogue(&app).await;
+    let rom = zip_rom(&app, "exblast.zip");
+    import_row(&app, "mame/exblast.zip", 1, rom);
+    let before = arcade_rows(&app);
+    assert_eq!(before.len(), 2);
+
+    // A file where the directory was listing fails with an error other than NotFound.
+    fs::remove_dir_all(games.join("mame")).expect("rm");
+    fs::write(games.join("mame"), b"unreadable").expect("write");
+    let progress = catalogue(&app).await;
+    assert_eq!(progress["presence_pruned"], 0);
+    assert_eq!(arcade_rows(&app), before, "nothing under it is pruned");
+}
+
+#[tokio::test]
+async fn a_zip_two_mras_name_keeps_the_promotion_either_gave() {
+    let (dir, app) = state();
+    let games = app.config().paths.games;
+    write_zip(&games.join("mame/exparent.zip"), &[("a.bin", b"AAAA")]);
+    write_mra(dir.path(), "Example Blaster", "exparent.zip");
+    write_mra(dir.path(), "Example Quest", "exparent.zip");
+    catalogue(&app).await;
+    let highest: i64 = app
+        .db
+        .read_blocking(|c| {
+            Ok(c.query_row(
+                "SELECT MAX(id) FROM roms WHERE name = 'exparent.zip'",
+                [],
+                |r| r.get(0),
+            )?)
+        })
+        .expect("rom");
+    let promoted = app
+        .db
+        .write_blocking(move |c| files::mark_verified(c, &pid(), "mame/exparent.zip", highest))
+        .expect("promote");
+    assert!(
+        promoted,
+        "verify_siblings promotes under the importing title's rom"
+    );
+
+    catalogue(&app).await;
+    let rows = arcade_rows(&app);
+    assert_eq!(rows.len(), 1);
+    assert_eq!((rows[0].1, rows[0].2), (FileState::Verified, Some(highest)));
+}
+
+#[tokio::test]
+async fn import_rows_match_a_zip_whatever_its_case() {
+    let (dir, app) = state();
+    let games = app.config().paths.games;
+    let path = games.join("mame/foo.zip");
+    write_zip(&path, &[("a.bin", b"AAAA")]);
+    write_mra(dir.path(), "Example Blaster", "Foo.zip");
+    catalogue(&app).await;
+    let rom = zip_rom(&app, "Foo.zip");
+    let mtime = mtime_of(&path);
+    assert_eq!(
+        arcade_rows(&app),
+        [(
+            "mame/foo.zip".into(),
+            FileState::Unverified,
+            Some(rom),
+            mtime
+        )]
+    );
+    import_row(&app, "mame/Foo.zip", mtime, rom);
+
+    catalogue(&app).await;
+    assert_eq!(
+        arcade_rows(&app),
+        [(
+            "mame/Foo.zip#a.bin".into(),
+            FileState::Verified,
+            Some(rom),
+            mtime
+        )],
+        "the import rows stand for foo.zip and are neither rewritten nor pruned"
+    );
 }

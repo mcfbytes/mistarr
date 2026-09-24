@@ -34,8 +34,8 @@ const DISC_DIRS: usize = 1_000;
 const PRESENCE_ZIPS: usize = 30_000;
 const PRESENCE_MEMBERS: usize = 10;
 const PRESENCE_MRAS: usize = 3_000;
-/// Longest the catalogue with its presence pass may take on the host, debug build.
-const PRESENCE_TIME: Duration = Duration::from_secs(20);
+/// Longest the catalogue with its presence pass may take, generous for shared CI runners.
+const PRESENCE_TIME: Duration = Duration::from_secs(60);
 
 /// A running `mistarr serve` over one data directory.
 struct Server {

@@ -531,7 +531,7 @@ pub fn titles_naming(
 }
 
 /// Every zip live MRA titles of `platform` name, keyed `{zip_dir}/{name}` in ASCII
-/// lowercase (exFAT compares names that way), to the lowest `roms.id` naming it.
+/// lowercase (exFAT compares names that way), to every live `roms.id` naming it, ascending.
 ///
 /// # Errors
 ///
@@ -542,19 +542,19 @@ pub fn titles_naming(
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert!(mistarr_server::db::arcade::live_zip_roms(&conn, "arcade").unwrap().is_empty());
 /// ```
-pub fn live_zip_roms(conn: &Connection, platform: &str) -> Result<HashMap<String, i64>> {
+pub fn live_zip_roms(conn: &Connection, platform: &str) -> Result<HashMap<String, Vec<i64>>> {
     let mut stmt = conn.prepare(
         "SELECT COALESCE(r.zip_dir, ''), r.name, r.id FROM roms r JOIN titles t ON t.id = r.title_id
-         WHERE t.platform_id = ?1 AND t.source = 'mra' AND t.retired = 0 AND r.retired = 0",
+         WHERE t.platform_id = ?1 AND t.source = 'mra' AND t.retired = 0 AND r.retired = 0
+         ORDER BY r.id",
     )?;
     let mut rows = stmt.query([platform])?;
-    let mut out: HashMap<String, i64> = HashMap::new();
+    let mut out: HashMap<String, Vec<i64>> = HashMap::new();
     while let Some(r) = rows.next()? {
         let (dir, name, id): (String, String, i64) = (r.get(0)?, r.get(1)?, r.get(2)?);
-        let key = format!("{dir}/{name}").to_ascii_lowercase();
-        out.entry(key)
-            .and_modify(|v| *v = (*v).min(id))
-            .or_insert(id);
+        out.entry(format!("{dir}/{name}").to_ascii_lowercase())
+            .or_default()
+            .push(id);
     }
     Ok(out)
 }

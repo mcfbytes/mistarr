@@ -252,6 +252,38 @@ pub fn zip_member_rows(
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// Rows of zip `zip_rel` matched ignoring ASCII case, as exFAT names files: its own
+/// presence rows (`zip_rel`) and its member rows (`zip_rel#member`), in `rel_path` order.
+/// Always uses the `files_rel_lower` index, never a scan of the platform's rows.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn zip_rows_nocase(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    zip_rel: &str,
+) -> Result<(Vec<FileRow>, Vec<FileRow>)> {
+    let key = zip_rel.to_ascii_lowercase();
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {COLUMNS} FROM files INDEXED BY files_rel_lower
+         WHERE platform_id = ?1 AND lower(rel_path) = ?2 ORDER BY rel_path"
+    ))?;
+    let bare = stmt
+        .query_map(params![platform_id.0, key], from_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {COLUMNS} FROM files INDEXED BY files_rel_lower
+         WHERE platform_id = ?1 AND lower(rel_path) >= ?2 AND lower(rel_path) < ?3
+         ORDER BY rel_path"
+    ))?;
+    let (from, to) = (format!("{key}#"), format!("{key}$"));
+    let members = stmt
+        .query_map(params![platform_id.0, from, to], from_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok((bare, members))
+}
+
 /// Up to `limit` `rel_path`s of `platform_id` under directory `dir` (`dir/...`) that sort
 /// after `after`, in order; a keyset page for walking one directory's rows in bounded memory.
 ///
@@ -462,8 +494,9 @@ pub fn delete_paths(
     )?)
 }
 
-/// Deletes every row of `platform_id` whose `rel_path` is not in `keep`, through
-/// [`delete_paths`] in batches of one transaction each. Returns the number of rows removed.
+/// Deletes every row of `platform_id` whose `rel_path` is not in `keep` and does not lie
+/// under a directory of `unreadable` (one the caller could not list, so its rows are kept),
+/// through [`delete_paths`] in batches of one transaction each. Returns the rows removed.
 ///
 /// # Errors
 ///
@@ -472,11 +505,18 @@ pub fn delete_missing(
     conn: &mut Connection,
     platform_id: &PlatformId,
     keep: &[String],
+    unreadable: &[String],
 ) -> Result<usize> {
     let keep: std::collections::HashSet<&str> = keep.iter().map(String::as_str).collect();
+    let under = |p: &str| {
+        unreadable.iter().any(|d| {
+            p.strip_prefix(d.as_str())
+                .is_some_and(|r| r.starts_with('/'))
+        })
+    };
     let gone: Vec<String> = existing_paths(conn, platform_id)?
         .into_iter()
-        .filter(|p| !keep.contains(p.as_str()))
+        .filter(|p| !keep.contains(p.as_str()) && !under(p))
         .collect();
     let mut removed = 0;
     for batch in gone.chunks(DELETE_BATCH) {
@@ -858,7 +898,7 @@ mod tests {
             1,
         )
         .expect("insert");
-        let removed = delete_missing(&mut c, &pid, &["keep.nes".to_owned()]).expect("delete");
+        let removed = delete_missing(&mut c, &pid, &["keep.nes".to_owned()], &[]).expect("delete");
         assert_eq!(removed, 1);
         assert!(find_by_path(&c, &pid, "keep.nes").expect("find").is_some());
         assert!(find_by_path(&c, &pid, "gone.nes").expect("find").is_none());
@@ -878,7 +918,7 @@ mod tests {
             [id.0],
         )
         .expect("log");
-        let removed = delete_missing(&mut c, &pid, &[]).expect("delete");
+        let removed = delete_missing(&mut c, &pid, &[], &[]).expect("delete");
         assert_eq!(removed, 1);
         let logged: Option<i64> = c
             .query_row("SELECT file_id FROM import_log", [], |r| r.get(0))
@@ -915,6 +955,25 @@ mod tests {
         );
         let rest = paths_under(&c, &pid, "mame", &first[2], 3).expect("page");
         assert_eq!(rest, ["mame/a.zip.zip#z.bin", "mame/b.zip#x.bin"]);
+    }
+
+    #[test]
+    fn zip_rows_nocase_match_any_spelling() {
+        let c = conn();
+        let pid = PlatformId("arcade".into());
+        let h = Hashed::default();
+        for rel in [
+            "mame/Foo.zip",
+            "mame/Foo.zip#a.bin",
+            "mame/FOO.ZIP#b.bin",
+            "mame/foo2.zip",
+        ] {
+            upsert(&c, &pid, rel, 1, 1, &h, None, FileState::Unverified, 1).expect("insert");
+        }
+        let (bare, members) = zip_rows_nocase(&c, &pid, "mame/foo.zip").expect("rows");
+        let names = |rows: Vec<FileRow>| rows.into_iter().map(|r| r.rel_path).collect::<Vec<_>>();
+        assert_eq!(names(bare), ["mame/Foo.zip"]);
+        assert_eq!(names(members), ["mame/FOO.ZIP#b.bin", "mame/Foo.zip#a.bin"]);
     }
 
     #[test]
@@ -1015,6 +1074,25 @@ mod tests {
     }
 
     #[test]
+    fn delete_missing_keeps_rows_under_an_unreadable_directory() {
+        let mut c = conn();
+        let pid = PlatformId("nes".into());
+        let h = Hashed::default();
+        for rel in ["NES/a.nes", "NES/sub/b.nes", "NESX/c.nes", "d.nes"] {
+            upsert(&c, &pid, rel, 1, 1, &h, None, FileState::Verified, 1).expect("insert");
+        }
+        let removed = delete_missing(&mut c, &pid, &[], &["NES".to_owned()]).expect("delete");
+        assert_eq!(removed, 2, "only rows outside NES/ go");
+        assert!(find_by_path(&c, &pid, "NES/a.nes").expect("find").is_some());
+        assert!(find_by_path(&c, &pid, "NES/sub/b.nes")
+            .expect("find")
+            .is_some());
+        assert!(find_by_path(&c, &pid, "NESX/c.nes")
+            .expect("find")
+            .is_none());
+    }
+
+    #[test]
     fn delete_missing_spans_several_batches() {
         let mut c = conn();
         let pid = PlatformId("nes".into());
@@ -1034,7 +1112,7 @@ mod tests {
             )
             .expect("insert");
         }
-        assert_eq!(delete_missing(&mut c, &pid, &[]).expect("delete"), n);
+        assert_eq!(delete_missing(&mut c, &pid, &[], &[]).expect("delete"), n);
         assert!(existing_paths(&c, &pid).expect("paths").is_empty());
     }
 
@@ -1062,7 +1140,7 @@ mod tests {
         let keep: Vec<String> = std::iter::repeat_n("game0.nes".to_owned(), 10)
             .chain(std::iter::repeat_n("game1.nes".to_owned(), 5))
             .collect();
-        let removed = delete_missing(&mut c, &pid, &keep).expect("delete");
+        let removed = delete_missing(&mut c, &pid, &keep, &[]).expect("delete");
         assert_eq!(removed, 48);
         assert!(find_by_path(&c, &pid, "game0.nes").expect("find").is_some());
         assert!(find_by_path(&c, &pid, "game1.nes").expect("find").is_some());

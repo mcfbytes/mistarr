@@ -1,13 +1,16 @@
 //! Arcade presence pass: which zips live MRAs name are on disk under `games/mame` and
 //! `games/hbmame`; see `docs/ARCHITECTURE.md` "Arcade presence pass".
 
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs::{self, File};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mistarr_core::hash::{zip_members, HashError};
 use mistarr_core::PlatformId;
+use mistarr_mister::launch::split_zip_member;
 use mistarr_mister::platforms::Platform;
 use rusqlite::Connection;
 use serde_json::json;
@@ -52,8 +55,8 @@ struct Zip {
 struct Recheck {
     /// The zip as stated this run.
     zip: Zip,
-    /// The zip rom a live MRA gives it, if any.
-    rom: Option<i64>,
+    /// The zip roms live MRAs give it, lowest first; empty when none names it.
+    roms: Vec<i64>,
     /// Its `zip#member` rows.
     members: Vec<FileRow>,
 }
@@ -76,17 +79,27 @@ fn zip_dirs(platform: &'static Platform) -> impl Iterator<Item = &'static str> {
     std::iter::once(platform.core_dir).chain(platform.legacy_dirs.iter().copied())
 }
 
-/// Zip file names directly under `dir`, sorted bytewise as `files.rel_path` sorts.
-fn zip_names(dir: &Path) -> Vec<String> {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return Vec::new();
+/// Compares two names as exFAT does, ignoring ASCII case.
+fn cmp_nocase(a: &str, b: &str) -> Ordering {
+    a.bytes()
+        .map(|c| c.to_ascii_lowercase())
+        .cmp(b.bytes().map(|c| c.to_ascii_lowercase()))
+}
+
+/// Zip file names directly under `dir`, sorted by [`cmp_nocase`]; empty when `dir` is
+/// gone, an error when it exists but cannot be read.
+fn zip_names(dir: &Path) -> io::Result<Vec<String>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
     };
     let mut out: Vec<String> = entries
         .filter_map(|e| e.ok()?.file_name().into_string().ok())
         .filter(|n| extension(Path::new(n)).as_deref() == Some("zip"))
         .collect();
-    out.sort_unstable();
-    out
+    out.sort_unstable_by(|a, b| cmp_nocase(a, b));
+    Ok(out)
 }
 
 /// Stats zip `name` under `dir`; one that cannot be stated is logged and left out, and
@@ -102,14 +115,30 @@ fn stat(games: &Path, dir: &str, name: &str) -> Option<Zip> {
     }
 }
 
-/// The presence row `zip` needs when no member row stands for it: one against the MRA
-/// zip rom that names it, refreshed only when the zip or its rom changed; none otherwise.
-fn record(zip: &Zip, rom: Option<i64>, bare: Option<&FileRow>, out: &mut Changes) {
-    match (rom, bare) {
-        (None, Some(b)) => out.drop.push(b.rel_path.clone()),
-        (None, None) => {}
-        (Some(r), Some(b)) if (b.size, b.mtime, b.rom_id) == (zip.size, zip.mtime, Some(r)) => {}
-        (Some(r), _) => out.record.push((zip.clone(), r)),
+/// The presence row `zip` needs when no member row stands for it: one against a zip rom
+/// of a live MRA naming it, the lowest of `roms` when written. The row is left alone while
+/// the zip's size and mtime and one of `roms` still match it, so a row `verify_siblings`
+/// promoted under another MRA's rom stays promoted; it is removed when no MRA names the zip.
+fn record(zip: &Zip, roms: &[i64], bare: Option<&FileRow>, out: &mut Changes) {
+    let Some(&first) = roms.first() else {
+        if let Some(b) = bare {
+            out.drop.push(b.rel_path.clone());
+        }
+        return;
+    };
+    match bare {
+        Some(b)
+            if (b.size, b.mtime) == (zip.size, zip.mtime)
+                && b.rom_id.is_some_and(|r| roms.contains(&r)) => {}
+        // Rewritten at the row's own spelling, which may differ in case from the listing.
+        Some(b) => out.record.push((
+            Zip {
+                rel: b.rel_path.clone(),
+                ..zip.clone()
+            },
+            first,
+        )),
+        None => out.record.push((zip.clone(), first)),
     }
 }
 
@@ -117,16 +146,20 @@ fn record(zip: &Zip, rom: Option<i64>, bare: Option<&FileRow>, out: &mut Changes
 /// zip and replace any presence row; they are left alone unless the zip's mtime moved.
 fn decide(
     zip: &Zip,
-    rom: Option<i64>,
-    bare: Option<FileRow>,
+    roms: &[i64],
+    bare: Vec<FileRow>,
     members: Vec<FileRow>,
     out: &mut Changes,
 ) -> Option<Recheck> {
+    let mut bare = bare.into_iter();
+    let first = bare.next();
+    // A second spelling of the same zip on a case-insensitive card is one row too many.
+    out.drop.extend(bare.map(|b| b.rel_path));
     if members.is_empty() {
-        record(zip, rom, bare.as_ref(), out);
+        record(zip, roms, first.as_ref(), out);
         return None;
     }
-    if let Some(b) = bare {
+    if let Some(b) = first {
         out.drop.push(b.rel_path);
     }
     if members.iter().all(|m| m.mtime == zip.mtime) {
@@ -134,7 +167,7 @@ fn decide(
     }
     Some(Recheck {
         zip: zip.clone(),
-        rom,
+        roms: roms.to_vec(),
         members,
     })
 }
@@ -146,7 +179,7 @@ fn plan_batch(
     db: &Db,
     games: &Path,
     pid: &PlatformId,
-    live: &HashMap<String, i64>,
+    live: &HashMap<String, Vec<i64>>,
     dir: &str,
     names: &[String],
 ) -> Result<Changes> {
@@ -155,12 +188,11 @@ fn plan_batch(
         let Some(zip) = stat(games, dir, name) else {
             continue;
         };
-        let rom = live.get(&zip.rel.to_ascii_lowercase()).copied();
-        let (bare, members) = db.read_blocking(|c| {
-            let bare = files::find_by_path(c, pid, &zip.rel)?;
-            Ok((bare, files::zip_member_rows(c, pid, &zip.rel)?))
-        })?;
-        if let Some(rc) = decide(&zip, rom, bare, members, &mut out) {
+        let roms = live
+            .get(&zip.rel.to_ascii_lowercase())
+            .map_or(&[][..], Vec::as_slice);
+        let (bare, members) = db.read_blocking(|c| files::zip_rows_nocase(c, pid, &zip.rel))?;
+        if let Some(rc) = decide(&zip, roms, bare, members, &mut out) {
             recheck(games, rc, &mut out);
         }
     }
@@ -184,7 +216,7 @@ fn recheck(games: &Path, rc: Recheck, out: &mut Changes) {
     let by_name: HashMap<&str, _> = listed.iter().map(|m| (m.name.as_str(), m)).collect();
     let mut kept = 0;
     for row in rc.members {
-        let name = row.rel_path.split_once('#').map_or("", |(_, n)| n);
+        let name = split_zip_member(&row.rel_path).1.unwrap_or_default();
         let Some(m) = by_name.get(name) else {
             out.drop.push(row.rel_path);
             continue;
@@ -203,7 +235,7 @@ fn recheck(games: &Path, rc: Recheck, out: &mut Changes) {
         }
     }
     if kept == 0 {
-        record(&rc.zip, rc.rom, None, out);
+        record(&rc.zip, &rc.roms, None, out);
     }
 }
 
@@ -241,17 +273,27 @@ fn write_changes(
     Ok((changes.record.len(), dropped))
 }
 
-/// Rows of `page` under `dir` whose zip is not in `names` (sorted) and not on disk.
+/// Rows of `page` under `dir` whose zip is neither in `names` (sorted by [`cmp_nocase`])
+/// nor on disk. A row whose zip cannot be checked is kept.
 fn gone(games: &Path, dir: &str, names: &[String], page: Vec<String>) -> Vec<String> {
     page.into_iter()
         .filter(|rel| {
-            let container = rel.split('#').next().unwrap_or(rel);
+            let container = split_zip_member(rel).0;
             let listed = container
                 .strip_prefix(dir)
                 .and_then(|n| n.strip_prefix('/'))
-                .is_some_and(|n| names.binary_search_by(|x| x.as_str().cmp(n)).is_ok());
-            // A row outside the listing (a nested path, or a zip added since) is checked on disk.
-            !listed && !games.join(container).exists()
+                .is_some_and(|n| names.binary_search_by(|x| cmp_nocase(x, n)).is_ok());
+            if listed {
+                return false;
+            }
+            // Outside the listing: a nested path or a zip added since, checked on disk.
+            match games.join(container).try_exists() {
+                Ok(present) => !present,
+                Err(e) => {
+                    tracing::warn!(path = %container, error = %e, "cannot check zip; keeping its rows");
+                    false
+                }
+            }
         })
         .collect()
 }
@@ -322,15 +364,23 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
             .read(|c| arcade_rows::live_zip_roms(c, super::PLATFORM))
             .await?,
     );
-    let listing: Vec<(&'static str, Arc<Vec<String>>)> = super::blocking({
+    let listed: Vec<(&'static str, io::Result<Vec<String>>)> = super::blocking({
         let games = games.clone();
         move || {
             zip_dirs(platform)
-                .map(|d| (d, Arc::new(zip_names(&games.join(d)))))
+                .map(|d| (d, zip_names(&games.join(d))))
                 .collect()
         }
     })
     .await?;
+    let mut listing: Vec<(&'static str, Arc<Vec<String>>)> = Vec::new();
+    for (dir, names) in listed {
+        match names {
+            Ok(names) => listing.push((dir, Arc::new(names))),
+            // Nothing under a directory that cannot be listed is recorded or pruned this run.
+            Err(e) => tracing::warn!(dir, error = %e, "cannot list zips; keeping their rows"),
+        }
+    }
     let pid = PlatformId(super::PLATFORM.to_owned());
     let mut stats = Stats {
         zips: listing.iter().map(|(_, n)| n.len()).sum(),
