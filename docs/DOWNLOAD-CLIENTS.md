@@ -117,14 +117,19 @@ the SD card over SMB, mapped to `/media/fat/mistarr/staging`.
 ## Polling
 
 One poll task. Interval 5 s while any download is `transferring` or
-`checking`, 60 s otherwise. A poll asks for every torrent mistarr added and
-diffs per-file progress against `downloads`, emitting `download.changed` only
-for rows that moved. Client errors set the client `unreachable` on the status
-screen after three consecutive failures and back off to 5 minutes.
+`checking`, 60 s otherwise. A poll asks for every torrent with a transferring
+or checking download and diffs per-file progress against `downloads`,
+emitting `download.changed` only for rows that moved. The first poll of a
+torrent after a new client handle, such as after a restart, re-applies its
+seed policy, since rtorrent keeps policies in memory. A torrent the client no
+longer has fails its downloads. Client errors set the client `unreachable` on
+the status screen after three consecutive failed polls and back off to 5
+minutes; the next answered poll sets it reachable again.
 
 ## Core gate
 
 When CORENAME is not `MENU` the poller applies the `*_core` rate limits from
-config; when it returns to `MENU` it restores the `*_menu` limits. It does not
+config; when it returns to `MENU` it restores the `*_menu` limits, once per
+transition. A missing CORENAME counts as the menu. It does not
 stop torrents, because stopping and starting a large set torrent is expensive
 in rtorrent.

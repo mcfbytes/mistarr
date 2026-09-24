@@ -56,6 +56,9 @@ pub fn options_in(dir: &Path) -> Options {
         magnet_started_poll: Duration::from_millis(50),
         dats_poll: Duration::from_millis(50),
         dats_min_age: Duration::ZERO,
+        poll_active: Duration::from_secs(3600),
+        poll_idle: Duration::from_secs(3600),
+        poll_backoff: Duration::from_secs(3600),
     }
 }
 

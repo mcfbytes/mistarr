@@ -17,7 +17,7 @@ use crate::error::{Error, Result};
 use crate::events::{EventBus, EventKind};
 use crate::jobs::detect_client::{ClientStatus, DetectClient};
 use crate::jobs::gate::Gate;
-use crate::jobs::{corename, source_import, Scheduler};
+use crate::jobs::{corename, poll, source_import, transfer, Scheduler};
 
 /// Runtime knobs that are not part of `mistarr.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +40,12 @@ pub struct Options {
     pub dats_poll: Duration,
     /// How old a file's mtime must be before it is imported.
     pub dats_min_age: Duration,
+    /// Poll interval while a download is transferring or checking.
+    pub poll_active: Duration,
+    /// Poll interval otherwise.
+    pub poll_idle: Duration,
+    /// Poll interval after repeated client failures.
+    pub poll_backoff: Duration,
 }
 
 impl Default for Options {
@@ -54,6 +60,9 @@ impl Default for Options {
             magnet_started_poll: Duration::from_secs(2),
             dats_poll: Duration::from_secs(10),
             dats_min_age: Duration::from_secs(2),
+            poll_active: Duration::from_secs(5),
+            poll_idle: Duration::from_secs(60),
+            poll_backoff: Duration::from_secs(300),
         }
     }
 }
@@ -73,6 +82,8 @@ pub struct AppState {
     pub started: Instant,
     /// Runtime knobs.
     pub options: Options,
+    /// Wakes the download poller to re-check its cadence after a transfer starts.
+    pub poll_wake: tokio::sync::Notify,
     shutdown: watch::Sender<bool>,
     settings_write: tokio::sync::Mutex<()>,
     client: RwLock<Option<(ClientKey, Arc<dyn DownloadClient>)>>,
@@ -90,6 +101,7 @@ impl AppState {
             scheduler: Scheduler::new(),
             started: Instant::now(),
             options,
+            poll_wake: tokio::sync::Notify::new(),
             shutdown: watch::Sender::new(false),
             settings_write: tokio::sync::Mutex::new(()),
             client: RwLock::new(None),
@@ -270,6 +282,9 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     tasks.push(tokio::spawn(crate::jobs::dat_import::watch(Arc::clone(
         &app,
     ))));
+    tasks.push(tokio::spawn(transfer::watch(Arc::clone(&app))));
+    tasks.push(tokio::spawn(poll::run(Arc::clone(&app))));
+    tasks.push(tokio::spawn(poll::follow_gate(Arc::clone(&app))));
 
     let listener = tokio::net::TcpListener::bind(app.config().server.listen.as_str()).await?;
     let addr = listener.local_addr()?;

@@ -4,7 +4,9 @@ pub mod corename;
 pub mod dat_import;
 pub mod detect_client;
 pub mod gate;
+pub mod poll;
 pub mod source_import;
+pub mod transfer;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};

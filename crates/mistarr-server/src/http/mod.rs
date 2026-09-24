@@ -2,6 +2,7 @@
 
 pub mod catalog;
 mod dats;
+mod downloads;
 mod events;
 mod platforms;
 mod sources;
@@ -37,6 +38,7 @@ pub fn router(app: Arc<AppState>) -> Router {
         .merge(platforms::routes())
         .merge(catalog::routes())
         .merge(dats::routes())
+        .merge(downloads::routes())
         .merge(stubs::routes())
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
