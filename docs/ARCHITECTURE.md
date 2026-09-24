@@ -437,7 +437,10 @@ the clone groups its writes touched in `title_groups` (DATA-MODEL.md
 per group; a page and its total cost about as much as reading the page, and
 the refresh adds a few hundred milliseconds on the host to a 15 000-game DAT
 load. Search probes the `title_search` trigram index for three or more
-characters and confirms with `LIKE`.
+characters and confirms with `LIKE`. A common short term costs time in
+proportion to its matches across every platform; if measurements on the
+board ever call for it, the next step is a sentinel-wrapped platform column
+in `title_search` queried with an FTS column filter.
 
 ## Configuration
 
