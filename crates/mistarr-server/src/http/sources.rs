@@ -32,6 +32,7 @@ const PLACE_ATTEMPTS: u32 = 100;
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/sources", get(list))
+        .route("/sources/incoming", get(incoming))
         .route(
             "/sources/upload",
             post(upload).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)),
@@ -48,6 +49,17 @@ async fn list(
     let (limit, offset) = paging.resolve();
     let (items, total) = app.db.read(move |c| rows::list(c, limit, offset)).await?;
     Ok(Json(Page { items, total }))
+}
+
+/// `GET /sources/incoming`: files in `sources/` not loaded yet, and rejected ones.
+async fn incoming(
+    State(app): State<Arc<AppState>>,
+    paging: Result<Query<Paging>, QueryRejection>,
+) -> Result<Json<Page<crate::incoming::IncomingFile>>, ApiError> {
+    let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    let dir = app.config().paths.sources();
+    let all = crate::incoming::list(&app, &dir, crate::jobs::source_import::IMPORT_KIND).await?;
+    Ok(Json(Page::slice(all, &paging)))
 }
 
 fn source_id(id: Result<UrlPath<i64>, PathRejection>) -> Result<SourceId, ApiError> {

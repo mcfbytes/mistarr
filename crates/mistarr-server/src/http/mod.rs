@@ -169,6 +169,27 @@ pub struct Page<T> {
     pub total: u64,
 }
 
+impl<T> Page<T> {
+    /// The page of `all` that `paging` asks for.
+    ///
+    /// ```
+    /// use mistarr_server::http::{Page, Paging};
+    /// let p = Page::slice(vec![1, 2, 3], &Paging { limit: Some(1), offset: Some(1) });
+    /// assert_eq!((p.items, p.total), (vec![2], 3));
+    /// ```
+    #[must_use]
+    pub fn slice(all: Vec<T>, paging: &Paging) -> Self {
+        let (limit, offset) = paging.resolve();
+        let total = u64::try_from(all.len()).unwrap_or(u64::MAX);
+        let items = all
+            .into_iter()
+            .skip(usize::try_from(offset).unwrap_or(usize::MAX))
+            .take(usize::try_from(limit).unwrap_or(usize::MAX))
+            .collect();
+        Self { items, total }
+    }
+}
+
 async fn require_key(
     State(key): State<Option<String>>,
     headers: HeaderMap,

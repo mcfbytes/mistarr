@@ -183,3 +183,45 @@ async fn a_restart_takes_over_held_jobs_instead_of_adding_more() {
     assert_eq!(status["waiting"][0]["id"], first, "the same row, re-queued");
     again.running.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn incoming_files_show_why_they_are_not_loaded() {
+    let booted = boot_with_core(tempfile::tempdir().expect("tempdir")).await;
+    let mut events = booted.running.app.events.subscribe(None).live;
+    let data = booted.dir.path().join("data");
+    drop_file(&data.join("dats"), "notes.txt", b"synthetic");
+    wait_event(&mut events, EventKind::DatRejected, "notes.txt").await;
+    drop_file(&data.join("sources"), "broken.torrent", b"not bencode");
+    wait_event(&mut events, EventKind::JobProgress, "rejected").await;
+
+    let dats = json_of(&booted, "/api/v1/dats/incoming").await;
+    assert_eq!(dats["total"], 1, "{dats}");
+    let item = &dats["items"][0];
+    assert_eq!(item["file"], "notes.txt");
+    assert_eq!(item["state"], "rejected");
+    assert!(
+        item["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("not a DAT")),
+        "{item}"
+    );
+    let sources = json_of(&booted, "/api/v1/sources/incoming").await;
+    let item = &sources["items"][0];
+    assert_eq!(item["state"], "rejected", "{sources}");
+    assert!(
+        item["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains(".torrent")),
+        "{item}"
+    );
+
+    std::fs::write(data.join("dats/pending.dat"), b"<datafile>").expect("write");
+    let dats = json_of(&booted, "/api/v1/dats/incoming?limit=1").await;
+    assert_eq!(dats["total"], 2);
+    assert_eq!(dats["items"][0]["file"], "pending.dat");
+    assert!(matches!(
+        dats["items"][0]["state"].as_str(),
+        Some("waiting" | "importing")
+    ));
+    booted.running.shutdown().await.expect("shutdown");
+}

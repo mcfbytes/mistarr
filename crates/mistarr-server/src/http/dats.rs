@@ -16,6 +16,7 @@ use super::{ApiError, Page, Paging};
 use crate::app::AppState;
 use crate::db::dats::{self, DatVersionId, DatVersionRow};
 use crate::db::jobs::JobId;
+use crate::incoming::IncomingFile;
 use crate::jobs::dat_import::{unique_path, DatImport, Recompute};
 use crate::jobs::Scheduler;
 
@@ -25,6 +26,7 @@ const MAX_UPLOAD: usize = 512 * 1024 * 1024;
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/dats", get(list))
+        .route("/dats/incoming", get(incoming))
         .route(
             "/dats/upload",
             post(upload).layer(DefaultBodyLimit::max(MAX_UPLOAD)),
@@ -40,6 +42,17 @@ async fn list(
     let (limit, offset) = paging.resolve();
     let (items, total) = app.db.read(move |c| dats::list(c, limit, offset)).await?;
     Ok(Json(Page { items, total }))
+}
+
+/// `GET /dats/incoming`: files in `dats/` not loaded yet, and rejected ones.
+async fn incoming(
+    State(app): State<Arc<AppState>>,
+    paging: Result<Query<Paging>, QueryRejection>,
+) -> Result<Json<Page<IncomingFile>>, ApiError> {
+    let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    let dir = app.config().paths.dats();
+    let all = crate::incoming::list(&app, &dir, crate::jobs::dat_import::KIND).await?;
+    Ok(Json(Page::slice(all, &paging)))
 }
 
 /// The answer to an upload: where the file landed and the job importing it.

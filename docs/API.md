@@ -157,6 +157,7 @@ canonical path with no file on disk is removed.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/dats` | Loaded and unbound dat_versions. |
+| GET | `/dats/incoming` | Files in `dats/` not loaded yet, and rejected ones; see "Incoming files". |
 | POST | `/dats/upload` | multipart; same handling as dropping into `dats/`. |
 | DELETE | `/dats/{id}` | Retire; files keep their provenance. |
 
@@ -173,6 +174,7 @@ answers 204 and recomputes the platform's picks.
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/sources` | All sources with state, platform, counts, seed policy, client status. |
+| GET | `/sources/incoming` | Files in `sources/` not loaded yet, and rejected ones; see "Incoming files". |
 | POST | `/sources/upload` | multipart `.torrent` or a `{ magnet }` body; same handling as the watched dir. |
 | PUT | `/sources/{id}` | `{ platform_id?, seed_policy?, state? }` to bind, rebind, disable. |
 | DELETE | `/sources/{id}` | Remove from mistarr and, if present, the client. Never deletes placed files. |
@@ -207,6 +209,21 @@ importing is a 400; its other downloads are kept with `source_id` `null`.
 `/sources/{id}/files` items: `{ file_index, path, size, rom_id, rom_name,
 title_id, confidence }`, where `path` is inside the torrent and `confidence`
 is `"name"`, `"size"` or `null` when no rom matched.
+
+## Incoming files
+
+`/dats/incoming` and `/sources/incoming` list the files in the watched
+directory that have not loaded, by name, then those in its `rejected/`
+directory, newest first. Items are `{ file, size, state, reason, job_id,
+progress, modified }`. `state` is `waiting` (not picked up yet, or its job
+is queued), `importing` (its job is running) or `rejected`. `reason` says
+why a file waits ("Waiting for the file to stop changing.", "Queued behind
+a.dat.", or the hold reason of a job paused for a core) or why it was
+rejected, from its `.reason.txt`. `job_id` and `progress` are the open
+`dat_import` or `source_import` job's. A loaded file leaves this list and
+appears in `/dats` or `/sources`. The SPA re-reads the list on
+`job.progress` for those kinds, `dat.loaded`, `dat.rejected` and
+`source.changed`.
 
 ## Downloads
 
