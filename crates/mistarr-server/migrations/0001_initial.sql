@@ -1,13 +1,3 @@
-# Data model
-
-SQLite, WAL mode, one writer. Migrations are numbered SQL files in
-`crates/mistarr-server/migrations/` applied at startup. All timestamps are
-Unix seconds. All hashes are stored as lowercase hex text so they can be
-compared with DAT values without conversion.
-
-## Tables
-
-```sql
 CREATE TABLE platforms (
   id            TEXT PRIMARY KEY,      -- stable slug, e.g. 'nes', 'megadrive', 'psx'
   name          TEXT NOT NULL,         -- display name
@@ -132,53 +122,7 @@ CREATE TABLE jobs (
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
 );
-```
 
-## State machines
-
-### downloads.state
-
-```
-wanted ──▶ queued ──▶ transferring ──▶ checking ──▶ importing ──▶ done
-   │          │             │             │            │
-   │          │             ▼             ▼            ▼
-   │          └────────▶ failed ◀────────┘         bad (hash mismatch, quarantined)
-   ▼
-cancelled
-```
-
-- `wanted`: title marked, no torrent_file chosen yet (no bound source has it).
-- `queued`: torrent_file chosen, not yet told to the client or client paused by
-  the core gate.
-- `transferring`: client reports progress below 100 percent.
-- `checking`: client reports 100 percent, waiting for the client's own hash
-  check to confirm.
-- `importing`: mistarr is hashing and placing the file.
-- `done`, `bad`, `failed`, `cancelled`: terminal. `failed` may be retried,
-  which returns it to `queued`; `bad` never retries the same torrent_file.
-
-### files.state
-
-- `pending`: seen, not yet hashed.
-- `verified`: hash matches a rom and the filename is what the adapter expects.
-- `misnamed`: hash matches a rom, name differs. The UI offers rename.
-- `unverified`: no rom matches in any loaded DAT.
-- `bad`: matches a rom flagged `baddump`.
-
-### sources.state
-
-- `resolving`: magnet added to the client, metadata not yet available.
-- `unbound`: file list known, no platform reached the binding threshold.
-- `bound`: attached to a platform, torrent_files populated.
-- `disabled`: user turned it off; existing downloads finish, nothing new is
-  chosen from it.
-
-## Derived views
-
-The browse screen needs one row per clone group with have/wanted counts. Keep
-this as a SQL view so both the API and tests use the same definition:
-
-```sql
 CREATE VIEW title_groups AS
 SELECT p.id AS parent_id, p.platform_id, p.base_name,
        COUNT(t.id) AS variants,
@@ -191,4 +135,4 @@ LEFT JOIN roms r ON r.title_id = t.id
 LEFT JOIN files f ON f.rom_id = r.id
 WHERE p.parent_id = p.id
 GROUP BY p.id;
-```
+
