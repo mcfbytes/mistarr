@@ -58,15 +58,17 @@ the URL, and offers to enable start-at-boot by appending a line to
 and the image may additionally ship an init service; either way the script is
 the documented path so both images behave the same for users.
 
-Logs go to `/media/fat/mistarr/mistarr.log` with size-based rotation at
-2 MiB, two generations. No syslog dependency.
+Logs go to `/media/fat/mistarr/mistarr.log` and stderr. The file rotates at
+2 MiB and keeps two generations, `mistarr.log.1` and `mistarr.log.2`. `RUST_LOG`
+sets the level, `info` by default. No syslog dependency.
 
 ## Runtime checks on the board
 
 `mistarr doctor` prints: binary is static, paths writable, free space,
 detected client and its version, installed cores, CORENAME, memory available,
-and the result of hashing 64 MiB of zeros for throughput. This is what a bug
-report should include.
+and the result of hashing 64 MiB of zeros for throughput (`--hash-mib N`
+changes the size). It reads the same config as the server and needs no running
+server. This is what a bug report should include.
 
 ## Releases
 
