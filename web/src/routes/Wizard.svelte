@@ -6,7 +6,7 @@
   import { getPlatforms, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { getDats, loadDats } from '../lib/stores/dats.svelte';
   import { getStatus, getWizard, loadStatus, loadWizard } from '../lib/stores/status.svelte';
-  import { fixtureDats, fixtureSettings } from '../lib/fixtures';
+  import { fixtureCores, fixtureDats, fixtureSettings } from '../lib/fixtures';
   import type { Settings } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -18,6 +18,10 @@
   let sourceFileInput = $state<HTMLInputElement>();
   let sourceMagnet = $state('');
   let settings = $state<Settings | null>(null);
+  // `null` until a fresh POST /system/cores answer replaces the boot-time result.
+  let coresResult = $state<string[] | null>(null);
+  let detectingCores = $state(false);
+  let coresChecked = false;
 
   onMount(() => {
     void loadPlatforms();
@@ -27,12 +31,42 @@
     void loadSettings();
   });
 
+  const platforms = $derived(getPlatforms());
+  const detectedCores = $derived(
+    coresResult ?? platforms.filter((p) => p.core_present).map((p) => p.id)
+  );
+
+  $effect(() => {
+    if (step === 0 && !coresChecked) {
+      coresChecked = true;
+      // Only auto-run when boot detection (already reflected in `platforms`) found nothing.
+      if (!platforms.some((p) => p.core_present)) {
+        void runCoreDetection();
+      }
+    }
+  });
+
+  async function runCoreDetection(): Promise<void> {
+    if (isMock) {
+      coresResult = fixtureCores.platforms;
+      return;
+    }
+    detectingCores = true;
+    try {
+      const result = await api.cores();
+      coresResult = result.platforms;
+      await loadPlatforms();
+    } catch (err) {
+      showToast(errorMessage(err));
+    } finally {
+      detectingCores = false;
+    }
+  }
+
   async function loadSettings(): Promise<void> {
     settings = isMock ? fixtureSettings : await api.settings();
   }
 
-  const platforms = $derived(getPlatforms());
-  const detectedCores = $derived(platforms.filter((p) => p.core_present));
   const dats = $derived(isMock ? fixtureDats : getDats());
   const status = $derived(getStatus());
   const wizard = $derived(getWizard());
@@ -51,6 +85,10 @@
 
   function finish(): void {
     navigate('/');
+  }
+
+  function platformName(id: string): string {
+    return platforms.find((p) => p.id === id)?.name ?? id;
   }
 
   async function uploadDat(): Promise<void> {
@@ -128,9 +166,12 @@
       <p>Root directory: <code>/media/fat</code></p>
       <p>Games directory: <code>/media/fat/games</code></p>
       <p class="muted">Detected cores:</p>
+      <button type="button" onclick={runCoreDetection} disabled={detectingCores}>
+        {detectingCores ? 'Detecting…' : 'Re-detect'}
+      </button>
       <ul>
-        {#each detectedCores as p (p.id)}
-          <li>{p.name}</li>
+        {#each detectedCores as id (id)}
+          <li>{platformName(id)}</li>
         {:else}
           <li class="muted">None detected yet.</li>
         {/each}

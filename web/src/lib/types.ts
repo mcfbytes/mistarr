@@ -32,6 +32,11 @@ export interface WizardStatus {
   open_on_start: boolean;
 }
 
+export interface CoresResult {
+  platforms: string[];
+  arcade_job_id: number | null;
+}
+
 export type PlatformKind = 'cartridge' | 'disc' | 'computer' | 'romset' | 'arcade' | 'other';
 
 export interface PlatformCounts {

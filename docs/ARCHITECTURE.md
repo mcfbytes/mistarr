@@ -132,9 +132,14 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 
 ### Library scan
 
-1. Triggered by the wizard, manually, or on a schedule. Walk each platform's
+1. Triggered manually, on the `[jobs] scan_interval_minutes` schedule,
+   automatically for a platform once its DAT finishes loading if that
+   platform's games directory already exists (deduped per platform, so a
+   zipped pack of several DATs queues one scan each), or once, full, the
+   first time every wizard step reports done. Walk each platform's
    `games/<Core>` directory and its other accepted directories (`games/hbmame`
-   for arcade). Skip while a core is running.
+   for arcade). Skip while a core is running; the timer goes through the same
+   heavy lane as the others, so it waits for the gate too.
 2. For each file, compare size and mtime with `files`. Unchanged files are
    skipped. New or changed files are hashed in one streaming pass with the
    platform's header rule. Zip members are hashed through the decompressor,
@@ -314,7 +319,7 @@ hide = ["bios", "beta", "proto", "demo", "sample", "program"]
 bind_threshold = 0.6        # lowest per-platform hit rate, 0 to 1, that binds a source
 
 [jobs]
-scan_interval_minutes = 0   # 0 = manual only; otherwise a full scan is enqueued on this timer
+scan_interval_minutes = 1440   # a daily rescan by default, 0 disables it
 ```
 
 The file is `--config FILE` if given, else `<data>/mistarr.toml` when it

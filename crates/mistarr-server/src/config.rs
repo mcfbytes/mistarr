@@ -50,11 +50,20 @@ impl Default for SourcesConfig {
 }
 
 /// `[jobs]`: scheduled background work.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct JobsConfig {
     /// How often a full library scan is enqueued; 0 means manual only.
     pub scan_interval_minutes: u32,
+}
+
+impl Default for JobsConfig {
+    /// A daily rescan by default, 0 disables it.
+    fn default() -> Self {
+        Self {
+            scan_interval_minutes: 1440,
+        }
+    }
 }
 
 /// `[server]`: where to listen and whether to require an API key.
@@ -390,6 +399,15 @@ mod tests {
         assert_eq!(c.client.kind, ClientChoice::Auto);
         assert_eq!(c.prefs.regions[0], "USA");
         assert!(c.prefs.prefer_latest_revision);
+        assert_eq!(c.jobs.scan_interval_minutes, 1440);
+    }
+
+    #[test]
+    fn jobs_interval_is_configurable_and_zero_disables_it() {
+        let c = Config::parse("[jobs]\nscan_interval_minutes = 0").expect("parse");
+        assert_eq!(c.jobs.scan_interval_minutes, 0);
+        let c = Config::parse("[jobs]\nscan_interval_minutes = 60").expect("parse");
+        assert_eq!(c.jobs.scan_interval_minutes, 60);
     }
 
     #[test]

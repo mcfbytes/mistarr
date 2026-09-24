@@ -17,7 +17,7 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use tokio::sync::watch;
 
-use super::{Job, JobContext, Lane, Scheduler};
+use super::{scan, wizard, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
 use crate::config::PrefsConfig;
 use crate::db::dats::{self, DatVersionId, NewVersion};
@@ -230,6 +230,7 @@ impl Job for DatImport {
             );
             publish_loaded(&ctx.app, l, &file);
         }
+        enqueue_follow_up_work(&ctx.app, &loaded).await;
         Ok(())
     }
 }
@@ -254,6 +255,7 @@ impl DatImport {
             match outcome {
                 Outcome::Loaded(l) => {
                     publish_loaded(&ctx.app, &l, file);
+                    enqueue_follow_up_work(&ctx.app, std::slice::from_ref(&l)).await;
                     return Ok(());
                 }
                 Outcome::Rejected(r) => reasons.push(r),
@@ -500,6 +502,27 @@ fn store_game(
         .collect();
     titles::upsert_title(conn, platform, version, dat_name, &title, &roms)?;
     Ok(())
+}
+
+/// Queues an automatic scan for each platform a DAT just loaded titles for,
+/// deduped so several DATs in one pack queue at most one each, then checks
+/// whether the wizard just became complete.
+async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
+    let mut queued = HashSet::new();
+    for l in loaded {
+        let Some(platform) = &l.platform else {
+            continue;
+        };
+        if !queued.insert(platform.clone()) {
+            continue;
+        }
+        if let Err(e) = scan::enqueue_if_games_dir_exists(app, platform).await {
+            tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue automatic scan");
+        }
+    }
+    if let Err(e) = wizard::on_change(app).await {
+        tracing::warn!(error = %e, "cannot check wizard completion");
+    }
 }
 
 fn publish_loaded(app: &AppState, l: &Loaded, file: &str) {

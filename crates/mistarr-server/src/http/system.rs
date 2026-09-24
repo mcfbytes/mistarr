@@ -15,14 +15,12 @@ use crate::app::AppState;
 use crate::config::{RuntimeSettings, SettingsPatch};
 use crate::db::jobs::{self, JobId, JobRow};
 use crate::db::platforms;
-use crate::db::settings::{self, keys};
-use crate::db::system::wizard_counts;
 use crate::jobs::dat_import::Recompute;
 use crate::jobs::detect_client::DetectClient;
 use crate::jobs::gate::Override;
 use crate::jobs::scan::ScanJob;
 use crate::jobs::Scheduler;
-use crate::status::{snapshot, Status};
+use crate::status::{snapshot, wizard_status, Status};
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -143,20 +141,13 @@ struct Wizard {
 }
 
 async fn wizard(State(app): State<Arc<AppState>>) -> Result<Json<Wizard>, ApiError> {
-    let counts = app.db.read(wizard_counts).await?;
-    let client = app
-        .db
-        .read(|c| {
-            settings::get_json::<crate::jobs::detect_client::ClientStatus>(c, keys::CLIENT_DETECTED)
-        })
-        .await?;
-    let dats = counts.dat_versions > 0;
+    let w = wizard_status(&app).await?;
     Ok(Json(Wizard {
-        paths: app.config().paths.games.is_dir(),
-        dats,
-        client: client.is_some_and(|c| c.kind.is_some()),
-        sources: counts.sources > 0,
-        open_on_start: !dats,
+        paths: w.paths,
+        dats: w.dats,
+        client: w.client,
+        sources: w.sources,
+        open_on_start: !w.dats,
     }))
 }
 
