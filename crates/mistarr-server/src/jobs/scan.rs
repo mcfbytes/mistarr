@@ -271,14 +271,11 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         .collect();
     let mut keep: Vec<String> = existing
         .into_iter()
-        .filter(|p| {
-            done_set
-                .iter()
-                .any(|d| p == d || p.starts_with(&format!("{d}/")))
-        })
+        .filter(|p| in_done_unit(p, &done_set))
         .collect();
 
-    let mut throttle = Throttle::new();
+    let mut sink = Sink::new(ctx, &pid);
+    let mut saved = Instant::now();
     let total = units.len();
     let remaining: Vec<Unit> = units
         .into_iter()
@@ -286,29 +283,22 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         .collect();
     for unit in remaining {
         ctx.checkpoint().await?;
-        let (rows, unit_seen) = if platform.kind == Kind::Disc {
-            scan_disc_unit(ctx, &pid, &unit.id, &unit.path).await?
+        let unit_seen = if platform.kind == Kind::Disc {
+            let (rows, seen) = scan_disc_unit(ctx, &pid, &unit.id, &unit.path).await?;
+            sink.rows.extend(rows);
+            seen
         } else {
-            scan_flat_unit(ctx, platform, &pid, &unit.id, &unit.path).await?
+            scan_flat_unit(&mut sink, platform, &unit.id, &unit.path).await?
         };
         keep.extend(unit_seen);
         done_set.insert(unit.id.clone());
-        let done_vec: Vec<String> = done_set.iter().cloned().collect();
-        let now = crate::unix_now();
-        let (pid2, rows2, done_vec2) = (pid.clone(), rows, done_vec);
-        let written = ctx
-            .app
-            .db
-            .write(move |c| commit_unit(c, &pid2, rows2, &done_vec2, now))
-            .await?;
-        for (_, id, state) in &written {
-            if throttle.allow() {
-                ctx.app.events.publish(
-                    EventKind::FileChanged,
-                    &json!({ "file_id": id.0, "state": state.as_str() }),
-                );
-            }
+        // Progress is a resume hint: an unsaved unit is walked again and its files skip hashing.
+        let save = saved.elapsed() >= PROGRESS_EVERY;
+        if save {
+            saved = Instant::now();
         }
+        let done_dirs = save.then(|| done_set.iter().cloned().collect::<Vec<_>>());
+        sink.flush(done_dirs).await?;
         ctx.progress(json!({
             "platform_id": pid.0,
             "dir": unit.id,
@@ -354,14 +344,79 @@ fn accepts_extension(platform: &Platform, ext: &str) -> bool {
 /// A written file's identity, for the caller's `file.changed` events.
 type Written = Vec<(String, FileId, FileState)>;
 
-/// Writes one unit's already-hashed rows and its scan progress in one short
-/// transaction, so an interruption never leaves a directory half committed
-/// and the single writer connection is never held for the hashing itself.
+/// Hashed rows written at a time, so a large directory never holds all its rows at once.
+const FLUSH_ROWS: usize = 256;
+
+/// Least time between two saves of the resume point.
+const PROGRESS_EVERY: Duration = Duration::from_secs(2);
+
+/// Whether `rel_path` lies in one of the `done` units, whose ids are its leading components.
+fn in_done_unit(rel_path: &str, done: &std::collections::HashSet<String>) -> bool {
+    done.contains(rel_path)
+        || rel_path
+            .match_indices('/')
+            .any(|(at, _)| done.contains(&rel_path[..at]))
+}
+
+/// Hashed rows waiting to be written, and the `file.changed` throttle.
+struct Sink<'a> {
+    ctx: &'a JobContext,
+    platform_id: PlatformId,
+    rows: Vec<NewFile>,
+    throttle: Throttle,
+}
+
+impl<'a> Sink<'a> {
+    fn new(ctx: &'a JobContext, platform_id: &PlatformId) -> Self {
+        Self {
+            ctx,
+            platform_id: platform_id.clone(),
+            rows: Vec::with_capacity(FLUSH_ROWS),
+            throttle: Throttle::new(),
+        }
+    }
+
+    /// Adds a row, writing the batch once it holds [`FLUSH_ROWS`].
+    async fn push(&mut self, row: NewFile) -> Result<()> {
+        self.rows.push(row);
+        if self.rows.len() >= FLUSH_ROWS {
+            self.flush(None).await?;
+        }
+        Ok(())
+    }
+
+    /// Writes the waiting rows, with the resume point when given, and announces them.
+    async fn flush(&mut self, done_dirs: Option<Vec<String>>) -> Result<()> {
+        if self.rows.is_empty() && done_dirs.is_none() {
+            return Ok(());
+        }
+        let rows = std::mem::replace(&mut self.rows, Vec::with_capacity(FLUSH_ROWS));
+        let (pid, now) = (self.platform_id.clone(), crate::unix_now());
+        let written = self
+            .ctx
+            .app
+            .db
+            .write(move |c| commit_unit(c, &pid, rows, done_dirs.as_deref(), now))
+            .await?;
+        for (_, id, state) in &written {
+            if self.throttle.allow() {
+                self.ctx.app.events.publish(
+                    EventKind::FileChanged,
+                    &json!({ "file_id": id.0, "state": state.as_str() }),
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Writes already-hashed rows, and the scan's resume point when given, in one short
+/// transaction, so the single writer connection is never held for the hashing itself.
 fn commit_unit(
     conn: &mut Connection,
     platform_id: &PlatformId,
     rows: Vec<NewFile>,
-    done_dirs: &[String],
+    done_dirs: Option<&[String]>,
     now: i64,
 ) -> Result<Written> {
     let tx = conn.transaction()?;
@@ -386,7 +441,9 @@ fn commit_unit(
         )?;
         written.push((row.rel_path, id, row.state));
     }
-    files::save_scan_progress(&tx, platform_id, done_dirs, now)?;
+    if let Some(done_dirs) = done_dirs {
+        files::save_scan_progress(&tx, platform_id, done_dirs, now)?;
+    }
     tx.commit()?;
     Ok(written)
 }
@@ -435,22 +492,22 @@ fn unchanged(
     )
 }
 
-/// Walks one cartridge, romset or arcade directory. Hashing runs outside
-/// any database lock; only the read connection is touched, and briefly, one
-/// file at a time. The caller commits the returned rows in one transaction.
+/// Walks one cartridge, romset or arcade directory, handing each row to `sink`, and
+/// returns every path it saw. Hashing runs outside any database lock; only the read
+/// connection is touched, and briefly, one file at a time.
 async fn scan_flat_unit(
-    ctx: &JobContext,
+    sink: &mut Sink<'_>,
     platform: &'static Platform,
-    platform_id: &PlatformId,
     unit_id: &str,
     dir: &Path,
-) -> Result<(Vec<NewFile>, Vec<String>)> {
+) -> Result<Vec<String>> {
+    let (ctx, platform_id) = (sink.ctx, sink.platform_id.clone());
+    let platform_id = &platform_id;
     let dir_owned = dir.to_path_buf();
     let entries = tokio::task::spawn_blocking(move || list_files(&dir_owned))
         .await
         .map_err(|e| Error::Task(e.to_string()))?;
     let rule = header_rule(platform.header_rule);
-    let mut rows = Vec::new();
     let mut seen = Vec::new();
     for (path, name) in entries {
         ctx.checkpoint().await?;
@@ -466,21 +523,19 @@ async fn scan_flat_unit(
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "cannot read metadata; marking unverified");
                 seen.push(rel_path.clone());
-                rows.push(unverified_row(rel_path, 0, 0, None));
+                sink.push(unverified_row(rel_path, 0, 0, None)).await?;
                 continue;
             }
         };
         if ext == "zip" {
             // A zip container has no files row of its own; its members do.
             scan_zip_unit(
-                ctx,
-                platform_id,
+                sink,
                 rule,
                 platform.header_rule,
                 &rel_path,
                 &path,
                 mtime,
-                &mut rows,
                 &mut seen,
             )
             .await?;
@@ -528,9 +583,9 @@ async fn scan_flat_unit(
                 unverified_row(rel_path, size, mtime, None)
             }
         };
-        rows.push(row);
+        sink.push(row).await?;
     }
-    Ok((rows, seen))
+    Ok(seen)
 }
 
 /// An unmatched or unreadable file's row: no hash was trusted enough to
@@ -549,18 +604,17 @@ fn unverified_row(rel_path: String, size: i64, mtime: i64, crc32: Option<String>
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn scan_zip_unit(
-    ctx: &JobContext,
-    platform_id: &PlatformId,
+    sink: &mut Sink<'_>,
     rule: HeaderRule,
     rule_name: &str,
     rel_path: &str,
     path: &Path,
     mtime: i64,
-    rows: &mut Vec<NewFile>,
     seen: &mut Vec<String>,
 ) -> Result<()> {
+    let (ctx, platform_id) = (sink.ctx, sink.platform_id.clone());
+    let platform_id = &platform_id;
     let path_owned = path.to_path_buf();
     let listed: std::result::Result<Vec<ZipMember>, HashError> =
         tokio::task::spawn_blocking(move || zip_members(File::open(&path_owned)?))
@@ -571,7 +625,8 @@ async fn scan_zip_unit(
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "cannot read zip; marking unverified");
             seen.push(rel_path.to_owned());
-            rows.push(unverified_row(rel_path.to_owned(), 0, mtime, None));
+            sink.push(unverified_row(rel_path.to_owned(), 0, mtime, None))
+                .await?;
             return Ok(());
         }
     };
@@ -609,12 +664,8 @@ async fn scan_zip_unit(
         };
 
         if !candidate {
-            rows.push(unverified_row(
-                member_rel,
-                member_size,
-                mtime,
-                Some(member.crc32.clone()),
-            ));
+            let row = unverified_row(member_rel, member_size, mtime, Some(member.crc32.clone()));
+            sink.push(row).await?;
             continue;
         }
 
@@ -625,7 +676,7 @@ async fn scan_zip_unit(
         })
         .await
         .map_err(|e| Error::Task(e.to_string()))?;
-        match hash_result {
+        let row = match hash_result {
             Ok(hashes) => {
                 let (pid2, basename2, hashes2) = (platform_id.clone(), basename, hashes.clone());
                 let (rom_id, state) = ctx
@@ -633,7 +684,7 @@ async fn scan_zip_unit(
                     .db
                     .read(move |c| classify(c, &pid2, &basename2, &hashes2))
                     .await?;
-                rows.push(NewFile {
+                NewFile {
                     rel_path: member_rel,
                     size: member_size,
                     mtime,
@@ -643,18 +694,14 @@ async fn scan_zip_unit(
                     header_rule: Some(rule_name.to_owned()),
                     rom_id,
                     state,
-                });
+                }
             }
             Err(e) => {
                 tracing::warn!(member = %member.name, error = %e, "cannot hash zip member; marking unverified");
-                rows.push(unverified_row(
-                    member_rel,
-                    member_size,
-                    mtime,
-                    Some(member.crc32.clone()),
-                ));
+                unverified_row(member_rel, member_size, mtime, Some(member.crc32.clone()))
             }
-        }
+        };
+        sink.push(row).await?;
     }
     Ok(())
 }
@@ -873,6 +920,18 @@ mod tests {
     use super::*;
     use crate::app::testutil::state;
     use crate::db::jobs as job_rows;
+
+    #[test]
+    fn done_units_cover_their_files_and_zip_members() {
+        let done: std::collections::HashSet<String> =
+            ["GBA".to_owned(), "PSX/Example Disc (USA)".to_owned()].into();
+        assert!(in_done_unit("GBA/a.gba", &done));
+        assert!(in_done_unit("GBA/a.zip#a.gba", &done));
+        assert!(in_done_unit("PSX/Example Disc (USA)/t.bin", &done));
+        assert!(in_done_unit("GBA", &done));
+        assert!(!in_done_unit("PSX/Other (USA)/t.bin", &done));
+        assert!(!in_done_unit("GBAX/a.gba", &done));
+    }
 
     #[tokio::test]
     async fn scan_is_queued_only_when_the_games_dir_exists() {

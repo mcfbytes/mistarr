@@ -148,7 +148,10 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    members that cannot match anything.
 3. Match by SHA1, then MD5, then CRC32 plus size. Record `verified`,
    `unverified` (no DAT match) or `misnamed` (match but wrong filename).
-4. Scans are resumable: progress is committed per directory.
+4. Scans are resumable: hashed rows are written 256 at a time and the
+   finished directories at most every 2 s. A directory not yet recorded as
+   finished is walked again after a restart, and its unchanged files are not
+   hashed again.
 
 ### Arcade catalogue
 
