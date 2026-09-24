@@ -11,15 +11,17 @@ permissions:
   contents: write
 jobs:
   release:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
       # Installs the pinned toolchain, components and targets from rust-toolchain.toml.
       - run: rustup toolchain install
-      - uses: goto-bus-stop/setup-zig@v2
-      - run: cargo install cargo-zigbuild
+      # Zig is the C cross-compiler and linker cargo-zigbuild drives for the bundled C code.
+      - uses: mlugg/setup-zig@v2
+        with: { version: 0.15.2 }
+      - run: cargo install --locked cargo-zigbuild@0.23.4
       - uses: actions/setup-node@v7
-        with: { node-version: "22", cache: "npm", cache-dependency-path: web/package-lock.json }
+        with: { node-version: "24", cache: "npm", cache-dependency-path: web/package-lock.json }
       - working-directory: web
         run: npm ci && npm run build
       - run: rustup target add armv7-unknown-linux-musleabihf
