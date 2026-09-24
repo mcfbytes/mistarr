@@ -70,6 +70,9 @@ code. Guidance:
 | WP-20 | Principles gate in CI | Haiku | none | The grep gate from TESTING.md, with the deny list in CI config only. |
 | WP-21 | Sample set | Sonnet | 14 | The `mistarr-samples` repository holds open-licensed entries with DATs, torrents and licence evidence; every entry documented per its README rules. |
 | WP-22 | Install script and release trigger | Sonnet | 17 | `install.sh` installs or upgrades on the board from a GitHub release with checksum verification and rollback; the release workflow runs from a release created in the web UI or a pushed tag. |
+| WP-23 | Show-hidden browse semantics | Sonnet | 10, 15 | `hidden=show` disables the hide list independently of `flags`; the Browse screen has a Show hidden checkbox and a require-flags selector. |
+| WP-24 | Import wanted MRA zips | Opus | 14, 19 | A wanted arcade zip is placed whole and verified by MRA md5 assembly, by MAME DAT members, or recorded unverified; multi-zip MRAs complete in any order. |
+| WP-25 | Scan automation and wizard cores | Sonnet | 11, 19 | Scans run after a DAT loads for a platform with a games directory, once when the wizard completes, and daily by default; the wizard's cores step calls `POST /system/cores`. |
 
 ## Suggested fan-out
 
