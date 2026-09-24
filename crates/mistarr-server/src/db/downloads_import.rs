@@ -75,6 +75,23 @@ pub fn done_on_file(
         .optional()?)
 }
 
+/// Whether a download of `source` placed its file: one `done`, or one `bad`
+/// whose file was placed as another version of its entry.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn placed_any(conn: &Connection, source: SourceId) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM downloads d WHERE d.source_id = ?1
+           AND (d.state = 'done' OR (d.state = 'bad' AND EXISTS (
+                 SELECT 1 FROM import_log l WHERE l.download_id = d.id
+                   AND l.action IN ('placed', 'replaced', 'skipped_existing')))))",
+        [source.0],
+        |r| r.get(0),
+    )?)
+}
+
 /// Inserts a download row in `state` directly, standing in for the transfer
 /// poller in tests.
 ///
@@ -102,6 +119,7 @@ pub fn insert_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::imports::ImportAction;
     use crate::db::sources::{self, NewSource, SourceState};
 
     #[test]
@@ -145,5 +163,45 @@ mod tests {
             Some("Set/a.nes")
         );
         assert!(torrent_path(&c, src, 1).expect("path").is_none());
+
+        let alt = sources::fixtures::seed_rom(&c, "nes", "Example Quest (USA) (Alt).nes", 10, "[]")
+            .expect("rom");
+        let other =
+            sources::fixtures::seed_rom(&c, "nes", "Other Tale (USA).nes", 10, "[]").expect("rom");
+        let title_of = |rom: i64| {
+            c.query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
+                r.get(0).map(TitleId)
+            })
+            .expect("title")
+        };
+        let (main, alt_title) = (TitleId(title), title_of(alt));
+        c.execute(
+            "UPDATE titles SET parent_id = ?1 WHERE id IN (?1, ?2)",
+            [main.0, alt_title.0],
+        )
+        .expect("group");
+        assert!(other_version_of(&c, main, alt_title).expect("group"));
+        assert!(other_version_of(&c, alt_title, main).expect("group"));
+        assert!(!other_version_of(&c, main, main).expect("self"));
+        assert!(!other_version_of(&c, main, title_of(other)).expect("other group"));
+        c.execute("UPDATE titles SET retired = 1 WHERE id = ?1", [alt_title.0])
+            .expect("retire");
+        assert!(!other_version_of(&c, main, alt_title).expect("retired"));
+
+        assert!(!placed_any(&c, src).expect("placed"));
+        let bad = insert_fixture(&c, rom, src, 0, "bad", None).expect("bad");
+        assert!(!placed_any(&c, src).expect("quarantined only"));
+        let detail = serde_json::json!({});
+        crate::db::imports::log(&c, 1, Some(bad.0), None, ImportAction::Placed, &detail)
+            .expect("log");
+        assert!(placed_any(&c, src).expect("placed as another version"));
+        assert_eq!(done_on_file(&c, src, 0, rom).expect("done"), None);
+        insert_fixture(&c, alt, src, 0, "done", None).expect("done");
+        assert_eq!(
+            done_on_file(&c, src, 0, rom).expect("done"),
+            Some(alt_title)
+        );
+        assert_eq!(done_on_file(&c, src, 0, alt).expect("own rom"), None);
+        assert_eq!(done_on_file(&c, src, 1, rom).expect("other file"), None);
     }
 }

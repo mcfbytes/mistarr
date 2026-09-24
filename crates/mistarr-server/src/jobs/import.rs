@@ -1146,8 +1146,8 @@ impl Placing<'_> {
     }
 
     /// Removes the torrent from the client, keeping its data, once a source
-    /// has a `done` download and none still selected and its seed policy is
-    /// `none`, then clears empty staging directories.
+    /// has a download that placed its file and none still selected and its
+    /// seed policy is `none`, then clears empty staging directories.
     async fn release_torrent(&self) {
         let app = self.app();
         let source_id = self.source.id;
@@ -1164,11 +1164,8 @@ impl Placing<'_> {
                         DownloadState::Importing,
                     ],
                 )?;
-                let done = downloads::of_source(c, source_id, &[DownloadState::Done])?;
-                Ok((
-                    busy.is_empty() && !done.is_empty(),
-                    sources::get(c, source_id)?,
-                ))
+                let placed = downloads_import::placed_any(c, source_id)?;
+                Ok((busy.is_empty() && placed, sources::get(c, source_id)?))
             })
             .await;
         let (settled, source) = match fresh {
