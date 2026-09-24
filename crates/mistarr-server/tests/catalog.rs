@@ -355,8 +355,15 @@ async fn a_dropped_pack_loads_and_the_catalog_answers() {
         "{}",
     )
     .await;
-    assert_eq!(r.status, 501);
-    assert_eq!(r.json()["error"]["code"], "not_implemented");
+    assert_eq!(r.status, 400, "rename needs a file_id");
+    let r = send(
+        addr,
+        "POST",
+        &format!("/api/v1/titles/{parent}/rename"),
+        r#"{"file_id":999}"#,
+    )
+    .await;
+    assert_eq!(r.status, 404);
 
     // Platform switches.
     let r = send(addr, "PUT", "/api/v1/platforms/gb", r#"{"enabled":false}"#).await;

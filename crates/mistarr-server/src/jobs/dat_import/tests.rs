@@ -57,6 +57,19 @@ fn count(c: &Connection, sql: &str) -> i64 {
 }
 
 #[test]
+fn rom_header_attributes_are_stored() {
+    let mut c = conn();
+    let xml = "<datafile><header><name>Maker - Nintendo Entertainment System</name></header>\
+        <game name=\"Example Quest (USA)\"><rom name=\"a.nes\" size=\"4\" crc=\"0a0b0c0d\" \
+        header=\"4E 45 53 1A\"/></game></datafile>";
+    loaded(import(&mut c, xml, &request(false, None)));
+    let header: Option<String> = c
+        .query_row("SELECT header FROM roms", [], |r| r.get(0))
+        .expect("header");
+    assert_eq!(header.as_deref(), Some("4E 45 53 1A"));
+}
+
+#[test]
 fn prefs_map_known_hide_flags() {
     let cfg = PrefsConfig {
         hide: vec!["bios".into(), "unl".into()],

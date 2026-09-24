@@ -495,6 +495,7 @@ fn store_game(
             md5: r.md5.as_deref(),
             sha1: r.sha1.as_deref(),
             status: r.status.as_str(),
+            header: r.header.as_deref(),
         })
         .collect();
     titles::upsert_title(conn, platform, version, dat_name, &title, &roms)?;

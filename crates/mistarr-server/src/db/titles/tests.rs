@@ -57,6 +57,7 @@ fn add(
             md5: None,
             sha1: None,
             status,
+            header: None,
         })
         .collect();
     upsert_title(c, "gb", v, DAT, &t, &roms).expect("upsert")

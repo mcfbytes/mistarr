@@ -293,6 +293,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     tasks.push(tokio::spawn(crate::jobs::dat_import::watch(Arc::clone(
         &app,
     ))));
+    tasks.push(tokio::spawn(crate::jobs::import::watch(Arc::clone(&app))));
 
     let listener = tokio::net::TcpListener::bind(app.config().server.listen.as_str()).await?;
     let addr = listener.local_addr()?;

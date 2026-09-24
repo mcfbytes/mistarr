@@ -363,7 +363,6 @@ async fn unimplemented_routes_answer_501_and_unknown_ones_404() {
         ("GET", "/api/v1/downloads"),
         ("POST", "/api/v1/downloads/1/retry"),
         ("DELETE", "/api/v1/downloads/1"),
-        ("GET", "/api/v1/imports"),
     ] {
         let r = request(addr, method, path, &[], Some("{}")).await;
         assert_eq!(r.status, 501, "{method} {path}");

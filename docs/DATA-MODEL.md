@@ -64,6 +64,7 @@ CREATE TABLE roms (                     -- one per <rom>; the file unit
   match_name    TEXT,                  -- normalised leaf name for pre-download matching, filled by binding
   match_base    TEXT,                  -- base name of match_name
   retired       INTEGER NOT NULL DEFAULT 0,       -- no longer listed by the title's DAT entry
+  header        TEXT,                  -- the DAT's header attribute, verbatim: hex bytes an adapter may prepend
   UNIQUE (title_id, name)
 );
 CREATE INDEX roms_sha1 ON roms(sha1);
@@ -134,7 +135,7 @@ CREATE TABLE import_log (
   at            INTEGER NOT NULL,
   download_id   INTEGER REFERENCES downloads(id),
   file_id       INTEGER REFERENCES files(id),
-  action        TEXT NOT NULL,         -- 'placed' | 'replaced' | 'quarantined' | 'skipped_existing'
+  action        TEXT NOT NULL,         -- 'placed' | 'replaced' | 'quarantined' | 'skipped_existing' | 'renamed'
   detail        TEXT NOT NULL          -- json
 );
 

@@ -84,7 +84,7 @@ unbound.
 | GET | `/titles/{id}` | The group: every variant with its roms, file states, available torrent_files, the 1G1R pick and its art URL. |
 | POST | `/titles/{id}/want` | Mark the 1G1R pick wanted, or a specific variant with `{ variant_id }`. |
 | DELETE | `/titles/{id}/want` | Unmark. Cancels a not-yet-started download. |
-| POST | `/titles/{id}/rename` | Apply the canonical name to a `misnamed` file. |
+| POST | `/titles/{id}/rename` | Apply the canonical name to a `misnamed` file, `{ file_id }`. |
 
 Browse filters: `q` is a case-insensitive substring of the base name; `have`
 and `wanted` take `yes`, `no` or `any` (also `true` and `false`); `region`
@@ -105,6 +105,14 @@ file_state, file_path }` for its best file, verified first. `want` and
 `DELETE want` answer with the same body. `want` is a 400 when the variant is
 not in the group, is retired or is a BIOS entry, or when no variant is
 selectable and none was named.
+
+`rename` takes `{ file_id }` for a `misnamed` file of any variant of the
+group, asks the platform's adapter for the file's canonical path and renames
+it in place under `games/`, marking it `verified` and logging `renamed`. It
+answers with the group body. It is a 404 when the file is not in the group, a
+400 when the file is not `misnamed`, lives inside a zip, belongs to a BIOS
+entry or needs more than a rename to load (such as a missing header), and a
+409 `conflict` when another file already has the canonical path.
 
 ## DATs
 
@@ -170,6 +178,14 @@ is `"name"`, `"size"` or `null` when no rom matched.
 | DELETE | `/downloads/{id}` | Cancel. |
 | GET | `/imports` | import_log, newest first. |
 
+`/imports` items are `{ id, at, download_id, file_id, action, detail }`,
+newest first, where `action` is one of `docs/DATA-MODEL.md` "import_log" and
+`detail` is the action's JSON: `rel_path`, `title_id`, `rom_id`, the staged
+file name and zip `member` for a placement, plus `previous` `{ rel_path,
+state, rom_id, sha1 }` for `replaced`; `path`, `expected` (the rom) and
+`actual` (hashes per file or member) for `quarantined`; `from` and `rel_path`
+for `renamed`.
+
 ## Events
 
 `GET /api/v1/events` is a Server-Sent Events stream. Every event is
@@ -201,7 +217,7 @@ connection that falls further behind is closed and, on reconnecting, gets
 | `dat.loaded` / `dat.rejected` | `{ dat_version_id, file, platform_id }` / `{ file, reason }`; one per DAT in a pack, `file` as dropped |
 | `source.changed` | `{ source_id, state, platform_id? }` |
 | `download.changed` | `{ download_id, state, progress }` |
-| `import.done` | `{ title_id, file_id, action }` |
+| `import.done` | `{ title_id, file_id, action }`, one per file placed, kept or renamed; `action` as in `import_log` |
 | `file.changed` | `{ file_id, state }` during scans, throttled to 10 per second |
 
 ## Art URLs

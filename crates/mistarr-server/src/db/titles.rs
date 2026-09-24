@@ -60,6 +60,8 @@ pub struct RomInput<'a> {
     pub sha1: Option<&'a str>,
     /// `good`, `baddump`, `nodump` or `verified`.
     pub status: &'a str,
+    /// The DAT's `header` attribute, verbatim.
+    pub header: Option<&'a str>,
 }
 
 fn json(xs: &[String]) -> String {
@@ -157,14 +159,17 @@ pub fn upsert_title(
         id
     };
     let mut stmt = conn.prepare_cached(
-        "INSERT INTO roms (title_id, name, size, crc32, md5, sha1, status, retired)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)
+        "INSERT INTO roms (title_id, name, size, crc32, md5, sha1, status, header, retired)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)
          ON CONFLICT(title_id, name) DO UPDATE SET size = excluded.size, crc32 = excluded.crc32,
-           md5 = excluded.md5, sha1 = excluded.sha1, status = excluded.status, retired = 0",
+           md5 = excluded.md5, sha1 = excluded.sha1, status = excluded.status,
+           header = excluded.header, retired = 0",
     )?;
     for r in roms {
         let size = i64::try_from(r.size).unwrap_or(i64::MAX);
-        stmt.execute(params![id, r.name, size, r.crc32, r.md5, r.sha1, r.status])?;
+        stmt.execute(params![
+            id, r.name, size, r.crc32, r.md5, r.sha1, r.status, r.header
+        ])?;
     }
     Ok(TitleId(id))
 }

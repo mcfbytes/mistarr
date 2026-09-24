@@ -4,6 +4,7 @@ pub mod corename;
 pub mod dat_import;
 pub mod detect_client;
 pub mod gate;
+pub mod import;
 pub mod scan;
 pub mod source_import;
 

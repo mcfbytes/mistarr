@@ -15,7 +15,6 @@ pub(super) const STUBS: &[(&str, &str)] = &[
     ("GET", "/downloads"),
     ("POST", "/downloads/{id}/retry"),
     ("DELETE", "/downloads/{id}"),
-    ("GET", "/imports"),
 ];
 
 pub(super) fn routes() -> Router<Arc<AppState>> {

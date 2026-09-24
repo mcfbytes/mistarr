@@ -187,17 +187,36 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 
 ### Import
 
-1. Hash the staged file. Match against the DAT. A mismatch marks the download
-   `bad` and leaves the file in `staging/quarantine/` with a report; it is
-   never placed.
-2. Ask the platform's `CoreAdapter` for a placement plan. Apply it: unzip if
-   the core cannot read zips or the plan says so, add or strip a header, fix
-   byte order, create a per-title directory for multi-file disc images and
-   move every track.
-3. Rename into `games/<Core>/` on the same filesystem. If the target exists
-   and is verified, keep the existing file and discard the new one. If it
-   exists and is unverified, replace it and record the previous name.
-4. Update `files`, mark the title `have`, emit `import.done`.
+A heavy `import` job runs per download in `importing`. The importer enqueues
+one for every such row at startup and, on each `download.changed`, one for
+every `importing` download of that download's title; a job whose row has left
+`importing` does nothing.
+
+1. Hash the staged file with the platform's header rule, every member of a
+   staged zip. Match against the DAT preferring live roms of non-superseded
+   versions. A mismatch marks the download `bad` and moves the file to
+   `staging/quarantine/<infohash>/` beside a `<name>.report.txt` naming the
+   expected rom and the actual hashes; it is never placed. An entry flagged
+   `bios` is refused: the download is `failed` and the file stays in staging.
+2. Ask the platform's `CoreAdapter` for a placement plan from the DAT entry
+   and the staged item (its zip member, and the first bytes that decide an
+   iNES header or N64 byte order). Apply its steps in order, touching only
+   staging and `games/`: unzip if the core cannot read zips or the plan says
+   so, add or strip a header, fix byte order, create a per-title directory for
+   multi-file disc images and move every track. A disc entry waits until every
+   track is `importing` and is placed together; when a track is missing and
+   nothing of the entry is still transferring, its downloads become `failed`
+   and the tracks stay in staging.
+3. Rename into `games/<Core>/` on the same filesystem; staging and `games/` on
+   different filesystems fail the import with both paths named. If the target
+   exists and is verified, keep the existing file and discard the new one. If
+   it exists and is not verified, replace it and record the previous file.
+4. Update `files`, which marks the title `have`, log the action in
+   `import_log`, set the download `done` and emit `import.done`.
+5. Once a source has a `done` download and none queued, transferring,
+   checking or importing, and its seed policy is `none`, remove the torrent
+   from the client without deleting data, clear `sources.client_id` and
+   remove the empty directories under `staging/<infohash>/`.
 
 ### Pausing for the core
 
