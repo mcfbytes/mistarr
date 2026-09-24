@@ -41,10 +41,11 @@ ALTER TABLE titles DROP COLUMN regions;
 ALTER TABLE titles DROP COLUMN languages;
 
 -- Bit per known flag and region in the group summary; anything else counts as bit 62.
+-- The flags hidden by default take the high bits, so MIN over a group's variants finds one without them.
 CREATE TABLE known_flags (name TEXT PRIMARY KEY, bit INTEGER NOT NULL) WITHOUT ROWID;
 INSERT INTO known_flags (name, bit) VALUES
-  ('bios', 1), ('beta', 2), ('proto', 4), ('demo', 8), ('sample', 16),
-  ('unl', 32), ('pirate', 64), ('program', 128), ('baddump', 256);
+  ('unl', 1), ('pirate', 2), ('baddump', 4), ('bios', 8), ('beta', 16),
+  ('proto', 32), ('demo', 64), ('sample', 128), ('program', 256);
 
 CREATE TABLE known_regions (name TEXT PRIMARY KEY COLLATE NOCASE, bit INTEGER NOT NULL) WITHOUT ROWID;
 INSERT INTO known_regions (name, bit) VALUES
@@ -66,15 +67,17 @@ CREATE TABLE title_groups (
   pick_id           INTEGER,
   newest_id         INTEGER NOT NULL,
   source            TEXT NOT NULL,     -- the parent's: 'dat' | 'mra'
-  unflagged         INTEGER NOT NULL,  -- a live variant of the parent carries no known flag
+  lean_flags        INTEGER NOT NULL,  -- least known-flag bits of a live variant of the parent
   unflagged_regions INTEGER NOT NULL,  -- region bits of those variants
   flag_union        INTEGER NOT NULL,  -- flag bits of every live variant of the parent
   region_union      INTEGER NOT NULL,  -- region bits of every live variant of the parent
+  split             INTEGER NOT NULL,  -- the parent title is on another platform than the group
   PRIMARY KEY (parent_id, platform_id)
 ) WITHOUT ROWID;
 CREATE INDEX title_groups_name ON title_groups(platform_id, base_name COLLATE NOCASE, parent_id);
 CREATE INDEX title_groups_have ON title_groups(platform_id, (have_verified > 0) DESC, base_name COLLATE NOCASE, parent_id);
 CREATE INDEX title_groups_recent ON title_groups(platform_id, newest_id DESC);
+CREATE INDEX title_groups_split ON title_groups(platform_id, parent_id) WHERE split;
 
 -- Groups whose inputs changed in the open transaction; db::commit refreshes and empties it.
 -- The triggers test membership rather than use OR IGNORE, which an upsert overrides.
@@ -109,8 +112,10 @@ WHEN OLD.platform_id IS NOT NEW.platform_id OR OLD.parent_id IS NOT NEW.parent_i
     WHERE x IS NOT NULL AND x NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
-CREATE TRIGGER titles_rename_groups AFTER UPDATE OF name, base_name, source ON titles
-WHEN OLD.name IS NOT NEW.name OR OLD.base_name IS NOT NEW.base_name OR OLD.source IS NOT NEW.source BEGIN
+-- A title's own name, source and platform show in the rows of the groups it roots.
+CREATE TRIGGER titles_rename_groups AFTER UPDATE OF name, base_name, source, platform_id ON titles
+WHEN OLD.name IS NOT NEW.name OR OLD.base_name IS NOT NEW.base_name OR OLD.source IS NOT NEW.source
+  OR OLD.platform_id IS NOT NEW.platform_id BEGIN
   INSERT INTO title_groups_dirty (parent_id)
     SELECT NEW.id WHERE NEW.id NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;

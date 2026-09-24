@@ -78,19 +78,26 @@ fn conn() -> Connection {
 fn seeded_conn() -> Connection {
     let mut c = conn();
     crate::synth::seed(&mut c, 0.002, 11).expect("catalogue");
+    // Groups split across platforms from the start, so every search shape meets them.
+    let tx = c.transaction().expect("tx");
+    for (from, to) in [("nes", "gb"), ("gb", "nes"), ("psx", "nes")] {
+        tx.execute(
+            "UPDATE titles SET platform_id = ?2 WHERE id = (SELECT MIN(parent_id) FROM titles
+             WHERE platform_id = ?1 AND parent_id <> id AND retired = 0)",
+            [from, to],
+        )
+        .expect("split");
+    }
+    crate::db::commit(tx).expect("commit");
+    let split: i64 = c
+        .query_row(
+            "SELECT COUNT(DISTINCT platform_id) FROM title_groups WHERE split",
+            [],
+            |r| r.get(0),
+        )
+        .expect("split");
+    assert!(split >= 2, "{split}");
     c
-}
-
-/// Whether a group on `platform` has its parent on another platform, which the
-/// platform-filtered search cannot see.
-fn split_groups(c: &Connection, platform: &str) -> bool {
-    c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM title_groups g JOIN titles p ON p.id = g.parent_id
-                        WHERE g.platform_id = ?1 AND p.platform_id <> g.platform_id)",
-        [platform],
-        |r| r.get(0),
-    )
-    .expect("split")
 }
 
 type Summary = (
@@ -297,6 +304,7 @@ fn assert_matches_reference(c: &Connection) {
     };
     let hiddens = lists(&[
         &[],
+        &["bios", "beta", "proto", "demo", "sample", "program"],
         &["bios", "beta"],
         &["bios", "other:Aftermarket"],
         &["proto"],
@@ -350,9 +358,6 @@ fn assert_matches_reference(c: &Connection) {
                 let (limit, offset) = if n % 4 == 0 { (3, 1) } else { (50, 0) };
                 let want = reference_browse(c, platform, &f, limit, offset);
                 for shape in SearchShape::ALL {
-                    if shape == SearchShape::FtsPlatform && split_groups(c, platform) {
-                        continue;
-                    }
                     let got =
                         titles::browse_with(c, platform, &f, limit, offset, shape).expect("browse");
                     assert_eq!(got, want, "{platform} {shape:?} {f:?}");
@@ -931,17 +936,79 @@ fn bits_follow_the_known_tables() {
     crate::db::commit(tx).expect("commit");
     let summary = |c: &Connection| -> (i64, i64, i64, i64) {
         c.query_row(
-            "SELECT unflagged, unflagged_regions, flag_union, region_union FROM title_groups",
+            "SELECT lean_flags, unflagged_regions, flag_union, region_union FROM title_groups",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .expect("summary")
     };
-    assert_eq!(summary(&c), (0, 0, 1 | OTHER, 2 | OTHER));
+    assert_eq!(summary(&c), (8, 0, 8 | OTHER, 2 | OTHER));
     let tx = c.transaction().expect("tx");
     titles::store_lists(&tx, 1, &["usa".to_owned()], &[], &["other:x".to_owned()]).expect("lists");
     crate::db::commit(tx).expect("commit");
-    assert_eq!(summary(&c), (1, 2, OTHER, 2));
+    assert_eq!(summary(&c), (0, 2, OTHER, 2));
+}
+
+#[test]
+fn the_default_hide_list_is_the_high_flag_bits() {
+    let hide = crate::config::PrefsConfig::default().hide;
+    let bits = hide
+        .iter()
+        .map(|f| flag_bit(f).expect("known"))
+        .fold(0, |a, b| a | b);
+    assert_eq!(bits, HIDDEN_BY_DEFAULT);
+    let low = KNOWN_FLAGS
+        .iter()
+        .map(|f| flag_bit(f).expect("bit"))
+        .filter(|b| b & HIDDEN_BY_DEFAULT == 0);
+    assert!(low.into_iter().all(|b| b < 8));
+    let mut c = Clause::default();
+    visible(&mut c, &hide, None, &[]);
+    assert_eq!(c.sql(), format!("(g.lean_flags & {HIDDEN_BY_DEFAULT} = 0)"));
+}
+
+#[test]
+fn a_group_whose_parent_is_on_another_platform_is_found_by_every_shape() {
+    let mut c = conn();
+    let tx = c.transaction().expect("tx");
+    tx.execute_batch(
+        "INSERT INTO titles (id, platform_id, dat_version_id, name, base_name, parent_id)
+           VALUES (1, 'gb', 1, 'Starla (USA)', 'Starla', 1),
+                  (2, 'nes', 1, 'Starla (Japan)', 'Starla', 1),
+                  (3, 'nes', 1, 'Other (USA)', 'Other', 3);",
+    )
+    .expect("titles");
+    crate::db::commit(tx).expect("commit");
+    let split: Vec<(i64, String)> = c
+        .prepare("SELECT parent_id, platform_id FROM title_groups WHERE split")
+        .expect("prepare")
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows");
+    assert_eq!(split, [(1, "nes".to_owned())]);
+    let f = Browse {
+        q: Some("starla".into()),
+        ..Browse::default()
+    };
+    for shape in SearchShape::ALL {
+        let (rows, total) = titles::browse_with(&c, "nes", &f, 10, 0, shape).expect("browse");
+        assert_eq!(total, 1, "{shape:?}");
+        assert_eq!(rows[0].parent_id, TitleId(1), "{shape:?}");
+    }
+    let tx = c.transaction().expect("tx");
+    tx.execute("UPDATE titles SET platform_id = 'nes' WHERE id = 1", [])
+        .expect("move");
+    crate::db::commit(tx).expect("commit");
+    let splits: i64 = c
+        .query_row("SELECT COUNT(*) FROM title_groups WHERE split", [], |r| {
+            r.get(0)
+        })
+        .expect("count");
+    assert_eq!(splits, 0);
+    let (_, total) =
+        titles::browse_with(&c, "nes", &f, 10, 0, SearchShape::FtsPlatform).expect("browse");
+    assert_eq!(total, 1);
 }
 
 #[test]
@@ -1069,7 +1136,7 @@ fn visibility_uses_the_summary_before_the_variants() {
     let mut c = Clause::default();
     visible(&mut c, &strings(&["bios", "beta"]), None, &[]);
     assert!(
-        c.sql().starts_with("((g.unflagged OR EXISTS"),
+        c.sql().starts_with("((g.lean_flags & 24 = 0 OR EXISTS"),
         "{}",
         c.sql()
     );
@@ -1082,5 +1149,5 @@ fn visibility_uses_the_summary_before_the_variants() {
         &strings(&["demo", "other:y"]),
     );
     assert_eq!(c.args.len(), 5);
-    assert!(c.sql().contains("g.flag_union & 8 = 8"), "{}", c.sql());
+    assert!(c.sql().contains("g.flag_union & 64 = 64"), "{}", c.sql());
 }

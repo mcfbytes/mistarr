@@ -438,6 +438,15 @@ fn seed_console(
             n += 1;
         }
         let bios = rng.chance(1);
+        // Cartridge sets carry whole groups of unlicensed or prototype-only entries.
+        let unlicensed = !mra
+            && !bios
+            && rng.chance(if console.layout == Layout::Headered {
+                20
+            } else {
+                4
+            });
+        let prototype = !mra && !bios && !unlicensed && rng.chance(3);
         let files_here = !mra && rng.chance(35);
         let setname = format!("s{group:05}");
         let mut parent = 0;
@@ -446,6 +455,10 @@ fn seed_console(
             let mut flags: Vec<String> = Vec::new();
             if bios {
                 flags.push("bios".into());
+            } else if unlicensed {
+                flags.push(if rng.chance(25) { "pirate" } else { "unl" }.into());
+            } else if prototype {
+                flags.push("proto".into());
             } else if v > 0 && rng.chance(8) {
                 flags.push(["beta", "proto", "demo", "unl"][rng.below(4)].into());
             }

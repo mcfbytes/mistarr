@@ -192,9 +192,19 @@ fn hot_reads_walk_indexes_not_growing_tables() {
                 failures.push(format!("{name}: {line} in {sql}"));
             }
         }
-        // The default search walks the platform's name index and never the trigram index.
-        if name == "browse" && SEARCH_SHAPE == SearchShape::Like {
-            assert!(!plan.iter().any(|l| l.contains("title_search")), "{sql}");
+        // The default search asks the trigram index for the platform's phrase.
+        if name == "browse" && sql.contains("title_groups g") {
+            assert_eq!(SEARCH_SHAPE, SearchShape::FtsPlatform);
+            assert!(sql.contains("platform : \"\u{1f}nes\u{1f}\""), "{sql}");
+            assert!(
+                plan.iter()
+                    .any(|l| l.contains("SCAN title_search VIRTUAL TABLE")),
+                "{sql}"
+            );
+            assert!(
+                plan.iter().any(|l| l.contains("title_groups_split")),
+                "{sql}"
+            );
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

@@ -637,8 +637,8 @@ pub enum SearchShape {
     Like,
     /// The trigram index over every platform, probed while walking the platform's groups.
     Fts,
-    /// The trigram index, filtered to the platform's sentinel-wrapped id in the same `MATCH`;
-    /// it misses a group whose parent title is on another platform than the group.
+    /// The trigram index, filtered to the platform's sentinel-wrapped id in the same `MATCH`,
+    /// plus the platform's groups whose parent title is on another platform.
     FtsPlatform,
 }
 
@@ -674,9 +674,9 @@ impl SearchShape {
     }
 }
 
-/// The shape [`browse`] uses: the fastest worst case in `tests/browse.rs`, which fails
-/// when another shape's worst case beats it by more than a quarter.
-pub const SEARCH_SHAPE: SearchShape = SearchShape::Like;
+/// The shape [`browse`] uses: the best worst case on real DATs on the board; see
+/// `docs/TESTING.md` "Browse speed".
+pub const SEARCH_SHAPE: SearchShape = SearchShape::FtsPlatform;
 
 /// The conditions of a browse request on `platform`, over `title_groups g`.
 fn browse_clause(
@@ -702,11 +702,14 @@ fn browse_clause(
                 SearchShape::Like => {}
                 SearchShape::Fts => clause.and(SEARCH, [Value::Text(phrase(q))]),
                 SearchShape::FtsPlatform => clause.and(
-                    SEARCH,
-                    [Value::Text(format!(
-                        "platform : \"\u{1f}{platform}\u{1f}\" AND base_name : {}",
-                        phrase(q)
-                    ))],
+                    SEARCH_PLATFORM,
+                    [
+                        Value::Text(format!(
+                            "platform : \"\u{1f}{platform}\u{1f}\" AND base_name : {}",
+                            phrase(q)
+                        )),
+                        Value::Text(platform.to_owned()),
+                    ],
                 ),
             }
         }
@@ -757,6 +760,12 @@ const TRIGRAM: usize = 3;
 /// Keeps groups whose parent's base name contains the phrase bound to `?`, found through
 /// `title_search` and probed while the platform's name index is walked in order.
 const SEARCH: &str = "g.parent_id IN (SELECT rowid FROM title_search WHERE title_search MATCH ?)";
+
+/// [`SEARCH`] with a `MATCH` limited to the platform, plus the platform's groups whose
+/// parent is elsewhere, found through the partial `title_groups_split` index.
+const SEARCH_PLATFORM: &str = "g.parent_id IN (
+    SELECT rowid FROM title_search WHERE title_search MATCH ?
+    UNION ALL SELECT s.parent_id FROM title_groups s WHERE s.platform_id = ? AND s.split)";
 
 /// `q` as one FTS5 phrase, so every character is literal.
 fn phrase(q: &str) -> String {

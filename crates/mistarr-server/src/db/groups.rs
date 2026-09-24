@@ -7,9 +7,14 @@ use rusqlite::Connection;
 use crate::error::Result;
 
 /// Flags with their own bit in the group summary, in bit order; `known_flags` holds the same.
+/// The flags `prefs.hide` holds by default come last, in [`HIDDEN_BY_DEFAULT`].
 pub const KNOWN_FLAGS: [&str; 9] = [
-    "bios", "beta", "proto", "demo", "sample", "unl", "pirate", "program", "baddump",
+    "unl", "pirate", "baddump", "bios", "beta", "proto", "demo", "sample", "program",
 ];
+
+/// The bits of the flags `prefs.hide` holds by default, the highest known bits; a
+/// group's `lean_flags` has none of them exactly when a live variant carries none.
+pub const HIDDEN_BY_DEFAULT: i64 = KNOWN_FLAG_MASK & !0b111;
 
 /// Regions with their own bit in the group summary, in bit order, matched ignoring
 /// ASCII case; `known_regions` holds the same.
@@ -49,13 +54,15 @@ const REBUILD_OVER: i64 = 4096;
 
 /// The columns of `title_groups`, in table order.
 const COLUMNS: &str = "parent_id, platform_id, base_name, name, variants, have_verified, wanted,
-    has_pick, pick_id, newest_id, source, unflagged, unflagged_regions, flag_union, region_union";
+    has_pick, pick_id, newest_id, source, lean_flags, unflagged_regions, flag_union, region_union,
+    split";
 
 /// The bit of a known flag, compared exactly.
 ///
 /// ```
 /// use mistarr_server::db::groups::flag_bit;
-/// assert_eq!(flag_bit("bios"), Some(1));
+/// assert_eq!(flag_bit("unl"), Some(1));
+/// assert_eq!(flag_bit("bios"), Some(8));
 /// assert_eq!(flag_bit("BIOS"), None);
 /// ```
 #[must_use]
@@ -124,7 +131,8 @@ fn select(scope: Scope) -> String {
     format!(
         "SELECT g.parent_id, g.platform_id, p.base_name, p.name, g.variants, g.have_verified,
                 g.wanted, g.has_pick, g.pick_id, g.newest_id, p.source,
-                u.unflagged, u.unflagged_regions, u.flag_union, u.region_union
+                u.lean_flags, u.unflagged_regions, u.flag_union, u.region_union,
+                p.platform_id <> g.platform_id
          FROM (
            SELECT v.platform_id, v.parent_id, COUNT(*) AS variants,
                   SUM(v.roms > 0 AND v.roms_verified = v.roms) AS have_verified,
@@ -157,7 +165,7 @@ fn select(scope: Scope) -> String {
                      WHERE r.title_id = t.id) AS rb
              FROM titles t WHERE t.retired = 0 AND t.parent_id IS NOT NULL AND {parents}
            )
-           SELECT b.parent_id, MAX(b.fb & {KNOWN_FLAG_MASK} = 0) AS unflagged,
+           SELECT b.parent_id, MIN(b.fb & {KNOWN_FLAG_MASK}) AS lean_flags,
                   {unflagged_regions} AS unflagged_regions,
                   {flag_union} AS flag_union, {region_union} AS region_union
            FROM b GROUP BY b.parent_id
@@ -470,9 +478,14 @@ pub(crate) fn visible(
                 None => (bits, true),
             })
     };
-    let (_, hidden_other) = known(hidden);
+    let (hk, hidden_other) = known(hidden);
     let (rk, required_other) = known(required);
     let region_bit = region.map(region_bit);
+    // With exactly the default hide list the least-flagged variant decides alone.
+    if hk == HIDDEN_BY_DEFAULT && !hidden_other && required.is_empty() && region.is_none() {
+        clause.and(&format!("g.lean_flags & {hk} = 0"), []);
+        return;
+    }
     if hidden.is_empty() && required.is_empty() {
         match region_bit {
             None => return,
@@ -497,7 +510,7 @@ pub(crate) fn visible(
     }
     let sufficient = if required.is_empty() && !hidden_other {
         match region_bit {
-            None => Some("g.unflagged".to_owned()),
+            None => Some(format!("g.lean_flags & {hk} = 0")),
             Some(Some(b)) => Some(format!("g.unflagged_regions & {b} != 0")),
             Some(None) => None,
         }

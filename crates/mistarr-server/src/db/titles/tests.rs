@@ -793,7 +793,7 @@ fn browse_walks_an_index_in_every_sort_order() {
             );
         }
     }
-    assert_eq!(SEARCH_SHAPE, SearchShape::Like);
+    assert_eq!(SEARCH_SHAPE, SearchShape::FtsPlatform);
 }
 
 #[test]
