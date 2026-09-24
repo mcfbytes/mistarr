@@ -15,4 +15,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sh scripts/principles-gate.sh
-  # Cross build (WP-17) is added by its work package; see docs/WORKPLAN.md.
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: "npm", cache-dependency-path: web/package-lock.json }
+      - working-directory: web
+        run: npm ci
+      - working-directory: web
+        run: npm run check
+      - working-directory: web
+        run: npm run lint
+      - working-directory: web
+        run: npm run build
+      - working-directory: web
+        run: npm run size
+  cross:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: goto-bus-stop/setup-zig@v2
+      - run: cargo install cargo-zigbuild
+      - uses: actions/setup-node@v4
+        with: { node-version: "22", cache: "npm", cache-dependency-path: web/package-lock.json }
+      - working-directory: web
+        run: npm ci && npm run build
+      - run: rustup target add armv7-unknown-linux-musleabihf
+      - run: cargo zigbuild --release --target armv7-unknown-linux-musleabihf -p mistarr-server
+      - run: file target/armv7-unknown-linux-musleabihf/release/mistarr | grep -q "statically linked"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mistarr-armv7
+          path: target/armv7-unknown-linux-musleabihf/release/mistarr
