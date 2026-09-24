@@ -9,6 +9,7 @@ import type {
   SourceFile,
   SystemStatus,
   TitleDetail,
+  TitleFilters,
   TitleGroup,
   WizardStatus
 } from './types';
@@ -75,13 +76,39 @@ const exampleNames = [
   'Stub Squad'
 ];
 
-export function fixtureTitles(platformId: string, count = 60): TitleGroup[] {
+/** Default `prefs.hide` flags, mirroring the server's fixture entries. */
+const HIDDEN_FLAGS = ['bios', 'beta'];
+
+function flagsFor(i: number): string[] {
+  if (i % 11 === 0) {
+    return ['bios'];
+  }
+  if (i % 13 === 0) {
+    return ['beta'];
+  }
+  return [];
+}
+
+export function fixtureTitles(platformId: string, count = 60, filters: TitleFilters = {}): TitleGroup[] {
   const platform = fixturePlatforms.find((p) => p.id === platformId);
   const coreDir = platform?.core_dir ?? 'NES';
-  return Array.from({ length: count }, (_, i) => {
+  const showHidden = filters.hidden === 'show';
+  const required = (filters.flags ?? '')
+    .split(',')
+    .map((f) => f.trim().toLowerCase())
+    .filter((f) => f.length > 0);
+  const rows: TitleGroup[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const flags = flagsFor(i);
+    if (!showHidden && flags.some((f) => HIDDEN_FLAGS.includes(f))) {
+      continue;
+    }
+    if (required.length > 0 && !required.every((f) => flags.includes(f))) {
+      continue;
+    }
     const base = exampleNames[i % exampleNames.length] ?? 'Example Quest';
     const name = `${base} (USA)`;
-    return {
+    rows.push({
       parent_id: i + 1,
       platform_id: platformId,
       base_name: base,
@@ -93,8 +120,9 @@ export function fixtureTitles(platformId: string, count = 60): TitleGroup[] {
       wanted: i % 5 === 0 ? 1 : 0,
       has_pick: true,
       art: artFor(coreDir, name)
-    };
-  });
+    });
+  }
+  return rows;
 }
 
 export function fixtureTitle(id: number): TitleDetail {

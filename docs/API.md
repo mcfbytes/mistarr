@@ -80,7 +80,7 @@ unbound.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/platforms/{id}/titles` | Rows from `title_groups`. Filters: `q`, `have` (yes/no/any), `wanted`, `region`, `flags`, `sort` (name/have/recent). |
+| GET | `/platforms/{id}/titles` | Rows from `title_groups`. Filters: `q`, `have` (yes/no/any), `wanted`, `region`, `flags`, `hidden` (hide/show), `sort` (name/have/recent). |
 | GET | `/titles/{id}` | The group: every variant with its roms, file states, available torrent_files, the 1G1R pick and its art URL. |
 | POST | `/titles/{id}/want` | Mark the 1G1R pick wanted, or a specific variant with `{ variant_id }`, and create its downloads. |
 | DELETE | `/titles/{id}/want` | Unmark. Cancels the group's downloads that are not importing or finished. |
@@ -88,13 +88,16 @@ unbound.
 
 Browse filters: `q` is a case-insensitive substring of the base name; `have`
 and `wanted` take `yes`, `no` or `any` (also `true` and `false`); `region`
-keeps groups with a variant of that region; `flags` is a comma list and keeps
-groups with a variant carrying every listed flag. Variants carrying a flag in
-`prefs.hide` do not count unless `flags` names it, so BIOS and beta entries
-appear only when asked for. `sort=recent` puts groups whose newest entry was
-added last first. Items are the `title_groups` row `{ parent_id, platform_id,
-base_name, name, pick_id, pick_name, variants, have_verified, wanted,
-has_pick }` plus `art` for the pick, or the parent without one.
+keeps groups with a variant of that region; `flags` is a comma list and
+requires a live variant to carry every listed flag. `hidden` is `hide`
+(default) or `show`: `hide` drops variants carrying a flag in `prefs.hide`
+from consideration, so BIOS and beta entries are absent by default; `show`
+disables that drop for the request, independently of `flags`, so a group
+whose only variants are hidden appears. `sort=recent` puts groups whose
+newest entry was added last first. Items are the `title_groups` row `{
+parent_id, platform_id, base_name, name, pick_id, pick_name, variants,
+have_verified, wanted, has_pick }` plus `art` for the pick, or the parent
+without one.
 
 `/titles/{id}` takes any title of the group and answers `{ parent_id,
 platform_id, base_name, pick_variant_id, art, variants }`. Each variant is `{

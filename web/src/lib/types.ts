@@ -59,8 +59,12 @@ export interface TitleFilters {
   wanted?: HaveFilter;
   region?: string;
   flags?: string;
+  hidden?: 'hide' | 'show';
   sort?: 'name' | 'have' | 'recent';
 }
+
+/** Flags the "require" multi-select offers. */
+export const BROWSE_FLAGS = ['bios', 'beta', 'proto', 'demo', 'sample', 'program', 'unl', 'pirate'] as const;
 
 export interface ArtUrls {
   boxart: string;

@@ -35,3 +35,21 @@ for (const viewport of viewports) {
     });
   }
 }
+
+test('requiring a hidden-by-default flag auto-shows hidden entries', async ({ page }) => {
+  await page.goto('/#/p/nes');
+  await page.waitForTimeout(200);
+
+  const showHidden = page.getByLabel('Show hidden');
+  await expect(showHidden).not.toBeChecked();
+
+  await page.getByLabel('bios', { exact: true }).check();
+
+  await expect(showHidden).toBeChecked();
+  await expect(showHidden).toBeDisabled();
+  await expect(page.getByText(/hidden by default/i)).toBeVisible();
+
+  await page.getByLabel('bios', { exact: true }).uncheck();
+  await expect(showHidden).not.toBeChecked();
+  await expect(showHidden).toBeEnabled();
+});

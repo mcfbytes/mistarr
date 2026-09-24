@@ -392,6 +392,43 @@ fn browse_filters_sorts_and_pages() {
 }
 
 #[test]
+fn hidden_and_flags_are_orthogonal() {
+    let c = conn();
+    plain(&c);
+    let hide: Vec<String> = vec!["bios".to_owned()];
+    let names = |f: &Browse| -> Vec<String> {
+        browse(&c, "gb", f, 10, 0)
+            .expect("browse")
+            .0
+            .into_iter()
+            .map(|r| r.base_name)
+            .collect()
+    };
+    // hide, no flags: the BIOS-only group is absent.
+    let hide_no_flags = Browse {
+        hidden: hide.clone(),
+        ..Browse::default()
+    };
+    assert!(!names(&hide_no_flags).contains(&"Example System".to_owned()));
+    // show, no flags: the BIOS-only group appears.
+    let show_no_flags = Browse::default();
+    assert!(names(&show_no_flags).contains(&"Example System".to_owned()));
+    // hide, require bios: still absent, since hidden excludes it regardless of flags.
+    let hide_flags = Browse {
+        hidden: hide.clone(),
+        flags: vec!["bios".into()],
+        ..Browse::default()
+    };
+    assert!(names(&hide_flags).is_empty());
+    // show, require bios: only the BIOS group appears.
+    let show_flags = Browse {
+        flags: vec!["bios".into()],
+        ..Browse::default()
+    };
+    assert_eq!(names(&show_flags), ["Example System"]);
+}
+
+#[test]
 fn detail_lists_variants_roms_files_and_sources() {
     let c = conn();
     plain(&c);

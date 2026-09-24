@@ -24,8 +24,9 @@ scan button. Platforms whose core is absent are in a collapsed section.
 
 **Browse** (`/p/{id}`). Poster grid of `title_groups`, cover from the libretro
 URL with a placeholder on 404. Filters: search, have / missing / wanted,
-region, show hidden flags. Each card shows the 1G1R pick name, a have
-indicator, and a want toggle. Infinite scroll in pages of 60.
+region, a "Show hidden" checkbox, and a flags multi-select that requires
+every checked flag. Each card shows the 1G1R pick name, a have indicator, and
+a want toggle. Infinite scroll in pages of 60.
 
 **Title** (`/t/{id}`). Every variant in the group with region, revision,
 flags, file state, and which sources have it. Want per variant. Rename action

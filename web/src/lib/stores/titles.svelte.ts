@@ -44,7 +44,7 @@ export async function loadTitlesPage(
   groupsPlatform = platformId;
   const offset = page * PAGE_SIZE;
   if (isMock) {
-    const all = fixtureTitles(platformId, 240);
+    const all = fixtureTitles(platformId, 240, filters);
     const slice = all.slice(offset, offset + PAGE_SIZE);
     groups = page === 0 ? slice : [...groups, ...slice];
     groupsTotal = all.length;
