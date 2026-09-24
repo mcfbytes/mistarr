@@ -217,7 +217,8 @@ async fn a_dropped_pack_loads_and_the_catalog_answers() {
         .expect("gb");
     assert_eq!(
         gb["counts"],
-        json!({"titles": 1, "have": 0, "wanted": 0, "unverified": 0})
+        json!({"titles": 1, "have": 0, "wanted": 0, "unmatched_files": 0,
+               "failing_check": 0, "partial": 0})
     );
     assert_eq!(gb["core_dir"], "GAMEBOY");
 

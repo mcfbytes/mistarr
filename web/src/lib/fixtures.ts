@@ -24,7 +24,7 @@ export const fixturePlatforms: Platform[] = [
     kind: 'cartridge',
     core_present: true,
     enabled: true,
-    counts: { titles: 240, have: 180, wanted: 12, unverified: 4 }
+    counts: { titles: 240, have: 180, wanted: 12, unmatched_files: 4, failing_check: 0, partial: 0 }
   },
   {
     id: 'megadrive',
@@ -33,7 +33,7 @@ export const fixturePlatforms: Platform[] = [
     kind: 'cartridge',
     core_present: true,
     enabled: true,
-    counts: { titles: 310, have: 90, wanted: 30, unverified: 1 }
+    counts: { titles: 310, have: 90, wanted: 30, unmatched_files: 1, failing_check: 0, partial: 0 }
   },
   {
     id: 'psx',
@@ -42,7 +42,7 @@ export const fixturePlatforms: Platform[] = [
     kind: 'disc',
     core_present: false,
     enabled: true,
-    counts: { titles: 420, have: 0, wanted: 0, unverified: 0 }
+    counts: { titles: 420, have: 0, wanted: 0, unmatched_files: 0, failing_check: 0, partial: 0 }
   },
   {
     id: 'amiga',
@@ -51,7 +51,16 @@ export const fixturePlatforms: Platform[] = [
     kind: 'computer',
     core_present: false,
     enabled: true,
-    counts: { titles: 150, have: 0, wanted: 0, unverified: 0 }
+    counts: { titles: 150, have: 0, wanted: 0, unmatched_files: 0, failing_check: 0, partial: 0 }
+  },
+  {
+    id: 'arcade',
+    name: 'Arcade',
+    core_dir: 'mame',
+    kind: 'arcade',
+    core_present: true,
+    enabled: true,
+    counts: { titles: 1298, have: 978, wanted: 0, unmatched_files: 0, failing_check: 14, partial: 6 }
   }
 ];
 

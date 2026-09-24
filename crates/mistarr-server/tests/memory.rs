@@ -33,6 +33,7 @@ const LOOSE_EVERY: usize = 10;
 const LOOSE_FILES: usize = 16_000;
 const ZIPPED_FILES: usize = 2_000;
 const DISC_DIRS: usize = 1_000;
+const PRESENCE_ZIPS: usize = 30_000;
 
 /// A running `mistarr serve` over one data directory.
 struct Server {
@@ -497,6 +498,39 @@ fn games_tree(root: &Path) -> usize {
     LOOSE_FILES + ZIPPED_FILES + DISC_DIRS * 2
 }
 
+/// `PRESENCE_ZIPS` small zips under `games/mame` that no MRA names and no DAT
+/// matches: the presence pass's worst case, reading every central directory and
+/// writing nothing. An empty `_Arcade` so the catalogue still queues at startup.
+fn presence_tree(root: &Path) -> usize {
+    let mame = root.join("games/mame");
+    std::fs::create_dir_all(root.join("_Arcade")).expect("mkdir");
+    for i in 0..PRESENCE_ZIPS {
+        let body = bytes_for(i, 64);
+        write(
+            &mame.join(format!("exg{i:05}.zip")),
+            &zip_of(&[("a.bin", &body)]),
+        );
+    }
+    PRESENCE_ZIPS
+}
+
+#[test]
+fn arcade_presence_pass_stays_under_budget() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let zips = presence_tree(dir.path());
+
+    let server = Server::start(dir.path());
+    let rows = server.wait_jobs("arcade_catalog", 1);
+    let files = server.count("SELECT COUNT(*) FROM files WHERE platform_id = 'arcade'");
+    let peak = server.stop("arcade_presence");
+    let (state, progress) = &rows[0];
+    println!("progress: {progress}");
+    assert_eq!(state, "done", "{progress}");
+    assert_eq!(progress["presence_zips"], zips);
+    assert_eq!(files, 0, "nothing names or matches any of these zips");
+    assert_budget("arcade_presence", peak, 16);
+}
+
 #[test]
 fn arcade_catalogue_stays_under_budget() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -514,7 +548,7 @@ fn arcade_catalogue_stays_under_budget() {
     assert_eq!(usize::try_from(titles).expect("count"), distinct);
     assert_eq!(usize::try_from(matched).expect("count"), distinct);
     assert_eq!(progress["parsed"], distinct, "each distinct MRA read once");
-    assert_budget("arcade_catalog", peak, 12);
+    assert_budget("arcade_catalog", peak, 13);
 
     let server = Server::start(dir.path());
     let rows = server.wait_jobs("arcade_catalog", 2);
@@ -526,7 +560,7 @@ fn arcade_catalogue_stays_under_budget() {
         progress["checked"], 0,
         "unchanged sets are not checked again"
     );
-    assert_budget("arcade_catalog rerun", peak, 12);
+    assert_budget("arcade_catalog rerun", peak, 13);
 }
 
 #[test]

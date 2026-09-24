@@ -57,7 +57,12 @@ export interface PlatformCounts {
   titles: number;
   have: number;
   wanted: number;
-  unverified: number;
+  /** Files on disk that match no rom; always 0 for arcade, which a scan never walks. */
+  unmatched_files: number;
+  /** Live MRA sets with every zip present whose md5 check did not match; 0 outside arcade. */
+  failing_check: number;
+  /** Live MRA sets with some, but not every, named zip present; 0 outside arcade. */
+  partial: number;
 }
 
 export interface Platform {

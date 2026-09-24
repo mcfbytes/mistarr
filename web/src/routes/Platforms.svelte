@@ -5,6 +5,7 @@
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
   import SetupHints from '../lib/SetupHints.svelte';
+  import type { PlatformCounts } from '../lib/types';
 
   onMount(() => {
     void loadPlatforms();
@@ -17,6 +18,21 @@
 
   const isMock = import.meta.env.VITE_MOCK === '1';
   let scanning = $state<Record<string, boolean>>({});
+
+  /** "N have · M wanted · T titles", plus any nonzero extra clause. */
+  function summarize(counts: PlatformCounts): string {
+    const parts = [`${counts.have} have`, `${counts.wanted} wanted`, `${counts.titles} titles`];
+    if (counts.unmatched_files > 0) {
+      parts.push(`${counts.unmatched_files} unmatched files`);
+    }
+    if (counts.failing_check > 0) {
+      parts.push(`${counts.failing_check} failing check`);
+    }
+    if (counts.partial > 0) {
+      parts.push(`${counts.partial} partial`);
+    }
+    return parts.join(' · ');
+  }
 
   async function scan(id: string): Promise<void> {
     scanning = { ...scanning, [id]: true };
@@ -52,10 +68,7 @@
     {#each present as platform (platform.id)}
       <div class="card">
         <h2><a href={platformUrl(platform.id)}>{platform.name}</a></h2>
-        <p class="muted">
-          {platform.counts.have} have · {platform.counts.wanted} wanted · {platform.counts.unverified} unverified
-          of {platform.counts.titles}
-        </p>
+        <p class="muted">{summarize(platform.counts)}</p>
         <div class="actions">
           <button onclick={() => scan(platform.id)} disabled={scanning[platform.id]}>Scan</button>
           <button onclick={() => setEnabled(platform.id, false)}>Disable</button>

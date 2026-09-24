@@ -375,17 +375,8 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     // Step 4: installed cores.
     detect_cores(&app)?;
 
-    // Resume any scan left unfinished by a previous run.
-    for platform_id in unfinished_scans {
-        tracing::info!(platform = %platform_id.0, "resuming interrupted scan");
-        Scheduler::enqueue(
-            &app,
-            Arc::new(jobs::scan::ScanJob {
-                platform_id: Some(platform_id),
-            }),
-        )
-        .await?;
-    }
+    // Resume any scan left unfinished by a previous run; arcade never gets one.
+    resume_scans(&app, unfinished_scans).await?;
 
     // The arcade catalogue reads the MRA files under `_Arcade`; unstamped sources map again.
     jobs::arcade::enqueue_if_relevant(&app).await?;
@@ -442,6 +433,29 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
         tasks,
         _lock: lock,
     })
+}
+
+/// Re-enqueues each platform's scan left unfinished by a previous run, skipping
+/// arcade: its progress is never saved, but a stale row from an older build is
+/// defensively skipped here too.
+async fn resume_scans(
+    app: &Arc<AppState>,
+    unfinished: Vec<mistarr_core::PlatformId>,
+) -> Result<()> {
+    for platform_id in unfinished
+        .into_iter()
+        .filter(|id| !jobs::scan::is_arcade(id))
+    {
+        tracing::info!(platform = %platform_id.0, "resuming interrupted scan");
+        Scheduler::enqueue(
+            app,
+            Arc::new(jobs::scan::ScanJob {
+                platform_id: Some(platform_id),
+            }),
+        )
+        .await?;
+    }
+    Ok(())
 }
 
 /// Marks platforms whose core is installed under the SD root and returns them.
