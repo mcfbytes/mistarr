@@ -186,6 +186,8 @@ canonical path with no file on disk is removed.
 | GET | `/dats/incoming` | Files in `dats/` not loaded yet, and rejected ones; see "Incoming files". |
 | POST | `/dats/upload` | multipart; same handling as dropping into `dats/`. |
 | DELETE | `/dats/{id}` | Retire; files keep their provenance. |
+| POST | `/dats/rejected/{file}/retry` | Move a rejected file back into `dats/` and import it again. |
+| DELETE | `/dats/rejected/{file}` | Delete a rejected file and its reason. |
 
 `/dats` items are `dat_versions` rows loaded from DAT files, newest first: `{ id, platform_id,
 dat_name, version, source_file, loaded_at, superseded_by, game_count, retired
@@ -194,6 +196,15 @@ the extension when the name is taken. Upload takes one `file` part named
 `.dat`, `.xml` or `.zip`, writes it into `dats/` and answers 202 `{ file,
 job_id }`; the result arrives as `dat.loaded` or `dat.rejected`. Retiring
 answers 204 and recomputes the platform's picks.
+
+`{file}` in the two `rejected` routes is a file name as `/dats/incoming`
+lists it, percent-encoded; a name with a `/` or `\`, a leading `.` or the
+`.reason.txt` suffix is a 400 and a name not in `dats/rejected/` a 404.
+Retrying moves the file back into `dats/`, under `name (N)` when the name is
+taken, deletes its `.reason.txt` and answers 202 `{ file, job_id }` like an
+upload, so a file fixed in place in `dats/rejected/` loads again. Deleting
+answers 204. Both are writes, so they need the `X-Mistarr` header and an
+allowed `Host`.
 
 ## Sources
 
