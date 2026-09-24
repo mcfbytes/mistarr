@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mistarr_core::naming::{group_key, parse_name};
+use mistarr_core::PlatformId;
 use mistarr_mister::adapter::arcade::assemble::{self, PartSource};
 use mistarr_mister::adapter::arcade::mra::{self, zip_location, Mra, MraRom, ZipPath};
 use serde_json::json;
@@ -255,6 +256,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
             Ok((retired, live))
         })
         .await?;
+    super::remap::enqueue(&ctx.app, Some(vec![PlatformId(PLATFORM.into())])).await;
     // Runs after titles are committed, so a zip an MRA newly names this run is
     // already visible to the presence pass's live-MRA lookup.
     let stats = presence::run(ctx).await?;
