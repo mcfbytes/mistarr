@@ -3,6 +3,8 @@
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { fixtureSettings } from '../lib/fixtures';
   import { api, errorMessage } from '../lib/api';
+  import ClientStart from '../lib/ClientStart.svelte';
+  import PathMapEditor, { cleanPathMap } from '../lib/PathMapEditor.svelte';
   import type { Settings } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -51,40 +53,20 @@
       .filter((s) => s.length > 0);
   }
 
-  function addMapping(): void {
-    if (!settings) {
-      return;
-    }
-    settings = {
-      ...settings,
-      client: {
-        ...settings.client,
-        remote_path_map: [...settings.client.remote_path_map, { remote: '', local: '' }]
-      }
-    };
-  }
-
-  function removeMapping(index: number): void {
-    if (!settings) {
-      return;
-    }
-    settings = {
-      ...settings,
-      client: {
-        ...settings.client,
-        remote_path_map: settings.client.remote_path_map.filter((_, i) => i !== index)
-      }
-    };
-  }
-
   async function save(): Promise<void> {
     if (!settings) {
       return;
     }
     settingsError = null;
     saved = false;
+    const cleaned = cleanPathMap(settings.client.remote_path_map);
+    if ('error' in cleaned) {
+      settingsError = cleaned.error;
+      return;
+    }
+    const next = { ...settings, client: { ...settings.client, remote_path_map: cleaned.map } };
     try {
-      settings = isMock ? settings : await api.putSettings(settings);
+      settings = isMock ? next : await api.putSettings(next);
       saved = true;
     } catch (err) {
       settingsError = errorMessage(err);
@@ -108,6 +90,7 @@
         Client: {status.client?.kind ?? 'none'} —
         {status.client?.reachable ? 'reachable' : 'unreachable'}
       </p>
+      <ClientStart />
       <p>CORENAME: {status.corename ?? 'none'}</p>
       <p>Launching: {status.launch}</p>
       <p>Disk free: {status.disk_free_bytes ? (status.disk_free_bytes / 1_000_000_000).toFixed(1) : '—'} GB</p>
@@ -138,14 +121,7 @@
         <input type="text" placeholder="http://127.0.0.1:9091/transmission/rpc" bind:value={settings.client.url} />
       </label>
       <p class="muted">Remote path map</p>
-      {#each settings.client.remote_path_map as mapping, i (i)}
-        <div class="mapping">
-          <input type="text" placeholder="Remote path" bind:value={mapping.remote} />
-          <input type="text" placeholder="Local path" bind:value={mapping.local} />
-          <button type="button" onclick={() => removeMapping(i)}>Remove</button>
-        </div>
-      {/each}
-      <button type="button" onclick={addMapping}>Add mapping</button>
+      <PathMapEditor bind:map={settings.client.remote_path_map} />
 
       <h3>Limits (kbps, 0 is unlimited)</h3>
       <label>
@@ -217,12 +193,6 @@
 
   .settings h3 {
     margin-top: 1em;
-  }
-
-  .mapping {
-    display: flex;
-    gap: 0.4em;
-    margin: 0.3em 0;
   }
 
   .error {

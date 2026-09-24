@@ -90,3 +90,41 @@ test('the launch setting is editable', async ({ page }) => {
   await allow.uncheck();
   await expect(allow).not.toBeChecked();
 });
+
+test('held jobs show a banner with Run now', async ({ page }) => {
+  await page.goto('/#/');
+  const banner = page.getByRole('status').filter({ hasText: 'paused while FCEUmm is running' });
+  await expect(banner).toBeVisible();
+  await expect(banner.getByRole('button', { name: 'Run now' })).toBeVisible();
+});
+
+test('the wizard lists files waiting in dats and sources', async ({ page }) => {
+  await page.goto('/#/wizard');
+  await page.getByRole('button', { name: 'Next' }).click();
+  const dats = page.getByRole('list', { name: 'Files in dats' });
+  await expect(dats.getByText('Importing')).toBeVisible();
+  await expect(dats.getByText(/Rejected: not a DAT/)).toBeVisible();
+
+  await page.getByRole('button', { name: 'Next' }).click();
+  await page.getByRole('button', { name: 'Next' }).click();
+  const sources = page.getByRole('list', { name: 'Files in sources' });
+  await expect(sources.getByText(/Waiting: Waiting for the file to stop changing/)).toBeVisible();
+});
+
+test('a path mapping can be removed and a half-filled one is refused', async ({ page }) => {
+  await page.goto('/#/system');
+  await page.getByRole('button', { name: 'Add mapping' }).click();
+  await expect(page.getByLabel('Remote path')).toHaveCount(1);
+  await page.getByRole('button', { name: 'Remove' }).click();
+  await expect(page.getByLabel('Remote path')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Add mapping' }).click();
+  await page.getByLabel('Remote path').fill('/downloads');
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.getByText(/needs an absolute remote path and an absolute local path/)).toBeVisible();
+});
+
+test('an unbound source offers its suggested platform', async ({ page }) => {
+  await page.goto('/#/sources');
+  await expect(page.getByRole('button', { name: /^Bind to / })).toBeVisible();
+});

@@ -70,14 +70,15 @@
     <p class="muted">No downloads.</p>
   {/each}
 
-  <h2>Running jobs</h2>
+  <h2>Jobs</h2>
   {#each jobs as job (job.id)}
-    <div class="card row">
+    <div class="card row head">
       <strong>{job.kind}</strong>
-      <span class="muted">{job.state}</span>
+      <span class="muted">{job.state}, {job.lane} lane</span>
+      {#if job.reason}<span class="muted">{job.reason}</span>{/if}
     </div>
   {:else}
-    <p class="muted">No jobs running.</p>
+    <p class="muted">No jobs queued or running.</p>
   {/each}
 
   <h2>Imports</h2>

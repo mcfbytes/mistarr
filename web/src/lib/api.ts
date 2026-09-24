@@ -1,5 +1,7 @@
 import type {
+  ClientKind,
   CoresResult,
+  IncomingFile,
   DatVersion,
   Download,
   DownloadState,
@@ -115,6 +117,11 @@ export const api = {
   pause: (): Promise<SystemStatus> => request('/system/pause', { method: 'POST' }),
   resume: (): Promise<SystemStatus> => request('/system/resume', { method: 'POST' }),
   jobs: (): Promise<Paged<Job>> => request('/system/jobs'),
+  wizardDone: (): Promise<WizardStatus> => request('/system/wizard/done', { method: 'POST' }),
+  startClient: (kind: ClientKind): Promise<SystemStatus> =>
+    request('/system/client/start', { method: 'POST', body: JSON.stringify({ kind }) }),
+  datsIncoming: (): Promise<Paged<IncomingFile>> => request('/dats/incoming'),
+  sourcesIncoming: (): Promise<Paged<IncomingFile>> => request('/sources/incoming'),
   settings: (): Promise<Settings> => request('/system/settings'),
   putSettings: (patch: SettingsPatch): Promise<Settings> =>
     request('/system/settings', { method: 'PUT', body: JSON.stringify(patch) }),

@@ -18,11 +18,8 @@ export function patchSource(id: number, patch: Partial<Source>): void {
   sources = sources.map((s) => (s.id === id ? { ...s, ...patch } : s));
 }
 
+// The event carries no reason or suggestion, so the list is re-read after patching.
 export function applySourceChanged(sourceId: number, state: SourceState, platformId: string | null): void {
-  const exists = sources.some((s) => s.id === sourceId);
-  if (exists) {
-    patchSource(sourceId, { state, platform_id: platformId });
-  } else {
-    void loadSources();
-  }
+  patchSource(sourceId, { state, platform_id: platformId ?? null });
+  void loadSources().catch(() => undefined);
 }

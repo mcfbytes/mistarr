@@ -1,11 +1,12 @@
 <script lang="ts">
   import './app.css';
   import { getRoute, navigate } from './lib/router.svelte';
-  import { getWizard, isConnected, isUnauthorized, loadWizard, setUnauthorized } from './lib/stores/status.svelte';
+  import { getWizard, isConnected, isUnauthorized, loadStatus, loadWizard, setUnauthorized } from './lib/stores/status.svelte';
   import { startEvents } from './lib/stores/events';
   import { ApiError, setApiKey } from './lib/api';
   import Nav from './lib/Nav.svelte';
   import Toasts from './lib/Toasts.svelte';
+  import HeldBanner from './lib/HeldBanner.svelte';
   import Wizard from './routes/Wizard.svelte';
   import Platforms from './routes/Platforms.svelte';
   import Browse from './routes/Browse.svelte';
@@ -34,14 +35,17 @@
     }
     wizardRetryMs = 1000;
     setUnauthorized(false);
+    void loadStatus().catch(() => undefined);
     const wizard = getWizard();
-    if (wizard && (!wizard.paths || wizard.open_on_start) && getRoute().name !== 'wizard') {
+    if (wizard && wizard.open_on_start && getRoute().name !== 'wizard') {
       navigate('/wizard');
     }
   }
 
   startEvents();
-  if (!isMock) {
+  if (isMock) {
+    void loadStatus();
+  } else {
     void checkFirstRun();
   }
 
@@ -72,6 +76,10 @@
 
   {#if !connected && route.name !== 'wizard'}
     <div class="banner">Disconnected from server. Reconnecting…</div>
+  {/if}
+
+  {#if route.name !== 'wizard'}
+    <HeldBanner />
   {/if}
 
   <Toasts />
