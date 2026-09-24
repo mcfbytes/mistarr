@@ -142,12 +142,13 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    `sources/rejected/` with a `<name>.reason.txt`.
 2. For a magnet, the source is `resolving`. A light `resolve_magnet` job adds
    it to the client paused into `staging/<infohash>/` with nothing wanted and
-   starts it, since a paused magnet never fetches metadata, then asks the
-   client for its file list every 15 s. Once the list arrives every file is
-   set unwanted, the torrent is stopped and the source is bound like a
-   `.torrent`.
-   With no client detected the source stays `resolving` with a reason and is
-   retried when one appears.
+   starts it, since a paused magnet never fetches metadata. While it is
+   started the job asks the client for its file list every 2 s, because once
+   metadata arrives the client wants every file. When the list appears the
+   torrent is stopped first, then every file is set unwanted and the source
+   is bound like a `.torrent`. A magnet not yet in the client, because none
+   is detected or the add failed, stays `resolving` with a reason and is
+   retried every 15 s.
 3. For each file in the torrent, normalise the leaf name and look it up
    against every loaded DAT by name, then by base name plus size. Compute
    per-platform hit rates.

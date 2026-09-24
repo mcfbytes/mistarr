@@ -32,8 +32,10 @@ pub struct Options {
     pub sources_poll: Duration,
     /// Seconds a file in `sources/` must be unmodified before it is imported.
     pub sources_min_age_secs: u64,
-    /// How often resolving magnets are checked with the client.
+    /// How often resolving magnets not yet started in the client are retried.
     pub magnet_poll: Duration,
+    /// How often a started resolving magnet's file list is checked.
+    pub magnet_started_poll: Duration,
 }
 
 impl Default for Options {
@@ -45,6 +47,7 @@ impl Default for Options {
             sources_poll: Duration::from_secs(10),
             sources_min_age_secs: mistarr_sources::watch::DEFAULT_MIN_AGE_SECS,
             magnet_poll: Duration::from_secs(15),
+            magnet_started_poll: Duration::from_secs(2),
         }
     }
 }

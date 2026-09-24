@@ -3,8 +3,12 @@
 mod common;
 
 use std::path::PathBuf;
+use std::time::Duration;
 
-use common::{boot, boot_with, config_in, eventually, get, request, request_bytes, Booted, Sse};
+use common::{
+    boot, boot_with_options, config_in, eventually, get, options_in, request, request_bytes,
+    Booted, Sse,
+};
 use mistarr_clients::fake::{FakeResponse, FakeScgiServer, FakeServer, ScgiReply};
 use mistarr_clients::xmlrpc::Value as Xml;
 use mistarr_server::config::ClientChoice;
@@ -352,17 +356,20 @@ async fn magnet_resolves_through_the_client() {
     fake.push(FakeResponse::success(
         json!({ "torrents": [{ "name": "Magnet Set", "files": listed }] }),
     ));
+    fake.push(exists());
+    fake.push(FakeResponse::success(json!({})));
     fake.push(FakeResponse::success(
         json!({ "torrents": [{ "wanted": [true, true, true] }] }),
     ));
-    fake.push(FakeResponse::success(json!({})));
-    fake.push(exists());
     fake.push(FakeResponse::success(json!({})));
 
     let dir = tempfile::tempdir().expect("tempdir");
     let mut config = config_in(dir.path());
     config.client.url = fake.url();
-    let b = boot_with(dir, config).await;
+    // Only the started-magnet cadence can pick up the listing in time.
+    let mut options = options_in(dir.path());
+    options.magnet_poll = Duration::from_secs(3600);
+    let b = boot_with_options(dir, config, options).await;
     assert!(b.running.app.client().is_some());
     seed_catalog(&b);
     let mut sse = Sse::open(b.addr(), "/api/v1/events", &[]).await;
@@ -406,9 +413,9 @@ async fn magnet_resolves_through_the_client() {
             "torrent-get",
             "torrent-get",
             "torrent-get",
-            "torrent-set",
-            "torrent-get",
             "torrent-stop",
+            "torrent-get",
+            "torrent-set",
         ]
     );
     assert_eq!(bodies[6]["arguments"]["fields"], json!(["name", "files"]));
@@ -421,7 +428,7 @@ async fn magnet_resolves_through_the_client() {
         add["arguments"]["download-dir"],
         staging.to_string_lossy().as_ref()
     );
-    assert_eq!(bodies[9]["arguments"]["files-unwanted"], json!([0, 1, 2]));
+    assert_eq!(bodies[11]["arguments"]["files-unwanted"], json!([0, 1, 2]));
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -451,16 +458,18 @@ async fn magnet_resolves_through_rtorrent() {
             row("NES/Third Tale (Europe).nes", 65_552),
         ]),
     ]));
+    fake.push(xml_ok());
     fake.push(xml_multicall(vec![Xml::Int(0), Xml::Int(2)]));
     fake.push(xml_multicall(vec![Xml::Int(0), Xml::Int(0)]));
-    fake.push(xml_ok());
     fake.push(xml_ok());
 
     let dir = tempfile::tempdir().expect("tempdir");
     let mut config = config_in(dir.path());
     config.client.kind = ClientChoice::Rtorrent;
     config.client.url = fake.addr();
-    let b = boot_with(dir, config).await;
+    let mut options = options_in(dir.path());
+    options.magnet_poll = Duration::from_secs(3600);
+    let b = boot_with_options(dir, config, options).await;
     seed_catalog(&b);
     let mut sse = Sse::open(b.addr(), "/api/v1/events", &[]).await;
     let uri = format!("magnet:?xt=urn:btih:{h}&dn=Rt%20Set");
@@ -498,10 +507,10 @@ async fn magnet_resolves_through_rtorrent() {
             "d.start",
             "multi:d.is_meta",
             "multi:d.is_meta",
+            "d.stop",
             "multi:d.is_meta",
             "multi:f.priority.set",
             "d.update_priorities",
-            "d.stop",
         ]
     );
     b.running.shutdown().await.expect("shutdown");
@@ -536,5 +545,37 @@ async fn concurrent_uploads_of_one_name_keep_both() {
         .collect();
     names.sort();
     assert_eq!(names, ["First Set", "Second Set"]);
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn unstarted_magnets_keep_the_slow_cadence() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = config_in(dir.path());
+    let mut options = options_in(dir.path());
+    options.magnet_poll = Duration::from_secs(3600);
+    let b = boot_with_options(dir, config, options).await;
+    let uri = format!("magnet:?xt=urn:btih:{}&dn=Slow%20Set", hash(0x3c));
+    std::fs::write(sources_dir(&b).join("slow.magnet"), format!("{uri}\n")).expect("write");
+    eventually("a reason from the unreachable client", || async {
+        sources(&b)
+            .await
+            .first()
+            .is_some_and(|s| s["reason"].is_string())
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    let app = &b.running.app;
+    let runs = app
+        .db
+        .read(|c| mistarr_server::db::jobs::count_kind(c, "resolve_magnet"))
+        .await
+        .expect("count");
+    // The import's own run, plus at most the first slow tick.
+    assert!(
+        runs <= 2,
+        "{runs} resolve runs for a magnet the client never took"
+    );
+    assert_eq!(only_source(&b).await["client_id"], Value::Null);
     b.running.shutdown().await.expect("shutdown");
 }

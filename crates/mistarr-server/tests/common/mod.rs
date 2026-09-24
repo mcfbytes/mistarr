@@ -53,13 +53,17 @@ pub fn options_in(dir: &Path) -> Options {
         sources_poll: Duration::from_millis(50),
         sources_min_age_secs: 0,
         magnet_poll: Duration::from_millis(100),
+        magnet_started_poll: Duration::from_millis(50),
     }
 }
 
 pub async fn boot_with(dir: tempfile::TempDir, config: Config) -> Booted {
-    let running = app::start(config, options_in(dir.path()))
-        .await
-        .expect("start");
+    let options = options_in(dir.path());
+    boot_with_options(dir, config, options).await
+}
+
+pub async fn boot_with_options(dir: tempfile::TempDir, config: Config, options: Options) -> Booted {
+    let running = app::start(config, options).await.expect("start");
     Booted { dir, running }
 }
 

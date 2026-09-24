@@ -294,15 +294,17 @@ pub fn list(conn: &Connection, limit: u32, offset: u32) -> Result<(Vec<SourceRow
     Ok((rows, total))
 }
 
-/// Ids of every source in `resolving`.
+/// Every source in `resolving`, each with whether the client already has it.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn list_resolving(conn: &Connection) -> Result<Vec<SourceId>> {
-    let mut stmt = conn.prepare("SELECT id FROM sources WHERE state = 'resolving' ORDER BY id")?;
+pub fn list_resolving(conn: &Connection) -> Result<Vec<(SourceId, bool)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, client_id IS NOT NULL FROM sources WHERE state = 'resolving' ORDER BY id",
+    )?;
     let ids = stmt
-        .query_map([], |r| r.get(0).map(SourceId))?
+        .query_map([], |r| Ok((SourceId(r.get(0)?), r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(ids)
 }
@@ -700,7 +702,9 @@ mod tests {
         let (page, total) = list(&c, 1, 1).expect("list");
         assert_eq!((page.len(), total), (1, 2));
         assert_eq!(page[0].id, b);
-        assert_eq!(list_resolving(&c).expect("resolving"), [b]);
+        assert_eq!(list_resolving(&c).expect("resolving"), [(b, false)]);
+        set_client_id(&c, b, Some("x")).expect("client");
+        assert_eq!(list_resolving(&c).expect("resolving"), [(b, true)]);
         assert_eq!(SourceId(3).to_string(), "3");
     }
 

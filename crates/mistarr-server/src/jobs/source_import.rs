@@ -363,11 +363,12 @@ impl Job for ResolveMagnet {
             }
             Err(e) => return note(app, &row, &unanswered(&e)).await,
         };
-        if let Err(e) = client.set_wanted(&torrent, &[]).await {
-            tracing::warn!(source = %id, error = %e, "cannot clear the magnet's file selection");
-        }
+        // Stop first: once metadata is in, the client wants every file.
         if let Err(e) = client.stop(&torrent).await {
             tracing::warn!(source = %id, error = %e, "cannot stop the resolved magnet");
+        }
+        if let Err(e) = client.set_wanted(&torrent, &[]).await {
+            tracing::warn!(source = %id, error = %e, "cannot clear the magnet's file selection");
         }
         let files: Vec<TorrentFile> = listed
             .into_iter()
@@ -471,12 +472,16 @@ pub async fn watch(app: Arc<AppState>) {
     }
 }
 
-/// Enqueues a [`ResolveMagnet`] for every resolving source every
-/// [`crate::app::Options::magnet_poll`], so a new client or new metadata is picked up.
+/// Enqueues a [`ResolveMagnet`] for resolving sources: every
+/// [`crate::app::Options::magnet_started_poll`] for those already started in
+/// the client, so a set torrent is stopped soon after its metadata arrives, and
+/// every [`crate::app::Options::magnet_poll`] for the rest.
 pub async fn resolve_pending(app: Arc<AppState>) {
-    let mut tick = tokio::time::interval(app.options.magnet_poll);
+    let slow = app.options.magnet_poll;
+    let mut tick = tokio::time::interval(app.options.magnet_started_poll.min(slow));
+    let mut last_slow: Option<tokio::time::Instant> = None;
     loop {
-        tick.tick().await;
+        let now = tick.tick().await;
         let pending = match app.db.read(rows::list_resolving).await {
             Ok(ids) => ids,
             Err(e) => {
@@ -484,7 +489,14 @@ pub async fn resolve_pending(app: Arc<AppState>) {
                 continue;
             }
         };
-        for source_id in pending {
+        let slow_due = last_slow.is_none_or(|t| now.duration_since(t) >= slow);
+        if slow_due {
+            last_slow = Some(now);
+        }
+        for (source_id, started) in pending {
+            if !started && !slow_due {
+                continue;
+            }
             if let Err(e) = Scheduler::enqueue(&app, Arc::new(ResolveMagnet { source_id })).await {
                 tracing::warn!(error = %e, "cannot queue magnet resolving");
             }
