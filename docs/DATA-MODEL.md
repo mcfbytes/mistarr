@@ -75,7 +75,7 @@ CREATE TABLE roms (                     -- one per <rom>; the file unit
   retired       INTEGER NOT NULL DEFAULT 0,       -- no longer listed by the title's DAT entry
   header        TEXT,                  -- the DAT's header attribute, verbatim: hex bytes an adapter may prepend
   zip_dir       TEXT,                  -- MRA roms: directory under games/ holding the zip
-  present       INTEGER NOT NULL DEFAULT 0,       -- MRA roms: the zip was on disk at the last catalogue run
+  present       INTEGER NOT NULL DEFAULT 0,       -- MRA roms: the zip was on disk at the last catalogue run or import
   UNIQUE (title_id, name)
 );
 CREATE INDEX roms_sha1 ON roms(sha1);
@@ -210,7 +210,9 @@ single-file one. It is the path mistarr sees, after the remote path map.
 - `pending`: seen, not yet hashed.
 - `verified`: hash matches a rom and the filename is what the adapter expects.
 - `misnamed`: hash matches a rom, name differs. The UI offers rename.
-- `unverified`: no rom matches in any loaded DAT.
+- `unverified`: no rom matches in any loaded DAT. A member of an imported MRA
+  zip the md5 check did not read, or that no hash source covers, is
+  `unverified` with `rom_id` set to the zip's rom.
 - `bad`: matches a rom flagged `baddump`.
 
 ### sources.state

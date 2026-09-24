@@ -225,7 +225,11 @@ newest first, where `action` is one of `docs/DATA-MODEL.md` "import_log" and
 file name and zip `member` for a placement, plus `previous` `{ rel_path,
 state, rom_id, sha1 }` for `replaced`; `path`, `expected` (the rom) and
 `actual` (hashes per file or member) for `quarantined`; `from` and `rel_path`
-for `renamed`.
+for `renamed`. A placement of an MRA zip adds `verification` (`mra_md5`,
+`dat` or `none`), `reason` when its members stay `unverified`, and
+`dat_entry` for `dat` (PLATFORMS.md "MRA import"). Its quarantine adds
+`missing` (member names), `md5` (the failed check) or `dat_entry`, `extra`
+and `absent` (member and rom names).
 
 ## Events
 

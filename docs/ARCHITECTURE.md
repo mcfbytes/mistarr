@@ -133,7 +133,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 ### Library scan
 
 1. Triggered by the wizard, manually, or on a schedule. Walk each platform's
-   `games/<Core>` directory. Skip while a core is running.
+   `games/<Core>` directory and its other accepted directories (`games/hbmame`
+   for arcade). Skip while a core is running.
 2. For each file, compare size and mtime with `files`. Unchanged files are
    skipped. New or changed files are hashed in one streaming pass with the
    platform's header rule. Zip members are hashed through the decompressor,
@@ -158,7 +159,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    case-insensitively, and its presence stored on its rom. A title whose MRA carries an `md5` and whose zips are
    all present is checked by assembling its roms (PLATFORMS.md "MRA
    assembly"); the check reruns only when the MRA or one of its zips changes
-   size or mtime. Nothing is ever fetched, rebuilt, merged or split.
+   size or mtime. Placing one of its zips reruns this for every title naming
+   that zip. Nothing is ever fetched, rebuilt, merged or split.
 
 ### Source import
 
@@ -226,9 +228,8 @@ does nothing.
    `bad` and the file moves to `staging/quarantine/<infohash>/` beside a
    `<name>.report.txt` naming the expected rom, the actual hashes and the
    other entry it matches, if any. An entry flagged `bios` is refused: the
-   download is `failed` and the file stays in staging. So is an MRA entry,
-   whose roms name zips but not their contents; a set is imported through
-   its MAME DAT entry.
+   download is `failed` and the file stays in staging. A zip an MRA title
+   names is verified and placed as PLATFORMS.md "MRA import" describes.
 2. A romset or arcade zip verifies only when every member is a rom of the
    entry and every rom of the entry is a member. A disc entry waits until
    every track is `importing` and is placed together; when a track is missing

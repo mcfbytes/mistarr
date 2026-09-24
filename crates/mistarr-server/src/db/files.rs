@@ -264,6 +264,32 @@ pub fn has_verified(conn: &Connection, rom_id: i64) -> Result<bool> {
     )?)
 }
 
+/// Marks the `unverified` row at `rel_path` verified as rom `rom_id`. Returns whether a row changed.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_core::PlatformId;
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let pid = PlatformId("arcade".into());
+/// assert!(!mistarr_server::db::files::mark_verified(&conn, &pid, "mame/a.zip#a.bin", 1).unwrap());
+/// ```
+pub fn mark_verified(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    rel_path: &str,
+    rom_id: i64,
+) -> Result<bool> {
+    Ok(conn.execute(
+        "UPDATE files SET state = 'verified', rom_id = ?3
+         WHERE platform_id = ?1 AND rel_path = ?2 AND state = 'unverified'",
+        params![platform_id.0, rel_path, rom_id],
+    )? > 0)
+}
+
 /// Every hashed field a file row records, when the file was hashed this pass.
 #[derive(Debug, Clone, Default)]
 pub struct Hashed<'a> {

@@ -2,6 +2,7 @@
 //! entry, then quarantines or places it; see `docs/ARCHITECTURE.md` "Import"
 //! and `docs/VERIFICATION.md`.
 
+mod mra;
 pub mod place;
 mod rename;
 mod support;
@@ -26,8 +27,8 @@ use self::place::{Partial, PlaceError, Roots};
 pub use self::rename::{rename, RenameError};
 pub use self::support::parse_header;
 use self::support::{
-    dat_rom, file_name, hash_item, header_rule, is_zip, leaf, locate, pick_rom, quarantine,
-    read_head, rel_string, report, Hashed,
+    dat_rom, explain, file_name, hash_item, header_rule, is_zip, leaf, locate, match_members,
+    pick_rom, quarantine, read_head, rel_string, report, Hashed,
 };
 use super::{transfer, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
@@ -45,10 +46,6 @@ pub const KIND: &str = "import";
 
 /// Why a BIOS entry is never imported, from `docs/PRINCIPLES.md` section 3.
 const BIOS_REFUSED: &str = "BIOS entries are never imported";
-
-/// MRA titles name zips without their contents, so nothing can verify a staged one.
-const MRA_REFUSED: &str =
-    "an MRA entry names zips, not their contents; import the set through its MAME DAT entry";
 
 const OUTSIDE_STAGING: &str = "the staged file is outside the staging directory";
 
@@ -230,9 +227,6 @@ async fn import(ctx: &JobContext, id: DownloadId) -> Result<()> {
     if entry.is_bios() {
         return fail(app, &[id], BIOS_REFUSED).await;
     }
-    if entry.from_mra {
-        return fail(app, &[id], MRA_REFUSED).await;
-    }
     let (Some(platform), Some(adapter)) = (
         platforms::by_id(&entry.platform_id.0),
         adapter_for(&entry.platform_id),
@@ -250,6 +244,7 @@ async fn import(ctx: &JobContext, id: DownloadId) -> Result<()> {
         entry: &entry,
     };
     match platform.kind {
+        _ if entry.from_mra => placing.mra(&row).await,
         Kind::Disc => placing.disc().await,
         Kind::Romset | Kind::Arcade => placing.romset(&row).await,
         _ => placing.single(&row).await,
@@ -264,6 +259,18 @@ struct Piece {
     source: PathBuf,
     hashed: Hashed,
     rom: EntryRom,
+    /// The `files.state` to record, when not the one the rom's hash match gives.
+    state: Option<FileState>,
+}
+
+/// Why a staged item is quarantined, when it is more than a hash mismatch.
+struct Why {
+    /// The download's error.
+    reason: String,
+    /// The opening of the report beside the quarantined file.
+    report: String,
+    /// Fields added to the `quarantined` log entry.
+    detail: Value,
 }
 
 impl Piece {
@@ -382,6 +389,18 @@ impl Placing<'_> {
         local: &Path,
         actual: &[Hashed],
     ) -> Result<()> {
+        self.quarantine_with(row, rom_id, local, actual, None).await
+    }
+
+    /// [`Self::quarantine`], with the report, reason and log detail led by `why` when given.
+    async fn quarantine_with(
+        &self,
+        row: DownloadId,
+        rom_id: i64,
+        local: &Path,
+        actual: &[Hashed],
+        why: Option<Why>,
+    ) -> Result<()> {
         let (pid, list) = (self.pid(), actual.to_vec());
         let (expected, other) = self
             .app()
@@ -403,12 +422,15 @@ impl Placing<'_> {
         let named = other
             .as_ref()
             .map(|(_, title, rom)| format!("{title} ({rom})"));
-        let text = report(
-            expected.as_ref(),
-            actual,
-            named.as_deref(),
-            self.platform.header_rule,
-        );
+        let text = match &why {
+            Some(w) => explain(&w.report, actual),
+            None => report(
+                expected.as_ref(),
+                actual,
+                named.as_deref(),
+                self.platform.header_rule,
+            ),
+        };
         let (staging, hash, item) = (
             self.staging.clone(),
             self.source.infohash.clone(),
@@ -428,15 +450,19 @@ impl Placing<'_> {
                 json!({ "member": a.member, "size": h.size, "crc32": h.crc32, "md5": h.md5, "sha1": h.sha1 })
             })
             .collect();
-        let detail = json!({
+        let mut detail = json!({
             "path": dst.to_string_lossy(),
             "expected": expected,
             "actual": actual_json,
             "other": other.map(|(id, title, rom)| json!({ "title_id": id.0, "title": title, "rom": rom })),
         });
-        let reason = match named {
-            Some(n) => format!("the file is {n}, not the wanted entry; it was quarantined"),
-            None => "the file matches no DAT entry and was quarantined".to_owned(),
+        let reason = match (why, named) {
+            (Some(w), _) => {
+                merge(&mut detail, &w.detail);
+                w.reason
+            }
+            (None, Some(n)) => format!("the file is {n}, not the wanted entry; it was quarantined"),
+            (None, None) => "the file matches no DAT entry and was quarantined".to_owned(),
         };
         let moved = self
             .app()
@@ -518,6 +544,7 @@ impl Placing<'_> {
             source: local.clone(),
             hashed: hashed.clone(),
             rom: rom.clone(),
+            state: None,
         };
         self.place(&dat, &staged, vec![piece], &[row.id], &[local])
             .await
@@ -562,31 +589,23 @@ impl Placing<'_> {
             Ok(h) => h,
             Err(reason) => return fail(app, &ids, &reason).await,
         };
-        let mut used = Vec::new();
-        let mut pieces = Vec::with_capacity(members.len());
-        for m in &members {
-            let Some(rom) = pick_rom(
-                &self.entry.roms,
-                &m.hashes,
-                None,
-                m.member.as_deref(),
-                &used,
-            ) else {
-                break;
-            };
-            used.push(rom.id);
-            pieces.push(Piece {
-                download: row.id,
-                source: local.clone(),
-                hashed: m.clone(),
-                rom: rom.clone(),
-            });
-        }
-        if pieces.len() != members.len() || used.len() != self.entry.roms.len() {
+        let set = match_members(&self.entry.roms, &members);
+        if !set.is_exact() {
             self.quarantine(row.id, row.rom_id, &local, &members)
                 .await?;
             return fail(app, &ids, "the romset did not verify and was quarantined").await;
         }
+        let pieces: Vec<Piece> = set
+            .pairs
+            .iter()
+            .map(|(m, rom)| Piece {
+                download: row.id,
+                source: local.clone(),
+                hashed: (*m).clone(),
+                rom: (*rom).clone(),
+                state: None,
+            })
+            .collect();
         let mut staged_members = Vec::with_capacity(members.len());
         for m in &members {
             let name = m.member.clone().unwrap_or_default();
@@ -696,6 +715,7 @@ impl Placing<'_> {
                 source: local,
                 hashed,
                 rom,
+                state: None,
             });
         }
         if pieces.is_empty() {
@@ -770,14 +790,30 @@ impl Placing<'_> {
         ids: &[DownloadId],
         originals: &[PathBuf],
     ) -> Result<()> {
-        let app = self.app();
         let plan = match self.adapter.plan_placement(dat, staged) {
             Ok(p) => p,
-            Err(e) => return fail(app, ids, &format!("cannot place the file: {e}")).await,
+            Err(e) => return fail(self.app(), ids, &format!("cannot place the file: {e}")).await,
         };
+        self.place_plan(&plan, staged, pieces, ids, originals, None)
+            .await
+            .map(|_| ())
+    }
+
+    /// Applies `plan` and records it as [`Self::place`] does, adding `note` to each
+    /// `import_log` entry. Returns whether every file landed.
+    async fn place_plan(
+        &self,
+        plan: &PlacementPlan,
+        staged: &StagedFile,
+        pieces: Vec<Piece>,
+        ids: &[DownloadId],
+        originals: &[PathBuf],
+        note: Option<Value>,
+    ) -> Result<bool> {
+        let app = self.app();
         let whole =
             (staged.kind == StagedKind::Zip).then(|| PathBuf::from(file_name(&staged.path)));
-        let targets = self.targets(&plan, whole.as_deref()).await?;
+        let targets = self.targets(plan, whole.as_deref()).await?;
         let steps: Vec<Step> = plan
             .steps
             .iter()
@@ -808,23 +844,27 @@ impl Placing<'_> {
         match applied {
             Err(e) => {
                 let reason = format!("cannot place the file, nothing was changed: {e}");
-                fail(app, ids, &reason).await
+                fail(app, ids, &reason).await.map(|()| false)
             }
             Ok(Placed::All(stats)) => {
-                let done = self.record(targets, &stats, pieces, ids, true).await?;
+                let done = self
+                    .record(targets, &stats, pieces, ids, true, note)
+                    .await?;
                 self.announce(ids, &done);
                 self.release_torrent().await;
-                Ok(())
+                Ok(true)
             }
             Ok(Placed::Partly(stats, error)) => {
                 let total = targets.len();
                 let landed = stats.len();
-                let done = self.record(targets, &stats, pieces, ids, false).await?;
+                let done = self
+                    .record(targets, &stats, pieces, ids, false, note)
+                    .await?;
                 self.announce(&[], &done);
                 let reason = format!(
                     "placement stopped after {landed} of {total} files ({error}); retry to finish"
                 );
-                fail(app, ids, &reason).await
+                fail(app, ids, &reason).await.map(|()| false)
             }
         }
     }
@@ -889,12 +929,14 @@ impl Placing<'_> {
         pieces: Vec<Piece>,
         ids: &[DownloadId],
         complete: bool,
+        note: Option<Value>,
     ) -> Result<Vec<(FileId, ImportAction)>> {
         let scope = Scope {
             pid: self.pid(),
             rule: self.platform.header_rule,
             title: self.entry.id,
             stats: stats.clone(),
+            note,
         };
         let ids = ids.to_vec();
         self.app()
@@ -979,16 +1021,31 @@ struct Scope {
     rule: &'static str,
     title: TitleId,
     stats: HashMap<String, (i64, i64)>,
+    /// Fields added to every log entry, such as how an MRA zip was verified.
+    note: Option<Value>,
+}
+
+/// Copies the fields of the object `extra` into the object `into`.
+fn merge(into: &mut Value, extra: &Value) {
+    if let (Some(into), Some(extra)) = (into.as_object_mut(), extra.as_object()) {
+        for (k, v) in extra {
+            into.insert(k.clone(), v.clone());
+        }
+    }
 }
 
 fn log_detail(scope: &Scope, p: &Piece, rel: &str) -> Value {
-    json!({
+    let mut detail = json!({
         "rel_path": rel,
         "title_id": scope.title.0,
         "rom_id": p.rom.id,
         "staged": file_name(&p.source),
         "member": p.hashed.member,
-    })
+    });
+    if let Some(note) = &scope.note {
+        merge(&mut detail, note);
+    }
+    detail
 }
 
 fn previous(prev: Option<&FileRow>, rel: &str) -> Value {
@@ -1086,6 +1143,9 @@ fn record_target(
 
 /// The state the scanner would give a placed payload.
 fn file_state(p: &Piece, whole_zip: bool) -> FileState {
+    if let Some(state) = p.state {
+        return state;
+    }
     let named = p
         .hashed
         .member

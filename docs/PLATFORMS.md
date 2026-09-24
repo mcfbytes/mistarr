@@ -70,7 +70,7 @@ never zipped. CHD is accepted on scan but not produced.
 | id | DAT name matches | core dir | adapter notes |
 |---|---|---|---|
 | `neogeo` | `Neo Geo` | `NeoGeo` | Cartridge games are romsets: a directory or zip per game whose internal layout the core expects, described by a `romsets.xml` the core ships. The adapter treats the DAT `<game>` as the unit, places the zip whole, and verifies member hashes against the DAT rather than the zip's own hash. A staged directory is placed whole as a directory. Needs BIOS `000-lo.lo`, `sfix.sfix`, `sp-s2.sp1`: report only. |
-| `arcade` | `MAME`, `Arcade` | `mame` (under `games/`) with MRAs in `_Arcade` | Wanted list is derived from MRA files: each MRA names the zips it needs. The adapter parses every MRA, lists missing zips, and places zips whole. Verification uses the MRA's `md5` where present and the loaded MAME DAT otherwise. No romset rebuilding, merging or splitting. A staged directory is zipped under the set name. |
+| `arcade` | `MAME`, `Arcade` | `mame` and `hbmame` (under `games/`) with MRAs in `_Arcade` | Wanted list is derived from MRA files: each MRA names the zips it needs. The adapter parses every MRA, lists missing zips, and places zips whole; see "MRA import". Verification uses the MRA's `md5` where present and the loaded MAME DAT otherwise. No romset rebuilding, merging or splitting. A staged directory is zipped under the set name for a DAT entry. |
 
 ### Neo Geo `romsets.xml`
 
@@ -119,6 +119,47 @@ the rom from this subset and refuses anything else by name:
 
 A part in none of its zips is reported as `missing_part` with its name; it
 is never sourced. Assembled roms are capped at 512 MiB.
+
+### MRA import
+
+A download of an MRA title is one zip the MRA names, staged whole. The
+importer reads the MRA again and checks the zip in this order, recording
+which check applied as `verification` in `import_log`:
+
+1. Every named part whose zips include this one must be in one of them;
+   parts that may still come from a zip not yet on disk are not counted.
+   Otherwise the zip is quarantined, the report and the download's error
+   naming the missing members.
+2. `mra_md5`, when every `<rom>` index the zip feeds has a `<rom>` with an
+   `md5`: those roms are assembled as in "MRA assembly" from the staged zip
+   and the sibling zips already on disk. When every index matches, the
+   members read by the `<rom>` alternatives that matched are `verified` and
+   the rest `unverified`; a mismatch quarantines the zip;
+   content the assembler refuses fails the download with the assembler's
+   reason and leaves the zip in staging. While a part may come from a zip
+   not yet on disk, the zip is placed with `unverified` members and the
+   reason names the zips the check waits for; when the last of them lands
+   the check runs over all of them and marks the members read from the
+   earlier zips `verified`.
+3. `dat`, when a loaded DAT of the platform has a live entry named as the
+   zip without `.zip`, looked up by directory: a zip in `games/hbmame/`
+   only in DATs whose header name contains `HBMAME`, any other zip only in
+   the other DATs. Members are verified against it as a romset, and a zip
+   that does not match exactly is quarantined. An entry flagged `bios`
+   refuses the download on this path only; a zip the md5 covers is never
+   looked up in a DAT.
+4. `none`: the zip is placed with `unverified` members and the reason `no
+   hash source`.
+
+The zip goes whole, never unpacked, to `games/mame/` or `games/hbmame/` as
+its MRA path says, under the MRA's file name; a zip read from any other
+directory is refused. `files` gets one row per member, linked to the DAT
+rom for `dat` and to the MRA title's zip rom otherwise, with the size and
+mtime a scan would record, so a following scan keeps them. Then the
+presence and md5 check of every MRA title naming the zip are redone, so a
+title shows have once all its zips are present and the check has not
+failed. Wanting a title creates one download per zip not on disk, and the
+zips may land in any order.
 
 ## Thumbnail playlists
 

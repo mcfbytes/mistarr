@@ -201,6 +201,61 @@ pub(super) fn pick_rom<'a>(
         .copied()
 }
 
+/// How the members of a zip pair with the roms of a DAT entry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct SetMatch<'a> {
+    /// Each member that is a rom of the entry, with that rom.
+    pub pairs: Vec<(&'a Hashed, &'a EntryRom)>,
+    /// Members that are no rom of the entry.
+    pub extra: Vec<String>,
+    /// Roms of the entry no member is.
+    pub absent: Vec<String>,
+}
+
+impl SetMatch<'_> {
+    /// Every member is a rom of the entry and every rom is a member.
+    pub fn is_exact(&self) -> bool {
+        self.extra.is_empty() && self.absent.is_empty()
+    }
+}
+
+/// Pairs each member with a distinct rom of `roms` by hash, preferring the same name.
+pub(super) fn match_members<'a>(roms: &'a [EntryRom], members: &'a [Hashed]) -> SetMatch<'a> {
+    let mut used = Vec::with_capacity(members.len());
+    let mut out = SetMatch {
+        pairs: Vec::with_capacity(members.len()),
+        extra: Vec::new(),
+        absent: Vec::new(),
+    };
+    for m in members {
+        match pick_rom(roms, &m.hashes, None, m.member.as_deref(), &used) {
+            Some(rom) => {
+                used.push(rom.id);
+                out.pairs.push((m, rom));
+            }
+            None => out.extra.push(m.member.clone().unwrap_or_default()),
+        }
+    }
+    out.absent = roms
+        .iter()
+        .filter(|r| !used.contains(&r.id))
+        .map(|r| r.name.clone())
+        .collect();
+    out
+}
+
+/// A quarantine report that opens with `why` and lists what arrived.
+pub(super) fn explain(why: &str, actual: &[Hashed]) -> String {
+    let mut out = format!("{why}\n\n");
+    for a in actual {
+        let label = a.member.as_deref().unwrap_or_default();
+        let h = &a.hashes;
+        let _ = writeln!(out, "Actual {label}: {} bytes", h.size);
+        let _ = writeln!(out, "  crc32 {}  md5 {}  sha1 {}", h.crc32, h.md5, h.sha1);
+    }
+    out
+}
+
 /// A library path as `files.rel_path` stores it.
 pub(super) fn rel_string(path: &Path) -> String {
     path.components()
@@ -338,6 +393,33 @@ mod tests {
         assert!(rom_matches(&md5_only, &h));
         let other = hash_reader(Cursor::new(b"abd"), HeaderRule::None, None).expect("hash");
         assert!(!rom_matches(&a, &other));
+    }
+
+    #[test]
+    fn members_pair_with_distinct_roms_and_leftovers_are_named() {
+        let h = abc();
+        let other = hash_reader(Cursor::new(b"xyz"), HeaderRule::None, None).expect("hash");
+        let roms = [rom(1, "a.bin", &h), rom(2, "b.bin", &h)];
+        let member = |name: &str, hashes: &Hashes| Hashed {
+            member: Some(name.into()),
+            raw_size: hashes.size,
+            hashes: hashes.clone(),
+        };
+        let both = [member("b.bin", &h), member("a.bin", &h)];
+        let set = match_members(&roms, &both);
+        assert!(set.is_exact());
+        assert_eq!(
+            set.pairs.iter().map(|(_, r)| r.id).collect::<Vec<_>>(),
+            [2, 1]
+        );
+        let odd = [member("a.bin", &h), member("c.bin", &other)];
+        let set = match_members(&roms, &odd);
+        assert!(!set.is_exact());
+        assert_eq!(set.extra, ["c.bin"]);
+        assert_eq!(set.absent, ["b.bin"]);
+        let text = explain("This zip lacks members.", &odd);
+        assert!(text.starts_with("This zip lacks members.\n\nActual a.bin: 3 bytes\n"));
+        assert!(text.contains(&other.sha1));
     }
 
     #[test]
