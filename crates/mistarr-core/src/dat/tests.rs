@@ -508,7 +508,8 @@ fn errors_display() {
     assert_eq!(e.to_string(), "a.dat: DAT contains no games");
     assert_eq!(
         DatError::NotDatafile { root: "x".into() }.to_string(),
-        "root element is <x>, expected <datafile>"
+        "root element is <x>; expected a Logiqx DAT (<datafile>) \
+         or a No-Intro DB export (<header> followed by <datafile>)"
     );
 }
 
@@ -542,6 +543,8 @@ prop_compose! {
             rom_of: None,
             description: description.map(|d| d.trim().to_owned()),
             category: None,
+            regions: Vec::new(),
+            languages: Vec::new(),
             roms,
         }
     }
@@ -600,4 +603,17 @@ proptest! {
         let dat = parse_dat(render(&games).as_bytes()).unwrap();
         prop_assert_eq!(dat.games, games);
     }
+}
+
+#[test]
+fn releases_give_regions_and_languages_once_each() {
+    let dat = parse_dat(full_dat().as_bytes()).unwrap();
+    assert_eq!(dat.games[0].regions, ["USA"]);
+    assert!(dat.games[0].languages.is_empty());
+    let xml = r#"<datafile><game name="Example Quest (Europe)">
+        <release name="a" region="Europe" language="En,Fr"/><release name="b" region="Europe" language="Fr, De"/>
+        </game></datafile>"#;
+    let game = &parse_dat(xml.as_bytes()).unwrap().games[0];
+    assert_eq!(game.regions, ["Europe"]);
+    assert_eq!(game.languages, ["En", "Fr", "De"]);
 }

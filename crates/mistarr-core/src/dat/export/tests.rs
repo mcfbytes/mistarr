@@ -1,0 +1,477 @@
+use std::fmt::Write as _;
+use std::io::{BufReader, Cursor, Write as _};
+
+use proptest::prelude::*;
+
+use crate::dat::{
+    export_name, export_parents, parse_dat, parse_dat_pack, parse_dat_with, DatError, DatFormat,
+    DatGame, DatRom, DatStream, ExportOptions, RomStatus,
+};
+use crate::hash::HeaderRule;
+
+/// One synthetic dump: the headerless hashes a board compares, and its iNES header.
+#[derive(Debug, Clone)]
+struct Dump {
+    size: u64,
+    seed: u64,
+    header: Vec<u8>,
+}
+
+/// One synthetic game, rendered as either DAT form.
+#[derive(Debug, Clone)]
+struct Game {
+    name: String,
+    parent: Option<usize>,
+    regions: Vec<String>,
+    languages: Vec<String>,
+    dump: Option<Dump>,
+    sources: usize,
+    bad: bool,
+}
+
+fn hex(seed: u64, len: usize) -> String {
+    let mut out = String::new();
+    let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+    while out.len() < len {
+        write!(out, "{x:016x}").unwrap();
+        x = x.rotate_left(23).wrapping_mul(0x2545_F491_4F6C_DD1D);
+    }
+    out.truncate(len);
+    out
+}
+
+fn header_hex(header: &[u8]) -> String {
+    header
+        .iter()
+        .map(|b| format!("{b:02X}"))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn number(i: usize) -> String {
+    format!("{:04}", i + 1)
+}
+
+/// The DB export form: `<header>`, then `<datafile>` whose games repeat each dump per source.
+fn export_xml(games: &[Game]) -> String {
+    let mut x = String::from(
+        "<?xml version=\"1.0\" encoding=\"utf-8\"?>\n<header>\n\t<version>20260101-000000</version>\n\
+         \t<author>tester</author>\n\t<url>none</url>\n</header>\n<datafile>\n",
+    );
+    for (i, g) in games.iter().enumerate() {
+        let clone = g.parent.map_or_else(|| "P".to_owned(), number);
+        writeln!(
+            x,
+            "\t<game name=\"{}\">\n\t\t<archive number=\"{}\" clone=\"{clone}\" regparent=\"\" name=\"{}\" \
+             region=\"{}\" languages=\"{}\" langchecked=\"yes\"/>",
+            g.name,
+            number(i),
+            g.name,
+            g.regions.join(", "),
+            g.languages.join(","),
+        )
+        .unwrap();
+        for s in 0..g.sources {
+            let section = if g.bad { "Bad Dump" } else { "Trusted Dump" };
+            writeln!(
+                x,
+                "\t\t<source>\n\t\t\t<details id=\"{s}\" section=\"{section}\" region=\"{}\" originalformat=\"Headerless\"/>\n\
+                 \t\t\t<serials media_serial1=\"\"/>",
+                g.regions.join(", ")
+            )
+            .unwrap();
+            if let Some(d) = &g.dump {
+                let whole = d.size + d.header.len() as u64;
+                writeln!(
+                    x,
+                    "\t\t\t<file id=\"{s}1\" extension=\"nes\" size=\"{whole}\" crc32=\"{}\" md5=\"{}\" \
+                     sha1=\"{}\" sha256=\"{}\" header=\"{}\" format=\"Headered\"/>\n\
+                     \t\t\t<file id=\"{s}2\" extension=\"unh\" size=\"{}\" crc32=\"{}\" md5=\"{}\" sha1=\"{}\" \
+                     sha256=\"{}\" format=\"Headerless\"/>",
+                    hex(d.seed ^ 1, 8),
+                    hex(d.seed ^ 2, 32),
+                    hex(d.seed ^ 3, 40),
+                    hex(d.seed ^ 4, 64),
+                    header_hex(&d.header),
+                    d.size,
+                    hex(d.seed, 8),
+                    hex(d.seed, 32),
+                    hex(d.seed, 40),
+                    hex(d.seed, 64),
+                )
+                .unwrap();
+            }
+            x.push_str("\t\t</source>\n");
+        }
+        writeln!(
+            x,
+            "\t\t<release name=\"{}\" region=\"Elsewhere\"/>\n\t</game>",
+            g.name
+        )
+        .unwrap();
+    }
+    x.push_str("</datafile>\n");
+    x
+}
+
+/// The Logiqx form of the same games, as a headerless DAT with the header recorded.
+fn logiqx_xml(games: &[Game]) -> String {
+    let mut x = String::from(
+        "<?xml version=\"1.0\"?>\n<datafile>\n<header><name>Example Vendor - Example System</name>\
+         <version>20260101-000000</version></header>\n",
+    );
+    for g in games {
+        write!(x, "<game name=\"{}\"", g.name).unwrap();
+        if let Some(p) = g.parent {
+            write!(x, " cloneof=\"{}\"", games[p].name).unwrap();
+        }
+        x.push('>');
+        for (k, r) in g.regions.iter().enumerate() {
+            write!(x, "<release name=\"{}\" region=\"{r}\"", g.name).unwrap();
+            if k == 0 && !g.languages.is_empty() {
+                write!(x, " language=\"{}\"", g.languages.join(",")).unwrap();
+            }
+            x.push_str("/>");
+        }
+        if g.regions.is_empty() && !g.languages.is_empty() {
+            write!(
+                x,
+                "<release name=\"{}\" language=\"{}\"/>",
+                g.name,
+                g.languages.join(",")
+            )
+            .unwrap();
+        }
+        if let Some(d) = g.dump.as_ref().filter(|_| g.sources > 0) {
+            write!(
+                x,
+                "<rom name=\"{}.nes\" size=\"{}\" crc=\"{}\" md5=\"{}\" sha1=\"{}\" header=\"{}\"",
+                g.name,
+                d.size,
+                hex(d.seed, 8),
+                hex(d.seed, 32),
+                hex(d.seed, 40),
+                header_hex(&d.header)
+            )
+            .unwrap();
+            if g.bad {
+                x.push_str(" status=\"baddump\"");
+            }
+            x.push_str("/>");
+        }
+        x.push_str("</game>\n");
+    }
+    x.push_str("</datafile>\n");
+    x
+}
+
+fn ines_options() -> ExportOptions {
+    ExportOptions {
+        header_rule: HeaderRule::Ines,
+        extension: Some("nes".into()),
+        ..ExportOptions::default()
+    }
+}
+
+fn ines_header(prg: u8) -> Vec<u8> {
+    let mut h = b"NES\x1a".to_vec();
+    h.extend_from_slice(&[prg, 1]);
+    h.resize(16, 0);
+    h
+}
+
+/// A clone listed before its parent, a parent with two sources, a bad dump and a game without files.
+fn fixture() -> Vec<Game> {
+    let dump = |seed, prg| Dump {
+        size: 16_384 * u64::from(prg),
+        seed,
+        header: ines_header(prg),
+    };
+    let game = |name: &str, parent, region: &str, lang: &str, d, sources, bad| Game {
+        name: name.into(),
+        parent,
+        regions: vec![region.into()],
+        languages: vec![lang.into()],
+        dump: d,
+        sources,
+        bad,
+    };
+    vec![
+        game(
+            "Example Quest (USA)",
+            Some(1),
+            "USA",
+            "En",
+            Some(dump(11, 2)),
+            1,
+            false,
+        ),
+        game(
+            "Example Quest (Japan)",
+            None,
+            "Japan",
+            "Ja",
+            Some(dump(12, 2)),
+            2,
+            false,
+        ),
+        game(
+            "Sample Racer (Europe)",
+            None,
+            "Europe",
+            "En",
+            Some(dump(13, 1)),
+            3,
+            true,
+        ),
+        game("Demo Dungeon (World)", None, "World", "En", None, 1, false),
+    ]
+}
+
+#[test]
+fn a_db_export_yields_headerless_roms_named_like_the_dat() {
+    let xml = export_xml(&fixture());
+    let dat = parse_dat_with(xml.as_bytes(), ines_options()).unwrap();
+    assert_eq!(dat.header.name, "");
+    assert_eq!(dat.header.version, "20260101-000000");
+    assert_eq!(dat.header.author.as_deref(), Some("tester"));
+    let names: Vec<&str> = dat.games.iter().map(|g| g.name.as_str()).collect();
+    assert_eq!(
+        names,
+        [
+            "Example Quest (USA)",
+            "Example Quest (Japan)",
+            "Sample Racer (Europe)",
+            "Demo Dungeon (World)"
+        ]
+    );
+    let clone = &dat.games[0];
+    assert_eq!(clone.clone_of.as_deref(), Some("Example Quest (Japan)"));
+    assert_eq!(clone.regions, ["USA"]);
+    assert_eq!(clone.languages, ["En"]);
+    assert_eq!(
+        clone.roms,
+        [DatRom {
+            name: "Example Quest (USA).nes".into(),
+            size: 32_768,
+            crc32: Some(hex(11, 8)),
+            md5: Some(hex(11, 32)),
+            sha1: Some(hex(11, 40)),
+            status: RomStatus::Good,
+            header: Some(header_hex(&ines_header(2))),
+        }]
+    );
+    let parent = &dat.games[1];
+    assert_eq!(parent.clone_of, None);
+    assert_eq!(parent.roms.len(), 1, "two sources of one dump are one rom");
+    assert_eq!(dat.games[2].roms[0].status, RomStatus::BadDump);
+    assert!(dat.games[3].roms.is_empty());
+    assert!(dat.games.iter().all(|g| g.description.is_none()));
+}
+
+#[test]
+fn without_a_header_rule_the_headered_file_is_taken() {
+    let xml = export_xml(&fixture());
+    let dat = parse_dat(xml.as_bytes()).unwrap();
+    let rom = &dat.games[1].roms[0];
+    assert_eq!(rom.name, "Example Quest (Japan).nes");
+    assert_eq!(rom.size, 32_768 + 16);
+    assert_eq!(rom.sha1.as_deref(), Some(hex(0b1100 ^ 0b11, 40).as_str()));
+    assert_eq!(rom.header, None);
+}
+
+#[test]
+fn a_single_pass_leaves_clones_unlinked() {
+    let xml = export_xml(&fixture());
+    let stream = DatStream::with_options(xml.as_bytes(), ines_options()).unwrap();
+    assert_eq!(stream.format(), DatFormat::DbExport);
+    let games: Vec<DatGame> = stream.collect::<Result<_, _>>().unwrap();
+    assert!(games.iter().all(|g| g.clone_of.is_none()));
+    let parents = export_parents(xml.as_bytes()).unwrap().unwrap();
+    assert_eq!(parents.len(), 4);
+    assert_eq!(parents["0002"], "Example Quest (Japan)");
+}
+
+#[test]
+fn a_zipped_export_links_its_clones() {
+    let xml = export_xml(&fixture());
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    let member = "Example Vendor - Example System (DB Export) (20260101-000000).xml";
+    zip.start_file(member, zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(xml.as_bytes()).unwrap();
+    let bytes = zip.finish().unwrap().into_inner();
+    let members: Vec<_> = parse_dat_pack(Cursor::new(bytes))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(members.len(), 1);
+    assert_eq!(members[0].file_name, member);
+    let games = &members[0].dat.games;
+    assert_eq!(games[0].clone_of.as_deref(), Some("Example Quest (Japan)"));
+    let name = export_name(&members[0].file_name).unwrap();
+    assert_eq!(name.dat_name, "Example Vendor - Example System (DB Export)");
+}
+
+#[test]
+fn n64_and_plain_platforms_take_their_format() {
+    let xml = r#"<header/><datafile><game name="Example Quest (World)"><archive number="1" clone="P"/>
+      <source><file extension="v64" size="8" crc32="00000001" format="ByteSwapped"/>
+      <file extension="z64" size="8" crc32="00000002" format="BigEndian"/></source>
+      <source><file extension="bin" size="8" crc32="00000003" format="Default"/></source></game></datafile>"#;
+    let n64 = ExportOptions {
+        header_rule: HeaderRule::N64,
+        ..ExportOptions::default()
+    };
+    let dat = parse_dat_with(xml.as_bytes(), n64).unwrap();
+    assert_eq!(dat.games[0].roms.len(), 1);
+    assert_eq!(dat.games[0].roms[0].name, "Example Quest (World).z64");
+    let dat = parse_dat(xml.as_bytes()).unwrap();
+    assert_eq!(dat.games[0].roms[0].name, "Example Quest (World).bin");
+}
+
+#[test]
+fn a_headerless_file_without_a_platform_extension_takes_the_headered_one() {
+    let xml = export_xml(&fixture()[1..2]);
+    let options = ExportOptions {
+        header_rule: HeaderRule::Ines,
+        ..ExportOptions::default()
+    };
+    let dat = parse_dat_with(xml.as_bytes(), options).unwrap();
+    assert_eq!(dat.games[0].roms[0].name, "Example Quest (Japan).nes");
+}
+
+#[test]
+fn unknown_xml_names_the_supported_formats() {
+    let e = parse_dat(b"<softwarelist><game name='x'/></softwarelist>").unwrap_err();
+    let text = e.to_string();
+    assert!(text.contains("<softwarelist>"), "{text}");
+    assert!(
+        text.contains("Logiqx") && text.contains("DB export"),
+        "{text}"
+    );
+    match parse_dat(b"<header/><softwarelist/>").unwrap_err() {
+        DatError::NotDatafile { root } => assert_eq!(root, "softwarelist"),
+        other => panic!("{other:?}"),
+    }
+    assert!(matches!(
+        parse_dat(b"<header><version>1</version></header>").unwrap_err(),
+        DatError::Truncated
+    ));
+    assert!(matches!(
+        parse_dat(b"<header/><datafile/>").unwrap_err(),
+        DatError::NoGames
+    ));
+}
+
+#[test]
+fn bad_file_attributes_reject_the_export() {
+    let bad = |file: &str| {
+        let xml = format!(
+            "<header/><datafile><game name=\"G\"><source>{file}</source></game></datafile>"
+        );
+        parse_dat(xml.as_bytes()).unwrap_err()
+    };
+    assert!(matches!(
+        bad("<file extension=\"nes\"/>"),
+        DatError::MissingAttribute {
+            element: "file",
+            attribute: "size",
+            ..
+        }
+    ));
+    assert!(matches!(
+        bad("<file size=\"x\"/>"),
+        DatError::InvalidAttribute {
+            attribute: "size",
+            ..
+        }
+    ));
+    assert!(matches!(
+        bad("<file size=\"1\" crc32=\"xyz\"/>"),
+        DatError::InvalidAttribute {
+            attribute: "crc32",
+            ..
+        }
+    ));
+}
+
+#[test]
+fn export_names_are_read_from_file_names() {
+    let n =
+        export_name("Example Vendor - Example System (DB Export) (20260101-000000).zip").unwrap();
+    assert_eq!(n.version, "20260101-000000");
+    let n = export_name("Example Vendor - Example System (db export)").unwrap();
+    assert_eq!(n.dat_name, "Example Vendor - Example System (DB Export)");
+    assert_eq!(n.version, "");
+    let n = export_name("Example System (DB Export) (2) (1).xml").unwrap();
+    assert_eq!(n.version, "2");
+    assert!(export_name("(DB Export) (1).xml").is_none());
+    assert!(export_name("").is_none());
+}
+
+#[test]
+fn a_stream_reads_an_export_from_a_buffered_reader() {
+    let xml = export_xml(&fixture());
+    let parents = export_parents(BufReader::new(xml.as_bytes()))
+        .unwrap()
+        .unwrap();
+    let options = ExportOptions {
+        parents,
+        ..ines_options()
+    };
+    let stream = DatStream::with_options(BufReader::new(xml.as_bytes()), options).unwrap();
+    let games: Vec<DatGame> = stream.collect::<Result<_, _>>().unwrap();
+    assert_eq!(games[0].clone_of.as_deref(), Some("Example Quest (Japan)"));
+}
+
+const REGIONS: [&str; 4] = ["USA", "Europe", "Japan", "World"];
+const LANGUAGES: [&str; 4] = ["En", "Fr", "De", "Ja"];
+
+prop_compose! {
+    fn arb_dump()(size in 1u64..1 << 20, seed: u64, prg in 1u8..8) -> Dump {
+        Dump { size, seed, header: ines_header(prg) }
+    }
+}
+
+prop_compose! {
+    fn arb_games()(count in 1usize..8)(
+        parents in prop::collection::vec(proptest::option::of(0usize..8), count),
+        regions in prop::collection::vec(proptest::sample::subsequence(REGIONS.to_vec(), 0..3), count),
+        languages in prop::collection::vec(proptest::sample::subsequence(LANGUAGES.to_vec(), 0..3), count),
+        dumps in prop::collection::vec(proptest::option::of(arb_dump()), count),
+        sources in prop::collection::vec(1usize..4, count),
+        bad in prop::collection::vec(any::<bool>(), count),
+    ) -> Vec<Game> {
+        (0..parents.len())
+            .map(|i| Game {
+                name: format!("Example Game {i:03} (Test)"),
+                // Only a game listed as a parent keeps parents, so no clone chains form.
+                parent: parents[i].filter(|&p| p < parents.len() && p != i && parents[p].is_none()),
+                regions: regions[i].iter().map(|r| (*r).to_owned()).collect(),
+                languages: languages[i].iter().map(|l| (*l).to_owned()).collect(),
+                dump: dumps[i].clone(),
+                sources: sources[i],
+                bad: bad[i],
+            })
+            .collect()
+    }
+}
+
+proptest! {
+    #[test]
+    fn export_and_logiqx_forms_give_the_same_games(games in arb_games()) {
+        let export = parse_dat_with(export_xml(&games).as_bytes(), ines_options()).unwrap();
+        let logiqx = parse_dat(logiqx_xml(&games).as_bytes()).unwrap();
+        prop_assert_eq!(&export.games, &logiqx.games);
+        prop_assert_eq!(export.header.version, logiqx.header.version);
+    }
+
+    #[test]
+    fn export_parsing_never_panics(s in "[<>/=\"' a-z!?&;#0-9-]{0,200}") {
+        let _ = parse_dat(format!("<header/><datafile>{s}</datafile>").as_bytes());
+        let _ = parse_dat(format!("<header/><datafile><game name='g'><source>{s}</source></game></datafile>").as_bytes());
+        let _ = export_parents(format!("<header/>{s}").as_bytes());
+        let _ = export_name(&s);
+    }
+}

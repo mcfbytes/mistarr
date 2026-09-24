@@ -1,12 +1,19 @@
-//! Streaming Logiqx DAT parsing; the contract is `docs/VERIFICATION.md` "DAT parsing".
+//! Streaming DAT parsing, Logiqx and No-Intro DB export; the contract is `docs/VERIFICATION.md` "DAT parsing".
 
 use std::borrow::Cow;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek};
 
 use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesRef, BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 use serde::{Deserialize, Serialize};
+
+use crate::hash::HeaderRule;
+
+mod export;
+
+pub use export::{export_name, ExportName};
 
 #[cfg(test)]
 mod tests;
@@ -23,8 +30,11 @@ pub enum DatError {
         /// Underlying parser error.
         source: quick_xml::Error,
     },
-    /// The root element is not `datafile`.
-    #[error("root element is <{root}>, expected <datafile>")]
+    /// The document is neither a Logiqx DAT nor a DB export.
+    #[error(
+        "root element is <{root}>; expected a Logiqx DAT (<datafile>) \
+         or a No-Intro DB export (<header> followed by <datafile>)"
+    )]
     NotDatafile {
         /// Name of the root element found.
         root: String,
@@ -179,8 +189,33 @@ pub struct DatGame {
     pub description: Option<String>,
     /// First `<category>`.
     pub category: Option<String>,
+    /// Regions the DAT states outside the name: `<release region>`, or a DB export's `archive@region`.
+    pub regions: Vec<String>,
+    /// Languages the DAT states outside the name: `<release language>`, or `archive@languages`.
+    pub languages: Vec<String>,
     /// Rom entries in document order.
     pub roms: Vec<DatRom>,
+}
+
+/// The two input forms a DAT file may take, told apart by its first element.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DatFormat {
+    /// A Logiqx `<datafile>` document.
+    Logiqx,
+    /// A No-Intro database export: a `<header>` element followed by a `<datafile>` element.
+    DbExport,
+}
+
+/// How a DB export's files become rom entries; ignored for Logiqx DATs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExportOptions {
+    /// Header rule of the platform the DAT binds to, which decides the file format taken.
+    pub header_rule: HeaderRule,
+    /// The platform's extension, without the dot, for files stored as `.unh` or with none.
+    pub extension: Option<String>,
+    /// Archive number to game name, from [`export_parents`], resolving clone references.
+    pub parents: HashMap<String, String>,
 }
 
 /// A fully parsed DAT with at least one game.
@@ -192,7 +227,7 @@ pub struct Dat {
     pub games: Vec<DatGame>,
 }
 
-/// Parses a DAT held in memory.
+/// Parses a DAT held in memory. A DB export is read twice, first for its parent index.
 ///
 /// ```
 /// let xml = br#"<datafile><header><name>Example System</name></header>
@@ -207,10 +242,38 @@ pub struct Dat {
 /// # Errors
 /// Any [`DatError`] other than the zip variants.
 pub fn parse_dat(bytes: &[u8]) -> Result<Dat, DatError> {
-    parse_dat_reader(bytes)
+    parse_dat_with(bytes, ExportOptions::default())
 }
 
-/// Parses a DAT from a buffered reader, one game at a time.
+/// Parses a DAT held in memory, turning a DB export's files into roms by `options`;
+/// its `parents` are filled from the document.
+///
+/// ```
+/// use mistarr_core::dat::{parse_dat_with, ExportOptions};
+/// use mistarr_core::hash::HeaderRule;
+/// let xml = br#"<header><version>1</version></header><datafile>
+///   <game name="Example Quest (Japan)"><archive number="1" clone="P"/><source>
+///     <file extension="nes" size="20" crc32="0a0b0c0d" format="Headered" header="4E 45 53 1A"/>
+///     <file extension="unh" size="4" crc32="01020304" format="Headerless"/>
+///   </source></game></datafile>"#;
+/// let options = ExportOptions { header_rule: HeaderRule::Ines, extension: Some("nes".into()), ..Default::default() };
+/// let dat = parse_dat_with(xml, options)?;
+/// assert_eq!(dat.games[0].roms[0].name, "Example Quest (Japan).nes");
+/// assert_eq!(dat.games[0].roms[0].size, 4);
+/// # Ok::<(), mistarr_core::dat::DatError>(())
+/// ```
+///
+/// # Errors
+/// Any [`DatError`] other than the zip variants.
+pub fn parse_dat_with(bytes: &[u8], mut options: ExportOptions) -> Result<Dat, DatError> {
+    if let Some(parents) = export_parents(bytes)? {
+        options.parents = parents;
+    }
+    collect(DatStream::with_options(bytes, options)?)
+}
+
+/// Parses a DAT from a buffered reader, one game at a time. A DB export read this way
+/// has no parent index, so its clones are not linked; see [`export_parents`].
 ///
 /// ```
 /// use std::io::BufReader;
@@ -223,7 +286,10 @@ pub fn parse_dat(bytes: &[u8]) -> Result<Dat, DatError> {
 /// # Errors
 /// Any [`DatError`] other than the zip variants.
 pub fn parse_dat_reader<R: BufRead>(reader: R) -> Result<Dat, DatError> {
-    let mut stream = DatStream::new(reader)?;
+    collect(DatStream::new(reader)?)
+}
+
+fn collect<R: BufRead>(mut stream: DatStream<R>) -> Result<Dat, DatError> {
     let mut games = Vec::new();
     for game in &mut stream {
         games.push(game?);
@@ -234,13 +300,47 @@ pub fn parse_dat_reader<R: BufRead>(reader: R) -> Result<Dat, DatError> {
     })
 }
 
+/// The first pass over a DB export: every archive number and its game name, for
+/// [`ExportOptions::parents`]. `None` for a Logiqx DAT, after reading only its first element.
+///
+/// ```
+/// let xml = br#"<header/><datafile>
+///   <game name="Example Quest (Japan)"><archive number="0001" clone="P"/></game>
+///   <game name="Example Quest (USA)"><archive number="0002" clone="0001"/></game>
+/// </datafile>"#;
+/// let parents = mistarr_core::dat::export_parents(&xml[..])?.unwrap();
+/// assert_eq!(parents["0001"], "Example Quest (Japan)");
+/// assert!(mistarr_core::dat::export_parents(&b"<datafile/>"[..])?.is_none());
+/// # Ok::<(), mistarr_core::dat::DatError>(())
+/// ```
+///
+/// # Errors
+/// As [`DatStream::new`], plus any error met in a game.
+pub fn export_parents<R: BufRead>(reader: R) -> Result<Option<HashMap<String, String>>, DatError> {
+    let mut stream = DatStream::open(reader, ExportOptions::default(), true)?;
+    if stream.format != DatFormat::DbExport {
+        return Ok(None);
+    }
+    let mut parents = HashMap::new();
+    while let Some((game, number)) = stream.pull()? {
+        if let Some(n) = number {
+            parents.entry(n).or_insert(game.name);
+        }
+    }
+    Ok(Some(parents))
+}
+
 /// Iterator over the games of a DAT, holding one game in memory at a time.
 /// Yields [`DatError::NoGames`] once if the document ends without any game.
 pub struct DatStream<R: BufRead> {
     reader: Reader<R>,
     buf: Vec<u8>,
     header: DatHeader,
-    first: Option<DatGame>,
+    format: DatFormat,
+    options: ExportOptions,
+    /// Reads only names and archive numbers, for [`export_parents`].
+    index_only: bool,
+    first: Option<(DatGame, Option<String>)>,
     count: usize,
     done: bool,
     fused: bool,
@@ -262,17 +362,43 @@ impl<R: BufRead> DatStream<R> {
     /// # Errors
     /// [`DatError::NotDatafile`], [`DatError::Xml`], [`DatError::Truncated`] or a header error.
     pub fn new(reader: R) -> Result<Self, DatError> {
+        Self::with_options(reader, ExportOptions::default())
+    }
+
+    /// As [`DatStream::new`], turning a DB export's files into roms by `options`.
+    ///
+    /// ```
+    /// use mistarr_core::dat::{DatFormat, DatStream, ExportOptions};
+    /// let xml = r#"<header><version>7</version></header><datafile><game name="Example Quest (World)"/></datafile>"#;
+    /// let stream = DatStream::with_options(xml.as_bytes(), ExportOptions::default())?;
+    /// assert_eq!(stream.format(), DatFormat::DbExport);
+    /// assert_eq!(stream.header().version, "7");
+    /// # Ok::<(), mistarr_core::dat::DatError>(())
+    /// ```
+    ///
+    /// # Errors
+    /// As [`DatStream::new`].
+    pub fn with_options(reader: R, options: ExportOptions) -> Result<Self, DatError> {
+        Self::open(reader, options, false)
+    }
+
+    fn open(reader: R, options: ExportOptions, index_only: bool) -> Result<Self, DatError> {
         let mut stream = DatStream {
             reader: Reader::from_reader(reader),
             buf: Vec::new(),
             header: DatHeader::default(),
+            format: DatFormat::Logiqx,
+            options,
+            index_only,
             first: None,
             count: 0,
             done: false,
             fused: false,
         };
         stream.read_root()?;
-        stream.first = stream.next_game()?;
+        if !(index_only && stream.format == DatFormat::Logiqx) {
+            stream.first = stream.next_game()?;
+        }
         Ok(stream)
     }
 
@@ -287,6 +413,19 @@ impl<R: BufRead> DatStream<R> {
     #[must_use]
     pub fn header(&self) -> &DatHeader {
         &self.header
+    }
+
+    /// Which form the document takes.
+    ///
+    /// ```
+    /// use mistarr_core::dat::{DatFormat, DatStream};
+    /// let stream = DatStream::new(r#"<datafile><game name="A"/></datafile>"#.as_bytes())?;
+    /// assert_eq!(stream.format(), DatFormat::Logiqx);
+    /// # Ok::<(), mistarr_core::dat::DatError>(())
+    /// ```
+    #[must_use]
+    pub fn format(&self) -> DatFormat {
+        self.format
     }
 
     fn xml_error(&self, source: quick_xml::Error) -> DatError {
@@ -304,13 +443,24 @@ impl<R: BufRead> DatStream<R> {
         }
     }
 
+    /// Reads to the `<datafile>` start: a Logiqx root, or the element after a DB export's `<header>`.
     fn read_root(&mut self) -> Result<(), DatError> {
+        let mut after_header = false;
         loop {
             match self.read_event()? {
                 Event::Start(e) if e.local_name().as_ref() == b"datafile" => return Ok(()),
                 Event::Empty(e) if e.local_name().as_ref() == b"datafile" => {
                     self.done = true;
                     return Ok(());
+                }
+                Event::Start(e) if !after_header && e.local_name().as_ref() == b"header" => {
+                    self.format = DatFormat::DbExport;
+                    after_header = true;
+                    self.read_header()?;
+                }
+                Event::Empty(e) if !after_header && e.local_name().as_ref() == b"header" => {
+                    self.format = DatFormat::DbExport;
+                    after_header = true;
                 }
                 Event::Start(e) | Event::Empty(e) => {
                     return Err(DatError::NotDatafile {
@@ -323,8 +473,8 @@ impl<R: BufRead> DatStream<R> {
         }
     }
 
-    /// Next game at datafile level, parsing a header met on the way.
-    fn next_game(&mut self) -> Result<Option<DatGame>, DatError> {
+    /// Next game at datafile level with its archive number, parsing a header met on the way.
+    fn next_game(&mut self) -> Result<Option<(DatGame, Option<String>)>, DatError> {
         while !self.done {
             match self.read_event()? {
                 Event::Start(e) => match e.local_name().as_ref() {
@@ -343,6 +493,14 @@ impl<R: BufRead> DatStream<R> {
             }
         }
         Ok(None)
+    }
+
+    /// The prefetched first game, then each following one.
+    fn pull(&mut self) -> Result<Option<(DatGame, Option<String>)>, DatError> {
+        match self.first.take() {
+            Some(first) => Ok(Some(first)),
+            None => self.next_game(),
+        }
     }
 
     fn skip(&mut self, start: &BytesStart<'_>) -> Result<(), DatError> {
@@ -429,7 +587,11 @@ impl<R: BufRead> DatStream<R> {
         Ok(None)
     }
 
-    fn read_game(&mut self, start: &BytesStart<'_>, has_body: bool) -> Result<DatGame, DatError> {
+    fn read_game(
+        &mut self,
+        start: &BytesStart<'_>,
+        has_body: bool,
+    ) -> Result<(DatGame, Option<String>), DatError> {
         let name = self
             .attr(start, b"name")?
             .ok_or_else(|| DatError::MissingAttribute {
@@ -437,42 +599,157 @@ impl<R: BufRead> DatStream<R> {
                 attribute: "name",
                 game: String::new(),
             })?;
+        let export = self.format == DatFormat::DbExport;
         let mut game = DatGame {
-            clone_of: self.attr(start, b"cloneof")?,
-            rom_of: self.attr(start, b"romof")?,
+            clone_of: None,
+            rom_of: None,
             name,
             description: None,
             category: None,
+            regions: Vec::new(),
+            languages: Vec::new(),
             roms: Vec::new(),
         };
+        if !export {
+            game.clone_of = self.attr(start, b"cloneof")?;
+            game.rom_of = self.attr(start, b"romof")?;
+        }
+        let mut archive = export::Archive::default();
+        let mut sources = Vec::new();
         if has_body {
             loop {
                 match self.read_event()? {
                     Event::Start(e) => match e.local_name().as_ref() {
-                        b"description" => game.description = Some(self.read_text()?),
-                        b"category" => {
+                        b"description" if !export => game.description = Some(self.read_text()?),
+                        b"category" if !export => {
                             let text = self.read_text()?;
                             game.category.get_or_insert(text);
                         }
-                        b"rom" => {
+                        b"rom" if !export => {
                             game.roms.push(self.read_rom(&e, &game.name)?);
                             self.skip(&e)?;
                         }
+                        b"release" if !export => {
+                            self.read_release(&e, &mut game)?;
+                            self.skip(&e)?;
+                        }
+                        b"archive" if export => {
+                            archive = self.read_archive(&e)?;
+                            self.skip(&e)?;
+                        }
+                        b"source" if export && !self.index_only => {
+                            sources.push(self.read_source(&game.name)?);
+                        }
                         _ => self.skip(&e)?,
                     },
-                    Event::Empty(e) => {
-                        if e.local_name().as_ref() == b"rom" {
-                            game.roms.push(self.read_rom(&e, &game.name)?);
-                        }
-                    }
+                    Event::Empty(e) => match e.local_name().as_ref() {
+                        b"rom" if !export => game.roms.push(self.read_rom(&e, &game.name)?),
+                        b"release" if !export => self.read_release(&e, &mut game)?,
+                        b"archive" if export => archive = self.read_archive(&e)?,
+                        _ => {}
+                    },
                     Event::End(_) => break,
                     Event::Eof => return Err(DatError::Truncated),
                     _ => {}
                 }
             }
         }
+        if export {
+            game.clone_of = archive.parent(&self.options.parents, &game.name);
+            game.regions = export::split_list(archive.region.as_deref());
+            game.languages = export::split_list(archive.languages.as_deref());
+            game.roms = export::roms(&game.name, &sources, &self.options);
+        }
         self.count += 1;
-        Ok(game)
+        Ok((game, archive.number))
+    }
+
+    /// Adds a `<release>`'s region and languages to the game's, each once.
+    fn read_release(&self, e: &BytesStart<'_>, game: &mut DatGame) -> Result<(), DatError> {
+        let region = self.attr(e, b"region")?;
+        let language = self.attr(e, b"language")?;
+        export::extend_unique(&mut game.regions, export::split_list(region.as_deref()));
+        export::extend_unique(&mut game.languages, export::split_list(language.as_deref()));
+        Ok(())
+    }
+
+    fn read_archive(&self, e: &BytesStart<'_>) -> Result<export::Archive, DatError> {
+        Ok(export::Archive {
+            number: self.attr(e, b"number")?.filter(|n| !n.trim().is_empty()),
+            clone: self.attr(e, b"clone")?,
+            region: self.attr(e, b"region")?,
+            languages: self.attr(e, b"languages")?,
+        })
+    }
+
+    /// Reads one `<source>`: its `details` section and every `<file>`.
+    fn read_source(&mut self, game: &str) -> Result<export::Source, DatError> {
+        let mut source = export::Source::default();
+        loop {
+            let (e, body) = match self.read_event()? {
+                Event::Start(e) => (e, true),
+                Event::Empty(e) => (e, false),
+                Event::End(_) => return Ok(source),
+                Event::Eof => return Err(DatError::Truncated),
+                _ => continue,
+            };
+            match e.local_name().as_ref() {
+                b"details" => {
+                    let section = self.attr(&e, b"section")?.unwrap_or_default();
+                    source.bad = section.to_ascii_lowercase().contains("bad");
+                }
+                b"file" => source.files.push(self.read_file(&e, game)?),
+                _ => {}
+            }
+            if body {
+                self.skip(&e)?;
+            }
+        }
+    }
+
+    fn read_file(&self, e: &BytesStart<'_>, game: &str) -> Result<export::File, DatError> {
+        let size_text = self
+            .attr(e, b"size")?
+            .ok_or_else(|| DatError::MissingAttribute {
+                element: "file",
+                attribute: "size",
+                game: game.to_owned(),
+            })?;
+        Ok(export::File {
+            extension: self.attr(e, b"extension")?.unwrap_or_default(),
+            format: self.attr(e, b"format")?.unwrap_or_default(),
+            size: parse_size(game, &size_text)?,
+            crc32: self.hex(e, "crc32", 8, game)?,
+            md5: self.hex(e, "md5", 32, game)?,
+            sha1: self.hex(e, "sha1", 40, game)?,
+            header: self.attr(e, b"header")?.filter(|h| !h.trim().is_empty()),
+        })
+    }
+
+    /// A hash attribute as lowercase hex of `len` digits; empty counts as absent.
+    fn hex(
+        &self,
+        e: &BytesStart<'_>,
+        key: &'static str,
+        len: usize,
+        game: &str,
+    ) -> Result<Option<String>, DatError> {
+        match self.attr(e, key.as_bytes())? {
+            None => Ok(None),
+            Some(v) if v.trim().is_empty() => Ok(None),
+            Some(v) => {
+                let t = v.trim();
+                if t.len() == len && t.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    Ok(Some(t.to_ascii_lowercase()))
+                } else {
+                    Err(DatError::InvalidAttribute {
+                        game: game.to_owned(),
+                        attribute: key,
+                        value: v,
+                    })
+                }
+            }
+        }
     }
 
     fn read_rom(&self, e: &BytesStart<'_>, game: &str) -> Result<DatRom, DatError> {
@@ -481,59 +758,54 @@ impl<R: BufRead> DatStream<R> {
             attribute,
             game: game.to_owned(),
         };
-        let invalid = |attribute, value: String| DatError::InvalidAttribute {
-            game: game.to_owned(),
-            attribute,
-            value,
-        };
         let name = self.attr(e, b"name")?.ok_or_else(|| missing("name"))?;
         let size_text = self.attr(e, b"size")?.ok_or_else(|| missing("size"))?;
-        let size = size_text
-            .trim()
-            .parse::<u64>()
-            .map_err(|_| invalid("size", size_text.clone()))?;
-        let hex = |key: &'static str, len: usize| -> Result<Option<String>, DatError> {
-            match self.attr(e, key.as_bytes())? {
-                None => Ok(None),
-                Some(v) if v.trim().is_empty() => Ok(None),
-                Some(v) => {
-                    let t = v.trim();
-                    if t.len() == len && t.bytes().all(|b| b.is_ascii_hexdigit()) {
-                        Ok(Some(t.to_ascii_lowercase()))
-                    } else {
-                        Err(invalid(key, v))
-                    }
-                }
-            }
-        };
+        let size = parse_size(game, &size_text)?;
         let status = match self.attr(e, b"status")? {
             None => RomStatus::Good,
-            Some(v) => RomStatus::parse(&v).ok_or_else(|| invalid("status", v))?,
+            Some(v) => RomStatus::parse(&v).ok_or_else(|| DatError::InvalidAttribute {
+                game: game.to_owned(),
+                attribute: "status",
+                value: v,
+            })?,
         };
+        let crc32 = self.hex(e, "crc", 8, game)?;
+        let md5 = self.hex(e, "md5", 32, game)?;
+        let sha1 = self.hex(e, "sha1", 40, game)?;
         Ok(DatRom {
-            crc32: hex("crc", 8)?,
-            md5: hex("md5", 32)?,
-            sha1: hex("sha1", 40)?,
             header: self.attr(e, b"header")?,
             name,
             size,
+            crc32,
+            md5,
+            sha1,
             status,
         })
     }
+}
+
+fn parse_size(game: &str, text: &str) -> Result<u64, DatError> {
+    text.trim()
+        .parse::<u64>()
+        .map_err(|_| DatError::InvalidAttribute {
+            game: game.to_owned(),
+            attribute: "size",
+            value: text.to_owned(),
+        })
 }
 
 impl<R: BufRead> Iterator for DatStream<R> {
     type Item = Result<DatGame, DatError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if let Some(game) = self.first.take() {
+        if let Some((game, _)) = self.first.take() {
             return Some(Ok(game));
         }
         if self.fused {
             return None;
         }
         let item = match self.next_game() {
-            Ok(Some(game)) => return Some(Ok(game)),
+            Ok(Some((game, _))) => return Some(Ok(game)),
             Ok(None) if self.count > 0 => None,
             Ok(None) => Some(Err(DatError::NoGames)),
             Err(err) => Some(Err(err)),
@@ -633,13 +905,23 @@ impl<R: Read + Seek> DatPack<R> {
         self.members.is_empty()
     }
 
+    /// Parses one member, reading a DB export twice so its clones are linked.
     fn read_member(&mut self, index: usize) -> Result<PackMember, DatError> {
-        let file = self.archive.by_index(index)?;
-        let file_name = file.name().to_owned();
-        let dat = parse_dat_reader(BufReader::new(file)).map_err(|source| DatError::Member {
+        let file_name = self.archive.by_index(index)?.name().to_owned();
+        let in_member = |source| DatError::Member {
             member: file_name.clone(),
             source: Box::new(source),
-        })?;
+        };
+        let parents = export_parents(BufReader::new(self.archive.by_index(index)?))
+            .map_err(in_member)?
+            .unwrap_or_default();
+        let options = ExportOptions {
+            parents,
+            ..ExportOptions::default()
+        };
+        let stream =
+            DatStream::with_options(BufReader::new(self.archive.by_index(index)?), options);
+        let dat = stream.and_then(collect).map_err(in_member)?;
         Ok(PackMember { file_name, dat })
     }
 }

@@ -15,9 +15,10 @@ const BUF_SIZE: usize = 256 * 1024;
 /// Header handling applied while hashing, one variant per row of the
 /// "Header rules" table in `docs/PLATFORMS.md`.
 #[non_exhaustive]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HeaderRule {
     /// Hash the whole file.
+    #[default]
     None,
     /// iNES: skip the 16-byte header when it starts with `NES\x1a`.
     Ines,
@@ -30,6 +31,39 @@ pub enum HeaderRule {
     /// Nintendo 64: detect byte order from the first four bytes and
     /// normalise to big-endian while hashing.
     N64,
+}
+
+impl HeaderRule {
+    /// The rule a platform table `header_rule` name stands for; unknown names hash whole files.
+    ///
+    /// ```
+    /// use mistarr_core::hash::HeaderRule;
+    /// assert_eq!(HeaderRule::from_name("ines"), HeaderRule::Ines);
+    /// assert_eq!(HeaderRule::from_name("none"), HeaderRule::None);
+    /// ```
+    #[must_use]
+    pub fn from_name(name: &str) -> Self {
+        match name {
+            "ines" => Self::Ines,
+            "smc" => Self::Smc,
+            "a78" => Self::A78,
+            "lnx" => Self::Lnx,
+            "n64" => Self::N64,
+            _ => Self::None,
+        }
+    }
+
+    /// Whether the rule drops a header a headered DAT would include in its hashes.
+    ///
+    /// ```
+    /// use mistarr_core::hash::HeaderRule;
+    /// assert!(HeaderRule::Lnx.strips_header());
+    /// assert!(!HeaderRule::Smc.strips_header());
+    /// ```
+    #[must_use]
+    pub fn strips_header(self) -> bool {
+        matches!(self, Self::Ines | Self::A78 | Self::Lnx)
+    }
 }
 
 /// Error reading a zip archive's central directory or one of its members.

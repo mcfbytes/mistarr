@@ -2,17 +2,62 @@
 
 ## DAT parsing
 
-Input is Logiqx XML: a `<datafile>` with a `<header>` and repeated `<game>`
-elements, each with one or more `<rom>` children. Parse with `quick-xml` in
-streaming mode so a 50 MB DAT does not need to be held in memory twice.
+Two input forms are accepted, told apart by the first element: Logiqx XML,
+whose root is `<datafile>`, and a No-Intro database export, which starts
+with `<header>` (see "DB export" below). Anything else is rejected with a
+reason naming both. Parse with `quick-xml` in streaming mode so a 50 MB DAT
+does not need to be held in memory twice.
 
-Extract per game: `name`, `cloneof`, `romof`, `description`, `category`,
-and per rom: `name`, `size`, `crc`, `md5`, `sha1`, `status` (default `good`),
-`header`. Ignore everything else. Reject files whose root element is not
-`datafile` or that have no games. Hash attributes are stored lowercase and
+Logiqx XML is a `<datafile>` with a `<header>` and repeated `<game>`
+elements, each with one or more `<rom>` children. Extract per game: `name`,
+`cloneof`, `romof`, `description`, `category`, the `region` and `language`
+of each `<release>`, and per rom: `name`, `size`, `crc`, `md5`, `sha1`,
+`status` (default `good`), `header`. Ignore everything else. Reject files
+that have no games. Hash attributes are stored lowercase and
 must have their full hex length; a malformed hash, size or status rejects the
 file. `dat::DatStream` yields one game at a time for importers that write as
 they read.
+
+Regions and languages come from the name (see "Name parsing"); a DAT's own
+fields (`<release>` or the export's `archive`) fill them only when the name
+has none, which is common for languages.
+
+### DB export
+
+A No-Intro database export is two top-level elements, `<header>` and then
+`<datafile>`, read as one stream. The header has a `<version>` but no system
+name. Each `<game name>` holds one `<archive>` and one or more `<source>`
+blocks, each with a `<details>` element and `<file>` elements carrying
+`extension`, `size`, `crc32`, `md5`, `sha1`, `format` and, on a headered
+file, `header`. It maps onto the same game and rom model as a Logiqx DAT:
+
+| Model | Taken from |
+|---|---|
+| game name | `game@name` |
+| parent | `archive@clone`: `P` or empty on a parent; otherwise the parent's `archive@number`, resolved to its game name by a first pass over the document, since a clone may precede its parent |
+| regions, languages | `archive@region` and `archive@languages`, comma-separated |
+| roms | the `<file>` elements of every source, one per `sha1` (size and other hashes without one), of one storage kind chosen per game |
+| rom name | `<game name>.<ext>` |
+| rom status | `baddump` when every source listing the file has a `details@section` naming a bad dump, else `good` |
+| DAT name, version | from the file name, `<System> (DB Export) (<version>).xml` or `.zip`, as `<System> (DB Export)`; the header `<version>` when present |
+
+The storage kind follows how the board hashes the platform (PLATFORMS.md
+"Header rules"). A file is headerless when `format="Headerless"` or its
+extension is `unh`, headered when `format="Headered"`. Of the kinds a game
+has, the first in this order is taken:
+
+- platforms whose rule strips a header (`ines`, `a78`, `lnx`): headerless,
+  then `Default` or no format, then big-endian, other formats, headered;
+- `n64`: `BigEndian`, then as below;
+- every other platform: `Default` or no format, then `BigEndian`, other
+  formats, headered, headerless.
+
+A headerless rom takes the `header` attribute of the headered file in its
+source, which placement uses to add the header back. Its extension is the
+platform's written extension instead of `.unh`, else the headered file's.
+Two files that would get the same rom name keep the first. A DAT name bound
+to no platform takes the last rule, and binding it later reads the file
+again under the chosen platform's rule.
 
 Both No-Intro and Redump distribute zipped daily packs. Accept `.zip` and
 load every `.dat` or `.xml` member as a separate DAT.
