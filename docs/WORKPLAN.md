@@ -68,6 +68,8 @@ code. Guidance:
 | WP-18 | Board verification | Opus | 16, 17 | The verify rows in PLATFORMS.md confirmed or corrected on a DE10-Nano; RSS and throughput recorded in DEPLOYMENT.md. |
 | WP-19 | Arcade and Neo Geo adapters | Opus | 04, 14 | MRA-driven wanted list; romset placement; verification against MRA md5. |
 | WP-20 | Principles gate in CI | Haiku | none | The grep gate from TESTING.md, with the deny list in CI config only. |
+| WP-21 | Sample set | Sonnet | 14 | The `mistarr-samples` repository holds open-licensed entries with DATs, torrents and licence evidence; every entry documented per its README rules. |
+| WP-22 | Install script and release trigger | Sonnet | 17 | `install.sh` installs or upgrades on the board from a GitHub release with checksum verification and rollback; the release workflow runs from a release created in the web UI or a pushed tag. |
 
 ## Suggested fan-out
 
