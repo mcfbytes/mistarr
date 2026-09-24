@@ -5,6 +5,7 @@
   import { titleUrl } from '../lib/router.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
+  import { fixtureSettings } from '../lib/fixtures';
   import { BROWSE_FLAGS, type HaveFilter, type TitleFilters } from '../lib/types';
 
   interface Props {
@@ -21,12 +22,17 @@
   let region = $state('');
   let showHidden = $state(false);
   let requireFlags = $state<string[]>([]);
+  let hideList = $state<string[]>([]);
   let page = $state(0);
   let loadingMore = $state(false);
 
   const platform = $derived(findPlatform(platformId));
   const groups = $derived(getGroups());
   const total = $derived(getGroupsTotal());
+  // Requiring a flag the server hides by default would otherwise always
+  // yield an empty grid, so force "show hidden" on for that combination.
+  const forcedByFlags = $derived(requireFlags.filter((f) => hideList.includes(f)));
+  const effectiveHidden = $derived(showHidden || forcedByFlags.length > 0);
 
   function filters(): TitleFilters {
     return {
@@ -35,7 +41,7 @@
       wanted,
       region: region || undefined,
       flags: requireFlags.length > 0 ? requireFlags.join(',') : undefined,
-      hidden: showHidden ? 'show' : 'hide',
+      hidden: effectiveHidden ? 'show' : 'hide',
       sort: 'name'
     };
   }
@@ -48,7 +54,13 @@
 
   onMount(() => {
     void loadPlatforms();
+    void loadHideList();
   });
+
+  async function loadHideList(): Promise<void> {
+    const settings = isMock ? fixtureSettings : await api.settings();
+    hideList = settings.prefs.hide;
+  }
 
   $effect(() => {
     void platformId;
@@ -56,8 +68,8 @@
     void have;
     void wanted;
     void region;
-    void showHidden;
     void requireFlags;
+    void effectiveHidden;
     page = 0;
     void loadTitlesPage(platformId, filters(), 0);
   });
@@ -136,7 +148,12 @@
     </select>
     <input type="text" placeholder="Region" bind:value={region} />
     <label class="show-hidden">
-      <input type="checkbox" bind:checked={showHidden} />
+      <input
+        type="checkbox"
+        checked={effectiveHidden}
+        disabled={forcedByFlags.length > 0}
+        onchange={(e) => (showHidden = (e.currentTarget as HTMLInputElement).checked)}
+      />
       Show hidden
     </label>
     <fieldset class="flags">
@@ -153,6 +170,12 @@
       {/each}
     </fieldset>
   </form>
+  {#if forcedByFlags.length > 0}
+    <p class="muted note">
+      Showing hidden entries because {forcedByFlags.join(', ')}
+      {forcedByFlags.length > 1 ? 'are' : 'is'} hidden by default.
+    </p>
+  {/if}
 
   <div class="grid">
     {#each groups as group (group.parent_id)}
@@ -210,6 +233,11 @@
     align-items: center;
     gap: 0.2em;
     font-size: 0.85em;
+  }
+
+  .note {
+    font-size: 0.85em;
+    margin: -0.5em 0 1em;
   }
 
   .grid {
