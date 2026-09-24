@@ -10,5 +10,9 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
-  # Cross build (WP-17) and the principles gate (WP-20) are added by their
-  # work packages; see docs/WORKPLAN.md.
+  principles:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sh scripts/principles-gate.sh
+  # Cross build (WP-17) is added by its work package; see docs/WORKPLAN.md.
