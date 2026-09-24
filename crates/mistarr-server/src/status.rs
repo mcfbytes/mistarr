@@ -36,6 +36,8 @@ pub struct Status {
     pub waiting: Vec<WaitingJob>,
     /// Free bytes on the filesystem holding the data directory.
     pub disk_free_bytes: Option<u64>,
+    /// The directory watched for DAT files, as configured.
+    pub dats_dir: String,
     /// Resident set size of this process.
     pub rss_bytes: Option<u64>,
     /// Whether cores and games can be launched.
@@ -188,6 +190,7 @@ pub async fn snapshot(app: &AppState) -> Status {
         waiting,
         corename: gate.corename,
         disk_free_bytes: free_bytes(&data),
+        dats_dir: app.config().paths.dats().to_string_lossy().into_owned(),
         rss_bytes: rss_bytes(),
         launch: launch_state(app),
     }

@@ -6,6 +6,7 @@
   import { showToast } from '../lib/stores/toast.svelte';
   import { scheduleIncoming } from '../lib/stores/incoming.svelte';
   import { addUpload } from '../lib/stores/uploads.svelte';
+  import { uploadFiles } from '../lib/upload';
   import IncomingList from '../lib/IncomingList.svelte';
   import type { SeedPolicy } from '../lib/types';
 
@@ -99,25 +100,6 @@
     return platforms.find((p) => p.id === id)?.name ?? id;
   }
 
-  async function upload(): Promise<void> {
-    const files = Array.from(fileInput?.files ?? []);
-    if (isMock) {
-      return;
-    }
-    for (const file of files) {
-      try {
-        const up = await api.uploadSource(file);
-        addUpload({ kind: 'sources', file: up.file, jobId: up.job_id });
-      } catch (err) {
-        showToast(`${file.name}: ${errorMessage(err)}`);
-      }
-    }
-    scheduleIncoming('sources');
-    if (fileInput) {
-      fileInput.value = '';
-    }
-  }
-
   async function addMagnet(): Promise<void> {
     const uri = magnet.trim();
     if (!uri || isMock) {
@@ -140,7 +122,7 @@
   <form class="card upload" onsubmit={(e) => e.preventDefault()}>
     <label>
       Add a .torrent file
-      <input bind:this={fileInput} type="file" accept=".torrent" multiple onchange={upload} />
+      <input bind:this={fileInput} type="file" accept=".torrent" multiple onchange={() => uploadFiles('sources', fileInput)} />
     </label>
     <label>
       Or a magnet link

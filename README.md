@@ -13,7 +13,8 @@ embedded. It runs on the stock MiSTer image and on
 
 ## What it does
 
-- **Catalog.** Import No-Intro, Redump or any Logiqx-format DAT. Browse every
+- **Catalog.** Import No-Intro (daily packs or its database export), Redump or
+  any Logiqx-format DAT. Browse every
   title per installed core, grouped one-game-one-ROM with region and revision
   preferences, with box art loaded by your browser from the libretro thumbnail
   server. Nothing is stored on the SD card except the database.

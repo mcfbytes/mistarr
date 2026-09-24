@@ -369,8 +369,8 @@ pub fn prove(conn: &Connection, source: SourceId, index: u32, rom: i64) -> Resul
 /// A text that changes whenever the live roms of `platform` do, so a source
 /// mapped against the same text needs no new mapping: its live DAT versions
 /// with their load times, which catch a reload that updates roms in place,
-/// and the count and ids of its live roms. MRA versions are left out, since a
-/// catalogue run touches theirs every time; MRA roms change their ids when renamed.
+/// the count and ids of its live roms, and their effective groups. MRA versions are left
+/// out, since a catalogue run touches theirs every time; MRA roms change their ids when renamed.
 ///
 /// # Errors
 ///
@@ -381,6 +381,7 @@ pub fn rom_stamp(conn: &Connection, platform: &PlatformId) -> Result<String> {
                  FROM (SELECT id, loaded_at FROM dat_versions
                        WHERE platform_id = ?1 AND retired = 0 AND source != 'mra' ORDER BY id))
              || ';' || COUNT(*) || ':' || COALESCE(MAX(r.id), 0) || ':' || COALESCE(SUM(r.id), 0)
+             || ':' || COALESCE(SUM(COALESCE(t.group_root, t.id)), 0)
          FROM roms r JOIN titles t ON t.id = r.title_id
          WHERE t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0",
         [&platform.0],
@@ -518,14 +519,14 @@ pub fn for_group(conn: &Connection, parent: TitleId) -> Result<Vec<(TitleId, Ava
            {group}
            JOIN torrent_files tf ON tf.rom_id = r.id
            JOIN sources s ON s.id = tf.source_id AND s.state = 'bound'
-           WHERE (t.parent_id = ?1 OR t.id = ?1) AND {bad_tf}
+           WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)) AND {bad_tf}
            UNION ALL
            SELECT t.id, c.source_id, s.display_name, c.file_index, tf.path, r.id, c.confidence
            {group}
            JOIN torrent_candidates c ON c.rom_id = r.id
            JOIN torrent_files tf ON tf.source_id = c.source_id AND tf.file_index = c.file_index
            JOIN sources s ON s.id = c.source_id AND s.state = 'bound'
-           WHERE (t.parent_id = ?1 OR t.id = ?1) AND {bad_c}
+           WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)) AND {bad_c}
          )
          ORDER BY title_id, {rank}, source_id, file_index, rom_id",
         bad_tf = not_bad("r.id", "tf.source_id", "tf.file_index"),
@@ -592,7 +593,7 @@ impl SizeIndex for SqlSizeIndex<'_> {
     fn roms_of_size(&self, size: u64) -> Vec<SizedRom> {
         let run = || -> rusqlite::Result<Vec<SizedRom>> {
             let mut stmt = self.conn.prepare_cached(
-                "SELECT r.id, r.match_base, COALESCE(t.parent_id, t.id)
+                "SELECT r.id, r.match_base, COALESCE(t.group_root, t.parent_id, t.id)
                  FROM roms r JOIN titles t ON t.id = r.title_id
                  WHERE r.size IN (?2, ?3) AND t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0
                    AND r.match_base IS NOT NULL AND t.flags NOT LIKE '%\"bios\"%'
@@ -755,7 +756,7 @@ mod tests {
             [(a, "fuzzy".to_owned()), (b, "size".to_owned())]
         );
         let (ta, tb) = (title_of(&c, a), title_of(&c, b));
-        c.execute("UPDATE titles SET parent_id = ?1", [ta.0])
+        c.execute("UPDATE titles SET group_root = ?1", [ta.0])
             .expect("group");
         let listed = for_group(&c, ta).expect("group");
         assert_eq!(listed.len(), 2);
@@ -834,7 +835,7 @@ mod tests {
         let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, "[]").expect("rom");
         seed_rom(&c, "nes", "Boot (World).nes", 16, r#"["bios"]"#).expect("bios");
         seed_rom(&c, "snes", "Nova Quest (World).sfc", 16, "[]").expect("snes");
-        seed_rom(&c, "nes", "Other (World).nes", 8, "[]").expect("other");
+        let other = seed_rom(&c, "nes", "Other (World).nes", 8, "[]").expect("other");
         sources::refresh_match_keys(&c).expect("keys");
         let nes = PlatformId("nes".into());
         let index = SqlSizeIndex::new(&c, &nes);
@@ -849,6 +850,13 @@ mod tests {
         );
         assert!(index.roms_of_size(u64::MAX).is_empty());
         assert_eq!(index.roms_of_size(32).len(), 1, "an iNES header on top");
+        let root = title_of(&c, other).0;
+        c.execute(
+            "UPDATE titles SET group_root = ?1 WHERE id = ?2",
+            [root, group],
+        )
+        .expect("link");
+        assert_eq!(index.roms_of_size(16)[0].group, root, "the effective group");
         assert_eq!(header_len(&PlatformId("snes".into())), 512);
         assert!(rank("x").contains("WHEN 'fuzzy' THEN 3"));
         assert!(tier("x").contains("'base'"));
@@ -863,6 +871,17 @@ mod tests {
             rom_stamp(&c, &nes).expect("stamp"),
             before,
             "a reload that updates roms in place moves the stamp"
+        );
+        let before = rom_stamp(&c, &nes).expect("stamp");
+        c.execute(
+            "UPDATE titles SET group_root = ?1 WHERE id = ?2",
+            [group, root],
+        )
+        .expect("regroup");
+        assert_ne!(
+            rom_stamp(&c, &nes).expect("stamp"),
+            before,
+            "a regroup moves it"
         );
     }
 }

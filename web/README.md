@@ -21,7 +21,7 @@ npm run e2e              # playwright screenshots of every screen, two viewports
 
 Routing is a small hash-based router in `src/lib/router.svelte.ts` (under
 50 lines, zero dependencies) rather than a router package, since the whole
-app is seven flat routes with no nesting or transitions to justify one.
+app is eight flat routes with no nesting or transitions to justify one.
 
 The server embeds whatever `dist/` holds when it is compiled. Files under
 `dist/assets/` are served as immutable, everything else with `no-cache`, and

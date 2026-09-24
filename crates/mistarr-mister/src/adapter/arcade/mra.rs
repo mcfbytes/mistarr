@@ -1,7 +1,8 @@
 //! MRA parsing: which MAME zips an arcade core definition needs and how its roms are built.
 
-use std::io::Read as _;
+use std::io::{self, BufRead, BufReader, Read, Seek as _, SeekFrom};
 use std::path::Path;
+use std::sync::Arc;
 
 use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesStart, Event};
@@ -96,8 +97,23 @@ pub struct Part {
     pub repeat: u64,
     /// The `map` attribute as written: hex digits, one per output byte.
     pub map: Option<String>,
-    /// Inline bytes of an unnamed part.
+    /// Inline bytes of an unnamed part parsed from memory.
     pub data: Vec<u8>,
+    /// Where an unnamed part's hex sits in the file it was read from, in place of `data`.
+    pub inline: Option<Inline>,
+}
+
+/// The hex text of an inline part left in its MRA file, read again by [`open_inline`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Inline {
+    /// The MRA file.
+    pub file: Arc<Path>,
+    /// Byte offset just after the `<part>` start tag.
+    pub start: u64,
+    /// Byte offset of the tag that ends the part.
+    pub end: u64,
+    /// Number of bytes the hex decodes to.
+    pub len: u64,
 }
 
 impl Default for Part {
@@ -111,6 +127,7 @@ impl Default for Part {
             repeat: 1,
             map: None,
             data: Vec::new(),
+            inline: None,
         }
     }
 }
@@ -230,13 +247,41 @@ pub fn zip_location(zip: &str) -> Option<ZipPath> {
 /// assert_eq!(mra.roms[0].zips, mra.zips);
 /// ```
 pub fn parse(xml: &[u8]) -> Result<Mra> {
-    let mut reader = Reader::from_reader(xml);
+    parse_from(xml, None)
+}
+
+/// Parses MRA markup from `input`; inline part bytes are kept in [`Part::data`], or with
+/// `file` set, left in that file as [`Part::inline`] so no payload is held.
+fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra> {
+    let bom = skip_bom(&mut input)?;
+    let mut reader = Reader::from_reader(input);
     reader.config_mut().check_end_names = false;
+    let mut buf = Vec::new();
     let mut mra = Mra::default();
     let mut open: Vec<(String, Option<Field>)> = Vec::new();
     let mut rom: Option<RomBuilder> = None;
+    let keep = file.is_none();
+    // Bytes of a BOM and inline hex read here, which the XML reader does not count.
+    let mut taken = bom;
     loop {
-        let event = reader.read_event().map_err(xml_err)?;
+        if let Some(RomBuilder {
+            open: Some(Open::Part(part, hex, None, _)),
+            skip: 0,
+            ..
+        }) = &mut rom
+        {
+            if part.name.is_none() {
+                taken += take_text(reader.get_mut(), hex, keep.then_some(&mut part.data))?;
+            }
+        }
+        let before = reader.buffer_position() + taken;
+        buf.clear();
+        let event = reader.read_event_into(&mut buf).map_err(xml_err)?;
+        let at = Pos {
+            before,
+            after: reader.buffer_position() + taken,
+            file,
+        };
         let field = open.last().and_then(|(_, f)| *f);
         match event {
             Event::Start(e) => {
@@ -245,30 +290,33 @@ pub fn parse(xml: &[u8]) -> Result<Mra> {
                 let f = Field::of(&name).or(field.filter(|_| name != "rom"));
                 open.push((name, f));
                 read_attributes(&e, &mut mra)?;
-                start(&e, &mut rom)?;
+                start(&e, &mut rom, at.after)?;
             }
             Event::Empty(e) => {
                 read_attributes(&e, &mut mra)?;
-                start(&e, &mut rom)?;
-                end(&tag(e.local_name().as_ref()), &mut rom, &mut mra);
+                start(&e, &mut rom, at.after)?;
+                end(
+                    &tag(e.local_name().as_ref()),
+                    &mut rom,
+                    &mut mra,
+                    at.after,
+                    &at,
+                );
             }
-            Event::Text(t) => text(&t.decode().map_err(xml_err)?, field, &mut mra, &mut rom),
-            Event::CData(c) => text(&c.decode().map_err(xml_err)?, field, &mut mra, &mut rom),
-            Event::GeneralRef(r) => {
-                let resolved = if let Some(c) = r.resolve_char_ref().map_err(xml_err)? {
-                    c.to_string()
-                } else {
-                    let name = r.decode().map_err(xml_err)?;
-                    resolve_predefined_entity(&name)
-                        .map_or_else(|| format!("&{name};"), str::to_owned)
-                };
-                text(&resolved, field, &mut mra, &mut rom);
+            Event::Text(t) => {
+                let t = t.decode().map_err(xml_err)?;
+                text(&t, field, &mut mra, &mut rom, keep);
             }
+            Event::CData(c) => {
+                let c = c.decode().map_err(xml_err)?;
+                text(&c, field, &mut mra, &mut rom, keep);
+            }
+            Event::GeneralRef(r) => text(&resolve_ref(&r)?, field, &mut mra, &mut rom, keep),
             Event::End(e) => {
                 let name = tag(e.local_name().as_ref());
-                if let Some(at) = open.iter().rposition(|(n, _)| *n == name) {
-                    for (closed, _) in open.drain(at..).rev() {
-                        end(&closed, &mut rom, &mut mra);
+                if let Some(i) = open.iter().rposition(|(n, _)| *n == name) {
+                    for (closed, _) in open.drain(i..).rev() {
+                        end(&closed, &mut rom, &mut mra, at.before, &at);
                     }
                 }
             }
@@ -286,20 +334,72 @@ pub fn parse(xml: &[u8]) -> Result<Mra> {
     Ok(mra)
 }
 
+/// Consumes a UTF-8 byte order mark at the start of `input`; returns its length or 0.
+fn skip_bom<R: BufRead>(input: &mut R) -> io::Result<u64> {
+    const BOM: &[u8] = b"\xEF\xBB\xBF";
+    if input.fill_buf()?.starts_with(BOM) {
+        input.consume(BOM.len());
+        Ok(BOM.len() as u64)
+    } else {
+        Ok(0)
+    }
+}
+
+/// Decodes plain text up to the next `<` or `&` straight from `input`, a buffer at a time,
+/// so a large inline part is never held as one text event. Returns the bytes consumed.
+fn take_text<R: BufRead>(
+    input: &mut R,
+    hex: &mut Hex,
+    mut out: Option<&mut Vec<u8>>,
+) -> io::Result<u64> {
+    let mut consumed = 0;
+    loop {
+        let buf = input.fill_buf()?;
+        let stop = buf.iter().position(|&b| b == b'<' || b == b'&');
+        let n = stop.unwrap_or(buf.len());
+        if n == 0 {
+            return Ok(consumed);
+        }
+        hex.feed(&buf[..n], out.as_deref_mut());
+        input.consume(n);
+        consumed += n as u64;
+        if stop.is_some() {
+            return Ok(consumed);
+        }
+    }
+}
+
+/// Where the event being handled sits in the input.
+struct Pos<'a> {
+    before: u64,
+    after: u64,
+    file: Option<&'a Arc<Path>>,
+}
+
+/// A character or predefined entity reference as text; an unknown entity stays as written.
+fn resolve_ref(r: &quick_xml::events::BytesRef<'_>) -> Result<String> {
+    if let Some(c) = r.resolve_char_ref().map_err(xml_err)? {
+        return Ok(c.to_string());
+    }
+    let name = r.decode().map_err(xml_err)?;
+    Ok(resolve_predefined_entity(&name).map_or_else(|| format!("&{name};"), str::to_owned))
+}
+
 fn xml_err(e: impl std::fmt::Display) -> Error {
     Error::Mra(e.to_string())
 }
 
-/// Largest MRA file read; real ones are a few KiB, so a bigger one is refused.
-pub const MAX_MRA_BYTES: u64 = 1024 * 1024;
+/// Largest MRA file read, a sanity bound: inline part data makes some a few MiB.
+pub const MAX_MRA_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Longest `<name>`, `<setname>` or `<rbf>` text kept, in bytes; the rest is dropped.
 pub const MAX_FIELD_BYTES: usize = 256;
 
 /// Version of what [`parse`] reads from an MRA; it changes whenever a file could parse differently.
-pub const PARSER_VERSION: u32 = 1;
+pub const PARSER_VERSION: u32 = 2;
 
-/// Reads and parses an MRA file of at most [`MAX_MRA_BYTES`].
+/// Reads and parses an MRA file of at most [`MAX_MRA_BYTES`], streaming it; inline part
+/// data is checked and left in the file as [`Part::inline`].
 ///
 /// # Errors
 ///
@@ -312,16 +412,173 @@ pub const PARSER_VERSION: u32 = 1;
 /// assert_eq!(mistarr_mister::adapter::arcade::mra::read(&path).unwrap().zips, ["exblast.zip"]);
 /// ```
 pub fn read(path: &Path) -> Result<Mra> {
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(MAX_MRA_BYTES + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_MRA_BYTES {
-        return Err(Error::Mra(format!(
-            "file is larger than {MAX_MRA_BYTES} bytes"
-        )));
+    let file = std::fs::File::open(path)?;
+    if file.metadata()?.len() > MAX_MRA_BYTES {
+        return Err(too_big());
     }
-    parse(&bytes)
+    let mut limited = BufReader::new(file.take(MAX_MRA_BYTES + 1));
+    let mra = parse_from(&mut limited, Some(&Arc::from(path)))?;
+    if limited.into_inner().limit() == 0 {
+        return Err(too_big());
+    }
+    Ok(mra)
+}
+
+fn too_big() -> Error {
+    Error::Mra(format!("file is larger than {MAX_MRA_BYTES} bytes"))
+}
+
+/// Streams the bytes of an inline part read by [`read`], decoding its hex again from the file.
+///
+/// # Errors
+///
+/// An I/O error when the file cannot be read; reading fails with `InvalidData` when the
+/// text does not decode to [`Inline::len`] bytes, as when the file changed after [`read`].
+///
+/// ```
+/// use std::io::Read as _;
+/// use mistarr_mister::adapter::arcade::mra;
+/// let path = std::env::temp_dir().join(format!("mistarr-doc-inline-{}.mra", std::process::id()));
+/// std::fs::write(&path, "<m><rom><part>61 62 63</part></rom></m>").unwrap();
+/// let parsed = mra::read(&path).unwrap();
+/// let mra::RomItem::Part(part) = &parsed.roms[0].items[0] else { panic!() };
+/// let mut bytes = Vec::new();
+/// mra::open_inline(part.inline.as_ref().unwrap()).unwrap().read_to_end(&mut bytes).unwrap();
+/// assert_eq!(bytes, b"abc");
+/// std::fs::remove_file(&path).unwrap();
+/// ```
+pub fn open_inline(inline: &Inline) -> io::Result<InlineReader> {
+    let mut file = std::fs::File::open(&inline.file)?;
+    file.seek(SeekFrom::Start(inline.start))?;
+    let span = inline.end.saturating_sub(inline.start);
+    let mut reader = Reader::from_reader(BufReader::new(file.take(span)));
+    reader.config_mut().check_end_names = false;
+    Ok(InlineReader {
+        reader,
+        buf: Vec::new(),
+        out: Vec::new(),
+        at: 0,
+        hex: Hex::default(),
+        expected: inline.len,
+        done: false,
+    })
+}
+
+/// Decoded bytes of one inline part, produced a file buffer at a time.
+pub struct InlineReader {
+    reader: Reader<BufReader<io::Take<std::fs::File>>>,
+    buf: Vec<u8>,
+    out: Vec<u8>,
+    at: usize,
+    hex: Hex,
+    expected: u64,
+    done: bool,
+}
+
+impl InlineReader {
+    /// Decodes the next text event into `out`; false once the part's text is exhausted.
+    fn refill(&mut self) -> io::Result<bool> {
+        let bad =
+            |e: &dyn std::fmt::Display| io::Error::new(io::ErrorKind::InvalidData, e.to_string());
+        self.out.clear();
+        self.at = 0;
+        while self.out.is_empty() {
+            if self.done {
+                return Ok(false);
+            }
+            let raw = self.reader.get_mut();
+            let buf = raw.fill_buf()?;
+            let n = buf
+                .iter()
+                .position(|&b| b == b'<' || b == b'&')
+                .unwrap_or(buf.len());
+            if n > 0 {
+                self.hex.feed(&buf[..n], Some(&mut self.out));
+                raw.consume(n);
+                continue;
+            }
+            self.buf.clear();
+            let event = self
+                .reader
+                .read_event_into(&mut self.buf)
+                .map_err(|e| bad(&e))?;
+            let chunk: std::borrow::Cow<'_, str> = match event {
+                Event::Text(t) => t.decode().map_err(|e| bad(&e))?,
+                Event::CData(c) => c.decode().map_err(|e| bad(&e))?,
+                Event::GeneralRef(r) => resolve_ref(&r).map_err(|e| bad(&e))?.into(),
+                Event::Eof => {
+                    self.done = true;
+                    self.hex.finish(Some(&mut self.out));
+                    if self.hex.bad || self.hex.len != self.expected {
+                        return Err(bad(&"inline part data changed since the MRA was read"));
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            self.hex.feed(chunk.as_bytes(), Some(&mut self.out));
+        }
+        Ok(true)
+    }
+}
+
+impl Read for InlineReader {
+    fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+        if self.at == self.out.len() && !self.refill()? {
+            return Ok(0);
+        }
+        let n = into.len().min(self.out.len() - self.at);
+        into[..n].copy_from_slice(&self.out[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+/// Incremental form of [`hex_bytes`]: the same result however the text is split.
+#[derive(Debug, Default)]
+struct Hex {
+    high: Option<u8>,
+    len: u64,
+    bad: bool,
+}
+
+impl Hex {
+    /// Decodes `text`, appending bytes to `out` when given and counting them either way;
+    /// any byte outside ASCII hex digits and separators marks the text bad.
+    fn feed(&mut self, text: &[u8], mut out: Option<&mut Vec<u8>>) {
+        let digit = |c: u8| {
+            char::from(c)
+                .to_digit(16)
+                .and_then(|d| u8::try_from(d).ok())
+        };
+        for &c in text {
+            if self.bad {
+                return;
+            }
+            match (self.high, digit(c)) {
+                (None, _) if matches!(c, b' ' | b',' | b'\t' | b'\n' | b'\r') => {}
+                (None, Some(d)) => self.high = Some(d),
+                (Some(h), Some(d)) => {
+                    self.high = None;
+                    self.len += 1;
+                    if let Some(out) = out.as_deref_mut() {
+                        out.push(h << 4 | d);
+                    }
+                }
+                _ => self.bad = true,
+            }
+        }
+    }
+
+    /// Emits a lone final digit as one byte, as MiSTer does.
+    fn finish(&mut self, out: Option<&mut Vec<u8>>) {
+        if let Some(h) = self.high.take() {
+            self.len += 1;
+            if let Some(out) = out {
+                out.push(h);
+            }
+        }
+    }
 }
 
 /// Zips from `mra` that are not present in `mame_dir`, compared case-insensitively.
@@ -359,20 +616,11 @@ pub fn missing_zips(mra: &Mra, mame_dir: &Path) -> Vec<String> {
 /// ```
 #[must_use]
 pub fn hex_bytes(text: &str) -> Option<Vec<u8>> {
-    let digit = |c: char| c.to_digit(16).and_then(|d| u8::try_from(d).ok());
     let mut out = Vec::with_capacity(text.len() / 2);
-    let mut chars = text.chars();
-    while let Some(c) = chars.next() {
-        if matches!(c, ' ' | ',' | '\t' | '\n' | '\r') {
-            continue;
-        }
-        let high = digit(c)?;
-        match chars.next() {
-            None => out.push(high),
-            Some(c) => out.push(high << 4 | digit(c)?),
-        }
-    }
-    Some(out)
+    let mut hex = Hex::default();
+    hex.feed(text.as_bytes(), Some(&mut out));
+    hex.finish(Some(&mut out));
+    (!hex.bad).then_some(out)
 }
 
 /// Reads a number the way `strtoul(value, NULL, 0)` does: `0x` hex, leading-zero octal, else decimal.
@@ -412,7 +660,8 @@ struct RomBuilder {
 
 /// A `<part>` or `<patch>` whose text is still arriving.
 enum Open {
-    Part(Part, String, Option<String>),
+    /// A part, its hex so far, why it is refused, and where its content starts.
+    Part(Part, Hex, Option<String>, u64),
     Patch(Patch, String, Option<String>),
 }
 
@@ -433,7 +682,7 @@ fn tag(name: &[u8]) -> String {
     String::from_utf8_lossy(name).to_ascii_lowercase()
 }
 
-fn start(e: &BytesStart<'_>, rom: &mut Option<RomBuilder>) -> Result<()> {
+fn start(e: &BytesStart<'_>, rom: &mut Option<RomBuilder>, after: u64) -> Result<()> {
     let name = tag(e.local_name().as_ref());
     let Some(b) = rom else {
         if name == "rom" {
@@ -462,7 +711,7 @@ fn start(e: &BytesStart<'_>, rom: &mut Option<RomBuilder>) -> Result<()> {
     match (name.as_str(), &b.open) {
         ("part", None) => {
             let (part, err) = part_from(&attrs(e)?);
-            b.open = Some(Open::Part(part, String::new(), err));
+            b.open = Some(Open::Part(part, Hex::default(), err, after));
         }
         ("patch", None) if b.interleave.is_none() => {
             let mut patch = Patch::default();
@@ -530,21 +779,28 @@ fn part_from(attrs: &[(String, String)]) -> (Part, Option<String>) {
     (part, err)
 }
 
-fn text(t: &str, field: Option<Field>, mra: &mut Mra, rom: &mut Option<RomBuilder>) {
+/// Adds text to the open field and to the open part or patch; `keep` stores inline bytes.
+fn text(t: &str, field: Option<Field>, mra: &mut Mra, rom: &mut Option<RomBuilder>, keep: bool) {
     if let Some(f) = field {
         f.append(mra, t);
     }
-    if let Some(RomBuilder {
-        open: Some(Open::Part(_, buf, _) | Open::Patch(_, buf, _)),
-        skip: 0,
-        ..
-    }) = rom
-    {
-        buf.push_str(t);
+    match rom {
+        Some(RomBuilder {
+            open: Some(Open::Part(part, hex, None, _)),
+            skip: 0,
+            ..
+        }) if part.name.is_none() => hex.feed(t.as_bytes(), keep.then_some(&mut part.data)),
+        Some(RomBuilder {
+            open: Some(Open::Patch(_, buf, _)),
+            skip: 0,
+            ..
+        }) => buf.push_str(t),
+        _ => {}
     }
 }
 
-fn end(name: &str, rom: &mut Option<RomBuilder>, mra: &mut Mra) {
+/// Closes element `name`; `pos` is where its content ends in the input.
+fn end(name: &str, rom: &mut Option<RomBuilder>, mra: &mut Mra, pos: u64, at: &Pos<'_>) {
     let Some(b) = rom else {
         return;
     };
@@ -554,19 +810,26 @@ fn end(name: &str, rom: &mut Option<RomBuilder>, mra: &mut Mra) {
     }
     match name {
         "part" => {
-            let Some(Open::Part(mut part, buf, err)) = b.open.take() else {
+            let Some(Open::Part(mut part, mut hex, err, start)) = b.open.take() else {
                 return;
             };
+            hex.finish(Some(&mut part.data));
             let item = match (err, &part.name) {
                 (Some(e), _) => Err(e),
                 (None, Some(_)) => Ok(part),
-                (None, None) => match hex_bytes(&buf) {
-                    Some(data) => {
-                        part.data = data;
-                        Ok(part)
+                (None, None) if hex.bad => Err("inline part data is not hex".to_owned()),
+                (None, None) => {
+                    if let Some(file) = at.file.filter(|_| hex.len > 0) {
+                        part.data = Vec::new();
+                        part.inline = Some(Inline {
+                            file: Arc::clone(file),
+                            start,
+                            end: pos,
+                            len: hex.len,
+                        });
                     }
-                    None => Err("inline part data is not hex".to_owned()),
-                },
+                    Ok(part)
+                }
             };
             match (item, &mut b.interleave) {
                 (Ok(p), Some(il)) => il.parts.push(p),

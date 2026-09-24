@@ -149,13 +149,18 @@ export const api = {
     request(`/titles/${id}/rename`, { method: 'POST', body: JSON.stringify({ file_id: fileId }) }),
   launchTitle: (id: number): Promise<Launched> => request(`/titles/${id}/launch`, { method: 'POST' }),
 
-  dats: (): Promise<Paged<DatVersion>> => request('/dats'),
+  dats: (limit: number, offset: number): Promise<Paged<DatVersion>> =>
+    request(`/dats${query({ limit, offset })}`),
   uploadDat: (file: File): Promise<Uploaded> => {
     const form = new FormData();
     form.append('file', file);
     return request('/dats/upload', { method: 'POST', body: form });
   },
   deleteDat: (id: number): Promise<void> => request(`/dats/${id}`, { method: 'DELETE' }),
+  retryRejectedDat: (file: string): Promise<Uploaded> =>
+    request(`/dats/rejected/${encodeURIComponent(file)}/retry`, { method: 'POST' }),
+  deleteRejectedDat: (file: string): Promise<void> =>
+    request(`/dats/rejected/${encodeURIComponent(file)}`, { method: 'DELETE' }),
 
   sources: (): Promise<Paged<Source>> => request('/sources'),
   uploadSource: (file: File): Promise<Uploaded> => {

@@ -461,7 +461,7 @@ impl Placing<'_> {
         why: Option<Why>,
     ) -> Result<()> {
         let (pid, list) = (self.pid(), actual.to_vec());
-        let (expected, other) = self
+        let (expected, other, removed) = self
             .app()
             .db
             .read(move |c| {
@@ -475,7 +475,11 @@ impl Placing<'_> {
                         break;
                     }
                 }
-                Ok((imports::rom(c, rom_id)?, other))
+                Ok((
+                    imports::rom(c, rom_id)?,
+                    other,
+                    imports::rom_retired(c, rom_id)?,
+                ))
             })
             .await?;
         let named = other
@@ -519,6 +523,13 @@ impl Placing<'_> {
             (Some(w), _) => {
                 merge(&mut detail, &w.detail);
                 w.reason
+            }
+            (None, Some(n)) if removed => format!(
+                "the DAT listing the wanted entry was removed; the file is {n} and was quarantined"
+            ),
+            (None, None) if removed => {
+                "the DAT listing the wanted entry was removed, so the file was quarantined"
+                    .to_owned()
             }
             (None, Some(n)) => format!("the file is {n}, not the wanted entry; it was quarantined"),
             (None, None) => "the file matches no DAT entry and was quarantined".to_owned(),

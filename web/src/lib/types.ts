@@ -34,6 +34,7 @@ export interface SystemStatus {
   override: Override;
   waiting: WaitingJob[];
   disk_free_bytes: number | null;
+  dats_dir: string;
   rss_bytes: number | null;
   launch: LaunchState;
 }
@@ -192,6 +193,12 @@ export interface DatVersion {
   superseded_by: number | null;
   game_count: number;
   retired: boolean;
+  /** Versions and forms of one list share it; see VERIFICATION.md "DAT families". */
+  family: string;
+  /** Why the version is not current; `null` for a current one. */
+  reason: string | null;
+  /** For an unbound version, the platforms its family is current on. */
+  suggested: string[];
 }
 
 export type SeedPolicy = 'none' | 'client' | `ratio:${string}`;

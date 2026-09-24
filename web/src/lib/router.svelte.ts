@@ -1,4 +1,13 @@
-export type RouteName = 'wizard' | 'platforms' | 'browse' | 'title' | 'activity' | 'sources' | 'system' | 'notfound';
+export type RouteName =
+  | 'wizard'
+  | 'platforms'
+  | 'browse'
+  | 'title'
+  | 'activity'
+  | 'sources'
+  | 'dats'
+  | 'system'
+  | 'notfound';
 
 export interface Route {
   name: RouteName;
@@ -20,6 +29,9 @@ function parseHash(hash: string): Route {
   }
   if (segments[0] === 'sources') {
     return { name: 'sources', params: {} };
+  }
+  if (segments[0] === 'dats') {
+    return { name: 'dats', params: {} };
   }
   if (segments[0] === 'system') {
     return { name: 'system', params: {} };

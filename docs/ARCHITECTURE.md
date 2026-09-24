@@ -42,7 +42,7 @@ contracts in this document.
 
 | Crate | Responsibility | Depends on |
 |---|---|---|
-| `mistarr-core` | Domain types. Logiqx DAT parser. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. | none |
+| `mistarr-core` | Domain types. DAT parser for Logiqx XML and No-Intro DB exports. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. | none |
 | `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
 | `mistarr-sources` | Watched-directory scanner. `.torrent` (bencode) and `.magnet` parsing into a file list. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
 | `mistarr-clients` | `DownloadClient` trait. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping. | none |
@@ -118,9 +118,9 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    between two listings. Accept `.dat`, `.xml`, and `.zip` containing either;
    each member of a zip is a separate DAT, and a file whose import job failed
    is enqueued again on a later listing. The `dat_import` job runs on the
-   background lane, so a loaded core does not hold it. Parse Logiqx
-   `<datafile>` with `quick-xml`, streaming. Each game is parsed outside the
-   database's write lock and appended to `dat_stage` in chunks of 2,000
+   background lane, so a loaded core does not hold it. Parse the DAT
+   (Logiqx, or a DB export read twice for its parents) with `quick-xml`,
+   streaming. Each game is parsed outside the database's write lock and appended to `dat_stage` in chunks of 2,000
    games, one short transaction per chunk; one transaction then applies the
    stage (steps 3 to 5), so readers see the old titles or the new ones and
    never part of a DAT. A parse error empties the stage and changes nothing
@@ -131,13 +131,20 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    is still a row, retired or not, as it would had it finished just before.
 2. Identify the platform from the DAT header name using the table in
    PLATFORMS.md, falling back to the platform an earlier version of the same
-   name was bound to. A header without a name takes the member's or file's
-   stem as dropped. Unknown DAT names are stored as an unbound
+   family was bound to. A header without a name takes the member's or file's
+   stem as dropped; a DB export takes `<System> (DB Export)` from its member's
+   or file's name (VERIFICATION.md "DB export"). Unknown DAT names are stored as an unbound
    `dat_versions` row the user can bind in the UI; binding re-reads the file
    from `dats/loaded/` and loads its titles.
 3. Upsert `dat_versions`, then `titles` and `roms`. A newer version of the same
-   DAT name supersedes the old one: entries not present in the new DAT are
-   marked `retired`, never deleted, so verified files keep their provenance.
+   DAT family on the same platform supersedes the old one, whether it comes
+   as a Logiqx DAT or a DB export (VERIFICATION.md "DAT families"); other
+   families on the platform stay live. Titles of the same name are reused
+   across the family's versions, and entries not present in the new DAT are
+   marked `retired`, never deleted. The platform's recompute job is queued;
+   it matches files of roms that retired again against the live roms by
+   their stored hashes, in chunks, or marks them `unverified`, recomputes the
+   picks and then queues a re-map of the platform's bound sources.
 4. Parent/clone data is read from `cloneof` attributes when present. When
    absent, clone groups are inferred by normalising the name (strip region,
    revision, language and flag tags) so 1G1R still works with plain DATs.
@@ -472,7 +479,7 @@ shutdown is left `queued` for this.
 | SQLite other | `mmap_size = 0`, `temp_store = FILE` under `<data>/tmp` (`SQLITE_TMPDIR`, set at startup and emptied of stale files, since the board's `/tmp` is RAM), WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB |
 | SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk |
 | Hashing buffer | 256 KiB, one file at a time |
-| Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches |
+| Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
 | Arcade presence pass | 500 zips per batch, stat only unless import rows of a changed zip need its central directory; the listing's names and the live MRA zip set persist across batches |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
 | SPA bundle, gzipped | under 200 KiB |

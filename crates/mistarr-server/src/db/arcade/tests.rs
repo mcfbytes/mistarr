@@ -184,7 +184,7 @@ fn dat_game(c: &Connection, version: &str, name: &str) -> TitleId {
         status: "good",
         header: None,
     };
-    let id = titles::upsert_title(c, "arcade", v, "MAME", &t, &[rom]).expect("upsert");
+    let id = titles::upsert_title(c, "arcade", v, &t, &[rom]).expect("upsert");
     dats::retire_absent(c, v).expect("retire");
     id
 }
@@ -205,7 +205,7 @@ fn dat_loads_never_touch_mra_titles() {
     assert!(retired(d));
     let mra_version = mra_version(&c, "arcade", 2).expect("version");
     assert!(dats::get(&c, mra_version).expect("get").is_none());
-    assert!(dats::retire(&c, mra_version).expect("retire").is_none());
+    assert!(dats::retire(&c, mra_version, 1).expect("retire").is_none());
     assert!(!retired(m));
     let (items, total) = dats::list(&c, 10, 0).expect("list");
     assert_eq!((items.len(), total), (2, 2));

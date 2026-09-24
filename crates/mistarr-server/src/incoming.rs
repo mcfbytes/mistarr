@@ -60,7 +60,7 @@ pub async fn list(app: &AppState, dir: &Path, kind: &'static str) -> Result<Vec<
     let dir = dir.to_path_buf();
     let listed = tokio::task::spawn_blocking(move || {
         let pending = files_in(&dir);
-        let rejected = rejected_in(&dir.join(REJECTED));
+        let rejected = rejected_in(&dir.join(REJECTED_DIR));
         (dir, pending, rejected)
     })
     .await
@@ -106,8 +106,10 @@ fn rejected_in(dir: &Path) -> Vec<IncomingFile> {
         .collect()
 }
 
-const REJECTED: &str = "rejected";
-const REASON_SUFFIX: &str = ".reason.txt";
+/// The directory beside the dropped files that holds rejected ones.
+pub const REJECTED_DIR: &str = "rejected";
+/// Suffix of the file beside a rejected one that says why.
+pub const REASON_SUFFIX: &str = ".reason.txt";
 
 /// A pending file's state from its open job, if any.
 fn pending_file(
@@ -213,7 +215,7 @@ mod tests {
     async fn pending_and_rejected_files_carry_their_state() {
         let (dir, app) = state();
         let dats = dir.path().join("dats");
-        std::fs::create_dir_all(dats.join(REJECTED)).expect("mkdir");
+        std::fs::create_dir_all(dats.join(REJECTED_DIR)).expect("mkdir");
         std::fs::write(dats.join("a.dat"), b"x").expect("write");
         std::fs::write(dats.join("b.dat"), b"yy").expect("write");
         std::fs::write(dats.join(".c.part"), b"").expect("write");

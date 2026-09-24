@@ -790,13 +790,13 @@ async fn scan_zip_unit(
 /// One hashed track of a disc game directory, before the all-or-nothing rule
 /// decides its final state. `hashes` is `None` when the track could not be
 /// read; it is then always `unverified`.
-struct Track {
-    rel_path: String,
-    name: String,
-    size: i64,
-    mtime: i64,
-    hashes: Option<Hashes>,
-    matched: Option<files::RomMatch>,
+pub(crate) struct Track {
+    pub(crate) rel_path: String,
+    pub(crate) name: String,
+    pub(crate) size: i64,
+    pub(crate) mtime: i64,
+    pub(crate) hashes: Option<Hashes>,
+    pub(crate) matched: Option<files::RomMatch>,
 }
 
 /// The stored hashes of an unchanged track, reused instead of re-hashing.
@@ -938,7 +938,7 @@ async fn scan_disc_unit(
 
 /// Decides each track's final state from the all-or-nothing rule, evaluated
 /// once per matched title rather than once for the whole directory.
-fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Result<Vec<NewFile>> {
+pub(crate) fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Result<Vec<NewFile>> {
     let mut groups: HashMap<i64, Vec<usize>> = HashMap::new();
     for (i, t) in tracks.iter().enumerate() {
         if let Some(m) = &t.matched {

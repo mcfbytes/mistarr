@@ -35,7 +35,7 @@ pub fn torrent_path(conn: &Connection, source_id: SourceId, index: u32) -> Resul
         .optional()?)
 }
 
-/// Whether `other` is a live title in the clone group of `wanted`, other than `wanted` itself.
+/// Whether `other` is a live title in the effective clone group of `wanted`, other than itself.
 ///
 /// # Errors
 ///
@@ -44,7 +44,7 @@ pub fn other_version_of(conn: &Connection, wanted: TitleId, other: TitleId) -> R
     Ok(conn
         .query_row(
             "SELECT 1 FROM titles w JOIN titles o
-               ON COALESCE(o.parent_id, o.id) = COALESCE(w.parent_id, w.id)
+               ON COALESCE(o.group_root, o.parent_id, o.id) = COALESCE(w.group_root, w.parent_id, w.id)
              WHERE w.id = ?1 AND o.id = ?2 AND o.id != w.id AND o.retired = 0",
             params![wanted.0, other.0],
             |_| Ok(()),
@@ -346,6 +346,13 @@ mod tests {
         assert!(other_version_of(&c, alt_title, main).expect("group"));
         assert!(!other_version_of(&c, main, main).expect("self"));
         assert!(!other_version_of(&c, main, title_of(other)).expect("other group"));
+        let linked = title_of(other).0;
+        c.execute(
+            "UPDATE titles SET group_root = ?1 WHERE id = ?2",
+            [main.0, linked],
+        )
+        .expect("link");
+        assert!(other_version_of(&c, main, TitleId(linked)).expect("linked by another DAT"));
         c.execute("UPDATE titles SET retired = 1 WHERE id = ?1", [alt_title.0])
             .expect("retire");
         assert!(!other_version_of(&c, main, alt_title).expect("retired"));

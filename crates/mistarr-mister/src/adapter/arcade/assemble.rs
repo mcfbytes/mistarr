@@ -4,7 +4,7 @@ use std::io::{self, Read};
 
 use mistarr_core::hash::Md5Stream;
 
-use super::mra::{Interleave, MraRom, Part, Patch, RomItem};
+use super::mra::{self, Inline, Interleave, MraRom, Part, Patch, RomItem};
 use crate::{Error, Result};
 
 /// Largest rom the assembler builds or hashes, a guard against runaway `repeat` values.
@@ -13,7 +13,7 @@ pub const MAX_ROM_BYTES: u64 = 512 * 1024 * 1024;
 /// Largest `repeat` a part may carry; MRAs use small counts to fill padding.
 pub const MAX_REPEAT: u64 = 4096;
 
-/// Bytes read at a time when [`md5`] streams a part from its zip.
+/// Bytes read at a time when [`md5`] streams a part from its zip or MRA file.
 const STREAM_CHUNK: usize = 64 * 1024;
 
 /// Where named parts are read from.
@@ -98,6 +98,13 @@ impl PartSource for NoParts {
     fn open(&mut self, _: &str, _: &str, _: Option<u32>) -> io::Result<Option<Box<dyn Read + '_>>> {
         Ok(None)
     }
+}
+
+/// The bytes of an inline part left in its MRA file, for building a rom in memory.
+fn read_inline(inline: &Inline) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    mra::open_inline(inline)?.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 fn refuse(reason: impl Into<String>) -> Error {
@@ -265,15 +272,21 @@ impl Walker {
         if p.repeat == 0 {
             return Ok(());
         }
-        if let (Some(name), None) = (&p.name, &self.data) {
-            return self.stream_named(p, name, rom_zips, layout, src);
+        match (&p.name, &p.inline, &self.data) {
+            (Some(name), _, None) => return self.stream_named(p, name, rom_zips, layout, src),
+            (None, Some(inline), None) => return self.stream_inline(p, inline, layout),
+            _ => {}
         }
-        let named;
-        let bytes: &[u8] = match &p.name {
-            None => &p.data,
-            Some(name) => {
-                named = self.read_named(p, name, rom_zips, src)?;
-                &named
+        let owned;
+        let bytes: &[u8] = match (&p.name, &p.inline) {
+            (None, None) => &p.data,
+            (None, Some(inline)) => {
+                owned = read_inline(inline)?;
+                &owned
+            }
+            (Some(name), _) => {
+                owned = self.read_named(p, name, rom_zips, src)?;
+                &owned
             }
         };
         if bytes.is_empty() && p.repeat > 1 {
@@ -365,6 +378,36 @@ impl Walker {
             let rest = once.checked_mul(p.repeat - 1).ok_or_else(too_large)?;
             if add(self.fed, rest)? > MAX_ROM_BYTES {
                 return Err(too_large());
+            }
+        }
+        Self::whole_words(k)
+    }
+
+    /// Feeds an inline part left in its MRA file, decoding it again for each repeat, so
+    /// no payload is held; refuses exactly what [`Walker::part`] does with the bytes in hand.
+    fn stream_inline(&mut self, p: &Part, inline: &Inline, layout: &Layout) -> Result<()> {
+        if inline.len == 0 && p.repeat > 1 {
+            return Err(refuse(format!(
+                "part (inline) is empty and repeated {} times",
+                p.repeat
+            )));
+        }
+        let total = inline.len.checked_mul(p.repeat).ok_or_else(too_large)?;
+        if add(self.fed, total)? > MAX_ROM_BYTES {
+            return Err(too_large());
+        }
+        let mut k = 0;
+        let mut buf = vec![0; STREAM_CHUNK];
+        for _ in 0..p.repeat {
+            let mut reader = mra::open_inline(inline)?;
+            loop {
+                let n = match reader.read(&mut buf) {
+                    Ok(0) => break,
+                    Ok(n) => n,
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(e) => return Err(e.into()),
+                };
+                self.feed(&buf[..n], layout, &mut k)?;
             }
         }
         Self::whole_words(k)
