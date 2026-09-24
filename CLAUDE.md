@@ -95,6 +95,10 @@ pull request with a merge commit once CI is green. Agents never open or merge
 pull requests, never push to `master`, and never rewrite another branch's
 history.
 
+Dependabot opens weekly update pull requests for actions, cargo and npm
+(`.github/dependabot.yml`). They are reviewed like any other: a bump that adds
+a transitive dependency needs the same justification as a new dependency.
+
 Commit messages: an imperative subject line under 60 characters, a body that
 says what and why, no session narration. End with the attribution trailer
 lines the session provides, when it provides them.
