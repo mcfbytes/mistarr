@@ -193,8 +193,45 @@ pub struct DatGame {
     pub regions: Vec<String>,
     /// Languages the DAT states outside the name: `<release language>`, or `archive@languages`.
     pub languages: Vec<String>,
+    /// A DB export's `archive@status`, verbatim, such as `Proto 2`; see [`DatGame::status_flags`].
+    pub status: Option<String>,
     /// Rom entries in document order.
     pub roms: Vec<DatRom>,
+}
+
+impl DatGame {
+    /// The name flags `status` stands for: `beta`, `proto` (also "Possible Proto"), `demo`
+    /// and `sample`, matched as words in any case.
+    ///
+    /// ```
+    /// use mistarr_core::dat::DatGame;
+    /// use mistarr_core::naming::Flag;
+    /// let game = DatGame { name: "Example Quest (World)".into(), clone_of: None, rom_of: None,
+    ///     description: None, category: None, regions: vec![], languages: vec![],
+    ///     status: Some("Possible Proto".into()), roms: vec![] };
+    /// assert_eq!(game.status_flags(), [Flag::Proto]);
+    /// ```
+    #[must_use]
+    pub fn status_flags(&self) -> Vec<crate::naming::Flag> {
+        use crate::naming::Flag;
+        let Some(status) = &self.status else {
+            return Vec::new();
+        };
+        let mut flags = Vec::new();
+        for word in status.split(|c: char| !c.is_ascii_alphabetic()) {
+            let flag = match word.to_ascii_lowercase().as_str() {
+                "beta" => Flag::Beta,
+                "proto" | "prototype" => Flag::Proto,
+                "demo" => Flag::Demo,
+                "sample" => Flag::Sample,
+                _ => continue,
+            };
+            if !flags.contains(&flag) {
+                flags.push(flag);
+            }
+        }
+        flags
+    }
 }
 
 /// The two input forms a DAT file may take, told apart by its first element.
@@ -608,6 +645,7 @@ impl<R: BufRead> DatStream<R> {
             category: None,
             regions: Vec::new(),
             languages: Vec::new(),
+            status: None,
             roms: Vec::new(),
         };
         if !export {
@@ -658,6 +696,7 @@ impl<R: BufRead> DatStream<R> {
             game.clone_of = archive.parent(&self.options.parents, &game.name);
             game.regions = export::split_list(archive.region.as_deref());
             game.languages = export::split_list(archive.languages.as_deref());
+            game.status = archive.status.clone().filter(|s| !s.trim().is_empty());
             game.roms = export::roms(&game.name, &sources, &self.options);
         }
         self.count += 1;
@@ -679,10 +718,11 @@ impl<R: BufRead> DatStream<R> {
             clone: self.attr(e, b"clone")?,
             region: self.attr(e, b"region")?,
             languages: self.attr(e, b"languages")?,
+            status: self.attr(e, b"status")?,
         })
     }
 
-    /// Reads one `<source>`: its `details` section and every `<file>`.
+    /// Reads one `<source>`: every `<file>` in it.
     fn read_source(&mut self, game: &str) -> Result<export::Source, DatError> {
         let mut source = export::Source::default();
         loop {
@@ -693,13 +733,8 @@ impl<R: BufRead> DatStream<R> {
                 Event::Eof => return Err(DatError::Truncated),
                 _ => continue,
             };
-            match e.local_name().as_ref() {
-                b"details" => {
-                    let section = self.attr(&e, b"section")?.unwrap_or_default();
-                    source.bad = section.to_ascii_lowercase().contains("bad");
-                }
-                b"file" => source.files.push(self.read_file(&e, game)?),
-                _ => {}
+            if e.local_name().as_ref() == b"file" {
+                source.files.push(self.read_file(&e, game)?);
             }
             if body {
                 self.skip(&e)?;
@@ -723,6 +758,10 @@ impl<R: BufRead> DatStream<R> {
             md5: self.hex(e, "md5", 32, game)?,
             sha1: self.hex(e, "sha1", 40, game)?,
             header: self.attr(e, b"header")?.filter(|h| !h.trim().is_empty()),
+            item: self.attr(e, b"item")?,
+            forcename: self.attr(e, b"forcename")?,
+            bad: self.attr(e, b"bad")?.is_some_and(|v| v.trim() == "1"),
+            mia: self.attr(e, b"mia")?.is_some_and(|v| v.trim() == "1"),
         })
     }
 

@@ -545,6 +545,7 @@ prop_compose! {
             category: None,
             regions: Vec::new(),
             languages: Vec::new(),
+            status: None,
             roms,
         }
     }

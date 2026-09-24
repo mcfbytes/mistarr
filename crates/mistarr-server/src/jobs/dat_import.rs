@@ -650,8 +650,8 @@ fn append_chunk(conn: &mut Connection, chunk: &[StagedGame]) -> Result<()> {
     Ok(())
 }
 
-/// Parses a game's name into the row its title is stored from; regions and languages
-/// the name lacks come from the DAT's own fields.
+/// Parses a game's name into the row its title is stored from; regions, languages and
+/// stage flags the name lacks come from the DAT's own fields.
 fn staged(game: &DatGame) -> StagedGame {
     let parsed = parse_name(&game.name);
     let mut regions: Vec<String> = parsed.regions.iter().map(|r| r.name().to_owned()).collect();
@@ -663,6 +663,12 @@ fn staged(game: &DatGame) -> StagedGame {
     } else {
         parsed.languages.clone()
     };
+    let mut flags = parsed.flag_labels();
+    for flag in game.status_flags() {
+        if !parsed.flags.contains(&flag) {
+            flags.push(flag.to_string());
+        }
+    }
     StagedGame {
         name: game.name.clone(),
         base_name: parsed.base_name.clone(),
@@ -671,7 +677,7 @@ fn staged(game: &DatGame) -> StagedGame {
         regions,
         languages,
         revision: parsed.revision.as_ref().map(|r| r.label.clone()),
-        flags: parsed.flag_labels(),
+        flags,
         roms: game
             .roms
             .iter()

@@ -22,7 +22,7 @@ gives; confirm them on the board together with the **verify** rows.
 
 | id | DAT name matches | core dir | ext written | adapter notes |
 |---|---|---|---|---|
-| `nes` | `Nintendo Entertainment System`, `NES` | `NES` | `.nes` | Use the **headered** No-Intro DAT. The core needs an iNES header. If only the headerless DAT is loaded, hash with the 16-byte header stripped for matching, but never strip on disk. |
+| `nes` | `Nintendo Entertainment System`, `NES` | `NES` | `.nes` | Use the **headered** No-Intro DAT. The core needs an iNES header. If only the headerless DAT is loaded, hash with the 16-byte header stripped for matching, but never strip on disk. From a DB export the headerless entries are used, and placement adds the header back from the recorded `header` attribute (VERIFICATION.md "DB export"). |
 | `fds` | `Famicom Disk System`, `Family Computer Disk System` | `NES` | `.fds` | Same directory as NES. Needs BIOS `boot0.rom`: report only. |
 | `snes` | `Super Nintendo Entertainment System`, `Super Famicom`, `Satellaview` | `SNES` | `.sfc` | Strip 512-byte copier headers on `.smc` when hashing and on disk. |
 | `n64` | `Nintendo 64` | `N64` | `.z64` | Use the **BigEndian** DAT. Convert `.v64`/`.n64` to big-endian on placement. |

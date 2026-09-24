@@ -425,7 +425,8 @@ fn big_dat(path: &Path) -> usize {
 }
 
 /// A zipped No-Intro DB export of about `EXPORT_BYTES` of XML binding to NES: each game
-/// has two sources repeating a headered and a headerless file, and clone groups of three
+/// has two sources repeating a headered and a headerless file beside a save file, some
+/// headerless files are bad dumps, and clone groups of three
 /// reference their parent's archive number. Returns the number of games.
 fn big_export(path: &Path) -> usize {
     std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
@@ -458,13 +459,16 @@ fn big_export(path: &Path) -> usize {
                  \t\t\t<file id=\"{s}1\" extension=\"nes\" size=\"{h}\" crc32=\"{}\" md5=\"{}\" sha1=\"{}\" \
                  header=\"4E 45 53 1A 02 01 00 00 00 00 00 00 00 00 00 00\" format=\"Headered\"/>\n\
                  \t\t\t<file id=\"{s}2\" extension=\"unh\" size=\"{size}\" crc32=\"{}\" md5=\"{}\" sha1=\"{}\" \
-                 format=\"Headerless\"/>\n\t\t</source>\n",
+                 format=\"Headerless\"{bad}/>\n\t\t\t<file id=\"{s}3\" extension=\"sav\" size=\"8192\" \
+                 crc32=\"{}\" format=\"Headerless\" item=\"Save\"/>\n\t\t</source>\n",
                 hex_of(games + 3, 8),
                 hex_of(games + 5, 32),
                 hex_of(games + 9, 40),
                 hex_of(games, 8),
                 hex_of(games + 7, 32),
                 hex_of(games + 13, 40),
+                hex_of(games + 17, 8),
+                bad = if games % 97 == 0 { " bad=\"1\"" } else { "" },
                 r = regions[games % 3],
                 h = size + 16,
             );

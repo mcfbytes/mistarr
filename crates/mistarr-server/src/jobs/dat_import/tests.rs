@@ -481,10 +481,48 @@ fn a_plain_db_export_takes_its_name_from_the_file() {
         .expect("version");
     assert_eq!(version, "7");
     assert_eq!(
-        count(&c, "SELECT COUNT(*) FROM roms WHERE name LIKE '%.nes'"),
+        count(
+            &c,
+            "SELECT COUNT(*) FROM roms WHERE name LIKE '%.gb' AND size = 32768"
+        ),
         2,
-        "no header rule on gb, so the headered file is taken"
+        "only the unh file matches the platform's image, named with its extension"
     );
+}
+
+#[test]
+fn archive_status_adds_the_stage_flags_a_name_lacks() {
+    let c = conn();
+    let req = request(false, None);
+    let xml = "<header><version>1</version></header><datafile>\
+        <game name=\"Example Quest (USA)\"><archive number=\"0001\" clone=\"P\" status=\"Proto 2\"/></game>\
+        <game name=\"Example Quest (USA) (Beta)\"><archive number=\"0002\" clone=\"0001\" status=\"Beta\"/></game>\
+        </datafile>";
+    let mut req = req;
+    req.file_stem = "Example Vendor - Nintendo Entertainment System (DB Export) (1)".into();
+    loaded(
+        import_stream(
+            &c.db,
+            Cursor::new(xml.as_bytes()),
+            &req,
+            "",
+            export_parents(xml.as_bytes()).expect("index"),
+        )
+        .expect("import"),
+    );
+    let flags = |name: &str| -> String {
+        let name = name.to_owned();
+        c.with(move |x| {
+            Ok(
+                x.query_row("SELECT flags FROM titles WHERE name = ?1", [name], |r| {
+                    r.get(0)
+                })?,
+            )
+        })
+        .expect("flags")
+    };
+    assert_eq!(flags("Example Quest (USA)"), "[\"proto\"]");
+    assert_eq!(flags("Example Quest (USA) (Beta)"), "[\"beta\"]");
 }
 
 #[test]

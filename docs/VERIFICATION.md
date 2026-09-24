@@ -28,18 +28,29 @@ A No-Intro database export is two top-level elements, `<header>` and then
 `<datafile>`, read as one stream. The header has a `<version>` but no system
 name. Each `<game name>` holds one `<archive>` and one or more `<source>`
 blocks, each with a `<details>` element and `<file>` elements carrying
-`extension`, `size`, `crc32`, `md5`, `sha1`, `format` and, on a headered
-file, `header`. It maps onto the same game and rom model as a Logiqx DAT:
+`extension`, `size`, `crc32`, `md5`, `sha1`, `format` (`Headered` or
+`Headerless`) and, on a headered file, `header`; a file may also carry
+`item`, `forcename`, `bad` and `mia`. It maps onto the same game and rom
+model as a Logiqx DAT:
 
 | Model | Taken from |
 |---|---|
 | game name | `game@name` |
 | parent | `archive@clone`: `P` or empty on a parent; otherwise the parent's `archive@number`, resolved to its game name by a first pass over the document, since a clone may precede its parent |
 | regions, languages | `archive@region` and `archive@languages`, comma-separated |
-| roms | the `<file>` elements of every source, one per `sha1` (size and other hashes without one), of one storage kind chosen per game |
-| rom name | `<game name>.<ext>` |
-| rom status | `baddump` when every source listing the file has a `details@section` naming a bad dump, else `good` |
+| flags | `archive@status` (such as `Beta 2`, `Proto 3`, `Possible Proto`, `Demo`, `Sample`) adds `beta`, `proto`, `demo` or `sample` when the name does not already carry that flag, so the hide list applies |
+| roms | the game image files of every source, one per `sha1` (size and other hashes without one), of one storage kind chosen per game |
+| rom name | the file's `forcename` when present, else `<game name>.<ext>` |
+| rom status | `nodump` when the file has `mia="1"`, `baddump` when it has `bad="1"`, else `good` |
 | DAT name, version | from the file name, `<System> (DB Export) (<version>).xml` or `.zip`, as `<System> (DB Export)`; the header `<version>` when present |
+
+Only the game image becomes a rom: a file with an `item` attribute, and a
+file whose extension is neither the image extension nor `unh`, is skipped.
+Those are extras such as save data or a separate chip dump, and a game
+needs every rom to verify, so one of them as a rom would keep the game
+from ever verifying. The image extension is the platform's written
+extension, else the extension of the game's headered file; without either,
+every file without `item` counts.
 
 The storage kind follows how the board hashes the platform (PLATFORMS.md
 "Header rules"). A file is headerless when `format="Headerless"` or its
@@ -53,8 +64,9 @@ has, the first in this order is taken:
   formats, headered, headerless.
 
 A headerless rom takes the `header` attribute of the headered file in its
-source, which placement uses to add the header back. Its extension is the
-platform's written extension instead of `.unh`, else the headered file's.
+source, which placement uses to add the header back. Unless it has a
+`forcename`, its extension is the platform's written extension instead of
+`.unh`, else the headered file's.
 Two files that would get the same rom name keep the first. A DAT name bound
 to no platform takes the last rule, and binding it later reads the file
 again under the chosen platform's rule.

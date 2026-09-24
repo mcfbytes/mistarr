@@ -26,7 +26,31 @@ struct Game {
     languages: Vec<String>,
     dump: Option<Dump>,
     sources: usize,
+    /// `bad="1"` on the dump's files.
     bad: bool,
+    /// `mia="1"` on the dump's files, which wins over `bad`.
+    mia: bool,
+    /// `forcename` on the dump's files.
+    forcename: Option<String>,
+    /// `archive@status`, which only the export form carries.
+    status: Option<String>,
+}
+
+impl Game {
+    /// The attributes every file of the dump carries besides its hashes.
+    fn marks(&self) -> String {
+        let mut m = String::new();
+        if self.bad {
+            m.push_str(" bad=\"1\"");
+        }
+        if self.mia {
+            m.push_str(" mia=\"1\"");
+        }
+        if let Some(f) = &self.forcename {
+            write!(m, " forcename=\"{f}\"").unwrap();
+        }
+        m
+    }
 }
 
 fn hex(seed: u64, len: usize) -> String {
@@ -60,10 +84,15 @@ fn export_xml(games: &[Game]) -> String {
     );
     for (i, g) in games.iter().enumerate() {
         let clone = g.parent.map_or_else(|| "P".to_owned(), number);
+        let status = g
+            .status
+            .as_ref()
+            .map(|s| format!(" status=\"{s}\""))
+            .unwrap_or_default();
         writeln!(
             x,
             "\t<game name=\"{}\">\n\t\t<archive number=\"{}\" clone=\"{clone}\" regparent=\"\" name=\"{}\" \
-             region=\"{}\" languages=\"{}\" langchecked=\"yes\"/>",
+             region=\"{}\" languages=\"{}\" langchecked=\"yes\"{status}/>",
             g.name,
             number(i),
             g.name,
@@ -71,11 +100,11 @@ fn export_xml(games: &[Game]) -> String {
             g.languages.join(","),
         )
         .unwrap();
+        let marks = g.marks();
         for s in 0..g.sources {
-            let section = if g.bad { "Bad Dump" } else { "Trusted Dump" };
             writeln!(
                 x,
-                "\t\t<source>\n\t\t\t<details id=\"{s}\" section=\"{section}\" region=\"{}\" originalformat=\"Headerless\"/>\n\
+                "\t\t<source>\n\t\t\t<details id=\"{s}\" section=\"Trusted Dump\" region=\"{}\" originalformat=\"Headerless\"/>\n\
                  \t\t\t<serials media_serial1=\"\"/>",
                 g.regions.join(", ")
             )
@@ -85,9 +114,12 @@ fn export_xml(games: &[Game]) -> String {
                 writeln!(
                     x,
                     "\t\t\t<file id=\"{s}1\" extension=\"nes\" size=\"{whole}\" crc32=\"{}\" md5=\"{}\" \
-                     sha1=\"{}\" sha256=\"{}\" header=\"{}\" format=\"Headered\"/>\n\
+                     sha1=\"{}\" sha256=\"{}\" header=\"{}\" format=\"Headered\"{marks}/>\n\
                      \t\t\t<file id=\"{s}2\" extension=\"unh\" size=\"{}\" crc32=\"{}\" md5=\"{}\" sha1=\"{}\" \
-                     sha256=\"{}\" format=\"Headerless\"/>",
+                     sha256=\"{}\" format=\"Headerless\"{marks}/>\n\
+                     \t\t\t<file id=\"{s}3\" extension=\"sav\" size=\"8192\" crc32=\"{}\" sha1=\"{}\" format=\"Headerless\"/>\n\
+                     \t\t\t<file id=\"{s}4\" extension=\"bin\" size=\"4096\" crc32=\"{}\" sha1=\"{}\" \
+                     format=\"Headerless\" item=\"Unfixed\" note=\"extra chip\"/>",
                     hex(d.seed ^ 1, 8),
                     hex(d.seed ^ 2, 32),
                     hex(d.seed ^ 3, 40),
@@ -98,6 +130,10 @@ fn export_xml(games: &[Game]) -> String {
                     hex(d.seed, 32),
                     hex(d.seed, 40),
                     hex(d.seed, 64),
+                    hex(d.seed ^ 5, 8),
+                    hex(d.seed ^ 5, 40),
+                    hex(d.seed ^ 6, 8),
+                    hex(d.seed ^ 6, 40),
                 )
                 .unwrap();
             }
@@ -143,10 +179,13 @@ fn logiqx_xml(games: &[Game]) -> String {
             .unwrap();
         }
         if let Some(d) = g.dump.as_ref().filter(|_| g.sources > 0) {
+            let name = g
+                .forcename
+                .clone()
+                .unwrap_or_else(|| format!("{}.nes", g.name));
             write!(
                 x,
-                "<rom name=\"{}.nes\" size=\"{}\" crc=\"{}\" md5=\"{}\" sha1=\"{}\" header=\"{}\"",
-                g.name,
+                "<rom name=\"{name}\" size=\"{}\" crc=\"{}\" md5=\"{}\" sha1=\"{}\" header=\"{}\"",
                 d.size,
                 hex(d.seed, 8),
                 hex(d.seed, 32),
@@ -154,7 +193,9 @@ fn logiqx_xml(games: &[Game]) -> String {
                 header_hex(&d.header)
             )
             .unwrap();
-            if g.bad {
+            if g.mia {
+                x.push_str(" status=\"nodump\"");
+            } else if g.bad {
                 x.push_str(" status=\"baddump\"");
             }
             x.push_str("/>");
@@ -180,52 +221,71 @@ fn ines_header(prg: u8) -> Vec<u8> {
     h
 }
 
-/// A clone listed before its parent, a parent with two sources, a bad dump and a game without files.
+/// A clone listed before its parent, a parent with two sources, a bad dump, a game without
+/// files, a missing dump, and a prototype by status only whose files carry a forced name.
 fn fixture() -> Vec<Game> {
     let dump = |seed, prg| Dump {
         size: 16_384 * u64::from(prg),
         seed,
         header: ines_header(prg),
     };
-    let game = |name: &str, parent, region: &str, lang: &str, d, sources, bad| Game {
+    let game = |name: &str, parent, region: &str, lang: &str, d, sources| Game {
         name: name.into(),
         parent,
         regions: vec![region.into()],
         languages: vec![lang.into()],
         dump: d,
         sources,
-        bad,
+        bad: false,
+        mia: false,
+        forcename: None,
+        status: None,
     };
-    vec![
-        game(
-            "Example Quest (USA)",
-            Some(1),
-            "USA",
-            "En",
-            Some(dump(11, 2)),
-            1,
-            false,
-        ),
-        game(
-            "Example Quest (Japan)",
-            None,
-            "Japan",
-            "Ja",
-            Some(dump(12, 2)),
-            2,
-            false,
-        ),
-        game(
+    let quest_usa = game(
+        "Example Quest (USA)",
+        Some(1),
+        "USA",
+        "En",
+        Some(dump(11, 2)),
+        1,
+    );
+    let quest_japan = game(
+        "Example Quest (Japan)",
+        None,
+        "Japan",
+        "Ja",
+        Some(dump(12, 2)),
+        2,
+    );
+    let racer = Game {
+        bad: true,
+        ..game(
             "Sample Racer (Europe)",
             None,
             "Europe",
             "En",
             Some(dump(13, 1)),
             3,
-            true,
-        ),
-        game("Demo Dungeon (World)", None, "World", "En", None, 1, false),
-    ]
+        )
+    };
+    let dungeon = game("Demo Dungeon (World)", None, "World", "En", None, 1);
+    let trail = Game {
+        mia: true,
+        ..game(
+            "Trial Trail (Japan)",
+            None,
+            "Japan",
+            "Ja",
+            Some(dump(14, 1)),
+            1,
+        )
+    };
+    let manor = Game {
+        forcename: Some("Mock Manor (USA) (Alt).nes".into()),
+        status: Some("Proto".into()),
+        ..game("Mock Manor (USA)", None, "USA", "En", Some(dump(15, 1)), 1)
+    };
+    vec![quest_usa, quest_japan, racer, dungeon, trail, manor]
 }
 
 #[test]
@@ -242,7 +302,9 @@ fn a_db_export_yields_headerless_roms_named_like_the_dat() {
             "Example Quest (USA)",
             "Example Quest (Japan)",
             "Sample Racer (Europe)",
-            "Demo Dungeon (World)"
+            "Demo Dungeon (World)",
+            "Trial Trail (Japan)",
+            "Mock Manor (USA)"
         ]
     );
     let clone = &dat.games[0];
@@ -264,9 +326,46 @@ fn a_db_export_yields_headerless_roms_named_like_the_dat() {
     let parent = &dat.games[1];
     assert_eq!(parent.clone_of, None);
     assert_eq!(parent.roms.len(), 1, "two sources of one dump are one rom");
+    assert!(
+        dat.games.iter().all(|g| g.roms.len() <= 1),
+        "extra items and save files are not roms"
+    );
     assert_eq!(dat.games[2].roms[0].status, RomStatus::BadDump);
     assert!(dat.games[3].roms.is_empty());
+    assert_eq!(dat.games[4].roms[0].status, RomStatus::NoDump);
+    let manor = &dat.games[5];
+    assert_eq!(manor.roms[0].name, "Mock Manor (USA) (Alt).nes");
+    assert_eq!(manor.roms[0].status, RomStatus::Good);
+    assert_eq!(manor.status.as_deref(), Some("Proto"));
+    assert_eq!(manor.status_flags(), [crate::naming::Flag::Proto]);
     assert!(dat.games.iter().all(|g| g.description.is_none()));
+}
+
+#[test]
+fn archive_status_maps_to_stage_flags() {
+    use crate::naming::Flag;
+    let flags = |status: Option<&str>| {
+        DatGame {
+            name: "Example Quest (World)".into(),
+            clone_of: None,
+            rom_of: None,
+            description: None,
+            category: None,
+            regions: Vec::new(),
+            languages: Vec::new(),
+            status: status.map(str::to_owned),
+            roms: Vec::new(),
+        }
+        .status_flags()
+    };
+    assert_eq!(flags(Some("Beta")), [Flag::Beta]);
+    assert_eq!(flags(Some("Beta 2")), [Flag::Beta]);
+    assert_eq!(flags(Some("Proto 3")), [Flag::Proto]);
+    assert_eq!(flags(Some("Possible Proto")), [Flag::Proto]);
+    assert_eq!(flags(Some("Demo")), [Flag::Demo]);
+    assert_eq!(flags(Some("sample")), [Flag::Sample]);
+    assert!(flags(Some("Verified")).is_empty());
+    assert!(flags(None).is_empty());
 }
 
 #[test]
@@ -288,7 +387,7 @@ fn a_single_pass_leaves_clones_unlinked() {
     let games: Vec<DatGame> = stream.collect::<Result<_, _>>().unwrap();
     assert!(games.iter().all(|g| g.clone_of.is_none()));
     let parents = export_parents(xml.as_bytes()).unwrap().unwrap();
-    assert_eq!(parents.len(), 4);
+    assert_eq!(parents.len(), 6);
     assert_eq!(parents["0002"], "Example Quest (Japan)");
 }
 
@@ -442,6 +541,8 @@ prop_compose! {
         dumps in prop::collection::vec(proptest::option::of(arb_dump()), count),
         sources in prop::collection::vec(1usize..4, count),
         bad in prop::collection::vec(any::<bool>(), count),
+        mia in prop::collection::vec(proptest::bool::weighted(0.2), count),
+        forced in prop::collection::vec(any::<bool>(), count),
     ) -> Vec<Game> {
         (0..parents.len())
             .map(|i| Game {
@@ -453,6 +554,9 @@ prop_compose! {
                 dump: dumps[i].clone(),
                 sources: sources[i],
                 bad: bad[i],
+                mia: mia[i],
+                forcename: forced[i].then(|| format!("Example Game {i:03} (Forced).nes")),
+                status: None,
             })
             .collect()
     }

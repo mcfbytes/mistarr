@@ -6,13 +6,14 @@ use std::path::Path;
 use super::{DatRom, ExportOptions, RomStatus};
 use crate::hash::HeaderRule;
 
-/// A game's `<archive>`: its number, parent reference, region and languages.
+/// A game's `<archive>`: its number, parent reference, region, languages and release status.
 #[derive(Debug, Default)]
 pub(super) struct Archive {
     pub(super) number: Option<String>,
     pub(super) clone: Option<String>,
     pub(super) region: Option<String>,
     pub(super) languages: Option<String>,
+    pub(super) status: Option<String>,
 }
 
 impl Archive {
@@ -29,8 +30,6 @@ impl Archive {
 /// One `<source>`: a dump of the game and the files it describes.
 #[derive(Debug, Default)]
 pub(super) struct Source {
-    /// The `details` section names a bad dump.
-    pub(super) bad: bool,
     pub(super) files: Vec<File>,
 }
 
@@ -44,6 +43,14 @@ pub(super) struct File {
     pub(super) md5: Option<String>,
     pub(super) sha1: Option<String>,
     pub(super) header: Option<String>,
+    /// `item`: the file is an extra, such as save data, not the game image.
+    pub(super) item: Option<String>,
+    /// `forcename`: the file name the rom takes instead of `<game>.<ext>`.
+    pub(super) forcename: Option<String>,
+    /// `bad="1"`: a known bad dump.
+    pub(super) bad: bool,
+    /// `mia="1"`: no dump is known.
+    pub(super) mia: bool,
 }
 
 /// How a file is stored, from its `format` attribute and extension.
@@ -85,6 +92,28 @@ impl File {
     fn own_extension(&self) -> &str {
         self.extension.trim().trim_start_matches('.')
     }
+
+    /// Whether the file is the game image: no `item`, and the image extension or the
+    /// headerless `unh`; without an image extension every file without `item` counts.
+    fn is_image(&self, extension: Option<&str>) -> bool {
+        if self.item.is_some() {
+            return false;
+        }
+        let own = self.own_extension();
+        extension.is_none_or(|ext| {
+            own.eq_ignore_ascii_case("unh") || own.eq_ignore_ascii_case(ext.trim_start_matches('.'))
+        })
+    }
+
+    fn status(&self) -> RomStatus {
+        if self.mia {
+            RomStatus::NoDump
+        } else if self.bad {
+            RomStatus::BadDump
+        } else {
+            RomStatus::Good
+        }
+    }
 }
 
 /// Preference of a storage kind under a header rule; the lowest present is taken.
@@ -100,14 +129,24 @@ fn rank(rule: HeaderRule, kind: Kind) -> u8 {
     }
 }
 
-/// The rom entries of a game: files of the preferred kind across every source, once per
-/// dump and per name, each named `<game>.<extension>`.
+/// The rom entries of a game: its image files of the preferred kind across every source,
+/// once per dump and per name, each named by `forcename` or `<game>.<extension>`. The
+/// image extension is the platform's, else that of the game's headered file.
 pub(super) fn roms(game: &str, sources: &[Source], options: &ExportOptions) -> Vec<DatRom> {
     let rule = options.header_rule;
+    let headered = sources
+        .iter()
+        .flat_map(|s| &s.files)
+        .find(|f| f.item.is_none() && f.kind() == Kind::Headered && !f.own_extension().is_empty())
+        .map(File::own_extension);
+    let image = options.extension.as_deref().or(headered);
     let files = || {
-        sources
-            .iter()
-            .flat_map(|s| s.files.iter().map(move |f| (s, f)))
+        sources.iter().flat_map(move |s| {
+            s.files
+                .iter()
+                .filter(move |f| f.is_image(image))
+                .map(move |f| (s, f))
+        })
     };
     let Some(best) = files().map(|(_, f)| rank(rule, f.kind())).min() else {
         return Vec::new();
@@ -119,10 +158,7 @@ pub(super) fn roms(game: &str, sources: &[Source], options: &ExportOptions) -> V
     let mut keys: Vec<String> = Vec::new();
     for (source, file) in files().filter(|(_, f)| rank(rule, f.kind()) == best) {
         let key = file.key();
-        if let Some(at) = keys.iter().position(|k| *k == key) {
-            if !source.bad {
-                out[at].status = RomStatus::Good;
-            }
+        if keys.contains(&key) {
             continue;
         }
         let name = rom_name(game, file, options, sibling_ext.as_deref());
@@ -145,19 +181,24 @@ pub(super) fn roms(game: &str, sources: &[Source], options: &ExportOptions) -> V
             crc32: file.crc32.clone(),
             md5: file.md5.clone(),
             sha1: file.sha1.clone(),
-            status: if source.bad {
-                RomStatus::BadDump
-            } else {
-                RomStatus::Good
-            },
+            status: file.status(),
             header,
         });
     }
     out
 }
 
-/// `<game>.<ext>`, where a `.unh` or missing extension becomes the platform's, else the headered file's.
+/// The file's `forcename`, else `<game>.<ext>`, where a `.unh` or missing extension becomes
+/// the platform's, else the headered file's.
 fn rom_name(game: &str, file: &File, options: &ExportOptions, sibling: Option<&str>) -> String {
+    if let Some(name) = file
+        .forcename
+        .as_deref()
+        .map(str::trim)
+        .filter(|n| !n.is_empty())
+    {
+        return name.to_owned();
+    }
     let own = file.own_extension();
     let ext = if own.is_empty() || own.eq_ignore_ascii_case("unh") {
         options
