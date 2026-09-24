@@ -325,6 +325,15 @@ async fn start_transmission_runs_the_opt_in_service() {
     assert_eq!(body["client"]["transmission_service"], true);
     assert_eq!(body["client"]["transmission_opt_in"], true);
     assert_eq!(start("rtorrent").await.status, 400);
+
+    let slow = format!("#!/bin/sh\n/bin/sleep 1\necho \"$1\" > '{}'\n", marker.display());
+    std::fs::write(init.join("S92transmission"), slow).expect("write");
+    let (a, b) = tokio::join!(start("transmission"), start("transmission"));
+    let mut codes = [a.status, b.status];
+    codes.sort_unstable();
+    assert_eq!(codes, [200, 409], "{} / {}", a.body, b.body);
+    let busy = if a.status == 409 { a } else { b };
+    assert_eq!(busy.json()["error"]["code"], "busy");
     booted.running.shutdown().await.expect("shutdown");
 }
 

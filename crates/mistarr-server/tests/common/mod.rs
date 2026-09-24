@@ -63,6 +63,7 @@ pub fn options_in(dir: &Path) -> Options {
         launch_dir: dir.to_path_buf(),
         launch_gap: Duration::ZERO,
         redetect_poll: Duration::from_secs(3600),
+        redetect_on_unreachable: false,
         transmission_opt_in: dir.join("linux/transmission"),
         transmission_init: dir.join("init.d/S92transmission"),
         client_search_path: Some(dir.join("bin").into_os_string()),

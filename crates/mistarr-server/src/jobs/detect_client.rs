@@ -68,6 +68,7 @@ pub async fn probe(client: &ClientConfig, launcher: &Launcher) -> ClientStatus {
         kind: client.kind.kind(),
         url,
         timeout: PROBE_TIMEOUT,
+        rtorrent_socket: launcher.data_dir.join("rtorrent.sock"),
         ..DetectConfig::default()
     };
     let found = detect::detect(&cfg).await;
@@ -103,12 +104,15 @@ pub async fn probe(client: &ClientConfig, launcher: &Launcher) -> ClientStatus {
 
 /// Detects the client, stores the result, points the app at it, publishes
 /// `status` when anything but the probe time changed (always with `announce`),
-/// and checks the wizard. Returns what it found.
+/// and checks the wizard. Runs one at a time; a result whose probe began
+/// before the stored one was taken is dropped and the stored one returned.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] when the result cannot be stored.
 pub async fn detect_and_store(app: &Arc<AppState>, announce: bool) -> Result<ClientStatus> {
+    let _one = app.detect_lock.lock().await;
+    let began = crate::unix_now();
     let client = app.config().client;
     let status = probe(&client, &app.launcher()).await;
     let stored = status.clone();
@@ -118,10 +122,17 @@ pub async fn detect_and_store(app: &Arc<AppState>, announce: bool) -> Result<Cli
             let before = settings::get_json::<ClientStatus>(c, keys::CLIENT_DETECTED)
                 .ok()
                 .flatten();
+            if before.as_ref().is_some_and(|b| b.checked_at > began) {
+                return Ok(Err(before));
+            }
             settings::set_json(c, keys::CLIENT_DETECTED, &stored)?;
-            Ok(before)
+            Ok(Ok(before))
         })
         .await?;
+    let before = match before {
+        Ok(before) => before,
+        Err(newer) => return Ok(newer.unwrap_or(status)),
+    };
     let changed = before.is_none_or(|b| {
         ClientStatus { checked_at: 0, ..b }
             != ClientStatus {
@@ -298,6 +309,33 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         panic!("the started client was never picked up");
+    }
+
+    #[tokio::test]
+    async fn a_probe_older_than_the_stored_result_is_dropped() {
+        let (_dir, app) = state();
+        app.update_config(|c| {
+            c.client.kind = ClientChoice::Rtorrent;
+            c.client.url = "127.0.0.1:1".into();
+        });
+        let newer = ClientStatus {
+            kind: Some(ClientKind::Transmission),
+            checked_at: crate::unix_now() + 100,
+            ..ClientStatus::default()
+        };
+        let stored = newer.clone();
+        app.db
+            .write(move |c| settings::set_json(c, keys::CLIENT_DETECTED, &stored))
+            .await
+            .expect("store");
+        let got = detect_and_store(&app, false).await.expect("detect");
+        assert_eq!(got, newer);
+        let kept: Option<ClientStatus> = app
+            .db
+            .read(|c| settings::get_json(c, keys::CLIENT_DETECTED))
+            .await
+            .expect("read");
+        assert_eq!(kept, Some(newer));
     }
 
     #[test]

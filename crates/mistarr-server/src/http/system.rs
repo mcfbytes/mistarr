@@ -205,6 +205,13 @@ async fn start_client(
 ) -> Result<Json<Status>, ApiError> {
     let body: StartBody =
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let Ok(_starting) = app.client_start.try_lock() else {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "busy",
+            "A download client is already being started.",
+        ));
+    };
     let current = app
         .db
         .read(|c| settings::get_json::<ClientStatus>(c, keys::CLIENT_DETECTED))

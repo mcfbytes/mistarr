@@ -55,6 +55,8 @@ pub struct Options {
     pub launch_gap: Duration,
     /// How often client detection re-runs while no client answers.
     pub redetect_poll: Duration,
+    /// Whether the poller asks for re-detection once the client is unreachable.
+    pub redetect_on_unreachable: bool,
     /// The directory that opts the `Buildroot_MiSTer` Transmission service in.
     pub transmission_opt_in: PathBuf,
     /// The `Buildroot_MiSTer` Transmission init script.
@@ -84,6 +86,7 @@ impl Default for Options {
             launch_dir: PathBuf::from("/tmp"),
             launch_gap: Duration::from_secs(3),
             redetect_poll: Duration::from_secs(60),
+            redetect_on_unreachable: true,
             transmission_opt_in: PathBuf::from(mistarr_clients::launch::TRANSMISSION_OPT_IN),
             transmission_init: PathBuf::from(mistarr_clients::launch::TRANSMISSION_INIT),
             client_search_path: None,
@@ -111,6 +114,10 @@ pub struct AppState {
     pub poll_wake: tokio::sync::Notify,
     /// Wakes client re-detection, as when a client that answered stops answering.
     pub redetect: tokio::sync::Notify,
+    /// Serialises client detection so an older probe never overwrites a newer one.
+    pub(crate) detect_lock: tokio::sync::Mutex<()>,
+    /// Held while `POST /system/client/start` runs, so a second one is `busy`.
+    pub(crate) client_start: tokio::sync::Mutex<()>,
     shutdown: watch::Sender<bool>,
     settings_write: tokio::sync::Mutex<()>,
     client: RwLock<Option<(ClientKey, Arc<dyn DownloadClient>)>>,
@@ -132,6 +139,8 @@ impl AppState {
             started: Instant::now(),
             poll_wake: tokio::sync::Notify::new(),
             redetect: tokio::sync::Notify::new(),
+            detect_lock: tokio::sync::Mutex::new(()),
+            client_start: tokio::sync::Mutex::new(()),
             shutdown: watch::Sender::new(false),
             settings_write: tokio::sync::Mutex::new(()),
             client: RwLock::new(None),
@@ -171,15 +180,24 @@ impl AppState {
             .map(|(_, c)| Arc::clone(c))
     }
 
-    /// Points [`AppState::client`] at what `status` found, keeping the current
-    /// handle when nothing it was built from changed.
+    /// Points [`AppState::client`] at what `status` found. The current handle
+    /// stays unless the probe answered from a different client, or only the
+    /// path map changed; a probe that found nothing never drops it.
     pub fn refresh_client(&self, status: &ClientStatus) {
-        let key = ClientKey::from_detection(status, &self.config().client);
-        let mut slot = self.client.write().unwrap_or_else(PoisonError::into_inner);
-        if slot.as_ref().map(|(k, _)| k) == key.as_ref() {
+        let Some(key) = ClientKey::from_detection(status, &self.config().client) else {
             return;
+        };
+        let mut slot = self.client.write().unwrap_or_else(PoisonError::into_inner);
+        let replace = match slot.as_ref() {
+            None => true,
+            Some((k, _)) if *k == key => false,
+            Some((k, _)) => status.reachable || (k.kind == key.kind && k.url == key.url),
+        };
+        if replace {
+            if let Some(client) = key.build() {
+                *slot = Some((key, client));
+            }
         }
-        *slot = key.and_then(|k| k.build().map(|c| (k, c)));
     }
 
     /// Installs `client` as the detected client, for tests that script one in process.
@@ -201,6 +219,7 @@ impl AppState {
             transmission_init: self.options.transmission_init.clone(),
             data_dir: self.config().paths.data,
             search_path: self.options.client_search_path.clone(),
+            timeout: mistarr_clients::launch::START_TIMEOUT,
         }
     }
 
@@ -584,12 +603,24 @@ mod tests {
         });
         app.refresh_client(&found);
         assert!(!Arc::ptr_eq(&first, &app.client().expect("client")));
+        let second = app.client().expect("client");
         app.refresh_client(&ClientStatus {
             kind: None,
             url: None,
-            ..found
+            ..found.clone()
         });
-        assert!(app.client().is_none());
+        assert!(Arc::ptr_eq(&second, &app.client().expect("kept")));
+        let other = ClientStatus {
+            url: Some("127.0.0.1:2".into()),
+            ..found.clone()
+        };
+        app.refresh_client(&other);
+        assert!(Arc::ptr_eq(&second, &app.client().expect("kept")));
+        app.refresh_client(&ClientStatus {
+            reachable: true,
+            ..other
+        });
+        assert!(!Arc::ptr_eq(&second, &app.client().expect("replaced")));
     }
 
     #[test]

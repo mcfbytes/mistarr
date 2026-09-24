@@ -16,7 +16,8 @@ At startup, and again when the user presses "re-detect":
    `X-Transmission-Session-Id` counts as alive, as does a 401 whose
    `WWW-Authenticate` challenge names Transmission.
 3. Probe rtorrent SCGI at `client.url` if it is an SCGI address, then
-   `127.0.0.1:5000`, then the unix socket `/media/fat/mistarr/rtorrent.sock`.
+   `127.0.0.1:5000`, then the unix socket `rtorrent.sock` in the data
+   directory.
    The probe only checks that the connection opens. An SCGI address is
    `host:port`, `scgi://host:port`, an absolute socket path or `scgi:///path`.
 4. Detection also records which clients are installed, running or not:
@@ -25,8 +26,12 @@ At startup, and again when the user presses "re-detect":
    directory `/media/fat/linux/transmission`, whose presence makes that
    script start the daemon at boot.
 5. While no client answers, detection runs again every minute, and once
-   more on the first failed poll after a client answered, so a daemon
-   started after mistarr is picked up without the wizard.
+   more when the poller marks the client unreachable after three failed
+   polls, so a daemon started after mistarr is picked up without the
+   wizard. Detection runs one at a time, and a result whose probe began
+   before the stored one was taken is dropped. The client mistarr talks to
+   changes only when a probe finds a different client that answers, or
+   when the settings change it; a probe that finds nothing keeps it.
 
 ## Starting a stopped client
 
@@ -34,6 +39,9 @@ When no client answers and one is installed, the wizard's client step and
 the System screen offer to start it. Nothing is started without that
 explicit action, which is `POST /system/client/start` with `{ kind }`; the
 server then re-detects for up to ten seconds and answers with the status.
+Only one start runs at a time. A start command's output goes to
+`client-start.log` in the data directory, and one still running after 30
+seconds is killed and reported.
 
 "Start Transmission" on Buildroot_MiSTer creates
 `/media/fat/linux/transmission` if it is absent and runs
@@ -44,24 +52,32 @@ removing the directory undoes that. Without the init script,
 `transmission-daemon` is run with `--config-dir /media/fat/mistarr/transmission`
 and `--download-dir /media/fat/mistarr/staging`, and daemonizes itself.
 
-"Start rtorrent" writes a minimal rc to `/media/fat/mistarr/rtorrent.rc`,
-unless that file exists, creates `/media/fat/mistarr/rtorrent-session/` and
-starts `rtorrent -n -o import=/media/fat/mistarr/rtorrent.rc` detached,
-under `nice` where the board has it. The rc:
+"Start rtorrent" writes the managed rc to `rtorrent.rc` in the data
+directory, creates `rtorrent-session/` beside it and starts
+`rtorrent -n -o system.daemon.set=true -o import="<data>/rtorrent.rc"` in its
+own process group, under `nice` where the board has it. The rc is rewritten
+on every start while its first line is the marker below; an `rtorrent.rc`
+without that line belongs to the user and is used as it is. Paths in the rc
+are quoted, so a data directory with spaces works; one containing a double
+quote is refused. SCGI listens on `127.0.0.1:5000`, which detection probes,
+since a unix socket cannot be created on the exFAT card. Daemon mode needs
+rtorrent 0.9.7 or newer; an older rtorrent rejects the option and exits,
+and a start whose rtorrent exits within two seconds is reported as failed
+with the last line it logged. The rc, with the board's data directory:
 
 ```
-directory.default.set = /media/fat/mistarr/staging
-session.path.set = /media/fat/mistarr/rtorrent-session
-network.scgi.open_local = /media/fat/mistarr/rtorrent.sock
+# Written by mistarr on every start. Delete this line to keep your own edits.
+directory.default.set = "/media/fat/mistarr/staging"
+session.path.set = "/media/fat/mistarr/rtorrent-session"
+network.scgi.open_port = 127.0.0.1:5000
 network.xmlrpc.size_limit.set = 8M
 dht.mode.set = auto
 protocol.pex.set = yes
 throttle.global_down.max_rate.set_kb = 0
 throttle.global_up.max_rate.set_kb = 0
-system.daemon.set = true
 ```
 
-mistarr never edits an rc file the user already has. If one exists without
+mistarr never edits an rc file the user owns. If one exists without
 SCGI enabled, the status screen says which line to add.
 
 ## Transmission
