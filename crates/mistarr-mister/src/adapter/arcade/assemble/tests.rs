@@ -373,3 +373,35 @@ fn streamed_md5_matches_the_assembled_rom_across_chunks() {
     let past = rom(r#"<rom zip="exblast.zip"><part name="a.bin" offset="0x100000"/></rom>"#);
     assert!(matches!(md5(&past, &mut src), Err(Error::MraUnsupported(m)) if m.contains("past")));
 }
+
+#[test]
+fn inline_parts_read_from_a_file_hash_and_assemble_as_in_memory() {
+    let hex = (0..3 * STREAM_CHUNK).fold(String::new(), |mut s, i| {
+        std::fmt::Write::write_fmt(&mut s, format_args!("{:02x} ", i % 253)).expect("write");
+        s
+    });
+    let xml = format!(
+        r#"<m><rom zip="exblast.zip"><part>{hex}</part><part name="a.bin"/>
+           <interleave output="16"><part map="01">{hex}</part><part name="b.bin" map="10"/></interleave>
+           <part repeat="3">0a 0b</part><patch offset="2">ff</patch></rom>
+           <rom><part repeat="2"> </part></rom></m>"#
+    );
+    let b = vec![7u8; 3 * STREAM_CHUNK];
+    let mut src = Mem::with(&[
+        ("exblast.zip", "a.bin", b"abcd"),
+        ("exblast.zip", "b.bin", &b),
+    ]);
+    let dir = crate::adapter::testutil::scratch("assemble-inline");
+    let path = dir.join("Example Inline.mra");
+    std::fs::write(&path, &xml).expect("write");
+    let from_file = crate::adapter::arcade::mra::read(&path).expect("read");
+    let in_memory = parse(xml.as_bytes()).expect("parse");
+    let (file_rom, mem_rom) = (&from_file.roms[0], &in_memory.roms[0]);
+    let expected = assemble(mem_rom, &mut src).expect("assemble");
+    assert_eq!(md5(file_rom, &mut src).expect("md5"), expected.md5);
+    assert_eq!(assemble(file_rom, &mut src).expect("assemble"), expected);
+    assert!(matches!(
+        md5(&from_file.roms[1], &mut src),
+        Err(Error::MraUnsupported(m)) if m.contains("empty")
+    ));
+}

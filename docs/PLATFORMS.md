@@ -89,7 +89,10 @@ the Arcade Organizer fills with thousands of symlinks to the same MRAs, and
 a second path to a file already listed (a hard link or a symlink to it, same
 device and inode). A symlink to an MRA file elsewhere is followed.
 `_alternatives` holds distinct MRAs and is read. An MRA is refused unread
-above 1 MiB.
+above 16 MiB, a sanity bound: inline part data makes some a few MiB. The
+catalogue streams each file, keeping its metadata, zip references and rom
+structure; the hex of an inline part is checked as it passes and left in the
+file, recorded by its place, so no payload is held across a batch.
 
 An MRA is read again only when its size or modification time changes, or
 when the parser version changes. exFAT and FAT keep modification times to
@@ -133,7 +136,7 @@ the rom from this subset and refuses anything else by name:
 |---|---|
 | `<part name zip crc>` | the member from the part's `zip`, else the rom's, trying each of a `\|` list in order; found by exact name, then case-insensitive name, then `crc` |
 | `offset`, `length`, `repeat` | numbers as C `strtoul` reads them (`0x` hex, leading-zero octal, decimal); `length="0"` takes the rest; `repeat="0"` emits nothing and reads nothing; the md5 check streams a named part again from its zip for each repeat, holding no part in memory; an offset past the end, `repeat` above 4096, an empty part repeated, and any offset or length that overflows are refused |
-| `<part>hex</part>` | inline bytes, digit pairs separated by spaces, commas or newlines |
+| `<part>hex</part>` | inline bytes, digit pairs separated by spaces, commas or newlines; the md5 check, one MRA at a time, decodes them again from the file straight into the digest, for each repeat, holding no payload |
 | `<interleave input="8" output="8..64">` | parts spread by `map`, hex digits read from the right, one per output byte: the k-th non-zero digit `d` writes input byte k of each word at output byte `first + d - 1 + gaps`, `first` being the first non-zero digit's position and `gaps` the zero digits after it so far; a missing `map` is `1`; a part that is not a whole number of words is refused |
 | `<patch offset operation="xor">hex</patch>` | overwrite or exclusive-or into the assembled bytes; past the end is refused |
 | `map` outside `<interleave>`, other `input` widths, `<group>` and any other element inside `<rom>` | refused |

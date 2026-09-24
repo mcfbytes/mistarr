@@ -28,6 +28,9 @@ const ORGANIZED_DIRS: usize = 1000;
 const LINKS_PER_DIR: usize = 15;
 const DAT_BYTES: usize = 50 * 1024 * 1024;
 const EXPORT_BYTES: usize = 16 * 1024 * 1024;
+/// MRAs of inline part data, each about 3 MB of hex, and the bytes each decodes to.
+const LARGE_MRAS: usize = 16;
+const INLINE_BYTES: usize = 1024 * 1024;
 const TORRENT_FILES: usize = 50_000;
 const LOOSE_FILES: usize = 16_000;
 const ZIPPED_FILES: usize = 2_000;
@@ -581,6 +584,54 @@ fn arcade_catalogue_stays_under_budget() {
         "unchanged sets are not checked again"
     );
     assert_budget("arcade_catalog rerun", peak, 12);
+}
+
+/// `_Arcade` with `LARGE_MRAS` MRAs of about 3 MB each, one `<part>` of inline hex beside a
+/// zipped part under one md5, all in one catalogue batch. Returns the number of MRAs.
+fn large_mra_tree(root: &Path) -> usize {
+    let arcade = root.join("_Arcade");
+    let mame = root.join("games/mame");
+    std::fs::create_dir_all(&mame).expect("mkdir");
+    for i in 0..LARGE_MRAS {
+        let inline = bytes_for(i + 90_000, INLINE_BYTES);
+        let zipped = bytes_for(i + 95_000, 4096);
+        let zip = format!("exinl{i:02}.zip");
+        write(&mame.join(&zip), &zip_of(&[("z.bin", &zipped)]));
+        let mut md5 = Md5Stream::new();
+        md5.update(&inline);
+        md5.update(&zipped);
+        let mut hex = String::with_capacity(INLINE_BYTES * 3);
+        for (k, b) in inline.iter().enumerate() {
+            let _ = write!(hex, "{b:02X}{}", if k % 32 == 31 { '\n' } else { ' ' });
+        }
+        let name = format!("Example Inline {i:02}");
+        let text = format!(
+            "<misterromdescription><name>{name}</name><rbf>excore</rbf>\n\
+             <rom index=\"0\" zip=\"{zip}\" md5=\"{}\"><part>\n{hex}</part><part name=\"z.bin\"/></rom>\n\
+             </misterromdescription>\n",
+            md5.finish()
+        );
+        write(&arcade.join(format!("{name}.mra")), text.as_bytes());
+    }
+    LARGE_MRAS
+}
+
+#[test]
+fn large_inline_mras_stay_under_budget() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let count = large_mra_tree(dir.path());
+
+    let server = Server::start(dir.path());
+    let rows = server.wait_jobs("arcade_catalog", 1);
+    let matched =
+        server.count("SELECT COUNT(*) FROM titles WHERE source = 'mra' AND mra_check = 'match'");
+    let peak = server.stop("arcade_catalog, large inline MRAs");
+    let (state, progress) = &rows[0];
+    println!("progress: {progress}");
+    assert_eq!(state, "done", "{progress}");
+    assert_eq!(usize::try_from(matched).expect("count"), count);
+    assert_eq!(progress["parsed"], count, "each MRA read once in the batch");
+    assert_budget("arcade_catalog, large inline MRAs", peak, 12);
 }
 
 #[test]

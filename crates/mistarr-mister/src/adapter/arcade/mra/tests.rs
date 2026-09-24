@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use super::*;
 use proptest::prelude::*;
 
@@ -274,6 +276,93 @@ fn recased_mra(name: &str, zip: &str, index: u32, mask: &[bool]) -> String {
     )
 }
 
+/// `bytes` as hex digit pairs, joined by separators and markup MiSTer's loader reads through.
+fn hex_text(bytes: &[u8], seps: &[usize]) -> String {
+    let mut text = String::new();
+    for (i, b) in bytes.iter().enumerate() {
+        let pair = format!("{b:02X}");
+        match seps[i % seps.len()] {
+            0 => text.push(' '),
+            1 => text.push_str(",\n"),
+            2 => text.push_str("<!-- c -->"),
+            3 => {
+                write!(text, "<![CDATA[{pair}]]>").expect("write");
+                continue;
+            }
+            4 => {
+                let first = u32::from(pair.as_bytes()[0]);
+                write!(text, "&#x{first:X};{}", &pair[1..]).expect("write");
+                continue;
+            }
+            _ => {}
+        }
+        text.push_str(&pair);
+    }
+    text
+}
+
+#[test]
+fn a_read_mra_leaves_inline_data_in_the_file() {
+    let dir = crate::adapter::testutil::scratch("mra-inline");
+    let path = dir.join("Example Inline.mra");
+    let body = "01 02 03 ".repeat(1000);
+    let xml = format!(
+        "<misterromdescription><name>Example Inline</name><rom index=\"1\" md5=\"none\">\
+         <part>{body}</part><PART>ff</Part><part></part><part>zz</part></rom></misterromdescription>"
+    );
+    std::fs::write(&path, &xml).expect("write");
+    let mra = read(&path).expect("read");
+    let items = &mra.roms[0].items;
+    let RomItem::Part(big) = &items[0] else {
+        panic!("{items:?}")
+    };
+    let inline = big.inline.as_ref().expect("inline");
+    assert!(big.data.is_empty());
+    assert_eq!(inline.len, 3000);
+    assert_eq!(&*inline.file, path.as_path());
+    let mut bytes = Vec::new();
+    open_inline(inline)
+        .expect("open")
+        .read_to_end(&mut bytes)
+        .expect("read");
+    assert_eq!(bytes, [1u8, 2, 3].repeat(1000));
+    let RomItem::Part(small) = &items[1] else {
+        panic!("{items:?}")
+    };
+    assert_eq!(small.inline.as_ref().map(|i| i.len), Some(1));
+    let RomItem::Part(empty) = &items[2] else {
+        panic!("{items:?}")
+    };
+    assert_eq!((empty.inline.as_ref(), empty.data.len()), (None, 0));
+    assert_eq!(
+        items[3],
+        RomItem::Unsupported("inline part data is not hex".into())
+    );
+
+    std::fs::write(&path, xml.replace("01 02 03", "01 02 0Z")).expect("rewrite");
+    let mut changed = Vec::new();
+    let err = open_inline(inline)
+        .expect("open")
+        .read_to_end(&mut changed)
+        .expect_err("changed");
+    assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+}
+
+#[test]
+fn a_large_mra_under_the_cap_is_read() {
+    let dir = crate::adapter::testutil::scratch("mra-large");
+    let path = dir.join("Example Large.mra");
+    let body = "00 11 22 33 44 55 66 77\n".repeat(128 * 1024);
+    let xml = format!("<m><rom index=\"0\"><part>{body}</part></rom></m>");
+    assert!(xml.len() > 3 * 1024 * 1024);
+    std::fs::write(&path, &xml).expect("write");
+    let mra = read(&path).expect("read");
+    let RomItem::Part(part) = &mra.roms[0].items[0] else {
+        panic!()
+    };
+    assert_eq!(part.inline.as_ref().map(|i| i.len), Some(1024 * 1024));
+}
+
 #[test]
 fn empty_document_has_no_zips() {
     assert_eq!(
@@ -349,6 +438,46 @@ proptest! {
         prop_assert_eq!(&mixed, &plain);
         prop_assert_eq!(mixed.roms[0].index, index);
         prop_assert_eq!(mixed.zips, vec![zip]);
+    }
+
+    #[test]
+    fn inline_data_read_from_a_file_matches_the_bytes(
+        bytes in proptest::collection::vec(any::<u8>(), 0..512),
+        seps in proptest::collection::vec(0usize..6, 1..16),
+        tag in 0u64..1_000_000,
+    ) {
+        let text = hex_text(&bytes, &seps);
+        let xml = format!("<m><name>x</name><rom index=\"0\"><part>{text}</part><part>0A</part></rom></m>");
+        let from_memory = parse(xml.as_bytes()).expect("parse");
+        let dir = crate::adapter::testutil::scratch("mra-inline-prop");
+        let path = dir.join(format!("{tag}.mra"));
+        std::fs::write(&path, &xml).expect("write");
+        let from_file = read(&path).expect("read");
+        let (RomItem::Part(mem), RomItem::Part(file)) =
+            (&from_memory.roms[0].items[0], &from_file.roms[0].items[0])
+        else {
+            panic!("parts expected");
+        };
+        prop_assert_eq!(&mem.data, &bytes);
+        prop_assert!(file.data.is_empty());
+        let streamed = file.inline.as_ref().map_or_else(Vec::new, |i| {
+            let mut out = Vec::new();
+            open_inline(i).expect("open").read_to_end(&mut out).expect("read");
+            out
+        });
+        prop_assert_eq!(streamed, bytes);
+        std::fs::remove_file(&path).expect("remove");
+    }
+
+    #[test]
+    fn hex_decodes_the_same_however_the_text_is_split(text in "[0-9a-fA-F ,\n]{0,64}", cut in 0usize..64) {
+        let (head, tail) = text.as_bytes().split_at(cut.min(text.len()));
+        let mut hex = Hex::default();
+        let mut out = Vec::new();
+        hex.feed(head, Some(&mut out));
+        hex.feed(tail, Some(&mut out));
+        hex.finish(Some(&mut out));
+        prop_assert_eq!((!hex.bad).then_some(out), hex_bytes(&text));
     }
 
     #[test]

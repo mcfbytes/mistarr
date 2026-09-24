@@ -389,7 +389,7 @@ shutdown is left `queued` for this.
 | SQLite other | `mmap_size = 0`, `temp_store = FILE` under `<data>/tmp` (`SQLITE_TMPDIR`, set at startup and emptied of stale files, since the board's `/tmp` is RAM), WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB |
 | SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk |
 | Hashing buffer | 256 KiB, one file at a time |
-| Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches |
+| Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
 | SPA bundle, gzipped | under 200 KiB |
 | Concurrent client RPC calls | 1, serialised |
