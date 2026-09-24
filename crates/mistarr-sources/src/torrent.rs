@@ -68,7 +68,10 @@ pub fn parse_torrent(data: &[u8]) -> Result<TorrentMeta, SourceError> {
         _ => return Err(SourceError::BadField("info.files/length")),
     };
 
-    let total_size = files.iter().map(|f| f.size).sum();
+    let total_size = files
+        .iter()
+        .try_fold(0u64, |sum, f| sum.checked_add(f.size))
+        .ok_or(SourceError::BadField("info.files.length"))?;
     let infohash: [u8; 20] = Sha1::digest(info_bytes).into();
 
     Ok(TorrentMeta {
@@ -308,6 +311,15 @@ mod tests {
         assert!(matches!(
             parse_torrent(b"de"),
             Err(SourceError::MissingInfoDict)
+        ));
+    }
+
+    #[test]
+    fn rejects_a_total_size_that_overflows() {
+        let files: Vec<(Vec<&str>, i64)> = (0..3).map(|_| (vec!["a.bin"], i64::MAX)).collect();
+        assert!(matches!(
+            parse_torrent(&multi_file_torrent("Example Set", &files)),
+            Err(SourceError::BadField("info.files.length"))
         ));
     }
 

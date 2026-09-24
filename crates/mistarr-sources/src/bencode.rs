@@ -298,7 +298,7 @@ impl<'a> Raw<'a> {
     /// ```
     pub fn items(self) -> impl Iterator<Item = Raw<'a>> {
         let body = match self {
-            Raw::List(b) => &b[1..b.len() - 1],
+            Raw::List(b) => inner(b),
             _ => &[][..],
         };
         let mut pos = 0;
@@ -320,7 +320,7 @@ impl<'a> Raw<'a> {
     /// ```
     pub fn entries(self) -> impl Iterator<Item = (&'a [u8], Raw<'a>, &'a [u8])> {
         let body = match self {
-            Raw::Dict(b) => &b[1..b.len() - 1],
+            Raw::Dict(b) => inner(b),
             _ => &[][..],
         };
         let mut pos = 0;
@@ -335,21 +335,28 @@ impl<'a> Raw<'a> {
         })
     }
 
-    /// The value under `key` in a dict, the last one when a key repeats.
+    /// The value under `key` in a dict, the first one when a key repeats, as clients read it.
     ///
     /// ```
     /// use mistarr_sources::bencode::Raw;
-    /// let (dict, _) = Raw::parse(b"d4:name2:oke").unwrap();
+    /// let (dict, _) = Raw::parse(b"d4:name2:ok4:name2:noe").unwrap();
     /// assert_eq!(dict.get("name").and_then(Raw::as_str), Some("ok"));
     /// assert_eq!(dict.get("absent"), None);
     /// ```
     #[must_use]
     pub fn get(self, key: &str) -> Option<Raw<'a>> {
         self.entries()
-            .filter(|(k, _, _)| *k == key.as_bytes())
+            .find(|(k, _, _)| *k == key.as_bytes())
             .map(|(_, v, _)| v)
-            .last()
     }
+}
+
+/// The body of an encoded list or dict without its `l`/`d` and `e`; empty for a `Raw`
+/// built by hand from bytes too short to hold them.
+fn inner(encoded: &[u8]) -> &[u8] {
+    encoded
+        .get(1..encoded.len().saturating_sub(1))
+        .unwrap_or_default()
 }
 
 /// Reads one value at `*pos`, checking all of it, and leaves `*pos` just past it.
@@ -561,6 +568,10 @@ mod tests {
         assert_eq!(top.get("z"), Some(Raw::Int(-2)));
         assert_eq!(Raw::Int(1).items().count(), 0);
         assert_eq!(Raw::Bytes(b"x").entries().count(), 0);
+        for hand_built in [&b""[..], b"l", b"le", b"lxe", b"li1"] {
+            assert_eq!(Raw::List(hand_built).items().count(), 0);
+            assert_eq!(Raw::Dict(hand_built).entries().count(), 0);
+        }
         assert!(matches!(
             Raw::parse(b"l1:a"),
             Err(SourceError::MalformedBencode(_))
