@@ -1,0 +1,262 @@
+use std::collections::HashMap;
+
+use super::super::mra::parse;
+use super::*;
+
+/// Parts held in memory as `(zip, member) -> bytes`.
+#[derive(Default)]
+struct Mem(HashMap<(String, String), Vec<u8>>, Vec<String>);
+
+impl Mem {
+    fn with(parts: &[(&str, &str, &[u8])]) -> Self {
+        let mut m = Self::default();
+        for (zip, name, bytes) in parts {
+            m.0.insert(((*zip).to_owned(), (*name).to_owned()), bytes.to_vec());
+        }
+        m
+    }
+}
+
+impl PartSource for Mem {
+    fn open(
+        &mut self,
+        zip: &str,
+        name: &str,
+        crc: Option<u32>,
+    ) -> io::Result<Option<Box<dyn Read + '_>>> {
+        self.1.push(format!("{zip}#{name}"));
+        let by_name = self.0.get(&(zip.to_owned(), name.to_owned()));
+        let by_crc = || {
+            let want = crc?;
+            self.0
+                .iter()
+                .find(|((z, _), b)| z == zip && crc32(b) == want)
+                .map(|(_, b)| b)
+        };
+        Ok(by_name
+            .or_else(by_crc)
+            .map(|b| Box::new(io::Cursor::new(b.clone())) as Box<dyn Read>))
+    }
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in bytes {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                crc >> 1 ^ 0xedb8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
+}
+
+fn rom(xml: &str) -> MraRom {
+    let mra = parse(format!("<misterromdescription>{xml}</misterromdescription>").as_bytes())
+        .expect("parse");
+    mra.roms.into_iter().next().expect("one rom")
+}
+
+fn md5_of(bytes: &[u8]) -> String {
+    let mut m = Md5Stream::new();
+    m.update(bytes);
+    m.finish()
+}
+
+#[test]
+fn whole_parts_concatenate_and_hash_like_mister() {
+    let mut src = Mem::with(&[
+        ("exblast.zip", "a.bin", b"ABC"),
+        ("exblast.zip", "b.bin", b"DE"),
+    ]);
+    let r = rom(r#"<rom zip="exblast.zip"><part name="a.bin"/><part name="b.bin"/></rom>"#);
+    let out = assemble(&r, &mut src).expect("assemble");
+    assert_eq!(out.data, b"ABCDE");
+    assert_eq!(out.md5, md5_of(b"ABCDE"));
+    assert_eq!(md5(&r, &mut src).expect("md5"), out.md5);
+}
+
+#[test]
+fn offset_length_repeat_and_inline_data() {
+    let mut src = Mem::with(&[("exblast.zip", "a.bin", b"0123456789")]);
+    let r = rom(r#"<rom zip="exblast.zip">
+             <part name="a.bin" offset="0x2" length="3" repeat="2"/>
+             <part repeat="3">FF</part>
+             <part name="a.bin" offset="8"/>
+             <part name="a.bin" length="99"/>
+           </rom>"#);
+    let out = assemble(&r, &mut src).expect("assemble");
+    let want = b"234234\xff\xff\xff890123456789";
+    assert_eq!(out.data, want);
+    assert_eq!(out.md5, md5_of(want));
+}
+
+#[test]
+fn interleave_places_bytes_and_md5_follows_input_order() {
+    let mut src = Mem::with(&[
+        ("exblast.zip", "even.bin", b"aceg"),
+        ("exblast.zip", "odd.bin", b"bdfh"),
+    ]);
+    let r = rom(r#"<rom zip="exblast.zip"><part>00</part>
+             <interleave output="16">
+               <part name="even.bin" map="01"/>
+               <part name="odd.bin" map="10"/>
+             </interleave>
+             <part>11</part></rom>"#);
+    let out = assemble(&r, &mut src).expect("assemble");
+    assert_eq!(out.data, b"\x00abcdefgh\x11");
+    assert_eq!(out.md5, md5_of(b"\x00acegbdfh\x11"));
+}
+
+#[test]
+fn byte_swapping_and_wide_words() {
+    let mut src = Mem::with(&[
+        ("exblast.zip", "w.bin", b"ABCD"),
+        ("exblast.zip", "p0.bin", b"15"),
+        ("exblast.zip", "p1.bin", b"26"),
+        ("exblast.zip", "p2.bin", b"37"),
+        ("exblast.zip", "p3.bin", b"48"),
+    ]);
+    let r = rom(r#"<rom zip="exblast.zip">
+             <interleave output="16"><part name="w.bin" map="12"/></interleave>
+             <interleave output="32">
+               <part name="p0.bin" map="0001"/><part name="p1.bin" map="0010"/>
+               <part name="p2.bin" map="0100"/><part name="p3.bin" map="1000"/>
+             </interleave></rom>"#);
+    let out = assemble(&r, &mut src).expect("assemble");
+    assert_eq!(out.data, b"BADC12345678");
+}
+
+#[test]
+fn two_byte_map_with_a_gap() {
+    let mut src = Mem::with(&[
+        ("exblast.zip", "a.bin", b"ABCD"),
+        ("exblast.zip", "b.bin", b"xy"),
+    ]);
+    let r = rom(r#"<rom zip="exblast.zip"><interleave output="32">
+             <part name="a.bin" map="0201"/>
+             <part name="b.bin" map="0010"/>
+           </interleave></rom>"#);
+    let out = assemble(&r, &mut src).expect("assemble");
+    assert_eq!(out.data, b"AxB\0CyD\0");
+}
+
+#[test]
+fn patches_replace_or_xor_and_do_not_change_the_md5() {
+    let mut src = Mem::with(&[("exblast.zip", "a.bin", &[0u8, 0x0f, 0xf0, 0xff])]);
+    let r = rom(r#"<rom zip="exblast.zip"><part name="a.bin"/>
+             <patch offset="1">AA BB</patch>
+             <patch offset="3" operation="xor">0F</patch></rom>"#);
+    let out = assemble(&r, &mut src).expect("assemble");
+    assert_eq!(out.data, [0, 0xaa, 0xbb, 0xf0]);
+    assert_eq!(out.md5, md5_of(&[0, 0x0f, 0xf0, 0xff]));
+    let past = rom(r#"<rom><part>00</part><patch offset="1">01</patch></rom>"#);
+    assert!(matches!(
+        md5(&past, &mut NoParts),
+        Err(Error::MraUnsupported(_))
+    ));
+}
+
+#[test]
+fn zip_lists_part_overrides_and_crc_lookup() {
+    let mut src = Mem::with(&[
+        ("exparent.zip", "a.bin", b"P"),
+        ("exsound.zip", "s.bin", b"S"),
+        ("exblast.zip", "renamed.bin", b"C"),
+    ]);
+    let crc = format!("{:08x}", crc32(b"C"));
+    let r = rom(&format!(
+        r#"<rom zip="exblast.zip|exparent.zip">
+             <part name="a.bin"/>
+             <part zip="exsound.zip" name="s.bin"/>
+             <part name="c.bin" crc="{crc}"/></rom>"#
+    ));
+    let out = assemble(&r, &mut src).expect("assemble");
+    assert_eq!(out.data, b"PSC");
+    src.1.dedup();
+    assert_eq!(
+        src.1[..3],
+        [
+            "exblast.zip#a.bin",
+            "exparent.zip#a.bin",
+            "exsound.zip#s.bin"
+        ]
+    );
+}
+
+#[test]
+fn a_missing_part_is_reported() {
+    let mut src = Mem::with(&[("exblast.zip", "a.bin", b"A")]);
+    let r = rom(r#"<rom zip="exblast.zip|exparent.zip"><part name="gone.bin"/></rom>"#);
+    match md5(&r, &mut src) {
+        Err(Error::MissingPart { part, zips }) => {
+            assert_eq!(part, "gone.bin");
+            assert_eq!(zips, "exblast.zip|exparent.zip");
+        }
+        other => panic!("expected a missing part, got {other:?}"),
+    }
+}
+
+#[test]
+fn unsupported_content_is_refused_before_reading() {
+    for xml in [
+        r#"<rom zip="exblast.zip"><group/></rom>"#,
+        r#"<rom zip="exblast.zip"><part name="a.bin" map="01"/></rom>"#,
+        r#"<rom zip="exblast.zip"><interleave input="16" output="32"/></rom>"#,
+        r#"<rom zip="exblast.zip"><interleave output="12"/></rom>"#,
+        r#"<rom zip="exblast.zip"><interleave output="8"><part name="a.bin" map="10"/></interleave></rom>"#,
+        r#"<rom zip="exblast.zip"><interleave output="16"><part name="a.bin" map="03"/></interleave></rom>"#,
+        r#"<rom zip="exblast.zip"><interleave output="16"><part name="a.bin" map="zz"/></interleave></rom>"#,
+        r#"<rom><part name="a.bin"/></rom>"#,
+    ] {
+        let mut src = Mem::with(&[("exblast.zip", "a.bin", b"AB")]);
+        let r = rom(xml);
+        assert!(
+            matches!(md5(&r, &mut src), Err(Error::MraUnsupported(_))),
+            "{xml}"
+        );
+        if xml.contains("<group") || xml.contains("map") || xml.contains("input") {
+            assert!(src.1.is_empty(), "{xml} read a part");
+        }
+    }
+}
+
+#[test]
+fn offsets_past_the_end_and_ragged_words_are_refused() {
+    let mut src = Mem::with(&[("exblast.zip", "a.bin", b"ABC")]);
+    let past = rom(r#"<rom zip="exblast.zip"><part name="a.bin" offset="4"/></rom>"#);
+    assert!(matches!(
+        md5(&past, &mut src),
+        Err(Error::MraUnsupported(_))
+    ));
+    let ragged = rom(
+        r#"<rom zip="exblast.zip"><interleave output="16"><part name="a.bin" map="21"/></interleave></rom>"#,
+    );
+    assert!(matches!(
+        md5(&ragged, &mut src),
+        Err(Error::MraUnsupported(_))
+    ));
+}
+
+#[test]
+fn runaway_repeat_is_refused() {
+    let r = rom(r#"<rom><part repeat="0xffffffff">00 00 00 00 00 00 00 00</part></rom>"#);
+    assert!(matches!(
+        md5(&r, &mut NoParts),
+        Err(Error::MraUnsupported(_))
+    ));
+}
+
+#[test]
+fn layout_matches_mister_rom_data() {
+    let l = layout(Some("10"), 2).expect("layout");
+    assert_eq!((l.idx, l.offsets.as_slice()), (1, &[1][..]));
+    let l = layout(None, 1).expect("layout");
+    assert_eq!((l.idx, l.offsets.as_slice()), (0, &[0][..]));
+    let l = layout(Some("12"), 2).expect("layout");
+    assert_eq!(l.offsets, [1, 0]);
+    assert!(layout(Some("0123456789abcdef0"), 8).is_err());
+}

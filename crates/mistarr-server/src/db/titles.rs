@@ -10,6 +10,7 @@ use mistarr_core::PlatformId;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
+use super::arcade::MraInfo;
 use super::dats::DatVersionId;
 use crate::error::Result;
 
@@ -358,6 +359,13 @@ pub fn recompute_platform(conn: &Connection, platform: &str, prefs: &Prefs) -> R
     Ok(out)
 }
 
+/// Keeps a group of `title_groups g` only when it is an MRA title or its platform has no
+/// live MRA title, so a platform with MRAs browses its MRA catalogue alone.
+const MRA_ONLY: &str =
+    "(EXISTS (SELECT 1 FROM titles s WHERE s.id = g.parent_id AND s.source = 'mra')
+    OR NOT EXISTS (SELECT 1 FROM titles m WHERE m.platform_id = g.platform_id
+                   AND m.source = 'mra' AND m.retired = 0))";
+
 /// Catalog counts of one platform for `GET /platforms`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct Counts {
@@ -385,15 +393,15 @@ pub struct Counts {
 /// ```
 pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Counts>> {
     let mut out: HashMap<String, Counts> = HashMap::new();
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT g.platform_id, COUNT(*), SUM(g.have_verified > 0), SUM(g.wanted > 0)
          FROM title_groups g
-         WHERE EXISTS (
+         WHERE {MRA_ONLY} AND EXISTS (
            SELECT 1 FROM titles v WHERE v.parent_id = g.parent_id AND v.retired = 0
              AND NOT EXISTS (SELECT 1 FROM json_each(v.flags) f
                              WHERE f.value IN (SELECT value FROM json_each(?1))))
-         GROUP BY g.platform_id",
-    )?;
+         GROUP BY g.platform_id"
+    ))?;
     let mut rows = stmt.query([json(hidden)])?;
     while let Some(r) = rows.next()? {
         let e = out.entry(r.get(0)?).or_default();
@@ -557,7 +565,7 @@ pub fn browse(
         offset
     ];
     let total: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM title_groups g WHERE {BROWSE_WHERE}"),
+        &format!("SELECT COUNT(*) FROM title_groups g WHERE {BROWSE_WHERE} AND {MRA_ONLY}"),
         &args[..7],
         |r| r.get(0),
     )?;
@@ -570,7 +578,7 @@ pub fn browse(
         "SELECT g.parent_id, g.platform_id, g.base_name, g.name, g.pick_id, k.name,
                 g.variants, g.have_verified, g.wanted, g.has_pick
          FROM title_groups g LEFT JOIN titles k ON k.id = g.pick_id
-         WHERE {BROWSE_WHERE} ORDER BY {order} LIMIT ?8 OFFSET ?9"
+         WHERE {BROWSE_WHERE} AND {MRA_ONLY} ORDER BY {order} LIMIT ?8 OFFSET ?9"
     ))?;
     let rows = stmt
         .query_map(args, |r| {
@@ -668,6 +676,23 @@ pub struct VariantRow {
     pub roms: Vec<RomRow>,
     /// Torrent files from bound sources matched to any of the roms.
     pub torrent_files_available: u64,
+    /// `dat` for a DAT entry, `mra` for an arcade title read from an MRA file.
+    pub source: String,
+    /// MRA details, for an MRA title.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mra: Option<MraInfo>,
+    /// Where the romset stands on disk, for a Neo Geo entry; filled by the HTTP layer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub romset: Option<RomsetState>,
+}
+
+/// A Neo Geo entry's romset on disk and in the core's `romsets.xml`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RomsetState {
+    /// Whether `romsets.xml` lists it; `None` when the file is absent.
+    pub listed: Option<bool>,
+    /// Whether `games/NeoGeo` holds it as a directory or zip.
+    pub present: bool,
 }
 
 /// A clone group with every variant, retired ones last.
@@ -700,6 +725,9 @@ fn variant_row(r: &Row<'_>) -> rusqlite::Result<VariantRow> {
         dat_version_id: DatVersionId(r.get(10)?),
         roms: Vec::new(),
         torrent_files_available: unsigned(r.get(11)?),
+        source: r.get(12)?,
+        mra: None,
+        romset: None,
     })
 }
 
@@ -733,7 +761,8 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
         "SELECT t.id, t.name, t.regions, t.languages, t.revision, t.flags, t.is_1g1r_pick,
                 t.wanted, t.retired, t.inferred, t.dat_version_id,
                 (SELECT COUNT(*) FROM torrent_files tf JOIN roms r ON r.id = tf.rom_id
-                 WHERE r.title_id = t.id AND r.retired = 0)
+                 WHERE r.title_id = t.id AND r.retired = 0),
+                t.source
          FROM titles t WHERE t.parent_id = ?1 OR t.id = ?1
          ORDER BY t.retired, t.is_1g1r_pick DESC, t.name",
     )?;
@@ -770,6 +799,9 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
         if let Some(v) = variants.iter_mut().find(|v| v.id.0 == title) {
             v.roms.push(rom);
         }
+    }
+    for v in variants.iter_mut().filter(|v| v.source == "mra") {
+        v.mra = super::arcade::info(conn, v.id)?;
     }
     let pick_variant_id = variants.iter().find(|v| v.is_1g1r_pick).map(|v| v.id);
     Ok(Some(GroupDetail {

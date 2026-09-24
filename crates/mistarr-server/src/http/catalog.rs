@@ -9,12 +9,15 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use mistarr_mister::platforms::Kind;
 use serde::{Deserialize, Serialize};
 
 use super::{ApiError, Page, Paging};
 use crate::app::AppState;
 use crate::db::files::FileId;
-use crate::db::titles::{self, Browse, GroupDetail, GroupRow, Sort, TitleId, Tri, WantRefused};
+use crate::db::titles::{
+    self, Browse, GroupDetail, GroupRow, RomsetState, Sort, TitleId, Tri, WantRefused,
+};
 use crate::db::{downloads, platforms};
 use crate::jobs::import::{self, RenameError};
 use crate::jobs::transfer;
@@ -192,6 +195,41 @@ struct DetailOut {
     #[serde(flatten)]
     detail: GroupDetail,
     art: Option<Art>,
+    /// BIOS files the Neo Geo core's `romsets.xml` names, for a Neo Geo group.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bios: Option<Vec<BiosFile>>,
+}
+
+/// A BIOS file a core names, reported as present or missing and never handled.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+struct BiosFile {
+    name: String,
+    present: bool,
+}
+
+/// Fills each Neo Geo variant's romset state from `games/NeoGeo` and its `romsets.xml`,
+/// and returns the BIOS files that file names.
+fn neogeo_romsets(dir: &std::path::Path, detail: &mut GroupDetail) -> Option<Vec<BiosFile>> {
+    use mistarr_mister::adapter::neogeo::{read_romsets, romset_on_disk};
+    let romsets = read_romsets(dir).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "cannot read romsets.xml");
+        None
+    });
+    for v in &mut detail.variants {
+        v.romset = Some(RomsetState {
+            listed: romsets.as_ref().map(|r| r.sets.contains(&v.name)),
+            present: romset_on_disk(dir, &v.name),
+        });
+    }
+    romsets.map(|r| {
+        r.bios
+            .into_iter()
+            .map(|name| BiosFile {
+                present: dir.join(&name).is_file(),
+                name,
+            })
+            .collect()
+    })
 }
 
 fn title_id(id: Result<Path<i64>, PathRejection>) -> Result<TitleId, ApiError> {
@@ -205,13 +243,26 @@ async fn load_detail(app: &AppState, id: TitleId) -> Result<DetailOut, ApiError>
         .read(move |c| titles::group_detail(c, id))
         .await?
         .ok_or_else(|| ApiError::not_found("no such title"))?;
+    let (detail, bios) = match mistarr_mister::platforms::by_id(&detail.platform_id.0) {
+        Some(p) if p.kind == Kind::Romset => {
+            let dir = app.config().paths.games.join(p.core_dir);
+            let mut detail = detail;
+            tokio::task::spawn_blocking(move || {
+                let bios = neogeo_romsets(&dir, &mut detail);
+                (detail, bios)
+            })
+            .await
+            .map_err(|e| crate::Error::Task(e.to_string()))?
+        }
+        _ => (detail, None),
+    };
     let shown = detail.pick_variant_id.unwrap_or(detail.parent_id);
     let art = detail
         .variants
         .iter()
         .find(|v| v.id == shown)
         .and_then(|v| platform_art(&detail.platform_id.0, &v.name));
-    Ok(DetailOut { detail, art })
+    Ok(DetailOut { detail, art, bios })
 }
 
 async fn detail(

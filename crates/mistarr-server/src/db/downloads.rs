@@ -565,8 +565,9 @@ pub fn best_file(conn: &Connection, rom: i64) -> Result<Option<Candidate>> {
         .optional()?)
 }
 
-/// Creates a download for each live rom of `title` that has no verified file
-/// and no open download, `queued` on its [`best_file`] or `wanted` without one.
+/// Creates a download for each live rom of `title` that has no verified file, is not
+/// an MRA zip already present,
+/// and has no open download, `queued` on its [`best_file`] or `wanted` without one.
 ///
 /// # Errors
 ///
@@ -579,6 +580,7 @@ pub fn want_title(
     let roms: Vec<i64> = conn
         .prepare(&format!(
             "SELECT r.id FROM roms r WHERE r.title_id = ?1 AND r.retired = 0
+               AND r.present = 0
                AND NOT EXISTS (SELECT 1 FROM files f WHERE f.rom_id = r.id AND f.state = 'verified')
                AND NOT EXISTS (SELECT 1 FROM downloads d WHERE d.rom_id = r.id AND d.state IN ({OPEN}))
              ORDER BY r.id"

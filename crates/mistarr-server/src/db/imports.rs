@@ -142,6 +142,8 @@ pub struct TitleEntry {
     pub flags: Vec<String>,
     /// Live roms in id order.
     pub roms: Vec<EntryRom>,
+    /// Read from an MRA file rather than a DAT.
+    pub from_mra: bool,
 }
 
 impl TitleEntry {
@@ -201,11 +203,11 @@ pub fn title_of_rom(conn: &Connection, rom_id: i64) -> Result<Option<TitleId>> {
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn title_entry(conn: &Connection, id: TitleId) -> Result<Option<TitleEntry>> {
-    let Some((platform, name, flags)): Option<(String, String, String)> = conn
+    let Some((platform, name, flags, source)): Option<(String, String, String, String)> = conn
         .query_row(
-            "SELECT platform_id, name, flags FROM titles WHERE id = ?1",
+            "SELECT platform_id, name, flags, source FROM titles WHERE id = ?1",
             [id.0],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()?
     else {
@@ -223,6 +225,7 @@ pub fn title_entry(conn: &Connection, id: TitleId) -> Result<Option<TitleEntry>>
         name,
         flags: serde_json::from_str(&flags).unwrap_or_default(),
         roms,
+        from_mra: source == "mra",
     }))
 }
 

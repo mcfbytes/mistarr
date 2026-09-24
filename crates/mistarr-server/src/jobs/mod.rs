@@ -1,5 +1,6 @@
 //! Background jobs: the [`Job`] trait, two serial lanes and the gate; see `docs/ARCHITECTURE.md`.
 
+pub mod arcade;
 pub mod corename;
 pub mod dat_import;
 pub mod detect_client;

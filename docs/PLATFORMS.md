@@ -72,6 +72,54 @@ never zipped. CHD is accepted on scan but not produced.
 | `neogeo` | `Neo Geo` | `NeoGeo` | Cartridge games are romsets: a directory or zip per game whose internal layout the core expects, described by a `romsets.xml` the core ships. The adapter treats the DAT `<game>` as the unit, places the zip whole, and verifies member hashes against the DAT rather than the zip's own hash. A staged directory is placed whole as a directory. Needs BIOS `000-lo.lo`, `sfix.sfix`, `sp-s2.sp1`: report only. |
 | `arcade` | `MAME`, `Arcade` | `mame` (under `games/`) with MRAs in `_Arcade` | Wanted list is derived from MRA files: each MRA names the zips it needs. The adapter parses every MRA, lists missing zips, and places zips whole. Verification uses the MRA's `md5` where present and the loaded MAME DAT otherwise. No romset rebuilding, merging or splitting. A staged directory is zipped under the set name. |
 
+### Neo Geo `romsets.xml`
+
+When `games/NeoGeo/romsets.xml` exists, title detail of a Neo Geo entry says
+whether the file lists the entry's name as a `<romset name>` and whether
+`games/NeoGeo/<name>/` or `<name>.zip` exists. The file names the BIOS files
+the core expects inside an XML comment, one per line; every comment line that
+is a single `name.ext` token is taken as one, and detail reports each as
+present or missing in `games/NeoGeo`. Nothing else is done with them.
+
+### MRA catalogue
+
+The arcade catalogue job (ARCHITECTURE.md "Arcade catalogue") turns each MRA
+into one `arcade` title with `source = 'mra'`: `<name>`, `<setname>` and
+`<rbf>` are kept, the name is parsed for regions and flags like a DAT name,
+and titles group by base name among MRA titles only, so an `_alternatives`
+MRA is a variant of its main one. Each zip named by any `zip` attribute
+(`|`-separated lists split) is a rom named by the zip's file name, carrying
+the `md5` of the first `<rom>` that names it, or no hash. MiSTer reads a
+plain zip name from `games/mame/`, a name starting with `/` from `games/`
+(so `/hbmame/x.zip` is `games/hbmame/x.zip`), and resolves `..`; a name that
+leaves `games/` is ignored. A title counts as have when every zip it names is
+present and its md5 check is not `mismatch` or `missing_part`.
+
+While any live MRA title exists, the arcade browse lists MRA titles only;
+DAT entries on the platform still verify zip members during a scan. MRA roms
+are never matched by the scanner, and wanting an MRA title creates downloads
+only for its missing zips.
+
+### MRA assembly
+
+The md5 check follows MiSTer's loader: the digest of the bytes of every part
+of a `<rom>`, in document order, before interleaving and without patches. A
+`<rom>` without `zip` or with `md5="none"` is not checked. When several
+`<rom>` elements share an `index`, one match is enough. The assembler builds
+the rom from this subset and refuses anything else by name:
+
+| Content | Handling |
+|---|---|
+| `<part name zip crc>` | the member from the part's `zip`, else the rom's, trying each of a `\|` list in order; found by exact name, then case-insensitive name, then `crc` |
+| `offset`, `length`, `repeat` | numbers as C `strtoul` reads them (`0x` hex, leading-zero octal, decimal); `length="0"` takes the rest; an offset past the end is refused |
+| `<part>hex</part>` | inline bytes, digit pairs separated by spaces, commas or newlines |
+| `<interleave input="8" output="8..64">` | parts spread by `map`, hex digits read from the right, one per output byte: the k-th non-zero digit `d` writes input byte k of each word at output byte `first + d - 1 + gaps`, `first` being the first non-zero digit's position and `gaps` the zero digits after it so far; a missing `map` is `1`; a part that is not a whole number of words is refused |
+| `<patch offset operation="xor">hex</patch>` | overwrite or exclusive-or into the assembled bytes; past the end is refused |
+| `map` outside `<interleave>`, other `input` widths, `<group>` and any other element inside `<rom>` | refused |
+
+A part in none of its zips is reported as `missing_part` with its name; it
+is never sourced. Assembled roms are capped at 512 MiB.
+
 ## Thumbnail playlists
 
 Art URLs (API.md "Art URLs") use the libretro playlist name of the platform,

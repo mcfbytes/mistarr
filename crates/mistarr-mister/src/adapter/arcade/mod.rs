@@ -1,5 +1,6 @@
 //! Arcade adapter: MAME zips placed whole under `games/mame`, wanted via MRA files.
 
+pub mod assemble;
 pub mod mra;
 
 use std::path::{Path, PathBuf};

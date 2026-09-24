@@ -359,10 +359,51 @@ pub fn hash_zip_member<R: Read + Seek>(
     Ok(hash_reader(file, rule, size_hint)?)
 }
 
+/// Incremental MD5 over bytes fed in order, for a digest that spans several inputs.
+///
+/// ```
+/// let mut md5 = mistarr_core::hash::Md5Stream::new();
+/// md5.update(b"a");
+/// md5.update(b"bc");
+/// assert_eq!(md5.finish(), "900150983cd24fb0d6963f7d28e17f72");
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct Md5Stream(md5::Md5);
+
+impl Md5Stream {
+    /// An empty digest.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feeds the next bytes.
+    pub fn update(&mut self, buf: &[u8]) {
+        self.0.update(buf);
+    }
+
+    /// The digest as 32 lowercase hex characters.
+    #[must_use]
+    pub fn finish(self) -> String {
+        hex(&self.0.finalize())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::io::{Cursor, Write};
+
+    #[test]
+    fn md5_stream_matches_one_pass() {
+        let mut m = Md5Stream::new();
+        for chunk in [&b"ab"[..], b"", b"c"] {
+            m.update(chunk);
+        }
+        let one = hash_reader(Cursor::new(b"abc"), HeaderRule::None, None).expect("hash");
+        assert_eq!(m.finish(), one.md5);
+        assert_eq!(Md5Stream::new().finish(), empty().1);
+    }
 
     fn empty() -> (&'static str, &'static str, &'static str) {
         (
