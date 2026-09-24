@@ -15,6 +15,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sh scripts/principles-gate.sh
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck -s sh scripts/mistarr.sh scripts/tests/run.sh
+      - run: sh scripts/tests/run.sh
   web:
     runs-on: ubuntu-latest
     steps:

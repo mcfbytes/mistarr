@@ -5,14 +5,38 @@
 ROOT="${MISTARR_ROOT:-/media/fat}"
 BIN="$ROOT/mistarr/mistarr"
 PIDFILE="$ROOT/mistarr/mistarr.pid"
+LOGFILE="$ROOT/mistarr/mistarr.log"
 STARTUP="$ROOT/linux/user-startup.sh"
 PORT="${MISTARR_PORT:-8420}"
-STARTUP_LINE="[ -x $ROOT/Scripts/mistarr.sh ] && $ROOT/Scripts/mistarr.sh start &"
+# Resolved absolute path to this script, wherever it was invoked from.
+SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+STARTUP_LINE="[ -x $SELF ] && $SELF start &"
 
+# True when $PIDFILE names a live process that is actually running $BIN.
+# Removes the pidfile when it is stale (dead pid, or pid reused by another process).
 is_running() {
     [ -f "$PIDFILE" ] || return 1
     pid=$(cat "$PIDFILE" 2>/dev/null)
-    [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+    if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+        rm -f "$PIDFILE"
+        return 1
+    fi
+    if [ -r "/proc/$pid/cmdline" ]; then
+        if tr '\0' '\n' < "/proc/$pid/cmdline" | grep -qF "$BIN"; then
+            return 0
+        fi
+        rm -f "$PIDFILE"
+        return 1
+    fi
+    if command -v ps >/dev/null 2>&1; then
+        if ps -p "$pid" -o args= 2>/dev/null | grep -qF "$BIN"; then
+            return 0
+        fi
+        rm -f "$PIDFILE"
+        return 1
+    fi
+    # No way to check the command line; trust a pid that answers kill -0.
+    return 0
 }
 
 do_start() {
@@ -24,8 +48,15 @@ do_start() {
         echo "mistarr binary not found at $BIN"
         return 1
     fi
-    nice -n 10 ionice -c 3 "$BIN" </dev/null >/dev/null 2>&1 &
+    nice -n 10 ionice -c 3 "$BIN" </dev/null >>"$LOGFILE" 2>&1 &
     pid=$!
+    sleep 1
+    if ! kill -0 "$pid" 2>/dev/null; then
+        echo "mistarr failed to start"
+        tail -n 20 "$LOGFILE" 2>/dev/null
+        rm -f "$PIDFILE"
+        return 1
+    fi
     echo "$pid" > "$PIDFILE"
     echo "mistarr started (pid $pid)"
 }
@@ -61,18 +92,18 @@ do_status() {
 
 # First non-loopback IPv4, tried with whatever address tool the board has.
 first_ipv4() {
+    addr=""
     if command -v ip >/dev/null 2>&1; then
-        ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1
-        return
+        addr=$(ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1)
     fi
-    if command -v ifconfig >/dev/null 2>&1; then
-        ifconfig 2>/dev/null | awk '/inet /{print $2}' | sed 's/^addr://' \
-            | grep -v '^127\.' | head -n1
-        return
+    if [ -z "$addr" ] && command -v ifconfig >/dev/null 2>&1; then
+        addr=$(ifconfig 2>/dev/null | awk '/inet /{print $2}' | sed 's/^addr://' \
+            | grep -v '^127\.' | head -n1)
     fi
-    if command -v hostname >/dev/null 2>&1; then
-        hostname -I 2>/dev/null | awk '{print $1}'
+    if [ -z "$addr" ] && command -v hostname >/dev/null 2>&1; then
+        addr=$(hostname -I 2>/dev/null | awk '{print $1}')
     fi
+    [ -n "$addr" ] && printf '%s\n' "$addr"
 }
 
 offer_autostart() {
@@ -94,7 +125,9 @@ offer_autostart() {
 }
 
 menu_run() {
-    do_start
+    if ! do_start; then
+        return 1
+    fi
     ip=$(first_ipv4)
     if [ -n "$ip" ]; then
         echo "mistarr is running at http://$ip:$PORT/"

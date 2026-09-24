@@ -23,7 +23,11 @@ jobs:
       - run: cp target/armv7-unknown-linux-musleabihf/release/mistarr dist/stage/mistarr
       - run: cp scripts/mistarr.sh dist/stage/mistarr.sh
       - run: tar -C dist/stage -czf mistarr-armv7.tar.gz mistarr mistarr.sh
-      - run: git tag -l --format='%(contents)' "${{ github.ref_name }}" > release-notes.txt
+      - name: Write release notes from the tag message only
+        run: |
+          git tag -l --format='%(contents:subject)' "${{ github.ref_name }}" > release-notes.txt
+          echo >> release-notes.txt
+          git tag -l --format='%(contents:body)' "${{ github.ref_name }}" >> release-notes.txt
       - uses: softprops/action-gh-release@v2
         with:
           files: mistarr-armv7.tar.gz

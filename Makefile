@@ -12,12 +12,15 @@ check:
 	cargo test --workspace
 	cd web && npm ci && npm run check && npm run lint && npm run build && npm run size
 	sh scripts/principles-gate.sh
+	sh scripts/tests/run.sh
 
 web:
 	cd web && npm ci && npm run build
 
+# Prepends ZIGDIR only when it resolved to something, so an empty value
+# never puts "." first in PATH.
 cross: web
-	PATH="$(ZIGDIR):$$PATH" cargo zigbuild --release --target $(TARGET) -p mistarr-server
+	PATH="$(if $(ZIGDIR),$(ZIGDIR):,)$$PATH" cargo zigbuild --release --target $(TARGET) -p mistarr-server
 	file $(BIN) | grep -q "statically linked"
 
 release: cross
