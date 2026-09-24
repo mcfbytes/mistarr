@@ -31,11 +31,12 @@ system.daemon.set = true
 ";
 
 /// Status commands sent per torrent, in the order [`RawStatus`] reads them.
-const STATUS_COMMANDS: [&str; 9] = [
+const STATUS_COMMANDS: [&str; 10] = [
     "d.state",
     "d.is_active",
     "d.complete",
     "d.is_hash_checking",
+    "d.hashing",
     "d.ratio",
     "d.down.rate",
     "d.up.rate",
@@ -55,18 +56,12 @@ pub fn recommended_rc() -> &'static str {
     RECOMMENDED_RC
 }
 
-#[derive(Debug, Clone)]
-struct Tracked {
-    policy: SeedPolicy,
-    /// Set when the policy stopped the torrent; cleared by `start`.
-    finished: bool,
-}
-
 /// An rtorrent reached over SCGI at a TCP address or unix socket.
 ///
 /// Calls are serialised through one lock, which also guards the seed policy
 /// per torrent. rtorrent has no per-torrent ratio limit, so [`DownloadClient::status`]
-/// stops a seeding torrent once `d.ratio` reaches its policy. Policies live in
+/// stops a seeding torrent once `d.ratio` reaches its policy, and reports a
+/// stopped one that has reached it as finished. Policies live in
 /// memory only; call [`DownloadClient::set_seed_policy`] again after a restart.
 ///
 /// ```
@@ -82,7 +77,7 @@ pub struct Rtorrent {
     addr: ScgiAddr,
     timeout: Duration,
     path_map: RemotePathMap,
-    torrents: Mutex<HashMap<InfoHash, Tracked>>,
+    torrents: Mutex<HashMap<InfoHash, SeedPolicy>>,
 }
 
 impl Rtorrent {
@@ -283,8 +278,10 @@ impl DownloadClient for Rtorrent {
             Err(e) => return Err(e),
         };
         if fresh {
-            // load.raw and load.normal leave the torrent stopped.
-            self.call(method, &["".into(), data]).await?;
+            // Trailing load commands are replayed when a magnet's metadata
+            // replaces the meta-download; load.raw and load.normal leave it stopped.
+            let replay = directory_command(dir);
+            self.call(method, &["".into(), data, replay.into()]).await?;
             self.call("d.directory.set", &[target.as_str().into(), dir.into()])
                 .await
                 .map_err(not_loaded)?;
@@ -297,13 +294,7 @@ impl DownloadClient for Rtorrent {
             check_indices(&wanted, count)?;
             self.apply_selection(&target, count, &wanted).await?;
         }
-        torrents.insert(
-            hash,
-            Tracked {
-                policy: seed,
-                finished: false,
-            },
-        );
+        torrents.insert(hash, seed);
         Ok(ClientTorrentId::new(hash.to_string()))
     }
 
@@ -323,24 +314,16 @@ impl DownloadClient for Rtorrent {
         let hash = parse_id(id)?;
         let mut torrents = self.torrents.lock().await;
         self.call("d.hash", &[target(&hash).into()]).await?;
-        torrents
-            .entry(hash)
-            .and_modify(|t| t.policy = seed.clone())
-            .or_insert(Tracked {
-                policy: seed,
-                finished: false,
-            });
+        torrents.insert(hash, seed);
         Ok(())
     }
 
     async fn start(&self, id: &ClientTorrentId) -> Result<()> {
         let hash = parse_id(id)?;
-        let mut torrents = self.torrents.lock().await;
-        self.call("d.start", &[target(&hash).into()]).await?;
-        if let Some(t) = torrents.get_mut(&hash) {
-            t.finished = false;
-        }
-        Ok(())
+        let _guard = self.torrents.lock().await;
+        self.call("d.start", &[target(&hash).into()])
+            .await
+            .map(drop)
     }
 
     async fn stop(&self, id: &ClientTorrentId) -> Result<()> {
@@ -352,7 +335,7 @@ impl DownloadClient for Rtorrent {
     async fn status(&self, id: &ClientTorrentId) -> Result<TorrentStatus> {
         let hash = parse_id(id)?;
         let target = target(&hash);
-        let mut torrents = self.torrents.lock().await;
+        let torrents = self.torrents.lock().await;
         let mut calls: Vec<(&str, Vec<Value>)> = STATUS_COMMANDS
             .iter()
             .map(|&c| (c, vec![target.as_str().into()]))
@@ -370,18 +353,12 @@ impl DownloadClient for Rtorrent {
         ));
         let raw = RawStatus::read(&self.multicall(calls).await?)?;
         let mut state = raw.state();
-        let finished = match torrents.get_mut(&hash) {
-            Some(t) if !t.finished && state == TorrentState::Seeding => {
-                if raw.passes(&t.policy) {
-                    self.call("d.stop", &[target.as_str().into()]).await?;
-                    t.finished = true;
-                    state = TorrentState::Stopped;
-                }
-                t.finished
-            }
-            Some(t) => t.finished,
-            None => false,
-        };
+        let passes = torrents.get(&hash).is_some_and(|p| raw.passes(p));
+        if passes && state == TorrentState::Seeding {
+            self.call("d.stop", &[target.as_str().into()]).await?;
+            state = TorrentState::Stopped;
+        }
+        let finished = passes && state == TorrentState::Stopped && raw.wanted_done();
         Ok(TorrentStatus {
             infohash: hash,
             state,
@@ -412,15 +389,17 @@ impl DownloadClient for Rtorrent {
         } else {
             None
         };
+        // Files go before the erase, so a failed erase leaves a torrent whose
+        // file list a retry can still read.
+        let deleted = match data {
+            Some(layout) => tokio::task::spawn_blocking(move || layout.delete())
+                .await
+                .map_err(|e| ClientError::Io(io::Error::other(e)))?,
+            None => Ok(()),
+        };
         self.call("d.erase", &[target.as_str().into()]).await?;
         torrents.remove(&hash);
-        drop(torrents);
-        if let Some(layout) = data {
-            tokio::task::spawn_blocking(move || layout.delete())
-                .await
-                .map_err(|e| ClientError::Io(io::Error::other(e)))??;
-        }
-        Ok(())
+        deleted.map_err(ClientError::Io)
     }
 
     async fn set_rate_limits(&self, down_kbps: Option<u32>, up_kbps: Option<u32>) -> Result<()> {
@@ -498,6 +477,7 @@ fn magnet_hash(uri: &str) -> Option<InfoHash> {
         if key != "xt" {
             return None;
         }
+        let value = percent_decode(value)?;
         let prefix = value.get(..9)?;
         if !prefix.eq_ignore_ascii_case("urn:btih:") {
             return None;
@@ -505,6 +485,35 @@ fn magnet_hash(uri: &str) -> Option<InfoHash> {
         let hash = &value[9..];
         InfoHash::from_hex(hash).or_else(|| base32_hash(hash))
     })
+}
+
+/// Decodes `%XX` escapes; `None` for a malformed escape or non-UTF-8 result.
+fn percent_decode(s: &str) -> Option<String> {
+    let mut out = Vec::with_capacity(s.len());
+    let mut bytes = s.bytes();
+    while let Some(b) = bytes.next() {
+        if b == b'%' {
+            let hi = char::from(bytes.next()?).to_digit(16)?;
+            let lo = char::from(bytes.next()?).to_digit(16)?;
+            out.push(u8::try_from(hi << 4 | lo).ok()?);
+        } else {
+            out.push(b);
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// A `d.directory.set` command for the trailing arguments of `load.*`, with
+/// the path quoted for rtorrent's command parser.
+fn directory_command(dir: &str) -> String {
+    let mut quoted = String::with_capacity(dir.len() + 2);
+    for c in dir.chars() {
+        if matches!(c, '"' | '\\') {
+            quoted.push('\\');
+        }
+        quoted.push(c);
+    }
+    format!("d.directory.set=\"{quoted}\"")
 }
 
 fn base32_hash(s: &str) -> Option<InfoHash> {
@@ -547,7 +556,8 @@ struct RawStatus {
 
 impl RawStatus {
     fn read(r: &[Value]) -> Result<Self> {
-        let [state, active, complete, hashing, ratio, down, up, message, meta, files] = r else {
+        let [state, active, complete, checking, hashing, ratio, down, up, message, meta, files] = r
+        else {
             return Err(protocol("status reply has the wrong length"));
         };
         let files = if int(meta)? == 0 {
@@ -562,7 +572,8 @@ impl RawStatus {
             open_state: int(state)?,
             active: int(active)? != 0,
             complete: int(complete)? != 0,
-            hashing: int(hashing)? != 0,
+            // d.hashing is non-zero while queued for a check, before it starts.
+            hashing: int(checking)? != 0 || int(hashing)? != 0,
             ratio,
             down_rate: uint(down)?,
             up_rate: uint(up)?,
@@ -677,12 +688,16 @@ impl DataLayout {
     }
 
     /// Removes the torrent's files, then any directories they leave empty
-    /// inside a multi-file torrent's own directory.
+    /// inside a multi-file torrent's own directory. Carries on past failures
+    /// and returns the first.
     fn delete(self) -> io::Result<()> {
+        let mut first_error = None;
         let mut dirs = BTreeSet::new();
         for rel in &self.files {
             match std::fs::remove_file(self.directory.join(rel)) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                    first_error.get_or_insert(e);
+                }
                 _ => {}
             }
             let mut parent = rel.parent();
@@ -700,7 +715,7 @@ impl DataLayout {
             }
             let _ = std::fs::remove_dir(&self.directory);
         }
-        Ok(())
+        first_error.map_or(Ok(()), Err)
     }
 }
 

@@ -100,6 +100,7 @@ struct Snapshot {
     active: i64,
     complete: i64,
     hashing: i64,
+    queued: i64,
     ratio: i64,
     message: &'static str,
     meta: i64,
@@ -113,6 +114,7 @@ impl Default for Snapshot {
             active: 1,
             complete: 0,
             hashing: 0,
+            queued: 0,
             ratio: 0,
             message: "",
             meta: 0,
@@ -133,6 +135,7 @@ impl Snapshot {
             Value::Int(self.active),
             Value::Int(self.complete),
             Value::Int(self.hashing),
+            Value::Int(self.queued),
             Value::Int(self.ratio),
             Value::Int(2048),
             Value::Int(512),
@@ -214,7 +217,14 @@ async fn add_loads_paused_then_prioritises_then_start() {
         fake.calls(),
         vec![
             call("d.hash", vec![v(&target)]),
-            call("load.raw", vec![v(""), Value::Base64(meta)]),
+            call(
+                "load.raw",
+                vec![
+                    v(""),
+                    Value::Base64(meta),
+                    v("d.directory.set=\"/media/fat/mistarr/staging/x\"")
+                ]
+            ),
             call(
                 "d.directory.set",
                 vec![v(&target), v("/media/fat/mistarr/staging/x")]
@@ -247,7 +257,10 @@ async fn add_magnet_loads_normal_and_defers_selection() {
         fake.calls(),
         vec![
             call("d.hash", vec![v(&t(0xab))]),
-            call("load.normal", vec![v(""), v(&magnet)]),
+            call(
+                "load.normal",
+                vec![v(""), v(&magnet), v("d.directory.set=\"/s/x\"")]
+            ),
             call("d.directory.set", vec![v(&t(0xab)), v("/s/x")]),
             size_query(&t(0xab)),
         ]
@@ -481,6 +494,15 @@ async fn status_maps_states() {
         ),
         (
             Snapshot {
+                active: 0,
+                queued: 1,
+                message: "Queued for hashing",
+                ..Snapshot::default()
+            },
+            TorrentState::Checking,
+        ),
+        (
+            Snapshot {
                 state: 0,
                 active: 0,
                 ..Snapshot::default()
@@ -537,7 +559,7 @@ async fn status_fault_in_multicall_entry_is_not_found() {
         message: "Could not find info-hash.".into(),
     }
     .to_value();
-    fake.push(ScgiReply::Value(Value::Array(vec![fault; 10])));
+    fake.push(ScgiReply::Value(Value::Array(vec![fault; 11])));
     let err = client.status(&id(7)).await.expect_err("missing");
     assert!(matches!(err, ClientError::NotFound), "{err:?}");
 }
@@ -593,8 +615,60 @@ async fn ratio_policy_stops_torrent_on_poll() {
     assert_eq!(
         fake.methods().last().map(String::as_str),
         Some("d.stop"),
-        "start re-arms the policy"
+        "a restarted torrent past its ratio is stopped again"
     );
+}
+
+#[tokio::test]
+async fn finished_is_derived_from_state_and_current_policy() {
+    let (fake, client) = setup().await;
+    add_existing(&fake, &client, 19, SeedPolicy::Ratio { ratio: 1.0 }).await;
+    let stopped = Snapshot {
+        state: 0,
+        active: 0,
+        ratio: 1000,
+        ..Snapshot::default()
+    };
+    fake.push(stopped.reply());
+    assert!(client.status(&id(19)).await.expect("status").is_finished);
+
+    fake.push(ScgiReply::Value(v(&t(19))));
+    client
+        .set_seed_policy(&id(19), SeedPolicy::Ratio { ratio: 2.0 })
+        .await
+        .expect("raise");
+    fake.push(stopped.reply());
+    let st = client.status(&id(19)).await.expect("status");
+    assert_eq!(st.state, TorrentState::Stopped);
+    assert!(!st.is_finished, "a raised policy is no longer met");
+
+    fake.push(
+        Snapshot {
+            ratio: 1000,
+            ..Snapshot::default()
+        }
+        .reply(),
+    );
+    let st = client.status(&id(19)).await.expect("status");
+    assert_eq!(st.state, TorrentState::Seeding, "restarted outside mistarr");
+    assert!(!st.is_finished);
+
+    fake.push(
+        Snapshot {
+            state: 0,
+            active: 0,
+            ratio: 5000,
+            files: vec![[100, 1, 4, 1]],
+            ..Snapshot::default()
+        }
+        .reply(),
+    );
+    let st = client.status(&id(19)).await.expect("status");
+    assert!(
+        !st.is_finished,
+        "a paused incomplete torrent is not finished"
+    );
+    assert!(!fake.methods().iter().any(|m| m == "d.stop"));
 }
 
 #[tokio::test]
@@ -730,6 +804,26 @@ async fn remove_single_file_keeps_the_directory() {
 }
 
 #[tokio::test]
+async fn remove_deletes_what_it_can_then_erases_and_reports_the_failure() {
+    let local = scratch_dir("partial");
+    std::fs::create_dir_all(local.join("stuck.bin/inner")).expect("mkdir");
+    std::fs::write(local.join("gone.bin"), b"g").expect("write");
+    let (fake, client) = setup().await;
+    let dir = local.display().to_string();
+    fake.push(layout_reply(&dir, 0, &["stuck.bin", "gone.bin"]));
+    fake.push(ok());
+    let err = client.remove(&id(20), true).await.expect_err("partial");
+    assert!(matches!(err, ClientError::Io(_)), "{err:?}");
+    assert!(!local.join("gone.bin").exists());
+    assert!(local.join("stuck.bin").exists());
+    assert_eq!(
+        fake.methods(),
+        vec!["system.multicall".to_owned(), "d.erase".to_owned()]
+    );
+    let _ = std::fs::remove_dir_all(&local);
+}
+
+#[tokio::test]
 async fn remove_refuses_unsafe_paths_before_erasing() {
     let (fake, client) = setup().await;
     fake.push(layout_reply("/srv/x", 1, &["../escape.bin"]));
@@ -849,16 +943,32 @@ fn magnet_hashes_parse() {
     assert_eq!(magnet_hash(&zeros), Some(InfoHash::from_bytes([0; 20])));
     let ones = format!("magnet:?xt=URN:BTIH:{}", "7".repeat(32));
     assert_eq!(magnet_hash(&ones), Some(InfoHash::from_bytes([0xff; 20])));
+    let encoded = format!("magnet:?dn=a%20b&xt=urn%3Abtih%3A{}", hash(0x5e));
+    assert_eq!(
+        magnet_hash(&encoded),
+        Some(InfoHash::from_bytes([0x5e; 20]))
+    );
     let mixed = "magnet:?xt=urn:btih:AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIB";
     assert_eq!(magnet_hash(mixed), Some(InfoHash::from_bytes([1; 20])));
     for bad in [
         "magnet:?xt=urn:btih:abc",
         "magnet:?xt=urn:sha1:",
+        "magnet:?xt=urn%3Abtih%3",
+        "magnet:?xt=urn%ZZbtih",
         "http://x/?xt=urn:btih:",
         &format!("magnet:?xt=urn:btih:{}", "1".repeat(32)),
     ] {
         assert_eq!(magnet_hash(bad), None, "{bad}");
     }
+}
+
+#[test]
+fn directory_command_quotes_the_path() {
+    assert_eq!(directory_command("/s/a b"), "d.directory.set=\"/s/a b\"");
+    assert_eq!(
+        directory_command(r#"/s/q"x\y"#),
+        r#"d.directory.set="/s/q\"x\\y""#
+    );
 }
 
 #[test]
