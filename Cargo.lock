@@ -853,6 +853,7 @@ dependencies = [
  "proptest",
  "quick-xml",
  "regex-lite",
+ "rustix",
  "serde",
  "thiserror",
 ]

@@ -5,6 +5,7 @@ mod dats;
 mod downloads;
 mod events;
 mod imports;
+mod launch;
 mod platforms;
 mod sources;
 mod spa;
@@ -41,6 +42,7 @@ pub fn router(app: Arc<AppState>) -> Router {
         .merge(dats::routes())
         .merge(imports::routes())
         .merge(downloads::routes())
+        .merge(launch::routes())
         .merge(stubs::routes())
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)
@@ -94,6 +96,18 @@ impl ApiError {
     #[must_use]
     pub fn not_found(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_FOUND, "not_found", message)
+    }
+
+    /// 409 `conflict`.
+    #[must_use]
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::CONFLICT, "conflict", message)
+    }
+
+    /// 503 `unavailable`: something outside the server cannot take the request.
+    #[must_use]
+    pub fn unavailable(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::SERVICE_UNAVAILABLE, "unavailable", message)
     }
 }
 
@@ -224,5 +238,11 @@ mod tests {
         let e = ApiError::from(crate::Error::Poisoned);
         assert_eq!(e.code, "internal");
         assert_eq!(ApiError::not_found("x").status, StatusCode::NOT_FOUND);
+        assert_eq!(ApiError::conflict("x").code, "conflict");
+        let e = ApiError::unavailable("x");
+        assert_eq!(
+            (e.status, e.code),
+            (StatusCode::SERVICE_UNAVAILABLE, "unavailable")
+        );
     }
 }

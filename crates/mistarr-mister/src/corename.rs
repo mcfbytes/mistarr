@@ -1,6 +1,6 @@
 //! The running core from `/tmp/CORENAME` and the cores installed on the SD card.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use mistarr_core::PlatformId;
 
@@ -65,10 +65,10 @@ pub fn read_corename(path: &Path) -> Result<CoreState> {
 /// ```
 #[must_use]
 pub fn installed_cores(root: &Path) -> Vec<InstalledCore> {
-    let mut found = Vec::new();
-    for dir in CORE_DIRS {
-        collect_rbf(&root.join(dir), 1, dir == ARCADE_DIR, &mut found);
-    }
+    let mut found: Vec<(String, bool)> = rbf_files(root)
+        .into_iter()
+        .map(|f| (f.name, f.arcade))
+        .collect();
     found.sort_unstable();
     found.dedup_by(|a, b| a.0 == b.0);
     found
@@ -87,8 +87,30 @@ pub fn installed_cores(root: &Path) -> Vec<InstalledCore> {
         .collect()
 }
 
-/// Collects `(core name, found under _Arcade)` for every `.rbf` in `dir`.
-fn collect_rbf(dir: &Path, depth: u8, arcade: bool, out: &mut Vec<(String, bool)>) {
+/// One `.rbf` file found under a [`CORE_DIRS`] directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RbfFile {
+    /// Core name with any `_YYYYMMDD` date suffix removed.
+    pub name: String,
+    /// The `YYYYMMDD` suffix, when the stem has one.
+    pub date: Option<String>,
+    /// Full path of the file.
+    pub path: PathBuf,
+    /// Found under `_Arcade`.
+    pub arcade: bool,
+}
+
+/// Every `.rbf` under the [`CORE_DIRS`] of `root` and one level of subfolders.
+pub(crate) fn rbf_files(root: &Path) -> Vec<RbfFile> {
+    let mut found = Vec::new();
+    for dir in CORE_DIRS {
+        collect_rbf(&root.join(dir), 1, dir == ARCADE_DIR, &mut found);
+    }
+    found
+}
+
+/// Collects every `.rbf` in `dir`, descending `depth` more folder levels.
+fn collect_rbf(dir: &Path, depth: u8, arcade: bool, out: &mut Vec<RbfFile>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -103,17 +125,25 @@ fn collect_rbf(dir: &Path, depth: u8, arcade: bool, out: &mut Vec<(String, bool)
             .is_some_and(|e| e.eq_ignore_ascii_case("rbf"))
         {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                out.push((core_name(stem).to_owned(), arcade));
+                let (name, date) = split_date(stem);
+                out.push(RbfFile {
+                    name: name.to_owned(),
+                    date: date.map(str::to_owned),
+                    arcade,
+                    path,
+                });
             }
         }
     }
 }
 
-/// Strips a trailing `_YYYYMMDD` release date from an `.rbf` file stem.
-fn core_name(stem: &str) -> &str {
+/// Splits a trailing `_YYYYMMDD` release date from an `.rbf` file stem.
+fn split_date(stem: &str) -> (&str, Option<&str>) {
     match stem.rsplit_once('_') {
-        Some((name, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => name,
-        _ => stem,
+        Some((name, date)) if date.len() == 8 && date.bytes().all(|b| b.is_ascii_digit()) => {
+            (name, Some(date))
+        }
+        _ => (stem, None),
     }
 }
 
@@ -191,9 +221,21 @@ mod tests {
     }
 
     #[test]
-    fn core_name_strips_only_dates() {
-        assert_eq!(core_name("SNES_20240101"), "SNES");
-        assert_eq!(core_name("Atari_2600"), "Atari_2600");
-        assert_eq!(core_name("GBA"), "GBA");
+    fn split_date_strips_only_dates() {
+        assert_eq!(split_date("SNES_20240101"), ("SNES", Some("20240101")));
+        assert_eq!(split_date("Atari_2600"), ("Atari_2600", None));
+        assert_eq!(split_date("GBA"), ("GBA", None));
+    }
+
+    #[test]
+    fn rbf_files_keep_dates_and_paths() {
+        let root = scratch("rbf-files");
+        std::fs::create_dir_all(root.join("_Console")).expect("mkdir");
+        std::fs::write(root.join("_Console/NES_20240101.rbf"), b"").expect("write");
+        let files = rbf_files(&root);
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].date.as_deref(), Some("20240101"));
+        assert_eq!(files[0].path, root.join("_Console/NES_20240101.rbf"));
+        assert!(!files[0].arcade);
     }
 }

@@ -6,6 +6,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use mistarr_clients::DownloadClient;
+use mistarr_mister::launch::{CommandSink, FifoSink};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -46,6 +47,10 @@ pub struct Options {
     pub poll_idle: Duration,
     /// Poll interval after repeated client failures.
     pub poll_backoff: Duration,
+    /// The FIFO MiSTer Main reads commands from.
+    pub command_path: PathBuf,
+    /// Directory the launch MGL is written to; tmpfs on the board, so the SD card is spared.
+    pub launch_dir: PathBuf,
 }
 
 impl Default for Options {
@@ -63,6 +68,8 @@ impl Default for Options {
             poll_active: Duration::from_secs(5),
             poll_idle: Duration::from_secs(60),
             poll_backoff: Duration::from_secs(300),
+            command_path: PathBuf::from(mistarr_mister::launch::COMMAND_PATH),
+            launch_dir: PathBuf::from("/tmp"),
         }
     }
 }
@@ -87,6 +94,7 @@ pub struct AppState {
     shutdown: watch::Sender<bool>,
     settings_write: tokio::sync::Mutex<()>,
     client: RwLock<Option<(ClientKey, Arc<dyn DownloadClient>)>>,
+    commands: RwLock<Arc<dyn CommandSink>>,
 }
 
 impl AppState {
@@ -100,12 +108,28 @@ impl AppState {
             gate: Arc::new(Gate::new()),
             scheduler: Scheduler::new(),
             started: Instant::now(),
-            options,
             poll_wake: tokio::sync::Notify::new(),
             shutdown: watch::Sender::new(false),
             settings_write: tokio::sync::Mutex::new(()),
             client: RwLock::new(None),
+            commands: RwLock::new(Arc::new(FifoSink::new(&options.command_path))),
+            options,
         })
+    }
+
+    /// Where launch commands for MiSTer Main go: the FIFO at `options.command_path`.
+    #[must_use]
+    pub fn command_sink(&self) -> Arc<dyn CommandSink> {
+        Arc::clone(&self.commands.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Replaces the command sink, for tests that record launches.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_command_sink(&self, sink: Arc<dyn CommandSink>) {
+        *self
+            .commands
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = sink;
     }
 
     /// The download client from the last `detect_client` run, or `None` when
@@ -403,6 +427,8 @@ pub(crate) mod testutil {
         .expect("seed");
         let options = Options {
             corename_path: dir.path().join("CORENAME"),
+            command_path: dir.path().join("MiSTer_cmd"),
+            launch_dir: dir.path().to_path_buf(),
             ..Options::default()
         };
         (dir, AppState::new(config, db, options))
@@ -493,6 +519,16 @@ mod tests {
         let o = Options::default();
         assert_eq!(o.corename_path, PathBuf::from("/tmp/CORENAME"));
         assert_eq!(o.corename_poll, Duration::from_secs(2));
+        assert_eq!(o.command_path, PathBuf::from("/dev/MiSTer_cmd"));
+        assert_eq!(o.launch_dir, PathBuf::from("/tmp"));
+    }
+
+    #[test]
+    fn command_sink_is_replaceable() {
+        let (_dir, app) = testutil::state();
+        assert!(!app.command_sink().present());
+        app.set_command_sink(Arc::new(mistarr_mister::launch::RecordingSink::new()));
+        assert!(app.command_sink().present());
     }
 
     /// The timer queues its scan on the heavy lane, so it sits behind the

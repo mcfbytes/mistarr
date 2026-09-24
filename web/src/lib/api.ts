@@ -5,6 +5,7 @@ import type {
   DownloadState,
   ImportLogEntry,
   Job,
+  Launched,
   Paged,
   Platform,
   Settings,
@@ -122,6 +123,7 @@ export const api = {
     request(`/platforms/${id}`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
   bindPlatformDat: (id: string, datVersionId: number): Promise<Binding> =>
     request(`/platforms/${id}/dat`, { method: 'POST', body: JSON.stringify({ dat_version_id: datVersionId }) }),
+  launchCore: (id: string): Promise<Launched> => request(`/platforms/${id}/launch-core`, { method: 'POST' }),
 
   titles: (
     platformId: string,
@@ -137,6 +139,7 @@ export const api = {
   unwant: (id: number): Promise<TitleDetail> => request(`/titles/${id}/want`, { method: 'DELETE' }),
   rename: (id: number, fileId: number): Promise<TitleDetail> =>
     request(`/titles/${id}/rename`, { method: 'POST', body: JSON.stringify({ file_id: fileId }) }),
+  launchTitle: (id: number): Promise<Launched> => request(`/titles/${id}/launch`, { method: 'POST' }),
 
   dats: (): Promise<Paged<DatVersion>> => request('/dats'),
   uploadDat: (file: File): Promise<Uploaded> => {

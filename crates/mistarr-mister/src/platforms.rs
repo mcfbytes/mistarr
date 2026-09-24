@@ -5,6 +5,8 @@ use std::sync::OnceLock;
 use mistarr_core::PlatformId;
 use regex_lite::Regex;
 
+use crate::launch::{LaunchSlot, LoadMode};
+
 /// How a platform's games are laid out and which adapter family places them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -48,6 +50,8 @@ pub struct Platform {
     pub core_names: &'static [&'static str],
     /// The libretro playlist name that thumbnail URLs are built from.
     pub libretro_playlist: &'static str,
+    /// MGL parameters for launching a game; `None` when games start another way.
+    pub launch: Option<LaunchSlot>,
 }
 
 impl Platform {
@@ -77,6 +81,7 @@ const CART: Platform = Platform {
     verify_on_board: false,
     core_names: &[],
     libretro_playlist: "",
+    launch: None,
 };
 
 const DISC: Platform = Platform {
@@ -85,10 +90,30 @@ const DISC: Platform = Platform {
     ..CART
 };
 
+/// Loads a game file into slot `index` after `delay` seconds; values await board verification.
+const fn file(index: u8, delay: u8) -> LaunchSlot {
+    slot(LoadMode::File, index, delay)
+}
+
+/// Mounts a disc image in slot `index` after `delay` seconds; values await board verification.
+const fn mount(index: u8, delay: u8) -> LaunchSlot {
+    slot(LoadMode::Mount, index, delay)
+}
+
+const fn slot(mode: LoadMode, index: u8, delay: u8) -> LaunchSlot {
+    LaunchSlot {
+        mode,
+        index,
+        delay,
+        verify_on_board: true,
+    }
+}
+
 /// Every platform, in the order of `docs/PLATFORMS.md`.
 pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "nes",
+        launch: Some(file(0, 2)),
         name: "Nintendo Entertainment System",
         libretro_playlist: "Nintendo - Nintendo Entertainment System",
         core_dir: "NES",
@@ -100,6 +125,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "fds",
+        launch: Some(file(0, 2)),
         name: "Famicom Disk System",
         libretro_playlist: "Nintendo - Family Computer Disk System",
         core_dir: "NES",
@@ -111,6 +137,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "snes",
+        launch: Some(file(0, 2)),
         name: "Super Nintendo Entertainment System",
         libretro_playlist: "Nintendo - Super Nintendo Entertainment System",
         core_dir: "SNES",
@@ -126,6 +153,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "n64",
+        launch: Some(file(1, 1)),
         name: "Nintendo 64",
         libretro_playlist: "Nintendo - Nintendo 64",
         core_dir: "N64",
@@ -137,6 +165,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "gb",
+        launch: Some(file(1, 2)),
         name: "Game Boy",
         libretro_playlist: "Nintendo - Game Boy",
         core_dir: "GAMEBOY",
@@ -148,6 +177,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "gbc",
+        launch: Some(file(1, 2)),
         name: "Game Boy Color",
         libretro_playlist: "Nintendo - Game Boy Color",
         core_dir: "GAMEBOY",
@@ -159,6 +189,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "gba",
+        launch: Some(file(0, 2)),
         name: "Game Boy Advance",
         libretro_playlist: "Nintendo - Game Boy Advance",
         core_dir: "GBA",
@@ -169,6 +200,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "megadrive",
+        launch: Some(file(1, 1)),
         name: "Mega Drive - Genesis",
         libretro_playlist: "Sega - Mega Drive - Genesis",
         core_dir: "Genesis",
@@ -181,6 +213,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "s32x",
+        launch: Some(file(1, 1)),
         name: "32X",
         libretro_playlist: "Sega - 32X",
         core_dir: "S32X",
@@ -191,6 +224,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "sms",
+        launch: Some(file(1, 1)),
         name: "Master System - Mark III",
         libretro_playlist: "Sega - Master System - Mark III",
         core_dir: "SMS",
@@ -201,6 +235,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "gg",
+        launch: Some(file(2, 1)),
         name: "Game Gear",
         libretro_playlist: "Sega - Game Gear",
         core_dir: "SMS",
@@ -211,6 +246,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "sg1000",
+        launch: Some(file(1, 1)),
         name: "SG-1000",
         libretro_playlist: "Sega - SG-1000",
         core_dir: "SG1000",
@@ -221,6 +257,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "pce",
+        launch: Some(file(0, 1)),
         name: "PC Engine - TurboGrafx-16",
         libretro_playlist: "NEC - PC Engine - TurboGrafx 16",
         core_dir: "TGFX16",
@@ -232,6 +269,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "sgx",
+        launch: Some(file(1, 1)),
         name: "SuperGrafx",
         libretro_playlist: "NEC - PC Engine SuperGrafx",
         core_dir: "TGFX16",
@@ -243,6 +281,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "atari2600",
+        launch: Some(file(1, 1)),
         name: "Atari 2600",
         libretro_playlist: "Atari - 2600",
         core_dir: "Atari2600",
@@ -253,6 +292,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "atari5200",
+        launch: Some(file(1, 1)),
         name: "Atari 5200",
         libretro_playlist: "Atari - 5200",
         core_dir: "Atari5200",
@@ -263,6 +303,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "atari7800",
+        launch: Some(file(1, 1)),
         name: "Atari 7800",
         libretro_playlist: "Atari - 7800",
         core_dir: "Atari7800",
@@ -274,6 +315,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "lynx",
+        launch: Some(file(1, 1)),
         name: "Atari Lynx",
         libretro_playlist: "Atari - Lynx",
         core_dir: "AtariLynx",
@@ -285,6 +327,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "coleco",
+        launch: Some(file(0, 1)),
         name: "ColecoVision",
         libretro_playlist: "Coleco - ColecoVision",
         core_dir: "Coleco",
@@ -297,6 +340,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "intv",
+        launch: Some(file(1, 1)),
         name: "Intellivision",
         libretro_playlist: "Mattel - Intellivision",
         core_dir: "Intellivision",
@@ -308,6 +352,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "ws",
+        launch: Some(file(0, 1)),
         name: "WonderSwan",
         libretro_playlist: "Bandai - WonderSwan",
         core_dir: "WonderSwan",
@@ -318,6 +363,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "wsc",
+        launch: Some(file(0, 1)),
         name: "WonderSwan Color",
         libretro_playlist: "Bandai - WonderSwan Color",
         core_dir: "WonderSwan",
@@ -328,6 +374,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "ngp",
+        launch: Some(file(0, 1)),
         name: "Neo Geo Pocket",
         libretro_playlist: "SNK - Neo Geo Pocket",
         core_dir: "NGP",
@@ -339,6 +386,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "vectrex",
+        launch: Some(file(1, 1)),
         name: "Vectrex",
         libretro_playlist: "GCE - Vectrex",
         core_dir: "Vectrex",
@@ -349,6 +397,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "pokemini",
+        launch: Some(file(0, 1)),
         name: "Pokemon Mini",
         libretro_playlist: "Nintendo - Pokemon Mini",
         core_dir: "PokemonMini",
@@ -359,6 +408,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "sv",
+        launch: Some(file(0, 1)),
         name: "Supervision",
         libretro_playlist: "Watara - Supervision",
         core_dir: "SuperVision",
@@ -369,6 +419,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "psx",
+        launch: Some(mount(1, 1)),
         name: "PlayStation",
         libretro_playlist: "Sony - PlayStation",
         core_dir: "PSX",
@@ -378,6 +429,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "saturn",
+        launch: Some(mount(0, 1)),
         name: "Sega Saturn",
         libretro_playlist: "Sega - Saturn",
         core_dir: "Saturn",
@@ -387,6 +439,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "megacd",
+        launch: Some(mount(0, 1)),
         name: "Mega CD - Sega CD",
         libretro_playlist: "Sega - Mega-CD - Sega CD",
         core_dir: "MegaCD",
@@ -396,6 +449,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "pcecd",
+        launch: Some(mount(0, 1)),
         name: "PC Engine CD - TurboGrafx-CD",
         libretro_playlist: "NEC - PC Engine CD - TurboGrafx-CD",
         core_dir: "TGFX16-CD",
@@ -406,6 +460,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "neocd",
+        launch: Some(mount(1, 1)),
         name: "Neo Geo CD",
         libretro_playlist: "SNK - Neo Geo CD",
         core_dir: "NeoGeo-CD",
@@ -417,6 +472,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "neogeo",
+        launch: Some(file(1, 1)),
         name: "Neo Geo",
         libretro_playlist: "SNK - Neo Geo",
         core_dir: "NeoGeo",
@@ -565,6 +621,21 @@ mod tests {
                 assert!(p.extension_written.is_none(), "{}", p.id);
             }
         }
+    }
+
+    #[test]
+    fn every_row_but_arcade_has_launch_parameters() {
+        for p in &PLATFORMS {
+            let slot = p.launch;
+            assert_eq!(slot.is_none(), p.kind == Kind::Arcade, "{}", p.id);
+            if let Some(slot) = slot {
+                let mount = p.kind == Kind::Disc;
+                assert_eq!(slot.mode == LoadMode::Mount, mount, "{}", p.id);
+                assert!(slot.delay > 0, "{}", p.id);
+            }
+        }
+        let nes = by_id("nes").and_then(|p| p.launch).expect("nes");
+        assert_eq!((nes.mode.letter(), nes.index, nes.delay), ('f', 0, 2));
     }
 
     #[test]

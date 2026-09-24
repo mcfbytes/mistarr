@@ -365,6 +365,8 @@ fn options(dir: &Path) -> Options {
         poll_active: Duration::from_millis(500),
         poll_idle: Duration::from_secs(1),
         poll_backoff: Duration::from_secs(5),
+        command_path: dir.join("MiSTer_cmd"),
+        launch_dir: dir.to_path_buf(),
     }
 }
 

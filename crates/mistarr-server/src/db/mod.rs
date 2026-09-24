@@ -7,6 +7,7 @@ pub mod downloads_import;
 pub mod files;
 pub mod imports;
 pub mod jobs;
+pub mod launch;
 pub mod migrate;
 pub mod platforms;
 pub mod settings;

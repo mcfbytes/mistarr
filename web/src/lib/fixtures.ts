@@ -160,7 +160,7 @@ export function fixtureTitle(id: number): TitleDetail {
             status: 'verified',
             file_state: 'verified',
             file_id: id * 1000,
-            file_path: `nes/${base}.nes`
+            file_path: `NES/${base}.nes`
           }
         ]
       },
@@ -212,7 +212,8 @@ export const fixtureStatus: SystemStatus = {
   pause_reason: null,
   override: null,
   disk_free_bytes: 12_400_000_000,
-  rss_bytes: 41_000_000
+  rss_bytes: 41_000_000,
+  launch: 'ready'
 };
 
 export const fixtureWizard: WizardStatus = {
@@ -381,6 +382,7 @@ export const fixtureSettings: Settings = {
     regions: ['USA', 'World', 'Europe', 'Japan'],
     languages: ['En'],
     prefer_latest_revision: true,
-    hide: ['bios', 'beta', 'proto', 'demo', 'sample', 'program']
+    hide: ['bios', 'beta', 'proto', 'demo', 'sample', 'program'],
+    launch: true
   }
 };

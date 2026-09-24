@@ -6,7 +6,8 @@ set headers, the `apikey` query parameter; otherwise the answer is 401. All
 list endpoints take `?limit=&offset=` (default 100, capped at 1000) and return
 `{ items: [...], total: n }`. Errors are `{ error: { code, message } }` with an
 appropriate status; codes are `bad_request`, `unauthorized`, `not_found`,
-`method_not_allowed`, `conflict`, `not_implemented` and `internal`. A
+`method_not_allowed`, `conflict`, `not_implemented`, `unavailable` and
+`internal`. A
 documented route whose work package has not landed answers 501
 `not_implemented`. The SPA is served
 from `/` and every unknown non-API path returns `index.html`; unknown paths
@@ -33,7 +34,7 @@ under `/api` return 404 JSON.
               "reachable": true, "version": "4.0.5", "rtorrent_on_path": false,
               "checked_at": 1700000000 },
   "corename": "MENU", "paused": false, "pause_reason": null, "override": null,
-  "disk_free_bytes": 1000000, "rss_bytes": 1000000
+  "disk_free_bytes": 1000000, "rss_bytes": 1000000, "launch": "ready"
 }
 ```
 
@@ -41,7 +42,8 @@ under `/api` return 404 JSON.
 client answered. `corename` is `null` when the file does not exist.
 `pause_reason` is `"core"`, `"manual"` or `null`; `override` is `"paused"`,
 `"running"` or `null`. `disk_free_bytes` is for the filesystem holding the
-data directory.
+data directory. `launch` is `"ready"`, `"disabled"` when `prefs.launch` is
+off, or `"unavailable"` when MiSTer Main's command FIFO does not exist.
 
 `/system/wizard` body: `{ paths, dats, client, sources, open_on_start }`, all
 booleans. `paths` is true when the games directory exists, `dats` when any DAT
@@ -62,7 +64,9 @@ job's `progress` is `{ error }`.
 same sections of `mistarr.toml`. PUT takes any subset of the three sections;
 each section present replaces the stored one whole, with absent fields taking
 their defaults. Other keys are a 400. Saved values take precedence over the
-file on later starts. Changing `client` re-runs client detection.
+file on later starts. Changing `client` re-runs client detection; changing
+the 1G1R fields of `prefs` recomputes the picks; changing `prefs.launch`
+publishes `status`.
 
 ## Platforms
 
@@ -264,6 +268,29 @@ connection that falls further behind is closed and, on reconnecting, gets
 | `download.changed` | `{ download_id, state, progress }` |
 | `import.done` | `{ title_id, file_id, action }`, one per file placed, kept or renamed; `action` as in `import_log` |
 | `file.changed` | `{ file_id, state }` during scans, throttled to 10 per second |
+
+## Launching
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/titles/{id}/launch` | Start title `id` (a variant, not its group) on the MiSTer. |
+| POST | `/platforms/{id}/launch-core` | Start the platform's newest installed core with no game. |
+
+Neither takes a body; everything launched comes from the database and the
+SD card (ARCHITECTURE.md "Launching"). Both answer `{ core, file }`: the
+`.rbf` or `.mra` loaded, relative to the SD root, and the game file handed
+to the core, relative to `games/`, or `null`.
+
+Both are a 409 `conflict` while `prefs.launch` is off and a 503
+`unavailable` when MiSTer Main's command FIFO does not exist, is not being
+read or does not take the command. `launch` is a 404 for an unknown title
+and a 409 when not every live rom has a `verified`, `misnamed` or `bad`
+file (for an MRA title: a zip is missing or its md5 check failed), for a
+BIOS entry, a DAT entry of the arcade platform, a platform without an
+installed core, or an MRA file no longer under `_Arcade`. `launch-core` is
+a 404 for an unknown platform and a 409 when no core is installed or for
+`arcade`, whose cores start from an MRA. Nothing is published on the event
+bus; the running core shows up in `status` through CORENAME.
 
 ## Art URLs
 

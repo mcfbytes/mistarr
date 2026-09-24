@@ -43,7 +43,7 @@ contracts in this document.
 | Crate | Responsibility | Depends on |
 |---|---|---|
 | `mistarr-core` | Domain types. Logiqx DAT parser. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. | none |
-| `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. | core |
+| `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
 | `mistarr-sources` | Watched-directory scanner. `.torrent` (bencode) and `.magnet` parsing into a file list. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
 | `mistarr-clients` | `DownloadClient` trait. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping. | none |
 | `mistarr-server` | The binary. axum HTTP server, SQLite via `rusqlite` (bundled), job scheduler, SSE event bus, embedded SPA via `rust-embed`, config, first-run wizard state, CLI flags. | all |
@@ -268,6 +268,29 @@ does nothing.
    from the client without deleting data, clear `sources.client_id` and
    remove the empty directories under `staging/<infohash>/`.
 
+### Launching
+
+A title in the collection, or a platform's core alone, can be started from
+the UI through MiSTer Main's command FIFO, `/dev/MiSTer_cmd` (API.md
+"Launching"). Every path comes from the database and the SD card, never
+from the request.
+
+1. `prefs.launch` must be on and the FIFO must exist; otherwise nothing is
+   written. The FIFO is opened write-only and non-blocking for each command,
+   so a Main that is not reading fails at once instead of stalling a worker.
+2. A bare core is the newest `.rbf` for the platform under the core
+   directories, by the `_YYYYMMDD` date in its name, and is started with
+   `load_core <path>`.
+3. A DAT entry needs a `verified`, `misnamed` or `bad` file for every live
+   rom. mistarr writes an MGL naming the newest core and the entry's file
+   (the cue sheet of a disc, the zip or directory of a romset) with the
+   platform's launch parameters from PLATFORMS.md, to `/tmp/mistarr.mgl`,
+   which is tmpfs on the board, and sends `load_core` on it.
+4. An MRA title with every zip present and no failed md5 check is started
+   with `load_core` on its `.mra` file.
+
+The CORENAME watcher then sees the core and pauses heavy jobs as below.
+
 ### Pausing for the core
 
 The CORENAME watcher polls `/tmp/CORENAME` every 2 s. When the value is not
@@ -319,6 +342,7 @@ regions   = ["USA", "World", "Europe", "Japan"]
 languages = ["En"]
 prefer_latest_revision = true
 hide = ["bios", "beta", "proto", "demo", "sample", "program"]
+launch = true               # allow starting cores and games from the UI
 
 [sources]
 bind_threshold = 0.6        # lowest per-platform hit rate, 0 to 1, that binds a source
@@ -337,8 +361,8 @@ precedence over the file on every start. `server`, `paths`, `sources` and
 
 ## Non-goals
 
-- No emulation, no launching of games, no save management. MiSTer Remote and
-  friends do that.
+- No emulation and no save management. Launching hands a command to MiSTer
+  Main and stops there.
 - No metadata providers beyond libretro thumbnails. No IGDB, no ScreenScraper,
   no API keys.
 - No embedded torrent client.

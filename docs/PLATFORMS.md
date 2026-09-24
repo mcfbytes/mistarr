@@ -186,6 +186,58 @@ the `libretro_playlist` column of the table in `mistarr-mister`.
 | `atari5200` | Atari - 5200 | `neogeo` | SNK - Neo Geo |
 | | | `arcade` | MAME |
 
+## Launch parameters
+
+Starting a DAT entry (ARCHITECTURE.md "Launching") writes an MGL file:
+
+```xml
+<mistergamedescription>
+  <rbf>_Console/NES</rbf>
+  <file delay="2" type="f" index="0" path="../../../../../media/fat/games/NES/Example Quest (USA).nes"/>
+</mistergamedescription>
+```
+
+`rbf` is the chosen core's path relative to the SD root without its date
+suffix and extension. The core is the newest `.rbf`, by its `_YYYYMMDD`
+date, whose name the row's core dir, legacy dirs or core names match, in
+`_Console`, `_Computer` or `_Other` and one folder below; undated files rank
+last. `path` climbs from the core's games folder to `/` and names the file
+absolutely. Attribute values are XML-escaped and paths with control
+characters are refused. The `launch` column of the table in `mistarr-mister`
+holds the per-platform values:
+
+| column | meaning |
+|---|---|
+| type | `f` loads the file into the core, `s` mounts it as a disc or disk image |
+| index | the core's file-slot index |
+| delay | seconds Main waits after loading the core before handing it the file |
+
+The file is the entry's cue sheet, else its `.chd` or `.iso`, for a disc;
+the zip or directory for a romset; the file otherwise, with a zip member
+opened as `a.zip/b.nes`. Arcade titles have no row: an MRA title starts
+with `load_core` on its `.mra`. Every row below is **verify**: the values
+are the best known and are confirmed on the board with the other verify
+rows.
+
+| id | type | index | delay | id | type | index | delay |
+|---|---|---|---|---|---|---|---|
+| `nes` | `f` | 0 | 2 | `atari7800` | `f` | 1 | 1 |
+| `fds` | `f` | 0 | 2 | `lynx` | `f` | 1 | 1 |
+| `snes` | `f` | 0 | 2 | `coleco` | `f` | 0 | 1 |
+| `n64` | `f` | 1 | 1 | `intv` | `f` | 1 | 1 |
+| `gb` | `f` | 1 | 2 | `ws` | `f` | 0 | 1 |
+| `gbc` | `f` | 1 | 2 | `wsc` | `f` | 0 | 1 |
+| `gba` | `f` | 0 | 2 | `ngp` | `f` | 0 | 1 |
+| `megadrive` | `f` | 1 | 1 | `vectrex` | `f` | 1 | 1 |
+| `s32x` | `f` | 1 | 1 | `pokemini` | `f` | 0 | 1 |
+| `sms` | `f` | 1 | 1 | `sv` | `f` | 0 | 1 |
+| `gg` | `f` | 2 | 1 | `psx` | `s` | 1 | 1 |
+| `sg1000` | `f` | 1 | 1 | `saturn` | `s` | 0 | 1 |
+| `pce` | `f` | 0 | 1 | `megacd` | `s` | 0 | 1 |
+| `sgx` | `f` | 1 | 1 | `pcecd` | `s` | 0 | 1 |
+| `atari2600` | `f` | 1 | 1 | `neocd` | `s` | 1 | 1 |
+| `atari5200` | `f` | 1 | 1 | `neogeo` | `f` | 1 | 1 |
+
 ## Computers
 
 Computer cores use disk and tape images with TOSEC-style DATs and inconsistent

@@ -3,6 +3,9 @@
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
   import { fixtureTitle } from '../lib/fixtures';
+  import { getStatus, loadStatus } from '../lib/stores/status.svelte';
+  import { findPlatform, loadPlatforms, platformsLoaded } from '../lib/stores/platforms.svelte';
+  import { inCollection, launchBlocker } from '../lib/launch';
 
   interface Props {
     titleId: number;
@@ -20,6 +23,35 @@
   });
 
   const detail = $derived(getDetail());
+  const platform = $derived(detail ? findPlatform(detail.platform_id) : undefined);
+  const playable = $derived(detail?.variants.some((v) => !v.retired && inCollection(v)) ?? false);
+  const playBlocker = $derived(
+    launchBlocker(getStatus()?.launch) ??
+      (platform && !platform.core_present ? 'No core for this platform is installed.' : null)
+  );
+
+  $effect(() => {
+    if (!getStatus()) {
+      void loadStatus().catch(() => undefined);
+    }
+    if (!platformsLoaded()) {
+      void loadPlatforms().catch(() => undefined);
+    }
+  });
+
+  async function play(variantId: number): Promise<void> {
+    busy = true;
+    try {
+      if (!isMock) {
+        await api.launchTitle(variantId);
+      }
+      showToast('Started on the MiSTer.');
+    } catch (err) {
+      showToast(errorMessage(err));
+    } finally {
+      busy = false;
+    }
+  }
 
   async function want(variantId: number): Promise<void> {
     busy = true;
@@ -90,6 +122,10 @@
       </div>
     {/if}
 
+    {#if playable && playBlocker}
+      <p class="muted reason">Play is unavailable: {playBlocker}</p>
+    {/if}
+
     <div class="table-wrap">
     <table>
       <thead>
@@ -117,6 +153,11 @@
             </td>
             <td>{variant.torrent_files_available} available</td>
             <td>
+              {#if !variant.retired && inCollection(variant)}
+                <button class="primary" disabled={busy || playBlocker !== null} onclick={() => play(variant.id)}>
+                  Play
+                </button>
+              {/if}
               {#if !variant.retired}
                 {#if variant.wanted}
                   <button disabled={busy} onclick={unwant}>Unwant</button>
@@ -174,5 +215,10 @@
 
   tr.retired {
     opacity: 0.6;
+  }
+
+  .reason {
+    font-size: 0.9em;
+    margin: 0.8em 0 0;
   }
 </style>

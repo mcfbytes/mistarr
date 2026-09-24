@@ -59,6 +59,8 @@ pub fn options_in(dir: &Path) -> Options {
         poll_active: Duration::from_secs(3600),
         poll_idle: Duration::from_secs(3600),
         poll_backoff: Duration::from_secs(3600),
+        command_path: dir.join("MiSTer_cmd"),
+        launch_dir: dir.to_path_buf(),
     }
 }
 
