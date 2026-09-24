@@ -606,9 +606,8 @@ fn is_language_code(token: &str) -> bool {
     };
     let b = primary.as_bytes();
     let primary_ok = b.len() == 2 && b[0].is_ascii_uppercase() && b[1].is_ascii_lowercase();
-    let subtag_ok = subtag.map_or(true, |s| {
-        (2..=4).contains(&s.len()) && s.bytes().all(|c| c.is_ascii_alphabetic())
-    });
+    let subtag_ok = subtag
+        .is_none_or(|s| (2..=4).contains(&s.len()) && s.bytes().all(|c| c.is_ascii_alphabetic()));
     primary_ok && subtag_ok
 }
 

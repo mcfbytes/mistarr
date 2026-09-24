@@ -120,8 +120,8 @@ pub struct Variant {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Rank {
     unlicensed_or_pirate: bool,
-    region_rank: usize,
-    language_rank: u8,
+    region: usize,
+    language: u8,
     revision_key: i64,
     is_bad_dump: bool,
     name_len: usize,
@@ -174,14 +174,14 @@ pub fn is_hidden(variant: &Variant, prefs: &Prefs) -> bool {
 #[must_use]
 pub fn rank(variant: &Variant, prefs: &Prefs) -> Rank {
     let unlicensed_or_pirate = variant.flags.iter().any(|f| f == "unl" || f == "pirate");
-    let region_rank = variant
+    let region = variant
         .regions
         .iter()
         .filter_map(|r| prefs.regions.iter().position(|p| p == r))
         .min()
         .unwrap_or(prefs.regions.len());
     // Untagged names carry no language claim, so they sit between a match and a mismatch.
-    let language_rank = match variant.languages.is_empty() {
+    let language = match variant.languages.is_empty() {
         true => 1,
         false
             if variant
@@ -201,8 +201,8 @@ pub fn rank(variant: &Variant, prefs: &Prefs) -> Rank {
     };
     Rank {
         unlicensed_or_pirate,
-        region_rank,
-        language_rank,
+        region,
+        language,
         revision_key,
         is_bad_dump: !variant.good_dump,
         name_len: variant.name.len(),
@@ -726,7 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn untagged_language_ranks_between_match_and_mismatch() {
+    fn untagged_languages_between_match_and_mismatch() {
         let prefs = Prefs::default();
         let mut en = base(1, "Example Quest (USA) (En)");
         en.languages = vec!["En".to_string()];
@@ -758,12 +758,15 @@ mod tests {
                     if i % 5 == 0 {
                         flags.push("unl".to_string());
                     }
+                    // Test ids are tiny, so the u64 to usize casts cannot truncate.
+                    #[allow(clippy::cast_possible_truncation)]
+                    let (ri, li) = ((i + perm_seed) as usize, i as usize);
                     Variant {
                         id: i,
                         name: format!("Example Quest {i}"),
-                        regions: vec![regions[(i as usize + perm_seed as usize) % regions.len()].to_string()],
-                        languages: vec![languages[(i as usize) % languages.len()].to_string()],
-                        revision_rank: Some((i % 3) as u32),
+                        regions: vec![regions[ri % regions.len()].to_string()],
+                        languages: vec![languages[li % languages.len()].to_string()],
+                        revision_rank: Some(u32::try_from(i % 3).unwrap_or(0)),
                         flags,
                         good_dump: i % 4 != 0,
                     }
@@ -774,7 +777,7 @@ mod tests {
             // Deterministic shuffle keyed on perm_seed, no external RNG crate needed.
             let mut seed = perm_seed.wrapping_add(1);
             for i in (1..group.len()).rev() {
-                seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+                seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
                 let j = (seed >> 33) as usize % (i + 1);
                 group.swap(i, j);
             }
