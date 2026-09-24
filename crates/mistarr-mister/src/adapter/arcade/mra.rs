@@ -1,5 +1,6 @@
 //! MRA parsing: which MAME zips an arcade core definition needs and how its roms are built.
 
+use std::io::Read as _;
 use std::path::Path;
 
 use quick_xml::escape::resolve_predefined_entity;
@@ -211,6 +212,9 @@ pub fn zip_location(zip: &str) -> Option<ZipPath> {
 /// Text of `<name>`, `<setname>` and `<rbf>` includes CDATA, resolved entities
 /// and the text of any nested child elements, so `<name>A<b>x</b>B</name>` reads `AxB`.
 /// Rom content the assembler does not implement is kept as [`RomItem::Unsupported`].
+/// Element and attribute names compare case-insensitively, as MiSTer's loader reads them:
+/// an end tag closes the innermost open element of its name, a stray end tag is ignored,
+/// and an unknown entity stays as written.
 ///
 /// # Errors
 ///
@@ -218,30 +222,34 @@ pub fn zip_location(zip: &str) -> Option<ZipPath> {
 ///
 /// ```
 /// let mra = mistarr_mister::adapter::arcade::mra::parse(
-///     br#"<misterromdescription><setname>exblast</setname>
-///         <rom index="0" zip="exblast.zip|exparent.zip"/></misterromdescription>"#,
+///     br#"<misterromdescription><SetName>exblast</setname>
+///         <ROM index="0" ZIP="exblast.zip|exparent.zip"/></misterromdescription>"#,
 /// ).unwrap();
+/// assert_eq!(mra.setname.as_deref(), Some("exblast"));
 /// assert_eq!(mra.zips, ["exblast.zip", "exparent.zip"]);
 /// assert_eq!(mra.roms[0].zips, mra.zips);
 /// ```
 pub fn parse(xml: &[u8]) -> Result<Mra> {
     let mut reader = Reader::from_reader(xml);
+    reader.config_mut().check_end_names = false;
     let mut mra = Mra::default();
-    let mut open: Vec<Option<Field>> = Vec::new();
+    let mut open: Vec<(String, Option<Field>)> = Vec::new();
     let mut rom: Option<RomBuilder> = None;
     loop {
         let event = reader.read_event().map_err(xml_err)?;
-        let field = open.last().copied().flatten();
+        let field = open.last().and_then(|(_, f)| *f);
         match event {
             Event::Start(e) => {
-                open.push(Field::of(e.local_name().as_ref()).or(field));
+                let name = tag(e.local_name().as_ref());
+                let f = Field::of(&name).or(field);
+                open.push((name, f));
                 read_attributes(&e, &mut mra)?;
                 start(&e, &mut rom)?;
             }
             Event::Empty(e) => {
                 read_attributes(&e, &mut mra)?;
                 start(&e, &mut rom)?;
-                end(e.local_name().as_ref(), &mut rom, &mut mra);
+                end(&tag(e.local_name().as_ref()), &mut rom, &mut mra);
             }
             Event::Text(t) => text(&t.decode().map_err(xml_err)?, field, &mut mra, &mut rom),
             Event::CData(c) => text(&c.decode().map_err(xml_err)?, field, &mut mra, &mut rom),
@@ -251,14 +259,17 @@ pub fn parse(xml: &[u8]) -> Result<Mra> {
                 } else {
                     let name = r.decode().map_err(xml_err)?;
                     resolve_predefined_entity(&name)
-                        .ok_or_else(|| Error::Mra(format!("unknown entity `{name}`")))?
-                        .to_owned()
+                        .map_or_else(|| format!("&{name};"), str::to_owned)
                 };
                 text(&resolved, field, &mut mra, &mut rom);
             }
             Event::End(e) => {
-                open.pop();
-                end(e.local_name().as_ref(), &mut rom, &mut mra);
+                let name = tag(e.local_name().as_ref());
+                if let Some(at) = open.iter().rposition(|(n, _)| *n == name) {
+                    for (closed, _) in open.drain(at..).rev() {
+                        end(&closed, &mut rom, &mut mra);
+                    }
+                }
             }
             Event::Eof if open.is_empty() => break,
             Event::Eof => return Err(Error::Mra("document ends inside an element".into())),
@@ -278,11 +289,15 @@ fn xml_err(e: impl std::fmt::Display) -> Error {
     Error::Mra(e.to_string())
 }
 
-/// Reads and parses an MRA file.
+/// Largest MRA file read; real ones are a few KiB, so a bigger one is refused.
+pub const MAX_MRA_BYTES: u64 = 1024 * 1024;
+
+/// Reads and parses an MRA file of at most [`MAX_MRA_BYTES`].
 ///
 /// # Errors
 ///
-/// Returns [`Error::Io`] when the file cannot be read and [`Error::Mra`] when it is not well-formed.
+/// Returns [`Error::Io`] when the file cannot be read and [`Error::Mra`] when it is
+/// too large or not well-formed.
 ///
 /// ```
 /// let path = std::env::temp_dir().join("mistarr-doc-example.mra");
@@ -290,7 +305,16 @@ fn xml_err(e: impl std::fmt::Display) -> Error {
 /// assert_eq!(mistarr_mister::adapter::arcade::mra::read(&path).unwrap().zips, ["exblast.zip"]);
 /// ```
 pub fn read(path: &Path) -> Result<Mra> {
-    parse(&std::fs::read(path)?)
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(MAX_MRA_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_MRA_BYTES {
+        return Err(Error::Mra(format!(
+            "file is larger than {MAX_MRA_BYTES} bytes"
+        )));
+    }
+    parse(&bytes)
 }
 
 /// Zips from `mra` that are not present in `mame_dir`, compared case-insensitively.
@@ -513,8 +537,7 @@ fn text(t: &str, field: Option<Field>, mra: &mut Mra, rom: &mut Option<RomBuilde
     }
 }
 
-fn end(name: &[u8], rom: &mut Option<RomBuilder>, mra: &mut Mra) {
-    let name = tag(name);
+fn end(name: &str, rom: &mut Option<RomBuilder>, mra: &mut Mra) {
     let Some(b) = rom else {
         return;
     };
@@ -522,7 +545,7 @@ fn end(name: &[u8], rom: &mut Option<RomBuilder>, mra: &mut Mra) {
         b.skip -= 1;
         return;
     }
-    match name.as_str() {
+    match name {
         "part" => {
             let Some(Open::Part(mut part, buf, err)) = b.open.take() else {
                 return;
@@ -580,11 +603,12 @@ enum Field {
 }
 
 impl Field {
-    fn of(tag: &[u8]) -> Option<Self> {
+    /// The field a lowercase tag name fills.
+    fn of(tag: &str) -> Option<Self> {
         match tag {
-            b"name" => Some(Self::Name),
-            b"setname" => Some(Self::Setname),
-            b"rbf" => Some(Self::Rbf),
+            "name" => Some(Self::Name),
+            "setname" => Some(Self::Setname),
+            "rbf" => Some(Self::Rbf),
             _ => None,
         }
     }
