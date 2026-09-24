@@ -8,23 +8,15 @@ use anyhow::Context as _;
 use clap::Parser as _;
 use mistarr_server::app::{self, Options};
 use mistarr_server::cli::{Cli, Command};
-use mistarr_server::{doctor, logging};
-
-/// tokio worker threads; see the budgets in `docs/ARCHITECTURE.md`.
-const WORKERS: usize = 2;
-
-/// Cap on threads running blocking SQLite and file work.
-const BLOCKING_THREADS: usize = 4;
+use mistarr_server::{doctor, logging, memory};
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = cli.config()?;
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(WORKERS)
-        .max_blocking_threads(BLOCKING_THREADS)
-        .enable_all()
-        .build()
-        .context("cannot start the async runtime")?;
+    // Set before any thread starts, so every stack and heap counts against it.
+    let data_limit =
+        memory::limit_data(config.memory.data_limit_mib).context("cannot set the memory limit")?;
+    let runtime = memory::runtime().context("cannot start the async runtime")?;
 
     match cli.command() {
         Command::Doctor { hash_mib } => runtime.block_on(async {
@@ -35,6 +27,11 @@ fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(&config.paths.data)
                 .with_context(|| format!("cannot create {}", config.paths.data.display()))?;
             logging::init(Some(&config.paths.log())).context("cannot open the log file")?;
+            if let Some(bytes) = data_limit {
+                tracing::info!(mib = bytes >> 20, "memory limit");
+            } else {
+                tracing::info!("no memory limit");
+            }
             runtime.block_on(serve(config))?;
         }
     }

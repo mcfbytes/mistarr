@@ -16,6 +16,7 @@ pub mod events;
 pub mod http;
 pub mod jobs;
 pub mod logging;
+pub mod memory;
 pub mod status;
 
 pub use error::{Error, Result};

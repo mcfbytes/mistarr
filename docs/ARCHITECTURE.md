@@ -289,12 +289,36 @@ job needs to know about.
 |---|---|
 | Binary size, stripped, with SPA | under 8 MiB |
 | Idle RSS | under 30 MiB |
-| Peak RSS during scan or import | under 64 MiB |
+| Peak RSS during scan or import | under 64 MiB, checked per job by `tests/memory.rs` |
 | tokio worker threads | 2 |
-| SQLite page cache | 2 MiB |
+| Blocking threads (SQLite, hashing, file work) | at most 4 |
+| Stack per runtime thread | 1 MiB reserved, touched pages only in RSS |
+| Soft `RLIMIT_DATA` | `[memory] data_limit_mib`, 192 MiB, never below 64 |
+| SQLite page cache | 2 MiB, 1 MiB on each of the two connections |
+| SQLite other | `mmap_size = 0`, `temp_store = FILE`, WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB |
 | Hashing buffer | 256 KiB, one file at a time |
+| Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches |
+| `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
 | SPA bundle, gzipped | under 200 KiB |
 | Concurrent client RPC calls | 1, serialised |
+
+The data limit is set in `main` before the runtime starts, so thread stacks
+and heap both count against it. `RLIMIT_DATA` rather than `RLIMIT_AS`
+because it counts only private writable memory (brk, anonymous mappings,
+thread stacks), which is what a runaway allocation grows, and not the
+binary, the SQLite shared-memory index or reserved address space. An
+allocation past it fails and Rust aborts the process, which ends one daemon
+instead of starving the MiSTer process of memory on a board without swap.
+
+The launcher runs the daemon under `nice -n 10` and `ionice -c 3` where the
+board has them, and heavy jobs stop at their next file boundary while a core
+runs. Heavy work has no thread of its own to lower further: it shares the
+blocking pool with request handlers.
+
+A DAT loads in one write transaction, so the WAL file can grow to the size
+of the pages that DAT touches while it loads; it is cut back to 1 MiB at the
+next checkpoint. Page memory stays within the cache either way, since SQLite
+spills dirty pages to the WAL.
 
 ## Configuration
 
@@ -332,6 +356,9 @@ bind_threshold = 0.6        # lowest per-platform hit rate, 0 to 1, that binds a
 
 [jobs]
 scan_interval_minutes = 1440   # a daily rescan by default, 0 disables it
+
+[memory]
+data_limit_mib = 192        # soft RLIMIT_DATA set at startup, at least 64; 0 keeps the inherited limit
 ```
 
 The file is `--config FILE` if given, else `<data>/mistarr.toml` when it
@@ -339,8 +366,8 @@ exists, where `<data>` is `--data DIR` or `/media/fat/mistarr`; `--data`
 also overrides `paths.data` and `--listen` overrides `server.listen`. The
 `client`, `limits` and `prefs` sections are editable through
 `/system/settings`; saved values live in the `settings` table and take
-precedence over the file on every start. `server`, `paths`, `sources` and
-`jobs` need a restart.
+precedence over the file on every start. `server`, `paths`, `sources`,
+`jobs` and `memory` need a restart.
 
 ## Non-goals
 

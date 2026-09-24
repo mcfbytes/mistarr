@@ -31,6 +31,25 @@ pub struct Config {
     pub sources: SourcesConfig,
     /// `[jobs]`.
     pub jobs: JobsConfig,
+    /// `[memory]`.
+    pub memory: MemoryConfig,
+}
+
+/// `[memory]`: the ceiling that keeps a runaway allocation from taking the board down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemoryConfig {
+    /// Soft `RLIMIT_DATA` in MiB, set at startup; 0 leaves the inherited limit.
+    pub data_limit_mib: u64,
+}
+
+impl Default for MemoryConfig {
+    /// Three times the 64 MiB peak budget.
+    fn default() -> Self {
+        Self {
+            data_limit_mib: 192,
+        }
+    }
 }
 
 /// `[sources]`: how a dropped source is bound to a platform.
@@ -400,6 +419,13 @@ mod tests {
         assert_eq!(c.prefs.regions[0], "USA");
         assert!(c.prefs.prefer_latest_revision);
         assert_eq!(c.jobs.scan_interval_minutes, 1440);
+    }
+
+    #[test]
+    fn memory_limit_defaults_to_192_mib_and_is_configurable() {
+        assert_eq!(Config::default().memory.data_limit_mib, 192);
+        let c = Config::parse("[memory]\ndata_limit_mib = 0").expect("parse");
+        assert_eq!(c.memory, MemoryConfig { data_limit_mib: 0 });
     }
 
     #[test]
