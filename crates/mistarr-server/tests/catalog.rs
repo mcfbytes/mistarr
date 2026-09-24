@@ -238,8 +238,14 @@ async fn a_dropped_pack_loads_and_the_catalog_answers() {
         "https://thumbnails.libretro.com/Nintendo%20-%20Game%20Boy/Named_Boxarts/Example%20Quest%20%28USA%29%20%28Rev%201%29.png"
     );
     for (query, expected) in [
-        ("flags=bios", vec!["Example System"]),
-        ("flags=beta", vec!["Example Puzzle"]),
+        ("flags=bios", vec![]),
+        ("flags=bios&hidden=show", vec!["Example System"]),
+        (
+            "hidden=show",
+            vec!["Example Puzzle", "Example Quest", "Example System"],
+        ),
+        ("flags=beta", vec![]),
+        ("flags=beta&hidden=show", vec!["Example Puzzle"]),
         ("region=japan", vec!["Example Quest"]),
         ("region=Europe", vec![]),
         ("q=QUEST", vec!["Example Quest"]),
@@ -247,9 +253,19 @@ async fn a_dropped_pack_loads_and_the_catalog_answers() {
         ("have=yes", vec![]),
         ("have=no", vec!["Example Quest"]),
         ("wanted=yes", vec![]),
-        ("sort=recent&flags=beta", vec!["Example Puzzle"]),
+        ("sort=recent&flags=beta&hidden=show", vec!["Example Puzzle"]),
         ("limit=1&offset=1", vec![]),
+        ("hidden=nope", vec![]),
     ] {
+        if query == "hidden=nope" {
+            assert_eq!(
+                get(addr, "/api/v1/platforms/gb/titles?hidden=nope")
+                    .await
+                    .status,
+                400
+            );
+            continue;
+        }
         let page = json_of(addr, &format!("/api/v1/platforms/gb/titles?{query}")).await;
         assert_eq!(names(&page), expected, "{query}");
     }
@@ -314,7 +330,7 @@ async fn a_dropped_pack_loads_and_the_catalog_answers() {
     assert_eq!(variant(&r.json(), QUEST_JAPAN)["wanted"], true);
     let wanted = json_of(addr, "/api/v1/platforms/gb/titles?wanted=yes").await;
     assert_eq!(wanted["items"][0]["wanted"], 2);
-    let bios_page = json_of(addr, "/api/v1/platforms/gb/titles?flags=bios").await;
+    let bios_page = json_of(addr, "/api/v1/platforms/gb/titles?flags=bios&hidden=show").await;
     let bios_id = bios_page["items"][0]["parent_id"].as_i64().expect("bios");
     let r = send(
         addr,

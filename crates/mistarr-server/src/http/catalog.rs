@@ -91,6 +91,7 @@ struct ListQuery {
     wanted: Option<String>,
     region: Option<String>,
     flags: Option<String>,
+    hidden: Option<String>,
     sort: Option<String>,
     limit: Option<u32>,
     offset: Option<u32>,
@@ -127,11 +128,16 @@ impl ListQuery {
             .map(|f| f.trim().to_ascii_lowercase())
             .filter(|f| !f.is_empty())
             .collect();
-        let hidden = hide
-            .iter()
-            .filter(|h| !flags.contains(h))
-            .cloned()
-            .collect();
+        // `hidden` disables the hide list; it never unhides based on `flags`.
+        let hidden = match self.hidden.as_deref().unwrap_or("hide") {
+            "hide" | "" => hide.to_vec(),
+            "show" => Vec::new(),
+            other => {
+                return Err(ApiError::bad_request(format!(
+                    "hidden must be hide or show, not {other:?}"
+                )))
+            }
+        };
         Ok(Browse {
             q: self.q.clone(),
             have: tri("have", self.have.as_deref())?,
@@ -373,7 +379,7 @@ mod tests {
             (Tri::Yes, Tri::No, Sort::Recent)
         );
         assert_eq!(b.flags, ["beta", "proto"]);
-        assert_eq!(b.hidden, ["bios"]);
+        assert_eq!(b.hidden, hide, "flags never unhide");
         assert_eq!(b.region, None);
         let bad = ListQuery {
             sort: Some("size".into()),
@@ -381,5 +387,27 @@ mod tests {
         };
         assert!(bad.browse(&hide).is_err());
         assert!(tri("have", Some("maybe")).is_err());
+    }
+
+    #[test]
+    fn hidden_show_disables_the_hide_list() {
+        let hide = ["bios".to_owned()];
+        let show = ListQuery {
+            hidden: Some("show".into()),
+            ..ListQuery::default()
+        };
+        assert!(show.browse(&hide).expect("browse").hidden.is_empty());
+        let hide_q = ListQuery {
+            hidden: Some("hide".into()),
+            ..ListQuery::default()
+        };
+        assert_eq!(hide_q.browse(&hide).expect("browse").hidden, hide);
+        let default_q = ListQuery::default();
+        assert_eq!(default_q.browse(&hide).expect("browse").hidden, hide);
+        let bad = ListQuery {
+            hidden: Some("maybe".into()),
+            ..ListQuery::default()
+        };
+        assert!(bad.browse(&hide).is_err());
     }
 }

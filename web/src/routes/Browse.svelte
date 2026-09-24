@@ -5,7 +5,7 @@
   import { titleUrl } from '../lib/router.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
-  import type { HaveFilter, TitleFilters } from '../lib/types';
+  import { BROWSE_FLAGS, type HaveFilter, type TitleFilters } from '../lib/types';
 
   interface Props {
     platformId: string;
@@ -19,7 +19,8 @@
   let have = $state<HaveFilter>('any');
   let wanted = $state<HaveFilter>('any');
   let region = $state('');
-  let showFlags = $state('');
+  let showHidden = $state(false);
+  let requireFlags = $state<string[]>([]);
   let page = $state(0);
   let loadingMore = $state(false);
 
@@ -33,9 +34,16 @@
       have,
       wanted,
       region: region || undefined,
-      flags: showFlags || undefined,
+      flags: requireFlags.length > 0 ? requireFlags.join(',') : undefined,
+      hidden: showHidden ? 'show' : 'hide',
       sort: 'name'
     };
+  }
+
+  function toggleFlag(flag: string): void {
+    requireFlags = requireFlags.includes(flag)
+      ? requireFlags.filter((f) => f !== flag)
+      : [...requireFlags, flag];
   }
 
   onMount(() => {
@@ -48,7 +56,8 @@
     void have;
     void wanted;
     void region;
-    void showFlags;
+    void showHidden;
+    void requireFlags;
     page = 0;
     void loadTitlesPage(platformId, filters(), 0);
   });
@@ -126,7 +135,23 @@
       <option value="no">Not wanted</option>
     </select>
     <input type="text" placeholder="Region" bind:value={region} />
-    <input type="text" placeholder="Show hidden flags (bios, beta…)" bind:value={showFlags} />
+    <label class="show-hidden">
+      <input type="checkbox" bind:checked={showHidden} />
+      Show hidden
+    </label>
+    <fieldset class="flags">
+      <legend>Require flags</legend>
+      {#each BROWSE_FLAGS as flag (flag)}
+        <label>
+          <input
+            type="checkbox"
+            checked={requireFlags.includes(flag)}
+            onchange={() => toggleFlag(flag)}
+          />
+          {flag}
+        </label>
+      {/each}
+    </fieldset>
   </form>
 
   <div class="grid">
@@ -162,6 +187,29 @@
     gap: 0.5em;
     margin: 1em 0;
     align-items: center;
+  }
+
+  .show-hidden {
+    display: flex;
+    align-items: center;
+    gap: 0.3em;
+  }
+
+  .flags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5em;
+    align-items: center;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 0.3em 0.6em;
+  }
+
+  .flags label {
+    display: flex;
+    align-items: center;
+    gap: 0.2em;
+    font-size: 0.85em;
   }
 
   .grid {
