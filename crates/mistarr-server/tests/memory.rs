@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use mistarr_core::hash::Md5Stream;
 use mistarr_sources::bencode::{self, Value};
-use serde_json::Value as Json;
+use serde_json::{json, Value as Json};
 
 /// Peak RSS budget during scan or import, `docs/ARCHITECTURE.md` "Resource budgets".
 const BUDGET_KIB: u64 = 64 * 1024;
@@ -597,7 +597,26 @@ fn dat_and_torrent_import_stay_under_budget() {
         candidates, 0,
         "a loose name matching thousands of roms is ambiguous"
     );
-    assert_budget("source_import", peak, 16);
+    assert_budget("source_import", peak, 12);
+
+    // A stale stamp makes the start's re-map work out every file of the source again.
+    let db = rusqlite::Connection::open(dir.path().join("data/mistarr.db")).expect("open db");
+    db.execute("UPDATE sources SET map_stamp = 'stale'", [])
+        .expect("stale");
+    drop(db);
+    let server = Server::start(dir.path());
+    let rows = server.wait_jobs("remap_sources", 3);
+    let remapped = server.count("SELECT COUNT(*) FROM torrent_files WHERE rom_id IS NOT NULL");
+    let peak = server.stop("remap_sources");
+    let last = rows.last().expect("remap");
+    assert_eq!(
+        (last.0.as_str(), &last.1["total"]),
+        ("done", &json!(1)),
+        "{}",
+        last.1
+    );
+    assert_eq!(remapped, matched, "the same mapping");
+    assert_budget("remap_sources", peak, 12);
 }
 
 #[test]

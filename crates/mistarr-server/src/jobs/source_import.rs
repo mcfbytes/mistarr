@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::remap::{map_files, RemapSources};
+use super::remap::{map_files, store_mapping};
 use super::{wizard, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::candidates;
@@ -274,10 +274,10 @@ pub fn bind_best(
     threshold: f32,
 ) -> Result<()> {
     rows::refresh_match_keys(conn)?;
-    let index = SqlDatIndex::new(conn);
-    let (state, reason) = match binding::bind(files, &index, threshold) {
+    let (binding, mapping) = binding::bind_and_map(files, &SqlDatIndex::new(conn), threshold);
+    let (state, reason) = match binding {
         Binding::Bound(platform, rate) => {
-            map_files(conn, id, &platform, files)?;
+            store_mapping(conn, id, &platform, files, mapping)?;
             rows::set_binding(conn, id, Some(&platform), Some(f64::from(rate)))?;
             (SourceState::Bound, None)
         }
@@ -378,10 +378,7 @@ pub async fn rebind_after_dat(app: &Arc<AppState>, platforms: &[PlatformId]) -> 
         })
         .await?;
     if !platforms_queued.is_empty() {
-        let job = RemapSources {
-            platforms: Some(platforms_queued),
-        };
-        Scheduler::enqueue(app, Arc::new(job)).await?;
+        super::remap::enqueue(app, Some(platforms_queued)).await;
     }
     let mut bound = 0;
     for row in &changed {
@@ -796,7 +793,7 @@ mod tests {
             .read(|c| crate::db::jobs::count_kind(c, super::super::remap::KIND))
             .await;
         assert_eq!(queued.expect("count"), 1);
-        let job = RemapSources {
+        let job = crate::jobs::remap::RemapSources {
             platforms: Some(nes.to_vec()),
         };
         Scheduler::run_inline(&app, Arc::new(job))

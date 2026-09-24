@@ -281,14 +281,112 @@ impl Mapping {
     /// ```
     #[must_use]
     pub fn unmatched<'f>(&self, files: &'f [TorrentFile]) -> Vec<&'f TorrentFile> {
-        let hit: HashSet<u32> = self
+        let missed: HashSet<u32> = self
             .matches
             .iter()
-            .filter(|(_, rom, _)| rom.is_some())
+            .filter(|(_, rom, _)| rom.is_none())
             .map(|(i, _, _)| *i)
             .collect();
-        files.iter().filter(|f| !hit.contains(&f.index)).collect()
+        let listed = self.matches.len();
+        files
+            .iter()
+            .enumerate()
+            .filter(|(n, f)| *n >= listed || missed.contains(&f.index))
+            .map(|(_, f)| f)
+            .collect()
     }
+}
+
+/// [`bind`] and, when bound, [`map_files`] for the bound platform, in one
+/// pass over the files; the mapping is empty when unbound.
+///
+/// ```
+/// use mistarr_sources::binding::{bind_and_map, Binding, Confidence, DatIndex, RomRef};
+/// use mistarr_sources::torrent::TorrentFile;
+/// use mistarr_sources::PlatformId;
+///
+/// struct One;
+/// impl DatIndex for One {
+///     fn by_normalised_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> {
+///         vec![(PlatformId("nes".into()), RomRef(7))]
+///     }
+///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomRef)> { Vec::new() }
+/// }
+/// let files = vec![TorrentFile { index: 0, path: "a.nes".into(), size: 1 }];
+/// let (binding, mapping) = bind_and_map(&files, &One, 0.6);
+/// assert_eq!(binding, Binding::Bound(PlatformId("nes".into()), 1.0));
+/// assert_eq!(mapping.matches, vec![(0, Some(RomRef(7)), Confidence::Name)]);
+/// ```
+#[must_use]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "file and hit counts fit f32 exactly for any realistic torrent"
+)]
+pub fn bind_and_map(
+    files: &[TorrentFile],
+    index: &dyn DatIndex,
+    threshold: f32,
+) -> (Binding, Mapping) {
+    let mut platforms: Vec<(PlatformId, usize)> = Vec::new();
+    // Per file, in order: (file index, platform slot, rom, confidence).
+    let mut found: Vec<(u32, u16, RomRef, Confidence)> = Vec::new();
+    for file in files {
+        let mut seen: Vec<u16> = Vec::new();
+        for (platform, rom, confidence) in candidates_for(file, index) {
+            let slot = if let Some(s) = platforms.iter().position(|(p, _)| *p == platform) {
+                s
+            } else {
+                platforms.push((platform, 0));
+                platforms.len() - 1
+            };
+            let Ok(tag) = u16::try_from(slot) else {
+                continue;
+            };
+            if !seen.contains(&tag) {
+                seen.push(tag);
+                platforms[slot].1 += 1;
+            }
+            found.push((file.index, tag, rom, confidence));
+        }
+    }
+    let total = files.len().max(1) as f32;
+    let mut scored: Vec<(PlatformId, f32)> = platforms
+        .iter()
+        .map(|(p, n)| (p.clone(), *n as f32 / total))
+        .collect();
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| a.0 .0.cmp(&b.0 .0))
+    });
+    let winner = match scored.first() {
+        Some((platform, rate)) if *rate >= threshold => (platform.clone(), *rate),
+        _ => return (Binding::Unbound(scored), Mapping::default()),
+    };
+    let tag = platforms
+        .iter()
+        .position(|(p, _)| *p == winner.0)
+        .and_then(|s| u16::try_from(s).ok());
+    let mut out = Mapping {
+        matches: Vec::with_capacity(files.len()),
+        extra: Vec::new(),
+    };
+    let mut rest = found.into_iter().filter(|e| Some(e.1) == tag).peekable();
+    for file in files {
+        let mut best: Option<(RomRef, Confidence)> = None;
+        while let Some((_, _, rom, c)) = rest.next_if(|e| e.0 == file.index) {
+            match best {
+                None => best = Some((rom, c)),
+                Some((b, bc)) if c == bc && rom != b => out.extra.push((file.index, rom, c)),
+                Some(_) => {}
+            }
+        }
+        out.matches.push(match best {
+            Some((rom, c)) => (file.index, Some(rom), c),
+            None => (file.index, None, Confidence::Unmatched),
+        });
+    }
+    (Binding::Bound(winner.0, winner.1), out)
 }
 
 /// Like [`match_files`], and also keeps every further rom of the platform
@@ -483,6 +581,43 @@ mod tests {
 
     fn platform(id: &str) -> PlatformId {
         PlatformId(id.to_owned())
+    }
+
+    proptest! {
+        #[test]
+        fn one_pass_binds_and_maps_as_the_two_passes_do(
+            names in prop::collection::vec(("[a-c]{1,2}", 0u8..3, 0i64..4, prop::bool::ANY), 0..12),
+            leaves in prop::collection::vec(("[a-c]{1,2}", 1u64..3), 0..12),
+            threshold in 0.0f32..1.0,
+        ) {
+            let mut by_name: BTreeMap<String, Vec<(PlatformId, RomRef)>> = BTreeMap::new();
+            let mut by_size: BTreeMap<(String, u64), Vec<(PlatformId, RomRef)>> = BTreeMap::new();
+            for (name, p, rom, sized) in names {
+                let entry = (platform(["nes", "snes", "gb"][usize::from(p)]), RomRef(rom));
+                if sized {
+                    by_size.entry((name, 1)).or_default().push(entry);
+                } else {
+                    by_name.entry(name).or_default().push(entry);
+                }
+            }
+            let dat = FakeDat { by_name, by_size };
+            let files: Vec<TorrentFile> = leaves
+                .iter()
+                .enumerate()
+                .map(|(i, (l, size))| TorrentFile {
+                    index: u32::try_from(i).unwrap_or(0) * 2,
+                    path: format!("d/{l}.bin"),
+                    size: *size,
+                })
+                .collect();
+            let (binding, mapping) = bind_and_map(&files, &dat, threshold);
+            let expected = bind(&files, &dat, threshold);
+            prop_assert_eq!(&binding, &expected);
+            match expected {
+                Binding::Bound(p, _) => prop_assert_eq!(mapping, map_files(&files, &p, &dat)),
+                Binding::Unbound(_) => prop_assert_eq!(mapping, Mapping::default()),
+            }
+        }
     }
 
     #[test]

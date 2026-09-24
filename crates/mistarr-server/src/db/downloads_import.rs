@@ -112,6 +112,8 @@ pub struct Elsewhere {
     pub rom_id: i64,
     /// The rom the file hashed to, when it was another version.
     pub proven: Option<i64>,
+    /// Whether the torrent file itself hashed to `proven`, not a member of it.
+    pub whole: bool,
     /// Whether the file was placed or kept as that rom.
     pub placed: bool,
 }
@@ -146,7 +148,7 @@ pub fn settle_elsewhere(
         ..Settled::default()
     };
     if let Some(index) = e.file_index {
-        if let Some(proven) = e.proven {
+        if let (Some(proven), true) = (e.proven, e.whole) {
             candidates::prove(conn, e.source, index, proven)?;
         }
         candidates::drop_pair(conn, e.source, index, e.rom_id)?;
@@ -442,6 +444,7 @@ mod tests {
             file_index: Some(0),
             rom_id: rom,
             proven: Some(alt),
+            whole: true,
             placed: true,
         };
         let settled = settle_elsewhere(&c, first, &e, 5).expect("settle");

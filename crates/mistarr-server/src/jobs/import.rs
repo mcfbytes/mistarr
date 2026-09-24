@@ -337,13 +337,14 @@ struct Placing<'a> {
 struct Redirect(Elsewhere);
 
 impl Redirect {
-    fn new(other: &str, row: &DownloadRow, source: SourceId, proven: Option<i64>) -> Self {
+    fn new(other: &str, row: &DownloadRow, source: SourceId, proven: Option<(i64, bool)>) -> Self {
         Self(Elsewhere {
             reason: different_version(other),
             source,
             file_index: row.file_index,
             rom_id: row.rom_id,
-            proven,
+            proven: proven.map(|p| p.0),
+            whole: proven.is_some_and(|p| p.1),
             placed: true,
         })
     }
@@ -672,7 +673,12 @@ impl Placing<'_> {
                 .await;
         };
         tracing::info!(download = %row.id, title = %other.id, "the file is another version of the wanted entry");
-        let redirect = Redirect::new(&other.name, row, self.source.id, Some(rom.id));
+        let redirect = Redirect::new(
+            &other.name,
+            row,
+            self.source.id,
+            Some((rom.id, hashed.member.is_none())),
+        );
         let proven = rom.id;
         let kept = self
             .app()
@@ -1307,7 +1313,8 @@ impl Quarantined<'_> {
         }
         let action = ImportAction::Quarantined;
         imports::log(tx, now, Some(self.row.0), None, action, self.detail)?;
-        if let (Some(proven), Some(i)) = (self.redirect.and_then(|r| r.0.proven), index) {
+        let whole = self.redirect.filter(|r| r.0.whole);
+        if let (Some(proven), Some(i)) = (whole.and_then(|r| r.0.proven), index) {
             candidates::prove(tx, self.source, i, proven)?;
         }
         if guessed || self.redirect.is_some() {

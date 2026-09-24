@@ -1,7 +1,7 @@
 //! The `torrent_candidates` table and the availability read that joins it
 //! with `torrent_files`; see `docs/DATA-MODEL.md` and `docs/VERIFICATION.md`.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 
 use mistarr_core::hash::HeaderRule;
 use mistarr_core::PlatformId;
@@ -64,6 +64,14 @@ pub struct Stored {
     pub candidates: BTreeMap<(u32, i64), &'static str>,
     /// `(file, rom)` pairs a `bad` download used.
     pub bad: HashSet<(u32, i64)>,
+}
+
+impl Stored {
+    /// Whether nothing is stored: no match, candidate or `bad` pair.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.matches.is_empty() && self.candidates.is_empty() && self.bad.is_empty()
+    }
 }
 
 /// The stored mapping of `source`.
@@ -148,12 +156,49 @@ impl Change {
     }
 }
 
-/// The [`Change`] from `stored` to the mapping of `matches` (one per file)
-/// and `found` (further candidates). A file a hash proved keeps its row and
-/// gets no candidate; a candidate a `bad` download ruled out, or equal to its
-/// file's match, is left out; a pair found twice keeps its strongest confidence.
+/// The [`Change`] from `stored` to the mapping of `matches` (one per file,
+/// in file index order) and `found` (further candidates): [`diff_matches`]
+/// and [`diff_candidates`] together.
 #[must_use]
 pub fn diff(
+    stored: &Stored,
+    matches: &[(u32, Option<RomRef>, Confidence)],
+    found: &[(u32, RomRef, Confidence)],
+) -> Change {
+    Change {
+        matches: diff_matches(stored, matches),
+        ..diff_candidates(stored, matches, found)
+    }
+}
+
+/// The `torrent_files` rows whose rom or confidence differs from `matches`;
+/// a file a hash proved keeps its row.
+#[must_use]
+pub fn diff_matches(
+    stored: &Stored,
+    matches: &[(u32, Option<RomRef>, Confidence)],
+) -> Vec<(u32, Option<i64>, Option<&'static str>)> {
+    let mut out = Vec::new();
+    for (i, rom, confidence) in matches {
+        let now = stored.matches.get(i).copied().unwrap_or((None, None));
+        if now.1 == Some(PROVEN) {
+            continue;
+        }
+        let new = (rom.map(|r| r.0), confidence_text(*confidence));
+        if now != new {
+            out.push((*i, new.0, new.1));
+        }
+    }
+    out
+}
+
+/// The candidates to remove and add to turn `stored` into `found`, as a
+/// [`Change`] with no `matches`. A file
+/// a hash proved gets none; a pair a `bad` download ruled out, or equal to
+/// its file's entry in `matches` (in file index order, possibly empty), is
+/// left out; a pair found twice keeps its strongest confidence.
+#[must_use]
+pub fn diff_candidates(
     stored: &Stored,
     matches: &[(u32, Option<RomRef>, Confidence)],
     found: &[(u32, RomRef, Confidence)],
@@ -162,35 +207,26 @@ pub fn diff(
         stored
             .matches
             .get(&i)
-            .is_some_and(|(_, c)| c.as_deref() == Some(PROVEN))
+            .is_some_and(|(_, c)| *c == Some(PROVEN))
     };
-    let mut change = Change::default();
-    let mut mapped: HashMap<u32, i64> = HashMap::new();
-    for (i, rom, confidence) in matches {
-        if proven(*i) {
-            continue;
-        }
-        let rom = rom.map(|r| r.0);
-        if let Some(r) = rom {
-            mapped.insert(*i, r);
-        }
-        let text = confidence_text(*confidence);
-        let now = stored.matches.get(i).copied().unwrap_or((None, None));
-        if now != (rom, text) {
-            change.matches.push((*i, rom, text));
-        }
-    }
+    let own = |i: u32| {
+        matches
+            .binary_search_by_key(&i, |m| m.0)
+            .ok()
+            .and_then(|at| matches[at].1)
+    };
     let mut wanted: BTreeMap<(u32, i64), Confidence> = BTreeMap::new();
     for (i, rom, confidence) in found {
         let keep = confidence_text(*confidence).is_some()
             && !proven(*i)
             && !stored.bad.contains(&(*i, rom.0))
-            && mapped.get(i) != Some(&rom.0);
+            && own(*i) != Some(*rom);
         if keep {
             let slot = wanted.entry((*i, rom.0)).or_insert(*confidence);
             *slot = (*slot).min(*confidence);
         }
     }
+    let mut change = Change::default();
     for (pair, text) in &stored.candidates {
         let same = wanted
             .get(pair)
@@ -209,7 +245,9 @@ pub fn diff(
     change
 }
 
-/// Writes `change` for `source`.
+/// Writes `change` for `source`. A row a hash proved is never overwritten,
+/// and no candidate is added to a proven file or for a pair a `bad` download
+/// ruled out, so a proof written while a re-map was worked out survives it.
 ///
 /// # Errors
 ///
@@ -217,7 +255,7 @@ pub fn diff(
 pub fn apply(conn: &Connection, source: SourceId, change: &Change) -> Result<()> {
     let mut update = conn.prepare_cached(
         "UPDATE torrent_files SET rom_id = ?3, confidence = ?4
-         WHERE source_id = ?1 AND file_index = ?2",
+         WHERE source_id = ?1 AND file_index = ?2 AND confidence IS NOT 'hash'",
     )?;
     for (i, rom, text) in &change.matches {
         update.execute(params![source.0, i, rom, text])?;
@@ -228,15 +266,39 @@ pub fn apply(conn: &Connection, source: SourceId, change: &Change) -> Result<()>
     for (i, rom) in &change.remove {
         remove.execute(params![source.0, i, rom])?;
     }
-    let mut add = conn.prepare_cached(
+    let mut add = conn.prepare_cached(&format!(
         "INSERT OR REPLACE INTO torrent_candidates (source_id, file_index, rom_id, confidence)
          SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM torrent_files
-                                             WHERE source_id = ?1 AND file_index = ?2)",
-    )?;
+                                             WHERE source_id = ?1 AND file_index = ?2
+                                               AND confidence IS NOT 'hash')
+           AND {}",
+        not_bad("?3", "?1", "?2")
+    ))?;
     for (i, rom, text) in &change.add {
         add.execute(params![source.0, i, rom, text])?;
     }
     Ok(())
+}
+
+/// Forgets the hash proofs of `source` that name a rom outside the live
+/// catalogue of `platform`, as when the source is bound to another platform.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn drop_foreign_proofs(
+    conn: &Connection,
+    source: SourceId,
+    platform: &PlatformId,
+) -> Result<usize> {
+    Ok(conn.execute(
+        "UPDATE torrent_files SET rom_id = NULL, confidence = NULL
+         WHERE source_id = ?1 AND confidence = 'hash' AND NOT EXISTS (
+           SELECT 1 FROM roms r JOIN titles t ON t.id = r.title_id
+           WHERE r.id = torrent_files.rom_id AND t.platform_id = ?2
+             AND r.retired = 0 AND t.retired = 0)",
+        params![source.0, platform.0],
+    )?)
 }
 
 /// Records that file `index` of `source` hashed to `rom`: its row names the
@@ -266,7 +328,10 @@ pub fn prove(conn: &Connection, source: SourceId, index: u32, rom: i64) -> Resul
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn rom_stamp(conn: &Connection, platform: &PlatformId) -> Result<String> {
     Ok(conn.query_row(
-        "SELECT COUNT(*) || ':' || COALESCE(MAX(r.id), 0) || ':' || COALESCE(SUM(r.id), 0)
+        "SELECT (SELECT COALESCE(group_concat(id || '@' || loaded_at, ','), '')
+                 FROM (SELECT id, loaded_at FROM dat_versions
+                       WHERE platform_id = ?1 AND retired = 0 ORDER BY id))
+             || ';' || COUNT(*) || ':' || COALESCE(MAX(r.id), 0) || ':' || COALESCE(SUM(r.id), 0)
          FROM roms r JOIN titles t ON t.id = r.title_id
          WHERE t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0",
         [&platform.0],
@@ -562,6 +627,48 @@ mod tests {
     }
 
     #[test]
+    fn a_proof_survives_a_stale_change_and_foreign_proofs_drop() {
+        let c = conn();
+        let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, "[]").expect("rom");
+        let b = seed_rom(&c, "nes", "Nova Quest (World) (Alt).nes", 16, "[]").expect("rom");
+        let src = source(&c, "0c", SourceState::Bound);
+        assert!(stored(&c, src).expect("stored").is_empty());
+        let stale = diff(
+            &stored(&c, src).expect("stored"),
+            &[(0, Some(RomRef(a)), Confidence::Name)],
+            &[
+                (0, RomRef(b), Confidence::Fuzzy),
+                (1, RomRef(a), Confidence::Size),
+            ],
+        );
+        assert_eq!(
+            diff_matches(&Stored::default(), &[(0, None, Confidence::Unmatched)]),
+            []
+        );
+        assert_eq!(
+            diff_candidates(&Stored::default(), &[], &[]),
+            Change::default()
+        );
+        prove(&c, src, 0, b).expect("prove");
+        crate::db::downloads_import::insert_fixture(&c, a, src, 1, "bad", None).expect("bad");
+        apply(&c, src, &stale).expect("apply");
+        let now = stored(&c, src).expect("stored");
+        assert!(!now.is_empty());
+        assert_eq!(now.matches[&0], (Some(b), Some(PROVEN)), "the proof stays");
+        assert!(
+            now.candidates.is_empty(),
+            "no guess on a proven or ruled-out file"
+        );
+        let snes = PlatformId("snes".into());
+        assert_eq!(
+            drop_foreign_proofs(&c, src, &PlatformId("nes".into())).expect("nes"),
+            0
+        );
+        assert_eq!(drop_foreign_proofs(&c, src, &snes).expect("snes"), 1);
+        assert!(!stored(&c, src).expect("stored").matches.contains_key(&0));
+    }
+
+    #[test]
     fn known_confidences_are_static() {
         assert_eq!(known("fuzzy"), Some("fuzzy"));
         assert_eq!(known(PROVEN), Some(PROVEN));
@@ -681,5 +788,13 @@ mod tests {
         let before = rom_stamp(&c, &nes).expect("stamp");
         seed_rom(&c, "nes", "New (World).nes", 8, "[]").expect("new");
         assert_ne!(rom_stamp(&c, &nes).expect("stamp"), before);
+        let before = rom_stamp(&c, &nes).expect("stamp");
+        c.execute("UPDATE dat_versions SET loaded_at = loaded_at + 1", [])
+            .expect("reload");
+        assert_ne!(
+            rom_stamp(&c, &nes).expect("stamp"),
+            before,
+            "a reload that updates roms in place moves the stamp"
+        );
     }
 }

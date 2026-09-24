@@ -1,6 +1,7 @@
 //! Mapping a source's files to its platform's roms, and mapping bound sources
 //! again when those roms change; see `docs/VERIFICATION.md` "Pre-download matching".
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -69,23 +70,54 @@ pub fn plan(
 ) -> Result<Planned> {
     let stamp = candidates::rom_stamp(conn, platform)?;
     let mapping = binding::map_files(files, platform, &SqlDatIndex::new(conn));
+    let stored = candidates::stored(conn, id)?;
+    Ok(plan_mapping(conn, platform, files, mapping, &stored, stamp))
+}
+
+/// [`plan`] from a mapping already worked out. The name-tier matches are
+/// compared and dropped before the fuzzy tier runs; no candidate can repeat a
+/// file's own match, since extras never do and guesses cover unmatched files only.
+fn plan_mapping(
+    conn: &Connection,
+    platform: &PlatformId,
+    files: &[TorrentFile],
+    mapping: binding::Mapping,
+    stored: &candidates::Stored,
+    stamp: String,
+) -> Planned {
     let unmatched = mapping.unmatched(files);
     let hits = files.len() - unmatched.len();
+    let binding::Mapping { matches, extra } = mapping;
+    let changed = candidates::diff_matches(stored, &matches);
+    drop(matches);
+    let found = guesses(conn, platform, files, &unmatched, extra);
+    Planned {
+        change: Change {
+            matches: changed,
+            ..candidates::diff_candidates(stored, &[], &found)
+        },
+        hits,
+        stamp,
+    }
+}
+
+/// `extra` with the fuzzy and size-only candidates of `unmatched` added.
+fn guesses(
+    conn: &Connection,
+    platform: &PlatformId,
+    files: &[TorrentFile],
+    unmatched: &[&TorrentFile],
+    mut extra: Vec<(u32, binding::RomRef, binding::Confidence)>,
+) -> Vec<(u32, binding::RomRef, binding::Confidence)> {
     let extensions = fuzzy_extensions(platform);
     let size_index = SqlSizeIndex::new(conn, platform);
-    let mut found = mapping.extra;
-    found.extend(fuzzy::candidates(
+    extra.extend(fuzzy::candidates(
         files,
-        &unmatched,
+        unmatched,
         &extensions,
         &size_index,
     ));
-    let change = candidates::diff(&candidates::stored(conn, id)?, &mapping.matches, &found);
-    Ok(Planned {
-        change,
-        hits,
-        stamp,
-    })
+    extra
 }
 
 /// Maps the source's `files` to `platform` in the caller's transaction and
@@ -101,10 +133,46 @@ pub fn map_files(
     files: &[TorrentFile],
 ) -> Result<usize> {
     rows::refresh_match_keys(conn)?;
-    let planned = plan(conn, id, platform, files)?;
-    candidates::apply(conn, id, &planned.change)?;
-    rows::set_map_stamp(conn, id, Some(&planned.stamp))?;
-    Ok(planned.hits)
+    let mapping = binding::map_files(files, platform, &SqlDatIndex::new(conn));
+    store_mapping(conn, id, platform, files, mapping)
+}
+
+/// Stores `mapping`, the name tiers of `files` under `platform`, with the
+/// fuzzy and size-only candidates, in the caller's transaction, and records
+/// the stamp; returns how many files the name tiers matched. A source with
+/// nothing stored gets its matches written straight, with no comparison.
+/// Hash proofs naming a rom outside `platform` are dropped first.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn store_mapping(
+    conn: &Connection,
+    id: SourceId,
+    platform: &PlatformId,
+    files: &[TorrentFile],
+    mapping: binding::Mapping,
+) -> Result<usize> {
+    candidates::drop_foreign_proofs(conn, id, platform)?;
+    let stamp = candidates::rom_stamp(conn, platform)?;
+    let stored = candidates::stored(conn, id)?;
+    let hits = if stored.is_empty() {
+        let unmatched = mapping.unmatched(files);
+        let hits = files.len() - unmatched.len();
+        let binding::Mapping { mut matches, extra } = mapping;
+        matches.retain(|(_, rom, _)| rom.is_some());
+        rows::set_matches(conn, id, &matches)?;
+        drop(matches);
+        let found = guesses(conn, platform, files, &unmatched, extra);
+        candidates::apply(conn, id, &candidates::diff_candidates(&stored, &[], &found))?;
+        hits
+    } else {
+        let planned = plan_mapping(conn, platform, files, mapping, &stored, stamp.clone());
+        candidates::apply(conn, id, &planned.change)?;
+        planned.hits
+    };
+    rows::set_map_stamp(conn, id, Some(&stamp))?;
+    Ok(hits)
 }
 
 /// Maps one source again when its platform's roms changed since it was last
@@ -215,9 +283,12 @@ impl Job for RemapSources {
         let ids = ctx
             .app
             .db
-            .read(move |c| match &platforms {
-                Some(p) => rows::list_on_platforms(c, p),
-                None => rows::list_mapped(c),
+            .read(move |c| {
+                let ids = match &platforms {
+                    Some(p) => rows::list_on_platforms(c, p)?,
+                    None => rows::list_mapped(c)?,
+                };
+                stale(c, &ids)
             })
             .await?;
         let mut changed = 0;
@@ -233,19 +304,37 @@ impl Job for RemapSources {
     }
 }
 
-/// Queues a re-map of every mapped source when one was bound before its
-/// mapping was stamped; returns whether it did.
+/// The sources of `ids` whose stamp differs from their platform's current
+/// [`candidates::rom_stamp`], worked out once per platform.
 ///
 /// # Errors
 ///
-/// [`crate::Error::Db`] on SQLite failure, or a stopped scheduler.
-pub async fn enqueue_if_unstamped(app: &Arc<AppState>) -> Result<bool> {
-    if !app.db.read(rows::any_unstamped).await? {
-        return Ok(false);
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn stale(conn: &Connection, ids: &[SourceId]) -> Result<Vec<SourceId>> {
+    let mut stamps: HashMap<PlatformId, String> = HashMap::new();
+    let mut out = Vec::new();
+    for id in ids {
+        let Some(platform) = rows::get(conn, *id)?.and_then(|r| r.platform_id) else {
+            continue;
+        };
+        if !stamps.contains_key(&platform) {
+            let stamp = candidates::rom_stamp(conn, &platform)?;
+            stamps.insert(platform.clone(), stamp);
+        }
+        if rows::map_stamp(conn, *id)?.as_ref() != stamps.get(&platform) {
+            out.push(*id);
+        }
     }
-    let job = RemapSources { platforms: None };
-    super::Scheduler::enqueue(app, Arc::new(job)).await?;
-    Ok(true)
+    Ok(out)
+}
+
+/// Queues a [`RemapSources`] for `platforms`, or for every platform when
+/// `None`, logging instead of failing when the scheduler has stopped.
+pub async fn enqueue(app: &Arc<AppState>, platforms: Option<Vec<PlatformId>>) {
+    let job = RemapSources { platforms };
+    if let Err(e) = super::Scheduler::enqueue(app, Arc::new(job)).await {
+        tracing::warn!(error = %e, "cannot queue a re-map of the bound sources");
+    }
 }
 
 impl RemapSources {
@@ -322,16 +411,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unstamped_source_is_mapped_again_at_start() {
+    async fn only_sources_whose_roms_changed_are_stale() {
         let (_dir, app) = state();
-        assert!(!enqueue_if_unstamped(&app).await.expect("none"));
-        app.db
+        let (a, b) = app
+            .db
             .write_blocking(|c| {
-                source(c, &"2b".repeat(20), &[file(0, "a.nes", 16)]);
-                Ok(())
+                let a = source(c, &"2b".repeat(20), &[file(0, "a.nes", 16)]);
+                let b = source(c, &"2c".repeat(20), &[file(0, "b.nes", 16)]);
+                let stamp = candidates::rom_stamp(c, &PlatformId("nes".into()))?;
+                rows::set_map_stamp(c, a, Some(&stamp))?;
+                Ok((a, b))
             })
             .expect("db");
-        assert!(enqueue_if_unstamped(&app).await.expect("queued"));
+        let found = app
+            .db
+            .read(move |c| stale(c, &[a, b]))
+            .await
+            .expect("stale");
+        assert_eq!(found, [b], "an unstamped source is stale");
+        app.db
+            .write_blocking(|c| {
+                seed_rom(c, "nes", "Nova Quest (World).nes", 16, "[]")?;
+                Ok(())
+            })
+            .expect("seed");
+        let found = app
+            .db
+            .read(move |c| stale(c, &[a, b]))
+            .await
+            .expect("stale");
+        assert_eq!(found, [a, b]);
+        enqueue(&app, None).await;
         let queued = app
             .db
             .read(|c| crate::db::jobs::count_kind(c, KIND))

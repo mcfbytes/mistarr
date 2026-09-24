@@ -425,20 +425,6 @@ pub fn list_mapped(conn: &Connection) -> Result<Vec<SourceId>> {
     Ok(ids)
 }
 
-/// Whether a source with a platform has never been mapped with a stamp.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure.
-pub fn any_unstamped(conn: &Connection) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sources WHERE platform_id IS NOT NULL
-           AND state != 'resolving' AND map_stamp IS NULL)",
-        [],
-        |r| r.get(0),
-    )?)
-}
-
 /// The rom stamp the source's files were last mapped against.
 ///
 /// # Errors
@@ -539,18 +525,34 @@ pub fn set_binding(
     Ok(())
 }
 
-/// Replaces the source's file list, clearing matches, and updates its counts.
+/// Replaces the source's file list, clearing matches and candidates but
+/// keeping each hash proof whose file keeps its index, path and size, and
+/// updates its counts.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn replace_files(conn: &Connection, id: SourceId, files: &[TorrentFile]) -> Result<()> {
+    let proofs: Vec<(u32, String, i64, i64)> = conn
+        .prepare_cached(
+            "SELECT file_index, path, size, rom_id FROM torrent_files
+             WHERE source_id = ?1 AND confidence = 'hash' AND rom_id IS NOT NULL",
+        )?
+        .query_map([id.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
     conn.execute("DELETE FROM torrent_files WHERE source_id = ?1", [id.0])?;
     let mut stmt = conn.prepare_cached(
         "INSERT INTO torrent_files (source_id, file_index, path, size) VALUES (?1, ?2, ?3, ?4)",
     )?;
     for f in files {
         stmt.execute(params![id.0, f.index, f.path, sql_int(f.size)])?;
+    }
+    let mut proven = conn.prepare_cached(
+        "UPDATE torrent_files SET rom_id = ?5, confidence = 'hash'
+         WHERE source_id = ?1 AND file_index = ?2 AND path = ?3 AND size = ?4",
+    )?;
+    for (index, path, size, rom) in proofs {
+        proven.execute(params![id.0, index, path, size, rom])?;
     }
     let total: u64 = files.iter().map(|f| f.size).sum();
     conn.execute(
@@ -873,11 +875,9 @@ mod tests {
         let snes = PlatformId("snes".into());
         assert_eq!(list_on_platforms(&c, &[snes, nes()]).expect("on"), [a]);
         assert_eq!(list_mapped(&c).expect("mapped"), [a]);
-        assert!(any_unstamped(&c).expect("unstamped"));
         assert_eq!(map_stamp(&c, a).expect("stamp"), None);
         set_map_stamp(&c, a, Some("1:2:3")).expect("set");
         assert_eq!(map_stamp(&c, a).expect("stamp").as_deref(), Some("1:2:3"));
-        assert!(!any_unstamped(&c).expect("unstamped"));
     }
 
     #[test]
@@ -957,7 +957,16 @@ mod tests {
             (None, None)
         );
         assert_eq!(torrent_files(&c, id).expect("list"), list);
-        replace_files(&c, id, &list[..1]).expect("replace");
+        crate::db::candidates::prove(&c, id, 0, rom).expect("prove");
+        replace_files(&c, id, &list).expect("replace");
+        let rows = files(&c, id, 10, 0).expect("files").0;
+        assert_eq!(
+            rows[0].confidence.as_deref(),
+            Some("hash"),
+            "a proof survives"
+        );
+        let moved = [file(0, "Sub/Other.nes", 16)];
+        replace_files(&c, id, &moved).expect("replace");
         assert_eq!(get(&c, id).expect("get").expect("row").matched_count, 0);
         assert_eq!(open_download_count(&c, id).expect("downloads"), 0);
         assert!(delete(&c, id).expect("delete"));
