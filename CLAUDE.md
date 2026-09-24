@@ -75,12 +75,14 @@ parallel on the work packages in `docs/WORKPLAN.md`. Read this file, then
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
 cargo test --workspace
-(cd web && npm ci && npm run build && npm run check)
+(cd web && npm ci && npm run check && npm run lint && npm run build && npm run size)
+(cd web && npm run e2e)
+sh scripts/tests/run.sh && sh scripts/principles-gate.sh
 cargo zigbuild --release --target armv7-unknown-linux-musleabihf -p mistarr-server
 ```
 
-The first four must pass before a push. The fifth must pass for any change
-that adds a dependency.
+Everything but `cargo zigbuild` must pass before a push, and CI enforces
+most of it. `cargo zigbuild` must pass for any change that adds a dependency.
 
 ## Branch workflow
 
