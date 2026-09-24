@@ -117,13 +117,61 @@ async fn want(b: &Booted, title: i64) {
     assert_eq!(r.status, 200, "{}", r.body);
 }
 
-async fn download_of(b: &Booted, title: i64) -> Value {
+async fn downloads_of(b: &Booted, title: i64) -> Vec<Value> {
     let r = get(b.addr(), "/api/v1/downloads").await.json();
-    r["items"]
+    let mut out: Vec<Value> = r["items"]
         .as_array()
-        .and_then(|items| items.iter().find(|d| d["title_id"] == title))
-        .cloned()
-        .unwrap_or_else(|| panic!("no download of {title}: {r}"))
+        .map(|items| {
+            items
+                .iter()
+                .filter(|d| d["title_id"] == title)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    out.sort_by_key(|d| d["id"].as_i64());
+    out
+}
+
+/// The newest download of `title`.
+async fn download_of(b: &Booted, title: i64) -> Value {
+    downloads_of(b, title)
+        .await
+        .pop()
+        .unwrap_or_else(|| panic!("no download of {title}"))
+}
+
+fn reason() -> String {
+    format!("the file in this source is a different version: {ALT}")
+}
+
+/// The actions the import log holds for download `id`.
+fn logged(b: &Booted, id: i64) -> Vec<String> {
+    b.running
+        .app
+        .db
+        .read_blocking(move |c| {
+            let mut stmt =
+                c.prepare("SELECT action FROM import_log WHERE download_id = ?1 ORDER BY id")?;
+            let rows = stmt.query_map([id], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
+        })
+        .expect("log")
+}
+
+/// Points a `wanted` download at `nova.nes` again, as a retry would.
+fn onto_nova(b: &Booted, id: i64) {
+    b.running
+        .app
+        .db
+        .write_blocking(move |c| {
+            c.execute(
+                "UPDATE downloads SET source_id = 1, file_index = 1 WHERE id = ?1",
+                [id],
+            )?;
+            Ok(())
+        })
+        .expect("retarget");
 }
 
 /// Moves a download to `importing` with `staged` and announces it, as the poller does.
@@ -239,18 +287,24 @@ async fn both_wanted(b: &Booted) -> Wanted {
     }
 }
 
-/// The Alt is placed and verified, the parent's download names it, and
-/// `nova.nes` is no longer offered for the parent.
+/// The Alt is placed and verified, the parent's download names it, the
+/// parent is wanted again with that history, and `nova.nes` is no longer
+/// offered for the parent.
 async fn assert_alt_placed(b: &Booted, w: &Wanted) {
     eventually("both downloads settle", || async {
-        let (p, a) = (download_of(b, w.parent).await, download_of(b, w.alt).await);
-        p["state"] == "bad" && a["state"] == "done"
+        let p = downloads_of(b, w.parent).await;
+        let a = download_of(b, w.alt).await;
+        p.len() == 2 && p[0]["state"] == "bad" && a["state"] == "done"
     })
     .await;
-    let p = download_of(b, w.parent).await;
+    let p = downloads_of(b, w.parent).await;
+    assert_eq!(p[0]["id"], w.parent_download);
+    assert_eq!(p[0]["error"], reason());
     assert_eq!(
-        p["error"],
-        format!("The file in this source is a different version: {ALT}.")
+        (p[1]["state"].clone(), p[1]["error"].clone()),
+        (json!("wanted"), json!(reason())),
+        "the parent is wanted again: {}",
+        p[1]
     );
     let games = b.running.app.config().paths.games;
     let placed = games.join(format!("NES/{ALT}.nes"));
@@ -289,5 +343,115 @@ async fn a_parent_download_after_the_alt_landed_says_so() {
     .await;
     hand_off(&b, w.parent_download, &w.staged);
     assert_alt_placed(&b, &w).await;
+    b.running.shutdown().await.expect("shutdown");
+}
+
+/// Stages the Alt bytes on `nova.nes` again and hands the parent's newest
+/// download off to the importer on that file.
+async fn stage_again(b: &Booted, w: &Wanted, write: bool) -> i64 {
+    if write {
+        let staged = std::path::Path::new(&w.staged);
+        std::fs::create_dir_all(staged.parent().expect("parent")).expect("mkdir");
+        std::fs::write(staged, version(2)).expect("stage");
+    }
+    let again = download_of(b, w.parent).await["id"].as_i64().expect("id");
+    onto_nova(b, again);
+    hand_off(b, again, &w.staged);
+    again
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn later_downloads_of_the_file_see_the_version_it_is() {
+    let b = boot().await;
+    let w = both_wanted(&b).await;
+    hand_off(&b, w.parent_download, &w.staged);
+    hand_off(&b, w.alt_download, &w.staged);
+    assert_alt_placed(&b, &w).await;
+
+    // The staged file is gone: the bad download's placed log says what it was.
+    let third = stage_again(&b, &w, false).await;
+    eventually("the third download settles", || async {
+        downloads_of(&b, w.parent).await.len() == 3
+    })
+    .await;
+    let p = downloads_of(&b, w.parent).await;
+    assert_eq!(
+        (p[1]["id"].as_i64(), p[1]["error"].clone()),
+        (Some(third), json!(reason()))
+    );
+    assert_eq!(p[1]["state"], "bad");
+    assert_eq!(p[2]["state"], "wanted");
+
+    // Staged anew, the Alt the library holds is kept, not written twice.
+    let fourth = stage_again(&b, &w, true).await;
+    eventually("the fourth download settles", || async {
+        downloads_of(&b, w.parent).await.len() == 4
+    })
+    .await;
+    let p = downloads_of(&b, w.parent).await;
+    assert_eq!(p[2]["id"].as_i64(), Some(fourth));
+    assert_eq!(
+        (p[2]["state"].clone(), p[2]["error"].clone()),
+        (json!("bad"), json!(reason()))
+    );
+    assert_eq!(logged(&b, fourth), ["skipped_existing"]);
+    assert!(
+        std::path::Path::new(&w.staged).exists(),
+        "the staged copy stays"
+    );
+    let games = b.running.app.config().paths.games.join("NES");
+    let placed: Vec<_> = std::fs::read_dir(&games)
+        .expect("games")
+        .filter_map(|e| e.ok().map(|e| e.file_name()))
+        .collect();
+    assert_eq!(placed.len(), 1, "{placed:?}");
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unverified_copy_of_the_version_is_never_replaced() {
+    let b = boot().await;
+    let w = both_wanted(&b).await;
+    let games = b.running.app.config().paths.games.join("NES");
+    std::fs::create_dir_all(&games).expect("games");
+    let copy = games.join(format!("{ALT}.nes"));
+    std::fs::write(&copy, b"unverified").expect("copy");
+    hand_off(&b, w.parent_download, &w.staged);
+    eventually("the parent settles", || async {
+        downloads_of(&b, w.parent).await.len() == 2
+    })
+    .await;
+    let p = downloads_of(&b, w.parent).await;
+    assert_eq!(p[0]["state"], "bad");
+    let error = p[0]["error"].as_str().unwrap_or_default().to_owned();
+    assert!(error.starts_with(&reason()), "{error}");
+    assert!(error.contains("quarantined"), "{error}");
+    assert_eq!(p[1]["state"], "wanted");
+    assert_eq!(logged(&b, w.parent_download), ["quarantined"]);
+    assert_eq!(std::fs::read(&copy).expect("copy"), b"unverified");
+    assert!(
+        !std::path::Path::new(&w.staged).exists(),
+        "moved to quarantine"
+    );
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_guessed_file_that_is_no_version_wants_the_rom_again() {
+    let b = boot().await;
+    let w = both_wanted(&b).await;
+    std::fs::write(&w.staged, version(9)).expect("stage");
+    hand_off(&b, w.parent_download, &w.staged);
+    eventually("the parent settles", || async {
+        downloads_of(&b, w.parent).await.len() == 2
+    })
+    .await;
+    let p = downloads_of(&b, w.parent).await;
+    assert_eq!(
+        (p[0]["state"].clone(), p[1]["state"].clone()),
+        (json!("bad"), json!("wanted"))
+    );
+    assert_eq!(p[1]["error"], p[0]["error"], "the history carries over");
+    assert_eq!(logged(&b, w.parent_download), ["quarantined"]);
     b.running.shutdown().await.expect("shutdown");
 }

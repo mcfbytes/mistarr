@@ -34,6 +34,7 @@ use super::{transfer, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::candidates;
 use crate::db::downloads::{self, DownloadId, DownloadRow, DownloadState};
+use crate::db::downloads_import::{Elsewhere, Settled};
 use crate::db::files::{self, FileId, FileRow, FileState};
 use crate::db::imports::{self, EntryRom, ImportAction, TitleEntry};
 use crate::db::jobs as job_rows;
@@ -330,46 +331,48 @@ struct Placing<'a> {
 }
 
 /// How a download ends whose file hashed to another version of its entry:
-/// the file is placed as that version and the download ends `bad`.
+/// the file is kept as that version, the download ends `bad` and the wanted
+/// rom is wanted again, as [`downloads_import::settle_elsewhere`] does.
 #[derive(Debug, Clone)]
-struct Redirect {
-    /// The download's error.
-    reason: String,
-    /// The file that turned out to be the other version.
-    source: SourceId,
-    file_index: Option<u32>,
-    /// The wanted rom, which that file is not.
-    rom_id: i64,
-}
+struct Redirect(Elsewhere);
 
 impl Redirect {
-    fn new(other: &str, row: &DownloadRow, source: SourceId) -> Self {
-        Self {
+    fn new(other: &str, row: &DownloadRow, source: SourceId, proven: Option<i64>) -> Self {
+        Self(Elsewhere {
             reason: different_version(other),
             source,
             file_index: row.file_index,
             rom_id: row.rom_id,
-        }
+            proven,
+            placed: true,
+        })
     }
 
-    /// Ends the download `bad` and forgets that its file may be the wanted rom.
-    fn settle(
-        &self,
-        c: &rusqlite::Connection,
-        id: DownloadId,
-        now: i64,
-    ) -> Result<Vec<DownloadId>> {
-        let moved = downloads::move_all(c, &[id], DownloadState::Bad, Some(&self.reason), now)?;
-        if let Some(index) = self.file_index {
-            candidates::drop_pair(c, self.source, index, self.rom_id)?;
-        }
-        Ok(moved)
+    fn settle(&self, c: &rusqlite::Connection, id: DownloadId, now: i64) -> Result<Settled> {
+        downloads_import::settle_elsewhere(c, id, &self.0, now)
     }
 }
 
 /// The error of a download whose file is the entry named `other` of the same group.
 fn different_version(other: &str) -> String {
-    format!("The file in this source is a different version: {other}.")
+    format!("the file in this source is a different version: {other}")
+}
+
+/// Announces what settling a download elsewhere changed and fetches the
+/// wanted rom again when it found another file.
+async fn after_settle(app: &Arc<AppState>, settled: Settled) {
+    for id in settled.moved {
+        transfer::publish(app, id, DownloadState::Bad, 1.0);
+    }
+    if !settled.cancelled.is_empty() {
+        crate::http::downloads::after_cancel(app, &settled.cancelled).await;
+    }
+    if let Some((id, state)) = settled.again {
+        transfer::publish(app, id, state, 0.0);
+        if state == DownloadState::Queued {
+            transfer::kick(app).await;
+        }
+    }
 }
 
 impl Placing<'_> {
@@ -519,28 +522,26 @@ impl Placing<'_> {
             (None, Some(n)) => format!("the file is {n}, not the wanted entry; it was quarantined"),
             (None, None) => "the file matches no DAT entry and was quarantined".to_owned(),
         };
-        let moved = self
+        let (source, redirect) = (self.source.id, self.redirect.clone());
+        let settled = self
             .app()
             .db
             .write(move |c| {
-                let now = crate::unix_now();
-                let moved = downloads::move_all(c, &[row], DownloadState::Bad, Some(&reason), now)?;
-                if !moved.is_empty() {
-                    imports::log(
-                        c,
-                        now,
-                        Some(row.0),
-                        None,
-                        ImportAction::Quarantined,
-                        &detail,
-                    )?;
-                }
-                Ok(moved)
+                let tx = c.transaction()?;
+                let quarantined = Quarantined {
+                    row,
+                    rom_id,
+                    source,
+                    redirect: redirect.as_ref(),
+                    reason: &reason,
+                    detail: &detail,
+                };
+                let settled = quarantined.record(&tx, crate::unix_now())?;
+                tx.commit()?;
+                Ok(settled)
             })
             .await?;
-        for id in moved {
-            transfer::publish(self.app(), id, DownloadState::Bad, 1.0);
-        }
+        after_settle(self.app(), settled).await;
         Ok(())
     }
 
@@ -671,6 +672,16 @@ impl Placing<'_> {
                 .await;
         };
         tracing::info!(download = %row.id, title = %other.id, "the file is another version of the wanted entry");
+        let redirect = Redirect::new(&other.name, row, self.source.id, Some(rom.id));
+        let proven = rom.id;
+        let kept = self
+            .app()
+            .db
+            .read(move |c| downloads_import::verified_file(c, proven))
+            .await?;
+        if let Some(file) = kept {
+            return self.keep_other(row, other, hashed, &redirect, file).await;
+        }
         let placing = Placing {
             ctx: self.ctx,
             staging: self.staging.clone(),
@@ -679,13 +690,55 @@ impl Placing<'_> {
             adapter: self.adapter,
             source: self.source,
             entry: other,
-            redirect: Some(Redirect::new(&other.name, row, self.source.id)),
+            redirect: Some(redirect),
         };
         placing.place_single(row.id, local, hashed, rom).await
     }
 
-    /// The entry of the same group a `done` download of this file placed,
-    /// when the file is gone because it was imported as that version.
+    /// Ends a download whose file is `other`, a version the library already
+    /// holds verified as `file`, without writing a second copy.
+    async fn keep_other(
+        &self,
+        row: &DownloadRow,
+        other: &TitleEntry,
+        hashed: &Hashed,
+        redirect: &Redirect,
+        file: i64,
+    ) -> Result<()> {
+        tracing::info!(download = %row.id, title = %other.id, "the other version is already in the library");
+        let detail = json!({
+            "title_id": other.id.0,
+            "rom_id": redirect.0.proven,
+            "staged": hashed.member.clone().unwrap_or_default(),
+            "reason": "the library already holds this version",
+        });
+        let (id, redirect) = (row.id, redirect.clone());
+        let settled = self
+            .app()
+            .db
+            .write(move |c| {
+                let tx = c.transaction()?;
+                let now = crate::unix_now();
+                imports::log(
+                    &tx,
+                    now,
+                    Some(id.0),
+                    Some(file),
+                    ImportAction::SkippedExisting,
+                    &detail,
+                )?;
+                let settled = redirect.settle(&tx, id, now)?;
+                tx.commit()?;
+                Ok(settled)
+            })
+            .await?;
+        after_settle(self.app(), settled).await;
+        Ok(())
+    }
+
+    /// The entry of the same group a download of this file placed or kept,
+    /// when the file is gone because it was imported as that version; never
+    /// inferred for a file inside a zip, whose other members are other roms.
     async fn placed_as_other(&self, row: &DownloadRow) -> Result<Option<TitleEntry>> {
         let (Some(index), source, wanted, rom) =
             (row.file_index, self.source.id, self.entry.id, row.rom_id)
@@ -695,7 +748,7 @@ impl Placing<'_> {
         self.app()
             .db
             .read(move |c| {
-                let Some(other) = downloads_import::done_on_file(c, source, index, rom)? else {
+                let Some(other) = downloads_import::placed_on_file(c, source, index, rom)? else {
                     return Ok(None);
                 };
                 if !downloads_import::other_version_of(c, wanted, other)? {
@@ -708,21 +761,20 @@ impl Placing<'_> {
 
     /// Ends a download whose file an earlier import placed as `other`.
     async fn settle_other(&self, row: &DownloadRow, other: &TitleEntry) -> Result<()> {
-        let redirect = Redirect::new(&other.name, row, self.source.id);
+        let mut redirect = Redirect::new(&other.name, row, self.source.id, None);
+        redirect.0.placed = false;
         let id = row.id;
-        let moved = self
+        let settled = self
             .app()
             .db
             .write(move |c| {
                 let tx = c.transaction()?;
-                let moved = redirect.settle(&tx, id, crate::unix_now())?;
+                let settled = redirect.settle(&tx, id, crate::unix_now())?;
                 tx.commit()?;
-                Ok(moved)
+                Ok(settled)
             })
             .await?;
-        for id in moved {
-            transfer::publish(self.app(), id, DownloadState::Bad, 1.0);
-        }
+        after_settle(self.app(), settled).await;
         Ok(())
     }
 
@@ -990,6 +1042,25 @@ impl Placing<'_> {
         let whole =
             (staged.kind == StagedKind::Zip).then(|| PathBuf::from(file_name(&staged.path)));
         let targets = self.targets(plan, whole.as_deref()).await?;
+        if let (Some(r), Some(p)) = (&self.redirect, pieces.first()) {
+            if targets
+                .iter()
+                .any(|t| matches!(t.decision, Decision::Replace(_)))
+            {
+                let why = Why {
+                    reason: format!("{}; the library holds an unverified copy of it, so the file was quarantined", r.0.reason),
+                    report: format!(
+                        "This file is {}, another version, and was not placed: its place in the library holds an unverified file.",
+                        self.entry.name
+                    ),
+                    detail: json!({ "different_version": true }),
+                };
+                let (download, source, hashed) = (p.download, p.source.clone(), p.hashed.clone());
+                self.quarantine_with(download, r.0.rom_id, &source, &[hashed], Some(why))
+                    .await?;
+                return Ok(false);
+            }
+        }
         let steps: Vec<Step> = plan
             .steps
             .iter()
@@ -1023,16 +1094,21 @@ impl Placing<'_> {
                 fail(app, ids, &reason).await.map(|()| false)
             }
             Ok(Placed::All(stats)) => {
-                let done = self
+                let (done, settled) = self
                     .record(targets, &stats, pieces, ids, true, note)
                     .await?;
-                self.announce(ids, &done);
+                if self.redirect.is_some() {
+                    self.announce(&[], &done);
+                    after_settle(app, settled).await;
+                } else {
+                    self.announce(ids, &done);
+                }
                 Ok(true)
             }
             Ok(Placed::Partly(stats, error)) => {
                 let total = targets.len();
                 let landed = stats.len();
-                let done = self
+                let (done, _) = self
                     .record(targets, &stats, pieces, ids, false, note)
                     .await?;
                 self.announce(&[], &done);
@@ -1084,13 +1160,8 @@ impl Placing<'_> {
 
     fn announce(&self, ids: &[DownloadId], done: &[(FileId, ImportAction)]) {
         let app = self.app();
-        let state = if self.redirect.is_some() {
-            DownloadState::Bad
-        } else {
-            DownloadState::Done
-        };
         for id in ids {
-            transfer::publish(app, *id, state, 1.0);
+            transfer::publish(app, *id, DownloadState::Done, 1.0);
         }
         for (file_id, action) in done {
             app.events.publish(
@@ -1110,7 +1181,7 @@ impl Placing<'_> {
         ids: &[DownloadId],
         complete: bool,
         note: Option<Value>,
-    ) -> Result<Vec<(FileId, ImportAction)>> {
+    ) -> Result<(Vec<(FileId, ImportAction)>, Settled)> {
         let scope = Scope {
             pid: self.pid(),
             rule: self.platform.header_rule,
@@ -1128,19 +1199,24 @@ impl Placing<'_> {
                 for t in &targets {
                     record_target(&tx, &scope, t, &pieces, now, &mut done)?;
                 }
+                let mut settled = Settled::default();
                 match (&redirect, complete) {
                     (Some(r), true) => {
                         for id in &ids {
-                            r.settle(&tx, *id, now)?;
+                            let s = r.settle(&tx, *id, now)?;
+                            settled.moved.extend(s.moved);
+                            settled.cancelled.extend(s.cancelled);
+                            settled.again = settled.again.or(s.again);
                         }
                     }
                     (None, true) => {
                         downloads::move_all(&tx, &ids, DownloadState::Done, None, now)?;
+                        prove_single(&tx, &pieces)?;
                     }
                     (_, false) => {}
                 }
                 tx.commit()?;
-                Ok(done)
+                Ok((done, settled))
             })
             .await
     }
@@ -1198,6 +1274,63 @@ impl Placing<'_> {
         let dir = self.staging.join(&source.infohash);
         let _ = tokio::task::spawn_blocking(move || place::remove_empty_dirs(&dir)).await;
     }
+}
+
+/// A download whose staged item was quarantined, for [`Quarantined::record`].
+struct Quarantined<'a> {
+    row: DownloadId,
+    rom_id: i64,
+    source: SourceId,
+    redirect: Option<&'a Redirect>,
+    reason: &'a str,
+    detail: &'a Value,
+}
+
+impl Quarantined<'_> {
+    /// Ends the download `bad` and logs it; a file that is another version is
+    /// recorded as that version, and when the file was that version or only a
+    /// fuzzy or size-only guess the wanted rom is wanted again.
+    fn record(&self, tx: &rusqlite::Connection, now: i64) -> Result<Settled> {
+        let index = downloads::get(tx, self.row)?.and_then(|d| d.file_index);
+        let guessed = match index {
+            Some(i) => downloads_import::guessed(tx, self.source, i, self.rom_id)?,
+            None => false,
+        };
+        let bad = DownloadState::Bad;
+        let moved = downloads::move_all(tx, &[self.row], bad, Some(self.reason), now)?;
+        let mut settled = Settled {
+            moved,
+            ..Settled::default()
+        };
+        if settled.moved.is_empty() {
+            return Ok(settled);
+        }
+        let action = ImportAction::Quarantined;
+        imports::log(tx, now, Some(self.row.0), None, action, self.detail)?;
+        if let (Some(proven), Some(i)) = (self.redirect.and_then(|r| r.0.proven), index) {
+            candidates::prove(tx, self.source, i, proven)?;
+        }
+        if guessed || self.redirect.is_some() {
+            settled.again = downloads_import::want_again(tx, self.row, self.reason, now)?;
+        }
+        Ok(settled)
+    }
+}
+
+/// Records that the torrent file of a one-piece, unzipped import is its rom by hash.
+fn prove_single(tx: &rusqlite::Connection, pieces: &[Piece]) -> Result<()> {
+    let [p] = pieces else {
+        return Ok(());
+    };
+    if p.hashed.member.is_some() {
+        return Ok(());
+    }
+    if let Some(d) = downloads::get(tx, p.download)? {
+        if let (Some(source), Some(index)) = (d.source_id, d.file_index) {
+            candidates::prove(tx, source, index, p.rom.id)?;
+        }
+    }
+    Ok(())
 }
 
 /// What [`record_target`] needs beyond the target itself.
