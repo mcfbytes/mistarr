@@ -12,7 +12,7 @@ jobs:
   rust:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with: { components: "rustfmt, clippy" }
       - run: cargo fmt --all --check
@@ -21,7 +21,7 @@ jobs:
   e2e:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update && sudo apt-get install -y transmission-daemon rtorrent
       # The package starts a system daemon; the suite runs its own on free ports.
@@ -34,26 +34,26 @@ jobs:
           mkdir -p target/e2e-logs
           make e2e 2>&1 | tee target/e2e-logs/cargo-test.log
       - if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: e2e-logs
           path: target/e2e-logs
   principles:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: sh scripts/principles-gate.sh
   shell:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: shellcheck -s sh scripts/mistarr.sh scripts/tests/run.sh
       - run: sh scripts/tests/run.sh
   web:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with: { node-version: "22", cache: "npm", cache-dependency-path: web/package-lock.json }
       - working-directory: web
         run: npm ci
@@ -68,18 +68,18 @@ jobs:
   cross:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: goto-bus-stop/setup-zig@v2
       - run: cargo install cargo-zigbuild
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: "22", cache: "npm", cache-dependency-path: web/package-lock.json }
       - working-directory: web
         run: npm ci && npm run build
       - run: rustup target add armv7-unknown-linux-musleabihf
       - run: cargo zigbuild --release --target armv7-unknown-linux-musleabihf -p mistarr-server
       - run: file target/armv7-unknown-linux-musleabihf/release/mistarr | grep -q "statically linked"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: mistarr-armv7
           path: target/armv7-unknown-linux-musleabihf/release/mistarr

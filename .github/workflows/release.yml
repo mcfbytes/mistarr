@@ -13,11 +13,11 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - uses: goto-bus-stop/setup-zig@v2
       - run: cargo install cargo-zigbuild
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with: { node-version: "22", cache: "npm", cache-dependency-path: web/package-lock.json }
       - working-directory: web
         run: npm ci && npm run build
@@ -53,7 +53,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
       - name: Publish the release, setting the body from the tag's annotation
         if: github.event_name == 'push' && steps.tagtype.outputs.type == 'tag'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             mistarr-armv7.tar.gz
@@ -62,7 +62,7 @@ jobs:
           body: ${{ steps.notes.outputs.notes }}
       - name: Publish the release, leaving its body untouched
         if: github.event_name == 'release' || steps.tagtype.outputs.type != 'tag'
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             mistarr-armv7.tar.gz
