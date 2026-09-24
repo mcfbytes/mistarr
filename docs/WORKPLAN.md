@@ -1,0 +1,67 @@
+# Work plan
+
+Work packages are sized so that one agent can complete one in a single
+session against the contracts in ARCHITECTURE.md, DATA-MODEL.md and API.md.
+Each has a branch name, the crates it may touch, its dependencies, and
+acceptance criteria that CI can check. Packages in the same wave have no
+dependencies on each other and are meant to run in parallel.
+
+Rules for every package:
+
+- Read CLAUDE.md and docs/PRINCIPLES.md first. Both are binding.
+- Touch only the crates listed. If a contract in the docs is wrong, change the
+  doc in the same PR and say so in the PR description; do not silently diverge.
+- Every public function has a unit test. Fixtures are synthetic.
+- `cargo fmt`, `cargo clippy -D warnings`, `cargo test` green before pushing.
+- Open a PR against `main` titled `WP-NN: <name>`. One package per PR.
+
+## Wave 0: foundation (done in this repository's initial commit)
+
+- WP-00 Workspace skeleton, docs, CI config stub.
+
+## Wave 1: core contracts, no I/O
+
+| WP | Name | Crates | Acceptance |
+|---|---|---|---|
+| WP-01 | DAT parser and name parser | `mistarr-core` | Parses a synthetic Logiqx DAT and a zipped pack; name corpus of at least 200 synthetic names parses into the documented fields; unknown tags never fail. |
+| WP-02 | Hashing and header rules | `mistarr-core` | One-pass CRC32/MD5/SHA1 matches reference vectors; each header rule from PLATFORMS.md tested; zip central-directory pre-check; bench in place. |
+| WP-03 | 1G1R and clone inference | `mistarr-core` | Selection table from VERIFICATION.md reproduced in tests; deterministic ties; inferred groups flagged. |
+| WP-04 | Platform table and adapters | `mistarr-mister` | Every row in PLATFORMS.md has an adapter; `plan_placement` tested per row including N64 byte order, SMC header, disc directories; rows marked verify carry a `#[ignore]` board test and a tracking issue. |
+| WP-05 | Torrent parsing and binding | `mistarr-sources` | Bencode parser for .torrent v1 and hybrid; magnet parsing; binding score against synthetic DATs with threshold behaviour; name normalisation matches VERIFICATION.md. |
+| WP-06 | Client trait and Transmission | `mistarr-clients` | Trait as in ARCHITECTURE.md; Transmission implementation passes a recorded-fake test for every operation including 409 handshake and the >2000 files path. |
+| WP-07 | rtorrent client | `mistarr-clients` | SCGI framing tested byte-exact; every operation against a recorded fake; multicall chunking; ratio policy via poll. |
+| WP-08 | SPA shell | `web/` | Vite project, router, theme, SSE store, API client generated from API.md, all screens as static mocks with fixture data, bundle size check. |
+
+## Wave 2: server assembly
+
+| WP | Name | Crates | Depends | Acceptance |
+|---|---|---|---|---|
+| WP-09 | Server, DB, migrations, config | `mistarr-server` | 01 | axum app boots, migrations from DATA-MODEL.md apply, config parses, `/system/status` and `/events` work, SPA embedded. |
+| WP-10 | DAT import job and catalog API | `mistarr-server` | 01, 03, 09 | Watched `dats/` flow end to end; `/platforms`, `/platforms/{id}/titles`, `/titles/{id}` return documented shapes; supersession tested. |
+| WP-11 | Library scan job | `mistarr-server` | 02, 04, 09 | Incremental scan with resumable progress; states per VERIFICATION.md; `file.changed` throttling; CORENAME gate honoured. |
+| WP-12 | Source import and binding job | `mistarr-server` | 05, 09 | Watched `sources/` flow; magnet resolving via client; `/sources` API; unbound picker. |
+| WP-13 | Want, transfer and poll | `mistarr-server` | 06, 07, 09, 12 | Want to transferring to checking with per-file progress over SSE; rate limits switch with CORENAME; remote path map applied. |
+| WP-14 | Importer | `mistarr-server` | 02, 04, 11, 13 | Hash, match, quarantine, plan, place, log; same-filesystem rename asserted; existing-verified kept. |
+| WP-15 | SPA wired to live API | `web/` | 08, 09 | Every screen against the running server; wizard completes a first run; phone width verified with a Playwright screenshot per screen. |
+
+## Wave 3: hardening and release
+
+| WP | Name | Depends | Acceptance |
+|---|---|---|---|
+| WP-16 | Integration suite with synthetic set and local tracker | 10 to 15 | TESTING.md layer 2 passes in CI against Transmission and rtorrent. |
+| WP-17 | Cross build, `doctor`, scripts, release workflow | 09 | Static armv7 artifact produced by CI; `mistarr.sh`; `doctor` output; `file` gate. |
+| WP-18 | Board verification | 16, 17 | The verify rows in PLATFORMS.md confirmed or corrected on a DE10-Nano; RSS and throughput recorded in DEPLOYMENT.md. |
+| WP-19 | Arcade and Neo Geo adapters | 04, 14 | MRA-driven wanted list; romset placement; verification against MRA md5. |
+| WP-20 | Principles gate in CI | none | The grep gate from TESTING.md, with the deny list in CI config only. |
+
+## Suggested fan-out
+
+Wave 1 is eight independent agents. Wave 2 needs WP-09 first, then six in
+parallel with the listed dependencies. Wave 3 is sequential except WP-19 and
+WP-20, which can start any time after their dependencies.
+
+## Issue conventions
+
+Each WP gets a GitHub issue with the row above as its body. Agents link the
+issue in the PR. Anything discovered outside the package's scope becomes a
+new issue, not a scope extension.

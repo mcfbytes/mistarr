@@ -1,0 +1,13 @@
+[package]
+name = "mistarr-mister"
+description = "MiSTer platform table, core adapters and board integration for mistarr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true
+mistarr-core = { path = "../mistarr-core" }

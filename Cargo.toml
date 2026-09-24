@@ -1,0 +1,33 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mistarr-core",
+    "crates/mistarr-mister",
+    "crates/mistarr-sources",
+    "crates/mistarr-clients",
+    "crates/mistarr-server",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/mcfbytes/mistarr"
+rust-version = "1.80"
+
+# Shared dependency versions. Crates opt in with `dep.workspace = true`.
+# Add here only after checking the dependency builds statically for
+# armv7-unknown-linux-musleabihf (see CLAUDE.md).
+[workspace.dependencies]
+thiserror = "2"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true

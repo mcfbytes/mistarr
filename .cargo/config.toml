@@ -1,0 +1,4 @@
+# Host builds stay native so `cargo test` works everywhere.
+# Cross builds: cargo zigbuild --release --target armv7-unknown-linux-musleabihf -p mistarr-server
+[target.armv7-unknown-linux-musleabihf]
+rustflags = ["-C", "target-feature=+crt-static"]

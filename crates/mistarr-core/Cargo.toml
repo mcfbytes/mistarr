@@ -1,0 +1,12 @@
+[package]
+name = "mistarr-core"
+description = "Domain types, DAT parsing, hashing, matching and 1G1R selection for mistarr"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde.workspace = true

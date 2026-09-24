@@ -1,0 +1,22 @@
+[package]
+name = "mistarr-server"
+description = "The mistarr binary: HTTP server, database, jobs and embedded web UI"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "mistarr"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+mistarr-core = { path = "../mistarr-core" }
+mistarr-mister = { path = "../mistarr-mister" }
+mistarr-sources = { path = "../mistarr-sources" }
+mistarr-clients = { path = "../mistarr-clients" }
