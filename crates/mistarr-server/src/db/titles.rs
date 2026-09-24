@@ -375,8 +375,15 @@ pub struct Counts {
     pub have: u64,
     /// Groups with at least one wanted variant.
     pub wanted: u64,
-    /// Files on disk that match no rom.
-    pub unverified: u64,
+    /// Files on disk that match no rom, outside arcade; arcade's own unverified
+    /// rows are covered by `failing_check` and `partial` instead.
+    pub unmatched_files: u64,
+    /// Groups with a visible MRA variant whose md5 check is `mismatch` or
+    /// `missing_part`, and no visible variant counted as `have`; 0 outside arcade.
+    pub failing_check: u64,
+    /// Groups with a visible MRA variant that has some, but not every, named
+    /// zip present, and no visible variant counted as `have`; 0 outside arcade.
+    pub partial: u64,
 }
 
 /// [`Counts`] per platform id, counting the groups the default browse shows
@@ -393,6 +400,7 @@ pub struct Counts {
 /// ```
 pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Counts>> {
     let mut out: HashMap<String, Counts> = HashMap::new();
+    let hidden_json = json(hidden);
     let mut stmt = conn.prepare(&format!(
         "SELECT g.platform_id, COUNT(*), SUM(g.have_verified > 0), SUM(g.wanted > 0)
          FROM title_groups g
@@ -402,7 +410,7 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
                              WHERE f.value IN (SELECT value FROM json_each(?1))))
          GROUP BY g.platform_id"
     ))?;
-    let mut rows = stmt.query([json(hidden)])?;
+    let mut rows = stmt.query([&hidden_json])?;
     while let Some(r) = rows.next()? {
         let e = out.entry(r.get(0)?).or_default();
         e.titles = unsigned(r.get(1)?);
@@ -410,11 +418,41 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
         e.wanted = unsigned(r.get(3)?);
     }
     let mut stmt = conn.prepare(
-        "SELECT platform_id, COUNT(*) FROM files WHERE state = 'unverified' GROUP BY platform_id",
+        "SELECT platform_id, COUNT(*) FROM files
+         WHERE state = 'unverified' AND platform_id <> 'arcade' GROUP BY platform_id",
     )?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        out.entry(r.get(0)?).or_default().unverified = unsigned(r.get(1)?);
+        out.entry(r.get(0)?).or_default().unmatched_files = unsigned(r.get(1)?);
+    }
+    // Per visible MRA title: whether it is failing its md5 check or partly present.
+    // Grouped by clone group and joined to title_groups' own `have` so a group with
+    // any have-verified visible variant never also counts as failing or partial.
+    let mut stmt = conn.prepare(
+        "WITH mra AS (
+           SELECT t.platform_id, t.parent_id,
+                  MAX(t.mra_check IN ('mismatch', 'missing_part')) AS any_failing,
+                  MAX(EXISTS (SELECT 1 FROM roms r
+                              WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 1)
+                      AND EXISTS (SELECT 1 FROM roms r
+                                  WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 0)) AS any_partial
+           FROM titles t
+           WHERE t.source = 'mra' AND t.retired = 0
+             AND NOT EXISTS (SELECT 1 FROM json_each(t.flags) f
+                             WHERE f.value IN (SELECT value FROM json_each(?1)))
+           GROUP BY t.platform_id, t.parent_id
+         )
+         SELECT g.platform_id,
+                SUM(m.any_failing AND g.have_verified = 0),
+                SUM(m.any_partial AND g.have_verified = 0)
+         FROM mra m JOIN title_groups g ON g.platform_id = m.platform_id AND g.parent_id = m.parent_id
+         GROUP BY g.platform_id",
+    )?;
+    let mut rows = stmt.query([&hidden_json])?;
+    while let Some(r) = rows.next()? {
+        let e = out.entry(r.get(0)?).or_default();
+        e.failing_check = unsigned(r.get(1)?);
+        e.partial = unsigned(r.get(2)?);
     }
     Ok(out)
 }

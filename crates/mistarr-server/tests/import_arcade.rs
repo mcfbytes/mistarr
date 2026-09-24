@@ -5,7 +5,6 @@ mod common;
 
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use common::{boot_with, config_in, eventually, get, request, Booted};
 use mistarr_core::hash::{hash_reader, HeaderRule, Md5Stream};
@@ -16,8 +15,6 @@ use mistarr_server::db::files::{self, FileRow, FileState};
 use mistarr_server::db::imports;
 use mistarr_server::db::sources::{self, NewSource, SourceId, SourceState};
 use mistarr_server::events::EventKind;
-use mistarr_server::jobs::scan::ScanJob;
-use mistarr_server::jobs::Scheduler;
 use serde_json::{json, Value};
 
 fn infohash() -> String {
@@ -231,32 +228,19 @@ fn log(b: &Booted) -> Vec<imports::LogRow> {
         .expect("log")
 }
 
-/// Runs a library scan of the arcade platform and checks it keeps `zip_rel`'s rows as they were.
-async fn scan_agrees(b: &Booted, zip_rel: &str) {
-    let key = |rows: Vec<FileRow>| {
-        rows.into_iter()
-            .map(|r| {
-                (
-                    r.id,
-                    r.rel_path,
-                    r.state,
-                    r.rom_id,
-                    r.size,
-                    r.mtime,
-                    r.scanned_at,
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    let before = key(rows(b, zip_rel));
-    assert!(!before.is_empty());
-    let scan = Arc::new(ScanJob {
-        platform_id: Some(PlatformId("arcade".into())),
-    });
-    Scheduler::run_inline(&b.running.app, scan)
-        .await
-        .expect("scan");
-    assert_eq!(key(rows(b, zip_rel)), before);
+/// Triggers the arcade catalogue, which now also runs the presence pass over
+/// `games/mame` and `games/hbmame`. The caller polls for the effect it wants
+/// with `eventually`, since the run may join one already queued or running.
+async fn rerun_catalogue(b: &Booted) {
+    let r = request(
+        b.addr(),
+        "POST",
+        "/api/v1/system/scan",
+        &[],
+        Some(r#"{"platform_id":"arcade"}"#),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -314,7 +298,6 @@ async fn an_md5_covered_zip_is_verified_by_assembly_and_placed_whole() {
     let m = mra_block(&b, "Example Blaster").await;
     assert_eq!(m["md5_check"], "match");
     assert_eq!(m["missing_zips"], json!([]));
-    scan_agrees(&b, "mame/exblast.zip").await;
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -368,7 +351,6 @@ async fn without_an_md5_a_loaded_dat_verifies_member_by_member() {
     assert!(entries.iter().all(|e| e.detail["verification"] == "dat"));
     assert_eq!(entries[0].detail["dat_entry"], "exblast");
     assert_eq!(have(&b, "Example Blaster").await, 1);
-    scan_agrees(&b, "mame/exblast.zip").await;
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -439,7 +421,6 @@ async fn with_no_hash_source_the_zip_is_placed_unverified() {
     assert_eq!(entry.detail["verification"], "none");
     assert_eq!(entry.detail["reason"], "no hash source");
     assert_eq!(have(&b, "Example Blaster").await, 1);
-    scan_agrees(&b, "mame/exblast.zip").await;
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -467,7 +448,6 @@ async fn a_zip_read_from_hbmame_is_placed_there() {
         )]
     );
     assert_eq!(have(&b, "Example Quest").await, 1);
-    scan_agrees(&b, "hbmame/examplequest.zip").await;
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -830,8 +810,6 @@ async fn two_zips_arrive(first: &str) {
     };
     assert_eq!(verified("mame/exblast.zip"), ["mame/exblast.zip#a.bin"]);
     assert_eq!(verified("mame/exparent.zip"), ["mame/exparent.zip#b.bin"]);
-    scan_agrees(&b, "mame/exblast.zip").await;
-    scan_agrees(&b, "mame/exparent.zip").await;
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -843,4 +821,90 @@ async fn zips_of_one_mra_arriving_main_first_are_checked_when_the_last_lands() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn zips_of_one_mra_arriving_parent_first_are_checked_when_the_last_lands() {
     two_zips_arrive("exparent.zip").await;
+}
+
+/// Once an imported zip is deleted from disk, the next catalogue run's presence
+/// pass prunes its `files` rows and the title drops out of `have`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deleting_an_imported_zip_drops_have_once_the_catalogue_reruns() {
+    let md5 = md5_of(&[b"CPU0", b"SND"]);
+    let roms = format!(
+        r#"<rom index="0" zip="exblast.zip" md5="{md5}"><part name="cpu.bin"/><part name="snd.bin"/></rom>"#
+    );
+    let b = boot_arcade(
+        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[],
+    )
+    .await;
+    let rom = zip_rom(&b, "exblast.zip");
+    let src = source(&b);
+    let body = zip_bytes(&[("cpu.bin", b"CPU0"), ("snd.bin", b"SND")]);
+    let staged = stage(&b, "arcade/exblast-download.zip", &body);
+    let id = hand_off(&b, rom, src, 0, &staged);
+    settled(&b, id, DownloadState::Done).await;
+    assert_eq!(have(&b, "Example Blaster").await, 1);
+
+    std::fs::remove_file(games(&b).join("mame/exblast.zip")).expect("rm");
+    rerun_catalogue(&b).await;
+    eventually("presence to prune the rows", || async {
+        rows(&b, "mame/exblast.zip").is_empty()
+    })
+    .await;
+
+    assert_eq!(have(&b, "Example Blaster").await, 0);
+    b.running.shutdown().await.expect("shutdown");
+}
+
+/// A zip the user places directly under `games/mame`, without a download, gets a row
+/// from the presence pass that `verify_siblings` can later promote once its pair lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_user_placed_sibling_zip_is_promoted_once_its_pair_is_imported() {
+    let md5 = md5_of(&[b"AAAA", b"BBBB"]);
+    let roms = format!(
+        r#"<rom index="0" zip="exblast.zip|exparent.zip" md5="{md5}">
+             <part name="a.bin"/><part name="b.bin"/></rom>"#
+    );
+    let b = boot_arcade(
+        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[],
+    )
+    .await;
+
+    write(
+        &games(&b).join("mame/exparent.zip"),
+        &zip_bytes(&[("b.bin", b"BBBB")]),
+    );
+    rerun_catalogue(&b).await;
+    eventually("the presence pass to record the sibling", || async {
+        !rows(&b, "mame/exparent.zip").is_empty()
+    })
+    .await;
+    let parent_rom = zip_rom(&b, "exparent.zip");
+    assert_eq!(
+        states(&rows(&b, "mame/exparent.zip")),
+        [(
+            "mame/exparent.zip#b.bin".into(),
+            FileState::Unverified,
+            Some(parent_rom)
+        )],
+        "the presence pass gives verify_siblings a row to promote"
+    );
+
+    let rom = zip_rom(&b, "exblast.zip");
+    let src = source(&b);
+    let staged = stage(&b, "arcade/exblast.zip", &zip_bytes(&[("a.bin", b"AAAA")]));
+    let id = hand_off(&b, rom, src, 0, &staged);
+    settled(&b, id, DownloadState::Done).await;
+
+    assert_eq!(
+        states(&rows(&b, "mame/exparent.zip")),
+        [(
+            "mame/exparent.zip#b.bin".into(),
+            FileState::Verified,
+            Some(parent_rom)
+        )],
+        "the user-placed sibling's member is promoted, not left unverified forever"
+    );
+    assert_eq!(have(&b, "Example Blaster").await, 1);
+    b.running.shutdown().await.expect("shutdown");
 }
