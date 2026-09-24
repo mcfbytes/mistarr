@@ -135,8 +135,15 @@ pub fn groups_line(path: &Path) -> String {
         .map_err(crate::Error::from)
         .and_then(|mut c| {
             c.busy_timeout(std::time::Duration::from_secs(5))?;
-            let tx = c.transaction()?;
-            groups::check(&tx)
+            // The long reads hold only a read snapshot; the index check takes the write
+            // lock on its own, briefly, and is rolled back.
+            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;
+            let drift = groups::drift(&tx)?;
+            tx.rollback()?;
+            let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+            let search = groups::search_damaged(&tx)?;
+            tx.rollback()?;
+            Ok(groups::Drift { search, ..drift })
         });
     match drift {
         Ok(d) if d.is_consistent() => "title groups: consistent".to_owned(),
@@ -152,14 +159,21 @@ pub fn groups_line(path: &Path) -> String {
     }
 }
 
-/// Opens the database at `path`, applying migrations, and recomputes `title_groups`
-/// and the title bits in one transaction. Returns the number of groups.
+/// Opens the existing database at `path`, applying migrations, and recomputes
+/// `title_groups` and the search index in one transaction. Returns the number of groups.
 ///
 /// # Errors
 ///
-/// [`crate::Error::Db`] or [`crate::Error::Migration`] when the database cannot be
-/// opened or written.
+/// [`crate::Error::Io`] when no database exists at `path`, which it never creates;
+/// [`crate::Error::Db`] or [`crate::Error::Migration`] when it cannot be opened or written.
 pub fn rebuild_groups(path: &Path) -> crate::error::Result<usize> {
+    if !path.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no database at {}", path.display()),
+        )
+        .into());
+    }
     let db = crate::db::Db::open(path)?;
     db.write_blocking(|c| {
         let tx = c.transaction()?;
@@ -286,6 +300,35 @@ mod tests {
             img[0x80..0x80 + bytes.len()].copy_from_slice(bytes.as_bytes());
         }
         img
+    }
+
+    #[test]
+    fn rebuild_groups_repairs_drift_and_never_creates_a_database() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("missing.db");
+        assert!(rebuild_groups(&missing).is_err());
+        assert!(!missing.exists());
+        assert_eq!(groups_line(&missing), "title groups: no database");
+
+        let path = dir.path().join("m.db");
+        let db = crate::db::Db::open(&path).expect("open");
+        db.write_blocking(|c| {
+            crate::db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS)?;
+            crate::synth::seed(c, 0.002, 3)
+        })
+        .expect("seed");
+        assert_eq!(groups_line(&path), "title groups: consistent");
+        db.write_blocking(|c| Ok(c.execute("UPDATE title_groups SET wanted = wanted + 9", [])?))
+            .expect("corrupt");
+        assert!(
+            groups_line(&path).contains("stale"),
+            "{}",
+            groups_line(&path)
+        );
+        drop(db);
+        let groups = rebuild_groups(&path).expect("rebuild");
+        assert!(groups > 0);
+        assert_eq!(groups_line(&path), "title groups: consistent");
     }
 
     #[test]

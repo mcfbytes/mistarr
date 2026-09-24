@@ -83,13 +83,17 @@ INSERT INTO title_groups_dirty (parent_id)
   SELECT DISTINCT parent_id FROM titles WHERE parent_id IS NOT NULL;
 
 -- Substring search over base names; trigram keeps LIKE's "contains" and the triggers keep it in step.
+-- `platform` is the id between 0x1F sentinels, so one MATCH filters by platform without substrings.
+CREATE VIEW title_search_source AS
+  SELECT id, base_name, char(31) || platform_id || char(31) AS platform FROM titles;
 CREATE VIRTUAL TABLE title_search USING fts5(
-  base_name, content = 'titles', content_rowid = 'id', tokenize = 'trigram'
+  base_name, platform, content = 'title_search_source', content_rowid = 'id', tokenize = 'trigram'
 );
 INSERT INTO title_search (title_search) VALUES ('rebuild');
 
 CREATE TRIGGER titles_insert_groups AFTER INSERT ON titles BEGIN
-  INSERT INTO title_search (rowid, base_name) VALUES (NEW.id, NEW.base_name);
+  INSERT INTO title_search (rowid, base_name, platform)
+    VALUES (NEW.id, NEW.base_name, char(31) || NEW.platform_id || char(31));
   INSERT INTO title_groups_dirty (parent_id)
     SELECT DISTINCT x FROM (SELECT NEW.parent_id AS x UNION SELECT NEW.id)
     WHERE x IS NOT NULL AND x NOT IN (SELECT parent_id FROM title_groups_dirty);
@@ -111,14 +115,17 @@ WHEN OLD.name IS NOT NEW.name OR OLD.base_name IS NOT NEW.base_name OR OLD.sourc
     SELECT NEW.id WHERE NEW.id NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
-CREATE TRIGGER titles_rename_search AFTER UPDATE OF base_name ON titles
-WHEN OLD.base_name IS NOT NEW.base_name BEGIN
-  INSERT INTO title_search (title_search, rowid, base_name) VALUES ('delete', OLD.id, OLD.base_name);
-  INSERT INTO title_search (rowid, base_name) VALUES (NEW.id, NEW.base_name);
+CREATE TRIGGER titles_rename_search AFTER UPDATE OF base_name, platform_id ON titles
+WHEN OLD.base_name IS NOT NEW.base_name OR OLD.platform_id IS NOT NEW.platform_id BEGIN
+  INSERT INTO title_search (title_search, rowid, base_name, platform)
+    VALUES ('delete', OLD.id, OLD.base_name, char(31) || OLD.platform_id || char(31));
+  INSERT INTO title_search (rowid, base_name, platform)
+    VALUES (NEW.id, NEW.base_name, char(31) || NEW.platform_id || char(31));
 END;
 
 CREATE TRIGGER titles_delete_groups AFTER DELETE ON titles BEGIN
-  INSERT INTO title_search (title_search, rowid, base_name) VALUES ('delete', OLD.id, OLD.base_name);
+  INSERT INTO title_search (title_search, rowid, base_name, platform)
+    VALUES ('delete', OLD.id, OLD.base_name, char(31) || OLD.platform_id || char(31));
   INSERT INTO title_groups_dirty (parent_id)
     SELECT DISTINCT x FROM (SELECT OLD.parent_id AS x UNION SELECT OLD.id)
     WHERE x IS NOT NULL AND x NOT IN (SELECT parent_id FROM title_groups_dirty);

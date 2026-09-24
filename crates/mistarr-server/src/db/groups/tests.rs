@@ -4,10 +4,10 @@ use proptest::prelude::*;
 use rusqlite::params;
 
 use super::*;
-use crate::db::titles::{self, Browse, Counts, GroupRow, Sort, Tri};
+use crate::db::titles::{self, Browse, Counts, GroupRow, SearchShape, Sort, TitleId, Tri};
 
-/// The `title_groups` view as migration 0007 defined it: the oracle the table must equal.
-const OLD_VIEW: &str = "CREATE TEMP VIEW old_title_groups AS
+/// The reference aggregation query for `title_groups`, as a view the table must equal.
+const REFERENCE: &str = "CREATE TEMP VIEW reference_groups AS
 SELECT g.parent_id, g.platform_id, p.base_name, p.name,
        g.variants, g.have_verified, g.wanted, g.has_pick, g.pick_id, g.newest_id
 FROM (
@@ -35,9 +35,9 @@ FROM (
 ) g
 JOIN titles p ON p.id = g.parent_id;";
 
-/// The per-request browse filter the table replaced, over the oracle view, reading each
+/// The reference browse filter, over the reference aggregation query, reading each
 /// variant's flags and regions from their tables where it read the JSON columns.
-const OLD_BROWSE_WHERE: &str = "
+const REFERENCE_BROWSE_WHERE: &str = "
     g.platform_id = ?1
     AND (?2 IS NULL OR g.base_name LIKE ?2 ESCAPE '\\')
     AND (?3 = 'any' OR (?3 = 'yes') = (g.have_verified > 0))
@@ -54,7 +54,7 @@ const OLD_BROWSE_WHERE: &str = "
                                                          WHERE title_id = v.id) f
                                           WHERE f.value = w.value)))";
 
-const OLD_MRA_ONLY: &str =
+const REFERENCE_MRA_ONLY: &str =
     "(EXISTS (SELECT 1 FROM titles s WHERE s.id = g.parent_id AND s.source = 'mra')
     OR NOT EXISTS (SELECT 1 FROM titles m WHERE m.platform_id = g.platform_id
                    AND m.source = 'mra' AND m.retired = 0))";
@@ -64,7 +64,7 @@ fn conn() -> Connection {
     crate::db::migrate::apply(&mut c).expect("migrate");
     crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
     c.pragma_update(None, "foreign_keys", false).expect("fk");
-    c.execute_batch(OLD_VIEW).expect("oracle");
+    c.execute_batch(REFERENCE).expect("reference");
     c.execute(
         "INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at, game_count)
          VALUES (1, 'gb', 'Test', '1', 't.dat', 0, 0)",
@@ -72,6 +72,25 @@ fn conn() -> Connection {
     )
     .expect("version");
     c
+}
+
+/// [`conn`] with a small synthetic catalogue for random writes to land among.
+fn seeded_conn() -> Connection {
+    let mut c = conn();
+    crate::synth::seed(&mut c, 0.002, 11).expect("catalogue");
+    c
+}
+
+/// Whether a group on `platform` has its parent on another platform, which the
+/// platform-filtered search cannot see.
+fn split_groups(c: &Connection, platform: &str) -> bool {
+    c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM title_groups g JOIN titles p ON p.id = g.parent_id
+                        WHERE g.platform_id = ?1 AND p.platform_id <> g.platform_id)",
+        [platform],
+        |r| r.get(0),
+    )
+    .expect("split")
 }
 
 type Summary = (
@@ -128,8 +147,8 @@ fn like(q: &str) -> String {
     out
 }
 
-/// The browse query the table replaced, run against the oracle view.
-fn old_browse(
+/// The reference browse query, run against the reference aggregation query.
+fn reference_browse(
     c: &Connection,
     platform: &str,
     f: &Browse,
@@ -159,11 +178,11 @@ fn old_browse(
     ];
     let total: i64 = c
         .query_row(
-            &format!("SELECT COUNT(*) FROM old_title_groups g WHERE {OLD_BROWSE_WHERE} AND {OLD_MRA_ONLY}"),
+            &format!("SELECT COUNT(*) FROM reference_groups g WHERE {REFERENCE_BROWSE_WHERE} AND {REFERENCE_MRA_ONLY}"),
             &args[..7],
             |r| r.get(0),
         )
-        .expect("old total");
+        .expect("reference total");
     let order = match f.sort {
         Sort::Name => "g.base_name COLLATE NOCASE, g.parent_id",
         Sort::Have => "g.have_verified > 0 DESC, g.base_name COLLATE NOCASE, g.parent_id",
@@ -173,8 +192,8 @@ fn old_browse(
         .prepare(&format!(
             "SELECT g.parent_id, g.platform_id, g.base_name, g.name, g.pick_id, k.name,
                     g.variants, g.have_verified, g.wanted, g.has_pick
-             FROM old_title_groups g LEFT JOIN titles k ON k.id = g.pick_id
-             WHERE {OLD_BROWSE_WHERE} AND {OLD_MRA_ONLY} ORDER BY {order} LIMIT ?8 OFFSET ?9"
+             FROM reference_groups g LEFT JOIN titles k ON k.id = g.pick_id
+             WHERE {REFERENCE_BROWSE_WHERE} AND {REFERENCE_MRA_ONLY} ORDER BY {order} LIMIT ?8 OFFSET ?9"
         ))
         .expect("prepare")
         .query_map(args, |r| {
@@ -197,13 +216,13 @@ fn old_browse(
     (items, u64::try_from(total).unwrap_or(0))
 }
 
-/// The per-platform counts the table replaced, without the unverified-file count.
-fn old_counts(c: &Connection, hidden: &[String]) -> HashMap<String, (u64, u64, u64)> {
+/// The reference per-platform counts, without the unverified-file count.
+fn reference_counts(c: &Connection, hidden: &[String]) -> HashMap<String, (u64, u64, u64)> {
     let mut stmt = c
         .prepare(&format!(
             "SELECT g.platform_id, COUNT(*), SUM(g.have_verified > 0), SUM(g.wanted > 0)
-             FROM old_title_groups g
-             WHERE {OLD_MRA_ONLY} AND EXISTS (
+             FROM reference_groups g
+             WHERE {REFERENCE_MRA_ONLY} AND EXISTS (
                SELECT 1 FROM titles v WHERE v.parent_id = g.parent_id AND v.retired = 0
                  AND NOT EXISTS (SELECT 1 FROM title_flags f
                                  WHERE f.title_id = v.id AND f.flag IN (SELECT value FROM json_each(?1))))
@@ -267,9 +286,9 @@ fn pick(pool: &[&str], mask: u8) -> Vec<String> {
         .collect()
 }
 
-/// Asserts the table, the bits and every browse and count equal the oracle.
-fn assert_matches_oracle(c: &Connection) {
-    assert_eq!(rows(c, "title_groups"), rows(c, "old_title_groups"));
+/// Asserts the table, the bits and every browse and count equal the reference query.
+fn assert_matches_reference(c: &Connection) {
+    assert_eq!(rows(c, "title_groups"), rows(c, "reference_groups"));
     assert_eq!(check(c).expect("check"), Drift::default());
     let lists = |xs: &[&[&str]]| -> Vec<Vec<String>> {
         xs.iter()
@@ -297,14 +316,22 @@ fn assert_matches_oracle(c: &Connection) {
         Some("hong kong"),
         Some("Nowhere"),
     ];
-    let qs = [None, Some("quest"), Some("%"), Some("a_"), Some("É")];
+    let qs = [
+        None,
+        Some("quest"),
+        Some("%"),
+        Some("a_"),
+        Some("É"),
+        Some("sta"),
+        Some("an"),
+    ];
     let tris = [Tri::Any, Tri::Yes, Tri::No];
     let sorts = [Sort::Name, Sort::Have, Sort::Recent];
     let mut n = 0usize;
     for hidden in &hiddens {
         assert_eq!(
             new_counts(c, hidden),
-            old_counts(c, hidden),
+            reference_counts(c, hidden),
             "counts {hidden:?}"
         );
         for flags in &requireds {
@@ -321,12 +348,15 @@ fn assert_matches_oracle(c: &Connection) {
                 };
                 let platform = PLATFORMS[n % PLATFORMS.len()];
                 let (limit, offset) = if n % 4 == 0 { (3, 1) } else { (50, 0) };
-                let got = titles::browse(c, platform, &f, limit, offset).expect("browse");
-                assert_eq!(
-                    got,
-                    old_browse(c, platform, &f, limit, offset),
-                    "{platform} {f:?}"
-                );
+                let want = reference_browse(c, platform, &f, limit, offset);
+                for shape in SearchShape::ALL {
+                    if shape == SearchShape::FtsPlatform && split_groups(c, platform) {
+                        continue;
+                    }
+                    let got =
+                        titles::browse_with(c, platform, &f, limit, offset, shape).expect("browse");
+                    assert_eq!(got, want, "{platform} {shape:?} {f:?}");
+                }
                 let unfiltered = Browse {
                     q: None,
                     have: Tri::Any,
@@ -336,7 +366,7 @@ fn assert_matches_oracle(c: &Connection) {
                 let got = titles::browse(c, platform, &unfiltered, 50, 0).expect("browse");
                 assert_eq!(
                     got,
-                    old_browse(c, platform, &unfiltered, 50, 0),
+                    reference_browse(c, platform, &unfiltered, 50, 0),
                     "{platform} {unfiltered:?}"
                 );
             }
@@ -660,9 +690,9 @@ fn apply(c: &Connection, op: &Op, seq: &mut u32) {
 }
 
 /// Runs `ops`, committing through [`crate::db::commit`] at each `Commit` and at the end,
-/// and compares everything with the oracle after every commit.
+/// and compares everything with the reference query after every commit.
 fn run_ops(ops: &[Op]) {
-    let mut c = conn();
+    let mut c = seeded_conn();
     let mut seq = 0;
     for batch in ops.split(|o| matches!(o, Op::Commit)) {
         let tx = c.transaction().expect("tx");
@@ -671,19 +701,19 @@ fn run_ops(ops: &[Op]) {
         }
         crate::db::commit(tx).expect("commit");
         assert!(!pending(&c).expect("pending"));
-        assert_matches_oracle(&c);
+        assert_matches_reference(&c);
     }
 }
 
 proptest! {
     #![proptest_config(ProptestConfig {
-        cases: 48,
+        cases: 32,
         failure_persistence: None,
         ..ProptestConfig::default()
     })]
 
     #[test]
-    fn random_writes_keep_the_table_equal_to_the_old_view(ops in proptest::collection::vec(op(), 1..60)) {
+    fn random_writes_keep_the_table_equal_to_the_reference_query(ops in proptest::collection::vec(op(), 1..60)) {
         run_ops(&ops);
     }
 }
@@ -791,7 +821,7 @@ fn a_large_transaction_rebuilds_whole_platforms() {
         .expect("dirty");
     assert!(dirty > REBUILD_OVER);
     crate::db::commit(tx).expect("commit");
-    assert_eq!(rows(&c, "title_groups"), rows(&c, "old_title_groups"));
+    assert_eq!(rows(&c, "title_groups"), rows(&c, "reference_groups"));
     assert!(check(&c).expect("check").is_consistent());
 }
 

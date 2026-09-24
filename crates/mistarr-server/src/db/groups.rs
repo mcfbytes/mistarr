@@ -4,7 +4,6 @@
 use rusqlite::types::Value;
 use rusqlite::Connection;
 
-use super::titles::TitleId;
 use crate::error::Result;
 
 /// Flags with their own bit in the group summary, in bit order; `known_flags` holds the same.
@@ -189,14 +188,11 @@ fn refresh_dirty(conn: &Connection) -> Result<usize> {
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-///
-/// ```
-/// use mistarr_server::db::{groups, titles::TitleId};
-/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert_eq!(groups::refresh_groups(&conn, &[TitleId(1)]).unwrap(), 0);
-/// ```
-pub fn refresh_groups(conn: &Connection, parent_ids: &[TitleId]) -> Result<usize> {
+#[cfg(test)]
+pub(crate) fn refresh_groups(
+    conn: &Connection,
+    parent_ids: &[super::titles::TitleId],
+) -> Result<usize> {
     let mut mark = conn.prepare_cached(
         "INSERT INTO title_groups_dirty (parent_id) SELECT ?1
          WHERE ?1 NOT IN (SELECT parent_id FROM title_groups_dirty)",
@@ -345,8 +341,8 @@ impl Drift {
     }
 }
 
-/// Compares the table and the search index with their inputs, for `mistarr doctor`
-/// and tests. It reads every title, rom and file, so it runs for seconds on the board.
+/// Compares the table and the search index with their inputs: [`drift`] then
+/// [`search_damaged`].
 ///
 /// # Errors
 ///
@@ -358,22 +354,56 @@ impl Drift {
 /// assert!(mistarr_server::db::groups::check(&conn).unwrap().is_consistent());
 /// ```
 pub fn check(conn: &Connection) -> Result<Drift> {
+    Ok(Drift {
+        search: search_damaged(conn)?,
+        ..drift(conn)?
+    })
+}
+
+/// Whether `title_search` disagrees with the titles it indexes. The check is an FTS5
+/// command written as an `INSERT`, so it takes the write lock for as long as it runs.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure other than a failed index check.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(!mistarr_server::db::groups::search_damaged(&conn).unwrap());
+/// ```
+pub fn search_damaged(conn: &Connection) -> Result<bool> {
+    match conn.execute(
+        "INSERT INTO title_search (title_search, rank) VALUES ('integrity-check', 1)",
+        [],
+    ) {
+        Ok(_) => Ok(false),
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::DatabaseCorrupt =>
+        {
+            Ok(true)
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+/// How far `title_groups` is from a fresh computation, by reads only; `search` is left
+/// false. It reads every title, rom and file, so it runs for seconds on the board.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(mistarr_server::db::groups::drift(&conn).unwrap().is_consistent());
+/// ```
+pub fn drift(conn: &Connection) -> Result<Drift> {
     let fresh = select(Scope::All);
     let count = |sql: &str| -> Result<u64> {
         let n: i64 = conn.query_row(sql, [], |r| r.get(0))?;
         Ok(u64::try_from(n).unwrap_or(0))
-    };
-    let search = match conn.execute(
-        "INSERT INTO title_search (title_search, rank) VALUES ('integrity-check', 1)",
-        [],
-    ) {
-        Ok(_) => false,
-        Err(rusqlite::Error::SqliteFailure(e, _))
-            if e.code == rusqlite::ErrorCode::DatabaseCorrupt =>
-        {
-            true
-        }
-        Err(e) => return Err(e.into()),
     };
     Ok(Drift {
         stale: count(&format!(
@@ -383,7 +413,7 @@ pub fn check(conn: &Connection) -> Result<Drift> {
             "SELECT COUNT(*) FROM ({fresh} EXCEPT SELECT {COLUMNS} FROM title_groups)"
         ))?,
         dirty: count("SELECT COUNT(*) FROM title_groups_dirty")?,
-        search,
+        search: false,
     })
 }
 

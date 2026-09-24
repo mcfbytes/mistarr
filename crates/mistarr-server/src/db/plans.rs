@@ -3,14 +3,12 @@
 use std::cell::RefCell;
 
 use rusqlite::trace::{TraceEvent, TraceEventCodes};
-use rusqlite::{params, Connection};
+use rusqlite::Connection;
 use serde_json::json;
 
 use super::downloads::{self, DownloadState};
-use super::titles::{self, Browse, Sort, TitleId};
-use super::{files, groups, imports, jobs, launch, sources};
-use mistarr_core::HashSet;
-use mistarr_core::PlatformId;
+use super::titles::{self, Browse, SearchShape, Sort, TitleId, SEARCH_SHAPE};
+use super::{groups, imports, jobs, launch, sources};
 
 thread_local! {
     static TRACED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -48,37 +46,16 @@ fn seeded() -> Connection {
     let mut c = Connection::open_in_memory().expect("open");
     super::migrate::apply(&mut c).expect("migrate");
     super::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-    let nes = PlatformId("nes".into());
-    let hashes = HashSet {
-        size: 16,
-        crc32: "00000001".into(),
-        md5: "0".repeat(32),
-        sha1: "0".repeat(40),
-    };
-    let rom = files::seed_rom_fixture(
-        &c,
-        &nes,
-        "Pebble Quest",
-        "Pebble Quest.nes",
-        &hashes,
-        "good",
-    )
-    .expect("rom");
+    crate::synth::seed(&mut c, 0.01, 4).expect("catalogue");
     c.execute_batch(
         "INSERT INTO sources (infohash, display_name, origin_file, platform_id, state, added_at)
            VALUES ('00', 'Synthetic', 's.torrent', 'nes', 'bound', 0);
          INSERT INTO torrent_files (source_id, file_index, path, size, rom_id)
-           VALUES (1, 0, 'Pebble Quest.nes', 16, 1);
+           VALUES (1, 0, 'track.bin', 16, 1);
          INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, created_at, updated_at)
            VALUES (1, 1, 1, 0, 'transferring', 0, 0);",
     )
     .expect("sources");
-    c.execute(
-        "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
-         VALUES ('nes', 'Pebble Quest.nes', 16, 0, ?1, 'verified', 0)",
-        params![rom],
-    )
-    .expect("file");
     jobs::insert(&c, "import", &json!({"download_id": 1}), "background", 0).expect("job");
     imports::log(
         &c,
@@ -101,7 +78,7 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
     let c = seeded();
     let hide: Vec<String> = ["bios", "beta"].map(str::to_owned).to_vec();
     let search = Browse {
-        q: Some("pebble".into()),
+        q: Some("sta".into()),
         hidden: hide.clone(),
         region: Some("USA".into()),
         sort: Sort::Have,
@@ -214,6 +191,10 @@ fn hot_reads_walk_indexes_not_growing_tables() {
             if scan || sort {
                 failures.push(format!("{name}: {line} in {sql}"));
             }
+        }
+        // The default search walks the platform's name index and never the trigram index.
+        if name == "browse" && SEARCH_SHAPE == SearchShape::Like {
+            assert!(!plan.iter().any(|l| l.contains("title_search")), "{sql}");
         }
     }
     assert!(failures.is_empty(), "{}", failures.join("\n"));

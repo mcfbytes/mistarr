@@ -8,6 +8,7 @@ use anyhow::Context as _;
 use clap::Parser as _;
 use mistarr_server::app::{self, Options};
 use mistarr_server::cli::{Cli, Command};
+use mistarr_server::db::titles::SearchShape;
 use mistarr_server::{db, doctor, logging, memory};
 
 fn main() -> anyhow::Result<()> {
@@ -25,6 +26,34 @@ fn main() -> anyhow::Result<()> {
     let runtime = memory::runtime().context("cannot start the async runtime")?;
 
     match cli.command() {
+        Command::BenchSeed { db, scale } => {
+            let seeded = mistarr_server::bench::seed_file(&db, scale)
+                .with_context(|| format!("cannot seed {}", db.display()))?;
+            println!(
+                "{}: {} titles, {} roms, {} files",
+                db.display(),
+                seeded.titles,
+                seeded.roms,
+                seeded.files
+            );
+        }
+        Command::BenchSearch {
+            db,
+            platform,
+            term,
+            iterations,
+            shapes,
+        } => {
+            let shapes = if shapes.is_empty() {
+                SearchShape::ALL.to_vec()
+            } else {
+                shapes
+            };
+            let timings = mistarr_server::bench::search(&db, &platform, &term, iterations, &shapes)
+                .with_context(|| format!("cannot time searches on {}", db.display()))?;
+            println!("{platform} {term:?}, {iterations} runs");
+            print!("{}", mistarr_server::bench::report(&timings));
+        }
         Command::Doctor {
             hash_mib,
             rebuild_groups,

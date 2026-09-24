@@ -119,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_has_every_table_and_no_view() {
+    fn schema_has_every_table_and_only_the_search_source_view() {
         let mut conn = Connection::open_in_memory().expect("open");
         apply(&mut conn).expect("apply");
         let tables = names(&conn, "table");
@@ -141,10 +141,10 @@ mod tests {
         ] {
             assert!(tables.iter().any(|n| n == t), "missing table {t}");
         }
-        assert!(names(&conn, "view").is_empty());
+        assert_eq!(names(&conn, "view"), ["title_search_source"]);
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM title_groups", [], |r| r.get(0))
-            .expect("view query");
+            .expect("group query");
         assert_eq!(rows, 0);
     }
 

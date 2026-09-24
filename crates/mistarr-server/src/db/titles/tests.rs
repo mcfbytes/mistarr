@@ -756,33 +756,79 @@ fn browse_walks_an_index_in_every_sort_order() {
         (Sort::Have, "title_groups_have"),
         (Sort::Recent, "title_groups_recent"),
     ] {
+        for shape in SearchShape::ALL {
+            let filter = Browse {
+                hidden: hidden.clone(),
+                q: Some("quest".into()),
+                sort,
+                ..Browse::default()
+            };
+            let clause = browse_clause(&c, "gb", &filter, shape).expect("clause");
+            let args = clause
+                .args
+                .iter()
+                .cloned()
+                .chain([Value::from(60), Value::from(0)]);
+            let plan: Vec<String> = c
+                .prepare(&format!("EXPLAIN QUERY PLAN {}", page_sql(&clause, sort)))
+                .expect("prepare")
+                .query_map(params_from_iter(args), |r| r.get(3))
+                .expect("query")
+                .collect::<rusqlite::Result<_>>()
+                .expect("rows");
+            let plan = plan.join("\n");
+            assert!(plan.contains(index), "{sort:?}: {plan}");
+            assert!(!plan.contains("TEMP B-TREE"), "{sort:?}: {plan}");
+            assert!(plan.contains("titles_parent"), "{sort:?}: {plan}");
+            let fts = shape != SearchShape::Like;
+            assert_eq!(
+                plan.contains("LIST SUBQUERY"),
+                fts,
+                "{sort:?} {shape:?}: {plan}"
+            );
+            assert_eq!(
+                plan.contains("SCAN title_search VIRTUAL TABLE"),
+                fts,
+                "{sort:?} {shape:?}: {plan}"
+            );
+        }
+    }
+    assert_eq!(SEARCH_SHAPE, SearchShape::Like);
+}
+
+#[test]
+fn every_search_shape_finds_the_same_groups() {
+    let mut c = conn();
+    crate::synth::seed(&mut c, 0.05, 2).expect("seed");
+    let hidden: Vec<String> = ["bios", "beta"].map(str::to_owned).to_vec();
+    for (platform, q) in [
+        ("nes", "sta"),
+        ("snes", "the"),
+        ("gb", "an"),
+        ("psx", "Vexmir"),
+        ("nes", ""),
+    ] {
         let filter = Browse {
+            q: Some(q.to_owned()).filter(|q| !q.is_empty()),
             hidden: hidden.clone(),
-            q: Some("quest".into()),
-            sort,
             ..Browse::default()
         };
-        let clause = browse_clause(&c, "gb", &filter).expect("clause");
-        let args = clause
-            .args
-            .iter()
-            .cloned()
-            .chain([Value::from(60), Value::from(0)]);
-        let plan: Vec<String> = c
-            .prepare(&format!("EXPLAIN QUERY PLAN {}", page_sql(&clause, sort)))
-            .expect("prepare")
-            .query_map(params_from_iter(args), |r| r.get(3))
-            .expect("query")
-            .collect::<rusqlite::Result<_>>()
-            .expect("rows");
-        let plan = plan.join("\n");
-        assert!(plan.contains(index), "{sort:?}: {plan}");
-        assert!(!plan.contains("TEMP B-TREE"), "{sort:?}: {plan}");
-        assert!(plan.contains("titles_parent"), "{sort:?}: {plan}");
-        assert!(plan.contains("LIST SUBQUERY"), "{sort:?}: {plan}");
-        assert!(
-            plan.contains("SCAN title_search VIRTUAL TABLE"),
-            "{sort:?}: {plan}"
+        let pages: Vec<_> = SearchShape::ALL
+            .into_iter()
+            .map(|s| browse_with(&c, platform, &filter, 60, 0, s).expect("browse"))
+            .collect();
+        assert!(pages.windows(2).all(|w| w[0] == w[1]), "{platform} {q}");
+    }
+    // The sentinels keep one platform's id from matching inside another's.
+    for platform in ["nes", "snes", "gb", "gbc"] {
+        let count = |sql: &str| -> i64 { c.query_row(sql, [platform], |r| r.get(0)).expect(sql) };
+        assert_eq!(
+            count(
+                "SELECT COUNT(*) FROM title_search
+                 WHERE title_search MATCH 'platform : \"' || char(31) || ?1 || char(31) || '\"'"
+            ),
+            count("SELECT COUNT(*) FROM titles WHERE platform_id = ?1"),
+            "{platform}"
         );
     }
 }

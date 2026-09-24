@@ -628,8 +628,63 @@ pub struct GroupRow {
     pub has_pick: bool,
 }
 
+/// How a search of three or more characters finds its groups; shorter ones always use
+/// [`SearchShape::Like`]. `mistarr bench-search` times each on a real database.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SearchShape {
+    /// `LIKE` over the platform's `title_groups_name` range.
+    Like,
+    /// The trigram index over every platform, probed while walking the platform's groups.
+    Fts,
+    /// The trigram index, filtered to the platform's sentinel-wrapped id in the same `MATCH`;
+    /// it misses a group whose parent title is on another platform than the group.
+    FtsPlatform,
+}
+
+impl SearchShape {
+    /// Every shape, in [`SearchShape::name`] order.
+    pub const ALL: [Self; 3] = [Self::Like, Self::Fts, Self::FtsPlatform];
+
+    /// The shape's command-line name.
+    ///
+    /// ```
+    /// use mistarr_server::db::titles::SearchShape;
+    /// assert_eq!(SearchShape::from_name(SearchShape::Fts.name()), Some(SearchShape::Fts));
+    /// ```
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Like => "like",
+            Self::Fts => "fts",
+            Self::FtsPlatform => "fts-platform",
+        }
+    }
+
+    /// The shape named `name`.
+    ///
+    /// ```
+    /// use mistarr_server::db::titles::SearchShape;
+    /// assert_eq!(SearchShape::from_name("like"), Some(SearchShape::Like));
+    /// assert_eq!(SearchShape::from_name("grep"), None);
+    /// ```
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.name() == name)
+    }
+}
+
+/// The shape [`browse`] uses: the fastest worst case in `tests/browse.rs`, which fails
+/// when another shape's worst case beats it by more than a quarter.
+pub const SEARCH_SHAPE: SearchShape = SearchShape::Like;
+
 /// The conditions of a browse request on `platform`, over `title_groups g`.
-fn browse_clause(conn: &Connection, platform: &str, filter: &Browse) -> Result<Clause> {
+fn browse_clause(
+    conn: &Connection,
+    platform: &str,
+    filter: &Browse,
+    shape: SearchShape,
+) -> Result<Clause> {
     let mut clause = Clause::default();
     clause.and("g.platform_id = ?", [Value::Text(platform.to_owned())]);
     let mra: bool = conn
@@ -643,7 +698,17 @@ fn browse_clause(conn: &Connection, platform: &str, filter: &Browse) -> Result<C
     }
     if let Some(q) = filter.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
         if q.chars().count() >= TRIGRAM {
-            clause.and(SEARCH, [Value::Text(phrase(q))]);
+            match shape {
+                SearchShape::Like => {}
+                SearchShape::Fts => clause.and(SEARCH, [Value::Text(phrase(q))]),
+                SearchShape::FtsPlatform => clause.and(
+                    SEARCH,
+                    [Value::Text(format!(
+                        "platform : \"\u{1f}{platform}\u{1f}\" AND base_name : {}",
+                        phrase(q)
+                    ))],
+                ),
+            }
         }
         // The index folds all of Unicode's case; LIKE keeps the ASCII-only match exact.
         clause.and(
@@ -731,7 +796,32 @@ pub fn browse(
     limit: u32,
     offset: u32,
 ) -> Result<(Vec<GroupRow>, u64)> {
-    let clause = browse_clause(conn, platform, filter)?;
+    browse_with(conn, platform, filter, limit, offset, SEARCH_SHAPE)
+}
+
+/// [`browse`] with the search done by `shape`, for comparing shapes.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::titles::{browse_with, Browse, SearchShape};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let filter = Browse { q: Some("quest".into()), ..Browse::default() };
+/// let (rows, total) = browse_with(&conn, "nes", &filter, 10, 0, SearchShape::Like).unwrap();
+/// assert!(rows.is_empty() && total == 0);
+/// ```
+pub fn browse_with(
+    conn: &Connection,
+    platform: &str,
+    filter: &Browse,
+    limit: u32,
+    offset: u32,
+    shape: SearchShape,
+) -> Result<(Vec<GroupRow>, u64)> {
+    let clause = browse_clause(conn, platform, filter, shape)?;
     let total: i64 = conn
         .prepare_cached(&format!(
             "SELECT COUNT(*) FROM title_groups g WHERE {}",

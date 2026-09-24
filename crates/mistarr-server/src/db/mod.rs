@@ -116,7 +116,10 @@ impl Db {
     pub fn write_blocking<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
         let mut conn = self.inner.writer.lock().map_err(|_| Error::Poisoned)?;
         let out = f(&mut conn);
-        settle(&mut conn)?;
+        // A failed settle leaves the groups dirty for the next commit; `f`'s own result stands.
+        if let Err(e) = settle(&mut conn) {
+            tracing::error!(error = %e, "title groups not refreshed after a write");
+        }
         out
     }
 
@@ -233,6 +236,50 @@ pub fn prepare_temp_dir(dir: &Path) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Opens `path` read-only with the reader's memory settings, for measuring queries on a
+/// database a server may be using; it never writes or migrates.
+///
+/// # Errors
+///
+/// [`Error::Db`] when the file cannot be opened.
+///
+/// ```
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = dir.path().join("ro.db");
+/// mistarr_server::db::Db::open(&path).unwrap();
+/// let conn = mistarr_server::db::open_read_only(&path).unwrap();
+/// assert!(conn.execute("CREATE TABLE x (y)", []).is_err());
+/// ```
+pub fn open_read_only(path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    conn.pragma_update(None, "query_only", true)?;
+    conn.pragma_update(None, "cache_size", -CACHE_KIB)?;
+    conn.pragma_update(None, "mmap_size", 0)?;
+    Ok(conn)
+}
+
+/// Whether the database has a table named `name`.
+///
+/// # Errors
+///
+/// [`Error::Db`] on SQLite failure.
+///
+/// ```
+/// let conn = rusqlite::Connection::open_in_memory().unwrap();
+/// assert!(!mistarr_server::db::has_table(&conn, "titles").unwrap());
+/// ```
+pub fn has_table(conn: &Connection, name: &str) -> Result<bool> {
+    Ok(conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
+        [name],
+        |r| r.get(0),
+    )?)
 }
 
 /// Applies the connection pragmas every connection shares; the memory-related ones are

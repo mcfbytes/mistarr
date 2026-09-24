@@ -1,43 +1,21 @@
-//! Browse and search speed on a synthetic catalogue the size of a large collection; see
-//! `docs/TESTING.md` "Browse speed". Run with `--nocapture` to print the timings.
+//! Browse and search speed on the synthetic full catalogue; see `docs/TESTING.md`
+//! "Browse speed". Run with `--nocapture` to print the timings.
 
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use mistarr_core::naming::{group_key, parse_name};
 use mistarr_server::db::dat_stage::{self, StagedGame, StagedRom};
-use mistarr_server::db::titles::{self, Browse, Sort};
+use mistarr_server::db::titles::{self, Browse, SearchShape, Sort, SEARCH_SHAPE};
 use mistarr_server::db::{self, dats, groups};
+use mistarr_server::synth::{self, BROWSED, ELSEWHERE, RARE};
 use rusqlite::{params, Connection};
-
-/// Titles per platform: one of 15 000 and five of 9 000, 60 000 in all.
-const PLATFORMS: [(&str, usize); 6] = [
-    ("nes", 15_000),
-    ("snes", 9_000),
-    ("gb", 9_000),
-    ("gba", 9_000),
-    ("megadrive", 9_000),
-    ("psx", 9_000),
-];
-
-/// Synthetic words; none contains a search term below.
-const WORDS: [&str; 24] = [
-    "Amber", "Bolt", "Cinder", "Delta", "Ember", "Frost", "Glimmer", "Harbor", "Ivory", "Jolt",
-    "Lumen", "Marble", "Nimbus", "Orbit", "Pebble", "Quill", "Ripple", "Summit", "Tundra", "Umber",
-    "Vortex", "Willow", "Yonder", "Zephyr",
-];
 
 /// Default `prefs.hide`.
 const HIDE: [&str; 6] = ["bios", "beta", "proto", "demo", "sample", "program"];
 
-/// Search terms: one in a handful of titles, one in about a quarter of every platform,
-/// and one common elsewhere but in three groups of the large platform.
-const RARE: &str = "Quokka";
-const COMMON: &str = "sta";
-const ELSEWHERE: &str = "Kart";
-
-/// The `title_groups` view the table replaced, with its per-request browse filter.
-const OLD_VIEW: &str = "CREATE TEMP VIEW old_title_groups AS
+/// The reference aggregation query for `title_groups`, computed per request.
+const REFERENCE: &str = "CREATE TEMP VIEW reference_groups AS
 SELECT g.parent_id, g.platform_id, p.base_name, p.name,
        g.variants, g.have_verified, g.wanted, g.has_pick, g.pick_id, g.newest_id
 FROM (
@@ -62,141 +40,11 @@ FROM (
 ) g
 JOIN titles p ON p.id = g.parent_id;";
 
-const OLD_WHERE: &str = "g.platform_id = ?1
-    AND (?2 IS NULL OR g.base_name LIKE ?2 ESCAPE '\\')
+const REFERENCE_WHERE: &str = "g.platform_id = ?1
     AND EXISTS (
       SELECT 1 FROM titles v WHERE v.parent_id = g.parent_id AND v.retired = 0
         AND NOT EXISTS (SELECT 1 FROM title_flags f
-                        WHERE f.title_id = v.id AND f.flag IN (SELECT value FROM json_each(?3))))
-    AND (EXISTS (SELECT 1 FROM titles s WHERE s.id = g.parent_id AND s.source = 'mra')
-         OR NOT EXISTS (SELECT 1 FROM titles m WHERE m.platform_id = g.platform_id
-                        AND m.source = 'mra' AND m.retired = 0))";
-
-struct Rng(u64);
-
-impl Rng {
-    fn next(&mut self) -> u64 {
-        self.0 ^= self.0 << 13;
-        self.0 ^= self.0 >> 7;
-        self.0 ^= self.0 << 17;
-        self.0
-    }
-
-    fn below(&mut self, n: usize) -> usize {
-        usize::try_from(self.next() % u64::try_from(n).expect("n")).expect("usize")
-    }
-}
-
-/// The base name of group `g` of platform `p`.
-fn base_name(rng: &mut Rng, p: usize, g: usize) -> String {
-    let mut words = vec![WORDS[rng.below(WORDS.len())], WORDS[rng.below(WORDS.len())]];
-    if rng.below(4) == 0 {
-        words.push("Star");
-    }
-    if (p > 0 && rng.below(3) == 0) || (p == 0 && g < 3) {
-        words.push(ELSEWHERE);
-    }
-    if g % 3_000 == 7 {
-        words.push(RARE);
-    }
-    format!("{} {g}", words.join(" "))
-}
-
-/// Builds the catalogue in one transaction the way the importers would leave it: clone
-/// groups of three regions, a beta in every 50th group, a BIOS-only group in every 200th,
-/// one rom per title, and 60 000 files on the large platform.
-fn build(conn: &mut Connection) -> Duration {
-    let start = Instant::now();
-    let tx = conn.transaction().expect("tx");
-    let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
-    for (p, (platform, count)) in PLATFORMS.iter().enumerate() {
-        exec(
-            &tx,
-            "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
-             VALUES (?1, ?1 || ' synthetic', '1', 'synthetic.dat', 0, ?2)",
-            params![platform, i64::try_from(*count).expect("count")],
-        );
-        let version = tx.last_insert_rowid();
-        let mut parent = 0;
-        let mut base = String::new();
-        for i in 0..*count {
-            let g = i / 3;
-            if i % 3 == 0 {
-                base = base_name(&mut rng, p, g);
-            }
-            let region = ["USA", "Europe", "Japan"][i % 3];
-            let mut flags: Vec<String> = Vec::new();
-            if g % 200 == 199 {
-                flags.push("bios".into());
-            } else if g % 50 == 49 && i % 3 == 2 {
-                flags.push("beta".into());
-            }
-            let name = format!("{base} ({region})");
-            exec(
-                &tx,
-                "INSERT INTO titles (platform_id, dat_version_id, name, base_name, is_1g1r_pick, wanted)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                params![platform, version, name, base, i % 3 == 0, i % 97 == 0],
-            );
-            let id = tx.last_insert_rowid();
-            if i % 3 == 0 {
-                parent = id;
-            }
-            exec(
-                &tx,
-                "UPDATE titles SET parent_id = ?2 WHERE id = ?1",
-                params![id, parent],
-            );
-            titles::set_flags(&tx, titles::TitleId(id), &flags).expect("flags");
-            exec(
-                &tx,
-                "INSERT INTO title_regions (title_id, pos, region) VALUES (?1, 0, ?2)",
-                params![id, region],
-            );
-            exec(
-                &tx,
-                "INSERT INTO roms (title_id, name, size, status) VALUES (?1, ?2, 16, 'good')",
-                params![id, format!("{name}.bin")],
-            );
-            let rom = tx.last_insert_rowid();
-            let files: &[(&str, bool)] = if p == 0 {
-                &[
-                    ("verified", true),
-                    ("misnamed", true),
-                    ("bad", true),
-                    ("unverified", false),
-                ]
-            } else if i % 2 == 0 {
-                &[("verified", true)]
-            } else {
-                &[]
-            };
-            for (k, (state, linked)) in files.iter().enumerate() {
-                let state = if *state == "verified" && i % 5 == 4 {
-                    "misnamed"
-                } else {
-                    state
-                };
-                exec(
-                    &tx,
-                    "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
-                     VALUES (?1, ?2, 16, 0, ?3, ?4, 0)",
-                    params![platform, format!("{platform}/{id}-{k}.bin"), linked.then_some(rom), state],
-                );
-            }
-        }
-    }
-    db::commit(tx).expect("commit");
-    start.elapsed()
-}
-
-/// Runs `sql` through the statement cache.
-fn exec(c: &Connection, sql: &str, args: impl rusqlite::Params) {
-    c.prepare_cached(sql)
-        .expect("prepare")
-        .execute(args)
-        .expect(sql);
-}
+                        WHERE f.title_id = v.id AND f.flag IN (SELECT value FROM json_each(?2))))";
 
 /// The median of `runs` timings of `f`, with its last result.
 fn time<T>(runs: usize, mut f: impl FnMut() -> T) -> (Duration, T) {
@@ -212,98 +60,54 @@ fn time<T>(runs: usize, mut f: impl FnMut() -> T) -> (Duration, T) {
 }
 
 fn ms(d: Duration) -> String {
-    format!("{:.2} ms", d.as_secs_f64() * 1000.0)
+    format!("{:.2}", d.as_secs_f64() * 1000.0)
 }
 
 fn hide() -> Vec<String> {
     HIDE.iter().map(|s| (*s).to_owned()).collect()
 }
 
-/// One page and the total of the old view on `platform`, as the old browse ran them.
-fn old_browse(c: &Connection, platform: &str, q: Option<&str>) -> (Vec<i64>, i64) {
-    let like = q.map(|q| format!("%{q}%"));
+/// The default page and total of the reference query on `platform`.
+fn reference_browse(c: &Connection, platform: &str) -> (Vec<i64>, u64) {
     let hidden = serde_json::to_string(&HIDE).expect("json");
     let total: i64 = c
         .query_row(
-            &format!("SELECT COUNT(*) FROM old_title_groups g WHERE {OLD_WHERE}"),
-            params![platform, like, hidden],
+            &format!("SELECT COUNT(*) FROM reference_groups g WHERE {REFERENCE_WHERE}"),
+            params![platform, hidden],
             |r| r.get(0),
         )
-        .expect("old total");
+        .expect("reference total");
     let ids = c
         .prepare(&format!(
-            "SELECT g.parent_id FROM old_title_groups g LEFT JOIN titles k ON k.id = g.pick_id
-             WHERE {OLD_WHERE} ORDER BY g.base_name COLLATE NOCASE, g.parent_id LIMIT 60"
+            "SELECT g.parent_id FROM reference_groups g WHERE {REFERENCE_WHERE}
+             ORDER BY g.base_name COLLATE NOCASE, g.parent_id LIMIT 60"
         ))
         .expect("prepare")
-        .query_map(params![platform, like, hidden], |r| r.get(0))
+        .query_map(params![platform, hidden], |r| r.get(0))
         .expect("query")
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
-    (ids, total)
+    (ids, u64::try_from(total).expect("total"))
 }
 
-fn new_browse(c: &Connection, platform: &str, q: Option<&str>, sort: Sort) -> (Vec<i64>, u64) {
+fn page(
+    c: &Connection,
+    platform: &str,
+    q: &str,
+    sort: Sort,
+    shape: SearchShape,
+) -> (Vec<i64>, u64) {
     let filter = Browse {
-        q: q.map(str::to_owned),
+        q: Some(q.to_owned()).filter(|q| !q.is_empty()),
         hidden: hide(),
         sort,
         ..Browse::default()
     };
-    let (rows, total) = titles::browse(c, platform, &filter, 60, 0).expect("browse");
+    let (rows, total) = titles::browse_with(c, platform, &filter, 60, 0, shape).expect("browse");
     (rows.into_iter().map(|r| r.parent_id.0).collect(), total)
 }
 
-/// A search shape: the `FROM` and `WHERE` of one page and of its count.
-struct Shape {
-    name: &'static str,
-    from: &'static str,
-    filter: &'static str,
-}
-
-const SHAPES: [Shape; 3] = [
-    Shape {
-        name: "LIKE on the platform's names",
-        from: "title_groups g",
-        filter: "g.platform_id = ?2 AND g.base_name LIKE ?3 ESCAPE '\\' AND ?1 IS NOT NULL",
-    },
-    Shape {
-        name: "(a) FTS drives rowid seeks",
-        from: "title_search s CROSS JOIN title_groups g",
-        filter: "s.title_search MATCH ?1 AND g.parent_id = s.rowid AND g.platform_id = ?2
-                 AND g.base_name LIKE ?3 ESCAPE '\\'",
-    },
-    Shape {
-        name: "(b) platform index probes FTS rowids",
-        from: "title_groups g",
-        filter: "g.platform_id = ?2
-                 AND g.parent_id IN (SELECT rowid FROM title_search WHERE title_search MATCH ?1)
-                 AND g.base_name LIKE ?3 ESCAPE '\\'",
-    },
-];
-
-fn shape(c: &Connection, s: &Shape, term: &str) -> (Vec<i64>, i64) {
-    let args = params![format!("\"{term}\""), "nes", format!("%{term}%")];
-    let total: i64 = c
-        .query_row(
-            &format!("SELECT COUNT(*) FROM {} WHERE {}", s.from, s.filter),
-            args,
-            |r| r.get(0),
-        )
-        .expect("count");
-    let ids = c
-        .prepare(&format!(
-            "SELECT g.parent_id FROM {} WHERE {} ORDER BY g.base_name COLLATE NOCASE, g.parent_id LIMIT 60",
-            s.from, s.filter
-        ))
-        .expect("prepare")
-        .query_map(args, |r| r.get(0))
-        .expect("query")
-        .collect::<rusqlite::Result<_>>()
-        .expect("rows");
-    (ids, total)
-}
-
+/// A file database with the full catalogue and the board's reader cache size.
 fn open(dir: &Path) -> Connection {
     let mut c = Connection::open(dir.join("browse.db")).expect("open");
     c.pragma_update(None, "journal_mode", "WAL").expect("wal");
@@ -313,88 +117,111 @@ fn open(dir: &Path) -> Connection {
     c
 }
 
+/// Every search the benchmark runs: rare, common trigrams, below trigram, common
+/// elsewhere, and none.
+fn terms() -> Vec<&'static str> {
+    vec![RARE, "the", "sta", "man", "st", "an", ELSEWHERE, ""]
+}
+
 #[test]
-fn browse_and_search_stay_fast_on_a_large_platform() {
-    for w in WORDS {
-        for term in [RARE, COMMON, ELSEWHERE] {
-            assert!(
-                !w.to_lowercase().contains(&term.to_lowercase()),
-                "{w} contains {term}"
+fn browse_and_search_stay_fast_on_a_full_catalogue() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut c = open(dir.path());
+    let start = Instant::now();
+    let seeded = synth::seed(&mut c, 1.0, 1).expect("seed");
+    eprintln!(
+        "seeded {} titles, {} roms, {} files in {} ms",
+        seeded.titles,
+        seeded.roms,
+        seeded.files,
+        ms(start.elapsed())
+    );
+    let runs = if cfg!(debug_assertions) { 3 } else { 15 };
+
+    c.execute_batch(REFERENCE).expect("reference query");
+    let (reference, reference_page) = time(1, || reference_browse(&c, "psx"));
+    let (new, new_page) = time(runs, || page(&c, "psx", "", Sort::Name, SEARCH_SHAPE));
+    assert_eq!(new_page, reference_page);
+    eprintln!(
+        "default psx page and total: reference query {} ms, table {} ms",
+        ms(reference),
+        ms(new)
+    );
+    assert!(
+        new * 5 < reference,
+        "table {} against the reference query {}",
+        ms(new),
+        ms(reference)
+    );
+    for sort in [Sort::Have, Sort::Recent] {
+        let (t, _) = time(runs, || page(&c, "psx", "", sort, SEARCH_SHAPE));
+        eprintln!("  sort {sort:?}: {} ms", ms(t));
+    }
+    let (t, _) = time(runs, || titles::counts(&c, &hide()).expect("counts"));
+    eprintln!("counts of every platform: {} ms", ms(t));
+
+    let mut worst = [Duration::ZERO; SearchShape::ALL.len()];
+    eprintln!(
+        "platform term     groups  {}",
+        SearchShape::ALL
+            .map(|s| format!("{:>14}", s.name()))
+            .join("")
+    );
+    for platform in BROWSED {
+        for term in terms() {
+            let mut line = String::new();
+            let mut expected = None;
+            for (i, shape) in SearchShape::ALL.into_iter().enumerate() {
+                let (t, got) = time(runs, || page(&c, platform, term, Sort::Name, shape));
+                let want = expected.get_or_insert_with(|| got.clone());
+                assert_eq!(&got, want, "{platform} {term:?} {shape:?}");
+                worst[i] = worst[i].max(t);
+                line.push_str(&format!("{:>14}", ms(t)));
+            }
+            let total = expected.map_or(0, |e| e.1);
+            eprintln!(
+                "{platform:<8} {:<9} {total:>6}  {line}",
+                format!("{term:?}")
             );
         }
     }
-    let dir = tempfile::tempdir().expect("tempdir");
-    let mut c = open(dir.path());
-    let built = build(&mut c);
-    c.execute_batch(OLD_VIEW).expect("old view");
-    let groups_rows: i64 = c
-        .query_row("SELECT COUNT(*) FROM title_groups", [], |r| r.get(0))
-        .expect("groups");
+    let best = worst.iter().min().copied().unwrap_or_default();
+    let chosen = worst[SearchShape::ALL
+        .iter()
+        .position(|s| *s == SEARCH_SHAPE)
+        .expect("chosen shape")];
     eprintln!(
-        "built 60 000 titles, {groups_rows} groups, in {}",
-        ms(built)
+        "worst case: {}; default {}",
+        SearchShape::ALL
+            .iter()
+            .zip(worst)
+            .map(|(s, w)| format!("{} {} ms", s.name(), ms(w)))
+            .collect::<Vec<_>>()
+            .join(", "),
+        SEARCH_SHAPE.name()
     );
-
-    let (old, (old_ids, old_total)) = time(3, || old_browse(&c, "nes", None));
-    let (new, (new_ids, new_total)) = time(9, || new_browse(&c, "nes", None, Sort::Name));
-    assert_eq!(
-        (new_ids, new_total),
-        (old_ids, u64::try_from(old_total).expect("total"))
-    );
-    eprintln!(
-        "default page and total on nes: old view {}, table {}",
-        ms(old),
-        ms(new)
-    );
-    for sort in [Sort::Have, Sort::Recent] {
-        let (t, _) = time(9, || new_browse(&c, "nes", None, sort));
-        eprintln!("  sort {sort:?}: {}", ms(t));
-    }
-    let (t, _) = time(9, || titles::counts(&c, &hide()).expect("counts"));
-    eprintln!("counts of every platform: {}", ms(t));
-    assert!(new * 5 < old, "table {} against view {}", ms(new), ms(old));
     assert!(
-        new < Duration::from_millis(100),
-        "default browse took {}",
-        ms(new)
+        chosen < Duration::from_millis(100),
+        "worst search {} ms",
+        ms(chosen)
     );
-
-    for term in [RARE, COMMON, ELSEWHERE] {
-        let (old, (old_ids, old_total)) = time(3, || old_browse(&c, "nes", Some(term)));
-        let (new, (new_ids, new_total)) = time(9, || new_browse(&c, "nes", Some(term), Sort::Name));
-        assert_eq!(
-            (new_ids, new_total),
-            (old_ids, u64::try_from(old_total).expect("total"))
-        );
-        eprintln!(
-            "search {term:?} ({new_total} groups): old view {}, browse {}",
-            ms(old),
-            ms(new)
-        );
-        let mut expected = None;
-        for s in &SHAPES {
-            let (t, got) = time(9, || shape(&c, s, term));
-            expected.get_or_insert_with(|| got.clone());
-            assert_eq!(Some(&got), expected.as_ref(), "{}", s.name);
-            eprintln!("  {}: {}", s.name, ms(t));
-        }
+    if !cfg!(debug_assertions) {
         assert!(
-            new < Duration::from_millis(100),
-            "search {term} took {}",
-            ms(new)
+            chosen <= best * 5 / 4,
+            "default {} ms, best {} ms",
+            ms(chosen),
+            ms(best)
         );
     }
     assert!(groups::check(&c).expect("check").is_consistent());
 }
 
-/// 15 000 staged games with clone groups and flags, for a timed DAT load.
-fn stage(c: &Connection) {
-    let mut rng = Rng(7);
-    let games: Vec<StagedGame> = (0..15_000)
-        .map(|i| {
-            let region = ["USA", "Europe", "Japan"][i % 3];
-            let tag = if i % 150 == 149 { " (Beta)" } else { "" };
-            let name = format!("{} ({region}){tag}", base_name(&mut rng, 1, i / 3));
+/// A staged DAT of `count` games named like the synthetic catalogue.
+fn stage(c: &Connection, count: usize) {
+    let games: Vec<StagedGame> = synth::game_names(count, 9)
+        .into_iter()
+        .enumerate()
+        .map(|(i, name)| {
             let parsed = parse_name(&name);
             StagedGame {
                 base_name: parsed.base_name.clone(),
@@ -402,7 +229,7 @@ fn stage(c: &Connection) {
                 clone_of: None,
                 regions: parsed.regions.iter().map(|r| r.name().to_owned()).collect(),
                 languages: parsed.languages.clone(),
-                revision: None,
+                revision: parsed.revision.as_ref().map(|r| r.label.clone()),
                 flags: parsed.flag_labels(),
                 roms: vec![StagedRom {
                     name: format!("{name}.sfc"),
@@ -497,19 +324,19 @@ fn measure_dat_load_and_index_size() {
                 c.execute_batch(&format!("DROP TRIGGER {t}")).expect("drop");
             }
         }
-        stage(&c);
+        stage(&c, 15_000);
         let first = load(&mut c, maintained);
-        stage(&c);
+        stage(&c, 15_000);
         let again = load(&mut c, maintained);
         eprintln!(
-            "15 000-game DAT, {label}: first load {}, reload {}",
+            "15 000-game DAT, {label}: first load {} ms, reload {} ms",
             ms(first),
             ms(again)
         );
     }
 
     let mut c = open(dir.path());
-    build(&mut c);
+    let seeded = synth::seed(&mut c, 1.0, 1).expect("seed");
     drop(c);
     let search = size_of(dir.path(), "DROP TABLE title_search");
     let summary = size_of(dir.path(), "DROP TABLE title_groups");
@@ -521,7 +348,8 @@ fn measure_dat_load_and_index_size() {
         .expect("size")
         .len();
     eprintln!(
-        "60 000 titles: database {} KiB, title_search {} KiB, title_groups {} KiB, flag and region tables {} KiB",
+        "{} titles: database {} KiB, title_search {} KiB, title_groups {} KiB, flag, region and language tables {} KiB",
+        seeded.titles,
         total / 1024,
         search / 1024,
         summary / 1024,
