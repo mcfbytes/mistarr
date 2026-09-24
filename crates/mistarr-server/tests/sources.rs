@@ -1,0 +1,393 @@
+//! Source import, binding and the Sources API against a booted server.
+
+mod common;
+
+use std::path::PathBuf;
+
+use common::{boot, boot_with, config_in, eventually, get, request, request_bytes, Booted, Sse};
+use mistarr_clients::fake::{FakeResponse, FakeServer};
+use mistarr_server::db::sources::fixtures::seed_rom;
+use serde_json::{json, Value};
+
+/// A synthetic infohash of one repeated byte.
+fn hash(byte: u8) -> String {
+    format!("{byte:02x}").repeat(20)
+}
+
+fn bstr(s: &str) -> String {
+    format!("{}:{s}", s.len())
+}
+
+/// A synthetic multi-file `.torrent` whose files sit under a subdirectory.
+fn torrent(name: &str, files: &[(&str, u64)]) -> Vec<u8> {
+    let mut list = String::from("l");
+    for (file, len) in files {
+        list.push_str(&format!(
+            "d6:lengthi{len}e4:pathl{}{}ee",
+            bstr("NES"),
+            bstr(file)
+        ));
+    }
+    list.push('e');
+    let info = format!(
+        "d5:files{list}4:name{}12:piece lengthi16384e6:pieces0:e",
+        bstr(name)
+    );
+    let announce = bstr("http://tracker.invalid/announce");
+    format!("d8:announce{announce}4:info{info}e").into_bytes()
+}
+
+/// Three roms on `nes` that the synthetic torrents refer to.
+fn seed_catalog(b: &Booted) {
+    b.running
+        .app
+        .db
+        .write_blocking(|c| {
+            seed_rom(c, "nes", "Example Quest (USA).nes", 40_976, "[]")?;
+            seed_rom(c, "nes", "Second Try (Japan).nes", 24_592, "[]")?;
+            seed_rom(c, "nes", "Third Tale (Europe).nes", 65_552, "[]")?;
+            Ok(())
+        })
+        .expect("seed");
+}
+
+fn sources_dir(b: &Booted) -> PathBuf {
+    b.running.app.config().paths.sources()
+}
+
+/// Three of four files match `nes`: two by name, one by base name and size.
+fn matching_set(name: &str) -> Vec<u8> {
+    torrent(
+        name,
+        &[
+            ("Example Quest (USA).nes", 40_976),
+            ("Second Try (Europe).nes", 24_592),
+            ("Third Tale (Europe).nes", 65_552),
+            ("readme.txt", 120),
+        ],
+    )
+}
+
+/// One of four files matches `nes`.
+fn sparse_set(name: &str) -> Vec<u8> {
+    torrent(
+        name,
+        &[
+            ("Example Quest (USA).nes", 40_976),
+            ("Unlisted One (USA).nes", 1_000),
+            ("Unlisted Two (USA).nes", 2_000),
+            ("notes.txt", 10),
+        ],
+    )
+}
+
+async fn sources(b: &Booted) -> Vec<Value> {
+    let r = get(b.addr(), "/api/v1/sources").await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    r.json()["items"].as_array().cloned().unwrap_or_default()
+}
+
+async fn only_source(b: &Booted) -> Value {
+    let items = sources(b).await;
+    assert_eq!(items.len(), 1, "{items:?}");
+    items[0].clone()
+}
+
+async fn put(b: &Booted, id: &Value, body: &Value) -> common::Response {
+    let path = format!("/api/v1/sources/{id}");
+    request(b.addr(), "PUT", &path, &[], Some(&body.to_string())).await
+}
+
+#[tokio::test]
+async fn dropped_torrent_binds_and_records_matches() {
+    let b = boot().await;
+    seed_catalog(&b);
+    let mut sse = Sse::open(b.addr(), "/api/v1/events", &[]).await;
+    let dir = sources_dir(&b);
+    std::fs::write(dir.join("set.torrent"), matching_set("Synthetic Set")).expect("write");
+    sse.until("event: source.changed").await;
+    assert!(sse.text.contains(r#""state":"bound""#), "{}", sse.text);
+    assert!(sse.text.contains(r#""platform_id":"nes""#), "{}", sse.text);
+
+    let s = only_source(&b).await;
+    assert_eq!(s["state"], "bound");
+    assert_eq!(s["platform_id"], "nes");
+    assert_eq!(s["display_name"], "Synthetic Set");
+    assert_eq!(s["origin_file"], "set.torrent");
+    assert_eq!(
+        (s["file_count"].clone(), s["matched_count"].clone()),
+        (json!(4), json!(3))
+    );
+    assert_eq!(s["bind_score"], 0.75);
+    assert_eq!(s["seed_policy"], "none");
+    assert_eq!(s["reason"], Value::Null);
+    assert!(dir.join("loaded/set.torrent").is_file());
+    assert!(!dir.join("set.torrent").exists());
+
+    let files = get(b.addr(), &format!("/api/v1/sources/{}/files", s["id"])).await;
+    assert_eq!(files.status, 200);
+    let files = files.json();
+    assert_eq!(files["total"], 4);
+    let items = files["items"].as_array().expect("items");
+    let got: Vec<(Value, Value, Value)> = items
+        .iter()
+        .map(|f| {
+            (
+                f["path"].clone(),
+                f["rom_name"].clone(),
+                f["confidence"].clone(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            (
+                json!("NES/Example Quest (USA).nes"),
+                json!("Example Quest (USA).nes"),
+                json!("name")
+            ),
+            (
+                json!("NES/Second Try (Europe).nes"),
+                json!("Second Try (Japan).nes"),
+                json!("size")
+            ),
+            (
+                json!("NES/Third Tale (Europe).nes"),
+                json!("Third Tale (Europe).nes"),
+                json!("name")
+            ),
+            (json!("NES/readme.txt"), Value::Null, Value::Null),
+        ]
+    );
+    let missing = get(b.addr(), "/api/v1/sources/999/files").await;
+    assert_eq!(missing.status, 404);
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn below_threshold_stays_unbound_until_bound_by_hand() {
+    let b = boot().await;
+    seed_catalog(&b);
+    let dir = sources_dir(&b);
+    std::fs::write(dir.join("sparse.torrent"), sparse_set("Sparse Set")).expect("write");
+    eventually("an unbound source", || async {
+        sources(&b).await.len() == 1
+    })
+    .await;
+    let s = only_source(&b).await;
+    assert_eq!(s["state"], "unbound");
+    assert_eq!(s["platform_id"], Value::Null);
+    assert_eq!(s["matched_count"], 0);
+    let reason = s["reason"].as_str().expect("reason");
+    assert!(reason.contains("60%"), "{reason}");
+
+    let r = put(&b, &s["id"], &json!({ "platform_id": "no-such" })).await;
+    assert_eq!(r.status, 400);
+    let r = put(&b, &s["id"], &json!({ "platform_id": "nes" })).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let s = r.json();
+    assert_eq!(s["state"], "bound");
+    assert_eq!(s["platform_id"], "nes");
+    assert_eq!(
+        (s["matched_count"].clone(), s["bind_score"].clone()),
+        (json!(1), json!(0.25))
+    );
+    let r = put(&b, &s["id"], &json!({ "platform_id": null })).await;
+    assert_eq!(r.json()["state"], "unbound");
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn seed_policy_disable_and_delete() {
+    let b = boot().await;
+    seed_catalog(&b);
+    std::fs::write(sources_dir(&b).join("s.torrent"), matching_set("Seed Set")).expect("write");
+    eventually("a source", || async { sources(&b).await.len() == 1 }).await;
+    let id = only_source(&b).await["id"].clone();
+
+    let r = put(&b, &id, &json!({ "seed_policy": "ratio:1.5" })).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["seed_policy"], "ratio:1.5");
+    for bad in [
+        json!({ "seed_policy": "ratio:0" }),
+        json!({ "state": "gone" }),
+        json!({ "x": 1 }),
+    ] {
+        assert_eq!(put(&b, &id, &bad).await.status, 400, "{bad}");
+    }
+    let r = put(&b, &id, &json!({ "state": "disabled" })).await;
+    assert_eq!(r.json()["state"], "disabled");
+    let r = put(&b, &id, &json!({ "state": "enabled" })).await;
+    assert_eq!(r.json()["state"], "bound");
+    assert_eq!(put(&b, &json!(999), &json!({})).await.status, 404);
+
+    let path = format!("/api/v1/sources/{id}");
+    let r = request(b.addr(), "DELETE", &path, &[], None).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    assert!(sources(&b).await.is_empty());
+    let r = request(b.addr(), "DELETE", &path, &[], None).await;
+    assert_eq!(r.status, 404);
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn upload_takes_a_torrent_or_a_magnet() {
+    let b = boot().await;
+    seed_catalog(&b);
+    let data = matching_set("Uploaded Set");
+    let mut body =
+        b"--bnd\r\nContent-Disposition: form-data; name=\"file\"; filename=\"up.torrent\"\r\n\r\n"
+            .to_vec();
+    body.extend_from_slice(&data);
+    body.extend_from_slice(b"\r\n--bnd--\r\n");
+    let multipart = "multipart/form-data; boundary=bnd";
+    let r = request_bytes(b.addr(), "POST", "/api/v1/sources/upload", multipart, &body).await;
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert_eq!(r.json()["file"], "up.torrent");
+    eventually("the uploaded torrent bound", || async {
+        sources(&b)
+            .await
+            .first()
+            .is_some_and(|s| s["state"] == "bound")
+    })
+    .await;
+    let again = request_bytes(b.addr(), "POST", "/api/v1/sources/upload", multipart, &body).await;
+    assert_eq!(again.status, 400);
+
+    let uri = format!(
+        "magnet:?xt=urn:btih:{}&dn=Magnet%20Set&tr=http%3A%2F%2Ftracker.invalid%2Fannounce",
+        hash(0x5a)
+    );
+    let json_body = json!({ "magnet": uri }).to_string();
+    let r = request(
+        b.addr(),
+        "POST",
+        "/api/v1/sources/upload",
+        &[],
+        Some(&json_body),
+    )
+    .await;
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert_eq!(r.json()["file"], "Magnet Set.magnet");
+    eventually("the magnet source", || async {
+        sources(&b).await.len() == 2
+    })
+    .await;
+    let m = sources(&b).await[1].clone();
+    assert_eq!(m["state"], "resolving");
+    assert_eq!(m["infohash"], hash(0x5a));
+    assert_eq!(m["display_name"], "Magnet Set");
+    eventually("a reason on the resolving source", || async {
+        sources(&b).await[1]["reason"].is_string()
+    })
+    .await;
+    let r = request(
+        b.addr(),
+        "POST",
+        "/api/v1/sources/upload",
+        &[],
+        Some(&json_body),
+    )
+    .await;
+    assert_eq!(r.status, 400, "a second copy of a resolving magnet");
+
+    let bad = json!({ "magnet": "magnet:?dn=nothing" }).to_string();
+    let r = request(b.addr(), "POST", "/api/v1/sources/upload", &[], Some(&bad)).await;
+    assert_eq!(r.status, 400);
+    let junk = b"--bnd\r\nContent-Disposition: form-data; name=\"file\"; filename=\"x.torrent\"\r\n\r\nnot bencode\r\n--bnd--\r\n";
+    let r = request_bytes(b.addr(), "POST", "/api/v1/sources/upload", multipart, junk).await;
+    assert_eq!(r.status, 400);
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn malformed_file_is_rejected_with_a_reason() {
+    let b = boot().await;
+    let dir = sources_dir(&b);
+    std::fs::write(dir.join("broken.torrent"), b"d4:infoi1ee").expect("write");
+    let reason = dir.join("rejected/broken.torrent.reason.txt");
+    eventually("the rejected file", || async { reason.is_file() }).await;
+    assert!(dir.join("rejected/broken.torrent").is_file());
+    let text = std::fs::read_to_string(&reason).expect("reason");
+    assert!(text.starts_with("Not a valid .torrent file"), "{text}");
+    assert!(sources(&b).await.is_empty());
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn magnet_resolves_through_the_client() {
+    let fake = FakeServer::start().await.expect("fake");
+    let h = hash(0xab);
+    fake.push(FakeResponse::success(json!({ "version": "4.0.5" })));
+    fake.push(FakeResponse::success(json!({
+        "torrent-added": { "id": 1, "name": "Magnet Set", "hashString": h }
+    })));
+    fake.push(FakeResponse::success(
+        json!({ "torrents": [{ "wanted": [] }] }),
+    ));
+    fake.push(FakeResponse::success(json!({})));
+    fake.push(FakeResponse::success(
+        json!({ "torrents": [{ "name": "Magnet Set", "files": [] }] }),
+    ));
+    let listed: Vec<Value> = [
+        ("Example Quest (USA).nes", 40_976),
+        ("Second Try (Europe).nes", 24_592),
+        ("extra.txt", 3),
+    ]
+    .iter()
+    .map(
+        |(f, n)| json!({ "name": format!("Magnet Set/NES/{f}"), "length": n, "bytesCompleted": 0 }),
+    )
+    .collect();
+    fake.push(FakeResponse::success(
+        json!({ "torrents": [{ "name": "Magnet Set", "files": listed }] }),
+    ));
+    fake.push(FakeResponse::success(
+        json!({ "torrents": [{ "wanted": [true, true, true] }] }),
+    ));
+    fake.push(FakeResponse::success(json!({})));
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = config_in(dir.path());
+    config.client.url = fake.url();
+    let b = boot_with(dir, config).await;
+    assert!(b.running.app.client().is_some());
+    seed_catalog(&b);
+    let mut sse = Sse::open(b.addr(), "/api/v1/events", &[]).await;
+    let uri = format!(
+        "magnet:?xt=urn:btih:{h}&dn=Magnet%20Set&tr=http%3A%2F%2Ftracker.invalid%2Fannounce"
+    );
+    std::fs::write(sources_dir(&b).join("m.magnet"), format!("{uri}\n")).expect("write");
+    sse.until(r#""state":"resolving""#).await;
+    sse.until(r#""state":"bound""#).await;
+
+    let s = only_source(&b).await;
+    assert_eq!(s["state"], "bound");
+    assert_eq!(s["platform_id"], "nes");
+    assert_eq!(s["client_id"], h.as_str());
+    assert_eq!(
+        (s["file_count"].clone(), s["matched_count"].clone()),
+        (json!(3), json!(2))
+    );
+    assert_eq!(s["reason"], Value::Null);
+    let files = get(b.addr(), &format!("/api/v1/sources/{}/files", s["id"]))
+        .await
+        .json();
+    assert_eq!(files["items"][0]["path"], "NES/Example Quest (USA).nes");
+    assert_eq!(files["items"][1]["confidence"], "size");
+
+    let bodies = fake.bodies();
+    assert_eq!(bodies.len(), 8, "{bodies:?}");
+    let add = &bodies[1];
+    assert_eq!(add["method"], "torrent-add");
+    assert_eq!(add["arguments"]["paused"], true);
+    assert_eq!(add["arguments"]["filename"], uri.as_str());
+    let staging = b.running.app.config().paths.staging().join(&h);
+    assert_eq!(
+        add["arguments"]["download-dir"],
+        staging.to_string_lossy().as_ref()
+    );
+    assert_eq!(bodies[7]["arguments"]["files-unwanted"], json!([0, 1, 2]));
+    b.running.shutdown().await.expect("shutdown");
+}

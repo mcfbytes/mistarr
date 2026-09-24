@@ -793,3 +793,46 @@ fn debug_output_hides_credentials() {
     assert!(shown.contains("<redacted>"));
     assert!(!shown.contains("dXNlcjpwYXNz"));
 }
+
+#[tokio::test]
+async fn files_strip_the_torrent_name_and_wait_for_metadata() {
+    let (fake, client) = setup().await;
+    fake.push(FakeResponse::success(
+        json!({ "torrents": [{ "name": "Set", "files": [] }] }),
+    ));
+    fake.push(FakeResponse::success(json!({ "torrents": [{
+        "name": "Set",
+        "files": [
+            { "name": "Set/Sub/a.bin", "length": 4, "bytesCompleted": 0 },
+            { "name": "Set/b.bin", "length": 8, "bytesCompleted": 0 }
+        ]
+    }] })));
+    fake.push(FakeResponse::success(json!({ "torrents": [{
+        "name": "one.bin",
+        "files": [{ "name": "one.bin", "length": 2, "bytesCompleted": 0 }]
+    }] })));
+    fake.push(FakeResponse::success(json!({ "torrents": [] })));
+    assert!(matches!(
+        client.files(&id(1)).await,
+        Err(ClientError::MetadataPending)
+    ));
+    let files = client.files(&id(1)).await.expect("files");
+    let listed: Vec<(u32, &str, u64)> = files
+        .iter()
+        .map(|f| (f.index, f.path.as_str(), f.size))
+        .collect();
+    assert_eq!(listed, vec![(0, "Sub/a.bin", 4), (1, "b.bin", 8)]);
+    let single = client.files(&id(2)).await.expect("files");
+    assert_eq!(single[0].path, "one.bin");
+    assert!(matches!(
+        client.files(&id(3)).await,
+        Err(ClientError::NotFound)
+    ));
+    assert_eq!(
+        fake.bodies()[0],
+        rpc(
+            "torrent-get",
+            json!({ "ids": [hash(1)], "fields": ["name", "files"] })
+        )
+    );
+}

@@ -1,6 +1,7 @@
 //! The axum application: `/api/v1` routes from `docs/API.md` and the embedded SPA.
 
 mod events;
+mod sources;
 mod spa;
 mod stubs;
 mod system;
@@ -29,6 +30,7 @@ pub fn router(app: Arc<AppState>) -> Router {
     let api = Router::new()
         .merge(system::routes())
         .merge(events::routes())
+        .merge(sources::routes())
         .merge(stubs::routes())
         .fallback(api_not_found)
         .method_not_allowed_fallback(method_not_allowed)

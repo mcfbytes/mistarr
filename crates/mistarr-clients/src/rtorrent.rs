@@ -11,9 +11,9 @@ use tokio::sync::Mutex;
 use crate::detect::ScgiAddr;
 use crate::xmlrpc::{self, Fault, MethodResponse, Value};
 use crate::{
-    metainfo, scgi, ClientError, ClientInfo, ClientKind, ClientTorrentId, DownloadClient,
-    FileProgress, InfoHash, RemotePathMap, Result, SeedPolicy, TorrentSource, TorrentState,
-    TorrentStatus,
+    metainfo, scgi, ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId,
+    DownloadClient, FileProgress, InfoHash, RemotePathMap, Result, SeedPolicy, TorrentSource,
+    TorrentState, TorrentStatus,
 };
 
 /// The rc mistarr writes when it starts rtorrent itself; the same text as in
@@ -368,6 +368,45 @@ impl DownloadClient for Rtorrent {
             up_rate: raw.up_rate,
             is_finished: finished,
         })
+    }
+
+    async fn files(&self, id: &ClientTorrentId) -> Result<Vec<ClientFile>> {
+        let target = target(&parse_id(id)?);
+        let _guard = self.torrents.lock().await;
+        let listing = vec![
+            target.as_str().into(),
+            "".into(),
+            "f.path=".into(),
+            "f.size_bytes=".into(),
+        ];
+        let r = self
+            .multicall(vec![
+                ("d.is_meta", vec![target.as_str().into()]),
+                ("f.multicall", listing),
+            ])
+            .await?;
+        let [meta, rows] = r.as_slice() else {
+            return Err(protocol("file list reply has the wrong length"));
+        };
+        if int(meta)? != 0 {
+            return Err(ClientError::MetadataPending);
+        }
+        let rows = rows
+            .as_array()
+            .ok_or_else(|| protocol("f.multicall reply is not an array"))?;
+        rows.iter()
+            .zip(0u32..)
+            .map(|(row, index)| {
+                let [path, size] = row.as_array().unwrap_or_default() else {
+                    return Err(protocol("malformed f.multicall row"));
+                };
+                Ok(ClientFile {
+                    index,
+                    path: text(path)?,
+                    size: uint(size)?,
+                })
+            })
+            .collect()
     }
 
     async fn remove(&self, id: &ClientTorrentId, delete_data: bool) -> Result<()> {

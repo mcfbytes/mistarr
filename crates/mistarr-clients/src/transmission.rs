@@ -14,8 +14,8 @@ use tokio::sync::Mutex;
 
 use crate::http::{self, Endpoint, Headers};
 use crate::{
-    metainfo, ClientError, ClientInfo, ClientKind, ClientTorrentId, DownloadClient, FileProgress,
-    InfoHash, Result, SeedPolicy, TorrentSource, TorrentState, TorrentStatus,
+    metainfo, ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId, DownloadClient,
+    FileProgress, InfoHash, Result, SeedPolicy, TorrentSource, TorrentState, TorrentStatus,
 };
 
 /// Fields requested by [`DownloadClient::status`].
@@ -410,6 +410,14 @@ impl DownloadClient for Transmission {
         raw.into_status()
     }
 
+    async fn files(&self, id: &ClientTorrentId) -> Result<Vec<ClientFile>> {
+        let mut session = self.session.lock().await;
+        let torrent = self.get_one(&mut session, id, &["name", "files"]).await?;
+        drop(session);
+        let raw: RawListing = serde_json::from_value(torrent).map_err(protocol)?;
+        raw.into_files()
+    }
+
     async fn remove(&self, id: &ClientTorrentId, delete_data: bool) -> Result<()> {
         self.simple(
             "torrent-remove",
@@ -531,6 +539,42 @@ struct RawTorrent {
 #[derive(Deserialize)]
 struct RawFile {
     length: u64,
+}
+
+#[derive(Deserialize)]
+struct RawListing {
+    name: String,
+    #[serde(default)]
+    files: Vec<RawNamedFile>,
+}
+
+#[derive(Deserialize)]
+struct RawNamedFile {
+    name: String,
+    length: u64,
+}
+
+impl RawListing {
+    /// Transmission prefixes each file of a multi-file torrent with the torrent's name.
+    fn into_files(self) -> Result<Vec<ClientFile>> {
+        if self.files.is_empty() {
+            return Err(ClientError::MetadataPending);
+        }
+        let prefix = format!("{}/", self.name);
+        Ok(self
+            .files
+            .into_iter()
+            .zip(0u32..)
+            .map(|(f, index)| ClientFile {
+                index,
+                path: match f.name.strip_prefix(&prefix) {
+                    Some(rest) => rest.to_owned(),
+                    None => f.name,
+                },
+                size: f.length,
+            })
+            .collect())
+    }
 }
 
 #[derive(Deserialize)]

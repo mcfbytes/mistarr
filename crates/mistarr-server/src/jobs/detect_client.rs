@@ -107,6 +107,7 @@ impl Job for DetectClient {
             .db
             .write(move |c| settings::set_json(c, keys::CLIENT_DETECTED, &stored))
             .await?;
+        ctx.app.refresh_client(&status);
         let snapshot = crate::status::snapshot(&ctx.app).await;
         ctx.app.events.publish(EventKind::Status, &snapshot);
         Ok(())

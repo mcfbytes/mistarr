@@ -50,6 +50,9 @@ pub fn options_in(dir: &Path) -> Options {
         corename_path: dir.join("CORENAME"),
         corename_poll: Duration::from_millis(20),
         status_interval: Duration::from_secs(3600),
+        sources_poll: Duration::from_millis(50),
+        sources_min_age_secs: 0,
+        magnet_poll: Duration::from_millis(100),
     }
 }
 
@@ -118,6 +121,30 @@ pub async fn request(
 
 pub async fn get(addr: SocketAddr, path: &str) -> Response {
     request(addr, "GET", path, &[], None).await
+}
+
+/// Sends one request with a raw body of any content type.
+pub async fn request_bytes(
+    addr: SocketAddr,
+    method: &str,
+    path: &str,
+    content_type: &str,
+    body: &[u8],
+) -> Response {
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\
+         Content-Type: {content_type}\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    stream.write_all(head.as_bytes()).await.expect("write");
+    stream.write_all(body).await.expect("write");
+    let mut raw = Vec::new();
+    tokio::time::timeout(Duration::from_secs(10), stream.read_to_end(&mut raw))
+        .await
+        .expect("response in time")
+        .expect("read");
+    parse(&String::from_utf8_lossy(&raw))
 }
 
 fn parse(raw: &str) -> Response {

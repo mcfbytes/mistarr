@@ -976,3 +976,33 @@ fn new_rejects_non_scgi_addresses() {
     assert!(Rtorrent::new("localhost").is_err());
     assert!(Rtorrent::new("127.0.0.1:5000").is_ok());
 }
+
+#[tokio::test]
+async fn files_list_paths_once_metadata_is_present() {
+    let (fake, client) = setup().await;
+    fake.push(ScgiReply::multicall(vec![
+        Value::Int(1),
+        Value::Array(vec![]),
+    ]));
+    let row = |p: &str, n: i64| Value::Array(vec![v(p), Value::Int(n)]);
+    fake.push(ScgiReply::multicall(vec![
+        Value::Int(0),
+        Value::Array(vec![row("Sub/a.bin", 4), row("b.bin", 8)]),
+    ]));
+    assert!(matches!(
+        client.files(&id(6)).await,
+        Err(ClientError::MetadataPending)
+    ));
+    let files = client.files(&id(6)).await.expect("files");
+    let listed: Vec<(u32, &str, u64)> = files
+        .iter()
+        .map(|f| (f.index, f.path.as_str(), f.size))
+        .collect();
+    assert_eq!(listed, vec![(0, "Sub/a.bin", 4), (1, "b.bin", 8)]);
+    let listing = vec![v(&t(6)), v(""), v("f.path="), v("f.size_bytes=")];
+    let expected = multicall(vec![
+        ("d.is_meta", vec![v(&t(6))]),
+        ("f.multicall", listing),
+    ]);
+    assert_eq!(fake.calls(), vec![expected.clone(), expected]);
+}

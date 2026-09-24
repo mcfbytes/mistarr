@@ -5,17 +5,19 @@ use std::path::PathBuf;
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
+use mistarr_clients::DownloadClient;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
+use crate::client::ClientKey;
 use crate::config::{Config, RuntimeSettings, SettingsPatch};
 use crate::db::settings::{self, keys};
 use crate::db::{self, Db};
 use crate::error::{Error, Result};
 use crate::events::{EventBus, EventKind};
-use crate::jobs::detect_client::DetectClient;
+use crate::jobs::detect_client::{ClientStatus, DetectClient};
 use crate::jobs::gate::Gate;
-use crate::jobs::{corename, Scheduler};
+use crate::jobs::{corename, source_import, Scheduler};
 
 /// Runtime knobs that are not part of `mistarr.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -26,6 +28,12 @@ pub struct Options {
     pub corename_poll: Duration,
     /// How often each SSE connection receives an unsolicited `status`.
     pub status_interval: Duration,
+    /// How often `sources/` is scanned for new files.
+    pub sources_poll: Duration,
+    /// Seconds a file in `sources/` must be unmodified before it is imported.
+    pub sources_min_age_secs: u64,
+    /// How often resolving magnets are checked with the client.
+    pub magnet_poll: Duration,
 }
 
 impl Default for Options {
@@ -34,6 +42,9 @@ impl Default for Options {
             corename_path: PathBuf::from(mistarr_mister::CORENAME_PATH),
             corename_poll: Duration::from_secs(2),
             status_interval: Duration::from_secs(30),
+            sources_poll: Duration::from_secs(10),
+            sources_min_age_secs: mistarr_sources::watch::DEFAULT_MIN_AGE_SECS,
+            magnet_poll: Duration::from_secs(15),
         }
     }
 }
@@ -55,6 +66,7 @@ pub struct AppState {
     pub options: Options,
     shutdown: watch::Sender<bool>,
     settings_write: tokio::sync::Mutex<()>,
+    client: RwLock<Option<(ClientKey, Arc<dyn DownloadClient>)>>,
 }
 
 impl AppState {
@@ -71,7 +83,34 @@ impl AppState {
             options,
             shutdown: watch::Sender::new(false),
             settings_write: tokio::sync::Mutex::new(()),
+            client: RwLock::new(None),
         })
+    }
+
+    /// The download client from the last `detect_client` run, or `None` when
+    /// detection found none. It is a Transmission or rtorrent handle for the
+    /// detected URL, rtorrent's carrying `client.remote_path_map`; it is
+    /// replaced only when the detected kind, URL or path map changes. Take a
+    /// fresh handle per operation rather than keeping one, and expect calls to
+    /// fail with `Unreachable` when the client is down.
+    #[must_use]
+    pub fn client(&self) -> Option<Arc<dyn DownloadClient>> {
+        self.client
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|(_, c)| Arc::clone(c))
+    }
+
+    /// Points [`AppState::client`] at what `status` found, keeping the current
+    /// handle when nothing it was built from changed.
+    pub fn refresh_client(&self, status: &ClientStatus) {
+        let key = ClientKey::from_detection(status, &self.config().client);
+        let mut slot = self.client.write().unwrap_or_else(PoisonError::into_inner);
+        if slot.as_ref().map(|(k, _)| k) == key.as_ref() {
+            return;
+        }
+        *slot = key.and_then(|k| k.build().map(|c| (k, c)));
     }
 
     /// A copy of the effective config.
@@ -215,6 +254,10 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     }));
     tasks.push(tokio::spawn(publish_gate_changes(Arc::clone(&app))));
     Scheduler::start(&app);
+    tasks.push(tokio::spawn(source_import::watch(Arc::clone(&app))));
+    tasks.push(tokio::spawn(source_import::resolve_pending(Arc::clone(
+        &app,
+    ))));
 
     let listener = tokio::net::TcpListener::bind(app.config().server.listen.as_str()).await?;
     let addr = listener.local_addr()?;
@@ -330,6 +373,35 @@ mod tests {
             .map(|r| r.id.0.as_str())
             .collect();
         assert_eq!(present, ["snes"]);
+    }
+
+    #[tokio::test]
+    async fn client_handle_follows_detection() {
+        let (_dir, app) = testutil::state();
+        assert!(app.client().is_none());
+        let found = ClientStatus {
+            kind: Some(mistarr_clients::ClientKind::Rtorrent),
+            url: Some("127.0.0.1:1".into()),
+            reachable: false,
+            version: None,
+            rtorrent_on_path: false,
+            checked_at: 0,
+        };
+        app.refresh_client(&found);
+        let first = app.client().expect("client");
+        app.refresh_client(&found);
+        assert!(Arc::ptr_eq(&first, &app.client().expect("client")));
+        app.update_config(|c| {
+            c.client.remote_path_map = vec![mistarr_clients::PathMapping::new("/r", "/l")];
+        });
+        app.refresh_client(&found);
+        assert!(!Arc::ptr_eq(&first, &app.client().expect("client")));
+        app.refresh_client(&ClientStatus {
+            kind: None,
+            url: None,
+            ..found
+        });
+        assert!(app.client().is_none());
     }
 
     #[test]

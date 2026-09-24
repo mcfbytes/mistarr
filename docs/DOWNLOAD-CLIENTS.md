@@ -53,6 +53,7 @@ array as "all files". An empty list is never sent to mean "none".
 | set_wanted | `torrent-get` `wanted` for the file count, then `torrent-set` with `files-wanted` / `files-unwanted`, using the large-torrent sequence above past 2000 files |
 | start / stop | `torrent-get` `id` to confirm the torrent exists, then `torrent-start` / `torrent-stop` |
 | status | `torrent-get` fields `id, hashString, status, percentDone, error, errorString, files, fileStats, rateDownload, rateUpload, uploadRatio, isFinished` |
+| files | `torrent-get` fields `name, files`; an empty `files` list is "metadata pending". A multi-file torrent's file names start with `<name>/`, which is stripped |
 | remove | `torrent-get` `id`, then `torrent-remove` with `delete-local-data` |
 | rate limits | `session-set` `speed-limit-down`, `speed-limit-down-enabled`, same for up; no limit or 0 sends only `*-enabled: false` |
 | seed policy | On add and `set_seed_policy` (after a `torrent-get` `id` existence check): `torrent-set` `seedRatioMode: 1` (use this torrent's limit) with `seedRatioLimit` N for "until ratio N", or 0 for "none". "Client default" sends `seedRatioMode: 0` (session default), skipped on a fresh add where it is already 0. |
@@ -88,6 +89,7 @@ hash with a fault naming the info-hash, which maps to "not found".
 | set_wanted | `d.is_meta` and `d.size_files`, then `f.priority.set` for every index and `d.update_priorities` |
 | start / stop | `d.start` / `d.stop` |
 | status | One `system.multicall` on the hash: `d.state, d.is_active, d.complete, d.is_hash_checking, d.hashing, d.ratio, d.down.rate, d.up.rate, d.message, d.is_meta`, and `f.multicall` for `f.size_bytes, f.completed_chunks, f.size_chunks, f.priority`. `d.multicall2` is not used because it lists every torrent in a view on each call. |
+| files | One `system.multicall`: `d.is_meta` (non-zero is "metadata pending") and `f.multicall` for `f.path, f.size_bytes`, whose paths are already relative to the torrent's directory |
 | remove | With data: `d.directory`, `d.is_multi_file` and `f.multicall` `f.path` first, then delete the listed files ourselves, since rtorrent does not, through the remote path map; a multi-file torrent's emptied directories go too. Deletion carries on past a failed file. Then `d.erase`, and only after it the first deletion error, if any, so the torrent is never left erased with an unreadable file list. |
 | rate limits | `throttle.global_down.max_rate.set_kb`, `throttle.global_up.max_rate.set_kb` with `""` and KiB/s; no limit sends 0 |
 | seed policy | rtorrent has no per-torrent ratio. The client keeps each torrent's policy in memory and `status` sends `d.stop` when a seeding torrent's `d.ratio` (thousandths) reaches it; "none" stops as soon as it seeds, "client default" never. `is_finished` is derived on every poll, never stored: a stopped torrent whose wanted files are complete and whose ratio meets the current policy is finished, a seeding one is not, and one restarted outside mistarr is stopped again if it still meets the policy. `set_seed_policy` checks the torrent with `d.hash` and replaces the policy. The poller re-applies policies after a restart. |

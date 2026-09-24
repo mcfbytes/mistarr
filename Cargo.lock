@@ -831,6 +831,7 @@ dependencies = [
  "mistarr-clients",
  "mistarr-core",
  "mistarr-mister",
+ "mistarr-server",
  "mistarr-sources",
  "rusqlite",
  "rust-embed",

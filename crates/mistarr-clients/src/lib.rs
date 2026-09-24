@@ -288,6 +288,23 @@ impl FileProgress {
     }
 }
 
+/// One file of a torrent as the client lists it, from [`DownloadClient::files`].
+///
+/// ```
+/// use mistarr_clients::ClientFile;
+/// let f = ClientFile { index: 0, path: "Sub/a.bin".into(), size: 4 };
+/// assert_eq!(f.path, "Sub/a.bin");
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientFile {
+    /// Index in the torrent's file list.
+    pub index: u32,
+    /// Path inside the torrent, `/`-separated, without the torrent's own name.
+    pub path: String,
+    /// Size of the file in bytes.
+    pub size: u64,
+}
+
 /// A snapshot of one torrent, as returned by [`DownloadClient::status`].
 ///
 /// ```
@@ -402,6 +419,10 @@ pub trait DownloadClient: Send + Sync {
 
     /// Reads state, rates and per-file progress.
     async fn status(&self, id: &ClientTorrentId) -> Result<TorrentStatus>;
+
+    /// Lists the torrent's files with their paths, for binding a magnet once
+    /// the client has its metadata. [`ClientError::MetadataPending`] until then.
+    async fn files(&self, id: &ClientTorrentId) -> Result<Vec<ClientFile>>;
 
     /// Removes the torrent from the client, deleting its data if asked.
     async fn remove(&self, id: &ClientTorrentId, delete_data: bool) -> Result<()>;

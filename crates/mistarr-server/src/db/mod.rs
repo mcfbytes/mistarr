@@ -4,6 +4,7 @@ pub mod jobs;
 pub mod migrate;
 pub mod platforms;
 pub mod settings;
+pub mod sources;
 pub mod system;
 
 use std::path::{Path, PathBuf};
