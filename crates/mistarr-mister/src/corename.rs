@@ -4,11 +4,14 @@ use std::path::Path;
 
 use mistarr_core::PlatformId;
 
-use crate::platforms::for_core;
+use crate::platforms::{by_id, for_core, Platform};
 use crate::Result;
 
 /// Directories under the SD root that hold `.rbf` cores.
-pub const CORE_DIRS: [&str; 4] = ["_Console", "_Computer", "_Arcade", "_Other"];
+pub const CORE_DIRS: [&str; 4] = ["_Console", "_Computer", ARCADE_DIR, "_Other"];
+
+/// Core directory whose `.rbf` files all belong to the arcade platform.
+const ARCADE_DIR: &str = "_Arcade";
 
 /// What the MiSTer main process is doing.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +54,7 @@ pub fn read_corename(path: &Path) -> Result<CoreState> {
 }
 
 /// Lists `.rbf` cores under the [`CORE_DIRS`] of `root` and one level of subfolders,
-/// deduplicated by name and sorted.
+/// deduplicated by name and sorted. Every core under `_Arcade` maps to the arcade platform.
 ///
 /// ```
 /// let root = std::env::temp_dir().join("mistarr-doc-cores");
@@ -62,22 +65,30 @@ pub fn read_corename(path: &Path) -> Result<CoreState> {
 /// ```
 #[must_use]
 pub fn installed_cores(root: &Path) -> Vec<InstalledCore> {
-    let mut names = Vec::new();
+    let mut found = Vec::new();
     for dir in CORE_DIRS {
-        collect_rbf(&root.join(dir), 1, &mut names);
+        collect_rbf(&root.join(dir), 1, dir == ARCADE_DIR, &mut found);
     }
-    names.sort_unstable();
-    names.dedup();
-    names
+    found.sort_unstable();
+    found.dedup_by(|a, b| a.0 == b.0);
+    found
         .into_iter()
-        .map(|name| InstalledCore {
-            platforms: for_core(&name).iter().map(|p| p.platform_id()).collect(),
+        .map(|(name, arcade)| InstalledCore {
+            platforms: if arcade {
+                by_id("arcade")
+                    .map(Platform::platform_id)
+                    .into_iter()
+                    .collect()
+            } else {
+                for_core(&name).iter().map(|p| p.platform_id()).collect()
+            },
             name,
         })
         .collect()
 }
 
-fn collect_rbf(dir: &Path, depth: u8, out: &mut Vec<String>) {
+/// Collects `(core name, found under _Arcade)` for every `.rbf` in `dir`.
+fn collect_rbf(dir: &Path, depth: u8, arcade: bool, out: &mut Vec<(String, bool)>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
@@ -85,14 +96,14 @@ fn collect_rbf(dir: &Path, depth: u8, out: &mut Vec<String>) {
         let path = entry.path();
         if path.is_dir() {
             if depth > 0 {
-                collect_rbf(&path, depth - 1, out);
+                collect_rbf(&path, depth - 1, arcade, out);
             }
         } else if path
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("rbf"))
         {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                out.push(core_name(stem).to_owned());
+                out.push((core_name(stem).to_owned(), arcade));
             }
         }
     }
@@ -154,6 +165,29 @@ mod tests {
             .iter()
             .find(|c| c.name == "Minimig")
             .is_some_and(|c| c.platforms.is_empty()));
+    }
+
+    #[test]
+    fn every_core_under_arcade_maps_to_the_arcade_platform() {
+        let root = scratch("arcade-cores");
+        for (dir, file) in [
+            ("_Arcade", "Arcade-Example_20240101.rbf"),
+            ("_Arcade/cores", "examplecore_20240101.rbf"),
+            ("_Arcade", "Example Blaster.mra"),
+        ] {
+            std::fs::create_dir_all(root.join(dir)).expect("mkdir");
+            std::fs::write(root.join(dir).join(file), b"").expect("write");
+        }
+        let cores = installed_cores(&root);
+        assert_eq!(cores.len(), 2);
+        for core in &cores {
+            assert_eq!(
+                core.platforms,
+                [PlatformId("arcade".into())],
+                "{}",
+                core.name
+            );
+        }
     }
 
     #[test]

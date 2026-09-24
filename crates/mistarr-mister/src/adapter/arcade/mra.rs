@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
@@ -24,9 +25,12 @@ pub struct Mra {
 
 /// Parses MRA XML.
 ///
+/// Text of `<name>`, `<setname>` and `<rbf>` includes CDATA, resolved entities
+/// and the text of any nested child elements, so `<name>A<b>x</b>B</name>` reads `AxB`.
+///
 /// # Errors
 ///
-/// Returns [`Error::Mra`] when the document is not well-formed.
+/// Returns [`Error::Mra`] when the document is not well-formed or ends with open elements.
 ///
 /// ```
 /// let mra = mistarr_mister::adapter::arcade::mra::parse(
@@ -38,31 +42,44 @@ pub struct Mra {
 pub fn parse(xml: &[u8]) -> Result<Mra> {
     let mut reader = Reader::from_reader(xml);
     let mut mra = Mra::default();
-    let mut field: Option<Field> = None;
+    let mut open: Vec<Option<Field>> = Vec::new();
     loop {
-        let event = reader.read_event().map_err(|e| Error::Mra(e.to_string()))?;
+        let event = reader.read_event().map_err(xml_err)?;
+        let field = open.last().copied().flatten();
         match event {
             Event::Start(e) => {
-                field = Field::of(e.local_name().as_ref());
+                open.push(Field::of(e.local_name().as_ref()).or(field));
                 read_attributes(&e, &mut mra)?;
             }
             Event::Empty(e) => read_attributes(&e, &mut mra)?,
             Event::Text(t) => {
                 if let Some(f) = field {
-                    let text = t.decode().map_err(|e| Error::Mra(e.to_string()))?;
-                    f.append(&mut mra, &text);
+                    f.append(&mut mra, &t.decode().map_err(xml_err)?);
+                }
+            }
+            Event::CData(c) => {
+                if let Some(f) = field {
+                    f.append(&mut mra, &c.decode().map_err(xml_err)?);
                 }
             }
             Event::GeneralRef(r) => {
+                let resolved = if let Some(c) = r.resolve_char_ref().map_err(xml_err)? {
+                    c.to_string()
+                } else {
+                    let name = r.decode().map_err(xml_err)?;
+                    resolve_predefined_entity(&name)
+                        .ok_or_else(|| Error::Mra(format!("unknown entity `{name}`")))?
+                        .to_owned()
+                };
                 if let Some(f) = field {
-                    let name = r.decode().map_err(|e| Error::Mra(e.to_string()))?;
-                    if let Some(c) = predefined(&name) {
-                        f.append(&mut mra, c);
-                    }
+                    f.append(&mut mra, &resolved);
                 }
             }
-            Event::End(_) => field = None,
-            Event::Eof => break,
+            Event::End(_) => {
+                open.pop();
+            }
+            Event::Eof if open.is_empty() => break,
+            Event::Eof => return Err(Error::Mra("document ends inside an element".into())),
             _ => {}
         }
     }
@@ -73,6 +90,10 @@ pub fn parse(xml: &[u8]) -> Result<Mra> {
         *s = s.trim().to_owned();
     }
     Ok(mra)
+}
+
+fn xml_err(e: impl std::fmt::Display) -> Error {
+    Error::Mra(e.to_string())
 }
 
 /// Reads and parses an MRA file.
@@ -140,17 +161,6 @@ impl Field {
     }
 }
 
-fn predefined(entity: &str) -> Option<&'static str> {
-    match entity {
-        "amp" => Some("&"),
-        "lt" => Some("<"),
-        "gt" => Some(">"),
-        "quot" => Some("\""),
-        "apos" => Some("'"),
-        _ => None,
-    }
-}
-
 fn read_attributes(e: &BytesStart<'_>, mra: &mut Mra) -> Result<()> {
     let is_rom = e.local_name().as_ref() == b"rom";
     for attr in e.attributes() {
@@ -212,6 +222,41 @@ mod tests {
     fn malformed_xml_is_an_error() {
         assert!(matches!(
             parse(b"<misterromdescription><rom zip=\"a.zip\"></oops>"),
+            Err(Error::Mra(_))
+        ));
+    }
+
+    #[test]
+    fn cdata_and_character_references_are_kept() {
+        let mra = parse(
+            b"<misterromdescription><name>Example &#38; Co &#x26; Blaster</name>\
+              <setname><![CDATA[ex<blast>]]></setname></misterromdescription>",
+        )
+        .expect("parse");
+        assert_eq!(mra.name.as_deref(), Some("Example & Co & Blaster"));
+        assert_eq!(mra.setname.as_deref(), Some("ex<blast>"));
+    }
+
+    #[test]
+    fn nested_child_text_stays_in_the_enclosing_field() {
+        let mra = parse(
+            b"<misterromdescription><name>A<b>x</b>B</name><rbf>c</rbf></misterromdescription>",
+        )
+        .expect("parse");
+        assert_eq!(mra.name.as_deref(), Some("AxB"));
+        assert_eq!(mra.rbf.as_deref(), Some("c"));
+    }
+
+    #[test]
+    fn truncated_document_is_an_error() {
+        let err = parse(b"<misterromdescription><rom zip=\"exblast.zip\"><part name=\"a\"/>");
+        assert!(matches!(err, Err(Error::Mra(_))));
+    }
+
+    #[test]
+    fn unknown_entity_is_an_error() {
+        assert!(matches!(
+            parse(b"<m><name>&bogus;</name></m>"),
             Err(Error::Mra(_))
         ));
     }
