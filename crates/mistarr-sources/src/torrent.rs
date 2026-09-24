@@ -3,7 +3,7 @@
 
 use sha1::{Digest, Sha1};
 
-use crate::bencode::{self, Value};
+use crate::bencode::Raw;
 use crate::error::SourceError;
 
 /// One file inside a torrent, as declared by the torrent itself.
@@ -38,7 +38,8 @@ pub struct TorrentMeta {
 ///
 /// Supports single-file and multi-file `BitTorrent` v1 layouts, and hybrid
 /// v1+v2 torrents by reading the v1 `files` list and ignoring `file tree`.
-/// A v2-only torrent (no `files` or `length`) is rejected.
+/// A v2-only torrent (no `files` or `length`) is rejected. The encoded `info` dict is
+/// read in place, so memory beyond `data` is the returned file list.
 ///
 /// # Errors
 ///
@@ -52,34 +53,38 @@ pub struct TorrentMeta {
 /// assert!(parse_torrent(b"d4:infoi1ee").is_err());
 /// ```
 pub fn parse_torrent(data: &[u8]) -> Result<TorrentMeta, SourceError> {
-    let entries = bencode::decode_top_level_dict(data)?;
-    let (_, info, info_span) = entries
-        .iter()
-        .find(|(key, _, _)| key.as_slice() == b"info")
+    let (top, len) = Raw::parse(data)?;
+    if !matches!(top, Raw::Dict(_)) {
+        return Err(SourceError::MalformedBencode(0));
+    }
+    if len != data.len() {
+        return Err(SourceError::TrailingData);
+    }
+    let (info, info_bytes) = top
+        .entries()
+        .find(|(key, _, _)| *key == b"info")
+        .map(|(_, value, bytes)| (value, bytes))
         .ok_or(SourceError::MissingInfoDict)?;
-    if info.as_dict().is_none() {
+    if !matches!(info, Raw::Dict(_)) {
         return Err(SourceError::MissingInfoDict);
     }
 
     let name = info
         .get("name")
-        .and_then(Value::as_str)
+        .and_then(Raw::as_str)
         .ok_or(SourceError::BadField("info.name"))?
         .to_owned();
-    let is_private = info.get("private").and_then(Value::as_int) == Some(1);
+    let is_private = info.get("private").and_then(Raw::as_int) == Some(1);
 
-    let files = if let Some(list) = info.get("files").and_then(Value::as_list) {
-        parse_multi_file(list)?
-    } else if let Some(length) = info.get("length").and_then(Value::as_int) {
-        parse_single_file(&name, length)?
-    } else if info.get("file tree").is_some() {
-        return Err(SourceError::V2Only);
-    } else {
-        return Err(SourceError::BadField("info.files/length"));
+    let files = match (info.get("files"), info.get("length")) {
+        (Some(list @ Raw::List(_)), _) => parse_multi_file(list)?,
+        (_, Some(Raw::Int(length))) => parse_single_file(&name, length)?,
+        _ if info.get("file tree").is_some() => return Err(SourceError::V2Only),
+        _ => return Err(SourceError::BadField("info.files/length")),
     };
 
     let total_size = files.iter().map(|f| f.size).sum();
-    let infohash = infohash_of_span(data, info_span.clone());
+    let infohash: [u8; 20] = Sha1::digest(info_bytes).into();
 
     Ok(TorrentMeta {
         infohash,
@@ -99,44 +104,34 @@ fn parse_single_file(name: &str, length: i64) -> Result<Vec<TorrentFile>, Source
     }])
 }
 
-fn parse_multi_file(list: &[Value]) -> Result<Vec<TorrentFile>, SourceError> {
-    let mut files = Vec::with_capacity(list.len());
-    for (i, entry) in list.iter().enumerate() {
+/// Reads `info.files` straight from the encoded list, one [`TorrentFile`] per entry.
+fn parse_multi_file(list: Raw<'_>) -> Result<Vec<TorrentFile>, SourceError> {
+    let mut files = Vec::new();
+    for (i, entry) in list.items().enumerate() {
         let index = u32::try_from(i).map_err(|_| SourceError::BadField("info.files"))?;
         let length = entry
             .get("length")
-            .and_then(Value::as_int)
+            .and_then(Raw::as_int)
             .ok_or(SourceError::BadField("info.files[].length"))?;
         let size =
             u64::try_from(length).map_err(|_| SourceError::BadField("info.files[].length"))?;
-        let segments = entry
-            .get("path")
-            .and_then(Value::as_list)
-            .ok_or(SourceError::BadField("info.files[].path"))?;
-        let mut parts = Vec::with_capacity(segments.len());
-        for segment in segments {
-            parts.push(
+        let Some(segments @ Raw::List(_)) = entry.get("path") else {
+            return Err(SourceError::BadField("info.files[].path"));
+        };
+        let mut path = String::new();
+        for (n, segment) in segments.items().enumerate() {
+            if n > 0 {
+                path.push('/');
+            }
+            path.push_str(
                 segment
                     .as_str()
-                    .ok_or(SourceError::BadField("info.files[].path[]"))?
-                    .to_owned(),
+                    .ok_or(SourceError::BadField("info.files[].path[]"))?,
             );
         }
-        files.push(TorrentFile {
-            index,
-            path: parts.join("/"),
-            size,
-        });
+        files.push(TorrentFile { index, path, size });
     }
     Ok(files)
-}
-
-// Hashing the raw input bytes (rather than re-encoding the parsed `Value`)
-// matches the client and tracker even when `info`'s keys are not sorted.
-fn infohash_of_span(data: &[u8], span: std::ops::Range<usize>) -> [u8; 20] {
-    let mut hasher = Sha1::new();
-    hasher.update(&data[span]);
-    hasher.finalize().into()
 }
 
 #[cfg(test)]

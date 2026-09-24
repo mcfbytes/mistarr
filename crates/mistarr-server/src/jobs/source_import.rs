@@ -32,6 +32,13 @@ pub const WAITING: &str = "Waiting for the download client to read the file list
 /// Rejection reason for a second copy of a loaded source.
 pub const DUPLICATE: &str = "A source with the same content is already loaded.";
 
+/// Largest `.torrent` or `.magnet` file read; a torrent listing 100 000 files is
+/// under half of it, and the whole file is held while it is parsed.
+pub const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Rejection reason for a file above [`MAX_SOURCE_BYTES`].
+pub const TOO_LARGE: &str = "The file is larger than 16 MiB, the most a source may be.";
+
 /// The `source.changed` event body.
 #[derive(Debug, Clone, Serialize)]
 pub struct SourceChanged<'a> {
@@ -82,10 +89,19 @@ impl Job for SourceImport {
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
-        let data = match tokio::fs::read(&self.path).await {
-            Ok(d) => d,
+        let size = match tokio::fs::metadata(&self.path).await {
+            Ok(m) => m.len(),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
+        };
+        let data = if size > MAX_SOURCE_BYTES {
+            Vec::new()
+        } else {
+            match tokio::fs::read(&self.path).await {
+                Ok(d) => d,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(e) => return Err(e.into()),
+            }
         };
         let origin = self
             .path
@@ -93,7 +109,8 @@ impl Job for SourceImport {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let outcome = match self.path.extension().and_then(|e| e.to_str()) {
-            Some("torrent") => import_torrent(&ctx.app, &origin, &data).await?,
+            _ if size > MAX_SOURCE_BYTES => Err(TOO_LARGE.to_owned()),
+            Some("torrent") => import_torrent(&ctx.app, &origin, data).await?,
             Some("magnet") => import_magnet(&ctx.app, &origin, &data).await?,
             _ => Err("Only .torrent and .magnet files are read.".to_owned()),
         };
@@ -138,16 +155,18 @@ async fn move_blocking(path: &Path, reason: Option<String>) -> Result<()> {
     .map_err(|e| crate::Error::Job(e.to_string()))
 }
 
-/// Parses and binds a `.torrent`. The inner error is a rejection reason.
+/// Parses and binds a `.torrent`, dropping its bytes once parsed. The inner error is a
+/// rejection reason.
 async fn import_torrent(
     app: &AppState,
     origin: &str,
-    data: &[u8],
+    data: Vec<u8>,
 ) -> Result<Result<SourceRow, String>> {
-    let meta = match torrent::parse_torrent(data) {
+    let meta = match torrent::parse_torrent(&data) {
         Ok(m) => m,
         Err(e) => return Ok(Err(format!("Not a valid .torrent file: {e}."))),
     };
+    drop(data);
     let infohash = InfoHash::from_bytes(meta.infohash).to_string();
     let threshold = app.config().sources.bind_threshold;
     let origin = origin.to_owned();
@@ -635,5 +654,22 @@ mod tests {
         let reason = std::fs::read_to_string(sources.join("rejected/broken.magnet.reason.txt"))
             .expect("reason");
         assert!(reason.starts_with("Not a valid .magnet file"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn oversized_files_are_rejected_unread() {
+        let (_dir, app) = state();
+        let sources = app.config().paths.sources();
+        std::fs::create_dir_all(&sources).expect("mkdir");
+        let big = sources.join("big.torrent");
+        let f = std::fs::File::create(&big).expect("create");
+        f.set_len(MAX_SOURCE_BYTES + 1).expect("grow");
+        drop(f);
+        let job = Arc::new(SourceImport { path: big.clone() });
+        Scheduler::run_inline(&app, job).await.expect("run");
+        assert!(!big.exists());
+        let reason = std::fs::read_to_string(sources.join("rejected/big.torrent.reason.txt"))
+            .expect("reason");
+        assert!(reason.starts_with(TOO_LARGE), "{reason}");
     }
 }

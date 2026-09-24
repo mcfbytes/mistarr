@@ -178,9 +178,10 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 
 1. A `.torrent` or `.magnet` appears in `sources/`, found by a scan every
    10 s once its size has held for two scans, or written there by
-   `POST /sources/upload`. A light `source_import` job per file parses it. A
-   file that does not parse, or repeats a loaded source, moves to
-   `sources/rejected/` with a `<name>.reason.txt`.
+   `POST /sources/upload`. A light `source_import` job per file parses it,
+   reading the bencode in place so only the file list is built. A file over
+   16 MiB, one that does not parse, or one that repeats a loaded source moves
+   to `sources/rejected/` with a `<name>.reason.txt`.
 2. For a magnet, the source is `resolving`. A light `resolve_magnet` job adds
    it to the client paused into `staging/<infohash>/` with nothing wanted and
    starts it, since a paused magnet never fetches metadata. While it is
