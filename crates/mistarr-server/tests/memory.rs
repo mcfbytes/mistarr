@@ -321,7 +321,7 @@ fn mra_text(name: &str, zip: &str, md5: &str, i: usize) -> String {
          <rom index=\"0\" zip=\"{zip}\" md5=\"{md5}\" type=\"merged\">\n{parts}  </rom>\n\
          <rom index=\"1\"><part>00 01 02 03</part></rom>\n</misterromdescription>\n"
     );
-    if i % 10 == 0 {
+    if i.is_multiple_of(10) {
         text.replace("<name>", "<Name>")
             .replace("<setname>", "<SetName>")
             .replace("<rom index=\"0\"", "<ROM Index=\"0\"")

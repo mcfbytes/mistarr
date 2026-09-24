@@ -642,10 +642,10 @@ fn import_stream<R: BufRead>(
 /// Stops on shutdown, sleeps briefly while a core runs and waits out a
 /// manual pause, which holds the background lane; checked every few games.
 fn pace(req: &Request, games: u64) -> Result<()> {
-    if games % CANCEL_EVERY == 0 && *req.stop.borrow() {
+    if games.is_multiple_of(CANCEL_EVERY) && *req.stop.borrow() {
         return Err(Error::Cancelled);
     }
-    if games % YIELD_EVERY != 0 {
+    if !games.is_multiple_of(YIELD_EVERY) {
         return Ok(());
     }
     if req.gate.borrow().core_running() {

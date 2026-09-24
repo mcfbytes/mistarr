@@ -205,7 +205,7 @@ impl InfoHash {
             return None;
         }
         let mut out = [0u8; 20];
-        for (byte, pair) in out.iter_mut().zip(digits.chunks_exact(2)) {
+        for (byte, pair) in out.iter_mut().zip(digits.as_chunks::<2>().0) {
             let hi = char::from(pair[0]).to_digit(16)?;
             let lo = char::from(pair[1]).to_digit(16)?;
             *byte = u8::try_from(hi << 4 | lo).ok()?;

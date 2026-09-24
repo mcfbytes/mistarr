@@ -184,7 +184,7 @@ fn interleave_unit(il: &Interleave) -> Result<u64> {
     if il.input != 8 {
         return Err(refuse(format!("interleave input {} is not 8", il.input)));
     }
-    if !(8..=64).contains(&il.output) || il.output % 8 != 0 {
+    if !(8..=64).contains(&il.output) || !il.output.is_multiple_of(8) {
         return Err(refuse(format!(
             "interleave output {} is not 8 to 64 in steps of 8",
             il.output

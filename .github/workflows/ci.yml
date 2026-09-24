@@ -27,6 +27,8 @@ jobs:
       - run: sudo apt-get update && sudo apt-get install -y transmission-daemon rtorrent
       # The package starts a system daemon; the suite runs its own on free ports.
       - run: sudo systemctl stop transmission-daemon || true
+      # Ubuntu's AppArmor profile confines the daemon to /var/lib; the suite's config is under /tmp.
+      - run: sudo apparmor_parser -R /etc/apparmor.d/transmission
       - name: make e2e
         shell: bash
         env:

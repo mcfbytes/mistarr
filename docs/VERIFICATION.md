@@ -30,11 +30,13 @@ is transcoded, and UTF-16 is not supported. `mistarr_core::xml::EscapeInvalid`
 sits between the file and the XML reader and escapes each byte that is not
 part of a valid UTF-8 sequence, so a non-UTF-8 byte fails the file only where
 the parser uses its value: a name, element text or an attribute it reads.
-A DAT error names the byte offset in the file. The same bytes in a comment, a
-processing instruction, an element or attribute the parser ignores, or a
-tag name pass without effect, so a Latin-1 comment or unknown tag never
-fails a DAT. The escapes are the code points U+10FF80 to U+10FFFF, so a
-value that really holds one of these private-use characters is refused too.
+A DAT error names the byte offset in the file, counting a byte order mark;
+for bad element text it is the offset of the closing tag. The same bytes in
+a comment, a processing instruction, an element or attribute the parser
+ignores, or a tag name pass without effect, so a Latin-1 comment or unknown
+tag never fails a DAT. The escapes are the code points U+10FF80 to U+10FFFF,
+so a value that holds one of them, written literally or as a character
+reference such as `&#x10FFE9;`, is refused too.
 
 ### DB export
 
