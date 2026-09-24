@@ -360,9 +360,8 @@ async fn unimplemented_routes_answer_501_and_unknown_ones_404() {
     let booted = boot().await;
     let addr = booted.addr();
     for (method, path) in [
-        ("GET", "/api/v1/sources"),
-        ("PUT", "/api/v1/sources/1"),
         ("GET", "/api/v1/downloads"),
+        ("POST", "/api/v1/downloads/1/retry"),
         ("DELETE", "/api/v1/downloads/1"),
         ("POST", "/api/v1/system/scan"),
         ("GET", "/api/v1/imports"),
