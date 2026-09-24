@@ -17,9 +17,10 @@ pub const THREAD_STACK_BYTES: usize = 1024 * 1024;
 /// hang rather than fail.
 pub const MIN_DATA_LIMIT_MIB: u64 = 64;
 
-/// The soft limit that asking for `mib` MiB leaves in force given `now`: at least
-/// [`MIN_DATA_LIMIT_MIB`], never above the hard limit or the soft limit already set, and
-/// unchanged for 0.
+/// The soft limit in force after asking for `mib` MiB given the inherited limits `now`: the
+/// lowest of `mib` raised to [`MIN_DATA_LIMIT_MIB`], the inherited soft limit and the hard
+/// limit. An inherited soft limit lower than that is kept, even below the floor; 0 asks for
+/// nothing and keeps the inherited soft limit. `None` means unlimited.
 ///
 /// ```
 /// use rustix::process::Rlimit;
@@ -97,6 +98,7 @@ mod tests {
         let mib = 1024 * 1024;
         assert_eq!(soft_limit(192, limit(None, None)), Some(192 * mib));
         assert_eq!(soft_limit(192, limit(Some(64 * mib), None)), Some(64 * mib));
+        assert_eq!(soft_limit(192, limit(Some(8 * mib), None)), Some(8 * mib));
         assert_eq!(
             soft_limit(192, limit(None, Some(100 * mib))),
             Some(100 * mib)

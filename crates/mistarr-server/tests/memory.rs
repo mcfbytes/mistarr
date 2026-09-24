@@ -6,6 +6,7 @@ use std::io::{BufWriter, Read as _, Write as _};
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use mistarr_core::hash::Md5Stream;
@@ -19,6 +20,9 @@ const BUDGET_KIB: u64 = 64 * 1024;
 const JOB_TIMEOUT: Duration = Duration::from_secs(600);
 
 const MRAS: usize = 1000;
+/// Member size and `repeat` of the one MRA part whose rom is larger than the budget.
+const BIG_PART_BYTES: usize = 32 * 1024 * 1024;
+const BIG_REPEAT: usize = 4;
 const ALTERNATIVES: usize = 50;
 const ORGANIZED_DIRS: usize = 1000;
 const LINKS_PER_DIR: usize = 15;
@@ -35,62 +39,84 @@ struct Server {
     db: PathBuf,
 }
 
-/// Writes the config and starts `mistarr serve` on `root`, returning the child and its port.
-fn spawn(root: &Path, extra: &str) -> (Child, u16) {
-    let port = free_port();
-    let data = root.join("data");
-    std::fs::create_dir_all(&data).expect("mkdir data");
-    let config = format!(
-        "[server]\nlisten = \"127.0.0.1:{port}\"\n[paths]\nroot = {root:?}\ngames = {games:?}\n\
-         [client]\nkind = \"transmission\"\nurl = \"http://127.0.0.1:1/transmission/rpc\"\n\
-         [jobs]\nscan_interval_minutes = 0\n{extra}",
-        games = root.join("games"),
-    );
-    std::fs::write(data.join("mistarr.toml"), config).expect("config");
-    let child = Command::new(env!("CARGO_BIN_EXE_mistarr"))
-        .arg("--data")
-        .arg(&data)
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .expect("spawn mistarr");
-    (child, port)
+/// Writes the config and starts `mistarr serve` on `root` until one listens, since another
+/// process may take the chosen free port first. Returns the listening server.
+fn spawn(root: &Path, extra: &str) -> Server {
+    for _ in 0..5 {
+        let port = free_port();
+        let data = root.join("data");
+        std::fs::create_dir_all(&data).expect("mkdir data");
+        let config = format!(
+            "[server]\nlisten = \"127.0.0.1:{port}\"\n[paths]\nroot = {root:?}\ngames = {games:?}\n\
+             [client]\nkind = \"transmission\"\nurl = \"http://127.0.0.1:1/transmission/rpc\"\n\
+             [jobs]\nscan_interval_minutes = 0\n{extra}",
+            games = root.join("games"),
+        );
+        std::fs::write(data.join("mistarr.toml"), config).expect("config");
+        let child = Command::new(env!("CARGO_BIN_EXE_mistarr"))
+            .arg("--data")
+            .arg(&data)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn mistarr");
+        let mut server = Server {
+            child,
+            port,
+            db: data.join("mistarr.db"),
+        };
+        if server.wait_listening() {
+            return server;
+        }
+    }
+    panic!("server never listened");
+}
+
+/// The data segment limit `mistarr` inherits from this process, `None` when unlimited.
+fn inherited_data_limit() -> Option<u64> {
+    let limits = std::fs::read_to_string("/proc/self/limits").expect("proc limits");
+    data_limit_of(&limits)
+}
+
+/// The soft `Max data size` of a `/proc/<pid>/limits` text, `None` when unlimited.
+fn data_limit_of(limits: &str) -> Option<u64> {
+    let line = limits
+        .lines()
+        .find(|l| l.starts_with("Max data size"))
+        .expect("data limit line");
+    line.split_whitespace().nth(3).expect("soft").parse().ok()
 }
 
 impl Server {
     fn start(root: &Path) -> Self {
-        let (child, port) = spawn(root, "");
-        let server = Self {
-            child,
-            port,
-            db: root.join("data/mistarr.db"),
-        };
-        server.wait_listening();
-        server.assert_data_limit();
+        let server = spawn(root, "");
+        server.assert_data_limit(192);
+        assert!(root.join("data/tmp").is_dir(), "SQLite temporary directory");
         server
     }
 
-    /// The default `[memory] data_limit_mib` is in force on the process.
-    fn assert_data_limit(&self) {
+    /// `[memory] data_limit_mib` of `mib` is in force, or the lower limit the test inherited.
+    fn assert_data_limit(&self, mib: u64) {
         let limits = std::fs::read_to_string(format!("/proc/{}/limits", self.child.id()))
             .expect("proc limits");
-        let line = limits
-            .lines()
-            .find(|l| l.starts_with("Max data size"))
-            .expect("data limit line");
-        let soft = line.split_whitespace().nth(3).expect("soft limit");
-        assert_eq!(soft, (192u64 << 20).to_string(), "{line}");
+        let want = inherited_data_limit().map_or(mib << 20, |l| l.min(mib << 20));
+        assert_eq!(data_limit_of(&limits), Some(want), "{limits}");
     }
 
-    fn wait_listening(&self) {
+    /// Waits until the server accepts connections; false when it exited first.
+    fn wait_listening(&mut self) -> bool {
         let start = Instant::now();
         while TcpStream::connect(("127.0.0.1", self.port)).is_err() {
+            if self.child.try_wait().ok().flatten().is_some() {
+                return false;
+            }
             assert!(
                 start.elapsed() < Duration::from_secs(60),
                 "server never listened"
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+        true
     }
 
     /// `VmHWM` of the server process in KiB.
@@ -198,10 +224,28 @@ fn free_port() -> u16 {
     l.local_addr().expect("addr").port()
 }
 
-fn assert_budget(label: &str, peak_kib: u64) {
+/// Peak RSS of a server that runs no job, measured once per test process.
+fn idle_kib() -> u64 {
+    static IDLE: OnceLock<u64> = OnceLock::new();
+    *IDLE.get_or_init(|| {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let server = spawn(dir.path(), "");
+        std::thread::sleep(Duration::from_secs(2));
+        server.stop("idle")
+    })
+}
+
+/// Holds `peak_kib` under the budget, and its growth over an idle server under `delta_mib`.
+fn assert_budget(label: &str, peak_kib: u64, delta_mib: u64) {
     assert!(
         peak_kib < BUDGET_KIB,
         "{label}: peak RSS {peak_kib} KiB is over the {BUDGET_KIB} KiB budget"
+    );
+    let idle = idle_kib();
+    let grown = peak_kib.saturating_sub(idle);
+    assert!(
+        grown < delta_mib << 10,
+        "{label}: peak RSS {peak_kib} KiB is {grown} KiB over idle {idle} KiB, above {delta_mib} MiB"
     );
 }
 
@@ -276,7 +320,8 @@ fn mra_text(name: &str, zip: &str, md5: &str, i: usize) -> String {
 }
 
 /// `_Arcade` with `MRAS` MRAs, `ALTERNATIVES` more under `_alternatives`, hard links,
-/// cores, and an `_Organized` tree of symlinks back to them; plus a zip per MRA.
+/// cores, one MRA repeating a 32 MiB part, and an `_Organized` tree of symlinks back to
+/// them; plus a zip per MRA.
 /// Returns the number of distinct MRA files.
 fn arcade_tree(root: &Path) -> usize {
     let arcade = root.join("_Arcade");
@@ -306,6 +351,19 @@ fn arcade_tree(root: &Path) -> usize {
         };
         write(&path, mra_text(&name, &zip, &md5.finish(), i).as_bytes());
     }
+    let big = bytes_for(0, 1024).repeat(BIG_PART_BYTES / 1024);
+    let mut md5 = Md5Stream::new();
+    for _ in 0..BIG_REPEAT {
+        md5.update(&big);
+    }
+    write(&mame.join("exbig.zip"), &zip_of(&[("big.bin", &big)]));
+    let big_mra = format!(
+        "<misterromdescription><name>Example Big Repeat</name><rbf>excore</rbf>\
+         <rom index=\"0\" zip=\"exbig.zip\" md5=\"{}\"><part name=\"big.bin\" repeat=\"{BIG_REPEAT}\"/>\
+         </rom></misterromdescription>",
+        md5.finish()
+    );
+    write(&arcade.join("Example Big Repeat.mra"), big_mra.as_bytes());
     for i in 0..5 {
         let src = arcade.join(format!("Example Game {i:04}.mra"));
         std::fs::hard_link(&src, arcade.join(format!("Example Game {i:04} link.mra")))
@@ -323,7 +381,7 @@ fn arcade_tree(root: &Path) -> usize {
                 .expect("symlink");
         }
     }
-    MRAS + ALTERNATIVES
+    MRAS + ALTERNATIVES + 1
 }
 
 /// A Logiqx DAT of about `DAT_BYTES` binding to NES, clone groups of three regions.
@@ -448,7 +506,7 @@ fn arcade_catalogue_stays_under_budget() {
     assert_eq!(usize::try_from(titles).expect("count"), distinct);
     assert_eq!(usize::try_from(matched).expect("count"), distinct);
     assert_eq!(progress["parsed"], distinct, "each distinct MRA read once");
-    assert_budget("arcade_catalog", peak);
+    assert_budget("arcade_catalog", peak, 12);
 
     let server = Server::start(dir.path());
     let rows = server.wait_jobs("arcade_catalog", 2);
@@ -460,7 +518,7 @@ fn arcade_catalogue_stays_under_budget() {
         progress["checked"], 0,
         "unchanged sets are not checked again"
     );
-    assert_budget("arcade_catalog rerun", peak);
+    assert_budget("arcade_catalog rerun", peak, 12);
 }
 
 #[test]
@@ -475,7 +533,7 @@ fn dat_and_torrent_import_stay_under_budget() {
     let peak = server.stop("dat_import");
     assert_eq!(rows[0].0, "done", "{}", rows[0].1);
     assert_eq!(usize::try_from(titles).expect("count"), games);
-    assert_budget("dat_import", peak);
+    assert_budget("dat_import", peak, 12);
 
     big_torrent(&dir.path().join("data/sources/example.torrent"));
     let server = Server::start(dir.path());
@@ -486,7 +544,7 @@ fn dat_and_torrent_import_stay_under_budget() {
     assert_eq!(rows[0].0, "done", "{}", rows[0].1);
     assert_eq!(usize::try_from(files).expect("count"), TORRENT_FILES);
     assert_eq!(usize::try_from(matched).expect("count"), TORRENT_FILES);
-    assert_budget("source_import", peak);
+    assert_budget("source_import", peak, 16);
 }
 
 #[test]
@@ -503,24 +561,12 @@ fn scan_stays_under_budget() {
     let peak = server.stop("scan");
     assert!(rows.iter().all(|(s, _)| s == "done"), "{rows:?}");
     assert_eq!(usize::try_from(stored).expect("count"), files);
-    assert_budget("scan", peak);
+    assert_budget("scan", peak, 16);
 }
 
 #[test]
 fn a_tiny_memory_limit_is_raised_to_the_floor() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let (child, port) = spawn(dir.path(), "[memory]\ndata_limit_mib = 2\n");
-    let server = Server {
-        child,
-        port,
-        db: dir.path().join("data/mistarr.db"),
-    };
-    server.wait_listening();
-    let limits = std::fs::read_to_string(format!("/proc/{}/limits", server.child.id()))
-        .expect("proc limits");
-    let line = limits
-        .lines()
-        .find(|l| l.starts_with("Max data size"))
-        .expect("data limit line");
-    assert_eq!(line.split_whitespace().nth(3), Some("67108864"), "{line}");
+    let server = spawn(dir.path(), "[memory]\ndata_limit_mib = 2\n");
+    server.assert_data_limit(64);
 }
