@@ -131,14 +131,19 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    is still a row, retired or not, as it would had it finished just before.
 2. Identify the platform from the DAT header name using the table in
    PLATFORMS.md, falling back to the platform an earlier version of the same
-   name was bound to. A header without a name takes the member's or file's
+   family was bound to. A header without a name takes the member's or file's
    stem as dropped; a DB export takes `<System> (DB Export)` from its member's
    or file's name (VERIFICATION.md "DB export"). Unknown DAT names are stored as an unbound
    `dat_versions` row the user can bind in the UI; binding re-reads the file
    from `dats/loaded/` and loads its titles.
 3. Upsert `dat_versions`, then `titles` and `roms`. A newer version of the same
-   DAT name supersedes the old one: entries not present in the new DAT are
-   marked `retired`, never deleted, so verified files keep their provenance.
+   DAT family on the same platform supersedes the old one, whether it comes
+   as a Logiqx DAT or a DB export (VERIFICATION.md "DAT families"); other
+   families on the platform stay live. Titles of the same name are reused
+   across the family's versions, and entries not present in the new DAT are
+   marked `retired`, never deleted. Files matched to a rom that retired are
+   matched again against the live roms by their stored hashes, or become
+   `unverified`.
 4. Parent/clone data is read from `cloneof` attributes when present. When
    absent, clone groups are inferred by normalising the name (strip region,
    revision, language and flag tags) so 1G1R still works with plain DATs.

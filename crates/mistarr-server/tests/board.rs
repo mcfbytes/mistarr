@@ -392,6 +392,20 @@ async fn a_rejected_dat_can_be_retried_after_a_fix_or_deleted() {
     assert!(!dats.join("rejected/junk.xml.reason.txt").exists());
     let listed = json_of(&booted, "/api/v1/dats/incoming").await;
     assert_eq!(listed["total"], 0, "{listed}");
+
+    let loaded = json_of(&booted, "/api/v1/dats").await;
+    let id = loaded["items"][0]["id"].as_i64().expect("id");
+    let remove = format!("/api/v1/dats/{id}");
+    let refused = common::request_plain(booted.addr(), "DELETE", &remove, &[], None).await;
+    assert_eq!(refused.status, 403, "{}", refused.body);
+    let r = request(booted.addr(), "DELETE", &remove, &[], None).await;
+    assert_eq!(r.status, 204, "{}", r.body);
+    let after = json_of(&booted, "/api/v1/dats").await;
+    assert_eq!(after["items"][0]["retired"], true, "{after}");
+    assert!(after["items"][0]["reason"].is_string(), "{after}");
+    assert!(dats.join("loaded/fixed.dat").is_file(), "the file stays");
+    let missing = request(booted.addr(), "DELETE", "/api/v1/dats/999", &[], None).await;
+    assert_eq!(missing.status, 404, "{}", missing.body);
     booted.running.shutdown().await.expect("shutdown");
 }
 

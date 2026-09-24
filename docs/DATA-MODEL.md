@@ -29,8 +29,10 @@ CREATE TABLE dat_versions (
   game_count    INTEGER NOT NULL,
   retired       INTEGER NOT NULL DEFAULT 0,   -- set by DELETE /dats/{id}
   source        TEXT NOT NULL DEFAULT 'dat',  -- 'dat' | 'mra': the one row MRA titles belong to
+  family        TEXT NOT NULL DEFAULT '',     -- dat::family_key of dat_name, refreshed at open
   UNIQUE (dat_name, version)
 );
+CREATE INDEX dat_versions_family ON dat_versions(family, platform_id);
 
 CREATE TABLE dat_stage (          -- the DAT being imported, parsed outside the write lock and applied at once
   seq  INTEGER PRIMARY KEY,

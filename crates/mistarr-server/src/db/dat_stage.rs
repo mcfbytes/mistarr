@@ -88,12 +88,7 @@ pub fn append(conn: &Connection, games: &[StagedGame]) -> Result<()> {
 ///
 /// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Job`] for a row
 /// that does not read back.
-pub fn apply(
-    conn: &Connection,
-    platform: &str,
-    version: DatVersionId,
-    dat_name: &str,
-) -> Result<u64> {
+pub fn apply(conn: &Connection, platform: &str, version: DatVersionId) -> Result<u64> {
     let mut stmt = conn.prepare("SELECT game FROM dat_stage ORDER BY seq")?;
     let mut staged = stmt.query([])?;
     let mut n = 0;
@@ -124,7 +119,7 @@ pub fn apply(
                 header: r.header.as_deref(),
             })
             .collect();
-        titles::upsert_title(conn, platform, version, dat_name, &title, &roms)?;
+        titles::upsert_title(conn, platform, version, &title, &roms)?;
         n += 1;
     }
     Ok(n)
@@ -172,7 +167,7 @@ mod tests {
         let id = upsert_version(&c, &v).expect("version").id;
         append(&c, &[game("Example Quest (USA)")]).expect("append");
         append(&c, &[game("Other Tale (USA)")]).expect("append");
-        assert_eq!(apply(&c, "gb", id, v.dat_name).expect("apply"), 2);
+        assert_eq!(apply(&c, "gb", id).expect("apply"), 2);
         let names: Vec<String> = c
             .prepare("SELECT name FROM titles ORDER BY id")
             .expect("prepare")
@@ -182,6 +177,6 @@ mod tests {
             .expect("rows");
         assert_eq!(names, ["Example Quest (USA)", "Other Tale (USA)"]);
         clear(&c).expect("clear");
-        assert_eq!(apply(&c, "gb", id, v.dat_name).expect("apply"), 0);
+        assert_eq!(apply(&c, "gb", id).expect("apply"), 0);
     }
 }

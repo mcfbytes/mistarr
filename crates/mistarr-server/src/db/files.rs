@@ -401,12 +401,26 @@ pub fn match_rom(
     crc32: &str,
     size: i64,
 ) -> Result<Option<RomMatch>> {
-    const SELECT: &str = "SELECT r.id, r.title_id, r.name, r.status
-         FROM roms r JOIN titles t ON t.id = r.title_id
-         JOIN dat_versions d ON d.id = t.dat_version_id
-         WHERE t.platform_id = ?1 AND t.source = 'dat' AND ";
+    match_among(conn, platform_id, [sha1, md5, crc32], size, "")
+}
+
+/// [`match_rom`] over the roms `live` admits, an SQL condition ending in `AND ` or empty.
+fn match_among(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    [sha1, md5, crc32]: [&str; 3],
+    size: i64,
+    live: &str,
+) -> Result<Option<RomMatch>> {
     const ORDER: &str = " ORDER BY (r.retired = 0 AND t.retired = 0) DESC,
          d.superseded_by IS NULL DESC, d.id DESC LIMIT 1";
+    let select = format!(
+        "SELECT r.id, r.title_id, r.name, r.status
+         FROM roms r JOIN titles t ON t.id = r.title_id
+         JOIN dat_versions d ON d.id = t.dat_version_id
+         WHERE t.platform_id = ?1 AND t.source = 'dat' AND {live}"
+    );
+    let select = select.as_str();
     let row = |r: &Row<'_>| -> rusqlite::Result<RomMatch> {
         Ok(RomMatch {
             rom_id: r.get(0)?,
@@ -417,7 +431,7 @@ pub fn match_rom(
     };
     if let Some(m) = conn
         .query_row(
-            &format!("{SELECT}r.sha1 = ?2{ORDER}"),
+            &format!("{select}r.sha1 = ?2{ORDER}"),
             params![platform_id.0, sha1],
             row,
         )
@@ -427,7 +441,7 @@ pub fn match_rom(
     }
     if let Some(m) = conn
         .query_row(
-            &format!("{SELECT}r.sha1 IS NULL AND r.md5 = ?2{ORDER}"),
+            &format!("{select}r.sha1 IS NULL AND r.md5 = ?2{ORDER}"),
             params![platform_id.0, md5],
             row,
         )
@@ -438,12 +452,68 @@ pub fn match_rom(
     Ok(conn
         .query_row(
             &format!(
-                "{SELECT}r.sha1 IS NULL AND r.md5 IS NULL AND r.crc32 = ?2 AND r.size = ?3{ORDER}"
+                "{select}r.sha1 IS NULL AND r.md5 IS NULL AND r.crc32 = ?2 AND r.size = ?3{ORDER}"
             ),
             params![platform_id.0, crc32, size],
             row,
         )
         .optional()?)
+}
+
+/// Matches again every file on `platform_id` whose rom or title is retired, by its stored
+/// hashes against live roms only: a match sets the rom and state as a scan would, and
+/// no match leaves the file `unverified`. Returns how many files changed.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let nes = mistarr_core::PlatformId("nes".into());
+/// assert_eq!(mistarr_server::db::files::rematch_retired(&conn, &nes).unwrap(), 0);
+/// ```
+pub fn rematch_retired(conn: &Connection, platform_id: &PlatformId) -> Result<usize> {
+    let orphans: Vec<(i64, String, i64, [Option<String>; 3])> = conn
+        .prepare(
+            "SELECT f.id, f.rel_path, f.size, f.sha1, f.md5, f.crc32
+             FROM files f JOIN roms r ON r.id = f.rom_id JOIN titles t ON t.id = r.title_id
+             WHERE f.platform_id = ?1 AND t.source = 'dat' AND (r.retired = 1 OR t.retired = 1)",
+        )?
+        .query_map([&platform_id.0], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                [r.get(3)?, r.get(4)?, r.get(5)?],
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut update =
+        conn.prepare_cached("UPDATE files SET rom_id = ?2, state = ?3 WHERE id = ?1")?;
+    for (id, rel_path, size, [sha1, md5, crc32]) in &orphans {
+        let hashes = [sha1, md5, crc32].map(|h| h.as_deref().unwrap_or(""));
+        let live = "r.retired = 0 AND t.retired = 0 AND ";
+        let (rom, state) = match match_among(conn, platform_id, hashes, *size, live)? {
+            Some(m) => {
+                let own = rel_path
+                    .rsplit_once('#')
+                    .map_or(rel_path.as_str(), |(_, m)| m);
+                let state = if m.status == "baddump" {
+                    FileState::Bad
+                } else if basename(&m.name) == basename(own) {
+                    FileState::Verified
+                } else {
+                    FileState::Misnamed
+                };
+                (Some(m.rom_id), state)
+            }
+            None => (None, FileState::Unverified),
+        };
+        update.execute(params![id, rom, state.as_str()])?;
+    }
+    Ok(orphans.len())
 }
 
 /// Whether any rom of this platform has this CRC32 and size, the pre-check

@@ -95,6 +95,7 @@ async fn status_has_the_documented_shape() {
     assert!(s["override"].is_null());
     assert_eq!(s["waiting"], serde_json::json!([]));
     assert!(s["disk_free_bytes"].is_u64());
+    assert!(s["dats_dir"].as_str().is_some_and(|d| d.ends_with("dats")));
     assert!(s["rss_bytes"].as_u64().is_some_and(|b| b > 0));
     booted.running.shutdown().await.expect("shutdown");
 }

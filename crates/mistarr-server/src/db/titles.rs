@@ -79,7 +79,7 @@ fn parse_list(text: &str) -> Vec<String> {
 }
 
 /// Stores a game under `version`, reusing the title of the same name from any
-/// version of `dat_name` so ids, `wanted` and file provenance survive a new
+/// version of its DAT family so ids, `wanted` and file provenance survive a new
 /// version. Roms the game no longer lists are marked retired.
 ///
 /// # Errors
@@ -95,23 +95,23 @@ fn parse_list(text: &str) -> Vec<String> {
 /// let version = dats::upsert_version(&conn, &v).unwrap().id;
 /// let t = titles::TitleInput { name: "Example Quest (USA)", base_name: "Example Quest",
 ///     group_key: "example quest", clone_of: None, regions: &[], languages: &[], revision: None, flags: &[] };
-/// let id = titles::upsert_title(&conn, "gb", version, "Maker - Game Boy", &t, &[]).unwrap();
-/// assert_eq!(titles::upsert_title(&conn, "gb", version, "Maker - Game Boy", &t, &[]).unwrap(), id);
+/// let id = titles::upsert_title(&conn, "gb", version, &t, &[]).unwrap();
+/// assert_eq!(titles::upsert_title(&conn, "gb", version, &t, &[]).unwrap(), id);
 /// ```
 pub fn upsert_title(
     conn: &Connection,
     platform: &str,
     version: DatVersionId,
-    dat_name: &str,
     t: &TitleInput<'_>,
     roms: &[RomInput<'_>],
 ) -> Result<TitleId> {
     let existing: Option<i64> = conn
         .prepare_cached(
-            "SELECT t.id FROM dat_versions d JOIN titles t ON t.dat_version_id = d.id AND t.name = ?2
-             WHERE d.dat_name = ?1 ORDER BY d.id = ?3 DESC, d.loaded_at DESC LIMIT 1",
+            "SELECT t.id FROM dat_versions d JOIN titles t ON t.dat_version_id = d.id AND t.name = ?1
+             WHERE d.family = (SELECT family FROM dat_versions WHERE id = ?2) AND t.source = 'dat'
+             ORDER BY d.id = ?2 DESC, d.loaded_at DESC LIMIT 1",
         )?
-        .query_row(params![dat_name, t.name, version.0], |r| r.get(0))
+        .query_row(params![t.name, version.0], |r| r.get(0))
         .optional()?;
     let (regions, languages, flags) = (json(t.regions), json(t.languages), json(t.flags));
     let id = if let Some(id) = existing {
@@ -281,9 +281,9 @@ fn grouped(
 const BAD_DUMP: &str =
     "EXISTS (SELECT 1 FROM roms r WHERE r.title_id = t.id AND r.retired = 0 AND r.status = 'baddump')";
 
-/// Re-elects inferred clone parents under default preferences, then stores the
-/// 1G1R pick of every live clone group on `platform` under `prefs`.
-/// Run it inside a transaction.
+/// Re-elects inferred clone parents under default preferences, joins the clone groups
+/// of titles that different DAT versions list with the same roms, then stores the 1G1R
+/// pick of every live clone group on `platform` under `prefs`. Run it inside a transaction.
 ///
 /// # Errors
 ///
@@ -329,6 +329,7 @@ pub fn recompute_platform(conn: &Connection, platform: &str, prefs: &Prefs) -> R
             stmt.execute([id, parent])?;
         }
     }
+    join_duplicate_groups(conn, platform)?;
 
     let mut out = Recomputed::default();
     let mut picks: Vec<i64> = Vec::new();
@@ -357,6 +358,118 @@ pub fn recompute_platform(conn: &Connection, platform: &str, prefs: &Prefs) -> R
     }
     out.picks = u64::try_from(picks.len()).unwrap_or(u64::MAX);
     Ok(out)
+}
+
+/// Joins clone groups across DAT versions: a title whose live roms, by hash, equal those
+/// of a title from another live version moves its whole group under the older group's
+/// parent. Groups joined by an earlier run return to their own DAT's parents first. Only
+/// the versions other than the largest are held in memory; the largest is streamed.
+fn join_duplicate_groups(conn: &Connection, platform: &str) -> Result<()> {
+    conn.execute(
+        "UPDATE titles SET parent_id = COALESCE(
+           (SELECT p.id FROM titles p
+            WHERE p.dat_version_id = titles.dat_version_id AND p.name = titles.clone_of),
+           id)
+         WHERE platform_id = ?1 AND source = 'dat' AND inferred = 0
+           AND (SELECT q.dat_version_id FROM titles q WHERE q.id = titles.parent_id)
+               IS NOT dat_version_id",
+        [platform],
+    )?;
+    let versions: Vec<i64> = conn
+        .prepare(
+            "SELECT id FROM dat_versions
+             WHERE platform_id = ?1 AND source = 'dat' AND retired = 0 AND superseded_by IS NULL
+             ORDER BY game_count DESC, id",
+        )?
+        .query_map([platform], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let Some((&largest, rest)) = versions.split_first() else {
+        return Ok(());
+    };
+    if rest.is_empty() {
+        return Ok(());
+    }
+    let mut first: HashMap<u64, (i64, i64)> = HashMap::new();
+    let mut root: HashMap<i64, i64> = HashMap::new();
+    for &version in rest {
+        each_signature(conn, version, |parent, sig| {
+            let (seen, seen_parent) = *first.entry(sig).or_insert((version, parent));
+            if seen != version {
+                union(&mut root, parent, seen_parent);
+            }
+        })?;
+    }
+    each_signature(conn, largest, |parent, sig| {
+        if let Some(&(_, seen_parent)) = first.get(&sig) {
+            union(&mut root, parent, seen_parent);
+        }
+    })?;
+    let mut update =
+        conn.prepare_cached("UPDATE titles SET parent_id = ?2 WHERE parent_id = ?1")?;
+    let groups: Vec<i64> = root.keys().copied().collect();
+    for group in groups {
+        update.execute([group, find(&root, group)])?;
+    }
+    Ok(())
+}
+
+/// Calls `each(parent, signature)` for every live title of `version` with roms that all
+/// carry a hash; the signature hashes the rom keys whatever their order.
+fn each_signature(conn: &Connection, version: i64, mut each: impl FnMut(i64, u64)) -> Result<()> {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut stmt = conn.prepare(
+        "SELECT t.id, t.parent_id, COALESCE(r.sha1, r.md5, r.crc32 || ':' || r.size)
+         FROM titles t JOIN roms r ON r.title_id = t.id AND r.retired = 0
+         WHERE t.dat_version_id = ?1 AND t.retired = 0 AND t.source = 'dat'
+         ORDER BY t.id",
+    )?;
+    let mut rows = stmt.query([version])?;
+    // Per title: id, parent, sum of key hashes, rom count, whether every rom had a key.
+    let mut open: Option<(i64, i64, u64, u64, bool)> = None;
+    let mut settle = |t: Option<(i64, i64, u64, u64, bool)>| {
+        if let Some((_, parent, sum, n, true)) = t {
+            let mut h = DefaultHasher::new();
+            (sum, n).hash(&mut h);
+            each(parent, h.finish());
+        }
+    };
+    while let Some(r) = rows.next()? {
+        let (id, parent): (i64, i64) = (r.get(0)?, r.get(1)?);
+        let key: Option<String> = r.get(2)?;
+        if open.is_none_or(|o| o.0 != id) {
+            settle(open.take());
+            open = Some((id, parent, 0, 0, true));
+        }
+        if let Some(o) = open.as_mut() {
+            match key {
+                Some(k) => {
+                    let mut h = DefaultHasher::new();
+                    k.hash(&mut h);
+                    o.2 = o.2.wrapping_add(h.finish());
+                    o.3 += 1;
+                }
+                None => o.4 = false,
+            }
+        }
+    }
+    settle(open.take());
+    Ok(())
+}
+
+/// Joins the trees of `a` and `b` under the smaller root.
+fn union(root: &mut HashMap<i64, i64>, a: i64, b: i64) {
+    let (a, b) = (find(root, a), find(root, b));
+    if a != b {
+        root.insert(a.max(b), a.min(b));
+    }
+}
+
+/// The root of `id` in a union-find forest stored as child to parent.
+fn find(root: &HashMap<i64, i64>, mut id: i64) -> i64 {
+    while let Some(&up) = root.get(&id) {
+        id = up;
+    }
+    id
 }
 
 /// Keeps a group of `title_groups g` only when it is an MRA title or its platform has no

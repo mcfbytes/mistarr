@@ -48,7 +48,8 @@ under `/api` return 404 JSON.
               "transmission_opt_in": true, "checked_at": 1700000000 },
   "corename": "MENU", "paused": false, "pause_reason": null, "override": null,
   "waiting": [],
-  "disk_free_bytes": 1000000, "rss_bytes": 1000000, "launch": "ready"
+  "disk_free_bytes": 1000000, "dats_dir": "/media/fat/mistarr/dats",
+  "rss_bytes": 1000000, "launch": "ready"
 }
 ```
 
@@ -65,6 +66,7 @@ lanes that are held, heavy lane first, oldest first, as
 the job is about or `null`. Running jobs are not in it. A running core holds
 the heavy lane; a manual pause holds the heavy and background lanes. It is
 empty while nothing is held. `disk_free_bytes` is for the filesystem holding the data directory.
+`dats_dir` is the directory watched for DAT files, from `[paths]`.
 `launch` is `"ready"`, `"disabled"` when `prefs.launch` is off, or
 `"unavailable"` when MiSTer Main's command FIFO does not exist.
 
@@ -185,17 +187,23 @@ canonical path with no file on disk is removed.
 | GET | `/dats` | Loaded and unbound dat_versions. |
 | GET | `/dats/incoming` | Files in `dats/` not loaded yet, and rejected ones; see "Incoming files". |
 | POST | `/dats/upload` | multipart; same handling as dropping into `dats/`. |
-| DELETE | `/dats/{id}` | Retire; files keep their provenance. |
+| DELETE | `/dats/{id}` | Remove a loaded version from the catalogue; files stay on disk. |
 | POST | `/dats/rejected/{file}/retry` | Move a rejected file back into `dats/` and import it again. |
 | DELETE | `/dats/rejected/{file}` | Delete a rejected file and its reason. |
 
 `/dats` items are `dat_versions` rows loaded from DAT files, newest first: `{ id, platform_id,
-dat_name, version, source_file, loaded_at, superseded_by, game_count, retired
-}`. `source_file` is the name under `dats/loaded/`, which gains ` (N)` before
+dat_name, version, source_file, loaded_at, superseded_by, game_count, retired,
+family, reason }`. `family` is the DAT family key (VERIFICATION.md "DAT
+families"); `reason` says why a version is not current, `null` for a current
+one. `total` counts every version, so a client pages with `limit` and `offset`. `source_file` is the name under `dats/loaded/`, which gains ` (N)` before
 the extension when the name is taken. Upload takes one `file` part named
 `.dat`, `.xml` or `.zip`, writes it into `dats/` and answers 202 `{ file,
 job_id }`; the result arrives as `dat.loaded` or `dat.rejected`. Retiring
-answers 204 and recomputes the platform's picks.
+removes a loaded version: its titles and roms retire, files matched to them
+are matched again against the live DATs by their stored hashes (or become
+`unverified`), and the platform's picks are recomputed; it answers 204, or
+404 for an unknown id. No file on disk is touched, and an older version of the
+same family stays superseded.
 
 `{file}` in the two `rejected` routes is a file name as `/dats/incoming`
 lists it, percent-encoded; a name with a `/` or `\`, a leading `.` or the

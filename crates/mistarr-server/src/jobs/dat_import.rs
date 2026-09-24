@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use mistarr_core::dat::{
-    export_name, export_parents, DatGame, DatHeader, DatStream, ExportOptions,
+    export_name, export_parents, split_version, DatGame, DatHeader, DatStream, ExportOptions,
 };
 use mistarr_core::hash::HeaderRule;
 use mistarr_core::naming::{group_key, parse_name};
@@ -41,8 +41,7 @@ pub const RECOMPUTE_KIND: &str = "recompute_1g1r";
 /// Subdirectory of `dats/` for files that loaded.
 pub const LOADED_DIR: &str = "loaded";
 
-/// Subdirectory of `dats/` for files that did not.
-pub const REJECTED_DIR: &str = "rejected";
+pub use crate::incoming::{REASON_SUFFIX, REJECTED_DIR};
 
 /// Games read between checks for shutdown.
 const CANCEL_EVERY: u64 = 500;
@@ -130,7 +129,7 @@ impl DatImport {
     /// use mistarr_server::jobs::{dat_import::DatImport, Job};
     /// let row = DatVersionRow { id: DatVersionId(3), platform_id: None, dat_name: "Test Console".into(),
     ///     version: "1".into(), source_file: "t.dat".into(), loaded_at: 0, superseded_by: None,
-    ///     game_count: 1, retired: false };
+    ///     game_count: 1, retired: false, family: "test console".into(), reason: None };
     /// let job = DatImport::bind(&row, "nes", "/d/loaded".as_ref());
     /// assert_eq!(job.payload()["dat_version_id"], 3);
     /// ```
@@ -438,7 +437,8 @@ struct Identity {
 }
 
 /// A DB export's identity: the name from the member's name, else the dropped file's,
-/// else the member's or file's stem; a plain file being bound keeps its stored name.
+/// else the member's or file's stem less a final version group, which becomes the
+/// version; a plain file being bound keeps its stored name.
 fn export_identity(req: &Request, member: &str) -> Identity {
     let named = [member, req.file_stem.as_str()]
         .into_iter()
@@ -447,8 +447,15 @@ fn export_identity(req: &Request, member: &str) -> Identity {
     let (name, version) = match (&req.bind, named) {
         (Some(b), _) if member.is_empty() => (b.dat_name.clone(), b.dat_version.clone()),
         (_, Some(n)) => (n.dat_name, n.version),
-        _ if !member.is_empty() => (stem(Path::new(member)), String::new()),
-        _ => (req.file_stem.clone(), String::new()),
+        _ => {
+            let stem = if member.is_empty() {
+                req.file_stem.clone()
+            } else {
+                stem(Path::new(member))
+            };
+            let (name, version) = split_version(&stem);
+            (name.to_owned(), version.to_owned())
+        }
     };
     let platform = platform_for(req, &name);
     Identity {
@@ -475,12 +482,21 @@ fn logiqx_identity(req: &Request, member: &str, header: &DatHeader) -> Identity 
     }
 }
 
-/// How a DB export's files become roms on `platform`: its header rule and extension.
+/// How a DB export's files become roms on `platform`: its header rule, the extensions it
+/// loads, and the one it writes, else the first it loads.
 fn export_options(platform: Option<&str>, parents: HashMap<String, String>) -> ExportOptions {
     let row = platform.and_then(mistarr_mister::platforms::by_id);
     ExportOptions {
         header_rule: row.map_or(HeaderRule::None, |p| HeaderRule::from_name(p.header_rule)),
-        extension: row.and_then(|p| p.extension_written).map(str::to_owned),
+        extension: row
+            .and_then(|p| {
+                p.extension_written
+                    .or_else(|| p.load_extensions.first().copied())
+            })
+            .map(str::to_owned),
+        load_extensions: row
+            .map(|p| p.load_extensions.iter().map(|e| (*e).to_owned()).collect())
+            .unwrap_or_default(),
         parents,
     }
 }
@@ -600,13 +616,14 @@ fn import_stream<R: BufRead>(
         let platform = plan.platform_id.clone().filter(|_| plan.current && staging);
         if let Some(p) = &platform {
             dats::begin_load(&tx, plan.id)?;
-            dat_stage::apply(&tx, &p.0, plan.id, &dat_name)?;
+            dat_stage::apply(&tx, &p.0, plan.id)?;
         }
         dats::set_game_count(&tx, plan.id, games)?;
         let mut retired = 0;
         if let Some(p) = &platform {
             titles::link_parents(&tx, plan.id, clone_of)?;
             retired = dats::retire_absent(&tx, plan.id)?;
+            crate::db::files::rematch_retired(&tx, p)?;
             titles::recompute_platform(&tx, &p.0, &req.prefs)?;
         }
         dat_stage::clear(&tx)?;
@@ -746,7 +763,7 @@ fn reject(app: &AppState, path: &Path, file: &str, reason: &str) -> Result<()> {
     let target = unique_path(&dir, file);
     std::fs::rename(path, &target)?;
     let mut reason_path = target.into_os_string();
-    reason_path.push(".reason.txt");
+    reason_path.push(REASON_SUFFIX);
     std::fs::write(reason_path, format!("{reason}\n"))?;
     tracing::warn!(file, reason, "DAT rejected");
     publish_rejected(app, file, reason);

@@ -184,7 +184,7 @@ fn dat_game(c: &Connection, version: &str, name: &str) -> TitleId {
         status: "good",
         header: None,
     };
-    let id = titles::upsert_title(c, "arcade", v, "MAME", &t, &[rom]).expect("upsert");
+    let id = titles::upsert_title(c, "arcade", v, &t, &[rom]).expect("upsert");
     dats::retire_absent(c, v).expect("retire");
     id
 }

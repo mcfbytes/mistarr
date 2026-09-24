@@ -41,16 +41,23 @@ model as a Logiqx DAT:
 | flags | `archive@status` (such as `Beta 2`, `Proto 3`, `Possible Proto`, `Demo`, `Sample`) adds `beta`, `proto`, `demo` or `sample` when the name does not already carry that flag, so the hide list applies |
 | roms | the game image files of every source, one per `sha1` (size and other hashes without one), of one storage kind chosen per game |
 | rom name | the file's `forcename` when present, else `<game name>.<ext>` |
-| rom status | `nodump` when the file has `mia="1"`, `baddump` when it has `bad="1"`, else `good` |
+| rom status | `baddump` when the file has `bad="1"`, else `good`; `mia="1"` leaves the status alone, since the file carries known hashes that verify |
 | DAT name, version | from the file name, `<System> (DB Export) (<version>).xml` or `.zip`, as `<System> (DB Export)`; the header `<version>` when present |
 
-Only the game image becomes a rom: a file with an `item` attribute, and a
-file whose extension is neither the image extension nor `unh`, is skipped.
-Those are extras such as save data or a separate chip dump, and a game
-needs every rom to verify, so one of them as a rom would keep the game
-from ever verifying. The image extension is the platform's written
-extension, else the extension of the game's headered file; without either,
-every file without `item` counts.
+Only the game image becomes a rom. Extras such as save data or a separate
+chip dump are skipped, since a game needs every rom to verify and one of
+them as a rom would keep the game from ever verifying. A file with an `item`
+attribute is always an extra; it is read leniently, so a malformed size or
+hash on it skips the file instead of rejecting the DAT. A file without
+`item` is an image when it has no extension, the headerless extension `unh`
+(or `lyx` for Lynx), or one of the platform's accepted extensions: every
+extension it loads (PLATFORMS.md) plus the one it writes. A headerless file
+whose size plus the `header` bytes of a headered image in its source equals
+that image's size is its headerless form and also counts, whatever its
+extension. For a DAT bound to no platform the headered file's extension is
+accepted; with nothing accepted every file without `item` counts. When no
+file is an image and a game has exactly one distinct file without `item`,
+that file is the image, named with the platform's extension.
 
 The storage kind follows how the board hashes the platform (PLATFORMS.md
 "Header rules"). A file is headerless when `format="Headerless"` or its
@@ -65,9 +72,11 @@ has, the first in this order is taken:
 
 A headerless rom takes the `header` attribute of the headered file in its
 source, which placement uses to add the header back. Unless it has a
-`forcename`, its extension is the platform's written extension instead of
-`.unh`, else the headered file's.
-Two files that would get the same rom name keep the first. A DAT name bound
+`forcename`, a headerless, extensionless or lone-file image is named with
+the platform's written extension, else the first it loads, else the
+headered file's. Candidates are ordered good, then bad dumps, before
+duplicates are dropped, so a good dump wins over a bad one of the same
+name; of two files that would still get the same rom name the first stays. A DAT name bound
 to no platform takes the last rule, and binding it later reads the file
 again under the chosen platform's rule.
 
@@ -76,7 +85,44 @@ load every `.dat` or `.xml` member as a separate DAT.
 
 Store the header `name` verbatim; platform binding works on it. Store
 `version` verbatim; supersession compares it as a string, newest by
-`loaded_at` when equal.
+`loaded_at` when equal. A DB export named without the `(DB Export)` marker
+takes its name from the file stem less a final version group, which becomes
+its version.
+
+### DAT families
+
+Several DATs may be live for one platform, such as an official DAT and an
+open-licensed add-on list. Only a refreshed or alternate form of the same
+list supersedes. That list is the DAT's family, keyed by
+`mistarr_core::dat::family_key` on the header name:
+
+1. Drop every bracketed group whose text, lowercased with `-` and `_` read
+   as spaces, is one of the format markers in
+   `mistarr_core::dat::FORMAT_MARKERS` (`db export`, `headered`,
+   `headerless`, `parent clone`, `retool`, `bigendian`, `byteswapped`,
+   `littleendian`), optionally followed by a date or version.
+2. Drop final `(…)` groups made of a date or version: digits with `.`, `-`,
+   `_`, `:` or spaces, optionally after a `v`.
+3. Collapse whitespace and lowercase.
+
+So `Example Vendor - Example System (Headered)` and `Example Vendor - Example
+System (DB Export)` are one family, `example vendor - example system`, and
+`Example Samples - Example System (Headered)` is another. The key is stored
+in `dat_versions.family` and refreshed from the names at every start.
+
+A load supersedes the current version of its family on its platform when its
+version string is not below that version's; an unbound version counts toward
+every platform. An older version loaded later is stored superseded by the
+current one and its titles are not loaded; `/dats` gives the reason. Removing
+a version (`DELETE /dats/{id}`) retires its titles and roms and does not
+bring back an older superseded version: the file is dropped again for that.
+
+Two live families on a platform may list the same game. After each load and
+each recompute, a title whose live roms equal, by hash, those of a title from
+another version joins its whole clone group to the group of the older title,
+so browse shows the game once and 1G1R picks one of its variants. Titles with
+a rom without any hash are never joined. Groups joined this way return to
+their own DAT's parents before the next join, so removing a DAT undoes it.
 
 ## Name parsing
 

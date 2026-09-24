@@ -17,7 +17,7 @@ use crate::app::AppState;
 use crate::db::dats::{self, DatVersionId, DatVersionRow};
 use crate::db::jobs::JobId;
 use crate::incoming::IncomingFile;
-use crate::jobs::dat_import::{unique_path, DatImport, Recompute, REJECTED_DIR};
+use crate::jobs::dat_import::{unique_path, DatImport, Recompute, REASON_SUFFIX, REJECTED_DIR};
 use crate::jobs::Scheduler;
 
 /// Largest accepted upload; daily packs of every system fit well inside.
@@ -141,9 +141,6 @@ async fn write_field(
     Ok(())
 }
 
-/// Suffix of the file beside a rejected one that says why.
-const REASON_SUFFIX: &str = ".reason.txt";
-
 /// The rejected file `name` in `dats/rejected/`, when it is a plain file name that exists.
 fn rejected_file(dats: &FsPath, name: &str) -> Result<PathBuf, ApiError> {
     let plain = !name.is_empty()
@@ -154,11 +151,47 @@ fn rejected_file(dats: &FsPath, name: &str) -> Result<PathBuf, ApiError> {
         return Err(ApiError::bad_request("not a file name in dats/rejected/"));
     }
     let path = dats.join(REJECTED_DIR).join(name);
-    if path.is_file() {
-        Ok(path)
-    } else {
-        Err(ApiError::not_found("no such rejected file"))
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) if meta.is_file() => Ok(path),
+        _ => Err(ApiError::not_found("no such rejected file")),
     }
+}
+
+/// Moves `from` into `dir` under `name` or the first free variant, never replacing a
+/// file: a hard link where the file system has them, else a copy made with `create_new`.
+fn move_new(from: &FsPath, dir: &FsPath, name: &str) -> std::io::Result<PathBuf> {
+    use std::io::ErrorKind;
+    loop {
+        let target = unique_path(dir, name);
+        let placed = match std::fs::hard_link(from, &target) {
+            Err(e) if e.kind() == ErrorKind::NotFound || e.kind() == ErrorKind::AlreadyExists => {
+                Err(e)
+            }
+            Err(_) => copy_new(from, &target),
+            ok => ok,
+        };
+        match placed {
+            Ok(()) => {
+                std::fs::remove_file(from)?;
+                return Ok(target);
+            }
+            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+}
+
+fn copy_new(from: &FsPath, to: &FsPath) -> std::io::Result<()> {
+    let mut src = std::fs::File::open(from)?;
+    let mut dst = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    let copied = std::io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all());
+    if copied.is_err() {
+        let _ = std::fs::remove_file(to);
+    }
+    copied
 }
 
 fn reason_of(path: &FsPath) -> PathBuf {
@@ -176,8 +209,12 @@ async fn retry_rejected(
     let Path(name) = file.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let dir = app.config().paths.dats();
     let path = rejected_file(&dir, &name)?;
-    let target = unique_path(&dir, &name);
-    std::fs::rename(&path, &target).map_err(crate::Error::from)?;
+    let target = match move_new(&path, &dir, &name) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::not_found("no such rejected file"))
+        }
+        moved => moved.map_err(crate::Error::from)?,
+    };
     remove_if_present(&reason_of(&path))?;
     let job_id = Scheduler::enqueue(&app, Arc::new(DatImport::new(&target))).await?;
     let file = target
@@ -205,6 +242,8 @@ fn remove_if_present(path: &FsPath) -> Result<(), ApiError> {
     }
 }
 
+/// `DELETE /dats/{id}`: retires a loaded version and its titles, matches the files of
+/// their roms again against the live DATs, and queues a 1G1R recompute. Files stay on disk.
 async fn retire(
     State(app): State<Arc<AppState>>,
     id: Result<Path<i64>, PathRejection>,
@@ -215,6 +254,9 @@ async fn retire(
         .write(move |c| {
             let tx = c.transaction()?;
             let row = dats::retire(&tx, DatVersionId(id))?;
+            if let Some(p) = row.as_ref().and_then(|r| r.platform_id.as_ref()) {
+                crate::db::files::rematch_retired(&tx, p)?;
+            }
             tx.commit()?;
             Ok(row)
         })
@@ -244,6 +286,37 @@ mod tests {
         assert_eq!(e.status, StatusCode::NOT_FOUND);
         assert!(reason_of(FsPath::new("/r/a.dat")).ends_with("a.dat.reason.txt"));
         assert!(remove_if_present(&dir.path().join("none")).is_ok());
+        std::os::unix::fs::symlink(
+            dir.path().join("rejected/a.dat"),
+            dir.path().join("rejected/l.dat"),
+        )
+        .expect("symlink");
+        let e = rejected_file(dir.path(), "l.dat").expect_err("a link is not a rejected file");
+        assert_eq!(e.status, StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn a_retried_file_never_replaces_one_of_the_same_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let from = dir.path().join("rejected.dat");
+        std::fs::write(&from, b"retried").expect("write");
+        std::fs::write(dir.path().join("a.dat"), b"waiting").expect("write");
+        let moved = move_new(&from, dir.path(), "a.dat").expect("move");
+        assert!(moved.ends_with("a (1).dat"));
+        assert_eq!(std::fs::read(&moved).expect("read"), b"retried");
+        assert_eq!(
+            std::fs::read(dir.path().join("a.dat")).expect("read"),
+            b"waiting"
+        );
+        assert!(!from.exists());
+        let gone = move_new(&from, dir.path(), "b.dat").expect_err("moved already");
+        assert_eq!(gone.kind(), std::io::ErrorKind::NotFound);
+        let to = dir.path().join("c.dat");
+        copy_new(&moved, &to).expect("copy");
+        assert_eq!(
+            copy_new(&moved, &to).expect_err("exists").kind(),
+            std::io::ErrorKind::AlreadyExists
+        );
     }
 
     #[test]

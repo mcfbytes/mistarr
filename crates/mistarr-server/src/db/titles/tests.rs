@@ -60,7 +60,7 @@ fn add(
             header: None,
         })
         .collect();
-    upsert_title(c, "gb", v, DAT, &t, &roms).expect("upsert")
+    upsert_title(c, "gb", v, &t, &roms).expect("upsert")
 }
 
 fn rom(c: &Connection, title: TitleId, name: &str) -> i64 {
