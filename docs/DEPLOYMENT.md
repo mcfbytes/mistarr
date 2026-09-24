@@ -147,9 +147,11 @@ automatic and manual scans instead; the change needs a restart.
 `mistarr doctor` prints: binary is static, paths writable, free space,
 detected client and its version, whether `rtorrent` is on `PATH`, installed
 cores, CORENAME, memory available, and the result of hashing 64 MiB of zeros
-for throughput (`--hash-mib N` changes the size). It reads the same config as
-the server and needs no running server. This is what a bug report should
-include.
+for throughput (`--hash-mib N` changes the size), and whether the
+`title_groups` table and search index match the catalogue. It reads the same
+config as the server and needs no running server. This is what a bug report
+should include. When it reports title groups out of step, stop the server
+and run `mistarr doctor --rebuild-groups` to recompute them.
 
 ## Releasing
 

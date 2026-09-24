@@ -409,6 +409,7 @@ shutdown is left `queued` for this.
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches |
 | Arcade presence pass | 500 zips per batch, central directory only, never decompressed |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
+| Browse page or search, with its total | under 100 ms on the board for a platform of 15 000 titles; `tests/browse.rs` holds a host bound |
 | SPA bundle, gzipped | under 200 KiB |
 | Concurrent client RPC calls | 1, serialised |
 
@@ -429,6 +430,14 @@ A DAT loads in one write transaction, so the WAL file can grow to the size
 of the pages that DAT touches while it loads; it is cut back to 1 MiB at the
 next checkpoint. Page memory stays within the cache either way, since SQLite
 spills dirty pages to the WAL.
+
+Every write transaction commits through `db::commit`, which first refreshes
+the clone groups its writes touched in `title_groups` (DATA-MODEL.md
+"Derived tables"). Browse and the platform counts then read one indexed row
+per group; a page and its total cost about as much as reading the page, and
+the refresh adds a few hundred milliseconds on the host to a 15 000-game DAT
+load. Search probes the `title_search` trigram index for three or more
+characters and confirms with `LIKE`.
 
 ## Configuration
 

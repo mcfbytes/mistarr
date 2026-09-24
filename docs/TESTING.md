@@ -108,6 +108,38 @@ prints each peak:
 make memory
 ```
 
+## Browse speed
+
+`crates/mistarr-server/tests/browse.rs` builds a synthetic catalogue of six
+platforms and 60 000 titles, one platform of 15 000 titles with 60 000
+files, in clone groups of three regions with some BIOS and beta entries. It
+checks that the default page, every sort, the counts and three searches (a
+rare word, a three-letter string in a quarter of every platform, and a word
+common elsewhere but rare on the large platform) return exactly what the old
+per-request view returned, at least five times faster and under 100 ms on
+the host. It prints each timing, the old view's, and the search query
+shapes side by side:
+
+```sh
+cargo test --release -p mistarr-server --test browse -- --include-ignored --nocapture
+```
+
+The ignored test in the same file times a 15 000-game DAT load with the
+group refresh and search index, without the index, and with neither, and
+prints the on-disk size of the index, the group table and the flag and
+region tables.
+
+`db::groups::tests` runs random sequences of writes to titles, roms, files,
+flags and regions through the real triggers and commits, and after every
+commit compares the table, the counts and every browse filter combination
+with the old view SQL kept in the test as the oracle. `db::plans` prints the
+query plan of every hot read and fails on a scan of a growing table.
+
+The web e2e suite drives the Browse screen against the mock API with a
+per-search latency from localStorage `mistarr.mockDelayMs` (a number, or an
+object of numbers by search text with `*` as the default; negative fails the
+search) to check the loading bar, stale answers and the error state.
+
 ## 3. End-to-end on a board with real, open-licensed content
 
 For manual verification on a DE10-Nano, use homebrew whose licence permits
