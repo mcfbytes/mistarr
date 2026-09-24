@@ -312,14 +312,12 @@ fn import_reads_find_zip_roms_their_titles_and_dat_entries() {
         ),
         (main, "exblast.zip", "mame", "Example.mra")
     );
-    assert_eq!(
-        zip_rom_id(&c, "arcade", "MAME", "EXBLAST.zip").expect("lookup"),
-        Some(rom)
-    );
-    assert_eq!(
-        zip_rom_id(&c, "arcade", "mame", "nosuch.zip").expect("lookup"),
-        None
-    );
+    let live = live_zip_roms(&c, "arcade").expect("live zips");
+    let naming = live.get("mame/exblast.zip").expect("named");
+    assert_eq!(naming.len(), 2, "both titles' roms, whatever their case");
+    assert_eq!(naming[0], rom, "lowest first");
+    assert!(live.contains_key("mame/exparent.zip"));
+    assert!(!live.contains_key("mame/nosuch.zip"));
     let naming = titles_naming(&c, "arcade", "MAME", "EXBLAST.zip").expect("naming");
     assert_eq!(
         naming.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
