@@ -508,8 +508,10 @@ dependencies = [
  "hyper",
  "hyper-util",
  "mistarr-clients",
+ "quick-xml",
  "serde",
  "serde_json",
+ "sha1",
  "thiserror",
  "tokio",
 ]

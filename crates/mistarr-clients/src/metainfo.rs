@@ -1,6 +1,23 @@
 //! Minimal bencode walk to count the files of a `.torrent` before adding it.
 
+use sha1::{Digest, Sha1};
+
+use crate::InfoHash;
+
 const MAX_DEPTH: usize = 64;
+
+/// The v1 infohash: SHA-1 of the bencoded `info` dictionary exactly as it
+/// appears in `metainfo`. `None` if there is no well-formed `info` dict.
+pub(crate) fn info_hash(metainfo: &[u8]) -> Option<InfoHash> {
+    let start = dict_get(metainfo, 0, b"info")?;
+    if metainfo.get(start) != Some(&b'd') {
+        return None;
+    }
+    let end = skip(metainfo, start, 0)?;
+    Some(InfoHash::from_bytes(
+        Sha1::digest(&metainfo[start..end]).into(),
+    ))
+}
 
 /// Number of entries in the v1 file list of `metainfo`: the length of
 /// `info.files`, or 1 for a single-file torrent. `None` if it cannot tell.
@@ -80,7 +97,8 @@ fn skip(buf: &[u8], pos: usize, depth: usize) -> Option<usize> {
 pub(crate) mod tests {
     use std::fmt::Write as _;
 
-    use super::file_count;
+    use super::{file_count, info_hash};
+    use sha1::{Digest, Sha1};
 
     /// Synthetic metainfo with `files` entries (0 means single-file).
     pub(crate) fn synthetic_metainfo(files: usize) -> Vec<u8> {
@@ -104,6 +122,19 @@ pub(crate) mod tests {
         assert_eq!(file_count(&synthetic_metainfo(3)), Some(3));
         assert_eq!(file_count(&synthetic_metainfo(0)), Some(1));
         assert_eq!(file_count(&synthetic_metainfo(2001)), Some(2001));
+    }
+
+    #[test]
+    fn hashes_the_info_dict_span() {
+        let info = b"d6:lengthi16e4:name1:a12:piece lengthi16384e6:pieces0:e";
+        let mut meta = b"d8:announce3:x:y4:info".to_vec();
+        meta.extend_from_slice(info);
+        meta.extend_from_slice(b"4:zzzzi1ee");
+        let want: [u8; 20] = Sha1::digest(info).into();
+        assert_eq!(info_hash(&meta).map(|h| *h.as_bytes()), Some(want));
+        assert_eq!(info_hash(b"d4:infoi1ee"), None);
+        assert_eq!(info_hash(b"d4:infod"), None);
+        assert!(info_hash(&synthetic_metainfo(2)).is_some());
     }
 
     #[test]
