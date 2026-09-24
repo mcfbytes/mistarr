@@ -1,11 +1,13 @@
 //! SQLite access; the schema is `docs/DATA-MODEL.md`. All SQL lives in this module's children.
 
+pub mod dats;
 pub mod jobs;
 pub mod migrate;
 pub mod platforms;
 pub mod settings;
 pub mod sources;
 pub mod system;
+pub mod titles;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

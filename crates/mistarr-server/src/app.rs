@@ -36,6 +36,10 @@ pub struct Options {
     pub magnet_poll: Duration,
     /// How often a started resolving magnet's file list is checked.
     pub magnet_started_poll: Duration,
+    /// How often `dats/` is listed.
+    pub dats_poll: Duration,
+    /// How old a file's mtime must be before it is imported.
+    pub dats_min_age: Duration,
 }
 
 impl Default for Options {
@@ -48,6 +52,8 @@ impl Default for Options {
             sources_min_age_secs: mistarr_sources::watch::DEFAULT_MIN_AGE_SECS,
             magnet_poll: Duration::from_secs(15),
             magnet_started_poll: Duration::from_secs(2),
+            dats_poll: Duration::from_secs(10),
+            dats_min_age: Duration::from_secs(2),
         }
     }
 }
@@ -259,6 +265,9 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     Scheduler::start(&app);
     tasks.push(tokio::spawn(source_import::watch(Arc::clone(&app))));
     tasks.push(tokio::spawn(source_import::resolve_pending(Arc::clone(
+        &app,
+    ))));
+    tasks.push(tokio::spawn(crate::jobs::dat_import::watch(Arc::clone(
         &app,
     ))));
 

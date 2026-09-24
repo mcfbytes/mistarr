@@ -65,6 +65,17 @@ file on later starts. Changing `client` re-runs client detection.
 | PUT | `/platforms/{id}` | `{ enabled }`. |
 | POST | `/platforms/{id}/dat` | Bind an unbound dat_version: `{ dat_version_id }`. |
 
+`/platforms` items are the platform row `{ id, name, core_dir, kind,
+core_present, enabled }` plus `counts: { titles, have, wanted, unverified }`:
+clone groups the default browse shows, groups with a verified variant, groups
+with a wanted variant, and `unverified` files on disk. `PUT` answers with the
+same item. Binding answers 202 `{ dat_version_id, platform_id, job_id }` and
+the import job loads the titles, then publishes `dat.loaded`; a version that
+is already bound or retired is a 400. When the job cannot load it, because its
+file is gone from `dats/loaded/` or a newer version of the same DAT name is
+loaded, it publishes `dat.rejected` with the reason and the version stays
+unbound.
+
 ## Catalog
 
 | Method | Path | Purpose |
@@ -75,6 +86,26 @@ file on later starts. Changing `client` re-runs client detection.
 | DELETE | `/titles/{id}/want` | Unmark. Cancels a not-yet-started download. |
 | POST | `/titles/{id}/rename` | Apply the canonical name to a `misnamed` file. |
 
+Browse filters: `q` is a case-insensitive substring of the base name; `have`
+and `wanted` take `yes`, `no` or `any` (also `true` and `false`); `region`
+keeps groups with a variant of that region; `flags` is a comma list and keeps
+groups with a variant carrying every listed flag. Variants carrying a flag in
+`prefs.hide` do not count unless `flags` names it, so BIOS and beta entries
+appear only when asked for. `sort=recent` puts groups whose newest entry was
+added last first. Items are the `title_groups` row `{ parent_id, platform_id,
+base_name, name, pick_id, pick_name, variants, have_verified, wanted,
+has_pick }` plus `art` for the pick, or the parent without one.
+
+`/titles/{id}` takes any title of the group and answers `{ parent_id,
+platform_id, base_name, pick_variant_id, art, variants }`. Each variant is `{
+id, name, regions, languages, revision, flags, is_1g1r_pick, wanted, retired,
+inferred, dat_version_id, torrent_files_available, roms }`, live variants
+first, and each rom is `{ id, name, size, crc32, md5, sha1, status, file_id,
+file_state, file_path }` for its best file, verified first. `want` and
+`DELETE want` answer with the same body. `want` is a 400 when the variant is
+not in the group, is retired or is a BIOS entry, or when no variant is
+selectable and none was named.
+
 ## DATs
 
 | Method | Path | Purpose |
@@ -82,6 +113,14 @@ file on later starts. Changing `client` re-runs client detection.
 | GET | `/dats` | Loaded and unbound dat_versions. |
 | POST | `/dats/upload` | multipart; same handling as dropping into `dats/`. |
 | DELETE | `/dats/{id}` | Retire; files keep their provenance. |
+
+`/dats` items are `dat_versions` rows, newest first: `{ id, platform_id,
+dat_name, version, source_file, loaded_at, superseded_by, game_count, retired
+}`. `source_file` is the name under `dats/loaded/`, which gains ` (N)` before
+the extension when the name is taken. Upload takes one `file` part named
+`.dat`, `.xml` or `.zip`, writes it into `dats/` and answers 202 `{ file,
+job_id }`; the result arrives as `dat.loaded` or `dat.rejected`. Retiring
+answers 204 and recomputes the platform's picks.
 
 ## Sources
 
@@ -159,7 +198,7 @@ connection that falls further behind is closed and, on reconnecting, gets
 |---|---|
 | `status` | Same shape as `/system/status`, sent on change and every 30 s. |
 | `job.progress` | `{ id, kind, state, progress }` |
-| `dat.loaded` / `dat.rejected` | `{ dat_version_id?, file, reason? }` |
+| `dat.loaded` / `dat.rejected` | `{ dat_version_id, file, platform_id }` / `{ file, reason }`; one per DAT in a pack, `file` as dropped |
 | `source.changed` | `{ source_id, state, platform_id? }` |
 | `download.changed` | `{ download_id, state, progress }` |
 | `import.done` | `{ title_id, file_id, action }` |
@@ -167,8 +206,11 @@ connection that falls further behind is closed and, on reconnecting, gets
 
 ## Art URLs
 
-The server never fetches art. `/titles/{id}` includes `art: { boxart, title,
-snap }` as URLs the browser loads directly from the libretro thumbnail server,
-built from the platform's playlist name and the DAT name with the characters
-`&*/:\`<>?\|"` replaced by `_`. The SPA treats a 404 as "no art" and shows a
-placeholder.
+The server never fetches art. `/titles/{id}` and each browse item include
+`art: { boxart, title, snap }` as URLs the browser loads directly from the
+libretro thumbnail server, built from the platform's playlist name
+(PLATFORMS.md "Thumbnail playlists") and the DAT name with the characters
+`&*/:\`<>?\|"` replaced by `_`, as
+`<server>/<playlist>/Named_Boxarts|Named_Titles|Named_Snaps/<name>.png` with
+both path segments percent-encoded. The SPA treats a 404 as "no art" and shows
+a placeholder.

@@ -54,6 +54,8 @@ pub fn options_in(dir: &Path) -> Options {
         sources_min_age_secs: 0,
         magnet_poll: Duration::from_millis(100),
         magnet_started_poll: Duration::from_millis(50),
+        dats_poll: Duration::from_millis(50),
+        dats_min_age: Duration::ZERO,
     }
 }
 

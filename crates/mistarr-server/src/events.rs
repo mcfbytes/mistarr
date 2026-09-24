@@ -18,7 +18,7 @@ pub enum EventKind {
     Status,
     /// `job.progress`: `{ id, kind, progress }`.
     JobProgress,
-    /// `dat.loaded`: `{ dat_version_id?, file }`.
+    /// `dat.loaded`: `{ dat_version_id, file, platform_id }`.
     DatLoaded,
     /// `dat.rejected`: `{ file, reason }`.
     DatRejected,

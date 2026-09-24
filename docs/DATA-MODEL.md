@@ -1,7 +1,8 @@
 # Data model
 
 SQLite, WAL mode, one writer. Migrations are numbered SQL files in
-`crates/mistarr-server/migrations/` applied at startup. All timestamps are
+`crates/mistarr-server/migrations/` applied at startup; this page shows the
+schema after all of them. All timestamps are
 Unix seconds. All hashes are stored as lowercase hex text so they can be
 compared with DAT values without conversion.
 
@@ -26,6 +27,7 @@ CREATE TABLE dat_versions (
   loaded_at     INTEGER NOT NULL,
   superseded_by INTEGER REFERENCES dat_versions(id),
   game_count    INTEGER NOT NULL,
+  retired       INTEGER NOT NULL DEFAULT 0,   -- set by DELETE /dats/{id}
   UNIQUE (dat_name, version)
 );
 
@@ -43,9 +45,14 @@ CREATE TABLE titles (                   -- one per <game>; the browse unit
   is_1g1r_pick  INTEGER NOT NULL DEFAULT 0,
   wanted        INTEGER NOT NULL DEFAULT 0,
   retired       INTEGER NOT NULL DEFAULT 0,
+  clone_of      TEXT,                  -- the DAT's cloneof, verbatim
+  group_key     TEXT NOT NULL DEFAULT '',   -- naming::group_key of the name
+  inferred      INTEGER NOT NULL DEFAULT 0, -- parent chosen by group_key, not cloneof
   UNIQUE (dat_version_id, name)
 );
 CREATE INDEX titles_platform_base ON titles(platform_id, base_name);
+CREATE INDEX titles_parent ON titles(parent_id);
+CREATE INDEX titles_group ON titles(platform_id, inferred, group_key);
 
 CREATE TABLE roms (                     -- one per <rom>; the file unit
   id            INTEGER PRIMARY KEY,
@@ -56,6 +63,7 @@ CREATE TABLE roms (                     -- one per <rom>; the file unit
   status        TEXT NOT NULL DEFAULT 'nodump',   -- 'good' | 'baddump' | 'nodump' | 'verified'
   match_name    TEXT,                  -- normalised leaf name for pre-download matching, filled by binding
   match_base    TEXT,                  -- base name of match_name
+  retired       INTEGER NOT NULL DEFAULT 0,       -- no longer listed by the title's DAT entry
   UNIQUE (title_id, name)
 );
 CREATE INDEX roms_sha1 ON roms(sha1);
@@ -77,6 +85,7 @@ CREATE TABLE files (                    -- what is on disk under games/
   scanned_at    INTEGER NOT NULL,
   UNIQUE (platform_id, rel_path)
 );
+CREATE INDEX files_rom ON files(rom_id);
 
 CREATE TABLE sources (                  -- one per torrent the user dropped in
   id            INTEGER PRIMARY KEY,
@@ -132,7 +141,7 @@ CREATE TABLE import_log (
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE jobs (
   id            INTEGER PRIMARY KEY,
-  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'poll' | 'source_import' | 'resolve_magnet' | 'detect_client'
+  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'poll' | 'detect_client' | 'dat_import' | 'recompute_1g1r' | 'source_import' | 'resolve_magnet'
   payload       TEXT NOT NULL,         -- json
   state         TEXT NOT NULL,         -- 'queued' | 'running' | 'paused' | 'done' | 'failed'
   progress      TEXT,                  -- json, job specific
@@ -181,22 +190,58 @@ cancelled
 - `disabled`: user turned it off; existing downloads finish, nothing new is
   chosen from it.
 
+## Titles across DAT versions
+
+A title row belongs to the DAT name, not to one version. Loading a version
+reuses the row with the same game name from any version of the same
+`dat_name`, moving its `dat_version_id` forward, so `titles.id`, `wanted` and
+the `files.rom_id` links survive an update. Titles left on older versions
+after a load are the entries the new version dropped; they get `retired = 1`
+and are never deleted, as do titles of the same version a reload of it no
+longer lists. Roms a kept entry no longer lists get `roms.retired = 1`.
+A version whose string sorts below the newest live one of its name is stored
+already superseded and does not touch titles. An unbound version stores only
+its `dat_versions` row; binding it re-reads the file from `dats/loaded/`.
+
+`parent_id` comes from `clone_of` when the DAT has any `cloneof`, else the
+titles are `inferred` and every live inferred title of the platform is
+regrouped by `(platform_id, group_key)` after each load, electing the parent
+that wins 1G1R under default preferences.
+
 ## Derived views
 
 The browse screen needs one row per clone group with have/wanted counts. Keep
-this as a SQL view so both the API and tests use the same definition:
+this as a SQL view so both the API and tests use the same definition. Roms and
+files are aggregated per title first, so a title with several roms or several
+files per rom counts once:
 
 ```sql
 CREATE VIEW title_groups AS
-SELECT p.id AS parent_id, p.platform_id, p.base_name,
-       COUNT(t.id) AS variants,
-       SUM(CASE WHEN f.state = 'verified' THEN 1 ELSE 0 END) AS have_verified,
-       SUM(t.wanted) AS wanted,
-       MAX(t.is_1g1r_pick) AS has_pick
-FROM titles p
-JOIN titles t ON t.parent_id = p.id AND t.retired = 0
-LEFT JOIN roms r ON r.title_id = t.id
-LEFT JOIN files f ON f.rom_id = r.id
-WHERE p.parent_id = p.id
-GROUP BY p.id;
+SELECT g.parent_id, g.platform_id, p.base_name, p.name,
+       g.variants, g.have_verified, g.wanted, g.has_pick, g.pick_id, g.newest_id
+FROM (
+  SELECT v.platform_id, v.parent_id,
+         COUNT(*) AS variants,
+         SUM(v.roms > 0 AND v.roms_verified = v.roms) AS have_verified,
+         SUM(v.wanted) AS wanted,
+         MAX(v.is_1g1r_pick) AS has_pick,
+         MAX(CASE WHEN v.is_1g1r_pick = 1 THEN v.id END) AS pick_id,
+         MAX(v.id) AS newest_id
+  FROM (
+    SELECT t.platform_id, t.parent_id, t.id, t.wanted, t.is_1g1r_pick,
+           COUNT(DISTINCT r.id) AS roms,
+           COUNT(DISTINCT CASE WHEN f.state = 'verified' THEN r.id END) AS roms_verified
+    FROM titles t
+    LEFT JOIN roms r ON r.title_id = t.id AND r.retired = 0
+    LEFT JOIN files f ON f.rom_id = r.id
+    WHERE t.retired = 0
+    GROUP BY t.platform_id, t.parent_id, t.id
+  ) v
+  GROUP BY v.platform_id, v.parent_id
+) g
+JOIN titles p ON p.id = g.parent_id;
 ```
+
+`variants` counts live titles, `have_verified` the live titles whose every
+live rom has a `verified` file, `wanted` the wanted live titles, and
+`newest_id` orders groups by when their newest entry first appeared.

@@ -30,7 +30,7 @@ mistarr-mister = { path = "../mistarr-mister" }
 mistarr-sources = { path = "../mistarr-sources" }
 mistarr-clients = { path = "../mistarr-clients" }
 async-trait = "0.1"
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "multipart", "query", "tokio"] }
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -38,6 +38,7 @@ rust-embed = "8"
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "fs", "signal", "macros"] }
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
+zip = { version = "4", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter"] }
 
 [dev-dependencies]
