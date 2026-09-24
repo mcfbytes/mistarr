@@ -99,8 +99,10 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 3. Detect the download client: probe Transmission RPC on `127.0.0.1:9091`,
    then rtorrent SCGI at the configured socket or `127.0.0.1:5000`. If neither
    answers and `rtorrent` is on `PATH`, offer to launch it with a generated rc
-   pointing at the staging directory. Record the result; do not retry on every
-   request.
+   pointing at the staging directory; if `transmission-daemon` is installed,
+   offer to start it (DOWNLOAD-CLIENTS.md "Starting a stopped client").
+   Record the result; do not retry on every request, but re-detect every
+   minute while no client answers.
 4. Detect installed cores by listing the `_Console`, `_Computer`, `_Arcade`
    and `_Other` directories. Platforms whose core is absent are shown but
    collapsed. When `_Arcade` exists, or MRA titles are stored, queue the

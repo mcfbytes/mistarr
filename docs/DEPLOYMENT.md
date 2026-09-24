@@ -60,6 +60,7 @@ any dynamic dependency, checked with `file` on the output.
   staging/quarantine/     # hash mismatches, with report
   staging/.import/        # importer scratch, removed after each import
   rtorrent.rc, rtorrent.sock, rtorrent-session/   # only if mistarr started rtorrent
+  transmission/           # only if mistarr started transmission-daemon without an init script
 /media/fat/Scripts/mistarr.sh      # start/stop/status from the MiSTer Scripts menu
 ```
 

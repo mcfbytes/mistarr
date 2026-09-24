@@ -29,6 +29,7 @@ under `/api` return 404 JSON.
 | POST | `/system/cores` | Detect installed cores again, for the wizard's detected-cores step. |
 | POST | `/system/pause` / `/system/resume` | Manual scheduler gate, overrides CORENAME until CORENAME next changes; `resume` ("Run now") also ends once the heavy queue drains. Returns the status body. |
 | GET | `/system/jobs` | Queued, running and paused jobs with progress. |
+| POST | `/system/client/start` | Start an installed client that is not running: `{ kind }`, `transmission` or `rtorrent`. Returns the status body. |
 | GET | `/system/settings` / PUT | The config subset that is editable at runtime. |
 
 `/system/status` body:
@@ -38,7 +39,8 @@ under `/api` return 404 JSON.
   "version": "0.0.1", "uptime_secs": 12,
   "client": { "kind": "transmission", "url": "http://127.0.0.1:9091/transmission/rpc",
               "reachable": true, "version": "4.0.5", "rtorrent_on_path": false,
-              "checked_at": 1700000000 },
+              "transmission_on_path": true, "transmission_service": true,
+              "transmission_opt_in": true, "checked_at": 1700000000 },
   "corename": "MENU", "paused": false, "pause_reason": null, "override": null,
   "waiting": [],
   "disk_free_bytes": 1000000, "rss_bytes": 1000000, "launch": "ready"
@@ -46,7 +48,11 @@ under `/api` return 404 JSON.
 ```
 
 `client` is `null` before the first detection and has `kind: null` when no
-client answered. `corename` is `null` when the file does not exist.
+client answered. `rtorrent_on_path` and `transmission_on_path` say whether
+each executable is on `PATH`, `transmission_service` whether
+Buildroot_MiSTer's init script for it exists and `transmission_opt_in`
+whether its opt-in directory does (DOWNLOAD-CLIENTS.md "Starting a stopped
+client"). `corename` is `null` when the file does not exist.
 `pause_reason` is `"core"`, `"manual"` or `null`; `override` is `"paused"`,
 `"running"` or `null`. `waiting` lists the heavy-lane jobs the closed gate
 holds, oldest first, as `{ id, kind, state, detail }`, where `detail` is the
@@ -80,6 +86,13 @@ their defaults. Other keys are a 400. Saved values take precedence over the
 file on later starts. Changing `client` re-runs client detection; changing
 the 1G1R fields of `prefs` recomputes the picks; changing `prefs.launch`
 publishes `status`.
+
+`/system/client/start` is a 409 `conflict` while a detected client answers,
+a 400 when `kind` is not installed, and a 500 `internal` naming the failure
+when its start command fails. Otherwise it starts the client as
+DOWNLOAD-CLIENTS.md "Starting a stopped client" describes, detects again
+every second for up to ten seconds until the client answers, and returns the
+status body, whose `client` says whether it did.
 
 ## Platforms
 

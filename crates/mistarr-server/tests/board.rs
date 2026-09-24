@@ -185,6 +185,49 @@ async fn a_restart_takes_over_held_jobs_instead_of_adding_more() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_transmission_runs_the_opt_in_service() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = config_in(dir.path());
+    let booted = boot_with(dir, config).await;
+    let root = booted.dir.path();
+    let start = |kind: &'static str| {
+        let addr = booted.addr();
+        async move {
+            let body = format!("{{\"kind\":\"{kind}\"}}");
+            request(
+                addr,
+                "POST",
+                "/api/v1/system/client/start",
+                &[],
+                Some(&body),
+            )
+            .await
+        }
+    };
+    let r = start("transmission").await;
+    assert_eq!(r.status, 400, "nothing installed: {}", r.body);
+    let status = json_of(&booted, "/api/v1/system/status").await;
+    assert_eq!(status["client"]["transmission_service"], false);
+
+    let init = root.join("init.d");
+    std::fs::create_dir_all(&init).expect("mkdir");
+    let marker = root.join("started");
+    let script = format!("#!/bin/sh\necho \"$1\" > '{}'\n", marker.display());
+    std::fs::write(init.join("S92transmission"), script).expect("write");
+    let mode = <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755);
+    std::fs::set_permissions(init.join("S92transmission"), mode).expect("chmod");
+    let r = start("transmission").await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(std::fs::read_to_string(&marker).expect("ran"), "start\n");
+    assert!(root.join("linux/transmission").is_dir(), "opted in");
+    let body = r.json();
+    assert_eq!(body["client"]["transmission_service"], true);
+    assert_eq!(body["client"]["transmission_opt_in"], true);
+    assert_eq!(start("rtorrent").await.status, 400);
+    booted.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn incoming_files_show_why_they_are_not_loaded() {
     let booted = boot_with_core(tempfile::tempdir().expect("tempdir")).await;
     let mut events = booted.running.app.events.subscribe(None).live;

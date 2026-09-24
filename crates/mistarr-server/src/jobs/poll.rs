@@ -317,6 +317,10 @@ impl Poller {
     async fn record(&mut self, app: &AppState, failed: bool, answered: bool) -> Result<()> {
         if failed {
             self.failures += 1;
+            if self.failures == 1 {
+                // The client may have been restarted elsewhere; look again.
+                app.redetect.notify_one();
+            }
             if self.failures >= FAILURES_BEFORE_UNREACHABLE && !self.unreachable {
                 self.unreachable = true;
                 tracing::warn!(failures = self.failures, "download client unreachable");
@@ -607,6 +611,7 @@ mod tests {
             version: None,
             rtorrent_on_path: false,
             checked_at: 0,
+            ..ClientStatus::default()
         };
         app.db
             .write(move |c| settings::set_json(c, keys::CLIENT_DETECTED, &detected))

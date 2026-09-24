@@ -19,9 +19,35 @@ At startup, and again when the user presses "re-detect":
    `127.0.0.1:5000`, then the unix socket `/media/fat/mistarr/rtorrent.sock`.
    The probe only checks that the connection opens. An SCGI address is
    `host:port`, `scgi://host:port`, an absolute socket path or `scgi:///path`.
-4. If nothing answers and `rtorrent` is on `PATH`, the status screen offers
-   "Start rtorrent". Accepting writes a minimal rc to
-   `/media/fat/mistarr/rtorrent.rc` and starts it detached under `nice`:
+4. Detection also records which clients are installed, running or not:
+   `transmission-daemon` or `rtorrent` on `PATH`, Buildroot_MiSTer's
+   Transmission init script `/etc/init.d/S92transmission`, and its opt-in
+   directory `/media/fat/linux/transmission`, whose presence makes that
+   script start the daemon at boot.
+5. While no client answers, detection runs again every minute, and once
+   more on the first failed poll after a client answered, so a daemon
+   started after mistarr is picked up without the wizard.
+
+## Starting a stopped client
+
+When no client answers and one is installed, the wizard's client step and
+the System screen offer to start it. Nothing is started without that
+explicit action, which is `POST /system/client/start` with `{ kind }`; the
+server then re-detects for up to ten seconds and answers with the status.
+
+"Start Transmission" on Buildroot_MiSTer creates
+`/media/fat/linux/transmission` if it is absent and runs
+`/etc/init.d/S92transmission start`. The script seeds its own
+`settings.json` there, with RPC on `127.0.0.1:9091`, and because the
+directory now exists the image also starts the daemon at every boot;
+removing the directory undoes that. Without the init script,
+`transmission-daemon` is run with `--config-dir /media/fat/mistarr/transmission`
+and `--download-dir /media/fat/mistarr/staging`, and daemonizes itself.
+
+"Start rtorrent" writes a minimal rc to `/media/fat/mistarr/rtorrent.rc`,
+unless that file exists, creates `/media/fat/mistarr/rtorrent-session/` and
+starts `rtorrent -n -o import=/media/fat/mistarr/rtorrent.rc` detached,
+under `nice` where the board has it. The rc:
 
 ```
 directory.default.set = /media/fat/mistarr/staging

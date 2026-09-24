@@ -29,7 +29,7 @@ impl ClientKey {
     /// use mistarr_server::config::ClientConfig;
     /// use mistarr_server::jobs::detect_client::ClientStatus;
     /// let none = ClientStatus { kind: None, url: None, reachable: false, version: None,
-    ///     rtorrent_on_path: false, checked_at: 0 };
+    ///     rtorrent_on_path: false, checked_at: 0, ..ClientStatus::default() };
     /// assert!(ClientKey::from_detection(&none, &ClientConfig::default()).is_none());
     /// ```
     #[must_use]
@@ -125,6 +125,7 @@ mod tests {
             version: None,
             rtorrent_on_path: false,
             checked_at: 0,
+            ..ClientStatus::default()
         }
     }
 

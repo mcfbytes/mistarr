@@ -53,6 +53,16 @@ pub struct Options {
     pub launch_dir: PathBuf,
     /// How long after one launch another is refused as `busy`.
     pub launch_gap: Duration,
+    /// How often client detection re-runs while no client answers.
+    pub redetect_poll: Duration,
+    /// The directory that opts the `Buildroot_MiSTer` Transmission service in.
+    pub transmission_opt_in: PathBuf,
+    /// The `Buildroot_MiSTer` Transmission init script.
+    pub transmission_init: PathBuf,
+    /// Where installed clients are looked for; `None` reads `PATH`.
+    pub client_search_path: Option<std::ffi::OsString>,
+    /// How long `POST /system/client/start` waits for the client to answer.
+    pub client_start_wait: Duration,
 }
 
 impl Default for Options {
@@ -73,6 +83,11 @@ impl Default for Options {
             command_path: PathBuf::from(mistarr_mister::launch::COMMAND_PATH),
             launch_dir: PathBuf::from("/tmp"),
             launch_gap: Duration::from_secs(3),
+            redetect_poll: Duration::from_secs(60),
+            transmission_opt_in: PathBuf::from(mistarr_clients::launch::TRANSMISSION_OPT_IN),
+            transmission_init: PathBuf::from(mistarr_clients::launch::TRANSMISSION_INIT),
+            client_search_path: None,
+            client_start_wait: Duration::from_secs(10),
         }
     }
 }
@@ -94,6 +109,8 @@ pub struct AppState {
     pub options: Options,
     /// Wakes the download poller to re-check its cadence after a transfer starts.
     pub poll_wake: tokio::sync::Notify,
+    /// Wakes client re-detection, as when a client that answered stops answering.
+    pub redetect: tokio::sync::Notify,
     shutdown: watch::Sender<bool>,
     settings_write: tokio::sync::Mutex<()>,
     client: RwLock<Option<(ClientKey, Arc<dyn DownloadClient>)>>,
@@ -114,6 +131,7 @@ impl AppState {
             scheduler: Scheduler::new(),
             started: Instant::now(),
             poll_wake: tokio::sync::Notify::new(),
+            redetect: tokio::sync::Notify::new(),
             shutdown: watch::Sender::new(false),
             settings_write: tokio::sync::Mutex::new(()),
             client: RwLock::new(None),
@@ -173,6 +191,17 @@ impl AppState {
             path_map: Vec::new(),
         };
         *self.client.write().unwrap_or_else(PoisonError::into_inner) = Some((key, client));
+    }
+
+    /// Where installed clients are looked for and how they are started.
+    #[must_use]
+    pub fn launcher(&self) -> mistarr_clients::launch::Launcher {
+        mistarr_clients::launch::Launcher {
+            transmission_opt_in: self.options.transmission_opt_in.clone(),
+            transmission_init: self.options.transmission_init.clone(),
+            data_dir: self.config().paths.data,
+            search_path: self.options.client_search_path.clone(),
+        }
     }
 
     /// A copy of the effective config.
@@ -362,6 +391,9 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     tasks.push(tokio::spawn(crate::jobs::import::watch(Arc::clone(&app))));
     tasks.push(tokio::spawn(transfer::watch(Arc::clone(&app))));
     tasks.push(tokio::spawn(poll::run(Arc::clone(&app))));
+    tasks.push(tokio::spawn(crate::jobs::detect_client::watch(Arc::clone(
+        &app,
+    ))));
     tasks.push(tokio::spawn(poll::follow_gate(Arc::clone(&app))));
 
     let listener = tokio::net::TcpListener::bind(app.config().server.listen.as_str()).await?;
@@ -536,6 +568,7 @@ mod tests {
             version: None,
             rtorrent_on_path: false,
             checked_at: 0,
+            ..ClientStatus::default()
         };
         app.refresh_client(&found);
         let first = app.client().expect("client");

@@ -15,13 +15,17 @@ use crate::app::AppState;
 use crate::config::{RuntimeSettings, SettingsPatch};
 use crate::db::jobs::{self, JobId, JobRow};
 use crate::db::platforms;
+use crate::db::settings::{self, keys};
 use crate::events::EventKind;
 use crate::jobs::dat_import::Recompute;
-use crate::jobs::detect_client::DetectClient;
+use crate::jobs::detect_client::{detect_and_store, ClientStatus, DetectClient};
 use crate::jobs::gate::Override;
 use crate::jobs::scan::ScanJob;
 use crate::jobs::Scheduler;
 use crate::status::{hold_reason, snapshot, wizard_status, Status};
+use axum::http::StatusCode;
+use mistarr_clients::launch::Launcher;
+use mistarr_clients::ClientKind;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -32,6 +36,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route("/system/pause", post(pause))
         .route("/system/resume", post(resume))
         .route("/system/jobs", get(list_jobs))
+        .route("/system/client/start", post(start_client))
         .route("/system/settings", get(get_settings).put(put_settings))
 }
 
@@ -150,6 +155,66 @@ async fn wizard(State(app): State<Arc<AppState>>) -> Result<Json<Wizard>, ApiErr
         sources: w.sources,
         open_on_start: !w.dats,
     }))
+}
+
+/// `POST /system/client/start` body.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StartBody {
+    kind: ClientKind,
+}
+
+/// Starts an installed client that is not running, then detects again until it
+/// answers or `client_start_wait` passes; see `docs/DOWNLOAD-CLIENTS.md`.
+async fn start_client(
+    State(app): State<Arc<AppState>>,
+    body: Bytes,
+) -> Result<Json<Status>, ApiError> {
+    let body: StartBody =
+        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let current = app
+        .db
+        .read(|c| settings::get_json::<ClientStatus>(c, keys::CLIENT_DETECTED))
+        .await?;
+    if current.is_some_and(|c| c.usable()) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "conflict",
+            "A download client is already running.",
+        ));
+    }
+    let launcher = app.launcher();
+    if !launcher_offers(&launcher, body.kind) {
+        return Err(ApiError::bad_request(format!(
+            "{} is not installed on this system.",
+            body.kind
+        )));
+    }
+    tracing::info!(kind = body.kind.as_str(), "starting the download client");
+    tokio::task::spawn_blocking(move || launcher.start(body.kind))
+        .await
+        .map_err(|e| crate::Error::Task(e.to_string()))?
+        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;
+    let deadline = tokio::time::Instant::now() + app.options.client_start_wait;
+    loop {
+        let found = detect_and_store(&app, true).await?;
+        if found.usable() || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    Ok(Json(snapshot(&app).await))
+}
+
+fn launcher_offers(launcher: &Launcher, kind: ClientKind) -> bool {
+    let installed = launcher.installed();
+    match kind {
+        ClientKind::Transmission => {
+            installed.transmission_on_path || installed.transmission_service
+        }
+        ClientKind::Rtorrent => installed.rtorrent_on_path,
+        _ => false,
+    }
 }
 
 async fn pause(State(app): State<Arc<AppState>>) -> Json<Status> {
