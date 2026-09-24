@@ -79,13 +79,13 @@ export interface Platform {
 export type HaveFilter = 'any' | 'yes' | 'no';
 
 export interface TitleFilters {
-  q?: string;
-  have?: HaveFilter;
-  wanted?: HaveFilter;
-  region?: string;
-  flags?: string;
-  hidden?: 'hide' | 'show';
-  sort?: 'name' | 'have' | 'recent';
+  q?: string | undefined;
+  have?: HaveFilter | undefined;
+  wanted?: HaveFilter | undefined;
+  region?: string | undefined;
+  flags?: string | undefined;
+  hidden?: 'hide' | 'show' | undefined;
+  sort?: 'name' | 'have' | 'recent' | undefined;
 }
 
 /** Flags the "require" multi-select offers. */

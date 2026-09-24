@@ -161,7 +161,7 @@
               {:else}
                 <select
                   disabled={source.file_count === 0}
-                  onchange={(e) => bind(source.id, (e.currentTarget as HTMLSelectElement).value)}
+                  onchange={(e) => bind(source.id, e.currentTarget.value)}
                 >
                   <option value="">Choose platform</option>
                   {#each platforms as p (p.id)}
@@ -181,7 +181,7 @@
             <td>
               <select
                 value={seedSelectValue(source.seed_policy)}
-                onchange={(e) => setSeedPolicy(source.id, (e.currentTarget as HTMLSelectElement).value as SeedPolicy)}
+                onchange={(e) => setSeedPolicy(source.id, e.currentTarget.value as SeedPolicy)}
               >
                 <option value="none">None</option>
                 <option value="client">Client default</option>

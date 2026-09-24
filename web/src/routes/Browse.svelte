@@ -111,13 +111,6 @@
   });
 
   $effect(() => {
-    void platformId;
-    void search;
-    void have;
-    void wanted;
-    void region;
-    void requireFlags;
-    void effectiveHidden;
     page = 0;
     void loadTitlesPage(platformId, filters(), 0);
   });
@@ -215,7 +208,7 @@
         type="checkbox"
         checked={effectiveHidden}
         disabled={forcedByFlags.length > 0}
-        onchange={(e) => (showHidden = (e.currentTarget as HTMLInputElement).checked)}
+        onchange={(e) => (showHidden = e.currentTarget.checked)}
       />
       Show hidden
     </label>
