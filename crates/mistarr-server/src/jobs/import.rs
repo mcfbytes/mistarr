@@ -958,7 +958,7 @@ impl Placing<'_> {
                 if complete {
                     downloads::move_all(&tx, &ids, DownloadState::Done, None, now)?;
                 }
-                tx.commit()?;
+                crate::db::commit(tx)?;
                 Ok(done)
             })
             .await

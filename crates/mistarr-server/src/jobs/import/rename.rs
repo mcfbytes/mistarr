@@ -99,7 +99,7 @@ pub async fn rename(app: &AppState, group: TitleId, file_id: FileId) -> Outcome<
                 ImportAction::Renamed,
                 &detail,
             )?;
-            tx.commit()?;
+            crate::db::commit(tx)?;
             Ok(())
         })
         .await?;

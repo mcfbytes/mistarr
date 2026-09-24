@@ -200,13 +200,7 @@ async fn titles_that_cannot_start_are_conflicts() {
     touch(dir.path(), "_Console/NES_20240101.rbf");
     assert_eq!(status(launch_title(&app, placed).await), StatusCode::OK);
     app.db
-        .write(move |c| {
-            c.execute(
-                "UPDATE titles SET flags = '[\"bios\"]' WHERE id = ?1",
-                [placed.0],
-            )?;
-            Ok(())
-        })
+        .write(move |c| crate::db::titles::set_flags(c, placed, &["bios".to_owned()]))
         .await
         .expect("flag");
     assert_eq!(

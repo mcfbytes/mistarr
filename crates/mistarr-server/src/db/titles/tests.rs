@@ -4,6 +4,24 @@ use mistarr_core::naming::group_key;
 
 const DAT: &str = "Maker - Game Boy";
 
+/// [`super::browse`] after refreshing the groups the test's autocommit writes left dirty.
+fn browse(
+    c: &Connection,
+    platform: &str,
+    filter: &Browse,
+    limit: u32,
+    offset: u32,
+) -> Result<(Vec<GroupRow>, u64)> {
+    groups::flush(c)?;
+    super::browse(c, platform, filter, limit, offset)
+}
+
+/// [`super::counts`] after the same refresh.
+fn counts(c: &Connection, hidden: &[String]) -> Result<HashMap<String, Counts>> {
+    groups::flush(c)?;
+    super::counts(c, hidden)
+}
+
 fn conn() -> Connection {
     let mut c = Connection::open_in_memory().expect("open");
     crate::db::migrate::apply(&mut c).expect("migrate");
@@ -157,14 +175,18 @@ fn upsert_keeps_ids_across_versions_and_retires_dropped_roms() {
         ),
         id
     );
-    let (dv, regions): (i64, String) = c
+    let dv: i64 = c
         .query_row(
-            "SELECT dat_version_id, regions FROM titles WHERE id = ?1",
+            "SELECT dat_version_id FROM titles WHERE id = ?1",
             [id.0],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get(0),
         )
         .expect("title");
-    assert_eq!((dv, regions.as_str()), (v2.0, r#"["Europe"]"#));
+    assert_eq!(dv, v2.0);
+    assert_eq!(
+        tags_of(&c, id.0, Tag::Regions).expect("regions"),
+        ["Europe"]
+    );
     let roms: Vec<(String, String, bool)> = c
         .prepare("SELECT name, status, retired FROM roms WHERE title_id = ?1 ORDER BY name")
         .expect("prepare")
@@ -278,6 +300,7 @@ fn view_counts_a_title_once_whatever_its_roms_and_files() {
     file(&c, Some(t1), "saga/t1.bin", "verified");
     file(&c, Some(t1), "copy/t1.bin", "verified");
     let have = |c: &Connection| -> (i64, i64) {
+        groups::flush(c).expect("flush");
         c.query_row(
             "SELECT variants, have_verified FROM title_groups WHERE parent_id = ?1",
             [disc.0],
@@ -516,29 +539,42 @@ fn want_refuses_bios_and_retired_and_unwant_cancels_queued_downloads() {
 }
 
 #[test]
-fn browse_uses_indexes_for_the_group_lookups() {
+fn browse_walks_an_index_in_every_sort_order() {
     let c = conn();
-    let plan: Vec<String> = c
-        .prepare(&format!(
-            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM title_groups g WHERE {BROWSE_WHERE}"
-        ))
-        .expect("prepare")
-        .query_map(
-            params![
-                "gb",
-                None::<String>,
-                "any",
-                "any",
-                "[]",
-                None::<String>,
-                "[]"
-            ],
-            |r| r.get(3),
-        )
-        .expect("query")
-        .collect::<rusqlite::Result<_>>()
-        .expect("rows");
-    let plan = plan.join("\n");
-    assert!(plan.contains("titles_parent"), "{plan}");
-    assert!(plan.contains("files_rom"), "{plan}");
+    plain(&c);
+    let hidden: Vec<String> = ["bios", "beta"].map(str::to_owned).to_vec();
+    for (sort, index) in [
+        (Sort::Name, "title_groups_name"),
+        (Sort::Have, "title_groups_have"),
+        (Sort::Recent, "title_groups_recent"),
+    ] {
+        let filter = Browse {
+            hidden: hidden.clone(),
+            q: Some("quest".into()),
+            sort,
+            ..Browse::default()
+        };
+        let clause = browse_clause(&c, "gb", &filter).expect("clause");
+        let args = clause
+            .args
+            .iter()
+            .cloned()
+            .chain([Value::from(60), Value::from(0)]);
+        let plan: Vec<String> = c
+            .prepare(&format!("EXPLAIN QUERY PLAN {}", page_sql(&clause, sort)))
+            .expect("prepare")
+            .query_map(params_from_iter(args), |r| r.get(3))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        let plan = plan.join("\n");
+        assert!(plan.contains(index), "{sort:?}: {plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{sort:?}: {plan}");
+        assert!(plan.contains("titles_parent"), "{sort:?}: {plan}");
+        assert!(plan.contains("LIST SUBQUERY"), "{sort:?}: {plan}");
+        assert!(
+            plan.contains("SCAN title_search VIRTUAL TABLE"),
+            "{sort:?}: {plan}"
+        );
+    }
 }

@@ -209,7 +209,7 @@ async fn import_torrent(
             suggest(&tx, id, &origin, &meta.name, &meta.files)?;
             bind_best(&tx, id, &meta.files, threshold)?;
             let row = rows::get(&tx, id)?;
-            tx.commit()?;
+            crate::db::commit(tx)?;
             Ok(row.ok_or_else(|| "The source could not be read back.".to_owned()))
         })
         .await
@@ -369,7 +369,7 @@ pub async fn rebind_after_dat(app: &AppState) -> Result<usize> {
                     }
                 }
             }
-            tx.commit()?;
+            crate::db::commit(tx)?;
             Ok(out)
         })
         .await?;
@@ -566,7 +566,7 @@ impl Job for ResolveMagnet {
                 }
                 bind_best(&tx, id, &files, threshold)?;
                 let row = rows::get(&tx, id)?;
-                tx.commit()?;
+                crate::db::commit(tx)?;
                 Ok(row)
             })
             .await?;
@@ -716,7 +716,7 @@ mod tests {
         let (_dir, app) = state();
         app.db
             .write_blocking(|c| {
-                seed_rom(c, "nes", "Example Quest (USA).nes", 16, "[]")?;
+                seed_rom(c, "nes", "Example Quest (USA).nes", 16, &[])?;
                 let files = [
                     file(0, "a/Example Quest (USA).nes", 16),
                     file(1, "b.txt", 1),
@@ -763,7 +763,7 @@ mod tests {
                 bind_best(c, id, &files, 0.6)?;
                 let row = rows::get(c, id)?.expect("row");
                 assert_eq!(row.reason, Some(awaiting_dat_reason("Game Boy")));
-                seed_rom(c, "gb", "Example Quest (USA).gb", 16, "[]")?;
+                seed_rom(c, "gb", "Example Quest (USA).gb", 16, &[])?;
                 Ok(id)
             })
             .expect("db");
@@ -781,7 +781,7 @@ mod tests {
         );
 
         app.db
-            .write_blocking(|c| seed_rom(c, "gb", "Other Tale (USA).gb", 8, "[]"))
+            .write_blocking(|c| seed_rom(c, "gb", "Other Tale (USA).gb", 8, &[]))
             .expect("seed");
         let other = app
             .db

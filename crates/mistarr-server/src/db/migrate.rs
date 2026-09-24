@@ -48,6 +48,10 @@ pub fn apply(conn: &mut Connection) -> Result<Vec<u32>> {
         };
         let tx = conn.transaction().map_err(fail)?;
         tx.execute_batch(m.sql).map_err(fail)?;
+        flush_groups(&tx).map_err(|e| match e {
+            Error::Db(source) => fail(source),
+            other => other,
+        })?;
         tx.execute(
             "INSERT INTO schema_version (version, name, applied_at) VALUES (?1, ?2, ?3)",
             params![m.version, m.name, crate::unix_now()],
@@ -58,6 +62,19 @@ pub fn apply(conn: &mut Connection) -> Result<Vec<u32>> {
         applied.push(m.version);
     }
     Ok(applied)
+}
+
+/// Builds the `title_groups` rows a migration's writes left dirty, once the table exists.
+fn flush_groups(conn: &Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'title_groups_dirty')",
+        [],
+        |r| r.get(0),
+    )?;
+    if exists {
+        super::groups::flush(conn)?;
+    }
+    Ok(())
 }
 
 /// The highest recorded migration, or 0 for a new database.
@@ -102,7 +119,7 @@ mod tests {
     }
 
     #[test]
-    fn initial_schema_has_every_table_and_the_view() {
+    fn schema_has_every_table_and_no_view() {
         let mut conn = Connection::open_in_memory().expect("open");
         apply(&mut conn).expect("apply");
         let tables = names(&conn, "table");
@@ -117,12 +134,14 @@ mod tests {
             "schema_version",
             "settings",
             "sources",
+            "title_groups",
+            "title_groups_dirty",
             "titles",
             "torrent_files",
         ] {
             assert!(tables.iter().any(|n| n == t), "missing table {t}");
         }
-        assert_eq!(names(&conn, "view"), ["title_groups"]);
+        assert!(names(&conn, "view").is_empty());
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM title_groups", [], |r| r.get(0))
             .expect("view query");

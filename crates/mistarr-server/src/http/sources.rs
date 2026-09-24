@@ -176,7 +176,7 @@ async fn update(
                 None => {}
             }
             let row = rows::get(&tx, id)?;
-            tx.commit()?;
+            crate::db::commit(tx)?;
             Ok(row)
         })
         .await?

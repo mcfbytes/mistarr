@@ -203,11 +203,11 @@ pub fn title_of_rom(conn: &Connection, rom_id: i64) -> Result<Option<TitleId>> {
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn title_entry(conn: &Connection, id: TitleId) -> Result<Option<TitleEntry>> {
-    let Some((platform, name, flags, source)): Option<(String, String, String, String)> = conn
+    let Some((platform, name, source)): Option<(String, String, String)> = conn
         .query_row(
-            "SELECT platform_id, name, flags, source FROM titles WHERE id = ?1",
+            "SELECT platform_id, name, source FROM titles WHERE id = ?1",
             [id.0],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?
     else {
@@ -223,7 +223,7 @@ pub fn title_entry(conn: &Connection, id: TitleId) -> Result<Option<TitleEntry>>
         id,
         platform_id: PlatformId(platform),
         name,
-        flags: serde_json::from_str(&flags).unwrap_or_default(),
+        flags: super::titles::flags_of(conn, id)?,
         roms,
         from_mra: source == "mra",
     }))
@@ -272,7 +272,7 @@ mod tests {
             "nes",
             "Example Quest (USA).nes",
             8,
-            r#"["bios"]"#,
+            &["bios"],
         )
         .expect("seed");
         c.execute(

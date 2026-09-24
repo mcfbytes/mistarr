@@ -6,6 +6,7 @@ pub mod dats;
 pub mod downloads;
 pub mod downloads_import;
 pub mod files;
+pub mod groups;
 pub mod imports;
 pub mod jobs;
 pub mod launch;
@@ -20,7 +21,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 
 use crate::error::{Error, Result};
 
@@ -114,7 +115,9 @@ impl Db {
     /// ```
     pub fn write_blocking<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
         let mut conn = self.inner.writer.lock().map_err(|_| Error::Poisoned)?;
-        f(&mut conn)
+        let out = f(&mut conn);
+        settle(&mut conn)?;
+        out
     }
 
     /// Runs `f` on the read-only connection on the calling thread.
@@ -175,6 +178,36 @@ impl Db {
     }
 }
 
+/// Commits `tx` after bringing `title_groups` up to date with the writes it holds, so
+/// readers never see the one without the other. Every write transaction commits here.
+///
+/// # Errors
+///
+/// [`Error::Db`] when the refresh or the commit fails; the transaction is then rolled back.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let tx = conn.transaction().unwrap();
+/// tx.execute("UPDATE titles SET wanted = 1", []).unwrap();
+/// mistarr_server::db::commit(tx).unwrap();
+/// ```
+pub fn commit(tx: Transaction<'_>) -> Result<()> {
+    groups::flush(&tx)?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Refreshes groups an autocommit write left dirty, in a transaction of their own, and
+/// warns, since a writer that commits through [`commit`] never leaves any.
+fn settle(conn: &mut Connection) -> Result<()> {
+    if !conn.is_autocommit() || !groups::pending(conn)? {
+        return Ok(());
+    }
+    tracing::warn!("title groups refreshed after an autocommit write");
+    commit(conn.transaction()?)
+}
+
 /// The environment variable SQLite reads for its temporary file directory.
 pub const SQLITE_TMPDIR: &str = "SQLITE_TMPDIR";
 
@@ -221,6 +254,9 @@ fn configure(conn: &Connection) -> Result<()> {
     conn.pragma_update_and_check(None, "soft_heap_limit", SOFT_HEAP_LIMIT, |_| Ok(()))?;
     Ok(())
 }
+
+#[cfg(test)]
+mod plans;
 
 #[cfg(test)]
 pub(crate) mod testutil {

@@ -25,10 +25,20 @@ fn main() -> anyhow::Result<()> {
     let runtime = memory::runtime().context("cannot start the async runtime")?;
 
     match cli.command() {
-        Command::Doctor { hash_mib } => runtime.block_on(async {
-            let mut out = std::io::stdout().lock();
-            doctor::run(&config, hash_mib, &mut out).await
-        })?,
+        Command::Doctor {
+            hash_mib,
+            rebuild_groups,
+        } => {
+            if rebuild_groups {
+                let groups = doctor::rebuild_groups(&config.paths.db())
+                    .context("cannot rebuild the title groups")?;
+                println!("title groups rebuilt: {groups}");
+            }
+            runtime.block_on(async {
+                let mut out = std::io::stdout().lock();
+                doctor::run(&config, hash_mib, &mut out).await
+            })?;
+        }
         Command::Serve => {
             std::fs::create_dir_all(&config.paths.data)
                 .with_context(|| format!("cannot create {}", config.paths.data.display()))?;

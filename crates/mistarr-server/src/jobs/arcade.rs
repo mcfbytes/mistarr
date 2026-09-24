@@ -249,7 +249,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
                 titles::recompute_platform(&tx, PLATFORM, &prefs)?;
                 rows::set_recompute_pending(&tx, PLATFORM, false)?;
             }
-            tx.commit()?;
+            crate::db::commit(tx)?;
             Ok((retired, live))
         })
         .await?;
@@ -473,7 +473,7 @@ fn store_batch(
             rows::set_check(&tx, id, check, detail.as_deref(), stamp.as_deref())?;
         }
     }
-    tx.commit()?;
+    crate::db::commit(tx)?;
     Ok(())
 }
 
@@ -930,7 +930,7 @@ pub(super) fn store_refreshed(conn: &mut rusqlite::Connection, found: &[Refreshe
         let (check, detail) = r.check.clone().map_or((None, None), |(c, d)| (Some(c), d));
         rows::set_check(&tx, r.id, check, detail.as_deref(), r.stamp.as_deref())?;
     }
-    tx.commit()?;
+    crate::db::commit(tx)?;
     Ok(())
 }
 

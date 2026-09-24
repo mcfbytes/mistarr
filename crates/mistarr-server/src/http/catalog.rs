@@ -313,7 +313,7 @@ async fn want(
                 Ok(()) => downloads::want_title(&tx, target, crate::unix_now())?,
                 Err(_) => Vec::new(),
             };
-            tx.commit()?;
+            crate::db::commit(tx)?;
             Ok(wanted.map(|()| created))
         })
         .await?;
@@ -349,7 +349,7 @@ async fn unwant(
             let now = crate::unix_now();
             let cancelled = downloads::cancel_group(&tx, group, now)?;
             titles::unwant_group(&tx, group, now)?;
-            tx.commit()?;
+            crate::db::commit(tx)?;
             Ok(cancelled)
         })
         .await?;

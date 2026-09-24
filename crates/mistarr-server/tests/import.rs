@@ -528,11 +528,11 @@ async fn a_bios_entry_is_refused() {
         .app
         .db
         .write_blocking(move |c| {
-            c.execute(
-                "UPDATE titles SET flags = '[\"bios\"]' WHERE id = ?1",
-                [title],
-            )?;
-            Ok(())
+            mistarr_server::db::titles::set_flags(
+                c,
+                mistarr_server::db::titles::TitleId(title),
+                &["bios".to_owned()],
+            )
         })
         .expect("flag");
     let src = source(&b, None);

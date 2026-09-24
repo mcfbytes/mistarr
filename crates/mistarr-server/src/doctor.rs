@@ -7,6 +7,7 @@ use std::time::Instant;
 use mistarr_core::hash::{hash_reader, HeaderRule};
 
 use crate::config::Config;
+use crate::db::groups;
 use crate::jobs::{corename, detect_client};
 use crate::status::{free_bytes, mem_available_bytes};
 
@@ -116,6 +117,58 @@ pub fn hash_zeros(mib: u32) -> io::Result<f64> {
     Ok(start.elapsed().as_secs_f64())
 }
 
+/// One line on how `title_groups` and `title_search` in the database at `path` compare
+/// with their inputs, in a transaction that is rolled back; a missing database says so.
+///
+/// ```
+/// let line = mistarr_server::doctor::groups_line(std::path::Path::new("/nonexistent/m.db"));
+/// assert_eq!(line, "title groups: no database");
+/// ```
+#[must_use]
+pub fn groups_line(path: &Path) -> String {
+    if !path.is_file() {
+        return "title groups: no database".to_owned();
+    }
+    let flags =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let drift = rusqlite::Connection::open_with_flags(path, flags)
+        .map_err(crate::Error::from)
+        .and_then(|mut c| {
+            c.busy_timeout(std::time::Duration::from_secs(5))?;
+            let tx = c.transaction()?;
+            groups::check(&tx)
+        });
+    match drift {
+        Ok(d) if d.is_consistent() => "title groups: consistent".to_owned(),
+        Ok(d) => format!(
+            "title groups: {} stale, {} missing, {} dirty, search index {}; \
+             run `mistarr doctor --rebuild-groups` while mistarr is stopped",
+            d.stale,
+            d.missing,
+            d.dirty,
+            if d.search { "damaged" } else { "consistent" }
+        ),
+        Err(e) => format!("title groups: not checked ({e})"),
+    }
+}
+
+/// Opens the database at `path`, applying migrations, and recomputes `title_groups`
+/// and the title bits in one transaction. Returns the number of groups.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] or [`crate::Error::Migration`] when the database cannot be
+/// opened or written.
+pub fn rebuild_groups(path: &Path) -> crate::error::Result<usize> {
+    let db = crate::db::Db::open(path)?;
+    db.write_blocking(|c| {
+        let tx = c.transaction()?;
+        let n = groups::rebuild(&tx)?;
+        crate::db::commit(tx)?;
+        Ok(n)
+    })
+}
+
 fn mib(bytes: u64) -> String {
     // Display rounding only; exact values are not needed.
     #[allow(clippy::cast_precision_loss)]
@@ -194,6 +247,8 @@ pub async fn run(config: &Config, hash_mib: u32, out: &mut impl Write) -> io::Re
         Some(b) => writeln!(out, "memory available: {}", mib(b))?,
         None => writeln!(out, "memory available: unknown")?,
     }
+
+    writeln!(out, "{}", groups_line(&config.paths.db()))?;
 
     match hash_zeros(hash_mib) {
         Ok(secs) => {
@@ -276,6 +331,7 @@ mod tests {
             "corename: ",
             "memory available: ",
             "hash: 1 MiB of zeros",
+            "title groups: no database",
         ] {
             assert!(
                 text.lines().any(|l| l.starts_with(prefix)),

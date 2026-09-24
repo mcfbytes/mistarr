@@ -80,7 +80,7 @@ mod tests {
             },
         )
         .expect("source");
-        let rom = sources::fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 10, "[]")
+        let rom = sources::fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 10, &[])
             .expect("rom");
         let title: i64 = c
             .query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {

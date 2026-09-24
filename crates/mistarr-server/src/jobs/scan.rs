@@ -315,7 +315,11 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     let (pid3, keep2) = (pid.clone(), keep);
     ctx.app
         .db
-        .write(move |c| files::delete_missing(c, &pid3, &keep2))
+        .write(move |c| {
+            let tx = c.transaction()?;
+            files::delete_missing(&tx, &pid3, &keep2)?;
+            crate::db::commit(tx)
+        })
         .await?;
     let pid4 = pid.clone();
     ctx.app
@@ -447,7 +451,7 @@ fn commit_unit(
     if let Some(done_dirs) = done_dirs {
         files::save_scan_progress(&tx, platform_id, done_dirs, now)?;
     }
-    tx.commit()?;
+    crate::db::commit(tx)?;
     Ok(written)
 }
 

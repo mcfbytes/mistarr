@@ -484,7 +484,7 @@ fn import_member<R: BufRead>(db: &Db, reader: R, req: &Request, member: &str) ->
             titles::recompute_platform(&tx, &p.0, &req.prefs)?;
         }
         dat_stage::clear(&tx)?;
-        tx.commit()?;
+        crate::db::commit(tx)?;
         Ok(Outcome::Loaded(Loaded {
             version: plan.id,
             platform: plan.platform_id,
@@ -520,7 +520,7 @@ fn pace(req: &Request, games: u64) -> Result<()> {
 fn append_chunk(conn: &mut Connection, chunk: &[StagedGame]) -> Result<()> {
     let tx = conn.transaction()?;
     dat_stage::append(&tx, chunk)?;
-    tx.commit()?;
+    crate::db::commit(tx)?;
     Ok(())
 }
 
@@ -696,7 +696,7 @@ impl Job for Recompute {
             .write(move |c| {
                 let tx = c.transaction()?;
                 let r = titles::recompute_platform(&tx, &platform, &prefs)?;
-                tx.commit()?;
+                crate::db::commit(tx)?;
                 Ok(r)
             })
             .await?;

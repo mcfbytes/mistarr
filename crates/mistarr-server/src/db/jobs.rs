@@ -127,6 +127,39 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<JobRow> {
     })
 }
 
+/// The dedupe key of a job payload: each top-level field as `name`, 0x1F, value, sorted
+/// by name and joined with 0x1E; strings are bare and other values are JSON. The
+/// `title_groups` migration derives the same key for rows written before the column existed.
+///
+/// ```
+/// use serde_json::json;
+/// let key = mistarr_server::db::jobs::subject_of(&json!({"platform_id": "nes", "a": 1}));
+/// assert_eq!(key, "a\u{1f}1\u{1e}platform_id\u{1f}nes");
+/// assert_eq!(mistarr_server::db::jobs::subject_of(&json!({})), "");
+/// ```
+#[must_use]
+pub fn subject_of(payload: &Value) -> String {
+    let Some(fields) = payload.as_object() else {
+        return String::new();
+    };
+    let mut pairs: Vec<(&String, String)> = fields
+        .iter()
+        .map(|(k, v)| {
+            let v = match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            (k, v)
+        })
+        .collect();
+    pairs.sort();
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{k}\u{1f}{v}"))
+        .collect::<Vec<_>>()
+        .join("\u{1e}")
+}
+
 /// Inserts a queued job on `lane`.
 ///
 /// # Errors
@@ -148,9 +181,9 @@ pub fn insert(
     now: i64,
 ) -> Result<JobId> {
     conn.execute(
-        "INSERT INTO jobs (kind, payload, state, created_at, updated_at, lane)
-         VALUES (?1, ?2, 'queued', ?3, ?3, ?4)",
-        params![kind, payload.to_string(), now, lane],
+        "INSERT INTO jobs (kind, payload, subject, state, created_at, updated_at, lane)
+         VALUES (?1, ?2, ?3, 'queued', ?4, ?4, ?5)",
+        params![kind, payload.to_string(), subject_of(payload), now, lane],
     )?;
     Ok(JobId(conn.last_insert_rowid()))
 }
@@ -277,10 +310,10 @@ pub fn find_queued(
     Ok(conn
         .query_row(
             &format!(
-                "SELECT id FROM jobs WHERE kind = ?1 AND payload = ?2
+                "SELECT id FROM jobs WHERE kind = ?1 AND subject = ?2
                    AND state IN {states} ORDER BY id LIMIT 1"
             ),
-            params![kind, payload.to_string()],
+            params![kind, subject_of(payload)],
             |r| r.get(0).map(JobId),
         )
         .optional()?)
@@ -307,9 +340,9 @@ pub fn find_queued(
 pub fn find_open(conn: &Connection, kind: &str, payload: &Value) -> Result<Option<JobId>> {
     Ok(conn
         .query_row(
-            "SELECT id FROM jobs WHERE kind = ?1 AND payload = ?2
+            "SELECT id FROM jobs WHERE kind = ?1 AND subject = ?2
                AND state IN ('queued', 'running', 'paused') ORDER BY id LIMIT 1",
-            params![kind, payload.to_string()],
+            params![kind, subject_of(payload)],
             |r| r.get(0).map(JobId),
         )
         .optional()?)

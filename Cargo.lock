@@ -874,6 +874,7 @@ dependencies = [
  "mistarr-mister",
  "mistarr-server",
  "mistarr-sources",
+ "proptest",
  "rusqlite",
  "rust-embed",
  "rustix",

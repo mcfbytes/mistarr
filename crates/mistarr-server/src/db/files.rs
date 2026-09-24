@@ -615,8 +615,8 @@ pub fn seed_title_fixture(
     )?;
     let dat_version_id = conn.last_insert_rowid();
     conn.execute(
-        "INSERT INTO titles (platform_id, dat_version_id, name, base_name, regions, languages, flags)
-         VALUES (?1, ?2, ?3, ?3, '[]', '[]', '[]')",
+        "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
+         VALUES (?1, ?2, ?3, ?3)",
         params![platform_id.0, dat_version_id, game_name],
     )?;
     let title_id = conn.last_insert_rowid();
@@ -839,8 +839,8 @@ mod tests {
         .expect("dat");
         let dv = c.last_insert_rowid();
         c.execute(
-            "INSERT INTO titles (platform_id, dat_version_id, name, base_name, regions, languages, flags)
-             VALUES (?1, ?2, 'Other Quest', 'Other Quest', '[]', '[]', '[]')",
+            "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
+             VALUES (?1, ?2, 'Other Quest', 'Other Quest')",
             params![pid.0, dv],
         )
         .expect("title");
@@ -898,8 +898,8 @@ mod tests {
 
     fn seed_title(c: &Connection, pid: &PlatformId, dv: i64, name: &str) -> i64 {
         c.execute(
-            "INSERT INTO titles (platform_id, dat_version_id, name, base_name, regions, languages, flags)
-             VALUES (?1, ?2, ?3, ?3, '[]', '[]', '[]')",
+            "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
+             VALUES (?1, ?2, ?3, ?3)",
             params![pid.0, dv, name],
         )
         .expect("title");

@@ -67,9 +67,12 @@ async fn boot_arcade(mras: &[(&str, Vec<u8>)], games: &[(&str, Vec<u8>)]) -> Boo
     let config = config_in(dir.path());
     let b = boot_with(dir, config).await;
     let want = mras.len();
-    eventually("the arcade catalogue", || async {
-        let rows = browse(&b).await;
-        rows.len() == want
+    eventually("the arcade catalogue and its picks", || async {
+        let page = get(b.addr(), "/api/v1/platforms/arcade/titles")
+            .await
+            .json();
+        let items = page["items"].as_array().cloned().unwrap_or_default();
+        items.len() == want && items.iter().all(|i| i["pick_id"].is_i64())
     })
     .await;
     b
@@ -201,8 +204,17 @@ async fn settled(b: &Booted, id: DownloadId, want: DownloadState) -> downloads::
             .expect("read")
             .expect("row")
     };
+    // The import job refreshes the MRA checks after the download settles.
+    let open = || {
+        let payload = serde_json::json!({ "download_id": id.0 });
+        b.running
+            .app
+            .db
+            .read_blocking(move |c| mistarr_server::db::jobs::find_open(c, "import", &payload))
+            .expect("jobs")
+    };
     eventually(&format!("download {id} {want}"), || async {
-        read().state == want
+        read().state == want && open().is_none()
     })
     .await;
     read()
@@ -580,10 +592,15 @@ fn dat_entry(b: &Booted, dat_name: &str, set: &str, rom: &str, data: &[u8], bios
         .write_blocking(move |c| {
             let t = files::seed_title_fixture(c, &PlatformId("arcade".into()), &set)?;
             let id = files::seed_rom_for_title_fixture(c, t, &rom, &hashes, "good")?;
-            let flags = if bios { r#"["bios"]"# } else { "[]" };
-            c.execute(
-                "UPDATE titles SET flags = ?2 WHERE id = ?1",
-                rusqlite::params![t, flags],
+            let flags = if bios {
+                vec!["bios".to_owned()]
+            } else {
+                Vec::new()
+            };
+            mistarr_server::db::titles::set_flags(
+                c,
+                mistarr_server::db::titles::TitleId(t),
+                &flags,
             )?;
             c.execute(
                 "UPDATE dat_versions SET dat_name = ?2

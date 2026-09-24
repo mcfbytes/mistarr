@@ -3,7 +3,8 @@
 use std::fmt;
 
 use mistarr_core::PlatformId;
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::types::Value;
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
 use super::sources::SourceId;
@@ -222,9 +223,16 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<DownloadRow> {
     })
 }
 
-fn states_json(states: &[DownloadState]) -> String {
-    let names: Vec<&str> = states.iter().map(|s| s.as_str()).collect();
-    serde_json::to_string(&names).unwrap_or_else(|_| "[]".to_owned())
+/// `IN (?, ...)` for `states`, with their values.
+fn states_in(states: &[DownloadState]) -> (String, Vec<Value>) {
+    let values = states
+        .iter()
+        .map(|s| Value::Text(s.as_str().to_owned()))
+        .collect();
+    (
+        format!("IN ({})", super::groups::placeholders(states.len())),
+        values,
+    )
 }
 
 /// A download to insert.
@@ -293,19 +301,24 @@ pub fn list(
     limit: u32,
     offset: u32,
 ) -> Result<(Vec<DownloadRow>, u64)> {
-    let filter = "(?1 = '[]' OR d.state IN (SELECT value FROM json_each(?1)))";
-    let states = states_json(states);
+    let (filter, mut args) = if states.is_empty() {
+        ("1".to_owned(), Vec::new())
+    } else {
+        let (inside, args) = states_in(states);
+        (format!("d.state {inside}"), args)
+    };
     let total: i64 = conn.query_row(
         &format!("SELECT COUNT(*) FROM downloads d WHERE {filter}"),
-        [&states],
+        params_from_iter(&args),
         |r| r.get(0),
     )?;
     let mut stmt = conn.prepare(&format!(
         "SELECT {COLUMNS} FROM {FROM} WHERE {filter}
-         ORDER BY d.updated_at DESC, d.id DESC LIMIT ?2 OFFSET ?3"
+         ORDER BY d.updated_at DESC, d.id DESC LIMIT ? OFFSET ?"
     ))?;
+    args.extend([Value::from(limit), Value::from(offset)]);
     let rows = stmt
-        .query_map(params![states, limit, offset], from_row)?
+        .query_map(params_from_iter(&args), from_row)?
         .collect::<rusqlite::Result<_>>()?;
     Ok((rows, uint(total)))
 }
@@ -661,13 +674,13 @@ pub fn of_source(
     source: SourceId,
     states: &[DownloadState],
 ) -> Result<Vec<DownloadRow>> {
+    let (inside, mut args) = states_in(states);
+    args.insert(0, Value::from(source.0));
     let rows = conn
         .prepare(&format!(
-            "SELECT {COLUMNS} FROM {FROM}
-             WHERE d.source_id = ?1 AND d.state IN (SELECT value FROM json_each(?2))
-             ORDER BY d.id"
+            "SELECT {COLUMNS} FROM {FROM} WHERE d.source_id = ? AND d.state {inside} ORDER BY d.id"
         ))?
-        .query_map(params![source.0, states_json(states)], from_row)?
+        .query_map(params_from_iter(&args), from_row)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
@@ -794,9 +807,10 @@ pub fn polled(conn: &Connection) -> Result<Vec<PollRow>> {
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn count_in(conn: &Connection, states: &[DownloadState]) -> Result<u64> {
+    let (inside, args) = states_in(states);
     let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM downloads WHERE state IN (SELECT value FROM json_each(?1))",
-        [states_json(states)],
+        &format!("SELECT COUNT(*) FROM downloads WHERE state {inside}"),
+        params_from_iter(&args),
         |r| r.get(0),
     )?;
     Ok(uint(n))

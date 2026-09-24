@@ -407,8 +407,8 @@ mod tests {
 
     fn title(c: &Connection, version: DatVersionId, name: &str) -> i64 {
         c.execute(
-            "INSERT INTO titles (platform_id, dat_version_id, name, base_name, regions, languages, flags)
-             VALUES ('gb', ?1, ?2, ?2, '[]', '[]', '[]')",
+            "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
+             VALUES ('gb', ?1, ?2, ?2)",
             params![version.0, name],
         )
         .expect("insert");

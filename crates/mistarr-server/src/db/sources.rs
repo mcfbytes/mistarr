@@ -663,7 +663,8 @@ impl DatIndex for SqlDatIndex<'_> {
     fn by_normalised_name(&self, name: &str) -> Vec<(PlatformId, RomRef)> {
         self.lookup(
             "SELECT t.platform_id, r.id FROM roms r JOIN titles t ON t.id = r.title_id
-             WHERE r.match_name = ?1 AND t.retired = 0 AND t.flags NOT LIKE '%\"bios\"%'
+             WHERE r.match_name = ?1 AND t.retired = 0
+               AND NOT EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.flag = 'bios')
              ORDER BY r.id",
             [name],
         )
@@ -673,7 +674,7 @@ impl DatIndex for SqlDatIndex<'_> {
         self.lookup(
             "SELECT t.platform_id, r.id FROM roms r JOIN titles t ON t.id = r.title_id
              WHERE r.match_base = ?1 AND r.size = ?2 AND t.retired = 0
-               AND t.flags NOT LIKE '%\"bios\"%'
+               AND NOT EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.flag = 'bios')
              ORDER BY r.id",
             params![base_name, sql_int(size)],
         )
@@ -687,8 +688,7 @@ pub mod fixtures {
 
     use crate::error::Result;
 
-    /// Inserts a DAT version, a title and one rom, returning the rom id.
-    /// `flags` is the title's JSON flag array, e.g. `[]` or `["bios"]`.
+    /// Inserts a DAT version, a title with `flags` and one rom, returning the rom id.
     ///
     /// # Errors
     ///
@@ -698,7 +698,7 @@ pub mod fixtures {
         platform: &str,
         rom_name: &str,
         size: u64,
-        flags: &str,
+        flags: &[&str],
     ) -> Result<i64> {
         conn.execute(
             "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
@@ -713,11 +713,13 @@ pub mod fixtures {
         )?;
         let title = rom_name.rsplit_once('.').map_or(rom_name, |(t, _)| t);
         conn.execute(
-            "INSERT INTO titles (platform_id, dat_version_id, name, base_name, regions, languages, flags)
-             VALUES (?1, ?2, ?3, ?3, '[]', '[]', ?4)",
-            params![platform, dat, title, flags],
+            "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
+             VALUES (?1, ?2, ?3, ?3)",
+            params![platform, dat, title],
         )?;
         let title_id = conn.last_insert_rowid();
+        let flags: Vec<String> = flags.iter().map(|f| (*f).to_owned()).collect();
+        crate::db::titles::set_flags(conn, crate::db::titles::TitleId(title_id), &flags)?;
         conn.execute(
             "INSERT INTO roms (title_id, name, size, status) VALUES (?1, ?2, ?3, 'good')",
             params![title_id, rom_name, super::sql_int(size)],
@@ -772,7 +774,7 @@ mod tests {
         let row = get(&c, a).expect("get").expect("row");
         assert_eq!(row.suggested_platform_id, Some(nes()));
         assert!(!platform_has_dat(&c, &nes()).expect("dat"));
-        fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 1, "[]").expect("seed");
+        fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 1, &[]).expect("seed");
         assert!(platform_has_dat(&c, &nes()).expect("dat"));
         set_suggestion(&c, a, None).expect("clear");
         assert_eq!(list_unbound(&c).expect("list"), [(a, None)]);
@@ -824,7 +826,7 @@ mod tests {
     #[test]
     fn files_carry_matches_confidence_and_rom_names() {
         let c = conn();
-        let rom = fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 16, "[]").expect("rom");
+        let rom = fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
         let id = insert(&c, &new(&"04".repeat(20), SourceState::Bound)).expect("insert");
         let list = [
             file(0, "Sub/Example Quest (USA).nes", 16),
@@ -866,10 +868,10 @@ mod tests {
     #[test]
     fn index_finds_by_name_and_by_base_name_and_size() {
         let c = conn();
-        let a = fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 16, "[]").expect("rom");
+        let a = fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
         let b =
-            fixtures::seed_rom(&c, "snes", "Sub\\Other Tale (Europe).sfc", 32, "[]").expect("rom");
-        fixtures::seed_rom(&c, "nes", "Boot Code (World).nes", 8, r#"["bios"]"#).expect("rom");
+            fixtures::seed_rom(&c, "snes", "Sub\\Other Tale (Europe).sfc", 32, &[]).expect("rom");
+        fixtures::seed_rom(&c, "nes", "Boot Code (World).nes", 8, &["bios"]).expect("rom");
         assert_eq!(refresh_match_keys(&c).expect("keys"), 3);
         assert_eq!(refresh_match_keys(&c).expect("keys"), 0);
         let index = SqlDatIndex::new(&c);
@@ -888,8 +890,8 @@ mod tests {
     #[test]
     fn binding_runs_against_the_index() {
         let c = conn();
-        fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 16, "[]").expect("rom");
-        fixtures::seed_rom(&c, "nes", "Second Try (Japan).nes", 24, "[]").expect("rom");
+        fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
+        fixtures::seed_rom(&c, "nes", "Second Try (Japan).nes", 24, &[]).expect("rom");
         refresh_match_keys(&c).expect("keys");
         let files = [
             file(0, "Set/Example Quest (USA).nes", 16),

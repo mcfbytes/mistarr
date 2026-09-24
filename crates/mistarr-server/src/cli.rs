@@ -39,6 +39,9 @@ pub enum Command {
         /// MiB of zeros hashed for the throughput line.
         #[arg(long, default_value_t = crate::doctor::DEFAULT_HASH_MIB)]
         hash_mib: u32,
+        /// Recompute the browse groups first; run it while the server is stopped.
+        #[arg(long)]
+        rebuild_groups: bool,
     },
 }
 
@@ -84,8 +87,22 @@ mod tests {
     fn flags_parse_before_and_after_the_subcommand() {
         let cli = Cli::try_parse_from(["mistarr", "doctor", "--hash-mib", "2", "--data", "/d"])
             .expect("parse");
-        assert_eq!(cli.command(), Command::Doctor { hash_mib: 2 });
+        assert_eq!(
+            cli.command(),
+            Command::Doctor {
+                hash_mib: 2,
+                rebuild_groups: false
+            }
+        );
         assert_eq!(cli.data.as_deref(), Some(std::path::Path::new("/d")));
+        let cli = Cli::try_parse_from(["mistarr", "doctor", "--rebuild-groups"]).expect("parse");
+        assert!(matches!(
+            cli.command(),
+            Command::Doctor {
+                rebuild_groups: true,
+                ..
+            }
+        ));
         let cli =
             Cli::try_parse_from(["mistarr", "--listen", "0.0.0.0:1", "serve"]).expect("parse");
         assert_eq!(cli.command(), Command::Serve);
