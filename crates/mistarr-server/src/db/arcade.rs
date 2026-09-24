@@ -286,6 +286,134 @@ pub fn set_check(
     Ok(())
 }
 
+/// A zip an MRA title names, as the importer places it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ZipRom {
+    /// The MRA title.
+    pub title_id: TitleId,
+    /// Zip file name.
+    pub name: String,
+    /// Directory under `games/` it is read from.
+    pub zip_dir: String,
+    /// The MRA file relative to `_Arcade`.
+    pub mra_path: String,
+}
+
+/// Rom `rom_id` as a zip of an MRA title, or `None` when it is not one.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(mistarr_server::db::arcade::zip_rom(&conn, 1).unwrap().is_none());
+/// ```
+pub fn zip_rom(conn: &Connection, rom_id: i64) -> Result<Option<ZipRom>> {
+    Ok(conn
+        .query_row(
+            "SELECT t.id, r.name, COALESCE(r.zip_dir, ''), COALESCE(t.mra_path, '')
+             FROM roms r JOIN titles t ON t.id = r.title_id
+             WHERE r.id = ?1 AND t.source = 'mra'",
+            [rom_id],
+            |r| {
+                Ok(ZipRom {
+                    title_id: TitleId(r.get(0)?),
+                    name: r.get(1)?,
+                    zip_dir: r.get(2)?,
+                    mra_path: r.get(3)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+/// Live MRA titles of `platform` naming zip `name` in `zip_dir`, compared case-insensitively
+/// as exFAT does, with their MRA paths.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let found = mistarr_server::db::arcade::titles_naming(&conn, "arcade", "mame", "exblast.zip");
+/// assert!(found.unwrap().is_empty());
+/// ```
+pub fn titles_naming(
+    conn: &Connection,
+    platform: &str,
+    zip_dir: &str,
+    name: &str,
+) -> Result<Vec<(TitleId, String)>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT t.id, COALESCE(t.mra_path, '') FROM titles t
+         JOIN roms r ON r.title_id = t.id AND r.retired = 0
+         WHERE t.platform_id = ?1 AND t.source = 'mra' AND t.retired = 0
+           AND lower(COALESCE(r.zip_dir, '')) = lower(?2) AND lower(r.name) = lower(?3)
+         ORDER BY t.id",
+    )?;
+    let rows = stmt.query_map(params![platform, zip_dir, name], |r| {
+        Ok((TitleId(r.get(0)?), r.get(1)?))
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Records whether zip `name` in `zip_dir` of MRA title `title` is on disk.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::{arcade, titles::TitleId};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert_eq!(arcade::set_zip_present(&conn, TitleId(1), "exblast.zip", "mame", true).unwrap(), 0);
+/// ```
+pub fn set_zip_present(
+    conn: &Connection,
+    title: TitleId,
+    name: &str,
+    zip_dir: &str,
+    present: bool,
+) -> Result<usize> {
+    Ok(conn
+        .prepare_cached(
+            "UPDATE roms SET present = ?4
+             WHERE title_id = ?1 AND retired = 0 AND lower(name) = lower(?2)
+               AND lower(COALESCE(zip_dir, '')) = lower(?3)",
+        )?
+        .execute(params![title.0, name, zip_dir, present])?)
+}
+
+/// The live DAT entry of `platform` named `set`, as a MAME DAT names the zip `set.zip`:
+/// the exact name first, then one differing only in case.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(mistarr_server::db::arcade::dat_entry_named(&conn, "arcade", "exblast").unwrap().is_none());
+/// ```
+pub fn dat_entry_named(conn: &Connection, platform: &str, set: &str) -> Result<Option<TitleId>> {
+    Ok(conn
+        .query_row(
+            "SELECT t.id FROM titles t JOIN dat_versions v ON v.id = t.dat_version_id
+             WHERE t.platform_id = ?1 AND t.source = 'dat' AND t.retired = 0
+               AND v.superseded_by IS NULL AND v.retired = 0 AND lower(t.name) = lower(?2)
+             ORDER BY t.name = ?2 DESC, t.id LIMIT 1",
+            params![platform, set],
+            |r| r.get(0).map(TitleId),
+        )
+        .optional()?)
+}
+
 /// What title detail shows for an MRA title.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct MraInfo {

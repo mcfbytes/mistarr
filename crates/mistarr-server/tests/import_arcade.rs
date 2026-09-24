@@ -1,0 +1,680 @@
+//! Importing zips an MRA names: the md5, DAT and unverified paths, zips arriving in
+//! either order, refusals and placement under `games/hbmame`. See `docs/ARCHITECTURE.md` "Import".
+
+mod common;
+
+use std::io::{Cursor, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use common::{boot_with, config_in, eventually, get, request, Booted};
+use mistarr_core::hash::{hash_reader, HeaderRule, Md5Stream};
+use mistarr_core::PlatformId;
+use mistarr_server::db::downloads::{self, DownloadId, DownloadState};
+use mistarr_server::db::downloads_import;
+use mistarr_server::db::files::{self, FileRow, FileState};
+use mistarr_server::db::imports;
+use mistarr_server::db::sources::{self, NewSource, SourceId, SourceState};
+use mistarr_server::events::EventKind;
+use mistarr_server::jobs::scan::ScanJob;
+use mistarr_server::jobs::Scheduler;
+use serde_json::{json, Value};
+
+fn infohash() -> String {
+    "0b".repeat(20)
+}
+
+fn write(path: &Path, data: &[u8]) {
+    std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+    std::fs::write(path, data).expect("write");
+}
+
+fn zip_bytes(members: &[(&str, &[u8])]) -> Vec<u8> {
+    let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    for (name, body) in members {
+        z.start_file(*name, zip::write::SimpleFileOptions::default())
+            .expect("start");
+        z.write_all(body).expect("write");
+    }
+    z.finish().expect("finish").into_inner()
+}
+
+fn md5_of(parts: &[&[u8]]) -> String {
+    let mut m = Md5Stream::new();
+    for p in parts {
+        m.update(p);
+    }
+    m.finish()
+}
+
+fn mra(name: &str, roms: &str) -> Vec<u8> {
+    format!(
+        "<misterromdescription><name>{name}</name><setname>exblast</setname>\
+         <rbf>excore</rbf>{roms}</misterromdescription>"
+    )
+    .into_bytes()
+}
+
+/// Boots with the given `_Arcade` files and waits for their titles.
+async fn boot_arcade(mras: &[(&str, Vec<u8>)], games: &[(&str, Vec<u8>)]) -> Booted {
+    let dir = tempfile::tempdir().expect("tempdir");
+    for (rel, body) in mras {
+        write(&dir.path().join("_Arcade").join(rel), body);
+    }
+    for (rel, body) in games {
+        write(&dir.path().join("games").join(rel), body);
+    }
+    let config = config_in(dir.path());
+    let b = boot_with(dir, config).await;
+    let want = mras.len();
+    eventually("the arcade catalogue", || async {
+        let rows = browse(&b).await;
+        rows.len() == want
+    })
+    .await;
+    b
+}
+
+/// Browse rows of the arcade platform as `(name, have_verified)`.
+async fn browse(b: &Booted) -> Vec<(String, u64)> {
+    get(b.addr(), "/api/v1/platforms/arcade/titles")
+        .await
+        .json()["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|i| {
+            let name = i["name"].as_str().expect("name").to_owned();
+            (name, i["have_verified"].as_u64().expect("have"))
+        })
+        .collect()
+}
+
+async fn have(b: &Booted, name: &str) -> u64 {
+    browse(b)
+        .await
+        .into_iter()
+        .find(|(n, _)| n == name)
+        .map_or_else(|| panic!("no {name}"), |(_, h)| h)
+}
+
+fn title_id(b: &Booted, name: &str) -> i64 {
+    let name = name.to_owned();
+    b.running
+        .app
+        .db
+        .read_blocking(move |c| {
+            Ok(c.query_row(
+                "SELECT id FROM titles WHERE source = 'mra' AND name = ?1",
+                [name],
+                |r| r.get(0),
+            )?)
+        })
+        .expect("title")
+}
+
+async fn mra_block(b: &Booted, name: &str) -> Value {
+    let id = title_id(b, name);
+    let detail = get(b.addr(), &format!("/api/v1/titles/{id}")).await.json();
+    detail["variants"][0]["mra"].clone()
+}
+
+fn zip_rom(b: &Booted, zip: &str) -> i64 {
+    let zip = zip.to_owned();
+    b.running
+        .app
+        .db
+        .read_blocking(move |c| {
+            Ok(c.query_row(
+                "SELECT r.id FROM roms r JOIN titles t ON t.id = r.title_id
+                 WHERE t.source = 'mra' AND r.name = ?1",
+                [zip],
+                |r| r.get(0),
+            )?)
+        })
+        .expect("rom")
+}
+
+fn source(b: &Booted) -> SourceId {
+    let hash = infohash();
+    b.running
+        .app
+        .db
+        .write_blocking(|c| {
+            sources::insert(
+                c,
+                &NewSource {
+                    infohash: &hash,
+                    display_name: "Synthetic Set",
+                    origin_file: "set.torrent",
+                    state: SourceState::Bound,
+                    reason: None,
+                    added_at: 1,
+                },
+            )
+        })
+        .expect("source")
+}
+
+fn staging(b: &Booted) -> PathBuf {
+    b.running.app.config().paths.staging()
+}
+
+fn games(b: &Booted) -> PathBuf {
+    b.running.app.config().paths.games
+}
+
+fn stage(b: &Booted, name: &str, data: &[u8]) -> PathBuf {
+    let path = staging(b).join(infohash()).join("Synthetic Set").join(name);
+    write(&path, data);
+    path
+}
+
+fn announce(b: &Booted, id: DownloadId) {
+    b.running.app.events.publish(
+        EventKind::DownloadChanged,
+        &json!({ "download_id": id.0, "state": "importing", "progress": 1.0 }),
+    );
+}
+
+/// Hands `path` to the importer as the transfer of `rom_id`.
+fn hand_off(b: &Booted, rom_id: i64, src: SourceId, index: u32, path: &Path) -> DownloadId {
+    let staged = path.to_string_lossy().into_owned();
+    let id = b
+        .running
+        .app
+        .db
+        .write_blocking(move |c| {
+            downloads_import::insert_fixture(c, rom_id, src, index, "importing", Some(&staged))
+        })
+        .expect("download");
+    announce(b, id);
+    id
+}
+
+async fn settled(b: &Booted, id: DownloadId, want: DownloadState) -> downloads::DownloadRow {
+    let read = || {
+        b.running
+            .app
+            .db
+            .read_blocking(move |c| downloads::get(c, id))
+            .expect("read")
+            .expect("row")
+    };
+    eventually(&format!("download {id} {want}"), || async {
+        read().state == want
+    })
+    .await;
+    read()
+}
+
+fn rows(b: &Booted, zip_rel: &str) -> Vec<FileRow> {
+    let zip_rel = zip_rel.to_owned();
+    b.running
+        .app
+        .db
+        .read_blocking(move |c| files::zip_member_rows(c, &PlatformId("arcade".into()), &zip_rel))
+        .expect("rows")
+}
+
+fn states(rows: &[FileRow]) -> Vec<(String, FileState, Option<i64>)> {
+    rows.iter()
+        .map(|r| (r.rel_path.clone(), r.state, r.rom_id))
+        .collect()
+}
+
+fn log(b: &Booted) -> Vec<imports::LogRow> {
+    b.running
+        .app
+        .db
+        .read_blocking(|c| imports::list(c, 100, 0).map(|(items, _)| items))
+        .expect("log")
+}
+
+/// Runs a library scan of the arcade platform and checks it keeps `zip_rel`'s rows as they were.
+async fn scan_agrees(b: &Booted, zip_rel: &str) {
+    let key = |rows: Vec<FileRow>| {
+        rows.into_iter()
+            .map(|r| {
+                (
+                    r.id,
+                    r.rel_path,
+                    r.state,
+                    r.rom_id,
+                    r.size,
+                    r.mtime,
+                    r.scanned_at,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let before = key(rows(b, zip_rel));
+    assert!(!before.is_empty());
+    let scan = Arc::new(ScanJob {
+        platform_id: Some(PlatformId("arcade".into())),
+    });
+    Scheduler::run_inline(&b.running.app, scan)
+        .await
+        .expect("scan");
+    assert_eq!(key(rows(b, zip_rel)), before);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_md5_covered_zip_is_verified_by_assembly_and_placed_whole() {
+    let md5 = md5_of(&[b"CPU0", b"SND"]);
+    let roms = format!(
+        r#"<rom index="0" zip="exblast.zip" md5="{md5}"><part name="cpu.bin"/><part name="snd.bin"/></rom>"#
+    );
+    let b = boot_arcade(
+        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[],
+    )
+    .await;
+    let rom = zip_rom(&b, "exblast.zip");
+    let src = source(&b);
+    let body = zip_bytes(&[
+        ("cpu.bin", b"CPU0"),
+        ("snd.bin", b"SND"),
+        ("notes.txt", b"n"),
+    ]);
+    let staged = stage(&b, "arcade/exblast-download.zip", &body);
+    let id = hand_off(&b, rom, src, 0, &staged);
+    settled(&b, id, DownloadState::Done).await;
+
+    let placed = games(&b).join("mame/exblast.zip");
+    assert_eq!(std::fs::read(&placed).expect("placed"), body);
+    assert!(!staged.exists());
+    assert!(!games(&b).join("mame/cpu.bin").exists());
+    assert_eq!(
+        states(&rows(&b, "mame/exblast.zip")),
+        [
+            (
+                "mame/exblast.zip#cpu.bin".into(),
+                FileState::Verified,
+                Some(rom)
+            ),
+            (
+                "mame/exblast.zip#notes.txt".into(),
+                FileState::Unverified,
+                Some(rom)
+            ),
+            (
+                "mame/exblast.zip#snd.bin".into(),
+                FileState::Verified,
+                Some(rom)
+            ),
+        ]
+    );
+    let entries = log(&b);
+    assert!(entries
+        .iter()
+        .all(|e| e.detail["verification"] == "mra_md5"));
+    assert_eq!(entries.len(), 3);
+    assert_eq!(have(&b, "Example Blaster").await, 1);
+    let m = mra_block(&b, "Example Blaster").await;
+    assert_eq!(m["md5_check"], "match");
+    assert_eq!(m["missing_zips"], json!([]));
+    scan_agrees(&b, "mame/exblast.zip").await;
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn without_an_md5_a_loaded_dat_verifies_member_by_member() {
+    let roms = r#"<rom index="0" zip="exblast.zip"><part name="cpu.bin"/></rom>"#;
+    let b = boot_arcade(
+        &[("Example Blaster.mra", mra("Example Blaster", roms))],
+        &[],
+    )
+    .await;
+    let hash = |d: &[u8]| hash_reader(Cursor::new(d), HeaderRule::None, None).expect("hash");
+    let (hc, hs) = (hash(b"CPU0"), hash(b"SND"));
+    let dat_roms = b
+        .running
+        .app
+        .db
+        .write_blocking(move |c| {
+            let t = files::seed_title_fixture(c, &PlatformId("arcade".into()), "exblast")?;
+            Ok([
+                files::seed_rom_for_title_fixture(c, t, "cpu.bin", &hc, "good")?,
+                files::seed_rom_for_title_fixture(c, t, "snd.bin", &hs, "good")?,
+            ])
+        })
+        .expect("dat");
+    let rom = zip_rom(&b, "exblast.zip");
+    let src = source(&b);
+    let good = stage(
+        &b,
+        "arcade/exblast.zip",
+        &zip_bytes(&[("snd.bin", b"SND"), ("cpu.bin", b"CPU0")]),
+    );
+    let id = hand_off(&b, rom, src, 0, &good);
+    settled(&b, id, DownloadState::Done).await;
+    assert_eq!(
+        states(&rows(&b, "mame/exblast.zip")),
+        [
+            (
+                "mame/exblast.zip#cpu.bin".into(),
+                FileState::Verified,
+                Some(dat_roms[0])
+            ),
+            (
+                "mame/exblast.zip#snd.bin".into(),
+                FileState::Verified,
+                Some(dat_roms[1])
+            ),
+        ]
+    );
+    let entries = log(&b);
+    assert!(entries.iter().all(|e| e.detail["verification"] == "dat"));
+    assert_eq!(entries[0].detail["dat_entry"], "exblast");
+    assert_eq!(have(&b, "Example Blaster").await, 1);
+    scan_agrees(&b, "mame/exblast.zip").await;
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_zip_the_dat_disagrees_with_is_quarantined() {
+    let roms = r#"<rom index="0" zip="exblast.zip"><part name="cpu.bin"/></rom>"#;
+    let b = boot_arcade(
+        &[("Example Blaster.mra", mra("Example Blaster", roms))],
+        &[],
+    )
+    .await;
+    let hc = hash_reader(Cursor::new(b"CPU0"), HeaderRule::None, None).expect("hash");
+    b.running
+        .app
+        .db
+        .write_blocking(move |c| {
+            let t = files::seed_title_fixture(c, &PlatformId("arcade".into()), "exblast")?;
+            files::seed_rom_for_title_fixture(c, t, "cpu.bin", &hc, "good")
+        })
+        .expect("dat");
+    let rom = zip_rom(&b, "exblast.zip");
+    let src = source(&b);
+    let staged = stage(
+        &b,
+        "arcade/exblast.zip",
+        &zip_bytes(&[("cpu.bin", b"CPUX")]),
+    );
+    let id = hand_off(&b, rom, src, 0, &staged);
+    let row = settled(&b, id, DownloadState::Bad).await;
+    assert!(
+        row.error
+            .as_deref()
+            .is_some_and(|e| e.contains("DAT entry exblast")),
+        "{:?}",
+        row.error
+    );
+    assert!(!games(&b).join("mame/exblast.zip").exists());
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn with_no_hash_source_the_zip_is_placed_unverified() {
+    let roms = r#"<rom index="0" zip="exblast.zip"><part name="cpu.bin"/></rom>"#;
+    let b = boot_arcade(
+        &[("Example Blaster.mra", mra("Example Blaster", roms))],
+        &[],
+    )
+    .await;
+    let rom = zip_rom(&b, "exblast.zip");
+    let src = source(&b);
+    let staged = stage(
+        &b,
+        "arcade/exblast.zip",
+        &zip_bytes(&[("cpu.bin", b"CPU0")]),
+    );
+    let id = hand_off(&b, rom, src, 0, &staged);
+    settled(&b, id, DownloadState::Done).await;
+    assert_eq!(
+        states(&rows(&b, "mame/exblast.zip")),
+        [(
+            "mame/exblast.zip#cpu.bin".into(),
+            FileState::Unverified,
+            Some(rom)
+        )]
+    );
+    let entry = &log(&b)[0];
+    assert_eq!(entry.action, "placed");
+    assert_eq!(entry.detail["verification"], "none");
+    assert_eq!(entry.detail["reason"], "no hash source");
+    assert_eq!(have(&b, "Example Blaster").await, 1);
+    scan_agrees(&b, "mame/exblast.zip").await;
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_zip_read_from_hbmame_is_placed_there() {
+    let roms = r#"<rom index="0" zip="/hbmame/examplequest.zip"><part name="q.bin"/></rom>"#;
+    let b = boot_arcade(&[("Example Quest.mra", mra("Example Quest", roms))], &[]).await;
+    let rom = zip_rom(&b, "examplequest.zip");
+    let src = source(&b);
+    let body = zip_bytes(&[("q.bin", b"Q")]);
+    let staged = stage(&b, "hb/examplequest.zip", &body);
+    let id = hand_off(&b, rom, src, 0, &staged);
+    settled(&b, id, DownloadState::Done).await;
+    assert_eq!(
+        std::fs::read(games(&b).join("hbmame/examplequest.zip")).expect("placed"),
+        body
+    );
+    assert!(!games(&b).join("mame").exists());
+    assert_eq!(
+        states(&rows(&b, "hbmame/examplequest.zip")),
+        [(
+            "hbmame/examplequest.zip#q.bin".into(),
+            FileState::Unverified,
+            Some(rom)
+        )]
+    );
+    assert_eq!(have(&b, "Example Quest").await, 1);
+    scan_agrees(&b, "hbmame/examplequest.zip").await;
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_zip_without_the_members_the_mra_names_is_quarantined() {
+    let roms = r#"<rom index="0" zip="exblast.zip"><part name="cpu.bin"/><part name="gone.bin"/><part name="lost.bin"/></rom>"#;
+    let b = boot_arcade(
+        &[("Example Blaster.mra", mra("Example Blaster", roms))],
+        &[],
+    )
+    .await;
+    let rom = zip_rom(&b, "exblast.zip");
+    let src = source(&b);
+    let staged = stage(
+        &b,
+        "arcade/exblast.zip",
+        &zip_bytes(&[("cpu.bin", b"CPU0")]),
+    );
+    let id = hand_off(&b, rom, src, 0, &staged);
+    let row = settled(&b, id, DownloadState::Bad).await;
+    assert!(
+        row.error
+            .as_deref()
+            .is_some_and(|e| e.contains("gone.bin, lost.bin")),
+        "{:?}",
+        row.error
+    );
+    let dir = staging(&b).join("quarantine").join(infohash());
+    assert!(dir.join("exblast.zip").is_file());
+    let report = std::fs::read_to_string(dir.join("exblast.zip.report.txt")).expect("report");
+    assert!(report.contains("Missing: gone.bin, lost.bin"), "{report}");
+    let entry = &log(&b)[0];
+    assert_eq!(entry.action, "quarantined");
+    assert_eq!(entry.detail["missing"], json!(["gone.bin", "lost.bin"]));
+    assert!(!games(&b).join("mame/exblast.zip").exists());
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_mra_the_assembler_cannot_build_is_refused_with_its_reason() {
+    let md5 = md5_of(&[b"CPU0"]);
+    let roms = format!(
+        r#"<rom index="0" zip="exblast.zip" md5="{md5}"><part name="cpu.bin" map="01"/></rom>"#
+    );
+    let b = boot_arcade(
+        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[],
+    )
+    .await;
+    let rom = zip_rom(&b, "exblast.zip");
+    let src = source(&b);
+    let staged = stage(
+        &b,
+        "arcade/exblast.zip",
+        &zip_bytes(&[("cpu.bin", b"CPU0")]),
+    );
+    let id = hand_off(&b, rom, src, 0, &staged);
+    let row = settled(&b, id, DownloadState::Failed).await;
+    assert!(
+        row.error
+            .as_deref()
+            .is_some_and(|e| e.contains("MRA content not supported: map outside <interleave>")),
+        "{:?}",
+        row.error
+    );
+    assert!(staged.is_file(), "a refused zip stays in staging");
+    assert!(!games(&b).join("mame/exblast.zip").exists());
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn wanting_creates_one_download_per_missing_zip() {
+    let roms =
+        r#"<rom index="0" zip="exblast.zip|exparent.zip|exsound.zip"><part name="a.bin"/></rom>"#;
+    let b = boot_arcade(
+        &[("Example Blaster.mra", mra("Example Blaster", roms))],
+        &[("mame/exparent.zip", zip_bytes(&[("p.bin", b"P")]))],
+    )
+    .await;
+    let id = title_id(&b, "Example Blaster");
+    let r = request(
+        b.addr(),
+        "POST",
+        &format!("/api/v1/titles/{id}/want"),
+        &[],
+        Some("{}"),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let listed = get(b.addr(), "/api/v1/downloads").await.json();
+    let mut names: Vec<String> = listed["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .map(|d| d["rom_name"].as_str().expect("name").to_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["exblast.zip", "exsound.zip"]);
+    assert_eq!(have(&b, "Example Blaster").await, 0);
+    b.running.shutdown().await.expect("shutdown");
+}
+
+/// A two-zip MRA whose one md5 spans both zips, imported with `first` landing first.
+async fn two_zips_arrive(first: &str) {
+    let md5 = md5_of(&[b"AAAA", b"BBBB"]);
+    let roms = format!(
+        r#"<rom index="0" zip="exblast.zip|exparent.zip" md5="{md5}">
+             <part name="a.bin"/><part name="b.bin"/></rom>"#
+    );
+    let b = boot_arcade(
+        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[],
+    )
+    .await;
+    let title = title_id(&b, "Example Blaster");
+    let r = request(
+        b.addr(),
+        "POST",
+        &format!("/api/v1/titles/{title}/want"),
+        &[],
+        Some("{}"),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let wanted: Vec<(DownloadId, i64)> = b
+        .running
+        .app
+        .db
+        .read_blocking(|c| {
+            let (rows, _) = downloads::list(c, &[DownloadState::Wanted], 10, 0)?;
+            Ok(rows.into_iter().map(|r| (r.id, r.rom_id)).collect())
+        })
+        .expect("downloads");
+    assert_eq!(wanted.len(), 2);
+    let src = source(&b);
+    let bodies = [
+        (
+            "exblast.zip",
+            zip_bytes(&[("a.bin", b"AAAA"), ("readme.txt", b"r")]),
+        ),
+        ("exparent.zip", zip_bytes(&[("b.bin", b"BBBB")])),
+    ];
+    let mut order: Vec<&(&str, Vec<u8>)> = bodies.iter().collect();
+    if first == "exparent.zip" {
+        order.reverse();
+    }
+    let mut ids = Vec::new();
+    for (index, (name, body)) in (0u32..).zip(&order) {
+        let rom = zip_rom(&b, name);
+        let (download, _) = *wanted.iter().find(|(_, r)| *r == rom).expect("download");
+        let path = stage(&b, &format!("arcade/{name}"), body);
+        let staged = path.to_string_lossy().into_owned();
+        b.running
+            .app
+            .db
+            .write_blocking(move |c| {
+                c.execute(
+                    "UPDATE downloads SET state = 'importing', source_id = ?2, file_index = ?3,
+                       staged_path = ?4 WHERE id = ?1",
+                    rusqlite::params![download.0, src.0, index, staged],
+                )?;
+                Ok(())
+            })
+            .expect("importing");
+        ids.push((download, *name));
+    }
+
+    announce(&b, ids[0].0);
+    settled(&b, ids[0].0, DownloadState::Done).await;
+    let early = format!("mame/{first}");
+    assert!(rows(&b, &early)
+        .iter()
+        .all(|r| r.state == FileState::Unverified));
+    let waits = log(&b)[0].detail["reason"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(
+        waits.starts_with("the md5 check waits for mame/"),
+        "{waits}"
+    );
+    assert_eq!(have(&b, "Example Blaster").await, 0);
+
+    announce(&b, ids[1].0);
+    settled(&b, ids[1].0, DownloadState::Done).await;
+    assert_eq!(have(&b, "Example Blaster").await, 1);
+    assert_eq!(mra_block(&b, "Example Blaster").await["md5_check"], "match");
+    let verified = |rel: &str| {
+        rows(&b, rel)
+            .into_iter()
+            .filter(|r| r.state == FileState::Verified)
+            .map(|r| r.rel_path)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(verified("mame/exblast.zip"), ["mame/exblast.zip#a.bin"]);
+    assert_eq!(verified("mame/exparent.zip"), ["mame/exparent.zip#b.bin"]);
+    scan_agrees(&b, "mame/exblast.zip").await;
+    scan_agrees(&b, "mame/exparent.zip").await;
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zips_of_one_mra_arriving_main_first_are_checked_when_the_last_lands() {
+    two_zips_arrive("exblast.zip").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zips_of_one_mra_arriving_parent_first_are_checked_when_the_last_lands() {
+    two_zips_arrive("exparent.zip").await;
+}

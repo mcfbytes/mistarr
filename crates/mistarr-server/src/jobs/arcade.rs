@@ -10,7 +10,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mistarr_core::naming::{group_key, parse_name};
 use mistarr_mister::adapter::arcade::assemble::{self, PartSource};
-use mistarr_mister::adapter::arcade::mra::{self, zip_location, Mra, ZipPath};
+use mistarr_mister::adapter::arcade::mra::{self, zip_location, Mra, MraRom, ZipPath};
 use serde_json::json;
 
 use super::dat_import::prefs;
@@ -344,12 +344,12 @@ fn resolve_dir(games: &Path, dir: &str) -> Option<PathBuf> {
 /// The zip files present in each directory under `games/`, directories and files keyed by
 /// lowercase name, since exFAT, where MiSTer keeps them, is case-insensitive.
 #[derive(Debug, Clone, Default)]
-struct ZipIndex {
+pub(super) struct ZipIndex {
     dirs: HashMap<String, HashMap<String, PathBuf>>,
 }
 
 impl ZipIndex {
-    fn build(games: &Path, dirs: Vec<String>) -> Self {
+    pub(super) fn build(games: &Path, dirs: Vec<String>) -> Self {
         let mut index = Self {
             dirs: HashMap::new(),
         };
@@ -372,7 +372,7 @@ impl ZipIndex {
         index
     }
 
-    fn find(&self, zip: &ZipPath) -> Option<&PathBuf> {
+    pub(super) fn find(&self, zip: &ZipPath) -> Option<&PathBuf> {
         self.dirs
             .get(&zip.dir.to_lowercase())?
             .get(&zip.file.to_lowercase())
@@ -422,10 +422,40 @@ fn check_stamp(entry: &Entry, zips: &[Zip]) -> Option<String> {
     Some(stamp)
 }
 
-/// Reads parts from the zips found under `games/`.
-struct ZipSource<'a> {
+/// Reads parts from the zips found under `games/`, or from a staged zip standing in for one
+/// of them, and remembers every member it opened.
+pub(super) struct ZipSource<'a> {
     index: &'a ZipIndex,
+    staged: Option<(ZipPath, PathBuf)>,
     open: HashMap<PathBuf, zip::ZipArchive<File>>,
+    /// Every member opened, as the zip's path and the member's name in the archive.
+    pub(super) read: Vec<(PathBuf, String)>,
+}
+
+impl<'a> ZipSource<'a> {
+    /// A source over `index`, reading `staged.0` from the file `staged.1` instead.
+    pub(super) fn new(index: &'a ZipIndex, staged: Option<(ZipPath, PathBuf)>) -> Self {
+        Self {
+            index,
+            staged,
+            open: HashMap::new(),
+            read: Vec::new(),
+        }
+    }
+
+    /// Where the MRA zip name `zip` is read from, if anywhere.
+    pub(super) fn locate(&self, zip: &str) -> Option<PathBuf> {
+        let z = zip_location(zip)?;
+        match &self.staged {
+            Some((s, path)) if same_zip(s, &z) => Some(path.clone()),
+            _ => self.index.find(&z).cloned(),
+        }
+    }
+}
+
+/// Whether two zip places are the same on a case-insensitive filesystem.
+pub(super) fn same_zip(a: &ZipPath, b: &ZipPath) -> bool {
+    a.dir.eq_ignore_ascii_case(&b.dir) && a.file.eq_ignore_ascii_case(&b.file)
 }
 
 impl PartSource for ZipSource<'_> {
@@ -435,7 +465,7 @@ impl PartSource for ZipSource<'_> {
         name: &str,
         crc: Option<u32>,
     ) -> io::Result<Option<Box<dyn Read + '_>>> {
-        let Some(path) = zip_location(zip).and_then(|z| self.index.find(&z).cloned()) else {
+        let Some(path) = self.locate(zip) else {
             return Ok(None);
         };
         if !self.open.contains_key(&path) {
@@ -449,6 +479,7 @@ impl PartSource for ZipSource<'_> {
             return Ok(None);
         };
         let file = archive.by_index(i).map_err(io::Error::other)?;
+        self.read.push((path, file.name().to_owned()));
         Ok(Some(Box::new(file)))
     }
 }
@@ -480,7 +511,7 @@ fn member_index(
 
 /// Outcome of the md5 check, worst first when several `<rom>` indexes disagree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Check {
+pub(super) enum Check {
     Match,
     Refused,
     MissingPart,
@@ -488,7 +519,7 @@ enum Check {
 }
 
 impl Check {
-    fn as_str(self) -> &'static str {
+    pub(super) fn as_str(self) -> &'static str {
         match self {
             Self::Match => "match",
             Self::Refused => "refused",
@@ -501,27 +532,42 @@ impl Check {
 /// Checks every `<rom>` of `mra` that carries an md5. A `<rom>` index passes when any of
 /// its alternatives matches, as MiSTer keeps the first valid rom 0. `None` when nothing is checkable.
 fn verify(mra: &Mra, index: &ZipIndex) -> Option<(&'static str, Option<String>)> {
-    let mut src = ZipSource {
-        index,
-        open: HashMap::new(),
-    };
+    let mut src = ZipSource::new(index, None);
+    let roms = mra.roms.iter().filter(|r| !r.zips.is_empty());
+    verify_roms(roms, &mut src).map(|(c, d)| (c.as_str(), d))
+}
+
+/// The md5 check of one `<rom>` against `expected`, with why it did not match.
+pub(super) fn check_rom(
+    rom: &MraRom,
+    expected: &str,
+    src: &mut dyn PartSource,
+) -> (Check, Option<String>) {
+    match assemble::md5(rom, src) {
+        Ok(h) if h == expected => (Check::Match, None),
+        Ok(_) => (
+            Check::Mismatch,
+            Some(format!("rom {} does not match the MRA's md5", rom.index)),
+        ),
+        Err(e @ mistarr_mister::Error::MissingPart { .. }) => {
+            (Check::MissingPart, Some(format!("rom {}: {e}", rom.index)))
+        }
+        Err(e) => (Check::Refused, Some(format!("rom {}: {e}", rom.index))),
+    }
+}
+
+/// Checks each of `roms` that carries an md5, one match per index being enough; the worst
+/// index decides. `None` when none carries an md5.
+pub(super) fn verify_roms<'r>(
+    roms: impl IntoIterator<Item = &'r MraRom>,
+    src: &mut dyn PartSource,
+) -> Option<(Check, Option<String>)> {
     let mut by_index: Vec<(u32, Check, Option<String>)> = Vec::new();
-    for rom in mra.roms.iter().filter(|r| !r.zips.is_empty()) {
+    for rom in roms {
         let Some(expected) = &rom.md5 else {
             continue;
         };
-        let (check, detail) = match assemble::md5(rom, &mut src) {
-            Ok(h) if h == *expected => (Check::Match, None),
-            Ok(_) => (
-                Check::Mismatch,
-                Some(format!("rom {} does not match the MRA's md5", rom.index)),
-            ),
-            Err(mistarr_mister::Error::MissingPart { part, zips }) => (
-                Check::MissingPart,
-                Some(format!("rom {}: part {part} is not in {zips}", rom.index)),
-            ),
-            Err(e) => (Check::Refused, Some(format!("rom {}: {e}", rom.index))),
-        };
+        let (check, detail) = check_rom(rom, expected, src);
         match by_index.iter_mut().find(|(i, _, _)| *i == rom.index) {
             Some(slot) if slot.1 != Check::Match && check < slot.1 => {
                 *slot = (rom.index, check, detail);
@@ -531,7 +577,61 @@ fn verify(mra: &Mra, index: &ZipIndex) -> Option<(&'static str, Option<String>)>
         }
     }
     let (_, worst, detail) = by_index.into_iter().max_by_key(|(_, c, _)| *c)?;
-    Some((worst.as_str(), detail))
+    Some((worst, detail))
+}
+
+/// One MRA title re-read after a zip it names was placed.
+#[derive(Debug, Clone)]
+pub(super) struct Refreshed {
+    id: TitleId,
+    /// Each zip it names, `(file, dir, present)`.
+    zips: Vec<(String, String, bool)>,
+    check: Option<(&'static str, Option<String>)>,
+    stamp: Option<String>,
+}
+
+/// Re-reads each `(title, MRA path)` under `arcade_dir` and redoes its zip presence and md5
+/// check as the catalogue does. Titles whose MRA cannot be read are left out.
+pub(super) fn refresh(
+    arcade_dir: &Path,
+    games: &Path,
+    titles: &[(TitleId, String)],
+) -> Vec<Refreshed> {
+    let mut out = Vec::with_capacity(titles.len());
+    for (id, rel) in titles {
+        let Some(entry) = read_entry(&(rel.clone(), arcade_dir.join(rel))) else {
+            continue;
+        };
+        let dirs = entry.mra.zip_paths().into_iter().map(|z| z.dir).collect();
+        let index = ZipIndex::build(games, dirs);
+        let zips = zips_of(&entry.mra, &index);
+        let stamp = check_stamp(&entry, &zips);
+        let check = stamp.as_ref().and_then(|_| verify(&entry.mra, &index));
+        out.push(Refreshed {
+            id: *id,
+            zips: zips
+                .iter()
+                .map(|z| (z.path.file.clone(), z.path.dir.clone(), z.on_disk.is_some()))
+                .collect(),
+            stamp: check.as_ref().and(stamp),
+            check,
+        });
+    }
+    out
+}
+
+/// Records what [`refresh`] found.
+pub(super) fn store_refreshed(conn: &mut rusqlite::Connection, found: &[Refreshed]) -> Result<()> {
+    let tx = conn.transaction()?;
+    for r in found {
+        for (file, dir, present) in &r.zips {
+            rows::set_zip_present(&tx, r.id, file, dir, *present)?;
+        }
+        let (check, detail) = r.check.clone().map_or((None, None), |(c, d)| (Some(c), d));
+        rows::set_check(&tx, r.id, check, detail.as_deref(), r.stamp.as_deref())?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 #[cfg(test)]

@@ -257,3 +257,60 @@ fn group_detail_carries_the_mra_block() {
     assert!(json.get("romset").is_none());
     assert_eq!(json["mra"]["setname"], "exblast");
 }
+
+#[test]
+fn import_reads_find_zip_roms_their_titles_and_dat_entries() {
+    let c = conn();
+    let main = mra(
+        &c,
+        "Example Blaster",
+        &[("exblast.zip", false), ("exparent.zip", true)],
+    );
+    let alt = mra(&c, "Example Blaster (set 2)", &[("ExBlast.zip", false)]);
+    let rom: i64 = c
+        .query_row(
+            "SELECT id FROM roms WHERE title_id = ?1 AND name = 'exblast.zip'",
+            [main.0],
+            |r| r.get(0),
+        )
+        .expect("rom");
+    let found = zip_rom(&c, rom).expect("read").expect("zip");
+    assert_eq!(
+        (
+            found.title_id,
+            found.name.as_str(),
+            found.zip_dir.as_str(),
+            found.mra_path.as_str()
+        ),
+        (main, "exblast.zip", "mame", "Example.mra")
+    );
+    let naming = titles_naming(&c, "arcade", "MAME", "EXBLAST.zip").expect("naming");
+    assert_eq!(
+        naming.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
+        [main, alt]
+    );
+    assert_eq!(
+        set_zip_present(&c, alt, "exblast.zip", "mame", true).expect("set"),
+        1
+    );
+    assert_eq!(
+        info(&c, alt).expect("info").expect("mra").missing_zips,
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        info(&c, main).expect("info").expect("mra").missing_zips,
+        ["mame/exblast.zip"]
+    );
+
+    let dat = dat_game(&c, "1", "exblast");
+    assert!(zip_rom(&c, 0).expect("read").is_none());
+    assert_eq!(
+        dat_entry_named(&c, "arcade", "ExBlast").expect("dat"),
+        Some(dat)
+    );
+    assert_eq!(dat_entry_named(&c, "arcade", "exquest").expect("dat"), None);
+    assert_eq!(
+        dat_entry_named(&c, "arcade", "Example Blaster").expect("dat"),
+        None
+    );
+}

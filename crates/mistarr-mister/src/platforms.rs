@@ -431,6 +431,7 @@ pub static PLATFORMS: [Platform; 33] = [
         name: "Arcade",
         libretro_playlist: "MAME",
         core_dir: "mame",
+        legacy_dirs: &["hbmame"],
         kind: Kind::Arcade,
         load_extensions: &["zip"],
         dat_name_patterns: &["mame", "arcade"],
