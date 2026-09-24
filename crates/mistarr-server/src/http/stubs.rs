@@ -12,7 +12,6 @@ use crate::app::AppState;
 
 /// `(method, path)` of every documented route not implemented yet.
 pub(super) const STUBS: &[(&str, &str)] = &[
-    ("POST", "/system/scan"),
     ("GET", "/downloads"),
     ("POST", "/downloads/{id}/retry"),
     ("DELETE", "/downloads/{id}"),

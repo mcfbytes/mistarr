@@ -29,6 +29,8 @@ pub struct Config {
     pub prefs: PrefsConfig,
     /// `[sources]`.
     pub sources: SourcesConfig,
+    /// `[jobs]`.
+    pub jobs: JobsConfig,
 }
 
 /// `[sources]`: how a dropped source is bound to a platform.
@@ -45,6 +47,14 @@ impl Default for SourcesConfig {
             bind_threshold: 0.6,
         }
     }
+}
+
+/// `[jobs]`: scheduled background work.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct JobsConfig {
+    /// How often a full library scan is enqueued; 0 means manual only.
+    pub scan_interval_minutes: u32,
 }
 
 /// `[server]`: where to listen and whether to require an API key.
