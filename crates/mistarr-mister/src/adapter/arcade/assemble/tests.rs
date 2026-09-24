@@ -405,3 +405,28 @@ fn inline_parts_read_from_a_file_hash_and_assemble_as_in_memory() {
         Err(Error::MraUnsupported(m)) if m.contains("empty")
     ));
 }
+
+#[test]
+fn inline_parts_after_a_byte_order_mark_are_read_at_their_offsets() {
+    let xml = r#"<?xml version="1.0"?><m><rom zip="exblast.zip"><part>00 01 02 03</part>
+        <part name="a.bin"/><part>fe
+        ff</part></rom></m>"#;
+    let mut src = Mem::with(&[("exblast.zip", "a.bin", b"abcd")]);
+    let dir = crate::adapter::testutil::scratch("assemble-bom");
+    let path = dir.join("Example Bom.mra");
+    let mut bytes = b"\xEF\xBB\xBF".to_vec();
+    bytes.extend_from_slice(xml.as_bytes());
+    std::fs::write(&path, &bytes).expect("write");
+    let from_file = crate::adapter::arcade::mra::read(&path).expect("read");
+    let expected =
+        assemble(&parse(xml.as_bytes()).expect("parse").roms[0], &mut src).expect("assemble");
+    assert_eq!(expected.data, b"\x00\x01\x02\x03abcd\xfe\xff");
+    assert_eq!(
+        md5(&from_file.roms[0], &mut src).expect("md5"),
+        expected.md5
+    );
+    assert_eq!(
+        assemble(&from_file.roms[0], &mut src).expect("assemble"),
+        expected
+    );
+}

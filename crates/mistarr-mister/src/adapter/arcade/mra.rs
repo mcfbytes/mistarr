@@ -252,7 +252,8 @@ pub fn parse(xml: &[u8]) -> Result<Mra> {
 
 /// Parses MRA markup from `input`; inline part bytes are kept in [`Part::data`], or with
 /// `file` set, left in that file as [`Part::inline`] so no payload is held.
-fn parse_from<R: BufRead>(input: R, file: Option<&Arc<Path>>) -> Result<Mra> {
+fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra> {
+    let bom = skip_bom(&mut input)?;
     let mut reader = Reader::from_reader(input);
     reader.config_mut().check_end_names = false;
     let mut buf = Vec::new();
@@ -260,8 +261,8 @@ fn parse_from<R: BufRead>(input: R, file: Option<&Arc<Path>>) -> Result<Mra> {
     let mut open: Vec<(String, Option<Field>)> = Vec::new();
     let mut rom: Option<RomBuilder> = None;
     let keep = file.is_none();
-    // Bytes of inline hex read here rather than by the XML reader, which does not count them.
-    let mut taken = 0;
+    // Bytes of a BOM and inline hex read here, which the XML reader does not count.
+    let mut taken = bom;
     loop {
         if let Some(RomBuilder {
             open: Some(Open::Part(part, hex, None, _)),
@@ -331,6 +332,17 @@ fn parse_from<R: BufRead>(input: R, file: Option<&Arc<Path>>) -> Result<Mra> {
         *s = s.trim().to_owned();
     }
     Ok(mra)
+}
+
+/// Consumes a UTF-8 byte order mark at the start of `input`; returns its length or 0.
+fn skip_bom<R: BufRead>(input: &mut R) -> io::Result<u64> {
+    const BOM: &[u8] = b"\xEF\xBB\xBF";
+    if input.fill_buf()?.starts_with(BOM) {
+        input.consume(BOM.len());
+        Ok(BOM.len() as u64)
+    } else {
+        Ok(0)
+    }
 }
 
 /// Decodes plain text up to the next `<` or `&` straight from `input`, a buffer at a time,
@@ -426,13 +438,14 @@ fn too_big() -> Error {
 /// ```
 /// use std::io::Read as _;
 /// use mistarr_mister::adapter::arcade::mra;
-/// let path = std::env::temp_dir().join("mistarr-doc-inline.mra");
+/// let path = std::env::temp_dir().join(format!("mistarr-doc-inline-{}.mra", std::process::id()));
 /// std::fs::write(&path, "<m><rom><part>61 62 63</part></rom></m>").unwrap();
 /// let parsed = mra::read(&path).unwrap();
 /// let mra::RomItem::Part(part) = &parsed.roms[0].items[0] else { panic!() };
 /// let mut bytes = Vec::new();
 /// mra::open_inline(part.inline.as_ref().unwrap()).unwrap().read_to_end(&mut bytes).unwrap();
 /// assert_eq!(bytes, b"abc");
+/// std::fs::remove_file(&path).unwrap();
 /// ```
 pub fn open_inline(inline: &Inline) -> io::Result<InlineReader> {
     let mut file = std::fs::File::open(&inline.file)?;
