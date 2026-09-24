@@ -88,6 +88,11 @@
       saved = true;
     } catch (err) {
       settingsError = errorMessage(err);
+      return;
+    }
+    if (!isMock) {
+      // A failed refresh leaves the card as it was; SSE brings the next status.
+      await loadStatus().catch(() => undefined);
     }
   }
 </script>
@@ -104,6 +109,7 @@
         {status.client?.reachable ? 'reachable' : 'unreachable'}
       </p>
       <p>CORENAME: {status.corename ?? 'none'}</p>
+      <p>Launching: {status.launch}</p>
       <p>Disk free: {status.disk_free_bytes ? (status.disk_free_bytes / 1_000_000_000).toFixed(1) : '—'} GB</p>
       <p>Memory: {status.rss_bytes ? (status.rss_bytes / 1_000_000).toFixed(0) : '—'} MB</p>
       <p>
@@ -188,6 +194,12 @@
           value={csv(settings.prefs.hide)}
           oninput={(e) => settings && (settings.prefs.hide = fromCsv((e.currentTarget as HTMLInputElement).value))}
         />
+      </label>
+
+      <h3>Launching</h3>
+      <label>
+        <input type="checkbox" bind:checked={settings.prefs.launch} />
+        Allow starting cores and games from mistarr
       </label>
 
       <button class="primary" onclick={save}>Save</button>

@@ -15,6 +15,7 @@ use crate::app::AppState;
 use crate::config::{RuntimeSettings, SettingsPatch};
 use crate::db::jobs::{self, JobId, JobRow};
 use crate::db::platforms;
+use crate::events::EventKind;
 use crate::jobs::dat_import::Recompute;
 use crate::jobs::detect_client::DetectClient;
 use crate::jobs::gate::Override;
@@ -189,8 +190,12 @@ async fn put_settings(
     if client_changed {
         Scheduler::enqueue(&app, Arc::new(DetectClient)).await?;
     }
-    if runtime.prefs != prefs_before {
+    if !runtime.prefs.same_selection(&prefs_before) {
         Recompute::enqueue_all(&app).await?;
+    }
+    if runtime.prefs.launch != prefs_before.launch {
+        let status = snapshot(&app).await;
+        app.events.publish(EventKind::Status, &status);
     }
     Ok(Json(runtime))
 }

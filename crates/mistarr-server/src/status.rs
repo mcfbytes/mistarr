@@ -33,6 +33,31 @@ pub struct Status {
     pub disk_free_bytes: Option<u64>,
     /// Resident set size of this process.
     pub rss_bytes: Option<u64>,
+    /// Whether cores and games can be launched.
+    pub launch: LaunchState,
+}
+
+/// Whether the launch routes can start anything, as `/system/status` reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LaunchState {
+    /// Launching is allowed and MiSTer Main's command interface exists.
+    Ready,
+    /// `prefs.launch` is off.
+    Disabled,
+    /// No command interface, as on a machine that is not a MiSTer.
+    Unavailable,
+}
+
+/// The launch state from `prefs.launch` and the command sink.
+pub fn launch_state(app: &AppState) -> LaunchState {
+    if !app.config().prefs.launch {
+        LaunchState::Disabled
+    } else if app.command_sink().present() {
+        LaunchState::Ready
+    } else {
+        LaunchState::Unavailable
+    }
 }
 
 /// Builds the status body from the gate, settings and the host.
@@ -57,6 +82,7 @@ pub async fn snapshot(app: &AppState) -> Status {
         corename: gate.corename,
         disk_free_bytes: free_bytes(&data),
         rss_bytes: rss_bytes(),
+        launch: launch_state(app),
     }
 }
 
@@ -174,5 +200,18 @@ mod tests {
         assert!(s.client.is_none());
         let json = serde_json::to_value(&s).expect("json");
         assert!(json.get("override").is_some());
+        assert_eq!(json["launch"], "unavailable");
+    }
+
+    #[tokio::test]
+    async fn launch_state_follows_prefs_and_sink() {
+        let (_dir, app) = state();
+        assert_eq!(launch_state(&app), LaunchState::Unavailable);
+        app.set_command_sink(std::sync::Arc::new(
+            mistarr_mister::launch::RecordingSink::new(),
+        ));
+        assert_eq!(launch_state(&app), LaunchState::Ready);
+        app.update_config(|c| c.prefs.launch = false);
+        assert_eq!(launch_state(&app), LaunchState::Disabled);
     }
 }

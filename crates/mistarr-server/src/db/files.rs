@@ -71,7 +71,8 @@ pub struct FileRow {
     pub id: FileId,
     /// Owning platform.
     pub platform_id: PlatformId,
-    /// Relative to `games/<core_dir>/`; a zip member is `a.zip#b.nes`.
+    /// Relative to `games/`, including the top directory name; a zip member is
+    /// `NES/a.zip#b.nes`.
     pub rel_path: String,
     /// Size in bytes after any header rule was applied.
     pub size: i64,

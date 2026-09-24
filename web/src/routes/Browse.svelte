@@ -6,6 +6,8 @@
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
   import { fixtureSettings } from '../lib/fixtures';
+  import { getStatus, loadStatus } from '../lib/stores/status.svelte';
+  import { launchBlocker } from '../lib/launch';
   import { BROWSE_FLAGS, type HaveFilter, type TitleFilters } from '../lib/types';
 
   interface Props {
@@ -27,6 +29,27 @@
   let loadingMore = $state(false);
 
   const platform = $derived(findPlatform(platformId));
+  const canStartCore = $derived(platform !== undefined && platform.kind !== 'arcade');
+  let statusFailed = $state(false);
+  const coreBlocker = $derived(
+    launchBlocker(getStatus()?.launch, statusFailed) ??
+      (platform && !platform.core_present ? 'No core for this platform is installed.' : null)
+  );
+  let coreBusy = $state(false);
+
+  async function startCore(): Promise<void> {
+    coreBusy = true;
+    try {
+      if (!isMock) {
+        await api.launchCore(platformId);
+      }
+      showToast('Core started on the MiSTer.');
+    } catch (err) {
+      showToast(errorMessage(err));
+    } finally {
+      coreBusy = false;
+    }
+  }
   const groups = $derived(getGroups());
   const total = $derived(getGroupsTotal());
   // Requiring a flag the server hides by default would otherwise always
@@ -55,6 +78,11 @@
   onMount(() => {
     void loadPlatforms();
     void loadHideList();
+    if (!getStatus()) {
+      void loadStatus().catch(() => {
+        statusFailed = true;
+      });
+    }
   });
 
   async function loadHideList(): Promise<void> {
@@ -132,7 +160,15 @@
 </script>
 
 <div class="page">
-  <h1>{platform?.name ?? platformId}</h1>
+  <div class="head">
+    <h1>{platform?.name ?? platformId}</h1>
+    {#if canStartCore}
+      <button disabled={coreBusy || coreBlocker !== null} onclick={startCore}>Start core</button>
+    {/if}
+  </div>
+  {#if canStartCore && coreBlocker}
+    <p class="muted reason">Start core is unavailable: {coreBlocker}</p>
+  {/if}
 
   <form class="filters" onsubmit={(e) => e.preventDefault()}>
     <input type="search" placeholder="Search" bind:value={q} />
@@ -204,6 +240,18 @@
 </div>
 
 <style>
+  .head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5em 1em;
+  }
+
+  .reason {
+    font-size: 0.9em;
+    margin: 0;
+  }
+
   .filters {
     display: flex;
     flex-wrap: wrap;

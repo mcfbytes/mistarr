@@ -87,7 +87,7 @@ CREATE INDEX roms_match_base ON roms(match_base, size);
 CREATE TABLE files (                    -- what is on disk under games/
   id            INTEGER PRIMARY KEY,
   platform_id   TEXT NOT NULL REFERENCES platforms(id),
-  rel_path      TEXT NOT NULL,         -- relative to games/<core_dir>/, includes zip member as 'a.zip#b.nes'
+  rel_path      TEXT NOT NULL,         -- relative to games/, e.g. 'NES/a.zip#b.nes' for a zip member
   size          INTEGER NOT NULL,
   mtime         INTEGER NOT NULL,
   crc32 TEXT, md5 TEXT, sha1 TEXT,

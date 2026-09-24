@@ -10,6 +10,7 @@ export interface ClientStatus {
 }
 
 export type PauseReason = 'core' | 'manual' | null;
+export type LaunchState = 'ready' | 'disabled' | 'unavailable';
 export type Override = 'paused' | 'running' | null;
 
 export interface SystemStatus {
@@ -22,6 +23,7 @@ export interface SystemStatus {
   override: Override;
   disk_free_bytes: number | null;
   rss_bytes: number | null;
+  launch: LaunchState;
 }
 
 export interface WizardStatus {
@@ -122,6 +124,22 @@ export interface TitleVariant {
   dat_version_id: number;
   roms: TitleRom[];
   torrent_files_available: number;
+  source?: 'dat' | 'mra';
+  mra?: TitleMra;
+}
+
+export interface TitleMra {
+  setname: string | null;
+  rbf: string | null;
+  path: string | null;
+  missing_zips: string[];
+  md5_check: 'match' | 'mismatch' | 'missing_part' | 'refused' | null;
+  md5_detail: string | null;
+}
+
+export interface Launched {
+  core: string;
+  file: string | null;
 }
 
 export interface TitleDetail {
@@ -255,6 +273,7 @@ export interface PrefsSettings {
   languages: string[];
   prefer_latest_revision: boolean;
   hide: string[];
+  launch: boolean;
 }
 
 export interface Settings {

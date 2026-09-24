@@ -2,11 +2,18 @@
 
 Base path `/api/v1`. JSON in and out. When `server.api_key` is set every API
 request needs it in the `X-Api-Key` header or, for `EventSource`, which cannot
-set headers, the `apikey` query parameter; otherwise the answer is 401. All
+set headers, the `apikey` query parameter; otherwise the answer is 401.
+Every API request other than `GET`, `HEAD` and `OPTIONS` must also come from
+the SPA's own origin: it needs the header `X-Mistarr: 1`, which the SPA
+sends on every request and a page on another site cannot set without a
+preflight, and it is refused when `Sec-Fetch-Site` is `cross-site` or an
+`Origin` header is present and does not name the request's `Host`. Refused
+requests answer 403 `forbidden`, checked after the API key. All
 list endpoints take `?limit=&offset=` (default 100, capped at 1000) and return
 `{ items: [...], total: n }`. Errors are `{ error: { code, message } }` with an
-appropriate status; codes are `bad_request`, `unauthorized`, `not_found`,
-`method_not_allowed`, `conflict`, `not_implemented` and `internal`. A
+appropriate status; codes are `bad_request`, `unauthorized`, `forbidden`,
+`not_found`, `method_not_allowed`, `conflict`, `busy`, `not_implemented`,
+`unavailable` and `internal`. A
 documented route whose work package has not landed answers 501
 `not_implemented`. The SPA is served
 from `/` and every unknown non-API path returns `index.html`; unknown paths
@@ -33,7 +40,7 @@ under `/api` return 404 JSON.
               "reachable": true, "version": "4.0.5", "rtorrent_on_path": false,
               "checked_at": 1700000000 },
   "corename": "MENU", "paused": false, "pause_reason": null, "override": null,
-  "disk_free_bytes": 1000000, "rss_bytes": 1000000
+  "disk_free_bytes": 1000000, "rss_bytes": 1000000, "launch": "ready"
 }
 ```
 
@@ -41,7 +48,8 @@ under `/api` return 404 JSON.
 client answered. `corename` is `null` when the file does not exist.
 `pause_reason` is `"core"`, `"manual"` or `null`; `override` is `"paused"`,
 `"running"` or `null`. `disk_free_bytes` is for the filesystem holding the
-data directory.
+data directory. `launch` is `"ready"`, `"disabled"` when `prefs.launch` is
+off, or `"unavailable"` when MiSTer Main's command FIFO does not exist.
 
 `/system/wizard` body: `{ paths, dats, client, sources, open_on_start }`, all
 booleans. `paths` is true when the games directory exists, `dats` when any DAT
@@ -62,7 +70,9 @@ job's `progress` is `{ error }`.
 same sections of `mistarr.toml`. PUT takes any subset of the three sections;
 each section present replaces the stored one whole, with absent fields taking
 their defaults. Other keys are a 400. Saved values take precedence over the
-file on later starts. Changing `client` re-runs client detection.
+file on later starts. Changing `client` re-runs client detection; changing
+the 1G1R fields of `prefs` recomputes the picks; changing `prefs.launch`
+publishes `status`.
 
 ## Platforms
 
@@ -264,6 +274,45 @@ connection that falls further behind is closed and, on reconnecting, gets
 | `download.changed` | `{ download_id, state, progress }` |
 | `import.done` | `{ title_id, file_id, action }`, one per file placed, kept or renamed; `action` as in `import_log` |
 | `file.changed` | `{ file_id, state }` during scans, throttled to 10 per second |
+
+## Launching
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/titles/{id}/launch` | Start title `id` (a variant, not its group) on the MiSTer. |
+| POST | `/platforms/{id}/launch-core` | Start the platform's newest installed core with no game. |
+
+Neither takes a body; everything launched comes from the database and the
+SD card (ARCHITECTURE.md "Launching"). Both answer `{ core, file }`: the
+`.rbf` or `.mra` loaded, relative to the SD root, and the game file handed
+to the core, relative to `games/`, or `null`.
+
+Both are a 409 `conflict` while `prefs.launch` is off, a 409 `busy` when
+another launch was sent less than 3 s before (launches are also serialised),
+and a 503 `unavailable` when MiSTer Main's command FIFO does not exist, is
+not being read or does not take the command.
+
+`launch` is a 404 for an unknown title and a 409 `conflict` when:
+
+- not every live rom has a `verified`, `misnamed` or `bad` file, or, for an
+  MRA title, a zip is missing or its md5 check failed;
+- a disc has a track that is not `verified`, or no cue sheet whose `FILE`
+  entries all exist beside it and no `.chd` or `.iso`;
+- the entry is a BIOS entry or a DAT entry of the arcade platform;
+- no launch core of the platform is installed;
+- the MRA file is no longer under `_Arcade`, or its stored path is not plain
+  names below it;
+- a path cannot be passed to Main: relative, not UTF-8, holding a control
+  character, or making the command longer than one FIFO write.
+
+It is a 500 `internal` with the message "the launch file could not be
+written" when the MGL cannot be created in the launch directory; the log
+names the directory and the error.
+
+`launch-core` is a 404 for an unknown platform and a 409 `conflict` when no
+launch core is installed or for `arcade`, whose cores start from an MRA.
+Nothing is published on the event bus; the running core shows up in
+`status` through CORENAME.
 
 ## Art URLs
 

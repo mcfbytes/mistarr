@@ -6,6 +6,7 @@ use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use mistarr_clients::DownloadClient;
+use mistarr_mister::launch::{CommandSink, FifoSink};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
@@ -46,6 +47,12 @@ pub struct Options {
     pub poll_idle: Duration,
     /// Poll interval after repeated client failures.
     pub poll_backoff: Duration,
+    /// The FIFO MiSTer Main reads commands from.
+    pub command_path: PathBuf,
+    /// Directory the launch MGL is written to; tmpfs on the board, so the SD card is spared.
+    pub launch_dir: PathBuf,
+    /// How long after one launch another is refused as `busy`.
+    pub launch_gap: Duration,
 }
 
 impl Default for Options {
@@ -63,6 +70,9 @@ impl Default for Options {
             poll_active: Duration::from_secs(5),
             poll_idle: Duration::from_secs(60),
             poll_backoff: Duration::from_secs(300),
+            command_path: PathBuf::from(mistarr_mister::launch::COMMAND_PATH),
+            launch_dir: PathBuf::from("/tmp"),
+            launch_gap: Duration::from_secs(3),
         }
     }
 }
@@ -87,6 +97,9 @@ pub struct AppState {
     shutdown: watch::Sender<bool>,
     settings_write: tokio::sync::Mutex<()>,
     client: RwLock<Option<(ClientKey, Arc<dyn DownloadClient>)>>,
+    commands: RwLock<Arc<dyn CommandSink>>,
+    /// Serialises launches and holds when the last one was sent.
+    pub(crate) launch_lock: tokio::sync::Mutex<Option<Instant>>,
 }
 
 impl AppState {
@@ -100,12 +113,29 @@ impl AppState {
             gate: Arc::new(Gate::new()),
             scheduler: Scheduler::new(),
             started: Instant::now(),
-            options,
             poll_wake: tokio::sync::Notify::new(),
             shutdown: watch::Sender::new(false),
             settings_write: tokio::sync::Mutex::new(()),
             client: RwLock::new(None),
+            commands: RwLock::new(Arc::new(FifoSink::new(&options.command_path))),
+            launch_lock: tokio::sync::Mutex::new(None),
+            options,
         })
+    }
+
+    /// Where launch commands for MiSTer Main go: the FIFO at `options.command_path`.
+    #[must_use]
+    pub fn command_sink(&self) -> Arc<dyn CommandSink> {
+        Arc::clone(&self.commands.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Replaces the command sink, for tests that record launches.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_command_sink(&self, sink: Arc<dyn CommandSink>) {
+        *self
+            .commands
+            .write()
+            .unwrap_or_else(PoisonError::into_inner) = sink;
     }
 
     /// The download client from the last `detect_client` run, or `None` when
@@ -390,6 +420,11 @@ pub(crate) mod testutil {
 
     /// App state over a fresh database with paths inside the returned directory.
     pub fn state() -> (tempfile::TempDir, Arc<AppState>) {
+        state_with(|_| {})
+    }
+
+    /// [`state`] with its options adjusted by `f`.
+    pub fn state_with(f: impl FnOnce(&mut Options)) -> (tempfile::TempDir, Arc<AppState>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut config = Config::default();
         config.paths.root = dir.path().to_path_buf();
@@ -401,10 +436,14 @@ pub(crate) mod testutil {
             db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS).map(|_| ())
         })
         .expect("seed");
-        let options = Options {
+        let mut options = Options {
             corename_path: dir.path().join("CORENAME"),
+            command_path: dir.path().join("MiSTer_cmd"),
+            launch_dir: dir.path().to_path_buf(),
+            launch_gap: Duration::ZERO,
             ..Options::default()
         };
+        f(&mut options);
         (dir, AppState::new(config, db, options))
     }
 }
@@ -460,6 +499,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_claimed_arcade_core_marks_its_row_present() {
+        let (dir, app) = testutil::state();
+        let cores = dir.path().join("_Arcade/cores");
+        std::fs::create_dir_all(&cores).expect("mkdir");
+        std::fs::write(cores.join("jtngp_20240101.rbf"), b"").expect("write");
+        detect_cores(&app).expect("detect");
+        let rows = app.db.read(db::platforms::list).await.expect("list");
+        let mut present: Vec<_> = rows
+            .iter()
+            .filter(|r| r.core_present)
+            .map(|r| r.id.0.as_str())
+            .collect();
+        present.sort_unstable();
+        assert_eq!(present, ["arcade", "ngp"]);
+    }
+
+    #[tokio::test]
     async fn client_handle_follows_detection() {
         let (_dir, app) = testutil::state();
         assert!(app.client().is_none());
@@ -493,6 +549,17 @@ mod tests {
         let o = Options::default();
         assert_eq!(o.corename_path, PathBuf::from("/tmp/CORENAME"));
         assert_eq!(o.corename_poll, Duration::from_secs(2));
+        assert_eq!(o.command_path, PathBuf::from("/dev/MiSTer_cmd"));
+        assert_eq!(o.launch_dir, PathBuf::from("/tmp"));
+        assert_eq!(o.launch_gap, Duration::from_secs(3));
+    }
+
+    #[test]
+    fn command_sink_is_replaceable() {
+        let (_dir, app) = testutil::state();
+        assert!(!app.command_sink().present());
+        app.set_command_sink(Arc::new(mistarr_mister::launch::RecordingSink::new()));
+        assert!(app.command_sink().present());
     }
 
     /// The timer queues its scan on the heavy lane, so it sits behind the

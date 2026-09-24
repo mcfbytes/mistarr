@@ -5,6 +5,8 @@ use std::sync::OnceLock;
 use mistarr_core::PlatformId;
 use regex_lite::Regex;
 
+use crate::launch::{LaunchCore, LaunchSlot, LoadMode};
+
 /// How a platform's games are laid out and which adapter family places them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
@@ -48,6 +50,9 @@ pub struct Platform {
     pub core_names: &'static [&'static str],
     /// The libretro playlist name that thumbnail URLs are built from.
     pub libretro_playlist: &'static str,
+    /// Cores that launch this platform's games, most preferred first; empty when
+    /// games start another way.
+    pub launch: &'static [LaunchCore],
 }
 
 impl Platform {
@@ -77,6 +82,7 @@ const CART: Platform = Platform {
     verify_on_board: false,
     core_names: &[],
     libretro_playlist: "",
+    launch: &[],
 };
 
 const DISC: Platform = Platform {
@@ -85,10 +91,48 @@ const DISC: Platform = Platform {
     ..CART
 };
 
+/// Loads a game file into slot `index` after `delay` seconds; values await board verification.
+const fn file(index: u8, delay: u8) -> LaunchSlot {
+    slot(LoadMode::File, index, delay)
+}
+
+/// Mounts a disc image in slot `index` after `delay` seconds; values await board verification.
+const fn mount(index: u8, delay: u8) -> LaunchSlot {
+    slot(LoadMode::Mount, index, delay)
+}
+
+/// A core outside `_Arcade` named `name`.
+const fn core(name: &'static str, slot: LaunchSlot) -> LaunchCore {
+    LaunchCore {
+        name,
+        arcade_dir: false,
+        slot,
+    }
+}
+
+/// A core the row names explicitly that may live under `_Arcade`.
+const fn arcade_core(name: &'static str, slot: LaunchSlot) -> LaunchCore {
+    LaunchCore {
+        name,
+        arcade_dir: true,
+        slot,
+    }
+}
+
+const fn slot(mode: LoadMode, index: u8, delay: u8) -> LaunchSlot {
+    LaunchSlot {
+        mode,
+        index,
+        delay,
+        verify_on_board: true,
+    }
+}
+
 /// Every platform, in the order of `docs/PLATFORMS.md`.
 pub static PLATFORMS: [Platform; 33] = [
     Platform {
         id: "nes",
+        launch: &[core("NES", file(1, 2))],
         name: "Nintendo Entertainment System",
         libretro_playlist: "Nintendo - Nintendo Entertainment System",
         core_dir: "NES",
@@ -100,6 +144,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "fds",
+        launch: &[core("NES", file(1, 2))],
         name: "Famicom Disk System",
         libretro_playlist: "Nintendo - Family Computer Disk System",
         core_dir: "NES",
@@ -111,6 +156,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "snes",
+        launch: &[core("SNES", file(0, 2))],
         name: "Super Nintendo Entertainment System",
         libretro_playlist: "Nintendo - Super Nintendo Entertainment System",
         core_dir: "SNES",
@@ -126,6 +172,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "n64",
+        launch: &[core("N64", file(1, 1))],
         name: "Nintendo 64",
         libretro_playlist: "Nintendo - Nintendo 64",
         core_dir: "N64",
@@ -137,6 +184,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "gb",
+        launch: &[core("Gameboy", file(1, 2))],
         name: "Game Boy",
         libretro_playlist: "Nintendo - Game Boy",
         core_dir: "GAMEBOY",
@@ -148,6 +196,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "gbc",
+        launch: &[core("Gameboy", file(1, 2))],
         name: "Game Boy Color",
         libretro_playlist: "Nintendo - Game Boy Color",
         core_dir: "GAMEBOY",
@@ -159,6 +208,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "gba",
+        launch: &[core("GBA", file(1, 2))],
         name: "Game Boy Advance",
         libretro_playlist: "Nintendo - Game Boy Advance",
         core_dir: "GBA",
@@ -169,6 +219,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "megadrive",
+        launch: &[core("MegaDrive", file(1, 1)), core("Genesis", file(1, 1))],
         name: "Mega Drive - Genesis",
         libretro_playlist: "Sega - Mega Drive - Genesis",
         core_dir: "Genesis",
@@ -181,6 +232,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "s32x",
+        launch: &[core("S32X", file(1, 1))],
         name: "32X",
         libretro_playlist: "Sega - 32X",
         core_dir: "S32X",
@@ -191,6 +243,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "sms",
+        launch: &[core("SMS", file(1, 1))],
         name: "Master System - Mark III",
         libretro_playlist: "Sega - Master System - Mark III",
         core_dir: "SMS",
@@ -201,6 +254,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "gg",
+        launch: &[core("SMS", file(2, 1))],
         name: "Game Gear",
         libretro_playlist: "Sega - Game Gear",
         core_dir: "SMS",
@@ -211,6 +265,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "sg1000",
+        launch: &[core("ColecoVision", file(0, 1))],
         name: "SG-1000",
         libretro_playlist: "Sega - SG-1000",
         core_dir: "SG1000",
@@ -221,6 +276,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "pce",
+        launch: &[core("TurboGrafx16", file(0, 1))],
         name: "PC Engine - TurboGrafx-16",
         libretro_playlist: "NEC - PC Engine - TurboGrafx 16",
         core_dir: "TGFX16",
@@ -232,6 +288,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "sgx",
+        launch: &[core("TurboGrafx16", file(1, 1))],
         name: "SuperGrafx",
         libretro_playlist: "NEC - PC Engine SuperGrafx",
         core_dir: "TGFX16",
@@ -243,6 +300,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "atari2600",
+        launch: &[core("Atari2600", file(1, 1)), core("Atari7800", file(1, 1))],
         name: "Atari 2600",
         libretro_playlist: "Atari - 2600",
         core_dir: "Atari2600",
@@ -253,6 +311,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "atari5200",
+        launch: &[core("Atari5200", mount(1, 1))],
         name: "Atari 5200",
         libretro_playlist: "Atari - 5200",
         core_dir: "Atari5200",
@@ -263,6 +322,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "atari7800",
+        launch: &[core("Atari7800", file(1, 1))],
         name: "Atari 7800",
         libretro_playlist: "Atari - 7800",
         core_dir: "Atari7800",
@@ -274,6 +334,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "lynx",
+        launch: &[core("AtariLynx", file(1, 1))],
         name: "Atari Lynx",
         libretro_playlist: "Atari - Lynx",
         core_dir: "AtariLynx",
@@ -285,6 +346,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "coleco",
+        launch: &[core("ColecoVision", file(1, 1))],
         name: "ColecoVision",
         libretro_playlist: "Coleco - ColecoVision",
         core_dir: "Coleco",
@@ -297,6 +359,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "intv",
+        launch: &[core("Intellivision", file(1, 1))],
         name: "Intellivision",
         libretro_playlist: "Mattel - Intellivision",
         core_dir: "Intellivision",
@@ -308,6 +371,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "ws",
+        launch: &[core("WonderSwan", file(1, 1))],
         name: "WonderSwan",
         libretro_playlist: "Bandai - WonderSwan",
         core_dir: "WonderSwan",
@@ -318,6 +382,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "wsc",
+        launch: &[core("WonderSwan", file(1, 1))],
         name: "WonderSwan Color",
         libretro_playlist: "Bandai - WonderSwan Color",
         core_dir: "WonderSwan",
@@ -328,6 +393,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "ngp",
+        launch: &[arcade_core("jtngp", file(1, 2))],
         name: "Neo Geo Pocket",
         libretro_playlist: "SNK - Neo Geo Pocket",
         core_dir: "NGP",
@@ -339,6 +405,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "vectrex",
+        launch: &[core("Vectrex", file(1, 1))],
         name: "Vectrex",
         libretro_playlist: "GCE - Vectrex",
         core_dir: "Vectrex",
@@ -349,6 +416,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "pokemini",
+        launch: &[core("PokemonMini", file(1, 1))],
         name: "Pokemon Mini",
         libretro_playlist: "Nintendo - Pokemon Mini",
         core_dir: "PokemonMini",
@@ -359,6 +427,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "sv",
+        launch: &[core("SuperVision", file(1, 1))],
         name: "Supervision",
         libretro_playlist: "Watara - Supervision",
         core_dir: "SuperVision",
@@ -369,6 +438,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "psx",
+        launch: &[core("PSX", mount(1, 1))],
         name: "PlayStation",
         libretro_playlist: "Sony - PlayStation",
         core_dir: "PSX",
@@ -378,6 +448,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "saturn",
+        launch: &[core("Saturn", mount(0, 2))],
         name: "Sega Saturn",
         libretro_playlist: "Sega - Saturn",
         core_dir: "Saturn",
@@ -387,6 +458,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "megacd",
+        launch: &[core("MegaCD", mount(0, 1))],
         name: "Mega CD - Sega CD",
         libretro_playlist: "Sega - Mega-CD - Sega CD",
         core_dir: "MegaCD",
@@ -396,6 +468,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "pcecd",
+        launch: &[core("TurboGrafx16", mount(0, 1))],
         name: "PC Engine CD - TurboGrafx-CD",
         libretro_playlist: "NEC - PC Engine CD - TurboGrafx-CD",
         core_dir: "TGFX16-CD",
@@ -406,6 +479,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "neocd",
+        launch: &[core("NeoGeo", mount(1, 1))],
         name: "Neo Geo CD",
         libretro_playlist: "SNK - Neo Geo CD",
         core_dir: "NeoGeo-CD",
@@ -417,6 +491,7 @@ pub static PLATFORMS: [Platform; 33] = [
     },
     Platform {
         id: "neogeo",
+        launch: &[core("NeoGeo", file(1, 1))],
         name: "Neo Geo",
         libretro_playlist: "SNK - Neo Geo",
         core_dir: "NeoGeo",
@@ -568,6 +643,33 @@ mod tests {
     }
 
     #[test]
+    fn every_row_but_arcade_has_launch_parameters() {
+        for p in &PLATFORMS {
+            assert_eq!(p.launch.is_empty(), p.kind == Kind::Arcade, "{}", p.id);
+            for core in p.launch {
+                assert!(core.slot.delay > 0, "{}", p.id);
+                if p.kind == Kind::Disc {
+                    assert_eq!(core.slot.mode, LoadMode::Mount, "{}", p.id);
+                }
+            }
+        }
+        let slot = |id: &str| by_id(id).expect("row").launch[0].slot;
+        let nes = slot("nes");
+        assert_eq!((nes.mode.letter(), nes.index, nes.delay), ('f', 1, 2));
+        assert_eq!(slot("atari5200").mode, LoadMode::Mount);
+        assert_eq!(slot("saturn").delay, 2);
+        let ngp = by_id("ngp").expect("row").launch[0];
+        assert!(ngp.arcade_dir && ngp.name == "jtngp");
+        let a2600: Vec<_> = by_id("atari2600")
+            .expect("row")
+            .launch
+            .iter()
+            .map(|c| c.name)
+            .collect();
+        assert_eq!(a2600, ["Atari2600", "Atari7800"]);
+    }
+
+    #[test]
     fn each_row_binds_its_own_name() {
         for p in &PLATFORMS {
             assert_eq!(
@@ -656,6 +758,68 @@ mod tests {
             .map(|p| p.id)
             .collect();
         assert_eq!(ids, BOARD_VERIFIED);
+    }
+
+    /// Rows whose launch parameters are marked **verify**, all checked by
+    /// `board_verify_launch_cores`; the slot values are confirmed by starting a game from the UI.
+    const BOARD_LAUNCH: [&str; 32] = [
+        "nes",
+        "fds",
+        "snes",
+        "n64",
+        "gb",
+        "gbc",
+        "gba",
+        "megadrive",
+        "s32x",
+        "sms",
+        "gg",
+        "sg1000",
+        "pce",
+        "sgx",
+        "atari2600",
+        "atari5200",
+        "atari7800",
+        "lynx",
+        "coleco",
+        "intv",
+        "ws",
+        "wsc",
+        "ngp",
+        "vectrex",
+        "pokemini",
+        "sv",
+        "psx",
+        "saturn",
+        "megacd",
+        "pcecd",
+        "neocd",
+        "neogeo",
+    ];
+
+    #[test]
+    fn verify_launch_rows_have_a_board_test() {
+        let ids: Vec<_> = PLATFORMS
+            .iter()
+            .filter(|p| p.launch.iter().any(|c| c.slot.verify_on_board))
+            .map(|p| p.id)
+            .collect();
+        assert_eq!(ids, BOARD_LAUNCH);
+    }
+
+    #[test]
+    #[ignore = "needs a MiSTer SD card at MISTARR_BOARD_ROOT"]
+    fn board_verify_launch_cores() {
+        let root =
+            std::env::var("MISTARR_BOARD_ROOT").expect("MISTARR_BOARD_ROOT is the SD card root");
+        let missing: Vec<_> = BOARD_LAUNCH
+            .iter()
+            .filter(|id| {
+                let row = by_id(id).expect("id is in the table");
+                crate::launch::find_core(std::path::Path::new(&root), row).is_none()
+            })
+            .collect();
+        assert!(missing.is_empty(), "no launch core found for {missing:?}");
     }
 
     fn assert_board_dir(id: &str) {

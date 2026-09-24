@@ -22,15 +22,22 @@ screen works at 360 px wide with a 16 px gutter and no horizontal scroll.
 **Platforms** (`/`). One card per platform with core present, counts, and a
 scan button. Platforms whose core is absent are in a collapsed section.
 
-**Browse** (`/p/{id}`). Poster grid of `title_groups`, cover from the libretro
+**Browse** (`/p/{id}`). A Start core button beside the platform name,
+except on arcade. Poster grid of `title_groups`, cover from the libretro
 URL with a placeholder on 404. Filters: search, have / missing / wanted,
 region, a "Show hidden" checkbox, and a flags multi-select that requires
 every checked flag. Each card shows the 1G1R pick name, a have indicator, and
 a want toggle. Infinite scroll in pages of 60.
 
 **Title** (`/t/{id}`). Every variant in the group with region, revision,
-flags, file state, and which sources have it. Want per variant. Rename action
-for misnamed files. Art tabs: boxart, title, snap.
+flags, file state, and which sources have it. Want per variant. Play for a
+variant whose files are all in the collection. Rename action for misnamed
+files. Art tabs: boxart, title, snap.
+
+Play and Start core are disabled while launching is unavailable, with the
+reason as a line of text on the page rather than a tooltip: launching is
+turned off in settings, mistarr is not running on a MiSTer, or no core for
+the platform is installed.
 
 **Activity** (`/activity`). Downloads with per-file progress bars, imports
 log, and running jobs. Live over SSE.
@@ -40,7 +47,8 @@ matched count, seed policy, client status. Bind and disable actions.
 Unbound sources have a platform picker.
 
 **System** (`/system`). Status, client, CORENAME, paused indicator with manual
-override, settings form for the runtime-editable subset, log tail.
+override, launch state, settings form for the runtime-editable subset
+including the switch that allows launching, log tail.
 
 ## State handling
 
@@ -51,5 +59,5 @@ disconnected and reconnects with backoff.
 ## Language
 
 Follow PRINCIPLES.md section 5. Buttons say "Want", "Scan", "Bind",
-"Rename". The empty state on Sources says: "No sources yet. Place a .torrent
+"Rename", "Play", "Start core". The empty state on Sources says: "No sources yet. Place a .torrent
 or .magnet file in `<path>` or drop one here." and nothing more.

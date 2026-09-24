@@ -160,7 +160,7 @@ export function fixtureTitle(id: number): TitleDetail {
             status: 'verified',
             file_state: 'verified',
             file_id: id * 1000,
-            file_path: `nes/${base}.nes`
+            file_path: `NES/${base}.nes`
           }
         ]
       },
@@ -191,6 +191,34 @@ export function fixtureTitle(id: number): TitleDetail {
             file_path: null
           }
         ]
+      },
+      {
+        id: id * 10 + 2,
+        name: `${base} System (BIOS)`,
+        regions: ['World'],
+        languages: [],
+        revision: null,
+        flags: ['bios'],
+        is_1g1r_pick: false,
+        wanted: false,
+        retired: false,
+        inferred: false,
+        dat_version_id: 1,
+        torrent_files_available: 0,
+        roms: [
+          {
+            id: id * 100 + 2,
+            name: `${base} System (BIOS).bin`,
+            size: 8192,
+            crc32: '0badc0de',
+            md5: null,
+            sha1: null,
+            status: 'good',
+            file_state: 'verified',
+            file_id: id * 1000 + 2,
+            file_path: `NES/${base} System (BIOS).bin`
+          }
+        ]
       }
     ]
   };
@@ -212,7 +240,8 @@ export const fixtureStatus: SystemStatus = {
   pause_reason: null,
   override: null,
   disk_free_bytes: 12_400_000_000,
-  rss_bytes: 41_000_000
+  rss_bytes: 41_000_000,
+  launch: 'ready'
 };
 
 export const fixtureWizard: WizardStatus = {
@@ -381,6 +410,7 @@ export const fixtureSettings: Settings = {
     regions: ['USA', 'World', 'Europe', 'Japan'],
     languages: ['En'],
     prefer_latest_revision: true,
-    hide: ['bios', 'beta', 'proto', 'demo', 'sample', 'program']
+    hide: ['bios', 'beta', 'proto', 'demo', 'sample', 'program'],
+    launch: true
   }
 };
