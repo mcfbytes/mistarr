@@ -531,6 +531,9 @@ async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
         if let Err(e) = scan::enqueue_if_games_dir_exists(app, platform).await {
             tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue automatic scan");
         }
+        if let Err(e) = super::source_import::rebind_after_dat(app, platform).await {
+            tracing::warn!(platform = %platform.0, error = %e, "cannot bind waiting sources");
+        }
     }
     if let Err(e) = wizard::on_change(app).await {
         tracing::warn!(error = %e, "cannot check wizard completion");

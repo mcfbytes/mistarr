@@ -134,8 +134,9 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    absent, clone groups are inferred by normalising the name (strip region,
    revision, language and flag tags) so 1G1R still works with plain DATs.
 5. Recompute the platform's 1G1R picks, move the file to `dats/loaded/` and
-   emit `dat.loaded` on the event bus. Changing `prefs` recomputes the picks
-   of every platform.
+   emit `dat.loaded` on the event bus, then bind the unbound sources waiting
+   for that platform ("Source import" step 4). Changing `prefs` recomputes the
+   picks of every platform.
 
 ### Library scan
 
@@ -197,6 +198,13 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 4. Bind the source to the platform with the best rate at or above
    `sources.bind_threshold` (default 0.6). Below that, the source is
    `unbound` and the user picks a platform or discards it.
+   Independently of any DAT, the platform table's DAT-name patterns are
+   matched against the dropped file's stem, the torrent's info name and each
+   directory holding at least half of its files; the longest match over all
+   of them is stored as the suggested platform, shown on the source and
+   named in its reason. When a DAT later loads titles for a platform, every
+   unbound source suggesting it is bound to it, and the other unbound
+   sources are scored again.
 5. Store the file list in `torrent_files` with the matched `rom_id` and its
    confidence where one exists. Move the file to `sources/loaded/` and emit
    `source.changed`. A `.torrent` is not told to the client until something

@@ -184,6 +184,62 @@ async fn a_restart_takes_over_held_jobs_instead_of_adding_more() {
     again.running.shutdown().await.expect("shutdown");
 }
 
+fn bstr(s: &str) -> String {
+    format!("{}:{s}", s.len())
+}
+
+/// A set torrent named like a board user's: `Example_Archive/No-Intro/<system>/<title>.zip`.
+fn set_torrent(games: usize) -> Vec<u8> {
+    let mut list = String::from("l");
+    for i in 0..games {
+        let leaf = format!("Example Title {i} (USA).zip");
+        list.push_str(&format!(
+            "d6:lengthi{}e4:pathl{}{}{}ee",
+            100 + i,
+            bstr("No-Intro"),
+            bstr(SYSTEM),
+            bstr(&leaf)
+        ));
+    }
+    list.push('e');
+    let info = format!(
+        "d5:files{list}4:name{}12:piece lengthi16384e6:pieces0:e",
+        bstr("Example_Archive")
+    );
+    let announce = bstr("http://tracker.invalid/announce");
+    format!("d8:announce{announce}4:info{info}e").into_bytes()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_set_torrent_waits_for_its_dat_and_then_binds() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let config = config_in(dir.path());
+    let booted = boot_with(dir, config).await;
+    let mut events = booted.running.app.events.subscribe(None).live;
+    let data = booted.dir.path().join("data");
+    let name = format!("Example_Archive - No-Intro - {SYSTEM}.torrent");
+    drop_file(&data.join("sources"), &name, &set_torrent(12));
+    wait_event(&mut events, EventKind::SourceChanged, "unbound").await;
+    let source = &json_of(&booted, "/api/v1/sources").await["items"][0];
+    assert_eq!(source["suggested_platform_id"], "snes", "{source}");
+    assert_eq!(source["platform_id"], Value::Null);
+    assert!(
+        source["reason"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("Looks like Super Nintendo Entertainment System.")),
+        "{source}"
+    );
+
+    let xml = no_intro_dat("20260101-000000", 12);
+    drop_file(&data.join("dats"), "system.dat", xml.as_bytes());
+    wait_event(&mut events, EventKind::SourceChanged, "\"bound\"").await;
+    let source = &json_of(&booted, "/api/v1/sources").await["items"][0];
+    assert_eq!(source["platform_id"], "snes", "{source}");
+    assert_eq!(source["matched_count"], 12);
+    assert_eq!(source["reason"], Value::Null);
+    booted.running.shutdown().await.expect("shutdown");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn start_transmission_runs_the_opt_in_service() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -154,6 +154,8 @@ pub struct SourceRow {
     pub client_id: Option<String>,
     /// Unix seconds.
     pub added_at: i64,
+    /// The platform the torrent's names point at, found without any DAT.
+    pub suggested_platform_id: Option<PlatformId>,
 }
 
 /// A source to insert.
@@ -195,7 +197,8 @@ pub struct FileRow {
 const COLUMNS: &str = "s.id, s.infohash, s.display_name, s.origin_file, s.platform_id,
     s.bind_score, s.state, s.reason, s.seed_policy, s.file_count, s.total_size,
     s.client_id, s.added_at,
-    (SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id AND f.rom_id IS NOT NULL)";
+    (SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id AND f.rom_id IS NOT NULL),
+    s.suggested_platform_id";
 
 /// Reads a non-negative integer column; SQLite stores it as `i64`.
 fn uint(r: &Row<'_>, i: usize) -> rusqlite::Result<u64> {
@@ -224,6 +227,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<SourceRow> {
         client_id: r.get(11)?,
         added_at: r.get(12)?,
         matched_count: uint(r, 13)?,
+        suggested_platform_id: r.get::<_, Option<String>>(14)?.map(PlatformId),
     })
 }
 
@@ -325,6 +329,59 @@ pub fn set_state(
         params![id.0, state.as_str(), reason],
     )?;
     Ok(())
+}
+
+/// Stores the platform guessed from the torrent's names.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn set_suggestion(
+    conn: &Connection,
+    id: SourceId,
+    platform: Option<&PlatformId>,
+) -> Result<()> {
+    conn.execute(
+        "UPDATE sources SET suggested_platform_id = ?2 WHERE id = ?1",
+        params![id.0, platform.map(|p| p.0.as_str())],
+    )?;
+    Ok(())
+}
+
+/// Unbound sources with their suggested platform, oldest first.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn list_unbound(conn: &Connection) -> Result<Vec<(SourceId, Option<PlatformId>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, suggested_platform_id FROM sources WHERE state = 'unbound' ORDER BY id",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                SourceId(r.get(0)?),
+                r.get::<_, Option<String>>(1)?.map(PlatformId),
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+/// True when `platform` has live titles from a DAT file.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn platform_has_dat(conn: &Connection, platform: &PlatformId) -> Result<bool> {
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM titles WHERE platform_id = ?1 AND retired = 0 AND source = 'dat' LIMIT 1",
+            [&platform.0],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
 }
 
 /// Sets the user-facing reason only.
@@ -686,6 +743,23 @@ mod tests {
 
     fn nes() -> PlatformId {
         PlatformId("nes".into())
+    }
+
+    #[test]
+    fn suggestions_and_unbound_listing() {
+        let c = conn();
+        let a = insert(&c, &new(&"03".repeat(20), SourceState::Unbound)).expect("insert");
+        insert(&c, &new(&"04".repeat(20), SourceState::Resolving)).expect("insert");
+        assert_eq!(list_unbound(&c).expect("list"), [(a, None)]);
+        set_suggestion(&c, a, Some(&nes())).expect("suggest");
+        assert_eq!(list_unbound(&c).expect("list"), [(a, Some(nes()))]);
+        let row = get(&c, a).expect("get").expect("row");
+        assert_eq!(row.suggested_platform_id, Some(nes()));
+        assert!(!platform_has_dat(&c, &nes()).expect("dat"));
+        fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 1, "[]").expect("seed");
+        assert!(platform_has_dat(&c, &nes()).expect("dat"));
+        set_suggestion(&c, a, None).expect("clear");
+        assert_eq!(list_unbound(&c).expect("list"), [(a, None)]);
     }
 
     #[test]

@@ -174,6 +174,7 @@ async fn import_torrent(
                 )?,
             };
             rows::replace_files(&tx, id, &meta.files)?;
+            suggest(&tx, id, &origin, &meta.name, &meta.files)?;
             bind_best(&tx, id, &meta.files, threshold)?;
             let row = rows::get(&tx, id)?;
             tx.commit()?;
@@ -249,10 +250,104 @@ pub fn bind_best(
         }
         Binding::Unbound(_) => {
             rows::set_binding(conn, id, None, None)?;
-            (SourceState::Unbound, Some(unbound_reason(threshold)))
+            (
+                SourceState::Unbound,
+                Some(unbound_explained(conn, id, threshold)?),
+            )
         }
     };
     keep_disabled(conn, id, state, reason.as_deref())
+}
+
+/// Guesses the source's platform from its names, with no DAT, and stores it;
+/// see `mistarr_mister::platforms::guess_platform`.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn suggest(
+    conn: &Connection,
+    id: SourceId,
+    origin_file: &str,
+    info_name: &str,
+    files: &[TorrentFile],
+) -> Result<Option<PlatformId>> {
+    let hints = binding::name_hints(origin_file, info_name, files);
+    let guess = mistarr_mister::platforms::guess_platform(hints.iter().map(String::as_str))
+        .map(mistarr_mister::platforms::Platform::platform_id);
+    rows::set_suggestion(conn, id, guess.as_ref())?;
+    Ok(guess)
+}
+
+/// The reason an unbound source shows, naming its suggested platform and
+/// whether a DAT for that platform is loaded yet.
+fn unbound_explained(conn: &Connection, id: SourceId, threshold: f32) -> Result<String> {
+    let suggested = rows::get(conn, id)?.and_then(|r| r.suggested_platform_id);
+    let Some(platform) = suggested else {
+        return Ok(unbound_reason(threshold));
+    };
+    let name =
+        mistarr_mister::platforms::by_id(&platform.0).map_or(platform.0.as_str(), |p| p.name);
+    if rows::platform_has_dat(conn, &platform)? {
+        Ok(format!(
+            "{} Its names suggest {name}.",
+            unbound_reason(threshold)
+        ))
+    } else {
+        Ok(awaiting_dat_reason(name))
+    }
+}
+
+/// The reason a source shows while the DAT of its suggested platform is missing.
+///
+/// ```
+/// let r = mistarr_server::jobs::source_import::awaiting_dat_reason("Example System");
+/// assert!(r.starts_with("Looks like Example System."));
+/// ```
+#[must_use]
+pub fn awaiting_dat_reason(platform_name: &str) -> String {
+    format!("Looks like {platform_name}. No DAT for it is loaded yet; it binds once one loads.")
+}
+
+/// Binds the unbound sources again after a DAT loaded titles for `platform`:
+/// those suggesting `platform` are bound to it, the others bind if they now
+/// reach the threshold. Publishes `source.changed` for each and returns how many bound.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub async fn rebind_after_dat(app: &AppState, platform: &PlatformId) -> Result<usize> {
+    let threshold = app.config().sources.bind_threshold;
+    let platform = platform.clone();
+    let rows_after = app
+        .db
+        .write(move |c| {
+            let tx = c.transaction()?;
+            let mut out = Vec::new();
+            for (id, suggested) in rows::list_unbound(&tx)? {
+                if suggested.as_ref() == Some(&platform) {
+                    bind_to(&tx, id, Some(&platform))?;
+                } else {
+                    let files = rows::torrent_files(&tx, id)?;
+                    bind_best(&tx, id, &files, threshold)?;
+                }
+                if let Some(row) = rows::get(&tx, id)? {
+                    out.push(row);
+                }
+            }
+            tx.commit()?;
+            Ok(out)
+        })
+        .await?;
+    let mut bound = 0;
+    for row in &rows_after {
+        if row.state == SourceState::Bound {
+            bound += 1;
+            tracing::info!(source = %row.id, platform = ?row.platform_id, "source bound after a DAT loaded");
+        }
+        publish_changed(app, row);
+    }
+    Ok(bound)
 }
 
 /// Binds a source to `platform` chosen by the user, matching its files against
@@ -396,6 +491,9 @@ impl Job for ResolveMagnet {
                     return Ok(None);
                 }
                 rows::replace_files(&tx, id, &files)?;
+                if let Some(r) = rows::get(&tx, id)? {
+                    suggest(&tx, id, &r.origin_file, &r.display_name, &files)?;
+                }
                 bind_best(&tx, id, &files, threshold)?;
                 let row = rows::get(&tx, id)?;
                 tx.commit()?;
@@ -577,6 +675,36 @@ mod tests {
                 Ok(())
             })
             .expect("db");
+    }
+
+    #[tokio::test]
+    async fn a_named_set_is_suggested_and_bound_once_its_dat_loads() {
+        let (_dir, app) = state();
+        let files = [
+            file(0, "Sets/Nintendo - Game Boy/Example Quest (USA).zip", 16),
+            file(1, "Sets/Nintendo - Game Boy/Other Tale (USA).zip", 8),
+        ];
+        let id = app
+            .db
+            .write_blocking(|c| {
+                let id = source(c, &"0c".repeat(20), &files);
+                let guess = suggest(c, id, "pack.torrent", "Example Pack", &files)?;
+                assert_eq!(guess, Some(PlatformId("gb".into())));
+                bind_best(c, id, &files, 0.6)?;
+                let row = rows::get(c, id)?.expect("row");
+                assert_eq!(row.reason, Some(awaiting_dat_reason("Game Boy")));
+                seed_rom(c, "gb", "Example Quest (USA).gb", 16, "[]")?;
+                Ok(id)
+            })
+            .expect("db");
+        let bound = rebind_after_dat(&app, &PlatformId("gb".into()))
+            .await
+            .expect("rebind");
+        assert_eq!(bound, 1);
+        let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");
+        let row = row.expect("row");
+        assert_eq!(row.platform_id, Some(PlatformId("gb".into())));
+        assert_eq!((row.state, row.matched_count), (SourceState::Bound, 1));
     }
 
     #[tokio::test]

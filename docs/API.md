@@ -195,9 +195,12 @@ answers 204 and recomputes the platform's picks.
 
 `/sources` items: `{ id, infohash, display_name, origin_file, platform_id,
 bind_score, state, reason, seed_policy, file_count, matched_count,
-total_size, client_id, added_at }`. `reason` says why a source is
-`resolving` or `unbound` and is otherwise `null`; `client_id` is set once the
-torrent is in the client. `seed_policy` is `"none"`, `"client"` or
+total_size, client_id, added_at, suggested_platform_id }`. `reason` says why
+a source is `resolving` or `unbound` and is otherwise `null`; `client_id` is
+set once the torrent is in the client. `suggested_platform_id` is the
+platform the torrent's names point at, found without any DAT
+(ARCHITECTURE.md "Source import" step 4), or `null`; the SPA preselects it in
+the platform picker. `seed_policy` is `"none"`, `"client"` or
 `"ratio:N"` with N above 0.
 
 `/sources/upload` takes `multipart/form-data` with one `.torrent` file part,

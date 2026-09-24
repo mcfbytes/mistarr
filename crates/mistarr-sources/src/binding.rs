@@ -253,11 +253,119 @@ pub fn match_files(
         .collect()
 }
 
+/// Names that may say which platform a torrent is for, without any DAT: the
+/// dropped file's stem, the torrent's info name, and every directory in the
+/// file paths that holds at least half of the files, in that order.
+///
+/// ```
+/// use mistarr_sources::binding::name_hints;
+/// use mistarr_sources::torrent::TorrentFile;
+/// let files = vec![TorrentFile { index: 0, path: "Sets/Example System/a.zip".into(), size: 1 }];
+/// let hints = name_hints("Example Pack.torrent", "Example Pack", &files);
+/// assert_eq!(hints, ["Example Pack", "Example Pack", "Sets", "Example System"]);
+/// ```
+#[must_use]
+pub fn name_hints(origin_file: &str, info_name: &str, files: &[TorrentFile]) -> Vec<String> {
+    let stem = origin_file
+        .strip_suffix(".torrent")
+        .or_else(|| origin_file.strip_suffix(".magnet"))
+        .unwrap_or(origin_file);
+    let mut hints = vec![stem.to_owned(), info_name.to_owned()];
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut order: Vec<&str> = Vec::new();
+    for file in files {
+        let mut parts: Vec<&str> = file.path.split('/').collect();
+        parts.pop();
+        let mut dirs: Vec<&str> = Vec::with_capacity(parts.len());
+        for part in parts {
+            if !part.is_empty() && !dirs.contains(&part) {
+                dirs.push(part);
+            }
+        }
+        for dir in dirs {
+            let n = counts.entry(dir).or_insert(0);
+            if *n == 0 {
+                order.push(dir);
+            }
+            *n += 1;
+        }
+    }
+    let half = files.len().div_ceil(2);
+    hints.extend(
+        order
+            .into_iter()
+            .filter(|d| counts.get(d).is_some_and(|&n| n >= half))
+            .map(str::to_owned),
+    );
+    hints
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
 
+    use proptest::prelude::*;
+
     use super::*;
+
+    fn file(index: u32, path: &str) -> TorrentFile {
+        TorrentFile {
+            index,
+            path: path.to_owned(),
+            size: 1,
+        }
+    }
+
+    #[test]
+    fn hints_skip_directories_of_a_minority_of_files() {
+        let files = [
+            file(0, "Top/System A/a.zip"),
+            file(1, "Top/System A/b.zip"),
+            file(2, "Top/System B/c.zip"),
+            file(3, "loose.txt"),
+        ];
+        let hints = name_hints("pack.magnet", "Pack", &files);
+        assert_eq!(hints, ["pack", "Pack", "Top", "System A"]);
+        assert_eq!(name_hints("x", "y", &[]), ["x", "y"]);
+    }
+
+    proptest! {
+        #[test]
+        fn hints_start_with_the_names_and_never_hold_a_leaf(
+            origin in "[a-z ]{0,10}", info in "[a-z ]{0,10}",
+            paths in prop::collection::vec("[a-c]{1,2}(/[a-c]{1,2}){0,3}\\.bin", 0..20)
+        ) {
+            let files: Vec<TorrentFile> = paths
+                .iter()
+                .enumerate()
+                .map(|(i, p)| file(u32::try_from(i).unwrap_or(0), p))
+                .collect();
+            let hints = name_hints(&format!("{origin}.torrent"), &info, &files);
+            prop_assert_eq!(&hints[0], &origin);
+            prop_assert_eq!(&hints[1], &info);
+            for hint in &hints[2..] {
+                prop_assert!(!hint.contains(".bin"));
+                let holding = files
+                    .iter()
+                    .filter(|f| f.path.split('/').rev().skip(1).any(|d| d == hint))
+                    .count();
+                prop_assert!(holding * 2 >= files.len());
+            }
+        }
+
+        #[test]
+        fn a_directory_holding_every_file_is_a_hint(
+            dir in "[A-Za-z]{1,8}", leaves in prop::collection::vec("[a-z]{1,6}", 1..10)
+        ) {
+            let files: Vec<TorrentFile> = leaves
+                .iter()
+                .enumerate()
+                .map(|(i, l)| file(u32::try_from(i).unwrap_or(0), &format!("{dir}/{l}.zip")))
+                .collect();
+            let hints = name_hints("a", "b", &files);
+            prop_assert!(hints[2..].contains(&dir));
+        }
+    }
 
     struct FakeDat {
         by_name: BTreeMap<String, Vec<(PlatformId, RomRef)>>,
