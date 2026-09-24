@@ -107,12 +107,23 @@ file on later starts. Changing `client` re-runs client detection.
 `event: <name>` with a JSON `data:` line. The SPA reconnects with
 `Last-Event-ID`; the server keeps a ring of the last 256 events.
 
-A new connection first receives the ring events newer than `Last-Event-ID`
-(the whole ring if the id is newer than any the server issued, as after a
-restart), then one `status`, then live events. Every event carries an `id:`
-except `status` sent on connect and on the 30 s timer, so those never move
-the client's `Last-Event-ID`. A connection that falls more than 256 events
-behind is closed; reconnecting replays what it missed from the ring.
+Event ids are `<epoch>-<seq>`: the epoch is fixed for the life of a server
+process (lowercase hex) and `seq` counts up from 1 within it. Clients treat
+ids as opaque strings. A new connection receives, in order:
+
+1. `resync` with data `{}`, when the replay below may have gaps: the
+   `Last-Event-ID` is from another epoch (the server restarted), is not a
+   valid id, or is older than the oldest event in the ring. The SPA should
+   then re-fetch the resources it shows.
+2. The ring events after `Last-Event-ID`, or the whole ring for another
+   epoch. Nothing is replayed when the header is absent.
+3. One `status`, then live events.
+
+Every event carries an `id:` except `resync` and the `status` sent on
+connect and on the 30 s timer, so those never move the client's
+`Last-Event-ID`. Each connection buffers up to 1024 undelivered events; a
+connection that falls further behind is closed and, on reconnecting, gets
+`resync` plus whatever the ring still holds.
 
 | Event | Data |
 |---|---|

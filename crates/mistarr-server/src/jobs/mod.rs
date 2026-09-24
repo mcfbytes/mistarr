@@ -4,16 +4,19 @@ pub mod corename;
 pub mod detect_client;
 pub mod gate;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use crate::app::AppState;
 use crate::db::jobs::{self as rows, JobId, JobState};
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::events::EventKind;
 
 /// Finished rows kept in `jobs` for the activity screen.
@@ -35,7 +38,7 @@ pub trait Job: Send + Sync {
     /// The `jobs.kind` value.
     fn kind(&self) -> &'static str;
 
-    /// The `jobs.payload` value; equal kind and payload deduplicate while pending.
+    /// The `jobs.payload` value; equal kind and payload deduplicate while queued.
     fn payload(&self) -> Value {
         json!({})
     }
@@ -86,18 +89,25 @@ impl JobContext {
         Ok(())
     }
 
-    /// For heavy jobs, waits while the gate is closed, marking the row
-    /// `paused` meanwhile. Light jobs return at once.
+    /// Fails with [`Error::Cancelled`] once the server is shutting down. For
+    /// heavy jobs, also waits while the gate is closed, marking the row `paused`.
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Db`] when the row state cannot be updated.
+    /// [`Error::Cancelled`] on shutdown, [`Error::Db`] when the row state cannot be updated.
     pub async fn checkpoint(&self) -> Result<()> {
+        let mut stop = self.app.shutdown_signal();
+        if *stop.borrow() {
+            return Err(Error::Cancelled);
+        }
         if self.lane == Lane::Light || !self.app.gate.state().paused() {
             return Ok(());
         }
         set_state(&self.app, self.id, JobState::Paused).await?;
-        self.app.gate.wait_open().await;
+        tokio::select! {
+            () = self.app.gate.wait_open() => {}
+            _ = stop.wait_for(|s| *s) => return Err(Error::Cancelled),
+        }
         set_state(&self.app, self.id, JobState::Running).await
     }
 
@@ -133,6 +143,17 @@ pub struct Scheduler {
     heavy: mpsc::UnboundedSender<Queued>,
     light: mpsc::UnboundedSender<Queued>,
     receivers: Mutex<Option<Receivers>>,
+    lanes: Mutex<Vec<JoinHandle<()>>>,
+    alive: Arc<AtomicUsize>,
+}
+
+/// Decrements the live-lane count when a lane task ends or is aborted.
+struct LaneGuard(Arc<AtomicUsize>);
+
+impl Drop for LaneGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl Default for Scheduler {
@@ -151,6 +172,29 @@ impl Scheduler {
             heavy,
             light,
             receivers: Mutex::new(Some((heavy_rx, light_rx))),
+            lanes: Mutex::new(Vec::new()),
+            alive: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Lane tasks still running.
+    #[must_use]
+    pub fn lanes_alive(&self) -> usize {
+        self.alive.load(Ordering::SeqCst)
+    }
+
+    /// Waits up to `limit` for the lanes to finish after shutdown was
+    /// signalled, then aborts any still running.
+    pub async fn stop(&self, limit: Duration) {
+        let handles: Vec<_> =
+            std::mem::take(&mut *self.lanes.lock().unwrap_or_else(PoisonError::into_inner));
+        let deadline = tokio::time::Instant::now() + limit;
+        for mut h in handles {
+            if tokio::time::timeout_at(deadline, &mut h).await.is_err() {
+                tracing::warn!("job lane did not stop in time");
+                h.abort();
+                let _ = h.await;
+            }
         }
     }
 
@@ -165,12 +209,17 @@ impl Scheduler {
         let Some((heavy, light)) = taken else {
             return;
         };
-        tokio::spawn(lane(Arc::clone(app), Lane::Heavy, heavy));
-        tokio::spawn(lane(Arc::clone(app), Lane::Light, light));
+        let sched = &app.scheduler;
+        let mut lanes = sched.lanes.lock().unwrap_or_else(PoisonError::into_inner);
+        for (kind, rx) in [(Lane::Heavy, heavy), (Lane::Light, light)] {
+            sched.alive.fetch_add(1, Ordering::SeqCst);
+            let guard = LaneGuard(Arc::clone(&sched.alive));
+            lanes.push(tokio::spawn(lane(Arc::clone(app), kind, rx, guard)));
+        }
     }
 
-    /// Records a queued job and hands it to its lane. A pending job with the
-    /// same kind and payload is returned instead of queuing a second one.
+    /// Records a queued job and hands it to its lane. A job with the same kind
+    /// and payload that has not started yet is returned instead of a second one.
     ///
     /// # Errors
     ///
@@ -181,7 +230,7 @@ impl Scheduler {
         let (id, fresh) = app
             .db
             .write(move |c| {
-                if let Some(id) = rows::find_pending(c, kind, &payload)? {
+                if let Some(id) = rows::find_queued(c, kind, &payload)? {
                     return Ok((id, false));
                 }
                 Ok((rows::insert(c, kind, &payload, crate::unix_now())?, true))
@@ -216,13 +265,28 @@ impl Scheduler {
     }
 }
 
-async fn lane(app: Arc<AppState>, lane: Lane, mut rx: mpsc::UnboundedReceiver<Queued>) {
-    while let Some(Queued { id, job }) = rx.recv().await {
-        if lane == Lane::Heavy && app.gate.state().paused() {
-            if let Err(e) = set_state(&app, id, JobState::Paused).await {
-                tracing::warn!(job = %id, error = %e, "cannot mark job paused");
+/// Runs queued jobs one at a time until shutdown. A heavy job waits for the
+/// gate before it starts and stays `queued` meanwhile.
+async fn lane(
+    app: Arc<AppState>,
+    lane: Lane,
+    mut rx: mpsc::UnboundedReceiver<Queued>,
+    _guard: LaneGuard,
+) {
+    let mut stop = app.shutdown_signal();
+    loop {
+        let next = tokio::select! {
+            q = rx.recv() => q,
+            _ = stop.wait_for(|s| *s) => None,
+        };
+        let Some(Queued { id, job }) = next else {
+            break;
+        };
+        if lane == Lane::Heavy {
+            tokio::select! {
+                () = app.gate.wait_open() => {}
+                _ = stop.wait_for(|s| *s) => break,
             }
-            app.gate.wait_open().await;
         }
         if let Err(e) = execute(&app, id, job.as_ref(), lane).await {
             tracing::warn!(job = %id, error = %e, "cannot record job state");
@@ -256,7 +320,7 @@ async fn execute(app: &Arc<AppState>, id: JobId, job: &dyn Job, lane: Lane) -> R
                 rows::set_progress(c, id, p, now)?;
             }
             rows::set_state(c, id, state, now)?;
-            rows::prune(c, KEEP_FINISHED)?;
+            rows::prune(c, KEEP_FINISHED, now)?;
             rows::get(c, id)
         })
         .await?;
@@ -348,7 +412,8 @@ mod tests {
         let mut events = app.events.subscribe(None).live;
         let (job, ran) = probe(Lane::Heavy, false, 3);
         let id = Scheduler::enqueue(&app, job).await.expect("enqueue");
-        wait_state(&app, id, JobState::Paused).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        wait_state(&app, id, JobState::Queued).await;
         app.gate.set_override(None);
         tokio::time::timeout(Duration::from_secs(2), ran.notified())
             .await
@@ -371,5 +436,83 @@ mod tests {
         Scheduler::start(&app);
         Scheduler::start(&app);
         wait_state(&app, first, JobState::Done).await;
+    }
+
+    /// Blocks in `run` until released, checkpointing every 10 ms.
+    struct Blocker {
+        lane: Lane,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl Job for Blocker {
+        fn kind(&self) -> &'static str {
+            "blocker"
+        }
+        fn lane(&self) -> Lane {
+            self.lane
+        }
+        async fn run(&self, ctx: &JobContext) -> Result<()> {
+            self.started.notify_one();
+            loop {
+                ctx.checkpoint().await?;
+                tokio::select! {
+                    () = self.release.notified() => return Ok(()),
+                    () = tokio::time::sleep(Duration::from_millis(10)) => {}
+                }
+            }
+        }
+    }
+
+    fn blocker(lane: Lane) -> (Arc<Blocker>, Arc<Notify>, Arc<Notify>) {
+        let (started, release) = (Arc::new(Notify::new()), Arc::new(Notify::new()));
+        let job = Arc::new(Blocker {
+            lane,
+            started: Arc::clone(&started),
+            release: Arc::clone(&release),
+        });
+        (job, started, release)
+    }
+
+    #[tokio::test]
+    async fn a_running_job_does_not_absorb_a_new_request() {
+        let (_dir, app) = state();
+        Scheduler::start(&app);
+        let (job, started, release) = blocker(Lane::Light);
+        let first = Scheduler::enqueue(&app, job).await.expect("enqueue");
+        started.notified().await;
+        let (again, _, release_again) = blocker(Lane::Light);
+        let second = Scheduler::enqueue(&app, again).await.expect("enqueue");
+        assert_ne!(first, second);
+        release.notify_one();
+        wait_state(&app, first, JobState::Done).await;
+        release_again.notify_one();
+        wait_state(&app, second, JobState::Done).await;
+    }
+
+    #[tokio::test]
+    async fn stop_cancels_a_running_heavy_job_and_ends_the_lanes() {
+        let (_dir, app) = state();
+        Scheduler::start(&app);
+        assert_eq!(app.scheduler.lanes_alive(), 2);
+        let (job, started, _release) = blocker(Lane::Heavy);
+        let id = Scheduler::enqueue(&app, job).await.expect("enqueue");
+        started.notified().await;
+        app.begin_shutdown();
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            app.scheduler.stop(Duration::from_secs(2)),
+        )
+        .await
+        .expect("stop in time");
+        assert_eq!(app.scheduler.lanes_alive(), 0);
+        let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");
+        let row = row.expect("row");
+        assert_eq!(row.state, JobState::Failed);
+        assert_eq!(
+            row.progress,
+            Some(json!({"error": "cancelled by shutdown"}))
+        );
     }
 }

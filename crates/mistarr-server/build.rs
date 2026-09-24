@@ -12,7 +12,8 @@ fn main() {
 
     let web = manifest.join("../../web");
     let dist = web.join("dist");
-    // A missing path would rerun this script on every build, so watch its parent instead.
+    // A missing path marks the crate dirty on every build, so until dist exists
+    // watch web/, whose scan only includes node_modules between `npm ci` and a build.
     let watched = if dist.exists() { &dist } else { &web };
     println!("cargo:rerun-if-changed={}", watched.display());
 

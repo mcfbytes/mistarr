@@ -20,6 +20,9 @@ use crate::events::{Event, EventKind};
 /// Interval of SSE comment lines that keep proxies from closing the stream.
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
 
+/// Sent first when the replay cannot cover everything the client missed.
+const RESYNC: &str = "resync";
+
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new().route("/events", get(events))
 }
@@ -30,6 +33,7 @@ struct Conn {
     live: broadcast::Receiver<Arc<Event>>,
     tick: Interval,
     shutdown: watch::Receiver<bool>,
+    resync: bool,
     greeted: bool,
 }
 
@@ -37,10 +41,7 @@ async fn events(
     State(app): State<Arc<AppState>>,
     headers: HeaderMap,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    let last = headers
-        .get("last-event-id")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<u64>().ok());
+    let last = headers.get("last-event-id").and_then(|v| v.to_str().ok());
     let sub = app.events.subscribe(last);
     let period = app.options.status_interval;
     let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + period, period);
@@ -51,14 +52,20 @@ async fn events(
         replay: sub.replay.into(),
         live: sub.live,
         tick,
+        resync: !sub.complete,
         greeted: false,
     };
     Sse::new(stream::unfold(conn, next)).keep_alive(KeepAlive::new().interval(KEEP_ALIVE))
 }
 
-/// Replayed events first, then a `status` snapshot, then live events and a
-/// periodic `status`. Ends on shutdown or when the subscriber lags past the ring.
+/// `resync` if the replay may have gaps, replayed events, a `status` snapshot,
+/// then live events and a periodic `status`. Ends on shutdown or when the
+/// subscriber lags past the broadcast buffer.
 async fn next(mut conn: Conn) -> Option<(Result<SseEvent, Infallible>, Conn)> {
+    if conn.resync {
+        conn.resync = false;
+        return Some((Ok(SseEvent::default().event(RESYNC).data("{}")), conn));
+    }
     if let Some(ev) = conn.replay.pop_front() {
         return Some((Ok(to_sse(&ev)), conn));
     }
@@ -85,7 +92,7 @@ async fn next(mut conn: Conn) -> Option<(Result<SseEvent, Infallible>, Conn)> {
 
 fn to_sse(ev: &Event) -> SseEvent {
     SseEvent::default()
-        .id(ev.id.to_string())
+        .id(ev.id())
         .event(ev.kind.as_str())
         .data(&ev.data)
 }

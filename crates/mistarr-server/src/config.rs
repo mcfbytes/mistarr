@@ -237,8 +237,9 @@ impl Default for PrefsConfig {
 }
 
 /// The part of the config the API may change at runtime; stored in `settings`
-/// and laid over the file on every start.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// and laid over the file on every start. Missing fields take their defaults.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct RuntimeSettings {
     /// `[client]`.
     pub client: ClientConfig,
@@ -430,6 +431,10 @@ mod tests {
         assert_eq!(c.runtime().prefs.regions, ["Japan"]);
         assert_eq!(c.runtime().prefs.languages, ["En"]);
         assert!(serde_json::from_str::<SettingsPatch>(r#"{"server":{}}"#).is_err());
+        let partial: RuntimeSettings =
+            serde_json::from_str(r#"{"limits":{"up_kbps_core":2}}"#).expect("partial");
+        assert_eq!(partial.limits.up_kbps_core, 2);
+        assert_eq!(partial.prefs, PrefsConfig::default());
     }
 
     #[test]

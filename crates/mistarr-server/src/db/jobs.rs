@@ -237,7 +237,8 @@ pub fn list_active(conn: &Connection, limit: u32, offset: u32) -> Result<(Vec<Jo
     Ok((rows, u64::try_from(total).unwrap_or(0)))
 }
 
-/// The id of a queued or running job with this kind and payload, if any.
+/// The id of a job with this kind and payload that has not started, if any.
+/// Running jobs never match, so work requested after a job began runs again.
 ///
 /// # Errors
 ///
@@ -249,17 +250,37 @@ pub fn list_active(conn: &Connection, limit: u32, offset: u32) -> Result<(Vec<Jo
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let p = serde_json::json!({});
 /// let id = jobs::insert(&conn, "scan", &p, 1).unwrap();
-/// assert_eq!(jobs::find_pending(&conn, "scan", &p).unwrap(), Some(id));
+/// assert_eq!(jobs::find_queued(&conn, "scan", &p).unwrap(), Some(id));
 /// ```
-pub fn find_pending(conn: &Connection, kind: &str, payload: &Value) -> Result<Option<JobId>> {
+pub fn find_queued(conn: &Connection, kind: &str, payload: &Value) -> Result<Option<JobId>> {
     Ok(conn
         .query_row(
             "SELECT id FROM jobs WHERE kind = ?1 AND payload = ?2
-               AND state IN ('queued', 'running', 'paused') ORDER BY id LIMIT 1",
+               AND state = 'queued' ORDER BY id LIMIT 1",
             params![kind, payload.to_string()],
             |r| r.get(0).map(JobId),
         )
         .optional()?)
+}
+
+/// Number of jobs of `kind` in any state.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::jobs;
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// jobs::insert(&conn, "scan", &serde_json::json!({}), 1).unwrap();
+/// assert_eq!(jobs::count_kind(&conn, "scan").unwrap(), 1);
+/// ```
+pub fn count_kind(conn: &Connection, kind: &str) -> Result<u64> {
+    let n: i64 = conn.query_row("SELECT COUNT(*) FROM jobs WHERE kind = ?1", [kind], |r| {
+        r.get(0)
+    })?;
+    Ok(u64::try_from(n).unwrap_or(0))
 }
 
 /// Marks jobs a previous process left unfinished as `failed` and returns them.
@@ -295,7 +316,8 @@ pub fn fail_interrupted(conn: &mut Connection, now: i64) -> Result<Vec<JobRow>> 
     Ok(rows)
 }
 
-/// Deletes finished jobs beyond the newest `keep`, returning how many went.
+/// Deletes finished jobs beyond the `keep` most recently updated, sparing any
+/// updated within [`PRUNE_GRACE_SECS`] of `now`. Returns how many went.
 ///
 /// # Errors
 ///
@@ -304,15 +326,19 @@ pub fn fail_interrupted(conn: &mut Connection, now: i64) -> Result<Vec<JobRow>> 
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert_eq!(mistarr_server::db::jobs::prune(&conn, 10).unwrap(), 0);
+/// assert_eq!(mistarr_server::db::jobs::prune(&conn, 10, 0).unwrap(), 0);
 /// ```
-pub fn prune(conn: &Connection, keep: u32) -> Result<usize> {
+pub fn prune(conn: &Connection, keep: u32, now: i64) -> Result<usize> {
     Ok(conn.execute(
-        "DELETE FROM jobs WHERE state IN ('done', 'failed') AND id NOT IN (
-           SELECT id FROM jobs WHERE state IN ('done', 'failed') ORDER BY id DESC LIMIT ?1)",
-        [keep],
+        "DELETE FROM jobs WHERE state IN ('done', 'failed') AND updated_at < ?2 AND id NOT IN (
+           SELECT id FROM jobs WHERE state IN ('done', 'failed')
+           ORDER BY updated_at DESC, id DESC LIMIT ?1)",
+        params![keep, now - PRUNE_GRACE_SECS],
     )?)
 }
+
+/// Finished jobs updated this recently are never pruned.
+pub const PRUNE_GRACE_SECS: i64 = 3600;
 
 #[cfg(test)]
 mod tests {
@@ -336,6 +362,8 @@ mod tests {
         assert_eq!(row.payload, json!({"a": 1}));
         assert_eq!(row.progress, Some(json!({"step": 2})));
         assert_eq!((row.created_at, row.updated_at), (10, 12));
+        assert_eq!(count_kind(&c, "detect_client").expect("count"), 1);
+        assert_eq!(count_kind(&c, "scan").expect("count"), 0);
     }
 
     #[test]
@@ -352,22 +380,17 @@ mod tests {
     }
 
     #[test]
-    fn pending_lookup_matches_kind_and_payload() {
+    fn queued_lookup_matches_kind_and_payload_only_before_start() {
         let c = conn();
-        let id = insert(&c, "scan", &json!({"p": "a"}), 1).expect("insert");
+        let a = json!({"p": "a"});
+        let id = insert(&c, "scan", &a, 1).expect("insert");
+        assert_eq!(find_queued(&c, "scan", &a).expect("find"), Some(id));
         assert_eq!(
-            find_pending(&c, "scan", &json!({"p": "a"})).expect("find"),
-            Some(id)
-        );
-        assert_eq!(
-            find_pending(&c, "scan", &json!({"p": "b"})).expect("find"),
+            find_queued(&c, "scan", &json!({"p": "b"})).expect("find"),
             None
         );
-        set_state(&c, id, JobState::Done, 2).expect("done");
-        assert_eq!(
-            find_pending(&c, "scan", &json!({"p": "a"})).expect("find"),
-            None
-        );
+        set_state(&c, id, JobState::Running, 2).expect("running");
+        assert_eq!(find_queued(&c, "scan", &a).expect("find"), None);
     }
 
     #[test]
@@ -382,9 +405,33 @@ mod tests {
             get(&c, a).expect("get").expect("row").state,
             JobState::Failed
         );
-        assert_eq!(prune(&c, 1).expect("prune"), 1);
-        assert!(get(&c, a).expect("get").is_none());
-        assert!(get(&c, b).expect("get").is_some());
+        assert_eq!(prune(&c, 1, 5 + PRUNE_GRACE_SECS + 1).expect("prune"), 1);
+        assert!(get(&c, a).expect("get").is_some());
+        assert!(get(&c, b).expect("get").is_none());
+    }
+
+    #[test]
+    fn prune_keeps_recently_finished_long_jobs() {
+        let c = conn();
+        let now = 100_000;
+        let long = insert(&c, "scan", &json!({}), 0).expect("insert");
+        for i in 0..5 {
+            let id = insert(&c, "poll", &json!({ "i": i }), 10).expect("insert");
+            set_state(&c, id, JobState::Done, 10 + i).expect("done");
+        }
+        set_state(&c, long, JobState::Done, now).expect("done");
+        assert_eq!(prune(&c, 2, now).expect("prune"), 4);
+        assert!(
+            get(&c, long).expect("get").is_some(),
+            "long job pruned on finish"
+        );
+        let recent = insert(&c, "poll", &json!({}), now).expect("insert");
+        set_state(&c, recent, JobState::Done, now - 10).expect("done");
+        prune(&c, 1, now).expect("prune");
+        assert!(
+            get(&c, recent).expect("get").is_some(),
+            "within the grace period"
+        );
     }
 
     #[test]

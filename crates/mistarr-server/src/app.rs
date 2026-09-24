@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::config::{Config, RuntimeSettings};
+use crate::config::{Config, RuntimeSettings, SettingsPatch};
 use crate::db::settings::{self, keys};
 use crate::db::{self, Db};
 use crate::error::{Error, Result};
@@ -54,6 +54,7 @@ pub struct AppState {
     /// Runtime knobs.
     pub options: Options,
     shutdown: watch::Sender<bool>,
+    settings_write: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -69,6 +70,7 @@ impl AppState {
             started: Instant::now(),
             options,
             shutdown: watch::Sender::new(false),
+            settings_write: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -91,6 +93,39 @@ impl AppState {
     pub fn shutdown_signal(&self) -> watch::Receiver<bool> {
         self.shutdown.subscribe()
     }
+
+    /// Tells SSE streams, job lanes and checkpoints to stop.
+    pub fn begin_shutdown(&self) {
+        self.shutdown.send_replace(true);
+    }
+
+    /// Applies a settings patch, stores the resulting runtime settings and
+    /// makes them effective. Calls are serialised, so concurrent patches to
+    /// different sections all survive. Returns the new settings and whether
+    /// `client` changed.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Db`] or [`Error::Stored`] when the settings cannot be saved;
+    /// the effective config is then unchanged.
+    pub async fn update_settings(&self, patch: &SettingsPatch) -> Result<(RuntimeSettings, bool)> {
+        let _serial = self.settings_write.lock().await;
+        let mut next = self.config();
+        let before = next.client.clone();
+        next.apply(patch);
+        let runtime = next.runtime();
+        let stored = runtime.clone();
+        self.db
+            .write(move |c| settings::set_json(c, keys::RUNTIME, &stored))
+            .await?;
+        self.update_config(|c| {
+            c.client.clone_from(&runtime.client);
+            c.limits = runtime.limits;
+            c.prefs.clone_from(&runtime.prefs);
+        });
+        let client_changed = runtime.client != before;
+        Ok((runtime, client_changed))
+    }
 }
 
 /// A started server.
@@ -104,17 +139,19 @@ pub struct Running {
 }
 
 impl Running {
-    /// Stops accepting requests, ends SSE streams and waits up to five
-    /// seconds for in-flight requests.
+    /// Stops accepting requests, ends SSE streams, cancels jobs at their next
+    /// checkpoint and waits up to five seconds each for the job lanes and
+    /// in-flight requests.
     ///
     /// # Errors
     ///
     /// [`Error::Io`] when the server loop failed.
     pub async fn shutdown(self) -> Result<()> {
-        self.app.shutdown.send_replace(true);
+        self.app.begin_shutdown();
         for t in &self.tasks {
             t.abort();
         }
+        self.app.scheduler.stop(Duration::from_secs(5)).await;
         let mut server = self.server;
         match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
             Ok(Ok(r)) => Ok(r?),
@@ -150,8 +187,12 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
         if !interrupted.is_empty() {
             tracing::warn!(count = interrupted.len(), "marked interrupted jobs failed");
         }
-        settings::get_json::<RuntimeSettings>(c, keys::RUNTIME)
+        Ok(settings::get_json::<RuntimeSettings>(c, keys::RUNTIME))
     })?;
+    let stored = stored.unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "ignoring unreadable saved settings; using the config file");
+        None
+    });
     if let Some(rt) = stored {
         config.client = rt.client;
         config.limits = rt.limits;
@@ -251,6 +292,28 @@ mod tests {
         app.update_config(|c| c.limits.up_kbps_core = 3);
         assert_eq!(app.config().limits.up_kbps_core, 3);
         assert!(!*app.shutdown_signal().borrow());
+        app.begin_shutdown();
+        assert!(*app.shutdown_signal().borrow());
+    }
+
+    #[tokio::test]
+    async fn concurrent_settings_updates_all_persist() {
+        let (_dir, app) = testutil::state();
+        let limits: SettingsPatch =
+            serde_json::from_str(r#"{"limits":{"up_kbps_core":9}}"#).expect("json");
+        let prefs: SettingsPatch =
+            serde_json::from_str(r#"{"prefs":{"languages":["Fr"]}}"#).expect("json");
+        let (a, b) = tokio::join!(app.update_settings(&limits), app.update_settings(&prefs));
+        assert!(!a.expect("limits").1 && !b.expect("prefs").1);
+        let stored: RuntimeSettings = app
+            .db
+            .read(|c| settings::get_json(c, keys::RUNTIME))
+            .await
+            .expect("read")
+            .expect("stored");
+        assert_eq!(stored.limits.up_kbps_core, 9);
+        assert_eq!(stored.prefs.languages, ["Fr"]);
+        assert_eq!(app.config().runtime(), stored);
     }
 
     #[tokio::test]

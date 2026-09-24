@@ -35,6 +35,9 @@ pub enum Error {
     /// A job kind has no registered implementation.
     #[error("unknown job kind `{0}`")]
     UnknownJob(String),
+    /// The server is shutting down; the job stopped at a checkpoint.
+    #[error("cancelled by shutdown")]
+    Cancelled,
     /// A job failed.
     #[error("job failed: {0}")]
     Job(String),

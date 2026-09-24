@@ -96,16 +96,8 @@ async fn put_settings(
 ) -> Result<Json<RuntimeSettings>, ApiError> {
     let patch: SettingsPatch =
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let mut next = app.config();
-    let before = next.client.clone();
-    next.apply(&patch);
-    let runtime = next.runtime();
-    let stored = runtime.clone();
-    app.db
-        .write(move |c| settings::set_json(c, keys::RUNTIME, &stored))
-        .await?;
-    app.update_config(|c| c.apply(&patch));
-    if runtime.client != before {
+    let (runtime, client_changed) = app.update_settings(&patch).await?;
+    if client_changed {
         Scheduler::enqueue(&app, Arc::new(DetectClient)).await?;
     }
     Ok(Json(runtime))
