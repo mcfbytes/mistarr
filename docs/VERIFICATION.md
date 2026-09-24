@@ -164,7 +164,7 @@ worked out when the source binds or is rebound, and again for every source
 bound to a platform when that platform's DATs or live roms change; the
 source's `map_stamp` records the DAT versions and roms it was worked out
 against, so an unchanged platform is skipped. Unbinding or removing a source drops its
-candidates. Post-download hashing is authoritative: once an import proves a
+candidates and matches, hash proofs included. Post-download hashing is authoritative: once an import proves a
 file to be a rom, `torrent_files` names that rom with confidence `hash`, the
 file loses its candidates and no later mapping changes it, nor does
 rebinding the source to the same platform. Only a file itself is proven,

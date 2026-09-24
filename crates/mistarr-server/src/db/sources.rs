@@ -439,6 +439,25 @@ pub fn map_stamp(conn: &Connection, id: SourceId) -> Result<Option<String>> {
         .flatten())
 }
 
+/// The platform a source is bound to and the stamp it was mapped against,
+/// `None` when it has no platform.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn mapped_against(
+    conn: &Connection,
+    id: SourceId,
+) -> Result<Option<(PlatformId, Option<String>)>> {
+    Ok(conn
+        .query_row(
+            "SELECT platform_id, map_stamp FROM sources WHERE id = ?1 AND platform_id IS NOT NULL",
+            [id.0],
+            |r| Ok((PlatformId(r.get(0)?), r.get(1)?)),
+        )
+        .optional()?)
+}
+
 /// Stores the rom stamp the source's files were mapped against.
 ///
 /// # Errors
@@ -562,6 +581,20 @@ pub fn replace_files(conn: &Connection, id: SourceId, files: &[TorrentFile]) -> 
             i64::try_from(files.len()).unwrap_or(i64::MAX),
             sql_int(total)
         ],
+    )?;
+    Ok(())
+}
+
+/// Forgets every file's matched rom and confidence, hash proofs included.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn clear_matches(conn: &Connection, id: SourceId) -> Result<()> {
+    conn.execute(
+        "UPDATE torrent_files SET rom_id = NULL, confidence = NULL
+         WHERE source_id = ?1 AND rom_id IS NOT NULL",
+        [id.0],
     )?;
     Ok(())
 }
@@ -878,6 +911,10 @@ mod tests {
         assert_eq!(map_stamp(&c, a).expect("stamp"), None);
         set_map_stamp(&c, a, Some("1:2:3")).expect("set");
         assert_eq!(map_stamp(&c, a).expect("stamp").as_deref(), Some("1:2:3"));
+        assert_eq!(
+            mapped_against(&c, a).expect("against"),
+            Some((nes(), Some("1:2:3".to_owned())))
+        );
     }
 
     #[test]
@@ -965,6 +1002,9 @@ mod tests {
             Some("hash"),
             "a proof survives"
         );
+        clear_matches(&c, id).expect("clear");
+        assert_eq!(get(&c, id).expect("get").expect("row").matched_count, 0);
+        crate::db::candidates::prove(&c, id, 0, rom).expect("prove");
         let moved = [file(0, "Sub/Other.nes", 16)];
         replace_files(&c, id, &moved).expect("replace");
         assert_eq!(get(&c, id).expect("get").expect("row").matched_count, 0);

@@ -55,11 +55,14 @@ pub fn known(text: &str) -> Option<&'static str> {
         .find(|k| *k == text)
 }
 
-/// A source's mapping as stored, and the pairs `bad` downloads ruled out.
+/// What a mapping of a source must respect, beyond its per-file matches,
+/// which [`diff_matches`] reads from the database as it goes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Stored {
-    /// Each matched file's `torrent_files` rom and confidence; an unmatched file is absent.
-    pub matches: BTreeMap<u32, (Option<i64>, Option<&'static str>)>,
+    /// The files a hash proved, in index order.
+    pub proven: Vec<u32>,
+    /// Whether any file has a matched rom.
+    pub matched: bool,
     /// Each `(file, rom)` candidate and its confidence.
     pub candidates: BTreeMap<(u32, i64), &'static str>,
     /// `(file, rom)` pairs a `bad` download used.
@@ -70,27 +73,39 @@ impl Stored {
     /// Whether nothing is stored: no match, candidate or `bad` pair.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.matches.is_empty() && self.candidates.is_empty() && self.bad.is_empty()
+        !self.matched && self.proven.is_empty() && self.candidates.is_empty() && self.bad.is_empty()
+    }
+
+    /// Whether a hash proved file `index`.
+    #[must_use]
+    pub fn is_proven(&self, index: u32) -> bool {
+        self.proven.binary_search(&index).is_ok()
     }
 }
 
-/// The stored mapping of `source`.
+/// What is stored for `source`, without its per-file matches.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn stored(conn: &Connection, source: SourceId) -> Result<Stored> {
-    let mut out = Stored::default();
-    let mut stmt = conn.prepare_cached(
-        "SELECT file_index, rom_id, confidence FROM torrent_files
-         WHERE source_id = ?1 AND (rom_id IS NOT NULL OR confidence IS NOT NULL)",
+    let proven = conn
+        .prepare_cached(
+            "SELECT file_index FROM torrent_files WHERE source_id = ?1 AND confidence = 'hash'
+             ORDER BY file_index",
+        )?
+        .query_map([source.0], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let matched = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM torrent_files WHERE source_id = ?1 AND rom_id IS NOT NULL)",
+        [source.0],
+        |r| r.get(0),
     )?;
-    let mut rows = stmt.query([source.0])?;
-    while let Some(r) = rows.next()? {
-        let text: Option<String> = r.get(2)?;
-        let text = text.as_deref().and_then(known);
-        out.matches.insert(r.get(0)?, (r.get(1)?, text));
-    }
+    let mut out = Stored {
+        proven,
+        matched,
+        ..Stored::default()
+    };
     let mut stmt = conn.prepare_cached(
         "SELECT file_index, rom_id, confidence FROM torrent_candidates WHERE source_id = ?1",
     )?;
@@ -111,11 +126,14 @@ pub fn stored(conn: &Connection, source: SourceId) -> Result<Stored> {
     Ok(out)
 }
 
+/// A `torrent_files` row to write: file index, rom and confidence.
+pub type MatchRow = (u32, Option<i64>, Option<&'static str>);
+
 /// The writes that turn a stored mapping into a new one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Change {
     /// `torrent_files` rows whose rom or confidence changes.
-    pub matches: Vec<(u32, Option<i64>, Option<&'static str>)>,
+    pub matches: Vec<MatchRow>,
     /// Candidates to remove.
     pub remove: Vec<(u32, i64)>,
     /// Candidates to add.
@@ -156,40 +174,73 @@ impl Change {
     }
 }
 
-/// The [`Change`] from `stored` to the mapping of `matches` (one per file,
-/// in file index order) and `found` (further candidates): [`diff_matches`]
-/// and [`diff_candidates`] together.
-#[must_use]
+/// The [`Change`] from what `source` stores to the mapping of `matches`
+/// (one per file, in file index order) and `found` (further candidates):
+/// [`diff_matches`] and [`diff_candidates`] together.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
 pub fn diff(
+    conn: &Connection,
+    source: SourceId,
     stored: &Stored,
     matches: &[(u32, Option<RomRef>, Confidence)],
     found: &[(u32, RomRef, Confidence)],
-) -> Change {
-    Change {
-        matches: diff_matches(stored, matches),
+) -> Result<Change> {
+    Ok(Change {
+        matches: diff_matches(conn, source, matches)?,
         ..diff_candidates(stored, matches, found)
-    }
+    })
 }
 
-/// The `torrent_files` rows whose rom or confidence differs from `matches`;
-/// a file a hash proved keeps its row.
-#[must_use]
+/// The `torrent_files` rows of `source` whose rom or confidence differs from
+/// `matches` (in file index order; a file absent from it is unmatched), read
+/// row by row so no copy of the stored matches is held; a proven row is kept.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
 pub fn diff_matches(
-    stored: &Stored,
+    conn: &Connection,
+    source: SourceId,
     matches: &[(u32, Option<RomRef>, Confidence)],
-) -> Vec<(u32, Option<i64>, Option<&'static str>)> {
+) -> Result<Vec<MatchRow>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT file_index, rom_id, confidence FROM torrent_files WHERE source_id = ?1
+         ORDER BY file_index",
+    )?;
+    let sorted;
+    let matches = if matches.is_sorted_by_key(|m| m.0) {
+        matches
+    } else {
+        sorted = {
+            let mut copy = matches.to_vec();
+            copy.sort_by_key(|m| m.0);
+            copy
+        };
+        &sorted
+    };
+    let mut rows = stmt.query([source.0])?;
     let mut out = Vec::new();
-    for (i, rom, confidence) in matches {
-        let now = stored.matches.get(i).copied().unwrap_or((None, None));
+    while let Some(r) = rows.next()? {
+        let index: u32 = r.get(0)?;
+        let text: Option<String> = r.get(2)?;
+        let now = (r.get::<_, Option<i64>>(1)?, text.as_deref().and_then(known));
         if now.1 == Some(PROVEN) {
             continue;
         }
-        let new = (rom.map(|r| r.0), confidence_text(*confidence));
+        let new = matches
+            .binary_search_by_key(&index, |m| m.0)
+            .map_or((None, None), |at| {
+                let (_, rom, confidence) = matches[at];
+                (rom.map(|r| r.0), confidence_text(confidence))
+            });
         if now != new {
-            out.push((*i, new.0, new.1));
+            out.push((index, new.0, new.1));
         }
     }
-    out
+    Ok(out)
 }
 
 /// The candidates to remove and add to turn `stored` into `found`, as a
@@ -203,12 +254,7 @@ pub fn diff_candidates(
     matches: &[(u32, Option<RomRef>, Confidence)],
     found: &[(u32, RomRef, Confidence)],
 ) -> Change {
-    let proven = |i: u32| {
-        stored
-            .matches
-            .get(&i)
-            .is_some_and(|(_, c)| *c == Some(PROVEN))
-    };
+    let proven = |i: u32| stored.is_proven(i);
     let own = |i: u32| {
         matches
             .binary_search_by_key(&i, |m| m.0)
@@ -321,7 +367,10 @@ pub fn prove(conn: &Connection, source: SourceId, index: u32, rom: i64) -> Resul
 }
 
 /// A text that changes whenever the live roms of `platform` do, so a source
-/// mapped against the same text needs no new mapping.
+/// mapped against the same text needs no new mapping: its live DAT versions
+/// with their load times, which catch a reload that updates roms in place,
+/// and the count and ids of its live roms. MRA versions are left out, since a
+/// catalogue run touches theirs every time; MRA roms change their ids when renamed.
 ///
 /// # Errors
 ///
@@ -330,7 +379,7 @@ pub fn rom_stamp(conn: &Connection, platform: &PlatformId) -> Result<String> {
     Ok(conn.query_row(
         "SELECT (SELECT COALESCE(group_concat(id || '@' || loaded_at, ','), '')
                  FROM (SELECT id, loaded_at FROM dat_versions
-                       WHERE platform_id = ?1 AND retired = 0 ORDER BY id))
+                       WHERE platform_id = ?1 AND retired = 0 AND source != 'mra' ORDER BY id))
              || ';' || COUNT(*) || ':' || COALESCE(MAX(r.id), 0) || ':' || COALESCE(SUM(r.id), 0)
          FROM roms r JOIN titles t ON t.id = r.title_id
          WHERE t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0",
@@ -621,7 +670,7 @@ mod tests {
 
     /// Replaces the candidates of `src` with `found`, as a mapping does.
     fn put(c: &Connection, src: SourceId, found: &[(u32, RomRef, Confidence)]) -> usize {
-        let change = diff(&stored(c, src).expect("stored"), &[], found);
+        let change = diff(c, src, &stored(c, src).expect("stored"), &[], found).expect("diff");
         apply(c, src, &change).expect("apply");
         change.add.len()
     }
@@ -634,27 +683,39 @@ mod tests {
         let src = source(&c, "0c", SourceState::Bound);
         assert!(stored(&c, src).expect("stored").is_empty());
         let stale = diff(
+            &c,
+            src,
             &stored(&c, src).expect("stored"),
             &[(0, Some(RomRef(a)), Confidence::Name)],
             &[
                 (0, RomRef(b), Confidence::Fuzzy),
                 (1, RomRef(a), Confidence::Size),
             ],
-        );
+        )
+        .expect("diff");
         assert_eq!(
-            diff_matches(&Stored::default(), &[(0, None, Confidence::Unmatched)]),
+            diff_matches(&c, src, &[(0, None, Confidence::Unmatched)]).expect("diff"),
             []
         );
         assert_eq!(
             diff_candidates(&Stored::default(), &[], &[]),
             Change::default()
         );
+        let unsorted = [
+            (1, None, Confidence::Unmatched),
+            (0, Some(RomRef(a)), Confidence::Name),
+        ];
+        assert_eq!(
+            diff_matches(&c, src, &unsorted).expect("diff"),
+            [(0, Some(a), Some("name"))]
+        );
         prove(&c, src, 0, b).expect("prove");
         crate::db::downloads_import::insert_fixture(&c, a, src, 1, "bad", None).expect("bad");
         apply(&c, src, &stale).expect("apply");
         let now = stored(&c, src).expect("stored");
         assert!(!now.is_empty());
-        assert_eq!(now.matches[&0], (Some(b), Some(PROVEN)), "the proof stays");
+        assert_eq!(now.proven, [0], "the proof stays");
+        assert!(now.is_proven(0) && !now.is_proven(1));
         assert!(
             now.candidates.is_empty(),
             "no guess on a proven or ruled-out file"
@@ -665,7 +726,7 @@ mod tests {
             0
         );
         assert_eq!(drop_foreign_proofs(&c, src, &snes).expect("snes"), 1);
-        assert!(!stored(&c, src).expect("stored").matches.contains_key(&0));
+        assert!(stored(&c, src).expect("stored").proven.is_empty());
     }
 
     #[test]
@@ -708,7 +769,7 @@ mod tests {
 
         crate::db::downloads_import::insert_fixture(&c, a, src, 0, "bad", None).expect("bad");
         assert_eq!(for_group(&c, ta).expect("group").len(), 1, "ruled out");
-        let change = diff(&stored(&c, src).expect("stored"), &[], &found);
+        let change = diff(&c, src, &stored(&c, src).expect("stored"), &[], &found).expect("diff");
         assert_eq!(change.remove, [(0, a)], "a ruled-out pair is removed");
         apply(&c, src, &change).expect("apply");
         drop_pair(&c, src, 0, b).expect("drop");
@@ -732,21 +793,28 @@ mod tests {
             (0, RomRef(a), Confidence::Fuzzy),
             (0, RomRef(b), Confidence::Fuzzy),
         ];
-        let change = diff(&stored(&c, src).expect("stored"), &matches, &found);
+        let change =
+            diff(&c, src, &stored(&c, src).expect("stored"), &matches, &found).expect("diff");
         assert_eq!(change.matches, [(0, Some(a), Some("name"))]);
         assert_eq!(change.add, [(0, b, "fuzzy")]);
         let pieces = change.clone().split(1);
         assert_eq!(pieces.len(), 2);
         assert!(pieces.iter().all(|p| !p.is_empty()));
         apply(&c, src, &change).expect("apply");
-        assert!(diff(&stored(&c, src).expect("stored"), &matches, &found).is_empty());
+        assert!(
+            diff(&c, src, &stored(&c, src).expect("stored"), &matches, &found)
+                .expect("diff")
+                .is_empty()
+        );
 
         prove(&c, src, 0, b).expect("prove");
         let proven = stored(&c, src).expect("stored");
-        assert_eq!(proven.matches[&0], (Some(b), Some(PROVEN)));
+        assert_eq!(proven.proven, [0]);
         assert!(proven.candidates.is_empty());
         assert!(
-            diff(&proven, &matches, &found).is_empty(),
+            diff(&c, src, &proven, &matches, &found)
+                .expect("diff")
+                .is_empty(),
             "a proven file keeps its rom"
         );
 

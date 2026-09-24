@@ -259,13 +259,15 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    matches written straight. When a DAT loads titles for a platform, the
    rebind of step 4 runs and a background `remap_sources` job maps every
    source bound to that platform again; the same job is queued when a DAT is
-   retired, when the arcade catalogue changes titles, and, for every
-   platform, at each start. A source is skipped when its `map_stamp` equals
-   the platform's current stamp (its live DAT versions with their load times,
-   and its live roms), and otherwise only the rows that changed are written,
-   2 000 per transaction, with its hit rate refreshed and `source.changed`
-   sent only when its mapping changed. A row an import proved by hash is
-   never overwritten, and rebinding to the same platform keeps it.
+   retired, when an arcade catalogue run stores or retires titles, and, for
+   every platform, at each start. A source is skipped when its `map_stamp`
+   equals the platform's current stamp: its live DAT versions with their load
+   times, leaving out the MRA catalogue's version, whose load time every run
+   touches, and the count and ids of its live roms. Otherwise only the rows
+   that changed are written, 2 000 per transaction, with its hit rate
+   refreshed and `source.changed` sent only when its mapping changed. A row
+   an import proved by hash is never overwritten, and rebinding to the same
+   platform keeps it; unbinding forgets every match, proofs included.
 
 ### Wanted and transfer
 

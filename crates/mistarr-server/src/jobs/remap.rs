@@ -71,7 +71,7 @@ pub fn plan(
     let stamp = candidates::rom_stamp(conn, platform)?;
     let mapping = binding::map_files(files, platform, &SqlDatIndex::new(conn));
     let stored = candidates::stored(conn, id)?;
-    Ok(plan_mapping(conn, platform, files, mapping, &stored, stamp))
+    plan_mapping(conn, id, platform, files, mapping, &stored, stamp)
 }
 
 /// [`plan`] from a mapping already worked out. The name-tier matches are
@@ -79,26 +79,27 @@ pub fn plan(
 /// file's own match, since extras never do and guesses cover unmatched files only.
 fn plan_mapping(
     conn: &Connection,
+    id: SourceId,
     platform: &PlatformId,
     files: &[TorrentFile],
     mapping: binding::Mapping,
     stored: &candidates::Stored,
     stamp: String,
-) -> Planned {
+) -> Result<Planned> {
     let unmatched = mapping.unmatched(files);
     let hits = files.len() - unmatched.len();
     let binding::Mapping { matches, extra } = mapping;
-    let changed = candidates::diff_matches(stored, &matches);
+    let changed = candidates::diff_matches(conn, id, &matches)?;
     drop(matches);
     let found = guesses(conn, platform, files, &unmatched, extra);
-    Planned {
+    Ok(Planned {
         change: Change {
             matches: changed,
             ..candidates::diff_candidates(stored, &[], &found)
         },
         hits,
         stamp,
-    }
+    })
 }
 
 /// `extra` with the fuzzy and size-only candidates of `unmatched` added.
@@ -167,7 +168,7 @@ pub fn store_mapping(
         candidates::apply(conn, id, &candidates::diff_candidates(&stored, &[], &found))?;
         hits
     } else {
-        let planned = plan_mapping(conn, platform, files, mapping, &stored, stamp.clone());
+        let planned = plan_mapping(conn, id, platform, files, mapping, &stored, stamp.clone())?;
         candidates::apply(conn, id, &planned.change)?;
         planned.hits
     };
@@ -314,14 +315,14 @@ pub fn stale(conn: &Connection, ids: &[SourceId]) -> Result<Vec<SourceId>> {
     let mut stamps: HashMap<PlatformId, String> = HashMap::new();
     let mut out = Vec::new();
     for id in ids {
-        let Some(platform) = rows::get(conn, *id)?.and_then(|r| r.platform_id) else {
+        let Some((platform, stamp)) = rows::mapped_against(conn, *id)? else {
             continue;
         };
         if !stamps.contains_key(&platform) {
-            let stamp = candidates::rom_stamp(conn, &platform)?;
-            stamps.insert(platform.clone(), stamp);
+            let current = candidates::rom_stamp(conn, &platform)?;
+            stamps.insert(platform.clone(), current);
         }
-        if rows::map_stamp(conn, *id)?.as_ref() != stamps.get(&platform) {
+        if stamp.as_ref() != stamps.get(&platform) {
             out.push(*id);
         }
     }

@@ -428,7 +428,8 @@ fn rebind_one(
 }
 
 /// Binds a source to `platform` chosen by the user, matching its files against
-/// that platform only; `None` unbinds it. Keeps `disabled`.
+/// that platform only; `None` unbinds it and forgets every match, hash proofs
+/// included. A proof survives only a rebind to the platform of its rom. Keeps `disabled`.
 ///
 /// # Errors
 ///
@@ -437,6 +438,7 @@ pub fn bind_to(conn: &Connection, id: SourceId, platform: Option<&PlatformId>) -
     let files = rows::torrent_files(conn, id)?;
     rows::replace_files(conn, id, &files)?;
     let Some(platform) = platform else {
+        rows::clear_matches(conn, id)?;
         rows::set_binding(conn, id, None, None)?;
         return keep_disabled(conn, id, SourceState::Unbound, None);
     };
