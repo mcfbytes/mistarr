@@ -1,54 +1,31 @@
 #!/bin/sh
-# Grep gate for principles violations in tracked files.
+# Fails when tracked files carry pointers to content (docs/PRINCIPLES.md §1).
+# Code may parse magnets and torrents, so only live-looking values are flagged.
 
-denylist_file=".github/principles-denylist.txt"
-tmpfile=$(mktemp)
-trap "rm -f '$tmpfile'" EXIT
+denylist=".github/principles-denylist.txt"
+out=$(mktemp)
+trap 'rm -f "$out"' EXIT
 
-git ls-files | while read -r file; do
-    # Skip the denylist file itself
-    if [ "$file" = "$denylist_file" ]; then
-        continue
-    fi
-    
-    # Skip files with "tests" in the path for all checks
-    if echo "$file" | grep -q "tests"; then
-        continue
-    fi
-    
-    # Check for magnet URIs (skip lines with "test")
-    grep -n "magnet:" "$file" 2>/dev/null | grep -vi "test" | sed "s|^|$file:|" >> "$tmpfile" || true
-    
-    # Check for /announce URLs (skip lines with "test")
-    grep -n "/announce" "$file" 2>/dev/null | grep -vi "test" | sed "s|^|$file:|" >> "$tmpfile" || true
-    
-    # Check for 40-char hex strings (skip in Cargo.lock and skip lines with "test")
-    if [ "$file" != "Cargo.lock" ]; then
-        grep -n "[0-9a-f]\{40\}" "$file" 2>/dev/null | grep -vi "test" | sed "s|^|$file:|" >> "$tmpfile" || true
-    fi
-    
-    # Check for domains from denylist
-    while IFS= read -r domain; do
-        # Skip empty lines and comments
-        [ -z "$domain" ] && continue
-        echo "$domain" | grep -q "^#" && continue
-        
-        # Skip allowed domains
-        case "$domain" in
-            tracker.invalid|example.com|example.invalid)
-                continue
-                ;;
-        esac
-        
-        # Check if domain appears in file (skip lines with "test")
-        grep -n "$domain" "$file" 2>/dev/null | grep -vi "test" | sed "s|^|$file:|" >> "$tmpfile" || true
-    done < "$denylist_file"
+hex40='[0-9a-f]\{40\}'
+# Placeholders used by tests and docs; everything else is a real pointer.
+allow='tracker\.invalid\|example\.\(com\|invalid\)\|0000000000000000000000000000000000000000\|a94a8fe5ccb19ba61c4c0873d391e987982fbbd3\|da39a3ee5e6b4b0d3255bfef95601890afd80709\|34aa973cd4c4daa4f61eeb2bdbad27316534016f'
+
+git ls-files | grep -v "^$denylist$\|^Cargo.lock$\|package-lock.json$" | while read -r f; do
+    # A magnet with a hash, or an announce URL, that is not a placeholder.
+    grep -n "magnet:?[^ ]*btih:$hex40\|https\?://[^ \"')]*/announce" "$f" 2>/dev/null \
+        | grep -v "$allow" | sed "s|^|$f:|" >> "$out"
+    # Bare 40-hex outside Rust and TypeScript source, where test vectors live.
+    case "$f" in *.rs|*.ts|*.svelte) ;; *)
+        grep -n "$hex40" "$f" 2>/dev/null | grep -v "$allow" | sed "s|^|$f:|" >> "$out" ;;
+    esac
+    grep -v '^#\|^$' "$denylist" | while read -r d; do
+        grep -ni "$d" "$f" 2>/dev/null | sed "s|^|$f:|" >> "$out"
+    done
 done
 
-# Print violations and exit
-if [ -s "$tmpfile" ]; then
-    cat "$tmpfile"
+if [ -s "$out" ]; then
+    echo "principles gate: pointers to content found"
+    cat "$out"
     exit 1
 fi
-
-exit 0
+echo "principles gate: clean"

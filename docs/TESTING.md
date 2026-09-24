@@ -45,7 +45,7 @@ the repository, and builds the DAT and torrent locally with the fixture tool:
 
 ```sh
 mistarr-fixture dat  --platform nes --name "Homebrew Test" ./roms > test.dat
-mistarr-fixture torrent --tracker http://<pc>:6969/announce ./roms > test.torrent
+mistarr-fixture torrent --tracker http://example.invalid:6969/announce ./roms > test.torrent
 ```
 
 Suitable titles are those released by their authors under licences that
