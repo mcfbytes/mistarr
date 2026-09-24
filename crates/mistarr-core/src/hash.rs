@@ -403,7 +403,7 @@ mod tests {
     #[test]
     fn ines_strips_header_when_present() {
         let mut data = b"NES\x1a".to_vec();
-        data.extend(std::iter::repeat(0u8).take(12));
+        data.extend(std::iter::repeat_n(0u8, 12));
         data.extend_from_slice(b"abc");
         let h = hash_reader(Cursor::new(data), HeaderRule::Ines, None).unwrap();
         assert_eq!(h.size, 3);
