@@ -134,7 +134,7 @@ mod tests {
         let mut conn = Connection::open_in_memory().expect("open");
         apply(&mut conn).expect("apply");
         crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-        // A real MRA zip rom, the kind the import path always links `files.rom_id` to.
+        // An MRA zip rom, as import and presence rows link `files.rom_id` to.
         let version = crate::db::arcade::mra_version(&conn, "arcade", 1).expect("version");
         let title = crate::db::arcade::upsert_title(
             &conn,
@@ -176,15 +176,15 @@ mod tests {
             )
             .expect("insert");
         };
-        // Noise the generic scan wrote: no rom matched, so rom_id is NULL.
+        // Library scan rows that matched no rom: rom_id is NULL.
         insert("mame/exampleset.zip#a.bin", "unverified", None);
         insert("hbmame/otherset.zip#b.bin", "unverified", None);
-        // A zip the old scan could not open at all: one bare-path row, no `#member`.
+        // A library scan's row for a zip it could not open: bare path, no rom.
         insert("mame/unreadable.zip", "unverified", None);
-        // Rows the MRA import path legitimately records: rom_id always set.
+        // Import rows: rom_id always set.
         insert("mame/exampleset.zip#c.bin", "unverified", Some(rom_id));
         insert("mame/exampleset.zip#d.bin", "verified", Some(rom_id));
-        // A non-arcade platform's stray file must survive untouched.
+        // Another platform's unmatched file is untouched.
         conn.execute(
             "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
              VALUES ('nes', 'NES/stray.bin', 4, 0, NULL, 'unverified', 0)",
@@ -229,6 +229,20 @@ mod tests {
             .collect::<rusqlite::Result<_>>()
             .expect("rows");
         assert_eq!(progress, ["nes"], "arcade never resumes a scan");
+    }
+
+    #[test]
+    fn import_log_is_indexed_by_file() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        let plan: String = conn
+            .query_row(
+                "EXPLAIN QUERY PLAN SELECT id FROM import_log WHERE file_id = 1",
+                [],
+                |r| r.get(3),
+            )
+            .expect("plan");
+        assert!(plan.contains("import_log_file"), "{plan}");
     }
 
     #[test]

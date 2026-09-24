@@ -32,6 +32,10 @@ const LOOSE_FILES: usize = 16_000;
 const ZIPPED_FILES: usize = 2_000;
 const DISC_DIRS: usize = 1_000;
 const PRESENCE_ZIPS: usize = 30_000;
+const PRESENCE_MEMBERS: usize = 10;
+const PRESENCE_MRAS: usize = 3_000;
+/// Longest the catalogue with its presence pass may take on the host, debug build.
+const PRESENCE_TIME: Duration = Duration::from_secs(20);
 
 /// A running `mistarr serve` over one data directory.
 struct Server {
@@ -491,36 +495,63 @@ fn games_tree(root: &Path) -> usize {
     LOOSE_FILES + ZIPPED_FILES + DISC_DIRS * 2
 }
 
-/// `PRESENCE_ZIPS` small zips under `games/mame` that no MRA names and no DAT
-/// matches: the presence pass's worst case, reading every central directory and
-/// writing nothing. An empty `_Arcade` so the catalogue still queues at startup.
-fn presence_tree(root: &Path) -> usize {
+/// `PRESENCE_ZIPS` zips of `PRESENCE_MEMBERS` members under `games/mame`, and
+/// `PRESENCE_MRAS` MRAs naming every tenth zip plus one absent zip each tenth MRA.
+/// Returns the number of zips and of present zips an MRA names.
+fn presence_tree(root: &Path) -> (usize, usize) {
     let mame = root.join("games/mame");
-    std::fs::create_dir_all(root.join("_Arcade")).expect("mkdir");
+    let arcade = root.join("_Arcade");
     for i in 0..PRESENCE_ZIPS {
-        let body = bytes_for(i, 64);
+        let bodies: Vec<(String, Vec<u8>)> = (0..PRESENCE_MEMBERS)
+            .map(|m| (format!("m{m}.bin"), bytes_for(i * PRESENCE_MEMBERS + m, 32)))
+            .collect();
+        let members: Vec<(&str, &[u8])> = bodies
+            .iter()
+            .map(|(n, b)| (n.as_str(), b.as_slice()))
+            .collect();
+        write(&mame.join(format!("exg{i:05}.zip")), &zip_of(&members));
+    }
+    let step = PRESENCE_ZIPS / PRESENCE_MRAS;
+    for t in 0..PRESENCE_MRAS {
+        let zips = if t % 10 == 0 {
+            format!("exg{:05}.zip|exabsent{t:04}.zip", t * step)
+        } else {
+            format!("exg{:05}.zip", t * step)
+        };
+        let mra = format!(
+            "<misterromdescription><name>Example Game {t:04}</name><rbf>excore</rbf>\
+             <rom index=\"0\" zip=\"{zips}\"><part name=\"m0.bin\"/></rom></misterromdescription>"
+        );
         write(
-            &mame.join(format!("exg{i:05}.zip")),
-            &zip_of(&[("a.bin", &body)]),
+            &arcade.join(format!("Example Game {t:04}.mra")),
+            mra.as_bytes(),
         );
     }
-    PRESENCE_ZIPS
+    (PRESENCE_ZIPS, PRESENCE_MRAS)
 }
 
 #[test]
 fn arcade_presence_pass_stays_under_budget() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let zips = presence_tree(dir.path());
+    let (zips, named) = presence_tree(dir.path());
 
     let server = Server::start(dir.path());
+    let started = Instant::now();
     let rows = server.wait_jobs("arcade_catalog", 1);
+    let took = started.elapsed();
     let files = server.count("SELECT COUNT(*) FROM files WHERE platform_id = 'arcade'");
     let peak = server.stop("arcade_presence");
     let (state, progress) = &rows[0];
-    println!("progress: {progress}");
+    println!("progress: {progress}, catalogue with presence pass took {took:?}");
     assert_eq!(state, "done", "{progress}");
     assert_eq!(progress["presence_zips"], zips);
-    assert_eq!(files, 0, "nothing names or matches any of these zips");
+    assert_eq!(progress["presence_recorded"], named);
+    assert_eq!(
+        usize::try_from(files).expect("count"),
+        named,
+        "one row per named zip"
+    );
+    assert!(took < PRESENCE_TIME, "took {took:?}");
     assert_budget("arcade_presence", peak, 16);
 }
 
@@ -541,7 +572,7 @@ fn arcade_catalogue_stays_under_budget() {
     assert_eq!(usize::try_from(titles).expect("count"), distinct);
     assert_eq!(usize::try_from(matched).expect("count"), distinct);
     assert_eq!(progress["parsed"], distinct, "each distinct MRA read once");
-    assert_budget("arcade_catalog", peak, 13);
+    assert_budget("arcade_catalog", peak, 12);
 
     let server = Server::start(dir.path());
     let rows = server.wait_jobs("arcade_catalog", 2);
@@ -553,7 +584,7 @@ fn arcade_catalogue_stays_under_budget() {
         progress["checked"], 0,
         "unchanged sets are not checked again"
     );
-    assert_budget("arcade_catalog rerun", peak, 13);
+    assert_budget("arcade_catalog rerun", peak, 12);
 }
 
 #[test]

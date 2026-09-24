@@ -238,7 +238,7 @@ impl Throttle {
 
 /// The paths every directory entry in a unit resolved to, sorted for a
 /// deterministic scan order.
-pub(crate) fn list_files(dir: &Path) -> Vec<(PathBuf, String)> {
+fn list_files(dir: &Path) -> Vec<(PathBuf, String)> {
     let Ok(entries) = fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -480,7 +480,7 @@ fn commit_unit(
 
 /// Matches a fully hashed payload and decides its state, per
 /// `docs/DATA-MODEL.md` "files.state".
-pub(crate) fn classify(
+fn classify(
     conn: &Connection,
     platform_id: &PlatformId,
     actual_name: &str,
@@ -508,7 +508,7 @@ pub(crate) fn classify(
     Ok((Some(m.rom_id), state))
 }
 
-pub(crate) fn unchanged(
+fn unchanged(
     conn: &Connection,
     platform_id: &PlatformId,
     rel_path: &str,
@@ -620,12 +620,7 @@ async fn scan_flat_unit(
 
 /// An unmatched or unreadable file's row: no hash was trusted enough to
 /// classify it, so it is recorded `unverified` rather than aborting the scan.
-pub(crate) fn unverified_row(
-    rel_path: String,
-    size: i64,
-    mtime: i64,
-    crc32: Option<String>,
-) -> NewFile {
+fn unverified_row(rel_path: String, size: i64, mtime: i64, crc32: Option<String>) -> NewFile {
     NewFile {
         rel_path,
         size,

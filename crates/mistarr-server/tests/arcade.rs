@@ -308,10 +308,8 @@ async fn rescans_follow_mra_and_zip_changes() {
     b.running.shutdown().await.expect("shutdown");
 }
 
-/// A manual scan of `arcade` queues only the catalogue: no generic scan job walks
-/// `games/mame` as if every zip were a cartridge, so `files` never gains an orphan
-/// row for a zip nothing knows about; the catalogue's own presence pass is what
-/// records rows, and only for zips the DAT or a live MRA title actually names.
+/// A manual scan of `arcade` queues only the catalogue: no library scan walks
+/// `games/mame` as if every zip were a cartridge, and every arcade row has a rom.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_manual_arcade_scan_queues_only_the_catalogue() {
     let b = boot_arcade().await;
@@ -342,8 +340,7 @@ async fn a_manual_arcade_scan_queues_only_the_catalogue() {
         "no generic scan job is ever queued for arcade"
     );
 
-    // Every row the presence pass wrote (from the boot-time catalogue run) is
-    // linked to a rom: no orphan noise the way the old generic scan left behind.
+    // Every row the boot-time catalogue's presence pass wrote is linked to a rom.
     let orphan_rows: i64 = b
         .running
         .app

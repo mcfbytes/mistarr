@@ -434,8 +434,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
 }
 
 /// Re-enqueues each platform's scan left unfinished by a previous run, skipping
-/// arcade: its progress is never saved, but a stale row from an older build is
-/// defensively skipped here too.
+/// arcade, which has no library scan whatever `scan_progress` holds.
 async fn resume_scans(
     app: &Arc<AppState>,
     unfinished: Vec<mistarr_core::PlatformId>,

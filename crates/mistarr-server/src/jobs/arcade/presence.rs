@@ -1,259 +1,369 @@
-//! Arcade presence: reads every `games/mame` and `games/hbmame` zip's central
-//! directory (member names, sizes and CRC32, never decompressed) so DAT-sourced
-//! arcade titles get CRC32-level verification and a zip a live MRA names gets a
-//! row for `verify_siblings` to promote, without a full library scan ever
-//! walking arcade. See `docs/ARCHITECTURE.md` "Arcade presence pass".
+//! Arcade presence pass: which zips live MRAs name are on disk under `games/mame` and
+//! `games/hbmame`; see `docs/ARCHITECTURE.md` "Arcade presence pass".
 
-use std::fs::File;
+use std::collections::HashMap;
+use std::fs::{self, File};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use mistarr_core::hash::{zip_members, HashError};
-use mistarr_core::{HashSet as Hashes, PlatformId};
+use mistarr_core::PlatformId;
 use mistarr_mister::platforms::Platform;
 use rusqlite::Connection;
 use serde_json::json;
 
 use crate::db::arcade as arcade_rows;
-use crate::db::files::{self, FileState, Hashed, NewFile};
+use crate::db::files::{self, FileId, FileRow, FileState, Hashed};
 use crate::db::Db;
 use crate::error::Result;
-use crate::jobs::scan::{classify, extension, file_meta, list_files, unchanged, unverified_row};
+use crate::jobs::scan::{extension, file_meta};
 use crate::jobs::JobContext;
 
-/// Zips read, matched and written per batch, so memory follows the batch, not the tree.
+/// Zips stated, looked up and written per batch; each batch is one write transaction.
 const BATCH: usize = 500;
 
-/// What one run found, folded into the catalogue's own final progress event.
-#[derive(Debug, Clone, Copy, Default)]
+/// `files` rows read per page while pruning one directory.
+const PRUNE_PAGE: usize = 2000;
+
+/// What one run did, folded into the catalogue's own final progress event.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct Stats {
     /// Zips seen under `games/mame` and `games/hbmame`.
     pub(super) zips: usize,
-    /// `files` rows removed because their zip or member is gone.
+    /// Presence rows written or refreshed.
+    pub(super) recorded: usize,
+    /// `files` rows removed because their zip, member or naming MRA is gone.
     pub(super) pruned: usize,
 }
 
-/// One zip found under a walked directory.
-#[derive(Clone)]
-struct ZipFile {
-    /// `mame` or `hbmame`, also the `files.rel_path` and [`arcade_rows::zip_rom_id`] prefix.
-    dir: String,
-    /// The zip's own file name.
-    name: String,
-    /// `{dir}/{name}`.
+/// One zip on disk, from one stat.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Zip {
+    /// `{dir}/{name}`, as `files.rel_path` stores it.
     rel: String,
-    /// Where it is on disk.
-    path: PathBuf,
+    /// Size in bytes.
+    size: i64,
+    /// Modification time, Unix seconds.
+    mtime: i64,
 }
 
-/// `platform`'s `games/` directories the presence pass walks: its core directory and
-/// any legacy one, `mame` and `hbmame` for arcade.
-fn zip_dirs(games: &Path, platform: &'static Platform) -> Vec<(String, PathBuf)> {
-    std::iter::once(platform.core_dir)
-        .chain(platform.legacy_dirs.iter().copied())
-        .map(|name| (name.to_owned(), games.join(name)))
-        .filter(|(_, p)| p.is_dir())
-        .collect()
+/// Member rows of a zip that changed on disk, reconciled once its central directory is read.
+#[derive(Debug)]
+struct Recheck {
+    /// The zip as stated this run.
+    zip: Zip,
+    /// The zip rom a live MRA gives it, if any.
+    rom: Option<i64>,
+    /// Its `zip#member` rows.
+    members: Vec<FileRow>,
 }
 
-/// Every zip directly under `platform`'s walked directories, sorted for a
-/// deterministic pass order.
-fn list_zips(games: &Path, platform: &'static Platform) -> Vec<ZipFile> {
-    let mut out = Vec::new();
-    for (dir, path) in zip_dirs(games, platform) {
-        for (file_path, name) in list_files(&path) {
-            if extension(&file_path).as_deref() != Some("zip") {
-                continue;
-            }
-            out.push(ZipFile {
-                rel: format!("{dir}/{name}"),
-                dir: dir.clone(),
-                name,
-                path: file_path,
-            });
-        }
-    }
-    out.sort_by(|a, b| a.rel.cmp(&b.rel));
+/// One batch's writes, applied in one transaction.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Changes {
+    /// Rows to delete.
+    drop: Vec<String>,
+    /// Presence rows to write: the zip, and the MRA zip rom it stands for.
+    record: Vec<(Zip, i64)>,
+    /// Member rows whose hashes still apply: the new mtime.
+    restamp: Vec<(FileId, i64)>,
+    /// Member rows whose content changed: new size, mtime and CRC32.
+    reverify: Vec<(FileId, i64, i64, String)>,
+}
+
+/// `platform`'s zip directories under `games/`: its core directory and any legacy one.
+fn zip_dirs(platform: &'static Platform) -> impl Iterator<Item = &'static str> {
+    std::iter::once(platform.core_dir).chain(platform.legacy_dirs.iter().copied())
+}
+
+/// Zip file names directly under `dir`, sorted bytewise as `files.rel_path` sorts.
+fn zip_names(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = entries
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| extension(Path::new(n)).as_deref() == Some("zip"))
+        .collect();
+    out.sort_unstable();
     out
 }
 
-/// Reads `zf`'s central directory and decides each member's row: a DAT match by CRC32
-/// and size, a zip a live MRA names but no DAT covers, or nothing worth tracking.
-/// A zip that cannot be opened gets one bare-path row instead of its members, mirroring
-/// a scan's own handling of an unreadable zip.
-fn scan_zip(
-    conn: &Connection,
-    pid: &PlatformId,
-    zf: &ZipFile,
-    rows: &mut Vec<NewFile>,
-    seen: &mut Vec<String>,
-) -> Result<()> {
-    let mtime = match file_meta(&zf.path) {
-        Ok((_, mtime)) => mtime,
+/// Stats zip `name` under `dir`; one that cannot be stated is logged and left out, and
+/// so are its rows, which stay as they are.
+fn stat(games: &Path, dir: &str, name: &str) -> Option<Zip> {
+    let rel = format!("{dir}/{name}");
+    match file_meta(&games.join(&rel)) {
+        Ok((size, mtime)) => Some(Zip { rel, size, mtime }),
         Err(e) => {
-            tracing::warn!(path = %zf.path.display(), error = %e, "cannot read metadata; marking unverified");
-            seen.push(zf.rel.clone());
-            rows.push(unverified_row(zf.rel.clone(), 0, 0, None));
-            return Ok(());
-        }
-    };
-    let opened = File::open(&zf.path)
-        .map_err(HashError::from)
-        .and_then(zip_members);
-    let members = match opened {
-        Ok(m) => m,
-        Err(e) => {
-            tracing::warn!(path = %zf.path.display(), error = %e, "cannot read zip; marking unverified");
-            seen.push(zf.rel.clone());
-            rows.push(unverified_row(zf.rel.clone(), 0, mtime, None));
-            return Ok(());
-        }
-    };
-    for member in members {
-        // A directory entry (or a zero-length placeholder) has no payload.
-        if member.name.ends_with('/') {
-            continue;
-        }
-        let member_rel = format!("{}#{}", zf.rel, member.name);
-        let member_size = i64::try_from(member.size).unwrap_or(i64::MAX);
-        seen.push(member_rel.clone());
-        if unchanged(conn, pid, &member_rel, member_size, mtime)? {
-            continue;
-        }
-        let basename = files::basename(&member.name).to_owned();
-        if files::crc_candidate_exists(conn, pid, &member.crc32, member_size)? {
-            // CRC32 and size from the central directory, never the full payload: weaker
-            // than a scan's hash, but enough to record the DAT match and its state.
-            let hashes = Hashes {
-                size: member.size,
-                crc32: member.crc32.clone(),
-                md5: String::new(),
-                sha1: String::new(),
-            };
-            let (rom_id, state) = classify(conn, pid, &basename, &hashes)?;
-            rows.push(NewFile {
-                rel_path: member_rel,
-                size: member_size,
-                mtime,
-                crc32: Some(member.crc32),
-                md5: None,
-                sha1: None,
-                header_rule: Some("none".to_owned()),
-                rom_id,
-                state,
-            });
-        } else if let Some(rom_id) =
-            arcade_rows::zip_rom_id(conn, super::PLATFORM, &zf.dir, &zf.name)?
-        {
-            // No DAT covers this member, but a live MRA names the zip: give
-            // `verify_siblings` a row to promote once an import reads it.
-            rows.push(NewFile {
-                rel_path: member_rel,
-                size: member_size,
-                mtime,
-                crc32: Some(member.crc32),
-                md5: None,
-                sha1: None,
-                header_rule: Some("none".to_owned()),
-                rom_id: Some(rom_id),
-                state: FileState::Unverified,
-            });
+            tracing::warn!(path = %rel, error = %e, "cannot stat zip; keeping its rows");
+            None
         }
     }
-    Ok(())
 }
 
-/// [`scan_zip`] over one batch, on the read connection.
-fn presence_batch(
-    db: &Db,
-    pid: &PlatformId,
-    batch: &[ZipFile],
-) -> Result<(Vec<NewFile>, Vec<String>)> {
-    db.read_blocking(|c| {
-        let mut rows = Vec::new();
-        let mut seen = Vec::new();
-        for zf in batch {
-            scan_zip(c, pid, zf, &mut rows, &mut seen)?;
-        }
-        Ok((rows, seen))
+/// The presence row `zip` needs when no member row stands for it: one against the MRA
+/// zip rom that names it, refreshed only when the zip or its rom changed; none otherwise.
+fn record(zip: &Zip, rom: Option<i64>, bare: Option<&FileRow>, out: &mut Changes) {
+    match (rom, bare) {
+        (None, Some(b)) => out.drop.push(b.rel_path.clone()),
+        (None, None) => {}
+        (Some(r), Some(b)) if (b.size, b.mtime, b.rom_id) == (zip.size, zip.mtime, Some(r)) => {}
+        (Some(r), _) => out.record.push((zip.clone(), r)),
+    }
+}
+
+/// Decides `zip`'s rows without reading it. Member rows (the import path's) stand for the
+/// zip and replace any presence row; they are left alone unless the zip's mtime moved.
+fn decide(
+    zip: &Zip,
+    rom: Option<i64>,
+    bare: Option<FileRow>,
+    members: Vec<FileRow>,
+    out: &mut Changes,
+) -> Option<Recheck> {
+    if members.is_empty() {
+        record(zip, rom, bare.as_ref(), out);
+        return None;
+    }
+    if let Some(b) = bare {
+        out.drop.push(b.rel_path);
+    }
+    if members.iter().all(|m| m.mtime == zip.mtime) {
+        return None;
+    }
+    Some(Recheck {
+        zip: zip.clone(),
+        rom,
+        members,
     })
 }
 
-/// Writes one batch's rows in one transaction.
-fn write_batch(
+/// Stats, looks up and decides each zip of `names` under `dir`, reading a central
+/// directory only for a [`Recheck`]. The reader is held for one zip's lookup at a time,
+/// never across a read from the SD card.
+fn plan_batch(
+    db: &Db,
+    games: &Path,
+    pid: &PlatformId,
+    live: &HashMap<String, i64>,
+    dir: &str,
+    names: &[String],
+) -> Result<Changes> {
+    let mut out = Changes::default();
+    for name in names {
+        let Some(zip) = stat(games, dir, name) else {
+            continue;
+        };
+        let rom = live.get(&zip.rel.to_ascii_lowercase()).copied();
+        let (bare, members) = db.read_blocking(|c| {
+            let bare = files::find_by_path(c, pid, &zip.rel)?;
+            Ok((bare, files::zip_member_rows(c, pid, &zip.rel)?))
+        })?;
+        if let Some(rc) = decide(&zip, rom, bare, members, &mut out) {
+            recheck(games, rc, &mut out);
+        }
+    }
+    Ok(out)
+}
+
+/// Reads a changed zip's central directory, never decompressing, and reconciles its member
+/// rows: same size and CRC32 keeps the row's hashes and state, a different one marks it for
+/// re-verification, a missing member drops it. An unreadable zip keeps every row as it is.
+fn recheck(games: &Path, rc: Recheck, out: &mut Changes) {
+    let listed = File::open(games.join(&rc.zip.rel))
+        .map_err(HashError::from)
+        .and_then(zip_members);
+    let listed = match listed {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(path = %rc.zip.rel, error = %e, "cannot read zip; keeping its rows");
+            return;
+        }
+    };
+    let by_name: HashMap<&str, _> = listed.iter().map(|m| (m.name.as_str(), m)).collect();
+    let mut kept = 0;
+    for row in rc.members {
+        let name = row.rel_path.split_once('#').map_or("", |(_, n)| n);
+        let Some(m) = by_name.get(name) else {
+            out.drop.push(row.rel_path);
+            continue;
+        };
+        kept += 1;
+        let size = i64::try_from(m.size).unwrap_or(i64::MAX);
+        let same_crc = row
+            .crc32
+            .as_deref()
+            .is_some_and(|c| c.eq_ignore_ascii_case(&m.crc32));
+        if row.size == size && same_crc {
+            out.restamp.push((row.id, rc.zip.mtime));
+        } else {
+            out.reverify
+                .push((row.id, size, rc.zip.mtime, m.crc32.clone()));
+        }
+    }
+    if kept == 0 {
+        record(&rc.zip, rc.rom, None, out);
+    }
+}
+
+/// Applies one batch's changes in one transaction; returns rows recorded and removed.
+fn write_changes(
     conn: &mut Connection,
     pid: &PlatformId,
-    rows: Vec<NewFile>,
+    changes: &Changes,
     now: i64,
-) -> Result<()> {
+) -> Result<(usize, usize)> {
     let tx = conn.transaction()?;
-    for row in rows {
-        let hashed = Hashed {
-            crc32: row.crc32.as_deref(),
-            md5: row.md5.as_deref(),
-            sha1: row.sha1.as_deref(),
-            header_rule: row.header_rule.as_deref(),
-        };
+    let dropped = files::delete_paths(&tx, pid, &changes.drop)?;
+    for (zip, rom) in &changes.record {
+        let none = Hashed::default();
+        let state = FileState::Unverified;
         files::upsert(
             &tx,
             pid,
-            &row.rel_path,
-            row.size,
-            row.mtime,
-            &hashed,
-            row.rom_id,
-            row.state,
+            &zip.rel,
+            zip.size,
+            zip.mtime,
+            &none,
+            Some(*rom),
+            state,
             now,
         )?;
     }
+    for (id, mtime) in &changes.restamp {
+        files::restamp(&tx, *id, *mtime, now)?;
+    }
+    for (id, size, mtime, crc) in &changes.reverify {
+        files::reverify(&tx, *id, *size, *mtime, crc, now)?;
+    }
     tx.commit()?;
-    Ok(())
+    Ok((changes.record.len(), dropped))
 }
 
-/// Walks `games/mame` and `games/hbmame`, records what their zips verify against the DAT
-/// and the live MRA catalogue this run just stored, and prunes rows whose zip or member
-/// is gone. Runs after the catalogue's own titles are committed, so a zip an MRA newly
-/// names this run is already visible to [`arcade_rows::zip_rom_id`].
+/// Rows of `page` under `dir` whose zip is not in `names` (sorted) and not on disk.
+fn gone(games: &Path, dir: &str, names: &[String], page: Vec<String>) -> Vec<String> {
+    page.into_iter()
+        .filter(|rel| {
+            let container = rel.split('#').next().unwrap_or(rel);
+            let listed = container
+                .strip_prefix(dir)
+                .and_then(|n| n.strip_prefix('/'))
+                .is_some_and(|n| names.binary_search_by(|x| x.as_str().cmp(n)).is_ok());
+            // A row outside the listing (a nested path, or a zip added since) is checked on disk.
+            !listed && !games.join(container).exists()
+        })
+        .collect()
+}
+
+/// Deletes the rows under `dir` whose zip is gone, a page at a time, holding the reader
+/// only while a page is read.
+async fn prune_dir(
+    ctx: &JobContext,
+    pid: &PlatformId,
+    games: &Path,
+    dir: &'static str,
+    names: Arc<Vec<String>>,
+) -> Result<usize> {
+    let mut after = String::new();
+    let mut pruned = 0;
+    loop {
+        ctx.checkpoint().await?;
+        let (p, from) = (pid.clone(), after.clone());
+        let page = ctx
+            .app
+            .db
+            .read(move |c| files::paths_under(c, &p, dir, &from, PRUNE_PAGE))
+            .await?;
+        let Some(last) = page.last() else {
+            break;
+        };
+        after.clone_from(last);
+        let full = page.len() == PRUNE_PAGE;
+        let (g, n) = (games.to_path_buf(), Arc::clone(&names));
+        let doomed = super::blocking(move || gone(&g, dir, &n, page)).await?;
+        if !doomed.is_empty() {
+            let p = pid.clone();
+            pruned += ctx
+                .app
+                .db
+                .write(move |c| {
+                    let tx = c.transaction()?;
+                    let n = files::delete_paths(&tx, &p, &doomed)?;
+                    tx.commit()?;
+                    Ok(n)
+                })
+                .await?;
+        }
+        if !full {
+            break;
+        }
+    }
+    Ok(pruned)
+}
+
+/// Records a presence row for every zip under `games/mame` and `games/hbmame` that a live
+/// MRA names and no import row stands for, reconciles import rows of zips that changed,
+/// and prunes rows whose zip is gone. Runs after the catalogue commits its titles, so the
+/// live MRA zips it reads once per run are this run's.
 pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
-    let games = ctx.app.config().paths.games.clone();
+    let games: PathBuf = ctx.app.config().paths.games.clone();
     let Some(platform) = mistarr_mister::platforms::by_id(super::PLATFORM) else {
         return Ok(Stats::default());
     };
-    ctx.checkpoint().await?;
-    let zips = super::blocking({
-        let games = games.clone();
-        move || list_zips(&games, platform)
-    })
-    .await?;
-    let total = zips.len();
-    let pid = PlatformId(super::PLATFORM.to_owned());
-    let mut keep: Vec<String> = Vec::with_capacity(total);
-    for (n, batch) in zips.chunks(BATCH).enumerate() {
-        ctx.checkpoint().await?;
-        let (db, pid2, batch) = (ctx.app.db.clone(), pid.clone(), batch.to_vec());
-        let (rows, seen) = super::blocking(move || presence_batch(&db, &pid2, &batch)).await??;
-        keep.extend(seen);
-        let (pid3, now) = (pid.clone(), crate::unix_now());
-        ctx.app
-            .db
-            .write(move |c| write_batch(c, &pid3, rows, now))
-            .await?;
-        ctx.progress(json!({
-            "presence_done": ((n + 1) * BATCH).min(total),
-            "presence_total": total,
-        }))
-        .await?;
+    if !games.is_dir() {
+        tracing::warn!(path = %games.display(), "games directory missing; presence pass skipped");
+        return Ok(Stats::default());
     }
     ctx.checkpoint().await?;
-    let pid4 = pid.clone();
-    let pruned = ctx
-        .app
-        .db
-        .write(move |c| files::delete_missing(c, &pid4, &keep))
-        .await?;
-    Ok(Stats {
-        zips: total,
-        pruned,
+    let live = Arc::new(
+        ctx.app
+            .db
+            .read(|c| arcade_rows::live_zip_roms(c, super::PLATFORM))
+            .await?,
+    );
+    let listing: Vec<(&'static str, Arc<Vec<String>>)> = super::blocking({
+        let games = games.clone();
+        move || {
+            zip_dirs(platform)
+                .map(|d| (d, Arc::new(zip_names(&games.join(d)))))
+                .collect()
+        }
     })
+    .await?;
+    let pid = PlatformId(super::PLATFORM.to_owned());
+    let mut stats = Stats {
+        zips: listing.iter().map(|(_, n)| n.len()).sum(),
+        ..Stats::default()
+    };
+    let mut done = 0;
+    for (dir, names) in &listing {
+        let dir: &'static str = dir;
+        for batch in names.chunks(BATCH) {
+            ctx.checkpoint().await?;
+            let (db, g, p, l, b) = (
+                ctx.app.db.clone(),
+                games.clone(),
+                pid.clone(),
+                Arc::clone(&live),
+                batch.to_vec(),
+            );
+            let changes = super::blocking(move || plan_batch(&db, &g, &p, &l, dir, &b)).await??;
+            let (p, now) = (pid.clone(), crate::unix_now());
+            let (recorded, dropped) = ctx
+                .app
+                .db
+                .write(move |c| write_changes(c, &p, &changes, now))
+                .await?;
+            stats.recorded += recorded;
+            stats.pruned += dropped;
+            done += batch.len();
+            ctx.progress(json!({ "presence_done": done, "presence_total": stats.zips }))
+                .await?;
+        }
+        stats.pruned += prune_dir(ctx, &pid, &games, dir, Arc::clone(names)).await?;
+    }
+    Ok(stats)
 }
 
 #[cfg(test)]

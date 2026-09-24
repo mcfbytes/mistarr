@@ -95,7 +95,7 @@ CREATE INDEX roms_match_base ON roms(match_base, size);
 CREATE TABLE files (                    -- what is on disk under games/
   id            INTEGER PRIMARY KEY,
   platform_id   TEXT NOT NULL REFERENCES platforms(id),
-  rel_path      TEXT NOT NULL,         -- relative to games/, e.g. 'NES/a.zip#b.nes' for a zip member
+  rel_path      TEXT NOT NULL,         -- relative to games/, e.g. 'NES/a.zip#b.nes' for a zip member, 'mame/a.zip' for an arcade presence row
   size          INTEGER NOT NULL,
   mtime         INTEGER NOT NULL,
   crc32 TEXT, md5 TEXT, sha1 TEXT,
@@ -162,6 +162,7 @@ CREATE TABLE import_log (
   action        TEXT NOT NULL,         -- 'placed' | 'replaced' | 'quarantined' | 'skipped_existing' | 'renamed'
   detail        TEXT NOT NULL          -- json
 );
+CREATE INDEX import_log_file ON import_log(file_id);
 
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE jobs (
@@ -225,7 +226,8 @@ single-file one. It is the path mistarr sees, after the remote path map.
 - `misnamed`: hash matches a rom, name differs. The UI offers rename.
 - `unverified`: no rom matches in any loaded DAT. A member of an imported MRA
   zip the md5 check did not read, or that no hash source covers, is
-  `unverified` with `rom_id` set to the zip's rom.
+  `unverified` with `rom_id` set to the zip's rom, and so is the presence row
+  `mame/<zip>` the arcade presence pass writes for a zip a live MRA names.
 - `bad`: matches a rom flagged `baddump`.
 
 ### sources.state
