@@ -409,7 +409,7 @@ shutdown is left `queued` for this.
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches |
 | Arcade presence pass | 500 zips per batch, central directory only, never decompressed |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
-| Browse page or search, with its total | under 100 ms on the board for a platform of 15 000 titles; `tests/browse.rs` holds a host bound |
+| Browse page or search, with its total | under 100 ms on the board with every major platform's DAT loaded; `tests/browse.rs` holds a host bound and `mistarr bench-search` measures the board |
 | SPA bundle, gzipped | under 200 KiB |
 | Concurrent client RPC calls | 1, serialised |
 
@@ -435,12 +435,19 @@ Every write transaction commits through `db::commit`, which first refreshes
 the clone groups its writes touched in `title_groups` (DATA-MODEL.md
 "Derived tables"). Browse and the platform counts then read one indexed row
 per group; a page and its total cost about as much as reading the page, and
-the refresh adds a few hundred milliseconds on the host to a 15 000-game DAT
-load. Search probes the `title_search` trigram index for three or more
-characters and confirms with `LIKE`. A common short term costs time in
-proportion to its matches across every platform; if measurements on the
-board ever call for it, the next step is a sentinel-wrapped platform column
-in `title_search` queried with an FTS column filter.
+the refresh adds about 0.1 s on the host to a 15 000-game DAT's first load.
+
+Search runs `LIKE` over the browsed platform's `title_groups_name` range,
+which the index covers, so its cost follows the platform's group count and
+never the rest of the catalogue. Two trigram shapes over `title_search` are
+kept for measurement: the plain index, whose cost follows a term's matches
+across every platform, and a `MATCH` that also filters on the platform's
+sentinel-wrapped id, whose cost follows the term's matches plus the
+platform's titles. On the synthetic full catalogue (42 000 titles) the worst
+host case was 1.5 ms for `LIKE`, 3.8 ms with the platform filter and 8.0 ms
+for the plain index, so `LIKE` is the default (`titles::SEARCH_SHAPE`).
+Keeping `title_search` current costs about 0.9 s on the host per
+15 000-game first load, against 0.5 s for the load without it.
 
 ## Configuration
 

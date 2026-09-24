@@ -336,8 +336,11 @@ CREATE TABLE title_groups_dirty (parent_id INTEGER PRIMARY KEY);   -- groups a w
 CREATE TABLE known_flags (name TEXT PRIMARY KEY, bit INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE known_regions (name TEXT PRIMARY KEY COLLATE NOCASE, bit INTEGER NOT NULL) WITHOUT ROWID;
 
+CREATE VIEW title_search_source AS      -- the platform id between 0x1F sentinels
+  SELECT id, base_name, char(31) || platform_id || char(31) AS platform FROM titles;
 CREATE VIRTUAL TABLE title_search USING fts5(
-  base_name, content = 'titles', content_rowid = 'id', tokenize = 'trigram');
+  base_name, platform, content = 'title_search_source', content_rowid = 'id',
+  tokenize = 'trigram');
 ```
 
 The group columns keep the meaning they have always had. Roms and files are
@@ -371,11 +374,12 @@ platforms' rows in one statement instead. A write made outside a
 transaction is settled by the writer connection right after, with a warning
 in the log.
 
-`title_search` indexes each title's `base_name` with trigrams; the title
-triggers keep it in the same transaction. Searches of three or more
-characters find candidate groups through it and confirm with `LIKE`, so
-the match is still a case-insensitive substring; shorter searches use
-`LIKE` on the platform's `title_groups_name` range.
+`title_search` indexes each title's `base_name` and its platform id, wrapped
+in 0x1F so `nes` never matches inside `snes`, with trigrams; the title
+triggers keep it in the same transaction, including a title that moves
+platform. Browse searches with `LIKE` on the platform's `title_groups_name`
+range; the index serves the trigram shapes `mistarr bench-search` compares
+(ARCHITECTURE.md "Resource budgets").
 
 `mistarr doctor` compares the table and the search index with a fresh
 computation and reports drift; `mistarr doctor --rebuild-groups` recomputes
