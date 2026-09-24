@@ -7,6 +7,10 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+#![warn(clippy::pedantic)]
+
+pub mod dat;
+pub mod naming;
 
 /// Stable platform identifier, e.g. `nes`, `megadrive`, `psx`.
 /// The full table lives in `docs/PLATFORMS.md` and in `mistarr-mister`.
