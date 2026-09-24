@@ -13,7 +13,7 @@ version = "0.0.1"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/mcfbytes/mistarr"
-rust-version = "1.80"
+rust-version = "1.85"
 
 # Shared dependency versions. Crates opt in with `dep.workspace = true`.
 # Add here only after checking the dependency builds statically for

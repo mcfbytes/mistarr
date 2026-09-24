@@ -8,6 +8,9 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+/// 1G1R selection and clone-group inference.
+pub mod select;
+
 /// Stable platform identifier, e.g. `nes`, `megadrive`, `psx`.
 /// The full table lives in `docs/PLATFORMS.md` and in `mistarr-mister`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
