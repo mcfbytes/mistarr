@@ -163,8 +163,8 @@ async fn wizard(State(app): State<Arc<AppState>>) -> Result<Json<Wizard>, ApiErr
     }))
 }
 
-/// `POST /system/wizard/done`: the user finished or dismissed the wizard, so
-/// it no longer opens by itself.
+/// `POST /system/wizard/done`: records that the user finished or dismissed the
+/// wizard, which then stays closed on load.
 async fn wizard_done(State(app): State<Arc<AppState>>) -> Result<Json<Wizard>, ApiError> {
     app.db
         .write(|c| settings::set_json(c, keys::WIZARD_DISMISSED, &true))
