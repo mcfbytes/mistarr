@@ -171,6 +171,12 @@ case "${1:-}" in
     start) echo "mistarr started" ;;
     status) echo "mistarr not running" ;;
     "")
+        # Stands in for a new binary that migrates the database, then dies.
+        db="$MISTARR_ROOT/mistarr/mistarr.db"
+        if [ -f "$db" ]; then
+            echo "MIGRATED" > "$db"
+            echo "NEW-WAL" > "$db-wal"
+        fi
         echo "mistarr failed to start"
         exit 1
         ;;
@@ -346,6 +352,105 @@ grep -q "GOOD-BEFORE-CRASH" "$root8/mistarr/mistarr" \
     || { fail=$((fail + 1)); echo "FAIL: a failed start must restore the previous binary"; }
 grep -q "stub-kind: normal" "$root8/Scripts/mistarr.sh" \
     || { fail=$((fail + 1)); echo "FAIL: a failed start must restore the previous launcher"; }
+
+expect_absent() {
+    if [ -e "$1" ]; then
+        fail=$((fail + 1))
+        echo "FAIL: $2 ($1 exists)"
+    fi
+}
+
+# A fresh install has no database to save.
+expect_contains "$(run_install "$work/root1b" "$no_tty" v1.0.0)" "no database yet; nothing to back up" \
+    "a fresh install says there is nothing to back up"
+expect_absent "$work/root1b/mistarr/mistarr.db.prev" "a fresh install makes no database backup"
+expect_absent "$root1/mistarr/mistarr.db.prev" "the first fresh install makes no database backup"
+expect "$(cat "$root2/mistarr/mistarr.db.prev")" "DBDATA" "an upgrade saves the database"
+expect_absent "$root2/mistarr/mistarr.db.prev-wal" "an upgrade with no wal saves none"
+
+# An upgrade saves the database with its wal and shm, and says how to roll back.
+root9="$work/root9"
+mkdir -p "$root9/mistarr" "$root9/Scripts"
+echo "DB9" > "$root9/mistarr/mistarr.db"
+echo "WAL9" > "$root9/mistarr/mistarr.db-wal"
+echo "SHM9" > "$root9/mistarr/mistarr.db-shm"
+write_arm_binary "$root9/mistarr/mistarr" OLD-BINARY-9
+write_launcher_stub "$root9/Scripts/mistarr.sh"
+out=$(run_install "$root9" "$no_tty" v1.1.0)
+code=$?
+[ "$code" -eq 0 ] || { fail=$((fail + 1)); echo "FAIL: upgrade with wal exits 0 (got $code): $out"; }
+expect "$(cat "$root9/mistarr/mistarr.db.prev")" "DB9" "the database is saved"
+expect "$(cat "$root9/mistarr/mistarr.db.prev-wal")" "WAL9" "the wal is saved"
+expect "$(cat "$root9/mistarr/mistarr.db.prev-shm")" "SHM9" "the shm is saved"
+expect "$(cat "$root9/mistarr/mistarr.db-wal")" "WAL9" "the live wal is left in place"
+expect_contains "$out" "saved the database as $root9/mistarr/mistarr.db.prev" "the backup path is printed"
+expect_contains "$out" "to roll back by hand" "the manual rollback is printed"
+
+# A later upgrade with no wal drops the stale saved wal and shm, never mixing sets.
+rm -f "$root9/mistarr/mistarr.db-wal" "$root9/mistarr/mistarr.db-shm"
+echo "DB9B" > "$root9/mistarr/mistarr.db"
+run_install "$root9" "$no_tty" v1.1.0 >/dev/null
+expect "$(cat "$root9/mistarr/mistarr.db.prev")" "DB9B" "the database is saved again"
+expect_absent "$root9/mistarr/mistarr.db.prev-wal" "a stale saved wal is removed"
+expect_absent "$root9/mistarr/mistarr.db.prev-shm" "a stale saved shm is removed"
+
+# A new binary that migrates the database and fails to start gets both the
+# binary and the database set rolled back.
+root10="$work/root10"
+mkdir -p "$root10/mistarr" "$root10/Scripts"
+echo "OLD-SCHEMA" > "$root10/mistarr/mistarr.db"
+write_arm_binary "$root10/mistarr/mistarr" GOOD-BEFORE-MIGRATION
+write_launcher_stub "$root10/Scripts/mistarr.sh"
+out=$(run_install "$root10" "$no_tty" v6.0.0)
+code=$?
+[ "$code" -ne 0 ] || { fail=$((fail + 1)); echo "FAIL: a failed migrating start must exit non-zero"; }
+expect_contains "$out" "restored the database from" "a failed start reports the database restore"
+expect "$(cat "$root10/mistarr/mistarr.db")" "OLD-SCHEMA" "a failed start restores the database"
+expect_absent "$root10/mistarr/mistarr.db-wal" "a failed start drops the new version's wal"
+grep -q "GOOD-BEFORE-MIGRATION" "$root10/mistarr/mistarr" \
+    || { fail=$((fail + 1)); echo "FAIL: a failed migrating start must restore the previous binary"; }
+expect_contains "$out" "restarted the previous version of mistarr" "the previous version is restarted"
+
+# A backup that cannot fit aborts before the binary or launcher is touched.
+stubs="$work/stubs"
+mkdir -p "$stubs/nospace" "$stubs/badcp"
+cat > "$stubs/nospace/df" <<'EOS'
+#!/bin/sh
+echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
+echo "/dev/fake 100000 99999 1 100% /"
+EOS
+real_cp=$(command -v cp)
+cat > "$stubs/badcp/cp" <<EOS
+#!/bin/sh
+case "\$2" in *.db.prev*) printf partial > "\$2"; exit 1 ;; esac
+exec "$real_cp" "\$@"
+EOS
+chmod +x "$stubs/nospace/df" "$stubs/badcp/cp"
+for kind in nospace badcp; do
+    r="$work/root11-$kind"
+    mkdir -p "$r/mistarr" "$r/Scripts"
+    echo "KEEP-DB" > "$r/mistarr/mistarr.db"
+    echo "KEEP-WAL" > "$r/mistarr/mistarr.db-wal"
+    write_arm_binary "$r/mistarr/mistarr" "INSTALLED-$kind"
+    write_launcher_stub "$r/Scripts/mistarr.sh"
+    out=$(env PATH="$stubs/$kind:$PATH" MISTARR_ROOT="$r" MISTARR_RELEASE_API="$api" \
+        MISTARR_RELEASE_BASE="$dl_base" MISTARR_TTY="$no_tty" sh "$install_script" v1.1.0 2>&1)
+    code=$?
+    [ "$code" -ne 0 ] || { fail=$((fail + 1)); echo "FAIL: $kind: a failed backup must exit non-zero"; }
+    expect_contains "$out" "aborting the install; nothing was changed" "$kind: the abort is reported"
+    expect_contains "$out" "restarted the installed version" "$kind: the installed version is restarted"
+    grep -q "INSTALLED-$kind" "$r/mistarr/mistarr" \
+        || { fail=$((fail + 1)); echo "FAIL: $kind: a failed backup must not touch the binary"; }
+    grep -q "stub-kind: normal" "$r/Scripts/mistarr.sh" \
+        || { fail=$((fail + 1)); echo "FAIL: $kind: a failed backup must not touch the launcher"; }
+    expect_absent "$r/mistarr/mistarr.prev" "$kind: no binary is saved"
+    expect_absent "$r/mistarr/mistarr.db.prev" "$kind: no partial database backup is left"
+    expect_absent "$r/mistarr/mistarr.db.prev-wal" "$kind: no partial wal backup is left"
+    expect "$(cat "$r/mistarr/mistarr.db")" "KEEP-DB" "$kind: the database is untouched"
+done
+expect_contains "$(env PATH="$stubs/nospace:$PATH" MISTARR_ROOT="$work/root11-nospace" \
+    MISTARR_RELEASE_API="$api" MISTARR_RELEASE_BASE="$dl_base" MISTARR_TTY="$no_tty" \
+    sh "$install_script" v1.1.0 2>&1)" "not enough free space" "a full disk is named"
 
 if [ "$fail" -eq 0 ]; then
     echo "all tests passed"

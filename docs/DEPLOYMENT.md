@@ -51,7 +51,10 @@ any dynamic dependency, checked with `file` on the output.
 /media/fat/mistarr/
   mistarr                 # the binary
   mistarr.toml            # optional config
-  mistarr.db              # SQLite
+  mistarr.prev            # the previous binary, kept by install.sh
+  mistarr.db              # SQLite, with mistarr.db-wal and mistarr.db-shm beside it
+  mistarr.db.prev         # the database as it was before the last upgrade, with any
+                          #   mistarr.db.prev-wal and mistarr.db.prev-shm
   mistarr.lock            # held by the running server; a second server exits
   mistarr.pid             # the daemon, written by Scripts/mistarr.sh
   supervisor.pid          # the script's restart loop
@@ -68,6 +71,7 @@ any dynamic dependency, checked with `file` on the output.
   client-start.log        # output of client start commands
   transmission/           # transmission-daemon started without an init script
 /media/fat/Scripts/mistarr.sh      # start/stop/status from the Scripts menu
+/media/fat/Scripts/mistarr.sh.prev # the previous launcher, kept by install.sh
 /tmp/mistarr.start.lock        # held while a start runs; a reboot clears it
 ```
 
@@ -91,18 +95,53 @@ argument, which installs the latest release.
 
 Either way `install.sh` resolves the release through the GitHub API,
 downloads `mistarr-armv7.tar.gz` and its `.sha256`, verifies the checksum and
-that the binary is an ARM ELF executable, stops a running mistarr, installs
-the new binary and `mistarr.sh`, and starts it again. `mistarr.db`,
-`mistarr.toml` and the watched directories are never touched.
+that the binary is an ARM ELF executable, stops a running mistarr, saves the
+database, installs the new binary and `mistarr.sh`, and starts it again.
+`mistarr.toml` and the watched directories are never touched, and
+`mistarr.db` is only copied, or put back from its copy by a rollback.
 
 **Upgrading** is the same command run again; it replaces the binary and
-`mistarr.sh` in place and keeps the database and config.
+`mistarr.sh` in place and keeps the database and config. The new version
+applies any new migrations to `mistarr.db` when it starts, after which an
+older binary cannot use that database.
 
-**Rollback**: before overwriting an existing binary, `install.sh` saves it as
-`mistarr.prev` beside it. If anything after that point fails — the new binary
-fails to start — the script restores `mistarr.prev` automatically. To roll
-back by hand, stop mistarr, copy `mistarr.prev` over `mistarr`, and start it
-again; then install whichever earlier version you need.
+Before anything is overwritten, with mistarr stopped, `install.sh` saves:
+
+- `mistarr.db` as `mistarr.db.prev`, and `mistarr.db-wal` and
+  `mistarr.db-shm`, when present, as `mistarr.db.prev-wal` and
+  `mistarr.db.prev-shm`. A saved `-wal` or `-shm` the current database lacks
+  is removed, so the saved files are always one consistent set. A fresh
+  install with no database saves nothing.
+- the binary as `mistarr.prev` and `Scripts/mistarr.sh` as
+  `Scripts/mistarr.sh.prev`.
+
+It checks free space in the data directory first, and copies with `cp`. When
+the space is short or a copy fails, it removes whatever it copied, restarts
+the installed version and exits without changing the binary or launcher.
+Only one previous version is kept: each upgrade replaces the saved files, so
+installing twice leaves only the version immediately before the current one.
+The script prints where the backup is and the manual rollback steps.
+
+**Rollback**: if the new version fails to start, `install.sh` stops it,
+puts back the saved database set, `mistarr.prev` and `mistarr.sh.prev`, and
+starts the previous version; the new binary may already have migrated the
+database before failing. A rollback across a migration needs the database
+restored with the binary. A binary refuses a database whose recorded schema
+version is newer than its own migrations, with an error naming both versions,
+and never writes to it; `mistarr doctor` reports the same. To roll back by
+hand, in `/media/fat/mistarr`:
+
+1. Stop mistarr: `/media/fat/Scripts/mistarr.sh stop`.
+2. Copy `mistarr.prev` to `mistarr`, and `Scripts/mistarr.sh.prev` to
+   `Scripts/mistarr.sh`.
+3. Delete `mistarr.db-wal` and `mistarr.db-shm`, copy `mistarr.db.prev` to
+   `mistarr.db`, and copy `mistarr.db.prev-wal` and `mistarr.db.prev-shm`, if
+   present, to `mistarr.db-wal` and `mistarr.db-shm`.
+4. Start it: `/media/fat/Scripts/mistarr.sh start`.
+
+Anything changed in the database since the upgrade is lost by step 3. To go
+back further than one version, install that version and restore a database
+copy of your own made while it was installed.
 
 ## Starting it
 
@@ -149,7 +188,9 @@ automatic and manual scans instead; the change needs a restart.
 detected client and its version, whether `rtorrent` is on `PATH`, installed
 cores, CORENAME, memory available, and the result of hashing 64 MiB of zeros
 for throughput (`--hash-mib N` changes the size), and whether the
-`title_groups` table and search index match the catalogue. It reads the same
+`title_groups` table and search index match the catalogue. It also prints the
+database's schema version against the highest this binary supports, and says
+so, without opening the database for writing, when a newer mistarr migrated it. It reads the same
 config as the server and needs no running server. This is what a bug report
 should include. When it reports title groups out of step, stop the server
 and run `mistarr doctor --rebuild-groups` to recompute them.

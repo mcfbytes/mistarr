@@ -14,6 +14,10 @@ BIN="$INSTALL_DIR/mistarr"
 PREV="$BIN.prev"
 LAUNCHER="$SCRIPTS_DIR/mistarr.sh"
 PREV_LAUNCHER="$LAUNCHER.prev"
+DB="$INSTALL_DIR/mistarr.db"
+DB_PREV="$DB.prev"
+# Set once this run has saved the database set, so a restore never uses a stale one.
+db_saved=0
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -57,9 +61,92 @@ is_arm_elf() {
         END { exit !ok }'
 }
 
-# Restores the previous binary and launcher after a failed install, if any
-# were saved, and restarts that previous version.
+# Size of file $1 in KiB, rounded up; awk keeps large sizes out of shell arithmetic.
+size_kib() {
+    wc -c < "$1" | awk '{ printf "%d\n", ($1 + 1023) / 1024 }'
+}
+
+# Free KiB on the filesystem holding $1, or nothing when df cannot say.
+free_kib() {
+    df -Pk "$1" 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print $4 }'
+}
+
+# Removes the saved database set.
+remove_db_prev() {
+    rm -f "$DB_PREV" "$DB_PREV-wal" "$DB_PREV-shm"
+}
+
+# Copies mistarr.db and any -wal/-shm beside it to the mistarr.db.prev set,
+# so a rollback across a migration has the matching database. Streams with cp.
+backup_db() {
+    if [ ! -f "$DB" ]; then
+        echo "no database yet; nothing to back up"
+        return 0
+    fi
+    need=1024
+    for f in "$DB" "$DB-wal" "$DB-shm"; do
+        [ -f "$f" ] && need=$((need + $(size_kib "$f")))
+    done
+    avail=$(free_kib "$INSTALL_DIR")
+    if [ -n "$avail" ]; then
+        # The old set is removed before copying, so its space counts as free.
+        for f in "$DB_PREV" "$DB_PREV-wal" "$DB_PREV-shm"; do
+            [ -f "$f" ] && avail=$((avail + $(size_kib "$f")))
+        done
+        if [ "$avail" -lt "$need" ]; then
+            echo "not enough free space to back up the database: need $need KiB, have $avail KiB" >&2
+            return 1
+        fi
+    fi
+    remove_db_prev
+    for part in "" -wal -shm; do
+        [ -f "$DB$part" ] || continue
+        if ! cp "$DB$part" "$DB_PREV$part"; then
+            echo "failed to copy $DB$part to $DB_PREV$part" >&2
+            remove_db_prev
+            return 1
+        fi
+    done
+    db_saved=1
+    echo "saved the database as $DB_PREV"
+}
+
+# Puts the saved database set back in place of the current one, dropping any
+# -wal/-shm the saved set lacks so a newer WAL is never replayed onto it.
+restore_db() {
+    [ "$db_saved" = 1 ] || return 0
+    rm -f "$DB-wal" "$DB-shm"
+    for part in "" -wal -shm; do
+        [ -f "$DB_PREV$part" ] || continue
+        if ! cp "$DB_PREV$part" "$DB$part"; then
+            echo "failed to restore $DB$part from $DB_PREV$part" >&2
+            return 1
+        fi
+    done
+    echo "restored the database from $DB_PREV"
+}
+
+# Restarts the installed version after an install that stopped it and then
+# aborted before changing anything.
+restart_current() {
+    [ -x "$LAUNCHER" ] || return 0
+    if MISTARR_ROOT="$ROOT" "$LAUNCHER" start; then
+        echo "restarted the installed version of mistarr"
+    else
+        echo "failed to restart the installed version of mistarr" >&2
+    fi
+}
+
+# Restores the previous binary, launcher and database after a failed install,
+# if they were saved, and restarts that previous version.
 restore_prev() {
+    if [ -x "$LAUNCHER" ]; then
+        MISTARR_ROOT="$ROOT" "$LAUNCHER" stop >/dev/null 2>&1 || true
+    fi
+    if ! restore_db; then
+        echo "not restarting; copy the $DB_PREV set back by hand before starting mistarr" >&2
+        return 1
+    fi
     restored=0
     if [ -f "$PREV" ]; then
         cp "$PREV" "$BIN" && chmod +x "$BIN"
@@ -154,11 +241,21 @@ install_release() {
         MISTARR_ROOT="$ROOT" "$LAUNCHER" stop || true
     fi
 
-    if [ -f "$BIN" ]; then
-        cp "$BIN" "$PREV"
+    if ! backup_db; then
+        echo "aborting the install; nothing was changed" >&2
+        restart_current
+        exit 1
     fi
-    if [ -f "$LAUNCHER" ]; then
-        cp "$LAUNCHER" "$PREV_LAUNCHER"
+
+    if [ -f "$BIN" ] && ! cp "$BIN" "$PREV"; then
+        echo "failed to save the previous binary; aborting the install" >&2
+        restart_current
+        exit 1
+    fi
+    if [ -f "$LAUNCHER" ] && ! cp "$LAUNCHER" "$PREV_LAUNCHER"; then
+        echo "failed to save the previous launcher; aborting the install" >&2
+        restart_current
+        exit 1
     fi
 
     if ! cp "$ex/mistarr" "$BIN"; then
@@ -182,6 +279,22 @@ install_release() {
         restore_prev
         exit 1
     fi
+    print_rollback
+}
+
+# Says what was saved and how to go back to it by hand.
+print_rollback() {
+    [ -f "$PREV" ] || return 0
+    echo "the previous version is saved as $PREV"
+    if [ "$db_saved" = 1 ]; then
+        echo "and its database as $DB_PREV (with any -wal and -shm beside it)"
+    fi
+    echo "to roll back by hand, in $INSTALL_DIR: run $LAUNCHER stop, copy mistarr.prev to mistarr,"
+    if [ "$db_saved" = 1 ]; then
+        echo "delete mistarr.db-wal and mistarr.db-shm, copy mistarr.db.prev to mistarr.db and any"
+        echo "mistarr.db.prev-wal and mistarr.db.prev-shm to mistarr.db-wal and mistarr.db-shm,"
+    fi
+    echo "then run $LAUNCHER start; see Rollback in docs/DEPLOYMENT.md"
 }
 
 main() {
