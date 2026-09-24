@@ -63,6 +63,39 @@ any dynamic dependency, checked with `file` on the output.
 /media/fat/Scripts/mistarr.sh      # start/stop/status from the MiSTer Scripts menu
 ```
 
+## Installing on the board
+
+Over SSH, one line fetches, verifies and installs the latest release:
+
+```sh
+curl -fsSL https://github.com/mcfbytes/mistarr/releases/latest/download/install.sh | sh
+```
+
+The stock MiSTer image's `/bin/sh` is BusyBox ash; the command above works
+with it as written. A `bash` present on the board runs it too. Add a version
+to install something other than latest: append it as an argument to a
+downloaded copy of the script, for example `sh install.sh v1.2.3`; piped
+through `sh -s`, the version goes after the dash: `... | sh -s v1.2.3`.
+
+From the MiSTer Scripts menu: copy `install.sh` from a release to
+`/media/fat/Scripts/mistarr_install.sh` and run it from the menu with no
+argument, which installs the latest release.
+
+Either way `install.sh` resolves the release through the GitHub API,
+downloads `mistarr-armv7.tar.gz` and its `.sha256`, verifies the checksum and
+that the binary is an ARM ELF executable, stops a running mistarr, installs
+the new binary and `mistarr.sh`, and starts it again. `mistarr.db`,
+`mistarr.toml` and the watched directories are never touched.
+
+**Upgrading** is the same command run again; it replaces the binary and
+`mistarr.sh` in place and keeps the database and config.
+
+**Rollback**: before overwriting an existing binary, `install.sh` saves it as
+`mistarr.prev` beside it. If anything after that point fails — the new binary
+fails to start — the script restores `mistarr.prev` automatically. To roll
+back by hand, stop mistarr, copy `mistarr.prev` over `mistarr`, and start it
+again; then install whichever earlier version you need.
+
 ## Starting it
 
 `Scripts/mistarr.sh` starts the daemon under `nice -n 10 ionice -c 3`, prints
@@ -84,8 +117,22 @@ for throughput (`--hash-mib N` changes the size). It reads the same config as
 the server and needs no running server. This is what a bug report should
 include.
 
-## Releases
+## Releasing
 
-Tagged releases publish `mistarr-armv7.tar.gz` containing the binary and
-`mistarr.sh`. No other artifacts. The release notes contain no links to
-content of any kind (PRINCIPLES.md).
+A release publishes `mistarr-armv7.tar.gz` (the binary, `mistarr.sh` and
+`install.sh`), `mistarr-armv7.tar.gz.sha256`, and `install.sh` on its own so
+it can be fetched directly. No other artifacts, and the release notes contain
+no links to content of any kind (PRINCIPLES.md).
+
+**From the GitHub web UI**: open Releases, choose "Draft a new release",
+create a new tag `vX.Y.Z` for it, and publish. The release's own body is used
+as written; CI builds the binary and attaches the three assets to it.
+
+**From the command line**: push a tag matching `v*`, for example
+`git tag -a v1.2.3 -m "v1.2.3" && git push origin v1.2.3`. CI builds and
+creates the release. An annotated tag's message becomes the release body; a
+lightweight tag creates the release with no body.
+
+Both paths run the same workflow and land on the same release for a given
+tag, so publishing through the UI and then pushing the tag (or the reverse)
+is safe.

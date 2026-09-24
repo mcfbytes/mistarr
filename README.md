@@ -39,6 +39,20 @@ directories. Seeding is a per-source setting you choose. See
 [docs/PRINCIPLES.md](docs/PRINCIPLES.md) for the design rules that keep it that
 way and why they are not negotiable.
 
+## Install
+
+On the board, over SSH:
+
+```sh
+curl -fsSL https://github.com/mcfbytes/mistarr/releases/latest/download/install.sh | sh
+```
+
+`/bin/sh` on the stock MiSTer image is BusyBox and runs this as written; a
+`bash` present on the board works too. From the MiSTer Scripts menu, copy
+`install.sh` from a release to `/media/fat/Scripts/mistarr_install.sh` and run
+it from there instead. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for
+upgrading, rollback and how releases are built.
+
 ## Status
 
 Design stage. The architecture and work packages are written; the code is a

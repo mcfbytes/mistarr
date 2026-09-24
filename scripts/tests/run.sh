@@ -200,6 +200,11 @@ count2=$(grep -c "$resolved_self" "$root/linux/user-startup.sh")
 }
 "$script" stop >/dev/null
 
+if ! sh "$here/install.sh"; then
+    fail=$((fail + 1))
+    echo "FAIL: scripts/tests/install.sh"
+fi
+
 if [ "$fail" -eq 0 ]; then
     echo "all tests passed"
 else
