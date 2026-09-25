@@ -15,6 +15,7 @@
   import { fixtureSettings } from '../lib/fixtures';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { launchBlocker } from '../lib/launch';
+  import PlatformArt from '../lib/PlatformArt.svelte';
   import { BROWSE_FLAGS, type HaveFilter, type TitleFilters } from '../lib/types';
 
   interface Props {
@@ -181,6 +182,7 @@
 
 <div class="page">
   <div class="head">
+    <div class="banner"><PlatformArt id={platformId} kind={platform?.kind} format="wide" /></div>
     <h1>{platform?.name ?? platformId}</h1>
     {#if canStartCore}
       <button disabled={coreBusy || coreBlocker !== null} onclick={startCore}>Start core</button>
@@ -274,10 +276,45 @@
 
 <style>
   .head {
+    position: relative;
+    overflow: hidden;
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 0.5em 1em;
+    padding: 116px 1em 1em;
+    margin-bottom: 0.75em;
+    border-radius: var(--radius);
+    border: 1px solid var(--border);
+  }
+
+  .banner {
+    position: absolute;
+    inset: 0 0 auto;
+    height: 150px;
+  }
+
+  /* Text starts where the scrim is at least 85% opaque, which holds AA contrast over any art. */
+  .banner::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      to bottom,
+      transparent 50%,
+      color-mix(in srgb, var(--bg) 85%, transparent) 76%,
+      var(--bg) 94%
+    );
+  }
+
+  .head > :not(.banner) {
+    position: relative;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 1.6em;
+    line-height: 1.2;
   }
 
   .reason {
