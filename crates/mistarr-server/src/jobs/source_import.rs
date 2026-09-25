@@ -14,7 +14,7 @@ use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use super::remap::{map_files, store_mapping};
+use super::remap::{key_new_roms, map_files, store_mapping};
 use super::{wizard, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::candidates;
@@ -189,8 +189,9 @@ async fn import_torrent(
     let infohash = InfoHash::from_bytes(meta.infohash).to_string();
     let threshold = app.config().sources.bind_threshold;
     let origin = origin.to_owned();
+    key_new_roms(&app.db).await?;
     app.db
-        .write(move |c| {
+        .write_bulk(move |c| {
             let tx = c.transaction()?;
             let id = match rows::find_by_infohash(&tx, &infohash)? {
                 Some(row) if row.state == SourceState::Resolving => row.id,
@@ -358,9 +359,10 @@ pub fn awaiting_dat_reason(platform_name: &str) -> String {
 pub async fn rebind_after_dat(app: &Arc<AppState>, platforms: &[PlatformId]) -> Result<usize> {
     let threshold = app.config().sources.bind_threshold;
     let platforms_queued = platforms.to_vec();
+    key_new_roms(&app.db).await?;
     let changed = app
         .db
-        .write(move |c| {
+        .write_bulk(move |c| {
             let tx = c.transaction()?;
             let mut out = Vec::new();
             for (id, suggested) in rows::list_unbound(&tx)? {
@@ -557,9 +559,10 @@ impl Job for ResolveMagnet {
             })
             .collect();
         let threshold = app.config().sources.bind_threshold;
+        key_new_roms(&app.db).await?;
         let bound = app
             .db
-            .write(move |c| {
+            .write_bulk(move |c| {
                 let tx = c.transaction()?;
                 let still = rows::get(&tx, id)?.is_some_and(|r| r.state == SourceState::Resolving);
                 if !still {

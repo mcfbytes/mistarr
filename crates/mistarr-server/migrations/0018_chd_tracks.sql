@@ -32,6 +32,8 @@ CREATE TABLE chd_whole (                      -- whole-file hashes of CHDs a DAT
 
 -- Whether a scanned .chd has the size of a DAT's .chd rom, whatever other size indexes exist.
 CREATE INDEX roms_chd_size ON roms(size) WHERE lower(name) LIKE '%.chd';
+-- The sizes a CHD's rebuilt tracks can have, whole 2352-byte sectors; no cartridge rom is one.
+CREATE INDEX roms_track_size ON roms(size) WHERE size % 2352 = 0;
 
 -- Unmatched whole-file hashes of disc CHDs; the next scan reads their headers.
 UPDATE import_log SET file_id = NULL WHERE file_id IN (

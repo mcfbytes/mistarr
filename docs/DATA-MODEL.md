@@ -42,7 +42,8 @@ CREATE TABLE dat_versions (
 CREATE INDEX dat_versions_family ON dat_versions(family, platform_id);
 -- family: dat::family_key of dat_name, rewritten from the names at every start.
 
-CREATE TABLE dat_stage (          -- the DAT being imported, parsed outside the write lock and applied at once
+-- The writer connection's own, created on first use; never in the database file.
+CREATE TEMP TABLE dat_stage (     -- the DAT being imported, parsed outside the write lock and applied at once
   seq  INTEGER PRIMARY KEY,
   game TEXT NOT NULL              -- one parsed game with its roms, as JSON
 );
@@ -123,12 +124,13 @@ CREATE TABLE roms (                     -- one per <rom>; the file unit
   UNIQUE (title_id, name)
 );
 CREATE INDEX roms_sha1 ON roms(sha1);
-CREATE INDEX roms_md5  ON roms(md5);
+CREATE INDEX roms_md5  ON roms(md5) WHERE sha1 IS NULL;
 CREATE INDEX roms_crc  ON roms(crc32, size);
 CREATE INDEX roms_match_name ON roms(match_name);
-CREATE INDEX roms_match_base ON roms(match_base, size);
-CREATE INDEX roms_size ON roms(size);
+CREATE INDEX roms_match_base ON roms(match_base, size) WHERE match_base IS NOT NULL;
+CREATE INDEX roms_size ON roms(size) WHERE match_base IS NOT NULL;
 CREATE INDEX roms_chd_size ON roms(size) WHERE lower(name) LIKE '%.chd';   -- a scanned .chd hashed whole
+CREATE INDEX roms_track_size ON roms(size) WHERE size % 2352 = 0;        -- a CHD's rebuilt track sizes
 
 CREATE TABLE files (                    -- what is on disk under games/
   id            INTEGER PRIMARY KEY,
@@ -503,4 +505,26 @@ once and MRA titles through `titles_mra_path`, unfiltered totals count a
 whole table, and pages in id order stop at their limit. The test
 `db::plans::hot_reads_walk_indexes_not_growing_tables` prints each plan and
 fails on any other scan.
+
+Each rom index serves one lookup, and a DAT load writes into every index
+whose key its roms carry, at random places (ARCHITECTURE.md "Writes on a
+sync mount"), so an index holds only the roms its lookup can return:
+
+| Index | Lookup | Rows |
+|---|---|---|
+| `roms_sha1` | the sha1 tier of matching a file | every rom |
+| `roms_md5` | the md5 tier, which matches only roms without a sha1 | roms without a sha1 |
+| `roms_crc` | the CRC32 and size tier, and whether a zip member's CRC32 can match anything | every rom |
+| `roms_match_name` | binding by normalised name, and the roms still to key | every rom |
+| `roms_match_base` | binding by base name and size | roms binding has keyed |
+| `roms_size` | the fuzzy and size-only candidates, which read only keyed roms | roms binding has keyed |
+| `roms_chd_size` | whether a scanned `.chd` has the size of a DAT's `.chd` rom | roms named `*.chd` |
+| `roms_track_size` | the titles a CHD's track sizes can match before it is decoded | roms of whole 2352-byte sectors |
+
+A load inserts its roms with `match_name` and `match_base` NULL; binding
+keys them (`sources::refresh_match_keys`) in one transaction before it reads
+them. `db::plans::rom_lookups_and_directory_tracks_seek_their_own_index`
+asserts each lookup, the partial ones included, seeks its index, and that a
+disc directory's tracks (`files::in_directory`) are one range of the
+`(platform_id, rel_path)` key.
 

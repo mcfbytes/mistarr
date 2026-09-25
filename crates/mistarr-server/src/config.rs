@@ -152,7 +152,7 @@ impl PathsConfig {
         self.data.join("mistarr.db")
     }
 
-    /// Where SQLite writes its temporary files, on the data disk.
+    /// Where SQLite writes its temporary files when `db::RAM_TEMP_DIR` cannot be written.
     ///
     /// ```
     /// assert!(mistarr_server::config::PathsConfig::default().tmp().ends_with("tmp"));

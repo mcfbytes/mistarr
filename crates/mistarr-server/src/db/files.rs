@@ -921,7 +921,9 @@ pub fn unmatched_after(
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// The files of `platform_id` directly inside the directory `dir` (relative to `games/`).
+/// The files of `platform_id` directly inside the directory `dir` (relative to `games/`),
+/// matched case-sensitively, in `rel_path` order. One range seek on the unique
+/// `(platform_id, rel_path)` key, so its cost follows the directory, not the platform.
 ///
 /// # Errors
 ///
@@ -938,19 +940,14 @@ pub fn in_directory(
     platform_id: &PlatformId,
     dir: &str,
 ) -> Result<Vec<FileRow>> {
-    let prefix = format!("{dir}/");
+    // `dir/` up to `dir0` (`0` follows `/`) is every path inside `dir`, byte for byte.
+    let (prefix, to) = (format!("{dir}/"), format!("{dir}0"));
     let rows: Vec<FileRow> = conn
         .prepare_cached(&format!(
-            "SELECT {COLUMNS} FROM files WHERE platform_id = ?1 AND substr(rel_path, 1, ?3) = ?2"
+            "SELECT {COLUMNS} FROM files
+             WHERE platform_id = ?1 AND rel_path >= ?2 AND rel_path < ?3 ORDER BY rel_path"
         ))?
-        .query_map(
-            params![
-                platform_id.0,
-                prefix,
-                i64::try_from(prefix.chars().count()).unwrap_or(i64::MAX)
-            ],
-            from_row,
-        )?
+        .query_map(params![platform_id.0, prefix, to], from_row)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows
         .into_iter()
@@ -1374,6 +1371,66 @@ mod tests {
         );
         let rest = paths_under(&c, &pid, "mame", &first[2], 3).expect("page");
         assert_eq!(rest, ["mame/a.zip.zip#z.bin", "mame/b.zip#x.bin"]);
+    }
+
+    #[test]
+    fn in_directory_lists_a_directory_s_own_files_by_exact_prefix() {
+        let c = conn();
+        let psx = PlatformId("psx".into());
+        let h = Hashed::default();
+        let paths = [
+            "PSX/Disc",
+            "PSX/Disc.bin",
+            "PSX/Disc/a.cue",
+            "PSX/Disc/a (Track 1).bin",
+            "PSX/Disc/sub/b.bin",
+            "PSX/Disc 2/c.bin",
+            "PSX/Disc0/d.bin",
+            "PSX/disc/e.bin",
+            "PSX/Díşc/f.bin",
+            "PSX/Díşc/g/h.bin",
+        ];
+        for rel in paths {
+            upsert(&c, &psx, rel, 1, 1, &h, None, FileState::Unverified, 1).expect("insert");
+        }
+        let other = PlatformId("saturn".into());
+        upsert(
+            &c,
+            &other,
+            "PSX/Disc/x.bin",
+            1,
+            1,
+            &h,
+            None,
+            FileState::Unverified,
+            1,
+        )
+        .expect("insert");
+        for dir in [
+            "PSX/Disc",
+            "PSX/disc",
+            "PSX/Díşc",
+            "PSX/Disc 2",
+            "PSX",
+            "PSX/None",
+        ] {
+            let prefix = format!("{dir}/");
+            let mut want: Vec<&str> = paths
+                .iter()
+                .copied()
+                .filter(|p| {
+                    p.strip_prefix(&prefix)
+                        .is_some_and(|rest| !rest.contains('/'))
+                })
+                .collect();
+            want.sort_unstable();
+            let got: Vec<String> = in_directory(&c, &psx, dir)
+                .expect("list")
+                .into_iter()
+                .map(|r| r.rel_path)
+                .collect();
+            assert_eq!(got, want, "{dir}");
+        }
     }
 
     #[test]

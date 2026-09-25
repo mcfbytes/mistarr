@@ -453,11 +453,54 @@ fn import_from(db: &Db, path: &Path, member: Member, req: &Request) -> Result<Ou
         Ok(Ok(p)) => p,
         Ok(Err(reason)) | Err(reason) => return Ok(Outcome::Rejected(reason)),
     };
-    match with_member(path, member, ("reading", meter), |r, name| {
+    let streamed = with_member(path, member, ("reading", meter), |r, name| {
         import_stream(db, r, req, name, parents)
-    })? {
-        Ok(outcome) => Ok(outcome),
-        Err(reason) => Ok(Outcome::Rejected(reason)),
+    });
+    match streamed {
+        Ok(Ok(outcome)) => Ok(outcome),
+        Ok(Err(reason)) => Ok(Outcome::Rejected(reason)),
+        Err(e) if disk_full(&e) => {
+            // The stage may hold most of the DAT; give its space back before failing.
+            if let Err(c) = db.write_blocking(|c| dat_stage::clear(c)) {
+                tracing::warn!(error = %c, "cannot empty the DAT stage");
+            }
+            let tmp = std::env::var_os(crate::db::SQLITE_TMPDIR).map(PathBuf::from);
+            Err(Error::Job(full_message(
+                tmp.as_deref(),
+                db.path(),
+                free_bytes,
+            )))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Whether `e` is SQLite's "database or disk is full".
+fn disk_full(e: &Error) -> bool {
+    matches!(e, Error::Db(rusqlite::Error::SqliteFailure(f, _))
+        if f.code == rusqlite::ErrorCode::DiskFull)
+}
+
+/// Bytes free to this process on the filesystem holding `path`.
+fn free_bytes(path: &Path) -> Option<u64> {
+    let s = rustix::fs::statvfs(path).ok()?;
+    Some(s.f_bavail.saturating_mul(s.f_frsize))
+}
+
+/// Why a load failed for lack of space, naming SQLite's temporary directory `tmp` when
+/// it has less room left than the filesystem holding the database `db`.
+fn full_message(tmp: Option<&Path>, db: &Path, free: impl Fn(&Path) -> Option<u64>) -> String {
+    let dir = db.parent().unwrap_or(db);
+    match tmp {
+        Some(t) if free(t).unwrap_or(0) <= free(dir).unwrap_or(u64::MAX) => format!(
+            "{} is full: the staged DAT and SQLite's temporary files did not fit there; \
+             the database is unchanged",
+            t.display()
+        ),
+        _ => format!(
+            "{} is full: the database could not grow; it is unchanged",
+            dir.display()
+        ),
     }
 }
 
@@ -696,7 +739,7 @@ fn import_stream<R: BufRead>(
     if !chunk.is_empty() {
         db.write_blocking(|c| append_chunk(c, &chunk))?;
     }
-    db.write_blocking(|c| {
+    db.write_bulk_blocking(|c| {
         let tx = c.transaction()?;
         let plan = dats::upsert_version(&tx, &new)?;
         if req.bind.is_some() && !plan.current {
@@ -1242,5 +1285,7 @@ pub async fn watch(app: Arc<AppState>) {
     }
 }
 
+#[cfg(test)]
+mod sync_writes;
 #[cfg(test)]
 mod tests;

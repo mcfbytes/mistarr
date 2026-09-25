@@ -176,8 +176,34 @@ pub fn store_mapping(
     Ok(hits)
 }
 
+/// Gives new roms their match keys a batch per bulk transaction, committing each, so
+/// binding that follows finds them keyed and holds the writer only for itself. Returns
+/// how many it keyed.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub async fn key_new_roms(db: &crate::db::Db) -> Result<usize> {
+    let mut total = 0;
+    loop {
+        let keyed = db
+            .write_bulk(|c| {
+                let tx = c.transaction()?;
+                let keyed = rows::key_batch(&tx)?;
+                crate::db::commit(tx)?;
+                Ok(keyed)
+            })
+            .await?;
+        if keyed == 0 {
+            return Ok(total);
+        }
+        total += keyed;
+    }
+}
+
 /// Maps one source again when its platform's roms changed since it was last
-/// mapped, writing only what changed, [`CHUNK`] rows per transaction, then
+/// mapped: keys new roms a batch per transaction, then writes only what changed,
+/// [`CHUNK`] rows per transaction, then
 /// its stamp and hit rate. Publishes `source.changed` when the mapping
 /// changed and returns whether it did.
 ///
@@ -201,11 +227,13 @@ pub async fn remap_one(app: &AppState, id: SourceId) -> Result<bool> {
     let Some((row, platform)) = current else {
         return Ok(false);
     };
+    key_new_roms(&app.db).await?;
     let p = platform.clone();
     app.db
         .write(move |c| {
-            rows::refresh_match_keys(c)?;
-            candidates::drop_foreign_proofs(c, id, &p)
+            let tx = c.transaction()?;
+            candidates::drop_foreign_proofs(&tx, id, &p)?;
+            crate::db::commit(tx)
         })
         .await?;
     let p = platform.clone();
@@ -415,6 +443,20 @@ mod tests {
         assert!(fuzzy_extensions(&PlatformId("psx".into())).is_empty());
         assert!(fuzzy_extensions(&PlatformId("neogeo".into())).is_empty());
         assert!(fuzzy_extensions(&PlatformId("none".into())).is_empty());
+    }
+
+    #[tokio::test]
+    async fn new_roms_are_keyed_before_binding_and_only_once() {
+        let (_dir, app) = state();
+        app.db
+            .write_blocking(|c| {
+                seed_rom(c, "nes", "Nova Quest (World).nes", 16, &[])?;
+                seed_rom(c, "nes", "Other Tale (Europe).nes", 16, &[])?;
+                Ok(())
+            })
+            .expect("seed");
+        assert_eq!(key_new_roms(&app.db).await.expect("key"), 2);
+        assert_eq!(key_new_roms(&app.db).await.expect("again"), 0);
     }
 
     #[tokio::test]

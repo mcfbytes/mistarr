@@ -393,9 +393,9 @@ pub fn layout_known(conn: &Connection, platform: &PlatformId, sizes: &[u64]) -> 
     };
     let titles: Vec<i64> = conn
         .prepare_cached(
-            "SELECT DISTINCT r.title_id FROM roms r INDEXED BY roms_size
+            "SELECT DISTINCT r.title_id FROM roms r INDEXED BY roms_track_size
              JOIN titles t ON t.id = r.title_id
-             WHERE r.size = ?2 AND t.platform_id = ?1 AND t.source = 'dat'
+             WHERE r.size = ?2 AND r.size % 2352 = 0 AND t.platform_id = ?1 AND t.source = 'dat'
                AND r.retired = 0 AND t.retired = 0 AND lower(r.name) NOT LIKE '%.cue'",
         )?
         .query_map(params![platform.0, size_i64(first)], |r| r.get(0))?

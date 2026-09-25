@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::downloads::{self, DownloadState};
 use super::titles::{self, Browse, SearchShape, Sort, TitleId, SEARCH_SHAPE};
-use super::{files, groups, imports, jobs, launch, sources};
+use super::{candidates, chd, files, groups, imports, jobs, launch, sources};
 
 thread_local! {
     static TRACED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -73,7 +73,8 @@ fn seeded() -> Connection {
 /// A read under test.
 type Read<'a> = Box<dyn FnOnce(&Connection) + 'a>;
 
-/// The reads of matching stored hashes and of the recent jobs.
+/// The reads of matching stored hashes, binding, a disc directory's tracks and the
+/// recent jobs.
 fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
     vec![
         (
@@ -100,6 +101,38 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             Box::new(|c| {
                 let nes = mistarr_core::PlatformId("nes".into());
                 files::crc_candidate_exists(c, &nes, "00000000", 16).expect("candidate");
+            }),
+        ),
+        (
+            "binding lookups",
+            Box::new(|c| {
+                use mistarr_sources::binding::DatIndex as _;
+                let index = sources::SqlDatIndex::new(c);
+                drop(index.by_normalised_name("example quest.nes"));
+                drop(index.by_base_name_and_size("example quest", 16));
+            }),
+        ),
+        (
+            "size candidates",
+            Box::new(|c| {
+                use mistarr_sources::fuzzy::SizeIndex as _;
+                let nes = mistarr_core::PlatformId("nes".into());
+                drop(candidates::SqlSizeIndex::new(c, &nes).roms_of_size(40_976));
+            }),
+        ),
+        (
+            "directory tracks",
+            Box::new(|c| {
+                let psx = mistarr_core::PlatformId("psx".into());
+                drop(files::in_directory(c, &psx, "psx/Example Disc").expect("tracks"));
+            }),
+        ),
+        (
+            "chd lookups",
+            Box::new(|c| {
+                let psx = mistarr_core::PlatformId("psx".into());
+                files::chd_rom_sized(c, &psx, 4_704).expect("chd rom");
+                chd::layout_known(c, &psx, &[4_704]).expect("layout");
             }),
         ),
     ]
@@ -196,7 +229,7 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
 }
 
 /// The whole-table walks the hot reads may make, each bounded or inherent.
-const ALLOWED_SCANS: [(&str, &str); 16] = [
+const ALLOWED_SCANS: [(&str, &str); 17] = [
     // The sort over one group's availability rows, which the union gathers by rom.
     ("title detail", "SCAN (subquery-"),
     // A refresh walks at most one chunk of the dirty list and that chunk's grouped rows.
@@ -219,6 +252,7 @@ const ALLOWED_SCANS: [(&str, &str); 16] = [
     ("browse", "SCAN CONSTANT ROW"),
     ("browse", "SCAN title_search VIRTUAL TABLE"),
     ("crc candidate", "SCAN CONSTANT ROW"),
+    ("chd lookups", "SCAN CONSTANT ROW"),
 ];
 
 /// Every hot read seeks through indexes except the scans in [`ALLOWED_SCANS`], and the
@@ -299,6 +333,42 @@ fn the_group_refresh_seeks_by_group_root_and_rom() {
     let has = |p: &str| plan.iter().any(|l| l.contains(p));
     assert!(has("titles_group_root (group_root=?)"), "{plan:?}");
     assert!(has("files_rom (rom_id=?)"), "{plan:?}");
+}
+
+/// Each rom lookup seeks the index made for it, the partial ones included, and a disc
+/// directory's tracks are one range of the files' unique key.
+#[test]
+fn rom_lookups_and_directory_tracks_seek_their_own_index() {
+    let reads = hot_reads();
+    let expect = |name: &str, sql: &str, index: &str| {
+        let plan = plan_of(&reads, name, sql);
+        assert!(plan.iter().any(|l| l.contains(index)), "{name}: {plan:?}");
+    };
+    expect("stored match", "r.sha1 = ", "roms_sha1 (sha1=?)");
+    expect("stored match", "r.md5 = ", "roms_md5 (md5=?)");
+    expect(
+        "stored match",
+        "r.crc32 = ",
+        "roms_crc (crc32=? AND size=?)",
+    );
+    expect(
+        "binding lookups",
+        "r.match_name = ",
+        "roms_match_name (match_name=?)",
+    );
+    expect(
+        "binding lookups",
+        "r.match_base = ",
+        "roms_match_base (match_base=? AND size=?)",
+    );
+    expect("size candidates", "r.size IN", "roms_size (size=?)");
+    expect("chd lookups", "LIKE '%.chd'", "roms_chd_size (size=?)");
+    expect("chd lookups", "r.size % 2352", "roms_track_size (size=?)");
+    expect(
+        "directory tracks",
+        "FROM files",
+        "sqlite_autoindex_files_1 (platform_id=? AND rel_path>? AND rel_path<?)",
+    );
 }
 
 /// The recent jobs seek finished rows by state and sort only those, which the scheduler's
