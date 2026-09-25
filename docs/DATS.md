@@ -62,8 +62,8 @@ such as "Waiting for the file to stop changing."), importing (with progress)
 or rejected (with the reason). Imports run while a core is loaded; only a
 manual pause on the System screen holds them.
 
-A loaded file moves to `dats/loaded/`, gaining ` (2)` before its extension
-when that name is taken. A rejected file moves to `dats/rejected/` with
+A loaded file moves to `dats/loaded/`, gaining ` (1)`, or the next free
+number, before its extension when that name is taken. A rejected file moves to `dats/rejected/` with
 `<file>.reason.txt` beside it. When some members of a zip load and others do
 not, the zip moves to `dats/loaded/` and each failed member is reported as a
 rejection on the screen.
@@ -110,11 +110,14 @@ them, so `20260101-000000` and `20260102` compare as dates and `1.9` comes
 before `1.10`. When a version has no digits, the one loaded later is newer.
 
 - Loading a version that is not older than the current one replaces it. The
-  replaced version shows "Replaced by version X" under "Older versions".
+  replaced version shows "Replaced by version X" under "Older versions", or
+  "Replaced by NAME version X" when the new one has a different DAT name
+  in the same family.
   Entries the new version no longer lists are retired from the catalogue;
   files on the card are never touched.
 - Loading an older version stores it without loading its entries, shown as
-  "Older than version X, which stays current".
+  "Older than version X, which stays current" (with the current DAT's name
+  before "version" when it differs).
 - Remove on a current version takes its entries out of the catalogue after a
   confirmation, shown as "Removed; its games are no longer listed". It does
   not bring back an older version; drop that file again to load it.
@@ -142,7 +145,7 @@ no games`, is about that member of a zip.
 | `invalid XML at byte N: …` | The XML is malformed at that byte offset, or a name or value there is not UTF-8. Comments and ignored elements may hold any bytes. |
 | `file ends before </datafile>` | The file is cut short, usually by an interrupted copy or download. Copy it again. |
 | `DAT contains no games` | The file parses but lists no entries. |
-| `<rom> in game "…" has no name attribute` | A required attribute is missing on that entry. |
+| `<rom> in game "…" has no name attribute` | A required attribute is missing on that entry. The element may also be `<file>`, or `<game>` with an empty game name when a game has no name. |
 | `game "…" has invalid crc value "…"` | A size, hash or status is not in the expected form; a hash must have its full length in hex. |
 | `invalid zip archive: …` | The zip cannot be read. |
 | `zip archive contains no .dat or .xml files` | The zip holds nothing to load. |
