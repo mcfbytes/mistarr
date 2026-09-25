@@ -459,7 +459,7 @@ impl DownloadClient for Rtorrent {
         // Files go before the erase, so a failed erase leaves a torrent whose
         // file list a retry can still read.
         let deleted = match data {
-            Some(layout) => tokio::task::spawn_blocking(move || layout.delete())
+            Some(layout) => tokio::task::spawn_blocking(move || delete_labelled(layout))
                 .await
                 .map_err(|e| ClientError::Io(io::Error::other(e)))?,
             None => Ok(()),
@@ -480,6 +480,21 @@ impl DownloadClient for Rtorrent {
         }
         Ok(())
     }
+}
+
+/// Deletes `layout` with the thread's `comm` set to `torrent-delete`, then puts the
+/// pool thread's name back; off Linux, or without `/proc`, it only deletes.
+fn delete_labelled(layout: DataLayout) -> io::Result<()> {
+    const COMM: &str = "/proc/thread-self/comm";
+    let saved = std::fs::read_to_string(COMM).ok();
+    if saved.is_some() {
+        let _ = std::fs::write(COMM, "torrent-delete");
+    }
+    let r = layout.delete();
+    if let Some(name) = saved {
+        let _ = std::fs::write(COMM, name.trim_end_matches('\n'));
+    }
+    r
 }
 
 fn protocol(e: impl std::fmt::Display) -> ClientError {

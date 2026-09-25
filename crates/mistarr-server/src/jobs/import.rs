@@ -405,10 +405,11 @@ impl Placing<'_> {
             None => None,
         };
         let (staging, hash) = (self.staging.clone(), self.source.infohash.clone());
-        let found =
-            tokio::task::spawn_blocking(move || locate(&staging, &hash, &staged, inner.as_deref()))
-                .await
-                .map_err(|e| task(&e))?;
+        let found = crate::threads::blocking(crate::threads::label::IMPORT, move || {
+            locate(&staging, &hash, &staged, inner.as_deref())
+        })
+        .await
+        .map_err(|e| task(&e))?;
         Ok(found.ok_or(OUTSIDE_STAGING))
     }
 
@@ -425,17 +426,20 @@ impl Placing<'_> {
 
     async fn hash(&self, local: &Path) -> Result<std::result::Result<Vec<Hashed>, String>> {
         let (path, rule) = (local.to_path_buf(), self.rule());
-        let hashed = tokio::task::spawn_blocking(move || hash_item(&path, rule))
-            .await
-            .map_err(|e| task(&e))?;
+        let hashed =
+            crate::threads::blocking(crate::threads::label::HASH, move || hash_item(&path, rule))
+                .await
+                .map_err(|e| task(&e))?;
         Ok(hashed.map_err(|e| format!("cannot read the staged file: {e}")))
     }
 
     async fn head(&self, path: &Path, member: Option<&str>) -> Result<Vec<u8>> {
         let (path, member) = (path.to_path_buf(), member.map(str::to_owned));
-        let head = tokio::task::spawn_blocking(move || read_head(&path, member.as_deref()))
-            .await
-            .map_err(|e| task(&e))?;
+        let head = crate::threads::blocking(crate::threads::label::IMPORT, move || {
+            read_head(&path, member.as_deref())
+        })
+        .await
+        .map_err(|e| task(&e))?;
         Ok(head.unwrap_or_default())
     }
 
@@ -499,9 +503,11 @@ impl Placing<'_> {
             self.source.infohash.clone(),
             local.to_path_buf(),
         );
-        let moved = tokio::task::spawn_blocking(move || quarantine(&staging, &hash, &item, &text))
-            .await
-            .map_err(|e| task(&e))?;
+        let moved = crate::threads::blocking(crate::threads::label::IMPORT, move || {
+            quarantine(&staging, &hash, &item, &text)
+        })
+        .await
+        .map_err(|e| task(&e))?;
         let dst = moved.unwrap_or_else(|e| {
             tracing::warn!(download = %row, error = %e, "cannot move the file to quarantine");
             local.to_path_buf()
@@ -1100,7 +1106,7 @@ impl Placing<'_> {
             originals.to_vec(),
         );
         self.ctx.checkpoint().await?;
-        let applied = tokio::task::spawn_blocking(move || {
+        let applied = crate::threads::blocking(crate::threads::label::IMPORT, move || {
             apply_plan(&staging, &item, &scratch, &games, &steps, &originals)
         })
         .await
@@ -1289,7 +1295,10 @@ impl Placing<'_> {
             }
         }
         let dir = self.staging.join(&source.infohash);
-        let _ = tokio::task::spawn_blocking(move || place::remove_empty_dirs(&dir)).await;
+        let _ = crate::threads::blocking(crate::threads::label::IMPORT, move || {
+            place::remove_empty_dirs(&dir);
+        })
+        .await;
     }
 }
 
