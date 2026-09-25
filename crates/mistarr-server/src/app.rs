@@ -2,7 +2,7 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
 use mistarr_clients::DownloadClient;
@@ -10,12 +10,13 @@ use mistarr_mister::launch::{CommandSink, FifoSink};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::client::ClientKey;
+use crate::client::{ClientEndpoint, ClientKey};
 use crate::config::{Config, RuntimeSettings, SettingsPatch};
 use crate::db::settings::{self, keys};
 use crate::db::{self, Db};
 use crate::error::{Error, Result};
 use crate::events::{EventBus, EventKind};
+use crate::jobs::core_limits::ClientHold;
 use crate::jobs::detect_client::{ClientStatus, DetectClient};
 use crate::jobs::gate::Gate;
 use crate::jobs::{self, corename, poll, source_import, transfer, Scheduler};
@@ -67,6 +68,14 @@ pub struct Options {
     pub client_start_wait: Duration,
     /// The `ionice` that idles the daemon's I/O while a core runs; `None` never changes it.
     pub ionice: Option<PathBuf>,
+    /// The `kill` that stops and resumes a client on the board.
+    pub kill: PathBuf,
+    /// The process table the client is looked for in.
+    pub proc_dir: PathBuf,
+    /// The frozen client's record, in the private RAM temporary directory.
+    pub frozen_file: PathBuf,
+    /// How often a held client is checked for having left its hold.
+    pub hold_recheck: Duration,
 }
 
 impl Default for Options {
@@ -94,6 +103,10 @@ impl Default for Options {
             client_search_path: None,
             client_start_wait: Duration::from_secs(10),
             ionice: Some(PathBuf::from("ionice")),
+            kill: PathBuf::from("kill"),
+            proc_dir: PathBuf::from("/proc"),
+            frozen_file: Path::new(crate::db::RAM_TEMP_DIR).join(crate::freeze::FROZEN_NAME),
+            hold_recheck: Duration::from_secs(60),
         }
     }
 }
@@ -121,6 +134,15 @@ pub struct AppState {
     pub poll_wake: tokio::sync::Notify,
     /// Wakes client re-detection, as when a client that answered stops answering.
     pub redetect: tokio::sync::Notify,
+    /// Wakes the core gate's client hold after the settings or the client change.
+    pub limits_wake: tokio::sync::Notify,
+    client_hold: RwLock<Option<ClientHold>>,
+    /// Held while the client is stopped or resumed for shutdown, so no stop
+    /// lands after shutdown resumed it.
+    pub(crate) freeze_lock: Arc<Mutex<()>>,
+    /// Passes of the core gate's loop, for tests that bound how often it wakes.
+    #[cfg(test)]
+    pub(crate) gate_passes: std::sync::atomic::AtomicU64,
     /// Serialises client detection so an older probe never overwrites a newer one.
     pub(crate) detect_lock: tokio::sync::Mutex<()>,
     /// Held while `POST /system/client/start` runs, so a second one is `busy`.
@@ -150,6 +172,11 @@ impl AppState {
             started: Instant::now(),
             poll_wake: tokio::sync::Notify::new(),
             redetect: tokio::sync::Notify::new(),
+            limits_wake: tokio::sync::Notify::new(),
+            client_hold: RwLock::new(None),
+            freeze_lock: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            gate_passes: std::sync::atomic::AtomicU64::new(0),
             detect_lock: tokio::sync::Mutex::new(()),
             client_start: tokio::sync::Mutex::new(()),
             shutdown: watch::Sender::new(false),
@@ -188,14 +215,49 @@ impl AppState {
     /// detected URL, rtorrent's carrying `client.remote_path_map`; it is
     /// replaced only when the detected kind, URL or path map changes. Take a
     /// fresh handle per operation rather than keeping one, and expect calls to
-    /// fail with `Unreachable` when the client is down.
+    /// fail with `Unreachable` when the client is down. `None` while the client
+    /// is frozen for a running core, since a stopped process never answers.
     #[must_use]
     pub fn client(&self) -> Option<Arc<dyn DownloadClient>> {
+        if self.client_frozen() {
+            return None;
+        }
+        self.client_entry().map(|(_, c)| c)
+    }
+
+    /// The detected client and which one it is, frozen or not; only the core
+    /// gate talks to it through this.
+    #[must_use]
+    pub fn client_entry(&self) -> Option<(ClientEndpoint, Arc<dyn DownloadClient>)> {
         self.client
             .read()
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
-            .map(|(_, c)| Arc::clone(c))
+            .map(|(k, c)| (k.endpoint(), Arc::clone(c)))
+    }
+
+    /// How the client is held for a running core, if it is.
+    #[must_use]
+    pub fn client_hold(&self) -> Option<ClientHold> {
+        *self
+            .client_hold
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether the client's process is stopped for a running core.
+    #[must_use]
+    pub fn client_frozen(&self) -> bool {
+        self.client_hold() == Some(ClientHold::Frozen)
+    }
+
+    /// Records how the client is held; true when that changed.
+    pub(crate) fn set_client_hold(&self, hold: Option<ClientHold>) -> bool {
+        let mut slot = self
+            .client_hold
+            .write()
+            .unwrap_or_else(PoisonError::into_inner);
+        std::mem::replace(&mut *slot, hold) != hold
     }
 
     /// Points [`AppState::client`] at what `status` found. The current handle
@@ -214,6 +276,7 @@ impl AppState {
         if replace {
             if let Some(client) = key.build() {
                 *slot = Some((key, client));
+                self.limits_wake.notify_one();
             }
         }
     }
@@ -221,12 +284,29 @@ impl AppState {
     /// Installs `client` as the detected client, for tests that script one in process.
     #[cfg(test)]
     pub(crate) fn set_client(&self, client: Arc<dyn DownloadClient>) {
-        let key = ClientKey {
+        let at = ClientEndpoint {
             kind: mistarr_clients::ClientKind::Transmission,
             url: String::new(),
+        };
+        self.set_client_at(at, client);
+    }
+
+    /// Drops the client handle, leaving no client, as before the first detection.
+    #[cfg(test)]
+    pub(crate) fn clear_client(&self) {
+        *self.client.write().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
+    /// [`AppState::set_client`] as the client at `at`.
+    #[cfg(test)]
+    pub(crate) fn set_client_at(&self, at: ClientEndpoint, client: Arc<dyn DownloadClient>) {
+        let key = ClientKey {
+            kind: at.kind,
+            url: at.url,
             path_map: Vec::new(),
         };
         *self.client.write().unwrap_or_else(PoisonError::into_inner) = Some((key, client));
+        self.limits_wake.notify_one();
     }
 
     /// Where installed clients are looked for and how they are started.
@@ -315,6 +395,8 @@ impl Running {
         for t in &self.tasks {
             t.abort();
         }
+        // A stopped mistarr never leaves the client frozen.
+        jobs::core_limits::thaw_for_shutdown(&self.app).await;
         self.app.scheduler.stop(Duration::from_secs(5)).await;
         let mut server = self.server;
         match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
@@ -396,7 +478,8 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
         .await?;
     }
 
-    // Step 3: download client.
+    // Step 3: download client, resumed first if a previous run left it frozen at the menu.
+    jobs::core_limits::recover_frozen(&app).await;
     Scheduler::run_inline(&app, Arc::new(DetectClient)).await?;
 
     // Step 4: installed cores.
@@ -567,7 +650,9 @@ fn spawn_tasks(app: &Arc<AppState>, scan_interval: u32) -> Vec<tokio::task::Join
     tasks.push(tokio::spawn(crate::jobs::detect_client::watch(Arc::clone(
         app,
     ))));
-    tasks.push(tokio::spawn(poll::follow_gate(Arc::clone(app))));
+    tasks.push(tokio::spawn(jobs::core_limits::follow_gate(Arc::clone(
+        app,
+    ))));
 
     tasks
 }
@@ -682,6 +767,8 @@ pub(crate) mod testutil {
             launch_dir: dir.path().to_path_buf(),
             launch_gap: Duration::ZERO,
             ionice: None,
+            proc_dir: dir.path().join("proc"),
+            frozen_file: dir.path().join("run").join(crate::freeze::FROZEN_NAME),
             ..Options::default()
         };
         f(&mut options);

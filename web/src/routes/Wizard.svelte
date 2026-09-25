@@ -235,6 +235,12 @@
         <li><strong>until ratio</strong> — seed until a chosen ratio, then stop.</li>
         <li><strong>client default</strong> — leave it to the client's own setting.</li>
       </ul>
+      {#if status?.pause_client_while_playing}
+        <p data-testid="seed-pause-note">
+          While a core runs, transfers pause, seeding included; a client on another machine only stops uploading.
+          You can turn this off in System.
+        </p>
+      {/if}
       {#if wizard?.sources}
         <p class="muted">At least one source is loaded.</p>
       {/if}

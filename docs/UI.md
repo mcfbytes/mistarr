@@ -26,7 +26,8 @@ screen works at 360 px wide with a 16 px gutter and no horizontal scroll.
    saving.
 4. Sources: drop zone and the watched-directory path, the files still in
    `sources/` listed as in step 2, and the added sources with their state and
-   reason. Seed policy explained with its default shown. Nothing about where
+   reason. Seed policy explained with its default shown, and, while the
+   client pauses during games, that it does and where to turn that off. Nothing about where
    to obtain files.
 
 The app opens the wizard on load only while `open_on_start` is true. Finish,
@@ -134,6 +135,9 @@ tracks: 3 verified, 1 unmatched, 1 not identified". Live over SSE.
 status pill (resolving runs, unbound waits, bound is done, disabled is
 paused) with its reason beneath, file count,
 matched count, seed policy, client status. Bind and disable actions.
+Under the heading, the client-held pill while it applies, and under each
+seed policy the note "Paused while a core runs" while the setting is on (see
+"The client while a core runs").
 Unbound sources have a platform picker and, when the names suggest one, a
 "Bind to" button for the suggested platform. Above the table, the files still
 in `sources/` and this session's uploads, as in the wizard.
@@ -166,7 +170,28 @@ and the switch that allows launching, log tail. Under "Disc images", the
 checkbox "Identify CHD images by their tracks" with a "Slow" tag, a line
 saying it decodes each image once, pauses while a core runs and keeps its
 results, and the measured speed as "about N minutes per 700 MB image", or
-"Speed not measured yet."
+"Speed not measured yet." The heading "Limits (kbps)" has the line "0 keeps
+the client's own limit. Any other value only ever lowers it." Under the
+limits, the checkbox "Pause the download client while a core runs", on by
+default, with the line "Frees the board for the game. Transfers resume at the
+menu, and each source's seed policy applies again. A client on another
+machine only stops uploading." The status card shows the client-held pill
+while it applies.
+
+## The client while a core runs
+
+While `/system/status` reports a `client_hold`, the Sources screen, the
+System status card and the activity panel, under its heading, show one
+paused pill (`web/src/lib/ClientHeld.svelte`): "Download client paused while
+NES is running" for a stopped client, or "Uploads paused while NES is
+running" for held uploads, naming the core as the held-jobs banner does. For
+rtorrent, whose lowest held rate is 1 KiB/s, a line beside it and its title
+say so. It follows the `status` event, so it appears when the client is held
+and goes when it is let go at the menu. While
+`pause_client_while_playing` is on, each source row notes "Paused while a
+core runs" under its seed policy, and the wizard's seed policy step says that
+transfers pause while a core runs, that a client on another machine only
+stops uploading, and that this can be turned off in System.
 
 ## Platform art
 

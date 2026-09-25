@@ -15,8 +15,9 @@ use tokio::sync::Mutex;
 
 use crate::http::{self, Endpoint, Headers};
 use crate::{
-    metainfo, ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId, DownloadClient,
-    FileProgress, InfoHash, Result, SeedPolicy, TorrentSource, TorrentState, TorrentStatus,
+    metainfo, ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId, Direction,
+    DownloadClient, FileProgress, InfoHash, RateLimit, Result, SeedPolicy, TorrentSource,
+    TorrentState, TorrentStatus,
 };
 
 /// Fields requested by [`DownloadClient::status`]: `fileStats` without `files`, whose
@@ -433,23 +434,71 @@ impl DownloadClient for Transmission {
         .await
     }
 
-    async fn set_rate_limits(&self, down_kbps: Option<u32>, up_kbps: Option<u32>) -> Result<()> {
-        let mut args = Map::new();
-        for (dir, limit) in [("down", down_kbps), ("up", up_kbps)] {
-            match limit {
-                Some(kbps) if kbps > 0 => {
-                    args.insert(format!("speed-limit-{dir}"), json!(kbps));
-                    args.insert(format!("speed-limit-{dir}-enabled"), json!(true));
-                }
-                _ => {
-                    args.insert(format!("speed-limit-{dir}-enabled"), json!(false));
-                }
-            }
+    async fn rate_limit(&self, dir: Direction) -> Result<RateLimit> {
+        let (rate, enabled) = speed_fields(dir);
+        let fields = json!({ "fields": [rate, enabled] });
+        let mut session = self.session.lock().await;
+        let reply = self.rpc(&mut session, "session-get", fields).await?;
+        drop(session);
+        let kbps = reply.get(rate).and_then(Value::as_u64);
+        match (reply.get(enabled).and_then(Value::as_bool), kbps) {
+            (Some(enabled), Some(kbps)) => Ok(RateLimit {
+                enabled,
+                kbps: u32::try_from(kbps).map_err(protocol)?,
+            }),
+            _ => Err(ClientError::Protocol(format!("session-get without {rate}"))),
         }
+    }
+
+    async fn set_rate_limit(&self, dir: Direction, limit: RateLimit) -> Result<()> {
+        let (rate, enabled) = speed_fields(dir);
+        let mut args = Map::new();
+        args.insert(rate.to_owned(), json!(limit.kbps));
+        args.insert(enabled.to_owned(), json!(limit.enabled));
         let mut session = self.session.lock().await;
         self.rpc(&mut session, "session-set", Value::Object(args))
             .await
             .map(drop)
+    }
+
+    async fn process_id(&self) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
+    async fn alt_up_limit(&self) -> Result<Option<RateLimit>> {
+        let fields = json!({ "fields": [ALT_UP, ALT_ENABLED] });
+        let mut session = self.session.lock().await;
+        let reply = self.rpc(&mut session, "session-get", fields).await?;
+        drop(session);
+        let kbps = reply.get(ALT_UP).and_then(Value::as_u64);
+        match (reply.get(ALT_ENABLED).and_then(Value::as_bool), kbps) {
+            (Some(enabled), Some(kbps)) => Ok(Some(RateLimit {
+                enabled,
+                kbps: u32::try_from(kbps).map_err(protocol)?,
+            })),
+            _ => Err(ClientError::Protocol(format!(
+                "session-get without {ALT_UP}"
+            ))),
+        }
+    }
+
+    async fn set_alt_up_rate(&self, kbps: u32) -> Result<()> {
+        let mut session = self.session.lock().await;
+        self.rpc(&mut session, "session-set", json!({ ALT_UP: kbps }))
+            .await
+            .map(drop)
+    }
+}
+
+/// The alternate ("turtle") upload rate, which replaces `speed-limit-up` while enabled.
+const ALT_UP: &str = "alt-speed-up";
+const ALT_ENABLED: &str = "alt-speed-enabled";
+
+/// The session fields holding the rate and its switch in `dir`.
+const fn speed_fields(dir: Direction) -> (&'static str, &'static str) {
+    match dir {
+        Direction::Down => ("speed-limit-down", "speed-limit-down-enabled"),
+        Direction::Up => ("speed-limit-up", "speed-limit-up-enabled"),
     }
 }
 

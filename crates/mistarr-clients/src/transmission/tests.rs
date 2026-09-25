@@ -77,7 +77,10 @@ async fn session_id_is_reused() {
     fake.push(FakeResponse::success(json!({ "version": "4" })));
     fake.push(FakeResponse::success(json!({})));
     client.probe().await.expect("probe");
-    client.set_rate_limits(None, None).await.expect("limits");
+    client
+        .set_rate_limit(Direction::Up, RateLimit::default())
+        .await
+        .expect("limits");
     let reqs = fake.requests();
     assert_eq!(reqs.len(), 3);
     assert_eq!(reqs[2].header("x-transmission-session-id"), Some("sid-1"));
@@ -727,16 +730,20 @@ fn bad_hashes_are_rejected() {
 }
 
 #[tokio::test]
-async fn rate_limits_enable_or_lift_each_direction() {
+async fn rate_limits_are_set_as_given_in_each_direction() {
     let (fake, client) = setup().await;
     fake.push(FakeResponse::success(json!({})));
     fake.push(FakeResponse::success(json!({})));
     client
-        .set_rate_limits(Some(512), None)
+        .set_rate_limit(Direction::Down, RateLimit::kbps(512))
         .await
         .expect("limits");
+    let off = RateLimit {
+        enabled: false,
+        kbps: 64,
+    };
     client
-        .set_rate_limits(Some(0), Some(64))
+        .set_rate_limit(Direction::Up, off)
         .await
         .expect("limits");
     assert_eq!(
@@ -744,19 +751,11 @@ async fn rate_limits_enable_or_lift_each_direction() {
         vec![
             rpc(
                 "session-set",
-                json!({
-                    "speed-limit-down": 512,
-                    "speed-limit-down-enabled": true,
-                    "speed-limit-up-enabled": false,
-                })
+                json!({ "speed-limit-down": 512, "speed-limit-down-enabled": true })
             ),
             rpc(
                 "session-set",
-                json!({
-                    "speed-limit-down-enabled": false,
-                    "speed-limit-up": 64,
-                    "speed-limit-up-enabled": true,
-                })
+                json!({ "speed-limit-up": 64, "speed-limit-up-enabled": false })
             ),
         ]
     );
@@ -880,4 +879,105 @@ async fn status_of_a_large_torrent_reads_every_file() {
         .file(19_999)
         .is_some_and(|f| f.bytes_done == 4 && !f.wanted));
     assert!(st.file_done(4, 4) && !st.file_done(3, 4));
+}
+
+#[tokio::test]
+async fn a_limit_is_read_held_and_restored() {
+    let (fake, client) = setup().await;
+    fake.push(FakeResponse::success(
+        json!({ "speed-limit-up": 40, "speed-limit-up-enabled": false }),
+    ));
+    fake.push(FakeResponse::success(json!({})));
+    fake.push(FakeResponse::success(json!({})));
+    fake.push(FakeResponse::success(
+        json!({ "speed-limit-down": 7, "speed-limit-down-enabled": true }),
+    ));
+    let before = client.rate_limit(Direction::Up).await.expect("read");
+    assert_eq!(
+        before,
+        RateLimit {
+            enabled: false,
+            kbps: 40
+        }
+    );
+    client
+        .set_rate_limit(Direction::Up, RateLimit::HELD)
+        .await
+        .expect("hold");
+    client
+        .set_rate_limit(Direction::Up, before)
+        .await
+        .expect("restore");
+    let down = client.rate_limit(Direction::Down).await.expect("read");
+    assert_eq!(down, RateLimit::kbps(7));
+    assert_eq!(
+        fake.bodies(),
+        vec![
+            rpc(
+                "session-get",
+                json!({ "fields": ["speed-limit-up", "speed-limit-up-enabled"] })
+            ),
+            rpc(
+                "session-set",
+                json!({ "speed-limit-up": 0, "speed-limit-up-enabled": true })
+            ),
+            rpc(
+                "session-set",
+                json!({ "speed-limit-up": 40, "speed-limit-up-enabled": false })
+            ),
+            rpc(
+                "session-get",
+                json!({ "fields": ["speed-limit-down", "speed-limit-down-enabled"] })
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_session_without_the_limit_is_a_protocol_error() {
+    let (fake, client) = setup().await;
+    fake.push(FakeResponse::success(json!({ "speed-limit-up": 5 })));
+    let err = client
+        .rate_limit(Direction::Up)
+        .await
+        .expect_err("incomplete");
+    assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
+}
+
+#[tokio::test]
+async fn transmission_does_not_report_its_process_id() {
+    let (fake, client) = setup().await;
+    assert_eq!(client.process_id().await.expect("pid"), None);
+    assert!(fake.requests().is_empty());
+}
+
+#[tokio::test]
+async fn the_turtle_upload_rate_is_read_and_set_alone() {
+    let (fake, client) = setup().await;
+    fake.push(FakeResponse::success(
+        json!({ "alt-speed-up": 50, "alt-speed-enabled": true }),
+    ));
+    fake.push(FakeResponse::success(json!({})));
+    fake.push(FakeResponse::success(json!({})));
+    let alt = client.alt_up_limit().await.expect("read");
+    assert_eq!(alt, Some(RateLimit::kbps(50)));
+    client.set_alt_up_rate(0).await.expect("hold");
+    assert!(
+        client.alt_up_limit().await.is_err(),
+        "a reply without the rate"
+    );
+    assert_eq!(
+        fake.bodies(),
+        vec![
+            rpc(
+                "session-get",
+                json!({ "fields": ["alt-speed-up", "alt-speed-enabled"] })
+            ),
+            rpc("session-set", json!({ "alt-speed-up": 0 })),
+            rpc(
+                "session-get",
+                json!({ "fields": ["alt-speed-up", "alt-speed-enabled"] })
+            ),
+        ]
+    );
 }

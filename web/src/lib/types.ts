@@ -23,6 +23,7 @@ export interface WaitingJob {
 export type PauseReason = 'core' | 'manual' | null;
 export type LaunchState = 'ready' | 'disabled' | 'unavailable';
 export type Override = 'paused' | 'running' | null;
+export type ClientHold = 'uploads' | 'frozen' | null;
 
 export interface SystemStatus {
   version: string;
@@ -32,6 +33,10 @@ export interface SystemStatus {
   paused: boolean;
   pause_reason: PauseReason;
   override: Override;
+  /** How the download client is held while a core runs: stopped, or its uploads held. */
+  client_hold: ClientHold;
+  /** Whether the client is paused while a core runs. */
+  pause_client_while_playing: boolean;
   waiting: WaitingJob[];
   disk_free_bytes: number | null;
   dats_dir: string;
@@ -352,11 +357,17 @@ export interface ScanSettings {
   chd_tracks: boolean;
 }
 
+export interface TransferSettings {
+  /** Pause the download client while a core other than the menu runs. */
+  pause_client_while_playing: boolean;
+}
+
 export interface Settings {
   client: ClientSettings;
   limits: LimitsSettings;
   prefs: PrefsSettings;
   scan: ScanSettings;
+  transfer: TransferSettings;
 }
 
 export interface SettingsPatch {
@@ -364,6 +375,7 @@ export interface SettingsPatch {
   limits?: LimitsSettings;
   prefs?: PrefsSettings;
   scan?: ScanSettings;
+  transfer?: TransferSettings;
 }
 
 /** Why a disc image is not identified; `unidentified.ts` has the sentence for each. */
