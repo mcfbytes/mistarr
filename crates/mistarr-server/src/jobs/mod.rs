@@ -522,7 +522,10 @@ async fn execute(app: &Arc<AppState>, id: JobId, job: &dyn Job, lane: Lane) -> R
     };
     set_state(app, id, JobState::Running).await?;
     tracing::debug!(job = %id, kind = ctx.kind, "job started");
-    let (state, progress) = match job.run(&ctx).await {
+    let ran = job.run(&ctx).await;
+    // Cleared before any exit below, including shutdown and a failed final write.
+    app.live.clear(id);
+    let (state, progress) = match ran {
         Ok(()) => (JobState::Done, None),
         // Left queued so the next start runs it again; see `reconcile`.
         Err(Error::Cancelled) if *app.shutdown_signal().borrow() => {
@@ -547,7 +550,6 @@ async fn execute(app: &Arc<AppState>, id: JobId, job: &dyn Job, lane: Lane) -> R
             rows::get(c, id)
         })
         .await?;
-    app.live.clear(id);
     let progress = progress
         .or_else(|| last.and_then(|r| r.progress))
         .unwrap_or(Value::Null);

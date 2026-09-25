@@ -96,13 +96,19 @@ pub async fn queue_placed(
     kind: &'static str,
     job: Arc<dyn crate::jobs::Job>,
 ) -> Result<IncomingFile> {
+    let (size, modified) = stat(path).await;
     app.placed.lock().insert(path.to_path_buf());
     let guard = PlacedGuard {
         app: Arc::clone(app),
         path: path.to_path_buf(),
     };
-    crate::jobs::Scheduler::enqueue_within(app, job, QUEUE_WAIT, guard).await?;
-    one(app, path, kind).await
+    let id = crate::jobs::Scheduler::enqueue_within(app, job, QUEUE_WAIT, guard).await?;
+    let pending = Pending {
+        size,
+        modified,
+        placed: true,
+    };
+    describe(app, path, kind, &pending, id).await
 }
 
 /// Describes the pending file at `path` as [`list`] would.
@@ -111,9 +117,17 @@ pub async fn queue_placed(
 ///
 /// [`crate::Error::Db`] when the open jobs cannot be read.
 pub async fn one(app: &AppState, path: &Path, kind: &'static str) -> Result<IncomingFile> {
-    let mut open = app.db.read(jobs::open_rows).await?;
-    app.live.overlay(&mut open);
-    let gate = app.gate.state();
+    let (size, modified) = stat(path).await;
+    let pending = Pending {
+        size,
+        modified,
+        placed: app.placed.contains(path),
+    };
+    describe(app, path, kind, &pending, None).await
+}
+
+/// Size and Unix mtime of `path`, zero when it cannot be read.
+async fn stat(path: &Path) -> (u64, i64) {
     let meta = tokio::fs::metadata(path).await.ok();
     let modified = meta
         .as_ref()
@@ -121,20 +135,42 @@ pub async fn one(app: &AppState, path: &Path, kind: &'static str) -> Result<Inco
         .and_then(|m| m.duration_since(UNIX_EPOCH).ok())
         .and_then(|d| i64::try_from(d.as_secs()).ok())
         .unwrap_or(0);
+    (meta.map_or(0, |m| m.len()), modified)
+}
+
+/// The file at `path` with its open `kind` job: job `known` when given, else the one
+/// naming the path. A known job no longer open has already run.
+async fn describe(
+    app: &AppState,
+    path: &Path,
+    kind: &'static str,
+    pending: &Pending,
+    known: Option<JobId>,
+) -> Result<IncomingFile> {
+    let mut open = app.db.read(jobs::open_rows).await?;
+    app.live.overlay(&mut open);
+    let gate = app.gate.state();
     let name = path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
     let text = path.to_string_lossy();
-    let job = open
-        .iter()
-        .find(|r| r.kind == kind && r.payload.get("path").and_then(Value::as_str) == Some(&text));
-    let pending = Pending {
-        size: meta.map_or(0, |m| m.len()),
-        modified,
-        placed: app.placed.contains(path),
-    };
-    Ok(pending_file(name, &pending, job, &open, &gate))
+    let job = open.iter().find(|r| match known {
+        Some(id) => r.id == id,
+        None => r.kind == kind && r.payload.get("path").and_then(Value::as_str) == Some(&text),
+    });
+    if let (Some(id), None) = (known, job) {
+        return Ok(IncomingFile {
+            file: name,
+            size: pending.size,
+            state: IncomingState::Importing,
+            reason: None,
+            job_id: Some(id),
+            progress: None,
+            modified: pending.modified,
+        });
+    }
+    Ok(pending_file(name, pending, job, &open, &gate))
 }
 
 /// Lists the files in `dir` and `dir/rejected/`, pending ones first by name,
@@ -490,5 +526,37 @@ mod tests {
         }
         assert!(!app.placed.contains(&path), "forgotten once recorded");
         assert_eq!(writer_reason(&[]), "Waiting to be queued.");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn one_file_is_described_with_its_job() {
+        let (dir, app) = state();
+        let path = dir.path().join("y.torrent");
+        std::fs::write(&path, b"abc").expect("write");
+        let f = one(&app, &path, "source_import").await.expect("one");
+        assert_eq!((f.file.as_str(), f.size), ("y.torrent", 3));
+        assert_eq!(f.reason.as_deref(), Some(SETTLING));
+        let text = path.to_string_lossy().into_owned();
+        let payload = json!({ "path": text });
+        let id = app
+            .db
+            .write(move |c| jobs::insert(c, "source_import", &payload, "background", 1))
+            .await
+            .expect("seed");
+        let f = one(&app, &path, "source_import").await.expect("one");
+        assert_eq!(f.job_id, Some(id));
+        assert_eq!(f.state, IncomingState::Waiting);
+        assert_eq!(f.reason.as_deref(), Some("Queued."));
+        let pending = Pending {
+            size: 3,
+            modified: 0,
+            placed: true,
+        };
+        let ran = describe(&app, &path, "source_import", &pending, Some(JobId(999)))
+            .await
+            .expect("describe");
+        assert_eq!(ran.job_id, Some(JobId(999)));
+        assert_eq!(ran.size, 3);
+        assert_eq!(ran.state, IncomingState::Importing);
     }
 }

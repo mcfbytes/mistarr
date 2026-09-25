@@ -151,7 +151,7 @@
                 {/if}
               {/if}
             </td>
-            <td class="state">
+            <td>
               <StatusPill {...sourceStatus(source.state)} />
               {#if source.reason}<span class="muted reason">{source.reason}</span>{/if}
             </td>
@@ -169,11 +169,13 @@
               </select>
             </td>
             <td>{source.client_id ? 'in client' : '—'}</td>
-            <td class="row-actions">
-              {#if source.state !== 'disabled'}
-                <button onclick={() => disable(source.id)}>Disable</button>
-              {/if}
-              <button onclick={() => remove(source.id)}>Delete</button>
+            <td>
+              <div class="row-actions">
+                {#if source.state !== 'disabled'}
+                  <button onclick={() => disable(source.id)}>Disable</button>
+                {/if}
+                <button onclick={() => remove(source.id)}>Delete</button>
+              </div>
             </td>
           </tr>
         {/each}
@@ -188,10 +190,6 @@
     display: grid;
     gap: 0.6em;
     margin-bottom: 1em;
-  }
-
-  .state {
-    min-width: 8em;
   }
 
   .reason {
@@ -224,6 +222,7 @@
 
   .row-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.4em;
   }
 </style>

@@ -2,7 +2,10 @@
   import { uploadFiles } from './upload';
   import type { Watched } from './stores/incoming.svelte';
 
-  /** A file picker that uploads what is chosen into `dats/` or `sources/`, showing while it sends. */
+  /**
+   * A file picker that uploads what is chosen into `dats/` or `sources/`, showing while it
+   * sends; it stays focusable then and ignores activation, so keyboard focus is kept.
+   */
   let { which, label, accept }: { which: Watched; label: string; accept: string } = $props();
 
   let input = $state<HTMLInputElement>();
@@ -25,7 +28,20 @@
 <div class="field">
   <label>
     {label}
-    <input bind:this={input} type="file" {accept} multiple disabled={sending !== null} aria-busy={sending !== null} onchange={send} />
+    <input
+      bind:this={input}
+      type="file"
+      {accept}
+      multiple
+      aria-disabled={sending !== null}
+      aria-busy={sending !== null}
+      onclick={(e) => {
+        if (sending !== null) {
+          e.preventDefault();
+        }
+      }}
+      onchange={send}
+    />
   </label>
   <p class="sending" role="status">
     {#if sending !== null}<span class="spinner" aria-hidden="true"></span>Uploading {sending}…{/if}

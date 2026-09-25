@@ -1,13 +1,16 @@
 <script lang="ts">
-  import { dismissToast, getToasts } from './stores/toast.svelte';
+  import { dismissToast, getSpoken, getToasts } from './stores/toast.svelte';
   import StatusPill from './StatusPill.svelte';
 
   const toasts = $derived(getToasts());
+  const spoken = $derived(getSpoken());
 </script>
 
-<div class="toasts" aria-live="polite">
+<div class="visually-hidden" aria-live="polite" aria-atomic="true">{spoken.polite}</div>
+<div class="visually-hidden" aria-live="assertive" aria-atomic="true">{spoken.assertive}</div>
+<div class="toasts">
   {#each toasts as toast (toast.id)}
-    <div class="toast {toast.tone}" role={toast.tone === 'error' ? 'alert' : undefined}>
+    <div class="toast {toast.tone}">
       {#if toast.tone === 'success'}
         <StatusPill status="done" />
       {:else if toast.tone === 'error'}

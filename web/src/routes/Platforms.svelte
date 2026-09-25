@@ -52,7 +52,11 @@
     return findPlatform(id)?.name ?? id;
   }
 
+  // The button keeps focus while the request is out, so a second press is ignored here.
   async function scan(id: string): Promise<void> {
+    if (scanning[id]) {
+      return;
+    }
     scanning = { ...scanning, [id]: true };
     try {
       const queued = isMock ? await new Promise<null>((r) => setTimeout(() => r(null), 400)) : await api.scan(id);
@@ -107,7 +111,7 @@
           </div>
         {/if}
         <div class="actions">
-          <button onclick={() => scan(platform.id)} disabled={scanning[platform.id]} aria-busy={scanning[platform.id]}>
+          <button onclick={() => scan(platform.id)} aria-disabled={scanning[platform.id] === true} aria-busy={scanning[platform.id] === true}>
             {#if scanning[platform.id]}<span class="spinner" aria-hidden="true"></span>Queuing…{:else}Scan{/if}
           </button>
           <button onclick={() => setEnabled(platform.id, false)}>Disable</button>

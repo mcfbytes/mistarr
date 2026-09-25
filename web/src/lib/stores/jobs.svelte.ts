@@ -3,7 +3,7 @@ import { fixtureJobs, fixtureRecentJobs, mockScenario } from '../fixtures';
 import type { Job, JobState } from '../types';
 import { findPlatform } from './platforms.svelte';
 import { showToast } from './toast.svelte';
-import { announceUpload, findUpload, resolveUpload } from './uploads.svelte';
+import { announceUpload, resolveUpload } from './uploads.svelte';
 
 const isMock = import.meta.env.VITE_MOCK === '1';
 
@@ -89,17 +89,13 @@ function announce(id: number, state: JobState, progress: Record<string, unknown>
   showToast(text, state === 'done' ? 'success' : 'error');
 }
 
-// A source upload's import ended; a DAT upload's outcome comes from `dat.loaded` or `dat.rejected`.
-function announceSource(id: number, state: JobState, progress: Record<string, unknown> | null): void {
-  const up = findUpload(id);
-  if (up?.kind !== 'sources') {
-    return;
-  }
+// A source import named `file` ended; a DAT upload's outcome comes from `dat.loaded` or `dat.rejected`.
+function announceSource(file: string, state: JobState, progress: Record<string, unknown> | null): void {
   if (state === 'failed') {
     const why = typeof progress?.error === 'string' ? progress.error : 'see Activity';
-    announceUpload('sources', up.file, why);
+    announceUpload('sources', file, why);
   } else {
-    announceUpload('sources', up.file, typeof progress?.rejected === 'string' ? progress.rejected : null);
+    announceUpload('sources', file, typeof progress?.rejected === 'string' ? progress.rejected : null);
   }
 }
 
@@ -192,7 +188,9 @@ export function applyJobProgress(
     finished = { ...Object.fromEntries(kept), [id]: { kind, state, progress } };
     jobs = jobs.filter((j) => j.id !== id);
     announce(id, state, progress);
-    announceSource(id, state, progress);
+    if (kind === 'source_import' && detail !== null) {
+      announceSource(detail, state, progress);
+    }
     scheduleRecent();
     return;
   }

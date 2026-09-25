@@ -27,7 +27,7 @@ const shots: { name: string; url: string; act?: (page: Page) => Promise<void>; f
         mimeType: 'application/x-bittorrent',
         buffer: Buffer.from('d1:ae')
       });
-      await page.getByText(/^Torrent received:/).waitFor();
+      await page.locator('.toasts').getByText(/^Torrent received:/).waitFor();
     }
   },
   { name: 'sources-pills', url: '/#/sources', full: true },

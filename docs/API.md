@@ -117,8 +117,9 @@ bytes_total }`: `members` is the DATs in the file, `done` those finished,
 `games` those read so far. `phase` is `indexing` (a DB export's first pass,
 for its clone list), `reading`, `storing` (applying the titles), `picking`
 (the 1G1R picks) or `refreshing` (the title groups); `bytes_read` of
-`bytes_total` of the current DAT, uncompressed, is present while `indexing`
-or `reading` and absent in the phases whose share done is unknown. After each
+`bytes_total` of the current DAT, uncompressed, is present while `reading`
+and absent in the other phases, whose share done is unknown, so a bar of
+the bytes read never moves backwards. After each
 DAT it stores `{ file, members, done, games }`. A `recompute_1g1r` reports
 `{ phase: "matching", checked, matched }`, then `{ phase: "picking", matched
 }`. A scan stores `{ platform_id, done, total, matched, unmatched }` as it

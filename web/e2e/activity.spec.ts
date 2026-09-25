@@ -9,14 +9,18 @@ function indicator(page: Page) {
 test('a torrent upload shows it is sending, then a toast saying it was received', async ({ page }) => {
   await page.goto('/#/sources');
   const input = page.getByLabel('Add a .torrent file');
+  await input.focus();
   await input.setInputFiles(torrent);
   await expect(page.getByText('Uploading Example bundle four.torrent…')).toBeVisible();
-  await expect(input).toBeDisabled();
-  const toast = page.getByText(
+  await expect(input).toHaveAttribute('aria-disabled', 'true');
+  await expect(input).toBeFocused();
+  const toast = page.locator('.toasts').getByText(
     /^Torrent received: Example bundle four\.torrent\. Waiting for the DAT import of Example Console \(20260101\)\.zip to finish\.$/
   );
   await expect(toast).toBeVisible();
-  await expect(input).toBeEnabled();
+  await expect(page.locator('[aria-live="polite"]').filter({ hasText: /^Torrent received: Example bundle four/ })).toHaveCount(1);
+  await expect(input).toHaveAttribute('aria-disabled', 'false');
+  await expect(input).toBeFocused();
   const row = page
     .getByRole('list', { name: 'Files in sources' })
     .getByRole('listitem')
@@ -29,11 +33,15 @@ test('the magnet Add button shows its pending state', async ({ page }) => {
   await page.goto('/#/sources');
   await page.getByLabel('Or a magnet link').fill('magnet:?xt=urn:btih:example');
   const add = page.getByRole('button', { name: 'Add', exact: true });
-  await add.click();
+  await add.focus();
+  await page.keyboard.press('Enter');
   const pending = page.getByRole('button', { name: 'Adding…' });
-  await expect(pending).toBeDisabled();
-  await expect(page.getByText(/^Magnet received: Example magnet\.magnet\./)).toBeVisible();
-  await expect(add).toBeEnabled();
+  await expect(pending).toHaveAttribute('aria-disabled', 'true');
+  await expect(pending).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(page.locator('.toasts').getByText(/^Magnet received: Example magnet\.magnet\./)).toHaveCount(1);
+  await expect(add).toHaveAttribute('aria-disabled', 'false');
+  await expect(add).toBeFocused();
   await expect(page.getByLabel('Or a magnet link')).toHaveValue('');
 });
 
@@ -118,4 +126,25 @@ test('status pills show on Sources and Activity', async ({ page }) => {
   await expect(jobs.filter({ hasText: 'Scan' }).locator('[data-status="paused"]')).toHaveText('Paused');
   await expect(page.locator('[data-status="failed"]').first()).toBeVisible();
   await expect(page.locator('[data-status="done"]').first()).toBeVisible();
+});
+
+test('the sources table fits its page on a desktop and scrolls whole on a phone', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto('/#/sources');
+  const table = page.getByRole('table');
+  const fit = await table.evaluate((t) => {
+    const wrap = t.parentElement as HTMLElement;
+    const right = t.getBoundingClientRect().right;
+    const buttons = [...t.querySelectorAll('button')].map((b) => b.getBoundingClientRect().right);
+    return { over: wrap.scrollWidth - wrap.clientWidth, outside: Math.max(...buttons) - right };
+  });
+  expect(fit.over).toBeLessThanOrEqual(0);
+  expect(fit.outside).toBeLessThanOrEqual(0);
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  const row = table.getByRole('row').filter({ hasText: 'Example bundle two' });
+  const del = row.getByRole('button', { name: 'Delete' });
+  await del.scrollIntoViewIfNeeded();
+  await expect(del).toBeInViewport();
+  await expect(row.locator('[data-status="waiting"]')).toHaveText('Unbound');
 });

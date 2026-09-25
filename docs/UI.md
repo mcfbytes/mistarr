@@ -256,9 +256,10 @@ stand still under `prefers-reduced-motion`, the band as a static stripe.
 ## Feedback
 
 Every button that starts work shows that it is sending until the server
-answers: Scan reads "Queuing…", Add reads "Adding…", both disabled and
-`aria-busy`, and a file picker is disabled with an "Uploading <name>…"
-status line beneath it. Then a toast says what happened, in one short
+answers: Scan reads "Queuing…", Add reads "Adding…", and a file picker
+shows an "Uploading <name>…" status line beneath it. Each is
+`aria-disabled` and `aria-busy` and ignores further presses, but is never
+`disabled`, so keyboard focus stays on it. Then a toast says what happened, in one short
 sentence:
 
 - received: "Torrent received: <file>. Waiting for the DAT import of <dat>
@@ -272,7 +273,9 @@ sentence:
 
 Toasts stack at the bottom right, full width on a phone, at most four. Each
 has a close button; information and success leave after 6 s and errors after
-10 s. They sit in a polite live region, and an error toast is an `alert`.
+10 s. Screen readers hear each once through two hidden live regions that
+exist before any toast, a polite one for information and success and an
+assertive one for errors; the toasts themselves are not live regions.
 
 ## State handling
 

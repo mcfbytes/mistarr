@@ -1,7 +1,7 @@
 <script lang="ts">
   import { addMagnet } from './upload';
 
-  /** A magnet link box whose Add button shows while the link is being sent. */
+  /** A magnet link box whose Add button shows while the link is sent, keeping focus and ignoring presses. */
   let magnet = $state('');
   let sending = $state(false);
 
@@ -26,7 +26,7 @@
     Or a magnet link
     <input type="text" placeholder="magnet:?xt=..." bind:value={magnet} />
   </label>
-  <button type="submit" class="primary" disabled={sending} aria-busy={sending}>
+  <button type="submit" class="primary" aria-disabled={sending} aria-busy={sending}>
     {#if sending}<span class="spinner" aria-hidden="true"></span>Adding…{:else}Add{/if}
   </button>
 </form>

@@ -66,7 +66,7 @@ test('Play starts an entry that is in the collection', async ({ page }) => {
   await expect(play).toHaveCount(1);
   await expect(play).toBeEnabled();
   await play.click();
-  await expect(page.getByText('Started on the MiSTer.')).toBeVisible();
+  await expect(page.locator('.toasts').getByText('Started on the MiSTer.')).toBeVisible();
 });
 
 test('Play is hidden for a BIOS entry even when its file is present', async ({ page }) => {
@@ -82,7 +82,7 @@ test('Start core is offered with its reason when it cannot run', async ({ page }
   const start = page.getByRole('button', { name: 'Start core' });
   await expect(start).toBeEnabled();
   await start.click();
-  await expect(page.getByText('Core started on the MiSTer.')).toBeVisible();
+  await expect(page.locator('.toasts').getByText('Core started on the MiSTer.')).toBeVisible();
 
   await page.goto('/#/p/psx');
   await expect(page.getByRole('button', { name: 'Start core' })).toBeDisabled();
@@ -109,7 +109,7 @@ test('Scan says it was queued and Activity lists finished jobs with their outcom
   await page.goto('/#/');
   const card = page.locator('.card').filter({ hasText: '240 titles' });
   await card.getByRole('button', { name: 'Scan' }).click();
-  await expect(page.getByText(/^Scan of .+ queued$/)).toBeVisible();
+  await expect(page.locator('.toasts').getByText(/^Scan of .+ queued$/)).toBeVisible();
   await page.goto('/#/activity');
   await expect(page.getByText('Scan of Sega Mega Drive: 90 matched, 1 unmatched')).toBeVisible();
 });

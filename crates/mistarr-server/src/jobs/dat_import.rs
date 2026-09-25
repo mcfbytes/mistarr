@@ -204,9 +204,13 @@ struct Meter {
 }
 
 impl Meter {
-    /// Reports `read` of `total` bytes in a reading `phase`.
+    /// Reports `read` of `total` bytes in a reading `phase`; the index pass reports no share.
     fn bytes(&self, phase: &str, read: u64, total: u64) {
-        if phase == "indexing" && read < INDEX_SHOWN_AFTER {
+        if phase == "indexing" {
+            // Its own share would restart the bar at reading; it shows as a band instead.
+            if read >= INDEX_SHOWN_AFTER {
+                self.phase(phase);
+            }
             return;
         }
         self.reporter

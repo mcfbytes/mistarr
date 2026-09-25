@@ -124,7 +124,13 @@ export function startEvents(): void {
   if (subscriber || import.meta.env.VITE_MOCK === '1') {
     return;
   }
-  subscriber = new EventSubscriber(handle, setConnected);
+  // Live progress is never replayed, so every (re)connection reads the open jobs again.
+  subscriber = new EventSubscriber(handle, (connected) => {
+    setConnected(connected);
+    if (connected) {
+      void loadJobs().catch(() => undefined);
+    }
+  });
   subscriber.start();
 }
 
