@@ -28,7 +28,7 @@ under `/api` return 404 JSON.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/system/status` | Version, uptime, client kind and reachability, CORENAME, paused state, how the download client is held, disk free, RSS, CHD decoding speed. |
+| GET | `/system/status` | Version and commit, uptime, client kind and reachability, CORENAME, paused state, how the download client is held, disk free and size, RSS, memory total and available, CHD decoding speed. |
 | GET | `/system/wizard` | Which first-run steps are complete. |
 | POST | `/system/wizard/done` | The user finished or dismissed the wizard; it stops opening by itself. Returns the wizard body. |
 | POST | `/system/scan` | Enqueue a library scan. Body `{ platform_id? }`. |
@@ -43,18 +43,25 @@ under `/api` return 404 JSON.
 
 ```json
 {
-  "version": "0.0.1", "uptime_secs": 12,
+  "version": "0.3.0", "commit": "1a2b3c4", "release": true, "uptime_secs": 12,
   "client": { "kind": "transmission", "url": "http://127.0.0.1:9091/transmission/rpc",
               "reachable": true, "version": "4.0.5", "rtorrent_on_path": false,
               "transmission_on_path": true, "transmission_service": true,
               "transmission_opt_in": true, "checked_at": 1700000000 },
   "corename": "MENU", "paused": false, "pause_reason": null, "override": null,
   "client_hold": null, "pause_client_while_playing": true, "waiting": [],
-  "disk_free_bytes": 1000000, "dats_dir": "/media/fat/mistarr/dats",
-  "rss_bytes": 1000000, "launch": "ready", "chd_decode_bytes_per_sec": null
+  "disk_free_bytes": 1000000, "disk_total_bytes": 32000000,
+  "dats_dir": "/media/fat/mistarr/dats",
+  "rss_bytes": 1000000, "mem_total_bytes": 507000000, "mem_available_bytes": 214000000,
+  "launch": "ready", "chd_decode_bytes_per_sec": null
 }
 ```
 
+`version` is the release tag's version for a release build, and otherwise
+the workspace version with `+dev`, plus `.` and the short commit when the
+build knew it, such as `0.3.0+dev.1a2b3c4` (DEPLOYMENT.md "Releasing").
+`commit` is that short commit or `null`, and `release` whether the binary was
+built from a release tag.
 `client` is `null` before the first detection and has `kind: null` when no
 client answered. `rtorrent_on_path` and `transmission_on_path` say whether
 each executable is on `PATH`, `transmission_service` whether
@@ -72,7 +79,9 @@ lanes that are held, heavy lane first, oldest first, as
 `{ id, kind, state, detail }`, where `detail` is the file name or platform
 the job is about or `null`. Running jobs are not in it. A running core holds
 the heavy lane; a manual pause holds the heavy and background lanes. It is
-empty while nothing is held. `disk_free_bytes` is for the filesystem holding the data directory.
+empty while nothing is held. `disk_free_bytes` and `disk_total_bytes` are for the filesystem holding the data directory.
+`mem_total_bytes` and `mem_available_bytes` are `MemTotal` and `MemAvailable`
+from `/proc/meminfo`, `null` where it cannot be read.
 `dats_dir` is the directory watched for DAT files, from `[paths]`.
 `launch` is `"ready"`, `"disabled"` when `prefs.launch` is off, or
 `"unavailable"` when MiSTer Main's command FIFO does not exist.
@@ -321,20 +330,36 @@ allowed `Host`.
 | GET | `/sources` | All sources with state, platform, counts, seed policy, client status. |
 | GET | `/sources/incoming` | Files in `sources/` not loaded yet, and rejected ones; see "Incoming files". |
 | POST | `/sources/upload` | multipart `.torrent` or a `{ magnet }` body; same handling as the watched dir. |
-| PUT | `/sources/{id}` | `{ platform_id?, seed_policy?, state? }` to bind, rebind, disable. |
+| GET | `/sources/{id}` | One source with how its files classify, its DATs and open downloads. |
+| PUT | `/sources/{id}` | `{ platform_id?, binding?, seed_policy?, state? }` to bind, rebind, reset, disable. |
 | DELETE | `/sources/{id}` | Remove from mistarr and, if present, the client. Never deletes placed files. |
-| GET | `/sources/{id}/files` | torrent_files with matched rom names. |
+| GET | `/sources/{id}/files` | torrent_files with matched rom names; `?filter=&q=` and paging. |
+| GET | `/sources/{id}/preview` | How many files each platform with a DAT would match. |
 
 `/sources` items: `{ id, infohash, display_name, origin_file, platform_id,
 bind_score, state, reason, seed_policy, file_count, matched_count,
-total_size, client_id, added_at, suggested_platform_id }`. `matched_count`
+total_size, client_id, added_at, suggested_platform_id, user_binding,
+pending_binding }`. `matched_count`
 counts files matched to a rom or holding a candidate rom. `reason` says why
 a source is `resolving` or `unbound` and is otherwise `null`; `client_id` is
 set once the torrent is in the client. `suggested_platform_id` is the
 platform the torrent's names point at, found without any DAT
 (ARCHITECTURE.md "Source import" step 4), or `null`; the SPA preselects it in
 the platform picker. `seed_policy` is `"none"`, `"client"` or
-`"ratio:N"` with N above 0.
+`"ratio:N"` with N above 0. `user_binding` is `true` when the user chose the
+binding, a platform or none, which automatic binding then leaves alone.
+`pending_binding` is the binding asked for and not applied yet, as
+`{ automatic, platform_id }` with `platform_id` null for "not a game set",
+or `null`.
+
+`GET /sources/{id}` is the item with `summary: { matched, candidates,
+unmatched, extra, wanted }`, where the first four count each file once: a
+matched rom, only candidate roms, neither, or neither and an extra such as a
+text, image or checksum file; `wanted` counts files with a download that was
+not cancelled. `dats` lists `{ dat_version_id, dat_name, version, matched }`
+for the DATs the matched roms come from, most files first, and `transfer:
+{ files, size, done }` sums the files whose downloads are queued,
+transferring, checking or importing, with the bytes of them done.
 
 `/sources/upload` takes `multipart/form-data` with one `.torrent` file part,
 or a JSON body `{ magnet }`. A file that does not parse, or repeats a source
@@ -346,9 +371,19 @@ when no such name is free), and the answer is 202 with the file as
 
 `PUT /sources/{id}` body fields are all optional. `platform_id` binds or
 rebinds the source to that platform, matching its files against it only, and
-`null` unbinds it and keeps it from being bound automatically after later
-DAT loads until the user binds it again; both are a 400 while the source has
-no file list.
+`null` marks it as not a game set: unbound, with no matches. Either sets
+`user_binding`, so later DAT loads never bind it automatically.
+`binding: "automatic"` clears `user_binding` and binds the source again as
+the automatic classifier would. `platform_id` and `binding` together are a
+400, as is either while the source has no file list. A binding change
+answers 202 with the item, its `pending_binding` set, and `job_id` of the
+background `bind_source` job that applies it; requests while that job is
+queued share it, and whichever job runs next applies the latest request.
+`source.changed` follows when it ends, and its final progress is
+`{ source_id, platform_id, matched, total }`. The job writes only the
+database and never calls the client; the transfer pass that
+`source.changed` starts is what reaches the client, under its rules for a
+held client. Any other update answers 200 with `job_id: null`.
 `state` is `"disabled"` or `"enabled"`, which returns the source to `bound`,
 `unbound` or `resolving` as its files and platform say. A disabled source
 stays disabled when rebound. The answer is the updated item.
@@ -364,6 +399,22 @@ title_id, confidence, candidates }`, where `path` is inside the torrent,
 matched, and `candidates` lists the further roms the file may be, strongest
 first, as `{ rom_id, rom_name, title_id, confidence }`. A file counts toward
 the source's `matched_count` exactly when it has a matched rom or a candidate.
+Each item also has `kind`, `"rom"`, `"archive"`, `"disc"` or `"extra"` from
+its extension and the platform's kind; `unmatched`, `null` when a rom or a
+candidate matched, else `"unbound"` (the source has no platform), `"extra"`
+or `"no_entry"`; and `download`, the file's newest download as `{ id, state,
+progress }`, or `null`. `filter` is `matched` (a rom or a candidate),
+`unmatched` or `wanted` (a download that was not cancelled), and `q` keeps
+paths containing it, ignoring ASCII case; `total` counts what they keep.
+
+`/sources/{id}/preview` is `{ total, sampled, platforms: [{ platform_id,
+matched }] }` for every platform with a loaded DAT, most matched first: a
+read-only dry run of the binding's name tiers, the count the automatic
+classifier's hit rate comes from. It reads at most 4 000 evenly spaced files,
+500 per read so other requests get the database's one reader in between;
+when `sampled` is below `total` each count is scaled up from the sample and
+is approximate. The SPA asks for it once per page view, when the user first
+opens Re-classify.
 
 ## Incoming files
 

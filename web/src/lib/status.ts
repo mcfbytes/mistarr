@@ -87,6 +87,7 @@ const KIND_LABEL: Record<string, string> = {
   chd_tracks: 'CHD tracks',
   transfer: 'Transfer',
   remap_sources: 'Source matching',
+  bind_source: 'Source binding',
   detect_client: 'Client check',
   resolve_magnet: 'Magnet lookup',
   deselect: 'Transfer stop',
@@ -102,6 +103,9 @@ export function kindLabel(kind: string): string {
 export function jobDetail(payload: Record<string, unknown>): string | null {
   if (typeof payload.path === 'string') {
     return payload.path.split('/').pop() ?? null;
+  }
+  if (typeof payload.source_name === 'string') {
+    return payload.source_name;
   }
   return typeof payload.platform_id === 'string' ? payload.platform_id : null;
 }
@@ -140,6 +144,8 @@ export function jobHref(job: Pick<Job, 'kind' | 'payload'> & { progress?: Job['p
     case 'resolve_magnet':
     case 'remap_sources':
       return '#/sources';
+    case 'bind_source':
+      return typeof job.payload.source_id === 'number' ? `#/sources/${job.payload.source_id}` : '#/sources';
     case 'scan':
     case 'recompute_1g1r':
       return typeof job.payload.platform_id === 'string' ? `#/p/${job.payload.platform_id}` : '#/';
@@ -161,6 +167,7 @@ const PHASE_TEXT: Record<string, string> = {
   picking: 'Choosing preferred versions',
   refreshing: 'Refreshing title groups',
   matching: 'Matching files on the card',
+  binding: 'Matching files to DAT entries',
   'copying the database to memory': 'Copying the database to memory',
   'writing the database to the card': 'Writing the database to the card',
   importing: 'Importing',

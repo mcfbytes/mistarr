@@ -200,7 +200,9 @@ export function jobOutcome(
     }
     return typeof p.target === 'string' ? `URL fetch${name}: placed in ${p.target}/` : `URL fetch${name}: done`;
   }
+  const source = typeof job.payload?.source_name === 'string' ? job.payload.source_name : '';
   const labels: Record<string, string> = {
+    bind_source: `Binding of ${source}`.trim(),
     scan: `Scan of ${where}`,
     recompute_1g1r: `Matching for ${where}`,
     dat_import: `DAT ${file}`.trim(),
@@ -223,6 +225,9 @@ export function jobOutcome(
   }
   if (job.kind === 'recompute_1g1r' && typeof p.matched === 'number') {
     return `${label}: ${p.matched} files newly matched`;
+  }
+  if (job.kind === 'bind_source' && typeof p.matched === 'number' && typeof p.total === 'number') {
+    return `${label}: ${p.matched} of ${p.total} files matched`;
   }
   if (job.kind === 'dat_import' && typeof p.games === 'number') {
     return `${label}: ${p.games} games read`;
@@ -287,6 +292,15 @@ export function applyJobProgress(
   } else {
     scheduleReload();
   }
+}
+
+/** Mock mode: shows `job` running, then finishes it with `outcome` after `ms` and calls `done`. */
+export function runMockJob(job: Job, outcome: Record<string, unknown>, ms: number, done: () => void): void {
+  jobs = [...jobs, job];
+  setTimeout(() => {
+    applyJobProgress(job.id, job.kind, 'done', outcome);
+    done();
+  }, ms);
 }
 
 let mockTimer: ReturnType<typeof setInterval> | null = null;

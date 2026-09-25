@@ -41,7 +41,7 @@
     const detail =
       job.kind === 'url_fetch'
         ? fetchSubject(job, active)
-        : typeof job.payload.platform_id === 'string'
+        : typeof job.payload.platform_id === 'string' && typeof job.payload.source_name !== 'string'
           ? name(job.payload.platform_id)
           : jobDetail(job.payload);
     return detail ? `${kindLabel(job.kind)}: ${detail}` : kindLabel(job.kind);

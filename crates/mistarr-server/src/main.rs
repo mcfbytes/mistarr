@@ -106,7 +106,11 @@ async fn serve(
         ..Options::default()
     };
     let running = app::start(config, options).await?;
-    tracing::info!(url = %format!("http://{}/", running.addr), "mistarr started");
+    tracing::info!(
+        url = %format!("http://{}/", running.addr),
+        version = mistarr_server::version::version(),
+        "mistarr started"
+    );
     wait_for_signal().await?;
     tracing::info!("shutting down");
     running.shutdown().await?;

@@ -32,10 +32,11 @@
 
   function jobTitle(job: Job): string {
     const pid = job.payload.platform_id;
+    const named = typeof job.payload.source_name === 'string';
     const detail =
       job.kind === 'url_fetch'
         ? fetchSubject(job, jobs)
-        : typeof pid === 'string'
+        : typeof pid === 'string' && !named
           ? platformName(pid)
           : jobDetail(job.payload);
     return detail ? `${kindLabel(job.kind)}: ${detail}` : kindLabel(job.kind);

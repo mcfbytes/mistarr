@@ -26,7 +26,12 @@ export type Override = 'paused' | 'running' | null;
 export type ClientHold = 'uploads' | 'frozen' | null;
 
 export interface SystemStatus {
+  /** The release tag's version, or `<crate version>+dev` with `.<commit>` when known. */
   version: string;
+  /** Short commit the binary was built from, null when the build did not know it. */
+  commit: string | null;
+  /** Whether the binary was built from a release tag. */
+  release: boolean;
   uptime_secs: number;
   client: ClientStatus | null;
   corename: string | null;
@@ -39,8 +44,11 @@ export interface SystemStatus {
   pause_client_while_playing: boolean;
   waiting: WaitingJob[];
   disk_free_bytes: number | null;
+  disk_total_bytes: number | null;
   dats_dir: string;
   rss_bytes: number | null;
+  mem_total_bytes: number | null;
+  mem_available_bytes: number | null;
   launch: LaunchState;
   /** Decoded CHD bytes per second on the last image, null before the first. */
   chd_decode_bytes_per_sec: number | null;
@@ -232,7 +240,56 @@ export interface Source {
   client_id: string | null;
   added_at: number;
   suggested_platform_id: string | null;
+  /** The user chose the binding, a platform or none; automatic binding leaves it alone. */
+  user_binding: boolean;
+  /** The binding asked for and not applied yet; `platform_id` null means "not a game set". */
+  pending_binding: { automatic: boolean; platform_id: string | null } | null;
 }
+
+/** `PUT /sources/{id}`'s answer: the source, and the binding job it queued. */
+export interface SourceUpdated extends Source {
+  job_id: number | null;
+}
+
+/** How a source's files classify; the first four add up to its file count. */
+export interface SourceSummary {
+  matched: number;
+  candidates: number;
+  unmatched: number;
+  extra: number;
+  wanted: number;
+}
+
+/** A DAT the source's matched files come from. */
+export interface SourceDat {
+  dat_version_id: number;
+  dat_name: string;
+  version: string;
+  matched: number;
+}
+
+/** The source's open downloads, which the client holds selected. */
+export interface SourceTransfer {
+  files: number;
+  size: number;
+  done: number;
+}
+
+export interface SourceDetail extends Source {
+  summary: SourceSummary;
+  dats: SourceDat[];
+  transfer: SourceTransfer;
+}
+
+/** What binding to each platform with a DAT would match, from a dry run. */
+export interface SourcePreview {
+  total: number;
+  /** Files read; below `total` the counts are scaled from an even sample. */
+  sampled: number;
+  platforms: { platform_id: string; matched: number }[];
+}
+
+export type SourceFileFilter = 'matched' | 'unmatched' | 'wanted';
 
 export type IncomingState = 'waiting' | 'importing' | 'rejected';
 
@@ -267,15 +324,24 @@ export interface SourceFileCandidate {
   confidence: MatchConfidence;
 }
 
+export type SourceFileKind = 'rom' | 'archive' | 'disc' | 'extra';
+
+/** Why a file matched no DAT entry. */
+export type SourceFileUnmatched = 'unbound' | 'extra' | 'no_entry';
+
 export interface SourceFile {
   file_index: number;
   path: string;
   size: number;
+  kind: SourceFileKind;
   rom_id: number | null;
   rom_name: string | null;
   title_id: number | null;
   confidence: SourceFileConfidence;
   candidates: SourceFileCandidate[];
+  unmatched: SourceFileUnmatched | null;
+  /** The file's newest download. */
+  download: { id: number; state: DownloadState; progress: number } | null;
 }
 
 export type DownloadState =

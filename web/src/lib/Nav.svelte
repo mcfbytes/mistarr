@@ -7,7 +7,7 @@
   const links: { hash: string; label: string; match: string[] }[] = [
     { hash: '#/', label: 'Platforms', match: ['platforms', 'browse'] },
     { hash: '#/activity', label: 'Activity', match: ['activity'] },
-    { hash: '#/sources', label: 'Sources', match: ['sources'] },
+    { hash: '#/sources', label: 'Sources', match: ['sources', 'source'] },
     { hash: '#/dats', label: 'DATs', match: ['dats'] },
     { hash: '#/system', label: 'System', match: ['system'] }
   ];

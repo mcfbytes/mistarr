@@ -142,9 +142,11 @@ Under the heading, the client-held pill while it applies, and under each
 seed policy the note "Paused while a core runs" while the setting is on (see
 "The client while a core runs").
 Unbound sources have a platform picker and, when the names suggest one, a
-"Bind to" button for the suggested platform. Above the table, the upload
-control, the magnet box and the URL field, then the files still in
-`sources/` and this session's uploads, as in the wizard.
+"Bind to" button for the suggested platform. The name links to the source's
+detail, and a "Set by you" tag beside the platform marks a binding the user
+chose. Above the table, the upload control, the magnet box and the URL
+field, then the files still in `sources/` and this session's uploads, as in
+the wizard.
 
 **URL field.** On DATs, Sources and the wizard's DAT and source steps: a
 text box labelled "Add from a URL" with the placeholder
@@ -182,6 +184,37 @@ the rest. An uploaded zip is a file the user already has and chose; a
 fetched one came from a server, and mistarr places only what it rewrote, so
 a member it could not rewrite has no place to go.
 
+**Source** (`/sources/{id}`). A link back to Sources, then the name; size,
+file count, the infohash shortened with Copy (over plain http, where the
+browser has no clipboard, Copy shows the whole infohash to copy by hand),
+added date, dropped file, and whether the client has it, with a paused pill
+("Client paused while NES is running", or "Client uploads paused while…")
+while a `client_hold` applies, and a bar of the
+selected files' transfer. The seed policy, the same control as on the list, saved through
+the same `PUT /sources/{id}`, so a held or missing client defers it the same
+way. Under
+Classification: the state pill, a "Set by you" tag for a user's binding, one
+sentence on how it was bound ("Bound to NES automatically. 94% of its files
+match DAT entries.", "Bound to NES by you.", "Marked by you as not a game
+set."), the DATs its matches come from, and counts of matched, possible,
+unmatched, extra and wanted files. Re-classify is a disclosure that asks
+`/sources/{id}/preview` once per page view, aborting it if the panel
+closes first, and lists each platform with a DAT as a radio, "would match N
+of M files" ("about N" when sampled), plus "Not a game set"; choosing one
+says what applying does, and Apply queues the binding job, whose bar shows on
+the page and in the activity panel until a toast gives its outcome. While the
+choice waits, the page and the list say "Binding to NES…", "Marking as not a
+game set…" or "Returning to automatic binding…". Reset to automatic, shown
+only while the binding is the user's, hands the source back to the
+classifier. Closing the panel, or Reset disappearing, returns focus to
+Re-classify. The page is rebuilt for each source id, so nothing carries over
+from one source to the next. The file table has filter chips (All, Matched, Unmatched, Wanted,
+`aria-pressed`), a path search 250 ms after typing stops, and pages of 50
+with Previous and Next; each row shows the path, size, kind, the matched
+entry linked to its title with its confidence, a candidate as "Possibly …",
+or the reason nothing matched, and the file's transfer state. At 600 px and
+below each row stacks its cells.
+
 **DATs** (`/dats`). Its own nav entry, between Sources and System, since
 DATs arrive and fail on their own schedule like sources do. An upload
 control taking several `.dat`, `.xml` or `.zip` files, the same upload as
@@ -203,33 +236,74 @@ moves to the confirming button and back to Remove on Keep; every button's
 label names its file or version, and an `aria-live` line reports each
 result. Live over SSE, as in the wizard.
 
-**System** (`/system`). Status, client with the same start offer as the
-wizard, CORENAME, paused indicator with manual override, launch state,
-settings form for the runtime-editable subset with the shared path map editor
-and the switch that allows launching, log tail. Under "Disc images", the
-checkbox "Identify CHD images by their tracks" with a "Slow" tag, a line
-saying it decodes each image once, pauses while a core runs and keeps its
-results, and the measured speed as "about N minutes per 700 MB image", or
-"Speed not measured yet." The heading "Limits (kbps)" has the line "0 keeps
-the client's own limit. Any other value only ever lowers it." Under the
-limits, the checkbox "Pause the download client while a core runs", on by
-default, with the line "Frees the board for the game. Transfers resume at the
-menu, and each source's seed policy applies again. A client on another
-machine only stops uploading." The status card shows the client-held pill
-while it applies.
+**System** (`/system`). A grid of status tiles, three across and two
+at phone width: the MiSTer (the running core, "At the menu" for `MENU`, the
+launch state, and the client-held pill while the client is held), the
+download client (kind, version, a Reachable or Not reachable pill, its
+address, the client-held pill with the rtorrent 1 KiB/s line, and the same
+start offer as the wizard), the
+scheduler (a Running, Paused or Held for the core pill, the jobs waiting,
+and Pause, Resume or Run now), memory (mistarr's RSS, with a meter of the
+board's memory in use and `MemAvailable` of `MemTotal`), storage (free
+space, with a meter of the data directory's filesystem in use) and uptime.
+Meters warn past 85 % for memory and 90 % for storage. Live over the SSE
+`status` event.
+
+An About block shows the version with a Copy button, a Release or
+Development build pill, the commit, a link to the release's notes on the
+project's GitHub page for a release build only, and Copy diagnostics. That
+copies a plain-text summary in the shape of `mistarr doctor`'s, built from
+`/system/status` by `web/src/lib/system.ts`: version, commit, uptime, client
+kind, version and reachability, which client programs exist, CORENAME,
+scheduler state and the number of jobs waiting, whether the client is paused
+while a core runs and how it is held now, launch state, memory, free
+space, CHD decoding speed and the browser. It never holds a path, an
+address, a file name or anything naming content. Over plain HTTP, where the
+Clipboard API is missing, it copies through a selected text area, and shows
+the text to copy by hand when the browser refuses.
+
+Settings, for the runtime-editable subset, are in titled sections: Download
+client (kind, address, and the shared path map editor as "Path map"),
+Transfers and limits (download and upload at the menu and while a core
+runs, in kB/s, with the line "0 keeps the client's own limit. Any other
+value only ever lowers it."; an empty or non-whole value is marked invalid,
+changes nothing and blocks Save with a message; then the checkbox "Pause the
+download client while a core runs", on by default, with the line "Frees the
+board for the game. Transfers resume at the menu, and each source's seed
+policy applies again. A client on another machine only stops uploading."),
+Title choice (1G1R region and language order,
+hidden flags, prefer the highest revision), Launching (the switch that
+allows launching) and Scanning. Each field has its label, control and help
+text in the same two columns on wide screens and stacked on a phone. A
+section list beside them, sticky on wide screens and a row of buttons on a
+phone, moves focus to a section's heading and marks the section in view.
+A note says these apply on save with no restart, and that settings found
+only in `mistarr.toml` apply at the next start. A save bar with Save and Discard
+appears, pinned to the bottom of the window (sticky where the browser
+supports `overflow-x: clip`, fixed elsewhere), only while something differs
+from what was loaded or saved, and lifts the toasts above itself. While it
+shows, leaving for another screen by a link, Back, Forward or an edited
+address asks first and stays on a no, through a guard in
+`web/src/lib/router.svelte.ts`; a link opened in a new tab asks nothing, and
+a reload is warned by the browser. Under Scanning, "Disc
+images": the checkbox "Identify CHD images by their tracks" with a "Slow"
+tag, a line saying it decodes each image once, pauses while a core runs and
+keeps its results, and the measured speed as "about N minutes per 700 MB
+image", or "Speed not measured yet."
 
 ## The client while a core runs
 
 While `/system/status` reports a `client_hold`, the Sources screen, the
-System status card and the activity panel, under its heading, show one
-paused pill (`web/src/lib/ClientHeld.svelte`): "Download client paused while
+activity panel under its heading, and System's MiSTer and download client
+tiles show a paused pill (`web/src/lib/ClientHeld.svelte`, without its
+rtorrent line in the MiSTer tile): "Download client paused while
 NES is running" for a stopped client, or "Uploads paused while NES is
 running" for held uploads, naming the core as the held-jobs banner does. For
 rtorrent, whose lowest held rate is 1 KiB/s, a line beside it and its title
 say so. It follows the `status` event, so it appears when the client is held
 and goes when it is let go at the menu. While
-`pause_client_while_playing` is on, each source row notes "Paused while a
-core runs" under its seed policy, and the wizard's seed policy step says that
+`pause_client_while_playing` is on, each source row, and the seed policy on
+a source's detail, notes "Paused while a core runs", and the wizard's seed policy step says that
 transfers pause while a core runs, that a client on another machine only
 stops uploading, and that this can be turned off in System.
 
