@@ -449,6 +449,7 @@ pub(crate) fn open_db(
     let path = config.paths.db();
     crate::migrating::clear_stale(&config.paths.data)?;
     // Leftovers of an import in RAM cut short; the database itself is always whole.
+    let swapping = db::ram::swap_files(&path);
     db::ram::clean_stale(&path, &config.memory.import_dir)?;
     if config.memory.import_floor_mib == 0 {
         tracing::warn!(
@@ -467,6 +468,14 @@ pub(crate) fn open_db(
         None => None,
     };
     migrate_in_ram(config, progress.as_ref())?;
+    if swapping && !path.exists() {
+        return Err(std::io::Error::other(format!(
+            "{} could not be recovered from a swap cut short; check the card and restore \
+             mistarr.db.prev",
+            path.display()
+        ))
+        .into());
+    }
     let db = match &progress {
         Some(m) => Db::open_counting(&path, &m.steps())?,
         None => Db::open(&path)?,

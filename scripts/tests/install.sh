@@ -879,18 +879,44 @@ expect_absent "$root16/mistarr/mistarr.db.new" "a stale copy is removed"
 expect_absent "$root16/mistarr/mistarr.db.prev.new" "a stale copy is never saved"
 expect "$(cat "$root16/mistarr/mistarr.db.prev")" "DB16" "the database itself is saved"
 
-# A swap cut after its first rename: the whole copy becomes the database first.
-root17="$work/root17"
-mkdir -p "$root17/mistarr" "$root17/Scripts"
-echo "OLD17" > "$root17/mistarr/mistarr.db.old"
-echo "NEW17" > "$root17/mistarr/mistarr.db.new"
-write_arm_binary "$root17/mistarr/mistarr" OLD-BINARY-17
-write_launcher_stub "$root17/Scripts/mistarr.sh"
-out=$(run_install "$root17" "$no_tty" v1.1.0)
-expect_contains "$out" "finished the database swap" "a swap cut short is reported"
-expect_absent "$root17/mistarr/mistarr.db.old" "the old file is removed"
-expect_absent "$root17/mistarr/mistarr.db.new" "the copy is renamed in"
-expect "$(cat "$root17/mistarr/mistarr.db.prev")" "NEW17" "the finished database is saved"
+# Swaps cut short at each step; a copy with no database beside it is never removed.
+swap_root() {
+    r="$work/root17-$1"
+    mkdir -p "$r/mistarr" "$r/Scripts"
+    write_arm_binary "$r/mistarr/mistarr" "OLD-BINARY-17-$1"
+    write_launcher_stub "$r/Scripts/mistarr.sh"
+    echo "$r"
+}
+r=$(swap_root old-new)
+echo "OLD17" > "$r/mistarr/mistarr.db.old"
+echo "NEW17" > "$r/mistarr/mistarr.db.new"
+out=$(run_install "$r" "$no_tty" v1.1.0)
+expect_contains "$out" "left $r/mistarr/mistarr.db.new" "a copy beside .old is left for the server"
+expect "$(cat "$r/mistarr/mistarr.db.new")" "NEW17" "the copy is kept"
+expect "$(cat "$r/mistarr/mistarr.db.old")" "OLD17" "the old file is kept"
+expect_absent "$r/mistarr/mistarr.db" "no database is made up"
+
+r=$(swap_root new)
+echo "NEW17" > "$r/mistarr/mistarr.db.new"
+out=$(run_install "$r" "$no_tty" v1.1.0)
+expect_contains "$out" "left $r/mistarr/mistarr.db.new" "a lone copy is left for the server"
+expect "$(cat "$r/mistarr/mistarr.db.new")" "NEW17" "a lone copy is never removed"
+expect_absent "$r/mistarr/mistarr.db" "no database is made up beside a lone copy"
+
+r=$(swap_root old)
+echo "OLD17" > "$r/mistarr/mistarr.db.old"
+out=$(run_install "$r" "$no_tty" v1.1.0)
+expect_contains "$out" "put the database back" "a lone .old is reported"
+expect "$(cat "$r/mistarr/mistarr.db")" "OLD17" "a lone .old becomes the database"
+expect "$(cat "$r/mistarr/mistarr.db.prev")" "OLD17" "and is saved"
+
+r=$(swap_root db-old)
+echo "NEW17" > "$r/mistarr/mistarr.db"
+echo "OLD17" > "$r/mistarr/mistarr.db.old"
+out=$(run_install "$r" "$no_tty" v1.1.0)
+expect_contains "$out" "a finished swap replaced" "a replaced file is reported"
+expect_absent "$r/mistarr/mistarr.db.old" "the replaced file is removed"
+expect "$(cat "$r/mistarr/mistarr.db.prev")" "NEW17" "the database itself is saved"
 
 if [ "$fail" -eq 0 ]; then
     echo "all tests passed"

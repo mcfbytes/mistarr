@@ -146,7 +146,8 @@ new ones after, and that stale copies go at startup. They build the files
 a crash leaves at each step of the swap, a partial and a whole
 `mistarr.db.new`, a migration's copy written back but not swapped in, and a
 migration that fails on the copy, and start through `app::open_db`, which
-must open one whole database; a swap that cannot reopen must fail with
+must open one whole database or, where no name can be read, refuse; a
+lone `.new` from a torn rename must be checked and kept; a swap that cannot reopen must fail with
 `Reopen`, never fall back. `jobs::dat_import::tests` fill the copy partway
 through a load and expect a fallback with the card file unchanged;
 `an_import_in_ram_stores_the_same_rows_as_one_in_place` compares every row

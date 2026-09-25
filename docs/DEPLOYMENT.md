@@ -58,6 +58,7 @@ any dynamic dependency, checked with `file` on the output.
                           #   renamed to mistarr.db, removed at startup if left
   mistarr.db.old          # the database the copy replaces, for the moment of
                           #   the swap; a start after a crash finishes the swap
+  mistarr.db.swap         # empty, present while the swap renames files
   mistarr.db.prev         # the database before the last upgrade, with any
                           #   mistarr.db.prev-wal and mistarr.db.prev-shm
   mistarr.lock            # held by the running server; a second server exits
@@ -167,9 +168,11 @@ rollback set:
 When `fuser` is available and shows a process still holding `mistarr.db`,
 its `-wal`, or the `mistarr.db.new` or `mistarr.db.old` of a DAT import's
 swap, the script names the process, restarts the installed version and exits
-without changing anything. A swap a crash cut short is then finished as the
-server's start would, and a `mistarr.db.new` left by an import that was
-stopped is removed, never saved. It then checks free space in the data
+without changing anything. Beside `mistarr.db`, a `mistarr.db.old` left by
+a swap and a `mistarr.db.new` left by an import that was stopped are then
+removed, never saved. Without `mistarr.db`, a `mistarr.db.new` is left for
+the server, which checks it and puts it in place when it starts, and a lone
+`mistarr.db.old` is renamed back. It then checks free space in the data
 directory, read with `stat -f` so that only that filesystem is queried; where
 `stat -f` is missing it falls back to `df`, which on some BusyBox builds
 queries every mount and can stall on an unreachable network mount. It copies

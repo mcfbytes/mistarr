@@ -427,11 +427,16 @@ pub fn sibling(path: &Path, suffix: &str) -> PathBuf {
 /// Suffix the old database file takes while [`install_file`] puts a new one in its place.
 pub const OLD_SUFFIX: &str = ".old";
 
+/// Suffix of the empty marker [`install_file`] keeps beside the database for the length
+/// of its renames, so a start after a crash that left no readable name never creates one.
+pub const SWAP_SUFFIX: &str = ".swap";
+
 /// Puts `new`, a complete database file synced beside `path`, in its place once no
 /// connection has `path` open: removes the old file's `-wal` and `-shm`, which must hold
-/// nothing unwritten, renames `path` to `.old`, `new` to `path`, and removes `.old`,
-/// syncing the directory after each. [`ram::clean_stale`] finishes a swap a crash cut
-/// short; `docs/ARCHITECTURE.md` "DAT import in RAM" lists every crash point.
+/// nothing unwritten, writes the `.swap` marker, renames `path` to `.old`, `new` to
+/// `path`, and removes `.old` and the marker, syncing the directory after each.
+/// [`ram::clean_stale`] finishes a swap a crash cut short; `docs/ARCHITECTURE.md` "DAT
+/// import in RAM" lists every crash point.
 ///
 /// # Errors
 ///
@@ -443,13 +448,22 @@ pub(crate) fn install_file(path: &Path, new: &Path) -> std::io::Result<()> {
     }
     let old = sibling(path, OLD_SUFFIX);
     remove_if_present(&old)?;
-    std::fs::rename(path, &old)?;
+    let marker = sibling(path, SWAP_SUFFIX);
+    std::fs::File::create(&marker)?.sync_all()?;
+    sync_parent(path);
+    if let Err(e) = std::fs::rename(path, &old) {
+        remove_if_present(&marker)?;
+        return Err(e);
+    }
     sync_parent(path);
     if let Err(e) = std::fs::rename(new, path) {
         let back = std::fs::rename(&old, path);
         sync_parent(path);
         return Err(match back {
-            Ok(()) => e,
+            Ok(()) => {
+                remove_if_present(&marker)?;
+                e
+            }
             Err(b) => std::io::Error::other(format!(
                 "{e}; the old database stays at {}: {b}",
                 old.display()
@@ -457,10 +471,12 @@ pub(crate) fn install_file(path: &Path, new: &Path) -> std::io::Result<()> {
         });
     }
     sync_parent(path);
-    if let Err(e) = std::fs::remove_file(&old) {
-        tracing::warn!(error = %e, "cannot remove the old database file; the next start does");
+    for leftover in [&old, &marker] {
+        if let Err(e) = std::fs::remove_file(leftover) {
+            tracing::warn!(error = %e, "cannot remove a file of the swap; the next start does");
+        }
+        sync_parent(path);
     }
-    sync_parent(path);
     Ok(())
 }
 
@@ -521,6 +537,16 @@ fn open_pair(
     steps: Option<&crate::migrating::Steps>,
     scratch: bool,
 ) -> Result<(Connection, Connection)> {
+    if !path.exists() && ram::swap_files(path) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!(
+                "{} is missing beside the files of a swap cut short; not creating a new one",
+                path.display()
+            ),
+        )
+        .into());
+    }
     let mut writer = Connection::open(path)?;
     // Checked before `configure`, whose pragmas may write to the file.
     migrate::check_supported(&writer)?;
@@ -922,12 +948,14 @@ mod tests {
         copy.write_blocking(|c| settings::set(c, "k", "v"))
             .expect("write");
         copy.close().expect("close");
+        for suffix in ["-journal", "-wal", "-shm"] {
+            assert!(!sibling(&path, suffix).exists(), "{suffix} left");
+        }
         let c = Connection::open(&path).expect("open");
         let mode: String = c
             .pragma_query_value(None, "journal_mode", |r| r.get(0))
             .expect("mode");
         assert_eq!(mode, "wal");
-        assert!(!sibling(&path, "-journal").exists());
     }
 
     #[test]

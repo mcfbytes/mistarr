@@ -711,36 +711,43 @@ of the database in RAM and write it back whole (`db::ram`):
    and the import runs on the card. The scan cannot see another user's
    processes, nor the file opened through another path such as a bind mount.
 7. With the reader held too, the old WAL is checkpointed again and must be
-   empty and both connections close. The old `-wal` and `-shm` are removed,
-   then the swap takes three renames, each followed by a sync of the
-   directory: `mistarr.db` to `mistarr.db.old`, `mistarr.db.new` to
-   `mistarr.db`, and `mistarr.db.old` removed. Both connections then open on
-   the file named `mistarr.db`, never creating one. A reader sees the old
-   file or the new one, never part of either.
+   empty and both connections close. The old `-wal` and `-shm` are removed
+   and an empty `mistarr.db.swap` marker is written and synced. The swap then
+   takes three steps, each followed by a sync of the directory: `mistarr.db`
+   renamed to `mistarr.db.old`, `mistarr.db.new` renamed to `mistarr.db`, and
+   `mistarr.db.old` and the marker removed. Both connections then open on the
+   file named `mistarr.db`, never creating one. A reader sees the old file
+   or the new one, never part of either.
 8. The working directory goes on every way out. At startup, before the
-   database opens, a swap cut short is finished, `mistarr.db.new` and this
-   database's working directories are removed, and a data directory that
-   lists `mistarr.db` twice, which only a damaged file system does, is
-   warned about.
+   database opens, a swap cut short is finished, `mistarr.db.new` is removed
+   when `mistarr.db` stands beside it, this database's working directories
+   are removed, and a data directory that lists `mistarr.db` twice, which
+   only a damaged file system does, is warned about.
 
-Every crash point leaves one whole database the next start opens. The
-start reads which step it was from the files present:
+exFAT on Linux rewrites a renamed file's directory entries in place, one
+synced write each, and finds a name by its hash and length before the name
+itself. A power cut inside a rename can therefore leave neither the old
+name nor the new one readable. The start reads which step it was from the
+files it can read, and never creates a database while `.old`, `.new` or the
+marker is present or was at the start:
 
-| Cut during | Files left | At the next start |
+| Cut during | Files readable | At the next start |
 |---|---|---|
 | the check, the copy or the import | `mistarr.db`, WAL empty | opened as it was; the job re-runs, as an interrupted DAT import does |
 | the write-back | `mistarr.db`, a partial `.new` | `.new` removed unread |
-| after the write-back, before the first rename | `mistarr.db`, a whole `.new` | `.new` removed; the import or migration runs again |
-| after the first rename | `.old`, a whole `.new` | `.new` renamed to `mistarr.db`, `.old` removed |
-| after the second rename | `mistarr.db` (new), `.old` | `.old` removed |
-| after the removal | `mistarr.db` (new) | opened |
+| after the write-back, before the first rename | `mistarr.db`, a whole `.new`, perhaps the marker | `.new` and the marker removed; the import or migration runs again |
+| the first rename | a whole `.new`, the marker | `.new`, synced before the swap began, passes SQLite's `quick_check` and is renamed to `mistarr.db` |
+| after the first rename | `.old`, a whole `.new`, the marker | `.new` checked and renamed to `mistarr.db`, `.old` removed |
+| the second rename | `.old`, the marker | `.old` renamed back; the import or migration runs again |
+| after the second rename | `mistarr.db` (new), `.old`, the marker | `.old` and the marker removed |
+| after the removals | `mistarr.db` (new) | opened |
+| a rename of the start's own recovery | the marker alone, or nothing | the start refuses, naming the database; the card needs checking, and `mistarr.db.prev` holds the last upgrade's copy |
 
-`.new` is synced before the first rename, so a `.new` beside `.old` is whole.
-Should `.new` be gone too, `.old` is renamed back. The old WAL is removed
-before the renames because it is empty and nothing writes it after the
-checkpoint, so removing it loses nothing and the new file never meets frames
-written for the old one. exFAT has no journal and its rename is not atomic
-against a power cut; no step here depends on one rename replacing a file.
+A `.new` with no `mistarr.db` beside it is never removed: a `.new` that
+fails the check stops the start with a message naming it, to be moved aside
+or kept for recovery. The old WAL is removed before the renames because it
+is empty and nothing writes it after the checkpoint, so removing it loses
+nothing and the new file never meets frames written for the old one.
 `db::ram::tests::a_start_after_a_crash_at_any_step_of_the_swap_opens_one_whole_database`
 builds each state and starts through `app::open_db`.
 

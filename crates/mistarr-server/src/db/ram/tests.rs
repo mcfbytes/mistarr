@@ -175,6 +175,7 @@ fn startup_removes_a_stale_new_file_and_this_databases_copies_only() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("data/mistarr.db");
     fs::create_dir_all(db.parent().expect("parent")).expect("mkdir");
+    fs::write(&db, b"the database").expect("write");
     fs::write(sibling(&db, NEW_SUFFIX), b"half a database").expect("write");
     let ram = dir.path().join("ram");
     let ours = ram.join(format!("{}12", work_prefix(&db)));
@@ -509,16 +510,25 @@ fn closed_with(path: &Path, value: &str) {
 #[test]
 fn a_start_after_a_crash_at_any_step_of_the_swap_opens_one_whole_database() {
     let ram = testutil::ram_dir();
-    // The files a crash leaves, `(db, .new, .old)`, and the value the start then reads.
+    // The files a crash leaves, `(db, .new, .old, .swap)`, and the value the start then
+    // reads, `None` when it must refuse to start. A torn rename on exFAT leaves neither
+    // of its names readable, which is why `.new` or nothing can stand alone.
     let cases = [
-        (Some("old"), Some("partial"), None, "old"),
-        (Some("old"), Some("new"), None, "old"),
-        (None, Some("new"), Some("old"), "new"),
-        (Some("new"), None, Some("old"), "new"),
-        (Some("new"), None, None, "new"),
-        (None, None, Some("old"), "old"),
+        (Some("old"), Some("partial"), None, false, Some("old")),
+        (Some("old"), Some("new"), None, false, Some("old")),
+        (Some("old"), Some("new"), None, true, Some("old")),
+        (None, Some("new"), Some("old"), true, Some("new")),
+        (None, Some("new"), None, true, Some("new")),
+        (None, Some("new"), None, false, Some("new")),
+        (Some("new"), None, Some("old"), true, Some("new")),
+        (Some("new"), None, None, true, Some("new")),
+        (Some("new"), None, None, false, Some("new")),
+        (None, None, Some("old"), true, Some("old")),
+        (None, None, None, true, None),
+        (None, Some("partial"), None, true, None),
+        (None, Some("partial"), Some("old"), true, None),
     ];
-    for (i, (db_file, new_file, old_file, want)) in cases.into_iter().enumerate() {
+    for (i, (db_file, new_file, old_file, marked, want)) in cases.into_iter().enumerate() {
         let root = tempfile::tempdir().expect("tempdir");
         let mut config = config_at(root.path(), ram.path());
         let path = config.paths.db();
@@ -538,12 +548,67 @@ fn a_start_after_a_crash_at_any_step_of_the_swap_opens_one_whole_database() {
         place(db_file, &path);
         place(new_file, &sibling(&path, NEW_SUFFIX));
         place(old_file, &sibling(&path, OLD_SUFFIX));
-        let (db, _, _) = crate::app::open_db(&mut config).expect("open");
+        if marked {
+            fs::write(sibling(&path, SWAP_SUFFIX), b"").expect("marker");
+        }
+        let opened = crate::app::open_db(&mut config);
+        let Some(want) = want else {
+            assert!(opened.is_err(), "case {i}: started");
+            assert!(!path.exists(), "case {i}: created a database");
+            if new_file.is_some() {
+                assert!(
+                    sibling(&path, NEW_SUFFIX).exists(),
+                    "case {i}: .new removed"
+                );
+            }
+            continue;
+        };
+        let (db, _, _) = opened.unwrap_or_else(|e| panic!("case {i}: {e}"));
         assert_eq!(get(&db, "k").as_deref(), Some(want), "case {i}");
-        for suffix in [NEW_SUFFIX, OLD_SUFFIX] {
+        for suffix in [NEW_SUFFIX, OLD_SUFFIX, SWAP_SUFFIX] {
             assert!(!sibling(&path, suffix).exists(), "case {i}: {suffix} left");
         }
     }
+}
+
+#[test]
+fn a_database_is_never_created_beside_the_files_of_a_swap() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("m.db");
+    for suffix in [OLD_SUFFIX, NEW_SUFFIX, SWAP_SUFFIX] {
+        fs::write(sibling(&path, suffix), b"").expect("write");
+        assert!(Db::open(&path).is_err(), "created beside {suffix}");
+        assert!(!path.exists());
+        fs::remove_file(sibling(&path, suffix)).expect("remove");
+    }
+    Db::open(&path).expect("a fresh database elsewhere");
+}
+
+#[test]
+fn a_start_after_a_torn_rename_in_a_migrations_swap_keeps_the_migrated_copy() {
+    let ram = testutil::ram_dir();
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut config = config_at(root.path(), ram.path());
+    let path = config.paths.db();
+    let latest = super::super::migrate::latest();
+    at_version(&path, latest - 1, 0.01);
+    let before = titles(&path);
+    let new = sibling(&path, NEW_SUFFIX);
+    fs::copy(&path, &new).expect("copy");
+    Db::open(&new)
+        .and_then(Db::close)
+        .expect("migrate the copy");
+    // The first rename torn: only the migrated copy and the marker can be read.
+    fs::write(sibling(&path, SWAP_SUFFIX), b"").expect("marker");
+    fs::remove_file(&path).expect("tear");
+    let (db, _, _) = crate::app::open_db(&mut config).expect("open");
+    let v = db
+        .read_blocking(super::super::migrate::current_version)
+        .expect("version");
+    assert_eq!(v, latest);
+    drop(db);
+    assert_eq!(titles(&path), before);
+    assert!(!new.exists() && !sibling(&path, SWAP_SUFFIX).exists());
 }
 
 #[test]

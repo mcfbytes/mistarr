@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{Connection, ErrorCode};
 
-use super::{sibling, Db, HeldWriter, OLD_SUFFIX};
+use super::{sibling, Db, HeldWriter, OLD_SUFFIX, SWAP_SUFFIX};
 use crate::error::{Error, Result};
 
 /// Bytes per `write` when the copy goes back to the card; a sync mount flushes each once.
@@ -748,6 +748,7 @@ pub fn write_new(src: &Path, new: &Path, between: &mut dyn FnMut() -> Result<()>
 /// ```
 /// let dir = tempfile::tempdir().unwrap();
 /// let db = dir.path().join("m.db");
+/// std::fs::write(&db, b"the database").unwrap();
 /// std::fs::write(dir.path().join("m.db.new"), b"partial").unwrap();
 /// assert_eq!(mistarr_server::db::ram::clean_stale(&db, &dir.path().join("ram")).unwrap(), 1);
 /// ```
@@ -755,13 +756,16 @@ pub fn clean_stale(db: &Path, dir: &Path) -> Result<usize> {
     let mut removed = finish_swap(db)?;
     warn_on_twins(db);
     let new = sibling(db, NEW_SUFFIX);
-    match fs::remove_file(&new) {
-        Ok(()) => {
-            tracing::info!(file = %new.display(), "removed an unfinished database copy");
-            removed += 1;
+    // Beside no database, `.new` is the only copy there is; `finish_swap` has refused it.
+    if db.exists() {
+        match fs::remove_file(&new) {
+            Ok(()) => {
+                tracing::info!(file = %new.display(), "removed an unfinished database copy");
+                removed += 1;
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+            Err(e) => tracing::warn!(error = %e, "cannot remove an unfinished database copy"),
         }
-        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!(error = %e, "cannot remove an unfinished database copy"),
     }
     let prefix = work_prefix(db);
     let Ok(entries) = fs::read_dir(dir) else {
@@ -782,30 +786,87 @@ pub fn clean_stale(db: &Path, dir: &Path) -> Result<usize> {
     Ok(removed)
 }
 
-/// The step of [`super::install_file`] a crash stopped at, from the files present: with
-/// `.old` and no `db` the new file is renamed in, or the old one back when `.new` is
-/// gone; with both, `.old` is removed. Returns how many files it removed.
+/// The step of [`super::install_file`] a crash stopped at, from the files present.
+/// Beside `db`, `.old` is removed. Without `db`, a `.new` that passes SQLite's
+/// `quick_check` is renamed in and `.old` removed, since `.new` is synced before the
+/// swap begins and a rename on exFAT may leave neither of its names readable; else
+/// `.old` is renamed back. The `.swap` marker goes once `db` is back. Returns how many
+/// files it removed.
+///
+/// # Errors
+///
+/// [`Error::Io`] naming `.new` when it fails the check, or a rename or removal failing.
 fn finish_swap(db: &Path) -> Result<usize> {
-    let old = sibling(db, OLD_SUFFIX);
-    if !old.exists() {
-        return Ok(0);
-    }
+    let (old, new) = (sibling(db, OLD_SUFFIX), sibling(db, NEW_SUFFIX));
+    let mut removed = 0;
     if db.exists() {
-        fs::remove_file(&old)?;
-        tracing::info!(file = %old.display(), "removed the database a finished swap replaced");
-        return Ok(1);
-    }
-    let new = sibling(db, NEW_SUFFIX);
-    if new.exists() {
+        if old.exists() {
+            fs::remove_file(&old)?;
+            tracing::info!(file = %old.display(), "removed the database a finished swap replaced");
+            removed += 1;
+        }
+    } else if new.exists() {
+        check_whole(&new)?;
         fs::rename(&new, db)?;
         super::sync_parent(db);
-        fs::remove_file(&old)?;
+        if old.exists() {
+            fs::remove_file(&old)?;
+            removed += 1;
+        }
         tracing::info!("finished swapping in the database written from RAM");
-        return Ok(1);
+    } else if old.exists() {
+        fs::rename(&old, db)?;
+        tracing::warn!("put the old database back; the swap had lost its new file");
     }
-    fs::rename(&old, db)?;
-    tracing::warn!("put the old database back; the swap had lost its new file");
-    Ok(0)
+    super::sync_parent(db);
+    let marker = sibling(db, SWAP_SUFFIX);
+    if db.exists() && marker.exists() {
+        fs::remove_file(&marker)?;
+        super::sync_parent(db);
+    }
+    Ok(removed)
+}
+
+/// Runs SQLite's `quick_check` on the database file `path`, which has no `-wal`.
+fn check_whole(path: &Path) -> Result<()> {
+    let refuse = |why: String| -> Result<()> {
+        Err(io::Error::other(format!(
+            "{} is the only copy of the database a swap left and {why}; move it aside to start \
+             afresh, or restore mistarr.db.prev",
+            path.display()
+        ))
+        .into())
+    };
+    let conn = match Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+    {
+        Ok(c) => c,
+        Err(e) => return refuse(format!("cannot be opened: {e}")),
+    };
+    let verdict: std::result::Result<String, _> =
+        conn.query_row("PRAGMA quick_check", [], |r| r.get(0));
+    super::close_connection(conn)?;
+    match verdict {
+        Ok(v) if v == "ok" => Ok(()),
+        Ok(v) => refuse(format!("failed SQLite's check: {v}")),
+        Err(e) => refuse(format!("failed SQLite's check: {e}")),
+    }
+}
+
+/// Whether a swap's files, `.old`, `.new` or the `.swap` marker, sit beside `db`; a
+/// start that saw any never creates a database under the name.
+///
+/// ```
+/// let dir = tempfile::tempdir().unwrap();
+/// let db = dir.path().join("m.db");
+/// assert!(!mistarr_server::db::ram::swap_files(&db));
+/// std::fs::write(dir.path().join("m.db.swap"), b"").unwrap();
+/// assert!(mistarr_server::db::ram::swap_files(&db));
+/// ```
+#[must_use]
+pub fn swap_files(db: &Path) -> bool {
+    [OLD_SUFFIX, NEW_SUFFIX, SWAP_SUFFIX]
+        .iter()
+        .any(|s| sibling(db, s).exists())
 }
 
 /// Warns when the database's directory lists its name more than once, which only a

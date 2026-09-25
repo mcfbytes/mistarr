@@ -406,21 +406,22 @@ install_release() {
         restart_current
         exit 1
     fi
-    # A swap cut short: finished as the server's start would, before the save.
-    if [ -f "$DB.old" ]; then
-        if [ -f "$DB" ]; then
+    # A swap cut short. Beside the database, .old is replaced and .new unfinished;
+    # without it, .new may be the only copy, which the server checks before using.
+    if [ -f "$DB" ]; then
+        if [ -f "$DB.old" ]; then
             rm -f "$DB.old"
-        elif [ -f "$DB.new" ]; then
-            mv -f "$DB.new" "$DB" && rm -f "$DB.old"
-        else
-            mv -f "$DB.old" "$DB"
+            echo "removed the database a finished swap replaced, $DB.old"
         fi
-        echo "finished the database swap an import left"
-    fi
-    # A copy a stopped import was writing back; never trusted, and never saved.
-    if [ -f "$DB.new" ]; then
-        rm -f "$DB.new"
-        echo "removed the unfinished database copy $DB.new"
+        if [ -f "$DB.new" ]; then
+            rm -f "$DB.new"
+            echo "removed the unfinished database copy $DB.new"
+        fi
+    elif [ -f "$DB.new" ]; then
+        echo "left $DB.new for mistarr to check and put in place when it starts"
+    elif [ -f "$DB.old" ]; then
+        mv -f "$DB.old" "$DB"
+        echo "put the database back from $DB.old"
     fi
 
     save_prev
