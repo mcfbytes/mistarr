@@ -159,7 +159,7 @@ save_prev() {
 db_in_use() {
     command -v fuser >/dev/null 2>&1 || return 1
     set --
-    for f in "$DB" "$DB-wal" "$DB.new"; do
+    for f in "$DB" "$DB-wal" "$DB.new" "$DB.old"; do
         [ -f "$f" ] && set -- "$@" "$f"
     done
     [ "$#" -gt 0 ] || return 1
@@ -405,6 +405,17 @@ install_release() {
         echo "aborting the install; nothing was changed" >&2
         restart_current
         exit 1
+    fi
+    # A swap cut short: finished as the server's start would, before the save.
+    if [ -f "$DB.old" ]; then
+        if [ -f "$DB" ]; then
+            rm -f "$DB.old"
+        elif [ -f "$DB.new" ]; then
+            mv -f "$DB.new" "$DB" && rm -f "$DB.old"
+        else
+            mv -f "$DB.old" "$DB"
+        fi
+        echo "finished the database swap an import left"
     fi
     # A copy a stopped import was writing back; never trusted, and never saved.
     if [ -f "$DB.new" ]; then

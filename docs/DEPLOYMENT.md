@@ -55,7 +55,9 @@ any dynamic dependency, checked with `file` on the output.
   mistarr.prev.ok         # present once the saved rollback set is complete
   mistarr.db              # SQLite, with mistarr.db-wal and mistarr.db-shm
   mistarr.db.new          # a DAT import's copy while it is written back;
-                          #   renamed over mistarr.db, removed at startup if left
+                          #   renamed to mistarr.db, removed at startup if left
+  mistarr.db.old          # the database the copy replaces, for the moment of
+                          #   the swap; a start after a crash finishes the swap
   mistarr.db.prev         # the database before the last upgrade, with any
                           #   mistarr.db.prev-wal and mistarr.db.prev-shm
   mistarr.lock            # held by the running server; a second server exits
@@ -81,7 +83,8 @@ any dynamic dependency, checked with `file` on the output.
                                #   is a symlink or is another user's (logged at warn);
                                #   MISTARR_TEMP_DIR names another directory
 /tmp/mistarr/import-<key>-<job>/  # the database's copy while a DAT import or a
-                               #   migration runs in RAM ([memory] import_dir)
+                               #   migration runs in RAM ([memory] import_dir,
+                               #   which must be on tmpfs)
 ```
 
 A DAT import copies the database into RAM, loads the DAT there and writes the
@@ -89,24 +92,31 @@ whole file back to the card in 1 MiB writes, so a load costs the card about
 one synchronous write per MiB of the database instead of thousands of page
 writes ([ARCHITECTURE.md](ARCHITECTURE.md) "DAT import in RAM"). Activity and
 the DATs screen show its phases: "copying the database to memory", then
-the load's own, then "writing the database to the card". While it runs, other writes
-wait, so marking a title wanted or saving settings answers once the import
-ends; browsing keeps working and shows the catalogue as it was until the
-swap. When the copy would leave less than `[memory] import_floor_mib` of
-memory available, or `import_dir` or the card lacks room, or another process
-keeps the database open, the import runs on the card, and its progress
-and the log say why. Pending migrations at startup
-take the same path. In `mistarr.toml`:
+the load's own and the recompute's, then "writing the database to the
+card". While it runs, other writes wait, so marking a title wanted or saving
+settings answers once the import ends; an upload answers at once and its
+import is queued when the running one ends. Browsing keeps working and
+shows the catalogue as it was until the swap. When the copy would leave
+less than `[memory] import_floor_mib` of memory available, when memory falls
+below it during the load, when `import_dir` is not a private directory on
+tmpfs apart from the card or it or the card lacks room, or when another
+process keeps the database open, the import runs on the card, and its
+progress, shown as "Importing in place", and the log say why. Pending
+migrations at startup take the same path. In `mistarr.toml`:
 
 ```toml
 [memory]
-import_dir = "/tmp/mistarr"   # RAM-backed; the copy needs the database's size and half again plus 32 MiB
+import_dir = "/tmp/mistarr"   # tmpfs; the copy needs the database's size and half again, three times the DAT, plus 32 MiB
 import_floor_mib = 128        # memory left available for MiSTer Main and a core; a large value always imports on the card
 ```
 
-Both need a restart. Leave `mistarr doctor` and any `sqlite3` session on the
-database closed while an import runs: the swap waits up to 30 s for them and
-then imports on the card.
+Both need a restart; a floor of 0 is logged as a warning at startup. Leave
+`mistarr doctor` and any `sqlite3` session on the database closed while an
+import runs: the swap waits up to 30 s for them and then imports on the card.
+Nothing but the server may write the database while it runs: a change made
+from outside during an import is lost when the copy replaces the file.
+`mistarr doctor --rebuild-groups` refuses to run while the server holds the
+data directory's lock.
 
 [DATS.md](DATS.md) explains the DAT formats mistarr loads, what happens to a
 file dropped into `dats/` or uploaded on the DATs screen, and what each
@@ -155,10 +165,11 @@ rollback set:
   `Scripts/mistarr.sh.prev`.
 
 When `fuser` is available and shows a process still holding `mistarr.db`,
-its `-wal` or a `mistarr.db.new` a DAT import is writing back, the script
-names the process, restarts the installed version and exits without
-changing anything. A `mistarr.db.new` left by an import that was stopped is
-removed then, never saved. It then checks free space in the data
+its `-wal`, or the `mistarr.db.new` or `mistarr.db.old` of a DAT import's
+swap, the script names the process, restarts the installed version and exits
+without changing anything. A swap a crash cut short is then finished as the
+server's start would, and a `mistarr.db.new` left by an import that was
+stopped is removed, never saved. It then checks free space in the data
 directory, read with `stat -f` so that only that filesystem is queried; where
 `stat -f` is missing it falls back to `df`, which on some BusyBox builds
 queries every mount and can stall on an unreachable network mount. It copies
@@ -278,7 +289,7 @@ so, without opening the database for writing, when a newer mistarr migrated
 it. It reads the same config as the server and needs no running server. This
 is what a bug report should include. When it reports title groups out of
 step, stop the server and run `mistarr doctor --rebuild-groups` to recompute
-them.
+them; it takes the data directory's lock and refuses while a server runs.
 
 ## Releasing
 

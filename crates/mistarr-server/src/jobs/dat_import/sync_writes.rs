@@ -201,6 +201,7 @@ fn request() -> Request {
         gate: watch::channel(GateState::default()).1,
         meter: None,
         abort_on_hold: false,
+        floor: None,
     }
 }
 
@@ -405,10 +406,12 @@ fn sync_writes_on_the_bench_catalogue() {
 fn measure_ram(db: &Db, dir: &std::path::Path, xml: &str) -> ram::Report {
     let path = dir.join("psx.dat");
     std::fs::write(&path, xml).expect("write");
+    let ram_dir = crate::db::testutil::ram_dir();
     let plan = ram::Plan {
-        dir: dir.join("ram"),
+        dir: ram_dir.path().to_path_buf(),
         floor: 0,
         job: 1,
+        input: 0,
     };
     let req = request();
     let out = db
@@ -523,10 +526,12 @@ fn migration_writes_on_the_bench_catalogue() {
         .read_blocking(crate::db::migrate::current_version)
         .expect("version");
     assert_eq!(v, crate::db::migrate::latest());
+    let ram_dir = crate::db::testutil::ram_dir();
     let plan = ram::Plan {
-        dir: dir.path().join("ram"),
+        dir: ram_dir.path().to_path_buf(),
         floor: 0,
         job: 0,
+        input: 0,
     };
     let start = std::time::Instant::now();
     let r = ram::migrate_in_ram(&copy, &plan, None)

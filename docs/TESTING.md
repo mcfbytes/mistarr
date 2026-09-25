@@ -93,7 +93,8 @@ against another and the numbers include everything the real daemon runs.
 | `db_export_import_stays_under_budget` | a zipped No-Intro DB export of 16 MB of XML, about 13 000 NES games with two sources of a headered and a headerless file and a save item each, some bad dumps, and clone groups of three | every game stored with one headerless rom, every clone linked |
 | `large_inline_mras_stay_under_budget` | `_Arcade` with 16 MRAs of about 3 MB each, one inline `<part>` of 1 MiB beside a zipped part under one md5, all in one catalogue batch | every MRA stored and its md5 matched, each read once |
 | `arcade_presence_pass_stays_under_budget` | 30 000 zips of 10 members under `games/mame` and 3 000 MRAs naming every tenth, one in ten also naming an absent zip | one `files` row per named zip on disk, the catalogue with its presence pass done within 20 seconds on the host |
-| `dat_and_torrent_import_stay_under_budget` | a 50 MB Logiqx DAT of about 200 000 games, then a torrent of 50 000 files named after them, every tenth only loosely (`example_game_<n>.nes`) so the fuzzy tier reads thousands of roms per size; then a start with the source's stamp stale, so `remap_sources` works out every file again | every game stored, every torrent file stored, the rest matched by name, no candidate for the ambiguous loose names, and the re-map keeps the same matches |
+| `dat_and_torrent_import_stay_under_budget` | a 50 MB Logiqx DAT of about 200 000 games, then a torrent of 50 000 files named after them, every tenth only loosely (`example_game_<n>.nes`) so the fuzzy tier reads thousands of roms per size; then a start with the source's stamp stale, so `remap_sources` works out every file again | the DAT loaded on the copy in RAM, whose working directory, sampled every 5 ms, never exceeds `db::ram::need`; every game stored, every torrent file stored, the rest matched by name, no candidate for the ambiguous loose names, and the re-map keeps the same matches |
+| `a_dat_import_on_the_card_stays_under_budget` | the same DAT with `[memory] import_floor_mib` too large for any copy | the load ran on the card, saying why, made no copy, and held SQLite's temporary files in its temporary directory |
 | `scan_stays_under_budget` | 16 000 loose and 2 000 zipped GBA files and 1 000 PSX folders of a cue and a bin | a `files` row per file and zip member |
 | `a_tiny_memory_limit_is_raised_to_the_floor` | `[memory] data_limit_mib = 2` | the process runs with the 64 MiB floor, or a lower inherited limit |
 
@@ -141,7 +142,13 @@ loads the same 450 games through the copy and fails above one write per MiB
 of the database plus 16, and `db::ram::tests` count the write-back's syscalls
 directly, check that a stop at every phase leaves the card file
 byte-identical by hash, that readers see the old rows until the swap and the
-new ones after, and that stale copies go at startup;
+new ones after, and that stale copies go at startup. They build the files
+a crash leaves at each step of the swap, a partial and a whole
+`mistarr.db.new`, a migration's copy written back but not swapped in, and a
+migration that fails on the copy, and start through `app::open_db`, which
+must open one whole database; a swap that cannot reopen must fail with
+`Reopen`, never fall back. `jobs::dat_import::tests` fill the copy partway
+through a load and expect a fallback with the card file unchanged;
 `an_import_in_ram_stores_the_same_rows_as_one_in_place` compares every row
 of both paths over a table of synthetic DATs. The ignored
 `in_place_and_in_ram_on_the_bench_catalogue` and

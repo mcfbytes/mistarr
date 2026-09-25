@@ -64,6 +64,8 @@ struct Inner {
     writer: Mutex<Connection>,
     reader: Mutex<Connection>,
     path: PathBuf,
+    /// A copy in RAM: rollback journal, no syncs; [`Db::close`] leaves it in WAL mode.
+    scratch: bool,
 }
 
 impl Db {
@@ -101,16 +103,42 @@ impl Db {
         Self::open_with(path, Some(steps))
     }
 
+    /// [`Db::open`] for a copy in RAM that is thrown away on failure: a rollback journal,
+    /// which holds only the pages a transaction overwrites, and no syncs. [`Db::close`]
+    /// puts it back in WAL mode, so the card file it becomes opens without a write.
+    ///
+    /// # Errors
+    ///
+    /// As [`Db::open`].
+    ///
+    /// ```
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let db = mistarr_server::db::Db::open_copy(&dir.path().join("c.db"), None).unwrap();
+    /// let mode: String = db
+    ///     .read_blocking(|c| Ok(c.pragma_query_value(None, "journal_mode", |r| r.get(0))?))
+    ///     .unwrap();
+    /// assert_eq!(mode, "delete");
+    /// ```
+    pub fn open_copy(path: &Path, steps: Option<&crate::migrating::Steps>) -> Result<Self> {
+        let (writer, reader) = open_pair(path, steps, true)?;
+        Ok(Self::from_pair(path, writer, reader, true))
+    }
+
     fn open_with(path: &Path, steps: Option<&crate::migrating::Steps>) -> Result<Self> {
-        let (writer, reader) = open_pair(path, steps)?;
-        Ok(Self {
+        let (writer, reader) = open_pair(path, steps, false)?;
+        Ok(Self::from_pair(path, writer, reader, false))
+    }
+
+    fn from_pair(path: &Path, writer: Connection, reader: Connection, scratch: bool) -> Self {
+        Self {
             inner: Arc::new(Inner {
                 write_turn: Arc::new(tokio::sync::Semaphore::new(1)),
                 writer: Mutex::new(writer),
                 reader: Mutex::new(reader),
                 path: path.to_path_buf(),
+                scratch,
             }),
-        })
+        }
     }
 
     /// The database file.
@@ -310,11 +338,17 @@ impl Db {
             .map_err(|_| std::io::Error::other("the database is still in use"))?;
         let writer = inner.writer.into_inner().map_err(|_| Error::Poisoned)?;
         let reader = inner.reader.into_inner().map_err(|_| Error::Poisoned)?;
-        let emptied = wal_emptied(&writer)?;
         close_connection(reader)?;
+        let emptied = wal_emptied(&writer)?;
         close_connection(writer)?;
         if !emptied {
             return Err(std::io::Error::other("the database's WAL could not be emptied").into());
+        }
+        if inner.scratch {
+            // A connection with no statement of its own may change the journal mode.
+            let conn = Connection::open(&inner.path)?;
+            conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+            close_connection(conn)?;
         }
         Ok(())
     }
@@ -338,39 +372,42 @@ impl HeldWriter<'_> {
         &self.inner.path
     }
 
-    /// Renames `new`, a complete database file already synced beside this one, over it
-    /// and reopens both connections on it. The reader is held throughout, so a read sees
-    /// the old file or the new one. The old file's WAL is emptied and its `-wal` and
-    /// `-shm` removed before the rename, so a crash at any step leaves one whole file under
-    /// the name; `docs/ARCHITECTURE.md` "DAT import in RAM" has the order.
+    /// Puts `new`, a complete database file already synced beside this one, in its place
+    /// with [`install_file`] and reopens both connections on whichever file then has the
+    /// name. The reader is held throughout, so a read sees the old file or the new one.
     ///
     /// # Errors
     ///
     /// [`Error::Io`] when the WAL cannot be emptied or a file cannot be removed or renamed,
-    /// with the old file reopened; [`Error::Db`] when the new file cannot be opened, which
+    /// with the old file reopened; [`Error::Reopen`] when no file could be reopened, which
     /// leaves connections that fail every statement until a restart.
     pub fn replace_file(&mut self, new: &Path) -> Result<()> {
+        self.replace_with(new, reopen_pair)
+    }
+
+    /// [`HeldWriter::replace_file`] reopening through `reopen`, which tests make fail.
+    fn replace_with(
+        &mut self,
+        new: &Path,
+        reopen: impl FnOnce(&Path) -> Result<(Connection, Connection)>,
+    ) -> Result<()> {
         let mut reader = self.inner.reader.lock().map_err(|_| Error::Poisoned)?;
         if !wal_emptied(&self.conn)? {
             return Err(std::io::Error::other("the database's WAL could not be emptied").into());
         }
+        let (hold_writer, hold_reader) = (placeholder()?, placeholder()?);
         let path = self.inner.path.clone();
-        let writer = std::mem::replace(&mut *self.conn, placeholder()?);
-        let old_reader = std::mem::replace(&mut *reader, placeholder()?);
+        let writer = std::mem::replace(&mut *self.conn, hold_writer);
+        let old_reader = std::mem::replace(&mut *reader, hold_reader);
         let closed = close_connection(old_reader).and(close_connection(writer));
         let swapped = closed.and_then(|()| Ok(install_file(&path, new)?));
-        if let Err(e) = swapped {
-            let (w, r) = open_pair(&path, None)?;
-            *self.conn = w;
-            *reader = r;
-            return Err(e);
-        }
-        let (w, r) = open_pair(&path, None).inspect_err(|e| {
+        let (w, r) = reopen(&path).map_err(|e| {
             tracing::error!(error = %e, "cannot reopen the database; restart mistarr");
+            Error::Reopen(Box::new(e))
         })?;
         *self.conn = w;
         *reader = r;
-        Ok(())
+        swapped
     }
 }
 
@@ -387,25 +424,66 @@ pub fn sibling(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Suffix the old database file takes while [`install_file`] puts a new one in its place.
+pub const OLD_SUFFIX: &str = ".old";
+
 /// Puts `new`, a complete database file synced beside `path`, in its place once no
 /// connection has `path` open: removes the old file's `-wal` and `-shm`, which must hold
-/// nothing unwritten, renames `new` over it and syncs the directory.
+/// nothing unwritten, renames `path` to `.old`, `new` to `path`, and removes `.old`,
+/// syncing the directory after each. [`ram::clean_stale`] finishes a swap a crash cut
+/// short; `docs/ARCHITECTURE.md` "DAT import in RAM" lists every crash point.
 ///
 /// # Errors
 ///
-/// The I/O failure of a removal or the rename; the old file then stays in place.
+/// The I/O failure of a removal or a rename; the old file is then back under `path`,
+/// unless renaming it back failed too, which the error names.
 pub(crate) fn install_file(path: &Path, new: &Path) -> std::io::Result<()> {
     for suffix in ["-wal", "-shm"] {
         remove_if_present(&sibling(path, suffix))?;
     }
-    std::fs::rename(new, path)?;
+    let old = sibling(path, OLD_SUFFIX);
+    remove_if_present(&old)?;
+    std::fs::rename(path, &old)?;
+    sync_parent(path);
+    if let Err(e) = std::fs::rename(new, path) {
+        let back = std::fs::rename(&old, path);
+        sync_parent(path);
+        return Err(match back {
+            Ok(()) => e,
+            Err(b) => std::io::Error::other(format!(
+                "{e}; the old database stays at {}: {b}",
+                old.display()
+            )),
+        });
+    }
+    sync_parent(path);
+    if let Err(e) = std::fs::remove_file(&old) {
+        tracing::warn!(error = %e, "cannot remove the old database file; the next start does");
+    }
+    sync_parent(path);
+    Ok(())
+}
+
+/// Syncs the directory holding `path`, making a rename in it durable where the mount is
+/// not `dirsync`.
+fn sync_parent(path: &Path) {
     if let Some(dir) = path.parent() {
-        // The rename is synchronous on a `dirsync` mount; elsewhere this makes it durable.
         if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
             tracing::warn!(error = %e, "cannot sync the database directory");
         }
     }
-    Ok(())
+}
+
+/// Opens both connections on the existing file `path`, never creating one.
+fn reopen_pair(path: &Path) -> Result<(Connection, Connection)> {
+    if !path.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("no database at {}", path.display()),
+        )
+        .into());
+    }
+    open_pair(path, None, false)
 }
 
 /// Removes `path`, treating a file already gone as removed.
@@ -441,11 +519,12 @@ fn placeholder() -> Result<Connection> {
 fn open_pair(
     path: &Path,
     steps: Option<&crate::migrating::Steps>,
+    scratch: bool,
 ) -> Result<(Connection, Connection)> {
     let mut writer = Connection::open(path)?;
     // Checked before `configure`, whose pragmas may write to the file.
     migrate::check_supported(&writer)?;
-    configure(&writer)?;
+    configure(&writer, scratch)?;
     if let Some(steps) = steps {
         count_steps(&writer, steps)?;
     }
@@ -453,7 +532,7 @@ fn open_pair(
     bulk(&mut writer, |c| migrate::apply(c).map(drop))?;
     writer.progress_handler(0, None::<fn() -> bool>)?;
     let reader = Connection::open(path)?;
-    configure(&reader)?;
+    configure(&reader, scratch)?;
     reader.pragma_update(None, "query_only", true)?;
     Ok((writer, reader))
 }
@@ -754,14 +833,15 @@ pub fn has_table(conn: &Connection, name: &str) -> Result<bool> {
 
 /// Applies the connection pragmas every connection shares; the memory-related ones are
 /// listed in `docs/ARCHITECTURE.md` "Resource budgets".
-fn configure(conn: &Connection) -> Result<()> {
+fn configure(conn: &Connection, scratch: bool) -> Result<()> {
     conn.busy_timeout(BUSY_TIMEOUT)?;
+    let want = if scratch { "delete" } else { "wal" };
     let mode: String =
-        conn.pragma_update_and_check(None, "journal_mode", "WAL", |row| row.get(0))?;
-    if !mode.eq_ignore_ascii_case("wal") {
-        tracing::warn!(mode, "database is not in WAL mode");
+        conn.pragma_update_and_check(None, "journal_mode", want, |row| row.get(0))?;
+    if !mode.eq_ignore_ascii_case(want) {
+        tracing::warn!(mode, want, "database is not in its journal mode");
     }
-    conn.pragma_update(None, "synchronous", "NORMAL")?;
+    conn.pragma_update(None, "synchronous", if scratch { "OFF" } else { "NORMAL" })?;
     conn.pragma_update(None, "foreign_keys", true)?;
     conn.pragma_update(None, "cache_size", -CACHE_KIB)?;
     conn.pragma_update(None, "mmap_size", 0)?;
@@ -784,11 +864,71 @@ pub(crate) mod testutil {
         let db = Db::open(&dir.path().join("test.db")).expect("open");
         (dir, db)
     }
+
+    /// A directory for a copy in RAM, on the tmpfs of `/dev/shm`, apart from the
+    /// temporary directory the test's database is in, which may be on disk or tmpfs.
+    pub fn ram_dir() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("mistarr-ram-")
+            .tempdir_in("/dev/shm")
+            .expect("a directory in /dev/shm")
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_held_writer_keeps_async_writes_waiting_and_reads_running() {
+        let (_dir, db) = testutil::db();
+        let (held, is_held) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let holding = db.clone();
+        let holder = tokio::spawn(async move {
+            let label = crate::threads::label::DAT_IMPORT;
+            holding
+                .hold_writer(label, move |h| {
+                    let _ = held.send(());
+                    let _ = released.recv();
+                    settings::set(h.conn(), "k", "held")?;
+                    Ok(h.path().to_path_buf())
+                })
+                .await
+        });
+        is_held.await.expect("held");
+        let writing = db.clone();
+        let write =
+            tokio::spawn(async move { writing.write(|c| settings::set(c, "k", "queued")).await });
+        let read = db
+            .read(migrate::current_version)
+            .await
+            .expect("a read runs");
+        assert!(read >= 1);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(!write.is_finished(), "an async write waits for the hold");
+        release.send(()).expect("release");
+        assert_eq!(holder.await.expect("join").expect("hold"), db.path());
+        write.await.expect("join").expect("write");
+        let k = db.read(|c| settings::get(c, "k")).await.expect("read");
+        assert_eq!(k.as_deref(), Some("queued"), "the queued write ran after");
+    }
+
+    #[test]
+    fn a_copy_uses_a_rollback_journal_and_closes_in_wal_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("copy.db");
+        let copy = Db::open_copy(&path, None).expect("open");
+        copy.write_blocking(|c| settings::set(c, "k", "v"))
+            .expect("write");
+        copy.close().expect("close");
+        let c = Connection::open(&path).expect("open");
+        let mode: String = c
+            .pragma_query_value(None, "journal_mode", |r| r.get(0))
+            .expect("mode");
+        assert_eq!(mode, "wal");
+        assert!(!sibling(&path, "-journal").exists());
+    }
 
     #[test]
     fn connections_use_wal_and_the_cache_budget() {

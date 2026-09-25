@@ -15,6 +15,8 @@ use tokio::net::{TcpSocket, TcpStream};
 pub struct Booted {
     pub dir: tempfile::TempDir,
     pub running: Running,
+    /// `[memory] import_dir`, on tmpfs apart from `dir`.
+    pub ram: tempfile::TempDir,
 }
 
 impl Booted {
@@ -84,9 +86,23 @@ pub async fn boot_with(dir: tempfile::TempDir, config: Config) -> Booted {
     boot_with_options(dir, config, options).await
 }
 
-pub async fn boot_with_options(dir: tempfile::TempDir, config: Config, options: Options) -> Booted {
+/// A directory on the tmpfs of `/dev/shm`, where an import copies the database.
+pub fn ram_dir() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("mistarr-ram-")
+        .tempdir_in("/dev/shm")
+        .expect("a directory in /dev/shm")
+}
+
+pub async fn boot_with_options(
+    dir: tempfile::TempDir,
+    mut config: Config,
+    options: Options,
+) -> Booted {
+    let ram = ram_dir();
+    config.memory.import_dir = ram.path().to_path_buf();
     let running = app::start(config, options).await.expect("start");
-    Booted { dir, running }
+    Booted { dir, running, ram }
 }
 
 pub async fn boot() -> Booted {

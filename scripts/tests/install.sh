@@ -879,6 +879,19 @@ expect_absent "$root16/mistarr/mistarr.db.new" "a stale copy is removed"
 expect_absent "$root16/mistarr/mistarr.db.prev.new" "a stale copy is never saved"
 expect "$(cat "$root16/mistarr/mistarr.db.prev")" "DB16" "the database itself is saved"
 
+# A swap cut after its first rename: the whole copy becomes the database first.
+root17="$work/root17"
+mkdir -p "$root17/mistarr" "$root17/Scripts"
+echo "OLD17" > "$root17/mistarr/mistarr.db.old"
+echo "NEW17" > "$root17/mistarr/mistarr.db.new"
+write_arm_binary "$root17/mistarr/mistarr" OLD-BINARY-17
+write_launcher_stub "$root17/Scripts/mistarr.sh"
+out=$(run_install "$root17" "$no_tty" v1.1.0)
+expect_contains "$out" "finished the database swap" "a swap cut short is reported"
+expect_absent "$root17/mistarr/mistarr.db.old" "the old file is removed"
+expect_absent "$root17/mistarr/mistarr.db.new" "the copy is renamed in"
+expect "$(cat "$root17/mistarr/mistarr.db.prev")" "NEW17" "the finished database is saved"
+
 if [ "$fail" -eq 0 ]; then
     echo "all tests passed"
 else

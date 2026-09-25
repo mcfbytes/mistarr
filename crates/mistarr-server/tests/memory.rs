@@ -7,7 +7,8 @@ use std::net::TcpStream;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use mistarr_core::hash::Md5Stream;
@@ -18,9 +19,12 @@ use serde_json::{json, Value as Json};
 const BUDGET_KIB: u64 = 64 * 1024;
 
 /// Growth over idle a DAT load may reach: its apply runs with the writer's 8 MiB bulk
-/// cache and a heap limit raised to match, on a second pair of connections to its copy
-/// in RAM, on top of the 12 MiB other jobs get.
-const LOAD_DELTA_MIB: u64 = 32;
+/// cache and a heap limit raised to match, on top of the 12 MiB other jobs get.
+const LOAD_DELTA_MIB: u64 = 28;
+
+/// [`LOAD_DELTA_MIB`] for a load on a copy in RAM, which opens a second pair of
+/// connections beside the held ones.
+const RAM_LOAD_DELTA_MIB: u64 = 32;
 
 /// Growth over idle a source import or remap may reach: its binding writes run with the
 /// writer's 8 MiB bulk cache on top of the 12 MiB other jobs get.
@@ -59,20 +63,28 @@ struct Server {
     port: u16,
     db: PathBuf,
     root: PathBuf,
+    /// `[memory] import_dir`, on tmpfs apart from `root`.
+    ram: tempfile::TempDir,
 }
 
-/// Writes the config and starts `mistarr serve` on `root` until one listens, since another
-/// process may take the chosen free port first. Returns the listening server.
-fn spawn(root: &Path, extra: &str) -> Server {
+/// Writes the config, with `memory` as more lines of its `[memory]` table, and starts
+/// `mistarr serve` on `root` until one listens, since another process may take the
+/// chosen free port first. Returns the listening server.
+fn spawn(root: &Path, memory: &str) -> Server {
     for _ in 0..5 {
         let port = free_port();
         let data = root.join("data");
         std::fs::create_dir_all(&data).expect("mkdir data");
+        let ram = tempfile::Builder::new()
+            .prefix("mistarr-ram-")
+            .tempdir_in("/dev/shm")
+            .expect("a directory in /dev/shm");
         let config = format!(
             "[server]\nlisten = \"127.0.0.1:{port}\"\n[paths]\nroot = {root:?}\ngames = {games:?}\n\
              [client]\nkind = \"transmission\"\nurl = \"http://127.0.0.1:1/transmission/rpc\"\n\
-             [jobs]\nscan_interval_minutes = 0\n{extra}",
+             [jobs]\nscan_interval_minutes = 0\n[memory]\nimport_dir = {dir:?}\n{memory}",
             games = root.join("games"),
+            dir = ram.path(),
         );
         std::fs::write(data.join("mistarr.toml"), config).expect("config");
         let child = Command::new(env!("CARGO_BIN_EXE_mistarr"))
@@ -88,6 +100,7 @@ fn spawn(root: &Path, extra: &str) -> Server {
             port,
             db: data.join("mistarr.db"),
             root: root.to_path_buf(),
+            ram,
         };
         if server.wait_listening() {
             return server;
@@ -113,7 +126,12 @@ fn data_limit_of(limits: &str) -> Option<u64> {
 
 impl Server {
     fn start(root: &Path) -> Self {
-        let server = spawn(root, "");
+        Self::start_with(root, "")
+    }
+
+    /// [`Server::start`] with `memory` as more lines of the `[memory]` table.
+    fn start_with(root: &Path, memory: &str) -> Self {
+        let server = spawn(root, memory);
         server.assert_data_limit(192);
         let mode = std::fs::metadata(root.join("sqlite-tmp")).map(|m| m.permissions().mode());
         assert_eq!(mode.expect("SQLite temporary directory") & 0o777, 0o700);
@@ -124,10 +142,11 @@ impl Server {
         server
     }
 
-    /// Asserts the server holds no SQLite temporary file open in the data directory. A
-    /// DAT load in RAM kept its stage on the copy's connection, closed with the copy.
-    fn assert_temp_files_off_the_card(&self) {
-        let mut card = 0;
+    /// Asserts the server holds no SQLite temporary file open in the data directory and,
+    /// after a load on the card, some in its own temporary directory. A load in RAM kept
+    /// them on the copy's connections, closed with the copy.
+    fn assert_temp_files_off_the_card(&self, loaded_in_place: bool) {
+        let (mut ours, mut card) = (0, 0);
         let fds = std::fs::read_dir(format!("/proc/{}/fd", self.child.id())).expect("fds");
         for fd in fds.flatten() {
             let Ok(target) = std::fs::read_link(fd.path()) else {
@@ -136,8 +155,13 @@ impl Server {
             let named = target
                 .file_name()
                 .is_some_and(|n| n.to_string_lossy().starts_with("etilqs_"));
+            ours += usize::from(named && target.starts_with(self.root.join("sqlite-tmp")));
             card += usize::from(named && target.starts_with(self.root.join("data")));
         }
+        assert!(
+            ours > 0 || !loaded_in_place,
+            "no SQLite temporary file in the temporary directory"
+        );
         assert_eq!(card, 0, "SQLite temporary files on the card");
         assert!(
             !self.root.join("data/tmp").exists(),
@@ -256,6 +280,36 @@ impl Server {
         );
         peak
     }
+}
+
+/// Samples the bytes the files under `dir` take every few milliseconds until the flag is
+/// set, and returns the largest.
+fn sample_peak(dir: PathBuf) -> (Arc<AtomicBool>, std::thread::JoinHandle<u64>) {
+    fn used(dir: &Path) -> u64 {
+        use std::os::unix::fs::MetadataExt;
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return 0;
+        };
+        entries
+            .flatten()
+            .map(|e| match e.metadata() {
+                Ok(m) if m.is_dir() => used(&e.path()),
+                Ok(m) => m.blocks() * 512,
+                Err(_) => 0,
+            })
+            .sum()
+    }
+    let done = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&done);
+    let handle = std::thread::spawn(move || {
+        let mut peak = 0;
+        while !flag.load(Ordering::Relaxed) {
+            peak = peak.max(used(&dir));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        peak
+    });
+    (done, handle)
 }
 
 impl Drop for Server {
@@ -755,15 +809,33 @@ fn dat_and_torrent_import_stay_under_budget() {
     let games = big_dat(&dir.path().join("data/dats/memory.dat"));
     println!("DAT of {games} games");
 
+    let dat_bytes = std::fs::metadata(dir.path().join("data/dats/memory.dat"))
+        .expect("stat")
+        .len();
     let server = Server::start(dir.path());
+    let (done, sampler) = sample_peak(server.ram.path().to_path_buf());
     let rows = server.wait_jobs("dat_import", 1);
-    server.assert_temp_files_off_the_card();
+    done.store(true, Ordering::Relaxed);
+    let ram_peak = sampler.join().expect("sampler");
+    server.assert_temp_files_off_the_card(false);
     let titles = server.count("SELECT COUNT(*) FROM titles WHERE retired = 0");
+    let size = std::fs::metadata(&server.db).expect("stat").len();
     let peak = server.stop("dat_import");
     assert_eq!(rows[0].0, "done", "{}", rows[0].1);
     assert_eq!(rows[0].1["phase"], "importing", "loaded on the copy in RAM");
     assert_eq!(usize::try_from(titles).expect("count"), games);
-    assert_budget("dat_import", peak, LOAD_DELTA_MIB);
+    // The database was nearly empty before the load; `need` is its bound at size 0.
+    let need = mistarr_server::db::ram::need(0, dat_bytes);
+    println!(
+        "copy in RAM peaked at {:.1} MiB for {:.1} MiB of DAT, need {:.1} MiB; database {:.1} MiB",
+        kib_to_mib(ram_peak >> 10),
+        kib_to_mib(dat_bytes >> 10),
+        kib_to_mib(need >> 10),
+        kib_to_mib(size >> 10),
+    );
+    assert!(ram_peak > 0, "the copy was never seen");
+    assert!(ram_peak <= need, "{ram_peak} bytes in RAM, need {need}");
+    assert_budget("dat_import", peak, RAM_LOAD_DELTA_MIB);
 
     big_torrent(&dir.path().join("data/sources/example.torrent"));
     let server = Server::start(dir.path());
@@ -808,6 +880,25 @@ fn dat_and_torrent_import_stay_under_budget() {
 }
 
 #[test]
+fn a_dat_import_on_the_card_stays_under_budget() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let games = big_dat(&dir.path().join("data/dats/memory.dat"));
+    let server = Server::start_with(dir.path(), "import_floor_mib = 1000000\n");
+    let rows = server.wait_jobs("dat_import", 1);
+    server.assert_temp_files_off_the_card(true);
+    let titles = server.count("SELECT COUNT(*) FROM titles WHERE retired = 0");
+    let left = std::fs::read_dir(server.ram.path()).map_or(0, Iterator::count);
+    let peak = server.stop("dat_import, in place");
+    assert_eq!(rows[0].0, "done", "{}", rows[0].1);
+    assert_eq!(rows[0].1["phase"], "importing in place", "{}", rows[0].1);
+    let reason = rows[0].1["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("memory available"), "{reason}");
+    assert_eq!(usize::try_from(titles).expect("count"), games);
+    assert_eq!(left, 0, "no copy was made");
+    assert_budget("dat_import, in place", peak, LOAD_DELTA_MIB);
+}
+
+#[test]
 fn db_export_import_stays_under_budget() {
     let dir = tempfile::tempdir().expect("tempdir");
     let games = big_export(
@@ -831,7 +922,7 @@ fn db_export_import_stays_under_budget() {
         usize::try_from(clones).expect("count"),
         games - games.div_ceil(3)
     );
-    assert_budget("dat_import, DB export", peak, LOAD_DELTA_MIB);
+    assert_budget("dat_import, DB export", peak, RAM_LOAD_DELTA_MIB);
 }
 
 #[test]
@@ -854,6 +945,6 @@ fn scan_stays_under_budget() {
 #[test]
 fn a_tiny_memory_limit_is_raised_to_the_floor() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let server = spawn(dir.path(), "[memory]\ndata_limit_mib = 2\n");
+    let server = spawn(dir.path(), "data_limit_mib = 2\n");
     server.assert_data_limit(64);
 }

@@ -121,8 +121,10 @@ for its clone list), `reading`, `storing` (applying the titles), `picking`
 and absent in the other phases, whose share done is unknown, so a bar of
 the bytes read never moves backwards. An import on a copy of the database
 in RAM (ARCHITECTURE.md "DAT import in RAM") also reports `{ file, members,
-phase }` with `phase` `copying the database to memory` before those and
-`writing the database to the card` after them, and stores `{ file, members,
+phase }` with `phase` `copying the database to memory` before those,
+`matching` (with `checked` and `matched`) and `picking` while it recomputes
+the platforms it loaded, and `writing the database to the card` after them,
+and stores `{ file, members,
 done, games, phase: "importing" }` on the copy after each DAT, which the swap
 keeps. One on the card carries `reason`, why it is not in RAM, in each
 report, and stores `{ file, members, done, games, phase: "importing in

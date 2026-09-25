@@ -56,6 +56,14 @@ pub enum Error {
     /// A job failed.
     #[error("job failed: {0}")]
     Job(String),
+    /// Memory, the RAM directory or the card ran short; the message says which and what
+    /// was left unchanged. An import in RAM falls back to the card on it.
+    #[error("{0}")]
+    NoRoom(String),
+    /// The database file was replaced but its connections could not be reopened; every
+    /// statement fails until mistarr restarts.
+    #[error("cannot reopen the database; restart mistarr: {0}")]
+    Reopen(Box<Error>),
     /// Another server holds the data directory's lock.
     #[error("another mistarr is already running with data directory {}", .0.display())]
     AlreadyRunning(std::path::PathBuf),
@@ -84,6 +92,11 @@ mod tests {
         assert_eq!(
             Error::UnknownJob("x".into()).to_string(),
             "unknown job kind `x`"
+        );
+        let reopen = Error::Reopen(Box::new(Error::NoRoom("full".into())));
+        assert_eq!(
+            reopen.to_string(),
+            "cannot reopen the database; restart mistarr: full"
         );
     }
 }

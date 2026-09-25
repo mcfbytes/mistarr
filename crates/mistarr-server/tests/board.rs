@@ -173,7 +173,7 @@ async fn a_restart_takes_over_held_jobs_instead_of_adding_more() {
         first,
         "joins the queued catalogue"
     );
-    let Booted { dir, running } = booted;
+    let Booted { dir, running, .. } = booted;
     running.shutdown().await.expect("shutdown");
 
     let config = config_in(dir.path());
@@ -282,7 +282,7 @@ async fn the_wizard_opens_until_dismissed_and_settings_keep_its_state() {
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.json()["open_on_start"], false);
     assert_eq!(put(settings.to_string()).await.status, 200);
-    let Booted { dir, running } = booted;
+    let Booted { dir, running, .. } = booted;
     running.shutdown().await.expect("shutdown");
     let config = config_in(dir.path());
     let again = boot_with(dir, config).await;

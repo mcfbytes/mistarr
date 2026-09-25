@@ -109,8 +109,8 @@ fn the_check_names_what_is_short() {
         card_room: Some(mib(4000)),
     };
     let size = mib(37);
-    assert_eq!(need(size), mib(37) + mib(37) / 2 + MARGIN_BYTES);
-    assert_eq!(refusal(&ok, size, mib(128)), None);
+    assert_eq!(need(size, 0), mib(37) + mib(37) / 2 + MARGIN_BYTES);
+    assert_eq!(refusal(&ok, size, 0, mib(128)), None);
     let cases = [
         (
             Budget {
@@ -149,14 +149,14 @@ fn the_check_names_what_is_short() {
         ),
     ];
     for (budget, says) in cases {
-        let reason = refusal(&budget, size, mib(128)).expect("refused");
+        let reason = refusal(&budget, size, 0, mib(128)).expect("refused");
         assert!(reason.contains(says), "{reason}");
     }
     let unknown_card = Budget {
         card_room: None,
         ..ok
     };
-    assert_eq!(refusal(&unknown_card, size, mib(128)), None);
+    assert_eq!(refusal(&unknown_card, size, 0, mib(128)), None);
 }
 
 #[test]
@@ -183,14 +183,17 @@ fn startup_removes_a_stale_new_file_and_this_databases_copies_only() {
         fs::create_dir_all(d).expect("mkdir");
         fs::write(d.join(COPY_NAME), b"copy").expect("write");
     }
-    assert_eq!(clean_stale(&db, &ram), 2);
+    assert_eq!(clean_stale(&db, &ram).expect("clean"), 2);
     assert!(!sibling(&db, NEW_SUFFIX).exists());
     assert!(!ours.exists());
     assert!(
         theirs.join(COPY_NAME).is_file(),
         "another server's copy stays"
     );
-    assert_eq!(clean_stale(&db, &dir.path().join("missing")), 0);
+    assert_eq!(
+        clean_stale(&db, &dir.path().join("missing")).expect("clean"),
+        0
+    );
 }
 
 /// A watch that records phases and can stop the run at one of them.
@@ -225,11 +228,12 @@ fn card(bulk: usize) -> (tempfile::TempDir, Db) {
     (dir, db)
 }
 
-fn plan(dir: &Path) -> Plan {
+fn plan(ram: &Path) -> Plan {
     Plan {
-        dir: dir.join("ram"),
+        dir: ram.to_path_buf(),
         floor: 0,
         job: 7,
+        input: 0,
     }
 }
 
@@ -244,13 +248,13 @@ fn get(db: &Db, key: &str) -> Option<String> {
     db.read_blocking(|c| settings::get(c, key)).expect("read")
 }
 
-/// Nothing an import in RAM leaves behind: no `.new`, no working directory.
-fn assert_clean(dir: &Path, db: &Db) {
+/// Nothing an import in RAM leaves behind: no `.new`, no working directory in `ram`.
+fn assert_clean(ram: &Path, db: &Db) {
     assert!(
         !sibling(db.path(), NEW_SUFFIX).exists(),
         "a .new file is left"
     );
-    let left: Vec<_> = fs::read_dir(dir.join("ram"))
+    let left: Vec<_> = fs::read_dir(ram)
         .map(|d| d.flatten().map(|e| e.file_name()).collect())
         .unwrap_or_default();
     assert!(left.is_empty(), "left {left:?}");
@@ -258,11 +262,12 @@ fn assert_clean(dir: &Path, db: &Db) {
 
 #[test]
 fn readers_see_the_old_file_until_the_swap_and_the_new_one_after() {
+    let ram = testutil::ram_dir();
     let (dir, db) = card(3 * CHUNK_BYTES);
     let mut watch = Script::default();
     let out = db
         .hold_writer_blocking(|h| {
-            run(h, &plan(dir.path()), &mut watch, |ram| {
+            run(h, &plan(ram.path()), &mut watch, |ram| {
                 ram.write_blocking(|c| settings::set(c, "k", "new"))?;
                 let during = get(&db, "k");
                 Ok((during, true))
@@ -286,7 +291,7 @@ fn readers_see_the_old_file_until_the_swap_and_the_new_one_after() {
     db.write_blocking(|c| settings::set(c, "after", "1"))
         .expect("the reopened writer writes");
     assert_eq!(get(&db, "after").as_deref(), Some("1"));
-    assert_clean(dir.path(), &db);
+    assert_clean(ram.path(), &db);
     // A fresh open sees one whole file, as a restart would.
     drop(db);
     let again = Db::open(&dir.path().join("test.db")).expect("reopen");
@@ -295,10 +300,11 @@ fn readers_see_the_old_file_until_the_swap_and_the_new_one_after() {
 
 #[test]
 fn the_card_takes_about_one_write_per_mebibyte() {
-    let (dir, db) = card(5 * CHUNK_BYTES);
+    let ram = testutil::ram_dir();
+    let (_dir, db) = card(5 * CHUNK_BYTES);
     let out = db
         .hold_writer_blocking(|h| {
-            run(h, &plan(dir.path()), &mut Script::default(), |ram| {
+            run(h, &plan(ram.path()), &mut Script::default(), |ram| {
                 ram.write_blocking(|c| settings::set(c, "k", "new"))?;
                 Ok(((), true))
             })
@@ -319,15 +325,16 @@ fn the_card_takes_about_one_write_per_mebibyte() {
 
 #[test]
 fn a_stop_during_the_import_or_the_write_back_leaves_the_card_byte_identical() {
+    let ram = testutil::ram_dir();
     for stop_at in [Phase::Copying, Phase::Importing, Phase::Writing] {
-        let (dir, db) = card(3 * CHUNK_BYTES);
+        let (_dir, db) = card(3 * CHUNK_BYTES);
         let before = sha1(db.path());
         let mut watch = Script {
             stop_at: Some(stop_at).filter(|p| *p != Phase::Importing),
             ..Script::default()
         };
         let out = db.hold_writer_blocking(|h| {
-            run(h, &plan(dir.path()), &mut watch, |ram| {
+            run(h, &plan(ram.path()), &mut watch, |ram| {
                 ram.write_blocking(|c| settings::set(c, "k", "new"))?;
                 if stop_at == Phase::Importing {
                     return Err(Error::Cancelled);
@@ -338,7 +345,7 @@ fn a_stop_during_the_import_or_the_write_back_leaves_the_card_byte_identical() {
         assert!(matches!(out, Err(Error::Cancelled)), "{stop_at:?}: {out:?}");
         assert_eq!(sha1(db.path()), before, "{stop_at:?}");
         assert_eq!(get(&db, "k").as_deref(), Some("old"));
-        assert_clean(dir.path(), &db);
+        assert_clean(ram.path(), &db);
         db.write_blocking(|c| settings::set(c, "k", "later"))
             .expect("the writer still writes");
     }
@@ -346,11 +353,12 @@ fn a_stop_during_the_import_or_the_write_back_leaves_the_card_byte_identical() {
 
 #[test]
 fn short_memory_or_a_full_copy_falls_back_with_the_card_untouched() {
-    let (dir, db) = card(1024);
+    let ram = testutil::ram_dir();
+    let (_dir, db) = card(1024);
     let before = sha1(db.path());
     let short = Plan {
         floor: u64::MAX / 2,
-        ..plan(dir.path())
+        ..plan(ram.path())
     };
     let mut ran = false;
     let out = db
@@ -369,7 +377,7 @@ fn short_memory_or_a_full_copy_falls_back_with_the_card_untouched() {
 
     let out = db
         .hold_writer_blocking(|h| {
-            run(h, &plan(dir.path()), &mut Script::default(), |ram| {
+            run(h, &plan(ram.path()), &mut Script::default(), |ram| {
                 ram.write_blocking(|c| settings::set(c, "k", "new"))?;
                 Err::<((), bool), _>(io::Error::from_raw_os_error(28).into())
             })
@@ -380,16 +388,17 @@ fn short_memory_or_a_full_copy_falls_back_with_the_card_untouched() {
         "{out:?}"
     );
     assert_eq!(sha1(db.path()), before);
-    assert_clean(dir.path(), &db);
+    assert_clean(ram.path(), &db);
 }
 
 #[test]
 fn work_that_changes_nothing_is_not_written_back() {
-    let (dir, db) = card(1024);
+    let ram = testutil::ram_dir();
+    let (_dir, db) = card(1024);
     let before = sha1(db.path());
     let out = db
         .hold_writer_blocking(|h| {
-            run(h, &plan(dir.path()), &mut Script::default(), |ram| {
+            run(h, &plan(ram.path()), &mut Script::default(), |ram| {
                 Ok((get(ram, "k"), false))
             })
         })
@@ -399,7 +408,7 @@ fn work_that_changes_nothing_is_not_written_back() {
         "{out:?}"
     );
     assert_eq!(sha1(db.path()), before);
-    assert_clean(dir.path(), &db);
+    assert_clean(ram.path(), &db);
 }
 
 #[test]
@@ -414,27 +423,221 @@ fn a_swap_refuses_a_file_it_cannot_rename_and_keeps_the_old_one() {
 }
 
 #[test]
-fn another_process_holding_the_database_is_seen() {
+fn another_process_holding_the_database_its_wal_or_its_shm_is_seen() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("m.db");
-    fs::write(&db, b"x").expect("write");
-    assert!(!held_elsewhere(&db));
-    let mut child = std::process::Command::new("sleep")
-        .arg("30")
-        .stdin(File::open(&db).expect("open"))
-        .spawn()
-        .expect("sleep");
-    let seen = (0..200).any(|_| {
-        let held = held_elsewhere(&db);
-        if !held {
-            std::thread::sleep(Duration::from_millis(10));
+    for suffix in ["", "-wal", "-shm"] {
+        let file = sibling(&db, suffix);
+        fs::write(&file, b"x").expect("write");
+        assert!(!held_elsewhere(&db));
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(File::open(&file).expect("open"))
+            .spawn()
+            .expect("sleep");
+        let seen = (0..200).any(|_| {
+            let held = held_elsewhere(&db);
+            if !held {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            held
+        });
+        child.kill().expect("kill");
+        child.wait().expect("wait");
+        assert!(seen, "a child holding {suffix:?} is seen");
+        assert!(!held_elsewhere(&db));
+    }
+}
+
+#[test]
+fn a_swap_whose_reopen_fails_is_its_own_error_and_never_a_fallback() {
+    let (_dir, db) = card(1024);
+    let new = sibling(db.path(), NEW_SUFFIX);
+    fs::write(&new, b"not a database, renamed in all the same").expect("write");
+    let r = db.hold_writer_blocking(|h| h.replace_file(&new));
+    let Err(e) = r else {
+        panic!("reopened a file that is not a database");
+    };
+    assert!(matches!(e, Error::Reopen(_)), "{e:?}");
+    assert!(!storage_full(&e));
+    assert!(
+        db.read_blocking(|c| settings::get(c, "k")).is_err(),
+        "every statement fails until a restart"
+    );
+    let full =
+        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL), None);
+    assert!(!storage_full(&Error::Reopen(Box::new(full.into()))));
+}
+
+#[test]
+fn a_reopen_that_fails_after_the_rename_reports_it_over_the_swap() {
+    let (dir, db) = card(1024);
+    let other = dir.path().join("other.db");
+    let copy = Db::open(&other).expect("open");
+    copy.write_blocking(|c| settings::set(c, "k", "new"))
+        .expect("set");
+    copy.close().expect("close");
+    let full =
+        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL), None);
+    let r = db.hold_writer_blocking(|h| h.replace_with(&other, |_| Err(full.into())));
+    assert!(matches!(&r, Err(Error::Reopen(_))), "{r:?}");
+    assert!(!other.exists(), "the swap itself ran");
+    let again = Connection::open(db.path()).expect("open");
+    let k = settings::get(&again, "k").expect("read");
+    assert_eq!(k.as_deref(), Some("new"), "the card holds the new file");
+}
+
+/// A config over `root` whose import directory is `ram`.
+fn config_at(root: &Path, ram: &Path) -> crate::config::Config {
+    let mut config = crate::config::Config::default();
+    config.paths.root = root.to_path_buf();
+    config.paths.games = root.join("games");
+    config.paths.data = root.join("data");
+    config.memory.import_dir = ram.to_path_buf();
+    fs::create_dir_all(&config.paths.data).expect("mkdir");
+    config
+}
+
+/// A closed database at `path` holding `k = value`.
+fn closed_with(path: &Path, value: &str) {
+    let db = Db::open(path).expect("open");
+    db.write_blocking(|c| settings::set(c, "k", value))
+        .expect("set");
+    db.close().expect("close");
+}
+
+#[test]
+fn a_start_after_a_crash_at_any_step_of_the_swap_opens_one_whole_database() {
+    let ram = testutil::ram_dir();
+    // The files a crash leaves, `(db, .new, .old)`, and the value the start then reads.
+    let cases = [
+        (Some("old"), Some("partial"), None, "old"),
+        (Some("old"), Some("new"), None, "old"),
+        (None, Some("new"), Some("old"), "new"),
+        (Some("new"), None, Some("old"), "new"),
+        (Some("new"), None, None, "new"),
+        (None, None, Some("old"), "old"),
+    ];
+    for (i, (db_file, new_file, old_file, want)) in cases.into_iter().enumerate() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mut config = config_at(root.path(), ram.path());
+        let path = config.paths.db();
+        let place = |value: Option<&str>, at: &Path| match value {
+            Some("partial") => {
+                closed_with(&root.path().join("whole.db"), "new");
+                let bytes = fs::read(root.path().join("whole.db")).expect("read");
+                fs::write(at, &bytes[..bytes.len() / 2]).expect("write");
+            }
+            Some(v) => {
+                let made = root.path().join(format!("{v}.db"));
+                closed_with(&made, v);
+                fs::rename(&made, at).expect("place");
+            }
+            None => {}
+        };
+        place(db_file, &path);
+        place(new_file, &sibling(&path, NEW_SUFFIX));
+        place(old_file, &sibling(&path, OLD_SUFFIX));
+        let (db, _, _) = crate::app::open_db(&mut config).expect("open");
+        assert_eq!(get(&db, "k").as_deref(), Some(want), "case {i}");
+        for suffix in [NEW_SUFFIX, OLD_SUFFIX] {
+            assert!(!sibling(&path, suffix).exists(), "case {i}: {suffix} left");
         }
-        held
-    });
-    child.kill().expect("kill");
-    child.wait().expect("wait");
-    assert!(seen, "a child holding the file is seen");
-    assert!(!held_elsewhere(&db));
+    }
+}
+
+#[test]
+fn a_start_after_a_crash_before_a_migrations_swap_migrates_again() {
+    let ram = testutil::ram_dir();
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut config = config_at(root.path(), ram.path());
+    let path = config.paths.db();
+    let latest = super::super::migrate::latest();
+    at_version(&path, latest - 1, 0.0);
+    // The whole `.new` a crash between the write-back and the swap leaves.
+    let new = sibling(&path, NEW_SUFFIX);
+    fs::copy(&path, &new).expect("copy");
+    Db::open(&new)
+        .and_then(Db::close)
+        .expect("migrate the copy");
+    let before = sha1(&path);
+    assert!(clean_stale(&path, ram.path()).expect("clean") >= 1);
+    assert_eq!(sha1(&path), before, "the card file is not the copy");
+    fs::copy(&path, &new).expect("copy again");
+    let (db, _, _) = crate::app::open_db(&mut config).expect("open");
+    let v = db
+        .read_blocking(super::super::migrate::current_version)
+        .expect("version");
+    assert_eq!(v, latest);
+    assert!(!new.exists());
+}
+
+#[test]
+fn a_migration_that_fails_on_the_copy_leaves_the_card_as_it_was_and_runs_in_place() {
+    let ram = testutil::ram_dir();
+    let root = tempfile::tempdir().expect("tempdir");
+    let mut config = config_at(root.path(), ram.path());
+    let path = config.paths.db();
+    let latest = super::super::migrate::latest();
+    at_version(&path, latest - 1, 0.0);
+    // The last migration drops this table; without it the migration fails.
+    let c = Connection::open(&path).expect("open");
+    c.execute_batch("DROP TABLE dat_stage").expect("drop");
+    super::super::wal_emptied(&c).expect("checkpoint");
+    drop(c);
+    let before = sha1(&path);
+    let r = migrate_in_ram(&path, &plan(ram.path()), None);
+    assert!(matches!(r, Err(Error::Migration { .. })), "{r:?}");
+    assert_eq!(sha1(&path), before, "the card is byte-identical");
+    assert_eq!(fs::read_dir(ram.path()).map_or(0, Iterator::count), 0);
+    let opened = crate::app::open_db(&mut config);
+    assert!(
+        matches!(opened, Err(Error::Migration { .. })),
+        "the open migrated in place and failed the same way"
+    );
+    let c = Connection::open(&path).expect("open");
+    let v = super::super::migrate::current_version(&c).expect("version");
+    assert_eq!(v, latest - 1, "rolled back");
+    assert!(!sibling(&path, NEW_SUFFIX).exists());
+}
+
+#[test]
+fn a_directory_off_tmpfs_or_beside_the_database_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("m.db");
+    let beside = dir_refusal(&dir.path().join("ram"), &db).expect("refused");
+    assert!(
+        beside.contains("not in RAM") || beside.contains("same file system"),
+        "{beside}"
+    );
+    let ram = testutil::ram_dir();
+    assert_eq!(dir_refusal(ram.path(), &db), None);
+    let link = dir.path().join("link");
+    std::os::unix::fs::symlink(ram.path(), &link).expect("symlink");
+    let linked = dir_refusal(&link, &db).expect("refused");
+    assert!(linked.contains("symlink"), "{linked}");
+}
+
+#[test]
+fn memory_falling_below_the_floor_stops_the_work_with_a_fallback() {
+    let (_dir, db) = card(1024);
+    let ram = testutil::ram_dir();
+    let before = sha1(db.path());
+    let out = db
+        .hold_writer_blocking(|h| {
+            run(h, &plan(ram.path()), &mut Script::default(), |copy| {
+                copy.write_blocking(|c| settings::set(c, "k", "new"))?;
+                memory_left(u64::MAX)?;
+                Ok(((), true))
+            })
+        })
+        .expect("run");
+    assert!(
+        matches!(&out, Ram::Fallback(r) if r.contains("fell to")),
+        "{out:?}"
+    );
+    assert_eq!(sha1(db.path()), before);
+    assert_clean(ram.path(), &db);
 }
 
 /// A WAL database at `path` migrated through `version` only, holding the synthetic
@@ -477,12 +680,13 @@ fn titles(path: &Path) -> i64 {
 
 #[test]
 fn startup_migrations_run_in_ram_and_swap_in() {
+    let ram = testutil::ram_dir();
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("m.db");
     let latest = super::super::migrate::latest();
     at_version(&db, latest - 1, 0.01);
     let before = titles(&db);
-    let report = migrate_in_ram(&db, &plan(dir.path()), None)
+    let report = migrate_in_ram(&db, &plan(ram.path()), None)
         .expect("migrate")
         .expect("ran in RAM");
     assert_eq!(report.bytes, fs::metadata(&db).expect("stat").len());
@@ -494,10 +698,10 @@ fn startup_migrations_run_in_ram_and_swap_in() {
     drop(c);
     assert_eq!(titles(&db), before);
     assert!(!sibling(&db, NEW_SUFFIX).exists());
-    let left = fs::read_dir(dir.path().join("ram")).map_or(0, Iterator::count);
+    let left = fs::read_dir(ram.path()).map_or(0, Iterator::count);
     assert_eq!(left, 0);
     assert!(
-        migrate_in_ram(&db, &plan(dir.path()), None)
+        migrate_in_ram(&db, &plan(ram.path()), None)
             .expect("again")
             .is_none(),
         "nothing left to migrate"
@@ -506,16 +710,17 @@ fn startup_migrations_run_in_ram_and_swap_in() {
 
 #[test]
 fn startup_migrations_stay_on_the_card_when_memory_is_short_or_the_schema_is_newer() {
+    let ram = testutil::ram_dir();
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("m.db");
-    assert!(migrate_in_ram(&db, &plan(dir.path()), None)
+    assert!(migrate_in_ram(&db, &plan(ram.path()), None)
         .expect("no database")
         .is_none());
     at_version(&db, super::super::migrate::latest() - 1, 0.01);
     let before = sha1(&db);
     let short = Plan {
         floor: u64::MAX / 2,
-        ..plan(dir.path())
+        ..plan(ram.path())
     };
     assert!(migrate_in_ram(&db, &short, None).expect("short").is_none());
     assert_eq!(sha1(&db), before, "left for the open to migrate");
@@ -526,7 +731,7 @@ fn startup_migrations_stay_on_the_card_when_memory_is_short_or_the_schema_is_new
         .expect("open")
         .execute("INSERT INTO schema_version VALUES (9999, 'future', 1)", [])
         .expect("future");
-    let too_new = migrate_in_ram(&newer, &plan(dir.path()), None);
+    let too_new = migrate_in_ram(&newer, &plan(ram.path()), None);
     assert!(
         matches!(too_new, Err(Error::SchemaTooNew { found: 9999, .. })),
         "{too_new:?}"
@@ -538,6 +743,7 @@ fn startup_migrations_stay_on_the_card_when_memory_is_short_or_the_schema_is_new
 #[test]
 #[ignore = "about a minute; run by hand with --ignored --nocapture"]
 fn the_last_migration_in_place_and_in_ram() {
+    let ram = testutil::ram_dir();
     let dir = tempfile::tempdir().expect("tempdir");
     let latest = super::super::migrate::latest();
     let (a, b) = (dir.path().join("a.db"), dir.path().join("b.db"));
@@ -558,7 +764,7 @@ fn the_last_migration_in_place_and_in_ram() {
     let in_place = started.elapsed();
     assert_eq!(applied, [latest]);
     let started = Instant::now();
-    let r = migrate_in_ram(&b, &plan(dir.path()), None)
+    let r = migrate_in_ram(&b, &plan(ram.path()), None)
         .expect("migrate")
         .expect("in RAM");
     eprintln!(

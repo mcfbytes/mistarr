@@ -457,7 +457,7 @@ Jobs run on three serial lanes, one job at a time each:
 | Lane | Jobs | While a core runs |
 |---|---|---|
 | heavy | `scan`, `import`, `arcade_catalog` | Held: a queued job does not start and a running one stops at its next file boundary, `paused`. |
-| background | `dat_import`, `recompute_1g1r`, `source_import` | Runs. A DAT parse sleeps 20 ms every 200 entries, on top of the process's `nice` level. Held, like the heavy lane, by a manual pause; a DAT import in RAM drops its copy and starts again after it. |
+| background | `dat_import`, `recompute_1g1r`, `source_import` | Runs. A DAT parse sleeps 20 ms every 200 entries, on top of the process's `nice` level. Held, like the heavy lane, by a manual pause; a DAT import in RAM drops its copy and starts again after it, and while a core runs its copy into RAM and back rests as long as each 1 MiB step took. |
 | light | `detect_client`, `transfer`, `resolve_magnet`, `deselect` | Runs. |
 
 The CORENAME watcher polls `/tmp/CORENAME` every 2 s. When the value is not
@@ -500,7 +500,7 @@ shutdown is left `queued` for this.
 | SQLite other | `mmap_size = 0`, `temp_store = FILE` under `/tmp/mistarr` (`SQLITE_TMPDIR`, set at startup and emptied of stale files; `MISTARR_TEMP_DIR` names another; RAM on the board, so temporary pages never reach the card), created with mode 0700 and refused when it is a symlink or another user's, in which case `<data>/tmp` is used and the log warns; WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB, 16 MiB while a bulk write is open |
 | DAT stage | in `/tmp/mistarr` while a DAT loads, about 1.5 times the DAT's size (18 MB for 20 000 games of three roms), given back when the load ends, as the temporary database vacuums itself; when `/tmp` fills the load fails naming `/tmp/mistarr` and the database is unchanged |
 | SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import in RAM holds the writer from its copy to its swap; one on the card, already on a blocking thread, takes it per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
-| DAT import or migration in RAM | a copy in `[memory] import_dir`, tmpfs, so it counts in `MemAvailable` and not in RSS: the database, what the import adds and the copy's WAL. Made only when `MemAvailable` covers the file's size, half again and 32 MiB, above `[memory] import_floor_mib` (128 MiB); 1 MiB write-back buffer |
+| DAT import or migration in RAM | a copy in `[memory] import_dir`, tmpfs, so it counts in `MemAvailable` and not in RSS: the database, what the import adds and the copy's rollback journal. Made only when `MemAvailable` covers the file's size and half again, three times the DATs' uncompressed size, and 32 MiB, above `[memory] import_floor_mib` (128 MiB), and dropped when `MemAvailable` falls below the floor during the load; 1 MiB write-back buffer |
 | Hashing buffer | 256 KiB, one file at a time |
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
 | Arcade presence pass | 500 zips per batch, stat only unless import rows of a changed zip need its central directory; the listing's names and the live MRA zip set persist across batches |
@@ -668,55 +668,81 @@ of the database in RAM and write it back whole (`db::ram`):
 
 1. The job takes the write turn and the writer and holds them to the end, so
    no other write reaches the file meanwhile; async writes queue on the
-   semaphore, and reads keep running on the card file.
+   semaphore, and reads keep running on the card file. An upload still
+   answers: it waits at most 250 ms to record its job, which is recorded
+   when the import ends.
 2. It checkpoints the WAL with TRUNCATE, so the file is complete and its WAL
-   empty. It then checks memory: `MemAvailable` from `/proc/meminfo` must
-   cover the copy's need, the file's size and half again plus 32 MiB, on top
-   of `[memory] import_floor_mib`, 128 MiB by default, left for MiSTer Main
-   and a running core; `[memory] import_dir` must have the need free, and the
-   card the file's size. Short of any, the import runs on the card, and the
-   job's progress and the log at info say why.
+   empty, and checks, in order, that no other process has the database open
+   (step 6), that `[memory] import_dir` is usable and that memory allows.
+   The directory must be, or become, one of mode 0700 that this user owns
+   and that is not a symlink, as SQLite's temporary directory must, on tmpfs
+   or ramfs by its `statfs` type, and not on the database's file system.
+   `MemAvailable` from `/proc/meminfo` must cover the copy's need on top of
+   `[memory] import_floor_mib`, 128 MiB by default, left for MiSTer Main and
+   a running core; `import_dir` must have the need free, and the card the
+   file's size. The need is the file's size and half again, for the copy's
+   journal and pages freed and reused, three times the uncompressed size of
+   the file's DATs, for the rows they stage and keep, and 32 MiB. Short of
+   any, the import runs on the card, and the job's progress, as `reason`,
+   and the log at info say why. A floor of 0 is allowed and warned about at
+   startup.
 3. SQLite's backup copies the file through the held writer into
    `<import_dir>/import-<key>-<job>/mistarr.db`, 1 MiB a step. The key hashes
    the database's path, so servers of two data directories never touch each
    other's copies. SQLite reads the source itself: a descriptor of the card
    file opened and closed beside its connections would drop their POSIX locks.
 4. Every member of the file loads into the copy, on a pair of connections of
-   its own, and then each platform that loaded titles has its recompute
-   there: rematching, the picks, `title_groups` and the search index. The
-   follow-up is the platform's re-map. The job's progress goes to the copy's
-   job row and out as `job.progress`. A file that loads nothing is not
-   written back.
-5. The copy is checkpointed and closed, so it stands alone, and written to
-   `mistarr.db.new` beside the database in writes of exactly 1 MiB, then
-   synced.
+   its own with a rollback journal and no syncs (`Db::open_copy`), and then
+   each platform that loaded titles has its recompute there: rematching, the
+   picks, `title_groups` and the search index. A rollback journal holds only
+   the pages a transaction overwrites, where a WAL would hold every page the
+   load writes. The follow-up is the platform's re-map. The job's progress
+   goes to the copy's job row and out as `job.progress`, with the phases
+   "copying the database to memory", the load's own, "matching" and
+   "picking" for the recompute, and "writing the database to the card". A
+   file that loads nothing is not written back.
+5. The copy is closed, put back in WAL mode so the card file opens without a
+   write, and written to `mistarr.db.new` beside the database in writes of
+   exactly 1 MiB, then synced.
 6. The swap waits, up to 30 s, until no other process has the database or
    its `-wal` or `-shm` open, from `/proc/<pid>/fd`. SQLite in such a
    process, closing its last connection to the old file, would remove the
    `-wal` and `-shm` names the new file uses. Still held, the copy is dropped
-   and the import runs on the card.
+   and the import runs on the card. The scan cannot see another user's
+   processes, nor the file opened through another path such as a bind mount.
 7. With the reader held too, the old WAL is checkpointed again and must be
-   empty, both connections close, the old `-wal` and `-shm` are removed,
-   `mistarr.db.new` is renamed over `mistarr.db`, the directory is synced and
-   both connections open on the new file. A reader sees the old file or the
-   new one, never part of either.
+   empty and both connections close. The old `-wal` and `-shm` are removed,
+   then the swap takes three renames, each followed by a sync of the
+   directory: `mistarr.db` to `mistarr.db.old`, `mistarr.db.new` to
+   `mistarr.db`, and `mistarr.db.old` removed. Both connections then open on
+   the file named `mistarr.db`, never creating one. A reader sees the old
+   file or the new one, never part of either.
 8. The working directory goes on every way out. At startup, before the
-   database opens, `mistarr.db.new` and this database's working directories
-   are removed.
+   database opens, a swap cut short is finished, `mistarr.db.new` and this
+   database's working directories are removed, and a data directory that
+   lists `mistarr.db` twice, which only a damaged file system does, is
+   warned about.
 
-A power cut or crash leaves one whole file under the name at every step:
+Every crash point leaves one whole database the next start opens. The
+start reads which step it was from the files present:
 
-| Cut during | At the next start |
-|---|---|
-| the check, the copy or the import | the card file as it was, WAL empty; the job re-runs, as an interrupted DAT import does |
-| the write-back | the same, plus a partial `mistarr.db.new`, removed unread |
-| the swap, before the rename | the old file, with its empty WAL or none |
-| the swap, after the rename | the new file, synced before the rename, with no WAL |
+| Cut during | Files left | At the next start |
+|---|---|---|
+| the check, the copy or the import | `mistarr.db`, WAL empty | opened as it was; the job re-runs, as an interrupted DAT import does |
+| the write-back | `mistarr.db`, a partial `.new` | `.new` removed unread |
+| after the write-back, before the first rename | `mistarr.db`, a whole `.new` | `.new` removed; the import or migration runs again |
+| after the first rename | `.old`, a whole `.new` | `.new` renamed to `mistarr.db`, `.old` removed |
+| after the second rename | `mistarr.db` (new), `.old` | `.old` removed |
+| after the removal | `mistarr.db` (new) | opened |
 
-The old WAL is removed before the rename because it is empty and nothing
-writes it after the checkpoint, so removing it loses nothing and the new file
-never meets frames written for the old one. exFAT has no journal; the rename
-is one directory update, synchronous on a `dirsync` mount.
+`.new` is synced before the first rename, so a `.new` beside `.old` is whole.
+Should `.new` be gone too, `.old` is renamed back. The old WAL is removed
+before the renames because it is empty and nothing writes it after the
+checkpoint, so removing it loses nothing and the new file never meets frames
+written for the old one. exFAT has no journal and its rename is not atomic
+against a power cut; no step here depends on one rename replacing a file.
+`db::ram::tests::a_start_after_a_crash_at_any_step_of_the_swap_opens_one_whole_database`
+builds each state and starts through `app::open_db`.
 
 Shutdown is checked between members, every 500 games, between copy steps
 and between written chunks, and leaves the card file untouched and the job
@@ -725,25 +751,43 @@ and starts again; during the write-back it lets the write-back finish. A
 core starting does not hold the import, which is on the background lane,
 and the write-back is not deferred for it: waiting for the core to exit
 would hold every write for the length of a game, against a burst of about
-one write per MiB, spaced by 20 ms per chunk while a core runs. Running out
-of memory or room while copying or importing (`ENOSPC`, `ENOMEM`,
-`SQLITE_FULL`, `SQLITE_NOMEM`), or finding no room on the card for
-`mistarr.db.new`, drops the copy and imports on the card; any other failure
-fails the job with the card file untouched.
+one write per MiB. While a core runs, the copy into RAM and the write-back
+rest after each 1 MiB step as long as the step took, at least 20 ms and at
+most 1 s, so they keep at most half of a CPU.
+
+`MemAvailable` is read again between members, every 500 games and between
+recompute chunks; below the floor the copy is dropped and the import runs
+on the card. Running out of memory or room while copying or importing
+(`ENOSPC`, `ENOMEM`, `SQLITE_FULL`, `SQLITE_NOMEM`, which the load reports
+as a typed `NoRoom` error), or finding no room on the card for
+`mistarr.db.new`, drops the copy the same way. Any other failure fails the
+job with the card file untouched. A swap whose connections cannot reopen
+after the renames fails the job with `Reopen`, never a fallback: the
+connections then fail every statement and mistarr must restart.
+
+Nothing else may write the database while a server runs: a write from
+another process during the hold would be lost with the old file. The data
+directory's lock keeps a second server out, and
+`mistarr doctor --rebuild-groups` takes the same lock and refuses while a
+server holds it.
 
 Startup migrations take the same path: before the server opens its
 connections, when a migration is pending and memory allows, the downgrade
 guard reads the card file, the copy is migrated, written back and swapped
-in the same way; otherwise the open migrates the card file itself.
+in the same way; otherwise the open migrates the card file itself. A
+migration that fails on the copy leaves the card file byte for byte as it
+was, and the open then runs it on the card, where it fails or succeeds as
+it would have.
 
-Measured on the host as the write-sync tests count them, on the bench
-catalogue with 3 000 unmatched `psx` files, loading a `psx` DAT with its
-recompute (`jobs::dat_import::sync_writes::in_place_and_in_ram_on_the_bench_catalogue`):
+Measured on the host as the write-sync tests count them, in a release
+build, on the bench catalogue with 3 000 unmatched `psx` files, loading a
+`psx` DAT with its recompute
+(`jobs::dat_import::sync_writes::in_place_and_in_ram_on_the_bench_catalogue`):
 
 | DAT | Database before, after | On the card: writes | In RAM: card writes | Host time on the card, in RAM |
 |---|---|---|---|---|
-| 450 games | 47.8, 48.4 MB | 6 042 | 55 | 0.49 s, 0.58 s |
-| 10 000 games | 47.8, 61.0 MB | 43 857 | 67 | 3.8 s, 4.3 s |
+| 450 games | 47.8, 48.4 MB | 6 042 | 55 | 0.39 s, 0.47 s |
+| 10 000 games | 47.8, 61.0 MB | 43 857 | 67 | 1.4 s, 1.9 s |
 
 The card writes in RAM are one per MiB of the file and about eight more:
 reopening maps SQLite's shared-memory file, writing a byte to each of its
@@ -753,10 +797,16 @@ seconds at the card's 10 to 20 MB/s, and the import's own time on the
 board's CPU. The last migration on the same catalogue, with half its roms
 lacking a sha1, writes the card 1 254 times in place and 51 times in RAM
 (`db::ram::tests::the_last_migration_in_place_and_in_ram`); with every rom
-keyed, 5 672 times in place and 62 in RAM
+keyed, 6 844 times in place and 62 in RAM
 (`migration_writes_on_the_bench_catalogue`).
 `a_load_in_ram_writes_the_card_about_once_per_mebibyte` holds a 450-game
 load on a tenth of the catalogue to one write per MiB plus 16.
+
+The copy's size in RAM for a 50 MiB DAT of about 198 000 games loaded into
+an empty database peaks at 145 MiB, the file it becomes, against a need of
+182 MiB (`tests/memory.rs`, which samples the working directory): 2.9 bytes
+per byte of DAT, hence the factor of three. A WAL in place of the rollback
+journal peaks at 253 MiB on the same load.
 
 ## Configuration
 
@@ -799,7 +849,7 @@ scan_interval_minutes = 1440   # a daily rescan by default, 0 disables it
 
 [memory]
 data_limit_mib = 192        # soft RLIMIT_DATA set at startup, at least 64; 0 keeps the inherited limit
-import_dir = "/tmp/mistarr"  # RAM-backed directory a DAT import or migration copies the database into
+import_dir = "/tmp/mistarr"  # tmpfs directory, private to mistarr, a DAT import or migration copies the database into
 import_floor_mib = 128      # MemAvailable kept free beyond the copy; short of it, work runs on the card
 ```
 

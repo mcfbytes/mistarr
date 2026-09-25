@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use mistarr_core::dat::{
@@ -61,6 +61,9 @@ const STAGE_CHUNK: usize = 2000;
 
 /// How long each of those pauses lasts.
 const YIELD_FOR: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Longest pause between two chunks of the copy into RAM or back while a core runs.
+const YIELD_AT_MOST: Duration = Duration::from_secs(1);
 
 /// The 1G1R preferences of `[prefs]`; hide names that are not selection flags are ignored.
 ///
@@ -190,6 +193,8 @@ struct Request {
     /// Fail with [`Error::Paused`] on a manual pause instead of waiting it out, for an
     /// import that holds the writer meanwhile.
     abort_on_hold: bool,
+    /// For an import in RAM, the `MemAvailable` bytes below which it gives up its copy.
+    floor: Option<u64>,
 }
 
 /// What the members of a file did, and whether their platforms' recompute already ran.
@@ -429,12 +434,12 @@ impl DatImport {
         })
     }
 
-    /// The request for one member of this file.
+    /// The request for one member of this file; `floor` is set for an import in RAM.
     fn request(
         &self,
         ctx: &JobContext,
         source_file: &str,
-        abort_on_hold: bool,
+        floor: Option<u64>,
         meter: Option<Meter>,
     ) -> Request {
         Request {
@@ -446,7 +451,8 @@ impl DatImport {
             stop: ctx.app.shutdown_signal(),
             gate: ctx.app.gate.subscribe(),
             meter,
-            abort_on_hold,
+            abort_on_hold: floor.is_some(),
+            floor,
         }
     }
 
@@ -459,13 +465,15 @@ impl DatImport {
         source_file: &str,
     ) -> Result<Ram<Vec<Outcome>>> {
         let memory = ctx.app.config().memory;
+        let floor = memory.import_floor_mib.saturating_mul(1024 * 1024);
         let plan = ram::Plan {
             dir: memory.import_dir,
-            floor: memory.import_floor_mib.saturating_mul(1024 * 1024),
+            floor,
             job: ctx.id.0,
+            input: members_size(&self.path, members),
         };
         let meter = Meter::new(ctx.reporter(), source_file, members.len(), None);
-        let req = self.request(ctx, source_file, true, Some(meter));
+        let req = self.request(ctx, source_file, Some(floor), Some(meter));
         let mut watch = RamWatch {
             reporter: ctx.reporter(),
             id: ctx.id,
@@ -473,6 +481,7 @@ impl DatImport {
             members: members.len(),
             stop: ctx.app.shutdown_signal(),
             gate: ctx.app.gate.subscribe(),
+            chunk_started: Instant::now(),
         };
         let path = self.path.clone();
         let members = members.to_vec();
@@ -503,7 +512,7 @@ impl DatImport {
             ctx.checkpoint().await?;
             let meter = Meter::new(ctx.reporter(), source_file, members.len(), Some(reason));
             meter.at_member(done, games);
-            let req = self.request(ctx, source_file, false, Some(meter));
+            let req = self.request(ctx, source_file, None, Some(meter));
             let path = self.path.clone();
             let db = ctx.app.db.clone();
             let outcome = crate::threads::blocking(crate::threads::label::DAT_IMPORT, move || {
@@ -567,14 +576,25 @@ fn import_all(
             }
         }
     }
+    let report = |pass: Pass, tally: &Tally| {
+        if let Some(m) = &req.meter {
+            m.reporter.report(pass.label(), || {
+                let mut v = m.value(pass.label(), None);
+                v["checked"] = json!(tally.checked);
+                v["matched"] = json!(tally.matched);
+                v
+            });
+        }
+    };
     for p in platforms {
-        recompute_blocking(db, p, &req.prefs, &|| check(req))?;
+        recompute_blocking(db, p, &req.prefs, &|| check(req), &report)?;
     }
     let loaded = outcomes.iter().any(|o| matches!(o, Outcome::Loaded(_)));
     Ok((outcomes, loaded))
 }
 
-/// [`Error::Cancelled`] on shutdown, [`Error::Paused`] while a pause holds the lane.
+/// [`Error::Cancelled`] on shutdown, [`Error::Paused`] while a pause holds the lane, and
+/// [`Error::NoRoom`] when memory fell below the request's floor.
 fn check(req: &Request) -> Result<()> {
     if *req.stop.borrow() {
         return Err(Error::Cancelled);
@@ -582,11 +602,32 @@ fn check(req: &Request) -> Result<()> {
     if req.gate.borrow().hold(Lane::Background).is_some() {
         return Err(Error::Paused);
     }
-    Ok(())
+    req.floor.map_or(Ok(()), ram::memory_left)
 }
 
-/// Reports an import in RAM's copy and write-back as live progress, and stops it
-/// between their steps on shutdown or, before the write-back, on a pause.
+/// Uncompressed bytes of `members` of `path`, 0 for those that cannot be read.
+fn members_size(path: &Path, members: &[Member]) -> u64 {
+    let Ok(file) = File::open(path) else {
+        return 0;
+    };
+    if members.iter().all(|m| matches!(m, Member::Plain)) {
+        return file.metadata().map_or(0, |m| m.len());
+    }
+    let Ok(mut archive) = zip::ZipArchive::new(BufReader::new(file)) else {
+        return 0;
+    };
+    members
+        .iter()
+        .filter_map(|m| match m {
+            Member::Zip(i) => archive.by_index_raw(*i).ok().map(|e| e.size()),
+            Member::Plain => None,
+        })
+        .sum()
+}
+
+/// Reports an import in RAM's copy and write-back as live progress, stops it between
+/// their steps on shutdown or, while copying in, on a pause, and while a core runs
+/// rests as long as the last chunk took.
 struct RamWatch {
     reporter: Reporter,
     id: JobId,
@@ -594,10 +635,12 @@ struct RamWatch {
     members: usize,
     stop: watch::Receiver<bool>,
     gate: watch::Receiver<GateState>,
+    chunk_started: Instant,
 }
 
 impl ram::Watch for RamWatch {
     fn phase(&mut self, phase: ram::Phase) {
+        self.chunk_started = Instant::now();
         // The load reports its own phases through the meter.
         if phase == ram::Phase::Importing {
             return;
@@ -610,14 +653,14 @@ impl ram::Watch for RamWatch {
         if *self.stop.borrow() {
             return Err(Error::Cancelled);
         }
-        if phase == ram::Phase::Writing {
-            // The write-back lasts seconds; a pause lets it finish, a core spaces it out.
-            if self.gate.borrow().core_running() {
-                std::thread::sleep(YIELD_FOR);
-            }
-            return Ok(());
+        if self.gate.borrow().core_running() {
+            // At most half the time busy while a core runs.
+            let took = self.chunk_started.elapsed();
+            std::thread::sleep(took.clamp(YIELD_FOR, YIELD_AT_MOST));
         }
-        if self.gate.borrow().hold(Lane::Background).is_some() {
+        self.chunk_started = Instant::now();
+        // The write-back lasts seconds and a pause lets it finish.
+        if phase != ram::Phase::Writing && self.gate.borrow().hold(Lane::Background).is_some() {
             return Err(Error::Paused);
         }
         Ok(())
@@ -714,7 +757,7 @@ fn import_from(db: &Db, path: &Path, member: Member, req: &Request) -> Result<Ou
                 tracing::warn!(error = %c, "cannot empty the DAT stage");
             }
             let tmp = std::env::var_os(crate::db::SQLITE_TMPDIR).map(PathBuf::from);
-            Err(Error::Job(full_message(
+            Err(Error::NoRoom(full_message(
                 tmp.as_deref(),
                 db.path(),
                 free_bytes,
@@ -1024,8 +1067,13 @@ fn import_stream<R: BufRead>(
 /// Stops on shutdown, sleeps briefly while a core runs and waits out a
 /// manual pause, which holds the background lane; checked every few games.
 fn pace(req: &Request, games: u64) -> Result<()> {
-    if games.is_multiple_of(CANCEL_EVERY) && *req.stop.borrow() {
-        return Err(Error::Cancelled);
+    if games.is_multiple_of(CANCEL_EVERY) {
+        if *req.stop.borrow() {
+            return Err(Error::Cancelled);
+        }
+        if let Some(floor) = req.floor {
+            ram::memory_left(floor)?;
+        }
     }
     if !games.is_multiple_of(YIELD_EVERY) {
         return Ok(());
@@ -1300,46 +1348,94 @@ fn stored_hashes(f: &FileRow) -> Option<mistarr_core::HashSet> {
     })
 }
 
-/// [`Recompute`]'s passes over `platform` on the calling thread, each chunk in its own
-/// transaction, with `check` between them; the caller queues the re-map.
+/// A step of a recompute: matching files of retired roms, matching unmatched files after
+/// an id, which arcade skips, and picking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Retired,
+    Unmatched(FileId),
+    Picking,
+    Done,
+}
+
+impl Pass {
+    /// The live progress phase of the pass.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Retired | Self::Unmatched(_) => "matching",
+            Self::Picking | Self::Done => "picking",
+        }
+    }
+}
+
+/// What a recompute's passes have done so far.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Tally {
+    checked: usize,
+    matched: usize,
+    picked: titles::Recomputed,
+}
+
+/// Runs one chunk of `pass` over `platform` in its own transaction, adding to `tally`,
+/// and returns the pass that follows.
+fn recompute_pass(
+    conn: &mut Connection,
+    platform: &PlatformId,
+    prefs: &Prefs,
+    pass: Pass,
+    tally: &mut Tally,
+) -> Result<Pass> {
+    let tx = conn.transaction()?;
+    let next = match pass {
+        Pass::Retired => {
+            let taken = rematch_chunk(&tx, platform)?;
+            tally.checked += taken;
+            if taken >= REMATCH_CHUNK as usize {
+                Pass::Retired
+            } else if scan::is_arcade(platform) {
+                // Arcade files are matched by the arcade catalogue's presence pass.
+                Pass::Picking
+            } else {
+                Pass::Unmatched(FileId(0))
+            }
+        }
+        Pass::Unmatched(after) => {
+            let chunk = match_unmatched_chunk(&tx, platform, after)?;
+            tally.checked += chunk.read;
+            tally.matched += chunk.matched;
+            if chunk.read < REMATCH_CHUNK as usize {
+                Pass::Picking
+            } else {
+                Pass::Unmatched(chunk.last)
+            }
+        }
+        Pass::Picking => {
+            tally.picked = titles::recompute_platform(&tx, &platform.0, prefs)?;
+            Pass::Done
+        }
+        Pass::Done => Pass::Done,
+    };
+    crate::db::commit(tx)?;
+    Ok(next)
+}
+
+/// [`Recompute`]'s passes over `platform` on the calling thread, with `check` and then
+/// `report` before each chunk; the caller queues the re-map.
 fn recompute_blocking(
     db: &Db,
     platform: &PlatformId,
     prefs: &Prefs,
     check: &dyn Fn() -> Result<()>,
-) -> Result<()> {
-    loop {
+    report: &dyn Fn(Pass, &Tally),
+) -> Result<Tally> {
+    let mut tally = Tally::default();
+    let mut pass = Pass::Retired;
+    while pass != Pass::Done {
         check()?;
-        let taken = db.write_blocking(|c| {
-            let tx = c.transaction()?;
-            let taken = rematch_chunk(&tx, platform)?;
-            crate::db::commit(tx)?;
-            Ok(taken)
-        })?;
-        if taken < REMATCH_CHUNK as usize {
-            break;
-        }
+        report(pass, &tally);
+        pass = db.write_blocking(|c| recompute_pass(c, platform, prefs, pass, &mut tally))?;
     }
-    let mut after = FileId(0);
-    while !scan::is_arcade(platform) {
-        check()?;
-        let chunk = db.write_blocking(|c| {
-            let tx = c.transaction()?;
-            let chunk = match_unmatched_chunk(&tx, platform, after)?;
-            crate::db::commit(tx)?;
-            Ok(chunk)
-        })?;
-        after = chunk.last;
-        if chunk.read < REMATCH_CHUNK as usize {
-            break;
-        }
-    }
-    check()?;
-    db.write_blocking(|c| {
-        let tx = c.transaction()?;
-        titles::recompute_platform(&tx, &platform.0, prefs)?;
-        crate::db::commit(tx)
-    })
+    Ok(tally)
 }
 
 /// Matches files of retired roms again, then, outside arcade, the platform's unmatched
@@ -1394,68 +1490,27 @@ impl Job for Recompute {
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
         let reporter = ctx.reporter();
-        let mut checked = 0;
-        let mut matched = 0;
-        loop {
-            reporter.report("matching", || matching(checked, matched));
+        let prefs = Arc::new(prefs(&ctx.app.config().prefs));
+        let mut tally = Tally::default();
+        let mut pass = Pass::Retired;
+        while pass != Pass::Done {
+            reporter.report(pass.label(), || pass_progress(pass, &tally));
             ctx.checkpoint().await?;
-            let platform = self.platform.clone();
-            let taken = ctx
+            let (platform, prefs) = (self.platform.clone(), Arc::clone(&prefs));
+            (pass, tally) = ctx
                 .app
                 .db
                 .write(move |c| {
-                    let tx = c.transaction()?;
-                    let taken = rematch_chunk(&tx, &platform)?;
-                    crate::db::commit(tx)?;
-                    Ok(taken)
+                    let mut tally = tally;
+                    let next = recompute_pass(c, &platform, &prefs, pass, &mut tally)?;
+                    Ok((next, tally))
                 })
                 .await?;
-            checked += taken;
-            if taken < REMATCH_CHUNK as usize {
-                break;
-            }
         }
-        let mut after = FileId(0);
-        // Arcade files are matched by the arcade catalogue's presence pass.
-        while !scan::is_arcade(&self.platform) {
-            reporter.report("matching", || matching(checked, matched));
-            ctx.checkpoint().await?;
-            let platform = self.platform.clone();
-            let chunk = ctx
-                .app
-                .db
-                .write(move |c| {
-                    let tx = c.transaction()?;
-                    let chunk = match_unmatched_chunk(&tx, &platform, after)?;
-                    crate::db::commit(tx)?;
-                    Ok(chunk)
-                })
-                .await?;
-            matched += chunk.matched;
-            checked += chunk.read;
-            after = chunk.last;
-            if chunk.read < REMATCH_CHUNK as usize {
-                break;
-            }
-        }
-        ctx.checkpoint().await?;
-        reporter.report(
-            "picking",
-            || json!({ "phase": "picking", "matched": matched }),
-        );
-        let prefs = prefs(&ctx.app.config().prefs);
-        let platform = self.platform.0.clone();
-        let r = ctx
-            .app
-            .db
-            .write(move |c| {
-                let tx = c.transaction()?;
-                let r = titles::recompute_platform(&tx, &platform, &prefs)?;
-                crate::db::commit(tx)?;
-                Ok(r)
-            })
-            .await?;
-        ctx.progress(json!({ "groups": r.groups, "picks": r.picks, "matched": matched }))
+        let Tally {
+            matched, picked, ..
+        } = tally;
+        ctx.progress(json!({ "groups": picked.groups, "picks": picked.picks, "matched": matched }))
             .await?;
         // Groups are settled now; a re-map that ran earlier stored a stamp without them.
         super::remap::enqueue(&ctx.app, Some(vec![self.platform.clone()])).await;
@@ -1463,9 +1518,14 @@ impl Job for Recompute {
     }
 }
 
-/// A recompute's live progress while it matches stored hashes.
-fn matching(checked: usize, matched: usize) -> Value {
-    json!({ "phase": "matching", "checked": checked, "matched": matched })
+/// A recompute's live progress before `pass`.
+fn pass_progress(pass: Pass, tally: &Tally) -> Value {
+    match pass {
+        Pass::Retired | Pass::Unmatched(_) => {
+            json!({ "phase": "matching", "checked": tally.checked, "matched": tally.matched })
+        }
+        Pass::Picking | Pass::Done => json!({ "phase": "picking", "matched": tally.matched }),
+    }
 }
 
 /// Finds files in `dats/` that have stopped changing: mtime at least

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{Connection, ErrorCode};
 
-use super::{sibling, Db, HeldWriter};
+use super::{sibling, Db, HeldWriter, OLD_SUFFIX};
 use crate::error::{Error, Result};
 
 /// Bytes per `write` when the copy goes back to the card; a sync mount flushes each once.
@@ -17,10 +17,18 @@ pub const CHUNK_BYTES: usize = 1024 * 1024;
 /// Pages the copy into RAM takes per backup step, 1 MiB of 4 KiB pages.
 const COPY_PAGES: std::ffi::c_int = 256;
 
-/// Room the copy needs beyond its own size and half again for growth and its WAL.
+/// Room the copy needs beyond its own size, its growth and its journal.
 const MARGIN_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Suffix of the copy written beside the database and then renamed over it.
+/// Bytes the copy may grow by per byte of DAT it loads, staged rows and indexes
+/// included; `docs/ARCHITECTURE.md` "DAT import in RAM" has the measurement.
+const INPUT_FACTOR: u64 = 3;
+
+/// `statfs` magic numbers of the file systems a copy may be made on.
+const TMPFS_MAGIC: u64 = 0x0102_1994;
+const RAMFS_MAGIC: u64 = 0x8584_58f6;
+
+/// Suffix of the copy written beside the database and then swapped in.
 pub const NEW_SUFFIX: &str = ".new";
 
 /// The copy's file name inside its working directory.
@@ -40,6 +48,8 @@ pub struct Plan {
     pub floor: u64,
     /// Names the working directory; the job's id.
     pub job: i64,
+    /// Uncompressed bytes of the DATs the work loads, 0 for a migration.
+    pub input: u64,
 }
 
 /// A step of [`run`], reported as it starts.
@@ -145,15 +155,19 @@ impl Budget {
     }
 }
 
-/// Bytes a copy of a `size`-byte database needs in RAM: the copy, half again for what
-/// the import adds and its WAL, and [`MARGIN_BYTES`] for temporary files.
+/// Bytes a copy of a `size`-byte database needs in RAM while it loads `input` bytes of
+/// DAT: the copy, half again for its journal and freed pages, [`INPUT_FACTOR`] times the
+/// input for the rows it stages and keeps, and [`MARGIN_BYTES`].
 ///
 /// ```
-/// assert_eq!(mistarr_server::db::ram::need(64 << 20), (96 + 32) << 20);
+/// assert_eq!(mistarr_server::db::ram::need(64 << 20, 0), (96 + 32) << 20);
+/// assert_eq!(mistarr_server::db::ram::need(64 << 20, 10 << 20), (96 + 30 + 32) << 20);
 /// ```
 #[must_use]
-pub fn need(size: u64) -> u64 {
-    size.saturating_add(size / 2).saturating_add(MARGIN_BYTES)
+pub fn need(size: u64, input: u64) -> u64 {
+    size.saturating_add(size / 2)
+        .saturating_add(input.saturating_mul(INPUT_FACTOR))
+        .saturating_add(MARGIN_BYTES)
 }
 
 /// `MemAvailable` of a `/proc/meminfo` text, in bytes.
@@ -171,18 +185,19 @@ pub fn mem_available(meminfo: &str) -> Option<u64> {
     kib.checked_mul(1024)
 }
 
-/// Why a `size`-byte database cannot be copied into RAM under `budget` keeping `floor`
-/// bytes available, or `None` when it can.
+/// Why a `size`-byte database loading `input` bytes of DAT cannot be copied into RAM
+/// under `budget` keeping `floor` bytes available, or `None` when it can.
 ///
 /// ```
 /// use mistarr_server::db::ram::{refusal, Budget};
 /// let roomy = Budget { available: Some(1 << 30), ram_room: Some(1 << 30), card_room: Some(1 << 30) };
-/// assert_eq!(refusal(&roomy, 40 << 20, 128 << 20), None);
-/// assert!(refusal(&roomy, 40 << 20, 1 << 30).is_some());
+/// assert_eq!(refusal(&roomy, 40 << 20, 0, 128 << 20), None);
+/// assert!(refusal(&roomy, 40 << 20, 0, 1 << 30).is_some());
+/// assert!(refusal(&roomy, 40 << 20, 400 << 20, 128 << 20).is_some());
 /// ```
 #[must_use]
-pub fn refusal(budget: &Budget, size: u64, floor: u64) -> Option<String> {
-    let need = need(size);
+pub fn refusal(budget: &Budget, size: u64, input: u64, floor: u64) -> Option<String> {
+    let need = need(size, input);
     let mib = |b: u64| b.div_ceil(MIB);
     let Some(available) = budget.available else {
         return Some("the memory available cannot be read".to_owned());
@@ -223,19 +238,80 @@ fn free_bytes(dir: &Path) -> Option<u64> {
     st.f_bavail.checked_mul(st.f_frsize)
 }
 
+/// Why `dir` cannot hold a copy of the database `db`, or `None` when it can: it must be,
+/// or become, a private directory as SQLite's temporary one is, on tmpfs or ramfs, and
+/// not on the file system holding `db`.
+///
+/// ```
+/// let dir = tempfile::tempdir().unwrap();
+/// let db = dir.path().join("m.db");
+/// let why = mistarr_server::db::ram::dir_refusal(&dir.path().join("ram"), &db);
+/// assert!(why.is_some(), "beside the database");
+/// ```
+#[must_use]
+pub fn dir_refusal(dir: &Path, db: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    if let Err(e) = super::private_dir(dir) {
+        return Some(format!("the memory directory cannot be used: {e}"));
+    }
+    let kind = rustix::fs::statfs(dir)
+        .ok()
+        .and_then(|s| u64::try_from(s.f_type).ok());
+    if !matches!(kind, Some(TMPFS_MAGIC | RAMFS_MAGIC)) {
+        return Some(format!("{} is not in RAM (tmpfs)", dir.display()));
+    }
+    let parent = db.parent().filter(|p| !p.as_os_str().is_empty());
+    let db_dev = fs::metadata(parent.unwrap_or(Path::new("."))).map(|m| m.dev());
+    let dir_dev = fs::metadata(dir).map(|m| m.dev());
+    match (db_dev, dir_dev) {
+        (Ok(a), Ok(b)) if a != b => None,
+        (Ok(_), Ok(_)) => Some(format!(
+            "{} is on the same file system as the database",
+            dir.display()
+        )),
+        (Err(e), _) | (_, Err(e)) => Some(format!("cannot read the memory directory: {e}")),
+    }
+}
+
+/// [`Error::NoRoom`] when `MemAvailable` has fallen below `floor`, so an import in RAM
+/// drops its copy and runs on the card; `Ok` when it cannot be read.
+///
+/// # Errors
+///
+/// [`Error::NoRoom`] naming both amounts.
+///
+/// ```
+/// assert!(mistarr_server::db::ram::memory_left(0).is_ok());
+/// assert!(mistarr_server::db::ram::memory_left(u64::MAX).is_err());
+/// ```
+pub fn memory_left(floor: u64) -> Result<()> {
+    let available = fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|t| mem_available(&t));
+    match available {
+        Some(a) if a < floor => Err(Error::NoRoom(format!(
+            "memory available fell to {} MiB, under the {} MiB kept free",
+            a.div_ceil(MIB),
+            floor.div_ceil(MIB)
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// Copies the database `held` writes into RAM, runs `work` on the copy and, when `work`
 /// asks for it by returning `true` beside its value, writes the copy back beside the
 /// database in [`CHUNK_BYTES`] writes, syncs it and swaps it in with
 /// [`HeldWriter::replace_file`]. Until the swap the card file is never written, except
 /// by the checkpoint that empties its WAL first. The working directory goes on every
-/// path out. Memory or room short at the start, or running out on the way, returns
-/// [`Ram::Fallback`] with the card file as it was.
+/// path out. Memory or room short at the start, or running out on the way, which `work`
+/// reports as [`Error::NoRoom`] or SQLite's full error, returns [`Ram::Fallback`] with the
+/// card file as it was.
 ///
 /// # Errors
 ///
 /// Whatever `watch` or `work` fails with, such as [`Error::Cancelled`], or the I/O or
-/// SQLite failure that stopped a step; the card file is untouched unless the swap failed
-/// after its rename.
+/// SQLite failure that stopped a step, with the card file untouched;
+/// [`Error::Reopen`] when the swap left no connection open, never a fallback.
 pub fn run<T>(
     held: &mut HeldWriter<'_>,
     plan: &Plan,
@@ -250,9 +326,15 @@ pub fn run<T>(
             "a reader kept the database's WAL from being emptied".to_owned(),
         ));
     }
+    if held_elsewhere(&path) {
+        return Ok(Ram::Fallback(SHARED.to_owned()));
+    }
+    if let Some(reason) = dir_refusal(&plan.dir, &path) {
+        return Ok(Ram::Fallback(reason));
+    }
     let size = fs::metadata(&path)?.len();
-    fs::create_dir_all(&plan.dir).ok();
-    if let Some(reason) = refusal(&Budget::read(&plan.dir, &path), size, plan.floor) {
+    let budget = Budget::read(&plan.dir, &path);
+    if let Some(reason) = refusal(&budget, size, plan.input, plan.floor) {
         return Ok(Ram::Fallback(reason));
     }
     let work_dir = match WorkDir::create(&plan.dir, &path, plan.job) {
@@ -276,7 +358,7 @@ pub fn run<T>(
 
     watch.phase(Phase::Importing);
     let started = Instant::now();
-    let done = Db::open(&copy).and_then(|db| {
+    let done = Db::open_copy(&copy, None).and_then(|db| {
         let out = work(&db);
         let closed = db.close();
         let v = out?;
@@ -365,7 +447,8 @@ fn wait_unshared(db: &Path, between: &mut dyn FnMut() -> Result<()>) -> Result<b
 }
 
 /// Whether a process other than this one has `db`, its `-wal` or its `-shm` open, read
-/// from `/proc/<pid>/fd`; a process whose descriptors cannot be read is not counted.
+/// from `/proc/<pid>/fd`. Blind to processes whose descriptors it cannot read (another
+/// user's) and to the file opened through another path, such as a bind mount.
 ///
 /// ```
 /// let dir = tempfile::tempdir().unwrap();
@@ -415,7 +498,7 @@ pub fn held_elsewhere(db: &Path) -> bool {
 /// # Errors
 ///
 /// [`Error::SchemaTooNew`] before anything is written, else the failure of a step, with
-/// the card file untouched unless the swap failed after its rename.
+/// the card file untouched unless a failed swap left `.old`, which the next start restores.
 pub fn migrate_in_ram(
     db: &Path,
     plan: &Plan,
@@ -439,9 +522,14 @@ pub fn migrate_in_ram(
     if !emptied? {
         return skip("a reader kept the database's WAL from being emptied");
     }
+    if held_elsewhere(db) {
+        return skip(SHARED);
+    }
+    if let Some(reason) = dir_refusal(&plan.dir, db) {
+        return skip(&reason);
+    }
     let size = fs::metadata(db)?.len();
-    fs::create_dir_all(&plan.dir).ok();
-    if let Some(reason) = refusal(&Budget::read(&plan.dir, db), size, plan.floor) {
+    if let Some(reason) = refusal(&Budget::read(&plan.dir, db), size, 0, plan.floor) {
         return skip(&reason);
     }
     let Ok(work_dir) = WorkDir::create(&plan.dir, db, plan.job) else {
@@ -456,14 +544,9 @@ pub fn migrate_in_ram(
     }
     report.copy_in = started.elapsed();
     let started = Instant::now();
-    if let Err(reason) = full_as_reason(
-        match steps {
-            Some(s) => Db::open_counting(&copy, s),
-            None => Db::open(&copy),
-        }
-        .and_then(Db::close),
-        "migrating",
-    )? {
+    if let Err(reason) =
+        full_as_reason(Db::open_copy(&copy, steps).and_then(Db::close), "migrating")?
+    {
         return skip(&reason);
     }
     report.work = started.elapsed();
@@ -512,7 +595,8 @@ fn full_as_reason<T>(r: Result<T>, during: &str) -> Result<std::result::Result<T
     }
 }
 
-/// True for failures that mean the RAM directory, the memory or the card is full.
+/// True for failures that mean the RAM directory, the memory or the card is full;
+/// never for [`Error::Reopen`], whatever it wraps.
 ///
 /// ```
 /// use mistarr_server::db::ram::storage_full;
@@ -533,6 +617,7 @@ pub fn storage_full(e: &Error) -> bool {
         Error::Db(rusqlite::Error::SqliteFailure(f, _)) => {
             matches!(f.code, ErrorCode::DiskFull | ErrorCode::OutOfMemory)
         }
+        Error::NoRoom(_) => true,
         _ => false,
     }
 }
@@ -651,19 +736,24 @@ pub fn write_new(src: &Path, new: &Path, between: &mut dyn FnMut() -> Result<()>
     copy_durable(&mut from, &mut to, between)
 }
 
-/// Removes what an earlier run left: `db`'s `.new` copy, never trusted since a power
-/// loss may have cut it short, and working directories of `db` under `dir`. Run before
-/// the database opens, under the data directory's lock. Returns how many it removed.
+/// Finishes or undoes a swap a crash cut short, then removes what an earlier run left:
+/// `db`'s `.new` copy, never trusted once the swap has not begun since a power loss may
+/// have cut it short, and working directories of `db` under `dir`. Run before the
+/// database opens, under the data directory's lock. Returns how many files it removed.
+///
+/// # Errors
+///
+/// [`Error::Io`] when a swap cut short cannot be finished; the database cannot open.
 ///
 /// ```
 /// let dir = tempfile::tempdir().unwrap();
 /// let db = dir.path().join("m.db");
 /// std::fs::write(dir.path().join("m.db.new"), b"partial").unwrap();
-/// assert_eq!(mistarr_server::db::ram::clean_stale(&db, &dir.path().join("ram")), 1);
+/// assert_eq!(mistarr_server::db::ram::clean_stale(&db, &dir.path().join("ram")).unwrap(), 1);
 /// ```
-#[must_use]
-pub fn clean_stale(db: &Path, dir: &Path) -> usize {
-    let mut removed = 0;
+pub fn clean_stale(db: &Path, dir: &Path) -> Result<usize> {
+    let mut removed = finish_swap(db)?;
+    warn_on_twins(db);
     let new = sibling(db, NEW_SUFFIX);
     match fs::remove_file(&new) {
         Ok(()) => {
@@ -675,7 +765,7 @@ pub fn clean_stale(db: &Path, dir: &Path) -> usize {
     }
     let prefix = work_prefix(db);
     let Ok(entries) = fs::read_dir(dir) else {
-        return removed;
+        return Ok(removed);
     };
     for entry in entries.flatten() {
         if !entry.file_name().to_string_lossy().starts_with(&prefix) {
@@ -689,7 +779,57 @@ pub fn clean_stale(db: &Path, dir: &Path) -> usize {
             Err(e) => tracing::warn!(error = %e, "cannot remove a stale import copy"),
         }
     }
-    removed
+    Ok(removed)
+}
+
+/// The step of [`super::install_file`] a crash stopped at, from the files present: with
+/// `.old` and no `db` the new file is renamed in, or the old one back when `.new` is
+/// gone; with both, `.old` is removed. Returns how many files it removed.
+fn finish_swap(db: &Path) -> Result<usize> {
+    let old = sibling(db, OLD_SUFFIX);
+    if !old.exists() {
+        return Ok(0);
+    }
+    if db.exists() {
+        fs::remove_file(&old)?;
+        tracing::info!(file = %old.display(), "removed the database a finished swap replaced");
+        return Ok(1);
+    }
+    let new = sibling(db, NEW_SUFFIX);
+    if new.exists() {
+        fs::rename(&new, db)?;
+        super::sync_parent(db);
+        fs::remove_file(&old)?;
+        tracing::info!("finished swapping in the database written from RAM");
+        return Ok(1);
+    }
+    fs::rename(&old, db)?;
+    tracing::warn!("put the old database back; the swap had lost its new file");
+    Ok(0)
+}
+
+/// Warns when the database's directory lists its name more than once, which only a
+/// damaged file system does.
+fn warn_on_twins(db: &Path) {
+    let (Some(dir), Some(name)) = (db.parent(), db.file_name()) else {
+        return;
+    };
+    let dir = if dir.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        dir
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    let seen = entries.flatten().filter(|e| e.file_name() == name).count();
+    if seen > 1 {
+        tracing::warn!(
+            dir = %dir.display(),
+            seen,
+            "the data directory lists the database more than once; check the card's file system"
+        );
+    }
 }
 
 /// `import-<key>-`, where the key is a stable hash of `db`'s path, so servers of two

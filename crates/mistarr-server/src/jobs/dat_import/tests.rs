@@ -55,6 +55,7 @@ fn request(stop: bool, bind: Option<Bind>) -> Request {
         gate: watch::channel(GateState::default()).1,
         meter: None,
         abort_on_hold: false,
+        floor: None,
     }
 }
 
@@ -1539,10 +1540,12 @@ fn load_all(c: &TestDb, dats: &[String], via_ram: bool) -> Vec<Outcome> {
         req.now = i64::try_from(i).expect("small") + 1;
         let mut progress = |_: &Db, _, _| Ok(());
         let (out, _) = if via_ram {
+            let ram_dir = crate::db::testutil::ram_dir();
             let plan = ram::Plan {
-                dir: dir.join("ram"),
+                dir: ram_dir.path().to_path_buf(),
                 floor: 0,
                 job: 1,
+                input: 0,
             };
             let ran =
                 c.db.hold_writer_blocking(|h| {
@@ -1699,7 +1702,7 @@ async fn a_dat_job_imports_in_ram_and_queues_the_remap_its_recompute_ends_with()
     );
     assert!(phases.iter().any(|p| p == "reading"), "{phases:?}");
     assert!(!dir.path().join("data/mistarr.db.new").exists());
-    let left = std::fs::read_dir(dir.path().join("ram")).map_or(0, Iterator::count);
+    let left = std::fs::read_dir(dir.ram()).map_or(0, Iterator::count);
     assert_eq!(left, 0, "the copy in RAM is removed");
 }
 
@@ -1730,6 +1733,112 @@ async fn short_memory_imports_in_place_and_says_why() {
         count_kind(&app, RECOMPUTE_KIND),
         1,
         "the recompute is queued"
+    );
+}
+
+#[test]
+fn a_copy_that_fills_partway_through_the_load_falls_back_with_the_card_untouched() {
+    let c = conn();
+    let names: Vec<String> = (0..STAGE_CHUNK * 3)
+        .map(|i| format!("Game {i} (USA)"))
+        .collect();
+    let games: Vec<(&str, Option<&str>)> = names.iter().map(|n| (n.as_str(), None)).collect();
+    let path = c.dir.path().join("big.dat");
+    std::fs::write(&path, dat("Maker - Game Boy", "1", &games)).expect("write");
+    let before = dump(&c.db);
+    let ram_dir = crate::db::testutil::ram_dir();
+    let plan = ram::Plan {
+        dir: ram_dir.path().to_path_buf(),
+        floor: 0,
+        job: 1,
+        input: 0,
+    };
+    let req = request(false, None);
+    let out =
+        c.db.hold_writer_blocking(|h| {
+            ram::run(h, &plan, &mut (), |db| {
+                // The copy's file system fills a few pages into the load.
+                db.write_blocking(|w| {
+                    let pages: i64 = w.pragma_query_value(None, "page_count", |r| r.get(0))?;
+                    w.pragma_update(None, "max_page_count", pages + 16)?;
+                    Ok(())
+                })?;
+                import_all(db, &path, &[Member::Plain], &req, &mut |_, _, _| Ok(()))
+            })
+        })
+        .expect("a fallback, not a failure");
+    assert!(
+        matches!(&out, Ram::Fallback(r) if r.contains("is full")),
+        "{out:?}"
+    );
+    assert_eq!(dump(&c.db), before, "the card is as it was");
+    assert_eq!(
+        std::fs::read_dir(ram_dir.path()).map_or(0, Iterator::count),
+        0
+    );
+}
+
+#[test]
+fn the_ram_budget_counts_every_member_uncompressed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let plain = dir.path().join("a.dat");
+    std::fs::write(&plain, "x".repeat(1000)).expect("write");
+    assert_eq!(members_size(&plain, &[Member::Plain]), 1000);
+    let zipped = dir.path().join("b.zip");
+    let (one, two) = ("y".repeat(3000), "z".repeat(500));
+    std::fs::write(
+        &zipped,
+        zip_of(&[("1.dat", one.as_str()), ("2.xml", two.as_str())]),
+    )
+    .expect("write");
+    let members = list_members(&zipped).expect("members");
+    assert_eq!(members_size(&zipped, &members), 3500);
+    assert_eq!(members_size(&dir.path().join("gone.zip"), &members), 0);
+}
+
+#[tokio::test]
+async fn a_running_core_halves_the_pace_of_the_copy() {
+    let (_dir, app) = state();
+    let (tx, gate) = watch::channel(GateState::default());
+    let mut watch = RamWatch {
+        reporter: Reporter::new(Arc::clone(&app), JobId(1), KIND, None),
+        id: JobId(1),
+        file: "a.dat".into(),
+        members: 1,
+        stop: watch::channel(false).1,
+        gate,
+        chunk_started: Instant::now(),
+    };
+    let chunk = Duration::from_millis(60);
+    watch.chunk_started = Instant::now().checked_sub(chunk).expect("past");
+    let started = Instant::now();
+    ram::Watch::between(&mut watch, ram::Phase::Writing).expect("idle");
+    assert!(started.elapsed() < chunk, "no rest without a core");
+    tx.send(GateState {
+        corename: Some("NES".into()),
+        manual: None,
+    })
+    .expect("core");
+    watch.chunk_started = Instant::now().checked_sub(chunk).expect("past");
+    let started = Instant::now();
+    ram::Watch::between(&mut watch, ram::Phase::Copying).expect("core");
+    assert!(
+        started.elapsed() >= chunk,
+        "rests as long as the chunk took"
+    );
+}
+
+#[test]
+fn memory_under_the_floor_stops_a_load_in_ram() {
+    let req = Request {
+        floor: Some(u64::MAX),
+        ..request(false, None)
+    };
+    assert!(matches!(check(&req), Err(Error::NoRoom(_))));
+    assert!(matches!(pace(&req, CANCEL_EVERY), Err(Error::NoRoom(_))));
+    assert!(
+        pace(&req, CANCEL_EVERY + 1).is_ok(),
+        "checked every few games"
     );
 }
 
