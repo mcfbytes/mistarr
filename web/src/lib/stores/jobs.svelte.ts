@@ -111,19 +111,38 @@ export function jobOutcome(
     recompute_1g1r: `Matching for ${where}`,
     dat_import: `DAT ${path.split('/').pop() ?? ''}`.trim(),
     arcade_catalog: 'Arcade catalogue',
-    import: 'Import'
+    import: 'Import',
+    chd_tracks: 'CHD tracks'
   };
   const label = labels[job.kind] ?? job.kind;
   if (job.state === 'failed') {
     return typeof p.error === 'string' ? `${label} failed: ${p.error}` : `${label} failed`;
   }
   if (job.kind === 'scan' && typeof p.matched === 'number' && typeof p.unmatched === 'number') {
-    return `${label}: ${p.matched} matched, ${p.unmatched} unmatched`;
+    const unidentified = typeof p.unidentified === 'number' && p.unidentified > 0 ? p.unidentified : 0;
+    const tail = unidentified > 0 ? `, ${unidentified} not identified` : '';
+    return `${label}: ${p.matched} matched, ${p.unmatched} unmatched${tail}`;
+  }
+  if (job.kind === 'chd_tracks' && typeof p.verified === 'number') {
+    return `${label}: ${p.verified} verified, ${Number(p.unmatched ?? 0)} unmatched, ${Number(p.not_identified ?? 0)} not identified`;
   }
   if (job.kind === 'recompute_1g1r' && typeof p.matched === 'number') {
     return `${label}: ${p.matched} files newly matched`;
   }
   return `${label}: done`;
+}
+
+/** A queued or running job's name, with the image and share done for CHD decoding. */
+export function jobLabel(job: { kind: string; progress: Record<string, unknown> | null }): string {
+  const p = job.progress ?? {};
+  if (job.kind !== 'chd_tracks') {
+    return job.kind;
+  }
+  if (typeof p.file !== 'string' || typeof p.bytes_done !== 'number' || typeof p.bytes_total !== 'number') {
+    return 'CHD tracks';
+  }
+  const share = p.bytes_total > 0 ? Math.floor((p.bytes_done / p.bytes_total) * 100) : 0;
+  return `CHD tracks, ${p.file} ${share}%`;
 }
 
 // After a resync the events that finished jobs may be lost; forget what is known.

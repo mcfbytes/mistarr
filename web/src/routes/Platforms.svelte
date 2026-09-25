@@ -7,6 +7,7 @@
   import { showToast } from '../lib/stores/toast.svelte';
   import SetupHints from '../lib/SetupHints.svelte';
   import PlatformArt from '../lib/PlatformArt.svelte';
+  import UnidentifiedList from '../lib/UnidentifiedList.svelte';
   import type { PlatformCounts } from '../lib/types';
 
   onMount(() => {
@@ -79,6 +80,9 @@
         <div class="banner"><PlatformArt id={platform.id} kind={platform.kind} /></div>
         <h2><a href={platformUrl(platform.id)}>{platform.name}</a></h2>
         <p class="muted">{summarize(platform.counts)}</p>
+        {#if platform.counts.unidentified_files > 0}
+          <UnidentifiedList platformId={platform.id} count={platform.counts.unidentified_files} />
+        {/if}
         <div class="actions">
           <button onclick={() => scan(platform.id)} disabled={scanning[platform.id]}>Scan</button>
           <button onclick={() => setEnabled(platform.id, false)}>Disable</button>

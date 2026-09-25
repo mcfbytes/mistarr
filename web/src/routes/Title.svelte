@@ -7,6 +7,7 @@
   import { findPlatform, loadPlatforms, platformsLoaded } from '../lib/stores/platforms.svelte';
   import { canPlay, launchBlocker } from '../lib/launch';
   import { availabilityLine } from '../lib/availability';
+  import { chdMemberLabel } from '../lib/unidentified';
 
   interface Props {
     titleId: number;
@@ -158,7 +159,8 @@
             <td>{variant.flags.join(', ') || '—'}</td>
             <td>
               {#each variant.roms as rom (rom.id)}
-                <div>{rom.file_state ?? 'missing'}</div>
+                {@const member = rom.file_path ? chdMemberLabel(rom.file_path) : null}
+                <div>{rom.file_state ?? 'missing'}{#if member}<span class="muted"> ({member})</span>{/if}</div>
               {/each}
             </td>
             <td class="sources">

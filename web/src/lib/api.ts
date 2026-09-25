@@ -14,6 +14,7 @@ import type {
   SettingsPatch,
   Source,
   SourceFile,
+  UnidentifiedFile,
   SseEvent,
   SystemStatus,
   TitleDetail,
@@ -128,6 +129,8 @@ export const api = {
     request('/system/settings', { method: 'PUT', body: JSON.stringify(patch) }),
 
   platforms: (): Promise<Paged<Platform>> => request('/platforms'),
+  unidentified: (id: string, offset: number, limit: number): Promise<Paged<UnidentifiedFile>> =>
+    request(`/platforms/${id}/unidentified${query({ offset, limit })}`),
   setPlatform: (id: string, enabled: boolean): Promise<Platform> =>
     request(`/platforms/${id}`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
   bindPlatformDat: (id: string, datVersionId: number): Promise<Binding> =>

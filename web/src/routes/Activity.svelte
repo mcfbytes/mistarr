@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getDownloads, getImports, loadDownloads, loadImports, patchDownload } from '../lib/stores/downloads.svelte';
-  import { getJobs, getRecentJobs, jobOutcome, loadJobs, watchRecent } from '../lib/stores/jobs.svelte';
+  import { getJobs, getRecentJobs, jobLabel, jobOutcome, loadJobs, watchRecent } from '../lib/stores/jobs.svelte';
   import { findPlatform, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
@@ -81,7 +81,7 @@
   <h2>Jobs</h2>
   {#each jobs as job (job.id)}
     <div class="card row head">
-      <strong>{job.kind}</strong>
+      <strong>{jobLabel(job)}</strong>
       <span class="muted">{job.state}, {job.lane} lane</span>
       {#if job.reason}<span class="muted">{job.reason}</span>{/if}
     </div>
