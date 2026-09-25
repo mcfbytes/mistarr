@@ -97,10 +97,8 @@ function query(params: Record<string, string | number | boolean | undefined>): s
   return s ? `?${s}` : '';
 }
 
-export interface Uploaded {
-  file: string;
-  job_id: number;
-}
+/** An upload's answer: the file as the incoming list shows it; see docs/API.md "Upload answers". */
+export type Uploaded = IncomingFile;
 
 export interface Binding {
   dat_version_id: number;
@@ -281,7 +279,7 @@ export class EventSubscriber {
         } else if (line.startsWith('data:')) {
           dataLines.push(line.slice(5).trim());
         } else if (line.startsWith('id:')) {
-          // Ids are opaque `<epoch>-<seq>` strings; only `resync` and `status` omit one.
+          // Ids are opaque `<epoch>-<seq>` strings; `resync`, `status` and live progress omit one.
           id = line.slice(3).trim();
         }
       }

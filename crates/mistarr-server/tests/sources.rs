@@ -579,3 +579,75 @@ async fn unstarted_magnets_keep_the_slow_cadence() {
     assert_eq!(only_source(&b).await["client_id"], Value::Null);
     b.running.shutdown().await.expect("shutdown");
 }
+
+/// Holds the writer in one open transaction for `hold`, as a DAT apply does, and
+/// returns once it is held.
+fn hold_writer(b: &Booted, hold: Duration) -> std::thread::JoinHandle<()> {
+    let db = b.running.app.db.clone();
+    let (held, is_held) = std::sync::mpsc::channel();
+    let holder = std::thread::spawn(move || {
+        db.write_blocking(|c| {
+            let tx = c.transaction()?;
+            mistarr_server::db::settings::set(&tx, "test.held", "1")?;
+            let _ = held.send(());
+            std::thread::sleep(hold);
+            mistarr_server::db::commit(tx)
+        })
+        .expect("held write");
+    });
+    is_held.recv().expect("writer held");
+    holder
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn uploads_answer_promptly_while_the_writer_is_held() {
+    let b = boot().await;
+    seed_catalog(&b);
+    let multipart = "multipart/form-data; boundary=bnd";
+    let part = |name: &str, data: &[u8]| {
+        let mut body = format!(
+            "--bnd\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\n\r\n"
+        )
+        .into_bytes();
+        body.extend_from_slice(data);
+        body.extend_from_slice(b"\r\n--bnd--\r\n");
+        body
+    };
+    let torrent_body = part("held.torrent", &matching_set("Held Set"));
+    let dat_body = part(
+        "held.dat",
+        b"<datafile><header><name>Held</name></header></datafile>",
+    );
+    let uri = format!("magnet:?xt=urn:btih:{}&dn=Held%20Magnet", hash(0x6b));
+    let magnet_body = json!({ "magnet": uri }).to_string();
+    let upload = "/api/v1/sources/upload";
+
+    let holder = hold_writer(&b, Duration::from_secs(4));
+    let started = std::time::Instant::now();
+    let t = request_bytes(b.addr(), "POST", upload, multipart, &torrent_body).await;
+    let torrent_took = started.elapsed();
+    let started = std::time::Instant::now();
+    let m = request(b.addr(), "POST", upload, &[], Some(&magnet_body)).await;
+    let magnet_took = started.elapsed();
+    let started = std::time::Instant::now();
+    let d = request_bytes(
+        b.addr(),
+        "POST",
+        "/api/v1/dats/upload",
+        multipart,
+        &dat_body,
+    )
+    .await;
+    let dat_took = started.elapsed();
+    eprintln!("while held: torrent {torrent_took:?}, magnet {magnet_took:?}, dat {dat_took:?}");
+    for (r, took) in [(&t, torrent_took), (&m, magnet_took), (&d, dat_took)] {
+        assert_eq!(r.status, 202, "{}", r.body);
+        assert!(took < Duration::from_secs(1), "answered in {took:?}");
+    }
+    holder.join().expect("holder");
+    eventually("both uploaded sources", || async {
+        sources(&b).await.len() == 2
+    })
+    .await;
+    b.running.shutdown().await.expect("shutdown");
+}

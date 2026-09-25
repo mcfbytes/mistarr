@@ -606,6 +606,41 @@ async fn malformed_files_are_rejected_and_uploads_are_imported() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dat_import_reports_its_phases_live() {
+    let booted = boot().await;
+    let addr = booted.addr();
+    let mut events = booted.running.app.events.subscribe(None).live;
+    let r = upload(addr, "gb.dat", gb_dat("1", &quest_games()).as_bytes()).await;
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert!(r.json()["job_id"].is_number(), "{}", r.body);
+    let mut phases: Vec<String> = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let e = tokio::time::timeout_at(deadline, events.recv())
+            .await
+            .expect("DAT loaded in time")
+            .expect("event");
+        if e.kind == EventKind::DatLoaded {
+            break;
+        }
+        let body: Value = serde_json::from_str(&e.data).expect("json");
+        let Some(phase) = body["progress"]["phase"].as_str() else {
+            continue;
+        };
+        assert_eq!(e.seq, 0, "live progress is transient");
+        assert_eq!(body["detail"], "gb.dat");
+        if phase == "reading" {
+            assert!(body["progress"]["bytes_total"].as_u64() > Some(0), "{body}");
+        }
+        if phases.last().map(String::as_str) != Some(phase) {
+            phases.push(phase.to_owned());
+        }
+    }
+    assert_eq!(phases, ["reading", "storing", "picking", "refreshing"]);
+    booted.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_file_whose_import_failed_is_imported_again() {
     let booted = boot().await;
     let addr = booted.addr();

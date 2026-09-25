@@ -5,6 +5,9 @@
   import { addUpload, dismissUpload, getUploads } from './stores/uploads.svelte';
   import { getFinishedJob, getJobs } from './stores/jobs.svelte';
   import { showToast } from './stores/toast.svelte';
+  import { describeProgress, incomingStatus, jobStatus, type Shown } from './status';
+  import StatusPill from './StatusPill.svelte';
+  import ProgressBar from './ProgressBar.svelte';
   import type { IncomingFile } from './types';
 
   /**
@@ -28,44 +31,36 @@
   const uploads = $derived(getUploads(which).filter((u) => !pendingNames.has(u.file)));
   const canManage = $derived(manage && which === 'dats');
 
-  function progressText(p: Record<string, unknown> | null): string {
-    if (!p) {
-      return '';
-    }
-    const parts: string[] = [];
-    if (typeof p.members === 'number' && typeof p.done === 'number') {
-      parts.push(`${p.done} of ${p.members} files`);
-    }
-    if (typeof p.games === 'number') {
-      parts.push(`${p.games} games`);
-    }
-    return parts.join(', ');
+  function gamesText(p: Record<string, unknown> | null): string {
+    return typeof p?.games === 'number' ? `, ${p.games} games` : '';
   }
 
-  function stateText(f: IncomingFile): string {
-    if (f.state === 'importing') {
-      return 'Importing';
-    }
-    return f.state === 'rejected' ? 'Rejected' : 'Waiting';
+  /** A running file's progress: the job store's live value, else the list's. */
+  function progressOf(f: IncomingFile): Record<string, unknown> | null {
+    const job = f.job_id === null ? undefined : getJobs().find((j) => j.id === f.job_id);
+    return job?.progress ?? f.progress;
   }
 
-  function uploadOutcome(jobId: number, stale: boolean): { text: string; kind: string } {
-    const done = getFinishedJob(jobId);
+  function uploadOutcome(jobId: number | null, reason: string | null, stale: boolean): { shown: Shown; text: string } {
+    const done = jobId === null ? undefined : getFinishedJob(jobId);
+    if (done?.state === 'done' && typeof done.progress?.rejected === 'string') {
+      return { shown: { status: 'failed', label: 'Rejected' }, text: done.progress.rejected };
+    }
     if (done?.state === 'done') {
-      const games = progressText(done.progress);
-      return { text: which === 'dats' ? `Loaded${games ? `, ${games}` : ''}` : 'Added', kind: 'ok' };
+      const text = which === 'dats' ? `Loaded${gamesText(done.progress)}` : 'Added';
+      return { shown: { status: 'done', label: which === 'dats' ? 'Loaded' : 'Added' }, text };
     }
     if (done?.state === 'failed') {
-      return { text: 'Failed; see Activity for the reason', kind: 'error' };
+      return { shown: { status: 'failed', label: 'Failed' }, text: 'See Activity for the reason' };
     }
-    const running = getJobs().find((j) => j.id === jobId);
-    if (running) {
-      return { text: running.reason ?? `Import ${running.state}`, kind: 'muted' };
+    const open = jobId === null ? undefined : getJobs().find((j) => j.id === jobId);
+    if (open) {
+      return { shown: jobStatus(open), text: open.reason ?? '' };
     }
     if (stale) {
-      return { text: 'Finished; the lists below show the result', kind: 'muted' };
+      return { shown: { status: 'done', label: 'Finished' }, text: 'The lists below show the result' };
     }
-    return { text: 'Uploaded, waiting for the import to start', kind: 'muted' };
+    return { shown: { status: 'waiting', label: 'Received' }, text: reason ?? 'Waiting for the import to start' };
   }
 
   function setBusy(file: string, on: boolean): void {
@@ -100,11 +95,12 @@
     setBusy(f.file, true);
     try {
       if (isMock) {
-        patchIncoming(which, f.file, { ...f, state: 'waiting', reason: 'Queued.' });
+        patchIncoming(which, f.file, { ...f, state: 'waiting', reason: 'Queued.', job_id: 99 });
       } else {
         const up = await api.retryRejectedDat(f.file);
-        addUpload({ kind: which, file: up.file, jobId: up.job_id });
-        patchIncoming(which, f.file, { ...f, file: up.file, state: 'waiting', reason: 'Queued.', job_id: up.job_id });
+        addUpload({ kind: which, file: up.file, jobId: up.job_id, reason: up.reason });
+        patchIncoming(which, f.file, null);
+        patchIncoming(which, up.file, up);
         scheduleIncoming(which);
       }
       announcement = `${f.file} queued to load again.`;
@@ -145,10 +141,11 @@
   bind:this={list}
 >
   {#each files as f (f.file)}
+    {@const shown = incomingStatus(f)}
     <li class:rejected={f.state === 'rejected'}>
       <span class="name">{f.file}</span>
+      <StatusPill {...shown} />
       {#if f.state === 'rejected'}
-        <span class="error state">Rejected</span>
         {#if f.reason}<p class="reason">{f.reason}</p>{/if}
         {#if canManage}
           <span class="actions">
@@ -183,20 +180,23 @@
             {/if}
           </span>
         {/if}
-      {:else}
-        <span class="muted">
-          {stateText(f)}{f.reason ? `: ${f.reason}` : ''}
-          {#if f.state === 'importing' && f.progress}({progressText(f.progress)}){/if}
-        </span>
+      {:else if f.state === 'importing'}
+        {@const view = describeProgress(which === 'dats' ? 'dat_import' : 'source_import', progressOf(f))}
+        <div class="progress-row">
+          <ProgressBar view={view ?? { fraction: null, text: '' }} label={`${f.file} import progress`} />
+        </div>
+      {:else if f.reason}
+        <span class="muted why">{f.reason}</span>
       {/if}
     </li>
   {/each}
-  {#each uploads as u (u.jobId)}
-    {@const outcome = uploadOutcome(u.jobId, u.stale ?? false)}
+  {#each uploads as u (u.file)}
+    {@const outcome = uploadOutcome(u.jobId, u.reason, u.stale ?? false)}
     <li>
       <span class="name">{u.file}</span>
-      <span class={outcome.kind}>{outcome.text}</span>
-      <button type="button" class="link" aria-label={`Dismiss ${u.file}`} onclick={() => dismissUpload(u.jobId)}
+      <StatusPill {...outcome.shown} />
+      {#if outcome.text}<span class="muted why">{outcome.text}</span>{/if}
+      <button type="button" class="link" aria-label={`Dismiss ${u.file}`} onclick={() => dismissUpload(which, u.file)}
         >Dismiss</button
       >
     </li>
@@ -232,10 +232,6 @@
     font-weight: 600;
   }
 
-  .state {
-    font-weight: 600;
-  }
-
   .reason {
     flex-basis: 100%;
     margin: 0.2em 0;
@@ -261,12 +257,13 @@
     color: var(--danger);
   }
 
-  .error {
-    color: var(--danger);
+  .why {
+    font-size: 0.9em;
   }
 
-  .ok {
-    color: var(--ok);
+  .progress-row {
+    flex-basis: 100%;
+    max-width: 32rem;
   }
 
   .link {

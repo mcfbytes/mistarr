@@ -197,6 +197,7 @@ fn request() -> Request {
         now: 2,
         stop: watch::channel(false).1,
         gate: watch::channel(GateState::default()).1,
+        meter: None,
     }
 }
 

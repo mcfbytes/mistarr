@@ -75,6 +75,7 @@ pub fn options_in(dir: &Path) -> Options {
         transmission_init: dir.join("init.d/S92transmission"),
         client_search_path: Some(dir.join("bin").into_os_string()),
         client_start_wait: Duration::ZERO,
+        ionice: None,
     }
 }
 
