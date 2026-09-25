@@ -26,7 +26,7 @@ use crate::app::AppState;
 use crate::config::PrefsConfig;
 use crate::db::dat_stage::{self, StagedGame, StagedRom};
 use crate::db::dats::{self, DatVersionId, NewVersion};
-use crate::db::files::{self, FileRow, FileState};
+use crate::db::files::{self, FileId, FileRow};
 use crate::db::jobs::{JobId, JobState};
 use crate::db::titles;
 use crate::db::Db;
@@ -804,47 +804,73 @@ pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
         .unwrap_or(candidate)
 }
 
-/// Files matched again per transaction by [`rematch_chunk`].
+/// Files matched again per transaction by [`rematch_chunk`] and [`match_unmatched_chunk`].
 const REMATCH_CHUNK: u32 = 256;
 
 /// Matches up to [`REMATCH_CHUNK`] files of retired roms on `platform` again, by their
-/// stored hashes against live roms only, and returns how many it took. A cartridge file
-/// takes the state a scan would give it; a disc track is classified again with the other
-/// tracks of its directory by the scan's all-or-nothing rule. A file no live rom lists
-/// becomes `unverified`.
+/// stored hashes against live roms only, and returns how many it took. A file no live
+/// rom lists becomes `unverified`; see [`set_matches`] for the states.
 ///
 /// # Errors
 ///
 /// [`Error::Db`] on SQLite failure.
 pub(crate) fn rematch_chunk(conn: &Connection, platform: &PlatformId) -> Result<usize> {
+    let orphans = files::retired_matches(conn, platform, REMATCH_CHUNK)?;
+    set_matches(conn, platform, &orphans)?;
+    Ok(orphans.len())
+}
+
+/// One page of [`match_unmatched_chunk`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UnmatchedChunk {
+    /// Files read; fewer than [`REMATCH_CHUNK`] means the last page.
+    pub(crate) read: usize,
+    /// The highest id read, the cursor for the next page.
+    pub(crate) last: FileId,
+    /// Files that went from no rom to a rom.
+    pub(crate) matched: usize,
+}
+
+/// Matches up to [`REMATCH_CHUNK`] unmatched files on `platform` with an id above
+/// `after` against live roms by their stored hashes, without reading the files. Paging
+/// by id reads a file that stays unmatched once per run.
+///
+/// # Errors
+///
+/// [`Error::Db`] on SQLite failure.
+pub(crate) fn match_unmatched_chunk(
+    conn: &Connection,
+    platform: &PlatformId,
+    after: FileId,
+) -> Result<UnmatchedChunk> {
+    let rows = files::unmatched_after(conn, platform, after, REMATCH_CHUNK)?;
+    let matched = set_matches(conn, platform, &rows)?;
+    Ok(UnmatchedChunk {
+        read: rows.len(),
+        last: rows.last().map_or(after, |f| f.id),
+        matched,
+    })
+}
+
+/// Matches `rows` again by their stored hashes against live roms and returns how many
+/// went from no rom to a rom. A cartridge file takes the state a scan would give it; a
+/// disc track is classified again with the other tracks of its directory by the scan's
+/// all-or-nothing rule.
+fn set_matches(conn: &Connection, platform: &PlatformId, rows: &[FileRow]) -> Result<usize> {
     let disc = mistarr_mister::platforms::by_id(&platform.0)
         .is_some_and(|p| p.kind == mistarr_mister::Kind::Disc);
-    let orphans = files::retired_matches(conn, platform, REMATCH_CHUNK)?;
+    let mut matched = 0;
     let mut units: Vec<&str> = Vec::new();
-    for f in &orphans {
+    for f in rows {
         if let Some((dir, _)) = f.rel_path.rsplit_once('/').filter(|_| disc) {
             if !units.contains(&dir) {
                 units.push(dir);
             }
             continue;
         }
-        let (rom, state) = match live_match(conn, platform, f)? {
-            None => (None, FileState::Unverified),
-            Some(m) => {
-                let own = f
-                    .rel_path
-                    .rsplit_once('#')
-                    .map_or(f.rel_path.as_str(), |(_, m)| m);
-                let state = if m.status == "baddump" {
-                    FileState::Bad
-                } else if files::basename(&m.name) == files::basename(own) {
-                    FileState::Verified
-                } else {
-                    FileState::Misnamed
-                };
-                (Some(m.rom_id), state)
-            }
-        };
+        let m = scan::stored_match(conn, platform, f)?;
+        let (rom, state) = scan::cartridge_state(m.as_ref(), scan::own_name(&f.rel_path));
+        matched += usize::from(f.rom_id.is_none() && rom.is_some());
         files::set_match(conn, f.id, rom, state)?;
     }
     for dir in units {
@@ -857,34 +883,15 @@ pub(crate) fn rematch_chunk(conn: &Connection, platform: &PlatformId) -> Result<
                 size: f.size,
                 mtime: f.mtime,
                 hashes: stored_hashes(f),
-                matched: live_match(conn, platform, f)?,
+                matched: scan::stored_match(conn, platform, f)?,
             });
         }
         for (f, t) in rows.iter().zip(scan::classify_disc_tracks(conn, tracks)?) {
+            matched += usize::from(f.rom_id.is_none() && t.rom_id.is_some());
             files::set_match(conn, f.id, t.rom_id, t.state)?;
         }
     }
-    Ok(orphans.len())
-}
-
-/// The live rom a file's stored hashes match, if it has any hash.
-fn live_match(
-    conn: &Connection,
-    platform: &PlatformId,
-    f: &FileRow,
-) -> Result<Option<files::RomMatch>> {
-    if f.crc32.is_none() && f.md5.is_none() && f.sha1.is_none() {
-        return Ok(None);
-    }
-    let hash = |h: &Option<String>| h.clone().unwrap_or_default();
-    files::match_live_rom(
-        conn,
-        platform,
-        &hash(&f.sha1),
-        &hash(&f.md5),
-        &hash(&f.crc32),
-        f.size,
-    )
+    Ok(matched)
 }
 
 fn stored_hashes(f: &FileRow) -> Option<mistarr_core::HashSet> {
@@ -896,8 +903,9 @@ fn stored_hashes(f: &FileRow) -> Option<mistarr_core::HashSet> {
     })
 }
 
-/// Matches files of retired roms again, recomputes the 1G1R picks of one platform
-/// under the current preferences, then queues a re-map of its bound sources.
+/// Matches files of retired roms again, then, outside arcade, the platform's unmatched
+/// files; recomputes the 1G1R picks of one platform under the current preferences, then
+/// queues a re-map of its bound sources.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recompute {
     platform: PlatformId,
@@ -963,6 +971,28 @@ impl Job for Recompute {
                 break;
             }
         }
+        let mut after = FileId(0);
+        let mut matched = 0;
+        // Arcade files are matched by the arcade catalogue's presence pass.
+        while !scan::is_arcade(&self.platform) {
+            ctx.checkpoint().await?;
+            let platform = self.platform.clone();
+            let chunk = ctx
+                .app
+                .db
+                .write(move |c| {
+                    let tx = c.transaction()?;
+                    let chunk = match_unmatched_chunk(&tx, &platform, after)?;
+                    crate::db::commit(tx)?;
+                    Ok(chunk)
+                })
+                .await?;
+            matched += chunk.matched;
+            after = chunk.last;
+            if chunk.read < REMATCH_CHUNK as usize {
+                break;
+            }
+        }
         ctx.checkpoint().await?;
         let prefs = prefs(&ctx.app.config().prefs);
         let platform = self.platform.0.clone();
@@ -976,7 +1006,7 @@ impl Job for Recompute {
                 Ok(r)
             })
             .await?;
-        ctx.progress(json!({ "groups": r.groups, "picks": r.picks }))
+        ctx.progress(json!({ "groups": r.groups, "picks": r.picks, "matched": matched }))
             .await?;
         // Groups are settled now; a re-map that ran earlier stored a stamp without them.
         super::remap::enqueue(&ctx.app, Some(vec![self.platform.clone()])).await;

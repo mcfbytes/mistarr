@@ -392,6 +392,42 @@ pub fn open_rows(conn: &Connection) -> Result<Vec<JobRow>> {
     Ok(rows)
 }
 
+/// The kinds `/system/jobs/recent` lists: work a user starts or waits on.
+pub const RECENT_KINDS: [&str; 5] = [
+    "scan",
+    "arcade_catalog",
+    "dat_import",
+    "recompute_1g1r",
+    "import",
+];
+
+/// Up to `limit` finished jobs of [`RECENT_KINDS`], most recently updated first.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure or unparseable JSON.
+///
+/// ```
+/// use mistarr_server::db::jobs;
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let id = jobs::insert(&conn, "scan", &serde_json::json!({}), "heavy", 1).unwrap();
+/// assert!(jobs::recent_finished(&conn, 5).unwrap().is_empty());
+/// jobs::set_state(&conn, id, jobs::JobState::Done, 2).unwrap();
+/// assert_eq!(jobs::recent_finished(&conn, 5).unwrap()[0].id, id);
+/// ```
+pub fn recent_finished(conn: &Connection, limit: u32) -> Result<Vec<JobRow>> {
+    let kinds = RECENT_KINDS.map(|k| format!("'{k}'")).join(", ");
+    let mut stmt = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM jobs WHERE state IN ('done', 'failed') AND kind IN ({kinds})
+         ORDER BY updated_at DESC, id DESC LIMIT ?1"
+    ))?;
+    let rows = stmt
+        .query_map([limit], from_row)?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
 /// Open jobs on `lane`, oldest first.
 ///
 /// # Errors

@@ -143,8 +143,10 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    across the family's versions, and entries not present in the new DAT are
    marked `retired`, never deleted. The platform's recompute job is queued;
    it matches files of roms that retired again against the live roms by
-   their stored hashes, in chunks, or marks them `unverified`, recomputes the
-   picks and then queues a re-map of the platform's bound sources.
+   their stored hashes, in chunks, or marks them `unverified`; then, outside
+   arcade, it matches the platform's unmatched files by their stored hashes
+   (VERIFICATION.md "Matching stored hashes"); it recomputes the picks and
+   then queues a re-map of the platform's bound sources.
 4. Parent/clone data is read from `cloneof` attributes when present. When
    absent, clone groups are inferred by normalising the name (strip region,
    revision, language and flag tags) so 1G1R still works with plain DATs.
@@ -169,15 +171,21 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    while a core is running; the timer goes through the same heavy lane as
    the others, so it waits for the gate too.
 2. For each file, compare size and mtime with `files`. Unchanged files are
-   skipped. New or changed files are hashed in one streaming pass with the
-   platform's header rule. Zip members are hashed through the decompressor,
+   not hashed again. An unchanged file with no rom is matched from its
+   stored hashes (VERIFICATION.md "Matching stored hashes"), and an unchanged
+   zip member stored with its CRC32 alone is hashed once a rom of that CRC32
+   and size exists; other unchanged files are skipped. New or changed files
+   are hashed in one streaming pass with the platform's header rule. Zip members are hashed through the decompressor,
    and the zip central-directory CRC is used as a pre-check to skip hashing
    members that cannot match anything.
 3. Match by SHA1, then MD5, then CRC32 plus size. Record `verified`,
    `unverified` (no DAT match) or `misnamed` (match but wrong filename).
 4. Rows the walk did not see are deleted at the end, except under a
    directory that exists but could not be listed, whose rows are kept.
-5. Scans are resumable: hashed rows are written 256 at a time and the
+5. The job's final progress is `{ platform_id, done, total, matched,
+   unmatched }`: the platform's files with a rom state (`verified`,
+   `misnamed`, `bad`) and those `unverified` once the scan ends.
+6. Scans are resumable: hashed rows are written 256 at a time and the
    finished directories at most every 2 s. A directory not yet recorded as
    finished is walked again after a restart, and its unchanged files are not
    hashed again.

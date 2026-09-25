@@ -74,7 +74,7 @@ pub struct FileRow {
     /// Relative to `games/`, including the top directory name; a zip member is
     /// `NES/a.zip#b.nes`.
     pub rel_path: String,
-    /// Size in bytes after any header rule was applied.
+    /// Size in bytes on disk, or a zip member's uncompressed size, header included.
     pub size: i64,
     /// Filesystem mtime, Unix seconds.
     pub mtime: i64,
@@ -101,7 +101,7 @@ pub struct NewFile {
     /// Relative to `games/`, including the top directory name; a zip member
     /// is `a.zip#b.nes`.
     pub rel_path: String,
-    /// Size in bytes after any header rule was applied.
+    /// Size in bytes on disk, or a zip member's uncompressed size, header included.
     pub size: i64,
     /// Filesystem mtime, Unix seconds.
     pub mtime: i64,
@@ -623,6 +623,38 @@ pub fn retired_matches(
              ORDER BY f.id LIMIT ?2"
         ))?
         .query_map(params![platform_id.0, limit], from_row)?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Up to `limit` files on `platform_id` with an id above `after` that no rom matches:
+/// `rom_id` NULL, `unverified`, and at least one stored hash. Ordered by id, so a caller
+/// pages with the last id it saw and a file that stays unmatched is read once.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::files::{unmatched_after, FileId};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let nes = mistarr_core::PlatformId("nes".into());
+/// assert!(unmatched_after(&conn, &nes, FileId(0), 10).unwrap().is_empty());
+/// ```
+pub fn unmatched_after(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    after: FileId,
+    limit: u32,
+) -> Result<Vec<FileRow>> {
+    Ok(conn
+        .prepare_cached(&format!(
+            "SELECT {COLUMNS} FROM files
+             WHERE platform_id = ?1 AND state = 'unverified' AND rom_id IS NULL AND id > ?2
+               AND (sha1 IS NOT NULL OR md5 IS NOT NULL OR crc32 IS NOT NULL)
+             ORDER BY id LIMIT ?3"
+        ))?
+        .query_map(params![platform_id.0, after.0, limit], from_row)?
         .collect::<rusqlite::Result<_>>()?)
 }
 

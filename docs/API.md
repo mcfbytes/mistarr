@@ -34,6 +34,7 @@ under `/api` return 404 JSON.
 | POST | `/system/cores` | Detect installed cores again, for the wizard's detected-cores step. |
 | POST | `/system/pause` / `/system/resume` | Manual scheduler gate, overrides CORENAME until CORENAME next changes; `pause` holds the heavy and background lanes; `resume` ("Run now") also ends once the heavy queue drains. Returns the status body. |
 | GET | `/system/jobs` | Queued, running and paused jobs with progress. |
+| GET | `/system/jobs/recent` | The last 10 finished scans, arcade catalogues, DAT imports, recomputes and imports. |
 | POST | `/system/client/start` | Start an installed client that is not running: `{ kind }`, `transmission` or `rtorrent`. Returns the status body. |
 | GET | `/system/settings` / PUT | The config subset that is editable at runtime. |
 
@@ -93,7 +94,12 @@ created_at, updated_at }`, where `lane` is `heavy`, `background` or `light`
 (ARCHITECTURE.md "Pausing for the core"), `state` is `queued`, `running` or
 `paused`, and `reason` says why a job on a held lane is not running, such as
 `"Paused while NES is running"` or `"Paused by the user"`, else `null`. A
-failed job's `progress` is `{ error }`.
+failed job's `progress` is `{ error }`. `/system/jobs/recent` answers `{
+items, total }` in the same item shape, newest first, with `state` `done` or
+`failed` and `reason` `null`. A finished scan's `progress` is `{ platform_id,
+done, total, matched, unmatched }` (ARCHITECTURE.md "Library scan"); a
+recompute's is `{ groups, picks, matched }`, `matched` counting files it
+gave a rom.
 
 `/system/settings` body: `{ client, limits, prefs }` with the fields of the
 same sections of `mistarr.toml`. PUT takes any subset of the three sections;

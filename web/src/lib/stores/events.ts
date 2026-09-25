@@ -33,6 +33,20 @@ async function resync(): Promise<void> {
 }
 
 const FILE_CHANGED_DEBOUNCE_MS = 2000;
+// Jobs whose end can move the platform counts and the browse table.
+const MATCHING_KINDS = new Set(['scan', 'recompute_1g1r', 'arcade_catalog']);
+let platformsTimer: ReturnType<typeof setTimeout> | null = null;
+
+function scheduleReloadPlatforms(): void {
+  if (platformsTimer) {
+    return;
+  }
+  platformsTimer = setTimeout(() => {
+    platformsTimer = null;
+    void loadPlatforms().catch(() => undefined);
+    void reloadTitles();
+  }, 500);
+}
 let fileChangeTimer: ReturnType<typeof setTimeout> | null = null;
 let fileChangePending = false;
 
@@ -70,6 +84,9 @@ function handle(event: SseEvent): void {
       break;
     case 'job.progress':
       applyJobProgress(event.data.id, event.data.kind, event.data.state, event.data.progress);
+      if ((event.data.state === 'done' || event.data.state === 'failed') && MATCHING_KINDS.has(event.data.kind)) {
+        scheduleReloadPlatforms();
+      }
       if (event.data.kind === 'dat_import') {
         scheduleIncoming('dats');
       } else if (event.data.kind === 'source_import') {

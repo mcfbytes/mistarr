@@ -40,7 +40,9 @@ holds scans and imports, or the user's Pause, which also holds DAT and source
 imports), which ones, and a Run now button that calls `POST /system/resume`.
 
 **Platforms** (`/`). One card per platform with core present, counts, and a
-scan button. Platforms whose core is absent are in a collapsed section. While
+scan button. Scan shows a toast when the scan is queued and another with its
+outcome when it finishes, such as "Scan of Nintendo 64: 410 matched, 2
+unmatched"; counts reload when a scan or recompute ends. Platforms whose core is absent are in a collapsed section. While
 the wizard reports a missing DAT, client or source, a "Setup not finished"
 card lists what is missing and links to the wizard.
 
@@ -68,8 +70,9 @@ turned off in settings, mistarr is not running on a MiSTer, or no core for
 the platform is installed.
 
 **Activity** (`/activity`). Downloads with per-file progress bars, imports
-log, and queued and running jobs with their lane and hold reason. Live over
-SSE.
+log, queued and running jobs with their lane and hold reason, and a Recent
+list of the last finished jobs from `/system/jobs/recent`, one line each with
+its outcome and time. Live over SSE.
 
 **Sources** (`/sources`). Table of sources: name, platform, state, file count,
 matched count, seed policy, client status. Bind and disable actions.

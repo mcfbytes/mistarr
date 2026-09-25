@@ -156,7 +156,8 @@ matches the files of retired roms again against live roms, by their stored
 hashes and in chunks of 256 per transaction: a cartridge file takes the
 state a scan would give it, a disc track is classified again with the other
 tracks of its directory under the all-or-nothing rule of "For disc games",
-and a file no live rom lists becomes `unverified`. Loads queue the same job.
+and a file no live rom lists becomes `unverified`. Loads queue the same job,
+which then matches the platform's unmatched files as below.
 
 Two live families on a platform may list the same game. Each title keeps its
 own DAT's clone parent in `titles.parent_id`; its effective group is
@@ -250,6 +251,31 @@ A file may match roms in more than one DAT version (an old and a new one).
 Prefer the non-superseded version. A file may match roms in more than one
 title (identical dumps under different names); record the first by title id
 and note the alternates in the file's detail.
+
+## Matching stored hashes
+
+A file scanned before its platform had a DAT, or before the DAT listing it
+loaded, keeps its hashes with `rom_id` NULL and state `unverified`. Two paths
+match such files without reading them again:
+
+- The recompute job, after every load, bind or removal of a DAT and every
+  change of preferences, pages through the platform's files with `rom_id`
+  NULL, state `unverified` and at least one stored hash, 256 per transaction
+  in id order, so a file that stays unmatched is read once per run. Arcade is
+  left out; its presence pass and md5 check decide its files.
+- A scan that finds such a file unchanged matches it from its stored hashes
+  instead of skipping it. A file with a rom, or with no stored hash, is
+  skipped as before.
+
+Both use the live roms only and the matching order above. A cartridge file
+or zip member takes `verified`, `misnamed` or `bad` as a scan would give it;
+a disc track is classified with the other tracks of its directory under the
+all-or-nothing rule. Stored hashes are of the content after the header rule
+named in `files.header_rule`, as the DAT's hashes are: a byte-swapped N64
+image is stored as its big-endian form and a headered NES file without its
+header. `files.size` is the size on disk, so the CRC32-plus-size tier also
+tries that size less the header the rule strips (for `smc`, only when the
+size is `n*1024 + 512`).
 
 ## Pre-download matching
 

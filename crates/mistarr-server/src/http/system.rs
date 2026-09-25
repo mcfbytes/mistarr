@@ -37,6 +37,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route("/system/pause", post(pause))
         .route("/system/resume", post(resume))
         .route("/system/jobs", get(list_jobs))
+        .route("/system/jobs/recent", get(recent_jobs))
         .route("/system/client/start", post(start_client))
         .route("/system/settings", get(get_settings).put(put_settings))
 }
@@ -300,6 +301,22 @@ async fn list_jobs(
             row,
         })
         .collect();
+    Ok(Json(Page { items, total }))
+}
+
+/// Finished jobs `/system/jobs/recent` lists.
+const RECENT_JOBS: u32 = 10;
+
+async fn recent_jobs(State(app): State<Arc<AppState>>) -> Result<Json<Page<JobItem>>, ApiError> {
+    let rows = app
+        .db
+        .read(|c| jobs::recent_finished(c, RECENT_JOBS))
+        .await?;
+    let items: Vec<JobItem> = rows
+        .into_iter()
+        .map(|row| JobItem { row, reason: None })
+        .collect();
+    let total = u64::try_from(items.len()).unwrap_or(0);
     Ok(Json(Page { items, total }))
 }
 
