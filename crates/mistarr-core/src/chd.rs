@@ -8,6 +8,7 @@ mod header;
 mod huffman;
 mod layout;
 mod map;
+mod zstd;
 
 use std::io;
 
@@ -30,8 +31,6 @@ pub const MAX_HUNK_BYTES: u32 = 214 * FRAME_BYTES;
 pub const MAX_FRAMES: u64 = 450_000;
 /// Most tracks on a CD.
 pub const MAX_TRACKS: usize = 99;
-/// Largest zstd window accepted, counted in [`decode_budget`].
-pub const ZSTD_MAX_WINDOW: u64 = 8 << 20;
 
 /// Why a CHD cannot be identified by its tracks. Each maps to a stable `files.reason` code.
 #[non_exhaustive]

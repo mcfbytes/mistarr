@@ -221,10 +221,16 @@ map CRC16, or the image fails with `checksum`.
 - LZMA streams have no header and no end marker: properties lc 3, lp 0, pb 2,
   with the unpacked size known. mistarr sets the dictionary to the output
   length, which is at least what chdman used.
-- zstd frames are checked before decoding: a window over 8 MiB, a dictionary,
-  or a content size other than the expected length is `corrupt`. chdman
-  writes single-segment frames with a content size; other encoders write
-  windowed frames without one, and both are read.
+- zstd frames are measured before ruzstd decodes them. A dictionary, a
+  content size other than the expected length, or a window larger than both
+  the expected length rounded up to a power of two and 128 KiB is `corrupt`.
+  Every block is then walked: raw and RLE blocks give their length, and a
+  compressed block its literals plus the match lengths of its sequences,
+  decoded from their FSE tables without running them. A block over 128 KiB
+  or a frame whose blocks do not add up to exactly the expected length is
+  `corrupt`, so a hostile frame never makes ruzstd allocate beyond its
+  window. chdman writes single-segment frames with a content size; other
+  encoders write windowed frames without one, and both are read.
 - FLAC frames are bare, with no stream header: 44.1 kHz, 2 channels, 16-bit.
   `cdfl` uses blocks of `bytes / 4` samples halved until at most 2352, `flac`
   until at most 2048; the subcode of a `cdfl` hunk starts exactly where the
@@ -288,9 +294,10 @@ and arithmetic on file values is checked.
 `decode_budget(header)` bounds the decoder's heap: three hunk buffers and
 the CD scratch, 16 bytes of map per hunk, the compressed map and one type
 byte per hunk while the map is read, and codec state (LZMA dictionary of one
-hunk, an 8 MiB zstd window, an inflater, and a FLAC block of up to 65535
-samples of 8 channels). At the header limits it is under 24 MiB: 450,000
-one-frame hunks come to about 21 MiB, 214-frame hunks to about 13 MiB. A
+hunk, ruzstd's buffer of a window no larger than a hunk rounded up to a
+power of two or 128 KiB, with its block and sequence scratch, an inflater,
+and a FLAC block of up to 65535 samples of 8 channels). At the header limits it is under 24 MiB: 450,000
+one-frame hunks come to about 15 MiB, 214-frame hunks to about 8 MiB. A
 700 MB image in chdman's default 8-frame hunks holds under 1 MiB of buffers
 and map. One image is decoded at a time and nothing is written to disk.
 

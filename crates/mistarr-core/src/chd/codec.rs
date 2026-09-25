@@ -8,7 +8,7 @@ use lzma_rs::decompress::raw::{LzmaDecoder, LzmaParams, LzmaProperties};
 use ruzstd::decoding::{BlockDecodingStrategy, FrameDecoder};
 
 use super::header::FourCc;
-use super::{corrupt, ecc, span, ChdError, FRAME_BYTES, SECTOR_BYTES, ZSTD_MAX_WINDOW};
+use super::{corrupt, ecc, span, zstd, ChdError, FRAME_BYTES, SECTOR_BYTES};
 
 /// A codec this decoder reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,8 +51,9 @@ const SYNC: [u8; 12] = [
 pub(crate) const FLAC_BUFFER: usize = 65_535 * 8 * 4;
 /// Heap an idle inflater holds.
 pub(crate) const INFLATE_STATE: usize = 64 << 10;
-/// Heap ruzstd holds beyond its window: block content and literal buffers.
-pub(crate) const ZSTD_STATE: usize = 256 << 10;
+/// Heap ruzstd holds beyond its output buffer: block content, literals, up to 43,690
+/// sequences of 12 bytes with room to grow, and its tables.
+pub(crate) const ZSTD_STATE: usize = 1280 << 10;
 /// Heap of one lzma-rs decoder's probability tables for lc 3.
 pub(crate) const LZMA_STATE: usize = 16 << 10;
 
@@ -61,7 +62,8 @@ pub(crate) struct Codecs {
     inflate: Decompress,
     lzma: Vec<(usize, LzmaDecoder)>,
     zstd: FrameDecoder,
-    zstd_window: usize,
+    /// Largest window or output length a zstd frame has used, `0` before the first.
+    zstd_extent: usize,
     flac: Vec<i32>,
     /// Base sectors then subcode of one CD hunk.
     scratch: Vec<u8>,
@@ -74,7 +76,7 @@ impl Codecs {
             inflate: Decompress::new(false),
             lzma: Vec::new(),
             zstd: FrameDecoder::new(),
-            zstd_window: 0,
+            zstd_extent: 0,
             flac: Vec::new(),
             scratch: vec![0u8; frames * FRAME],
         }
@@ -83,8 +85,8 @@ impl Codecs {
     /// Heap held by codec state and scratch now.
     pub(crate) fn heap_bytes(&self) -> usize {
         let lzma: usize = self.lzma.iter().map(|(dict, _)| dict + LZMA_STATE).sum();
-        let zstd = if self.zstd_window > 0 {
-            self.zstd_window + ZSTD_STATE
+        let zstd = if self.zstd_extent > 0 {
+            zstd_heap(self.zstd_extent)
         } else {
             0
         };
@@ -158,35 +160,28 @@ impl Codecs {
     }
 
     fn zstd(&mut self, input: &[u8], out: &mut [u8]) -> Result<(), ChdError> {
-        let window = zstd_window(input, out.len() as u64)?;
-        self.zstd_window = self
-            .zstd_window
-            .max(usize::try_from(window).unwrap_or(usize::MAX));
+        let window = zstd::check_frame(input, out.len())?;
+        self.zstd_extent = self.zstd_extent.max(window).max(out.len());
         let mut src = input;
         self.zstd
             .init(&mut src)
             .map_err(|_| corrupt("zstd frame header is invalid"))?;
+        // The frame was measured to decode to exactly `out.len()` bytes.
+        self.zstd
+            .decode_blocks(&mut src, BlockDecodingStrategy::All)
+            .map_err(|_| corrupt("zstd data are invalid"))?;
         let mut filled = 0;
-        loop {
-            self.zstd
-                .decode_blocks(&mut src, BlockDecodingStrategy::UptoBytes(out.len() + 1))
-                .map_err(|_| corrupt("zstd data are invalid"))?;
+        while filled < out.len() {
             let n = self
                 .zstd
                 .read(&mut out[filled..])
                 .map_err(|_| corrupt("zstd data are invalid"))?;
-            filled += n;
-            if self.zstd.can_collect() != 0 {
-                return Err(corrupt("zstd data are longer than the hunk"));
-            }
-            if self.zstd.is_finished() {
+            if n == 0 {
                 break;
             }
-            if n == 0 && src.is_empty() {
-                return Err(corrupt("zstd data end early"));
-            }
+            filled += n;
         }
-        if filled != out.len() {
+        if filled != out.len() || self.zstd.can_collect() != 0 || !self.zstd.is_finished() {
             return Err(corrupt("zstd data have the wrong length"));
         }
         Ok(())
@@ -292,48 +287,10 @@ fn interleave(scratch: &[u8], frames: usize, out: &mut [u8]) {
     }
 }
 
-/// The window a zstd frame asks for, checked against [`ZSTD_MAX_WINDOW`] and the expected
-/// content size `expect` before any decoder state is sized from it.
-pub(crate) fn zstd_window(frame: &[u8], expect: u64) -> Result<u64, ChdError> {
-    let head = span(frame, 0, 5, "the zstd frame header")?;
-    if head[..4] != [0x28, 0xb5, 0x2f, 0xfd] {
-        return Err(corrupt("no zstd frame magic"));
-    }
-    let desc = head[4];
-    let single = desc & 0x20 != 0;
-    if desc & 0x08 != 0 || desc & 0x03 != 0 {
-        return Err(corrupt("zstd frame uses a reserved bit or a dictionary"));
-    }
-    let mut at = 5;
-    let mut window = 0u64;
-    if !single {
-        let wd = *span(frame, at, 1, "the zstd window")?.first().unwrap_or(&0);
-        let base = 1u64 << (10 + u32::from(wd >> 3));
-        window = base + (base / 8) * u64::from(wd & 7);
-        at += 1;
-    }
-    let fcs_len = match desc >> 6 {
-        0 if single => 1,
-        0 => 0,
-        1 => 2,
-        2 => 4,
-        _ => 8,
-    };
-    let fcs = span(frame, at, fcs_len, "the zstd content size")?;
-    let mut size = fcs.iter().rev().fold(0u64, |v, &b| (v << 8) | u64::from(b));
-    if fcs_len == 2 {
-        size += 256;
-    }
-    if fcs_len > 0 && size != expect {
-        return Err(corrupt("zstd content size is not the hunk length"));
-    }
-    if single {
-        window = size;
-    }
-    if window > ZSTD_MAX_WINDOW {
-        return Err(corrupt("zstd window is over 8 MiB"));
-    }
-    Ok(window)
+/// Heap ruzstd may hold for frames whose window and output are at most `extent`: its buffer
+/// reserves the window, and while it grows the old and new buffers are both alive.
+pub(crate) fn zstd_heap(extent: usize) -> usize {
+    3 * extent.max(zstd::MIN_WINDOW_CAP).next_power_of_two() + ZSTD_STATE
 }
 
 #[cfg(test)]
@@ -399,16 +356,18 @@ mod tests {
     }
 
     #[test]
-    fn a_zstd_window_over_8_mib_is_rejected_before_decoding() {
-        // Window descriptor exponent 16: 2^26 = 64 MiB.
-        let frame = [0x28, 0xb5, 0x2f, 0xfd, 0x00, 16 << 3, 0, 0, 0];
-        assert!(zstd_window(&frame, 100).is_err());
-        let ok = [0x28, 0xb5, 0x2f, 0xfd, 0x00, 7 << 3];
-        assert_eq!(zstd_window(&ok, 100).expect("128 KiB"), 128 << 10);
-        let edge = [0x28, 0xb5, 0x2f, 0xfd, 0x00, 13 << 3];
-        assert_eq!(zstd_window(&edge, 100).expect("8 MiB"), 8 << 20);
-        assert!(zstd_window(&[0x28, 0xb5, 0x2f, 0xfd, 0x00, (13 << 3) | 1], 1).is_err());
-        assert!(zstd_window(&[1, 2, 3], 1).is_err());
+    fn zstd_heap_covers_what_decoding_holds() {
+        let data: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let frame = ruzstd::encoding::compress_to_vec(
+            &data[..],
+            ruzstd::encoding::CompressionLevel::Fastest,
+        );
+        let mut c = Codecs::new(1);
+        let mut out = vec![0u8; data.len()];
+        c.decode(Codec::Zstd, &frame, &mut out).expect("zstd");
+        assert_eq!(out, data);
+        assert!(c.heap_bytes() >= zstd_heap(data.len()));
+        assert!(zstd_heap(523_872) < 4 << 20);
     }
 
     #[test]

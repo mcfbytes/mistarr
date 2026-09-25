@@ -9,9 +9,7 @@ use super::codec::{self, Codec, Codecs};
 use super::header::Header;
 use super::layout::{Layout, TrackKind};
 use super::map::{self, MapEntry};
-use super::{
-    corrupt, crc16, fail, ChdError, Unidentifiable, FRAME_BYTES, SECTOR_BYTES, ZSTD_MAX_WINDOW,
-};
+use super::{corrupt, crc16, fail, ChdError, Unidentifiable, FRAME_BYTES, SECTOR_BYTES};
 use crate::hash::Hashers;
 use crate::HashSet;
 
@@ -332,7 +330,7 @@ pub fn decode_budget(h: &Header) -> usize {
         usize::try_from(map::max_map_bytes(h.hunk_count())).unwrap_or(usize::MAX / 64) + hunks
     };
     let lzma = hunk + frames * SECTOR + 2 * codec::LZMA_STATE;
-    let zstd = usize::try_from(ZSTD_MAX_WINDOW).unwrap_or(0) + codec::ZSTD_STATE;
+    let zstd = codec::zstd_heap(hunk);
     let codecs = codec::INFLATE_STATE + lzma + zstd + codec::FLAC_BUFFER;
     buffers + map + transient + codecs
 }
