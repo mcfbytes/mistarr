@@ -448,10 +448,10 @@ fn open_db(
     }
     let path = config.paths.db();
     crate::migrating::clear_stale(&config.paths.data)?;
-    let _progress = match crate::db::migrate::pending(&path)? {
+    let progress = match crate::db::migrate::pending(&path)? {
         Some((from, to)) => {
             tracing::info!(from, to, "migrating the database");
-            crate::migrating::Migrating::begin(&config.paths.data, from, to)
+            crate::migrating::Migrating::begin(&config.paths.data, &path, from, to)
                 .inspect_err(
                     |e| tracing::warn!(error = %e, "cannot write the migration progress file"),
                 )
@@ -459,7 +459,10 @@ fn open_db(
         }
         None => None,
     };
-    let db = Db::open(&path)?;
+    let db = match &progress {
+        Some(m) => Db::open_counting(&path, &m.steps())?,
+        None => Db::open(&path)?,
+    };
     let (stored, unfinished, resolved) = db.write_blocking(prepare_catalog)?;
     let stored = stored.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "ignoring unreadable saved settings; using the config file");
