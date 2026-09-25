@@ -58,7 +58,7 @@ pub async fn list(app: &AppState, dir: &Path, kind: &'static str) -> Result<Vec<
     let open = app.db.read(jobs::open_rows).await?;
     let gate = app.gate.state();
     let dir = dir.to_path_buf();
-    let listed = tokio::task::spawn_blocking(move || {
+    let listed = crate::threads::blocking(crate::threads::label::INCOMING, move || {
         let pending = files_in(&dir);
         let rejected = rejected_in(&dir.join(REJECTED_DIR));
         (dir, pending, rejected)

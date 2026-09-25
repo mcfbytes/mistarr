@@ -62,7 +62,7 @@ pub struct SourceChanged<'a> {
 pub async fn read_bounded(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     use std::io::Read as _;
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    crate::threads::blocking(crate::threads::label::SOURCE_FILE, move || {
         let file = std::fs::File::open(&path)?;
         if file.metadata()?.len() > MAX_SOURCE_BYTES {
             return Ok(None);
@@ -165,7 +165,7 @@ impl Job for SourceImport {
 /// Moves into `loaded/`, or into `rejected/` with `reason`, off the async runtime.
 async fn move_blocking(path: &Path, reason: Option<String>) -> Result<()> {
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || match reason {
+    crate::threads::blocking(crate::threads::label::SOURCE_FILE, move || match reason {
         None => watch::mark_loaded(&path),
         Some(r) => watch::mark_rejected(&path, &r),
     })
@@ -632,7 +632,7 @@ pub async fn watch(app: Arc<AppState>) {
     loop {
         tick.tick().await;
         let d = dir.clone();
-        let result = tokio::task::spawn_blocking(move || {
+        let result = crate::threads::blocking(crate::threads::label::SOURCE_WATCH, move || {
             let found = scanner.scan_once(&d);
             (scanner, found)
         })

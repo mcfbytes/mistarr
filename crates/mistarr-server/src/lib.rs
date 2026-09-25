@@ -22,6 +22,7 @@ pub mod logging;
 pub mod memory;
 pub mod status;
 pub mod synth;
+pub mod threads;
 
 pub use error::{Error, Result};
 
