@@ -313,7 +313,8 @@ fn scaled(console: &Console, scale: f64) -> usize {
 /// Writes the catalogue at `scale` (1.0 is full size) into a migrated database with its
 /// platforms seeded, in one transaction through [`db::commit`], and returns the counts.
 /// Clone groups average three variants; flags, revisions, files and verified states
-/// follow DAT-like rates, and the same `seed` gives the same rows.
+/// follow DAT-like rates, DAT roms carry a CRC32, MD5 and SHA1 as most DATs give them,
+/// and the same `seed` gives the same rows.
 ///
 /// # Errors
 ///
@@ -409,8 +410,8 @@ fn seed_console(
         "INSERT INTO title_languages (title_id, pos, language) VALUES (?1, ?2, ?3)",
     )?;
     let mut rom = c.prepare_cached(
-        "INSERT INTO roms (title_id, name, size, crc32, sha1, status, header, zip_dir, present)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        "INSERT INTO roms (title_id, name, size, crc32, md5, sha1, status, header, zip_dir, present)
+         VALUES (?1, ?2, ?3, ?4, substr(?5, 9), ?5, ?6, ?7, ?8, ?9)",
     )?;
     let mut file = c.prepare_cached(
         "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)

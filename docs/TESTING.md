@@ -101,7 +101,8 @@ Each server started also checks that `/proc/<pid>/limits` shows the default
 192 MiB data limit, or the lower limit the test run inherited, and that its
 SQLite temporary directory exists. Besides the 64 MiB budget, each job's peak
 must stay within 12 or 16 MiB of a server that runs no job, measured once
-per run, so a regression shows before it reaches the budget. The suite runs in `cargo test --workspace` in debug
+per run, so a regression shows before it reaches the budget; the two DAT
+loads, whose apply runs with the writer's 8 MiB bulk cache, within 28 MiB. The suite runs in `cargo test --workspace` in debug
 builds and takes about a minute; the budget holds there on x86-64 with room
 to spare, and a release build for armv7 needs less, with half the pointer
 size and a smaller binary. `make memory` runs it one test at a time and
@@ -109,6 +110,23 @@ prints each peak:
 
 ```sh
 make memory
+```
+
+## Writes to the card
+
+`crates/mistarr-server/src/jobs/dat_import/sync_writes.rs` counts the write
+syscalls a DAT load and its recompute make, from `/proc/thread-self/io`, with
+the writer's temporary tables in memory as the board keeps them in RAM, so
+only database and WAL writes count (ARCHITECTURE.md "Writes on a sync
+mount"). `load_writes_alone` loads 450 disc games on a tenth of the synthetic
+catalogue and fails above 1 500 writes for the load or 200 for the
+recompute, which catches a writer that spills before its commit or a rom
+index a load need not touch; the test that runs in CI starts it in a test
+process of its own. The ignored `sync_writes_on_the_bench_catalogue` prints
+the counts on the full catalogue:
+
+```sh
+cargo test -p mistarr-server --lib sync_writes_on_the_bench -- --ignored --nocapture
 ```
 
 ## Browse speed

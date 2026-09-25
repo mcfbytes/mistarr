@@ -16,6 +16,10 @@ use serde_json::{json, Value as Json};
 /// Peak RSS budget during scan or import, `docs/ARCHITECTURE.md` "Resource budgets".
 const BUDGET_KIB: u64 = 64 * 1024;
 
+/// Growth over idle a DAT load may reach: its apply runs with the writer's 8 MiB bulk
+/// cache and a heap limit raised to match, on top of the 12 MiB other jobs get.
+const LOAD_DELTA_MIB: u64 = 28;
+
 /// Longest a job may take before the test gives up.
 const JOB_TIMEOUT: Duration = Duration::from_secs(600);
 
@@ -102,7 +106,11 @@ impl Server {
     fn start(root: &Path) -> Self {
         let server = spawn(root, "");
         server.assert_data_limit(192);
-        assert!(root.join("data/tmp").is_dir(), "SQLite temporary directory");
+        let ram = Path::new(mistarr_server::db::RAM_TEMP_DIR);
+        assert!(
+            ram.is_dir() || root.join("data/tmp").is_dir(),
+            "SQLite temporary directory"
+        );
         server
     }
 
@@ -722,7 +730,7 @@ fn dat_and_torrent_import_stay_under_budget() {
     let peak = server.stop("dat_import");
     assert_eq!(rows[0].0, "done", "{}", rows[0].1);
     assert_eq!(usize::try_from(titles).expect("count"), games);
-    assert_budget("dat_import", peak, 12);
+    assert_budget("dat_import", peak, LOAD_DELTA_MIB);
 
     big_torrent(&dir.path().join("data/sources/example.torrent"));
     let server = Server::start(dir.path());
@@ -790,7 +798,7 @@ fn db_export_import_stays_under_budget() {
         usize::try_from(clones).expect("count"),
         games - games.div_ceil(3)
     );
-    assert_budget("dat_import, DB export", peak, 12);
+    assert_budget("dat_import, DB export", peak, LOAD_DELTA_MIB);
 }
 
 #[test]

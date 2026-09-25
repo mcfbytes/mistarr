@@ -1,7 +1,7 @@
 //! Shared server state and the startup sequence of `docs/ARCHITECTURE.md` "Startup".
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
@@ -425,6 +425,9 @@ fn open_db(
     Vec<mistarr_core::PlatformId>,
     Vec<mistarr_core::PlatformId>,
 )> {
+    if let Some(dir) = std::env::var_os(crate::db::SQLITE_TMPDIR) {
+        tracing::info!(dir = %Path::new(&dir).display(), "SQLite temporary files");
+    }
     let db = Db::open(&config.paths.db())?;
     let (stored, unfinished, resolved) = db.write_blocking(prepare_catalog)?;
     let stored = stored.unwrap_or_else(|e| {

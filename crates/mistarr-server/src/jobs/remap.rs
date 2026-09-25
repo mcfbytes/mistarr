@@ -203,9 +203,11 @@ pub async fn remap_one(app: &AppState, id: SourceId) -> Result<bool> {
     };
     let p = platform.clone();
     app.db
-        .write(move |c| {
-            rows::refresh_match_keys(c)?;
-            candidates::drop_foreign_proofs(c, id, &p)
+        .write_bulk(move |c| {
+            let tx = c.transaction()?;
+            rows::refresh_match_keys(&tx)?;
+            candidates::drop_foreign_proofs(&tx, id, &p)?;
+            crate::db::commit(tx)
         })
         .await?;
     let p = platform.clone();

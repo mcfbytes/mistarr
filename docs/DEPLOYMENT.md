@@ -74,6 +74,8 @@ any dynamic dependency, checked with `file` on the output.
 /media/fat/Scripts/mistarr.sh      # start/stop/status from the Scripts menu
 /media/fat/Scripts/mistarr.sh.prev # the previous launcher, kept by install.sh
 /tmp/mistarr.start.lock        # held while a start runs; a reboot clears it
+/tmp/mistarr/                  # SQLite's temporary files and the DAT stage, in RAM;
+                               #   <data>/tmp/ on the card when it cannot be written
 ```
 
 ## Installing on the board

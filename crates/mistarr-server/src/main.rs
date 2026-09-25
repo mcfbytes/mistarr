@@ -22,9 +22,10 @@ fn main() -> anyhow::Result<()> {
     let data_limit =
         memory::limit_data(config.memory.data_limit_mib).context("cannot set the memory limit")?;
     if matches!(cli.command(), Command::Serve) {
-        let tmp = config.paths.tmp();
-        db::prepare_temp_dir(&tmp).with_context(|| format!("cannot create {}", tmp.display()))?;
-        // The board's /tmp is RAM; set before any thread starts, as the environment is shared.
+        let disk = config.paths.tmp();
+        let tmp = db::choose_temp_dir(std::path::Path::new(db::RAM_TEMP_DIR), &disk)
+            .with_context(|| format!("cannot create {}", disk.display()))?;
+        // Set before any thread starts, as the environment is shared.
         std::env::set_var(db::SQLITE_TMPDIR, &tmp);
     }
     let runtime = memory::runtime().context("cannot start the async runtime")?;

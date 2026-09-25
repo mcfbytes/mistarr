@@ -609,7 +609,7 @@ fn import_stream<R: BufRead>(
     if !chunk.is_empty() {
         db.write_blocking(|c| append_chunk(c, &chunk))?;
     }
-    db.write_blocking(|c| {
+    db.write_bulk_blocking(|c| {
         let tx = c.transaction()?;
         let plan = dats::upsert_version(&tx, &new)?;
         if req.bind.is_some() && !plan.current {
@@ -1129,5 +1129,7 @@ pub async fn watch(app: Arc<AppState>) {
     }
 }
 
+#[cfg(test)]
+mod sync_writes;
 #[cfg(test)]
 mod tests;

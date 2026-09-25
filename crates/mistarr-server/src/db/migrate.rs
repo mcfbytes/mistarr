@@ -379,6 +379,42 @@ mod tests {
     }
 
     #[test]
+    fn rom_indexes_a_load_need_not_touch_are_partial_and_the_stage_is_gone() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        let sql = |name: &str| -> String {
+            conn.query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [name],
+                |r| r.get(0),
+            )
+            .expect(name)
+        };
+        assert!(sql("roms_md5").ends_with("WHERE sha1 IS NULL"));
+        assert!(sql("roms_size").ends_with("WHERE match_base IS NOT NULL"));
+        assert!(sql("roms_match_base").ends_with("WHERE match_base IS NOT NULL"));
+        assert!(!sql("roms_sha1").contains("WHERE"));
+        assert!(!names(&conn, "table").iter().any(|n| n == "dat_stage"));
+        conn.execute_batch(
+            "INSERT INTO platforms (id, name, core_dir, kind) VALUES ('p', 'P', 'P', 'cartridge');
+             INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
+               VALUES ('p', 'd', '1', 'd.dat', 0, 1);
+             INSERT INTO titles (platform_id, dat_version_id, name, base_name) VALUES ('p', 1, 't', 't');
+             INSERT INTO roms (title_id, name, size, md5, sha1) VALUES (1, 'a', 4, 'm1', 's1');
+             INSERT INTO roms (title_id, name, size, md5) VALUES (1, 'b', 4, 'm2');",
+        )
+        .expect("rows");
+        let entries: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM roms INDEXED BY roms_md5 WHERE sha1 IS NULL AND md5 > ''",
+                [],
+                |r| r.get(0),
+            )
+            .expect("count");
+        assert_eq!(entries, 1, "only the sha1-less rom is in the md5 index");
+    }
+
+    #[test]
     fn a_newer_schema_is_refused_and_its_contents_unchanged() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("m.db");

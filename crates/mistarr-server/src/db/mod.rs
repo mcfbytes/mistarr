@@ -19,7 +19,7 @@ pub mod system;
 pub mod titles;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use rusqlite::{Connection, Transaction};
@@ -29,6 +29,11 @@ use crate::error::{Error, Result};
 /// Page cache per connection in KiB; two connections share the 2 MiB budget.
 const CACHE_KIB: i64 = 1024;
 
+/// The writer's page cache in KiB while a bulk write holds it: a DAT load's dirty pages
+/// stay in memory until its commit writes each once; `docs/ARCHITECTURE.md` "Writes on
+/// a sync mount" has the measurement.
+const BULK_CACHE_KIB: i64 = 8 * 1024;
+
 /// WAL pages written before an automatic checkpoint, about 1 MiB of 4 KiB pages.
 const WAL_AUTOCHECKPOINT: i64 = 256;
 
@@ -37,6 +42,9 @@ const JOURNAL_SIZE_LIMIT: i64 = 1024 * 1024;
 
 /// Heap SQLite tries to stay under, process-wide, by shedding cached pages.
 const SOFT_HEAP_LIMIT: i64 = 8 * 1024 * 1024;
+
+/// [`SOFT_HEAP_LIMIT`] while a bulk write holds the writer: room for its cache on top.
+const BULK_HEAP_LIMIT: i64 = SOFT_HEAP_LIMIT + BULK_CACHE_KIB * 1024;
 
 /// How long a statement waits on a lock held by the other connection.
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -127,6 +135,28 @@ impl Db {
         out
     }
 
+    /// [`Db::write_blocking`] with the writer's page cache raised while `f` runs; see
+    /// [`bulk`].
+    ///
+    /// # Errors
+    ///
+    /// Whatever `f` returns, [`Error::Poisoned`], or [`Error::Db`] when the cache
+    /// cannot be set or restored.
+    ///
+    /// ```
+    /// # let dir = std::env::temp_dir().join(format!("mistarr-doc-db-bulk-{}", std::process::id()));
+    /// # std::fs::create_dir_all(&dir).unwrap();
+    /// # let db = mistarr_server::db::Db::open(&dir.join("b.db")).unwrap();
+    /// use mistarr_server::db::settings;
+    /// db.write_bulk_blocking(|c| settings::set(c, "k", "v")).unwrap();
+    /// ```
+    pub fn write_bulk_blocking<T>(
+        &self,
+        f: impl FnOnce(&mut Connection) -> Result<T>,
+    ) -> Result<T> {
+        self.write_blocking(|c| bulk(c, f))
+    }
+
     /// Runs `f` on the read-only connection on the calling thread.
     ///
     /// # Errors
@@ -166,6 +196,20 @@ impl Db {
         })
         .await
         .map_err(|e| Error::Task(e.to_string()))?
+    }
+
+    /// [`Db::write_bulk_blocking`] on tokio's blocking pool, once no other async write
+    /// is running.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `f` returns, [`Error::Poisoned`], [`Error::Task`] or [`Error::Db`].
+    pub async fn write_bulk<T, F>(&self, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
+        self.write(move |c| bulk(c, f)).await
     }
 
     /// [`Db::read_blocking`] on tokio's blocking pool.
@@ -215,8 +259,97 @@ fn settle(conn: &mut Connection) -> Result<()> {
     commit(conn.transaction()?)
 }
 
+/// Runs `f` on `conn` with its page cache at 8 MiB and the soft heap limit raised to
+/// match, then puts both back and frees the extra pages, whether `f` succeeded or not.
+/// A write transaction inside `f` whose dirty pages fit then writes each once, at its
+/// commit, instead of spilling pages early and writing them again.
+///
+/// # Errors
+///
+/// Whatever `f` returns, else [`Error::Db`] when a pragma fails.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// let cache: i64 = mistarr_server::db::bulk(&mut conn, |c| {
+///     Ok(c.pragma_query_value(None, "cache_size", |r| r.get(0))?)
+/// }).unwrap();
+/// assert_eq!(cache, -8 * 1024);
+/// ```
+pub fn bulk<T>(conn: &mut Connection, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
+    conn.pragma_update(None, "cache_size", -BULK_CACHE_KIB)?;
+    let out = heap_limit(conn, 1).and_then(|()| f(conn));
+    // `and` takes its argument eagerly, so the count drops whatever the cache pragma did.
+    let restored = conn
+        .pragma_update(None, "cache_size", -CACHE_KIB)
+        .map_err(Error::from)
+        .and(heap_limit(conn, -1))
+        .and_then(|()| Ok(conn.execute_batch("PRAGMA shrink_memory")?));
+    match (out, restored) {
+        (Ok(v), Ok(())) => Ok(v),
+        (Ok(_), Err(e)) => Err(e),
+        (Err(e), restored) => {
+            if let Err(r) = restored {
+                tracing::error!(error = %r, "writer cache not restored after a failed bulk write");
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Bulk writes open in this process; the soft heap limit is raised while any is.
+static BULK_OPEN: Mutex<usize> = Mutex::new(0);
+
+/// Counts `delta` bulk writes in or out and sets the process-wide soft heap limit to
+/// match, so a connection opened meanwhile never lowers it under an open bulk write.
+fn heap_limit(conn: &Connection, delta: isize) -> Result<()> {
+    let mut open = BULK_OPEN.lock().unwrap_or_else(PoisonError::into_inner);
+    *open = open.saturating_add_signed(delta);
+    let limit = if *open > 0 {
+        BULK_HEAP_LIMIT
+    } else {
+        SOFT_HEAP_LIMIT
+    };
+    conn.pragma_update_and_check(None, "soft_heap_limit", limit, |_| Ok(()))?;
+    Ok(())
+}
+
 /// The environment variable SQLite reads for its temporary file directory.
 pub const SQLITE_TMPDIR: &str = "SQLITE_TMPDIR";
+
+/// The RAM-backed directory for SQLite's temporary files, used when it can be written.
+pub const RAM_TEMP_DIR: &str = "/tmp/mistarr";
+
+/// Prepares `ram` with [`prepare_temp_dir`] and returns it when a file can be written
+/// there, else prepares and returns `fallback`. On the card every temporary page would
+/// be written through its `sync` mount; see `docs/ARCHITECTURE.md` "Writes on a sync mount".
+///
+/// # Errors
+///
+/// [`Error::Io`] when `fallback` cannot be prepared either.
+///
+/// ```
+/// let dir = tempfile::tempdir().unwrap();
+/// let (ram, disk) = (dir.path().join("ram"), dir.path().join("disk"));
+/// let chosen = mistarr_server::db::choose_temp_dir(&ram, &disk).unwrap();
+/// assert_eq!(chosen, ram);
+/// ```
+pub fn choose_temp_dir(ram: &Path, fallback: &Path) -> Result<PathBuf> {
+    let writable = |dir: &Path| -> Result<()> {
+        prepare_temp_dir(dir)?;
+        let probe = dir.join(format!(".probe-{}", std::process::id()));
+        std::fs::write(&probe, b"x")?;
+        std::fs::remove_file(&probe)?;
+        Ok(())
+    };
+    match writable(ram) {
+        Ok(()) => Ok(ram.to_path_buf()),
+        Err(e) => {
+            tracing::info!(error = %e, dir = %ram.display(), "SQLite temporary files go to the data directory");
+            prepare_temp_dir(fallback)?;
+            Ok(fallback.to_path_buf())
+        }
+    }
+}
 
 /// Creates `dir` for SQLite's temporary files and removes the files a previous run left
 /// there; the caller then points [`SQLITE_TMPDIR`] at it before any connection opens.
@@ -302,8 +435,7 @@ fn configure(conn: &Connection) -> Result<()> {
     conn.pragma_update(None, "temp_store", "FILE")?;
     conn.pragma_update(None, "wal_autocheckpoint", WAL_AUTOCHECKPOINT)?;
     conn.pragma_update_and_check(None, "journal_size_limit", JOURNAL_SIZE_LIMIT, |_| Ok(()))?;
-    conn.pragma_update_and_check(None, "soft_heap_limit", SOFT_HEAP_LIMIT, |_| Ok(()))?;
-    Ok(())
+    heap_limit(conn, 0)
 }
 
 #[cfg(test)]
@@ -362,16 +494,54 @@ mod tests {
             }
             .expect("pragmas");
             assert_eq!(
-                got,
-                [
-                    0,
-                    1,
-                    WAL_AUTOCHECKPOINT,
-                    JOURNAL_SIZE_LIMIT,
-                    SOFT_HEAP_LIMIT
-                ]
+                got[..4],
+                [0, 1, WAL_AUTOCHECKPOINT, JOURNAL_SIZE_LIMIT],
+                "read {read}"
+            );
+            // Process-wide: another test's bulk write may hold it raised.
+            assert!(
+                [SOFT_HEAP_LIMIT, BULK_HEAP_LIMIT].contains(&got[4]),
+                "{got:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_bulk_write_raises_the_writer_cache_and_restores_it_on_error() {
+        let (_dir, db) = testutil::db();
+        let cache = |c: &Connection| -> Result<i64> {
+            Ok(c.pragma_query_value(None, "cache_size", |r| r.get(0))?)
+        };
+        let inside = db
+            .write_bulk_blocking(|c| {
+                let heap: i64 = c.pragma_query_value(None, "soft_heap_limit", |r| r.get(0))?;
+                Ok((cache(c)?, heap))
+            })
+            .expect("bulk");
+        assert_eq!(inside, (-BULK_CACHE_KIB, BULK_HEAP_LIMIT));
+        assert_eq!(db.write_blocking(|c| cache(c)).expect("after"), -CACHE_KIB);
+        let failed: Result<()> = db.write_bulk_blocking(|c| {
+            c.execute("INSERT INTO no_such_table VALUES (1)", [])?;
+            Ok(())
+        });
+        assert!(failed.is_err());
+        assert_eq!(
+            db.write_blocking(|c| cache(c)).expect("after error"),
+            -CACHE_KIB
+        );
+        assert_eq!(db.read_blocking(|c| cache(c)).expect("reader"), -CACHE_KIB);
+    }
+
+    #[test]
+    fn temp_files_go_to_ram_when_it_can_be_written() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let disk = dir.path().join("data/tmp");
+        let ram = dir.path().join("ram");
+        assert_eq!(choose_temp_dir(&ram, &disk).expect("ram"), ram);
+        std::fs::write(dir.path().join("file"), b"x").expect("write");
+        let blocked = dir.path().join("file/sub");
+        assert_eq!(choose_temp_dir(&blocked, &disk).expect("disk"), disk);
+        assert!(disk.is_dir());
     }
 
     #[test]
