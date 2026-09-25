@@ -69,7 +69,8 @@ pub fn limit_data(mib: u64) -> Result<Option<u64>> {
 }
 
 /// The runtime the binary serves on: [`WORKERS`] workers, at most [`BLOCKING_THREADS`]
-/// blocking threads, each with a [`THREAD_STACK_BYTES`] stack.
+/// blocking threads, each with a [`THREAD_STACK_BYTES`] stack and named by
+/// [`crate::threads::runtime_thread_name`].
 ///
 /// # Errors
 ///
@@ -84,6 +85,7 @@ pub fn runtime() -> Result<tokio::runtime::Runtime> {
         .worker_threads(WORKERS)
         .max_blocking_threads(BLOCKING_THREADS)
         .thread_stack_size(THREAD_STACK_BYTES)
+        .thread_name_fn(crate::threads::runtime_thread_name)
         .enable_all()
         .build()?)
 }

@@ -509,6 +509,19 @@ board has them, and heavy jobs stop at their next file boundary while a core
 runs. Heavy work has no thread of its own to lower further: it shares the
 blocking pool with request handlers.
 
+### Thread names
+
+Runtime workers and blocking threads are named `mistarr-rt-N`. While a
+blocking thread runs work, `threads::blocking` sets its `comm` to a label of
+at most 15 bytes (`threads::label`: `db-read`, `db-write`, `hash`,
+`scan-list`, `zip-list`, `dat-import`, `dat-save`, `source-file`,
+`source-watch`, `import`, `rename`, `arcade`, `romsets`, `launch`, `detect`,
+`incoming`) and puts the pool name back when it ends; the thread that reaps
+a started rtorrent is `rtorrent-reap`, and a torrent's data is deleted under
+`torrent-delete`. The board's BusyBox `top` and `ps` cannot list threads, so
+read them from procfs:
+`for t in /proc/$(pidof mistarr)/task/*; do echo "${t##*/} $(cat $t/comm)"; done`.
+
 A DAT loads in one write transaction, so the WAL file can grow to the size
 of the pages that DAT touches while it loads; it is cut back to 1 MiB at the
 next checkpoint. Page memory stays within the cache either way, since SQLite
