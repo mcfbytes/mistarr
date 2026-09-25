@@ -143,12 +143,30 @@ fn every_codec_rebuilds_the_source_tracks() {
         if let Some(c) = codec {
             assert!(used(&w, c) > 0, "{c:?} is used");
         }
+        if codec == Some(Codec::Flac) {
+            assert!(w.flac_little > 0, "some flac hunks are little-endian");
+            assert!(w.flac_little < used(&w, Codec::Flac), "and some big-endian");
+        }
         assert_eq!(decode(&bytes).expect("decode"), w.tracks, "{codec:?}");
         let sizes = our_tracks(&bytes)
             .iter()
             .map(|t| u64::from(t.1) * 2352)
             .collect::<Vec<_>>();
         assert_eq!(sizes, w.tracks.iter().map(|t| t.size).collect::<Vec<_>>());
+    }
+}
+
+#[test]
+fn every_codec_stays_within_the_decode_budget() {
+    for (codec, bytes, _) in every_codec_images() {
+        let h = chd::read_header(&bytes[..]).expect("header");
+        let budget = chd::decode_budget(&h);
+        let mut c = Cursor::new(&bytes[..]);
+        let layout = chd::read_layout(&mut c, &h).expect("layout");
+        let mut d = Decoder::new(c, h, layout).expect("decoder");
+        while d.step(1).expect("step") != Step::Done {
+            assert!(d.heap_bytes() <= budget, "{codec:?}");
+        }
     }
 }
 
@@ -372,13 +390,28 @@ fn damaged_images_fail_without_panicking() {
         assert!(decode(&good[..len]).is_err(), "truncated at {len}");
     }
 
-    let mut rng = mistarr_fixture::rng::SplitMix::from_label("mutations");
+    mutations_fail_or_keep_the_hashes(&good, &w, "cdzl");
+}
+
+/// Flips a random byte in each of 256 copies of `good`, one image per codec.
+#[test]
+fn every_codec_survives_mutations() {
+    for (codec, bytes, w) in every_codec_images() {
+        mutations_fail_or_keep_the_hashes(&bytes, &w, &format!("{codec:?}"));
+    }
+}
+
+fn mutations_fail_or_keep_the_hashes(good: &[u8], w: &Written, label: &str) {
+    let mut rng = mistarr_fixture::rng::SplitMix::from_label(&format!("mutations {label}"));
     for _ in 0..256 {
-        let mut bad = good.clone();
+        let mut bad = good.to_vec();
         let at = usize::try_from(rng.next_u64() % good.len() as u64).expect("fits");
         bad[at] ^= u8::try_from(rng.next_u64() % 255 + 1).expect("byte");
         if let Ok(tracks) = decode(&bad) {
-            assert_eq!(tracks, w.tracks, "a mutation at {at} decoded to other data");
+            assert_eq!(
+                tracks, w.tracks,
+                "{label}: a mutation at {at} decoded to other data"
+            );
         }
     }
 }

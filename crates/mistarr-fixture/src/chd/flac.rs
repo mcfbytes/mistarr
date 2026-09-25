@@ -184,6 +184,21 @@ pub(crate) fn samples_be(bytes: &[u8]) -> Vec<(i16, i16)> {
         .collect()
 }
 
+/// Stereo samples of `bytes` read as little-endian 16-bit pairs.
+pub(crate) fn samples_le(bytes: &[u8]) -> Vec<(i16, i16)> {
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| {
+            (
+                i16::from_le_bytes([c[0], c[1]]),
+                i16::from_le_bytes([c[2], c[3]]),
+            )
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

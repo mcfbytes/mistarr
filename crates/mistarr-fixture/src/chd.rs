@@ -313,6 +313,8 @@ pub struct Written {
     pub sha1: [u8; 20],
     /// Hunks stored with each codec.
     pub codec_use: Vec<(Codec, u32)>,
+    /// Hunks of the `flac` codec stored as little-endian samples.
+    pub flac_little: u32,
 }
 
 fn deflate(data: &[u8]) -> Vec<u8> {
@@ -394,11 +396,17 @@ fn compress(codec: Codec, hunk: &[u8]) -> Option<Vec<u8>> {
         Codec::Lzma => lzma(hunk),
         Codec::Zstd => zstd(hunk),
         Codec::Flac => {
-            let mut out = vec![b'B'];
-            out.extend(flac::encode(
-                &flac::samples_be(hunk),
-                flac_block(hunk.len(), 2048),
-            ));
+            // Whichever byte order codes smaller, as chdman picks; little-endian on a tie.
+            let block = flac_block(hunk.len(), 2048);
+            let big = flac::encode(&flac::samples_be(hunk), block);
+            let little = flac::encode(&flac::samples_le(hunk), block);
+            let (order, body) = if big.len() < little.len() {
+                (b'B', big)
+            } else {
+                (b'L', little)
+            };
+            let mut out = vec![order];
+            out.extend(body);
             out
         }
         Codec::CdFlac => {
@@ -475,6 +483,7 @@ struct Hunks {
     entries: Vec<Entry>,
     plain: Vec<u32>,
     uses: HashMap<Codec, u32>,
+    flac_little: u32,
     raw: Sha1,
 }
 
@@ -486,6 +495,7 @@ fn write_hunks<W: Write + Seek>(spec: &Spec, w: &mut W, logical: u64) -> io::Res
         entries: Vec::new(),
         plain: Vec::new(),
         uses: HashMap::new(),
+        flac_little: 0,
         raw: Sha1::new(),
     };
     let mut seen: HashMap<[u8; 20], u32> = HashMap::new();
@@ -520,7 +530,11 @@ fn write_hunks<W: Write + Seek>(spec: &Spec, w: &mut W, logical: u64) -> io::Res
         }
         let crc = crc16(&hunk);
         if let Some((slot, data)) = choose(spec, index, &hunk) {
-            *out.uses.entry(spec.codecs[usize::from(slot)]).or_default() += 1;
+            let codec = spec.codecs[usize::from(slot)];
+            *out.uses.entry(codec).or_default() += 1;
+            if codec == Codec::Flac && data.first() == Some(&b'L') {
+                out.flac_little += 1;
+            }
             let len = u32::try_from(data.len()).unwrap_or(0);
             out.entries.push(Entry::Codec { slot, len, crc });
             w.write_all(&data)?;
@@ -630,6 +644,7 @@ pub fn write<W: Write + Seek>(spec: &Spec, mut w: W) -> io::Result<Written> {
         raw_sha1,
         sha1,
         codec_use,
+        flac_little: hunks.flac_little,
     })
 }
 
