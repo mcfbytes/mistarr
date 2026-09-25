@@ -512,21 +512,23 @@ I/O class by running `ionice -c 3 -p <tid>` for each entry of
 created later inherit the class from the thread that creates them. Back at
 the menu it runs `ionice -c 0 -p <tid>` the same way, and the kernel derives
 a best-effort level from `nice` again. A switch counts, and its class is
-recorded, once at least one thread takes the class; a thread `ionice` refused
-keeps the old class until the next switch. One that fails, for example because
-`/proc` cannot be listed or no thread takes the class, is logged at debug and
-tried again 30 seconds later, the wait doubling after each further failure up
-to 4 minutes, or at once at the next core change. Without `ionice` it logs
-once at debug, stops switching and leaves the class as launched. A process
-the daemon starts inherits the class of the thread that forks it and is not in
-`/proc/self/task`, so a download client started from the UI while a core
-runs is forked from a thread set back to class 0 for the launch, and every
-thread takes the idle class again afterwards; when no thread takes it, the
-recorded class is cleared and the switch is tried again as a failed one. The
-class lock is taken only on blocking threads, so a long launch never stalls an
-async worker. The client's transfers slow under the gate's rate limit
-instead. Heavy jobs also stop at their next file boundary while a core runs. Heavy work has no thread of its
-own to lower further: it shares the blocking pool with request handlers.
+recorded, once at least one thread takes the class; a thread `ionice`
+refused, almost always one that has exited, keeps the old class until the
+next core change. One that fails, for example because `/proc` cannot be
+listed or no thread takes the class, is logged at debug and tried again 30
+seconds later, the wait doubling after each further failure up to 4 minutes,
+or at once at the next change of the gate, which also resets the wait.
+Without `ionice` it logs once at debug, stops switching and leaves the class
+as launched. A process the daemon starts inherits the class of the thread
+that forks it and is not in `/proc/self/task`, so a download client started
+from the UI while a core runs is forked from a thread set back to class 0
+for the launch, and every thread takes the idle class again afterwards; when
+that restore fails, the recorded class is cleared and the switch is tried
+again at once. The class lock is taken only on blocking threads, so a long
+launch never stalls an async worker. The client's transfers slow under the
+gate's rate limit instead. Heavy jobs also stop at their next file boundary
+while a core runs. Heavy work has no thread of its own to lower further: it
+shares the blocking pool with request handlers.
 
 ### Thread names
 
