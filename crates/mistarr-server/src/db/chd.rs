@@ -173,17 +173,20 @@ pub fn find_id(conn: &Connection, tracks: &[HashSet]) -> Result<Option<ChdId>> {
     Ok(None)
 }
 
-/// Why image `id` could not be identified, and the decoder version that found it.
+/// Why image `id` with modification time `mtime` could not be identified, and the decoder
+/// version that found it. A file rewritten since, as when a copy completes, has another
+/// `mtime` and no failure.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn failure(conn: &Connection, id: &ChdId) -> Result<Option<(Unidentifiable, u32)>> {
+pub fn failure(conn: &Connection, id: &ChdId, mtime: i64) -> Result<Option<(Unidentifiable, u32)>> {
     let row: Option<(String, u32)> = conn
         .prepare_cached(
-            "SELECT reason, decoder FROM chd_failures WHERE chd_sha1 = ?1 AND chd_size = ?2",
+            "SELECT reason, decoder FROM chd_failures
+             WHERE chd_sha1 = ?1 AND chd_size = ?2 AND mtime = ?3",
         )?
-        .query_row(params![id.sha1.to_hex(), size_i64(id.size)], |r| {
+        .query_row(params![id.sha1.to_hex(), size_i64(id.size), mtime], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })
         .optional()?;
@@ -193,8 +196,8 @@ pub fn failure(conn: &Connection, id: &ChdId) -> Result<Option<(Unidentifiable, 
     }))
 }
 
-/// Records that image `id` cannot be identified by this decoder version; an unchanged
-/// record keeps its `failed_at`.
+/// Records that image `id`, as a file with modification time `mtime`, cannot be identified
+/// by this decoder version; an unchanged record keeps its `failed_at`.
 ///
 /// # Errors
 ///
@@ -202,19 +205,21 @@ pub fn failure(conn: &Connection, id: &ChdId) -> Result<Option<(Unidentifiable, 
 pub fn store_failure(
     conn: &Connection,
     id: &ChdId,
+    mtime: i64,
     reason: Unidentifiable,
     now: i64,
 ) -> Result<()> {
     conn.prepare_cached(
-        "INSERT INTO chd_failures (chd_sha1, chd_size, reason, decoder, failed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5)
-         ON CONFLICT(chd_sha1, chd_size) DO UPDATE SET
+        "INSERT INTO chd_failures (chd_sha1, chd_size, mtime, reason, decoder, failed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(chd_sha1, chd_size, mtime) DO UPDATE SET
            reason = excluded.reason, decoder = excluded.decoder, failed_at = excluded.failed_at
          WHERE chd_failures.reason <> excluded.reason OR chd_failures.decoder <> excluded.decoder",
     )?
     .execute(params![
         id.sha1.to_hex(),
         size_i64(id.size),
+        mtime,
         reason.code(),
         mistarr_core::chd::DECODER_VERSION,
         now
@@ -512,20 +517,24 @@ mod tests {
     fn a_failure_keeps_its_first_time_until_it_changes() {
         let c = conn();
         let a = id(2, 9);
-        assert!(failure(&c, &a).expect("read").is_none());
-        store_failure(&c, &a, Unidentifiable::Cooked, 10).expect("store");
-        store_failure(&c, &a, Unidentifiable::Cooked, 20).expect("again");
+        assert!(failure(&c, &a, 5).expect("read").is_none());
+        store_failure(&c, &a, 5, Unidentifiable::Cooked, 10).expect("store");
+        store_failure(&c, &a, 5, Unidentifiable::Cooked, 20).expect("again");
         let at: i64 = c
             .query_row("SELECT failed_at FROM chd_failures", [], |r| r.get(0))
             .expect("at");
         assert_eq!(at, 10);
         assert_eq!(
-            failure(&c, &a).expect("read"),
+            failure(&c, &a, 5).expect("read"),
             Some((Unidentifiable::Cooked, mistarr_core::chd::DECODER_VERSION))
         );
-        store_failure(&c, &a, Unidentifiable::Corrupt, 30).expect("changed");
+        assert!(
+            failure(&c, &a, 6).expect("read").is_none(),
+            "a rewritten file"
+        );
+        store_failure(&c, &a, 5, Unidentifiable::Corrupt, 30).expect("changed");
         assert_eq!(
-            failure(&c, &a).expect("read").map(|f| f.0),
+            failure(&c, &a, 5).expect("read").map(|f| f.0),
             Some(Unidentifiable::Corrupt)
         );
     }

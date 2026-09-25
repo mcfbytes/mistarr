@@ -144,7 +144,7 @@ fn known_rows(
         };
         return classify_chd(conn, platform, &m);
     }
-    if let Some((reason, decoder)) = rows::failure(conn, id)? {
+    if let Some((reason, decoder)) = rows::failure(conn, id, mtime)? {
         if decoder >= core::DECODER_VERSION {
             let row = container(rel_path, size, mtime, Unidentified::Chd(reason));
             return Ok(vec![row]);
@@ -680,13 +680,16 @@ struct Ready {
     mtime: i64,
 }
 
+/// The identity and modification time of an image whose header was read.
+type Seen = Option<(ChdId, i64)>;
+
 /// Opens `path` and reads its header and track list; the identity when the header was read.
-fn open(path: &Path) -> std::result::Result<Ready, (Option<ChdId>, ChdError)> {
+fn open(path: &Path) -> std::result::Result<Ready, (Seen, ChdError)> {
     let mut file = File::open(path).map_err(|e| (None, e.into()))?;
     let (size, mtime) = scan::file_meta(path).map_err(|e| (None, e.into()))?;
     let header = core::read_header(&mut file).map_err(|e| (None, e))?;
     let id = header.id(u64::try_from(size).unwrap_or(0));
-    let layout = core::read_layout(&mut file, &header).map_err(|e| (Some(id), e))?;
+    let layout = core::read_layout(&mut file, &header).map_err(|e| (Some((id, mtime)), e))?;
     Ok(Ready {
         file,
         header,
@@ -743,7 +746,7 @@ async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcom
     .map_err(|e| Error::Task(e.to_string()))?;
     let mut dec = match made {
         Ok(d) => d,
-        Err(e) => return failed(ctx, row, Some(id), &e).await,
+        Err(e) => return failed(ctx, row, Some((id, mtime)), &e).await,
     };
     let mut active = Duration::ZERO;
     loop {
@@ -769,12 +772,12 @@ async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcom
                 live.report(row, bytes);
             }
             Ok(Step::Done) => break,
-            Err(e) => return failed(ctx, row, Some(id), &e).await,
+            Err(e) => return failed(ctx, row, Some((id, mtime)), &e).await,
         }
     }
     let tracks = match dec.finish() {
         Ok(t) => t,
-        Err(e) => return failed(ctx, row, Some(id), &e).await,
+        Err(e) => return failed(ctx, row, Some((id, mtime)), &e).await,
     };
     let secs = active.as_secs_f64().max(0.001);
     #[allow(
@@ -843,21 +846,16 @@ async fn record(
 }
 
 /// Records why an image cannot be identified, or leaves it `pending` after an I/O error.
-async fn failed(
-    ctx: &JobContext,
-    row: &FileRow,
-    id: Option<ChdId>,
-    e: &ChdError,
-) -> Result<Outcome> {
+async fn failed(ctx: &JobContext, row: &FileRow, seen: Seen, e: &ChdError) -> Result<Outcome> {
     let Some(reason) = e.reason() else {
         tracing::debug!(path = %row.rel_path, error = %e, "cannot read CHD; left pending");
         return Ok(Outcome::Skipped);
     };
     tracing::debug!(path = %row.rel_path, error = %e, "CHD not identified");
-    if let Some(id) = id {
+    if let Some((id, mtime)) = seen {
         ctx.app
             .db
-            .write(move |c| rows::store_failure(c, &id, reason, crate::unix_now()))
+            .write(move |c| rows::store_failure(c, &id, mtime, reason, crate::unix_now()))
             .await?;
     }
     set_reason(ctx, row.id, Unidentified::Chd(reason)).await?;
@@ -938,7 +936,7 @@ mod tests {
     }
 
     #[test]
-    fn a_complete_set_verifies_every_track_and_its_cue() {
+    fn every_track_matched_verifies_the_tracks_and_their_cue() {
         let c = conn();
         let ids = title(
             &c,
@@ -976,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn a_bad_dump_leaves_the_set_without_a_cue() {
+    fn a_bad_dump_leaves_the_tracks_without_a_cue() {
         let c = conn();
         title(
             &c,

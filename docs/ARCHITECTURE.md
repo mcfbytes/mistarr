@@ -213,8 +213,9 @@ and after a disc platform's recompute, which first moves that platform's
 1. Page through the `pending` rows by id, 16 at a time. For each image,
    checkpoint, and stop if the setting was turned off.
 2. Read the header and track list in a blocking task. An image that cannot
-   be identified gets its reason, and a failure row when its identity was
-   read; an I/O error leaves it `pending`.
+   be identified gets its reason, and a failure row under its identity and
+   modification time when its header was read, so it is tried again once the
+   file is rewritten; an I/O error leaves it `pending`.
 3. If the track cache has the image, write its members and move on. If no
    live DAT title on the platform has its track sizes, give it `no_layout`
    and move on, without decoding.

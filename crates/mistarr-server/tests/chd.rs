@@ -477,6 +477,35 @@ async fn a_cooked_track_is_recorded_once() {
     b.running.shutdown().await.expect("shutdown");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_damaged_image_is_decoded_again_once_rewritten() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let b = boot(dir, true).await;
+    let app = &b.running.app;
+    let (good, w) = to_vec(&disc("d")).expect("image");
+    seed_title(app, "psx", "d", &w.tracks).await;
+    let mut damaged = good.clone();
+    let mid = damaged.len() / 2;
+    damaged[mid - 64..mid + 64].fill(0);
+    let path = games(&b).join("PSX/D/d.chd");
+    write(&path, &damaged);
+
+    scan(&b, "psx").await;
+    let failed = row(app, "psx", "PSX/D/d.chd").await.expect("row");
+    assert_eq!(failed.state, FileState::Unidentified);
+    assert!(
+        matches!(failed.reason.as_deref(), Some("corrupt" | "checksum")),
+        "{:?}",
+        failed.reason
+    );
+    // Same header and size, as when a copy into a preallocated file completes.
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+    write(&path, &good);
+    scan(&b, "psx").await;
+    assert_eq!(rows(app, "psx").await, verified_members("PSX/D/d.chd", 3));
+    b.running.shutdown().await.expect("shutdown");
+}
+
 /// A disc of `frames` frames at one frame per hunk, long enough to catch mid-decode.
 fn long_disc(label: &str, frames: u32) -> Spec {
     let mut spec = Spec::new(label, vec![track(Kind::Mode1Raw, frames, 0)]);
@@ -485,7 +514,7 @@ fn long_disc(label: &str, frames: u32) -> Spec {
     spec
 }
 
-/// The running `chd_tracks` job once it reported decoded bytes of `file`.
+/// The running `chd_tracks` job once its live progress reported decoded bytes of `file`.
 async fn decoding(app: &AppState, file: &str) -> JobId {
     let start = Instant::now();
     loop {
@@ -496,8 +525,9 @@ async fn decoding(app: &AppState, file: &str) -> JobId {
             .expect("open");
         let found = open.into_iter().find(|r| {
             r.kind == "chd_tracks"
-                && r.progress
-                    .as_ref()
+                && app
+                    .live
+                    .get(r.id)
                     .is_some_and(|p| p["file"] == file && p["bytes_done"].as_u64() > Some(0))
         });
         if let Some(r) = found {

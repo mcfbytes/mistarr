@@ -15,10 +15,11 @@ CREATE INDEX chd_tracks_sha1 ON chd_tracks(sha1);
 CREATE TABLE chd_failures (                   -- CHDs that cannot be identified, so they are not decoded again
   chd_sha1  TEXT NOT NULL,
   chd_size  INTEGER NOT NULL,
+  mtime     INTEGER NOT NULL,                 -- of the file that failed; a rewritten file is retried
   reason    TEXT NOT NULL,                    -- a files.reason code
   decoder   INTEGER NOT NULL,                 -- decoder version; an older one is retried
   failed_at INTEGER NOT NULL,
-  PRIMARY KEY (chd_sha1, chd_size)
+  PRIMARY KEY (chd_sha1, chd_size, mtime)
 ) WITHOUT ROWID;
 
 -- Unmatched whole-file hashes of disc CHDs; the next scan reads their headers.

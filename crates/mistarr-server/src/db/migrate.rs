@@ -463,7 +463,11 @@ mod tests {
     #[test]
     fn chd_migration_drops_unmatched_disc_chd_rows_only() {
         let mut conn = Connection::open_in_memory().expect("open");
-        for m in MIGRATIONS.iter().filter(|m| m.version < 17) {
+        let chd = MIGRATIONS
+            .iter()
+            .find(|m| m.name.ends_with("_chd_tracks"))
+            .expect("the CHD migration");
+        for m in MIGRATIONS.iter().filter(|m| m.version < chd.version) {
             conn.execute_batch(m.sql).expect("migration");
         }
         crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
@@ -497,8 +501,7 @@ mod tests {
             [logged],
         )
         .expect("log");
-        let chd = MIGRATIONS.iter().find(|m| m.version == 17).expect("0017");
-        conn.execute_batch(chd.sql).expect("0017");
+        conn.execute_batch(chd.sql).expect("the CHD migration");
         let left: Vec<String> = conn
             .prepare("SELECT rel_path FROM files ORDER BY rel_path")
             .expect("prepare")

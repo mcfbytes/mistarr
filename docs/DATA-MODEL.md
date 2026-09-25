@@ -231,10 +231,11 @@ CREATE INDEX chd_tracks_sha1 ON chd_tracks(sha1);   -- finds the image of member
 CREATE TABLE chd_failures (                   -- CHDs that cannot be identified, so they are not decoded again
   chd_sha1  TEXT NOT NULL,
   chd_size  INTEGER NOT NULL,
+  mtime     INTEGER NOT NULL,                 -- of the file that failed; a rewritten file is retried
   reason    TEXT NOT NULL,                    -- a files.reason code
   decoder   INTEGER NOT NULL,                 -- decoder version; an older one is retried
   failed_at INTEGER NOT NULL,
-  PRIMARY KEY (chd_sha1, chd_size)
+  PRIMARY KEY (chd_sha1, chd_size, mtime)
 ) WITHOUT ROWID;
 -- Both outlive the files they describe, so a moved image is identified without a decode.
 
@@ -332,8 +333,9 @@ single-file one. It is the path mistarr sees, after the remote path map.
   with `reason` saying why (VERIFICATION.md "CHD images"). Its row is
   `g.chd` itself, with no hashes and no rom. Once its tracks are known the
   row gives way to member rows `g.chd#01`, `g.chd#02`… with the rebuilt
-  tracks' sizes and hashes, and `g.chd#cue` (`#cue2`…) for each cue rom of a
-  complete set; members take the states above and are never `misnamed`.
+  tracks' sizes and hashes, and `g.chd#cue` (`#cue2`…) for each cue rom
+  when every track of one DAT entry matches a distinct rom; members take the
+  states above and are never `misnamed`.
 
 ### sources.state
 

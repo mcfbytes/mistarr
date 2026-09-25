@@ -306,8 +306,8 @@ image; with `[scan] chd_tracks` off it never reads further.
 **Rows.** An image not identified is one row, `g.chd`, in state
 `unidentified` with a `reason`. An identified image is member rows instead:
 `g.chd#01` to `g.chd#NN` with each rebuilt track's size and hashes, plus
-`g.chd#cue` (then `#cue2` and on, one per cue rom) when the set is
-complete, carrying the image's size. Members carry the image's mtime and
+`g.chd#cue` (then `#cue2` and on, one per cue rom) when every track of one
+DAT entry matches a distinct rom, carrying the image's size. Members carry the image's mtime and
 `header_rule` `chd`, and are never `misnamed`: the image holds no file names.
 
 **Classification.** Each track takes every live rom it matches at the first
@@ -341,9 +341,12 @@ combined SHA1 over it and the metadata before anything is stored; the second
 SHA1 pass costs about 6 % of the decode (CHD.md "Speed").
 
 **Cache.** `chd_tracks` keeps an image's track hashes by its identity, and
-`chd_failures` why it could not be identified with the decoder version that
-found it. A scan builds member rows from the cache whatever the setting, and
-a failure is tried again only by a newer decoder. Only a finished decode
+`chd_failures` why it could not be identified, by its identity and the
+file's modification time, with the decoder version that found it. A scan
+builds member rows from the cache whatever the setting. A failure is tried
+again by a newer decoder, or once the file is rewritten: a copy into a
+preallocated file has its final header and size before its data, and fails
+until the copy completes. Only a finished decode
 whose checksums all matched writes the cache, so it is trusted as `files`
 is. Entries outlive the file, about 150 bytes per track, so a moved or copied
 image is identified without decoding it again.
