@@ -1,5 +1,5 @@
 import { api } from '../api';
-import { fixtureStatus, fixtureWizard } from '../fixtures';
+import { scenarioStatus, scenarioWizard } from '../fixtures';
 import type { SystemStatus, WizardStatus } from '../types';
 
 const isMock = import.meta.env.VITE_MOCK === '1';
@@ -34,11 +34,11 @@ export function setUnauthorized(value: boolean): void {
 }
 
 export async function loadStatus(): Promise<void> {
-  status = isMock ? fixtureStatus : await api.status();
+  status = isMock ? scenarioStatus() : await api.status();
 }
 
 export async function loadWizard(): Promise<void> {
-  wizard = isMock ? fixtureWizard : await api.wizard();
+  wizard = isMock ? scenarioWizard() : await api.wizard();
 }
 
 export function applyStatus(next: SystemStatus): void {

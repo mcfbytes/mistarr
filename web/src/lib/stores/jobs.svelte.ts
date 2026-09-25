@@ -38,7 +38,7 @@ export function getFinishedJob(id: number): FinishedJob | undefined {
 
 export async function loadJobs(): Promise<void> {
   if (isMock) {
-    jobs = mockScenario() === 'idle' ? [] : fixtureJobs;
+    jobs = mockScenario() === 'busy' ? fixtureJobs : [];
     startMockProgress();
     return;
   }

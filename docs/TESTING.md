@@ -285,6 +285,29 @@ The board run checks: placement into `games/NES` and `games/SNES`, loading in
 the core from the MiSTer menu, RSS under budget during scan and transfer,
 CORENAME pausing when a core is launched, and the Scripts menu entry.
 
+## README images
+
+The images in `docs/images/` come from `web/e2e/readme-shots.spec.ts`, which
+runs only when `README_SHOTS_DIR` names an output directory. It captures the
+web UI in mock mode at twice the pixel density, 1280 CSS pixels wide on the
+desktop and 390 on a phone, with the clock, locale and time zone fixed. The
+`?mock=showcase` scenario is an idle, fully set up board with a few more
+platforms; `?mock=idle` has no jobs, and no `mock` parameter shows the busy
+set. Every request that leaves the preview server is aborted, so posters show
+the placeholder and no third-party cover art appears. The banner and the
+1280×640 social preview are drawn from the platform art generator alone.
+
+To regenerate them, with ImageMagick 7 built with WebP on the `PATH`:
+
+```sh
+cd web && npm ci && ./scripts/readme-images.sh
+```
+
+The script converts the art-heavy images to lossy WebP at quality 90 and the
+rest to lossless WebP, and passes `social-preview.png` through `oxipng` or
+`optipng` when either is installed. Look at every image before committing
+it. The social preview is uploaded by hand in the repository's settings.
+
 ## Performance checks
 
 `cargo bench` in `mistarr-core` covers hashing throughput and DAT parse time.
