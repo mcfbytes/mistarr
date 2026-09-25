@@ -169,7 +169,7 @@ impl Pass {
 }
 
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T> {
-    tokio::task::spawn_blocking(f)
+    crate::threads::blocking(crate::threads::label::ARCADE, f)
         .await
         .map_err(|e| Error::Task(e.to_string()))
 }

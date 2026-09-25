@@ -168,6 +168,32 @@ export function mockDelayMs(q: string, page: number): number {
   return 0;
 }
 
+/**
+ * Extra present, enabled mock platforms named by their ids, read from
+ * localStorage `mistarr.mockPlatformIds` as a JSON array of strings.
+ */
+export function mockExtraPlatforms(): Platform[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockPlatformIds') ?? '[]');
+    if (Array.isArray(parsed)) {
+      return parsed
+        .filter((id): id is string => typeof id === 'string')
+        .map((id) => ({
+          id,
+          name: id,
+          core_dir: id,
+          kind: 'cartridge',
+          core_present: true,
+          enabled: true,
+          counts: { titles: 0, have: 0, wanted: 0, unmatched_files: 0, failing_check: 0, partial: 0 }
+        }));
+    }
+  } catch {
+    // Storage blocked or the value is not JSON: no extra platforms.
+  }
+  return [];
+}
+
 export function fixtureTitle(id: number): TitleDetail {
   const base = exampleNames[id % exampleNames.length] ?? 'Example Quest';
   const name = `${base} (USA)`;

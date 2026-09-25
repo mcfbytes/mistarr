@@ -114,6 +114,21 @@ test('Scan says it was queued and Activity lists finished jobs with their outcom
   await expect(page.getByText('Scan of Sega Mega Drive: 90 matched, 1 unmatched')).toBeVisible();
 });
 
+test('platform ids naming prototype members get a working Scan button', async ({ page }) => {
+  await page.addInitScript(() => {
+    localStorage.setItem('mistarr.mockPlatformIds', '["constructor", "__proto__", "toString"]');
+  });
+  await page.goto('/#/');
+  for (const id of ['constructor', '__proto__', 'toString']) {
+    const card = page.locator('.card').filter({ has: page.getByRole('heading', { name: id, exact: true }) });
+    const scan = card.getByRole('button', { name: 'Scan' });
+    await expect(scan).toBeEnabled();
+    await scan.click();
+    await expect(page.getByText(`Scan of ${id} queued`)).toBeVisible();
+    await expect(scan).toBeEnabled();
+  }
+});
+
 test('held jobs show a banner with Run now', async ({ page }) => {
   await page.goto('/#/');
   const banner = page.getByRole('status').filter({ hasText: 'paused while FCEUmm is running' });

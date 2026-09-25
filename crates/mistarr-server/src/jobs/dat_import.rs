@@ -379,10 +379,11 @@ impl DatImport {
             };
             let path = self.path.clone();
             let db = ctx.app.db.clone();
-            let outcome =
-                tokio::task::spawn_blocking(move || import_from(&db, &path, member, &req))
-                    .await
-                    .map_err(|e| Error::Task(e.to_string()))??;
+            let outcome = crate::threads::blocking(crate::threads::label::DAT_IMPORT, move || {
+                import_from(&db, &path, member, &req)
+            })
+            .await
+            .map_err(|e| Error::Task(e.to_string()))??;
             if let Outcome::Loaded(l) = &outcome {
                 games += l.games;
             }

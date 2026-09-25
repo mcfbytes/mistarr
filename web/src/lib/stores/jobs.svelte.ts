@@ -1,3 +1,4 @@
+import { SvelteMap } from 'svelte/reactivity';
 import { api } from '../api';
 import { fixtureJobs, fixtureRecentJobs, mockScenario } from '../fixtures';
 import type { Job, JobState } from '../types';
@@ -16,21 +17,23 @@ export interface FinishedJob {
 
 let jobs = $state<Job[]>([]);
 let recent = $state<Job[]>([]);
-let finished = $state<Record<number, FinishedJob>>({});
+// Insertion-ordered, so the oldest entry is evicted first.
+const finished = new SvelteMap<number, FinishedJob>();
 const FINISHED_KEEP = 50;
 let reloadTimer: ReturnType<typeof setTimeout> | null = null;
 let recentTimer: ReturnType<typeof setTimeout> | null = null;
 // Pages showing the recent list; it is re-read only while one is open.
 let recentWatchers = 0;
 // Scans the user queued, by job id, until their outcome is shown; kept across pages.
-let pendingScans: Record<number, string> = {};
+// eslint-disable-next-line svelte/prefer-svelte-reactivity -- only event handlers read it, never markup
+const pendingScans = new Map<number, string>();
 
 export function getJobs(): Job[] {
   return jobs;
 }
 
 export function getFinishedJob(id: number): FinishedJob | undefined {
-  return finished[id];
+  return finished.get(id);
 }
 
 export async function loadJobs(): Promise<void> {
@@ -68,8 +71,8 @@ export function watchRecent(): () => void {
 
 /** Shows a toast with the outcome of scan `jobId` of `platformId` once it finishes. */
 export function trackScan(jobId: number, platformId: string): void {
-  pendingScans = { ...pendingScans, [jobId]: platformId };
-  const done = finished[jobId];
+  pendingScans.set(jobId, platformId);
+  const done = finished.get(jobId);
   if (done) {
     announce(jobId, done.state, done.progress);
   }
@@ -80,11 +83,11 @@ function platformName(id: string): string {
 }
 
 function announce(id: number, state: JobState, progress: Record<string, unknown> | null): void {
-  const platformId = pendingScans[id];
+  const platformId = pendingScans.get(id);
   if (platformId === undefined || (state !== 'done' && state !== 'failed')) {
     return;
   }
-  pendingScans = Object.fromEntries(Object.entries(pendingScans).filter(([k]) => Number(k) !== id));
+  pendingScans.delete(id);
   const text = jobOutcome({ kind: 'scan', state, progress, payload: { platform_id: platformId } }, platformName);
   showToast(text, state === 'done' ? 'success' : 'error');
 }
@@ -101,7 +104,7 @@ function announceSource(file: string, state: JobState, progress: Record<string, 
 
 /** After a resync, re-reads the recent list when a page shows it or a scan awaits its outcome. */
 export function resyncRecent(): Promise<void> {
-  if (recentWatchers === 0 && Object.keys(pendingScans).length === 0) {
+  if (recentWatchers === 0 && pendingScans.size === 0) {
     return Promise.resolve();
   }
   return loadRecentJobs().catch(() => undefined);
@@ -154,7 +157,7 @@ export function jobOutcome(
 
 // After a resync the events that finished jobs may be lost; forget what is known.
 export function resetFinished(): void {
-  finished = {};
+  finished.clear();
 }
 
 // Lane and hold reason come only from /system/jobs, so a new or moved job re-reads it.
@@ -184,8 +187,14 @@ export function applyJobProgress(
     resolveUpload(kind === 'dat_import' ? 'dats' : 'sources', detail, id);
   }
   if (state === 'done' || state === 'failed') {
-    const kept = Object.entries(finished).slice(-(FINISHED_KEEP - 1));
-    finished = { ...Object.fromEntries(kept), [id]: { kind, state, progress } };
+    finished.delete(id);
+    for (const old of finished.keys()) {
+      if (finished.size < FINISHED_KEEP) {
+        break;
+      }
+      finished.delete(old);
+    }
+    finished.set(id, { kind, state, progress });
     jobs = jobs.filter((j) => j.id !== id);
     announce(id, state, progress);
     if (kind === 'source_import' && detail !== null) {

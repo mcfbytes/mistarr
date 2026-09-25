@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { findPlatform, getPlatforms, loadPlatforms, patchPlatform } from '../lib/stores/platforms.svelte';
   import { getJobs, trackScan } from '../lib/stores/jobs.svelte';
   import { describeProgress, jobStatus } from '../lib/status';
@@ -22,7 +23,7 @@
   const disabled = $derived(platforms.filter((p) => p.core_present && !p.enabled));
 
   const isMock = import.meta.env.VITE_MOCK === '1';
-  let scanning = $state<Record<string, boolean>>({});
+  const scanning = new SvelteSet<string>();
 
   // The open scan of each platform, shown on its card.
   const scans: Record<string, Job | undefined> = $derived(
@@ -54,10 +55,10 @@
 
   // The button keeps focus while the request is out, so a second press is ignored here.
   async function scan(id: string): Promise<void> {
-    if (scanning[id]) {
+    if (scanning.has(id)) {
       return;
     }
-    scanning = { ...scanning, [id]: true };
+    scanning.add(id);
     try {
       const queued = isMock ? await new Promise<null>((r) => setTimeout(() => r(null), 400)) : await api.scan(id);
       showToast(`Scan of ${platformName(id)} queued`, 'info');
@@ -68,7 +69,7 @@
     } catch (err) {
       showToast(errorMessage(err));
     } finally {
-      scanning = { ...scanning, [id]: false };
+      scanning.delete(id);
     }
   }
 
@@ -111,8 +112,8 @@
           </div>
         {/if}
         <div class="actions">
-          <button onclick={() => scan(platform.id)} aria-disabled={scanning[platform.id] === true} aria-busy={scanning[platform.id] === true}>
-            {#if scanning[platform.id]}<span class="spinner" aria-hidden="true"></span>Queuing…{:else}Scan{/if}
+          <button onclick={() => scan(platform.id)} aria-disabled={scanning.has(platform.id)} aria-busy={scanning.has(platform.id)}>
+            {#if scanning.has(platform.id)}<span class="spinner" aria-hidden="true"></span>Queuing…{:else}Scan{/if}
           </button>
           <button onclick={() => setEnabled(platform.id, false)}>Disable</button>
         </div>

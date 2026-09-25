@@ -120,7 +120,7 @@ async fn write_field(
         let Some(mut f) = file.take() else {
             break;
         };
-        let written = tokio::task::spawn_blocking(move || {
+        let written = crate::threads::blocking(crate::threads::label::DAT_SAVE, move || {
             f.write_all(&chunk)?;
             Ok::<_, std::io::Error>(f)
         })

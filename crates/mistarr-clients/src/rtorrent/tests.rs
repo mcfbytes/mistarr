@@ -1042,3 +1042,29 @@ async fn files_list_paths_once_metadata_is_present() {
     ]);
     assert_eq!(fake.calls(), vec![expected.clone(), expected]);
 }
+
+#[test]
+fn a_labelled_delete_removes_the_files_and_keeps_the_thread_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::write(dir.path().join("a.bin"), b"x").expect("write");
+    let directory = dir.path().to_path_buf();
+    let t = std::thread::Builder::new()
+        .name("delete-test".into())
+        .spawn(move || {
+            let layout = DataLayout {
+                directory,
+                multi_file: false,
+                files: vec![PathBuf::from("a.bin")],
+            };
+            let r = delete_labelled(layout);
+            let comm = std::fs::read_to_string("/proc/thread-self/comm").unwrap_or_default();
+            (r, comm)
+        })
+        .expect("spawn");
+    let (r, comm) = t.join().expect("join");
+    r.expect("delete");
+    assert!(!dir.path().join("a.bin").exists());
+    if cfg!(target_os = "linux") {
+        assert_eq!(comm.trim_end(), "delete-test");
+    }
+}

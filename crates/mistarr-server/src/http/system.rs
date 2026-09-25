@@ -104,9 +104,11 @@ struct CoresResponse {
 async fn cores(State(app): State<Arc<AppState>>) -> Result<Json<CoresResponse>, ApiError> {
     let platforms = {
         let app = Arc::clone(&app);
-        tokio::task::spawn_blocking(move || crate::app::detect_cores(&app))
-            .await
-            .map_err(|e| crate::Error::Task(e.to_string()))??
+        crate::threads::blocking(crate::threads::label::DETECT, move || {
+            crate::app::detect_cores(&app)
+        })
+        .await
+        .map_err(|e| crate::Error::Task(e.to_string()))??
     };
     let arcade_job_id = crate::jobs::arcade::enqueue_if_relevant(&app).await?;
     Ok(Json(CoresResponse {
@@ -239,10 +241,12 @@ async fn start_client(
         )));
     }
     tracing::info!(kind = body.kind.as_str(), "starting the download client");
-    tokio::task::spawn_blocking(move || launcher.start(body.kind))
-        .await
-        .map_err(|e| crate::Error::Task(e.to_string()))?
-        .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;
+    crate::threads::blocking(crate::threads::label::LAUNCH, move || {
+        launcher.start(body.kind)
+    })
+    .await
+    .map_err(|e| crate::Error::Task(e.to_string()))?
+    .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;
     let deadline = tokio::time::Instant::now() + app.options.client_start_wait;
     loop {
         let found = detect_and_store(&app, true).await?;
