@@ -426,13 +426,14 @@ fn describe(src: &[u8], kind: Kind) -> Result<(u32, Vec<i32>, usize), ChdError> 
         if count == 0 {
             loop {
                 let run = bits.take(2);
+                // Checked per run, so a hostile run of zeros never grows the vector.
+                if probs.len() + run as usize > kind.max_symbol + 1 {
+                    return Err(corrupt("zstd FSE table has too many symbols"));
+                }
                 probs.extend(std::iter::repeat_n(0, run as usize));
                 if run != 3 {
                     break;
                 }
-            }
-            if probs.len() > kind.max_symbol + 1 {
-                return Err(corrupt("zstd FSE table has too many symbols"));
             }
         }
         while remaining < threshold {
@@ -614,6 +615,14 @@ mod tests {
             f.extend_from_slice(body);
         }
         f
+    }
+
+    #[test]
+    fn a_long_run_of_zero_probabilities_is_refused_at_the_symbol_limit() {
+        let mut src = vec![0xFF; 128 << 10];
+        src[..2].copy_from_slice(&[0x10, 0xFE]);
+        let e = describe(&src, LL).expect_err("too many symbols");
+        assert!(e.to_string().contains("too many symbols"), "{e}");
     }
 
     #[test]

@@ -373,6 +373,7 @@ image is identified without decoding it again.
 | `pregap` | A pregap after track 1 that the image does not store, which the Redump `.bin` holds. |
 | `corrupt` | The image is damaged or truncated. |
 | `checksum` | The decoded data do not match the image's own checksums. |
+| `no_checksum` | The image's SHA1 is all zero, as chdman leaves an uncompressed image, so it has no identity and no check. |
 
 ## Pre-download matching
 

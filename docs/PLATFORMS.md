@@ -65,8 +65,8 @@ image, which takes minutes per disc on the DE10-Nano, so it runs only with
 decoded once and its track hashes are kept. With it off, or while an image
 waits, the scan reads only its header and the Platforms card lists it as not
 identified with the reason, not as unmatched. GD-ROM images, images that need
-a parent CHD, and tracks stored without their full 2352-byte sectors are not
-identified. A DAT that lists `.chd` files as roms still verifies them by
+a parent CHD, uncompressed images, which chdman writes without checksums,
+and tracks stored without their full 2352-byte sectors are not identified. A DAT that lists `.chd` files as roms still verifies them by
 whole-file hash.
 
 | id | DAT name matches | core dir | adapter notes |

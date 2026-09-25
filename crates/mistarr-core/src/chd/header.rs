@@ -213,6 +213,9 @@ pub fn read_header<R: Read>(mut r: R) -> Result<Header, ChdError> {
             "more frames than a CD holds",
         ));
     }
+    if b[84..104].iter().all(|&x| x == 0) {
+        return Err(fail(Unidentifiable::NoChecksum, "the image SHA1 is zero"));
+    }
     let mut compressors = [None; 4];
     let mut ended = false;
     for (i, slot) in compressors.iter_mut().enumerate() {
@@ -337,6 +340,13 @@ pub(crate) mod tests {
         gap[24..28].copy_from_slice(b"cdfl");
         assert_eq!(reason(&gap), Some(Unidentifiable::Corrupt));
         assert_eq!(reason(&sample(10, 8)[..100]), Some(Unidentifiable::Corrupt));
+        let unchecked = set(84, &[0; 20]);
+        assert_eq!(reason(&unchecked), Some(Unidentifiable::NoChecksum));
+        assert_eq!(
+            reason(&set(16, &[0; 8])[..]),
+            None,
+            "an uncompressed image with its SHA1 set is read"
+        );
     }
 
     /// Fails every read that would reach past byte 124.

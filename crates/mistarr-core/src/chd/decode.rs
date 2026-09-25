@@ -315,6 +315,7 @@ impl<R: Read + Seek> Decoder<R> {
 /// # b[32..40].copy_from_slice(&(300_000u64 * 2448).to_be_bytes());
 /// # b[56..60].copy_from_slice(&(8u32 * 2448).to_be_bytes());
 /// # b[60..64].copy_from_slice(&2448u32.to_be_bytes());
+/// # b[84..104].fill(1);
 /// let h = read_header(&b[..]).unwrap();
 /// assert!(decode_budget(&h) < 16 << 20);
 /// ```

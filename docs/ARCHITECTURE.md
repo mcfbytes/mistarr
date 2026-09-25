@@ -213,7 +213,10 @@ and after a disc platform's recompute, which first moves that platform's
 `no_layout` images back to `pending`. It never runs while the setting is off.
 
 1. Page through the `pending` rows by id, 16 at a time. For each image,
-   checkpoint, and stop if the setting was turned off.
+   checkpoint, and stop if the setting was turned off. When the pages run
+   out, start again from the lowest id if the pass identified any image,
+   skipping those left `pending` by an I/O error: an enqueue while the job
+   is paused joins it, and may have put rows behind its cursor.
 2. Read the header and track list in a blocking task. An image that cannot
    be identified gets its reason, and a failure row under its identity and
    modification time when its header was read, so it is tried again once the

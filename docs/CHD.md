@@ -50,6 +50,7 @@ and the length is 124. It never reads past byte 124.
 | hunk bytes is 0, not a multiple of 2448, or over 214 frames (523,872 bytes) | `corrupt` |
 | logical bytes is 0 or not a multiple of 2448 | `corrupt` |
 | more than 450,000 frames | `too_large` |
+| SHA1 (offset 84) is all zero | `no_checksum` |
 | an empty codec slot before a used one | `corrupt` |
 
 Hunks number `ceil(logical / hunk bytes)`; the last may be partial, and only
@@ -131,7 +132,10 @@ first. Two pad frames end the image.
 When codec slot 0 is empty the map at the map offset is one u32 per hunk.
 The hunk is stored at file offset `entry × hunk bytes`, `hunk bytes` long,
 with no CRC. Entry 0 is a hunk of zeros (a parent hunk when there is a
-parent). The raw SHA1 covers these hunks.
+parent). chdman writes an uncompressed image with both SHA1s zero, which
+the header check rejects as `no_checksum`: such an image has no identity to
+cache under and nothing to check its data against. An uncompressed image
+with its SHA1s set is decoded, and the raw SHA1 covers its hunks.
 
 ### Compressed map header
 

@@ -619,10 +619,13 @@ impl Job for ChdTracks {
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
-        let total = ctx.app.db.read(rows::waiting_count).await?;
+        let mut total = ctx.app.db.read(rows::waiting_count).await?;
         let mut tally = Tally::default();
         let mut live = Live::new(ctx, total);
         let mut after = FileId(0);
+        // Rows left pending this run, and whether this pass from id 0 identified any.
+        let mut skipped = std::collections::HashSet::new();
+        let mut progressed = false;
         'pages: loop {
             let page = ctx
                 .app
@@ -630,10 +633,21 @@ impl Job for ChdTracks {
                 .read(move |c| rows::waiting(c, after, PAGE))
                 .await?;
             if page.is_empty() {
-                break;
+                // A DAT load may have joined this run with rows behind the cursor.
+                if !progressed {
+                    break;
+                }
+                (after, progressed) = (FileId(0), false);
+                let left = ctx.app.db.read(rows::waiting_count).await?;
+                total = tally.done + left.saturating_sub(skipped.len() as u64);
+                live.total = total;
+                continue;
             }
             for row in page {
                 after = row.id;
+                if skipped.contains(&row.id) {
+                    continue;
+                }
                 ctx.checkpoint().await?;
                 if !enabled(&ctx.app) {
                     break 'pages;
@@ -643,9 +657,12 @@ impl Job for ChdTracks {
                     Outcome::Verified => tally.verified += 1,
                     Outcome::Unmatched => tally.unmatched += 1,
                     Outcome::NotIdentified => tally.not_identified += 1,
-                    Outcome::Skipped => {}
+                    Outcome::Skipped => {
+                        skipped.insert(row.id);
+                    }
                     Outcome::Stopped => break 'pages,
                 }
+                progressed |= outcome != Outcome::Skipped;
                 tally.done += 1;
                 live.done = tally.done;
                 if yield_lane(ctx).await? {

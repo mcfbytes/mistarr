@@ -60,9 +60,12 @@ pub enum Unidentifiable {
     Corrupt,
     /// The decoded data do not match a checksum the image carries.
     Checksum,
+    /// The image's SHA1 is all zero, as chdman leaves an uncompressed image, so it has
+    /// neither an identity nor a check of its decoded data.
+    NoChecksum,
 }
 
-const REASONS: [(Unidentifiable, &str); 12] = [
+const REASONS: [(Unidentifiable, &str); 13] = [
     (Unidentifiable::NotChd, "not_chd"),
     (Unidentifiable::Version, "version"),
     (Unidentifiable::Parent, "parent"),
@@ -75,6 +78,7 @@ const REASONS: [(Unidentifiable, &str); 12] = [
     (Unidentifiable::PregapMissing, "pregap"),
     (Unidentifiable::Corrupt, "corrupt"),
     (Unidentifiable::Checksum, "checksum"),
+    (Unidentifiable::NoChecksum, "no_checksum"),
 ];
 
 impl Unidentifiable {

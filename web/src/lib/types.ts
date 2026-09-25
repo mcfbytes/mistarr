@@ -381,7 +381,8 @@ export type UnidentifiedReason =
   | 'cooked'
   | 'pregap'
   | 'corrupt'
-  | 'checksum';
+  | 'checksum'
+  | 'no_checksum';
 
 export interface UnidentifiedFile {
   rel_path: string;

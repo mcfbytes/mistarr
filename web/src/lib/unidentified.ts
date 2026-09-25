@@ -16,7 +16,8 @@ const REASONS: Record<UnidentifiedReason, string> = {
   cooked: 'Not identified: a track is stored as 2048-byte sectors, so its raw track cannot be rebuilt.',
   pregap: "Not identified: a track's pregap is not stored in the image.",
   corrupt: 'Not identified: the image is damaged or truncated.',
-  checksum: "Not identified: the decoded data do not match the image's own checksum."
+  checksum: "Not identified: the decoded data do not match the image's own checksum.",
+  no_checksum: 'Not identified: the image carries no checksum, as uncompressed CHD images do; re-create it compressed with chdman.'
 };
 
 /** The sentence the Platforms card shows for a file not identified. */

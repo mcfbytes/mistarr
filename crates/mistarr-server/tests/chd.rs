@@ -201,6 +201,10 @@ async fn chd_jobs(app: &AppState) -> i64 {
     count(app, "SELECT COUNT(*) FROM jobs WHERE kind = 'chd_tracks'").await
 }
 
+async fn scan_jobs(app: &AppState) -> i64 {
+    count(app, "SELECT COUNT(*) FROM jobs WHERE kind = 'scan'").await
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_setting_off_reads_only_the_header_and_turning_it_on_verifies_the_tracks() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -359,20 +363,52 @@ async fn a_chd_beside_its_bins_and_cue_leaves_both_verified() {
 
 /// A Logiqx DAT for PlayStation with one game `g` of a cue and `tracks`.
 fn psx_dat(version: &str, tracks: &[HashSet]) -> String {
+    psx_dat_of(version, &[("g", tracks)])
+}
+
+/// A Logiqx DAT for PlayStation with a game per `(name, tracks)`, each with a cue.
+fn psx_dat_of(version: &str, games: &[(&str, &[HashSet])]) -> String {
     let rom = |name: &str, h: &HashSet| {
         format!(
             "<rom name=\"{name}\" size=\"{}\" crc=\"{}\" md5=\"{}\" sha1=\"{}\"/>",
             h.size, h.crc32, h.md5, h.sha1
         )
     };
-    let mut roms = rom("g.cue", &cue_hash("g"));
-    for (i, h) in tracks.iter().enumerate() {
-        roms.push_str(&rom(&format!("g (Track {:02}).bin", i + 1), h));
+    let mut body = String::new();
+    for (game, tracks) in games {
+        let mut roms = rom(&format!("{game}.cue"), &cue_hash(game));
+        for (i, h) in tracks.iter().enumerate() {
+            roms.push_str(&rom(&format!("{game} (Track {:02}).bin", i + 1), h));
+        }
+        body.push_str(&format!(
+            "<game name=\"{game}\"><description>{game}</description>{roms}</game>"
+        ));
     }
     format!(
         "<datafile><header><name>Sony - PlayStation</name><version>{version}</version></header>\
-         <game name=\"g\"><description>g</description>{roms}</game></datafile>"
+         {body}</datafile>"
     )
+}
+
+/// Enqueues a DAT load of `xml` and waits for it and the background jobs it queues.
+async fn load_dat_in_background(b: &Booted, file: &str, xml: &str) {
+    let app = &b.running.app;
+    let path = app.config().paths.data.join("dats").join(file);
+    write(&path, xml.as_bytes());
+    let job = Arc::new(mistarr_server::jobs::dat_import::DatImport::new(&path));
+    mistarr_server::jobs::Scheduler::enqueue(app, job)
+        .await
+        .expect("enqueue");
+    wait_for("the background lane", || async {
+        count(
+            app,
+            "SELECT COUNT(*) FROM jobs WHERE lane = 'background'
+               AND state IN ('queued', 'running', 'paused')",
+        )
+        .await
+            == 0
+    })
+    .await;
 }
 
 async fn load_dat(b: &Booted, file: &str, xml: &str) {
@@ -602,6 +638,61 @@ async fn a_held_gate_pauses_decoding_and_turning_off_stops_it() {
     )
     .await;
     assert_eq!(waiting, 0);
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_recheck_while_decoding_is_paused_joins_the_run() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let b = boot(dir, true).await;
+    let app = &b.running.app;
+    image(&games(&b).join("PSX/A/a.chd"), &disc("a"));
+    scan(&b, "psx").await;
+    let first = row(app, "psx", "PSX/A/a.chd").await.expect("row");
+    assert_eq!(first.reason.as_deref(), Some("no_layout"));
+
+    let (bytes, l) = to_vec(&long_disc("l", 12_000)).expect("image");
+    load_dat_in_background(&b, "psx.dat", &psx_dat_of("1", &[("l", &l.tracks)])).await;
+    idle(app).await;
+    write(&games(&b).join("PSX/L/l.chd"), &bytes);
+    let body = r#"{"platform_id":"psx"}"#;
+    let r = request(b.addr(), "POST", "/api/v1/system/scan", &[], Some(body)).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let id = decoding(app, "l.chd").await;
+    // A running core holds the heavy lane only, so the recompute below goes ahead.
+    std::fs::write(b.corename(), "SNES\n").expect("corename");
+    wait_state(app, id, JobState::Paused).await;
+    let (jobs, scans) = (chd_jobs(app).await, scan_jobs(app).await);
+
+    // A recompute puts the row behind the paused run's cursor back to pending, and its
+    // enqueue joins that run, which must still reach the row.
+    let recompute = Arc::new(mistarr_server::jobs::dat_import::Recompute::new("psx"));
+    mistarr_server::jobs::Scheduler::enqueue(app, recompute)
+        .await
+        .expect("enqueue");
+    wait_for("the recheck", || async {
+        row(app, "psx", "PSX/A/a.chd")
+            .await
+            .is_some_and(|r| r.reason.as_deref() == Some("pending"))
+    })
+    .await;
+    assert_eq!(
+        row(app, "psx", "PSX/A/a.chd").await.expect("row").id,
+        first.id
+    );
+    assert_eq!(
+        chd_jobs(app).await,
+        jobs,
+        "the enqueue joined the paused run"
+    );
+    std::fs::write(b.corename(), "MENU\n").expect("corename");
+    idle(app).await;
+    assert_eq!(scan_jobs(app).await, scans, "no scan queued a fresh run");
+    let a = row(app, "psx", "PSX/A/a.chd").await.expect("row");
+    assert_eq!(a.reason.as_deref(), Some("no_layout"), "checked again");
+    assert_eq!(chd_jobs(app).await, jobs);
+    let t1 = row(app, "psx", "PSX/L/l.chd#01").await.expect("track");
+    assert_eq!(t1.state, FileState::Verified);
     b.running.shutdown().await.expect("shutdown");
 }
 

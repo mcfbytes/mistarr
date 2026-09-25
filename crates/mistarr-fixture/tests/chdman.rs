@@ -147,6 +147,25 @@ fn chdman_images_decode_to_the_source_bins() {
     }
 }
 
+/// chdman leaves both SHA1s of an uncompressed image zero, so its header is rejected.
+#[test]
+fn chdman_uncompressed_images_carry_no_checksum() {
+    let Some(chdman) = chdman() else { return };
+    let dir = tempfile::tempdir().expect("tmp");
+    for (spec, name) in [(split_disc(), "split"), (hidden_pregap_disc(), "hidden")] {
+        let cue = write_redump_set(&spec, &dir.path().join(name), false).expect("set");
+        let out = dir.path().join(format!("{name}-none.chd"));
+        create(&chdman, &cue, &out, &["-c", "none"]);
+        let bytes = std::fs::read(&out).expect("read");
+        assert!(
+            bytes[64..104].iter().all(|&b| b == 0),
+            "{name}: SHA1s are zero"
+        );
+        let got = chd::read_header(&bytes[..]).err().and_then(|e| e.reason());
+        assert_eq!(got, Some(Unidentifiable::NoChecksum), "{name}");
+    }
+}
+
 #[test]
 fn chdman_cooked_and_virtual_pregap_images_are_not_identified() {
     let Some(chdman) = chdman() else { return };
