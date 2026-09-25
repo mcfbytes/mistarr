@@ -171,11 +171,12 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    while a core is running; the timer goes through the same heavy lane as
    the others, so it waits for the gate too.
 2. For each file, compare size and mtime with `files`. Unchanged files are
-   not hashed again. An unchanged file with no rom is matched from its
-   stored hashes (VERIFICATION.md "Matching stored hashes"), and an unchanged
-   zip member stored with its CRC32 alone is hashed once a rom of that CRC32
-   and size exists; other unchanged files are skipped. New or changed files
-   are hashed in one streaming pass with the platform's header rule. Zip members are hashed through the decompressor,
+   not hashed again. An unchanged, fully hashed file with no rom is matched
+   from its stored hashes, and an unchanged zip member never hashed, known by
+   its CRC32 alone, is hashed once a rom of that CRC32 and size exists
+   (VERIFICATION.md "Matching stored hashes"); other unchanged files are
+   skipped. New or changed files are hashed in one streaming pass with the
+   platform's header rule. Zip members are hashed through the decompressor,
    and the zip central-directory CRC is used as a pre-check to skip hashing
    members that cannot match anything.
 3. Match by SHA1, then MD5, then CRC32 plus size. Record `verified`,

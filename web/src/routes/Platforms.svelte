@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { findPlatform, getPlatforms, loadPlatforms, patchPlatform } from '../lib/stores/platforms.svelte';
-  import { getFinishedJob, jobOutcome } from '../lib/stores/jobs.svelte';
+  import { trackScan } from '../lib/stores/jobs.svelte';
   import { platformUrl } from '../lib/router.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
@@ -35,34 +35,19 @@
     return parts.join(' · ');
   }
 
-  // Scans this page queued, by job id, until their outcome is shown.
-  let pending = $state<Record<number, string>>({});
-
   function platformName(id: string): string {
     return findPlatform(id)?.name ?? id;
   }
 
-  $effect(() => {
-    for (const [key, platformId] of Object.entries(pending)) {
-      const done = getFinishedJob(Number(key));
-      if (done) {
-        showToast(jobOutcome({ ...done, payload: { platform_id: platformId } }, platformName));
-        pending = Object.fromEntries(Object.entries(pending).filter(([k]) => k !== key));
-      }
-    }
-  });
-
   async function scan(id: string): Promise<void> {
     scanning = { ...scanning, [id]: true };
     try {
-      if (!isMock) {
-        const queued = await api.scan(id);
-        const jobId = queued.job_id ?? queued.arcade_job_id;
-        if (jobId != null) {
-          pending = { ...pending, [jobId]: id };
-        }
-      }
+      const queued = isMock ? null : await api.scan(id);
       showToast(`Scan of ${platformName(id)} queued`);
+      const jobId = queued?.job_id ?? queued?.arcade_job_id;
+      if (jobId != null) {
+        trackScan(jobId, id);
+      }
     } catch (err) {
       showToast(errorMessage(err));
     } finally {

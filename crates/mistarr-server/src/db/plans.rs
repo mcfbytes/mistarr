@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::downloads::{self, DownloadState};
 use super::titles::{self, Browse, SearchShape, Sort, TitleId, SEARCH_SHAPE};
-use super::{groups, imports, jobs, launch, sources};
+use super::{files, groups, imports, jobs, launch, sources};
 
 thread_local! {
     static TRACED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -72,6 +72,38 @@ fn seeded() -> Connection {
 
 /// A read under test.
 type Read<'a> = Box<dyn FnOnce(&Connection) + 'a>;
+
+/// The reads of matching stored hashes and of the recent jobs.
+fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
+    vec![
+        (
+            "recent jobs",
+            Box::new(|c| drop(jobs::recent_finished(c, 10).expect("recent"))),
+        ),
+        (
+            "unmatched files",
+            Box::new(|c| {
+                let nes = mistarr_core::PlatformId("nes".into());
+                drop(files::unmatched_after(c, &nes, files::FileId(0), 256).expect("unmatched"));
+            }),
+        ),
+        (
+            "stored match",
+            Box::new(|c| {
+                let nes = mistarr_core::PlatformId("nes".into());
+                let (sha1, md5) = ("0".repeat(40), "0".repeat(32));
+                files::match_live_rom(c, &nes, &sha1, &md5, "00000000", 16).expect("match");
+            }),
+        ),
+        (
+            "crc candidate",
+            Box::new(|c| {
+                let nes = mistarr_core::PlatformId("nes".into());
+                files::crc_candidate_exists(c, &nes, "00000000", 16).expect("candidate");
+            }),
+        ),
+    ]
+}
 
 /// Every hot read with the plan of each statement it runs.
 fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
@@ -154,7 +186,7 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
         ),
     ];
     let mut out = Vec::new();
-    for (name, read) in reads {
+    for (name, read) in reads.into_iter().chain(matching_reads()) {
         for sql in traced(&c, read) {
             let p = plan(&c, &sql);
             out.push((name, sql, p));
@@ -164,7 +196,7 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
 }
 
 /// The whole-table walks the hot reads may make, each bounded or inherent.
-const ALLOWED_SCANS: [(&str, &str); 15] = [
+const ALLOWED_SCANS: [(&str, &str); 16] = [
     // The sort over one group's availability rows, which the union gathers by rom.
     ("title detail", "SCAN (subquery-"),
     // A refresh walks at most one chunk of the dirty list and that chunk's grouped rows.
@@ -186,6 +218,7 @@ const ALLOWED_SCANS: [(&str, &str); 15] = [
     // A single-row subquery and the search index's own lookup.
     ("browse", "SCAN CONSTANT ROW"),
     ("browse", "SCAN title_search VIRTUAL TABLE"),
+    ("crc candidate", "SCAN CONSTANT ROW"),
 ];
 
 /// Every hot read seeks through indexes except the scans in [`ALLOWED_SCANS`], and the
@@ -266,4 +299,14 @@ fn the_group_refresh_seeks_by_group_root_and_rom() {
     let has = |p: &str| plan.iter().any(|l| l.contains(p));
     assert!(has("titles_group_root (group_root=?)"), "{plan:?}");
     assert!(has("files_rom (rom_id=?)"), "{plan:?}");
+}
+
+/// The recent jobs seek finished rows by state and sort only those, which the scheduler's
+/// prune keeps to a few hundred, so they need no index of their own.
+#[test]
+fn recent_jobs_sort_only_finished_rows() {
+    let reads = hot_reads();
+    let plan = plan_of(&reads, "recent jobs", "FROM jobs");
+    let seek = "SEARCH jobs USING INDEX jobs_state (state=?)";
+    assert!(plan.iter().any(|l| l.starts_with(seek)), "{plan:?}");
 }

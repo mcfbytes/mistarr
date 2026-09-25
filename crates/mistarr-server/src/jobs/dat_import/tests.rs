@@ -909,17 +909,18 @@ fn an_export_after_a_logiqx_dat_of_the_system_leaves_one_live_set() {
     );
 }
 
-/// Stores files `(path, crc32, rom id)` of 4 bytes on NES, removes `version` as
-/// `DELETE /dats/{id}` does and recomputes; returns how many files were matched again.
+/// Stores fully hashed files `(path, crc32, rom id)` of 4 bytes on NES, removes `version`
+/// as `DELETE /dats/{id}` does and recomputes; returns how many files were matched again.
 fn remove_with_files(c: &TestDb, version: DatVersionId, files: &[(&str, &str, i64)]) -> usize {
     c.with(|x| {
         let nes = PlatformId("nes".into());
+        let (md5, sha1) = ("d".repeat(32), "d".repeat(40));
         for (path, crc, id) in files {
             let hashed = crate::db::files::Hashed {
                 crc32: Some(crc),
-                md5: None,
-                sha1: None,
-                header_rule: None,
+                md5: Some(&md5),
+                sha1: Some(&sha1),
+                header_rule: Some("none"),
             };
             let state = crate::db::files::FileState::Misnamed;
             crate::db::files::upsert(x, &nes, path, 4, 1, &hashed, Some(*id), state, 1)?;
@@ -1419,4 +1420,60 @@ fn a_stored_crc_matches_a_headered_file_by_its_size_less_the_header() {
         Some(FileState::Verified),
         "20 bytes on disk hash as the 4 after the iNES header"
     );
+}
+
+#[test]
+fn a_stored_crc_allows_for_a_copier_header_only_at_its_size() {
+    let c = conn();
+    let snes = PlatformId("snes".into());
+    let states = c
+        .with(|x| {
+            let rom = sums(11);
+            let title = files::seed_title_fixture(x, &snes, "Copier Quest (USA)")?;
+            x.execute(
+                "INSERT INTO roms (title_id, name, size, crc32)
+                 VALUES (?1, 'Copier Quest (USA).sfc', 1024, ?2)",
+                rusqlite::params![title, rom.crc32],
+            )?;
+            let hashed = files::Hashed {
+                crc32: Some(&rom.crc32),
+                md5: Some(&rom.md5),
+                sha1: Some(&rom.sha1),
+                header_rule: Some("smc"),
+            };
+            let unverified = FileState::Unverified;
+            let mut ids = Vec::new();
+            // 1536 is 1024 plus a 512-byte copier header; 1040 is no copier size.
+            for (path, size) in [("SNES/Copier Quest (USA).sfc", 1536), ("SNES/b.sfc", 1040)] {
+                ids.push(files::upsert(
+                    x, &snes, path, size, 1, &hashed, None, unverified, 1,
+                )?);
+            }
+            match_unmatched_chunk(x, &snes, files::FileId(0))?;
+            let mut states = Vec::new();
+            for id in ids {
+                states.push(files::get(x, id)?.map(|f| f.state));
+            }
+            Ok(states)
+        })
+        .expect("match");
+    assert_eq!(
+        states,
+        [Some(FileState::Verified), Some(FileState::Unverified)]
+    );
+}
+
+#[test]
+fn a_recompute_that_changes_nothing_writes_nothing() {
+    let c = conn();
+    let nes = PlatformId("nes".into());
+    let changes = c
+        .with(|x| {
+            unmatched_file(x, &nes, "NES/stray.nes", &sums(12))?;
+            let before = x.total_changes();
+            match_unmatched_chunk(x, &nes, files::FileId(0))?;
+            Ok(x.total_changes() - before)
+        })
+        .expect("page");
+    assert_eq!(changes, 0);
 }

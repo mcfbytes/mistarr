@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getDownloads, getImports, loadDownloads, loadImports, patchDownload } from '../lib/stores/downloads.svelte';
-  import { getJobs, getRecentJobs, jobOutcome, loadJobs, loadRecentJobs } from '../lib/stores/jobs.svelte';
+  import { getJobs, getRecentJobs, jobOutcome, loadJobs, watchRecent } from '../lib/stores/jobs.svelte';
   import { findPlatform, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
@@ -12,8 +12,8 @@
     void loadDownloads();
     void loadImports();
     void loadJobs();
-    void loadRecentJobs().catch(() => undefined);
     void loadPlatforms().catch(() => undefined);
+    return watchRecent();
   });
 
   const downloads = $derived(getDownloads());

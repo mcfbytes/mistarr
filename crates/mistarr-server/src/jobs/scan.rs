@@ -590,9 +590,10 @@ pub(crate) fn own_name(rel_path: &str) -> &str {
     files::basename(rel_path.rsplit_once('#').map_or(rel_path, |(_, m)| m))
 }
 
-/// The live rom a row's stored hashes match, per `docs/VERIFICATION.md` "Matching order".
-/// The hashes are of the content after the row's header rule while `size` is the size on
-/// disk, so the CRC32 tier also tries the size less the header that rule strips.
+/// The live rom a fully hashed row's stored hashes match, per `docs/VERIFICATION.md`
+/// "Matching stored hashes"; a row without a sha1 or md5 never matches. The hashes are of
+/// the content after the row's header rule while `size` is the size on disk, so the CRC32
+/// tier also tries the size less the header that rule strips.
 ///
 /// # Errors
 ///
@@ -602,7 +603,7 @@ pub(crate) fn stored_match(
     platform_id: &PlatformId,
     f: &files::FileRow,
 ) -> Result<Option<files::RomMatch>> {
-    if f.crc32.is_none() && f.md5.is_none() && f.sha1.is_none() {
+    if f.md5.is_none() && f.sha1.is_none() {
         return Ok(None);
     }
     let hash = |h: &Option<String>| h.clone().unwrap_or_default();
@@ -634,8 +635,8 @@ enum Known {
 }
 
 /// Decides [`Known`] for a file of `size` and `mtime`. An unchanged unmatched row is
-/// matched from its stored hashes; with `crc_recheck`, one holding only a zip member's
-/// CRC32 is hashed again once a rom of that CRC32 and size exists.
+/// matched from its stored hashes; with `crc_recheck`, a zip member never hashed, known
+/// by its CRC32 alone, is hashed once a rom of that CRC32 and size exists.
 fn known(
     conn: &Connection,
     platform_id: &PlatformId,
@@ -653,9 +654,12 @@ fn known(
     if row.rom_id.is_some() || row.state != FileState::Unverified {
         return Ok(Known::Skip);
     }
-    if row.sha1.is_none() {
+    if row.sha1.is_none() && row.md5.is_none() {
+        // A NULL rule marks a member never hashed; a failed hash records its rule instead.
         let candidate = match row.crc32.as_deref() {
-            Some(crc) if crc_recheck => files::crc_candidate_exists(conn, platform_id, crc, size)?,
+            Some(crc) if crc_recheck && row.header_rule.is_none() => {
+                files::crc_candidate_exists(conn, platform_id, crc, size)?
+            }
             _ => false,
         };
         return Ok(if candidate { Known::Hash } else { Known::Skip });
@@ -897,7 +901,11 @@ async fn scan_zip_unit(
             }
             Err(e) => {
                 tracing::warn!(member = %member.name, error = %e, "cannot hash zip member; marking unverified");
-                unverified_row(member_rel, member_size, mtime, Some(member.crc32.clone()))
+                let mut row =
+                    unverified_row(member_rel, member_size, mtime, Some(member.crc32.clone()));
+                // The rule records the attempt, so an unchanged member is not decompressed again.
+                row.header_rule = Some(rule_name.to_owned());
+                row
             }
         };
         sink.push(row).await?;

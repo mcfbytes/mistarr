@@ -255,19 +255,28 @@ and note the alternates in the file's detail.
 ## Matching stored hashes
 
 A file scanned before its platform had a DAT, or before the DAT listing it
-loaded, keeps its hashes with `rom_id` NULL and state `unverified`. Two paths
-match such files without reading them again:
+loaded, keeps its hashes with `rom_id` NULL and state `unverified`. Only a
+fully hashed file, one with a stored sha1 or md5, is matched from its stored
+hashes; a CRC32 alone never makes a file `verified`. Two paths do this
+without reading the files again:
 
 - The recompute job, after every load, bind or removal of a DAT and every
-  change of preferences, pages through the platform's files with `rom_id`
-  NULL, state `unverified` and at least one stored hash, 256 per transaction
-  in id order, so a file that stays unmatched is read once per run. Arcade is
-  left out; its presence pass and md5 check decide its files.
-- A scan that finds such a file unchanged matches it from its stored hashes
-  instead of skipping it. A file with a rom, or with no stored hash, is
-  skipped as before.
+  change of preferences, pages through the platform's fully hashed files
+  with `rom_id` NULL and state `unverified`, 256 per transaction in id
+  order, so a file that stays unmatched is read once per run, and writes
+  only the rows whose rom or state changes. Arcade is left out; its presence
+  pass and md5 check decide its files.
+- A scan that finds such a file unchanged matches it from its stored hashes.
+  An unchanged file with a rom, or with no stored hash, is skipped.
 
-Both use the live roms only and the matching order above. A cartridge file
+A zip member the pre-check did not decompress is stored with its
+central-directory CRC32 alone and `header_rule` NULL. The recompute leaves
+it alone; a scan that finds it unchanged hashes it once a rom of that CRC32
+and size exists, and then matches it as a new file. A member that fails to
+hash is stored with the platform's rule, so an unchanged one is not
+decompressed again.
+
+Both paths use the live roms only and the matching order above. A cartridge file
 or zip member takes `verified`, `misnamed` or `bad` as a scan would give it;
 a disc track is classified with the other tracks of its directory under the
 all-or-nothing rule. Stored hashes are of the content after the header rule

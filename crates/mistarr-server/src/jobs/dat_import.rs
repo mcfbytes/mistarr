@@ -26,7 +26,7 @@ use crate::app::AppState;
 use crate::config::PrefsConfig;
 use crate::db::dat_stage::{self, StagedGame, StagedRom};
 use crate::db::dats::{self, DatVersionId, NewVersion};
-use crate::db::files::{self, FileId, FileRow};
+use crate::db::files::{self, FileId, FileRow, FileState};
 use crate::db::jobs::{JobId, JobState};
 use crate::db::titles;
 use crate::db::Db;
@@ -712,8 +712,9 @@ fn staged(game: &DatGame) -> StagedGame {
     }
 }
 
-/// Queues the recompute job, which matches files of retired roms again, and an
-/// automatic scan for each platform a DAT just loaded titles for,
+/// Queues the recompute job, which matches files of retired roms and unmatched files
+/// again from their stored hashes, and an automatic scan for each platform a DAT just
+/// loaded titles for,
 /// deduped so several DATs in one pack queue at most one each, binds waiting
 /// sources once for the whole pack, then checks whether the wizard just
 /// became complete.
@@ -726,7 +727,7 @@ async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
         if !queued.insert(platform.clone()) {
             continue;
         }
-        // Files of roms the load retired are matched again in the background.
+        // Files of retired roms and unmatched files are matched again in the background.
         if let Err(e) = Scheduler::enqueue(app, Arc::new(Recompute::new(&platform.0))).await {
             tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue the recompute");
         }
@@ -871,7 +872,7 @@ fn set_matches(conn: &Connection, platform: &PlatformId, rows: &[FileRow]) -> Re
         let m = scan::stored_match(conn, platform, f)?;
         let (rom, state) = scan::cartridge_state(m.as_ref(), scan::own_name(&f.rel_path));
         matched += usize::from(f.rom_id.is_none() && rom.is_some());
-        files::set_match(conn, f.id, rom, state)?;
+        set_changed(conn, f, rom, state)?;
     }
     for dir in units {
         let rows = files::in_directory(conn, platform, dir)?;
@@ -888,10 +889,19 @@ fn set_matches(conn: &Connection, platform: &PlatformId, rows: &[FileRow]) -> Re
         }
         for (f, t) in rows.iter().zip(scan::classify_disc_tracks(conn, tracks)?) {
             matched += usize::from(f.rom_id.is_none() && t.rom_id.is_some());
-            files::set_match(conn, f.id, t.rom_id, t.state)?;
+            set_changed(conn, f, t.rom_id, t.state)?;
         }
     }
     Ok(matched)
+}
+
+/// [`files::set_match`] only when the rom or state differs, so a recompute that changes
+/// nothing writes nothing.
+fn set_changed(conn: &Connection, f: &FileRow, rom: Option<i64>, state: FileState) -> Result<()> {
+    if f.rom_id == rom && f.state == state {
+        return Ok(());
+    }
+    files::set_match(conn, f.id, rom, state)
 }
 
 fn stored_hashes(f: &FileRow) -> Option<mistarr_core::HashSet> {

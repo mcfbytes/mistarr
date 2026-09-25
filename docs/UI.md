@@ -42,7 +42,8 @@ imports), which ones, and a Run now button that calls `POST /system/resume`.
 **Platforms** (`/`). One card per platform with core present, counts, and a
 scan button. Scan shows a toast when the scan is queued and another with its
 outcome when it finishes, such as "Scan of Nintendo 64: 410 matched, 2
-unmatched"; counts reload when a scan or recompute ends. Platforms whose core is absent are in a collapsed section. While
+unmatched", on whichever page is open; counts reload when a scan or
+recompute ends. Platforms whose core is absent are in a collapsed section. While
 the wizard reports a missing DAT, client or source, a "Setup not finished"
 card lists what is missing and links to the wizard.
 
@@ -113,7 +114,10 @@ most once per burst of `job.progress`, `dat.loaded`, `dat.rejected` or
 `source.changed` events, and `/sources` is re-read at most once per burst of
 `source.changed`. The outcomes of this session's uploads come from the last
 50 finished jobs; a resync forgets them, and an upload whose job is no longer
-known then says to look at the lists.
+known then says to look at the lists. `/system/jobs/recent` is re-read once
+per burst of finished jobs while Activity is open, and on a resync while
+Activity is open or a scan the user queued awaits its outcome, which the
+re-read list then supplies.
 No polling from the browser. The SSE connection shows a banner when
 disconnected and reconnects with backoff.
 

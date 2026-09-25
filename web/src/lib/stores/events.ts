@@ -3,7 +3,7 @@ import type { SseEvent } from '../types';
 import { applyStatus, loadStatus, loadWizard, setConnected } from './status.svelte';
 import { applySourceChanged, loadSources } from './sources.svelte';
 import { applyDownloadChanged, loadDownloads, loadImports } from './downloads.svelte';
-import { applyJobProgress, loadJobs, resetFinished } from './jobs.svelte';
+import { applyJobProgress, loadJobs, resetFinished, resyncRecent } from './jobs.svelte';
 import { applyDatLoaded, loadDats } from './dats.svelte';
 import { loadPlatforms } from './platforms.svelte';
 import { applyFileChanged, reloadTitles } from './titles.svelte';
@@ -24,6 +24,7 @@ async function resync(): Promise<void> {
     loadDownloads(),
     loadImports(),
     loadJobs(),
+    resyncRecent(),
     loadWizard(),
     loadStatus(),
     reloadTitles(),
