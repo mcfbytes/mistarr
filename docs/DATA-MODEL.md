@@ -237,7 +237,15 @@ CREATE TABLE chd_failures (                   -- CHDs that cannot be identified,
   failed_at INTEGER NOT NULL,
   PRIMARY KEY (chd_sha1, chd_size, mtime)
 ) WITHOUT ROWID;
--- Both outlive the files they describe, so a moved image is identified without a decode.
+
+CREATE TABLE chd_whole (                      -- whole-file hashes of CHDs a DAT's `.chd` rom size had hashed
+  chd_sha1 TEXT NOT NULL,
+  chd_size INTEGER NOT NULL,
+  mtime    INTEGER NOT NULL,                  -- of the file hashed
+  crc32 TEXT NOT NULL, md5 TEXT NOT NULL, sha1 TEXT NOT NULL,
+  PRIMARY KEY (chd_sha1, chd_size, mtime)
+) WITHOUT ROWID;
+-- They outlive the files they describe, so a moved image is identified without a decode.
 
 CREATE TABLE jobs (
   id            INTEGER PRIMARY KEY,

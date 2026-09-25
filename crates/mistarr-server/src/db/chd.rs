@@ -1,4 +1,4 @@
-//! The `chd_tracks` cache, `chd_failures`, and the `files` rows of CHD images waiting to
+//! The `chd_tracks` and `chd_whole` caches, `chd_failures`, and the `files` rows of CHD images waiting to
 //! be identified. See `docs/VERIFICATION.md` "CHD images" and `docs/DATA-MODEL.md`.
 
 use mistarr_core::chd::{ChdId, Sha1Digest, Unidentifiable};
@@ -137,6 +137,51 @@ pub fn store_tracks(conn: &Connection, id: &ChdId, tracks: &[HashSet]) -> Result
             t.sha1
         ])?;
     }
+    Ok(())
+}
+
+/// The whole-file hashes of image `id` with modification time `mtime`, kept when a DAT
+/// listing `.chd` roms of its size had it hashed whole and nothing matched.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn whole_hashes(conn: &Connection, id: &ChdId, mtime: i64) -> Result<Option<HashSet>> {
+    let row: Option<(String, String, String)> = conn
+        .prepare_cached(
+            "SELECT crc32, md5, sha1 FROM chd_whole
+             WHERE chd_sha1 = ?1 AND chd_size = ?2 AND mtime = ?3",
+        )?
+        .query_row(params![id.sha1.to_hex(), size_i64(id.size), mtime], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .optional()?;
+    Ok(row.map(|(crc32, md5, sha1)| HashSet {
+        size: id.size,
+        crc32,
+        md5,
+        sha1,
+    }))
+}
+
+/// Keeps the whole-file hashes `h` of image `id` with modification time `mtime`.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn store_whole_hashes(conn: &Connection, id: &ChdId, mtime: i64, h: &HashSet) -> Result<()> {
+    conn.prepare_cached(
+        "INSERT OR REPLACE INTO chd_whole (chd_sha1, chd_size, mtime, crc32, md5, sha1)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+    )?
+    .execute(params![
+        id.sha1.to_hex(),
+        size_i64(id.size),
+        mtime,
+        h.crc32,
+        h.md5,
+        h.sha1
+    ])?;
     Ok(())
 }
 
@@ -510,6 +555,21 @@ mod tests {
         assert_eq!(
             cached_tracks(&c, &a).expect("read"),
             Some(tracks[..1].to_vec())
+        );
+    }
+
+    #[test]
+    fn whole_hashes_are_kept_per_identity_and_mtime() {
+        let c = conn();
+        let a = id(3, 100);
+        assert!(whole_hashes(&c, &a, 5).expect("read").is_none());
+        let h = track(9, 100);
+        store_whole_hashes(&c, &a, 5, &h).expect("store");
+        store_whole_hashes(&c, &a, 5, &h).expect("again");
+        assert_eq!(whole_hashes(&c, &a, 5).expect("read"), Some(h));
+        assert!(
+            whole_hashes(&c, &a, 6).expect("read").is_none(),
+            "a rewritten file"
         );
     }
 

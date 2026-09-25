@@ -219,9 +219,9 @@ and after a disc platform's recompute, which first moves that platform's
 3. If the track cache has the image, write its members and move on. If no
    live DAT title on the platform has its track sizes, give it `no_layout`
    and move on, without decoding.
-4. Otherwise decode in blocking slices of 32 hunks (about 600 KiB, a
-   fraction of a second on the board), with a checkpoint between slices, so
-   a running core pauses the job within one slice; the paused job keeps its
+4. Otherwise decode in blocking slices of whole hunks, about 640 KiB and at
+   least one hunk (a fraction of a second on the board), with a checkpoint
+   between slices, so a running core pauses the job within one slice; the paused job keeps its
    decoder of about 1 MiB and holds no thread. Then cache the track hashes,
    replace the container row with its members, and store the decoding speed
    for `/system/status`.
@@ -490,7 +490,7 @@ Jobs run on three serial lanes, one job at a time each:
 
 | Lane | Jobs | While a core runs |
 |---|---|---|
-| heavy | `scan`, `import`, `arcade_catalog`, `chd_tracks` | Held: a queued job does not start and a running one stops at its next file boundary, or for `chd_tracks` its next 32-hunk slice, `paused`. |
+| heavy | `scan`, `import`, `arcade_catalog`, `chd_tracks` | Held: a queued job does not start and a running one stops at its next file boundary, or for `chd_tracks` its next slice of about 640 KiB, `paused`. |
 | background | `dat_import`, `recompute_1g1r`, `source_import` | Runs. A DAT parse sleeps 20 ms every 200 entries, on top of the process's `nice` level. Held, like the heavy lane, by a manual pause. |
 | light | `detect_client`, `transfer`, `resolve_magnet`, `deselect` | Runs. |
 

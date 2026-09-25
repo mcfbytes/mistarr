@@ -244,7 +244,9 @@ A `.chd` on a disc platform is not hashed whole: the scan reads its 124-byte
 header and nothing more, and its tracks are hashed only by the `chd_tracks`
 job (see "CHD images"). The exception is a `.chd` of the exact size of a live
 DAT rom whose name ends in `.chd`: it is hashed whole and matched like any
-file, and read as a CHD only when that hash matches nothing.
+file, and read as a CHD only when that hash matches nothing. Such a hash is
+kept in `chd_whole` by the image's identity and the file's modification
+time, so an unchanged file is not read whole again on the next scan.
 
 ## Matching order
 

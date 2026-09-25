@@ -184,6 +184,7 @@ mod tests {
         for t in [
             "chd_failures",
             "chd_tracks",
+            "chd_whole",
             "dat_versions",
             "downloads",
             "files",

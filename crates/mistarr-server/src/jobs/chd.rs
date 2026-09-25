@@ -28,8 +28,21 @@ use crate::threads::{self, label};
 /// `jobs.kind` of [`ChdTracks`].
 pub const KIND: &str = "chd_tracks";
 
-/// Hunks decoded between two checkpoints: about 600 KiB, a fraction of a second on the board.
-const SLICE_HUNKS: u32 = 32;
+/// Bytes decoded between two checkpoints, a fraction of a second on the board.
+const SLICE_BYTES: u32 = 640 << 10;
+
+/// Hunks of `hunk_bytes` in one slice of about [`SLICE_BYTES`], at least one.
+///
+/// ```
+/// use mistarr_server::jobs::chd::slice_hunks;
+/// assert_eq!(slice_hunks(8 * 2448), 33);
+/// assert_eq!(slice_hunks(214 * 2448), 1);
+/// assert_eq!(slice_hunks(0), 1);
+/// ```
+#[must_use]
+pub fn slice_hunks(hunk_bytes: u32) -> u32 {
+    SLICE_BYTES.checked_div(hunk_bytes).unwrap_or(1).max(1)
+}
 
 /// Waiting rows read at a time.
 const PAGE: u32 = 16;
@@ -47,9 +60,10 @@ pub(crate) struct ScannedChd {
     pub(crate) whole: Option<Track>,
 }
 
-/// Records one `.chd` file for the scan. A file of the size of a whole-file `.chd` rom is
-/// hashed whole first; otherwise only its 124-byte header is read, and its rows come from
-/// the track cache, a stored failure, or a container row waiting to be decoded.
+/// Records one `.chd` file for the scan. Its 124-byte header is read; a file of the size of
+/// a whole-file `.chd` rom is then hashed whole, or its whole hashes taken from the cache.
+/// Otherwise its rows come from the track cache, a stored failure, or a container row
+/// waiting to be decoded.
 ///
 /// # Errors
 ///
@@ -77,21 +91,6 @@ pub(crate) async fn scan_file(
             )]));
         }
     };
-    let pid = platform.clone();
-    if ctx
-        .app
-        .db
-        .read(move |c| files::chd_rom_sized(c, &pid, size))
-        .await?
-    {
-        if let Some(track) = whole_file(ctx, platform, rel_path, path, size, mtime).await? {
-            return Ok(ScannedChd {
-                rows: Vec::new(),
-                seen: vec![rel_path.to_owned()],
-                whole: Some(track),
-            });
-        }
-    }
     let owned = path.to_path_buf();
     let read = threads::blocking(label::CHD_HEADER, move || {
         File::open(&owned)
@@ -100,6 +99,32 @@ pub(crate) async fn scan_file(
     })
     .await
     .map_err(|e| Error::Task(e.to_string()))?;
+    let id = read
+        .as_ref()
+        .ok()
+        .map(|h| h.id(u64::try_from(size).unwrap_or(0)));
+    let pid = platform.clone();
+    if ctx
+        .app
+        .db
+        .read(move |c| files::chd_rom_sized(c, &pid, size))
+        .await?
+    {
+        let file = Whole {
+            rel_path,
+            path,
+            size,
+            mtime,
+            id,
+        };
+        if let Some(track) = whole_file(ctx, platform, file).await? {
+            return Ok(ScannedChd {
+                rows: Vec::new(),
+                seen: vec![rel_path.to_owned()],
+                whole: Some(track),
+            });
+        }
+    }
     let header = match read {
         Ok(h) => h,
         Err(e) => {
@@ -165,21 +190,40 @@ fn known_rows(
     Ok(vec![container(rel_path, size, mtime, reason)])
 }
 
+/// A `.chd` to hash whole, with its identity when its header was read.
+struct Whole<'a> {
+    rel_path: &'a str,
+    path: &'a Path,
+    size: i64,
+    mtime: i64,
+    id: Option<ChdId>,
+}
+
 /// Hashes a `.chd` whole, as a DAT listing `.chd` roms expects; `None` when the hash
-/// matches no rom or the file cannot be read.
+/// matches no rom or the file cannot be read. Hashes that matched nothing are kept by
+/// identity and mtime, so an unchanged file is not read whole again.
 async fn whole_file(
     ctx: &JobContext,
     platform: &PlatformId,
-    rel_path: &str,
-    path: &Path,
-    size: i64,
-    mtime: i64,
+    f: Whole<'_>,
 ) -> Result<Option<Track>> {
+    let Whole {
+        rel_path,
+        path,
+        size,
+        mtime,
+        id,
+    } = f;
     let (pid, rel) = (platform.clone(), rel_path.to_owned());
     let cached = ctx
         .app
         .db
-        .read(move |c| scan::cached_hashes(c, &pid, &rel, size, mtime))
+        .read(
+            move |c| match scan::cached_hashes(c, &pid, &rel, size, mtime)? {
+                Some(h) => Ok(Some(h)),
+                None => id.map_or(Ok(None), |id| rows::whole_hashes(c, &id, mtime)),
+            },
+        )
         .await?;
     let hashes = if let Some(h) = cached {
         h
@@ -202,9 +246,13 @@ async fn whole_file(
     let matched = ctx
         .app
         .db
-        .read(move |c| {
+        .write(move |c| {
             let size = i64::try_from(h.size).unwrap_or(i64::MAX);
-            files::match_rom(c, &pid, &h.sha1, &h.md5, &h.crc32, size)
+            let m = files::match_rom(c, &pid, &h.sha1, &h.md5, &h.crc32, size)?;
+            if let (None, Some(id)) = (&m, id) {
+                rows::store_whole_hashes(c, &id, mtime, &h)?;
+            }
+            Ok(m)
         })
         .await?;
     Ok(matched.map(|m| Track {
@@ -739,6 +787,7 @@ async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcom
     } = ready;
     let bytes_total = header.logical_bytes;
     let hunk_bytes = u64::from(header.hunk_bytes);
+    let slice = slice_hunks(header.hunk_bytes);
     let made = threads::blocking(label::CHD_DECODE, move || {
         Decoder::new(file, header, layout)
     })
@@ -756,7 +805,7 @@ async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcom
         }
         let started = Instant::now();
         let (d, step) = threads::blocking(label::CHD_DECODE, move || {
-            let step = dec.step(SLICE_HUNKS);
+            let step = dec.step(slice);
             (dec, step)
         })
         .await

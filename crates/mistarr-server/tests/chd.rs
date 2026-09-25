@@ -693,3 +693,56 @@ async fn a_dat_listing_whole_chd_files_still_hashes_them_whole() {
     assert_eq!(count(app, "SELECT COUNT(*) FROM chd_failures").await, 0);
     b.running.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_chd_the_size_of_a_whole_chd_rom_is_hashed_whole_once() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let b = boot(dir, false).await;
+    let app = &b.running.app;
+    let (bytes, _) = to_vec(&disc("v")).expect("image");
+    write(&games(&b).join("PSX/V/v.chd"), &bytes);
+    let other = HashSet {
+        size: bytes.len() as u64,
+        crc32: "0badf00d".into(),
+        md5: "0".repeat(32),
+        sha1: "1".repeat(40),
+    };
+    let pid = PlatformId("psx".into());
+    app.db
+        .write(move |c| files::seed_rom_fixture(c, &pid, "o", "o.chd", &other, "good").map(|_| ()))
+        .await
+        .expect("seed");
+
+    scan(&b, "psx").await;
+    let off = vec![(
+        "PSX/V/v.chd".to_owned(),
+        FileState::Unidentified,
+        Some("off".to_owned()),
+    )];
+    assert_eq!(rows(app, "psx").await, off);
+    let kept = || async {
+        app.db
+            .read(|c| Ok(c.query_row("SELECT sha1 FROM chd_whole", [], |r| r.get::<_, String>(0))?))
+            .await
+            .expect("kept")
+    };
+    let whole = hash_reader(Cursor::new(&bytes), HeaderRule::None, None).expect("hash");
+    assert_eq!(kept().await, whole.sha1);
+    // Zeros past the header now: a scan that read it whole again would keep another hash.
+    let mut header_only = bytes[..mistarr_core::chd::HEADER_LEN].to_vec();
+    header_only.resize(bytes.len(), 0);
+    let path = games(&b).join("PSX/V/v.chd");
+    let mtime = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .expect("mtime");
+    write(&path, &header_only);
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .and_then(|f| f.set_modified(mtime))
+        .expect("keep mtime");
+    scan(&b, "psx").await;
+    assert_eq!(rows(app, "psx").await, off);
+    assert_eq!(kept().await, whole.sha1);
+    b.running.shutdown().await.expect("shutdown");
+}
