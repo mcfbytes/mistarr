@@ -1,15 +1,18 @@
-//! Idle I/O class while a core runs; see `docs/ARCHITECTURE.md` "Pausing for the core".
+//! Idle I/O class while a core runs; see `docs/ARCHITECTURE.md` "Resource budgets".
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use super::gate::Gate;
 
 /// Where Linux lists this process's threads.
 pub const TASK_DIR: &str = "/proc/self/task";
+
+/// Where Linux links the calling thread's own `/proc/<pid>/task/<tid>` entry.
+const THREAD_SELF: &str = "/proc/thread-self";
 
 /// Listings of the task directory per switch; a pass that finds no new thread ends it.
 const MAX_PASSES: usize = 4;
@@ -195,17 +198,86 @@ pub fn apply(
     Ok(set)
 }
 
+/// The calling thread's id, read from `/proc/thread-self`; `None` without `/proc`.
+///
+/// ```
+/// let tid = mistarr_server::jobs::io_priority::current_tid();
+/// assert!(tid.is_none() || tid.is_some_and(|t| t > 0));
+/// ```
+#[must_use]
+pub fn current_tid() -> Option<u32> {
+    let link = std::fs::read_link(THREAD_SELF).ok()?;
+    link.file_name()?.to_str()?.parse().ok()
+}
+
+/// The daemon's I/O class: the setter, the thread list and the class last set.
+/// Switches and default-class launches hold the class lock, so they never interleave.
+pub struct IoPriority {
+    setter: Arc<dyn SetClass>,
+    task_dir: PathBuf,
+    current: Mutex<IoClass>,
+}
+
+impl IoPriority {
+    /// Starts at [`IoClass::Default`], the class the launcher leaves the daemon in.
+    ///
+    /// ```
+    /// use mistarr_server::jobs::io_priority::{IoPriority, Ionice, TASK_DIR};
+    /// let ionice = std::sync::Arc::new(Ionice::new(std::path::Path::new("ionice")));
+    /// let _ = IoPriority::new(ionice, std::path::Path::new(TASK_DIR));
+    /// ```
+    #[must_use]
+    pub fn new(setter: Arc<dyn SetClass>, task_dir: &Path) -> Self {
+        Self {
+            setter,
+            task_dir: task_dir.to_path_buf(),
+            current: Mutex::new(IoClass::Default),
+        }
+    }
+
+    /// Sets `class` on every thread through [`apply`] and records it.
+    ///
+    /// # Errors
+    ///
+    /// As [`apply`]; the recorded class stays as it was.
+    pub fn switch(&self, class: IoClass) -> Result<usize, PriorityError> {
+        let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+        let set = apply(self.setter.as_ref(), &self.task_dir, class)?;
+        *current = class;
+        Ok(set)
+    }
+
+    /// Runs `f` with the calling thread in the default class, so a process it
+    /// starts does not inherit the idle class, then sets the current class on
+    /// every thread again, covering any thread `f` left behind.
+    pub fn at_default<T>(&self, f: impl FnOnce() -> T) -> T {
+        let current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
+        if *current == IoClass::Default {
+            return f();
+        }
+        if let Some(tid) = current_tid() {
+            if let Err(e) = self.setter.set(tid, IoClass::Default) {
+                tracing::debug!(tid, error = %e, "launching in the idle I/O class");
+            }
+        }
+        let out = f();
+        if let Err(e) = apply(self.setter.as_ref(), &self.task_dir, *current) {
+            tracing::debug!(error = %e, "I/O class not restored after the launch");
+        }
+        out
+    }
+}
+
 /// Follows `gate`: idle I/O class while a core runs, the default otherwise.
 /// Returns when the gate is dropped or when the class cannot be set at all.
-pub async fn follow(gate: Arc<Gate>, setter: Arc<dyn SetClass>, task_dir: PathBuf) {
+pub async fn follow(gate: Arc<Gate>, priority: Arc<IoPriority>) {
     let mut rx = gate.subscribe();
     let mut current = IoClass::Default;
     loop {
         let want = IoClass::for_core(rx.borrow_and_update().core_running());
         if want != current {
-            let (setter, dir) = (Arc::clone(&setter), task_dir.clone());
-            let applied =
-                tokio::task::spawn_blocking(move || apply(setter.as_ref(), &dir, want)).await;
+            let priority = Arc::clone(&priority);
+            let applied = tokio::task::spawn_blocking(move || priority.switch(want)).await;
             match applied {
                 Ok(Ok(threads)) => tracing::info!(class = ?want, threads, "I/O class set"),
                 Ok(Err(e)) => {
@@ -225,7 +297,6 @@ pub async fn follow(gate: Arc<Gate>, setter: Arc<dyn SetClass>, task_dir: PathBu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
     /// Records calls; optionally adds a thread entry while switching, or has no tool.
     #[derive(Default)]
@@ -343,11 +414,8 @@ mod tests {
         let dir = tasks(&[5, 6]);
         let gate = Arc::new(Gate::new());
         let fake = Arc::new(Fake::default());
-        let task = tokio::spawn(follow(
-            Arc::clone(&gate),
-            Arc::clone(&fake) as Arc<dyn SetClass>,
-            dir.path().to_path_buf(),
-        ));
+        let priority = IoPriority::new(Arc::clone(&fake) as Arc<dyn SetClass>, dir.path());
+        let task = tokio::spawn(follow(Arc::clone(&gate), Arc::new(priority)));
         let wait_for = |n: usize| {
             let fake = Arc::clone(&fake);
             async move {
@@ -377,5 +445,37 @@ mod tests {
             ]
         );
         task.abort();
+    }
+
+    #[test]
+    fn a_launch_while_idle_runs_at_default_then_restores_every_thread() {
+        let dir = tasks(&[5, 6]);
+        let fake = Arc::new(Fake::default());
+        let priority = IoPriority::new(Arc::clone(&fake) as Arc<dyn SetClass>, dir.path());
+        assert_eq!(priority.at_default(|| 1), 1);
+        assert!(fake.calls.lock().expect("lock").is_empty());
+        assert_eq!(priority.switch(IoClass::Idle).expect("switch"), 2);
+        fake.calls.lock().expect("lock").clear();
+        let tid = current_tid().expect("thread-self");
+        let calls = Arc::clone(&fake);
+        let seen = priority.at_default(move || calls.calls.lock().expect("lock").clone());
+        assert_eq!(seen, vec![(tid, IoClass::Default)]);
+        let calls = fake.calls.lock().expect("lock").clone();
+        assert_eq!(
+            calls,
+            vec![
+                (tid, IoClass::Default),
+                (5, IoClass::Idle),
+                (6, IoClass::Idle)
+            ]
+        );
+    }
+
+    #[test]
+    fn current_tid_is_one_of_this_process_threads() {
+        let tid = std::thread::spawn(current_tid).join().expect("join");
+        let tid = tid.expect("thread-self");
+        assert_ne!(tid, std::process::id());
+        assert!(tid > 0);
     }
 }

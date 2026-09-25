@@ -239,7 +239,13 @@ async fn start_client(
         )));
     }
     tracing::info!(kind = body.kind.as_str(), "starting the download client");
-    tokio::task::spawn_blocking(move || launcher.start(body.kind))
+    let priority = app.io_priority.clone();
+    // The client runs at the default I/O class; the gate's rate limit slows it while a core runs.
+    let start = move || match priority {
+        Some(p) => p.at_default(|| launcher.start(body.kind)),
+        None => launcher.start(body.kind),
+    };
+    tokio::task::spawn_blocking(start)
         .await
         .map_err(|e| crate::Error::Task(e.to_string()))?
         .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;

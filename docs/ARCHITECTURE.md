@@ -511,7 +511,12 @@ I/O class by running `ionice -c 3 -p <tid>` for each entry of
 created later inherit the class from the thread that creates them. Back at
 the menu it runs `ionice -c 0 -p <tid>` the same way, and the kernel derives
 a best-effort level from `nice` again. Without `ionice` or `/proc` it logs
-once at debug and leaves the class as launched. Heavy jobs also stop at
+once at debug and leaves the class as launched. A process the daemon starts
+inherits the class of the thread that forks it and is not in
+`/proc/self/task`, so a download client started from the UI while a core
+runs is forked from a thread set back to class 0 for the launch, and every
+thread takes the idle class again afterwards; the client's transfers slow
+under the gate's rate limit instead. Heavy jobs also stop at
 their next file boundary while a core runs. Heavy work has no thread of its
 own to lower further: it shares the blocking pool with request handlers.
 

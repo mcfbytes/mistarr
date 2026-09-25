@@ -1,7 +1,7 @@
 //! Shared server state and the startup sequence of `docs/ARCHITECTURE.md` "Startup".
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
@@ -127,6 +127,8 @@ pub struct AppState {
     commands: RwLock<Arc<dyn CommandSink>>,
     /// Serialises launches and holds when the last one was sent.
     pub(crate) launch_lock: tokio::sync::Mutex<Option<Instant>>,
+    /// The daemon's I/O class, when `options.ionice` names a tool to set it.
+    pub(crate) io_priority: Option<Arc<jobs::io_priority::IoPriority>>,
 }
 
 impl AppState {
@@ -149,6 +151,13 @@ impl AppState {
             client: RwLock::new(None),
             commands: RwLock::new(Arc::new(FifoSink::new(&options.command_path))),
             launch_lock: tokio::sync::Mutex::new(None),
+            io_priority: options.ionice.as_deref().map(|program| {
+                let setter = Arc::new(jobs::io_priority::Ionice::new(program));
+                Arc::new(jobs::io_priority::IoPriority::new(
+                    setter,
+                    Path::new(jobs::io_priority::TASK_DIR),
+                ))
+            }),
             options,
         })
     }
@@ -464,12 +473,10 @@ fn spawn_tasks(app: &Arc<AppState>, scan_interval: u32) -> Vec<tokio::task::Join
         corename::watch(&opts.corename_path, opts.corename_poll, gate).await;
     }));
     tasks.push(tokio::spawn(publish_gate_changes(Arc::clone(app))));
-    if let Some(program) = &app.options.ionice {
-        let setter = Arc::new(jobs::io_priority::Ionice::new(program));
+    if let Some(priority) = &app.io_priority {
         tasks.push(tokio::spawn(jobs::io_priority::follow(
             Arc::clone(&app.gate),
-            setter,
-            PathBuf::from(jobs::io_priority::TASK_DIR),
+            Arc::clone(priority),
         )));
     }
     if scan_interval > 0 {
