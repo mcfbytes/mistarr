@@ -186,8 +186,12 @@ take longer than that: every page it writes is flushed through the card's
 rebuilds three rom indexes, writes about 3 400 pages to the database and
 WAL for a 65 MB database with every rom keyed, about 90 s at 25 ms a write.
 While migrations run, the server keeps `mistarr.migrating` in the data
-directory, rewritten every 5 s with the versions and the process's I/O bytes
-and CPU ticks, and removes it once they are applied; the log says
+directory, rewritten every 5 s from its `db-migrate` thread with the
+versions, a step count that SQLite advances every 10 000 instructions
+the migrating connection runs, and the size of the WAL, which grows while a
+commit writes its pages; it is removed once they are applied. The rewrite
+itself moves neither, so the line stays the same while the migration makes
+no progress; the log says
 "migrating the database". While that file exists and keeps changing, the
 script waits on, printing it every 30 s, and the 180 s count starts again
 once it is gone. A migration that leaves the file unchanged for 300 s

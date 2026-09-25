@@ -82,7 +82,27 @@ impl Db {
     /// assert!(db.path().ends_with("t.db"));
     /// ```
     pub fn open(path: &Path) -> Result<Self> {
-        let (writer, reader) = open_pair(path)?;
+        Self::open_with(path, None)
+    }
+
+    /// [`Db::open`], bumping `steps` every [`crate::migrating::STEP_OPS`] SQLite
+    /// instructions while it migrates, so a progress report moves only with the migration.
+    ///
+    /// # Errors
+    ///
+    /// As [`Db::open`].
+    ///
+    /// ```
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let steps = mistarr_server::migrating::Steps::default();
+    /// mistarr_server::db::Db::open_counting(&dir.path().join("c.db"), &steps).unwrap();
+    /// ```
+    pub fn open_counting(path: &Path, steps: &crate::migrating::Steps) -> Result<Self> {
+        Self::open_with(path, Some(steps))
+    }
+
+    fn open_with(path: &Path, steps: Option<&crate::migrating::Steps>) -> Result<Self> {
+        let (writer, reader) = open_pair(path, steps)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 write_turn: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -340,12 +360,12 @@ impl HeldWriter<'_> {
         let closed = close_connection(old_reader).and(close_connection(writer));
         let swapped = closed.and_then(|()| Ok(install_file(&path, new)?));
         if let Err(e) = swapped {
-            let (w, r) = open_pair(&path)?;
+            let (w, r) = open_pair(&path, None)?;
             *self.conn = w;
             *reader = r;
             return Err(e);
         }
-        let (w, r) = open_pair(&path).inspect_err(|e| {
+        let (w, r) = open_pair(&path, None).inspect_err(|e| {
             tracing::error!(error = %e, "cannot reopen the database; restart mistarr");
         })?;
         *self.conn = w;
@@ -418,13 +438,20 @@ fn placeholder() -> Result<Connection> {
 }
 
 /// Opens the writer, applying migrations, and the read-only reader on `path`.
-fn open_pair(path: &Path) -> Result<(Connection, Connection)> {
+fn open_pair(
+    path: &Path,
+    steps: Option<&crate::migrating::Steps>,
+) -> Result<(Connection, Connection)> {
     let mut writer = Connection::open(path)?;
     // Checked before `configure`, whose pragmas may write to the file.
     migrate::check_supported(&writer)?;
     configure(&writer)?;
+    if let Some(steps) = steps {
+        count_steps(&writer, steps)?;
+    }
     // A migration that rebuilds an index writes each page once with the bulk cache.
     bulk(&mut writer, |c| migrate::apply(c).map(drop))?;
+    writer.progress_handler(0, None::<fn() -> bool>)?;
     let reader = Connection::open(path)?;
     configure(&reader)?;
     reader.pragma_update(None, "query_only", true)?;
@@ -542,6 +569,23 @@ fn heap_limit(conn: &Connection, delta: isize) -> Result<()> {
         SOFT_HEAP_LIMIT
     };
     conn.pragma_update_and_check(None, "soft_heap_limit", limit, |_| Ok(()))?;
+    Ok(())
+}
+
+/// Makes `conn` bump `steps` every [`crate::migrating::STEP_OPS`] instructions it runs.
+///
+/// # Errors
+///
+/// [`Error::Db`] when the handler cannot be set.
+pub fn count_steps(conn: &Connection, steps: &crate::migrating::Steps) -> Result<()> {
+    let steps = Arc::clone(steps);
+    conn.progress_handler(
+        crate::migrating::STEP_OPS,
+        Some(move || {
+            steps.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            false
+        }),
+    )?;
     Ok(())
 }
 

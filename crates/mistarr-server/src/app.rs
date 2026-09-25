@@ -450,10 +450,10 @@ fn open_db(
     crate::migrating::clear_stale(&config.paths.data)?;
     // Leftovers of an import in RAM cut short; the database itself is always whole.
     let _ = db::ram::clean_stale(&path, &config.memory.import_dir);
-    let _progress = match crate::db::migrate::pending(&path)? {
+    let progress = match crate::db::migrate::pending(&path)? {
         Some((from, to)) => {
             tracing::info!(from, to, "migrating the database");
-            crate::migrating::Migrating::begin(&config.paths.data, from, to)
+            crate::migrating::Migrating::begin(&config.paths.data, &path, from, to)
                 .inspect_err(
                     |e| tracing::warn!(error = %e, "cannot write the migration progress file"),
                 )
@@ -461,8 +461,11 @@ fn open_db(
         }
         None => None,
     };
-    migrate_in_ram(config)?;
-    let db = Db::open(&path)?;
+    migrate_in_ram(config, progress.as_ref())?;
+    let db = match &progress {
+        Some(m) => Db::open_counting(&path, &m.steps())?,
+        None => Db::open(&path)?,
+    };
     let (stored, unfinished, resolved) = db.write_blocking(prepare_catalog)?;
     let stored = stored.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "ignoring unreadable saved settings; using the config file");
@@ -478,13 +481,17 @@ fn open_db(
 
 /// Runs pending migrations on a copy of the database in RAM when memory allows, so an
 /// index rebuild reaches the card as whole MiB writes; `Db::open` migrates what is left.
-fn migrate_in_ram(config: &Config) -> Result<()> {
+fn migrate_in_ram(config: &Config, progress: Option<&crate::migrating::Migrating>) -> Result<()> {
     let plan = db::ram::Plan {
         dir: config.memory.import_dir.clone(),
         floor: config.memory.import_floor_mib.saturating_mul(1024 * 1024),
         job: 0,
     };
-    match db::ram::migrate_in_ram(&config.paths.db(), &plan) {
+    match db::ram::migrate_in_ram(
+        &config.paths.db(),
+        &plan,
+        progress.map(crate::migrating::Migrating::steps).as_ref(),
+    ) {
         Ok(Some(r)) => tracing::info!(
             mib = r.bytes.div_ceil(1024 * 1024),
             card_writes = r.card_writes,

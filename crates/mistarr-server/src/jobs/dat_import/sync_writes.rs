@@ -511,7 +511,9 @@ fn migration_writes_on_the_bench_catalogue() {
     std::fs::copy(&path, &copy).expect("copy");
     let size = std::fs::metadata(&path).expect("size").len();
     let start = std::time::Instant::now();
-    let (db, writes) = writes_of(|| Db::open(&path).expect("migrate"));
+    let steps = crate::migrating::Steps::default();
+    let (db, writes) = writes_of(|| Db::open_counting(&path, &steps).expect("migrate"));
+    eprintln!("steps {}", steps.load(std::sync::atomic::Ordering::Relaxed));
     let (w, b) = writes.expect("per-thread I/O accounting");
     eprintln!(
         "database {size} bytes: migration {w} writes, {b} bytes, {:?}",
@@ -527,7 +529,7 @@ fn migration_writes_on_the_bench_catalogue() {
         job: 0,
     };
     let start = std::time::Instant::now();
-    let r = ram::migrate_in_ram(&copy, &plan)
+    let r = ram::migrate_in_ram(&copy, &plan, None)
         .expect("migrate")
         .expect("in RAM");
     eprintln!(

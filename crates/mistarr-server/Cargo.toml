@@ -33,7 +33,7 @@ async-trait = "0.1"
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "multipart", "query", "tokio"] }
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-rusqlite = { version = "0.40", features = ["bundled", "backup"] }
+rusqlite = { version = "0.40", features = ["bundled", "backup", "hooks"] }
 rust-embed = "8"
 rustix = { version = "1", default-features = false, features = ["std", "fs", "process"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "fs", "signal", "macros"] }
@@ -46,5 +46,5 @@ mistarr-server = { path = ".", features = ["test-support"] }
 mistarr-fixture = { path = "../mistarr-fixture" }
 tempfile = "3"
 proptest = { version = "1", default-features = false, features = ["std"] }
-rusqlite = { version = "0.40", features = ["bundled", "trace"] }
+rusqlite = { version = "0.40", features = ["bundled", "hooks", "trace"] }
 tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros"] }

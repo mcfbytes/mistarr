@@ -416,7 +416,11 @@ pub fn held_elsewhere(db: &Path) -> bool {
 ///
 /// [`Error::SchemaTooNew`] before anything is written, else the failure of a step, with
 /// the card file untouched unless the swap failed after its rename.
-pub fn migrate_in_ram(db: &Path, plan: &Plan) -> Result<Option<Report>> {
+pub fn migrate_in_ram(
+    db: &Path,
+    plan: &Plan,
+    steps: Option<&crate::migrating::Steps>,
+) -> Result<Option<Report>> {
     if !db.is_file() {
         return Ok(None);
     }
@@ -452,7 +456,14 @@ pub fn migrate_in_ram(db: &Path, plan: &Plan) -> Result<Option<Report>> {
     }
     report.copy_in = started.elapsed();
     let started = Instant::now();
-    if let Err(reason) = full_as_reason(Db::open(&copy).and_then(Db::close), "migrating")? {
+    if let Err(reason) = full_as_reason(
+        match steps {
+            Some(s) => Db::open_counting(&copy, s),
+            None => Db::open(&copy),
+        }
+        .and_then(Db::close),
+        "migrating",
+    )? {
         return skip(&reason);
     }
     report.work = started.elapsed();

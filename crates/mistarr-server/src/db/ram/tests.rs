@@ -482,7 +482,7 @@ fn startup_migrations_run_in_ram_and_swap_in() {
     let latest = super::super::migrate::latest();
     at_version(&db, latest - 1, 0.01);
     let before = titles(&db);
-    let report = migrate_in_ram(&db, &plan(dir.path()))
+    let report = migrate_in_ram(&db, &plan(dir.path()), None)
         .expect("migrate")
         .expect("ran in RAM");
     assert_eq!(report.bytes, fs::metadata(&db).expect("stat").len());
@@ -497,7 +497,7 @@ fn startup_migrations_run_in_ram_and_swap_in() {
     let left = fs::read_dir(dir.path().join("ram")).map_or(0, Iterator::count);
     assert_eq!(left, 0);
     assert!(
-        migrate_in_ram(&db, &plan(dir.path()))
+        migrate_in_ram(&db, &plan(dir.path()), None)
             .expect("again")
             .is_none(),
         "nothing left to migrate"
@@ -508,7 +508,7 @@ fn startup_migrations_run_in_ram_and_swap_in() {
 fn startup_migrations_stay_on_the_card_when_memory_is_short_or_the_schema_is_newer() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db = dir.path().join("m.db");
-    assert!(migrate_in_ram(&db, &plan(dir.path()))
+    assert!(migrate_in_ram(&db, &plan(dir.path()), None)
         .expect("no database")
         .is_none());
     at_version(&db, super::super::migrate::latest() - 1, 0.01);
@@ -517,7 +517,7 @@ fn startup_migrations_stay_on_the_card_when_memory_is_short_or_the_schema_is_new
         floor: u64::MAX / 2,
         ..plan(dir.path())
     };
-    assert!(migrate_in_ram(&db, &short).expect("short").is_none());
+    assert!(migrate_in_ram(&db, &short, None).expect("short").is_none());
     assert_eq!(sha1(&db), before, "left for the open to migrate");
 
     let newer = dir.path().join("newer.db");
@@ -526,7 +526,7 @@ fn startup_migrations_stay_on_the_card_when_memory_is_short_or_the_schema_is_new
         .expect("open")
         .execute("INSERT INTO schema_version VALUES (9999, 'future', 1)", [])
         .expect("future");
-    let too_new = migrate_in_ram(&newer, &plan(dir.path()));
+    let too_new = migrate_in_ram(&newer, &plan(dir.path()), None);
     assert!(
         matches!(too_new, Err(Error::SchemaTooNew { found: 9999, .. })),
         "{too_new:?}"
@@ -558,7 +558,7 @@ fn the_last_migration_in_place_and_in_ram() {
     let in_place = started.elapsed();
     assert_eq!(applied, [latest]);
     let started = Instant::now();
-    let r = migrate_in_ram(&b, &plan(dir.path()))
+    let r = migrate_in_ram(&b, &plan(dir.path()), None)
         .expect("migrate")
         .expect("in RAM");
     eprintln!(

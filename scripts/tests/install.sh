@@ -341,8 +341,9 @@ publish_crashing_release() {
     rm -rf "$stage"
 }
 
-# A launcher stub whose daemon, $2 = ok, serves HTTP on port $3 after 3 s;
-# exit, stops being reported running after 3 s; hang, never answers.
+# A launcher stub whose daemon, $2 = ok, serves HTTP on port $3 after 3 s; exit, stops
+# being reported running after 3 s; hang, never answers; migrate, advances
+# mistarr.migrating for 6 s, then serves; stuck, keeps rewriting it with the same line.
 write_slow_launcher_stub() {
     cat > "$1" <<STUB
 #!/bin/sh
@@ -365,11 +366,15 @@ case "\${1:-}" in
             exit) (sleep 3; rm -f "\$state") >/dev/null 2>&1 & ;;
             migrate) (m="\$MISTARR_ROOT/mistarr/mistarr.migrating"; i=0
                 while [ \$i -lt 6 ]; do
-                    echo "migrating from 16 to 17: io \$i cpu \$i" > "\$m"; i=\$((i + 1)); sleep 1
+                    echo "migrating from 16 to 17: steps \$i wal 0" > "\$m"; i=\$((i + 1)); sleep 1
                 done
                 rm -f "\$m"; exec python3 -m http.server "$3" --bind 127.0.0.1) >/dev/null 2>&1 &
                 echo \$! > "\$MISTARR_ROOT/stub.srv" ;;
-            stuck) echo "migrating from 16 to 17: io 1 cpu 1" > "\$MISTARR_ROOT/mistarr/mistarr.migrating" ;;
+            stuck) (while :; do
+                    echo "migrating from 16 to 17: steps 7 wal 4152" > "\$MISTARR_ROOT/mistarr/mistarr.migrating"
+                    sleep 1
+                done) >/dev/null 2>&1 &
+                echo \$! > "\$MISTARR_ROOT/stub.srv" ;;
         esac
         echo "mistarr started"
         ;;
