@@ -355,13 +355,14 @@ async fn put_settings(
     if client_changed {
         Scheduler::enqueue(&app, Arc::new(DetectClient)).await?;
     }
-    if runtime.transfer != Some(before.transfer) {
+    let transfer_changed = runtime.transfer != Some(before.transfer);
+    if transfer_changed || runtime.limits != before.limits {
         app.limits_wake.notify_one();
     }
     if !runtime.prefs.same_selection(&prefs_before) {
         Recompute::enqueue_all(&app).await?;
     }
-    if runtime.prefs.launch != prefs_before.launch {
+    if runtime.prefs.launch != prefs_before.launch || transfer_changed {
         let status = snapshot(&app).await;
         app.events.publish(EventKind::Status, &status);
     }

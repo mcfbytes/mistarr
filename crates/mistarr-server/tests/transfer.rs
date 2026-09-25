@@ -520,45 +520,62 @@ fn session_calls(fake: &FakeServer) -> Vec<Value> {
         .collect()
 }
 
-fn upload_limit(kbps: u32, enabled: bool) -> Value {
-    json!({ "speed-limit-up": kbps, "speed-limit-up-enabled": enabled })
+fn limit(dir: &str, kbps: u32, enabled: bool) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert(format!("speed-limit-{dir}"), json!(kbps));
+    m.insert(format!("speed-limit-{dir}-enabled"), json!(enabled));
+    Value::Object(m)
 }
 
-async fn uploads_paused(b: &Booted) -> Value {
-    get(b.addr(), "/api/v1/system/status").await.json()["uploads_paused"].clone()
+fn fields(dir: &str) -> Value {
+    json!({ "fields": [format!("speed-limit-{dir}"), format!("speed-limit-{dir}-enabled")] })
+}
+
+async fn client_hold(b: &Booted) -> Value {
+    get(b.addr(), "/api/v1/system/status").await.json()["client_hold"].clone()
+}
+
+/// Scripts the reads of the client's own limits and the two sets of a core start.
+fn push_core_start(fake: &FakeServer, down: Value, up: Value) {
+    fake.push(FakeResponse::success(down));
+    fake.push(FakeResponse::success(up));
+    fake.push(ok());
+    fake.push(ok());
 }
 
 #[tokio::test]
-async fn corename_switches_rate_limits_and_uploads_once_per_transition() {
+async fn corename_holds_uploads_once_per_transition_and_restores_own_limits() {
     let fake = FakeServer::start().await.expect("fake");
     let b = boot_transmission(&fake).await;
     let app = &b.running.app;
     let sets = || session_calls(&fake);
+    let mut live = app.events.subscribe(None).live;
     std::fs::write(b.corename(), "MENU").expect("write");
     eventually("MENU read", || async {
         app.gate.state().corename.as_deref() == Some("MENU")
     })
     .await;
-    fake.push(FakeResponse::success(upload_limit(30, true)));
-    fake.push(ok());
-    fake.push(ok());
+    push_core_start(&fake, limit("down", 0, false), limit("up", 30, true));
     std::fs::write(b.corename(), "SNES").expect("write");
-    eventually("uploads paused", || async { sets().len() == 3 }).await;
+    eventually("uploads held", || async { sets().len() == 4 }).await;
     assert_eq!(
         sets(),
         [
-            json!({ "fields": ["speed-limit-up", "speed-limit-up-enabled"] }),
-            json!({
-                "speed-limit-down": 512, "speed-limit-down-enabled": true,
-                "speed-limit-up": 64, "speed-limit-up-enabled": true
-            }),
-            upload_limit(0, true),
+            fields("down"),
+            fields("up"),
+            limit("down", 512, true),
+            limit("up", 0, true),
         ]
     );
-    eventually("the paused status", || async {
-        uploads_paused(&b).await == true
+    eventually("the held status", || async {
+        client_hold(&b).await == "uploads"
     })
     .await;
+    let mut announced = false;
+    while let Ok(ev) = live.try_recv() {
+        announced |= ev.kind == EventKind::Status && ev.data.contains(r#""client_hold":"uploads""#);
+    }
+    assert!(announced, "a status event says uploads are held");
     std::fs::write(b.corename(), "N64").expect("write");
     eventually("N64 read", || async {
         app.gate.state().corename.as_deref() == Some("N64")
@@ -567,43 +584,45 @@ async fn corename_switches_rate_limits_and_uploads_once_per_transition() {
     fake.push(ok());
     fake.push(ok());
     std::fs::write(b.corename(), "MENU").expect("write");
-    eventually("menu limits", || async { sets().len() == 5 }).await;
+    eventually("own limits back", || async { sets().len() == 6 }).await;
     assert_eq!(
-        sets()[3..],
-        [
-            upload_limit(30, true),
-            json!({ "speed-limit-down-enabled": false, "speed-limit-up-enabled": false }),
-        ]
+        sets()[4..],
+        [limit("down", 0, false), limit("up", 30, true)]
     );
-    assert_eq!(uploads_paused(&b).await, false);
+    assert_eq!(client_hold(&b).await, Value::Null);
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(sets().len(), 5);
+    assert_eq!(sets().len(), 6);
     b.running.shutdown().await.expect("shutdown");
 }
 
 #[tokio::test]
-async fn turning_the_pause_off_mid_game_restores_uploads() {
+async fn turning_the_pause_off_mid_game_gives_uploads_the_core_limit() {
     let fake = FakeServer::start().await.expect("fake");
     let b = boot_transmission(&fake).await;
     let sets = || session_calls(&fake);
-    fake.push(FakeResponse::success(upload_limit(8, false)));
-    fake.push(ok());
-    fake.push(ok());
+    push_core_start(&fake, limit("down", 0, false), limit("up", 8, false));
     std::fs::write(b.corename(), "SNES").expect("write");
-    eventually("uploads paused", || async { sets().len() == 3 }).await;
+    eventually("uploads held", || async { sets().len() == 4 }).await;
     fake.push(ok());
-    fake.push(ok());
-    let body = json!({ "transfer": { "pause_uploads_while_playing": false } }).to_string();
+    let body = json!({ "transfer": { "pause_client_while_playing": false } }).to_string();
     let r = request(b.addr(), "PUT", "/api/v1/system/settings", &[], Some(&body)).await;
     assert_eq!(r.status, 200, "{}", r.body);
-    assert_eq!(r.json()["transfer"]["pause_uploads_while_playing"], false);
-    eventually("uploads restored", || async { sets().len() == 5 }).await;
-    assert_eq!(sets()[3], upload_limit(8, false));
-    assert_eq!(sets()[4]["speed-limit-up"], 64);
-    assert_eq!(uploads_paused(&b).await, false);
-    std::fs::write(b.corename(), "MENU").expect("write");
+    assert_eq!(r.json()["transfer"]["pause_client_while_playing"], false);
+    let settings = get(b.addr(), "/api/v1/system/settings").await.json();
+    assert_eq!(
+        settings["transfer"],
+        json!({ "pause_client_while_playing": false })
+    );
+    eventually("the core upload limit", || async { sets().len() == 5 }).await;
+    assert_eq!(sets()[4], limit("up", 64, true));
+    assert_eq!(client_hold(&b).await, Value::Null);
+    let status = get(b.addr(), "/api/v1/system/status").await.json();
+    assert_eq!(status["pause_client_while_playing"], false);
     fake.push(ok());
-    eventually("menu limits", || async { sets().len() == 6 }).await;
+    fake.push(ok());
+    std::fs::write(b.corename(), "MENU").expect("write");
+    eventually("own limits back", || async { sets().len() == 7 }).await;
+    assert_eq!(sets()[6], limit("up", 8, false));
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -781,7 +800,8 @@ async fn refused_rate_limits_are_retried_until_the_client_takes_them() {
             .filter(|down| !down.is_null())
             .collect::<Vec<_>>()
     };
-    fake.push(FakeResponse::success(upload_limit(0, false)));
+    fake.push(FakeResponse::success(limit("down", 0, false)));
+    fake.push(FakeResponse::success(limit("up", 0, false)));
     fake.push(FakeResponse::failure("busy"));
     fake.push(ok());
     fake.push(ok());

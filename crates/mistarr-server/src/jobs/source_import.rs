@@ -501,6 +501,9 @@ impl Job for ResolveMagnet {
         if row.state != SourceState::Resolving {
             return Ok(());
         }
+        if app.client_frozen() {
+            return Ok(());
+        }
         let Some(client) = app.client() else {
             return note(app, &row, NO_CLIENT).await;
         };

@@ -14,6 +14,7 @@ pub mod db;
 pub mod doctor;
 mod error;
 pub mod events;
+pub mod freeze;
 pub mod http;
 pub mod incoming;
 pub mod jobs;

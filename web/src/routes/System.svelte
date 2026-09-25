@@ -1,11 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
-  import { fixtureSettings } from '../lib/fixtures';
+  import { fixtureSettings, recordMockSave } from '../lib/fixtures';
   import { api, errorMessage } from '../lib/api';
   import ClientStart from '../lib/ClientStart.svelte';
   import PathMapEditor from '../lib/PathMapEditor.svelte';
-  import UploadsPaused from '../lib/UploadsPaused.svelte';
+  import ClientHeld from '../lib/ClientHeld.svelte';
   import { cleanPathMap } from '../lib/pathmap';
   import { speedText } from '../lib/unidentified';
   import type { Settings } from '../lib/types';
@@ -69,6 +69,9 @@
     }
     const next = { ...settings, client: { ...settings.client, remote_path_map: cleaned.map } };
     try {
+      if (isMock) {
+        recordMockSave(next);
+      }
       settings = isMock ? next : await api.putSettings(next);
       saved = true;
     } catch (err) {
@@ -103,7 +106,7 @@
         {#if status.pause_reason === 'core'}<span class="muted">(held for the running core)</span>{/if}
         <button onclick={togglePause}>{status.paused ? 'Resume' : 'Pause'}</button>
       </p>
-      <UploadsPaused />
+      <ClientHeld />
       {#if statusError}<p class="error">{statusError}</p>{/if}
     </div>
   {/if}
@@ -147,13 +150,14 @@
       <label>
         <input
           type="checkbox"
-          bind:checked={settings.transfer.pause_uploads_while_playing}
-          aria-describedby="uploads-help"
+          bind:checked={settings.transfer.pause_client_while_playing}
+          aria-describedby="client-pause-help"
         />
-        Pause uploads while a game runs
+        Pause the download client while a core runs
       </label>
-      <p id="uploads-help" class="muted help">
-        Frees the card and CPU for the game. At the menu, each source's seed policy applies again.
+      <p id="client-pause-help" class="muted help">
+        Frees the board for the game. Transfers resume at the menu, and each source's seed policy applies again. A
+        client on another machine only stops uploading.
       </p>
 
       <h3>1G1R preferences</h3>

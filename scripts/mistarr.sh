@@ -12,6 +12,9 @@ STARTLOCK="${MISTARR_RUNDIR:-/tmp}/mistarr.start.lock"
 LOGFILE="$ROOT/mistarr/mistarr.log"
 STARTUP="$ROOT/linux/user-startup.sh"
 PORT="${MISTARR_PORT:-8420}"
+# Where mistarr records a download client it stopped while a core runs.
+FROZEN="${MISTARR_FROZEN:-/tmp/mistarr-client.frozen}"
+PROCDIR="${MISTARR_PROC:-/proc}"
 # Resolved absolute path to this script, wherever it was invoked from.
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 NAME=$(basename "$0")
@@ -208,6 +211,19 @@ reap() {
     done
 }
 
+# Resumes a download client mistarr stopped for a running core, when the
+# recorded pid still names that process; see docs/DOWNLOAD-CLIENTS.md.
+thaw_client() {
+    [ -f "$FROZEN" ] || return 0
+    if read -r fpid fstart < "$FROZEN" && [ -r "$PROCDIR/$fpid/stat" ]; then
+        now=$(sed 's/.*) //' "$PROCDIR/$fpid/stat" | cut -d' ' -f20)
+        if [ -n "$fstart" ] && [ "$now" = "$fstart" ] && kill -CONT "$fpid" 2>/dev/null; then
+            echo "download client resumed"
+        fi
+    fi
+    rm -f "$FROZEN"
+}
+
 do_stop() {
     sup=$(supervisor_pid)
     [ -n "$sup" ] && kill "$sup" 2>/dev/null
@@ -222,6 +238,8 @@ do_stop() {
     fi
     [ -n "$sup" ] && reap "$sup" 5
     rm -f "$SUPERFILE"
+    # A killed daemon cannot resume the client itself.
+    thaw_client
     if [ "$stopped" -eq 1 ] || [ -n "$sup" ]; then
         echo "mistarr stopped"
     else

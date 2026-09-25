@@ -18,9 +18,9 @@ pub mod keys {
     pub const WIZARD_DISMISSED: &str = "wizard.dismissed";
     /// JSON `u64`: decoded CHD bytes per active second, from the last image decoded.
     pub const CHD_RATE: &str = "chd.rate";
-    /// JSON [`crate::jobs::core_limits::Marker`]: the client's upload limit, kept
-    /// while mistarr holds uploads for a running core.
-    pub const UPLOADS_PAUSED: &str = "transfer.uploads_paused";
+    /// JSON [`crate::jobs::core_limits::SavedLimits`]: the client's own limits
+    /// in each direction the core gate replaced, until they are put back.
+    pub const CLIENT_SAVED_LIMITS: &str = "client.saved_limits";
 }
 
 /// Reads a value.

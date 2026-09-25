@@ -9,6 +9,7 @@ use crate::db::jobs::{self, JobId, JobRow, JobState};
 use crate::db::settings::{self, keys};
 use crate::db::system::wizard_counts;
 use crate::error::Result;
+use crate::jobs::core_limits::ClientHold;
 use crate::jobs::detect_client::ClientStatus;
 use crate::jobs::gate::{GateState, Override, PauseReason};
 use crate::jobs::Lane;
@@ -31,8 +32,10 @@ pub struct Status {
     /// The manual override in force.
     #[serde(rename = "override")]
     pub manual_override: Option<Override>,
-    /// Whether the download client's uploads are held while a core runs.
-    pub uploads_paused: bool,
+    /// How the download client is held while a core runs, if it is.
+    pub client_hold: Option<ClientHold>,
+    /// `transfer.pause_client_while_playing`.
+    pub pause_client_while_playing: bool,
     /// Queued and paused jobs on held lanes, heavy first, oldest first;
     /// empty while no lane is held.
     pub waiting: Vec<WaitingJob>,
@@ -199,7 +202,8 @@ pub async fn snapshot(app: &AppState) -> Status {
         pause_reason: gate.pause_reason(),
         paused: gate.paused(),
         manual_override: gate.manual,
-        uploads_paused: app.uploads_paused(),
+        client_hold: app.client_hold(),
+        pause_client_while_playing: app.config().transfer.pause_client_while_playing,
         waiting,
         corename: gate.corename,
         disk_free_bytes: free_bytes(&data),

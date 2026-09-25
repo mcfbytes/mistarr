@@ -180,7 +180,9 @@ async fn update(
         .await?
         .ok_or_else(|| ApiError::not_found("No such source."))?;
     if let (Some(seed), Some(cid)) = (seed, &updated.client_id) {
-        if let Some(client) = app.client() {
+        if app.client_frozen() {
+            app.defer_seed_policy(id);
+        } else if let Some(client) = app.client() {
             if let Err(e) = client
                 .set_seed_policy(&ClientTorrentId::new(cid.as_str()), seed)
                 .await
@@ -208,6 +210,13 @@ async fn remove(
         return Err(ApiError::bad_request(
             "This source has downloads that are queued, transferring, checking or importing. \
              Cancel them or let them finish before removing it.",
+        ));
+    }
+    if row.client_id.is_some() && app.client_frozen() {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "conflict",
+            "The download client is paused while a core runs. Remove the source at the menu.",
         ));
     }
     if let (Some(cid), Some(client)) = (&row.client_id, app.client()) {

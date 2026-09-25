@@ -435,23 +435,20 @@ mod tests {
         async fn remove(&self, _id: &ClientTorrentId, _data: bool) -> mistarr_clients::Result<()> {
             nope()
         }
-        async fn set_rate_limits(
+        async fn rate_limit(
             &self,
-            _down: Option<u32>,
-            _up: Option<u32>,
+            _dir: mistarr_clients::Direction,
+        ) -> mistarr_clients::Result<mistarr_clients::RateLimit> {
+            nope()
+        }
+        async fn set_rate_limit(
+            &self,
+            _dir: mistarr_clients::Direction,
+            _limit: mistarr_clients::RateLimit,
         ) -> mistarr_clients::Result<()> {
             nope()
         }
-        async fn upload_limit(&self) -> mistarr_clients::Result<mistarr_clients::UploadLimit> {
-            nope()
-        }
-        async fn set_upload_limit(
-            &self,
-            _limit: mistarr_clients::UploadLimit,
-        ) -> mistarr_clients::Result<()> {
-            nope()
-        }
-        async fn pause_uploads(&self) -> mistarr_clients::Result<()> {
+        async fn process_id(&self) -> mistarr_clients::Result<Option<u32>> {
             nope()
         }
     }

@@ -16,6 +16,9 @@ LAUNCHER="$SCRIPTS_DIR/mistarr.sh"
 PREV_LAUNCHER="$LAUNCHER.prev"
 DB="$INSTALL_DIR/mistarr.db"
 DB_PREV="$DB.prev"
+# Where mistarr records a download client it stopped while a core runs.
+FROZEN="${MISTARR_FROZEN:-/tmp/mistarr-client.frozen}"
+PROCDIR="${MISTARR_PROC:-/proc}"
 # Written once a rollback set is complete; a set without it is never restored.
 PREV_OK="$PREV.ok"
 # Test-only hook: a command that runs the binary, which a test cannot execute.
@@ -392,6 +395,19 @@ run_launcher() {
     MISTARR_ROOT="$ROOT" "$LAUNCHER" < /dev/null
 }
 
+# Resumes a download client mistarr stopped for a running core, when the
+# recorded pid still names that process; see docs/DOWNLOAD-CLIENTS.md.
+thaw_client() {
+    [ -f "$FROZEN" ] || return 0
+    if read -r fpid fstart < "$FROZEN" && [ -r "$PROCDIR/$fpid/stat" ]; then
+        now=$(sed 's/.*) //' "$PROCDIR/$fpid/stat" | cut -d' ' -f20)
+        if [ -n "$fstart" ] && [ "$now" = "$fstart" ] && kill -CONT "$fpid" 2>/dev/null; then
+            echo "download client resumed"
+        fi
+    fi
+    rm -f "$FROZEN"
+}
+
 install_release() {
     mkdir -p "$INSTALL_DIR" "$SCRIPTS_DIR"
 
@@ -399,6 +415,8 @@ install_release() {
         echo "stopping the running mistarr before installing"
         MISTARR_ROOT="$ROOT" "$LAUNCHER" stop || true
     fi
+    # An older launcher does not resume a client its killed daemon left stopped.
+    thaw_client
 
     if db_in_use; then
         echo "$DB is still open by process $holders; stop it and run the install again" >&2

@@ -311,6 +311,28 @@ expect "$(cat "$root/prio" 2>/dev/null)" "nice -n 10 $root/mistarr/mistarr" \
 "$script" stop >/dev/null
 rm -f "$fakebin/nice" "$fakebin/ionice"
 
+# stop resumes a client a daemon left stopped, only while its pid is the same process.
+start_of() { sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f20; }
+state_of() { sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f1; }
+MISTARR_FROZEN="$root/client.frozen"
+export MISTARR_FROZEN
+sleep 100 &
+client=$!
+kill -STOP "$client"
+echo "$client $(start_of "$client")" > "$MISTARR_FROZEN"
+out=$("$script" stop)
+expect_contains "$out" "download client resumed" "stop reports the resumed client"
+expect "$(state_of "$client" | sed "s/[^T]/running/")" "running" "stop resumes the stopped client"
+expect_file_absent "$MISTARR_FROZEN" "stop removes the frozen record"
+kill -STOP "$client"
+echo "$client 1" > "$MISTARR_FROZEN"
+"$script" stop >/dev/null
+expect "$(state_of "$client")" "T" "a record for an older process with that pid resumes nothing"
+expect_file_absent "$MISTARR_FROZEN" "a stale frozen record is removed"
+kill -CONT "$client"
+kill "$client" 2>/dev/null
+unset MISTARR_FROZEN
+
 if ! sh "$here/install.sh"; then
     fail=$((fail + 1))
     echo "FAIL: scripts/tests/install.sh"

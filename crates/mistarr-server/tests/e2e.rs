@@ -233,6 +233,8 @@ where
 
 /// The download limit the app applies while a core runs, in KiB/s.
 const CORE_DOWN_KBPS: u32 = 7;
+/// The upload limit set while a core runs with the client not paused.
+const CORE_UP_KBPS: u32 = 64;
 
 /// The client's global limit in KiB/s for `dir`, `down` or `up`, `None` when
 /// unlimited, read over its own RPC rather than through the app.
@@ -390,6 +392,8 @@ fn options(dir: &Path) -> Options {
         launch_dir: dir.to_path_buf(),
         launch_gap: Duration::ZERO,
         ionice: Some(ionice_shim(dir)),
+        frozen_file: dir.join("client.frozen"),
+        hold_recheck: Duration::from_secs(1),
         ..Options::default()
     }
 }
@@ -579,6 +583,9 @@ async fn run(kind: Kind) {
     config.client.kind = kind.choice();
     config.client.url.clone_from(&leecher.url);
     config.limits.down_kbps_core = CORE_DOWN_KBPS;
+    config.limits.up_kbps_core = CORE_UP_KBPS;
+    // Rate limits first; the client is paused while a core runs later in the journey.
+    config.transfer.pause_client_while_playing = false;
     let running = start(&config, &home).await;
     let addr = running.addr;
     let paths = running.app.config().paths;
@@ -789,12 +796,9 @@ async fn run(kind: Kind) {
         json(addr, "/api/v1/system/status").await["pause_reason"],
         "core"
     );
-    // Transmission holds a zero upload rate; rtorrent reads zero as none and keeps 1 KiB/s.
-    let paused = if kind == Kind::Transmission { 0 } else { 1 };
     probe
-        .wait("uploads paused", Duration::from_secs(10), || async {
-            limit_kbps(kind, &leecher.url, "up").await == Some(paused)
-                && json(addr, "/api/v1/system/status").await["uploads_paused"] == true
+        .wait("the core upload limit", Duration::from_secs(10), || async {
+            limit_kbps(kind, &leecher.url, "up").await == Some(CORE_UP_KBPS)
         })
         .await;
     probe
@@ -811,10 +815,11 @@ async fn run(kind: Kind) {
         )
         .await;
     probe
-        .wait("uploads restored", Duration::from_secs(10), || async {
-            limit_kbps(kind, &leecher.url, "up").await.is_none()
-                && json(addr, "/api/v1/system/status").await["uploads_paused"] == false
-        })
+        .wait(
+            "the client's own upload limit",
+            Duration::from_secs(10),
+            || async { limit_kbps(kind, &leecher.url, "up").await.is_none() },
+        )
         .await;
     probe
         .wait("the default I/O class", Duration::from_secs(10), || async {
@@ -822,6 +827,30 @@ async fn run(kind: Kind) {
         })
         .await;
     t.mark("core gate followed");
+
+    let body = r#"{"transfer":{"pause_client_while_playing":true}}"#;
+    let r = request(addr, "PUT", "/api/v1/system/settings", &[], Some(body)).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let pid = leecher.child.id();
+    let state = move || {
+        mistarr_server::freeze::stat(Path::new("/proc"), pid)
+            .expect("the client runs")
+            .0
+    };
+    std::fs::write(home.join("CORENAME"), "NES").expect("corename");
+    probe
+        .wait("the client paused", Duration::from_secs(10), || async {
+            state() == 'T' && json(addr, "/api/v1/system/status").await["client_hold"] == "frozen"
+        })
+        .await;
+    std::fs::write(home.join("CORENAME"), "MENU").expect("corename");
+    probe
+        .wait("the client resumed", Duration::from_secs(10), || async {
+            state() != 'T' && json(addr, "/api/v1/system/status").await["client_hold"].is_null()
+        })
+        .await;
+    assert!(fetching.probe().await.is_ok(), "the resumed client answers");
+    t.mark("client paused and resumed");
 
     let before = (
         download_states(addr).await,

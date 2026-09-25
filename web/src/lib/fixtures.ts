@@ -179,6 +179,31 @@ export function mockDelayMs(q: string, page: number): number {
 }
 
 /**
+ * The mock status: `fixtureStatus` with the fields in localStorage
+ * `mistarr.mockStatus`, a JSON object, laid over it.
+ */
+export function mockStatus(): SystemStatus {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockStatus') ?? '{}');
+    if (parsed !== null && typeof parsed === 'object') {
+      return { ...fixtureStatus, ...(parsed as Partial<SystemStatus>) };
+    }
+  } catch {
+    // Storage blocked or the value is not JSON: the plain fixture.
+  }
+  return fixtureStatus;
+}
+
+/** Keeps what a mock save would send, in localStorage `mistarr.mockSavedSettings`. */
+export function recordMockSave(settings: Settings): void {
+  try {
+    localStorage.setItem('mistarr.mockSavedSettings', JSON.stringify(settings));
+  } catch {
+    // Storage blocked: nothing to keep.
+  }
+}
+
+/**
  * Extra present, enabled mock platforms named by their ids, read from
  * localStorage `mistarr.mockPlatformIds` as a JSON array of strings.
  */
@@ -349,7 +374,8 @@ export const fixtureStatus: SystemStatus = {
   paused: true,
   pause_reason: 'core',
   override: null,
-  uploads_paused: true,
+  client_hold: 'frozen',
+  pause_client_while_playing: true,
   waiting: [{ id: 2, kind: 'scan', state: 'queued', detail: 'nes' }],
   disk_free_bytes: 12_400_000_000,
   dats_dir: '/media/fat/mistarr/dats',
@@ -717,5 +743,5 @@ export const fixtureSettings: Settings = {
     launch: true
   },
   scan: { chd_tracks: false },
-  transfer: { pause_uploads_while_playing: true }
+  transfer: { pause_client_while_playing: true }
 };

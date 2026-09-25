@@ -97,8 +97,7 @@ array as "all files". An empty list is never sent to mean "none".
 | status | `torrent-get` fields `id, hashString, status, leftUntilDone, error, errorString, fileStats, rateDownload, rateUpload, uploadRatio, isFinished`; not `files`, whose names would put a 100 000-file torrent's reply over the 16 MiB body limit on every poll |
 | files | `torrent-get` fields `name, files`; an empty `files` list is "metadata pending". A multi-file torrent's file names start with `<name>/`, which is stripped |
 | remove | `torrent-get` `id`, then `torrent-remove` with `delete-local-data` |
-| rate limits | `session-set` `speed-limit-down`, `speed-limit-down-enabled`, same for up; no limit or 0 sends only `*-enabled: false` |
-| uploads | Read: `session-get` `speed-limit-up, speed-limit-up-enabled`. Pause: `session-set` `speed-limit-up: 0` with `speed-limit-up-enabled: true`, which Transmission holds as zero. Restore: `session-set` both values as read. |
+| rate limits | Per direction. Read: `session-get` `speed-limit-down, speed-limit-down-enabled`, or the same for up. Set: `session-set` both fields as given, so a limit read with its switch off keeps its rate. Held: `speed-limit-up: 0` with `speed-limit-up-enabled: true`, which Transmission keeps as zero. |
 | seed policy | On add and `set_seed_policy` (after a `torrent-get` `id` existence check): `torrent-set` `seedRatioMode: 1` (use this torrent's limit) with `seedRatioLimit` N for "until ratio N". "None" sends `seedRatioMode: 2` (unlimited), so a session ratio limit never stops the torrent and only the poller does. "Client default" sends `seedRatioMode: 0` (session default), skipped on a fresh add where it is already 0. |
 
 `fileStats[i].bytesCompleted` divided by the file's size from the metainfo
@@ -140,9 +139,9 @@ hash with a fault naming the info-hash, which maps to "not found".
 | start / stop | `d.start` / `d.stop` |
 | status | One `system.multicall` on the hash: `d.state, d.is_active, d.complete, d.is_hash_checking, d.hashing, d.ratio, d.down.rate, d.up.rate, d.message, d.is_meta`, and `f.multicall` for `f.size_bytes, f.completed_chunks, f.size_chunks, f.priority`. `d.multicall2` is not used because it lists every torrent in a view on each call. |
 | files | One `system.multicall`: `d.is_meta` (non-zero is "metadata pending") and `f.multicall` for `f.path, f.size_bytes`, whose paths are already relative to the torrent's directory |
+| process id | `system.pid`, used to stop the process while a core runs ("Core gate") |
 | remove | With data: `d.directory`, `d.is_multi_file` and `f.multicall` `f.path` first, then delete the listed files ourselves, since rtorrent does not, through the remote path map; a multi-file torrent's emptied directories go too. Deletion carries on past a failed file. Then `d.erase`, and only after it the first deletion error, if any, so the torrent is never left erased with an unreadable file list. |
-| rate limits | `throttle.global_down.max_rate.set_kb`, `throttle.global_up.max_rate.set_kb` with `""` and KiB/s; no limit sends 0 |
-| uploads | Read: `throttle.global_up.max_rate` in bytes per second, 0 being none. Pause: `throttle.global_up.max_rate.set_kb` 1, the lowest rate rtorrent holds, since 0 lifts the limit. Restore: `throttle.global_up.max_rate.set_kb` with the value read. |
+| rate limits | Per direction. Read: `throttle.global_down.max_rate` or `throttle.global_up.max_rate` in bytes per second, 0 being none, rounded up to whole KiB/s so a limit under 1 KiB/s never reads as none. Set: `throttle.global_*.max_rate.set_kb` with `""` and KiB/s, 0 when the limit is off; an enabled limit is at least 1, since 0 lifts it. Held: 1 KiB/s, the lowest rate rtorrent keeps. |
 | seed policy | rtorrent has no per-torrent ratio. The client keeps each torrent's policy in memory and `status` sends `d.stop` when a seeding torrent's `d.ratio` (thousandths) reaches it; "none" and "client default" never stop in the client, since under "none" the poller does. `is_finished` is derived on every poll, never stored: a stopped torrent whose wanted files are complete and whose ratio meets a ratio policy is finished, a seeding one is not, and one restarted outside mistarr is stopped again if it still meets the policy. `set_seed_policy` checks the torrent with `d.hash` and replaces the policy. The poller re-applies policies after a restart. |
 
 Per-file progress is `f.size_bytes` prorated by `f.completed_chunks` over
@@ -184,33 +183,70 @@ minutes; the next answered poll sets it reachable again.
 
 ## Core gate
 
-When CORENAME is not `MENU` mistarr applies the `*_core` rate limits from
-config; when it returns to `MENU` it restores the `*_menu` limits, once per
-transition. A missing CORENAME counts as the menu. Limits the client refuses,
-or that find no client, are retried at the CORENAME poll interval. It does not
-stop torrents, because stopping and starting a large set torrent is expensive
-in rtorrent.
+While CORENAME names a core other than `MENU`, the client is held so the
+board's CPU and card go to the game. A missing CORENAME counts as the menu.
+Torrents are never stopped for it, because stopping and starting a large set
+torrent is expensive in rtorrent.
 
-With `[transfer] pause_uploads_while_playing`, on by default and changeable
-on the System screen, uploads also stop while a core runs, so the card and
-CPU go to the game:
+**Pausing the client.** With `[transfer] pause_client_while_playing`, on by
+default and changeable on the System screen, a client running on the board,
+one whose address is a loopback host or a unix socket, is stopped with
+SIGSTOP when the gate leaves the menu and resumed with SIGCONT when it
+returns. A stopped process takes no CPU, writes nothing to the card and
+resumes at once, without the resume files, tracker announces and hash checks
+a shutdown or a restart would cost. Its transfers, uploads and downloads,
+pause with it.
 
-1. On leaving the menu, mistarr reads the client's global upload limit and
-   stores it with the client kind under `transfer.uploads_paused` in the
-   `settings` table, then applies the core limits and pauses uploads through
-   the client's own upload control (the "uploads" rows above).
-2. Back at the menu, it sets the stored upload limit again, exactly as read,
-   deletes the record, then applies the menu limits. The client then does
-   what it would have done without the pause: each source's seed policy,
-   none, until ratio N or client default, is unchanged throughout and
-   applies again.
-3. At startup, a stored record means a previous run left uploads paused. With
-   no core running it is restored at once; with a core running uploads stay
-   paused and the first recorded limit is kept.
-4. Turning the setting off while a core runs restores the upload limit and
-   applies the core limits again; turning it on pauses uploads at once.
+1. The pid comes from rtorrent's `system.pid`, checked to belong to an
+   `rtorrent` executable. For Transmission, `/proc` is searched for the
+   `transmission-daemon` executable; of several, the one listening on the
+   client's RPC port is taken. A process that cannot be found, or cannot be
+   told apart, is not stopped; that is logged and the client's uploads are
+   held instead, as for a client elsewhere, until the menu.
+2. Before SIGSTOP, the pid and its start time from `/proc/<pid>/stat` are
+   written to `/tmp/mistarr-client.frozen`. SIGCONT is sent only while that
+   pid still has that start time, so a reused pid is never signalled.
+   Signals go through the `kill` program.
+3. While the client is stopped mistarr never calls it, since a stopped
+   process never answers: polling, transfers, magnet lookups and detection
+   wait, a changed seed policy is applied once it resumes, and removing a
+   source that is in the client is refused until the menu. At the menu the
+   poller and the transfer job run again at once.
+4. Every minute a stopped client is checked: one resumed by something else
+   is stopped again, and one that exited is let go, so the next step finds
+   its successor.
+5. A clean shutdown of mistarr resumes the client first. At startup a record
+   left by a run that was killed resumes the client, unless a core still
+   runs and the setting is on; then it stays stopped. `mistarr.sh stop` and
+   `install.sh` resume a recorded client as well, checking the start time the
+   same way, since a killed daemon cannot.
 
-A client that does not answer is retried at the next gate change or every
-CORENAME poll, and never fails a job. A record for another client kind than
-the current one is dropped without restoring it. `/system/status` reports
-`uploads_paused` while the client holds uploads for the core.
+**Rate limits and held uploads.** A client on another machine, or one that
+cannot be stopped, is held through its own controls instead:
+
+1. While a core runs, the gate sets each non-zero `[limits]` `*_core` value,
+   and with the setting on it holds uploads (the "rate limits" rows above,
+   "Held"). At the menu it sets each non-zero `*_menu` value. A zero leaves
+   the client's own limit in that direction.
+2. Before the gate first changes a direction, it reads the client's own limit
+   there and stores it with the client's kind and address under
+   `client.saved_limits` in the `settings` table. Once the gate no longer
+   sets that direction, the stored limit is put back exactly and removed.
+   A stored limit is never replaced by a reading, so a held value is never
+   saved as the client's own.
+3. At startup, stored limits are put back if the gate no longer sets their
+   direction; during a game they are kept and the hold is sent again. A
+   stored record that cannot be read is retried and never overwritten.
+   Limits stored for another client are dropped with a warning; the current
+   client's own are read before it is held.
+4. A new client handle, after detection finds another client, is held in turn.
+   Every minute held uploads are read back and held again if they left the
+   hold, as after a client restart.
+
+Whatever the client does not take, or a missing client, is retried at the
+next gate change and after a wait that starts at the CORENAME poll interval
+and doubles up to a minute. The first failure in a row is a warning, later
+ones are logged at debug, and success after failures at info. None of this
+ever fails a job. Each source's seed policy, none, until ratio N or client
+default, is unchanged throughout and applies again at the menu.
+`/system/status` reports `client_hold`: `frozen`, `uploads` or `null`.

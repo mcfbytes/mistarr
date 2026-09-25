@@ -11,15 +11,25 @@ use tokio::sync::Mutex;
 use crate::detect::ScgiAddr;
 use crate::xmlrpc::{self, Fault, MethodResponse, Value};
 use crate::{
-    metainfo, scgi, ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId,
-    DownloadClient, FileProgress, InfoHash, RemotePathMap, Result, SeedPolicy, TorrentSource,
-    TorrentState, TorrentStatus, UploadLimit,
+    metainfo, scgi, ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId, Direction,
+    DownloadClient, FileProgress, InfoHash, RateLimit, RemotePathMap, Result, SeedPolicy,
+    TorrentSource, TorrentState, TorrentStatus,
 };
 
-/// Reads the global upload limit in bytes per second; 0 is none.
-const UP_RATE: &str = "throttle.global_up.max_rate";
-/// Sets the global upload limit in KiB/s; 0 lifts it.
-const UP_RATE_SET_KB: &str = "throttle.global_up.max_rate.set_kb";
+/// The global limit's getter, in bytes per second with 0 for none, and its
+/// setter in KiB/s, where 0 lifts it.
+const fn throttle(dir: Direction) -> (&'static str, &'static str) {
+    match dir {
+        Direction::Down => (
+            "throttle.global_down.max_rate",
+            "throttle.global_down.max_rate.set_kb",
+        ),
+        Direction::Up => (
+            "throttle.global_up.max_rate",
+            "throttle.global_up.max_rate.set_kb",
+        ),
+    }
+}
 
 /// First line of every rc mistarr writes; an rc without it belongs to the user.
 pub const RC_MARKER: &str =
@@ -474,41 +484,30 @@ impl DownloadClient for Rtorrent {
         deleted.map_err(ClientError::Io)
     }
 
-    async fn set_rate_limits(&self, down_kbps: Option<u32>, up_kbps: Option<u32>) -> Result<()> {
+    async fn rate_limit(&self, dir: Direction) -> Result<RateLimit> {
         let _guard = self.torrents.lock().await;
-        for (method, limit) in [
-            ("throttle.global_down.max_rate.set_kb", down_kbps),
-            ("throttle.global_up.max_rate.set_kb", up_kbps),
-        ] {
-            let kb = i64::from(limit.unwrap_or(0));
-            self.call(method, &["".into(), kb.into()]).await?;
-        }
-        Ok(())
-    }
-
-    async fn upload_limit(&self) -> Result<UploadLimit> {
-        let _guard = self.torrents.lock().await;
-        let bytes = uint(&self.call(UP_RATE, &["".into()]).await?)?;
-        let kbps = u32::try_from(bytes / 1024).map_err(protocol)?;
-        Ok(UploadLimit {
+        let bytes = uint(&self.call(throttle(dir).0, &["".into()]).await?)?;
+        // Rounded up, so a limit under 1 KiB/s is never read back as none.
+        let kbps = u32::try_from(bytes.div_ceil(1024)).map_err(protocol)?;
+        Ok(RateLimit {
             enabled: kbps > 0,
             kbps,
         })
     }
 
-    async fn set_upload_limit(&self, limit: UploadLimit) -> Result<()> {
-        let kb = if limit.enabled { limit.kbps } else { 0 };
+    async fn set_rate_limit(&self, dir: Direction, limit: RateLimit) -> Result<()> {
+        // rtorrent reads 0 as no limit, so an enabled limit is at least 1 KiB/s.
+        let kb = if limit.enabled { limit.kbps.max(1) } else { 0 };
         let _guard = self.torrents.lock().await;
-        self.call(UP_RATE_SET_KB, &["".into(), i64::from(kb).into()])
+        self.call(throttle(dir).1, &["".into(), i64::from(kb).into()])
             .await
             .map(drop)
     }
 
-    async fn pause_uploads(&self) -> Result<()> {
+    async fn process_id(&self) -> Result<Option<u32>> {
         let _guard = self.torrents.lock().await;
-        self.call(UP_RATE_SET_KB, &["".into(), 1.into()])
-            .await
-            .map(drop)
+        let pid = uint(&self.call("system.pid", &[]).await?)?;
+        u32::try_from(pid).map(Some).map_err(protocol)
     }
 }
 

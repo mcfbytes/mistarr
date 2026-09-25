@@ -304,14 +304,15 @@ impl Default for LimitsConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TransferConfig {
-    /// Hold every upload while a core other than the menu runs.
-    pub pause_uploads_while_playing: bool,
+    /// Stop a client on the board while a core other than the menu runs, or
+    /// hold the uploads of one on another machine.
+    pub pause_client_while_playing: bool,
 }
 
 impl Default for TransferConfig {
     fn default() -> Self {
         Self {
-            pause_uploads_while_playing: true,
+            pause_client_while_playing: true,
         }
     }
 }
@@ -673,14 +674,14 @@ mod tests {
     }
 
     #[test]
-    fn uploads_pause_while_playing_unless_turned_off() {
-        assert!(Config::default().transfer.pause_uploads_while_playing);
+    fn the_client_pauses_while_playing_unless_turned_off() {
+        assert!(Config::default().transfer.pause_client_while_playing);
         let file_off =
-            Config::parse("[transfer]\npause_uploads_while_playing = false").expect("parse");
-        assert!(!file_off.transfer.pause_uploads_while_playing);
+            Config::parse("[transfer]\npause_client_while_playing = false").expect("parse");
+        assert!(!file_off.transfer.pause_client_while_playing);
         let mut c = file_off.clone();
         c.overlay(serde_json::from_str(r#"{"limits":{}}"#).expect("old settings"));
-        assert!(!c.transfer.pause_uploads_while_playing);
+        assert!(!c.transfer.pause_client_while_playing);
         c.apply(&serde_json::from_str(r#"{"transfer":{}}"#).expect("patch"));
         assert_eq!(c.runtime().transfer, Some(TransferConfig::default()));
     }

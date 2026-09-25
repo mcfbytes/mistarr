@@ -411,6 +411,7 @@ run_install() {
         MISTARR_START_TIMEOUT="${start_timeout:-30}" MISTARR_ROOT="$root" \
         MISTARR_PROGRESS_TIMEOUT="${progress_timeout:-300}" \
         MISTARR_RELEASE_API="$api" MISTARR_RELEASE_BASE="$dl_base" \
+        MISTARR_FROZEN="${frozen:-$work/no-frozen-client}" \
         MISTARR_TTY="$tty" sh "$install_script" "$@" 2>&1
 }
 
@@ -590,6 +591,18 @@ expect_no_staging "$root9" "a saved set leaves no staging files"
 expect_contains "$out" "saved the database as $root9/mistarr/mistarr.db.prev" "the backup path is printed"
 expect_contains "$out" "mistarr answered at http://127.0.0.1:$port/" "the install waits for an answer"
 expect_contains "$out" "to roll back by hand" "the manual rollback is printed"
+
+# An upgrade resumes a download client a killed mistarr left stopped.
+sleep 100 &
+stopped=$!
+kill -STOP "$stopped"
+start_of() { sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f20; }
+state_of() { sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f1; }
+echo "$stopped $(start_of "$stopped")" > "$work/frozen9"
+frozen="$work/frozen9" run_install "$root9" "$no_tty" v1.1.0 >/dev/null
+expect "$(state_of "$stopped" | sed "s/[^T]/running/")" "running" "the install resumes the stopped client"
+expect_absent "$work/frozen9" "the frozen record is removed"
+kill "$stopped" 2>/dev/null
 
 # A later upgrade with no wal drops the stale saved wal and shm, never mixing sets.
 rm -f "$root9/mistarr/mistarr.db-wal" "$root9/mistarr/mistarr.db-shm"
