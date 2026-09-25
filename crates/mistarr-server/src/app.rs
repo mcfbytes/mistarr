@@ -1,7 +1,7 @@
 //! Shared server state and the startup sequence of `docs/ARCHITECTURE.md` "Startup".
 
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
@@ -65,6 +65,8 @@ pub struct Options {
     pub client_search_path: Option<std::ffi::OsString>,
     /// How long `POST /system/client/start` waits for the client to answer.
     pub client_start_wait: Duration,
+    /// The `ionice` that idles the daemon's I/O while a core runs; `None` never changes it.
+    pub ionice: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -91,6 +93,7 @@ impl Default for Options {
             transmission_init: PathBuf::from(mistarr_clients::launch::TRANSMISSION_INIT),
             client_search_path: None,
             client_start_wait: Duration::from_secs(10),
+            ionice: Some(PathBuf::from("ionice")),
         }
     }
 }
@@ -128,6 +131,8 @@ pub struct AppState {
     commands: RwLock<Arc<dyn CommandSink>>,
     /// Serialises launches and holds when the last one was sent.
     pub(crate) launch_lock: tokio::sync::Mutex<Option<Instant>>,
+    /// The daemon's I/O class, when `options.ionice` names a tool to set it.
+    pub(crate) io_priority: Option<Arc<jobs::io_priority::IoPriority>>,
 }
 
 impl AppState {
@@ -152,6 +157,13 @@ impl AppState {
             client: RwLock::new(None),
             commands: RwLock::new(Arc::new(FifoSink::new(&options.command_path))),
             launch_lock: tokio::sync::Mutex::new(None),
+            io_priority: options.ionice.as_deref().map(|program| {
+                let setter = Arc::new(jobs::io_priority::Ionice::new(program));
+                Arc::new(jobs::io_priority::IoPriority::new(
+                    setter,
+                    Path::new(jobs::io_priority::TASK_DIR),
+                ))
+            }),
             options,
         })
     }
@@ -467,6 +479,13 @@ fn spawn_tasks(app: &Arc<AppState>, scan_interval: u32) -> Vec<tokio::task::Join
         corename::watch(&opts.corename_path, opts.corename_poll, gate).await;
     }));
     tasks.push(tokio::spawn(publish_gate_changes(Arc::clone(app))));
+    if let Some(priority) = &app.io_priority {
+        tasks.push(tokio::spawn(jobs::io_priority::follow(
+            Arc::clone(&app.gate),
+            Arc::clone(priority),
+            jobs::io_priority::RETRY,
+        )));
+    }
     if scan_interval > 0 {
         tasks.push(tokio::spawn(scan_on_timer(
             Arc::clone(app),
@@ -579,6 +598,7 @@ pub(crate) mod testutil {
             command_path: dir.path().join("MiSTer_cmd"),
             launch_dir: dir.path().to_path_buf(),
             launch_gap: Duration::ZERO,
+            ionice: None,
             ..Options::default()
         };
         f(&mut options);
@@ -703,6 +723,7 @@ mod tests {
         assert_eq!(o.command_path, PathBuf::from("/dev/MiSTer_cmd"));
         assert_eq!(o.launch_dir, PathBuf::from("/tmp"));
         assert_eq!(o.launch_gap, Duration::from_secs(3));
+        assert_eq!(o.ionice, Some(PathBuf::from("ionice")));
     }
 
     #[test]

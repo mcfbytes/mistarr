@@ -241,8 +241,11 @@ async fn start_client(
         )));
     }
     tracing::info!(kind = body.kind.as_str(), "starting the download client");
-    crate::threads::blocking(crate::threads::label::LAUNCH, move || {
-        launcher.start(body.kind)
+    let priority = app.io_priority.clone();
+    // The client runs at the default I/O class; the gate's rate limit slows it while a core runs.
+    crate::threads::blocking(crate::threads::label::LAUNCH, move || match priority {
+        Some(p) => p.at_default(|| launcher.start(body.kind)),
+        None => launcher.start(body.kind),
     })
     .await
     .map_err(|e| crate::Error::Task(e.to_string()))?

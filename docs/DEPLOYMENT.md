@@ -179,7 +179,7 @@ copy of your own made while it was installed.
 
 ## Starting it
 
-`Scripts/mistarr.sh` starts the daemon under `nice -n 10 ionice -c 3`, prints
+`Scripts/mistarr.sh` starts the daemon under `nice -n 10`, prints
 the URL, and offers to enable start-at-boot by appending a line to
 `/media/fat/linux/user-startup.sh`. On Buildroot_MiSTer the same script works,
 and the image may additionally ship an init service; either way the script is
