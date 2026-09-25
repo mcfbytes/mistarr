@@ -309,7 +309,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    every platform, at each start. A source is skipped when its `map_stamp`
    equals the platform's current stamp: its live DAT versions with their load
    times, leaving out the MRA catalogue's version, whose load time every run
-   touches, and the count and ids of its live roms. Otherwise only the rows
+   touches, the count of its live roms, and a sum of a hash of each one's id
+   and effective group, so roms trading groups move it. Otherwise only the rows
    that changed are written, 2 000 per transaction, with its hit rate
    refreshed and `source.changed` sent only when its mapping changed. A row
    an import proved by hash is never overwritten, and rebinding to the same
@@ -526,6 +527,19 @@ class lock is taken only on blocking threads, so a long launch never stalls an
 async worker. The client's transfers slow under the gate's rate limit
 instead. Heavy jobs also stop at their next file boundary while a core runs. Heavy work has no thread of its
 own to lower further: it shares the blocking pool with request handlers.
+
+### Thread names
+
+Runtime workers and blocking threads are named `mistarr-rt-N`. While a
+blocking thread runs work, `threads::blocking` sets its `comm` to a label of
+at most 15 bytes (`threads::label`: `db-read`, `db-write`, `hash`,
+`scan-list`, `zip-list`, `dat-import`, `dat-save`, `source-file`,
+`source-watch`, `import`, `rename`, `arcade`, `romsets`, `launch`, `detect`,
+`incoming`, `io-class`) and puts the pool name back when it ends; the thread
+that reaps a started rtorrent is `rtorrent-reap`, and a torrent's data is
+deleted under `torrent-delete`. The board's BusyBox `top` and `ps` cannot
+list threads, so read them from procfs:
+`for t in /proc/$(pidof mistarr)/task/*; do echo "${t##*/} $(cat $t/comm)"; done`.
 
 A DAT loads in one write transaction, so the WAL file can grow to the size
 of the pages that DAT touches while it loads; it is cut back to 1 MiB at the

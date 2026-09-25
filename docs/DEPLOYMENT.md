@@ -76,6 +76,10 @@ any dynamic dependency, checked with `file` on the output.
 /tmp/mistarr.start.lock        # held while a start runs; a reboot clears it
 ```
 
+[DATS.md](DATS.md) explains the DAT formats mistarr loads, what happens to a
+file dropped into `dats/` or uploaded on the DATs screen, and what each
+rejection reason means.
+
 ## Installing on the board
 
 Over SSH, one line fetches, verifies and installs the latest release:
@@ -237,11 +241,11 @@ no links to content of any kind (PRINCIPLES.md).
 create a new tag `vX.Y.Z` for it, and publish. The release's own body is used
 as written; CI builds the binary and attaches the three assets to it.
 
-**From the command line**: push a tag matching `v*`, for example
-`git tag -a v1.2.3 -m "v1.2.3" && git push origin v1.2.3`. CI builds and
-creates the release. An annotated tag's message becomes the release body; a
-lightweight tag creates the release with no body.
+**From the command line**: push an annotated tag, for example
+`git tag -a v1.2.3 -m "v1.2.3" && git push origin v1.2.3`, then publish a
+release for it with the GitHub CLI:
+`gh release create v1.2.3 --verify-tag --notes-from-tag`, which uses the
+tag's message as the release body.
 
-Both paths run the same workflow and land on the same release for a given
-tag, so publishing through the UI and then pushing the tag (or the reverse)
-is safe.
+The workflow runs only when a release is published, so each release builds
+once. Pushing a tag alone creates no release and starts no build.

@@ -313,9 +313,11 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     let games_root = ctx.app.config().paths.games.clone();
     let pid = id.clone();
     let (units, mut unreadable) =
-        tokio::task::spawn_blocking(move || discover_units(&games_root, platform))
-            .await
-            .map_err(|e| Error::Task(e.to_string()))?;
+        crate::threads::blocking(crate::threads::label::SCAN_LIST, move || {
+            discover_units(&games_root, platform)
+        })
+        .await
+        .map_err(|e| Error::Task(e.to_string()))?;
 
     let existing = ctx
         .app
@@ -693,9 +695,11 @@ async fn scan_flat_unit(
     let (ctx, platform_id) = (sink.ctx, sink.platform_id.clone());
     let platform_id = &platform_id;
     let dir_owned = dir.to_path_buf();
-    let listed = tokio::task::spawn_blocking(move || list_files(&dir_owned))
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+    let listed = crate::threads::blocking(crate::threads::label::SCAN_LIST, move || {
+        list_files(&dir_owned)
+    })
+    .await
+    .map_err(|e| Error::Task(e.to_string()))?;
     let Some(entries) = readable(dir, listed) else {
         return Ok(None);
     };
@@ -750,7 +754,7 @@ async fn scan_flat_unit(
         }
         let hint = u64::try_from(size).unwrap_or(0);
         let path_owned = path.clone();
-        let hash_result = tokio::task::spawn_blocking(move || {
+        let hash_result = crate::threads::blocking(crate::threads::label::HASH, move || {
             File::open(&path_owned).and_then(|f| hash_reader(f, rule, Some(hint)))
         })
         .await
@@ -814,9 +818,11 @@ async fn scan_zip_unit(
     let platform_id = &platform_id;
     let path_owned = path.to_path_buf();
     let listed: std::result::Result<Vec<ZipMember>, HashError> =
-        tokio::task::spawn_blocking(move || zip_members(File::open(&path_owned)?))
-            .await
-            .map_err(|e| Error::Task(e.to_string()))?;
+        crate::threads::blocking(crate::threads::label::ZIP_LIST, move || {
+            zip_members(File::open(&path_owned)?)
+        })
+        .await
+        .map_err(|e| Error::Task(e.to_string()))?;
     let members = match listed {
         Ok(m) => m,
         Err(e) => {
@@ -874,7 +880,7 @@ async fn scan_zip_unit(
 
         let path_owned = path.to_path_buf();
         let member_name = member.name.clone();
-        let hash_result = tokio::task::spawn_blocking(move || {
+        let hash_result = crate::threads::blocking(crate::threads::label::HASH, move || {
             hash_zip_member(File::open(&path_owned)?, &member_name, rule)
         })
         .await
@@ -962,9 +968,11 @@ async fn scan_disc_unit(
     dir: &Path,
 ) -> Result<Option<(Vec<NewFile>, Vec<String>)>> {
     let dir_owned = dir.to_path_buf();
-    let listed = tokio::task::spawn_blocking(move || list_files(&dir_owned))
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+    let listed = crate::threads::blocking(crate::threads::label::SCAN_LIST, move || {
+        list_files(&dir_owned)
+    })
+    .await
+    .map_err(|e| Error::Task(e.to_string()))?;
     let Some(entries) = readable(dir, listed) else {
         return Ok(None);
     };
@@ -1009,7 +1017,7 @@ async fn scan_disc_unit(
         } else {
             let hint = u64::try_from(size).unwrap_or(0);
             let path_owned = path.clone();
-            let hash_result = tokio::task::spawn_blocking(move || {
+            let hash_result = crate::threads::blocking(crate::threads::label::HASH, move || {
                 File::open(&path_owned).and_then(|f| hash_reader(f, HeaderRule::None, Some(hint)))
             })
             .await

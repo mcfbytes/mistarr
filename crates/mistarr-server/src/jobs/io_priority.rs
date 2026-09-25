@@ -325,7 +325,10 @@ pub async fn follow(gate: Arc<Gate>, priority: Arc<IoPriority>, retry: Duration)
     loop {
         let want = IoClass::for_core(rx.borrow_and_update().core_running());
         let switcher = Arc::clone(&priority);
-        let failed = match tokio::task::spawn_blocking(move || switcher.switch(want)).await {
+        let attempt = crate::threads::blocking(crate::threads::label::IO_CLASS, move || {
+            switcher.switch(want)
+        });
+        let failed = match attempt.await {
             Ok(Ok(set)) => {
                 if let Some(threads) = set {
                     tracing::info!(class = ?want, threads, "I/O class set");
