@@ -171,6 +171,9 @@ latency from localStorage `mistarr.mockDelayMs`: a number, or an object of
 numbers keyed `search#page` or `search` with `*` as the default; negative
 fails the request. It checks the loading bar, stale answers, a background
 reload overtaken by a search, a failed next page and the error state.
+localStorage `mistarr.mockPlatformIds`, a JSON array of ids, adds present,
+enabled mock platforms named by their ids, so a test can use ids such as
+`constructor` that name members of a plain object's prototype.
 
 ## 3. End-to-end on a board with real, open-licensed content
 
