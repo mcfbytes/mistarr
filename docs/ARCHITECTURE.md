@@ -309,7 +309,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    every platform, at each start. A source is skipped when its `map_stamp`
    equals the platform's current stamp: its live DAT versions with their load
    times, leaving out the MRA catalogue's version, whose load time every run
-   touches, and the count and ids of its live roms. Otherwise only the rows
+   touches, the count of its live roms, and a sum of a hash of each one's id
+   and effective group, so roms trading groups move it. Otherwise only the rows
    that changed are written, 2 000 per transaction, with its hit rate
    refreshed and `source.changed` sent only when its mapping changed. A row
    an import proved by hash is never overwritten, and rebinding to the same
