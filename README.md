@@ -37,7 +37,11 @@ your region and revision preferences; a title lists every variant with its
 file state and the sources that list it. CHD disc images can be identified
 by their tracks, an optional and slower check.
 
-<img alt="Browse: a platform's titles as a poster grid with search, have, wanted, region and flag filters" src="docs/images/browse-dark.webp">
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/browse-dark.webp">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/browse-light.webp">
+  <img alt="Browse: a platform's titles as a poster grid with search, have, wanted, region and flag filters" src="docs/images/browse-dark.webp">
+</picture>
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/title-dark.webp">
@@ -66,8 +70,16 @@ Transmission or rtorrent for just that file, verifies it and files it. Seeding
 is a setting on each source.
 
 <p>
-  <img alt="The first-run wizard's paths step, listing the detected cores" src="docs/images/wizard-dark.webp" width="49%">
-  <img alt="The System screen: version, client, running core, launch state, disk, memory and scheduler" src="docs/images/system-dark.webp" width="49%">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/wizard-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/wizard-light.webp">
+    <img alt="The first-run wizard's paths step, listing the detected cores" src="docs/images/wizard-dark.webp" width="49%">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/system-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/system-light.webp">
+    <img alt="The System screen: version, client, running core, launch state, disk, memory and scheduler" src="docs/images/system-dark.webp" width="49%">
+  </picture>
 </p>
 
 <p align="center">
@@ -79,9 +91,10 @@ is a setting on each source.
 </p>
 
 The screenshots use the web UI's mock data, which is synthetic, with cover art
-turned off; `docs/TESTING.md` says how to regenerate them. In use, covers load
-in your browser from the libretro thumbnail server, and nothing but the
-database is stored on the SD card.
+turned off, so every poster is the one mistarr draws for a title without a
+cover; `docs/TESTING.md` says how to regenerate them. In use, covers load in
+your browser from the libretro thumbnail server, and nothing but the database
+is stored on the SD card.
 
 ## What it deliberately does not do
 

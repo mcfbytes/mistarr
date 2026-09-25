@@ -13,10 +13,10 @@ README_SHOTS_DIR="$raw" npx playwright test -c e2e/playwright.config.ts readme-s
 mkdir -p "$images"
 
 # Art-heavy images are lossy WebP; interface text stays lossless.
-for name in hero-dark hero-light platforms-dark platforms-light browse-dark phone-dark phone-light; do
+for name in hero-dark hero-light platforms-dark platforms-light browse-dark browse-light phone-dark phone-light; do
     magick "$raw/$name.png" -quality 90 -define webp:method=6 "$images/$name.webp"
 done
-for name in title-dark title-light activity-dark activity-light system-dark wizard-dark wizard-light; do
+for name in title-dark title-light activity-dark activity-light system-dark system-light wizard-dark wizard-light; do
     magick "$raw/$name.png" -define webp:lossless=true -define webp:method=6 "$images/$name.webp"
 done
 

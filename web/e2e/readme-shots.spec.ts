@@ -10,7 +10,7 @@ test.use({ deviceScaleFactor: 2, locale: 'en-US', timezoneId: 'UTC' });
 /** A few minutes after the fixtures' job times, so "ago" reads as recent. */
 const NOW = new Date(1_770_032_700_000);
 
-/** Blocks cover art so every poster shows the placeholder; covers are third-party images. */
+/** Blocks cover art so every poster is the generated one; covers are third-party images. */
 async function noCovers(page: Page): Promise<void> {
   await page.route(/^https?:\/\/(?!localhost)/, (route) => route.abort());
 }
@@ -27,22 +27,20 @@ interface Shot {
   width: number;
   height: number;
   act?: (page: Page) => Promise<void>;
-  /** Dark only: the poster placeholder and the plain System page gain nothing from a light pair. */
-  darkOnly?: boolean;
 }
 
 const shots: Shot[] = [
   { name: 'platforms', url: '/?mock=showcase#/', width: 1280, height: 860 },
-  { name: 'browse', url: '/?mock=showcase#/p/snes', width: 1280, height: 760, darkOnly: true },
-  { name: 'title', url: '/?mock=showcase#/t/10', width: 1280, height: 440 },
+  { name: 'browse', url: '/?mock=showcase#/p/snes', width: 1280, height: 760 },
+  { name: 'title', url: '/?mock=showcase#/t/10', width: 1280, height: 660 },
   { name: 'activity', url: '/#/dats', width: 1280, height: 800, act: openPanel },
-  { name: 'system', url: '/?mock=showcase#/system', width: 1280, height: 800, darkOnly: true },
+  { name: 'system', url: '/?mock=showcase#/system', width: 1280, height: 800 },
   { name: 'wizard', url: '/?mock=showcase#/wizard', width: 1280, height: 640 },
   { name: 'phone', url: '/?mock=showcase#/', width: 390, height: 844 }
 ];
 
 for (const scheme of ['dark', 'light'] as const) {
-  for (const shot of shots.filter((s) => scheme === 'dark' || !s.darkOnly)) {
+  for (const shot of shots) {
     test(`${shot.name} ${scheme}`, async ({ page }) => {
       test.skip(!dir, 'README_SHOTS_DIR is not set');
       await noCovers(page);

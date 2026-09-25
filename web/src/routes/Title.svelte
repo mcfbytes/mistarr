@@ -8,6 +8,8 @@
   import { canPlay, launchBlocker } from '../lib/launch';
   import { availabilityLine } from '../lib/availability';
   import { chdMemberLabel } from '../lib/unidentified';
+  import PosterPlaceholder from '../lib/PosterPlaceholder.svelte';
+  import { SvelteSet } from 'svelte/reactivity';
 
   interface Props {
     titleId: number;
@@ -18,13 +20,17 @@
   const isMock = import.meta.env.VITE_MOCK === '1';
   let tab = $state<'boxart' | 'title' | 'snap'>('boxart');
   let busy = $state(false);
+  /** Art tabs whose image failed to load; a missing boxart shows the generated poster. */
+  const missingArt = new SvelteSet<string>();
 
   $effect(() => {
+    missingArt.clear();
     clearDetail();
     void loadTitleDetail(titleId);
   });
 
   const detail = $derived(getDetail());
+  const pickName = $derived(detail?.variants.find((v) => v.id === detail.pick_variant_id)?.name ?? null);
   const platform = $derived(detail ? findPlatform(detail.platform_id) : undefined);
   let statusFailed = $state(false);
   const playableIds = $derived(
@@ -113,25 +119,33 @@
     }
   }
 
-  function onArtError(e: Event): void {
-    (e.currentTarget as HTMLImageElement).style.visibility = 'hidden';
-  }
 </script>
 
 <div class="page">
   {#if detail}
     <h1>{detail.base_name}</h1>
 
-    {#if detail.art}
-      <div class="art">
+    <div class="art">
+      {#if detail.art}
         <div class="tabs">
           <button class:primary={tab === 'boxart'} onclick={() => (tab = 'boxart')}>Boxart</button>
           <button class:primary={tab === 'title'} onclick={() => (tab = 'title')}>Title</button>
           <button class:primary={tab === 'snap'} onclick={() => (tab = 'snap')}>Snap</button>
         </div>
-        <img src={detail.art[tab]} alt="" onerror={onArtError} />
-      </div>
-    {/if}
+      {/if}
+      {#if detail.art && !missingArt.has(tab)}
+        <img src={detail.art[tab]} alt="" onerror={() => missingArt.add(tab)} />
+      {:else if tab === 'boxart'}
+        <div class="poster">
+          <PosterPlaceholder
+            platformId={detail.platform_id}
+            kind={platform?.kind}
+            title={detail.base_name}
+            name={pickName}
+          />
+        </div>
+      {/if}
+    </div>
 
     {#if playableIds.size > 0 && playBlocker}
       <p class="muted reason">Play is unavailable: {playBlocker}</p>
@@ -179,7 +193,7 @@
               {#if !variant.retired}
                 {#if variant.wanted}
                   <button disabled={busy} onclick={unwant}>Unwant</button>
-                {:else}
+                {:else if !variant.flags.includes('bios')}
                   <button class="primary" disabled={busy} onclick={() => want(variant.id)}>Want</button>
                 {/if}
               {/if}
@@ -202,6 +216,11 @@
 <style>
   .table-wrap {
     overflow-x: auto;
+  }
+
+  .poster {
+    width: 180px;
+    margin-top: 0.5em;
   }
 
   .art img {

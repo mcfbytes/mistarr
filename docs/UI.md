@@ -79,7 +79,13 @@ wizard.
 
 **Browse** (`/p/{id}`). A Start core button beside the platform name, except
 on arcade, both below a banner of the platform's art. Poster grid of
-`title_groups`, cover from the libretro URL with a placeholder on 404.
+`title_groups`, cover from the libretro URL. A title with no cover URL, or
+whose cover fails to load, gets a generated poster
+(`web/src/lib/PosterPlaceholder.svelte`): the platform's art as a faded band
+over the theme's raised background, the title's name set in bold beneath it
+and the name's parenthesised tags, such as the region, on a dimmed line at the
+foot. It uses the theme tokens, makes no request, and is `aria-hidden`, since
+the name is already on the card as text.
 Filters: search, have / missing / wanted, region, a "Show hidden" checkbox,
 and a flags multi-select that requires every checked flag. Each card shows
 the 1G1R pick name, a have indicator, and a want toggle. Infinite scroll in
@@ -93,9 +99,11 @@ flags, file state (a CHD member named as "g.chd, track 2" or "g.chd, track
 list"), and which sources have it: one line per file, as "nova.nes
 in Example Pack (name guess)", with the confidence read as "name match",
 "hash match", "name match", "name and size", "name guess" or "size only", or
-"None available". Want per variant. Play for a
+"None available". Want per variant, except on a variant flagged `bios`, which the server
+refuses (PRINCIPLES.md section 3). Play for a
 variant whose files are all in the collection. Rename action for misnamed
-files. Art tabs: boxart, title, snap.
+files. Art tabs: boxart, title, snap; a missing boxart shows the generated
+poster, a missing title or snap image nothing.
 
 Play and Start core are disabled while launching is unavailable, with the
 reason as a line of text on the page rather than a tooltip: launching is
