@@ -5,8 +5,8 @@ SQLite, WAL mode, one writer. Migrations are numbered SQL files in
 schema after all of them. A binary refuses to open a database whose
 `schema_version` records a migration newer than any it embeds, and leaves its
 contents unchanged; see "Rollback" in [DEPLOYMENT.md](DEPLOYMENT.md). All
-timestamps are Unix seconds. All hashes are stored as lowercase hex text so they can be
-compared with DAT values without conversion.
+timestamps are Unix seconds. All hashes are stored as lowercase hex text so
+they can be compared with DAT values without conversion.
 
 JSON may stage data or carry opaque blobs; nothing filters or joins on JSON.
 The JSON columns are `dat_stage.game`, `scan_progress.done_dirs`,

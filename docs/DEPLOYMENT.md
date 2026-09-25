@@ -52,8 +52,9 @@ any dynamic dependency, checked with `file` on the output.
   mistarr                 # the binary
   mistarr.toml            # optional config
   mistarr.prev            # the previous binary, kept by install.sh
-  mistarr.db              # SQLite, with mistarr.db-wal and mistarr.db-shm beside it
-  mistarr.db.prev         # the database as it was before the last upgrade, with any
+  mistarr.prev.ok         # present once the saved rollback set is complete
+  mistarr.db              # SQLite, with mistarr.db-wal and mistarr.db-shm
+  mistarr.db.prev         # the database before the last upgrade, with any
                           #   mistarr.db.prev-wal and mistarr.db.prev-shm
   mistarr.lock            # held by the running server; a second server exits
   mistarr.pid             # the daemon, written by Scripts/mistarr.sh
@@ -118,34 +119,47 @@ rollback set:
   `Scripts/mistarr.sh.prev`.
 
 When `fuser` is available and shows a process still holding `mistarr.db` or
-its `-wal`, the script names the process and exits without changing anything.
-It then checks free space in the data directory and copies each file with
-`cp` to a `.new` name beside its saved name, for example `mistarr.db.prev.new`.
-Only once every copy has succeeded are they synced and renamed over the old
-set. When the space is short or a copy fails, it removes the `.new` files,
-restarts the installed version and exits; the binary, the launcher, the
-database and the earlier rollback set are left as they were. Only one
+its `-wal`, the script names the process, restarts the installed version and
+exits without changing anything. It then checks free space in the data
+directory, read with `stat -f` so that only that filesystem is queried; where
+`stat -f` is missing it falls back to `df`, which on some BusyBox builds
+queries every mount and can stall on an unreachable network mount. It copies
+each file with `cp` to a `.new` name beside its saved name, for example
+`mistarr.db.prev.new`. Only once every copy has succeeded does it sync,
+remove `mistarr.prev.ok`, rename the copies over the old set, sync, and write
+`mistarr.prev.ok` again, so a set cut short by a power loss is never
+trusted. When the space is short or a copy fails, it removes the `.new`
+files, restarts the installed version and exits; the binary, the launcher,
+the database and the earlier rollback set are left as they were. Only one
 previous version is kept: each upgrade replaces the saved set, so installing
 twice leaves only the version immediately before the current one. The script
 prints where the backup is and the manual rollback steps.
 
-**Rollback**: after starting the new version, `install.sh` waits up to 180 s
-(`MISTARR_START_TIMEOUT`) for it to answer HTTP at the address in
-`[server] listen` in `mistarr.toml`, on the loopback address when that is
-`0.0.0.0`, or port 8420 without one. Migrations run before the server listens,
-so the wait covers them. If the new version fails to start, stops being
-reported running, or does not answer in time, the script stops it, puts back
-the saved database set, `mistarr.prev` and `mistarr.sh.prev`, and starts the
-previous version. The database files are copied to `.restore` names, synced
-and moved into place; if that copy fails, the previous version is not
-started and the saved set is left for a manual restore. A crash after the
-wait is not rolled back: the supervisor restarts the new version.
+**Rollback**: after starting the new version, `install.sh` asks the new
+binary for its listen address (`mistarr listen-addr`, which reads
+`mistarr.toml` as the server does), uses the loopback address when that is
+`0.0.0.0` or `[::]`, and falls back to port 8420 on loopback when the binary
+gives no clean answer. It waits up to 180 s for the server to answer HTTP
+there. Migrations run before the server listens, so the wait covers them;
+for a database that needs a longer migration on the board, run the install
+with a larger limit, for example `MISTARR_START_TIMEOUT=900 sh install.sh`.
+If the new version fails to start, stops being reported running, or does
+not answer in time, the script stops it and puts back `mistarr.prev` and
+`mistarr.sh.prev`, and, when the new version was started, the saved
+database set. It restores only a set marked by `mistarr.prev.ok`. The
+database files are copied to `.restore` names, synced and moved into place;
+with no room for those copies, it deletes the live `-wal` and `-shm` and
+copies the saved files straight over the live ones, leaving the saved set
+intact. If the database cannot be put back, the binary and launcher are
+still restored but the previous version is not started, and the saved set
+is left for a manual restore. A crash after the wait is not rolled back: the
+supervisor restarts the new version.
 
 A rollback across a migration needs the database restored with the binary.
 A binary refuses a database whose recorded schema version is newer than its
 own migrations, with an error naming both versions, and leaves its contents
 unchanged; `mistarr doctor` reports the same. To roll back by hand, in
-`/media/fat/mistarr`:
+`/media/fat/mistarr`, and only when `mistarr.prev.ok` is present:
 
 1. Stop mistarr: `/media/fat/Scripts/mistarr.sh stop`.
 2. Copy `mistarr.prev` to `mistarr`, and `Scripts/mistarr.sh.prev` to
@@ -207,9 +221,10 @@ for throughput (`--hash-mib N` changes the size), and whether the
 `title_groups` table and search index match the catalogue. It also prints the
 database's schema version against the highest this binary supports, and says
 so, without opening the database for writing, when a newer mistarr migrated
-it. It reads the same config as the server and needs no running server. This is what a bug report
-should include. When it reports title groups out of step, stop the server
-and run `mistarr doctor --rebuild-groups` to recompute them.
+it. It reads the same config as the server and needs no running server. This
+is what a bug report should include. When it reports title groups out of
+step, stop the server and run `mistarr doctor --rebuild-groups` to recompute
+them.
 
 ## Releasing
 

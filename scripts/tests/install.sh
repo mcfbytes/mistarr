@@ -26,6 +26,28 @@ EOS
     export PATH
 fi
 
+# Stands in for running the fake binary's `listen-addr`: reads [server] listen
+# with a real TOML parser, else prints TEST_LISTEN as the default address.
+runner="$work/runner"
+cat > "$runner" <<'EOS'
+#!/bin/sh
+data=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --data) data="$2"; shift 2 ;;
+        *) shift ;;
+    esac
+done
+exec python3 -c '
+import os, sys, tomllib
+path, listen = sys.argv[1], sys.argv[2]
+if os.path.exists(path):
+    with open(path, "rb") as f:
+        listen = tomllib.load(f).get("server", {}).get("listen", listen)
+print(listen)' "$data/mistarr.toml" "$TEST_LISTEN"
+EOS
+chmod +x "$runner"
+
 cleanup() {
     [ -n "$srv_pid" ] && kill "$srv_pid" 2>/dev/null
     rm -rf "$srv" "$work"
@@ -184,6 +206,7 @@ case "${1:-}" in
     status) echo "mistarr not running" ;;
     "")
         # Stands in for a new binary that migrates the database, then dies.
+        [ -f "$MISTARR_ROOT/drop-marker" ] && rm -f "$MISTARR_ROOT/mistarr/mistarr.prev.ok"
         db="$MISTARR_ROOT/mistarr/mistarr.db"
         if [ -f "$db" ]; then
             echo "MIGRATED" > "$db"
@@ -271,7 +294,8 @@ run_install() {
     root="$1"
     tty="$2"
     shift 2
-    env PATH="${extra_path:+$extra_path:}$PATH" MISTARR_PORT="${health_port:-$port}" \
+    env PATH="${extra_path:+$extra_path:}$PATH" MISTARR_EXEC="$runner" \
+        TEST_LISTEN="${test_listen:-0.0.0.0:${health_port:-$port}}" \
         MISTARR_START_TIMEOUT="${start_timeout:-30}" MISTARR_ROOT="$root" \
         MISTARR_RELEASE_API="$api" MISTARR_RELEASE_BASE="$dl_base" \
         MISTARR_TTY="$tty" sh "$install_script" "$@" 2>&1
@@ -298,7 +322,7 @@ grep -q "FRESH-BINARY-V1" "$root1/mistarr/mistarr" \
 root2="$work/root2"
 mkdir -p "$root2/mistarr/dats" "$root2/Scripts"
 echo "DBDATA" > "$root2/mistarr/mistarr.db"
-echo "CONFIG" > "$root2/mistarr/mistarr.toml"
+echo "# CONFIG" > "$root2/mistarr/mistarr.toml"
 echo "a-dat-file" > "$root2/mistarr/dats/sample.dat"
 write_arm_binary "$root2/mistarr/mistarr" OLD-BINARY-V0
 write_launcher_stub "$root2/Scripts/mistarr.sh"
@@ -307,7 +331,7 @@ out=$(run_install "$root2" "$no_tty" v1.1.0)
 code=$?
 [ "$code" -eq 0 ] || { fail=$((fail + 1)); echo "FAIL: upgrade exits 0 (got $code): $out"; }
 expect "$(cat "$root2/mistarr/mistarr.db")" "DBDATA" "upgrade preserves the database"
-expect "$(cat "$root2/mistarr/mistarr.toml")" "CONFIG" "upgrade preserves the config"
+expect "$(cat "$root2/mistarr/mistarr.toml")" "# CONFIG" "upgrade preserves the config"
 expect "$(cat "$root2/mistarr/dats/sample.dat")" "a-dat-file" "upgrade preserves watched directories"
 grep -q "UPGRADED-BINARY-V1-1" "$root2/mistarr/mistarr" \
     || { fail=$((fail + 1)); echo "FAIL: upgrade wrote the new binary"; }
@@ -371,7 +395,7 @@ root6="$work/root6"
 mkdir -p "$root6"
 publish_release v5.0.0 PIPED-FLOW-BINARY yes
 set_latest v5.0.0
-out=$(printf 'unrelated piped bytes\n' | env MISTARR_PORT="$port" MISTARR_ROOT="$root6" MISTARR_RELEASE_API="$api" \
+out=$(printf 'unrelated piped bytes\n' | env MISTARR_EXEC="$runner" TEST_LISTEN="0.0.0.0:$port" MISTARR_ROOT="$root6" MISTARR_RELEASE_API="$api" \
     MISTARR_RELEASE_BASE="$dl_base" MISTARR_TTY="$no_tty" sh "$install_script" 2>&1)
 code=$?
 [ "$code" -eq 0 ] || { fail=$((fail + 1)); echo "FAIL: piped no-argument run exits 0: $out"; }
@@ -387,7 +411,7 @@ publish_release v5.1.0 PIPED-FLOW-TTY-BINARY yes
 set_latest v5.1.0
 fake_tty="$work/fake-tty"
 echo "y" > "$fake_tty"
-out=$(printf 'unrelated piped bytes\n' | env MISTARR_PORT="$port" MISTARR_ROOT="$root7" MISTARR_RELEASE_API="$api" \
+out=$(printf 'unrelated piped bytes\n' | env MISTARR_EXEC="$runner" TEST_LISTEN="0.0.0.0:$port" MISTARR_ROOT="$root7" MISTARR_RELEASE_API="$api" \
     MISTARR_RELEASE_BASE="$dl_base" MISTARR_TTY="$fake_tty" sh "$install_script" 2>&1)
 code=$?
 [ "$code" -eq 0 ] || { fail=$((fail + 1)); echo "FAIL: run with a reachable tty exits 0: $out"; }
@@ -468,6 +492,27 @@ mkdir -p "$root9t/mistarr"
 printf '[jobs]\nlisten = "x:1"\n[server]\nlisten = "0.0.0.0:%s"\n' "$port" > "$root9t/mistarr/mistarr.toml"
 out=$(health_port=1 run_install "$root9t" "$no_tty" v1.1.0)
 expect_contains "$out" "mistarr answered at http://127.0.0.1:$port/" "the port is read from mistarr.toml"
+expect_present() {
+    [ -e "$1" ] || { fail=$((fail + 1)); echo "FAIL: $2 ($1 missing)"; }
+}
+expect_present "$root9/mistarr/mistarr.prev.ok" "a complete rollback set is marked"
+for form in single dotted; do
+    r="$work/root9-$form"
+    mkdir -p "$r/mistarr"
+    if [ "$form" = single ]; then
+        printf "[ server ]\nlisten = '0.0.0.0:%s'\n" "$port" > "$r/mistarr/mistarr.toml"
+    else
+        printf 'server.listen = "0.0.0.0:%s"\n' "$port" > "$r/mistarr/mistarr.toml"
+    fi
+    out=$(health_port=1 start_timeout=5 run_install "$r" "$no_tty" v1.1.0)
+    code=$?
+    [ "$code" -eq 0 ] || { fail=$((fail + 1)); echo "FAIL: a $form config installs without a rollback: $out"; }
+    expect_contains "$out" "mistarr answered at http://127.0.0.1:$port/" "a $form config names the port"
+done
+
+# An address the binary does not report cleanly is never turned into a URL.
+out=$(test_listen="listen = '0.0.0.0:9000'" start_timeout=1 run_install "$work/root9-garbled" "$no_tty" v1.1.0)
+expect_contains "$out" "answer at http://127.0.0.1:8420/" "an unparsed address falls back to 8420"
 
 # A new binary that migrates the database and fails to start is stopped, then
 # gets both the binary and the database set rolled back.
@@ -486,52 +531,113 @@ expect_no_staging "$root10" "a restore leaves no staging files"
 grep -q "GOOD-BEFORE-MIGRATION" "$root10/mistarr/mistarr" \
     || { fail=$((fail + 1)); echo "FAIL: a failed migrating start must restore the previous binary"; }
 expect_contains "$out" "restarted the previous version of mistarr" "the previous version is restarted"
-expect "$(grep '^stop' "$root10/launcher.log" | tail -n1)" "stop prev=3 db=MIGRATED" \
+expect "$(grep '^stop' "$root10/launcher.log" | tail -n1)" "stop prev=4 db=MIGRATED" \
     "the new version is stopped before the database is restored"
 expect "$(tail -n1 "$root10/launcher.log")" "start" "the previous version starts last"
 
-# A failed database restore leaves the saved set for a manual restore and does
-# not start the previous version against the migrated database.
 stubs="$work/stubs"
-mkdir -p "$stubs/nospace" "$stubs/badcp" "$stubs/badwal" "$stubs/badrestore" "$stubs/busy"
 real_cp=$(command -v cp)
-for kind in badcp badwal badrestore; do
+real_stat=$(command -v stat)
+for kind in badcp badwal badrestore badprevdb enospc; do
+    mkdir -p "$stubs/$kind"
     case "$kind" in
-        badcp) pattern='*.db.prev.new' ;;
-        badwal) pattern='*.db.prev-wal.new' ;;
-        badrestore) pattern='*.restore' ;;
+        badcp) pattern='*::*.db.prev.new' ;;
+        badwal) pattern='*::*.db.prev-wal.new' ;;
+        badrestore) pattern='*::*.restore' ;;
+        badprevdb) pattern='*.db.prev::*' ;;
+        enospc) pattern='*/extract/mistarr::*' ;;
     esac
     cat > "$stubs/$kind/cp" <<EOS
 #!/bin/sh
-case "\$2" in $pattern) printf partial > "\$2"; exit 1 ;; esac
+case "\$1::\$2" in $pattern) printf partial > "\$2"; exit 1 ;; esac
 exec "$real_cp" "\$@"
 EOS
     chmod +x "$stubs/$kind/cp"
 done
+mkdir -p "$stubs/nospace" "$stubs/busy"
 cat > "$stubs/nospace/df" <<'EOS'
 #!/bin/sh
 echo "Filesystem 1024-blocks Used Available Capacity Mounted on"
 echo "/dev/fake 100000 99999 1 100% /"
 EOS
+cat > "$stubs/nospace/stat" <<EOS
+#!/bin/sh
+[ "\$1" = -f ] && { echo "1 1024"; exit 0; }
+exec "$real_stat" "\$@"
+EOS
 printf '#!/bin/sh\necho " 4242"\nexit 0\n' > "$stubs/busy/fuser"
-chmod +x "$stubs/nospace/df" "$stubs/busy/fuser"
+chmod +x "$stubs/nospace/df" "$stubs/nospace/stat" "$stubs/busy/fuser"
 
+# With no room to stage the restore, the saved set is copied straight back.
 root12="$work/root12"
 mkdir -p "$root12/mistarr" "$root12/Scripts"
 echo "OLD-SCHEMA" > "$root12/mistarr/mistarr.db"
 write_arm_binary "$root12/mistarr/mistarr" GOOD-BEFORE-FAILED-RESTORE
 write_launcher_stub "$root12/Scripts/mistarr.sh"
 out=$(extra_path="$stubs/badrestore" run_install "$root12" "$no_tty" v6.0.0)
+expect_contains "$out" "no room to stage the database restore" "an unstaged restore is reported"
+expect "$(cat "$root12/mistarr/mistarr.db")" "OLD-SCHEMA" "an unstaged restore puts the database back"
+expect_absent "$root12/mistarr/mistarr.db-wal" "an unstaged restore drops the new wal"
+expect "$(cat "$root12/mistarr/mistarr.db.prev")" "OLD-SCHEMA" "an unstaged restore keeps the saved set"
+expect_no_staging "$root12" "an unstaged restore leaves no staging files"
+expect_contains "$out" "restarted the previous version of mistarr" "an unstaged restore restarts"
+
+# A database restore that fails outright still puts the binary and launcher
+# back, keeps the saved set, and starts nothing against the migrated database.
+root12b="$work/root12b"
+mkdir -p "$root12b/mistarr" "$root12b/Scripts"
+echo "OLD-SCHEMA" > "$root12b/mistarr/mistarr.db"
+write_arm_binary "$root12b/mistarr/mistarr" GOOD-BEFORE-FAILED-RESTORE
+write_launcher_stub "$root12b/Scripts/mistarr.sh"
+out=$(extra_path="$stubs/badprevdb" run_install "$root12b" "$no_tty" v6.0.0)
 code=$?
 [ "$code" -ne 0 ] || { fail=$((fail + 1)); echo "FAIL: a failed restore must exit non-zero"; }
+expect_contains "$out" "restored the previous binary and launcher, but not the database" \
+    "a failed restore says what it restored"
 expect_contains "$out" "not restarting" "a failed restore does not restart"
-expect "$(cat "$root12/mistarr/mistarr.db.prev")" "OLD-SCHEMA" "a failed restore keeps the saved set"
-expect "$(cat "$root12/mistarr/mistarr.db")" "MIGRATED" "a failed restore leaves the live database alone"
-expect_no_staging "$root12" "a failed restore leaves no staging files"
-case "$(tail -n1 "$root12/launcher.log")" in
+grep -q "GOOD-BEFORE-FAILED-RESTORE" "$root12b/mistarr/mistarr" \
+    || { fail=$((fail + 1)); echo "FAIL: a failed database restore still restores the binary"; }
+grep -q "stub-kind: normal" "$root12b/Scripts/mistarr.sh" \
+    || { fail=$((fail + 1)); echo "FAIL: a failed database restore still restores the launcher"; }
+expect "$(cat "$root12b/mistarr/mistarr.db.prev")" "OLD-SCHEMA" "a failed restore keeps the saved set"
+expect_no_staging "$root12b" "a failed restore leaves no staging files"
+case "$(tail -n1 "$root12b/launcher.log")" in
     stop*) ;;
     *) fail=$((fail + 1)); echo "FAIL: nothing starts after a failed restore" ;;
 esac
+
+# A new binary that cannot be copied in, as on a full card, is replaced by the
+# saved one; the database was never opened, so it is left alone.
+root14="$work/root14"
+mkdir -p "$root14/mistarr" "$root14/Scripts"
+echo "NEVER-OPENED" > "$root14/mistarr/mistarr.db"
+echo "LIVE-WAL" > "$root14/mistarr/mistarr.db-wal"
+write_arm_binary "$root14/mistarr/mistarr" GOOD-BEFORE-FULL-CARD
+write_launcher_stub "$root14/Scripts/mistarr.sh"
+out=$(extra_path="$stubs/enospc" run_install "$root14" "$no_tty" v1.1.0)
+code=$?
+[ "$code" -ne 0 ] || { fail=$((fail + 1)); echo "FAIL: a failed binary copy must exit non-zero"; }
+expect_contains "$out" "failed to install the new binary" "a failed binary copy is reported"
+grep -q "GOOD-BEFORE-FULL-CARD" "$root14/mistarr/mistarr" \
+    || { fail=$((fail + 1)); echo "FAIL: a failed binary copy restores the previous binary"; }
+expect "$(cat "$root14/mistarr/mistarr.db")" "NEVER-OPENED" "a failed binary copy leaves the database"
+expect "$(cat "$root14/mistarr/mistarr.db-wal")" "LIVE-WAL" "a failed binary copy leaves the wal"
+case "$out" in
+    *"restored the database"* | *"by hand"*)
+        fail=$((fail + 1)); echo "FAIL: a failed binary copy must not touch or blame the database" ;;
+esac
+expect_contains "$out" "restarted the previous version of mistarr" "a failed binary copy restarts"
+
+# A rollback set whose completion marker is gone is never restored.
+root15="$work/root15"
+mkdir -p "$root15/mistarr" "$root15/Scripts"
+echo "OLD-SCHEMA" > "$root15/mistarr/mistarr.db"
+: > "$root15/drop-marker"
+write_arm_binary "$root15/mistarr/mistarr" GOOD-BEFORE-UNMARKED
+write_launcher_stub "$root15/Scripts/mistarr.sh"
+out=$(run_install "$root15" "$no_tty" v6.0.0)
+expect_contains "$out" "the saved rollback set is incomplete; not restoring it" "an unmarked set is refused"
+expect "$(cat "$root15/mistarr/mistarr.db")" "MIGRATED" "an unmarked set is not restored"
 
 # A new version that answers after a slow start is kept.
 port2=$(python3 -c 'import socket
@@ -602,7 +708,7 @@ for kind in nospace badcp badwal busy; do
         badwal) expect_contains "$out" "failed to copy $r/mistarr/mistarr.db-wal" "a failed wal copy is named" ;;
         busy) expect_contains "$out" "is still open by process 4242" "a held database is named" ;;
     esac
-    [ "$kind" = busy ] || expect_contains "$out" "restarted the installed version" \
+    expect_contains "$out" "restarted the installed version" \
         "$kind: the installed version is restarted"
 done
 

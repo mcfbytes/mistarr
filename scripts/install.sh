@@ -16,10 +16,16 @@ LAUNCHER="$SCRIPTS_DIR/mistarr.sh"
 PREV_LAUNCHER="$LAUNCHER.prev"
 DB="$INSTALL_DIR/mistarr.db"
 DB_PREV="$DB.prev"
+# Written once a rollback set is complete; a set without it is never restored.
+PREV_OK="$PREV.ok"
+# Test hook: a command that runs the binary, which a test cannot execute.
+EXEC="${MISTARR_EXEC:-}"
 # Seconds a started mistarr has to answer HTTP before the install is rolled back.
 START_TIMEOUT="${MISTARR_START_TIMEOUT:-180}"
 # Set once this run has saved the database set, so a restore never uses a stale one.
 db_saved=0
+# Set just before the new version first runs; before that the database is as saved.
+db_touched=0
 
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
@@ -68,8 +74,16 @@ size_kib() {
     wc -c < "$1" | awk '{ printf "%d\n", ($1 + 1023) / 1024 }'
 }
 
-# Free KiB on the filesystem holding $1, or nothing when df cannot say.
+# Free KiB on the filesystem holding $1, or nothing when it cannot be read.
+# stat -f reads only that filesystem; df may stat every mount and stall on a dead one.
 free_kib() {
+    fs=$(stat -f -c '%a %S' "$1" 2>/dev/null)
+    case "$fs" in
+        [0-9]*" "[0-9]*)
+            echo "$fs" | awk '{ printf "%.0f\n", $1 * $2 / 1024 }'
+            return 0
+            ;;
+    esac
     df -Pk "$1" 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print $4 }'
 }
 
@@ -117,9 +131,13 @@ save_prev() {
         return 1
     fi
     sync
+    # Unmarked while the renames run, so a power cut here leaves no trusted mixed set.
+    rm -f "$PREV_OK"
     for f in "$DB_PREV" "$DB_PREV-wal" "$DB_PREV-shm" "$PREV" "$PREV_LAUNCHER"; do
         commit_new "$f" || return 2
     done
+    sync
+    : > "$PREV_OK" || return 2
     sync
     if [ -f "$DB" ]; then
         db_saved=1
@@ -141,28 +159,35 @@ db_in_use() {
     holders=$(fuser "$@" 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) printf "%s%s", (n++ ? " " : ""), $i }')
 }
 
-# Puts the saved database set back in place of the current one, through
-# .restore copies moved into place; drops any -wal/-shm the set lacks.
+# Puts the saved database set back through .restore copies moved into place,
+# or, short of room for those, by copying straight over the live files.
 restore_db() {
-    [ "$db_saved" = 1 ] || return 0
+    [ "$db_saved" = 1 ] && [ "$db_touched" = 1 ] || return 0
+    staged=1
     for part in "" -wal -shm; do
         rm -f "$DB$part.restore"
         [ -f "$DB_PREV$part" ] || continue
         if ! cp "$DB_PREV$part" "$DB$part.restore"; then
-            echo "failed to copy $DB_PREV$part to $DB$part.restore" >&2
-            rm -f "$DB.restore" "$DB-wal.restore" "$DB-shm.restore"
-            return 1
+            staged=0
+            break
         fi
     done
+    if [ "$staged" = 0 ]; then
+        rm -f "$DB.restore" "$DB-wal.restore" "$DB-shm.restore"
+        echo "no room to stage the database restore; copying $DB_PREV over the live files" >&2
+    fi
     sync
     # The newer WAL must never be replayed onto the restored file.
     rm -f "$DB-wal" "$DB-shm"
     for part in "" -wal -shm; do
-        [ -f "$DB$part.restore" ] || continue
-        if ! mv -f "$DB$part.restore" "$DB$part"; then
-            echo "failed to move $DB$part.restore into place" >&2
-            return 1
+        [ -f "$DB_PREV$part" ] || continue
+        if [ "$staged" = 1 ]; then
+            mv -f "$DB$part.restore" "$DB$part" && continue
+        else
+            cp "$DB_PREV$part" "$DB$part" && continue
         fi
+        echo "failed to put $DB_PREV$part back as $DB$part" >&2
+        return 1
     done
     sync
     echo "restored the database from $DB_PREV"
@@ -180,15 +205,17 @@ restart_current() {
 }
 
 # Restores the previous binary, launcher and database after a failed install,
-# if they were saved, and restarts that previous version.
+# from a complete saved set, and restarts that previous version.
 restore_prev() {
     if [ -x "$LAUNCHER" ]; then
         MISTARR_ROOT="$ROOT" "$LAUNCHER" stop >/dev/null 2>&1 || true
     fi
-    if ! restore_db; then
-        echo "not restarting; copy the $DB_PREV set back by hand before starting mistarr" >&2
+    if [ ! -f "$PREV_OK" ]; then
+        echo "the saved rollback set is incomplete; not restoring it" >&2
         return 1
     fi
+    db_ok=1
+    restore_db || db_ok=0
     restored=0
     # save_prev left these mirroring what this run replaced.
     if [ -f "$PREV" ]; then
@@ -198,6 +225,11 @@ restore_prev() {
     if [ -f "$PREV_LAUNCHER" ]; then
         cp "$PREV_LAUNCHER" "$LAUNCHER" && chmod +x "$LAUNCHER"
         restored=1
+    fi
+    if [ "$db_ok" = 0 ]; then
+        echo "restored the previous binary and launcher, but not the database" >&2
+        echo "not restarting; copy the $DB_PREV set back by hand before starting mistarr" >&2
+        return 1
     fi
     [ "$restored" = 1 ] || return 0
     echo "restored the previous binary and launcher after a failed install"
@@ -264,30 +296,20 @@ extract_and_check() {
     echo "binary verified as an ARM ELF executable"
 }
 
-# The URL of the server's root page, from `[server] listen` in mistarr.toml,
-# else MISTARR_PORT or 8420 on the loopback address.
+# The URL of the server's root page, from the listen address the installed
+# binary reports from its own config; 8420 on loopback when that fails.
 listen_url() {
-    conf="$INSTALL_DIR/mistarr.toml"
-    addr=""
-    if [ -f "$conf" ]; then
-        addr=$(awk '
-            /^[ \t]*\[/ { s = ($0 ~ /^[ \t]*\[server\]/) }
-            s && /^[ \t]*listen[ \t]*=/ {
-                v = $0; sub(/^[^=]*=[ \t]*"/, "", v); sub(/".*/, "", v); print v; exit
-            }' "$conf")
+    addr=$($EXEC "$BIN" --data "$INSTALL_DIR" listen-addr 2>/dev/null | head -n1)
+    host=127.0.0.1
+    port=8420
+    if echo "$addr" | grep -Eq '^(\[[0-9A-Fa-f:.]+\]|[0-9A-Za-z.-]+):[0-9]+$'; then
+        host=${addr%:*}
+        port=${addr##*:}
     fi
-    host=""
-    port=""
-    case "$addr" in
-        *:*)
-            host=${addr%:*}
-            port=${addr##*:}
-            ;;
-    esac
     case "$host" in
-        "" | 0.0.0.0 | "[::]") host=127.0.0.1 ;;
+        0.0.0.0 | "[::]") host=127.0.0.1 ;;
     esac
-    echo "http://$host:${port:-${MISTARR_PORT:-8420}}/"
+    echo "http://$host:$port/"
 }
 
 # True when $1 answers HTTP at all; the root page needs no API key.
@@ -318,7 +340,7 @@ wait_ready() {
                 ;;
         esac
         if [ "$(date +%s)" -ge "$deadline" ]; then
-            echo "mistarr did not answer at $url within $START_TIMEOUT s" >&2
+            echo "mistarr did not answer at $url within $START_TIMEOUT s (MISTARR_START_TIMEOUT)" >&2
             return 1
         fi
         sleep 1
@@ -348,6 +370,7 @@ install_release() {
     if db_in_use; then
         echo "$DB is still open by process $holders; stop it and run the install again" >&2
         echo "aborting the install; nothing was changed" >&2
+        restart_current
         exit 1
     fi
 
@@ -383,6 +406,7 @@ install_release() {
 
     echo "installed mistarr $tag to $INSTALL_DIR"
     echo "starting mistarr"
+    db_touched=1
     if ! run_launcher || ! wait_ready; then
         echo "mistarr failed to start after installing" >&2
         restore_prev

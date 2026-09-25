@@ -14,6 +14,10 @@ use mistarr_server::{db, doctor, logging, memory};
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let config = cli.config()?;
+    if cli.command() == Command::ListenAddr {
+        println!("{}", config.server.listen);
+        return Ok(());
+    }
     // Set before any thread starts, so every stack and heap counts against it.
     let data_limit =
         memory::limit_data(config.memory.data_limit_mib).context("cannot set the memory limit")?;
@@ -68,6 +72,7 @@ fn main() -> anyhow::Result<()> {
                 doctor::run(&config, hash_mib, &mut out).await
             })?;
         }
+        Command::ListenAddr => {}
         Command::Serve => {
             std::fs::create_dir_all(&config.paths.data)
                 .with_context(|| format!("cannot create {}", config.paths.data.display()))?;
