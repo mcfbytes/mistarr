@@ -155,6 +155,52 @@ test('scrolling on after a reload loads the next page with no gap', async ({ pag
   expect(got.slice(0, 180)).toEqual(expected.slice(0, 180));
 });
 
+async function scrollToEnd(page: Page): Promise<string[]> {
+  await expect(async () => {
+    await page.mouse.wheel(0, 50_000);
+    expect(await page.locator('.sentinel').count()).toBe(0);
+  }).toPass({ timeout: 5000 });
+  return ids(page);
+}
+
+function duplicates(list: string[]): string[] {
+  return list.filter((id, i) => list.indexOf(id) !== i);
+}
+
+test('a reload after a row left the list never shows a group twice or skips one', async ({ page }) => {
+  await page.goto('/#/p/nes');
+  await expect(names(page).first()).toBeVisible();
+  await scrollForMore(page, 120);
+  const removed = Number((await ids(page))[4]?.split('/').pop());
+  await page.evaluate((id) => localStorage.setItem('mistarr.mockRemovedIds', JSON.stringify([id])), removed);
+
+  // The list as a fresh visit sees it, from a second tab sharing the storage.
+  const other = await page.context().newPage();
+  await other.goto('/#/p/nes');
+  await expect(names(other).first()).toBeVisible();
+  const fresh = await scrollToEnd(other);
+  expect(fresh.some((id) => id.endsWith(`/${removed}`))).toBe(false);
+
+  // Page 0 reloads at once and page 1 slowly; the grid is then the fresh list's start.
+  await page.evaluate(() => {
+    localStorage.setItem('mistarr.mockDelayMs', '{"#1": 1500}');
+    const w = window as unknown as { mistarrReloadTitles: () => Promise<void> };
+    void w.mistarrReloadTitles();
+  });
+  await page.waitForTimeout(500);
+  const during = await ids(page);
+  expect(during.length).toBeGreaterThanOrEqual(119);
+  expect(during).toEqual(fresh.slice(0, during.length));
+
+  // Scrolling on cuts the reload short; what follows must still end at the fresh list.
+  await page.evaluate(() => localStorage.removeItem('mistarr.mockDelayMs'));
+  await expect(async () => {
+    const shown = await scrollToEnd(page);
+    expect(duplicates(shown)).toEqual([]);
+    expect(shown).toEqual(fresh);
+  }).toPass({ timeout: 10_000 });
+});
+
 test('a background reload stops when the user searches', async ({ page }) => {
   await page.goto('/#/p/nes');
   await expect(names(page).first()).toBeVisible();

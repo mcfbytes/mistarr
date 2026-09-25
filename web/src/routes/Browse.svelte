@@ -7,7 +7,7 @@
     getGroupsTotal,
     isGroupsLoading,
     loadTitlesPage,
-    nextPage,
+    nextOffset,
     patchGroup
   } from '../lib/stores/titles.svelte';
   import { titleUrl } from '../lib/router.svelte';
@@ -120,8 +120,8 @@
       return;
     }
     loadingMore = true;
-    // The next page follows the rows held, so a failure or a reload never skips any.
-    await loadTitlesPage(platformId, filters(), nextPage());
+    // The next rows follow those held, so a failure or a reload never skips any.
+    await loadTitlesPage(platformId, filters(), nextOffset());
     loadingMore = false;
   }
 
