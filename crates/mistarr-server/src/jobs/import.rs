@@ -297,7 +297,7 @@ impl Piece {
 /// What happens at one `Rename` target.
 enum Decision {
     Place,
-    Replace(Option<FileRow>),
+    Replace(Option<Box<FileRow>>),
     Skip(FileId),
 }
 
@@ -1168,7 +1168,7 @@ impl Placing<'_> {
             let verified = !rows.is_empty() && rows.iter().all(|f| f.state == FileState::Verified);
             let decision = match rows.into_iter().next() {
                 Some(row) if exists && verified => Decision::Skip(row.id),
-                row if exists => Decision::Replace(row),
+                row if exists => Decision::Replace(row.map(Box::new)),
                 _ => Decision::Place,
             };
             out.push(Target {
@@ -1475,7 +1475,7 @@ fn record_target(
         let mut detail = log_detail(scope, p, &rel);
         let action = match &t.decision {
             Decision::Replace(prev) => {
-                detail["previous"] = previous(prev.as_ref(), &rel);
+                detail["previous"] = previous(prev.as_deref(), &rel);
                 ImportAction::Replaced
             }
             _ => ImportAction::Placed,

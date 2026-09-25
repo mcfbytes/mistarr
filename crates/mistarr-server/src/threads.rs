@@ -93,9 +93,13 @@ pub mod label {
     pub const SOURCE_WATCH: Label = Label::new("source-watch");
     /// Checking which romset archives a title's directory holds.
     pub const ROMSETS: Label = Label::new("romsets");
+    /// Reading a CHD image's header and track list.
+    pub const CHD_HEADER: Label = Label::new("chd-header");
+    /// Decoding a slice of a CHD image's hunks.
+    pub const CHD_DECODE: Label = Label::new("chd-decode");
 
     /// Every label, for tests and docs.
-    pub const ALL: [Label; 16] = [
+    pub const ALL: [Label; 18] = [
         DB_READ,
         DB_WRITE,
         HASH,
@@ -112,6 +116,8 @@ pub mod label {
         INCOMING,
         SOURCE_WATCH,
         ROMSETS,
+        CHD_HEADER,
+        CHD_DECODE,
     ];
 }
 

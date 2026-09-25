@@ -33,6 +33,16 @@ pub struct Config {
     pub jobs: JobsConfig,
     /// `[memory]`.
     pub memory: MemoryConfig,
+    /// `[scan]`.
+    pub scan: ScanConfig,
+}
+
+/// `[scan]`: how the library scan identifies files.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ScanConfig {
+    /// Decode CHD images to hash their tracks; slow on the board, so off by default.
+    pub chd_tracks: bool,
 }
 
 /// `[memory]`: the ceiling that keeps a runaway allocation from taking the board down.
@@ -338,6 +348,9 @@ pub struct RuntimeSettings {
     pub limits: LimitsConfig,
     /// `[prefs]`.
     pub prefs: PrefsConfig,
+    /// `[scan]`; absent in settings saved before it existed, which then keep the file's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scan: Option<ScanConfig>,
 }
 
 /// A partial [`RuntimeSettings`], as accepted by `PUT /system/settings`.
@@ -350,6 +363,8 @@ pub struct SettingsPatch {
     pub limits: Option<LimitsConfig>,
     /// Replaces `[prefs]` when present.
     pub prefs: Option<PrefsConfig>,
+    /// Replaces `[scan]` when present.
+    pub scan: Option<ScanConfig>,
 }
 
 impl Config {
@@ -414,6 +429,24 @@ impl Config {
             client: self.client.clone(),
             limits: self.limits,
             prefs: self.prefs.clone(),
+            scan: Some(self.scan),
+        }
+    }
+
+    /// Lays saved runtime settings over this config; `[scan]` only when they carry it.
+    ///
+    /// ```
+    /// use mistarr_server::config::{Config, RuntimeSettings, ScanConfig};
+    /// let mut c = Config { scan: ScanConfig { chd_tracks: true }, ..Config::default() };
+    /// c.overlay(RuntimeSettings::default());
+    /// assert!(c.scan.chd_tracks);
+    /// ```
+    pub fn overlay(&mut self, runtime: RuntimeSettings) {
+        self.client = runtime.client;
+        self.limits = runtime.limits;
+        self.prefs = runtime.prefs;
+        if let Some(scan) = runtime.scan {
+            self.scan = scan;
         }
     }
 
@@ -435,6 +468,9 @@ impl Config {
         }
         if let Some(prefs) = &patch.prefs {
             self.prefs.clone_from(prefs);
+        }
+        if let Some(scan) = patch.scan {
+            self.scan = scan;
         }
     }
 }
@@ -549,6 +585,35 @@ mod tests {
             serde_json::from_str(r#"{"limits":{"up_kbps_core":2}}"#).expect("partial");
         assert_eq!(partial.limits.up_kbps_core, 2);
         assert_eq!(partial.prefs, PrefsConfig::default());
+    }
+
+    #[test]
+    fn scan_settings_overlay_only_when_saved() {
+        let on = ScanConfig { chd_tracks: true };
+        let off = ScanConfig::default();
+        let file_on = Config::parse("[scan]\nchd_tracks = true").expect("parse");
+        assert_eq!(file_on.scan, on);
+        assert_eq!(Config::default().scan, off);
+        let old: RuntimeSettings = serde_json::from_str(r#"{"limits":{}}"#).expect("json");
+        for (file, saved, want) in [
+            (on, None, on),
+            (off, None, off),
+            (on, Some(off), off),
+            (off, Some(on), on),
+        ] {
+            let mut c = Config {
+                scan: file,
+                ..Config::default()
+            };
+            c.overlay(RuntimeSettings {
+                scan: saved,
+                ..old.clone()
+            });
+            assert_eq!(c.scan, want, "file {file:?}, saved {saved:?}");
+        }
+        let mut c = Config::default();
+        c.apply(&serde_json::from_str(r#"{"scan":{"chd_tracks":true}}"#).expect("patch"));
+        assert_eq!(c.runtime().scan, Some(on));
     }
 
     #[test]

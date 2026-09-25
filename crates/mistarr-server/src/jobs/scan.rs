@@ -397,11 +397,12 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         .db
         .write(move |c| files::clear_scan_progress(c, &pid4))
         .await?;
+    super::chd::queue_for(&ctx.app, &pid, false).await?;
     report_outcome(ctx, &pid, total).await
 }
 
-/// Stores the scan's final progress: the platform's files with a rom state and those
-/// left `unverified`, per `docs/ARCHITECTURE.md` "Library scan".
+/// Stores the scan's final progress: the platform's files with a rom state, those left
+/// `unverified` and those `unidentified`, per `docs/ARCHITECTURE.md` "Library scan".
 async fn report_outcome(ctx: &JobContext, pid: &PlatformId, total: usize) -> Result<()> {
     let id = pid.clone();
     let counts = ctx
@@ -415,6 +416,7 @@ async fn report_outcome(ctx: &JobContext, pid: &PlatformId, total: usize) -> Res
         "total": total,
         "matched": counts.verified + counts.misnamed + counts.bad,
         "unmatched": counts.unverified,
+        "unidentified": counts.unidentified,
     }))
     .await
 }
@@ -492,11 +494,15 @@ impl<'a> Sink<'a> {
         }
         let rows = std::mem::replace(&mut self.rows, Vec::with_capacity(FLUSH_ROWS));
         let (pid, now) = (self.platform_id.clone(), crate::unix_now());
+        let app = Arc::clone(&self.ctx.app);
         let written = self
             .ctx
             .app
             .db
-            .write(move |c| commit_unit(c, &pid, rows, done_dirs.as_deref(), now))
+            .write(move |c| {
+                let chd_on = app.config().scan.chd_tracks;
+                commit_unit(c, &pid, rows, done_dirs.as_deref(), now, chd_on)
+            })
             .await?;
         for (_, id, state) in &written {
             if self.throttle.allow() {
@@ -511,34 +517,23 @@ impl<'a> Sink<'a> {
 }
 
 /// Writes already-hashed rows, and the scan's resume point when given, in one short
-/// transaction, so the single writer connection is never held for the hashing itself.
+/// transaction, so the single writer connection is never held for the hashing itself. A
+/// CHD waiting to be decoded is written `pending` or `off` as `chd_on`, read in this write, says.
 fn commit_unit(
     conn: &mut Connection,
     platform_id: &PlatformId,
     rows: Vec<NewFile>,
     done_dirs: Option<&[String]>,
     now: i64,
+    chd_on: bool,
 ) -> Result<Written> {
     let tx = conn.transaction()?;
     let mut written = Vec::with_capacity(rows.len());
-    for row in rows {
-        let hashed = files::Hashed {
-            crc32: row.crc32.as_deref(),
-            md5: row.md5.as_deref(),
-            sha1: row.sha1.as_deref(),
-            header_rule: row.header_rule.as_deref(),
-        };
-        let id = files::upsert(
-            &tx,
-            platform_id,
-            &row.rel_path,
-            row.size,
-            row.mtime,
-            &hashed,
-            row.rom_id,
-            row.state,
-            now,
-        )?;
+    for mut row in rows {
+        if let Some(reason) = row.reason.as_deref() {
+            row.reason = Some(super::chd::settle(reason, chd_on).to_owned());
+        }
+        let id = files::upsert_row(&tx, platform_id, &row, now)?;
         written.push((row.rel_path, id, row.state));
     }
     if let Some(done_dirs) = done_dirs {
@@ -680,6 +675,7 @@ fn known(
         header_rule: row.header_rule,
         rom_id,
         state,
+        reason: None,
     }))
 }
 
@@ -777,6 +773,7 @@ async fn scan_flat_unit(
                     header_rule: Some(platform.header_rule.to_owned()),
                     rom_id,
                     state,
+                    reason: None,
                 }
             }
             Err(e) => {
@@ -802,6 +799,7 @@ fn unverified_row(rel_path: String, size: i64, mtime: i64, crc32: Option<String>
         header_rule: None,
         rom_id: None,
         state: FileState::Unverified,
+        reason: None,
     }
 }
 
@@ -903,6 +901,7 @@ async fn scan_zip_unit(
                     header_rule: Some(rule_name.to_owned()),
                     rom_id,
                     state,
+                    reason: None,
                 }
             }
             Err(e) => {
@@ -932,7 +931,7 @@ pub(crate) struct Track {
 }
 
 /// The stored hashes of an unchanged track, reused instead of re-hashing.
-fn cached_hashes(
+pub(crate) fn cached_hashes(
     conn: &Connection,
     platform_id: &PlatformId,
     rel_path: &str,
@@ -978,6 +977,7 @@ async fn scan_disc_unit(
     };
 
     let mut tracks: Vec<Track> = Vec::new();
+    let mut chd_rows: Vec<NewFile> = Vec::new();
     let mut seen = Vec::new();
     for (path, name) in entries {
         ctx.checkpoint().await?;
@@ -988,6 +988,15 @@ async fn scan_disc_unit(
             continue;
         }
         let rel_path = format!("{unit_id}/{name}");
+        if ext == "chd" {
+            let got = super::chd::scan_file(ctx, platform_id, &rel_path, &path).await?;
+            seen.extend(got.seen);
+            match got.whole {
+                Some(track) => tracks.push(track),
+                None => chd_rows.extend(got.rows),
+            }
+            continue;
+        }
         let (size, mtime) = match file_meta(&path) {
             Ok(v) => v,
             Err(e) => {
@@ -1005,69 +1014,82 @@ async fn scan_disc_unit(
             }
         };
         seen.push(rel_path.clone());
-
-        let (pid, relp) = (platform_id.clone(), rel_path.clone());
-        let cached = ctx
-            .app
-            .db
-            .read(move |c| cached_hashes(c, &pid, &relp, size, mtime))
-            .await?;
-        let hashes = if let Some(h) = cached {
-            Some(h)
-        } else {
-            let hint = u64::try_from(size).unwrap_or(0);
-            let path_owned = path.clone();
-            let hash_result = crate::threads::blocking(crate::threads::label::HASH, move || {
-                File::open(&path_owned).and_then(|f| hash_reader(f, HeaderRule::None, Some(hint)))
-            })
-            .await
-            .map_err(|e| Error::Task(e.to_string()))?;
-            match hash_result {
-                Ok(h) => Some(h),
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "cannot hash track; marking unverified");
-                    None
-                }
-            }
-        };
-        let matched = match &hashes {
-            Some(h) => {
-                let (pid2, h2) = (platform_id.clone(), h.clone());
-                ctx.app
-                    .db
-                    .read(move |c| {
-                        files::match_rom(
-                            c,
-                            &pid2,
-                            &h2.sha1,
-                            &h2.md5,
-                            &h2.crc32,
-                            i64::try_from(h2.size).unwrap_or(i64::MAX),
-                        )
-                    })
-                    .await?
-            }
-            None => None,
-        };
-        tracks.push(Track {
-            rel_path,
-            name,
-            size,
-            mtime,
-            hashes,
-            matched,
-        });
+        tracks.push(disc_track(ctx, platform_id, &path, rel_path, name, size, mtime).await?);
     }
     if tracks.is_empty() {
-        return Ok(Some((Vec::new(), seen)));
+        return Ok(Some((chd_rows, seen)));
     }
 
-    let rows = ctx
+    let mut rows = ctx
         .app
         .db
         .read(move |c| classify_disc_tracks(c, tracks))
         .await?;
+    rows.extend(chd_rows);
     Ok(Some((rows, seen)))
+}
+
+/// Hashes one disc track, or reuses its stored hashes when unchanged, and finds its rom.
+async fn disc_track(
+    ctx: &JobContext,
+    platform_id: &PlatformId,
+    path: &Path,
+    rel_path: String,
+    name: String,
+    size: i64,
+    mtime: i64,
+) -> Result<Track> {
+    let (pid, relp) = (platform_id.clone(), rel_path.clone());
+    let cached = ctx
+        .app
+        .db
+        .read(move |c| cached_hashes(c, &pid, &relp, size, mtime))
+        .await?;
+    let hashes = if let Some(h) = cached {
+        Some(h)
+    } else {
+        let hint = u64::try_from(size).unwrap_or(0);
+        let path_owned = path.to_path_buf();
+        let hash_result = crate::threads::blocking(crate::threads::label::HASH, move || {
+            File::open(&path_owned).and_then(|f| hash_reader(f, HeaderRule::None, Some(hint)))
+        })
+        .await
+        .map_err(|e| Error::Task(e.to_string()))?;
+        match hash_result {
+            Ok(h) => Some(h),
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "cannot hash track; marking unverified");
+                None
+            }
+        }
+    };
+    let matched = match &hashes {
+        Some(h) => {
+            let (pid2, h2) = (platform_id.clone(), h.clone());
+            ctx.app
+                .db
+                .read(move |c| {
+                    files::match_rom(
+                        c,
+                        &pid2,
+                        &h2.sha1,
+                        &h2.md5,
+                        &h2.crc32,
+                        i64::try_from(h2.size).unwrap_or(i64::MAX),
+                    )
+                })
+                .await?
+        }
+        None => None,
+    };
+    Ok(Track {
+        rel_path,
+        name,
+        size,
+        mtime,
+        hashes,
+        matched,
+    })
 }
 
 /// Decides each track's final state from the all-or-nothing rule, evaluated
@@ -1128,6 +1150,7 @@ pub(crate) fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Res
             header_rule,
             rom_id,
             state,
+            reason: None,
         });
     }
     Ok(rows)

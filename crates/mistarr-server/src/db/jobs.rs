@@ -453,6 +453,26 @@ pub fn open_in_lane(conn: &Connection, lane: &str) -> Result<Vec<JobRow>> {
     Ok(rows)
 }
 
+/// Whether a job of a kind other than `except_kind` is queued on `lane`, so a long job
+/// of `except_kind` can hand the lane over between items.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(!mistarr_server::db::jobs::queued_other_in_lane(&conn, "heavy", "scan").unwrap());
+/// ```
+pub fn queued_other_in_lane(conn: &Connection, lane: &str, except_kind: &str) -> Result<bool> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM jobs WHERE state = 'queued' AND lane = ?1 AND kind <> ?2)",
+        )?
+        .query_row(params![lane, except_kind], |r| r.get(0))?)
+}
+
 /// Finishes a job as `failed` with `{ error }` as its progress.
 ///
 /// # Errors
@@ -548,6 +568,25 @@ mod tests {
         let mut c = Connection::open_in_memory().expect("open");
         crate::db::migrate::apply(&mut c).expect("migrate");
         c
+    }
+
+    #[test]
+    fn queued_other_in_lane_ignores_its_own_kind_and_other_lanes() {
+        let c = conn();
+        let own = insert(&c, "chd_tracks", &json!({}), "heavy", 0).expect("insert");
+        assert!(!queued_other_in_lane(&c, "heavy", "chd_tracks").expect("query"));
+        insert(&c, "dat_import", &json!({"path": "a"}), "background", 0).expect("insert");
+        assert!(!queued_other_in_lane(&c, "heavy", "chd_tracks").expect("query"));
+        let scan = insert(&c, "scan", &json!({"platform_id": "psx"}), "heavy", 0).expect("insert");
+        assert!(queued_other_in_lane(&c, "heavy", "chd_tracks").expect("query"));
+        set_state(&c, scan, JobState::Running, 1).expect("running");
+        assert!(!queued_other_in_lane(&c, "heavy", "chd_tracks").expect("query"));
+        set_state(&c, own, JobState::Running, 1).expect("running");
+        assert_eq!(
+            find_queued(&c, "chd_tracks", &json!({}), true).expect("find"),
+            None,
+            "a running singleton is never joined, so a yield queues a fresh row"
+        );
     }
 
     #[test]

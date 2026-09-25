@@ -182,6 +182,8 @@ mod tests {
         apply(&mut conn).expect("apply");
         let tables = names(&conn, "table");
         for t in [
+            "chd_failures",
+            "chd_tracks",
             "dat_versions",
             "downloads",
             "files",
@@ -456,5 +458,58 @@ mod tests {
         }
         assert_eq!(current_version(&conn).expect("version"), 0);
         assert!(!names(&conn, "table").iter().any(|n| n == "titles"));
+    }
+
+    #[test]
+    fn chd_migration_drops_unmatched_disc_chd_rows_only() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        for m in MIGRATIONS.iter().filter(|m| m.version < 17) {
+            conn.execute_batch(m.sql).expect("migration");
+        }
+        crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+        let title = crate::db::files::seed_title_fixture(
+            &conn,
+            &mistarr_core::PlatformId("psx".into()),
+            "Disc",
+        )
+        .expect("title");
+        conn.execute(
+            "INSERT INTO roms (title_id, name, size, status) VALUES (?1, 'Disc.chd', 9, 'good')",
+            [title],
+        )
+        .expect("rom");
+        let rom = conn.last_insert_rowid();
+        let insert = |platform: &str, rel: &str, rom: Option<i64>| {
+            conn.execute(
+                "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
+                 VALUES (?1, ?2, 9, 0, ?3, 'unverified', 0)",
+                params![platform, rel, rom],
+            )
+            .expect("file");
+            conn.last_insert_rowid()
+        };
+        let logged = insert("psx", "PSX/G/g.CHD", None);
+        insert("psx", "PSX/Disc/Disc.chd", Some(rom));
+        insert("psx", "PSX/G/g.bin", None);
+        insert("nes", "NES/odd.chd", None);
+        conn.execute(
+            "INSERT INTO import_log (at, file_id, action, detail) VALUES (0, ?1, 'placed', '{}')",
+            [logged],
+        )
+        .expect("log");
+        let chd = MIGRATIONS.iter().find(|m| m.version == 17).expect("0017");
+        conn.execute_batch(chd.sql).expect("0017");
+        let left: Vec<String> = conn
+            .prepare("SELECT rel_path FROM files ORDER BY rel_path")
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(left, ["NES/odd.chd", "PSX/Disc/Disc.chd", "PSX/G/g.bin"]);
+        let file_id: Option<i64> = conn
+            .query_row("SELECT file_id FROM import_log", [], |r| r.get(0))
+            .expect("log");
+        assert_eq!(file_id, None);
     }
 }

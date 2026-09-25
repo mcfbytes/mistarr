@@ -2,6 +2,7 @@
 
 pub mod arcade;
 pub mod candidates;
+pub mod chd;
 pub mod dat_stage;
 pub mod dats;
 pub mod downloads;

@@ -607,6 +607,8 @@ pub struct Counts {
     pub wanted: u64,
     /// `unverified` files on disk, outside arcade; always 0 for arcade.
     pub unmatched_files: u64,
+    /// `unidentified` files on disk: disc images not identified by their tracks.
+    pub unidentified_files: u64,
     /// Groups with a visible MRA variant whose md5 check is `mismatch` or
     /// `missing_part` and no fully verified live variant, hidden or not; 0 outside arcade.
     pub failing_check: u64,
@@ -651,6 +653,13 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
         out.entry(r.get(0)?).or_default().unmatched_files = unsigned(r.get(1)?);
+    }
+    let mut stmt = conn.prepare(
+        "SELECT platform_id, COUNT(*) FROM files WHERE state = 'unidentified' GROUP BY platform_id",
+    )?;
+    let mut rows = stmt.query([])?;
+    while let Some(r) = rows.next()? {
+        out.entry(r.get(0)?).or_default().unidentified_files = unsigned(r.get(1)?);
     }
     // Per visible MRA title, failing its md5 check or partly present, by clone group;
     // a group with a have-verified variant in title_groups counts as neither.

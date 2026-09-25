@@ -16,6 +16,8 @@ pub mod keys {
     pub const WIZARD_SCAN_DONE: &str = "wizard.scan_done";
     /// JSON `bool`: whether the user finished or dismissed the wizard once.
     pub const WIZARD_DISMISSED: &str = "wizard.dismissed";
+    /// JSON `u64`: decoded CHD bytes per active second, from the last image decoded.
+    pub const CHD_RATE: &str = "chd.rate";
 }
 
 /// Reads a value.

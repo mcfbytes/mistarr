@@ -335,8 +335,11 @@ async fn put_settings(
     let patch: SettingsPatch =
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
     check_path_map(&patch)?;
-    let prefs_before = app.config().prefs;
+    let (prefs_before, scan_before) = (app.config().prefs, app.config().scan);
     let (runtime, client_changed) = app.update_settings(&patch).await?;
+    if runtime.scan != Some(scan_before) {
+        crate::jobs::chd::apply_setting(&app).await?;
+    }
     if client_changed {
         Scheduler::enqueue(&app, Arc::new(DetectClient)).await?;
     }

@@ -42,6 +42,8 @@ pub struct Status {
     pub rss_bytes: Option<u64>,
     /// Whether cores and games can be launched.
     pub launch: LaunchState,
+    /// CHD decoding speed measured on the last image, `None` before the first.
+    pub chd_decode_bytes_per_sec: Option<u64>,
 }
 
 /// Whether the launch routes can start anything, as `/system/status` reports it.
@@ -180,6 +182,14 @@ pub async fn snapshot(app: &AppState) -> Status {
         );
     }
     let data = app.config().paths.data;
+    let chd_rate = app
+        .db
+        .read(|c| settings::get_json::<u64>(c, keys::CHD_RATE))
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "cannot read the CHD decoding speed");
+            None
+        });
     Status {
         version: env!("CARGO_PKG_VERSION"),
         uptime_secs: app.started.elapsed().as_secs(),
@@ -193,6 +203,7 @@ pub async fn snapshot(app: &AppState) -> Status {
         dats_dir: app.config().paths.dats().to_string_lossy().into_owned(),
         rss_bytes: rss_bytes(),
         launch: launch_state(app),
+        chd_decode_bytes_per_sec: chd_rate,
     }
 }
 

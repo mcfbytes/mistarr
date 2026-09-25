@@ -267,11 +267,7 @@ impl AppState {
         self.db
             .write(move |c| settings::set_json(c, keys::RUNTIME, &stored))
             .await?;
-        self.update_config(|c| {
-            c.client.clone_from(&runtime.client);
-            c.limits = runtime.limits;
-            c.prefs.clone_from(&runtime.prefs);
-        });
+        self.update_config(|c| c.overlay(runtime.clone()));
         let client_changed = runtime.client != before;
         Ok((runtime, client_changed))
     }
@@ -432,20 +428,19 @@ fn open_db(
         None
     });
     if let Some(rt) = stored {
-        config.client = rt.client;
-        config.limits = rt.limits;
-        config.prefs = rt.prefs;
+        config.overlay(rt);
     }
     Ok((db, unfinished, resolved))
 }
 
-/// Queues the jobs every start runs: unfinished scans (never arcade's), the
-/// arcade catalogue, and a re-map of the bound sources whose roms changed.
+/// Queues the jobs every start runs: unfinished scans (never arcade's), CHD decoding when
+/// its setting is on, the arcade catalogue, and a re-map of the bound sources whose roms changed.
 async fn queue_startup_jobs(
     app: &Arc<AppState>,
     unfinished: Vec<mistarr_core::PlatformId>,
 ) -> Result<()> {
     resume_scans(app, unfinished).await?;
+    jobs::chd::apply_setting(app).await?;
     jobs::arcade::enqueue_if_relevant(app).await?;
     let remap = jobs::remap::RemapSources { platforms: None };
     Scheduler::enqueue(app, Arc::new(remap)).await?;
