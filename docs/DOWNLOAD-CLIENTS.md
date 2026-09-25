@@ -216,13 +216,18 @@ pause with it.
    process never answers, and removing a source that is in the client is
    refused until the menu. Polling, transfers and magnet lookups wait and
    run again at the menu. Work that would otherwise be lost is kept under
-   `client.deferred` in the `settings` table and run once the client
+   `client.deferred` in the `settings` table, as is the same work when no
+   client is detected or the client refuses it, and run once the client
    resumes, or at the next start if mistarr stops first: detection asked for
-   meanwhile, as after a client setting changed, runs again; a changed seed
-   policy applies every source's policy again from the database; a cancelled
-   download re-applies its source's selection, stopping a torrent with
-   nothing left selected; and a finished torrent under seed policy "none" is
-   removed from the client and its empty staging directories cleared.
+   meanwhile, as after a client setting changed or when the stopped process
+   exited, runs first, so the rest goes to the client that answers now; a
+   changed seed policy applies every source's policy again from the
+   database; a cancelled download re-applies its source's selection,
+   stopping a torrent with nothing left selected; and a finished torrent
+   under seed policy "none" is removed from the client and its empty staging
+   directories cleared. Each piece is cleared only once the client took it.
+   With no client all of it stays until one is detected; work a client
+   refuses is tried again after the gate's retry wait.
 5. Every minute a stopped client is checked: one resumed by something else
    is stopped again, and one that exited or is no longer the client is let
    go, so the next step finds its successor.
@@ -232,7 +237,9 @@ pause with it.
    resumes the client, unless a core still runs and the setting is on; then
    it stays stopped. `mistarr.sh stop` and `install.sh` resume a recorded
    client as well, with the same checks on the record, its directory, the
-   executable and the start time, since a killed daemon cannot. `install.sh`
+   executable and the start time, since a killed daemon cannot; owner and
+   mode come from `stat -c`, or from `ls -ldn` on a BusyBox built without
+   stat formats. `install.sh`
    does so only when the launcher stopped mistarr or no mistarr runs.
 
 **Rate limits and held uploads.** A client on another machine, or one that
@@ -258,11 +265,15 @@ cannot be stopped, is held through its own controls instead:
 4. At startup, stored limits are put back if the gate no longer sets their
    direction; during a game they are kept and the hold is sent again. A
    stored record that cannot be read is retried and never overwritten.
-   Limits stored for another client, after the client changed, are put back
-   in that client through a handle built from its kind and address; when it
-   does not take them within five seconds they are dropped with a warning.
-   With no client detected they are retried the same way. The current
-   client's own are read before it is held.
+   When the client changes, or no client is detected, the stored limits are
+   set aside under `client.previous_limits` and the current client's own are
+   read before it is held, so the old client never delays the new one's
+   hold. Limits set aside are put back in their client through a handle
+   built from its kind and address, each try taking at most five seconds,
+   the first at once and then after a wait that starts at a minute and
+   doubles up to an hour. A try that fails a day after they were set aside
+   drops them with a warning. When their client is detected again they are
+   taken back as its saved limits, so a held limit is never read as its own.
 5. A new client handle, after detection finds another client, is held in turn.
    Every minute held uploads are read back and held again if they left the
    hold, as after a client restart.

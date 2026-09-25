@@ -104,6 +104,22 @@ fn find_takes_the_one_process_or_the_one_on_the_port() {
 }
 
 #[test]
+fn a_client_upgraded_under_it_is_still_found() {
+    let proc = tempfile::tempdir().expect("tempdir");
+    let dir = proc.path().join("20");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    symlink("/usr/bin/transmission-daemon (deleted)", dir.join("exe")).expect("exe");
+    assert_eq!(
+        process_name(proc.path(), 20).as_deref(),
+        Some("transmission-daemon")
+    );
+    assert_eq!(
+        find(proc.path(), "transmission-daemon", None).expect("found"),
+        20
+    );
+}
+
+#[test]
 fn the_record_round_trips_and_is_optional() {
     let (_dir, file) = private();
     let uid = euid();

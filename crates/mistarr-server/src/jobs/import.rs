@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mistarr_clients::{ClientTorrentId, SeedPolicy};
+use mistarr_clients::{ClientError, ClientTorrentId, SeedPolicy};
 use mistarr_core::hash::HeaderRule;
 use mistarr_core::PlatformId;
 use mistarr_mister::platforms::{self, Kind, Platform};
@@ -1253,9 +1253,10 @@ impl Placing<'_> {
 
 /// Removes a source's torrent from the client, keeping its data, once it has a
 /// download that placed its file and none still selected and its seed policy
-/// is `none`, then clears empty staging directories. While the client is
-/// frozen the release waits for it to resume.
-pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) {
+/// is `none`, then clears empty staging directories. True once that is done or
+/// there is nothing to do; false when the release waits for the client, kept
+/// by the core gate while it is frozen, missing or refuses the removal.
+pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) -> bool {
     let fresh = app
         .db
         .read(move |c| {
@@ -1275,26 +1276,27 @@ pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) {
         .await;
     let (settled, source) = match fresh {
         Ok((settled, Some(source))) => (settled, source),
-        Ok(_) => return,
+        Ok(_) => return true,
         Err(e) => {
             tracing::warn!(error = %e, "cannot read the source after an import");
-            return;
+            return false;
         }
     };
     if !settled || sources::seed_from_text(&source.seed_policy) != Some(SeedPolicy::None) {
-        return;
+        return true;
     }
     if let Some(client_id) = source.client_id.as_deref() {
-        if app.client_frozen() {
-            crate::jobs::core_limits::defer(app, Op::Release(source_id)).await;
-            return;
-        }
         let Some(client) = app.client() else {
-            return;
+            crate::jobs::core_limits::defer(app, Op::Release(source_id)).await;
+            return false;
         };
-        if let Err(e) = client.remove(&ClientTorrentId::new(client_id), false).await {
-            tracing::warn!(source = %source.id.0, error = %e, "cannot remove the finished torrent from the client");
-            return;
+        match client.remove(&ClientTorrentId::new(client_id), false).await {
+            Ok(()) | Err(ClientError::NotFound) => {}
+            Err(e) => {
+                tracing::warn!(source = %source.id.0, error = %e, "cannot remove the finished torrent from the client");
+                crate::jobs::core_limits::defer(app, Op::Release(source_id)).await;
+                return false;
+            }
         }
         if let Err(e) = app
             .db
@@ -1302,6 +1304,7 @@ pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) {
             .await
         {
             tracing::warn!(error = %e, "cannot clear the source's client id");
+            return false;
         }
     }
     let dir = app.config().paths.staging().join(&source.infohash);
@@ -1309,6 +1312,7 @@ pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) {
         place::remove_empty_dirs(&dir);
     })
     .await;
+    true
 }
 
 /// A download whose staged item was quarantined, for [`Quarantined::record`].

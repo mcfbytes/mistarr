@@ -351,6 +351,24 @@ kill -STOP "$other"
 echo "$other $(start_of "$other")" > "$MISTARR_FROZEN"
 "$script" stop >/dev/null
 expect "$(state_of "$other")" "T" "a process that is not a client is never resumed"
+# A BusyBox without stat formats is checked through ls -ldn instead.
+nostat="$root/nostat-bin"
+mkdir -p "$nostat"
+printf '#!/bin/sh\necho "stat: unrecognized option" >&2\nexit 1\n' > "$nostat/stat"
+chmod +x "$nostat/stat"
+kill -STOP "$client"
+echo "$client $(start_of "$client")" > "$MISTARR_FROZEN"
+out=$(PATH="$nostat:$PATH" "$script" stop)
+expect_contains "$out" "download client resumed" "without stat formats the record is still read"
+expect "$(running_of "$client")" "running" "without stat formats the client is resumed"
+kill -STOP "$client"
+echo "$client $(start_of "$client")" > "$MISTARR_FROZEN"
+chmod 750 "$root/frozen-dir"
+PATH="$nostat:$PATH" "$script" stop >/dev/null 2>&1
+expect "$(state_of "$client")" "T" "without stat formats an open directory is refused"
+chmod 700 "$root/frozen-dir"
+rm -f "$MISTARR_FROZEN"
+rm -rf "$nostat"
 kill -CONT "$other" "$client"
 kill "$other" "$client" 2>/dev/null
 rm -f "$root/rtorrent" "$root/planted-record"

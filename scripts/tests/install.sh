@@ -606,6 +606,24 @@ frozen="$work/run9/client.frozen" run_install "$root9" "$no_tty" v1.1.0 >/dev/nu
 expect "$(state_of "$stopped" | sed "s/[^T]/running/")" "running" "the install resumes the stopped client"
 expect_absent "$work/run9/client.frozen" "the frozen record is removed"
 
+# A BusyBox without stat formats checks the record through ls -ldn.
+mkdir -p "$work/nostat"
+printf '#!/bin/sh\necho "stat: unrecognized option" >&2\nexit 1\n' > "$work/nostat/stat"
+chmod +x "$work/nostat/stat"
+kill -STOP "$stopped"
+echo "$stopped $(start_of "$stopped")" > "$work/run9/client.frozen"
+extra_path="$work/nostat" frozen="$work/run9/client.frozen" run_install "$root9" "$no_tty" v1.1.0 >/dev/null
+expect "$(state_of "$stopped" | sed "s/[^T]/running/")" "running" "without stat formats the install resumes the client"
+kill -STOP "$stopped"
+echo "$stopped $(start_of "$stopped")" > "$work/run9/client.frozen"
+chmod 750 "$work/run9"
+extra_path="$work/nostat" frozen="$work/run9/client.frozen" run_install "$root9" "$no_tty" v1.1.0 >/dev/null
+expect "$(state_of "$stopped")" "T" "without stat formats an open record directory is refused"
+chmod 700 "$work/run9"
+rm -f "$work/run9/client.frozen"
+rm -rf "$work/nostat"
+kill -CONT "$stopped"
+
 # A stop that fails while mistarr still runs leaves its client to it.
 sh -c "sleep 100; : $root9/mistarr/mistarr" &
 daemon=$!

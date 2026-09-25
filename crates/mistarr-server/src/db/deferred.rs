@@ -56,13 +56,15 @@ pub fn get(conn: &Connection) -> Result<Deferred> {
     Ok(settings::get_json(conn, keys::CLIENT_DEFERRED)?.unwrap_or_default())
 }
 
-/// Adds `op`; a source already waiting is kept once.
+/// Adds `op`; a source already waiting is kept once. True when the waiting
+/// work changed, false when `op` already waited and nothing was written.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn add(conn: &Connection, op: Op) -> Result<()> {
-    let mut d = get(conn)?;
+pub fn add(conn: &Connection, op: Op) -> Result<bool> {
+    let before = get(conn)?;
+    let mut d = before.clone();
     let push = |list: &mut Vec<SourceId>, id: SourceId| {
         if !list.contains(&id) {
             list.push(id);
@@ -74,7 +76,11 @@ pub fn add(conn: &Connection, op: Op) -> Result<()> {
         Op::Deselect(id) => push(&mut d.deselect, id),
         Op::Release(id) => push(&mut d.release, id),
     }
-    settings::set_json(conn, keys::CLIENT_DEFERRED, &d)
+    if d == before {
+        return Ok(false);
+    }
+    settings::set_json(conn, keys::CLIENT_DEFERRED, &d)?;
+    Ok(true)
 }
 
 /// Removes the work in `done`, keeping anything added since it was read.
@@ -104,10 +110,14 @@ mod tests {
         let mut c = Connection::open_in_memory().expect("open");
         crate::db::migrate::apply(&mut c).expect("migrate");
         assert!(get(&c).expect("get").is_empty());
-        add(&c, Op::Deselect(SourceId(1))).expect("add");
-        add(&c, Op::Deselect(SourceId(1))).expect("again");
+        assert!(add(&c, Op::Deselect(SourceId(1))).expect("add"));
+        assert!(!add(&c, Op::Deselect(SourceId(1))).expect("again"));
         add(&c, Op::Release(SourceId(2))).expect("add");
         add(&c, Op::Detect).expect("add");
+        assert!(
+            !add(&c, Op::Detect).expect("again"),
+            "an unchanged queue is not written"
+        );
         let done = get(&c).expect("get");
         assert_eq!(done.deselect, [SourceId(1)]);
         assert!(done.detect && !done.seed);

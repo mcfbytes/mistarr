@@ -23,6 +23,9 @@ pub mod keys {
     pub const CLIENT_SAVED_LIMITS: &str = "client.saved_limits";
     /// JSON [`crate::db::deferred::Deferred`]: client work waiting for a frozen client.
     pub const CLIENT_DEFERRED: &str = "client.deferred";
+    /// JSON list of [`crate::jobs::core_limits::PreviousLimits`]: limits saved
+    /// for clients no longer in use, until they are put back or dropped.
+    pub const CLIENT_PREVIOUS_LIMITS: &str = "client.previous_limits";
 }
 
 /// Reads a value.

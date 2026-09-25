@@ -5,7 +5,9 @@ use std::fmt::Display;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
-use mistarr_clients::{ClientKind, ClientTorrentId, Direction, DownloadClient, RateLimit};
+use mistarr_clients::{
+    ClientError, ClientKind, ClientTorrentId, Direction, DownloadClient, RateLimit,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::app::AppState;
@@ -16,16 +18,23 @@ use crate::db::settings::{self, keys};
 use crate::db::sources;
 use crate::events::EventKind;
 use crate::freeze::{self, FreezeError, Frozen, Kill};
-use crate::jobs::detect_client::DetectClient;
-use crate::jobs::transfer::Deselect;
-use crate::jobs::Scheduler;
 use crate::threads::{self, label};
 
 /// The longest wait between retries while the client does not take its hold.
 pub const RETRY_MAX: Duration = Duration::from_secs(60);
 
-/// How long the client used before gets to take back its own limits.
+/// How long one try at putting back a previous client's limits may take.
 const RESTORE_WAIT: Duration = Duration::from_secs(5);
+
+/// The first wait before a previous client's limits are tried again; it
+/// doubles after each failed try up to [`PREVIOUS_RETRY_MAX`].
+const PREVIOUS_RETRY_FIRST: Duration = Duration::from_mins(1);
+
+/// The longest wait between tries at a previous client's limits.
+const PREVIOUS_RETRY_MAX: Duration = Duration::from_hours(1);
+
+/// How long a previous client's limits are kept for another try.
+pub const PREVIOUS_KEEP: Duration = Duration::from_hours(24);
 
 const DIRECTIONS: [Direction; 2] = [Direction::Down, Direction::Up];
 
@@ -91,6 +100,50 @@ impl SavedLimits {
             Direction::Up => self.up = limit,
         }
     }
+}
+
+/// Limits saved for a client no longer in use, or with no client detected,
+/// stored in a list under [`keys::CLIENT_PREVIOUS_LIMITS`]. They are put back
+/// through a handle built for that client, tried again with a growing wait,
+/// and dropped with a warning once a try fails [`PREVIOUS_KEEP`] after they
+/// were set aside.
+///
+/// ```
+/// use mistarr_clients::{ClientKind, RateLimit};
+/// use mistarr_server::client::ClientEndpoint;
+/// use mistarr_server::jobs::core_limits::{PreviousLimits, SavedLimits};
+/// let saved = SavedLimits { client: ClientEndpoint { kind: ClientKind::Rtorrent, url: "127.0.0.1:5000".into() },
+///     down: None, up: Some(RateLimit::kbps(40)), alt_up: None };
+/// let p = PreviousLimits { saved, since: 10, tries: 1, next_at: 70 };
+/// let json = serde_json::to_string(&p).unwrap();
+/// assert_eq!(serde_json::from_str::<PreviousLimits>(&json).unwrap(), p);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreviousLimits {
+    /// The limits and the client they belong to.
+    pub saved: SavedLimits,
+    /// When they were set aside, in seconds since the epoch.
+    pub since: i64,
+    /// Failed tries so far.
+    pub tries: u32,
+    /// When to try next, in seconds since the epoch.
+    pub next_at: i64,
+}
+
+/// The wait after `tries` failed tries at a previous client's limits.
+///
+/// ```
+/// use std::time::Duration;
+/// use mistarr_server::jobs::core_limits::previous_retry;
+/// assert_eq!(previous_retry(1), Duration::from_secs(60));
+/// assert_eq!(previous_retry(3), Duration::from_secs(240));
+/// assert_eq!(previous_retry(30), Duration::from_secs(3600));
+/// ```
+#[must_use]
+pub fn previous_retry(tries: u32) -> Duration {
+    PREVIOUS_RETRY_FIRST
+        .saturating_mul(1 << tries.saturating_sub(1).min(16))
+        .min(PREVIOUS_RETRY_MAX)
 }
 
 /// What the gate sets in each direction; `None` leaves the client's own limit.
@@ -197,6 +250,8 @@ struct Applied {
     alt_held: bool,
     /// Its own limits the gate replaced.
     saved: Option<SavedLimits>,
+    /// Limits of clients no longer in use, still to be put back.
+    previous: Vec<PreviousLimits>,
     /// Its stopped process.
     frozen: Option<Frozen>,
     /// A client that cannot be frozen, held by its uploads until the menu.
@@ -213,6 +268,14 @@ impl Applied {
         self.have = Target::default();
         self.alt_read = false;
         self.alt_held = false;
+    }
+
+    /// How long until a previous client's limits are due for another try.
+    fn previous_wait(&self) -> Option<Duration> {
+        let now = crate::unix_now();
+        self.previous.iter().map(|p| p.next_at).min().map(|at| {
+            Duration::from_secs(u64::try_from(at.saturating_sub(now)).unwrap_or(0).max(1))
+        })
     }
 }
 
@@ -259,6 +322,11 @@ pub async fn follow_gate(app: Arc<AppState>) {
                 Some(backoff(app.options.corename_poll, failures))
             }
         };
+        let previous = applied.as_ref().and_then(Applied::previous_wait);
+        let delay = match (delay, previous) {
+            (Some(d), Some(p)) => Some(d.min(p)),
+            (d, p) => d.or(p),
+        };
         let recheck = outcome.is_ok() && delay.is_some();
         let timer = tokio::select! {
             r = rx.changed() => {
@@ -291,6 +359,12 @@ async fn load(app: &AppState) -> Result<Applied, Failure> {
         .read(|c| settings::get_json::<SavedLimits>(c, keys::CLIENT_SAVED_LIMITS))
         .await
         .map_err(failed("cannot read the client limits a previous run saved"))?;
+    let previous = app
+        .db
+        .read(|c| settings::get_json::<Vec<PreviousLimits>>(c, keys::CLIENT_PREVIOUS_LIMITS))
+        .await
+        .map_err(failed("cannot read the limits saved for a previous client"))?
+        .unwrap_or_default();
     let file = app.options.frozen_file.clone();
     let frozen = match blocking(move || freeze::read_file(&file, freeze::euid())).await? {
         Ok(frozen) => frozen,
@@ -306,6 +380,7 @@ async fn load(app: &AppState) -> Result<Applied, Failure> {
         alt_read: false,
         alt_held: false,
         saved,
+        previous,
         frozen,
         refused: None,
     })
@@ -321,9 +396,22 @@ where
         .map_err(failed("a client task failed"))
 }
 
-/// Moves the client towards what the gate wants now, then runs the client
-/// work kept while it was frozen.
+/// Moves the client towards what the gate wants now, then, unless the client
+/// is frozen, puts back a previous client's limits that are due and runs the
+/// client work kept for it.
 async fn step(app: &Arc<AppState>, a: &mut Applied) -> Result<(), Failure> {
+    let held = hold(app, a).await;
+    if !app.client_frozen() {
+        restore_previous(app, a).await;
+        if held.is_ok() {
+            replay_deferred(app).await?;
+        }
+    }
+    held
+}
+
+/// Moves the client towards what the gate wants now.
+async fn hold(app: &Arc<AppState>, a: &mut Applied) -> Result<(), Failure> {
     let core = app.gate.state().core_running();
     let config = app.config();
     let pause = core && config.transfer.pause_client_while_playing;
@@ -336,21 +424,11 @@ async fn step(app: &Arc<AppState>, a: &mut Applied) -> Result<(), Failure> {
         }
         thaw_client(app, a, frozen).await?;
     }
-    if !app.client_frozen() {
-        if let Err(f) = replay_deferred(app).await {
-            tracing::warn!(error = %f.error, "{}", f.what);
-        }
-    }
     let Some((id, client)) = app.client_entry() else {
-        return match a.saved.clone() {
-            Some(saved) => {
-                restore_saved(app, &saved).await?;
-                persist(app, None).await?;
-                a.saved = None;
-                Ok(())
-            }
-            None => Ok(()),
-        };
+        if let Some(saved) = a.saved.clone() {
+            set_aside(app, a, saved).await?;
+        }
+        return Ok(());
     };
     if a.client.as_ref() != Some(&id) {
         a.client = Some(id.clone());
@@ -447,6 +525,7 @@ async fn thaw_client(app: &Arc<AppState>, a: &mut Applied, frozen: Frozen) -> Re
         Ok(()) => tracing::info!(pid = frozen.pid, "download client resumed"),
         Err(e @ (FreezeError::Gone(_) | FreezeError::Reused(_) | FreezeError::NotClient(_))) => {
             tracing::warn!(error = %e, "the paused download client is gone; nothing to resume");
+            defer(app, Op::Detect).await;
         }
         Err(e) => return Err(failed("cannot resume the download client")(e)),
     }
@@ -465,16 +544,21 @@ async fn thaw_client(app: &Arc<AppState>, a: &mut Applied, frozen: Frozen) -> Re
 /// core gate runs it then, or at the next start when mistarr stops first.
 pub async fn defer(app: &AppState, op: Op) {
     match app.db.write(move |c| deferred::add(c, op)).await {
-        Ok(()) => tracing::debug!(?op, "client work waits for the client to resume"),
+        Ok(true) => {
+            tracing::debug!(?op, "client work waits for the client to resume");
+            // The client may have resumed in between; the gate then runs it now.
+            app.limits_wake.notify_one();
+        }
+        Ok(false) => {}
         Err(e) => tracing::warn!(error = %e, "cannot keep client work for when the client resumes"),
     }
-    // The client may have resumed in between; the gate then runs it now.
-    app.limits_wake.notify_one();
 }
 
-/// Runs the client work [`defer`] kept: detection, the seed policy of every
-/// source in the client, selections and releases. Work that still finds no
-/// client stays for the next time.
+/// Runs the client work [`defer`] kept: detection first, so the rest goes to
+/// the client that answers now, then the seed policy of every source in the
+/// client, selections and releases. Only work that succeeded is cleared; with
+/// no client all of it stays, and work the client refused is a failure the
+/// gate retries.
 async fn replay_deferred(app: &Arc<AppState>) -> Result<(), Failure> {
     let waiting = app
         .db
@@ -486,53 +570,70 @@ async fn replay_deferred(app: &Arc<AppState>) -> Result<(), Failure> {
     }
     let mut done = Deferred::default();
     if waiting.detect {
-        match Scheduler::enqueue(app, Arc::new(DetectClient)).await {
+        match crate::jobs::detect_client::detect_and_store(app, false).await {
             Ok(_) => done.detect = true,
-            Err(e) => tracing::warn!(error = %e, "cannot queue client detection"),
+            Err(e) => tracing::warn!(error = %e, "cannot detect the download client"),
         }
     }
-    if waiting.seed {
-        if let Some(client) = app.client() {
-            apply_seed_policies(app, client.as_ref()).await;
-            done.seed = true;
+    let client = app.client();
+    if let Some(client) = &client {
+        done.seed = waiting.seed && apply_seed_policies(app, client.as_ref()).await;
+        for &source in &waiting.deselect {
+            match crate::jobs::transfer::deselect(app, source).await {
+                Ok(true) => done.deselect.push(source),
+                Ok(false) => {}
+                Err(e) => {
+                    tracing::debug!(source = %source, error = %e, "cannot apply a kept selection");
+                }
+            }
+        }
+        for &source in &waiting.release {
+            if crate::jobs::import::release_source(app, source).await {
+                done.release.push(source);
+            }
         }
     }
-    for &source_id in &waiting.deselect {
-        match Scheduler::enqueue(app, Arc::new(Deselect { source_id })).await {
-            Ok(_) => done.deselect.push(source_id),
-            Err(e) => tracing::warn!(error = %e, "cannot queue a selection for the client"),
-        }
-    }
-    for &source in &waiting.release {
-        if app.client().is_none() {
-            break;
-        }
-        crate::jobs::import::release_source(app, source).await;
-        done.release.push(source);
-    }
+    let left = waiting.detect != done.detect
+        || waiting.seed != done.seed
+        || waiting.deselect.len() != done.deselect.len()
+        || waiting.release.len() != done.release.len();
     app.db
         .write(move |c| deferred::clear(c, &done))
         .await
-        .map_err(failed("cannot clear the client work kept for the resume"))
+        .map_err(failed("cannot clear the client work kept for the resume"))?;
+    match client {
+        Some(_) if left => Err(Failure {
+            what: "the download client did not take the work kept while it was paused",
+            error: "kept for another try".into(),
+        }),
+        _ => Ok(()),
+    }
 }
 
-/// Applies every source's seed policy from the database to the client.
-async fn apply_seed_policies(app: &AppState, client: &dyn DownloadClient) {
+/// Applies every source's seed policy from the database to the client; true
+/// when the client took each one.
+async fn apply_seed_policies(app: &AppState, client: &dyn DownloadClient) -> bool {
     let rows = match app.db.read(sources::list_in_client).await {
         Ok(rows) => rows,
         Err(e) => {
             tracing::warn!(error = %e, "cannot read the sources to apply their seed policies");
-            return;
+            return false;
         }
     };
+    let mut all = true;
     for (source, cid, seed) in rows {
-        if let Err(e) = client
+        match client
             .set_seed_policy(&ClientTorrentId::new(cid), seed)
             .await
         {
-            tracing::warn!(source = %source, error = %e, "cannot apply the seed policy in the client");
+            Ok(()) | Err(ClientError::NotFound) => {}
+            Err(e) => {
+                tracing::warn!(source = %source, error = %e, "cannot apply the seed policy in the client");
+                all = false;
+            }
         }
     }
+    all
 }
 
 /// Sets `want` in the client, never above its own limits. Before the gate
@@ -547,18 +648,10 @@ async fn apply_limits(
     want: Target,
 ) -> Result<(), Failure> {
     if let Some(old) = a.saved.clone().filter(|s| s.client != *id) {
-        // Bounded, so a client that went away delays the new one's hold only briefly.
-        match tokio::time::timeout(RESTORE_WAIT, restore_saved(app, &old)).await {
-            Ok(Ok(())) => tracing::info!("restored the limits of the download client used before"),
-            Ok(Err(f)) => {
-                tracing::warn!(error = %f.error, "cannot restore the limits of the download client used before; dropping them");
-            }
-            Err(_) => tracing::warn!(
-                "the download client used before did not answer; dropping its saved limits"
-            ),
-        }
-        persist(app, None).await?;
-        a.saved = None;
+        set_aside(app, a, old).await?;
+    }
+    if a.saved.is_none() {
+        take_back(app, a, id).await?;
     }
     let mut saved = a
         .saved
@@ -679,6 +772,93 @@ async fn restore_into(client: &dyn DownloadClient, saved: &SavedLimits) -> Resul
     Ok(())
 }
 
+/// Moves `saved` from the current record to the previous clients' list, to be
+/// put back by [`restore_previous`] without holding up the current client.
+async fn set_aside(app: &AppState, a: &mut Applied, saved: SavedLimits) -> Result<(), Failure> {
+    let now = crate::unix_now();
+    let mut previous = a.previous.clone();
+    previous.retain(|p| p.saved.client != saved.client);
+    previous.push(PreviousLimits {
+        saved,
+        since: now,
+        tries: 0,
+        next_at: now,
+    });
+    persist_previous(app, &previous).await?;
+    a.previous = previous;
+    persist(app, None).await?;
+    a.saved = None;
+    Ok(())
+}
+
+/// Takes back limits set aside for `id` when it is the client again, so its
+/// own limits are never read while they are still held.
+async fn take_back(app: &AppState, a: &mut Applied, id: &ClientEndpoint) -> Result<(), Failure> {
+    let Some(pos) = a.previous.iter().position(|p| p.saved.client == *id) else {
+        return Ok(());
+    };
+    let mut previous = a.previous.clone();
+    let back = previous.remove(pos).saved;
+    persist(app, Some(&back)).await?;
+    a.saved = Some(back);
+    persist_previous(app, &previous).await?;
+    a.previous = previous;
+    Ok(())
+}
+
+/// Tries each previous client's limits that are due, each for at most
+/// [`RESTORE_WAIT`]. A failed try waits [`previous_retry`] for the next, and
+/// one failing [`PREVIOUS_KEEP`] after they were set aside drops them.
+async fn restore_previous(app: &AppState, a: &mut Applied) {
+    let now = crate::unix_now();
+    if !a.previous.iter().any(|p| p.next_at <= now) {
+        return;
+    }
+    let keep_secs = i64::try_from(PREVIOUS_KEEP.as_secs()).unwrap_or(i64::MAX);
+    let mut left = Vec::new();
+    for mut p in a.previous.clone() {
+        if p.next_at > now {
+            left.push(p);
+            continue;
+        }
+        let error = match tokio::time::timeout(RESTORE_WAIT, restore_saved(app, &p.saved)).await {
+            Ok(Ok(())) => {
+                tracing::info!("restored the limits of a download client no longer in use");
+                continue;
+            }
+            Ok(Err(f)) => f.error,
+            Err(_) => "no answer".to_owned(),
+        };
+        p.tries += 1;
+        if now.saturating_sub(p.since) >= keep_secs {
+            tracing::warn!(error = %error, tries = p.tries, "dropping the limits saved for a download client no longer in use");
+            continue;
+        }
+        tracing::debug!(error = %error, tries = p.tries, "cannot restore the limits of a download client no longer in use");
+        let wait = i64::try_from(previous_retry(p.tries).as_secs()).unwrap_or(i64::MAX);
+        p.next_at = now.saturating_add(wait);
+        left.push(p);
+    }
+    if let Err(f) = persist_previous(app, &left).await {
+        tracing::warn!(error = %f.error, "{}", f.what);
+    }
+    a.previous = left;
+}
+
+async fn persist_previous(app: &AppState, previous: &[PreviousLimits]) -> Result<(), Failure> {
+    let previous = previous.to_vec();
+    app.db
+        .write(move |c| {
+            if previous.is_empty() {
+                settings::remove(c, keys::CLIENT_PREVIOUS_LIMITS)
+            } else {
+                settings::set_json(c, keys::CLIENT_PREVIOUS_LIMITS, &previous)
+            }
+        })
+        .await
+        .map_err(failed("cannot save the limits of a previous client"))
+}
+
 async fn persist(app: &AppState, saved: Option<&SavedLimits>) -> Result<(), Failure> {
     let saved = saved.cloned();
     app.db
@@ -748,6 +928,7 @@ async fn recheck_hold(app: &AppState, a: &mut Applied) {
 /// Drops a frozen process that is no longer the client, without signalling it.
 async fn let_go(app: &AppState, a: &mut Applied, why: &FreezeError) {
     tracing::warn!(error = %why, "the paused download client exited");
+    defer(app, Op::Detect).await;
     let file = app.options.frozen_file.clone();
     if let Ok(Err(e)) = blocking(move || freeze::remove_file(&file)).await {
         tracing::warn!(error = %e, "cannot remove the frozen client record");

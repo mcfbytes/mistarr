@@ -112,8 +112,9 @@ pub fn stat(proc: &Path, pid: u32) -> io::Result<(char, u64)> {
     }
 }
 
-/// The executable name of `pid`: the file its `exe` link names, else the
-/// first word of its command line.
+/// The executable name of `pid`: the file its `exe` link names, without the
+/// ` (deleted)` an executable replaced on disk shows, else the first word of
+/// its command line.
 ///
 /// ```
 /// let name = mistarr_server::freeze::process_name(std::path::Path::new("/proc"), std::process::id());
@@ -123,7 +124,9 @@ pub fn stat(proc: &Path, pid: u32) -> io::Result<(char, u64)> {
 pub fn process_name(proc: &Path, pid: u32) -> Option<String> {
     let dir = proc.join(pid.to_string());
     if let Ok(exe) = std::fs::read_link(dir.join("exe")) {
-        return exe.file_name().map(|n| n.to_string_lossy().into_owned());
+        return exe
+            .file_name()
+            .map(|n| exe_name(&n.to_string_lossy()).to_owned());
     }
     let cmdline = std::fs::read(dir.join("cmdline")).ok()?;
     let first = cmdline.split(|b| *b == 0).next()?;
@@ -276,6 +279,11 @@ impl Kill {
 /// The names a download client's executable has; nothing else is ever signalled.
 pub const CLIENT_NAMES: [&str; 2] = ["rtorrent", "transmission-daemon"];
 
+/// An `exe` link's file name without the ` (deleted)` of an executable replaced on disk.
+fn exe_name(name: &str) -> &str {
+    name.strip_suffix(" (deleted)").unwrap_or(name)
+}
+
 /// Checks that `pid` runs a download client, by the file its `exe` link names.
 ///
 /// # Errors
@@ -285,9 +293,7 @@ pub fn check_client(proc: &Path, pid: u32) -> Result<(), FreezeError> {
     let exe = std::fs::read_link(proc.join(pid.to_string()).join("exe"))
         .map_err(|_| FreezeError::NotClient(pid))?;
     let name = exe.file_name().map(|n| n.to_string_lossy().into_owned());
-    // An executable replaced on disk reads as `<path> (deleted)`.
-    let name = name.as_deref().map(|n| n.trim_end_matches(" (deleted)"));
-    if name.is_some_and(|n| CLIENT_NAMES.contains(&n)) {
+    if name.is_some_and(|n| CLIENT_NAMES.contains(&exe_name(&n))) {
         Ok(())
     } else {
         Err(FreezeError::NotClient(pid))

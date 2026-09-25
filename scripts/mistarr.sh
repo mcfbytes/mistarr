@@ -211,6 +211,16 @@ reap() {
     done
 }
 
+# Prints "<uid> <mode string>" for $1, such as "0 drwx------", through stat,
+# or through ls -ldn on a BusyBox built without stat formats.
+owner_mode() {
+    if om=$(stat -c '%u %A' "$1" 2>/dev/null) && [ -n "$om" ]; then
+        echo "$om"
+    else
+        ls -ldn "$1" 2>/dev/null | awk '{ print $3, substr($1, 1, 10) }'
+    fi
+}
+
 # Resumes a download client mistarr stopped for a running core, when the
 # recorded pid still names that process; see docs/DOWNLOAD-CLIENTS.md.
 thaw_client() {
@@ -219,8 +229,8 @@ thaw_client() {
     me=$(id -u)
     # Only a record mistarr wrote: a regular file of this user in its private directory.
     if [ -L "$FROZEN" ] || [ ! -f "$FROZEN" ] || [ -L "$fdir" ] \
-        || [ "$(stat -c %u "$FROZEN")" != "$me" ] || [ "$(stat -c %u "$fdir")" != "$me" ] \
-        || [ "$(stat -c %a "$fdir")" != 700 ]; then
+        || [ "$(owner_mode "$FROZEN" | cut -d' ' -f1)" != "$me" ] \
+        || [ "$(owner_mode "$fdir")" != "$me drwx------" ]; then
         echo "ignoring $FROZEN: not a record mistarr wrote" >&2
         return 0
     fi

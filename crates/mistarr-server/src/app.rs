@@ -286,6 +286,12 @@ impl AppState {
         self.set_client_at(at, client);
     }
 
+    /// Drops the client handle, as when detection finds no client.
+    #[cfg(test)]
+    pub(crate) fn clear_client(&self) {
+        *self.client.write().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+
     /// [`AppState::set_client`] as the client at `at`.
     #[cfg(test)]
     pub(crate) fn set_client_at(&self, at: ClientEndpoint, client: Arc<dyn DownloadClient>) {

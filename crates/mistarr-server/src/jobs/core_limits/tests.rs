@@ -752,14 +752,13 @@ async fn a_finished_torrent_is_released_at_the_resume() {
 }
 
 #[tokio::test]
-async fn seed_policies_and_detection_asked_during_a_game_run_at_the_resume() {
+async fn seed_policies_changed_during_a_game_apply_at_the_resume() {
     let mock = Mock::new(OWN);
     let (_dir, app) = frozen_client(&mock);
     source_in_client(&app);
     defer(&app, Op::Seed).await;
-    defer(&app, Op::Detect).await;
     let kept = waiting(&app).await;
-    assert!(kept.seed && kept.detect, "{kept:?}");
+    assert!(kept.seed, "{kept:?}");
     assert!(mock.calls().is_empty());
 
     app.set_client_hold(None);
@@ -848,7 +847,7 @@ async fn held_uploads_also_hold_the_alternate_rate_and_put_it_back() {
 }
 
 #[tokio::test]
-async fn limits_saved_for_a_client_no_longer_in_use_are_put_back_or_dropped() {
+async fn limits_of_a_client_no_longer_in_use_are_set_aside_and_tried_again() {
     let saved = SavedLimits {
         client: remote("http://192.0.2.7:9/transmission/rpc"),
         down: None,
@@ -873,11 +872,97 @@ async fn limits_saved_for_a_client_no_longer_in_use_are_put_back_or_dropped() {
     })
     .await;
     let now = stored(&app).await.expect("saved");
+    assert_eq!((now.client, now.up), (nas(), Some(RateLimit::kbps(9))));
+    let before = crate::unix_now();
+    let mut previous = Vec::new();
+    for _ in 0..300 {
+        previous = previous_list(&app).await;
+        if previous.first().is_some_and(|p| p.tries == 1) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(previous.len(), 1, "the old client's limits are kept");
+    assert_eq!(previous[0].saved.client, gone_socket());
+    assert_eq!(previous[0].tries, 1);
+    assert!(previous[0].next_at >= before + 59, "{previous:?}");
+}
+
+async fn previous_list(app: &AppState) -> Vec<PreviousLimits> {
+    app.db
+        .read(|c| settings::get_json::<Vec<PreviousLimits>>(c, keys::CLIENT_PREVIOUS_LIMITS))
+        .await
+        .expect("read")
+        .unwrap_or_default()
+}
+
+fn set_previous(app: &AppState, list: &[PreviousLimits]) {
+    let text = serde_json::to_string(list).expect("json");
+    app.db
+        .write_blocking(move |c| settings::set(c, keys::CLIENT_PREVIOUS_LIMITS, &text))
+        .expect("previous");
+}
+
+#[tokio::test]
+async fn limits_set_aside_a_day_ago_are_dropped_after_a_failed_try() {
+    let now = crate::unix_now();
+    let day = i64::try_from(PREVIOUS_KEEP.as_secs()).expect("secs");
+    let mock = Mock::new(OWN);
+    let (_dir, app) = state_with(fast);
+    app.set_client_at(nas(), Arc::clone(&mock) as Arc<dyn DownloadClient>);
+    let stale = PreviousLimits {
+        saved: SavedLimits {
+            client: gone_socket(),
+            down: None,
+            up: Some(OWN),
+            alt_up: None,
+        },
+        since: now - day - 1,
+        tries: 20,
+        next_at: now,
+    };
+    set_previous(&app, &[stale]);
+    tokio::spawn(follow_gate(Arc::clone(&app)));
+    for _ in 0..300 {
+        if previous_list(&app).await.is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the stale limits stayed");
+}
+
+#[tokio::test]
+async fn with_no_client_the_saved_limits_are_set_aside_and_taken_back() {
+    let (_dir, app) = state_with(fast);
+    let text = saved_json(&gone_socket(), None, Some(OWN));
+    app.db
+        .write_blocking(move |c| settings::set(c, keys::CLIENT_SAVED_LIMITS, &text))
+        .expect("saved");
+    tokio::spawn(follow_gate(Arc::clone(&app)));
+    for _ in 0..300 {
+        if !previous_list(&app).await.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(previous_list(&app).await[0].saved.up, Some(OWN));
+    assert_eq!(stored(&app).await, None);
+
+    let mock = Mock::new(RateLimit::HELD);
+    app.set_client_at(gone_socket(), Arc::clone(&mock) as Arc<dyn DownloadClient>);
+    app.gate.set_corename(Some("SNES".into()));
+    wait_for("the hold", || {
+        mock.calls().contains(&"set:up:true/0".to_owned())
+    })
+    .await;
     assert_eq!(
-        (now.client, now.up),
-        (nas(), Some(RateLimit::kbps(9))),
-        "the unreachable client's limits are dropped"
+        mock.calls()[0],
+        "set:up:true/40",
+        "the limit set aside is put back, never read while it is held"
     );
+    assert_eq!(stored(&app).await.and_then(|s| s.up), Some(OWN));
+    assert!(previous_list(&app).await.is_empty());
 }
 
 #[tokio::test]
@@ -919,4 +1004,72 @@ async fn a_planted_record_is_ignored_and_its_process_left_alone() {
     Kill::new(Path::new("kill"))
         .send(other.pid(), Signal::Cont)
         .expect("cont");
+}
+
+#[tokio::test]
+async fn work_kept_for_a_client_that_died_during_the_game_waits_until_it_is_back() {
+    let mock = Mock::new(OWN);
+    let (_dir, app) = frozen_client(&mock);
+    let source = source_in_client(&app);
+    app.db
+        .write_blocking(move |c| {
+            let rom = sources::fixtures::seed_rom(c, "nes", "Example Quest (USA).nes", 16, &[])?;
+            crate::db::downloads_import::insert_fixture(c, rom, source, 0, "done", None)?;
+            Ok(())
+        })
+        .expect("placed");
+    assert!(!crate::jobs::import::release_source(&app, source).await);
+    defer(&app, Op::Seed).await;
+    defer(&app, Op::Deselect(source)).await;
+
+    mock.set_unreachable(true);
+    app.set_client_hold(None);
+    assert!(
+        replay_deferred(&app).await.is_err(),
+        "a refusing client is retried"
+    );
+    let kept = waiting(&app).await;
+    assert!(kept.seed, "{kept:?}");
+    assert_eq!((kept.deselect, kept.release), (vec![source], vec![source]));
+
+    app.clear_client();
+    replay_deferred(&app).await.expect("no client waits");
+    assert_eq!(
+        waiting(&app).await.release,
+        [source],
+        "nothing is lost with no client"
+    );
+
+    mock.set_unreachable(false);
+    app.set_client_at(nas(), Arc::clone(&mock) as Arc<dyn DownloadClient>);
+    replay_deferred(&app).await.expect("replay");
+    assert_eq!(
+        mock.calls(),
+        ["seed:t", "stop:t", "wanted:t:[]", "remove:t"]
+    );
+    assert!(waiting(&app).await.is_empty());
+    let row = app
+        .db
+        .read(move |c| sources::get(c, source))
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(
+        row.client_id, None,
+        "a torrent under \"none\" stops seeding"
+    );
+}
+
+#[tokio::test]
+async fn a_deselect_with_no_client_waits_for_one() {
+    let mock = Mock::new(OWN);
+    let (_dir, app) = state_with(fast);
+    let source = source_in_client(&app);
+    Scheduler::run_inline(&app, Arc::new(Deselect { source_id: source }))
+        .await
+        .expect("deselect");
+    assert_eq!(waiting(&app).await.deselect, [source]);
+    app.set_client_at(nas(), Arc::clone(&mock) as Arc<dyn DownloadClient>);
+    replay_deferred(&app).await.expect("replay");
+    assert_eq!(mock.calls(), ["stop:t", "wanted:t:[]"]);
 }
