@@ -182,7 +182,7 @@
 
 <div class="page">
   <div class="head">
-    <PlatformArt id={platformId} kind={platform?.kind} format="wide" />
+    <div class="banner"><PlatformArt id={platformId} kind={platform?.kind} format="wide" /></div>
     <h1>{platform?.name ?? platformId}</h1>
     {#if canStartCore}
       <button disabled={coreBusy || coreBlocker !== null} onclick={startCore}>Start core</button>
@@ -282,26 +282,33 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 0.5em 1em;
-    min-height: 128px;
-    padding: 3.5em 1em 1em;
+    padding: 116px 1em 1em;
     margin-bottom: 0.75em;
     border-radius: var(--radius);
     border: 1px solid var(--border);
   }
 
-  /* The name sits where the scrim is at least 85% opaque, which holds AA contrast over any art. */
-  .head::after {
+  .banner {
+    position: absolute;
+    inset: 0 0 auto;
+    height: 150px;
+  }
+
+  /* Text starts where the scrim is at least 85% opaque, which holds AA contrast over any art. */
+  .banner::after {
     content: '';
     position: absolute;
     inset: 0;
-    background:
-      linear-gradient(to top, var(--bg), color-mix(in srgb, var(--bg) 80%, transparent) 60%, color-mix(in srgb, var(--bg) 25%, transparent)),
-      linear-gradient(to right, color-mix(in srgb, var(--bg) 65%, transparent), transparent 75%);
+    background: linear-gradient(
+      to bottom,
+      transparent 50%,
+      color-mix(in srgb, var(--bg) 85%, transparent) 76%,
+      var(--bg) 94%
+    );
   }
 
-  .head > :not(:global(.art)) {
+  .head > :not(.banner) {
     position: relative;
-    z-index: 1;
   }
 
   h1 {

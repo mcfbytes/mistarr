@@ -1,5 +1,6 @@
 // Procedural platform backdrops; see docs/UI.md "Platform art".
 import type { PlatformKind } from '../types';
+import { hardware } from './hardware';
 import { HUE, slotVars, type Hues } from './palette';
 
 /** A motif family: one visual idea shared by the platforms of an era or medium. */
@@ -40,12 +41,12 @@ const PLATFORMS: Readonly<Record<string, readonly [ArtFamily, number?, number?, 
   sgx: ['pixel', 92, 0.9, -32],
   sv: ['pixel', 230, 0.4],
   snes: ['parallax', 205, 1, 80],
-  megadrive: ['parallax', HUE.rose, 1, 50],
+  megadrive: ['parallax', 30, 1, 40],
   s32x: ['parallax', HUE.violet, 1, 74],
   atari2600: ['bands', 200, 1, 70],
   atari5200: ['bands', HUE.teal, 1, -30],
   vectrex: ['vector'],
-  gb: ['lcd', 225, 0.22],
+  gb: ['lcd', 225, 0.34],
   ngp: ['lcd', 32, 0.4],
   gbc: ['lcd', HUE.rose],
   ws: ['lcd', 205, 0.5],
@@ -54,11 +55,11 @@ const PLATFORMS: Readonly<Record<string, readonly [ArtFamily, number?, number?, 
   gba: ['lcd', HUE.violet],
   lynx: ['lcd', HUE.warn],
   wsc: ['lcd', HUE.coral],
-  psx: ['disc'],
-  saturn: ['disc'],
-  megacd: ['disc'],
-  pcecd: ['disc'],
-  neocd: ['disc'],
+  psx: ['disc', 240],
+  saturn: ['disc', 192],
+  megacd: ['disc', 318],
+  pcecd: ['disc', 28],
+  neocd: ['disc', 150],
   n64: ['poly'],
   arcade: ['marquee', HUE.rose],
   neogeo: ['marquee', 250, 1, 90]
@@ -614,6 +615,24 @@ function contour(c: Canvas): void {
   c.body.push(`<path d="${d}" ${stroke(3, 1.2, 0.55)}/>`);
 }
 
+/**
+ * Draws the platform's hardware centred on the canvas, standing on a soft
+ * shadow in front of a glow, scaled to fit the format's box.
+ */
+function stage(c: Canvas, kind: PlatformKind | undefined): void {
+  const { w } = c;
+  const card = w < 400;
+  const [cw, ch, markup] = hardware(c.id, kind);
+  const k = Math.min((card ? 78 : 84) / ch, (card ? 190 : 240) / cw);
+  const ground = card ? 106 : 130;
+  const x = w / 2;
+  glow(c, 'back', x, ground - (ch * k) / 2, cw * k * 0.9, ch * k * 0.9, 3, 0.4);
+  glow(c, 'floor', x, ground + 1, cw * k * 0.7, 7, 8, 0.8);
+  c.body.push(
+    `<g class="hw" transform="translate(${num(x - (cw * k) / 2)} ${num(ground - ch * k)}) scale(${op(k)})" style="fill:var(--c9);stroke:var(--c4);stroke-width:${op(1.4 / k)};stroke-linejoin:round">${markup}</g>`
+  );
+}
+
 const DRAW: Readonly<Record<ArtFamily, (c: Canvas) => void>> = {
   pixel,
   parallax,
@@ -653,6 +672,7 @@ export function renderArt(id: string, kind: PlatformKind | undefined, format: Ar
     body: []
   };
   DRAW[family](canvas);
+  stage(canvas, kind);
   const anchor = format === 'card' ? 'YMin' : 'YMid';
   const svg =
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMid${anchor} slice" focusable="false" style="${slotVars(hues, sat * idSat)}">` +

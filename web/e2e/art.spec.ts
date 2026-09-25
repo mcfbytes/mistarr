@@ -1,5 +1,6 @@
 import { expect, test } from '@playwright/test';
 import { familyFor, platformArt, renderArt, type ArtFormat } from '../src/lib/art/generate';
+import { hardware } from '../src/lib/art/hardware';
 import { SLOTS, slotVars } from '../src/lib/art/palette';
 import { fixturePlatforms } from '../src/lib/fixtures';
 
@@ -70,10 +71,24 @@ test('art is memoised and stays small, local and free of script', () => {
       expect(platformArt(id, id === 'amiga' ? 'computer' : undefined, format)).toBe(art);
       const nodes = art.svg.match(/<[a-zA-Z]/g)?.length ?? 0;
       expect(nodes, `${id} ${format}`).toBeLessThan(120);
+      expect(art.svg, `${id} has its hardware`).toContain('<g class="hw"');
+      expect(art.svg, `${id} has no text`).not.toMatch(/<text|<tspan/);
       expect(art.svg).not.toMatch(/<script|on[a-z]+=|href=|https?:\/\/(?!www\.w3\.org\/2000\/svg)/);
     }
   }
   expect(renderArt('a"><x', undefined, 'card').svg).not.toContain('"><x');
+});
+
+test('each console stays small and unknown ids fall back to a generic form', () => {
+  for (const id of ids) {
+    const [w, h, markup] = hardware(id);
+    expect(w * h, id).toBeGreaterThan(0);
+    expect(markup.match(/<[a-zA-Z]/g)?.length ?? 0, id).toBeLessThan(60);
+  }
+  expect(hardware('amiga', 'computer')).toBe(hardware('c64', 'computer'));
+  expect(hardware('newboard', 'romset')).toBe(hardware('arcade'));
+  expect(hardware('mystery')).toBe(hardware('other', 'other'));
+  expect(hardware('mystery')).not.toBe(hardware('amiga', 'computer'));
 });
 
 test('every colour slot runs from its dark to its light value', () => {
@@ -100,7 +115,7 @@ test('each platform card shows its art, hidden from assistive tech', async ({ pa
   expect(tree).toContain('heading "Nintendo Entertainment System"');
 });
 
-test('the Browse header shows the platform art behind the name', async ({ page }) => {
+test('the Browse header shows the platform art above the name', async ({ page }) => {
   await page.goto('/#/p/nes');
   const art = page.locator('.head [data-art-family="pixel"]');
   await expect(art).toHaveAttribute('aria-hidden', 'true');

@@ -40,12 +40,12 @@ holds scans and imports, or the user's Pause, which also holds DAT and source
 imports), which ones, and a Run now button that calls `POST /system/resume`.
 
 **Platforms** (`/`). One card per platform with core present, counts, and a
-scan button, under a banner of the platform's art. Platforms whose core is absent are in a collapsed section. While
+scan button, below a banner of the platform's art. Platforms whose core is absent are in a collapsed section. While
 the wizard reports a missing DAT, client or source, a "Setup not finished"
 card lists what is missing and links to the wizard.
 
 **Browse** (`/p/{id}`). A Start core button beside the platform name,
-except on arcade, both over a short banner of the platform's art. Poster grid of `title_groups`, cover from the libretro
+except on arcade, both below a banner of the platform's art. Poster grid of `title_groups`, cover from the libretro
 URL with a placeholder on 404. Filters: search, have / missing / wanted,
 region, a "Show hidden" checkbox, and a flags multi-select that requires
 every checked flag. Each card shows the 1G1R pick name, a have indicator, and
@@ -104,11 +104,13 @@ and the switch that allows launching, log tail.
 
 ## Platform art
 
-Each platform has an abstract backdrop, drawn as inline SVG by
-`web/src/lib/art/generate.ts` and shown by `web/src/lib/PlatformArt.svelte`.
-The art is original and abstract: it depicts no hardware, logo or
-manufacturer artwork and uses no brand colours (PRINCIPLES.md section 8). It
-ships in the bundle and never loads an image or touches the network.
+Each platform has an abstract backdrop with a stylised drawing of its
+hardware in front, drawn as inline SVG by `web/src/lib/art/generate.ts` and
+`web/src/lib/art/hardware.ts` and shown by `web/src/lib/PlatformArt.svelte`.
+The art is original: the hardware is recognisable by form alone and carries
+no logo, wordmark, badge, model name or printed text, no manufacturer artwork
+and no brand colours (PRINCIPLES.md section 8). It ships in the bundle and
+never loads an image or touches the network.
 
 A platform id maps to a motif family that evokes its era or medium; an id
 without a mapping falls back to its `kind`, and anything else to contours.
@@ -139,20 +141,52 @@ always draws the same art. Every colour slot runs from a dark value to a
 light one through `--l`, which the component sets from `prefers-color-scheme`.
 There is no motion.
 
-A compact focal element (a sun, burst, lit shape or vanishing point) is
-centred where every banner aspect in use shows it: between 32% and 68% of the
+The hardware is the focal element: flat, filled with the palette's body
+tone, outlined by a thin rim in the family's light tone, with slots, vents,
+ports, screens and keys built from shared rectangles, circles and short
+paths. One key colour serves every button. It stands centred on a soft floor
+shadow in front of a glow, fitted to about half the banner height. Its forms:
+
+| Hardware | Platforms |
+|---|---|
+| front-loading box with a lid flap and ribs | nes |
+| drive with a disk in its slot | fds |
+| angled wedge with a card slot | sms |
+| stepped box with a rear slot | sg1000 |
+| wedge with a front band and two buttons | atari7800 |
+| keypad controllers docked on the body | coleco, intv |
+| compact box with a front card slot | pce, sgx |
+| rounded box with a raised slot and sliders | snes |
+| body with a round central dome; with a stacked add-on | megadrive; s32x |
+| raised centre slot above four ports | n64 |
+| low base under a raised slot block with switches | atari2600 |
+| long wedge with a wide slot | atari5200 |
+| portrait cabinet whose screen shows a vector tunnel, with its controller | vectrex |
+| portrait handheld; the classic has an angled grille | gb, gbc |
+| landscape handheld with a centred screen | gba, gg, lynx |
+| landscape handheld with a thumb stick | ngp |
+| landscape handheld with a side screen and key diamonds | ws, wsc |
+| small rounded handheld | pokemini, sv |
+| top-down disc console with a round lid | psx, saturn, megacd, pcecd, neocd |
+| home console with a joystick controller | neogeo |
+| upright arcade cabinet | arcade; kinds `arcade`, `romset` |
+| keyboard computer | kind `computer` |
+| generic console box | every other id |
+
+A compact focal element (the hardware, a sun, burst, lit shape or vanishing
+point) is centred where every banner aspect in use shows it: between 32% and 68% of the
 width in the card format, whose banner crops its sides on desktop, and
 between 48% and 52% in the wide format, of which a phone shows only the
 middle 358 of 960 units. The disc and tunnel are wider than a card banner and
 sit off centre there.
 
-On a Platforms card the art fills a banner under a scrim that is at least
-85% opaque where the text starts, so text keeps AA contrast over any art.
-Disabled cards and cards without a core show the art desaturated and dimmed.
-The Browse header uses a wider format under a scrim that darkens towards the
-name. The art is `aria-hidden`; the platform name stays the accessible name.
-Each tile stays under 120 SVG elements, and art is memoised per id, kind and
-format.
+On a Platforms card and in the Browse header the art fills a 150 px banner
+that fades into the background, and the text starts below it where the scrim
+is at least 85% opaque, so text keeps AA contrast over any art. The Browse
+header uses a wider format. Disabled cards and cards without a core show the
+art desaturated and dimmed. The art is `aria-hidden`; the platform name stays
+the accessible name. Each tile stays under 120 SVG elements, its hardware
+under 60, and art is memoised per id, kind and format.
 
 ## State handling
 

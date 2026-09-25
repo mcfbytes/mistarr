@@ -20,7 +20,7 @@ export interface Hues {
 
 // Per slot: hue (primary, secondary, tertiary, their midpoint, beyond the secondary), then
 // dark saturation and lightness, then light. Slots: 0-1 background, 2-3 fills, 4 line,
-// 5 tertiary, 6-7 ramp, 8 silhouette ink.
+// 5 tertiary, 6-7 ramp, 8 silhouette ink, 9-10 hardware body and panels.
 const SLOT: readonly (readonly [number, number, number, number, number])[] = [
   [0, 30, 8, 45, 97],
   [1, 34, 15, 55, 88],
@@ -30,7 +30,9 @@ const SLOT: readonly (readonly [number, number, number, number, number])[] = [
   [2, 70, 62, 62, 56],
   [3, 58, 44, 64, 67],
   [4, 60, 54, 70, 58],
-  [0, 32, 6, 28, 52]
+  [0, 32, 6, 28, 52],
+  [0, 40, 14, 45, 84],
+  [0, 34, 22, 40, 93]
 ];
 
 /** Number of colour slots a generator may use, `--c0` to `--c8`. */

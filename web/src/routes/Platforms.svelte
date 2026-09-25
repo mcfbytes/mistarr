@@ -121,7 +121,7 @@
   .art-card {
     position: relative;
     overflow: hidden;
-    padding-top: 100px;
+    padding-top: 116px;
   }
 
   .art-card > :not(.banner) {
@@ -131,7 +131,7 @@
   .banner {
     position: absolute;
     inset: 0 0 auto;
-    height: 136px;
+    height: 150px;
   }
 
   /* Text starts where the scrim is at least 85% opaque, which holds AA contrast over any art. */
@@ -141,8 +141,8 @@
     inset: 0;
     background: linear-gradient(
       to bottom,
-      transparent 35%,
-      color-mix(in srgb, var(--bg-raised) 85%, transparent) 72%,
+      transparent 50%,
+      color-mix(in srgb, var(--bg-raised) 85%, transparent) 76%,
       var(--bg-raised) 94%
     );
   }
