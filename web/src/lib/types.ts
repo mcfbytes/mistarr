@@ -25,7 +25,12 @@ export type LaunchState = 'ready' | 'disabled' | 'unavailable';
 export type Override = 'paused' | 'running' | null;
 
 export interface SystemStatus {
+  /** The release tag's version, or `<crate version>-dev` with `+<commit>` when known. */
   version: string;
+  /** Short commit the binary was built from, null when the build did not know it. */
+  commit: string | null;
+  /** Whether the binary was built from a release tag. */
+  release: boolean;
   uptime_secs: number;
   client: ClientStatus | null;
   corename: string | null;
@@ -34,8 +39,11 @@ export interface SystemStatus {
   override: Override;
   waiting: WaitingJob[];
   disk_free_bytes: number | null;
+  disk_total_bytes: number | null;
   dats_dir: string;
   rss_bytes: number | null;
+  mem_total_bytes: number | null;
+  mem_available_bytes: number | null;
   launch: LaunchState;
   /** Decoded CHD bytes per second on the last image, null before the first. */
   chd_decode_bytes_per_sec: number | null;

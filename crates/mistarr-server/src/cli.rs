@@ -12,7 +12,7 @@ use crate::error::Result;
 #[derive(Debug, Parser)]
 #[command(
     name = "mistarr",
-    version,
+    version = crate::version::version(),
     about = "Verifier and organiser for MiSTer game files"
 )]
 pub struct Cli {

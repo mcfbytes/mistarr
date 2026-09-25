@@ -16,8 +16,12 @@ use crate::jobs::Lane;
 /// `GET /system/status` and the `status` event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Status {
-    /// Crate version.
+    /// The version string from [`crate::version::version`].
     pub version: &'static str,
+    /// The short commit the binary was built from, when the build knew it.
+    pub commit: Option<&'static str>,
+    /// Whether the binary was built from a release tag.
+    pub release: bool,
     /// Seconds since the server started.
     pub uptime_secs: u64,
     /// Last client detection, `None` before the first.
@@ -36,10 +40,16 @@ pub struct Status {
     pub waiting: Vec<WaitingJob>,
     /// Free bytes on the filesystem holding the data directory.
     pub disk_free_bytes: Option<u64>,
+    /// Size in bytes of the filesystem holding the data directory.
+    pub disk_total_bytes: Option<u64>,
     /// The directory watched for DAT files, as configured.
     pub dats_dir: String,
     /// Resident set size of this process.
     pub rss_bytes: Option<u64>,
+    /// `MemTotal` from `/proc/meminfo`.
+    pub mem_total_bytes: Option<u64>,
+    /// `MemAvailable` from `/proc/meminfo`.
+    pub mem_available_bytes: Option<u64>,
     /// Whether cores and games can be launched.
     pub launch: LaunchState,
     /// CHD decoding speed measured on the last image, `None` before the first.
@@ -190,8 +200,11 @@ pub async fn snapshot(app: &AppState) -> Status {
             tracing::warn!(error = %e, "cannot read the CHD decoding speed");
             None
         });
+    let mem = meminfo();
     Status {
-        version: env!("CARGO_PKG_VERSION"),
+        version: crate::version::version(),
+        commit: crate::version::commit(),
+        release: crate::version::is_release(),
         uptime_secs: app.started.elapsed().as_secs(),
         client,
         pause_reason: gate.pause_reason(),
@@ -200,8 +213,11 @@ pub async fn snapshot(app: &AppState) -> Status {
         waiting,
         corename: gate.corename,
         disk_free_bytes: free_bytes(&data),
+        disk_total_bytes: total_bytes(&data),
         dats_dir: app.config().paths.dats().to_string_lossy().into_owned(),
         rss_bytes: rss_bytes(),
+        mem_total_bytes: mem.total,
+        mem_available_bytes: mem.available,
         launch: launch_state(app),
         chd_decode_bytes_per_sec: chd_rate,
     }
@@ -260,6 +276,47 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
     st.f_bavail.checked_mul(st.f_frsize)
 }
 
+/// Size in bytes of the filesystem holding `path`.
+///
+/// ```
+/// let p = std::path::Path::new("/");
+/// assert!(mistarr_server::status::total_bytes(p) >= mistarr_server::status::free_bytes(p));
+/// ```
+#[must_use]
+pub fn total_bytes(path: &Path) -> Option<u64> {
+    let st = rustix::fs::statvfs(path).ok()?;
+    st.f_blocks.checked_mul(st.f_frsize)
+}
+
+/// Total and available memory, from one read of `/proc/meminfo`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct MemInfo {
+    /// `MemTotal`.
+    pub total: Option<u64>,
+    /// `MemAvailable`.
+    pub available: Option<u64>,
+}
+
+/// Reads [`MemInfo`]; both fields are `None` when `/proc/meminfo` cannot be read.
+///
+/// ```
+/// let m = mistarr_server::status::meminfo();
+/// assert!(m.total.is_some_and(|t| m.available.is_some_and(|a| a <= t)));
+/// ```
+#[must_use]
+pub fn meminfo() -> MemInfo {
+    std::fs::read_to_string("/proc/meminfo")
+        .map(|text| meminfo_from(&text))
+        .unwrap_or_default()
+}
+
+fn meminfo_from(text: &str) -> MemInfo {
+    MemInfo {
+        total: kib_field(text, "MemTotal:"),
+        available: kib_field(text, "MemAvailable:"),
+    }
+}
+
 /// This process's resident set size from `/proc/self/status`.
 ///
 /// ```
@@ -303,7 +360,19 @@ mod tests {
     }
 
     #[test]
+    fn meminfo_parses_total_and_available() {
+        let text = "MemTotal:  512000 kB\nMemFree: 1 kB\nMemAvailable:  128000 kB\n";
+        let m = meminfo_from(text);
+        assert_eq!(m.total, Some(512_000 * 1024));
+        assert_eq!(m.available, Some(128_000 * 1024));
+        assert_eq!(meminfo_from(""), MemInfo::default());
+    }
+
+    #[test]
     fn host_measurements_exist_on_linux() {
+        assert!(meminfo().total.is_some());
+        assert!(total_bytes(Path::new("/")).is_some());
+        assert!(total_bytes(Path::new("/nonexistent/x")).is_none());
         assert!(rss_bytes().is_some());
         assert!(mem_available_bytes().is_some());
         assert!(free_bytes(Path::new("/")).is_some());
@@ -322,6 +391,9 @@ mod tests {
         let json = serde_json::to_value(&s).expect("json");
         assert!(json.get("override").is_some());
         assert_eq!(json["launch"], "unavailable");
+        assert_eq!(json["version"], crate::version::version());
+        assert!(json["mem_total_bytes"].is_u64());
+        assert!(json["disk_total_bytes"].is_u64());
     }
 
     #[tokio::test]

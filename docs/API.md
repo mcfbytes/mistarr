@@ -27,7 +27,7 @@ under `/api` return 404 JSON.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/system/status` | Version, uptime, client kind and reachability, CORENAME, paused state, disk free, RSS, CHD decoding speed. |
+| GET | `/system/status` | Version and commit, uptime, client kind and reachability, CORENAME, paused state, disk free and size, RSS, memory total and available, CHD decoding speed. |
 | GET | `/system/wizard` | Which first-run steps are complete. |
 | POST | `/system/wizard/done` | The user finished or dismissed the wizard; it stops opening by itself. Returns the wizard body. |
 | POST | `/system/scan` | Enqueue a library scan. Body `{ platform_id? }`. |
@@ -42,18 +42,25 @@ under `/api` return 404 JSON.
 
 ```json
 {
-  "version": "0.0.1", "uptime_secs": 12,
+  "version": "0.3.0", "commit": "1a2b3c4", "release": true, "uptime_secs": 12,
   "client": { "kind": "transmission", "url": "http://127.0.0.1:9091/transmission/rpc",
               "reachable": true, "version": "4.0.5", "rtorrent_on_path": false,
               "transmission_on_path": true, "transmission_service": true,
               "transmission_opt_in": true, "checked_at": 1700000000 },
   "corename": "MENU", "paused": false, "pause_reason": null, "override": null,
   "waiting": [],
-  "disk_free_bytes": 1000000, "dats_dir": "/media/fat/mistarr/dats",
-  "rss_bytes": 1000000, "launch": "ready", "chd_decode_bytes_per_sec": null
+  "disk_free_bytes": 1000000, "disk_total_bytes": 32000000,
+  "dats_dir": "/media/fat/mistarr/dats",
+  "rss_bytes": 1000000, "mem_total_bytes": 507000000, "mem_available_bytes": 214000000,
+  "launch": "ready", "chd_decode_bytes_per_sec": null
 }
 ```
 
+`version` is the release tag's version for a release build, and otherwise
+the workspace version with `-dev`, plus `+` and the short commit when the
+build knew it, such as `0.3.0-dev+1a2b3c4` (DEPLOYMENT.md "Releasing").
+`commit` is that short commit or `null`, and `release` whether the binary was
+built from a release tag.
 `client` is `null` before the first detection and has `kind: null` when no
 client answered. `rtorrent_on_path` and `transmission_on_path` say whether
 each executable is on `PATH`, `transmission_service` whether
@@ -66,7 +73,9 @@ lanes that are held, heavy lane first, oldest first, as
 `{ id, kind, state, detail }`, where `detail` is the file name or platform
 the job is about or `null`. Running jobs are not in it. A running core holds
 the heavy lane; a manual pause holds the heavy and background lanes. It is
-empty while nothing is held. `disk_free_bytes` is for the filesystem holding the data directory.
+empty while nothing is held. `disk_free_bytes` and `disk_total_bytes` are for the filesystem holding the data directory.
+`mem_total_bytes` and `mem_available_bytes` are `MemTotal` and `MemAvailable`
+from `/proc/meminfo`, `null` where it cannot be read.
 `dats_dir` is the directory watched for DAT files, from `[paths]`.
 `launch` is `"ready"`, `"disabled"` when `prefs.launch` is off, or
 `"unavailable"` when MiSTer Main's command FIFO does not exist.

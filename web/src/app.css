@@ -42,6 +42,8 @@ body {
     'Segoe UI',
     sans-serif;
   overflow-x: hidden;
+  /* Clips without making body a scroll container, so position: sticky follows the viewport. */
+  overflow-x: clip;
 }
 
 body {

@@ -283,7 +283,7 @@ automatic and manual scans instead; the change needs a restart.
 
 ## Runtime checks on the board
 
-`mistarr doctor` prints: binary is static, paths writable, free space,
+`mistarr doctor` prints: the version (with the commit for a release), binary is static, paths writable, free space,
 detected client and its version, whether `rtorrent` is on `PATH`, installed
 cores, CORENAME, memory available, and the result of hashing 64 MiB of zeros
 for throughput (`--hash-mib N` changes the size), and whether the
@@ -314,3 +314,16 @@ tag's message as the release body.
 
 The workflow runs only when a release is published, so each release builds
 once. Pushing a tag alone creates no release and starts no build.
+
+**Version**: the tag must be `vMAJOR.MINOR.PATCH` semver, with an optional
+pre-release or build suffix such as `v1.2.3-rc.1`; the workflow fails on any
+other tag before it builds. It passes the tag without the `v` as
+`MISTARR_VERSION` and the commit as `MISTARR_COMMIT`, which the binary reads
+at compile time, so a release reports exactly its tag in `/system/status`,
+`mistarr --version`, `mistarr doctor`, the log line at startup and the System
+tab. Any other build reports `version` from the workspace `Cargo.toml` with
+`-dev`, plus `+` and the first seven characters of the commit when
+`MISTARR_COMMIT` or CI's `GITHUB_SHA` is set, such as `0.3.0-dev+1a2b3c4`.
+Keep the workspace version at the latest release, and raise it in the
+pull request that prepares the next one, so a development build names the
+release it follows.

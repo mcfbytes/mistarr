@@ -12,6 +12,18 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
+      # The binary reports the tag's version; see docs/DEPLOYMENT.md "Releasing".
+      - name: Check the tag is vX.Y.Z semver and pass it to the build
+        env:
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
+          if ! printf '%s\n' "$TAG" | grep -Eq "$semver"; then
+            echo "::error::release tag '$TAG' is not vMAJOR.MINOR.PATCH semver"
+            exit 1
+          fi
+          echo "MISTARR_VERSION=${TAG#v}" >> "$GITHUB_ENV"
+          echo "MISTARR_COMMIT=$GITHUB_SHA" >> "$GITHUB_ENV"
       # Installs the pinned toolchain, components and targets from rust-toolchain.toml.
       - run: rustup toolchain install
       # Zig is the C cross-compiler and linker cargo-zigbuild drives for the bundled C code.

@@ -98,7 +98,11 @@ fn main() -> anyhow::Result<()> {
 
 async fn serve(config: mistarr_server::config::Config) -> anyhow::Result<()> {
     let running = app::start(config, Options::default()).await?;
-    tracing::info!(url = %format!("http://{}/", running.addr), "mistarr started");
+    tracing::info!(
+        url = %format!("http://{}/", running.addr),
+        version = mistarr_server::version::version(),
+        "mistarr started"
+    );
     wait_for_signal().await?;
     tracing::info!("shutting down");
     running.shutdown().await?;

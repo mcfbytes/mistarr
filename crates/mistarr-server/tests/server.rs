@@ -83,7 +83,11 @@ async fn status_has_the_documented_shape() {
         .header("content-type")
         .is_some_and(|v| v.contains("application/json")));
     let s = r.json();
-    assert_eq!(s["version"], env!("CARGO_PKG_VERSION"));
+    assert_eq!(s["version"], mistarr_server::version::version());
+    assert_eq!(s["release"], mistarr_server::version::is_release());
+    assert!(s["mem_total_bytes"].as_u64().is_some_and(|b| b > 0));
+    assert!(s["mem_available_bytes"].is_u64());
+    assert!(s["disk_total_bytes"].is_u64());
     assert!(s["uptime_secs"].is_u64());
     assert_eq!(s["client"]["kind"], "transmission");
     assert_eq!(s["client"]["reachable"], false);

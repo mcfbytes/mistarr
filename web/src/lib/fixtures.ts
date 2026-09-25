@@ -372,7 +372,9 @@ export function fixtureTitle(id: number): TitleDetail {
 }
 
 export const fixtureStatus: SystemStatus = {
-  version: '0.1.0-fixture',
+  version: '0.3.0-dev+1a2b3c4',
+  commit: '1a2b3c4',
+  release: false,
   uptime_secs: 4521,
   client: {
     kind: 'rtorrent',
@@ -391,8 +393,11 @@ export const fixtureStatus: SystemStatus = {
   override: null,
   waiting: [{ id: 2, kind: 'scan', state: 'queued', detail: 'nes' }],
   disk_free_bytes: 12_400_000_000,
+  disk_total_bytes: 31_900_000_000,
   dats_dir: '/media/fat/mistarr/dats',
   rss_bytes: 41_000_000,
+  mem_total_bytes: 507_000_000,
+  mem_available_bytes: 214_000_000,
   launch: 'ready',
   chd_decode_bytes_per_sec: 1_200_000
 };
@@ -400,7 +405,7 @@ export const fixtureStatus: SystemStatus = {
 /** The status mock mode reports: the fixture's, or at the menu with nothing held for `showcase`. */
 export function scenarioStatus(): SystemStatus {
   return mockScenario() === 'showcase'
-    ? { ...fixtureStatus, version: '0.1.0', corename: 'MENU', paused: false, pause_reason: null, waiting: [] }
+    ? { ...fixtureStatus, version: '0.3.0', release: true, corename: 'MENU', paused: false, pause_reason: null, waiting: [] }
     : fixtureStatus;
 }
 
