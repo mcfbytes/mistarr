@@ -389,10 +389,14 @@ debug. It lives in the `url_fetch` job's memory until the job ends.
    together), sends one GET and follows up to 5 HTTP redirects of that
    request, the only URLs besides the typed one it ever requests
    (PRINCIPLES.md section 2). It never follows a redirect from https to
-   http, nor one to an address on this machine or the local network
-   (loopback, private, link-local, 100.64/10, unique local, unspecified,
-   also IPv4-mapped) when the typed URL's host was not one; it dials only
-   the addresses it checked. A 6th redirect, any other non-2xx answer, a
+   http, nor one to an address on this machine or the local network once
+   any host in the chain, the typed one included, was public; it dials only
+   the addresses it checked. Local means IPv4 0.0.0.0/8, loopback, private,
+   link-local, 100.64/10 and broadcast, and IPv6 loopback, unspecified,
+   unique local, link-local, site-local (`fec0::/10`), NAT64
+   (`64:ff9b::/96`, `64:ff9b:1::/48`) and IPv4-compatible (`::/96`); an
+   IPv4-mapped or 6to4 (`2002::/16`) address counts as the IPv4 address it
+   carries. A host with any local address is local. A 6th redirect, any other non-2xx answer, a
    `Content-Encoding` other than `identity`, 60 s without a byte, or an
    average under 1 KiB/s once 5 minutes have passed ends it. Nothing is
    retried and nothing is fetched again later: a restart fails the job as
@@ -400,15 +404,20 @@ debug. It lives in the `url_fetch` job's memory until the job ends.
    on the user's LAN, the user typed the address, and a DAT or torrent on a
    NAS or another machine at home is the common case, so refusing it would
    protect nothing the user could not reach from the same browser.
-4. The body streams into `fetch-<pid>-<token>.part` in SQLite's temporary
-   directory when that is in RAM (`/tmp/mistarr`) and `MemAvailable` covers
-   the announced length, or 16 MiB when there is none, above
-   `[memory] import_floor_mib`; otherwise, and when memory falls short during
-   the transfer (checked every 8 MiB), in `<data>/tmp` on the card. It is
-   written in 1 MiB writes. A move to the card that fails removes its
-   partial copy and keeps the file in RAM, and the fetch fails. Leftover
-   parts are removed at startup, in both places, as are the `.upload-*.part`
-   files a restart left in `dats/` and `sources/`.
+4. The body streams into `fetch-<pid>-<token>.part` in `mistarr-fetch/`,
+   mistarr's own directory under SQLite's temporary one when that is in RAM
+   (`/tmp/mistarr`), when `MemAvailable` covers the announced length, or
+   16 MiB when there is none, above `[memory] import_floor_mib`; otherwise,
+   and when memory falls short during the transfer (checked every 8 MiB),
+   in `<data>/tmp` on the card. It is written in 1 MiB writes. Before
+   writing to the card, and every 8 MiB while it does, the card must have
+   room for what comes next and 32 MiB more, else the fetch fails as "The
+   card has too little free space for the file.". A move to the card that
+   fails removes its partial copy and keeps the file in RAM, and the fetch
+   fails. At startup leftover parts are removed from `<data>/tmp` and
+   `mistarr-fetch/` only, never from a directory another program shares,
+   as are the `.upload-*.part` files a restart left in `dats/` and
+   `sources/`.
 5. The first 64 bytes decide the type, never the URL or `Content-Type`: an
    XML document (`<?xml`, `<datafile`, `<header`, `<!DOCTYPE datafile`, or
    `<!--`, since DATs often open with a comment before any declaration,
@@ -419,19 +428,36 @@ debug. It lives in the `url_fetch` job's memory until the job ends.
    torrent. An HTML page that opens with a comment passes the sniff and is
    refused by the check. A body longer than its type's cap, announced or
    counted, ends it too.
-6. Once whole, the file is checked with the importers' own parsers: every
-   game of a DAT through `DatStream`, which also refuses anything after the
-   root element but whitespace, comments and processing instructions, and
-   any single XML event over 1 MiB; every member of a zip, which must all
-   be `.dat` or `.xml` and parse; or the whole torrent through
-   `parse_torrent`. A zip is not placed as fetched: each member is
-   decompressed once, parsed and written as it is read into a new zip
-   (deflate level 1) beside the spool, so the placed pack holds only what
-   was checked and no bytes the central directory does not list; the new
-   zip goes in RAM when memory allows a second copy, else on the card.
-   Nothing inside is read for further URLs; a torrent's `url-list` and
-   trackers are never contacted by mistarr. A refused file is deleted,
-   never placed.
+6. Once whole, the file is checked with the importers' own parsers, and a
+   DAT is not placed as fetched: the placed file is mistarr's rewrite of
+   the DAT's entries (`dat::rewrite`). `DatStream` parses every game, with
+   the caps of VERIFICATION.md "DAT parsing" (1 MiB per XML event, 64
+   levels of nesting, 4 KiB per name, 64 KiB per other field, 100,000 roms,
+   releases and files and 16 MiB of fields per game), refusing anything
+   after the root element but whitespace, comments and processing
+   instructions; as each game is read, a streaming writer writes the
+   header fields the parser reads and the game with exactly the
+   attributes, releases and roms it keeps, one game in memory at a time.
+   A Logiqx DAT becomes a Logiqx DAT. A No-Intro DB export stays a DB
+   export, since which of its files become roms depends on the platform it
+   binds to at import: each game keeps its `archive` and every `file` of
+   every `source` with the attributes the parser reads. Comments,
+   processing instructions, doctypes, CDATA sections, unknown elements and
+   attributes and stray text never reach the placed file, and data a
+   server hides inside a legitimate field is bounded by that field's cap.
+   Importing the rewrite gives the same rows as importing the original.
+   Every member of a zip must be a `.dat` or `.xml` DAT; the members may
+   unpack to 512 MiB together, checked against the sizes the zip declares
+   and again as they are read, and each is rewritten as it is read into a
+   new zip (deflate level 1), so the placed pack holds only mistarr's
+   rewrites and no bytes the central directory does not list. A torrent is
+   parsed whole through `parse_torrent` and placed as fetched, since its
+   infohash is its bytes. The rewrite starts in RAM when the spool is in
+   RAM and memory allows it, moves to the card when memory falls short
+   (checked every 8 MiB), checks the card's room as the spool does, may not
+   exceed 512 MiB, and is deleted the moment the file is refused. Nothing
+   inside is read for further URLs; a torrent's `url-list` and trackers are
+   never contacted by mistarr. A refused file is deleted, never placed.
 7. The file is named from `Content-Disposition` (`filename*` in UTF-8 or
    ISO-8859-1 first, then `filename`, quoted strings unescaped), else the
    final URL's last path segment, made safe as an upload's name is and
@@ -444,18 +470,19 @@ debug. It lives in the `url_fetch` job's memory until the job ends.
    there the incoming list, jobs and toasts are an upload's.
 
 Every failure, cancellation and shutdown removes the part file and any
-rebuilt pack. The `fetch` lane runs one fetch at a time and is never held:
+rewrite. The `fetch` lane runs one fetch at a time and is never held:
 neither a running core nor a manual pause stops a transfer, which is
 network-bound and would otherwise hold a link the user just pasted for the
 length of a game. Instead, while a core runs, every write a fetch makes to
 the card rests after each 1 MiB as long as the write took, between 20 ms
 and 1 s, as the database's write-back does: the spool's writes when it is
-on the card, its move there when memory runs short, the rebuilt pack, and
-the copy into `dats/`. The network read waits for each write and its rest,
+on the card, its move there when memory runs short, the rewrite, and the
+copy into `dats/`. The network read waits for each write and its rest,
 so a fetch on the card goes no faster than the card is allowed to take it;
 a fetch in RAM is not slowed. The daemon's threads are in the idle I/O
-class. Cancel (`DELETE /fetch/{token}`) is honoured between chunks, between
-games of the check and between writes of the copy into `dats/`; shutdown
+class. Cancel (`DELETE /fetch/{token}`) is honoured between chunks, every
+8 MiB the check and rewrite read, and between writes of the copy into
+`dats/`; shutdown
 likewise, leaving the job queued for the restart to fail as interrupted.
 
 https uses rustls with the ring provider, TLS 1.2 and 1.3, and ALPN
@@ -657,8 +684,8 @@ shutdown is left `queued` for this.
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
 | Arcade presence pass | 500 zips per batch, stat only unless import rows of a changed zip need its central directory; the listing's names and the live MRA zip set persist across batches |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
-| Fetched file (`url_fetch`) | `.torrent` 16 MiB (`MAX_SOURCE_BYTES`), DAT or DAT pack 512 MiB (`MAX_DAT_BYTES`), the uploads' caps, checked against `Content-Length` and while streaming; 1 MiB write buffer; spooled in `/tmp/mistarr` only above `[memory] import_floor_mib`; one fetch at a time; each XML event under 1 MiB; peak RSS 17.5 MiB in all for a 50 MiB DAT over https in a release build, under the 64 MiB ceiling, checked by `tests/memory.rs` |
-| https | rustls with ring, `webpki-roots` (58 KiB of it) and the fetch code add 690 KiB to the stripped armv7 binary, 5.55 to 6.23 MiB with the SPA; trust anchors are loaded per fetch and dropped after it, so idle RSS is unchanged |
+| Fetched file (`url_fetch`) | `.torrent` 16 MiB (`MAX_SOURCE_BYTES`), DAT or DAT pack 512 MiB (`MAX_DAT_BYTES`), the uploads' caps, checked against `Content-Length` and while streaming; 1 MiB write buffer; spooled in `/tmp/mistarr` only above `[memory] import_floor_mib`; one fetch at a time; each XML event under 1 MiB and one game in memory while it is rewritten; peak RSS 17.7 MiB in all for a 50 MiB DAT over https in a release build, under the 64 MiB ceiling, checked by `tests/memory.rs` |
+| https | rustls with ring, `webpki-roots` (58 KiB of it) and the fetch code with its DAT rewrite add 756 KiB to the stripped armv7 binary, 5.55 to 6.28 MiB with the SPA; trust anchors are loaded per fetch and dropped after it, so idle RSS is unchanged |
 | Browse page or search, with its total | under 100 ms on the board with every major platform's DAT loaded; `tests/browse.rs` holds a host bound and `mistarr bench-search` measures the board |
 | SPA bundle, gzipped | under 200 KiB |
 | Concurrent client RPC calls | 1, serialised |

@@ -1,22 +1,21 @@
 //! What a fetched file is, from its first bytes and then its whole content.
 
-use std::io::{BufReader, Read, Write};
-use std::path::Path;
+use std::cell::Cell;
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
-use mistarr_core::dat::DatStream;
+use mistarr_core::dat::{rewrite, RewriteError};
 
 use crate::jobs::dat_import::MAX_DAT_BYTES;
 use crate::jobs::source_import::MAX_SOURCE_BYTES;
-use crate::jobs::url_fetch::spool::{Pace, Paced};
+use crate::jobs::url_fetch::spool::{Spill, Target, RECHECK_BYTES};
 
 /// Bytes read before the type is decided, unless the file is shorter.
 pub const SNIFF_BYTES: usize = 64;
 
-/// Buffer of the rebuilt pack's writes.
+/// Buffer of the rewrite's writes.
 const CHUNK: usize = 1024 * 1024;
-
-/// Games parsed between checks for cancellation.
-const CHECK_EVERY: usize = 500;
 
 /// What the first bytes of a fetched file say it is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -98,8 +97,9 @@ pub fn sniff(head: &[u8]) -> Option<Found> {
         .then_some(Found::Xml)
 }
 
-/// Bytes one member of a fetched DAT pack may decompress to; a zip bomb stops here.
-pub const MAX_MEMBER_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+/// Bytes the members of a fetched DAT pack may decompress to, one or all together; a zip
+/// bomb stops here.
+pub const MAX_UNPACKED_BYTES: u64 = MAX_DAT_BYTES;
 
 /// Whether the first bytes are gzip's, which a server may send despite being asked not to.
 ///
@@ -115,8 +115,14 @@ pub fn is_gzip(head: &[u8]) -> bool {
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Checked {
-    /// A DAT, or a pack of DATs rebuilt from its checked members alone.
-    Dat,
+    /// A DAT or a pack of DATs, rewritten by mistarr into a new file; the fetched bytes
+    /// are not kept.
+    Dat {
+        /// The rewrite.
+        path: PathBuf,
+        /// Whether it is in RAM.
+        in_ram: bool,
+    },
     /// A `.torrent` that parses, with its bytes and infohash.
     Torrent {
         /// The whole file.
@@ -137,43 +143,52 @@ pub enum Refused {
     /// A zip that holds a file other than a `.dat` or `.xml` DAT.
     #[error("the zip holds files other than DATs")]
     OtherFiles,
+    /// A pack unpacks, or a rewrite grows, past [`MAX_UNPACKED_BYTES`].
+    #[error("larger than a DAT may be")]
+    TooLarge,
+    /// The card has too little room for the rewrite.
+    #[error("the card has too little free space")]
+    NoRoom,
     /// The check was asked to stop.
     #[error("stopped")]
     Stopped,
-    /// The file could not be read, or the rebuilt pack written.
+    /// The file could not be read, or the rewrite written.
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }
 
-/// Checks the file at `path` fully as `found`: every game of a DAT to the end of the
-/// file, or the whole torrent. A zip must hold only `.dat` or `.xml` DATs, each of which
-/// is checked while it is written into a new zip at `rebuilt`, so the pack placed holds
-/// only what was checked; its writes rest for what `pace` returns. `stop` is asked
-/// between games.
+/// Checks the file at `path` fully as `found`. A DAT is parsed to the end of the file and
+/// rewritten by [`rewrite`] into a file where `target` allows; each member of a zip, which
+/// must all be `.dat` or `.xml` DATs, is rewritten likewise into a new zip. A torrent is
+/// parsed whole. `stop` is asked every [`RECHECK_BYTES`] read.
 ///
 /// # Errors
 ///
-/// [`Refused`] saying why; a partial `rebuilt` is removed.
+/// [`Refused`] saying why; the partial rewrite is removed at once.
 pub fn check(
     found: Found,
     path: &Path,
-    rebuilt: &Path,
-    pace: &Pace,
+    target: &Target,
     stop: &dyn Fn() -> bool,
 ) -> Result<Checked, Refused> {
     match found {
         Found::Xml => {
             let file = std::fs::File::open(path)?;
-            dat(BufReader::with_capacity(64 * 1024, file), stop)?;
-            Ok(Checked::Dat)
+            let size = file.metadata()?.len();
+            let budget = Budget::new(stop);
+            let spill = Spill::create(target.clone(), size).map_err(write_error)?;
+            let mut out = std::io::BufWriter::with_capacity(CHUNK, spill);
+            let input = Counted {
+                inner: file,
+                budget: &budget,
+            };
+            let rewritten = rewrite(BufReader::with_capacity(64 * 1024, input), &mut out);
+            budget.verdict(rewritten.map(|_| ()))?;
+            let spill = out.into_inner().map_err(|e| write_error(e.into_error()))?;
+            let (path, in_ram) = spill.finish().map_err(write_error)?;
+            Ok(Checked::Dat { path, in_ram })
         }
-        Found::Zip => {
-            let packed = pack(path, rebuilt, pace, stop);
-            if packed.is_err() {
-                let _ = std::fs::remove_file(rebuilt);
-            }
-            packed.map(|()| Checked::Dat)
-        }
+        Found::Zip => pack(path, target, stop),
         Found::Torrent => {
             let file = std::fs::File::open(path)?;
             let mut bytes = Vec::new();
@@ -191,17 +206,84 @@ pub fn check(
     }
 }
 
-/// Parses every game of one DAT, one at a time, and what follows its root.
-fn dat<R: std::io::BufRead>(reader: R, stop: &dyn Fn() -> bool) -> Result<(), Refused> {
-    let not_dat = |e: mistarr_core::dat::DatError| Refused::NotAccepted(format!("not a DAT: {e}"));
-    let stream = DatStream::new(reader).map_err(not_dat)?;
-    for (i, game) in stream.enumerate() {
-        game.map_err(not_dat)?;
-        if i % CHECK_EVERY == 0 && stop() {
-            return Err(Refused::Stopped);
+/// A write error as a refusal: a full card, a rewrite past its cap, or plain I/O.
+fn write_error(e: std::io::Error) -> Refused {
+    match e.kind() {
+        std::io::ErrorKind::StorageFull => Refused::NoRoom,
+        std::io::ErrorKind::FileTooLarge => Refused::TooLarge,
+        _ => Refused::Io(e),
+    }
+}
+
+/// What the input readers of one check have taken, and why they stopped.
+struct Budget<'a> {
+    read: Cell<u64>,
+    next_stop_check: Cell<u64>,
+    stop: &'a dyn Fn() -> bool,
+    stopped: Cell<bool>,
+    over: Cell<bool>,
+}
+
+impl<'a> Budget<'a> {
+    fn new(stop: &'a dyn Fn() -> bool) -> Self {
+        Self {
+            read: Cell::new(0),
+            next_stop_check: Cell::new(0),
+            stop,
+            stopped: Cell::new(false),
+            over: Cell::new(false),
         }
     }
-    Ok(())
+
+    /// Counts `n` more bytes read, failing past [`MAX_UNPACKED_BYTES`] or once `stop` says so.
+    fn take(&self, n: usize) -> std::io::Result<()> {
+        let read = self.read.get() + n as u64;
+        self.read.set(read);
+        if read > MAX_UNPACKED_BYTES {
+            self.over.set(true);
+            return Err(std::io::Error::other("larger than a DAT may be"));
+        }
+        if read >= self.next_stop_check.get() {
+            self.next_stop_check.set(read + RECHECK_BYTES);
+            if (self.stop)() {
+                self.stopped.set(true);
+                return Err(std::io::Error::other("stopped"));
+            }
+        }
+        Ok(())
+    }
+
+    /// The refusal a rewrite's outcome stands for, the readers' own reasons first.
+    fn verdict(&self, done: Result<(), RewriteError>) -> Result<(), Refused> {
+        if self.stopped.get() {
+            return Err(Refused::Stopped);
+        }
+        if self.over.get() {
+            return Err(Refused::TooLarge);
+        }
+        match done {
+            Ok(()) => Ok(()),
+            Err(RewriteError::Write(e)) => Err(write_error(e)),
+            Err(e) => Err(Refused::NotAccepted(format!("not a DAT: {e}"))),
+        }
+    }
+}
+
+/// A reader counting what it hands out against a [`Budget`].
+struct Counted<'a, 'b, R> {
+    inner: R,
+    budget: &'a Budget<'b>,
+}
+
+impl<R: Read> Read for Counted<'_, '_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.budget.read.get() == 0 {
+            self.budget.take(0)?;
+        }
+        let n = self.inner.read(buf)?;
+        self.budget.take(n)?;
+        Ok(n)
+    }
 }
 
 fn is_dat_member(name: &str) -> bool {
@@ -211,33 +293,62 @@ fn is_dat_member(name: &str) -> bool {
         .is_some_and(|e| e == "dat" || e == "xml")
 }
 
-/// A reader that copies what it hands out to `out` and fails past [`MAX_MEMBER_BYTES`].
-struct Tee<'a, R, W> {
-    inner: R,
-    out: &'a mut W,
-    seen: &'a std::cell::Cell<u64>,
+/// The rewrite of a pack: a [`Spill`] that becomes a sink once the pack is refused, so the
+/// zip writer's closing writes on drop cost nothing before the file is removed. It keeps
+/// the position and length, which the zip writer still seeks by as a sink.
+struct PackOut {
+    spill: Spill,
+    abandoned: Rc<Cell<bool>>,
+    pos: u64,
+    len: u64,
 }
 
-impl<R: Read, W: Write> Read for Tee<'_, R, W> {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let n = self.inner.read(buf)?;
-        let seen = self.seen.get() + n as u64;
-        self.seen.set(seen);
-        if seen > MAX_MEMBER_BYTES {
-            return Err(std::io::Error::other("a member is too large"));
-        }
-        self.out.write_all(&buf[..n])?;
+impl Write for PackOut {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = if self.abandoned.get() {
+            buf.len()
+        } else {
+            self.spill.write(buf)?
+        };
+        self.pos += n as u64;
+        self.len = self.len.max(self.pos);
         Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.abandoned.get() {
+            return Ok(());
+        }
+        self.spill.flush()
     }
 }
 
-/// Checks that the zip at `path` holds at least one DAT and nothing else, parsing each
-/// member while writing its decompressed bytes into a fresh zip at `rebuilt`.
-fn pack(path: &Path, rebuilt: &Path, pace: &Pace, stop: &dyn Fn() -> bool) -> Result<(), Refused> {
+impl Seek for PackOut {
+    fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+        if !self.abandoned.get() {
+            self.pos = self.spill.seek(pos)?;
+            return Ok(self.pos);
+        }
+        let to = match pos {
+            SeekFrom::Start(n) => Some(n),
+            SeekFrom::Current(d) => self.pos.checked_add_signed(d),
+            SeekFrom::End(d) => self.len.checked_add_signed(d),
+        };
+        self.pos = to.ok_or_else(|| std::io::Error::other("seek out of range"))?;
+        Ok(self.pos)
+    }
+}
+
+/// Checks that the zip at `path` holds at least one DAT and nothing else, and that its
+/// members unpack to at most [`MAX_UNPACKED_BYTES`] together, rewriting each member into
+/// a new zip where `target` allows.
+fn pack(path: &Path, target: &Target, stop: &dyn Fn() -> bool) -> Result<Checked, Refused> {
     let not_zip = |e: zip::result::ZipError| Refused::NotAccepted(format!("not a DAT pack: {e}"));
     let file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
     let mut archive = zip::ZipArchive::new(BufReader::new(file)).map_err(not_zip)?;
     let mut members = Vec::new();
+    let mut declared = 0u64;
     for i in 0..archive.len() {
         let Some(name) = archive.name_for_index(i) else {
             continue;
@@ -253,41 +364,71 @@ fn pack(path: &Path, rebuilt: &Path, pace: &Pace, stop: &dyn Fn() -> bool) -> Re
     if members.is_empty() {
         return Err(Refused::NotAccepted("the zip holds no DAT".into()));
     }
-    let out = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(rebuilt)?;
-    let out = Paced::new(out, std::sync::Arc::clone(pace));
+    for &i in &members {
+        declared = declared.saturating_add(archive.by_index_raw(i).map_err(not_zip)?.size());
+    }
+    if declared > MAX_UNPACKED_BYTES {
+        return Err(Refused::TooLarge);
+    }
+    let abandoned = Rc::new(Cell::new(false));
+    let spill = Spill::create(target.clone(), size).map_err(write_error)?;
+    let out = PackOut {
+        spill,
+        abandoned: Rc::clone(&abandoned),
+        pos: 0,
+        len: 0,
+    };
     let mut writer = zip::ZipWriter::new(std::io::BufWriter::with_capacity(CHUNK, out));
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .compression_level(Some(1));
-    for i in members {
-        let member = archive.by_index(i).map_err(not_zip)?;
-        let name = member.name().to_owned();
-        writer.start_file(name, options).map_err(not_zip)?;
-        let seen = std::cell::Cell::new(0);
-        let tee = Tee {
-            inner: member,
-            out: &mut writer,
-            seen: &seen,
-        };
-        let checked = dat(BufReader::with_capacity(64 * 1024, tee), stop);
-        if seen.get() > MAX_MEMBER_BYTES {
-            return Err(Refused::NotAccepted("a member is too large".into()));
+    let budget = Budget::new(stop);
+    let rewritten = (|| -> Result<(), Refused> {
+        for &i in &members {
+            let member = archive.by_index(i).map_err(not_zip)?;
+            let name = member.name().to_owned();
+            writer.start_file(name, options).map_err(|e| match e {
+                zip::result::ZipError::Io(e) => write_error(e),
+                e => not_zip(e),
+            })?;
+            let input = Counted {
+                inner: member,
+                budget: &budget,
+            };
+            let done = rewrite(BufReader::with_capacity(64 * 1024, input), &mut writer);
+            budget.verdict(done.map(|_| ()))?;
         }
-        checked?;
+        Ok(())
+    })();
+    if let Err(e) = rewritten {
+        abandoned.set(true);
+        return Err(e);
     }
-    let mut out = writer.finish().map_err(not_zip)?;
-    out.flush()?;
-    Ok(())
+    let finished = writer.finish().map_err(|e| match e {
+        zip::result::ZipError::Io(e) => write_error(e),
+        e => not_zip(e),
+    });
+    let buffered = match finished {
+        Ok(b) => b,
+        Err(e) => {
+            abandoned.set(true);
+            return Err(e);
+        }
+    };
+    let out = buffered
+        .into_inner()
+        .map_err(|e| write_error(e.into_error()))?;
+    let (path, in_ram) = out.spill.finish().map_err(write_error)?;
+    Ok(Checked::Dat { path, in_ram })
 }
 
 #[cfg(test)]
 mod tests {
     use std::io::Write;
+    use std::sync::Arc;
 
     use super::*;
+    use crate::jobs::url_fetch::spool::Places;
 
     const DAT: &[u8] = br#"<?xml version="1.0"?>
 <datafile><header><name>Example System</name></header>
@@ -304,22 +445,41 @@ mod tests {
         z.finish().expect("finish").into_inner()
     }
 
-    fn no_rest() -> Pace {
-        std::sync::Arc::new(|_| std::time::Duration::ZERO)
+    fn target(dir: &Path) -> Target {
+        Target {
+            places: Places {
+                ram: None,
+                card: dir.join("card"),
+                floor: 0,
+            },
+            name: "fetch-1-1-out.part".into(),
+            ram: false,
+            pace: Arc::new(|_| std::time::Duration::ZERO),
+            limit: MAX_DAT_BYTES,
+        }
     }
 
     fn checked(found: Found, bytes: &[u8]) -> Result<Checked, Refused> {
-        rebuilt(found, bytes).0
+        rewritten(found, bytes).0
     }
 
-    /// The check's outcome and the bytes of the rebuilt pack, if one was left.
-    fn rebuilt(found: Found, bytes: &[u8]) -> (Result<Checked, Refused>, Option<Vec<u8>>) {
+    /// The check's outcome and the rewrite's bytes; asserts nothing else is left behind.
+    fn rewritten(found: Found, bytes: &[u8]) -> (Result<Checked, Refused>, Option<Vec<u8>>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("f");
         std::fs::write(&path, bytes).expect("write");
-        let out = dir.path().join("f.zip");
-        let r = check(found, &path, &out, &no_rest(), &|| false);
-        (r, std::fs::read(&out).ok())
+        let r = check(found, &path, &target(dir.path()), &|| false);
+        let out = match &r {
+            Ok(Checked::Dat { path, .. }) => Some(std::fs::read(path).expect("read")),
+            _ => None,
+        };
+        let left = std::fs::read_dir(dir.path().join("card")).map_or(0, Iterator::count);
+        assert_eq!(
+            left,
+            usize::from(out.is_some()),
+            "only a finished rewrite is left"
+        );
+        (r, out)
     }
 
     #[test]
@@ -343,10 +503,20 @@ mod tests {
     }
 
     #[test]
-    fn dats_and_packs_of_dats_pass() {
-        assert!(matches!(checked(Found::Xml, DAT), Ok(Checked::Dat)));
-        let pack = zip_of(&[("a.dat", DAT), ("sub/", b""), ("b.XML", DAT)]);
-        assert!(matches!(checked(Found::Zip, &pack), Ok(Checked::Dat)));
+    fn a_dat_is_rewritten_without_what_the_parser_does_not_read() {
+        let noisy = br#"<?xml version="1.0"?><!DOCTYPE datafile><!-- hidden-comment -->
+<datafile><header><name>Example System</name></header>
+<hidden-element><![CDATA[hidden-cdata]]></hidden-element>
+<game name="Example Quest (World)"><rom name="q.bin" size="4" crc="0a0b0c0d"/><hidden-rom-sibling/></game>
+</datafile>"#;
+        let (r, out) = rewritten(Found::Xml, noisy);
+        assert!(matches!(r, Ok(Checked::Dat { in_ram: false, .. })), "{r:?}");
+        let out = String::from_utf8(out.expect("a rewrite")).expect("utf-8");
+        assert!(!out.contains("hidden") && !out.contains("DOCTYPE"), "{out}");
+        assert_eq!(
+            mistarr_core::dat::parse_dat(out.as_bytes()).expect("parse"),
+            mistarr_core::dat::parse_dat(noisy).expect("parse")
+        );
     }
 
     #[test]
@@ -366,9 +536,10 @@ mod tests {
             Found::Zip,
             &zip_of(&[("readme.txt", b"hi")])
         )));
-        let (r, left) = rebuilt(Found::Zip, &zip_of(&[("a.dat", DAT), ("b.dat", b"<x/>")]));
-        assert!(refused(r));
-        assert!(left.is_none(), "a failed rebuild leaves nothing");
+        assert!(refused(checked(
+            Found::Zip,
+            &zip_of(&[("a.dat", DAT), ("b.dat", b"<x/>")])
+        )));
         let mut appended = DAT.to_vec();
         appended.extend_from_slice(b"NES\x1a rom bytes");
         assert!(refused(checked(Found::Xml, &appended)));
@@ -385,6 +556,29 @@ mod tests {
     }
 
     #[test]
+    fn reading_past_the_unpacked_cap_or_after_a_stop_is_refused() {
+        let budget = Budget::new(&|| false);
+        let cap = usize::try_from(MAX_UNPACKED_BYTES).expect("fits");
+        budget.take(cap).expect("within");
+        assert!(budget.take(1).is_err());
+        assert!(matches!(budget.verdict(Ok(())), Err(Refused::TooLarge)));
+        let stopping = Budget::new(&|| true);
+        assert!(stopping.take(0).is_err());
+        assert!(matches!(stopping.verdict(Ok(())), Err(Refused::Stopped)));
+        let asked = Cell::new(0);
+        let counting = || {
+            asked.set(asked.get() + 1);
+            false
+        };
+        let every = Budget::new(&counting);
+        let step = usize::try_from(RECHECK_BYTES).expect("fits") / 4;
+        for _ in 0..8 {
+            every.take(step).expect("within");
+        }
+        assert_eq!(asked.get(), 2, "asked once per RECHECK_BYTES read");
+    }
+
+    #[test]
     fn a_torrent_passes_with_its_hash() {
         let torrent = b"d4:infod6:lengthi3e4:name5:a.bin12:piece lengthi16384e6:pieces20:aaaaaaaaaaaaaaaaaaaaee";
         let Ok(Checked::Torrent { bytes, infohash }) = checked(Found::Torrent, torrent) else {
@@ -395,24 +589,49 @@ mod tests {
     }
 
     #[test]
-    fn a_check_stops_when_asked() {
+    fn a_check_stops_when_asked_and_leaves_nothing() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("f");
         std::fs::write(&path, DAT).expect("write");
-        let out = dir.path().join("out.zip");
+        let t = target(dir.path());
         assert!(matches!(
-            check(Found::Xml, &path, &out, &no_rest(), &|| true),
+            check(Found::Xml, &path, &t, &|| true),
             Err(Refused::Stopped)
         ));
+        let pack = dir.path().join("p.zip");
+        std::fs::write(&pack, zip_of(&[("a.dat", DAT)])).expect("write");
         assert!(matches!(
-            check(
-                Found::Xml,
-                &dir.path().join("none"),
-                &out,
-                &no_rest(),
-                &|| false
-            ),
+            check(Found::Zip, &pack, &t, &|| true),
+            Err(Refused::Stopped)
+        ));
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("card")).map_or(0, Iterator::count),
+            0
+        );
+        assert!(matches!(
+            check(Found::Xml, &dir.path().join("none"), &t, &|| false),
             Err(Refused::Io(_))
+        ));
+    }
+
+    #[test]
+    fn a_rewrite_past_its_limit_is_refused() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("f");
+        std::fs::write(&path, DAT).expect("write");
+        let mut t = target(dir.path());
+        t.limit = 16;
+        assert!(matches!(
+            check(Found::Xml, &path, &t, &|| false),
+            Err(Refused::TooLarge)
+        ));
+        assert_eq!(
+            std::fs::read_dir(dir.path().join("card")).map_or(0, Iterator::count),
+            0
+        );
+        assert!(matches!(
+            write_error(std::io::ErrorKind::StorageFull.into()),
+            Refused::NoRoom
         ));
     }
 
@@ -427,14 +646,15 @@ mod tests {
     }
 
     #[test]
-    fn a_pack_is_rebuilt_from_its_checked_members_alone() {
+    fn a_pack_is_rebuilt_from_rewritten_members_alone() {
         let hidden = b"NES\x1a hidden bytes the directory does not list";
         let mut padded = hidden.to_vec();
-        let pack = zip_of(&[("a.dat", DAT), ("b.xml", DAT)]);
+        let noisy = [DAT, b"<!-- hidden-member-comment -->"].concat();
+        let pack = zip_of(&[("a.dat", DAT), ("b.xml", &noisy)]);
         padded.extend_from_slice(&pack);
         padded.extend_from_slice(hidden);
-        let (r, out) = rebuilt(Found::Zip, &padded);
-        assert!(matches!(r, Ok(Checked::Dat)), "{r:?}");
+        let (r, out) = rewritten(Found::Zip, &padded);
+        assert!(matches!(r, Ok(Checked::Dat { .. })), "{r:?}");
         let out = out.expect("a rebuilt pack");
         assert!(!out.windows(hidden.len()).any(|w| w == hidden));
         let mut archive = zip::ZipArchive::new(std::io::Cursor::new(out)).expect("a zip");
@@ -445,7 +665,11 @@ mod tests {
             .expect("member")
             .read_to_string(&mut text)
             .expect("read");
-        assert_eq!(text.as_bytes(), DAT);
+        assert!(!text.contains("hidden"));
+        assert_eq!(
+            mistarr_core::dat::parse_dat(text.as_bytes()).expect("parse"),
+            mistarr_core::dat::parse_dat(DAT).expect("parse")
+        );
         assert!(is_gzip(b"\x1f\x8b") && !is_gzip(DAT));
     }
 

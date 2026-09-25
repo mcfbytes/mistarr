@@ -41,13 +41,17 @@ pub const MIN_RATE: u64 = 1024;
 /// How long a body may take before [`MIN_RATE`] applies.
 pub const RATE_WINDOW: Duration = Duration::from_secs(300);
 
-/// Whether `ip` is on this machine or a local network: loopback, private, link-local,
-/// shared (100.64/10), unique local or unspecified, also inside an IPv4-mapped address.
+/// Whether `ip` may reach this machine or a local network. IPv4: 0.0.0.0/8, loopback,
+/// private, link-local, shared (100.64/10) and broadcast. IPv6: loopback, unspecified,
+/// unique local, link-local, site-local (`fec0::/10`), NAT64 (`64:ff9b::/96` and
+/// `64:ff9b:1::/48`) and IPv4-compatible (`::/96`); an IPv4-mapped or 6to4 (`2002::/16`)
+/// address by the IPv4 address it carries.
 ///
 /// ```
 /// use mistarr_clients::fetch::is_local;
 /// assert!(is_local("192.168.1.5".parse().unwrap()));
 /// assert!(is_local("::ffff:127.0.0.1".parse().unwrap()));
+/// assert!(is_local("2002:c0a8:0105::1".parse().unwrap()));
 /// assert!(!is_local("192.0.2.1".parse().unwrap()));
 /// ```
 #[must_use]
@@ -55,22 +59,33 @@ pub fn is_local(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             let [a, b, ..] = v4.octets();
-            v4.is_private()
+            a == 0
+                || v4.is_private()
                 || v4.is_loopback()
                 || v4.is_link_local()
-                || v4.is_unspecified()
                 || v4.is_broadcast()
                 || (a == 100 && (64..128).contains(&b))
         }
-        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
-            Some(v4) => is_local(IpAddr::V4(v4)),
-            None => {
-                v6.is_loopback()
-                    || v6.is_unspecified()
-                    || v6.is_unique_local()
-                    || v6.is_unicast_link_local()
+        IpAddr::V6(v6) => {
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_local(IpAddr::V4(v4));
             }
-        },
+            let seg = v6.segments();
+            if seg[0] == 0x2002 {
+                let embedded = (u32::from(seg[1]) << 16) | u32::from(seg[2]);
+                return is_local(IpAddr::V4(std::net::Ipv4Addr::from(embedded)));
+            }
+            let nat64 = seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || seg[..3] == [0x64, 0xff9b, 1];
+            let compatible = seg[..6] == [0; 6];
+            let site_local = seg[0] & 0xffc0 == 0xfec0;
+            nat64
+                || compatible
+                || site_local
+                || v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_unique_local()
+                || v6.is_unicast_link_local()
+        }
     }
 }
 
@@ -190,9 +205,9 @@ impl Fetcher {
     }
 
     /// GETs `url`, following up to [`MAX_REDIRECTS`] redirects, never from https to
-    /// http, nor to a local address when `url` itself is not local, and returns the
-    /// successful answer with its body still to read. Each host is resolved once and only
-    /// the addresses checked are dialled.
+    /// http, nor to a local address once any host in the chain, the typed one included,
+    /// was public, and returns the successful answer with its body still to read. Each
+    /// host is resolved once and only the addresses checked are dialled.
     ///
     /// # Errors
     ///
@@ -200,15 +215,14 @@ impl Fetcher {
     pub async fn get(&self, url: &FetchUrl) -> Result<Response, FetchError> {
         let mut url = url.clone();
         let mut hops = 0;
-        let mut typed_local = false;
+        let mut seen_public = false;
         loop {
             let addrs = self.resolve(&url).await?;
             let local = addrs.iter().any(|a| (self.local)(a.ip()));
-            if hops == 0 {
-                typed_local = local;
-            } else if local && !typed_local {
+            if local && seen_public {
                 return Err(FetchError::LocalRedirect);
             }
+            seen_public |= !local;
             let (head, driver) = self.request(&url, &addrs).await?;
             let status = head.status();
             if is_redirect(status) {

@@ -17,11 +17,26 @@ that have no games. Hash attributes are stored lowercase and
 must have their full hex length; a malformed hash, size or status rejects the
 file. `dat::DatStream` yields one game at a time for importers that write as
 they read. After the root element closes it reads to the end of the file,
-and anything there but whitespace, comments, processing instructions and a
-doctype rejects the file (`DatError::TrailingData`), for a lone DAT and for
-each member of a pack alike. No single XML event, a tag, a text run or a
-comment, may exceed 1 MiB (`dat::MAX_EVENT_BYTES`, `DatError::EventTooLarge`),
-checked before it is buffered, so a hostile file cannot grow memory.
+and anything there but whitespace, comments and processing instructions,
+a doctype included, rejects the file (`DatError::TrailingData`), for a
+lone DAT and for each member of a pack alike.
+
+Caps keep a hostile file from growing memory, on every path: uploads, the
+watcher and fetches alike. Each fails the file with its own error.
+
+| Cap | Limit | Error |
+|---|---|---|
+| One XML event: a tag, a text run or a comment, checked before it is buffered | 1 MiB (`MAX_EVENT_BYTES`) | `EventTooLarge` |
+| Element nesting, the root at depth 1, wherever it occurs | 64 (`MAX_DEPTH`) | `TooDeep` |
+| A name: of a game or rom, `cloneof`, `romof`, `forcename`, an archive `number` or `clone`, the header's `<name>` | 4 KiB (`MAX_NAME_BYTES`) | `FieldTooLarge` |
+| Any other attribute or element text, all its text and CDATA together | 64 KiB (`MAX_FIELD_BYTES`) | `FieldTooLarge` |
+| Roms, releases and DB export files in one game together | 100,000 (`MAX_GAME_ENTRIES`) | `TooManyEntries` |
+| Bytes of fields one game holds | 16 MiB (`MAX_GAME_BYTES`) | `GameTooLarge` |
+| Names and archive numbers in a DB export's parent index | 32 MiB (`MAX_INDEX_BYTES`) | `IndexTooLarge` |
+
+There is no cap on games per file: the stream holds one game at a time and
+the importer stages games in SQLite, so only the DB export's parent index
+grows with the file, and it has its own cap.
 
 Regions and languages come from the name (see "Name parsing"); a DAT's own
 fields (`<release>` or the export's `archive`) fill them only when the name

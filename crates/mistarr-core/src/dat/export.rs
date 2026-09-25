@@ -7,7 +7,7 @@ use super::{DatRom, ExportOptions, RomStatus};
 use crate::hash::HeaderRule;
 
 /// A game's `<archive>`: its number, parent reference, region, languages and release status.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct Archive {
     pub(super) number: Option<String>,
     pub(super) clone: Option<String>,
@@ -36,13 +36,13 @@ impl Archive {
 }
 
 /// One `<source>`: a dump of the game and the files it describes.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(super) struct Source {
     pub(super) files: Vec<File>,
 }
 
 /// One `<file>` of a source.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct File {
     pub(super) extension: String,
     pub(super) format: String,
@@ -70,6 +70,19 @@ enum Kind {
 }
 
 impl File {
+    /// Bytes of its text fields, counted against a game's budget.
+    pub(super) fn bytes(&self) -> usize {
+        let len = |s: &Option<String>| s.as_deref().map_or(0, str::len);
+        self.extension.len()
+            + self.format.len()
+            + len(&self.crc32)
+            + len(&self.md5)
+            + len(&self.sha1)
+            + len(&self.header)
+            + len(&self.item)
+            + len(&self.forcename)
+    }
+
     fn kind(&self) -> Kind {
         let format = self.format.trim().to_ascii_lowercase();
         match format.as_str() {

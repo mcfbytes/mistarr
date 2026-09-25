@@ -12,7 +12,9 @@ use mistarr_clients::fake::{FileRoute, FileServer};
 use serde_json::{json, Value};
 
 const DAT: &str = r#"<?xml version="1.0"?>
+<!-- carried-comment -->
 <datafile><header><name>Nintendo - Nintendo Entertainment System</name><version>20240101</version></header>
+<carried-element><![CDATA[carried-cdata]]></carried-element>
 <game name="Example Quest (World)"><rom name="Example Quest (World).nes" size="4" crc="0a0b0c0d"/></game>
 </datafile>"#;
 
@@ -154,6 +156,12 @@ async fn a_dat_is_fetched_once_placed_and_never_stored() {
     })
     .await;
     assert!(names_in(&data(&b).join("tmp")).is_empty());
+    let placed = std::fs::read(dats.join("loaded").join("Example.dat")).expect("placed");
+    assert!(
+        !contains(&placed, "carried"),
+        "only mistarr's rewrite is placed"
+    );
+    assert!(contains(&placed, "Example Quest (World).nes"));
     let stored = db_bytes(&b);
     for needle in [
         url.as_str(),

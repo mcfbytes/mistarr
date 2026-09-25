@@ -36,7 +36,7 @@ builds only the SPA, and `make clean` removes `target/`, `dist/` and
 `web/dist`.
 
 The binary at `target/armv7-unknown-linux-musleabihf/release/mistarr` is
-statically linked and stripped, measured at 6,530,880 bytes (6.23 MiB) with
+statically linked and stripped, measured at 6,589,184 bytes (6.28 MiB) with
 the SPA embedded.
 
 Dependencies must build for this target without a C toolchain surprise:

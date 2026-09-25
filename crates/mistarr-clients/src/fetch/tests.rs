@@ -217,6 +217,29 @@ async fn a_public_link_may_not_redirect_to_a_local_address() {
 }
 
 #[tokio::test]
+async fn once_a_hop_was_public_no_later_hop_may_be_local() {
+    let lan = FileServer::start().await.expect("bind");
+    let public = FileServer::start_at(IpAddr::from([127, 0, 0, 2]))
+        .await
+        .expect("bind");
+    lan.route("/start", FileRoute::redirect(302, &public.url("/mid")));
+    public.route(
+        "/mid",
+        FileRoute::redirect(302, "http://127.0.0.3:9/back.dat"),
+    );
+    public.route("/ok", FileRoute::ok(b"x".to_vec()));
+    lan.route("/fine", FileRoute::redirect(302, &public.url("/ok")));
+    let f = fetcher().with_local(|ip| ip != IpAddr::from([127, 0, 0, 2]));
+    let e = get(&f, &lan.url("/start")).await.err().expect("refused");
+    assert!(matches!(e, FetchError::LocalRedirect), "{e:?}");
+    assert_eq!(public.hits(), vec!["/mid".to_owned()]);
+    assert!(
+        get(&f, &lan.url("/fine")).await.is_ok(),
+        "local to public is fine"
+    );
+}
+
+#[tokio::test]
 async fn a_body_under_the_minimum_rate_fails() {
     let server = FileServer::start().await.expect("bind");
     server.route(
@@ -270,10 +293,19 @@ fn local_addresses_are_recognised() {
         "169.254.1.1",
         "100.64.0.1",
         "0.0.0.0",
+        "0.1.2.3",
+        "255.255.255.255",
         "::1",
+        "::",
         "fd00::1",
         "fe80::1",
+        "fec0::1",
         "::ffff:192.168.0.1",
+        "::192.0.2.1",
+        "64:ff9b::c000:201",
+        "64:ff9b:1::1",
+        "2002:0a00:0001::1",
+        "2002:7f00:0001::",
     ] {
         assert!(is_local(local.parse().expect("ip")), "{local}");
     }
@@ -282,6 +314,9 @@ fn local_addresses_are_recognised() {
         "100.128.0.1",
         "2001:db8::1",
         "::ffff:198.51.100.1",
+        "2002:c000:0201::1",
+        "64:ff9c::1",
+        "fe00::1",
     ] {
         assert!(!is_local(public.parse().expect("ip")), "{public}");
     }

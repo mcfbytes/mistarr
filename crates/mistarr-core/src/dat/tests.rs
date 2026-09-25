@@ -678,6 +678,7 @@ fn only_whitespace_comments_and_instructions_may_follow_the_root() {
         b"<game name='g'/>",
         b"</datafile>",
         b"\n\x7fELF\x01\x02",
+        b"<!DOCTYPE datafile>",
         b"NES\x1a\x00\xff",
     ] {
         let e = trailing(bad).expect_err("trailing data");
@@ -728,8 +729,93 @@ fn an_oversized_event_fails_before_it_is_buffered() {
         assert!(matches!(e, DatError::EventTooLarge { .. }), "{e}");
     }
     let near = "a".repeat(usize::try_from(MAX_EVENT_BYTES).unwrap() - 64);
-    let xml = format!(r#"<datafile><game name="{near}"/></datafile>"#);
+    let xml = format!(r#"<datafile><game name="g"><video>{near}</video></game></datafile>"#);
     assert!(parse_dat_reader(BufReader::new(xml.as_bytes())).is_ok());
+}
+
+fn nested(depth: usize) -> String {
+    let inner = "<x>".repeat(depth) + &"</x>".repeat(depth);
+    format!("<datafile><game name='g'>{inner}</game></datafile>")
+}
+
+#[test]
+fn nesting_deeper_than_the_cap_fails_wherever_it_is() {
+    assert!(parse_dat(nested(MAX_DEPTH - 2).as_bytes()).is_ok());
+    let e = parse_dat(nested(MAX_DEPTH - 1).as_bytes()).expect_err("too deep");
+    assert!(matches!(e, DatError::TooDeep { .. }), "{e}");
+    let deep = "<x>".repeat(MAX_DEPTH) + &"</x>".repeat(MAX_DEPTH);
+    for xml in [
+        format!("<datafile>{deep}<game name='g'/></datafile>"),
+        format!("<datafile><header><name>{deep}</name></header><game name='g'/></datafile>"),
+        format!("<datafile><game name='g'><description>{deep}</description></game></datafile>"),
+    ] {
+        let e = parse_dat(xml.as_bytes()).expect_err("too deep");
+        assert!(matches!(e, DatError::TooDeep { .. }), "{e}");
+    }
+}
+
+#[test]
+fn fields_longer_than_their_caps_fail() {
+    let name = "n".repeat(MAX_NAME_BYTES + 1);
+    let field = "f".repeat(MAX_FIELD_BYTES + 1);
+    let cases = [
+        (format!("<datafile><game name='{name}'/></datafile>"), "name"),
+        (format!("<datafile><game name='g' cloneof='{name}'/></datafile>"), "cloneof"),
+        (format!("<datafile><game name='g'><rom name='{name}' size='1'/></game></datafile>"), "name"),
+        (format!("<datafile><game name='g'><rom name='r' size='1' header='{field}'/></game></datafile>"), "header"),
+        (format!("<datafile><header><name>{name}</name></header><game name='g'/></datafile>"), "header name"),
+        (format!("<datafile><header><comment>{field}</comment></header><game name='g'/></datafile>"), "header field"),
+        (format!("<datafile><game name='g'><description>{}</description></game></datafile>",
+            "<![CDATA[x]]>".repeat(MAX_FIELD_BYTES / 13 + 1) + &"d".repeat(MAX_FIELD_BYTES)), "description"),
+    ];
+    for (xml, expected) in &cases {
+        let e = parse_dat(xml.as_bytes()).expect_err("too long");
+        assert!(
+            matches!(e, DatError::FieldTooLarge { field, .. } if field == *expected),
+            "{expected}: {e}"
+        );
+    }
+    let ok = format!(
+        "<datafile><game name='{}'><description>{}</description></game></datafile>",
+        "n".repeat(MAX_NAME_BYTES),
+        "d".repeat(MAX_FIELD_BYTES)
+    );
+    assert!(parse_dat(ok.as_bytes()).is_ok());
+}
+
+#[test]
+fn a_game_with_too_many_entries_or_bytes_fails() {
+    let roms = "<rom name='r' size='1'/>".repeat(MAX_GAME_ENTRIES + 1);
+    let xml = format!("<datafile><game name='g'>{roms}</game></datafile>");
+    let e = parse_dat_reader(BufReader::new(xml.as_bytes())).expect_err("too many");
+    assert!(
+        matches!(e, DatError::TooManyEntries { ref game } if game == "g"),
+        "{e}"
+    );
+    let big = "h".repeat(MAX_FIELD_BYTES);
+    let count = MAX_GAME_BYTES / MAX_FIELD_BYTES + 1;
+    let roms = format!("<rom name='r' size='1' header='{big}'/>").repeat(count);
+    let xml = format!("<datafile><game name='g'>{roms}</game></datafile>");
+    let e = parse_dat_reader(BufReader::new(xml.as_bytes())).expect_err("too large");
+    assert!(matches!(e, DatError::GameTooLarge { .. }), "{e}");
+    let files = format!("<file size='1' item='{big}'/>").repeat(count);
+    let xml =
+        format!("<header/><datafile><game name='g'><source>{files}</source></game></datafile>");
+    let e = parse_dat_reader(BufReader::new(xml.as_bytes())).expect_err("too large");
+    assert!(matches!(e, DatError::GameTooLarge { .. }), "{e}");
+}
+
+#[test]
+fn a_db_export_parent_index_is_capped() {
+    let name = "n".repeat(MAX_NAME_BYTES - 8);
+    let count = MAX_INDEX_BYTES / MAX_NAME_BYTES + 2;
+    let mut xml = String::from("<header/><datafile>");
+    for i in 0..count {
+        let _ = write!(xml, "<game name='{name}{i}'><archive number='{i}'/></game>");
+    }
+    xml.push_str("</datafile>");
+    let e = export_parents(xml.as_bytes()).expect_err("too large");
+    assert!(matches!(e, DatError::IndexTooLarge), "{e}");
 }
 
 proptest! {

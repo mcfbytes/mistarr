@@ -12,9 +12,11 @@ use serde::{Deserialize, Serialize};
 use crate::hash::HeaderRule;
 use crate::xml::{check_utf8, lossy, Capped, EscapeInvalid};
 
+mod canon;
 mod export;
 mod family;
 
+pub use canon::{rewrite, RewriteError, Rewritten};
 pub use export::{export_name, ExportName};
 pub use family::{family_key, split_version, version_order, DatFamily, FORMAT_MARKERS};
 
@@ -81,6 +83,38 @@ pub enum DatError {
         /// Byte offset of the first such data.
         position: u64,
     },
+    /// Elements nest deeper than [`MAX_DEPTH`].
+    #[error("elements nest deeper than {MAX_DEPTH} levels at byte {position}")]
+    TooDeep {
+        /// Byte offset of the element that went too deep.
+        position: u64,
+    },
+    /// One field, an attribute or an element's text, is longer than its cap:
+    /// [`MAX_NAME_BYTES`] for names, [`MAX_FIELD_BYTES`] for the rest.
+    #[error("the {field} at byte {position} is longer than {limit} bytes")]
+    FieldTooLarge {
+        /// The attribute or element.
+        field: &'static str,
+        /// Its cap.
+        limit: usize,
+        /// Byte offset near the field.
+        position: u64,
+    },
+    /// A game has more than [`MAX_GAME_ENTRIES`] roms, releases and files together.
+    #[error("game {game:?} has more than {MAX_GAME_ENTRIES} roms, releases or files")]
+    TooManyEntries {
+        /// The game.
+        game: String,
+    },
+    /// A game's fields add up to more than [`MAX_GAME_BYTES`].
+    #[error("game {game:?} holds more than {} MiB of fields", MAX_GAME_BYTES >> 20)]
+    GameTooLarge {
+        /// The game.
+        game: String,
+    },
+    /// A DB export's parent index would exceed [`MAX_INDEX_BYTES`].
+    #[error("the DB export's parent index is larger than {} MiB", MAX_INDEX_BYTES >> 20)]
+    IndexTooLarge,
     /// The zip container could not be read.
     #[error("invalid zip archive: {0}")]
     Zip(#[from] zip::result::ZipError),
@@ -101,6 +135,26 @@ pub enum DatError {
 /// DAT may hold; larger ones fail with [`DatError::EventTooLarge`] before being buffered.
 pub const MAX_EVENT_BYTES: u64 = 1024 * 1024;
 
+/// Deepest element nesting a DAT may use, the document root at depth 1.
+pub const MAX_DEPTH: usize = 64;
+
+/// Longest name: a game's, a rom's, a parent reference or an archive number, and the header's.
+pub const MAX_NAME_BYTES: usize = 4 * 1024;
+
+/// Longest other field: an attribute or the text of one element.
+pub const MAX_FIELD_BYTES: usize = 64 * 1024;
+
+/// Most roms, releases and DB export files one game may hold together.
+pub const MAX_GAME_ENTRIES: usize = 100_000;
+
+/// Most bytes of fields one game may hold, so one game never grows memory without bound.
+pub const MAX_GAME_BYTES: usize = 16 * 1024 * 1024;
+
+/// Most bytes of names and archive numbers a DB export's parent index may hold.
+pub const MAX_INDEX_BYTES: usize = 32 * 1024 * 1024;
+
+/// Attributes capped at [`MAX_NAME_BYTES`]; any other at [`MAX_FIELD_BYTES`].
+const NAME_KEYS: [&str; 6] = ["name", "cloneof", "romof", "forcename", "number", "clone"];
 /// Header fields of a DAT. `name` and `version` are kept verbatim.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatHeader {
@@ -377,17 +431,35 @@ fn collect<R: BufRead>(mut stream: DatStream<R>) -> Result<Dat, DatError> {
 /// # Errors
 /// As [`DatStream::new`], plus any error met in a game.
 pub fn export_parents<R: BufRead>(reader: R) -> Result<Option<HashMap<String, String>>, DatError> {
-    let mut stream = DatStream::open(reader, ExportOptions::default(), true)?;
+    let mut stream = DatStream::open(reader, ExportOptions::default(), Mode::Index)?;
     if stream.format != DatFormat::DbExport {
         return Ok(None);
     }
     let mut parents = HashMap::new();
+    let mut bytes = 0usize;
     while let Some((game, number)) = stream.pull()? {
         if let Some(n) = number {
-            parents.entry(n).or_insert(game.name);
+            if let std::collections::hash_map::Entry::Vacant(slot) = parents.entry(n) {
+                bytes += slot.key().len() + game.name.len();
+                if bytes > MAX_INDEX_BYTES {
+                    return Err(DatError::IndexTooLarge);
+                }
+                slot.insert(game.name);
+            }
         }
     }
     Ok(Some(parents))
+}
+
+/// What a [`DatStream`] reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    /// Every game in full.
+    Full,
+    /// Only names and archive numbers, for [`export_parents`]; the trailer is not read.
+    Index,
+    /// Every game in full, keeping each DB export game's archive and sources, for [`rewrite`].
+    Raw,
 }
 
 /// Iterator over the games of a DAT, holding one game in memory at a time.
@@ -398,10 +470,11 @@ pub struct DatStream<R: BufRead> {
     header: DatHeader,
     format: DatFormat,
     options: ExportOptions,
-    /// Reads only names and archive numbers, for [`export_parents`].
-    index_only: bool,
+    mode: Mode,
+    raw: Option<(export::Archive, Vec<export::Source>)>,
     first: Option<(DatGame, Option<String>)>,
     count: usize,
+    depth: usize,
     done: bool,
     fused: bool,
 }
@@ -439,24 +512,26 @@ impl<R: BufRead> DatStream<R> {
     /// # Errors
     /// As [`DatStream::new`].
     pub fn with_options(reader: R, options: ExportOptions) -> Result<Self, DatError> {
-        Self::open(reader, options, false)
+        Self::open(reader, options, Mode::Full)
     }
 
-    fn open(reader: R, options: ExportOptions, index_only: bool) -> Result<Self, DatError> {
+    fn open(reader: R, options: ExportOptions, mode: Mode) -> Result<Self, DatError> {
         let mut stream = DatStream {
             reader: Reader::from_reader(Capped::new(EscapeInvalid::new(reader))),
             buf: Vec::new(),
             header: DatHeader::default(),
             format: DatFormat::Logiqx,
             options,
-            index_only,
+            mode,
+            raw: None,
             first: None,
             count: 0,
+            depth: 0,
             done: false,
             fused: false,
         };
         stream.read_root()?;
-        if !(index_only && stream.format == DatFormat::Logiqx) {
+        if !(mode == Mode::Index && stream.format == DatFormat::Logiqx) {
             stream.first = stream.next_game()?;
         }
         Ok(stream)
@@ -490,9 +565,25 @@ impl<R: BufRead> DatStream<R> {
 
     fn xml_error(&self, source: quick_xml::Error) -> DatError {
         DatError::Xml {
-            position: self.reader.get_ref().get_ref().position(),
+            position: self.offset(),
             source,
         }
+    }
+
+    fn offset(&self) -> u64 {
+        self.reader.get_ref().get_ref().position()
+    }
+
+    /// Fails when `value` is longer than `limit`.
+    fn cap(&self, field: &'static str, value: &str, limit: usize) -> Result<(), DatError> {
+        if value.len() > limit {
+            return Err(DatError::FieldTooLarge {
+                field,
+                limit,
+                position: self.offset(),
+            });
+        }
+        Ok(())
     }
 
     /// Fails on a value read from bytes that are not UTF-8.
@@ -500,28 +591,40 @@ impl<R: BufRead> DatStream<R> {
         check_utf8(value).map_err(|e| self.xml_error(e.into()))
     }
 
+    /// The next event, each capped at [`MAX_EVENT_BYTES`] and nested at most [`MAX_DEPTH`] deep.
     fn read_event(&mut self) -> Result<Event<'static>, DatError> {
         self.buf.clear();
-        let start = self.reader.get_ref().get_ref().position();
+        let start = self.offset();
         self.reader.get_mut().arm(MAX_EVENT_BYTES);
-        match self.reader.read_event_into(&mut self.buf) {
-            Ok(event) => Ok(event.into_owned()),
+        let event = match self.reader.read_event_into(&mut self.buf) {
+            Ok(event) => event.into_owned(),
             Err(_) if self.reader.get_ref().over() => {
-                Err(DatError::EventTooLarge { position: start })
+                return Err(DatError::EventTooLarge { position: start })
             }
-            Err(err) => Err(self.xml_error(err)),
+            Err(err) => return Err(self.xml_error(err)),
+        };
+        match event {
+            Event::Start(_) => {
+                self.depth += 1;
+                if self.depth > MAX_DEPTH {
+                    return Err(DatError::TooDeep { position: start });
+                }
+            }
+            Event::End(_) => self.depth = self.depth.saturating_sub(1),
+            _ => {}
         }
+        Ok(event)
     }
 
     /// Reads to the end of input after the root element closes, refusing anything but
-    /// whitespace, comments, processing instructions and a doctype.
+    /// whitespace, comments and processing instructions.
     fn read_trailer(&mut self) -> Result<(), DatError> {
         loop {
-            let at = self.reader.get_ref().get_ref().position();
+            let at = self.offset();
             match self.read_event()? {
                 Event::Eof => return Ok(()),
                 Event::Text(t) if t.as_ref().bytes().all(|b| b.is_ascii_whitespace()) => {}
-                Event::Comment(_) | Event::PI(_) | Event::DocType(_) => {}
+                Event::Comment(_) | Event::PI(_) => {}
                 _ => return Err(DatError::TrailingData { position: at }),
             }
         }
@@ -574,7 +677,7 @@ impl<R: BufRead> DatStream<R> {
                 }
                 Event::End(_) => {
                     self.done = true;
-                    if !self.index_only {
+                    if self.mode != Mode::Index {
                         self.read_trailer()?;
                     }
                 }
@@ -614,7 +717,11 @@ impl<R: BufRead> DatStream<R> {
                     if e.local_name().as_ref() == "clrmamepro" {
                         self.header.clrmamepro_header = self.attr(&e, "header")?;
                     }
-                    let text = self.read_text()?;
+                    let text = if e.local_name().as_ref() == "name" {
+                        self.read_text("header name", MAX_NAME_BYTES)?
+                    } else {
+                        self.read_text("header field", MAX_FIELD_BYTES)?
+                    };
                     let h = &mut self.header;
                     match e.local_name().as_ref() {
                         "name" => h.name = text,
@@ -640,18 +747,24 @@ impl<R: BufRead> DatStream<R> {
         }
     }
 
-    /// Concatenated text up to the end of the current element, trimmed; nested elements are skipped.
-    fn read_text(&mut self) -> Result<String, DatError> {
+    /// Concatenated text up to the end of the current element, trimmed and at most
+    /// `limit` bytes before trimming; nested elements are skipped.
+    fn read_text(&mut self, field: &'static str, limit: usize) -> Result<String, DatError> {
         let mut text = String::new();
         loop {
             match self.read_event()? {
                 Event::Text(t) => {
                     text.push_str(&t.xml10_content());
+                    self.cap(field, &text, limit)?;
                 }
                 Event::CData(t) => {
                     text.push_str(&t);
+                    self.cap(field, &text, limit)?;
                 }
-                Event::GeneralRef(r) => text.push_str(&self.resolve_ref(&r)?),
+                Event::GeneralRef(r) => {
+                    text.push_str(&self.resolve_ref(&r)?);
+                    self.cap(field, &text, limit)?;
+                }
                 Event::Start(e) => self.skip(&e)?,
                 Event::End(_) => {
                     self.utf8(&text)?;
@@ -673,7 +786,8 @@ impl<R: BufRead> DatStream<R> {
         Ok(resolve_predefined_entity(name).map_or_else(|| format!("&{name};"), str::to_owned))
     }
 
-    fn attr(&self, e: &BytesStart<'_>, key: &str) -> Result<Option<String>, DatError> {
+    /// Attribute `key`, capped at [`MAX_NAME_BYTES`] for names, else [`MAX_FIELD_BYTES`].
+    fn attr(&self, e: &BytesStart<'_>, key: &'static str) -> Result<Option<String>, DatError> {
         for attr in e.attributes() {
             let attr = attr.map_err(|err| self.xml_error(err.into()))?;
             if attr.key.local_name().as_ref() == key {
@@ -681,6 +795,12 @@ impl<R: BufRead> DatStream<R> {
                     .normalized_value(XmlVersion::Implicit1_0)
                     .map_err(|err| self.xml_error(err))?;
                 self.utf8(&value)?;
+                let limit = if NAME_KEYS.contains(&key) {
+                    MAX_NAME_BYTES
+                } else {
+                    MAX_FIELD_BYTES
+                };
+                self.cap(key, &value, limit)?;
                 return Ok(Some(value.into_owned()));
             }
         }
@@ -716,42 +836,49 @@ impl<R: BufRead> DatStream<R> {
             game.rom_of = self.attr(start, "romof")?;
         }
         let mut archive = export::Archive::default();
-        let mut sources = Vec::new();
+        let mut sources: Vec<export::Source> = Vec::new();
+        let mut budget = Budget::default();
         if has_body {
             loop {
-                match self.read_event()? {
-                    Event::Start(e) => match e.local_name().as_ref() {
-                        "description" if !export => game.description = Some(self.read_text()?),
-                        "category" if !export => {
-                            let text = self.read_text()?;
-                            game.category.get_or_insert(text);
-                        }
-                        "rom" if !export => {
-                            game.roms.push(self.read_rom(&e, &game.name)?);
-                            self.skip(&e)?;
-                        }
-                        "release" if !export => {
-                            self.read_release(&e, &mut game)?;
-                            self.skip(&e)?;
-                        }
-                        "archive" if export => {
-                            archive = self.read_archive(&e)?;
-                            self.skip(&e)?;
-                        }
-                        "source" if export && !self.index_only => {
-                            sources.push(self.read_source(&game.name)?);
-                        }
-                        _ => self.skip(&e)?,
-                    },
-                    Event::Empty(e) => match e.local_name().as_ref() {
-                        "rom" if !export => game.roms.push(self.read_rom(&e, &game.name)?),
-                        "release" if !export => self.read_release(&e, &mut game)?,
-                        "archive" if export => archive = self.read_archive(&e)?,
-                        _ => {}
-                    },
+                let (e, body) = match self.read_event()? {
+                    Event::Start(e) => (e, true),
+                    Event::Empty(e) => (e, false),
                     Event::End(_) => break,
                     Event::Eof => return Err(DatError::Truncated),
+                    _ => continue,
+                };
+                match e.local_name().as_ref() {
+                    "description" if !export && body => {
+                        let text = self.read_text("description", MAX_FIELD_BYTES)?;
+                        budget.add(&game.name, 0, text.len())?;
+                        game.description = Some(text);
+                        continue;
+                    }
+                    "category" if !export && body => {
+                        let text = self.read_text("category", MAX_FIELD_BYTES)?;
+                        budget.add(&game.name, 0, text.len())?;
+                        game.category.get_or_insert(text);
+                        continue;
+                    }
+                    "rom" if !export => {
+                        let rom = self.read_rom(&e, &game.name)?;
+                        budget.add(&game.name, 1, rom_bytes(&rom))?;
+                        game.roms.push(rom);
+                    }
+                    "release" if !export => {
+                        let added = self.read_release(&e, &mut game)?;
+                        budget.add(&game.name, 1, added)?;
+                    }
+                    "archive" if export => archive = self.read_archive(&e)?,
+                    "source" if export && self.mode != Mode::Index && body => {
+                        let source = self.read_source(&game.name, &mut budget)?;
+                        sources.push(source);
+                        continue;
+                    }
                     _ => {}
+                }
+                if body {
+                    self.skip(&e)?;
                 }
             }
         }
@@ -764,16 +891,21 @@ impl<R: BufRead> DatStream<R> {
         }
         self.count += 1;
         let number = archive.number.clone().filter(|_| archive.is_parent());
+        if self.mode == Mode::Raw && export {
+            self.raw = Some((archive, sources));
+        }
         Ok((game, number))
     }
 
-    /// Adds a `<release>`'s region and languages to the game's, each once.
-    fn read_release(&self, e: &BytesStart<'_>, game: &mut DatGame) -> Result<(), DatError> {
+    /// Adds a `<release>`'s region and languages to the game's, each once; returns the
+    /// bytes it read.
+    fn read_release(&self, e: &BytesStart<'_>, game: &mut DatGame) -> Result<usize, DatError> {
         let region = self.attr(e, "region")?;
         let language = self.attr(e, "language")?;
+        let read = region.as_deref().map_or(0, str::len) + language.as_deref().map_or(0, str::len);
         export::extend_unique(&mut game.regions, export::split_list(region.as_deref()));
         export::extend_unique(&mut game.languages, export::split_list(language.as_deref()));
-        Ok(())
+        Ok(read)
     }
 
     fn read_archive(&self, e: &BytesStart<'_>) -> Result<export::Archive, DatError> {
@@ -786,8 +918,8 @@ impl<R: BufRead> DatStream<R> {
         })
     }
 
-    /// Reads one `<source>`: every `<file>` in it.
-    fn read_source(&mut self, game: &str) -> Result<export::Source, DatError> {
+    /// Reads one `<source>`: every `<file>` in it, counted against the game's `budget`.
+    fn read_source(&mut self, game: &str, budget: &mut Budget) -> Result<export::Source, DatError> {
         let mut source = export::Source::default();
         loop {
             let (e, body) = match self.read_event()? {
@@ -798,7 +930,10 @@ impl<R: BufRead> DatStream<R> {
                 _ => continue,
             };
             if e.local_name().as_ref() == "file" {
-                source.files.extend(self.read_file(&e, game)?);
+                if let Some(file) = self.read_file(&e, game)? {
+                    budget.add(game, 1, file.bytes())?;
+                    source.files.push(file);
+                }
             }
             if body {
                 self.skip(&e)?;
@@ -899,6 +1034,36 @@ impl<R: BufRead> DatStream<R> {
             status,
         })
     }
+}
+
+/// What one game has taken so far against [`MAX_GAME_ENTRIES`] and [`MAX_GAME_BYTES`].
+#[derive(Default)]
+struct Budget {
+    entries: usize,
+    bytes: usize,
+}
+
+impl Budget {
+    fn add(&mut self, game: &str, entries: usize, bytes: usize) -> Result<(), DatError> {
+        self.entries += entries;
+        self.bytes += bytes;
+        if self.entries > MAX_GAME_ENTRIES {
+            return Err(DatError::TooManyEntries {
+                game: game.to_owned(),
+            });
+        }
+        if self.bytes > MAX_GAME_BYTES {
+            return Err(DatError::GameTooLarge {
+                game: game.to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+fn rom_bytes(rom: &DatRom) -> usize {
+    let len = |s: &Option<String>| s.as_deref().map_or(0, str::len);
+    rom.name.len() + len(&rom.crc32) + len(&rom.md5) + len(&rom.sha1) + len(&rom.header)
 }
 
 fn parse_size(game: &str, text: &str) -> Result<u64, DatError> {

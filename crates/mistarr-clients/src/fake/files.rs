@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -117,7 +117,16 @@ impl FileServer {
     ///
     /// When the listener cannot bind.
     pub async fn start() -> io::Result<Self> {
-        Self::launch(None).await
+        Self::launch(None, IpAddr::from([127, 0, 0, 1])).await
+    }
+
+    /// Starts a plain HTTP server on `ip`, such as another loopback address.
+    ///
+    /// # Errors
+    ///
+    /// When the listener cannot bind.
+    pub async fn start_at(ip: IpAddr) -> io::Result<Self> {
+        Self::launch(None, ip).await
     }
 
     /// Starts an HTTPS server presenting `config`'s certificate.
@@ -126,11 +135,12 @@ impl FileServer {
     ///
     /// When the listener cannot bind.
     pub async fn start_tls(config: rustls::ServerConfig) -> io::Result<Self> {
-        Self::launch(Some(tokio_rustls::TlsAcceptor::from(Arc::new(config)))).await
+        let tls = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+        Self::launch(Some(tls), IpAddr::from([127, 0, 0, 1])).await
     }
 
-    async fn launch(tls: Option<tokio_rustls::TlsAcceptor>) -> io::Result<Self> {
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
+    async fn launch(tls: Option<tokio_rustls::TlsAcceptor>, ip: IpAddr) -> io::Result<Self> {
+        let listener = TcpListener::bind((ip, 0)).await?;
         let addr = listener.local_addr()?;
         let state = Arc::new(Mutex::new(Files::default()));
         let shared = Arc::clone(&state);

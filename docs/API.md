@@ -432,6 +432,10 @@ sentence that names neither the URL nor its host, such as:
   `.dat` and `.xml` DATs;
 - "The server sent a compressed file mistarr can't read." for a gzip body or
   a `Content-Encoding` other than `identity`;
+- "The file is larger than 512 MiB, the most a DAT or DAT pack unpacked
+  may be." for a pack whose members unpack past the cap, or a rewrite that
+  grows past it;
+- "The card has too little free space for the file.";
 - "The file is larger than 16 MiB, the most a torrent may be." or "… 512
   MiB, the most a DAT or DAT pack may be.";
 - "The server answered 404.", "The server redirected more than 5 times.",
@@ -448,8 +452,8 @@ sentence that names neither the URL nor its host, such as:
 - "Cancelled." after `DELETE /fetch/{token}`, or "interrupted by a restart"
   when the server stopped first; a fetch is never retried.
 
-`DELETE /fetch/{token}` answers 204 and the job stops at its next chunk, game
-of the check or 1 MiB write of its copy into `dats/`, removing what it
+`DELETE /fetch/{token}` answers 204 and the job stops at its next chunk,
+8 MiB of the check and rewrite, or 1 MiB write of its copy into `dats/`, removing what it
 wrote, or 404 when no fetch with that token is queued or running. A token is
 open for `DELETE` once `POST /fetch` has answered, not before. A shutdown
 stops a fetch at the same points and removes what it wrote; the job then

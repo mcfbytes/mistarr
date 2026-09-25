@@ -36,6 +36,13 @@ pub const COMPRESSED: &str = "The server sent a compressed file mistarr can't re
 /// The error of a zip that holds more than DATs; `docs/UI.md` says why fetches refuse it.
 pub const OTHER_FILES: &str = "This zip holds files other than DATs.";
 
+/// The error of a fetch the card has no room for.
+pub const CARD_FULL: &str = "The card has too little free space for the file.";
+
+/// The subdirectory of SQLite's temporary directory that holds fetches in RAM, mistarr's
+/// own, so the startup sweep never touches another program's files.
+pub const RAM_SUBDIR: &str = "mistarr-fetch";
+
 /// The shortest and longest rest after each MiB written to the card while a core runs.
 const REST_MIN: Duration = Duration::from_millis(20);
 const REST_MAX: Duration = Duration::from_secs(1);
@@ -369,7 +376,7 @@ impl UrlFetch {
         view.file = Some(name.clone());
         spool.finish().await?;
         reporter.report("checking", || view.json("checking"));
-        let checked = self.check(ctx, found, &mut spool, &pace).await?;
+        let checked = self.check(ctx, found, &mut spool).await?;
         self.stop_point(ctx)?;
         reporter.report("placing", || view.json("placing"));
         let placed = match checked {
@@ -385,7 +392,7 @@ impl UrlFetch {
                     .await
                     .map_err(|e| Error::Fetch(e.message))?
             }
-            Checked::Dat => {
+            Checked::Dat { .. } => {
                 let dir = app.config().paths.dats();
                 std::fs::create_dir_all(&dir)?;
                 let part = crate::http::dat_part_path(&dir);
@@ -405,37 +412,31 @@ impl UrlFetch {
         ctx.progress(done).await
     }
 
-    /// Checks the spooled file on a blocking thread, stopping when cancelled; a pack is
-    /// rebuilt from its checked members and the spool then holds the rebuilt file.
-    async fn check(
-        &self,
-        ctx: &JobContext,
-        found: Found,
-        spool: &mut Spool,
-        pace: &Pace,
-    ) -> Result<Checked> {
+    /// Checks the spooled file on a blocking thread, stopping when cancelled; a DAT or
+    /// pack is rewritten by mistarr and the spool then holds the rewrite alone.
+    async fn check(&self, ctx: &JobContext, found: Found, spool: &mut Spool) -> Result<Checked> {
         let path = spool.path().to_path_buf();
-        let (rebuilt, in_ram) = spool.beside();
-        let pace: Pace = if in_ram {
-            Arc::new(|_| Duration::ZERO)
-        } else {
-            Arc::clone(pace)
-        };
+        let target = spool.target(crate::jobs::dat_import::MAX_DAT_BYTES);
         let cancel = Arc::clone(&self.cancel);
         let shutdown = ctx.app.shutdown_signal();
-        let out = rebuilt.clone();
         let checked = blocking(label::FETCH, move || {
-            content::check(found, &path, &out, &pace, &|| {
+            content::check(found, &path, &target, &|| {
                 cancel.is_set() || *shutdown.borrow()
             })
         })
         .await
         .map_err(|e| Error::Task(e.to_string()))?;
-        if checked.is_ok() && found == Found::Zip {
-            spool.adopt(rebuilt, in_ram);
-        }
         match checked {
+            Ok(Checked::Dat { path, in_ram }) => {
+                spool.adopt(path.clone(), in_ram);
+                Ok(Checked::Dat { path, in_ram })
+            }
             Ok(c) => Ok(c),
+            Err(Refused::TooLarge) => Err(too_large(
+                content::MAX_UNPACKED_BYTES,
+                "a DAT or DAT pack unpacked",
+            )),
+            Err(Refused::NoRoom) => Err(Error::Fetch(CARD_FULL.to_owned())),
             Err(Refused::NotAccepted(why)) => {
                 tracing::debug!(why, "a fetched file was refused");
                 Err(Error::Fetch(NOT_ACCEPTED.to_owned()))
@@ -471,13 +472,31 @@ fn pace(app: &AppState) -> Pace {
     })
 }
 
-/// Where a spool may go: SQLite's temporary directory when it is in RAM, else the card.
+/// A card that filled up during a fetch, as the fetch's error.
+fn card_full(e: Error) -> Error {
+    match e {
+        Error::Io(io) if io.kind() == std::io::ErrorKind::StorageFull => {
+            Error::Fetch(CARD_FULL.to_owned())
+        }
+        e => e,
+    }
+}
+
+/// mistarr's own directory for fetches in RAM, under SQLite's temporary directory when
+/// that is set and is not `card`.
+#[must_use]
+pub fn ram_dir(card: &std::path::Path) -> Option<PathBuf> {
+    std::env::var_os(crate::db::SQLITE_TMPDIR)
+        .map(PathBuf::from)
+        .filter(|d| d != card)
+        .map(|d| d.join(RAM_SUBDIR))
+}
+
+/// Where a spool may go: mistarr's directory in RAM when there is one, else the card.
 fn places(app: &AppState) -> Places {
     let config = app.config();
     let card = config.paths.tmp();
-    let ram = std::env::var_os(crate::db::SQLITE_TMPDIR)
-        .map(PathBuf::from)
-        .filter(|d| *d != card);
+    let ram = ram_dir(&card);
     Places {
         ram,
         card,
@@ -500,7 +519,7 @@ impl Job for UrlFetch {
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
-        let ran = self.fetch(ctx).await;
+        let ran = self.fetch(ctx).await.map_err(card_full);
         self.cancel.end();
         ctx.app.fetches.close(self.token);
         ran
@@ -563,6 +582,18 @@ mod tests {
             .expect("woken")
             .expect("join");
         c.wait().await;
+    }
+
+    #[test]
+    fn a_full_card_is_named_and_other_errors_pass() {
+        let full = card_full(std::io::Error::from(std::io::ErrorKind::StorageFull).into());
+        assert_eq!(full.to_string(), CARD_FULL);
+        let other = card_full(Error::Fetch("x".into()));
+        assert_eq!(other.to_string(), "x");
+        let card = std::path::Path::new("/nonexistent/card");
+        if let Some(dir) = ram_dir(card) {
+            assert!(dir.ends_with(RAM_SUBDIR));
+        }
     }
 
     #[test]

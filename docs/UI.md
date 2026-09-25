@@ -158,12 +158,18 @@ a.dat. Importing now.") and the file is followed as an upload; when it
 fails the toast is "The fetch failed: <reason>", or "The fetch was
 cancelled.".
 
+A fetched DAT is not placed as the server sent it: the file that lands in
+`dats/` is mistarr's rewrite of the DAT's entries, the header fields and the
+games, releases and roms it reads, and for a DB export its archives and
+files, with nothing else the server's file held. A fetched pack is rebuilt
+from the rewrites of its members. An uploaded or dropped file is placed as
+it is, since the user chose it.
+
 A fetched zip must hold only `.dat` and `.xml` DATs ("This zip holds files
 other than DATs."), where an upload loads the DATs of a mixed zip and skips
 the rest. An uploaded zip is a file the user already has and chose; a
-fetched one came from a server, and mistarr places only what it checked, so
-a pack is rebuilt from its checked members and a member it could not check
-has no place to go.
+fetched one came from a server, and mistarr places only what it rewrote, so
+a member it could not rewrite has no place to go.
 
 **DATs** (`/dats`). Its own nav entry, between Sources and System, since
 DATs arrive and fail on their own schedule like sources do. An upload

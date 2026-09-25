@@ -455,8 +455,8 @@ pub(crate) fn open_db(
     db::ram::clean_stale(&path, &config.memory.import_dir)?;
     // Leftovers of a fetch or upload that a restart or power cut broke off.
     crate::jobs::url_fetch::spool::clean_stale(&config.paths.tmp());
-    if let Some(ram) = std::env::var_os(crate::db::SQLITE_TMPDIR) {
-        crate::jobs::url_fetch::spool::clean_stale(Path::new(&ram));
+    if let Some(ram) = crate::jobs::url_fetch::ram_dir(&config.paths.tmp()) {
+        crate::jobs::url_fetch::spool::clean_stale(&ram);
     }
     for dir in [config.paths.dats(), config.paths.sources()] {
         crate::jobs::url_fetch::spool::clean_parts(&dir, ".upload-");
