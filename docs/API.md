@@ -17,7 +17,8 @@ list endpoints take `?limit=&offset=` (default 100, capped at 1000) and return
 `{ items: [...], total: n }`. Errors are `{ error: { code, message } }` with an
 appropriate status; codes are `bad_request`, `unauthorized`, `forbidden`,
 `not_found`, `method_not_allowed`, `conflict`, `busy`, `not_implemented`,
-`unavailable` and `internal`. A
+`unavailable` and `internal`. Every API answer, errors included, carries
+`Cache-Control: no-store`, so a browser or proxy never serves one again. A
 documented route whose work package has not landed answers 501
 `not_implemented`. The SPA is served
 from `/` and every unknown non-API path returns `index.html`; unknown paths

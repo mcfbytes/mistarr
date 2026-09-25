@@ -96,6 +96,22 @@ test('a failed next page is loaded again after Retry, never skipped', async ({ p
   expect((await ids(page)).slice(0, 120)).toEqual(expected);
 });
 
+test('a slow search lands while background reloads keep arriving', async ({ page }) => {
+  await delays(page, { Mock: 1500 });
+  await page.goto('/#/p/nes');
+  await expect(names(page).first()).toBeVisible();
+
+  await page.getByPlaceholder('Search').fill('Mock');
+  // A scan's file.changed events ask for reloads faster than this search answers.
+  await page.evaluate(() => {
+    const w = window as unknown as { mistarrReloadTitles: () => Promise<void> };
+    const timer = setInterval(() => void w.mistarrReloadTitles(), 500);
+    setTimeout(() => clearInterval(timer), 10_000);
+  });
+  await expect(names(page).first()).toHaveText('Mock Manor (USA)', { timeout: 5000 });
+  await expect(page.getByRole('progressbar', { name: 'Loading titles' })).toHaveCount(0);
+});
+
 test('a background reload stops when the user searches', async ({ page }) => {
   await page.goto('/#/p/nes');
   await expect(names(page).first()).toBeVisible();

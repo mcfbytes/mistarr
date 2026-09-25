@@ -17,6 +17,12 @@ let detailId: number | null = null;
 let groupsController: AbortController | null = null;
 /** Counts the loads a user asked for, so a background reload stops once one starts. */
 let userLoads = 0;
+/** True while a page load is on its way. */
+let loadInFlight = false;
+/** True while `reloadTitles` runs. */
+let reloading = false;
+/** A reload asked for while a load was on its way, run once that load settles. */
+let reloadQueued = false;
 let detailToken = 0;
 
 export function getGroups(): TitleGroup[] {
@@ -82,6 +88,7 @@ export async function loadTitlesPage(
   const controller = new AbortController();
   groupsController = controller;
   lastFilters = filters;
+  loadInFlight = true;
   if (!quiet) {
     userLoads += 1;
   }
@@ -117,28 +124,50 @@ export async function loadTitlesPage(
   } finally {
     if (groupsController === controller) {
       groupsLoading = false;
+      loadInFlight = false;
+      runQueuedReload();
     }
+  }
+}
+
+/** Starts the reload asked for while a load was on its way, once nothing is loading. */
+function runQueuedReload(): void {
+  if (reloadQueued && !loadInFlight && !reloading) {
+    reloadQueued = false;
+    void reloadTitles();
   }
 }
 
 /**
  * Re-fetches every loaded page in place. It stops as soon as a page fails or a
  * load the user asked for starts, so it never lands results for stale filters.
+ * Asked for while a load is on its way, it runs once that load settles instead
+ * of aborting it, so reloads arriving faster than a page answers never starve it.
  */
 export async function reloadTitles(): Promise<void> {
-  // Snapshot before reloading: page 0 would otherwise reset lastPage first.
-  const platform = groupsPlatform;
-  const filters = lastFilters;
-  const pages = lastPage;
-  const loads = userLoads;
-  if (platform) {
-    for (let p = 0; p <= pages; p += 1) {
-      if (userLoads !== loads || !(await loadTitlesPage(platform, filters, p, true))) {
-        return;
+  if (loadInFlight || reloading) {
+    reloadQueued = true;
+    return;
+  }
+  reloading = true;
+  try {
+    // Snapshot before reloading: page 0 would otherwise reset lastPage first.
+    const platform = groupsPlatform;
+    const filters = lastFilters;
+    const pages = lastPage;
+    const loads = userLoads;
+    if (platform) {
+      for (let p = 0; p <= pages; p += 1) {
+        if (userLoads !== loads || !(await loadTitlesPage(platform, filters, p, true))) {
+          return;
+        }
       }
     }
+    await refreshDetail();
+  } finally {
+    reloading = false;
+    runQueuedReload();
   }
-  await refreshDetail();
 }
 
 if (isMock && typeof window !== 'undefined') {
