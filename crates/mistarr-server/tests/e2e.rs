@@ -392,7 +392,7 @@ fn options(dir: &Path) -> Options {
         launch_dir: dir.to_path_buf(),
         launch_gap: Duration::ZERO,
         ionice: Some(ionice_shim(dir)),
-        frozen_file: dir.join("client.frozen"),
+        frozen_file: dir.join("run").join(mistarr_server::freeze::FROZEN_NAME),
         hold_recheck: Duration::from_secs(1),
         ..Options::default()
     }

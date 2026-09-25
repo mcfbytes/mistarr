@@ -546,4 +546,17 @@ pub trait DownloadClient: Send + Sync {
 
     /// The client's process id as it reports it, `None` when its RPC has no way to.
     async fn process_id(&self) -> Result<Option<u32>>;
+
+    /// The alternate upload limit the client switches to by hand or on a
+    /// schedule, with `enabled` saying whether it is in use; `None` when it has none.
+    async fn alt_up_limit(&self) -> Result<Option<RateLimit>> {
+        Ok(None)
+    }
+
+    /// Sets the alternate upload rate, leaving whether it is in use alone; a
+    /// client without one ignores it.
+    async fn set_alt_up_rate(&self, kbps: u32) -> Result<()> {
+        let _ = kbps;
+        Ok(())
+    }
 }

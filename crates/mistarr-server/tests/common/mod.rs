@@ -80,7 +80,7 @@ pub fn options_in(dir: &Path) -> Options {
         ionice: None,
         kill: std::path::PathBuf::from("kill"),
         proc_dir: dir.join("proc"),
-        frozen_file: dir.join("client.frozen"),
+        frozen_file: dir.join("run").join(mistarr_server::freeze::FROZEN_NAME),
         hold_recheck: Duration::from_secs(3600),
     }
 }

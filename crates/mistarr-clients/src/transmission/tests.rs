@@ -950,3 +950,34 @@ async fn transmission_does_not_report_its_process_id() {
     assert_eq!(client.process_id().await.expect("pid"), None);
     assert!(fake.requests().is_empty());
 }
+
+#[tokio::test]
+async fn the_turtle_upload_rate_is_read_and_set_alone() {
+    let (fake, client) = setup().await;
+    fake.push(FakeResponse::success(
+        json!({ "alt-speed-up": 50, "alt-speed-enabled": true }),
+    ));
+    fake.push(FakeResponse::success(json!({})));
+    fake.push(FakeResponse::success(json!({})));
+    let alt = client.alt_up_limit().await.expect("read");
+    assert_eq!(alt, Some(RateLimit::kbps(50)));
+    client.set_alt_up_rate(0).await.expect("hold");
+    assert!(
+        client.alt_up_limit().await.is_err(),
+        "a reply without the rate"
+    );
+    assert_eq!(
+        fake.bodies(),
+        vec![
+            rpc(
+                "session-get",
+                json!({ "fields": ["alt-speed-up", "alt-speed-enabled"] })
+            ),
+            rpc("session-set", json!({ "alt-speed-up": 0 })),
+            rpc(
+                "session-get",
+                json!({ "fields": ["alt-speed-up", "alt-speed-enabled"] })
+            ),
+        ]
+    );
+}

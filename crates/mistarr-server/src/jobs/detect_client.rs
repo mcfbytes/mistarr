@@ -114,7 +114,8 @@ pub async fn probe(client: &ClientConfig, launcher: &Launcher) -> ClientStatus {
 pub async fn detect_and_store(app: &Arc<AppState>, announce: bool) -> Result<ClientStatus> {
     let _one = app.detect_lock.lock().await;
     if app.client_frozen() {
-        // A stopped client never answers; keep the last result until it resumes.
+        // A stopped client never answers; keep the last result and detect again at resume.
+        crate::jobs::core_limits::defer(app, crate::db::deferred::Op::Detect).await;
         let stored = app
             .db
             .read(|c| settings::get_json::<ClientStatus>(c, keys::CLIENT_DETECTED))

@@ -311,26 +311,49 @@ expect "$(cat "$root/prio" 2>/dev/null)" "nice -n 10 $root/mistarr/mistarr" \
 "$script" stop >/dev/null
 rm -f "$fakebin/nice" "$fakebin/ionice"
 
-# stop resumes a client a daemon left stopped, only while its pid is the same process.
+# stop resumes a client a daemon left stopped, only while its pid is the same client.
 start_of() { sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f20; }
 state_of() { sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f1; }
-MISTARR_FROZEN="$root/client.frozen"
+running_of() { state_of "$1" | sed "s/[^T]/running/"; }
+mkdir -m 700 "$root/frozen-dir"
+MISTARR_FROZEN="$root/frozen-dir/client.frozen"
 export MISTARR_FROZEN
-sleep 100 &
+# A shell copied under the client's name, so its exe link names rtorrent.
+cp "$(readlink -f /bin/sh)" "$root/rtorrent"
+"$root/rtorrent" -c 'while :; do sleep 1; done' &
 client=$!
+sleep 1
 kill -STOP "$client"
 echo "$client $(start_of "$client")" > "$MISTARR_FROZEN"
 out=$("$script" stop)
 expect_contains "$out" "download client resumed" "stop reports the resumed client"
-expect "$(state_of "$client" | sed "s/[^T]/running/")" "running" "stop resumes the stopped client"
+expect "$(running_of "$client")" "running" "stop resumes the stopped client"
 expect_file_absent "$MISTARR_FROZEN" "stop removes the frozen record"
 kill -STOP "$client"
 echo "$client 1" > "$MISTARR_FROZEN"
 "$script" stop >/dev/null
 expect "$(state_of "$client")" "T" "a record for an older process with that pid resumes nothing"
 expect_file_absent "$MISTARR_FROZEN" "a stale frozen record is removed"
-kill -CONT "$client"
-kill "$client" 2>/dev/null
+echo "$client $(start_of "$client")" > "$root/planted-record"
+ln -s "$root/planted-record" "$MISTARR_FROZEN"
+"$script" stop >/dev/null 2>&1
+expect "$(state_of "$client")" "T" "a symlinked record resumes nothing"
+rm -f "$MISTARR_FROZEN"
+echo "$client $(start_of "$client")" > "$MISTARR_FROZEN"
+chmod 755 "$root/frozen-dir"
+"$script" stop >/dev/null 2>&1
+expect "$(state_of "$client")" "T" "a record in a directory others can read resumes nothing"
+chmod 700 "$root/frozen-dir"
+rm -f "$MISTARR_FROZEN"
+sleep 100 &
+other=$!
+kill -STOP "$other"
+echo "$other $(start_of "$other")" > "$MISTARR_FROZEN"
+"$script" stop >/dev/null
+expect "$(state_of "$other")" "T" "a process that is not a client is never resumed"
+kill -CONT "$other" "$client"
+kill "$other" "$client" 2>/dev/null
+rm -f "$root/rtorrent" "$root/planted-record"
 unset MISTARR_FROZEN
 
 if ! sh "$here/install.sh"; then

@@ -151,8 +151,9 @@ and the switch that allows launching, log tail. Under "Disc images", the
 checkbox "Identify CHD images by their tracks" with a "Slow" tag, a line
 saying it decodes each image once, pauses while a core runs and keeps its
 results, and the measured speed as "about N minutes per 700 MB image", or
-"Speed not measured yet." Under the limits, whose zero leaves the client's
-own limit, the checkbox "Pause the download client while a core runs", on by
+"Speed not measured yet." The heading "Limits (kbps)" has the line "0 keeps
+the client's own limit. Any other value only ever lowers it." Under the
+limits, the checkbox "Pause the download client while a core runs", on by
 default, with the line "Frees the board for the game. Transfers resume at the
 menu, and each source's seed policy applies again. A client on another
 machine only stops uploading." The status card shows the client-held pill

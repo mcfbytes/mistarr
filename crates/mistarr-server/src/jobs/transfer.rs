@@ -13,6 +13,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use super::{Job, JobContext, Scheduler};
 use crate::app::AppState;
+use crate::db::deferred::Op;
 use crate::db::downloads::{self as rows, DownloadId, DownloadRow, DownloadState};
 use crate::db::sources::{self, SourceId, SourceRow};
 use crate::error::Result;
@@ -305,7 +306,14 @@ impl Job for Deselect {
             .db
             .read(move |c| Ok((sources::get(c, source)?, rows::selected_indices(c, source)?)))
             .await?;
-        let (Some(cid), Some(client)) = (row.and_then(|r| r.client_id), ctx.app.client()) else {
+        let Some(cid) = row.and_then(|r| r.client_id) else {
+            return Ok(());
+        };
+        if ctx.app.client_frozen() {
+            crate::jobs::core_limits::defer(&ctx.app, Op::Deselect(source)).await;
+            return Ok(());
+        }
+        let Some(client) = ctx.app.client() else {
             return Ok(());
         };
         let id = ClientTorrentId::new(cid);

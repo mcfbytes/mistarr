@@ -593,16 +593,39 @@ expect_contains "$out" "mistarr answered at http://127.0.0.1:$port/" "the instal
 expect_contains "$out" "to roll back by hand" "the manual rollback is printed"
 
 # An upgrade resumes a download client a killed mistarr left stopped.
-sleep 100 &
-stopped=$!
-kill -STOP "$stopped"
 start_of() { sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f20; }
 state_of() { sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f1; }
-echo "$stopped $(start_of "$stopped")" > "$work/frozen9"
-frozen="$work/frozen9" run_install "$root9" "$no_tty" v1.1.0 >/dev/null
+mkdir -m 700 "$work/run9"
+cp "$(readlink -f /bin/sh)" "$work/rtorrent"
+"$work/rtorrent" -c 'while :; do sleep 1; done' &
+stopped=$!
+sleep 1
+kill -STOP "$stopped"
+echo "$stopped $(start_of "$stopped")" > "$work/run9/client.frozen"
+frozen="$work/run9/client.frozen" run_install "$root9" "$no_tty" v1.1.0 >/dev/null
 expect "$(state_of "$stopped" | sed "s/[^T]/running/")" "running" "the install resumes the stopped client"
-expect_absent "$work/frozen9" "the frozen record is removed"
+expect_absent "$work/run9/client.frozen" "the frozen record is removed"
+
+# A stop that fails while mistarr still runs leaves its client to it.
+sh -c "sleep 100; : $root9/mistarr/mistarr" &
+daemon=$!
+echo "$daemon" > "$root9/mistarr/mistarr.pid"
+kill -STOP "$stopped"
+echo "$stopped $(start_of "$stopped")" > "$work/run9/client.frozen"
+write_launcher_stub "$root9/Scripts/mistarr.sh"
+sed 's/^        echo "mistarr stopped"$/        exit 1/' "$root9/Scripts/mistarr.sh" > "$work/failing-stop"
+cat "$work/failing-stop" > "$root9/Scripts/mistarr.sh"
+frozen="$work/run9/client.frozen" run_install "$root9" "$no_tty" v1.1.0 >/dev/null
+expect "$(state_of "$stopped")" "T" "a running mistarr keeps its client stopped"
+expect_present_file() {
+    [ -e "$1" ] || { fail=$((fail + 1)); echo "FAIL: $2 ($1 missing)"; }
+}
+expect_present_file "$work/run9/client.frozen" "the running mistarr keeps its record"
+kill "$daemon" 2>/dev/null
+rm -f "$root9/mistarr/mistarr.pid" "$work/run9/client.frozen" "$work/failing-stop"
+kill -CONT "$stopped"
 kill "$stopped" 2>/dev/null
+rm -f "$work/rtorrent"
 
 # A later upgrade with no wal drops the stale saved wal and shm, never mixing sets.
 rm -f "$root9/mistarr/mistarr.db-wal" "$root9/mistarr/mistarr.db-shm"

@@ -1,6 +1,5 @@
 //! Shared server state and the startup sequence of `docs/ARCHITECTURE.md` "Startup".
 
-use std::collections::HashSet;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
@@ -14,7 +13,6 @@ use tokio::task::JoinHandle;
 use crate::client::{ClientEndpoint, ClientKey};
 use crate::config::{Config, RuntimeSettings, SettingsPatch};
 use crate::db::settings::{self, keys};
-use crate::db::sources::SourceId;
 use crate::db::{self, Db};
 use crate::error::{Error, Result};
 use crate::events::{EventBus, EventKind};
@@ -74,7 +72,7 @@ pub struct Options {
     pub kill: PathBuf,
     /// The process table the client is looked for in.
     pub proc_dir: PathBuf,
-    /// Where the frozen client's pid and start time are kept.
+    /// The frozen client's record, in the private RAM temporary directory.
     pub frozen_file: PathBuf,
     /// How often a held client is checked for having left its hold.
     pub hold_recheck: Duration,
@@ -107,7 +105,7 @@ impl Default for Options {
             ionice: Some(PathBuf::from("ionice")),
             kill: PathBuf::from("kill"),
             proc_dir: PathBuf::from("/proc"),
-            frozen_file: PathBuf::from(crate::freeze::FROZEN_FILE),
+            frozen_file: Path::new(crate::db::RAM_TEMP_DIR).join(crate::freeze::FROZEN_NAME),
             hold_recheck: Duration::from_secs(60),
         }
     }
@@ -139,7 +137,9 @@ pub struct AppState {
     /// Wakes the core gate's client hold after the settings or the client change.
     pub limits_wake: tokio::sync::Notify,
     client_hold: RwLock<Option<ClientHold>>,
-    deferred_seed: Mutex<HashSet<SourceId>>,
+    /// Held while the client is stopped or resumed for shutdown, so no stop
+    /// lands after shutdown resumed it.
+    pub(crate) freeze_lock: Arc<Mutex<()>>,
     /// Serialises client detection so an older probe never overwrites a newer one.
     pub(crate) detect_lock: tokio::sync::Mutex<()>,
     /// Held while `POST /system/client/start` runs, so a second one is `busy`.
@@ -171,7 +171,7 @@ impl AppState {
             redetect: tokio::sync::Notify::new(),
             limits_wake: tokio::sync::Notify::new(),
             client_hold: RwLock::new(None),
-            deferred_seed: Mutex::new(HashSet::new()),
+            freeze_lock: Arc::new(Mutex::new(())),
             detect_lock: tokio::sync::Mutex::new(()),
             client_start: tokio::sync::Mutex::new(()),
             shutdown: watch::Sender::new(false),
@@ -253,27 +253,6 @@ impl AppState {
             .write()
             .unwrap_or_else(PoisonError::into_inner);
         std::mem::replace(&mut *slot, hold) != hold
-    }
-
-    /// Notes a source whose seed policy changed while the client was frozen,
-    /// for the core gate to apply once it resumes the client.
-    pub fn defer_seed_policy(&self, source: SourceId) {
-        self.deferred_seed
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .insert(source);
-    }
-
-    /// Takes the sources [`AppState::defer_seed_policy`] noted.
-    pub(crate) fn take_deferred_seed(&self) -> Vec<SourceId> {
-        std::mem::take(
-            &mut *self
-                .deferred_seed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner),
-        )
-        .into_iter()
-        .collect()
     }
 
     /// Points [`AppState::client`] at what `status` found. The current handle
@@ -778,7 +757,7 @@ pub(crate) mod testutil {
             launch_gap: Duration::ZERO,
             ionice: None,
             proc_dir: dir.path().join("proc"),
-            frozen_file: dir.path().join("client.frozen"),
+            frozen_file: dir.path().join("run").join(crate::freeze::FROZEN_NAME),
             ..Options::default()
         };
         f(&mut options);

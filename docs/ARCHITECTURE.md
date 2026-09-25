@@ -70,6 +70,8 @@ pub trait DownloadClient: Send + Sync {
     async fn rate_limit(&self, dir: Direction) -> Result<RateLimit>;                // to put back later
     async fn set_rate_limit(&self, dir: Direction, limit: RateLimit) -> Result<()>;
     async fn process_id(&self) -> Result<Option<u32>>;                              // rtorrent's system.pid
+    async fn alt_up_limit(&self) -> Result<Option<RateLimit>> { Ok(None) }          // Transmission's turtle upload rate
+    async fn set_alt_up_rate(&self, kbps: u32) -> Result<()> { Ok(()) }
 }
 
 // mistarr-mister
@@ -510,9 +512,9 @@ The CORENAME watcher polls `/tmp/CORENAME` every 2 s. When the value is not
 `transfer.pause_client_while_playing` on, a download client on the board is
 stopped with SIGSTOP and nothing calls it until the menu; a client elsewhere
 gets the "core running" rate limits and its uploads held. When CORENAME
-returns to `MENU` everything resumes: the client runs again, its own limits
-are put back where the gate changed them, and each source's seed policy
-applies as before (DOWNLOAD-CLIENTS.md "Core gate"). This is a
+returns to `MENU` everything resumes: the client runs again, the client work kept
+while it was stopped runs, its own limits are put back where the gate
+changed them, and each source's seed policy applies as before (DOWNLOAD-CLIENTS.md "Core gate"). This is a
 scheduler-level gate, not something each job needs to know about.
 
 "Pause" (`POST /system/pause`) holds the heavy and background lanes; a DAT
@@ -549,7 +551,7 @@ shutdown is left `queued` for this.
 | Stack per runtime thread | 1 MiB reserved, touched pages only in RSS |
 | Soft `RLIMIT_DATA` | `[memory] data_limit_mib`, 192 MiB, never below 64 |
 | SQLite page cache | 2 MiB, 1 MiB on each of the two connections; the writer's rises to 8 MiB while a DAT load applies its stage, a source import, resolve, rebind or re-map first keys new roms (one committed batch of 1 000 per transaction), or a source binds (`db::bulk`) |
-| SQLite other | `mmap_size = 0`, `temp_store = FILE` under `/tmp/mistarr` (`SQLITE_TMPDIR`, set at startup and emptied of stale files; `MISTARR_TEMP_DIR` names another; RAM on the board, so temporary pages never reach the card), created with mode 0700 and refused when it is a symlink or another user's, in which case `<data>/tmp` is used and the log warns; WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB, 16 MiB while a bulk write is open |
+| SQLite other | `mmap_size = 0`, `temp_store = FILE` under `/tmp/mistarr` (`SQLITE_TMPDIR`, set at startup and emptied of stale files except the frozen client's record `client.frozen`; `MISTARR_TEMP_DIR` names another; RAM on the board, so temporary pages never reach the card), created with mode 0700 and refused when it is a symlink or another user's, in which case `<data>/tmp` is used and the log warns; WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB, 16 MiB while a bulk write is open |
 | DAT stage | in `/tmp/mistarr` while a DAT loads, about 1.5 times the DAT's size (18 MB for 20 000 games of three roms), given back when the load ends, as the temporary database vacuums itself. A load in RAM keeps its stage in the same place, beside the copy on the same tmpfs, and when `/tmp` fills it drops the copy and loads on the card; a load on the card whose `/tmp` fills fails naming `/tmp/mistarr`, the database unchanged |
 | SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import in RAM holds the writer from its copy to its swap; one on the card, already on a blocking thread, takes it per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
 | DAT import or migration in RAM | a copy in `[memory] import_dir`, tmpfs, so it counts in `MemAvailable` and not in RSS: the database, what the import adds and the copy's rollback journal. Made only when `MemAvailable` covers the file's size and half again, six times the DATs' uncompressed size for the rows and the stage in SQLite's temporary files, and 32 MiB, above `[memory] import_floor_mib` (128 MiB), and dropped when `MemAvailable` falls below the floor during the load; 1 MiB write-back buffer |
@@ -897,7 +899,7 @@ url       = ""              # transmission RPC url or rtorrent scgi address
 remote_path_map = []        # [{ remote = "/downloads", local = "/media/fat/mistarr/staging" }]
 
 [limits]
-down_kbps_menu = 0          # 0 leaves the client's own limit
+down_kbps_menu = 0          # 0 leaves the client's own limit; others never raise it
 down_kbps_core = 512
 up_kbps_menu   = 0
 up_kbps_core   = 64

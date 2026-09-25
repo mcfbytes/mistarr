@@ -2,25 +2,30 @@
 //! uploads or a stopped process; see `docs/DOWNLOAD-CLIENTS.md` "Core gate".
 
 use std::fmt::Display;
-use std::sync::Arc;
+use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
-use mistarr_clients::{
-    ClientKind, ClientTorrentId, Direction, DownloadClient, RateLimit, SeedPolicy,
-};
+use mistarr_clients::{ClientKind, ClientTorrentId, Direction, DownloadClient, RateLimit};
 use serde::{Deserialize, Serialize};
 
 use crate::app::AppState;
-use crate::client::{self, ClientEndpoint};
+use crate::client::{self, ClientEndpoint, ClientKey};
 use crate::config::LimitsConfig;
+use crate::db::deferred::{self, Deferred, Op};
 use crate::db::settings::{self, keys};
 use crate::db::sources;
 use crate::events::EventKind;
-use crate::freeze::{self, FreezeError, Frozen, Kill, Signal};
+use crate::freeze::{self, FreezeError, Frozen, Kill};
+use crate::jobs::detect_client::DetectClient;
+use crate::jobs::transfer::Deselect;
+use crate::jobs::Scheduler;
 use crate::threads::{self, label};
 
 /// The longest wait between retries while the client does not take its hold.
 pub const RETRY_MAX: Duration = Duration::from_secs(60);
+
+/// How long the client used before gets to take back its own limits.
+const RESTORE_WAIT: Duration = Duration::from_secs(5);
 
 const DIRECTIONS: [Direction; 2] = [Direction::Down, Direction::Up];
 
@@ -34,7 +39,7 @@ pub enum ClientHold {
     Frozen,
 }
 
-/// The client's own limits in each direction the gate changed, stored under
+/// The client's own limits the gate changed, stored under
 /// [`keys::CLIENT_SAVED_LIMITS`] until they are put back.
 ///
 /// ```
@@ -42,7 +47,7 @@ pub enum ClientHold {
 /// use mistarr_server::client::ClientEndpoint;
 /// use mistarr_server::jobs::core_limits::SavedLimits;
 /// let s = SavedLimits { client: ClientEndpoint { kind: ClientKind::Rtorrent, url: "127.0.0.1:5000".into() },
-///     down: None, up: Some(RateLimit::kbps(40)) };
+///     down: None, up: Some(RateLimit::kbps(40)), alt_up: None };
 /// let json = serde_json::to_string(&s).unwrap();
 /// assert_eq!(serde_json::from_str::<SavedLimits>(&json).unwrap(), s);
 /// ```
@@ -54,6 +59,9 @@ pub struct SavedLimits {
     pub down: Option<RateLimit>,
     /// Its own upload limit, while the gate replaces it.
     pub up: Option<RateLimit>,
+    /// Its own alternate upload rate in kbps, while held uploads replace it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alt_up: Option<u32>,
 }
 
 impl SavedLimits {
@@ -62,7 +70,12 @@ impl SavedLimits {
             client,
             down: None,
             up: None,
+            alt_up: None,
         }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.down.is_none() && self.up.is_none() && self.alt_up.is_none()
     }
 
     fn get(&self, dir: Direction) -> Option<RateLimit> {
@@ -137,6 +150,26 @@ pub fn target(limits: &LimitsConfig, core: bool, hold_uploads: bool) -> Target {
     }
 }
 
+/// The limit set for `want` against the client's `own`: a rate is never above
+/// an own limit in force, so `[limits]` only ever lowers the client.
+///
+/// ```
+/// use mistarr_clients::RateLimit;
+/// use mistarr_server::jobs::core_limits::lowered;
+/// assert_eq!(lowered(RateLimit::kbps(64), RateLimit::kbps(40)), RateLimit::kbps(40));
+/// assert_eq!(lowered(RateLimit::kbps(8), RateLimit::kbps(40)), RateLimit::kbps(8));
+/// assert_eq!(lowered(RateLimit::kbps(64), RateLimit::default()), RateLimit::kbps(64));
+/// assert_eq!(lowered(RateLimit::HELD, RateLimit::kbps(40)), RateLimit::HELD);
+/// ```
+#[must_use]
+pub fn lowered(want: RateLimit, own: RateLimit) -> RateLimit {
+    if want.is_held() || !own.enabled || own.kbps == 0 {
+        want
+    } else {
+        RateLimit::kbps(want.kbps.min(own.kbps))
+    }
+}
+
 /// A step that did not complete, logged by the caller once per streak.
 #[derive(Debug)]
 struct Failure {
@@ -158,6 +191,10 @@ struct Applied {
     client: Option<ClientEndpoint>,
     /// The limits set in it.
     have: Target,
+    /// Whether its alternate upload rate was asked for during this hold.
+    alt_read: bool,
+    /// Whether its alternate upload rate is held.
+    alt_held: bool,
     /// Its own limits the gate replaced.
     saved: Option<SavedLimits>,
     /// Its stopped process.
@@ -169,6 +206,13 @@ struct Applied {
 impl Applied {
     fn holding(&self) -> bool {
         self.frozen.is_some() || self.have.up == Some(RateLimit::HELD)
+    }
+
+    /// Forgets what was set, so the next step sets it again.
+    fn forget(&mut self) {
+        self.have = Target::default();
+        self.alt_read = false;
+        self.alt_held = false;
     }
 }
 
@@ -248,12 +292,19 @@ async fn load(app: &AppState) -> Result<Applied, Failure> {
         .await
         .map_err(failed("cannot read the client limits a previous run saved"))?;
     let file = app.options.frozen_file.clone();
-    let frozen = blocking(move || freeze::read_file(&file))
-        .await?
-        .map_err(failed("cannot read the frozen client record"))?;
+    let frozen = match blocking(move || freeze::read_file(&file, freeze::euid())).await? {
+        Ok(frozen) => frozen,
+        Err(e @ FreezeError::Untrusted(_)) => {
+            tracing::warn!(error = %e, "ignoring the frozen client record");
+            None
+        }
+        Err(e) => return Err(failed("cannot read the frozen client record")(e)),
+    };
     Ok(Applied {
         client: None,
         have: Target::default(),
+        alt_read: false,
+        alt_held: false,
         saved,
         frozen,
         refused: None,
@@ -270,7 +321,8 @@ where
         .map_err(failed("a client task failed"))
 }
 
-/// Moves the client towards what the gate wants now.
+/// Moves the client towards what the gate wants now, then runs the client
+/// work kept while it was frozen.
 async fn step(app: &Arc<AppState>, a: &mut Applied) -> Result<(), Failure> {
     let core = app.gate.state().core_running();
     let config = app.config();
@@ -284,18 +336,25 @@ async fn step(app: &Arc<AppState>, a: &mut Applied) -> Result<(), Failure> {
         }
         thaw_client(app, a, frozen).await?;
     }
+    if !app.client_frozen() {
+        if let Err(f) = replay_deferred(app).await {
+            tracing::warn!(error = %f.error, "{}", f.what);
+        }
+    }
     let Some((id, client)) = app.client_entry() else {
-        return match a.saved {
-            Some(_) => Err(Failure {
-                what: "cannot restore the client's own limits",
-                error: "no download client".into(),
-            }),
+        return match a.saved.clone() {
+            Some(saved) => {
+                restore_saved(app, &saved).await?;
+                persist(app, None).await?;
+                a.saved = None;
+                Ok(())
+            }
             None => Ok(()),
         };
     };
     if a.client.as_ref() != Some(&id) {
         a.client = Some(id.clone());
-        a.have = Target::default();
+        a.forget();
     }
     if pause && client::is_local(&id.url) && a.refused.as_ref() != Some(&id) {
         let menu = target(&config.limits, false, false);
@@ -333,11 +392,7 @@ async fn freeze_client(
             let Some(pid) = reported else {
                 return Ok(Err(FreezeError::NotFound("rtorrent".into())));
             };
-            let proc = proc.clone();
-            match blocking(move || freeze::check_name(&proc, pid, "rtorrent")).await? {
-                Ok(()) => pid,
-                Err(e) => return Ok(Err(e)),
-            }
+            pid
         }
         ClientKind::Transmission => {
             let (proc, port) = (proc.clone(), client::port(&id.url));
@@ -355,13 +410,21 @@ async fn freeze_client(
         Kill::new(&app.options.kill),
         app.options.frozen_file.clone(),
     );
-    let done = blocking(move || freeze::freeze(&proc, &kill, &file, pid)).await;
+    let (lock, stop) = (Arc::clone(&app.freeze_lock), app.shutdown_signal());
+    let done = blocking(move || {
+        let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        if *stop.borrow() {
+            return Err(FreezeError::ShuttingDown);
+        }
+        freeze::freeze(&proc, &kill, &file, pid)
+    })
+    .await;
     match done {
         Ok(Ok(frozen)) => {
             announce(app).await;
             Ok(Ok(frozen))
         }
-        Ok(Err(e @ (FreezeError::Kill(_) | FreezeError::Io(_)))) => {
+        Ok(Err(e @ (FreezeError::Kill(_) | FreezeError::ShuttingDown))) => {
             app.set_client_hold(before);
             Err(failed("cannot pause the download client")(e))
         }
@@ -382,7 +445,7 @@ async fn thaw_client(app: &Arc<AppState>, a: &mut Applied, frozen: Frozen) -> Re
     let (proc, kill) = (app.options.proc_dir.clone(), Kill::new(&app.options.kill));
     match blocking(move || freeze::thaw(&proc, &kill, frozen)).await? {
         Ok(()) => tracing::info!(pid = frozen.pid, "download client resumed"),
-        Err(e @ (FreezeError::Gone(_) | FreezeError::Reused(_))) => {
+        Err(e @ (FreezeError::Gone(_) | FreezeError::Reused(_) | FreezeError::NotClient(_))) => {
             tracing::warn!(error = %e, "the paused download client is gone; nothing to resume");
         }
         Err(e) => return Err(failed("cannot resume the download client")(e)),
@@ -393,27 +456,76 @@ async fn thaw_client(app: &Arc<AppState>, a: &mut Applied, frozen: Frozen) -> Re
         .map_err(failed("cannot remove the frozen client record"))?;
     a.frozen = None;
     publish(app, None).await;
-    if let Some((_, client)) = app.client_entry() {
-        apply_deferred_seed(app, client.as_ref()).await;
-    }
     app.poll_wake.notify_one();
     crate::jobs::transfer::kick(app).await;
     Ok(())
 }
 
-/// Applies the seed policies changed while the client was frozen.
-async fn apply_deferred_seed(app: &AppState, client: &dyn DownloadClient) {
-    for source in app.take_deferred_seed() {
-        let row = match app.db.read(move |c| sources::get(c, source)).await {
-            Ok(Some(row)) => row,
-            Ok(None) => continue,
-            Err(e) => {
-                tracing::warn!(error = %e, "cannot read a source to apply its seed policy");
-                continue;
-            }
-        };
-        let Some(cid) = row.client_id else { continue };
-        let seed = sources::seed_from_text(&row.seed_policy).unwrap_or(SeedPolicy::None);
+/// Keeps client work that cannot reach a frozen client until it resumes; the
+/// core gate runs it then, or at the next start when mistarr stops first.
+pub async fn defer(app: &AppState, op: Op) {
+    match app.db.write(move |c| deferred::add(c, op)).await {
+        Ok(()) => tracing::debug!(?op, "client work waits for the client to resume"),
+        Err(e) => tracing::warn!(error = %e, "cannot keep client work for when the client resumes"),
+    }
+    // The client may have resumed in between; the gate then runs it now.
+    app.limits_wake.notify_one();
+}
+
+/// Runs the client work [`defer`] kept: detection, the seed policy of every
+/// source in the client, selections and releases. Work that still finds no
+/// client stays for the next time.
+async fn replay_deferred(app: &Arc<AppState>) -> Result<(), Failure> {
+    let waiting = app
+        .db
+        .read(deferred::get)
+        .await
+        .map_err(failed("cannot read the client work kept for the resume"))?;
+    if waiting.is_empty() {
+        return Ok(());
+    }
+    let mut done = Deferred::default();
+    if waiting.detect {
+        match Scheduler::enqueue(app, Arc::new(DetectClient)).await {
+            Ok(_) => done.detect = true,
+            Err(e) => tracing::warn!(error = %e, "cannot queue client detection"),
+        }
+    }
+    if waiting.seed {
+        if let Some(client) = app.client() {
+            apply_seed_policies(app, client.as_ref()).await;
+            done.seed = true;
+        }
+    }
+    for &source_id in &waiting.deselect {
+        match Scheduler::enqueue(app, Arc::new(Deselect { source_id })).await {
+            Ok(_) => done.deselect.push(source_id),
+            Err(e) => tracing::warn!(error = %e, "cannot queue a selection for the client"),
+        }
+    }
+    for &source in &waiting.release {
+        if app.client().is_none() {
+            break;
+        }
+        crate::jobs::import::release_source(app, source).await;
+        done.release.push(source);
+    }
+    app.db
+        .write(move |c| deferred::clear(c, &done))
+        .await
+        .map_err(failed("cannot clear the client work kept for the resume"))
+}
+
+/// Applies every source's seed policy from the database to the client.
+async fn apply_seed_policies(app: &AppState, client: &dyn DownloadClient) {
+    let rows = match app.db.read(sources::list_in_client).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot read the sources to apply their seed policies");
+            return;
+        }
+    };
+    for (source, cid, seed) in rows {
         if let Err(e) = client
             .set_seed_policy(&ClientTorrentId::new(cid), seed)
             .await
@@ -423,9 +535,10 @@ async fn apply_deferred_seed(app: &AppState, client: &dyn DownloadClient) {
     }
 }
 
-/// Sets `want` in the client. Before the gate first changes a direction it
-/// saves the client's own limit there, and it puts that limit back once the
-/// gate no longer sets the direction; a saved limit is never replaced.
+/// Sets `want` in the client, never above its own limits. Before the gate
+/// first changes a direction it saves the client's own limit there, and it
+/// puts that limit back once the gate no longer sets the direction; a saved
+/// limit is never replaced. Held uploads also hold the alternate upload rate.
 async fn apply_limits(
     app: &AppState,
     a: &mut Applied,
@@ -433,8 +546,17 @@ async fn apply_limits(
     client: &dyn DownloadClient,
     want: Target,
 ) -> Result<(), Failure> {
-    if a.saved.as_ref().is_some_and(|s| s.client != *id) {
-        tracing::warn!("dropping the limits saved for a download client no longer in use");
+    if let Some(old) = a.saved.clone().filter(|s| s.client != *id) {
+        // Bounded, so a client that went away delays the new one's hold only briefly.
+        match tokio::time::timeout(RESTORE_WAIT, restore_saved(app, &old)).await {
+            Ok(Ok(())) => tracing::info!("restored the limits of the download client used before"),
+            Ok(Err(f)) => {
+                tracing::warn!(error = %f.error, "cannot restore the limits of the download client used before; dropping them");
+            }
+            Err(_) => tracing::warn!(
+                "the download client used before did not answer; dropping its saved limits"
+            ),
+        }
         persist(app, None).await?;
         a.saved = None;
     }
@@ -453,12 +575,27 @@ async fn apply_limits(
             read = true;
         }
     }
+    let hold_alt = want.up == Some(RateLimit::HELD);
+    if hold_alt && saved.alt_up.is_none() && !a.alt_read {
+        // A client that does not report the rate is held through its upload limit alone.
+        let alt = client.alt_up_limit().await.unwrap_or_else(|e| {
+            tracing::debug!(error = %e, "cannot read the client's alternate upload rate");
+            None
+        });
+        a.alt_read = true;
+        if let Some(alt) = alt {
+            saved.alt_up = Some(alt.kbps);
+            read = true;
+        }
+    }
     if read {
         persist(app, Some(&saved)).await?;
         a.saved = Some(saved.clone());
     }
     for dir in DIRECTIONS {
-        match (want.get(dir), saved.get(dir)) {
+        let own = saved.get(dir);
+        let want = want.get(dir).map(|w| own.map_or(w, |own| lowered(w, own)));
+        match (want, own) {
             (Some(limit), _) if a.have.get(dir) != Some(limit) => {
                 client
                     .set_rate_limit(dir, limit)
@@ -473,12 +610,71 @@ async fn apply_limits(
                     .map_err(failed("cannot restore the client's rate limit"))?;
                 a.have.set(dir, None);
                 saved.set(dir, None);
-                let keep = (saved.down.is_some() || saved.up.is_some()).then_some(&saved);
-                persist(app, keep).await?;
-                a.saved = keep.cloned();
+                keep(app, a, &saved).await?;
             }
             _ => {}
         }
+    }
+    match (hold_alt, saved.alt_up) {
+        (true, Some(_)) if !a.alt_held => {
+            client
+                .set_alt_up_rate(0)
+                .await
+                .map_err(failed("cannot hold the client's alternate upload rate"))?;
+            a.alt_held = true;
+        }
+        (false, Some(own)) => {
+            client
+                .set_alt_up_rate(own)
+                .await
+                .map_err(failed("cannot restore the client's alternate upload rate"))?;
+            a.alt_held = false;
+            a.alt_read = false;
+            saved.alt_up = None;
+            keep(app, a, &saved).await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Stores what is still saved, or drops the record once nothing is.
+async fn keep(app: &AppState, a: &mut Applied, saved: &SavedLimits) -> Result<(), Failure> {
+    let keep = (!saved.is_empty()).then_some(saved);
+    persist(app, keep).await?;
+    a.saved = keep.cloned();
+    Ok(())
+}
+
+/// Puts `saved` back in the client it names, through a handle built for it.
+async fn restore_saved(app: &AppState, saved: &SavedLimits) -> Result<(), Failure> {
+    let key = ClientKey {
+        kind: saved.client.kind,
+        url: saved.client.url.clone(),
+        path_map: app.config().client.remote_path_map.clone(),
+    };
+    let client = key.build().ok_or_else(|| Failure {
+        what: "cannot restore the client's own limits",
+        error: format!("cannot reach the {} client", saved.client.kind),
+    })?;
+    restore_into(client.as_ref(), saved).await
+}
+
+/// Sets each saved limit in `client`.
+async fn restore_into(client: &dyn DownloadClient, saved: &SavedLimits) -> Result<(), Failure> {
+    for dir in DIRECTIONS {
+        if let Some(own) = saved.get(dir) {
+            client
+                .set_rate_limit(dir, own)
+                .await
+                .map_err(failed("cannot restore the client's own limits"))?;
+        }
+    }
+    if let Some(own) = saved.alt_up {
+        client
+            .set_alt_up_rate(own)
+            .await
+            .map_err(failed("cannot restore the client's own limits"))?;
     }
     Ok(())
 }
@@ -495,8 +691,8 @@ async fn persist(app: &AppState, saved: Option<&SavedLimits>) -> Result<(), Fail
 }
 
 /// Checks a held client is still held: a process resumed elsewhere is stopped
-/// again, one that exited is let go so the next step finds its successor, and
-/// uploads that left their hold are held again.
+/// again, one that exited or was replaced is let go so the next step finds its
+/// successor, and uploads that left their hold are held again.
 async fn recheck_hold(app: &AppState, a: &mut Applied) {
     if let Some(frozen) = a.frozen {
         let proc = app.options.proc_dir.clone();
@@ -507,22 +703,25 @@ async fn recheck_hold(app: &AppState, a: &mut Applied) {
                     pid = frozen.pid,
                     "the download client was resumed elsewhere; pausing it again"
                 );
-                let kill = Kill::new(&app.options.kill);
-                let sent = blocking(move || kill.send(frozen.pid, Signal::Stop)).await;
-                if let Ok(Err(e)) = sent {
-                    tracing::warn!(error = %e, "cannot pause the download client again");
+                let (proc, kill) = (app.options.proc_dir.clone(), Kill::new(&app.options.kill));
+                let (lock, stop) = (Arc::clone(&app.freeze_lock), app.shutdown_signal());
+                let sent = blocking(move || {
+                    let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                    if *stop.borrow() {
+                        return Err(FreezeError::ShuttingDown);
+                    }
+                    freeze::stop_again(&proc, &kill, frozen)
+                })
+                .await;
+                match sent {
+                    Ok(Err(e @ FreezeError::NotClient(_))) => let_go(app, a, &e).await,
+                    Ok(Err(e)) => {
+                        tracing::warn!(error = %e, "cannot pause the download client again");
+                    }
+                    _ => {}
                 }
             }
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "the paused download client exited");
-                let file = app.options.frozen_file.clone();
-                if let Ok(Err(e)) = blocking(move || freeze::remove_file(&file)).await {
-                    tracing::warn!(error = %e, "cannot remove the frozen client record");
-                }
-                a.frozen = None;
-                a.have = Target::default();
-                publish(app, None).await;
-            }
+            Ok(Err(e)) => let_go(app, a, &e).await,
             Err(f) => tracing::debug!(error = %f.error, "{}", f.what),
         }
         return;
@@ -539,11 +738,23 @@ async fn recheck_hold(app: &AppState, a: &mut Applied) {
     match client.rate_limit(Direction::Up).await {
         Ok(up) if !up.is_held() => {
             tracing::info!("the download client's uploads left their hold; holding them again");
-            a.have = Target::default();
+            a.forget();
         }
         Ok(_) => {}
         Err(e) => tracing::debug!(error = %e, "cannot check the client's upload hold"),
     }
+}
+
+/// Drops a frozen process that is no longer the client, without signalling it.
+async fn let_go(app: &AppState, a: &mut Applied, why: &FreezeError) {
+    tracing::warn!(error = %why, "the paused download client exited");
+    let file = app.options.frozen_file.clone();
+    if let Ok(Err(e)) = blocking(move || freeze::remove_file(&file)).await {
+        tracing::warn!(error = %e, "cannot remove the frozen client record");
+    }
+    a.frozen = None;
+    a.forget();
+    publish(app, None).await;
 }
 
 /// How the client is held now.
@@ -577,7 +788,7 @@ async fn announce(app: &AppState) {
 /// still runs and the setting holds it; then it stays frozen.
 pub async fn recover_frozen(app: &Arc<AppState>) {
     let file = app.options.frozen_file.clone();
-    let frozen = match blocking(move || freeze::read_file(&file)).await {
+    let frozen = match blocking(move || freeze::read_file(&file, freeze::euid())).await {
         Ok(Ok(Some(frozen))) => frozen,
         Ok(Ok(None)) => return,
         Ok(Err(e)) => {
@@ -598,38 +809,78 @@ pub async fn recover_frozen(app: &Arc<AppState>) {
     }
 }
 
-/// On shutdown, resumes a frozen client, so a stopped mistarr never leaves it frozen.
+/// On shutdown, resumes a frozen client, so a stopped mistarr never leaves it
+/// frozen. It waits for a stop in flight, and none starts once shutdown began.
 pub async fn thaw_for_shutdown(app: &AppState) {
-    let file = app.options.frozen_file.clone();
-    if let Ok(Ok(Some(frozen))) = blocking(move || freeze::read_file(&file)).await {
-        if resume(app, frozen).await {
+    let (file, proc, kill) = (
+        app.options.frozen_file.clone(),
+        app.options.proc_dir.clone(),
+        Kill::new(&app.options.kill),
+    );
+    let lock = Arc::clone(&app.freeze_lock);
+    let done = blocking(move || {
+        let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(frozen) = freeze::read_file(&file, freeze::euid())? else {
+            return Ok(false);
+        };
+        resume_now(&proc, &kill, &file, frozen)
+    })
+    .await;
+    match done {
+        Ok(Ok(true)) => {
             app.set_client_hold(None);
         }
+        Ok(Ok(false)) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "cannot resume the download client"),
+        Err(f) => tracing::warn!(error = %f.error, "{}", f.what),
     }
 }
 
 /// Sends SIGCONT and removes the record; true unless the signal failed.
 async fn resume(app: &AppState, frozen: Frozen) -> bool {
-    let (proc, kill) = (app.options.proc_dir.clone(), Kill::new(&app.options.kill));
-    match blocking(move || freeze::thaw(&proc, &kill, frozen)).await {
-        Ok(Ok(())) => tracing::info!(pid = frozen.pid, "download client resumed"),
-        Ok(Err(e @ (FreezeError::Gone(_) | FreezeError::Reused(_)))) => {
-            tracing::warn!(error = %e, "the paused download client is gone; nothing to resume");
-        }
+    let (proc, kill, file) = (
+        app.options.proc_dir.clone(),
+        Kill::new(&app.options.kill),
+        app.options.frozen_file.clone(),
+    );
+    let lock = Arc::clone(&app.freeze_lock);
+    let done = blocking(move || {
+        let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
+        resume_now(&proc, &kill, &file, frozen)
+    })
+    .await;
+    match done {
+        Ok(Ok(resumed)) => resumed,
         Ok(Err(e)) => {
             tracing::warn!(error = %e, "cannot resume the download client");
-            return false;
+            false
         }
         Err(f) => {
             tracing::warn!(error = %f.error, "{}", f.what);
-            return false;
+            false
         }
     }
-    let file = app.options.frozen_file.clone();
-    if let Ok(Err(e)) = blocking(move || freeze::remove_file(&file)).await {
+}
+
+/// Resumes `frozen` and removes its record; a process that is gone or no
+/// longer the client only loses its record.
+fn resume_now(
+    proc: &std::path::Path,
+    kill: &Kill,
+    file: &std::path::Path,
+    frozen: Frozen,
+) -> Result<bool, FreezeError> {
+    match freeze::thaw(proc, kill, frozen) {
+        Ok(()) => tracing::info!(pid = frozen.pid, "download client resumed"),
+        Err(e @ (FreezeError::Gone(_) | FreezeError::Reused(_) | FreezeError::NotClient(_))) => {
+            tracing::warn!(error = %e, "the paused download client is gone; nothing to resume");
+        }
+        Err(e) => return Err(e),
+    }
+    if let Err(e) = freeze::remove_file(file) {
         tracing::warn!(error = %e, "cannot remove the frozen client record");
     }
-    true
+    Ok(true)
 }
 
 #[cfg(test)]

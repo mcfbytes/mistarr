@@ -197,29 +197,43 @@ resumes at once, without the resume files, tracker announces and hash checks
 a shutdown or a restart would cost. Its transfers, uploads and downloads,
 pause with it.
 
-1. The pid comes from rtorrent's `system.pid`, checked to belong to an
-   `rtorrent` executable. For Transmission, `/proc` is searched for the
-   `transmission-daemon` executable; of several, the one listening on the
-   client's RPC port is taken. A process that cannot be found, or cannot be
-   told apart, is not stopped; that is logged and the client's uploads are
-   held instead, as for a client elsewhere, until the menu.
-2. Before SIGSTOP, the pid and its start time from `/proc/<pid>/stat` are
-   written to `/tmp/mistarr-client.frozen`. SIGCONT is sent only while that
-   pid still has that start time, so a reused pid is never signalled.
-   Signals go through the `kill` program.
-3. While the client is stopped mistarr never calls it, since a stopped
-   process never answers: polling, transfers, magnet lookups and detection
-   wait, a changed seed policy is applied once it resumes, and removing a
-   source that is in the client is refused until the menu. At the menu the
-   poller and the transfer job run again at once.
-4. Every minute a stopped client is checked: one resumed by something else
-   is stopped again, and one that exited is let go, so the next step finds
-   its successor.
-5. A clean shutdown of mistarr resumes the client first. At startup a record
-   left by a run that was killed resumes the client, unless a core still
-   runs and the setting is on; then it stays stopped. `mistarr.sh stop` and
-   `install.sh` resume a recorded client as well, checking the start time the
-   same way, since a killed daemon cannot.
+1. The pid comes from rtorrent's `system.pid`. For Transmission, `/proc` is
+   searched for the `transmission-daemon` executable; of several, the one
+   listening on the client's RPC port is taken. A process that cannot be
+   found, or cannot be told apart, is not stopped; that is logged and the
+   client's uploads are held instead, as for a client elsewhere, until the menu.
+2. No signal is sent to a process whose `/proc/<pid>/exe` is not `rtorrent`
+   or `transmission-daemon`, whether stopping, stopping again or resuming.
+3. Before SIGSTOP, the pid and its start time from `/proc/<pid>/stat` are
+   recorded in `client.frozen` in mistarr's private RAM directory,
+   `/tmp/mistarr` or `MISTARR_TEMP_DIR`, which is mode 0700 and owned by
+   mistarr's user. The record is written to a new file, created exclusively
+   without following links, synced and renamed into place; it is read only
+   when it is a regular file of that user, in that directory, and not a
+   link. SIGCONT is sent only while the pid still has that start time, so a
+   reused pid is never signalled. Signals go through the `kill` program.
+4. While the client is stopped mistarr never calls it, since a stopped
+   process never answers, and removing a source that is in the client is
+   refused until the menu. Polling, transfers and magnet lookups wait and
+   run again at the menu. Work that would otherwise be lost is kept under
+   `client.deferred` in the `settings` table and run once the client
+   resumes, or at the next start if mistarr stops first: detection asked for
+   meanwhile, as after a client setting changed, runs again; a changed seed
+   policy applies every source's policy again from the database; a cancelled
+   download re-applies its source's selection, stopping a torrent with
+   nothing left selected; and a finished torrent under seed policy "none" is
+   removed from the client and its empty staging directories cleared.
+5. Every minute a stopped client is checked: one resumed by something else
+   is stopped again, and one that exited or is no longer the client is let
+   go, so the next step finds its successor.
+6. A clean shutdown of mistarr resumes the client first. Once shutdown
+   begins no new stop is sent, and one already under way finishes before
+   the record is read. At startup a record left by a run that was killed
+   resumes the client, unless a core still runs and the setting is on; then
+   it stays stopped. `mistarr.sh stop` and `install.sh` resume a recorded
+   client as well, with the same checks on the record, its directory, the
+   executable and the start time, since a killed daemon cannot. `install.sh`
+   does so only when the launcher stopped mistarr or no mistarr runs.
 
 **Rate limits and held uploads.** A client on another machine, or one that
 cannot be stopped, is held through its own controls instead:
@@ -227,19 +241,29 @@ cannot be stopped, is held through its own controls instead:
 1. While a core runs, the gate sets each non-zero `[limits]` `*_core` value,
    and with the setting on it holds uploads (the "rate limits" rows above,
    "Held"). At the menu it sets each non-zero `*_menu` value. A zero leaves
-   the client's own limit in that direction.
-2. Before the gate first changes a direction, it reads the client's own limit
-   there and stores it with the client's kind and address under
-   `client.saved_limits` in the `settings` table. Once the gate no longer
+   the client's own limit in that direction, and a non-zero value applies
+   as the lower of it and the client's own limit when that limit is on, so
+   `[limits]` never raises the client.
+2. While uploads are held on Transmission, its alternate ("turtle") upload
+   rate `alt-speed-up` is set to 0 as well, since the turtle mode replaces
+   the normal limit whenever it is on, by hand or on its schedule. Whether
+   the turtle mode is on is left alone.
+3. Before the gate first changes a direction, it reads the client's own limit
+   there, and before it holds the turtle rate that rate, and stores them with
+   the client's kind and address under `client.saved_limits` in the
+   `settings` table. Once the gate no longer
    sets that direction, the stored limit is put back exactly and removed.
    A stored limit is never replaced by a reading, so a held value is never
    saved as the client's own.
-3. At startup, stored limits are put back if the gate no longer sets their
+4. At startup, stored limits are put back if the gate no longer sets their
    direction; during a game they are kept and the hold is sent again. A
    stored record that cannot be read is retried and never overwritten.
-   Limits stored for another client are dropped with a warning; the current
+   Limits stored for another client, after the client changed, are put back
+   in that client through a handle built from its kind and address; when it
+   does not take them within five seconds they are dropped with a warning.
+   With no client detected they are retried the same way. The current
    client's own are read before it is held.
-4. A new client handle, after detection finds another client, is held in turn.
+5. A new client handle, after detection finds another client, is held in turn.
    Every minute held uploads are read back and held again if they left the
    hold, as after a client restart.
 

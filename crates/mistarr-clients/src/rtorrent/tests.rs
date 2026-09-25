@@ -1130,3 +1130,11 @@ async fn the_process_id_comes_from_system_pid() {
     assert_eq!(client.process_id().await.expect("pid"), Some(4321));
     assert_eq!(fake.calls(), vec![call("system.pid", vec![])]);
 }
+
+#[tokio::test]
+async fn rtorrent_has_no_alternate_upload_rate() {
+    let (fake, client) = setup().await;
+    assert_eq!(client.alt_up_limit().await.expect("alt"), None);
+    client.set_alt_up_rate(0).await.expect("ignored");
+    assert!(fake.calls().is_empty());
+}

@@ -535,10 +535,26 @@ async fn client_hold(b: &Booted) -> Value {
     get(b.addr(), "/api/v1/system/status").await.json()["client_hold"].clone()
 }
 
-/// Scripts the reads of the client's own limits and the two sets of a core start.
+/// The turtle upload rate the fake client reports.
+const ALT_UP: u32 = 50;
+
+fn alt(kbps: u32) -> Value {
+    json!({ "alt-speed-up": kbps })
+}
+
+fn alt_fields() -> Value {
+    json!({ "fields": ["alt-speed-up", "alt-speed-enabled"] })
+}
+
+/// Scripts the reads of the client's own limits and turtle rate, and the
+/// three sets of a core start that holds uploads.
 fn push_core_start(fake: &FakeServer, down: Value, up: Value) {
     fake.push(FakeResponse::success(down));
     fake.push(FakeResponse::success(up));
+    fake.push(FakeResponse::success(
+        json!({ "alt-speed-up": ALT_UP, "alt-speed-enabled": true }),
+    ));
+    fake.push(ok());
     fake.push(ok());
     fake.push(ok());
 }
@@ -557,14 +573,16 @@ async fn corename_holds_uploads_once_per_transition_and_restores_own_limits() {
     .await;
     push_core_start(&fake, limit("down", 0, false), limit("up", 30, true));
     std::fs::write(b.corename(), "SNES").expect("write");
-    eventually("uploads held", || async { sets().len() == 4 }).await;
+    eventually("uploads held", || async { sets().len() == 6 }).await;
     assert_eq!(
         sets(),
         [
             fields("down"),
             fields("up"),
+            alt_fields(),
             limit("down", 512, true),
             limit("up", 0, true),
+            alt(0),
         ]
     );
     eventually("the held status", || async {
@@ -583,15 +601,16 @@ async fn corename_holds_uploads_once_per_transition_and_restores_own_limits() {
     .await;
     fake.push(ok());
     fake.push(ok());
+    fake.push(ok());
     std::fs::write(b.corename(), "MENU").expect("write");
-    eventually("own limits back", || async { sets().len() == 6 }).await;
+    eventually("own limits back", || async { sets().len() == 9 }).await;
     assert_eq!(
-        sets()[4..],
-        [limit("down", 0, false), limit("up", 30, true)]
+        sets()[6..],
+        [limit("down", 0, false), limit("up", 30, true), alt(ALT_UP)]
     );
     assert_eq!(client_hold(&b).await, Value::Null);
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(sets().len(), 6);
+    assert_eq!(sets().len(), 9);
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -602,7 +621,8 @@ async fn turning_the_pause_off_mid_game_gives_uploads_the_core_limit() {
     let sets = || session_calls(&fake);
     push_core_start(&fake, limit("down", 0, false), limit("up", 8, false));
     std::fs::write(b.corename(), "SNES").expect("write");
-    eventually("uploads held", || async { sets().len() == 4 }).await;
+    eventually("uploads held", || async { sets().len() == 6 }).await;
+    fake.push(ok());
     fake.push(ok());
     let body = json!({ "transfer": { "pause_client_while_playing": false } }).to_string();
     let r = request(b.addr(), "PUT", "/api/v1/system/settings", &[], Some(&body)).await;
@@ -613,16 +633,16 @@ async fn turning_the_pause_off_mid_game_gives_uploads_the_core_limit() {
         settings["transfer"],
         json!({ "pause_client_while_playing": false })
     );
-    eventually("the core upload limit", || async { sets().len() == 5 }).await;
-    assert_eq!(sets()[4], limit("up", 64, true));
+    eventually("the core upload limit", || async { sets().len() == 8 }).await;
+    assert_eq!(sets()[6..], [limit("up", 64, true), alt(ALT_UP)]);
     assert_eq!(client_hold(&b).await, Value::Null);
     let status = get(b.addr(), "/api/v1/system/status").await.json();
     assert_eq!(status["pause_client_while_playing"], false);
     fake.push(ok());
     fake.push(ok());
     std::fs::write(b.corename(), "MENU").expect("write");
-    eventually("own limits back", || async { sets().len() == 7 }).await;
-    assert_eq!(sets()[6], limit("up", 8, false));
+    eventually("own limits back", || async { sets().len() == 10 }).await;
+    assert_eq!(sets()[9], limit("up", 8, false));
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -802,7 +822,9 @@ async fn refused_rate_limits_are_retried_until_the_client_takes_them() {
     };
     fake.push(FakeResponse::success(limit("down", 0, false)));
     fake.push(FakeResponse::success(limit("up", 0, false)));
+    fake.push(FakeResponse::success(alt(ALT_UP)));
     fake.push(FakeResponse::failure("busy"));
+    fake.push(ok());
     fake.push(ok());
     fake.push(ok());
     std::fs::write(b.corename(), "SNES").expect("write");

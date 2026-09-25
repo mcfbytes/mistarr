@@ -464,7 +464,35 @@ impl DownloadClient for Transmission {
     async fn process_id(&self) -> Result<Option<u32>> {
         Ok(None)
     }
+
+    async fn alt_up_limit(&self) -> Result<Option<RateLimit>> {
+        let fields = json!({ "fields": [ALT_UP, ALT_ENABLED] });
+        let mut session = self.session.lock().await;
+        let reply = self.rpc(&mut session, "session-get", fields).await?;
+        drop(session);
+        let kbps = reply.get(ALT_UP).and_then(Value::as_u64);
+        match (reply.get(ALT_ENABLED).and_then(Value::as_bool), kbps) {
+            (Some(enabled), Some(kbps)) => Ok(Some(RateLimit {
+                enabled,
+                kbps: u32::try_from(kbps).map_err(protocol)?,
+            })),
+            _ => Err(ClientError::Protocol(format!(
+                "session-get without {ALT_UP}"
+            ))),
+        }
+    }
+
+    async fn set_alt_up_rate(&self, kbps: u32) -> Result<()> {
+        let mut session = self.session.lock().await;
+        self.rpc(&mut session, "session-set", json!({ ALT_UP: kbps }))
+            .await
+            .map(drop)
+    }
 }
+
+/// The alternate ("turtle") upload rate, which replaces `speed-limit-up` while enabled.
+const ALT_UP: &str = "alt-speed-up";
+const ALT_ENABLED: &str = "alt-speed-enabled";
 
 /// The session fields holding the rate and its switch in `dir`.
 const fn speed_fields(dir: Direction) -> (&'static str, &'static str) {

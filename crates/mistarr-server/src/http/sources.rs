@@ -181,7 +181,7 @@ async fn update(
         .ok_or_else(|| ApiError::not_found("No such source."))?;
     if let (Some(seed), Some(cid)) = (seed, &updated.client_id) {
         if app.client_frozen() {
-            app.defer_seed_policy(id);
+            crate::jobs::core_limits::defer(&app, crate::db::deferred::Op::Seed).await;
         } else if let Some(client) = app.client() {
             if let Err(e) = client
                 .set_seed_policy(&ClientTorrentId::new(cid.as_str()), seed)

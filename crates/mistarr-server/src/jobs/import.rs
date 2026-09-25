@@ -33,6 +33,7 @@ use self::support::{
 use super::{transfer, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::candidates;
+use crate::db::deferred::Op;
 use crate::db::downloads::{self, DownloadId, DownloadRow, DownloadState};
 use crate::db::downloads_import::{Elsewhere, Settled};
 use crate::db::files::{self, FileId, FileRow, FileState};
@@ -1244,62 +1245,70 @@ impl Placing<'_> {
             .await
     }
 
-    /// Removes the torrent from the client, keeping its data, once a source
-    /// has a download that placed its file and none still selected and its
-    /// seed policy is `none`, then clears empty staging directories.
+    /// Releases the source's torrent once its downloads settled; see [`release_source`].
     async fn release_torrent(&self) {
-        let app = self.app();
-        let source_id = self.source.id;
-        let fresh = app
-            .db
-            .read(move |c| {
-                let busy = downloads::of_source(
-                    c,
-                    source_id,
-                    &[
-                        DownloadState::Queued,
-                        DownloadState::Transferring,
-                        DownloadState::Checking,
-                        DownloadState::Importing,
-                    ],
-                )?;
-                let placed = downloads_import::placed_any(c, source_id)?;
-                Ok((busy.is_empty() && placed, sources::get(c, source_id)?))
-            })
-            .await;
-        let (settled, source) = match fresh {
-            Ok((settled, Some(source))) => (settled, source),
-            Ok(_) => return,
-            Err(e) => {
-                tracing::warn!(error = %e, "cannot read the source after an import");
-                return;
-            }
-        };
-        if !settled || sources::seed_from_text(&source.seed_policy) != Some(SeedPolicy::None) {
-            return;
-        }
-        if let Some(client_id) = source.client_id.as_deref() {
-            let Some(client) = app.client() else {
-                return;
-            };
-            if let Err(e) = client.remove(&ClientTorrentId::new(client_id), false).await {
-                tracing::warn!(source = %source.id.0, error = %e, "cannot remove the finished torrent from the client");
-                return;
-            }
-            if let Err(e) = app
-                .db
-                .write(move |c| sources::set_client_id(c, source_id, None))
-                .await
-            {
-                tracing::warn!(error = %e, "cannot clear the source's client id");
-            }
-        }
-        let dir = self.staging.join(&source.infohash);
-        let _ = crate::threads::blocking(crate::threads::label::IMPORT, move || {
-            place::remove_empty_dirs(&dir);
+        release_source(self.app(), self.source.id).await;
+    }
+}
+
+/// Removes a source's torrent from the client, keeping its data, once it has a
+/// download that placed its file and none still selected and its seed policy
+/// is `none`, then clears empty staging directories. While the client is
+/// frozen the release waits for it to resume.
+pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) {
+    let fresh = app
+        .db
+        .read(move |c| {
+            let busy = downloads::of_source(
+                c,
+                source_id,
+                &[
+                    DownloadState::Queued,
+                    DownloadState::Transferring,
+                    DownloadState::Checking,
+                    DownloadState::Importing,
+                ],
+            )?;
+            let placed = downloads_import::placed_any(c, source_id)?;
+            Ok((busy.is_empty() && placed, sources::get(c, source_id)?))
         })
         .await;
+    let (settled, source) = match fresh {
+        Ok((settled, Some(source))) => (settled, source),
+        Ok(_) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, "cannot read the source after an import");
+            return;
+        }
+    };
+    if !settled || sources::seed_from_text(&source.seed_policy) != Some(SeedPolicy::None) {
+        return;
     }
+    if let Some(client_id) = source.client_id.as_deref() {
+        if app.client_frozen() {
+            crate::jobs::core_limits::defer(app, Op::Release(source_id)).await;
+            return;
+        }
+        let Some(client) = app.client() else {
+            return;
+        };
+        if let Err(e) = client.remove(&ClientTorrentId::new(client_id), false).await {
+            tracing::warn!(source = %source.id.0, error = %e, "cannot remove the finished torrent from the client");
+            return;
+        }
+        if let Err(e) = app
+            .db
+            .write(move |c| sources::set_client_id(c, source_id, None))
+            .await
+        {
+            tracing::warn!(error = %e, "cannot clear the source's client id");
+        }
+    }
+    let dir = app.config().paths.staging().join(&source.infohash);
+    let _ = crate::threads::blocking(crate::threads::label::IMPORT, move || {
+        place::remove_empty_dirs(&dir);
+    })
+    .await;
 }
 
 /// A download whose staged item was quarantined, for [`Quarantined::record`].

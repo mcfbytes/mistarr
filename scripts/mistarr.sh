@@ -13,7 +13,7 @@ LOGFILE="$ROOT/mistarr/mistarr.log"
 STARTUP="$ROOT/linux/user-startup.sh"
 PORT="${MISTARR_PORT:-8420}"
 # Where mistarr records a download client it stopped while a core runs.
-FROZEN="${MISTARR_FROZEN:-/tmp/mistarr-client.frozen}"
+FROZEN="${MISTARR_FROZEN:-${MISTARR_TEMP_DIR:-/tmp/mistarr}/client.frozen}"
 PROCDIR="${MISTARR_PROC:-/proc}"
 # Resolved absolute path to this script, wherever it was invoked from.
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
@@ -214,9 +214,25 @@ reap() {
 # Resumes a download client mistarr stopped for a running core, when the
 # recorded pid still names that process; see docs/DOWNLOAD-CLIENTS.md.
 thaw_client() {
-    [ -f "$FROZEN" ] || return 0
-    if read -r fpid fstart < "$FROZEN" && [ -r "$PROCDIR/$fpid/stat" ]; then
+    [ -e "$FROZEN" ] || [ -L "$FROZEN" ] || return 0
+    fdir=$(dirname "$FROZEN")
+    me=$(id -u)
+    # Only a record mistarr wrote: a regular file of this user in its private directory.
+    if [ -L "$FROZEN" ] || [ ! -f "$FROZEN" ] || [ -L "$fdir" ] \
+        || [ "$(stat -c %u "$FROZEN")" != "$me" ] || [ "$(stat -c %u "$fdir")" != "$me" ] \
+        || [ "$(stat -c %a "$fdir")" != 700 ]; then
+        echo "ignoring $FROZEN: not a record mistarr wrote" >&2
+        return 0
+    fi
+    if read -r fpid fstart < "$FROZEN" && [ -n "${fpid##*[!0-9]*}" ] \
+        && [ -r "$PROCDIR/$fpid/stat" ]; then
         now=$(sed 's/.*) //' "$PROCDIR/$fpid/stat" | cut -d' ' -f20)
+        exe=$(readlink "$PROCDIR/$fpid/exe" 2>/dev/null)
+        exe=${exe% (deleted)}
+        case "${exe##*/}" in
+            rtorrent | transmission-daemon) ;;
+            *) now="" ;;
+        esac
         if [ -n "$fstart" ] && [ "$now" = "$fstart" ] && kill -CONT "$fpid" 2>/dev/null; then
             echo "download client resumed"
         fi

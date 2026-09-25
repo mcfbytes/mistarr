@@ -1,13 +1,17 @@
 //! Freezing a download client on the board with SIGSTOP; see `docs/DOWNLOAD-CLIENTS.md` "Core gate".
 
 use std::collections::HashSet;
-use std::io;
+use std::io::{self, Read as _, Write as _};
+use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// Where the frozen client's pid and start time are kept, in RAM so no card
-/// write is spent and `mistarr.sh` can resume it if mistarr is killed.
-pub const FROZEN_FILE: &str = "/tmp/mistarr-client.frozen";
+use rustix::fs::{Mode, OFlags};
+use rustix::io::Errno;
+
+/// The frozen client's record, kept in mistarr's private RAM directory so no
+/// card write is spent and `mistarr.sh` can resume it if mistarr is killed.
+pub const FROZEN_NAME: &str = "client.frozen";
 
 /// Why a client cannot be frozen or resumed.
 #[derive(Debug, thiserror::Error)]
@@ -30,6 +34,15 @@ pub enum FreezeError {
     /// The recorded pid now belongs to a process started later.
     #[error("process {0} was replaced by another with the same id")]
     Reused(u32),
+    /// The pid runs something other than a download client.
+    #[error("process {0} is not a download client")]
+    NotClient(u32),
+    /// The record or its directory could have been planted by someone else.
+    #[error("the frozen client record is refused: {0}")]
+    Untrusted(String),
+    /// mistarr is stopping and resumes the client instead.
+    #[error("mistarr is shutting down")]
+    ShuttingDown,
     /// `kill` failed or could not be run.
     #[error("kill: {0}")]
     Kill(String),
@@ -116,19 +129,6 @@ pub fn process_name(proc: &Path, pid: u32) -> Option<String> {
     let first = cmdline.split(|b| *b == 0).next()?;
     let path = PathBuf::from(String::from_utf8_lossy(first).into_owned());
     path.file_name().map(|n| n.to_string_lossy().into_owned())
-}
-
-/// Checks that `pid` runs the executable `name`.
-///
-/// # Errors
-///
-/// [`FreezeError::NotFound`] when it does not.
-pub fn check_name(proc: &Path, pid: u32, name: &str) -> Result<(), FreezeError> {
-    if process_name(proc, pid).as_deref() == Some(name) {
-        Ok(())
-    } else {
-        Err(FreezeError::NotFound(name.to_owned()))
-    }
 }
 
 /// The one process running `name`, or of several the one listening on TCP `port`.
@@ -273,17 +273,49 @@ impl Kill {
     }
 }
 
+/// The names a download client's executable has; nothing else is ever signalled.
+pub const CLIENT_NAMES: [&str; 2] = ["rtorrent", "transmission-daemon"];
+
+/// Checks that `pid` runs a download client, by the file its `exe` link names.
+///
+/// # Errors
+///
+/// [`FreezeError::NotClient`] when it runs anything else or cannot be read.
+pub fn check_client(proc: &Path, pid: u32) -> Result<(), FreezeError> {
+    let exe = std::fs::read_link(proc.join(pid.to_string()).join("exe"))
+        .map_err(|_| FreezeError::NotClient(pid))?;
+    let name = exe.file_name().map(|n| n.to_string_lossy().into_owned());
+    // An executable replaced on disk reads as `<path> (deleted)`.
+    let name = name.as_deref().map(|n| n.trim_end_matches(" (deleted)"));
+    if name.is_some_and(|n| CLIENT_NAMES.contains(&n)) {
+        Ok(())
+    } else {
+        Err(FreezeError::NotClient(pid))
+    }
+}
+
+/// This process's effective user id, the owner a trusted record has.
+///
+/// ```
+/// let _ = mistarr_server::freeze::euid();
+/// ```
+#[must_use]
+pub fn euid() -> u32 {
+    rustix::process::geteuid().as_raw()
+}
+
 /// Records `pid` in `file`, then stops it. The record comes first, so a crash
 /// in between still leaves what to resume.
 ///
 /// # Errors
 ///
-/// [`FreezeError`] when the process cannot be read, the file written or the signal sent;
-/// the file is then removed again.
+/// [`FreezeError`] when the process is not a client, the record cannot be written
+/// or the signal fails; the record is then removed again.
 pub fn freeze(proc: &Path, kill: &Kill, file: &Path, pid: u32) -> Result<Frozen, FreezeError> {
     let (_, starttime) = stat(proc, pid).map_err(|_| FreezeError::Gone(pid))?;
+    check_client(proc, pid)?;
     let frozen = Frozen { pid, starttime };
-    std::fs::write(file, frozen.to_line())?;
+    write_file(file, frozen)?;
     if let Err(e) = kill.send(pid, Signal::Stop) {
         let _ = std::fs::remove_file(file);
         return Err(e);
@@ -291,15 +323,27 @@ pub fn freeze(proc: &Path, kill: &Kill, file: &Path, pid: u32) -> Result<Frozen,
     Ok(frozen)
 }
 
-/// Resumes `frozen` when its pid still names the process that was stopped.
+/// Resumes `frozen` when its pid still names the client that was stopped.
 ///
 /// # Errors
 ///
-/// [`FreezeError::Gone`] or [`FreezeError::Reused`] without sending anything,
-/// [`FreezeError::Kill`] when the signal fails.
+/// [`FreezeError::Gone`], [`FreezeError::Reused`] or [`FreezeError::NotClient`]
+/// without sending anything, [`FreezeError::Kill`] when the signal fails.
 pub fn thaw(proc: &Path, kill: &Kill, frozen: Frozen) -> Result<(), FreezeError> {
     same_process(proc, frozen)?;
+    check_client(proc, frozen.pid)?;
     kill.send(frozen.pid, Signal::Cont)
+}
+
+/// Stops `frozen` again after something else resumed it, under the same checks as [`thaw`].
+///
+/// # Errors
+///
+/// As [`thaw`].
+pub fn stop_again(proc: &Path, kill: &Kill, frozen: Frozen) -> Result<(), FreezeError> {
+    same_process(proc, frozen)?;
+    check_client(proc, frozen.pid)?;
+    kill.send(frozen.pid, Signal::Stop)
 }
 
 /// Whether `frozen` is still stopped: state `T`, or `t` under a tracer.
@@ -321,17 +365,78 @@ fn same_process(proc: &Path, frozen: Frozen) -> Result<char, FreezeError> {
     }
 }
 
-/// Reads the frozen file; `None` when there is none.
+fn untrusted(file: &Path, why: &str) -> FreezeError {
+    FreezeError::Untrusted(format!("{} {why}", file.display()))
+}
+
+/// Checks `dir` is a real directory `uid` owns that no one else can use.
+fn check_dir(dir: &Path, uid: u32) -> Result<(), FreezeError> {
+    let meta = std::fs::symlink_metadata(dir)?;
+    if !meta.file_type().is_dir() {
+        return Err(untrusted(dir, "is not a directory"));
+    }
+    if meta.uid() != uid || meta.mode() & 0o077 != 0 {
+        return Err(untrusted(dir, "is not private to mistarr"));
+    }
+    Ok(())
+}
+
+/// Writes the record for `frozen` to `file` in a private directory, through a
+/// new file that is synced and renamed over it, so no link is ever followed.
 ///
 /// # Errors
 ///
-/// [`io::Error`] when it exists but cannot be read; a malformed one reads as `None`.
-pub fn read_file(file: &Path) -> io::Result<Option<Frozen>> {
-    match std::fs::read_to_string(file) {
-        Ok(text) => Ok(Frozen::parse(&text)),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e),
+/// [`FreezeError::Untrusted`] when the directory is not private to this user,
+/// [`FreezeError::Io`] when the file cannot be written.
+pub fn write_file(file: &Path, frozen: Frozen) -> Result<(), FreezeError> {
+    let dir = file
+        .parent()
+        .ok_or_else(|| untrusted(file, "has no directory"))?;
+    crate::db::private_dir(dir).map_err(|e| FreezeError::Untrusted(e.to_string()))?;
+    check_dir(dir, euid())?;
+    let mut name = file.as_os_str().to_owned();
+    name.push(".new");
+    let new = PathBuf::from(name);
+    remove_file(&new)?;
+    let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let fd = rustix::fs::open(&new, flags, Mode::RUSR | Mode::WUSR).map_err(io::Error::from)?;
+    let mut out = std::fs::File::from(fd);
+    out.write_all(frozen.to_line().as_bytes())?;
+    out.sync_all()?;
+    std::fs::rename(&new, file)?;
+    Ok(())
+}
+
+/// Reads the record; `None` when there is none. Only a regular file that `uid`
+/// owns, in a directory private to it, is read; a malformed one reads as `None`.
+///
+/// # Errors
+///
+/// [`FreezeError::Untrusted`] for a link, another kind of file or another owner,
+/// [`FreezeError::Io`] when it cannot be read.
+pub fn read_file(file: &Path, uid: u32) -> Result<Option<Frozen>, FreezeError> {
+    // Non-blocking, so a planted FIFO cannot hang the open.
+    let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    let fd = match rustix::fs::open(file, flags, Mode::empty()) {
+        Ok(fd) => fd,
+        Err(Errno::NOENT) => return Ok(None),
+        Err(Errno::LOOP) => return Err(untrusted(file, "is a symlink")),
+        Err(e) => return Err(io::Error::from(e).into()),
+    };
+    let f = std::fs::File::from(fd);
+    let meta = f.metadata()?;
+    if !meta.file_type().is_file() {
+        return Err(untrusted(file, "is not a regular file"));
     }
+    if meta.uid() != uid {
+        return Err(untrusted(file, "belongs to another user"));
+    }
+    if let Some(dir) = file.parent() {
+        check_dir(dir, uid)?;
+    }
+    let mut text = String::new();
+    f.take(64).read_to_string(&mut text)?;
+    Ok(Frozen::parse(&text))
 }
 
 /// Removes the frozen file; an absent one is fine.
@@ -346,5 +451,7 @@ pub fn remove_file(file: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(test)]
+pub(crate) mod fake;
 #[cfg(test)]
 mod tests;

@@ -130,7 +130,10 @@
       <p class="muted">Remote path map</p>
       <PathMapEditor bind:map={settings.client.remote_path_map} />
 
-      <h3>Limits (kbps, 0 is unlimited)</h3>
+      <h3>Limits (kbps)</h3>
+      <p class="muted help">
+        0 keeps the client's own limit. Any other value only ever lowers it.
+      </p>
       <label>
         Download at menu
         <input type="number" min="0" bind:value={settings.limits.down_kbps_menu} />

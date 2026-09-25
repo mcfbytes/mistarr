@@ -21,6 +21,8 @@ pub mod keys {
     /// JSON [`crate::jobs::core_limits::SavedLimits`]: the client's own limits
     /// in each direction the core gate replaced, until they are put back.
     pub const CLIENT_SAVED_LIMITS: &str = "client.saved_limits";
+    /// JSON [`crate::db::deferred::Deferred`]: client work waiting for a frozen client.
+    pub const CLIENT_DEFERRED: &str = "client.deferred";
 }
 
 /// Reads a value.

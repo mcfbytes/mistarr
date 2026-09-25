@@ -275,7 +275,8 @@ pub struct ClientConfig {
     pub remote_path_map: Vec<PathMapping>,
 }
 
-/// `[limits]`: client rate limits in kbps, for the menu and while a core runs. 0 is unlimited.
+/// `[limits]`: client rate limits in kbps, for the menu and while a core runs. 0 leaves
+/// the client's own limit; any other value applies only where it is below that limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LimitsConfig {

@@ -139,6 +139,8 @@ test('nothing shows while the client is not held or the setting is off', async (
 
 test('the client pause setting is saved with the settings', async ({ page }) => {
   await page.goto('/#/system');
+  await expect(page.getByRole('heading', { name: 'Limits (kbps)' })).toBeVisible();
+  await expect(page.getByText("0 keeps the client's own limit. Any other value only ever lowers it.")).toBeVisible();
   const setting = page.getByLabel('Pause the download client while a core runs');
   await expect(setting).toBeChecked();
   await expect(setting).toHaveAccessibleDescription(/frees the board for the game/i);

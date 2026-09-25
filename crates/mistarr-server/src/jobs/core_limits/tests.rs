@@ -1,14 +1,21 @@
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Command;
 use std::sync::Mutex;
 
 use async_trait::async_trait;
-use mistarr_clients::{ClientError, ClientFile, ClientInfo, TorrentSource, TorrentStatus};
+use mistarr_clients::{
+    ClientError, ClientFile, ClientInfo, SeedPolicy, TorrentSource, TorrentStatus,
+};
 
 use super::*;
 use crate::app::testutil::{state_with, TestDir};
 use crate::app::Options;
+use crate::db::deferred::{self, Deferred, Op};
+use crate::freeze::fake::FakeClient;
+use crate::freeze::Signal;
 use crate::jobs::gate::MENU;
+use crate::jobs::transfer::Deselect;
+use crate::jobs::Scheduler;
 
 /// A client whose global limits live in memory and whose calls are recorded;
 /// `down` makes every call fail.
@@ -18,6 +25,7 @@ struct Mock {
     up_limit: Mutex<RateLimit>,
     unreachable: Mutex<bool>,
     pid: Mutex<Option<u32>>,
+    alt_up: Mutex<Option<RateLimit>>,
 }
 
 impl Mock {
@@ -28,6 +36,7 @@ impl Mock {
             up_limit: Mutex::new(up),
             unreachable: Mutex::new(false),
             pid: Mutex::new(None),
+            alt_up: Mutex::new(None),
         })
     }
 
@@ -62,6 +71,14 @@ impl Mock {
         *self.up_limit.lock().expect("lock") = limit;
     }
 
+    fn set_alt(&self, alt: RateLimit) {
+        *self.alt_up.lock().expect("lock") = Some(alt);
+    }
+
+    fn alt(&self) -> Option<RateLimit> {
+        *self.alt_up.lock().expect("lock")
+    }
+
     fn set_pid(&self, pid: u32) {
         *self.pid.lock().expect("lock") = Some(pid);
     }
@@ -92,8 +109,8 @@ impl DownloadClient for Mock {
     ) -> mistarr_clients::Result<ClientTorrentId> {
         nope()
     }
-    async fn set_wanted(&self, _id: &ClientTorrentId, _w: &[u32]) -> mistarr_clients::Result<()> {
-        nope()
+    async fn set_wanted(&self, id: &ClientTorrentId, w: &[u32]) -> mistarr_clients::Result<()> {
+        self.log(format!("wanted:{id}:{w:?}"))
     }
     async fn set_seed_policy(
         &self,
@@ -105,8 +122,8 @@ impl DownloadClient for Mock {
     async fn start(&self, _id: &ClientTorrentId) -> mistarr_clients::Result<()> {
         nope()
     }
-    async fn stop(&self, _id: &ClientTorrentId) -> mistarr_clients::Result<()> {
-        nope()
+    async fn stop(&self, id: &ClientTorrentId) -> mistarr_clients::Result<()> {
+        self.log(format!("stop:{id}"))
     }
     async fn status(&self, _id: &ClientTorrentId) -> mistarr_clients::Result<TorrentStatus> {
         nope()
@@ -114,8 +131,8 @@ impl DownloadClient for Mock {
     async fn files(&self, _id: &ClientTorrentId) -> mistarr_clients::Result<Vec<ClientFile>> {
         nope()
     }
-    async fn remove(&self, _id: &ClientTorrentId, _data: bool) -> mistarr_clients::Result<()> {
-        nope()
+    async fn remove(&self, id: &ClientTorrentId, _data: bool) -> mistarr_clients::Result<()> {
+        self.log(format!("remove:{id}"))
     }
     async fn rate_limit(&self, dir: Direction) -> mistarr_clients::Result<RateLimit> {
         self.log(format!("read:{}", name(dir)))?;
@@ -130,6 +147,20 @@ impl DownloadClient for Mock {
         self.log("pid".into())?;
         Ok(*self.pid.lock().expect("lock"))
     }
+    async fn alt_up_limit(&self) -> mistarr_clients::Result<Option<RateLimit>> {
+        let alt = self.alt();
+        if alt.is_some() {
+            self.log("read:alt".into())?;
+        }
+        Ok(alt)
+    }
+    async fn set_alt_up_rate(&self, kbps: u32) -> mistarr_clients::Result<()> {
+        self.log(format!("set:alt:{kbps}"))?;
+        if let Some(alt) = self.alt_up.lock().expect("lock").as_mut() {
+            alt.kbps = kbps;
+        }
+        Ok(())
+    }
 }
 
 const OWN: RateLimit = RateLimit {
@@ -141,6 +172,14 @@ fn remote(url: &str) -> ClientEndpoint {
     ClientEndpoint {
         kind: ClientKind::Transmission,
         url: url.into(),
+    }
+}
+
+/// An rtorrent socket that refuses at once, so restoring through it fails fast.
+fn gone_socket() -> ClientEndpoint {
+    ClientEndpoint {
+        kind: ClientKind::Rtorrent,
+        url: "/nonexistent/mistarr-test.sock".into(),
     }
 }
 
@@ -214,6 +253,7 @@ fn saved_json(client: &ClientEndpoint, down: Option<RateLimit>, up: Option<RateL
         client: client.clone(),
         down,
         up,
+        alt_up: None,
     };
     serde_json::to_string(&s).expect("json")
 }
@@ -278,7 +318,7 @@ async fn a_nonzero_menu_limit_replaces_the_own_one_until_it_is_zero() {
 
 #[tokio::test]
 async fn the_setting_off_leaves_uploads_to_the_core_limit() {
-    let mock = Mock::new(OWN);
+    let mock = Mock::new(RateLimit::default());
     let (_dir, app) = start(&mock);
     app.update_config(|c| c.transfer.pause_client_while_playing = false);
     app.gate.set_corename(Some("SNES".into()));
@@ -295,7 +335,7 @@ async fn the_setting_off_leaves_uploads_to_the_core_limit() {
     assert_eq!(app.client_hold(), None);
     app.gate.set_corename(Some(MENU.into()));
     let calls = wait_calls(&mock, 6).await;
-    assert_eq!(calls[4..], ["set:down:false/0", "set:up:true/40"]);
+    assert_eq!(calls[4..], ["set:down:false/0", "set:up:false/0"]);
 }
 
 #[tokio::test]
@@ -316,7 +356,7 @@ async fn with_no_core_limits_and_the_setting_off_the_client_is_left_alone() {
 
 #[tokio::test]
 async fn turning_the_setting_off_mid_game_sets_the_core_upload_limit() {
-    let mock = Mock::new(OWN);
+    let mock = Mock::new(RateLimit::default());
     let (_dir, app) = start(&mock);
     app.gate.set_corename(Some("SNES".into()));
     wait_calls(&mock, 4).await;
@@ -325,7 +365,10 @@ async fn turning_the_setting_off_mid_game_sets_the_core_upload_limit() {
     let calls = wait_calls(&mock, 5).await;
     assert_eq!(calls[4..], ["set:up:true/64"]);
     assert_eq!(app.client_hold(), None);
-    assert_eq!(stored(&app).await.and_then(|s| s.up), Some(OWN));
+    assert_eq!(
+        stored(&app).await.and_then(|s| s.up),
+        Some(RateLimit::default())
+    );
 }
 
 #[tokio::test]
@@ -410,10 +453,13 @@ fn the_retry_wait_doubles_up_to_a_minute() {
 #[tokio::test]
 async fn a_new_client_while_held_gets_its_own_limit_saved_and_held() {
     let first = Mock::new(OWN);
-    let (_dir, app) = start(&first);
+    let (_dir, app) = start_at(&first, gone_socket(), MENU, |_| {}, None);
     app.update_config(|c| c.limits.down_kbps_core = 0);
     app.gate.set_corename(Some("SNES".into()));
-    assert_eq!(wait_calls(&first, 2).await, ["read:up", "set:up:true/0"]);
+    assert_eq!(
+        wait_calls(&first, 3).await,
+        ["pid", "read:up", "set:up:true/0"]
+    );
     let second = Mock::new(RateLimit::kbps(9));
     let other = remote("http://192.0.2.6:9091/transmission/rpc");
     app.set_client_at(
@@ -424,7 +470,7 @@ async fn a_new_client_while_held_gets_its_own_limit_saved_and_held() {
     let saved = stored(&app).await.expect("saved");
     assert_eq!((saved.client, saved.up), (other, Some(RateLimit::kbps(9))));
     assert_eq!(app.client_hold(), Some(ClientHold::Uploads));
-    assert_eq!(first.calls().len(), 2, "the old client is left alone");
+    assert_eq!(first.calls().len(), 3, "the old handle is not used again");
 }
 
 #[tokio::test]
@@ -470,74 +516,6 @@ fn the_client_entry_names_the_client_and_ignores_a_freeze() {
     assert!(app.client().is_some());
 }
 
-const FAKE_ENV: &str = "MISTARR_FAKE_CLIENT";
-
-/// Stands in for a client process when the test binary runs as one.
-#[test]
-#[ignore = "run only as the fake client process"]
-fn fake_client_process() {
-    if std::env::var_os(FAKE_ENV).is_some() {
-        std::thread::sleep(Duration::from_secs(60));
-    }
-}
-
-/// This test binary, linked as `rtorrent` so its `exe` link names rtorrent,
-/// running [`fake_client_process`].
-struct FakeRtorrent {
-    child: Child,
-    _dir: tempfile::TempDir,
-}
-
-impl FakeRtorrent {
-    fn spawn() -> Self {
-        let me = std::env::current_exe().expect("exe");
-        let dir = tempfile::tempdir_in(me.parent().expect("dir")).expect("tempdir");
-        let exe = dir.path().join("rtorrent");
-        if std::fs::hard_link(&me, &exe).is_err() {
-            std::fs::copy(&me, &exe).expect("copy");
-        }
-        let mut tries = 0;
-        let child = loop {
-            let spawned = Command::new(&exe)
-                .args([
-                    "--ignored",
-                    "--exact",
-                    "jobs::core_limits::tests::fake_client_process",
-                ])
-                .env(FAKE_ENV, "1")
-                .stdout(std::process::Stdio::null())
-                .spawn();
-            match spawned {
-                Ok(child) => break child,
-                // A binary just written may still be busy for exec for a moment.
-                Err(e) if e.raw_os_error() == Some(26) && tries < 50 => {
-                    tries += 1;
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(e) => panic!("spawn: {e}"),
-            }
-        };
-        Self { child, _dir: dir }
-    }
-
-    fn pid(&self) -> u32 {
-        self.child.id()
-    }
-
-    fn state(&self) -> char {
-        freeze::stat(Path::new("/proc"), self.pid())
-            .expect("stat")
-            .0
-    }
-}
-
-impl Drop for FakeRtorrent {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
-
 fn on_board(o: &mut Options) {
     o.proc_dir = PathBuf::from("/proc");
 }
@@ -551,7 +529,7 @@ fn local_rtorrent() -> ClientEndpoint {
 
 #[tokio::test]
 async fn a_client_on_the_board_is_frozen_while_a_core_runs() {
-    let proc = FakeRtorrent::spawn();
+    let proc = FakeClient::rtorrent();
     let mock = Mock::new(OWN);
     mock.set_pid(proc.pid());
     let (_dir, app) = start_at(&mock, local_rtorrent(), MENU, on_board, None);
@@ -560,7 +538,7 @@ async fn a_client_on_the_board_is_frozen_while_a_core_runs() {
     wait_for("the freeze", || proc.state() == 'T').await;
     assert_eq!(app.client_hold(), Some(ClientHold::Frozen));
     assert!(app.client().is_none());
-    let recorded = freeze::read_file(&app.options.frozen_file).expect("read");
+    let recorded = freeze::read_file(&app.options.frozen_file, freeze::euid()).expect("read");
     assert_eq!(recorded.map(|f| f.pid), Some(proc.pid()));
     assert_eq!(
         mock.calls(),
@@ -570,20 +548,19 @@ async fn a_client_on_the_board_is_frozen_while_a_core_runs() {
     let ev = live.recv().await.expect("status");
     assert!(ev.data.contains(r#""client_hold":"frozen""#), "{}", ev.data);
 
-    app.defer_seed_policy(sources::SourceId(1));
     app.gate.set_corename(Some(MENU.into()));
     wait_for("the resume", || proc.state() != 'T').await;
     wait_for("the hold cleared", || app.client_hold().is_none()).await;
     assert!(app.client().is_some());
     assert_eq!(
-        freeze::read_file(&app.options.frozen_file).expect("read"),
+        freeze::read_file(&app.options.frozen_file, freeze::euid()).expect("read"),
         None
     );
 }
 
 #[tokio::test]
 async fn a_client_resumed_elsewhere_is_frozen_again() {
-    let proc = FakeRtorrent::spawn();
+    let proc = FakeClient::rtorrent();
     let mock = Mock::new(OWN);
     mock.set_pid(proc.pid());
     let (_dir, app) = start_at(
@@ -628,7 +605,7 @@ async fn a_process_that_is_not_the_client_is_never_frozen() {
 
 #[tokio::test]
 async fn a_frozen_client_is_resumed_at_startup_unless_a_core_still_runs() {
-    let proc = FakeRtorrent::spawn();
+    let proc = FakeClient::rtorrent();
     let (dir, app) = state_with(on_board);
     let kill = Kill::new(Path::new("kill"));
     freeze::freeze(
@@ -655,7 +632,7 @@ async fn a_frozen_client_is_resumed_at_startup_unless_a_core_still_runs() {
 
 #[tokio::test]
 async fn shutdown_resumes_a_frozen_client() {
-    let proc = FakeRtorrent::spawn();
+    let proc = FakeClient::rtorrent();
     let (_dir, app) = state_with(on_board);
     let kill = Kill::new(Path::new("kill"));
     freeze::freeze(
@@ -692,4 +669,254 @@ fn targets_follow_the_config() {
             up: Some(RateLimit::kbps(64))
         }
     );
+}
+
+/// A source whose torrent `t` is in the client, under seed policy `none`.
+fn source_in_client(app: &AppState) -> sources::SourceId {
+    app.db
+        .write_blocking(|c| {
+            let id = sources::insert(
+                c,
+                &sources::NewSource {
+                    infohash: &"0b".repeat(20),
+                    display_name: "Synthetic Set",
+                    origin_file: "set.torrent",
+                    state: sources::SourceState::Bound,
+                    reason: None,
+                    added_at: 0,
+                },
+            )?;
+            sources::set_client_id(c, id, Some("t"))?;
+            Ok(id)
+        })
+        .expect("source")
+}
+
+async fn waiting(app: &AppState) -> Deferred {
+    app.db.read(deferred::get).await.expect("deferred")
+}
+
+/// App state with the scheduler running and `mock` as a frozen client.
+fn frozen_client(mock: &Arc<Mock>) -> (TestDir, Arc<AppState>) {
+    let (dir, app) = state_with(fast);
+    Scheduler::start(&app);
+    app.set_client_at(nas(), Arc::clone(mock) as Arc<dyn DownloadClient>);
+    app.set_client_hold(Some(ClientHold::Frozen));
+    (dir, app)
+}
+
+#[tokio::test]
+async fn a_cancel_during_a_game_waits_for_the_client_and_runs_at_the_resume() {
+    let mock = Mock::new(OWN);
+    let (_dir, app) = frozen_client(&mock);
+    let source = source_in_client(&app);
+    Scheduler::run_inline(&app, Arc::new(Deselect { source_id: source }))
+        .await
+        .expect("deselect");
+    assert!(mock.calls().is_empty(), "nothing reaches a frozen client");
+    assert_eq!(waiting(&app).await.deselect, [source]);
+
+    app.set_client_hold(None);
+    replay_deferred(&app).await.expect("replay");
+    assert_eq!(wait_calls(&mock, 2).await, ["stop:t", "wanted:t:[]"]);
+    assert!(waiting(&app).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_finished_torrent_is_released_at_the_resume() {
+    let mock = Mock::new(OWN);
+    let (_dir, app) = frozen_client(&mock);
+    let source = source_in_client(&app);
+    app.db
+        .write_blocking(move |c| {
+            let rom = sources::fixtures::seed_rom(c, "nes", "Example Quest (USA).nes", 16, &[])?;
+            crate::db::downloads_import::insert_fixture(c, rom, source, 0, "done", None)?;
+            Ok(())
+        })
+        .expect("placed");
+    crate::jobs::import::release_source(&app, source).await;
+    assert!(mock.calls().is_empty());
+    assert_eq!(waiting(&app).await.release, [source]);
+
+    app.set_client_hold(None);
+    replay_deferred(&app).await.expect("replay");
+    assert_eq!(mock.calls(), ["remove:t"]);
+    let row = app
+        .db
+        .read(move |c| sources::get(c, source))
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(row.client_id, None);
+    assert!(waiting(&app).await.is_empty());
+}
+
+#[tokio::test]
+async fn seed_policies_and_detection_asked_during_a_game_run_at_the_resume() {
+    let mock = Mock::new(OWN);
+    let (_dir, app) = frozen_client(&mock);
+    source_in_client(&app);
+    defer(&app, Op::Seed).await;
+    defer(&app, Op::Detect).await;
+    let kept = waiting(&app).await;
+    assert!(kept.seed && kept.detect, "{kept:?}");
+    assert!(mock.calls().is_empty());
+
+    app.set_client_hold(None);
+    replay_deferred(&app).await.expect("replay");
+    assert_eq!(mock.calls(), ["seed:t"]);
+    assert!(waiting(&app).await.is_empty());
+}
+
+#[tokio::test]
+async fn detection_during_a_game_is_kept_for_the_resume() {
+    let mock = Mock::new(OWN);
+    let (_dir, app) = frozen_client(&mock);
+    crate::jobs::detect_client::detect_and_store(&app, false)
+        .await
+        .expect("detect");
+    assert!(waiting(&app).await.detect);
+    assert!(mock.calls().is_empty());
+}
+
+#[tokio::test]
+async fn work_kept_before_a_restart_runs_when_the_gate_starts() {
+    let mock = Mock::new(OWN);
+    let (dir, app) = state_with(fast);
+    Scheduler::start(&app);
+    let source = source_in_client(&app);
+    app.db
+        .write_blocking(move |c| deferred::add(c, Op::Deselect(source)))
+        .expect("kept");
+    let _gate = start_at_state(&mock, &app);
+    assert_eq!(wait_calls(&mock, 2).await, ["stop:t", "wanted:t:[]"]);
+    wait_for_async(&app).await;
+    drop(dir);
+}
+
+fn start_at_state(mock: &Arc<Mock>, app: &Arc<AppState>) -> tokio::task::JoinHandle<()> {
+    app.set_client_at(nas(), Arc::clone(mock) as Arc<dyn DownloadClient>);
+    app.gate.set_corename(Some(MENU.into()));
+    tokio::spawn(follow_gate(Arc::clone(app)))
+}
+
+async fn wait_for_async(app: &AppState) {
+    for _ in 0..300 {
+        if waiting(app).await.is_empty() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the kept work stayed");
+}
+
+#[tokio::test]
+async fn a_core_limit_never_raises_the_client_above_its_own() {
+    let mock = Mock::new(OWN);
+    let (_dir, app) = start(&mock);
+    app.update_config(|c| {
+        c.transfer.pause_client_while_playing = false;
+        c.limits.down_kbps_core = 0;
+        c.limits.up_kbps_core = 100;
+    });
+    app.gate.set_corename(Some("SNES".into()));
+    assert_eq!(wait_calls(&mock, 2).await, ["read:up", "set:up:true/40"]);
+    app.update_config(|c| c.limits.up_kbps_core = 8);
+    app.limits_wake.notify_one();
+    let calls = wait_calls(&mock, 3).await;
+    assert_eq!(calls[2..], ["set:up:true/8"]);
+}
+
+#[tokio::test]
+async fn held_uploads_also_hold_the_alternate_rate_and_put_it_back() {
+    let mock = Mock::new(OWN);
+    mock.set_alt(RateLimit {
+        enabled: true,
+        kbps: 25,
+    });
+    let (_dir, app) = start(&mock);
+    app.update_config(|c| c.limits.down_kbps_core = 0);
+    app.gate.set_corename(Some("SNES".into()));
+    let calls = wait_calls(&mock, 4).await;
+    assert_eq!(calls, ["read:up", "read:alt", "set:up:true/0", "set:alt:0"]);
+    assert_eq!(stored(&app).await.and_then(|s| s.alt_up), Some(25));
+    app.gate.set_corename(Some(MENU.into()));
+    let calls = wait_calls(&mock, 6).await;
+    assert_eq!(calls[4..], ["set:up:true/40", "set:alt:25"]);
+    assert_eq!(mock.alt().map(|a| a.kbps), Some(25));
+    assert_eq!(stored(&app).await, None);
+}
+
+#[tokio::test]
+async fn limits_saved_for_a_client_no_longer_in_use_are_put_back_or_dropped() {
+    let saved = SavedLimits {
+        client: remote("http://192.0.2.7:9/transmission/rpc"),
+        down: None,
+        up: Some(OWN),
+        alt_up: Some(5),
+    };
+    let old = Mock::new(RateLimit::HELD);
+    restore_into(old.as_ref(), &saved).await.expect("restore");
+    assert_eq!(old.calls(), ["set:up:true/40", "set:alt:5"]);
+
+    let mock = Mock::new(RateLimit::kbps(9));
+    let text = serde_json::to_string(&SavedLimits {
+        client: gone_socket(),
+        ..saved
+    })
+    .expect("json");
+    let (_dir, app) = start_at(&mock, nas(), "SNES", |_| {}, Some(&text));
+    app.update_config(|c| c.limits.down_kbps_core = 0);
+    app.limits_wake.notify_one();
+    wait_for("the new client held", || {
+        mock.calls().contains(&"set:up:true/0".to_owned())
+    })
+    .await;
+    let now = stored(&app).await.expect("saved");
+    assert_eq!(
+        (now.client, now.up),
+        (nas(), Some(RateLimit::kbps(9))),
+        "the unreachable client's limits are dropped"
+    );
+}
+
+#[tokio::test]
+async fn no_stop_is_sent_once_shutdown_began() {
+    let proc = FakeClient::rtorrent();
+    let mock = Mock::new(OWN);
+    mock.set_pid(proc.pid());
+    let (_dir, app) = state_with(on_board);
+    app.set_client_at(
+        local_rtorrent(),
+        Arc::clone(&mock) as Arc<dyn DownloadClient>,
+    );
+    app.begin_shutdown();
+    let done = freeze_client(&app, &local_rtorrent(), mock.as_ref()).await;
+    assert!(done.is_err(), "a stop during shutdown is refused");
+    thaw_for_shutdown(&app).await;
+    assert_ne!(proc.state(), 'T');
+    assert!(!app.options.frozen_file.exists());
+    assert!(!app.client_frozen());
+}
+
+#[tokio::test]
+async fn a_planted_record_is_ignored_and_its_process_left_alone() {
+    let other = FakeClient::spawn("helper");
+    let (_dir, app) = state_with(on_board);
+    let (_, starttime) = freeze::stat(Path::new("/proc"), other.pid()).expect("stat");
+    let record = Frozen {
+        pid: other.pid(),
+        starttime,
+    };
+    freeze::write_file(&app.options.frozen_file, record).expect("record");
+    Kill::new(Path::new("kill"))
+        .send(other.pid(), Signal::Stop)
+        .expect("stop");
+    assert_eq!(other.wait_state(|s| s == 'T'), 'T');
+    recover_frozen(&app).await;
+    assert_eq!(other.state(), 'T', "only a client is ever resumed");
+    assert!(!app.options.frozen_file.exists());
+    Kill::new(Path::new("kill"))
+        .send(other.pid(), Signal::Cont)
+        .expect("cont");
 }
