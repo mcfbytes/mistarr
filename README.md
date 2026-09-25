@@ -1,44 +1,110 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/hero-dark.webp">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/hero-light.webp">
+  <img alt="mistarr: stylised drawings of console, handheld, disc and arcade hardware beside the project name" src="docs/images/hero-dark.webp">
+</picture>
+
 # mistarr
 
-A small, self-contained collection manager for [MiSTer FPGA](https://github.com/MiSTer-devel/Wiki_MiSTer/wiki)
-that runs **on the DE10-Nano itself**. It reads the DAT files you give it, shows
-you your collection per core with cover art, verifies every file against those
-DATs, files verified games into the right `games/<Core>` directory with each
-core's quirks handled, and can drive the torrent client that already ships with
-the MiSTer Linux image to fetch missing entries from torrents you supply.
+**A verifier and organiser for [MiSTer FPGA](https://github.com/MiSTer-devel/Wiki_MiSTer/wiki)
+game libraries that runs on the DE10-Nano itself.** It checks the files you
+already have against the DAT files you give it, puts each one where its core
+expects it, and adds a small front end for the torrent client that ships with
+the MiSTer Linux image.
 
-It is written in Rust and ships as one static ARMv7 binary with the web UI
-embedded. It runs on the stock MiSTer image and on
-[Buildroot_MiSTer](https://github.com/mcfbytes/Buildroot_MiSTer).
+It is one static ARMv7 binary with the web UI embedded, written in Rust, and
+runs on the stock MiSTer image and on
+[Buildroot_MiSTer](https://github.com/mcfbytes/Buildroot_MiSTer). Open it from
+a desktop browser or a phone on the couch.
 
 ## What it does
 
-- **Catalog.** Import No-Intro (daily packs or its database export), Redump or
-  any Logiqx-format DAT. Browse every
-  title per installed core, grouped one-game-one-ROM with region and revision
-  preferences, with box art loaded by your browser from the libretro thumbnail
-  server. Nothing is stored on the SD card except the database.
-- **Verify.** Hash what is already in `games/`, match it against the DATs, and
-  show what is verified, unverified, misnamed or missing.
-- **Place.** Rename and move verified files into the directory and format each
-  MiSTer core expects: iNES headers, big-endian N64, multi-track discs kept
-  together, Neo Geo romset layout, arcade zips beside their MRA.
-- **Acquire.** Drop `.torrent` or `.magnet` files into a watched directory.
-  mistarr binds each torrent to a platform by matching its file list against
-  your DATs, and when you mark a title as wanted it asks Transmission or rtorrent
-  to fetch just that file, verifies it, and files it.
-- **Stay out of the way.** Hashing and transfers pause while a core is running,
-  I/O is throttled for the SD card, and memory is budgeted for a board that has
-  under half a gigabyte to share with MiSTer.
+**Catalogue every platform you have a core for.** Load No-Intro DATs (daily
+packs or the database export), Redump or any Logiqx-format DAT. mistarr binds
+each one to its platform and shows what you have, what is missing and what
+needs a look, one card per core.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/platforms-dark.webp">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/platforms-light.webp">
+  <img alt="The Platforms screen: one card per platform, each with original art of its hardware and counts of entries present, wanted and unmatched" src="docs/images/platforms-dark.webp">
+</picture>
+
+**Scan and verify what is already on the card.** It hashes the files in
+`games/`, matches them against the DATs, and marks each entry verified,
+unverified, misnamed or missing. Browse groups titles one-game-one-ROM with
+your region and revision preferences; a title lists every variant with its
+file state and the sources that list it. CHD disc images can be identified
+by their tracks, an optional and slower check.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/browse-dark.webp">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/browse-light.webp">
+  <img alt="Browse: a platform's titles as a poster grid with search, have, wanted, region and flag filters" src="docs/images/browse-dark.webp">
+</picture>
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/title-dark.webp">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/title-light.webp">
+  <img alt="A title page: each variant with its region, revision, file state and the sources that list it, with Play and Want" src="docs/images/title-dark.webp">
+</picture>
+
+**Place files the way each core expects them, without getting in the way.**
+Verified files are renamed and moved into the right `games/<Core>` directory
+in the right form: iNES headers, big-endian N64, multi-track discs kept
+together, Neo Geo romset layout, arcade zips beside their MRA. While a core
+is running, hashing, scans and placement pause, transfers slow to the rate
+limits you set for that case, and mistarr's I/O drops to the idle class.
+Memory is budgeted for a board with under half a gigabyte to share with
+MiSTer. The activity panel shows what is running, what waits and why.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/activity-dark.webp">
+  <source media="(prefers-color-scheme: light)" srcset="docs/images/activity-light.webp">
+  <img alt="The DATs screen with the background work panel open: a DAT import with its progress bar, a source import waiting for it, and a scan paused while a core runs" src="docs/images/activity-dark.webp">
+</picture>
+
+**Transfers from sources you add.** Drop `.torrent` or `.magnet` files into a
+watched directory. mistarr binds each source to a platform by matching its
+file list against your DATs; when you mark an entry as wanted it asks
+Transmission or rtorrent for just that file, verifies it and files it. Seeding
+is a setting on each source.
+
+<p>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/wizard-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/wizard-light.webp">
+    <img alt="The first-run wizard's paths step, listing the detected cores" src="docs/images/wizard-dark.webp" width="49%">
+  </picture>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/system-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/system-light.webp">
+    <img alt="The System screen: version, client, running core, launch state, disk, memory and scheduler" src="docs/images/system-dark.webp" width="49%">
+  </picture>
+</p>
+
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/images/phone-dark.webp">
+    <source media="(prefers-color-scheme: light)" srcset="docs/images/phone-light.webp">
+    <img alt="The Platforms screen at phone width" src="docs/images/phone-dark.webp" width="300">
+  </picture>
+</p>
+
+The screenshots use the web UI's mock data, which is synthetic, with cover art
+turned off, so every poster is the one mistarr draws for a title without a
+cover; `docs/TESTING.md` says how to regenerate them. In use, covers load in
+your browser from the libretro thumbnail server, and nothing but the database
+is stored on the SD card.
 
 ## What it deliberately does not do
 
 mistarr contains no sources. It ships with no torrents, magnets, tracker
 addresses, site definitions, DAT files or BIOS images, and it never suggests
-any. Everything it acquires comes from files you placed in its watched
-directories. Seeding is a per-source setting you choose. See
-[docs/PRINCIPLES.md](docs/PRINCIPLES.md) for the design rules that keep it that
-way and why they are not negotiable.
+any. Everything it transfers comes from files you placed in its watched
+directories. The catalogue, scan, verify and place features work with no
+source at all. See [docs/PRINCIPLES.md](docs/PRINCIPLES.md) for the design
+rules that keep it that way and why they are not negotiable.
 
 ## Install
 
@@ -51,13 +117,21 @@ curl -fsSL https://github.com/mcfbytes/mistarr/releases/latest/download/install.
 `/bin/sh` on the stock MiSTer image is BusyBox and runs this as written; a
 `bash` present on the board works too. From the MiSTer Scripts menu, copy
 `install.sh` from a release to `/media/fat/Scripts/mistarr_install.sh` and run
-it from there instead. See [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for
-upgrading, rollback and how releases are built.
+it from there instead. Once it runs,
+`Scripts/mistarr.sh` prints the address to open.
+
+To upgrade, run the same command again: the database and config are kept, and
+the previous version is saved first. If the new version fails to start, the
+installer puts the previous version back. See
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for installing a given version,
+manual rollback and how releases are built.
 
 ## Status
 
-Design stage. The architecture and work packages are written; the code is a
-skeleton. Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
+In active development. Releases are published on the
+[releases page](https://github.com/mcfbytes/mistarr/releases); the
+architecture and the work still open are in
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and
 [docs/WORKPLAN.md](docs/WORKPLAN.md).
 
 ## Documentation

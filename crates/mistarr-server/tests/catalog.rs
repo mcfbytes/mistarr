@@ -231,8 +231,18 @@ async fn a_dropped_pack_loads_and_the_catalog_answers() {
     let row = &page["items"][0];
     assert_eq!(row["pick_name"], QUEST_REV);
     assert_eq!(
-        (row["variants"].clone(), row["has_pick"].clone()),
-        (json!(3), json!(true))
+        (
+            row["variants"].clone(),
+            row["has_pick"].clone(),
+            row["bios"].clone()
+        ),
+        (json!(3), json!(true), json!(false))
+    );
+    let bios = json_of(addr, "/api/v1/platforms/gb/titles?flags=bios&hidden=show").await;
+    assert_eq!(
+        bios["items"][0]["bios"],
+        json!(true),
+        "a BIOS-only group says so"
     );
     assert_eq!(
         row["art"]["boxart"],

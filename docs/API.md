@@ -230,7 +230,8 @@ disables that drop for the request, independently of `flags`, so a group
 whose only variants are hidden appears. `sort=recent` puts groups whose
 newest entry was added last first. Items are the `title_groups` row `{
 parent_id, platform_id, base_name, name, pick_id, pick_name, variants,
-have_verified, wanted, has_pick }` plus `art` for the pick, or the parent
+have_verified, wanted, has_pick }` plus `bios`, true when every live variant
+is flagged `bios` so none can be wanted, and `art` for the pick, or the parent
 without one. While the
 platform has MRA titles (PLATFORMS.md "MRA catalogue") only they are listed,
 and `/platforms` counts only them.

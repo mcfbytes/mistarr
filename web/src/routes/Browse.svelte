@@ -12,10 +12,12 @@
   import { titleUrl } from '../lib/router.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
-  import { fixtureSettings } from '../lib/fixtures';
+  import { fixtureSettings, scenarioBrowseFlags } from '../lib/fixtures';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { launchBlocker } from '../lib/launch';
   import PlatformArt from '../lib/PlatformArt.svelte';
+  import PosterPlaceholder from '../lib/PosterPlaceholder.svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { BROWSE_FLAGS, type HaveFilter, type TitleFilters } from '../lib/types';
 
   interface Props {
@@ -25,6 +27,7 @@
   const { platformId }: Props = $props();
 
   const isMock = import.meta.env.VITE_MOCK === '1';
+  const flagChoices: readonly string[] = isMock ? scenarioBrowseFlags() : BROWSE_FLAGS;
   /** Typing pauses this long before the search runs. */
   const SEARCH_DEBOUNCE_MS = 250;
 
@@ -168,16 +171,8 @@
     }
   }
 
-  function onArtError(e: Event): void {
-    const img = e.currentTarget as HTMLImageElement;
-    img.src = placeholderArt;
-  }
-
-  const placeholderArt =
-    'data:image/svg+xml,' +
-    encodeURIComponent(
-      '<svg xmlns="http://www.w3.org/2000/svg" width="200" height="280"><rect width="100%" height="100%" fill="#2c303a"/></svg>'
-    );
+  /** Groups whose cover failed to load, drawn with the generated poster instead. */
+  const missingArt = new SvelteSet<number>();
 </script>
 
 <div class="page">
@@ -216,7 +211,7 @@
     </label>
     <fieldset class="flags">
       <legend>Require flags</legend>
-      {#each BROWSE_FLAGS as flag (flag)}
+      {#each flagChoices as flag (flag)}
         <label>
           <input
             type="checkbox"
@@ -251,19 +246,30 @@
   <div class="grid" class:dimmed={loading} aria-busy={loading}>
     {#each groups as group (group.parent_id)}
       <a class="poster" href={titleUrl(group.parent_id)}>
-        <img src={group.art?.boxart ?? placeholderArt} alt="" loading="lazy" onerror={onArtError} />
+        {#if group.art?.boxart && !missingArt.has(group.parent_id)}
+          <img src={group.art.boxart} alt="" loading="lazy" onerror={() => missingArt.add(group.parent_id)} />
+        {:else}
+          <PosterPlaceholder
+            platformId={group.platform_id}
+            kind={platform?.kind}
+            title={group.base_name}
+            name={group.pick_name ?? group.name}
+          />
+        {/if}
         <p class="name">{group.pick_name ?? group.name}</p>
-        <p class="muted">{group.have_verified > 0 ? 'Have' : 'Missing'}</p>
-        <button
-          class:primary={group.wanted > 0}
-          disabled={group.pick_id === null}
-          onclick={(e) => {
-            e.preventDefault();
-            void toggleWant(group.parent_id, group.pick_id, group.wanted);
-          }}
-        >
-          {group.wanted > 0 ? 'Wanted' : 'Want'}
-        </button>
+        <p class="muted status">{group.have_verified > 0 ? 'Have' : 'Missing'}</p>
+        {#if !group.bios}
+          <button
+            class:primary={group.wanted > 0}
+            disabled={group.pick_id === null}
+            onclick={(e) => {
+              e.preventDefault();
+              void toggleWant(group.parent_id, group.pick_id, group.wanted);
+            }}
+          >
+            {group.wanted > 0 ? 'Wanted' : 'Want'}
+          </button>
+        {/if}
       </a>
     {/each}
   </div>
@@ -418,9 +424,19 @@
   }
 
   .poster {
-    display: block;
+    display: flex;
+    flex-direction: column;
     text-decoration: none;
     color: var(--fg);
+  }
+
+  .poster .status {
+    margin-top: auto;
+    padding-top: 1em;
+  }
+
+  .poster button {
+    align-self: flex-start;
   }
 
   .poster img {

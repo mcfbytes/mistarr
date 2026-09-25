@@ -1,3 +1,4 @@
+import { BROWSE_FLAGS } from './types';
 import type {
   CoresResult,
   DatVersion,
@@ -17,7 +18,10 @@ import type {
   WizardStatus
 } from './types';
 
-/** Mock mode's scenario, from `?mock=` in the page URL: `idle` shows no work. */
+/**
+ * Mock mode's scenario, from `?mock=` in the page URL: `idle` shows no work,
+ * and `showcase` an idle, fully set up board with more platforms, for the README.
+ */
 export function mockScenario(): string {
   return new URLSearchParams(globalThis.location.search).get('mock') ?? 'busy';
 }
@@ -79,6 +83,34 @@ export const fixturePlatforms: Platform[] = [
   }
 ];
 
+const counts = (titles: number, have: number, wanted: number, unmatched = 0): Platform['counts'] => ({
+  titles,
+  have,
+  wanted,
+  unmatched_files: unmatched,
+  unidentified_files: 0,
+  failing_check: 0,
+  partial: 0
+});
+
+/** Present platforms added in the `showcase` scenario, beside the fixture set. */
+const showcaseExtra: Platform[] = [
+  { id: 'snes', name: 'Super Nintendo Entertainment System', core_dir: 'SNES', kind: 'cartridge', core_present: true, enabled: true, counts: counts(1460, 612, 8, 2) },
+  { id: 'n64', name: 'Nintendo 64', core_dir: 'N64', kind: 'cartridge', core_present: true, enabled: true, counts: counts(410, 38, 3) },
+  { id: 'gba', name: 'Game Boy Advance', core_dir: 'GBA', kind: 'cartridge', core_present: true, enabled: true, counts: counts(1530, 204, 5, 1) },
+  { id: 'gb', name: 'Game Boy', core_dir: 'GAMEBOY', kind: 'cartridge', core_present: true, enabled: true, counts: counts(820, 117, 0) }
+];
+
+/** The platforms mock mode lists for the current scenario. */
+export function scenarioPlatforms(): Platform[] {
+  if (mockScenario() !== 'showcase') {
+    return fixturePlatforms;
+  }
+  const [nes, megadrive, psx, saturn, amiga, arcade] = fixturePlatforms;
+  const [snes, n64, gba, gb] = showcaseExtra;
+  return [nes, snes, n64, megadrive, gba, gb, saturn, arcade, psx, amiga].filter((p): p is Platform => p !== undefined);
+}
+
 function artFor(playlist: string, name: string) {
   const clean = name.replace(/[&*/:`<>?\\|"]/g, '_');
   const base = `https://thumbnails.libretro.com/${encodeURIComponent(playlist)}`;
@@ -88,6 +120,9 @@ function artFor(playlist: string, name: string) {
     snap: `${base}/Named_Snaps/${encodeURIComponent(clean)}.png`
   };
 }
+
+/** Titles whose id ends in 9 have no cover URL, as a title the thumbnail server lacks. */
+const noArt = (id: number): boolean => id % 10 === 9;
 
 const exampleNames = [
   'Example Quest',
@@ -149,7 +184,8 @@ export function fixtureTitles(platformId: string, count = 60, filters: TitleFilt
       have_verified: i % 4 === 0 ? 1 : 0,
       wanted: i % 5 === 0 ? 1 : 0,
       has_pick: true,
-      art: artFor(coreDir, name)
+      bios: flags.includes('bios'),
+      art: noArt(i + 1) ? null : artFor(coreDir, name)
     });
   }
   return rows;
@@ -232,12 +268,12 @@ export function mockExtraPlatforms(): Platform[] {
 export function fixtureTitle(id: number): TitleDetail {
   const base = exampleNames[id % exampleNames.length] ?? 'Example Quest';
   const name = `${base} (USA)`;
-  return {
+  const detail: TitleDetail = {
     parent_id: id,
     platform_id: 'nes',
     base_name: base,
     pick_variant_id: id * 10,
-    art: artFor('Nintendo - Nintendo Entertainment System', name),
+    art: noArt(id) ? null : artFor('Nintendo - Nintendo Entertainment System', name),
     variants: [
       {
         id: id * 10,
@@ -354,6 +390,10 @@ export function fixtureTitle(id: number): TitleDetail {
       }
     ]
   };
+  if (mockScenario() !== 'showcase') {
+    return detail;
+  }
+  return { ...detail, variants: detail.variants.filter((v) => !v.flags.includes('bios')) };
 }
 
 export const fixtureStatus: SystemStatus = {
@@ -384,6 +424,22 @@ export const fixtureStatus: SystemStatus = {
   chd_decode_bytes_per_sec: 1_200_000
 };
 
+/**
+ * The status mock mode reports: `mockStatus`, or at the menu with nothing
+ * held for `showcase`.
+ */
+export function scenarioStatus(): SystemStatus {
+  const base = mockStatus();
+  return mockScenario() === 'showcase'
+    ? { ...base, version: '0.1.0', corename: 'MENU', paused: false, pause_reason: null, waiting: [], client_hold: null }
+    : base;
+}
+
+/** Browse's flag choices: the README showcase leaves out the `pirate` DAT tag. */
+export function scenarioBrowseFlags(): readonly string[] {
+  return mockScenario() === 'showcase' ? BROWSE_FLAGS.filter((f) => f !== 'pirate') : BROWSE_FLAGS;
+}
+
 /** Files not identified, by platform, for the Platforms card. */
 export const fixtureUnidentified: Record<string, UnidentifiedFile[]> = {
   saturn: [
@@ -400,6 +456,13 @@ export const fixtureWizard: WizardStatus = {
   sources: false,
   open_on_start: false
 };
+
+/** The wizard state mock mode reports: every step done for `showcase`. */
+export function scenarioWizard(): WizardStatus {
+  return mockScenario() === 'showcase'
+    ? { ...fixtureWizard, client: true, sources: true }
+    : fixtureWizard;
+}
 
 export const fixtureCores: CoresResult = {
   platforms: fixturePlatforms.filter((p) => p.core_present).map((p) => p.id),

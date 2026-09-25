@@ -7,12 +7,14 @@ in the `mistarr` binary. Screens and API contract are in `docs/UI.md` and
 ```sh
 npm ci
 npm run dev              # dev server
-VITE_MOCK=1 npm run dev  # dev server against fixture data, no backend needed
+VITE_MOCK=1 npm run dev  # dev server against fixture data, no backend needed;
+                         # ?mock=idle or ?mock=showcase picks another scenario
 npm run check            # svelte-check
 npm run lint             # eslint
 npm run build            # -> dist/
 npm run size             # gzip budget check against dist/
 npm run e2e              # playwright screenshots of every screen, two viewports
+./scripts/readme-images.sh  # the README images in ../docs/images, see docs/TESTING.md
 ```
 
 `npm run e2e` uses Playwright's own browser resolution by default. Set

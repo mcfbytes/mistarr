@@ -1,5 +1,5 @@
 import { api } from '../api';
-import { fixturePlatforms, mockExtraPlatforms } from '../fixtures';
+import { mockExtraPlatforms, scenarioPlatforms } from '../fixtures';
 import type { Platform } from '../types';
 
 const isMock = import.meta.env.VITE_MOCK === '1';
@@ -16,7 +16,7 @@ export function platformsLoaded(): boolean {
 }
 
 export async function loadPlatforms(): Promise<void> {
-  platforms = isMock ? [...fixturePlatforms, ...mockExtraPlatforms()] : (await api.platforms()).items;
+  platforms = isMock ? [...scenarioPlatforms(), ...mockExtraPlatforms()] : (await api.platforms()).items;
   loaded = true;
 }
 
