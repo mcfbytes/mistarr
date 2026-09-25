@@ -477,6 +477,7 @@ fn spawn_tasks(app: &Arc<AppState>, scan_interval: u32) -> Vec<tokio::task::Join
         tasks.push(tokio::spawn(jobs::io_priority::follow(
             Arc::clone(&app.gate),
             Arc::clone(priority),
+            jobs::io_priority::RETRY,
         )));
     }
     if scan_interval > 0 {

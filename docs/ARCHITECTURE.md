@@ -510,8 +510,11 @@ I/O class by running `ionice -c 3 -p <tid>` for each entry of
 `/proc/self/task`, listing again until a pass finds no new thread; threads
 created later inherit the class from the thread that creates them. Back at
 the menu it runs `ionice -c 0 -p <tid>` the same way, and the kernel derives
-a best-effort level from `nice` again. Without `ionice` or `/proc` it logs
-once at debug and leaves the class as launched. A process the daemon starts
+a best-effort level from `nice` again. A switch counts once a thread takes
+the class; one that fails, for example because `/proc` cannot be listed or
+no thread takes the class, is logged at debug and tried again 30 seconds
+later or at the next core change. Without `ionice` it logs once at debug,
+stops switching and leaves the class as launched. A process the daemon starts
 inherits the class of the thread that forks it and is not in
 `/proc/self/task`, so a download client started from the UI while a core
 runs is forked from a thread set back to class 0 for the launch, and every

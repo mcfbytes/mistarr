@@ -17,6 +17,9 @@ const THREAD_SELF: &str = "/proc/thread-self";
 /// Listings of the task directory per switch; a pass that finds no new thread ends it.
 const MAX_PASSES: usize = 4;
 
+/// How long [`follow`] waits before trying a switch that failed again.
+pub const RETRY: Duration = Duration::from_secs(30);
+
 /// Linux `ETXTBSY`: exec of a file still open for writing somewhere.
 const ETXTBSY: i32 = 26;
 
@@ -167,11 +170,12 @@ pub fn thread_ids(task_dir: &Path) -> Result<Vec<u32>, PriorityError> {
 /// Sets `class` on every thread in `task_dir`, listing again until a pass finds
 /// no new thread, so one spawned by a thread not yet switched is caught too.
 /// Threads created afterwards inherit the class from their creator. Returns
-/// how many threads took the class; a thread the tool refuses is skipped.
+/// how many threads took the class; a thread the tool refuses is skipped, and
+/// a listing that fails after the first ends the passes.
 ///
 /// # Errors
 ///
-/// [`PriorityError::NoTool`] or [`PriorityError::Threads`], when no switch can succeed.
+/// [`PriorityError::NoTool`], or [`PriorityError::Threads`] when the first listing fails.
 pub fn apply(
     setter: &dyn SetClass,
     task_dir: &Path,
@@ -179,11 +183,16 @@ pub fn apply(
 ) -> Result<usize, PriorityError> {
     let mut seen = HashSet::new();
     let mut set = 0;
-    for _ in 0..MAX_PASSES {
-        let fresh: Vec<u32> = thread_ids(task_dir)?
-            .into_iter()
-            .filter(|tid| seen.insert(*tid))
-            .collect();
+    for pass in 0..MAX_PASSES {
+        let tids = match thread_ids(task_dir) {
+            Ok(tids) => tids,
+            Err(e) if pass == 0 => return Err(e),
+            Err(e) => {
+                tracing::debug!(error = %e, "thread list ended early");
+                break;
+            }
+        };
+        let fresh: Vec<u32> = tids.into_iter().filter(|tid| seen.insert(*tid)).collect();
         if fresh.is_empty() {
             break;
         }
@@ -235,14 +244,32 @@ impl IoPriority {
         }
     }
 
-    /// Sets `class` on every thread through [`apply`] and records it.
+    /// The class last recorded by [`IoPriority::switch`].
+    ///
+    /// ```
+    /// use mistarr_server::jobs::io_priority::{IoClass, IoPriority, Ionice, TASK_DIR};
+    /// let ionice = std::sync::Arc::new(Ionice::new(std::path::Path::new("ionice")));
+    /// let priority = IoPriority::new(ionice, std::path::Path::new(TASK_DIR));
+    /// assert_eq!(priority.class(), IoClass::Default);
+    /// ```
+    #[must_use]
+    pub fn class(&self) -> IoClass {
+        *self.current.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Sets `class` on every thread through [`apply`] and records it once at
+    /// least one thread took it.
     ///
     /// # Errors
     ///
-    /// As [`apply`]; the recorded class stays as it was.
+    /// As [`apply`], or [`PriorityError::Failed`] when no thread took the class;
+    /// the recorded class stays as it was.
     pub fn switch(&self, class: IoClass) -> Result<usize, PriorityError> {
         let mut current = self.current.lock().unwrap_or_else(PoisonError::into_inner);
         let set = apply(self.setter.as_ref(), &self.task_dir, class)?;
+        if set == 0 {
+            return Err(PriorityError::Failed("no thread took the class".into()));
+        }
         *current = class;
         Ok(set)
     }
@@ -269,26 +296,37 @@ impl IoPriority {
 }
 
 /// Follows `gate`: idle I/O class while a core runs, the default otherwise.
-/// Returns when the gate is dropped or when the class cannot be set at all.
-pub async fn follow(gate: Arc<Gate>, priority: Arc<IoPriority>) {
+/// A failed switch is tried again after `retry` or at the next gate change;
+/// returns when the gate is dropped or `ionice` is absent.
+pub async fn follow(gate: Arc<Gate>, priority: Arc<IoPriority>, retry: Duration) {
     let mut rx = gate.subscribe();
-    let mut current = IoClass::Default;
     loop {
         let want = IoClass::for_core(rx.borrow_and_update().core_running());
-        if want != current {
-            let priority = Arc::clone(&priority);
-            let applied = tokio::task::spawn_blocking(move || priority.switch(want)).await;
-            match applied {
+        let mut pending = false;
+        if want != priority.class() {
+            let switcher = Arc::clone(&priority);
+            match tokio::task::spawn_blocking(move || switcher.switch(want)).await {
                 Ok(Ok(threads)) => tracing::info!(class = ?want, threads, "I/O class set"),
-                Ok(Err(e)) => {
-                    tracing::debug!(error = %e, "I/O class stays as launched");
+                Ok(Err(PriorityError::NoTool)) => {
+                    tracing::debug!("ionice is not installed; I/O class stays as launched");
                     return;
                 }
-                Err(e) => tracing::debug!(error = %e, "I/O class switch did not finish"),
+                Ok(Err(e)) => {
+                    tracing::debug!(error = %e, "I/O class switch failed; will retry");
+                    pending = true;
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "I/O class switch did not finish");
+                    pending = true;
+                }
             }
-            current = want;
         }
-        if rx.changed().await.is_err() {
+        if pending {
+            tokio::select! {
+                changed = rx.changed() => if changed.is_err() { return },
+                () = tokio::time::sleep(retry) => {}
+            }
+        } else if rx.changed().await.is_err() {
             return;
         }
     }
@@ -298,11 +336,14 @@ pub async fn follow(gate: Arc<Gate>, priority: Arc<IoPriority>) {
 mod tests {
     use super::*;
 
-    /// Records calls; optionally adds a thread entry while switching, or has no tool.
+    /// Records calls; optionally adds a thread entry or removes the thread list
+    /// while switching, refuses every thread, or has no tool.
     #[derive(Default)]
     struct Fake {
         calls: Mutex<Vec<(u32, IoClass)>>,
         spawn_into: Option<PathBuf>,
+        remove: Option<PathBuf>,
+        refuse: std::sync::atomic::AtomicBool,
         missing: bool,
     }
 
@@ -311,9 +352,15 @@ mod tests {
             if self.missing {
                 return Err(PriorityError::NoTool);
             }
+            if self.refuse.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(PriorityError::Failed("try again".into()));
+            }
             let mut calls = self.calls.lock().expect("lock");
             if let Some(dir) = &self.spawn_into {
                 let _ = std::fs::create_dir(dir.join("900"));
+            }
+            if let Some(dir) = &self.remove {
+                let _ = std::fs::remove_dir_all(dir);
             }
             if tid == 13 {
                 return Err(PriorityError::Failed("no such process".into()));
@@ -369,6 +416,75 @@ mod tests {
     }
 
     #[test]
+    fn a_thread_list_lost_after_the_first_pass_still_records_the_class() {
+        let dir = tasks(&[5, 6]);
+        let fake = Arc::new(Fake {
+            remove: Some(dir.path().to_path_buf()),
+            ..Fake::default()
+        });
+        let priority = IoPriority::new(Arc::clone(&fake) as Arc<dyn SetClass>, dir.path());
+        assert_eq!(priority.switch(IoClass::Idle).expect("switch"), 2);
+        assert_eq!(priority.class(), IoClass::Idle);
+        assert!(matches!(
+            priority.switch(IoClass::Default),
+            Err(PriorityError::Threads(_))
+        ));
+        assert_eq!(priority.class(), IoClass::Idle);
+    }
+
+    #[test]
+    fn a_switch_no_thread_takes_keeps_the_recorded_class() {
+        let dir = tasks(&[5]);
+        let fake = Arc::new(Fake::default());
+        fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let priority = IoPriority::new(Arc::clone(&fake) as Arc<dyn SetClass>, dir.path());
+        assert!(matches!(
+            priority.switch(IoClass::Idle),
+            Err(PriorityError::Failed(_))
+        ));
+        assert_eq!(priority.class(), IoClass::Default);
+    }
+
+    #[tokio::test]
+    async fn a_failed_switch_is_retried_and_the_menu_restores() {
+        let dir = tasks(&[5]);
+        let gate = Arc::new(Gate::new());
+        let fake = Arc::new(Fake::default());
+        fake.refuse.store(true, std::sync::atomic::Ordering::SeqCst);
+        let priority = Arc::new(IoPriority::new(
+            Arc::clone(&fake) as Arc<dyn SetClass>,
+            dir.path(),
+        ));
+        let task = tokio::spawn(follow(
+            Arc::clone(&gate),
+            Arc::clone(&priority),
+            Duration::from_millis(20),
+        ));
+        gate.set_corename(Some("SNES".into()));
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        assert_eq!(priority.class(), IoClass::Default);
+        fake.refuse
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        for _ in 0..200 {
+            if priority.class() == IoClass::Idle {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(priority.class(), IoClass::Idle);
+        gate.set_corename(Some("MENU".into()));
+        for _ in 0..200 {
+            if priority.class() == IoClass::Default {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let calls = fake.calls.lock().expect("lock").clone();
+        assert_eq!(calls, vec![(5, IoClass::Idle), (5, IoClass::Default)]);
+        task.abort();
+    }
+
+    #[test]
     fn thread_ids_lists_numeric_entries() {
         let dir = tasks(&[7, 3]);
         assert_eq!(thread_ids(dir.path()).expect("list"), vec![3, 7]);
@@ -415,7 +531,7 @@ mod tests {
         let gate = Arc::new(Gate::new());
         let fake = Arc::new(Fake::default());
         let priority = IoPriority::new(Arc::clone(&fake) as Arc<dyn SetClass>, dir.path());
-        let task = tokio::spawn(follow(Arc::clone(&gate), Arc::new(priority)));
+        let task = tokio::spawn(follow(Arc::clone(&gate), Arc::new(priority), RETRY));
         let wait_for = |n: usize| {
             let fake = Arc::clone(&fake);
             async move {
