@@ -201,7 +201,10 @@ fn reference_browse(
     let items = c
         .prepare(&format!(
             "SELECT g.parent_id, g.platform_id, g.base_name, g.name, g.pick_id, k.name,
-                    g.variants, g.have_verified, g.wanted, g.has_pick
+                    g.variants, g.have_verified, g.wanted, g.has_pick,
+                    NOT EXISTS (SELECT 1 FROM titles v WHERE v.group_root = g.parent_id
+                        AND v.retired = 0 AND NOT EXISTS (SELECT 1 FROM title_flags f
+                            WHERE f.title_id = v.id AND f.flag = 'bios'))
              FROM reference_groups g LEFT JOIN titles k ON k.id = g.pick_id
              WHERE {REFERENCE_BROWSE_WHERE} AND {REFERENCE_MRA_ONLY} ORDER BY {order} LIMIT ?8 OFFSET ?9"
         ))
@@ -218,6 +221,7 @@ fn reference_browse(
                 have_verified: u64::try_from(r.get::<_, i64>(7)?).unwrap_or(0),
                 wanted: u64::try_from(r.get::<_, i64>(8)?).unwrap_or(0),
                 has_pick: r.get(9)?,
+                bios: r.get(10)?,
             })
         })
         .expect("query")

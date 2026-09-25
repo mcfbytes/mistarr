@@ -12,7 +12,7 @@
   import { titleUrl } from '../lib/router.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
-  import { fixtureSettings } from '../lib/fixtures';
+  import { fixtureSettings, scenarioBrowseFlags } from '../lib/fixtures';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { launchBlocker } from '../lib/launch';
   import PlatformArt from '../lib/PlatformArt.svelte';
@@ -27,6 +27,7 @@
   const { platformId }: Props = $props();
 
   const isMock = import.meta.env.VITE_MOCK === '1';
+  const flagChoices: readonly string[] = isMock ? scenarioBrowseFlags() : BROWSE_FLAGS;
   /** Typing pauses this long before the search runs. */
   const SEARCH_DEBOUNCE_MS = 250;
 
@@ -210,7 +211,7 @@
     </label>
     <fieldset class="flags">
       <legend>Require flags</legend>
-      {#each BROWSE_FLAGS as flag (flag)}
+      {#each flagChoices as flag (flag)}
         <label>
           <input
             type="checkbox"
@@ -257,16 +258,18 @@
         {/if}
         <p class="name">{group.pick_name ?? group.name}</p>
         <p class="muted status">{group.have_verified > 0 ? 'Have' : 'Missing'}</p>
-        <button
-          class:primary={group.wanted > 0}
-          disabled={group.pick_id === null}
-          onclick={(e) => {
-            e.preventDefault();
-            void toggleWant(group.parent_id, group.pick_id, group.wanted);
-          }}
-        >
-          {group.wanted > 0 ? 'Wanted' : 'Want'}
-        </button>
+        {#if !group.bios}
+          <button
+            class:primary={group.wanted > 0}
+            disabled={group.pick_id === null}
+            onclick={(e) => {
+              e.preventDefault();
+              void toggleWant(group.parent_id, group.pick_id, group.wanted);
+            }}
+          >
+            {group.wanted > 0 ? 'Wanted' : 'Want'}
+          </button>
+        {/if}
       </a>
     {/each}
   </div>

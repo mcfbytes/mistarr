@@ -79,6 +79,24 @@ test('Play and Want are hidden for a BIOS entry even when its file is present', 
   await expect(page.getByRole('row', { name: /\(Europe\)/ }).getByRole('button', { name: 'Want' })).toHaveCount(1);
 });
 
+test('a title without art shows its poster even after the Snap tab of another', async ({ page }) => {
+  await page.goto('/#/t/1');
+  await page.getByRole('button', { name: 'Snap' }).click();
+  await page.goto('/#/t/9');
+  await expect(page.getByRole('heading', { name: 'Stub Squad' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Snap' })).toHaveCount(0);
+  await expect(page.locator('.art').getByTestId('poster-placeholder').locator('.title')).toHaveText('Stub Squad');
+});
+
+test('a BIOS-only group in Browse offers no Want', async ({ page }) => {
+  await page.goto('/#/p/nes');
+  await page.getByLabel('bios', { exact: true }).check();
+  const cards = page.locator('.grid a.poster');
+  await expect(cards.first()).toContainText('(USA)');
+  expect(await cards.count()).toBeGreaterThan(0);
+  await expect(page.locator('.grid').getByRole('button', { name: /^Want/ })).toHaveCount(0);
+});
+
 test('the status and Want button line up across a row of posters', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto('/#/p/nes');

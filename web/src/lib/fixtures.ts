@@ -1,3 +1,4 @@
+import { BROWSE_FLAGS } from './types';
 import type {
   CoresResult,
   DatVersion,
@@ -120,6 +121,9 @@ function artFor(playlist: string, name: string) {
   };
 }
 
+/** Titles whose id ends in 9 have no cover URL, as a title the thumbnail server lacks. */
+const noArt = (id: number): boolean => id % 10 === 9;
+
 const exampleNames = [
   'Example Quest',
   'Sample Racer',
@@ -180,7 +184,8 @@ export function fixtureTitles(platformId: string, count = 60, filters: TitleFilt
       have_verified: i % 4 === 0 ? 1 : 0,
       wanted: i % 5 === 0 ? 1 : 0,
       has_pick: true,
-      art: artFor(coreDir, name)
+      bios: flags.includes('bios'),
+      art: noArt(i + 1) ? null : artFor(coreDir, name)
     });
   }
   return rows;
@@ -243,7 +248,7 @@ export function fixtureTitle(id: number): TitleDetail {
     platform_id: 'nes',
     base_name: base,
     pick_variant_id: id * 10,
-    art: artFor('Nintendo - Nintendo Entertainment System', name),
+    art: noArt(id) ? null : artFor('Nintendo - Nintendo Entertainment System', name),
     variants: [
       {
         id: id * 10,
@@ -397,6 +402,11 @@ export function scenarioStatus(): SystemStatus {
   return mockScenario() === 'showcase'
     ? { ...fixtureStatus, version: '0.1.0', corename: 'MENU', paused: false, pause_reason: null, waiting: [] }
     : fixtureStatus;
+}
+
+/** Browse's flag choices: the README showcase leaves out the `pirate` DAT tag. */
+export function scenarioBrowseFlags(): readonly string[] {
+  return mockScenario() === 'showcase' ? BROWSE_FLAGS.filter((f) => f !== 'pirate') : BROWSE_FLAGS;
 }
 
 /** Files not identified, by platform, for the Platforms card. */

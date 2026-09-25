@@ -847,6 +847,8 @@ pub struct GroupRow {
     pub wanted: u64,
     /// Whether a pick exists.
     pub has_pick: bool,
+    /// Every live variant is flagged `bios`, so none can be wanted.
+    pub bios: bool,
 }
 
 /// How a search of three or more characters finds its groups; shorter ones always use
@@ -966,12 +968,18 @@ fn page_sql(clause: &Clause, sort: Sort) -> String {
         Sort::Have => "g.have_verified > 0 DESC, g.base_name COLLATE NOCASE, g.parent_id",
         Sort::Recent => "g.newest_id DESC",
     };
+    // Only groups with a BIOS variant look at their variants' flags.
     format!(
         "SELECT g.parent_id, g.platform_id, g.base_name, g.name, g.pick_id, k.name,
-                g.variants, g.have_verified, g.wanted, g.has_pick
+                g.variants, g.have_verified, g.wanted, g.has_pick,
+                CASE WHEN g.flag_union & {bios} = 0 THEN 0 ELSE NOT EXISTS (
+                    SELECT 1 FROM titles v WHERE v.group_root = g.parent_id AND v.retired = 0
+                    AND NOT EXISTS (SELECT 1 FROM title_flags f
+                                    WHERE f.title_id = v.id AND f.flag = 'bios')) END
          FROM title_groups g LEFT JOIN titles k ON k.id = g.pick_id
          WHERE {} ORDER BY {order} LIMIT ? OFFSET ?",
-        clause.sql()
+        clause.sql(),
+        bios = groups::BIOS_BIT
     )
 }
 
@@ -1077,6 +1085,7 @@ pub fn browse_with(
                 have_verified: unsigned(r.get(7)?),
                 wanted: unsigned(r.get(8)?),
                 has_pick: r.get(9)?,
+                bios: r.get(10)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;

@@ -52,9 +52,10 @@ by their tracks, an optional and slower check.
 **Place files the way each core expects them, without getting in the way.**
 Verified files are renamed and moved into the right `games/<Core>` directory
 in the right form: iNES headers, big-endian N64, multi-track discs kept
-together, Neo Geo romset layout, arcade zips beside their MRA. Hashing and
-transfers pause while a core is running, I/O is throttled for the SD card,
-and memory is budgeted for a board with under half a gigabyte to share with
+together, Neo Geo romset layout, arcade zips beside their MRA. While a core
+is running, hashing, scans and placement pause, transfers slow to the rate
+limits you set for that case, and mistarr's I/O drops to the idle class.
+Memory is budgeted for a board with under half a gigabyte to share with
 MiSTer. The activity panel shows what is running, what waits and why.
 
 <picture>

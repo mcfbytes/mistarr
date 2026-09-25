@@ -25,6 +25,7 @@
 
   $effect(() => {
     missingArt.clear();
+    tab = 'boxart';
     clearDetail();
     void loadTitleDetail(titleId);
   });

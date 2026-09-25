@@ -56,15 +56,29 @@ for (const scheme of ['dark', 'light'] as const) {
   }
 }
 
-/** Page tokens per scheme, from `app.css`. */
-const THEME = {
-  dark: { bg: '#14161a', raised: '#1d2026', fg: '#e8e9ec', dim: '#9a9fab', border: '#2c303a', l: 0 },
-  light: { bg: '#f5f6f8', raised: '#ffffff', fg: '#1a1c20', dim: '#5b606b', border: '#dde0e5', l: 1 }
-} as const;
+type Scheme = 'dark' | 'light';
+
+/** The page tokens of `app.css` as the running app computes them for `scheme`. */
+interface Theme {
+  bg: string;
+  fg: string;
+  dim: string;
+  border: string;
+  l: number;
+}
+
+async function theme(page: Page, scheme: Scheme): Promise<Theme> {
+  await page.emulateMedia({ colorScheme: scheme });
+  await page.goto('/?mock=idle#/');
+  const [bg, fg, dim, border] = await page.evaluate(() => {
+    const css = getComputedStyle(document.documentElement);
+    return ['--bg', '--fg', '--fg-dim', '--border'].map((name) => css.getPropertyValue(name).trim());
+  });
+  return { bg: bg ?? '', fg: fg ?? '', dim: dim ?? '', border: border ?? '', l: scheme === 'light' ? 1 : 0 };
+}
 
 /** A page of platform art tiles beside the project name, drawn from the art generator alone. */
-function banner(scheme: keyof typeof THEME, ids: string[], cols: number, big: boolean): string {
-  const t = THEME[scheme];
+function banner(t: Theme, ids: string[], cols: number, big: boolean): string {
   const tiles = ids
     .map((id) => {
       const kind = fixturePlatforms.find((p) => p.id === id)?.kind;
@@ -94,7 +108,7 @@ test.describe('banners', () => {
     test(`hero ${scheme}`, async ({ page }) => {
       test.skip(!dir, 'README_SHOTS_DIR is not set');
       await page.setViewportSize({ width: 1280, height: 400 });
-      await page.setContent(banner(scheme, ['snes', 'gba', 'saturn', 'arcade'], 2, false));
+      await page.setContent(banner(await theme(page, scheme), ['snes', 'gba', 'saturn', 'arcade'], 2, false));
       await page.screenshot({ path: `${dir ?? ''}/hero-${scheme}.png` });
     });
   }
@@ -106,7 +120,7 @@ test.describe('social preview', () => {
   test('social preview', async ({ page }) => {
     test.skip(!dir, 'README_SHOTS_DIR is not set');
     await page.setViewportSize({ width: 1280, height: 640 });
-    await page.setContent(banner('dark', ['nes', 'snes', 'n64', 'gba', 'saturn', 'arcade'], 2, true));
+    await page.setContent(banner(await theme(page, 'dark'), ['nes', 'snes', 'n64', 'gba', 'saturn', 'arcade'], 2, true));
     await page.screenshot({ path: `${dir ?? ''}/social-preview.png` });
   });
 });

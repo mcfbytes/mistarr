@@ -193,7 +193,9 @@ Colours come from `web/src/lib/art/palette.ts`: the hues of the theme tokens
 in `app.css` (accent, ok, warn) and a few that harmonise with them. Each
 family has a base hue, and most mapped ids set their own hue so siblings read
 apart: the colour handhelds get distinct hues, the monochrome ones muted
-slate, sepia, grey-blue or teal tints. No hue is chosen to match a
+slate, sepia, grey-blue or teal tints. Handhelds sold in a range of bold
+shell colours (gba, gbc, pokemini) take muted sage, brick and slate tones,
+so no body reads as one of those shells. No hue is chosen to match a
 manufacturer's branding, and no LCD uses a pea-green tint. A PRNG seeded by
 the id shifts the hue slightly and drives every other choice, so the same id
 always draws the same art. Every colour slot runs from a dark value to a
