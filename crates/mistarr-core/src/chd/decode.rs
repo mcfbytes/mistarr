@@ -124,7 +124,8 @@ impl<R: Read + Seek> Decoder<R> {
     /// or a parent, [`ChdError::Io`] when the reader fails.
     pub fn new(mut r: R, header: Header, layout: Layout) -> Result<Self, ChdError> {
         let file_size = r.seek(SeekFrom::End(0))?;
-        let map = map::read_map(&mut r, &header, file_size)?;
+        let mut map = map::read_map(&mut r, &header, file_size)?;
+        map::flatten_copies(&mut map);
         let hunk = header.hunk_bytes as usize;
         let codecs = header.compressors.map(|c| c.and_then(Codec::from_fourcc));
         let frames = (header.hunk_bytes / FRAME_BYTES) as usize;
@@ -217,7 +218,7 @@ impl<R: Read + Seek> Decoder<R> {
         let MapEntry::Copy(mut target) = entry else {
             return self.src.stored(index, entry, &mut self.out);
         };
-        // Copy targets strictly decrease, so this ends; chdman only writes depth 1.
+        // The map was flattened, so a copy's target is stored; the loop guards that.
         let mut target_entry = self.entry(u64::from(target))?;
         while let MapEntry::Copy(t) = target_entry {
             if t >= target {

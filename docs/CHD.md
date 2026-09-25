@@ -278,8 +278,9 @@ writes `v1` then `v2`. The tables are computed at compile time.
 return at hunk boundaries. Each decoded hunk, clipped to the logical size,
 feeds a running raw SHA1; each frame inside a track feeds that track's CRC32,
 MD5 and SHA1 (audio byte-swapped), and pad frames are skipped. One track's
-hashers are alive at a time. Copies are resolved to their first stored hunk,
-with the last one kept. `finish` checks that every hunk was decoded, that
+hashers are alive at a time. When the map is read, every copy is pointed at
+the stored hunk its chain ends on, in one pass, so decoding a copy reads at
+most one hunk; the last hunk copied is kept. `finish` checks that every hunk was decoded, that
 the raw SHA1 matches the header, and that the combined SHA1 over it and the
 metadata matches too, so the hashed bytes are the bytes the image's author
 hashed. How tracks are split and their byte order are not covered by any

@@ -88,6 +88,18 @@ fn read_plain<R: Read>(r: &mut R, h: &Header, file_size: u64) -> Result<Vec<MapE
     Ok(out)
 }
 
+/// Points every copy at the stored hunk its chain ends on, in one pass: a copy's target
+/// comes before it, so that target already points at a stored hunk.
+pub(crate) fn flatten_copies(map: &mut [MapEntry]) {
+    for i in 0..map.len() {
+        if let MapEntry::Copy(t) = map[i] {
+            if let Some(&MapEntry::Copy(end)) = map.get(t as usize) {
+                map[i] = MapEntry::Copy(end);
+            }
+        }
+    }
+}
+
 /// Bytes of compressed map accepted for `hunks` hunks: 56 bits a hunk plus the tree.
 pub(crate) fn max_map_bytes(hunks: u64) -> u64 {
     hunks * 8 + 64
@@ -495,6 +507,21 @@ pub(crate) mod tests {
                 MapEntry::Copy(2)
             ]
         );
+    }
+
+    #[test]
+    fn copy_chains_flatten_to_their_stored_hunk() {
+        let raw = MapEntry::Raw {
+            offset: 0,
+            crc: None,
+        };
+        let mut map = vec![raw, MapEntry::Copy(0)];
+        map.extend((1..6).map(MapEntry::Copy));
+        map.push(raw);
+        map.push(MapEntry::Copy(7));
+        flatten_copies(&mut map);
+        assert!(map[1..7].iter().all(|e| *e == MapEntry::Copy(0)));
+        assert_eq!(map[8], MapEntry::Copy(7));
     }
 
     fn one_type(
