@@ -27,52 +27,56 @@ export interface Art {
 
 /**
  * Per id: its family, then an optional hue, saturation scale and secondary hue
- * offset. Siblings take compositions in this order; see `layout`.
+ * offset. Siblings take compositions in this order; see `layout`. A Map, so ids
+ * such as `constructor` or `__proto__` never reach Object.prototype.
  */
-const PLATFORMS: Readonly<Record<string, readonly [ArtFamily, number?, number?, number?]>> = {
-  nes: ['pixel', 176],
-  fds: ['pixel', 256],
-  sms: ['pixel', HUE.warn, 1, -30],
-  sg1000: ['pixel', 212],
-  atari7800: ['pixel', 140],
-  coleco: ['pixel', 330],
-  intv: ['pixel', HUE.coral],
-  pce: ['pixel', 292],
-  sgx: ['pixel', 92, 0.9, -32],
-  sv: ['pixel', 230, 0.4],
-  snes: ['parallax', 205, 1, 80],
-  megadrive: ['parallax', 30, 1, 40],
-  s32x: ['parallax', HUE.violet, 1, 74],
-  atari2600: ['bands', 200, 1, 70],
-  atari5200: ['bands', HUE.teal, 1, -30],
-  vectrex: ['vector'],
-  gb: ['lcd', 225, 0.34],
-  ngp: ['lcd', 32, 0.4],
-  gbc: ['lcd', HUE.rose],
-  ws: ['lcd', 205, 0.5],
-  pokemini: ['lcd', HUE.teal, 0.42],
-  gg: ['lcd', 196],
-  gba: ['lcd', HUE.violet],
-  lynx: ['lcd', HUE.warn],
-  wsc: ['lcd', HUE.coral],
-  psx: ['disc', 240],
-  saturn: ['disc', 192],
-  megacd: ['disc', 318],
-  pcecd: ['disc', 28],
-  neocd: ['disc', 150],
-  n64: ['poly'],
-  arcade: ['marquee', HUE.rose],
-  neogeo: ['marquee', 250, 1, 90]
-};
+const PLATFORMS: ReadonlyMap<string, readonly [ArtFamily, number?, number?, number?]> = new Map(
+  Object.entries({
+    nes: ['pixel', 176],
+    fds: ['pixel', 256],
+    sms: ['pixel', HUE.warn, 1, -30],
+    sg1000: ['pixel', 212],
+    atari7800: ['pixel', 140],
+    coleco: ['pixel', 330],
+    intv: ['pixel', HUE.coral],
+    pce: ['pixel', 292],
+    sgx: ['pixel', 92, 0.9, -32],
+    sv: ['pixel', 230, 0.4],
+    snes: ['parallax', 205, 1, -40],
+    megadrive: ['parallax', 30, 1, 40],
+    s32x: ['parallax', HUE.violet, 1, 74],
+    atari2600: ['bands', 200, 1, 70],
+    atari5200: ['bands', HUE.teal, 1, -30],
+    vectrex: ['vector'],
+    gb: ['lcd', 168, 0.55, 30],
+    ngp: ['lcd', 32, 0.4],
+    gbc: ['lcd', HUE.rose],
+    ws: ['lcd', 205, 0.5],
+    pokemini: ['lcd', 300, 0.45],
+    gg: ['lcd', 196],
+    gba: ['lcd', HUE.violet],
+    lynx: ['lcd', HUE.warn],
+    wsc: ['lcd', HUE.coral],
+    psx: ['disc', 240],
+    saturn: ['disc', 192],
+    megacd: ['disc', 318],
+    pcecd: ['disc', 28],
+    neocd: ['disc', 150],
+    n64: ['poly'],
+    arcade: ['marquee', HUE.rose],
+    neogeo: ['marquee', 250, 1, 90]
+  } satisfies Record<string, readonly [ArtFamily, number?, number?, number?]>)
+);
 
-const FAMILY_BY_KIND: Readonly<Record<PlatformKind, ArtFamily>> = {
-  cartridge: 'pixel',
-  disc: 'disc',
-  computer: 'phosphor',
-  romset: 'marquee',
-  arcade: 'marquee',
-  other: 'contour'
-};
+/** Keyed by string: the server may send a kind this client does not know. */
+const FAMILY_BY_KIND: ReadonlyMap<string, ArtFamily> = new Map([
+  ['cartridge', 'pixel'],
+  ['disc', 'disc'],
+  ['computer', 'phosphor'],
+  ['romset', 'marquee'],
+  ['arcade', 'marquee'],
+  ['other', 'contour']
+]);
 
 /** Per family: base hue, secondary and tertiary offsets, hue spread either way, saturation. */
 const TONES: Readonly<Record<ArtFamily, readonly [number, number, number, number, number]>> = {
@@ -96,7 +100,7 @@ const SIZE: Readonly<Record<ArtFormat, readonly [number, number]>> = {
 
 /** The family an id draws with: its own mapping, else its kind's, else the default. */
 export function familyFor(id: string, kind?: PlatformKind): ArtFamily {
-  return PLATFORMS[id]?.[0] ?? (kind ? FAMILY_BY_KIND[kind] : 'contour');
+  return PLATFORMS.get(id)?.[0] ?? FAMILY_BY_KIND.get(kind ?? '') ?? 'contour';
 }
 
 /** FNV-1a over the UTF-16 code units of `text`. */
@@ -155,10 +159,10 @@ function pick<T>(c: Canvas, items: readonly [T, ...T[]]): T {
 
 /** A composition for the canvas: mapped siblings take turns through `shapes`, others pick one. */
 function layout<T>(c: Canvas, shapes: readonly [T, ...T[]]): T {
-  const family = PLATFORMS[c.id]?.[0];
-  const turn = Object.keys(PLATFORMS)
-    .filter((k) => PLATFORMS[k]?.[0] === family)
-    .indexOf(c.id);
+  const family = PLATFORMS.get(c.id)?.[0];
+  const turn = [...PLATFORMS]
+    .filter(([, own]) => own[0] === family)
+    .findIndex(([k]) => k === c.id);
   return turn < 0 ? pick(c, shapes) : (shapes[turn % shapes.length] ?? shapes[0]);
 }
 
@@ -654,7 +658,7 @@ export function renderArt(id: string, kind: PlatformKind | undefined, format: Ar
   const family = familyFor(id, kind);
   const [base, second, third, spread, sat] = TONES[family];
   const rand = prng(hash(`${family}:${id}`));
-  const [, hue, idSat = 1, idSecond = second] = PLATFORMS[id] ?? [];
+  const [, hue, idSat = 1, idSecond = second] = PLATFORMS.get(id) ?? [];
   const primary = (hue ?? base) + (rand() * 2 - 1) * (hue === undefined ? spread : 6);
   const hues: Hues = {
     primary,

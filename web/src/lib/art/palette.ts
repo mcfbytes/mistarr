@@ -18,9 +18,12 @@ export interface Hues {
   tertiary: number;
 }
 
-// Per slot: hue (primary, secondary, tertiary, their midpoint, beyond the secondary), then
-// dark saturation and lightness, then light. Slots: 0-1 background, 2-3 fills, 4 line,
-// 5 tertiary, 6-7 ramp, 8 silhouette ink, 9-10 hardware body and panels.
+/**
+ * Per slot: hue (primary, secondary, tertiary, their midpoint, beyond the
+ * secondary), then dark saturation and lightness, then light. Slots: 0-1
+ * background, 2-3 fills, 4 line, 5 tertiary, 6-7 ramp, 8 silhouette ink, 9-10
+ * hardware body and panels.
+ */
 const SLOT: readonly (readonly [number, number, number, number, number])[] = [
   [0, 30, 8, 45, 97],
   [1, 34, 15, 55, 88],
@@ -31,18 +34,18 @@ const SLOT: readonly (readonly [number, number, number, number, number])[] = [
   [3, 58, 44, 64, 67],
   [4, 60, 54, 70, 58],
   [0, 32, 6, 28, 52],
-  [0, 40, 14, 45, 84],
-  [0, 34, 22, 40, 93]
+  [0, 40, 14, 62, 82],
+  [0, 34, 22, 52, 92]
 ];
 
-/** Number of colour slots a generator may use, `--c0` to `--c8`. */
+/** Number of colour slots a generator may use, `--c0` to `--c10`. */
 export const SLOTS = SLOT.length;
 
 /** `from` at `--l: 0`, `to` at `--l: 1`, as a CSS percentage. */
 const mix = (from: number, to: number): string => `calc(${from}% + ${to - from}% * var(--l))`;
 
 /**
- * Custom properties `--c0` to `--c8`, each slot's colour running from its dark
+ * Custom properties `--c0` to `--c10`, each slot's colour running from its dark
  * value at `--l: 0` to its light value at `--l: 1`; `sat` scales saturation.
  */
 export function slotVars(hues: Hues, sat: number): string {

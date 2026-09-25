@@ -3,6 +3,7 @@ import { familyFor, platformArt, renderArt, type ArtFormat } from '../src/lib/ar
 import { hardware } from '../src/lib/art/hardware';
 import { SLOTS, slotVars } from '../src/lib/art/palette';
 import { fixturePlatforms } from '../src/lib/fixtures';
+import type { PlatformKind } from '../src/lib/types';
 
 const ids = [
   'nes', 'fds', 'snes', 'n64', 'gb', 'gbc', 'gba', 'megadrive', 's32x', 'sms', 'gg', 'sg1000',
@@ -10,6 +11,10 @@ const ids = [
   'ngp', 'vectrex', 'pokemini', 'sv', 'psx', 'saturn', 'megacd', 'pcecd', 'neocd', 'neogeo', 'arcade'
 ];
 const formats: ArtFormat[] = ['card', 'wide'];
+/** Ids that name Object.prototype members, which a plain object lookup would find. */
+const prototypeIds = ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__proto__'];
+/** A run of well-formed tags whose attribute values hold no `<`, `>` or quote. */
+const WELL_FORMED = /^(?:<\/?[a-zA-Z]+(?: [a-zA-Z][a-zA-Z0-9-]*="[^"<>']*")*\/?>)+$/;
 
 test('each platform maps to its family, then its kind, then the default', () => {
   expect(familyFor('nes', 'cartridge')).toBe('pixel');
@@ -76,7 +81,32 @@ test('art is memoised and stays small, local and free of script', () => {
       expect(art.svg).not.toMatch(/<script|on[a-z]+=|href=|https?:\/\/(?!www\.w3\.org\/2000\/svg)/);
     }
   }
-  expect(renderArt('a"><x', undefined, 'card').svg).not.toContain('"><x');
+});
+
+test('no input character can escape into the markup', () => {
+  for (const id of [...ids, 'a"><x onload=\'1\'>&', `x'<script>`, ...prototypeIds]) {
+    for (const format of formats) {
+      const { svg } = renderArt(id, undefined, format);
+      expect(svg, id).toMatch(WELL_FORMED);
+      expect(svg, id).not.toMatch(/&|<x|<script/);
+    }
+  }
+});
+
+test('ids naming prototype members and unknown kinds draw the defaults', () => {
+  const box = hardware('mystery');
+  for (const id of prototypeIds) {
+    expect(familyFor(id), id).toBe('contour');
+    expect(hardware(id), id).toBe(box);
+    for (const format of formats) {
+      expect(renderArt(id, undefined, format).svg, id).toContain('<g class="hw"');
+    }
+  }
+  const future = 'handheld' as unknown as PlatformKind;
+  expect(familyFor('newboard', future)).toBe('contour');
+  expect(hardware('newboard', future)).toBe(box);
+  expect(renderArt('newboard', future, 'card').family).toBe('contour');
+  expect(familyFor('constructor', future)).toBe('contour');
 });
 
 test('each console stays small and unknown ids fall back to a generic form', () => {
@@ -114,6 +144,17 @@ test('each platform card shows its art, hidden from assistive tech', async ({ pa
   expect(tree).not.toMatch(/img|graphics/);
   expect(tree).toContain('heading "Nintendo Entertainment System"');
 });
+
+for (const id of prototypeIds) {
+  test(`the Browse screen renders for the id ${id}`, async ({ page }) => {
+    const errors: string[] = [];
+    page.on('pageerror', (err) => errors.push(err.message));
+    await page.goto(`/#/p/${id}`);
+    await expect(page.getByRole('heading', { level: 1, name: id })).toBeVisible();
+    await expect(page.locator('.head [data-art-family="contour"] svg')).toHaveCount(1);
+    expect(errors).toEqual([]);
+  });
+}
 
 test('the Browse header shows the platform art above the name', async ({ page }) => {
   await page.goto('/#/p/nes');

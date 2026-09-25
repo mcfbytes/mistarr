@@ -40,13 +40,14 @@ holds scans and imports, or the user's Pause, which also holds DAT and source
 imports), which ones, and a Run now button that calls `POST /system/resume`.
 
 **Platforms** (`/`). One card per platform with core present, counts, and a
-scan button, below a banner of the platform's art. Platforms whose core is absent are in a collapsed section. While
-the wizard reports a missing DAT, client or source, a "Setup not finished"
-card lists what is missing and links to the wizard.
+scan button, below a banner of the platform's art. Platforms whose core is
+absent are in a collapsed section. While the wizard reports a missing DAT,
+client or source, a "Setup not finished" card lists what is missing and
+links to the wizard.
 
 **Browse** (`/p/{id}`). A Start core button beside the platform name,
-except on arcade, both below a banner of the platform's art. Poster grid of `title_groups`, cover from the libretro
-URL with a placeholder on 404. Filters: search, have / missing / wanted,
+except on arcade, both below a banner of the platform's art. Poster grid of
+`title_groups`, cover from the libretro URL with a placeholder on 404. Filters: search, have / missing / wanted,
 region, a "Show hidden" checkbox, and a flags multi-select that requires
 every checked flag. Each card shows the 1G1R pick name, a have indicator, and
 a want toggle. Infinite scroll in pages of 60. Search runs 250 ms after

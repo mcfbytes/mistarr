@@ -168,169 +168,172 @@ function tunnel(x: number, y: number): string {
   return path(d, ' style="fill:none;stroke-opacity:.9"');
 }
 
-const HARDWARE: Readonly<Record<string, Hardware>> = {
-  nes: [
-    100,
-    36,
-    rect(0, 0, 100, 36, 2) +
-      rect(34, 4, 62, 14, 1, FACE) +
-      vents(34, 23, 62, 3, 4) +
-      path('M30 3V33', LINE) +
-      rect(8, 6, 9, 4, 1, KEY) +
-      rect(19, 6, 9, 4, 1, KEY) +
-      slot(8, 24, 9, 6) +
-      slot(19, 24, 9, 6)
-  ],
-  fds: [
-    90,
-    40,
-    rect(22, 0, 46, 22, 1, FACE) +
-      slot(38, 3, 14, 8) +
-      rect(0, 14, 90, 26, 3) +
-      slot(18, 12, 54, 4) +
-      rect(74, 30, 10, 4, 1, KEY) +
-      keys(1.6, [10, 32])
-  ],
-  sms: [
-    100,
-    34,
-    path('M0 34V18L16 6H100V34Z') + rect(0, 20, 100, 5, 0, FACE) + slot(44, 9, 40, 4) + slot(56, 28, 26, 3) + keys(2.2, [10, 29], [18, 29])
-  ],
-  sg1000: [90, 34, path('M0 34V14H26V4H90V34Z') + slot(40, 7, 40, 4) + vents(6, 20, 78, 3, 4) + keys(2.2, [8, 9], [16, 9])],
-  atari7800: [
-    100,
-    30,
-    path('M0 30V16L12 4H88L100 16V30Z') +
-      slot(34, 7, 32, 4) +
-      rect(0, 17, 100, 4, 0, FACE) +
-      rect(14, 24, 8, 3, 1, KEY) +
-      rect(26, 24, 8, 3, 1, KEY) +
-      slot(70, 23, 8, 5) +
-      slot(82, 23, 8, 5)
-  ],
-  coleco: [
-    100,
-    44,
-    rect(0, 0, 100, 44, 3) +
-      rect(6, 6, 22, 32, 2, FACE) +
-      grid(10, 16, 3, 4, 3.5, 1.5) +
-      keys(3, [17, 11], [43, 11]) +
-      rect(32, 6, 22, 32, 2, FACE) +
-      grid(36, 16, 3, 4, 3.5, 1.5) +
-      slot(62, 6, 32, 5) +
-      vents(62, 18, 32, 5, 4)
-  ],
-  intv: [
-    110,
-    40,
-    rect(0, 0, 110, 40, 3) +
-      rect(6, 5, 20, 30, 2, FACE) +
-      grid(9.5, 8, 3, 4, 3, 1.2) +
-      rect(30, 5, 20, 30, 2, FACE) +
-      grid(33.5, 8, 3, 4, 3, 1.2) +
-      circle(16, 29, 4, LINE) +
-      circle(40, 29, 4, LINE) +
-      vents(58, 8, 44, 7, 3.6)
-  ],
-  pce: [60, 40, rect(0, 4, 60, 36, 3) + rect(6, 0, 48, 8, 2, FACE) + slot(14, 16, 32, 3) + vents(8, 26, 44, 3, 3.5)],
-  sgx: [90, 44, path('M0 44V14L14 2H76L90 14V44Z') + slot(24, 18, 42, 3) + vents(8, 28, 74, 3, 4) + rect(66, 6, 10, 4, 1, KEY)],
-  sv: [
-    60,
-    76,
-    rect(0, 0, 60, 76, 8) + screen(8, 6, 44, 34) + path('M2 45H58', LINE) + dpad(16, 60, 14) + keys(3.4, [42, 62], [50, 55])
-  ],
-  snes: [
-    100,
-    38,
-    rect(0, 8, 100, 30, 8) +
-      rect(28, 0, 44, 16, 5, FACE) +
-      slot(36, 4, 28, 4) +
-      rect(8, 15, 12, 5, 2, KEY) +
-      rect(80, 15, 12, 5, 2, KEY) +
-      keys(2.6, [18, 30]) +
-      slot(34, 28, 9, 6) +
-      slot(57, 28, 9, 6)
-  ],
-  megadrive: dome(false),
-  s32x: dome(true),
-  n64: [
-    100,
-    40,
-    path('M0 40V24Q0 16 8 16H28L34 4H66L72 16H92Q100 16 100 24V40Z') +
-      slot(40, 8, 20, 4) +
-      slot(14, 30, 10, 6) +
-      slot(34, 30, 10, 6) +
-      slot(56, 30, 10, 6) +
-      slot(76, 30, 10, 6)
-  ],
-  atari2600: [
-    100,
-    36,
-    rect(0, 20, 100, 16, 2) +
-      rect(18, 6, 64, 16, 2, FACE) +
-      slot(34, 9, 32, 4) +
-      vents(22, 16, 56, 2, 3) +
-      rect(6, 25, 5, 7, 1, KEY) +
-      rect(15, 25, 5, 7, 1, KEY) +
-      rect(80, 25, 5, 7, 1, KEY) +
-      rect(89, 25, 5, 7, 1, KEY)
-  ],
-  atari5200: [
-    100,
-    40,
-    path('M0 40V20L22 4H100V40Z') + slot(40, 8, 52, 6) + rect(0, 24, 100, 4, 0, FACE) + vents(30, 32, 64, 2, 3.5) + keys(2.2, [10, 33])
-  ],
-  vectrex: [
-    64,
-    100,
-    rect(0, 0, 64, 86, 4) +
-      rect(6, 6, 52, 62, 2, ' style="fill:#000;fill-opacity:.75;stroke-opacity:.5"') +
-      tunnel(32, 37) +
-      vents(12, 74, 40, 3, 3.5) +
-      rect(8, 88, 48, 12, 2, FACE) +
-      keys(3, [17, 94]) +
-      keys(1.8, [32, 94], [38, 94], [44, 94], [50, 94])
-  ],
-  gb: pocket(true),
-  gbc: pocket(false),
-  gba: slab(104, 56, 26, 44),
-  gg: slab(112, 58, 12, 50),
-  lynx: slab(136, 52, 11, 60),
-  ngp: [
-    96,
-    60,
-    rect(0, 0, 96, 60, 22) + screen(28, 6, 42, 40) + circle(15, 30, 8, FACE) + keys(4, [15, 30]) + keys(4, [80, 34], [88, 26])
-  ],
-  ws: swan(56, 8),
-  wsc: swan(60, 12),
-  pokemini: [
-    62,
-    66,
-    rect(0, 0, 62, 66, 16) + screen(10, 6, 42, 30) + dpad(17, 50, 12) + keys(5, [44, 47]) + keys(2.6, [36, 58], [52, 58])
-  ],
-  psx: tray(100, 72, 5, 62, keys(3.5, [18, 14], [18, 26]) + keys(5, [18, 42])),
-  saturn: tray(104, 68, 12, 48, slot(24, 3, 56, 4) + keys(3, [90, 22], [90, 32], [90, 42])),
-  megacd: tray(112, 60, 6, 78, circle(28, 26, 15, FACE) + slot(18, 23, 20, 5)),
-  pcecd: tray(80, 70, 4, 40, slot(24, 66, 32, 2) + keys(2.6, [70, 10])),
-  neocd: tray(106, 64, 6, 36, rect(70, 8, 28, 44, 3, FACE) + keys(3.5, [84, 18], [84, 30], [84, 42])),
-  arcade: CABINET,
-  neogeo: [
-    120,
-    48,
-    rect(0, 18, 78, 30, 3) +
-      rect(10, 12, 58, 8, 2, FACE) +
-      slot(14, 14, 50, 3) +
-      vents(8, 30, 62, 3, 4) +
-      rect(84, 30, 36, 18, 3, FACE) +
-      path('M94 30V12', ' style="stroke-width:3"') +
-      keys(5, [94, 10]) +
-      keys(2.6, [102, 40], [109, 40], [116, 40])
-  ]
-};
+/** Drawings per id; a Map, so ids such as `constructor` never reach Object.prototype. */
+const HARDWARE: ReadonlyMap<string, Hardware> = new Map(
+  Object.entries({
+    nes: [
+      100,
+      36,
+      rect(0, 0, 100, 36, 2) +
+        rect(34, 4, 62, 14, 1, FACE) +
+        vents(34, 23, 62, 3, 4) +
+        path('M30 3V33', LINE) +
+        rect(8, 6, 9, 4, 1, KEY) +
+        rect(19, 6, 9, 4, 1, KEY) +
+        slot(8, 24, 9, 6) +
+        slot(19, 24, 9, 6)
+    ],
+    fds: [
+      90,
+      40,
+      rect(22, 0, 46, 22, 1, FACE) +
+        slot(38, 3, 14, 8) +
+        rect(0, 14, 90, 26, 3) +
+        slot(18, 12, 54, 4) +
+        rect(74, 30, 10, 4, 1, KEY) +
+        keys(1.6, [10, 32])
+    ],
+    sms: [
+      100,
+      34,
+      path('M0 34V18L16 6H100V34Z') + rect(0, 20, 100, 5, 0, FACE) + slot(44, 9, 40, 4) + slot(56, 28, 26, 3) + keys(2.2, [10, 29], [18, 29])
+    ],
+    sg1000: [90, 34, path('M0 34V14H26V4H90V34Z') + slot(40, 7, 40, 4) + vents(6, 20, 78, 3, 4) + keys(2.2, [8, 9], [16, 9])],
+    atari7800: [
+      100,
+      30,
+      path('M0 30V16L12 4H88L100 16V30Z') +
+        slot(34, 7, 32, 4) +
+        rect(0, 17, 100, 4, 0, FACE) +
+        rect(14, 24, 8, 3, 1, KEY) +
+        rect(26, 24, 8, 3, 1, KEY) +
+        slot(70, 23, 8, 5) +
+        slot(82, 23, 8, 5)
+    ],
+    coleco: [
+      100,
+      44,
+      rect(0, 0, 100, 44, 3) +
+        rect(6, 6, 22, 32, 2, FACE) +
+        grid(10, 16, 3, 4, 3.5, 1.5) +
+        keys(3, [17, 11], [43, 11]) +
+        rect(32, 6, 22, 32, 2, FACE) +
+        grid(36, 16, 3, 4, 3.5, 1.5) +
+        slot(62, 6, 32, 5) +
+        vents(62, 18, 32, 5, 4)
+    ],
+    intv: [
+      110,
+      40,
+      rect(0, 0, 110, 40, 3) +
+        rect(6, 5, 20, 30, 2, FACE) +
+        grid(9.5, 8, 3, 4, 3, 1.2) +
+        rect(30, 5, 20, 30, 2, FACE) +
+        grid(33.5, 8, 3, 4, 3, 1.2) +
+        circle(16, 29, 4, LINE) +
+        circle(40, 29, 4, LINE) +
+        vents(58, 8, 44, 7, 3.6)
+    ],
+    pce: [60, 40, rect(0, 4, 60, 36, 3) + rect(6, 0, 48, 8, 2, FACE) + slot(14, 16, 32, 3) + vents(8, 26, 44, 3, 3.5)],
+    sgx: [90, 44, path('M0 44V14L14 2H76L90 14V44Z') + slot(24, 18, 42, 3) + vents(8, 28, 74, 3, 4) + rect(66, 6, 10, 4, 1, KEY)],
+    sv: [
+      60,
+      76,
+      rect(0, 0, 60, 76, 8) + screen(8, 6, 44, 34) + path('M2 45H58', LINE) + dpad(16, 60, 14) + keys(3.4, [42, 62], [50, 55])
+    ],
+    snes: [
+      100,
+      38,
+      rect(0, 8, 100, 30, 8) +
+        rect(28, 0, 44, 16, 5, FACE) +
+        slot(36, 4, 28, 4) +
+        rect(8, 15, 12, 5, 2, KEY) +
+        rect(80, 15, 12, 5, 2, KEY) +
+        keys(2.6, [18, 30]) +
+        slot(34, 28, 9, 6) +
+        slot(57, 28, 9, 6)
+    ],
+    megadrive: dome(false),
+    s32x: dome(true),
+    n64: [
+      100,
+      40,
+      path('M0 40V24Q0 16 8 16H28L34 4H66L72 16H92Q100 16 100 24V40Z') +
+        slot(40, 8, 20, 4) +
+        slot(14, 30, 10, 6) +
+        slot(34, 30, 10, 6) +
+        slot(56, 30, 10, 6) +
+        slot(76, 30, 10, 6)
+    ],
+    atari2600: [
+      100,
+      36,
+      rect(0, 20, 100, 16, 2) +
+        rect(18, 6, 64, 16, 2, FACE) +
+        slot(34, 9, 32, 4) +
+        vents(22, 16, 56, 2, 3) +
+        rect(6, 25, 5, 7, 1, KEY) +
+        rect(15, 25, 5, 7, 1, KEY) +
+        rect(80, 25, 5, 7, 1, KEY) +
+        rect(89, 25, 5, 7, 1, KEY)
+    ],
+    atari5200: [
+      100,
+      40,
+      path('M0 40V20L22 4H100V40Z') + slot(40, 8, 52, 6) + rect(0, 24, 100, 4, 0, FACE) + vents(30, 32, 64, 2, 3.5) + keys(2.2, [10, 33])
+    ],
+    vectrex: [
+      64,
+      100,
+      rect(0, 0, 64, 86, 4) +
+        rect(6, 6, 52, 62, 2, ' style="fill:#000;fill-opacity:.75;stroke-opacity:.5"') +
+        tunnel(32, 37) +
+        vents(12, 74, 40, 3, 3.5) +
+        rect(8, 88, 48, 12, 2, FACE) +
+        keys(3, [17, 94]) +
+        keys(1.8, [32, 94], [38, 94], [44, 94], [50, 94])
+    ],
+    gb: pocket(true),
+    gbc: pocket(false),
+    gba: slab(104, 56, 26, 44),
+    gg: slab(112, 58, 12, 50),
+    lynx: slab(136, 52, 11, 60),
+    ngp: [
+      96,
+      60,
+      rect(0, 0, 96, 60, 22) + screen(28, 6, 42, 40) + circle(15, 30, 8, FACE) + keys(4, [15, 30]) + keys(4, [80, 34], [88, 26])
+    ],
+    ws: swan(56, 8),
+    wsc: swan(60, 12),
+    pokemini: [
+      62,
+      66,
+      rect(0, 0, 62, 66, 16) + screen(10, 6, 42, 30) + dpad(17, 50, 12) + keys(5, [44, 47]) + keys(2.6, [36, 58], [52, 58])
+    ],
+    psx: tray(100, 72, 5, 62, keys(3.5, [18, 14], [18, 26]) + keys(5, [18, 42])),
+    saturn: tray(104, 68, 12, 48, slot(24, 3, 56, 4) + keys(3, [90, 22], [90, 32], [90, 42])),
+    megacd: tray(112, 60, 6, 78, circle(28, 26, 15, FACE) + slot(18, 23, 20, 5)),
+    pcecd: tray(80, 70, 4, 40, slot(24, 66, 32, 2) + keys(2.6, [70, 10])),
+    neocd: tray(106, 64, 6, 36, rect(70, 8, 28, 44, 3, FACE) + keys(3.5, [84, 18], [84, 30], [84, 42])),
+    arcade: CABINET,
+    neogeo: [
+      120,
+      48,
+      rect(0, 18, 78, 30, 3) +
+        rect(10, 12, 58, 8, 2, FACE) +
+        slot(14, 14, 50, 3) +
+        vents(8, 30, 62, 3, 4) +
+        rect(84, 30, 36, 18, 3, FACE) +
+        path('M94 30V12', ' style="stroke-width:3"') +
+        keys(5, [94, 10]) +
+        keys(2.6, [102, 40], [109, 40], [116, 40])
+    ]
+  } satisfies Record<string, Hardware>)
+);
 
 /** The drawing for platform `id`: its own, else a generic form for its kind. */
 export function hardware(id: string, kind?: PlatformKind): Hardware {
-  const own = HARDWARE[id];
+  const own = HARDWARE.get(id);
   if (own) {
     return own;
   }
