@@ -99,7 +99,9 @@
   {:else if route.name === 'sources'}
     <Sources />
   {:else if route.name === 'source'}
-    <SourceDetail sourceId={Number(route.params.id ?? 0)} />
+    {#key route.params.id}
+      <SourceDetail sourceId={Number(route.params.id ?? 0)} />
+    {/key}
   {:else if route.name === 'dats'}
     <Dats />
   {:else if route.name === 'system'}

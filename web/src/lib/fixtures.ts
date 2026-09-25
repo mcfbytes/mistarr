@@ -531,7 +531,8 @@ export const fixtureSources: Source[] = [
     client_id: 'abc123',
     added_at: 1_770_010_000,
     suggested_platform_id: 'nes',
-    user_binding: false
+    user_binding: false,
+    pending_binding: null
   },
   {
     id: 2,
@@ -549,7 +550,8 @@ export const fixtureSources: Source[] = [
     client_id: null,
     added_at: 1_770_020_000,
     suggested_platform_id: 'gb',
-    user_binding: false
+    user_binding: false,
+    pending_binding: null
   }
 ];
 
@@ -710,7 +712,7 @@ export function mockSourcePreview(source: Source): SourcePreview {
             : (i * 7) % 4
     }))
     .sort((a, b) => b.matched - a.matched || a.platform_id.localeCompare(b.platform_id));
-  return { total: source.file_count, platforms };
+  return { total: source.file_count, sampled: source.file_count, platforms };
 }
 
 export const fixtureDownloads: Download[] = [

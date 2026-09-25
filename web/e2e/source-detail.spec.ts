@@ -72,6 +72,8 @@ test('re-classify previews, runs as a job and marks the source as set by you', a
   await expect(panel.getByText(/^Binding to Sega Mega Drive would match \d+ of 240 files\./)).toBeVisible();
   await panel.getByRole('button', { name: 'Bind to Sega Mega Drive' }).click();
   await expect(panel).toHaveCount(0);
+  await expect(open).toBeFocused();
+  await expect(page.getByText('Binding to Sega Mega Drive…', { exact: true })).toBeVisible();
 
   // The job shows on the page and in the activity panel while it runs.
   await expect(page.getByRole('progressbar', { name: 'Binding progress' })).toHaveAttribute(
@@ -111,7 +113,39 @@ test('marking a source as not a game set, then Reset to automatic', async ({ pag
   await page.getByRole('button', { name: 'Reset to automatic' }).click();
   await expect(page.getByTestId('overridden')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Reset to automatic' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Re-classify…' })).toBeFocused();
+  await expect(page.getByText('Returning to automatic binding…')).toBeVisible();
   await expect(page.getByText(/^Bound to Nintendo Entertainment System automatically\./)).toBeVisible({
     timeout: 5000
   });
+});
+
+test('Cancel closes Re-classify and puts focus back on its button', async ({ page }) => {
+  await openFromList(page);
+  const open = page.getByRole('button', { name: 'Re-classify…' });
+  await open.click();
+  const panel = page.getByRole('region', { name: 'Re-classify' });
+  await panel.getByRole('radio', { name: /Sega Saturn/ }).check();
+  await panel.getByRole('button', { name: 'Cancel' }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(open).toBeFocused();
+  await expect(open).toHaveAttribute('aria-expanded', 'false');
+});
+
+test('going from one source straight to another starts the page afresh', async ({ page }) => {
+  await openFromList(page);
+  await page.getByRole('button', { name: 'Unmatched' }).click();
+  await expect(page.getByText(/^Files 1–2 of 2$/)).toBeVisible();
+  await page.getByRole('button', { name: 'Re-classify…' }).click();
+  await page.getByRole('region', { name: 'Re-classify' }).getByRole('radio', { name: /Sega Saturn/ }).check();
+
+  await page.evaluate(() => {
+    window.location.hash = '#/sources/2';
+  });
+  await expect(page.getByRole('heading', { level: 1, name: 'Example bundle two' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'true');
+  await expect(page.getByRole('region', { name: 'Re-classify' })).toHaveCount(0);
+  await expect(page.getByText(/^Files 1–50 of 60$/)).toBeVisible();
+  await page.getByRole('button', { name: 'Re-classify…' }).click();
+  await expect(page.getByRole('radio', { checked: true })).toHaveCount(0);
 });

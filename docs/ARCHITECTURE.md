@@ -349,10 +349,11 @@ On shutdown the job stays queued and starts the image it was decoding again.
    when its hit rate reaches the threshold and no other platform scores
    higher, otherwise as above. A source whose binding the user chose, a
    platform or none (`sources.user_binding`), is never bound
-   automatically; the user's choice runs as a background `bind_source` job
-   through the same matching, and "Reset to automatic" runs it through the
-   rebind above. `source.changed` is sent `source.changed` is sent only for sources whose state
-   or platform changed.
+   automatically. The user's choice is stored on the source as
+   `bind_pending` and a background `bind_source` job applies whichever
+   choice is newest when it runs, through the same matching, or through the
+   rebind above for "Reset to automatic". `source.changed` is sent only for
+   sources whose state or platform changed.
 5. Store the file list in `torrent_files` with the matched `rom_id` and its
    confidence where one exists, and the further candidate roms of every tier
    in `torrent_candidates` (VERIFICATION.md "Pre-download matching"). Move

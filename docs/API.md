@@ -314,7 +314,8 @@ allowed `Host`.
 
 `/sources` items: `{ id, infohash, display_name, origin_file, platform_id,
 bind_score, state, reason, seed_policy, file_count, matched_count,
-total_size, client_id, added_at, suggested_platform_id, user_binding }`. `matched_count`
+total_size, client_id, added_at, suggested_platform_id, user_binding,
+pending_binding }`. `matched_count`
 counts files matched to a rom or holding a candidate rom. `reason` says why
 a source is `resolving` or `unbound` and is otherwise `null`; `client_id` is
 set once the torrent is in the client. `suggested_platform_id` is the
@@ -323,6 +324,9 @@ platform the torrent's names point at, found without any DAT
 the platform picker. `seed_policy` is `"none"`, `"client"` or
 `"ratio:N"` with N above 0. `user_binding` is `true` when the user chose the
 binding, a platform or none, which automatic binding then leaves alone.
+`pending_binding` is the binding asked for and not applied yet, as
+`{ automatic, platform_id }` with `platform_id` null for "not a game set",
+or `null`.
 
 `GET /sources/{id}` is the item with `summary: { matched, candidates,
 unmatched, extra, wanted }`, where the first four count each file once: a
@@ -348,9 +352,11 @@ rebinds the source to that platform, matching its files against it only, and
 `binding: "automatic"` clears `user_binding` and binds the source again as
 the automatic classifier would. `platform_id` and `binding` together are a
 400, as is either while the source has no file list. A binding change
-answers 202 with the item and `job_id` of the background `bind_source` job
-that does it; `source.changed` follows when it ends, and its final progress
-is `{ source_id, platform_id, matched, total }`. Any other update answers
+answers 202 with the item, its `pending_binding` set, and `job_id` of the
+background `bind_source` job that applies it; requests while that job is
+queued share it, and whichever job runs next applies the latest request.
+`source.changed` follows when it ends, and its final progress is
+`{ source_id, platform_id, matched, total }`. Any other update answers
 200 with `job_id: null`.
 `state` is `"disabled"` or `"enabled"`, which returns the source to `bound`,
 `unbound` or `resolving` as its files and platform say. A disabled source
@@ -375,11 +381,14 @@ progress }`, or `null`. `filter` is `matched` (a rom or a candidate),
 `unmatched` or `wanted` (a download that was not cancelled), and `q` keeps
 paths containing it, ignoring ASCII case; `total` counts what they keep.
 
-`/sources/{id}/preview` is `{ total, platforms: [{ platform_id, matched }] }`
-for every platform with a loaded DAT, most matched first: a read-only dry run
-of the binding's name tiers over the source's files, the count the automatic
-classifier's hit rate comes from. It reads every file once, so the SPA asks
-for it only when the user opens Re-classify.
+`/sources/{id}/preview` is `{ total, sampled, platforms: [{ platform_id,
+matched }] }` for every platform with a loaded DAT, most matched first: a
+read-only dry run of the binding's name tiers, the count the automatic
+classifier's hit rate comes from. It reads at most 4 000 evenly spaced files,
+500 per read so other requests get the database's one reader in between;
+when `sampled` is below `total` each count is scaled up from the sample and
+is approximate. The SPA asks for it once per page view, when the user first
+opens Re-classify.
 
 ## Incoming files
 

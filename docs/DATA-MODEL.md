@@ -166,7 +166,8 @@ CREATE TABLE sources (                  -- one per torrent the user dropped in
   added_at      INTEGER NOT NULL,
   suggested_platform_id TEXT REFERENCES platforms(id),  -- guessed from the torrent's names, no DAT needed
   user_binding  INTEGER NOT NULL DEFAULT 0,  -- 1 when the user chose the binding, a platform or none; automatic binding never changes it
-  map_stamp     TEXT                   -- the platform's live DAT versions and roms the files were last mapped against
+  map_stamp     TEXT,                  -- the platform's live DAT versions and roms the files were last mapped against
+  bind_pending  TEXT                   -- the binding asked for and not applied yet: 'automatic' | 'none' | 'platform:<id>'
 );
 CREATE INDEX sources_state ON sources(state);
 
@@ -362,7 +363,12 @@ with a `platform_id`, or `null` for "not a game set", sets it; `binding:
 "automatic"` clears it. While it is set, the rebind after a DAT load skips
 the source, so no automatic run changes its platform; a `remap_sources` job
 still maps its files again against its own platform when that platform's
-roms change.
+roms change. Each request also stores the choice in `bind_pending` and queues
+a `bind_source` job; the job takes the value when it runs and applies it, and
+finds nothing when a later job already took it, so requests that share a
+queued job, or run in any order, end on the last choice. Migration 0019 gives
+sources the user had unbound the reason "Marked as not a game set. It is not
+bound automatically."
 
 ## Titles across DAT versions
 

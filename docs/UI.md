@@ -143,12 +143,17 @@ sentence on how it was bound ("Bound to NES automatically. 94% of its files
 match DAT entries.", "Bound to NES by you.", "Marked by you as not a game
 set."), the DATs its matches come from, and counts of matched, possible,
 unmatched, extra and wanted files. Re-classify is a disclosure that asks
-`/sources/{id}/preview` and lists each platform with a DAT as a radio, "would
-match N of M files", plus "Not a game set"; choosing one says what applying
-does, and Apply queues the binding job, whose bar shows on the page and in
-the activity panel until a toast gives its outcome. Reset to automatic, shown
+`/sources/{id}/preview` once per page view, aborting it if the panel
+closes first, and lists each platform with a DAT as a radio, "would match N
+of M files" ("about N" when sampled), plus "Not a game set"; choosing one
+says what applying does, and Apply queues the binding job, whose bar shows on
+the page and in the activity panel until a toast gives its outcome. While the
+choice waits, the page and the list say "Binding to NES…", "Marking as not a
+game set…" or "Returning to automatic binding…". Reset to automatic, shown
 only while the binding is the user's, hands the source back to the
-classifier. The file table has filter chips (All, Matched, Unmatched, Wanted,
+classifier. Closing the panel, or Reset disappearing, returns focus to
+Re-classify. The page is rebuilt for each source id, so nothing carries over
+from one source to the next. The file table has filter chips (All, Matched, Unmatched, Wanted,
 `aria-pressed`), a path search 250 ms after typing stops, and pages of 50
 with Previous and Next; each row shows the path, size, kind, the matched
 entry linked to its title with its confidence, a candidate as "Possibly …",

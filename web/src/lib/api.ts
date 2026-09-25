@@ -188,7 +188,8 @@ export const api = {
     signal?: AbortSignal
   ): Promise<Paged<SourceFile>> =>
     request(`/sources/${id}/files${query({ ...opts })}`, { signal: signal ?? null }),
-  sourcePreview: (id: number): Promise<SourcePreview> => request(`/sources/${id}/preview`),
+  sourcePreview: (id: number, signal?: AbortSignal): Promise<SourcePreview> =>
+    request(`/sources/${id}/preview`, { signal: signal ?? null }),
 
   downloads: (state?: DownloadState): Promise<Paged<Download>> =>
     request(`/downloads${query({ state })}`),

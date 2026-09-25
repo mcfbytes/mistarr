@@ -10,6 +10,7 @@
   import MagnetField from '../lib/MagnetField.svelte';
   import StatusPill from '../lib/StatusPill.svelte';
   import { sourceUrl } from '../lib/router.svelte';
+  import { bindingText } from '../lib/sourceDetail';
   import type { SeedPolicy } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -34,17 +35,19 @@
       return;
     }
     const prev = sources.find((s) => s.id === id);
-    patchSource(id, { platform_id: platformId, state: 'bound', user_binding: true });
     if (isMock) {
+      patchSource(id, { platform_id: platformId, state: 'bound', user_binding: true });
       return;
     }
+    const pending = { automatic: false, platform_id: platformId };
+    patchSource(id, { user_binding: true, pending_binding: pending });
     try {
       // The binding runs as a job; `source.changed` brings the bound row once it ends.
       const row = await api.updateSource(id, { platform_id: platformId });
-      patchSource(id, { user_binding: row.user_binding });
+      patchSource(id, { user_binding: row.user_binding, pending_binding: row.pending_binding });
     } catch (err) {
       if (prev) {
-        patchSource(id, { platform_id: prev.platform_id, state: prev.state, user_binding: prev.user_binding });
+        patchSource(id, { user_binding: prev.user_binding, pending_binding: prev.pending_binding });
       }
       showToast(errorMessage(err));
     }
@@ -134,7 +137,9 @@
           <tr>
             <td><a href={sourceUrl(source.id)} class="name">{source.display_name}</a></td>
             <td>
-              {#if source.platform_id}
+              {#if source.pending_binding}
+                <span class="muted">{bindingText(source, platformName)}</span>
+              {:else if source.platform_id}
                 {source.platform_id}
                 {#if source.user_binding}<span class="tag">Set by you</span>{/if}
               {:else}
@@ -225,7 +230,7 @@
   }
 
   .name {
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
   }
 
   .tag {

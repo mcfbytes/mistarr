@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onDestroy, untrack } from 'svelte';
+  import { onDestroy, tick, untrack } from 'svelte';
   import { api, ApiError, errorMessage } from '../lib/api';
   import { findSource, loadSources, patchSource } from '../lib/stores/sources.svelte';
   import { findPlatform, loadPlatforms, platformsLoaded } from '../lib/stores/platforms.svelte';
@@ -52,6 +52,8 @@
   let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
   let panelOpen = $state(false);
+  let reclassifyButton = $state<HTMLButtonElement | null>(null);
+  let previewController: AbortController | null = null;
   let preview = $state<SourcePreview | null>(null);
   let previewError = $state<string | null>(null);
   let choice = $state('');
@@ -97,7 +99,15 @@
 
   // The list row changes on `source.changed`; its binding and counts moving means a re-read.
   const rowKey = $derived(
-    [sourceId, row?.state, row?.platform_id, row?.matched_count, row?.user_binding, row?.file_count].join('|')
+    JSON.stringify([
+      sourceId,
+      row?.state,
+      row?.platform_id,
+      row?.matched_count,
+      row?.user_binding,
+      row?.pending_binding,
+      row?.file_count
+    ])
   );
   $effect(() => {
     if (rowKey) {
@@ -157,6 +167,7 @@
 
   onDestroy(() => {
     controller?.abort();
+    previewController?.abort();
     if (searchTimer) {
       clearTimeout(searchTimer);
     }
@@ -219,21 +230,47 @@
     }
   }
 
+  /** Closes Re-classify, stops its preview request and returns focus to its button. */
+  async function closePanel(): Promise<void> {
+    panelOpen = false;
+    previewController?.abort();
+    previewController = null;
+    await tick();
+    reclassifyButton?.focus();
+  }
+
+  // The preview is read once per page view; the page is rebuilt for another source.
   async function openPanel(): Promise<void> {
-    panelOpen = !panelOpen;
-    if (!panelOpen) {
+    if (panelOpen) {
+      await closePanel();
       return;
     }
+    panelOpen = true;
     choice = '';
-    preview = null;
+    if (preview || previewController) {
+      return;
+    }
     previewError = null;
+    const c = new AbortController();
+    previewController = c;
     try {
       const r = findSource(sourceId);
-      preview = isMock ? (r ? mockSourcePreview(r) : null) : await api.sourcePreview(sourceId);
+      const got = isMock ? (r ? mockSourcePreview(r) : null) : await api.sourcePreview(sourceId, c.signal);
+      if (!c.signal.aborted) {
+        preview = got;
+      }
     } catch (err) {
-      previewError = errorMessage(err);
+      if (!c.signal.aborted) {
+        previewError = errorMessage(err);
+      }
+    } finally {
+      if (previewController === c) {
+        previewController = null;
+      }
     }
   }
+
+  const sampled = $derived(preview !== null && preview.sampled < preview.total);
 
   const chosenMatch = $derived(
     choice && choice !== NONE ? (preview?.platforms.find((p) => p.platform_id === choice)?.matched ?? 0) : null
@@ -244,7 +281,8 @@
       return 'The source will have no platform and is never bound automatically. Its files keep no matches.';
     }
     const name = platformName(choice);
-    return `Binding to ${name} would match ${chosenMatch ?? 0} of ${preview?.total ?? 0} files. Its files are matched again in the background, and later DAT loads keep this choice.`;
+    const about = sampled ? 'about ' : '';
+    return `Binding to ${name} would match ${about}${chosenMatch ?? 0} of ${preview?.total ?? 0} files. Its files are matched again in the background, and later DAT loads keep this choice.`;
   }
 
   /** Mock mode: runs a binding job, then shows the source as the server would leave it. */
@@ -253,11 +291,6 @@
     const id = 9000 + mockJobs;
     const name = detail?.display_name ?? '';
     const payload: Record<string, unknown> = { source_id: sourceId, source_name: name };
-    if (automatic) {
-      payload.automatic = true;
-    } else {
-      payload.platform_id = platformId;
-    }
     jobId = id;
     const fileCount = detail?.file_count ?? 0;
     const job = {
@@ -273,6 +306,7 @@
     };
     runMockJob(job, { source_id: sourceId, platform_id: platformId, matched, total: fileCount }, 2500, () => {
       patchSource(sourceId, {
+        pending_binding: null,
         platform_id: platformId,
         state: platformId ? 'bound' : 'unbound',
         matched_count: matched,
@@ -290,14 +324,14 @@
     const platformId = choice === NONE ? null : choice;
     try {
       if (isMock) {
-        patchSource(sourceId, { user_binding: true });
+        patchSource(sourceId, { user_binding: true, pending_binding: { automatic: false, platform_id: platformId } });
         mockBinding(platformId, false, chosenMatch ?? 0);
       } else {
         const updated = await api.updateSource(sourceId, { platform_id: platformId });
         jobId = updated.job_id;
-        patchSource(sourceId, { user_binding: updated.user_binding });
+        patchSource(sourceId, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
       }
-      panelOpen = false;
+      void closePanel();
       showToast(platformId ? `Binding to ${platformName(platformId)} queued.` : 'Setting the source aside queued.', 'info');
     } catch (err) {
       showToast(errorMessage(err));
@@ -314,14 +348,17 @@
     try {
       if (isMock) {
         const original = fixtureSources.find((s) => s.id === sourceId);
-        patchSource(sourceId, { user_binding: false });
+        patchSource(sourceId, { user_binding: false, pending_binding: { automatic: true, platform_id: null } });
         mockBinding(original?.platform_id ?? null, true, original?.matched_count ?? 0);
       } else {
         const updated = await api.updateSource(sourceId, { binding: 'automatic' });
         jobId = updated.job_id;
-        patchSource(sourceId, { user_binding: updated.user_binding });
+        patchSource(sourceId, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
       }
       showToast('Automatic binding queued.', 'info');
+      // Reset leaves with the user's binding; focus goes to the control that stays.
+      await tick();
+      reclassifyButton?.focus();
     } catch (err) {
       showToast(errorMessage(err));
     } finally {
@@ -452,6 +489,7 @@
 
       <div class="actions">
         <button
+          bind:this={reclassifyButton}
           aria-expanded={panelOpen}
           aria-controls="reclassify"
           disabled={source.file_count === 0}
@@ -483,7 +521,9 @@
                   <input type="radio" name="bind-to" value={p.platform_id} bind:group={choice} />
                   <span>
                     {platformName(p.platform_id)}{#if p.platform_id === source.platform_id}&nbsp;<span class="muted">(now)</span>{/if}
-                    <span class="muted hint">would match {p.matched.toLocaleString()} of {preview.total.toLocaleString()} files</span>
+                    <span class="muted hint"
+                      >would match {sampled ? 'about ' : ''}{p.matched.toLocaleString()} of {preview.total.toLocaleString()} files</span
+                    >
                   </span>
                 </label>
               {/each}
@@ -504,7 +544,7 @@
               >
                 {applying ? 'Applying…' : choice === NONE ? 'Set aside' : choice ? `Bind to ${platformName(choice)}` : 'Bind'}
               </button>
-              <button onclick={() => (panelOpen = false)}>Cancel</button>
+              <button onclick={() => void closePanel()}>Cancel</button>
             </div>
           {/if}
         </div>
@@ -588,7 +628,7 @@
   }
 
   h1 {
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
   }
 
   section {
@@ -618,7 +658,7 @@
 
   .wrap,
   .path {
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
   }
 
   .full {
@@ -756,7 +796,7 @@
     padding: 0.4em;
     border-bottom: 1px solid var(--border);
     vertical-align: top;
-    overflow-wrap: anywhere;
+    overflow-wrap: break-word;
   }
 
   th:nth-child(1) {

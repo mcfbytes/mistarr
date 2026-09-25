@@ -2,7 +2,6 @@
 //! see `docs/ARCHITECTURE.md` "Source import" step 4.
 
 use async_trait::async_trait;
-use mistarr_core::PlatformId;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
@@ -18,36 +17,28 @@ pub const KIND: &str = "bind_source";
 /// The reason a source the user marked as not a game set shows.
 pub const IGNORED: &str = "Marked as not a game set. It is not bound automatically.";
 
-/// What the user chose for a source's binding.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Choice {
-    /// This platform, matching the files against it only.
-    Platform(PlatformId),
-    /// No platform: not a game set.
-    Ignore,
-    /// Whatever automatic binding decides, now and after later DAT loads.
-    Automatic,
-}
+pub use crate::db::sources::BindChoice as Choice;
 
-/// Applies a [`Choice`] to one source through the same binding and matching
-/// the automatic classifier uses, on the background lane.
+/// Applies the binding the user last asked for on one source, as
+/// [`rows::request_binding`] recorded it, through the same binding and matching
+/// the automatic classifier uses, on the background lane. A job that finds no
+/// request waiting does nothing, so requests sharing one queued job, or a job
+/// queued behind one that already applied the latest request, are harmless.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindSource {
     /// The source.
     pub source_id: SourceId,
     /// Its display name, for the activity list.
     pub source_name: String,
-    /// The binding asked for.
-    pub choice: Choice,
 }
 
 impl BindSource {
     /// The job a stored payload describes, `None` when it names no source.
     ///
     /// ```
-    /// use mistarr_server::jobs::bind_source::{BindSource, Choice};
-    /// let job = BindSource::from_payload(&serde_json::json!({ "source_id": 3, "automatic": true }));
-    /// assert_eq!(job.map(|j| j.choice), Some(Choice::Automatic));
+    /// use mistarr_server::jobs::bind_source::BindSource;
+    /// let job = BindSource::from_payload(&serde_json::json!({ "source_id": 3 }));
+    /// assert_eq!(job.map(|j| j.source_id.0), Some(3));
     /// ```
     #[must_use]
     pub fn from_payload(payload: &Value) -> Option<Self> {
@@ -57,18 +48,9 @@ impl BindSource {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
-        let choice = if payload.get("automatic").and_then(Value::as_bool) == Some(true) {
-            Choice::Automatic
-        } else {
-            match payload.get("platform_id")?.as_str() {
-                Some(p) => Choice::Platform(PlatformId(p.to_owned())),
-                None => Choice::Ignore,
-            }
-        };
         Some(Self {
             source_id,
             source_name,
-            choice,
         })
     }
 }
@@ -112,13 +94,7 @@ impl Job for BindSource {
     }
 
     fn payload(&self) -> Value {
-        let mut p = json!({ "source_id": self.source_id, "source_name": self.source_name });
-        match &self.choice {
-            Choice::Platform(id) => p["platform_id"] = json!(id.0),
-            Choice::Ignore => p["platform_id"] = Value::Null,
-            Choice::Automatic => p["automatic"] = json!(true),
-        }
-        p
+        json!({ "source_id": self.source_id, "source_name": self.source_name })
     }
 
     fn lane(&self) -> Lane {
@@ -131,16 +107,17 @@ impl Job for BindSource {
             .await?;
         key_new_roms(&ctx.app.db).await?;
         let threshold = ctx.app.config().sources.bind_threshold;
-        let choice = self.choice.clone();
         let row = ctx
             .app
             .db
             .write_bulk(move |c| {
                 let tx = c.transaction()?;
-                if rows::get(&tx, id)?.is_none_or(|r| r.file_count == 0) {
+                let Some(choice) = rows::take_binding(&tx, id)? else {
                     return Ok(None);
+                };
+                if rows::get(&tx, id)?.is_some_and(|r| r.file_count > 0) {
+                    apply(&tx, id, &choice, threshold)?;
                 }
-                apply(&tx, id, &choice, threshold)?;
                 let row = rows::get(&tx, id)?;
                 crate::db::commit(tx)?;
                 Ok(row)
@@ -165,6 +142,7 @@ impl Job for BindSource {
 mod tests {
     use std::sync::Arc;
 
+    use mistarr_core::PlatformId;
     use mistarr_sources::torrent::TorrentFile;
 
     use super::*;
@@ -213,11 +191,22 @@ mod tests {
         Ok(id)
     }
 
+    /// Records `choice` as a request would and runs one job for the source.
     async fn run(app: &Arc<crate::app::AppState>, id: SourceId, choice: Choice) {
+        request(app, id, choice);
+        run_job(app, id).await;
+    }
+
+    fn request(app: &crate::app::AppState, id: SourceId, choice: Choice) {
+        app.db
+            .write_blocking(move |c| rows::request_binding(c, id, &choice))
+            .expect("request");
+    }
+
+    async fn run_job(app: &Arc<crate::app::AppState>, id: SourceId) {
         let job = BindSource {
             source_id: id,
             source_name: "Synthetic Set".into(),
-            choice,
         };
         Scheduler::run_inline(app, Arc::new(job))
             .await
@@ -234,15 +223,37 @@ mod tests {
 
     #[test]
     fn payloads_round_trip() {
-        for choice in [Choice::Platform(nes()), Choice::Ignore, Choice::Automatic] {
-            let job = BindSource {
-                source_id: SourceId(4),
-                source_name: "Synthetic Set".into(),
-                choice,
-            };
-            assert_eq!(BindSource::from_payload(&job.payload()), Some(job));
-        }
-        assert_eq!(BindSource::from_payload(&json!({ "source_id": 1 })), None);
+        let job = BindSource {
+            source_id: SourceId(4),
+            source_name: "Synthetic Set".into(),
+        };
+        assert_eq!(BindSource::from_payload(&job.payload()), Some(job));
+        assert_eq!(BindSource::from_payload(&json!({ "name": 1 })), None);
+    }
+
+    #[tokio::test]
+    async fn the_last_request_wins_whichever_job_runs_it() {
+        let (_dir, app) = state();
+        let id = app.db.write_blocking(|c| source(c)).expect("seed");
+        // Pick, reset and pick while the lane is busy: two jobs run, after all three.
+        request(&app, id, Choice::Platform(nes()));
+        request(&app, id, Choice::Automatic);
+        let waiting = row(&app, id).await;
+        assert_eq!(waiting.pending_binding, Some(Choice::Automatic));
+        assert!(!waiting.user_binding);
+        request(&app, id, Choice::Platform(nes()));
+        run_job(&app, id).await;
+        run_job(&app, id).await;
+        let done = row(&app, id).await;
+        assert_eq!(
+            (
+                done.platform_id.clone(),
+                done.user_binding,
+                done.pending_binding
+            ),
+            (Some(nes()), true, None)
+        );
+        assert_eq!(done.matched_count, 1);
     }
 
     #[tokio::test]

@@ -229,6 +229,8 @@ export interface Source {
   suggested_platform_id: string | null;
   /** The user chose the binding, a platform or none; automatic binding leaves it alone. */
   user_binding: boolean;
+  /** The binding asked for and not applied yet; `platform_id` null means "not a game set". */
+  pending_binding: { automatic: boolean; platform_id: string | null } | null;
 }
 
 /** `PUT /sources/{id}`'s answer: the source, and the binding job it queued. */
@@ -269,6 +271,8 @@ export interface SourceDetail extends Source {
 /** What binding to each platform with a DAT would match, from a dry run. */
 export interface SourcePreview {
   total: number;
+  /** Files read; below `total` the counts are scaled from an even sample. */
+  sampled: number;
   platforms: { platform_id: string; matched: number }[];
 }
 

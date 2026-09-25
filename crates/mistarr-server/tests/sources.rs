@@ -199,6 +199,10 @@ async fn below_threshold_stays_unbound_until_bound_by_hand() {
     assert_eq!(r.status, 202, "{}", r.body);
     assert!(r.json()["job_id"].is_i64(), "{}", r.body);
     assert_eq!(r.json()["user_binding"], true);
+    assert_eq!(
+        r.json()["pending_binding"],
+        json!({ "automatic": false, "platform_id": "nes" })
+    );
     eventually("the source bound by hand", || async {
         only_source(&b).await["state"] == "bound"
     })
@@ -268,7 +272,7 @@ async fn detail_files_preview_and_reset_to_automatic() {
     assert_eq!(p.status, 200, "{}", p.body);
     assert_eq!(
         p.json(),
-        json!({ "total": 4, "platforms": [{ "platform_id": "nes", "matched": 3 }] })
+        json!({ "total": 4, "sampled": 4, "platforms": [{ "platform_id": "nes", "matched": 3 }] })
     );
 
     let bad = json!({ "platform_id": "nes", "binding": "automatic" });

@@ -61,6 +61,13 @@ export function downloadText(d: { state: DownloadState; progress: number }): str
 
 /** How the source came to its binding, in one sentence. */
 export function bindingText(source: Source, platformName: (id: string) => string): string {
+  const pending = source.pending_binding;
+  if (pending) {
+    if (pending.automatic) {
+      return 'Returning to automatic binding…';
+    }
+    return pending.platform_id ? `Binding to ${platformName(pending.platform_id)}…` : 'Marking as not a game set…';
+  }
   const share = source.bind_score === null ? null : Math.round(source.bind_score * 100);
   const matches = share === null ? '' : ` ${share}% of its files match DAT entries.`;
   if (source.platform_id) {

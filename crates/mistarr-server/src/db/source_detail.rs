@@ -3,6 +3,7 @@
 use mistarr_core::PlatformId;
 use mistarr_mister::platforms::{self, Kind};
 use mistarr_sources::binding;
+use mistarr_sources::torrent::TorrentFile;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
@@ -420,8 +421,149 @@ pub struct PlatformMatch {
 pub struct Preview {
     /// Files in the source.
     pub total: u64,
+    /// Files read; below `total`, each count is scaled from this evenly spaced sample.
+    pub sampled: u64,
     /// Every platform with a loaded DAT, most matched first, then by id.
     pub platforms: Vec<PlatformMatch>,
+}
+
+/// Files a preview reads at most; a larger source is sampled evenly.
+pub const PREVIEW_SAMPLE: u64 = 4_000;
+
+/// Files scored per read, so the single reader is held only briefly each time.
+pub const PREVIEW_CHUNK: u32 = 500;
+
+/// The gap between sampled file indices that keeps a preview of `total` files
+/// within `max` files.
+///
+/// ```
+/// use mistarr_server::db::source_detail::sample_step;
+/// assert_eq!(sample_step(100, 4_000), 1);
+/// assert_eq!(sample_step(10_000, 4_000), 3);
+/// ```
+#[must_use]
+pub fn sample_step(total: u64, max: u64) -> u32 {
+    u32::try_from(total.div_ceil(max.max(1)).max(1)).unwrap_or(u32::MAX)
+}
+
+/// One chunk of a preview: how many files it read, each platform's hits among
+/// them, and the last file index read.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PreviewChunk {
+    /// Files read.
+    pub files: u64,
+    /// Files each platform's DAT entries match by name, or base name and size.
+    pub hits: Vec<(PlatformId, u64)>,
+    /// The last file index read, to continue after.
+    pub last: Option<u32>,
+}
+
+/// Scores up to `limit` of the source's files after index `after` whose index is a
+/// multiple of `step`, as binding's name tiers do. Reads only.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn preview_chunk(
+    conn: &Connection,
+    id: SourceId,
+    after: Option<u32>,
+    step: u32,
+    limit: u32,
+) -> Result<PreviewChunk> {
+    let files: Vec<TorrentFile> = conn
+        .prepare_cached(
+            "SELECT file_index, path, size FROM torrent_files
+             WHERE source_id = ?1 AND file_index > ?2 AND file_index % ?3 = 0
+             ORDER BY file_index LIMIT ?4",
+        )?
+        .query_map(
+            params![id.0, after.map_or(-1, i64::from), step.max(1), limit],
+            |r| {
+                Ok(TorrentFile {
+                    index: r.get(0)?,
+                    path: r.get(1)?,
+                    size: uint(r, 2)?,
+                })
+            },
+        )?
+        .collect::<rusqlite::Result<_>>()?;
+    let n = files.len();
+    let hits = binding::score_platforms(&files, &SqlDatIndex::new(conn))
+        .into_iter()
+        .map(|(p, rate)| {
+            // Rates are hits over a chunk's file count, far below 2^24, so this restores the count.
+            #[allow(
+                clippy::cast_possible_truncation,
+                clippy::cast_sign_loss,
+                clippy::cast_precision_loss
+            )]
+            let hit = (f64::from(rate) * n as f64).round() as u64;
+            (p, hit)
+        })
+        .collect();
+    Ok(PreviewChunk {
+        files: n as u64,
+        hits,
+        last: files.last().map(|f| f.index),
+    })
+}
+
+/// The hits of a preview's chunks added up.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PreviewTally {
+    sampled: u64,
+    hits: Vec<(PlatformId, u64)>,
+}
+
+impl PreviewTally {
+    /// Adds one chunk.
+    pub fn add(&mut self, chunk: &PreviewChunk) {
+        self.sampled += chunk.files;
+        for (p, n) in &chunk.hits {
+            match self.hits.iter_mut().find(|(q, _)| q == p) {
+                Some((_, m)) => *m += n,
+                None => self.hits.push((p.clone(), *n)),
+            }
+        }
+    }
+
+    /// The preview of a source of `total` files over the platforms `with_dat`, with
+    /// each count scaled up from the sample when the sample is smaller.
+    #[must_use]
+    pub fn finish(self, total: u64, with_dat: Vec<PlatformId>) -> Preview {
+        let mut platforms: Vec<PlatformMatch> = with_dat
+            .into_iter()
+            .map(|platform_id| {
+                let hit = self
+                    .hits
+                    .iter()
+                    .find(|(p, _)| *p == platform_id)
+                    .map_or(0, |(_, n)| *n);
+                let matched = if self.sampled >= total || self.sampled == 0 {
+                    hit
+                } else {
+                    (u128::from(hit) * u128::from(total) / u128::from(self.sampled))
+                        .try_into()
+                        .unwrap_or(total)
+                };
+                PlatformMatch {
+                    platform_id,
+                    matched: matched.min(total),
+                }
+            })
+            .collect();
+        platforms.sort_by(|a, b| {
+            b.matched
+                .cmp(&a.matched)
+                .then_with(|| a.platform_id.0.cmp(&b.platform_id.0))
+        });
+        Preview {
+            total,
+            sampled: self.sampled,
+            platforms,
+        }
+    }
 }
 
 /// Platforms with live titles from a DAT file, by id.
@@ -441,43 +583,27 @@ pub fn platforms_with_dat(conn: &Connection) -> Result<Vec<PlatformId>> {
     Ok(ids)
 }
 
-/// A dry run of binding's name tiers over the source's files against every
-/// platform at once, as the automatic classifier scores them. Reads only.
+/// A dry run of binding's name tiers over at most `max` evenly spaced files of the
+/// source, against every platform at once, on one connection. The HTTP handler
+/// runs the same chunks as separate reads.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn preview(conn: &Connection, id: SourceId) -> Result<Preview> {
-    let files = sources::torrent_files(conn, id)?;
-    let total = u64::try_from(files.len()).unwrap_or(u64::MAX);
-    let scores = binding::score_platforms(&files, &SqlDatIndex::new(conn));
-    drop(files);
-    let mut platforms: Vec<PlatformMatch> = platforms_with_dat(conn)?
-        .into_iter()
-        .map(|platform_id| {
-            let rate = scores
-                .iter()
-                .find(|(p, _)| *p == platform_id)
-                .map_or(0.0, |(_, r)| f64::from(*r));
-            // Rates are hits over the file count, far below 2^24, so this restores the count.
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                clippy::cast_precision_loss
-            )]
-            let matched = (rate * total as f64).round() as u64;
-            PlatformMatch {
-                platform_id,
-                matched,
-            }
-        })
-        .collect();
-    platforms.sort_by(|a, b| {
-        b.matched
-            .cmp(&a.matched)
-            .then_with(|| a.platform_id.0.cmp(&b.platform_id.0))
-    });
-    Ok(Preview { total, platforms })
+pub fn preview(conn: &Connection, id: SourceId, max: u64) -> Result<Preview> {
+    let total = sources::get(conn, id)?.map_or(0, |r| r.file_count);
+    let step = sample_step(total, max);
+    let mut tally = PreviewTally::default();
+    let mut after = None;
+    loop {
+        let chunk = preview_chunk(conn, id, after, step, PREVIEW_CHUNK)?;
+        tally.add(&chunk);
+        match chunk.last {
+            Some(last) if chunk.files == u64::from(PREVIEW_CHUNK) => after = Some(last),
+            _ => break,
+        }
+    }
+    Ok(tally.finish(total, platforms_with_dat(conn)?))
 }
 
 #[cfg(test)]
@@ -623,13 +749,42 @@ mod tests {
     }
 
     #[test]
+    fn a_large_source_is_previewed_from_an_even_sample_scaled_up() {
+        let c = conn();
+        let (id, _) = source(&c);
+        let more: Vec<TorrentFile> = (0..12)
+            .map(|i| file(i, &format!("Set/Example Quest (USA) {i}.nes"), 16))
+            .collect();
+        sources::replace_files(&c, id, &more).expect("files");
+        sources::refresh_match_keys(&c).expect("keys");
+        // Files 0, 3, 6 and 9 are read; each is a base-name match on `nes`.
+        let p = preview(&c, id, 4).expect("preview");
+        assert_eq!((p.total, p.sampled), (12, 4));
+        assert_eq!(p.platforms[0].matched, 12);
+        let chunk = preview_chunk(&c, id, Some(3), 3, 1).expect("chunk");
+        assert_eq!((chunk.files, chunk.last), (1, Some(6)));
+        let mut tally = PreviewTally::default();
+        tally.add(&PreviewChunk {
+            files: 4,
+            hits: vec![(PlatformId("nes".into()), 1)],
+            last: Some(9),
+        });
+        let scaled = tally.finish(
+            12,
+            vec![PlatformId("nes".into()), PlatformId("snes".into())],
+        );
+        let got: Vec<_> = scaled.platforms.iter().map(|m| m.matched).collect();
+        assert_eq!(got, [3, 0]);
+    }
+
+    #[test]
     fn preview_scores_every_platform_with_a_dat() {
         let c = conn();
         let (id, _) = source(&c);
         seed_rom(&c, "snes", "Unlisted (USA).sfc", 8, &[]).expect("rom");
         sources::refresh_match_keys(&c).expect("keys");
-        let p = preview(&c, id).expect("preview");
-        assert_eq!(p.total, 4);
+        let p = preview(&c, id, PREVIEW_SAMPLE).expect("preview");
+        assert_eq!((p.total, p.sampled), (4, 4));
         let got: Vec<_> = p
             .platforms
             .iter()

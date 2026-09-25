@@ -160,6 +160,69 @@ pub struct SourceRow {
     pub suggested_platform_id: Option<PlatformId>,
     /// True when the user chose the binding, a platform or none; automatic binding keeps it.
     pub user_binding: bool,
+    /// The binding the user asked for that its `bind_source` job has not applied yet.
+    pub pending_binding: Option<BindChoice>,
+}
+
+/// A binding the user chose for a source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindChoice {
+    /// This platform, matching the files against it only.
+    Platform(PlatformId),
+    /// No platform: not a game set.
+    Ignore,
+    /// Whatever automatic binding decides, now and after later DAT loads.
+    Automatic,
+}
+
+impl BindChoice {
+    /// The `sources.bind_pending` text.
+    ///
+    /// ```
+    /// use mistarr_core::PlatformId;
+    /// use mistarr_server::db::sources::BindChoice;
+    /// let nes = BindChoice::Platform(PlatformId("nes".into()));
+    /// assert_eq!(nes.to_text(), "platform:nes");
+    /// assert_eq!(BindChoice::parse("platform:nes"), Some(nes));
+    /// assert_eq!(BindChoice::parse("none"), Some(BindChoice::Ignore));
+    /// assert_eq!(BindChoice::parse("x"), None);
+    /// ```
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        match self {
+            Self::Platform(p) => format!("platform:{}", p.0),
+            Self::Ignore => "none".to_owned(),
+            Self::Automatic => "automatic".to_owned(),
+        }
+    }
+
+    /// Parses the `sources.bind_pending` text.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "none" => Some(Self::Ignore),
+            "automatic" => Some(Self::Automatic),
+            other => other
+                .strip_prefix("platform:")
+                .filter(|p| !p.is_empty())
+                .map(|p| Self::Platform(PlatformId(p.to_owned()))),
+        }
+    }
+}
+
+/// Serialises as `{ automatic, platform_id }`, `platform_id` null for [`BindChoice::Ignore`].
+impl Serialize for BindChoice {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+        let mut out = s.serialize_struct("BindChoice", 2)?;
+        out.serialize_field("automatic", &matches!(self, Self::Automatic))?;
+        let platform = match self {
+            Self::Platform(p) => Some(p.0.as_str()),
+            _ => None,
+        };
+        out.serialize_field("platform_id", &platform)?;
+        out.end()
+    }
 }
 
 /// A source to insert.
@@ -185,7 +248,7 @@ const COLUMNS: &str = "s.id, s.infohash, s.display_name, s.origin_file, s.platfo
     (SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id
        AND (f.rom_id IS NOT NULL OR EXISTS (SELECT 1 FROM torrent_candidates c
              WHERE c.source_id = f.source_id AND c.file_index = f.file_index))),
-    s.suggested_platform_id, s.user_binding";
+    s.suggested_platform_id, s.user_binding, s.bind_pending";
 
 /// Reads a non-negative integer column; SQLite stores it as `i64`.
 fn uint(r: &Row<'_>, i: usize) -> rusqlite::Result<u64> {
@@ -216,6 +279,10 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<SourceRow> {
         matched_count: uint(r, 13)?,
         suggested_platform_id: r.get::<_, Option<String>>(14)?.map(PlatformId),
         user_binding: r.get(15)?,
+        pending_binding: r
+            .get::<_, Option<String>>(16)?
+            .as_deref()
+            .and_then(BindChoice::parse),
     })
 }
 
@@ -348,6 +415,41 @@ pub fn set_user_binding(conn: &Connection, id: SourceId, chosen: bool) -> Result
         params![id.0, chosen],
     )?;
     Ok(())
+}
+
+/// Records the binding the user asked for, which the next `bind_source` job of the
+/// source applies, and whether the user chose it.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn request_binding(conn: &Connection, id: SourceId, choice: &BindChoice) -> Result<()> {
+    conn.execute(
+        "UPDATE sources SET bind_pending = ?2, user_binding = ?3 WHERE id = ?1",
+        params![id.0, choice.to_text(), *choice != BindChoice::Automatic],
+    )?;
+    Ok(())
+}
+
+/// Takes the binding the user asked for, clearing it; `None` when none waits.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn take_binding(conn: &Connection, id: SourceId) -> Result<Option<BindChoice>> {
+    let text: Option<String> = conn
+        .query_row(
+            "SELECT bind_pending FROM sources WHERE id = ?1",
+            [id.0],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    conn.execute(
+        "UPDATE sources SET bind_pending = NULL WHERE id = ?1",
+        [id.0],
+    )?;
+    Ok(text.as_deref().and_then(BindChoice::parse))
 }
 
 /// Unbound sources whose binding the user did not choose, with their

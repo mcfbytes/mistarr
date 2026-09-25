@@ -138,8 +138,24 @@ async fn preview(
     id: Result<UrlPath<i64>, PathRejection>,
 ) -> Result<Json<Preview>, ApiError> {
     let id = source_id(id)?;
-    load(&app, id).await?;
-    Ok(Json(app.db.read(move |c| detail::preview(c, id)).await?))
+    let total = load(&app, id).await?.file_count;
+    let step = detail::sample_step(total, detail::PREVIEW_SAMPLE);
+    let mut tally = detail::PreviewTally::default();
+    let mut after = None;
+    // The database has one reader; each chunk is its own read so other pages get it in between.
+    loop {
+        let chunk = app
+            .db
+            .read(move |c| detail::preview_chunk(c, id, after, step, detail::PREVIEW_CHUNK))
+            .await?;
+        tally.add(&chunk);
+        match chunk.last {
+            Some(last) if chunk.files == u64::from(detail::PREVIEW_CHUNK) => after = Some(last),
+            _ => break,
+        }
+    }
+    let with_dat = app.db.read(detail::platforms_with_dat).await?;
+    Ok(Json(tally.finish(total, with_dat)))
 }
 
 /// `PUT /sources/{id}` body. `platform_id: null` marks the source as not a game
@@ -239,13 +255,13 @@ async fn update(
     }
     let threshold = app.config().sources.bind_threshold;
     let stored_seed = seed.clone();
-    let user = choice.as_ref().map(|c| *c != Choice::Automatic);
+    let requested = choice.clone();
     let updated = app
         .db
         .write(move |c| {
             let tx = c.transaction()?;
-            if let Some(user) = user {
-                rows::set_user_binding(&tx, id, user)?;
+            if let Some(choice) = &requested {
+                rows::request_binding(&tx, id, choice)?;
             }
             if let Some(s) = &stored_seed {
                 rows::set_seed_policy(&tx, id, s)?;
@@ -271,12 +287,12 @@ async fn update(
             }
         }
     }
+    // The job applies whichever request is newest when it runs, so sharing a queued one is safe.
     let job_id = match choice {
-        Some(choice) => {
+        Some(_) => {
             let job = BindSource {
                 source_id: id,
                 source_name: updated.display_name.clone(),
-                choice,
             };
             Some(Scheduler::enqueue(&app, Arc::new(job)).await?)
         }

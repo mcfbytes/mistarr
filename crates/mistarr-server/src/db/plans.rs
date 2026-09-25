@@ -164,7 +164,10 @@ fn source_reads() -> Vec<(&'static str, Read<'static>)> {
         ),
         (
             "reclassify preview",
-            Box::new(|c| drop(source_detail::preview(c, sources::SourceId(1)).expect("preview"))),
+            Box::new(|c| {
+                let max = source_detail::PREVIEW_SAMPLE;
+                drop(source_detail::preview(c, sources::SourceId(1), max).expect("preview"));
+            }),
         ),
     ]
 }
