@@ -54,6 +54,8 @@ any dynamic dependency, checked with `file` on the output.
   mistarr.prev            # the previous binary, kept by install.sh
   mistarr.prev.ok         # present once the saved rollback set is complete
   mistarr.db              # SQLite, with mistarr.db-wal and mistarr.db-shm
+  mistarr.db.new          # a DAT import's copy while it is written back;
+                          #   renamed over mistarr.db, removed at startup if left
   mistarr.db.prev         # the database before the last upgrade, with any
                           #   mistarr.db.prev-wal and mistarr.db.prev-shm
   mistarr.lock            # held by the running server; a second server exits
@@ -76,7 +78,33 @@ any dynamic dependency, checked with `file` on the output.
 /tmp/mistarr.start.lock        # held while a start runs; a reboot clears it
 /tmp/mistarr/                  # SQLite's temporary files and the DAT stage, in RAM;
                                #   <data>/tmp/ on the card when it cannot be written
+/tmp/mistarr/import-<key>-<job>/  # the database's copy while a DAT import or a
+                               #   migration runs in RAM ([memory] import_dir)
 ```
+
+A DAT import copies the database into RAM, loads the DAT there and writes the
+whole file back to the card in 1 MiB writes, so a load costs the card about
+one synchronous write per MiB of the database instead of thousands of page
+writes ([ARCHITECTURE.md](ARCHITECTURE.md) "DAT import in RAM"). Activity and
+the DATs screen show its phase: "copying the database to memory",
+"importing", "writing the database to the card". While it runs, other writes
+wait, so marking a title wanted or saving settings answers once the import
+ends; browsing keeps working and shows the catalogue as it was until the
+swap. When the copy would leave less than `[memory] import_floor_mib` of
+memory available, or `import_dir` or the card lacks room, or another process
+keeps the database open, the import runs on the card as "importing in
+place", and its progress and the log say why. Pending migrations at startup
+take the same path. In `mistarr.toml`:
+
+```toml
+[memory]
+import_dir = "/tmp/mistarr"   # RAM-backed; the copy needs the database's size and half again plus 32 MiB
+import_floor_mib = 128        # memory left available for MiSTer Main and a core; a large value always imports on the card
+```
+
+Both need a restart. Leave `mistarr doctor` and any `sqlite3` session on the
+database closed while an import runs: the swap waits up to 30 s for them and
+then imports on the card.
 
 [DATS.md](DATS.md) explains the DAT formats mistarr loads, what happens to a
 file dropped into `dats/` or uploaded on the DATs screen, and what each
@@ -124,9 +152,11 @@ rollback set:
 - the binary as `mistarr.prev` and `Scripts/mistarr.sh` as
   `Scripts/mistarr.sh.prev`.
 
-When `fuser` is available and shows a process still holding `mistarr.db` or
-its `-wal`, the script names the process, restarts the installed version and
-exits without changing anything. It then checks free space in the data
+When `fuser` is available and shows a process still holding `mistarr.db`,
+its `-wal` or a `mistarr.db.new` a DAT import is writing back, the script
+names the process, restarts the installed version and exits without
+changing anything. A `mistarr.db.new` left by an import that was stopped is
+removed then, never saved. It then checks free space in the data
 directory, read with `stat -f` so that only that filesystem is queried; where
 `stat -f` is missing it falls back to `df`, which on some BusyBox builds
 queries every mount and can stall on an unreachable network mount. It copies

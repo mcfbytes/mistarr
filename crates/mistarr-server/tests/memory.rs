@@ -17,8 +17,9 @@ use serde_json::{json, Value as Json};
 const BUDGET_KIB: u64 = 64 * 1024;
 
 /// Growth over idle a DAT load may reach: its apply runs with the writer's 8 MiB bulk
-/// cache and a heap limit raised to match, on top of the 12 MiB other jobs get.
-const LOAD_DELTA_MIB: u64 = 28;
+/// cache and a heap limit raised to match, on a second pair of connections to its copy
+/// in RAM, on top of the 12 MiB other jobs get.
+const LOAD_DELTA_MIB: u64 = 32;
 
 /// Longest a job may take before the test gives up.
 const JOB_TIMEOUT: Duration = Duration::from_secs(600);
@@ -729,6 +730,7 @@ fn dat_and_torrent_import_stay_under_budget() {
     let titles = server.count("SELECT COUNT(*) FROM titles WHERE retired = 0");
     let peak = server.stop("dat_import");
     assert_eq!(rows[0].0, "done", "{}", rows[0].1);
+    assert_eq!(rows[0].1["phase"], "importing", "loaded on the copy in RAM");
     assert_eq!(usize::try_from(titles).expect("count"), games);
     assert_budget("dat_import", peak, LOAD_DELTA_MIB);
 

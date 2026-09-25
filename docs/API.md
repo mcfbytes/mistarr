@@ -99,7 +99,11 @@ items, total }` in the same item shape, newest first, with `state` `done` or
 `failed` and `reason` `null`. A finished scan's `progress` is `{ platform_id,
 done, total, matched, unmatched }` (ARCHITECTURE.md "Library scan"); a
 recompute's is `{ groups, picks, matched }`, `matched` counting files it
-gave a rom.
+gave a rom. A DAT import's is `{ file, members, done, games, phase }`, where
+`phase` is `copying the database to memory`, `importing` or `writing the
+database to the card` for an import in RAM (ARCHITECTURE.md "DAT import in
+RAM"), whose phases arrive as `job.progress` while the stored row keeps what
+it held when the import began, or `importing in place` with a `reason`.
 
 `/system/settings` body: `{ client, limits, prefs }` with the fields of the
 same sections of `mistarr.toml`. PUT takes any subset of the three sections;

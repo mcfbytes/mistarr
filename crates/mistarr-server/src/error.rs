@@ -50,6 +50,9 @@ pub enum Error {
     /// The server is shutting down; the job stopped at a checkpoint.
     #[error("cancelled by shutdown")]
     Cancelled,
+    /// A pause held the job's lane while it held the writer; it let go to wait.
+    #[error("stopped for a pause")]
+    Paused,
     /// A job failed.
     #[error("job failed: {0}")]
     Job(String),

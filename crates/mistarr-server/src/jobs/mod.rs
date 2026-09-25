@@ -152,14 +152,26 @@ impl JobContext {
     }
 
     fn publish(&self, state: JobState, progress: &Value) {
-        let body = ProgressEvent {
-            id: self.id,
-            kind: self.kind,
-            state,
-            progress,
-        };
-        self.app.events.publish(EventKind::JobProgress, &body);
+        publish_progress(&self.app, self.id, self.kind, state, progress);
     }
+}
+
+/// Publishes `job.progress` for job `id` without storing it, for a job that holds the
+/// writer and so cannot write its row.
+pub(crate) fn publish_progress(
+    app: &AppState,
+    id: JobId,
+    kind: &str,
+    state: JobState,
+    progress: &Value,
+) {
+    let body = ProgressEvent {
+        id,
+        kind,
+        state,
+        progress,
+    };
+    app.events.publish(EventKind::JobProgress, &body);
 }
 
 async fn set_state(app: &AppState, id: JobId, state: JobState) -> Result<()> {

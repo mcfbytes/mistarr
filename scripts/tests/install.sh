@@ -812,6 +812,32 @@ for kind in nospace badcp badwal busy; do
         "$kind: the installed version is restarted"
 done
 
+# A copy a stopped DAT import left beside the database is removed, never saved,
+# and a process still writing one holds the install back like the database itself.
+root16="$work/root16"
+mkdir -p "$root16/mistarr" "$root16/Scripts"
+echo "DB16" > "$root16/mistarr/mistarr.db"
+echo "PARTIAL" > "$root16/mistarr/mistarr.db.new"
+write_arm_binary "$root16/mistarr/mistarr" OLD-BINARY-16
+write_launcher_stub "$root16/Scripts/mistarr.sh"
+mkdir -p "$stubs/busynew"
+cat > "$stubs/busynew/fuser" <<'EOS'
+#!/bin/sh
+for f in "$@"; do
+    case "$f" in *.db.new) echo " 4343"; exit 0 ;; esac
+done
+exit 1
+EOS
+chmod +x "$stubs/busynew/fuser"
+out=$(extra_path="$stubs/busynew" run_install "$root16" "$no_tty" v1.1.0)
+expect_contains "$out" "is still open by process 4343" "a process writing the copy holds the install"
+expect "$(cat "$root16/mistarr/mistarr.db.new")" "PARTIAL" "a held copy is left alone"
+out=$(run_install "$root16" "$no_tty" v1.1.0)
+expect_contains "$out" "removed the unfinished database copy" "a stale copy is reported"
+expect_absent "$root16/mistarr/mistarr.db.new" "a stale copy is removed"
+expect_absent "$root16/mistarr/mistarr.db.prev.new" "a stale copy is never saved"
+expect "$(cat "$root16/mistarr/mistarr.db.prev")" "DB16" "the database itself is saved"
+
 if [ "$fail" -eq 0 ]; then
     echo "all tests passed"
 else

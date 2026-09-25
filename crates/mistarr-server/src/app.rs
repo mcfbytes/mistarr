@@ -428,6 +428,9 @@ fn open_db(
     if let Some(dir) = std::env::var_os(crate::db::SQLITE_TMPDIR) {
         tracing::info!(dir = %Path::new(&dir).display(), "SQLite temporary files");
     }
+    // Leftovers of an import in RAM cut short; the database itself is always whole.
+    let _ = db::ram::clean_stale(&config.paths.db(), &config.memory.import_dir);
+    migrate_in_ram(config)?;
     let db = Db::open(&config.paths.db())?;
     let (stored, unfinished, resolved) = db.write_blocking(prepare_catalog)?;
     let stored = stored.unwrap_or_else(|e| {
@@ -440,6 +443,29 @@ fn open_db(
         config.prefs = rt.prefs;
     }
     Ok((db, unfinished, resolved))
+}
+
+/// Runs pending migrations on a copy of the database in RAM when memory allows, so an
+/// index rebuild reaches the card as whole MiB writes; `Db::open` migrates what is left.
+fn migrate_in_ram(config: &Config) -> Result<()> {
+    let plan = db::ram::Plan {
+        dir: config.memory.import_dir.clone(),
+        floor: config.memory.import_floor_mib.saturating_mul(1024 * 1024),
+        job: 0,
+    };
+    match db::ram::migrate_in_ram(&config.paths.db(), &plan) {
+        Ok(Some(r)) => tracing::info!(
+            mib = r.bytes.div_ceil(1024 * 1024),
+            card_writes = r.card_writes,
+            migrate_ms = r.work.as_millis(),
+            write_ms = r.write_back.as_millis(),
+            "database migrated in RAM"
+        ),
+        Ok(None) => {}
+        Err(e @ Error::SchemaTooNew { .. }) => return Err(e),
+        Err(e) => tracing::warn!(error = %e, "migrating the database in place"),
+    }
+    Ok(())
 }
 
 /// Queues the jobs every start runs: unfinished scans (never arcade's), the
@@ -565,6 +591,7 @@ pub(crate) mod testutil {
         config.paths.root = dir.path().to_path_buf();
         config.paths.games = dir.path().join("games");
         config.paths.data = dir.path().join("data");
+        config.memory.import_dir = dir.path().join("ram");
         std::fs::create_dir_all(&config.paths.data).expect("mkdir");
         let db = Db::open(&config.paths.db()).expect("db");
         db.write_blocking(|c| {

@@ -148,11 +148,12 @@ save_prev() {
     fi
 }
 
-# True when a process still holds the database open. Skipped without fuser.
+# True when a process still holds the database open, or the copy a DAT import
+# writes back beside it. Skipped without fuser.
 db_in_use() {
     command -v fuser >/dev/null 2>&1 || return 1
     set --
-    for f in "$DB" "$DB-wal"; do
+    for f in "$DB" "$DB-wal" "$DB.new"; do
         [ -f "$f" ] && set -- "$@" "$f"
     done
     [ "$#" -gt 0 ] || return 1
@@ -373,6 +374,11 @@ install_release() {
         echo "aborting the install; nothing was changed" >&2
         restart_current
         exit 1
+    fi
+    # A copy a stopped import was writing back; never trusted, and never saved.
+    if [ -f "$DB.new" ]; then
+        rm -f "$DB.new"
+        echo "removed the unfinished database copy $DB.new"
     fi
 
     save_prev

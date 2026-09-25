@@ -28,6 +28,7 @@ use crate::db::dat_stage::{self, StagedGame, StagedRom};
 use crate::db::dats::{self, DatVersionId, NewVersion};
 use crate::db::files::{self, FileId, FileRow, FileState};
 use crate::db::jobs::{JobId, JobState};
+use crate::db::ram::{self, Ram};
 use crate::db::titles;
 use crate::db::Db;
 use crate::error::{Error, Result};
@@ -183,6 +184,15 @@ struct Request {
     now: i64,
     stop: watch::Receiver<bool>,
     gate: watch::Receiver<GateState>,
+    /// Fail with [`Error::Paused`] on a manual pause instead of waiting it out, for an
+    /// import that holds the writer meanwhile.
+    abort_on_hold: bool,
+}
+
+/// What the members of a file did, and whether their platforms' recompute already ran.
+struct Imported {
+    outcomes: Vec<Outcome>,
+    recomputed: bool,
 }
 
 #[async_trait]
@@ -221,7 +231,10 @@ impl Job for DatImport {
         let dats_dir = self.path.parent().unwrap_or_else(|| Path::new("."));
         let target = unique_path(&dats_dir.join(LOADED_DIR), &file);
         let stored = file_name(&target);
-        let outcomes = self.import_members(ctx, &members, &stored).await?;
+        let Imported {
+            outcomes,
+            recomputed,
+        } = self.import_members(ctx, &members, &stored).await?;
         let mut loaded = Vec::new();
         let mut reasons = Vec::new();
         for o in outcomes {
@@ -250,7 +263,7 @@ impl Job for DatImport {
             );
             publish_loaded(&ctx.app, l, &file);
         }
-        enqueue_follow_up_work(&ctx.app, &loaded).await;
+        enqueue_follow_up_work(&ctx.app, &loaded, recomputed).await;
         Ok(())
     }
 }
@@ -271,11 +284,13 @@ impl DatImport {
             Err(reason) => return fail(reason),
         };
         let mut reasons = Vec::new();
-        for outcome in self.import_members(ctx, &members, file).await? {
+        let imported = self.import_members(ctx, &members, file).await?;
+        for outcome in imported.outcomes {
             match outcome {
                 Outcome::Loaded(l) => {
                     publish_loaded(&ctx.app, &l, file);
-                    enqueue_follow_up_work(&ctx.app, std::slice::from_ref(&l)).await;
+                    let loaded = std::slice::from_ref(&l);
+                    enqueue_follow_up_work(&ctx.app, loaded, imported.recomputed).await;
                     return Ok(());
                 }
                 Outcome::Rejected(r) => reasons.push(r),
@@ -288,26 +303,113 @@ impl DatImport {
         fail(reasons.join("\n"))
     }
 
-    /// Imports every member on a blocking thread, checkpointing between them.
+    /// Imports every member on a copy of the database in RAM, with their platforms'
+    /// recompute, and swaps the copy in; in place, member by member, when memory or room
+    /// is short. A manual pause drops the copy, waits, and starts again.
     async fn import_members(
         &self,
         ctx: &JobContext,
         members: &[Member],
         source_file: &str,
+    ) -> Result<Imported> {
+        let reason = loop {
+            match self.import_in_ram(ctx, members, source_file).await {
+                Ok(Ram::Done(outcomes, report)) => {
+                    log_report(source_file, &report);
+                    return Ok(Imported {
+                        outcomes,
+                        recomputed: true,
+                    });
+                }
+                Ok(Ram::Fallback(reason)) => {
+                    tracing::info!(file = source_file, reason, "DAT imported in place");
+                    ctx.progress(json!({
+                        "file": source_file,
+                        "members": members.len(),
+                        "phase": IN_PLACE,
+                        "reason": reason,
+                    }))
+                    .await?;
+                    break reason;
+                }
+                Err(Error::Paused) => ctx.checkpoint().await?,
+                Err(e) => return Err(e),
+            }
+        };
+        Ok(Imported {
+            outcomes: self
+                .import_in_place(ctx, members, source_file, &reason)
+                .await?,
+            recomputed: false,
+        })
+    }
+
+    /// The request for one member of this file.
+    fn request(&self, ctx: &JobContext, source_file: &str, abort_on_hold: bool) -> Request {
+        Request {
+            source_file: source_file.to_owned(),
+            file_stem: stem(&self.path),
+            bind: self.bind.clone(),
+            prefs: prefs(&ctx.app.config().prefs),
+            now: crate::unix_now(),
+            stop: ctx.app.shutdown_signal(),
+            gate: ctx.app.gate.subscribe(),
+            abort_on_hold,
+        }
+    }
+
+    /// Holds the writer and runs every member, then the recompute of each platform they
+    /// loaded into, on a copy in RAM through [`ram::run`].
+    async fn import_in_ram(
+        &self,
+        ctx: &JobContext,
+        members: &[Member],
+        source_file: &str,
+    ) -> Result<Ram<Vec<Outcome>>> {
+        let memory = ctx.app.config().memory;
+        let plan = ram::Plan {
+            dir: memory.import_dir,
+            floor: memory.import_floor_mib.saturating_mul(1024 * 1024),
+            job: ctx.id.0,
+        };
+        let req = self.request(ctx, source_file, true);
+        let mut reporter = Reporter {
+            app: Arc::clone(&ctx.app),
+            id: ctx.id,
+            kind: ctx.kind,
+            file: source_file.to_owned(),
+            members: members.len(),
+            stop: ctx.app.shutdown_signal(),
+            gate: ctx.app.gate.subscribe(),
+        };
+        let path = self.path.clone();
+        let members = members.to_vec();
+        ctx.app
+            .db
+            .hold_writer(crate::threads::label::DAT_IMPORT, move |held| {
+                let mut progress = reporter.clone();
+                let mut store = |db: &Db, done, games| progress.store(db, done, games);
+                ram::run(held, &plan, &mut reporter, |db| {
+                    import_all(db, &path, &members, &req, &mut store)
+                })
+            })
+            .await
+    }
+
+    /// Imports every member in place on a blocking thread, checkpointing between them.
+    /// `reason` says why it runs in place, and goes into every progress it stores.
+    async fn import_in_place(
+        &self,
+        ctx: &JobContext,
+        members: &[Member],
+        source_file: &str,
+        reason: &str,
     ) -> Result<Vec<Outcome>> {
         let mut outcomes = Vec::with_capacity(members.len());
         let mut games = 0;
         for (done, &member) in members.iter().enumerate() {
             ctx.checkpoint().await?;
-            let req = Request {
-                source_file: source_file.to_owned(),
-                file_stem: stem(&self.path),
-                bind: self.bind.clone(),
-                prefs: prefs(&ctx.app.config().prefs),
-                now: crate::unix_now(),
-                stop: ctx.app.shutdown_signal(),
-                gate: ctx.app.gate.subscribe(),
-            };
+            let req = self.request(ctx, source_file, false);
             let path = self.path.clone();
             let db = ctx.app.db.clone();
             let outcome = crate::threads::blocking(crate::threads::label::DAT_IMPORT, move || {
@@ -324,11 +426,135 @@ impl DatImport {
                 "members": members.len(),
                 "done": done + 1,
                 "games": games,
+                "phase": IN_PLACE,
+                "reason": reason,
             }))
             .await?;
         }
         Ok(outcomes)
     }
+}
+
+/// `phase` of a DAT import that runs on the card.
+const IN_PLACE: &str = "importing in place";
+
+/// Imports `members` of `path` into `db`, the copy in RAM, then recomputes each platform
+/// a member loaded into, as the queued recompute would; asks for the copy to be written
+/// back when any member loaded.
+fn import_all(
+    db: &Db,
+    path: &Path,
+    members: &[Member],
+    req: &Request,
+    progress: &mut dyn FnMut(&Db, usize, u64) -> Result<()>,
+) -> Result<(Vec<Outcome>, bool)> {
+    let mut outcomes = Vec::with_capacity(members.len());
+    let mut games = 0;
+    for (done, &member) in members.iter().enumerate() {
+        check(req)?;
+        let outcome = import_from(db, path, member, req)?;
+        if let Outcome::Loaded(l) = &outcome {
+            games += l.games;
+        }
+        outcomes.push(outcome);
+        progress(db, done + 1, games)?;
+    }
+    let mut platforms: Vec<&PlatformId> = Vec::new();
+    for o in &outcomes {
+        if let Outcome::Loaded(Loaded {
+            platform: Some(p), ..
+        }) = o
+        {
+            if !platforms.contains(&p) {
+                platforms.push(p);
+            }
+        }
+    }
+    for p in platforms {
+        recompute_blocking(db, p, &req.prefs, &|| check(req))?;
+    }
+    let loaded = outcomes.iter().any(|o| matches!(o, Outcome::Loaded(_)));
+    Ok((outcomes, loaded))
+}
+
+/// [`Error::Cancelled`] on shutdown, [`Error::Paused`] while a pause holds the lane.
+fn check(req: &Request) -> Result<()> {
+    if *req.stop.borrow() {
+        return Err(Error::Cancelled);
+    }
+    if req.gate.borrow().hold(Lane::Background).is_some() {
+        return Err(Error::Paused);
+    }
+    Ok(())
+}
+
+/// Reports an import in RAM as `job.progress`: each phase as it starts, and the members
+/// done, stored on the copy's job row too so the swap keeps the last of them.
+#[derive(Clone)]
+struct Reporter {
+    app: Arc<AppState>,
+    id: JobId,
+    kind: &'static str,
+    file: String,
+    members: usize,
+    stop: watch::Receiver<bool>,
+    gate: watch::Receiver<GateState>,
+}
+
+impl Reporter {
+    fn body(&self, phase: ram::Phase, done: Option<(usize, u64)>) -> Value {
+        let mut body =
+            json!({ "file": self.file, "members": self.members, "phase": phase.label() });
+        if let Some((done, games)) = done {
+            body["done"] = json!(done);
+            body["games"] = json!(games);
+        }
+        body
+    }
+
+    fn store(&mut self, db: &Db, done: usize, games: u64) -> Result<()> {
+        let body = self.body(ram::Phase::Importing, Some((done, games)));
+        let (id, now) = (self.id, crate::unix_now());
+        db.write_blocking(|c| crate::db::jobs::set_progress(c, id, &body, now))?;
+        super::publish_progress(&self.app, self.id, self.kind, JobState::Running, &body);
+        Ok(())
+    }
+}
+
+impl ram::Watch for Reporter {
+    fn phase(&mut self, phase: ram::Phase) {
+        let body = self.body(phase, None);
+        super::publish_progress(&self.app, self.id, self.kind, JobState::Running, &body);
+    }
+
+    fn between(&mut self, phase: ram::Phase) -> Result<()> {
+        if *self.stop.borrow() {
+            return Err(Error::Cancelled);
+        }
+        if phase == ram::Phase::Writing {
+            // The write-back lasts seconds; a pause lets it finish, a core spaces it out.
+            if self.gate.borrow().core_running() {
+                std::thread::sleep(YIELD_FOR);
+            }
+            return Ok(());
+        }
+        if self.gate.borrow().hold(Lane::Background).is_some() {
+            return Err(Error::Paused);
+        }
+        Ok(())
+    }
+}
+
+fn log_report(file: &str, r: &ram::Report) {
+    tracing::info!(
+        file,
+        mib = r.bytes.div_ceil(1024 * 1024),
+        card_writes = r.card_writes,
+        copy_ms = r.copy_in.as_millis(),
+        import_ms = r.work.as_millis(),
+        write_ms = r.write_back.as_millis(),
+        "DAT imported in RAM"
+    );
 }
 
 fn file_name(path: &Path) -> String {
@@ -656,6 +882,9 @@ fn pace(req: &Request, games: u64) -> Result<()> {
         if *req.stop.borrow() {
             return Err(Error::Cancelled);
         }
+        if req.abort_on_hold {
+            return Err(Error::Paused);
+        }
         std::thread::sleep(PAUSED_POLL);
     }
     Ok(())
@@ -714,12 +943,12 @@ fn staged(game: &DatGame) -> StagedGame {
 }
 
 /// Queues the recompute job, which matches files of retired roms and unmatched files
-/// again from their stored hashes, and an automatic scan for each platform a DAT just
-/// loaded titles for,
+/// again from their stored hashes, or when the import already ran it, the re-map it ends
+/// with; and an automatic scan for each platform a DAT just loaded titles for,
 /// deduped so several DATs in one pack queue at most one each, binds waiting
 /// sources once for the whole pack, then checks whether the wizard just
 /// became complete.
-async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
+async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded], recomputed: bool) {
     let mut queued = HashSet::new();
     for l in loaded {
         let Some(platform) = &l.platform else {
@@ -728,8 +957,10 @@ async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
         if !queued.insert(platform.clone()) {
             continue;
         }
-        // Files of retired roms and unmatched files are matched again in the background.
-        if let Err(e) = Scheduler::enqueue(app, Arc::new(Recompute::new(&platform.0))).await {
+        if recomputed {
+            super::remap::enqueue(app, Some(vec![platform.clone()])).await;
+        } else if let Err(e) = Scheduler::enqueue(app, Arc::new(Recompute::new(&platform.0))).await
+        {
             tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue the recompute");
         }
         if let Err(e) = scan::enqueue_if_games_dir_exists(app, platform).await {
@@ -911,6 +1142,48 @@ fn stored_hashes(f: &FileRow) -> Option<mistarr_core::HashSet> {
         crc32: f.crc32.clone()?,
         md5: f.md5.clone()?,
         sha1: f.sha1.clone()?,
+    })
+}
+
+/// [`Recompute`]'s passes over `platform` on the calling thread, each chunk in its own
+/// transaction, with `check` between them; the caller queues the re-map.
+fn recompute_blocking(
+    db: &Db,
+    platform: &PlatformId,
+    prefs: &Prefs,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<()> {
+    loop {
+        check()?;
+        let taken = db.write_blocking(|c| {
+            let tx = c.transaction()?;
+            let taken = rematch_chunk(&tx, platform)?;
+            crate::db::commit(tx)?;
+            Ok(taken)
+        })?;
+        if taken < REMATCH_CHUNK as usize {
+            break;
+        }
+    }
+    let mut after = FileId(0);
+    while !scan::is_arcade(platform) {
+        check()?;
+        let chunk = db.write_blocking(|c| {
+            let tx = c.transaction()?;
+            let chunk = match_unmatched_chunk(&tx, platform, after)?;
+            crate::db::commit(tx)?;
+            Ok(chunk)
+        })?;
+        after = chunk.last;
+        if chunk.read < REMATCH_CHUNK as usize {
+            break;
+        }
+    }
+    check()?;
+    db.write_blocking(|c| {
+        let tx = c.transaction()?;
+        titles::recompute_platform(&tx, &platform.0, prefs)?;
+        crate::db::commit(tx)
     })
 }
 

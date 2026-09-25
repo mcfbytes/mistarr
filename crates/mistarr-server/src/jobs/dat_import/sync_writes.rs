@@ -197,6 +197,7 @@ fn request() -> Request {
         now: 2,
         stop: watch::channel(false).1,
         gate: watch::channel(GateState::default()).1,
+        abort_on_hold: false,
     }
 }
 
@@ -263,4 +264,86 @@ fn sync_writes_on_the_bench_catalogue() {
     let db = catalogue(dir.path(), 1.0, 3_000, &tracks);
     let [(iw, ib), (rw, rb)] = measure(&db, &xml).expect("per-thread I/O accounting");
     eprintln!("import {iw} writes, {ib} bytes; recompute {rw} writes, {rb} bytes");
+}
+
+/// Loads `xml` from a file in `dir` through the import in RAM and returns its report.
+fn measure_ram(db: &Db, dir: &std::path::Path, xml: &str) -> ram::Report {
+    let path = dir.join("psx.dat");
+    std::fs::write(&path, xml).expect("write");
+    let plan = ram::Plan {
+        dir: dir.join("ram"),
+        floor: 0,
+        job: 1,
+    };
+    let req = request();
+    let out = db
+        .hold_writer_blocking(|h| {
+            ram::run(h, &plan, &mut (), |ram| {
+                import_all(ram, &path, &[Member::Plain], &req, &mut |_, _, _| Ok(()))
+            })
+        })
+        .expect("run");
+    match out {
+        Ram::Done(outcomes, report) => {
+            assert!(matches!(outcomes[..], [Outcome::Loaded(_)]), "{outcomes:?}");
+            report
+        }
+        Ram::Fallback(reason) => panic!("fell back: {reason}"),
+    }
+}
+
+/// A 450-game psx load and its recompute on a tenth of the catalogue, through the copy
+/// in RAM: the card sees one write per MiB of the database and a few more.
+#[test]
+fn a_load_in_ram_writes_the_card_about_once_per_mebibyte() {
+    if thread_writes().is_none() {
+        eprintln!("no per-thread I/O accounting; skipped");
+        return;
+    }
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (xml, tracks) = psx_dat(450);
+    let db = catalogue(dir.path(), 0.1, 600, &tracks);
+    let report = measure_ram(&db, dir.path(), &xml);
+    let writes = report.card_writes.expect("per-thread I/O accounting");
+    let chunks = report.bytes.div_ceil(ram::CHUNK_BYTES as u64);
+    eprintln!(
+        "{} bytes, {chunks} chunks, {writes} card writes",
+        report.bytes
+    );
+    assert!(writes <= chunks + 16, "{writes} writes for {chunks} MiB");
+}
+
+/// In place against in RAM, on the bench catalogue with 3 000 unmatched psx files, for a
+/// 450-game and a 10 000-game psx DAT: card writes and host wall time of each.
+#[test]
+#[ignore = "minutes; run by hand with --ignored --nocapture --test-threads=1"]
+fn in_place_and_in_ram_on_the_bench_catalogue() {
+    for games in [450, 10_000] {
+        let (xml, tracks) = psx_dat(games);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = catalogue(dir.path(), 1.0, 3_000, &tracks);
+        let size = std::fs::metadata(db.path()).expect("stat").len();
+        let start = std::time::Instant::now();
+        let [(iw, ib), (rw, rb)] = measure(&db, &xml).expect("per-thread I/O accounting");
+        let in_place = start.elapsed();
+        drop(db);
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = catalogue(dir.path(), 1.0, 3_000, &tracks);
+        let start = std::time::Instant::now();
+        let r = measure_ram(&db, dir.path(), &xml);
+        let in_ram = start.elapsed();
+        eprintln!(
+            "{games} games, database {size} bytes before, {} after\n  \
+             in place: {} writes ({} bytes), {in_place:?}\n  \
+             in RAM: {:?} card writes, copy {:?}, import {:?}, write-back {:?}, {in_ram:?}",
+            r.bytes,
+            iw + rw,
+            ib + rb,
+            r.card_writes,
+            r.copy_in,
+            r.work,
+            r.write_back,
+        );
+    }
 }

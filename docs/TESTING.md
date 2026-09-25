@@ -102,7 +102,9 @@ Each server started also checks that `/proc/<pid>/limits` shows the default
 SQLite temporary directory exists. Besides the 64 MiB budget, each job's peak
 must stay within 12 or 16 MiB of a server that runs no job, measured once
 per run, so a regression shows before it reaches the budget; the two DAT
-loads, whose apply runs with the writer's 8 MiB bulk cache, within 28 MiB. The suite runs in `cargo test --workspace` in debug
+loads, whose apply runs with the writer's 8 MiB bulk cache on a second pair
+of connections to the copy in RAM, within 32 MiB, and the 50 MB DAT's job
+must report that it loaded in RAM. The suite runs in `cargo test --workspace` in debug
 builds and takes about a minute; the budget holds there on x86-64 with room
 to spare, and a release build for armv7 needs less, with half the pointer
 size and a smaller binary. `make memory` runs it one test at a time and
@@ -127,6 +129,23 @@ the counts on the full catalogue:
 
 ```sh
 cargo test -p mistarr-server --lib sync_writes_on_the_bench -- --ignored --nocapture
+```
+
+The import in RAM (ARCHITECTURE.md "DAT import in RAM") is held to its card
+writes the same way. `a_load_in_ram_writes_the_card_about_once_per_mebibyte`
+loads the same 450 games through the copy and fails above one write per MiB
+of the database plus 16, and `db::ram::tests` count the write-back's syscalls
+directly, check that a stop at every phase leaves the card file
+byte-identical by hash, that readers see the old rows until the swap and the
+new ones after, and that stale copies go at startup;
+`an_import_in_ram_stores_the_same_rows_as_one_in_place` compares every row
+of both paths over a table of synthetic DATs. The ignored
+`in_place_and_in_ram_on_the_bench_catalogue` and
+`the_last_migration_in_place_and_in_ram` print the comparisons ARCHITECTURE.md
+records:
+
+```sh
+cargo test -p mistarr-server --lib in_ram -- --ignored --nocapture --test-threads=1
 ```
 
 ## Browse speed

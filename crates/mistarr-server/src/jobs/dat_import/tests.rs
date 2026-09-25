@@ -8,7 +8,7 @@ use crate::db::jobs::{self as rows, JobState};
 
 /// A database in its own temporary directory, dropped with it.
 struct TestDb {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     db: Db,
 }
 
@@ -23,7 +23,7 @@ fn conn() -> TestDb {
     let db = Db::open(&dir.path().join("t.db")).expect("open");
     db.write_blocking(|c| crate::db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS))
         .expect("seed");
-    TestDb { _dir: dir, db }
+    TestDb { dir, db }
 }
 
 /// A Logiqx DAT with games `(name, cloneof)`, one rom each.
@@ -53,6 +53,7 @@ fn request(stop: bool, bind: Option<Bind>) -> Request {
         now: 1,
         stop: watch::channel(stop).1,
         gate: watch::channel(GateState::default()).1,
+        abort_on_hold: false,
     }
 }
 
@@ -1476,4 +1477,272 @@ fn a_recompute_that_changes_nothing_writes_nothing() {
         })
         .expect("page");
     assert_eq!(changes, 0);
+}
+
+/// Every row of every table, the search index's included, as sorted text; the times
+/// migrations ran are left out.
+fn dump(db: &Db) -> Vec<String> {
+    db.read_blocking(|c| {
+        let tables: Vec<String> = c
+            .prepare(
+                "SELECT name FROM sqlite_master WHERE type = 'table' \
+                 AND name NOT LIKE 'sqlite_%' AND name != 'schema_version' ORDER BY name",
+            )?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        let mut out = Vec::new();
+        for t in tables {
+            let mut stmt = c.prepare(&format!("SELECT * FROM \"{t}\""))?;
+            let n = stmt.column_count();
+            let mut rows: Vec<String> = stmt
+                .query_map([], |r| {
+                    let mut line = t.clone();
+                    for i in 0..n {
+                        let v: rusqlite::types::Value = r.get(i)?;
+                        let _ = write!(line, "|{v:?}");
+                    }
+                    Ok(line)
+                })?
+                .collect::<rusqlite::Result<_>>()?;
+            rows.sort();
+            out.extend(rows);
+        }
+        Ok(out)
+    })
+    .expect("dump")
+}
+
+/// A seeded database with unmatched gb files a DAT of [`dat`] matches by CRC32 and size.
+fn with_files() -> TestDb {
+    let c = conn();
+    let gb = PlatformId("gb".into());
+    c.with(|x| {
+        for n in [0, 1, 2, 9] {
+            unmatched_file(x, &gb, &format!("GB/file {n}.gb"), &sums(n))?;
+        }
+        Ok(())
+    })
+    .expect("files");
+    c
+}
+
+/// Loads each DAT in turn through [`import_all`], on `c` itself or on a copy in RAM that
+/// is then swapped in, and returns every outcome.
+fn load_all(c: &TestDb, dats: &[String], via_ram: bool) -> Vec<Outcome> {
+    let dir = c.dir.path();
+    let mut outcomes = Vec::new();
+    for (i, xml) in dats.iter().enumerate() {
+        let path = dir.join(format!("{i}.dat"));
+        std::fs::write(&path, xml).expect("write");
+        let mut req = request(false, None);
+        req.now = i64::try_from(i).expect("small") + 1;
+        let mut progress = |_: &Db, _, _| Ok(());
+        let (out, _) = if via_ram {
+            let plan = ram::Plan {
+                dir: dir.join("ram"),
+                floor: 0,
+                job: 1,
+            };
+            let ran =
+                c.db.hold_writer_blocking(|h| {
+                    ram::run(h, &plan, &mut (), |db| {
+                        import_all(db, &path, &[Member::Plain], &req, &mut progress)
+                    })
+                })
+                .expect("run");
+            match ran {
+                Ram::Done(out, _) => (out, true),
+                Ram::Fallback(reason) => panic!("fell back: {reason}"),
+            }
+        } else {
+            import_all(&c.db, &path, &[Member::Plain], &req, &mut progress).expect("import")
+        };
+        outcomes.extend(out);
+    }
+    outcomes
+}
+
+#[test]
+fn an_import_in_ram_stores_the_same_rows_as_one_in_place() {
+    let gb = "Maker - Game Boy";
+    let cases: Vec<(&str, Vec<String>)> = vec![
+        (
+            "clones and picks",
+            vec![dat(
+                gb,
+                "1",
+                &[
+                    ("Example Quest (USA)", None),
+                    ("Example Quest (Japan)", Some("Example Quest (USA)")),
+                    ("Mock Manor (Europe)", None),
+                ],
+            )],
+        ),
+        (
+            "inferred groups",
+            vec![dat(
+                gb,
+                "1",
+                &[
+                    ("Example Quest (Europe) (Rev 1)", None),
+                    ("Example Quest (USA)", None),
+                    ("Sample Tale (World) (Beta)", None),
+                ],
+            )],
+        ),
+        (
+            "a newer version retires what it lacks",
+            vec![
+                dat(
+                    gb,
+                    "1",
+                    &[
+                        ("Example Quest (USA)", None),
+                        ("Mock Manor (USA)", None),
+                        ("Sample Tale (USA)", None),
+                    ],
+                ),
+                dat(
+                    gb,
+                    "2",
+                    &[("Sample Tale (USA)", None), ("Example Quest (USA)", None)],
+                ),
+            ],
+        ),
+        (
+            "an unbound DAT",
+            vec![dat("Test Console", "1", &[("Example Quest (USA)", None)])],
+        ),
+        ("a rejected DAT", vec!["<datafile><game".to_owned()]),
+    ];
+    for (name, dats) in cases {
+        let (in_place, in_ram) = (with_files(), with_files());
+        let a = load_all(&in_place, &dats, false);
+        let b = load_all(&in_ram, &dats, true);
+        assert_eq!(a, b, "{name}: outcomes");
+        let (rows_a, rows_b) = (dump(&in_place.db), dump(&in_ram.db));
+        let stored = rows_a.iter().any(|r| r.starts_with("dat_versions|"));
+        assert_eq!(stored, name != "a rejected DAT", "{name}");
+        assert_eq!(rows_a, rows_b, "{name}: rows");
+    }
+}
+
+fn job_row(app: &AppState, id: crate::db::jobs::JobId) -> rows::JobRow {
+    app.db
+        .read_blocking(|c| rows::get(c, id))
+        .expect("get")
+        .expect("row")
+}
+
+fn count_kind(app: &AppState, kind: &str) -> u64 {
+    app.db
+        .read_blocking(|c| rows::count_kind(c, kind))
+        .expect("count")
+}
+
+#[tokio::test]
+async fn a_dat_job_imports_in_ram_and_queues_the_remap_its_recompute_ends_with() {
+    let (dir, app) = state();
+    let dats_dir = app.config().paths.dats();
+    std::fs::create_dir_all(&dats_dir).expect("mkdir");
+    let path = dats_dir.join("gb.dat");
+    let xml = dat(
+        "Maker - Game Boy",
+        "1",
+        &[("Example Quest (USA)", None), ("Mock Manor (USA)", None)],
+    );
+    std::fs::write(&path, xml).expect("write");
+    let mut events = app.events.subscribe(None).live;
+    let id = Scheduler::run_inline(&app, Arc::new(DatImport::new(&path)))
+        .await
+        .expect("run");
+    let row = job_row(&app, id);
+    assert_eq!(row.state, JobState::Done, "{:?}", row.progress);
+    assert_eq!(
+        row.progress.as_ref().and_then(|p| p["phase"].as_str()),
+        Some("importing"),
+        "{:?}",
+        row.progress
+    );
+    let titles: i64 = app
+        .db
+        .read_blocking(|c| Ok(c.query_row("SELECT COUNT(*) FROM titles", [], |r| r.get(0))?))
+        .expect("titles");
+    assert_eq!(titles, 2);
+    assert_eq!(
+        count_kind(&app, RECOMPUTE_KIND),
+        0,
+        "the recompute ran in RAM"
+    );
+    assert_eq!(count_kind(&app, crate::jobs::remap::KIND), 1);
+    let mut phases = Vec::new();
+    while let Ok(e) = events.try_recv() {
+        if e.kind == EventKind::JobProgress {
+            let body: Value = serde_json::from_str(&e.data).expect("json");
+            let running = body["state"] == "running";
+            if let Some(p) = body["progress"]["phase"].as_str().filter(|_| running) {
+                phases.push(p.to_owned());
+            }
+        }
+    }
+    phases.dedup();
+    assert_eq!(
+        phases,
+        [
+            "copying the database to memory",
+            "importing",
+            "writing the database to the card"
+        ]
+    );
+    assert!(!dir.path().join("data/mistarr.db.new").exists());
+    let left = std::fs::read_dir(dir.path().join("ram")).map_or(0, Iterator::count);
+    assert_eq!(left, 0, "the copy in RAM is removed");
+}
+
+#[tokio::test]
+async fn short_memory_imports_in_place_and_says_why() {
+    let (_dir, app) = state();
+    app.update_config(|c| c.memory.import_floor_mib = 1 << 40);
+    let dats_dir = app.config().paths.dats();
+    std::fs::create_dir_all(&dats_dir).expect("mkdir");
+    let path = dats_dir.join("gb.dat");
+    let xml = dat("Maker - Game Boy", "1", &[("Example Quest (USA)", None)]);
+    std::fs::write(&path, xml).expect("write");
+    let id = Scheduler::run_inline(&app, Arc::new(DatImport::new(&path)))
+        .await
+        .expect("run");
+    let row = job_row(&app, id);
+    assert_eq!(row.state, JobState::Done, "{:?}", row.progress);
+    let progress = row.progress.expect("progress");
+    assert_eq!(progress["phase"], IN_PLACE);
+    assert!(
+        progress["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("MiB of memory available")),
+        "{progress}"
+    );
+    assert_eq!(progress["games"], 1);
+    assert_eq!(
+        count_kind(&app, RECOMPUTE_KIND),
+        1,
+        "the recompute is queued"
+    );
+}
+
+#[test]
+fn a_pause_stops_an_import_that_holds_the_writer() {
+    let (tx, gate) = watch::channel(GateState::default());
+    let req = Request {
+        gate,
+        ..request(false, None)
+    };
+    assert!(check(&req).is_ok());
+    let held = GateState {
+        corename: None,
+        manual: Some(crate::jobs::gate::Override::Paused),
+    };
+    tx.send(held).expect("send");
+    assert!(matches!(check(&req), Err(Error::Paused)));
+    let stopped = request(true, None);
+    assert!(matches!(check(&stopped), Err(Error::Cancelled)));
 }

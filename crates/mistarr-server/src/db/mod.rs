@@ -13,13 +13,14 @@ pub mod jobs;
 pub mod launch;
 pub mod migrate;
 pub mod platforms;
+pub mod ram;
 pub mod settings;
 pub mod sources;
 pub mod system;
 pub mod titles;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use rusqlite::{Connection, Transaction};
@@ -81,14 +82,7 @@ impl Db {
     /// assert!(db.path().ends_with("t.db"));
     /// ```
     pub fn open(path: &Path) -> Result<Self> {
-        let mut writer = Connection::open(path)?;
-        // Checked before `configure`, whose pragmas may write to the file.
-        migrate::check_supported(&writer)?;
-        configure(&writer)?;
-        migrate::apply(&mut writer)?;
-        let reader = Connection::open(path)?;
-        configure(&reader)?;
-        reader.pragma_update(None, "query_only", true)?;
+        let (writer, reader) = open_pair(path)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 write_turn: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -227,6 +221,213 @@ impl Db {
             .await
             .map_err(|e| Error::Task(e.to_string()))?
     }
+
+    /// Runs `f` with the writer held for all of it, so no other write reaches the file
+    /// until `f` returns; reads keep running. [`HeldWriter::replace_file`] swaps the file.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `f` returns, or [`Error::Poisoned`].
+    ///
+    /// ```
+    /// # let dir = tempfile::tempdir().unwrap();
+    /// let db = mistarr_server::db::Db::open(&dir.path().join("h.db")).unwrap();
+    /// let v = db.hold_writer_blocking(|h| Ok(h.path().to_path_buf())).unwrap();
+    /// assert_eq!(v, db.path());
+    /// ```
+    pub fn hold_writer_blocking<T>(
+        &self,
+        f: impl FnOnce(&mut HeldWriter<'_>) -> Result<T>,
+    ) -> Result<T> {
+        let conn = self.inner.writer.lock().map_err(|_| Error::Poisoned)?;
+        let mut held = HeldWriter {
+            inner: &self.inner,
+            conn,
+        };
+        f(&mut held)
+    }
+
+    /// [`Db::hold_writer_blocking`] on tokio's blocking pool under `label`, once no other
+    /// async write is running; async writes queued meanwhile wait until `f` returns.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `f` returns, [`Error::Poisoned`] or [`Error::Task`].
+    pub async fn hold_writer<T, F>(&self, label: crate::threads::Label, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut HeldWriter<'_>) -> Result<T> + Send + 'static,
+    {
+        let turn = Arc::clone(&self.inner.write_turn)
+            .acquire_owned()
+            .await
+            .map_err(|_| Error::Poisoned)?;
+        let db = self.clone();
+        crate::threads::blocking(label, move || {
+            let _turn = turn;
+            db.hold_writer_blocking(f)
+        })
+        .await
+        .map_err(|e| Error::Task(e.to_string()))?
+    }
+
+    /// Empties the WAL into the file and closes both connections, so the file stands
+    /// alone and its `-wal` is gone. Every clone of this `Db` must be dropped first.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] when a clone is still alive or the WAL could not be emptied,
+    /// [`Error::Poisoned`], or [`Error::Db`] when a connection fails to close.
+    ///
+    /// ```
+    /// # let dir = tempfile::tempdir().unwrap();
+    /// let path = dir.path().join("c.db");
+    /// mistarr_server::db::Db::open(&path).unwrap().close().unwrap();
+    /// assert!(!dir.path().join("c.db-wal").exists());
+    /// ```
+    pub fn close(self) -> Result<()> {
+        let inner = Arc::try_unwrap(self.inner)
+            .map_err(|_| std::io::Error::other("the database is still in use"))?;
+        let writer = inner.writer.into_inner().map_err(|_| Error::Poisoned)?;
+        let reader = inner.reader.into_inner().map_err(|_| Error::Poisoned)?;
+        let emptied = wal_emptied(&writer)?;
+        close_connection(reader)?;
+        close_connection(writer)?;
+        if !emptied {
+            return Err(std::io::Error::other("the database's WAL could not be emptied").into());
+        }
+        Ok(())
+    }
+}
+
+/// The writer connection held by [`Db::hold_writer_blocking`], with the file it writes.
+pub struct HeldWriter<'a> {
+    inner: &'a Inner,
+    conn: MutexGuard<'a, Connection>,
+}
+
+impl HeldWriter<'_> {
+    /// The held writer connection.
+    pub fn conn(&mut self) -> &mut Connection {
+        &mut self.conn
+    }
+
+    /// The database file.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.inner.path
+    }
+
+    /// Renames `new`, a complete database file already synced beside this one, over it
+    /// and reopens both connections on it. The reader is held throughout, so a read sees
+    /// the old file or the new one. The old file's WAL is emptied and its `-wal` and
+    /// `-shm` removed before the rename, so a crash at any step leaves one whole file under
+    /// the name; `docs/ARCHITECTURE.md` "DAT import in RAM" has the order.
+    ///
+    /// # Errors
+    ///
+    /// [`Error::Io`] when the WAL cannot be emptied or a file cannot be removed or renamed,
+    /// with the old file reopened; [`Error::Db`] when the new file cannot be opened, which
+    /// leaves connections that fail every statement until a restart.
+    pub fn replace_file(&mut self, new: &Path) -> Result<()> {
+        let mut reader = self.inner.reader.lock().map_err(|_| Error::Poisoned)?;
+        if !wal_emptied(&self.conn)? {
+            return Err(std::io::Error::other("the database's WAL could not be emptied").into());
+        }
+        let path = self.inner.path.clone();
+        let writer = std::mem::replace(&mut *self.conn, placeholder()?);
+        let old_reader = std::mem::replace(&mut *reader, placeholder()?);
+        let closed = close_connection(old_reader).and(close_connection(writer));
+        let swapped = closed.and_then(|()| Ok(install_file(&path, new)?));
+        if let Err(e) = swapped {
+            let (w, r) = open_pair(&path)?;
+            *self.conn = w;
+            *reader = r;
+            return Err(e);
+        }
+        let (w, r) = open_pair(&path).inspect_err(|e| {
+            tracing::error!(error = %e, "cannot reopen the database; restart mistarr");
+        })?;
+        *self.conn = w;
+        *reader = r;
+        Ok(())
+    }
+}
+
+/// `path` with `suffix` appended to its file name, as SQLite names `-wal` and `-shm`.
+///
+/// ```
+/// let p = mistarr_server::db::sibling(std::path::Path::new("/d/m.db"), "-wal");
+/// assert_eq!(p, std::path::Path::new("/d/m.db-wal"));
+/// ```
+#[must_use]
+pub fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
+}
+
+/// Puts `new`, a complete database file synced beside `path`, in its place once no
+/// connection has `path` open: removes the old file's `-wal` and `-shm`, which must hold
+/// nothing unwritten, renames `new` over it and syncs the directory.
+///
+/// # Errors
+///
+/// The I/O failure of a removal or the rename; the old file then stays in place.
+pub(crate) fn install_file(path: &Path, new: &Path) -> std::io::Result<()> {
+    for suffix in ["-wal", "-shm"] {
+        remove_if_present(&sibling(path, suffix))?;
+    }
+    std::fs::rename(new, path)?;
+    if let Some(dir) = path.parent() {
+        // The rename is synchronous on a `dirsync` mount; elsewhere this makes it durable.
+        if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
+            tracing::warn!(error = %e, "cannot sync the database directory");
+        }
+    }
+    Ok(())
+}
+
+/// Removes `path`, treating a file already gone as removed.
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        _ => Ok(()),
+    }
+}
+
+/// Checkpoints `conn`'s WAL with TRUNCATE and says whether it is now empty; true when
+/// the connection is not in WAL mode.
+fn wal_emptied(conn: &Connection) -> Result<bool> {
+    let (busy, log, done): (i64, i64, i64) =
+        conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+    Ok(busy == 0 && log == done)
+}
+
+fn close_connection(conn: Connection) -> Result<()> {
+    conn.close().map_err(|(_, e)| Error::Db(e))
+}
+
+/// A connection that fails every statement, held while the real ones are swapped.
+fn placeholder() -> Result<Connection> {
+    let conn = Connection::open_in_memory()?;
+    conn.pragma_update(None, "query_only", true)?;
+    Ok(conn)
+}
+
+/// Opens the writer, applying migrations, and the read-only reader on `path`.
+fn open_pair(path: &Path) -> Result<(Connection, Connection)> {
+    let mut writer = Connection::open(path)?;
+    // Checked before `configure`, whose pragmas may write to the file.
+    migrate::check_supported(&writer)?;
+    configure(&writer)?;
+    migrate::apply(&mut writer)?;
+    let reader = Connection::open(path)?;
+    configure(&reader)?;
+    reader.pragma_update(None, "query_only", true)?;
+    Ok((writer, reader))
 }
 
 /// Commits `tx` after bringing `title_groups` up to date with the writes it holds, so
