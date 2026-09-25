@@ -650,6 +650,44 @@ mod tests {
         assert!(dropped.await.is_err(), "`keep` is dropped once recorded");
     }
 
+    struct Reports;
+
+    #[async_trait]
+    impl Job for Reports {
+        fn kind(&self) -> &'static str {
+            "reports"
+        }
+        fn payload(&self) -> Value {
+            json!({ "path": "/d/r.dat" })
+        }
+        async fn run(&self, ctx: &JobContext) -> Result<()> {
+            assert!(ctx
+                .reporter()
+                .report("reading", || json!({ "phase": "reading" })));
+            assert!(ctx.app.live.get(ctx.id).is_some(), "held while running");
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn a_reporter_sends_live_progress_that_ends_with_the_job() {
+        let (_dir, app) = state();
+        let mut events = app.events.subscribe(None).live;
+        let id = Scheduler::run_inline(&app, Arc::new(Reports))
+            .await
+            .expect("run");
+        let live = loop {
+            let e = events.recv().await.expect("event");
+            if e.seq == 0 {
+                break e;
+            }
+        };
+        let body: Value = serde_json::from_str(&live.data).expect("json");
+        assert_eq!(body["detail"], "r.dat");
+        assert_eq!(body["progress"]["phase"], "reading");
+        assert_eq!(app.live.get(id), None, "cleared once finished");
+    }
+
     #[tokio::test]
     async fn inline_run_records_done_and_failed() {
         let (_dir, app) = state();
