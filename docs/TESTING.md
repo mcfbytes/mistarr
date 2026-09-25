@@ -180,7 +180,9 @@ the budget. The two DAT loads, whose apply runs with the writer's 8 MiB bulk
 cache on a second pair of connections to the copy in RAM, may reach 32 MiB,
 and the 50 MB DAT's job must report that it loaded in RAM. Source imports
 and remaps, whose binding writes use it too, may reach 20 MiB. The suite runs in `cargo test --workspace` in debug
-builds and takes about a minute; the budget holds there on x86-64 with room
+builds and takes about a minute. Most of a debug binary's code is resident
+from the start, so the workspace `Cargo.toml` builds dependencies at
+opt-level 1 in dev and test builds, which keeps that baseline small. The budget holds there on x86-64 with room
 to spare, and a release build for armv7 needs less, with half the pointer
 size and a smaller binary. `make memory` runs it one test at a time and
 prints each peak:

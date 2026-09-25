@@ -71,8 +71,8 @@ fn extended(value: &str) -> Option<String> {
     }
 }
 
-/// The file name a `Content-Disposition` header gives: `filename*` when it decodes,
-/// else `filename`; `None` when neither names a file.
+/// The file name a `Content-Disposition` header gives: `filename*` when it decodes to a
+/// name that is not blank, else `filename`; `None` when neither names a file.
 ///
 /// ```
 /// use mistarr_clients::fetch::disposition_file_name;
@@ -84,10 +84,11 @@ fn extended(value: &str) -> Option<String> {
 pub fn disposition_file_name(value: &str) -> Option<String> {
     let params = params(value);
     let find = |name: &str| params.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+    let named = |n: &String| !n.trim().is_empty();
     find("filename*")
         .and_then(|v| extended(v))
-        .or_else(|| find("filename").cloned())
-        .filter(|n| !n.trim().is_empty())
+        .filter(named)
+        .or_else(|| find("filename").cloned().filter(named))
 }
 
 #[cfg(test)]
@@ -118,6 +119,10 @@ mod tests {
         assert_eq!(
             n("attachment; filename*=UTF-8''%FF.dat; filename=b.dat").as_deref(),
             Some("b.dat")
+        );
+        assert_eq!(
+            n("attachment; filename*=UTF-8''%20; filename=c.dat").as_deref(),
+            Some("c.dat")
         );
         assert_eq!(
             n("attachment; filename=\"unterminated").as_deref(),
