@@ -67,6 +67,8 @@ pub struct Options {
     pub client_start_wait: Duration,
     /// The `ionice` that idles the daemon's I/O while a core runs; `None` never changes it.
     pub ionice: Option<PathBuf>,
+    /// A PEM bundle an https fetch trusts in place of the system's; `None` finds that.
+    pub ca_file: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -94,6 +96,7 @@ impl Default for Options {
             client_search_path: None,
             client_start_wait: Duration::from_secs(10),
             ionice: Some(PathBuf::from("ionice")),
+            ca_file: None,
         }
     }
 }
@@ -113,6 +116,8 @@ pub struct AppState {
     pub live: crate::jobs::progress::LiveProgress,
     /// Uploaded files whose import job is still being recorded.
     pub placed: crate::incoming::Placed,
+    /// URL fetches queued or running, by token.
+    pub fetches: crate::jobs::url_fetch::Fetches,
     /// When the server started.
     pub started: Instant,
     /// Runtime knobs.
@@ -147,6 +152,7 @@ impl AppState {
             scheduler: Scheduler::new(),
             live: crate::jobs::progress::LiveProgress::default(),
             placed: crate::incoming::Placed::default(),
+            fetches: crate::jobs::url_fetch::Fetches::default(),
             started: Instant::now(),
             poll_wake: tokio::sync::Notify::new(),
             redetect: tokio::sync::Notify::new(),
@@ -447,6 +453,7 @@ pub(crate) fn open_db(
     // Leftovers of an import in RAM cut short; the database itself is always whole.
     let swapping = db::ram::swap_files(&path);
     db::ram::clean_stale(&path, &config.memory.import_dir)?;
+    crate::jobs::url_fetch::spool::clean_stale(&config.paths.tmp());
     if config.memory.import_floor_mib == 0 {
         tracing::warn!(
             "[memory] import_floor_mib is 0: a DAT import in RAM may leave the core no memory"

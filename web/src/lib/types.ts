@@ -232,6 +232,16 @@ export interface Source {
 export type IncomingState = 'waiting' | 'importing' | 'rejected';
 
 /** A file in `dats/` or `sources/` that has not loaded. */
+/** The answer to `POST /fetch`; see docs/API.md "Fetching a URL". */
+export interface FetchStarted {
+  /** Cancels the fetch through `DELETE /fetch/{token}`; `null` for a magnet. */
+  token: number | null;
+  job_id: number | null;
+  /** `sources` for a magnet, placed at once. */
+  target: 'dats' | 'sources' | null;
+  file: IncomingFile | null;
+}
+
 export interface IncomingFile {
   file: string;
   size: number;
@@ -305,7 +315,7 @@ export interface ImportLogEntry {
 
 export type JobState = 'queued' | 'running' | 'paused' | 'done' | 'failed';
 
-export type JobLane = 'heavy' | 'background' | 'light';
+export type JobLane = 'heavy' | 'background' | 'light' | 'fetch';
 
 export interface Job {
   id: number;

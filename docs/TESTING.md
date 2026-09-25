@@ -101,6 +101,25 @@ and launch once it is on, the cache on a rescan, an image beside its bins,
 `no_layout` until a DAT loads, a cooked track, a paused and a stopped
 decode, the lane handed to a scan, and a DAT listing a whole `.chd`.
 
+`crates/mistarr-server/tests/url_fetch.rs` boots the server beside
+`mistarr_clients::fake::FileServer`, an in-process HTTP and HTTPS server on
+localhost that answers scripted routes and records every path asked for; no
+test contacts another host, and every example link uses `example.invalid`.
+It fetches a synthetic DAT, a DAT pack and a torrent listing a web seed on
+the same server, and checks each is asked for once, placed and imported,
+with the web seed never requested; it refuses an HTML page, a binary, a zip
+holding a non-DAT, a body past the torrent cap as it streams and one
+announcing more than the DAT cap; it follows five redirects and refuses a
+sixth and a redirect from https to http, the https server presenting a
+certificate generated in the test and trusted through `Options::ca_file`;
+it cancels a slow body and finds no part file left; it places a magnet and
+refuses malformed links. It greps the database and its WAL for the URL, its
+path, its query and the server's address, and a global subscriber's
+info-level log for the same. `mistarr-clients` tests the fetcher alone the
+same way, trusting the generated certificate through `Roots::from_pem_file`
+and refusing it with the built-in roots. `web/e2e/url.spec.ts` covers the
+field on each screen in mock mode.
+
 The fixture tool runs on its own too:
 
 ```sh
@@ -127,6 +146,7 @@ against another and the numbers include everything the real daemon runs.
 | `a_dat_import_on_the_card_stays_under_budget` | the same DAT with `[memory] import_floor_mib` too large for any copy | the load ran on the card, saying why, made no copy, and held SQLite's temporary files in its temporary directory |
 | `scan_stays_under_budget` | 16 000 loose and 2 000 zipped GBA files and 1 000 PSX folders of a cue and a bin | a `files` row per file and zip member |
 | `chd_identification_stays_under_budget` | four CHD images of 2 to 4 MB of CD data under `games/PSX` (chdman's default CD codecs, `cdzs`, uncompressed, and one-frame hunks) and a DAT of their tracks, with `[scan] chd_tracks` on | a scan then `chd_tracks` verify every track and cue row |
+| `a_url_fetch_stays_under_budget` | the 50 MB DAT served over https by a local `FileServer` whose certificate, generated in the test, the server trusts through `SSL_CERT_FILE`, fetched through `POST /fetch` with the server paused so the import that follows waits | the fetch done and the DAT in `dats/`, within 12 MiB of idle |
 | `a_tiny_memory_limit_is_raised_to_the_floor` | `[memory] data_limit_mib = 2` | the process runs with the 64 MiB floor, or a lower inherited limit |
 
 Each server started also checks that `/proc/<pid>/limits` shows the default

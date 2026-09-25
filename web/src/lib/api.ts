@@ -1,6 +1,7 @@
 import type {
   ClientKind,
   CoresResult,
+  FetchStarted,
   IncomingFile,
   DatVersion,
   Download,
@@ -172,6 +173,8 @@ export const api = {
   },
   addMagnet: (magnet: string): Promise<Uploaded> =>
     request('/sources/upload', { method: 'POST', body: JSON.stringify({ magnet }) }),
+  fetchUrl: (url: string): Promise<FetchStarted> => request('/fetch', { method: 'POST', body: JSON.stringify({ url }) }),
+  cancelFetch: (token: number): Promise<void> => request(`/fetch/${token}`, { method: 'DELETE' }),
   updateSource: (
     id: number,
     patch: { platform_id?: string | null; seed_policy?: string; state?: string }

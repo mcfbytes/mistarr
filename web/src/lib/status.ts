@@ -89,7 +89,8 @@ const KIND_LABEL: Record<string, string> = {
   remap_sources: 'Source matching',
   detect_client: 'Client check',
   resolve_magnet: 'Magnet lookup',
-  deselect: 'Transfer stop'
+  deselect: 'Transfer stop',
+  url_fetch: 'URL fetch'
 };
 
 export function kindLabel(kind: string): string {
@@ -105,9 +106,16 @@ export function jobDetail(payload: Record<string, unknown>): string | null {
   return typeof payload.platform_id === 'string' ? payload.platform_id : null;
 }
 
+/** What a URL fetch is about: its file once known, never the URL. */
+export function fetchSubject(progress: Record<string, unknown> | null): string {
+  return typeof progress?.file === 'string' ? progress.file : 'a URL';
+}
+
 /** The page that owns a job's result. */
-export function jobHref(job: Pick<Job, 'kind' | 'payload'>): string {
+export function jobHref(job: Pick<Job, 'kind' | 'payload'> & { progress?: Job['progress'] }): string {
   switch (job.kind) {
+    case 'url_fetch':
+      return job.progress?.target === 'sources' ? '#/sources' : job.progress?.target === 'dats' ? '#/dats' : '#/activity';
     case 'dat_import':
       return '#/dats';
     case 'source_import':
@@ -138,8 +146,20 @@ const PHASE_TEXT: Record<string, string> = {
   'copying the database to memory': 'Copying the database to memory',
   'writing the database to the card': 'Writing the database to the card',
   importing: 'Importing',
-  'importing in place': 'Importing in place'
+  'importing in place': 'Importing in place',
+  connecting: 'Connecting',
+  receiving: 'Receiving',
+  checking: 'Checking the file',
+  placing: 'Writing to the card'
 };
+
+/** Bytes as "4.2 MB" or "812 KB". */
+export function bytesText(n: number): string {
+  if (n >= 1_000_000) {
+    return `${(n / 1_000_000).toFixed(1)} MB`;
+  }
+  return `${Math.max(0, Math.round(n / 1000)).toLocaleString()} KB`;
+}
 
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
@@ -195,6 +215,17 @@ export function describeProgress(kind: string, p: Record<string, unknown> | null
     const images = num(p.total);
     if (done !== null && images !== null && images > 1) {
       parts.push(`image ${Math.min(done + 1, images)} of ${images}`);
+    }
+  } else if (kind === 'url_fetch') {
+    const got = num(p.bytes_received);
+    const total = num(p.bytes_total);
+    if (phase === 'receiving' && got !== null) {
+      if (total !== null && total > 0) {
+        fraction = Math.min(1, got / total);
+        parts.push(`${bytesText(got)} of ${bytesText(total)}`);
+      } else {
+        parts.push(`${bytesText(got)} received`);
+      }
     }
   } else if (kind === 'recompute_1g1r') {
     const checked = num(p.checked);

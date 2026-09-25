@@ -1,7 +1,8 @@
 import { SvelteMap } from 'svelte/reactivity';
 import { api } from '../api';
 import { fixtureJobs, fixtureRecentJobs, mockScenario } from '../fixtures';
-import type { Job, JobState } from '../types';
+import type { IncomingFile, Job, JobState } from '../types';
+import { received } from '../upload';
 import { findPlatform } from './platforms.svelte';
 import { showToast } from './toast.svelte';
 import { announceUpload, resolveUpload } from './uploads.svelte';
@@ -24,6 +25,11 @@ let reloadTimer: ReturnType<typeof setTimeout> | null = null;
 let recentTimer: ReturnType<typeof setTimeout> | null = null;
 // Pages showing the recent list; it is re-read only while one is open.
 let recentWatchers = 0;
+/** The error a fetch the user cancelled ends with. */
+export const FETCH_CANCELLED = 'Cancelled.';
+// URL fetches started in this tab, by token, with their job once known; never the URL.
+// eslint-disable-next-line svelte/prefer-svelte-reactivity -- only event handlers read it, never markup
+const pendingFetches = new Map<number, number | null>();
 // Scans the user queued, by job id, until their outcome is shown; kept across pages.
 // eslint-disable-next-line svelte/prefer-svelte-reactivity -- only event handlers read it, never markup
 const pendingScans = new Map<number, string>();
@@ -75,6 +81,45 @@ export function trackScan(jobId: number, platformId: string): void {
   const done = finished.get(jobId);
   if (done) {
     announce(jobId, done.state, done.progress);
+  }
+}
+
+/** Follows URL fetch `token`, whose job is `jobId` once recorded, until a toast says how it ended. */
+export function trackFetch(token: number, jobId: number | null): void {
+  pendingFetches.set(token, jobId);
+  const done = jobId === null ? undefined : finished.get(jobId);
+  if (jobId !== null && done) {
+    announceFetch(jobId, done.state, done.progress);
+  }
+}
+
+// A URL fetch moved: its progress names its token, and once it ends a toast says how.
+function announceFetch(id: number, state: JobState, progress: Record<string, unknown> | null): void {
+  const token = typeof progress?.token === 'number' ? progress.token : null;
+  if (token !== null && pendingFetches.get(token) === null) {
+    pendingFetches.set(token, id);
+  }
+  if (state !== 'done' && state !== 'failed') {
+    return;
+  }
+  const mine = [...pendingFetches].find(([t, j]) => j === id || t === token);
+  if (!mine) {
+    return;
+  }
+  pendingFetches.delete(mine[0]);
+  if (state === 'done') {
+    const target = progress?.target;
+    const placed = progress?.placed;
+    if ((target === 'dats' || target === 'sources') && placed && typeof placed === 'object') {
+      received(target, placed as IncomingFile);
+    }
+    return;
+  }
+  const error = typeof progress?.error === 'string' ? progress.error : 'see Activity';
+  if (error === FETCH_CANCELLED) {
+    showToast('The fetch was cancelled.', 'info');
+  } else {
+    showToast(`The fetch failed: ${error}`, 'error');
   }
 }
 
@@ -131,6 +176,13 @@ export function jobOutcome(
   const where = pid ? platformName(pid) : 'every platform';
   const path = typeof job.payload?.path === 'string' ? job.payload.path : '';
   const file = path.split('/').pop() ?? '';
+  if (job.kind === 'url_fetch') {
+    const name = typeof p.file === 'string' ? ` of ${p.file}` : '';
+    if (job.state === 'failed') {
+      return typeof p.error === 'string' ? `URL fetch failed: ${p.error}` : 'URL fetch failed';
+    }
+    return typeof p.target === 'string' ? `URL fetch${name}: placed in ${p.target}/` : `URL fetch${name}: done`;
+  }
   const labels: Record<string, string> = {
     scan: `Scan of ${where}`,
     recompute_1g1r: `Matching for ${where}`,
@@ -189,6 +241,9 @@ export function applyJobProgress(
   progress: Record<string, unknown> | null,
   detail: string | null = null
 ): void {
+  if (kind === 'url_fetch') {
+    announceFetch(id, state, progress);
+  }
   if (state === 'queued' && detail !== null && (kind === 'dat_import' || kind === 'source_import')) {
     resolveUpload(kind === 'dat_import' ? 'dats' : 'sources', detail, id);
   }
@@ -249,4 +304,72 @@ function startMockProgress(): void {
     const progress = { file: job.progress?.file, members: 1, done: 0, games, phase, ...bytes };
     applyJobProgress(job.id, job.kind, 'running', progress);
   }, 600);
+}
+
+let mockFetchId = 9000;
+// eslint-disable-next-line svelte/prefer-svelte-reactivity -- only timers and handlers read it, never markup
+const mockFetches = new Map<number, { id: number; timer: ReturnType<typeof setInterval> }>();
+
+/** The refusal the server gives for anything but a DAT, DAT pack or torrent. */
+export const NOT_ACCEPTED = "This isn't a DAT, DAT pack or torrent file.";
+
+/** Mock mode: a fetch job that moves through its phases; a link to an HTML page is refused. */
+export function startMockFetch(link: string, token: number): void {
+  mockFetchId += 1;
+  const id = mockFetchId;
+  const segment = link.split(/[?#]/)[0]?.split('/').pop() ?? '';
+  const refuse = /\.html?$/i.test(segment);
+  const file = !segment ? 'download.dat' : /\.(dat|xml|zip|torrent)$/i.test(segment) ? segment : `${segment}.dat`;
+  const total = 2_400_000;
+  let got = 0;
+  const now = Math.floor(Date.now() / 1000);
+  jobs = [
+    ...jobs,
+    {
+      id,
+      kind: 'url_fetch',
+      lane: 'fetch',
+      payload: { fetch: token },
+      state: 'running',
+      progress: { token, phase: 'connecting', bytes_received: 0 },
+      reason: null,
+      created_at: now,
+      updated_at: now
+    }
+  ];
+  trackFetch(token, id);
+  const timer = setInterval(() => {
+    got = Math.min(total, got + 300_000);
+    if (refuse && got > 300_000) {
+      stopMockFetch(token);
+      applyJobProgress(id, 'url_fetch', 'failed', { error: NOT_ACCEPTED });
+    } else if (got < total) {
+      const known = refuse ? {} : { file };
+      applyJobProgress(id, 'url_fetch', 'running', { token, phase: 'receiving', bytes_received: got, bytes_total: total, ...known });
+    } else {
+      stopMockFetch(token);
+      const target = file.endsWith('.torrent') ? 'sources' : 'dats';
+      const placed: IncomingFile = { file, size: total, state: 'waiting', reason: 'Queued.', job_id: null, progress: null, modified: now };
+      applyJobProgress(id, 'url_fetch', 'done', { token, phase: 'placed', file, target, bytes_received: total, bytes_total: total, placed });
+    }
+  }, 600);
+  mockFetches.set(token, { id, timer });
+}
+
+function stopMockFetch(token: number): number | null {
+  const running = mockFetches.get(token);
+  if (!running) {
+    return null;
+  }
+  clearInterval(running.timer);
+  mockFetches.delete(token);
+  return running.id;
+}
+
+/** Mock mode: cancels fetch `token` as the server would. */
+export function cancelMockFetch(token: number): void {
+  const id = stopMockFetch(token);
+  if (id !== null) {
+    applyJobProgress(id, 'url_fetch', 'failed', { error: FETCH_CANCELLED });
+  }
 }

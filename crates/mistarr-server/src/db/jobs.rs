@@ -393,12 +393,13 @@ pub fn open_rows(conn: &Connection) -> Result<Vec<JobRow>> {
 }
 
 /// The kinds `/system/jobs/recent` lists: work a user starts or waits on.
-pub const RECENT_KINDS: [&str; 5] = [
+pub const RECENT_KINDS: [&str; 6] = [
     "scan",
     "arcade_catalog",
     "dat_import",
     "recompute_1g1r",
     "import",
+    "url_fetch",
 ];
 
 /// Up to `limit` finished jobs of [`RECENT_KINDS`], most recently updated first.

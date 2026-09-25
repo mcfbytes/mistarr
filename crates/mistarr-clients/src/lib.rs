@@ -14,6 +14,7 @@ pub mod detect;
 mod error;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake;
+pub mod fetch;
 mod http;
 pub mod launch;
 mod metainfo;

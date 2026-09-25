@@ -20,8 +20,9 @@ use crate::jobs::dat_import::{
 };
 use crate::jobs::Scheduler;
 
-/// Largest accepted upload; daily packs of every system fit well inside.
-const MAX_UPLOAD: usize = 512 * 1024 * 1024;
+/// Largest accepted upload, [`crate::jobs::dat_import::MAX_DAT_BYTES`].
+#[allow(clippy::cast_possible_truncation)] // 512 MiB fits every usize the target has.
+const MAX_UPLOAD: usize = crate::jobs::dat_import::MAX_DAT_BYTES as usize;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -65,7 +66,7 @@ fn accepted(name: &str) -> bool {
 }
 
 /// A temporary name in `dir` the watcher ignores.
-fn part_path(dir: &FsPath) -> PathBuf {
+pub(crate) fn part_path(dir: &FsPath) -> PathBuf {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     let n = NEXT.fetch_add(1, Ordering::Relaxed);
     dir.join(format!(".upload-{}-{n}.part", std::process::id()))
@@ -98,12 +99,31 @@ async fn upload(
             let _ = std::fs::remove_file(&part);
             return Err(e);
         }
-        let target = unique_path(&dir, &name);
-        std::fs::rename(&part, &target).map_err(crate::Error::from)?;
-        let job = Arc::new(DatImport::new(&target));
-        let placed = crate::incoming::queue_placed(&app, &target, KIND, job).await?;
+        let placed = place_part(&app, &part, &name).await?;
         return Ok((StatusCode::ACCEPTED, Json(placed)));
     }
+}
+
+/// Renames the finished `part`, a [`part_path`] of `dats/`, to `name` there, or
+/// `name (N)` when that is taken, and queues its import as an upload's.
+///
+/// # Errors
+///
+/// [`crate::Error::Io`] when the rename fails, [`crate::Error::Db`] when the job cannot
+/// be recorded.
+pub(crate) async fn place_part(
+    app: &Arc<AppState>,
+    part: &FsPath,
+    name: &str,
+) -> crate::Result<IncomingFile> {
+    let dir = app.config().paths.dats();
+    let target = unique_path(&dir, name);
+    if let Err(e) = std::fs::rename(part, &target) {
+        let _ = std::fs::remove_file(part);
+        return Err(e.into());
+    }
+    let job = Arc::new(DatImport::new(&target));
+    crate::incoming::queue_placed(app, &target, KIND, job).await
 }
 
 /// Streams one multipart field to `path`, one chunk in memory at a time.

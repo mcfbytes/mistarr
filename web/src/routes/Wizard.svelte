@@ -10,6 +10,7 @@
   import { getSources, loadSources } from '../lib/stores/sources.svelte';
   import UploadField from '../lib/UploadField.svelte';
   import MagnetField from '../lib/MagnetField.svelte';
+  import UrlField from '../lib/UrlField.svelte';
   import IncomingList from '../lib/IncomingList.svelte';
   import ClientStart from '../lib/ClientStart.svelte';
   import HeldBanner from '../lib/HeldBanner.svelte';
@@ -174,6 +175,7 @@
       <p>Drop Logiqx DAT files, No-Intro database exports or zipped DAT packs here, or place them in:</p>
       <p><code>/media/fat/mistarr/dats</code></p>
       <UploadField which="dats" label="Add DAT files" accept=".dat,.xml,.zip" />
+      <UrlField />
       <p class="muted">Waiting in <code>dats/</code>:</p>
       <IncomingList which="dats" />
       <p class="muted">Loaded DATs:</p>
@@ -215,6 +217,7 @@
       <p><code>/media/fat/mistarr/sources</code></p>
       <UploadField which="sources" label="Add a .torrent file" accept=".torrent" />
       <MagnetField />
+      <UrlField />
       <p class="muted">Waiting in <code>sources/</code>:</p>
       <IncomingList which="sources" />
       <p class="muted">Added sources:</p>

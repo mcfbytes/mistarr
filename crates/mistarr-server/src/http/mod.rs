@@ -4,6 +4,7 @@ pub mod catalog;
 mod dats;
 pub(crate) mod downloads;
 mod events;
+mod fetch;
 mod imports;
 mod launch;
 mod platforms;
@@ -22,6 +23,9 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::app::AppState;
+
+pub(crate) use dats::{part_path as dat_part_path, place_part as place_dat_part};
+pub(crate) use sources::{file_name as sources_file_name, place_source, SourceFile};
 
 /// Header carrying the API key.
 pub const API_KEY_HEADER: &str = "x-api-key";
@@ -43,6 +47,7 @@ pub fn router(app: Arc<AppState>) -> Router {
         .merge(platforms::routes())
         .merge(catalog::routes())
         .merge(dats::routes())
+        .merge(fetch::routes())
         .merge(imports::routes())
         .merge(downloads::routes())
         .merge(launch::routes())

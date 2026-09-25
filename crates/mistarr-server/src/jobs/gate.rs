@@ -96,7 +96,7 @@ impl GateState {
             Lane::Background => {
                 (self.manual == Some(Override::Paused)).then_some(PauseReason::Manual)
             }
-            Lane::Light => None,
+            Lane::Light | Lane::Fetch => None,
         }
     }
 }

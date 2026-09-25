@@ -78,6 +78,7 @@ pub fn options_in(dir: &Path) -> Options {
         client_search_path: Some(dir.join("bin").into_os_string()),
         client_start_wait: Duration::ZERO,
         ionice: None,
+        ca_file: None,
     }
 }
 

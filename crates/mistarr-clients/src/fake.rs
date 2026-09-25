@@ -10,8 +10,10 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
+mod files;
 mod scgi;
 
+pub use files::{FileRoute, FileServer};
 pub use scgi::{FakeScgiServer, ScgiReply, ScgiRequest};
 
 const MAX_HEAD: usize = 64 * 1024;

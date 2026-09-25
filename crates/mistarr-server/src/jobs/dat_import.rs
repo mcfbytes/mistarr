@@ -42,6 +42,10 @@ pub const KIND: &str = "dat_import";
 /// `jobs.kind` of [`Recompute`].
 pub const RECOMPUTE_KIND: &str = "recompute_1g1r";
 
+/// Largest DAT or DAT pack an upload or a URL fetch accepts; daily packs of every
+/// system fit well inside.
+pub const MAX_DAT_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Subdirectory of `dats/` for files that loaded.
 pub const LOADED_DIR: &str = "loaded";
 

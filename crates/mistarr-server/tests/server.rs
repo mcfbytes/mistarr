@@ -441,7 +441,7 @@ async fn concurrent_settings_puts_keep_both_sections() {
 async fn shutdown_leaves_no_job_lane_running() {
     let booted = boot().await;
     let app = std::sync::Arc::clone(&booted.running.app);
-    assert_eq!(app.scheduler.lanes_alive(), 3);
+    assert_eq!(app.scheduler.lanes_alive(), 4);
     booted.running.shutdown().await.expect("shutdown");
     assert_eq!(app.scheduler.lanes_alive(), 0);
 }

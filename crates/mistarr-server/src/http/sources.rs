@@ -244,42 +244,83 @@ async fn upload(
         .get(header::CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    let (name, bytes, infohash, is_torrent) = if content_type.starts_with("multipart/form-data") {
+    let file = if content_type.starts_with("multipart/form-data") {
         let content_type = content_type.to_owned();
         // Parsing walks every file entry, so it stays off the async workers.
-        let (name, bytes, infohash) =
-            crate::threads::blocking(crate::threads::label::SOURCE_FILE, move || {
-                let (filename, data) = multipart_file(&content_type, &body).ok_or_else(|| {
-                    ApiError::bad_request("Send one .torrent file as multipart form data.")
-                })?;
-                let meta = torrent::parse_torrent(data).map_err(|e| {
-                    ApiError::bad_request(format!("Not a valid .torrent file: {e}."))
-                })?;
-                let name = file_name(&filename, "upload", "torrent");
-                Ok::<_, ApiError>((name, data.to_vec(), meta.infohash))
+        crate::threads::blocking(crate::threads::label::SOURCE_FILE, move || {
+            let (filename, data) = multipart_file(&content_type, &body).ok_or_else(|| {
+                ApiError::bad_request("Send one .torrent file as multipart form data.")
+            })?;
+            let meta = torrent::parse_torrent(data)
+                .map_err(|e| ApiError::bad_request(format!("Not a valid .torrent file: {e}.")))?;
+            Ok::<_, ApiError>(SourceFile {
+                name: file_name(&filename, "upload", "torrent"),
+                bytes: data.to_vec(),
+                infohash: meta.infohash,
+                is_torrent: true,
             })
-            .await
-            .map_err(|e| crate::Error::Task(e.to_string()))??;
-        (name, bytes, infohash, true)
+        })
+        .await
+        .map_err(|e| crate::Error::Task(e.to_string()))??
     } else {
         let req: MagnetBody = serde_json::from_slice(&body).map_err(|e| {
             ApiError::bad_request(format!(
                 "Send {{ \"magnet\": \"...\" }} or a .torrent file: {e}"
             ))
         })?;
-        let uri = req.magnet.trim();
-        let parsed = magnet::parse_magnet(uri)
-            .map_err(|e| ApiError::bad_request(format!("Not a valid magnet: {e}.")))?;
-        let hex = InfoHash::from_bytes(parsed.infohash).to_string();
-        let stem = parsed.display_name.unwrap_or_else(|| hex.clone());
-        let name = file_name(&stem, &hex, "magnet");
-        (
-            name,
-            format!("{uri}\n").into_bytes(),
-            parsed.infohash,
-            false,
-        )
+        magnet_file(&req.magnet)?
     };
+    let placed = place_source(&app, file).await?;
+    Ok((StatusCode::ACCEPTED, Json(placed)).into_response())
+}
+
+/// A `.torrent` or `.magnet` file on its way into `sources/`.
+pub(crate) struct SourceFile {
+    /// The safe file name to place it under.
+    pub(crate) name: String,
+    /// Its contents.
+    pub(crate) bytes: Vec<u8>,
+    /// The torrent's infohash.
+    pub(crate) infohash: [u8; 20],
+    /// A `.torrent`, which may complete a magnet that is still resolving.
+    pub(crate) is_torrent: bool,
+}
+
+/// A magnet link as the `.magnet` file an upload places.
+///
+/// # Errors
+///
+/// A 400 when `uri` is not a magnet link with a v1 infohash.
+pub(crate) fn magnet_file(uri: &str) -> Result<SourceFile, ApiError> {
+    let uri = uri.trim();
+    let parsed = magnet::parse_magnet(uri)
+        .map_err(|e| ApiError::bad_request(format!("Not a valid magnet: {e}.")))?;
+    let hex = InfoHash::from_bytes(parsed.infohash).to_string();
+    let stem = parsed.display_name.unwrap_or_else(|| hex.clone());
+    Ok(SourceFile {
+        name: file_name(&stem, &hex, "magnet"),
+        bytes: format!("{uri}\n").into_bytes(),
+        infohash: parsed.infohash,
+        is_torrent: false,
+    })
+}
+
+/// Places `file` in `sources/` as an upload does and queues its import: a 400 when it
+/// repeats a loaded source, a 409 when no free name is left.
+///
+/// # Errors
+///
+/// As described, and a 500 when the file cannot be written or its job recorded.
+pub(crate) async fn place_source(
+    app: &Arc<AppState>,
+    file: SourceFile,
+) -> Result<crate::incoming::IncomingFile, ApiError> {
+    let SourceFile {
+        name,
+        bytes,
+        infohash,
+        is_torrent,
+    } = file;
     let hex = InfoHash::from_bytes(infohash).to_string();
     let existing = app
         .db
@@ -306,9 +347,7 @@ async fn upload(
         Err(e) => return Err(crate::Error::Io(e).into()),
     };
     let job = Arc::new(SourceImport { path: path.clone() });
-    let placed =
-        crate::incoming::queue_placed(&app, &path, source_import::IMPORT_KIND, job).await?;
-    Ok((StatusCode::ACCEPTED, Json(placed)).into_response())
+    Ok(crate::incoming::queue_placed(app, &path, source_import::IMPORT_KIND, job).await?)
 }
 
 /// Writes `bytes` under `name`, or `name (N)` when taken, in `dir`. The name
@@ -353,7 +392,7 @@ fn place(dir: &Path, name: &str, bytes: &[u8]) -> std::io::Result<PathBuf> {
 }
 
 /// A safe basename ending in `.ext` from a user-supplied name, else `fallback.ext`.
-fn file_name(given: &str, fallback: &str, ext: &str) -> String {
+pub(crate) fn file_name(given: &str, fallback: &str, ext: &str) -> String {
     let base = given.rsplit(['/', '\\']).next().unwrap_or("");
     let suffix = format!(".{ext}");
     let stem = if base.len() > suffix.len() && base.to_ascii_lowercase().ends_with(&suffix) {

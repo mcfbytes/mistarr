@@ -8,6 +8,7 @@
   import IncomingList from '../lib/IncomingList.svelte';
   import UploadField from '../lib/UploadField.svelte';
   import MagnetField from '../lib/MagnetField.svelte';
+  import UrlField from '../lib/UrlField.svelte';
   import StatusPill from '../lib/StatusPill.svelte';
   import type { SeedPolicy } from '../lib/types';
 
@@ -105,6 +106,7 @@
   <div class="card upload">
     <UploadField which="sources" label="Add a .torrent file" accept=".torrent" />
     <MagnetField />
+    <UrlField />
   </div>
 
   <h2>Waiting in <code>sources/</code></h2>

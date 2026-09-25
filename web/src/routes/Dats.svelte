@@ -6,6 +6,7 @@
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import IncomingList from '../lib/IncomingList.svelte';
   import UploadField from '../lib/UploadField.svelte';
+  import UrlField from '../lib/UrlField.svelte';
   import type { DatVersion } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -130,6 +131,7 @@
 
   <div class="card upload">
     <UploadField which="dats" label="Add DAT files" accept=".dat,.xml,.zip" />
+    <UrlField />
     <p class="muted">
       Logiqx DATs, No-Intro database exports and zipped DAT packs are accepted.
       {#if datsDir}Files placed in <code>{datsDir}</code> are picked up the same way.{/if}

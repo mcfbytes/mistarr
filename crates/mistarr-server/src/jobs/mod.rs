@@ -14,6 +14,7 @@ pub mod remap;
 pub mod scan;
 pub mod source_import;
 pub mod transfer;
+pub mod url_fetch;
 pub mod wizard;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -55,6 +56,8 @@ pub enum Lane {
     Background,
     /// Client polling, detection and transfers: one at a time, never held.
     Light,
+    /// Fetches of a URL the user supplied: one at a time, never held.
+    Fetch,
 }
 
 impl Lane {
@@ -69,6 +72,7 @@ impl Lane {
             Self::Heavy => "heavy",
             Self::Background => "background",
             Self::Light => "light",
+            Self::Fetch => "fetch",
         }
     }
 }
@@ -197,7 +201,7 @@ struct Queued {
     job: Arc<dyn Job>,
 }
 
-const LANES: [Lane; 3] = [Lane::Heavy, Lane::Background, Lane::Light];
+const LANES: [Lane; 4] = [Lane::Heavy, Lane::Background, Lane::Light, Lane::Fetch];
 
 type Receivers = Vec<(Lane, mpsc::UnboundedReceiver<Queued>)>;
 
@@ -833,7 +837,7 @@ mod tests {
     async fn stop_cancels_a_running_heavy_job_and_ends_the_lanes() {
         let (_dir, app) = state();
         Scheduler::start(&app);
-        assert_eq!(app.scheduler.lanes_alive(), 3);
+        assert_eq!(app.scheduler.lanes_alive(), 4);
         let (job, started, _release) = blocker(Lane::Heavy);
         let id = Scheduler::enqueue(&app, job).await.expect("enqueue");
         started.notified().await;
