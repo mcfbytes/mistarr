@@ -294,7 +294,7 @@ run_install() {
     root="$1"
     tty="$2"
     shift 2
-    env PATH="${extra_path:+$extra_path:}$PATH" MISTARR_EXEC="$runner" \
+    env PATH="${extra_path:+$extra_path:}$PATH" MISTARR_TEST_EXEC="$runner" \
         TEST_LISTEN="${test_listen:-0.0.0.0:${health_port:-$port}}" \
         MISTARR_START_TIMEOUT="${start_timeout:-30}" MISTARR_ROOT="$root" \
         MISTARR_RELEASE_API="$api" MISTARR_RELEASE_BASE="$dl_base" \
@@ -395,7 +395,7 @@ root6="$work/root6"
 mkdir -p "$root6"
 publish_release v5.0.0 PIPED-FLOW-BINARY yes
 set_latest v5.0.0
-out=$(printf 'unrelated piped bytes\n' | env MISTARR_EXEC="$runner" TEST_LISTEN="0.0.0.0:$port" MISTARR_ROOT="$root6" MISTARR_RELEASE_API="$api" \
+out=$(printf 'unrelated piped bytes\n' | env MISTARR_TEST_EXEC="$runner" TEST_LISTEN="0.0.0.0:$port" MISTARR_ROOT="$root6" MISTARR_RELEASE_API="$api" \
     MISTARR_RELEASE_BASE="$dl_base" MISTARR_TTY="$no_tty" sh "$install_script" 2>&1)
 code=$?
 [ "$code" -eq 0 ] || { fail=$((fail + 1)); echo "FAIL: piped no-argument run exits 0: $out"; }
@@ -411,7 +411,7 @@ publish_release v5.1.0 PIPED-FLOW-TTY-BINARY yes
 set_latest v5.1.0
 fake_tty="$work/fake-tty"
 echo "y" > "$fake_tty"
-out=$(printf 'unrelated piped bytes\n' | env MISTARR_EXEC="$runner" TEST_LISTEN="0.0.0.0:$port" MISTARR_ROOT="$root7" MISTARR_RELEASE_API="$api" \
+out=$(printf 'unrelated piped bytes\n' | env MISTARR_TEST_EXEC="$runner" TEST_LISTEN="0.0.0.0:$port" MISTARR_ROOT="$root7" MISTARR_RELEASE_API="$api" \
     MISTARR_RELEASE_BASE="$dl_base" MISTARR_TTY="$fake_tty" sh "$install_script" 2>&1)
 code=$?
 [ "$code" -eq 0 ] || { fail=$((fail + 1)); echo "FAIL: run with a reachable tty exits 0: $out"; }
