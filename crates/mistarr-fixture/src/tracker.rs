@@ -81,7 +81,10 @@ impl Tracker {
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let (swarms, stop) = (Arc::clone(&swarms), Arc::clone(&stop));
-            std::thread::spawn(move || accept(&listener, &swarms, &stop, loopback_as))
+            std::thread::Builder::new()
+                .name("tracker-accept".into())
+                .spawn(move || accept(&listener, &swarms, &stop, loopback_as))
+                .map_err(listen_err)?
         };
         Ok(Self {
             addr,
@@ -139,9 +142,12 @@ fn accept(
         }
         let Ok(stream) = conn else { continue };
         let swarms = Arc::clone(swarms);
-        std::thread::spawn(move || {
-            let _ = serve(stream, &swarms, loopback_as);
-        });
+        // A connection the fixture cannot serve is dropped, as a busy tracker would.
+        let _ = std::thread::Builder::new()
+            .name("tracker-conn".into())
+            .spawn(move || {
+                let _ = serve(stream, &swarms, loopback_as);
+            });
     }
 }
 

@@ -18,8 +18,8 @@ DB="$INSTALL_DIR/mistarr.db"
 DB_PREV="$DB.prev"
 # Written once a rollback set is complete; a set without it is never restored.
 PREV_OK="$PREV.ok"
-# Test hook: a command that runs the binary, which a test cannot execute.
-EXEC="${MISTARR_EXEC:-}"
+# Test-only hook: a command that runs the binary, which a test cannot execute.
+EXEC="${MISTARR_TEST_EXEC:-}"
 # Seconds a started mistarr has to answer HTTP before the install is rolled back.
 START_TIMEOUT="${MISTARR_START_TIMEOUT:-180}"
 # Set once this run has saved the database set, so a restore never uses a stale one.

@@ -243,7 +243,7 @@ fn relative(path: &FsPath, root: &FsPath) -> String {
 async fn blocking<T: Send + 'static>(
     f: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
 ) -> Result<T, ApiError> {
-    tokio::task::spawn_blocking(f)
+    crate::threads::blocking(crate::threads::label::LAUNCH, f)
         .await
         .map_err(|e| crate::Error::Task(e.to_string()))?
 }

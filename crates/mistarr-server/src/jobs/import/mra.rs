@@ -372,7 +372,7 @@ impl Placing<'_> {
             .join(arcade::ARCADE_DIR)
             .join(&zip_rom.mra_path);
         let (games, path, at) = (self.games.clone(), local.clone(), zip.clone());
-        let verdict = tokio::task::spawn_blocking(move || {
+        let verdict = crate::threads::blocking(crate::threads::label::ARCADE, move || {
             mra::read(&mra_file).map(|m| examine(&m, &at, &path, &games))
         })
         .await
@@ -460,10 +460,11 @@ impl Placing<'_> {
             .await?;
         let arcade_dir = app.config().paths.root.join(arcade::ARCADE_DIR);
         let games = self.games.clone();
-        let found =
-            tokio::task::spawn_blocking(move || arcade::refresh(&arcade_dir, &games, &titles))
-                .await
-                .map_err(|e| task(&e))?;
+        let found = crate::threads::blocking(crate::threads::label::ARCADE, move || {
+            arcade::refresh(&arcade_dir, &games, &titles)
+        })
+        .await
+        .map_err(|e| task(&e))?;
         app.db
             .write(move |c| arcade::store_refreshed(c, &found))
             .await

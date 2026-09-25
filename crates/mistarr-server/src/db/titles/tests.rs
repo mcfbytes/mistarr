@@ -1,6 +1,7 @@
 use super::*;
 use crate::db::dats::{self, NewVersion};
 use mistarr_core::naming::group_key;
+use proptest::prelude::*;
 
 const DAT: &str = "Maker - Game Boy";
 
@@ -901,4 +902,323 @@ fn removing_a_dat_retires_its_roms_unwants_and_cancels_queued_downloads() {
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
     assert_eq!(states, ["cancelled", "cancelled", "transferring"]);
+}
+
+/// The reference for [`reroot`], one title at a time: a title keeps its group unless that
+/// group's root title is known and in another group, and then takes the group's
+/// lowest live member, or its lowest member when none is live.
+fn reference_reroot(nodes: &[Node]) -> Vec<Option<i64>> {
+    nodes
+        .iter()
+        .map(|n| {
+            let label = n.target?;
+            let root = nodes.iter().find(|m| m.id == label);
+            if root.is_none_or(|r| r.target == Some(label)) {
+                return Some(label);
+            }
+            let members: Vec<&Node> = nodes.iter().filter(|m| m.target == Some(label)).collect();
+            let live = members.iter().filter(|m| m.live).map(|m| m.id).min();
+            live.or_else(|| members.iter().map(|m| m.id).min())
+        })
+        .collect()
+}
+
+/// Random titles: `(target, live)` with target an index into the titles, or past
+/// them for a group rooted by a title that is not loaded, and ids in random order.
+fn nodes_strategy() -> impl Strategy<Value = Vec<Node>> {
+    proptest::collection::vec(
+        (
+            proptest::option::weighted(0.95, 0usize..28),
+            proptest::bool::weighted(0.8),
+        ),
+        1..24,
+    )
+    .prop_flat_map(|specs| {
+        let order: Vec<i64> = (0..specs.len())
+            .map(|i| i64::try_from(i).expect("i"))
+            .collect();
+        (Just(specs), Just(order).prop_shuffle())
+    })
+    .prop_map(|(specs, order)| {
+        let id = |i: usize| {
+            order
+                .get(i)
+                .map_or(1000 + i64::try_from(i).expect("i"), |&o| o * 3 + 1)
+        };
+        let mut nodes: Vec<Node> = specs
+            .iter()
+            .enumerate()
+            .map(|(i, &(target, live))| Node {
+                id: id(i),
+                target: target.map(id),
+                current: None,
+                live,
+            })
+            .collect();
+        nodes.sort_unstable_by_key(|n| n.id);
+        nodes
+    })
+}
+
+/// A synthetic game of [`catalogue_strategy`]: its version, a pick among the games of
+/// that version for its parent, whether it is retired, and its roms' keys (`None` unhashed).
+#[derive(Debug, Clone)]
+struct GameSpec {
+    version: usize,
+    parent: usize,
+    retired: bool,
+    roms: Vec<Option<u8>>,
+}
+
+/// Three DAT versions' game counts, their games, and the order of the games' ids.
+fn catalogue_strategy() -> impl Strategy<Value = ([i64; 3], Vec<GameSpec>, Vec<i64>)> {
+    let game = (
+        0usize..3,
+        0usize..8,
+        proptest::bool::weighted(0.15),
+        proptest::collection::vec(proptest::option::weighted(0.9, 0u8..5), 1..3),
+    )
+        .prop_map(|(version, parent, retired, roms)| GameSpec {
+            version,
+            parent,
+            retired,
+            roms,
+        });
+    (
+        [1i64..6, 1i64..6, 1i64..6],
+        proptest::collection::vec(game, 1..14),
+    )
+        .prop_flat_map(|(counts, games)| {
+            let order: Vec<i64> = (1..=games.len())
+                .map(|i| i64::try_from(i).expect("i"))
+                .collect();
+            (Just(counts), Just(games), Just(order).prop_shuffle())
+        })
+}
+
+/// Stores `games` on `nes` as three DAT versions, game `i` with id `ids[i]`.
+fn store_catalogue(c: &Connection, counts: [i64; 3], games: &[GameSpec], ids: &[i64]) {
+    for (v, count) in counts.iter().enumerate() {
+        c.execute(
+            "INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at, game_count)
+             VALUES (?1, 'nes', 'Test ' || ?1, '1', 't.dat', 0, ?2)",
+            params![i64::try_from(v + 1).expect("v"), count],
+        )
+        .expect("version");
+    }
+    for (g, &id) in games.iter().zip(ids) {
+        c.execute(
+            "INSERT INTO titles (id, platform_id, dat_version_id, name, base_name, retired)
+             VALUES (?1, 'nes', ?2, 'G' || ?1, 'G', ?3)",
+            params![id, i64::try_from(g.version + 1).expect("v"), g.retired],
+        )
+        .expect("title");
+    }
+    for (g, &id) in games.iter().zip(ids) {
+        let peers: Vec<i64> = games
+            .iter()
+            .zip(ids)
+            .filter(|(o, _)| o.version == g.version)
+            .map(|(_, &id)| id)
+            .collect();
+        c.execute(
+            "UPDATE titles SET parent_id = ?2 WHERE id = ?1",
+            [id, peers[g.parent % peers.len()]],
+        )
+        .expect("parent");
+        for (k, key) in g.roms.iter().enumerate() {
+            c.execute(
+                "INSERT INTO roms (title_id, name, size, sha1) VALUES (?1, ?2, 4, ?3)",
+                params![id, format!("r{k}"), key.map(|k| format!("{k:02x}"))],
+            )
+            .expect("rom");
+        }
+    }
+}
+
+/// A title as [`reference_groups`] reads it: id, parent, version, live, and its sorted
+/// rom keys when every live rom has one.
+type RefTitle = (i64, Option<i64>, i64, bool, Option<Vec<String>>);
+
+/// The documented `group_root` of every `nes` title, worked out without the code under
+/// test: DAT groups, then links by sorted rom keys, then the lowest live id of each
+/// group left behind.
+fn reference_groups(c: &Connection) -> Vec<(i64, Option<i64>)> {
+    let versions: Vec<i64> = c
+        .prepare(
+            "SELECT id FROM dat_versions WHERE platform_id = 'nes' AND source = 'dat'
+               AND retired = 0 AND superseded_by IS NULL ORDER BY game_count DESC, id",
+        )
+        .expect("prepare")
+        .query_map([], |r| r.get(0))
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("versions");
+    let mut rows: Vec<RefTitle> = c
+        .prepare(
+            "SELECT id, parent_id, dat_version_id, retired = 0 FROM titles
+             WHERE platform_id = 'nes' ORDER BY id",
+        )
+        .expect("prepare")
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, None))
+        })
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("titles");
+    for row in &mut rows {
+        let keys: Vec<Option<String>> = c
+            .prepare(
+                "SELECT COALESCE(sha1, md5, crc32 || ':' || size) FROM roms
+                 WHERE title_id = ?1 AND retired = 0",
+            )
+            .expect("prepare")
+            .query_map([row.0], |r| r.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("roms");
+        let keys: Option<Vec<String>> = keys.into_iter().collect();
+        row.4 = keys.filter(|k| !k.is_empty()).map(|mut k| {
+            k.sort();
+            k
+        });
+    }
+    let mut nodes: Vec<Node> = rows
+        .iter()
+        .map(|r| Node {
+            id: r.0,
+            target: r.1,
+            current: None,
+            live: r.3,
+        })
+        .collect();
+    if versions.len() < 2 {
+        return nodes.iter().map(|n| (n.id, n.target)).collect();
+    }
+    let largest = versions[0];
+    let mut rest = versions[1..].to_vec();
+    rest.sort_unstable();
+    let sig = |r: &RefTitle| r.4.clone().filter(|_| r.3);
+    for (i, t) in rows.iter().enumerate() {
+        let Some(s) = sig(t).filter(|_| rest.contains(&t.2)) else {
+            continue;
+        };
+        let same = |o: &&RefTitle| sig(o).as_ref() == Some(&s);
+        let target = match rows.iter().filter(|a| a.2 == largest).find(same) {
+            Some(anchor) => Some(anchor.1),
+            None => rest
+                .iter()
+                .find_map(|&v| rows.iter().filter(|o| o.2 == v).find(same))
+                .filter(|first| first.2 != t.2)
+                .map(|first| first.1),
+        };
+        if let Some(root) = target {
+            nodes[i].target = root;
+        }
+    }
+    let roots = reference_reroot(&nodes);
+    nodes.iter().zip(roots).map(|(n, r)| (n.id, r)).collect()
+}
+
+fn stored_groups(c: &Connection) -> Vec<(i64, Option<i64>)> {
+    c.prepare("SELECT id, group_root FROM titles WHERE platform_id = 'nes' ORDER BY id")
+        .expect("prepare")
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("groups")
+}
+
+/// Recomputes `nes` in a transaction and commits it, returning the rows it changed and
+/// the groups it left dirty before the commit refreshed them.
+fn recompute_nes(c: &mut Connection) -> (i64, i64) {
+    let changes = |c: &Connection| -> i64 {
+        c.query_row("SELECT total_changes()", [], |r| r.get(0))
+            .expect("changes")
+    };
+    let tx = c.transaction().expect("tx");
+    let before = changes(&tx);
+    recompute_platform(&tx, "nes", &Prefs::default()).expect("recompute");
+    let written = changes(&tx) - before;
+    let dirty: i64 = tx
+        .query_row("SELECT COUNT(*) FROM title_groups_dirty", [], |r| r.get(0))
+        .expect("dirty");
+    crate::db::commit(tx).expect("commit");
+    (written, dirty)
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 256,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn reroot_gives_each_stranded_group_its_lowest_live_id(nodes in nodes_strategy()) {
+        let expected = reference_reroot(&nodes);
+        let mut got = nodes.clone();
+        reroot(&mut got);
+        let got: Vec<Option<i64>> = got.iter().map(|n| n.target).collect();
+        prop_assert_eq!(&got, &expected);
+        for (i, a) in nodes.iter().enumerate() {
+            for (j, b) in nodes.iter().enumerate() {
+                prop_assert_eq!(a.target == b.target, got[i] == got[j], "no group gains or loses members");
+            }
+        }
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 64,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    #[test]
+    fn recompute_matches_the_documented_groups_and_rewrites_nothing_unchanged(
+        (counts, games, ids) in catalogue_strategy()
+    ) {
+        let mut c = conn();
+        store_catalogue(&c, counts, &games, &ids);
+        recompute_nes(&mut c);
+        prop_assert_eq!(stored_groups(&c), reference_groups(&c));
+        prop_assert_eq!(recompute_nes(&mut c), (0, 0), "an unchanged catalogue writes nothing");
+    }
+}
+
+/// A group's new root that is itself the root of a group left behind: each group keeps
+/// its own members, and neither merges into the other whatever order they are visited in.
+#[test]
+fn chained_re_rooting_keeps_every_group_apart() {
+    let mut c = conn();
+    c.execute_batch(
+        "INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at, game_count)
+           VALUES (1, 'nes', 'Test A', '1', 'a.dat', 0, 9), (2, 'nes', 'Test B', '1', 'b.dat', 0, 2),
+                  (3, 'nes', 'Test C', '1', 'c.dat', 0, 2);
+         INSERT INTO titles (id, platform_id, dat_version_id, name, base_name)
+           VALUES (50, 'nes', 1, 'A', 'A'), (40, 'nes', 2, 'X', 'X'), (41, 'nes', 2, 'B', 'B'),
+                  (10, 'nes', 3, 'N', 'N'), (11, 'nes', 3, 'C', 'C');
+         UPDATE titles SET parent_id = CASE id WHEN 41 THEN 40 WHEN 11 THEN 10 ELSE id END;
+         INSERT INTO roms (title_id, name, size, sha1)
+           VALUES (50, 'a', 4, 'aa'), (40, 'x', 4, 'aa'), (41, 'b', 4, 'bb'),
+                  (10, 'n', 4, 'bb'), (11, 'c', 4, 'cc');",
+    )
+    .expect("rows");
+    recompute_nes(&mut c);
+    let groups = stored_groups(&c);
+    assert_eq!(
+        groups,
+        [
+            (10, Some(10)),
+            (11, Some(11)),
+            (40, Some(50)),
+            (41, Some(10)),
+            (50, Some(50))
+        ],
+        "X links to A; B and N keep a group rooted at N; C keeps its own"
+    );
+    assert_eq!(groups, reference_groups(&c));
+    assert_eq!(recompute_nes(&mut c), (0, 0));
 }
