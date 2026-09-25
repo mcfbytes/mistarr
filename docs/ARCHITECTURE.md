@@ -129,6 +129,11 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    alone; scans and imports resolve rom ids on the read connection and
    write afterwards, so one that straddles an apply records a rom id that
    is still a row, retired or not, as it would had it finished just before.
+   The job reports the bytes it has read and its phase through memory and
+   transient events, never the database (API.md "Live progress"), so an
+   apply that holds the writer still shows its progress; an upload records
+   its job on a task of its own and answers without waiting for the apply
+   (API.md "Upload answers").
 2. Identify the platform from the DAT header name using the table in
    PLATFORMS.md, falling back to the platform an earlier version of the same
    family was bound to. A header without a name takes the member's or file's
@@ -486,7 +491,7 @@ shutdown is left `queued` for this.
 | Soft `RLIMIT_DATA` | `[memory] data_limit_mib`, 192 MiB, never below 64 |
 | SQLite page cache | 2 MiB, 1 MiB on each of the two connections |
 | SQLite other | `mmap_size = 0`, `temp_store = FILE` under `<data>/tmp` (`SQLITE_TMPDIR`, set at startup and emptied of stale files, since the board's `/tmp` is RAM), WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB |
-| SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk |
+| SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
 | Hashing buffer | 256 KiB, one file at a time |
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
 | Arcade presence pass | 500 zips per batch, stat only unless import rows of a changed zip need its central directory; the listing's names and the live MRA zip set persist across batches |

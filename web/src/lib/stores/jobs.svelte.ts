@@ -1,8 +1,9 @@
 import { api } from '../api';
-import { fixtureJobs, fixtureRecentJobs } from '../fixtures';
+import { fixtureJobs, fixtureRecentJobs, mockScenario } from '../fixtures';
 import type { Job, JobState } from '../types';
 import { findPlatform } from './platforms.svelte';
 import { showToast } from './toast.svelte';
+import { announceUpload, findUpload, resolveUpload } from './uploads.svelte';
 
 const isMock = import.meta.env.VITE_MOCK === '1';
 
@@ -33,7 +34,12 @@ export function getFinishedJob(id: number): FinishedJob | undefined {
 }
 
 export async function loadJobs(): Promise<void> {
-  jobs = isMock ? fixtureJobs : (await api.jobs()).items;
+  if (isMock) {
+    jobs = mockScenario() === 'idle' ? [] : fixtureJobs;
+    startMockProgress();
+    return;
+  }
+  jobs = (await api.jobs()).items;
 }
 
 export function getRecentJobs(): Job[] {
@@ -41,7 +47,11 @@ export function getRecentJobs(): Job[] {
 }
 
 export async function loadRecentJobs(): Promise<void> {
-  recent = isMock ? fixtureRecentJobs : (await api.recentJobs()).items;
+  if (isMock) {
+    recent = mockScenario() === 'idle' ? [] : fixtureRecentJobs;
+  } else {
+    recent = (await api.recentJobs()).items;
+  }
   for (const job of recent) {
     announce(job.id, job.state, job.progress);
   }
@@ -75,7 +85,22 @@ function announce(id: number, state: JobState, progress: Record<string, unknown>
     return;
   }
   pendingScans = Object.fromEntries(Object.entries(pendingScans).filter(([k]) => Number(k) !== id));
-  showToast(jobOutcome({ kind: 'scan', state, progress, payload: { platform_id: platformId } }, platformName));
+  const text = jobOutcome({ kind: 'scan', state, progress, payload: { platform_id: platformId } }, platformName);
+  showToast(text, state === 'done' ? 'success' : 'error');
+}
+
+// A source upload's import ended; a DAT upload's outcome comes from `dat.loaded` or `dat.rejected`.
+function announceSource(id: number, state: JobState, progress: Record<string, unknown> | null): void {
+  const up = findUpload(id);
+  if (up?.kind !== 'sources') {
+    return;
+  }
+  if (state === 'failed') {
+    const why = typeof progress?.error === 'string' ? progress.error : 'see Activity';
+    announceUpload('sources', up.file, why);
+  } else {
+    announceUpload('sources', up.file, typeof progress?.rejected === 'string' ? progress.rejected : null);
+  }
 }
 
 /** After a resync, re-reads the recent list when a page shows it or a scan awaits its outcome. */
@@ -106,10 +131,12 @@ export function jobOutcome(
   const pid = typeof job.payload?.platform_id === 'string' ? job.payload.platform_id : null;
   const where = pid ? platformName(pid) : 'every platform';
   const path = typeof job.payload?.path === 'string' ? job.payload.path : '';
+  const file = path.split('/').pop() ?? '';
   const labels: Record<string, string> = {
     scan: `Scan of ${where}`,
     recompute_1g1r: `Matching for ${where}`,
-    dat_import: `DAT ${path.split('/').pop() ?? ''}`.trim(),
+    dat_import: `DAT ${file}`.trim(),
+    source_import: `Source ${file}`.trim(),
     arcade_catalog: 'Arcade catalogue',
     import: 'Import'
   };
@@ -122,6 +149,9 @@ export function jobOutcome(
   }
   if (job.kind === 'recompute_1g1r' && typeof p.matched === 'number') {
     return `${label}: ${p.matched} files newly matched`;
+  }
+  if (job.kind === 'dat_import' && typeof p.games === 'number') {
+    return `${label}: ${p.games} games read`;
   }
   return `${label}: done`;
 }
@@ -138,21 +168,31 @@ function scheduleReload(): void {
   }
   reloadTimer = setTimeout(() => {
     reloadTimer = null;
-    void loadJobs();
+    void loadJobs().catch(() => undefined);
   }, 500);
+}
+
+/** Whether job `id` is known to be running, so its next progress needs no re-read. */
+export function isRunning(id: number): boolean {
+  return jobs.some((j) => j.id === id && j.state === 'running');
 }
 
 export function applyJobProgress(
   id: number,
   kind: string,
   state: JobState,
-  progress: Record<string, unknown> | null
+  progress: Record<string, unknown> | null,
+  detail: string | null = null
 ): void {
+  if (state === 'queued' && detail !== null && (kind === 'dat_import' || kind === 'source_import')) {
+    resolveUpload(kind === 'dat_import' ? 'dats' : 'sources', detail, id);
+  }
   if (state === 'done' || state === 'failed') {
     const kept = Object.entries(finished).slice(-(FINISHED_KEEP - 1));
     finished = { ...Object.fromEntries(kept), [id]: { kind, state, progress } };
     jobs = jobs.filter((j) => j.id !== id);
     announce(id, state, progress);
+    announceSource(id, state, progress);
     scheduleRecent();
     return;
   }
@@ -162,4 +202,38 @@ export function applyJobProgress(
   } else {
     scheduleReload();
   }
+}
+
+let mockTimer: ReturnType<typeof setInterval> | null = null;
+
+// Mock mode moves the fixture DAT import through its phases so its bar is seen to move.
+function startMockProgress(): void {
+  if (mockTimer || jobs.length === 0) {
+    return;
+  }
+  const total = 18_400_000;
+  let read = 5_200_000;
+  let games = 4_120;
+  let tick = 0;
+  mockTimer = setInterval(() => {
+    const job = jobs.find((j) => j.kind === 'dat_import' && j.state === 'running');
+    if (!job) {
+      return;
+    }
+    tick += 1;
+    let phase = 'reading';
+    if (read < total) {
+      read = Math.min(total, read + 460_000);
+      games += 104;
+    } else {
+      phase = tick % 12 < 6 ? 'storing' : 'refreshing';
+      if (tick % 12 === 11) {
+        read = 1_000_000;
+        games = 900;
+      }
+    }
+    const bytes = phase === 'reading' ? { bytes_read: read, bytes_total: total } : {};
+    const progress = { file: job.progress?.file, members: 1, done: 0, games, phase, ...bytes };
+    applyJobProgress(job.id, job.kind, 'running', progress);
+  }, 600);
 }

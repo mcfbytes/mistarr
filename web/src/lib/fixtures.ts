@@ -16,6 +16,11 @@ import type {
   WizardStatus
 } from './types';
 
+/** Mock mode's scenario, from `?mock=` in the page URL: `idle` shows no work. */
+export function mockScenario(): string {
+  return new URLSearchParams(globalThis.location.search).get('mock') ?? 'busy';
+}
+
 export const fixturePlatforms: Platform[] = [
   {
     id: 'nes',
@@ -444,7 +449,7 @@ export const fixtureIncomingDats: IncomingFile[] = [
     size: 180_000,
     state: 'importing',
     reason: null,
-    job_id: 7,
+    job_id: 1,
     progress: { members: 1, done: 0, games: 1200 },
     modified: 1_770_040_000
   },
@@ -470,6 +475,15 @@ export const fixtureIncomingDats: IncomingFile[] = [
 ];
 
 export const fixtureIncomingSources: IncomingFile[] = [
+  {
+    file: 'Example bundle two.torrent',
+    size: 52_000,
+    state: 'waiting',
+    reason: 'Waiting for the DAT import of Example Console (20260101).zip to finish.',
+    job_id: 4,
+    progress: null,
+    modified: 1_770_040_500
+  },
   {
     file: 'Example bundle three.torrent',
     size: 40_000,
@@ -572,10 +586,29 @@ export const fixtureJobs: Job[] = [
     lane: 'background',
     payload: { path: '/media/fat/mistarr/dats/Example Console (20260101).zip' },
     state: 'running',
-    progress: { members: 1, done: 0, games: 1200 },
+    progress: {
+      file: 'Example Console (20260101).zip',
+      members: 1,
+      done: 0,
+      games: 4_120,
+      phase: 'reading',
+      bytes_read: 5_200_000,
+      bytes_total: 18_400_000
+    },
     reason: null,
     created_at: 1_770_032_000,
     updated_at: 1_770_032_500
+  },
+  {
+    id: 4,
+    kind: 'source_import',
+    lane: 'background',
+    payload: { path: '/media/fat/mistarr/sources/Example bundle two.torrent' },
+    state: 'queued',
+    progress: null,
+    reason: 'Waiting for the DAT import of Example Console (20260101).zip to finish.',
+    created_at: 1_770_032_200,
+    updated_at: 1_770_032_200
   },
   {
     id: 2,
@@ -591,6 +624,17 @@ export const fixtureJobs: Job[] = [
 ];
 
 export const fixtureRecentJobs: Job[] = [
+  {
+    id: 5,
+    kind: 'dat_import',
+    lane: 'background',
+    payload: { path: '/media/fat/mistarr/dats/Example Handheld (20260101).xml' },
+    state: 'failed',
+    progress: { error: 'root element is <softwarelist>; expected a Logiqx DAT' },
+    reason: null,
+    created_at: 1_770_031_500,
+    updated_at: 1_770_031_560
+  },
   {
     id: 3,
     kind: 'scan',

@@ -39,8 +39,31 @@ again.
 holds scans and imports, or the user's Pause, which also holds DAT and source
 imports), which ones, and a Run now button that calls `POST /system/resume`.
 
+**Activity indicator.** On every screen but the wizard, at the end of the
+nav: a pulse icon with the count of running, queued and waiting jobs, left
+out of the count and the panel are the housekeeping kinds (client checks,
+magnet lookups, transfer stops, source re-maps), which Activity still
+lists. The icon takes the accent colour with a breathing dot while
+something runs, the warning colour while work only waits, and the dimmed
+text colour when idle; the button keeps its width either way, so nothing
+moves. Its accessible name says the same in words ("Background work: 1
+running, 2 waiting"), and a visually hidden `aria-live` line announces each
+change. The button is a disclosure (`aria-expanded`, `aria-controls`)
+opening a panel under it: Running, with each job's progress bar; Waiting,
+with why each waits ("Waiting for the DAT import of a.dat to finish.",
+"Paused while NES is running"); and Finished, the last five from
+`/system/jobs/recent` with their outcome and how long ago. Every row links to
+the page that owns it (DATs, Sources, the platform, else Activity), and the
+panel ends with Open Activity. Opening moves focus to the panel; Escape
+closes it and returns focus to the button; a press outside, or focus
+leaving it, closes it without moving focus. At 480 px and below the panel
+spans the width less 8 px each side. The recent list is re-read only while
+the panel is open.
+
 **Platforms** (`/`). One card per platform with core present, counts, and a
-scan button, below a banner of the platform's art. Scan shows a toast when
+scan button, below a banner of the platform's art. While the platform's scan
+is open the card shows its status pill, with a progress bar of files done
+while it runs or its reason while it waits. Scan shows a toast when
 the scan is queued and another with its outcome when it finishes, such as
 "Scan of Nintendo 64: 410 matched, 2 unmatched", on whichever page is open;
 counts reload when a scan or recompute ends. Platforms whose core is absent
@@ -72,12 +95,16 @@ reason as a line of text on the page rather than a tooltip: launching is
 turned off in settings, mistarr is not running on a MiSTer, or no core for
 the platform is installed.
 
-**Activity** (`/activity`). Downloads with per-file progress bars, imports
-log, queued and running jobs with their lane and hold reason, and a Recent
-list of the last finished jobs from `/system/jobs/recent`, one line each with
-its outcome and time. Live over SSE.
+**Activity** (`/activity`). Downloads with their status pill and per-file
+progress bars, imports log, queued and running jobs, each with its status
+pill, what it is about linked to the page that owns it, its lane, its
+progress bar while running and its reason while it waits, and a Recent list
+of the last finished jobs from `/system/jobs/recent`, one line each with
+its pill, outcome and time. Live over SSE.
 
-**Sources** (`/sources`). Table of sources: name, platform, state, file count,
+**Sources** (`/sources`). Table of sources: name, platform, state as a
+status pill (resolving runs, unbound waits, bound is done, disabled is
+paused) with its reason beneath, file count,
 matched count, seed policy, client status. Bind and disable actions.
 Unbound sources have a platform picker and, when the names suggest one, a
 "Bind to" button for the suggested platform. Above the table, the files still
@@ -87,7 +114,8 @@ in `sources/` and this session's uploads, as in the wizard.
 DATs arrive and fail on their own schedule like sources do. An upload
 control taking several `.dat`, `.xml` or `.zip` files, the same upload as
 the wizard's. The files still in `dats/` as in the wizard: waiting with the
-reason, importing with progress, rejected with the reason on its own line
+reason, importing with a progress bar of the DAT read so far, its phase and
+games read, rejected with the reason on its own line
 under the name, plus this session's uploads with their outcome. Each
 rejected file has Retry, which moves it back into `dats/` so a file fixed
 in place loads again, and Delete, which asks once more before removing it.
@@ -194,15 +222,72 @@ art desaturated and dimmed. The art is `aria-hidden`; the platform name stays
 the accessible name. Each tile stays under 120 SVG elements, its hardware
 under 60, and art is memoised per id, kind and format.
 
+## Status vocabulary
+
+Every job, incoming file, source and download shows its state through one
+component, `web/src/lib/StatusPill.svelte`, in one of six states, each with
+its own shape as well as its colour from the theme tokens, so colour is never
+the only cue:
+
+| State | Shape | Colour | Means |
+|---|---|---|---|
+| queued | hollow ring | dimmed text | in line; runs when its turn comes |
+| running | turning arc | accent | working now |
+| waiting | clock | warning | held up by something named in its reason |
+| paused | two bars | dimmed text | held by a running core or the user, or stopped |
+| done | tick | ok | finished |
+| failed | cross | danger | finished with an error, or rejected |
+
+The pill's word is the state's, or the thing's own name for it: an
+importing file is running as "Importing", a rejected one failed as
+"Rejected", an unbound source waits as "Unbound", a cancelled download is
+paused as "Cancelled". A queued job held by the gate shows as paused, and
+one whose reason says what it waits for shows as waiting.
+`web/src/lib/status.ts` maps each state to its pill; nothing else picks
+colours for a state.
+
+Progress is one component, `ProgressBar.svelte`, a `progressbar` with its
+share done and a line of text such as "Reading games · 35% · 4,432 games".
+When the share is unknown (storing, choosing preferred versions, refreshing
+title groups, matching files on the card) it shows a moving band with the
+phase name instead of a stuck percentage. The arc, the band and the dot
+stand still under `prefers-reduced-motion`, the band as a static stripe.
+
+## Feedback
+
+Every button that starts work shows that it is sending until the server
+answers: Scan reads "Queuing…", Add reads "Adding…", both disabled and
+`aria-busy`, and a file picker is disabled with an "Uploading <name>…"
+status line beneath it. Then a toast says what happened, in one short
+sentence:
+
+- received: "Torrent received: <file>. Waiting for the DAT import of <dat>
+  to finish.", "Magnet received: …", "DAT received: …", ending with what
+  the file waits for, or "Importing now.";
+- finished: "<file> added as a source." once a source upload's import ends,
+  "<file> loaded." on `dat.loaded` for an uploaded DAT, on whichever page is
+  open, and a scan's outcome as above;
+- failed: the file name and the server's message when the upload is
+  refused, or "<file> was rejected: <reason>" when its import rejects it.
+
+Toasts stack at the bottom right, full width on a phone, at most four. Each
+has a close button; information and success leave after 6 s and errors after
+10 s. They sit in a polite live region, and an error toast is an `alert`.
+
 ## State handling
 
 One store per API resource, hydrated on navigation and patched by SSE events.
+The jobs store is loaded on start by the activity indicator and patched by
+`job.progress`; live progress of a job it knows to be running patches the
+job in place and triggers no re-read.
 The incoming-file lists re-read `/dats/incoming` or `/sources/incoming` at
-most once per burst of `job.progress`, `dat.loaded`, `dat.rejected` or
-`source.changed` events, and `/sources` is re-read at most once per burst of
+most once per burst of `job.progress` (other than such live progress),
+`dat.loaded`, `dat.rejected` or `source.changed` events, and `/sources` is re-read at most once per burst of
 `source.changed`. The outcomes of this session's uploads come from the last
 50 finished jobs; a resync forgets them, and an upload whose job is no longer
-known then says to look at the lists. `/system/jobs/recent` is re-read once
+known then says to look at the lists. An upload answered before its job was
+recorded is followed by file name until the queued `job.progress` whose
+`detail` names it. `/system/jobs/recent` is re-read once
 per burst of finished jobs while Activity is open, and on a resync while
 Activity is open or a scan the user queued awaits its outcome, which the
 re-read list then supplies.

@@ -8,9 +8,8 @@
   import { getStatus, getWizard, loadStatus, loadWizard } from '../lib/stores/status.svelte';
   import { fixtureCores, fixtureDats, fixtureSettings } from '../lib/fixtures';
   import { getSources, loadSources } from '../lib/stores/sources.svelte';
-  import { scheduleIncoming } from '../lib/stores/incoming.svelte';
-  import { addUpload } from '../lib/stores/uploads.svelte';
-  import { uploadFiles } from '../lib/upload';
+  import UploadField from '../lib/UploadField.svelte';
+  import MagnetField from '../lib/MagnetField.svelte';
   import IncomingList from '../lib/IncomingList.svelte';
   import ClientStart from '../lib/ClientStart.svelte';
   import HeldBanner from '../lib/HeldBanner.svelte';
@@ -23,9 +22,6 @@
   let step = $state(0);
   const steps = ['Paths', 'DATs', 'Client', 'Sources'];
 
-  let datFileInput = $state<HTMLInputElement>();
-  let sourceFileInput = $state<HTMLInputElement>();
-  let sourceMagnet = $state('');
   let settings = $state<Settings | null>(null);
   // `null` until a fresh POST /system/cores answer replaces the boot-time result.
   let coresResult = $state<string[] | null>(null);
@@ -122,21 +118,6 @@
     return platforms.find((p) => p.id === id)?.name ?? id;
   }
 
-  async function addSourceMagnet(): Promise<void> {
-    const uri = sourceMagnet.trim();
-    if (!uri || isMock) {
-      return;
-    }
-    try {
-      const up = await api.addMagnet(uri);
-      addUpload({ kind: 'sources', file: up.file, jobId: up.job_id });
-      scheduleIncoming('sources');
-      sourceMagnet = '';
-    } catch (err) {
-      showToast(errorMessage(err));
-    }
-  }
-
   async function saveClientSettings(): Promise<void> {
     if (!settings) {
       return;
@@ -192,13 +173,7 @@
       <h2>DATs</h2>
       <p>Drop Logiqx DAT files, No-Intro database exports or zipped DAT packs here, or place them in:</p>
       <p><code>/media/fat/mistarr/dats</code></p>
-      <input
-        bind:this={datFileInput}
-        type="file"
-        accept=".dat,.xml,.zip"
-        multiple
-        onchange={() => uploadFiles('dats', datFileInput)}
-      />
+      <UploadField which="dats" label="Add DAT files" accept=".dat,.xml,.zip" />
       <p class="muted">Waiting in <code>dats/</code>:</p>
       <IncomingList which="dats" />
       <p class="muted">Loaded DATs:</p>
@@ -238,18 +213,8 @@
       <h2>Sources</h2>
       <p>Drop <code>.torrent</code> or <code>.magnet</code> files here, or place them in:</p>
       <p><code>/media/fat/mistarr/sources</code></p>
-      <input
-        bind:this={sourceFileInput}
-        type="file"
-        accept=".torrent"
-        multiple
-        onchange={() => uploadFiles('sources', sourceFileInput)}
-      />
-      <label>
-        Or a magnet link
-        <input type="text" placeholder="magnet:?xt=..." bind:value={sourceMagnet} />
-      </label>
-      <button onclick={addSourceMagnet}>Add</button>
+      <UploadField which="sources" label="Add a .torrent file" accept=".torrent" />
+      <MagnetField />
       <p class="muted">Waiting in <code>sources/</code>:</p>
       <IncomingList which="sources" />
       <p class="muted">Added sources:</p>
@@ -310,11 +275,6 @@
 
   .steps li.done {
     color: var(--ok);
-  }
-
-  label {
-    display: block;
-    margin: 0.5em 0;
   }
 
   .error {
