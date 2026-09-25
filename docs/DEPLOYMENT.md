@@ -96,7 +96,8 @@ argument, which installs the latest release.
 Either way `install.sh` resolves the release through the GitHub API,
 downloads `mistarr-armv7.tar.gz` and its `.sha256`, verifies the checksum and
 that the binary is an ARM ELF executable, stops a running mistarr, saves the
-database, installs the new binary and `mistarr.sh`, and starts it again.
+database, installs the new binary and `mistarr.sh`, starts it again and waits
+for it to answer.
 `mistarr.toml` and the watched directories are never touched, and
 `mistarr.db` is only copied, or put back from its copy by a rollback.
 
@@ -105,31 +106,46 @@ database, installs the new binary and `mistarr.sh`, and starts it again.
 applies any new migrations to `mistarr.db` when it starts, after which an
 older binary cannot use that database.
 
-Before anything is overwritten, with mistarr stopped, `install.sh` saves:
+Before anything is overwritten, with mistarr stopped, `install.sh` saves a
+rollback set:
 
 - `mistarr.db` as `mistarr.db.prev`, and `mistarr.db-wal` and
   `mistarr.db-shm`, when present, as `mistarr.db.prev-wal` and
   `mistarr.db.prev-shm`. A saved `-wal` or `-shm` the current database lacks
   is removed, so the saved files are always one consistent set. A fresh
-  install with no database saves nothing.
+  install with no database saves none.
 - the binary as `mistarr.prev` and `Scripts/mistarr.sh` as
   `Scripts/mistarr.sh.prev`.
 
-It checks free space in the data directory first, and copies with `cp`. When
-the space is short or a copy fails, it removes whatever it copied, restarts
-the installed version and exits without changing the binary or launcher.
-Only one previous version is kept: each upgrade replaces the saved files, so
-installing twice leaves only the version immediately before the current one.
-The script prints where the backup is and the manual rollback steps.
+When `fuser` is available and shows a process still holding `mistarr.db` or
+its `-wal`, the script names the process and exits without changing anything.
+It then checks free space in the data directory and copies each file with
+`cp` to a `.new` name beside its saved name, for example `mistarr.db.prev.new`.
+Only once every copy has succeeded are they synced and renamed over the old
+set. When the space is short or a copy fails, it removes the `.new` files,
+restarts the installed version and exits; the binary, the launcher, the
+database and the earlier rollback set are left as they were. Only one
+previous version is kept: each upgrade replaces the saved set, so installing
+twice leaves only the version immediately before the current one. The script
+prints where the backup is and the manual rollback steps.
 
-**Rollback**: if the new version fails to start, `install.sh` stops it,
-puts back the saved database set, `mistarr.prev` and `mistarr.sh.prev`, and
-starts the previous version; the new binary may already have migrated the
-database before failing. A rollback across a migration needs the database
-restored with the binary. A binary refuses a database whose recorded schema
-version is newer than its own migrations, with an error naming both versions,
-and never writes to it; `mistarr doctor` reports the same. To roll back by
-hand, in `/media/fat/mistarr`:
+**Rollback**: after starting the new version, `install.sh` waits up to 180 s
+(`MISTARR_START_TIMEOUT`) for it to answer HTTP at the address in
+`[server] listen` in `mistarr.toml`, on the loopback address when that is
+`0.0.0.0`, or port 8420 without one. Migrations run before the server listens,
+so the wait covers them. If the new version fails to start, stops being
+reported running, or does not answer in time, the script stops it, puts back
+the saved database set, `mistarr.prev` and `mistarr.sh.prev`, and starts the
+previous version. The database files are copied to `.restore` names, synced
+and moved into place; if that copy fails, the previous version is not
+started and the saved set is left for a manual restore. A crash after the
+wait is not rolled back: the supervisor restarts the new version.
+
+A rollback across a migration needs the database restored with the binary.
+A binary refuses a database whose recorded schema version is newer than its
+own migrations, with an error naming both versions, and leaves its contents
+unchanged; `mistarr doctor` reports the same. To roll back by hand, in
+`/media/fat/mistarr`:
 
 1. Stop mistarr: `/media/fat/Scripts/mistarr.sh stop`.
 2. Copy `mistarr.prev` to `mistarr`, and `Scripts/mistarr.sh.prev` to
@@ -190,8 +206,8 @@ cores, CORENAME, memory available, and the result of hashing 64 MiB of zeros
 for throughput (`--hash-mib N` changes the size), and whether the
 `title_groups` table and search index match the catalogue. It also prints the
 database's schema version against the highest this binary supports, and says
-so, without opening the database for writing, when a newer mistarr migrated it. It reads the same
-config as the server and needs no running server. This is what a bug report
+so, without opening the database for writing, when a newer mistarr migrated
+it. It reads the same config as the server and needs no running server. This is what a bug report
 should include. When it reports title groups out of step, stop the server
 and run `mistarr doctor --rebuild-groups` to recompute them.
 

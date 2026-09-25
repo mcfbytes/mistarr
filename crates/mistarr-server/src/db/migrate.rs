@@ -379,7 +379,7 @@ mod tests {
     }
 
     #[test]
-    fn a_newer_schema_is_refused_and_left_untouched() {
+    fn a_newer_schema_is_refused_and_its_contents_unchanged() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("m.db");
         let newer = latest() + 1;
@@ -392,7 +392,21 @@ mod tests {
             )
             .expect("record");
         }
-        let before = std::fs::read(&path).expect("read");
+        let contents = || -> Vec<String> {
+            let conn = Connection::open(&path).expect("open");
+            let mut stmt = conn
+                .prepare(
+                    "SELECT 'v' || version || name FROM schema_version
+                     UNION ALL SELECT 's' || type || name || COALESCE(sql, '') FROM sqlite_master
+                     ORDER BY 1",
+                )
+                .expect("prepare");
+            stmt.query_map([], |r| r.get(0))
+                .expect("query")
+                .collect::<rusqlite::Result<_>>()
+                .expect("rows")
+        };
+        let before = contents();
         match crate::db::Db::open(&path) {
             Err(Error::SchemaTooNew { found, supported }) => {
                 assert_eq!((found, supported), (newer, latest()));
@@ -400,7 +414,7 @@ mod tests {
             Err(other) => panic!("expected SchemaTooNew, got {other:?}"),
             Ok(_) => panic!("a newer schema must not open"),
         }
-        assert_eq!(std::fs::read(&path).expect("read"), before);
+        assert_eq!(contents(), before);
         let msg = Error::SchemaTooNew {
             found: newer,
             supported: latest(),

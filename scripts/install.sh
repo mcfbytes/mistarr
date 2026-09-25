@@ -16,6 +16,8 @@ LAUNCHER="$SCRIPTS_DIR/mistarr.sh"
 PREV_LAUNCHER="$LAUNCHER.prev"
 DB="$INSTALL_DIR/mistarr.db"
 DB_PREV="$DB.prev"
+# Seconds a started mistarr has to answer HTTP before the install is rolled back.
+START_TIMEOUT="${MISTARR_START_TIMEOUT:-180}"
 # Set once this run has saved the database set, so a restore never uses a stale one.
 db_saved=0
 
@@ -71,58 +73,98 @@ free_kib() {
     df -Pk "$1" 2>/dev/null | awk 'NR == 2 && $4 ~ /^[0-9]+$/ { print $4 }'
 }
 
-# Removes the saved database set.
-remove_db_prev() {
-    rm -f "$DB_PREV" "$DB_PREV-wal" "$DB_PREV-shm"
+# Removes the staged copies a failed backup left.
+discard_new() {
+    rm -f "$DB_PREV.new" "$DB_PREV-wal.new" "$DB_PREV-shm.new" "$PREV.new" "$PREV_LAUNCHER.new"
 }
 
-# Copies mistarr.db and any -wal/-shm beside it to the mistarr.db.prev set,
-# so a rollback across a migration has the matching database. Streams with cp.
-backup_db() {
-    if [ ! -f "$DB" ]; then
-        echo "no database yet; nothing to back up"
-        return 0
+# Copies $1, when it exists, to $2.new.
+copy_new() {
+    [ -f "$1" ] || return 0
+    if ! cp "$1" "$2.new"; then
+        echo "failed to copy $1 to $2.new" >&2
+        return 1
     fi
+}
+
+# Moves $1.new over $1 when it was staged, and removes $1 when it was not, so
+# the saved set mirrors what was installed.
+commit_new() {
+    if [ -f "$1.new" ]; then
+        mv -f "$1.new" "$1"
+    else
+        rm -f "$1"
+    fi
+}
+
+# Saves the rollback set through .new copies renamed over the old set once all
+# succeed; see DEPLOYMENT.md "Upgrading". 1: old set intact; 2: a rename failed.
+save_prev() {
+    discard_new
     need=1024
-    for f in "$DB" "$DB-wal" "$DB-shm"; do
+    for f in "$DB" "$DB-wal" "$DB-shm" "$BIN" "$LAUNCHER"; do
         [ -f "$f" ] && need=$((need + $(size_kib "$f")))
     done
     avail=$(free_kib "$INSTALL_DIR")
-    if [ -n "$avail" ]; then
-        # The old set is removed before copying, so its space counts as free.
-        for f in "$DB_PREV" "$DB_PREV-wal" "$DB_PREV-shm"; do
-            [ -f "$f" ] && avail=$((avail + $(size_kib "$f")))
-        done
-        if [ "$avail" -lt "$need" ]; then
-            echo "not enough free space to back up the database: need $need KiB, have $avail KiB" >&2
-            return 1
-        fi
+    if [ -n "$avail" ] && [ "$avail" -lt "$need" ]; then
+        echo "not enough free space to save the rollback set: need $need KiB, have $avail KiB" >&2
+        return 1
     fi
-    remove_db_prev
-    for part in "" -wal -shm; do
-        [ -f "$DB$part" ] || continue
-        if ! cp "$DB$part" "$DB_PREV$part"; then
-            echo "failed to copy $DB$part to $DB_PREV$part" >&2
-            remove_db_prev
-            return 1
-        fi
+    if ! { copy_new "$DB" "$DB_PREV" && copy_new "$DB-wal" "$DB_PREV-wal" \
+        && copy_new "$DB-shm" "$DB_PREV-shm" && copy_new "$BIN" "$PREV" \
+        && copy_new "$LAUNCHER" "$PREV_LAUNCHER"; }; then
+        discard_new
+        return 1
+    fi
+    sync
+    for f in "$DB_PREV" "$DB_PREV-wal" "$DB_PREV-shm" "$PREV" "$PREV_LAUNCHER"; do
+        commit_new "$f" || return 2
     done
-    db_saved=1
-    echo "saved the database as $DB_PREV"
+    sync
+    if [ -f "$DB" ]; then
+        db_saved=1
+        echo "saved the database as $DB_PREV"
+    else
+        echo "no database yet; nothing to back up"
+    fi
 }
 
-# Puts the saved database set back in place of the current one, dropping any
-# -wal/-shm the saved set lacks so a newer WAL is never replayed onto it.
+# True when a process still holds the database open. Skipped without fuser.
+db_in_use() {
+    command -v fuser >/dev/null 2>&1 || return 1
+    set --
+    for f in "$DB" "$DB-wal"; do
+        [ -f "$f" ] && set -- "$@" "$f"
+    done
+    [ "$#" -gt 0 ] || return 1
+    fuser "$@" >/dev/null 2>&1 || return 1
+    holders=$(fuser "$@" 2>/dev/null | awk '{ for (i = 1; i <= NF; i++) printf "%s%s", (n++ ? " " : ""), $i }')
+}
+
+# Puts the saved database set back in place of the current one, through
+# .restore copies moved into place; drops any -wal/-shm the set lacks.
 restore_db() {
     [ "$db_saved" = 1 ] || return 0
-    rm -f "$DB-wal" "$DB-shm"
     for part in "" -wal -shm; do
+        rm -f "$DB$part.restore"
         [ -f "$DB_PREV$part" ] || continue
-        if ! cp "$DB_PREV$part" "$DB$part"; then
-            echo "failed to restore $DB$part from $DB_PREV$part" >&2
+        if ! cp "$DB_PREV$part" "$DB$part.restore"; then
+            echo "failed to copy $DB_PREV$part to $DB$part.restore" >&2
+            rm -f "$DB.restore" "$DB-wal.restore" "$DB-shm.restore"
             return 1
         fi
     done
+    sync
+    # The newer WAL must never be replayed onto the restored file.
+    rm -f "$DB-wal" "$DB-shm"
+    for part in "" -wal -shm; do
+        [ -f "$DB$part.restore" ] || continue
+        if ! mv -f "$DB$part.restore" "$DB$part"; then
+            echo "failed to move $DB$part.restore into place" >&2
+            return 1
+        fi
+    done
+    sync
     echo "restored the database from $DB_PREV"
 }
 
@@ -148,6 +190,7 @@ restore_prev() {
         return 1
     fi
     restored=0
+    # save_prev left these mirroring what this run replaced.
     if [ -f "$PREV" ]; then
         cp "$PREV" "$BIN" && chmod +x "$BIN"
         restored=1
@@ -221,6 +264,67 @@ extract_and_check() {
     echo "binary verified as an ARM ELF executable"
 }
 
+# The URL of the server's root page, from `[server] listen` in mistarr.toml,
+# else MISTARR_PORT or 8420 on the loopback address.
+listen_url() {
+    conf="$INSTALL_DIR/mistarr.toml"
+    addr=""
+    if [ -f "$conf" ]; then
+        addr=$(awk '
+            /^[ \t]*\[/ { s = ($0 ~ /^[ \t]*\[server\]/) }
+            s && /^[ \t]*listen[ \t]*=/ {
+                v = $0; sub(/^[^=]*=[ \t]*"/, "", v); sub(/".*/, "", v); print v; exit
+            }' "$conf")
+    fi
+    host=""
+    port=""
+    case "$addr" in
+        *:*)
+            host=${addr%:*}
+            port=${addr##*:}
+            ;;
+    esac
+    case "$host" in
+        "" | 0.0.0.0 | "[::]") host=127.0.0.1 ;;
+    esac
+    echo "http://$host:${port:-${MISTARR_PORT:-8420}}/"
+}
+
+# True when $1 answers HTTP at all; the root page needs no API key.
+answers() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -s -o /dev/null --max-time 5 "$1"
+        return $?
+    fi
+    wget -q -O /dev/null "$1" 2>/dev/null
+}
+
+# Waits up to START_TIMEOUT seconds for the server to answer; fails early
+# when the launcher no longer reports it running.
+wait_ready() {
+    url=$(listen_url)
+    echo "waiting up to $START_TIMEOUT s for mistarr to answer at $url"
+    deadline=$(($(date +%s) + START_TIMEOUT))
+    while :; do
+        if answers "$url"; then
+            echo "mistarr answered at $url"
+            return 0
+        fi
+        case "$(MISTARR_ROOT="$ROOT" "$LAUNCHER" status 2>/dev/null)" in
+            "mistarr running"*) ;;
+            *)
+                echo "mistarr exited before answering at $url" >&2
+                return 1
+                ;;
+        esac
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "mistarr did not answer at $url within $START_TIMEOUT s" >&2
+            return 1
+        fi
+        sleep 1
+    done
+}
+
 # Runs the launcher with its stdin attached to a real terminal when one is
 # reachable, so the start-at-boot prompt works even when install.sh itself
 # was read from a pipe. Falls back to /dev/null and a printed note.
@@ -241,22 +345,27 @@ install_release() {
         MISTARR_ROOT="$ROOT" "$LAUNCHER" stop || true
     fi
 
-    if ! backup_db; then
+    if db_in_use; then
+        echo "$DB is still open by process $holders; stop it and run the install again" >&2
         echo "aborting the install; nothing was changed" >&2
-        restart_current
         exit 1
     fi
 
-    if [ -f "$BIN" ] && ! cp "$BIN" "$PREV"; then
-        echo "failed to save the previous binary; aborting the install" >&2
-        restart_current
-        exit 1
-    fi
-    if [ -f "$LAUNCHER" ] && ! cp "$LAUNCHER" "$PREV_LAUNCHER"; then
-        echo "failed to save the previous launcher; aborting the install" >&2
-        restart_current
-        exit 1
-    fi
+    save_prev
+    case $? in
+        0) ;;
+        1)
+            echo "aborting the install; nothing was changed" >&2
+            restart_current
+            exit 1
+            ;;
+        *)
+            echo "failed to replace the rollback set in $INSTALL_DIR; it may be incomplete" >&2
+            echo "aborting the install; the installed binary and database are unchanged" >&2
+            restart_current
+            exit 1
+            ;;
+    esac
 
     if ! cp "$ex/mistarr" "$BIN"; then
         echo "failed to install the new binary" >&2
@@ -274,7 +383,7 @@ install_release() {
 
     echo "installed mistarr $tag to $INSTALL_DIR"
     echo "starting mistarr"
-    if ! run_launcher; then
+    if ! run_launcher || ! wait_ready; then
         echo "mistarr failed to start after installing" >&2
         restore_prev
         exit 1

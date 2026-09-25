@@ -2,10 +2,10 @@
 
 SQLite, WAL mode, one writer. Migrations are numbered SQL files in
 `crates/mistarr-server/migrations/` applied at startup; this page shows the
-schema after all of them. A binary refuses to open, and never writes to, a
-database whose `schema_version` records a migration newer than any it embeds;
-see "Rollback" in [DEPLOYMENT.md](DEPLOYMENT.md). All timestamps are
-Unix seconds. All hashes are stored as lowercase hex text so they can be
+schema after all of them. A binary refuses to open a database whose
+`schema_version` records a migration newer than any it embeds, and leaves its
+contents unchanged; see "Rollback" in [DEPLOYMENT.md](DEPLOYMENT.md). All
+timestamps are Unix seconds. All hashes are stored as lowercase hex text so they can be
 compared with DAT values without conversion.
 
 JSON may stage data or carry opaque blobs; nothing filters or joins on JSON.

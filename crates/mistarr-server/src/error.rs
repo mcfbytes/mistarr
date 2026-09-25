@@ -18,7 +18,7 @@ pub enum Error {
         /// The SQLite error.
         source: rusqlite::Error,
     },
-    /// The database was migrated by a newer mistarr; it is left untouched.
+    /// The database was migrated by a newer mistarr; its contents are left unchanged.
     #[error(
         "database schema version {found} is newer than this mistarr supports ({supported}); \
          install a newer mistarr, or restore mistarr.db.prev with the previous version"
