@@ -90,7 +90,8 @@ const KIND_LABEL: Record<string, string> = {
   bind_source: 'Source binding',
   detect_client: 'Client check',
   resolve_magnet: 'Magnet lookup',
-  deselect: 'Transfer stop'
+  deselect: 'Transfer stop',
+  url_fetch: 'URL fetch'
 };
 
 export function kindLabel(kind: string): string {
@@ -109,9 +110,34 @@ export function jobDetail(payload: Record<string, unknown>): string | null {
   return typeof payload.platform_id === 'string' ? payload.platform_id : null;
 }
 
+type FetchJob = Pick<Job, 'id' | 'kind' | 'progress' | 'created_at'>;
+
+/**
+ * What a URL fetch is about, never any part of the URL: its file once known, else when it
+ * was sent, numbered by job when several unnamed fetches in `all` were sent that second.
+ */
+export function fetchSubject(job: FetchJob, all: readonly FetchJob[] = []): string {
+  if (typeof job.progress?.file === 'string') {
+    return job.progress.file;
+  }
+  const time = new Date(job.created_at * 1000).toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+  const same = all
+    .filter((j) => j.kind === 'url_fetch' && typeof j.progress?.file !== 'string' && j.created_at === job.created_at)
+    .map((j) => j.id)
+    .sort((a, b) => a - b);
+  const n = same.indexOf(job.id);
+  return same.length > 1 && n >= 0 ? `sent at ${time} (${n + 1})` : `sent at ${time}`;
+}
+
 /** The page that owns a job's result. */
-export function jobHref(job: Pick<Job, 'kind' | 'payload'>): string {
+export function jobHref(job: Pick<Job, 'kind' | 'payload'> & { progress?: Job['progress'] }): string {
   switch (job.kind) {
+    case 'url_fetch':
+      return job.progress?.target === 'sources' ? '#/sources' : job.progress?.target === 'dats' ? '#/dats' : '#/activity';
     case 'dat_import':
       return '#/dats';
     case 'source_import':
@@ -145,8 +171,20 @@ const PHASE_TEXT: Record<string, string> = {
   'copying the database to memory': 'Copying the database to memory',
   'writing the database to the card': 'Writing the database to the card',
   importing: 'Importing',
-  'importing in place': 'Importing in place'
+  'importing in place': 'Importing in place',
+  connecting: 'Connecting',
+  receiving: 'Receiving',
+  checking: 'Checking the file',
+  placing: 'Writing to the card'
 };
+
+/** Bytes as "4.2 MiB" or "812 KiB", the units the size caps are given in. */
+export function bytesText(n: number): string {
+  if (n >= 1024 * 1024) {
+    return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
+  }
+  return `${Math.max(0, Math.round(n / 1024)).toLocaleString()} KiB`;
+}
 
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
@@ -202,6 +240,17 @@ export function describeProgress(kind: string, p: Record<string, unknown> | null
     const images = num(p.total);
     if (done !== null && images !== null && images > 1) {
       parts.push(`image ${Math.min(done + 1, images)} of ${images}`);
+    }
+  } else if (kind === 'url_fetch') {
+    const got = num(p.bytes_received);
+    const total = num(p.bytes_total);
+    if (phase === 'receiving' && got !== null) {
+      if (total !== null && total > 0) {
+        fraction = Math.min(1, got / total);
+        parts.push(`${bytesText(got)} of ${bytesText(total)}`);
+      } else {
+        parts.push(`${bytesText(got)} received`);
+      }
     }
   } else if (kind === 'recompute_1g1r') {
     const checked = num(p.checked);

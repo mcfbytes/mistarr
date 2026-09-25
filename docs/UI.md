@@ -13,8 +13,8 @@ screen works at 360 px wide with a 16 px gutter and no horizontal scroll.
 
 **Wizard** (`/wizard`). Four steps, each skippable:
 1. Paths: confirm root and games directory, show detected cores.
-2. DATs: drop zone and the watched-directory path, taking Logiqx DATs, No-Intro
-   database exports and zipped packs. Lists the files still in
+2. DATs: drop zone, the URL field and the watched-directory path, taking
+   Logiqx DATs, No-Intro database exports and zipped packs. Lists the files still in
    `dats/`, each waiting (with the reason), importing (with progress) or
    rejected (with the reason), then this session's uploads with their
    outcome, then the loaded DATs and the platform each bound to.
@@ -24,7 +24,8 @@ screen works at 360 px wide with a 16 px gutter and no horizontal scroll.
    map with a Remove button per row; blank rows are dropped and a row
    without a remote path or with a relative local path is refused before
    saving.
-4. Sources: drop zone and the watched-directory path, the files still in
+4. Sources: drop zone, the magnet box, the URL field and the
+   watched-directory path, the files still in
    `sources/` listed as in step 2, and the added sources with their state and
    reason. Seed policy explained with its default shown, and, while the
    client pauses during games, that it does and where to turn that off. Nothing about where
@@ -52,7 +53,9 @@ running, 2 waiting"), and a visually hidden `aria-live` line announces each
 change. The button is a disclosure (`aria-expanded`, `aria-controls`)
 opening a panel under it: Running, with each job's progress bar; Waiting,
 with why each waits ("Waiting for the DAT import of a.dat to finish.",
-"Paused while NES is running"); and Finished, the last five from
+"Paused while NES is running"); a URL fetch in either list has a Cancel
+button named for it ("Cancel URL fetch: a.dat", "Cancelling URL fetch:
+a.dat" while pending); and Finished, the last five from
 `/system/jobs/recent` with their outcome and how long ago. Every row links to
 the page that owns it (DATs, Sources, the platform, else Activity), and the
 panel ends with Open Activity. Opening moves focus to the panel; Escape
@@ -141,8 +144,45 @@ seed policy the note "Paused while a core runs" while the setting is on (see
 Unbound sources have a platform picker and, when the names suggest one, a
 "Bind to" button for the suggested platform. The name links to the source's
 detail, and a "Set by you" tag beside the platform marks a binding the user
-chose. Above the table, the files still in `sources/` and this session's
-uploads, as in the wizard.
+chose. Above the table, the upload control, the magnet box and the URL
+field, then the files still in `sources/` and this session's uploads, as in
+the wizard.
+
+**URL field.** On DATs, Sources and the wizard's DAT and source steps: a
+text box labelled "Add from a URL" with the placeholder
+`https://example.invalid/…`, `autocomplete="off"` on it and its form,
+`inputmode="url"`, no spell check or capitalisation, no `datalist`, and a
+Fetch button; a note under it says it takes a DAT, a zipped DAT pack, a
+.torrent file or a magnet link, fetched once and not remembered. The box
+empties once the server takes the link and keeps it when the server refuses
+it, so it can be corrected; the link is never written to storage, and a
+reload shows the box empty (PRINCIPLES.md section 2). Whatever screen it is
+on, the file goes where its content says. A magnet is received like the
+magnet box's. An http(s) link says "Fetching the file. Its progress is under
+Background work." and appears there and on Activity as "URL fetch: sent at
+14:02:31", the time it was sent, with "(1)", "(2)" by job when several were
+sent in the same second, and never any part of the URL; then "URL fetch:
+<file>" once the first bytes name it, with a bar of the bytes received
+("Receiving · 40% · 1.0 MiB of 2.3 MiB", or a moving band and "1.0 MiB
+received" without a length), then "Checking the file" and "Writing to the
+card", and a Cancel button, which says "Cancelling…" and is disabled until
+the fetch ends. When it lands the toast is an upload's ("DAT received:
+a.dat. Importing now.") and the file is followed as an upload; when it
+fails the toast is "The fetch failed: <reason>", or "The fetch was
+cancelled.".
+
+A fetched DAT is not placed as the server sent it: the file that lands in
+`dats/` is mistarr's rewrite of the DAT's entries, the header fields and the
+games, releases and roms it reads, and for a DB export its archives and
+files, with nothing else the server's file held. A fetched pack is rebuilt
+from the rewrites of its members. An uploaded or dropped file is placed as
+it is, since the user chose it.
+
+A fetched zip must hold only `.dat` and `.xml` DATs ("This zip holds files
+other than DATs."), where an upload loads the DATs of a mixed zip and skips
+the rest. An uploaded zip is a file the user already has and chose; a
+fetched one came from a server, and mistarr places only what it rewrote, so
+a member it could not rewrite has no place to go.
 
 **Source** (`/sources/{id}`). A link back to Sources, then the name; size,
 file count, the infohash shortened with Copy (over plain http, where the
@@ -178,7 +218,7 @@ below each row stacks its cells.
 **DATs** (`/dats`). Its own nav entry, between Sources and System, since
 DATs arrive and fail on their own schedule like sources do. An upload
 control taking several `.dat`, `.xml` or `.zip` files, the same upload as
-the wizard's. The files still in `dats/` as in the wizard: waiting with the
+the wizard's, and the URL field. The files still in `dats/` as in the wizard: waiting with the
 reason, importing with a progress bar of the DAT read so far, its phase and
 games read, rejected with the reason on its own line
 under the name, plus this session's uploads with their outcome. Each
@@ -389,7 +429,8 @@ stand still under `prefers-reduced-motion`, the band as a static stripe.
 ## Feedback
 
 Every button that starts work shows that it is sending until the server
-answers: Scan reads "Queuing…", Add reads "Adding…", and a file picker
+answers: Scan reads "Queuing…", Add reads "Adding…", Fetch reads
+"Sending…", and a file picker
 shows an "Uploading <name>…" status line beneath it. Each is
 `aria-disabled` and `aria-busy` and ignores further presses, but is never
 `disabled`, so keyboard focus stays on it. Then a toast says what happened, in one short
@@ -397,12 +438,16 @@ sentence:
 
 - received: "Torrent received: <file>. Waiting for the DAT import of <dat>
   to finish.", "Magnet received: …", "DAT received: …", ending with what
-  the file waits for, or "Importing now.";
+  the file waits for, or "Importing now.", also when a URL fetch lands;
+- queued: "Fetching the file. Its progress is under Background work." for a
+  URL fetch;
 - finished: "<file> added as a source." once a source upload's import ends,
   "<file> loaded." on `dat.loaded` for an uploaded DAT, on whichever page is
   open, and a scan's outcome as above;
 - failed: the file name and the server's message when the upload is
-  refused, or "<file> was rejected: <reason>" when its import rejects it.
+  refused, or "<file> was rejected: <reason>" when its import rejects it;
+  "The fetch failed: <reason>" or "The fetch was cancelled." for a URL
+  fetch, and the server's message alone when it refuses the link.
 
 Toasts stack at the bottom right, full width on a phone, at most four. Each
 has a close button; information and success leave after 6 s and errors after

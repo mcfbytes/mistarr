@@ -17,7 +17,7 @@ torrent client that ships with the image, and moves verified files into the
 | Stock image is Buildroot 2021 with glibc 2.31 | musl static linking, no OpenSSL, `rustls` only. |
 | MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing, scans and file placement while it is anything other than `MENU`. DAT and source parsing continue at low priority. A download client on the board is stopped with SIGSTOP until the menu, unless the user turns that off; one elsewhere gets reduced rate limits and held uploads. |
 | Torrent client already present | Stock image ships rtorrent; Buildroot_MiSTer ships Transmission. mistarr never embeds a client. |
-| Content neutrality | See PRINCIPLES.md. No sources in the tree; watched directories are the only input path. |
+| Content neutrality | See PRINCIPLES.md. No sources in the tree; files arrive only through the watched directories, an upload, or one URL the user supplies ("Fetching a URL"). |
 
 ## Components
 
@@ -46,7 +46,7 @@ contracts in this document.
 | `mistarr-core` | Domain types. DAT parser for Logiqx XML and No-Intro DB exports. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. | none |
 | `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
 | `mistarr-sources` | Watched-directory scanner. `.torrent` (bencode) and `.magnet` parsing into a file list. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
-| `mistarr-clients` | `DownloadClient` trait. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping. | none |
+| `mistarr-clients` | `DownloadClient` trait. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping. The one GET of a URL the user supplies, over hyper and rustls (`fetch`). | none |
 | `mistarr-server` | The binary. axum HTTP server, SQLite via `rusqlite` (bundled), job scheduler, SSE event bus, embedded SPA via `rust-embed`, config, first-run wizard state, CLI flags. | all |
 | `mistarr-fixture` | Development tool, never shipped: synthetic DATs, `.torrent` files, the synthetic set and a local tracker for the tests in TESTING.md. | core, mister, sources |
 | `web/` | Svelte 5 + Vite + TypeScript SPA. Built to `web/dist`, embedded at compile time. | API.md |
@@ -378,6 +378,148 @@ On shutdown the job stays queued and starts the image it was decoding again.
    an import proved by hash is never overwritten, and rebinding to the same
    platform keeps it; unbinding forgets every match, proofs included.
 
+### Fetching a URL
+
+`POST /fetch` takes one link the user typed or pasted (PRINCIPLES.md
+section 2). The link is never written to the database, a setting, a job's
+payload or progress, or a log line at info; the host alone may appear at
+debug. It lives in the `url_fetch` job's memory until the job ends.
+
+1. A `magnet:` link is parsed as an upload's is and placed in `sources/` as
+   a `.magnet` file at once, through the same code (`http::place_source`).
+2. Any other link must be `http` or `https`, with a host and no user name or
+   password; a fragment is dropped, and spaces and other characters a
+   request line cannot carry are percent-encoded. The answer is 202 with a
+   token, which starts at a random per-run nonce so a page open across a
+   restart never matches an old one, and is open for `DELETE` once the job
+   is queued; a `url_fetch` job on the `fetch` lane holds the URL.
+3. The job resolves the host, connects (15 s for the lookup, TCP and TLS
+   together), sends one GET and follows up to 5 HTTP redirects of that
+   request, the only URLs besides the typed one it ever requests
+   (PRINCIPLES.md section 2). It never follows a redirect from https to
+   http, nor one to an address on this machine or the local network once
+   any host in the chain, the typed one included, was public; it dials only
+   the addresses it checked. Local means IPv4 0.0.0.0/8, loopback, private,
+   link-local, 100.64/10, 192.0.0.0/24, 198.18.0.0/15 and 240.0.0.0/4 with
+   broadcast, and IPv6 loopback, unspecified, unique local, link-local,
+   site-local (`fec0::/10`), NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`),
+   Teredo (`2001::/32`) and IPv4-compatible (`::/96`); an IPv4-mapped or
+   6to4 (`2002::/16`) address counts as the IPv4 address it carries. A host
+   with any local address is refused once the chain is public, and a host
+   with any public address, the typed one included, makes it public. A 6th redirect, any other non-2xx answer, a
+   `Content-Encoding` other than `identity`, 60 s without a byte, or an
+   average under 1 KiB/s once 5 minutes have passed ends it. Nothing is
+   retried and nothing is fetched again later: a restart fails the job as
+   interrupted. A typed private or loopback address is allowed: mistarr runs
+   on the user's LAN, the user typed the address, and a DAT or torrent on a
+   NAS or another machine at home is the common case, so refusing it would
+   protect nothing the user could not reach from the same browser.
+4. The body streams into `fetch-<pid>-<token>.part` in `mistarr-fetch/`,
+   mistarr's own directory under SQLite's temporary one when that is in RAM
+   (`/tmp/mistarr`), when `MemAvailable` covers the announced length, or
+   16 MiB when there is none, above `[memory] import_floor_mib`; otherwise,
+   and when memory falls short during the transfer (checked every 8 MiB),
+   in `<data>/tmp` on the card. It is written in 1 MiB writes. Before
+   writing to the card, and every 8 MiB while it does, the card must have
+   room for what comes next and 32 MiB more, else the fetch fails as "The
+   card has too little free space for the file.". A move to the card that
+   fails removes its partial copy and keeps the file in RAM, and the fetch
+   fails. At startup leftover `fetch-*.part` files are removed from
+   `<data>/tmp` and `mistarr-fetch/` only, never from a directory another
+   program shares, as are the `.upload-*.part` files a restart left in
+   `dats/` and `sources/`. The SQLite temporary directory's own cleanup
+   removes only files at its top level, so it leaves `mistarr-fetch/` to
+   this sweep, and neither touches the frozen client's `client.frozen`.
+5. The first 64 bytes decide the type, never the URL or `Content-Type`: an
+   XML document (`<?xml`, `<datafile`, `<header`, `<!DOCTYPE datafile`, or
+   `<!--`, since DATs often open with a comment before any declaration,
+   after a byte-order mark and whitespace), a zip local-file header, or a
+   bencoded dictionary (`d` and a key length). A gzip header is refused as
+   a compressed file mistarr cannot read; anything else, an HTML page or a
+   ROM or disc image included, ends the transfer at once as not a DAT or
+   torrent. An HTML page that opens with a comment passes the sniff and is
+   refused by the check. A body longer than its type's cap, announced or
+   counted, ends it too.
+6. Once whole, the file is checked with the importers' own parsers, and a
+   DAT is not placed as fetched: the placed file is mistarr's rewrite of
+   the DAT's entries (`dat::rewrite`). `DatStream` parses every game, with
+   the caps of VERIFICATION.md "DAT parsing" (1 MiB per XML event, 64
+   levels of nesting, 4 KiB per name, 64 KiB per other field, 100,000 roms,
+   releases and files and 16 MiB of fields per game), refusing anything
+   after the root element but whitespace, comments and processing
+   instructions; as each game is read, a streaming writer writes the
+   header fields the parser reads and the game with exactly the
+   attributes, releases and roms it keeps, one game in memory at a time;
+   regions and languages go in as many `<release>` elements as keep each
+   within the field cap, and a tag that escaping would take past what the
+   parser reads as one event refuses the file.
+   A Logiqx DAT becomes a Logiqx DAT. A No-Intro DB export stays a DB
+   export, since which of its files become roms depends on the platform it
+   binds to at import: each game keeps its `archive` and every `file` of
+   every `source` with the attributes the parser reads. Comments,
+   processing instructions, doctypes, CDATA sections, unknown elements and
+   attributes and stray text never reach the placed file, and data a
+   server hides inside a legitimate field is bounded by that field's cap.
+   Importing the rewrite gives the same rows as importing the original.
+   Every member of a zip must be a `.dat` or `.xml` DAT; the members may
+   unpack to 512 MiB together, checked against the sizes the zip declares
+   and again as they are read, and each is rewritten as it is read into a
+   new zip (deflate level 1), so the placed pack holds only mistarr's
+   rewrites and no bytes the central directory does not list. A torrent is
+   parsed whole through `parse_torrent` and placed as fetched, since its
+   infohash is its bytes. The rewrite starts in RAM when the spool is in
+   RAM and memory allows it, moves to the card when memory falls short
+   (checked every 8 MiB), checks the card's room as the spool does, may not
+   exceed 512 MiB, and is deleted the moment the file is refused. Nothing
+   inside is read for further URLs; a torrent's `url-list` and trackers are
+   never contacted by mistarr. A refused file is deleted, never placed.
+7. The file is named from `Content-Disposition` (`filename*` in UTF-8 or
+   ISO-8859-1 first, then `filename`, quoted strings unescaped), else the
+   final URL's last path segment, made safe as an upload's name is and
+   given the extension its type needs (`.dat` or `.xml`, `.zip`,
+   `.torrent`), else `download`. A DAT is moved into `dats/` as an upload's
+   part file, renamed in place from `<data>/tmp` or copied from RAM in
+   1 MiB writes, then renamed to its name or `name (N)` and queued as an
+   upload is (`http::place_dat_part`); a torrent goes through
+   `http::place_source`, which refuses a repeat of a loaded source. From
+   there the incoming list, jobs and toasts are an upload's. A fetch never
+   calls the download client, so it runs while the client is stopped for a
+   core; a torrent or magnet it places lands in `sources/` and imports as
+   an upload's does, its client work kept until the menu like any other.
+
+Every failure, cancellation and shutdown removes the part file and any
+rewrite. The `fetch` lane runs one fetch at a time and is never held:
+neither a running core nor a manual pause stops a transfer, which is
+network-bound and would otherwise hold a link the user just pasted for the
+length of a game. Instead, while a core runs, every write a fetch makes to
+the card rests after each 1 MiB as long as the write took, between 20 ms
+and 1 s, as the database's write-back does: the spool's writes when it is
+on the card, its move there when memory runs short, the rewrite, and the
+copy into `dats/`. The network read waits for each write and its rest,
+so a fetch on the card goes no faster than the card is allowed to take it;
+a fetch in RAM is not slowed. The daemon's threads are in the idle I/O
+class. Cancel (`DELETE /fetch/{token}`) is honoured between chunks, every
+8 MiB the check and rewrite read, and between writes of the copy into
+`dats/`; shutdown
+likewise, leaving the job queued for the restart to fail as interrupted.
+
+https uses rustls with the ring provider, TLS 1.2 and 1.3, and ALPN
+`http/1.1`. Trust anchors are read for every fetch, http too since it may
+redirect to https, and dropped with it: the PEM bundle `SSL_CERT_FILE`
+names, else the first of
+`/etc/ssl/certs/ca-certificates.crt`, `/etc/ssl/cert.pem`,
+`/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem`,
+`/etc/ssl/certs/cacert.pem` and
+`/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` that holds a
+certificate, else the Mozilla set built in through `webpki-roots`. The
+board's own bundle comes first because it is updated with the image; the
+built-in set, 58 KiB of the binary, covers an image without one. A bundle
+`SSL_CERT_FILE` names that cannot be read or holds no certificate is
+passed over with one warning per run naming the variable and the path. A
+certificate error says whether the certificate is untrusted, for another
+host, or outside its validity, which on the board usually means the clock
+is not set yet.
+
 ### Wanted and transfer
 
 1. The user marks a title as wanted. mistarr creates a download for each of
@@ -503,13 +645,14 @@ The CORENAME watcher then sees the core and pauses heavy jobs as below.
 
 ### Pausing for the core
 
-Jobs run on three serial lanes, one job at a time each:
+Jobs run on four serial lanes, one job at a time each:
 
 | Lane | Jobs | While a core runs |
 |---|---|---|
 | heavy | `scan`, `import`, `arcade_catalog`, `chd_tracks` | Held: a queued job does not start and a running one stops at its next file boundary, or for `chd_tracks` its next slice of about 640 KiB, `paused`. |
 | background | `dat_import`, `recompute_1g1r`, `source_import` | Runs. A DAT parse sleeps 20 ms every 200 entries, on top of the process's `nice` level. Held, like the heavy lane, by a manual pause; a DAT import in RAM drops its copy and starts again after it, and while a core runs its copy into RAM and back rests as long as each 1 MiB step took. |
 | light | `detect_client`, `transfer`, `resolve_magnet`, `deselect` | Runs. |
+| fetch | `url_fetch` | Runs; never held, not even by a manual pause, and never calls the download client, so it runs while the client is stopped ("Fetching a URL"). |
 
 The CORENAME watcher polls `/tmp/CORENAME` every 2 s. When the value is not
 `MENU` the gate closes for the heavy lane. With
@@ -564,6 +707,8 @@ shutdown is left `queued` for this.
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
 | Arcade presence pass | 500 zips per batch, stat only unless import rows of a changed zip need its central directory; the listing's names and the live MRA zip set persist across batches |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
+| Fetched file (`url_fetch`) | `.torrent` 16 MiB (`MAX_SOURCE_BYTES`), DAT or DAT pack 512 MiB (`MAX_DAT_BYTES`), the uploads' caps, checked against `Content-Length` and while streaming; 1 MiB write buffer; spooled in `/tmp/mistarr` only above `[memory] import_floor_mib`; one fetch at a time; each XML event under 1 MiB and one game in memory while it is rewritten; peak RSS 17.7 MiB in all for a 50 MiB DAT over https in a release build, under the 64 MiB ceiling, checked by `tests/memory.rs` |
+| https | rustls with ring, `webpki-roots` (58 KiB of it) and the fetch code with its DAT rewrite take about 770 KiB of the stripped armv7 binary, which measures 6.43 MiB with the SPA; trust anchors are loaded per fetch and dropped after it, so idle RSS is unchanged |
 | Browse page or search, with its total | under 100 ms on the board with every major platform's DAT loaded; `tests/browse.rs` holds a host bound and `mistarr bench-search` measures the board |
 | SPA bundle, gzipped | under 200 KiB |
 | Concurrent client RPC calls | 1, serialised |
@@ -609,7 +754,8 @@ blocking thread runs work, `threads::blocking` sets its `comm` to a label of
 at most 15 bytes (`threads::label`: `db-read`, `db-write`, `hash`,
 `scan-list`, `zip-list`, `dat-import`, `dat-save`, `source-file`,
 `source-watch`, `import`, `rename`, `arcade`, `romsets`, `launch`, `detect`,
-`incoming`, `io-class`, `chd-header`, `chd-decode`, `client-freeze`) and puts the pool name
+`incoming`, `io-class`, `chd-header`, `chd-decode`, `client-freeze`, `fetch`) and
+puts the pool name
 back when it ends; the thread that reaps a started rtorrent is
 `rtorrent-reap`, the one that rewrites `mistarr.migrating` while migrations
 run is `db-migrate`, and a torrent's data is deleted under `torrent-delete`.

@@ -99,11 +99,13 @@ pub mod label {
     pub const CHD_HEADER: Label = Label::new("chd-header");
     /// Decoding a slice of a CHD image's hunks.
     pub const CHD_DECODE: Label = Label::new("chd-decode");
+    /// Writing, checking or placing a file fetched from a URL.
+    pub const FETCH: Label = Label::new("fetch");
     /// Finding, stopping and resuming the download client's process.
     pub const CLIENT_FREEZE: Label = Label::new("client-freeze");
 
     /// Every label, for tests and docs.
-    pub const ALL: [Label; 20] = [
+    pub const ALL: [Label; 21] = [
         DB_READ,
         DB_WRITE,
         HASH,
@@ -123,6 +125,7 @@ pub mod label {
         IO_CLASS,
         CHD_HEADER,
         CHD_DECODE,
+        FETCH,
         CLIENT_FREEZE,
     ];
 }

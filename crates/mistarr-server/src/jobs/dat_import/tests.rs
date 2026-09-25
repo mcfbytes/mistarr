@@ -1896,3 +1896,35 @@ fn a_pause_stops_an_import_that_holds_the_writer() {
     let stopped = request(true, None);
     assert!(matches!(check(&stopped), Err(Error::Cancelled)));
 }
+
+/// mistarr's rewrite of `xml`, as a fetch places it.
+fn rewritten(xml: &str) -> String {
+    let mut out = Vec::new();
+    mistarr_core::dat::rewrite(xml.as_bytes(), &mut out).expect("rewrite");
+    String::from_utf8(out).expect("utf-8")
+}
+
+#[test]
+fn a_rewritten_dat_imports_to_the_same_rows() {
+    let logiqx = "<?xml version=\"1.0\"?><!-- note --><datafile>\
+        <header><name>Maker - Nintendo Entertainment System</name><version>3</version>\
+        <clrmamepro header=\"No-Intro_NES.xml\"/></header>\
+        <game name=\"Example Quest (USA)\"><description>Example Quest</description>\
+        <release name=\"x\" region=\"USA\" language=\"En\"/><extra>ignored</extra>\
+        <rom name=\"a.nes\" size=\"4\" crc=\"0A0B0C0D\" header=\"4E 45 53 1A\" status=\"verified\"/></game>\
+        <game name=\"Example Quest (Europe) (Proto)\" cloneof=\"Example Quest (USA)\">\
+        <rom name=\"b.nes\" size=\"4\" sha1=\"0123456789abcdef0123456789abcdef01234567\"/></game>\
+        </datafile>";
+    let (original, copy) = (conn(), conn());
+    loaded(import(&original, logiqx, &request(false, None)));
+    loaded(import(&copy, &rewritten(logiqx), &request(false, None)));
+    assert_eq!(dump(&copy.db), dump(&original.db));
+
+    let export = db_export("20260101-000000");
+    let stem = "Example Vendor - Nintendo Entertainment System (DB Export) (20260101-000000)";
+    let (original, copy) = (conn(), conn());
+    import_export(&original, &export, stem, 1);
+    import_export(&copy, &rewritten(&export), stem, 1);
+    assert_eq!(dump(&copy.db), dump(&original.db));
+    assert!(count(&copy, "SELECT COUNT(*) FROM roms") > 0);
+}

@@ -5,7 +5,8 @@
   import { findPlatform, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
-  import { describeProgress, downloadStatus, jobDetail, jobHref, jobStatus, kindLabel } from '../lib/status';
+  import { describeProgress, downloadStatus, fetchSubject, jobDetail, jobHref, jobStatus, kindLabel } from '../lib/status';
+  import FetchCancel from '../lib/FetchCancel.svelte';
   import StatusPill from '../lib/StatusPill.svelte';
   import ProgressBar from '../lib/ProgressBar.svelte';
   import type { Job } from '../lib/types';
@@ -32,7 +33,12 @@
   function jobTitle(job: Job): string {
     const pid = job.payload.platform_id;
     const named = typeof job.payload.source_name === 'string';
-    const detail = typeof pid === 'string' && !named ? platformName(pid) : jobDetail(job.payload);
+    const detail =
+      job.kind === 'url_fetch'
+        ? fetchSubject(job, jobs)
+        : typeof pid === 'string' && !named
+          ? platformName(pid)
+          : jobDetail(job.payload);
     return detail ? `${kindLabel(job.kind)}: ${detail}` : kindLabel(job.kind);
   }
 
@@ -97,6 +103,7 @@
         <StatusPill {...jobStatus(job)} />
         <a href={jobHref(job)}><strong>{jobTitle(job)}</strong></a>
         <span class="muted">{job.lane} lane</span>
+        <FetchCancel {job} label={jobTitle(job)} />
       </div>
       {#if job.state === 'running'}
         <ProgressBar view={view ?? { fraction: null, text: 'Starting' }} label={`${jobTitle(job)} progress`} />

@@ -56,6 +56,10 @@ pub enum Error {
     /// A job failed.
     #[error("job failed: {0}")]
     Job(String),
+    /// A URL fetch failed or its file was refused; the message is the user's to read
+    /// and never names the URL.
+    #[error("{0}")]
+    Fetch(String),
     /// Memory, the RAM directory or the card ran short; the message says which and what
     /// was left unchanged. An import in RAM falls back to the card on it.
     #[error("{0}")]

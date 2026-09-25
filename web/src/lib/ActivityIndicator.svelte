@@ -2,7 +2,8 @@
   import { onMount, tick } from 'svelte';
   import { getJobs, getRecentJobs, jobOutcome, loadJobs, watchRecent } from './stores/jobs.svelte';
   import { findPlatform } from './stores/platforms.svelte';
-  import { QUIET_KINDS, describeProgress, jobDetail, jobHref, jobStatus, kindLabel } from './status';
+  import { QUIET_KINDS, describeProgress, fetchSubject, jobDetail, jobHref, jobStatus, kindLabel } from './status';
+  import FetchCancel from './FetchCancel.svelte';
   import StatusPill from './StatusPill.svelte';
   import ProgressBar from './ProgressBar.svelte';
   import ClientHeld from './ClientHeld.svelte';
@@ -38,9 +39,11 @@
 
   function title(job: Job): string {
     const detail =
-      typeof job.payload.platform_id === 'string' && typeof job.payload.source_name !== 'string'
-        ? name(job.payload.platform_id)
-        : jobDetail(job.payload);
+      job.kind === 'url_fetch'
+        ? fetchSubject(job, active)
+        : typeof job.payload.platform_id === 'string' && typeof job.payload.source_name !== 'string'
+          ? name(job.payload.platform_id)
+          : jobDetail(job.payload);
     return detail ? `${kindLabel(job.kind)}: ${detail}` : kindLabel(job.kind);
   }
 
@@ -177,6 +180,7 @@
             <div class="row">
               <StatusPill {...jobStatus(job)} />
               <a href={jobHref(job)} onclick={() => hide(false)}>{title(job)}</a>
+              <FetchCancel {job} label={title(job)} compact />
             </div>
             <ProgressBar {view} label={`${title(job)} progress`} compact />
           </li>
@@ -192,6 +196,7 @@
             <div class="row">
               <StatusPill {...jobStatus(job)} />
               <a href={jobHref(job)} onclick={() => hide(false)}>{title(job)}</a>
+              <FetchCancel {job} label={title(job)} compact />
             </div>
             {#if job.reason}<p class="why">{job.reason}</p>{/if}
           </li>

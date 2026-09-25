@@ -36,13 +36,14 @@ builds only the SPA, and `make clean` removes `target/`, `dist/` and
 `web/dist`.
 
 The binary at `target/armv7-unknown-linux-musleabihf/release/mistarr` is
-statically linked and stripped, measured at 2,985,296 bytes (2.85 MiB) with
+statically linked and stripped, measured at 6,746,064 bytes (6.43 MiB) with
 the SPA embedded.
 
 Dependencies must build for this target without a C toolchain surprise:
 `rustls` with `ring`, never OpenSSL or `aws-lc-rs`; `rusqlite` with
-`bundled`; no `reqwest` (the server only talks to localhost RPC; use `hyper`
-client or `ureq` with rustls). CI builds the target on every push and fails on
+`bundled`; no `reqwest` (the server talks to the client's RPC and fetches a
+URL the user supplies with the `hyper` client, over `tokio-rustls` for
+https). CI builds the target on every push and fails on
 any dynamic dependency, checked with `file` on the output.
 
 ## Layout on the SD card
@@ -308,6 +309,22 @@ it. It reads the same config as the server and needs no running server. This
 is what a bug report should include. When it reports title groups out of
 step, stop the server and run `mistarr doctor --rebuild-groups` to recompute
 them; it takes the data directory's lock and refuses while a server runs.
+
+## Certificates for https links
+
+A link pasted into the URL field (ARCHITECTURE.md "Fetching a URL") is
+fetched over rustls. It trusts the PEM bundle named by `SSL_CERT_FILE` in
+the daemon's environment, else the image's own bundle at
+`/etc/ssl/certs/ca-certificates.crt` or one of the other usual paths, else
+the Mozilla set built into the binary, so an image without a bundle still
+works and nothing needs installing. To trust a private authority, such as
+one a NAS uses, put its certificate with the public ones in a PEM file and
+start mistarr with `SSL_CERT_FILE` pointing at it.
+
+Certificates are checked against the board's clock. The DE10-Nano has no
+battery-backed clock, so until the image has set the time from the network
+a fetch fails with "The server's certificate is not valid at this time;
+check the board's clock." Plain `http` links need neither.
 
 ## Releasing
 

@@ -55,3 +55,8 @@ opt-level = 3
 
 [profile.release.package.crc32fast]
 opt-level = 3
+
+# Dependencies at opt-level 1 in dev and test builds keep the debug binary's resident
+# pages inside the memory test's budget; see docs/TESTING.md "Memory budget".
+[profile.dev.package."*"]
+opt-level = 1

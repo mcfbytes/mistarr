@@ -101,6 +101,44 @@ and launch once it is on, the cache on a rescan, an image beside its bins,
 `no_layout` until a DAT loads, a cooked track, a paused and a stopped
 decode, the lane handed to a scan, and a DAT listing a whole `.chd`.
 
+`crates/mistarr-server/tests/url_fetch.rs` boots the server beside
+`mistarr_clients::fake::FileServer`, an in-process HTTP and HTTPS server on
+localhost that answers scripted routes and records every path asked for; no
+test contacts another host, and every example link uses `example.invalid`.
+It fetches a synthetic DAT carrying a comment, CDATA and an unknown
+element, a DAT pack and a torrent listing a web seed on the same server,
+and checks each is asked for once, placed and imported, the DAT placed as
+mistarr's rewrite without the comment, CDATA or element, and the web seed
+never requested; it refuses an HTML page, a binary, a zip
+holding a non-DAT, a body past the torrent cap as it streams and one
+announcing more than the DAT cap; it places a pack with bytes appended past
+its directory and finds them absent from the placed file; it follows five
+redirects and refuses a sixth and a redirect from https to http, and follows
+one from http to https, the https server presenting a certificate generated
+in the test and trusted through `Options::ca_file`; it cancels a slow body
+and finds no part file left; it finds part files a restart left swept at
+startup; it places a magnet and refuses malformed links. It greps the
+database and its WAL for the URL, its path, its query and the server's
+address, and a global subscriber's
+info-level log for the same. `mistarr-clients` tests the fetcher alone the
+same way, trusting the generated certificate through `Roots::from_pem_file`
+and refusing it with the built-in roots; it refuses a redirect to a local
+address, and one back to a local address after a public hop, by classing
+loopback addresses public with `Fetcher::with_local` and serving on a
+second loopback address, a body under a raised minimum rate, and a
+`Content-Encoding`, and reads `Content-Disposition` with proptests. The
+spool's unit tests force the memory floor up to move a file, and a rewrite
+mid-write, to the card and make a move fail, finding no partial copy left.
+`mistarr-core`'s `dat::canon` tests check that a rewrite drops comments,
+processing instructions, doctypes, CDATA, unknown elements and attributes
+and stray text, keeps a header met after the first game where the importer
+reads it, and keeps a DB export's archives and files; proptests check that
+parsing the rewrite gives what parsing the input gave, for Logiqx DATs and
+DB exports under several platforms' options, and that a rewrite is its own
+rewrite. `dat_import`'s tests import a DAT and a DB export and their
+rewrites and compare every row. The core's DAT tests hit each parser cap. `web/e2e/url.spec.ts` covers the
+field on each screen in mock mode.
+
 The fixture tool runs on its own too:
 
 ```sh
@@ -127,6 +165,7 @@ against another and the numbers include everything the real daemon runs.
 | `a_dat_import_on_the_card_stays_under_budget` | the same DAT with `[memory] import_floor_mib` too large for any copy | the load ran on the card, saying why, made no copy, and held SQLite's temporary files in its temporary directory |
 | `scan_stays_under_budget` | 16 000 loose and 2 000 zipped GBA files and 1 000 PSX folders of a cue and a bin | a `files` row per file and zip member |
 | `chd_identification_stays_under_budget` | four CHD images of 2 to 4 MB of CD data under `games/PSX` (chdman's default CD codecs, `cdzs`, uncompressed, and one-frame hunks) and a DAT of their tracks, with `[scan] chd_tracks` on | a scan then `chd_tracks` verify every track and cue row |
+| `a_url_fetch_stays_under_budget` | the 50 MB DAT served over https by a local `FileServer` whose certificate, generated in the test, the server trusts through `SSL_CERT_FILE`, fetched through `POST /fetch` with the server paused so the import that follows waits | the fetch done and the DAT in `dats/`, within 12 MiB of idle |
 | `a_tiny_memory_limit_is_raised_to_the_floor` | `[memory] data_limit_mib = 2` | the process runs with the 64 MiB floor, or a lower inherited limit |
 
 Each server started also checks that `/proc/<pid>/limits` shows the default
@@ -141,7 +180,9 @@ the budget. The two DAT loads, whose apply runs with the writer's 8 MiB bulk
 cache on a second pair of connections to the copy in RAM, may reach 32 MiB,
 and the 50 MB DAT's job must report that it loaded in RAM. Source imports
 and remaps, whose binding writes use it too, may reach 20 MiB. The suite runs in `cargo test --workspace` in debug
-builds and takes about a minute; the budget holds there on x86-64 with room
+builds and takes about a minute. Most of a debug binary's code is resident
+from the start, so the workspace `Cargo.toml` builds dependencies at
+opt-level 1 in dev and test builds, which keeps that baseline small. The budget holds there on x86-64 with room
 to spare, and a release build for armv7 needs less, with half the pointer
 size and a smaller binary. `make memory` runs it one test at a time and
 prints each peak:

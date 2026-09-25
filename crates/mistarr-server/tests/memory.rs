@@ -71,6 +71,11 @@ struct Server {
 /// `mistarr serve` on `root` until one listens, since another process may take the
 /// chosen free port first. Returns the listening server.
 fn spawn(root: &Path, memory: &str) -> Server {
+    spawn_env(root, memory, &[])
+}
+
+/// [`spawn`] with `envs` added to the server's environment.
+fn spawn_env(root: &Path, memory: &str, envs: &[(&str, &Path)]) -> Server {
     for _ in 0..5 {
         let port = free_port();
         let data = root.join("data");
@@ -91,6 +96,7 @@ fn spawn(root: &Path, memory: &str) -> Server {
             .arg("--data")
             .arg(&data)
             .env(mistarr_server::db::TEMP_DIR_ENV, root.join("sqlite-tmp"))
+            .envs(envs.iter().copied())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -949,6 +955,80 @@ fn db_export_import_stays_under_budget() {
         games - games.div_ceil(3)
     );
     assert_budget("dat_import, DB export", peak, RAM_LOAD_DELTA_MIB);
+}
+
+/// Growth over idle a URL fetch may reach: its 1 MiB write buffer, one body chunk,
+/// the TLS session and its roots, and the DAT check, which parses one game at a time.
+const FETCH_DELTA_MIB: u64 = 12;
+
+#[test]
+fn a_url_fetch_stays_under_budget() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let dat = dir.path().join("served/memory.dat");
+    big_dat(&dat);
+    let body = std::fs::read(&dat).expect("read");
+    let key = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).expect("cert");
+    let ca = dir.path().join("ca.pem");
+    std::fs::write(&ca, key.cert.pem()).expect("write");
+    let der = rustls::pki_types::PrivateKeyDer::Pkcs8(key.signing_key.serialize_der().into());
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let tls = rustls::ServerConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .expect("versions")
+        .with_no_client_auth()
+        .with_single_cert(vec![key.cert.der().clone()], der)
+        .expect("server config");
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let files = runtime
+        .block_on(mistarr_clients::fake::FileServer::start_tls(tls))
+        .expect("file server");
+    files.route("/memory.dat", mistarr_clients::fake::FileRoute::ok(body));
+    let server = spawn_env(dir.path(), "", &[("SSL_CERT_FILE", &ca)]);
+    // Held, so the DAT import that follows the fetch does not start and count.
+    server.post("/system/pause", "{}");
+    let url = files.url("/memory.dat");
+    let mut s = TcpStream::connect(("127.0.0.1", server.port)).expect("connect");
+    let body = json!({ "url": url }).to_string();
+    write!(
+        s,
+        "POST /api/v1/fetch HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\
+         X-Mistarr: 1\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+        body.len(),
+        port = server.port,
+    )
+    .expect("write");
+    let mut reply = String::new();
+    s.read_to_string(&mut reply).expect("read");
+    assert!(reply.starts_with("HTTP/1.1 202"), "{reply}");
+    let start = Instant::now();
+    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
+    let (state, progress) = loop {
+        let row = rusqlite::Connection::open_with_flags(&server.db, flags)
+            .ok()
+            .and_then(|c| {
+                c.query_row(
+                    "SELECT state, COALESCE(progress, 'null') FROM jobs
+                     WHERE kind = 'url_fetch' AND state IN ('done', 'failed')",
+                    [],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .ok()
+            });
+        if let Some(row) = row {
+            break row;
+        }
+        assert!(start.elapsed() < JOB_TIMEOUT, "url_fetch did not finish");
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    println!(
+        "url_fetch of {} MiB over https took {:?}",
+        DAT_BYTES >> 20,
+        start.elapsed()
+    );
+    let peak = server.stop("url_fetch");
+    assert_eq!(state, "done", "{progress}");
+    assert!(dir.path().join("data/dats/memory.dat").exists());
+    assert_budget("url_fetch", peak, FETCH_DELTA_MIB);
 }
 
 #[test]
