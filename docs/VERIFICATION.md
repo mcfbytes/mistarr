@@ -240,6 +240,12 @@ For disc games hash every track. The game is `verified` only if every rom in
 the DAT entry matched. A cue with tracks missing is `incomplete`, shown as
 unverified with a reason.
 
+A `.chd` on a disc platform is not hashed whole: the scan reads its 124-byte
+header and nothing more, and its tracks are hashed only by the `chd_tracks`
+job (see "CHD images"). The exception is a `.chd` of the exact size of a live
+DAT rom whose name ends in `.chd`: it is hashed whole and matched like any
+file, and read as a CHD only when that hash matches nothing.
+
 ## Matching order
 
 1. SHA1, exact.
@@ -279,12 +285,89 @@ decompressed again.
 Both paths use the live roms only and the matching order above. A cartridge file
 or zip member takes `verified`, `misnamed` or `bad` as a scan would give it;
 a disc track is classified with the other tracks of its directory under the
-all-or-nothing rule. Stored hashes are of the content after the header rule
+all-or-nothing rule, and the tracks of one CHD are classified together as
+their own set (see "CHD images"). Stored hashes are of the content after the header rule
 named in `files.header_rule`, as the DAT's hashes are: a byte-swapped N64
 image is stored as its big-endian form and a headered NES file without its
 header. `files.size` is the size on disk, so the CRC32-plus-size tier also
 tries that size less the header the rule strips (for `smc`, only when the
 size is `n*1024 + 512`).
+
+## CHD images
+
+A Redump-style DAT lists a disc as a cue sheet plus one `.bin` per track, so a
+CHD image can match only through its tracks. [CHD.md](CHD.md) describes the
+format as mistarr reads it.
+
+**Identity.** The header's combined SHA1 (offset 84) plus the file size
+identify an image. Every scan reads the header again, one 124-byte read per
+image; with `[scan] chd_tracks` off it never reads further.
+
+**Rows.** An image not identified is one row, `g.chd`, in state
+`unidentified` with a `reason`. An identified image is member rows instead:
+`g.chd#01` to `g.chd#NN` with each rebuilt track's size and hashes, plus
+`g.chd#cue` (then `#cue2` and on, one per cue rom) when the set is
+complete, carrying the image's size. Members carry the image's mtime and
+`header_rule` `chd`, and are never `misnamed`: the image holds no file names.
+
+**Classification.** Each track takes every live rom it matches at the first
+matching tier of "Matching order". Titles are tried in id order; one wins
+when its non-cue roms number the tracks and each track in turn gets a
+distinct rom among its candidates, lowest id first. Then every track is
+`verified` and a cue row verifies each cue rom of the title; with a bad dump
+among the assigned roms those tracks are `bad`, the others `unverified`, and
+there is no cue row. With no winning title every track is `unverified` with
+its first candidate, if any. A recompute classifies an image's members again
+together, adding or dropping its cue rows. Members never enter the bin and
+cue rule of their directory, so a `.chd` beside its own bins and cue leaves
+both copies `verified`.
+
+**Rebuilding a track.** Each 2448-byte frame holds a 2352-byte sector and 96
+bytes of subcode. A track's `.bin` is the sector bytes of its frames,
+stored pregap frames included, pad frames skipped, and audio samples swapped
+to little-endian. Track boundaries come from the image's CHT2 metadata, which
+stands in for the cue; [CHD.md](CHD.md) "How chdman fills CHT2 from a cue"
+has the mapping. Tests encode synthetic bins and cues with chdman, in split
+and single-file form, with Mode 1, Mode 2 and audio tracks and INDEX 00
+pregaps, and check that the rebuilt tracks hash to the source bins.
+
+**Decoding.** With the setting on, the `chd_tracks` job decodes each waiting
+image once (ARCHITECTURE.md "CHD identification"). First it checks that a
+live DAT title on the platform has non-cue roms of exactly the image's track
+sizes, in any order; if none does, the image gets `no_layout` without a
+decode and is checked again after the platform's DATs change, not on every
+scan. A decode checks each hunk's CRC16, the SHA1 of all decoded data and the
+combined SHA1 over it and the metadata before anything is stored; the second
+SHA1 pass costs about 6 % of the decode (CHD.md "Speed").
+
+**Cache.** `chd_tracks` keeps an image's track hashes by its identity, and
+`chd_failures` why it could not be identified with the decoder version that
+found it. A scan builds member rows from the cache whatever the setting, and
+a failure is tried again only by a newer decoder. Only a finished decode
+whose checksums all matched writes the cache, so it is trusted as `files`
+is. Entries outlive the file, about 150 bytes per track, so a moved or copied
+image is identified without decoding it again.
+
+**Reasons.** An `unidentified` row carries one of:
+
+| Reason | Meaning |
+|---|---|
+| `off` | The setting is off. |
+| `pending` | Waiting for the `chd_tracks` job. |
+| `no_layout` | No live DAT title has this number and size of tracks. |
+| `unreadable` | The file could not be read. |
+| `not_chd` | The file does not start with the CHD magic. |
+| `version` | A CHD version other than 5. |
+| `parent` | The image needs a parent CHD. |
+| `not_cd` | A hard disk, DVD or A/V image, or one with no track list. |
+| `too_large` | More frames than a CD holds. |
+| `codec` | A hunk uses a codec CHD.md "Codecs" does not list. |
+| `gdrom` | A GD-ROM image. |
+| `old_layout` | A track list older than CHT2, which says nothing of pregaps. |
+| `cooked` | A track stored as 2048-, 2324- or 2336-byte sectors, so its raw bytes cannot be rebuilt. |
+| `pregap` | A pregap after track 1 that the image does not store, which the Redump `.bin` holds. |
+| `corrupt` | The image is damaged or truncated. |
+| `checksum` | The decoded data do not match the image's own checksums. |
 
 ## Pre-download matching
 

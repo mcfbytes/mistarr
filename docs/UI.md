@@ -42,8 +42,13 @@ imports), which ones, and a Run now button that calls `POST /system/resume`.
 **Platforms** (`/`). One card per platform with core present, counts, and a
 scan button, below a banner of the platform's art. Scan shows a toast when
 the scan is queued and another with its outcome when it finishes, such as
-"Scan of Nintendo 64: 410 matched, 2 unmatched", on whichever page is open;
-counts reload when a scan or recompute ends. Platforms whose core is absent
+"Scan of Nintendo 64: 410 matched, 2 unmatched", followed by "3 not
+identified" when there are any, on whichever page is open; counts reload when
+a scan or recompute ends. A card with files not identified has "N not
+identified" as a disclosure that lists them 50 at a time, each path with the
+sentence for its reason ("Not identified: no loaded DAT entry has this number
+and size of tracks.") and Show more, with an `aria-live` count of those
+shown. Platforms whose core is absent
 are in a collapsed section. While the wizard reports a missing DAT, client or
 source, a "Setup not finished" card lists what is missing and links to the
 wizard.
@@ -60,7 +65,8 @@ current results stay visible, dimmed and marked `aria-busy`; a failed load
 shows an alert with Retry.
 
 **Title** (`/t/{id}`). Every variant in the group with region, revision,
-flags, file state, and which sources have it: one line per file, as "nova.nes
+flags, file state (a CHD member named as "g.chd, track 2" or "g.chd, track
+list"), and which sources have it: one line per file, as "nova.nes
 in Example Pack (name guess)", with the confidence read as "name match",
 "hash match", "name match", "name and size", "name guess" or "size only", or
 "None available". Want per variant. Play for a
@@ -75,7 +81,9 @@ the platform is installed.
 **Activity** (`/activity`). Downloads with per-file progress bars, imports
 log, queued and running jobs with their lane and hold reason, and a Recent
 list of the last finished jobs from `/system/jobs/recent`, one line each with
-its outcome and time. Live over SSE.
+its outcome and time. A running `chd_tracks` job reads "CHD tracks, g.chd
+45%" and its outcome "CHD tracks: 3 verified, 1 unmatched, 1 not
+identified". Live over SSE.
 
 **Sources** (`/sources`). Table of sources: name, platform, state, file count,
 matched count, seed policy, client status. Bind and disable actions.
@@ -106,7 +114,11 @@ result. Live over SSE, as in the wizard.
 **System** (`/system`). Status, client with the same start offer as the
 wizard, CORENAME, paused indicator with manual override, launch state,
 settings form for the runtime-editable subset with the shared path map editor
-and the switch that allows launching, log tail.
+and the switch that allows launching, log tail. Under "Disc images", the
+checkbox "Identify CHD images by their tracks" with a "Slow" tag, a line
+saying it decodes each image once, pauses while a core runs and keeps its
+results, and the measured speed as "about N minutes per 700 MB image", or
+"Speed not measured yet."
 
 ## Platform art
 

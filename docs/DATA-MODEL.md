@@ -132,14 +132,15 @@ CREATE INDEX roms_size ON roms(size);
 CREATE TABLE files (                    -- what is on disk under games/
   id            INTEGER PRIMARY KEY,
   platform_id   TEXT NOT NULL REFERENCES platforms(id),
-  rel_path      TEXT NOT NULL,         -- relative to games/, e.g. 'NES/a.zip#b.nes' for a zip member, 'mame/a.zip' for an arcade presence row
+  rel_path      TEXT NOT NULL,         -- relative to games/, e.g. 'NES/a.zip#b.nes' for a zip member, 'mame/a.zip' for an arcade presence row, 'PSX/G/g.chd#01' or 'PSX/G/g.chd#cue' for a CHD member
   size          INTEGER NOT NULL,
   mtime         INTEGER NOT NULL,
   crc32 TEXT, md5 TEXT, sha1 TEXT,
   header_rule   TEXT,                  -- the rule it was hashed, or last failed to hash, under; NULL for a zip member known by its CRC32 alone
   rom_id        INTEGER REFERENCES roms(id),
-  state         TEXT NOT NULL,         -- 'verified' | 'unverified' | 'misnamed' | 'bad' | 'pending'
+  state         TEXT NOT NULL,         -- 'verified' | 'unverified' | 'misnamed' | 'bad' | 'pending' | 'unidentified'
   scanned_at    INTEGER NOT NULL,
+  reason        TEXT,                  -- why an 'unidentified' row is not identified; NULL otherwise
   UNIQUE (platform_id, rel_path)
 );
 CREATE INDEX files_rom ON files(rom_id);
@@ -217,9 +218,29 @@ CREATE TABLE import_log (
 CREATE INDEX import_log_file ON import_log(file_id);
 
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE chd_tracks (                     -- rebuilt .bin hashes of a CHD's tracks, keyed by content
+  chd_sha1 TEXT NOT NULL,                     -- header combined SHA1, verified by the decode
+  chd_size INTEGER NOT NULL,
+  track    INTEGER NOT NULL,                  -- 1-based
+  size     INTEGER NOT NULL,                  -- rebuilt track length
+  crc32 TEXT NOT NULL, md5 TEXT NOT NULL, sha1 TEXT NOT NULL,
+  PRIMARY KEY (chd_sha1, chd_size, track)
+) WITHOUT ROWID;
+CREATE INDEX chd_tracks_sha1 ON chd_tracks(sha1);   -- finds the image of member rows whose size is not stored
+
+CREATE TABLE chd_failures (                   -- CHDs that cannot be identified, so they are not decoded again
+  chd_sha1  TEXT NOT NULL,
+  chd_size  INTEGER NOT NULL,
+  reason    TEXT NOT NULL,                    -- a files.reason code
+  decoder   INTEGER NOT NULL,                 -- decoder version; an older one is retried
+  failed_at INTEGER NOT NULL,
+  PRIMARY KEY (chd_sha1, chd_size)
+) WITHOUT ROWID;
+-- Both outlive the files they describe, so a moved image is identified without a decode.
+
 CREATE TABLE jobs (
   id            INTEGER PRIMARY KEY,
-  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'poll' | 'detect_client' | 'dat_import' | 'recompute_1g1r' | 'source_import' | 'resolve_magnet' | 'transfer' | 'deselect' | 'arcade_catalog'
+  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'poll' | 'detect_client' | 'dat_import' | 'recompute_1g1r' | 'source_import' | 'resolve_magnet' | 'transfer' | 'deselect' | 'arcade_catalog' | 'chd_tracks'
   payload       TEXT NOT NULL,         -- json
   state         TEXT NOT NULL,         -- 'queued' | 'running' | 'paused' | 'done' | 'failed'
   progress      TEXT,                  -- json, job specific
@@ -307,6 +328,12 @@ single-file one. It is the path mistarr sees, after the remote path map.
   `unverified` with `rom_id` set to the zip's rom, and so is the presence row
   `mame/<zip>` the arcade presence pass writes for a zip a live MRA names.
 - `bad`: matches a rom flagged `baddump`.
+- `unidentified`: a CHD image on a disc platform whose tracks are not known,
+  with `reason` saying why (VERIFICATION.md "CHD images"). Its row is
+  `g.chd` itself, with no hashes and no rom. Once its tracks are known the
+  row gives way to member rows `g.chd#01`, `g.chd#02`… with the rebuilt
+  tracks' sizes and hashes, and `g.chd#cue` (`#cue2`…) for each cue rom of a
+  complete set; members take the states above and are never `misnamed`.
 
 ### sources.state
 

@@ -10,7 +10,7 @@ torrent client that ships with the image, and moves verified files into the
 
 | Constraint | Consequence |
 |---|---|
-| Cortex-A9 dual core at ~800 MHz, ARMv7 hard-float | Cross-compiled static musl binary. Hashing is streaming and background. No CHD decompression in the critical path. |
+| Cortex-A9 dual core at ~800 MHz, ARMv7 hard-float | Cross-compiled static musl binary. Hashing is streaming and background. CHD images are decoded only in a heavy background job, opt-in, once per image. |
 | Roughly 490 MiB RAM visible to Linux, shared with the MiSTer process | Idle RSS target under 30 MiB, hard ceiling 64 MiB. No in-memory torrent metadata for set torrents; file lists live in SQLite. |
 | SD card, exFAT, ~10-20 MB/s writes | Stage and rename on the same filesystem, never copy. Throttle hashing with `ionice`. No symlinks, case-insensitive names. |
 | Stock image is Buildroot 2021 with glibc 2.31 | musl static linking, no OpenSSL, `rustls` only. |
@@ -170,7 +170,11 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    (`POST /system/scan`, API.md "System"). Skip
    while a core is running; the timer goes through the same heavy lane as
    the others, so it waits for the gate too.
-2. For each file, compare size and mtime with `files`. Unchanged files are
+2. A `.chd` on a disc platform is read header-only: its rows come from the
+   CHD track cache, a stored failure, or a container row `unidentified`
+   waiting for "CHD identification", and it is hashed whole only when a
+   live DAT rom named `*.chd` has its size (VERIFICATION.md "CHD images").
+   For each other file, compare size and mtime with `files`. Unchanged files are
    not hashed again. An unchanged, fully hashed file with no rom is matched
    from its stored hashes, and an unchanged zip member never hashed, known by
    its CRC32 alone, is hashed once a rom of that CRC32 and size exists
@@ -184,12 +188,47 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 4. Rows the walk did not see are deleted at the end, except under a
    directory that exists but could not be listed, whose rows are kept.
 5. The job's final progress is `{ platform_id, done, total, matched,
-   unmatched }`: the platform's files with a rom state (`verified`,
-   `misnamed`, `bad`) and those `unverified` once the scan ends.
+   unmatched, unidentified }`: the platform's files with a rom state
+   (`verified`, `misnamed`, `bad`), those `unverified` and those
+   `unidentified` once the scan ends. When `[scan] chd_tracks` is on and an
+   image of the platform waits, the scan queues `chd_tracks`.
 6. Scans are resumable: hashed rows are written 256 at a time and the
    finished directories at most every 2 s. A directory not yet recorded as
    finished is walked again after a restart, and its unchanged files are not
    hashed again.
+
+### CHD identification
+
+`chd_tracks` is one heavy-lane job with no payload that covers every enabled
+disc platform. It is queued at the end of a scan that left an image
+`pending`, when `[scan] chd_tracks` is turned on, at startup while it is on,
+and after a disc platform's recompute, which first moves that platform's
+`no_layout` images back to `pending`. It never runs while the setting is off.
+
+1. Page through the `pending` rows by id, 16 at a time. For each image,
+   checkpoint, and stop if the setting was turned off.
+2. Read the header and track list in a blocking task. An image that cannot
+   be identified gets its reason, and a failure row when its identity was
+   read; an I/O error leaves it `pending`.
+3. If the track cache has the image, write its members and move on. If no
+   live DAT title on the platform has its track sizes, give it `no_layout`
+   and move on, without decoding.
+4. Otherwise decode in blocking slices of 32 hunks (about 600 KiB, a
+   fraction of a second on the board), with a checkpoint between slices, so
+   a running core pauses the job within one slice; the paused job keeps its
+   decoder of about 1 MiB and holds no thread. Then cache the track hashes,
+   replace the container row with its members, and store the decoding speed
+   for `/system/status`.
+5. After each image, if a heavy job of another kind is queued, queue a fresh
+   `chd_tracks` behind it when images still wait, and end. The job is
+   otherwise a singleton, so the lane is handed over between images and two
+   `chd_tracks` runs never alternate.
+
+Every reason the job writes is conditional: it applies only to a row still
+`pending`, and only while the setting, read in the same write, is on. A
+scan writes a waiting image as `pending` or `off` by the setting read in its
+own write, so a toggle never leaves an image waiting with the setting off.
+On shutdown the job stays queued and starts the image it was decoding again.
 
 ### Arcade catalogue
 
@@ -444,7 +483,7 @@ Jobs run on three serial lanes, one job at a time each:
 
 | Lane | Jobs | While a core runs |
 |---|---|---|
-| heavy | `scan`, `import`, `arcade_catalog` | Held: a queued job does not start and a running one stops at its next file boundary, `paused`. |
+| heavy | `scan`, `import`, `arcade_catalog`, `chd_tracks` | Held: a queued job does not start and a running one stops at its next file boundary, or for `chd_tracks` its next 32-hunk slice, `paused`. |
 | background | `dat_import`, `recompute_1g1r`, `source_import` | Runs. A DAT parse sleeps 20 ms every 200 entries, on top of the process's `nice` level. Held, like the heavy lane, by a manual pause. |
 | light | `detect_client`, `transfer`, `resolve_magnet`, `deselect` | Runs. |
 
@@ -461,15 +500,17 @@ why. "Run now" (`POST /system/resume`) opens the gate
 until CORENAME changes or the heavy queue drains, whichever comes first;
 after that, new heavy work waits for the core again.
 
-`scan`, `arcade_catalog` and `recompute_1g1r` are singletons per payload: a
-request joins a queued or paused job of the same kind and payload instead of
-queueing another. Any other kind joins only a job that has not started.
+`scan`, `arcade_catalog`, `recompute_1g1r` and `chd_tracks` are singletons
+per payload: a request joins a queued or paused job of the same kind and
+payload instead of queueing another. Any other kind joins only a job that has
+not started. `chd_tracks` hands the heavy lane only to a queued job of
+another kind, between images ("CHD identification").
 
 At startup the scheduler takes over the queued, running and paused rows the
 previous process left. The first row of each kind and payload goes back on
 its lane under its own id when the kind can be re-run (`scan`,
 `arcade_catalog`, `dat_import` of a dropped file, `recompute_1g1r`,
-`source_import`, `import`); other kinds fail with "interrupted by a
+`source_import`, `import`, `chd_tracks`); other kinds fail with "interrupted by a
 restart", and repeats of a kind and payload are deleted. A job stopped by a
 shutdown is left `queued` for this.
 
@@ -488,6 +529,7 @@ shutdown is left `queued` for this.
 | SQLite other | `mmap_size = 0`, `temp_store = FILE` under `<data>/tmp` (`SQLITE_TMPDIR`, set at startup and emptied of stale files, since the board's `/tmp` is RAM), WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB |
 | SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk |
 | Hashing buffer | 256 KiB, one file at a time |
+| CHD decode | one image at a time, at most 24 MiB (`decode_budget` at the header limits), about 1 MiB for chdman's default hunks; nothing written to disk (CHD.md "Memory") |
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
 | Arcade presence pass | 500 zips per batch, stat only unless import rows of a changed zip need its central directory; the listing's names and the live MRA zip set persist across batches |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
@@ -515,7 +557,7 @@ blocking thread runs work, `threads::blocking` sets its `comm` to a label of
 at most 15 bytes (`threads::label`: `db-read`, `db-write`, `hash`,
 `scan-list`, `zip-list`, `dat-import`, `dat-save`, `source-file`,
 `source-watch`, `import`, `rename`, `arcade`, `romsets`, `launch`, `detect`,
-`incoming`) and puts the pool name back when it ends; the thread that reaps
+`incoming`, `chd-header`, `chd-decode`) and puts the pool name back when it ends; the thread that reaps
 a started rtorrent is `rtorrent-reap`, and a torrent's data is deleted under
 `torrent-delete`. The board's BusyBox `top` and `ps` cannot list threads, so
 read them from procfs:
@@ -609,15 +651,20 @@ scan_interval_minutes = 1440   # a daily rescan by default, 0 disables it
 
 [memory]
 data_limit_mib = 192        # soft RLIMIT_DATA set at startup, at least 64; 0 keeps the inherited limit
+
+[scan]
+chd_tracks = false          # decode CHD images to identify them by their tracks; slow on the board
 ```
 
 The file is `--config FILE` if given, else `<data>/mistarr.toml` when it
 exists, where `<data>` is `--data DIR` or `/media/fat/mistarr`; `--data`
 also overrides `paths.data` and `--listen` overrides `server.listen`. The
-`client`, `limits` and `prefs` sections are editable through
+`client`, `limits`, `prefs` and `scan` sections are editable through
 `/system/settings`; saved values live in the `settings` table and take
-precedence over the file on every start. `server`, `paths`, `sources`,
-`jobs` and `memory` need a restart.
+precedence over the file on every start, except that settings saved without
+a `scan` section leave the file's in force, so a faster board can default
+`chd_tracks` on in the file. `server`, `paths`, `sources`, `jobs` and
+`memory` need a restart.
 
 ## Non-goals
 
@@ -626,8 +673,8 @@ precedence over the file on every start. `server`, `paths`, `sources`,
 - No metadata providers beyond libretro thumbnails. No IGDB, no ScreenScraper,
   no API keys.
 - No embedded torrent client.
-- No CHD conversion in the first release. bin/cue and ISO are supported by the
-  CD cores and are what Redump DATs describe. CHD verification can come later
-  behind a feature flag if someone wants to pay the CPU cost.
+- No CHD conversion. CHD images are read, never written: they are identified
+  by decoding their tracks, behind `[scan] chd_tracks` because of the CPU
+  cost, and bin/cue and ISO sets are placed as the DATs describe them.
 - No arcade romset building. Arcade support is "this MRA needs these zips, here
   is which are missing"; the zips are files like any other.
