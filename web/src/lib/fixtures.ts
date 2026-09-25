@@ -192,6 +192,21 @@ export function fixtureTitles(platformId: string, count = 60, filters: TitleFilt
 }
 
 /**
+ * Mock group ids the mock server no longer lists, read from localStorage
+ * `mistarr.mockRemovedIds` as a JSON array of numbers, standing in for rows a
+ * scan or an import moves out of the browsed list.
+ */
+export function mockRemovedIds(): number[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockRemovedIds') ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter((v): v is number => typeof v === 'number') : [];
+  } catch {
+    // Storage blocked or the value is not JSON: nothing removed.
+    return [];
+  }
+}
+
+/**
  * Mock latency in ms of page `page` of a title search for `q`, read from
  * localStorage `mistarr.mockDelayMs`: a number for every request, or an object
  * of numbers keyed `q#page` or `q`, with `*` as the default. A negative value

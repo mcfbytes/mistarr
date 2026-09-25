@@ -1,5 +1,5 @@
 import { api, errorMessage } from '../api';
-import { fixtureTitle, fixtureTitles, mockDelayMs } from '../fixtures';
+import { fixtureTitle, fixtureTitles, mockDelayMs, mockRemovedIds } from '../fixtures';
 import type { FileState, TitleDetail, TitleFilters, TitleGroup } from '../types';
 
 const isMock = import.meta.env.VITE_MOCK === '1';
@@ -11,13 +11,20 @@ let groupsPlatform = $state<string | null>(null);
 let groupsLoading = $state(false);
 let groupsError = $state<string | null>(null);
 let lastFilters: TitleFilters = {};
-let lastPage = 0;
 let detail = $state<TitleDetail | null>(null);
 let detailId: number | null = null;
 let groupsController: AbortController | null = null;
 /** Counts the loads a user asked for, so a background reload stops once one starts. */
 let userLoads = 0;
+/** True while a page load is on its way. */
+let loadInFlight = false;
+/** True while `reloadTitles` runs. */
+let reloading = false;
+/** A reload asked for while a load was on its way, run once that load settles. */
+let reloadQueued = false;
 let detailToken = 0;
+/** The background detail refresh on its way; a newer one cancels it. */
+let detailController: AbortController | null = null;
 
 export function getGroups(): TitleGroup[] {
   return groups;
@@ -59,8 +66,17 @@ async function mockTitles(
   if (ms < 0) {
     throw new Error('Mock search failed.');
   }
-  const all = fixtureTitles(platformId, 240, filters);
+  const removed = mockRemovedIds();
+  const all = fixtureTitles(platformId, 240, filters).filter((g) => !removed.includes(g.parent_id));
   return { items: all, total: all.length };
+}
+
+/**
+ * The offset of the rows to load after those in the grid: how many it holds,
+ * which is where they end in the server's list when it has not changed since.
+ */
+export function nextOffset(): number {
+  return groups.length;
 }
 
 export function getDetail(): TitleDetail | null {
@@ -68,46 +84,54 @@ export function getDetail(): TitleDetail | null {
 }
 
 /**
- * Loads one page of groups, aborting the request before it so only the newest
- * answer lands, and resolves to whether this page landed. A `quiet` load
- * refreshes in place without the loading state.
+ * Loads one page of groups from row `offset`, aborting the request before it so
+ * only the newest answer lands, and resolves to whether this page landed. A
+ * `quiet` load refreshes in place without the loading state. A load-more also
+ * reads the row before `offset`; when that is not the last row held, the list
+ * moved since it was loaded, and a background reload rewrites the held pages.
  */
 export async function loadTitlesPage(
   platformId: string,
   filters: TitleFilters,
-  page: number,
+  offset: number,
   quiet = false
 ): Promise<boolean> {
   groupsController?.abort();
   const controller = new AbortController();
   groupsController = controller;
   lastFilters = filters;
+  loadInFlight = true;
   if (!quiet) {
     userLoads += 1;
   }
 
-  if (groupsPlatform !== platformId && page === 0) {
+  if (groupsPlatform !== platformId && offset === 0) {
     groups = [];
   }
   groupsPlatform = platformId;
   if (!quiet) {
     groupsLoading = true;
   }
-  const offset = page * PAGE_SIZE;
+  const overlap = !quiet && offset > 0 ? 1 : 0;
+  const from = offset - overlap;
+  const limit = PAGE_SIZE + overlap;
   try {
     const res = isMock
-      ? await mockTitles(platformId, filters, page, controller.signal).then((all) => ({
-          items: all.items.slice(offset, offset + PAGE_SIZE),
+      ? await mockTitles(platformId, filters, Math.floor(offset / PAGE_SIZE), controller.signal).then((all) => ({
+          items: all.items.slice(from, from + limit),
           total: all.total
         }))
-      : await api.titles(platformId, filters, PAGE_SIZE, offset, controller.signal);
+      : await api.titles(platformId, filters, limit, from, controller.signal);
     if (controller.signal.aborted) {
       return false;
     }
-    groups = page === 0 ? res.items : [...groups, ...res.items];
+    const moved = overlap > 0 && res.items[0]?.parent_id !== groups[offset - 1]?.parent_id;
+    groups = placed(groups, overlap > 0 && !moved ? res.items.slice(1) : res.items, offset, quiet);
+    if (moved) {
+      reloadQueued = true;
+    }
     groupsTotal = res.total;
     groupsError = null;
-    lastPage = page;
     return true;
   } catch (err) {
     if (!controller.signal.aborted) {
@@ -117,28 +141,76 @@ export async function loadTitlesPage(
   } finally {
     if (groupsController === controller) {
       groupsLoading = false;
+      loadInFlight = false;
+      runQueuedReload();
     }
+  }
+}
+
+/**
+ * `rows` with `items` at `offset`, never holding one group twice. A background
+ * reload writes its page over the same slot and keeps the rows after it unless its
+ * page came back short; any other load ends there. A row already before the slot,
+ * or kept after it but also in the page, is dropped, since the list shifted.
+ */
+function placed(rows: TitleGroup[], items: TitleGroup[], offset: number, quiet: boolean): TitleGroup[] {
+  const before = rows.slice(0, offset);
+  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- a local lookup, never state
+  const seen = new Set(before.map((g) => g.parent_id));
+  const page = items.filter((g) => !seen.has(g.parent_id));
+  for (const g of page) {
+    seen.add(g.parent_id);
+  }
+  const after = quiet && items.length === PAGE_SIZE ? rows.slice(offset + PAGE_SIZE) : [];
+  return [...before, ...page, ...after.filter((g) => !seen.has(g.parent_id))];
+}
+
+/** Starts the reload asked for while a load was on its way, once nothing is loading. */
+function runQueuedReload(): void {
+  if (reloadQueued && !loadInFlight && !reloading) {
+    reloadQueued = false;
+    void reloadTitles();
   }
 }
 
 /**
  * Re-fetches every loaded page in place. It stops as soon as a page fails or a
  * load the user asked for starts, so it never lands results for stale filters.
+ * Asked for while a load is on its way, it runs once that load settles instead
+ * of aborting it, so reloads arriving faster than a page answers never starve it.
  */
 export async function reloadTitles(): Promise<void> {
-  // Snapshot before reloading: page 0 would otherwise reset lastPage first.
-  const platform = groupsPlatform;
-  const filters = lastFilters;
-  const pages = lastPage;
-  const loads = userLoads;
-  if (platform) {
-    for (let p = 0; p <= pages; p += 1) {
-      if (userLoads !== loads || !(await loadTitlesPage(platform, filters, p, true))) {
-        return;
+  if (loadInFlight || reloading) {
+    reloadQueued = true;
+    return;
+  }
+  reloading = true;
+  let complete = true;
+  try {
+    // Snapshot before reloading: the pages it rewrites change what is held.
+    const platform = groupsPlatform;
+    const filters = lastFilters;
+    const held = groups.length;
+    const loads = userLoads;
+    if (platform) {
+      for (let offset = 0; offset < held; offset += PAGE_SIZE) {
+        if (userLoads !== loads || !(await loadTitlesPage(platform, filters, offset, true))) {
+          complete = false;
+          break;
+        }
+        // A short page is the new end of the list; nothing after it is left to reload.
+        if (groups.length < offset + PAGE_SIZE) {
+          break;
+        }
       }
     }
+  } finally {
+    reloading = false;
+    runQueuedReload();
   }
-  await refreshDetail();
+  if (complete) {
+    await refreshDetail();
+  }
 }
 
 if (isMock && typeof window !== 'undefined') {
@@ -152,11 +224,22 @@ async function refreshDetail(): Promise<void> {
   if (detailId === null) {
     return;
   }
+  detailController?.abort();
+  const controller = new AbortController();
+  detailController = controller;
   const id = detailId;
   const token = detailToken;
-  const next = isMock ? fixtureTitle(id) : await api.title(id);
-  if (token === detailToken && detailId === id) {
-    detail = next;
+  try {
+    const next = isMock ? fixtureTitle(id) : await api.title(id, controller.signal);
+    if (token === detailToken && detailId === id && !controller.signal.aborted) {
+      detail = next;
+    }
+  } catch {
+    // A failed or cancelled refresh keeps the detail shown; the next one tries again.
+  } finally {
+    if (detailController === controller) {
+      detailController = null;
+    }
   }
 }
 
