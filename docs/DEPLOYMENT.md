@@ -76,6 +76,10 @@ any dynamic dependency, checked with `file` on the output.
 /tmp/mistarr.start.lock        # held while a start runs; a reboot clears it
 ```
 
+[DATS.md](DATS.md) explains the DAT formats mistarr loads, what happens to a
+file dropped into `dats/` or uploaded on the DATs screen, and what each
+rejection reason means.
+
 ## Installing on the board
 
 Over SSH, one line fetches, verifies and installs the latest release:
