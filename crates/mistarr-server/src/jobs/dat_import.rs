@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -21,6 +22,7 @@ use serde_json::{json, Value};
 use tokio::sync::watch;
 
 use super::gate::GateState;
+use super::progress::{CountingReader, Reporter};
 use super::{scan, wizard, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
 use crate::config::PrefsConfig;
@@ -183,6 +185,65 @@ struct Request {
     now: i64,
     stop: watch::Receiver<bool>,
     gate: watch::Receiver<GateState>,
+    meter: Option<Meter>,
+}
+
+/// Bytes an index pass must read before it is shown; a Logiqx DAT leaves that
+/// pass after its header, so only a DB export's real index pass shows.
+const INDEX_SHOWN_AFTER: u64 = 64 * 1024;
+
+/// Live progress of one member's import: `{ file, members, done, games, phase,
+/// bytes_read, bytes_total }`, sent through the job's [`Reporter`] without the database.
+struct Meter {
+    reporter: Reporter,
+    file: String,
+    members: usize,
+    done: usize,
+    games_before: u64,
+    games: AtomicU64,
+}
+
+impl Meter {
+    /// Reports `read` of `total` bytes in a reading `phase`; the index pass reports no share.
+    fn bytes(&self, phase: &str, read: u64, total: u64) {
+        if phase == "indexing" {
+            // Its own share would restart the bar at reading; it shows as a band instead.
+            if read >= INDEX_SHOWN_AFTER {
+                self.phase(phase);
+            }
+            return;
+        }
+        self.reporter
+            .report(phase, || self.value(phase, Some((read, total))));
+    }
+
+    /// Reports the start of a `phase` whose share done is unknown.
+    fn phase(&self, phase: &str) {
+        self.reporter.report(phase, || self.value(phase, None));
+    }
+
+    fn value(&self, phase: &str, bytes: Option<(u64, u64)>) -> Value {
+        let games = self.games_before + self.games.load(Ordering::Relaxed);
+        let mut v = json!({
+            "file": self.file,
+            "members": self.members,
+            "done": self.done,
+            "games": games,
+            "phase": phase,
+        });
+        if let Some((read, total)) = bytes {
+            v["bytes_read"] = json!(read.min(total));
+            v["bytes_total"] = json!(total);
+        }
+        v
+    }
+}
+
+/// Reports a phase change when a meter is attached.
+fn phase(req: &Request, phase: &str) {
+    if let Some(m) = &req.meter {
+        m.phase(phase);
+    }
 }
 
 #[async_trait]
@@ -307,6 +368,14 @@ impl DatImport {
                 now: crate::unix_now(),
                 stop: ctx.app.shutdown_signal(),
                 gate: ctx.app.gate.subscribe(),
+                meter: Some(Meter {
+                    reporter: ctx.reporter(),
+                    file: source_file.to_owned(),
+                    members: members.len(),
+                    done,
+                    games_before: games,
+                    games: AtomicU64::new(0),
+                }),
             };
             let path = self.path.clone();
             let db = ctx.app.db.clone();
@@ -377,13 +446,14 @@ fn is_dat_name(name: &str) -> bool {
 /// Opens a member for streaming and imports it, reading a DB export twice so its
 /// clones are linked. Runs on a blocking thread.
 fn import_from(db: &Db, path: &Path, member: Member, req: &Request) -> Result<Outcome> {
-    let parents = match with_member(path, member, |r, name| {
+    let meter = req.meter.as_ref();
+    let parents = match with_member(path, member, ("indexing", meter), |r, name| {
         Ok(export_parents(r).map_err(|e| rejected(name, &e)))
     })? {
         Ok(Ok(p)) => p,
         Ok(Err(reason)) | Err(reason) => return Ok(Outcome::Rejected(reason)),
     };
-    match with_member(path, member, |r, name| {
+    match with_member(path, member, ("reading", meter), |r, name| {
         import_stream(db, r, req, name, parents)
     })? {
         Ok(outcome) => Ok(outcome),
@@ -392,15 +462,26 @@ fn import_from(db: &Db, path: &Path, member: Member, req: &Request) -> Result<Ou
 }
 
 /// Runs `f` on a fresh buffered reader of `member` and its name in the zip, empty for a
-/// plain file; `Err` holds why a zip member cannot be opened.
+/// plain file, reporting the bytes read in `phase` to the meter; `Err` holds why a zip
+/// member cannot be opened.
 fn with_member<T>(
     path: &Path,
     member: Member,
+    (phase, meter): (&str, Option<&Meter>),
     f: impl FnOnce(&mut dyn BufRead, &str) -> Result<T>,
 ) -> Result<std::result::Result<T, String>> {
     let file = File::open(path)?;
+    let report = |read: u64, total: u64| {
+        if let Some(m) = meter {
+            m.bytes(phase, read, total);
+        }
+    };
     match member {
-        Member::Plain => f(&mut BufReader::new(file), "").map(Ok),
+        Member::Plain => {
+            let total = file.metadata()?.len();
+            let counted = CountingReader::new(file, |n| report(n, total));
+            f(&mut BufReader::new(counted), "").map(Ok)
+        }
         Member::Zip(index) => {
             let mut archive = match zip::ZipArchive::new(BufReader::new(file)) {
                 Ok(a) => a,
@@ -411,7 +492,9 @@ fn with_member<T>(
                 Err(e) => return Ok(Err(format!("invalid zip archive: {e}"))),
             };
             let name = entry.name().to_owned();
-            let out = f(&mut BufReader::new(entry), &name);
+            let total = entry.size();
+            let counted = CountingReader::new(entry, |n| report(n, total));
+            let out = f(&mut BufReader::new(counted), &name);
             out.map(Ok)
         }
     }
@@ -597,6 +680,9 @@ fn import_stream<R: BufRead>(
             }
         };
         games += 1;
+        if let Some(m) = &req.meter {
+            m.games.store(games, Ordering::Relaxed);
+        }
         pace(req, games)?;
         if staging {
             clone_of |= game.clone_of.is_some();
@@ -618,6 +704,7 @@ fn import_stream<R: BufRead>(
         }
         let platform = plan.platform_id.clone().filter(|_| plan.current && staging);
         if let Some(p) = &platform {
+            phase(req, "storing");
             dats::begin_load(&tx, plan.id)?;
             dat_stage::apply(&tx, &p.0, plan.id)?;
         }
@@ -626,9 +713,11 @@ fn import_stream<R: BufRead>(
         if let Some(p) = &platform {
             titles::link_parents(&tx, plan.id, clone_of)?;
             retired = dats::retire_absent(&tx, plan.id)?;
+            phase(req, "picking");
             titles::recompute_platform(&tx, &p.0, &req.prefs)?;
         }
         dat_stage::clear(&tx)?;
+        phase(req, "refreshing");
         crate::db::commit(tx)?;
         Ok(Outcome::Loaded(Loaded {
             version: plan.id,
@@ -969,7 +1058,11 @@ impl Job for Recompute {
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
+        let reporter = ctx.reporter();
+        let mut checked = 0;
+        let mut matched = 0;
         loop {
+            reporter.report("matching", || matching(checked, matched));
             ctx.checkpoint().await?;
             let platform = self.platform.clone();
             let taken = ctx
@@ -982,14 +1075,15 @@ impl Job for Recompute {
                     Ok(taken)
                 })
                 .await?;
+            checked += taken;
             if taken < REMATCH_CHUNK as usize {
                 break;
             }
         }
         let mut after = FileId(0);
-        let mut matched = 0;
         // Arcade files are matched by the arcade catalogue's presence pass.
         while !scan::is_arcade(&self.platform) {
+            reporter.report("matching", || matching(checked, matched));
             ctx.checkpoint().await?;
             let platform = self.platform.clone();
             let chunk = ctx
@@ -1003,12 +1097,17 @@ impl Job for Recompute {
                 })
                 .await?;
             matched += chunk.matched;
+            checked += chunk.read;
             after = chunk.last;
             if chunk.read < REMATCH_CHUNK as usize {
                 break;
             }
         }
         ctx.checkpoint().await?;
+        reporter.report(
+            "picking",
+            || json!({ "phase": "picking", "matched": matched }),
+        );
         let prefs = prefs(&ctx.app.config().prefs);
         let platform = self.platform.0.clone();
         let r = ctx
@@ -1031,6 +1130,11 @@ impl Job for Recompute {
         }
         Ok(())
     }
+}
+
+/// A recompute's live progress while it matches stored hashes.
+fn matching(checked: usize, matched: usize) -> Value {
+    json!({ "phase": "matching", "checked": checked, "matched": matched })
 }
 
 /// Finds files in `dats/` that have stopped changing: mtime at least

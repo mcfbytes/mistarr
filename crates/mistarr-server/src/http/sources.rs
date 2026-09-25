@@ -14,14 +14,12 @@ use axum::{Json, Router};
 use mistarr_clients::{ClientError, ClientTorrentId, InfoHash};
 use mistarr_core::PlatformId;
 use mistarr_sources::{magnet, torrent};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer};
 
 use super::{ApiError, Page, Paging};
 use crate::app::AppState;
-use crate::db::jobs::JobId;
 use crate::db::sources::{self as rows, FileRow, SourceId, SourceRow, SourceState};
 use crate::jobs::source_import::{self, publish_changed, SourceImport, DUPLICATE};
-use crate::jobs::Scheduler;
 
 /// Largest accepted upload; set torrents with many files run to a few MiB.
 const UPLOAD_LIMIT: usize = 16 * 1024 * 1024;
@@ -231,13 +229,6 @@ async fn remove(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// `POST /sources/upload` answer: the file written into `sources/` and its import job.
-#[derive(Debug, Serialize)]
-struct Uploaded {
-    file: String,
-    job_id: JobId,
-}
-
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MagnetBody {
@@ -314,12 +305,10 @@ async fn upload(
         }
         Err(e) => return Err(crate::Error::Io(e).into()),
     };
-    let file = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let job_id = Scheduler::enqueue(&app, Arc::new(SourceImport { path })).await?;
-    Ok((StatusCode::ACCEPTED, Json(Uploaded { file, job_id })).into_response())
+    let job = Arc::new(SourceImport { path: path.clone() });
+    let placed =
+        crate::incoming::queue_placed(&app, &path, source_import::IMPORT_KIND, job).await?;
+    Ok((StatusCode::ACCEPTED, Json(placed)).into_response())
 }
 
 /// Writes `bytes` under `name`, or `name (N)` when taken, in `dir`. The name

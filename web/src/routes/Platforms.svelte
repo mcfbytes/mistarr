@@ -1,14 +1,18 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { findPlatform, getPlatforms, loadPlatforms, patchPlatform } from '../lib/stores/platforms.svelte';
-  import { trackScan } from '../lib/stores/jobs.svelte';
+  import { getJobs, trackScan } from '../lib/stores/jobs.svelte';
+  import { describeProgress, jobStatus } from '../lib/status';
+  import StatusPill from '../lib/StatusPill.svelte';
+  import ProgressBar from '../lib/ProgressBar.svelte';
   import { platformUrl } from '../lib/router.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
   import SetupHints from '../lib/SetupHints.svelte';
   import PlatformArt from '../lib/PlatformArt.svelte';
   import UnidentifiedList from '../lib/UnidentifiedList.svelte';
-  import type { PlatformCounts } from '../lib/types';
+  import type { Job, PlatformCounts } from '../lib/types';
 
   onMount(() => {
     void loadPlatforms();
@@ -20,7 +24,16 @@
   const disabled = $derived(platforms.filter((p) => p.core_present && !p.enabled));
 
   const isMock = import.meta.env.VITE_MOCK === '1';
-  let scanning = $state<Record<string, boolean>>({});
+  const scanning = new SvelteSet<string>();
+
+  // The open scan of each platform, shown on its card.
+  const scans: Map<string, Job> = $derived(
+    new Map(
+      getJobs()
+        .filter((j) => j.kind === 'scan' && typeof j.payload.platform_id === 'string')
+        .map((j) => [j.payload.platform_id as string, j])
+    )
+  );
 
   /** "N have · M wanted · T titles", plus any nonzero extra clause. */
   function summarize(counts: PlatformCounts): string {
@@ -41,11 +54,15 @@
     return findPlatform(id)?.name ?? id;
   }
 
+  // The button keeps focus while the request is out, so a second press is ignored here.
   async function scan(id: string): Promise<void> {
-    scanning = { ...scanning, [id]: true };
+    if (scanning.has(id)) {
+      return;
+    }
+    scanning.add(id);
     try {
-      const queued = isMock ? null : await api.scan(id);
-      showToast(`Scan of ${platformName(id)} queued`);
+      const queued = isMock ? await new Promise<null>((r) => setTimeout(() => r(null), 400)) : await api.scan(id);
+      showToast(`Scan of ${platformName(id)} queued`, 'info');
       const jobId = queued?.job_id ?? queued?.arcade_job_id;
       if (jobId != null) {
         trackScan(jobId, id);
@@ -53,7 +70,7 @@
     } catch (err) {
       showToast(errorMessage(err));
     } finally {
-      scanning = { ...scanning, [id]: false };
+      scanning.delete(id);
     }
   }
 
@@ -76,6 +93,7 @@
   <SetupHints />
   <div class="grid">
     {#each present as platform (platform.id)}
+      {@const job = scans.get(platform.id)}
       <div class="card art-card">
         <div class="banner"><PlatformArt id={platform.id} kind={platform.kind} /></div>
         <h2><a href={platformUrl(platform.id)}>{platform.name}</a></h2>
@@ -83,8 +101,24 @@
         {#if platform.counts.unidentified_files > 0}
           <UnidentifiedList platformId={platform.id} count={platform.counts.unidentified_files} />
         {/if}
+        {#if job}
+          <div class="scan-state">
+            <StatusPill {...jobStatus(job)} label={`Scan ${jobStatus(job).label.toLowerCase()}`} />
+            {#if job.state === 'running'}
+              <ProgressBar
+                view={describeProgress('scan', job.progress) ?? { fraction: null, text: '' }}
+                label={`Scan of ${platform.name}`}
+                compact
+              />
+            {:else if job.reason}
+              <span class="muted why">{job.reason}</span>
+            {/if}
+          </div>
+        {/if}
         <div class="actions">
-          <button onclick={() => scan(platform.id)} disabled={scanning[platform.id]}>Scan</button>
+          <button onclick={() => scan(platform.id)} aria-disabled={scanning.has(platform.id)} aria-busy={scanning.has(platform.id)}>
+            {#if scanning.has(platform.id)}<span class="spinner" aria-hidden="true"></span>Queuing…{:else}Scan{/if}
+          </button>
           <button onclick={() => setEnabled(platform.id, false)}>Disable</button>
         </div>
       </div>
@@ -177,6 +211,28 @@
   .actions {
     display: flex;
     gap: 0.5em;
+  }
+
+  .actions button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4em;
+  }
+
+  .scan-state {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.3em;
+    margin-bottom: 0.6em;
+  }
+
+  .scan-state :global(.wrap) {
+    align-self: stretch;
+  }
+
+  .why {
+    font-size: 0.8rem;
   }
 
   details {

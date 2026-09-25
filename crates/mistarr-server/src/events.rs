@@ -203,6 +203,26 @@ impl EventBus {
         seq
     }
 
+    /// Broadcasts an event to live subscribers only: it takes no ring slot and no
+    /// sequence number, so it is sent without an id and never replayed.
+    ///
+    /// ```
+    /// use mistarr_server::events::{EventBus, EventKind};
+    /// let bus = EventBus::new();
+    /// bus.publish_transient(EventKind::JobProgress, &serde_json::json!({}));
+    /// assert_eq!(bus.latest_seq(), 0);
+    /// ```
+    pub fn publish_transient<T: Serialize + ?Sized>(&self, kind: EventKind, data: &T) {
+        let data = serde_json::to_string(data).unwrap_or_else(|_| "null".to_owned());
+        let event = Arc::new(Event {
+            epoch: self.epoch,
+            seq: 0,
+            kind,
+            data,
+        });
+        let _ = self.tx.send(event);
+    }
+
     /// Subscribes with the client's `Last-Event-ID`. `None` replays nothing.
     /// An id from this epoch replays the ring after it; any other id replays
     /// the whole ring and reports the replay incomplete.

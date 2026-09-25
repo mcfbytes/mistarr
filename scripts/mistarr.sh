@@ -118,10 +118,10 @@ supervise() {
     trap 'stopping=1; [ -n "$child" ] && kill "$child" 2>/dev/null; [ -n "$sleeper" ] && kill "$sleeper" 2>/dev/null' TERM INT
     delay="$BACKOFF_FIRST"
     crashes=""
-    # Either applet may be absent from the board's BusyBox; use what is there.
+    # nice may be absent from the board's BusyBox. The daemon sets its own
+    # I/O class, idle only while a core runs.
     prio=""
     command -v nice >/dev/null 2>&1 && prio="nice -n 10"
-    command -v ionice >/dev/null 2>&1 && prio="$prio ionice -c 3"
     while [ "$stopping" -eq 0 ]; do
         # shellcheck disable=SC2086
         $prio "$BIN" </dev/null >>"$LOGFILE" 2>&1 &

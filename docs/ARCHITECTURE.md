@@ -12,7 +12,7 @@ torrent client that ships with the image, and moves verified files into the
 |---|---|
 | Cortex-A9 dual core at ~800 MHz, ARMv7 hard-float | Cross-compiled static musl binary. Hashing is streaming and background. CHD images are decoded only in a heavy background job, opt-in, once per image. |
 | Roughly 490 MiB RAM visible to Linux, shared with the MiSTer process | Idle RSS target under 30 MiB, hard ceiling 64 MiB. No in-memory torrent metadata for set torrents; file lists live in SQLite. |
-| SD card, exFAT, ~10-20 MB/s writes | Stage and rename on the same filesystem, never copy. Throttle hashing with `ionice`. No symlinks, case-insensitive names. |
+| SD card, exFAT, ~10-20 MB/s writes | Stage and rename on the same filesystem, never copy. Idle I/O class while a core runs. No symlinks, case-insensitive names. |
 | Stock image is Buildroot 2021 with glibc 2.31 | musl static linking, no OpenSSL, `rustls` only. |
 | MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing, scans and file placement while it is anything other than `MENU`. DAT and source parsing continue at low priority; transfers continue at a reduced rate limit. |
 | Torrent client already present | Stock image ships rtorrent; Buildroot_MiSTer ships Transmission. mistarr never embeds a client. |
@@ -129,6 +129,11 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    alone; scans and imports resolve rom ids on the read connection and
    write afterwards, so one that straddles an apply records a rom id that
    is still a row, retired or not, as it would had it finished just before.
+   The job reports the bytes it has read and its phase through memory and
+   transient events, never the database (API.md "Live progress"), so an
+   apply that holds the writer still shows its progress; an upload records
+   its job on a task of its own and answers without waiting for the apply
+   (API.md "Upload answers").
 2. Identify the platform from the DAT header name using the table in
    PLATFORMS.md, falling back to the platform an earlier version of the same
    family was bound to. A header without a name takes the member's or file's
@@ -348,7 +353,8 @@ On shutdown the job stays queued and starts the image it was decoding again.
    every platform, at each start. A source is skipped when its `map_stamp`
    equals the platform's current stamp: its live DAT versions with their load
    times, leaving out the MRA catalogue's version, whose load time every run
-   touches, and the count and ids of its live roms. Otherwise only the rows
+   touches, the count of its live roms, and a sum of a hash of each one's id
+   and effective group, so roms trading groups move it. Otherwise only the rows
    that changed are written, 2 000 per transaction, with its hit rate
    refreshed and `source.changed` sent only when its mapping changed. A row
    an import proved by hash is never overwritten, and rebinding to the same
@@ -527,7 +533,7 @@ shutdown is left `queued` for this.
 | Soft `RLIMIT_DATA` | `[memory] data_limit_mib`, 192 MiB, never below 64 |
 | SQLite page cache | 2 MiB, 1 MiB on each of the two connections |
 | SQLite other | `mmap_size = 0`, `temp_store = FILE` under `<data>/tmp` (`SQLITE_TMPDIR`, set at startup and emptied of stale files, since the board's `/tmp` is RAM), WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB |
-| SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk |
+| SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
 | Hashing buffer | 256 KiB, one file at a time |
 | CHD decode | one image at a time, at most 24 MiB (`decode_budget` at the header limits), about 1 MiB for chdman's default hunks; nothing written to disk (CHD.md "Memory") |
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
@@ -545,10 +551,31 @@ binary, the SQLite shared-memory index or reserved address space. An
 allocation past it fails and Rust aborts the process, which ends one daemon
 instead of starving the MiSTer process of memory on a board without swap.
 
-The launcher runs the daemon under `nice -n 10` and `ionice -c 3` where the
-board has them, and heavy jobs stop at their next file boundary while a core
-runs. Heavy work has no thread of its own to lower further: it shares the
-blocking pool with request handlers.
+The launcher runs the daemon under `nice -n 10` where the board has it, at
+the default I/O class, so work at the menu gets the disk's full share. While
+a core other than the menu runs, the daemon moves every thread to the idle
+I/O class by running `ionice -c 3 -p <tid>` for each entry of
+`/proc/self/task`, listing again until a pass finds no new thread; threads
+created later inherit the class from the thread that creates them. Back at
+the menu it runs `ionice -c 0 -p <tid>` the same way, and the kernel derives
+a best-effort level from `nice` again. A switch counts, and its class is
+recorded, once at least one thread takes the class; a thread `ionice`
+refused, almost always one that has exited, keeps the old class until the
+next core change. One that fails, for example because `/proc` cannot be
+listed or no thread takes the class, is logged at debug and tried again 30
+seconds later, the wait doubling after each further failure up to 4 minutes,
+or at once at the next change of the gate, which also resets the wait.
+Without `ionice` it logs once at debug, stops switching and leaves the class
+as launched. A process the daemon starts inherits the class of the thread
+that forks it and is not in `/proc/self/task`, so a download client started
+from the UI while a core runs is forked from a thread set back to class 0
+for the launch, and every thread takes the idle class again afterwards; when
+that restore fails, the recorded class is cleared and the switch is tried
+again at once. The class lock is taken only on blocking threads, so a long
+launch never stalls an async worker. The client's transfers slow under the
+gate's rate limit instead. Heavy jobs also stop at their next file boundary
+while a core runs. Heavy work has no thread of its own to lower further: it
+shares the blocking pool with request handlers.
 
 ### Thread names
 
@@ -557,10 +584,10 @@ blocking thread runs work, `threads::blocking` sets its `comm` to a label of
 at most 15 bytes (`threads::label`: `db-read`, `db-write`, `hash`,
 `scan-list`, `zip-list`, `dat-import`, `dat-save`, `source-file`,
 `source-watch`, `import`, `rename`, `arcade`, `romsets`, `launch`, `detect`,
-`incoming`, `chd-header`, `chd-decode`) and puts the pool name back when it ends; the thread that reaps
-a started rtorrent is `rtorrent-reap`, and a torrent's data is deleted under
-`torrent-delete`. The board's BusyBox `top` and `ps` cannot list threads, so
-read them from procfs:
+`incoming`, `io-class`, `chd-header`, `chd-decode`) and puts the pool name
+back when it ends; the thread that reaps a started rtorrent is
+`rtorrent-reap`, and a torrent's data is deleted under `torrent-delete`. The
+board's BusyBox `top` and `ps` cannot list threads, so read them from procfs:
 `for t in /proc/$(pidof mistarr)/task/*; do echo "${t##*/} $(cat $t/comm)"; done`.
 
 A DAT loads in one write transaction, so the WAL file can grow to the size

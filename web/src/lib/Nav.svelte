@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getRoute } from './router.svelte';
+  import ActivityIndicator from './ActivityIndicator.svelte';
 
   const route = $derived(getRoute());
 
@@ -16,11 +17,13 @@
   {#each links as link (link.hash)}
     <a href={link.hash} class:active={link.match.includes(route.name)}>{link.label}</a>
   {/each}
+  <ActivityIndicator />
 </nav>
 
 <style>
   nav {
     display: flex;
+    align-items: center;
     gap: 0.5em;
     padding: 0.6em var(--gutter);
     border-bottom: 1px solid var(--border);

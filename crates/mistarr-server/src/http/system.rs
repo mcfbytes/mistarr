@@ -19,7 +19,7 @@ use crate::db::settings::{self, keys};
 use crate::events::EventKind;
 use crate::jobs::dat_import::Recompute;
 use crate::jobs::detect_client::{detect_and_store, ClientStatus, DetectClient};
-use crate::jobs::gate::Override;
+use crate::jobs::gate::{GateState, Override};
 use crate::jobs::scan::{is_arcade, ScanJob};
 use crate::jobs::Scheduler;
 use crate::status::{hold_reason, snapshot, wizard_status, Status};
@@ -241,8 +241,11 @@ async fn start_client(
         )));
     }
     tracing::info!(kind = body.kind.as_str(), "starting the download client");
-    crate::threads::blocking(crate::threads::label::LAUNCH, move || {
-        launcher.start(body.kind)
+    let priority = app.io_priority.clone();
+    // The client runs at the default I/O class; the gate's rate limit slows it while a core runs.
+    crate::threads::blocking(crate::threads::label::LAUNCH, move || match priority {
+        Some(p) => p.at_default(|| launcher.start(body.kind)),
+        None => launcher.start(body.kind),
     })
     .await
     .map_err(|e| crate::Error::Task(e.to_string()))?
@@ -279,7 +282,7 @@ async fn resume(State(app): State<Arc<AppState>>) -> Json<Status> {
     Json(snapshot(&app).await)
 }
 
-/// A `/system/jobs` item: the row plus why it is not running, if the gate holds it.
+/// A `/system/jobs` item: the row plus why it is not running.
 #[derive(Debug, Serialize)]
 struct JobItem {
     #[serde(flatten)]
@@ -293,19 +296,27 @@ async fn list_jobs(
 ) -> Result<Json<Page<JobItem>>, ApiError> {
     let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let (limit, offset) = paging.resolve();
-    let (rows, total) = app
+    let ((mut rows, total), open) = app
         .db
-        .read(move |c| jobs::list_active(c, limit, offset))
+        .read(move |c| Ok((jobs::list_active(c, limit, offset)?, jobs::open_rows(c)?)))
         .await?;
+    app.live.overlay(&mut rows);
     let gate = app.gate.state();
     let items = rows
         .into_iter()
         .map(|row| JobItem {
-            reason: hold_reason(&gate, &row.lane, row.state),
+            reason: job_reason(&gate, &row, &open),
             row,
         })
         .collect();
     Ok(Json(Page { items, total }))
+}
+
+/// Why an open job is not running: the gate's hold, else, while queued, what it waits for.
+fn job_reason(gate: &GateState, row: &JobRow, open: &[JobRow]) -> Option<String> {
+    hold_reason(gate, &row.lane, row.state).or_else(|| {
+        (row.state == jobs::JobState::Queued).then(|| crate::incoming::queued_reason(row, open))
+    })
 }
 
 /// Finished jobs `/system/jobs/recent` lists.
@@ -357,6 +368,38 @@ async fn put_settings(
 mod tests {
     use super::*;
     use mistarr_clients::PathMapping;
+
+    #[test]
+    fn a_queued_job_says_what_it_waits_for() {
+        let row = |id, kind: &str, state| JobRow {
+            id: JobId(id),
+            kind: kind.into(),
+            lane: "background".into(),
+            payload: serde_json::json!({ "path": "/d/a.dat" }),
+            state,
+            progress: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let open = [
+            row(1, "dat_import", jobs::JobState::Running),
+            row(2, "source_import", jobs::JobState::Queued),
+        ];
+        let free = GateState::default();
+        assert_eq!(job_reason(&free, &open[0], &open), None);
+        assert_eq!(
+            job_reason(&free, &open[1], &open).as_deref(),
+            Some("Waiting for the DAT import of a.dat to finish.")
+        );
+        let paused = GateState {
+            corename: None,
+            manual: Some(Override::Paused),
+        };
+        assert_eq!(
+            job_reason(&paused, &open[1], &open).as_deref(),
+            Some("Paused by the user")
+        );
+    }
 
     #[test]
     fn path_map_entries_need_a_remote_and_an_absolute_local() {

@@ -17,6 +17,11 @@ import type {
   WizardStatus
 } from './types';
 
+/** Mock mode's scenario, from `?mock=` in the page URL: `idle` shows no work. */
+export function mockScenario(): string {
+  return new URLSearchParams(globalThis.location.search).get('mock') ?? 'busy';
+}
+
 export const fixturePlatforms: Platform[] = [
   {
     id: 'nes',
@@ -171,6 +176,32 @@ export function mockDelayMs(q: string, page: number): number {
     // Storage blocked or the value is not JSON: no delay.
   }
   return 0;
+}
+
+/**
+ * Extra present, enabled mock platforms named by their ids, read from
+ * localStorage `mistarr.mockPlatformIds` as a JSON array of strings.
+ */
+export function mockExtraPlatforms(): Platform[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockPlatformIds') ?? '[]');
+    if (Array.isArray(parsed)) {
+      return parsed
+        .filter((id): id is string => typeof id === 'string')
+        .map((id) => ({
+          id,
+          name: id,
+          core_dir: id,
+          kind: 'cartridge',
+          core_present: true,
+          enabled: true,
+          counts: { titles: 0, have: 0, wanted: 0, unmatched_files: 0, failing_check: 0, partial: 0 }
+        }));
+    }
+  } catch {
+    // Storage blocked or the value is not JSON: no extra platforms.
+  }
+  return [];
 }
 
 export function fixtureTitle(id: number): TitleDetail {
@@ -464,7 +495,7 @@ export const fixtureIncomingDats: IncomingFile[] = [
     size: 180_000,
     state: 'importing',
     reason: null,
-    job_id: 7,
+    job_id: 1,
     progress: { members: 1, done: 0, games: 1200 },
     modified: 1_770_040_000
   },
@@ -490,6 +521,15 @@ export const fixtureIncomingDats: IncomingFile[] = [
 ];
 
 export const fixtureIncomingSources: IncomingFile[] = [
+  {
+    file: 'Example bundle two.torrent',
+    size: 52_000,
+    state: 'waiting',
+    reason: 'Waiting for the DAT import of Example Console (20260101).zip to finish.',
+    job_id: 4,
+    progress: null,
+    modified: 1_770_040_500
+  },
   {
     file: 'Example bundle three.torrent',
     size: 40_000,
@@ -592,10 +632,29 @@ export const fixtureJobs: Job[] = [
     lane: 'background',
     payload: { path: '/media/fat/mistarr/dats/Example Console (20260101).zip' },
     state: 'running',
-    progress: { members: 1, done: 0, games: 1200 },
+    progress: {
+      file: 'Example Console (20260101).zip',
+      members: 1,
+      done: 0,
+      games: 4_120,
+      phase: 'reading',
+      bytes_read: 5_200_000,
+      bytes_total: 18_400_000
+    },
     reason: null,
     created_at: 1_770_032_000,
     updated_at: 1_770_032_500
+  },
+  {
+    id: 4,
+    kind: 'source_import',
+    lane: 'background',
+    payload: { path: '/media/fat/mistarr/sources/Example bundle two.torrent' },
+    state: 'queued',
+    progress: null,
+    reason: 'Waiting for the DAT import of Example Console (20260101).zip to finish.',
+    created_at: 1_770_032_200,
+    updated_at: 1_770_032_200
   },
   {
     id: 2,
@@ -612,7 +671,18 @@ export const fixtureJobs: Job[] = [
 
 export const fixtureRecentJobs: Job[] = [
   {
-    id: 4,
+    id: 5,
+    kind: 'dat_import',
+    lane: 'background',
+    payload: { path: '/media/fat/mistarr/dats/Example Handheld (20260101).xml' },
+    state: 'failed',
+    progress: { error: 'root element is <softwarelist>; expected a Logiqx DAT' },
+    reason: null,
+    created_at: 1_770_031_500,
+    updated_at: 1_770_031_560
+  },
+  {
+    id: 6,
     kind: 'chd_tracks',
     lane: 'heavy',
     payload: {},

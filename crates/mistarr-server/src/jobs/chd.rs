@@ -34,9 +34,6 @@ const SLICE_HUNKS: u32 = 32;
 /// Waiting rows read at a time.
 const PAGE: u32 = 16;
 
-/// Least time between two live progress reports.
-const PROGRESS_EVERY: Duration = Duration::from_secs(2);
-
 /// `files.header_rule` of a CHD's container and member rows.
 const HEADER_RULE: &str = "chd";
 
@@ -576,7 +573,7 @@ impl Job for ChdTracks {
     async fn run(&self, ctx: &JobContext) -> Result<()> {
         let total = ctx.app.db.read(rows::waiting_count).await?;
         let mut tally = Tally::default();
-        let mut live = Live::new(total);
+        let mut live = Live::new(ctx, total);
         let mut after = FileId(0);
         'pages: loop {
             let page = ctx
@@ -593,7 +590,7 @@ impl Job for ChdTracks {
                 if !enabled(&ctx.app) {
                     break 'pages;
                 }
-                let outcome = identify(ctx, &row, &mut live).await?;
+                let outcome = identify(ctx, &row, &live).await?;
                 match outcome {
                     Outcome::Verified => tally.verified += 1,
                     Outcome::Unmatched => tally.unmatched += 1,
@@ -643,36 +640,33 @@ async fn yield_lane(ctx: &JobContext) -> Result<bool> {
     Ok(true)
 }
 
-/// Throttled live progress.
+/// Live progress through the job's [`super::progress::Reporter`].
 struct Live {
-    last: Option<Instant>,
+    reporter: super::progress::Reporter,
     done: u64,
     total: u64,
 }
 
 impl Live {
-    fn new(total: u64) -> Self {
+    fn new(ctx: &JobContext, total: u64) -> Self {
         Self {
-            last: None,
+            reporter: ctx.reporter(),
             done: 0,
             total,
         }
     }
 
-    async fn report(&mut self, ctx: &JobContext, row: &FileRow, bytes: (u64, u64)) -> Result<()> {
-        if self.last.is_some_and(|t| t.elapsed() < PROGRESS_EVERY) {
-            return Ok(());
-        }
-        self.last = Some(Instant::now());
-        ctx.progress(json!({
-            "platform_id": row.platform_id.0,
-            "done": self.done,
-            "total": self.total,
-            "file": files::basename(&row.rel_path),
-            "bytes_done": bytes.0,
-            "bytes_total": bytes.1,
-        }))
-        .await
+    fn report(&self, row: &FileRow, bytes: (u64, u64)) {
+        self.reporter.report("decoding", || {
+            json!({
+                "platform_id": row.platform_id.0,
+                "done": self.done,
+                "total": self.total,
+                "file": files::basename(&row.rel_path),
+                "bytes_done": bytes.0,
+                "bytes_total": bytes.1,
+            })
+        });
     }
 }
 
@@ -704,7 +698,7 @@ fn open(path: &Path) -> std::result::Result<Ready, (Option<ChdId>, ChdError)> {
 }
 
 /// Identifies one waiting image: cache, layout pre-filter, then a decode in slices.
-async fn identify(ctx: &JobContext, row: &FileRow, live: &mut Live) -> Result<Outcome> {
+async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcome> {
     let path = ctx.app.config().paths.games.join(&row.rel_path);
     let opened = threads::blocking(label::CHD_HEADER, move || open(&path))
         .await
@@ -772,7 +766,7 @@ async fn identify(ctx: &JobContext, row: &FileRow, live: &mut Live) -> Result<Ou
                     done.saturating_mul(hunk_bytes).min(bytes_total),
                     bytes_total,
                 );
-                live.report(ctx, row, bytes).await?;
+                live.report(row, bytes);
             }
             Ok(Step::Done) => break,
             Err(e) => return failed(ctx, row, Some(id), &e).await,

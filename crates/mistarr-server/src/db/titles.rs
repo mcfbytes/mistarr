@@ -475,12 +475,9 @@ fn store_picks(conn: &Connection, platform: &str, mut picks: Vec<i64>) -> Result
 /// shared only among the other versions links to the group of its earliest version. Only
 /// a single title ever links, never a group, so two groups of one DAT never merge; the
 /// members left behind by a root that linked away take their lowest live id as root.
+/// The groups are worked out in memory and only rows whose `group_root` changes are
+/// written, so a recompute that changes nothing leaves every group clean.
 fn link_shared_titles(conn: &Connection, platform: &str) -> Result<()> {
-    conn.execute(
-        "UPDATE titles SET group_root = parent_id
-         WHERE platform_id = ?1 AND group_root IS NOT parent_id",
-        [platform],
-    )?;
     let versions: Vec<i64> = conn
         .prepare_cached(
             "SELECT id FROM dat_versions
@@ -489,64 +486,154 @@ fn link_shared_titles(conn: &Connection, platform: &str) -> Result<()> {
         )?
         .query_map([platform], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    let Some((&largest, rest)) = versions.split_first() else {
-        return Ok(());
+    let (largest, mut rest) = match versions.split_first() {
+        Some((&largest, rest)) if !rest.is_empty() => (largest, rest.to_vec()),
+        _ => {
+            conn.execute(
+                "UPDATE titles SET group_root = parent_id
+                 WHERE platform_id = ?1 AND group_root IS NOT parent_id",
+                [platform],
+            )?;
+            return Ok(());
+        }
     };
-    let mut rest = rest.to_vec();
-    if rest.is_empty() {
-        return Ok(());
-    }
     rest.sort_unstable();
+    let links = shared_links(conn, platform, largest, &rest)?;
+    let mut nodes = group_nodes(conn, platform)?;
+    for (id, root) in links {
+        if let Ok(i) = nodes.binary_search_by_key(&id, |n| n.id) {
+            nodes[i].target = Some(root);
+        }
+    }
+    reroot(&mut nodes);
+    let mut set = conn.prepare_cached("UPDATE titles SET group_root = ?2 WHERE id = ?1")?;
+    for n in nodes.iter().filter(|n| n.target != n.current) {
+        set.execute(params![n.id, n.target])?;
+    }
+    Ok(())
+}
+
+/// The `(title, group)` links of [`link_shared_titles`]: titles of `rest` whose roms
+/// equal those of a title in `largest`, or of a title in an earlier version of `rest`.
+fn shared_links(
+    conn: &Connection,
+    platform: &str,
+    largest: i64,
+    rest: &[i64],
+) -> Result<Vec<(i64, i64)>> {
     // Titles outside the largest version by signature, in version order: (version, id, parent).
     let mut others: HashMap<u64, Vec<(i64, i64, i64)>> = HashMap::new();
-    for &version in &rest {
-        each_signature(conn, version, |id, parent, sig| {
+    for &version in rest {
+        each_signature(conn, platform, version, |id, parent, sig| {
             others.entry(sig).or_default().push((version, id, parent));
         })?;
     }
     let mut anchors: HashMap<u64, i64> = HashMap::new();
-    each_signature(conn, largest, |_, parent, sig| {
+    each_signature(conn, platform, largest, |_, parent, sig| {
         if others.contains_key(&sig) {
             anchors.entry(sig).or_insert(parent);
         }
     })?;
-    let mut link = conn.prepare_cached("UPDATE titles SET group_root = ?2 WHERE id = ?1")?;
+    let mut links = Vec::new();
     for (sig, titles) in &others {
         let (first_version, root) = match anchors.get(sig) {
             Some(&root) => (largest, root),
             None => (titles[0].0, titles[0].2),
         };
-        for (_, id, _) in titles.iter().filter(|t| t.0 != first_version) {
-            link.execute([*id, root])?;
+        links.extend(
+            titles
+                .iter()
+                .filter(|t| t.0 != first_version)
+                .map(|t| (t.1, root)),
+        );
+    }
+    Ok(links)
+}
+
+/// A title as [`link_shared_titles`] regroups it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Node {
+    id: i64,
+    /// The group it is to belong to.
+    target: Option<i64>,
+    /// Its stored `group_root`.
+    current: Option<i64>,
+    live: bool,
+}
+
+/// Every title of `platform` with `target` at its `parent_id`, and every title elsewhere
+/// in a group a title of `platform` roots with `target` at that group, sorted by id.
+fn group_nodes(conn: &Connection, platform: &str) -> Result<Vec<Node>> {
+    let mut nodes: Vec<Node> = conn
+        .prepare_cached(
+            "SELECT id, parent_id, group_root, retired = 0 FROM titles WHERE platform_id = ?1",
+        )?
+        .query_map([platform], |r| {
+            Ok(Node {
+                id: r.get(0)?,
+                target: r.get(1)?,
+                current: r.get(2)?,
+                live: r.get(3)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut away = conn.prepare_cached(
+        "SELECT m.id, m.group_root, m.retired = 0
+         FROM titles r JOIN titles m ON m.group_root = r.id
+         WHERE r.platform_id = ?1 AND m.platform_id IS NOT ?1",
+    )?;
+    let away = away.query_map([platform], |r| {
+        let root: Option<i64> = r.get(1)?;
+        Ok(Node {
+            id: r.get(0)?,
+            target: root,
+            current: root,
+            live: r.get(2)?,
+        })
+    })?;
+    for n in away {
+        nodes.push(n?);
+    }
+    nodes.sort_unstable_by_key(|n| n.id);
+    Ok(nodes)
+}
+
+/// Gives every group whose root title is among `nodes` but belongs to another group a
+/// new root: its lowest live member, or its lowest member when none is live. Every move
+/// is worked out before any is applied, so no group gains or loses members whatever
+/// order they come in. `nodes` must be sorted by id.
+fn reroot(nodes: &mut [Node]) {
+    let stranded = |label: i64| {
+        nodes
+            .binary_search_by_key(&label, |n| n.id)
+            .is_ok_and(|i| nodes[i].target != Some(label))
+    };
+    // Stranded group -> (lowest live member, lowest member); ids come in ascending order.
+    let mut roots: HashMap<i64, (Option<i64>, i64)> = HashMap::new();
+    for n in nodes.iter() {
+        let Some(label) = n.target.filter(|&l| l != n.id) else {
+            continue;
+        };
+        if let Some(e) = roots.get_mut(&label) {
+            if e.0.is_none() && n.live {
+                e.0 = Some(n.id);
+            }
+        } else if stranded(label) {
+            roots.insert(label, (n.live.then_some(n.id), n.id));
         }
     }
-    reroot_stranded(conn, platform)
-}
-
-/// Gives each group whose root title linked into another group a new root: its lowest
-/// live member, or its lowest member when none is live.
-fn reroot_stranded(conn: &Connection, platform: &str) -> Result<()> {
-    let moves: Vec<(i64, i64)> = conn
-        .prepare_cached(
-            "SELECT m.group_root,
-                    COALESCE(MIN(CASE WHEN m.retired = 0 THEN m.id END), MIN(m.id))
-             FROM titles r JOIN titles m ON m.group_root = r.id AND m.id != r.id
-             WHERE r.platform_id = ?1 AND r.group_root IS NOT r.id
-             GROUP BY m.group_root",
-        )?
-        .query_map([platform], |r| Ok((r.get(0)?, r.get(1)?)))?
-        .collect::<rusqlite::Result<_>>()?;
-    let mut set = conn.prepare_cached("UPDATE titles SET group_root = ?2 WHERE group_root = ?1")?;
-    for (old, new) in moves {
-        set.execute([old, new])?;
+    for n in nodes.iter_mut() {
+        if let Some(&(live, lowest)) = n.target.and_then(|t| roots.get(&t)) {
+            n.target = Some(live.unwrap_or(lowest));
+        }
     }
-    Ok(())
 }
 
-/// Calls `each(id, parent, signature)` for every live title of `version` with roms that
-/// all carry a hash; the signature hashes the rom keys whatever their order.
+/// Calls `each(id, parent, signature)` for every live title of `version` on `platform`
+/// with roms that all carry a hash; the signature hashes the rom keys whatever their order.
 fn each_signature(
     conn: &Connection,
+    platform: &str,
     version: i64,
     mut each: impl FnMut(i64, i64, u64),
 ) -> Result<()> {
@@ -555,9 +642,10 @@ fn each_signature(
         "SELECT t.id, t.parent_id, COALESCE(r.sha1, r.md5, r.crc32 || ':' || r.size)
          FROM titles t JOIN roms r ON r.title_id = t.id AND r.retired = 0
          WHERE t.dat_version_id = ?1 AND t.retired = 0 AND t.source = 'dat'
+           AND t.platform_id = ?2
          ORDER BY t.id",
     )?;
-    let mut rows = stmt.query([version])?;
+    let mut rows = stmt.query(params![version, platform])?;
     // Per title: id, parent, sum of key hashes, rom count, whether every rom had a key.
     let mut open: Option<(i64, i64, u64, u64, bool)> = None;
     let mut settle = |t: Option<(i64, i64, u64, u64, bool)>| {

@@ -90,11 +90,14 @@ async fn next(mut conn: Conn) -> Option<(Result<SseEvent, Infallible>, Conn)> {
     Some((Ok(sse), conn))
 }
 
+/// A transient event, sequence 0, goes out without an id so it never moves `Last-Event-ID`.
 fn to_sse(ev: &Event) -> SseEvent {
-    SseEvent::default()
-        .id(ev.id())
-        .event(ev.kind.as_str())
-        .data(&ev.data)
+    let sse = SseEvent::default().event(ev.kind.as_str()).data(&ev.data);
+    if ev.seq == 0 {
+        sse
+    } else {
+        sse.id(ev.id())
+    }
 }
 
 /// A `status` event without an id, so it does not move the client's `Last-Event-ID`.
