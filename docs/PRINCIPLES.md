@@ -75,8 +75,17 @@ mentions it; users load it through the same directories as anything else.
 ## 8. Trademarks and branding
 
 Platform names are used descriptively in the DAT-to-directory table because
-that is what the directories are called. No console logos, no manufacturer
-artwork, no colour schemes that imitate a manufacturer's brand.
+that is what the directories are called. No console logos, wordmarks or
+badges, no manufacturer artwork or traces of it, no product photos, and no
+colour schemes that imitate a manufacturer's brand.
+
+Within those limits the UI may show original, stylised illustrations of
+console, handheld, computer or arcade cabinet hardware. Such an illustration
+must be recognisable by form alone: proportions, slots, screen, D-pad,
+buttons and ports. It must carry no logo, wordmark, badge, model name or other
+printed text, and it is never drawn in the manufacturer's own colour scheme
+or a brand colour combination, for example a grey body with red or black
+accents, or four-colour face buttons.
 
 ## Why these rules
 

@@ -40,22 +40,24 @@ holds scans and imports, or the user's Pause, which also holds DAT and source
 imports), which ones, and a Run now button that calls `POST /system/resume`.
 
 **Platforms** (`/`). One card per platform with core present, counts, and a
-scan button. Scan shows a toast when the scan is queued and another with its
-outcome when it finishes, such as "Scan of Nintendo 64: 410 matched, 2
-unmatched", on whichever page is open; counts reload when a scan or
-recompute ends. Platforms whose core is absent are in a collapsed section. While
-the wizard reports a missing DAT, client or source, a "Setup not finished"
-card lists what is missing and links to the wizard.
+scan button, below a banner of the platform's art. Scan shows a toast when
+the scan is queued and another with its outcome when it finishes, such as
+"Scan of Nintendo 64: 410 matched, 2 unmatched", on whichever page is open;
+counts reload when a scan or recompute ends. Platforms whose core is absent
+are in a collapsed section. While the wizard reports a missing DAT, client or
+source, a "Setup not finished" card lists what is missing and links to the
+wizard.
 
-**Browse** (`/p/{id}`). A Start core button beside the platform name,
-except on arcade. Poster grid of `title_groups`, cover from the libretro
-URL with a placeholder on 404. Filters: search, have / missing / wanted,
-region, a "Show hidden" checkbox, and a flags multi-select that requires
-every checked flag. Each card shows the 1G1R pick name, a have indicator, and
-a want toggle. Infinite scroll in pages of 60. Search runs 250 ms after
-typing stops, and each request cancels the one before it. While a page is
-loading a thin progress bar shows and the current results stay visible,
-dimmed and marked `aria-busy`; a failed load shows an alert with Retry.
+**Browse** (`/p/{id}`). A Start core button beside the platform name, except
+on arcade, both below a banner of the platform's art. Poster grid of
+`title_groups`, cover from the libretro URL with a placeholder on 404.
+Filters: search, have / missing / wanted, region, a "Show hidden" checkbox,
+and a flags multi-select that requires every checked flag. Each card shows
+the 1G1R pick name, a have indicator, and a want toggle. Infinite scroll in
+pages of 60. Search runs 250 ms after typing stops, and each request cancels
+the one before it. While a page is loading a thin progress bar shows and the
+current results stay visible, dimmed and marked `aria-busy`; a failed load
+shows an alert with Retry.
 
 **Title** (`/t/{id}`). Every variant in the group with region, revision,
 flags, file state, and which sources have it: one line per file, as "nova.nes
@@ -105,6 +107,92 @@ result. Live over SSE, as in the wizard.
 wizard, CORENAME, paused indicator with manual override, launch state,
 settings form for the runtime-editable subset with the shared path map editor
 and the switch that allows launching, log tail.
+
+## Platform art
+
+Each platform has an abstract backdrop with a stylised drawing of its
+hardware in front, drawn as inline SVG by `web/src/lib/art/generate.ts` and
+`web/src/lib/art/hardware.ts` and shown by `web/src/lib/PlatformArt.svelte`.
+The art is original: the hardware is recognisable by form alone and carries
+no logo, wordmark, badge, model name or printed text, no manufacturer artwork
+and no brand colours (PRINCIPLES.md section 8). It ships in the bundle and
+never loads an image or touches the network.
+
+A platform id maps to a motif family that evokes its era or medium; an id
+without a mapping falls back to its `kind`, and anything else to contours.
+Mapped siblings take the family's compositions in turn, so neighbours in a
+family differ in layout as well as colour.
+
+| Family | Motif | Compositions | Platforms |
+|---|---|---|---|
+| pixel | tile mosaic, ordered dither through a four-step ramp | diagonal sweep, centre burst, corner fade, wave, checker falloff | nes, fds, sms, sg1000, atari7800, coleco, intv, pce, sgx, sv; kind `cartridge` |
+| parallax | banded sun behind stepped parallax ridges | sun position and size | snes, megadrive, s32x |
+| bands | bold horizontal bands, blocky shapes, scanlines | band weights | atari2600, atari5200 |
+| vector | twisting wireframe tunnel on black | sides and twist | vectrex |
+| lcd | abstract lit shapes on a dot matrix, with ghosting and backlight | bars, blocky landscape, rings, geometric glyphs, dot lattice | gb, ngp, gbc, ws, pokemini, gg, gba, lynx, wsc |
+| disc | concentric tracks, thin-film sheen, light sweep | centre and sheen angle | psx, saturn, megacd, pcecd, neocd; kind `disc` |
+| poly | flat-shaded low-poly terrain | height field | n64 |
+| marquee | perspective grid to a glowing horizon, starfield, bulb chase | vanishing point | arcade, neogeo; kinds `arcade`, `romset` |
+| phosphor | glyph-like blocks on a phosphor raster | text layout | kind `computer` |
+| contour | drifting contour lines | wave field | kind `other`, unknown ids |
+
+Colours come from `web/src/lib/art/palette.ts`: the hues of the theme tokens
+in `app.css` (accent, ok, warn) and a few that harmonise with them. Each
+family has a base hue, and most mapped ids set their own hue so siblings read
+apart: the colour handhelds get distinct hues, the monochrome ones muted
+slate, sepia, grey-blue or teal tints. No hue is chosen to match a
+manufacturer's branding, and no LCD uses a pea-green tint. A PRNG seeded by
+the id shifts the hue slightly and drives every other choice, so the same id
+always draws the same art. Every colour slot runs from a dark value to a
+light one through `--l`, which the component sets from `prefers-color-scheme`.
+There is no motion.
+
+The hardware is the focal element: flat, filled with the palette's body
+tone, outlined by a thin rim in the family's light tone, with slots, vents,
+ports, screens and keys built from shared rectangles, circles and short
+paths. One key colour serves every button. It stands centred on a soft floor
+shadow in front of a glow, fitted to about half the banner height. Its forms:
+
+| Hardware | Platforms |
+|---|---|
+| front-loading box with a lid flap and ribs | nes |
+| drive with a disk in its slot | fds |
+| angled wedge with a card slot | sms |
+| stepped box with a rear slot | sg1000 |
+| wedge with a front band and two buttons | atari7800 |
+| keypad controllers docked on the body | coleco, intv |
+| compact box with a front card slot | pce, sgx |
+| rounded box with a raised slot and sliders | snes |
+| body with a round central dome; with a stacked add-on | megadrive; s32x |
+| raised centre slot above four ports | n64 |
+| low base under a raised slot block with switches | atari2600 |
+| long wedge with a wide slot | atari5200 |
+| portrait cabinet whose screen shows a vector tunnel, with its controller | vectrex |
+| portrait handheld; the classic has an angled grille | gb, gbc |
+| landscape handheld with a centred screen | gba, gg, lynx |
+| landscape handheld with a thumb stick | ngp |
+| landscape handheld with a side screen and key diamonds | ws, wsc |
+| small rounded handheld | pokemini, sv |
+| top-down disc console with a round lid | psx, saturn, megacd, pcecd, neocd |
+| home console with a joystick controller | neogeo |
+| upright arcade cabinet | arcade; kinds `arcade`, `romset` |
+| keyboard computer | kind `computer` |
+| generic console box | every other id |
+
+A compact focal element (the hardware, a sun, burst, lit shape or vanishing
+point) is centred where every banner aspect in use shows it: between 32% and 68% of the
+width in the card format, whose banner crops its sides on desktop, and
+between 48% and 52% in the wide format, of which a phone shows only the
+middle 358 of 960 units. The disc and tunnel are wider than a card banner and
+sit off centre there.
+
+On a Platforms card and in the Browse header the art fills a 150 px banner
+that fades into the background, and the text starts below it where the scrim
+is at least 85% opaque, so text keeps AA contrast over any art. The Browse
+header uses a wider format. Disabled cards and cards without a core show the
+art desaturated and dimmed. The art is `aria-hidden`; the platform name stays
+the accessible name. Each tile stays under 120 SVG elements, its hardware
+under 60, and art is memoised per id, kind and format.
 
 ## State handling
 

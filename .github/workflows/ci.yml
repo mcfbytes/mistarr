@@ -68,6 +68,15 @@ jobs:
         run: npm run build
       - working-directory: web
         run: npm run size
+      # Browsers are cached per lockfile; --with-deps still installs the system libraries.
+      - uses: actions/cache@v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('web/package-lock.json') }}
+      - working-directory: web
+        run: npx playwright install --with-deps chromium
+      - working-directory: web
+        run: npm run e2e
   cross:
     runs-on: ubuntu-26.04
     steps:

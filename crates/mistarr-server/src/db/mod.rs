@@ -62,7 +62,8 @@ impl Db {
     ///
     /// # Errors
     ///
-    /// [`Error::Db`] when the file cannot be opened or configured, and
+    /// [`Error::Db`] when the file cannot be opened or configured,
+    /// [`Error::SchemaTooNew`] when a newer mistarr migrated it, and
     /// [`Error::Migration`] when a migration fails.
     ///
     /// ```
@@ -73,6 +74,8 @@ impl Db {
     /// ```
     pub fn open(path: &Path) -> Result<Self> {
         let mut writer = Connection::open(path)?;
+        // Checked before `configure`, whose pragmas may write to the file.
+        migrate::check_supported(&writer)?;
         configure(&writer)?;
         migrate::apply(&mut writer)?;
         let reader = Connection::open(path)?;
