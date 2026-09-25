@@ -69,6 +69,15 @@ test('no handheld screen is tinted pea green', () => {
   }
 });
 
+test('handhelds sold in bold shell colours are drawn in muted tones', () => {
+  for (const id of ['gba', 'gbc', 'pokemini']) {
+    const sat = /--c9:hsl\(\d+ calc\((\d+)%/.exec(renderArt(id, undefined, 'card').svg)?.[1];
+    expect(Number(sat), `${id} body saturation`).toBeLessThanOrEqual(20);
+  }
+  const gba = hue('gba', 9);
+  expect(gba < 230 || gba > 300, `gba body hue ${gba} is not violet`).toBe(true);
+});
+
 test('art is memoised and stays small, local and free of script', () => {
   for (const id of [...ids, 'amiga', 'mystery']) {
     for (const format of formats) {

@@ -12,6 +12,9 @@ pub const KNOWN_FLAGS: [&str; 9] = [
     "unl", "pirate", "baddump", "bios", "beta", "proto", "demo", "sample", "program",
 ];
 
+/// The bit of the `bios` flag in the group summary.
+pub const BIOS_BIT: i64 = 1 << 3;
+
 /// The bits of the flags `prefs.hide` holds by default, the highest known bits; a
 /// group's `lean_flags` has none of them exactly when a live variant carries none.
 pub const HIDDEN_BY_DEFAULT: i64 = KNOWN_FLAG_MASK & !0b111;
@@ -63,6 +66,7 @@ const COLUMNS: &str = "parent_id, platform_id, base_name, name, variants, have_v
 /// use mistarr_server::db::groups::flag_bit;
 /// assert_eq!(flag_bit("unl"), Some(1));
 /// assert_eq!(flag_bit("bios"), Some(8));
+/// assert_eq!(flag_bit("bios"), Some(mistarr_server::db::groups::BIOS_BIT));
 /// assert_eq!(flag_bit("BIOS"), None);
 /// ```
 #[must_use]

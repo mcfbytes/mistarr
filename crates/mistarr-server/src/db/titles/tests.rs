@@ -696,6 +696,43 @@ fn hidden_and_flags_are_orthogonal() {
 }
 
 #[test]
+fn a_group_is_bios_only_when_every_live_variant_is_flagged_bios() {
+    let c = conn();
+    let v = plain(&c);
+    let bios_of = |c: &Connection| -> Vec<(String, bool)> {
+        browse(c, "gb", &Browse::default(), 10, 0)
+            .expect("browse")
+            .0
+            .into_iter()
+            .map(|r| (r.base_name, r.bios))
+            .collect()
+    };
+    assert_eq!(
+        bios_of(&c),
+        [
+            ("Example Quest".to_owned(), false),
+            ("Example System".to_owned(), true),
+            ("Other Tale".to_owned(), false)
+        ]
+    );
+    add(
+        &c,
+        v,
+        "[BIOS] Other Tale (USA)",
+        Some("Other Tale (Europe)"),
+        &[("b.bin", "good")],
+    );
+    link_parents(&c, v, false).expect("link");
+    recompute_platform(&c, "gb", &Prefs::default()).expect("recompute");
+    let tale = bios_of(&c).into_iter().find(|(n, _)| n == "Other Tale");
+    assert_eq!(
+        tale,
+        Some(("Other Tale".to_owned(), false)),
+        "one plain variant is enough"
+    );
+}
+
+#[test]
 fn detail_lists_variants_roms_files_and_sources() {
     let c = conn();
     plain(&c);

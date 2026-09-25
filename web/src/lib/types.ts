@@ -112,6 +112,8 @@ export interface TitleGroup {
   have_verified: number;
   wanted: number;
   has_pick: boolean;
+  /** Every live variant is flagged `bios`, so none can be wanted. */
+  bios: boolean;
   art: ArtUrls | null;
 }
 

@@ -79,7 +79,17 @@ wizard.
 
 **Browse** (`/p/{id}`). A Start core button beside the platform name, except
 on arcade, both below a banner of the platform's art. Poster grid of
-`title_groups`, cover from the libretro URL with a placeholder on 404.
+`title_groups`, cover from the libretro URL. A title with no cover URL, or
+whose cover fails to load, gets a generated poster
+(`web/src/lib/PosterPlaceholder.svelte`): the platform's art as a faded band
+over the theme's raised background, the title's name set in bold beneath it
+and the name's parenthesised tags, such as the region, on a dimmed line at the
+foot. A hash of the name picks the band's hue rotation (up to 30° either way),
+horizontal shift and a zoom that covers it (`web/src/lib/poster.ts`), so neighbours differ
+and a title always looks the same. It uses the theme tokens, makes no
+request, and is `aria-hidden`, since the name is already on the card as text.
+Each card is a column whose status line and Want button sit at its foot, so
+they line up across a row whatever the name's length.
 Filters: search, have / missing / wanted, region, a "Show hidden" checkbox,
 and a flags multi-select that requires every checked flag. Each card shows
 the 1G1R pick name, a have indicator, and a want toggle. Infinite scroll in
@@ -93,9 +103,11 @@ flags, file state (a CHD member named as "g.chd, track 2" or "g.chd, track
 list"), and which sources have it: one line per file, as "nova.nes
 in Example Pack (name guess)", with the confidence read as "name match",
 "hash match", "name match", "name and size", "name guess" or "size only", or
-"None available". Want per variant. Play for a
+"None available". Want per variant, except on a variant flagged `bios`, which the server
+refuses (PRINCIPLES.md section 3). Play for a
 variant whose files are all in the collection. Rename action for misnamed
-files. Art tabs: boxart, title, snap.
+files. Art tabs: boxart, title, snap; a missing boxart shows the generated
+poster, a missing title or snap image nothing.
 
 Play and Start core are disabled while launching is unavailable, with the
 reason as a line of text on the page rather than a tooltip: launching is
@@ -181,7 +193,9 @@ Colours come from `web/src/lib/art/palette.ts`: the hues of the theme tokens
 in `app.css` (accent, ok, warn) and a few that harmonise with them. Each
 family has a base hue, and most mapped ids set their own hue so siblings read
 apart: the colour handhelds get distinct hues, the monochrome ones muted
-slate, sepia, grey-blue or teal tints. No hue is chosen to match a
+slate, sepia, grey-blue or teal tints. Handhelds sold in a range of bold
+shell colours (gba, gbc, pokemini) take muted sage, brick and slate tones,
+so no body reads as one of those shells. No hue is chosen to match a
 manufacturer's branding, and no LCD uses a pea-green tint. A PRNG seeded by
 the id shifts the hue slightly and drives every other choice, so the same id
 always draws the same art. Every colour slot runs from a dark value to a
