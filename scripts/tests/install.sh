@@ -10,22 +10,6 @@ work=$(mktemp -d)
 fail=0
 srv_pid=""
 
-# Stand in for the board's BusyBox: tar without gzip support, od without -t/-A.
-shims="$work/bin"
-mkdir -p "$shims"
-if command -v busybox >/dev/null 2>&1; then
-    cat > "$shims/tar" <<'EOS'
-#!/bin/sh
-case " $* " in *" -xzf "*|*" -z"*|*"z"*" -f "*) echo "tar: invalid option -- 'z'" >&2; exit 1;; esac
-exec busybox tar "$@"
-EOS
-    printf '#!/bin/sh\nexit 1\n' > "$shims/od"
-    printf '#!/bin/sh\nexec busybox hexdump "$@"\n' > "$shims/hexdump"
-    chmod +x "$shims/tar" "$shims/od" "$shims/hexdump"
-    PATH="$shims:$PATH"
-    export PATH
-fi
-
 # Stands in for running the fake binary's `listen-addr`: reads [server] listen
 # with a real TOML parser, else prints TEST_LISTEN as the default address.
 runner="$work/runner"
@@ -53,6 +37,95 @@ cleanup() {
     rm -rf "$srv" "$work"
 }
 trap cleanup EXIT
+
+# Stand in for the board's BusyBox: tar without gzip support, od without -t/-A.
+# The shims enforce those limits themselves over busybox applets or host tools.
+shims="$work/bin"
+mkdir -p "$shims"
+backing=""
+for tool in tar od hexdump; do
+    if command -v busybox >/dev/null 2>&1 && busybox --list 2>/dev/null | grep -qx "$tool"; then
+        real="busybox $tool"
+        backing="$backing $tool=busybox"
+    elif real=$(command -v "$tool"); then
+        real="'$real'"
+        backing="$backing $tool=host"
+    else
+        echo "scripts/tests/install.sh needs $tool from busybox or the host" >&2
+        exit 1
+    fi
+    printf '#!/bin/sh\nrun_real() { %s "$@"; }\n' "$real" > "$shims/$tool"
+done
+cat >> "$shims/tar" <<'EOS'
+# BusyBox tar without gzip: compression options and gzip input fail as on the board.
+refuse() { echo "tar: $1" >&2; exit 1; }
+extract=0 file="" queue="" first=1
+for a in "$@"; do
+    if [ -n "$queue" ]; then
+        [ "${queue%"${queue#?}"}" = f ] && file=$a
+        queue=${queue#?}
+        continue
+    fi
+    cluster=""
+    case "$a" in
+        --gzip|--gunzip|--ungzip|--bzip2|--xz|--lzma|--zstd|--compress|--uncompress|--auto-compress|--use-compress-program*)
+            refuse "unrecognized option '$a'" ;;
+        --extract|--get) extract=1 ;;
+        --file=*) file=${a#--file=} ;;
+        --file) queue=f ;;
+        --directory) queue=C ;;
+        --*) ;;
+        -*) cluster=${a#-} ;;
+        *) if [ "$first" = 1 ]; then cluster=$a; fi ;;
+    esac
+    first=0
+    while [ -n "$cluster" ]; do
+        c=${cluster%"${cluster#?}"}
+        cluster=${cluster#?}
+        case "$c" in
+            z|j|J|Z|a|I) refuse "invalid option -- '$c'" ;;
+            x) extract=1 ;;
+            f|C|T|X|b)
+                # A dashed cluster's remainder is the value; old-style values follow in order.
+                if [ -n "$cluster" ] && [ "${a#-}" != "$a" ]; then
+                    [ "$c" = f ] && file=$cluster
+                    cluster=""
+                else
+                    queue="$queue$c"
+                fi
+                ;;
+        esac
+    done
+done
+magic=$(printf '\037\213')
+if [ "$extract" = 1 ] && { [ -z "$file" ] || [ "$file" = - ]; }; then
+    t=$(mktemp) || exit 1
+    cat > "$t"
+    if [ "$(head -c 2 "$t")" = "$magic" ]; then rm -f "$t"; refuse "invalid tar magic"; fi
+    run_real "$@" < "$t"
+    rc=$?
+    rm -f "$t"
+    exit "$rc"
+fi
+if [ "$extract" = 1 ] && [ "$(head -c 2 "$file" 2>/dev/null)" = "$magic" ]; then
+    refuse "invalid tar magic"
+fi
+run_real "$@"
+EOS
+cat >> "$shims/od" <<'EOS'
+# BusyBox od without -t/-A: those options fail as on the board.
+for a in "$@"; do
+    case "$a" in
+        --) break ;;
+        -t*|-A*|--format*|--address-radix*|-[!-]*[tA]*) echo "od: invalid option -- '$a'" >&2; exit 1 ;;
+    esac
+done
+run_real "$@"
+EOS
+echo 'run_real "$@"' >> "$shims/hexdump"
+chmod +x "$shims/tar" "$shims/od" "$shims/hexdump"
+board_path="$shims:$PATH"
+echo "install tests: board BusyBox limits enforced over$backing"
 
 port=$(python3 -c 'import socket
 s = socket.socket()
@@ -95,6 +168,33 @@ expect_contains() {
             ;;
     esac
 }
+
+# The shims reject what the board rejects, whichever tools back them.
+mkdir -p "$work/shimcheck"
+printf 'x' > "$work/shimcheck/member"
+tar -C "$work/shimcheck" -czf "$work/shimcheck/a.tar.gz" member
+for args in "-xzf a.tar.gz" "xzf a.tar.gz" "-x -z -f a.tar.gz" "--gzip -xf a.tar.gz" "-xf a.tar.gz"; do
+    # shellcheck disable=SC2086
+    if (cd "$work/shimcheck" && PATH="$board_path" tar $args) >/dev/null 2>&1; then
+        fail=$((fail + 1))
+        echo "FAIL: the tar stand-in refuses gzip (tar $args)"
+    fi
+done
+if PATH="$board_path" tar -C "$work/shimcheck" -xf - < "$work/shimcheck/a.tar.gz" >/dev/null 2>&1; then
+    fail=$((fail + 1))
+    echo "FAIL: the tar stand-in refuses gzip on stdin"
+fi
+if ! gunzip -c "$work/shimcheck/a.tar.gz" | PATH="$board_path" tar -C "$work/shimcheck" -xf - member; then
+    fail=$((fail + 1))
+    echo "FAIL: the tar stand-in extracts a plain tar from stdin"
+fi
+for args in "-An" "-tx1" "-vtx1" "--format=x1"; do
+    if PATH="$board_path" od "$args" /dev/null >/dev/null 2>&1; then
+        fail=$((fail + 1))
+        echo "FAIL: the od stand-in refuses $args"
+    fi
+done
+expect "$(printf 'AB' | PATH="$board_path" hexdump -v -e '1/1 "%02x "')" "41 42 " "the hexdump stand-in formats bytes"
 
 # Fake ARM32 ELF header (20 bytes) followed by arbitrary payload.
 write_arm_binary() {
@@ -294,7 +394,7 @@ run_install() {
     root="$1"
     tty="$2"
     shift 2
-    env PATH="${extra_path:+$extra_path:}$PATH" MISTARR_EXEC="$runner" \
+    env PATH="${extra_path:+$extra_path:}$board_path" MISTARR_TEST_EXEC="$runner" \
         TEST_LISTEN="${test_listen:-0.0.0.0:${health_port:-$port}}" \
         MISTARR_START_TIMEOUT="${start_timeout:-30}" MISTARR_ROOT="$root" \
         MISTARR_RELEASE_API="$api" MISTARR_RELEASE_BASE="$dl_base" \
@@ -395,7 +495,7 @@ root6="$work/root6"
 mkdir -p "$root6"
 publish_release v5.0.0 PIPED-FLOW-BINARY yes
 set_latest v5.0.0
-out=$(printf 'unrelated piped bytes\n' | env MISTARR_EXEC="$runner" TEST_LISTEN="0.0.0.0:$port" MISTARR_ROOT="$root6" MISTARR_RELEASE_API="$api" \
+out=$(printf 'unrelated piped bytes\n' | env PATH="$board_path" MISTARR_TEST_EXEC="$runner" TEST_LISTEN="0.0.0.0:$port" MISTARR_ROOT="$root6" MISTARR_RELEASE_API="$api" \
     MISTARR_RELEASE_BASE="$dl_base" MISTARR_TTY="$no_tty" sh "$install_script" 2>&1)
 code=$?
 [ "$code" -eq 0 ] || { fail=$((fail + 1)); echo "FAIL: piped no-argument run exits 0: $out"; }
@@ -411,7 +511,7 @@ publish_release v5.1.0 PIPED-FLOW-TTY-BINARY yes
 set_latest v5.1.0
 fake_tty="$work/fake-tty"
 echo "y" > "$fake_tty"
-out=$(printf 'unrelated piped bytes\n' | env MISTARR_EXEC="$runner" TEST_LISTEN="0.0.0.0:$port" MISTARR_ROOT="$root7" MISTARR_RELEASE_API="$api" \
+out=$(printf 'unrelated piped bytes\n' | env PATH="$board_path" MISTARR_TEST_EXEC="$runner" TEST_LISTEN="0.0.0.0:$port" MISTARR_ROOT="$root7" MISTARR_RELEASE_API="$api" \
     MISTARR_RELEASE_BASE="$dl_base" MISTARR_TTY="$fake_tty" sh "$install_script" 2>&1)
 code=$?
 [ "$code" -eq 0 ] || { fail=$((fail + 1)); echo "FAIL: run with a reachable tty exits 0: $out"; }

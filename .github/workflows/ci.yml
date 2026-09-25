@@ -50,7 +50,7 @@ jobs:
     runs-on: ubuntu-26.04
     steps:
       - uses: actions/checkout@v7
-      - run: shellcheck -s sh scripts/mistarr.sh scripts/tests/run.sh
+      - run: shellcheck -s sh scripts/mistarr.sh scripts/install.sh scripts/tests/run.sh scripts/tests/install.sh
       - run: sh scripts/tests/run.sh
   web:
     runs-on: ubuntu-26.04

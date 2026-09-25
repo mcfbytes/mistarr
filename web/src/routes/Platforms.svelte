@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { findPlatform, getPlatforms, loadPlatforms, patchPlatform } from '../lib/stores/platforms.svelte';
   import { trackScan } from '../lib/stores/jobs.svelte';
   import { platformUrl } from '../lib/router.svelte';
@@ -19,7 +20,7 @@
   const disabled = $derived(platforms.filter((p) => p.core_present && !p.enabled));
 
   const isMock = import.meta.env.VITE_MOCK === '1';
-  let scanning = $state<Record<string, boolean>>({});
+  const scanning = new SvelteSet<string>();
 
   /** "N have · M wanted · T titles", plus any nonzero extra clause. */
   function summarize(counts: PlatformCounts): string {
@@ -41,7 +42,7 @@
   }
 
   async function scan(id: string): Promise<void> {
-    scanning = { ...scanning, [id]: true };
+    scanning.add(id);
     try {
       const queued = isMock ? null : await api.scan(id);
       showToast(`Scan of ${platformName(id)} queued`);
@@ -52,7 +53,7 @@
     } catch (err) {
       showToast(errorMessage(err));
     } finally {
-      scanning = { ...scanning, [id]: false };
+      scanning.delete(id);
     }
   }
 
@@ -80,7 +81,7 @@
         <h2><a href={platformUrl(platform.id)}>{platform.name}</a></h2>
         <p class="muted">{summarize(platform.counts)}</p>
         <div class="actions">
-          <button onclick={() => scan(platform.id)} disabled={scanning[platform.id]}>Scan</button>
+          <button onclick={() => scan(platform.id)} disabled={scanning.has(platform.id)}>Scan</button>
           <button onclick={() => setEnabled(platform.id, false)}>Disable</button>
         </div>
       </div>
