@@ -133,6 +133,7 @@ save_prev() {
     sync
     # Unmarked while the renames run, so a power cut here leaves no trusted mixed set.
     rm -f "$PREV_OK"
+    sync
     for f in "$DB_PREV" "$DB_PREV-wal" "$DB_PREV-shm" "$PREV" "$PREV_LAUNCHER"; do
         commit_new "$f" || return 2
     done
