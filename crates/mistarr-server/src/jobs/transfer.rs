@@ -442,6 +442,18 @@ mod tests {
         ) -> mistarr_clients::Result<()> {
             nope()
         }
+        async fn upload_limit(&self) -> mistarr_clients::Result<mistarr_clients::UploadLimit> {
+            nope()
+        }
+        async fn set_upload_limit(
+            &self,
+            _limit: mistarr_clients::UploadLimit,
+        ) -> mistarr_clients::Result<()> {
+            nope()
+        }
+        async fn pause_uploads(&self) -> mistarr_clients::Result<()> {
+            nope()
+        }
     }
 
     /// A bound single-file source in `sources/loaded/` with one queued download.

@@ -17,6 +17,7 @@ use crate::http::{self, Endpoint, Headers};
 use crate::{
     metainfo, ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId, DownloadClient,
     FileProgress, InfoHash, Result, SeedPolicy, TorrentSource, TorrentState, TorrentStatus,
+    UploadLimit,
 };
 
 /// Fields requested by [`DownloadClient::status`]: `fileStats` without `files`, whose
@@ -450,6 +451,42 @@ impl DownloadClient for Transmission {
         self.rpc(&mut session, "session-set", Value::Object(args))
             .await
             .map(drop)
+    }
+
+    async fn upload_limit(&self) -> Result<UploadLimit> {
+        #[derive(Default, Deserialize)]
+        struct Up {
+            #[serde(rename = "speed-limit-up")]
+            kbps: Option<u32>,
+            #[serde(rename = "speed-limit-up-enabled")]
+            enabled: Option<bool>,
+        }
+        let fields = json!({ "fields": ["speed-limit-up", "speed-limit-up-enabled"] });
+        let mut session = self.session.lock().await;
+        let up: Up = self.rpc_as(&mut session, "session-get", fields).await?;
+        match (up.enabled, up.kbps) {
+            (Some(enabled), Some(kbps)) => Ok(UploadLimit { enabled, kbps }),
+            _ => Err(ClientError::Protocol(
+                "session-get without the upload limit".into(),
+            )),
+        }
+    }
+
+    async fn set_upload_limit(&self, limit: UploadLimit) -> Result<()> {
+        let args = json!({
+            "speed-limit-up": limit.kbps,
+            "speed-limit-up-enabled": limit.enabled,
+        });
+        let mut session = self.session.lock().await;
+        self.rpc(&mut session, "session-set", args).await.map(drop)
+    }
+
+    async fn pause_uploads(&self) -> Result<()> {
+        self.set_upload_limit(UploadLimit {
+            enabled: true,
+            kbps: 0,
+        })
+        .await
     }
 }
 

@@ -27,7 +27,7 @@ under `/api` return 404 JSON.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/system/status` | Version, uptime, client kind and reachability, CORENAME, paused state, disk free, RSS, CHD decoding speed. |
+| GET | `/system/status` | Version, uptime, client kind and reachability, CORENAME, paused state, whether uploads are paused, disk free, RSS, CHD decoding speed. |
 | GET | `/system/wizard` | Which first-run steps are complete. |
 | POST | `/system/wizard/done` | The user finished or dismissed the wizard; it stops opening by itself. Returns the wizard body. |
 | POST | `/system/scan` | Enqueue a library scan. Body `{ platform_id? }`. |
@@ -48,7 +48,7 @@ under `/api` return 404 JSON.
               "transmission_on_path": true, "transmission_service": true,
               "transmission_opt_in": true, "checked_at": 1700000000 },
   "corename": "MENU", "paused": false, "pause_reason": null, "override": null,
-  "waiting": [],
+  "uploads_paused": false, "waiting": [],
   "disk_free_bytes": 1000000, "dats_dir": "/media/fat/mistarr/dats",
   "rss_bytes": 1000000, "launch": "ready", "chd_decode_bytes_per_sec": null
 }
@@ -61,7 +61,10 @@ Buildroot_MiSTer's init script for it exists and `transmission_opt_in`
 whether its opt-in directory does (DOWNLOAD-CLIENTS.md "Starting a stopped
 client"). `corename` is `null` when the file does not exist.
 `pause_reason` is `"core"`, `"manual"` or `null`; `override` is `"paused"`,
-`"running"` or `null`. `waiting` lists the queued and paused jobs of the
+`"running"` or `null`. `uploads_paused` is true while the client holds its
+uploads for a running core under `transfer.pause_uploads_while_playing`
+(DOWNLOAD-CLIENTS.md "Core gate"); a `status` event follows each change.
+`waiting` lists the queued and paused jobs of the
 lanes that are held, heavy lane first, oldest first, as
 `{ id, kind, state, detail }`, where `detail` is the file name or platform
 the job is about or `null`. Running jobs are not in it. A running core holds
@@ -141,8 +144,9 @@ goes. A `chd_tracks` job reports `{ platform_id, done, total, file,
 bytes_done, bytes_total }` while it decodes: `done` and `total` count images,
 `file` names the image being decoded, and the bytes are its decoded share.
 
-`/system/settings` body: `{ client, limits, prefs, scan }` with the fields of
-the same sections of `mistarr.toml`. PUT takes any subset of the four sections;
+`/system/settings` body: `{ client, limits, transfer, prefs, scan }` with the
+fields of the same sections of `mistarr.toml`; `transfer` is
+`{ pause_uploads_while_playing }`. PUT takes any subset of the five sections;
 each section present replaces the stored one whole, with absent fields taking
 their defaults. Other keys are a 400, as is a `remote_path_map` entry whose
 `remote` is blank or whose `local` is not an absolute path; `remote` is the
@@ -152,8 +156,9 @@ the 1G1R fields of `prefs` recomputes the picks; changing `prefs.launch`
 publishes `status`; turning `scan.chd_tracks` on moves CHD images waiting
 with reason `off` to `pending` and queues the `chd_tracks` job, and turning
 it off moves `pending` and `no_layout` images to `off` and stops a running
-job at its next slice; saving never touches the wizard's state. Settings
-saved before `scan` existed leave the file's `[scan]` in force.
+job at its next slice; changing `transfer` pauses or restores uploads at once
+while a core runs; saving never touches the wizard's state. Settings saved
+before `scan` or `transfer` existed leave the file's section in force.
 
 `/system/client/start` is a 409 `conflict` while a detected client answers,
 a 409 `busy` while another start is running, a 400 when `kind` is not

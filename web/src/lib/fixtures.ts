@@ -349,6 +349,7 @@ export const fixtureStatus: SystemStatus = {
   paused: true,
   pause_reason: 'core',
   override: null,
+  uploads_paused: true,
   waiting: [{ id: 2, kind: 'scan', state: 'queued', detail: 'nes' }],
   disk_free_bytes: 12_400_000_000,
   dats_dir: '/media/fat/mistarr/dats',
@@ -715,5 +716,6 @@ export const fixtureSettings: Settings = {
     hide: ['bios', 'beta', 'proto', 'demo', 'sample', 'program'],
     launch: true
   },
-  scan: { chd_tracks: false }
+  scan: { chd_tracks: false },
+  transfer: { pause_uploads_while_playing: true }
 };

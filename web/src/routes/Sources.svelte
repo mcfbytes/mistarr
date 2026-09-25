@@ -9,6 +9,7 @@
   import UploadField from '../lib/UploadField.svelte';
   import MagnetField from '../lib/MagnetField.svelte';
   import StatusPill from '../lib/StatusPill.svelte';
+  import UploadsPaused from '../lib/UploadsPaused.svelte';
   import type { SeedPolicy } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -101,6 +102,7 @@
 
 <div class="page">
   <h1>Sources</h1>
+  <UploadsPaused />
 
   <div class="card upload">
     <UploadField which="sources" label="Add a .torrent file" accept=".torrent" />

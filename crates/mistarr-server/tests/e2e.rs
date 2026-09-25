@@ -234,12 +234,14 @@ where
 /// The download limit the app applies while a core runs, in KiB/s.
 const CORE_DOWN_KBPS: u32 = 7;
 
-/// The client's global download limit in KiB/s, `None` when unlimited, read
-/// over its own RPC rather than through the app.
-async fn down_limit_kbps(kind: Kind, url: &str) -> Option<u32> {
+/// The client's global limit in KiB/s for `dir`, `down` or `up`, `None` when
+/// unlimited, read over its own RPC rather than through the app.
+async fn limit_kbps(kind: Kind, url: &str, dir: &str) -> Option<u32> {
     match kind {
         Kind::Transmission => {
-            let body = r#"{"method":"session-get","arguments":{"fields":["speed-limit-down","speed-limit-down-enabled"]}}"#;
+            let body = format!(
+                r#"{{"method":"session-get","arguments":{{"fields":["speed-limit-{dir}","speed-limit-{dir}-enabled"]}}}}"#
+            );
             let path = url.split_once("//").map_or(url, |(_, rest)| rest);
             let (host, path) = path.split_once('/').expect("rpc path");
             let mut session = String::new();
@@ -264,9 +266,9 @@ async fn down_limit_kbps(kind: Kind, url: &str) -> Option<u32> {
                 }
                 let json: Value = serde_json::from_str(text.split("\r\n\r\n").nth(1)?).ok()?;
                 let args = &json["arguments"];
-                return (args["speed-limit-down-enabled"] == true)
+                return (args[format!("speed-limit-{dir}-enabled")] == true)
                     .then(|| {
-                        args["speed-limit-down"]
+                        args[format!("speed-limit-{dir}")]
                             .as_u64()
                             .and_then(|v| u32::try_from(v).ok())
                     })
@@ -279,7 +281,7 @@ async fn down_limit_kbps(kind: Kind, url: &str) -> Option<u32> {
                 decode_response, encode_call, MethodResponse, Value as Xml,
             };
             let call = encode_call(
-                "throttle.global_down.max_rate",
+                &format!("throttle.global_{dir}.max_rate"),
                 &[Xml::String(String::new())],
             );
             let headers = format!("CONTENT_LENGTH\0{}\0SCGI\x001\0", call.len());
@@ -780,13 +782,21 @@ async fn run(kind: Kind) {
         .wait(
             "the core download limit",
             Duration::from_secs(10),
-            || async { down_limit_kbps(kind, &leecher.url).await == Some(CORE_DOWN_KBPS) },
+            || async { limit_kbps(kind, &leecher.url, "down").await == Some(CORE_DOWN_KBPS) },
         )
         .await;
     assert_eq!(
         json(addr, "/api/v1/system/status").await["pause_reason"],
         "core"
     );
+    // Transmission holds a zero upload rate; rtorrent reads zero as none and keeps 1 KiB/s.
+    let paused = if kind == Kind::Transmission { 0 } else { 1 };
+    probe
+        .wait("uploads paused", Duration::from_secs(10), || async {
+            limit_kbps(kind, &leecher.url, "up").await == Some(paused)
+                && json(addr, "/api/v1/system/status").await["uploads_paused"] == true
+        })
+        .await;
     probe
         .wait("the idle I/O class", Duration::from_secs(10), || async {
             ionice_logged(&home, 3)
@@ -797,8 +807,14 @@ async fn run(kind: Kind) {
         .wait(
             "the menu download limit",
             Duration::from_secs(10),
-            || async { down_limit_kbps(kind, &leecher.url).await.is_none() },
+            || async { limit_kbps(kind, &leecher.url, "down").await.is_none() },
         )
+        .await;
+    probe
+        .wait("uploads restored", Duration::from_secs(10), || async {
+            limit_kbps(kind, &leecher.url, "up").await.is_none()
+                && json(addr, "/api/v1/system/status").await["uploads_paused"] == false
+        })
         .await;
     probe
         .wait("the default I/O class", Duration::from_secs(10), || async {

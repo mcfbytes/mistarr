@@ -32,6 +32,8 @@ export interface SystemStatus {
   paused: boolean;
   pause_reason: PauseReason;
   override: Override;
+  /** Whether the client's uploads are held while a core runs. */
+  uploads_paused: boolean;
   waiting: WaitingJob[];
   disk_free_bytes: number | null;
   dats_dir: string;
@@ -350,11 +352,17 @@ export interface ScanSettings {
   chd_tracks: boolean;
 }
 
+export interface TransferSettings {
+  /** Hold every upload while a core other than the menu runs. */
+  pause_uploads_while_playing: boolean;
+}
+
 export interface Settings {
   client: ClientSettings;
   limits: LimitsSettings;
   prefs: PrefsSettings;
   scan: ScanSettings;
+  transfer: TransferSettings;
 }
 
 export interface SettingsPatch {
@@ -362,6 +370,7 @@ export interface SettingsPatch {
   limits?: LimitsSettings;
   prefs?: PrefsSettings;
   scan?: ScanSettings;
+  transfer?: TransferSettings;
 }
 
 /** Why a disc image is not identified; `unidentified.ts` has the sentence for each. */

@@ -15,7 +15,7 @@ torrent client that ships with the image, and moves verified files into the
 | SD card, exFAT, ~10-20 MB/s writes | Stage and rename on the same filesystem, never copy. Idle I/O class while a core runs. No symlinks, case-insensitive names. |
 | `/media/fat` mounted `sync,dirsync` | Every write syscall there is flushed to the card before it returns, about 25 ms each, so the database's cost is its count of writes, not bytes. SQLite's temporary files and the DAT stage live in RAM, and a DAT import or a migration runs on a copy of the database in RAM written back 1 MiB at a time; see "Writes on a sync mount" and "DAT import in RAM". |
 | Stock image is Buildroot 2021 with glibc 2.31 | musl static linking, no OpenSSL, `rustls` only. |
-| MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing, scans and file placement while it is anything other than `MENU`. DAT and source parsing continue at low priority; transfers continue at a reduced rate limit. |
+| MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing, scans and file placement while it is anything other than `MENU`. DAT and source parsing continue at low priority; transfers continue at a reduced rate limit, with uploads paused unless the user turns that off. |
 | Torrent client already present | Stock image ships rtorrent; Buildroot_MiSTer ships Transmission. mistarr never embeds a client. |
 | Content neutrality | See PRINCIPLES.md. No sources in the tree; watched directories are the only input path. |
 
@@ -68,6 +68,9 @@ pub trait DownloadClient: Send + Sync {
     async fn files(&self, id: &ClientTorrentId) -> Result<Vec<ClientFile>>;         // paths and sizes, MetadataPending until known
     async fn remove(&self, id: &ClientTorrentId, delete_data: bool) -> Result<()>;
     async fn set_rate_limits(&self, down_kbps: Option<u32>, up_kbps: Option<u32>) -> Result<()>;
+    async fn upload_limit(&self) -> Result<UploadLimit>;                           // to put back after a pause
+    async fn set_upload_limit(&self, limit: UploadLimit) -> Result<()>;
+    async fn pause_uploads(&self) -> Result<()>;
 }
 
 // mistarr-mister
@@ -504,9 +507,12 @@ Jobs run on three serial lanes, one job at a time each:
 | light | `detect_client`, `transfer`, `resolve_magnet`, `deselect` | Runs. |
 
 The CORENAME watcher polls `/tmp/CORENAME` every 2 s. When the value is not
-`MENU` the gate closes for the heavy lane and the poller applies the "core
-running" rate limits. When it returns to `MENU` everything resumes. This is
-a scheduler-level gate, not something each job needs to know about.
+`MENU` the gate closes for the heavy lane and the client gets the "core
+running" rate limits and, while `transfer.pause_uploads_while_playing` is on,
+has its uploads paused. When it returns to `MENU` everything resumes: the
+client's own upload limit is put back and each source's seed policy applies
+as before (DOWNLOAD-CLIENTS.md "Core gate"). This is a scheduler-level gate,
+not something each job needs to know about.
 
 "Pause" (`POST /system/pause`) holds the heavy and background lanes; a DAT
 parse in progress waits at its next 200 entries. While a lane is held,
@@ -895,6 +901,9 @@ down_kbps_core = 512
 up_kbps_menu   = 0
 up_kbps_core   = 64
 
+[transfer]
+pause_uploads_while_playing = true   # hold every upload while a core runs
+
 [prefs]
 regions   = ["USA", "World", "Europe", "Japan"]
 languages = ["En"]
@@ -920,11 +929,11 @@ chd_tracks = false          # decode CHD images to identify them by their tracks
 The file is `--config FILE` if given, else `<data>/mistarr.toml` when it
 exists, where `<data>` is `--data DIR` or `/media/fat/mistarr`; `--data`
 also overrides `paths.data` and `--listen` overrides `server.listen`. The
-`client`, `limits`, `prefs` and `scan` sections are editable through
-`/system/settings`; saved values live in the `settings` table and take
+`client`, `limits`, `transfer`, `prefs` and `scan` sections are editable
+through `/system/settings`; saved values live in the `settings` table and take
 precedence over the file on every start, except that settings saved without
-a `scan` section leave the file's in force, so a faster board can default
-`chd_tracks` on in the file. `server`, `paths`, `sources`, `jobs` and
+a `scan` or `transfer` section leave the file's in force, so a faster board
+can default `chd_tracks` on in the file. `server`, `paths`, `sources`, `jobs` and
 `memory` need a restart.
 
 ## Non-goals

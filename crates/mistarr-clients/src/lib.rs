@@ -113,6 +113,24 @@ pub struct ClientInfo {
     pub version: String,
 }
 
+/// A client's global upload limit as [`DownloadClient::upload_limit`] read it, so
+/// [`DownloadClient::set_upload_limit`] can put it back exactly. The rate is kept
+/// while the limit is off, as Transmission keeps it.
+///
+/// ```
+/// use mistarr_clients::UploadLimit;
+/// let l: UploadLimit = serde_json::from_str(r#"{"enabled":true,"kbps":64}"#)?;
+/// assert_eq!(l, UploadLimit { enabled: true, kbps: 64 });
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UploadLimit {
+    /// Whether the limit applies.
+    pub enabled: bool,
+    /// The limit in the client's kilobytes per second, as for [`DownloadClient::set_rate_limits`].
+    pub kbps: u32,
+}
+
 /// The torrent to hand to the client.
 ///
 /// ```
@@ -473,4 +491,14 @@ pub trait DownloadClient: Send + Sync {
     /// Sets global rate limits in the client's kilobytes per second (1000
     /// bytes for Transmission, 1024 for rtorrent). `None` or `Some(0)` lifts the limit.
     async fn set_rate_limits(&self, down_kbps: Option<u32>, up_kbps: Option<u32>) -> Result<()>;
+
+    /// Reads the global upload limit, to restore after [`DownloadClient::pause_uploads`].
+    async fn upload_limit(&self) -> Result<UploadLimit>;
+
+    /// Sets the global upload limit to what [`DownloadClient::upload_limit`] read.
+    async fn set_upload_limit(&self, limit: UploadLimit) -> Result<()>;
+
+    /// Holds every upload at the lowest rate the client can keep: zero in
+    /// Transmission, 1 KiB/s in rtorrent, which reads zero as no limit.
+    async fn pause_uploads(&self) -> Result<()>;
 }

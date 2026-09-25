@@ -18,6 +18,9 @@ pub mod keys {
     pub const WIZARD_DISMISSED: &str = "wizard.dismissed";
     /// JSON `u64`: decoded CHD bytes per active second, from the last image decoded.
     pub const CHD_RATE: &str = "chd.rate";
+    /// JSON [`crate::jobs::core_limits::Marker`]: the client's upload limit, kept
+    /// while mistarr holds uploads for a running core.
+    pub const UPLOADS_PAUSED: &str = "transfer.uploads_paused";
 }
 
 /// Reads a value.
@@ -106,6 +109,25 @@ pub fn set_json<T: Serialize>(conn: &Connection, key: &str, value: &T) -> Result
     set(conn, key, &text)
 }
 
+/// Deletes a value; absent keys are fine.
+///
+/// # Errors
+///
+/// [`Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::settings;
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// settings::set(&conn, "k", "v").unwrap();
+/// settings::remove(&conn, "k").unwrap();
+/// assert_eq!(settings::get(&conn, "k").unwrap(), None);
+/// ```
+pub fn remove(conn: &Connection, key: &str) -> Result<()> {
+    conn.execute("DELETE FROM settings WHERE key = ?1", [key])?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -123,6 +145,9 @@ mod tests {
         set(&c, "k", "2").expect("set");
         assert_eq!(get(&c, "k").expect("get").as_deref(), Some("2"));
         assert_eq!(get(&c, "other").expect("get"), None);
+        remove(&c, "k").expect("remove");
+        remove(&c, "k").expect("remove again");
+        assert_eq!(get(&c, "k").expect("get"), None);
     }
 
     #[test]

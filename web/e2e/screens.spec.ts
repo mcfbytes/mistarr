@@ -97,6 +97,22 @@ test('the launch setting is editable', async ({ page }) => {
   await expect(allow).not.toBeChecked();
 });
 
+test('held uploads show on Sources, System and the activity panel', async ({ page }) => {
+  const pill = '[data-testid="uploads-paused"] [data-status="paused"]';
+  await page.goto('/#/sources');
+  await expect(page.locator(pill)).toHaveText('Uploads paused while a game runs');
+  await page.getByRole('button', { name: /^Background work:/ }).click();
+  const panel = page.getByRole('region', { name: 'Background work' });
+  await expect(panel.locator(pill)).toHaveText('Uploads paused while a game runs');
+  await page.goto('/#/system');
+  await expect(page.locator(`.page ${pill}`)).toHaveText('Uploads paused while a game runs');
+  const setting = page.getByLabel('Pause uploads while a game runs');
+  await expect(setting).toBeChecked();
+  await expect(setting).toHaveAccessibleDescription(/frees the card and CPU for the game/i);
+  await setting.uncheck();
+  await expect(setting).not.toBeChecked();
+});
+
 test('platform cards show have, wanted and titles, plus any nonzero extra', async ({ page }) => {
   await page.goto('/#/');
   await expect(page.getByText('180 have · 12 wanted · 240 titles · 4 unmatched files')).toBeVisible();

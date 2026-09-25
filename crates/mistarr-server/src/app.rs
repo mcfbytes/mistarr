@@ -2,10 +2,11 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use mistarr_clients::DownloadClient;
+use mistarr_clients::{ClientKind, DownloadClient};
 use mistarr_mister::launch::{CommandSink, FifoSink};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -121,6 +122,9 @@ pub struct AppState {
     pub poll_wake: tokio::sync::Notify,
     /// Wakes client re-detection, as when a client that answered stops answering.
     pub redetect: tokio::sync::Notify,
+    /// Wakes the core-gate limits to re-read `[transfer]` after the settings change.
+    pub limits_wake: tokio::sync::Notify,
+    uploads_paused: AtomicBool,
     /// Serialises client detection so an older probe never overwrites a newer one.
     pub(crate) detect_lock: tokio::sync::Mutex<()>,
     /// Held while `POST /system/client/start` runs, so a second one is `busy`.
@@ -150,6 +154,8 @@ impl AppState {
             started: Instant::now(),
             poll_wake: tokio::sync::Notify::new(),
             redetect: tokio::sync::Notify::new(),
+            limits_wake: tokio::sync::Notify::new(),
+            uploads_paused: AtomicBool::new(false),
             detect_lock: tokio::sync::Mutex::new(()),
             client_start: tokio::sync::Mutex::new(()),
             shutdown: watch::Sender::new(false),
@@ -196,6 +202,27 @@ impl AppState {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .map(|(_, c)| Arc::clone(c))
+    }
+
+    /// [`AppState::client`] with the kind of client it drives.
+    #[must_use]
+    pub fn client_with_kind(&self) -> Option<(ClientKind, Arc<dyn DownloadClient>)> {
+        self.client
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|(k, c)| (k.kind, Arc::clone(c)))
+    }
+
+    /// Whether the client's uploads are held for a running core.
+    #[must_use]
+    pub fn uploads_paused(&self) -> bool {
+        self.uploads_paused.load(Ordering::Relaxed)
+    }
+
+    /// Records whether uploads are held; true when that changed.
+    pub(crate) fn set_uploads_paused(&self, paused: bool) -> bool {
+        self.uploads_paused.swap(paused, Ordering::Relaxed) != paused
     }
 
     /// Points [`AppState::client`] at what `status` found. The current handle
@@ -567,7 +594,9 @@ fn spawn_tasks(app: &Arc<AppState>, scan_interval: u32) -> Vec<tokio::task::Join
     tasks.push(tokio::spawn(crate::jobs::detect_client::watch(Arc::clone(
         app,
     ))));
-    tasks.push(tokio::spawn(poll::follow_gate(Arc::clone(app))));
+    tasks.push(tokio::spawn(jobs::core_limits::follow_gate(Arc::clone(
+        app,
+    ))));
 
     tasks
 }

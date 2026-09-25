@@ -5,6 +5,7 @@
   import { api, errorMessage } from '../lib/api';
   import ClientStart from '../lib/ClientStart.svelte';
   import PathMapEditor from '../lib/PathMapEditor.svelte';
+  import UploadsPaused from '../lib/UploadsPaused.svelte';
   import { cleanPathMap } from '../lib/pathmap';
   import { speedText } from '../lib/unidentified';
   import type { Settings } from '../lib/types';
@@ -102,6 +103,7 @@
         {#if status.pause_reason === 'core'}<span class="muted">(held for the running core)</span>{/if}
         <button onclick={togglePause}>{status.paused ? 'Resume' : 'Pause'}</button>
       </p>
+      <UploadsPaused />
       {#if statusError}<p class="error">{statusError}</p>{/if}
     </div>
   {/if}
@@ -142,6 +144,17 @@
         Upload while a core runs
         <input type="number" min="0" bind:value={settings.limits.up_kbps_core} />
       </label>
+      <label>
+        <input
+          type="checkbox"
+          bind:checked={settings.transfer.pause_uploads_while_playing}
+          aria-describedby="uploads-help"
+        />
+        Pause uploads while a game runs
+      </label>
+      <p id="uploads-help" class="muted help">
+        Frees the card and CPU for the game. At the menu, each source's seed policy applies again.
+      </p>
 
       <h3>1G1R preferences</h3>
       <label>

@@ -510,47 +510,100 @@ async fn a_wanted_title_waits_for_a_source_to_bind() {
     b.running.shutdown().await.expect("shutdown");
 }
 
+/// Transmission's `session-set` and `session-get` arguments since boot.
+fn session_calls(fake: &FakeServer) -> Vec<Value> {
+    fake.bodies()
+        .into_iter()
+        .filter(|x| x["method"] == "session-set" || x["method"] == "session-get")
+        .skip(1)
+        .map(|x| x["arguments"].clone())
+        .collect()
+}
+
+fn upload_limit(kbps: u32, enabled: bool) -> Value {
+    json!({ "speed-limit-up": kbps, "speed-limit-up-enabled": enabled })
+}
+
+async fn uploads_paused(b: &Booted) -> Value {
+    get(b.addr(), "/api/v1/system/status").await.json()["uploads_paused"].clone()
+}
+
 #[tokio::test]
-async fn corename_switches_rate_limits_once_per_transition() {
+async fn corename_switches_rate_limits_and_uploads_once_per_transition() {
     let fake = FakeServer::start().await.expect("fake");
     let b = boot_transmission(&fake).await;
     let app = &b.running.app;
-    let sets = || {
-        fake.bodies()
-            .into_iter()
-            .filter(|x| x["method"] == "session-set")
-            .map(|x| x["arguments"].clone())
-            .collect::<Vec<_>>()
-    };
+    let sets = || session_calls(&fake);
     std::fs::write(b.corename(), "MENU").expect("write");
     eventually("MENU read", || async {
         app.gate.state().corename.as_deref() == Some("MENU")
     })
     .await;
+    fake.push(FakeResponse::success(upload_limit(30, true)));
     fake.push(ok());
     fake.push(ok());
     std::fs::write(b.corename(), "SNES").expect("write");
-    eventually("core limits", || async { sets().len() == 1 }).await;
+    eventually("uploads paused", || async { sets().len() == 3 }).await;
     assert_eq!(
-        sets()[0],
-        json!({
-            "speed-limit-down": 512, "speed-limit-down-enabled": true,
-            "speed-limit-up": 64, "speed-limit-up-enabled": true
-        })
+        sets(),
+        [
+            json!({ "fields": ["speed-limit-up", "speed-limit-up-enabled"] }),
+            json!({
+                "speed-limit-down": 512, "speed-limit-down-enabled": true,
+                "speed-limit-up": 64, "speed-limit-up-enabled": true
+            }),
+            upload_limit(0, true),
+        ]
     );
+    eventually("the paused status", || async {
+        uploads_paused(&b).await == true
+    })
+    .await;
     std::fs::write(b.corename(), "N64").expect("write");
     eventually("N64 read", || async {
         app.gate.state().corename.as_deref() == Some("N64")
     })
     .await;
+    fake.push(ok());
+    fake.push(ok());
     std::fs::write(b.corename(), "MENU").expect("write");
-    eventually("menu limits", || async { sets().len() == 2 }).await;
+    eventually("menu limits", || async { sets().len() == 5 }).await;
     assert_eq!(
-        sets()[1],
-        json!({ "speed-limit-down-enabled": false, "speed-limit-up-enabled": false })
+        sets()[3..],
+        [
+            upload_limit(30, true),
+            json!({ "speed-limit-down-enabled": false, "speed-limit-up-enabled": false }),
+        ]
     );
+    assert_eq!(uploads_paused(&b).await, false);
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(sets().len(), 2);
+    assert_eq!(sets().len(), 5);
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn turning_the_pause_off_mid_game_restores_uploads() {
+    let fake = FakeServer::start().await.expect("fake");
+    let b = boot_transmission(&fake).await;
+    let sets = || session_calls(&fake);
+    fake.push(FakeResponse::success(upload_limit(8, false)));
+    fake.push(ok());
+    fake.push(ok());
+    std::fs::write(b.corename(), "SNES").expect("write");
+    eventually("uploads paused", || async { sets().len() == 3 }).await;
+    fake.push(ok());
+    fake.push(ok());
+    let body = json!({ "transfer": { "pause_uploads_while_playing": false } }).to_string();
+    let r = request(b.addr(), "PUT", "/api/v1/system/settings", &[], Some(&body)).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["transfer"]["pause_uploads_while_playing"], false);
+    eventually("uploads restored", || async { sets().len() == 5 }).await;
+    assert_eq!(sets()[3], upload_limit(8, false));
+    assert_eq!(sets()[4]["speed-limit-up"], 64);
+    assert_eq!(uploads_paused(&b).await, false);
+    std::fs::write(b.corename(), "MENU").expect("write");
+    fake.push(ok());
+    eventually("menu limits", || async { sets().len() == 6 }).await;
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -725,9 +778,12 @@ async fn refused_rate_limits_are_retried_until_the_client_takes_them() {
             .into_iter()
             .filter(|x| x["method"] == "session-set")
             .map(|x| x["arguments"]["speed-limit-down"].clone())
+            .filter(|down| !down.is_null())
             .collect::<Vec<_>>()
     };
+    fake.push(FakeResponse::success(upload_limit(0, false)));
     fake.push(FakeResponse::failure("busy"));
+    fake.push(ok());
     fake.push(ok());
     std::fs::write(b.corename(), "SNES").expect("write");
     eventually("the retried core limits", || async { sets().len() == 2 }).await;

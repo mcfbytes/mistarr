@@ -881,3 +881,48 @@ async fn status_of_a_large_torrent_reads_every_file() {
         .is_some_and(|f| f.bytes_done == 4 && !f.wanted));
     assert!(st.file_done(4, 4) && !st.file_done(3, 4));
 }
+
+#[tokio::test]
+async fn upload_limit_is_read_paused_and_restored() {
+    let (fake, client) = setup().await;
+    fake.push(FakeResponse::success(
+        json!({ "speed-limit-up": 40, "speed-limit-up-enabled": false }),
+    ));
+    fake.push(FakeResponse::success(json!({})));
+    fake.push(FakeResponse::success(json!({})));
+    let before = client.upload_limit().await.expect("read");
+    assert_eq!(
+        before,
+        UploadLimit {
+            enabled: false,
+            kbps: 40
+        }
+    );
+    client.pause_uploads().await.expect("pause");
+    client.set_upload_limit(before).await.expect("restore");
+    assert_eq!(
+        fake.bodies(),
+        vec![
+            rpc(
+                "session-get",
+                json!({ "fields": ["speed-limit-up", "speed-limit-up-enabled"] })
+            ),
+            rpc(
+                "session-set",
+                json!({ "speed-limit-up": 0, "speed-limit-up-enabled": true })
+            ),
+            rpc(
+                "session-set",
+                json!({ "speed-limit-up": 40, "speed-limit-up-enabled": false })
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_session_without_the_upload_limit_is_a_protocol_error() {
+    let (fake, client) = setup().await;
+    fake.push(FakeResponse::success(json!({ "speed-limit-up": 5 })));
+    let err = client.upload_limit().await.expect_err("incomplete");
+    assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
+}

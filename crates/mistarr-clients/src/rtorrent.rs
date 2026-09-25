@@ -13,8 +13,13 @@ use crate::xmlrpc::{self, Fault, MethodResponse, Value};
 use crate::{
     metainfo, scgi, ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId,
     DownloadClient, FileProgress, InfoHash, RemotePathMap, Result, SeedPolicy, TorrentSource,
-    TorrentState, TorrentStatus,
+    TorrentState, TorrentStatus, UploadLimit,
 };
+
+/// Reads the global upload limit in bytes per second; 0 is none.
+const UP_RATE: &str = "throttle.global_up.max_rate";
+/// Sets the global upload limit in KiB/s; 0 lifts it.
+const UP_RATE_SET_KB: &str = "throttle.global_up.max_rate.set_kb";
 
 /// First line of every rc mistarr writes; an rc without it belongs to the user.
 pub const RC_MARKER: &str =
@@ -479,6 +484,31 @@ impl DownloadClient for Rtorrent {
             self.call(method, &["".into(), kb.into()]).await?;
         }
         Ok(())
+    }
+
+    async fn upload_limit(&self) -> Result<UploadLimit> {
+        let _guard = self.torrents.lock().await;
+        let bytes = uint(&self.call(UP_RATE, &["".into()]).await?)?;
+        let kbps = u32::try_from(bytes / 1024).map_err(protocol)?;
+        Ok(UploadLimit {
+            enabled: kbps > 0,
+            kbps,
+        })
+    }
+
+    async fn set_upload_limit(&self, limit: UploadLimit) -> Result<()> {
+        let kb = if limit.enabled { limit.kbps } else { 0 };
+        let _guard = self.torrents.lock().await;
+        self.call(UP_RATE_SET_KB, &["".into(), i64::from(kb).into()])
+            .await
+            .map(drop)
+    }
+
+    async fn pause_uploads(&self) -> Result<()> {
+        let _guard = self.torrents.lock().await;
+        self.call(UP_RATE_SET_KB, &["".into(), 1.into()])
+            .await
+            .map(drop)
     }
 }
 

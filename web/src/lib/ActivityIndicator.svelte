@@ -5,6 +5,7 @@
   import { QUIET_KINDS, describeProgress, jobDetail, jobHref, jobStatus, kindLabel } from './status';
   import StatusPill from './StatusPill.svelte';
   import ProgressBar from './ProgressBar.svelte';
+  import UploadsPaused from './UploadsPaused.svelte';
   import type { Job } from './types';
 
   /** The always-visible work indicator in the nav and its panel; see docs/UI.md "Activity indicator". */
@@ -158,6 +159,7 @@
       <h2 id="activity-heading">Background work</h2>
       <span class="muted">{summary.charAt(0).toUpperCase() + summary.slice(1)}</span>
     </header>
+    <UploadsPaused />
 
     {#if active.length === 0}
       <p class="empty muted">Nothing is running or waiting.</p>

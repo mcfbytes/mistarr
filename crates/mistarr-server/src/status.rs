@@ -31,6 +31,8 @@ pub struct Status {
     /// The manual override in force.
     #[serde(rename = "override")]
     pub manual_override: Option<Override>,
+    /// Whether the download client's uploads are held while a core runs.
+    pub uploads_paused: bool,
     /// Queued and paused jobs on held lanes, heavy first, oldest first;
     /// empty while no lane is held.
     pub waiting: Vec<WaitingJob>,
@@ -197,6 +199,7 @@ pub async fn snapshot(app: &AppState) -> Status {
         pause_reason: gate.pause_reason(),
         paused: gate.paused(),
         manual_override: gate.manual,
+        uploads_paused: app.uploads_paused(),
         waiting,
         corename: gate.corename,
         disk_free_bytes: free_bytes(&data),

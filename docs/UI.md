@@ -115,6 +115,8 @@ tracks: 3 verified, 1 unmatched, 1 not identified". Live over SSE.
 status pill (resolving runs, unbound waits, bound is done, disabled is
 paused) with its reason beneath, file count,
 matched count, seed policy, client status. Bind and disable actions.
+Under the heading, the uploads-paused pill while it applies (see "Uploads
+while a game runs").
 Unbound sources have a platform picker and, when the names suggest one, a
 "Bind to" button for the suggested platform. Above the table, the files still
 in `sources/` and this session's uploads, as in the wizard.
@@ -147,7 +149,19 @@ and the switch that allows launching, log tail. Under "Disc images", the
 checkbox "Identify CHD images by their tracks" with a "Slow" tag, a line
 saying it decodes each image once, pauses while a core runs and keeps its
 results, and the measured speed as "about N minutes per 700 MB image", or
-"Speed not measured yet."
+"Speed not measured yet." Under the limits, the checkbox "Pause uploads while
+a game runs", on by default, with the line "Frees the card and CPU for the
+game. At the menu, each source's seed policy applies again." The status card
+shows the uploads-paused pill while it applies.
+
+## Uploads while a game runs
+
+While `/system/status` reports `uploads_paused`, the Sources screen, the
+System status card and the activity panel, under its heading, show one
+paused pill reading "Uploads paused while a game runs"
+(`web/src/lib/UploadsPaused.svelte`). It follows the `status` event, so it
+appears when the client takes the pause and goes when the upload limit is
+restored at the menu. Each source's seed policy on its row is unchanged.
 
 ## Platform art
 

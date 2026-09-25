@@ -1068,3 +1068,37 @@ fn a_labelled_delete_removes_the_files_and_keeps_the_thread_name() {
         assert_eq!(comm.trim_end(), "delete-test");
     }
 }
+
+#[tokio::test]
+async fn upload_limit_is_read_paused_and_restored() {
+    let (fake, client) = setup().await;
+    fake.push(ScgiReply::Value(Value::Int(25 * 1024)));
+    fake.push(ok());
+    fake.push(ok());
+    fake.push(ScgiReply::Value(Value::Int(0)));
+    fake.push(ok());
+    let before = client.upload_limit().await.expect("read");
+    assert_eq!(
+        before,
+        UploadLimit {
+            enabled: true,
+            kbps: 25
+        }
+    );
+    client.pause_uploads().await.expect("pause");
+    client.set_upload_limit(before).await.expect("restore");
+    let none = client.upload_limit().await.expect("read");
+    assert_eq!(none, UploadLimit::default());
+    client.set_upload_limit(none).await.expect("restore");
+    let set = "throttle.global_up.max_rate.set_kb";
+    assert_eq!(
+        fake.calls(),
+        vec![
+            call("throttle.global_up.max_rate", vec![v("")]),
+            call(set, vec![v(""), Value::Int(1)]),
+            call(set, vec![v(""), Value::Int(25)]),
+            call("throttle.global_up.max_rate", vec![v("")]),
+            call(set, vec![v(""), Value::Int(0)]),
+        ]
+    );
+}
