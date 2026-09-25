@@ -80,12 +80,12 @@ badges, no manufacturer artwork or traces of it, no product photos, and no
 colour schemes that imitate a manufacturer's brand.
 
 Within those limits the UI may show original, stylised illustrations of
-console, handheld or computer hardware. Such hardware is recognisable by form
-alone: proportions, slots, screen, D-pad, buttons and ports. It carries no
-logo, wordmark, badge, model name or other printed text, and it is never
-drawn in the manufacturer's own colour scheme or a brand colour combination,
-for example a grey body with red or black accents, four-colour face buttons
-or a multicolour logo.
+console, handheld, computer or arcade cabinet hardware. Such an illustration
+must be recognisable by form alone: proportions, slots, screen, D-pad,
+buttons and ports. It carries no logo, wordmark, badge, model name or other
+printed text, and it is never drawn in the manufacturer's own colour scheme
+or a brand colour combination, for example a grey body with red or black
+accents, or four-colour face buttons.
 
 ## Why these rules
 
