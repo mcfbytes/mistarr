@@ -1,6 +1,13 @@
-import { test, expect, type Page } from '@playwright/test';
+import { test, expect, type Locator, type Page } from '@playwright/test';
 
 test.use({ permissions: ['clipboard-read', 'clipboard-write'] });
+
+function tile(page: Page, name: string): Locator {
+  return page
+    .getByRole('list', { name: 'Status' })
+    .getByRole('listitem')
+    .filter({ has: page.getByRole('heading', { name, exact: true }) });
+}
 
 async function clipboard(page: Page): Promise<string> {
   return page.evaluate(() => navigator.clipboard.readText());
@@ -10,32 +17,46 @@ test('the status tiles show the board, client, scheduler, memory, storage and up
   await page.goto('/#/system');
   const tiles = page.getByRole('list', { name: 'Status' }).getByRole('listitem');
   await expect(tiles).toHaveCount(6);
-  await expect(tiles.filter({ hasText: 'MiSTer' })).toContainText('FCEUmm');
-  await expect(tiles.filter({ hasText: 'MiSTer' })).toContainText('Launching: Ready');
-  const client = tiles.filter({ hasText: 'Download client' });
+  await expect(tile(page, 'MiSTer')).toContainText('FCEUmm');
+  await expect(tile(page, 'MiSTer')).toContainText('Launching: Ready');
+  const client = tile(page, 'Download client');
   await expect(client).toContainText('rtorrent');
   await expect(client.locator('[data-status="done"]')).toHaveText('Reachable');
   await expect(client).toContainText('scgi://127.0.0.1:5000');
-  const scheduler = tiles.filter({ hasText: 'Scheduler' });
+  const scheduler = tile(page, 'Scheduler');
   await expect(scheduler.locator('[data-status="paused"]')).toHaveText('Held for the core');
   await expect(scheduler).toContainText('1 job waiting');
   await expect(scheduler.getByRole('button', { name: 'Run now' })).toBeVisible();
-  await expect(tiles.filter({ hasText: 'Memory' })).toContainText('41 MB used by mistarr');
+  await expect(tile(page, 'Memory')).toContainText('41 MB used by mistarr');
   await expect(page.getByRole('meter', { name: 'Board memory in use' })).toHaveAttribute(
     'aria-valuetext',
     '214 MB available of 507 MB'
   );
   await expect(page.getByRole('meter', { name: 'Storage in use' })).toHaveAttribute('aria-valuenow', '61');
-  await expect(tiles.filter({ hasText: 'Uptime' })).toContainText('1 h 15 min');
+  await expect(tile(page, 'Uptime')).toContainText('1 h 15 min');
+  const held = 'Download client paused while FCEUmm is running';
+  await expect(tile(page, 'MiSTer').locator('[data-status="paused"]')).toHaveText(held);
+  await expect(client.locator('[data-status="paused"]')).toHaveText(held);
+});
+
+test('held uploads on rtorrent show in both tiles, the 1 KiB/s line in the client tile only', async ({ page }) => {
+  await page.goto('/#/');
+  await page.evaluate(() => localStorage.setItem('mistarr.mockStatus', JSON.stringify({ client_hold: 'uploads' })));
+  await page.goto('/#/system');
+  const text = 'Uploads paused while FCEUmm is running';
+  await expect(tile(page, 'MiSTer').locator('[data-status="paused"]')).toHaveText(text);
+  await expect(tile(page, 'MiSTer')).not.toContainText('1 KiB/s');
+  await expect(tile(page, 'Download client')).toContainText('rtorrent holds uploads at 1 KiB/s');
+  await page.evaluate(() => localStorage.removeItem('mistarr.mockStatus'));
 });
 
 test('at the menu with nothing held, the board and scheduler say so', async ({ page }) => {
   await page.goto('/?mock=showcase#/system');
-  const tiles = page.getByRole('list', { name: 'Status' }).getByRole('listitem');
-  await expect(tiles.filter({ hasText: 'MiSTer' })).toContainText('At the menu');
-  const scheduler = tiles.filter({ hasText: 'Scheduler' });
+  await expect(tile(page, 'MiSTer')).toContainText('At the menu');
+  const scheduler = tile(page, 'Scheduler');
   await expect(scheduler.locator('[data-status="running"]')).toHaveText('Running');
   await expect(scheduler).toContainText('Nothing waiting');
+  await expect(page.locator('[data-testid^="client-held"]')).toHaveCount(0);
   await expect(scheduler.getByRole('button', { name: 'Pause' })).toBeVisible();
 });
 
@@ -64,7 +85,7 @@ test('Copy diagnostics gives plain text with no paths, addresses or file names',
   await expect(page.locator('.toasts').getByText('Diagnostics copied.')).toBeVisible();
   const text = await clipboard(page);
   expect(text.split('\n')[0]).toBe('mistarr 0.3.0+dev.1a2b3c4 (development build)');
-  for (const line of ['client: rtorrent version unknown, reachable', 'corename: FCEUmm', 'scheduler: paused (core), 1 job waiting']) {
+  for (const line of ['client: rtorrent version unknown, reachable', 'corename: FCEUmm', 'scheduler: paused (core), 1 job waiting', 'pause client while a core runs: yes', 'client held: frozen']) {
     expect(text).toContain(line);
   }
   expect(text).toMatch(/^memory: mistarr 39 MiB, available 204 MiB of 484 MiB$/m);

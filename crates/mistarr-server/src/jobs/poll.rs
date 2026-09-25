@@ -1,5 +1,4 @@
-//! The download poller and the core-gate rate limits; see `docs/DOWNLOAD-CLIENTS.md`
-//! "Polling" and "Core gate".
+//! The download poller; see `docs/DOWNLOAD-CLIENTS.md` "Polling".
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf};
@@ -12,7 +11,6 @@ use mistarr_clients::{
 
 use super::transfer;
 use crate::app::{AppState, Options};
-use crate::config::LimitsConfig;
 use crate::db::downloads::{self as rows, DownloadId, DownloadState, Observed, PollRow};
 use crate::db::settings::{self, keys};
 use crate::db::sources::{self, SourceId};
@@ -415,23 +413,6 @@ pub async fn run(app: Arc<AppState>) {
     }
 }
 
-/// The `(down, up)` limits in KiB/s for the menu or a running core; 0 is unlimited.
-///
-/// ```
-/// use mistarr_server::config::LimitsConfig;
-/// use mistarr_server::jobs::poll::limits_for;
-/// assert_eq!(limits_for(&LimitsConfig::default(), true), (512, 64));
-/// assert_eq!(limits_for(&LimitsConfig::default(), false), (0, 0));
-/// ```
-#[must_use]
-pub fn limits_for(limits: &LimitsConfig, core: bool) -> (u32, u32) {
-    if core {
-        (limits.down_kbps_core, limits.up_kbps_core)
-    } else {
-        (limits.down_kbps_menu, limits.up_kbps_menu)
-    }
-}
-
 /// Whether the poller stops a torrent: only under seed policy `none`, which
 /// neither client acts on by itself, once no download of its source is open
 /// and every file selected in the client is complete.
@@ -445,50 +426,6 @@ pub fn should_stop(status: &TorrentStatus, open: usize, policy: &SeedPolicy) -> 
             .iter()
             .filter(|f| f.wanted)
             .all(mistarr_clients::FileProgress::is_complete)
-}
-
-/// Applies the core limits each time CORENAME leaves `MENU` and the menu
-/// limits each time it returns, once per transition. While no client takes
-/// them, they are retried every [`Options::corename_poll`].
-pub async fn follow_gate(app: Arc<AppState>) {
-    let mut rx = app.gate.subscribe();
-    let mut applied = false;
-    loop {
-        let want = rx.borrow_and_update().core_running();
-        if want != applied && apply_limits(&app, want).await {
-            applied = want;
-        }
-        let changed = if want == applied {
-            rx.changed().await.is_ok()
-        } else {
-            tokio::select! {
-                r = rx.changed() => r.is_ok(),
-                () = tokio::time::sleep(app.options.corename_poll) => true,
-            }
-        };
-        if !changed {
-            return;
-        }
-    }
-}
-
-/// Sends the core or menu limits; true when the client took them.
-async fn apply_limits(app: &AppState, core: bool) -> bool {
-    let (down, up) = limits_for(&app.config().limits, core);
-    let Some(client) = app.client() else {
-        tracing::debug!("no download client for rate limits");
-        return false;
-    };
-    match client.set_rate_limits(Some(down), Some(up)).await {
-        Ok(()) => {
-            tracing::info!(core, down, up, "rate limits applied");
-            true
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "cannot apply rate limits");
-            false
-        }
-    }
 }
 
 #[cfg(test)]
@@ -610,11 +547,6 @@ mod tests {
         let o = Options::default();
         assert_eq!(Cadence::Idle.interval(&o), Duration::from_secs(60));
         assert_eq!(Cadence::Backoff.interval(&o), Duration::from_secs(300));
-        let l = LimitsConfig {
-            down_kbps_menu: 9,
-            ..LimitsConfig::default()
-        };
-        assert_eq!(limits_for(&l, false), (9, 0));
     }
 
     #[tokio::test]

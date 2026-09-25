@@ -78,6 +78,8 @@ export function diagnosticsText(status: SystemStatus): string {
   const held = status.waiting.length;
   const scheduler = status.paused ? `paused (${status.pause_reason ?? 'unknown'})` : 'running';
   lines.push(`scheduler: ${scheduler}, ${held} ${held === 1 ? 'job' : 'jobs'} waiting`);
+  lines.push(`pause client while a core runs: ${yesNo(status.pause_client_while_playing)}`);
+  lines.push(`client held: ${status.client_hold ?? 'no'}`);
   lines.push(`launching: ${status.launch}`);
   lines.push(`memory: mistarr ${mib(status.rss_bytes)}, available ${mib(status.mem_available_bytes)} of ${mib(status.mem_total_bytes)}`);
   lines.push(`free space data: ${mib(status.disk_free_bytes)} of ${mib(status.disk_total_bytes)}`);

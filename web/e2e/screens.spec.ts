@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 
 const routes = [
   { name: 'wizard', hash: '#/wizard' },
@@ -147,6 +147,71 @@ test('the launch setting is editable', async ({ page }) => {
   await expect(allow).toBeChecked();
   await allow.uncheck();
   await expect(allow).not.toBeChecked();
+});
+
+const held = '[data-testid="client-held"] [data-status="paused"]';
+
+async function mockStatus(page: Page, fields: Record<string, unknown>): Promise<void> {
+  await page.goto('/#/');
+  await page.evaluate((f) => localStorage.setItem('mistarr.mockStatus', JSON.stringify(f)), fields);
+  await page.reload();
+}
+
+test('a paused client shows on Sources, System and the activity panel', async ({ page }) => {
+  const text = 'Download client paused while FCEUmm is running';
+  await page.goto('/#/sources');
+  await expect(page.locator(held)).toHaveText(text);
+  await expect(page.locator('.seed-note').first()).toHaveText('Paused while a core runs');
+  await page.getByRole('button', { name: /^Background work:/ }).click();
+  const panel = page.getByRole('region', { name: 'Background work' });
+  await expect(panel.locator(held)).toHaveText(text);
+  await page.goto('/#/system');
+  await expect(page.locator(`.page ${held}`)).toHaveText(text);
+});
+
+test('held uploads on rtorrent say they are held at 1 KiB/s', async ({ page }) => {
+  await mockStatus(page, { client_hold: 'uploads' });
+  await page.goto('/#/sources');
+  await expect(page.locator(held)).toHaveText('Uploads paused while FCEUmm is running');
+  await expect(page.locator('[data-testid="client-held"]')).toContainText('rtorrent holds uploads at 1 KiB/s');
+  await page.evaluate(() => localStorage.removeItem('mistarr.mockStatus'));
+});
+
+test('nothing shows while the client is not held or the setting is off', async ({ page }) => {
+  await mockStatus(page, { client_hold: null, pause_client_while_playing: false });
+  await page.goto('/#/sources');
+  await expect(page.locator('h1', { hasText: 'Sources' })).toBeVisible();
+  await expect(page.locator('[data-testid="client-held"]')).toHaveCount(0);
+  await expect(page.locator('.seed-note')).toHaveCount(0);
+  await page.goto('/#/system');
+  await expect(page.locator('h1', { hasText: 'System' })).toBeVisible();
+  await expect(page.locator('[data-testid="client-held"]')).toHaveCount(0);
+  await page.evaluate(() => localStorage.removeItem('mistarr.mockStatus'));
+});
+
+test('the client pause setting is saved with the settings', async ({ page }) => {
+  await page.goto('/#/system');
+  await expect(page.getByRole('heading', { name: 'Transfers and limits' })).toBeVisible();
+  await expect(page.getByText("0 keeps the client's own limit. Any other value only ever lowers it.")).toBeVisible();
+  const setting = page.getByLabel('Pause the download client while a core runs');
+  await expect(setting).toBeChecked();
+  await expect(setting).toHaveAccessibleDescription(/frees the board for the game/i);
+  await setting.uncheck();
+  await page.getByRole('button', { name: 'Save' }).click();
+  await expect(page.locator('.toasts').getByText('Settings saved.')).toBeVisible();
+  const saved = await page.evaluate(() => localStorage.getItem('mistarr.mockSavedSettings') ?? '{}');
+  expect((JSON.parse(saved) as { transfer?: unknown }).transfer).toEqual({ pause_client_while_playing: false });
+  await page.evaluate(() => localStorage.removeItem('mistarr.mockSavedSettings'));
+});
+
+test('the wizard says transfers pause while a core runs', async ({ page }) => {
+  await page.goto('/#/wizard');
+  for (let i = 0; i < 3; i++) {
+    await page.getByRole('button', { name: 'Next' }).click();
+  }
+  await expect(page.getByRole('heading', { name: 'Seed policy' })).toBeVisible();
+  await expect(page.getByTestId('seed-pause-note')).toContainText('While a core runs, transfers pause');
+  await expect(page.getByTestId('seed-pause-note')).toContainText('turn this off in System');
 });
 
 test('platform cards show have, wanted and titles, plus any nonzero extra', async ({ page }) => {

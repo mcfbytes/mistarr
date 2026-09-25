@@ -2,9 +2,10 @@
   import { onMount } from 'svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { showToast } from '../lib/stores/toast.svelte';
-  import { fixtureSettings } from '../lib/fixtures';
+  import { fixtureSettings, recordMockSave } from '../lib/fixtures';
   import { api, errorMessage } from '../lib/api';
   import ClientStart from '../lib/ClientStart.svelte';
+  import ClientHeld from '../lib/ClientHeld.svelte';
   import PathMapEditor from '../lib/PathMapEditor.svelte';
   import StatusPill from '../lib/StatusPill.svelte';
   import Meter from '../lib/Meter.svelte';
@@ -248,6 +249,9 @@
     const next = { ...settings, client: { ...settings.client, remote_path_map: cleaned.map } };
     saving = true;
     try {
+      if (isMock) {
+        recordMockSave(next);
+      }
       adopt(isMock ? next : await api.putSettings(next));
       showToast('Settings saved.', 'success');
     } catch (err) {
@@ -279,6 +283,7 @@
             {#if status.corename !== null && status.corename !== 'MENU'}Core running.{/if}
             Launching: {LAUNCH_TEXT[status.launch]}
           </p>
+          <ClientHeld pillOnly />
         </li>
 
         <li class="tile">
@@ -297,6 +302,7 @@
             {#if status.client?.version}<span class="dim">{status.client.version}</span>{/if}
           </p>
           {#if status.client?.url}<p class="sub mono">{status.client.url}</p>{/if}
+          <ClientHeld />
           <ClientStart />
         </li>
 
@@ -458,7 +464,8 @@
 
           <section id="set-limits" class="card group" aria-labelledby="set-limits-h">
             <h3 id="set-limits-h" tabindex="-1">Transfers and limits</h3>
-            <p class="help lead">Speed limits the client applies, in kB/s. 0 is unlimited.</p>
+            <p class="help lead">Speed limits the client applies, in kB/s.</p>
+            <p class="help lead">0 keeps the client's own limit. Any other value only ever lowers it.</p>
             {#key limitsKey}
               {#each LIMIT_ROWS as row (row.id)}
                 <div class="field">
@@ -491,6 +498,20 @@
             {#if invalidLimits.length > 0}
               <p id="limits-error" class="error field-error">{LIMIT_ERROR}</p>
             {/if}
+            <div class="field check">
+              <label>
+                <input
+                  type="checkbox"
+                  bind:checked={settings.transfer.pause_client_while_playing}
+                  aria-describedby="client-pause-help"
+                />
+                Pause the download client while a core runs
+              </label>
+              <p id="client-pause-help" class="help">
+                Frees the board for the game. Transfers resume at the menu, and each source's seed policy applies
+                again. A client on another machine only stops uploading.
+              </p>
+            </div>
           </section>
 
           <section id="set-titles" class="card group" aria-labelledby="set-titles-h">
@@ -681,6 +702,14 @@
   button.small {
     padding: 0.25em 0.7em;
     font-size: 0.85rem;
+  }
+
+  .tile :global(.client-held) {
+    margin: 0;
+  }
+
+  .tile :global(.client-held .pill) {
+    white-space: normal;
   }
 
   .tile :global(.client-start) {

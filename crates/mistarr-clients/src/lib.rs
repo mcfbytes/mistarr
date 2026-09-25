@@ -113,6 +113,73 @@ pub struct ClientInfo {
     pub version: String,
 }
 
+/// Which way a global rate limit applies.
+///
+/// ```
+/// assert_ne!(mistarr_clients::Direction::Down, mistarr_clients::Direction::Up);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Direction {
+    /// Downloads.
+    Down,
+    /// Uploads.
+    Up,
+}
+
+/// A client's global rate limit in one direction, as [`DownloadClient::rate_limit`]
+/// read it, so [`DownloadClient::set_rate_limit`] can put it back exactly. The rate
+/// is kept while the limit is off, as Transmission keeps it.
+///
+/// ```
+/// use mistarr_clients::RateLimit;
+/// let l: RateLimit = serde_json::from_str(r#"{"enabled":true,"kbps":64}"#)?;
+/// assert_eq!(l, RateLimit::kbps(64));
+/// # Ok::<(), serde_json::Error>(())
+/// ```
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RateLimit {
+    /// Whether the limit applies.
+    pub enabled: bool,
+    /// The limit in the client's kilobytes per second: 1000 bytes for
+    /// Transmission, 1024 for rtorrent.
+    pub kbps: u32,
+}
+
+impl RateLimit {
+    /// The lowest rate the client holds: zero in Transmission, 1 KiB/s in
+    /// rtorrent, which reads zero as no limit.
+    pub const HELD: Self = Self {
+        enabled: true,
+        kbps: 0,
+    };
+
+    /// An enabled limit of `kbps`.
+    ///
+    /// ```
+    /// assert!(mistarr_clients::RateLimit::kbps(5).enabled);
+    /// ```
+    #[must_use]
+    pub const fn kbps(kbps: u32) -> Self {
+        Self {
+            enabled: true,
+            kbps,
+        }
+    }
+
+    /// Whether this reading holds the direction at [`RateLimit::HELD`] or
+    /// what a client keeps for it.
+    ///
+    /// ```
+    /// use mistarr_clients::RateLimit;
+    /// assert!(RateLimit::HELD.is_held() && RateLimit::kbps(1).is_held());
+    /// assert!(!RateLimit::kbps(2).is_held() && !RateLimit::default().is_held());
+    /// ```
+    #[must_use]
+    pub const fn is_held(self) -> bool {
+        self.enabled && self.kbps <= 1
+    }
+}
+
 /// The torrent to hand to the client.
 ///
 /// ```
@@ -470,7 +537,26 @@ pub trait DownloadClient: Send + Sync {
     /// Removes the torrent from the client, deleting its data if asked.
     async fn remove(&self, id: &ClientTorrentId, delete_data: bool) -> Result<()>;
 
-    /// Sets global rate limits in the client's kilobytes per second (1000
-    /// bytes for Transmission, 1024 for rtorrent). `None` or `Some(0)` lifts the limit.
-    async fn set_rate_limits(&self, down_kbps: Option<u32>, up_kbps: Option<u32>) -> Result<()>;
+    /// Reads the global rate limit in `dir`.
+    async fn rate_limit(&self, dir: Direction) -> Result<RateLimit>;
+
+    /// Sets the global rate limit in `dir`, exactly as [`DownloadClient::rate_limit`]
+    /// read it, or [`RateLimit::HELD`] to hold that direction.
+    async fn set_rate_limit(&self, dir: Direction, limit: RateLimit) -> Result<()>;
+
+    /// The client's process id as it reports it, `None` when its RPC has no way to.
+    async fn process_id(&self) -> Result<Option<u32>>;
+
+    /// The alternate upload limit the client switches to by hand or on a
+    /// schedule, with `enabled` saying whether it is in use; `None` when it has none.
+    async fn alt_up_limit(&self) -> Result<Option<RateLimit>> {
+        Ok(None)
+    }
+
+    /// Sets the alternate upload rate, leaving whether it is in use alone; a
+    /// client without one ignores it.
+    async fn set_alt_up_rate(&self, kbps: u32) -> Result<()> {
+        let _ = kbps;
+        Ok(())
+    }
 }

@@ -192,6 +192,21 @@ export function fixtureTitles(platformId: string, count = 60, filters: TitleFilt
 }
 
 /**
+ * Mock group ids the mock server no longer lists, read from localStorage
+ * `mistarr.mockRemovedIds` as a JSON array of numbers, standing in for rows a
+ * scan or an import moves out of the browsed list.
+ */
+export function mockRemovedIds(): number[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockRemovedIds') ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter((v): v is number => typeof v === 'number') : [];
+  } catch {
+    // Storage blocked or the value is not JSON: nothing removed.
+    return [];
+  }
+}
+
+/**
  * Mock latency in ms of page `page` of a title search for `q`, read from
  * localStorage `mistarr.mockDelayMs`: a number for every request, or an object
  * of numbers keyed `q#page` or `q`, with `*` as the default. A negative value
@@ -212,6 +227,31 @@ export function mockDelayMs(q: string, page: number): number {
     // Storage blocked or the value is not JSON: no delay.
   }
   return 0;
+}
+
+/**
+ * The mock status: `fixtureStatus` with the fields in localStorage
+ * `mistarr.mockStatus`, a JSON object, laid over it.
+ */
+export function mockStatus(): SystemStatus {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockStatus') ?? '{}');
+    if (parsed !== null && typeof parsed === 'object') {
+      return { ...fixtureStatus, ...(parsed as Partial<SystemStatus>) };
+    }
+  } catch {
+    // Storage blocked or the value is not JSON: the plain fixture.
+  }
+  return fixtureStatus;
+}
+
+/** Keeps what a mock save would send, in localStorage `mistarr.mockSavedSettings`. */
+export function recordMockSave(settings: Settings): void {
+  try {
+    localStorage.setItem('mistarr.mockSavedSettings', JSON.stringify(settings));
+  } catch {
+    // Storage blocked: nothing to keep.
+  }
 }
 
 /**
@@ -391,6 +431,8 @@ export const fixtureStatus: SystemStatus = {
   paused: true,
   pause_reason: 'core',
   override: null,
+  client_hold: 'frozen',
+  pause_client_while_playing: true,
   waiting: [{ id: 2, kind: 'scan', state: 'queued', detail: 'nes' }],
   disk_free_bytes: 12_400_000_000,
   disk_total_bytes: 31_900_000_000,
@@ -402,11 +444,15 @@ export const fixtureStatus: SystemStatus = {
   chd_decode_bytes_per_sec: 1_200_000
 };
 
-/** The status mock mode reports: the fixture's, or at the menu with nothing held for `showcase`. */
+/**
+ * The status mock mode reports: `mockStatus`, or at the menu with nothing
+ * held for `showcase`.
+ */
 export function scenarioStatus(): SystemStatus {
+  const base = mockStatus();
   return mockScenario() === 'showcase'
-    ? { ...fixtureStatus, version: '0.3.0', release: true, corename: 'MENU', paused: false, pause_reason: null, waiting: [] }
-    : fixtureStatus;
+    ? { ...base, version: '0.3.0', release: true, corename: 'MENU', paused: false, pause_reason: null, waiting: [], client_hold: null }
+    : base;
 }
 
 /** Browse's flag choices: the README showcase leaves out the `pirate` DAT tag. */
@@ -779,5 +825,6 @@ export const fixtureSettings: Settings = {
     hide: ['bios', 'beta', 'proto', 'demo', 'sample', 'program'],
     launch: true
   },
-  scan: { chd_tracks: false }
+  scan: { chd_tracks: false },
+  transfer: { pause_client_while_playing: true }
 };

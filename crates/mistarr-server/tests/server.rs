@@ -115,6 +115,7 @@ async fn api_key_is_enforced_on_the_api_only() {
     let r = get(addr, "/api/v1/system/status").await;
     assert_eq!(r.status, 401);
     assert_eq!(r.json()["error"]["code"], "unauthorized");
+    assert_eq!(r.header("cache-control"), Some("no-store"));
     let r = request(
         addr,
         "GET",
@@ -135,8 +136,13 @@ async fn api_key_is_enforced_on_the_api_only() {
     assert_eq!(r.status, 200);
     let r = get(addr, "/api/v1/system/status?apikey=s3cret").await;
     assert_eq!(r.status, 200);
+    assert_eq!(r.header("cache-control"), Some("no-store"));
+    let r = get(addr, "/api/v1/platforms/nes/titles?q=zorbl&apikey=s3cret").await;
+    assert_eq!(r.status, 200);
+    assert_eq!(r.header("cache-control"), Some("no-store"));
     let r = get(addr, "/").await;
     assert_eq!(r.status, 200);
+    assert_eq!(r.header("cache-control"), Some("no-cache"));
     booted.running.shutdown().await.expect("shutdown");
 }
 

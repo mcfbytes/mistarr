@@ -10,6 +10,22 @@ use mistarr_clients::{
 use crate::config::ClientConfig;
 use crate::jobs::detect_client::ClientStatus;
 
+/// Which client a handle talks to: its kind and RPC URL or SCGI address.
+///
+/// ```
+/// use mistarr_clients::ClientKind;
+/// use mistarr_server::client::ClientEndpoint;
+/// let e = ClientEndpoint { kind: ClientKind::Rtorrent, url: "127.0.0.1:5000".into() };
+/// assert_eq!(serde_json::to_string(&e).unwrap(), r#"{"kind":"rtorrent","url":"127.0.0.1:5000"}"#);
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ClientEndpoint {
+    /// The client.
+    pub kind: ClientKind,
+    /// Its RPC URL or SCGI address.
+    pub url: String,
+}
+
 /// What a handle was built from; an equal key keeps the existing handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientKey {
@@ -39,6 +55,22 @@ impl ClientKey {
             url: status.url.clone()?,
             path_map: config.remote_path_map.clone(),
         })
+    }
+
+    /// The client this key talks to.
+    ///
+    /// ```
+    /// use mistarr_clients::ClientKind;
+    /// use mistarr_server::client::ClientKey;
+    /// let key = ClientKey { kind: ClientKind::Rtorrent, url: "127.0.0.1:5000".into(), path_map: vec![] };
+    /// assert_eq!(key.endpoint().url, "127.0.0.1:5000");
+    /// ```
+    #[must_use]
+    pub fn endpoint(&self) -> ClientEndpoint {
+        ClientEndpoint {
+            kind: self.kind,
+            url: self.url.clone(),
+        }
     }
 
     /// Builds the client; `None` when the URL does not suit the kind.
@@ -103,9 +135,91 @@ pub async fn prepare_download_dir(local: &Path) {
     }
 }
 
+/// Host and port of a client URL: an `http://` RPC URL or an SCGI address,
+/// `None` for a unix socket path.
+fn host_port(url: &str) -> Option<(&str, Option<u16>)> {
+    let rest = ["http://", "https://", "scgi://"]
+        .iter()
+        .find_map(|p| url.strip_prefix(p))
+        .unwrap_or(url);
+    if rest.starts_with('/') {
+        return None;
+    }
+    let authority = rest.split('/').next().unwrap_or(rest);
+    if let Some(v6) = authority.strip_prefix('[') {
+        let (host, tail) = v6.split_once(']')?;
+        let port = tail.strip_prefix(':').and_then(|p| p.parse().ok());
+        return Some((host, port));
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.contains(':') => Some((host, port.parse().ok())),
+        _ => Some((authority, None)),
+    }
+}
+
+/// Whether a client at `url` runs on this machine: a unix socket, or a
+/// loopback host.
+///
+/// ```
+/// use mistarr_server::client::is_local;
+/// assert!(is_local("http://127.0.0.1:9091/transmission/rpc"));
+/// assert!(is_local("scgi:///media/fat/mistarr/rtorrent.sock"));
+/// assert!(!is_local("http://192.168.1.5:9091/transmission/rpc"));
+/// ```
+#[must_use]
+pub fn is_local(url: &str) -> bool {
+    match host_port(url) {
+        None => true,
+        Some((host, _)) => {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        }
+    }
+}
+
+/// The TCP port of a client URL, when it names one.
+///
+/// ```
+/// assert_eq!(mistarr_server::client::port("127.0.0.1:5000"), Some(5000));
+/// assert_eq!(mistarr_server::client::port("/run/rtorrent.sock"), None);
+/// ```
+#[must_use]
+pub fn port(url: &str) -> Option<u16> {
+    host_port(url).and_then(|(_, p)| p)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_and_sockets_are_local() {
+        for url in [
+            "http://127.0.0.1:9091/transmission/rpc",
+            "http://localhost:9091/transmission/rpc",
+            "http://[::1]:9091/transmission/rpc",
+            "127.0.0.1:5000",
+            "scgi://127.0.0.2:5000",
+            "/media/fat/mistarr/rtorrent.sock",
+            "scgi:///run/rtorrent.sock",
+        ] {
+            assert!(is_local(url), "{url}");
+        }
+        for url in [
+            "http://192.168.1.5:9091/transmission/rpc",
+            "http://nas.home.arpa:9091/transmission/rpc",
+            "10.0.0.2:5000",
+            "http://[fe80::1]:9091/",
+        ] {
+            assert!(!is_local(url), "{url}");
+        }
+        assert_eq!(port("http://127.0.0.1:9091/transmission/rpc"), Some(9091));
+        assert_eq!(port("http://[::1]:9092/x"), Some(9092));
+        assert_eq!(port("scgi://127.0.0.1:5001"), Some(5001));
+        assert_eq!(port("http://localhost/transmission/rpc"), None);
+    }
 
     #[tokio::test]
     async fn download_dirs_are_created_with_their_parents() {

@@ -26,7 +26,8 @@ screen works at 360 px wide with a 16 px gutter and no horizontal scroll.
    saving.
 4. Sources: drop zone and the watched-directory path, the files still in
    `sources/` listed as in step 2, and the added sources with their state and
-   reason. Seed policy explained with its default shown. Nothing about where
+   reason. Seed policy explained with its default shown, and, while the
+   client pauses during games, that it does and where to turn that off. Nothing about where
    to obtain files.
 
 The app opens the wizard on load only while `open_on_start` is true. Finish,
@@ -94,9 +95,16 @@ Filters: search, have / missing / wanted, region, a "Show hidden" checkbox,
 and a flags multi-select that requires every checked flag. Each card shows
 the 1G1R pick name, a have indicator, and a want toggle. Infinite scroll in
 pages of 60. Search runs 250 ms after typing stops, and each request cancels
-the one before it. While a page is loading a thin progress bar shows and the
-current results stay visible, dimmed and marked `aria-busy`; a failed load
-shows an alert with Retry.
+the one before it. A background reload, such as one a scan's `file.changed`
+asks for, never cancels a page on its way: it runs once that page lands, so
+a stream of events never keeps a slow search from answering. It rewrites
+each loaded page in its place and drops any row that would then show twice.
+Scrolling on loads the rows after those shown, from the row before them;
+when that row is not the last one shown, the list moved and a background
+reload rewrites the loaded pages, so no group shows twice or is skipped.
+While a page is loading a thin progress bar shows and the current results
+stay visible, dimmed and marked `aria-busy`; a failed load shows an alert
+with Retry.
 
 **Title** (`/t/{id}`). Every variant in the group with region, revision,
 flags, file state (a CHD member named as "g.chd, track 2" or "g.chd, track
@@ -127,6 +135,9 @@ tracks: 3 verified, 1 unmatched, 1 not identified". Live over SSE.
 status pill (resolving runs, unbound waits, bound is done, disabled is
 paused) with its reason beneath, file count,
 matched count, seed policy, client status. Bind and disable actions.
+Under the heading, the client-held pill while it applies, and under each
+seed policy the note "Paused while a core runs" while the setting is on (see
+"The client while a core runs").
 Unbound sources have a platform picker and, when the names suggest one, a
 "Bind to" button for the suggested platform. Above the table, the files still
 in `sources/` and this session's uploads, as in the wizard.
@@ -153,9 +164,11 @@ label names its file or version, and an `aria-live` line reports each
 result. Live over SSE, as in the wizard.
 
 **System** (`/system`). A grid of status tiles, three across and two
-at phone width: the MiSTer (the running core, "At the menu" for `MENU`, and
-the launch state), the download client (kind, version, a Reachable or Not
-reachable pill, its address, and the same start offer as the wizard), the
+at phone width: the MiSTer (the running core, "At the menu" for `MENU`, the
+launch state, and the client-held pill while the client is held), the
+download client (kind, version, a Reachable or Not reachable pill, its
+address, the client-held pill with the rtorrent 1 KiB/s line, and the same
+start offer as the wizard), the
 scheduler (a Running, Paused or Held for the core pill, the jobs waiting,
 and Pause, Resume or Run now), memory (mistarr's RSS, with a meter of the
 board's memory in use and `MemAvailable` of `MemTotal`), storage (free
@@ -169,7 +182,8 @@ project's GitHub page for a release build only, and Copy diagnostics. That
 copies a plain-text summary in the shape of `mistarr doctor`'s, built from
 `/system/status` by `web/src/lib/system.ts`: version, commit, uptime, client
 kind, version and reachability, which client programs exist, CORENAME,
-scheduler state and the number of jobs waiting, launch state, memory, free
+scheduler state and the number of jobs waiting, whether the client is paused
+while a core runs and how it is held now, launch state, memory, free
 space, CHD decoding speed and the browser. It never holds a path, an
 address, a file name or anything naming content. Over plain HTTP, where the
 Clipboard API is missing, it copies through a selected text area, and shows
@@ -178,8 +192,13 @@ the text to copy by hand when the browser refuses.
 Settings, for the runtime-editable subset, are in titled sections: Download
 client (kind, address, and the shared path map editor as "Path map"),
 Transfers and limits (download and upload at the menu and while a core
-runs, in kB/s, 0 unlimited; an empty or non-whole value is marked invalid,
-changes nothing and blocks Save with a message), Title choice (1G1R region and language order,
+runs, in kB/s, with the line "0 keeps the client's own limit. Any other
+value only ever lowers it."; an empty or non-whole value is marked invalid,
+changes nothing and blocks Save with a message; then the checkbox "Pause the
+download client while a core runs", on by default, with the line "Frees the
+board for the game. Transfers resume at the menu, and each source's seed
+policy applies again. A client on another machine only stops uploading."),
+Title choice (1G1R region and language order,
 hidden flags, prefer the highest revision), Launching (the switch that
 allows launching) and Scanning. Each field has its label, control and help
 text in the same two columns on wide screens and stacked on a phone. A
@@ -198,6 +217,22 @@ images": the checkbox "Identify CHD images by their tracks" with a "Slow"
 tag, a line saying it decodes each image once, pauses while a core runs and
 keeps its results, and the measured speed as "about N minutes per 700 MB
 image", or "Speed not measured yet."
+
+## The client while a core runs
+
+While `/system/status` reports a `client_hold`, the Sources screen, the
+activity panel under its heading, and System's MiSTer and download client
+tiles show a paused pill (`web/src/lib/ClientHeld.svelte`, without its
+rtorrent line in the MiSTer tile): "Download client paused while
+NES is running" for a stopped client, or "Uploads paused while NES is
+running" for held uploads, naming the core as the held-jobs banner does. For
+rtorrent, whose lowest held rate is 1 KiB/s, a line beside it and its title
+say so. It follows the `status` event, so it appears when the client is held
+and goes when it is let go at the menu. While
+`pause_client_while_playing` is on, each source row notes "Paused while a
+core runs" under its seed policy, and the wizard's seed policy step says that
+transfers pause while a core runs, that a client on another machine only
+stops uploading, and that this can be turned off in System.
 
 ## Platform art
 
