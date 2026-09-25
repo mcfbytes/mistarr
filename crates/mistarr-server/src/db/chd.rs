@@ -6,7 +6,7 @@ use mistarr_core::{HashSet, PlatformId};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Serialize, Serializer};
 
-use super::files::{self, FileId, FileRow, NewFile};
+use super::files::{self, FileId, FileRow, FileState, NewFile};
 use crate::error::Result;
 
 /// Why a CHD's `files` row is `unidentified`: the stable code stored in `files.reason`.
@@ -420,7 +420,7 @@ pub fn layout_known(conn: &Connection, platform: &PlatformId, sizes: &[u64]) -> 
 
 /// Replaces container `container`'s row and member rows with `rows`: the container row and
 /// members not in `rows` are deleted through [`files::delete_ids`], and rows that differ
-/// from what is stored are written.
+/// from what is stored are written. Returns the id and state of each row written.
 ///
 /// # Errors
 ///
@@ -431,7 +431,7 @@ pub fn replace_container(
     container: &str,
     rows: &[NewFile],
     now: i64,
-) -> Result<()> {
+) -> Result<Vec<(FileId, FileState)>> {
     let existing = files::zip_member_rows(conn, platform, container)?;
     let mut stale: Vec<i64> = existing
         .iter()
@@ -442,6 +442,7 @@ pub fn replace_container(
         stale.push(bare.id.0);
     }
     files::delete_ids(conn, &stale)?;
+    let mut written = Vec::new();
     for row in rows {
         let same = existing.iter().any(|e| {
             e.rel_path == row.rel_path
@@ -456,16 +457,15 @@ pub fn replace_container(
                 && e.reason == row.reason
         });
         if !same {
-            files::upsert_row(conn, platform, row, now)?;
+            written.push((files::upsert_row(conn, platform, row, now)?, row.state));
         }
     }
-    Ok(())
+    Ok(written)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::files::FileState;
 
     fn conn() -> Connection {
         let mut c = Connection::open_in_memory().expect("open");
@@ -689,7 +689,7 @@ mod tests {
             reason: None,
             ..container("x", Unidentified::Off)
         };
-        replace_container(&c, &pid, "PSX/G/g.chd", std::slice::from_ref(&member), 5)
+        let written = replace_container(&c, &pid, "PSX/G/g.chd", std::slice::from_ref(&member), 5)
             .expect("replace");
         for gone in ["PSX/G/g.chd", "PSX/G/g.chd#cue"] {
             assert!(
@@ -708,10 +708,12 @@ mod tests {
             .query_row("SELECT file_id FROM import_log", [], |r| r.get(0))
             .expect("log");
         assert_eq!(logged, None);
-        replace_container(&c, &pid, "PSX/G/g.chd", &[member], 9).expect("again");
-        let again = files::find_by_path(&c, &pid, "PSX/G/g.chd#01")
+        assert_eq!(written, vec![(got.id, FileState::Unverified)]);
+        let again = replace_container(&c, &pid, "PSX/G/g.chd", &[member], 9).expect("again");
+        assert!(again.is_empty(), "an unchanged row is not reported");
+        let kept = files::find_by_path(&c, &pid, "PSX/G/g.chd#01")
             .expect("find")
             .expect("member");
-        assert_eq!(again.scanned_at, 5, "an unchanged row is not written");
+        assert_eq!(kept.scanned_at, 5, "an unchanged row is not written");
     }
 }

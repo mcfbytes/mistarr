@@ -15,7 +15,10 @@ use mistarr_fixture::chd::{to_vec, write_redump_set, Codec, Kind, Spec, TrackSpe
 use mistarr_server::app::AppState;
 use mistarr_server::db::files::{self, FileRow, FileState};
 use mistarr_server::db::jobs::{self as job_rows, JobId, JobState};
+use mistarr_server::events::EventKind;
 use mistarr_server::jobs::gate::Override;
+use serde_json::json;
+use tokio::sync::broadcast::error::TryRecvError;
 
 /// Longest a scan or decode may take in a debug build on a shared runner.
 const WAIT: Duration = Duration::from_secs(120);
@@ -255,8 +258,17 @@ async fn the_setting_off_reads_only_the_header_and_turning_it_on_verifies_the_tr
     .await;
     assert_eq!(missing.status, 404);
 
+    let mut live = app.events.subscribe(None).live;
     put_setting(&b, true).await;
     idle(app).await;
+    let mut changed = Vec::new();
+    loop {
+        match live.try_recv() {
+            Ok(e) if e.kind == EventKind::FileChanged => changed.push(e.data.clone()),
+            Ok(_) | Err(TryRecvError::Lagged(_)) => {}
+            Err(_) => break,
+        }
+    }
     let mut want = verified_members("PSX/G/g.chd", 3);
     want.push((
         "PSX/H/h.chd".to_owned(),
@@ -266,6 +278,11 @@ async fn the_setting_off_reads_only_the_header_and_turning_it_on_verifies_the_tr
     assert_eq!(rows(app, "psx").await, want);
     let t1 = row(app, "psx", "PSX/G/g.chd#01").await.expect("track");
     assert_eq!(t1.sha1.as_deref(), Some(written.tracks[0].sha1.as_str()));
+    let event = json!({ "file_id": t1.id.0, "state": "verified" }).to_string();
+    assert!(
+        changed.contains(&event),
+        "no file.changed for a member: {changed:?}"
+    );
     let counts = request(b.addr(), "GET", "/api/v1/platforms", &[], None)
         .await
         .json();

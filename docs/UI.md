@@ -67,7 +67,8 @@ while it runs or its reason while it waits. Scan shows a toast when
 the scan is queued and another with its outcome when it finishes, such as
 "Scan of Nintendo 64: 410 matched, 2 unmatched", followed by "3 not
 identified" when there are any, on whichever page is open; counts reload when
-a scan or recompute ends. A card with files not identified has "N not
+a scan, a recompute or the CHD tracks job ends, and titles reload on
+`file.changed`, which the CHD tracks job sends for each row it writes. A card with files not identified has "N not
 identified" as a disclosure that lists them 50 at a time, each path with the
 sentence for its reason ("Not identified: no loaded DAT entry has this number
 and size of tracks.") and Show more, with an `aria-live` count of those

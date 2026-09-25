@@ -35,7 +35,7 @@ async function resync(): Promise<void> {
 
 const FILE_CHANGED_DEBOUNCE_MS = 2000;
 // Jobs whose end can move the platform counts and the browse table.
-const MATCHING_KINDS = new Set(['scan', 'recompute_1g1r', 'arcade_catalog']);
+const MATCHING_KINDS = new Set(['scan', 'recompute_1g1r', 'arcade_catalog', 'chd_tracks']);
 let platformsTimer: ReturnType<typeof setTimeout> | null = null;
 
 function scheduleReloadPlatforms(): void {

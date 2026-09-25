@@ -23,6 +23,7 @@ use crate::db::chd::{self as rows, Unidentified};
 use crate::db::files::{self, FileId, FileRow, FileState, NewFile, RomMatch};
 use crate::db::settings::{self, keys};
 use crate::error::{Error, Result};
+use crate::events::EventKind;
 use crate::threads::{self, label};
 
 /// `jobs.kind` of [`ChdTracks`].
@@ -896,14 +897,19 @@ async fn record(
                 tracks: &tracks,
             };
             let members = classify_chd(&tx, &pid, &m)?;
-            rows::replace_container(&tx, &pid, &container, &members, crate::unix_now())?;
+            let changed =
+                rows::replace_container(&tx, &pid, &container, &members, crate::unix_now())?;
             if let Some(rate) = rate {
                 settings::set_json(&tx, keys::CHD_RATE, &rate)?;
             }
             crate::db::commit(tx)?;
-            Ok(members)
+            Ok((members, changed))
         })
         .await?;
+    let (written, changed) = written;
+    for (id, state) in changed {
+        file_changed(ctx, id, state);
+    }
     Ok(if written.iter().any(|r| r.state == FileState::Verified) {
         Outcome::Verified
     } else {
@@ -931,15 +937,23 @@ async fn failed(ctx: &JobContext, row: &FileRow, seen: Seen, e: &ChdError) -> Re
 /// Moves a `pending` row to `to`, only while the setting, read inside the write, is on.
 async fn set_reason(ctx: &JobContext, id: FileId, to: Unidentified) -> Result<()> {
     let app = Arc::clone(&ctx.app);
-    ctx.app
+    let moved = ctx
+        .app
         .db
-        .write(move |c| {
-            if enabled(&app) {
-                rows::set_reason_if(c, id, Unidentified::Pending, to)?;
-            }
-            Ok(())
-        })
-        .await
+        .write(move |c| Ok(enabled(&app) && rows::set_reason_if(c, id, Unidentified::Pending, to)?))
+        .await?;
+    if moved {
+        file_changed(ctx, id, FileState::Unidentified);
+    }
+    Ok(())
+}
+
+/// Tells open views that a row this job wrote changed; one image writes at most 101 rows.
+fn file_changed(ctx: &JobContext, id: FileId, state: FileState) {
+    ctx.app.events.publish(
+        EventKind::FileChanged,
+        &json!({ "file_id": id.0, "state": state.as_str() }),
+    );
 }
 
 #[cfg(test)]

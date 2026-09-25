@@ -446,7 +446,7 @@ connection that falls further behind is closed and, on reconnecting, gets
 | `source.changed` | `{ source_id, state, platform_id? }` |
 | `download.changed` | `{ download_id, state, progress }` |
 | `import.done` | `{ title_id, file_id, action }`, one per file placed, kept or renamed; `action` as in `import_log` |
-| `file.changed` | `{ file_id, state }` during scans, throttled to 10 per second |
+| `file.changed` | `{ file_id, state }` during scans, throttled to 10 per second, and for each row the `chd_tracks` job writes |
 
 ## Launching
 
