@@ -232,7 +232,10 @@ fn mib(bytes: u64) -> String {
 ///
 /// Only errors writing to `out`; failed checks are reported in the output.
 pub async fn run(config: &Config, hash_mib: u32, out: &mut impl Write) -> io::Result<()> {
-    writeln!(out, "mistarr {}", env!("CARGO_PKG_VERSION"))?;
+    match (crate::version::is_release(), crate::version::commit()) {
+        (true, Some(c)) => writeln!(out, "mistarr {} (commit {c})", crate::version::version())?,
+        _ => writeln!(out, "mistarr {}", crate::version::version())?,
+    }
     let exe = std::env::current_exe().and_then(std::fs::read);
     match exe.and_then(|image| linkage(&image)) {
         Ok(Linkage::Static) => writeln!(out, "binary: static")?,

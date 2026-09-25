@@ -25,6 +25,7 @@ pub mod migrating;
 pub mod status;
 pub mod synth;
 pub mod threads;
+pub mod version;
 
 pub use error::{Error, Result};
 

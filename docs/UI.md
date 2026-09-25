@@ -196,26 +196,67 @@ moves to the confirming button and back to Remove on Keep; every button's
 label names its file or version, and an `aria-live` line reports each
 result. Live over SSE, as in the wizard.
 
-**System** (`/system`). Status, client with the same start offer as the
-wizard, CORENAME, paused indicator with manual override, launch state,
-settings form for the runtime-editable subset with the shared path map editor
-and the switch that allows launching, log tail. Under "Disc images", the
-checkbox "Identify CHD images by their tracks" with a "Slow" tag, a line
-saying it decodes each image once, pauses while a core runs and keeps its
-results, and the measured speed as "about N minutes per 700 MB image", or
-"Speed not measured yet." The heading "Limits (kbps)" has the line "0 keeps
-the client's own limit. Any other value only ever lowers it." Under the
-limits, the checkbox "Pause the download client while a core runs", on by
-default, with the line "Frees the board for the game. Transfers resume at the
-menu, and each source's seed policy applies again. A client on another
-machine only stops uploading." The status card shows the client-held pill
-while it applies.
+**System** (`/system`). A grid of status tiles, three across and two
+at phone width: the MiSTer (the running core, "At the menu" for `MENU`, the
+launch state, and the client-held pill while the client is held), the
+download client (kind, version, a Reachable or Not reachable pill, its
+address, the client-held pill with the rtorrent 1 KiB/s line, and the same
+start offer as the wizard), the
+scheduler (a Running, Paused or Held for the core pill, the jobs waiting,
+and Pause, Resume or Run now), memory (mistarr's RSS, with a meter of the
+board's memory in use and `MemAvailable` of `MemTotal`), storage (free
+space, with a meter of the data directory's filesystem in use) and uptime.
+Meters warn past 85 % for memory and 90 % for storage. Live over the SSE
+`status` event.
+
+An About block shows the version with a Copy button, a Release or
+Development build pill, the commit, a link to the release's notes on the
+project's GitHub page for a release build only, and Copy diagnostics. That
+copies a plain-text summary in the shape of `mistarr doctor`'s, built from
+`/system/status` by `web/src/lib/system.ts`: version, commit, uptime, client
+kind, version and reachability, which client programs exist, CORENAME,
+scheduler state and the number of jobs waiting, whether the client is paused
+while a core runs and how it is held now, launch state, memory, free
+space, CHD decoding speed and the browser. It never holds a path, an
+address, a file name or anything naming content. Over plain HTTP, where the
+Clipboard API is missing, it copies through a selected text area, and shows
+the text to copy by hand when the browser refuses.
+
+Settings, for the runtime-editable subset, are in titled sections: Download
+client (kind, address, and the shared path map editor as "Path map"),
+Transfers and limits (download and upload at the menu and while a core
+runs, in kB/s, with the line "0 keeps the client's own limit. Any other
+value only ever lowers it."; an empty or non-whole value is marked invalid,
+changes nothing and blocks Save with a message; then the checkbox "Pause the
+download client while a core runs", on by default, with the line "Frees the
+board for the game. Transfers resume at the menu, and each source's seed
+policy applies again. A client on another machine only stops uploading."),
+Title choice (1G1R region and language order,
+hidden flags, prefer the highest revision), Launching (the switch that
+allows launching) and Scanning. Each field has its label, control and help
+text in the same two columns on wide screens and stacked on a phone. A
+section list beside them, sticky on wide screens and a row of buttons on a
+phone, moves focus to a section's heading and marks the section in view.
+A note says these apply on save with no restart, and that settings found
+only in `mistarr.toml` apply at the next start. A save bar with Save and Discard
+appears, pinned to the bottom of the window (sticky where the browser
+supports `overflow-x: clip`, fixed elsewhere), only while something differs
+from what was loaded or saved, and lifts the toasts above itself. While it
+shows, leaving for another screen by a link, Back, Forward or an edited
+address asks first and stays on a no, through a guard in
+`web/src/lib/router.svelte.ts`; a link opened in a new tab asks nothing, and
+a reload is warned by the browser. Under Scanning, "Disc
+images": the checkbox "Identify CHD images by their tracks" with a "Slow"
+tag, a line saying it decodes each image once, pauses while a core runs and
+keeps its results, and the measured speed as "about N minutes per 700 MB
+image", or "Speed not measured yet."
 
 ## The client while a core runs
 
 While `/system/status` reports a `client_hold`, the Sources screen, the
-System status card and the activity panel, under its heading, show one
-paused pill (`web/src/lib/ClientHeld.svelte`): "Download client paused while
+activity panel under its heading, and System's MiSTer and download client
+tiles show a paused pill (`web/src/lib/ClientHeld.svelte`, without its
+rtorrent line in the MiSTer tile): "Download client paused while
 NES is running" for a stopped client, or "Uploads paused while NES is
 running" for held uploads, naming the core as the held-jobs banner does. For
 rtorrent, whose lowest held rate is 1 KiB/s, a line beside it and its title

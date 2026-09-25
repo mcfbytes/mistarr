@@ -79,7 +79,7 @@ is a setting on each source.
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="docs/images/system-dark.webp">
     <source media="(prefers-color-scheme: light)" srcset="docs/images/system-light.webp">
-    <img alt="The System screen: version, client, running core, launch state, disk, memory and scheduler" src="docs/images/system-dark.webp" width="49%">
+    <img alt="The System screen: tiles for the MiSTer, client, scheduler, memory, storage and uptime, and the version" src="docs/images/system-dark.webp" width="49%">
   </picture>
 </p>
 
