@@ -740,24 +740,34 @@ fn leaf(name: &str) -> &str {
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn refresh_match_keys(conn: &Connection) -> Result<usize> {
+    let mut keyed = 0;
+    loop {
+        match key_batch(conn)? {
+            0 => return Ok(keyed),
+            n => keyed += n,
+        }
+    }
+}
+
+/// Keys at most [`KEY_BATCH`] of the roms [`refresh_match_keys`] would, so a caller can
+/// commit between batches. Returns rows keyed, 0 once none is left.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn key_batch(conn: &Connection) -> Result<usize> {
     let mut select =
         conn.prepare_cached("SELECT id, name FROM roms WHERE match_name IS NULL LIMIT ?1")?;
     let mut update =
         conn.prepare_cached("UPDATE roms SET match_name = ?2, match_base = ?3 WHERE id = ?1")?;
-    let mut keyed = 0;
-    loop {
-        let batch: Vec<(i64, String)> = select
-            .query_map([KEY_BATCH], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        if batch.is_empty() {
-            return Ok(keyed);
-        }
-        for (id, name) in &batch {
-            let normalised = binding::normalise_name(leaf(name));
-            update.execute(params![id, normalised, binding::base_name(&normalised)])?;
-        }
-        keyed += batch.len();
+    let batch: Vec<(i64, String)> = select
+        .query_map([KEY_BATCH], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (id, name) in &batch {
+        let normalised = binding::normalise_name(leaf(name));
+        update.execute(params![id, normalised, binding::base_name(&normalised)])?;
     }
+    Ok(batch.len())
 }
 
 /// Binding's view of the catalog: roms of titles that are neither retired nor
@@ -1036,6 +1046,19 @@ mod tests {
         );
         assert!(index.by_base_name_and_size("other tale", 33).is_empty());
         assert!(index.by_normalised_name("boot code (world)").is_empty());
+    }
+
+    #[test]
+    fn a_key_batch_keys_at_most_a_batch() {
+        let c = conn();
+        let count = KEY_BATCH as usize + 5;
+        for i in 0..count {
+            fixtures::seed_rom(&c, "nes", &format!("Example Quest {i} (USA).nes"), 16, &[])
+                .expect("rom");
+        }
+        assert_eq!(key_batch(&c).expect("first"), KEY_BATCH as usize);
+        assert_eq!(key_batch(&c).expect("second"), 5);
+        assert_eq!(key_batch(&c).expect("done"), 0);
     }
 
     #[test]

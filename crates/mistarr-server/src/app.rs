@@ -443,7 +443,26 @@ fn open_db(
     Vec<mistarr_core::PlatformId>,
     Vec<mistarr_core::PlatformId>,
 )> {
-    let db = Db::open(&config.paths.db())?;
+    if let Some(dir) = std::env::var_os(crate::db::SQLITE_TMPDIR) {
+        tracing::info!(dir = %Path::new(&dir).display(), "SQLite temporary files");
+    }
+    let path = config.paths.db();
+    crate::migrating::clear_stale(&config.paths.data)?;
+    let progress = match crate::db::migrate::pending(&path)? {
+        Some((from, to)) => {
+            tracing::info!(from, to, "migrating the database");
+            crate::migrating::Migrating::begin(&config.paths.data, &path, from, to)
+                .inspect_err(
+                    |e| tracing::warn!(error = %e, "cannot write the migration progress file"),
+                )
+                .ok()
+        }
+        None => None,
+    };
+    let db = match &progress {
+        Some(m) => Db::open_counting(&path, &m.steps())?,
+        None => Db::open(&path)?,
+    };
     let (stored, unfinished, resolved) = db.write_blocking(prepare_catalog)?;
     let stored = stored.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "ignoring unreadable saved settings; using the config file");

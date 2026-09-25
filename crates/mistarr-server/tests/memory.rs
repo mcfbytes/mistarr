@@ -4,6 +4,7 @@
 use std::fmt::Write as _;
 use std::io::{BufWriter, Read as _, Write as _};
 use std::net::TcpStream;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
@@ -15,6 +16,14 @@ use serde_json::{json, Value as Json};
 
 /// Peak RSS budget during scan or import, `docs/ARCHITECTURE.md` "Resource budgets".
 const BUDGET_KIB: u64 = 64 * 1024;
+
+/// Growth over idle a DAT load may reach: its apply runs with the writer's 8 MiB bulk
+/// cache and a heap limit raised to match, on top of the 12 MiB other jobs get.
+const LOAD_DELTA_MIB: u64 = 28;
+
+/// Growth over idle a source import or remap may reach: its binding writes run with the
+/// writer's 8 MiB bulk cache on top of the 12 MiB other jobs get.
+const BIND_DELTA_MIB: u64 = 20;
 
 /// Longest a job may take before the test gives up.
 const JOB_TIMEOUT: Duration = Duration::from_secs(600);
@@ -48,6 +57,7 @@ struct Server {
     child: Child,
     port: u16,
     db: PathBuf,
+    root: PathBuf,
 }
 
 /// Writes the config and starts `mistarr serve` on `root` until one listens, since another
@@ -67,6 +77,7 @@ fn spawn(root: &Path, extra: &str) -> Server {
         let child = Command::new(env!("CARGO_BIN_EXE_mistarr"))
             .arg("--data")
             .arg(&data)
+            .env(mistarr_server::db::TEMP_DIR_ENV, root.join("sqlite-tmp"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -75,6 +86,7 @@ fn spawn(root: &Path, extra: &str) -> Server {
             child,
             port,
             db: data.join("mistarr.db"),
+            root: root.to_path_buf(),
         };
         if server.wait_listening() {
             return server;
@@ -102,8 +114,39 @@ impl Server {
     fn start(root: &Path) -> Self {
         let server = spawn(root, "");
         server.assert_data_limit(192);
-        assert!(root.join("data/tmp").is_dir(), "SQLite temporary directory");
+        let mode = std::fs::metadata(root.join("sqlite-tmp")).map(|m| m.permissions().mode());
+        assert_eq!(mode.expect("SQLite temporary directory") & 0o777, 0o700);
+        assert!(
+            !root.join("data/tmp").exists(),
+            "temporary files on the card"
+        );
         server
+    }
+
+    /// Asserts the server holds SQLite temporary files open in its own temporary
+    /// directory and none in the data directory.
+    fn assert_temp_files_off_the_card(&self) {
+        let (mut ours, mut card) = (0, 0);
+        let fds = std::fs::read_dir(format!("/proc/{}/fd", self.child.id())).expect("fds");
+        for fd in fds.flatten() {
+            let Ok(target) = std::fs::read_link(fd.path()) else {
+                continue;
+            };
+            let named = target
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("etilqs_"));
+            ours += usize::from(named && target.starts_with(self.root.join("sqlite-tmp")));
+            card += usize::from(named && target.starts_with(self.root.join("data")));
+        }
+        assert!(
+            ours > 0,
+            "no SQLite temporary file in the temporary directory"
+        );
+        assert_eq!(card, 0, "SQLite temporary files on the card");
+        assert!(
+            !self.root.join("data/tmp").exists(),
+            "temporary files on the card"
+        );
     }
 
     /// `[memory] data_limit_mib` of `mib` is in force, or the lower limit the test inherited.
@@ -718,11 +761,12 @@ fn dat_and_torrent_import_stay_under_budget() {
 
     let server = Server::start(dir.path());
     let rows = server.wait_jobs("dat_import", 1);
+    server.assert_temp_files_off_the_card();
     let titles = server.count("SELECT COUNT(*) FROM titles WHERE retired = 0");
     let peak = server.stop("dat_import");
     assert_eq!(rows[0].0, "done", "{}", rows[0].1);
     assert_eq!(usize::try_from(titles).expect("count"), games);
-    assert_budget("dat_import", peak, 12);
+    assert_budget("dat_import", peak, LOAD_DELTA_MIB);
 
     big_torrent(&dir.path().join("data/sources/example.torrent"));
     let server = Server::start(dir.path());
@@ -744,7 +788,7 @@ fn dat_and_torrent_import_stay_under_budget() {
         candidates, 0,
         "a loose name matching thousands of roms is ambiguous"
     );
-    assert_budget("source_import", peak, 12);
+    assert_budget("source_import", peak, BIND_DELTA_MIB);
 
     // A stale stamp makes the start's re-map work out every file of the source again.
     let db = rusqlite::Connection::open(dir.path().join("data/mistarr.db")).expect("open db");
@@ -763,7 +807,7 @@ fn dat_and_torrent_import_stay_under_budget() {
         last.1
     );
     assert_eq!(remapped, matched, "the same mapping");
-    assert_budget("remap_sources", peak, 12);
+    assert_budget("remap_sources", peak, BIND_DELTA_MIB);
 }
 
 #[test]
@@ -790,7 +834,7 @@ fn db_export_import_stays_under_budget() {
         usize::try_from(clones).expect("count"),
         games - games.div_ceil(3)
     );
-    assert_budget("dat_import, DB export", peak, 12);
+    assert_budget("dat_import, DB export", peak, LOAD_DELTA_MIB);
 }
 
 #[test]

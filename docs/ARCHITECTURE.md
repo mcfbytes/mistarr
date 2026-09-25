@@ -13,6 +13,7 @@ torrent client that ships with the image, and moves verified files into the
 | Cortex-A9 dual core at ~800 MHz, ARMv7 hard-float | Cross-compiled static musl binary. Hashing is streaming and background. No CHD decompression in the critical path. |
 | Roughly 490 MiB RAM visible to Linux, shared with the MiSTer process | Idle RSS target under 30 MiB, hard ceiling 64 MiB. No in-memory torrent metadata for set torrents; file lists live in SQLite. |
 | SD card, exFAT, ~10-20 MB/s writes | Stage and rename on the same filesystem, never copy. Idle I/O class while a core runs. No symlinks, case-insensitive names. |
+| `/media/fat` mounted `sync,dirsync` | Every write syscall there is flushed to the card before it returns, about 25 ms each, so the database's cost is its count of writes, not bytes. SQLite's temporary files and the DAT stage live in RAM; see "Writes on a sync mount". |
 | Stock image is Buildroot 2021 with glibc 2.31 | musl static linking, no OpenSSL, `rustls` only. |
 | MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing, scans and file placement while it is anything other than `MENU`. DAT and source parsing continue at low priority; transfers continue at a reduced rate limit. |
 | Torrent client already present | Stock image ships rtorrent; Buildroot_MiSTer ships Transmission. mistarr never embeds a client. |
@@ -120,10 +121,11 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    is enqueued again on a later listing. The `dat_import` job runs on the
    background lane, so a loaded core does not hold it. Parse the DAT
    (Logiqx, or a DB export read twice for its parents) with `quick-xml`,
-   streaming. Each game is parsed outside the database's write lock and appended to `dat_stage` in chunks of 2,000
+   streaming. Each game is parsed outside the database's write lock and appended to `dat_stage`, a TEMP table of
+   the writer connection in SQLite's temporary directory, in chunks of 2,000
    games, one short transaction per chunk; one transaction then applies the
-   stage (steps 3 to 5), so readers see the old titles or the new ones and
-   never part of a DAT. A parse error empties the stage and changes nothing
+   stage (steps 3 to 5) with the writer's bulk cache, so readers see the old
+   titles or the new ones and never part of a DAT. A parse error empties the stage and changes nothing
    else. Reject anything else and move it to `dats/rejected/` with a
    `<name>.reason.txt` beside it. The apply holds the writer for the SQL
    alone; scans and imports resolve rom ids on the read connection and
@@ -485,13 +487,14 @@ shutdown is left `queued` for this.
 |---|---|
 | Binary size, stripped, with SPA | under 8 MiB |
 | Idle RSS | under 30 MiB |
-| Peak RSS during scan or import | under 64 MiB, checked per job by `tests/memory.rs` |
+| Peak RSS during scan or import | under 64 MiB, checked per job by `tests/memory.rs`; a DAT load, with its bulk cache, within 28 MiB of an idle server, a source import or remap within 20 MiB, other jobs within 12 or 16 MiB |
 | tokio worker threads | 2 |
 | Blocking threads (SQLite, hashing, file work) | at most 4 |
 | Stack per runtime thread | 1 MiB reserved, touched pages only in RSS |
 | Soft `RLIMIT_DATA` | `[memory] data_limit_mib`, 192 MiB, never below 64 |
-| SQLite page cache | 2 MiB, 1 MiB on each of the two connections |
-| SQLite other | `mmap_size = 0`, `temp_store = FILE` under `<data>/tmp` (`SQLITE_TMPDIR`, set at startup and emptied of stale files, since the board's `/tmp` is RAM), WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB |
+| SQLite page cache | 2 MiB, 1 MiB on each of the two connections; the writer's rises to 8 MiB while a DAT load applies its stage, a source import, resolve, rebind or re-map first keys new roms (one committed batch of 1 000 per transaction), or a source binds (`db::bulk`) |
+| SQLite other | `mmap_size = 0`, `temp_store = FILE` under `/tmp/mistarr` (`SQLITE_TMPDIR`, set at startup and emptied of stale files; `MISTARR_TEMP_DIR` names another; RAM on the board, so temporary pages never reach the card), created with mode 0700 and refused when it is a symlink or another user's, in which case `<data>/tmp` is used and the log warns; WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB, 16 MiB while a bulk write is open |
+| DAT stage | in `/tmp/mistarr` while a DAT loads, about 1.5 times the DAT's size (18 MB for 20 000 games of three roms), given back when the load ends, as the temporary database vacuums itself; when `/tmp` fills the load fails naming `/tmp/mistarr` and the database is unchanged |
 | SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
 | Hashing buffer | 256 KiB, one file at a time |
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
@@ -543,15 +546,71 @@ at most 15 bytes (`threads::label`: `db-read`, `db-write`, `hash`,
 `scan-list`, `zip-list`, `dat-import`, `dat-save`, `source-file`,
 `source-watch`, `import`, `rename`, `arcade`, `romsets`, `launch`, `detect`,
 `incoming`, `io-class`) and puts the pool name back when it ends; the thread
-that reaps a started rtorrent is `rtorrent-reap`, and a torrent's data is
+that reaps a started rtorrent is `rtorrent-reap`, the one that rewrites
+`mistarr.migrating` while migrations run is `db-migrate`, and a torrent's data is
 deleted under `torrent-delete`. The board's BusyBox `top` and `ps` cannot
 list threads, so read them from procfs:
 `for t in /proc/$(pidof mistarr)/task/*; do echo "${t##*/} $(cat $t/comm)"; done`.
 
 A DAT loads in one write transaction, so the WAL file can grow to the size
 of the pages that DAT touches while it loads; it is cut back to 1 MiB at the
-next checkpoint. Page memory stays within the cache either way, since SQLite
-spills dirty pages to the WAL.
+next checkpoint. Page memory stays within the cache either way: a load whose
+dirty pages outgrow the bulk cache spills the rest to the WAL before its
+commit, writing those pages more than once.
+
+### Writes on a sync mount
+
+The board mounts `/media/fat` with `sync,dirsync`, so each `write` or
+`pwrite` there runs the file's fsync, a block device sync and a device
+flush before it returns: about 25 ms on a typical card, whatever its size.
+SQLite writes one page per `pwrite`, and two per WAL frame (its header, then
+the page), so the time a load takes on the board is its count of write
+syscalls, and the design counts those:
+
+- SQLite's temporary files (statement journals, sorter spills, temporary
+  b-trees) go to `/tmp/mistarr`, RAM on the board. Statement journals are
+  the large part: every statement of a long transaction copies each page it
+  changes that the transaction already dirtied, and past 64 KiB that copy
+  is a file. The DAT stage is a TEMP table for the same reason; it is
+  rebuilt from the file after a restart anyway.
+- `db::bulk` raises the writer's page cache from 1 to 8 MiB, and the soft
+  heap limit to match, for the one transaction that applies a DAT, and for
+  migrations, re-map key batches and source binding, and puts both back
+  after, on error or panic too. With 1 MiB the cache fills with dirty
+  pages, SQLite spills them to the WAL, and the same page is written again
+  each time it is changed after a spill. A connection opened meanwhile never
+  lowers the process-wide heap limit under an open bulk write. The cache is
+  sized to the measurement below: 8 and 16 MiB give the same count, and the
+  memory budget caps it.
+- The rom indexes a load does not need to update are partial (DATA-MODEL.md
+  "Indexes"): md5 is indexed only for roms without a sha1, since only those
+  are matched by md5, and the size and base-name indexes only for roms
+  binding has keyed, which a load never does.
+- Pages stay 4 KiB.
+
+Measured on the host with `/proc/thread-self/io`, which counts the syscalls
+the board would flush: the full synthetic catalogue (`synth`, every DAT rom
+with CRC32, MD5 and SHA1), a 450-game, 266 KB disc DAT of a second family on
+`psx` with every hash, and 3 000 unmatched `psx` files in directories of
+three, a third of them tracks of that DAT
+(`jobs::dat_import::sync_writes::sync_writes_on_the_bench_catalogue`):
+
+| Configuration | Load: writes to the database and WAL | Load: to temporary files | Recompute |
+|---|---|---|---|
+| 1 MiB cache, full rom indexes, temporary files on the card | 14 847 (38.4 MB) | 62 876 (129.9 MB) | 263 to the database and WAL, 464 temporary, 4.7 s |
+| 8 MiB bulk cache, partial rom indexes, temporary files in RAM | 5 785 (15.8 MB) | none on the card | 257, none on the card, 0.2 s |
+| the same with full rom indexes | 8 098 (22.2 MB) | none on the card | 257 |
+| the same with a 1 MiB cache | 9 996 (25.2 MB) | none on the card | 257 |
+
+At 25 ms a write, the load's 77 723 card writes of the first row take about
+32 minutes on the board and the 5 785 of the second about 2.4 minutes. The
+4.7 s of the first row's recompute is a lookup of each disc directory's
+tracks that reads every file row of the platform; `files::in_directory`
+seeks one directory's range of the `(platform_id, rel_path)` key instead.
+`load_writes_alone` in the same module holds a 450-game load on a tenth of
+the catalogue under 1 500 writes to the database and WAL (about 1 300; 2 000
+with a 1 MiB cache), in a test process of its own since the heap limit is
+process-wide.
 
 Every write transaction commits through `db::commit`, which first refreshes
 the clone groups its writes touched in `title_groups` (DATA-MODEL.md

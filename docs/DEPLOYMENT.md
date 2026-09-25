@@ -74,6 +74,10 @@ any dynamic dependency, checked with `file` on the output.
 /media/fat/Scripts/mistarr.sh      # start/stop/status from the Scripts menu
 /media/fat/Scripts/mistarr.sh.prev # the previous launcher, kept by install.sh
 /tmp/mistarr.start.lock        # held while a start runs; a reboot clears it
+/tmp/mistarr/                  # SQLite's temporary files and the DAT stage, in RAM, mode 0700;
+                               #   <data>/tmp/ on the card when it cannot be written,
+                               #   is a symlink or is another user's (logged at warn);
+                               #   MISTARR_TEMP_DIR names another directory
 ```
 
 [DATS.md](DATS.md) explains the DAT formats mistarr loads, what happens to a
@@ -143,12 +147,28 @@ prints where the backup is and the manual rollback steps.
 binary for its listen address (`mistarr listen-addr`, which reads
 `mistarr.toml` as the server does), uses the loopback address when that is
 `0.0.0.0` or `[::]`, and falls back to port 8420 on loopback when the binary
-gives no clean answer. It waits up to 180 s for the server to answer HTTP
-there. Migrations run before the server listens, so the wait covers them;
-for a database that needs a longer migration on the board, run the install
-with a larger limit, for example `MISTARR_START_TIMEOUT=900 sh install.sh`.
-If the new version fails to start, stops being reported running, or does
-not answer in time, the script stops it and puts back `mistarr.prev` and
+gives no clean answer. It waits up to 180 s (`MISTARR_START_TIMEOUT`) for the
+server to answer HTTP there.
+
+Migrations run before the server listens, so a large one on the board can
+take longer than that: every page it writes is flushed through the card's
+`sync` mount (ARCHITECTURE.md "Writes on a sync mount"). Migration 17, which
+rebuilds three rom indexes, writes about 3 400 pages to the database and
+WAL for a 65 MB database with every rom keyed, about 90 s at 25 ms a write.
+While migrations run, the server keeps `mistarr.migrating` in the data
+directory, rewritten every 5 s from its `db-migrate` thread with the
+versions, a step count that SQLite advances every 10 000 instructions
+the migrating connection runs, and the size of the WAL, which grows while a
+commit writes its pages; it is removed once they are applied. The rewrite
+itself moves neither, so the line stays the same while the migration makes
+no progress; the log says
+"migrating the database". While that file exists and keeps changing, the
+script waits on, printing it every 30 s, and the 180 s count starts again
+once it is gone. A migration that leaves the file unchanged for 300 s
+(`MISTARR_PROGRESS_TIMEOUT`), or that runs past two hours
+(`MISTARR_MIGRATE_TIMEOUT`), counts as a failed start, as does a server that
+exits. If the new version fails to start, stops being reported running,
+stalls, or does not answer in time, the script stops it and puts back `mistarr.prev` and
 `mistarr.sh.prev`, and, when the new version was started, the saved
 database set. It restores only a set marked by `mistarr.prev.ok`. The
 database files are copied to `.restore` names, synced and moved into place;

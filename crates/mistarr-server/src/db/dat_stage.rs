@@ -1,5 +1,5 @@
-//! `dat_stage`: the games of the DAT being imported, parsed and stored in
-//! chunks, then applied in one transaction; see `docs/ARCHITECTURE.md` "DAT import".
+//! `dat_stage`: the games of the DAT being imported, parsed and stored in chunks in a
+//! TEMP table, then applied in one transaction; see `docs/ARCHITECTURE.md` "DAT import".
 
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,25 @@ pub struct StagedRom {
     pub header: Option<String>,
 }
 
+/// Creates the connection's stage, a TEMP table, so staged rows go to SQLite's
+/// temporary directory rather than the database file, and nothing survives a restart.
+/// The temporary database vacuums itself, so the file shrinks back when the stage empties.
+fn ensure(conn: &Connection) -> Result<()> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM temp.sqlite_master WHERE name = 'dat_stage')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        // Takes effect only before the temporary database holds its first table.
+        conn.execute_batch(
+            "PRAGMA temp.auto_vacuum = FULL;
+             CREATE TEMP TABLE dat_stage (seq INTEGER PRIMARY KEY, game TEXT NOT NULL)",
+        )?;
+    }
+    Ok(())
+}
+
 /// Empties the stage. The background lane imports one DAT at a time, so a
 /// load starts from an empty stage.
 ///
@@ -63,7 +82,8 @@ pub struct StagedRom {
 /// mistarr_server::db::dat_stage::clear(&conn).unwrap();
 /// ```
 pub fn clear(conn: &Connection) -> Result<()> {
-    conn.execute("DELETE FROM dat_stage", [])?;
+    ensure(conn)?;
+    conn.execute("DELETE FROM temp.dat_stage", [])?;
     Ok(())
 }
 
@@ -73,7 +93,8 @@ pub fn clear(conn: &Connection) -> Result<()> {
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn append(conn: &Connection, games: &[StagedGame]) -> Result<()> {
-    let mut stmt = conn.prepare_cached("INSERT INTO dat_stage (game) VALUES (?1)")?;
+    ensure(conn)?;
+    let mut stmt = conn.prepare_cached("INSERT INTO temp.dat_stage (game) VALUES (?1)")?;
     for game in games {
         let text = serde_json::to_string(game).map_err(|e| crate::Error::Job(e.to_string()))?;
         stmt.execute(params![text])?;
@@ -89,7 +110,8 @@ pub fn append(conn: &Connection, games: &[StagedGame]) -> Result<()> {
 /// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Job`] for a row
 /// that does not read back.
 pub fn apply(conn: &Connection, platform: &str, version: DatVersionId) -> Result<u64> {
-    let mut stmt = conn.prepare("SELECT game FROM dat_stage ORDER BY seq")?;
+    ensure(conn)?;
+    let mut stmt = conn.prepare("SELECT game FROM temp.dat_stage ORDER BY seq")?;
     let mut staged = stmt.query([])?;
     let mut n = 0;
     while let Some(row) = staged.next()? {
@@ -178,5 +200,13 @@ mod tests {
         assert_eq!(names, ["Example Quest (USA)", "Other Tale (USA)"]);
         clear(&c).expect("clear");
         assert_eq!(apply(&c, "gb", id).expect("apply"), 0);
+        let in_main: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM main.sqlite_master WHERE name = 'dat_stage'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("schema");
+        assert_eq!(in_main, 0, "the stage never reaches the database file");
     }
 }
