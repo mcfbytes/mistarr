@@ -40,12 +40,12 @@ holds scans and imports, or the user's Pause, which also holds DAT and source
 imports), which ones, and a Run now button that calls `POST /system/resume`.
 
 **Platforms** (`/`). One card per platform with core present, counts, and a
-scan button. Platforms whose core is absent are in a collapsed section. While
+scan button, under a banner of the platform's art. Platforms whose core is absent are in a collapsed section. While
 the wizard reports a missing DAT, client or source, a "Setup not finished"
 card lists what is missing and links to the wizard.
 
 **Browse** (`/p/{id}`). A Start core button beside the platform name,
-except on arcade. Poster grid of `title_groups`, cover from the libretro
+except on arcade, both over a short banner of the platform's art. Poster grid of `title_groups`, cover from the libretro
 URL with a placeholder on 404. Filters: search, have / missing / wanted,
 region, a "Show hidden" checkbox, and a flags multi-select that requires
 every checked flag. Each card shows the 1G1R pick name, a have indicator, and
@@ -101,6 +101,45 @@ result. Live over SSE, as in the wizard.
 wizard, CORENAME, paused indicator with manual override, launch state,
 settings form for the runtime-editable subset with the shared path map editor
 and the switch that allows launching, log tail.
+
+## Platform art
+
+Each platform has an abstract backdrop, drawn as inline SVG by
+`web/src/lib/art/generate.ts` and shown by `web/src/lib/PlatformArt.svelte`.
+The art is original and abstract: it depicts no hardware, logo or
+manufacturer artwork and uses no brand colours (PRINCIPLES.md section 8). It
+ships in the bundle and never loads an image or touches the network.
+
+A platform id maps to a motif family that evokes its era or medium; an id
+without a mapping falls back to its `kind`, and anything else to contours.
+
+| Family | Motif | Platforms |
+|---|---|---|
+| pixel | tile mosaic, ordered dither through a four-step ramp | nes, fds, sms, sg1000, atari7800, coleco, intv, pce, sgx, sv; kind `cartridge` |
+| parallax | banded sun behind stepped parallax ridges | snes, megadrive, s32x |
+| bands | bold horizontal bands under a scanline raster | atari2600, atari5200 |
+| vector | twisting wireframe tunnel on black | vectrex |
+| lcd | dot matrix with lit sprites, ghosting and backlight | gb, gbc, gba, gg, lynx, ngp, ws, wsc, pokemini |
+| disc | concentric tracks, thin-film sheen, light sweep | psx, saturn, megacd, pcecd, neocd; kind `disc` |
+| poly | flat-shaded low-poly terrain | n64 |
+| marquee | starfield, horizon glow, marquee bulbs | arcade, neogeo; kinds `arcade`, `romset` |
+| phosphor | glyph-like blocks on a phosphor raster | kind `computer` |
+| contour | drifting contour lines | kind `other`, unknown ids |
+
+Colours come from `web/src/lib/art/palette.ts`: the hues of the theme tokens
+in `app.css` (accent, ok, warn) and a few that harmonise with them. Each
+family has a base hue; a PRNG seeded by the platform id shifts it and every
+layout choice, so the same id always draws the same art and siblings differ
+within their family. Every colour slot has a dark and a light value, and the
+component picks one through `prefers-color-scheme`. There is no motion.
+
+On a Platforms card the art fills a banner under a scrim that is at least
+85% opaque where the text starts, so text keeps AA contrast over any art.
+Disabled cards and cards without a core show the art desaturated and dimmed.
+The Browse header uses a wider format under a scrim that darkens towards the
+name. The art is `aria-hidden`; the platform name stays the accessible name.
+Each tile stays under 120 SVG elements, and art is memoised per id, kind and
+format.
 
 ## State handling
 

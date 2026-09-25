@@ -5,6 +5,7 @@
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
   import SetupHints from '../lib/SetupHints.svelte';
+  import PlatformArt from '../lib/PlatformArt.svelte';
   import type { PlatformCounts } from '../lib/types';
 
   onMount(() => {
@@ -66,7 +67,8 @@
   <SetupHints />
   <div class="grid">
     {#each present as platform (platform.id)}
-      <div class="card">
+      <div class="card art-card">
+        <div class="banner"><PlatformArt id={platform.id} kind={platform.kind} /></div>
         <h2><a href={platformUrl(platform.id)}>{platform.name}</a></h2>
         <p class="muted">{summarize(platform.counts)}</p>
         <div class="actions">
@@ -82,7 +84,8 @@
       <summary>Disabled platforms ({disabled.length})</summary>
       <div class="grid">
         {#each disabled as platform (platform.id)}
-          <div class="card">
+          <div class="card art-card">
+            <div class="banner"><PlatformArt id={platform.id} kind={platform.kind} muted /></div>
             <h2>{platform.name}</h2>
             <button onclick={() => setEnabled(platform.id, true)}>Enable</button>
           </div>
@@ -96,7 +99,8 @@
       <summary>Platforms with no core present ({absent.length})</summary>
       <div class="grid">
         {#each absent as platform (platform.id)}
-          <div class="card">
+          <div class="card art-card">
+            <div class="banner"><PlatformArt id={platform.id} kind={platform.kind} muted /></div>
             <h2>{platform.name}</h2>
             <p class="muted">Core not present.</p>
           </div>
@@ -112,6 +116,53 @@
     grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
     gap: 1em;
     margin-top: 1em;
+  }
+
+  .art-card {
+    position: relative;
+    overflow: hidden;
+    padding-top: 100px;
+  }
+
+  .art-card > :not(.banner) {
+    position: relative;
+  }
+
+  .banner {
+    position: absolute;
+    inset: 0 0 auto;
+    height: 136px;
+  }
+
+  /* Text starts where the scrim is at least 85% opaque, which holds AA contrast over any art. */
+  .banner::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(
+      to bottom,
+      transparent 35%,
+      color-mix(in srgb, var(--bg-raised) 85%, transparent) 72%,
+      var(--bg-raised) 94%
+    );
+  }
+
+  h2 {
+    margin: 0 0 0.4em;
+    font-size: 1.15em;
+    line-height: 1.25;
+  }
+
+  h2 a {
+    color: var(--fg);
+    text-decoration: none;
+  }
+
+  h2 a:hover,
+  h2 a:focus-visible {
+    text-decoration: underline;
+    text-decoration-color: var(--accent);
+    text-underline-offset: 3px;
   }
 
   .actions {
