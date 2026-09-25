@@ -7,6 +7,7 @@
     getGroupsTotal,
     isGroupsLoading,
     loadTitlesPage,
+    nextPage,
     patchGroup
   } from '../lib/stores/titles.svelte';
   import { titleUrl } from '../lib/router.svelte';
@@ -36,7 +37,6 @@
   let showHidden = $state(false);
   let requireFlags = $state<string[]>([]);
   let hideList = $state<string[]>([]);
-  let page = $state(0);
   let loadingMore = $state(false);
 
   const platform = $derived(findPlatform(platformId));
@@ -112,7 +112,6 @@
   });
 
   $effect(() => {
-    page = 0;
     void loadTitlesPage(platformId, filters(), 0);
   });
 
@@ -121,15 +120,12 @@
       return;
     }
     loadingMore = true;
-    // The page advances only once it has landed, so a failure never skips rows.
-    if (await loadTitlesPage(platformId, filters(), page + 1)) {
-      page += 1;
-    }
+    // The next page follows the rows held, so a failure or a reload never skips any.
+    await loadTitlesPage(platformId, filters(), nextPage());
     loadingMore = false;
   }
 
   function retry(): void {
-    page = 0;
     void loadTitlesPage(platformId, filters(), 0);
   }
 

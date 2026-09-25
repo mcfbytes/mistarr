@@ -86,9 +86,11 @@ the 1G1R pick name, a have indicator, and a want toggle. Infinite scroll in
 pages of 60. Search runs 250 ms after typing stops, and each request cancels
 the one before it. A background reload, such as one a scan's `file.changed`
 asks for, never cancels a page on its way: it runs once that page lands, so
-a stream of events never keeps a slow search from answering. While a page is loading a thin progress bar shows and the
-current results stay visible, dimmed and marked `aria-busy`; a failed load
-shows an alert with Retry.
+a stream of events never keeps a slow search from answering. It rewrites
+each loaded page in its place, and scrolling on loads the page after the
+rows shown, so no rows are skipped. While a page is loading a thin progress
+bar shows and the current results stay visible, dimmed and marked
+`aria-busy`; a failed load shows an alert with Retry.
 
 **Title** (`/t/{id}`). Every variant in the group with region, revision,
 flags, file state (a CHD member named as "g.chd, track 2" or "g.chd, track

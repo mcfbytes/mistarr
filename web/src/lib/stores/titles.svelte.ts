@@ -24,6 +24,8 @@ let reloading = false;
 /** A reload asked for while a load was on its way, run once that load settles. */
 let reloadQueued = false;
 let detailToken = 0;
+/** The background detail refresh on its way; a newer one cancels it. */
+let detailController: AbortController | null = null;
 
 export function getGroups(): TitleGroup[] {
   return groups;
@@ -69,6 +71,14 @@ async function mockTitles(
   return { items: all, total: all.length };
 }
 
+/**
+ * The page to load after the rows already in the grid: the count of full pages
+ * held, so a load-more never leaves a gap whatever reloads did meanwhile.
+ */
+export function nextPage(): number {
+  return Math.floor(groups.length / PAGE_SIZE);
+}
+
 export function getDetail(): TitleDetail | null {
   return detail;
 }
@@ -111,7 +121,7 @@ export async function loadTitlesPage(
     if (controller.signal.aborted) {
       return false;
     }
-    groups = page === 0 ? res.items : [...groups, ...res.items];
+    groups = placed(groups, res.items, offset, quiet);
     groupsTotal = res.total;
     groupsError = null;
     lastPage = page;
@@ -128,6 +138,16 @@ export async function loadTitlesPage(
       runQueuedReload();
     }
   }
+}
+
+/**
+ * `rows` with `items` at `offset`. A background reload writes its page over the
+ * same slot and keeps the pages after it, unless its page came back short, so the
+ * grid never shrinks to one page while the rest reload; any other load ends there.
+ */
+function placed(rows: TitleGroup[], items: TitleGroup[], offset: number, quiet: boolean): TitleGroup[] {
+  const kept = quiet && items.length === PAGE_SIZE ? rows.slice(offset + PAGE_SIZE) : [];
+  return [...rows.slice(0, offset), ...items, ...kept];
 }
 
 /** Starts the reload asked for while a load was on its way, once nothing is loading. */
@@ -150,6 +170,7 @@ export async function reloadTitles(): Promise<void> {
     return;
   }
   reloading = true;
+  let complete = true;
   try {
     // Snapshot before reloading: page 0 would otherwise reset lastPage first.
     const platform = groupsPlatform;
@@ -159,14 +180,21 @@ export async function reloadTitles(): Promise<void> {
     if (platform) {
       for (let p = 0; p <= pages; p += 1) {
         if (userLoads !== loads || !(await loadTitlesPage(platform, filters, p, true))) {
-          return;
+          complete = false;
+          break;
+        }
+        // A short page is the new end of the list; nothing after it is left to reload.
+        if (groups.length < (p + 1) * PAGE_SIZE) {
+          break;
         }
       }
     }
-    await refreshDetail();
   } finally {
     reloading = false;
     runQueuedReload();
+  }
+  if (complete) {
+    await refreshDetail();
   }
 }
 
@@ -181,11 +209,22 @@ async function refreshDetail(): Promise<void> {
   if (detailId === null) {
     return;
   }
+  detailController?.abort();
+  const controller = new AbortController();
+  detailController = controller;
   const id = detailId;
   const token = detailToken;
-  const next = isMock ? fixtureTitle(id) : await api.title(id);
-  if (token === detailToken && detailId === id) {
-    detail = next;
+  try {
+    const next = isMock ? fixtureTitle(id) : await api.title(id, controller.signal);
+    if (token === detailToken && detailId === id && !controller.signal.aborted) {
+      detail = next;
+    }
+  } catch {
+    // A failed or cancelled refresh keeps the detail shown; the next one tries again.
+  } finally {
+    if (detailController === controller) {
+      detailController = null;
+    }
   }
 }
 

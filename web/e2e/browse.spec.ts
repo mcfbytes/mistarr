@@ -112,6 +112,49 @@ test('a slow search lands while background reloads keep arriving', async ({ page
   await expect(page.getByRole('progressbar', { name: 'Loading titles' })).toHaveCount(0);
 });
 
+test('a reload asked for during a load runs once that load has landed', async ({ page }) => {
+  await delays(page, { Mock: 1500 });
+  await page.goto('/#/p/nes');
+  await expect(names(page).first()).toBeVisible();
+
+  await page.getByPlaceholder('Search').fill('Mock');
+  await expect(page.getByRole('progressbar', { name: 'Loading titles' })).toBeVisible();
+  // The search already read its delay; the reload's own request will fail, which shows.
+  await page.evaluate(() => {
+    localStorage.setItem('mistarr.mockDelayMs', '{"Mock": -1}');
+    const w = window as unknown as { mistarrReloadTitles: () => Promise<void> };
+    void w.mistarrReloadTitles();
+  });
+  const alert = page.getByRole('alert');
+  await page.waitForTimeout(500);
+  await expect(alert).toHaveCount(0);
+  await expect(names(page).first()).toHaveText('Mock Manor (USA)', { timeout: 5000 });
+  await expect(alert).toContainText('Titles could not be loaded');
+});
+
+test('scrolling on after a reload loads the next page with no gap', async ({ page }) => {
+  await page.goto('/#/p/nes');
+  await expect(names(page).first()).toBeVisible();
+  await scrollForMore(page, 180);
+  const expected = await ids(page);
+
+  await page.reload();
+  await expect(names(page).first()).toBeVisible();
+  await scrollForMore(page, 120);
+  // Page 0 reloads at once and page 1 slowly, while the grid sits scrolled to its end.
+  await page.evaluate(() => {
+    localStorage.setItem('mistarr.mockDelayMs', '{"#1": 1500}');
+    const w = window as unknown as { mistarrReloadTitles: () => Promise<void> };
+    void w.mistarrReloadTitles();
+  });
+  await page.mouse.wheel(0, 50_000);
+  await page.waitForTimeout(2500);
+  await page.evaluate(() => localStorage.removeItem('mistarr.mockDelayMs'));
+  await scrollForMore(page, 180);
+  const got = await ids(page);
+  expect(got.slice(0, 180)).toEqual(expected.slice(0, 180));
+});
+
 test('a background reload stops when the user searches', async ({ page }) => {
   await page.goto('/#/p/nes');
   await expect(names(page).first()).toBeVisible();
