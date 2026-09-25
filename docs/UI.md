@@ -45,15 +45,16 @@ absent are in a collapsed section. While the wizard reports a missing DAT,
 client or source, a "Setup not finished" card lists what is missing and
 links to the wizard.
 
-**Browse** (`/p/{id}`). A Start core button beside the platform name,
-except on arcade, both below a banner of the platform's art. Poster grid of
+**Browse** (`/p/{id}`). A Start core button beside the platform name, except
+on arcade, both below a banner of the platform's art. Poster grid of
 `title_groups`, cover from the libretro URL with a placeholder on 404.
 Filters: search, have / missing / wanted, region, a "Show hidden" checkbox,
 and a flags multi-select that requires every checked flag. Each card shows
-the 1G1R pick name, a have indicator, and a want toggle. Infinite scroll in pages of 60. Search runs 250 ms after
-typing stops, and each request cancels the one before it. While a page is
-loading a thin progress bar shows and the current results stay visible,
-dimmed and marked `aria-busy`; a failed load shows an alert with Retry.
+the 1G1R pick name, a have indicator, and a want toggle. Infinite scroll in
+pages of 60. Search runs 250 ms after typing stops, and each request cancels
+the one before it. While a page is loading a thin progress bar shows and the
+current results stay visible, dimmed and marked `aria-busy`; a failed load
+shows an alert with Retry.
 
 **Title** (`/t/{id}`). Every variant in the group with region, revision,
 flags, file state, and which sources have it: one line per file, as "nova.nes
