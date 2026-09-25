@@ -286,7 +286,7 @@ impl AppState {
         self.set_client_at(at, client);
     }
 
-    /// Drops the client handle, as when detection finds no client.
+    /// Drops the client handle, leaving no client, as before the first detection.
     #[cfg(test)]
     pub(crate) fn clear_client(&self) {
         *self.client.write().unwrap_or_else(PoisonError::into_inner) = None;

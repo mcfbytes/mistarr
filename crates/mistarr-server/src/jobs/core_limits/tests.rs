@@ -10,12 +10,13 @@ use mistarr_clients::{
 use super::*;
 use crate::app::testutil::{state_with, TestDir};
 use crate::app::Options;
-use crate::db::deferred::{self, Deferred, Op};
+use crate::db::deferred::{self, Op};
 use crate::freeze::fake::FakeClient;
 use crate::freeze::Signal;
 use crate::jobs::gate::MENU;
 use crate::jobs::transfer::Deselect;
 use crate::jobs::Scheduler;
+use serde_json::json;
 
 /// A client whose global limits live in memory and whose calls are recorded;
 /// `down` makes every call fail.
@@ -24,6 +25,7 @@ struct Mock {
     down_limit: Mutex<RateLimit>,
     up_limit: Mutex<RateLimit>,
     unreachable: Mutex<bool>,
+    refuse_seed: Mutex<bool>,
     pid: Mutex<Option<u32>>,
     alt_up: Mutex<Option<RateLimit>>,
 }
@@ -35,6 +37,7 @@ impl Mock {
             down_limit: Mutex::new(RateLimit::default()),
             up_limit: Mutex::new(up),
             unreachable: Mutex::new(false),
+            refuse_seed: Mutex::new(false),
             pid: Mutex::new(None),
             alt_up: Mutex::new(None),
         })
@@ -117,7 +120,11 @@ impl DownloadClient for Mock {
         id: &ClientTorrentId,
         _seed: SeedPolicy,
     ) -> mistarr_clients::Result<()> {
-        self.log(format!("seed:{id}"))
+        self.log(format!("seed:{id}"))?;
+        if *self.refuse_seed.lock().expect("lock") {
+            return Err(ClientError::Protocol("refused".into()));
+        }
+        Ok(())
     }
     async fn start(&self, _id: &ClientTorrentId) -> mistarr_clients::Result<()> {
         nope()
@@ -692,8 +699,9 @@ fn source_in_client(app: &AppState) -> sources::SourceId {
         .expect("source")
 }
 
-async fn waiting(app: &AppState) -> Deferred {
-    app.db.read(deferred::get).await.expect("deferred")
+async fn waiting(app: &AppState) -> Vec<Op> {
+    let kept = app.db.read(deferred::get).await.expect("deferred");
+    kept.into_iter().map(|e| e.op).collect()
 }
 
 /// App state with the scheduler running and `mock` as a frozen client.
@@ -714,7 +722,7 @@ async fn a_cancel_during_a_game_waits_for_the_client_and_runs_at_the_resume() {
         .await
         .expect("deselect");
     assert!(mock.calls().is_empty(), "nothing reaches a frozen client");
-    assert_eq!(waiting(&app).await.deselect, [source]);
+    assert_eq!(waiting(&app).await, [Op::Deselect(source)]);
 
     app.set_client_hold(None);
     replay_deferred(&app).await.expect("replay");
@@ -736,7 +744,7 @@ async fn a_finished_torrent_is_released_at_the_resume() {
         .expect("placed");
     crate::jobs::import::release_source(&app, source).await;
     assert!(mock.calls().is_empty());
-    assert_eq!(waiting(&app).await.release, [source]);
+    assert_eq!(waiting(&app).await, [Op::Release(source)]);
 
     app.set_client_hold(None);
     replay_deferred(&app).await.expect("replay");
@@ -757,8 +765,7 @@ async fn seed_policies_changed_during_a_game_apply_at_the_resume() {
     let (_dir, app) = frozen_client(&mock);
     source_in_client(&app);
     defer(&app, Op::Seed).await;
-    let kept = waiting(&app).await;
-    assert!(kept.seed, "{kept:?}");
+    assert_eq!(waiting(&app).await, [Op::Seed]);
     assert!(mock.calls().is_empty());
 
     app.set_client_hold(None);
@@ -774,7 +781,7 @@ async fn detection_during_a_game_is_kept_for_the_resume() {
     crate::jobs::detect_client::detect_and_store(&app, false)
         .await
         .expect("detect");
-    assert!(waiting(&app).await.detect);
+    assert_eq!(waiting(&app).await, [Op::Detect]);
     assert!(mock.calls().is_empty());
 }
 
@@ -785,7 +792,7 @@ async fn work_kept_before_a_restart_runs_when_the_gate_starts() {
     Scheduler::start(&app);
     let source = source_in_client(&app);
     app.db
-        .write_blocking(move |c| deferred::add(c, Op::Deselect(source)))
+        .write_blocking(move |c| deferred::add(c, Op::Deselect(source), 0))
         .expect("kept");
     let _gate = start_at_state(&mock, &app);
     assert_eq!(wait_calls(&mock, 2).await, ["stop:t", "wanted:t:[]"]);
@@ -1018,9 +1025,9 @@ async fn work_kept_for_a_client_that_died_during_the_game_waits_until_it_is_back
             Ok(())
         })
         .expect("placed");
-    assert!(!crate::jobs::import::release_source(&app, source).await);
     defer(&app, Op::Seed).await;
     defer(&app, Op::Deselect(source)).await;
+    assert!(!crate::jobs::import::release_source(&app, source).await);
 
     mock.set_unreachable(true);
     app.set_client_hold(None);
@@ -1028,17 +1035,14 @@ async fn work_kept_for_a_client_that_died_during_the_game_waits_until_it_is_back
         replay_deferred(&app).await.is_err(),
         "a refusing client is retried"
     );
-    let kept = waiting(&app).await;
-    assert!(kept.seed, "{kept:?}");
-    assert_eq!((kept.deselect, kept.release), (vec![source], vec![source]));
+    let kept = [Op::Seed, Op::Deselect(source), Op::Release(source)];
+    assert_eq!(waiting(&app).await, kept);
+    let tries = app.db.read(deferred::get).await.expect("kept");
+    assert!(tries.iter().all(|e| e.tries == 1), "{tries:?}");
 
     app.clear_client();
     replay_deferred(&app).await.expect("no client waits");
-    assert_eq!(
-        waiting(&app).await.release,
-        [source],
-        "nothing is lost with no client"
-    );
+    assert_eq!(waiting(&app).await, kept, "nothing is lost with no client");
 
     mock.set_unreachable(false);
     app.set_client_at(nas(), Arc::clone(&mock) as Arc<dyn DownloadClient>);
@@ -1068,8 +1072,134 @@ async fn a_deselect_with_no_client_waits_for_one() {
     Scheduler::run_inline(&app, Arc::new(Deselect { source_id: source }))
         .await
         .expect("deselect");
-    assert_eq!(waiting(&app).await.deselect, [source]);
+    assert_eq!(waiting(&app).await, [Op::Deselect(source)]);
     app.set_client_at(nas(), Arc::clone(&mock) as Arc<dyn DownloadClient>);
     replay_deferred(&app).await.expect("replay");
     assert_eq!(mock.calls(), ["stop:t", "wanted:t:[]"]);
+}
+
+#[test]
+fn a_due_previous_entry_never_wakes_the_gate_while_the_client_is_frozen() {
+    let saved = SavedLimits {
+        client: gone_socket(),
+        down: None,
+        up: Some(OWN),
+        alt_up: None,
+    };
+    let a = Applied {
+        client: None,
+        have: Target::default(),
+        alt_read: false,
+        alt_held: false,
+        saved: None,
+        previous: vec![PreviousLimits {
+            saved,
+            since: 0,
+            tries: 0,
+            next_at: 0,
+        }],
+        frozen: None,
+        refused: None,
+    };
+    assert_eq!(
+        a.previous_at(true),
+        None,
+        "no try runs while frozen, so none is due"
+    );
+    let due = a.previous_at(false).expect("due");
+    assert!(due <= Instant::now());
+}
+
+#[tokio::test]
+async fn a_refused_kept_work_neither_stops_the_recheck_nor_retries_faster_than_the_backoff() {
+    let mock = Mock::new(OWN);
+    let (_dir, app) = start_at(
+        &mock,
+        nas(),
+        MENU,
+        |o| o.hold_recheck = Duration::from_millis(30),
+        None,
+    );
+    app.update_config(|c| c.limits.down_kbps_core = 0);
+    source_in_client(&app);
+    *mock.refuse_seed.lock().expect("lock") = true;
+    app.gate.set_corename(Some("SNES".into()));
+    wait_calls(&mock, 2).await;
+    defer(&app, Op::Seed).await;
+    mock.set_up(RateLimit::default());
+    wait_for("the hold again", || {
+        mock.calls()
+            .iter()
+            .filter(|c| *c == "set:up:true/0")
+            .count()
+            == 2
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let tries = mock
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("seed:"))
+        .count();
+    // Retries at 10, 20, 40, 80 and 160 ms after each failure: a handful, not one per wake.
+    assert!((2..=8).contains(&tries), "{tries} seed tries");
+    assert_eq!(waiting(&app).await, [Op::Seed]);
+}
+
+#[tokio::test]
+async fn the_same_daemon_under_a_new_address_gets_its_own_limit_back_before_it_is_read() {
+    use mistarr_clients::fake::{FakeResponse, FakeServer};
+    let fake = FakeServer::start().await.expect("fake");
+    let port = fake.addr().port();
+    let at = |host: &str| remote(&format!("http://{host}:{port}/transmission/rpc"));
+    let handle = |e: &ClientEndpoint| {
+        ClientKey {
+            kind: e.kind,
+            url: e.url.clone(),
+            path_map: Vec::new(),
+        }
+        .build()
+        .expect("client")
+    };
+    let own = json!({ "speed-limit-up": 30, "speed-limit-up-enabled": true });
+    let (_dir, app) = state_with(fast);
+    app.update_config(|c| c.limits.down_kbps_core = 0);
+    fake.push(FakeResponse::success(own.clone()));
+    fake.push(FakeResponse::success(json!({})));
+    fake.push(FakeResponse::success(json!({})));
+    app.set_client_at(at("localhost"), handle(&at("localhost")));
+    app.gate.set_corename(Some("SNES".into()));
+    tokio::spawn(follow_gate(Arc::clone(&app)));
+    let sets = || {
+        fake.bodies()
+            .into_iter()
+            .filter(|b| b["method"] == "session-set" || b["method"] == "session-get")
+            .map(|b| b["arguments"].clone())
+            .collect::<Vec<_>>()
+    };
+    wait_for("the first hold", || sets().len() == 3).await;
+    assert_eq!(
+        sets()[2],
+        json!({ "speed-limit-up": 0, "speed-limit-up-enabled": true })
+    );
+
+    fake.push(FakeResponse::success(json!({})));
+    fake.push(FakeResponse::success(own.clone()));
+    fake.push(FakeResponse::success(json!({})));
+    fake.push(FakeResponse::success(json!({})));
+    app.set_client_at(at("127.0.0.1"), handle(&at("127.0.0.1")));
+    wait_for("the second hold", || sets().len() == 7).await;
+    let calls = sets();
+    assert_eq!(
+        calls[3], own,
+        "the own limit is put back before the new address reads it"
+    );
+    assert_eq!(
+        calls[4],
+        json!({ "fields": ["speed-limit-up", "speed-limit-up-enabled"] })
+    );
+    assert_eq!(
+        stored(&app).await.and_then(|s| s.up),
+        Some(RateLimit::kbps(30))
+    );
 }

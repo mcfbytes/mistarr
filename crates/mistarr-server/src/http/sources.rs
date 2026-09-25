@@ -180,15 +180,17 @@ async fn update(
         .await?
         .ok_or_else(|| ApiError::not_found("No such source."))?;
     if let (Some(seed), Some(cid)) = (seed, &updated.client_id) {
-        if app.client_frozen() {
-            crate::jobs::core_limits::defer(&app, crate::db::deferred::Op::Seed).await;
-        } else if let Some(client) = app.client() {
-            if let Err(e) = client
+        let applied = match app.client() {
+            Some(client) => client
                 .set_seed_policy(&ClientTorrentId::new(cid.as_str()), seed)
                 .await
-            {
-                tracing::warn!(source = %id, error = %e, "cannot apply the seed policy in the client");
-            }
+                .map_err(|e| tracing::warn!(source = %id, error = %e, "cannot apply the seed policy in the client"))
+                .is_ok(),
+            None => false,
+        };
+        // A frozen, missing or refusing client gets every policy again later.
+        if !applied {
+            crate::jobs::core_limits::defer(&app, crate::db::deferred::Op::Seed).await;
         }
     }
     publish_changed(&app, &updated);

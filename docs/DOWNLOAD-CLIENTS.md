@@ -226,8 +226,11 @@ pause with it.
    stopping a torrent with nothing left selected; and a finished torrent
    under seed policy "none" is removed from the client and its empty staging
    directories cleared. Each piece is cleared only once the client took it.
-   With no client all of it stays until one is detected; work a client
-   refuses is tried again after the gate's retry wait.
+   With no client all of it stays until one is detected. Work a client
+   refuses is tried again after a wait of its own that starts at the
+   CORENAME poll interval and doubles up to a minute, apart from the hold's
+   retries and checks; a piece refused 20 times and kept for a day, both,
+   is dropped with a warning.
 5. Every minute a stopped client is checked: one resumed by something else
    is stopped again, and one that exited or is no longer the client is let
    go, so the next step finds its successor.
@@ -266,14 +269,17 @@ cannot be stopped, is held through its own controls instead:
    direction; during a game they are kept and the hold is sent again. A
    stored record that cannot be read is retried and never overwritten.
    When the client changes, or no client is detected, the stored limits are
-   set aside under `client.previous_limits` and the current client's own are
-   read before it is held, so the old client never delays the new one's
-   hold. Limits set aside are put back in their client through a handle
-   built from its kind and address, each try taking at most five seconds,
+   set aside under `client.previous_limits`. Limits set aside are put back
+   in their client through a handle built from its kind and address, each
+   try taking at most five seconds and ending early when the gate changes,
    the first at once and then after a wait that starts at a minute and
-   doubles up to an hour. A try that fails a day after they were set aside
-   drops them with a warning. When their client is detected again they are
-   taken back as its saved limits, so a held limit is never read as its own.
+   doubles up to an hour; no try runs, and none is due, while the client is
+   stopped. Before the gate first reads a client's own limits it tries
+   every entry set aside, so the same daemon under another address, such as
+   `localhost` and `127.0.0.1`, has its own limits back before they are
+   read. A try that fails a day after they were set aside drops them with a
+   warning. When their client is detected again under the same address they
+   are taken back as its saved limits.
 5. A new client handle, after detection finds another client, is held in turn.
    Every minute held uploads are read back and held again if they left the
    hold, as after a client restart.

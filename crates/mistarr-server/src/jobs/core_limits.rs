@@ -5,6 +5,8 @@ use std::fmt::Display;
 use std::sync::{Arc, PoisonError};
 use std::time::Duration;
 
+use tokio::time::Instant;
+
 use mistarr_clients::{
     ClientError, ClientKind, ClientTorrentId, Direction, DownloadClient, RateLimit,
 };
@@ -13,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use crate::app::AppState;
 use crate::client::{self, ClientEndpoint, ClientKey};
 use crate::config::LimitsConfig;
-use crate::db::deferred::{self, Deferred, Op};
+use crate::db::deferred::{self, Op};
 use crate::db::settings::{self, keys};
 use crate::db::sources;
 use crate::events::EventKind;
@@ -270,12 +272,49 @@ impl Applied {
         self.alt_held = false;
     }
 
-    /// How long until a previous client's limits are due for another try.
-    fn previous_wait(&self) -> Option<Duration> {
+    /// When a previous client's limits are next due for a try; never while
+    /// the client is `frozen`, since no try runs then.
+    fn previous_at(&self, frozen: bool) -> Option<Instant> {
         let now = crate::unix_now();
-        self.previous.iter().map(|p| p.next_at).min().map(|at| {
-            Duration::from_secs(u64::try_from(at.saturating_sub(now)).unwrap_or(0).max(1))
-        })
+        let next = self.previous.iter().map(|p| p.next_at).min()?;
+        let wait = u64::try_from(next.saturating_sub(now)).unwrap_or(0);
+        (!frozen).then(|| Instant::now() + Duration::from_secs(wait))
+    }
+}
+
+/// Failures in a row of one kind of work: the first is a warning, the rest
+/// debug, and success after them info.
+#[derive(Debug, Default)]
+struct Streak {
+    failures: u32,
+}
+
+impl Streak {
+    /// Records the outcome; the time to try again after a failure.
+    fn record(
+        &mut self,
+        outcome: &Result<(), Failure>,
+        base: Duration,
+        recovered: &str,
+    ) -> Option<Instant> {
+        match outcome {
+            Ok(()) => {
+                if self.failures > 0 {
+                    tracing::info!("{recovered}");
+                }
+                self.failures = 0;
+                None
+            }
+            Err(f) => {
+                self.failures += 1;
+                if self.failures == 1 {
+                    tracing::warn!(error = %f.error, "{}", f.what);
+                } else {
+                    tracing::debug!(error = %f.error, failures = self.failures, "{}", f.what);
+                }
+                Some(Instant::now() + backoff(base, self.failures))
+            }
+        }
     }
 }
 
@@ -285,12 +324,22 @@ impl Applied {
 /// elsewhere with its uploads held. What the client does not take is retried
 /// with a backoff from [`crate::app::Options::corename_poll`] to [`RETRY_MAX`],
 /// and a held client is checked every [`crate::app::Options::hold_recheck`].
+/// Client work kept for later runs when the client is not frozen, with a
+/// backoff of its own.
 pub async fn follow_gate(app: Arc<AppState>) {
     let mut rx = app.gate.subscribe();
+    let base = app.options.corename_poll;
     let mut applied: Option<Applied> = None;
-    let mut failures = 0u32;
+    let (mut hold_streak, mut replay_streak) = (Streak::default(), Streak::default());
+    let (mut replay_retry, mut recheck_at) = (None, None::<Instant>);
     loop {
         rx.borrow_and_update();
+        if recheck_at.is_some_and(|at| at <= Instant::now()) {
+            recheck_at = None;
+            if let Some(a) = applied.as_mut() {
+                recheck_hold(&app, a).await;
+            }
+        }
         let outcome = match applied.as_mut() {
             Some(a) => step(&app, a).await,
             None => match load(&app).await {
@@ -301,47 +350,38 @@ pub async fn follow_gate(app: Arc<AppState>) {
         if let Some(a) = &applied {
             publish(&app, current_hold(&app, a)).await;
         }
-        let delay = match &outcome {
-            Ok(()) => {
-                if failures > 0 {
-                    tracing::info!("the download client took its core-gate hold");
-                }
-                failures = 0;
-                applied
-                    .as_ref()
-                    .filter(|a| a.holding())
-                    .map(|_| app.options.hold_recheck)
-            }
-            Err(f) => {
-                failures += 1;
-                if failures == 1 {
-                    tracing::warn!(error = %f.error, "{}", f.what);
-                } else {
-                    tracing::debug!(error = %f.error, failures, "{}", f.what);
-                }
-                Some(backoff(app.options.corename_poll, failures))
-            }
+        let hold_retry = hold_streak.record(
+            &outcome,
+            base,
+            "the download client took its core-gate hold",
+        );
+        recheck_at = if applied.as_ref().is_some_and(Applied::holding) {
+            recheck_at.or_else(|| Some(Instant::now() + app.options.hold_recheck))
+        } else {
+            None
         };
-        let previous = applied.as_ref().and_then(Applied::previous_wait);
-        let delay = match (delay, previous) {
-            (Some(d), Some(p)) => Some(d.min(p)),
-            (d, p) => d.or(p),
-        };
-        let recheck = outcome.is_ok() && delay.is_some();
-        let timer = tokio::select! {
+        let frozen = app.client_frozen();
+        if !frozen && replay_retry.is_none_or(|at: Instant| at <= Instant::now()) {
+            let replayed = replay_deferred(&app).await;
+            replay_retry = replay_streak.record(
+                &replayed,
+                base,
+                "the download client took the work kept for it",
+            );
+        }
+        let previous = applied.as_ref().and_then(|a| a.previous_at(frozen));
+        let wake = [hold_retry, recheck_at, replay_retry, previous]
+            .into_iter()
+            .flatten()
+            .min();
+        tokio::select! {
             r = rx.changed() => {
                 if r.is_err() {
                     return;
                 }
-                false
             }
-            () = app.limits_wake.notified() => false,
-            () = tokio::time::sleep(delay.unwrap_or(RETRY_MAX)), if delay.is_some() => true,
-        };
-        if timer && recheck {
-            if let Some(a) = applied.as_mut() {
-                recheck_hold(&app, a).await;
-            }
+            () = app.limits_wake.notified() => {}
+            () = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {}
         }
     }
 }
@@ -397,15 +437,11 @@ where
 }
 
 /// Moves the client towards what the gate wants now, then, unless the client
-/// is frozen, puts back a previous client's limits that are due and runs the
-/// client work kept for it.
+/// is frozen, puts back a previous client's limits that are due.
 async fn step(app: &Arc<AppState>, a: &mut Applied) -> Result<(), Failure> {
     let held = hold(app, a).await;
     if !app.client_frozen() {
-        restore_previous(app, a).await;
-        if held.is_ok() {
-            replay_deferred(app).await?;
-        }
+        restore_previous(app, a, false).await;
     }
     held
 }
@@ -540,10 +576,12 @@ async fn thaw_client(app: &Arc<AppState>, a: &mut Applied, frozen: Frozen) -> Re
     Ok(())
 }
 
-/// Keeps client work that cannot reach a frozen client until it resumes; the
-/// core gate runs it then, or at the next start when mistarr stops first.
+/// Keeps client work that did not reach the client, frozen, missing or
+/// refusing it; the core gate runs it once the client answers, or at the next
+/// start when mistarr stops first.
 pub async fn defer(app: &AppState, op: Op) {
-    match app.db.write(move |c| deferred::add(c, op)).await {
+    let now = crate::unix_now();
+    match app.db.write(move |c| deferred::add(c, op, now)).await {
         Ok(true) => {
             tracing::debug!(?op, "client work waits for the client to resume");
             // The client may have resumed in between; the gate then runs it now.
@@ -556,58 +594,59 @@ pub async fn defer(app: &AppState, op: Op) {
 
 /// Runs the client work [`defer`] kept: detection first, so the rest goes to
 /// the client that answers now, then the seed policy of every source in the
-/// client, selections and releases. Only work that succeeded is cleared; with
-/// no client all of it stays, and work the client refused is a failure the
-/// gate retries.
+/// client, selections and releases. Work that succeeded is removed and work
+/// the client refused counts a try, a failure the gate retries with a
+/// backoff; with no client all of it waits.
 async fn replay_deferred(app: &Arc<AppState>) -> Result<(), Failure> {
     let waiting = app
         .db
         .read(deferred::get)
         .await
-        .map_err(failed("cannot read the client work kept for the resume"))?;
+        .map_err(failed("cannot read the client work kept for the client"))?;
     if waiting.is_empty() {
         return Ok(());
     }
-    let mut done = Deferred::default();
-    if waiting.detect {
-        match crate::jobs::detect_client::detect_and_store(app, false).await {
-            Ok(_) => done.detect = true,
-            Err(e) => tracing::warn!(error = %e, "cannot detect the download client"),
+    let (mut done, mut refused) = (Vec::new(), Vec::new());
+    let mut outcome = |op: Op, ok: bool| if ok { done.push(op) } else { refused.push(op) };
+    let ops: Vec<Op> = waiting.iter().map(|e| e.op).collect();
+    if ops.contains(&Op::Detect) {
+        let found = crate::jobs::detect_client::detect_and_store(app, false).await;
+        if let Err(e) = &found {
+            tracing::warn!(error = %e, "cannot detect the download client");
+        }
+        outcome(Op::Detect, found.is_ok());
+    }
+    if let Some(client) = app.client() {
+        for op in ops {
+            let ok = match op {
+                Op::Seed => apply_seed_policies(app, client.as_ref()).await,
+                Op::Deselect(source) => crate::jobs::transfer::deselect(app, source)
+                    .await
+                    .map_err(|e| tracing::debug!(source = %source, error = %e, "cannot apply a kept selection"))
+                    .unwrap_or(false),
+                Op::Release(source) => crate::jobs::import::release_source(app, source).await,
+                _ => continue,
+            };
+            outcome(op, ok);
         }
     }
-    let client = app.client();
-    if let Some(client) = &client {
-        done.seed = waiting.seed && apply_seed_policies(app, client.as_ref()).await;
-        for &source in &waiting.deselect {
-            match crate::jobs::transfer::deselect(app, source).await {
-                Ok(true) => done.deselect.push(source),
-                Ok(false) => {}
-                Err(e) => {
-                    tracing::debug!(source = %source, error = %e, "cannot apply a kept selection");
-                }
-            }
-        }
-        for &source in &waiting.release {
-            if crate::jobs::import::release_source(app, source).await {
-                done.release.push(source);
-            }
-        }
-    }
-    let left = waiting.detect != done.detect
-        || waiting.seed != done.seed
-        || waiting.deselect.len() != done.deselect.len()
-        || waiting.release.len() != done.release.len();
-    app.db
-        .write(move |c| deferred::clear(c, &done))
+    let left = !refused.is_empty();
+    let now = crate::unix_now();
+    let dropped = app
+        .db
+        .write(move |c| deferred::finish(c, &done, &refused, now))
         .await
-        .map_err(failed("cannot clear the client work kept for the resume"))?;
-    match client {
-        Some(_) if left => Err(Failure {
-            what: "the download client did not take the work kept while it was paused",
-            error: "kept for another try".into(),
-        }),
-        _ => Ok(()),
+        .map_err(failed("cannot record the client work kept for the client"))?;
+    for e in dropped {
+        tracing::warn!(op = ?e.op, tries = e.tries, "dropping client work the download client keeps refusing");
     }
+    if left {
+        return Err(Failure {
+            what: "the download client did not take the work kept for it",
+            error: "kept for another try".into(),
+        });
+    }
+    Ok(())
 }
 
 /// Applies every source's seed policy from the database to the client; true
@@ -658,6 +697,13 @@ async fn apply_limits(
         .clone()
         .unwrap_or_else(|| SavedLimits::empty(id.clone()));
     let mut read = false;
+    if DIRECTIONS
+        .iter()
+        .any(|d| want.get(*d).is_some() && saved.get(*d).is_none())
+    {
+        // The same daemon may be set aside under another address; its own limits come back first.
+        restore_previous(app, a, true).await;
+    }
     for dir in DIRECTIONS {
         if want.get(dir).is_some() && saved.get(dir).is_none() {
             let own = client
@@ -809,19 +855,31 @@ async fn take_back(app: &AppState, a: &mut Applied, id: &ClientEndpoint) -> Resu
 /// Tries each previous client's limits that are due, each for at most
 /// [`RESTORE_WAIT`]. A failed try waits [`previous_retry`] for the next, and
 /// one failing [`PREVIOUS_KEEP`] after they were set aside drops them.
-async fn restore_previous(app: &AppState, a: &mut Applied) {
+async fn restore_previous(app: &AppState, a: &mut Applied, all: bool) {
     let now = crate::unix_now();
-    if !a.previous.iter().any(|p| p.next_at <= now) {
+    if !a.previous.iter().any(|p| all || p.next_at <= now) {
         return;
     }
+    let mut gate = app.gate.subscribe();
+    let mut moved = false;
     let keep_secs = i64::try_from(PREVIOUS_KEEP.as_secs()).unwrap_or(i64::MAX);
     let mut left = Vec::new();
     for mut p in a.previous.clone() {
-        if p.next_at > now {
+        if moved || (!all && p.next_at > now) {
             left.push(p);
             continue;
         }
-        let error = match tokio::time::timeout(RESTORE_WAIT, restore_saved(app, &p.saved)).await {
+        // A gate change ends the try, so a core starting meanwhile is acted on at once.
+        let tried = tokio::select! {
+            r = tokio::time::timeout(RESTORE_WAIT, restore_saved(app, &p.saved)) => Some(r),
+            _ = gate.changed() => None,
+        };
+        let Some(tried) = tried else {
+            moved = true;
+            left.push(p);
+            continue;
+        };
+        let error = match tried {
             Ok(Ok(())) => {
                 tracing::info!("restored the limits of a download client no longer in use");
                 continue;

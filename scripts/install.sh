@@ -408,6 +408,7 @@ owner_mode() {
     if om=$(stat -c '%u %A' "$1" 2>/dev/null) && [ -n "$om" ]; then
         echo "$om"
     else
+        # shellcheck disable=SC2012 # one path whose owner and mode are read, not a listing to parse
         ls -ldn "$1" 2>/dev/null | awk '{ print $3, substr($1, 1, 10) }'
     fi
 }
