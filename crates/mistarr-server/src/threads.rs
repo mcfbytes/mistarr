@@ -1,4 +1,4 @@
-//! Thread names shown by `top -H` and `ps -T`; see `docs/ARCHITECTURE.md` "Thread names".
+//! Thread names shown in `/proc/<pid>/task/*/comm`; see `docs/ARCHITECTURE.md` "Thread names".
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -143,21 +143,44 @@ pub fn named<R>(label: Label, f: impl FnOnce() -> R) -> R {
     f()
 }
 
-/// Restores the thread's name when dropped.
-struct Rename;
+/// Restores the thread's name when dropped: its Rust name, or for an unnamed thread
+/// the `comm` read before the rename.
+struct Rename {
+    thread: std::thread::Thread,
+    saved: Option<String>,
+}
 
 impl Rename {
     fn to(name: &str) -> Self {
+        let thread = std::thread::current();
+        // Only unnamed threads pay the extra read; pool threads are always named.
+        let saved = if thread.name().is_none() {
+            get_comm()
+        } else {
+            None
+        };
         set_comm(name);
-        Self
+        Self { thread, saved }
     }
 }
 
 impl Drop for Rename {
     fn drop(&mut self) {
-        let current = std::thread::current();
-        set_comm(current.name().unwrap_or(""));
+        if let Some(name) = self.saved.as_deref().or(self.thread.name()) {
+            set_comm(name);
+        }
     }
+}
+
+#[cfg(target_os = "linux")]
+fn get_comm() -> Option<String> {
+    let s = std::fs::read_to_string("/proc/thread-self/comm").ok()?;
+    Some(s.trim_end_matches('\n').to_owned())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn get_comm() -> Option<String> {
+    None
 }
 
 #[cfg(target_os = "linux")]
@@ -208,13 +231,37 @@ mod tests {
     #[test]
     fn blocking_work_carries_its_label_then_the_pool_name() {
         let rt = crate::memory::runtime().expect("runtime");
-        let (during, after) = rt.block_on(async {
-            let during = blocking(label::DAT_IMPORT, comm).await.expect("join");
-            let after = tokio::task::spawn_blocking(comm).await.expect("join");
-            (during, after)
+        let (before, during, after) = rt.block_on(async {
+            tokio::task::spawn_blocking(|| {
+                let before = comm();
+                let during = named(label::DAT_IMPORT, comm);
+                (before, during, comm())
+            })
+            .await
+            .expect("join")
         });
+        assert!(before.starts_with(RUNTIME_PREFIX), "{before}");
         assert_eq!(during, "dat-import");
-        assert!(after.starts_with(RUNTIME_PREFIX), "{after}");
+        assert_eq!(after, before);
+        let seen = rt
+            .block_on(async { blocking(label::HASH, comm).await })
+            .expect("join");
+        assert_eq!(seen, "hash");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_unnamed_thread_gets_its_comm_back() {
+        let t = std::thread::Builder::new()
+            .spawn(|| {
+                let before = comm();
+                let during = named(label::HASH, comm);
+                (before, during, comm())
+            })
+            .expect("spawn");
+        let (before, during, after) = t.join().expect("join");
+        assert_eq!(during, "hash");
+        assert_eq!(after, before);
     }
 
     #[cfg(target_os = "linux")]
