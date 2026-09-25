@@ -369,24 +369,41 @@ pub fn prove(conn: &Connection, source: SourceId, index: u32, rom: i64) -> Resul
 /// A text that changes whenever the live roms of `platform` do, so a source
 /// mapped against the same text needs no new mapping: its live DAT versions
 /// with their load times, which catch a reload that updates roms in place,
-/// the count and ids of its live roms, and their effective groups. MRA versions are left
-/// out, since a catalogue run touches theirs every time; MRA roms change their ids when renamed.
+/// the count of its live roms, and a sum of a hash of each one's id and effective group, which
+/// moves when roms trade groups. MRA versions are left out, since a catalogue run touches
+/// theirs every time; MRA roms change their ids when renamed.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn rom_stamp(conn: &Connection, platform: &PlatformId) -> Result<String> {
-    Ok(conn.query_row(
-        "SELECT (SELECT COALESCE(group_concat(id || '@' || loaded_at, ','), '')
-                 FROM (SELECT id, loaded_at FROM dat_versions
-                       WHERE platform_id = ?1 AND retired = 0 AND source != 'mra' ORDER BY id))
-             || ';' || COUNT(*) || ':' || COALESCE(MAX(r.id), 0) || ':' || COALESCE(SUM(r.id), 0)
-             || ':' || COALESCE(SUM(COALESCE(t.group_root, t.id)), 0)
-         FROM roms r JOIN titles t ON t.id = r.title_id
-         WHERE t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0",
+    let versions: String = conn.query_row(
+        "SELECT COALESCE(group_concat(id || '@' || loaded_at, ','), '')
+         FROM (SELECT id, loaded_at FROM dat_versions
+               WHERE platform_id = ?1 AND retired = 0 AND source != 'mra' ORDER BY id)",
         [&platform.0],
         |r| r.get(0),
-    )?)
+    )?;
+    let mut stmt = conn.prepare_cached(
+        "SELECT r.id, COALESCE(t.group_root, t.id)
+         FROM roms r JOIN titles t ON t.id = r.title_id
+         WHERE t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0",
+    )?;
+    let mut rows = stmt.query([&platform.0])?;
+    let (mut count, mut sum) = (0u64, 0u64);
+    while let Some(r) = rows.next()? {
+        let (rom, group): (i64, i64) = (r.get(0)?, r.get(1)?);
+        count += 1;
+        sum = sum.wrapping_add(mix(mix(rom.cast_unsigned()) ^ group.cast_unsigned()));
+    }
+    Ok(format!("{versions};{count}:{sum:016x}"))
+}
+
+/// The `splitmix64` finaliser: a fixed bijection of `u64` that spreads every input bit.
+fn mix(mut z: u64) -> u64 {
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^ (z >> 31)
 }
 
 /// The candidates of files `from..to` of `source` with their rom names,
@@ -886,5 +903,64 @@ mod tests {
             before,
             "a regroup moves it"
         );
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 64,
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        /// Two titles trading effective groups move the stamp, whatever their rom counts.
+        #[test]
+        fn two_titles_swapping_groups_move_the_stamp(
+            roms in proptest::collection::vec(1usize..4, 2..7),
+            roots in proptest::collection::vec(0usize..7, 7),
+            a in 0usize..7,
+            b in 0usize..7,
+        ) {
+            let c = conn();
+            let n = roms.len();
+            let id = |i: usize| i64::try_from(i + 1).expect("id");
+            c.execute(
+                "INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at, game_count)
+                 VALUES (1, 'nes', 'Test', '1', 't.dat', 0, 0)",
+                [],
+            ).expect("version");
+            for i in 0..n {
+                c.execute(
+                    "INSERT INTO titles (id, platform_id, dat_version_id, name, base_name)
+                     VALUES (?1, 'nes', 1, 'T' || ?1, 'T')",
+                    [id(i)],
+                ).expect("title");
+            }
+            for (i, &count) in roms.iter().enumerate() {
+                c.execute(
+                    "UPDATE titles SET group_root = ?2 WHERE id = ?1",
+                    [id(i), id(roots[i] % n)],
+                ).expect("root");
+                for k in 0..count {
+                    c.execute(
+                        "INSERT INTO roms (title_id, name, size) VALUES (?1, ?2, 4)",
+                        params![id(i), format!("r{k}")],
+                    ).expect("rom");
+                }
+            }
+            let (a, b) = (id(a % n), id(b % n));
+            let root = |id: i64| -> i64 {
+                c.query_row("SELECT group_root FROM titles WHERE id = ?1", [id], |r| r.get(0))
+                    .expect("root")
+            };
+            let (ra, rb) = (root(a), root(b));
+            proptest::prop_assume!(ra != rb);
+            let nes = PlatformId("nes".into());
+            let before = rom_stamp(&c, &nes).expect("stamp");
+            c.execute("UPDATE titles SET group_root = ?2 WHERE id = ?1", params![a, rb])
+                .expect("swap");
+            c.execute("UPDATE titles SET group_root = ?2 WHERE id = ?1", params![b, ra])
+                .expect("swap");
+            proptest::prop_assert_ne!(rom_stamp(&c, &nes).expect("stamp"), before);
+        }
     }
 }

@@ -160,7 +160,7 @@ impl Db {
             .await
             .map_err(|_| Error::Poisoned)?;
         let db = self.clone();
-        tokio::task::spawn_blocking(move || {
+        crate::threads::blocking(crate::threads::label::DB_WRITE, move || {
             let _turn = turn;
             db.write_blocking(f)
         })
@@ -179,7 +179,7 @@ impl Db {
         F: FnOnce(&Connection) -> Result<T> + Send + 'static,
     {
         let db = self.clone();
-        tokio::task::spawn_blocking(move || db.read_blocking(f))
+        crate::threads::blocking(crate::threads::label::DB_READ, move || db.read_blocking(f))
             .await
             .map_err(|e| Error::Task(e.to_string()))?
     }

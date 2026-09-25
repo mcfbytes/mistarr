@@ -86,9 +86,10 @@ pub async fn probe(client: &ClientConfig, launcher: &Launcher) -> ClientStatus {
         None => (false, None),
     };
     let launcher = launcher.clone();
-    let installed = tokio::task::spawn_blocking(move || launcher.installed())
-        .await
-        .unwrap_or_default();
+    let installed =
+        crate::threads::blocking(crate::threads::label::DETECT, move || launcher.installed())
+            .await
+            .unwrap_or_default();
     ClientStatus {
         kind: found.as_ref().map(|d| d.kind),
         url: found.map(|d| d.url),

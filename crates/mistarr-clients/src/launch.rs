@@ -258,7 +258,10 @@ impl Launcher {
                 self.log_tail(from)
             )));
         }
-        std::thread::spawn(move || child.wait());
+        // Without the reaper rtorrent still runs and only lingers as a zombie once it exits.
+        let _ = std::thread::Builder::new()
+            .name("rtorrent-reap".into())
+            .spawn(move || child.wait());
         Ok(())
     }
 }
