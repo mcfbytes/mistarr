@@ -21,12 +21,16 @@ fn main() -> anyhow::Result<()> {
     // Set before any thread starts, so every stack and heap counts against it.
     let data_limit =
         memory::limit_data(config.memory.data_limit_mib).context("cannot set the memory limit")?;
+    let mut temp_refused = None;
     if matches!(cli.command(), Command::Serve) {
         let disk = config.paths.tmp();
-        let tmp = db::choose_temp_dir(std::path::Path::new(db::RAM_TEMP_DIR), &disk)
+        let ram = std::env::var_os(db::TEMP_DIR_ENV)
+            .map_or_else(|| std::path::PathBuf::from(db::RAM_TEMP_DIR), Into::into);
+        let tmp = db::choose_temp_dir(&ram, &disk)
             .with_context(|| format!("cannot create {}", disk.display()))?;
         // Set before any thread starts, as the environment is shared.
-        std::env::set_var(db::SQLITE_TMPDIR, &tmp);
+        std::env::set_var(db::SQLITE_TMPDIR, &tmp.dir);
+        temp_refused = tmp.refused.map(|e| (ram, e));
     }
     let runtime = memory::runtime().context("cannot start the async runtime")?;
 
@@ -78,6 +82,9 @@ fn main() -> anyhow::Result<()> {
             std::fs::create_dir_all(&config.paths.data)
                 .with_context(|| format!("cannot create {}", config.paths.data.display()))?;
             logging::init(Some(&config.paths.log())).context("cannot open the log file")?;
+            if let Some((ram, e)) = temp_refused {
+                tracing::warn!(error = %e, dir = %ram.display(), "SQLite temporary files go to the card");
+            }
             if let Some(bytes) = data_limit {
                 tracing::info!(mib = bytes >> 20, "memory limit");
             } else {

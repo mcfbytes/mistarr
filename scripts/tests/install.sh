@@ -363,6 +363,13 @@ case "\${1:-}" in
             ok) (sleep 3; exec python3 -m http.server "$3" --bind 127.0.0.1) >/dev/null 2>&1 &
                 echo \$! > "\$MISTARR_ROOT/stub.srv" ;;
             exit) (sleep 3; rm -f "\$state") >/dev/null 2>&1 & ;;
+            migrate) (m="\$MISTARR_ROOT/mistarr/mistarr.migrating"; i=0
+                while [ \$i -lt 6 ]; do
+                    echo "migrating from 16 to 17: io \$i cpu \$i" > "\$m"; i=\$((i + 1)); sleep 1
+                done
+                rm -f "\$m"; exec python3 -m http.server "$3" --bind 127.0.0.1) >/dev/null 2>&1 &
+                echo \$! > "\$MISTARR_ROOT/stub.srv" ;;
+            stuck) echo "migrating from 16 to 17: io 1 cpu 1" > "\$MISTARR_ROOT/mistarr/mistarr.migrating" ;;
         esac
         echo "mistarr started"
         ;;
@@ -397,6 +404,7 @@ run_install() {
     env PATH="${extra_path:+$extra_path:}$board_path" MISTARR_TEST_EXEC="$runner" \
         TEST_LISTEN="${test_listen:-0.0.0.0:${health_port:-$port}}" \
         MISTARR_START_TIMEOUT="${start_timeout:-30}" MISTARR_ROOT="$root" \
+        MISTARR_PROGRESS_TIMEOUT="${progress_timeout:-300}" \
         MISTARR_RELEASE_API="$api" MISTARR_RELEASE_BASE="$dl_base" \
         MISTARR_TTY="$tty" sh "$install_script" "$@" 2>&1
 }
@@ -774,6 +782,34 @@ for tag in v7.0.0 v7.1.0 v7.2.0; do
         expect_contains "$out" "did not answer at http://127.0.0.1:$port2/ within 8 s" "a start that never answers times out"
     fi
     expect "$last" "start" "$tag: the previous version is restarted"
+done
+
+# A start that migrates for longer than the start wait is kept while its progress
+# file changes; one whose progress file stops changing is rolled back.
+publish_slow_release v7.3.0 migrate "$port2"
+publish_slow_release v7.4.0 stuck "$port2"
+for tag in v7.3.0 v7.4.0; do
+    r="$work/root16-$tag"
+    mkdir -p "$r/mistarr" "$r/Scripts"
+    echo "PRE-MIGRATION-DB" > "$r/mistarr/mistarr.db"
+    write_arm_binary "$r/mistarr/mistarr" "GOOD-BEFORE-$tag"
+    write_launcher_stub "$r/Scripts/mistarr.sh"
+    out=$(health_port="$port2" start_timeout=2 progress_timeout=4 run_install "$r" "$no_tty" "$tag")
+    code=$?
+    MISTARR_ROOT="$r" sh "$r/Scripts/mistarr.sh" stop >/dev/null 2>&1
+    expect_contains "$out" "mistarr is migrating its database, migrating from 16 to 17" \
+        "$tag: the migration's progress is printed"
+    if [ "$tag" = v7.3.0 ]; then
+        [ "$code" -eq 0 ] || { fail=$((fail + 1)); echo "FAIL: a migration past the start wait succeeds: $out"; }
+        grep -q "SLOW-migrate" "$r/mistarr/mistarr" \
+            || { fail=$((fail + 1)); echo "FAIL: a migration past the start wait keeps the new binary"; }
+        continue
+    fi
+    [ "$code" -ne 0 ] || { fail=$((fail + 1)); echo "FAIL: a stalled migration exits non-zero"; }
+    expect_contains "$out" "made no progress migrating its database for 4 s" "a stalled migration is named"
+    grep -q "GOOD-BEFORE-$tag" "$r/mistarr/mistarr" \
+        || { fail=$((fail + 1)); echo "FAIL: a stalled migration restores the binary"; }
+    expect "$(cat "$r/mistarr/mistarr.db")" "PRE-MIGRATION-DB" "a stalled migration restores the database"
 done
 
 # A backup that cannot complete aborts before the binary or launcher is

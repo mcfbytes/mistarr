@@ -99,10 +99,14 @@ against another and the numbers include everything the real daemon runs.
 
 Each server started also checks that `/proc/<pid>/limits` shows the default
 192 MiB data limit, or the lower limit the test run inherited, and that its
-SQLite temporary directory exists. Besides the 64 MiB budget, each job's peak
-must stay within 12 or 16 MiB of a server that runs no job, measured once
-per run, so a regression shows before it reaches the budget; the two DAT
-loads, whose apply runs with the writer's 8 MiB bulk cache, within 28 MiB. The suite runs in `cargo test --workspace` in debug
+SQLite temporary directory, set per run with `MISTARR_TEMP_DIR`, exists with
+mode 0700 while `<data>/tmp` does not; after the DAT load the server must hold
+its temporary files open there and none on the data directory. Besides the
+64 MiB budget, each job's peak must stay within 12 or 16 MiB of a server that
+runs no job, measured once per run, so a regression shows before it reaches
+the budget. The two DAT loads, whose apply runs with the writer's 8 MiB bulk
+cache, may reach 28 MiB, and source imports and remaps, whose binding writes
+use it too, 20 MiB. The suite runs in `cargo test --workspace` in debug
 builds and takes about a minute; the budget holds there on x86-64 with room
 to spare, and a release build for armv7 needs less, with half the pointer
 size and a smaller binary. `make memory` runs it one test at a time and

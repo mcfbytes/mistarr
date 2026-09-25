@@ -85,7 +85,8 @@ impl Db {
         // Checked before `configure`, whose pragmas may write to the file.
         migrate::check_supported(&writer)?;
         configure(&writer)?;
-        migrate::apply(&mut writer)?;
+        // A migration that rebuilds an index writes each page once with the bulk cache.
+        bulk(&mut writer, |c| migrate::apply(c).map(drop))?;
         let reader = Connection::open(path)?;
         configure(&reader)?;
         reader.pragma_update(None, "query_only", true)?;
@@ -276,15 +277,9 @@ fn settle(conn: &mut Connection) -> Result<()> {
 /// assert_eq!(cache, -8 * 1024);
 /// ```
 pub fn bulk<T>(conn: &mut Connection, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
-    conn.pragma_update(None, "cache_size", -BULK_CACHE_KIB)?;
-    let out = heap_limit(conn, 1).and_then(|()| f(conn));
-    // `and` takes its argument eagerly, so the count drops whatever the cache pragma did.
-    let restored = conn
-        .pragma_update(None, "cache_size", -CACHE_KIB)
-        .map_err(Error::from)
-        .and(heap_limit(conn, -1))
-        .and_then(|()| Ok(conn.execute_batch("PRAGMA shrink_memory")?));
-    match (out, restored) {
+    let mut open = Bulk::enter(conn)?;
+    let out = f(open.conn);
+    match (out, open.leave()) {
         (Ok(v), Ok(())) => Ok(v),
         (Ok(_), Err(e)) => Err(e),
         (Err(e), restored) => {
@@ -292,6 +287,42 @@ pub fn bulk<T>(conn: &mut Connection, f: impl FnOnce(&mut Connection) -> Result<
                 tracing::error!(error = %r, "writer cache not restored after a failed bulk write");
             }
             Err(e)
+        }
+    }
+}
+
+/// An open bulk write: restores the cache and the heap limit when left, or when dropped
+/// on any other path, a panic included.
+struct Bulk<'c> {
+    conn: &'c mut Connection,
+    open: bool,
+}
+
+impl<'c> Bulk<'c> {
+    fn enter(conn: &'c mut Connection) -> Result<Self> {
+        conn.pragma_update(None, "cache_size", -BULK_CACHE_KIB)?;
+        let open = Self { conn, open: true };
+        heap_limit(open.conn, 1)?;
+        Ok(open)
+    }
+
+    fn leave(&mut self) -> Result<()> {
+        if !std::mem::replace(&mut self.open, false) {
+            return Ok(());
+        }
+        // `and` takes its argument eagerly, so the count drops whatever the cache pragma did.
+        self.conn
+            .pragma_update(None, "cache_size", -CACHE_KIB)
+            .map_err(Error::from)
+            .and(heap_limit(self.conn, -1))
+            .and_then(|()| Ok(self.conn.execute_batch("PRAGMA shrink_memory")?))
+    }
+}
+
+impl Drop for Bulk<'_> {
+    fn drop(&mut self) {
+        if let Err(e) = self.leave() {
+            tracing::error!(error = %e, "writer cache not restored after a bulk write");
         }
     }
 }
@@ -319,9 +350,23 @@ pub const SQLITE_TMPDIR: &str = "SQLITE_TMPDIR";
 /// The RAM-backed directory for SQLite's temporary files, used when it can be written.
 pub const RAM_TEMP_DIR: &str = "/tmp/mistarr";
 
-/// Prepares `ram` with [`prepare_temp_dir`] and returns it when a file can be written
-/// there, else prepares and returns `fallback`. On the card every temporary page would
-/// be written through its `sync` mount; see `docs/ARCHITECTURE.md` "Writes on a sync mount".
+/// The environment variable that names another directory in place of [`RAM_TEMP_DIR`],
+/// so tests and side-by-side servers each get their own.
+pub const TEMP_DIR_ENV: &str = "MISTARR_TEMP_DIR";
+
+/// Where SQLite's temporary files go, and why the RAM directory was refused when it was.
+#[derive(Debug)]
+pub struct TempDir {
+    /// The directory chosen.
+    pub dir: PathBuf,
+    /// Why the RAM directory could not be used; `None` when it is `dir`.
+    pub refused: Option<Error>,
+}
+
+/// Returns `ram` when it is, or can be made, a directory of mode 0700 that this user owns,
+/// is not a symlink, and takes a file, having emptied it with [`prepare_temp_dir`]; else
+/// prepares and returns `fallback`. On the card every temporary page would be written
+/// through its `sync` mount; see `docs/ARCHITECTURE.md` "Writes on a sync mount".
 ///
 /// # Errors
 ///
@@ -331,24 +376,67 @@ pub const RAM_TEMP_DIR: &str = "/tmp/mistarr";
 /// let dir = tempfile::tempdir().unwrap();
 /// let (ram, disk) = (dir.path().join("ram"), dir.path().join("disk"));
 /// let chosen = mistarr_server::db::choose_temp_dir(&ram, &disk).unwrap();
-/// assert_eq!(chosen, ram);
+/// assert_eq!(chosen.dir, ram);
+/// assert!(chosen.refused.is_none());
 /// ```
-pub fn choose_temp_dir(ram: &Path, fallback: &Path) -> Result<PathBuf> {
-    let writable = |dir: &Path| -> Result<()> {
+pub fn choose_temp_dir(ram: &Path, fallback: &Path) -> Result<TempDir> {
+    let usable = |dir: &Path| -> Result<()> {
+        private_dir(dir)?;
         prepare_temp_dir(dir)?;
         let probe = dir.join(format!(".probe-{}", std::process::id()));
         std::fs::write(&probe, b"x")?;
         std::fs::remove_file(&probe)?;
         Ok(())
     };
-    match writable(ram) {
-        Ok(()) => Ok(ram.to_path_buf()),
+    match usable(ram) {
+        Ok(()) => Ok(TempDir {
+            dir: ram.to_path_buf(),
+            refused: None,
+        }),
         Err(e) => {
-            tracing::info!(error = %e, dir = %ram.display(), "SQLite temporary files go to the data directory");
             prepare_temp_dir(fallback)?;
-            Ok(fallback.to_path_buf())
+            Ok(TempDir {
+                dir: fallback.to_path_buf(),
+                refused: Some(e),
+            })
         }
     }
+}
+
+/// Creates `dir` with mode 0700, or checks the one there is a real directory this user
+/// owns and narrows it to 0700, so no other user can read or plant temporary files.
+fn private_dir(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    let refuse = |why: &str| -> Result<()> {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} {why}", dir.display()),
+        )
+        .into())
+    };
+    let meta = match std::fs::symlink_metadata(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .recursive(true)
+                .create(dir)?;
+            std::fs::symlink_metadata(dir)?
+        }
+        other => other?,
+    };
+    if meta.file_type().is_symlink() {
+        return refuse("is a symlink");
+    }
+    if !meta.is_dir() {
+        return refuse("is not a directory");
+    }
+    if meta.uid() != rustix::process::geteuid().as_raw() {
+        return refuse("belongs to another user");
+    }
+    if meta.mode() & 0o777 != 0o700 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
 }
 
 /// Creates `dir` for SQLite's temporary files and removes the files a previous run left
@@ -533,15 +621,58 @@ mod tests {
     }
 
     #[test]
+    fn a_panic_inside_a_bulk_write_still_restores_the_cache() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            bulk(&mut conn, |_| -> Result<()> {
+                panic!("inside a bulk write")
+            })
+        }));
+        assert!(caught.is_err());
+        let cache: i64 = conn
+            .pragma_query_value(None, "cache_size", |r| r.get(0))
+            .expect("cache");
+        assert_eq!(cache, -CACHE_KIB);
+    }
+
+    #[test]
     fn temp_files_go_to_ram_when_it_can_be_written() {
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
         let disk = dir.path().join("data/tmp");
         let ram = dir.path().join("ram");
-        assert_eq!(choose_temp_dir(&ram, &disk).expect("ram"), ram);
+        let chosen = choose_temp_dir(&ram, &disk).expect("ram");
+        assert_eq!(chosen.dir, ram);
+        let mode = std::fs::metadata(&ram).expect("ram").permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
         std::fs::write(dir.path().join("file"), b"x").expect("write");
         let blocked = dir.path().join("file/sub");
-        assert_eq!(choose_temp_dir(&blocked, &disk).expect("disk"), disk);
+        let chosen = choose_temp_dir(&blocked, &disk).expect("disk");
+        assert_eq!(chosen.dir, disk);
+        assert!(chosen.refused.is_some());
         assert!(disk.is_dir());
+    }
+
+    #[test]
+    fn a_temp_dir_that_is_a_symlink_or_open_to_others_is_refused_or_narrowed() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let disk = dir.path().join("data/tmp");
+        let target = dir.path().join("elsewhere");
+        std::fs::create_dir(&target).expect("mkdir");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("symlink");
+        let chosen = choose_temp_dir(&link, &disk).expect("disk");
+        assert_eq!(chosen.dir, disk);
+        let why = chosen.refused.expect("refused").to_string();
+        assert!(why.contains("is a symlink"), "{why}");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o777)).expect("chmod");
+        assert_eq!(choose_temp_dir(&target, &disk).expect("ram").dir, target);
+        let mode = std::fs::metadata(&target)
+            .expect("meta")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o700);
     }
 
     #[test]

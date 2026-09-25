@@ -20,6 +20,7 @@ pub mod jobs;
 pub mod lock;
 pub mod logging;
 pub mod memory;
+pub mod migrating;
 pub mod status;
 pub mod synth;
 pub mod threads;

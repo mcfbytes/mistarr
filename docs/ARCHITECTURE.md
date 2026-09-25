@@ -487,13 +487,14 @@ shutdown is left `queued` for this.
 |---|---|
 | Binary size, stripped, with SPA | under 8 MiB |
 | Idle RSS | under 30 MiB |
-| Peak RSS during scan or import | under 64 MiB, checked per job by `tests/memory.rs`; a DAT load, with its bulk cache, within 28 MiB of an idle server, other jobs within 12 or 16 MiB |
+| Peak RSS during scan or import | under 64 MiB, checked per job by `tests/memory.rs`; a DAT load, with its bulk cache, within 28 MiB of an idle server, a source import or remap within 20 MiB, other jobs within 12 or 16 MiB |
 | tokio worker threads | 2 |
 | Blocking threads (SQLite, hashing, file work) | at most 4 |
 | Stack per runtime thread | 1 MiB reserved, touched pages only in RSS |
 | Soft `RLIMIT_DATA` | `[memory] data_limit_mib`, 192 MiB, never below 64 |
-| SQLite page cache | 2 MiB, 1 MiB on each of the two connections; the writer's rises to 8 MiB while a DAT load applies its stage or a re-map keys new roms (`db::bulk`) |
-| SQLite other | `mmap_size = 0`, `temp_store = FILE` under `/tmp/mistarr` (`SQLITE_TMPDIR`, set at startup and emptied of stale files; RAM on the board, so temporary pages never reach the card), or `<data>/tmp` when `/tmp/mistarr` cannot be written; WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB, 16 MiB while a bulk write is open |
+| SQLite page cache | 2 MiB, 1 MiB on each of the two connections; the writer's rises to 8 MiB while a DAT load applies its stage, a re-map keys new roms (one batch of 1 000 per transaction) or a source binds (`db::bulk`) |
+| SQLite other | `mmap_size = 0`, `temp_store = FILE` under `/tmp/mistarr` (`SQLITE_TMPDIR`, set at startup and emptied of stale files; `MISTARR_TEMP_DIR` names another; RAM on the board, so temporary pages never reach the card), created with mode 0700 and refused when it is a symlink or another user's, in which case `<data>/tmp` is used and the log warns; WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB, 16 MiB while a bulk write is open |
+| DAT stage | in `/tmp/mistarr` while a DAT loads, about 1.5 times the DAT's size (18 MB for 20 000 games of three roms), given back when the load ends, as the temporary database vacuums itself; when `/tmp` fills the load fails naming `/tmp/mistarr` and the database is unchanged |
 | SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
 | Hashing buffer | 256 KiB, one file at a time |
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
@@ -545,7 +546,8 @@ at most 15 bytes (`threads::label`: `db-read`, `db-write`, `hash`,
 `scan-list`, `zip-list`, `dat-import`, `dat-save`, `source-file`,
 `source-watch`, `import`, `rename`, `arcade`, `romsets`, `launch`, `detect`,
 `incoming`, `io-class`) and puts the pool name back when it ends; the thread
-that reaps a started rtorrent is `rtorrent-reap`, and a torrent's data is
+that reaps a started rtorrent is `rtorrent-reap`, the one that rewrites
+`mistarr.migrating` while migrations run is `db-migrate`, and a torrent's data is
 deleted under `torrent-delete`. The board's BusyBox `top` and `ps` cannot
 list threads, so read them from procfs:
 `for t in /proc/$(pidof mistarr)/task/*; do echo "${t##*/} $(cat $t/comm)"; done`.
@@ -572,8 +574,9 @@ syscalls, and the design counts those:
   is a file. The DAT stage is a TEMP table for the same reason; it is
   rebuilt from the file after a restart anyway.
 - `db::bulk` raises the writer's page cache from 1 to 8 MiB, and the soft
-  heap limit to match, for the one transaction that applies a DAT, and puts
-  both back after, on error too. With 1 MiB the cache fills with dirty
+  heap limit to match, for the one transaction that applies a DAT, and for
+  migrations, re-map key batches and source binding, and puts both back
+  after, on error or panic too. With 1 MiB the cache fills with dirty
   pages, SQLite spills them to the WAL, and the same page is written again
   each time it is changed after a spill. A connection opened meanwhile never
   lowers the process-wide heap limit under an open bulk write. The cache is

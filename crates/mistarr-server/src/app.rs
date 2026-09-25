@@ -446,7 +446,20 @@ fn open_db(
     if let Some(dir) = std::env::var_os(crate::db::SQLITE_TMPDIR) {
         tracing::info!(dir = %Path::new(&dir).display(), "SQLite temporary files");
     }
-    let db = Db::open(&config.paths.db())?;
+    let path = config.paths.db();
+    crate::migrating::clear_stale(&config.paths.data)?;
+    let _progress = match crate::db::migrate::pending(&path)? {
+        Some((from, to)) => {
+            tracing::info!(from, to, "migrating the database");
+            crate::migrating::Migrating::begin(&config.paths.data, from, to)
+                .inspect_err(
+                    |e| tracing::warn!(error = %e, "cannot write the migration progress file"),
+                )
+                .ok()
+        }
+        None => None,
+    };
+    let db = Db::open(&path)?;
     let (stored, unfinished, resolved) = db.write_blocking(prepare_catalog)?;
     let stored = stored.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "ignoring unreadable saved settings; using the config file");
