@@ -9,6 +9,8 @@
 #![warn(missing_docs)]
 #![warn(clippy::pedantic)]
 
+/// CHD v5 CD images: header, track layout and track decoding.
+pub mod chd;
 pub mod dat;
 pub mod naming;
 pub mod xml;

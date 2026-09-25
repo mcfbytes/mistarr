@@ -111,7 +111,8 @@ pub struct ZipMember {
     pub crc32: String,
 }
 
-struct Hashers {
+/// CRC32, MD5 and SHA1 fed together, finished into a [`HashSet`].
+pub(crate) struct Hashers {
     crc: crc32fast::Hasher,
     md5: md5::Md5,
     sha1: sha1::Sha1,
@@ -119,7 +120,7 @@ struct Hashers {
 }
 
 impl Hashers {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             crc: crc32fast::Hasher::new(),
             md5: md5::Md5::new(),
@@ -128,14 +129,14 @@ impl Hashers {
         }
     }
 
-    fn update(&mut self, buf: &[u8]) {
+    pub(crate) fn update(&mut self, buf: &[u8]) {
         self.crc.update(buf);
         self.md5.update(buf);
         self.sha1.update(buf);
         self.len += buf.len() as u64;
     }
 
-    fn finish(self) -> HashSet {
+    pub(crate) fn finish(self) -> HashSet {
         HashSet {
             size: self.len,
             crc32: format!("{:08x}", self.crc.finalize()),
@@ -145,7 +146,7 @@ impl Hashers {
     }
 }
 
-fn hex(bytes: &[u8]) -> String {
+pub(crate) fn hex(bytes: &[u8]) -> String {
     use std::fmt::Write as _;
     bytes
         .iter()

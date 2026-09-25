@@ -16,6 +16,10 @@ sha1 = "0.11"
 quick-xml = "0.42"
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
 unicode-normalization = "0.1"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+lzma-rs = { version = "0.3", default-features = false, features = ["raw_decoder"] }
+claxon = "0.4.3"
+ruzstd = { version = "0.8", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
