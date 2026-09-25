@@ -55,7 +55,19 @@ Disc entries in Redump DATs are one `<game>` with several `<rom>` rows: a
 `.cue` plus `.bin` tracks, or a single `.iso`. The adapter places the whole
 set in its own directory `games/<Core>/<Title>/` and multi-disc games share
 that directory, which is what the cores want for disc swapping. Disc images are
-never zipped. CHD is accepted on scan but not produced.
+never zipped. CHD images are accepted on scan, never produced.
+
+A CHD is identified by its tracks: each track's `.bin` is rebuilt from the
+image and hashed, and the image is `verified` when every track of one DAT
+entry matches (VERIFICATION.md "CHD images"). That means decoding the whole
+image, which takes minutes per disc on the DE10-Nano, so it runs only with
+`[scan] chd_tracks` on, off by default and switched in System; each image is
+decoded once and its track hashes are kept. With it off, or while an image
+waits, the scan reads only its header and the Platforms card lists it as not
+identified with the reason, not as unmatched. GD-ROM images, images that need
+a parent CHD, uncompressed images, which chdman writes without checksums,
+and tracks stored without their full 2352-byte sectors are not identified. A DAT that lists `.chd` files as roms still verifies them by
+whole-file hash.
 
 | id | DAT name matches | core dir | adapter notes |
 |---|---|---|---|
@@ -262,7 +274,8 @@ The file handed over is:
 
 - for a disc, the first cue sheet among the entry's files whose `FILE`
   entries all exist beside it, else its `.chd` or `.iso`; every track must
-  be `verified`;
+  be `verified`. A CHD identified by its tracks hands over the `.chd`, and
+  its `#cue` row never counts as a cue sheet;
 - for a romset, its zip, or its set directory `games/NeoGeo/<set>`;
 - otherwise its file. Only the first `.zip#`, compared case-insensitively,
   separates a zip from its member, which Main opens as `a.zip/b.nes`; any

@@ -255,3 +255,31 @@ test('the title lists each file that may hold a variant with its confidence', as
   const bios = page.getByRole('row', { name: /\(BIOS\)/ });
   await expect(bios.getByText('None available')).toBeVisible();
 });
+
+test('identifying CHD images is a setting marked slow, with the measured speed', async ({ page }) => {
+  await page.goto('/#/system');
+  const chd = page.getByLabel('Identify CHD images by their tracks');
+  await expect(chd).not.toBeChecked();
+  await expect(page.locator('label', { has: chd }).getByText('Slow', { exact: true })).toBeVisible();
+  await expect(page.getByText('Measured speed: about 10 minutes per 700 MB image.')).toBeVisible();
+  await chd.check();
+  await expect(chd).toBeChecked();
+});
+
+test('a platform card lists the files not identified with the reason for each', async ({ page }) => {
+  await page.goto('/#/');
+  const card = page.locator('.card').filter({ hasText: 'Sega Saturn' });
+  await card.getByText('3 not identified').click();
+  await expect(card.getByText('3 of 3 shown')).toBeVisible();
+  const cooked = card.getByRole('listitem').filter({ hasText: 'Sample Rally (Europe).chd' });
+  await expect(cooked).toContainText('a track is stored as 2048-byte sectors');
+  await expect(card.getByRole('listitem').filter({ hasText: 'Test Pattern Disc.chd' })).toContainText(
+    'no loaded DAT entry has this number and size of tracks'
+  );
+  await expect(card.getByRole('button', { name: 'Show more' })).toHaveCount(0);
+});
+
+test('Activity shows what CHD decoding identified', async ({ page }) => {
+  await page.goto('/#/activity');
+  await expect(page.getByText('CHD tracks: 3 verified, 1 unmatched, 1 not identified')).toBeVisible();
+});

@@ -6,6 +6,7 @@
   import ClientStart from '../lib/ClientStart.svelte';
   import PathMapEditor from '../lib/PathMapEditor.svelte';
   import { cleanPathMap } from '../lib/pathmap';
+  import { speedText } from '../lib/unidentified';
   import type { Settings } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -179,6 +180,17 @@
         Allow starting cores and games from mistarr
       </label>
 
+      <h3>Disc images</h3>
+      <label>
+        <input type="checkbox" bind:checked={settings.scan.chd_tracks} aria-describedby="chd-help" />
+        Identify CHD images by their tracks <span class="tag">Slow</span>
+      </label>
+      <p id="chd-help" class="muted help">
+        Decodes each CHD image once to hash its tracks, so it can be matched against a DAT. On the DE10-Nano this
+        takes minutes per disc; it pauses while a core runs, and results are kept.
+      </p>
+      <p class="muted help">{speedText(status?.chd_decode_bytes_per_sec)}</p>
+
       <button class="primary" onclick={save}>Save</button>
       {#if saved}<span class="muted">Saved.</span>{/if}
       {#if settingsError}<p class="error">{settingsError}</p>{/if}
@@ -194,6 +206,21 @@
 
   .settings h3 {
     margin-top: 1em;
+  }
+
+  .help {
+    margin: 0.2em 0 0.4em;
+    max-width: 40em;
+  }
+
+  .tag {
+    display: inline-block;
+    margin-left: 0.4em;
+    padding: 0 0.4em;
+    border: 1px solid var(--border);
+    border-radius: 3px;
+    font-size: 0.85em;
+    color: var(--fg-dim);
   }
 
   .error {

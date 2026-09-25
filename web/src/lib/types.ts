@@ -37,6 +37,8 @@ export interface SystemStatus {
   dats_dir: string;
   rss_bytes: number | null;
   launch: LaunchState;
+  /** Decoded CHD bytes per second on the last image, null before the first. */
+  chd_decode_bytes_per_sec: number | null;
 }
 
 export interface WizardStatus {
@@ -60,6 +62,8 @@ export interface PlatformCounts {
   wanted: number;
   /** Files on disk that match no rom; always 0 for arcade, which a scan never walks. */
   unmatched_files: number;
+  /** Disc images not identified by their tracks, listed by `GET /platforms/{id}/unidentified`. */
+  unidentified_files: number;
   /** Clone groups with a visible MRA variant failing its md5 check and no verified variant; 0 outside arcade. */
   failing_check: number;
   /** Clone groups with a visible MRA variant missing some of its zips and no verified variant; 0 outside arcade. */
@@ -113,7 +117,7 @@ export interface TitleGroup {
 
 export type RomStatus = 'good' | 'baddump' | 'nodump' | 'verified';
 
-export type FileState = 'verified' | 'unverified' | 'misnamed' | 'bad' | 'pending';
+export type FileState = 'verified' | 'unverified' | 'misnamed' | 'bad' | 'pending' | 'unidentified';
 
 export interface TitleRom {
   id: number;
@@ -341,16 +345,49 @@ export interface PrefsSettings {
   launch: boolean;
 }
 
+export interface ScanSettings {
+  /** Decode CHD images to hash their tracks; slow on the board. */
+  chd_tracks: boolean;
+}
+
 export interface Settings {
   client: ClientSettings;
   limits: LimitsSettings;
   prefs: PrefsSettings;
+  scan: ScanSettings;
 }
 
 export interface SettingsPatch {
   client?: ClientSettings;
   limits?: LimitsSettings;
   prefs?: PrefsSettings;
+  scan?: ScanSettings;
+}
+
+/** Why a disc image is not identified; `unidentified.ts` has the sentence for each. */
+export type UnidentifiedReason =
+  | 'off'
+  | 'pending'
+  | 'no_layout'
+  | 'unreadable'
+  | 'not_chd'
+  | 'version'
+  | 'parent'
+  | 'not_cd'
+  | 'too_large'
+  | 'codec'
+  | 'gdrom'
+  | 'old_layout'
+  | 'cooked'
+  | 'pregap'
+  | 'corrupt'
+  | 'checksum'
+  | 'no_checksum';
+
+export interface UnidentifiedFile {
+  rel_path: string;
+  size: number;
+  reason: UnidentifiedReason;
 }
 
 export interface Paged<T> {

@@ -112,6 +112,50 @@ fn zip_members_split_only_after_a_zip() {
 }
 
 #[test]
+fn chd_members_split_only_after_a_chd() {
+    assert_eq!(
+        split_chd_member("PSX/G/g.chd#01"),
+        ("PSX/G/g.chd", Some("01"))
+    );
+    assert_eq!(
+        split_chd_member("PSX/G/g.Chd#cue"),
+        ("PSX/G/g.Chd", Some("cue"))
+    );
+    assert_eq!(
+        split_chd_member("PSX/No #1/g #2.chd#03"),
+        ("PSX/No #1/g #2.chd", Some("03"))
+    );
+    assert_eq!(split_chd_member("PSX/No #1.bin"), ("PSX/No #1.bin", None));
+    assert_eq!(
+        split_chd_member("NES/a.zip#b.nes"),
+        ("NES/a.zip#b.nes", None)
+    );
+    assert_eq!(split_chd_member("PSX/x.chdx#y"), ("PSX/x.chdx#y", None));
+}
+
+#[test]
+fn a_chd_member_loads_its_image_after_a_complete_cue() {
+    let games = fresh("chd-member");
+    let path = |files: &[&str]| game_path(Kind::Disc, &games, files);
+    assert_eq!(
+        path(&["PSX/G/g.chd#01", "PSX/G/g.chd#02", "PSX/G/g.chd#cue"]).as_deref(),
+        Some("PSX/G/g.chd")
+    );
+    assert_eq!(
+        path(&["PSX/G/g.chd#cue"]).as_deref(),
+        Some("PSX/G/g.chd"),
+        "the track list member is never taken for a cue sheet"
+    );
+    touch(&games, "PSX/G/g.bin");
+    std::fs::write(games.join("PSX/G/g.cue"), "FILE \"g.bin\" BINARY\n").expect("cue");
+    assert_eq!(
+        path(&["PSX/G/g.chd#01", "PSX/G/g.cue", "PSX/G/g.bin"]).as_deref(),
+        Some("PSX/G/g.cue"),
+        "a complete cue still wins"
+    );
+}
+
+#[test]
 fn game_paths_per_kind() {
     let games = Path::new("/nonexistent");
     let path = |kind, files: &[&str]| game_path(kind, games, files);

@@ -27,14 +27,14 @@ under `/api` return 404 JSON.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/system/status` | Version, uptime, client kind and reachability, CORENAME, paused state, disk free, RSS. |
+| GET | `/system/status` | Version, uptime, client kind and reachability, CORENAME, paused state, disk free, RSS, CHD decoding speed. |
 | GET | `/system/wizard` | Which first-run steps are complete. |
 | POST | `/system/wizard/done` | The user finished or dismissed the wizard; it stops opening by itself. Returns the wizard body. |
 | POST | `/system/scan` | Enqueue a library scan. Body `{ platform_id? }`. |
 | POST | `/system/cores` | Detect installed cores again, for the wizard's detected-cores step. |
 | POST | `/system/pause` / `/system/resume` | Manual scheduler gate, overrides CORENAME until CORENAME next changes; `pause` holds the heavy and background lanes; `resume` ("Run now") also ends once the heavy queue drains. Returns the status body. |
 | GET | `/system/jobs` | Queued, running and paused jobs with progress. |
-| GET | `/system/jobs/recent` | The last 10 finished scans, arcade catalogues, DAT imports, recomputes and imports. |
+| GET | `/system/jobs/recent` | The last 10 finished jobs, such as scans, arcade catalogues, DAT imports, recomputes, CHD decoding and imports. |
 | POST | `/system/client/start` | Start an installed client that is not running: `{ kind }`, `transmission` or `rtorrent`. Returns the status body. |
 | GET | `/system/settings` / PUT | The config subset that is editable at runtime. |
 
@@ -50,7 +50,7 @@ under `/api` return 404 JSON.
   "corename": "MENU", "paused": false, "pause_reason": null, "override": null,
   "waiting": [],
   "disk_free_bytes": 1000000, "dats_dir": "/media/fat/mistarr/dats",
-  "rss_bytes": 1000000, "launch": "ready"
+  "rss_bytes": 1000000, "launch": "ready", "chd_decode_bytes_per_sec": null
 }
 ```
 
@@ -70,6 +70,9 @@ empty while nothing is held. `disk_free_bytes` is for the filesystem holding the
 `dats_dir` is the directory watched for DAT files, from `[paths]`.
 `launch` is `"ready"`, `"disabled"` when `prefs.launch` is off, or
 `"unavailable"` when MiSTer Main's command FIFO does not exist.
+`chd_decode_bytes_per_sec` is the speed of the last CHD decode, decoded
+bytes per second of decoding time with pauses left out, or `null` before the
+first.
 
 `/system/wizard` body: `{ paths, dats, client, sources, open_on_start }`, all
 booleans. `paths` is true when the games directory exists, `dats` when any DAT
@@ -99,9 +102,10 @@ running job's `progress` is its latest live progress ("Live progress") when
 it has one. A failed job's `progress` is `{ error }`. `/system/jobs/recent` answers `{
 items, total }` in the same item shape, newest first, with `state` `done` or
 `failed` and `reason` `null`. A finished scan's `progress` is `{ platform_id,
-done, total, matched, unmatched }` (ARCHITECTURE.md "Library scan"); a
-recompute's is `{ groups, picks, matched }`, `matched` counting files it
-gave a rom.
+done, total, matched, unmatched, unidentified }` (ARCHITECTURE.md "Library
+scan"); a recompute's is `{ groups, picks, matched }`, `matched` counting
+files it gave a rom; a `chd_tracks` job's is `{ done, total, verified,
+unmatched, not_identified }`, counting images.
 
 ### Live progress
 
@@ -133,17 +137,23 @@ report, and stores `{ file, members, done, games, phase: "importing in
 place", reason }` after each DAT. A `recompute_1g1r` reports
 `{ phase: "matching", checked, matched }`, then `{ phase: "picking", matched
 }`. A scan stores `{ platform_id, done, total, matched, unmatched }` as it
-goes.
+goes. A `chd_tracks` job reports `{ platform_id, done, total, file,
+bytes_done, bytes_total }` while it decodes: `done` and `total` count images,
+`file` names the image being decoded, and the bytes are its decoded share.
 
-`/system/settings` body: `{ client, limits, prefs }` with the fields of the
-same sections of `mistarr.toml`. PUT takes any subset of the three sections;
+`/system/settings` body: `{ client, limits, prefs, scan }` with the fields of
+the same sections of `mistarr.toml`. PUT takes any subset of the four sections;
 each section present replaces the stored one whole, with absent fields taking
 their defaults. Other keys are a 400, as is a `remote_path_map` entry whose
 `remote` is blank or whose `local` is not an absolute path; `remote` is the
 client's own spelling, so `C:\Torrents` or `C:/Torrents` is accepted. Saved values take precedence over
 the file on later starts. Changing `client` re-runs client detection; changing
 the 1G1R fields of `prefs` recomputes the picks; changing `prefs.launch`
-publishes `status`; saving never touches the wizard's state.
+publishes `status`; turning `scan.chd_tracks` on moves CHD images waiting
+with reason `off` to `pending` and queues the `chd_tracks` job, and turning
+it off moves `pending` and `no_layout` images to `off` and stops a running
+job at its next slice; saving never touches the wizard's state. Settings
+saved before `scan` existed leave the file's `[scan]` in force.
 
 `/system/client/start` is a 409 `conflict` while a detected client answers,
 a 409 `busy` while another start is running, a 400 when `kind` is not
@@ -157,13 +167,14 @@ status body, whose `client` says whether it did.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/platforms` | All platforms with core_present, counts (titles, have, wanted, unmatched_files, failing_check, partial). |
+| GET | `/platforms` | All platforms with core_present, counts (titles, have, wanted, unmatched_files, unidentified_files, failing_check, partial). |
+| GET | `/platforms/{id}/unidentified` | Files of the platform not identified, with why. Paged by `limit` (default 100) and `offset`. |
 | PUT | `/platforms/{id}` | `{ enabled }`. |
 | POST | `/platforms/{id}/dat` | Bind an unbound dat_version: `{ dat_version_id }`. |
 
 `/platforms` items are the platform row `{ id, name, core_dir, kind,
 core_present, enabled }` plus `counts: { titles, have, wanted, unmatched_files,
-failing_check, partial }`. `titles` counts the clone groups the default browse
+unidentified_files, failing_check, partial }`. `titles` counts the clone groups the default browse
 shows: groups with at least one live variant not flagged with a hidden flag
 (only MRA groups while the platform has a live MRA title). The other group counts count among those groups, and look at every live
 variant of a group, hidden ones included: `have` counts groups with a fully
@@ -174,12 +185,18 @@ some, but not every, zip it names present; neither counts a group that has a
 fully verified variant, hidden or not, so a group counted in `have` is never
 in either. `unmatched_files` counts `unverified` files on disk, and is always
 0 for arcade, whose state `failing_check` and `partial` report instead.
+`unidentified_files` counts `unidentified` files: CHD images whose tracks are
+not identified (VERIFICATION.md "CHD images").
 `PUT` answers with the same item. Binding answers 202 `{ dat_version_id, platform_id, job_id }` and
 the import job loads the titles, then publishes `dat.loaded`; a version that
 is already bound or retired is a 400. When the job cannot load it, because its
 file is gone from `dats/loaded/` or a newer version of the same DAT name is
 loaded, it publishes `dat.rejected` with the reason and the version stays
 unbound.
+
+`/platforms/{id}/unidentified` answers `{ items, total }` with items `{
+rel_path, size, reason }` in `rel_path` order, where `reason` is a code of
+VERIFICATION.md "CHD images" "Reasons"; it is a 404 for an unknown platform.
 
 ## Catalog
 
@@ -439,7 +456,7 @@ connection that falls further behind is closed and, on reconnecting, gets
 | `source.changed` | `{ source_id, state, platform_id? }` |
 | `download.changed` | `{ download_id, state, progress }` |
 | `import.done` | `{ title_id, file_id, action }`, one per file placed, kept or renamed; `action` as in `import_log` |
-| `file.changed` | `{ file_id, state }` during scans, throttled to 10 per second |
+| `file.changed` | `{ file_id, state }` during scans, throttled to 10 per second, and for each row the `chd_tracks` job writes |
 
 ## Launching
 
@@ -463,7 +480,8 @@ not being read or does not take the command.
 - not every live rom has a `verified`, `misnamed` or `bad` file, or, for an
   MRA title, a zip is missing or its md5 check failed;
 - a disc has a track that is not `verified`, or no cue sheet whose `FILE`
-  entries all exist beside it and no `.chd` or `.iso`;
+  entries all exist beside it and no `.chd` or `.iso`; a `.chd` identified
+  by its tracks counts, and its `#cue` row is not a cue sheet;
 - the entry is a BIOS entry or a DAT entry of the arcade platform;
 - no launch core of the platform is installed;
 - the MRA file is no longer under `_Arcade`, or its stored path is not plain

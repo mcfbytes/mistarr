@@ -137,14 +137,20 @@ export function jobOutcome(
     dat_import: `DAT ${file}`.trim(),
     source_import: `Source ${file}`.trim(),
     arcade_catalog: 'Arcade catalogue',
-    import: 'Import'
+    import: 'Import',
+    chd_tracks: 'CHD tracks'
   };
   const label = labels[job.kind] ?? job.kind;
   if (job.state === 'failed') {
     return typeof p.error === 'string' ? `${label} failed: ${p.error}` : `${label} failed`;
   }
   if (job.kind === 'scan' && typeof p.matched === 'number' && typeof p.unmatched === 'number') {
-    return `${label}: ${p.matched} matched, ${p.unmatched} unmatched`;
+    const unidentified = typeof p.unidentified === 'number' && p.unidentified > 0 ? p.unidentified : 0;
+    const tail = unidentified > 0 ? `, ${unidentified} not identified` : '';
+    return `${label}: ${p.matched} matched, ${p.unmatched} unmatched${tail}`;
+  }
+  if (job.kind === 'chd_tracks' && typeof p.verified === 'number') {
+    return `${label}: ${p.verified} verified, ${Number(p.unmatched ?? 0)} unmatched, ${Number(p.not_identified ?? 0)} not identified`;
   }
   if (job.kind === 'recompute_1g1r' && typeof p.matched === 'number') {
     return `${label}: ${p.matched} files newly matched`;

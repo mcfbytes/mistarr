@@ -32,3 +32,26 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
+
+# CHD track decoding and the hashes it feeds run at opt-level 3: measured 3x faster
+# under qemu-arm for a few tens of KiB; see docs/CHD.md "Speed".
+[profile.release.package.mistarr-core]
+opt-level = 3
+
+[profile.release.package.lzma-rs]
+opt-level = 3
+
+[profile.release.package.claxon]
+opt-level = 3
+
+[profile.release.package.ruzstd]
+opt-level = 3
+
+[profile.release.package.sha1]
+opt-level = 3
+
+[profile.release.package.md-5]
+opt-level = 3
+
+[profile.release.package.crc32fast]
+opt-level = 3

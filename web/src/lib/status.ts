@@ -84,6 +84,7 @@ const KIND_LABEL: Record<string, string> = {
   recompute_1g1r: 'Matching',
   arcade_catalog: 'Arcade catalogue',
   import: 'Import',
+  chd_tracks: 'CHD tracks',
   transfer: 'Transfer',
   remap_sources: 'Source matching',
   detect_client: 'Client check',
@@ -180,6 +181,20 @@ export function describeProgress(kind: string, p: Record<string, unknown> | null
     if (done !== null && total !== null && total > 0) {
       fraction = Math.min(1, done / total);
       parts.push(`${done.toLocaleString()} of ${total.toLocaleString()} files`);
+    }
+  } else if (kind === 'chd_tracks') {
+    const read = num(p.bytes_done);
+    const total = num(p.bytes_total);
+    if (read !== null && total !== null && total > 0) {
+      fraction = Math.min(1, read / total);
+    }
+    if (typeof p.file === 'string') {
+      parts.push(p.file);
+    }
+    const done = num(p.done);
+    const images = num(p.total);
+    if (done !== null && images !== null && images > 1) {
+      parts.push(`image ${Math.min(done + 1, images)} of ${images}`);
     }
   } else if (kind === 'recompute_1g1r') {
     const checked = num(p.checked);

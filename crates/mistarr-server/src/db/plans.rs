@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::downloads::{self, DownloadState};
 use super::titles::{self, Browse, SearchShape, Sort, TitleId, SEARCH_SHAPE};
-use super::{candidates, files, groups, imports, jobs, launch, sources};
+use super::{candidates, chd, files, groups, imports, jobs, launch, sources};
 
 thread_local! {
     static TRACED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -127,6 +127,14 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
                 drop(files::in_directory(c, &psx, "psx/Example Disc").expect("tracks"));
             }),
         ),
+        (
+            "chd lookups",
+            Box::new(|c| {
+                let psx = mistarr_core::PlatformId("psx".into());
+                files::chd_rom_sized(c, &psx, 4_704).expect("chd rom");
+                chd::layout_known(c, &psx, &[4_704]).expect("layout");
+            }),
+        ),
     ]
 }
 
@@ -221,7 +229,7 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
 }
 
 /// The whole-table walks the hot reads may make, each bounded or inherent.
-const ALLOWED_SCANS: [(&str, &str); 16] = [
+const ALLOWED_SCANS: [(&str, &str); 17] = [
     // The sort over one group's availability rows, which the union gathers by rom.
     ("title detail", "SCAN (subquery-"),
     // A refresh walks at most one chunk of the dirty list and that chunk's grouped rows.
@@ -244,6 +252,7 @@ const ALLOWED_SCANS: [(&str, &str); 16] = [
     ("browse", "SCAN CONSTANT ROW"),
     ("browse", "SCAN title_search VIRTUAL TABLE"),
     ("crc candidate", "SCAN CONSTANT ROW"),
+    ("chd lookups", "SCAN CONSTANT ROW"),
 ];
 
 /// Every hot read seeks through indexes except the scans in [`ALLOWED_SCANS`], and the
@@ -353,6 +362,8 @@ fn rom_lookups_and_directory_tracks_seek_their_own_index() {
         "roms_match_base (match_base=? AND size=?)",
     );
     expect("size candidates", "r.size IN", "roms_size (size=?)");
+    expect("chd lookups", "LIKE '%.chd'", "roms_chd_size (size=?)");
+    expect("chd lookups", "r.size % 2352", "roms_track_size (size=?)");
     expect(
         "directory tracks",
         "FROM files",

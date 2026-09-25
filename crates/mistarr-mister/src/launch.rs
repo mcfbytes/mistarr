@@ -155,10 +155,27 @@ pub fn split_zip_member(rel_path: &str) -> (&str, Option<&str>) {
     }
 }
 
+/// Splits a `files.rel_path` at the first `.chd#`, compared case-insensitively, into the
+/// CHD image and the track member (`01`, `cue`) the scan recorded for it.
+///
+/// ```
+/// use mistarr_mister::launch::split_chd_member;
+/// assert_eq!(split_chd_member("PSX/G/g.CHD#01"), ("PSX/G/g.CHD", Some("01")));
+/// assert_eq!(split_chd_member("PSX/G/g.chd"), ("PSX/G/g.chd", None));
+/// ```
+#[must_use]
+pub fn split_chd_member(rel_path: &str) -> (&str, Option<&str>) {
+    let lower = rel_path.to_ascii_lowercase();
+    match lower.find(".chd#") {
+        Some(at) => (&rel_path[..at + 4], Some(&rel_path[at + 5..])),
+        None => (rel_path, None),
+    }
+}
+
 /// The path, relative to `games/`, that loads a title from its files' `rel_path`s,
 /// reading cue sheets under `games`:
 /// - a disc loads the first cue sheet whose every `FILE` entry exists beside it,
-///   else its `.chd` or `.iso`;
+///   else its `.chd` (a CHD track member stands for its image) or `.iso`;
 /// - a romset loads its zip or its set directory, the first folder under the platform's;
 /// - anything else loads its first file, a zip member `a.zip#b.nes` as `a.zip/b.nes`,
 ///   which Main opens inside the zip.
@@ -169,19 +186,29 @@ pub fn split_zip_member(rel_path: &str) -> (&str, Option<&str>) {
 /// let games = std::path::Path::new("/nonexistent");
 /// assert_eq!(game_path(Kind::Cartridge, games, &["NES/a.zip#b.nes"]).as_deref(), Some("NES/a.zip/b.nes"));
 /// assert_eq!(game_path(Kind::Romset, games, &["NeoGeo/set"]).as_deref(), Some("NeoGeo/set"));
+/// let members = ["PSX/G/g.CHD#01", "PSX/G/g.CHD#cue"];
+/// assert_eq!(game_path(Kind::Disc, games, &members).as_deref(), Some("PSX/G/g.CHD"));
 /// ```
 #[must_use]
 pub fn game_path(kind: Kind, games: &Path, rel_paths: &[&str]) -> Option<String> {
     match kind {
-        Kind::Disc => rel_paths
-            .iter()
-            .find(|p| has_extension(p, "cue") && cue_complete(&games.join(p)))
-            .or_else(|| {
-                ["chd", "iso"]
-                    .iter()
-                    .find_map(|ext| rel_paths.iter().find(|p| has_extension(p, ext)))
-            })
-            .map(|p| (*p).to_owned()),
+        Kind::Disc => {
+            let images: Vec<&str> = rel_paths.iter().map(|p| split_chd_member(p).0).collect();
+            rel_paths
+                .iter()
+                .copied()
+                .find(|p| {
+                    split_chd_member(p).1.is_none()
+                        && has_extension(p, "cue")
+                        && cue_complete(&games.join(p))
+                })
+                .or_else(|| {
+                    ["chd", "iso"]
+                        .iter()
+                        .find_map(|ext| images.iter().copied().find(|p| has_extension(p, ext)))
+                })
+                .map(str::to_owned)
+        }
         Kind::Romset => rel_paths.first().map(|p| romset_container(p)),
         _ => rel_paths.first().map(|p| match split_zip_member(p) {
             (zip, Some(member)) => format!("{zip}/{member}"),

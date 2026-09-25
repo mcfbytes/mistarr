@@ -324,6 +324,7 @@ fn view_counts_a_title_once_whatever_its_roms_and_files() {
             have: 1,
             wanted: 1,
             unmatched_files: 1,
+            unidentified_files: 0,
             failing_check: 0,
             partial: 0
         })
@@ -450,6 +451,7 @@ fn counts_read_zero_for_an_unchecked_mra_title_with_its_zip_absent() {
             have: 0,
             wanted: 0,
             unmatched_files: 0,
+            unidentified_files: 0,
             failing_check: 0,
             partial: 0
         })

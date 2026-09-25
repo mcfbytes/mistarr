@@ -213,4 +213,26 @@ mod tests {
                 .complete
         );
     }
+
+    #[test]
+    fn a_chd_identified_by_its_tracks_counts_as_verified() {
+        let c = conn();
+        let pid = PlatformId("psx".into());
+        let title = files::seed_title_fixture(&c, &pid, "Disc").expect("title");
+        let cue = files::seed_rom_for_title_fixture(&c, title, "Disc.cue", &hashes(), "good")
+            .expect("cue");
+        let bin = files::seed_rom_for_title_fixture(&c, title, "Disc.bin", &hashes(), "good")
+            .expect("bin");
+        file(&c, &pid, "PSX/Disc/Disc.chd#01", bin, FileState::Verified);
+        let t = super::title(&c, TitleId(title))
+            .expect("read")
+            .expect("title");
+        assert!(!t.all_verified, "the cue row is still missing");
+        file(&c, &pid, "PSX/Disc/Disc.chd#cue", cue, FileState::Verified);
+        let t = super::title(&c, TitleId(title))
+            .expect("read")
+            .expect("title");
+        assert!(t.all_verified && t.complete);
+        assert!(t.files.iter().all(|f| f.starts_with("PSX/Disc/Disc.chd#")));
+    }
 }

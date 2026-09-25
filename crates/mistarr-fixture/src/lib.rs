@@ -7,6 +7,7 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod chd;
 pub mod dat;
 pub mod rng;
 pub mod set;

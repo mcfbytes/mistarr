@@ -65,8 +65,14 @@ scan button, below a banner of the platform's art. While the platform's scan
 is open the card shows its status pill, with a progress bar of files done
 while it runs or its reason while it waits. Scan shows a toast when
 the scan is queued and another with its outcome when it finishes, such as
-"Scan of Nintendo 64: 410 matched, 2 unmatched", on whichever page is open;
-counts reload when a scan or recompute ends. Platforms whose core is absent
+"Scan of Nintendo 64: 410 matched, 2 unmatched", followed by "3 not
+identified" when there are any, on whichever page is open; counts reload when
+a scan, a recompute or the CHD tracks job ends, and titles reload on
+`file.changed`, which the CHD tracks job sends for each row it writes. A card with files not identified has "N not
+identified" as a disclosure that lists them 50 at a time, each path with the
+sentence for its reason ("Not identified: no loaded DAT entry has this number
+and size of tracks.") and Show more, with an `aria-live` count of those
+shown. Platforms whose core is absent
 are in a collapsed section. While the wizard reports a missing DAT, client or
 source, a "Setup not finished" card lists what is missing and links to the
 wizard.
@@ -83,7 +89,8 @@ current results stay visible, dimmed and marked `aria-busy`; a failed load
 shows an alert with Retry.
 
 **Title** (`/t/{id}`). Every variant in the group with region, revision,
-flags, file state, and which sources have it: one line per file, as "nova.nes
+flags, file state (a CHD member named as "g.chd, track 2" or "g.chd, track
+list"), and which sources have it: one line per file, as "nova.nes
 in Example Pack (name guess)", with the confidence read as "name match",
 "hash match", "name match", "name and size", "name guess" or "size only", or
 "None available". Want per variant. Play for a
@@ -100,7 +107,9 @@ progress bars, imports log, queued and running jobs, each with its status
 pill, what it is about linked to the page that owns it, its lane, its
 progress bar while running and its reason while it waits, and a Recent list
 of the last finished jobs from `/system/jobs/recent`, one line each with
-its pill, outcome and time. Live over SSE.
+its pill, outcome and time. A running `chd_tracks` job's bar follows the
+image being decoded ("45% · g.chd · image 2 of 5") and its outcome reads "CHD
+tracks: 3 verified, 1 unmatched, 1 not identified". Live over SSE.
 
 **Sources** (`/sources`). Table of sources: name, platform, state as a
 status pill (resolving runs, unbound waits, bound is done, disabled is
@@ -134,7 +143,11 @@ result. Live over SSE, as in the wizard.
 **System** (`/system`). Status, client with the same start offer as the
 wizard, CORENAME, paused indicator with manual override, launch state,
 settings form for the runtime-editable subset with the shared path map editor
-and the switch that allows launching, log tail.
+and the switch that allows launching, log tail. Under "Disc images", the
+checkbox "Identify CHD images by their tracks" with a "Slow" tag, a line
+saying it decodes each image once, pauses while a core runs and keeps its
+results, and the measured speed as "about N minutes per 700 MB image", or
+"Speed not measured yet."
 
 ## Platform art
 

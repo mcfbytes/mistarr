@@ -13,6 +13,7 @@ import type {
   TitleDetail,
   TitleFilters,
   TitleGroup,
+  UnidentifiedFile,
   WizardStatus
 } from './types';
 
@@ -29,7 +30,7 @@ export const fixturePlatforms: Platform[] = [
     kind: 'cartridge',
     core_present: true,
     enabled: true,
-    counts: { titles: 240, have: 180, wanted: 12, unmatched_files: 4, failing_check: 0, partial: 0 }
+    counts: { titles: 240, have: 180, wanted: 12, unmatched_files: 4, unidentified_files: 0, failing_check: 0, partial: 0 }
   },
   {
     id: 'megadrive',
@@ -38,7 +39,7 @@ export const fixturePlatforms: Platform[] = [
     kind: 'cartridge',
     core_present: true,
     enabled: true,
-    counts: { titles: 310, have: 90, wanted: 30, unmatched_files: 1, failing_check: 0, partial: 0 }
+    counts: { titles: 310, have: 90, wanted: 30, unmatched_files: 1, unidentified_files: 0, failing_check: 0, partial: 0 }
   },
   {
     id: 'psx',
@@ -47,7 +48,16 @@ export const fixturePlatforms: Platform[] = [
     kind: 'disc',
     core_present: false,
     enabled: true,
-    counts: { titles: 420, have: 0, wanted: 0, unmatched_files: 0, failing_check: 0, partial: 0 }
+    counts: { titles: 420, have: 0, wanted: 0, unmatched_files: 0, unidentified_files: 0, failing_check: 0, partial: 0 }
+  },
+  {
+    id: 'saturn',
+    name: 'Sega Saturn',
+    core_dir: 'Saturn',
+    kind: 'disc',
+    core_present: true,
+    enabled: true,
+    counts: { titles: 60, have: 12, wanted: 0, unmatched_files: 1, unidentified_files: 3, failing_check: 0, partial: 0 }
   },
   {
     id: 'amiga',
@@ -56,7 +66,7 @@ export const fixturePlatforms: Platform[] = [
     kind: 'computer',
     core_present: false,
     enabled: true,
-    counts: { titles: 150, have: 0, wanted: 0, unmatched_files: 0, failing_check: 0, partial: 0 }
+    counts: { titles: 150, have: 0, wanted: 0, unmatched_files: 0, unidentified_files: 0, failing_check: 0, partial: 0 }
   },
   {
     id: 'arcade',
@@ -65,7 +75,7 @@ export const fixturePlatforms: Platform[] = [
     kind: 'arcade',
     core_present: true,
     enabled: true,
-    counts: { titles: 1298, have: 978, wanted: 0, unmatched_files: 0, failing_check: 14, partial: 6 }
+    counts: { titles: 1298, have: 978, wanted: 0, unmatched_files: 0, unidentified_files: 0, failing_check: 14, partial: 6 }
   }
 ];
 
@@ -185,7 +195,7 @@ export function mockExtraPlatforms(): Platform[] {
           kind: 'cartridge',
           core_present: true,
           enabled: true,
-          counts: { titles: 0, have: 0, wanted: 0, unmatched_files: 0, failing_check: 0, partial: 0 }
+          counts: { titles: 0, have: 0, wanted: 0, unmatched_files: 0, unidentified_files: 0, failing_check: 0, partial: 0 }
         }));
     }
   } catch {
@@ -343,7 +353,17 @@ export const fixtureStatus: SystemStatus = {
   disk_free_bytes: 12_400_000_000,
   dats_dir: '/media/fat/mistarr/dats',
   rss_bytes: 41_000_000,
-  launch: 'ready'
+  launch: 'ready',
+  chd_decode_bytes_per_sec: 1_200_000
+};
+
+/** Files not identified, by platform, for the Platforms card. */
+export const fixtureUnidentified: Record<string, UnidentifiedFile[]> = {
+  saturn: [
+    { rel_path: 'Saturn/Example Orbit (Japan)/Example Orbit (Japan).chd', size: 412_000_000, reason: 'off' },
+    { rel_path: 'Saturn/Sample Rally (Europe)/Sample Rally (Europe).chd', size: 380_000_000, reason: 'cooked' },
+    { rel_path: 'Saturn/Test Pattern Disc/Test Pattern Disc.chd', size: 2_000_000, reason: 'no_layout' }
+  ]
 };
 
 export const fixtureWizard: WizardStatus = {
@@ -662,6 +682,17 @@ export const fixtureRecentJobs: Job[] = [
     updated_at: 1_770_031_560
   },
   {
+    id: 6,
+    kind: 'chd_tracks',
+    lane: 'heavy',
+    payload: {},
+    state: 'done',
+    progress: { done: 5, total: 5, verified: 3, unmatched: 1, not_identified: 1 },
+    reason: null,
+    created_at: 1_770_031_030,
+    updated_at: 1_770_031_900
+  },
+  {
     id: 3,
     kind: 'scan',
     lane: 'heavy',
@@ -683,5 +714,6 @@ export const fixtureSettings: Settings = {
     prefer_latest_revision: true,
     hide: ['bios', 'beta', 'proto', 'demo', 'sample', 'program'],
     launch: true
-  }
+  },
+  scan: { chd_tracks: false }
 };

@@ -1166,8 +1166,8 @@ fn staged(game: &DatGame) -> StagedGame {
 }
 
 /// Queues the recompute job, which matches files of retired roms and unmatched files
-/// again from their stored hashes, or when the import already ran it, the re-map it ends
-/// with; and an automatic scan for each platform a DAT just loaded titles for,
+/// again from their stored hashes, or when the import already ran it, the re-map and CHD
+/// decoding it ends with; and an automatic scan for each platform a DAT just loaded titles for,
 /// deduped so several DATs in one pack queue at most one each, binds waiting
 /// sources once for the whole pack, then checks whether the wizard just
 /// became complete.
@@ -1182,6 +1182,10 @@ async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded], recomput
         }
         if recomputed {
             super::remap::enqueue(app, Some(vec![platform.clone()])).await;
+            // The recompute job queues this itself; one run inside the import cannot.
+            if let Err(e) = super::chd::queue_for(app, platform, true).await {
+                tracing::warn!(platform = %platform.0, error = %e, "cannot queue CHD decoding");
+            }
         } else if let Err(e) = Scheduler::enqueue(app, Arc::new(Recompute::new(&platform.0))).await
         {
             tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue the recompute");
@@ -1311,7 +1315,7 @@ pub(crate) fn match_unmatched_chunk(
 /// Matches `rows` again by their stored hashes against live roms and returns how many
 /// went from no rom to a rom. A cartridge file takes the state a scan would give it; a
 /// disc track is classified again with the other tracks of its directory by the scan's
-/// all-or-nothing rule.
+/// all-or-nothing rule, and a CHD's tracks together as its own set.
 fn set_matches(conn: &Connection, platform: &PlatformId, rows: &[FileRow]) -> Result<usize> {
     let disc = mistarr_mister::platforms::by_id(&platform.0)
         .is_some_and(|p| p.kind == mistarr_mister::Kind::Disc);
@@ -1330,7 +1334,11 @@ fn set_matches(conn: &Connection, platform: &PlatformId, rows: &[FileRow]) -> Re
         set_changed(conn, f, rom, state)?;
     }
     for dir in units {
-        let rows = files::in_directory(conn, platform, dir)?;
+        let (rows, containers) =
+            super::chd::split_disc_rows(files::in_directory(conn, platform, dir)?);
+        for c in containers {
+            matched += super::chd::rematch_container(conn, platform, &c, crate::unix_now())?;
+        }
         let mut tracks = Vec::with_capacity(rows.len());
         for f in &rows {
             tracks.push(scan::Track {
@@ -1534,6 +1542,10 @@ impl Job for Recompute {
             .await?;
         // Groups are settled now; a re-map that ran earlier stored a stamp without them.
         super::remap::enqueue(&ctx.app, Some(vec![self.platform.clone()])).await;
+        // New roms may fit CHD track layouts no DAT had before.
+        if let Err(e) = super::chd::queue_for(&ctx.app, &self.platform, true).await {
+            tracing::warn!(platform = %self.platform.0, error = %e, "cannot queue CHD decoding");
+        }
         Ok(())
     }
 }

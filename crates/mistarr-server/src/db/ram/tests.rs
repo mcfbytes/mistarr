@@ -643,9 +643,8 @@ fn a_migration_that_fails_on_the_copy_leaves_the_card_as_it_was_and_runs_in_plac
     let root = tempfile::tempdir().expect("tempdir");
     let mut config = config_at(root.path(), ram.path());
     let path = config.paths.db();
-    let latest = super::super::migrate::latest();
-    at_version(&path, latest - 1, 0.0);
-    // The last migration drops this table; without it the migration fails.
+    // Migration 17 drops this table; without it that migration fails.
+    at_version(&path, 16, 0.0);
     let c = Connection::open(&path).expect("open");
     c.execute_batch("DROP TABLE dat_stage").expect("drop");
     super::super::wal_emptied(&c).expect("checkpoint");
@@ -662,7 +661,7 @@ fn a_migration_that_fails_on_the_copy_leaves_the_card_as_it_was_and_runs_in_plac
     );
     let c = Connection::open(&path).expect("open");
     let v = super::super::migrate::current_version(&c).expect("version");
-    assert_eq!(v, latest - 1, "rolled back");
+    assert_eq!(v, 16, "rolled back");
     assert!(!sibling(&path, NEW_SUFFIX).exists());
 }
 

@@ -1,6 +1,7 @@
 //! Background jobs: the [`Job`] trait, three serial lanes and the gate; see `docs/ARCHITECTURE.md`.
 
 pub mod arcade;
+pub mod chd;
 pub mod corename;
 pub mod dat_import;
 pub mod detect_client;
@@ -35,7 +36,12 @@ const KEEP_FINISHED: u32 = 200;
 
 /// Kinds whose whole work a paused run of the same payload still covers, so a
 /// second request never queues behind it.
-pub const SINGLETON_KINDS: [&str; 3] = [arcade::KIND, scan::KIND, dat_import::RECOMPUTE_KIND];
+pub const SINGLETON_KINDS: [&str; 4] = [
+    arcade::KIND,
+    scan::KIND,
+    dat_import::RECOMPUTE_KIND,
+    chd::KIND,
+];
 
 /// Error recorded on a job a previous process left unfinished and that is not re-run.
 pub const INTERRUPTED: &str = "interrupted by a restart";
@@ -484,6 +490,7 @@ pub async fn reconcile(app: &Arc<AppState>) -> Result<Reconciled> {
 /// ```
 /// use mistarr_server::jobs::revive;
 /// assert!(revive("arcade_catalog", &serde_json::json!({})).is_some());
+/// assert!(revive("chd_tracks", &serde_json::json!({})).is_some());
 /// assert!(revive("dat_import", &serde_json::json!({"path": "/d/a.dat"})).is_some());
 /// assert!(revive("detect_client", &serde_json::json!({})).is_none());
 /// ```
@@ -492,6 +499,7 @@ pub fn revive(kind: &str, payload: &Value) -> Option<Arc<dyn Job>> {
     let text = |key: &str| payload.get(key).and_then(Value::as_str);
     let job: Arc<dyn Job> = match kind {
         arcade::KIND => Arc::new(arcade::ArcadeCatalog),
+        chd::KIND => Arc::new(chd::ChdTracks),
         scan::KIND => Arc::new(scan::ScanJob {
             platform_id: text("platform_id").map(|p| mistarr_core::PlatformId(p.to_owned())),
         }),

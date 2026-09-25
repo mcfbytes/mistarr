@@ -6,7 +6,9 @@ Three layers. All of them run on x86-64 in CI; only the last needs a board.
 
 - `mistarr-core`: DAT parsing against synthetic DATs generated in the test,
   name parsing corpus, header rules, hashing against known vectors, 1G1R
-  selection tables, cue parsing.
+  selection tables, cue parsing, and the CHD decoder: known answers worked
+  out in CHD.md for the map, canonical codes and CHT2 layout, and
+  `decode_budget` under 24 MiB at the header limits.
 - `mistarr-mister`: every adapter's `plan_placement` and `accepts` against
   synthetic inputs; MRA parsing; DAT-name to platform binding; MGL building
   and escaping, core selection and the command FIFO against a real FIFO in a
@@ -74,6 +76,31 @@ client's log and the server's `mistarr.log` land. Set
 `MISTARR_E2E_REQUIRE=transmission-daemon,rtorrent` to fail instead of skip
 when a client is missing. Each test prints its timings on success.
 
+### CHD images
+
+`mistarr_fixture::chd` writes CHD v5 CD images of synthetic tracks with
+every CD and whole-hunk codec, MAME-canonical Huffman maps, copies and RLE
+types, and the Redump-style bins and cue of the same tracks. It is written
+from CHD.md, apart from the decoder it tests. `tests/chd.rs` in
+`mistarr-fixture` checks that every codec rebuilds the source tracks, runs a
+proptest over track layouts, hunk sizes and codecs, reads every image with
+the `chd` crate as an independent decoder, and feeds damaged, truncated and
+mutated images to the decoder, which must fail without panicking.
+
+`tests/chdman.rs` encodes synthetic discs (split and single-file cues, Mode
+1, Mode 2 and audio tracks with INDEX 00 pregaps, a hidden track-1 pregap)
+with the real `chdman` in its default codecs, `cdzs`, `cdfl`, `cdzl`,
+one-frame hunks and hunks large enough for 3-byte lengths, and checks the
+decoded tracks against the source bins. It skips with a message when
+`chdman` (Debian's `mame-tools`) is missing; `MISTARR_CHDMAN_REQUIRE=1`, set
+in CI, makes that a failure.
+
+`crates/mistarr-server/tests/chd.rs` boots the server over synthetic images
+and a seeded DAT: the header-only scan with the setting off, verification
+and launch once it is on, the cache on a rescan, an image beside its bins,
+`no_layout` until a DAT loads, a cooked track, a paused and a stopped
+decode, the lane handed to a scan, and a DAT listing a whole `.chd`.
+
 The fixture tool runs on its own too:
 
 ```sh
@@ -99,6 +126,7 @@ against another and the numbers include everything the real daemon runs.
 | `dat_and_torrent_import_stay_under_budget` | a 50 MB Logiqx DAT of about 200 000 games, then a torrent of 50 000 files named after them, every tenth only loosely (`example_game_<n>.nes`) so the fuzzy tier reads thousands of roms per size; then a start with the source's stamp stale, so `remap_sources` works out every file again | the DAT loaded on the copy in RAM, whose files and SQLite's temporary files, named or held open and deleted, sampled every 5 ms, never exceed `db::ram::need`; every game stored, every torrent file stored, the rest matched by name, no candidate for the ambiguous loose names, and the re-map keeps the same matches |
 | `a_dat_import_on_the_card_stays_under_budget` | the same DAT with `[memory] import_floor_mib` too large for any copy | the load ran on the card, saying why, made no copy, and held SQLite's temporary files in its temporary directory |
 | `scan_stays_under_budget` | 16 000 loose and 2 000 zipped GBA files and 1 000 PSX folders of a cue and a bin | a `files` row per file and zip member |
+| `chd_identification_stays_under_budget` | four CHD images of 2 to 4 MB of CD data under `games/PSX` (chdman's default CD codecs, `cdzs`, uncompressed, and one-frame hunks) and a DAT of their tracks, with `[scan] chd_tracks` on | a scan then `chd_tracks` verify every track and cue row |
 | `a_tiny_memory_limit_is_raised_to_the_floor` | `[memory] data_limit_mib = 2` | the process runs with the 64 MiB floor, or a lower inherited limit |
 
 Each server started also checks that `/proc/<pid>/limits` shows the default
@@ -267,6 +295,8 @@ CI records them; a regression over 20 percent fails the build. On the board,
 
 - `cargo fmt --check`, `cargo clippy -D warnings`, `cargo test` on x86-64,
   which includes the memory budget suite above.
+- The `rust` job installs `mame-tools` and runs the tests with
+  `MISTARR_CHDMAN_REQUIRE=1`, so the chdman test cannot skip.
 - The `e2e` job: installs `transmission-daemon` and `rtorrent`, runs
   `make e2e` with both required, and uploads `target/e2e-logs` on failure.
 - `cargo zigbuild --target armv7-unknown-linux-musleabihf`, then `file`

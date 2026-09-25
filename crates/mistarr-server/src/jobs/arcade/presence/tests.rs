@@ -67,6 +67,7 @@ fn row(id: i64, rel: &str, size: i64, mtime: i64, rom: Option<i64>, state: FileS
         rom_id: rom,
         state,
         scanned_at: 1,
+        reason: None,
     }
 }
 

@@ -974,3 +974,82 @@ fn a_tiny_memory_limit_is_raised_to_the_floor() {
     let server = spawn(dir.path(), "data_limit_mib = 2\n");
     server.assert_data_limit(64);
 }
+
+/// Four CHD images of 2 to 4 MB of CD data under `games/PSX`, each with a different codec
+/// setup, and a PlayStation DAT listing their tracks. Returns the member rows they verify to.
+fn chd_tree(root: &Path) -> usize {
+    use mistarr_fixture::chd::{to_vec, Codec, Kind, Spec, TrackSpec};
+    let track = |kind, frames| TrackSpec {
+        kind,
+        frames,
+        pregap: 0,
+        pregap_stored: true,
+    };
+    let mut specs = vec![
+        Spec::new(
+            "Mixed",
+            vec![track(Kind::Mode2Raw, 900), track(Kind::Audio, 400)],
+        ),
+        Spec::new("Zstd", vec![track(Kind::Mode1Raw, 1200)]),
+        Spec::new(
+            "Plain",
+            vec![track(Kind::Mode1Raw, 900), track(Kind::Audio, 300)],
+        ),
+        Spec::new("Small Hunks", vec![track(Kind::Audio, 1500)]),
+    ];
+    specs[1].codecs = vec![Codec::CdZstd];
+    specs[2].codecs = Vec::new();
+    specs[3].frames_per_hunk = 1;
+    let psx = mistarr_fixture::dat::platform("psx").expect("psx");
+    let header = mistarr_fixture::dat::header_name(psx, "Memory Test");
+    let mut xml = format!(
+        "<?xml version=\"1.0\"?>\n<datafile>\n<header>\n<name>{header}</name>\n\
+         <description>{header}</description>\n<version>1</version>\n</header>\n"
+    );
+    let mut members = 0;
+    for spec in &specs {
+        let (bytes, written) = to_vec(spec).expect("image");
+        let name = format!("Example {} (USA)", spec.label);
+        write(&root.join(format!("games/PSX/{name}/{name}.chd")), &bytes);
+        let _ = write!(
+            xml,
+            "<game name=\"{name}\">\n<description>{name}</description>\n\
+             <rom name=\"{name}.cue\" size=\"90\" crc=\"{}\" md5=\"{}\" sha1=\"{}\"/>\n",
+            hex_of(members, 8),
+            hex_of(members + 1, 32),
+            hex_of(members + 2, 40),
+        );
+        for (i, t) in written.tracks.iter().enumerate() {
+            let _ = writeln!(
+                xml,
+                "<rom name=\"{name} (Track {:02}).bin\" size=\"{}\" crc=\"{}\" md5=\"{}\" sha1=\"{}\"/>",
+                i + 1,
+                t.size,
+                t.crc32,
+                t.md5,
+                t.sha1
+            );
+        }
+        xml.push_str("</game>\n");
+        members += written.tracks.len() + 1;
+    }
+    xml.push_str("</datafile>\n");
+    write(&root.join("data/dats/chd.dat"), xml.as_bytes());
+    members
+}
+
+#[test]
+fn chd_identification_stays_under_budget() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let members = chd_tree(dir.path());
+    let server = spawn(dir.path(), "[scan]\nchd_tracks = true\n");
+    server.wait_jobs("dat_import", 1);
+    server.post("/system/scan", "{\"platform_id\":\"psx\"}");
+    let rows = server.wait_jobs("chd_tracks", 1);
+    let verified = server
+        .count("SELECT COUNT(*) FROM files WHERE rel_path LIKE '%.chd#%' AND state = 'verified'");
+    let peak = server.stop("chd_tracks");
+    assert!(rows.iter().all(|(s, _)| s == "done"), "{rows:?}");
+    assert_eq!(usize::try_from(verified).expect("count"), members);
+    assert_budget("chd_tracks", peak, 16);
+}

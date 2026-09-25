@@ -8,11 +8,13 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use mistarr_core::PlatformId;
 use serde::{Deserialize, Serialize};
 
 use super::{ApiError, Page, Paging};
 use crate::app::AppState;
 use crate::db::dats::{self, DatVersionId};
+use crate::db::files::{self, UnidentifiedFile};
 use crate::db::jobs::JobId;
 use crate::db::platforms::{self, PlatformRow};
 use crate::db::titles::{self, Counts};
@@ -24,6 +26,29 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route("/platforms", get(list))
         .route("/platforms/{id}", put(update))
         .route("/platforms/{id}/dat", post(bind))
+        .route("/platforms/{id}/unidentified", get(unidentified))
+}
+
+/// `GET /platforms/{id}/unidentified`: the files not identified, with why, by path.
+async fn unidentified(
+    State(app): State<Arc<AppState>>,
+    id: Result<Path<String>, PathRejection>,
+    paging: Result<Query<Paging>, QueryRejection>,
+) -> Result<Json<Page<UnidentifiedFile>>, ApiError> {
+    let id = PlatformId(path_id(id)?);
+    let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    let (limit, offset) = paging.resolve();
+    let found = app
+        .db
+        .read(move |c| {
+            if platforms::get(c, &id.0)?.is_none() {
+                return Ok(None);
+            }
+            files::unidentified(c, &id, offset, limit).map(Some)
+        })
+        .await?;
+    let (items, total) = found.ok_or_else(|| ApiError::not_found("no such platform"))?;
+    Ok(Json(Page { items, total }))
 }
 
 /// A platform with its catalog counts.

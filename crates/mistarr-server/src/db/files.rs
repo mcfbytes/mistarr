@@ -34,6 +34,8 @@ pub enum FileState {
     Unverified,
     /// Matches a rom flagged `baddump`.
     Bad,
+    /// A disc image whose tracks are not identified yet or cannot be; `reason` says why.
+    Unidentified,
 }
 
 impl FileState {
@@ -46,6 +48,7 @@ impl FileState {
             Self::Misnamed => "misnamed",
             Self::Unverified => "unverified",
             Self::Bad => "bad",
+            Self::Unidentified => "unidentified",
         }
     }
 
@@ -58,6 +61,7 @@ impl FileState {
             Self::Misnamed,
             Self::Unverified,
             Self::Bad,
+            Self::Unidentified,
         ]
         .into_iter()
         .find(|v| v.as_str() == s)
@@ -93,6 +97,9 @@ pub struct FileRow {
     pub state: FileState,
     /// Unix seconds this row was last written by a scan.
     pub scanned_at: i64,
+    /// Why an `unidentified` row is not identified, a code of `docs/VERIFICATION.md`
+    /// "CHD images"; `None` in every other state.
+    pub reason: Option<String>,
 }
 
 /// A file found on disk and hashed, ready to be matched and written by the
@@ -119,6 +126,8 @@ pub struct NewFile {
     pub rom_id: Option<i64>,
     /// The decided state.
     pub state: FileState,
+    /// Why an `unidentified` row is not identified; `None` in every other state.
+    pub reason: Option<String>,
 }
 
 /// The last path component of a name that may use `/` as a separator, as
@@ -147,10 +156,10 @@ pub struct RomMatch {
     pub status: String,
 }
 
-const COLUMNS: &str =
-    "id, platform_id, rel_path, size, mtime, crc32, md5, sha1, header_rule, rom_id, state, scanned_at";
+pub(crate) const COLUMNS: &str =
+    "id, platform_id, rel_path, size, mtime, crc32, md5, sha1, header_rule, rom_id, state, scanned_at, reason";
 
-fn from_row(r: &Row<'_>) -> rusqlite::Result<FileRow> {
+pub(crate) fn from_row(r: &Row<'_>) -> rusqlite::Result<FileRow> {
     let state: String = r.get(10)?;
     Ok(FileRow {
         id: FileId(r.get(0)?),
@@ -165,6 +174,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<FileRow> {
         rom_id: r.get(9)?,
         state: FileState::parse(&state).unwrap_or(FileState::Pending),
         scanned_at: r.get(11)?,
+        reason: r.get(12)?,
     })
 }
 
@@ -234,7 +244,7 @@ pub fn delete(conn: &Connection, id: FileId) -> Result<()> {
     Ok(())
 }
 
-/// The member rows the scanner keeps for zip `zip_rel`, stored as `zip_rel#member`.
+/// The member rows kept for container `zip_rel`, a zip or a CHD, stored as `zip_rel#member`.
 ///
 /// # Errors
 ///
@@ -406,7 +416,7 @@ pub struct Hashed<'a> {
     pub header_rule: Option<&'a str>,
 }
 
-/// Inserts or replaces a file row keyed on `(platform_id, rel_path)`.
+/// Inserts or replaces a file row keyed on `(platform_id, rel_path)`, with no reason.
 ///
 /// # Errors
 ///
@@ -423,32 +433,106 @@ pub fn upsert(
     state: FileState,
     now: i64,
 ) -> Result<FileId> {
-    conn.execute(
+    let row = Columns {
+        rel_path,
+        size,
+        mtime,
+        hashed,
+        rom_id,
+        state,
+        reason: None,
+    };
+    upsert_columns(conn, platform_id, &row, now)
+}
+
+/// Inserts or replaces the row `row` describes, keyed on `(platform_id, rel_path)`.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::files::{find_by_path, upsert_row, FileState, NewFile};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// mistarr_server::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).unwrap();
+/// let psx = mistarr_core::PlatformId("psx".into());
+/// let row = NewFile { rel_path: "PSX/g.chd".into(), size: 9, mtime: 1, crc32: None, md5: None,
+///     sha1: None, header_rule: Some("chd".into()), rom_id: None,
+///     state: FileState::Unidentified, reason: Some("off".into()) };
+/// upsert_row(&conn, &psx, &row, 5).unwrap();
+/// let got = find_by_path(&conn, &psx, "PSX/g.chd").unwrap().unwrap();
+/// assert_eq!(got.reason.as_deref(), Some("off"));
+/// ```
+pub fn upsert_row(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    row: &NewFile,
+    now: i64,
+) -> Result<FileId> {
+    let hashed = Hashed {
+        crc32: row.crc32.as_deref(),
+        md5: row.md5.as_deref(),
+        sha1: row.sha1.as_deref(),
+        header_rule: row.header_rule.as_deref(),
+    };
+    let columns = Columns {
+        rel_path: &row.rel_path,
+        size: row.size,
+        mtime: row.mtime,
+        hashed: &hashed,
+        rom_id: row.rom_id,
+        state: row.state,
+        reason: row.reason.as_deref(),
+    };
+    upsert_columns(conn, platform_id, &columns, now)
+}
+
+/// The columns [`upsert_columns`] writes.
+struct Columns<'a> {
+    rel_path: &'a str,
+    size: i64,
+    mtime: i64,
+    hashed: &'a Hashed<'a>,
+    rom_id: Option<i64>,
+    state: FileState,
+    reason: Option<&'a str>,
+}
+
+fn upsert_columns(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    row: &Columns<'_>,
+    now: i64,
+) -> Result<FileId> {
+    conn.prepare_cached(
         "INSERT INTO files (platform_id, rel_path, size, mtime, crc32, md5, sha1, header_rule,
-                             rom_id, state, scanned_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                             rom_id, state, scanned_at, reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
          ON CONFLICT(platform_id, rel_path) DO UPDATE SET
            size = excluded.size, mtime = excluded.mtime, crc32 = excluded.crc32,
            md5 = excluded.md5, sha1 = excluded.sha1, header_rule = excluded.header_rule,
-           rom_id = excluded.rom_id, state = excluded.state, scanned_at = excluded.scanned_at",
-        params![
-            platform_id.0,
-            rel_path,
-            size,
-            mtime,
-            hashed.crc32,
-            hashed.md5,
-            hashed.sha1,
-            hashed.header_rule,
-            rom_id,
-            state.as_str(),
-            now,
-        ],
-    )?;
+           rom_id = excluded.rom_id, state = excluded.state, scanned_at = excluded.scanned_at,
+           reason = excluded.reason",
+    )?
+    .execute(params![
+        platform_id.0,
+        row.rel_path,
+        row.size,
+        row.mtime,
+        row.hashed.crc32,
+        row.hashed.md5,
+        row.hashed.sha1,
+        row.hashed.header_rule,
+        row.rom_id,
+        row.state.as_str(),
+        now,
+        row.reason,
+    ])?;
     Ok(conn
         .query_row(
             "SELECT id FROM files WHERE platform_id = ?1 AND rel_path = ?2",
-            params![platform_id.0, rel_path],
+            params![platform_id.0, row.rel_path],
             |r| r.get(0).map(FileId),
         )
         .optional()?
@@ -469,9 +553,8 @@ pub fn existing_paths(conn: &Connection, platform_id: &PlatformId) -> Result<Vec
 /// Rows [`delete_missing`] removes per transaction.
 const DELETE_BATCH: usize = 500;
 
-/// Deletes the rows of `platform_id` at `paths`, first clearing the `import_log`
-/// references to them, since that foreign key has no delete action. Set-based: two
-/// statements for the whole slice; the caller owns the transaction. Returns rows removed.
+/// Deletes the rows of `platform_id` at `paths` through [`delete_ids`]. Set-based: the
+/// caller owns the transaction. Returns rows removed.
 ///
 /// # Errors
 ///
@@ -485,16 +568,40 @@ pub fn delete_paths(
         return Ok(0);
     }
     let list = serde_json::to_string(paths).map_err(|e| crate::Error::Job(e.to_string()))?;
-    conn.execute(
-        "UPDATE import_log SET file_id = NULL
-         WHERE file_id IN (SELECT id FROM files WHERE platform_id = ?1
-                             AND rel_path IN (SELECT value FROM json_each(?2)))",
-        params![platform_id.0, list],
-    )?;
-    Ok(conn.execute(
-        "DELETE FROM files WHERE platform_id = ?1 AND rel_path IN (SELECT value FROM json_each(?2))",
-        params![platform_id.0, list],
-    )?)
+    let ids: Vec<i64> = conn
+        .prepare_cached(
+            "SELECT id FROM files WHERE platform_id = ?1
+               AND rel_path IN (SELECT value FROM json_each(?2))",
+        )?
+        .query_map(params![platform_id.0, list], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    delete_ids(conn, &ids)
+}
+
+/// Deletes the rows `ids`, first clearing the `import_log` references to them, since that
+/// foreign key has no delete action. Two statements; the caller owns the transaction.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert_eq!(mistarr_server::db::files::delete_ids(&conn, &[1, 2]).unwrap(), 0);
+/// ```
+pub fn delete_ids(conn: &Connection, ids: &[i64]) -> Result<usize> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let list = serde_json::to_string(ids).map_err(|e| crate::Error::Job(e.to_string()))?;
+    conn.prepare_cached(
+        "UPDATE import_log SET file_id = NULL WHERE file_id IN (SELECT value FROM json_each(?1))",
+    )?
+    .execute([&list])?;
+    Ok(conn
+        .prepare_cached("DELETE FROM files WHERE id IN (SELECT value FROM json_each(?1))")?
+        .execute([&list])?)
 }
 
 /// Deletes every row of `platform_id` whose `rel_path` is not in `keep` and does not lie
@@ -594,6 +701,158 @@ fn match_among(
         ))?
         .query_row(params![platform_id.0, crc32, size], row)
         .optional()?)
+}
+
+/// Every live rom of a live DAT title on `platform_id` that `hashes` matches at the first
+/// tier with any match: SHA1, then MD5, then CRC32 and size; ordered by rom id.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let psx = mistarr_core::PlatformId("psx".into());
+/// let h = mistarr_core::HashSet { size: 1, crc32: "0".into(), md5: "0".into(), sha1: "0".into() };
+/// assert!(mistarr_server::db::files::roms_matching(&conn, &psx, &h).unwrap().is_empty());
+/// ```
+pub fn roms_matching(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    hashes: &mistarr_core::HashSet,
+) -> Result<Vec<RomMatch>> {
+    let select = "SELECT r.id, r.title_id, r.name, r.status
+         FROM roms r JOIN titles t ON t.id = r.title_id
+         WHERE t.platform_id = ?1 AND t.source = 'dat' AND r.retired = 0 AND t.retired = 0 AND ";
+    let size = i64::try_from(hashes.size).unwrap_or(i64::MAX);
+    let run = |cond: &str, p: &[&dyn rusqlite::ToSql]| -> Result<Vec<RomMatch>> {
+        Ok(conn
+            .prepare_cached(&format!("{select}{cond} ORDER BY r.id"))?
+            .query_map(p, rom_match)?
+            .collect::<rusqlite::Result<_>>()?)
+    };
+    let found = run("r.sha1 = ?2", &[&platform_id.0, &hashes.sha1])?;
+    if !found.is_empty() {
+        return Ok(found);
+    }
+    let found = run(
+        "r.sha1 IS NULL AND r.md5 = ?2",
+        &[&platform_id.0, &hashes.md5],
+    )?;
+    if !found.is_empty() {
+        return Ok(found);
+    }
+    run(
+        "r.sha1 IS NULL AND r.md5 IS NULL AND r.crc32 = ?2 AND r.size = ?3",
+        &[&platform_id.0, &hashes.crc32, &size],
+    )
+}
+
+fn rom_match(r: &Row<'_>) -> rusqlite::Result<RomMatch> {
+    Ok(RomMatch {
+        rom_id: r.get(0)?,
+        title_id: r.get(1)?,
+        name: r.get(2)?,
+        status: r.get(3)?,
+    })
+}
+
+/// The live roms of title `title_id`, ordered by rom id, cue sheets included.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(mistarr_server::db::files::disc_roms(&conn, 1).unwrap().is_empty());
+/// ```
+pub fn disc_roms(conn: &Connection, title_id: i64) -> Result<Vec<RomMatch>> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT r.id, r.title_id, r.name, r.status FROM roms r JOIN titles t ON t.id = r.title_id
+             WHERE r.title_id = ?1 AND r.retired = 0 AND t.retired = 0 ORDER BY r.id",
+        )?
+        .query_map([title_id], rom_match)?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Whether a live DAT rom on `platform_id` is a whole `.chd` file of `size` bytes, so a
+/// `.chd` of that size is hashed whole before its header is read.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let psx = mistarr_core::PlatformId("psx".into());
+/// assert!(!mistarr_server::db::files::chd_rom_sized(&conn, &psx, 10).unwrap());
+/// ```
+pub fn chd_rom_sized(conn: &Connection, platform_id: &PlatformId, size: i64) -> Result<bool> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS(
+               SELECT 1 FROM roms r INDEXED BY roms_chd_size JOIN titles t ON t.id = r.title_id
+               WHERE r.size = ?2 AND t.platform_id = ?1 AND t.source = 'dat'
+                 AND r.retired = 0 AND t.retired = 0 AND lower(r.name) LIKE '%.chd')",
+        )?
+        .query_row(params![platform_id.0, size], |r| r.get(0))?)
+}
+
+/// One file the Platforms card lists as not identified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnidentifiedFile {
+    /// Relative to `games/`.
+    pub rel_path: String,
+    /// Size in bytes on disk.
+    pub size: i64,
+    /// The reason code; see `docs/VERIFICATION.md` "CHD images".
+    pub reason: String,
+}
+
+/// A page of the `unidentified` files of `platform_id` by `rel_path`, and their total.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let psx = mistarr_core::PlatformId("psx".into());
+/// let (items, total) = mistarr_server::db::files::unidentified(&conn, &psx, 0, 50).unwrap();
+/// assert!(items.is_empty() && total == 0);
+/// ```
+pub fn unidentified(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    offset: u32,
+    limit: u32,
+) -> Result<(Vec<UnidentifiedFile>, u64)> {
+    let items = conn
+        .prepare_cached(
+            "SELECT rel_path, size, COALESCE(reason, 'corrupt') FROM files
+             WHERE state = 'unidentified' AND platform_id = ?1
+             ORDER BY rel_path LIMIT ?2 OFFSET ?3",
+        )?
+        .query_map(params![platform_id.0, limit, offset], |r| {
+            Ok(UnidentifiedFile {
+                rel_path: r.get(0)?,
+                size: r.get(1)?,
+                reason: r.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let total: i64 = conn
+        .prepare_cached(
+            "SELECT COUNT(*) FROM files WHERE state = 'unidentified' AND platform_id = ?1",
+        )?
+        .query_row([&platform_id.0], |r| r.get(0))?;
+    Ok((items, u64::try_from(total).unwrap_or(0)))
 }
 
 /// Up to `limit` files on `platform_id` matched to a rom that is retired or whose title is.
@@ -777,8 +1036,7 @@ pub fn count_roms_for_title(conn: &Connection, title_id: i64) -> Result<i64> {
     )?)
 }
 
-/// Verified/misnamed/unverified/bad counts for one platform, for the
-/// platforms card.
+/// File counts by state for one platform, for the platforms card.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
 pub struct StateCounts {
     /// Rows `verified`.
@@ -791,6 +1049,8 @@ pub struct StateCounts {
     pub bad: u64,
     /// Rows `pending`.
     pub pending: u64,
+    /// Rows `unidentified`.
+    pub unidentified: u64,
 }
 
 /// File state counts for a single platform.
@@ -813,6 +1073,7 @@ pub fn state_counts(conn: &Connection, platform_id: &PlatformId) -> Result<State
             Some(FileState::Misnamed) => counts.misnamed = n,
             Some(FileState::Unverified) => counts.unverified = n,
             Some(FileState::Bad) => counts.bad = n,
+            Some(FileState::Unidentified) => counts.unidentified = n,
             Some(FileState::Pending) | None => counts.pending = n,
         }
     }
@@ -1640,5 +1901,159 @@ mod tests {
             assert_eq!(FileState::parse(s).map(FileState::as_str), Some(s));
         }
         assert_eq!(FileId(4).to_string(), "4");
+    }
+
+    #[test]
+    fn unidentified_rows_keep_their_state_and_reason() {
+        let c = conn();
+        let pid = PlatformId("psx".into());
+        assert_eq!(
+            FileState::parse("unidentified"),
+            Some(FileState::Unidentified)
+        );
+        for (rel, reason) in [
+            ("PSX/B/b.chd", "off"),
+            ("PSX/A/a.chd", "cooked"),
+            ("PSX/C/c.chd", "pending"),
+        ] {
+            let row = NewFile {
+                rel_path: rel.into(),
+                size: 5,
+                mtime: 1,
+                crc32: None,
+                md5: None,
+                sha1: None,
+                header_rule: Some("chd".into()),
+                rom_id: None,
+                state: FileState::Unidentified,
+                reason: Some(reason.into()),
+            };
+            upsert_row(&c, &pid, &row, 1).expect("upsert");
+        }
+        let row = find_by_path(&c, &pid, "PSX/A/a.chd")
+            .expect("find")
+            .expect("row");
+        assert_eq!(
+            (row.state, row.reason.as_deref()),
+            (FileState::Unidentified, Some("cooked"))
+        );
+        let h = Hashed::default();
+        upsert(
+            &c,
+            &pid,
+            "PSX/A/a.chd",
+            5,
+            1,
+            &h,
+            None,
+            FileState::Unverified,
+            2,
+        )
+        .expect("upsert");
+        let row = find_by_path(&c, &pid, "PSX/A/a.chd")
+            .expect("find")
+            .expect("row");
+        assert_eq!(row.reason, None, "a plain upsert clears the reason");
+
+        let (page, total) = unidentified(&c, &pid, 0, 1).expect("page");
+        assert_eq!(total, 2);
+        assert_eq!(page[0].rel_path, "PSX/B/b.chd");
+        assert_eq!(page[0].reason, "off");
+        let (page, _) = unidentified(&c, &pid, 1, 5).expect("page");
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].rel_path, "PSX/C/c.chd");
+        assert_eq!(state_counts(&c, &pid).expect("counts").unidentified, 2);
+    }
+
+    #[test]
+    fn roms_matching_returns_every_live_rom_of_the_first_tier() {
+        let c = conn();
+        let pid = PlatformId("psx".into());
+        let h = hashes(2352);
+        let a = seed_title_fixture(&c, &pid, "Disc A").expect("title");
+        let b = seed_title_fixture(&c, &pid, "Disc B").expect("title");
+        let ra = seed_rom_for_title_fixture(&c, a, "a.bin", &h, "good").expect("rom");
+        let rb = seed_rom_for_title_fixture(&c, b, "b.bin", &h, "good").expect("rom");
+        let got: Vec<i64> = roms_matching(&c, &pid, &h)
+            .expect("match")
+            .iter()
+            .map(|m| m.rom_id)
+            .collect();
+        assert_eq!(got, [ra, rb]);
+        c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [rb])
+            .expect("retire");
+        let got: Vec<i64> = roms_matching(&c, &pid, &h)
+            .expect("match")
+            .iter()
+            .map(|m| m.rom_id)
+            .collect();
+        assert_eq!(got, [ra], "retired roms never match");
+        let crc_only = HashSet {
+            sha1: "f".repeat(40),
+            md5: "e".repeat(32),
+            ..h.clone()
+        };
+        assert!(
+            roms_matching(&c, &pid, &crc_only)
+                .expect("match")
+                .is_empty(),
+            "sha1 roms need sha1"
+        );
+        assert!(roms_matching(&c, &PlatformId("saturn".into()), &h)
+            .expect("match")
+            .is_empty());
+
+        let roms: Vec<String> = disc_roms(&c, a)
+            .expect("roms")
+            .into_iter()
+            .map(|r| r.name)
+            .collect();
+        assert_eq!(roms, ["a.bin"]);
+        assert!(
+            disc_roms(&c, b).expect("roms").is_empty(),
+            "a retired rom is gone"
+        );
+    }
+
+    #[test]
+    fn chd_rom_sized_finds_whole_file_chd_roms_by_size() {
+        let c = conn();
+        let pid = PlatformId("psx".into());
+        let t = seed_title_fixture(&c, &pid, "Disc").expect("title");
+        seed_rom_for_title_fixture(&c, t, "Disc.CHD", &hashes(4096), "good").expect("rom");
+        seed_rom_for_title_fixture(&c, t, "Disc.bin", &hashes(8192), "good").expect("rom");
+        assert!(chd_rom_sized(&c, &pid, 4096).expect("sized"));
+        assert!(!chd_rom_sized(&c, &pid, 8192).expect("a bin is not a chd"));
+        assert!(!chd_rom_sized(&c, &PlatformId("saturn".into()), 4096).expect("other platform"));
+    }
+
+    #[test]
+    fn delete_ids_clears_the_import_log_first() {
+        let c = conn();
+        let pid = PlatformId("psx".into());
+        let h = Hashed::default();
+        let id = upsert(
+            &c,
+            &pid,
+            "PSX/G/g.chd",
+            1,
+            1,
+            &h,
+            None,
+            FileState::Unverified,
+            1,
+        )
+        .expect("upsert");
+        c.execute(
+            "INSERT INTO import_log (at, file_id, action, detail) VALUES (0, ?1, 'placed', '{}')",
+            [id.0],
+        )
+        .expect("log");
+        c.execute_batch("PRAGMA foreign_keys = ON").expect("fk");
+        assert_eq!(delete_ids(&c, &[id.0, 999]).expect("delete"), 1);
+        let logged: Option<i64> = c
+            .query_row("SELECT file_id FROM import_log", [], |r| r.get(0))
+            .expect("log");
+        assert_eq!(logged, None);
     }
 }
