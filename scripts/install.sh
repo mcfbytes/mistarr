@@ -407,7 +407,7 @@ install_release() {
         exit 1
     fi
     # A swap cut short. Beside the database, .old is replaced and .new unfinished;
-    # without it, .new may be the only copy, which the server checks before using.
+    # without it, .new may be the only copy, which only the server can check.
     if [ -f "$DB" ]; then
         if [ -f "$DB.old" ]; then
             rm -f "$DB.old"
@@ -418,7 +418,11 @@ install_release() {
             echo "removed the unfinished database copy $DB.new"
         fi
     elif [ -f "$DB.new" ]; then
-        echo "left $DB.new for mistarr to check and put in place when it starts"
+        echo "$DB is missing beside $DB.new, an interrupted database swap" >&2
+        echo "start the installed mistarr once to finish the swap, then run the installer again" >&2
+        echo "aborting the install; nothing was changed" >&2
+        restart_current
+        exit 1
     elif [ -f "$DB.old" ]; then
         mv -f "$DB.old" "$DB"
         echo "put the database back from $DB.old"

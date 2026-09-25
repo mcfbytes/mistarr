@@ -742,11 +742,12 @@ marker is present or was at the start:
 | the second rename | `.old`, the marker | `.old` renamed back; the import or migration runs again |
 | after the second rename | `mistarr.db` (new), `.old`, the marker | `.old` and the marker removed |
 | after the removals | `mistarr.db` (new) | opened |
-| a rename of the start's own recovery | the marker alone, or nothing | the start refuses, naming the database; the card needs checking, and `mistarr.db.prev` holds the last upgrade's copy |
+| a rename of the start's own recovery | the marker alone | the start refuses, naming the database; the card needs checking, and `mistarr.db.prev` holds the last upgrade's copy |
 
-A `.new` with no `mistarr.db` beside it is never removed: a `.new` that
-fails the check stops the start with a message naming it, to be moved aside
-or kept for recovery. The old WAL is removed before the renames because it
+A `.new` with no `mistarr.db` beside it is never removed. It is taken only
+beside `.old` or the marker, since without either it can only be a stale
+copy; one that stands alone or fails the check stops the start with a
+message naming it, to be moved aside or kept for recovery. The old WAL is removed before the renames because it
 is empty and nothing writes it after the checkpoint, so removing it loses
 nothing and the new file never meets frames written for the old one.
 `db::ram::tests::a_start_after_a_crash_at_any_step_of_the_swap_opens_one_whole_database`

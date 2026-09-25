@@ -887,21 +887,26 @@ swap_root() {
     write_launcher_stub "$r/Scripts/mistarr.sh"
     echo "$r"
 }
-r=$(swap_root old-new)
-echo "OLD17" > "$r/mistarr/mistarr.db.old"
-echo "NEW17" > "$r/mistarr/mistarr.db.new"
-out=$(run_install "$r" "$no_tty" v1.1.0)
-expect_contains "$out" "left $r/mistarr/mistarr.db.new" "a copy beside .old is left for the server"
-expect "$(cat "$r/mistarr/mistarr.db.new")" "NEW17" "the copy is kept"
-expect "$(cat "$r/mistarr/mistarr.db.old")" "OLD17" "the old file is kept"
-expect_absent "$r/mistarr/mistarr.db" "no database is made up"
-
-r=$(swap_root new)
-echo "NEW17" > "$r/mistarr/mistarr.db.new"
-out=$(run_install "$r" "$no_tty" v1.1.0)
-expect_contains "$out" "left $r/mistarr/mistarr.db.new" "a lone copy is left for the server"
-expect "$(cat "$r/mistarr/mistarr.db.new")" "NEW17" "a lone copy is never removed"
-expect_absent "$r/mistarr/mistarr.db" "no database is made up beside a lone copy"
+# A copy with no database beside it aborts the install and keeps the saved set.
+for kind in old-new new; do
+    r=$(swap_root "$kind")
+    if [ "$kind" = old-new ]; then
+        echo "OLD17" > "$r/mistarr/mistarr.db.old"
+    fi
+    echo "NEW17" > "$r/mistarr/mistarr.db.new"
+    echo "PREV17" > "$r/mistarr/mistarr.db.prev"
+    echo "PREV17-WAL" > "$r/mistarr/mistarr.db.prev-wal"
+    : > "$r/mistarr/mistarr.prev.ok"
+    out=$(run_install "$r" "$no_tty" v1.1.0 2>&1)
+    expect_contains "$out" "interrupted database swap" "$kind: the swap is named"
+    expect_contains "$out" "start the installed mistarr once" "$kind: the way out is given"
+    expect "$(cat "$r/mistarr/mistarr.db.new")" "NEW17" "$kind: the copy is kept"
+    expect_absent "$r/mistarr/mistarr.db" "$kind: no database is made up"
+    expect "$(cat "$r/mistarr/mistarr.db.prev")" "PREV17" "$kind: the saved database is kept"
+    expect "$(cat "$r/mistarr/mistarr.db.prev-wal")" "PREV17-WAL" "$kind: its WAL is kept"
+    expect "$(test -f "$r/mistarr/mistarr.prev.ok" && echo kept)" kept "$kind: the saved set keeps its marker"
+    expect "$(grep -c "OLD-BINARY-17-$kind" "$r/mistarr/mistarr")" 1 "$kind: the binary is not replaced"
+done
 
 r=$(swap_root old)
 echo "OLD17" > "$r/mistarr/mistarr.db.old"

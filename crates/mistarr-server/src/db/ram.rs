@@ -829,17 +829,19 @@ pub fn clean_stale(db: &Path, dir: &Path) -> Result<usize> {
 }
 
 /// The step of [`super::install_file`] a crash stopped at, from the files present.
-/// Beside `db`, `.old` is removed. Without `db`, a `.new` that passes SQLite's
-/// `quick_check` is renamed in and `.old` removed, since `.new` is synced before the
-/// swap begins and a rename on exFAT may leave neither of its names readable; else
-/// `.old` is renamed back. The `.swap` marker goes once `db` is back. Returns how many
-/// files it removed.
+/// Beside `db`, `.old` is removed. Without `db`, a `.new` beside `.old` or the `.swap`
+/// marker that passes SQLite's `quick_check` is renamed in and `.old` removed, since
+/// `.new` is synced before the swap begins and a rename on exFAT may leave neither of
+/// its names readable; else `.old` is renamed back. The marker goes once `db` is back.
+/// Returns how many files it removed.
 ///
 /// # Errors
 ///
-/// [`Error::Io`] naming `.new` when it fails the check, or a rename or removal failing.
+/// [`Error::Io`] naming `.new` when it fails the check or stands alone without the
+/// marker, which only a stale copy does, or a rename or removal failing.
 fn finish_swap(db: &Path) -> Result<usize> {
     let (old, new) = (sibling(db, OLD_SUFFIX), sibling(db, NEW_SUFFIX));
+    let marker = sibling(db, SWAP_SUFFIX);
     let mut removed = 0;
     if db.exists() {
         if old.exists() {
@@ -848,6 +850,15 @@ fn finish_swap(db: &Path) -> Result<usize> {
             removed += 1;
         }
     } else if new.exists() {
+        if !old.exists() && !marker.exists() {
+            return Err(io::Error::other(format!(
+                "{} is missing and {} stands alone without a swap under way, so it is a \
+                 stale copy; move it aside to start afresh, or restore mistarr.db.prev",
+                db.display(),
+                new.display()
+            ))
+            .into());
+        }
         check_whole(&new)?;
         fs::rename(&new, db)?;
         super::sync_parent(db);
@@ -861,7 +872,6 @@ fn finish_swap(db: &Path) -> Result<usize> {
         tracing::warn!("put the old database back; the swap had lost its new file");
     }
     super::sync_parent(db);
-    let marker = sibling(db, SWAP_SUFFIX);
     if db.exists() && marker.exists() {
         fs::remove_file(&marker)?;
         super::sync_parent(db);

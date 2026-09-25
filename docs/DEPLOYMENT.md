@@ -170,9 +170,10 @@ its `-wal`, or the `mistarr.db.new` or `mistarr.db.old` of a DAT import's
 swap, the script names the process, restarts the installed version and exits
 without changing anything. Beside `mistarr.db`, a `mistarr.db.old` left by
 a swap and a `mistarr.db.new` left by an import that was stopped are then
-removed, never saved. Without `mistarr.db`, a `mistarr.db.new` is left for
-the server, which checks it and puts it in place when it starts, and a lone
-`mistarr.db.old` is renamed back. It then checks free space in the data
+removed, never saved. Without `mistarr.db`, a lone `mistarr.db.old` is
+renamed back, and a `mistarr.db.new` stops the install with nothing
+changed, the saved set included: start the installed mistarr once, which
+checks the copy and puts it in place, then run the installer again. It then checks free space in the data
 directory, read with `stat -f` so that only that filesystem is queried; where
 `stat -f` is missing it falls back to `df`, which on some BusyBox builds
 queries every mount and can stall on an unreachable network mount. It copies

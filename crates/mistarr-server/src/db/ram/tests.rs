@@ -519,7 +519,7 @@ fn a_start_after_a_crash_at_any_step_of_the_swap_opens_one_whole_database() {
         (Some("old"), Some("new"), None, true, Some("old")),
         (None, Some("new"), Some("old"), true, Some("new")),
         (None, Some("new"), None, true, Some("new")),
-        (None, Some("new"), None, false, Some("new")),
+        (None, Some("new"), None, false, None),
         (Some("new"), None, Some("old"), true, Some("new")),
         (Some("new"), None, None, true, Some("new")),
         (Some("new"), None, None, false, Some("new")),
