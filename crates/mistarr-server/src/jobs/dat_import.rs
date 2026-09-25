@@ -5,9 +5,9 @@ use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use mistarr_core::dat::{
@@ -30,6 +30,7 @@ use crate::db::dat_stage::{self, StagedGame, StagedRom};
 use crate::db::dats::{self, DatVersionId, NewVersion};
 use crate::db::files::{self, FileId, FileRow, FileState};
 use crate::db::jobs::{JobId, JobState};
+use crate::db::ram::{self, Ram};
 use crate::db::titles;
 use crate::db::Db;
 use crate::error::{Error, Result};
@@ -60,6 +61,9 @@ const STAGE_CHUNK: usize = 2000;
 
 /// How long each of those pauses lasts.
 const YIELD_FOR: std::time::Duration = std::time::Duration::from_millis(20);
+
+/// Longest pause between two chunks of the copy into RAM or back while a core runs.
+const YIELD_AT_MOST: Duration = Duration::from_secs(1);
 
 /// The 1G1R preferences of `[prefs]`; hide names that are not selection flags are ignored.
 ///
@@ -186,24 +190,56 @@ struct Request {
     stop: watch::Receiver<bool>,
     gate: watch::Receiver<GateState>,
     meter: Option<Meter>,
+    /// Fail with [`Error::Paused`] on a manual pause instead of waiting it out, for an
+    /// import that holds the writer meanwhile.
+    abort_on_hold: bool,
+    /// For an import in RAM, the `MemAvailable` bytes below which it gives up its copy.
+    floor: Option<u64>,
+}
+
+/// What the members of a file did, and whether their platforms' recompute already ran.
+struct Imported {
+    outcomes: Vec<Outcome>,
+    recomputed: bool,
 }
 
 /// Bytes an index pass must read before it is shown; a Logiqx DAT leaves that
 /// pass after its header, so only a DB export's real index pass shows.
 const INDEX_SHOWN_AFTER: u64 = 64 * 1024;
 
-/// Live progress of one member's import: `{ file, members, done, games, phase,
-/// bytes_read, bytes_total }`, sent through the job's [`Reporter`] without the database.
+/// Live progress of a file's import: `{ file, members, done, games, phase,
+/// bytes_read, bytes_total }`, and `reason` when it runs on the card, sent through the
+/// job's [`Reporter`] without the database.
 struct Meter {
     reporter: Reporter,
     file: String,
     members: usize,
-    done: usize,
-    games_before: u64,
+    done: AtomicUsize,
+    games_before: AtomicU64,
     games: AtomicU64,
+    reason: Option<String>,
 }
 
 impl Meter {
+    fn new(reporter: Reporter, file: &str, members: usize, reason: Option<&str>) -> Self {
+        Self {
+            reporter,
+            file: file.to_owned(),
+            members,
+            done: AtomicUsize::new(0),
+            games_before: AtomicU64::new(0),
+            games: AtomicU64::new(0),
+            reason: reason.map(str::to_owned),
+        }
+    }
+
+    /// Starts the member after `done` others, which loaded `games_before` games.
+    fn at_member(&self, done: usize, games_before: u64) {
+        self.done.store(done, Ordering::Relaxed);
+        self.games_before.store(games_before, Ordering::Relaxed);
+        self.games.store(0, Ordering::Relaxed);
+    }
+
     /// Reports `read` of `total` bytes in a reading `phase`; the index pass reports no share.
     fn bytes(&self, phase: &str, read: u64, total: u64) {
         if phase == "indexing" {
@@ -223,17 +259,20 @@ impl Meter {
     }
 
     fn value(&self, phase: &str, bytes: Option<(u64, u64)>) -> Value {
-        let games = self.games_before + self.games.load(Ordering::Relaxed);
+        let games = self.games_before.load(Ordering::Relaxed) + self.games.load(Ordering::Relaxed);
         let mut v = json!({
             "file": self.file,
             "members": self.members,
-            "done": self.done,
+            "done": self.done.load(Ordering::Relaxed),
             "games": games,
             "phase": phase,
         });
         if let Some((read, total)) = bytes {
             v["bytes_read"] = json!(read.min(total));
             v["bytes_total"] = json!(total);
+        }
+        if let Some(r) = &self.reason {
+            v["reason"] = json!(r);
         }
         v
     }
@@ -282,7 +321,10 @@ impl Job for DatImport {
         let dats_dir = self.path.parent().unwrap_or_else(|| Path::new("."));
         let target = unique_path(&dats_dir.join(LOADED_DIR), &file);
         let stored = file_name(&target);
-        let outcomes = self.import_members(ctx, &members, &stored).await?;
+        let Imported {
+            outcomes,
+            recomputed,
+        } = self.import_members(ctx, &members, &stored).await?;
         let mut loaded = Vec::new();
         let mut reasons = Vec::new();
         for o in outcomes {
@@ -311,7 +353,7 @@ impl Job for DatImport {
             );
             publish_loaded(&ctx.app, l, &file);
         }
-        enqueue_follow_up_work(&ctx.app, &loaded).await;
+        enqueue_follow_up_work(&ctx.app, &loaded, recomputed).await;
         Ok(())
     }
 }
@@ -332,11 +374,13 @@ impl DatImport {
             Err(reason) => return fail(reason),
         };
         let mut reasons = Vec::new();
-        for outcome in self.import_members(ctx, &members, file).await? {
+        let imported = self.import_members(ctx, &members, file).await?;
+        for outcome in imported.outcomes {
             match outcome {
                 Outcome::Loaded(l) => {
                     publish_loaded(&ctx.app, &l, file);
-                    enqueue_follow_up_work(&ctx.app, std::slice::from_ref(&l)).await;
+                    let loaded = std::slice::from_ref(&l);
+                    enqueue_follow_up_work(&ctx.app, loaded, imported.recomputed).await;
                     return Ok(());
                 }
                 Outcome::Rejected(r) => reasons.push(r),
@@ -349,34 +393,132 @@ impl DatImport {
         fail(reasons.join("\n"))
     }
 
-    /// Imports every member on a blocking thread, checkpointing between them.
+    /// Imports every member on a copy of the database in RAM, with their platforms'
+    /// recompute, and swaps the copy in; in place, member by member, when memory or room
+    /// is short. A manual pause drops the copy, waits, and starts again.
     async fn import_members(
         &self,
         ctx: &JobContext,
         members: &[Member],
         source_file: &str,
+    ) -> Result<Imported> {
+        let reason = loop {
+            match self.import_in_ram(ctx, members, source_file).await {
+                Ok(Ram::Done(outcomes, report)) => {
+                    log_report(source_file, &report);
+                    return Ok(Imported {
+                        outcomes,
+                        recomputed: true,
+                    });
+                }
+                Ok(Ram::Fallback(why)) => {
+                    let reason = why.summary;
+                    tracing::info!(
+                        file = source_file,
+                        reason,
+                        detail = why.detail,
+                        "DAT imported in place"
+                    );
+                    ctx.progress(json!({
+                        "file": source_file,
+                        "members": members.len(),
+                        "phase": IN_PLACE,
+                        "reason": reason,
+                    }))
+                    .await?;
+                    break reason;
+                }
+                Err(Error::Paused) => ctx.checkpoint().await?,
+                Err(e) => return Err(e),
+            }
+        };
+        Ok(Imported {
+            outcomes: self
+                .import_in_place(ctx, members, source_file, reason)
+                .await?,
+            recomputed: false,
+        })
+    }
+
+    /// The request for one member of this file; `floor` is set for an import in RAM.
+    fn request(
+        &self,
+        ctx: &JobContext,
+        source_file: &str,
+        floor: Option<u64>,
+        meter: Option<Meter>,
+    ) -> Request {
+        Request {
+            source_file: source_file.to_owned(),
+            file_stem: stem(&self.path),
+            bind: self.bind.clone(),
+            prefs: prefs(&ctx.app.config().prefs),
+            now: crate::unix_now(),
+            stop: ctx.app.shutdown_signal(),
+            gate: ctx.app.gate.subscribe(),
+            meter,
+            abort_on_hold: floor.is_some(),
+            floor,
+        }
+    }
+
+    /// Holds the writer and runs every member, then the recompute of each platform they
+    /// loaded into, on a copy in RAM through [`ram::run`].
+    async fn import_in_ram(
+        &self,
+        ctx: &JobContext,
+        members: &[Member],
+        source_file: &str,
+    ) -> Result<Ram<Vec<Outcome>>> {
+        let memory = ctx.app.config().memory;
+        let floor = memory.import_floor_mib.saturating_mul(1024 * 1024);
+        let plan = ram::Plan {
+            dir: memory.import_dir,
+            floor,
+            job: ctx.id.0,
+            input: members_size(&self.path, members),
+        };
+        let meter = Meter::new(ctx.reporter(), source_file, members.len(), None);
+        let req = self.request(ctx, source_file, Some(floor), Some(meter));
+        let mut watch = RamWatch {
+            reporter: ctx.reporter(),
+            id: ctx.id,
+            file: source_file.to_owned(),
+            members: members.len(),
+            stop: ctx.app.shutdown_signal(),
+            gate: ctx.app.gate.subscribe(),
+            chunk_started: Instant::now(),
+        };
+        let path = self.path.clone();
+        let members = members.to_vec();
+        ctx.app
+            .db
+            .hold_writer(crate::threads::label::DAT_IMPORT, move |held| {
+                let (id, file, count) = (watch.id, watch.file.clone(), watch.members);
+                let mut store = |db: &Db, done, games| store(db, id, &file, count, done, games);
+                ram::run(held, &plan, &mut watch, |db| {
+                    import_all(db, &path, &members, &req, &mut store)
+                })
+            })
+            .await
+    }
+
+    /// Imports every member in place on a blocking thread, checkpointing between them.
+    /// `reason` says why it runs in place, and goes into every progress it stores.
+    async fn import_in_place(
+        &self,
+        ctx: &JobContext,
+        members: &[Member],
+        source_file: &str,
+        reason: &str,
     ) -> Result<Vec<Outcome>> {
         let mut outcomes = Vec::with_capacity(members.len());
         let mut games = 0;
         for (done, &member) in members.iter().enumerate() {
             ctx.checkpoint().await?;
-            let req = Request {
-                source_file: source_file.to_owned(),
-                file_stem: stem(&self.path),
-                bind: self.bind.clone(),
-                prefs: prefs(&ctx.app.config().prefs),
-                now: crate::unix_now(),
-                stop: ctx.app.shutdown_signal(),
-                gate: ctx.app.gate.subscribe(),
-                meter: Some(Meter {
-                    reporter: ctx.reporter(),
-                    file: source_file.to_owned(),
-                    members: members.len(),
-                    done,
-                    games_before: games,
-                    games: AtomicU64::new(0),
-                }),
-            };
+            let meter = Meter::new(ctx.reporter(), source_file, members.len(), Some(reason));
+            meter.at_member(done, games);
+            let req = self.request(ctx, source_file, None, Some(meter));
             let path = self.path.clone();
             let db = ctx.app.db.clone();
             let outcome = crate::threads::blocking(crate::threads::label::DAT_IMPORT, move || {
@@ -393,11 +535,181 @@ impl DatImport {
                 "members": members.len(),
                 "done": done + 1,
                 "games": games,
+                "phase": IN_PLACE,
+                "reason": reason,
             }))
             .await?;
         }
         Ok(outcomes)
     }
+}
+
+/// `phase` of a DAT import that runs on the card.
+const IN_PLACE: &str = "importing in place";
+
+/// Imports `members` of `path` into `db`, the copy in RAM, then recomputes each platform
+/// a member loaded into, as the queued recompute would; asks for the copy to be written
+/// back when any member loaded.
+fn import_all(
+    db: &Db,
+    path: &Path,
+    members: &[Member],
+    req: &Request,
+    progress: &mut dyn FnMut(&Db, usize, u64) -> Result<()>,
+) -> Result<(Vec<Outcome>, bool)> {
+    let mut outcomes = Vec::with_capacity(members.len());
+    let mut games = 0;
+    for (done, &member) in members.iter().enumerate() {
+        check(req)?;
+        // The first member follows the check that allowed the copy.
+        if done > 0 {
+            room(req)?;
+        }
+        if let Some(m) = &req.meter {
+            m.at_member(done, games);
+        }
+        let outcome = import_from(db, path, member, req)?;
+        if let Outcome::Loaded(l) = &outcome {
+            games += l.games;
+        }
+        outcomes.push(outcome);
+        progress(db, done + 1, games)?;
+    }
+    let mut platforms: Vec<&PlatformId> = Vec::new();
+    for o in &outcomes {
+        if let Outcome::Loaded(Loaded {
+            platform: Some(p), ..
+        }) = o
+        {
+            if !platforms.contains(&p) {
+                platforms.push(p);
+            }
+        }
+    }
+    let report = |pass: Pass, tally: &Tally| {
+        if let Some(m) = &req.meter {
+            m.reporter.report(pass.label(), || {
+                let mut v = m.value(pass.label(), None);
+                v["checked"] = json!(tally.checked);
+                v["matched"] = json!(tally.matched);
+                v
+            });
+        }
+    };
+    for p in platforms {
+        recompute_blocking(
+            db,
+            p,
+            &req.prefs,
+            &|| check(req).and_then(|()| room(req)),
+            &report,
+        )?;
+    }
+    let loaded = outcomes.iter().any(|o| matches!(o, Outcome::Loaded(_)));
+    Ok((outcomes, loaded))
+}
+
+/// [`Error::Cancelled`] on shutdown, [`Error::Paused`] while a pause holds the lane.
+fn check(req: &Request) -> Result<()> {
+    if *req.stop.borrow() {
+        return Err(Error::Cancelled);
+    }
+    if req.gate.borrow().hold(Lane::Background).is_some() {
+        return Err(Error::Paused);
+    }
+    Ok(())
+}
+
+/// [`Error::NoRoom`] when memory fell below the floor of a request in RAM.
+fn room(req: &Request) -> Result<()> {
+    req.floor.map_or(Ok(()), ram::memory_left)
+}
+
+/// Uncompressed bytes of `members` of `path`, 0 for those that cannot be read.
+fn members_size(path: &Path, members: &[Member]) -> u64 {
+    let Ok(file) = File::open(path) else {
+        return 0;
+    };
+    if members.iter().all(|m| matches!(m, Member::Plain)) {
+        return file.metadata().map_or(0, |m| m.len());
+    }
+    let Ok(mut archive) = zip::ZipArchive::new(BufReader::new(file)) else {
+        return 0;
+    };
+    members
+        .iter()
+        .filter_map(|m| match m {
+            Member::Zip(i) => archive.by_index_raw(*i).ok().map(|e| e.size()),
+            Member::Plain => None,
+        })
+        .sum()
+}
+
+/// Reports an import in RAM's copy and write-back as live progress, stops it between
+/// their steps on shutdown or, while copying in, on a pause, and while a core runs
+/// rests as long as the last chunk took.
+struct RamWatch {
+    reporter: Reporter,
+    id: JobId,
+    file: String,
+    members: usize,
+    stop: watch::Receiver<bool>,
+    gate: watch::Receiver<GateState>,
+    chunk_started: Instant,
+}
+
+impl ram::Watch for RamWatch {
+    fn phase(&mut self, phase: ram::Phase) {
+        self.chunk_started = Instant::now();
+        // The load reports its own phases through the meter.
+        if phase == ram::Phase::Importing {
+            return;
+        }
+        let body = json!({ "file": self.file, "members": self.members, "phase": phase.label() });
+        self.reporter.report(phase.label(), || body);
+    }
+
+    fn between(&mut self, phase: ram::Phase) -> Result<()> {
+        if *self.stop.borrow() {
+            return Err(Error::Cancelled);
+        }
+        if self.gate.borrow().core_running() {
+            // At most half the time busy while a core runs.
+            let took = self.chunk_started.elapsed();
+            std::thread::sleep(took.clamp(YIELD_FOR, YIELD_AT_MOST));
+        }
+        self.chunk_started = Instant::now();
+        // The write-back lasts seconds and a pause lets it finish.
+        if phase != ram::Phase::Writing && self.gate.borrow().hold(Lane::Background).is_some() {
+            return Err(Error::Paused);
+        }
+        Ok(())
+    }
+}
+
+/// Stores the members `done` on the copy's row of job `id`, so the swap keeps the last.
+fn store(db: &Db, id: JobId, file: &str, members: usize, done: usize, games: u64) -> Result<()> {
+    let body = json!({
+        "file": file,
+        "members": members,
+        "done": done,
+        "games": games,
+        "phase": ram::Phase::Importing.label(),
+    });
+    let now = crate::unix_now();
+    db.write_blocking(|c| crate::db::jobs::set_progress(c, id, &body, now))
+}
+
+fn log_report(file: &str, r: &ram::Report) {
+    tracing::info!(
+        file,
+        mib = r.bytes.div_ceil(1024 * 1024),
+        card_writes = r.card_writes,
+        copy_ms = r.copy_in.as_millis(),
+        import_ms = r.work.as_millis(),
+        write_ms = r.write_back.as_millis(),
+        "DAT imported in RAM"
+    );
 }
 
 fn file_name(path: &Path) -> String {
@@ -465,7 +777,7 @@ fn import_from(db: &Db, path: &Path, member: Member, req: &Request) -> Result<Ou
                 tracing::warn!(error = %c, "cannot empty the DAT stage");
             }
             let tmp = std::env::var_os(crate::db::SQLITE_TMPDIR).map(PathBuf::from);
-            Err(Error::Job(full_message(
+            Err(Error::NoRoom(full_message(
                 tmp.as_deref(),
                 db.path(),
                 free_bytes,
@@ -739,6 +1051,8 @@ fn import_stream<R: BufRead>(
     if !chunk.is_empty() {
         db.write_blocking(|c| append_chunk(c, &chunk))?;
     }
+    // Applying the stage grows the copy and SQLite's temporary files at once.
+    room(req)?;
     db.write_bulk_blocking(|c| {
         let tx = c.transaction()?;
         let plan = dats::upsert_version(&tx, &new)?;
@@ -775,8 +1089,11 @@ fn import_stream<R: BufRead>(
 /// Stops on shutdown, sleeps briefly while a core runs and waits out a
 /// manual pause, which holds the background lane; checked every few games.
 fn pace(req: &Request, games: u64) -> Result<()> {
-    if games.is_multiple_of(CANCEL_EVERY) && *req.stop.borrow() {
-        return Err(Error::Cancelled);
+    if games.is_multiple_of(CANCEL_EVERY) {
+        if *req.stop.borrow() {
+            return Err(Error::Cancelled);
+        }
+        room(req)?;
     }
     if !games.is_multiple_of(YIELD_EVERY) {
         return Ok(());
@@ -787,6 +1104,9 @@ fn pace(req: &Request, games: u64) -> Result<()> {
     while req.gate.borrow().hold(Lane::Background).is_some() {
         if *req.stop.borrow() {
             return Err(Error::Cancelled);
+        }
+        if req.abort_on_hold {
+            return Err(Error::Paused);
         }
         std::thread::sleep(PAUSED_POLL);
     }
@@ -846,12 +1166,12 @@ fn staged(game: &DatGame) -> StagedGame {
 }
 
 /// Queues the recompute job, which matches files of retired roms and unmatched files
-/// again from their stored hashes, and an automatic scan for each platform a DAT just
-/// loaded titles for,
+/// again from their stored hashes, or when the import already ran it, the re-map it ends
+/// with; and an automatic scan for each platform a DAT just loaded titles for,
 /// deduped so several DATs in one pack queue at most one each, binds waiting
 /// sources once for the whole pack, then checks whether the wizard just
 /// became complete.
-async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
+async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded], recomputed: bool) {
     let mut queued = HashSet::new();
     for l in loaded {
         let Some(platform) = &l.platform else {
@@ -860,8 +1180,10 @@ async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded]) {
         if !queued.insert(platform.clone()) {
             continue;
         }
-        // Files of retired roms and unmatched files are matched again in the background.
-        if let Err(e) = Scheduler::enqueue(app, Arc::new(Recompute::new(&platform.0))).await {
+        if recomputed {
+            super::remap::enqueue(app, Some(vec![platform.clone()])).await;
+        } else if let Err(e) = Scheduler::enqueue(app, Arc::new(Recompute::new(&platform.0))).await
+        {
             tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue the recompute");
         }
         if let Err(e) = scan::enqueue_if_games_dir_exists(app, platform).await {
@@ -1046,6 +1368,96 @@ fn stored_hashes(f: &FileRow) -> Option<mistarr_core::HashSet> {
     })
 }
 
+/// A step of a recompute: matching files of retired roms, matching unmatched files after
+/// an id, which arcade skips, and picking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pass {
+    Retired,
+    Unmatched(FileId),
+    Picking,
+    Done,
+}
+
+impl Pass {
+    /// The live progress phase of the pass.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Retired | Self::Unmatched(_) => "matching",
+            Self::Picking | Self::Done => "picking",
+        }
+    }
+}
+
+/// What a recompute's passes have done so far.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Tally {
+    checked: usize,
+    matched: usize,
+    picked: titles::Recomputed,
+}
+
+/// Runs one chunk of `pass` over `platform` in its own transaction, adding to `tally`,
+/// and returns the pass that follows.
+fn recompute_pass(
+    conn: &mut Connection,
+    platform: &PlatformId,
+    prefs: &Prefs,
+    pass: Pass,
+    tally: &mut Tally,
+) -> Result<Pass> {
+    let tx = conn.transaction()?;
+    let next = match pass {
+        Pass::Retired => {
+            let taken = rematch_chunk(&tx, platform)?;
+            tally.checked += taken;
+            if taken >= REMATCH_CHUNK as usize {
+                Pass::Retired
+            } else if scan::is_arcade(platform) {
+                // Arcade files are matched by the arcade catalogue's presence pass.
+                Pass::Picking
+            } else {
+                Pass::Unmatched(FileId(0))
+            }
+        }
+        Pass::Unmatched(after) => {
+            let chunk = match_unmatched_chunk(&tx, platform, after)?;
+            tally.checked += chunk.read;
+            tally.matched += chunk.matched;
+            if chunk.read < REMATCH_CHUNK as usize {
+                Pass::Picking
+            } else {
+                Pass::Unmatched(chunk.last)
+            }
+        }
+        Pass::Picking => {
+            tally.picked = titles::recompute_platform(&tx, &platform.0, prefs)?;
+            Pass::Done
+        }
+        Pass::Done => Pass::Done,
+    };
+    crate::db::commit(tx)?;
+    Ok(next)
+}
+
+/// [`Recompute`]'s passes over `platform` on the calling thread, with `check` and then
+/// `report` before each chunk; the caller queues the re-map.
+fn recompute_blocking(
+    db: &Db,
+    platform: &PlatformId,
+    prefs: &Prefs,
+    check: &dyn Fn() -> Result<()>,
+    report: &dyn Fn(Pass, &Tally),
+) -> Result<Tally> {
+    let mut tally = Tally::default();
+    let mut pass = Pass::Retired;
+    while pass != Pass::Done {
+        check()?;
+        report(pass, &tally);
+        pass = db.write_blocking(|c| recompute_pass(c, platform, prefs, pass, &mut tally))?;
+    }
+    Ok(tally)
+}
+
 /// Matches files of retired roms again, then, outside arcade, the platform's unmatched
 /// files; recomputes the 1G1R picks of one platform under the current preferences, then
 /// queues a re-map of its bound sources.
@@ -1098,68 +1510,27 @@ impl Job for Recompute {
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
         let reporter = ctx.reporter();
-        let mut checked = 0;
-        let mut matched = 0;
-        loop {
-            reporter.report("matching", || matching(checked, matched));
+        let prefs = Arc::new(prefs(&ctx.app.config().prefs));
+        let mut tally = Tally::default();
+        let mut pass = Pass::Retired;
+        while pass != Pass::Done {
+            reporter.report(pass.label(), || pass_progress(pass, &tally));
             ctx.checkpoint().await?;
-            let platform = self.platform.clone();
-            let taken = ctx
+            let (platform, prefs) = (self.platform.clone(), Arc::clone(&prefs));
+            (pass, tally) = ctx
                 .app
                 .db
                 .write(move |c| {
-                    let tx = c.transaction()?;
-                    let taken = rematch_chunk(&tx, &platform)?;
-                    crate::db::commit(tx)?;
-                    Ok(taken)
+                    let mut tally = tally;
+                    let next = recompute_pass(c, &platform, &prefs, pass, &mut tally)?;
+                    Ok((next, tally))
                 })
                 .await?;
-            checked += taken;
-            if taken < REMATCH_CHUNK as usize {
-                break;
-            }
         }
-        let mut after = FileId(0);
-        // Arcade files are matched by the arcade catalogue's presence pass.
-        while !scan::is_arcade(&self.platform) {
-            reporter.report("matching", || matching(checked, matched));
-            ctx.checkpoint().await?;
-            let platform = self.platform.clone();
-            let chunk = ctx
-                .app
-                .db
-                .write(move |c| {
-                    let tx = c.transaction()?;
-                    let chunk = match_unmatched_chunk(&tx, &platform, after)?;
-                    crate::db::commit(tx)?;
-                    Ok(chunk)
-                })
-                .await?;
-            matched += chunk.matched;
-            checked += chunk.read;
-            after = chunk.last;
-            if chunk.read < REMATCH_CHUNK as usize {
-                break;
-            }
-        }
-        ctx.checkpoint().await?;
-        reporter.report(
-            "picking",
-            || json!({ "phase": "picking", "matched": matched }),
-        );
-        let prefs = prefs(&ctx.app.config().prefs);
-        let platform = self.platform.0.clone();
-        let r = ctx
-            .app
-            .db
-            .write(move |c| {
-                let tx = c.transaction()?;
-                let r = titles::recompute_platform(&tx, &platform, &prefs)?;
-                crate::db::commit(tx)?;
-                Ok(r)
-            })
-            .await?;
-        ctx.progress(json!({ "groups": r.groups, "picks": r.picks, "matched": matched }))
+        let Tally {
+            matched, picked, ..
+        } = tally;
+        ctx.progress(json!({ "groups": picked.groups, "picks": picked.picks, "matched": matched }))
             .await?;
         // Groups are settled now; a re-map that ran earlier stored a stamp without them.
         super::remap::enqueue(&ctx.app, Some(vec![self.platform.clone()])).await;
@@ -1167,9 +1538,14 @@ impl Job for Recompute {
     }
 }
 
-/// A recompute's live progress while it matches stored hashes.
-fn matching(checked: usize, matched: usize) -> Value {
-    json!({ "phase": "matching", "checked": checked, "matched": matched })
+/// A recompute's live progress before `pass`.
+fn pass_progress(pass: Pass, tally: &Tally) -> Value {
+    match pass {
+        Pass::Retired | Pass::Unmatched(_) => {
+            json!({ "phase": "matching", "checked": tally.checked, "matched": tally.matched })
+        }
+        Pass::Picking | Pass::Done => json!({ "phase": "picking", "matched": tally.matched }),
+    }
 }
 
 /// Finds files in `dats/` that have stopped changing: mtime at least

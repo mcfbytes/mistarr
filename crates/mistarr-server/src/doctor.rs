@@ -192,10 +192,13 @@ pub fn groups_line(path: &Path) -> String {
 
 /// Opens the existing database at `path`, applying migrations, and recomputes
 /// `title_groups` and the search index in one transaction. Returns the number of groups.
+/// Holds the data directory's lock throughout, so it never writes under a running
+/// server, whose import in RAM would drop the write.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Io`] when no database exists at `path`, which it never creates;
+/// [`crate::Error::AlreadyRunning`] while a server holds the directory's lock;
 /// [`crate::Error::Db`] or [`crate::Error::Migration`] when it cannot be opened or written.
 pub fn rebuild_groups(path: &Path) -> crate::error::Result<usize> {
     if !path.is_file() {
@@ -205,6 +208,8 @@ pub fn rebuild_groups(path: &Path) -> crate::error::Result<usize> {
         )
         .into());
     }
+    let data = path.parent().unwrap_or_else(|| Path::new("."));
+    let _lock = crate::lock::InstanceLock::acquire(data)?;
     let db = crate::db::Db::open(path)?;
     db.write_blocking(|c| {
         let tx = c.transaction()?;
@@ -388,6 +393,14 @@ mod tests {
             groups_line(&path)
         );
         drop(db);
+        let server = crate::lock::InstanceLock::acquire(dir.path()).expect("lock");
+        let refused = rebuild_groups(&path);
+        assert!(
+            matches!(refused, Err(crate::Error::AlreadyRunning(_))),
+            "{refused:?}"
+        );
+        assert!(groups_line(&path).contains("stale"), "nothing written");
+        drop(server);
         let groups = rebuild_groups(&path).expect("rebuild");
         assert!(groups > 0);
         assert_eq!(groups_line(&path), "title groups: consistent");

@@ -133,7 +133,11 @@ const PHASE_TEXT: Record<string, string> = {
   storing: 'Saving titles',
   picking: 'Choosing preferred versions',
   refreshing: 'Refreshing title groups',
-  matching: 'Matching files on the card'
+  matching: 'Matching files on the card',
+  'copying the database to memory': 'Copying the database to memory',
+  'writing the database to the card': 'Writing the database to the card',
+  importing: 'Importing',
+  'importing in place': 'Importing in place'
 };
 
 function num(v: unknown): number | null {
@@ -165,6 +169,10 @@ export function describeProgress(kind: string, p: Record<string, unknown> | null
     const games = num(p.games);
     if (games !== null) {
       parts.push(`${games.toLocaleString()} games`);
+    }
+    // Why the import runs on the card rather than on a copy in memory.
+    if (typeof p.reason === 'string' && p.reason) {
+      parts.push(p.reason);
     }
   } else if (kind === 'scan') {
     const done = num(p.done);

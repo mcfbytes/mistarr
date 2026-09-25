@@ -119,8 +119,18 @@ for its clone list), `reading`, `storing` (applying the titles), `picking`
 (the 1G1R picks) or `refreshing` (the title groups); `bytes_read` of
 `bytes_total` of the current DAT, uncompressed, is present while `reading`
 and absent in the other phases, whose share done is unknown, so a bar of
-the bytes read never moves backwards. After each
-DAT it stores `{ file, members, done, games }`. A `recompute_1g1r` reports
+the bytes read never moves backwards. An import on a copy of the database
+in RAM (ARCHITECTURE.md "DAT import in RAM") also reports `{ file, members,
+phase }` with `phase` `copying the database to memory` before those,
+`matching` (with `checked` and `matched`) and `picking` while it recomputes
+the platforms it loaded, and `writing the database to the card` after them,
+and stores `{ file, members,
+done, games, phase: "importing" }` on the copy after each DAT, which the swap
+keeps. One on the card carries `reason`, why it is not in RAM in a few
+words such as `not enough free memory for a copy`, the log holding the
+numbers, in each
+report, and stores `{ file, members, done, games, phase: "importing in
+place", reason }` after each DAT. A `recompute_1g1r` reports
 `{ phase: "matching", checked, matched }`, then `{ phase: "picking", matched
 }`. A scan stores `{ platform_id, done, total, matched, unmatched }` as it
 goes.

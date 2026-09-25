@@ -35,19 +35,27 @@ pub struct Config {
     pub memory: MemoryConfig,
 }
 
-/// `[memory]`: the ceiling that keeps a runaway allocation from taking the board down.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// `[memory]`: the ceiling that keeps a runaway allocation from taking the board down,
+/// and where and when a DAT import runs on a copy of the database in RAM.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MemoryConfig {
     /// Soft `RLIMIT_DATA` in MiB, set at startup; 0 leaves the inherited limit.
     pub data_limit_mib: u64,
+    /// The RAM-backed directory a DAT import copies the database into.
+    pub import_dir: PathBuf,
+    /// Memory, in MiB, a DAT import in RAM leaves available beyond the copy it needs.
+    pub import_floor_mib: u64,
 }
 
 impl Default for MemoryConfig {
-    /// Three times the 64 MiB peak budget.
+    /// Three times the 64 MiB peak budget; the copy beside SQLite's temporary files, and
+    /// room kept for MiSTer Main and a running core.
     fn default() -> Self {
         Self {
             data_limit_mib: 192,
+            import_dir: PathBuf::from(crate::db::RAM_TEMP_DIR),
+            import_floor_mib: 128,
         }
     }
 }
@@ -461,7 +469,24 @@ mod tests {
     fn memory_limit_defaults_to_192_mib_and_is_configurable() {
         assert_eq!(Config::default().memory.data_limit_mib, 192);
         let c = Config::parse("[memory]\ndata_limit_mib = 0").expect("parse");
-        assert_eq!(c.memory, MemoryConfig { data_limit_mib: 0 });
+        assert_eq!(
+            c.memory,
+            MemoryConfig {
+                data_limit_mib: 0,
+                ..MemoryConfig::default()
+            }
+        );
+    }
+
+    #[test]
+    fn the_import_in_ram_settings_default_beside_the_temp_dir() {
+        let m = Config::default().memory;
+        assert_eq!(m.import_dir, Path::new(crate::db::RAM_TEMP_DIR));
+        assert_eq!(m.import_floor_mib, 128);
+        let c = Config::parse("[memory]\nimport_dir = \"/run/x\"\nimport_floor_mib = 9")
+            .expect("parse");
+        assert_eq!(c.memory.import_dir, Path::new("/run/x"));
+        assert_eq!(c.memory.import_floor_mib, 9);
     }
 
     #[test]
