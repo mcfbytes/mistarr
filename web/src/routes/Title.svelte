@@ -55,7 +55,7 @@
       if (!isMock) {
         await api.launchTitle(variantId);
       }
-      showToast('Started on the MiSTer.');
+      showToast('Started on the MiSTer.', 'success');
     } catch (err) {
       showToast(errorMessage(err));
     } finally {

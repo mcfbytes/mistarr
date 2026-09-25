@@ -4,10 +4,11 @@
   import { getPlatforms, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
-  import { scheduleIncoming } from '../lib/stores/incoming.svelte';
-  import { addUpload } from '../lib/stores/uploads.svelte';
-  import { uploadFiles } from '../lib/upload';
+  import { sourceStatus } from '../lib/status';
   import IncomingList from '../lib/IncomingList.svelte';
+  import UploadField from '../lib/UploadField.svelte';
+  import MagnetField from '../lib/MagnetField.svelte';
+  import StatusPill from '../lib/StatusPill.svelte';
   import type { SeedPolicy } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -19,9 +20,6 @@
 
   const sources = $derived(getSources());
   const platforms = $derived(getPlatforms());
-
-  let magnet = $state('');
-  let fileInput: HTMLInputElement | undefined;
 
   // The server may format a ratio as "1.0"; compare the parsed number so
   // the select shows the matching option regardless of formatting.
@@ -99,37 +97,15 @@
   function platformName(id: string): string {
     return platforms.find((p) => p.id === id)?.name ?? id;
   }
-
-  async function addMagnet(): Promise<void> {
-    const uri = magnet.trim();
-    if (!uri || isMock) {
-      return;
-    }
-    try {
-      const up = await api.addMagnet(uri);
-      addUpload({ kind: 'sources', file: up.file, jobId: up.job_id });
-      scheduleIncoming('sources');
-      magnet = '';
-    } catch (err) {
-      showToast(errorMessage(err));
-    }
-  }
 </script>
 
 <div class="page">
   <h1>Sources</h1>
 
-  <form class="card upload" onsubmit={(e) => e.preventDefault()}>
-    <label>
-      Add a .torrent file
-      <input bind:this={fileInput} type="file" accept=".torrent" multiple onchange={() => uploadFiles('sources', fileInput)} />
-    </label>
-    <label>
-      Or a magnet link
-      <input type="text" placeholder="magnet:?xt=..." bind:value={magnet} />
-    </label>
-    <button class="primary" onclick={addMagnet}>Add</button>
-  </form>
+  <div class="card upload">
+    <UploadField which="sources" label="Add a .torrent file" accept=".torrent" />
+    <MagnetField />
+  </div>
 
   <h2>Waiting in <code>sources/</code></h2>
   <IncomingList which="sources" />
@@ -175,7 +151,10 @@
                 {/if}
               {/if}
             </td>
-            <td>{source.state}{source.reason ? ` — ${source.reason}` : ''}</td>
+            <td>
+              <StatusPill {...sourceStatus(source.state)} />
+              {#if source.reason}<span class="muted reason">{source.reason}</span>{/if}
+            </td>
             <td>{source.file_count}</td>
             <td>{source.matched_count}</td>
             <td>
@@ -190,11 +169,13 @@
               </select>
             </td>
             <td>{source.client_id ? 'in client' : '—'}</td>
-            <td class="row-actions">
-              {#if source.state !== 'disabled'}
-                <button onclick={() => disable(source.id)}>Disable</button>
-              {/if}
-              <button onclick={() => remove(source.id)}>Delete</button>
+            <td>
+              <div class="row-actions">
+                {#if source.state !== 'disabled'}
+                  <button onclick={() => disable(source.id)}>Disable</button>
+                {/if}
+                <button onclick={() => remove(source.id)}>Delete</button>
+              </div>
             </td>
           </tr>
         {/each}
@@ -206,18 +187,14 @@
 
 <style>
   .upload {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.8em;
-    align-items: end;
+    display: grid;
+    gap: 0.6em;
     margin-bottom: 1em;
   }
 
-  .upload label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.2em;
-    font-size: 0.85em;
+  .reason {
+    display: block;
+    margin-top: 0.2em;
   }
 
   .table-wrap {
@@ -245,6 +222,7 @@
 
   .row-actions {
     display: flex;
+    flex-wrap: wrap;
     gap: 0.4em;
   }
 </style>

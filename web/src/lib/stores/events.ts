@@ -3,12 +3,12 @@ import type { SseEvent } from '../types';
 import { applyStatus, loadStatus, loadWizard, setConnected } from './status.svelte';
 import { applySourceChanged, loadSources } from './sources.svelte';
 import { applyDownloadChanged, loadDownloads, loadImports } from './downloads.svelte';
-import { applyJobProgress, loadJobs, resetFinished, resyncRecent } from './jobs.svelte';
+import { applyJobProgress, isRunning, loadJobs, resetFinished, resyncRecent } from './jobs.svelte';
 import { applyDatLoaded, loadDats } from './dats.svelte';
 import { loadPlatforms } from './platforms.svelte';
 import { applyFileChanged, reloadTitles } from './titles.svelte';
 import { loadIncoming, scheduleIncoming } from './incoming.svelte';
-import { markUploadsStale } from './uploads.svelte';
+import { announceUpload, markUploadsStale } from './uploads.svelte';
 
 let subscriber: EventSubscriber | null = null;
 
@@ -83,23 +83,28 @@ function handle(event: SseEvent): void {
     case 'download.changed':
       applyDownloadChanged(event.data.download_id, event.data.state, event.data.progress);
       break;
-    case 'job.progress':
-      applyJobProgress(event.data.id, event.data.kind, event.data.state, event.data.progress);
+    case 'job.progress': {
+      // Live progress of a job already known to run moves no file between lists.
+      const moved = !(event.data.state === 'running' && isRunning(event.data.id));
+      applyJobProgress(event.data.id, event.data.kind, event.data.state, event.data.progress, event.data.detail ?? null);
       if ((event.data.state === 'done' || event.data.state === 'failed') && MATCHING_KINDS.has(event.data.kind)) {
         scheduleReloadPlatforms();
       }
-      if (event.data.kind === 'dat_import') {
+      if (moved && event.data.kind === 'dat_import') {
         scheduleIncoming('dats');
-      } else if (event.data.kind === 'source_import') {
+      } else if (moved && event.data.kind === 'source_import') {
         scheduleIncoming('sources');
       }
       break;
+    }
     case 'dat.loaded':
+      announceUpload('dats', event.data.file, null);
       applyDatLoaded();
       scheduleIncoming('dats');
       void loadWizard();
       break;
     case 'dat.rejected':
+      announceUpload('dats', event.data.file, event.data.reason);
       scheduleIncoming('dats');
       break;
     case 'import.done':
@@ -119,7 +124,13 @@ export function startEvents(): void {
   if (subscriber || import.meta.env.VITE_MOCK === '1') {
     return;
   }
-  subscriber = new EventSubscriber(handle, setConnected);
+  // Live progress is never replayed, so every (re)connection reads the open jobs again.
+  subscriber = new EventSubscriber(handle, (connected) => {
+    setConnected(connected);
+    if (connected) {
+      void loadJobs().catch(() => undefined);
+    }
+  });
   subscriber.start();
 }
 

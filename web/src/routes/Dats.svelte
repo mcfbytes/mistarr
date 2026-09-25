@@ -4,8 +4,8 @@
   import { getDats, getDatTotal, loadDats, markDatRemoved } from '../lib/stores/dats.svelte';
   import { getPlatforms, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
-  import { uploadFiles } from '../lib/upload';
   import IncomingList from '../lib/IncomingList.svelte';
+  import UploadField from '../lib/UploadField.svelte';
   import type { DatVersion } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -18,7 +18,6 @@
     }
   });
 
-  let fileInput = $state<HTMLInputElement>();
   let confirming = $state<number | null>(null);
   let busy = $state<Set<number>>(new Set());
   let announcement = $state('');
@@ -129,22 +128,13 @@
 <div class="page">
   <h1>DATs</h1>
 
-  <form class="card upload" onsubmit={(e) => e.preventDefault()}>
-    <label>
-      Add DAT files
-      <input
-        bind:this={fileInput}
-        type="file"
-        accept=".dat,.xml,.zip"
-        multiple
-        onchange={() => uploadFiles('dats', fileInput)}
-      />
-    </label>
+  <div class="card upload">
+    <UploadField which="dats" label="Add DAT files" accept=".dat,.xml,.zip" />
     <p class="muted">
       Logiqx DATs, No-Intro database exports and zipped DAT packs are accepted.
       {#if datsDir}Files placed in <code>{datsDir}</code> are picked up the same way.{/if}
     </p>
-  </form>
+  </div>
 
   <h2>Waiting in <code>dats/</code></h2>
   <IncomingList which="dats" manage />
@@ -229,19 +219,9 @@
     margin-bottom: 1em;
   }
 
-  .upload label {
-    display: flex;
-    flex-direction: column;
-    gap: 0.3em;
-  }
-
   .upload p {
     margin: 0;
     font-size: 0.85em;
-  }
-
-  input[type='file'] {
-    max-width: 100%;
   }
 
   code {

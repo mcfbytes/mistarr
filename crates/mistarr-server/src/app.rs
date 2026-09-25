@@ -106,6 +106,10 @@ pub struct AppState {
     pub gate: Arc<Gate>,
     /// The job scheduler.
     pub scheduler: Scheduler,
+    /// Live progress of running jobs, kept in memory only.
+    pub live: crate::jobs::progress::LiveProgress,
+    /// Uploaded files whose import job is still being recorded.
+    pub placed: crate::incoming::Placed,
     /// When the server started.
     pub started: Instant,
     /// Runtime knobs.
@@ -136,6 +140,8 @@ impl AppState {
             events: EventBus::new(),
             gate: Arc::new(Gate::new()),
             scheduler: Scheduler::new(),
+            live: crate::jobs::progress::LiveProgress::default(),
+            placed: crate::incoming::Placed::default(),
             started: Instant::now(),
             poll_wake: tokio::sync::Notify::new(),
             redetect: tokio::sync::Notify::new(),

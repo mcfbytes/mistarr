@@ -5,6 +5,10 @@
   import { findPlatform, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
+  import { describeProgress, downloadStatus, jobDetail, jobHref, jobStatus, kindLabel } from '../lib/status';
+  import StatusPill from '../lib/StatusPill.svelte';
+  import ProgressBar from '../lib/ProgressBar.svelte';
+  import type { Job } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
 
@@ -23,6 +27,12 @@
 
   function platformName(id: string): string {
     return findPlatform(id)?.name ?? id;
+  }
+
+  function jobTitle(job: Job): string {
+    const pid = job.payload.platform_id;
+    const detail = typeof pid === 'string' ? platformName(pid) : jobDetail(job.payload);
+    return detail ? `${kindLabel(job.kind)}: ${detail}` : kindLabel(job.kind);
   }
 
   async function retry(id: number): Promise<void> {
@@ -61,10 +71,10 @@
       <div class="head">
         <strong>{d.title_name}</strong>
         <span class="muted">{d.rom_name}</span>
-        <span class="muted">{d.state}</span>
+        <StatusPill {...downloadStatus(d.state)} />
         {#if d.error}<span class="error">{d.error}</span>{/if}
       </div>
-      <div class="progress"><span style={`width: ${Math.round(d.progress * 100)}%`}></span></div>
+      <ProgressBar view={{ fraction: d.progress, text: '' }} label={`${d.title_name} transfer`} />
       <div class="actions">
         {#if d.state === 'failed'}
           <button onclick={() => retry(d.id)}>Retry</button>
@@ -80,10 +90,17 @@
 
   <h2>Jobs</h2>
   {#each jobs as job (job.id)}
-    <div class="card row head">
-      <strong>{job.kind}</strong>
-      <span class="muted">{job.state}, {job.lane} lane</span>
-      {#if job.reason}<span class="muted">{job.reason}</span>{/if}
+    {@const view = job.state === 'running' ? describeProgress(job.kind, job.progress) : null}
+    <div class="card row job" data-job={job.id}>
+      <div class="head">
+        <StatusPill {...jobStatus(job)} />
+        <a href={jobHref(job)}><strong>{jobTitle(job)}</strong></a>
+        <span class="muted">{job.lane} lane</span>
+      </div>
+      {#if job.state === 'running'}
+        <ProgressBar view={view ?? { fraction: null, text: 'Starting' }} label={`${jobTitle(job)} progress`} />
+      {/if}
+      {#if job.reason}<p class="muted why">{job.reason}</p>{/if}
     </div>
   {:else}
     <p class="muted">No jobs queued or running.</p>
@@ -92,8 +109,9 @@
   <h2>Recent</h2>
   <ul class="imports" aria-live="polite">
     {#each recent as job (job.id)}
-      <li class:error={job.state === 'failed'}>
-        {jobOutcome(job, platformName)}
+      <li>
+        <StatusPill {...jobStatus(job)} />
+        <span class:error={job.state === 'failed'}>{jobOutcome(job, platformName)}</span>
         <span class="muted">{new Date(job.updated_at * 1000).toLocaleString()}</span>
       </li>
     {:else}
@@ -119,8 +137,15 @@
   .head {
     display: flex;
     flex-wrap: wrap;
+    align-items: baseline;
     gap: 0.6em;
-    margin-bottom: 0.3em;
+    margin-bottom: 0.4em;
+    overflow-wrap: anywhere;
+  }
+
+  .why {
+    margin: 0.4em 0 0;
+    font-size: 0.85em;
   }
 
   .actions {
@@ -139,7 +164,12 @@
   }
 
   .imports li {
-    padding: 0.3em 0;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.3em 0.6em;
+    padding: 0.35em 0;
     border-bottom: 1px solid var(--border);
+    overflow-wrap: anywhere;
   }
 </style>
