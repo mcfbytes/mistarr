@@ -426,7 +426,7 @@ fn measure_ram(db: &Db, dir: &std::path::Path, xml: &str) -> ram::Report {
             assert!(matches!(outcomes[..], [Outcome::Loaded(_)]), "{outcomes:?}");
             report
         }
-        Ram::Fallback(reason) => panic!("fell back: {reason}"),
+        Ram::Fallback(reason) => panic!("fell back: {reason:?}"),
     }
 }
 

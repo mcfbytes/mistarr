@@ -282,21 +282,42 @@ impl Server {
     }
 }
 
-/// Samples the bytes the files under `dir` take every few milliseconds until the flag is
-/// set, and returns the largest.
-fn sample_peak(dir: PathBuf) -> (Arc<AtomicBool>, std::thread::JoinHandle<u64>) {
-    fn used(dir: &Path) -> u64 {
-        use std::os::unix::fs::MetadataExt;
+/// Samples, every few milliseconds until the flag is set, the bytes that the files under
+/// `dirs` and the files process `pid` holds open in them take, deleted ones included, each
+/// file counted once; returns the largest sum.
+fn sample_peak(pid: u32, dirs: Vec<PathBuf>) -> (Arc<AtomicBool>, std::thread::JoinHandle<u64>) {
+    use std::os::unix::fs::MetadataExt;
+    fn named(dir: &Path, files: &mut Vec<std::fs::Metadata>) {
         let Ok(entries) = std::fs::read_dir(dir) else {
-            return 0;
+            return;
         };
-        entries
-            .flatten()
-            .map(|e| match e.metadata() {
-                Ok(m) if m.is_dir() => used(&e.path()),
-                Ok(m) => m.blocks() * 512,
-                Err(_) => 0,
-            })
+        for e in entries.flatten() {
+            match e.metadata() {
+                Ok(m) if m.is_dir() => named(&e.path(), files),
+                Ok(m) => files.push(m),
+                Err(_) => {}
+            }
+        }
+    }
+    fn used(pid: u32, dirs: &[PathBuf]) -> u64 {
+        let mut files = Vec::new();
+        for d in dirs {
+            named(d, &mut files);
+        }
+        if let Ok(fds) = std::fs::read_dir(format!("/proc/{pid}/fd")) {
+            for fd in fds.flatten() {
+                let inside = std::fs::read_link(fd.path())
+                    .is_ok_and(|t| dirs.iter().any(|d| t.starts_with(d)));
+                if let Some(m) = inside.then(|| std::fs::metadata(fd.path()).ok()).flatten() {
+                    files.push(m);
+                }
+            }
+        }
+        let mut seen = std::collections::HashSet::new();
+        files
+            .iter()
+            .filter(|m| seen.insert((m.dev(), m.ino())))
+            .map(|m| m.blocks() * 512)
             .sum()
     }
     let done = Arc::new(AtomicBool::new(false));
@@ -304,7 +325,7 @@ fn sample_peak(dir: PathBuf) -> (Arc<AtomicBool>, std::thread::JoinHandle<u64>) 
     let handle = std::thread::spawn(move || {
         let mut peak = 0;
         while !flag.load(Ordering::Relaxed) {
-            peak = peak.max(used(&dir));
+            peak = peak.max(used(pid, &dirs));
             std::thread::sleep(Duration::from_millis(5));
         }
         peak
@@ -813,7 +834,11 @@ fn dat_and_torrent_import_stay_under_budget() {
         .expect("stat")
         .len();
     let server = Server::start(dir.path());
-    let (done, sampler) = sample_peak(server.ram.path().to_path_buf());
+    let dirs = vec![
+        server.ram.path().to_path_buf(),
+        dir.path().join("sqlite-tmp"),
+    ];
+    let (done, sampler) = sample_peak(server.child.id(), dirs);
     let rows = server.wait_jobs("dat_import", 1);
     done.store(true, Ordering::Relaxed);
     let ram_peak = sampler.join().expect("sampler");
@@ -827,7 +852,8 @@ fn dat_and_torrent_import_stay_under_budget() {
     // The database was nearly empty before the load; `need` is its bound at size 0.
     let need = mistarr_server::db::ram::need(0, dat_bytes);
     println!(
-        "copy in RAM peaked at {:.1} MiB for {:.1} MiB of DAT, need {:.1} MiB; database {:.1} MiB",
+        "copy and temporary files in RAM peaked at {:.1} MiB for {:.1} MiB of DAT, \
+         need {:.1} MiB; database {:.1} MiB",
         kib_to_mib(ram_peak >> 10),
         kib_to_mib(dat_bytes >> 10),
         kib_to_mib(need >> 10),
@@ -892,7 +918,7 @@ fn a_dat_import_on_the_card_stays_under_budget() {
     assert_eq!(rows[0].0, "done", "{}", rows[0].1);
     assert_eq!(rows[0].1["phase"], "importing in place", "{}", rows[0].1);
     let reason = rows[0].1["reason"].as_str().unwrap_or_default();
-    assert!(reason.contains("memory available"), "{reason}");
+    assert_eq!(reason, mistarr_server::db::ram::why::SHORT);
     assert_eq!(usize::try_from(titles).expect("count"), games);
     assert_eq!(left, 0, "no copy was made");
     assert_budget("dat_import, in place", peak, LOAD_DELTA_MIB);

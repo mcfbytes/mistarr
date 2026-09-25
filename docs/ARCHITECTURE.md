@@ -498,9 +498,9 @@ shutdown is left `queued` for this.
 | Soft `RLIMIT_DATA` | `[memory] data_limit_mib`, 192 MiB, never below 64 |
 | SQLite page cache | 2 MiB, 1 MiB on each of the two connections; the writer's rises to 8 MiB while a DAT load applies its stage, a source import, resolve, rebind or re-map first keys new roms (one committed batch of 1 000 per transaction), or a source binds (`db::bulk`) |
 | SQLite other | `mmap_size = 0`, `temp_store = FILE` under `/tmp/mistarr` (`SQLITE_TMPDIR`, set at startup and emptied of stale files; `MISTARR_TEMP_DIR` names another; RAM on the board, so temporary pages never reach the card), created with mode 0700 and refused when it is a symlink or another user's, in which case `<data>/tmp` is used and the log warns; WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB, 16 MiB while a bulk write is open |
-| DAT stage | in `/tmp/mistarr` while a DAT loads, about 1.5 times the DAT's size (18 MB for 20 000 games of three roms), given back when the load ends, as the temporary database vacuums itself; when `/tmp` fills the load fails naming `/tmp/mistarr` and the database is unchanged |
+| DAT stage | in `/tmp/mistarr` while a DAT loads, about 1.5 times the DAT's size (18 MB for 20 000 games of three roms), given back when the load ends, as the temporary database vacuums itself. A load in RAM keeps its stage in the same place, beside the copy on the same tmpfs, and when `/tmp` fills it drops the copy and loads on the card; a load on the card whose `/tmp` fills fails naming `/tmp/mistarr`, the database unchanged |
 | SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import in RAM holds the writer from its copy to its swap; one on the card, already on a blocking thread, takes it per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
-| DAT import or migration in RAM | a copy in `[memory] import_dir`, tmpfs, so it counts in `MemAvailable` and not in RSS: the database, what the import adds and the copy's rollback journal. Made only when `MemAvailable` covers the file's size and half again, three times the DATs' uncompressed size, and 32 MiB, above `[memory] import_floor_mib` (128 MiB), and dropped when `MemAvailable` falls below the floor during the load; 1 MiB write-back buffer |
+| DAT import or migration in RAM | a copy in `[memory] import_dir`, tmpfs, so it counts in `MemAvailable` and not in RSS: the database, what the import adds and the copy's rollback journal. Made only when `MemAvailable` covers the file's size and half again, six times the DATs' uncompressed size for the rows and the stage in SQLite's temporary files, and 32 MiB, above `[memory] import_floor_mib` (128 MiB), and dropped when `MemAvailable` falls below the floor during the load; 1 MiB write-back buffer |
 | Hashing buffer | 256 KiB, one file at a time |
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
 | Arcade presence pass | 500 zips per batch, stat only unless import rows of a changed zip need its central directory; the listing's names and the live MRA zip set persist across batches |
@@ -681,11 +681,12 @@ of the database in RAM and write it back whole (`db::ram`):
    `[memory] import_floor_mib`, 128 MiB by default, left for MiSTer Main and
    a running core; `import_dir` must have the need free, and the card the
    file's size. The need is the file's size and half again, for the copy's
-   journal and pages freed and reused, three times the uncompressed size of
-   the file's DATs, for the rows they stage and keep, and 32 MiB. Short of
-   any, the import runs on the card, and the job's progress, as `reason`,
-   and the log at info say why. A floor of 0 is allowed and warned about at
-   startup.
+   journal and pages freed and reused, six times the uncompressed size of
+   the file's DATs, for the rows they keep and for the stage, which SQLite
+   keeps in its temporary files on the same tmpfs on the board, and 32 MiB.
+   Short of any, the import runs on the card; the job's progress says why in
+   a few words, as `reason`, and the log at info gives the numbers. A floor
+   of 0 is allowed and warned about at startup.
 3. SQLite's backup copies the file through the held writer into
    `<import_dir>/import-<key>-<job>/mistarr.db`, 1 MiB a step. The key hashes
    the database's path, so servers of two data directories never touch each
@@ -809,11 +810,16 @@ keyed, 6 844 times in place and 62 in RAM
 `a_load_in_ram_writes_the_card_about_once_per_mebibyte` holds a 450-game
 load on a tenth of the catalogue to one write per MiB plus 16.
 
-The copy's size in RAM for a 50 MiB DAT of about 198 000 games loaded into
-an empty database peaks at 145 MiB, the file it becomes, against a need of
-182 MiB (`tests/memory.rs`, which samples the working directory): 2.9 bytes
-per byte of DAT, hence the factor of three. A WAL in place of the rollback
-journal peaks at 253 MiB on the same load.
+A 50 MiB Logiqx DAT of about 198 000 games with every hash, loaded into an
+empty database, peaks at 257 MiB in RAM against a need of 332 MiB
+(`tests/memory.rs`, which samples the files in the working directory and in
+SQLite's temporary directory, and those the server holds open there,
+deleted ones included): the copy reaches 145 MiB, the file it becomes, and
+the stage's temporary files 121 MiB. That is 5.1 bytes per byte of DAT for
+the tersest DATs, hence the factor of six; a verbose DB export takes about
+one. `MemAvailable` is read again just before the stage is applied, the
+step in which both grow at once. A WAL in place of the rollback journal
+takes the copy alone to 253 MiB on the same load.
 
 ## Configuration
 

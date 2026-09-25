@@ -371,7 +371,7 @@ fn short_memory_or_a_full_copy_falls_back_with_the_card_untouched() {
         })
         .expect("run");
     assert!(
-        matches!(&out, Ram::Fallback(r) if r.contains("memory available")),
+        matches!(&out, Ram::Fallback(r) if r.detail.contains("memory available")),
         "{out:?}"
     );
     assert!(!ran, "the work never ran");
@@ -385,7 +385,7 @@ fn short_memory_or_a_full_copy_falls_back_with_the_card_untouched() {
         })
         .expect("run");
     assert!(
-        matches!(&out, Ram::Fallback(r) if r.contains("memory ran out importing")),
+        matches!(&out, Ram::Fallback(r) if r.detail.contains("memory ran out importing")),
         "{out:?}"
     );
     assert_eq!(sha1(db.path()), before);
@@ -698,7 +698,7 @@ fn memory_falling_below_the_floor_stops_the_work_with_a_fallback() {
         })
         .expect("run");
     assert!(
-        matches!(&out, Ram::Fallback(r) if r.contains("fell to")),
+        matches!(&out, Ram::Fallback(r) if r.detail.contains("fell to")),
         "{out:?}"
     );
     assert_eq!(sha1(db.path()), before);

@@ -1556,7 +1556,7 @@ fn load_all(c: &TestDb, dats: &[String], via_ram: bool) -> Vec<Outcome> {
                 .expect("run");
             match ran {
                 Ram::Done(out, _) => (out, true),
-                Ram::Fallback(reason) => panic!("fell back: {reason}"),
+                Ram::Fallback(reason) => panic!("fell back: {reason:?}"),
             }
         } else {
             import_all(&c.db, &path, &[Member::Plain], &req, &mut progress).expect("import")
@@ -1725,7 +1725,7 @@ async fn short_memory_imports_in_place_and_says_why() {
     assert!(
         progress["reason"]
             .as_str()
-            .is_some_and(|r| r.contains("MiB of memory available")),
+            .is_some_and(|r| r == ram::why::SHORT),
         "{progress}"
     );
     assert_eq!(progress["games"], 1);
@@ -1768,7 +1768,7 @@ fn a_copy_that_fills_partway_through_the_load_falls_back_with_the_card_untouched
         })
         .expect("a fallback, not a failure");
     assert!(
-        matches!(&out, Ram::Fallback(r) if r.contains("is full")),
+        matches!(&out, Ram::Fallback(r) if r.detail.contains("is full")),
         "{out:?}"
     );
     assert_eq!(dump(&c.db), before, "the card is as it was");
@@ -1776,6 +1776,42 @@ fn a_copy_that_fills_partway_through_the_load_falls_back_with_the_card_untouched
         std::fs::read_dir(ram_dir.path()).map_or(0, Iterator::count),
         0
     );
+}
+
+#[test]
+fn memory_falling_short_during_a_load_in_ram_falls_back_with_the_card_untouched() {
+    let c = conn();
+    let names: Vec<String> = (0..CANCEL_EVERY * 2)
+        .map(|i| format!("Game {i} (USA)"))
+        .collect();
+    let games: Vec<(&str, Option<&str>)> = names.iter().map(|n| (n.as_str(), None)).collect();
+    let path = c.dir.path().join("big.dat");
+    std::fs::write(&path, dat("Maker - Game Boy", "1", &games)).expect("write");
+    let before = dump(&c.db);
+    let ram_dir = crate::db::testutil::ram_dir();
+    let plan = ram::Plan {
+        dir: ram_dir.path().to_path_buf(),
+        floor: 0,
+        job: 1,
+        input: 0,
+    };
+    // The copy was allowed; from the first member on, no memory is ever enough.
+    let req = Request {
+        floor: Some(u64::MAX),
+        ..request(false, None)
+    };
+    let out =
+        c.db.hold_writer_blocking(|h| {
+            ram::run(h, &plan, &mut (), |db| {
+                import_all(db, &path, &[Member::Plain], &req, &mut |_, _, _| Ok(()))
+            })
+        })
+        .expect("a fallback, not a failure");
+    assert!(
+        matches!(&out, Ram::Fallback(r) if r.summary == ram::why::RAN_SHORT && r.detail.contains("fell to")),
+        "{out:?}"
+    );
+    assert_eq!(dump(&c.db), before, "the card is as it was");
 }
 
 #[test]
@@ -1834,7 +1870,8 @@ fn memory_under_the_floor_stops_a_load_in_ram() {
         floor: Some(u64::MAX),
         ..request(false, None)
     };
-    assert!(matches!(check(&req), Err(Error::NoRoom(_))));
+    assert!(check(&req).is_ok(), "a pause or a stop only");
+    assert!(matches!(room(&req), Err(Error::NoRoom(_))));
     assert!(matches!(pace(&req, CANCEL_EVERY), Err(Error::NoRoom(_))));
     assert!(
         pace(&req, CANCEL_EVERY + 1).is_ok(),

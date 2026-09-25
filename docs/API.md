@@ -126,7 +126,9 @@ phase }` with `phase` `copying the database to memory` before those,
 the platforms it loaded, and `writing the database to the card` after them,
 and stores `{ file, members,
 done, games, phase: "importing" }` on the copy after each DAT, which the swap
-keeps. One on the card carries `reason`, why it is not in RAM, in each
+keeps. One on the card carries `reason`, why it is not in RAM in a few
+words such as `not enough free memory for a copy`, the log holding the
+numbers, in each
 report, and stores `{ file, members, done, games, phase: "importing in
 place", reason }` after each DAT. A `recompute_1g1r` reports
 `{ phase: "matching", checked, matched }`, then `{ phase: "picking", matched

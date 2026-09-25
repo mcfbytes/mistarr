@@ -107,7 +107,7 @@ migrations at startup take the same path. In `mistarr.toml`:
 
 ```toml
 [memory]
-import_dir = "/tmp/mistarr"   # tmpfs; the copy needs the database's size and half again, three times the DAT, plus 32 MiB
+import_dir = "/tmp/mistarr"   # tmpfs; the copy needs the database's size and half again, six times the DAT, plus 32 MiB
 import_floor_mib = 128        # memory left available for MiSTer Main and a core; a large value always imports on the card
 ```
 

@@ -411,8 +411,14 @@ impl DatImport {
                         recomputed: true,
                     });
                 }
-                Ok(Ram::Fallback(reason)) => {
-                    tracing::info!(file = source_file, reason, "DAT imported in place");
+                Ok(Ram::Fallback(why)) => {
+                    let reason = why.summary;
+                    tracing::info!(
+                        file = source_file,
+                        reason,
+                        detail = why.detail,
+                        "DAT imported in place"
+                    );
                     ctx.progress(json!({
                         "file": source_file,
                         "members": members.len(),
@@ -428,7 +434,7 @@ impl DatImport {
         };
         Ok(Imported {
             outcomes: self
-                .import_in_place(ctx, members, source_file, &reason)
+                .import_in_place(ctx, members, source_file, reason)
                 .await?,
             recomputed: false,
         })
@@ -555,6 +561,10 @@ fn import_all(
     let mut games = 0;
     for (done, &member) in members.iter().enumerate() {
         check(req)?;
+        // The first member follows the check that allowed the copy.
+        if done > 0 {
+            room(req)?;
+        }
         if let Some(m) = &req.meter {
             m.at_member(done, games);
         }
@@ -587,14 +597,19 @@ fn import_all(
         }
     };
     for p in platforms {
-        recompute_blocking(db, p, &req.prefs, &|| check(req), &report)?;
+        recompute_blocking(
+            db,
+            p,
+            &req.prefs,
+            &|| check(req).and_then(|()| room(req)),
+            &report,
+        )?;
     }
     let loaded = outcomes.iter().any(|o| matches!(o, Outcome::Loaded(_)));
     Ok((outcomes, loaded))
 }
 
-/// [`Error::Cancelled`] on shutdown, [`Error::Paused`] while a pause holds the lane, and
-/// [`Error::NoRoom`] when memory fell below the request's floor.
+/// [`Error::Cancelled`] on shutdown, [`Error::Paused`] while a pause holds the lane.
 fn check(req: &Request) -> Result<()> {
     if *req.stop.borrow() {
         return Err(Error::Cancelled);
@@ -602,6 +617,11 @@ fn check(req: &Request) -> Result<()> {
     if req.gate.borrow().hold(Lane::Background).is_some() {
         return Err(Error::Paused);
     }
+    Ok(())
+}
+
+/// [`Error::NoRoom`] when memory fell below the floor of a request in RAM.
+fn room(req: &Request) -> Result<()> {
     req.floor.map_or(Ok(()), ram::memory_left)
 }
 
@@ -1031,6 +1051,8 @@ fn import_stream<R: BufRead>(
     if !chunk.is_empty() {
         db.write_blocking(|c| append_chunk(c, &chunk))?;
     }
+    // Applying the stage grows the copy and SQLite's temporary files at once.
+    room(req)?;
     db.write_bulk_blocking(|c| {
         let tx = c.transaction()?;
         let plan = dats::upsert_version(&tx, &new)?;
@@ -1071,9 +1093,7 @@ fn pace(req: &Request, games: u64) -> Result<()> {
         if *req.stop.borrow() {
             return Err(Error::Cancelled);
         }
-        if let Some(floor) = req.floor {
-            ram::memory_left(floor)?;
-        }
+        room(req)?;
     }
     if !games.is_multiple_of(YIELD_EVERY) {
         return Ok(());

@@ -20,9 +20,10 @@ const COPY_PAGES: std::ffi::c_int = 256;
 /// Room the copy needs beyond its own size, its growth and its journal.
 const MARGIN_BYTES: u64 = 32 * 1024 * 1024;
 
-/// Bytes the copy may grow by per byte of DAT it loads, staged rows and indexes
-/// included; `docs/ARCHITECTURE.md` "DAT import in RAM" has the measurement.
-const INPUT_FACTOR: u64 = 3;
+/// Bytes the copy and SQLite's temporary files, in the same tmpfs on the board, may
+/// take per byte of DAT loaded: its rows, their indexes and the stage; `docs/ARCHITECTURE.md`
+/// "DAT import in RAM" has the measurement.
+const INPUT_FACTOR: u64 = 6;
 
 /// `statfs` magic numbers of the file systems a copy may be made on.
 const TMPFS_MAGIC: u64 = 0x0102_1994;
@@ -110,7 +111,41 @@ pub enum Ram<T> {
     /// The work ran on the copy, which is now the database when it asked for that.
     Done(T, Report),
     /// The copy was not used, for the reason given; the card file is as it was.
-    Fallback(String),
+    Fallback(Fallback),
+}
+
+/// Why [`run`] left the work to the card.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fallback {
+    /// A few words for the job's progress.
+    pub summary: &'static str,
+    /// The measurements behind it, for the log.
+    pub detail: String,
+}
+
+/// Summaries of [`Fallback`]; a few words each, shown as the job's progress.
+pub mod why {
+    /// The WAL could not be emptied first.
+    pub const BUSY: &str = "the database was busy";
+    /// Another process has the database open.
+    pub const SHARED: &str = "another process has the database open";
+    /// `[memory] import_dir` is not usable.
+    pub const DIR: &str = "the memory directory cannot be used";
+    /// Memory or room was short before the copy.
+    pub const SHORT: &str = "not enough free memory for a copy";
+    /// Memory or the memory directory ran short on the way.
+    pub const RAN_SHORT: &str = "memory ran short during the import";
+    /// The card has no room for the copy it would write back.
+    pub const CARD: &str = "not enough room on the card";
+}
+
+impl<T> Ram<T> {
+    fn fallback(summary: &'static str, detail: impl Into<String>) -> Self {
+        Self::Fallback(Fallback {
+            summary,
+            detail: detail.into(),
+        })
+    }
 }
 
 /// What a [`run`] cost.
@@ -157,11 +192,12 @@ impl Budget {
 
 /// Bytes a copy of a `size`-byte database needs in RAM while it loads `input` bytes of
 /// DAT: the copy, half again for its journal and freed pages, [`INPUT_FACTOR`] times the
-/// input for the rows it stages and keeps, and [`MARGIN_BYTES`].
+/// input for the rows it keeps and the stage in SQLite's temporary files, and
+/// [`MARGIN_BYTES`].
 ///
 /// ```
 /// assert_eq!(mistarr_server::db::ram::need(64 << 20, 0), (96 + 32) << 20);
-/// assert_eq!(mistarr_server::db::ram::need(64 << 20, 10 << 20), (96 + 30 + 32) << 20);
+/// assert_eq!(mistarr_server::db::ram::need(64 << 20, 10 << 20), (96 + 60 + 32) << 20);
 /// ```
 #[must_use]
 pub fn need(size: u64, input: u64) -> u64 {
@@ -322,27 +358,29 @@ pub fn run<T>(
     let mut report = Report::default();
     let (emptied, first) = counted(|| super::wal_emptied(held.conn()));
     if !emptied? {
-        return Ok(Ram::Fallback(
-            "a reader kept the database's WAL from being emptied".to_owned(),
+        return Ok(Ram::fallback(
+            why::BUSY,
+            "a reader kept the database's WAL from being emptied",
         ));
     }
     if held_elsewhere(&path) {
-        return Ok(Ram::Fallback(SHARED.to_owned()));
+        return Ok(Ram::fallback(why::SHARED, SHARED));
     }
     if let Some(reason) = dir_refusal(&plan.dir, &path) {
-        return Ok(Ram::Fallback(reason));
+        return Ok(Ram::fallback(why::DIR, reason));
     }
     let size = fs::metadata(&path)?.len();
     let budget = Budget::read(&plan.dir, &path);
     if let Some(reason) = refusal(&budget, size, plan.input, plan.floor) {
-        return Ok(Ram::Fallback(reason));
+        return Ok(Ram::fallback(why::SHORT, reason));
     }
     let work_dir = match WorkDir::create(&plan.dir, &path, plan.job) {
         Ok(d) => d,
         Err(e) => {
-            return Ok(Ram::Fallback(format!(
-                "cannot make the memory directory: {e}"
-            )))
+            return Ok(Ram::fallback(
+                why::DIR,
+                format!("cannot make the memory directory: {e}"),
+            ))
         }
     };
     let copy = work_dir.0.join(COPY_NAME);
@@ -350,7 +388,7 @@ pub fn run<T>(
     watch.phase(Phase::Copying);
     let started = Instant::now();
     if let Err(reason) = full_as_reason(copy_in(held.conn(), &copy, watch), "copying")? {
-        return Ok(Ram::Fallback(reason));
+        return Ok(Ram::fallback(why::RAN_SHORT, reason));
     }
     // The backup filled the idle writer's cache; the import's own cache needs the room.
     held.conn().execute_batch("PRAGMA shrink_memory")?;
@@ -366,7 +404,7 @@ pub fn run<T>(
     });
     let (value, write) = match full_as_reason(done, "importing")? {
         Ok(v) => v,
-        Err(reason) => return Ok(Ram::Fallback(reason)),
+        Err(reason) => return Ok(Ram::fallback(why::RAN_SHORT, reason)),
     };
     report.work = started.elapsed();
     if !write {
@@ -379,10 +417,13 @@ pub fn run<T>(
     let bytes = fs::metadata(&copy)?.len();
     let card_room = path.parent().and_then(free_bytes);
     if card_room.is_some_and(|room| room < bytes.saturating_add(CHUNK_BYTES as u64)) {
-        return Ok(Ram::Fallback(format!(
-            "the card has no room for a second copy of the database, {} MiB",
-            bytes.div_ceil(MIB)
-        )));
+        return Ok(Ram::fallback(
+            why::CARD,
+            format!(
+                "the card has no room for a second copy of the database, {} MiB",
+                bytes.div_ceil(MIB)
+            ),
+        ));
     }
     let new = sibling(&path, NEW_SUFFIX);
     let (written, back) = counted(|| {
@@ -396,14 +437,15 @@ pub fn run<T>(
         Ok(true) => {}
         Ok(false) => {
             remove_new(&new);
-            return Ok(Ram::Fallback(SHARED.to_owned()));
+            return Ok(Ram::fallback(why::SHARED, SHARED));
         }
         Err(e) => {
             remove_new(&new);
             if storage_full(&e) {
-                return Ok(Ram::Fallback(format!(
-                    "the card ran out of room writing the database: {e}"
-                )));
+                return Ok(Ram::fallback(
+                    why::CARD,
+                    format!("the card ran out of room writing the database: {e}"),
+                ));
             }
             return Err(e);
         }
