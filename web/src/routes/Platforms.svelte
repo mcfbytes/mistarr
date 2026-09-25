@@ -158,11 +158,8 @@
     text-decoration: none;
   }
 
-  h2 a:hover,
-  h2 a:focus-visible {
+  h2 a:hover {
     text-decoration: underline;
-    text-decoration-color: var(--accent);
-    text-underline-offset: 3px;
   }
 
   .actions {

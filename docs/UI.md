@@ -112,26 +112,39 @@ ships in the bundle and never loads an image or touches the network.
 
 A platform id maps to a motif family that evokes its era or medium; an id
 without a mapping falls back to its `kind`, and anything else to contours.
+Mapped siblings take the family's compositions in turn, so neighbours in a
+family differ in layout as well as colour.
 
-| Family | Motif | Platforms |
-|---|---|---|
-| pixel | tile mosaic, ordered dither through a four-step ramp | nes, fds, sms, sg1000, atari7800, coleco, intv, pce, sgx, sv; kind `cartridge` |
-| parallax | banded sun behind stepped parallax ridges | snes, megadrive, s32x |
-| bands | bold horizontal bands under a scanline raster | atari2600, atari5200 |
-| vector | twisting wireframe tunnel on black | vectrex |
-| lcd | dot matrix with lit sprites, ghosting and backlight | gb, gbc, gba, gg, lynx, ngp, ws, wsc, pokemini |
-| disc | concentric tracks, thin-film sheen, light sweep | psx, saturn, megacd, pcecd, neocd; kind `disc` |
-| poly | flat-shaded low-poly terrain | n64 |
-| marquee | starfield, horizon glow, marquee bulbs | arcade, neogeo; kinds `arcade`, `romset` |
-| phosphor | glyph-like blocks on a phosphor raster | kind `computer` |
-| contour | drifting contour lines | kind `other`, unknown ids |
+| Family | Motif | Compositions | Platforms |
+|---|---|---|---|
+| pixel | tile mosaic, ordered dither through a four-step ramp | diagonal sweep, centre burst, corner fade, wave, checker falloff | nes, fds, sms, sg1000, atari7800, coleco, intv, pce, sgx, sv; kind `cartridge` |
+| parallax | banded sun behind stepped parallax ridges | sun position and size | snes, megadrive, s32x |
+| bands | bold horizontal bands, blocky shapes, scanlines | band weights | atari2600, atari5200 |
+| vector | twisting wireframe tunnel on black | sides and twist | vectrex |
+| lcd | abstract lit shapes on a dot matrix, with ghosting and backlight | bars, blocky landscape, rings, geometric glyphs, dot lattice | gb, ngp, gbc, ws, pokemini, gg, gba, lynx, wsc |
+| disc | concentric tracks, thin-film sheen, light sweep | centre and sheen angle | psx, saturn, megacd, pcecd, neocd; kind `disc` |
+| poly | flat-shaded low-poly terrain | height field | n64 |
+| marquee | perspective grid to a glowing horizon, starfield, bulb chase | vanishing point | arcade, neogeo; kinds `arcade`, `romset` |
+| phosphor | glyph-like blocks on a phosphor raster | text layout | kind `computer` |
+| contour | drifting contour lines | wave field | kind `other`, unknown ids |
 
 Colours come from `web/src/lib/art/palette.ts`: the hues of the theme tokens
 in `app.css` (accent, ok, warn) and a few that harmonise with them. Each
-family has a base hue; a PRNG seeded by the platform id shifts it and every
-layout choice, so the same id always draws the same art and siblings differ
-within their family. Every colour slot has a dark and a light value, and the
-component picks one through `prefers-color-scheme`. There is no motion.
+family has a base hue, and most mapped ids set their own hue so siblings read
+apart: the colour handhelds get distinct hues, the monochrome ones muted
+slate, sepia, grey-blue or teal tints. No hue is chosen to match a
+manufacturer's branding, and no LCD uses a pea-green tint. A PRNG seeded by
+the id shifts the hue slightly and drives every other choice, so the same id
+always draws the same art. Every colour slot runs from a dark value to a
+light one through `--l`, which the component sets from `prefers-color-scheme`.
+There is no motion.
+
+A compact focal element (a sun, burst, lit shape or vanishing point) is
+centred where every banner aspect in use shows it: between 32% and 68% of the
+width in the card format, whose banner crops its sides on desktop, and
+between 48% and 52% in the wide format, of which a phone shows only the
+middle 358 of 960 units. The disc and tunnel are wider than a card banner and
+sit off centre there.
 
 On a Platforms card the art fills a banner under a scrim that is at least
 85% opaque where the text starts, so text keeps AA contrast over any art.

@@ -12,12 +12,19 @@
 
   const { id, kind, format = 'card', muted = false }: Props = $props();
   const art = $derived(platformArt(id, kind, format));
+
+  /** Sets the node's markup; the SVG is built from numbers in generate.ts, never from input. */
+  function paint(node: HTMLElement, svg: string): { update(next: string): void } {
+    node.innerHTML = svg;
+    return {
+      update(next) {
+        node.innerHTML = next;
+      }
+    };
+  }
 </script>
 
-<div class="art" class:muted aria-hidden="true" data-art-family={art.family}>
-  <!-- eslint-disable-next-line svelte/no-at-html-tags -- built from numbers in generate.ts, never from input -->
-  {@html art.svg}
-</div>
+<div class="art" class:muted aria-hidden="true" data-art-family={art.family} use:paint={art.svg}></div>
 
 <style>
   .art {
@@ -25,34 +32,18 @@
     inset: 0;
     overflow: hidden;
     pointer-events: none;
+    --l: 0;
   }
 
   .art :global(svg) {
     display: block;
     width: 100%;
     height: 100%;
-    --c0: var(--c0d);
-    --c1: var(--c1d);
-    --c2: var(--c2d);
-    --c3: var(--c3d);
-    --c4: var(--c4d);
-    --c5: var(--c5d);
-    --c6: var(--c6d);
-    --c7: var(--c7d);
-    --c8: var(--c8d);
   }
 
   @media (prefers-color-scheme: light) {
-    .art :global(svg) {
-      --c0: var(--c0l);
-      --c1: var(--c1l);
-      --c2: var(--c2l);
-      --c3: var(--c3l);
-      --c4: var(--c4l);
-      --c5: var(--c5l);
-      --c6: var(--c6l);
-      --c7: var(--c7l);
-      --c8: var(--c8l);
+    .art {
+      --l: 1;
     }
   }
 

@@ -37,6 +37,32 @@ test('the same id always draws the same art, and siblings differ', () => {
   expect(seen.size).toBe(ids.length * formats.length);
 });
 
+/** Hue of colour slot `slot` in the art's root style. */
+function hue(id: string, slot: number): number {
+  const match = new RegExp(`--c${slot}:hsl\\((\\d+) `).exec(renderArt(id, undefined, 'card').svg);
+  return Number(match?.[1]);
+}
+
+test('pixel siblings each take a clearly different hue', () => {
+  const pixel = ['nes', 'fds', 'sms', 'sg1000', 'atari7800', 'coleco', 'intv', 'pce', 'sgx'];
+  const hues = pixel.map((id) => hue(id, 0));
+  for (const [i, a] of hues.entries()) {
+    for (const b of hues.slice(i + 1)) {
+      const apart = Math.min(Math.abs(a - b), 360 - Math.abs(a - b));
+      expect(apart, `${pixel.join(',')} -> ${hues.join(',')}`).toBeGreaterThanOrEqual(20);
+    }
+  }
+});
+
+test('no handheld screen is tinted pea green', () => {
+  for (const id of ['gb', 'gbc', 'gba', 'gg', 'lynx', 'ngp', 'ws', 'wsc', 'pokemini']) {
+    for (let slot = 0; slot <= 4; slot += 1) {
+      const h = hue(id, slot);
+      expect(h < 60 || h > 110, `${id} slot ${slot} hue ${h}`).toBe(true);
+    }
+  }
+});
+
 test('art is memoised and stays small, local and free of script', () => {
   for (const id of [...ids, 'amiga', 'mystery']) {
     for (const format of formats) {
@@ -50,11 +76,10 @@ test('art is memoised and stays small, local and free of script', () => {
   expect(renderArt('a"><x', undefined, 'card').svg).not.toContain('"><x');
 });
 
-test('every colour slot has a dark and a light value', () => {
+test('every colour slot runs from its dark to its light value', () => {
   const vars = slotVars({ primary: 10, secondary: 40, tertiary: 190 }, 1);
   for (let i = 0; i < SLOTS; i += 1) {
-    expect(vars).toMatch(new RegExp(`--c${i}d:hsl\\(\\d+ \\d+% \\d+%\\)`));
-    expect(vars).toMatch(new RegExp(`--c${i}l:hsl\\(\\d+ \\d+% \\d+%\\)`));
+    expect(vars).toMatch(new RegExp(`--c${i}:hsl\\(\\d+ calc\\([^;]*var\\(--l\\)`));
   }
 });
 

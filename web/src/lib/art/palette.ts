@@ -18,69 +18,36 @@ export interface Hues {
   tertiary: number;
 }
 
+// Per slot: hue (primary, secondary, tertiary, their midpoint, beyond the secondary), then
+// dark saturation and lightness, then light. Slots: 0-1 background, 2-3 fills, 4 line,
+// 5 tertiary, 6-7 ramp, 8 silhouette ink.
+const SLOT: readonly (readonly [number, number, number, number, number])[] = [
+  [0, 30, 8, 45, 97],
+  [1, 34, 15, 55, 88],
+  [0, 52, 36, 62, 72],
+  [1, 60, 52, 66, 62],
+  [0, 90, 74, 60, 44],
+  [2, 70, 62, 62, 56],
+  [3, 58, 44, 64, 67],
+  [4, 60, 54, 70, 58],
+  [0, 32, 6, 28, 52]
+];
+
 /** Number of colour slots a generator may use, `--c0` to `--c8`. */
-export const SLOTS = 9;
+export const SLOTS = SLOT.length;
 
-type Hsl = readonly [hueOffset: 'p' | 's' | 't' | 'm' | 'x', sat: number, light: number];
-
-// Slots: 0-1 background, 2-3 fills, 4 high-contrast line, 5 tertiary, 6-7 ramp,
-// 8 silhouette ink.
-const DARK: readonly Hsl[] = [
-  ['p', 30, 8],
-  ['s', 34, 15],
-  ['p', 52, 36],
-  ['s', 60, 52],
-  ['p', 90, 74],
-  ['t', 70, 62],
-  ['m', 58, 44],
-  ['x', 60, 54],
-  ['p', 32, 6]
-];
-
-const LIGHT: readonly Hsl[] = [
-  ['p', 45, 97],
-  ['s', 50, 90],
-  ['p', 48, 80],
-  ['s', 60, 67],
-  ['p', 60, 44],
-  ['t', 58, 62],
-  ['m', 60, 74],
-  ['x', 68, 66],
-  ['p', 28, 52]
-];
-
-function hueOf(which: Hsl[0], hues: Hues): number {
-  switch (which) {
-    case 'p':
-      return hues.primary;
-    case 's':
-      return hues.secondary;
-    case 't':
-      return hues.tertiary;
-    case 'm':
-      return (hues.primary + hues.secondary) / 2;
-    case 'x':
-      return hues.secondary + (hues.secondary - hues.primary) / 2;
-  }
-}
-
-function css(entry: Hsl, hues: Hues, sat: number): string {
-  const h = Math.round(((hueOf(entry[0], hues) % 360) + 360) % 360);
-  return `hsl(${h} ${Math.round(entry[1] * sat)}% ${entry[2]}%)`;
-}
+/** `from` at `--l: 0`, `to` at `--l: 1`, as a CSS percentage. */
+const mix = (from: number, to: number): string => `calc(${from}% + ${to - from}% * var(--l))`;
 
 /**
- * Custom properties `--cNd` and `--cNl` holding each slot's dark and light
- * colour; `sat` scales saturation so a family can run muted or vivid.
+ * Custom properties `--c0` to `--c8`, each slot's colour running from its dark
+ * value at `--l: 0` to its light value at `--l: 1`; `sat` scales saturation.
  */
 export function slotVars(hues: Hues, sat: number): string {
-  const out: string[] = [];
-  for (let i = 0; i < SLOTS; i += 1) {
-    const dark = DARK[i];
-    const light = LIGHT[i];
-    if (dark && light) {
-      out.push(`--c${i}d:${css(dark, hues, sat)}`, `--c${i}l:${css(light, hues, sat)}`);
-    }
-  }
-  return out.join(';');
+  const { primary: p, secondary: s, tertiary: t } = hues;
+  const choices = [p, s, t, (p + s) / 2, s + (s - p) / 2];
+  return SLOT.map(([which, sd, ld, sl, ll], i) => {
+    const h = Math.round((((choices[which] ?? p) % 360) + 360) % 360);
+    return `--c${i}:hsl(${h} ${mix(Math.round(sd * sat), Math.round(sl * sat))} ${mix(ld, ll)})`;
+  }).join(';');
 }

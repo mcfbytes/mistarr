@@ -24,40 +24,44 @@ export interface Art {
   svg: string;
 }
 
-const FAMILY_BY_ID: Readonly<Record<string, ArtFamily>> = {
-  nes: 'pixel',
-  fds: 'pixel',
-  sms: 'pixel',
-  sg1000: 'pixel',
-  atari7800: 'pixel',
-  coleco: 'pixel',
-  intv: 'pixel',
-  pce: 'pixel',
-  sgx: 'pixel',
-  sv: 'pixel',
-  snes: 'parallax',
-  megadrive: 'parallax',
-  s32x: 'parallax',
-  atari2600: 'bands',
-  atari5200: 'bands',
-  vectrex: 'vector',
-  gb: 'lcd',
-  gbc: 'lcd',
-  gba: 'lcd',
-  gg: 'lcd',
-  lynx: 'lcd',
-  ngp: 'lcd',
-  ws: 'lcd',
-  wsc: 'lcd',
-  pokemini: 'lcd',
-  psx: 'disc',
-  saturn: 'disc',
-  megacd: 'disc',
-  pcecd: 'disc',
-  neocd: 'disc',
-  n64: 'poly',
-  arcade: 'marquee',
-  neogeo: 'marquee'
+/**
+ * Per id: its family, then an optional hue, saturation scale and secondary hue
+ * offset. Siblings take compositions in this order; see `layout`.
+ */
+const PLATFORMS: Readonly<Record<string, readonly [ArtFamily, number?, number?, number?]>> = {
+  nes: ['pixel', 176],
+  fds: ['pixel', 256],
+  sms: ['pixel', HUE.warn, 1, -30],
+  sg1000: ['pixel', 212],
+  atari7800: ['pixel', 140],
+  coleco: ['pixel', 330],
+  intv: ['pixel', HUE.coral],
+  pce: ['pixel', 292],
+  sgx: ['pixel', 92, 0.9, -32],
+  sv: ['pixel', 230, 0.4],
+  snes: ['parallax', 205, 1, 80],
+  megadrive: ['parallax', HUE.rose, 1, 50],
+  s32x: ['parallax', HUE.violet, 1, 74],
+  atari2600: ['bands', 200, 1, 70],
+  atari5200: ['bands', HUE.teal, 1, -30],
+  vectrex: ['vector'],
+  gb: ['lcd', 225, 0.22],
+  ngp: ['lcd', 32, 0.4],
+  gbc: ['lcd', HUE.rose],
+  ws: ['lcd', 205, 0.5],
+  pokemini: ['lcd', HUE.teal, 0.42],
+  gg: ['lcd', 196],
+  gba: ['lcd', HUE.violet],
+  lynx: ['lcd', HUE.warn],
+  wsc: ['lcd', HUE.coral],
+  psx: ['disc'],
+  saturn: ['disc'],
+  megacd: ['disc'],
+  pcecd: ['disc'],
+  neocd: ['disc'],
+  n64: ['poly'],
+  arcade: ['marquee', HUE.rose],
+  neogeo: ['marquee', 250, 1, 90]
 };
 
 const FAMILY_BY_KIND: Readonly<Record<PlatformKind, ArtFamily>> = {
@@ -69,27 +73,18 @@ const FAMILY_BY_KIND: Readonly<Record<PlatformKind, ArtFamily>> = {
   other: 'contour'
 };
 
-interface Tone {
-  /** Base primary hue, the offset to the secondary and to the tertiary. */
-  base: number;
-  second: number;
-  third: number;
-  /** How far a platform's primary hue may wander from `base`, either way. */
-  spread: number;
-  sat: number;
-}
-
-const TONES: Readonly<Record<ArtFamily, Tone>> = {
-  pixel: { base: HUE.rose + 18, second: 30, third: 170, spread: 22, sat: 0.85 },
-  parallax: { base: HUE.violet, second: 74, third: 150, spread: 30, sat: 0.95 },
-  bands: { base: HUE.warn, second: -34, third: 150, spread: 12, sat: 1 },
-  vector: { base: HUE.accent - 16, second: -30, third: 120, spread: 14, sat: 0.9 },
-  lcd: { base: HUE.teal - 12, second: -30, third: 160, spread: 28, sat: 0.8 },
-  disc: { base: HUE.accent + 20, second: 60, third: 150, spread: 34, sat: 0.85 },
-  poly: { base: HUE.ok, second: 60, third: -110, spread: 14, sat: 0.7 },
-  marquee: { base: HUE.rose, second: 70, third: -130, spread: 24, sat: 1 },
-  phosphor: { base: HUE.ok - 10, second: 20, third: 180, spread: 10, sat: 0.9 },
-  contour: { base: HUE.accent, second: 46, third: 170, spread: 20, sat: 0.8 }
+/** Per family: base hue, secondary and tertiary offsets, hue spread either way, saturation. */
+const TONES: Readonly<Record<ArtFamily, readonly [number, number, number, number, number]>> = {
+  pixel: [HUE.rose + 18, 30, 170, 22, 0.85],
+  parallax: [HUE.violet, 74, 150, 30, 0.95],
+  bands: [HUE.teal, -30, -133, 12, 1],
+  vector: [HUE.accent - 16, -30, 120, 14, 0.9],
+  lcd: [HUE.teal - 12, -30, 160, 28, 0.8],
+  disc: [HUE.accent + 20, 60, 150, 34, 0.85],
+  poly: [HUE.ok, 60, -110, 14, 0.7],
+  marquee: [HUE.rose, 70, -130, 24, 1],
+  phosphor: [HUE.ok - 10, 20, 180, 10, 0.9],
+  contour: [HUE.accent, 46, 170, 20, 0.8]
 };
 
 /** Canvas size per format, in viewBox units. */
@@ -100,7 +95,7 @@ const SIZE: Readonly<Record<ArtFormat, readonly [number, number]>> = {
 
 /** The family an id draws with: its own mapping, else its kind's, else the default. */
 export function familyFor(id: string, kind?: PlatformKind): ArtFamily {
-  return FAMILY_BY_ID[id] ?? (kind ? FAMILY_BY_KIND[kind] : 'contour');
+  return PLATFORMS[id]?.[0] ?? (kind ? FAMILY_BY_KIND[kind] : 'contour');
 }
 
 /** FNV-1a over the UTF-16 code units of `text`. */
@@ -130,7 +125,7 @@ const op = (v: number): string => String(Math.round(v * 100) / 100);
 const fill = (slot: number, opacity = 1): string =>
   `style="fill:var(--c${slot})${opacity < 1 ? `;fill-opacity:${op(opacity)}` : ''}"`;
 const stroke = (slot: number, width: number, opacity = 1): string =>
-  `style="fill:none;stroke:var(--c${slot});stroke-width:${num(width)};stroke-opacity:${op(opacity)};stroke-linejoin:round"`;
+  `style="fill:none;stroke:var(--c${slot});stroke-width:${num(width)};stroke-opacity:${op(opacity)}"`;
 const stop = (offset: number, slot: number, opacity = 1): string =>
   `<stop offset="${num(offset)}" style="stop-color:var(--c${slot});stop-opacity:${op(opacity)}"/>`;
 const square = (x: number, y: number, w: number, h = w): string =>
@@ -142,6 +137,7 @@ interface Canvas {
   w: number;
   h: number;
   rand: () => number;
+  id: string;
   /** Prefix for element ids, unique per platform and format. */
   uid: string;
   defs: string[];
@@ -154,6 +150,29 @@ function between(c: Canvas, lo: number, hi: number): number {
 
 function pick<T>(c: Canvas, items: readonly [T, ...T[]]): T {
   return items[Math.floor(c.rand() * items.length)] ?? items[0];
+}
+
+/** A composition for the canvas: mapped siblings take turns through `shapes`, others pick one. */
+function layout<T>(c: Canvas, shapes: readonly [T, ...T[]]): T {
+  const family = PLATFORMS[c.id]?.[0];
+  const turn = Object.keys(PLATFORMS)
+    .filter((k) => PLATFORMS[k]?.[0] === family)
+    .indexOf(c.id);
+  return turn < 0 ? pick(c, shapes) : (shapes[turn % shapes.length] ?? shapes[0]);
+}
+
+/** A focal x as a fraction of the width, visible at every banner aspect in use. */
+function focusX(c: Canvas): number {
+  return c.w > 400 ? between(c, 0.48, 0.52) : between(c, 0.32, 0.68);
+}
+
+/** `count` round stars in slot 4 across x 0 to `x1` and y `y0` to `y1`. */
+function stars(c: Canvas, count: number, x1: number, y0: number, y1: number, opacity: number): void {
+  let d = '';
+  for (let k = 0; k < count; k += 1) {
+    d += dot(between(c, 0, x1), between(c, y0, y1), between(c, 0.5, 1.3));
+  }
+  c.body.push(`<path d="${d}" ${fill(4, opacity)}/>`);
 }
 
 /** Vertical background gradient from slot `top` to slot `bottom`. */
@@ -187,29 +206,42 @@ const BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
 /** 8-bit cartridges: a chunky tile mosaic, an ordered dither through a four-step ramp. */
 function pixel(c: Canvas): void {
   backdrop(c);
+  const { w, h } = c;
   const cell = pick(c, [10, 12]);
-  const aspect = c.h / c.w;
-  const radial = c.rand() < 0.5;
-  const fx = between(c, 0.1, 0.9) - 0.5;
-  const fy = (between(c, 0.2, 0.8) - 0.5) * aspect;
-  const reach = between(c, 0.45, 0.6);
-  const angle = between(c, -0.6, 0.6) + (c.rand() < 0.5 ? 0 : Math.PI);
-  const wave = between(c, 0.04, 0.1);
-  const freq = between(c, 5, 10);
+  const cols = Math.ceil(w / cell);
+  const rows = Math.ceil(h / cell);
+  const aspect = h / w;
+  const fx = focusX(c) - 0.5;
+  const fy = (between(c, 0.25, 0.5) - 0.5) * aspect;
+  const angle = between(c, 0.3, 0.9) * (c.rand() < 0.5 ? 1 : -1) + (c.rand() < 0.5 ? 0 : Math.PI);
+  const corner = c.rand() < 0.5 ? -0.5 : 0.5;
+  const freq = between(c, 9, 15);
   const phase = between(c, 0, 6.3);
-  const cols = Math.ceil(c.w / cell);
-  const rows = Math.ceil(c.h / cell);
+  const shape = layout(c, ['sweep', 'burst', 'corner', 'wave', 'checker'] as const);
   const ramp = [2, 6, 3, 7];
   const levels = ramp.map(() => '');
   for (let j = 0; j < rows; j += 1) {
     for (let i = 0; i < cols; i += 1) {
       const x = (i + 0.5) / cols - 0.5;
       const y = ((j + 0.5) / rows - 0.5) * aspect;
-      const v =
-        (radial
-          ? 1 - Math.hypot(x - fx, y - fy) / reach
-          : 0.45 + (x * Math.cos(angle) + y * Math.sin(angle)) * 1.1) +
-        Math.sin(x * freq + phase) * wave;
+      const d = Math.hypot(x - fx, y - fy);
+      let v: number;
+      switch (shape) {
+        case 'sweep':
+          v = 0.45 + (x * Math.cos(angle) + y * Math.sin(angle)) * 1.2;
+          break;
+        case 'burst':
+          v = 1.05 - d * 2.6;
+          break;
+        case 'corner':
+          v = 1 - Math.hypot(x - corner, y + aspect / 2) * 1.3;
+          break;
+        case 'wave':
+          v = 0.5 + Math.sin(x * freq + phase) * 0.3 + Math.sin(y * freq * 2 - phase) * 0.18;
+          break;
+        case 'checker':
+          v = (1 - d * 2) * ((Math.floor(i / 4) + Math.floor(j / 4)) % 2 ? 1 : 0.62);
+      }
       const t = ((BAYER[(j % 4) * 4 + (i % 4)] ?? 0) + 0.5) / 16;
       const level = Math.floor(v * ramp.length + t - 0.45) - 1;
       if (level >= 0) {
@@ -238,9 +270,9 @@ function waves(c: Canvas, count: number): (x: number) => number {
 function parallax(c: Canvas): void {
   backdrop(c, 0, 3);
   const { w, h } = c;
-  const sx = w * (pick(c, [0.24, 0.5, 0.76]) + between(c, -0.06, 0.06));
-  const sy = h * 0.42;
-  const sr = h * between(c, 0.2, 0.3);
+  const sx = w * focusX(c);
+  const sy = h * between(c, 0.32, 0.44);
+  const sr = h * between(c, 0.16, 0.32);
   c.defs.push(
     `<linearGradient id="${c.uid}sun" x1="0" y1="0" x2="0" y2="1">${stop(0, 4)}${stop(1, 7)}</linearGradient>`
   );
@@ -256,11 +288,7 @@ function parallax(c: Canvas): void {
   }
   glow(c, 'halo', sx, sy, sr * 2.4, sr * 1.6, 4, 0.35);
   c.body.push(`<path d="${sun}" fill="url(#${c.uid}sun)"/>`);
-  let stars = '';
-  for (let k = 0; k < 18; k += 1) {
-    stars += square(between(c, 0, w), between(c, 0, h * 0.4), 2);
-  }
-  c.body.push(`<path d="${stars}" ${fill(4, 0.6)}/>`);
+  stars(c, 18, w, 0, h * 0.4, 0.6);
   const layers = [
     { y: 0.56, amp: 0.2, slot: 2, op: 0.45 },
     { y: 0.68, amp: 0.16, slot: 2, op: 0.85 },
@@ -305,7 +333,7 @@ function bands(c: Canvas): void {
     }
     x += span + Math.ceil(between(c, 1, 5)) * block;
   }
-  c.body.push(`<path d="${blocks}" ${fill(2)}/>`);
+  c.body.push(`<path d="${blocks}" ${fill(5)}/>`);
   scanlines(c, 0, 0.3);
 }
 
@@ -313,7 +341,7 @@ function bands(c: Canvas): void {
 function vector(c: Canvas): void {
   backdrop(c, 0, 0);
   const { w, h } = c;
-  const cx = w * between(c, 0.55, 0.72);
+  const cx = w > 400 ? w * focusX(c) : w * between(c, 0.55, 0.72);
   const cy = h * between(c, 0.42, 0.58);
   const sides = pick(c, [4, 5, 6, 8]);
   const twist = between(c, 0.12, 0.28) * (c.rand() < 0.5 ? -1 : 1);
@@ -339,56 +367,72 @@ function vector(c: Canvas): void {
   }
   glow(c, 'core', cx, cy, w * 0.2, h * 0.5, 3, 0.35);
   c.body.push(`<path d="${d}" ${stroke(3, 4, 0.16)}/>`, `<path d="${d}" ${stroke(4, 1, 0.8)}/>`);
-  let stars = '';
-  for (let k = 0; k < 14; k += 1) {
-    stars += dot(between(c, 0, w * 0.45), between(c, 0, h), between(c, 0.6, 1.3));
-  }
-  c.body.push(`<path d="${stars}" ${fill(4, 0.7)}/>`);
+  stars(c, 14, w * 0.45, 0, h, 0.7);
 }
 
-/** A mirrored random sprite, as rows of booleans. */
-function sprite(c: Canvas, size: number): boolean[][] {
-  const half = Math.ceil(size / 2);
-  return Array.from({ length: size }, () => {
-    const left = Array.from({ length: half }, () => c.rand() < 0.5);
-    return [...left, ...left.slice(0, size - half).reverse()];
-  });
-}
-
-/** Handhelds: an LCD dot matrix with lit sprites, their ghosting and a backlight glow. */
+/** Handhelds: abstract lit shapes on an LCD dot matrix, with ghosting and a backlight glow. */
 function lcd(c: Canvas): void {
   backdrop(c, 1, 0);
   const { w, h } = c;
   const cell = pick(c, [5, 6]);
+  const cols = Math.floor(w / cell);
+  const rows = Math.floor(h / cell);
+  const fx = Math.round(focusX(c) * cols);
+  const fy = Math.round(rows * between(c, 0.3, 0.4));
+  const r = Math.round(rows * (w > 400 ? between(c, 0.16, 0.2) : between(c, 0.2, 0.26)));
+  const span = Math.round(cols * (w > 400 ? 0.12 : 0.32));
+  const ridge = waves(c, 2);
+  const shape = layout(c, ['bars', 'land', 'rings', 'glyphs', 'dots'] as const);
   c.defs.push(
     `<pattern id="${c.uid}dm" width="${cell}" height="${cell}" patternUnits="userSpaceOnUse"><rect x=".5" y=".5" width="${cell - 1}" height="${cell - 1}" ${fill(2, 0.3)}/></pattern>`
   );
-  glow(c, 'bl', w * between(c, 0.3, 0.7), h * 0.35, w * 0.55, h * 0.9, 3, 0.4);
+  glow(c, 'bl', fx * cell, fy * cell, w * 0.5, h * 0.9, 3, 0.45);
   c.body.push(`<rect width="${w}" height="${h}" fill="url(#${c.uid}dm)"/>`);
+  const on = (i: number, j: number): boolean => {
+    const dx = i - fx;
+    const dy = j - fy;
+    switch (shape) {
+      case 'bars': {
+        const tall = Math.round((ridge(Math.floor(i / 3) * 0.9) * 0.5 + 0.5) * r * 2) + 1;
+        return Math.abs(dx) <= span && i % 3 !== 2 && dy <= r && dy > r - tall;
+      }
+      case 'land': {
+        const ground = r - Math.round((ridge(i * 0.07) * 0.5 + 0.5) * r * 1.4);
+        const sun = Math.hypot(dx - span / 2, dy + r * 0.6) < r * 0.5;
+        return sun || (dy >= ground && dy <= r + 3 && (dy === ground || (i + j) % 2 === 0));
+      }
+      case 'dots':
+        return i % 2 === 0 && j % 2 === 0 && Math.abs(dx) + Math.abs(dy) * 2 < r * 3;
+      case 'rings':
+        return Math.hypot(dx, dy * 1.2) < r * 1.7 && Math.round(Math.hypot(dx, dy * 1.2)) % 3 === 0;
+      case 'glyphs': {
+        // Circle, square and diamond outlines: one radius under three norms.
+        const k = Math.round(dx / (r * 2.2));
+        const x = Math.abs(dx - k * r * 2.2);
+        const y = Math.abs(dy);
+        const norm = [Math.hypot(x, y), Math.max(x, y), (x + y) * 0.8][k + 1];
+        return norm !== undefined && Math.abs(norm - r * 0.85) < 0.6;
+      }
+    }
+  };
   let lit = '';
   let ghost = '';
-  const count = Math.round(w / 110);
-  const size = pick(c, [7, 8]);
-  for (let k = 0; k < count; k += 1) {
-    const ox = Math.round(((k + between(c, 0.15, 0.55)) * w) / count / cell) * cell;
-    const oy = Math.round((h * between(c, 0.18, 0.6)) / cell) * cell;
-    sprite(c, size).forEach((row, j) => {
-      row.forEach((on, i) => {
-        if (on) {
-          lit += square(ox + i * cell + 0.5, oy + j * cell + 0.5, cell - 1);
-          ghost += square(ox + (i - 1) * cell + 0.5, oy + j * cell + 0.5, cell - 1);
-        }
-      });
-    });
+  for (let j = 0; j < rows; j += 1) {
+    for (let i = 0; i < cols; i += 1) {
+      if (on(i, j)) {
+        lit += square(i * cell + 0.5, j * cell + 0.5, cell - 1);
+        ghost += square((i - 1) * cell + 0.5, j * cell + 0.5, cell - 1);
+      }
+    }
   }
-  c.body.push(`<path d="${ghost}" ${fill(4, 0.18)}/>`, `<path d="${lit}" ${fill(4, 0.8)}/>`);
+  c.body.push(`<path d="${ghost}" ${fill(4, 0.18)}/>`, `<path d="${lit}" ${fill(4, 0.85)}/>`);
 }
 
 /** Discs: concentric tracks under a thin-film sheen and a sweep of light. */
 function disc(c: Canvas): void {
   backdrop(c);
   const { w, h } = c;
-  const cx = w * (pick(c, [0.3, 0.72, 0.78]) + between(c, -0.05, 0.05));
+  const cx = w > 400 ? w * focusX(c) : w * (pick(c, [0.3, 0.72, 0.78]) + between(c, -0.05, 0.05));
   const cy = h * between(c, 0.36, 0.5);
   const r = h * between(c, 0.95, 1.25);
   const tilt = between(c, 0, Math.PI);
@@ -487,42 +531,39 @@ function poly(c: Canvas): void {
   c.body.push(`<path d="${mesh}" ${stroke(0, 0.6, 0.35)}/>`);
 }
 
-/** Arcade: a starfield over a glowing horizon, framed by marquee bulbs. */
+/** Arcade: a perspective grid running to a glowing horizon, under a chase of marquee bulbs. */
 function marquee(c: Canvas): void {
   backdrop(c);
   const { w, h } = c;
-  const horizon = h * between(c, 0.55, 0.66);
-  glow(c, 'hz', w * between(c, 0.35, 0.65), horizon, w * 0.7, h * 0.35, 3, 0.8);
-  let far = '';
-  let near = '';
-  const stars = Math.round((w * h) / 900);
-  for (let k = 0; k < stars; k += 1) {
-    const x = between(c, 0, w);
-    const y = between(c, 14, horizon - 4);
-    if (c.rand() < 0.75) {
-      far += dot(x, y, 0.7);
-    } else {
-      near += dot(x, y, 1.3);
-    }
+  const horizon = h * (w > 400 ? between(c, 0.44, 0.52) : between(c, 0.3, 0.36));
+  const vx = w * focusX(c);
+  glow(c, 'hz', vx, horizon, w * 0.4, h * 0.45, 3, 0.9);
+  stars(c, w / 12, w, 16, horizon - 6, 0.6);
+  c.body.push(`<rect y="${num(horizon)}" width="${w}" height="${num(h - horizon)}" ${fill(0, 0.6)}/>`);
+  let grid = `M0 ${num(horizon)}H${w}`;
+  const pitch = between(c, 34, 46);
+  for (let k = -Math.ceil(w / pitch); k <= w / pitch; k += 1) {
+    grid += `M${num(vx + k * pitch * 0.1)} ${num(horizon)}L${num(vx + k * pitch * 1.4)} ${h}`;
   }
-  c.body.push(`<path d="${far}" ${fill(4, 0.45)}/>`, `<path d="${near}" ${fill(4, 0.9)}/>`);
-  c.body.push(`<rect y="${num(horizon)}" width="${w}" height="${num(h - horizon)}" ${fill(0, 0.55)}/>`);
-  c.body.push(`<rect y="${num(horizon)}" width="${w}" height="1" ${fill(4, 0.7)}/>`);
-  const pitch = pick(c, [12, 14, 16]);
-  const phase = Math.floor(between(c, 0, 3));
-  let on = '';
+  for (let t = 1; t < 8; t += 1) {
+    grid += `M0 ${num(horizon + (h - horizon) * (t / 7) ** 2)}H${w}`;
+  }
+  c.body.push(`<path d="${grid}" ${stroke(3, 3, 0.25)}/>`, `<path d="${grid}" ${stroke(4, 0.8, 0.75)}/>`);
+  const gap = pick(c, [9, 10, 11]);
+  const phase = Math.floor(between(c, 0, 2));
+  let lit = '';
   let off = '';
   let halo = '';
-  for (let k = 0; k * pitch < w; k += 1) {
-    const x = k * pitch + pitch / 2;
-    if ((k + phase) % 3 === 0) {
-      on += dot(x, 7, 2.2);
-      halo += dot(x, 7, 5.5);
+  for (let k = 0; k * gap < w; k += 1) {
+    const x = k * gap + gap / 2;
+    if ((k + phase) % 2 === 0) {
+      lit += dot(x, 7, 2.1);
+      halo += dot(x, 7, 5);
     } else {
-      off += dot(x, 7, 1.8);
+      off += dot(x, 7, 1.6);
     }
   }
-  c.body.push(`<path d="${halo}" ${fill(5, 0.22)}/>`, `<path d="${off}" ${fill(2, 0.8)}/>`, `<path d="${on}" ${fill(5)}/>`);
+  c.body.push(`<path d="${halo}" ${fill(5, 0.25)}/>`, `<path d="${off}" ${fill(2, 0.8)}/>`, `<path d="${lit}" ${fill(5)}/>`);
 }
 
 /** Computers: rows of glyph-like blocks on a phosphor raster, with a cursor. */
@@ -592,19 +633,21 @@ const DRAW: Readonly<Record<ArtFamily, (c: Canvas) => void>> = {
  */
 export function renderArt(id: string, kind: PlatformKind | undefined, format: ArtFormat): Art {
   const family = familyFor(id, kind);
-  const tone = TONES[family];
+  const [base, second, third, spread, sat] = TONES[family];
   const rand = prng(hash(`${family}:${id}`));
-  const primary = tone.base + (rand() * 2 - 1) * tone.spread;
+  const [, hue, idSat = 1, idSecond = second] = PLATFORMS[id] ?? [];
+  const primary = (hue ?? base) + (rand() * 2 - 1) * (hue === undefined ? spread : 6);
   const hues: Hues = {
     primary,
-    secondary: primary + tone.second + (rand() * 2 - 1) * 10,
-    tertiary: primary + tone.third
+    secondary: primary + idSecond + (rand() * 2 - 1) * 10,
+    tertiary: primary + third
   };
   const [w, h] = SIZE[format];
   const canvas: Canvas = {
     w,
     h,
     rand: prng(hash(`${format}:${id}`)),
+    id,
     uid: `pa-${id.replace(/[^a-zA-Z0-9_-]/g, '')}-${format}-`,
     defs: [],
     body: []
@@ -612,7 +655,7 @@ export function renderArt(id: string, kind: PlatformKind | undefined, format: Ar
   DRAW[family](canvas);
   const anchor = format === 'card' ? 'YMin' : 'YMid';
   const svg =
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMid${anchor} slice" focusable="false" style="${slotVars(hues, tone.sat)}">` +
+    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${w} ${h}" preserveAspectRatio="xMid${anchor} slice" focusable="false" style="${slotVars(hues, sat * idSat)}">` +
     `<defs>${canvas.defs.join('')}</defs>${canvas.body.join('')}</svg>`;
   return { family, svg };
 }
