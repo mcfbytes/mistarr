@@ -36,7 +36,7 @@ builds only the SPA, and `make clean` removes `target/`, `dist/` and
 `web/dist`.
 
 The binary at `target/armv7-unknown-linux-musleabihf/release/mistarr` is
-statically linked and stripped, measured at 6,599,056 bytes (6.29 MiB) with
+statically linked and stripped, measured at 6,746,064 bytes (6.43 MiB) with
 the SPA embedded.
 
 Dependencies must build for this target without a C toolchain surprise:
@@ -276,7 +276,21 @@ non-zero status or a signal, the supervisor logs it to `mistarr.log` and
 starts it again after 5 s, doubling the wait on each crash up to 5 minutes.
 After 5 crashes within 10 minutes it logs that it gives up and exits. A
 clean exit is not restarted. `stop` ends the supervisor first, then the
-daemon; `status` reports a supervisor waiting to restart.
+daemon; `status` reports a supervisor waiting to restart. mistarr stops a
+download client on the board while a core runs (DOWNLOAD-CLIENTS.md "Core
+gate") and resumes it when it shuts down; `stop` and `install.sh` also
+resume a client recorded in `/tmp/mistarr/client.frozen` (under
+`MISTARR_TEMP_DIR` when that is set), since a daemon killed after 20 s
+cannot. They act only on a regular file of their own user in a 0700
+directory, and signal only an `rtorrent` or `transmission-daemon` process
+that still has the recorded start time. `install.sh` resumes it only once the
+launcher stopped mistarr, or no mistarr runs.
+
+`[transfer] pause_client_while_playing` is on by default: a client on the
+board stops while a core runs and one elsewhere stops uploading. `[limits]`
+values of 0 leave the client's own limits alone; non-zero ones are set at the
+menu or while a core runs, never above a limit the client already has, and
+the client's own come back once they no longer apply.
 
 `[jobs] scan_interval_minutes` in `mistarr.toml` defaults to 1440: a daily
 rescan of the whole library. Set it to 0 to disable the timer and rely on the

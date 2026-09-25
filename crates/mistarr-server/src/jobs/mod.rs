@@ -2,6 +2,7 @@
 
 pub mod arcade;
 pub mod chd;
+pub mod core_limits;
 pub mod corename;
 pub mod dat_import;
 pub mod detect_client;

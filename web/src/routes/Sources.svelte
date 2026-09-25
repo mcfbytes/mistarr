@@ -10,6 +10,8 @@
   import MagnetField from '../lib/MagnetField.svelte';
   import UrlField from '../lib/UrlField.svelte';
   import StatusPill from '../lib/StatusPill.svelte';
+  import ClientHeld from '../lib/ClientHeld.svelte';
+  import { getStatus } from '../lib/stores/status.svelte';
   import type { SeedPolicy } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -20,6 +22,7 @@
   });
 
   const sources = $derived(getSources());
+  const pausedWhilePlaying = $derived(getStatus()?.pause_client_while_playing === true);
   const platforms = $derived(getPlatforms());
 
   // The server may format a ratio as "1.0"; compare the parsed number so
@@ -102,6 +105,7 @@
 
 <div class="page">
   <h1>Sources</h1>
+  <ClientHeld />
 
   <div class="card upload">
     <UploadField which="sources" label="Add a .torrent file" accept=".torrent" />
@@ -169,6 +173,7 @@
                 <option value="ratio:1">Until ratio 1</option>
                 <option value="ratio:2">Until ratio 2</option>
               </select>
+              {#if pausedWhilePlaying}<span class="muted seed-note">Paused while a core runs</span>{/if}
             </td>
             <td>{source.client_id ? 'in client' : '—'}</td>
             <td>
@@ -194,9 +199,14 @@
     margin-bottom: 1em;
   }
 
-  .reason {
+  .reason,
+  .seed-note {
     display: block;
     margin-top: 0.2em;
+  }
+
+  .seed-note {
+    font-size: 0.85em;
   }
 
   .table-wrap {

@@ -244,9 +244,12 @@ fn stale_parts_are_removed() {
     std::fs::write(dir.path().join("fetch-1-2.part"), b"x").expect("write");
     std::fs::write(dir.path().join("etilqs_1"), b"x").expect("write");
     std::fs::write(dir.path().join(".upload-1-2.part"), b"x").expect("write");
+    let frozen = dir.path().join(crate::freeze::FROZEN_NAME);
+    std::fs::write(&frozen, b"1").expect("write");
     clean_stale(dir.path());
     assert!(!dir.path().join("fetch-1-2.part").exists());
     assert!(dir.path().join("etilqs_1").exists());
+    assert!(frozen.exists(), "the frozen client's record is never swept");
     clean_parts(dir.path(), ".upload-");
     assert!(!dir.path().join(".upload-1-2.part").exists());
     clean_stale(&dir.path().join("none"));

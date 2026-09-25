@@ -79,6 +79,10 @@ pub fn options_in(dir: &Path) -> Options {
         client_start_wait: Duration::ZERO,
         ionice: None,
         ca_file: None,
+        kill: std::path::PathBuf::from("kill"),
+        proc_dir: dir.join("proc"),
+        frozen_file: dir.join("run").join(mistarr_server::freeze::FROZEN_NAME),
+        hold_recheck: Duration::from_secs(3600),
     }
 }
 

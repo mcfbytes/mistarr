@@ -16,6 +16,9 @@ LAUNCHER="$SCRIPTS_DIR/mistarr.sh"
 PREV_LAUNCHER="$LAUNCHER.prev"
 DB="$INSTALL_DIR/mistarr.db"
 DB_PREV="$DB.prev"
+# Where mistarr records a download client it stopped while a core runs.
+FROZEN="${MISTARR_FROZEN:-${MISTARR_TEMP_DIR:-/tmp/mistarr}/client.frozen}"
+PROCDIR="${MISTARR_PROC:-/proc}"
 # Written once a rollback set is complete; a set without it is never restored.
 PREV_OK="$PREV.ok"
 # Test-only hook: a command that runs the binary, which a test cannot execute.
@@ -392,12 +395,65 @@ run_launcher() {
     MISTARR_ROOT="$ROOT" "$LAUNCHER" < /dev/null
 }
 
+# True while the pid file names a live process running the installed binary.
+mistarr_running() {
+    rpid=$(cat "$INSTALL_DIR/mistarr.pid" 2>/dev/null) || return 1
+    [ -n "$rpid" ] && kill -0 "$rpid" 2>/dev/null || return 1
+    tr '\0' '\n' < "$PROCDIR/$rpid/cmdline" 2>/dev/null | grep -qF "$BIN"
+}
+
+# Prints "<uid> <mode string>" for $1, such as "0 drwx------", through stat,
+# or through ls -ldn on a BusyBox built without stat formats.
+owner_mode() {
+    if om=$(stat -c '%u %A' "$1" 2>/dev/null) && [ -n "$om" ]; then
+        echo "$om"
+    else
+        # shellcheck disable=SC2012 # one path whose owner and mode are read, not a listing to parse
+        ls -ldn "$1" 2>/dev/null | awk '{ print $3, substr($1, 1, 10) }'
+    fi
+}
+
+# Resumes a download client mistarr stopped for a running core, when the
+# recorded pid still names that process; see docs/DOWNLOAD-CLIENTS.md.
+thaw_client() {
+    [ -e "$FROZEN" ] || [ -L "$FROZEN" ] || return 0
+    fdir=$(dirname "$FROZEN")
+    me=$(id -u)
+    # Only a record mistarr wrote: a regular file of this user in its private directory.
+    if [ -L "$FROZEN" ] || [ ! -f "$FROZEN" ] || [ -L "$fdir" ] \
+        || [ "$(owner_mode "$FROZEN" | cut -d' ' -f1)" != "$me" ] \
+        || [ "$(owner_mode "$fdir")" != "$me drwx------" ]; then
+        echo "ignoring $FROZEN: not a record mistarr wrote" >&2
+        return 0
+    fi
+    if read -r fpid fstart < "$FROZEN" && [ -n "${fpid##*[!0-9]*}" ] \
+        && [ -r "$PROCDIR/$fpid/stat" ]; then
+        now=$(sed 's/.*) //' "$PROCDIR/$fpid/stat" | cut -d' ' -f20)
+        exe=$(readlink "$PROCDIR/$fpid/exe" 2>/dev/null)
+        exe=${exe% (deleted)}
+        case "${exe##*/}" in
+            rtorrent | transmission-daemon) ;;
+            *) now="" ;;
+        esac
+        if [ -n "$fstart" ] && [ "$now" = "$fstart" ] && kill -CONT "$fpid" 2>/dev/null; then
+            echo "download client resumed"
+        fi
+    fi
+    rm -f "$FROZEN"
+}
+
 install_release() {
     mkdir -p "$INSTALL_DIR" "$SCRIPTS_DIR"
 
+    stop_ok=1
     if [ -x "$LAUNCHER" ]; then
         echo "stopping the running mistarr before installing"
-        MISTARR_ROOT="$ROOT" "$LAUNCHER" stop || true
+        MISTARR_ROOT="$ROOT" "$LAUNCHER" stop || stop_ok=0
+    fi
+    # An older launcher does not resume a client its killed daemon left stopped;
+    # a daemon still running keeps its own client stopped.
+    if [ "$stop_ok" -eq 1 ] || ! mistarr_running; then
+        thaw_client
     fi
 
     if db_in_use; then

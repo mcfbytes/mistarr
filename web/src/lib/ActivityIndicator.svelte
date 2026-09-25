@@ -6,6 +6,7 @@
   import FetchCancel from './FetchCancel.svelte';
   import StatusPill from './StatusPill.svelte';
   import ProgressBar from './ProgressBar.svelte';
+  import ClientHeld from './ClientHeld.svelte';
   import type { Job } from './types';
 
   /** The always-visible work indicator in the nav and its panel; see docs/UI.md "Activity indicator". */
@@ -164,6 +165,7 @@
       <h2 id="activity-heading">Background work</h2>
       <span class="muted">{summary.charAt(0).toUpperCase() + summary.slice(1)}</span>
     </header>
+    <ClientHeld />
 
     {#if active.length === 0}
       <p class="empty muted">Nothing is running or waiting.</p>

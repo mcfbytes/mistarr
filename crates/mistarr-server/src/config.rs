@@ -25,6 +25,8 @@ pub struct Config {
     pub client: ClientConfig,
     /// `[limits]`.
     pub limits: LimitsConfig,
+    /// `[transfer]`.
+    pub transfer: TransferConfig,
     /// `[prefs]`.
     pub prefs: PrefsConfig,
     /// `[sources]`.
@@ -273,7 +275,8 @@ pub struct ClientConfig {
     pub remote_path_map: Vec<PathMapping>,
 }
 
-/// `[limits]`: client rate limits in kbps, for the menu and while a core runs. 0 is unlimited.
+/// `[limits]`: client rate limits in kbps, for the menu and while a core runs. 0 leaves
+/// the client's own limit; any other value applies only where it is below that limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LimitsConfig {
@@ -294,6 +297,23 @@ impl Default for LimitsConfig {
             down_kbps_core: 512,
             up_kbps_menu: 0,
             up_kbps_core: 64,
+        }
+    }
+}
+
+/// `[transfer]`: what the download client may do while a core runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TransferConfig {
+    /// Stop a client on the board while a core other than the menu runs, or
+    /// hold the uploads of one on another machine.
+    pub pause_client_while_playing: bool,
+}
+
+impl Default for TransferConfig {
+    fn default() -> Self {
+        Self {
+            pause_client_while_playing: true,
         }
     }
 }
@@ -359,6 +379,9 @@ pub struct RuntimeSettings {
     /// `[scan]`; absent in settings saved before it existed, which then keep the file's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scan: Option<ScanConfig>,
+    /// `[transfer]`; absent in settings saved before it existed, which then keep the file's.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transfer: Option<TransferConfig>,
 }
 
 /// A partial [`RuntimeSettings`], as accepted by `PUT /system/settings`.
@@ -373,6 +396,8 @@ pub struct SettingsPatch {
     pub prefs: Option<PrefsConfig>,
     /// Replaces `[scan]` when present.
     pub scan: Option<ScanConfig>,
+    /// Replaces `[transfer]` when present.
+    pub transfer: Option<TransferConfig>,
 }
 
 impl Config {
@@ -438,10 +463,12 @@ impl Config {
             limits: self.limits,
             prefs: self.prefs.clone(),
             scan: Some(self.scan),
+            transfer: Some(self.transfer),
         }
     }
 
-    /// Lays saved runtime settings over this config; `[scan]` only when they carry it.
+    /// Lays saved runtime settings over this config; `[scan]` and `[transfer]` only
+    /// when they carry them.
     ///
     /// ```
     /// use mistarr_server::config::{Config, RuntimeSettings, ScanConfig};
@@ -455,6 +482,9 @@ impl Config {
         self.prefs = runtime.prefs;
         if let Some(scan) = runtime.scan {
             self.scan = scan;
+        }
+        if let Some(transfer) = runtime.transfer {
+            self.transfer = transfer;
         }
     }
 
@@ -479,6 +509,9 @@ impl Config {
         }
         if let Some(scan) = patch.scan {
             self.scan = scan;
+        }
+        if let Some(transfer) = patch.transfer {
+            self.transfer = transfer;
         }
     }
 }
@@ -639,6 +672,19 @@ mod tests {
         let mut c = Config::default();
         c.apply(&serde_json::from_str(r#"{"scan":{"chd_tracks":true}}"#).expect("patch"));
         assert_eq!(c.runtime().scan, Some(on));
+    }
+
+    #[test]
+    fn the_client_pauses_while_playing_unless_turned_off() {
+        assert!(Config::default().transfer.pause_client_while_playing);
+        let file_off =
+            Config::parse("[transfer]\npause_client_while_playing = false").expect("parse");
+        assert!(!file_off.transfer.pause_client_while_playing);
+        let mut c = file_off.clone();
+        c.overlay(serde_json::from_str(r#"{"limits":{}}"#).expect("old settings"));
+        assert!(!c.transfer.pause_client_while_playing);
+        c.apply(&serde_json::from_str(r#"{"transfer":{}}"#).expect("patch"));
+        assert_eq!(c.runtime().transfer, Some(TransferConfig::default()));
     }
 
     #[test]

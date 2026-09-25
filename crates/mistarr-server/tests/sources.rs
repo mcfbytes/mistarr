@@ -210,6 +210,30 @@ async fn below_threshold_stays_unbound_until_bound_by_hand() {
 }
 
 #[tokio::test]
+async fn a_seed_policy_no_client_took_is_kept_for_one() {
+    use mistarr_server::db::{deferred, sources::SourceId};
+    let b = boot().await;
+    seed_catalog(&b);
+    std::fs::write(sources_dir(&b).join("s.torrent"), matching_set("Seed Set")).expect("write");
+    eventually("a source", || async { sources(&b).await.len() == 1 }).await;
+    let id = only_source(&b).await["id"].clone();
+    let source = SourceId(id.as_i64().expect("id"));
+    let db = b.running.app.db.clone();
+    db.write(move |c| mistarr_server::db::sources::set_client_id(c, source, Some("t")))
+        .await
+        .expect("client id");
+    let r = put(&b, &id, &json!({ "seed_policy": "ratio:1.5" })).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let kept = db.read(deferred::get).await.expect("kept");
+    assert_eq!(
+        kept.iter().map(|e| e.op).collect::<Vec<_>>(),
+        [deferred::Op::Seed],
+        "with no client the policy waits for one"
+    );
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
 async fn seed_policy_disable_and_delete() {
     let b = boot().await;
     seed_catalog(&b);

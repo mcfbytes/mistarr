@@ -13,6 +13,7 @@ use tokio::sync::broadcast::error::RecvError;
 
 use super::{Job, JobContext, Scheduler};
 use crate::app::AppState;
+use crate::db::deferred::Op;
 use crate::db::downloads::{self as rows, DownloadId, DownloadRow, DownloadState};
 use crate::db::sources::{self, SourceId, SourceRow};
 use crate::error::Result;
@@ -299,25 +300,46 @@ impl Job for Deselect {
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
-        let source = self.source_id;
-        let (row, wanted) = ctx
-            .app
-            .db
-            .read(move |c| Ok((sources::get(c, source)?, rows::selected_indices(c, source)?)))
-            .await?;
-        let (Some(cid), Some(client)) = (row.and_then(|r| r.client_id), ctx.app.client()) else {
-            return Ok(());
-        };
-        let id = ClientTorrentId::new(cid);
-        if wanted.is_empty() {
-            match client.stop(&id).await {
-                Ok(()) | Err(ClientError::NotFound) => {}
-                Err(e) => return Err(crate::Error::Job(e.to_string())),
+        deselect(&ctx.app, self.source_id).await.map(drop)
+    }
+}
+
+/// Applies a source's selection in the client, stopping its torrent when
+/// nothing is selected. True once applied, or when the source has no torrent;
+/// false when the client is frozen or missing and the core gate keeps the work
+/// for later, as it does when the client refuses it.
+///
+/// # Errors
+///
+/// [`crate::Error::Job`] when the client refuses; [`crate::Error::Db`] on database failure.
+pub async fn deselect(app: &AppState, source: SourceId) -> Result<bool> {
+    let (row, wanted) = app
+        .db
+        .read(move |c| Ok((sources::get(c, source)?, rows::selected_indices(c, source)?)))
+        .await?;
+    let Some(cid) = row.and_then(|r| r.client_id) else {
+        return Ok(true);
+    };
+    let Some(client) = app.client() else {
+        crate::jobs::core_limits::defer(app, Op::Deselect(source)).await;
+        return Ok(false);
+    };
+    let id = ClientTorrentId::new(cid);
+    let refused = |e: ClientError| crate::Error::Job(e.to_string());
+    if wanted.is_empty() {
+        match client.stop(&id).await {
+            Ok(()) | Err(ClientError::NotFound) => {}
+            Err(e) => {
+                crate::jobs::core_limits::defer(app, Op::Deselect(source)).await;
+                return Err(refused(e));
             }
         }
-        match client.set_wanted(&id, &wanted).await {
-            Ok(()) | Err(ClientError::NotFound | ClientError::MetadataPending) => Ok(()),
-            Err(e) => Err(crate::Error::Job(e.to_string())),
+    }
+    match client.set_wanted(&id, &wanted).await {
+        Ok(()) | Err(ClientError::NotFound | ClientError::MetadataPending) => Ok(true),
+        Err(e) => {
+            crate::jobs::core_limits::defer(app, Op::Deselect(source)).await;
+            Err(refused(e))
         }
     }
 }
@@ -435,11 +457,20 @@ mod tests {
         async fn remove(&self, _id: &ClientTorrentId, _data: bool) -> mistarr_clients::Result<()> {
             nope()
         }
-        async fn set_rate_limits(
+        async fn rate_limit(
             &self,
-            _down: Option<u32>,
-            _up: Option<u32>,
+            _dir: mistarr_clients::Direction,
+        ) -> mistarr_clients::Result<mistarr_clients::RateLimit> {
+            nope()
+        }
+        async fn set_rate_limit(
+            &self,
+            _dir: mistarr_clients::Direction,
+            _limit: mistarr_clients::RateLimit,
         ) -> mistarr_clients::Result<()> {
+            nope()
+        }
+        async fn process_id(&self) -> mistarr_clients::Result<Option<u32>> {
             nope()
         }
     }
