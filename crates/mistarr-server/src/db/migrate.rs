@@ -18,11 +18,68 @@ pub struct Migration {
 /// Every migration, in ascending version order.
 pub const MIGRATIONS: &[Migration] = include!(concat!(env!("OUT_DIR"), "/migrations.rs"));
 
+/// The highest migration this binary embeds.
+///
+/// ```
+/// let latest = mistarr_server::db::migrate::latest();
+/// assert_eq!(Some(latest), mistarr_server::db::migrate::MIGRATIONS.last().map(|m| m.version));
+/// ```
+#[must_use]
+pub fn latest() -> u32 {
+    MIGRATIONS.last().map_or(0, |m| m.version)
+}
+
+/// The recorded schema version, without creating anything: 0 when `schema_version` is absent.
+///
+/// # Errors
+///
+/// [`Error::Db`] when the database cannot be read.
+///
+/// ```
+/// let conn = rusqlite::Connection::open_in_memory().unwrap();
+/// assert_eq!(mistarr_server::db::migrate::recorded_version(&conn).unwrap(), 0);
+/// ```
+pub fn recorded_version(conn: &Connection) -> Result<u32> {
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version')",
+        [],
+        |r| r.get(0),
+    )?;
+    if exists {
+        current_version(conn)
+    } else {
+        Ok(0)
+    }
+}
+
+/// Refuses a database a newer mistarr migrated, reading only; returns its recorded version.
+///
+/// # Errors
+///
+/// [`Error::SchemaTooNew`] when the recorded version exceeds [`latest`], and
+/// [`Error::Db`] when it cannot be read.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let v = mistarr_server::db::migrate::check_supported(&conn).unwrap();
+/// assert_eq!(v, mistarr_server::db::migrate::latest());
+/// ```
+pub fn check_supported(conn: &Connection) -> Result<u32> {
+    let found = recorded_version(conn)?;
+    let supported = latest();
+    if found > supported {
+        return Err(Error::SchemaTooNew { found, supported });
+    }
+    Ok(found)
+}
+
 /// Applies each migration not yet recorded, in order, one transaction each,
 /// and returns the versions applied by this call.
 ///
 /// # Errors
 ///
+/// [`Error::SchemaTooNew`] before any write when a newer mistarr migrated the database;
 /// [`Error::Migration`] names the first migration that failed; earlier ones stay applied.
 ///
 /// ```
@@ -32,6 +89,7 @@ pub const MIGRATIONS: &[Migration] = include!(concat!(env!("OUT_DIR"), "/migrati
 /// assert!(mistarr_server::db::migrate::apply(&mut conn).unwrap().is_empty());
 /// ```
 pub fn apply(conn: &mut Connection) -> Result<Vec<u32>> {
+    check_supported(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (
            version    INTEGER PRIMARY KEY,
@@ -318,6 +376,61 @@ mod tests {
             )
             .expect("plan");
         assert!(plan.contains("import_log_file"), "{plan}");
+    }
+
+    #[test]
+    fn a_newer_schema_is_refused_and_its_contents_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("m.db");
+        let newer = latest() + 1;
+        {
+            let mut conn = Connection::open(&path).expect("open");
+            apply(&mut conn).expect("apply");
+            conn.execute(
+                "INSERT INTO schema_version (version, name, applied_at) VALUES (?1, 'future', 0)",
+                [newer],
+            )
+            .expect("record");
+        }
+        let contents = || -> Vec<String> {
+            let conn = Connection::open(&path).expect("open");
+            let mut stmt = conn
+                .prepare(
+                    "SELECT 'v' || version || name FROM schema_version
+                     UNION ALL SELECT 's' || type || name || COALESCE(sql, '') FROM sqlite_master
+                     ORDER BY 1",
+                )
+                .expect("prepare");
+            stmt.query_map([], |r| r.get(0))
+                .expect("query")
+                .collect::<rusqlite::Result<_>>()
+                .expect("rows")
+        };
+        let before = contents();
+        match crate::db::Db::open(&path) {
+            Err(Error::SchemaTooNew { found, supported }) => {
+                assert_eq!((found, supported), (newer, latest()));
+            }
+            Err(other) => panic!("expected SchemaTooNew, got {other:?}"),
+            Ok(_) => panic!("a newer schema must not open"),
+        }
+        assert_eq!(contents(), before);
+        let msg = Error::SchemaTooNew {
+            found: newer,
+            supported: latest(),
+        }
+        .to_string();
+        assert!(msg.contains(&newer.to_string()) && msg.contains("mistarr.db.prev"));
+    }
+
+    #[test]
+    fn an_equal_schema_opens_normally() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("m.db");
+        drop(crate::db::Db::open(&path).expect("first open"));
+        let db = crate::db::Db::open(&path).expect("second open");
+        let v = db.read_blocking(check_supported).expect("check");
+        assert_eq!(v, latest());
     }
 
     #[test]

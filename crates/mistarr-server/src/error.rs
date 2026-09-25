@@ -18,6 +18,18 @@ pub enum Error {
         /// The SQLite error.
         source: rusqlite::Error,
     },
+    /// The database was migrated by a newer mistarr; its contents are left unchanged.
+    #[error(
+        "database schema version {found} is newer than this mistarr supports ({supported}); \
+         install a newer mistarr, or restore the mistarr.db.prev set with the previous version \
+         when mistarr.prev.ok marks it complete"
+    )]
+    SchemaTooNew {
+        /// The highest migration recorded in the database.
+        found: u32,
+        /// The highest migration this binary embeds.
+        supported: u32,
+    },
     /// A stored value is not the JSON its reader expects.
     #[error("stored value `{key}` is invalid: {source}")]
     Stored {

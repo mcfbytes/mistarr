@@ -44,6 +44,9 @@ pub enum Command {
         #[arg(long)]
         rebuild_groups: bool,
     },
+    /// Print the effective listen address, for `install.sh` to wait on.
+    #[command(hide = true)]
+    ListenAddr,
     /// Write the synthetic benchmark catalogue into a new database file.
     #[command(hide = true)]
     BenchSeed {
@@ -193,6 +196,28 @@ mod tests {
                 scale: 1.0
             }
         );
+    }
+
+    #[test]
+    fn listen_addr_reads_any_valid_toml_form() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let data = dir.path().to_string_lossy().into_owned();
+        let cli = Cli::try_parse_from(["mistarr", "--data", &data, "listen-addr"]).expect("parse");
+        assert_eq!(cli.command(), Command::ListenAddr);
+        assert_eq!(cli.config().expect("config").server.listen, "0.0.0.0:8420");
+        for text in [
+            "[server]\nlisten = '0.0.0.0:9000'\n",
+            "server.listen = \"0.0.0.0:9000\"\n",
+            "[ server ]\nlisten = \"\"\"0.0.0.0:9000\"\"\"\n",
+            "[jobs]\n[server] # the web UI\n  listen=\"0.0.0.0:9000\"\n",
+        ] {
+            std::fs::write(dir.path().join("mistarr.toml"), text).expect("write");
+            assert_eq!(
+                cli.config().expect("config").server.listen,
+                "0.0.0.0:9000",
+                "{text}"
+            );
+        }
     }
 
     #[test]

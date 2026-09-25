@@ -117,6 +117,37 @@ pub fn hash_zeros(mib: u32) -> io::Result<f64> {
     Ok(start.elapsed().as_secs_f64())
 }
 
+/// The database's recorded schema version, opened read-only; `None` when no database exists.
+///
+/// # Errors
+///
+/// [`crate::Error::SchemaTooNew`] when a newer mistarr migrated it, and
+/// [`crate::Error::Db`] when it cannot be read.
+///
+/// ```
+/// let v = mistarr_server::doctor::schema_status(std::path::Path::new("/nonexistent/m.db"));
+/// assert!(matches!(v, Ok(None)));
+/// ```
+pub fn schema_status(path: &Path) -> crate::error::Result<Option<u32>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let flags =
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+    let conn = rusqlite::Connection::open_with_flags(path, flags)?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    crate::db::migrate::check_supported(&conn).map(Some)
+}
+
+fn schema_line(status: &crate::error::Result<Option<u32>>) -> String {
+    let latest = crate::db::migrate::latest();
+    match status {
+        Ok(None) => "database schema: no database".to_owned(),
+        Ok(Some(v)) => format!("database schema: version {v}, this binary supports {latest}"),
+        Err(e) => format!("database schema: {e}"),
+    }
+}
+
 /// One line on how `title_groups` and `title_search` in the database at `path` compare
 /// with their inputs, in a transaction that is rolled back; a missing database says so.
 ///
@@ -262,7 +293,13 @@ pub async fn run(config: &Config, hash_mib: u32, out: &mut impl Write) -> io::Re
         None => writeln!(out, "memory available: unknown")?,
     }
 
-    writeln!(out, "{}", groups_line(&config.paths.db()))?;
+    let schema = schema_status(&config.paths.db());
+    writeln!(out, "{}", schema_line(&schema))?;
+    if matches!(schema, Err(crate::Error::SchemaTooNew { .. })) {
+        writeln!(out, "title groups: not checked (database schema is newer)")?;
+    } else {
+        writeln!(out, "{}", groups_line(&config.paths.db()))?;
+    }
 
     match hash_zeros(hash_mib) {
         Ok(secs) => {
@@ -300,6 +337,31 @@ mod tests {
             img[0x80..0x80 + bytes.len()].copy_from_slice(bytes.as_bytes());
         }
         img
+    }
+
+    #[test]
+    fn schema_status_reports_a_newer_database_without_writing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("m.db");
+        drop(crate::db::Db::open(&path).expect("open"));
+        let latest = crate::db::migrate::latest();
+        assert_eq!(schema_status(&path).expect("status"), Some(latest));
+        rusqlite::Connection::open(&path)
+            .expect("open")
+            .execute(
+                "INSERT INTO schema_version (version, name, applied_at) VALUES (?1, 'future', 0)",
+                [latest + 1],
+            )
+            .expect("record");
+        let before = std::fs::read(&path).expect("read");
+        let status = schema_status(&path);
+        assert!(matches!(status, Err(crate::Error::SchemaTooNew { .. })));
+        assert!(schema_line(&status).contains("newer than this mistarr supports"));
+        assert_eq!(std::fs::read(&path).expect("read"), before);
+        assert!(matches!(
+            rebuild_groups(&path),
+            Err(crate::Error::SchemaTooNew { .. })
+        ));
     }
 
     #[test]
