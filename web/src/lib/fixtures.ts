@@ -9,7 +9,10 @@ import type {
   Platform,
   Settings,
   Source,
+  SourceDetail,
   SourceFile,
+  SourceFileFilter,
+  SourcePreview,
   SystemStatus,
   TitleDetail,
   TitleFilters,
@@ -578,7 +581,9 @@ export const fixtureSources: Source[] = [
     total_size: 900_000_000,
     client_id: 'abc123',
     added_at: 1_770_010_000,
-    suggested_platform_id: 'nes'
+    suggested_platform_id: 'nes',
+    user_binding: false,
+    pending_binding: null
   },
   {
     id: 2,
@@ -595,7 +600,9 @@ export const fixtureSources: Source[] = [
     total_size: 300_000_000,
     client_id: null,
     added_at: 1_770_020_000,
-    suggested_platform_id: 'gb'
+    suggested_platform_id: 'gb',
+    user_binding: false,
+    pending_binding: null
   }
 ];
 
@@ -651,29 +658,112 @@ export const fixtureIncomingSources: IncomingFile[] = [
   }
 ];
 
-export function fixtureSourceFiles(): SourceFile[] {
-  return [
-    {
-      file_index: 0,
-      path: 'Example Quest (USA).nes',
-      size: 131072,
-      rom_id: 1,
-      rom_name: 'Example Quest (USA).nes',
-      title_id: 1,
-      confidence: 'name',
-      candidates: []
-    },
-    {
-      file_index: 1,
-      path: 'Sample Racer (USA).nes',
-      size: 262144,
-      rom_id: null,
-      rom_name: null,
-      title_id: null,
-      confidence: null,
-      candidates: [{ rom_id: 2, rom_name: 'Sample Racer (World).nes', title_id: 2, confidence: 'fuzzy' }]
+const MOCK_FIRST = ['Example', 'Sample', 'Mock', 'Placeholder', 'Demo', 'Test', 'Synthetic', 'Stand-in'];
+const MOCK_SECOND = ['Quest', 'Racer', 'Manor', 'Voyage', 'Puzzle', 'Circuit', 'Garden', 'Tower', 'Harbor', 'Orbit'];
+
+/**
+ * A mock source's files, made up from its row: the first `matched_count` game
+ * files match, every 40th of them only as a name guess, and the last two are an
+ * unlisted file and a readme. A few early files have downloads.
+ */
+export function mockSourceFiles(source: Source): SourceFile[] {
+  const ext = source.platform_id === 'gb' || source.suggested_platform_id === 'gb' ? 'gb' : 'nes';
+  const files: SourceFile[] = [];
+  for (let i = 0; i < source.file_count; i += 1) {
+    const readme = i === source.file_count - 1;
+    const base = `${MOCK_FIRST[i % MOCK_FIRST.length]} ${MOCK_SECOND[Math.floor(i / MOCK_FIRST.length) % MOCK_SECOND.length]}`;
+    const name = `${base} ${Math.floor(i / 80) + 1} (USA)`;
+    const path = readme ? 'readme.txt' : `${source.display_name}/${name}.${ext}`;
+    const matched = !readme && source.platform_id !== null && i < source.matched_count;
+    const guess = matched && i % 40 === 39;
+    const rom = matched && !guess ? { rom_id: 1000 + i, rom_name: `${name}.${ext}`, title_id: 1 + (i % 12) } : null;
+    const downloads: Record<number, SourceFile['download']> = {
+      2: { id: 21, state: 'transferring', progress: 0.45 },
+      4: { id: 22, state: 'queued', progress: 0 },
+      6: { id: 23, state: 'done', progress: 1 }
+    };
+    files.push({
+      file_index: i,
+      path,
+      size: readme ? 2_048 : 131_072 * (1 + (i % 4)),
+      kind: readme ? 'extra' : 'rom',
+      rom_id: rom?.rom_id ?? null,
+      rom_name: rom?.rom_name ?? null,
+      title_id: rom?.title_id ?? null,
+      confidence: rom ? 'name' : null,
+      candidates: guess ? [{ rom_id: 3000 + i, rom_name: `${base} (World).${ext}`, title_id: 2, confidence: 'fuzzy' }] : [],
+      unmatched: matched ? null : source.platform_id === null ? 'unbound' : readme ? 'extra' : 'no_entry',
+      download: matched ? (downloads[i] ?? null) : null
+    });
+  }
+  return files;
+}
+
+/** A page of `mockSourceFiles`, filtered and searched as the server does. */
+export function mockSourceFilesPage(
+  source: Source,
+  opts: { filter?: SourceFileFilter | undefined; q?: string | undefined; limit: number; offset: number }
+): { items: SourceFile[]; total: number } {
+  const q = opts.q?.trim().toLowerCase() ?? '';
+  const all = mockSourceFiles(source).filter((f) => {
+    const hit = f.rom_id !== null || f.candidates.length > 0;
+    const keep =
+      opts.filter === 'matched'
+        ? hit
+        : opts.filter === 'unmatched'
+          ? !hit
+          : opts.filter === 'wanted'
+            ? f.download !== null && f.download.state !== 'cancelled'
+            : true;
+    return keep && (!q || f.path.toLowerCase().includes(q));
+  });
+  return { items: all.slice(opts.offset, opts.offset + opts.limit), total: all.length };
+}
+
+/** The mock detail of `source`, its counts read from `mockSourceFiles`. */
+export function mockSourceDetail(source: Source): SourceDetail {
+  const files = mockSourceFiles(source);
+  const summary = { matched: 0, candidates: 0, unmatched: 0, extra: 0, wanted: 0 };
+  for (const f of files) {
+    if (f.rom_id !== null) {
+      summary.matched += 1;
+    } else if (f.candidates.length > 0) {
+      summary.candidates += 1;
+    } else if (f.kind === 'extra') {
+      summary.extra += 1;
+    } else {
+      summary.unmatched += 1;
     }
-  ];
+    if (f.download) {
+      summary.wanted += 1;
+    }
+  }
+  const open = files.filter((f) => f.download && f.download.state !== 'done' && f.download.state !== 'cancelled');
+  const size = open.reduce((n, f) => n + f.size, 0);
+  const done = open.reduce((n, f) => n + Math.round(f.size * (f.download?.progress ?? 0)), 0);
+  const dats =
+    source.platform_id && summary.matched > 0
+      ? [{ dat_version_id: 1, dat_name: `Example ${source.platform_id} list`, version: '20260101', matched: summary.matched }]
+      : [];
+  return { ...source, summary, dats, transfer: { files: open.length, size, done } };
+}
+
+/** The mock dry run: the bound or suggested platform matches most, the others a few files. */
+export function mockSourcePreview(source: Source): SourcePreview {
+  const likely = source.platform_id ?? source.suggested_platform_id;
+  const platforms = scenarioPlatforms()
+    .filter((p) => p.counts.titles > 0)
+    .map((p, i) => ({
+      platform_id: p.id,
+      matched:
+        p.id === source.platform_id
+          ? source.matched_count
+          : p.id === likely
+            ? Math.round(source.file_count * 0.8)
+            : (i * 7) % 4
+    }))
+    .sort((a, b) => b.matched - a.matched || a.platform_id.localeCompare(b.platform_id));
+  return { total: source.file_count, sampled: source.file_count, platforms };
 }
 
 export const fixtureDownloads: Download[] = [

@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::downloads::{self, DownloadState};
 use super::titles::{self, Browse, SearchShape, Sort, TitleId, SEARCH_SHAPE};
-use super::{candidates, chd, files, groups, imports, jobs, launch, sources};
+use super::{candidates, chd, files, groups, imports, jobs, launch, source_detail, sources};
 
 thread_local! {
     static TRACED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -138,6 +138,40 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
     ]
 }
 
+/// The reads of a source's detail view: its file filters, summary and preview.
+fn source_reads() -> Vec<(&'static str, Read<'static>)> {
+    vec![
+        (
+            "source file filters",
+            Box::new(|c| {
+                for filter in [
+                    source_detail::FileFilter::Matched,
+                    source_detail::FileFilter::Unmatched,
+                    source_detail::FileFilter::Wanted,
+                ] {
+                    let query = source_detail::FileQuery {
+                        filter: Some(filter),
+                        q: Some("track".into()),
+                    };
+                    let id = sources::SourceId(1);
+                    drop(source_detail::files(c, id, &query, 50, 0).expect("files"));
+                }
+            }),
+        ),
+        (
+            "source detail",
+            Box::new(|c| drop(source_detail::detail(c, sources::SourceId(1)).expect("detail"))),
+        ),
+        (
+            "reclassify preview",
+            Box::new(|c| {
+                let max = source_detail::PREVIEW_SAMPLE;
+                drop(source_detail::preview(c, sources::SourceId(1), max).expect("preview"));
+            }),
+        ),
+    ]
+}
+
 /// Every hot read with the plan of each statement it runs.
 fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
     let c = seeded();
@@ -182,7 +216,10 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
         ),
         (
             "source files",
-            Box::new(|c| drop(sources::files(c, sources::SourceId(1), 50, 0).expect("files"))),
+            Box::new(|c| {
+                let all = source_detail::FileQuery::default();
+                drop(source_detail::files(c, sources::SourceId(1), &all, 50, 0).expect("files"));
+            }),
         ),
         (
             "downloads list",
@@ -219,7 +256,11 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
         ),
     ];
     let mut out = Vec::new();
-    for (name, read) in reads.into_iter().chain(matching_reads()) {
+    for (name, read) in reads
+        .into_iter()
+        .chain(matching_reads())
+        .chain(source_reads())
+    {
         for sql in traced(&c, read) {
             let p = plan(&c, &sql);
             out.push((name, sql, p));
@@ -229,7 +270,7 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
 }
 
 /// The whole-table walks the hot reads may make, each bounded or inherent.
-const ALLOWED_SCANS: [(&str, &str); 17] = [
+const ALLOWED_SCANS: [(&str, &str); 18] = [
     // The sort over one group's availability rows, which the union gathers by rom.
     ("title detail", "SCAN (subquery-"),
     // A refresh walks at most one chunk of the dirty list and that chunk's grouped rows.
@@ -252,6 +293,8 @@ const ALLOWED_SCANS: [(&str, &str); 17] = [
     ("browse", "SCAN CONSTANT ROW"),
     ("browse", "SCAN title_search VIRTUAL TABLE"),
     ("crc candidate", "SCAN CONSTANT ROW"),
+    // The platform table is the fixed list the binary seeds, a few dozen rows.
+    ("reclassify preview", "SCAN p"),
     ("chd lookups", "SCAN CONSTANT ROW"),
 ];
 
@@ -323,6 +366,36 @@ fn title_detail_seeks_torrent_rows_by_rom() {
         .find(|l| l.contains(" tf ") || l.contains(" c "))
         .expect("torrent rows");
     assert!(first.contains("(rom_id=?)"), "{plan:?}");
+}
+
+/// A source's detail and file pages reach its files as one range of the primary key
+/// and their downloads through `downloads_source`; the preview finds DATs by platform.
+#[test]
+fn source_detail_seeks_the_source_files_and_downloads() {
+    let reads = hot_reads();
+    for name in ["source files", "source file filters", "source detail"] {
+        let plan = plan_of(&reads, name, "torrent_files f");
+        let has = |p: &str| plan.iter().any(|l| l.contains(p));
+        assert!(
+            has("SEARCH f USING INDEX sqlite_autoindex_torrent_files_1 (source_id=?)"),
+            "{name}: {plan:?}"
+        );
+        assert!(!has("SCAN f"), "{name}: {plan:?}");
+    }
+    for name in ["source files", "source file filters"] {
+        let plan = plan_of(&reads, name, "LEFT JOIN downloads d");
+        let seek = "downloads_source (source_id=? AND file_index=?)";
+        assert!(plan.iter().any(|l| l.contains(seek)), "{name}: {plan:?}");
+    }
+    let plan = plan_of(&reads, "source detail", "FROM downloads d JOIN");
+    assert!(
+        plan.iter()
+            .any(|l| l.contains("downloads_source (source_id=?)")),
+        "{plan:?}"
+    );
+    let plan = plan_of(&reads, "reclassify preview", "FROM platforms p");
+    let seek = "titles_source (platform_id=? AND source=?)";
+    assert!(plan.iter().any(|l| l.contains(seek)), "{plan:?}");
 }
 
 /// The group refresh reaches titles by group root and files by rom.

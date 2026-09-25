@@ -335,6 +335,44 @@ mod tests {
     }
 
     #[test]
+    fn a_source_the_user_unbound_keeps_its_choice_and_gets_the_reason() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, name TEXT NOT NULL,
+               applied_at INTEGER NOT NULL);",
+        )
+        .expect("versions");
+        for m in MIGRATIONS.iter().filter(|m| m.version < 19) {
+            conn.execute_batch(m.sql).expect("older migration");
+            conn.execute(
+                "INSERT INTO schema_version (version, name, applied_at) VALUES (?1, ?2, 0)",
+                params![m.version, m.name],
+            )
+            .expect("record");
+        }
+        conn.execute_batch(
+            "INSERT INTO sources (infohash, display_name, origin_file, state, added_at, user_unbound)
+               VALUES ('aa', 'Set aside', 'a.torrent', 'unbound', 0, 1),
+                      ('bb', 'Automatic', 'b.torrent', 'unbound', 0, 0);",
+        )
+        .expect("sources");
+        assert_eq!(apply(&mut conn).expect("apply"), [19]);
+        let rows: Vec<(bool, Option<String>, Option<String>)> = conn
+            .prepare("SELECT user_binding, reason, bind_pending FROM sources ORDER BY id")
+            .expect("prepare")
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        let ignored = crate::jobs::bind_source::IGNORED.to_owned();
+        assert_eq!(
+            rows,
+            [(true, Some(ignored), None), (false, None, None)],
+            "the user's choice survives as user_binding with its reason"
+        );
+    }
+
+    #[test]
     fn arcade_presence_migration_indexes_and_drops_md5_less_member_rows() {
         let mut conn = Connection::open_in_memory().expect("open");
         apply(&mut conn).expect("apply");

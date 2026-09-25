@@ -12,7 +12,12 @@ export function getSources(): Source[] {
 }
 
 export async function loadSources(): Promise<void> {
-  sources = isMock ? fixtureSources : (await api.sources()).items;
+  // Mock mode keeps its patched rows, so a change made on one page shows on the next.
+  sources = isMock ? (sources.length > 0 ? sources : fixtureSources) : (await api.sources()).items;
+}
+
+export function findSource(id: number): Source | undefined {
+  return sources.find((s) => s.id === id);
 }
 
 export function patchSource(id: number, patch: Partial<Source>): void {

@@ -5,6 +5,7 @@ export type RouteName =
   | 'title'
   | 'activity'
   | 'sources'
+  | 'source'
   | 'dats'
   | 'system'
   | 'notfound';
@@ -26,6 +27,9 @@ function parseHash(hash: string): Route {
   }
   if (segments[0] === 'activity') {
     return { name: 'activity', params: {} };
+  }
+  if (segments[0] === 'sources' && segments[1]) {
+    return { name: 'source', params: { id: segments[1] } };
   }
   if (segments[0] === 'sources') {
     return { name: 'sources', params: {} };
@@ -125,4 +129,8 @@ export function platformUrl(id: string): string {
 
 export function titleUrl(id: number): string {
   return `#/t/${id}`;
+}
+
+export function sourceUrl(id: number): string {
+  return `#/sources/${id}`;
 }
