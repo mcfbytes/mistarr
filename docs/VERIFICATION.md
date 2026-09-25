@@ -16,7 +16,12 @@ of each `<release>`, and per rom: `name`, `size`, `crc`, `md5`, `sha1`,
 that have no games. Hash attributes are stored lowercase and
 must have their full hex length; a malformed hash, size or status rejects the
 file. `dat::DatStream` yields one game at a time for importers that write as
-they read.
+they read. After the root element closes it reads to the end of the file,
+and anything there but whitespace, comments, processing instructions and a
+doctype rejects the file (`DatError::TrailingData`), for a lone DAT and for
+each member of a pack alike. No single XML event, a tag, a text run or a
+comment, may exceed 1 MiB (`dat::MAX_EVENT_BYTES`, `DatError::EventTooLarge`),
+checked before it is buffered, so a hostile file cannot grow memory.
 
 Regions and languages come from the name (see "Name parsing"); a DAT's own
 fields (`<release>` or the export's `archive`) fill them only when the name

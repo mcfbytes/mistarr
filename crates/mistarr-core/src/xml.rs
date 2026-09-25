@@ -229,6 +229,84 @@ pub fn lossy(value: &str) -> String {
     String::from_utf8_lossy(&restore(value)).into_owned()
 }
 
+/// A [`BufRead`] that hands out at most a set number of bytes after each [`Capped::arm`],
+/// then fails with [`io::ErrorKind::OutOfMemory`], so one XML event can never grow past
+/// its cap in memory. Unarmed it passes everything through.
+///
+/// ```
+/// use std::io::Read as _;
+/// let mut r = mistarr_core::xml::Capped::new(&b"abcdef"[..]);
+/// r.arm(4);
+/// let mut out = Vec::new();
+/// assert!(r.read_to_end(&mut out).is_err());
+/// assert_eq!(out, b"abcd");
+/// assert!(r.over());
+/// ```
+pub struct Capped<R> {
+    inner: R,
+    consumed: u64,
+    limit: u64,
+}
+
+impl<R: BufRead> Capped<R> {
+    /// Wraps `inner`, unarmed.
+    #[must_use]
+    pub fn new(inner: R) -> Self {
+        Self {
+            inner,
+            consumed: 0,
+            limit: u64::MAX,
+        }
+    }
+
+    /// Allows `cap` more bytes from here.
+    pub fn arm(&mut self, cap: u64) {
+        self.limit = self.consumed.saturating_add(cap);
+    }
+
+    /// Whether the cap was reached.
+    #[must_use]
+    pub fn over(&self) -> bool {
+        self.consumed >= self.limit
+    }
+
+    /// The wrapped reader.
+    #[must_use]
+    pub fn get_ref(&self) -> &R {
+        &self.inner
+    }
+}
+
+impl<R: BufRead> BufRead for Capped<R> {
+    fn fill_buf(&mut self) -> io::Result<&[u8]> {
+        let left = self.limit.saturating_sub(self.consumed);
+        let buf = self.inner.fill_buf()?;
+        if left == 0 && !buf.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "an XML element is too large",
+            ));
+        }
+        let n = usize::try_from(left).unwrap_or(usize::MAX).min(buf.len());
+        Ok(&buf[..n])
+    }
+
+    fn consume(&mut self, amt: usize) {
+        self.consumed = self.consumed.saturating_add(amt as u64);
+        self.inner.consume(amt);
+    }
+}
+
+impl<R: BufRead> Read for Capped<R> {
+    fn read(&mut self, into: &mut [u8]) -> io::Result<usize> {
+        let buf = self.fill_buf()?;
+        let n = buf.len().min(into.len());
+        into[..n].copy_from_slice(&buf[..n]);
+        self.consume(n);
+        Ok(n)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

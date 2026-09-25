@@ -231,7 +231,6 @@ export interface Source {
 
 export type IncomingState = 'waiting' | 'importing' | 'rejected';
 
-/** A file in `dats/` or `sources/` that has not loaded. */
 /** The answer to `POST /fetch`; see docs/API.md "Fetching a URL". */
 export interface FetchStarted {
   /** Cancels the fetch through `DELETE /fetch/{token}`; `null` for a magnet. */
@@ -242,6 +241,7 @@ export interface FetchStarted {
   file: IncomingFile | null;
 }
 
+/** A file in `dats/` or `sources/` that has not loaded. */
 export interface IncomingFile {
   file: string;
   size: number;

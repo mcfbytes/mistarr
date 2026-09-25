@@ -88,6 +88,7 @@ async fn a_stalled_body_times_out() {
     let limits = Limits {
         connect: CONNECT_TIMEOUT,
         idle: Duration::from_millis(100),
+        ..Limits::default()
     };
     let f = Fetcher::new(Roots::bundled(), limits).expect("fetcher");
     let e = body_of(get(&f, &server.url("/slow")).await.expect("head"))
@@ -175,18 +176,113 @@ async fn https_works_with_an_injected_root_and_refuses_without_it() {
     );
 }
 
+#[tokio::test]
+async fn an_http_link_may_redirect_to_https() {
+    let (config, pem) = self_signed();
+    let secure = FileServer::start_tls(config).await.expect("bind");
+    secure.route("/a.dat", FileRoute::ok(b"<datafile/>".to_vec()));
+    let plain = FileServer::start().await.expect("bind");
+    plain.route("/up", FileRoute::redirect(301, &secure.url("/a.dat")));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ca = dir.path().join("ca.pem");
+    std::fs::write(&ca, pem).expect("write");
+    let f = Fetcher::new(Roots::from_pem_file(&ca).expect("roots"), Limits::default())
+        .expect("fetcher");
+    let r = get(&f, &plain.url("/up")).await.expect("followed");
+    assert_eq!(body_of(r).await.expect("body"), b"<datafile/>");
+}
+
+#[tokio::test]
+async fn a_public_link_may_not_redirect_to_a_local_address() {
+    let server = FileServer::start().await.expect("bind");
+    let port = server.addr().port();
+    server.route(
+        "/in",
+        FileRoute::redirect(302, &format!("http://127.0.0.2:{port}/a.dat")),
+    );
+    server.route("/a.dat", FileRoute::ok(b"x".to_vec()));
+    let public_first = fetcher().with_local(|ip| ip != IpAddr::from([127, 0, 0, 1]));
+    let e = get(&public_first, &server.url("/in"))
+        .await
+        .err()
+        .expect("refused");
+    assert!(matches!(e, FetchError::LocalRedirect), "{e:?}");
+    assert_eq!(server.hits(), vec!["/in".to_owned()]);
+    let lan = fetcher();
+    server.route("/in", FileRoute::redirect(302, &server.url("/a.dat")));
+    assert!(
+        get(&lan, &server.url("/in")).await.is_ok(),
+        "a typed LAN link may"
+    );
+}
+
+#[tokio::test]
+async fn a_body_under_the_minimum_rate_fails() {
+    let server = FileServer::start().await.expect("bind");
+    server.route(
+        "/slow",
+        FileRoute::ok(vec![7; 256]).paced(4, Duration::from_millis(40)),
+    );
+    let limits = Limits {
+        min_rate: 1 << 20,
+        window: Duration::from_millis(150),
+        ..Limits::default()
+    };
+    let f = Fetcher::new(Roots::bundled(), limits).expect("fetcher");
+    let e = body_of(get(&f, &server.url("/slow")).await.expect("head"))
+        .await
+        .expect_err("slow");
+    assert!(matches!(e, FetchError::TooSlow(_)), "{e:?}");
+    let e = FetchError::TooSlow(MIN_RATE);
+    assert_eq!(
+        e.to_string(),
+        "The server sent the file too slowly, under 1024 bytes a second."
+    );
+}
+
+#[tokio::test]
+async fn a_compressed_body_is_refused() {
+    let server = FileServer::start().await.expect("bind");
+    server.route(
+        "/gz",
+        FileRoute::ok(vec![0x1f, 0x8b, 8]).with_header("Content-Encoding", "gzip"),
+    );
+    server.route(
+        "/id",
+        FileRoute::ok(b"x".to_vec()).with_header("Content-Encoding", "identity"),
+    );
+    let e = get(&fetcher(), &server.url("/gz"))
+        .await
+        .err()
+        .expect("gzip");
+    assert_eq!(
+        e.to_string(),
+        "The server sent a compressed file mistarr can't read."
+    );
+    assert!(get(&fetcher(), &server.url("/id")).await.is_ok());
+}
+
 #[test]
-fn disposition_names_are_read() {
-    assert_eq!(
-        disposition_file_name("attachment; filename=a.dat").as_deref(),
-        Some("a.dat")
-    );
-    assert_eq!(
-        disposition_file_name("attachment; filename=\"\"").as_deref(),
-        None
-    );
-    assert_eq!(
-        disposition_file_name("attachment; FILENAME*=utf-8'en'x%20y.zip").as_deref(),
-        Some("x y.zip")
-    );
+fn local_addresses_are_recognised() {
+    for local in [
+        "10.1.2.3",
+        "172.16.0.1",
+        "169.254.1.1",
+        "100.64.0.1",
+        "0.0.0.0",
+        "::1",
+        "fd00::1",
+        "fe80::1",
+        "::ffff:192.168.0.1",
+    ] {
+        assert!(is_local(local.parse().expect("ip")), "{local}");
+    }
+    for public in [
+        "192.0.2.1",
+        "100.128.0.1",
+        "2001:db8::1",
+        "::ffff:198.51.100.1",
+    ] {
+        assert!(!is_local(public.parse().expect("ip")), "{public}");
+    }
 }

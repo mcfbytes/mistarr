@@ -34,11 +34,13 @@ pub enum RootsOrigin {
 pub struct Roots {
     pub(super) store: RootCertStore,
     origin: RootsOrigin,
+    skipped: Option<(PathBuf, String)>,
 }
 
 impl Roots {
     /// The bundle named by `SSL_CERT_FILE`, else the first of [`SYSTEM_BUNDLES`] that holds
-    /// a certificate, else [`Roots::bundled`].
+    /// a certificate, else [`Roots::bundled`]. A named bundle that cannot be used is
+    /// reported by [`Roots::skipped`].
     ///
     /// ```
     /// let roots = mistarr_clients::fetch::Roots::system_or_bundled();
@@ -47,24 +49,29 @@ impl Roots {
     #[must_use]
     pub fn system_or_bundled() -> Self {
         let named = std::env::var_os(CERT_FILE_ENV).map(PathBuf::from);
-        named
-            .into_iter()
-            .chain(SYSTEM_BUNDLES.iter().map(PathBuf::from))
-            .find_map(|p| Self::from_pem_file(&p).ok())
-            .unwrap_or_else(Self::bundled)
+        Self::first_usable(named, &SYSTEM_BUNDLES)
     }
 
-    /// No authority at all, for a fetcher that only makes plain http requests.
-    ///
-    /// ```
-    /// assert!(mistarr_clients::fetch::Roots::empty().is_empty());
-    /// ```
+    fn first_usable(named: Option<PathBuf>, system: &[&str]) -> Self {
+        let skipped = named.as_ref().and_then(|p| match Self::from_pem_file(p) {
+            Ok(_) => None,
+            Err(e) => Some((p.clone(), e.to_string())),
+        });
+        let mut roots = named
+            .into_iter()
+            .chain(system.iter().map(PathBuf::from))
+            .find_map(|p| Self::from_pem_file(&p).ok())
+            .unwrap_or_else(Self::bundled);
+        roots.skipped = skipped;
+        roots
+    }
+
+    /// The bundle `SSL_CERT_FILE` named and why it was passed over, when it was.
     #[must_use]
-    pub fn empty() -> Self {
-        Self {
-            store: RootCertStore::empty(),
-            origin: RootsOrigin::Bundled,
-        }
+    pub fn skipped(&self) -> Option<(&Path, &str)> {
+        self.skipped
+            .as_ref()
+            .map(|(p, why)| (p.as_path(), why.as_str()))
     }
 
     /// The Mozilla root set from the `webpki-roots` crate, for boards without a bundle.
@@ -81,6 +88,7 @@ impl Roots {
         Self {
             store,
             origin: RootsOrigin::Bundled,
+            skipped: None,
         }
     }
 
@@ -108,6 +116,7 @@ impl Roots {
         Ok(Self {
             store,
             origin: RootsOrigin::File(path.to_path_buf()),
+            skipped: None,
         })
     }
 
@@ -152,6 +161,17 @@ mod tests {
         std::fs::write(&path, key.cert.pem()).expect("write");
         let roots = Roots::from_pem_file(&path).expect("read");
         assert_eq!(roots.len(), 1);
-        assert_eq!(roots.origin(), &RootsOrigin::File(path));
+        assert_eq!(roots.origin(), &RootsOrigin::File(path.clone()));
+        assert!(roots.skipped().is_none());
+
+        let bad = dir.path().join("bad.pem");
+        std::fs::write(&bad, "junk\n").expect("write");
+        let system = [path.to_str().expect("utf-8")];
+        let roots = Roots::first_usable(Some(bad.clone()), &system);
+        assert_eq!(roots.origin(), &RootsOrigin::File(path.clone()));
+        assert_eq!(roots.skipped().map(|(p, _)| p), Some(bad.as_path()));
+        let roots = Roots::first_usable(None, &[]);
+        assert_eq!(roots.origin(), &RootsOrigin::Bundled);
+        assert!(roots.skipped().is_none());
     }
 }

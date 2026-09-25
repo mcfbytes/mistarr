@@ -382,63 +382,95 @@ debug. It lives in the `url_fetch` job's memory until the job ends.
 2. Any other link must be `http` or `https`, with a host and no user name or
    password; a fragment is dropped, and spaces and other characters a
    request line cannot carry are percent-encoded. The answer is 202 with a
-   token; a `url_fetch` job on the `fetch` lane holds the URL.
-3. The job connects (15 s for TCP and TLS together), sends one GET and
-   follows up to 5 redirects of that request, never from https to http;
-   a 6th redirect, any other non-2xx answer, or 60 s without a byte ends it.
-   Nothing is retried and nothing is fetched again later: a restart fails the
-   job as interrupted. Private and loopback addresses are allowed: mistarr
-   runs on the user's LAN, the user typed the address, and a DAT or torrent
-   on a NAS or another machine at home is the common case, so refusing them
-   would protect nothing the user could not reach from the same browser.
+   token, which starts at a random per-run nonce so a page open across a
+   restart never matches an old one, and is open for `DELETE` once the job
+   is queued; a `url_fetch` job on the `fetch` lane holds the URL.
+3. The job resolves the host, connects (15 s for the lookup, TCP and TLS
+   together), sends one GET and follows up to 5 HTTP redirects of that
+   request, the only URLs besides the typed one it ever requests
+   (PRINCIPLES.md section 2). It never follows a redirect from https to
+   http, nor one to an address on this machine or the local network
+   (loopback, private, link-local, 100.64/10, unique local, unspecified,
+   also IPv4-mapped) when the typed URL's host was not one; it dials only
+   the addresses it checked. A 6th redirect, any other non-2xx answer, a
+   `Content-Encoding` other than `identity`, 60 s without a byte, or an
+   average under 1 KiB/s once 5 minutes have passed ends it. Nothing is
+   retried and nothing is fetched again later: a restart fails the job as
+   interrupted. A typed private or loopback address is allowed: mistarr runs
+   on the user's LAN, the user typed the address, and a DAT or torrent on a
+   NAS or another machine at home is the common case, so refusing it would
+   protect nothing the user could not reach from the same browser.
 4. The body streams into `fetch-<pid>-<token>.part` in SQLite's temporary
    directory when that is in RAM (`/tmp/mistarr`) and `MemAvailable` covers
    the announced length, or 16 MiB when there is none, above
    `[memory] import_floor_mib`; otherwise, and when memory falls short during
    the transfer (checked every 8 MiB), in `<data>/tmp` on the card. It is
-   written in 1 MiB writes. Leftover parts are removed at startup.
+   written in 1 MiB writes. A move to the card that fails removes its
+   partial copy and keeps the file in RAM, and the fetch fails. Leftover
+   parts are removed at startup, in both places, as are the `.upload-*.part`
+   files a restart left in `dats/` and `sources/`.
 5. The first 64 bytes decide the type, never the URL or `Content-Type`: an
-   XML document (`<?xml`, `<datafile`, `<header`, `<!DOCTYPE datafile`,
+   XML document (`<?xml`, `<datafile`, `<header`, `<!DOCTYPE datafile`, or
+   `<!--`, since DATs often open with a comment before any declaration,
    after a byte-order mark and whitespace), a zip local-file header, or a
-   bencoded dictionary (`d` and a key length). Anything else, an HTML page
-   or a ROM or disc image included, ends the transfer at once. A body longer
-   than its type's cap, announced or counted, ends it too.
+   bencoded dictionary (`d` and a key length). A gzip header is refused as
+   a compressed file mistarr cannot read; anything else, an HTML page or a
+   ROM or disc image included, ends the transfer at once as not a DAT or
+   torrent. An HTML page that opens with a comment passes the sniff and is
+   refused by the check. A body longer than its type's cap, announced or
+   counted, ends it too.
 6. Once whole, the file is checked with the importers' own parsers: every
-   game of a DAT through `DatStream`, every member of a zip, which must all
-   be `.dat` or `.xml` and parse, or the whole torrent through
-   `parse_torrent`. Nothing inside is read for further URLs; a torrent's
-   `url-list` and trackers are never contacted by mistarr. A refused file is
-   deleted, never placed.
-7. The file is named from `Content-Disposition`, else the final URL's last
-   path segment, made safe as an upload's name is and given the extension its
-   type needs (`.dat` or `.xml`, `.zip`, `.torrent`), else `download`. A DAT
-   is moved into `dats/` as an upload's part file, renamed in place from
-   `<data>/tmp` or copied from RAM in 1 MiB writes, then renamed to its name
-   or `name (N)` and queued as an upload is (`http::place_dat_part`); a
-   torrent goes through `http::place_source`, which refuses a repeat of a
-   loaded source. From there the incoming list, jobs and toasts are an
-   upload's.
+   game of a DAT through `DatStream`, which also refuses anything after the
+   root element but whitespace, comments and processing instructions, and
+   any single XML event over 1 MiB; every member of a zip, which must all
+   be `.dat` or `.xml` and parse; or the whole torrent through
+   `parse_torrent`. A zip is not placed as fetched: each member is
+   decompressed once, parsed and written as it is read into a new zip
+   (deflate level 1) beside the spool, so the placed pack holds only what
+   was checked and no bytes the central directory does not list; the new
+   zip goes in RAM when memory allows a second copy, else on the card.
+   Nothing inside is read for further URLs; a torrent's `url-list` and
+   trackers are never contacted by mistarr. A refused file is deleted,
+   never placed.
+7. The file is named from `Content-Disposition` (`filename*` in UTF-8 or
+   ISO-8859-1 first, then `filename`, quoted strings unescaped), else the
+   final URL's last path segment, made safe as an upload's name is and
+   given the extension its type needs (`.dat` or `.xml`, `.zip`,
+   `.torrent`), else `download`. A DAT is moved into `dats/` as an upload's
+   part file, renamed in place from `<data>/tmp` or copied from RAM in
+   1 MiB writes, then renamed to its name or `name (N)` and queued as an
+   upload is (`http::place_dat_part`); a torrent goes through
+   `http::place_source`, which refuses a repeat of a loaded source. From
+   there the incoming list, jobs and toasts are an upload's.
 
-Every failure, cancellation and shutdown removes the part file. The `fetch`
-lane runs one fetch at a time and is never held: neither a running core nor
-a manual pause stops a transfer, which is network-bound and would otherwise
-hold a link the user just pasted for the length of a game. While a core
-runs, the copy of a DAT from RAM onto the card rests after each 1 MiB write
-as long as the write took, between 20 ms and 1 s, as the database's
-write-back does, and the daemon's threads are in the idle I/O class. Cancel
-(`DELETE /fetch/{token}`) is honoured between chunks and between games of
-the check; shutdown likewise.
+Every failure, cancellation and shutdown removes the part file and any
+rebuilt pack. The `fetch` lane runs one fetch at a time and is never held:
+neither a running core nor a manual pause stops a transfer, which is
+network-bound and would otherwise hold a link the user just pasted for the
+length of a game. Instead, while a core runs, every write a fetch makes to
+the card rests after each 1 MiB as long as the write took, between 20 ms
+and 1 s, as the database's write-back does: the spool's writes when it is
+on the card, its move there when memory runs short, the rebuilt pack, and
+the copy into `dats/`. The network read waits for each write and its rest,
+so a fetch on the card goes no faster than the card is allowed to take it;
+a fetch in RAM is not slowed. The daemon's threads are in the idle I/O
+class. Cancel (`DELETE /fetch/{token}`) is honoured between chunks, between
+games of the check and between writes of the copy into `dats/`; shutdown
+likewise, leaving the job queued for the restart to fail as interrupted.
 
 https uses rustls with the ring provider, TLS 1.2 and 1.3, and ALPN
-`http/1.1`. Trust anchors are read for each https fetch and dropped with it:
-the PEM bundle `SSL_CERT_FILE` names, else the first of
+`http/1.1`. Trust anchors are read for every fetch, http too since it may
+redirect to https, and dropped with it: the PEM bundle `SSL_CERT_FILE`
+names, else the first of
 `/etc/ssl/certs/ca-certificates.crt`, `/etc/ssl/cert.pem`,
 `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/ca-bundle.pem`,
 `/etc/ssl/certs/cacert.pem` and
 `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem` that holds a
 certificate, else the Mozilla set built in through `webpki-roots`. The
 board's own bundle comes first because it is updated with the image; the
-built-in set, 58 KiB of the binary, covers an image without one. A
+built-in set, 58 KiB of the binary, covers an image without one. A bundle
+`SSL_CERT_FILE` names that cannot be read or holds no certificate is
+passed over with one warning per run naming the variable and the path. A
 certificate error says whether the certificate is untrusted, for another
 host, or outside its validity, which on the board usually means the clock
 is not set yet.
@@ -625,7 +657,7 @@ shutdown is left `queued` for this.
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
 | Arcade presence pass | 500 zips per batch, stat only unless import rows of a changed zip need its central directory; the listing's names and the live MRA zip set persist across batches |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
-| Fetched file (`url_fetch`) | `.torrent` 16 MiB (`MAX_SOURCE_BYTES`), DAT or DAT pack 512 MiB (`MAX_DAT_BYTES`), the uploads' caps, checked against `Content-Length` and while streaming; 1 MiB write buffer; spooled in `/tmp/mistarr` only above `[memory] import_floor_mib`; one fetch at a time; peak RSS about 8.3 MiB over idle for a 50 MiB DAT over https, held within 12 MiB by `tests/memory.rs` |
+| Fetched file (`url_fetch`) | `.torrent` 16 MiB (`MAX_SOURCE_BYTES`), DAT or DAT pack 512 MiB (`MAX_DAT_BYTES`), the uploads' caps, checked against `Content-Length` and while streaming; 1 MiB write buffer; spooled in `/tmp/mistarr` only above `[memory] import_floor_mib`; one fetch at a time; each XML event under 1 MiB; peak RSS 17.5 MiB in all for a 50 MiB DAT over https in a release build, under the 64 MiB ceiling, checked by `tests/memory.rs` |
 | https | rustls with ring, `webpki-roots` (58 KiB of it) and the fetch code add 690 KiB to the stripped armv7 binary, 5.55 to 6.23 MiB with the SPA; trust anchors are loaded per fetch and dropped after it, so idle RSS is unchanged |
 | Browse page or search, with its total | under 100 ms on the board with every major platform's DAT loaded; `tests/browse.rs` holds a host bound and `mistarr bench-search` measures the board |
 | SPA bundle, gzipped | under 200 KiB |

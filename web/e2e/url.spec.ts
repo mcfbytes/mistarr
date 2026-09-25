@@ -36,7 +36,7 @@ test('a fetch shows its progress in the activity panel and a toast when it lands
   const row = running.getByRole('listitem').filter({ hasText: 'URL fetch: Example.dat' });
   await expect(row).toBeVisible();
   await expect(row.getByRole('progressbar')).toBeVisible();
-  await expect(row).toContainText(/Receiving · \d+% · [\d.]+ MB of 2\.4 MB/);
+  await expect(row).toContainText(/Receiving · \d+% · [\d.]+ MiB of 2\.3 MiB/);
   await expect(row.getByRole('button', { name: 'Cancel URL fetch: Example.dat' })).toBeVisible();
   await expect(row.getByRole('link')).toHaveAttribute('href', '#/activity');
   await expect(toasts(page).getByText('DAT received: Example.dat. Queued.')).toBeVisible({ timeout: 10_000 });
@@ -89,4 +89,26 @@ test('no link is remembered after a reload', async ({ page }) => {
       .join('\n')
   );
   expect(stored).not.toContain('example.invalid');
+});
+
+test('unnamed fetches are told apart without the URL and a cancel shows it is pending', async ({ page }) => {
+  await page.goto('/#/dats');
+  for (const link of ['https://example.invalid/wait-one', 'https://example.invalid/wait-two']) {
+    await page.getByLabel('Add from a URL').fill(link);
+    await page.getByRole('button', { name: 'Fetch' }).click();
+    await expect(page.getByLabel('Add from a URL')).toHaveValue('');
+  }
+  await page.getByRole('button', { name: /^Background work:/ }).click();
+  const panel = page.getByRole('region', { name: 'Background work' });
+  const titles = panel.getByRole('link', { name: /^URL fetch: sent at / });
+  await expect(titles).toHaveCount(2);
+  const [first, second] = await titles.allTextContents();
+  expect(first).not.toEqual(second);
+  expect(`${first} ${second}`).not.toMatch(/example|wait/);
+  const cancel = panel.getByRole('button', { name: `Cancel ${first}` });
+  await cancel.click();
+  const pending = panel.getByRole('button', { name: `Cancelling ${first}` });
+  await expect(pending).toBeDisabled();
+  await expect(pending).toHaveText('Cancelling…');
+  await expect(toasts(page).getByText('The fetch was cancelled.')).toBeVisible();
 });

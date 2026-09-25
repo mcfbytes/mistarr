@@ -188,11 +188,26 @@ async fn a_dat_pack_is_placed_and_a_mixed_zip_refused() {
     );
     let (state, progress) = fetched(&b, &server.url("/mixed.zip")).await;
     assert_eq!(state, "failed");
-    assert_eq!(progress["error"], NOT_ACCEPTED);
+    assert_eq!(progress["error"], "This zip holds files other than DATs.");
     let dats = data(&b).join("dats");
     assert!(!names_in(&dats).contains(&"mixed.zip".to_owned()));
     assert!(!names_in(&dats.join("loaded")).contains(&"mixed.zip".to_owned()));
     assert!(names_in(&data(&b).join("tmp")).is_empty());
+
+    let hidden = b"NES bytes no member lists";
+    let mut padded = zip_of(&[("c.dat", DAT.as_bytes())]);
+    padded.extend_from_slice(hidden);
+    server.route("/Padded.zip", FileRoute::ok(padded));
+    let (state, progress) = fetched(&b, &server.url("/Padded.zip")).await;
+    assert_eq!(state, "done", "{progress}");
+    let placed = [
+        dats.join("Padded.zip"),
+        dats.join("loaded").join("Padded.zip"),
+    ]
+    .into_iter()
+    .find_map(|p| std::fs::read(p).ok())
+    .expect("the placed pack");
+    assert!(!placed.windows(hidden.len()).any(|w| w == hidden));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -404,13 +419,44 @@ async fn https_uses_the_given_roots_and_refuses_a_downgrade() {
     plain.route("/a.dat", FileRoute::ok(DAT.as_bytes().to_vec()));
     tls.route("/a.dat", FileRoute::ok(DAT.as_bytes().to_vec()));
     tls.route("/down", FileRoute::redirect(302, &plain.url("/a.dat")));
+    plain.route("/up", FileRoute::redirect(301, &tls.url("/a.dat")));
     let (state, progress) = fetched(&b, &tls.url("/a.dat")).await;
     assert_eq!(state, "done", "{progress}");
+    let (state, progress) = fetched(&b, &plain.url("/up")).await;
+    assert_eq!(
+        state, "done",
+        "an http link may redirect to https: {progress}"
+    );
     let (state, progress) = fetched(&b, &tls.url("/down")).await;
     assert_eq!(state, "failed");
     assert_eq!(
         progress["error"],
         "A redirect from https to http was refused."
     );
-    assert!(plain.hits().is_empty());
+    assert_eq!(
+        plain.hits(),
+        vec!["/up".to_owned()],
+        "the downgrade was never followed"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn parts_a_restart_broke_off_are_swept_at_startup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let data = dir.path().join("data");
+    let left = [
+        data.join("dats").join(".upload-1-1.part"),
+        data.join("sources").join(".upload-1-2.part"),
+        data.join("tmp").join("fetch-1-3.part"),
+    ];
+    for p in &left {
+        std::fs::create_dir_all(p.parent().expect("dir")).expect("mkdir");
+        std::fs::write(p, b"partial").expect("write");
+    }
+    let cfg = config_in(dir.path());
+    let options = options_in(dir.path());
+    let _b = boot_with_options(dir, cfg, options).await;
+    for p in &left {
+        assert!(!p.exists(), "{} was swept", p.display());
+    }
 }

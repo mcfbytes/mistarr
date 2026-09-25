@@ -109,15 +109,22 @@ It fetches a synthetic DAT, a DAT pack and a torrent listing a web seed on
 the same server, and checks each is asked for once, placed and imported,
 with the web seed never requested; it refuses an HTML page, a binary, a zip
 holding a non-DAT, a body past the torrent cap as it streams and one
-announcing more than the DAT cap; it follows five redirects and refuses a
-sixth and a redirect from https to http, the https server presenting a
-certificate generated in the test and trusted through `Options::ca_file`;
-it cancels a slow body and finds no part file left; it places a magnet and
-refuses malformed links. It greps the database and its WAL for the URL, its
+announcing more than the DAT cap; it places a pack with bytes appended past
+its directory and finds them absent from the placed file; it follows five
+redirects and refuses a sixth and a redirect from https to http, and follows
+one from http to https, the https server presenting a certificate generated
+in the test and trusted through `Options::ca_file`; it cancels a slow body
+and finds no part file left; it finds part files a restart left swept at
+startup; it places a magnet and refuses malformed links. It greps the database and its WAL for the URL, its
 path, its query and the server's address, and a global subscriber's
 info-level log for the same. `mistarr-clients` tests the fetcher alone the
 same way, trusting the generated certificate through `Roots::from_pem_file`
-and refusing it with the built-in roots. `web/e2e/url.spec.ts` covers the
+and refusing it with the built-in roots; it refuses a redirect to a local
+address by classing the first loopback address public with
+`Fetcher::with_local`, a body under a raised minimum rate, and a
+`Content-Encoding`, and reads `Content-Disposition` with proptests. The
+spool's unit tests force the memory floor up to move a file to the card and
+make that move fail, finding no partial copy left. `web/e2e/url.spec.ts` covers the
 field on each screen in mock mode.
 
 The fixture tool runs on its own too:

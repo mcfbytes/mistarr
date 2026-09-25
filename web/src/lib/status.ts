@@ -106,9 +106,27 @@ export function jobDetail(payload: Record<string, unknown>): string | null {
   return typeof payload.platform_id === 'string' ? payload.platform_id : null;
 }
 
-/** What a URL fetch is about: its file once known, never the URL. */
-export function fetchSubject(progress: Record<string, unknown> | null): string {
-  return typeof progress?.file === 'string' ? progress.file : 'a URL';
+type FetchJob = Pick<Job, 'id' | 'kind' | 'progress' | 'created_at'>;
+
+/**
+ * What a URL fetch is about, never any part of the URL: its file once known, else when it
+ * was sent, numbered by job when several unnamed fetches in `all` were sent that second.
+ */
+export function fetchSubject(job: FetchJob, all: readonly FetchJob[] = []): string {
+  if (typeof job.progress?.file === 'string') {
+    return job.progress.file;
+  }
+  const time = new Date(job.created_at * 1000).toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit'
+  });
+  const same = all
+    .filter((j) => j.kind === 'url_fetch' && typeof j.progress?.file !== 'string' && j.created_at === job.created_at)
+    .map((j) => j.id)
+    .sort((a, b) => a - b);
+  const n = same.indexOf(job.id);
+  return same.length > 1 && n >= 0 ? `sent at ${time} (${n + 1})` : `sent at ${time}`;
 }
 
 /** The page that owns a job's result. */
@@ -153,12 +171,12 @@ const PHASE_TEXT: Record<string, string> = {
   placing: 'Writing to the card'
 };
 
-/** Bytes as "4.2 MB" or "812 KB". */
+/** Bytes as "4.2 MiB" or "812 KiB", the units the size caps are given in. */
 export function bytesText(n: number): string {
-  if (n >= 1_000_000) {
-    return `${(n / 1_000_000).toFixed(1)} MB`;
+  if (n >= 1024 * 1024) {
+    return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
   }
-  return `${Math.max(0, Math.round(n / 1000)).toLocaleString()} KB`;
+  return `${Math.max(0, Math.round(n / 1024)).toLocaleString()} KiB`;
 }
 
 function num(v: unknown): number | null {

@@ -212,6 +212,11 @@ impl FetchUrl {
 /// ```
 #[must_use]
 pub fn percent_decode(text: &str) -> String {
+    String::from_utf8_lossy(&percent_decode_bytes(text)).into_owned()
+}
+
+/// The bytes `%XX` escapes in `text` stand for, malformed escapes kept as written.
+pub(crate) fn percent_decode_bytes(text: &str) -> Vec<u8> {
     let bytes = text.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -227,7 +232,7 @@ pub fn percent_decode(text: &str) -> String {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8_lossy(&out).into_owned()
+    out
 }
 
 #[cfg(test)]

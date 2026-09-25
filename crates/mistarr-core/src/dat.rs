@@ -10,7 +10,7 @@ use quick_xml::{Reader, XmlVersion};
 use serde::{Deserialize, Serialize};
 
 use crate::hash::HeaderRule;
-use crate::xml::{check_utf8, lossy, EscapeInvalid};
+use crate::xml::{check_utf8, lossy, Capped, EscapeInvalid};
 
 mod export;
 mod family;
@@ -68,6 +68,19 @@ pub enum DatError {
         /// The rejected value.
         value: String,
     },
+    /// One element, text run or comment is larger than [`MAX_EVENT_BYTES`].
+    #[error("an XML element at byte {position} is larger than {} KiB", MAX_EVENT_BYTES >> 10)]
+    EventTooLarge {
+        /// Byte offset where the element starts.
+        position: u64,
+    },
+    /// Something other than whitespace, comments or processing instructions follows
+    /// the root element, such as another file appended to the DAT.
+    #[error("data follows the end of the DAT at byte {position}")]
+    TrailingData {
+        /// Byte offset of the first such data.
+        position: u64,
+    },
     /// The zip container could not be read.
     #[error("invalid zip archive: {0}")]
     Zip(#[from] zip::result::ZipError),
@@ -83,6 +96,10 @@ pub enum DatError {
         source: Box<DatError>,
     },
 }
+
+/// Largest single XML event, a tag with its attributes, a text run or a comment, that a
+/// DAT may hold; larger ones fail with [`DatError::EventTooLarge`] before being buffered.
+pub const MAX_EVENT_BYTES: u64 = 1024 * 1024;
 
 /// Header fields of a DAT. `name` and `version` are kept verbatim.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -376,7 +393,7 @@ pub fn export_parents<R: BufRead>(reader: R) -> Result<Option<HashMap<String, St
 /// Iterator over the games of a DAT, holding one game in memory at a time.
 /// Yields [`DatError::NoGames`] once if the document ends without any game.
 pub struct DatStream<R: BufRead> {
-    reader: Reader<EscapeInvalid<R>>,
+    reader: Reader<Capped<EscapeInvalid<R>>>,
     buf: Vec<u8>,
     header: DatHeader,
     format: DatFormat,
@@ -427,7 +444,7 @@ impl<R: BufRead> DatStream<R> {
 
     fn open(reader: R, options: ExportOptions, index_only: bool) -> Result<Self, DatError> {
         let mut stream = DatStream {
-            reader: Reader::from_reader(EscapeInvalid::new(reader)),
+            reader: Reader::from_reader(Capped::new(EscapeInvalid::new(reader))),
             buf: Vec::new(),
             header: DatHeader::default(),
             format: DatFormat::Logiqx,
@@ -473,7 +490,7 @@ impl<R: BufRead> DatStream<R> {
 
     fn xml_error(&self, source: quick_xml::Error) -> DatError {
         DatError::Xml {
-            position: self.reader.get_ref().position(),
+            position: self.reader.get_ref().get_ref().position(),
             source,
         }
     }
@@ -485,9 +502,28 @@ impl<R: BufRead> DatStream<R> {
 
     fn read_event(&mut self) -> Result<Event<'static>, DatError> {
         self.buf.clear();
+        let start = self.reader.get_ref().get_ref().position();
+        self.reader.get_mut().arm(MAX_EVENT_BYTES);
         match self.reader.read_event_into(&mut self.buf) {
             Ok(event) => Ok(event.into_owned()),
+            Err(_) if self.reader.get_ref().over() => {
+                Err(DatError::EventTooLarge { position: start })
+            }
             Err(err) => Err(self.xml_error(err)),
+        }
+    }
+
+    /// Reads to the end of input after the root element closes, refusing anything but
+    /// whitespace, comments, processing instructions and a doctype.
+    fn read_trailer(&mut self) -> Result<(), DatError> {
+        loop {
+            let at = self.reader.get_ref().get_ref().position();
+            match self.read_event()? {
+                Event::Eof => return Ok(()),
+                Event::Text(t) if t.as_ref().bytes().all(|b| b.is_ascii_whitespace()) => {}
+                Event::Comment(_) | Event::PI(_) | Event::DocType(_) => {}
+                _ => return Err(DatError::TrailingData { position: at }),
+            }
         }
     }
 
@@ -499,7 +535,7 @@ impl<R: BufRead> DatStream<R> {
                 Event::Start(e) if e.local_name().as_ref() == "datafile" => return Ok(()),
                 Event::Empty(e) if e.local_name().as_ref() == "datafile" => {
                     self.done = true;
-                    return Ok(());
+                    return self.read_trailer();
                 }
                 Event::Start(e) if !after_header && e.local_name().as_ref() == "header" => {
                     self.format = DatFormat::DbExport;
@@ -536,7 +572,12 @@ impl<R: BufRead> DatStream<R> {
                         return self.read_game(&e, false).map(Some);
                     }
                 }
-                Event::End(_) => self.done = true,
+                Event::End(_) => {
+                    self.done = true;
+                    if !self.index_only {
+                        self.read_trailer()?;
+                    }
+                }
                 Event::Eof => return Err(DatError::Truncated),
                 _ => {}
             }
@@ -552,13 +593,18 @@ impl<R: BufRead> DatStream<R> {
         }
     }
 
-    fn skip(&mut self, start: &BytesStart<'_>) -> Result<(), DatError> {
-        self.buf.clear();
-        let end = start.to_end().into_owned();
-        match self.reader.read_to_end_into(end.name(), &mut self.buf) {
-            Ok(_) => Ok(()),
-            Err(err) => Err(self.xml_error(err)),
+    /// Reads past the element `_start` opened, one capped event at a time.
+    fn skip(&mut self, _start: &BytesStart<'_>) -> Result<(), DatError> {
+        let mut depth = 1usize;
+        while depth > 0 {
+            match self.read_event()? {
+                Event::Start(_) => depth += 1,
+                Event::End(_) => depth -= 1,
+                Event::Eof => return Err(DatError::Truncated),
+                _ => {}
+            }
         }
+        Ok(())
     }
 
     fn read_header(&mut self) -> Result<(), DatError> {

@@ -81,8 +81,9 @@ async fn start(
         _ => ApiError::bad_request("This is not a valid link."),
     })?;
     let job = UrlFetch::new(&app, url);
-    let token = job.token();
+    let (token, flag) = (job.token(), job.cancel_flag());
     let job_id = Scheduler::enqueue_within(&app, Arc::new(job), QUEUE_WAIT, ()).await?;
+    app.fetches.register(token, &flag);
     Ok((
         StatusCode::ACCEPTED,
         Json(Started {

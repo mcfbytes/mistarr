@@ -659,3 +659,87 @@ fn releases_give_regions_and_languages_once_each() {
     assert_eq!(game.regions, ["Europe"]);
     assert_eq!(game.languages, ["En", "Fr", "De"]);
 }
+
+const SMALL: &str = r#"<datafile><game name="Example Quest (World)"><rom name="q.bin" size="1"/></game></datafile>"#;
+
+fn trailing(bytes: &[u8]) -> Result<Dat, DatError> {
+    let mut all = SMALL.as_bytes().to_vec();
+    all.extend_from_slice(bytes);
+    parse_dat_reader(BufReader::new(Cursor::new(all)))
+}
+
+#[test]
+fn only_whitespace_comments_and_instructions_may_follow_the_root() {
+    for ok in [&b""[..], b"\n\r\n  ", b"<!-- end -->\n", b"<?pi data?>"] {
+        assert!(trailing(ok).is_ok(), "{ok:?}");
+    }
+    for bad in [
+        &b"x"[..],
+        b"<game name='g'/>",
+        b"</datafile>",
+        b"\n\x7fELF\x01\x02",
+        b"NES\x1a\x00\xff",
+    ] {
+        let e = trailing(bad).expect_err("trailing data");
+        assert!(
+            matches!(e, DatError::TrailingData { .. } | DatError::Xml { .. }),
+            "{bad:?}: {e}"
+        );
+    }
+    let e = trailing(b"PK\x03\x04rom bytes").expect_err("an appended file");
+    assert!(
+        matches!(e, DatError::TrailingData { position } if position >= SMALL.len() as u64),
+        "{e}"
+    );
+    let e = parse_dat(b"<datafile/>junk").expect_err("after an empty root");
+    assert!(matches!(e, DatError::TrailingData { .. }), "{e}");
+}
+
+#[test]
+fn a_pack_member_with_trailing_data_fails() {
+    let mut zip = zip::ZipWriter::new(Cursor::new(Vec::new()));
+    zip.start_file("a.dat", SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(format!("{SMALL}appended").as_bytes())
+        .unwrap();
+    let bytes = zip.finish().unwrap().into_inner();
+    let member = parse_dat_pack(Cursor::new(bytes)).unwrap().next().unwrap();
+    let e = member.expect_err("trailing data");
+    assert!(
+        matches!(e, DatError::Member { ref source, .. } if matches!(**source, DatError::TrailingData { .. })),
+        "{e}"
+    );
+}
+
+#[test]
+fn an_oversized_event_fails_before_it_is_buffered() {
+    let big = "a".repeat(usize::try_from(MAX_EVENT_BYTES).unwrap() + 10);
+    let cases = [
+        format!(r#"<datafile><game name="{big}"/></datafile>"#),
+        format!("<datafile><game name='g'><description>{big}</description></game></datafile>"),
+        format!("<datafile><game name='g'><video><x>{big}</x></video></game></datafile>"),
+        format!(
+            "<datafile><game name='g'/></datafile>{}",
+            " ".repeat(big.len())
+        ),
+    ];
+    for xml in &cases {
+        let e = parse_dat_reader(BufReader::new(xml.as_bytes())).expect_err("too large");
+        assert!(matches!(e, DatError::EventTooLarge { .. }), "{e}");
+    }
+    let near = "a".repeat(usize::try_from(MAX_EVENT_BYTES).unwrap() - 64);
+    let xml = format!(r#"<datafile><game name="{near}"/></datafile>"#);
+    assert!(parse_dat_reader(BufReader::new(xml.as_bytes())).is_ok());
+}
+
+proptest! {
+    #[test]
+    fn appended_bytes_are_refused_unless_blank(tail in prop::collection::vec(any::<u8>(), 1..64)) {
+        let parsed = trailing(&tail);
+        if tail.iter().all(u8::is_ascii_whitespace) {
+            prop_assert!(parsed.is_ok());
+        } else if !tail.starts_with(b"<!") && !tail.starts_with(b"<?") {
+            prop_assert!(parsed.is_err(), "{:?} accepted", tail);
+        }
+    }
+}

@@ -6,7 +6,7 @@
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
   import { describeProgress, downloadStatus, fetchSubject, jobDetail, jobHref, jobStatus, kindLabel } from '../lib/status';
-  import { cancelFetch, fetchToken } from '../lib/fetch';
+  import FetchCancel from '../lib/FetchCancel.svelte';
   import StatusPill from '../lib/StatusPill.svelte';
   import ProgressBar from '../lib/ProgressBar.svelte';
   import type { Job } from '../lib/types';
@@ -34,7 +34,7 @@
     const pid = job.payload.platform_id;
     const detail =
       job.kind === 'url_fetch'
-        ? fetchSubject(job.progress)
+        ? fetchSubject(job, jobs)
         : typeof pid === 'string'
           ? platformName(pid)
           : jobDetail(job.payload);
@@ -102,9 +102,7 @@
         <StatusPill {...jobStatus(job)} />
         <a href={jobHref(job)}><strong>{jobTitle(job)}</strong></a>
         <span class="muted">{job.lane} lane</span>
-        {#if fetchToken(job) !== null}
-          <button aria-label={`Cancel ${jobTitle(job)}`} onclick={() => cancelFetch(job)}>Cancel</button>
-        {/if}
+        <FetchCancel {job} label={jobTitle(job)} />
       </div>
       {#if job.state === 'running'}
         <ProgressBar view={view ?? { fraction: null, text: 'Starting' }} label={`${jobTitle(job)} progress`} />

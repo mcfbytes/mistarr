@@ -453,7 +453,14 @@ pub(crate) fn open_db(
     // Leftovers of an import in RAM cut short; the database itself is always whole.
     let swapping = db::ram::swap_files(&path);
     db::ram::clean_stale(&path, &config.memory.import_dir)?;
+    // Leftovers of a fetch or upload that a restart or power cut broke off.
     crate::jobs::url_fetch::spool::clean_stale(&config.paths.tmp());
+    if let Some(ram) = std::env::var_os(crate::db::SQLITE_TMPDIR) {
+        crate::jobs::url_fetch::spool::clean_stale(Path::new(&ram));
+    }
+    for dir in [config.paths.dats(), config.paths.sources()] {
+        crate::jobs::url_fetch::spool::clean_parts(&dir, ".upload-");
+    }
     if config.memory.import_floor_mib == 0 {
         tracing::warn!(
             "[memory] import_floor_mib is 0: a DAT import in RAM may leave the core no memory"

@@ -53,7 +53,8 @@ change. The button is a disclosure (`aria-expanded`, `aria-controls`)
 opening a panel under it: Running, with each job's progress bar; Waiting,
 with why each waits ("Waiting for the DAT import of a.dat to finish.",
 "Paused while NES is running"); a URL fetch in either list has a Cancel
-button named for it ("Cancel URL fetch: a.dat"); and Finished, the last five from
+button named for it ("Cancel URL fetch: a.dat", "Cancelling URL fetch:
+a.dat" while pending); and Finished, the last five from
 `/system/jobs/recent` with their outcome and how long ago. Every row links to
 the page that owns it (DATs, Sources, the platform, else Activity), and the
 panel ends with Open Activity. Opening moves focus to the panel; Escape
@@ -145,14 +146,24 @@ it, so it can be corrected; the link is never written to storage, and a
 reload shows the box empty (PRINCIPLES.md section 2). Whatever screen it is
 on, the file goes where its content says. A magnet is received like the
 magnet box's. An http(s) link says "Fetching the file. Its progress is under
-Background work." and appears there and on Activity as "URL fetch: a URL",
-then "URL fetch: <file>" once the first bytes name it, with a bar of the
-bytes received ("Receiving · 40% · 1.0 MB of 2.4 MB", or a moving band and
-"1.0 MB received" without a length), then "Checking the file" and "Writing
-to the card", and a Cancel button. When it lands the toast is an upload's
-("DAT received: a.dat. Importing now.") and the file is followed as an
-upload; when it fails the toast is "The fetch failed: <reason>", or "The
-fetch was cancelled.".
+Background work." and appears there and on Activity as "URL fetch: sent at
+14:02:31", the time it was sent, with "(1)", "(2)" by job when several were
+sent in the same second, and never any part of the URL; then "URL fetch:
+<file>" once the first bytes name it, with a bar of the bytes received
+("Receiving · 40% · 1.0 MiB of 2.3 MiB", or a moving band and "1.0 MiB
+received" without a length), then "Checking the file" and "Writing to the
+card", and a Cancel button, which says "Cancelling…" and is disabled until
+the fetch ends. When it lands the toast is an upload's ("DAT received:
+a.dat. Importing now.") and the file is followed as an upload; when it
+fails the toast is "The fetch failed: <reason>", or "The fetch was
+cancelled.".
+
+A fetched zip must hold only `.dat` and `.xml` DATs ("This zip holds files
+other than DATs."), where an upload loads the DATs of a mixed zip and skips
+the rest. An uploaded zip is a file the user already has and chose; a
+fetched one came from a server, and mistarr places only what it checked, so
+a pack is rebuilt from its checked members and a member it could not check
+has no place to go.
 
 **DATs** (`/dats`). Its own nav entry, between Sources and System, since
 DATs arrive and fail on their own schedule like sources do. An upload

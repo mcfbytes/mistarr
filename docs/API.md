@@ -410,7 +410,9 @@ are 400 as well. A valid link answers 202 `{ token, job_id, target: null,
 file: null }` and queues a `url_fetch` job on the `fetch` lane, which is
 never held. `job_id` is `null` when the writer is too busy to record the job
 within 250 ms, as for uploads; the job's queued `job.progress` follows once
-it is recorded. Its payload is `{ fetch: token }` and nothing else.
+it is recorded. Its payload is `{ fetch: token }` and nothing else. Tokens
+start at a random number each run and stay below 2^53, so one from before a
+restart never names a new fetch.
 
 The job reports live progress `{ token, phase, bytes_received, bytes_total,
 file }`: `phase` is `connecting`, `receiving`, `checking` (the parsers read
@@ -424,23 +426,34 @@ it, whose import then runs as an upload's. A failure stores `{ error }`, one
 sentence that names neither the URL nor its host, such as:
 
 - "This isn't a DAT, DAT pack or torrent file." for an HTML page, an image,
-  a zip holding anything but `.dat` and `.xml` DATs, or a file that does
-  not parse;
+  or a file that does not parse, including a DAT with anything but
+  whitespace, comments or processing instructions after its root;
+- "This zip holds files other than DATs." for a zip holding anything but
+  `.dat` and `.xml` DATs;
+- "The server sent a compressed file mistarr can't read." for a gzip body or
+  a `Content-Encoding` other than `identity`;
 - "The file is larger than 16 MiB, the most a torrent may be." or "… 512
   MiB, the most a DAT or DAT pack may be.";
 - "The server answered 404.", "The server redirected more than 5 times.",
-  "A redirect from https to http was refused.", "The server did not answer
-  within 15 seconds.", "The server sent nothing for 60 seconds.", "The
-  download ended early.";
+  "A redirect from https to http was refused.", "A redirect to an address on
+  the local network was refused." (when the typed link's host is not on
+  it), "The server did not answer within 15 seconds.", "The server sent
+  nothing for 60 seconds.", "The server sent the file too slowly, under 1024
+  bytes a second." (averaged once 5 minutes have passed), "The transfer
+  failed: …" when the connection breaks, a body short of its length
+  included;
 - "The server's certificate is not trusted." (or is for another host, or is
   not valid at this time);
 - "A source with the same content is already loaded.";
 - "Cancelled." after `DELETE /fetch/{token}`, or "interrupted by a restart"
   when the server stopped first; a fetch is never retried.
 
-`DELETE /fetch/{token}` answers 204 and the job stops at its next chunk,
-removing what it wrote, or 404 when no fetch with that token is queued or
-running. Both routes are writes, so they need the `X-Mistarr` header and an
+`DELETE /fetch/{token}` answers 204 and the job stops at its next chunk, game
+of the check or 1 MiB write of its copy into `dats/`, removing what it
+wrote, or 404 when no fetch with that token is queued or running. A token is
+open for `DELETE` once `POST /fetch` has answered, not before. A shutdown
+stops a fetch at the same points and removes what it wrote; the job then
+fails as "interrupted by a restart". Both routes are writes, so they need the `X-Mistarr` header and an
 allowed `Host`.
 
 ## Downloads

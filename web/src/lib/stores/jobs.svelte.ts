@@ -1,4 +1,4 @@
-import { SvelteMap } from 'svelte/reactivity';
+import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import { api } from '../api';
 import { fixtureJobs, fixtureRecentJobs, mockScenario } from '../fixtures';
 import type { IncomingFile, Job, JobState } from '../types';
@@ -25,6 +25,23 @@ let reloadTimer: ReturnType<typeof setTimeout> | null = null;
 let recentTimer: ReturnType<typeof setTimeout> | null = null;
 // Pages showing the recent list; it is re-read only while one is open.
 let recentWatchers = 0;
+// Fetch tokens whose cancel was asked for and has not been refused.
+const cancelling = new SvelteSet<number>();
+
+/** Whether fetch `token`'s cancel is pending. */
+export function isCancelling(token: number): boolean {
+  return cancelling.has(token);
+}
+
+/** Marks fetch `token`'s cancel as pending, or no longer. */
+export function markCancelling(token: number, pending: boolean): void {
+  if (pending) {
+    cancelling.add(token);
+  } else {
+    cancelling.delete(token);
+  }
+}
+
 /** The error a fetch the user cancelled ends with. */
 export const FETCH_CANCELLED = 'Cancelled.';
 // URL fetches started in this tab, by token, with their job once known; never the URL.
@@ -319,6 +336,8 @@ export function startMockFetch(link: string, token: number): void {
   const id = mockFetchId;
   const segment = link.split(/[?#]/)[0]?.split('/').pop() ?? '';
   const refuse = /\.html?$/i.test(segment);
+  // A link whose last segment starts with "wait" stays connecting until it is cancelled.
+  const hold = /^wait/i.test(segment);
   const file = !segment ? 'download.dat' : /\.(dat|xml|zip|torrent)$/i.test(segment) ? segment : `${segment}.dat`;
   const total = 2_400_000;
   let got = 0;
@@ -339,6 +358,9 @@ export function startMockFetch(link: string, token: number): void {
   ];
   trackFetch(token, id);
   const timer = setInterval(() => {
+    if (hold) {
+      return;
+    }
     got = Math.min(total, got + 300_000);
     if (refuse && got > 300_000) {
       stopMockFetch(token);

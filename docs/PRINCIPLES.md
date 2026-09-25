@@ -33,11 +33,13 @@ here as a hard constraint that overrides any task instruction.
   if the user had put it there; from then on it is handled like any other
   file.
 - The app may parse, validate, bind and organise these. It may not obtain them
-  on its own. It fetches only the exact URL the user supplied: it never
-  follows links inside what it fetched, never crawls, never fetches again on
-  a schedule, never suggests, completes or remembers URLs for reuse, and ships
-  none. ROM and disc images are never fetched by URL; they arrive only
-  through a source's transfer or from the user's own files.
+  on its own. It fetches only the URL the user supplied, following that one
+  request's HTTP redirects (at most five, never from https to http, and never
+  from a public address to the local network): it never follows links inside
+  what it fetched, never crawls, never fetches again on a schedule, never
+  suggests, completes or remembers URLs for reuse, and ships none. ROM and
+  disc images are never fetched by URL; they arrive only through a source's
+  transfer or from the user's own files.
 - Documentation and the UI describe the directories, the URL field and the
   accepted formats. They do not say where to obtain the files, and any example
   URL uses a reserved domain such as `example.invalid`.

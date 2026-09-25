@@ -1,7 +1,8 @@
 //! One GET of a URL the user supplied, streamed; the contract is `docs/ARCHITECTURE.md` "Fetching a URL".
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use http_body_util::{BodyExt, Empty};
 use hyper::body::{Bytes, Incoming};
@@ -13,10 +14,13 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
+mod disposition;
 mod roots;
 mod url;
 
+pub use disposition::disposition_file_name;
 pub use roots::{Roots, RootsOrigin, CERT_FILE_ENV, SYSTEM_BUNDLES};
+use url::percent_decode_bytes;
 pub use url::{percent_decode, FetchUrl};
 
 #[cfg(test)]
@@ -30,6 +34,45 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Longest the server may send nothing, for the answer's head or any part of its body.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Slowest average a body may arrive at, in bytes per second, once [`RATE_WINDOW`] has passed.
+pub const MIN_RATE: u64 = 1024;
+
+/// How long a body may take before [`MIN_RATE`] applies.
+pub const RATE_WINDOW: Duration = Duration::from_secs(300);
+
+/// Whether `ip` is on this machine or a local network: loopback, private, link-local,
+/// shared (100.64/10), unique local or unspecified, also inside an IPv4-mapped address.
+///
+/// ```
+/// use mistarr_clients::fetch::is_local;
+/// assert!(is_local("192.168.1.5".parse().unwrap()));
+/// assert!(is_local("::ffff:127.0.0.1".parse().unwrap()));
+/// assert!(!is_local("192.0.2.1".parse().unwrap()));
+/// ```
+#[must_use]
+pub fn is_local(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            let [a, b, ..] = v4.octets();
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || (a == 100 && (64..128).contains(&b))
+        }
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => is_local(IpAddr::V4(v4)),
+            None => {
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || v6.is_unique_local()
+                    || v6.is_unicast_link_local()
+            }
+        },
+    }
+}
 
 /// A failed fetch. No message carries the URL or its host.
 #[derive(Debug, thiserror::Error)]
@@ -62,6 +105,15 @@ pub enum FetchError {
     /// The exchange broke off or was malformed.
     #[error("The transfer failed: {0}.")]
     Transfer(String),
+    /// A redirect from a public address to one on this machine or the local network.
+    #[error("A redirect to an address on the local network was refused.")]
+    LocalRedirect,
+    /// The body arrived slower than [`Limits::min_rate`] on average.
+    #[error("The server sent the file too slowly, under {0} bytes a second.")]
+    TooSlow(u64),
+    /// The body is compressed with a `Content-Encoding` that was not asked for.
+    #[error("The server sent a compressed file mistarr can't read.")]
+    Compressed,
 }
 
 /// Timeouts and redirect limit of a [`Fetcher`].
@@ -71,6 +123,10 @@ pub struct Limits {
     pub connect: Duration,
     /// For the answer's head and between parts of its body.
     pub idle: Duration,
+    /// Slowest average rate of a body, in bytes per second, once `window` has passed.
+    pub min_rate: u64,
+    /// How long a body may take before `min_rate` applies.
+    pub window: Duration,
 }
 
 impl Default for Limits {
@@ -78,6 +134,8 @@ impl Default for Limits {
         Self {
             connect: CONNECT_TIMEOUT,
             idle: IDLE_TIMEOUT,
+            min_rate: MIN_RATE,
+            window: RATE_WINDOW,
         }
     }
 }
@@ -86,6 +144,7 @@ impl Default for Limits {
 pub struct Fetcher {
     tls: tokio_rustls::TlsConnector,
     limits: Limits,
+    local: fn(IpAddr) -> bool,
 }
 
 struct AbortOnDrop(JoinHandle<()>);
@@ -118,11 +177,22 @@ impl Fetcher {
         Ok(Self {
             tls: tokio_rustls::TlsConnector::from(Arc::new(config)),
             limits,
+            local: is_local,
         })
     }
 
+    /// This fetcher with `local` in place of [`is_local`], for tests on one loopback host.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn with_local(mut self, local: fn(IpAddr) -> bool) -> Self {
+        self.local = local;
+        self
+    }
+
     /// GETs `url`, following up to [`MAX_REDIRECTS`] redirects, never from https to
-    /// http, and returns the successful answer with its body still to read.
+    /// http, nor to a local address when `url` itself is not local, and returns the
+    /// successful answer with its body still to read. Each host is resolved once and only
+    /// the addresses checked are dialled.
     ///
     /// # Errors
     ///
@@ -130,8 +200,16 @@ impl Fetcher {
     pub async fn get(&self, url: &FetchUrl) -> Result<Response, FetchError> {
         let mut url = url.clone();
         let mut hops = 0;
+        let mut typed_local = false;
         loop {
-            let (head, driver) = self.request(&url).await?;
+            let addrs = self.resolve(&url).await?;
+            let local = addrs.iter().any(|a| (self.local)(a.ip()));
+            if hops == 0 {
+                typed_local = local;
+            } else if local && !typed_local {
+                return Err(FetchError::LocalRedirect);
+            }
+            let (head, driver) = self.request(&url, &addrs).await?;
             let status = head.status();
             if is_redirect(status) {
                 if hops == MAX_REDIRECTS {
@@ -154,24 +232,51 @@ impl Fetcher {
                 return Err(FetchError::Status(status.as_u16()));
             }
             let (parts, body) = head.into_parts();
+            let encoded = parts
+                .headers
+                .get(header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| !v.trim().eq_ignore_ascii_case("identity"));
+            if encoded {
+                return Err(FetchError::Compressed);
+            }
             return Ok(Response {
                 content_length: content_length(&parts.headers),
                 name: disposition_name(&parts.headers).or_else(|| url.last_segment()),
                 body,
-                idle: self.limits.idle,
+                limits: self.limits,
+                started: Instant::now(),
+                received: 0,
                 _driver: driver,
             });
         }
     }
 
+    /// The addresses `url`'s host resolves to, within the connect limit.
+    async fn resolve(&self, url: &FetchUrl) -> Result<Vec<SocketAddr>, FetchError> {
+        let limit = self.limits.connect;
+        let found = tokio::time::timeout(limit, tokio::net::lookup_host((url.host(), url.port())))
+            .await
+            .map_err(|_| FetchError::ConnectTimeout(limit.as_secs()))?
+            .map_err(|e| FetchError::Connect(e.to_string()))?;
+        let addrs: Vec<SocketAddr> = found.collect();
+        if addrs.is_empty() {
+            return Err(FetchError::Connect(
+                "the host name has no address".to_owned(),
+            ));
+        }
+        Ok(addrs)
+    }
+
     async fn request(
         &self,
         url: &FetchUrl,
+        addrs: &[SocketAddr],
     ) -> Result<(hyper::Response<Incoming>, AbortOnDrop), FetchError> {
         let limit = self.limits.connect;
         let timed_out = || FetchError::ConnectTimeout(limit.as_secs());
         let deadline = tokio::time::Instant::now() + limit;
-        let tcp = tokio::time::timeout_at(deadline, TcpStream::connect((url.host(), url.port())))
+        let tcp = tokio::time::timeout_at(deadline, TcpStream::connect(addrs))
             .await
             .map_err(|_| timed_out())?
             .map_err(|e| FetchError::Connect(e.to_string()))?;
@@ -256,39 +361,6 @@ fn content_length(headers: &HeaderMap) -> Option<u64> {
         .and_then(|v| v.trim().parse().ok())
 }
 
-/// The file name a `Content-Disposition` header gives, `filename*` before `filename`.
-///
-/// ```
-/// use mistarr_clients::fetch::disposition_file_name;
-/// assert_eq!(disposition_file_name(r#"attachment; filename="a b.dat""#).as_deref(), Some("a b.dat"));
-/// assert_eq!(disposition_file_name("attachment; filename*=UTF-8''p%C3%A9.zip; filename=p.zip").as_deref(), Some("pé.zip"));
-/// assert_eq!(disposition_file_name("inline"), None);
-/// ```
-#[must_use]
-pub fn disposition_file_name(value: &str) -> Option<String> {
-    let params: Vec<(String, &str)> = value
-        .split(';')
-        .skip(1)
-        .filter_map(|p| p.split_once('='))
-        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim()))
-        .collect();
-    let extended = params
-        .iter()
-        .find(|(k, _)| k == "filename*")
-        .and_then(|(_, v)| {
-            let (_charset, rest) = v.split_once('\'')?;
-            let (_lang, encoded) = rest.split_once('\'')?;
-            Some(percent_decode(encoded.trim_matches('"')))
-        });
-    let plain = || {
-        params
-            .iter()
-            .find(|(k, _)| k == "filename")
-            .map(|(_, v)| v.trim_matches('"').to_owned())
-    };
-    extended.or_else(plain).filter(|n| !n.trim().is_empty())
-}
-
 fn disposition_name(headers: &HeaderMap) -> Option<String> {
     headers
         .get(header::CONTENT_DISPOSITION)
@@ -301,7 +373,9 @@ pub struct Response {
     content_length: Option<u64>,
     name: Option<String>,
     body: Incoming,
-    idle: Duration,
+    limits: Limits,
+    started: Instant,
+    received: u64,
     _driver: AbortOnDrop,
 }
 
@@ -323,24 +397,42 @@ impl Response {
     ///
     /// # Errors
     ///
-    /// [`FetchError::Stalled`] after the idle limit without data, [`FetchError::Transfer`]
-    /// when the connection breaks, including before a promised length arrived.
+    /// [`FetchError::Stalled`] after the idle limit without data, [`FetchError::TooSlow`]
+    /// once the window has passed with the average under the minimum rate,
+    /// [`FetchError::Transfer`] when the connection breaks, including before a promised
+    /// length arrived.
     pub async fn chunk(&mut self) -> Result<Option<Bytes>, FetchError> {
+        let idle = self.limits.idle;
         loop {
-            let frame = tokio::time::timeout(self.idle, self.body.frame())
+            self.check_rate()?;
+            let frame = tokio::time::timeout(idle, self.body.frame())
                 .await
-                .map_err(|_| FetchError::Stalled(self.idle.as_secs()))?;
+                .map_err(|_| FetchError::Stalled(idle.as_secs()))?;
             match frame {
                 None => return Ok(None),
                 Some(Err(e)) => return Err(FetchError::Transfer(e.to_string())),
                 Some(Ok(f)) => {
                     if let Ok(data) = f.into_data() {
                         if !data.is_empty() {
+                            self.received += data.len() as u64;
+                            self.check_rate()?;
                             return Ok(Some(data));
                         }
                     }
                 }
             }
         }
+    }
+
+    fn check_rate(&self) -> Result<(), FetchError> {
+        let elapsed = self.started.elapsed();
+        let Limits {
+            min_rate, window, ..
+        } = self.limits;
+        let needed = u128::from(min_rate) * elapsed.as_millis() / 1000;
+        if elapsed >= window && u128::from(self.received) < needed {
+            return Err(FetchError::TooSlow(min_rate));
+        }
+        Ok(())
     }
 }

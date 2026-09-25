@@ -3,7 +3,7 @@
   import { getJobs, getRecentJobs, jobOutcome, loadJobs, watchRecent } from './stores/jobs.svelte';
   import { findPlatform } from './stores/platforms.svelte';
   import { QUIET_KINDS, describeProgress, fetchSubject, jobDetail, jobHref, jobStatus, kindLabel } from './status';
-  import { cancelFetch, fetchToken } from './fetch';
+  import FetchCancel from './FetchCancel.svelte';
   import StatusPill from './StatusPill.svelte';
   import ProgressBar from './ProgressBar.svelte';
   import type { Job } from './types';
@@ -39,7 +39,7 @@
   function title(job: Job): string {
     const detail =
       job.kind === 'url_fetch'
-        ? fetchSubject(job.progress)
+        ? fetchSubject(job, active)
         : typeof job.payload.platform_id === 'string'
           ? name(job.payload.platform_id)
           : jobDetail(job.payload);
@@ -178,9 +178,7 @@
             <div class="row">
               <StatusPill {...jobStatus(job)} />
               <a href={jobHref(job)} onclick={() => hide(false)}>{title(job)}</a>
-              {#if fetchToken(job) !== null}
-                <button class="cancel" aria-label={`Cancel ${title(job)}`} onclick={() => cancelFetch(job)}>Cancel</button>
-              {/if}
+              <FetchCancel {job} label={title(job)} compact />
             </div>
             <ProgressBar {view} label={`${title(job)} progress`} compact />
           </li>
@@ -196,9 +194,7 @@
             <div class="row">
               <StatusPill {...jobStatus(job)} />
               <a href={jobHref(job)} onclick={() => hide(false)}>{title(job)}</a>
-              {#if fetchToken(job) !== null}
-                <button class="cancel" aria-label={`Cancel ${title(job)}`} onclick={() => cancelFetch(job)}>Cancel</button>
-              {/if}
+              <FetchCancel {job} label={title(job)} compact />
             </div>
             {#if job.reason}<p class="why">{job.reason}</p>{/if}
           </li>
@@ -349,12 +345,6 @@
     min-width: 0;
     color: var(--fg);
     overflow-wrap: anywhere;
-  }
-
-  .row .cancel {
-    margin-left: auto;
-    padding: 0.15em 0.6em;
-    font-size: 0.85em;
   }
 
   .why {

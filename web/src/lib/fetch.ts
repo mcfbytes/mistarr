@@ -1,5 +1,5 @@
 import { ApiError, api, errorMessage } from './api';
-import { cancelMockFetch, startMockFetch, trackFetch } from './stores/jobs.svelte';
+import { cancelMockFetch, markCancelling, startMockFetch, trackFetch } from './stores/jobs.svelte';
 import { showToast } from './stores/toast.svelte';
 import { received } from './upload';
 import type { Job } from './types';
@@ -70,13 +70,16 @@ export async function cancelFetch(job: Pick<Job, 'kind' | 'payload'>): Promise<v
   if (token === null) {
     return;
   }
+  markCancelling(token, true);
   if (isMock) {
+    await new Promise((resolve) => setTimeout(resolve, 800));
     cancelMockFetch(token);
     return;
   }
   try {
     await api.cancelFetch(token);
   } catch (err) {
+    markCancelling(token, false);
     showToast(errorMessage(err), 'error');
   }
 }
