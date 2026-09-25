@@ -1,6 +1,8 @@
 import { api } from '../api';
-import { fixtureJobs } from '../fixtures';
+import { fixtureJobs, fixtureRecentJobs } from '../fixtures';
 import type { Job, JobState } from '../types';
+import { findPlatform } from './platforms.svelte';
+import { showToast } from './toast.svelte';
 
 const isMock = import.meta.env.VITE_MOCK === '1';
 
@@ -12,9 +14,15 @@ export interface FinishedJob {
 }
 
 let jobs = $state<Job[]>([]);
+let recent = $state<Job[]>([]);
 let finished = $state<Record<number, FinishedJob>>({});
 const FINISHED_KEEP = 50;
 let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+let recentTimer: ReturnType<typeof setTimeout> | null = null;
+// Pages showing the recent list; it is re-read only while one is open.
+let recentWatchers = 0;
+// Scans the user queued, by job id, until their outcome is shown; kept across pages.
+let pendingScans: Record<number, string> = {};
 
 export function getJobs(): Job[] {
   return jobs;
@@ -26,6 +34,96 @@ export function getFinishedJob(id: number): FinishedJob | undefined {
 
 export async function loadJobs(): Promise<void> {
   jobs = isMock ? fixtureJobs : (await api.jobs()).items;
+}
+
+export function getRecentJobs(): Job[] {
+  return recent;
+}
+
+export async function loadRecentJobs(): Promise<void> {
+  recent = isMock ? fixtureRecentJobs : (await api.recentJobs()).items;
+  for (const job of recent) {
+    announce(job.id, job.state, job.progress);
+  }
+}
+
+/** Keeps the recent list fresh while the caller is shown; returns the stop function. */
+export function watchRecent(): () => void {
+  recentWatchers += 1;
+  void loadRecentJobs().catch(() => undefined);
+  return () => {
+    recentWatchers -= 1;
+  };
+}
+
+/** Shows a toast with the outcome of scan `jobId` of `platformId` once it finishes. */
+export function trackScan(jobId: number, platformId: string): void {
+  pendingScans = { ...pendingScans, [jobId]: platformId };
+  const done = finished[jobId];
+  if (done) {
+    announce(jobId, done.state, done.progress);
+  }
+}
+
+function platformName(id: string): string {
+  return findPlatform(id)?.name ?? id;
+}
+
+function announce(id: number, state: JobState, progress: Record<string, unknown> | null): void {
+  const platformId = pendingScans[id];
+  if (platformId === undefined || (state !== 'done' && state !== 'failed')) {
+    return;
+  }
+  pendingScans = Object.fromEntries(Object.entries(pendingScans).filter(([k]) => Number(k) !== id));
+  showToast(jobOutcome({ kind: 'scan', state, progress, payload: { platform_id: platformId } }, platformName));
+}
+
+/** After a resync, re-reads the recent list when a page shows it or a scan awaits its outcome. */
+export function resyncRecent(): Promise<void> {
+  if (recentWatchers === 0 && Object.keys(pendingScans).length === 0) {
+    return Promise.resolve();
+  }
+  return loadRecentJobs().catch(() => undefined);
+}
+
+// One re-read of the recent list per burst of finished jobs, while it is shown.
+function scheduleRecent(): void {
+  if (isMock || recentTimer || recentWatchers === 0) {
+    return;
+  }
+  recentTimer = setTimeout(() => {
+    recentTimer = null;
+    void loadRecentJobs().catch(() => undefined);
+  }, 500);
+}
+
+/** One line saying what a finished job did, such as "Scan of NES: 10 matched, 2 unmatched". */
+export function jobOutcome(
+  job: { kind: string; state: JobState; payload?: Record<string, unknown>; progress: Record<string, unknown> | null },
+  platformName: (id: string) => string
+): string {
+  const p = job.progress ?? {};
+  const pid = typeof job.payload?.platform_id === 'string' ? job.payload.platform_id : null;
+  const where = pid ? platformName(pid) : 'every platform';
+  const path = typeof job.payload?.path === 'string' ? job.payload.path : '';
+  const labels: Record<string, string> = {
+    scan: `Scan of ${where}`,
+    recompute_1g1r: `Matching for ${where}`,
+    dat_import: `DAT ${path.split('/').pop() ?? ''}`.trim(),
+    arcade_catalog: 'Arcade catalogue',
+    import: 'Import'
+  };
+  const label = labels[job.kind] ?? job.kind;
+  if (job.state === 'failed') {
+    return typeof p.error === 'string' ? `${label} failed: ${p.error}` : `${label} failed`;
+  }
+  if (job.kind === 'scan' && typeof p.matched === 'number' && typeof p.unmatched === 'number') {
+    return `${label}: ${p.matched} matched, ${p.unmatched} unmatched`;
+  }
+  if (job.kind === 'recompute_1g1r' && typeof p.matched === 'number') {
+    return `${label}: ${p.matched} files newly matched`;
+  }
+  return `${label}: done`;
 }
 
 // After a resync the events that finished jobs may be lost; forget what is known.
@@ -54,6 +152,8 @@ export function applyJobProgress(
     const kept = Object.entries(finished).slice(-(FINISHED_KEEP - 1));
     finished = { ...Object.fromEntries(kept), [id]: { kind, state, progress } };
     jobs = jobs.filter((j) => j.id !== id);
+    announce(id, state, progress);
+    scheduleRecent();
     return;
   }
   const known = jobs.find((j) => j.id === id);

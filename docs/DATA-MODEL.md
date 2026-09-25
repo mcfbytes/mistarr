@@ -136,7 +136,7 @@ CREATE TABLE files (                    -- what is on disk under games/
   size          INTEGER NOT NULL,
   mtime         INTEGER NOT NULL,
   crc32 TEXT, md5 TEXT, sha1 TEXT,
-  header_rule   TEXT,                  -- which rule was applied when hashing
+  header_rule   TEXT,                  -- the rule it was hashed, or last failed to hash, under; NULL for a zip member known by its CRC32 alone
   rom_id        INTEGER REFERENCES roms(id),
   state         TEXT NOT NULL,         -- 'verified' | 'unverified' | 'misnamed' | 'bad' | 'pending'
   scanned_at    INTEGER NOT NULL,

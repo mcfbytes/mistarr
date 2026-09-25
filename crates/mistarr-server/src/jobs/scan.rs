@@ -394,7 +394,27 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     ctx.app
         .db
         .write(move |c| files::clear_scan_progress(c, &pid4))
-        .await
+        .await?;
+    report_outcome(ctx, &pid, total).await
+}
+
+/// Stores the scan's final progress: the platform's files with a rom state and those
+/// left `unverified`, per `docs/ARCHITECTURE.md` "Library scan".
+async fn report_outcome(ctx: &JobContext, pid: &PlatformId, total: usize) -> Result<()> {
+    let id = pid.clone();
+    let counts = ctx
+        .app
+        .db
+        .read(move |c| files::state_counts(c, &id))
+        .await?;
+    ctx.progress(json!({
+        "platform_id": pid.0,
+        "done": total,
+        "total": total,
+        "matched": counts.verified + counts.misnamed + counts.bad,
+        "unmatched": counts.unverified,
+    }))
+    .await
 }
 
 /// A file's size and mtime, as stored in `files`.
@@ -535,39 +555,130 @@ fn classify(
     hashes: &Hashes,
 ) -> Result<(Option<i64>, FileState)> {
     let size = i64::try_from(hashes.size).unwrap_or(i64::MAX);
-    let Some(m) = files::match_rom(
+    let m = files::match_rom(
         conn,
         platform_id,
         &hashes.sha1,
         &hashes.md5,
         &hashes.crc32,
         size,
-    )?
-    else {
-        return Ok((None, FileState::Unverified));
+    )?;
+    Ok(cartridge_state(m.as_ref(), actual_name))
+}
+
+/// The rom id and state a cartridge file or zip member named `own_name` takes from
+/// its match: `bad` for a bad dump, else `verified` or `misnamed` by name.
+pub(crate) fn cartridge_state(
+    m: Option<&files::RomMatch>,
+    own_name: &str,
+) -> (Option<i64>, FileState) {
+    let Some(m) = m else {
+        return (None, FileState::Unverified);
     };
     let state = if m.status == "baddump" {
         FileState::Bad
-    } else if files::basename(&m.name) == actual_name {
+    } else if files::basename(&m.name) == own_name {
         FileState::Verified
     } else {
         FileState::Misnamed
     };
-    Ok((Some(m.rom_id), state))
+    (Some(m.rom_id), state)
 }
 
-fn unchanged(
+/// The name a row's file or zip member has, compared against the rom's name.
+pub(crate) fn own_name(rel_path: &str) -> &str {
+    files::basename(rel_path.rsplit_once('#').map_or(rel_path, |(_, m)| m))
+}
+
+/// The live rom a fully hashed row's stored hashes match, per `docs/VERIFICATION.md`
+/// "Matching stored hashes"; a row without a sha1 or md5 never matches. The hashes are of
+/// the content after the row's header rule while `size` is the size on disk, so the CRC32
+/// tier also tries the size less the header that rule strips.
+///
+/// # Errors
+///
+/// [`Error::Db`] on SQLite failure.
+pub(crate) fn stored_match(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    f: &files::FileRow,
+) -> Result<Option<files::RomMatch>> {
+    if f.md5.is_none() && f.sha1.is_none() {
+        return Ok(None);
+    }
+    let hash = |h: &Option<String>| h.clone().unwrap_or_default();
+    let (sha1, md5, crc32) = (hash(&f.sha1), hash(&f.md5), hash(&f.crc32));
+    if let Some(m) = files::match_live_rom(conn, platform_id, &sha1, &md5, &crc32, f.size)? {
+        return Ok(Some(m));
+    }
+    let rule = HeaderRule::from_name(f.header_rule.as_deref().unwrap_or_default());
+    let header = i64::try_from(rule.header_len()).unwrap_or(0);
+    let stripped = match rule {
+        HeaderRule::Smc => f.size % 1024 == 512,
+        _ => header > 0 && f.size > header,
+    };
+    if !stripped || crc32.is_empty() {
+        return Ok(None);
+    }
+    // The hash tiers failed above whatever the size; only the CRC32 tier is left.
+    files::match_live_rom(conn, platform_id, "", "", &crc32, f.size - header)
+}
+
+/// What a scan does with a file it found, given the row it has for it.
+enum Known {
+    /// New, changed or pending: hash it.
+    Hash,
+    /// Unchanged and nothing to update.
+    Skip,
+    /// Unchanged and unmatched, and its stored hashes now match a live rom.
+    Matched(NewFile),
+}
+
+/// Decides [`Known`] for a file of `size` and `mtime`. An unchanged unmatched row is
+/// matched from its stored hashes; with `crc_recheck`, a zip member never hashed, known
+/// by its CRC32 alone, is hashed once a rom of that CRC32 and size exists.
+fn known(
     conn: &Connection,
     platform_id: &PlatformId,
     rel_path: &str,
     size: i64,
     mtime: i64,
-) -> Result<bool> {
-    Ok(
-        files::find_by_path(conn, platform_id, rel_path)?.is_some_and(|row| {
-            row.size == size && row.mtime == mtime && row.state != FileState::Pending
-        }),
-    )
+    crc_recheck: bool,
+) -> Result<Known> {
+    let Some(row) = files::find_by_path(conn, platform_id, rel_path)? else {
+        return Ok(Known::Hash);
+    };
+    if row.size != size || row.mtime != mtime || row.state == FileState::Pending {
+        return Ok(Known::Hash);
+    }
+    if row.rom_id.is_some() || row.state != FileState::Unverified {
+        return Ok(Known::Skip);
+    }
+    if row.sha1.is_none() && row.md5.is_none() {
+        // A NULL rule marks a member never hashed; a failed hash records its rule instead.
+        let candidate = match row.crc32.as_deref() {
+            Some(crc) if crc_recheck && row.header_rule.is_none() => {
+                files::crc_candidate_exists(conn, platform_id, crc, size)?
+            }
+            _ => false,
+        };
+        return Ok(if candidate { Known::Hash } else { Known::Skip });
+    }
+    let Some(m) = stored_match(conn, platform_id, &row)? else {
+        return Ok(Known::Skip);
+    };
+    let (rom_id, state) = cartridge_state(Some(&m), own_name(rel_path));
+    Ok(Known::Matched(NewFile {
+        rel_path: row.rel_path,
+        size,
+        mtime,
+        crc32: row.crc32,
+        md5: row.md5,
+        sha1: row.sha1,
+        header_rule: row.header_rule,
+        rom_id,
+        state,
+    }))
 }
 
 /// Walks one cartridge, romset or arcade directory, handing each row to `sink`, and
@@ -624,13 +735,18 @@ async fn scan_flat_unit(
         }
         seen.push(rel_path.clone());
         let (pid, relp) = (platform_id.clone(), rel_path.clone());
-        let skip = ctx
+        let known = ctx
             .app
             .db
-            .read(move |c| unchanged(c, &pid, &relp, size, mtime))
+            .read(move |c| known(c, &pid, &relp, size, mtime, false))
             .await?;
-        if skip {
-            continue;
+        match known {
+            Known::Hash => {}
+            Known::Skip => continue,
+            Known::Matched(row) => {
+                sink.push(row).await?;
+                continue;
+            }
         }
         let hint = u64::try_from(size).unwrap_or(0);
         let path_owned = path.clone();
@@ -722,13 +838,19 @@ async fn scan_zip_unit(
         let member_size = i64::try_from(member.size).unwrap_or(i64::MAX);
         seen.push(member_rel.clone());
         let (pid, mrel) = (platform_id.clone(), member_rel.clone());
-        let skip = ctx
+        let crc_recheck = rule == HeaderRule::None;
+        let known = ctx
             .app
             .db
-            .read(move |c| unchanged(c, &pid, &mrel, member_size, mtime))
+            .read(move |c| known(c, &pid, &mrel, member_size, mtime, crc_recheck))
             .await?;
-        if skip {
-            continue;
+        match known {
+            Known::Hash => {}
+            Known::Skip => continue,
+            Known::Matched(row) => {
+                sink.push(row).await?;
+                continue;
+            }
         }
         let basename = files::basename(&member.name).to_owned();
 
@@ -779,7 +901,11 @@ async fn scan_zip_unit(
             }
             Err(e) => {
                 tracing::warn!(member = %member.name, error = %e, "cannot hash zip member; marking unverified");
-                unverified_row(member_rel, member_size, mtime, Some(member.crc32.clone()))
+                let mut row =
+                    unverified_row(member_rel, member_size, mtime, Some(member.crc32.clone()));
+                // The rule records the attempt, so an unchanged member is not decompressed again.
+                row.header_rule = Some(rule_name.to_owned());
+                row
             }
         };
         sink.push(row).await?;

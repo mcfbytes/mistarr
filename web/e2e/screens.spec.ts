@@ -105,6 +105,15 @@ test('platform cards show have, wanted and titles, plus any nonzero extra', asyn
   ).toBeVisible();
 });
 
+test('Scan says it was queued and Activity lists finished jobs with their outcome', async ({ page }) => {
+  await page.goto('/#/');
+  const card = page.locator('.card').filter({ hasText: '240 titles' });
+  await card.getByRole('button', { name: 'Scan' }).click();
+  await expect(page.getByText(/^Scan of .+ queued$/)).toBeVisible();
+  await page.goto('/#/activity');
+  await expect(page.getByText('Scan of Sega Mega Drive: 90 matched, 1 unmatched')).toBeVisible();
+});
+
 test('held jobs show a banner with Run now', async ({ page }) => {
   await page.goto('/#/');
   const banner = page.getByRole('status').filter({ hasText: 'paused while FCEUmm is running' });

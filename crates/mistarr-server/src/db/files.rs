@@ -74,7 +74,7 @@ pub struct FileRow {
     /// Relative to `games/`, including the top directory name; a zip member is
     /// `NES/a.zip#b.nes`.
     pub rel_path: String,
-    /// Size in bytes after any header rule was applied.
+    /// Size in bytes on disk, or a zip member's uncompressed size, header included.
     pub size: i64,
     /// Filesystem mtime, Unix seconds.
     pub mtime: i64,
@@ -84,7 +84,8 @@ pub struct FileRow {
     pub md5: Option<String>,
     /// SHA1 as lowercase hex, when fully hashed.
     pub sha1: Option<String>,
-    /// Header rule name applied while hashing.
+    /// The header rule the payload was hashed under, or last failed to hash under;
+    /// NULL for a zip member known by its central-directory CRC32 alone.
     pub header_rule: Option<String>,
     /// The matched `roms.id`, when any.
     pub rom_id: Option<i64>,
@@ -101,7 +102,7 @@ pub struct NewFile {
     /// Relative to `games/`, including the top directory name; a zip member
     /// is `a.zip#b.nes`.
     pub rel_path: String,
-    /// Size in bytes after any header rule was applied.
+    /// Size in bytes on disk, or a zip member's uncompressed size, header included.
     pub size: i64,
     /// Filesystem mtime, Unix seconds.
     pub mtime: i64,
@@ -111,7 +112,8 @@ pub struct NewFile {
     pub md5: Option<String>,
     /// SHA1 as lowercase hex, when fully hashed.
     pub sha1: Option<String>,
-    /// Header rule name applied, when fully hashed.
+    /// The header rule the payload was hashed under, or last failed to hash under;
+    /// `None` for a zip member known by its central-directory CRC32 alone.
     pub header_rule: Option<String>,
     /// The matched `roms.id`, when any.
     pub rom_id: Option<i64>,
@@ -399,7 +401,8 @@ pub struct Hashed<'a> {
     pub md5: Option<&'a str>,
     /// SHA1, known only once the payload was fully hashed.
     pub sha1: Option<&'a str>,
-    /// The header rule name applied, when the payload was fully hashed.
+    /// The header rule the payload was hashed under, or last failed to hash under;
+    /// `None` for a zip member known by its central-directory CRC32 alone.
     pub header_rule: Option<&'a str>,
 }
 
@@ -623,6 +626,39 @@ pub fn retired_matches(
              ORDER BY f.id LIMIT ?2"
         ))?
         .query_map(params![platform_id.0, limit], from_row)?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+/// Up to `limit` files on `platform_id` with an id above `after` that no rom matches:
+/// `rom_id` NULL, `unverified`, and fully hashed, with a stored sha1 or md5; a CRC32
+/// alone never decides a match. Ordered by id, so a caller pages with the last id it
+/// saw and a file that stays unmatched is read once.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::files::{unmatched_after, FileId};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let nes = mistarr_core::PlatformId("nes".into());
+/// assert!(unmatched_after(&conn, &nes, FileId(0), 10).unwrap().is_empty());
+/// ```
+pub fn unmatched_after(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    after: FileId,
+    limit: u32,
+) -> Result<Vec<FileRow>> {
+    Ok(conn
+        .prepare_cached(&format!(
+            "SELECT {COLUMNS} FROM files
+             WHERE platform_id = ?1 AND state = 'unverified' AND rom_id IS NULL AND id > ?2
+               AND (sha1 IS NOT NULL OR md5 IS NOT NULL)
+             ORDER BY id LIMIT ?3"
+        ))?
+        .query_map(params![platform_id.0, after.0, limit], from_row)?
         .collect::<rusqlite::Result<_>>()?)
 }
 

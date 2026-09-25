@@ -3,6 +3,7 @@ use std::io::{Cursor, Write as _};
 
 use super::*;
 use crate::app::testutil::state;
+use crate::db::files::FileState;
 use crate::db::jobs::{self as rows, JobState};
 
 /// A database in its own temporary directory, dropped with it.
@@ -365,7 +366,10 @@ async fn the_job_moves_files_and_publishes_events() {
         .await
         .expect("get")
         .expect("row");
-    assert_eq!(row.progress, Some(json!({ "groups": 1, "picks": 1 })));
+    assert_eq!(
+        row.progress,
+        Some(json!({ "groups": 1, "picks": 1, "matched": 0 }))
+    );
     let remaps = app
         .db
         .read(|c| crate::db::jobs::count_kind(c, crate::jobs::remap::KIND))
@@ -905,17 +909,18 @@ fn an_export_after_a_logiqx_dat_of_the_system_leaves_one_live_set() {
     );
 }
 
-/// Stores files `(path, crc32, rom id)` of 4 bytes on NES, removes `version` as
-/// `DELETE /dats/{id}` does and recomputes; returns how many files were matched again.
+/// Stores fully hashed files `(path, crc32, rom id)` of 4 bytes on NES, removes `version`
+/// as `DELETE /dats/{id}` does and recomputes; returns how many files were matched again.
 fn remove_with_files(c: &TestDb, version: DatVersionId, files: &[(&str, &str, i64)]) -> usize {
     c.with(|x| {
         let nes = PlatformId("nes".into());
+        let (md5, sha1) = ("d".repeat(32), "d".repeat(40));
         for (path, crc, id) in files {
             let hashed = crate::db::files::Hashed {
                 crc32: Some(crc),
-                md5: None,
-                sha1: None,
-                header_rule: None,
+                md5: Some(&md5),
+                sha1: Some(&sha1),
+                header_rule: Some("none"),
             };
             let state = crate::db::files::FileState::Misnamed;
             crate::db::files::upsert(x, &nes, path, 4, 1, &hashed, Some(*id), state, 1)?;
@@ -1243,4 +1248,232 @@ fn a_disc_track_is_matched_again_under_the_all_or_nothing_rule() {
         ],
         "two of the live title's three tracks are not a complete game"
     );
+}
+
+/// Synthetic hashes numbered `n`, of a 4-byte payload.
+fn sums(n: u32) -> mistarr_core::HashSet {
+    mistarr_core::HashSet {
+        size: 4,
+        crc32: format!("{n:08x}"),
+        md5: format!("{n:032x}"),
+        sha1: format!("{n:040x}"),
+    }
+}
+
+/// Stores an unmatched 4-byte file row with `sums`, as a scan with no DAT leaves it.
+fn unmatched_file(
+    c: &Connection,
+    platform: &PlatformId,
+    path: &str,
+    sums: &mistarr_core::HashSet,
+) -> Result<files::FileId> {
+    let hashed = files::Hashed {
+        crc32: Some(&sums.crc32),
+        md5: Some(&sums.md5),
+        sha1: Some(&sums.sha1),
+        header_rule: Some("none"),
+    };
+    files::upsert(
+        c,
+        platform,
+        path,
+        4,
+        1,
+        &hashed,
+        None,
+        FileState::Unverified,
+        1,
+    )
+}
+
+#[tokio::test]
+async fn recompute_matches_unmatched_files_and_updates_have() {
+    let (_dir, app) = state();
+    let gb = PlatformId("gb".into());
+    app.db
+        .write(move |c| {
+            let tx = c.transaction()?;
+            let quest = ("Example Quest (USA)", "Example Quest (USA).gb");
+            files::seed_rom_fixture(&tx, &gb, quest.0, quest.1, &sums(1), "good")?;
+            let manor = ("Mock Manor (USA)", "Mock Manor (USA).gb");
+            files::seed_rom_fixture(&tx, &gb, manor.0, manor.1, &sums(2), "good")?;
+            titles::recompute_platform(&tx, "gb", &Prefs::default())?;
+            // More strays than one chunk, so the cursor pages past files that never match.
+            for n in 0..300 {
+                unmatched_file(&tx, &gb, &format!("GAMEBOY/stray {n}.gb"), &sums(1000 + n))?;
+            }
+            unmatched_file(&tx, &gb, "GAMEBOY/Example Quest (USA).gb", &sums(1))?;
+            unmatched_file(&tx, &gb, "GAMEBOY/Other Name.gb", &sums(2))?;
+            crate::db::commit(tx)
+        })
+        .await
+        .expect("seed");
+    let have = |app: Arc<AppState>| async move {
+        let sql = "SELECT SUM(have_verified) FROM title_groups WHERE platform_id = 'gb'";
+        app.db
+            .read(move |c| Ok(c.query_row(sql, [], |r| r.get::<_, i64>(0))?))
+            .await
+            .expect("have")
+    };
+    assert_eq!(have(app.clone()).await, 0, "nothing matched yet");
+
+    let run = Scheduler::run_inline(&app, Arc::new(Recompute::new("gb")));
+    let id = tokio::time::timeout(Duration::from_secs(30), run)
+        .await
+        .expect("a file that stays unmatched is read once, so the recompute ends")
+        .expect("run");
+    let row = app
+        .db
+        .read(move |c| rows::get(c, id))
+        .await
+        .expect("get")
+        .expect("row");
+    let matched = row.progress.as_ref().map(|p| p["matched"].clone());
+    assert_eq!(matched, Some(json!(2)));
+    let states: Vec<(String, String)> = app
+        .db
+        .read(|c| {
+            let sql =
+                "SELECT rel_path, state FROM files WHERE rom_id IS NOT NULL ORDER BY rel_path";
+            Ok(c.prepare(sql)?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?)
+        })
+        .await
+        .expect("states");
+    let pair = |p: &str, s: &str| (p.to_owned(), s.to_owned());
+    assert_eq!(
+        states,
+        [
+            pair("GAMEBOY/Example Quest (USA).gb", "verified"),
+            pair("GAMEBOY/Other Name.gb", "misnamed"),
+        ]
+    );
+    assert_eq!(
+        have(app.clone()).await,
+        1,
+        "the verified file's group is have"
+    );
+}
+
+#[test]
+fn unmatched_pages_end_on_a_file_that_never_matches() {
+    let c = conn();
+    let nes = PlatformId("nes".into());
+    let (first, pages) = c
+        .with(|x| {
+            let first = unmatched_file(x, &nes, "NES/stray.nes", &sums(7))?;
+            let mut after = files::FileId(0);
+            let mut pages = 0;
+            loop {
+                let chunk = match_unmatched_chunk(x, &nes, after)?;
+                pages += 1;
+                after = chunk.last;
+                if chunk.read < REMATCH_CHUNK as usize {
+                    break;
+                }
+            }
+            let again = match_unmatched_chunk(x, &nes, after)?;
+            assert_eq!(
+                (again.read, again.last),
+                (0, after),
+                "nothing past the cursor"
+            );
+            Ok((first, pages))
+        })
+        .expect("page");
+    assert_eq!(pages, 1);
+    let state = c
+        .with(|x| Ok(files::get(x, first)?.map(|f| (f.rom_id, f.state))))
+        .expect("get");
+    assert_eq!(state, Some((None, FileState::Unverified)));
+}
+
+#[test]
+fn a_stored_crc_matches_a_headered_file_by_its_size_less_the_header() {
+    let c = conn();
+    let nes = PlatformId("nes".into());
+    let state = c
+        .with(|x| {
+            let rom = sums(9);
+            let title = files::seed_title_fixture(x, &nes, "Crc Quest (USA)")?;
+            x.execute(
+                "INSERT INTO roms (title_id, name, size, crc32)
+                 VALUES (?1, 'Crc Quest (USA).nes', 4, ?2)",
+                rusqlite::params![title, rom.crc32],
+            )?;
+            let hashed = files::Hashed {
+                crc32: Some(&rom.crc32),
+                md5: Some(&rom.md5),
+                sha1: Some(&rom.sha1),
+                header_rule: Some("ines"),
+            };
+            let path = "NES/Crc Quest (USA).nes";
+            let unverified = FileState::Unverified;
+            let id = files::upsert(x, &nes, path, 20, 1, &hashed, None, unverified, 1)?;
+            match_unmatched_chunk(x, &nes, files::FileId(0))?;
+            Ok(files::get(x, id)?.map(|f| f.state))
+        })
+        .expect("match");
+    assert_eq!(
+        state,
+        Some(FileState::Verified),
+        "20 bytes on disk hash as the 4 after the iNES header"
+    );
+}
+
+#[test]
+fn a_stored_crc_allows_for_a_copier_header_only_at_its_size() {
+    let c = conn();
+    let snes = PlatformId("snes".into());
+    let states = c
+        .with(|x| {
+            let rom = sums(11);
+            let title = files::seed_title_fixture(x, &snes, "Copier Quest (USA)")?;
+            x.execute(
+                "INSERT INTO roms (title_id, name, size, crc32)
+                 VALUES (?1, 'Copier Quest (USA).sfc', 1024, ?2)",
+                rusqlite::params![title, rom.crc32],
+            )?;
+            let hashed = files::Hashed {
+                crc32: Some(&rom.crc32),
+                md5: Some(&rom.md5),
+                sha1: Some(&rom.sha1),
+                header_rule: Some("smc"),
+            };
+            let unverified = FileState::Unverified;
+            let mut ids = Vec::new();
+            // 1536 is 1024 plus a 512-byte copier header; 1040 is no copier size.
+            for (path, size) in [("SNES/Copier Quest (USA).sfc", 1536), ("SNES/b.sfc", 1040)] {
+                ids.push(files::upsert(
+                    x, &snes, path, size, 1, &hashed, None, unverified, 1,
+                )?);
+            }
+            match_unmatched_chunk(x, &snes, files::FileId(0))?;
+            let mut states = Vec::new();
+            for id in ids {
+                states.push(files::get(x, id)?.map(|f| f.state));
+            }
+            Ok(states)
+        })
+        .expect("match");
+    assert_eq!(
+        states,
+        [Some(FileState::Verified), Some(FileState::Unverified)]
+    );
+}
+
+#[test]
+fn a_recompute_that_changes_nothing_writes_nothing() {
+    let c = conn();
+    let nes = PlatformId("nes".into());
+    let changes = c
+        .with(|x| {
+            unmatched_file(x, &nes, "NES/stray.nes", &sums(12))?;
+            let before = x.total_changes();
+            match_unmatched_chunk(x, &nes, files::FileId(0))?;
+            Ok(x.total_changes() - before)
+        })
+        .expect("page");
+    assert_eq!(changes, 0);
 }

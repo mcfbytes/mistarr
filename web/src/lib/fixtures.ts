@@ -590,6 +590,20 @@ export const fixtureJobs: Job[] = [
   }
 ];
 
+export const fixtureRecentJobs: Job[] = [
+  {
+    id: 3,
+    kind: 'scan',
+    lane: 'heavy',
+    payload: { platform_id: 'megadrive' },
+    state: 'done',
+    progress: { platform_id: 'megadrive', done: 1, total: 1, matched: 90, unmatched: 1 },
+    reason: null,
+    created_at: 1_770_031_000,
+    updated_at: 1_770_031_020
+  }
+];
+
 export const fixtureSettings: Settings = {
   client: { kind: 'auto', url: '', remote_path_map: [] },
   limits: { down_kbps_menu: 0, down_kbps_core: 512, up_kbps_menu: 0, up_kbps_core: 64 },

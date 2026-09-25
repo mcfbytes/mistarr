@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getPlatforms, loadPlatforms, patchPlatform } from '../lib/stores/platforms.svelte';
+  import { findPlatform, getPlatforms, loadPlatforms, patchPlatform } from '../lib/stores/platforms.svelte';
+  import { trackScan } from '../lib/stores/jobs.svelte';
   import { platformUrl } from '../lib/router.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
@@ -35,11 +36,18 @@
     return parts.join(' · ');
   }
 
+  function platformName(id: string): string {
+    return findPlatform(id)?.name ?? id;
+  }
+
   async function scan(id: string): Promise<void> {
     scanning = { ...scanning, [id]: true };
     try {
-      if (!isMock) {
-        await api.scan(id);
+      const queued = isMock ? null : await api.scan(id);
+      showToast(`Scan of ${platformName(id)} queued`);
+      const jobId = queued?.job_id ?? queued?.arcade_job_id;
+      if (jobId != null) {
+        trackScan(jobId, id);
       }
     } catch (err) {
       showToast(errorMessage(err));

@@ -113,7 +113,7 @@ async fn scan_and_wait(
     app: &mistarr_server::app::AppState,
     addr: std::net::SocketAddr,
     platform_id: &str,
-) {
+) -> job_rows::JobRow {
     let body = post_scan(addr, Some(platform_id)).await;
     let id = JobId(body["job_id"].as_i64().expect("job_id"));
     eventually("scan job to finish", || async move {
@@ -132,6 +132,7 @@ async fn scan_and_wait(
         .expect("read")
         .expect("row");
     assert_eq!(row.state, JobState::Done, "{:?}", row.progress);
+    row
 }
 
 async fn find(
@@ -753,6 +754,394 @@ async fn scan_rejects_unknown_or_disabled_platforms() {
     .await;
     assert_eq!(r.status, 400, "{}", r.body);
     assert_eq!(r.json()["error"]["code"], "bad_request");
+
+    booted.running.shutdown().await.expect("shutdown");
+}
+
+/// A big-endian N64 image: the byte order mark the N64 rule detects, then `payload`.
+fn z64(payload: &[u8]) -> Vec<u8> {
+    let mut v = vec![0x80, 0x37, 0x12, 0x40];
+    v.extend_from_slice(payload);
+    v
+}
+
+/// `data` with each pair of bytes swapped, the byte-swapped N64 order.
+fn swap16(data: &[u8]) -> Vec<u8> {
+    data.chunks(2)
+        .flat_map(|p| p.iter().rev().copied())
+        .collect()
+}
+
+/// A Logiqx DAT named `name` with one game per `(game, rom, hashes)`.
+fn logiqx(name: &str, games: &[(&str, &str, &HashSet)]) -> String {
+    let mut xml = format!("<datafile><header><name>{name}</name><version>1</version></header>");
+    for (game, rom, h) in games {
+        xml.push_str(&format!(
+            "<game name=\"{game}\"><rom name=\"{rom}\" size=\"{}\" crc=\"{}\" md5=\"{}\" sha1=\"{}\"/></game>",
+            h.size, h.crc32, h.md5, h.sha1
+        ));
+    }
+    xml.push_str("</datafile>");
+    xml
+}
+
+/// Loads `xml` as a DAT dropped into `dats/` and waits for its import job.
+async fn load_dat(booted: &common::Booted, file: &str, xml: &str) {
+    let app = &booted.running.app;
+    let path = app.config().paths.data.join("dats").join(file);
+    write(&path, xml.as_bytes());
+    let job = std::sync::Arc::new(mistarr_server::jobs::dat_import::DatImport::new(&path));
+    let id = mistarr_server::jobs::Scheduler::enqueue(app, job)
+        .await
+        .expect("enqueue");
+    eventually("the DAT import", || async move {
+        app.db
+            .read(move |c| job_rows::get(c, id))
+            .await
+            .ok()
+            .flatten()
+            .is_some_and(|r| r.state == JobState::Done)
+    })
+    .await;
+}
+
+async fn platform_counts(addr: std::net::SocketAddr, id: &str) -> serde_json::Value {
+    let r = request(addr, "GET", "/api/v1/platforms", &[], None).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    r.json()["items"]
+        .as_array()
+        .expect("items")
+        .iter()
+        .find(|p| p["id"] == id)
+        .map(|p| p["counts"].clone())
+        .expect("platform")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_dat_loaded_after_the_first_scan_matches_the_files_already_there() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let games = dir.path().join("games");
+    let quest = z64(b"n64 quest payload, big-endian...");
+    write(&games.join("N64/Example Quest (USA).z64"), &quest);
+    let swapped = z64(b"n64 manor payload, swapped order");
+    write(&games.join("N64/Mock Manor (USA).v64"), &swap16(&swapped));
+    write(
+        &games.join("N64/Stray.z64"),
+        &z64(b"listed by no DAT at all........."),
+    );
+    let nes_payload = b"nes payload behind an ines header";
+    write(
+        &games.join("NES/Header Quest (USA).nes"),
+        &ines(nes_payload),
+    );
+
+    let mut config = config_in(dir.path());
+    config.paths.games = games.clone();
+    let booted = boot_with(dir, config).await;
+    let (app, addr) = (&booted.running.app, booted.addr());
+    let (n64, nes) = (PlatformId("n64".into()), PlatformId("nes".into()));
+
+    scan_and_wait(app, addr, "n64").await;
+    scan_and_wait(app, addr, "nes").await;
+    let before = find(app, &n64, "N64/Mock Manor (USA).v64")
+        .await
+        .expect("row");
+    assert_eq!((before.rom_id, before.state), (None, FileState::Unverified));
+    assert_eq!(platform_counts(addr, "n64").await["unmatched_files"], 3);
+
+    // A running core holds the heavy lane, so the scans the loads queue wait and only
+    // the background recompute can match the files.
+    std::fs::write(booted.corename(), "N64\n").expect("corename");
+    eventually("the heavy lane to close", || async {
+        app.gate.state().core_running()
+    })
+    .await;
+
+    let (quest_h, manor_h) = (hash_of(&quest), hash_of(&swapped));
+    let n64_dat = logiqx(
+        "Example Vendor - Nintendo 64",
+        &[
+            ("Example Quest (USA)", "Example Quest (USA).z64", &quest_h),
+            ("Mock Manor (USA)", "Mock Manor (USA).z64", &manor_h),
+        ],
+    );
+    load_dat(&booted, "n64.dat", &n64_dat).await;
+    let nes_h = hash_of(nes_payload);
+    let nes_dat = logiqx(
+        "Example Vendor - Nintendo Entertainment System",
+        &[("Header Quest (USA)", "Header Quest (USA).nes", &nes_h)],
+    );
+    load_dat(&booted, "nes.dat", &nes_dat).await;
+
+    eventually("the N64 files to match", || async {
+        let counts = platform_counts(addr, "n64").await;
+        counts["have"] == 1 && counts["unmatched_files"] == 1
+    })
+    .await;
+    let state = |rel: &'static str, pid: PlatformId| async move {
+        find(app, &pid, rel).await.map(|r| r.state)
+    };
+    assert_eq!(
+        state("N64/Example Quest (USA).z64", n64.clone()).await,
+        Some(FileState::Verified)
+    );
+    assert_eq!(
+        state("N64/Mock Manor (USA).v64", n64.clone()).await,
+        Some(FileState::Misnamed),
+        "stored hashes are of the big-endian form the DAT lists"
+    );
+    assert_eq!(
+        state("N64/Stray.z64", n64).await,
+        Some(FileState::Unverified)
+    );
+    eventually("the headered NES file to match", || async {
+        platform_counts(addr, "nes").await["have"] == 1
+    })
+    .await;
+    let open_scans = app
+        .db
+        .read(|c| {
+            let open = job_rows::open_rows(c)?;
+            Ok(open.iter().filter(|j| j.kind == "scan").count())
+        })
+        .await
+        .expect("jobs");
+    assert_eq!(
+        open_scans, 2,
+        "both automatic scans still wait for the core"
+    );
+    assert_eq!(
+        state("NES/Header Quest (USA).nes", nes).await,
+        Some(FileState::Verified)
+    );
+    let r = request(
+        addr,
+        "GET",
+        "/api/v1/platforms/n64/titles?have=yes",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(r.json()["total"], 1, "{}", r.body);
+
+    booted.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_rescan_matches_unchanged_unmatched_files_without_hashing_them() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let games = dir.path().join("games");
+    let path = games.join("GAMEBOY/Example Quest (USA).gb");
+    let original = b"gb payload scanned before any DAT";
+    write(&path, original);
+
+    let mut config = config_in(dir.path());
+    config.paths.games = games.clone();
+    let booted = boot_with(dir, config).await;
+    let (app, addr) = (&booted.running.app, booted.addr());
+    let gb = PlatformId("gb".into());
+
+    let first = scan_and_wait(app, addr, "gb").await;
+    let progress = first.progress.expect("progress");
+    assert_eq!(
+        (&progress["matched"], &progress["unmatched"]),
+        (&0.into(), &1.into())
+    );
+    let mtime = std::fs::metadata(&path)
+        .expect("meta")
+        .modified()
+        .expect("mtime");
+
+    let hash = hash_of(original);
+    app.db
+        .write({
+            let (gb, hash) = (gb.clone(), hash.clone());
+            move |c| {
+                let name = "Example Quest (USA)";
+                files::seed_rom_fixture(c, &gb, name, "Example Quest (USA).gb", &hash, "good")
+            }
+        })
+        .await
+        .expect("seed");
+
+    // Same size and mtime, other bytes: only the stored hashes can match now.
+    std::fs::write(&path, vec![b'X'; original.len()]).expect("overwrite");
+    std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .expect("open")
+        .set_modified(mtime)
+        .expect("set mtime");
+
+    let second = scan_and_wait(app, addr, "gb").await;
+    let progress = second.progress.expect("progress");
+    assert_eq!(
+        (&progress["matched"], &progress["unmatched"]),
+        (&1.into(), &0.into())
+    );
+    let row = find(app, &gb, "GAMEBOY/Example Quest (USA).gb")
+        .await
+        .expect("row");
+    assert_eq!(row.state, FileState::Verified);
+    assert!(row.rom_id.is_some());
+    assert_eq!(
+        row.sha1.as_deref(),
+        Some(hash.sha1.as_str()),
+        "not hashed again"
+    );
+
+    let r = request(addr, "GET", "/api/v1/system/jobs/recent", &[], None).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    let recent = r.json();
+    assert_eq!(recent["items"][0]["id"], second.id.0, "newest first");
+    assert_eq!(recent["items"][0]["progress"]["matched"], 1);
+    assert_eq!(recent["items"][1]["id"], first.id.0);
+
+    booted.running.shutdown().await.expect("shutdown");
+}
+
+/// Writes `data` over `path` and gives it `mtime` back, so a scan sees it unchanged.
+fn rewrite_keeping_mtime(path: &Path, data: &[u8]) {
+    let mtime = std::fs::metadata(path)
+        .expect("meta")
+        .modified()
+        .expect("mtime");
+    std::fs::write(path, data).expect("rewrite");
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .expect("open")
+        .set_modified(mtime)
+        .expect("set mtime");
+}
+
+/// `zip` with its first member flagged as encrypted, local and central: it lists but
+/// cannot be read without a password.
+fn encrypted(zip: &[u8]) -> Vec<u8> {
+    let mut out = zip.to_vec();
+    out[6] |= 1;
+    let central = 0x0201_4b50u32.to_le_bytes();
+    let at = out
+        .windows(4)
+        .position(|w| w == central)
+        .expect("central directory");
+    out[at + 8] |= 1;
+    out
+}
+
+/// A rom whose CRC32 and size are `h`'s but whose sha1 and md5 are other, synthetic ones.
+fn same_crc_other_sha1(h: &HashSet) -> HashSet {
+    HashSet {
+        size: h.size,
+        crc32: h.crc32.clone(),
+        md5: "7".repeat(32),
+        sha1: "7".repeat(40),
+    }
+}
+
+async fn seed_gba_rom(app: &mistarr_server::app::AppState, name: &str, h: &HashSet) {
+    let (name, h) = (name.to_owned(), h.clone());
+    app.db
+        .write(move |c| {
+            let gba = PlatformId("gba".into());
+            files::seed_rom_fixture(c, &gba, &name, &format!("{name}.gba"), &h, "good")
+        })
+        .await
+        .expect("seed");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_crc_only_member_is_hashed_once_a_candidate_appears_and_never_again() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let games = dir.path().join("games");
+    let zip_path = games.join("GBA/Crc Quest (USA).zip");
+    let payload = b"gba member payload known by crc only";
+    let h = hash_of(payload);
+    let zip = build_stored_zip("Crc Quest (USA).gba", payload, &h.crc32);
+    write(&zip_path, &zip);
+
+    let mut config = config_in(dir.path());
+    config.paths.games = games.clone();
+    let booted = boot_with(dir, config).await;
+    let (app, addr) = (&booted.running.app, booted.addr());
+    let gba = PlatformId("gba".into());
+    let rel = "GBA/Crc Quest (USA).zip#Crc Quest (USA).gba";
+
+    scan_and_wait(app, addr, "gba").await;
+    let row = find(app, &gba, rel).await.expect("row");
+    assert_eq!(
+        (row.sha1.as_deref(), row.header_rule.as_deref()),
+        (None, None)
+    );
+
+    // The candidate shares the CRC32 and size but not the sha1: the CRC32 decides nothing.
+    seed_gba_rom(app, "Crc Quest (USA)", &same_crc_other_sha1(&h)).await;
+    let recompute = mistarr_server::jobs::dat_import::Recompute::new("gba");
+    mistarr_server::jobs::Scheduler::run_inline(app, std::sync::Arc::new(recompute))
+        .await
+        .expect("recompute");
+    let row = find(app, &gba, rel).await.expect("row");
+    assert_eq!((row.rom_id, row.state), (None, FileState::Unverified));
+    assert!(
+        row.sha1.is_none(),
+        "the recompute never matches a CRC32 alone"
+    );
+
+    scan_and_wait(app, addr, "gba").await;
+    let row = find(app, &gba, rel).await.expect("row");
+    assert_eq!(row.sha1.as_deref(), Some(h.sha1.as_str()), "hashed once");
+    assert_eq!(row.state, FileState::Unverified);
+
+    // Other bytes of the same length: a second hash would store another sha1.
+    let other = vec![b'Z'; payload.len()];
+    rewrite_keeping_mtime(
+        &zip_path,
+        &build_stored_zip("Crc Quest (USA).gba", &other, &h.crc32),
+    );
+    scan_and_wait(app, addr, "gba").await;
+    let row = find(app, &gba, rel).await.expect("row");
+    assert_eq!(
+        row.sha1.as_deref(),
+        Some(h.sha1.as_str()),
+        "never hashed again"
+    );
+
+    booted.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_member_that_fails_to_hash_is_not_retried_while_unchanged() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let games = dir.path().join("games");
+    let zip_path = games.join("GBA/Odd Quest (USA).zip");
+    let payload = b"gba member behind a password flag";
+    let h = hash_of(payload);
+    let stored = build_stored_zip("Odd Quest (USA).gba", payload, &h.crc32);
+    write(&zip_path, &encrypted(&stored));
+
+    let mut config = config_in(dir.path());
+    config.paths.games = games.clone();
+    let booted = boot_with(dir, config).await;
+    let (app, addr) = (&booted.running.app, booted.addr());
+    let gba = PlatformId("gba".into());
+    let rel = "GBA/Odd Quest (USA).zip#Odd Quest (USA).gba";
+
+    scan_and_wait(app, addr, "gba").await;
+    seed_gba_rom(app, "Odd Quest (USA)", &h).await;
+    scan_and_wait(app, addr, "gba").await;
+    let row = find(app, &gba, rel).await.expect("row");
+    assert_eq!(
+        row.header_rule.as_deref(),
+        Some("none"),
+        "the failed attempt is recorded"
+    );
+    assert!(row.sha1.is_none());
+
+    // Now readable at the same size and mtime: a retry would hash and verify it.
+    rewrite_keeping_mtime(&zip_path, &stored);
+    scan_and_wait(app, addr, "gba").await;
+    let row = find(app, &gba, rel).await.expect("row");
+    assert_eq!((row.sha1, row.state), (None, FileState::Unverified));
 
     booted.running.shutdown().await.expect("shutdown");
 }

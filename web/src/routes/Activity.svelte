@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getDownloads, getImports, loadDownloads, loadImports, patchDownload } from '../lib/stores/downloads.svelte';
-  import { getJobs, loadJobs } from '../lib/stores/jobs.svelte';
+  import { getJobs, getRecentJobs, jobOutcome, loadJobs, watchRecent } from '../lib/stores/jobs.svelte';
+  import { findPlatform, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
 
@@ -11,11 +12,18 @@
     void loadDownloads();
     void loadImports();
     void loadJobs();
+    void loadPlatforms().catch(() => undefined);
+    return watchRecent();
   });
 
   const downloads = $derived(getDownloads());
   const imports = $derived(getImports());
   const jobs = $derived(getJobs());
+  const recent = $derived(getRecentJobs());
+
+  function platformName(id: string): string {
+    return findPlatform(id)?.name ?? id;
+  }
 
   async function retry(id: number): Promise<void> {
     if (isMock) {
@@ -80,6 +88,18 @@
   {:else}
     <p class="muted">No jobs queued or running.</p>
   {/each}
+
+  <h2>Recent</h2>
+  <ul class="imports" aria-live="polite">
+    {#each recent as job (job.id)}
+      <li class:error={job.state === 'failed'}>
+        {jobOutcome(job, platformName)}
+        <span class="muted">{new Date(job.updated_at * 1000).toLocaleString()}</span>
+      </li>
+    {:else}
+      <li class="muted">No finished jobs yet.</li>
+    {/each}
+  </ul>
 
   <h2>Imports</h2>
   <ul class="imports">

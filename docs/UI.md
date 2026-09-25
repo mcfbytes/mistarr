@@ -40,10 +40,13 @@ holds scans and imports, or the user's Pause, which also holds DAT and source
 imports), which ones, and a Run now button that calls `POST /system/resume`.
 
 **Platforms** (`/`). One card per platform with core present, counts, and a
-scan button, below a banner of the platform's art. Platforms whose core is
-absent are in a collapsed section. While the wizard reports a missing DAT,
-client or source, a "Setup not finished" card lists what is missing and
-links to the wizard.
+scan button, below a banner of the platform's art. Scan shows a toast when
+the scan is queued and another with its outcome when it finishes, such as
+"Scan of Nintendo 64: 410 matched, 2 unmatched", on whichever page is open;
+counts reload when a scan or recompute ends. Platforms whose core is absent
+are in a collapsed section. While the wizard reports a missing DAT, client or
+source, a "Setup not finished" card lists what is missing and links to the
+wizard.
 
 **Browse** (`/p/{id}`). A Start core button beside the platform name, except
 on arcade, both below a banner of the platform's art. Poster grid of
@@ -70,8 +73,9 @@ turned off in settings, mistarr is not running on a MiSTer, or no core for
 the platform is installed.
 
 **Activity** (`/activity`). Downloads with per-file progress bars, imports
-log, and queued and running jobs with their lane and hold reason. Live over
-SSE.
+log, queued and running jobs with their lane and hold reason, and a Recent
+list of the last finished jobs from `/system/jobs/recent`, one line each with
+its outcome and time. Live over SSE.
 
 **Sources** (`/sources`). Table of sources: name, platform, state, file count,
 matched count, seed policy, client status. Bind and disable actions.
@@ -198,7 +202,10 @@ most once per burst of `job.progress`, `dat.loaded`, `dat.rejected` or
 `source.changed` events, and `/sources` is re-read at most once per burst of
 `source.changed`. The outcomes of this session's uploads come from the last
 50 finished jobs; a resync forgets them, and an upload whose job is no longer
-known then says to look at the lists.
+known then says to look at the lists. `/system/jobs/recent` is re-read once
+per burst of finished jobs while Activity is open, and on a resync while
+Activity is open or a scan the user queued awaits its outcome, which the
+re-read list then supplies.
 No polling from the browser. The SSE connection shows a banner when
 disconnected and reconnects with backoff.
 
