@@ -54,7 +54,7 @@
       if (!isMock) {
         await api.launchCore(platformId);
       }
-      showToast('Core started on the MiSTer.');
+      showToast('Core started on the MiSTer.', 'success');
     } catch (err) {
       showToast(errorMessage(err));
     } finally {

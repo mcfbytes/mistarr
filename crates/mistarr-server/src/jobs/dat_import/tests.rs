@@ -53,6 +53,7 @@ fn request(stop: bool, bind: Option<Bind>) -> Request {
         now: 1,
         stop: watch::channel(stop).1,
         gate: watch::channel(GateState::default()).1,
+        meter: None,
         abort_on_hold: false,
     }
 }
@@ -1687,13 +1688,16 @@ async fn a_dat_job_imports_in_ram_and_queues_the_remap_its_recompute_ends_with()
     }
     phases.dedup();
     assert_eq!(
-        phases,
-        [
-            "copying the database to memory",
-            "importing",
-            "writing the database to the card"
-        ]
+        phases.first().map(String::as_str),
+        Some("copying the database to memory"),
+        "{phases:?}"
     );
+    assert_eq!(
+        phases.last().map(String::as_str),
+        Some("writing the database to the card"),
+        "{phases:?}"
+    );
+    assert!(phases.iter().any(|p| p == "reading"), "{phases:?}");
     assert!(!dir.path().join("data/mistarr.db.new").exists());
     let left = std::fs::read_dir(dir.path().join("ram")).map_or(0, Iterator::count);
     assert_eq!(left, 0, "the copy in RAM is removed");

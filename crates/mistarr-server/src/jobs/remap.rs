@@ -177,7 +177,8 @@ pub fn store_mapping(
 }
 
 /// Maps one source again when its platform's roms changed since it was last
-/// mapped, writing only what changed, [`CHUNK`] rows per transaction, then
+/// mapped: keys new roms a batch per transaction, then writes only what changed,
+/// [`CHUNK`] rows per transaction, then
 /// its stamp and hit rate. Publishes `source.changed` when the mapping
 /// changed and returns whether it did.
 ///
@@ -201,11 +202,24 @@ pub async fn remap_one(app: &AppState, id: SourceId) -> Result<bool> {
     let Some((row, platform)) = current else {
         return Ok(false);
     };
+    loop {
+        let keyed = app
+            .db
+            .write_bulk(|c| {
+                let tx = c.transaction()?;
+                let keyed = rows::key_batch(&tx)?;
+                crate::db::commit(tx)?;
+                Ok(keyed)
+            })
+            .await?;
+        if keyed == 0 {
+            break;
+        }
+    }
     let p = platform.clone();
     app.db
-        .write_bulk(move |c| {
+        .write(move |c| {
             let tx = c.transaction()?;
-            rows::refresh_match_keys(&tx)?;
             candidates::drop_foreign_proofs(&tx, id, &p)?;
             crate::db::commit(tx)
         })

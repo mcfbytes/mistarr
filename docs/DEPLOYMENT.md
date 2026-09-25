@@ -76,8 +76,10 @@ any dynamic dependency, checked with `file` on the output.
 /media/fat/Scripts/mistarr.sh      # start/stop/status from the Scripts menu
 /media/fat/Scripts/mistarr.sh.prev # the previous launcher, kept by install.sh
 /tmp/mistarr.start.lock        # held while a start runs; a reboot clears it
-/tmp/mistarr/                  # SQLite's temporary files and the DAT stage, in RAM;
-                               #   <data>/tmp/ on the card when it cannot be written
+/tmp/mistarr/                  # SQLite's temporary files and the DAT stage, in RAM, mode 0700;
+                               #   <data>/tmp/ on the card when it cannot be written,
+                               #   is a symlink or is another user's (logged at warn);
+                               #   MISTARR_TEMP_DIR names another directory
 /tmp/mistarr/import-<key>-<job>/  # the database's copy while a DAT import or a
                                #   migration runs in RAM ([memory] import_dir)
 ```
@@ -86,14 +88,14 @@ A DAT import copies the database into RAM, loads the DAT there and writes the
 whole file back to the card in 1 MiB writes, so a load costs the card about
 one synchronous write per MiB of the database instead of thousands of page
 writes ([ARCHITECTURE.md](ARCHITECTURE.md) "DAT import in RAM"). Activity and
-the DATs screen show its phase: "copying the database to memory",
-"importing", "writing the database to the card". While it runs, other writes
+the DATs screen show its phases: "copying the database to memory", then
+the load's own, then "writing the database to the card". While it runs, other writes
 wait, so marking a title wanted or saving settings answers once the import
 ends; browsing keeps working and shows the catalogue as it was until the
 swap. When the copy would leave less than `[memory] import_floor_mib` of
 memory available, or `import_dir` or the card lacks room, or another process
-keeps the database open, the import runs on the card as "importing in
-place", and its progress and the log say why. Pending migrations at startup
+keeps the database open, the import runs on the card, and its progress
+and the log say why. Pending migrations at startup
 take the same path. In `mistarr.toml`:
 
 ```toml
@@ -175,12 +177,24 @@ prints where the backup is and the manual rollback steps.
 binary for its listen address (`mistarr listen-addr`, which reads
 `mistarr.toml` as the server does), uses the loopback address when that is
 `0.0.0.0` or `[::]`, and falls back to port 8420 on loopback when the binary
-gives no clean answer. It waits up to 180 s for the server to answer HTTP
-there. Migrations run before the server listens, so the wait covers them;
-for a database that needs a longer migration on the board, run the install
-with a larger limit, for example `MISTARR_START_TIMEOUT=900 sh install.sh`.
-If the new version fails to start, stops being reported running, or does
-not answer in time, the script stops it and puts back `mistarr.prev` and
+gives no clean answer. It waits up to 180 s (`MISTARR_START_TIMEOUT`) for the
+server to answer HTTP there.
+
+Migrations run before the server listens, so a large one on the board can
+take longer than that: every page it writes is flushed through the card's
+`sync` mount (ARCHITECTURE.md "Writes on a sync mount"). Migration 17, which
+rebuilds three rom indexes, writes about 3 400 pages to the database and
+WAL for a 65 MB database with every rom keyed, about 90 s at 25 ms a write.
+While migrations run, the server keeps `mistarr.migrating` in the data
+directory, rewritten every 5 s with the versions and the process's I/O bytes
+and CPU ticks, and removes it once they are applied; the log says
+"migrating the database". While that file exists and keeps changing, the
+script waits on, printing it every 30 s, and the 180 s count starts again
+once it is gone. A migration that leaves the file unchanged for 300 s
+(`MISTARR_PROGRESS_TIMEOUT`), or that runs past two hours
+(`MISTARR_MIGRATE_TIMEOUT`), counts as a failed start, as does a server that
+exits. If the new version fails to start, stops being reported running,
+stalls, or does not answer in time, the script stops it and puts back `mistarr.prev` and
 `mistarr.sh.prev`, and, when the new version was started, the saved
 database set. It restores only a set marked by `mistarr.prev.ok`. The
 database files are copied to `.restore` names, synced and moved into place;
@@ -211,7 +225,7 @@ copy of your own made while it was installed.
 
 ## Starting it
 
-`Scripts/mistarr.sh` starts the daemon under `nice -n 10 ionice -c 3`, prints
+`Scripts/mistarr.sh` starts the daemon under `nice -n 10`, prints
 the URL, and offers to enable start-at-boot by appending a line to
 `/media/fat/linux/user-startup.sh`. On Buildroot_MiSTer the same script works,
 and the image may additionally ship an init service; either way the script is

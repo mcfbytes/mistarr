@@ -190,7 +190,7 @@ async fn import_torrent(
     let threshold = app.config().sources.bind_threshold;
     let origin = origin.to_owned();
     app.db
-        .write(move |c| {
+        .write_bulk(move |c| {
             let tx = c.transaction()?;
             let id = match rows::find_by_infohash(&tx, &infohash)? {
                 Some(row) if row.state == SourceState::Resolving => row.id,
@@ -360,7 +360,7 @@ pub async fn rebind_after_dat(app: &Arc<AppState>, platforms: &[PlatformId]) -> 
     let platforms_queued = platforms.to_vec();
     let changed = app
         .db
-        .write(move |c| {
+        .write_bulk(move |c| {
             let tx = c.transaction()?;
             let mut out = Vec::new();
             for (id, suggested) in rows::list_unbound(&tx)? {
@@ -559,7 +559,7 @@ impl Job for ResolveMagnet {
         let threshold = app.config().sources.bind_threshold;
         let bound = app
             .db
-            .write(move |c| {
+            .write_bulk(move |c| {
                 let tx = c.transaction()?;
                 let still = rows::get(&tx, id)?.is_some_and(|r| r.state == SourceState::Resolving);
                 if !still {

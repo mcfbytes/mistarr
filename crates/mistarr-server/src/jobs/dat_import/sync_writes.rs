@@ -2,8 +2,10 @@
 
 use std::fmt::Write as _;
 use std::io::Cursor;
+use std::path::{Path, PathBuf};
 
 use super::*;
+use crate::db::dat_stage::{StagedGame, StagedRom};
 use crate::db::files::{FileId, FileState, Hashed};
 
 /// Write syscalls and bytes the calling thread made so far, from `/proc/thread-self/io`;
@@ -101,7 +103,7 @@ fn psx_dat(games: usize) -> (String, Vec<Track>) {
 /// A file database holding the synthetic catalogue at `scale` and `unmatched` hashed psx
 /// files no rom matches yet, in disc directories of three, a third of them tracks of `dat`.
 /// Its writer keeps temporary tables in memory, so only database and WAL writes count.
-fn catalogue(dir: &std::path::Path, scale: f64, unmatched: usize, dat: &[Track]) -> Db {
+fn catalogue(dir: &Path, scale: f64, unmatched: usize, dat: &[Track]) -> Db {
     let db = Db::open(&dir.join("sync.db")).expect("open");
     let psx = PlatformId("psx".into());
     db.write_blocking(|c| {
@@ -197,6 +199,7 @@ fn request() -> Request {
         now: 2,
         stop: watch::channel(false).1,
         gate: watch::channel(GateState::default()).1,
+        meter: None,
         abort_on_hold: false,
     }
 }
@@ -212,6 +215,30 @@ fn measure(db: &Db, xml: &str) -> Option<[(u64, u64); 2]> {
     Some([import?, recomputed?])
 }
 
+/// Runs the ignored test `name` of this module alone in a child test process with `env`
+/// set, and fails when it fails.
+fn run_alone(name: &str, env: &[(&str, &Path)]) {
+    let module = module_path!().split_once("::").map_or("", |(_, m)| m);
+    let mut cmd = std::process::Command::new(std::env::current_exe().expect("test binary"));
+    cmd.arg(format!("{module}::{name}")).args([
+        "--exact",
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ]);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run");
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    eprintln!("{text}");
+    assert!(out.status.success() && text.contains("1 passed"), "{text}");
+}
+
 /// [`load_writes_alone`] in a process of its own: the soft heap limit and the heap it
 /// bounds are process-wide, so other tests' connections would make the writer spill.
 #[test]
@@ -220,19 +247,127 @@ fn a_dat_load_writes_each_dirty_page_about_once() {
         eprintln!("no per-thread I/O accounting; skipped");
         return;
     }
-    let module = module_path!().split_once("::").map_or("", |(_, m)| m);
-    let out = std::process::Command::new(std::env::current_exe().expect("test binary"))
-        .arg(format!("{module}::load_writes_alone"))
-        .args(["--exact", "--ignored", "--nocapture", "--test-threads=1"])
-        .output()
-        .expect("run");
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
+    run_alone("load_writes_alone", &[]);
+}
+
+/// [`stage_shrinks_alone`] in a process of its own whose temporary directory is its own.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_stage_gives_its_temporary_space_back() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    run_alone(
+        "stage_shrinks_alone",
+        &[(crate::db::SQLITE_TMPDIR, dir.path())],
     );
-    eprintln!("{text}");
-    assert!(out.status.success() && text.contains("1 passed"), "{text}");
+}
+
+/// Bytes of the files this process holds open under `dir`, deleted ones included, as
+/// SQLite's temporary files are.
+#[cfg(target_os = "linux")]
+fn open_bytes_under(dir: &Path) -> u64 {
+    let mut total = 0;
+    for fd in std::fs::read_dir("/proc/self/fd").expect("fds").flatten() {
+        let Ok(target) = std::fs::read_link(fd.path()) else {
+            continue;
+        };
+        if target.starts_with(dir) {
+            total += std::fs::metadata(fd.path()).map_or(0, |m| m.len());
+        }
+    }
+    total
+}
+
+/// A staged game of `name` with three tracks carrying every hash.
+fn staged_game(name: String, rng: &mut Rng) -> StagedGame {
+    let roms = (1..=3)
+        .map(|t| StagedRom {
+            name: format!("{name} (Track {t}).bin"),
+            size: 1_000_000,
+            crc32: Some(rng.hex(8)),
+            md5: Some(rng.hex(32)),
+            sha1: Some(rng.hex(40)),
+            status: "good".into(),
+            header: None,
+        })
+        .collect();
+    StagedGame {
+        base_name: name.clone(),
+        group_key: name.to_lowercase(),
+        clone_of: None,
+        regions: vec!["Europe".into()],
+        languages: Vec::new(),
+        revision: None,
+        flags: Vec::new(),
+        roms,
+        name,
+    }
+}
+
+/// Stages 20 000 games, empties the stage, then loads a DAT, and checks the temporary
+/// files under `SQLITE_TMPDIR` hold the stage and shrink back once it is empty.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "run alone by the_stage_gives_its_temporary_space_back"]
+fn stage_shrinks_alone() {
+    let tmp = PathBuf::from(std::env::var_os(crate::db::SQLITE_TMPDIR).expect("SQLITE_TMPDIR"));
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = catalogue(dir.path(), 0.01, 0, &[]);
+    db.write_blocking(|c| Ok(c.pragma_update(None, "temp_store", "FILE")?))
+        .expect("temporary files");
+    let mut rng = Rng(0x57a9_e000);
+    let games: Vec<StagedGame> = crate::synth::game_names(20_000, 7)
+        .into_iter()
+        .map(|name| staged_game(name, &mut rng))
+        .collect();
+    let staged = db
+        .write_blocking(|c| {
+            for chunk in games.chunks(500) {
+                append_chunk(c, chunk)?;
+            }
+            Ok(open_bytes_under(&tmp))
+        })
+        .expect("stage");
+    db.write_blocking(|c| {
+        let tx = c.transaction()?;
+        dat_stage::clear(&tx)?;
+        crate::db::commit(tx)
+    })
+    .expect("clear");
+    let cleared = open_bytes_under(&tmp);
+    let (xml, _) = psx_dat(2_000);
+    let outcome = import_member(&db, Cursor::new(xml.as_bytes()), &request(), "").expect("load");
+    assert!(matches!(outcome, Outcome::Loaded(_)), "{outcome:?}");
+    let loaded = open_bytes_under(&tmp);
+    eprintln!(
+        "staged {staged} bytes, {cleared} once cleared, {loaded} after a {} byte load",
+        xml.len()
+    );
+    assert!(staged > 4 << 20, "{staged} bytes staged");
+    assert!(
+        cleared < 256 << 10,
+        "{cleared} bytes left once the stage emptied"
+    );
+    assert!(loaded < 256 << 10, "{loaded} bytes left after a load");
+}
+
+#[test]
+fn a_full_disk_names_the_directory_with_less_room() {
+    let (tmp, db) = (
+        Path::new("/tmp/mistarr"),
+        Path::new("/media/fat/mistarr/mistarr.db"),
+    );
+    let ram_full = |p: &Path| Some(if p == tmp { 0 } else { 1 << 30 });
+    let card_full = |p: &Path| Some(if p == tmp { 1 << 30 } else { 0 });
+    let msg = full_message(Some(tmp), db, ram_full);
+    assert!(msg.starts_with("/tmp/mistarr is full"), "{msg}");
+    let msg = full_message(Some(tmp), db, card_full);
+    assert!(msg.starts_with("/media/fat/mistarr is full"), "{msg}");
+    let msg = full_message(None, db, ram_full);
+    assert!(msg.starts_with("/media/fat/mistarr is full"), "{msg}");
+    let full =
+        rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL), None);
+    assert!(disk_full(&Error::Db(full)));
+    assert!(!disk_full(&Error::Cancelled));
 }
 
 /// Write syscalls of a 450-game psx load on a catalogue a tenth the bench size: about
@@ -346,4 +481,59 @@ fn in_place_and_in_ram_on_the_bench_catalogue() {
             r.write_back,
         );
     }
+}
+
+/// Write syscalls of migration 17 on the bench catalogue with every rom keyed, the most
+/// its partial indexes can hold, through [`Db::open`] as a start runs it.
+#[test]
+#[ignore = "about a minute; run by hand with --ignored --nocapture"]
+fn migration_writes_on_the_bench_catalogue() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("sync.db");
+    let db = Db::open(&path).expect("open");
+    db.write_blocking(|c| {
+        crate::db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS)?;
+        crate::synth::seed(c, 1.0, 1)?;
+        c.execute_batch(
+            "UPDATE roms SET match_name = lower(name), match_base = lower(name);
+             DROP INDEX roms_md5; CREATE INDEX roms_md5 ON roms(md5);
+             DROP INDEX roms_match_base; CREATE INDEX roms_match_base ON roms(match_base, size);
+             DROP INDEX roms_size; CREATE INDEX roms_size ON roms(size);
+             CREATE TABLE dat_stage (seq INTEGER PRIMARY KEY, game TEXT NOT NULL);
+             DELETE FROM schema_version WHERE version = 17;",
+        )?;
+        c.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+        Ok(())
+    })
+    .expect("catalogue at 16");
+    drop(db);
+    let copy = dir.path().join("copy.db");
+    std::fs::copy(&path, &copy).expect("copy");
+    let size = std::fs::metadata(&path).expect("size").len();
+    let start = std::time::Instant::now();
+    let (db, writes) = writes_of(|| Db::open(&path).expect("migrate"));
+    let (w, b) = writes.expect("per-thread I/O accounting");
+    eprintln!(
+        "database {size} bytes: migration {w} writes, {b} bytes, {:?}",
+        start.elapsed()
+    );
+    let v = db
+        .read_blocking(crate::db::migrate::current_version)
+        .expect("version");
+    assert_eq!(v, crate::db::migrate::latest());
+    let plan = ram::Plan {
+        dir: dir.path().join("ram"),
+        floor: 0,
+        job: 0,
+    };
+    let start = std::time::Instant::now();
+    let r = ram::migrate_in_ram(&copy, &plan)
+        .expect("migrate")
+        .expect("in RAM");
+    eprintln!(
+        "in RAM: {:?} card writes of {} bytes, {:?}",
+        r.card_writes,
+        r.bytes,
+        start.elapsed()
+    );
 }

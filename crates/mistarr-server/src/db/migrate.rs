@@ -52,6 +52,29 @@ pub fn recorded_version(conn: &Connection) -> Result<u32> {
     }
 }
 
+/// The recorded and latest versions of the database at `path` when it exists, has
+/// been migrated before and has migrations to apply; opened read-only, never created.
+///
+/// # Errors
+///
+/// [`Error::Db`] when the file exists but cannot be read.
+///
+/// ```
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = dir.path().join("m.db");
+/// assert_eq!(mistarr_server::db::migrate::pending(&path).unwrap(), None);
+/// drop(mistarr_server::db::Db::open(&path).unwrap());
+/// assert_eq!(mistarr_server::db::migrate::pending(&path).unwrap(), None);
+/// ```
+pub fn pending(path: &std::path::Path) -> Result<Option<(u32, u32)>> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let found = recorded_version(&conn)?;
+    Ok((found > 0 && found < latest()).then_some((found, latest())))
+}
+
 /// Refuses a database a newer mistarr migrated, reading only; returns its recorded version.
 ///
 /// # Errors
@@ -412,6 +435,21 @@ mod tests {
             )
             .expect("count");
         assert_eq!(entries, 1, "only the sha1-less rom is in the md5 index");
+    }
+
+    #[test]
+    fn an_older_schema_reports_its_pending_migrations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("m.db");
+        drop(crate::db::Db::open(&path).expect("open"));
+        let conn = Connection::open(&path).expect("open");
+        conn.execute("DELETE FROM schema_version WHERE version = ?1", [latest()])
+            .expect("forget the last migration");
+        drop(conn);
+        assert_eq!(
+            pending(&path).expect("pending"),
+            Some((latest() - 1, latest()))
+        );
     }
 
     #[test]

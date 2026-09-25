@@ -93,9 +93,11 @@ pub mod label {
     pub const SOURCE_WATCH: Label = Label::new("source-watch");
     /// Checking which romset archives a title's directory holds.
     pub const ROMSETS: Label = Label::new("romsets");
+    /// Switching the daemon's I/O class.
+    pub const IO_CLASS: Label = Label::new("io-class");
 
     /// Every label, for tests and docs.
-    pub const ALL: [Label; 16] = [
+    pub const ALL: [Label; 17] = [
         DB_READ,
         DB_WRITE,
         HASH,
@@ -112,6 +114,7 @@ pub mod label {
         INCOMING,
         SOURCE_WATCH,
         ROMSETS,
+        IO_CLASS,
     ];
 }
 

@@ -291,6 +291,26 @@ expect "$out" "mistarr not running" "nothing runs after giving up"
 cp "$root/mistarr/mistarr.good" "$root/mistarr/mistarr"
 chmod +x "$root/mistarr/mistarr"
 
+# The daemon starts under nice but at the default I/O class.
+cat > "$fakebin/nice" <<FAKENICE
+#!/bin/sh
+echo "nice \$*" >> "$root/prio"
+shift 2
+exec "\$@"
+FAKENICE
+cat > "$fakebin/ionice" <<FAKEIONICE
+#!/bin/sh
+echo "ionice \$*" >> "$root/prio"
+FAKEIONICE
+chmod +x "$fakebin/nice" "$fakebin/ionice"
+rm -f "$root/prio"
+PATH="$fakebin:$PATH" "$script" start >/dev/null
+sleep 1
+expect "$(cat "$root/prio" 2>/dev/null)" "nice -n 10 $root/mistarr/mistarr" \
+    "the daemon runs under nice -n 10 and no ionice"
+"$script" stop >/dev/null
+rm -f "$fakebin/nice" "$fakebin/ionice"
+
 if ! sh "$here/install.sh"; then
     fail=$((fail + 1))
     echo "FAIL: scripts/tests/install.sh"

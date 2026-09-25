@@ -65,6 +65,8 @@ pub struct Options {
     pub client_search_path: Option<std::ffi::OsString>,
     /// How long `POST /system/client/start` waits for the client to answer.
     pub client_start_wait: Duration,
+    /// The `ionice` that idles the daemon's I/O while a core runs; `None` never changes it.
+    pub ionice: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -91,6 +93,7 @@ impl Default for Options {
             transmission_init: PathBuf::from(mistarr_clients::launch::TRANSMISSION_INIT),
             client_search_path: None,
             client_start_wait: Duration::from_secs(10),
+            ionice: Some(PathBuf::from("ionice")),
         }
     }
 }
@@ -106,6 +109,10 @@ pub struct AppState {
     pub gate: Arc<Gate>,
     /// The job scheduler.
     pub scheduler: Scheduler,
+    /// Live progress of running jobs, kept in memory only.
+    pub live: crate::jobs::progress::LiveProgress,
+    /// Uploaded files whose import job is still being recorded.
+    pub placed: crate::incoming::Placed,
     /// When the server started.
     pub started: Instant,
     /// Runtime knobs.
@@ -124,6 +131,8 @@ pub struct AppState {
     commands: RwLock<Arc<dyn CommandSink>>,
     /// Serialises launches and holds when the last one was sent.
     pub(crate) launch_lock: tokio::sync::Mutex<Option<Instant>>,
+    /// The daemon's I/O class, when `options.ionice` names a tool to set it.
+    pub(crate) io_priority: Option<Arc<jobs::io_priority::IoPriority>>,
 }
 
 impl AppState {
@@ -136,6 +145,8 @@ impl AppState {
             events: EventBus::new(),
             gate: Arc::new(Gate::new()),
             scheduler: Scheduler::new(),
+            live: crate::jobs::progress::LiveProgress::default(),
+            placed: crate::incoming::Placed::default(),
             started: Instant::now(),
             poll_wake: tokio::sync::Notify::new(),
             redetect: tokio::sync::Notify::new(),
@@ -146,6 +157,13 @@ impl AppState {
             client: RwLock::new(None),
             commands: RwLock::new(Arc::new(FifoSink::new(&options.command_path))),
             launch_lock: tokio::sync::Mutex::new(None),
+            io_priority: options.ionice.as_deref().map(|program| {
+                let setter = Arc::new(jobs::io_priority::Ionice::new(program));
+                Arc::new(jobs::io_priority::IoPriority::new(
+                    setter,
+                    Path::new(jobs::io_priority::TASK_DIR),
+                ))
+            }),
             options,
         })
     }
@@ -428,10 +446,23 @@ fn open_db(
     if let Some(dir) = std::env::var_os(crate::db::SQLITE_TMPDIR) {
         tracing::info!(dir = %Path::new(&dir).display(), "SQLite temporary files");
     }
+    let path = config.paths.db();
+    crate::migrating::clear_stale(&config.paths.data)?;
     // Leftovers of an import in RAM cut short; the database itself is always whole.
-    let _ = db::ram::clean_stale(&config.paths.db(), &config.memory.import_dir);
+    let _ = db::ram::clean_stale(&path, &config.memory.import_dir);
+    let _progress = match crate::db::migrate::pending(&path)? {
+        Some((from, to)) => {
+            tracing::info!(from, to, "migrating the database");
+            crate::migrating::Migrating::begin(&config.paths.data, from, to)
+                .inspect_err(
+                    |e| tracing::warn!(error = %e, "cannot write the migration progress file"),
+                )
+                .ok()
+        }
+        None => None,
+    };
     migrate_in_ram(config)?;
-    let db = Db::open(&config.paths.db())?;
+    let db = Db::open(&path)?;
     let (stored, unfinished, resolved) = db.write_blocking(prepare_catalog)?;
     let stored = stored.unwrap_or_else(|e| {
         tracing::warn!(error = %e, "ignoring unreadable saved settings; using the config file");
@@ -490,6 +521,13 @@ fn spawn_tasks(app: &Arc<AppState>, scan_interval: u32) -> Vec<tokio::task::Join
         corename::watch(&opts.corename_path, opts.corename_poll, gate).await;
     }));
     tasks.push(tokio::spawn(publish_gate_changes(Arc::clone(app))));
+    if let Some(priority) = &app.io_priority {
+        tasks.push(tokio::spawn(jobs::io_priority::follow(
+            Arc::clone(&app.gate),
+            Arc::clone(priority),
+            jobs::io_priority::RETRY,
+        )));
+    }
     if scan_interval > 0 {
         tasks.push(tokio::spawn(scan_on_timer(
             Arc::clone(app),
@@ -603,6 +641,7 @@ pub(crate) mod testutil {
             command_path: dir.path().join("MiSTer_cmd"),
             launch_dir: dir.path().to_path_buf(),
             launch_gap: Duration::ZERO,
+            ionice: None,
             ..Options::default()
         };
         f(&mut options);
@@ -727,6 +766,7 @@ mod tests {
         assert_eq!(o.command_path, PathBuf::from("/dev/MiSTer_cmd"));
         assert_eq!(o.launch_dir, PathBuf::from("/tmp"));
         assert_eq!(o.launch_gap, Duration::from_secs(3));
+        assert_eq!(o.ionice, Some(PathBuf::from("ionice")));
     }
 
     #[test]

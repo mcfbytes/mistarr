@@ -12,7 +12,7 @@ torrent client that ships with the image, and moves verified files into the
 |---|---|
 | Cortex-A9 dual core at ~800 MHz, ARMv7 hard-float | Cross-compiled static musl binary. Hashing is streaming and background. No CHD decompression in the critical path. |
 | Roughly 490 MiB RAM visible to Linux, shared with the MiSTer process | Idle RSS target under 30 MiB, hard ceiling 64 MiB. No in-memory torrent metadata for set torrents; file lists live in SQLite. |
-| SD card, exFAT, ~10-20 MB/s writes | Stage and rename on the same filesystem, never copy. Throttle hashing with `ionice`. No symlinks, case-insensitive names. |
+| SD card, exFAT, ~10-20 MB/s writes | Stage and rename on the same filesystem, never copy. Idle I/O class while a core runs. No symlinks, case-insensitive names. |
 | `/media/fat` mounted `sync,dirsync` | Every write syscall there is flushed to the card before it returns, about 25 ms each, so the database's cost is its count of writes, not bytes. SQLite's temporary files and the DAT stage live in RAM, and a DAT import or a migration runs on a copy of the database in RAM written back 1 MiB at a time; see "Writes on a sync mount" and "DAT import in RAM". |
 | Stock image is Buildroot 2021 with glibc 2.31 | musl static linking, no OpenSSL, `rustls` only. |
 | MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing, scans and file placement while it is anything other than `MENU`. DAT and source parsing continue at low priority; transfers continue at a reduced rate limit. |
@@ -133,6 +133,11 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    alone; scans and imports resolve rom ids on the read connection and
    write afterwards, so one that straddles an apply records a rom id that
    is still a row, retired or not, as it would had it finished just before.
+   The job reports the bytes it has read and its phase through memory and
+   transient events, never the database (API.md "Live progress"), so an
+   apply that holds the writer still shows its progress; an upload records
+   its job on a task of its own and answers without waiting for the apply
+   (API.md "Upload answers").
 2. Identify the platform from the DAT header name using the table in
    PLATFORMS.md, falling back to the platform an earlier version of the same
    family was bound to. A header without a name takes the member's or file's
@@ -486,14 +491,15 @@ shutdown is left `queued` for this.
 |---|---|
 | Binary size, stripped, with SPA | under 8 MiB |
 | Idle RSS | under 30 MiB |
-| Peak RSS during scan or import | under 64 MiB, checked per job by `tests/memory.rs`; a DAT load, with its bulk cache and the connections to its copy in RAM, within 32 MiB of an idle server, other jobs within 12 or 16 MiB |
+| Peak RSS during scan or import | under 64 MiB, checked per job by `tests/memory.rs`; a DAT load, with its bulk cache and the connections to its copy in RAM, within 32 MiB of an idle server, a source import or remap within 20 MiB, other jobs within 12 or 16 MiB |
 | tokio worker threads | 2 |
 | Blocking threads (SQLite, hashing, file work) | at most 4 |
 | Stack per runtime thread | 1 MiB reserved, touched pages only in RSS |
 | Soft `RLIMIT_DATA` | `[memory] data_limit_mib`, 192 MiB, never below 64 |
-| SQLite page cache | 2 MiB, 1 MiB on each of the two connections; the writer's rises to 8 MiB while a DAT load applies its stage or a re-map keys new roms (`db::bulk`) |
-| SQLite other | `mmap_size = 0`, `temp_store = FILE` under `/tmp/mistarr` (`SQLITE_TMPDIR`, set at startup and emptied of stale files; RAM on the board, so temporary pages never reach the card), or `<data>/tmp` when `/tmp/mistarr` cannot be written; WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB, 16 MiB while a bulk write is open |
-| SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import in RAM holds the writer from its copy to its swap; one on the card, already on a blocking thread, takes it per staged chunk |
+| SQLite page cache | 2 MiB, 1 MiB on each of the two connections; the writer's rises to 8 MiB while a DAT load applies its stage, a re-map keys new roms (one batch of 1 000 per transaction) or a source binds (`db::bulk`) |
+| SQLite other | `mmap_size = 0`, `temp_store = FILE` under `/tmp/mistarr` (`SQLITE_TMPDIR`, set at startup and emptied of stale files; `MISTARR_TEMP_DIR` names another; RAM on the board, so temporary pages never reach the card), created with mode 0700 and refused when it is a symlink or another user's, in which case `<data>/tmp` is used and the log warns; WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB, 16 MiB while a bulk write is open |
+| DAT stage | in `/tmp/mistarr` while a DAT loads, about 1.5 times the DAT's size (18 MB for 20 000 games of three roms), given back when the load ends, as the temporary database vacuums itself; when `/tmp` fills the load fails naming `/tmp/mistarr` and the database is unchanged |
+| SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import in RAM holds the writer from its copy to its swap; one on the card, already on a blocking thread, takes it per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
 | DAT import or migration in RAM | a copy in `[memory] import_dir`, tmpfs, so it counts in `MemAvailable` and not in RSS: the database, what the import adds and the copy's WAL. Made only when `MemAvailable` covers the file's size, half again and 32 MiB, above `[memory] import_floor_mib` (128 MiB); 1 MiB write-back buffer |
 | Hashing buffer | 256 KiB, one file at a time |
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
@@ -511,10 +517,31 @@ binary, the SQLite shared-memory index or reserved address space. An
 allocation past it fails and Rust aborts the process, which ends one daemon
 instead of starving the MiSTer process of memory on a board without swap.
 
-The launcher runs the daemon under `nice -n 10` and `ionice -c 3` where the
-board has them, and heavy jobs stop at their next file boundary while a core
-runs. Heavy work has no thread of its own to lower further: it shares the
-blocking pool with request handlers.
+The launcher runs the daemon under `nice -n 10` where the board has it, at
+the default I/O class, so work at the menu gets the disk's full share. While
+a core other than the menu runs, the daemon moves every thread to the idle
+I/O class by running `ionice -c 3 -p <tid>` for each entry of
+`/proc/self/task`, listing again until a pass finds no new thread; threads
+created later inherit the class from the thread that creates them. Back at
+the menu it runs `ionice -c 0 -p <tid>` the same way, and the kernel derives
+a best-effort level from `nice` again. A switch counts, and its class is
+recorded, once at least one thread takes the class; a thread `ionice`
+refused, almost always one that has exited, keeps the old class until the
+next core change. One that fails, for example because `/proc` cannot be
+listed or no thread takes the class, is logged at debug and tried again 30
+seconds later, the wait doubling after each further failure up to 4 minutes,
+or at once at the next change of the gate, which also resets the wait.
+Without `ionice` it logs once at debug, stops switching and leaves the class
+as launched. A process the daemon starts inherits the class of the thread
+that forks it and is not in `/proc/self/task`, so a download client started
+from the UI while a core runs is forked from a thread set back to class 0
+for the launch, and every thread takes the idle class again afterwards; when
+that restore fails, the recorded class is cleared and the switch is tried
+again at once. The class lock is taken only on blocking threads, so a long
+launch never stalls an async worker. The client's transfers slow under the
+gate's rate limit instead. Heavy jobs also stop at their next file boundary
+while a core runs. Heavy work has no thread of its own to lower further: it
+shares the blocking pool with request handlers.
 
 ### Thread names
 
@@ -523,10 +550,11 @@ blocking thread runs work, `threads::blocking` sets its `comm` to a label of
 at most 15 bytes (`threads::label`: `db-read`, `db-write`, `hash`,
 `scan-list`, `zip-list`, `dat-import`, `dat-save`, `source-file`,
 `source-watch`, `import`, `rename`, `arcade`, `romsets`, `launch`, `detect`,
-`incoming`) and puts the pool name back when it ends; the thread that reaps
-a started rtorrent is `rtorrent-reap`, and a torrent's data is deleted under
-`torrent-delete`. The board's BusyBox `top` and `ps` cannot list threads, so
-read them from procfs:
+`incoming`, `io-class`) and puts the pool name back when it ends; the thread
+that reaps a started rtorrent is `rtorrent-reap`, the one that rewrites
+`mistarr.migrating` while migrations run is `db-migrate`, and a torrent's data is
+deleted under `torrent-delete`. The board's BusyBox `top` and `ps` cannot
+list threads, so read them from procfs:
 `for t in /proc/$(pidof mistarr)/task/*; do echo "${t##*/} $(cat $t/comm)"; done`.
 
 A DAT loads in one write transaction, so the WAL file, in RAM beside the copy
@@ -552,8 +580,9 @@ syscalls, and the design counts those:
   is a file. The DAT stage is a TEMP table for the same reason; it is
   rebuilt from the file after a restart anyway.
 - `db::bulk` raises the writer's page cache from 1 to 8 MiB, and the soft
-  heap limit to match, for the one transaction that applies a DAT, and puts
-  both back after, on error too. With 1 MiB the cache fills with dirty
+  heap limit to match, for the one transaction that applies a DAT, and for
+  migrations, re-map key batches and source binding, and puts both back
+  after, on error or panic too. With 1 MiB the cache fills with dirty
   pages, SQLite spills them to the WAL, and the same page is written again
   each time it is changed after a spill. A connection opened meanwhile never
   lowers the process-wide heap limit under an open bulk write. The cache is
@@ -713,17 +742,19 @@ recompute (`jobs::dat_import::sync_writes::in_place_and_in_ram_on_the_bench_cata
 
 | DAT | Database before, after | On the card: writes | In RAM: card writes | Host time on the card, in RAM |
 |---|---|---|---|---|
-| 450 games | 47.8, 48.4 MB | 6 042 | 55 | 0.46 s, 0.54 s |
-| 10 000 games | 47.8, 61.0 MB | 48 955 | 67 | 3.7 s, 4.2 s |
+| 450 games | 47.8, 48.4 MB | 6 042 | 55 | 0.49 s, 0.58 s |
+| 10 000 games | 47.8, 61.0 MB | 43 857 | 67 | 3.8 s, 4.3 s |
 
 The card writes in RAM are one per MiB of the file and about eight more:
 reopening maps SQLite's shared-memory file, writing a byte to each of its
-4 KiB pages. At 25 ms a write, the 10 000-game load takes about 20 minutes
+4 KiB pages. At 25 ms a write, the 10 000-game load takes about 18 minutes
 on the card and 1.7 s of flushes in RAM, plus the 61 MB transfer, a few
 seconds at the card's 10 to 20 MB/s, and the import's own time on the
 board's CPU. The last migration on the same catalogue, with half its roms
 lacking a sha1, writes the card 1 254 times in place and 51 times in RAM
-(`db::ram::tests::the_last_migration_in_place_and_in_ram`).
+(`db::ram::tests::the_last_migration_in_place_and_in_ram`); with every rom
+keyed, 5 672 times in place and 62 in RAM
+(`migration_writes_on_the_bench_catalogue`).
 `a_load_in_ram_writes_the_card_about_once_per_mebibyte` holds a 450-game
 load on a tenth of the catalogue to one write per MiB plus 16.
 

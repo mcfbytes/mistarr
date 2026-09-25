@@ -369,7 +369,13 @@ export interface SseStatusEvent {
 
 export interface SseJobProgressEvent {
   name: 'job.progress';
-  data: { id: number; kind: string; state: JobState; progress: Record<string, unknown> | null };
+  data: {
+    id: number;
+    kind: string;
+    state: JobState;
+    detail?: string | null;
+    progress: Record<string, unknown> | null;
+  };
 }
 
 export interface SseDatLoadedEvent {

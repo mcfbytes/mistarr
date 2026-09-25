@@ -52,10 +52,20 @@ pub struct StagedRom {
 
 /// Creates the connection's stage, a TEMP table, so staged rows go to SQLite's
 /// temporary directory rather than the database file, and nothing survives a restart.
+/// The temporary database vacuums itself, so the file shrinks back when the stage empties.
 fn ensure(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
-        "CREATE TEMP TABLE IF NOT EXISTS dat_stage (seq INTEGER PRIMARY KEY, game TEXT NOT NULL)",
+    let exists: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM temp.sqlite_master WHERE name = 'dat_stage')",
+        [],
+        |r| r.get(0),
     )?;
+    if !exists {
+        // Takes effect only before the temporary database holds its first table.
+        conn.execute_batch(
+            "PRAGMA temp.auto_vacuum = FULL;
+             CREATE TEMP TABLE dat_stage (seq INTEGER PRIMARY KEY, game TEXT NOT NULL)",
+        )?;
+    }
     Ok(())
 }
 

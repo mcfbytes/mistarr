@@ -22,6 +22,12 @@ PREV_OK="$PREV.ok"
 EXEC="${MISTARR_TEST_EXEC:-}"
 # Seconds a started mistarr has to answer HTTP before the install is rolled back.
 START_TIMEOUT="${MISTARR_START_TIMEOUT:-180}"
+# Written by a start that migrates the database, rewritten every few seconds.
+MIGRATING="$INSTALL_DIR/mistarr.migrating"
+# Seconds a migrating start may leave that file unchanged before it counts as stuck.
+PROGRESS_TIMEOUT="${MISTARR_PROGRESS_TIMEOUT:-300}"
+# Longest a migrating start may take in all.
+MIGRATE_TIMEOUT="${MISTARR_MIGRATE_TIMEOUT:-7200}"
 # Set once this run has saved the database set, so a restore never uses a stale one.
 db_saved=0
 # Set just before the new version first runs; before that the database is as saved.
@@ -323,12 +329,17 @@ answers() {
     wget -q -O /dev/null "$1" 2>/dev/null
 }
 
-# Waits up to START_TIMEOUT seconds for the server to answer; fails early
-# when the launcher no longer reports it running.
+# Waits START_TIMEOUT s for the server to answer, failing when it exits, and longer
+# while MIGRATING keeps changing; see DEPLOYMENT.md "Upgrading".
 wait_ready() {
     url=$(listen_url)
     echo "waiting up to $START_TIMEOUT s for mistarr to answer at $url"
-    deadline=$(($(date +%s) + START_TIMEOUT))
+    now=$(date +%s)
+    deadline=$((now + START_TIMEOUT))
+    ceiling=$((now + MIGRATE_TIMEOUT))
+    seen=""
+    moved=$now
+    told=0
     while :; do
         if answers "$url"; then
             echo "mistarr answered at $url"
@@ -341,7 +352,27 @@ wait_ready() {
                 return 1
                 ;;
         esac
-        if [ "$(date +%s)" -ge "$deadline" ]; then
+        now=$(date +%s)
+        if [ -f "$MIGRATING" ]; then
+            line=$(head -n 1 "$MIGRATING" 2>/dev/null)
+            if [ "$line" != "$seen" ]; then
+                seen=$line
+                moved=$now
+            fi
+            if [ $((now - told)) -ge 30 ]; then
+                echo "mistarr is migrating its database, $line"
+                told=$now
+            fi
+            if [ $((now - moved)) -ge "$PROGRESS_TIMEOUT" ]; then
+                echo "mistarr made no progress migrating its database for $PROGRESS_TIMEOUT s (MISTARR_PROGRESS_TIMEOUT)" >&2
+                return 1
+            fi
+            if [ "$now" -ge "$ceiling" ]; then
+                echo "mistarr did not finish migrating its database within $MIGRATE_TIMEOUT s (MISTARR_MIGRATE_TIMEOUT)" >&2
+                return 1
+            fi
+            deadline=$((now + START_TIMEOUT))
+        elif [ "$now" -ge "$deadline" ]; then
             echo "mistarr did not answer at $url within $START_TIMEOUT s (MISTARR_START_TIMEOUT)" >&2
             return 1
         fi
@@ -414,6 +445,7 @@ install_release() {
     echo "installed mistarr $tag to $INSTALL_DIR"
     echo "starting mistarr"
     db_touched=1
+    rm -f "$MIGRATING"
     if ! run_launcher || ! wait_ready; then
         echo "mistarr failed to start after installing" >&2
         restore_prev
