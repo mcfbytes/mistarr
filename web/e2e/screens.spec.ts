@@ -79,6 +79,22 @@ test('Play and Want are hidden for a BIOS entry even when its file is present', 
   await expect(page.getByRole('row', { name: /\(Europe\)/ }).getByRole('button', { name: 'Want' })).toHaveCount(1);
 });
 
+test('the status and Want button line up across a row of posters', async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto('/#/p/nes');
+  const cards = page.locator('.grid a.poster');
+  await expect(cards.nth(5)).toBeVisible();
+  const tops = await cards.evaluateAll((els) =>
+    els.slice(0, 6).map((el) => {
+      const card = el.getBoundingClientRect().top;
+      const button = el.querySelector('button')?.getBoundingClientRect().top ?? 0;
+      return { card: Math.round(card), button: Math.round(button) };
+    })
+  );
+  expect(new Set(tops.map((t) => t.card)).size, 'the first six cards share a row').toBe(1);
+  expect(new Set(tops.map((t) => t.button)).size).toBe(1);
+});
+
 test('a title without a cover gets a generated poster with its name, hidden from screen readers', async ({ page }) => {
   await page.route(/^https?:\/\/(?!localhost)/, (route) => route.abort());
   await page.goto('/#/p/nes');

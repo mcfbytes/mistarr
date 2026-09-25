@@ -256,7 +256,7 @@
           />
         {/if}
         <p class="name">{group.pick_name ?? group.name}</p>
-        <p class="muted">{group.have_verified > 0 ? 'Have' : 'Missing'}</p>
+        <p class="muted status">{group.have_verified > 0 ? 'Have' : 'Missing'}</p>
         <button
           class:primary={group.wanted > 0}
           disabled={group.pick_id === null}
@@ -421,9 +421,19 @@
   }
 
   .poster {
-    display: block;
+    display: flex;
+    flex-direction: column;
     text-decoration: none;
     color: var(--fg);
+  }
+
+  .poster .status {
+    margin-top: auto;
+    padding-top: 1em;
+  }
+
+  .poster button {
+    align-self: flex-start;
   }
 
   .poster img {

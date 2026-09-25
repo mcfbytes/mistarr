@@ -84,8 +84,12 @@ whose cover fails to load, gets a generated poster
 (`web/src/lib/PosterPlaceholder.svelte`): the platform's art as a faded band
 over the theme's raised background, the title's name set in bold beneath it
 and the name's parenthesised tags, such as the region, on a dimmed line at the
-foot. It uses the theme tokens, makes no request, and is `aria-hidden`, since
-the name is already on the card as text.
+foot. A hash of the name picks the band's hue rotation (up to 30° either way),
+horizontal shift and a zoom that covers it (`web/src/lib/poster.ts`), so neighbours differ
+and a title always looks the same. It uses the theme tokens, makes no
+request, and is `aria-hidden`, since the name is already on the card as text.
+Each card is a column whose status line and Want button sit at its foot, so
+they line up across a row whatever the name's length.
 Filters: search, have / missing / wanted, region, a "Show hidden" checkbox,
 and a flags multi-select that requires every checked flag. Each card shows
 the 1G1R pick name, a have indicator, and a want toggle. Infinite scroll in

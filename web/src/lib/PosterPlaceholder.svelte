@@ -1,5 +1,6 @@
 <script lang="ts">
   import PlatformArt from './PlatformArt.svelte';
+  import { posterVariation } from './poster';
   import type { PlatformKind } from './types';
 
   interface Props {
@@ -12,6 +13,7 @@
   }
 
   const { platformId, kind, title, name = null }: Props = $props();
+  const look = $derived(posterVariation(name ?? title));
   const tags = $derived(
     [...(name ?? '').matchAll(/\(([^()]+)\)/g)]
       .map((m) => m[1] ?? '')
@@ -22,7 +24,15 @@
 
 <!-- The name is already on the page as text, so the poster is decoration. -->
 <div class="poster-placeholder" aria-hidden="true" data-testid="poster-placeholder">
-  <div class="band"><PlatformArt id={platformId} {kind} /></div>
+  <div class="band">
+    <div
+      class="shift"
+      style:filter="hue-rotate({look.hue}deg)"
+      style:transform="translateX({look.shift}%) scale({look.scale})"
+    >
+      <PlatformArt id={platformId} {kind} />
+    </div>
+  </div>
   <p class="title">{title}</p>
   {#if tags}
     <p class="tags">{tags}</p>
@@ -46,7 +56,14 @@
   .band {
     position: relative;
     flex: 0 0 46%;
+    overflow: hidden;
     opacity: 0.8;
+  }
+
+  .shift {
+    position: absolute;
+    inset: 0;
+    transform-origin: 50% 0;
   }
 
   .band::after {
