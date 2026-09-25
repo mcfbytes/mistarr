@@ -6,6 +6,7 @@ pub mod dat_import;
 pub mod detect_client;
 pub mod gate;
 pub mod import;
+pub mod io_priority;
 pub mod poll;
 pub mod remap;
 pub mod scan;

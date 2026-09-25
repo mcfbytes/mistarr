@@ -351,6 +351,25 @@ impl Probe {
     }
 }
 
+/// An `ionice` stand-in that appends its arguments to `ionice.log` in `dir`.
+fn ionice_shim(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let shim = dir.join("ionice");
+    let script = format!(
+        "#!/bin/sh\necho \"$@\" >> '{}'\n",
+        dir.join("ionice.log").display()
+    );
+    std::fs::write(&shim, script).expect("ionice shim");
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    shim
+}
+
+/// True once the shim switched this process's main thread to `class`.
+fn ionice_logged(dir: &Path, class: u8) -> bool {
+    let want = format!("-c {class} -p {}", std::process::id());
+    std::fs::read_to_string(dir.join("ionice.log")).is_ok_and(|log| log.lines().any(|l| l == want))
+}
+
 fn options(dir: &Path) -> Options {
     Options {
         corename_path: dir.join("CORENAME"),
@@ -368,6 +387,7 @@ fn options(dir: &Path) -> Options {
         command_path: dir.join("MiSTer_cmd"),
         launch_dir: dir.to_path_buf(),
         launch_gap: Duration::ZERO,
+        ionice: Some(ionice_shim(dir)),
         ..Options::default()
     }
 }
@@ -767,6 +787,11 @@ async fn run(kind: Kind) {
         json(addr, "/api/v1/system/status").await["pause_reason"],
         "core"
     );
+    probe
+        .wait("the idle I/O class", Duration::from_secs(10), || async {
+            ionice_logged(&home, 3)
+        })
+        .await;
     std::fs::write(home.join("CORENAME"), "MENU").expect("corename");
     probe
         .wait(
@@ -774,6 +799,11 @@ async fn run(kind: Kind) {
             Duration::from_secs(10),
             || async { down_limit_kbps(kind, &leecher.url).await.is_none() },
         )
+        .await;
+    probe
+        .wait("the default I/O class", Duration::from_secs(10), || async {
+            ionice_logged(&home, 0)
+        })
         .await;
     t.mark("core gate followed");
 

@@ -12,7 +12,7 @@ torrent client that ships with the image, and moves verified files into the
 |---|---|
 | Cortex-A9 dual core at ~800 MHz, ARMv7 hard-float | Cross-compiled static musl binary. Hashing is streaming and background. No CHD decompression in the critical path. |
 | Roughly 490 MiB RAM visible to Linux, shared with the MiSTer process | Idle RSS target under 30 MiB, hard ceiling 64 MiB. No in-memory torrent metadata for set torrents; file lists live in SQLite. |
-| SD card, exFAT, ~10-20 MB/s writes | Stage and rename on the same filesystem, never copy. Throttle hashing with `ionice`. No symlinks, case-insensitive names. |
+| SD card, exFAT, ~10-20 MB/s writes | Stage and rename on the same filesystem, never copy. Idle I/O class while a core runs. No symlinks, case-insensitive names. |
 | Stock image is Buildroot 2021 with glibc 2.31 | musl static linking, no OpenSSL, `rustls` only. |
 | MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing, scans and file placement while it is anything other than `MENU`. DAT and source parsing continue at low priority; transfers continue at a reduced rate limit. |
 | Torrent client already present | Stock image ships rtorrent; Buildroot_MiSTer ships Transmission. mistarr never embeds a client. |
@@ -503,10 +503,17 @@ binary, the SQLite shared-memory index or reserved address space. An
 allocation past it fails and Rust aborts the process, which ends one daemon
 instead of starving the MiSTer process of memory on a board without swap.
 
-The launcher runs the daemon under `nice -n 10` and `ionice -c 3` where the
-board has them, and heavy jobs stop at their next file boundary while a core
-runs. Heavy work has no thread of its own to lower further: it shares the
-blocking pool with request handlers.
+The launcher runs the daemon under `nice -n 10` where the board has it, at
+the default I/O class, so work at the menu gets the disk's full share. While
+a core other than the menu runs, the daemon moves every thread to the idle
+I/O class by running `ionice -c 3 -p <tid>` for each entry of
+`/proc/self/task`, listing again until a pass finds no new thread; threads
+created later inherit the class from the thread that creates them. Back at
+the menu it runs `ionice -c 0 -p <tid>` the same way, and the kernel derives
+a best-effort level from `nice` again. Without `ionice` or `/proc` it logs
+once at debug and leaves the class as launched. Heavy jobs also stop at
+their next file boundary while a core runs. Heavy work has no thread of its
+own to lower further: it shares the blocking pool with request handlers.
 
 A DAT loads in one write transaction, so the WAL file can grow to the size
 of the pages that DAT touches while it loads; it is cut back to 1 MiB at the

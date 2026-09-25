@@ -65,6 +65,8 @@ pub struct Options {
     pub client_search_path: Option<std::ffi::OsString>,
     /// How long `POST /system/client/start` waits for the client to answer.
     pub client_start_wait: Duration,
+    /// The `ionice` that idles the daemon's I/O while a core runs; `None` never changes it.
+    pub ionice: Option<PathBuf>,
 }
 
 impl Default for Options {
@@ -91,6 +93,7 @@ impl Default for Options {
             transmission_init: PathBuf::from(mistarr_clients::launch::TRANSMISSION_INIT),
             client_search_path: None,
             client_start_wait: Duration::from_secs(10),
+            ionice: Some(PathBuf::from("ionice")),
         }
     }
 }
@@ -461,6 +464,14 @@ fn spawn_tasks(app: &Arc<AppState>, scan_interval: u32) -> Vec<tokio::task::Join
         corename::watch(&opts.corename_path, opts.corename_poll, gate).await;
     }));
     tasks.push(tokio::spawn(publish_gate_changes(Arc::clone(app))));
+    if let Some(program) = &app.options.ionice {
+        let setter = Arc::new(jobs::io_priority::Ionice::new(program));
+        tasks.push(tokio::spawn(jobs::io_priority::follow(
+            Arc::clone(&app.gate),
+            setter,
+            PathBuf::from(jobs::io_priority::TASK_DIR),
+        )));
+    }
     if scan_interval > 0 {
         tasks.push(tokio::spawn(scan_on_timer(
             Arc::clone(app),
@@ -573,6 +584,7 @@ pub(crate) mod testutil {
             command_path: dir.path().join("MiSTer_cmd"),
             launch_dir: dir.path().to_path_buf(),
             launch_gap: Duration::ZERO,
+            ionice: None,
             ..Options::default()
         };
         f(&mut options);
@@ -697,6 +709,7 @@ mod tests {
         assert_eq!(o.command_path, PathBuf::from("/dev/MiSTer_cmd"));
         assert_eq!(o.launch_dir, PathBuf::from("/tmp"));
         assert_eq!(o.launch_gap, Duration::from_secs(3));
+        assert_eq!(o.ionice, Some(PathBuf::from("ionice")));
     }
 
     #[test]
