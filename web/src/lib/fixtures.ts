@@ -372,7 +372,7 @@ export function fixtureTitle(id: number): TitleDetail {
 }
 
 export const fixtureStatus: SystemStatus = {
-  version: '0.3.0-dev+1a2b3c4',
+  version: '0.3.0+dev.1a2b3c4',
   commit: '1a2b3c4',
   release: false,
   uptime_secs: 4521,

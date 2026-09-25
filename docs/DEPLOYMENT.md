@@ -321,9 +321,10 @@ other tag before it builds. It passes the tag without the `v` as
 `MISTARR_VERSION` and the commit as `MISTARR_COMMIT`, which the binary reads
 at compile time, so a release reports exactly its tag in `/system/status`,
 `mistarr --version`, `mistarr doctor`, the log line at startup and the System
-tab. Any other build reports `version` from the workspace `Cargo.toml` with
-`-dev`, plus `+` and the first seven characters of the commit when
-`MISTARR_COMMIT` or CI's `GITHUB_SHA` is set, such as `0.3.0-dev+1a2b3c4`.
-Keep the workspace version at the latest release, and raise it in the
-pull request that prepares the next one, so a development build names the
-release it follows.
+tab. Any other build reports the workspace version from `Cargo.toml` with
+the build metadata `+dev`, plus `.` and the first seven characters of the
+commit when `MISTARR_COMMIT` (set by CI to the branch head) or `GITHUB_SHA`
+is known, such as `0.3.0+dev.1a2b3c4`: a build made after the release it
+names. Build metadata does not change semver precedence, so the rule is
+one: the workspace version is raised to the new version in the pull request
+that prepares a release, and stays there until the next.

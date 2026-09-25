@@ -30,7 +30,7 @@
   .toasts {
     position: fixed;
     right: var(--gutter);
-    bottom: var(--gutter);
+    bottom: calc(var(--gutter) + var(--toast-lift, 0px));
     left: var(--gutter);
     display: flex;
     flex-direction: column;

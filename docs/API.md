@@ -57,8 +57,8 @@ under `/api` return 404 JSON.
 ```
 
 `version` is the release tag's version for a release build, and otherwise
-the workspace version with `-dev`, plus `+` and the short commit when the
-build knew it, such as `0.3.0-dev+1a2b3c4` (DEPLOYMENT.md "Releasing").
+the workspace version with `+dev`, plus `.` and the short commit when the
+build knew it, such as `0.3.0+dev.1a2b3c4` (DEPLOYMENT.md "Releasing").
 `commit` is that short commit or `null`, and `release` whether the binary was
 built from a release tag.
 `client` is `null` before the first detection and has `kind: null` when no

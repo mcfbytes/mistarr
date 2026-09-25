@@ -178,7 +178,8 @@ the text to copy by hand when the browser refuses.
 Settings, for the runtime-editable subset, are in titled sections: Download
 client (kind, address, and the shared path map editor as "Path map"),
 Transfers and limits (download and upload at the menu and while a core
-runs, in kB/s, 0 unlimited), Title choice (1G1R region and language order,
+runs, in kB/s, 0 unlimited; an empty or non-whole value is marked invalid,
+changes nothing and blocks Save with a message), Title choice (1G1R region and language order,
 hidden flags, prefer the highest revision), Launching (the switch that
 allows launching) and Scanning. Each field has its label, control and help
 text in the same two columns on wide screens and stacked on a phone. A
@@ -186,9 +187,13 @@ section list beside them, sticky on wide screens and a row of buttons on a
 phone, moves focus to a section's heading and marks the section in view.
 A note says these apply on save with no restart, and that settings found
 only in `mistarr.toml` apply at the next start. A save bar with Save and Discard
-appears, pinned to the bottom of the window, only while something differs
-from what was loaded or saved; while it shows, leaving through a nav link
-asks first and a reload is warned by the browser. Under Scanning, "Disc
+appears, pinned to the bottom of the window (sticky where the browser
+supports `overflow-x: clip`, fixed elsewhere), only while something differs
+from what was loaded or saved, and lifts the toasts above itself. While it
+shows, leaving for another screen by a link, Back, Forward or an edited
+address asks first and stays on a no, through a guard in
+`web/src/lib/router.svelte.ts`; a link opened in a new tab asks nothing, and
+a reload is warned by the browser. Under Scanning, "Disc
 images": the checkbox "Identify CHD images by their tracks" with a "Slow"
 tag, a line saying it decodes each image once, pauses while a core runs and
 keeps its results, and the measured speed as "about N minutes per 700 MB

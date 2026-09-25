@@ -25,7 +25,7 @@ export type LaunchState = 'ready' | 'disabled' | 'unavailable';
 export type Override = 'paused' | 'running' | null;
 
 export interface SystemStatus {
-  /** The release tag's version, or `<crate version>-dev` with `+<commit>` when known. */
+  /** The release tag's version, or `<crate version>+dev` with `.<commit>` when known. */
   version: string;
   /** Short commit the binary was built from, null when the build did not know it. */
   commit: string | null;

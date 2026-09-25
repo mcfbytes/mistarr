@@ -8,6 +8,9 @@ on:
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# Builds name the branch head, not the throwaway merge commit a pull request's GITHUB_SHA names.
+env:
+  MISTARR_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
 jobs:
   rust:
     runs-on: ubuntu-26.04

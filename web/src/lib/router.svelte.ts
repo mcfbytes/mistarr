@@ -50,11 +50,62 @@ function currentHash(): string {
 }
 
 let route = $state<Route>(parseHash(currentHash()));
+let leaveGuard: (() => boolean) | null = null;
+let restoring = false;
+let shownAt = 0;
+
+/** When the current history entry was first shown, from its state; NaN for a new entry. */
+function entryTime(): number {
+  const state: unknown = window.history.state;
+  if (state && typeof state === 'object' && 'mistarrShownAt' in state && typeof state.mistarrShownAt === 'number') {
+    return state.mistarrShownAt;
+  }
+  return NaN;
+}
+
+/** Stamps the current entry, so a later return to it reads as Back or Forward. */
+function stampEntry(): void {
+  let at = entryTime();
+  if (Number.isNaN(at)) {
+    at = performance.timeOrigin + performance.now();
+    const state: unknown = window.history.state;
+    const base = state && typeof state === 'object' ? state : {};
+    window.history.replaceState({ ...base, mistarrShownAt: at }, '');
+  }
+  shownAt = at;
+}
+
+function onHashChange(): void {
+  const next = parseHash(currentHash());
+  if (restoring) {
+    restoring = false;
+    return;
+  }
+  if (leaveGuard && next.name !== route.name && !leaveGuard()) {
+    // Step back to the entry that was showing; its hashchange is then ignored.
+    restoring = true;
+    if (entryTime() < shownAt) {
+      window.history.forward();
+    } else {
+      window.history.back();
+    }
+    return;
+  }
+  stampEntry();
+  route = next;
+}
 
 if (typeof window !== 'undefined') {
-  window.addEventListener('hashchange', () => {
-    route = parseHash(currentHash());
-  });
+  stampEntry();
+  window.addEventListener('hashchange', onHashChange);
+}
+
+/**
+ * Asks `guard` before any navigation to another screen, by link, Back, Forward or an edited
+ * address; a false answer stays on the current screen. `null` removes it.
+ */
+export function setLeaveGuard(guard: (() => boolean) | null): void {
+  leaveGuard = guard;
 }
 
 export function getRoute(): Route {

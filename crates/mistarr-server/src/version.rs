@@ -19,8 +19,8 @@ fn raw_commit() -> Option<&'static str> {
         .or(option_env!("GITHUB_SHA"))
 }
 
-/// The version string: a release tag's version, or `<crate version>-dev` with
-/// `+<short commit>` when the build knew its commit.
+/// The version string: a release tag's version, or `<crate version>+dev`, with
+/// `.<short commit>` when the build knew its commit.
 ///
 /// ```
 /// assert!(!mistarr_server::version::version().is_empty());
@@ -34,7 +34,7 @@ pub fn version() -> &'static str {
 ///
 /// ```
 /// let v = mistarr_server::version::version();
-/// assert_eq!(mistarr_server::version::is_release(), !v.contains("-dev"));
+/// assert_eq!(mistarr_server::version::is_release(), !v.contains("+dev"));
 /// ```
 #[must_use]
 pub fn is_release() -> bool {
@@ -56,8 +56,8 @@ pub fn commit() -> Option<&'static str> {
 /// ```
 /// use mistarr_server::version::format;
 /// assert_eq!(format(Some("0.3.0"), "0.3.0", Some("0123456789abcdef")), "0.3.0");
-/// assert_eq!(format(None, "0.3.0", Some("0123456789abcdef")), "0.3.0-dev+0123456");
-/// assert_eq!(format(None, "0.3.0", None), "0.3.0-dev");
+/// assert_eq!(format(None, "0.3.0", Some("0123456789abcdef")), "0.3.0+dev.0123456");
+/// assert_eq!(format(None, "0.3.0", None), "0.3.0+dev");
 /// ```
 #[must_use]
 pub fn format(release: Option<&str>, crate_version: &str, commit: Option<&str>) -> String {
@@ -65,8 +65,8 @@ pub fn format(release: Option<&str>, crate_version: &str, commit: Option<&str>) 
         return tag.trim_start_matches('v').to_owned();
     }
     match commit.and_then(short) {
-        Some(c) => format!("{crate_version}-dev+{c}"),
-        None => format!("{crate_version}-dev"),
+        Some(c) => format!("{crate_version}+dev.{c}"),
+        None => format!("{crate_version}+dev"),
     }
 }
 
@@ -92,14 +92,14 @@ mod tests {
 
     #[test]
     fn other_builds_are_marked_dev() {
-        assert_eq!(format(Some(""), "0.3.0", None), "0.3.0-dev");
+        assert_eq!(format(Some(""), "0.3.0", None), "0.3.0+dev");
         assert_eq!(
             format(None, "0.3.0", Some("ABCDEF1234")),
-            "0.3.0-dev+ABCDEF1"
+            "0.3.0+dev.ABCDEF1"
         );
-        assert_eq!(format(None, "0.3.0", Some("abc")), "0.3.0-dev+abc");
-        assert_eq!(format(None, "0.3.0", Some("not a sha")), "0.3.0-dev");
-        assert_eq!(format(None, "0.3.0", Some(" ")), "0.3.0-dev");
+        assert_eq!(format(None, "0.3.0", Some("abc")), "0.3.0+dev.abc");
+        assert_eq!(format(None, "0.3.0", Some("not a sha")), "0.3.0+dev");
+        assert_eq!(format(None, "0.3.0", Some(" ")), "0.3.0+dev");
     }
 
     #[test]
@@ -113,9 +113,8 @@ mod tests {
     fn this_build_is_consistent() {
         let v = version();
         assert!(v.starts_with(env!("CARGO_PKG_VERSION")) || is_release());
-        assert_eq!(is_release(), !v.contains("-dev"));
         if let (false, Some(c)) = (is_release(), commit()) {
-            assert!(v.ends_with(&format!("+{c}")));
+            assert!(v.ends_with(&format!("+dev.{c}")));
         }
     }
 }

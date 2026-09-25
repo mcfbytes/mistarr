@@ -9,6 +9,7 @@
   import StatusPill from '../lib/StatusPill.svelte';
   import Meter from '../lib/Meter.svelte';
   import { cleanPathMap } from '../lib/pathmap';
+  import { setLeaveGuard } from '../lib/router.svelte';
   import { speedText } from '../lib/unidentified';
   import {
     bytesText,
@@ -18,7 +19,9 @@
     uptimeText,
     usedFraction
   } from '../lib/system';
-  import type { Settings } from '../lib/types';
+  import type { LimitsSettings, Settings } from '../lib/types';
+
+  type LimitKey = keyof LimitsSettings;
 
   const isMock = import.meta.env.VITE_MOCK === '1';
 
@@ -31,6 +34,25 @@
     { id: 'set-scan', label: 'Scanning' }
   ] as const;
 
+  const LIMIT_ROWS: { id: string; label: string; fields: { key: LimitKey; label: string }[] }[] = [
+    {
+      id: 'limits-menu',
+      label: 'At the menu',
+      fields: [
+        { key: 'down_kbps_menu', label: 'Download' },
+        { key: 'up_kbps_menu', label: 'Upload' }
+      ]
+    },
+    {
+      id: 'limits-core',
+      label: 'While a core runs',
+      fields: [
+        { key: 'down_kbps_core', label: 'Download' },
+        { key: 'up_kbps_core', label: 'Upload' }
+      ]
+    }
+  ];
+  const LIMIT_ERROR = 'Each speed limit needs a whole number of kB/s, 0 or more.';
   const LAUNCH_TEXT = { ready: 'Ready', disabled: 'Off in settings', unavailable: 'Unavailable here' };
 
   let settings = $state<Settings | null>(null);
@@ -41,9 +63,13 @@
   let manualCopy = $state<string | null>(null);
   let current = $state<string>(SECTIONS[0].id);
   let jumpedAt = 0;
+  let invalidLimits = $state<LimitKey[]>([]);
+  let limitsKey = $state(0);
+  let barHeight = $state(0);
 
   const status = $derived(getStatus());
   const dirty = $derived(settings !== null && JSON.stringify(settings) !== baseline);
+  const showBar = $derived(dirty || invalidLimits.length > 0 || settingsError !== null);
   const notesUrl = $derived(status ? releaseNotesUrl(status) : null);
   const memUsed = $derived(status ? usedFraction(status.mem_available_bytes, status.mem_total_bytes) : null);
   const diskUsed = $derived(status ? usedFraction(status.disk_free_bytes, status.disk_total_bytes) : null);
@@ -70,25 +96,31 @@
     adopt(isMock ? fixtureSettings : await api.settings());
   }
 
-  // Unsaved settings survive neither a reload nor a nav link without a question.
+  // Unsaved settings survive neither a reload nor leaving the screen without a question.
   $effect(() => {
-    if (!dirty) {
+    if (!dirty && invalidLimits.length === 0) {
       return;
     }
     const onUnload = (e: BeforeUnloadEvent): void => {
       e.preventDefault();
     };
-    const onClick = (e: MouseEvent): void => {
-      const link = e.target instanceof Element ? e.target.closest('a[href^="#/"]') : null;
-      if (link && !window.confirm('Leave without saving the changed settings?')) {
-        e.preventDefault();
-      }
-    };
     window.addEventListener('beforeunload', onUnload);
-    document.addEventListener('click', onClick, true);
+    setLeaveGuard(() => window.confirm('Leave without saving the changed settings?'));
     return () => {
       window.removeEventListener('beforeunload', onUnload);
-      document.removeEventListener('click', onClick, true);
+      setLeaveGuard(null);
+    };
+  });
+
+  // Lifts the toasts above the save bar while it shows.
+  $effect(() => {
+    if (!showBar || barHeight === 0) {
+      return;
+    }
+    const root = document.documentElement;
+    root.style.setProperty('--toast-lift', `${barHeight + 12}px`);
+    return () => {
+      root.style.removeProperty('--toast-lift');
     };
   });
 
@@ -178,8 +210,24 @@
       .filter((s) => s.length > 0);
   }
 
+  /** Takes a limit only when it is a whole number of kB/s; otherwise marks the field. */
+  function setLimit(key: LimitKey, input: HTMLInputElement): void {
+    const text = input.value.trim();
+    const n = Number(text);
+    const ok = text !== '' && Number.isInteger(n) && n >= 0 && n <= 4_294_967_295;
+    invalidLimits = ok ? invalidLimits.filter((k) => k !== key) : [...new Set([...invalidLimits, key])];
+    if (ok && settings) {
+      settings.limits[key] = n;
+    }
+    if (invalidLimits.length === 0 && settingsError === LIMIT_ERROR) {
+      settingsError = null;
+    }
+  }
+
   function discard(): void {
     settingsError = null;
+    invalidLimits = [];
+    limitsKey += 1;
     settings = JSON.parse(baseline) as Settings;
   }
 
@@ -188,6 +236,10 @@
       return;
     }
     settingsError = null;
+    if (invalidLimits.length > 0) {
+      settingsError = LIMIT_ERROR;
+      return;
+    }
     const cleaned = cleanPathMap(settings.client.remote_path_map);
     if ('error' in cleaned) {
       settingsError = cleaned.error;
@@ -336,8 +388,8 @@
       <div class="diag">
         <button onclick={copyDiagnostics} aria-describedby="diag-help">Copy diagnostics</button>
         <p id="diag-help" class="help">
-          Plain text for a bug report: versions, states and sizes, like <code>mistarr doctor</code>. It holds no
-          paths, addresses or file names.
+          Plain text for a bug report: versions, states and sizes, like <code>mistarr doctor</code>, and your
+          browser. It holds no paths, addresses or file names.
         </p>
       </div>
       {#if manualCopy}
@@ -407,44 +459,38 @@
           <section id="set-limits" class="card group" aria-labelledby="set-limits-h">
             <h3 id="set-limits-h" tabindex="-1">Transfers and limits</h3>
             <p class="help lead">Speed limits the client applies, in kB/s. 0 is unlimited.</p>
-            <div class="field">
-              <span class="label" id="limits-menu">At the menu</span>
-              <div class="pair" role="group" aria-labelledby="limits-menu">
-                <label>
-                  <span>Download</span>
-                  <span class="unit">
-                    <input type="number" min="0" step="1" bind:value={settings.limits.down_kbps_menu} />
-                    <span aria-hidden="true">kB/s</span>
-                  </span>
-                </label>
-                <label>
-                  <span>Upload</span>
-                  <span class="unit">
-                    <input type="number" min="0" step="1" bind:value={settings.limits.up_kbps_menu} />
-                    <span aria-hidden="true">kB/s</span>
-                  </span>
-                </label>
-              </div>
-            </div>
-            <div class="field">
-              <span class="label" id="limits-core">While a core runs</span>
-              <div class="pair" role="group" aria-labelledby="limits-core">
-                <label>
-                  <span>Download</span>
-                  <span class="unit">
-                    <input type="number" min="0" step="1" bind:value={settings.limits.down_kbps_core} />
-                    <span aria-hidden="true">kB/s</span>
-                  </span>
-                </label>
-                <label>
-                  <span>Upload</span>
-                  <span class="unit">
-                    <input type="number" min="0" step="1" bind:value={settings.limits.up_kbps_core} />
-                    <span aria-hidden="true">kB/s</span>
-                  </span>
-                </label>
-              </div>
-            </div>
+            {#key limitsKey}
+              {#each LIMIT_ROWS as row (row.id)}
+                <div class="field">
+                  <span class="label" id={row.id}>{row.label}</span>
+                  <div class="pair" role="group" aria-labelledby={row.id}>
+                    {#each row.fields as f (f.key)}
+                      <label>
+                        <span>{f.label}</span>
+                        <span class="unit">
+                          <input
+                            type="number"
+                            min="0"
+                            step="1"
+                            inputmode="numeric"
+                            value={settings.limits[f.key]}
+                            aria-invalid={invalidLimits.includes(f.key) ? 'true' : undefined}
+                            aria-describedby={invalidLimits.includes(f.key) ? 'limits-error' : undefined}
+                            oninput={(e) => {
+                              setLimit(f.key, e.currentTarget);
+                            }}
+                          />
+                          <span aria-hidden="true">kB/s</span>
+                        </span>
+                      </label>
+                    {/each}
+                  </div>
+                </div>
+              {/each}
+            {/key}
+            {#if invalidLimits.length > 0}
+              <p id="limits-error" class="error field-error">{LIMIT_ERROR}</p>
+            {/if}
           </section>
 
           <section id="set-titles" class="card group" aria-labelledby="set-titles-h">
@@ -525,8 +571,8 @@
             </div>
           </section>
 
-          {#if dirty || settingsError}
-            <div class="savebar" role="region" aria-label="Unsaved changes">
+          {#if showBar}
+            <div class="savebar" role="region" aria-label="Unsaved changes" bind:clientHeight={barHeight}>
               {#if settingsError}
                 <p class="error" role="alert">{settingsError}</p>
               {:else}
@@ -926,6 +972,31 @@
     border: 1px solid var(--accent);
     border-radius: var(--radius);
     box-shadow: 0 6px 20px rgb(0 0 0 / 25%);
+  }
+
+  /* Without overflow-x: clip, body scrolls and sticky cannot follow the window. */
+  @supports not (overflow-x: clip) {
+    .savebar {
+      position: fixed;
+      right: var(--gutter);
+      bottom: var(--gutter);
+      left: var(--gutter);
+      max-width: 60rem;
+      margin: 0 auto;
+    }
+
+    form:has(.savebar) {
+      padding-bottom: 5rem;
+    }
+  }
+
+  .field-error {
+    margin: 0.3rem 0 0;
+    font-size: 0.85rem;
+  }
+
+  .unit input[aria-invalid='true'] {
+    border-color: var(--danger);
   }
 
   .savebar p {

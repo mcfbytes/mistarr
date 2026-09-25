@@ -201,6 +201,7 @@ pub async fn snapshot(app: &AppState) -> Status {
             None
         });
     let mem = meminfo();
+    let disk = disk_space(&data);
     Status {
         version: crate::version::version(),
         commit: crate::version::commit(),
@@ -212,8 +213,8 @@ pub async fn snapshot(app: &AppState) -> Status {
         manual_override: gate.manual,
         waiting,
         corename: gate.corename,
-        disk_free_bytes: free_bytes(&data),
-        disk_total_bytes: total_bytes(&data),
+        disk_free_bytes: disk.free,
+        disk_total_bytes: disk.total,
         dats_dir: app.config().paths.dats().to_string_lossy().into_owned(),
         rss_bytes: rss_bytes(),
         mem_total_bytes: mem.total,
@@ -272,20 +273,33 @@ pub async fn wizard_status(app: &AppState) -> Result<WizardStatus> {
 /// ```
 #[must_use]
 pub fn free_bytes(path: &Path) -> Option<u64> {
-    let st = rustix::fs::statvfs(path).ok()?;
-    st.f_bavail.checked_mul(st.f_frsize)
+    disk_space(path).free
 }
 
-/// Size in bytes of the filesystem holding `path`.
+/// Free and total bytes of a filesystem, from one `statvfs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DiskSpace {
+    /// Bytes available to unprivileged users.
+    pub free: Option<u64>,
+    /// Size of the filesystem.
+    pub total: Option<u64>,
+}
+
+/// Reads [`DiskSpace`] for the filesystem holding `path`; both `None` when it cannot.
 ///
 /// ```
-/// let p = std::path::Path::new("/");
-/// assert!(mistarr_server::status::total_bytes(p) >= mistarr_server::status::free_bytes(p));
+/// let s = mistarr_server::status::disk_space(std::path::Path::new("/"));
+/// assert!(s.total.is_some_and(|t| s.free.is_some_and(|f| f <= t)));
 /// ```
 #[must_use]
-pub fn total_bytes(path: &Path) -> Option<u64> {
-    let st = rustix::fs::statvfs(path).ok()?;
-    st.f_blocks.checked_mul(st.f_frsize)
+pub fn disk_space(path: &Path) -> DiskSpace {
+    match rustix::fs::statvfs(path) {
+        Ok(st) => DiskSpace {
+            free: st.f_bavail.checked_mul(st.f_frsize),
+            total: st.f_blocks.checked_mul(st.f_frsize),
+        },
+        Err(_) => DiskSpace::default(),
+    }
 }
 
 /// Total and available memory, from one read of `/proc/meminfo`.
@@ -371,8 +385,11 @@ mod tests {
     #[test]
     fn host_measurements_exist_on_linux() {
         assert!(meminfo().total.is_some());
-        assert!(total_bytes(Path::new("/")).is_some());
-        assert!(total_bytes(Path::new("/nonexistent/x")).is_none());
+        assert!(disk_space(Path::new("/")).total.is_some());
+        assert_eq!(
+            disk_space(Path::new("/nonexistent/x")),
+            DiskSpace::default()
+        );
         assert!(rss_bytes().is_some());
         assert!(mem_available_bytes().is_some());
         assert!(free_bytes(Path::new("/")).is_some());
