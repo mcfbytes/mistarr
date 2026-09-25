@@ -16,7 +16,8 @@ here as a hard constraint that overrides any task instruction.
   resolves to game content is not.
 - No default indexer, no bundled source definition format that points at a
   site, and no in-app discovery of sources. Sources arrive only as files the
-  user placed in the watched directory or uploaded through the UI.
+  user placed in the watched directory, uploaded through the UI, or fetched
+  from a single URL the user typed or pasted, under the rules in section 2.
 - The single permitted external URL family in the code is the libretro
   thumbnail server for cover art, which the browser loads directly. The board
   never fetches or stores art.
@@ -26,9 +27,20 @@ here as a hard constraint that overrides any task instruction.
 - DATs: the user drops Logiqx XML, zipped DAT packs or a No-Intro DB export
   (XML, or zipped) into `dats/`.
 - Torrents: the user drops `.torrent` or `.magnet` files into `sources/`.
-- The app may parse, validate, bind and organise these. It may not obtain them.
-- Documentation describes the directories and the accepted formats. It does
-  not say where to obtain the files.
+- URLs: the user may type or paste the URL of one DAT, zipped DAT pack or
+  `.torrent` file, or a magnet link. The app fetches that one resource once,
+  when the user submits it, and places it in `dats/` or `sources/` exactly as
+  if the user had put it there; from then on it is handled like any other
+  file.
+- The app may parse, validate, bind and organise these. It may not obtain them
+  on its own. It fetches only the exact URL the user supplied: it never
+  follows links inside what it fetched, never crawls, never fetches again on
+  a schedule, never suggests, completes or remembers URLs for reuse, and ships
+  none. ROM and disc images are never fetched by URL; they arrive only
+  through a source's transfer or from the user's own files.
+- Documentation and the UI describe the directories, the URL field and the
+  accepted formats. They do not say where to obtain the files, and any example
+  URL uses a reserved domain such as `example.invalid`.
 
 ## 3. Nothing about circumvention
 
@@ -94,5 +106,7 @@ distributor promotes infringing use, shown by clear expression or other
 affirmative steps. In most of Europe the exposure sits with the person who
 uploads. mistarr's defence is that it does nothing the user did not
 individually configure, contains nothing that points at content, and is fully
-useful without any source at all. Every rule above protects one of those three
+useful without any source at all. Fetching a URL the user supplied is the same
+act as the user downloading that file and dropping it in: the user chose the
+address, the app contributes none, and it fetches nothing further on its own. Every rule above protects one of those three
 facts. This is not legal advice; it is the design rationale.
