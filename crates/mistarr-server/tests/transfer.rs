@@ -510,47 +510,139 @@ async fn a_wanted_title_waits_for_a_source_to_bind() {
     b.running.shutdown().await.expect("shutdown");
 }
 
+/// Transmission's `session-set` and `session-get` arguments since boot.
+fn session_calls(fake: &FakeServer) -> Vec<Value> {
+    fake.bodies()
+        .into_iter()
+        .filter(|x| x["method"] == "session-set" || x["method"] == "session-get")
+        .skip(1)
+        .map(|x| x["arguments"].clone())
+        .collect()
+}
+
+fn limit(dir: &str, kbps: u32, enabled: bool) -> Value {
+    let mut m = serde_json::Map::new();
+    m.insert(format!("speed-limit-{dir}"), json!(kbps));
+    m.insert(format!("speed-limit-{dir}-enabled"), json!(enabled));
+    Value::Object(m)
+}
+
+fn fields(dir: &str) -> Value {
+    json!({ "fields": [format!("speed-limit-{dir}"), format!("speed-limit-{dir}-enabled")] })
+}
+
+async fn client_hold(b: &Booted) -> Value {
+    get(b.addr(), "/api/v1/system/status").await.json()["client_hold"].clone()
+}
+
+/// The turtle upload rate the fake client reports.
+const ALT_UP: u32 = 50;
+
+fn alt(kbps: u32) -> Value {
+    json!({ "alt-speed-up": kbps })
+}
+
+fn alt_fields() -> Value {
+    json!({ "fields": ["alt-speed-up", "alt-speed-enabled"] })
+}
+
+/// Scripts the reads of the client's own limits and turtle rate, and the
+/// three sets of a core start that holds uploads.
+fn push_core_start(fake: &FakeServer, down: Value, up: Value) {
+    fake.push(FakeResponse::success(down));
+    fake.push(FakeResponse::success(up));
+    fake.push(FakeResponse::success(
+        json!({ "alt-speed-up": ALT_UP, "alt-speed-enabled": true }),
+    ));
+    fake.push(ok());
+    fake.push(ok());
+    fake.push(ok());
+}
+
 #[tokio::test]
-async fn corename_switches_rate_limits_once_per_transition() {
+async fn corename_holds_uploads_once_per_transition_and_restores_own_limits() {
     let fake = FakeServer::start().await.expect("fake");
     let b = boot_transmission(&fake).await;
     let app = &b.running.app;
-    let sets = || {
-        fake.bodies()
-            .into_iter()
-            .filter(|x| x["method"] == "session-set")
-            .map(|x| x["arguments"].clone())
-            .collect::<Vec<_>>()
-    };
+    let sets = || session_calls(&fake);
+    let mut live = app.events.subscribe(None).live;
     std::fs::write(b.corename(), "MENU").expect("write");
     eventually("MENU read", || async {
         app.gate.state().corename.as_deref() == Some("MENU")
     })
     .await;
-    fake.push(ok());
-    fake.push(ok());
+    push_core_start(&fake, limit("down", 0, false), limit("up", 30, true));
     std::fs::write(b.corename(), "SNES").expect("write");
-    eventually("core limits", || async { sets().len() == 1 }).await;
+    eventually("uploads held", || async { sets().len() == 6 }).await;
     assert_eq!(
-        sets()[0],
-        json!({
-            "speed-limit-down": 512, "speed-limit-down-enabled": true,
-            "speed-limit-up": 64, "speed-limit-up-enabled": true
-        })
+        sets(),
+        [
+            fields("down"),
+            fields("up"),
+            alt_fields(),
+            limit("down", 512, true),
+            limit("up", 0, true),
+            alt(0),
+        ]
     );
+    eventually("the held status", || async {
+        client_hold(&b).await == "uploads"
+    })
+    .await;
+    let mut announced = false;
+    while let Ok(ev) = live.try_recv() {
+        announced |= ev.kind == EventKind::Status && ev.data.contains(r#""client_hold":"uploads""#);
+    }
+    assert!(announced, "a status event says uploads are held");
     std::fs::write(b.corename(), "N64").expect("write");
     eventually("N64 read", || async {
         app.gate.state().corename.as_deref() == Some("N64")
     })
     .await;
+    fake.push(ok());
+    fake.push(ok());
+    fake.push(ok());
     std::fs::write(b.corename(), "MENU").expect("write");
-    eventually("menu limits", || async { sets().len() == 2 }).await;
+    eventually("own limits back", || async { sets().len() == 9 }).await;
     assert_eq!(
-        sets()[1],
-        json!({ "speed-limit-down-enabled": false, "speed-limit-up-enabled": false })
+        sets()[6..],
+        [limit("down", 0, false), limit("up", 30, true), alt(ALT_UP)]
     );
+    assert_eq!(client_hold(&b).await, Value::Null);
     tokio::time::sleep(Duration::from_millis(100)).await;
-    assert_eq!(sets().len(), 2);
+    assert_eq!(sets().len(), 9);
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn turning_the_pause_off_mid_game_gives_uploads_the_core_limit() {
+    let fake = FakeServer::start().await.expect("fake");
+    let b = boot_transmission(&fake).await;
+    let sets = || session_calls(&fake);
+    push_core_start(&fake, limit("down", 0, false), limit("up", 8, false));
+    std::fs::write(b.corename(), "SNES").expect("write");
+    eventually("uploads held", || async { sets().len() == 6 }).await;
+    fake.push(ok());
+    fake.push(ok());
+    let body = json!({ "transfer": { "pause_client_while_playing": false } }).to_string();
+    let r = request(b.addr(), "PUT", "/api/v1/system/settings", &[], Some(&body)).await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["transfer"]["pause_client_while_playing"], false);
+    let settings = get(b.addr(), "/api/v1/system/settings").await.json();
+    assert_eq!(
+        settings["transfer"],
+        json!({ "pause_client_while_playing": false })
+    );
+    eventually("the core upload limit", || async { sets().len() == 8 }).await;
+    assert_eq!(sets()[6..], [limit("up", 64, true), alt(ALT_UP)]);
+    assert_eq!(client_hold(&b).await, Value::Null);
+    let status = get(b.addr(), "/api/v1/system/status").await.json();
+    assert_eq!(status["pause_client_while_playing"], false);
+    fake.push(ok());
+    fake.push(ok());
+    std::fs::write(b.corename(), "MENU").expect("write");
+    eventually("own limits back", || async { sets().len() == 10 }).await;
+    assert_eq!(sets()[9], limit("up", 8, false));
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -725,9 +817,15 @@ async fn refused_rate_limits_are_retried_until_the_client_takes_them() {
             .into_iter()
             .filter(|x| x["method"] == "session-set")
             .map(|x| x["arguments"]["speed-limit-down"].clone())
+            .filter(|down| !down.is_null())
             .collect::<Vec<_>>()
     };
+    fake.push(FakeResponse::success(limit("down", 0, false)));
+    fake.push(FakeResponse::success(limit("up", 0, false)));
+    fake.push(FakeResponse::success(alt(ALT_UP)));
     fake.push(FakeResponse::failure("busy"));
+    fake.push(ok());
+    fake.push(ok());
     fake.push(ok());
     std::fs::write(b.corename(), "SNES").expect("write");
     eventually("the retried core limits", || async { sets().len() == 2 }).await;

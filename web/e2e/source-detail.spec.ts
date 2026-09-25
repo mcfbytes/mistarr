@@ -17,7 +17,9 @@ test('a source opens from the list with the keyboard and shows what it holds', a
   await expect(overview).toContainText('00000000…00000000');
   await expect(overview).toContainText('In the client, 2 files selected');
   await expect(page.getByRole('progressbar', { name: 'Transfer of the selected files' })).toBeVisible();
-  await expect(page.getByRole('combobox', { name: 'Seed policy' })).toHaveValue('ratio:1');
+  await expect(page.getByRole('combobox', { name: 'Seed policy', exact: true })).toHaveValue('ratio:1');
+  await expect(page.getByTestId('client-held-line')).toHaveText('Client paused while FCEUmm is running');
+  await expect(page.getByText('Paused while a core runs')).toBeVisible();
   await expect(page.getByText('Bound to Nintendo Entertainment System automatically. 94% of its files match DAT entries.')).toBeVisible();
   const counts = page.getByRole('list', { name: 'Files by match' });
   await expect(counts).toContainText('233 matched');

@@ -508,6 +508,28 @@ pub fn list_mapped(conn: &Connection) -> Result<Vec<SourceId>> {
     Ok(ids)
 }
 
+/// Sources with a torrent in the client: id, the client's id for it and its seed policy.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn list_in_client(conn: &Connection) -> Result<Vec<(SourceId, String, SeedPolicy)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, client_id, seed_policy FROM sources WHERE client_id IS NOT NULL ORDER BY id",
+    )?;
+    let rows = stmt
+        .query_map([], |r| {
+            let policy: String = r.get(2)?;
+            Ok((
+                SourceId(r.get(0)?),
+                r.get(1)?,
+                seed_from_text(&policy).unwrap_or(SeedPolicy::None),
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
 /// The rom stamp the source's files were last mapped against.
 ///
 /// # Errors
@@ -989,6 +1011,10 @@ mod tests {
         assert_eq!(list_resolving(&c).expect("resolving"), [(b, false)]);
         set_client_id(&c, b, Some("x")).expect("client");
         assert_eq!(list_resolving(&c).expect("resolving"), [(b, true)]);
+        assert_eq!(
+            list_in_client(&c).expect("in client"),
+            [(b, "x".to_owned(), SeedPolicy::None)]
+        );
         assert_eq!(SourceId(3).to_string(), "3");
     }
 

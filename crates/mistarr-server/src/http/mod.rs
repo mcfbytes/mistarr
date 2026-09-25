@@ -15,7 +15,7 @@ mod system;
 use std::sync::Arc;
 
 use axum::extract::{Request, State};
-use axum::http::{HeaderMap, Method, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, Method, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
@@ -53,7 +53,8 @@ pub fn router(app: Arc<AppState>) -> Router {
             Arc::new(HostAllowlist::for_board(&app.config().server.allowed_hosts)),
             refuse_cross_site,
         ))
-        .layer(middleware::from_fn_with_state(key, require_key));
+        .layer(middleware::from_fn_with_state(key, require_key))
+        .layer(middleware::from_fn(no_store));
     Router::new()
         .nest("/api/v1", api)
         .fallback(spa::serve)
@@ -191,6 +192,15 @@ impl<T> Page<T> {
             .collect();
         Self { items, total }
     }
+}
+
+/// Marks every API answer `Cache-Control: no-store`, so no browser or proxy ever
+/// answers a later request with a copy from before the catalogue changed.
+async fn no_store(req: Request, next: Next) -> Response {
+    let mut res = next.run(req).await;
+    res.headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    res
 }
 
 async fn require_key(

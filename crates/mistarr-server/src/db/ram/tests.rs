@@ -849,3 +849,90 @@ fn the_budget_reads_memory_and_both_directories() {
     let gone = Budget::read(&dir.path().join("none"), Path::new("m.db"));
     assert_eq!((gone.ram_room, gone.card_room), (None, None));
 }
+
+/// Loads `names` as one DAT's games on `platform`, committed as a DAT import commits them.
+fn load_games(
+    c: &mut rusqlite::Connection,
+    platform: &str,
+    dat: &str,
+    names: &[&str],
+) -> Result<()> {
+    use crate::db::{dats, titles};
+    let tx = c.transaction()?;
+    let v = dats::NewVersion {
+        dat_name: dat,
+        version: "1",
+        source_file: "a.dat",
+        platform: Some(platform),
+        now: 1,
+    };
+    let version = dats::upsert_version(&tx, &v)?.id;
+    for name in names {
+        let t = titles::TitleInput {
+            name,
+            base_name: name,
+            group_key: name,
+            clone_of: None,
+            regions: &[],
+            languages: &[],
+            revision: None,
+            flags: &[],
+        };
+        titles::upsert_title(&tx, platform, version, &t, &[])?;
+    }
+    titles::link_parents(&tx, version, true)?;
+    titles::recompute_platform(&tx, platform, &mistarr_core::select::Prefs::default())?;
+    crate::db::commit(tx)
+}
+
+/// Groups on `platform` a browse finds, searching for `q` when given.
+fn found(db: &Db, platform: &str, q: Option<&str>) -> u64 {
+    let filter = crate::db::titles::Browse {
+        q: q.map(str::to_owned),
+        ..crate::db::titles::Browse::default()
+    };
+    db.read_blocking(|c| crate::db::titles::browse(c, platform, &filter, 10, 0))
+        .expect("browse")
+        .1
+}
+
+#[test]
+fn a_search_run_before_an_import_finds_its_titles_after_the_swap_and_in_place() {
+    let ram = testutil::ram_dir();
+    let (_dir, db) = testutil::db();
+    db.write_blocking(|c| {
+        crate::db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS)?;
+        load_games(c, "nes", "Maker - Console", &["Zorbl Harbor"])
+    })
+    .expect("seed");
+    // The reader's statements and index state are warm on both platforms first.
+    assert_eq!(found(&db, "nes", Some("zorbl")), 1);
+    assert_eq!(found(&db, "gba", Some("zorbl")), 0);
+    let out = db
+        .hold_writer_blocking(|h| {
+            run(h, &plan(ram.path()), &mut Script::default(), |copy| {
+                copy.write_blocking(|c| {
+                    load_games(
+                        c,
+                        "gba",
+                        "Maker - Handheld",
+                        &["Zorbl Quest", "Vexil Plinth"],
+                    )
+                })?;
+                Ok((found(&db, "gba", Some("zorbl")), true))
+            })
+        })
+        .expect("run");
+    let Ram::Done(during, _) = out else {
+        panic!("fell back: {out:?}");
+    };
+    assert_eq!(during, 0, "a search during the import reads the old file");
+    assert_eq!(found(&db, "gba", None), 2);
+    assert_eq!(found(&db, "gba", Some("zorbl")), 1);
+    assert_eq!(found(&db, "gba", Some("plin")), 1);
+    assert_eq!(found(&db, "nes", Some("zorbl")), 1);
+    db.write_blocking(|c| load_games(c, "gba", "Maker - Handheld", &["Zorbl Tessel"]))
+        .expect("in place");
+    assert_eq!(found(&db, "gba", None), 3);
+    assert_eq!(found(&db, "gba", Some("zorbl")), 2);
+}

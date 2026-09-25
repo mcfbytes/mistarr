@@ -15,7 +15,7 @@ torrent client that ships with the image, and moves verified files into the
 | SD card, exFAT, ~10-20 MB/s writes | Stage and rename on the same filesystem, never copy. Idle I/O class while a core runs. No symlinks, case-insensitive names. |
 | `/media/fat` mounted `sync,dirsync` | Every write syscall there is flushed to the card before it returns, about 25 ms each, so the database's cost is its count of writes, not bytes. SQLite's temporary files and the DAT stage live in RAM, and a DAT import or a migration runs on a copy of the database in RAM written back 1 MiB at a time; see "Writes on a sync mount" and "DAT import in RAM". |
 | Stock image is Buildroot 2021 with glibc 2.31 | musl static linking, no OpenSSL, `rustls` only. |
-| MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing, scans and file placement while it is anything other than `MENU`. DAT and source parsing continue at low priority; transfers continue at a reduced rate limit. |
+| MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing, scans and file placement while it is anything other than `MENU`. DAT and source parsing continue at low priority. A download client on the board is stopped with SIGSTOP until the menu, unless the user turns that off; one elsewhere gets reduced rate limits and held uploads. |
 | Torrent client already present | Stock image ships rtorrent; Buildroot_MiSTer ships Transmission. mistarr never embeds a client. |
 | Content neutrality | See PRINCIPLES.md. No sources in the tree; watched directories are the only input path. |
 
@@ -67,7 +67,11 @@ pub trait DownloadClient: Send + Sync {
     async fn status(&self, id: &ClientTorrentId) -> Result<TorrentStatus>;          // per-file progress included
     async fn files(&self, id: &ClientTorrentId) -> Result<Vec<ClientFile>>;         // paths and sizes, MetadataPending until known
     async fn remove(&self, id: &ClientTorrentId, delete_data: bool) -> Result<()>;
-    async fn set_rate_limits(&self, down_kbps: Option<u32>, up_kbps: Option<u32>) -> Result<()>;
+    async fn rate_limit(&self, dir: Direction) -> Result<RateLimit>;                // to put back later
+    async fn set_rate_limit(&self, dir: Direction, limit: RateLimit) -> Result<()>;
+    async fn process_id(&self) -> Result<Option<u32>>;                              // rtorrent's system.pid
+    async fn alt_up_limit(&self) -> Result<Option<RateLimit>> { Ok(None) }          // Transmission's turtle upload rate
+    async fn set_alt_up_rate(&self, kbps: u32) -> Result<()> { Ok(()) }
 }
 
 // mistarr-mister
@@ -508,9 +512,14 @@ Jobs run on three serial lanes, one job at a time each:
 | light | `detect_client`, `transfer`, `resolve_magnet`, `deselect` | Runs. |
 
 The CORENAME watcher polls `/tmp/CORENAME` every 2 s. When the value is not
-`MENU` the gate closes for the heavy lane and the poller applies the "core
-running" rate limits. When it returns to `MENU` everything resumes. This is
-a scheduler-level gate, not something each job needs to know about.
+`MENU` the gate closes for the heavy lane. With
+`transfer.pause_client_while_playing` on, a download client on the board is
+stopped with SIGSTOP and nothing calls it until the menu; a client elsewhere
+gets the "core running" rate limits and its uploads held. When CORENAME
+returns to `MENU` everything resumes: the client runs again, the client work kept
+while it was stopped runs, its own limits are put back where the gate
+changed them, and each source's seed policy applies as before (DOWNLOAD-CLIENTS.md "Core gate"). This is a
+scheduler-level gate, not something each job needs to know about.
 
 "Pause" (`POST /system/pause`) holds the heavy and background lanes; a DAT
 parse in progress waits at its next 200 entries. While a lane is held,
@@ -546,7 +555,7 @@ shutdown is left `queued` for this.
 | Stack per runtime thread | 1 MiB reserved, touched pages only in RSS |
 | Soft `RLIMIT_DATA` | `[memory] data_limit_mib`, 192 MiB, never below 64 |
 | SQLite page cache | 2 MiB, 1 MiB on each of the two connections; the writer's rises to 8 MiB while a DAT load applies its stage, a source import, resolve, rebind or re-map first keys new roms (one committed batch of 1 000 per transaction), or a source binds (`db::bulk`) |
-| SQLite other | `mmap_size = 0`, `temp_store = FILE` under `/tmp/mistarr` (`SQLITE_TMPDIR`, set at startup and emptied of stale files; `MISTARR_TEMP_DIR` names another; RAM on the board, so temporary pages never reach the card), created with mode 0700 and refused when it is a symlink or another user's, in which case `<data>/tmp` is used and the log warns; WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB, 16 MiB while a bulk write is open |
+| SQLite other | `mmap_size = 0`, `temp_store = FILE` under `/tmp/mistarr` (`SQLITE_TMPDIR`, set at startup and emptied of stale files except the frozen client's record `client.frozen`; `MISTARR_TEMP_DIR` names another; RAM on the board, so temporary pages never reach the card), created with mode 0700 and refused when it is a symlink or another user's, in which case `<data>/tmp` is used and the log warns; WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB, 16 MiB while a bulk write is open |
 | DAT stage | in `/tmp/mistarr` while a DAT loads, about 1.5 times the DAT's size (18 MB for 20 000 games of three roms), given back when the load ends, as the temporary database vacuums itself. A load in RAM keeps its stage in the same place, beside the copy on the same tmpfs, and when `/tmp` fills it drops the copy and loads on the card; a load on the card whose `/tmp` fills fails naming `/tmp/mistarr`, the database unchanged |
 | SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import in RAM holds the writer from its copy to its swap; one on the card, already on a blocking thread, takes it per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
 | DAT import or migration in RAM | a copy in `[memory] import_dir`, tmpfs, so it counts in `MemAvailable` and not in RSS: the database, what the import adds and the copy's rollback journal. Made only when `MemAvailable` covers the file's size and half again, six times the DATs' uncompressed size for the rows and the stage in SQLite's temporary files, and 32 MiB, above `[memory] import_floor_mib` (128 MiB), and dropped when `MemAvailable` falls below the floor during the load; 1 MiB write-back buffer |
@@ -600,7 +609,7 @@ blocking thread runs work, `threads::blocking` sets its `comm` to a label of
 at most 15 bytes (`threads::label`: `db-read`, `db-write`, `hash`,
 `scan-list`, `zip-list`, `dat-import`, `dat-save`, `source-file`,
 `source-watch`, `import`, `rename`, `arcade`, `romsets`, `launch`, `detect`,
-`incoming`, `io-class`, `chd-header`, `chd-decode`) and puts the pool name
+`incoming`, `io-class`, `chd-header`, `chd-decode`, `client-freeze`) and puts the pool name
 back when it ends; the thread that reaps a started rtorrent is
 `rtorrent-reap`, the one that rewrites `mistarr.migrating` while migrations
 run is `db-migrate`, and a torrent's data is deleted under `torrent-delete`.
@@ -894,10 +903,13 @@ url       = ""              # transmission RPC url or rtorrent scgi address
 remote_path_map = []        # [{ remote = "/downloads", local = "/media/fat/mistarr/staging" }]
 
 [limits]
-down_kbps_menu = 0          # 0 = unlimited
+down_kbps_menu = 0          # 0 leaves the client's own limit; others never raise it
 down_kbps_core = 512
 up_kbps_menu   = 0
 up_kbps_core   = 64
+
+[transfer]
+pause_client_while_playing = true    # stop a client on the board while a core runs; hold uploads of one elsewhere
 
 [prefs]
 regions   = ["USA", "World", "Europe", "Japan"]
@@ -924,11 +936,11 @@ chd_tracks = false          # decode CHD images to identify them by their tracks
 The file is `--config FILE` if given, else `<data>/mistarr.toml` when it
 exists, where `<data>` is `--data DIR` or `/media/fat/mistarr`; `--data`
 also overrides `paths.data` and `--listen` overrides `server.listen`. The
-`client`, `limits`, `prefs` and `scan` sections are editable through
-`/system/settings`; saved values live in the `settings` table and take
+`client`, `limits`, `transfer`, `prefs` and `scan` sections are editable
+through `/system/settings`; saved values live in the `settings` table and take
 precedence over the file on every start, except that settings saved without
-a `scan` section leave the file's in force, so a faster board can default
-`chd_tracks` on in the file. `server`, `paths`, `sources`, `jobs` and
+a `scan` or `transfer` section leave the file's in force, so a faster board
+can default `chd_tracks` on in the file. `server`, `paths`, `sources`, `jobs` and
 `memory` need a restart.
 
 ## Non-goals

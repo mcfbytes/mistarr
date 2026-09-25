@@ -21,6 +21,7 @@
   import StatusPill from '../lib/StatusPill.svelte';
   import ProgressBar from '../lib/ProgressBar.svelte';
   import SeedPolicySelect from '../lib/SeedPolicySelect.svelte';
+  import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import type { SeedPolicy, SourceDetail, SourceFile, SourceFileFilter, SourcePreview } from '../lib/types';
 
   const { sourceId }: { sourceId: number } = $props();
@@ -63,6 +64,16 @@
   let mockJobs = 0;
 
   const row = $derived(findSource(sourceId));
+  const status = $derived(getStatus());
+  const pausedWhilePlaying = $derived(status?.pause_client_while_playing === true);
+  // How the client is held while a core runs, as the list's banner says it.
+  const clientHeld = $derived(
+    status?.client_hold === 'frozen'
+      ? `paused while ${status.corename ?? 'a core'} is running`
+      : status?.client_hold === 'uploads'
+        ? `uploads paused while ${status.corename ?? 'a core'} is running`
+        : null
+  );
   const source = $derived(detail ?? null);
   const job = $derived(jobId === null ? undefined : getJobs().find((j) => j.id === jobId));
   const jobView = $derived(job ? describeProgress(job.kind, job.progress) : null);
@@ -77,6 +88,9 @@
     }
     if (!row) {
       void loadSources().catch(() => undefined);
+    }
+    if (!getStatus()) {
+      void loadStatus().catch(() => undefined);
     }
   });
 
@@ -424,7 +438,12 @@
           <dt>Client</dt>
           <dd>
             {#if source.client_id}
-              In the client{#if source.transfer.files > 0}, {source.transfer.files} {source.transfer.files === 1 ? 'file' : 'files'} selected{/if}
+              In the client{#if source.transfer.files > 0}, {source.transfer.files} {source.transfer.files === 1 ? 'file' : 'files'} selected{/if}{#if clientHeld}<span
+                  class="held"
+                  data-testid="client-held-line"
+                >
+                  <StatusPill status="paused" label={`Client ${clientHeld}`} /></span
+                >{/if}
             {:else}
               Not in the client
             {/if}
@@ -449,6 +468,7 @@
         <SeedPolicySelect policy={source.seed_policy} label="Seed policy" onpick={(p: SeedPolicy) => void setSeedPolicy(p)} />
         <span class="muted">How long the client keeps sharing this source's files once they are complete.</span>
       </div>
+      {#if pausedWhilePlaying}<p class="muted seed-note">Paused while a core runs</p>{/if}
     </section>
 
     <section class="card" aria-labelledby="class-h">
@@ -684,6 +704,16 @@
     flex-wrap: wrap;
     align-items: center;
     gap: 0.6em;
+  }
+
+  .held {
+    display: block;
+    margin-top: 0.3em;
+  }
+
+  .seed-note {
+    margin: 0.4em 0 0;
+    font-size: 0.85em;
   }
 
   .state {

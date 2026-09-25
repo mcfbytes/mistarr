@@ -5,6 +5,7 @@ pub mod candidates;
 pub mod chd;
 pub mod dat_stage;
 pub mod dats;
+pub mod deferred;
 pub mod downloads;
 pub mod downloads_import;
 pub mod files;
@@ -757,7 +758,7 @@ pub fn choose_temp_dir(ram: &Path, fallback: &Path) -> Result<TempDir> {
 
 /// Creates `dir` with mode 0700, or checks the one there is a real directory this user
 /// owns and narrows it to 0700, so no other user can read or plant temporary files.
-fn private_dir(dir: &Path) -> Result<()> {
+pub(crate) fn private_dir(dir: &Path) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
     let refuse = |why: &str| -> Result<()> {
         Err(std::io::Error::new(
@@ -806,6 +807,10 @@ fn private_dir(dir: &Path) -> Result<()> {
 pub fn prepare_temp_dir(dir: &Path) -> Result<()> {
     std::fs::create_dir_all(dir)?;
     for entry in std::fs::read_dir(dir)?.flatten() {
+        // The frozen client's record outlives a restart so the client is resumed.
+        if entry.file_name() == crate::freeze::FROZEN_NAME {
+            continue;
+        }
         if entry.file_type().is_ok_and(|t| t.is_file()) {
             if let Err(e) = std::fs::remove_file(entry.path()) {
                 tracing::warn!(error = %e, "cannot remove a stale SQLite temporary file");

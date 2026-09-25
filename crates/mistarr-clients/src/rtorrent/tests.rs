@@ -874,15 +874,19 @@ async fn remove_refuses_unsafe_paths_before_erasing() {
 #[tokio::test]
 async fn rate_limits_use_global_throttles() {
     let (fake, client) = setup().await;
-    for _ in 0..4 {
+    for _ in 0..3 {
         fake.push(ok());
     }
     client
-        .set_rate_limits(Some(100), None)
+        .set_rate_limit(Direction::Down, RateLimit::kbps(100))
         .await
         .expect("limits");
     client
-        .set_rate_limits(Some(0), Some(25))
+        .set_rate_limit(Direction::Up, RateLimit::default())
+        .await
+        .expect("limits");
+    client
+        .set_rate_limit(Direction::Down, RateLimit::HELD)
         .await
         .expect("limits");
     let down = "throttle.global_down.max_rate.set_kb";
@@ -892,8 +896,7 @@ async fn rate_limits_use_global_throttles() {
         vec![
             call(down, vec![v(""), Value::Int(100)]),
             call(up, vec![v(""), Value::Int(0)]),
-            call(down, vec![v(""), Value::Int(0)]),
-            call(up, vec![v(""), Value::Int(25)]),
+            call(down, vec![v(""), Value::Int(1)]),
         ]
     );
 }
@@ -1067,4 +1070,71 @@ fn a_labelled_delete_removes_the_files_and_keeps_the_thread_name() {
     if cfg!(target_os = "linux") {
         assert_eq!(comm.trim_end(), "delete-test");
     }
+}
+
+#[tokio::test]
+async fn a_limit_is_read_held_and_restored() {
+    let (fake, client) = setup().await;
+    fake.push(ScgiReply::Value(Value::Int(25 * 1024)));
+    fake.push(ok());
+    fake.push(ok());
+    fake.push(ScgiReply::Value(Value::Int(0)));
+    fake.push(ok());
+    let before = client.rate_limit(Direction::Up).await.expect("read");
+    assert_eq!(before, RateLimit::kbps(25));
+    client
+        .set_rate_limit(Direction::Up, RateLimit::HELD)
+        .await
+        .expect("hold");
+    client
+        .set_rate_limit(Direction::Up, before)
+        .await
+        .expect("restore");
+    let none = client.rate_limit(Direction::Down).await.expect("read");
+    assert_eq!(none, RateLimit::default());
+    client
+        .set_rate_limit(Direction::Down, none)
+        .await
+        .expect("restore");
+    let up = "throttle.global_up.max_rate.set_kb";
+    assert_eq!(
+        fake.calls(),
+        vec![
+            call("throttle.global_up.max_rate", vec![v("")]),
+            call(up, vec![v(""), Value::Int(1)]),
+            call(up, vec![v(""), Value::Int(25)]),
+            call("throttle.global_down.max_rate", vec![v("")]),
+            call(
+                "throttle.global_down.max_rate.set_kb",
+                vec![v(""), Value::Int(0)]
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_limit_under_one_kib_is_read_as_one_never_as_none() {
+    let (fake, client) = setup().await;
+    fake.push(ScgiReply::Value(Value::Int(512)));
+    fake.push(ScgiReply::Value(Value::Int(1025)));
+    let low = client.rate_limit(Direction::Up).await.expect("read");
+    assert_eq!(low, RateLimit::kbps(1));
+    let odd = client.rate_limit(Direction::Up).await.expect("read");
+    assert_eq!(odd, RateLimit::kbps(2));
+}
+
+#[tokio::test]
+async fn the_process_id_comes_from_system_pid() {
+    let (fake, client) = setup().await;
+    fake.push(ScgiReply::Value(Value::Int(4321)));
+    assert_eq!(client.process_id().await.expect("pid"), Some(4321));
+    assert_eq!(fake.calls(), vec![call("system.pid", vec![])]);
+}
+
+#[tokio::test]
+async fn rtorrent_has_no_alternate_upload_rate() {
+    let (fake, client) = setup().await;
+    assert_eq!(client.alt_up_limit().await.expect("alt"), None);
+    client.set_alt_up_rate(0).await.expect("ignored");
+    assert!(fake.calls().is_empty());
 }

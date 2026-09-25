@@ -26,7 +26,8 @@ screen works at 360 px wide with a 16 px gutter and no horizontal scroll.
    saving.
 4. Sources: drop zone and the watched-directory path, the files still in
    `sources/` listed as in step 2, and the added sources with their state and
-   reason. Seed policy explained with its default shown. Nothing about where
+   reason. Seed policy explained with its default shown, and, while the
+   client pauses during games, that it does and where to turn that off. Nothing about where
    to obtain files.
 
 The app opens the wizard on load only while `open_on_start` is true. Finish,
@@ -94,9 +95,16 @@ Filters: search, have / missing / wanted, region, a "Show hidden" checkbox,
 and a flags multi-select that requires every checked flag. Each card shows
 the 1G1R pick name, a have indicator, and a want toggle. Infinite scroll in
 pages of 60. Search runs 250 ms after typing stops, and each request cancels
-the one before it. While a page is loading a thin progress bar shows and the
-current results stay visible, dimmed and marked `aria-busy`; a failed load
-shows an alert with Retry.
+the one before it. A background reload, such as one a scan's `file.changed`
+asks for, never cancels a page on its way: it runs once that page lands, so
+a stream of events never keeps a slow search from answering. It rewrites
+each loaded page in its place and drops any row that would then show twice.
+Scrolling on loads the rows after those shown, from the row before them;
+when that row is not the last one shown, the list moved and a background
+reload rewrites the loaded pages, so no group shows twice or is skipped.
+While a page is loading a thin progress bar shows and the current results
+stay visible, dimmed and marked `aria-busy`; a failed load shows an alert
+with Retry.
 
 **Title** (`/t/{id}`). Every variant in the group with region, revision,
 flags, file state (a CHD member named as "g.chd, track 2" or "g.chd, track
@@ -127,6 +135,9 @@ tracks: 3 verified, 1 unmatched, 1 not identified". Live over SSE.
 status pill (resolving runs, unbound waits, bound is done, disabled is
 paused) with its reason beneath, file count,
 matched count, seed policy, client status. Bind and disable actions.
+Under the heading, the client-held pill while it applies, and under each
+seed policy the note "Paused while a core runs" while the setting is on (see
+"The client while a core runs").
 Unbound sources have a platform picker and, when the names suggest one, a
 "Bind to" button for the suggested platform. The name links to the source's
 detail, and a "Set by you" tag beside the platform marks a binding the user
@@ -136,8 +147,12 @@ uploads, as in the wizard.
 **Source** (`/sources/{id}`). A link back to Sources, then the name; size,
 file count, the infohash shortened with Copy (over plain http, where the
 browser has no clipboard, Copy shows the whole infohash to copy by hand),
-added date, dropped file, and whether the client has it, with a bar of the
-selected files' transfer. The seed policy, editable as on the list. Under
+added date, dropped file, and whether the client has it, with a paused pill
+("Client paused while NES is running", or "Client uploads paused while…")
+while a `client_hold` applies, and a bar of the
+selected files' transfer. The seed policy, the same control as on the list, saved through
+the same `PUT /sources/{id}`, so a held or missing client defers it the same
+way. Under
 Classification: the state pill, a "Set by you" tag for a user's binding, one
 sentence on how it was bound ("Bound to NES automatically. 94% of its files
 match DAT entries.", "Bound to NES by you.", "Marked by you as not a game
@@ -188,7 +203,28 @@ and the switch that allows launching, log tail. Under "Disc images", the
 checkbox "Identify CHD images by their tracks" with a "Slow" tag, a line
 saying it decodes each image once, pauses while a core runs and keeps its
 results, and the measured speed as "about N minutes per 700 MB image", or
-"Speed not measured yet."
+"Speed not measured yet." The heading "Limits (kbps)" has the line "0 keeps
+the client's own limit. Any other value only ever lowers it." Under the
+limits, the checkbox "Pause the download client while a core runs", on by
+default, with the line "Frees the board for the game. Transfers resume at the
+menu, and each source's seed policy applies again. A client on another
+machine only stops uploading." The status card shows the client-held pill
+while it applies.
+
+## The client while a core runs
+
+While `/system/status` reports a `client_hold`, the Sources screen, the
+System status card and the activity panel, under its heading, show one
+paused pill (`web/src/lib/ClientHeld.svelte`): "Download client paused while
+NES is running" for a stopped client, or "Uploads paused while NES is
+running" for held uploads, naming the core as the held-jobs banner does. For
+rtorrent, whose lowest held rate is 1 KiB/s, a line beside it and its title
+say so. It follows the `status` event, so it appears when the client is held
+and goes when it is let go at the menu. While
+`pause_client_while_playing` is on, each source row, and the seed policy on
+a source's detail, notes "Paused while a core runs", and the wizard's seed policy step says that
+transfers pause while a core runs, that a client on another machine only
+stops uploading, and that this can be turned off in System.
 
 ## Platform art
 

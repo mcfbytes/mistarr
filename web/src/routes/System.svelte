@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
-  import { fixtureSettings } from '../lib/fixtures';
+  import { fixtureSettings, recordMockSave } from '../lib/fixtures';
   import { api, errorMessage } from '../lib/api';
   import ClientStart from '../lib/ClientStart.svelte';
   import PathMapEditor from '../lib/PathMapEditor.svelte';
+  import ClientHeld from '../lib/ClientHeld.svelte';
   import { cleanPathMap } from '../lib/pathmap';
   import { speedText } from '../lib/unidentified';
   import type { Settings } from '../lib/types';
@@ -68,6 +69,9 @@
     }
     const next = { ...settings, client: { ...settings.client, remote_path_map: cleaned.map } };
     try {
+      if (isMock) {
+        recordMockSave(next);
+      }
       settings = isMock ? next : await api.putSettings(next);
       saved = true;
     } catch (err) {
@@ -102,6 +106,7 @@
         {#if status.pause_reason === 'core'}<span class="muted">(held for the running core)</span>{/if}
         <button onclick={togglePause}>{status.paused ? 'Resume' : 'Pause'}</button>
       </p>
+      <ClientHeld />
       {#if statusError}<p class="error">{statusError}</p>{/if}
     </div>
   {/if}
@@ -125,7 +130,10 @@
       <p class="muted">Remote path map</p>
       <PathMapEditor bind:map={settings.client.remote_path_map} />
 
-      <h3>Limits (kbps, 0 is unlimited)</h3>
+      <h3>Limits (kbps)</h3>
+      <p class="muted help">
+        0 keeps the client's own limit. Any other value only ever lowers it.
+      </p>
       <label>
         Download at menu
         <input type="number" min="0" bind:value={settings.limits.down_kbps_menu} />
@@ -142,6 +150,18 @@
         Upload while a core runs
         <input type="number" min="0" bind:value={settings.limits.up_kbps_core} />
       </label>
+      <label>
+        <input
+          type="checkbox"
+          bind:checked={settings.transfer.pause_client_while_playing}
+          aria-describedby="client-pause-help"
+        />
+        Pause the download client while a core runs
+      </label>
+      <p id="client-pause-help" class="muted help">
+        Frees the board for the game. Transfers resume at the menu, and each source's seed policy applies again. A
+        client on another machine only stops uploading.
+      </p>
 
       <h3>1G1R preferences</h3>
       <label>
