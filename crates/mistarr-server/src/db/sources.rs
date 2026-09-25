@@ -9,7 +9,6 @@ use mistarr_sources::torrent::TorrentFile;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
-use super::candidates::FileCandidate;
 use crate::error::Result;
 
 /// Roms given match keys per statement batch in [`refresh_match_keys`].
@@ -159,6 +158,71 @@ pub struct SourceRow {
     pub added_at: i64,
     /// The platform the torrent's names point at, found without any DAT.
     pub suggested_platform_id: Option<PlatformId>,
+    /// True when the user chose the binding, a platform or none; automatic binding keeps it.
+    pub user_binding: bool,
+    /// The binding the user asked for that its `bind_source` job has not applied yet.
+    pub pending_binding: Option<BindChoice>,
+}
+
+/// A binding the user chose for a source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BindChoice {
+    /// This platform, matching the files against it only.
+    Platform(PlatformId),
+    /// No platform: not a game set.
+    Ignore,
+    /// Whatever automatic binding decides, now and after later DAT loads.
+    Automatic,
+}
+
+impl BindChoice {
+    /// The `sources.bind_pending` text.
+    ///
+    /// ```
+    /// use mistarr_core::PlatformId;
+    /// use mistarr_server::db::sources::BindChoice;
+    /// let nes = BindChoice::Platform(PlatformId("nes".into()));
+    /// assert_eq!(nes.to_text(), "platform:nes");
+    /// assert_eq!(BindChoice::parse("platform:nes"), Some(nes));
+    /// assert_eq!(BindChoice::parse("none"), Some(BindChoice::Ignore));
+    /// assert_eq!(BindChoice::parse("x"), None);
+    /// ```
+    #[must_use]
+    pub fn to_text(&self) -> String {
+        match self {
+            Self::Platform(p) => format!("platform:{}", p.0),
+            Self::Ignore => "none".to_owned(),
+            Self::Automatic => "automatic".to_owned(),
+        }
+    }
+
+    /// Parses the `sources.bind_pending` text.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "none" => Some(Self::Ignore),
+            "automatic" => Some(Self::Automatic),
+            other => other
+                .strip_prefix("platform:")
+                .filter(|p| !p.is_empty())
+                .map(|p| Self::Platform(PlatformId(p.to_owned()))),
+        }
+    }
+}
+
+/// Serialises as `{ automatic, platform_id }`, `platform_id` null for [`BindChoice::Ignore`].
+impl Serialize for BindChoice {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct as _;
+        let mut out = s.serialize_struct("BindChoice", 2)?;
+        out.serialize_field("automatic", &matches!(self, Self::Automatic))?;
+        let platform = match self {
+            Self::Platform(p) => Some(p.0.as_str()),
+            _ => None,
+        };
+        out.serialize_field("platform_id", &platform)?;
+        out.end()
+    }
 }
 
 /// A source to insert.
@@ -178,34 +242,13 @@ pub struct NewSource<'a> {
     pub added_at: i64,
 }
 
-/// One `torrent_files` row with its matched rom's name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FileRow {
-    /// Index in the torrent.
-    pub file_index: u32,
-    /// Path inside the torrent.
-    pub path: String,
-    /// Size in bytes.
-    pub size: u64,
-    /// Matched rom.
-    pub rom_id: Option<i64>,
-    /// The matched rom's DAT name.
-    pub rom_name: Option<String>,
-    /// The matched rom's title.
-    pub title_id: Option<i64>,
-    /// `hash`, `name` or `base`, `None` when unmatched.
-    pub confidence: Option<String>,
-    /// The file's candidate roms, strongest first.
-    pub candidates: Vec<FileCandidate>,
-}
-
 const COLUMNS: &str = "s.id, s.infohash, s.display_name, s.origin_file, s.platform_id,
     s.bind_score, s.state, s.reason, s.seed_policy, s.file_count, s.total_size,
     s.client_id, s.added_at,
     (SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id
        AND (f.rom_id IS NOT NULL OR EXISTS (SELECT 1 FROM torrent_candidates c
              WHERE c.source_id = f.source_id AND c.file_index = f.file_index))),
-    s.suggested_platform_id";
+    s.suggested_platform_id, s.user_binding, s.bind_pending";
 
 /// Reads a non-negative integer column; SQLite stores it as `i64`.
 fn uint(r: &Row<'_>, i: usize) -> rusqlite::Result<u64> {
@@ -235,6 +278,11 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<SourceRow> {
         added_at: r.get(12)?,
         matched_count: uint(r, 13)?,
         suggested_platform_id: r.get::<_, Option<String>>(14)?.map(PlatformId),
+        user_binding: r.get(15)?,
+        pending_binding: r
+            .get::<_, Option<String>>(16)?
+            .as_deref()
+            .and_then(BindChoice::parse),
     })
 }
 
@@ -355,22 +403,57 @@ pub fn set_suggestion(
     Ok(())
 }
 
-/// Records whether the user unbound the source, which keeps it out of
-/// [`list_unbound`].
+/// Records whether the user chose the source's binding, which keeps it out of
+/// [`list_unbound`] and so out of every automatic binding.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn set_user_unbound(conn: &Connection, id: SourceId, unbound: bool) -> Result<()> {
+pub fn set_user_binding(conn: &Connection, id: SourceId, chosen: bool) -> Result<()> {
     conn.execute(
-        "UPDATE sources SET user_unbound = ?2 WHERE id = ?1",
-        params![id.0, unbound],
+        "UPDATE sources SET user_binding = ?2 WHERE id = ?1",
+        params![id.0, chosen],
     )?;
     Ok(())
 }
 
-/// Unbound sources the user did not unbind, with their suggested platform,
-/// oldest first.
+/// Records the binding the user asked for, which the next `bind_source` job of the
+/// source applies, and whether the user chose it.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn request_binding(conn: &Connection, id: SourceId, choice: &BindChoice) -> Result<()> {
+    conn.execute(
+        "UPDATE sources SET bind_pending = ?2, user_binding = ?3 WHERE id = ?1",
+        params![id.0, choice.to_text(), *choice != BindChoice::Automatic],
+    )?;
+    Ok(())
+}
+
+/// Takes the binding the user asked for, clearing it; `None` when none waits.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn take_binding(conn: &Connection, id: SourceId) -> Result<Option<BindChoice>> {
+    let text: Option<String> = conn
+        .query_row(
+            "SELECT bind_pending FROM sources WHERE id = ?1",
+            [id.0],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    conn.execute(
+        "UPDATE sources SET bind_pending = NULL WHERE id = ?1",
+        [id.0],
+    )?;
+    Ok(text.as_deref().and_then(BindChoice::parse))
+}
+
+/// Unbound sources whose binding the user did not choose, with their
+/// suggested platform, oldest first.
 ///
 /// # Errors
 ///
@@ -378,7 +461,7 @@ pub fn set_user_unbound(conn: &Connection, id: SourceId, unbound: bool) -> Resul
 pub fn list_unbound(conn: &Connection) -> Result<Vec<(SourceId, Option<PlatformId>)>> {
     let mut stmt = conn.prepare(
         "SELECT id, suggested_platform_id FROM sources
-         WHERE state = 'unbound' AND user_unbound = 0 ORDER BY id",
+         WHERE state = 'unbound' AND user_binding = 0 ORDER BY id",
     )?;
     let rows = stmt
         .query_map([], |r| {
@@ -667,53 +750,6 @@ pub fn torrent_files(conn: &Connection, id: SourceId) -> Result<Vec<TorrentFile>
     Ok(files)
 }
 
-/// A page of the source's files with matched rom names, and the total.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure.
-pub fn files(
-    conn: &Connection,
-    id: SourceId,
-    limit: u32,
-    offset: u32,
-) -> Result<(Vec<FileRow>, u64)> {
-    let total = conn.query_row(
-        "SELECT COUNT(*) FROM torrent_files WHERE source_id = ?1",
-        [id.0],
-        |r| uint(r, 0),
-    )?;
-    let mut stmt = conn.prepare(
-        "SELECT f.file_index, f.path, f.size, f.rom_id, r.name, r.title_id, f.confidence
-         FROM torrent_files f LEFT JOIN roms r ON r.id = f.rom_id
-         WHERE f.source_id = ?1 ORDER BY f.file_index LIMIT ?2 OFFSET ?3",
-    )?;
-    let rows = stmt
-        .query_map(params![id.0, limit, offset], |r| {
-            Ok(FileRow {
-                file_index: r.get(0)?,
-                path: r.get(1)?,
-                size: uint(r, 2)?,
-                rom_id: r.get(3)?,
-                rom_name: r.get(4)?,
-                title_id: r.get(5)?,
-                confidence: r.get(6)?,
-                candidates: Vec::new(),
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<FileRow>>>()?;
-    let mut rows = rows;
-    if let (Some(first), Some(last)) = (rows.first(), rows.last()) {
-        let (from, to) = (first.file_index, last.file_index);
-        for (index, found) in super::candidates::of_files(conn, id, from, to)? {
-            if let Some(row) = rows.iter_mut().find(|r| r.file_index == index) {
-                row.candidates.push(found);
-            }
-        }
-    }
-    Ok((rows, total))
-}
-
 /// Deletes a source and, by cascade, its files. Its downloads keep their rows
 /// with `source_id` NULL. Returns whether it existed.
 ///
@@ -890,7 +926,12 @@ pub mod fixtures {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::source_detail::{self, FileRow};
     use crate::db::testutil;
+
+    fn files(c: &Connection, id: SourceId, limit: u32, offset: u32) -> Result<(Vec<FileRow>, u64)> {
+        source_detail::files(c, id, &source_detail::FileQuery::default(), limit, offset)
+    }
 
     fn conn() -> Connection {
         let mut c = Connection::open_in_memory().expect("open");

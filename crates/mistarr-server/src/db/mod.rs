@@ -17,6 +17,7 @@ pub mod migrate;
 pub mod platforms;
 pub mod ram;
 pub mod settings;
+pub mod source_detail;
 pub mod sources;
 pub mod system;
 pub mod titles;

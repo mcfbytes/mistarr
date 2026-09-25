@@ -109,11 +109,13 @@ impl WaitingJob {
     }
 }
 
-/// The file name in a payload's `path`, else its `platform_id`.
+/// The file name in a payload's `path`, else its `source_name`, else its `platform_id`.
 ///
 /// ```
 /// let p = serde_json::json!({"path": "/data/dats/a.dat"});
 /// assert_eq!(mistarr_server::status::job_detail(&p).as_deref(), Some("a.dat"));
+/// let s = serde_json::json!({"source_name": "Set", "platform_id": "nes"});
+/// assert_eq!(mistarr_server::status::job_detail(&s).as_deref(), Some("Set"));
 /// assert_eq!(mistarr_server::status::job_detail(&serde_json::json!({})), None);
 /// ```
 #[must_use]
@@ -121,6 +123,12 @@ pub fn job_detail(payload: &serde_json::Value) -> Option<String> {
     if let Some(path) = payload.get("path").and_then(serde_json::Value::as_str) {
         let name = Path::new(path).file_name()?;
         return Some(name.to_string_lossy().into_owned());
+    }
+    if let Some(name) = payload
+        .get("source_name")
+        .and_then(serde_json::Value::as_str)
+    {
+        return Some(name.to_owned());
     }
     payload
         .get("platform_id")

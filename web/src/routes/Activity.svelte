@@ -31,7 +31,8 @@
 
   function jobTitle(job: Job): string {
     const pid = job.payload.platform_id;
-    const detail = typeof pid === 'string' ? platformName(pid) : jobDetail(job.payload);
+    const named = typeof job.payload.source_name === 'string';
+    const detail = typeof pid === 'string' && !named ? platformName(pid) : jobDetail(job.payload);
     return detail ? `${kindLabel(job.kind)}: ${detail}` : kindLabel(job.kind);
   }
 

@@ -236,8 +236,13 @@ async fn both_wanted(b: &Booted) -> Wanted {
     .await;
     let body = Some(r#"{"platform_id":"nes"}"#);
     let r = request(b.addr(), "PUT", "/api/v1/sources/1", &[], body).await;
-    assert_eq!(r.status, 200, "{}", r.body);
-    let s = r.json();
+    assert_eq!(r.status, 202, "{}", r.body);
+    eventually("the source bound by hand", || async {
+        let r = get(b.addr(), "/api/v1/sources").await.json();
+        r["items"][0]["state"] == "bound"
+    })
+    .await;
+    let s = get(b.addr(), "/api/v1/sources").await.json()["items"][0].clone();
     assert_eq!(
         (s["state"].clone(), s["bind_score"].clone()),
         (json!("bound"), json!(0.0))
