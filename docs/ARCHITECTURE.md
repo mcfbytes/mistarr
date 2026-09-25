@@ -13,7 +13,7 @@ torrent client that ships with the image, and moves verified files into the
 | Cortex-A9 dual core at ~800 MHz, ARMv7 hard-float | Cross-compiled static musl binary. Hashing is streaming and background. CHD images are decoded only in a heavy background job, opt-in, once per image. |
 | Roughly 490 MiB RAM visible to Linux, shared with the MiSTer process | Idle RSS target under 30 MiB, hard ceiling 64 MiB. No in-memory torrent metadata for set torrents; file lists live in SQLite. |
 | SD card, exFAT, ~10-20 MB/s writes | Stage and rename on the same filesystem, never copy. Idle I/O class while a core runs. No symlinks, case-insensitive names. |
-| `/media/fat` mounted `sync,dirsync` | Every write syscall there is flushed to the card before it returns, about 25 ms each, so the database's cost is its count of writes, not bytes. SQLite's temporary files and the DAT stage live in RAM; see "Writes on a sync mount". |
+| `/media/fat` mounted `sync,dirsync` | Every write syscall there is flushed to the card before it returns, about 25 ms each, so the database's cost is its count of writes, not bytes. SQLite's temporary files and the DAT stage live in RAM, and a DAT import or a migration runs on a copy of the database in RAM written back 1 MiB at a time; see "Writes on a sync mount" and "DAT import in RAM". |
 | Stock image is Buildroot 2021 with glibc 2.31 | musl static linking, no OpenSSL, `rustls` only. |
 | MiSTer main process wants the CPU when a core runs | Watch `/tmp/CORENAME`; pause hashing, scans and file placement while it is anything other than `MENU`. DAT and source parsing continue at low priority; transfers continue at a reduced rate limit. |
 | Torrent client already present | Stock image ships rtorrent; Buildroot_MiSTer ships Transmission. mistarr never embeds a client. |
@@ -93,7 +93,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 ### Startup
 
 1. Load config from `/media/fat/mistarr/mistarr.toml`, or defaults.
-2. Open or create SQLite at `/media/fat/mistarr/mistarr.db`, run migrations.
+2. Open or create SQLite at `/media/fat/mistarr/mistarr.db`, run migrations,
+   on a copy in RAM when memory allows ("DAT import in RAM").
    Read CORENAME once, so the gate is closed from the start while a core is
    loaded, then reconcile the jobs a previous process left open (see
    "Pausing for the core").
@@ -121,7 +122,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    is enqueued again on a later listing. The `dat_import` job runs on the
    background lane, so a loaded core does not hold it. Parse the DAT
    (Logiqx, or a DB export read twice for its parents) with `quick-xml`,
-   streaming. Each game is parsed outside the database's write lock and appended to `dat_stage`, a TEMP table of
+   streaming, into a copy of the database in RAM when memory allows ("DAT
+   import in RAM"), else into the card file. Each game is parsed outside the database's write lock and appended to `dat_stage`, a TEMP table of
    the writer connection in SQLite's temporary directory, in chunks of 2,000
    games, one short transaction per chunk; one transaction then applies the
    stage (steps 3 to 5) with the writer's bulk cache, so readers see the old
@@ -148,12 +150,14 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    as a Logiqx DAT or a DB export (VERIFICATION.md "DAT families"); other
    families on the platform stay live. Titles of the same name are reused
    across the family's versions, and entries not present in the new DAT are
-   marked `retired`, never deleted. The platform's recompute job is queued;
-   it matches files of roms that retired again against the live roms by
-   their stored hashes, in chunks, or marks them `unverified`; then, outside
-   arcade, it matches the platform's unmatched files by their stored hashes
-   (VERIFICATION.md "Matching stored hashes"); it recomputes the picks and
-   then queues a re-map of the platform's bound sources.
+   marked `retired`, never deleted. The platform's recompute then runs, on
+   the copy in RAM as part of the import, or as a queued recompute job when
+   the import ran on the card: it matches files of roms that retired again
+   against the live roms by their stored hashes, in chunks, or marks them
+   `unverified`; then, outside arcade, it matches the platform's unmatched
+   files by their stored hashes (VERIFICATION.md "Matching stored hashes");
+   it recomputes the picks and then queues a re-map of the platform's bound
+   sources.
 4. Parent/clone data is read from `cloneof` attributes when present. When
    absent, clone groups are inferred by normalising the name (strip region,
    revision, language and flag tags) so 1G1R still works with plain DATs.
@@ -496,7 +500,7 @@ Jobs run on three serial lanes, one job at a time each:
 | Lane | Jobs | While a core runs |
 |---|---|---|
 | heavy | `scan`, `import`, `arcade_catalog`, `chd_tracks` | Held: a queued job does not start and a running one stops at its next file boundary, or for `chd_tracks` its next slice of about 640 KiB, `paused`. |
-| background | `dat_import`, `recompute_1g1r`, `source_import` | Runs. A DAT parse sleeps 20 ms every 200 entries, on top of the process's `nice` level. Held, like the heavy lane, by a manual pause. |
+| background | `dat_import`, `recompute_1g1r`, `source_import` | Runs. A DAT parse sleeps 20 ms every 200 entries, on top of the process's `nice` level. Held, like the heavy lane, by a manual pause; a DAT import in RAM drops its copy and starts again after it, and while a core runs its copy into RAM and back rests as long as each 1 MiB step took. |
 | light | `detect_client`, `transfer`, `resolve_magnet`, `deselect` | Runs. |
 
 The CORENAME watcher polls `/tmp/CORENAME` every 2 s. When the value is not
@@ -532,15 +536,16 @@ shutdown is left `queued` for this.
 |---|---|
 | Binary size, stripped, with SPA | under 8 MiB |
 | Idle RSS | under 30 MiB |
-| Peak RSS during scan or import | under 64 MiB, checked per job by `tests/memory.rs`; a DAT load, with its bulk cache, within 28 MiB of an idle server, a source import or remap within 20 MiB, other jobs within 12 or 16 MiB |
+| Peak RSS during scan or import | under 64 MiB, checked per job by `tests/memory.rs`; a DAT load, with its bulk cache and the connections to its copy in RAM, within 32 MiB of an idle server, a source import or remap within 20 MiB, other jobs within 12 or 16 MiB |
 | tokio worker threads | 2 |
 | Blocking threads (SQLite, hashing, file work) | at most 4 |
 | Stack per runtime thread | 1 MiB reserved, touched pages only in RSS |
 | Soft `RLIMIT_DATA` | `[memory] data_limit_mib`, 192 MiB, never below 64 |
 | SQLite page cache | 2 MiB, 1 MiB on each of the two connections; the writer's rises to 8 MiB while a DAT load applies its stage, a source import, resolve, rebind or re-map first keys new roms (one committed batch of 1 000 per transaction), or a source binds (`db::bulk`) |
 | SQLite other | `mmap_size = 0`, `temp_store = FILE` under `/tmp/mistarr` (`SQLITE_TMPDIR`, set at startup and emptied of stale files; `MISTARR_TEMP_DIR` names another; RAM on the board, so temporary pages never reach the card), created with mode 0700 and refused when it is a symlink or another user's, in which case `<data>/tmp` is used and the log warns; WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB, 16 MiB while a bulk write is open |
-| DAT stage | in `/tmp/mistarr` while a DAT loads, about 1.5 times the DAT's size (18 MB for 20 000 games of three roms), given back when the load ends, as the temporary database vacuums itself; when `/tmp` fills the load fails naming `/tmp/mistarr` and the database is unchanged |
-| SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import already on a blocking thread takes the writer per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
+| DAT stage | in `/tmp/mistarr` while a DAT loads, about 1.5 times the DAT's size (18 MB for 20 000 games of three roms), given back when the load ends, as the temporary database vacuums itself. A load in RAM keeps its stage in the same place, beside the copy on the same tmpfs, and when `/tmp` fills it drops the copy and loads on the card; a load on the card whose `/tmp` fills fails naming `/tmp/mistarr`, the database unchanged |
+| SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import in RAM holds the writer from its copy to its swap; one on the card, already on a blocking thread, takes it per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
+| DAT import or migration in RAM | a copy in `[memory] import_dir`, tmpfs, so it counts in `MemAvailable` and not in RSS: the database, what the import adds and the copy's rollback journal. Made only when `MemAvailable` covers the file's size and half again, six times the DATs' uncompressed size for the rows and the stage in SQLite's temporary files, and 32 MiB, above `[memory] import_floor_mib` (128 MiB), and dropped when `MemAvailable` falls below the floor during the load; 1 MiB write-back buffer |
 | Hashing buffer | 256 KiB, one file at a time |
 | CHD decode | one image at a time, at most 24 MiB (`decode_budget` at the header limits), about 1 MiB for chdman's default hunks; nothing written to disk (CHD.md "Memory") |
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
@@ -599,8 +604,9 @@ The board's BusyBox `top` and `ps` cannot list threads, so read them from
 procfs:
 `for t in /proc/$(pidof mistarr)/task/*; do echo "${t##*/} $(cat $t/comm)"; done`.
 
-A DAT loads in one write transaction, so the WAL file can grow to the size
-of the pages that DAT touches while it loads; it is cut back to 1 MiB at the
+A DAT loads in one write transaction, so the WAL file, in RAM beside the copy
+when the import runs there, can grow to the size of the pages that DAT touches
+while it loads; it is cut back to 1 MiB at the
 next checkpoint. Page memory stays within the cache either way: a load whose
 dirty pages outgrow the bulk cache spills the rest to the WAL before its
 commit, writing those pages more than once.
@@ -701,6 +707,168 @@ under 3 ms for the same data and the ranking does not carry over. Keeping
 about 1 s on the host per 15 000-game first load, against 0.5 s for the load
 without it.
 
+### DAT import in RAM
+
+A load changes pages all over the file, and on the card each costs about
+three flushed writes, so a DAT import, a bind and a re-import run on a copy
+of the database in RAM and write it back whole (`db::ram`):
+
+1. The job takes the write turn and the writer and holds them to the end, so
+   no other write reaches the file meanwhile; async writes queue on the
+   semaphore, and reads keep running on the card file. An upload still
+   answers: it waits at most 250 ms to record its job, which is recorded
+   when the import ends.
+2. It checkpoints the WAL with TRUNCATE, so the file is complete and its WAL
+   empty, and checks, in order, that no other process has the database open
+   (step 6), that `[memory] import_dir` is usable and that memory allows.
+   The directory must be, or become, one of mode 0700 that this user owns
+   and that is not a symlink, as SQLite's temporary directory must, on tmpfs
+   or ramfs by its `statfs` type, and not on the database's file system.
+   `MemAvailable` from `/proc/meminfo` must cover the copy's need on top of
+   `[memory] import_floor_mib`, 128 MiB by default, left for MiSTer Main and
+   a running core; `import_dir` must have the need free, and the card the
+   file's size. The need is the file's size and half again, for the copy's
+   journal and pages freed and reused, six times the uncompressed size of
+   the file's DATs, for the rows they keep and for the stage, which SQLite
+   keeps in its temporary files on the same tmpfs on the board, and 32 MiB.
+   Short of any, the import runs on the card; the job's progress says why in
+   a few words, as `reason`, and the log at info gives the numbers. A floor
+   of 0 is allowed and warned about at startup.
+3. SQLite's backup copies the file through the held writer into
+   `<import_dir>/import-<key>-<job>/mistarr.db`, 1 MiB a step. The key hashes
+   the database's path, so servers of two data directories never touch each
+   other's copies. SQLite reads the source itself: a descriptor of the card
+   file opened and closed beside its connections would drop their POSIX locks.
+4. Every member of the file loads into the copy, on a pair of connections of
+   its own with a rollback journal and no syncs (`Db::open_copy`), and then
+   each platform that loaded titles has its recompute there: rematching, the
+   picks, `title_groups` and the search index. A rollback journal holds only
+   the pages a transaction overwrites, where a WAL would hold every page the
+   load writes. The follow-up is the platform's re-map. The job's progress
+   goes to the copy's job row and out as `job.progress`, with the phases
+   "copying the database to memory", the load's own, "matching" and
+   "picking" for the recompute, and "writing the database to the card". A
+   file that loads nothing is not written back.
+5. The copy is closed, put back in WAL mode so the card file opens without a
+   write, and written to `mistarr.db.new` beside the database in writes of
+   exactly 1 MiB, then synced.
+6. The swap waits, up to 30 s, until no other process has the database or
+   its `-wal` or `-shm` open, from `/proc/<pid>/fd`. SQLite in such a
+   process, closing its last connection to the old file, would remove the
+   `-wal` and `-shm` names the new file uses. Still held, the copy is dropped
+   and the import runs on the card. The scan cannot see another user's
+   processes, nor the file opened through another path such as a bind mount.
+7. With the reader held too, the old WAL is checkpointed again and must be
+   empty and both connections close. The old `-wal` and `-shm` are removed
+   and an empty `mistarr.db.swap` marker is written and synced. The swap then
+   takes three steps, each followed by a sync of the directory: `mistarr.db`
+   renamed to `mistarr.db.old`, `mistarr.db.new` renamed to `mistarr.db`, and
+   `mistarr.db.old` and the marker removed. Both connections then open on the
+   file named `mistarr.db`, never creating one. A reader sees the old file
+   or the new one, never part of either.
+8. The working directory goes on every way out. At startup, before the
+   database opens, a swap cut short is finished, `mistarr.db.new` is removed
+   when `mistarr.db` stands beside it, this database's working directories
+   are removed, and a data directory that lists `mistarr.db` twice, which
+   only a damaged file system does, is warned about.
+
+exFAT on Linux rewrites a renamed file's directory entries in place, one
+synced write each, and finds a name by its hash and length before the name
+itself. A power cut inside a rename can therefore leave neither the old
+name nor the new one readable. The start reads which step it was from the
+files it can read, and never creates a database while `.old`, `.new` or the
+marker is present or was at the start:
+
+| Cut during | Files readable | At the next start |
+|---|---|---|
+| the check, the copy or the import | `mistarr.db`, WAL empty | opened as it was; the job re-runs, as an interrupted DAT import does |
+| the write-back | `mistarr.db`, a partial `.new` | `.new` removed unread |
+| after the write-back, before the first rename | `mistarr.db`, a whole `.new`, perhaps the marker | `.new` and the marker removed; the import or migration runs again |
+| the first rename | a whole `.new`, the marker | `.new`, synced before the swap began, passes SQLite's `quick_check` and is renamed to `mistarr.db` |
+| after the first rename | `.old`, a whole `.new`, the marker | `.new` checked and renamed to `mistarr.db`, `.old` removed |
+| the second rename | `.old`, the marker | `.old` renamed back; the import or migration runs again |
+| after the second rename | `mistarr.db` (new), `.old`, the marker | `.old` and the marker removed |
+| after the removals | `mistarr.db` (new) | opened |
+| a rename of the start's own recovery | the marker alone | the start refuses, naming the database; the card needs checking, and `mistarr.db.prev` holds the last upgrade's copy |
+
+A `.new` with no `mistarr.db` beside it is never removed. It is taken only
+beside `.old` or the marker, since without either it can only be a stale
+copy; one that stands alone or fails the check stops the start with a
+message naming it, to be moved aside or kept for recovery. The old WAL is removed before the renames because it
+is empty and nothing writes it after the checkpoint, so removing it loses
+nothing and the new file never meets frames written for the old one.
+`db::ram::tests::a_start_after_a_crash_at_any_step_of_the_swap_opens_one_whole_database`
+builds each state and starts through `app::open_db`.
+
+Shutdown is checked between members, every 500 games, between copy steps
+and between written chunks, and leaves the card file untouched and the job
+queued. A manual pause during the copy or the import drops the copy, waits,
+and starts again; during the write-back it lets the write-back finish. A
+core starting does not hold the import, which is on the background lane,
+and the write-back is not deferred for it: waiting for the core to exit
+would hold every write for the length of a game, against a burst of about
+one write per MiB. While a core runs, the copy into RAM and the write-back
+rest after each 1 MiB step as long as the step took, at least 20 ms and at
+most 1 s, so they keep at most half of a CPU.
+
+`MemAvailable` is read again between members, every 500 games and between
+recompute chunks; below the floor the copy is dropped and the import runs
+on the card. Running out of memory or room while copying or importing
+(`ENOSPC`, `ENOMEM`, `SQLITE_FULL`, `SQLITE_NOMEM`, which the load reports
+as a typed `NoRoom` error), or finding no room on the card for
+`mistarr.db.new`, drops the copy the same way. Any other failure fails the
+job with the card file untouched. A swap whose connections cannot reopen
+after the renames fails the job with `Reopen`, never a fallback: the
+connections then fail every statement and mistarr must restart.
+
+Nothing else may write the database while a server runs: a write from
+another process during the hold would be lost with the old file. The data
+directory's lock keeps a second server out, and
+`mistarr doctor --rebuild-groups` takes the same lock and refuses while a
+server holds it.
+
+Startup migrations take the same path: before the server opens its
+connections, when a migration is pending and memory allows, the downgrade
+guard reads the card file, the copy is migrated, written back and swapped
+in the same way; otherwise the open migrates the card file itself. A
+migration that fails on the copy leaves the card file byte for byte as it
+was, and the open then runs it on the card, where it fails or succeeds as
+it would have.
+
+Measured on the host as the write-sync tests count them, in a release
+build, on the bench catalogue with 3 000 unmatched `psx` files, loading a
+`psx` DAT with its recompute
+(`jobs::dat_import::sync_writes::in_place_and_in_ram_on_the_bench_catalogue`):
+
+| DAT | Database before, after | On the card: writes | In RAM: card writes | Host time on the card, in RAM |
+|---|---|---|---|---|
+| 450 games | 47.8, 48.4 MB | 6 042 | 55 | 0.39 s, 0.47 s |
+| 10 000 games | 47.8, 61.0 MB | 43 857 | 67 | 1.4 s, 1.9 s |
+
+The card writes in RAM are one per MiB of the file and about eight more:
+reopening maps SQLite's shared-memory file, writing a byte to each of its
+4 KiB pages. At 25 ms a write, the 10 000-game load takes about 18 minutes
+on the card and 1.7 s of flushes in RAM, plus the 61 MB transfer, a few
+seconds at the card's 10 to 20 MB/s, and the import's own time on the
+board's CPU. The last migration on the same catalogue, with half its roms
+lacking a sha1, writes the card 1 254 times in place and 51 times in RAM
+(`db::ram::tests::the_last_migration_in_place_and_in_ram`); with every rom
+keyed, 6 844 times in place and 62 in RAM
+(`migration_writes_on_the_bench_catalogue`).
+`a_load_in_ram_writes_the_card_about_once_per_mebibyte` holds a 450-game
+load on a tenth of the catalogue to one write per MiB plus 16.
+
+A 50 MiB Logiqx DAT of about 198 000 games with every hash, loaded into an
+empty database, peaks at 257 MiB in RAM against a need of 332 MiB
+(`tests/memory.rs`, which samples the files in the working directory and in
+SQLite's temporary directory, and those the server holds open there,
+deleted ones included): the copy reaches 145 MiB, the file it becomes, and
+the stage's temporary files 121 MiB. That is 5.1 bytes per byte of DAT for
+the tersest DATs, hence the factor of six; a verbose DB export takes about
+one. `MemAvailable` is read again just before the stage is applied, the
+step in which both grow at once. A WAL in place of the rollback journal
+takes the copy alone to 253 MiB on the same load.
+
 ## Configuration
 
 `mistarr.toml`, all optional:
@@ -742,6 +910,8 @@ scan_interval_minutes = 1440   # a daily rescan by default, 0 disables it
 
 [memory]
 data_limit_mib = 192        # soft RLIMIT_DATA set at startup, at least 64; 0 keeps the inherited limit
+import_dir = "/tmp/mistarr"  # tmpfs directory, private to mistarr, a DAT import or migration copies the database into
+import_floor_mib = 128      # MemAvailable kept free beyond the copy; short of it, work runs on the card
 
 [scan]
 chd_tracks = false          # decode CHD images to identify them by their tracks; slow on the board

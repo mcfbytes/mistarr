@@ -636,7 +636,51 @@ async fn a_dat_import_reports_its_phases_live() {
             phases.push(phase.to_owned());
         }
     }
-    assert_eq!(phases, ["reading", "storing", "picking", "refreshing"]);
+    assert_eq!(
+        phases,
+        [
+            "copying the database to memory",
+            "reading",
+            "storing",
+            "picking",
+            "refreshing",
+            "matching",
+            "picking",
+            "writing the database to the card"
+        ]
+    );
+    booted.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_upload_answers_while_an_import_holds_the_writer() {
+    let booted = boot().await;
+    let addr = booted.addr();
+    let db = booted.running.app.db.clone();
+    let (held, is_held) = tokio::sync::oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = tokio::spawn(async move {
+        let label = mistarr_server::threads::label::DAT_IMPORT;
+        db.hold_writer(label, move |_| {
+            let _ = held.send(());
+            let _ = released.recv();
+            Ok(())
+        })
+        .await
+    });
+    is_held.await.expect("held");
+    let started = std::time::Instant::now();
+    let r = upload(addr, "gb.dat", gb_dat("1", &quest_games()).as_bytes()).await;
+    let took = started.elapsed();
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert!(
+        r.json()["job_id"].is_null(),
+        "recorded once the writer is free"
+    );
+    // The queue waits 250 ms for the writer, then answers.
+    assert!(took < Duration::from_millis(750), "answered after {took:?}");
+    release.send(()).expect("release");
+    holder.await.expect("join").expect("hold");
     booted.running.shutdown().await.expect("shutdown");
 }
 

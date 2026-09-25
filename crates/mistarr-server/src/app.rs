@@ -432,7 +432,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
 /// Opens the database, prepares the catalog and applies the saved runtime
 /// settings to `config`; returns the database, the platforms whose scan a
 /// previous run left unfinished, and the platforms whose DAT families resolved.
-fn open_db(
+pub(crate) fn open_db(
     config: &mut Config,
 ) -> Result<(
     Db,
@@ -444,6 +444,14 @@ fn open_db(
     }
     let path = config.paths.db();
     crate::migrating::clear_stale(&config.paths.data)?;
+    // Leftovers of an import in RAM cut short; the database itself is always whole.
+    let swapping = db::ram::swap_files(&path);
+    db::ram::clean_stale(&path, &config.memory.import_dir)?;
+    if config.memory.import_floor_mib == 0 {
+        tracing::warn!(
+            "[memory] import_floor_mib is 0: a DAT import in RAM may leave the core no memory"
+        );
+    }
     let progress = match crate::db::migrate::pending(&path)? {
         Some((from, to)) => {
             tracing::info!(from, to, "migrating the database");
@@ -455,6 +463,15 @@ fn open_db(
         }
         None => None,
     };
+    migrate_in_ram(config, progress.as_ref())?;
+    if swapping && !path.exists() {
+        return Err(std::io::Error::other(format!(
+            "{} could not be recovered from a swap cut short; check the card and restore \
+             mistarr.db.prev",
+            path.display()
+        ))
+        .into());
+    }
     let db = match &progress {
         Some(m) => Db::open_counting(&path, &m.steps())?,
         None => Db::open(&path)?,
@@ -468,6 +485,36 @@ fn open_db(
         config.overlay(rt);
     }
     Ok((db, unfinished, resolved))
+}
+
+/// Runs pending migrations on a copy of the database in RAM when memory allows, so an
+/// index rebuild reaches the card as whole MiB writes; `Db::open` migrates what is left.
+fn migrate_in_ram(config: &Config, progress: Option<&crate::migrating::Migrating>) -> Result<()> {
+    let plan = db::ram::Plan {
+        dir: config.memory.import_dir.clone(),
+        floor: config.memory.import_floor_mib.saturating_mul(1024 * 1024),
+        job: 0,
+        input: 0,
+    };
+    match db::ram::migrate_in_ram(
+        &config.paths.db(),
+        &plan,
+        progress.map(crate::migrating::Migrating::steps).as_ref(),
+    ) {
+        Ok(Some(r)) => tracing::info!(
+            mib = r.bytes.div_ceil(1024 * 1024),
+            card_writes = r.card_writes,
+            migrate_ms = r.work.as_millis(),
+            write_ms = r.write_back.as_millis(),
+            "database migrated in RAM"
+        ),
+        Ok(None) => {}
+        Err(e @ Error::SchemaTooNew { .. }) => return Err(e),
+        // A swap that could not put the old file back; opening would create an empty one.
+        Err(e) if !config.paths.db().exists() => return Err(e),
+        Err(e) => tracing::warn!(error = %e, "migrating the database in place"),
+    }
+    Ok(())
 }
 
 /// Queues the jobs every start runs: unfinished scans (never arcade's), CHD decoding when
@@ -589,18 +636,40 @@ async fn publish_gate_changes(app: Arc<AppState>) {
 pub(crate) mod testutil {
     use super::*;
 
+    /// A test's directory, and the RAM directory its imports copy the database into.
+    pub struct TestDir {
+        root: tempfile::TempDir,
+        ram: tempfile::TempDir,
+    }
+
+    impl TestDir {
+        /// The directory holding the paths of the test's config.
+        pub fn path(&self) -> &Path {
+            self.root.path()
+        }
+
+        /// `[memory] import_dir`.
+        pub fn ram(&self) -> &Path {
+            self.ram.path()
+        }
+    }
+
     /// App state over a fresh database with paths inside the returned directory.
-    pub fn state() -> (tempfile::TempDir, Arc<AppState>) {
+    pub fn state() -> (TestDir, Arc<AppState>) {
         state_with(|_| {})
     }
 
     /// [`state`] with its options adjusted by `f`.
-    pub fn state_with(f: impl FnOnce(&mut Options)) -> (tempfile::TempDir, Arc<AppState>) {
-        let dir = tempfile::tempdir().expect("tempdir");
+    pub fn state_with(f: impl FnOnce(&mut Options)) -> (TestDir, Arc<AppState>) {
+        let dir = TestDir {
+            root: tempfile::tempdir().expect("tempdir"),
+            ram: db::testutil::ram_dir(),
+        };
         let mut config = Config::default();
         config.paths.root = dir.path().to_path_buf();
         config.paths.games = dir.path().join("games");
         config.paths.data = dir.path().join("data");
+        config.memory.import_dir = dir.ram().to_path_buf();
         std::fs::create_dir_all(&config.paths.data).expect("mkdir");
         let db = Db::open(&config.paths.db()).expect("db");
         db.write_blocking(|c| {
