@@ -26,8 +26,8 @@
   const scanning = new SvelteSet<string>();
 
   // The open scan of each platform, shown on its card.
-  const scans: Record<string, Job | undefined> = $derived(
-    Object.fromEntries(
+  const scans: Map<string, Job> = $derived(
+    new Map(
       getJobs()
         .filter((j) => j.kind === 'scan' && typeof j.payload.platform_id === 'string')
         .map((j) => [j.payload.platform_id as string, j])
@@ -92,7 +92,7 @@
   <SetupHints />
   <div class="grid">
     {#each present as platform (platform.id)}
-      {@const job = scans[platform.id]}
+      {@const job = scans.get(platform.id)}
       <div class="card art-card">
         <div class="banner"><PlatformArt id={platform.id} kind={platform.kind} /></div>
         <h2><a href={platformUrl(platform.id)}>{platform.name}</a></h2>

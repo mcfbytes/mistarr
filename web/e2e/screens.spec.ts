@@ -124,7 +124,7 @@ test('platform ids naming prototype members get a working Scan button', async ({
     const scan = card.getByRole('button', { name: 'Scan' });
     await expect(scan).toBeEnabled();
     await scan.click();
-    await expect(page.getByText(`Scan of ${id} queued`)).toBeVisible();
+    await expect(page.locator('.toasts').getByText(`Scan of ${id} queued`)).toBeVisible();
     await expect(scan).toBeEnabled();
   }
 });
