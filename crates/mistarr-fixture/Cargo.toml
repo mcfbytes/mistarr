@@ -24,6 +24,14 @@ mistarr-sources = { path = "../mistarr-sources" }
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
 sha1 = "0.11"
 zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+lzma-rs = "0.3"
+ruzstd = "0.8"
 
 [dev-dependencies]
 tempfile = "3"
+proptest = { version = "1", default-features = false, features = ["std"] }
+claxon = "0.4.3"
+md-5 = "0.11"
+crc32fast = "1"
+chd = { version = "0.3.4", default-features = false, features = ["std", "cd_full", "verify_block_crc"] }
