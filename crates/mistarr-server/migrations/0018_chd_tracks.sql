@@ -30,6 +30,9 @@ CREATE TABLE chd_whole (                      -- whole-file hashes of CHDs a DAT
   PRIMARY KEY (chd_sha1, chd_size, mtime)
 ) WITHOUT ROWID;
 
+-- Whether a scanned .chd has the size of a DAT's .chd rom, whatever other size indexes exist.
+CREATE INDEX roms_chd_size ON roms(size) WHERE lower(name) LIKE '%.chd';
+
 -- Unmatched whole-file hashes of disc CHDs; the next scan reads their headers.
 UPDATE import_log SET file_id = NULL WHERE file_id IN (
   SELECT id FROM files WHERE lower(rel_path) LIKE '%.chd' AND rom_id IS NULL

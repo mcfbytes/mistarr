@@ -796,7 +796,7 @@ pub fn chd_rom_sized(conn: &Connection, platform_id: &PlatformId, size: i64) -> 
     Ok(conn
         .prepare_cached(
             "SELECT EXISTS(
-               SELECT 1 FROM roms r INDEXED BY roms_size JOIN titles t ON t.id = r.title_id
+               SELECT 1 FROM roms r INDEXED BY roms_chd_size JOIN titles t ON t.id = r.title_id
                WHERE r.size = ?2 AND t.platform_id = ?1 AND t.source = 'dat'
                  AND r.retired = 0 AND t.retired = 0 AND lower(r.name) LIKE '%.chd')",
         )?

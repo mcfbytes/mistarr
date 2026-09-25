@@ -128,6 +128,7 @@ CREATE INDEX roms_crc  ON roms(crc32, size);
 CREATE INDEX roms_match_name ON roms(match_name);
 CREATE INDEX roms_match_base ON roms(match_base, size);
 CREATE INDEX roms_size ON roms(size);
+CREATE INDEX roms_chd_size ON roms(size) WHERE lower(name) LIKE '%.chd';   -- a scanned .chd hashed whole
 
 CREATE TABLE files (                    -- what is on disk under games/
   id            INTEGER PRIMARY KEY,
