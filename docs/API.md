@@ -92,14 +92,37 @@ catalogue or `null`.
 `/system/jobs` items: `{ id, kind, lane, payload, state, progress, reason,
 created_at, updated_at }`, where `lane` is `heavy`, `background` or `light`
 (ARCHITECTURE.md "Pausing for the core"), `state` is `queued`, `running` or
-`paused`, and `reason` says why a job on a held lane is not running, such as
-`"Paused while NES is running"` or `"Paused by the user"`, else `null`. A
-failed job's `progress` is `{ error }`. `/system/jobs/recent` answers `{
+`paused`, and `reason` says why a job is not running: on a held lane, such as
+`"Paused while NES is running"` or `"Paused by the user"`; for a queued job,
+what it waits for, as for incoming files ("Incoming files"); else `null`. A
+running job's `progress` is its latest live progress ("Live progress") when
+it has one. A failed job's `progress` is `{ error }`. `/system/jobs/recent` answers `{
 items, total }` in the same item shape, newest first, with `state` `done` or
 `failed` and `reason` `null`. A finished scan's `progress` is `{ platform_id,
 done, total, matched, unmatched }` (ARCHITECTURE.md "Library scan"); a
 recompute's is `{ groups, picks, matched }`, `matched` counting files it
 gave a rom.
+
+### Live progress
+
+Long jobs report progress held in memory, never written to the database, so
+a job that holds the writer still reports. Each report goes out as a
+`job.progress` event without an `id:` ("Events"), at most one per 250 ms in
+a phase plus one at every phase change, and becomes the job's `progress` in
+`/system/jobs` and `/dats/incoming`. The value stored on the row replaces it
+when the job next stores progress or finishes.
+
+A `dat_import` reports `{ file, members, done, games, phase, bytes_read,
+bytes_total }`: `members` is the DATs in the file, `done` those finished,
+`games` those read so far. `phase` is `indexing` (a DB export's first pass,
+for its clone list), `reading`, `storing` (applying the titles), `picking`
+(the 1G1R picks) or `refreshing` (the title groups); `bytes_read` of
+`bytes_total` of the current DAT, uncompressed, is present while `indexing`
+or `reading` and absent in the phases whose share done is unknown. After each
+DAT it stores `{ file, members, done, games }`. A `recompute_1g1r` reports
+`{ phase: "matching", checked, matched }`, then `{ phase: "picking", matched
+}`. A scan stores `{ platform_id, done, total, matched, unmatched }` as it
+goes.
 
 `/system/settings` body: `{ client, limits, prefs }` with the fields of the
 same sections of `mistarr.toml`. PUT takes any subset of the three sections;
@@ -223,8 +246,9 @@ current one; `suggested` lists, for an unbound version, the platforms its
 family is current on, and is empty otherwise. `total` counts every version,
 so a client pages with `limit` and `offset`. `source_file` is the name under `dats/loaded/`, which gains ` (N)` before
 the extension when the name is taken. Upload takes one `file` part named
-`.dat`, `.xml` or `.zip`, writes it into `dats/` and answers 202 `{ file,
-job_id }`; the result arrives as `dat.loaded` or `dat.rejected`. Retiring
+`.dat`, `.xml` or `.zip`, writes it into `dats/` and answers 202 with the
+file as `/dats/incoming` lists it ("Upload answers"); the result arrives as
+`dat.loaded` or `dat.rejected`. Retiring
 removes a loaded version: in one transaction its titles and their roms
 retire, `wanted` is cleared on those titles and their downloads in `wanted`
 or `queued` are cancelled. It answers 204, or 404 for an unknown id, and
@@ -241,7 +265,7 @@ stays superseded.
 lists it, percent-encoded; a name with a `/` or `\`, a leading `.` or the
 `.reason.txt` suffix is a 400 and a name not in `dats/rejected/` a 404.
 Retrying moves the file back into `dats/`, under `name (N)` when the name is
-taken, deletes its `.reason.txt` and answers 202 `{ file, job_id }` like an
+taken, deletes its `.reason.txt` and answers 202 like an
 upload, so a file fixed in place in `dats/rejected/` loads again. Deleting
 answers 204. Both are writes, so they need the `X-Mistarr` header and an
 allowed `Host`.
@@ -272,8 +296,9 @@ the platform picker. `seed_policy` is `"none"`, `"client"` or
 or a JSON body `{ magnet }`. A file that does not parse, or repeats a source
 that is already loaded, is a 400. Otherwise the file is written into
 `sources/` under its name, or `name (N)` when that is taken (409 `conflict`
-when no such name is free), and the answer is 202 `{ file, job_id }`; the
-import then emits `source.changed`.
+when no such name is free), and the answer is 202 with the file as
+`/sources/incoming` lists it ("Upload answers"); the import then emits
+`source.changed`.
 
 `PUT /sources/{id}` body fields are all optional. `platform_id` binds or
 rebinds the source to that platform, matching its files against it only, and
@@ -298,16 +323,34 @@ the source's `matched_count` exactly when it has a matched rom or a candidate.
 
 ## Incoming files
 
+### Upload answers
+
+An upload or a retry answers once the file is in place, whatever the
+database writer is doing: it waits at most 250 ms for its import job to be
+recorded. The body is the file as the incoming list shows it, `{ file, size,
+state, reason, job_id, progress, modified }`. `job_id` is `null` when the
+writer is still busy, as while a DAT applies; the job is then recorded as
+soon as the writer is free, sending the usual queued `job.progress` with the
+file name as `detail`, and `reason` says what the file waits for, such as
+"Waiting for the DAT import of a.dat to finish.". A file the server placed
+never waits to stop changing.
+
+### Listing
+
 `/dats/incoming` and `/sources/incoming` list the files in the watched
 directory that have not loaded, by name, then those in its `rejected/`
 directory, newest first. Items are `{ file, size, state, reason, job_id,
 progress, modified }`. `state` is `waiting` (not picked up yet, or its job
 is queued), `importing` (its job is running) or `rejected`. `reason` says
-why a file waits ("Waiting for the file to stop changing.", "Queued behind
-a.dat.", or "Paused by the user" while a manual pause holds the background
-lane; a running core never holds it) or why it was
+why a file waits ("Waiting for the file to stop changing." for a file
+dropped into the directory that the watcher has not queued, "Waiting for the
+DAT import of a.dat to finish." for other work behind a DAT import or an
+uploaded file whose job waits for the writer, "Queued behind a.dat.", or
+"Paused by the user" while a manual pause holds the background lane; a
+running core never holds it) or why it was
 rejected, from its `.reason.txt`. `job_id` and `progress` are the open
-`dat_import` or `source_import` job's. A loaded file leaves this list and
+`dat_import` or `source_import` job's, `progress` live while the job
+runs. A loaded file leaves this list and
 appears in `/dats` or `/sources`. The SPA re-reads the list on
 `job.progress` for those kinds, `dat.loaded`, `dat.rejected` and
 `source.changed`.
@@ -370,16 +413,17 @@ ids as opaque strings. A new connection receives, in order:
    epoch. Nothing is replayed when the header is absent.
 3. One `status`, then live events.
 
-Every event carries an `id:` except `resync` and the `status` sent on
-connect and on the 30 s timer, so those never move the client's
-`Last-Event-ID`. Each connection buffers up to 1024 undelivered events; a
+Every event carries an `id:` except `resync`, the `status` sent on
+connect and on the 30 s timer, and live progress ("Live progress"), so those
+never move the client's `Last-Event-ID` and live progress is never
+replayed. Each connection buffers up to 1024 undelivered events; a
 connection that falls further behind is closed and, on reconnecting, gets
 `resync` plus whatever the ring still holds.
 
 | Event | Data |
 |---|---|
 | `status` | Same shape as `/system/status`, sent on change and every 30 s. |
-| `job.progress` | `{ id, kind, state, progress }`; also sent with `state: "queued"` and `progress: null` when a job is queued |
+| `job.progress` | `{ id, kind, state, detail, progress }`, `detail` being the file name or platform the job is about or `null`; also sent with `state: "queued"` and `progress: null` when a job is queued, and without an id for live progress |
 | `dat.loaded` / `dat.rejected` | `{ dat_version_id, file, platform_id }` / `{ file, reason }`; one per DAT in a pack, `file` as dropped |
 | `source.changed` | `{ source_id, state, platform_id? }` |
 | `download.changed` | `{ download_id, state, progress }` |

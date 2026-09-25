@@ -10,14 +10,14 @@ use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
-use serde::Serialize;
 
 use super::{ApiError, Page, Paging};
 use crate::app::AppState;
 use crate::db::dats::{self, DatVersionId, DatVersionRow};
-use crate::db::jobs::JobId;
 use crate::incoming::IncomingFile;
-use crate::jobs::dat_import::{unique_path, DatImport, Recompute, REASON_SUFFIX, REJECTED_DIR};
+use crate::jobs::dat_import::{
+    unique_path, DatImport, Recompute, KIND, REASON_SUFFIX, REJECTED_DIR,
+};
 use crate::jobs::Scheduler;
 
 /// Largest accepted upload; daily packs of every system fit well inside.
@@ -57,13 +57,6 @@ async fn incoming(
     Ok(Json(Page::slice(all, &paging)))
 }
 
-/// The answer to an upload: where the file landed and the job importing it.
-#[derive(Debug, Serialize)]
-struct Uploaded {
-    file: String,
-    job_id: JobId,
-}
-
 fn accepted(name: &str) -> bool {
     FsPath::new(name)
         .extension()
@@ -81,7 +74,7 @@ fn part_path(dir: &FsPath) -> PathBuf {
 async fn upload(
     State(app): State<Arc<AppState>>,
     mut multipart: Multipart,
-) -> Result<(StatusCode, Json<Uploaded>), ApiError> {
+) -> Result<(StatusCode, Json<IncomingFile>), ApiError> {
     let dir = app.config().paths.dats();
     loop {
         let field = multipart
@@ -107,12 +100,9 @@ async fn upload(
         }
         let target = unique_path(&dir, &name);
         std::fs::rename(&part, &target).map_err(crate::Error::from)?;
-        let job_id = Scheduler::enqueue(&app, Arc::new(DatImport::new(&target))).await?;
-        let file = target
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or(name);
-        return Ok((StatusCode::ACCEPTED, Json(Uploaded { file, job_id })));
+        let job = Arc::new(DatImport::new(&target));
+        let placed = crate::incoming::queue_placed(&app, &target, KIND, job).await?;
+        return Ok((StatusCode::ACCEPTED, Json(placed)));
     }
 }
 
@@ -205,7 +195,7 @@ fn reason_of(path: &FsPath) -> PathBuf {
 async fn retry_rejected(
     State(app): State<Arc<AppState>>,
     file: Result<Path<String>, PathRejection>,
-) -> Result<(StatusCode, Json<Uploaded>), ApiError> {
+) -> Result<(StatusCode, Json<IncomingFile>), ApiError> {
     let Path(name) = file.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let dir = app.config().paths.dats();
     let path = rejected_file(&dir, &name)?;
@@ -216,11 +206,9 @@ async fn retry_rejected(
         moved => moved.map_err(crate::Error::from)?,
     };
     remove_if_present(&reason_of(&path))?;
-    let job_id = Scheduler::enqueue(&app, Arc::new(DatImport::new(&target))).await?;
-    let file = target
-        .file_name()
-        .map_or(name, |n| n.to_string_lossy().into_owned());
-    Ok((StatusCode::ACCEPTED, Json(Uploaded { file, job_id })))
+    let job = Arc::new(DatImport::new(&target));
+    let placed = crate::incoming::queue_placed(&app, &target, KIND, job).await?;
+    Ok((StatusCode::ACCEPTED, Json(placed)))
 }
 
 /// `DELETE /dats/rejected/{file}`: deletes a rejected file and its reason.

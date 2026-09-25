@@ -7,6 +7,7 @@ pub mod detect_client;
 pub mod gate;
 pub mod import;
 pub mod poll;
+pub mod progress;
 pub mod remap;
 pub mod scan;
 pub mod source_import;
@@ -101,6 +102,7 @@ pub struct JobContext {
     /// The server.
     pub app: Arc<AppState>,
     lane: Lane,
+    detail: Option<String>,
 }
 
 /// The `job.progress` event body.
@@ -109,11 +111,12 @@ struct ProgressEvent<'a> {
     id: JobId,
     kind: &'a str,
     state: JobState,
+    detail: Option<&'a str>,
     progress: &'a Value,
 }
 
 impl JobContext {
-    /// Stores `progress` on the job row and publishes `job.progress`.
+    /// Stores `progress` on the job row, replacing any live progress, and publishes `job.progress`.
     ///
     /// # Errors
     ///
@@ -125,6 +128,7 @@ impl JobContext {
             .db
             .write(move |c| rows::set_progress(c, id, &stored, crate::unix_now()))
             .await?;
+        self.app.live.clear(id);
         self.publish(JobState::Running, &progress);
         Ok(())
     }
@@ -151,11 +155,24 @@ impl JobContext {
         set_state(&self.app, self.id, JobState::Running).await
     }
 
+    /// A throttled reporter of this job's live progress, for work that cannot
+    /// write the database meanwhile; see [`progress::Reporter`].
+    #[must_use]
+    pub fn reporter(&self) -> progress::Reporter {
+        progress::Reporter::new(
+            Arc::clone(&self.app),
+            self.id,
+            self.kind,
+            self.detail.clone(),
+        )
+    }
+
     fn publish(&self, state: JobState, progress: &Value) {
         let body = ProgressEvent {
             id: self.id,
             kind: self.kind,
             state,
+            detail: self.detail.as_deref(),
             progress,
         };
         self.app.events.publish(EventKind::JobProgress, &body);
@@ -282,10 +299,12 @@ impl Scheduler {
             })
             .await?;
         if fresh {
+            let detail = crate::status::job_detail(&job.payload());
             let queued = ProgressEvent {
                 id,
                 kind,
                 state: JobState::Queued,
+                detail: detail.as_deref(),
                 progress: &Value::Null,
             };
             app.events.publish(EventKind::JobProgress, &queued);
@@ -295,6 +314,34 @@ impl Scheduler {
             }
         }
         Ok(id)
+    }
+
+    /// [`Scheduler::enqueue`] on a task of its own, waiting at most `wait` for it:
+    /// `None` when the writer is still busy, as while a DAT applies; the job is then
+    /// recorded and dispatched once the writer is free. `keep` is dropped after that.
+    ///
+    /// # Errors
+    ///
+    /// As [`Scheduler::enqueue`], when it fails within `wait`.
+    pub async fn enqueue_within<K: Send + 'static>(
+        app: &Arc<AppState>,
+        job: Arc<dyn Job>,
+        wait: Duration,
+        keep: K,
+    ) -> Result<Option<JobId>> {
+        let task_app = Arc::clone(app);
+        let mut task = tokio::spawn(async move {
+            let queued = Self::enqueue(&task_app, job).await;
+            if let Err(e) = &queued {
+                tracing::warn!(error = %e, "cannot queue a job");
+            }
+            drop(keep);
+            queued
+        });
+        match tokio::time::timeout(wait, &mut task).await {
+            Ok(joined) => joined.map_err(|e| Error::Task(e.to_string()))?.map(Some),
+            Err(_) => Ok(None),
+        }
     }
 
     /// Hands an already recorded job to its lane.
@@ -471,6 +518,7 @@ async fn execute(app: &Arc<AppState>, id: JobId, job: &dyn Job, lane: Lane) -> R
         kind: job.kind(),
         app: Arc::clone(app),
         lane,
+        detail: crate::status::job_detail(&job.payload()),
     };
     set_state(app, id, JobState::Running).await?;
     tracing::debug!(job = %id, kind = ctx.kind, "job started");
@@ -499,6 +547,7 @@ async fn execute(app: &Arc<AppState>, id: JobId, job: &dyn Job, lane: Lane) -> R
             rows::get(c, id)
         })
         .await?;
+    app.live.clear(id);
     let progress = progress
         .or_else(|| last.and_then(|r| r.progress))
         .unwrap_or(Value::Null);
@@ -563,6 +612,42 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         panic!("job {id} never reached {want:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn enqueue_within_answers_while_the_writer_is_busy() {
+        let (_dir, app) = state();
+        Scheduler::start(&app);
+        let wait = Duration::from_millis(100);
+        let (quick, _) = probe(Lane::Light, false, 10);
+        let id = Scheduler::enqueue_within(&app, quick, wait, ())
+            .await
+            .expect("queued");
+        assert!(id.is_some(), "a free writer records the job at once");
+        let (held, is_held) = std::sync::mpsc::channel();
+        let (release, released) = std::sync::mpsc::channel::<()>();
+        let db = app.db.clone();
+        let holder = std::thread::spawn(move || {
+            db.write_blocking(|c| {
+                let tx = c.transaction()?;
+                let _ = held.send(());
+                let _ = released.recv();
+                crate::db::commit(tx)
+            })
+        });
+        is_held.recv().expect("held");
+        let (job, ran) = probe(Lane::Light, false, 11);
+        let (kept, dropped) = tokio::sync::oneshot::channel::<()>();
+        let id = Scheduler::enqueue_within(&app, job, wait, kept)
+            .await
+            .expect("answered");
+        assert_eq!(id, None);
+        release.send(()).expect("release");
+        holder.join().expect("join").expect("write");
+        tokio::time::timeout(Duration::from_secs(5), ran.notified())
+            .await
+            .expect("the job ran once the writer was free");
+        assert!(dropped.await.is_err(), "`keep` is dropped once recorded");
     }
 
     #[tokio::test]
