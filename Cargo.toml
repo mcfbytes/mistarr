@@ -55,4 +55,3 @@ opt-level = 3
 
 [profile.release.package.crc32fast]
 opt-level = 3
-

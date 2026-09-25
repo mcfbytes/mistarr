@@ -1,6 +1,10 @@
 //! Measures CHD track decoding: `write <out.chd> <MB>` makes a synthetic image with chdman's
 //! default codecs; `decode <in.chd>` times the decoder and the hash passes it runs.
 
+#![forbid(unsafe_code)]
+#![warn(missing_docs)]
+#![warn(clippy::pedantic)]
+
 use std::io::BufWriter;
 use std::time::Instant;
 
@@ -43,7 +47,9 @@ fn main() -> anyhow::Result<()> {
 
 fn rate(bytes: u64, start: Instant) -> String {
     let secs = start.elapsed().as_secs_f64();
-    format!("{secs:.2} s, {:.1} MB/s", bytes as f64 / secs / 1e6)
+    #[allow(clippy::cast_precision_loss)] // a rate to one decimal
+    let mb = bytes as f64 / 1e6;
+    format!("{secs:.2} s, {:.1} MB/s", mb / secs)
 }
 
 fn decode(path: &str) -> anyhow::Result<()> {
@@ -52,33 +58,33 @@ fn decode(path: &str) -> anyhow::Result<()> {
     let mut f = std::fs::File::open(path)?;
     let layout = chd::read_layout(&mut f, &h)?;
     let start = Instant::now();
-    let mut d = Decoder::new(f, h, layout)?;
-    while d.step(32)? != Step::Done {}
-    let tracks = d.finish()?.len();
+    let mut decoder = Decoder::new(f, h, layout)?;
+    while decoder.step(32)? != Step::Done {}
+    let tracks = decoder.finish()?.len();
     println!("decode {tracks} tracks: {}", rate(logical, start));
 
     let buf = vec![0x5au8; 1 << 20];
     let chunks = logical.div_ceil(1 << 20);
     let start = Instant::now();
-    let mut s = sha1::Sha1::new();
+    let mut sha = sha1::Sha1::new();
     for _ in 0..chunks {
-        s.update(&buf);
+        sha.update(&buf);
     }
-    let _ = s.finalize();
+    let _ = sha.finalize();
     println!("one SHA1 pass: {}", rate(chunks << 20, start));
     let start = Instant::now();
-    let mut m = md5::Md5::new();
+    let mut md5 = md5::Md5::new();
     for _ in 0..chunks {
-        m.update(&buf);
+        md5.update(&buf);
     }
-    let _ = m.finalize();
+    let _ = md5.finalize();
     println!("one MD5 pass: {}", rate(chunks << 20, start));
     let start = Instant::now();
-    let mut c = crc32fast::Hasher::new();
+    let mut crc = crc32fast::Hasher::new();
     for _ in 0..chunks {
-        c.update(&buf);
+        crc.update(&buf);
     }
-    let _ = c.finalize();
+    let _ = crc.finalize();
     println!("one CRC32 pass: {}", rate(chunks << 20, start));
     Ok(())
 }
