@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { api, errorMessage } from './api';
   import { fixtureUnidentified } from './fixtures';
   import { reasonText } from './unidentified';
@@ -17,7 +18,30 @@
   let total = $state(0);
   let loading = $state(false);
   let error = $state<string | null>(null);
+  let open = $state(false);
   let started = false;
+  // Bumped when the list is reset, so a page fetched for the old list is dropped.
+  let generation = 0;
+  let shownFor = untrack(() => count);
+
+  // A scan or decode changed the count: the pages read so far are stale.
+  $effect(() => {
+    const now = count;
+    untrack(() => {
+      if (now === shownFor) {
+        return;
+      }
+      shownFor = now;
+      generation += 1;
+      items = [];
+      total = 0;
+      loading = false;
+      started = open;
+      if (open) {
+        void more();
+      }
+    });
+  });
 
   function mockPage(offset: number): Paged<UnidentifiedFile> {
     const all = fixtureUnidentified[platformId] ?? [];
@@ -25,21 +49,30 @@
   }
 
   async function more(): Promise<void> {
+    const mine = generation;
     loading = true;
     error = null;
     try {
       const page = isMock ? mockPage(items.length) : await api.unidentified(platformId, items.length, PAGE);
+      if (mine !== generation) {
+        return;
+      }
       items = [...items, ...page.items];
       total = page.total;
     } catch (err) {
-      error = errorMessage(err);
+      if (mine === generation) {
+        error = errorMessage(err);
+      }
     } finally {
-      loading = false;
+      if (mine === generation) {
+        loading = false;
+      }
     }
   }
 
   function onToggle(e: Event): void {
-    if ((e.currentTarget as HTMLDetailsElement).open && !started) {
+    open = (e.currentTarget as HTMLDetailsElement).open;
+    if (open && !started) {
       started = true;
       void more();
     }

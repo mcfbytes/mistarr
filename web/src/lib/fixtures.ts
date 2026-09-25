@@ -195,7 +195,7 @@ export function mockExtraPlatforms(): Platform[] {
           kind: 'cartridge',
           core_present: true,
           enabled: true,
-          counts: { titles: 0, have: 0, wanted: 0, unmatched_files: 0, failing_check: 0, partial: 0 }
+          counts: { titles: 0, have: 0, wanted: 0, unmatched_files: 0, unidentified_files: 0, failing_check: 0, partial: 0 }
         }));
     }
   } catch {
