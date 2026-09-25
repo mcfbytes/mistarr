@@ -196,16 +196,105 @@ async fn below_threshold_stays_unbound_until_bound_by_hand() {
     let r = put(&b, &s["id"], &json!({ "platform_id": "no-such" })).await;
     assert_eq!(r.status, 400);
     let r = put(&b, &s["id"], &json!({ "platform_id": "nes" })).await;
-    assert_eq!(r.status, 200, "{}", r.body);
-    let s = r.json();
-    assert_eq!(s["state"], "bound");
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert!(r.json()["job_id"].is_i64(), "{}", r.body);
+    assert_eq!(r.json()["user_binding"], true);
+    eventually("the source bound by hand", || async {
+        only_source(&b).await["state"] == "bound"
+    })
+    .await;
+    let s = only_source(&b).await;
     assert_eq!(s["platform_id"], "nes");
     assert_eq!(
         (s["matched_count"].clone(), s["bind_score"].clone()),
         (json!(1), json!(0.25))
     );
     let r = put(&b, &s["id"], &json!({ "platform_id": null })).await;
-    assert_eq!(r.json()["state"], "unbound");
+    assert_eq!(r.status, 202, "{}", r.body);
+    eventually("the source set aside", || async {
+        only_source(&b).await["state"] == "unbound"
+    })
+    .await;
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn detail_files_preview_and_reset_to_automatic() {
+    let b = boot().await;
+    seed_catalog(&b);
+    let dir = sources_dir(&b);
+    std::fs::write(dir.join("set.torrent"), matching_set("Detail Set")).expect("write");
+    eventually("a bound source", || async {
+        sources(&b)
+            .await
+            .first()
+            .is_some_and(|s| s["state"] == "bound")
+    })
+    .await;
+    let id = only_source(&b).await["id"].clone();
+    assert_eq!(only_source(&b).await["user_binding"], false);
+
+    let d = get(b.addr(), &format!("/api/v1/sources/{id}")).await;
+    assert_eq!(d.status, 200, "{}", d.body);
+    let d = d.json();
+    assert_eq!(d["display_name"], "Detail Set");
+    assert_eq!(
+        d["summary"],
+        json!({ "matched": 3, "candidates": 0, "unmatched": 0, "extra": 1, "wanted": 0 })
+    );
+    assert_eq!(d["dats"][0]["matched"], 3);
+    assert_eq!(d["transfer"]["files"], 0);
+    assert_eq!(get(b.addr(), "/api/v1/sources/999").await.status, 404);
+
+    let files = |query: &'static str| {
+        let path = format!("/api/v1/sources/{id}/files{query}");
+        let addr = b.addr();
+        async move { get(addr, &path).await }
+    };
+    let r = files("?filter=unmatched").await.json();
+    assert_eq!(r["total"], 1);
+    assert_eq!(r["items"][0]["kind"], "extra");
+    assert_eq!(r["items"][0]["unmatched"], "extra");
+    let r = files("?filter=matched&limit=2&offset=2").await.json();
+    assert_eq!(
+        (r["total"].clone(), r["items"].as_array().map(Vec::len)),
+        (json!(3), Some(1))
+    );
+    assert_eq!(files("?q=second").await.json()["total"], 1);
+    assert_eq!(files("?filter=wanted").await.json()["total"], 0);
+    assert_eq!(files("?filter=other").await.status, 400);
+
+    let p = get(b.addr(), &format!("/api/v1/sources/{id}/preview")).await;
+    assert_eq!(p.status, 200, "{}", p.body);
+    assert_eq!(
+        p.json(),
+        json!({ "total": 4, "platforms": [{ "platform_id": "nes", "matched": 3 }] })
+    );
+
+    let bad = json!({ "platform_id": "nes", "binding": "automatic" });
+    assert_eq!(put(&b, &id, &bad).await.status, 400);
+    assert_eq!(put(&b, &id, &json!({ "binding": "x" })).await.status, 400);
+    let r = put(&b, &id, &json!({ "platform_id": null })).await;
+    assert_eq!(r.status, 202, "{}", r.body);
+    eventually("the source set aside", || async {
+        only_source(&b).await["state"] == "unbound"
+    })
+    .await;
+    assert_eq!(only_source(&b).await["user_binding"], true);
+    let r = put(&b, &id, &json!({ "binding": "automatic" })).await;
+    assert_eq!(r.status, 202, "{}", r.body);
+    assert_eq!(r.json()["user_binding"], false);
+    eventually("the source bound again", || async {
+        only_source(&b).await["state"] == "bound"
+    })
+    .await;
+    let s = only_source(&b).await;
+    assert_eq!(
+        (s["platform_id"].clone(), s["matched_count"].clone()),
+        (json!("nes"), json!(3))
+    );
+    let r = put(&b, &id, &json!({ "seed_policy": "client" })).await;
+    assert_eq!((r.status, r.json()["job_id"].clone()), (200, Value::Null));
     b.running.shutdown().await.expect("shutdown");
 }
 

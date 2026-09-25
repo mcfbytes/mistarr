@@ -128,8 +128,32 @@ status pill (resolving runs, unbound waits, bound is done, disabled is
 paused) with its reason beneath, file count,
 matched count, seed policy, client status. Bind and disable actions.
 Unbound sources have a platform picker and, when the names suggest one, a
-"Bind to" button for the suggested platform. Above the table, the files still
-in `sources/` and this session's uploads, as in the wizard.
+"Bind to" button for the suggested platform. The name links to the source's
+detail, and a "Set by you" tag beside the platform marks a binding the user
+chose. Above the table, the files still in `sources/` and this session's
+uploads, as in the wizard.
+
+**Source** (`/sources/{id}`). A link back to Sources, then the name; size,
+file count, the infohash shortened with Copy (over plain http, where the
+browser has no clipboard, Copy shows the whole infohash to copy by hand),
+added date, dropped file, and whether the client has it, with a bar of the
+selected files' transfer. The seed policy, editable as on the list. Under
+Classification: the state pill, a "Set by you" tag for a user's binding, one
+sentence on how it was bound ("Bound to NES automatically. 94% of its files
+match DAT entries.", "Bound to NES by you.", "Marked by you as not a game
+set."), the DATs its matches come from, and counts of matched, possible,
+unmatched, extra and wanted files. Re-classify is a disclosure that asks
+`/sources/{id}/preview` and lists each platform with a DAT as a radio, "would
+match N of M files", plus "Not a game set"; choosing one says what applying
+does, and Apply queues the binding job, whose bar shows on the page and in
+the activity panel until a toast gives its outcome. Reset to automatic, shown
+only while the binding is the user's, hands the source back to the
+classifier. The file table has filter chips (All, Matched, Unmatched, Wanted,
+`aria-pressed`), a path search 250 ms after typing stops, and pages of 50
+with Previous and Next; each row shows the path, size, kind, the matched
+entry linked to its title with its confidence, a candidate as "Possibly …",
+or the reason nothing matched, and the file's transfer state. At 600 px and
+below each row stacks its cells.
 
 **DATs** (`/dats`). Its own nav entry, between Sources and System, since
 DATs arrive and fail on their own schedule like sources do. An upload

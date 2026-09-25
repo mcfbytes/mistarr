@@ -1,6 +1,7 @@
 //! Background jobs: the [`Job`] trait, three serial lanes and the gate; see `docs/ARCHITECTURE.md`.
 
 pub mod arcade;
+pub mod bind_source;
 pub mod chd;
 pub mod corename;
 pub mod dat_import;
@@ -512,6 +513,7 @@ pub fn revive(kind: &str, payload: &Value) -> Option<Arc<dyn Job>> {
             path: text("path")?.into(),
         }),
         remap::KIND => Arc::new(remap::RemapSources::from_payload(payload)),
+        bind_source::KIND => Arc::new(bind_source::BindSource::from_payload(payload)?),
         import::KIND => Arc::new(import::ImportJob {
             download_id: crate::db::downloads::DownloadId(payload.get("download_id")?.as_i64()?),
         }),

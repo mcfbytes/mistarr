@@ -9,7 +9,6 @@ use mistarr_sources::torrent::TorrentFile;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
-use super::candidates::FileCandidate;
 use crate::error::Result;
 
 /// Roms given match keys per statement batch in [`refresh_match_keys`].
@@ -159,6 +158,8 @@ pub struct SourceRow {
     pub added_at: i64,
     /// The platform the torrent's names point at, found without any DAT.
     pub suggested_platform_id: Option<PlatformId>,
+    /// True when the user chose the binding, a platform or none; automatic binding keeps it.
+    pub user_binding: bool,
 }
 
 /// A source to insert.
@@ -178,34 +179,13 @@ pub struct NewSource<'a> {
     pub added_at: i64,
 }
 
-/// One `torrent_files` row with its matched rom's name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct FileRow {
-    /// Index in the torrent.
-    pub file_index: u32,
-    /// Path inside the torrent.
-    pub path: String,
-    /// Size in bytes.
-    pub size: u64,
-    /// Matched rom.
-    pub rom_id: Option<i64>,
-    /// The matched rom's DAT name.
-    pub rom_name: Option<String>,
-    /// The matched rom's title.
-    pub title_id: Option<i64>,
-    /// `hash`, `name` or `base`, `None` when unmatched.
-    pub confidence: Option<String>,
-    /// The file's candidate roms, strongest first.
-    pub candidates: Vec<FileCandidate>,
-}
-
 const COLUMNS: &str = "s.id, s.infohash, s.display_name, s.origin_file, s.platform_id,
     s.bind_score, s.state, s.reason, s.seed_policy, s.file_count, s.total_size,
     s.client_id, s.added_at,
     (SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id
        AND (f.rom_id IS NOT NULL OR EXISTS (SELECT 1 FROM torrent_candidates c
              WHERE c.source_id = f.source_id AND c.file_index = f.file_index))),
-    s.suggested_platform_id";
+    s.suggested_platform_id, s.user_binding";
 
 /// Reads a non-negative integer column; SQLite stores it as `i64`.
 fn uint(r: &Row<'_>, i: usize) -> rusqlite::Result<u64> {
@@ -235,6 +215,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<SourceRow> {
         added_at: r.get(12)?,
         matched_count: uint(r, 13)?,
         suggested_platform_id: r.get::<_, Option<String>>(14)?.map(PlatformId),
+        user_binding: r.get(15)?,
     })
 }
 
@@ -355,22 +336,22 @@ pub fn set_suggestion(
     Ok(())
 }
 
-/// Records whether the user unbound the source, which keeps it out of
-/// [`list_unbound`].
+/// Records whether the user chose the source's binding, which keeps it out of
+/// [`list_unbound`] and so out of every automatic binding.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn set_user_unbound(conn: &Connection, id: SourceId, unbound: bool) -> Result<()> {
+pub fn set_user_binding(conn: &Connection, id: SourceId, chosen: bool) -> Result<()> {
     conn.execute(
-        "UPDATE sources SET user_unbound = ?2 WHERE id = ?1",
-        params![id.0, unbound],
+        "UPDATE sources SET user_binding = ?2 WHERE id = ?1",
+        params![id.0, chosen],
     )?;
     Ok(())
 }
 
-/// Unbound sources the user did not unbind, with their suggested platform,
-/// oldest first.
+/// Unbound sources whose binding the user did not choose, with their
+/// suggested platform, oldest first.
 ///
 /// # Errors
 ///
@@ -378,7 +359,7 @@ pub fn set_user_unbound(conn: &Connection, id: SourceId, unbound: bool) -> Resul
 pub fn list_unbound(conn: &Connection) -> Result<Vec<(SourceId, Option<PlatformId>)>> {
     let mut stmt = conn.prepare(
         "SELECT id, suggested_platform_id FROM sources
-         WHERE state = 'unbound' AND user_unbound = 0 ORDER BY id",
+         WHERE state = 'unbound' AND user_binding = 0 ORDER BY id",
     )?;
     let rows = stmt
         .query_map([], |r| {
@@ -645,53 +626,6 @@ pub fn torrent_files(conn: &Connection, id: SourceId) -> Result<Vec<TorrentFile>
     Ok(files)
 }
 
-/// A page of the source's files with matched rom names, and the total.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure.
-pub fn files(
-    conn: &Connection,
-    id: SourceId,
-    limit: u32,
-    offset: u32,
-) -> Result<(Vec<FileRow>, u64)> {
-    let total = conn.query_row(
-        "SELECT COUNT(*) FROM torrent_files WHERE source_id = ?1",
-        [id.0],
-        |r| uint(r, 0),
-    )?;
-    let mut stmt = conn.prepare(
-        "SELECT f.file_index, f.path, f.size, f.rom_id, r.name, r.title_id, f.confidence
-         FROM torrent_files f LEFT JOIN roms r ON r.id = f.rom_id
-         WHERE f.source_id = ?1 ORDER BY f.file_index LIMIT ?2 OFFSET ?3",
-    )?;
-    let rows = stmt
-        .query_map(params![id.0, limit, offset], |r| {
-            Ok(FileRow {
-                file_index: r.get(0)?,
-                path: r.get(1)?,
-                size: uint(r, 2)?,
-                rom_id: r.get(3)?,
-                rom_name: r.get(4)?,
-                title_id: r.get(5)?,
-                confidence: r.get(6)?,
-                candidates: Vec::new(),
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<FileRow>>>()?;
-    let mut rows = rows;
-    if let (Some(first), Some(last)) = (rows.first(), rows.last()) {
-        let (from, to) = (first.file_index, last.file_index);
-        for (index, found) in super::candidates::of_files(conn, id, from, to)? {
-            if let Some(row) = rows.iter_mut().find(|r| r.file_index == index) {
-                row.candidates.push(found);
-            }
-        }
-    }
-    Ok((rows, total))
-}
-
 /// Deletes a source and, by cascade, its files. Its downloads keep their rows
 /// with `source_id` NULL. Returns whether it existed.
 ///
@@ -868,7 +802,12 @@ pub mod fixtures {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::source_detail::{self, FileRow};
     use crate::db::testutil;
+
+    fn files(c: &Connection, id: SourceId, limit: u32, offset: u32) -> Result<(Vec<FileRow>, u64)> {
+        source_detail::files(c, id, &source_detail::FileQuery::default(), limit, offset)
+    }
 
     fn conn() -> Connection {
         let mut c = Connection::open_in_memory().expect("open");

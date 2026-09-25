@@ -14,12 +14,18 @@ use axum::{Json, Router};
 use mistarr_clients::{ClientError, ClientTorrentId, InfoHash};
 use mistarr_core::PlatformId;
 use mistarr_sources::{magnet, torrent};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{ApiError, Page, Paging};
 use crate::app::AppState;
-use crate::db::sources::{self as rows, FileRow, SourceId, SourceRow, SourceState};
+use crate::db::jobs::JobId;
+use crate::db::source_detail::{
+    self as detail, FileFilter, FileQuery, FileRow, Preview, SourceDetail,
+};
+use crate::db::sources::{self as rows, SourceId, SourceRow, SourceState};
+use crate::jobs::bind_source::{BindSource, Choice};
 use crate::jobs::source_import::{self, publish_changed, SourceImport, DUPLICATE};
+use crate::jobs::Scheduler;
 
 /// Largest accepted upload; set torrents with many files run to a few MiB.
 const UPLOAD_LIMIT: usize = 16 * 1024 * 1024;
@@ -35,8 +41,9 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
             "/sources/upload",
             post(upload).layer(DefaultBodyLimit::max(UPLOAD_LIMIT)),
         )
-        .route("/sources/{id}", axum::routing::put(update).delete(remove))
+        .route("/sources/{id}", get(show).put(update).delete(remove))
         .route("/sources/{id}/files", get(files))
+        .route("/sources/{id}/preview", get(preview))
 }
 
 async fn list(
@@ -72,23 +79,71 @@ async fn load(app: &AppState, id: SourceId) -> Result<SourceRow, ApiError> {
         .ok_or_else(|| ApiError::not_found("No such source."))
 }
 
+/// `GET /sources/{id}/files` query: paging, a filter and a search.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FilesQuery {
+    limit: Option<u32>,
+    offset: Option<u32>,
+    filter: Option<String>,
+    q: Option<String>,
+}
+
 async fn files(
     State(app): State<Arc<AppState>>,
     id: Result<UrlPath<i64>, PathRejection>,
-    paging: Result<Query<Paging>, QueryRejection>,
+    query: Result<Query<FilesQuery>, QueryRejection>,
 ) -> Result<Json<Page<FileRow>>, ApiError> {
     let id = source_id(id)?;
-    let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    let Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    let filter = query
+        .filter
+        .as_deref()
+        .filter(|f| !f.is_empty())
+        .map(|f| {
+            FileFilter::parse(f)
+                .ok_or_else(|| ApiError::bad_request("filter is matched, unmatched or wanted."))
+        })
+        .transpose()?;
+    let paging = Paging {
+        limit: query.limit,
+        offset: query.offset,
+    };
     let (limit, offset) = paging.resolve();
+    let query = FileQuery { filter, q: query.q };
     load(&app, id).await?;
     let (items, total) = app
         .db
-        .read(move |c| rows::files(c, id, limit, offset))
+        .read(move |c| detail::files(c, id, &query, limit, offset))
         .await?;
     Ok(Json(Page { items, total }))
 }
 
-/// `PUT /sources/{id}` body. `platform_id: null` unbinds; `state` is
+/// `GET /sources/{id}`: the source with how its files classify.
+async fn show(
+    State(app): State<Arc<AppState>>,
+    id: Result<UrlPath<i64>, PathRejection>,
+) -> Result<Json<SourceDetail>, ApiError> {
+    let id = source_id(id)?;
+    app.db
+        .read(move |c| detail::detail(c, id))
+        .await?
+        .map(Json)
+        .ok_or_else(|| ApiError::not_found("No such source."))
+}
+
+/// `GET /sources/{id}/preview`: how many files each platform with a DAT would match.
+async fn preview(
+    State(app): State<Arc<AppState>>,
+    id: Result<UrlPath<i64>, PathRejection>,
+) -> Result<Json<Preview>, ApiError> {
+    let id = source_id(id)?;
+    load(&app, id).await?;
+    Ok(Json(app.db.read(move |c| detail::preview(c, id)).await?))
+}
+
+/// `PUT /sources/{id}` body. `platform_id: null` marks the source as not a game
+/// set; `binding: "automatic"` hands it back to automatic binding; `state` is
 /// `disabled`, or `enabled` to return to the state the source would otherwise have.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -96,6 +151,7 @@ async fn files(
 struct Update {
     #[serde(default, deserialize_with = "present")]
     platform_id: Option<Option<String>>,
+    binding: Option<String>,
     seed_policy: Option<String>,
     state: Option<String>,
 }
@@ -106,11 +162,50 @@ fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D:
     Option::<String>::deserialize(d).map(Some)
 }
 
+/// The `PUT /sources/{id}` answer: the item, and the binding job it queued.
+#[derive(Debug, Serialize)]
+struct Updated {
+    #[serde(flatten)]
+    source: SourceRow,
+    job_id: Option<JobId>,
+}
+
+/// Returns a disabled source to `bound`, `unbound` or `resolving` as its files and platform say.
+fn enable_source(conn: &rusqlite::Connection, id: SourceId, threshold: f32) -> crate::Result<()> {
+    let now = rows::get(conn, id)?;
+    if let Some(r) = now.filter(|r| r.state == SourceState::Disabled) {
+        let (state, reason) = if r.platform_id.is_some() {
+            (SourceState::Bound, None)
+        } else if r.file_count == 0 {
+            (SourceState::Resolving, None)
+        } else {
+            let why = source_import::unbound_reason(threshold);
+            (SourceState::Unbound, Some(why))
+        };
+        rows::set_state(conn, id, state, reason.as_deref())?;
+    }
+    Ok(())
+}
+
+/// The binding `req` asks for, if any.
+fn choice(req: &Update) -> Result<Option<Choice>, ApiError> {
+    match (&req.platform_id, req.binding.as_deref()) {
+        (Some(_), Some(_)) => Err(ApiError::bad_request(
+            "Send platform_id or binding, not both.",
+        )),
+        (None, Some("automatic")) => Ok(Some(Choice::Automatic)),
+        (None, Some(_)) => Err(ApiError::bad_request("binding is automatic.")),
+        (Some(Some(p)), None) => Ok(Some(Choice::Platform(PlatformId(p.clone())))),
+        (Some(None), None) => Ok(Some(Choice::Ignore)),
+        (None, None) => Ok(None),
+    }
+}
+
 async fn update(
     State(app): State<Arc<AppState>>,
     id: Result<UrlPath<i64>, PathRejection>,
     body: Bytes,
-) -> Result<Json<SourceRow>, ApiError> {
+) -> Result<Response, ApiError> {
     let id = source_id(id)?;
     let req: Update =
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
@@ -130,47 +225,34 @@ async fn update(
         Some("enabled") => Some(true),
         Some(_) => return Err(ApiError::bad_request("state is disabled or enabled.")),
     };
-    let platform = req.platform_id.map(|p| p.map(PlatformId));
-    if let Some(Some(p)) = &platform {
+    let choice = choice(&req)?;
+    if let Some(Choice::Platform(p)) = &choice {
         let p = p.clone();
         if !app.db.read(move |c| rows::platform_exists(c, &p)).await? {
             return Err(ApiError::bad_request("No such platform."));
         }
     }
-    if platform.is_some() && row.file_count == 0 {
+    if choice.is_some() && row.file_count == 0 {
         return Err(ApiError::bad_request(
             "This source has no file list yet, so it cannot be bound.",
         ));
     }
     let threshold = app.config().sources.bind_threshold;
     let stored_seed = seed.clone();
+    let user = choice.as_ref().map(|c| *c != Choice::Automatic);
     let updated = app
         .db
         .write(move |c| {
             let tx = c.transaction()?;
-            if let Some(p) = &platform {
-                source_import::bind_to(&tx, id, p.as_ref())?;
-                rows::set_user_unbound(&tx, id, p.is_none())?;
+            if let Some(user) = user {
+                rows::set_user_binding(&tx, id, user)?;
             }
             if let Some(s) = &stored_seed {
                 rows::set_seed_policy(&tx, id, s)?;
             }
             match enable {
                 Some(false) => rows::set_state(&tx, id, SourceState::Disabled, None)?,
-                Some(true) => {
-                    let now = rows::get(&tx, id)?;
-                    if let Some(r) = now.filter(|r| r.state == SourceState::Disabled) {
-                        let (state, reason) = if r.platform_id.is_some() {
-                            (SourceState::Bound, None)
-                        } else if r.file_count == 0 {
-                            (SourceState::Resolving, None)
-                        } else {
-                            let why = source_import::unbound_reason(threshold);
-                            (SourceState::Unbound, Some(why))
-                        };
-                        rows::set_state(&tx, id, state, reason.as_deref())?;
-                    }
-                }
+                Some(true) => enable_source(&tx, id, threshold)?,
                 None => {}
             }
             let row = rows::get(&tx, id)?;
@@ -189,8 +271,28 @@ async fn update(
             }
         }
     }
+    let job_id = match choice {
+        Some(choice) => {
+            let job = BindSource {
+                source_id: id,
+                source_name: updated.display_name.clone(),
+                choice,
+            };
+            Some(Scheduler::enqueue(&app, Arc::new(job)).await?)
+        }
+        None => None,
+    };
     publish_changed(&app, &updated);
-    Ok(Json(updated))
+    let status = if job_id.is_some() {
+        StatusCode::ACCEPTED
+    } else {
+        StatusCode::OK
+    };
+    let body = Updated {
+        source: updated,
+        job_id,
+    };
+    Ok((status, Json(body)).into_response())
 }
 
 async fn remove(

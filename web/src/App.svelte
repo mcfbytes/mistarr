@@ -13,6 +13,7 @@
   import TitleScreen from './routes/Title.svelte';
   import Activity from './routes/Activity.svelte';
   import Sources from './routes/Sources.svelte';
+  import SourceDetail from './routes/SourceDetail.svelte';
   import Dats from './routes/Dats.svelte';
   import System from './routes/System.svelte';
 
@@ -97,6 +98,8 @@
     <Activity />
   {:else if route.name === 'sources'}
     <Sources />
+  {:else if route.name === 'source'}
+    <SourceDetail sourceId={Number(route.params.id ?? 0)} />
   {:else if route.name === 'dats'}
     <Dats />
   {:else if route.name === 'system'}

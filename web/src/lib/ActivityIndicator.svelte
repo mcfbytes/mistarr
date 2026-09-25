@@ -36,7 +36,10 @@
   }
 
   function title(job: Job): string {
-    const detail = typeof job.payload.platform_id === 'string' ? name(job.payload.platform_id) : jobDetail(job.payload);
+    const detail =
+      typeof job.payload.platform_id === 'string' && typeof job.payload.source_name !== 'string'
+        ? name(job.payload.platform_id)
+        : jobDetail(job.payload);
     return detail ? `${kindLabel(job.kind)}: ${detail}` : kindLabel(job.kind);
   }
 

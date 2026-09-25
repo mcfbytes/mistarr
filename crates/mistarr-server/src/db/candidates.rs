@@ -841,7 +841,16 @@ mod tests {
 
         drop_pair(&c, src, 0, b).expect("drop");
         assert_eq!(
-            sources::files(&c, src, 10, 0).expect("files").0[0].rom_id,
+            crate::db::source_detail::files(
+                &c,
+                src,
+                &crate::db::source_detail::FileQuery::default(),
+                10,
+                0
+            )
+            .expect("files")
+            .0[0]
+                .rom_id,
             None
         );
         put(&c, src, &[(0, RomRef(a), Confidence::Fuzzy)]);

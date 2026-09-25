@@ -395,7 +395,7 @@ pub async fn rebind_after_dat(app: &Arc<AppState>, platforms: &[PlatformId]) -> 
 
 /// Binds one unbound source to `suggested` when it reaches `threshold` and
 /// scores at least as well as the best platform, else as [`bind_best`] does.
-fn rebind_one(
+pub(crate) fn rebind_one(
     conn: &Connection,
     id: SourceId,
     suggested: Option<&PlatformId>,
@@ -891,7 +891,7 @@ mod tests {
                 let other = source(c, &"0d".repeat(20), &files);
                 suggest(c, other, "pack2.torrent", "Example Pack", &files)?;
                 bind_to(c, other, None)?;
-                rows::set_user_unbound(c, other, true)?;
+                rows::set_user_binding(c, other, true)?;
                 Ok(other)
             })
             .expect("db");

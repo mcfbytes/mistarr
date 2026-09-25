@@ -306,20 +306,32 @@ allowed `Host`.
 | GET | `/sources` | All sources with state, platform, counts, seed policy, client status. |
 | GET | `/sources/incoming` | Files in `sources/` not loaded yet, and rejected ones; see "Incoming files". |
 | POST | `/sources/upload` | multipart `.torrent` or a `{ magnet }` body; same handling as the watched dir. |
-| PUT | `/sources/{id}` | `{ platform_id?, seed_policy?, state? }` to bind, rebind, disable. |
+| GET | `/sources/{id}` | One source with how its files classify, its DATs and open downloads. |
+| PUT | `/sources/{id}` | `{ platform_id?, binding?, seed_policy?, state? }` to bind, rebind, reset, disable. |
 | DELETE | `/sources/{id}` | Remove from mistarr and, if present, the client. Never deletes placed files. |
-| GET | `/sources/{id}/files` | torrent_files with matched rom names. |
+| GET | `/sources/{id}/files` | torrent_files with matched rom names; `?filter=&q=` and paging. |
+| GET | `/sources/{id}/preview` | How many files each platform with a DAT would match. |
 
 `/sources` items: `{ id, infohash, display_name, origin_file, platform_id,
 bind_score, state, reason, seed_policy, file_count, matched_count,
-total_size, client_id, added_at, suggested_platform_id }`. `matched_count`
+total_size, client_id, added_at, suggested_platform_id, user_binding }`. `matched_count`
 counts files matched to a rom or holding a candidate rom. `reason` says why
 a source is `resolving` or `unbound` and is otherwise `null`; `client_id` is
 set once the torrent is in the client. `suggested_platform_id` is the
 platform the torrent's names point at, found without any DAT
 (ARCHITECTURE.md "Source import" step 4), or `null`; the SPA preselects it in
 the platform picker. `seed_policy` is `"none"`, `"client"` or
-`"ratio:N"` with N above 0.
+`"ratio:N"` with N above 0. `user_binding` is `true` when the user chose the
+binding, a platform or none, which automatic binding then leaves alone.
+
+`GET /sources/{id}` is the item with `summary: { matched, candidates,
+unmatched, extra, wanted }`, where the first four count each file once: a
+matched rom, only candidate roms, neither, or neither and an extra such as a
+text, image or checksum file; `wanted` counts files with a download that was
+not cancelled. `dats` lists `{ dat_version_id, dat_name, version, matched }`
+for the DATs the matched roms come from, most files first, and `transfer:
+{ files, size, done }` sums the files whose downloads are queued,
+transferring, checking or importing, with the bytes of them done.
 
 `/sources/upload` takes `multipart/form-data` with one `.torrent` file part,
 or a JSON body `{ magnet }`. A file that does not parse, or repeats a source
@@ -331,9 +343,15 @@ when no such name is free), and the answer is 202 with the file as
 
 `PUT /sources/{id}` body fields are all optional. `platform_id` binds or
 rebinds the source to that platform, matching its files against it only, and
-`null` unbinds it and keeps it from being bound automatically after later
-DAT loads until the user binds it again; both are a 400 while the source has
-no file list.
+`null` marks it as not a game set: unbound, with no matches. Either sets
+`user_binding`, so later DAT loads never bind it automatically.
+`binding: "automatic"` clears `user_binding` and binds the source again as
+the automatic classifier would. `platform_id` and `binding` together are a
+400, as is either while the source has no file list. A binding change
+answers 202 with the item and `job_id` of the background `bind_source` job
+that does it; `source.changed` follows when it ends, and its final progress
+is `{ source_id, platform_id, matched, total }`. Any other update answers
+200 with `job_id: null`.
 `state` is `"disabled"` or `"enabled"`, which returns the source to `bound`,
 `unbound` or `resolving` as its files and platform say. A disabled source
 stays disabled when rebound. The answer is the updated item.
@@ -349,6 +367,19 @@ title_id, confidence, candidates }`, where `path` is inside the torrent,
 matched, and `candidates` lists the further roms the file may be, strongest
 first, as `{ rom_id, rom_name, title_id, confidence }`. A file counts toward
 the source's `matched_count` exactly when it has a matched rom or a candidate.
+Each item also has `kind`, `"rom"`, `"archive"`, `"disc"` or `"extra"` from
+its extension and the platform's kind; `unmatched`, `null` when a rom or a
+candidate matched, else `"unbound"` (the source has no platform), `"extra"`
+or `"no_entry"`; and `download`, the file's newest download as `{ id, state,
+progress }`, or `null`. `filter` is `matched` (a rom or a candidate),
+`unmatched` or `wanted` (a download that was not cancelled), and `q` keeps
+paths containing it, ignoring ASCII case; `total` counts what they keep.
+
+`/sources/{id}/preview` is `{ total, platforms: [{ platform_id, matched }] }`
+for every platform with a loaded DAT, most matched first: a read-only dry run
+of the binding's name tiers over the source's files, the count the automatic
+classifier's hit rate comes from. It reads every file once, so the SPA asks
+for it only when the user opens Re-classify.
 
 ## Incoming files
 

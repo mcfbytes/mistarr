@@ -13,7 +13,11 @@ import type {
   Settings,
   SettingsPatch,
   Source,
+  SourceDetail,
   SourceFile,
+  SourceFileFilter,
+  SourcePreview,
+  SourceUpdated,
   UnidentifiedFile,
   SseEvent,
   SystemStatus,
@@ -174,10 +178,17 @@ export const api = {
     request('/sources/upload', { method: 'POST', body: JSON.stringify({ magnet }) }),
   updateSource: (
     id: number,
-    patch: { platform_id?: string | null; seed_policy?: string; state?: string }
-  ): Promise<Source> => request(`/sources/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
+    patch: { platform_id?: string | null; binding?: 'automatic'; seed_policy?: string; state?: string }
+  ): Promise<SourceUpdated> => request(`/sources/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteSource: (id: number): Promise<void> => request(`/sources/${id}`, { method: 'DELETE' }),
-  sourceFiles: (id: number): Promise<Paged<SourceFile>> => request(`/sources/${id}/files`),
+  source: (id: number): Promise<SourceDetail> => request(`/sources/${id}`),
+  sourceFiles: (
+    id: number,
+    opts: { filter?: SourceFileFilter | undefined; q?: string | undefined; limit: number; offset: number },
+    signal?: AbortSignal
+  ): Promise<Paged<SourceFile>> =>
+    request(`/sources/${id}/files${query({ ...opts })}`, { signal: signal ?? null }),
+  sourcePreview: (id: number): Promise<SourcePreview> => request(`/sources/${id}/preview`),
 
   downloads: (state?: DownloadState): Promise<Paged<Download>> =>
     request(`/downloads${query({ state })}`),

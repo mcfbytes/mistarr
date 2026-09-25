@@ -9,6 +9,7 @@
   import UploadField from '../lib/UploadField.svelte';
   import MagnetField from '../lib/MagnetField.svelte';
   import StatusPill from '../lib/StatusPill.svelte';
+  import { sourceUrl } from '../lib/router.svelte';
   import type { SeedPolicy } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
@@ -33,16 +34,17 @@
       return;
     }
     const prev = sources.find((s) => s.id === id);
-    patchSource(id, { platform_id: platformId, state: 'bound' });
+    patchSource(id, { platform_id: platformId, state: 'bound', user_binding: true });
     if (isMock) {
       return;
     }
     try {
+      // The binding runs as a job; `source.changed` brings the bound row once it ends.
       const row = await api.updateSource(id, { platform_id: platformId });
-      patchSource(id, row);
+      patchSource(id, { user_binding: row.user_binding });
     } catch (err) {
       if (prev) {
-        patchSource(id, { platform_id: prev.platform_id, state: prev.state });
+        patchSource(id, { platform_id: prev.platform_id, state: prev.state, user_binding: prev.user_binding });
       }
       showToast(errorMessage(err));
     }
@@ -130,11 +132,13 @@
       <tbody>
         {#each sources as source (source.id)}
           <tr>
-            <td>{source.display_name}</td>
+            <td><a href={sourceUrl(source.id)} class="name">{source.display_name}</a></td>
             <td>
               {#if source.platform_id}
                 {source.platform_id}
+                {#if source.user_binding}<span class="tag">Set by you</span>{/if}
               {:else}
+                {#if source.user_binding}<span class="tag">Set by you</span>{/if}
                 <select
                   disabled={source.file_count === 0}
                   onchange={(e) => bind(source.id, e.currentTarget.value)}
@@ -218,6 +222,20 @@
     display: block;
     margin-top: 0.3em;
     font-size: 0.9em;
+  }
+
+  .name {
+    overflow-wrap: anywhere;
+  }
+
+  .tag {
+    display: inline-block;
+    font-size: 0.85em;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    border-radius: 999px;
+    padding: 0 0.5em;
+    white-space: nowrap;
   }
 
   .row-actions {

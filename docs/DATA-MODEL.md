@@ -165,7 +165,7 @@ CREATE TABLE sources (                  -- one per torrent the user dropped in
   client_id     TEXT,                  -- id in the download client once added, else NULL
   added_at      INTEGER NOT NULL,
   suggested_platform_id TEXT REFERENCES platforms(id),  -- guessed from the torrent's names, no DAT needed
-  user_unbound  INTEGER NOT NULL DEFAULT 0,  -- 1 after the user unbound it; never bound automatically again
+  user_binding  INTEGER NOT NULL DEFAULT 0,  -- 1 when the user chose the binding, a platform or none; automatic binding never changes it
   map_stamp     TEXT                   -- the platform's live DAT versions and roms the files were last mapped against
 );
 CREATE INDEX sources_state ON sources(state);
@@ -252,7 +252,7 @@ CREATE TABLE chd_whole (                      -- whole-file hashes of CHDs a DAT
 
 CREATE TABLE jobs (
   id            INTEGER PRIMARY KEY,
-  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'poll' | 'detect_client' | 'dat_import' | 'recompute_1g1r' | 'source_import' | 'resolve_magnet' | 'transfer' | 'deselect' | 'arcade_catalog' | 'chd_tracks'
+  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'poll' | 'detect_client' | 'dat_import' | 'recompute_1g1r' | 'source_import' | 'resolve_magnet' | 'transfer' | 'deselect' | 'arcade_catalog' | 'chd_tracks' | 'remap_sources' | 'bind_source'
   payload       TEXT NOT NULL,         -- json
   state         TEXT NOT NULL,         -- 'queued' | 'running' | 'paused' | 'done' | 'failed'
   progress      TEXT,                  -- json, job specific
@@ -356,6 +356,13 @@ single-file one. It is the path mistarr sees, after the remote path map.
 - `bound`: attached to a platform, torrent_files populated.
 - `disabled`: user turned it off; existing downloads finish, nothing new is
   chosen from it.
+
+`user_binding` is the user's override of the classifier. `PUT /sources/{id}`
+with a `platform_id`, or `null` for "not a game set", sets it; `binding:
+"automatic"` clears it. While it is set, the rebind after a DAT load skips
+the source, so no automatic run changes its platform; a `remap_sources` job
+still maps its files again against its own platform when that platform's
+roms change.
 
 ## Titles across DAT versions
 
