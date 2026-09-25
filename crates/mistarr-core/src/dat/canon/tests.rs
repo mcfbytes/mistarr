@@ -174,6 +174,45 @@ fn what_the_parser_refuses_is_not_rewritten() {
     assert!(matches!(e, RewriteError::Write(_)), "{e}");
 }
 
+#[test]
+fn a_tag_that_escaping_would_take_past_the_event_cap_is_refused() {
+    let quotes = "\"".repeat(crate::dat::MAX_FIELD_BYTES);
+    let xml = format!(
+        "<header/><datafile><game name='g'><source><file size='1' extension='{quotes}' \
+         format='{quotes}' header='{quotes}' item='{quotes}'/></source></game></datafile>"
+    );
+    assert!(
+        crate::dat::parse_dat(xml.as_bytes()).is_ok(),
+        "the input parses"
+    );
+    let e = rewrite(xml.as_bytes(), &mut Vec::new()).expect_err("too large once escaped");
+    assert!(
+        matches!(e, RewriteError::TagTooLarge { element: "file", ref game } if game == "g"),
+        "{e}"
+    );
+}
+
+#[test]
+fn many_regions_are_split_across_releases_within_the_field_cap() {
+    let mut xml = String::from("<datafile><game name='g'>");
+    for i in 0..100 {
+        let _ = write!(xml, "<release region='{i:03}{}'/>", "r".repeat(1000));
+    }
+    xml.push_str("<release language='En'/><rom name='a' size='1'/></game></datafile>");
+    let out = rewritten(xml.as_bytes());
+    let parsed = parse_dat(&out).expect("the rewrite parses");
+    assert_eq!(parsed, parse_dat(xml.as_bytes()).expect("parse"));
+    assert_eq!(parsed.games[0].regions.len(), 100);
+    let text = String::from_utf8(out).expect("utf-8");
+    assert_eq!(
+        text.matches("<release").count(),
+        3,
+        "two of regions, one of languages"
+    );
+    let joined = joined_within(&["a".into(), "b".into(), "cc".into()], 3);
+    assert_eq!(joined, ["a,b", "cc"]);
+}
+
 /// `s` escaped for an attribute or text, with references in a different style from the writer's.
 fn esc(s: &str) -> String {
     s.chars()

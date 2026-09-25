@@ -16,7 +16,7 @@ mod canon;
 mod export;
 mod family;
 
-pub use canon::{rewrite, RewriteError, Rewritten};
+pub use canon::{rewrite, RewriteError, Rewritten, TAG_LIMIT};
 pub use export::{export_name, ExportName};
 pub use family::{family_key, split_version, version_order, DatFamily, FORMAT_MARKERS};
 

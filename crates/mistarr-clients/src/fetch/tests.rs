@@ -239,6 +239,26 @@ async fn once_a_hop_was_public_no_later_hop_may_be_local() {
     );
 }
 
+#[test]
+fn a_host_with_both_public_and_local_addresses_makes_the_chain_public() {
+    let at = |ip: [u8; 4]| SocketAddr::from((ip, 80));
+    let mixed = [at([192, 0, 2, 1]), at([192, 168, 1, 2])];
+    let local = [at([192, 168, 1, 3])];
+    let public = [at([198, 51, 100, 1])];
+    let seen = check_hop(&mixed, false, is_local).expect("a typed host is allowed");
+    assert!(seen, "its public address counts");
+    assert!(matches!(
+        check_hop(&local, seen, is_local),
+        Err(FetchError::LocalRedirect)
+    ));
+    assert!(matches!(
+        check_hop(&mixed, true, is_local),
+        Err(FetchError::LocalRedirect)
+    ));
+    assert!(!check_hop(&local, false, is_local).expect("local to local"));
+    assert!(check_hop(&public, false, is_local).expect("local to public"));
+}
+
 #[tokio::test]
 async fn a_body_under_the_minimum_rate_fails() {
     let server = FileServer::start().await.expect("bind");
@@ -306,6 +326,12 @@ fn local_addresses_are_recognised() {
         "64:ff9b:1::1",
         "2002:0a00:0001::1",
         "2002:7f00:0001::",
+        "2001:0:4136:e378::1",
+        "198.18.0.1",
+        "198.19.255.255",
+        "192.0.0.8",
+        "240.0.0.1",
+        "250.1.2.3",
     ] {
         assert!(is_local(local.parse().expect("ip")), "{local}");
     }
@@ -317,6 +343,10 @@ fn local_addresses_are_recognised() {
         "2002:c000:0201::1",
         "64:ff9c::1",
         "fe00::1",
+        "198.20.0.1",
+        "192.0.1.1",
+        "239.255.255.255",
+        "2001:1::1",
     ] {
         assert!(!is_local(public.parse().expect("ip")), "{public}");
     }

@@ -183,7 +183,11 @@ pub fn check(
                 budget: &budget,
             };
             let rewritten = rewrite(BufReader::with_capacity(64 * 1024, input), &mut out);
-            budget.verdict(rewritten.map(|_| ()))?;
+            if let Err(e) = budget.verdict(rewritten.map(|_| ())) {
+                // Dropped unflushed, so a refused rewrite never writes, or moves to the card, again.
+                drop(out.into_parts());
+                return Err(e);
+            }
             let spill = out.into_inner().map_err(|e| write_error(e.into_error()))?;
             let (path, in_ram) = spill.finish().map_err(write_error)?;
             Ok(Checked::Dat { path, in_ram })

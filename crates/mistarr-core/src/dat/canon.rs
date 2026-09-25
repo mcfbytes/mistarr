@@ -5,6 +5,7 @@ use std::io::{BufRead, Write};
 use super::export::{Archive, File, Source};
 use super::{
     DatError, DatFormat, DatGame, DatHeader, DatRom, DatStream, ExportOptions, Mode, RomStatus,
+    MAX_EVENT_BYTES, MAX_FIELD_BYTES,
 };
 
 /// What [`rewrite`] wrote.
@@ -26,7 +27,19 @@ pub enum RewriteError {
     /// The output could not be written.
     #[error("the rewritten DAT cannot be written: {0}")]
     Write(#[from] std::io::Error),
+    /// A tag, once its attributes are escaped, would exceed [`TAG_LIMIT`], more than the
+    /// parser reads as one event.
+    #[error("the <{element}> of game {game:?} would be written larger than the parser reads")]
+    TagTooLarge {
+        /// The element.
+        element: &'static str,
+        /// Its game, empty in the header.
+        game: String,
+    },
 }
+
+/// Longest tag the rewrite writes: [`MAX_EVENT_BYTES`] less 1 KiB to spare.
+pub const TAG_LIMIT: u64 = MAX_EVENT_BYTES - 1024;
 
 /// Parses the DAT `reader` holds and writes to `out` only what the parser read, in its
 /// own form: the header's fields, and each game with the attributes, releases and roms
@@ -54,7 +67,7 @@ pub fn rewrite<R: BufRead, W: Write>(reader: R, out: W) -> Result<Rewritten, Rew
     let mut stream = DatStream::open(reader, ExportOptions::default(), Mode::Raw)?;
     let format = stream.format();
     let first = stream.header().clone();
-    let mut w = Out { out };
+    let mut w = Out { out, tag: None };
     w.put("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n")?;
     match format {
         DatFormat::DbExport => {
@@ -89,11 +102,39 @@ pub fn rewrite<R: BufRead, W: Write>(reader: R, out: W) -> Result<Rewritten, Rew
 
 struct Out<W> {
     out: W,
+    /// Bytes of the tag being written, from its `<`.
+    tag: Option<u64>,
 }
 
 impl<W: Write> Out<W> {
     fn put(&mut self, s: &str) -> std::io::Result<()> {
+        if let Some(n) = self.tag.as_mut() {
+            *n += s.len() as u64;
+        }
         self.out.write_all(s.as_bytes())
+    }
+
+    /// Starts tag `<name` after `indent`, counting its length until [`Out::close`].
+    fn open(&mut self, indent: &str, name: &str) -> std::io::Result<()> {
+        self.put(indent)?;
+        self.tag = Some(0);
+        self.put("<")?;
+        self.put(name)
+    }
+
+    /// Ends the tag with `end`, refusing it past [`TAG_LIMIT`].
+    fn close(&mut self, end: &str, element: &'static str, game: &str) -> Result<(), RewriteError> {
+        let tail = end.trim_end_matches('\n');
+        self.put(tail)?;
+        let len = self.tag.take().unwrap_or(0);
+        self.put(&end[tail.len()..])?;
+        if len > TAG_LIMIT {
+            return Err(RewriteError::TagTooLarge {
+                element,
+                game: game.to_owned(),
+            });
+        }
+        Ok(())
     }
 
     /// Writes `value` as element text or, with `attr`, as a quoted attribute value.
@@ -148,7 +189,7 @@ fn needs_ref(c: char, attr: bool) -> bool {
 
 /// Writes every header field; `reset` adds an empty `<clrmamepro/>` that clears a rule an
 /// earlier header set.
-fn write_header<W: Write>(w: &mut Out<W>, h: &DatHeader, reset: bool) -> std::io::Result<()> {
+fn write_header<W: Write>(w: &mut Out<W>, h: &DatHeader, reset: bool) -> Result<(), RewriteError> {
     w.put("<header>\n")?;
     w.element("  ", "name", Some(&h.name))?;
     w.element("  ", "description", Some(&h.description))?;
@@ -159,45 +200,52 @@ fn write_header<W: Write>(w: &mut Out<W>, h: &DatHeader, reset: bool) -> std::io
     w.element("  ", "url", h.url.as_deref())?;
     w.element("  ", "comment", h.comment.as_deref())?;
     if h.clrmamepro_header.is_some() || reset {
-        w.put("  <clrmamepro")?;
+        w.open("  ", "clrmamepro")?;
         w.attr("header", h.clrmamepro_header.as_deref())?;
-        w.put("/>\n")?;
+        w.close("/>\n", "clrmamepro", "")?;
     }
-    w.put("</header>\n")
+    Ok(w.put("</header>\n")?)
 }
 
-fn write_game<W: Write>(w: &mut Out<W>, g: &DatGame) -> std::io::Result<()> {
-    w.put("<game")?;
+fn write_game<W: Write>(w: &mut Out<W>, g: &DatGame) -> Result<(), RewriteError> {
+    w.open("", "game")?;
     w.attr("name", Some(&g.name))?;
     w.attr("cloneof", g.clone_of.as_deref())?;
     w.attr("romof", g.rom_of.as_deref())?;
-    w.put(">\n")?;
+    w.close(">\n", "game", &g.name)?;
     w.element("  ", "description", g.description.as_deref())?;
     w.element("  ", "category", g.category.as_deref())?;
-    if !g.regions.is_empty() || !g.languages.is_empty() {
-        let regions = g.regions.join(",");
-        let languages = g.languages.join(",");
-        w.put("  <release")?;
-        w.attr(
-            "region",
-            Some(&regions).filter(|r| !r.is_empty()).map(String::as_str),
-        )?;
-        w.attr(
-            "language",
-            Some(&languages)
-                .filter(|l| !l.is_empty())
-                .map(String::as_str),
-        )?;
-        w.put("/>\n")?;
+    for (key, values) in [("region", &g.regions), ("language", &g.languages)] {
+        for joined in joined_within(values, MAX_FIELD_BYTES) {
+            w.open("  ", "release")?;
+            w.attr(key, Some(&joined))?;
+            w.close("/>\n", "release", &g.name)?;
+        }
     }
     for rom in &g.roms {
-        write_rom(w, rom)?;
+        write_rom(w, rom, &g.name)?;
     }
-    w.put("</game>\n")
+    Ok(w.put("</game>\n")?)
 }
 
-fn write_rom<W: Write>(w: &mut Out<W>, r: &DatRom) -> std::io::Result<()> {
-    w.put("  <rom")?;
+/// `values` joined by commas into as few strings as keep each within `limit` bytes, the
+/// parser's cap on one attribute; a value is never split.
+fn joined_within(values: &[String], limit: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for v in values {
+        match out.last_mut() {
+            Some(last) if last.len() + 1 + v.len() <= limit => {
+                last.push(',');
+                last.push_str(v);
+            }
+            _ => out.push(v.clone()),
+        }
+    }
+    out
+}
+
+fn write_rom<W: Write>(w: &mut Out<W>, r: &DatRom, game: &str) -> Result<(), RewriteError> {
+    w.open("  ", "rom")?;
     w.attr("name", Some(&r.name))?;
     w.attr("size", Some(&r.size.to_string()))?;
     w.attr("crc", r.crc32.as_deref())?;
@@ -207,7 +255,7 @@ fn write_rom<W: Write>(w: &mut Out<W>, r: &DatRom) -> std::io::Result<()> {
         w.attr("status", Some(r.status.as_str()))?;
     }
     w.attr("header", r.header.as_deref())?;
-    w.put("/>\n")
+    w.close("/>\n", "rom", game)
 }
 
 fn write_export_game<W: Write>(
@@ -215,35 +263,35 @@ fn write_export_game<W: Write>(
     name: &str,
     archive: &Archive,
     sources: &[Source],
-) -> std::io::Result<()> {
-    w.put("<game")?;
+) -> Result<(), RewriteError> {
+    w.open("", "game")?;
     w.attr("name", Some(name))?;
-    w.put(">\n")?;
+    w.close(">\n", "game", name)?;
     if archive != &Archive::default() {
-        w.put("  <archive")?;
+        w.open("  ", "archive")?;
         w.attr("number", archive.number.as_deref())?;
         w.attr("clone", archive.clone.as_deref())?;
         w.attr("region", archive.region.as_deref())?;
         w.attr("languages", archive.languages.as_deref())?;
         w.attr("status", archive.status.as_deref())?;
-        w.put("/>\n")?;
+        w.close("/>\n", "archive", name)?;
     }
     for source in sources {
         w.put("  <source>\n")?;
         for file in &source.files {
-            write_file(w, file)?;
+            write_file(w, file, name)?;
         }
         w.put("  </source>\n")?;
     }
-    w.put("</game>\n")
+    Ok(w.put("</game>\n")?)
 }
 
 fn nonempty(s: &str) -> Option<&str> {
     (!s.is_empty()).then_some(s)
 }
 
-fn write_file<W: Write>(w: &mut Out<W>, f: &File) -> std::io::Result<()> {
-    w.put("    <file")?;
+fn write_file<W: Write>(w: &mut Out<W>, f: &File, game: &str) -> Result<(), RewriteError> {
+    w.open("    ", "file")?;
     w.attr("extension", nonempty(&f.extension))?;
     w.attr("format", nonempty(&f.format))?;
     w.attr("size", Some(&f.size.to_string()))?;
@@ -256,7 +304,7 @@ fn write_file<W: Write>(w: &mut Out<W>, f: &File) -> std::io::Result<()> {
     if f.bad {
         w.attr("bad", Some("1"))?;
     }
-    w.put("/>\n")
+    w.close("/>\n", "file", game)
 }
 
 #[cfg(test)]

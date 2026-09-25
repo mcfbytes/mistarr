@@ -392,11 +392,13 @@ debug. It lives in the `url_fetch` job's memory until the job ends.
    http, nor one to an address on this machine or the local network once
    any host in the chain, the typed one included, was public; it dials only
    the addresses it checked. Local means IPv4 0.0.0.0/8, loopback, private,
-   link-local, 100.64/10 and broadcast, and IPv6 loopback, unspecified,
-   unique local, link-local, site-local (`fec0::/10`), NAT64
-   (`64:ff9b::/96`, `64:ff9b:1::/48`) and IPv4-compatible (`::/96`); an
-   IPv4-mapped or 6to4 (`2002::/16`) address counts as the IPv4 address it
-   carries. A host with any local address is local. A 6th redirect, any other non-2xx answer, a
+   link-local, 100.64/10, 192.0.0.0/24, 198.18.0.0/15 and 240.0.0.0/4 with
+   broadcast, and IPv6 loopback, unspecified, unique local, link-local,
+   site-local (`fec0::/10`), NAT64 (`64:ff9b::/96`, `64:ff9b:1::/48`),
+   Teredo (`2001::/32`) and IPv4-compatible (`::/96`); an IPv4-mapped or
+   6to4 (`2002::/16`) address counts as the IPv4 address it carries. A host
+   with any local address is refused once the chain is public, and a host
+   with any public address, the typed one included, makes it public. A 6th redirect, any other non-2xx answer, a
    `Content-Encoding` other than `identity`, 60 s without a byte, or an
    average under 1 KiB/s once 5 minutes have passed ends it. Nothing is
    retried and nothing is fetched again later: a restart fails the job as
@@ -437,7 +439,10 @@ debug. It lives in the `url_fetch` job's memory until the job ends.
    after the root element but whitespace, comments and processing
    instructions; as each game is read, a streaming writer writes the
    header fields the parser reads and the game with exactly the
-   attributes, releases and roms it keeps, one game in memory at a time.
+   attributes, releases and roms it keeps, one game in memory at a time;
+   regions and languages go in as many `<release>` elements as keep each
+   within the field cap, and a tag that escaping would take past what the
+   parser reads as one event refuses the file.
    A Logiqx DAT becomes a Logiqx DAT. A No-Intro DB export stays a DB
    export, since which of its files become roms depends on the platform it
    binds to at import: each game keeps its `archive` and every `file` of
@@ -685,7 +690,7 @@ shutdown is left `queued` for this.
 | Arcade presence pass | 500 zips per batch, stat only unless import rows of a changed zip need its central directory; the listing's names and the live MRA zip set persist across batches |
 | `.torrent` or `.magnet` file | 16 MiB, read whole, parsed in place |
 | Fetched file (`url_fetch`) | `.torrent` 16 MiB (`MAX_SOURCE_BYTES`), DAT or DAT pack 512 MiB (`MAX_DAT_BYTES`), the uploads' caps, checked against `Content-Length` and while streaming; 1 MiB write buffer; spooled in `/tmp/mistarr` only above `[memory] import_floor_mib`; one fetch at a time; each XML event under 1 MiB and one game in memory while it is rewritten; peak RSS 17.7 MiB in all for a 50 MiB DAT over https in a release build, under the 64 MiB ceiling, checked by `tests/memory.rs` |
-| https | rustls with ring, `webpki-roots` (58 KiB of it) and the fetch code with its DAT rewrite add 756 KiB to the stripped armv7 binary, 5.55 to 6.28 MiB with the SPA; trust anchors are loaded per fetch and dropped after it, so idle RSS is unchanged |
+| https | rustls with ring, `webpki-roots` (58 KiB of it) and the fetch code with its DAT rewrite add 766 KiB to the stripped armv7 binary, 5.55 to 6.29 MiB with the SPA; trust anchors are loaded per fetch and dropped after it, so idle RSS is unchanged |
 | Browse page or search, with its total | under 100 ms on the board with every major platform's DAT loaded; `tests/browse.rs` holds a host bound and `mistarr bench-search` measures the board |
 | SPA bundle, gzipped | under 200 KiB |
 | Concurrent client RPC calls | 1, serialised |

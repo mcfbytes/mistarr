@@ -42,10 +42,11 @@ pub const MIN_RATE: u64 = 1024;
 pub const RATE_WINDOW: Duration = Duration::from_secs(300);
 
 /// Whether `ip` may reach this machine or a local network. IPv4: 0.0.0.0/8, loopback,
-/// private, link-local, shared (100.64/10) and broadcast. IPv6: loopback, unspecified,
-/// unique local, link-local, site-local (`fec0::/10`), NAT64 (`64:ff9b::/96` and
-/// `64:ff9b:1::/48`) and IPv4-compatible (`::/96`); an IPv4-mapped or 6to4 (`2002::/16`)
-/// address by the IPv4 address it carries.
+/// private, link-local, shared (100.64/10), 192.0.0.0/24, benchmarking (198.18.0.0/15)
+/// and 240.0.0.0/4 with broadcast. IPv6: loopback, unspecified, unique local,
+/// link-local, site-local (`fec0::/10`), NAT64 (`64:ff9b::/96` and `64:ff9b:1::/48`),
+/// Teredo (`2001::/32`) and IPv4-compatible (`::/96`); an IPv4-mapped or 6to4
+/// (`2002::/16`) address by the IPv4 address it carries.
 ///
 /// ```
 /// use mistarr_clients::fetch::is_local;
@@ -58,8 +59,11 @@ pub const RATE_WINDOW: Duration = Duration::from_secs(300);
 pub fn is_local(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            let [a, b, ..] = v4.octets();
+            let [a, b, c, _] = v4.octets();
             a == 0
+                || a >= 240
+                || (a == 192 && b == 0 && c == 0)
+                || (a == 198 && b & 0xfe == 18)
                 || v4.is_private()
                 || v4.is_loopback()
                 || v4.is_link_local()
@@ -77,8 +81,10 @@ pub fn is_local(ip: IpAddr) -> bool {
             }
             let nat64 = seg[..6] == [0x64, 0xff9b, 0, 0, 0, 0] || seg[..3] == [0x64, 0xff9b, 1];
             let compatible = seg[..6] == [0; 6];
+            let teredo = seg[..2] == [0x2001, 0];
             let site_local = seg[0] & 0xffc0 == 0xfec0;
             nat64
+                || teredo
                 || compatible
                 || site_local
                 || v6.is_loopback()
@@ -87,6 +93,20 @@ pub fn is_local(ip: IpAddr) -> bool {
                 || v6.is_unicast_link_local()
         }
     }
+}
+
+/// Checks one hop's addresses against the chain so far, given whether any earlier hop had
+/// a public address: a host with any local address is refused after one, and a host with
+/// any public address makes the chain public from here on. Returns the new state.
+fn check_hop(
+    addrs: &[SocketAddr],
+    seen_public: bool,
+    local: fn(IpAddr) -> bool,
+) -> Result<bool, FetchError> {
+    if seen_public && addrs.iter().any(|a| local(a.ip())) {
+        return Err(FetchError::LocalRedirect);
+    }
+    Ok(seen_public || addrs.iter().any(|a| !local(a.ip())))
 }
 
 /// A failed fetch. No message carries the URL or its host.
@@ -218,11 +238,7 @@ impl Fetcher {
         let mut seen_public = false;
         loop {
             let addrs = self.resolve(&url).await?;
-            let local = addrs.iter().any(|a| (self.local)(a.ip()));
-            if local && seen_public {
-                return Err(FetchError::LocalRedirect);
-            }
-            seen_public |= !local;
+            seen_public = check_hop(&addrs, seen_public, self.local)?;
             let (head, driver) = self.request(&url, &addrs).await?;
             let status = head.status();
             if is_redirect(status) {
