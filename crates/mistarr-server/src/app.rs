@@ -140,6 +140,9 @@ pub struct AppState {
     /// Held while the client is stopped or resumed for shutdown, so no stop
     /// lands after shutdown resumed it.
     pub(crate) freeze_lock: Arc<Mutex<()>>,
+    /// Passes of the core gate's loop, for tests that bound how often it wakes.
+    #[cfg(test)]
+    pub(crate) gate_passes: std::sync::atomic::AtomicU64,
     /// Serialises client detection so an older probe never overwrites a newer one.
     pub(crate) detect_lock: tokio::sync::Mutex<()>,
     /// Held while `POST /system/client/start` runs, so a second one is `busy`.
@@ -172,6 +175,8 @@ impl AppState {
             limits_wake: tokio::sync::Notify::new(),
             client_hold: RwLock::new(None),
             freeze_lock: Arc::new(Mutex::new(())),
+            #[cfg(test)]
+            gate_passes: std::sync::atomic::AtomicU64::new(0),
             detect_lock: tokio::sync::Mutex::new(()),
             client_start: tokio::sync::Mutex::new(()),
             shutdown: watch::Sender::new(false),

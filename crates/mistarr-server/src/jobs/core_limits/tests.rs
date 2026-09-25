@@ -1203,3 +1203,37 @@ async fn the_same_daemon_under_a_new_address_gets_its_own_limit_back_before_it_i
         Some(RateLimit::kbps(30))
     );
 }
+
+#[tokio::test]
+async fn a_refused_kept_work_does_not_spin_the_gate_while_the_client_is_frozen() {
+    let proc = FakeClient::rtorrent();
+    let mock = Mock::new(OWN);
+    mock.set_pid(proc.pid());
+    let (_dir, app) = start_at(
+        &mock,
+        local_rtorrent(),
+        MENU,
+        |o| {
+            on_board(o);
+            o.hold_recheck = Duration::from_millis(100);
+        },
+        None,
+    );
+    source_in_client(&app);
+    *mock.refuse_seed.lock().expect("lock") = true;
+    defer(&app, Op::Seed).await;
+    wait_for("a refused try", || {
+        mock.calls().iter().any(|c| c.starts_with("seed:"))
+    })
+    .await;
+    app.gate.set_corename(Some("SNES".into()));
+    wait_for("the freeze", || proc.state() == 'T').await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let before = app.gate_passes.load(std::sync::atomic::Ordering::Relaxed);
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let passes = app.gate_passes.load(std::sync::atomic::Ordering::Relaxed) - before;
+    // About one pass per 100 ms recheck over half a second, not a busy loop.
+    assert!(passes <= 8, "{passes} gate passes while frozen");
+    app.gate.set_corename(Some(MENU.into()));
+    wait_for("the resume", || proc.state() != 'T').await;
+}

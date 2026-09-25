@@ -334,6 +334,9 @@ pub async fn follow_gate(app: Arc<AppState>) {
     let (mut replay_retry, mut recheck_at) = (None, None::<Instant>);
     loop {
         rx.borrow_and_update();
+        #[cfg(test)]
+        app.gate_passes
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if recheck_at.is_some_and(|at| at <= Instant::now()) {
             recheck_at = None;
             if let Some(a) = applied.as_mut() {
@@ -370,7 +373,9 @@ pub async fn follow_gate(app: Arc<AppState>) {
             );
         }
         let previous = applied.as_ref().and_then(|a| a.previous_at(frozen));
-        let wake = [hold_retry, recheck_at, replay_retry, previous]
+        // Only deadlines whose work runs now: a skipped one would leave a past deadline and spin.
+        let replay_at = replay_retry.filter(|_| !frozen);
+        let wake = [hold_retry, recheck_at, replay_at, previous]
             .into_iter()
             .flatten()
             .min();
