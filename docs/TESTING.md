@@ -217,6 +217,12 @@ CI records them; a regression over 20 percent fails the build. On the board,
 - `cargo zigbuild --target armv7-unknown-linux-musleabihf`, then `file`
   asserts "statically linked".
 - `npm run build` and a size check on the gzipped bundle.
+- `shellcheck` on the board scripts and `scripts/tests/run.sh`, which runs
+  `mistarr.sh` and `install.sh` against fake roots. The install tests put
+  stand-ins for the board's BusyBox on the installer's `PATH`: `tar` refuses
+  compression options and gzip input, `od` refuses `-t` and `-A`. The
+  stand-ins wrap `busybox` applets when the host has them, else the host's
+  tools, and the run prints one line naming which backs each.
 - A grep gate from PRINCIPLES.md: the tree must not contain magnet URIs,
   `announce` URLs, 40-hex infohashes outside test fixtures, or the domains of
   known ROM sites (the deny list itself lives in CI config, not in the docs).
