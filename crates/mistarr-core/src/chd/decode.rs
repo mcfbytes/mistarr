@@ -186,7 +186,7 @@ impl<R: Read + Seek> Decoder<R> {
             return Err(corrupt("the image was not decoded to its end"));
         }
         let raw: [u8; 20] = self.raw.finalize().into();
-        if raw != self.src.header.raw_sha1.0 {
+        if raw != *self.src.header.raw_sha1.as_bytes() {
             return Err(fail(Unidentifiable::Checksum, "raw SHA1"));
         }
         let mut records = self.layout.checksums().to_vec();
@@ -197,7 +197,7 @@ impl<R: Read + Seek> Decoder<R> {
             combined.update(r);
         }
         let combined: [u8; 20] = combined.finalize().into();
-        if combined != self.src.header.sha1.0 {
+        if combined != *self.src.header.sha1.as_bytes() {
             return Err(fail(Unidentifiable::Checksum, "combined SHA1"));
         }
         Ok(self.done)

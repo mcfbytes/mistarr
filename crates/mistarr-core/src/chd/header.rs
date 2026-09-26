@@ -2,6 +2,8 @@
 
 use std::io::Read;
 
+use crate::Sha1;
+
 use super::{
     corrupt, fail, ChdError, Unidentifiable, FRAME_BYTES, HEADER_LEN, MAX_FRAMES, MAX_HUNK_BYTES,
 };
@@ -10,51 +12,11 @@ use super::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FourCc(pub [u8; 4]);
 
-/// A SHA1 digest as stored in a CHD header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct Sha1Digest(pub [u8; 20]);
-
-impl Sha1Digest {
-    /// The digest as 40 lowercase hex characters.
-    ///
-    /// ```
-    /// use mistarr_core::chd::Sha1Digest;
-    /// let d = Sha1Digest([0xab; 20]);
-    /// assert_eq!(&d.to_hex()[..4], "abab");
-    /// assert_eq!(Sha1Digest::from_hex(&d.to_hex()), Some(d));
-    /// ```
-    #[must_use]
-    pub fn to_hex(&self) -> String {
-        crate::hash::hex(&self.0)
-    }
-
-    /// Parses 40 hex characters, either case; `None` for anything else.
-    ///
-    /// ```
-    /// use mistarr_core::chd::Sha1Digest;
-    /// assert!(Sha1Digest::from_hex("00").is_none());
-    /// ```
-    #[must_use]
-    pub fn from_hex(s: &str) -> Option<Self> {
-        let bytes = s.as_bytes();
-        if bytes.len() != 40 {
-            return None;
-        }
-        let mut out = [0u8; 20];
-        for (o, pair) in out.iter_mut().zip(bytes.as_chunks::<2>().0) {
-            let hi = char::from(pair[0]).to_digit(16)?;
-            let lo = char::from(pair[1]).to_digit(16)?;
-            *o = u8::try_from(hi * 16 + lo).ok()?;
-        }
-        Some(Self(out))
-    }
-}
-
 /// Content identity of a CHD: the header's combined SHA1 and the file size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ChdId {
     /// Combined SHA1 of the raw data and checksummed metadata (header offset 84).
-    pub sha1: Sha1Digest,
+    pub sha1: Sha1,
     /// File size in bytes.
     pub size: u64,
 }
@@ -75,19 +37,19 @@ pub struct Header {
     /// Bytes per unit: always [`FRAME_BYTES`] for a CD.
     pub unit_bytes: u32,
     /// SHA1 of the decoded data.
-    pub raw_sha1: Sha1Digest,
+    pub raw_sha1: Sha1,
     /// SHA1 of the raw SHA1 and the checksummed metadata.
-    pub sha1: Sha1Digest,
+    pub sha1: Sha1,
 }
 
 impl Header {
     /// The identity of a file with this header and `file_size` bytes.
     ///
     /// ```
-    /// # use mistarr_core::chd::{Header, Sha1Digest};
+    /// # use mistarr_core::{chd::Header, Sha1};
     /// # let h = Header { compressors: [None; 4], logical_bytes: 2448, map_offset: 124,
     /// #     meta_offset: 0, hunk_bytes: 2448, unit_bytes: 2448,
-    /// #     raw_sha1: Sha1Digest([0; 20]), sha1: Sha1Digest([1; 20]) };
+    /// #     raw_sha1: Sha1::from_bytes([0; 20]), sha1: Sha1::from_bytes([1; 20]) };
     /// assert_eq!(h.id(500).size, 500);
     /// assert_eq!(h.id(500).sha1, h.sha1);
     /// ```
@@ -102,10 +64,10 @@ impl Header {
     /// Hunks in the image, the last one possibly partial.
     ///
     /// ```
-    /// # use mistarr_core::chd::{Header, Sha1Digest};
+    /// # use mistarr_core::{chd::Header, Sha1};
     /// # let h = Header { compressors: [None; 4], logical_bytes: 5 * 2448, map_offset: 124,
     /// #     meta_offset: 0, hunk_bytes: 2 * 2448, unit_bytes: 2448,
-    /// #     raw_sha1: Sha1Digest([0; 20]), sha1: Sha1Digest([0; 20]) };
+    /// #     raw_sha1: Sha1::from_bytes([0; 20]), sha1: Sha1::from_bytes([0; 20]) };
     /// assert_eq!((h.hunk_count(), h.frames_per_hunk()), (3, 2));
     /// ```
     #[must_use]
@@ -138,10 +100,10 @@ fn be64(b: &[u8], at: usize) -> u64 {
     u64::from_be_bytes(v)
 }
 
-fn sha(b: &[u8], at: usize) -> Sha1Digest {
+fn sha(b: &[u8], at: usize) -> Sha1 {
     let mut v = [0u8; 20];
     v.copy_from_slice(&b[at..at + 20]);
-    Sha1Digest(v)
+    Sha1::from_bytes(v)
 }
 
 /// Reads until `buf` is full or the reader ends, returning the bytes read.
@@ -275,11 +237,11 @@ pub(crate) mod tests {
         assert_eq!((h.hunk_bytes, h.logical_bytes), (8 * 2448, 10 * 2448));
         assert_eq!((h.hunk_count(), h.frames_per_hunk()), (2, 8));
         assert_eq!((h.map_offset, h.meta_offset), (1000, 124));
-        assert_eq!(h.raw_sha1, Sha1Digest([0x11; 20]));
+        assert_eq!(h.raw_sha1, Sha1::from_bytes([0x11; 20]));
         assert_eq!(
             h.id(77),
             ChdId {
-                sha1: Sha1Digest([0x22; 20]),
+                sha1: Sha1::from_bytes([0x22; 20]),
                 size: 77
             }
         );

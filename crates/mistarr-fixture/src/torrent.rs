@@ -6,7 +6,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 
-use mistarr_sources::bencode::{encode, Value};
+use mistarr_core::bencode::{encode, Value};
 use sha1::{Digest, Sha1};
 
 use crate::{io_at, walk, Error, Result};
@@ -110,7 +110,7 @@ pub fn build(dir: &Path, tracker: &str, web_seed: Option<&str>) -> Result<Vec<u8
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mistarr_sources::bencode::decode;
+    use mistarr_core::bencode::Raw;
     use mistarr_sources::torrent::parse_torrent;
 
     const TRACKER: &str = "http://tracker.invalid/announce";
@@ -136,7 +136,7 @@ mod tests {
             .map(|f| (f.path.as_str(), f.size))
             .collect();
         assert_eq!(files, [("a.bin", 262_154), ("sub/b.bin", 100)]);
-        let v = decode(&t).unwrap();
+        let v = Raw::parse(&t).unwrap().0;
         let info = v.get("info").unwrap();
         assert_eq!(info.get("pieces").unwrap().as_bytes().unwrap().len(), 40);
         assert_eq!(info.get("piece length").unwrap().as_int(), Some(262_144));
@@ -148,7 +148,7 @@ mod tests {
     fn second_piece_spans_the_file_boundary() {
         let root = tree();
         let t = build(&root.path().join("Synthetic Set"), TRACKER, None).unwrap();
-        let v = decode(&t).unwrap();
+        let v = Raw::parse(&t).unwrap().0;
         let pieces = v
             .get("info")
             .unwrap()
@@ -166,9 +166,9 @@ mod tests {
         let root = tree();
         let seed = "http://example.invalid/files/";
         let t = build(&root.path().join("Synthetic Set"), TRACKER, Some(seed)).unwrap();
-        let v = decode(&t).unwrap();
-        let list = v.get("url-list").unwrap().as_list().unwrap();
-        assert_eq!(list[0].as_str(), Some(seed));
+        let v = Raw::parse(&t).unwrap().0;
+        let mut list = v.get("url-list").unwrap().items();
+        assert_eq!(list.next().and_then(Raw::as_str), Some(seed));
     }
 
     #[test]

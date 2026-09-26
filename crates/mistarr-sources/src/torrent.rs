@@ -3,8 +3,9 @@
 
 use sha1::{Digest, Sha1};
 
-use crate::bencode::Raw;
 use crate::error::SourceError;
+use mistarr_core::bencode::{BencodeError, Raw};
+use mistarr_core::InfoHash;
 
 /// One file inside a torrent, as declared by the torrent itself.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -22,7 +23,7 @@ pub struct TorrentFile {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TorrentMeta {
     /// SHA1 of the bencoded `info` dict, the `BitTorrent` v1 infohash.
-    pub infohash: [u8; 20],
+    pub infohash: InfoHash,
     /// The torrent's `name` field.
     pub name: String,
     /// The declared files, in torrent order.
@@ -72,7 +73,7 @@ pub fn parse_torrent(data: &[u8]) -> Result<TorrentMeta, SourceError> {
         .iter()
         .try_fold(0u64, |sum, f| sum.checked_add(f.size))
         .ok_or(SourceError::BadField("info.files.length"))?;
-    let infohash: [u8; 20] = Sha1::digest(info_bytes).into();
+    let infohash = InfoHash::from_bytes(Sha1::digest(info_bytes).into());
 
     Ok(TorrentMeta {
         infohash,
@@ -92,22 +93,22 @@ pub fn parse_torrent(data: &[u8]) -> Result<TorrentMeta, SourceError> {
 ///
 /// ```
 /// let h = mistarr_sources::torrent::infohash(b"d4:infod4:name1:x6:lengthi1eee").unwrap();
-/// assert_eq!(h.len(), 20);
+/// assert_eq!(h.to_string().len(), 40);
 /// assert!(mistarr_sources::torrent::infohash(b"d4:infoi1ee").is_err());
 /// ```
-pub fn infohash(data: &[u8]) -> Result<[u8; 20], SourceError> {
+pub fn infohash(data: &[u8]) -> Result<InfoHash, SourceError> {
     let (_, info_bytes) = info_of(data)?;
-    Ok(Sha1::digest(info_bytes).into())
+    Ok(InfoHash::from_bytes(Sha1::digest(info_bytes).into()))
 }
 
 /// The `info` dict of a whole `.torrent` and its encoded bytes.
 fn info_of(data: &[u8]) -> Result<(Raw<'_>, &[u8]), SourceError> {
     let (top, len) = Raw::parse(data)?;
     if !matches!(top, Raw::Dict(_)) {
-        return Err(SourceError::MalformedBencode(0));
+        return Err(BencodeError::Malformed(0).into());
     }
     if len != data.len() {
-        return Err(SourceError::TrailingData);
+        return Err(BencodeError::TrailingData.into());
     }
     let (info, info_bytes) = top
         .entries()
@@ -344,8 +345,8 @@ mod tests {
         };
         let data = DictBuilder::new().field("info", info).build();
         let meta = parse_torrent(&data).unwrap();
-        assert_eq!(meta.infohash, expected);
-        assert_eq!(infohash(&data).unwrap(), expected);
+        assert_eq!(meta.infohash, InfoHash::from_bytes(expected));
+        assert_eq!(infohash(&data).unwrap(), InfoHash::from_bytes(expected));
     }
 
     #[test]
@@ -365,7 +366,7 @@ mod tests {
         };
         let data = DictBuilder::new().field("info", info).build();
         let meta = parse_torrent(&data).unwrap();
-        assert_eq!(meta.infohash, expected);
+        assert_eq!(meta.infohash, InfoHash::from_bytes(expected));
     }
 
     proptest::proptest! {

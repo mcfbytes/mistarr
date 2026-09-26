@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use mistarr_sources::bencode::{encode, Value};
+use mistarr_core::bencode::{encode, Value};
 
 use crate::{Error, Result};
 
@@ -314,7 +314,7 @@ mod tests {
 
     use std::fmt::Write as _;
 
-    use mistarr_sources::bencode::decode;
+    use mistarr_core::bencode::Raw;
 
     use super::*;
 
@@ -359,12 +359,13 @@ mod tests {
         let first = format!("{ANNOUNCE_PATH}?{}", query(&hash, "peer-one", 51413, ""));
         let (head, body) = get(&t, &first);
         assert!(head.starts_with("HTTP/1.0 200"), "{head}");
-        let v = decode(&body).unwrap();
+        let v = Raw::parse(&body).unwrap().0;
         assert_eq!(v.get("peers").unwrap().as_bytes(), Some(&[][..]));
         assert_eq!(v.get("interval").unwrap().as_int(), Some(INTERVAL_SECS));
 
         let second = format!("{ANNOUNCE_PATH}?{}", query(&hash, "peer-two", 6881, ""));
-        let v = decode(&get(&t, &second).1).unwrap();
+        let body = get(&t, &second).1;
+        let v = Raw::parse(&body).unwrap().0;
         let expected = [127, 0, 0, 1, 0xc8, 0xd5];
         assert_eq!(v.get("peers").unwrap().as_bytes(), Some(&expected[..]));
         assert_eq!(v.get("complete").unwrap().as_int(), Some(2));
@@ -410,7 +411,7 @@ mod tests {
         let swarms = Mutex::new(Swarms::new());
         let (status, body) = respond(b"GET /announce?port=1 HTTP/1.1\r\n\r\n", LOCAL, &swarms);
         assert_eq!(status, "200 OK");
-        let v = decode(&body).unwrap();
+        let v = Raw::parse(&body).unwrap().0;
         assert!(v.get("failure reason").is_some());
         assert_eq!(
             respond(b"POST / HTTP/1.1", LOCAL, &swarms).0,

@@ -203,7 +203,7 @@ pub fn check(
             let meta = mistarr_sources::torrent::parse_torrent(&bytes)
                 .map_err(|e| Refused::NotAccepted(format!("not a torrent: {e}")))?;
             Ok(Checked::Torrent {
-                infohash: meta.infohash,
+                infohash: *meta.infohash.as_bytes(),
                 bytes,
             })
         }

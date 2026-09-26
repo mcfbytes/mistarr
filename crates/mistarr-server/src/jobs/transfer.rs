@@ -3,9 +3,7 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mistarr_clients::{
-    ClientError, ClientTorrentId, DownloadClient, InfoHash, SeedPolicy, TorrentSource,
-};
+use mistarr_clients::{ClientError, ClientTorrentId, DownloadClient, SeedPolicy, TorrentSource};
 use mistarr_sources::torrent;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -286,7 +284,7 @@ async fn metainfo(app: &AppState, row: &SourceRow) -> Option<Vec<u8>> {
         .join(&row.origin_file);
     let bytes = tokio::fs::read(&path).await.ok()?;
     let hash = torrent::infohash(&bytes).ok()?;
-    (InfoHash::from_bytes(hash).to_string() == row.infohash).then_some(bytes)
+    (hash.to_string() == row.infohash).then_some(bytes)
 }
 
 #[async_trait]
@@ -484,7 +482,7 @@ mod tests {
         )
         .into_bytes();
         let meta = torrent::parse_torrent(&bytes).expect("torrent");
-        let hash = InfoHash::from_bytes(meta.infohash).to_string();
+        let hash = meta.infohash.to_string();
         let origin = format!("s{byte}.torrent");
         let loaded = app
             .config()

@@ -12,8 +12,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use mistarr_clients::{ClientError, ClientTorrentId, InfoHash};
+use mistarr_core::magnet;
 use mistarr_core::PlatformId;
-use mistarr_sources::{magnet, torrent};
+use mistarr_sources::torrent;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use super::{ApiError, Page, Paging};
@@ -385,7 +386,7 @@ async fn upload(
             Ok::<_, ApiError>(SourceFile {
                 name: file_name(&filename, "upload", "torrent"),
                 bytes: data.to_vec(),
-                infohash: meta.infohash,
+                infohash: *meta.infohash.as_bytes(),
                 is_torrent: true,
             })
         })
@@ -424,12 +425,12 @@ pub(crate) fn magnet_file(uri: &str) -> Result<SourceFile, ApiError> {
     let uri = uri.trim();
     let parsed = magnet::parse_magnet(uri)
         .map_err(|e| ApiError::bad_request(format!("Not a valid magnet: {e}.")))?;
-    let hex = InfoHash::from_bytes(parsed.infohash).to_string();
+    let hex = parsed.infohash.to_string();
     let stem = parsed.display_name.unwrap_or_else(|| hex.clone());
     Ok(SourceFile {
         name: file_name(&stem, &hex, "magnet"),
         bytes: format!("{uri}\n").into_bytes(),
-        infohash: parsed.infohash,
+        infohash: *parsed.infohash.as_bytes(),
         is_torrent: false,
     })
 }
