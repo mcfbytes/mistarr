@@ -22,7 +22,7 @@ gives; confirm them on the board together with the **verify** rows.
 
 | id | DAT name matches | core dir | ext written | adapter notes |
 |---|---|---|---|---|
-| `nes` | `Nintendo Entertainment System`, `NES` | `NES` | `.nes` | Use the **headered** No-Intro DAT. The core needs an iNES header. If only the headerless DAT is loaded, hash with the 16-byte header stripped for matching, but never strip on disk. From a DB export the headerless entries are used, and placement adds the header back from the recorded `header` attribute (VERIFICATION.md "DB export"). |
+| `nes` | `Nintendo Entertainment System`, `NES` | `NES` | `.nes` | Use the **headered** No-Intro DAT. The core needs an iNES header. A headered file is hashed whole and with its 16-byte header stripped, in one pass, so it matches the headered and the headerless DAT alike ("Header rules"); the header is never stripped on disk. From a DB export the headerless entries are used, and placement adds the header back from the recorded `header` attribute (VERIFICATION.md "DB export"). |
 | `fds` | `Famicom Disk System`, `Family Computer Disk System` | `NES` | `.fds` | Same directory as NES. Needs BIOS `boot0.rom`: report only. |
 | `snes` | `Super Nintendo Entertainment System`, `Super Famicom`, `Satellaview` | `SNES` | `.sfc` | Strip 512-byte copier headers on `.smc` when hashing and on disk. |
 | `n64` | `Nintendo 64` | `N64` | `.z64` | Use the **BigEndian** DAT. Convert `.v64`/`.n64` to big-endian on placement. |
@@ -38,8 +38,8 @@ gives; confirm them on the board together with the **verify** rows.
 | `sgx` | `SuperGrafx` | `TGFX16` | `.sgx` | |
 | `atari2600` | `Atari 2600` | `Atari2600` | `.a26` | |
 | `atari5200` | `Atari 5200` | `Atari5200` | `.a52` | |
-| `atari7800` | `Atari 7800` | `Atari7800` | `.a78` | Headered DAT. |
-| `lynx` | `Atari Lynx` | `AtariLynx` | `.lnx` | Headered DAT. |
+| `atari7800` | `Atari 7800` | `Atari7800` | `.a78` | Headered DAT. A headerless DAT matches too: files are hashed with and without the 128-byte header ("Header rules"). |
+| `lynx` | `Atari Lynx` | `AtariLynx` | `.lnx` | Headered DAT. A headerless DAT matches too: files are hashed with and without the 64-byte header ("Header rules"). |
 | `coleco` | `ColecoVision` | `Coleco` | `.col` | Needs BIOS `boot0.rom`: report only. |
 | `intv` | `Intellivision` | `Intellivision` | `.int` | Needs BIOS `boot0.rom`: report only. |
 | `ws` | `WonderSwan` | `WonderSwan` | `.ws` | |
@@ -354,15 +354,24 @@ Every adapter implements `CoreAdapter` from ARCHITECTURE.md and must provide:
 
 ## Header rules
 
-Hashing rules keyed by platform, applied in `hash_reader`:
+Hashing rules keyed by platform, applied in `hash_reader` and `hash_forms`:
 
 | rule | behaviour |
 |---|---|
 | `none` | hash whole file |
-| `ines` | if the file starts with `NES\x1a`, hash from byte 16 when matching a headerless DAT |
+| `ines` | if the file starts with `NES\x1a`, hash the whole file and, in the same pass, the content from byte 16 |
 | `smc` | if size mod 1024 is 512, skip the first 512 bytes |
-| `a78` | skip 128-byte header when matching a headerless DAT |
-| `lnx` | skip 64-byte header when present |
+| `a78` | if bytes 1 to 9 are `ATARI7800`, hash the whole file and the content after the 128-byte header |
+| `lnx` | if the file starts with `LYNX`, hash the whole file and the content after the 64-byte header |
 | `n64` | detect byte order from the first four bytes and normalise to big-endian while hashing |
+
+`ines`, `a78` and `lnx` strip a header: a file with the header's magic has two
+forms, and it matches a headered DAT by its whole hashes and size and a
+headerless DAT by its content's hashes and the size less the header, the whole
+file tried first. Both sets are stored (DATA-MODEL.md `files`), so a DAT loaded
+later matches either way without reading the file again. A file without the
+magic has one form, the whole file, and matches only by it. `smc` has no
+headered form in any DAT, and `n64` DATs list the big-endian form only, so both
+keep one set of hashes. Headers are never stripped on disk.
 
 Each rule is a pure function with unit tests in `mistarr-core`.

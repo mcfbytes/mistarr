@@ -64,6 +64,7 @@ fn row(id: i64, rel: &str, size: i64, mtime: i64, rom: Option<i64>, state: FileS
         md5: Some("m".into()),
         sha1: Some("s".into()),
         header_rule: Some("none".into()),
+        whole: crate::db::files::WholeHashes::default(),
         rom_id: rom,
         state,
         scanned_at: 1,
@@ -442,6 +443,7 @@ fn import_row(app: &Arc<AppState>, rel: &str, mtime: i64, rom: i64) -> i64 {
                 md5: Some("0123456789abcdef0123456789abcdef"),
                 sha1: None,
                 header_rule: Some("none"),
+                whole: None,
             };
             let id = files::upsert(c, &pid(), &member, 1, mtime, &h, Some(rom), FileState::Verified, 1)?;
             c.execute(

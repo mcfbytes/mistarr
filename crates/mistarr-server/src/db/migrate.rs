@@ -356,7 +356,7 @@ mod tests {
                       ('bb', 'Automatic', 'b.torrent', 'unbound', 0, 0);",
         )
         .expect("sources");
-        assert_eq!(apply(&mut conn).expect("apply"), [19]);
+        assert_eq!(apply(&mut conn).expect("apply").first(), Some(&19));
         let rows: Vec<(bool, Option<String>, Option<String>)> = conn
             .prepare("SELECT user_binding, reason, bind_pending FROM sources ORDER BY id")
             .expect("prepare")
@@ -370,6 +370,57 @@ mod tests {
             [(true, Some(ignored), None), (false, None, None)],
             "the user's choice survives as user_binding with its reason"
         );
+    }
+
+    #[test]
+    fn rows_hashed_without_the_whole_file_queue_a_scan_of_their_platform() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        let whole = MIGRATIONS
+            .iter()
+            .find(|m| m.name.ends_with("_whole_hashes"))
+            .expect("the whole-hashes migration");
+        for m in MIGRATIONS.iter().filter(|m| m.version < whole.version) {
+            conn.execute_batch(m.sql).expect("migration");
+        }
+        crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+        crate::db::platforms::set_enabled(&conn, "lynx", false).expect("disable");
+        let insert = |platform: &str, rel: &str, rule: Option<&str>, sha1: Option<&str>| {
+            conn.execute(
+                "INSERT INTO files (platform_id, rel_path, size, mtime, sha1, header_rule, state,
+                                    scanned_at)
+                 VALUES (?1, ?2, 9, 0, ?3, ?4, 'verified', 0)",
+                params![platform, rel, sha1, rule],
+            )
+            .expect("file");
+        };
+        insert("nes", "NES/a.zip#a.nes", Some("ines"), Some("aa"));
+        insert("atari7800", "Atari7800/b.a78", Some("a78"), Some("bb"));
+        insert("lynx", "AtariLynx/c.lnx", Some("lnx"), Some("cc"));
+        insert("snes", "SNES/d.sfc", Some("smc"), Some("dd"));
+        insert("gba", "GBA/e.zip#e.gba", None, None);
+        insert("nes", "NES/f.zip#f.nes", Some("ines"), None);
+        conn.execute_batch(whole.sql)
+            .expect("the whole-hashes migration");
+        let queued: Vec<String> = conn
+            .prepare("SELECT platform_id FROM scan_progress ORDER BY platform_id")
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(
+            queued,
+            ["atari7800", "nes"],
+            "enabled platforms with stale rows only"
+        );
+        let whole_sha1: Option<String> = conn
+            .query_row(
+                "SELECT sha1_whole FROM files WHERE platform_id = 'nes'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("column");
+        assert_eq!(whole_sha1, None);
     }
 
     #[test]

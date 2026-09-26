@@ -194,6 +194,7 @@ fn existing_file(b: &Booted, rel: &str, data: &[u8], rom_id: Option<i64>, st: Fi
                 md5: Some(&h.md5),
                 sha1: Some(&h.sha1),
                 header_rule: Some("ines"),
+                whole: None,
             };
             files::upsert(
                 c,
@@ -240,6 +241,11 @@ async fn headerless_nes_is_placed_with_the_dat_header() {
     let row = file_at(&b, "nes", NES_TARGET).expect("files row");
     assert_eq!((row.state, row.rom_id), (FileState::Verified, Some(rom)));
     assert_eq!(row.sha1.as_deref(), Some(hash_of(&body).sha1.as_str()));
+    assert_eq!(
+        row.whole.sha1,
+        Some(hash_of(&placed).sha1),
+        "the whole form is of the file on disk, header added"
+    );
     let entries = log(&b);
     assert_eq!(entries[0].action, "placed");
     assert_eq!(entries[0].download_id, Some(id.0));
@@ -248,6 +254,31 @@ async fn headerless_nes_is_placed_with_the_dat_header() {
         .await
         .json();
     assert_eq!(detail["variants"][0]["roms"][0]["file_state"], "verified");
+    b.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn headered_nes_matches_a_headered_dat_and_is_placed_unchanged() {
+    let b = boot().await;
+    let mut file = ines_bytes();
+    file.extend_from_slice(&payload(3, 32 * 1024));
+    let (_, rom) = entry(
+        &b,
+        "nes",
+        "Example Quest (USA)",
+        "Example Quest (USA).nes",
+        &hash_of(&file),
+    );
+    let src = source(&b, None);
+    let staged = stage(&b, "NES/example.nes", &file);
+    let id = hand_off(&b, rom, src, 0, &staged);
+    settled(&b, id, DownloadState::Done).await;
+    let placed = std::fs::read(games(&b).join(NES_TARGET)).expect("placed");
+    assert_eq!(placed, file, "never stripped on disk");
+    let row = file_at(&b, "nes", NES_TARGET).expect("files row");
+    assert_eq!((row.state, row.rom_id), (FileState::Verified, Some(rom)));
+    assert_eq!(row.whole.sha1, Some(hash_of(&file).sha1));
+    assert_eq!(row.sha1, Some(hash_of(&file[16..]).sha1));
     b.running.shutdown().await.expect("shutdown");
 }
 

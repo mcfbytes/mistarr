@@ -175,15 +175,97 @@ pub(crate) fn hex(bytes: &[u8]) -> String {
 /// assert_eq!(hashes.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
 /// ```
 pub fn hash_reader<R: Read>(r: R, rule: HeaderRule, size_hint: Option<u64>) -> io::Result<HashSet> {
+    Ok(hash_under(r, rule, size_hint, false)?.content)
+}
+
+/// A payload's hashes in the forms its header rule gives, per
+/// `docs/VERIFICATION.md` "Hashing".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderForms {
+    /// The content after the rule: header stripped, byte order normalised.
+    pub content: HashSet,
+    /// The whole payload, header included, when a stripping rule found and
+    /// stripped a header; `None` when `content` already is the whole payload
+    /// or the rule is not one of [`HeaderRule::strips_header`].
+    pub whole: Option<HashSet>,
+}
+
+impl HeaderForms {
+    /// The whole payload's hashes: [`Self::whole`] when a header was stripped, else [`Self::content`].
+    ///
+    /// ```
+    /// use mistarr_core::hash::{hash_forms, HeaderRule};
+    /// let forms = hash_forms(&b"abc"[..], HeaderRule::Ines, None).unwrap();
+    /// assert_eq!(forms.whole_or_content(), &forms.content);
+    /// ```
+    #[must_use]
+    pub fn whole_or_content(&self) -> &HashSet {
+        self.whole.as_ref().unwrap_or(&self.content)
+    }
+}
+
+/// [`hash_reader`], also hashing the whole payload in the same pass when a
+/// stripping rule finds its header, so a file matches headered and headerless
+/// DATs alike. Two hasher sets share the one read buffer.
+///
+/// # Errors
+///
+/// Returns an error if reading from `r` fails.
+///
+/// ```
+/// use mistarr_core::hash::{hash_forms, hash_reader, HeaderRule};
+///
+/// let mut file = b"NES\x1a".to_vec();
+/// file.resize(16, 0);
+/// file.extend_from_slice(b"abc");
+/// let forms = hash_forms(&file[..], HeaderRule::Ines, None).unwrap();
+/// assert_eq!(forms.content.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+/// let whole = forms.whole.unwrap();
+/// assert_eq!(whole, hash_reader(&file[..], HeaderRule::None, None).unwrap());
+/// ```
+pub fn hash_forms<R: Read>(
+    r: R,
+    rule: HeaderRule,
+    size_hint: Option<u64>,
+) -> io::Result<HeaderForms> {
+    hash_under(r, rule, size_hint, true)
+}
+
+fn hash_under<R: Read>(
+    r: R,
+    rule: HeaderRule,
+    size_hint: Option<u64>,
+    both: bool,
+) -> io::Result<HeaderForms> {
+    let content = match rule {
+        HeaderRule::Ines | HeaderRule::A78 | HeaderRule::Lnx => {
+            return hash_header_forms(r, rule, both)
+        }
+        HeaderRule::None => hash_stream(r, &[])?,
+        HeaderRule::Smc => hash_smc(r, size_hint)?,
+        HeaderRule::N64 => hash_n64(r)?,
+    };
+    Ok(HeaderForms {
+        content,
+        whole: None,
+    })
+}
+
+/// Bytes a stripping rule reads to recognise its header.
+fn probe_len(rule: HeaderRule) -> usize {
     match rule {
-        HeaderRule::None => hash_stream(r, &[]),
-        HeaderRule::Ines => hash_with_magic_skip(r, 4, INES_HEADER, |p| p == b"NES\x1a"),
-        HeaderRule::Smc => hash_smc(r, size_hint),
-        HeaderRule::A78 => hash_with_magic_skip(r, 10, A78_HEADER, |p| {
-            p.len() >= 10 && &p[1..10] == b"ATARI7800"
-        }),
-        HeaderRule::Lnx => hash_with_magic_skip(r, 4, LNX_HEADER, |p| p == b"LYNX"),
-        HeaderRule::N64 => hash_n64(r),
+        HeaderRule::A78 => 10,
+        _ => 4,
+    }
+}
+
+/// Whether `head`, a payload's first bytes, starts with the header `rule` strips.
+fn header_found(rule: HeaderRule, head: &[u8]) -> bool {
+    match rule {
+        HeaderRule::Ines => head.starts_with(b"NES\x1a"),
+        HeaderRule::A78 => head.get(1..10) == Some(&b"ATARI7800"[..]),
+        HeaderRule::Lnx => head.starts_with(b"LYNX"),
+        _ => false,
     }
 }
 
@@ -228,18 +310,73 @@ fn discard<R: Read>(r: &mut R, mut n: usize) -> io::Result<()> {
     Ok(())
 }
 
-fn hash_with_magic_skip<R: Read>(
-    mut r: R,
-    probe_len: usize,
-    skip_len: usize,
-    matches: impl Fn(&[u8]) -> bool,
-) -> io::Result<HashSet> {
-    let probe = read_probe(&mut r, probe_len)?;
-    if matches(&probe) {
-        discard(&mut r, skip_len - probe.len())?;
-        hash_stream(r, &[])
-    } else {
-        hash_stream(r, &probe)
+fn hash_header_forms<R: Read>(mut r: R, rule: HeaderRule, both: bool) -> io::Result<HeaderForms> {
+    let probe = read_probe(&mut r, probe_len(rule))?;
+    let content_only = |content| HeaderForms {
+        content,
+        whole: None,
+    };
+    if !header_found(rule, &probe) {
+        return hash_stream(r, &probe).map(content_only);
+    }
+    let header = rule.header_len();
+    if !both {
+        // Every header is longer than its probe, and at most 128 bytes.
+        #[allow(clippy::cast_possible_truncation)]
+        discard(&mut r, header as usize - probe.len())?;
+        return hash_stream(r, &[]).map(content_only);
+    }
+    let mut dual = Skipping::new(header);
+    dual.update(&probe);
+    let mut buf = vec![0u8; BUF_SIZE];
+    loop {
+        let n = r.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        dual.update(&buf[..n]);
+    }
+    let (whole, content) = dual.finish();
+    Ok(HeaderForms {
+        content,
+        whole: Some(whole),
+    })
+}
+
+/// Two hasher sets fed the same bytes: one the whole stream, one all but its first `skip` bytes.
+struct Skipping {
+    whole: Hashers,
+    skipped: Hashers,
+    skip: u64,
+    pos: u64,
+}
+
+impl Skipping {
+    fn new(skip: u64) -> Self {
+        Self {
+            whole: Hashers::new(),
+            skipped: Hashers::new(),
+            skip,
+            pos: 0,
+        }
+    }
+
+    fn update(&mut self, chunk: &[u8]) {
+        self.whole.update(chunk);
+        let start = self.pos;
+        self.pos += chunk.len() as u64;
+        if start >= self.skip {
+            self.skipped.update(chunk);
+        } else if self.pos > self.skip {
+            // start < skip here, so the difference always fits in usize.
+            #[allow(clippy::cast_possible_truncation)]
+            self.skipped.update(&chunk[(self.skip - start) as usize..]);
+        }
+    }
+
+    /// The whole stream's hashes, then the skipped stream's.
+    fn finish(self) -> (HashSet, HashSet) {
+        (self.whole.finish(), self.skipped.finish())
     }
 }
 
@@ -253,32 +390,21 @@ fn hash_smc<R: Read>(mut r: R, size_hint: Option<u64>) -> io::Result<HashSet> {
     }
     // No size known up front: run whole-file and header-skipped hashers in
     // parallel and pick the right one once the total size is known at EOF.
-    let mut whole = Hashers::new();
-    let mut skipped = Hashers::new();
+    let mut dual = Skipping::new(header);
     let mut buf = vec![0u8; BUF_SIZE];
-    let mut total: u64 = 0;
     loop {
         let n = r.read(&mut buf)?;
         if n == 0 {
             break;
         }
-        let chunk = &buf[..n];
-        whole.update(chunk);
-        let pos_before = total;
-        total += n as u64;
-        if pos_before >= header {
-            skipped.update(chunk);
-        } else if total > header {
-            // pos_before < header here, so the difference always fits in usize.
-            #[allow(clippy::cast_possible_truncation)]
-            let split = (header - pos_before) as usize;
-            skipped.update(&chunk[split..]);
-        }
+        dual.update(&buf[..n]);
     }
+    let total = dual.pos;
+    let (whole, skipped) = dual.finish();
     Ok(if total % 1024 == header {
-        skipped.finish()
+        skipped
     } else {
-        whole.finish()
+        whole
     })
 }
 
@@ -416,6 +542,98 @@ pub fn hash_zip_member<R: Read + Seek>(
     let file = archive.by_name(name)?;
     let size_hint = Some(file.size());
     Ok(hash_reader(file, rule, size_hint)?)
+}
+
+/// Decompresses one zip member by name and hashes it through [`hash_forms`].
+///
+/// # Errors
+///
+/// As [`hash_zip_member`].
+///
+/// ```
+/// use mistarr_core::hash::{hash_zip_member_forms, HeaderRule};
+/// use std::io::{Cursor, Write};
+///
+/// let mut buf = Vec::new();
+/// let mut zip = zip::ZipWriter::new(Cursor::new(&mut buf));
+/// zip.start_file("a.lnx", zip::write::SimpleFileOptions::default()).unwrap();
+/// zip.write_all(b"abc").unwrap();
+/// zip.finish().unwrap();
+///
+/// let forms = hash_zip_member_forms(Cursor::new(buf), "a.lnx", HeaderRule::Lnx).unwrap();
+/// assert_eq!((forms.content.size, forms.whole), (3, None));
+/// ```
+pub fn hash_zip_member_forms<R: Read + Seek>(
+    r: R,
+    name: &str,
+    rule: HeaderRule,
+) -> Result<HeaderForms, HashError> {
+    let mut archive = zip::ZipArchive::new(r)?;
+    let file = archive.by_name(name)?;
+    let size_hint = Some(file.size());
+    Ok(hash_forms(file, rule, size_hint)?)
+}
+
+/// The CRC32 of a zip member's content once `rule` strips its header, from the
+/// central directory's whole-member CRC32 and the header bytes alone: only the
+/// header is decompressed. `None` when the rule strips nothing or the member
+/// does not start with its header, so its content is the whole member.
+///
+/// # Errors
+///
+/// As [`hash_zip_member`], or when `member.crc32` is not 8 hex digits.
+///
+/// ```
+/// use mistarr_core::hash::{hash_reader, zip_member_content_crc, zip_members, HeaderRule};
+/// use std::io::{Cursor, Write};
+///
+/// let mut rom = b"LYNX".to_vec();
+/// rom.resize(64, 0);
+/// rom.extend_from_slice(b"abc");
+/// let mut buf = Vec::new();
+/// let mut zip = zip::ZipWriter::new(Cursor::new(&mut buf));
+/// zip.start_file("a.lnx", zip::write::SimpleFileOptions::default()).unwrap();
+/// zip.write_all(&rom).unwrap();
+/// zip.finish().unwrap();
+///
+/// let member = &zip_members(Cursor::new(&buf)).unwrap()[0];
+/// let crc = zip_member_content_crc(Cursor::new(&buf), member, HeaderRule::Lnx).unwrap();
+/// assert_eq!(crc.as_deref(), Some("352441c2"));
+/// ```
+pub fn zip_member_content_crc<R: Read + Seek>(
+    r: R,
+    member: &ZipMember,
+    rule: HeaderRule,
+) -> Result<Option<String>, HashError> {
+    if !rule.strips_header() || member.size < rule.header_len() {
+        return Ok(None);
+    }
+    let whole = u32::from_str_radix(&member.crc32, 16)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "member CRC32 is not hex"))?;
+    let mut archive = zip::ZipArchive::new(r)?;
+    // At most 128 bytes, so the length always fits in usize.
+    #[allow(clippy::cast_possible_truncation)]
+    let head = read_probe(
+        &mut archive.by_name(&member.name)?,
+        rule.header_len() as usize,
+    )?;
+    if !header_found(rule, &head) || (head.len() as u64) < rule.header_len() {
+        return Ok(None);
+    }
+    Ok(Some(format!(
+        "{:08x}",
+        strip_crc(whole, &head, member.size - rule.header_len())
+    )))
+}
+
+/// The CRC32 of the last `rest` bytes of a stream whose CRC32 is `whole` and
+/// which starts with `head`: CRC32 is linear, so `crc(head ++ rest)` is
+/// `crc(head)` shifted over `rest` bytes, XOR `crc(rest)`.
+fn strip_crc(whole: u32, head: &[u8], rest: u64) -> u32 {
+    let mut shifted =
+        crc32fast::Hasher::new_with_initial_len(crc32fast::hash(head), head.len() as u64);
+    shifted.combine(&crc32fast::Hasher::new_with_initial_len(0, rest));
+    whole ^ shifted.finalize()
 }
 
 /// Incremental MD5 over bytes fed in order, for a digest that spans several inputs.
@@ -776,5 +994,148 @@ mod tests {
     fn hash_zip_member_missing_name_errors() {
         let err = hash_zip_member(Cursor::new(build_zip()), "missing.bin", HeaderRule::None);
         assert!(err.is_err());
+    }
+
+    /// A reader handing out at most `chunk` bytes per read, to move the buffer boundaries.
+    struct Chunked<'a> {
+        data: &'a [u8],
+        chunk: usize,
+    }
+
+    impl Read for Chunked<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let n = self.chunk.min(buf.len()).min(self.data.len());
+            buf[..n].copy_from_slice(&self.data[..n]);
+            self.data = &self.data[n..];
+            Ok(n)
+        }
+    }
+
+    /// A payload of `len` bytes starting with `rule`'s header when `headered`.
+    #[allow(clippy::cast_possible_truncation)] // A byte-filler pattern.
+    fn synthetic(rule: HeaderRule, headered: bool, len: usize) -> Vec<u8> {
+        let mut data: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
+        let magic: &[u8] = match rule {
+            HeaderRule::Ines => b"NES\x1a",
+            HeaderRule::A78 => b"\x01ATARI7800",
+            _ => b"LYNX",
+        };
+        if headered && len >= magic.len() {
+            data[..magic.len()].copy_from_slice(magic);
+        } else if !data.is_empty() {
+            data[0] = b'x';
+        }
+        data
+    }
+
+    fn plain(data: &[u8]) -> HashSet {
+        hash_reader(data, HeaderRule::None, None).expect("hash")
+    }
+
+    #[test]
+    fn forms_of_a_headered_file_are_the_whole_file_and_its_content() {
+        for rule in [HeaderRule::Ines, HeaderRule::A78, HeaderRule::Lnx] {
+            let data = synthetic(rule, true, 1000);
+            let forms = hash_forms(&data[..], rule, None).expect("hash");
+            let header = usize::try_from(rule.header_len()).expect("len");
+            assert_eq!(forms.content, plain(&data[header..]), "{rule:?}");
+            assert_eq!(forms.whole.as_ref(), Some(&plain(&data)), "{rule:?}");
+            assert_eq!(
+                forms.content,
+                hash_reader(&data[..], rule, None).expect("hash")
+            );
+        }
+    }
+
+    #[test]
+    fn forms_of_a_file_without_a_header_are_one() {
+        for rule in [
+            HeaderRule::Ines,
+            HeaderRule::A78,
+            HeaderRule::Lnx,
+            HeaderRule::None,
+        ] {
+            let data = synthetic(rule, false, 1000);
+            let forms = hash_forms(&data[..], rule, None).expect("hash");
+            assert_eq!(
+                (forms.content.clone(), forms.whole.clone()),
+                (plain(&data), None)
+            );
+            assert_eq!(forms.whole_or_content(), &plain(&data));
+        }
+    }
+
+    #[test]
+    fn forms_of_other_rules_keep_only_the_content() {
+        let mut smc = vec![0xffu8; 512];
+        smc.extend(vec![1u8; 1024]);
+        let forms = hash_forms(&smc[..], HeaderRule::Smc, None).expect("hash");
+        assert_eq!((forms.content, forms.whole), (plain(&smc[512..]), None));
+    }
+
+    #[test]
+    fn zip_forms_and_content_crc_agree_with_the_payload() {
+        for rule in [HeaderRule::Ines, HeaderRule::A78, HeaderRule::Lnx] {
+            for headered in [true, false] {
+                let data = synthetic(rule, headered, 700);
+                let mut buf = Vec::new();
+                let mut zip = zip::ZipWriter::new(Cursor::new(&mut buf));
+                let opts = zip::write::SimpleFileOptions::default();
+                zip.start_file("a.bin", opts).unwrap();
+                zip.write_all(&data).unwrap();
+                zip.finish().unwrap();
+                let member = &zip_members(Cursor::new(&buf)).unwrap()[0];
+                let forms = hash_zip_member_forms(Cursor::new(&buf), "a.bin", rule).unwrap();
+                assert_eq!(forms, hash_forms(&data[..], rule, None).unwrap());
+                let crc = zip_member_content_crc(Cursor::new(&buf), member, rule).unwrap();
+                let expect = headered.then(|| forms.content.crc32.clone());
+                assert_eq!(crc, expect, "{rule:?} headered={headered}");
+            }
+        }
+    }
+
+    #[test]
+    fn content_crc_is_none_for_rules_that_strip_nothing_or_short_members() {
+        let member = ZipMember {
+            name: "a.bin".into(),
+            size: 3,
+            crc32: "352441c2".into(),
+        };
+        let none = zip_member_content_crc(Cursor::new(build_zip()), &member, HeaderRule::None);
+        assert!(none.unwrap().is_none());
+        let short = zip_member_content_crc(Cursor::new(build_zip()), &member, HeaderRule::Ines);
+        assert!(short.unwrap().is_none());
+    }
+
+    proptest::proptest! {
+        #[test]
+        fn dual_hashing_agrees_with_each_form_alone(
+            len in 0usize..700,
+            chunk in 1usize..300,
+            headered in proptest::bool::ANY,
+            which in 0usize..3,
+        ) {
+            let rule = [HeaderRule::Ines, HeaderRule::A78, HeaderRule::Lnx][which];
+            let data = synthetic(rule, headered, len);
+            let forms = hash_forms(Chunked { data: &data, chunk }, rule, None).expect("hash");
+            let alone = hash_reader(Chunked { data: &data, chunk }, rule, None).expect("hash");
+            proptest::prop_assert_eq!(&forms.content, &alone);
+            proptest::prop_assert_eq!(forms.whole_or_content(), &plain(&data));
+            if forms.whole.is_some() {
+                let header = usize::try_from(rule.header_len()).expect("len").min(len);
+                proptest::prop_assert_eq!(&forms.content, &plain(&data[header..]));
+            }
+        }
+
+        #[test]
+        fn a_stripped_crc_is_the_crc_of_the_rest(
+            head in proptest::collection::vec(proptest::num::u8::ANY, 0..130),
+            rest in proptest::collection::vec(proptest::num::u8::ANY, 0..600),
+        ) {
+            let mut all = head.clone();
+            all.extend_from_slice(&rest);
+            let got = strip_crc(crc32fast::hash(&all), &head, rest.len() as u64);
+            proptest::prop_assert_eq!(got, crc32fast::hash(&rest));
+        }
     }
 }

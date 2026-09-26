@@ -88,6 +88,7 @@ pub trait CoreAdapter: Send + Sync {
 // mistarr-core
 pub struct HashSet { pub size: u64, pub crc32: u32, pub md5: [u8;16], pub sha1: [u8;20] }
 pub fn hash_reader<R: Read>(r: R, rule: HeaderRule, size_hint: Option<u64>) -> io::Result<HashSet>;
+pub fn hash_forms<R: Read>(r: R, rule: HeaderRule, size_hint: Option<u64>) -> io::Result<HeaderForms>; // content, and the whole file when a header was stripped
 pub fn parse_dat(xml: &[u8]) -> Result<Dat>;
 pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 ```
@@ -193,13 +194,16 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    not hashed again. An unchanged, fully hashed file with no rom is matched
    from its stored hashes, and an unchanged zip member never hashed, known by
    its CRC32 alone, is hashed once a rom of that CRC32 and size exists
-   (VERIFICATION.md "Matching stored hashes"); other unchanged files are
-   skipped. New or changed files are hashed in one streaming pass with the
-   platform's header rule. Zip members are hashed through the decompressor,
-   and the zip central-directory CRC is used as a pre-check to skip hashing
-   members that cannot match anything.
-3. Match by SHA1, then MD5, then CRC32 plus size. Record `verified`,
-   `unverified` (no DAT match) or `misnamed` (match but wrong filename, by
+   (VERIFICATION.md "Matching stored hashes"); a file hashed under a rule
+   that strips a header but stored without its whole-file hashes is hashed
+   again; other unchanged files are skipped. New or changed files are hashed
+   in one streaming pass with the platform's header rule, in both forms when
+   that rule strips a header it found. Zip members are hashed through the
+   decompressor, and the zip central-directory CRC is used as a pre-check to
+   skip hashing members that cannot match anything.
+3. Match by SHA1, then MD5, then CRC32 plus size, the whole file first and
+   then its content without the header. Record `verified`, `unverified` (no
+   DAT match) or `misnamed` (match but wrong filename, by
    VERIFICATION.md "File names").
 4. Rows the walk did not see are deleted at the end, except under a
    directory that exists but could not be listed, whose rows are kept.
@@ -562,8 +566,9 @@ it is already queued or running. A download that fails or is cancelled also wake
 tracks of its entry that wait for it. A job whose row has left `importing`
 does nothing.
 
-1. Hash the staged file with the platform's header rule, every member of a
-   staged zip, and match it against the roms of the download's own entry, so
+1. Hash the staged file with the platform's header rule, in both forms when
+   that rule strips a header it found, every member of a staged zip, and
+   match it in either form against the roms of the download's own entry, so
    byte-identical regional variants and identical disc tracks resolve to the
    wanted rom. Only when nothing of the entry matches is the rest of the DAT
    searched. A cartridge file that is a live rom of another live, non-BIOS
@@ -607,7 +612,10 @@ does nothing.
    treats a track whose staged file is gone but whose rom has a verified file
    as placed, and completes the rest.
 5. Update `files` with the rows the library scan would write (one per member
-   of a zip placed whole, as `a.zip#member`), which marks the title `have`,
+   of a zip placed whole, as `a.zip#member`; a file that gained a header on
+   placement is hashed again from the library, so its whole-file hashes are
+   of the file on disk, or stored without them for the next scan to hash
+   when that read fails), which marks the title `have`,
    log the action in `import_log`, set the downloads `done` and emit
    `import.done`.
 6. Once a source has a download that placed its file (`done`, or `bad`
@@ -704,7 +712,7 @@ shutdown is left `queued` for this.
 | DAT stage | in `/tmp/mistarr` while a DAT loads, about 1.5 times the DAT's size (18 MB for 20 000 games of three roms), given back when the load ends, as the temporary database vacuums itself. A load in RAM keeps its stage in the same place, beside the copy on the same tmpfs, and when `/tmp` fills it drops the copy and loads on the card; a load on the card whose `/tmp` fills fails naming `/tmp/mistarr`, the database unchanged |
 | SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import in RAM holds the writer from its copy to its swap; one on the card, already on a blocking thread, takes it per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
 | DAT import or migration in RAM | a copy in `[memory] import_dir`, tmpfs, so it counts in `MemAvailable` and not in RSS: the database, what the import adds and the copy's rollback journal. Made only when `MemAvailable` covers the file's size and half again, six times the DATs' uncompressed size for the rows and the stage in SQLite's temporary files, and 32 MiB, above `[memory] import_floor_mib` (128 MiB), and dropped when `MemAvailable` falls below the floor during the load; 1 MiB write-back buffer |
-| Hashing buffer | 256 KiB, one file at a time |
+| Hashing buffer | 256 KiB, one file at a time; a file whose header a rule strips feeds two hasher sets from it, twice the CPU for that file (VERIFICATION.md "Hashing") |
 | CHD decode | one image at a time, at most 24 MiB (`decode_budget` at the header limits), about 1 MiB for chdman's default hunks; nothing written to disk (CHD.md "Memory") |
 | Arcade catalogue | 64 MRA files per batch; only zip listings and names taken persist across batches; MRA files up to 16 MiB, streamed, inline part data never held |
 | Arcade presence pass | 500 zips per batch, stat only unless import rows of a changed zip need its central directory; the listing's names and the live MRA zip set persist across batches |

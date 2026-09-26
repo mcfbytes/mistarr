@@ -1,11 +1,11 @@
-//! Benchmarks `hash_reader` over 64 MiB of deterministic bytes, with and
-//! without the N64 byte-swap transform. See `docs/VERIFICATION.md` "Hashing".
+//! Benchmarks `hash_reader` and `hash_forms` over 64 MiB of deterministic bytes, with and
+//! without the N64 byte swap and the iNES header. See `docs/VERIFICATION.md` "Hashing".
 
 use std::hint::black_box;
 use std::io::Cursor;
 
 use criterion::{criterion_group, criterion_main, Criterion};
-use mistarr_core::hash::{hash_reader, HeaderRule};
+use mistarr_core::hash::{hash_forms, hash_reader, HeaderRule};
 
 const SIZE: usize = 64 * 1024 * 1024;
 
@@ -23,6 +23,7 @@ fn deterministic_bytes(first_four: [u8; 4]) -> Vec<u8> {
 fn bench_hash(c: &mut Criterion) {
     let plain = deterministic_bytes([0, 0, 0, 0]);
     let v64 = deterministic_bytes([0x37, 0x80, 0x40, 0x12]);
+    let nes = deterministic_bytes(*b"NES\x1a");
 
     c.bench_function("hash_reader 64MiB rule=None", |b| {
         b.iter(|| hash_reader(Cursor::new(black_box(&plain)), HeaderRule::None, None).unwrap());
@@ -30,6 +31,14 @@ fn bench_hash(c: &mut Criterion) {
 
     c.bench_function("hash_reader 64MiB rule=N64", |b| {
         b.iter(|| hash_reader(Cursor::new(black_box(&v64)), HeaderRule::N64, None).unwrap());
+    });
+
+    c.bench_function("hash_reader 64MiB rule=Ines", |b| {
+        b.iter(|| hash_reader(Cursor::new(black_box(&nes)), HeaderRule::Ines, None).unwrap());
+    });
+
+    c.bench_function("hash_forms 64MiB rule=Ines", |b| {
+        b.iter(|| hash_forms(Cursor::new(black_box(&nes)), HeaderRule::Ines, None).unwrap());
     });
 }
 

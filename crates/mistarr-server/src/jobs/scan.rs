@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mistarr_core::hash::{
-    hash_reader, hash_zip_member, zip_members, HashError, HeaderRule, ZipMember,
+    hash_forms, hash_reader, hash_zip_member_forms, zip_member_content_crc, zip_members, HashError,
+    HeaderForms, HeaderRule, ZipMember,
 };
 use mistarr_core::{HashSet as Hashes, PlatformId};
 use mistarr_mister::platforms::{self, Kind, Platform};
@@ -543,24 +544,49 @@ fn commit_unit(
     Ok(written)
 }
 
-/// Matches a fully hashed payload and decides its state, per
+/// Matches a fully hashed payload in its forms and decides its state, per
 /// `docs/DATA-MODEL.md` "files.state".
 fn classify(
     conn: &Connection,
     platform_id: &PlatformId,
     actual_name: &str,
-    hashes: &Hashes,
+    forms: &HeaderForms,
 ) -> Result<(Option<i64>, FileState)> {
-    let size = i64::try_from(hashes.size).unwrap_or(i64::MAX);
-    let m = files::match_rom(
+    let m = match_forms(
         conn,
         platform_id,
-        &hashes.sha1,
-        &hashes.md5,
-        &hashes.crc32,
-        size,
+        forms.whole.iter().chain([&forms.content]),
     )?;
     Ok(cartridge_state(platform_id, m.as_ref(), actual_name))
+}
+
+/// The rom `forms` match under `docs/VERIFICATION.md` "Matching order" in each, a caller
+/// passing the whole file before its content: the first form to match a live rom, else
+/// the first to match a retired one, so a live rom of any form wins over a retired one.
+///
+/// # Errors
+///
+/// [`Error::Db`] on SQLite failure.
+pub(crate) fn match_forms<'a>(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    forms: impl IntoIterator<Item = &'a Hashes>,
+) -> Result<Option<files::RomMatch>> {
+    let forms: Vec<&Hashes> = forms.into_iter().collect();
+    let size = |h: &Hashes| i64::try_from(h.size).unwrap_or(i64::MAX);
+    for h in &forms {
+        let (sha1, md5, crc32) = (&h.sha1, &h.md5, &h.crc32);
+        if let Some(m) = files::match_live_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
+            return Ok(Some(m));
+        }
+    }
+    for h in &forms {
+        let (sha1, md5, crc32) = (&h.sha1, &h.md5, &h.crc32);
+        if let Some(m) = files::match_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
+            return Ok(Some(m));
+        }
+    }
+    Ok(None)
 }
 
 /// The rom id and state a cartridge file or zip member of `platform` named `own_name`
@@ -675,9 +701,11 @@ pub(crate) fn own_name(rel_path: &str) -> &str {
 }
 
 /// The live rom a fully hashed row's stored hashes match, per `docs/VERIFICATION.md`
-/// "Matching stored hashes"; a row without a sha1 or md5 never matches. The hashes are of
-/// the content after the row's header rule while `size` is the size on disk, so the CRC32
-/// tier also tries the size less the header that rule strips.
+/// "Matching stored hashes"; a row without a sha1 or md5 never matches. A row with
+/// whole-file hashes that differ from its hashes tries the whole file at its size first,
+/// then its content at the size less the header. Otherwise the hashes are of the content
+/// after the row's header rule while `size` is the size on disk, so the CRC32 tier also
+/// tries the size less the header that rule strips.
 ///
 /// # Errors
 ///
@@ -692,11 +720,25 @@ pub(crate) fn stored_match(
     }
     let hash = |h: &Option<String>| h.clone().unwrap_or_default();
     let (sha1, md5, crc32) = (hash(&f.sha1), hash(&f.md5), hash(&f.crc32));
+    let rule = HeaderRule::from_name(f.header_rule.as_deref().unwrap_or_default());
+    let header = i64::try_from(rule.header_len()).unwrap_or(0);
+    let w = &f.whole;
+    let has_whole = w.sha1.is_some() || w.md5.is_some();
+    if has_whole && (&w.sha1, &w.md5) != (&f.sha1, &f.md5) {
+        let (wsha1, wmd5, wcrc) = (hash(&w.sha1), hash(&w.md5), hash(&w.crc32));
+        if let Some(m) = files::match_live_rom(conn, platform_id, &wsha1, &wmd5, &wcrc, f.size)? {
+            return Ok(Some(m));
+        }
+        let size = f.size - header;
+        return files::match_live_rom(conn, platform_id, &sha1, &md5, &crc32, size);
+    }
     if let Some(m) = files::match_live_rom(conn, platform_id, &sha1, &md5, &crc32, f.size)? {
         return Ok(Some(m));
     }
-    let rule = HeaderRule::from_name(f.header_rule.as_deref().unwrap_or_default());
-    let header = i64::try_from(rule.header_len()).unwrap_or(0);
+    if has_whole {
+        // No header was found: the hashes already are the whole file's.
+        return Ok(None);
+    }
     let stripped = match rule {
         HeaderRule::Smc => f.size % 1024 == 512,
         _ => header > 0 && f.size > header,
@@ -715,19 +757,21 @@ enum Known {
     /// Unchanged and nothing to update.
     Skip,
     /// Unchanged and unmatched, and its stored hashes now match a live rom.
-    Matched(NewFile),
+    Matched(Box<NewFile>),
 }
 
 /// Decides [`Known`] for a file of `size` and `mtime`. An unchanged unmatched row is
-/// matched from its stored hashes; with `crc_recheck`, a zip member never hashed, known
-/// by its CRC32 alone, is hashed once a rom of that CRC32 and size exists.
+/// matched from its stored hashes, and a row hashed under a stripping rule without its
+/// whole-file hashes is hashed again. With `precheck`, the platform's rule for a zip
+/// member, a member never hashed, known by its CRC32 alone, is hashed once
+/// [`member_candidate`] finds a rom for it.
 fn known(
     conn: &Connection,
     platform_id: &PlatformId,
     rel_path: &str,
     size: i64,
     mtime: i64,
-    crc_recheck: bool,
+    precheck: Option<HeaderRule>,
 ) -> Result<Known> {
     let Some(row) = files::find_by_path(conn, platform_id, rel_path)? else {
         return Ok(Known::Hash);
@@ -735,14 +779,19 @@ fn known(
     if row.size != size || row.mtime != mtime || row.state == FileState::Pending {
         return Ok(Known::Hash);
     }
+    if lacks_whole(&row) {
+        return Ok(Known::Hash);
+    }
     if row.rom_id.is_some() || row.state != FileState::Unverified {
         return Ok(Known::Skip);
     }
     if row.sha1.is_none() && row.md5.is_none() {
         // A NULL rule marks a member never hashed; a failed hash records its rule instead.
-        let candidate = match row.crc32.as_deref() {
-            Some(crc) if crc_recheck && row.header_rule.is_none() => {
-                files::crc_candidate_exists(conn, platform_id, crc, size)?
+        let candidate = match (precheck, row.crc32.as_deref()) {
+            (Some(rule), Some(crc)) if row.header_rule.is_none() => {
+                let whole = row.whole.crc32.as_deref().unwrap_or(crc);
+                let content = (whole != crc).then_some(crc);
+                member_candidate(conn, platform_id, rule, whole, content, size)?
             }
             _ => false,
         };
@@ -752,7 +801,7 @@ fn known(
         return Ok(Known::Skip);
     };
     let (rom_id, state) = cartridge_state(platform_id, Some(&m), own_name(rel_path));
-    Ok(Known::Matched(NewFile {
+    Ok(Known::Matched(Box::new(NewFile {
         rel_path: row.rel_path,
         size,
         mtime,
@@ -760,10 +809,42 @@ fn known(
         md5: row.md5,
         sha1: row.sha1,
         header_rule: row.header_rule,
+        whole: row.whole,
         rom_id,
         state,
         reason: None,
-    }))
+    })))
+}
+
+/// Whether a fully hashed row was hashed under a rule that strips a header but holds
+/// the stripped form alone, with no whole-file hashes to match a headered DAT by.
+fn lacks_whole(row: &files::FileRow) -> bool {
+    let rule = HeaderRule::from_name(row.header_rule.as_deref().unwrap_or_default());
+    rule.strips_header()
+        && (row.sha1.is_some() || row.md5.is_some())
+        && row.whole.sha1.is_none()
+        && row.whole.md5.is_none()
+}
+
+/// Whether a zip member not yet decompressed may be a rom: a rom has its central-directory
+/// CRC32 `whole` and `size`, or, when `rule` found a header, its content CRC32 `content`
+/// and the size less that header.
+fn member_candidate(
+    conn: &Connection,
+    platform_id: &PlatformId,
+    rule: HeaderRule,
+    whole: &str,
+    content: Option<&str>,
+    size: i64,
+) -> Result<bool> {
+    if files::crc_candidate_exists(conn, platform_id, whole, size)? {
+        return Ok(true);
+    }
+    let Some(content) = content else {
+        return Ok(false);
+    };
+    let header = i64::try_from(rule.header_len()).unwrap_or(0);
+    files::crc_candidate_exists(conn, platform_id, content, size - header)
 }
 
 /// Walks one cartridge, romset or arcade directory, handing each row to `sink`, and
@@ -825,43 +906,40 @@ async fn scan_flat_unit(
         let known = ctx
             .app
             .db
-            .read(move |c| known(c, &pid, &relp, size, mtime, false))
+            .read(move |c| known(c, &pid, &relp, size, mtime, None))
             .await?;
         match known {
             Known::Hash => {}
             Known::Skip => continue,
             Known::Matched(row) => {
-                sink.push(row).await?;
+                sink.push(*row).await?;
                 continue;
             }
         }
         let hint = u64::try_from(size).unwrap_or(0);
         let path_owned = path.clone();
         let hash_result = crate::threads::blocking(crate::threads::label::HASH, move || {
-            File::open(&path_owned).and_then(|f| hash_reader(f, rule, Some(hint)))
+            File::open(&path_owned).and_then(|f| hash_forms(f, rule, Some(hint)))
         })
         .await
         .map_err(|e| Error::Task(e.to_string()))?;
         let row = match hash_result {
-            Ok(hashes) => {
-                let (pid2, name2, hashes2) = (platform_id.clone(), name.clone(), hashes.clone());
+            Ok(forms) => {
+                let (pid2, name2, forms2) = (platform_id.clone(), name.clone(), forms.clone());
                 let (rom_id, state) = ctx
                     .app
                     .db
-                    .read(move |c| classify(c, &pid2, &name2, &hashes2))
+                    .read(move |c| classify(c, &pid2, &name2, &forms2))
                     .await?;
-                NewFile {
+                hashed_row(
                     rel_path,
                     size,
                     mtime,
-                    crc32: Some(hashes.crc32),
-                    md5: Some(hashes.md5),
-                    sha1: Some(hashes.sha1),
-                    header_rule: Some(platform.header_rule.to_owned()),
+                    platform.header_rule,
+                    &forms,
                     rom_id,
                     state,
-                    reason: None,
-                }
+                )
             }
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "cannot hash file; marking unverified");
@@ -871,6 +949,31 @@ async fn scan_flat_unit(
         sink.push(row).await?;
     }
     Ok(Some(seen))
+}
+
+/// The row of a payload hashed under the rule named `rule` into `forms`.
+fn hashed_row(
+    rel_path: String,
+    size: i64,
+    mtime: i64,
+    rule: &str,
+    forms: &HeaderForms,
+    rom_id: Option<i64>,
+    state: FileState,
+) -> NewFile {
+    NewFile {
+        rel_path,
+        size,
+        mtime,
+        crc32: Some(forms.content.crc32.clone()),
+        md5: Some(forms.content.md5.clone()),
+        sha1: Some(forms.content.sha1.clone()),
+        header_rule: Some(rule.to_owned()),
+        whole: files::WholeHashes::of(rule, forms),
+        rom_id,
+        state,
+        reason: None,
+    }
 }
 
 /// An unmatched or unreadable file's row: no hash was trusted enough to
@@ -884,6 +987,7 @@ fn unverified_row(rel_path: String, size: i64, mtime: i64, crc32: Option<String>
         md5: None,
         sha1: None,
         header_rule: None,
+        whole: files::WholeHashes::default(),
         rom_id: None,
         state: FileState::Unverified,
         reason: None,
@@ -929,67 +1033,55 @@ async fn scan_zip_unit(
         let member_size = i64::try_from(member.size).unwrap_or(i64::MAX);
         seen.push(member_rel.clone());
         let (pid, mrel) = (platform_id.clone(), member_rel.clone());
-        let crc_recheck = rule == HeaderRule::None;
+        // The central directory's CRC32 is of the whole member, before any transform.
+        let precheck = (rule == HeaderRule::None || rule.strips_header()).then_some(rule);
         let known = ctx
             .app
             .db
-            .read(move |c| known(c, &pid, &mrel, member_size, mtime, crc_recheck))
+            .read(move |c| known(c, &pid, &mrel, member_size, mtime, precheck))
             .await?;
         match known {
             Known::Hash => {}
             Known::Skip => continue,
             Known::Matched(row) => {
-                sink.push(row).await?;
+                sink.push(*row).await?;
                 continue;
             }
         }
         let basename = files::basename(&member.name).to_owned();
 
-        // A header rule strips bytes before hashing, so the DAT's expected
-        // CRC32/size never match the zip's raw member entry: always hash.
-        let candidate = if rule == HeaderRule::None {
-            let (pid2, crc, size2) = (platform_id.clone(), member.crc32.clone(), member_size);
-            ctx.app
-                .db
-                .read(move |c| files::crc_candidate_exists(c, &pid2, &crc, size2))
-                .await?
-        } else {
-            true
-        };
-
-        if !candidate {
-            let row = unverified_row(member_rel, member_size, mtime, Some(member.crc32.clone()));
-            sink.push(row).await?;
-            continue;
+        if precheck.is_some() {
+            let unit = (path, mtime, member_rel.as_str());
+            if let Some(row) = precheck_member(ctx, platform_id, rule, unit, &member).await? {
+                sink.push(row).await?;
+                continue;
+            }
         }
 
         let path_owned = path.to_path_buf();
         let member_name = member.name.clone();
         let hash_result = crate::threads::blocking(crate::threads::label::HASH, move || {
-            hash_zip_member(File::open(&path_owned)?, &member_name, rule)
+            hash_zip_member_forms(File::open(&path_owned)?, &member_name, rule)
         })
         .await
         .map_err(|e| Error::Task(e.to_string()))?;
         let row = match hash_result {
-            Ok(hashes) => {
-                let (pid2, basename2, hashes2) = (platform_id.clone(), basename, hashes.clone());
+            Ok(forms) => {
+                let (pid2, basename2, forms2) = (platform_id.clone(), basename, forms.clone());
                 let (rom_id, state) = ctx
                     .app
                     .db
-                    .read(move |c| classify(c, &pid2, &basename2, &hashes2))
+                    .read(move |c| classify(c, &pid2, &basename2, &forms2))
                     .await?;
-                NewFile {
-                    rel_path: member_rel,
-                    size: member_size,
+                hashed_row(
+                    member_rel,
+                    member_size,
                     mtime,
-                    crc32: Some(hashes.crc32),
-                    md5: Some(hashes.md5),
-                    sha1: Some(hashes.sha1),
-                    header_rule: Some(rule_name.to_owned()),
+                    rule_name,
+                    &forms,
                     rom_id,
                     state,
-                    reason: None,
-                }
+                )
             }
             Err(e) => {
                 tracing::warn!(member = %member.name, error = %e, "cannot hash zip member; marking unverified");
@@ -1003,6 +1095,51 @@ async fn scan_zip_unit(
         sink.push(row).await?;
     }
     Ok(())
+}
+
+/// The CRC32-only row of a zip member the pre-check finds no rom for, or `None` when it is
+/// worth decompressing. `unit` is the zip's path, its mtime and the member's `rel_path`.
+/// Under a stripping rule the member's content CRC32 comes from its header alone.
+async fn precheck_member(
+    ctx: &JobContext,
+    platform_id: &PlatformId,
+    rule: HeaderRule,
+    (path, mtime, member_rel): (&Path, i64, &str),
+    member: &ZipMember,
+) -> Result<Option<NewFile>> {
+    let content_crc = if rule.strips_header() {
+        let (path_owned, m) = (path.to_path_buf(), member.clone());
+        let got = crate::threads::blocking(crate::threads::label::HASH, move || {
+            zip_member_content_crc(File::open(&path_owned)?, &m, rule)
+        })
+        .await
+        .map_err(|e| Error::Task(e.to_string()))?;
+        // A header that cannot be read makes the member a candidate: hashing records why.
+        let Ok(crc) = got else {
+            return Ok(None);
+        };
+        crc
+    } else {
+        None
+    };
+    let size = i64::try_from(member.size).unwrap_or(i64::MAX);
+    let (pid, whole, content) = (
+        platform_id.clone(),
+        member.crc32.clone(),
+        content_crc.clone(),
+    );
+    let candidate = ctx
+        .app
+        .db
+        .read(move |c| member_candidate(c, &pid, rule, &whole, content.as_deref(), size))
+        .await?;
+    if candidate {
+        return Ok(None);
+    }
+    let crc = content_crc.unwrap_or_else(|| member.crc32.clone());
+    let mut row = unverified_row(member_rel.to_owned(), size, mtime, Some(crc));
+    row.whole.crc32 = rule.strips_header().then(|| member.crc32.clone());
+    Ok(Some(row))
 }
 
 /// One hashed track of a disc game directory, before the all-or-nothing rule
@@ -1235,6 +1372,7 @@ pub(crate) fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Res
             md5,
             sha1,
             header_rule,
+            whole: files::WholeHashes::default(),
             rom_id,
             state,
             reason: None,
@@ -1396,6 +1534,7 @@ mod tests {
             rom_id: Some(rom),
             state: FileState::Misnamed,
             reason: None,
+            whole: files::WholeHashes::default(),
         };
         let fits =
             files::upsert_row(&c, &nes, &row("NES/q.zip#Example Quest (USA).nes"), 1).expect("row");
@@ -1613,6 +1752,78 @@ mod tests {
             enqueue_if_games_dir_exists(&app, &nes).await.expect("run"),
             None,
             "disabled platforms are skipped, matching POST /system/scan"
+        );
+    }
+
+    #[test]
+    fn a_live_rom_of_the_content_beats_a_retired_rom_of_the_whole_file() {
+        let mut c = Connection::open_in_memory().expect("open");
+        crate::db::migrate::apply(&mut c).expect("migrate");
+        crate::db::platforms::seed(&mut c, &platforms::PLATFORMS).expect("seed");
+        let nes = PlatformId("nes".into());
+        let mut file = b"NES\x1a".to_vec();
+        file.resize(16, 0);
+        file.extend_from_slice(b"synthetic body of a retired and a live rom");
+        let forms = hash_forms(&file[..], HeaderRule::Ines, None).expect("hash");
+        let whole = forms.whole.clone().expect("a header");
+        let retired =
+            files::seed_rom_fixture(&c, &nes, "Old (USA)", "Old (USA).nes", &whole, "good")
+                .expect("retired rom");
+        c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [retired])
+            .expect("retire");
+        let live = files::seed_rom_fixture(
+            &c,
+            &nes,
+            "New (USA)",
+            "New (USA).nes",
+            &forms.content,
+            "good",
+        )
+        .expect("live rom");
+        let (rom, _) = classify(&c, &nes, "New (USA).nes", &forms).expect("classify");
+        assert_eq!(rom, Some(live));
+        c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [live])
+            .expect("retire");
+        let (rom, _) = classify(&c, &nes, "Old (USA).nes", &forms).expect("classify");
+        assert_eq!(
+            rom,
+            Some(retired),
+            "a retired rom still matches when nothing live does"
+        );
+    }
+
+    #[test]
+    fn only_stripping_rule_rows_without_the_whole_form_lack_it() {
+        let row = |rule: Option<&str>, sha1: Option<&str>, whole: Option<&str>| files::FileRow {
+            id: FileId(1),
+            platform_id: PlatformId("nes".into()),
+            rel_path: "NES/a.nes".into(),
+            size: 20,
+            mtime: 1,
+            crc32: Some("00000000".into()),
+            md5: None,
+            sha1: sha1.map(Into::into),
+            header_rule: rule.map(Into::into),
+            whole: files::WholeHashes {
+                sha1: whole.map(Into::into),
+                ..files::WholeHashes::default()
+            },
+            rom_id: None,
+            state: FileState::Unverified,
+            scanned_at: 1,
+            reason: None,
+        };
+        assert!(lacks_whole(&row(Some("ines"), Some("a"), None)));
+        assert!(lacks_whole(&row(Some("lnx"), Some("a"), None)));
+        assert!(!lacks_whole(&row(Some("ines"), Some("a"), Some("b"))));
+        assert!(
+            !lacks_whole(&row(Some("ines"), None, None)),
+            "a failed hash"
+        );
+        assert!(!lacks_whole(&row(Some("smc"), Some("a"), None)));
+        assert!(
+            !lacks_whole(&row(None, None, None)),
+            "a member known by CRC32"
         );
     }
 
