@@ -107,7 +107,7 @@ pub fn append(conn: &Connection, games: &[StagedGame]) -> Result<()> {
 ///
 /// # Errors
 ///
-/// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Job`] for a row
+/// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Json`] for a row
 /// that does not read back.
 pub fn apply(conn: &Connection, platform: &str, version: DatVersionId) -> Result<u64> {
     ensure(conn)?;

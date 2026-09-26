@@ -101,13 +101,7 @@ struct CoresResponse {
 /// Detects installed cores again, for the wizard's detected-cores step, and
 /// queues the arcade catalogue when there are MRA files to read.
 async fn cores(State(app): State<Arc<AppState>>) -> Result<Json<CoresResponse>, ApiError> {
-    let platforms = {
-        let app = Arc::clone(&app);
-        crate::threads::run(crate::threads::label::DETECT, move || {
-            crate::app::detect_cores(&app)
-        })
-        .await??
-    };
+    let platforms = crate::app::detect_cores(&app).await?;
     let arcade_job_id = crate::jobs::arcade::enqueue_if_relevant(&app).await?;
     Ok(Json(CoresResponse {
         platforms,

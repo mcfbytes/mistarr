@@ -492,7 +492,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     Scheduler::run_inline(&app, Arc::new(DetectClient)).await?;
 
     // Step 4: installed cores.
-    detect_cores(&app)?;
+    detect_cores(&app).await?;
 
     queue_startup_jobs(&app, unfinished_scans).await?;
 
@@ -696,14 +696,24 @@ async fn resume_scans(
     Ok(())
 }
 
-/// Marks platforms whose core is installed under the SD root and returns them.
-pub(crate) fn detect_cores(app: &AppState) -> Result<Vec<mistarr_core::PlatformId>> {
-    let cores = mistarr_mister::corename::installed_cores(&app.config().paths.root);
-    let present: Vec<_> = cores.into_iter().flat_map(|c| c.platforms).collect();
+/// Marks platforms whose core is installed under the SD root and returns them; the walk
+/// runs on the blocking pool and the write goes through [`Db::write_tx`].
+pub(crate) async fn detect_cores(app: &AppState) -> Result<Vec<mistarr_core::PlatformId>> {
+    let root = app.config().paths.root.clone();
+    let present: Vec<_> = crate::threads::run(crate::threads::label::DETECT, move || {
+        mistarr_mister::corename::installed_cores(&root)
+    })
+    .await?
+    .into_iter()
+    .flat_map(|c| c.platforms)
+    .collect();
     tracing::info!(platforms = present.len(), "installed cores detected");
     app.db
-        .write_tx_blocking(|tx| db::platforms::set_core_present(tx, &present))?;
-    Ok(present)
+        .write_tx(move |tx| {
+            db::platforms::set_core_present(tx, &present)?;
+            Ok(present)
+        })
+        .await
 }
 
 /// Enqueues a full library scan every `interval`, from `[jobs] scan_interval_minutes`.
@@ -837,7 +847,7 @@ mod tests {
         let console = dir.path().join("_Console");
         std::fs::create_dir_all(&console).expect("mkdir");
         std::fs::write(console.join("SNES_20240101.rbf"), b"").expect("write");
-        detect_cores(&app).expect("detect");
+        detect_cores(&app).await.expect("detect");
         let rows = app.db.read(db::platforms::list).await.expect("list");
         let present: Vec<_> = rows
             .iter()
@@ -853,7 +863,7 @@ mod tests {
         let cores = dir.path().join("_Arcade/cores");
         std::fs::create_dir_all(&cores).expect("mkdir");
         std::fs::write(cores.join("jtngp_20240101.rbf"), b"").expect("write");
-        detect_cores(&app).expect("detect");
+        detect_cores(&app).await.expect("detect");
         let rows = app.db.read(db::platforms::list).await.expect("list");
         let mut present: Vec<_> = rows
             .iter()

@@ -408,6 +408,8 @@ impl Db {
 
 /// The turn every write takes before the writer connection. Async writers wait for it
 /// on the runtime and blocking writers on their own thread; each release wakes one of each.
+/// Blocking-pool writers must stay fewer than [`crate::memory::BLOCKING_THREADS`], since an
+/// async holder needs a pool thread to finish; only the background job lane writes from it.
 #[derive(Default)]
 struct WriteTurn {
     taken: Mutex<bool>,

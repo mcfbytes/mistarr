@@ -149,7 +149,8 @@ pub fn find(conn: &Connection, id: &PlatformId) -> Result<Option<PlatformRow>> {
 ///
 /// # Errors
 ///
-/// [`crate::Error::Db`] on SQLite failure; nothing is written then.
+/// [`crate::Error::Db`] on SQLite failure. Run it in the caller's transaction, such as
+/// [`crate::db::Db::write_tx`], so that a failure part way writes nothing.
 ///
 /// ```
 /// use mistarr_core::PlatformId;
@@ -157,10 +158,10 @@ pub fn find(conn: &Connection, id: &PlatformId) -> Result<Option<PlatformRow>> {
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// mistarr_server::db::platforms::set_core_present(&conn, &[PlatformId("nes".into())]).unwrap();
 /// ```
-pub fn set_core_present(tx: &Connection, present: &[PlatformId]) -> Result<()> {
-    tx.execute("UPDATE platforms SET core_present = 0", [])?;
+pub fn set_core_present(conn: &Connection, present: &[PlatformId]) -> Result<()> {
+    conn.execute("UPDATE platforms SET core_present = 0", [])?;
     {
-        let mut stmt = tx.prepare("UPDATE platforms SET core_present = 1 WHERE id = ?1")?;
+        let mut stmt = conn.prepare("UPDATE platforms SET core_present = 1 WHERE id = ?1")?;
         for id in present {
             stmt.execute([&id.0])?;
         }

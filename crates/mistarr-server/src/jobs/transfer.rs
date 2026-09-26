@@ -311,7 +311,7 @@ impl Job for Deselect {
 ///
 /// # Errors
 ///
-/// [`crate::Error::Job`] when the client refuses; [`crate::Error::Db`] on database failure.
+/// [`crate::Error::Client`] when the client refuses; [`crate::Error::Db`] on database failure.
 pub async fn deselect(app: &AppState, source: SourceId) -> Result<bool> {
     let (row, wanted) = app
         .db
