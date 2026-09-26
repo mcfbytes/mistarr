@@ -768,8 +768,8 @@ at most 15 bytes (`threads::label`: `db-read`, `db-write`, `hash`,
 `client-freeze`, `fetch`) and puts the pool name back when it ends; the
 thread that reaps a started rtorrent is `rtorrent-reap`, the one that
 rewrites `mistarr.migrating` while migrations run is `db-migrate`, and a
-torrent's data is deleted under `torrent-delete`. The board's BusyBox `top` and `ps` cannot list threads, so read them from
-procfs:
+torrent's data is deleted under `torrent-delete`. The board's BusyBox
+`top` and `ps` cannot list threads, so read them from procfs:
 `for t in /proc/$(pidof mistarr)/task/*; do echo "${t##*/} $(cat $t/comm)"; done`.
 
 A DAT loads in one write transaction, so the WAL file, in RAM beside the copy

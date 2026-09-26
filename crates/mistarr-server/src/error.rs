@@ -85,6 +85,9 @@ pub enum Error {
     /// and never names the URL.
     #[error("{0}")]
     FetchRefused(String),
+    /// The configured CA bundle cannot be read, so a URL fetch is refused.
+    #[error("The CA bundle cannot be read: {0}.")]
+    CaFile(std::io::Error),
     /// Memory, the RAM directory or the card ran short; the message says which and what
     /// was left unchanged. An import in RAM falls back to the card on it.
     #[error("{0}")]
@@ -131,6 +134,11 @@ mod tests {
         };
         assert!(config.to_string().starts_with("config: /d/mistarr.toml: "));
         assert_eq!(config.to_string().matches("config:").count(), 1);
+        let ca = Error::CaFile(std::io::Error::other("no certificate"));
+        assert_eq!(
+            ca.to_string(),
+            "The CA bundle cannot be read: no certificate."
+        );
         let reopen = Error::Reopen(Box::new(Error::NoRoom("full".into())));
         assert_eq!(
             reopen.to_string(),

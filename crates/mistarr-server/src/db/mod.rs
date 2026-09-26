@@ -279,8 +279,8 @@ impl Db {
         self.write(move |c| transact(c, f)).await
     }
 
-    /// [`Db::write_bulk_blocking`] on tokio's blocking pool, once no other async write
-    /// is running.
+    /// [`Db::write_bulk_blocking`] on tokio's blocking pool, once no other write is
+    /// running.
     ///
     /// # Errors
     ///
@@ -412,6 +412,7 @@ impl Db {
 /// on the runtime and blocking writers on their own thread; each release wakes one of each.
 /// Blocking-pool writers must stay fewer than [`crate::memory::BLOCKING_THREADS`], since an
 /// async holder needs a pool thread to finish; only the background job lane writes from it.
+/// The turn is not FIFO: a newly arriving writer may take a free turn ahead of queued ones.
 #[derive(Default)]
 struct WriteTurn {
     taken: Mutex<bool>,

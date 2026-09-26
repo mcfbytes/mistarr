@@ -292,9 +292,7 @@ impl UrlFetch {
                 warn_once(|| {
                     tracing::warn!(path = %path.display(), error = %e, "the CA file cannot be read");
                 });
-                return Err(Error::FetchRefused(format!(
-                    "The CA bundle cannot be read: {e}."
-                )));
+                return Err(Error::CaFile(e));
             }
         };
         if let Some((path, why)) = roots.skipped() {

@@ -416,7 +416,7 @@ fn settle_titles(
     Ok((retired, live, changed))
 }
 
-/// Writes one batch in one transaction, marking the picks stale when it stores a title.
+/// Writes one batch in the caller's transaction, one per batch, marking the picks stale when it stores a title.
 fn store_batch(
     tx: &rusqlite::Connection,
     version: DatVersionId,

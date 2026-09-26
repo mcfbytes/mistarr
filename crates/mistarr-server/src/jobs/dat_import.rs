@@ -1422,8 +1422,8 @@ struct Tally {
     picked: titles::Recomputed,
 }
 
-/// Runs one chunk of `pass` over `platform` in its own transaction, adding to `tally`,
-/// and returns the pass that follows.
+/// Runs one chunk of `pass` over `platform` in the caller's transaction, one per chunk,
+/// adding to `tally`, and returns the pass that follows.
 fn recompute_pass(
     tx: &Connection,
     platform: &PlatformId,

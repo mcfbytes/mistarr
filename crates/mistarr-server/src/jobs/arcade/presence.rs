@@ -240,7 +240,7 @@ fn recheck(games: &Path, rc: Recheck, out: &mut Changes) {
     }
 }
 
-/// Applies one batch's changes in one transaction; returns rows recorded and removed.
+/// Applies one batch's changes in the caller's transaction, one per batch; returns rows recorded and removed.
 fn write_changes(
     tx: &Connection,
     pid: &PlatformId,
