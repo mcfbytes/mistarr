@@ -1,5 +1,12 @@
 <script lang="ts">
-  import { clearDetail, getDetail, loadTitleDetail, setDetail } from '../lib/stores/titles.svelte';
+  import {
+    clearDetail,
+    getDetail,
+    getDetailLoadError,
+    isDetailMissing,
+    loadTitleDetail,
+    setDetail
+  } from '../lib/stores/titles.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
   import { fixtureTitle } from '../lib/fixtures';
@@ -31,6 +38,8 @@
   });
 
   const detail = $derived(getDetail());
+  const titleMissing = $derived(isDetailMissing());
+  const titleLoadError = $derived(getDetailLoadError());
   const pickName = $derived(detail?.variants.find((v) => v.id === detail.pick_variant_id)?.name ?? null);
   const platform = $derived(detail ? findPlatform(detail.platform_id) : undefined);
   let statusFailed = $state(false);
@@ -209,8 +218,14 @@
       </tbody>
     </table>
     </div>
+  {:else if titleMissing}
+    <h1>Title not found</h1>
+    <p class="muted">No title has this id. It may have been removed.</p>
+  {:else if titleLoadError}
+    <h1>Title</h1>
+    <p role="alert">{titleLoadError} <button onclick={() => void loadTitleDetail(titleId)}>Retry</button></p>
   {:else}
-    <p class="muted">Loading…</p>
+    <p class="muted" aria-busy="true">Loading…</p>
   {/if}
 </div>
 
