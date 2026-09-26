@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{ApiError, Page, Paging};
 use crate::app::AppState;
-use crate::config::{client_path_map_ok, ConfigProblem, RuntimeSettings, SettingsPatch};
+use crate::config::{ConfigProblem, RuntimeSettings, SettingsPatch};
 use crate::db::jobs::{self, JobId, JobRow};
 use crate::db::platforms;
 use crate::db::settings::{self, keys};
@@ -326,12 +326,14 @@ async fn put_settings(
 ) -> Result<Json<RuntimeSettings>, ApiError> {
     let patch: SettingsPatch =
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
-    if let Some(client) = &patch.client {
-        if !client_path_map_ok(client) {
+    let before = app.config();
+    if patch.client.is_some() {
+        let mut effective = before.clone();
+        effective.apply(&patch);
+        if effective.validate().contains(&ConfigProblem::PathMap) {
             return Err(ApiError::bad_request(ConfigProblem::PathMap.message()));
         }
     }
-    let before = app.config();
     let (prefs_before, scan_before) = (before.prefs, before.scan);
     let (runtime, client_changed) = app.update_settings(&patch).await?;
     if runtime.scan != Some(scan_before) {

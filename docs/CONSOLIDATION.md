@@ -174,14 +174,9 @@ Sonnet · `mistarr-server` (`config.rs`, `app.rs`, `http/system.rs`) · branch
 - [x] A TOML error reads `config: <path>: <error>`, with the prefix once.
 - [x] An unknown key in `mistarr.toml` is logged as a warning naming the key;
   startup continues. A new dependency for this needs the usual justification.
-- [x] `Config::validate()` problems are logged at startup by `open_db`, not by
-  `Config::load` itself: the import-floor warning (moved from `open_db`)
-  before the database migrates in RAM, since `[memory]` cannot move from the
-  settings overlay, and the remote path map check (moved from
-  `http/system.rs`, shared as `client_path_map_ok`) after that overlay, over
-  the effective `client` section. `PUT /system/settings` does not call
-  `validate()`; it rejects only a patch whose own `client` section fails the
-  path map check.
+- [x] `Config::validate()` is the single source of config problems. `open_db`
+  logs each at startup, the import floor before the settings overlay and
+  the path map after; `PUT /system/settings` runs it to check a patch's `client`.
 - [x] Tests for each of the three.
 
 ## Wave 5
