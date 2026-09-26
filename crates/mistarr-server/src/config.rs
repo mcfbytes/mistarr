@@ -436,8 +436,9 @@ impl Config {
     /// Loads `explicit` if given, which must exist, else `<data>/mistarr.toml`
     /// if present, else defaults. `data` then overrides `paths.data`. Unknown
     /// keys are kept on the returned config rather than logged here; call
-    /// [`Config::log_problems`] once logging starts, after laying any saved
-    /// runtime settings over the result.
+    /// [`Config::log_problems`] once logging starts, then
+    /// [`Config::log_path_map_problem`] again after laying any saved runtime
+    /// settings over the result, since only `client` can move from that.
     ///
     /// # Errors
     ///
@@ -471,22 +472,37 @@ impl Config {
         Ok(config)
     }
 
-    /// Logs each key `load` found that no field claimed, then every
-    /// [`Config::validate`] problem. The caller runs this once a `tracing`
-    /// subscriber is installed, so nothing is silently dropped as at startup,
-    /// where `load` itself runs too early for that.
+    /// Logs each key `load` found that no field claimed, then
+    /// [`ConfigProblem::ImportFloor`] if it applies. Both are decided before
+    /// any runtime settings overlay, since `[memory]` only takes effect on a
+    /// restart; the caller runs this once a `tracing` subscriber is
+    /// installed and before anything uses `[memory] import_floor_mib`, so
+    /// nothing is silently dropped as at startup, where `load` itself runs
+    /// too early for logging.
     pub(crate) fn log_problems(&self) {
         warn_unknown_keys(&self.unknown_keys);
-        for problem in self.validate() {
-            tracing::warn!("{}", problem.message());
+        if self.memory.import_floor_mib == 0 {
+            tracing::warn!("{}", ConfigProblem::ImportFloor.message());
         }
     }
 
-    /// Problems with this config that are safe to find at load, where every
-    /// one is only logged, via [`Config::log_problems`]. `PUT
-    /// /system/settings` separately rejects a patch whose own `client`
-    /// section fails the [`ConfigProblem::PathMap`] check; it does not
-    /// re-validate the rest of the stored config.
+    /// Logs [`ConfigProblem::PathMap`] when `client.remote_path_map` fails
+    /// the check. The caller runs this over the effective config, after any
+    /// runtime settings overlay, since `client` can move from that.
+    pub(crate) fn log_path_map_problem(&self) {
+        if !client_path_map_ok(&self.client) {
+            tracing::warn!("{}", ConfigProblem::PathMap.message());
+        }
+    }
+
+    /// Problems with this config that are safe to find at load. `open_db`
+    /// logs [`ConfigProblem::ImportFloor`] via [`Config::log_problems`]
+    /// before migrating the database in RAM, and
+    /// [`ConfigProblem::PathMap`] via [`Config::log_path_map_problem`]
+    /// after the settings overlay. `PUT /system/settings` separately
+    /// rejects a patch whose own `client` section fails the
+    /// [`ConfigProblem::PathMap`] check; it does not re-validate the rest
+    /// of the stored config.
     #[must_use]
     pub fn validate(&self) -> Vec<ConfigProblem> {
         let mut problems = Vec::new();
@@ -819,7 +835,7 @@ mod tests {
             .with_ansi(false)
             .finish();
 
-        let mut config = Config {
+        let config = Config {
             memory: MemoryConfig {
                 import_floor_mib: 0,
                 ..MemoryConfig::default()
@@ -827,7 +843,6 @@ mod tests {
             unknown_keys: vec!["server.typo".to_owned()],
             ..Config::default()
         };
-        config.client.remote_path_map = vec![PathMapping::new("/r", "not-absolute")];
 
         tracing::subscriber::with_default(subscriber, || config.log_problems());
 
@@ -840,6 +855,28 @@ mod tests {
         .expect("utf8 log");
         assert!(logged.contains("server.typo"), "{logged}");
         assert!(logged.contains("import_floor_mib is 0"), "{logged}");
+    }
+
+    #[test]
+    fn log_path_map_problem_reports_a_bad_entry() {
+        let buf = CapturingWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+
+        let mut config = Config::default();
+        config.client.remote_path_map = vec![PathMapping::new("/r", "not-absolute")];
+
+        tracing::subscriber::with_default(subscriber, || config.log_path_map_problem());
+
+        let logged = String::from_utf8(
+            buf.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .expect("utf8 log");
         assert!(logged.contains("remote path map entry"), "{logged}");
     }
 

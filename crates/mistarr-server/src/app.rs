@@ -535,6 +535,9 @@ pub(crate) fn open_db(
     if let Some(dir) = std::env::var_os(crate::db::SQLITE_TMPDIR) {
         tracing::info!(dir = %Path::new(&dir).display(), "SQLite temporary files");
     }
+    // `[memory]` cannot move from the overlay below, so this reaches the log
+    // before `migrate_in_ram` reads `import_floor_mib` as its floor.
+    config.log_problems();
     let path = config.paths.db();
     crate::migrating::clear_stale(&config.paths.data)?;
     // Leftovers of an import in RAM cut short; the database itself is always whole.
@@ -580,8 +583,8 @@ pub(crate) fn open_db(
     if let Some(rt) = stored {
         config.overlay(rt);
     }
-    // Logging starts before `open_db`, unlike when `load` ran, so this reaches the log.
-    config.log_problems();
+    // `client` can move from the overlay above, unlike `[memory]`.
+    config.log_path_map_problem();
     Ok((db, unfinished, resolved))
 }
 

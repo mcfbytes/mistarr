@@ -1101,14 +1101,15 @@ can default `chd_tracks` on in the file. `server`, `paths`, `sources`, `jobs` an
 
 A file that is not valid TOML fails startup with `config: <path>: <error>`,
 the prefix once; a key the schema above does not name is otherwise ignored,
-and logged as a warning naming it once the server's logging starts, after the
-saved settings overlay. `Config::validate` runs there too, at that point, over
-the effective config, logging every problem it finds, including `[memory]
-import_floor_mib` left at 0. `PUT /system/settings` does not re-run it over
-the stored config; it rejects only a `client.remote_path_map` entry with a
-blank remote path or a non-absolute local path inside the section a patch
-itself carries, leaving a `client`-less patch to succeed even over a stored
-map that already fails the check.
+and logged as a warning naming it once the server's logging starts, before
+`open_db` migrates the database in RAM. `[memory] import_floor_mib` left at 0
+is logged there too, since `[memory]` needs a restart and cannot move from
+the settings overlay that follows; the `client.remote_path_map` check runs
+after that overlay instead, over the effective config, logging a blank
+remote path or a non-absolute local path as a warning. `PUT /system/settings`
+does not re-run it over the stored config; it rejects only such an entry
+inside the `client` section a patch itself carries, leaving a `client`-less
+patch to succeed even over a stored map that already fails the check.
 
 ## Non-goals
 
