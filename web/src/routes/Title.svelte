@@ -61,6 +61,7 @@
         statusFailed = true;
       });
     }
+    // A miss leaves platform kind/core-missing unknown until the next resync.
     if (!platformsLoaded()) {
       void loadPlatforms().catch(() => undefined);
     }

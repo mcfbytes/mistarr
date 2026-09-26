@@ -2,7 +2,7 @@ import { EventSubscriber } from '../api';
 import type { SseEvent } from '../types';
 import { applyStatus, loadStatus, loadWizard, setConnected } from './status.svelte';
 import { applySourceChanged, loadSources } from './sources.svelte';
-import { applyDownloadChanged, loadDownloads, loadImports } from './downloads.svelte';
+import { applyDownloadChanged, loadDownloads, loadImports, watchingImports } from './downloads.svelte';
 import { applyJobProgress, isRunning, loadJobs, resetFinished, resyncRecent } from './jobs.svelte';
 import { applyDatLoaded, loadDats } from './dats.svelte';
 import { loadPlatforms } from './platforms.svelte';
@@ -70,9 +70,12 @@ function scheduleReloadTitles(): void {
 let importsTimer: ReturnType<typeof setTimeout> | null = null;
 let importsPending = false;
 
-// A mass import fires import.done per file; one log re-read per window is enough,
-// and a miss here just leaves the list stale until the next resync.
+// A mass import fires import.done per file; one full-log re-read per window is enough,
+// and only while Activity has it open — otherwise the next mount or resync pages it in.
 function scheduleReloadImports(): void {
+  if (!watchingImports()) {
+    return;
+  }
   if (importsTimer) {
     importsPending = true;
     return;

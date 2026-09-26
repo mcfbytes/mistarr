@@ -1,6 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getDownloads, getImports, loadDownloads, loadImports, patchDownload } from '../lib/stores/downloads.svelte';
+  import {
+    getDownloads,
+    getImports,
+    loadDownloads,
+    loadImports,
+    patchDownload,
+    watchImports
+  } from '../lib/stores/downloads.svelte';
   import { getJobs, getRecentJobs, jobOutcome, loadJobs, watchRecent } from '../lib/stores/jobs.svelte';
   import { findPlatform, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { api, errorMessage } from '../lib/api';
@@ -50,7 +57,12 @@
     void loadJobsList();
     // The platform name falls back to its id in jobTitle(); it retries at the next resync.
     void loadPlatforms().catch(() => undefined);
-    return watchRecent();
+    const stopRecent = watchRecent();
+    const stopImports = watchImports();
+    return () => {
+      stopRecent();
+      stopImports();
+    };
   });
 
   const downloads = $derived(getDownloads());

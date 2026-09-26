@@ -124,6 +124,7 @@
       await loadSourcesList();
     } catch (err) {
       showToast(errorMessage(err));
+      void focusButton(id, 'remove');
     } finally {
       removingId = null;
     }

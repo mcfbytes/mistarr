@@ -83,12 +83,15 @@
   }
 
   $effect(() => {
+    // Falls back to the id in platformName(); a miss retries at the next resync.
     if (!platformsLoaded()) {
       void loadPlatforms().catch(() => undefined);
     }
+    // Only feeds rowKey below; loadDetail() below has its own missing/loadError state.
     if (!row) {
       void loadSources().catch(() => undefined);
     }
+    // Hides the pause-while-playing note until connected; SSE resync fills it.
     if (!getStatus()) {
       void loadStatus().catch(() => undefined);
     }

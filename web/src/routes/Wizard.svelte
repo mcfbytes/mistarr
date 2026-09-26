@@ -24,6 +24,7 @@
   const steps = ['Paths', 'DATs', 'Client', 'Sources'];
 
   let settings = $state<Settings | null>(null);
+  let settingsError = $state<string | null>(null);
   // `null` until a fresh POST /system/cores answer replaces the boot-time result.
   let coresResult = $state<string[] | null>(null);
   let detectingCores = $state(false);
@@ -32,13 +33,13 @@
   let clientSaved = $state(false);
 
   onMount(() => {
-    // Each step just displays what's in its store and never blocks Next/Finish;
-    // a miss leaves it empty here and is retried at the next resync.
+    // The other steps show a store's data and retry at the next resync on a miss;
+    // settings is local here, so its failure is shown with Retry in the Client step.
     void loadPlatforms().catch(() => undefined);
     void loadDats().catch(() => undefined);
     void loadStatus().catch(() => undefined);
     void loadWizard().catch(() => undefined);
-    void loadSettings().catch(() => undefined);
+    void loadSettings();
     void loadSources().catch(() => undefined);
     // Leaving the wizard any way at all counts as dismissing it.
     return () => void dismiss();
@@ -77,7 +78,12 @@
   }
 
   async function loadSettings(): Promise<void> {
-    settings = isMock ? fixtureSettings : await api.settings();
+    try {
+      settings = isMock ? fixtureSettings : await api.settings();
+      settingsError = null;
+    } catch (err) {
+      settingsError = errorMessage(err);
+    }
   }
 
   const dats = $derived(isMock ? fixtureDats : getDats());
@@ -201,7 +207,11 @@
         <p>Detection result: <strong>not run yet</strong></p>
       {/if}
       <ClientStart />
-      {#if settings}
+      {#if !settings && settingsError}
+        <p class="error" role="alert">
+          {settingsError} <button type="button" onclick={() => void loadSettings()}>Retry</button>
+        </p>
+      {:else if settings}
         <h3>Remote path map</h3>
         <p class="muted">Only needed when the client sees its downloads under different paths.</p>
         <PathMapEditor bind:map={settings.client.remote_path_map} />

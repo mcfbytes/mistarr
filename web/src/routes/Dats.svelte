@@ -10,9 +10,19 @@
   import type { DatVersion } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
+  let datsError = $state<string | null>(null);
+
+  async function loadDatsList(): Promise<void> {
+    try {
+      await loadDats();
+      datsError = null;
+    } catch (err) {
+      datsError = errorMessage(err);
+    }
+  }
 
   onMount(() => {
-    void loadDats().catch(() => undefined);
+    void loadDatsList();
     void loadPlatforms().catch(() => undefined);
     if (!getStatus()) {
       void loadStatus().catch(() => undefined);
@@ -143,7 +153,9 @@
 
   <h2>Loaded <span class="muted count">({total} {total === 1 ? 'version' : 'versions'})</span></h2>
   <p class="live" aria-live="polite">{announcement}</p>
-  {#if dats.length === 0}
+  {#if datsError}
+    <p role="alert">{datsError} <button type="button" onclick={() => void loadDatsList()}>Retry</button></p>
+  {:else if dats.length === 0}
     <p class="muted">No DAT loaded yet.</p>
   {:else}
     <ul class="families" aria-label="Loaded DATs">
