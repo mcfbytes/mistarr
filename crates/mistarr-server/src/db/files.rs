@@ -154,6 +154,8 @@ pub struct RomMatch {
     pub name: String,
     /// `good`, `baddump`, `nodump` or `verified`.
     pub status: String,
+    /// The owning title's name, which placement names the file after.
+    pub game: String,
 }
 
 pub(crate) const COLUMNS: &str =
@@ -667,7 +669,7 @@ fn match_among(
     const ORDER: &str = " ORDER BY (r.retired = 0 AND t.retired = 0) DESC,
          d.superseded_by IS NULL DESC, d.id DESC LIMIT 1";
     let select = format!(
-        "SELECT r.id, r.title_id, r.name, r.status
+        "SELECT r.id, r.title_id, r.name, r.status, t.name
          FROM roms r JOIN titles t ON t.id = r.title_id
          JOIN dat_versions d ON d.id = t.dat_version_id
          WHERE t.platform_id = ?1 AND t.source = 'dat' AND {live}"
@@ -679,6 +681,7 @@ fn match_among(
             title_id: r.get(1)?,
             name: r.get(2)?,
             status: r.get(3)?,
+            game: r.get(4)?,
         })
     };
     if let Some(m) = conn
@@ -722,7 +725,7 @@ pub fn roms_matching(
     platform_id: &PlatformId,
     hashes: &mistarr_core::HashSet,
 ) -> Result<Vec<RomMatch>> {
-    let select = "SELECT r.id, r.title_id, r.name, r.status
+    let select = "SELECT r.id, r.title_id, r.name, r.status, t.name
          FROM roms r JOIN titles t ON t.id = r.title_id
          WHERE t.platform_id = ?1 AND t.source = 'dat' AND r.retired = 0 AND t.retired = 0 AND ";
     let size = i64::try_from(hashes.size).unwrap_or(i64::MAX);
@@ -755,6 +758,7 @@ fn rom_match(r: &Row<'_>) -> rusqlite::Result<RomMatch> {
         title_id: r.get(1)?,
         name: r.get(2)?,
         status: r.get(3)?,
+        game: r.get(4)?,
     })
 }
 
@@ -772,7 +776,7 @@ fn rom_match(r: &Row<'_>) -> rusqlite::Result<RomMatch> {
 pub fn disc_roms(conn: &Connection, title_id: i64) -> Result<Vec<RomMatch>> {
     Ok(conn
         .prepare_cached(
-            "SELECT r.id, r.title_id, r.name, r.status FROM roms r JOIN titles t ON t.id = r.title_id
+            "SELECT r.id, r.title_id, r.name, r.status, t.name FROM roms r JOIN titles t ON t.id = r.title_id
              WHERE r.title_id = ?1 AND r.retired = 0 AND t.retired = 0 ORDER BY r.id",
         )?
         .query_map([title_id], rom_match)?
@@ -1209,6 +1213,54 @@ pub fn seed_rom_for_title_fixture(
         ],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// A `misnamed` file with the name of the rom it matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MisnamedRow {
+    /// The file.
+    pub id: FileId,
+    /// Its platform.
+    pub platform_id: PlatformId,
+    /// Relative to `games/`, a zip member as `a.zip#b.nes`.
+    pub rel_path: String,
+    /// The matched `roms.id`.
+    pub rom_id: i64,
+    /// The rom's name in its DAT.
+    pub rom_name: String,
+    /// The name of the rom's title.
+    pub game: String,
+}
+
+/// Every `misnamed` file with a rom, in id order, so the name rule can be applied
+/// again without hashing.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(mistarr_server::db::files::misnamed(&conn).unwrap().is_empty());
+/// ```
+pub fn misnamed(conn: &Connection) -> Result<Vec<MisnamedRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.id, f.platform_id, f.rel_path, r.id, r.name, t.name
+         FROM files f JOIN roms r ON r.id = f.rom_id JOIN titles t ON t.id = r.title_id
+         WHERE f.state = 'misnamed' ORDER BY f.id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(MisnamedRow {
+            id: FileId(r.get(0)?),
+            platform_id: PlatformId(r.get(1)?),
+            rel_path: r.get(2)?,
+            rom_id: r.get(3)?,
+            rom_name: r.get(4)?,
+            game: r.get(5)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
 /// Inserts a title, `dat_version` and one rom directly, bypassing the DAT

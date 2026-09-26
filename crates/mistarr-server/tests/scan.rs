@@ -1145,3 +1145,71 @@ async fn a_member_that_fails_to_hash_is_not_retried_while_unchanged() {
 
     booted.running.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn zipped_nes_files_matched_by_a_headerless_dat_count_as_have() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let games = dir.path().join("games");
+    let names = ["Example Quest (USA)", "Mock Manor (Europe)"];
+    let payloads: Vec<Vec<u8>> = names
+        .iter()
+        .map(|n| format!("synthetic cartridge payload of {n}").into_bytes())
+        .collect();
+    for (name, payload) in names.iter().zip(&payloads) {
+        let image = ines(payload);
+        let zip = build_stored_zip(&format!("{name}.nes"), &image, &hash_of(&image).crc32);
+        write(&games.join(format!("NES/{name}.zip")), &zip);
+    }
+    let headered: Vec<HashSet> = payloads.iter().map(|p| hash_of(&ines(p))).collect();
+    let headerless: Vec<HashSet> = payloads.iter().map(|p| hash_of(p)).collect();
+
+    let mut config = config_in(dir.path());
+    config.paths.games = games;
+    let booted = boot_with(dir, config).await;
+    let (app, addr) = (&booted.running.app, booted.addr());
+    let nes = PlatformId("nes".into());
+
+    let dat = |marker: &str, ext: &str, hashes: &[HashSet]| {
+        let roms: Vec<String> = names.iter().map(|n| format!("{n}.{ext}")).collect();
+        let games: Vec<(&str, &str, &HashSet)> = names
+            .iter()
+            .zip(&roms)
+            .zip(hashes)
+            .map(|((n, r), h)| (*n, r.as_str(), h))
+            .collect();
+        logiqx(
+            &format!("Example Vendor - Nintendo Entertainment System ({marker})"),
+            &games,
+        )
+    };
+    load_dat(&booted, "headered.dat", &dat("Headered", "nes", &headered)).await;
+    // The headerless form of the same family replaces it and names its roms `.unh`.
+    let headerless_dat = dat("Headerless", "unh", &headerless);
+    load_dat(&booted, "headerless.dat", &headerless_dat).await;
+
+    let scan = scan_and_wait(app, addr, "nes").await;
+    let progress = scan.progress.expect("progress");
+    assert_eq!(
+        (&progress["matched"], &progress["unmatched"]),
+        (&2.into(), &0.into())
+    );
+    for name in names {
+        let row = find(app, &nes, &format!("NES/{name}.zip#{name}.nes"))
+            .await
+            .expect("row");
+        assert_eq!(row.state, FileState::Verified, "{name}");
+    }
+    let counts = platform_counts(addr, "nes").await;
+    assert_eq!((&counts["have"], &counts["titles"]), (&2.into(), &2.into()));
+    let r = request(
+        addr,
+        "GET",
+        "/api/v1/platforms/nes/titles?have=yes",
+        &[],
+        None,
+    )
+    .await;
+    assert_eq!(r.json()["total"], 2, "{}", r.body);
+
+    booted.running.shutdown().await.expect("shutdown");
+}

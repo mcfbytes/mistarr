@@ -334,8 +334,10 @@ single-file one. It is the path mistarr sees, after the remote path map.
 ### files.state
 
 - `pending`: seen, not yet hashed.
-- `verified`: hash matches a rom and the filename is what the adapter expects.
-- `misnamed`: hash matches a rom, name differs. The UI offers rename.
+- `verified`: hash matches a rom and the filename is what the adapter expects
+  (VERIFICATION.md "File names").
+- `misnamed`: hash matches a rom, name differs. The UI offers rename. Only
+  `verified` files count toward a title's `have`.
 - `unverified`: no rom matches in any loaded DAT. A member of an imported MRA
   zip the md5 check did not read, or that no hash source covers, is
   `unverified` with `rom_id` set to the zip's rom, and so is the presence row
