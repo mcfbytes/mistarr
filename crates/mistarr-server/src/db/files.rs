@@ -1074,8 +1074,8 @@ pub fn set_match(
 /// Unmatches the files of rom `name` of title `title_id` when a DAT load is about to give
 /// it another size or `[crc32, md5, sha1]`, so no file stays verified against hashes it
 /// does not have: a fully hashed file becomes `unverified` for the recompute to match again
-/// from its stored hashes, any other `pending` for the next scan to hash. Returns the files
-/// changed.
+/// from its stored hashes, any other `pending` for the next scan to hash. A CHD's cue row is
+/// left alone: it holds no hashes and follows its tracks. Returns the files changed.
 ///
 /// # Errors
 ///
@@ -1100,7 +1100,8 @@ pub fn unmatch_changed_rom(
                                                   THEN 'unverified' ELSE 'pending' END
              WHERE rom_id = (SELECT id FROM roms WHERE title_id = ?1 AND name = ?2
                                AND (size IS NOT ?3 OR crc32 IS NOT ?4 OR md5 IS NOT ?5
-                                    OR sha1 IS NOT ?6))",
+                                    OR sha1 IS NOT ?6))
+               AND NOT (header_rule IS 'chd' AND sha1 IS NULL AND md5 IS NULL)",
         )?
         .execute(params![title_id, name, size, crc32, md5, sha1])?)
 }
@@ -2034,6 +2035,22 @@ mod tests {
             1,
         )
         .expect("b");
+        let cue = Hashed {
+            header_rule: Some("chd"),
+            ..Hashed::default()
+        };
+        let cue_row = upsert(
+            &c,
+            &pid,
+            "NES/d.chd#cue",
+            3,
+            1,
+            &cue,
+            Some(rom),
+            verified,
+            1,
+        )
+        .expect("d");
         let same = [
             Some(h.crc32.as_str()),
             Some(h.md5.as_str()),
@@ -2048,6 +2065,11 @@ mod tests {
         );
         assert_eq!(unmatch(4, same).expect("size"), 2);
         let state = |id| get(&c, id).expect("get").map(|f| (f.rom_id, f.state));
+        assert_eq!(
+            state(cue_row),
+            Some((Some(rom), verified)),
+            "a CHD cue row follows its tracks"
+        );
         assert_eq!(state(a), Some((None, FileState::Unverified)));
         assert_eq!(
             state(b),

@@ -25,6 +25,9 @@ pub(super) struct Hashed {
     pub hashes: Hashes,
     /// The whole payload's hashes when the rule stripped a header from it.
     pub whole: Option<Hashes>,
+    /// The whole form of the file on disk is not known, as when the file gained a header
+    /// on placement and could not be read again; `files` then stores no whole hashes.
+    pub whole_unread: bool,
 }
 
 impl Hashed {
@@ -36,6 +39,7 @@ impl Hashed {
             raw_size: hashes.size,
             hashes,
             whole: None,
+            whole_unread: false,
         }
     }
 
@@ -49,8 +53,25 @@ impl Hashed {
         self.forms().any(|h| rom_matches(rom, h))
     }
 
-    /// What `files` stores beside the hashes of a payload hashed under the rule named `rule`.
+    /// Takes the hashes of the placed file, `again`, after it gained a header; without them
+    /// the whole form is unread.
+    pub fn take_rehash(&mut self, again: Option<Hashed>) {
+        if let Some(h) = again {
+            self.hashes = h.hashes;
+            self.whole = h.whole;
+            self.whole_unread = false;
+        } else {
+            self.whole = None;
+            self.whole_unread = true;
+        }
+    }
+
+    /// What `files` stores beside the hashes of a payload hashed under the rule named `rule`:
+    /// nothing when the whole form is unread, so a scan hashes the file again.
     pub fn whole_columns(&self, rule: &str) -> crate::db::files::WholeHashes {
+        if self.whole_unread {
+            return crate::db::files::WholeHashes::default();
+        }
         let whole = self.whole.as_ref().unwrap_or(&self.hashes);
         crate::db::files::WholeHashes::whole_file(rule, whole)
     }
@@ -137,6 +158,7 @@ pub(super) fn hash_item(path: &Path, rule: HeaderRule) -> Result<Vec<Hashed>, Ha
             raw_size: size,
             hashes: forms.content,
             whole: forms.whole,
+            whole_unread: false,
         }]);
     }
     let mut out = Vec::new();
@@ -148,6 +170,7 @@ pub(super) fn hash_item(path: &Path, rule: HeaderRule) -> Result<Vec<Hashed>, Ha
                 raw_size: m.size,
                 hashes: forms.content,
                 whole: forms.whole,
+                whole_unread: false,
             });
         }
     }
@@ -534,6 +557,27 @@ mod tests {
             ..rom(1, "a.nes", &abc())
         });
         assert_eq!(dat.header, Some(vec![0x4e, 0x45]));
+    }
+
+    #[test]
+    fn a_placed_file_not_read_again_stores_no_whole_hashes() {
+        let body = abc();
+        let mut staged = Hashed::plain(None, body.clone());
+        staged.take_rehash(None);
+        assert_eq!(
+            staged.whole_columns("ines"),
+            crate::db::files::WholeHashes::default(),
+            "left for a scan to hash again"
+        );
+        assert_eq!(staged.hashes, body, "the content form still stands");
+        let mut placed = hash_reader(Cursor::new(b"NES\x1a"), HeaderRule::None, None).expect("h");
+        placed.size = 19;
+        let again = Hashed {
+            whole: Some(placed.clone()),
+            ..Hashed::plain(None, body)
+        };
+        staged.take_rehash(Some(again));
+        assert_eq!(staged.whole_columns("ines").sha1, Some(placed.sha1));
     }
 
     #[test]

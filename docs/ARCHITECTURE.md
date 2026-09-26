@@ -612,7 +612,8 @@ does nothing.
 5. Update `files` with the rows the library scan would write (one per member
    of a zip placed whole, as `a.zip#member`; a file that gained a header on
    placement is hashed again from the library, so its whole-file hashes are
-   of the file on disk), which marks the title `have`,
+   of the file on disk, or stored without them for the next scan to hash
+   when that read fails), which marks the title `have`,
    log the action in `import_log`, set the downloads `done` and emit
    `import.done`.
 6. Once a source has a download that placed its file (`done`, or `bad`

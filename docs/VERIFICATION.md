@@ -293,7 +293,8 @@ time, so an unchanged file is not read whole again on the next scan.
 
 A file hashed in two forms goes through this order with its whole form and
 size first, then with its content and the size less the header; the first
-form to match decides. Placement does not need to know which form matched:
+form to match a live rom decides, and only when neither does, the first to
+match a retired one. Placement does not need to know which form matched:
 it reads the staged file's first bytes to decide whether to add a header.
 
 A file may match roms in more than one DAT version (an old and a new one).
@@ -327,7 +328,8 @@ title and name (a headered DAT loaded over the headerless one of its family),
 unmatches the files matched to it in the same transaction: a fully hashed
 file becomes `unverified` with no rom for the recompute to match again from
 its stored hashes, and any other `pending` for the next scan to hash. Arcade
-is left out.
+is left out, and so is a CHD's cue row: it holds no hashes and is rebuilt
+from its tracks when they are matched again.
 
 A zip member the pre-check did not decompress is stored with its
 central-directory CRC32 alone and `header_rule` NULL, and under a stripping

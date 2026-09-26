@@ -383,7 +383,8 @@ longer lists. Roms a kept entry no longer lists get `roms.retired = 1`. A
 kept rom the new version gives another size or other hashes loses its files'
 links in the same transaction, outside arcade: a fully hashed file becomes
 `unverified` with no rom, for the recompute to match again from its stored
-hashes, and any other `pending` (VERIFICATION.md "Matching stored hashes").
+hashes, and any other but a CHD's cue row `pending` (VERIFICATION.md
+"Matching stored hashes").
 A version whose string sorts below the newest live one of its name is stored
 already superseded and does not touch titles. An unbound version stores only
 its `dat_versions` row; binding it re-reads the file from `dats/loaded/`.

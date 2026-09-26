@@ -560,8 +560,9 @@ fn classify(
     Ok(cartridge_state(m.as_ref(), actual_name))
 }
 
-/// The rom the first of `forms` to match any matches, under `docs/VERIFICATION.md`
-/// "Matching order" in each; a caller passes the whole file before its content.
+/// The rom `forms` match under `docs/VERIFICATION.md` "Matching order" in each, a caller
+/// passing the whole file before its content: the first form to match a live rom, else
+/// the first to match a retired one, so a live rom of any form wins over a retired one.
 ///
 /// # Errors
 ///
@@ -571,9 +572,17 @@ pub(crate) fn match_forms<'a>(
     platform_id: &PlatformId,
     forms: impl IntoIterator<Item = &'a Hashes>,
 ) -> Result<Option<files::RomMatch>> {
-    for h in forms {
-        let size = i64::try_from(h.size).unwrap_or(i64::MAX);
-        if let Some(m) = files::match_rom(conn, platform_id, &h.sha1, &h.md5, &h.crc32, size)? {
+    let forms: Vec<&Hashes> = forms.into_iter().collect();
+    let size = |h: &Hashes| i64::try_from(h.size).unwrap_or(i64::MAX);
+    for h in &forms {
+        let (sha1, md5, crc32) = (&h.sha1, &h.md5, &h.crc32);
+        if let Some(m) = files::match_live_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
+            return Ok(Some(m));
+        }
+    }
+    for h in &forms {
+        let (sha1, md5, crc32) = (&h.sha1, &h.md5, &h.crc32);
+        if let Some(m) = files::match_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
             return Ok(Some(m));
         }
     }
@@ -1476,6 +1485,43 @@ mod tests {
             enqueue_if_games_dir_exists(&app, &nes).await.expect("run"),
             None,
             "disabled platforms are skipped, matching POST /system/scan"
+        );
+    }
+
+    #[test]
+    fn a_live_rom_of_the_content_beats_a_retired_rom_of_the_whole_file() {
+        let mut c = Connection::open_in_memory().expect("open");
+        crate::db::migrate::apply(&mut c).expect("migrate");
+        crate::db::platforms::seed(&mut c, &platforms::PLATFORMS).expect("seed");
+        let nes = PlatformId("nes".into());
+        let mut file = b"NES\x1a".to_vec();
+        file.resize(16, 0);
+        file.extend_from_slice(b"synthetic body of a retired and a live rom");
+        let forms = hash_forms(&file[..], HeaderRule::Ines, None).expect("hash");
+        let whole = forms.whole.clone().expect("a header");
+        let retired =
+            files::seed_rom_fixture(&c, &nes, "Old (USA)", "Old (USA).nes", &whole, "good")
+                .expect("retired rom");
+        c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [retired])
+            .expect("retire");
+        let live = files::seed_rom_fixture(
+            &c,
+            &nes,
+            "New (USA)",
+            "New (USA).nes",
+            &forms.content,
+            "good",
+        )
+        .expect("live rom");
+        let (rom, _) = classify(&c, &nes, "New (USA).nes", &forms).expect("classify");
+        assert_eq!(rom, Some(live));
+        c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [live])
+            .expect("retire");
+        let (rom, _) = classify(&c, &nes, "Old (USA).nes", &forms).expect("classify");
+        assert_eq!(
+            rom,
+            Some(retired),
+            "a retired rom still matches when nothing live does"
         );
     }
 

@@ -1169,14 +1169,12 @@ impl Placing<'_> {
             crate::threads::blocking(crate::threads::label::HASH, move || hash_item(&path, rule))
                 .await
                 .map_err(|e| task(&e))?;
-        match hashed.map(|mut h| h.pop()) {
-            Ok(Some(h)) => {
-                pieces[0].hashed.hashes = h.hashes;
-                pieces[0].hashed.whole = h.whole;
-            }
-            Ok(None) => {}
-            Err(e) => tracing::warn!(error = %e, "cannot hash the placed file again"),
+        if let Err(e) = &hashed {
+            tracing::warn!(error = %e, "cannot hash the placed file again");
         }
+        pieces[0]
+            .hashed
+            .take_rehash(hashed.ok().and_then(|mut h| h.pop()));
         Ok(pieces)
     }
 
