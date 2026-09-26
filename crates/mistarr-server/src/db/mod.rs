@@ -1362,6 +1362,8 @@ mod tests {
         assert!(matches!(failed, Err(Error::Cancelled)));
         let held = db.write_tx_blocking(|tx| Ok(tx.is_autocommit()));
         assert!(!held.expect("in a transaction"));
+        let bulk = db.write_bulk_tx(|tx| Ok(tx.is_autocommit())).await;
+        assert!(!bulk.expect("a bulk write in a transaction"));
         let (a, b) = db
             .read(|c| Ok((settings::get(c, "a")?, settings::get(c, "b")?)))
             .await

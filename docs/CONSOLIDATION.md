@@ -141,7 +141,7 @@ Sonnet · `mistarr-mister` · branch `wp-54-mister-limits`
 
 Opus · `mistarr-server` · branch `wp-55-server-blocking`
 
-- [ ] `threads::run(label, f)` is async and returns `Result<R>`;
+- [x] `threads::run(label, f)` is async and returns `Result<R>`;
   `Error::Task` carries the `JoinError` through `#[from]`. Every
   `.map_err(|e| Error::Task(e.to_string()))` goes, as do the local blocking
   wrappers in `jobs/arcade.rs`, `jobs/core_limits.rs`, `http/launch.rs` and
@@ -149,22 +149,22 @@ Opus · `mistarr-server` · branch `wp-55-server-blocking`
 - [ ] `Error` gains `Json(#[from] serde_json::Error)` and
   `Client(#[from] ClientError)`; no variant wraps a typed error's
   `to_string()`; `Error::UnknownJob` goes if nothing builds it.
-- [ ] Blocking filesystem calls leave the async workers: the DAT watcher's
+- [x] Blocking filesystem calls leave the async workers: the DAT watcher's
   poll, the DAT import's `is_file`, `list_members`, `create_dir_all`,
   `rename` and `reject`, `import_in_ram`'s `members_size`, and the remaining
   `exists` and `is_dir` calls in `import.rs`, `scan.rs` and `arcade.rs`.
   `scan::file_meta` folds into the blocking listing, which returns size and
   mtime.
-- [ ] One write gate: `write_blocking`, `write_bulk_blocking` and
+- [x] One write gate: `write_blocking`, `write_bulk_blocking` and
   `hold_writer_blocking` take the `write_turn` permit. A test shows an async
   writer queued behind a blocking bulk write holds no blocking thread.
-- [ ] `Db::write_tx` and `write_tx_blocking` open a transaction and end with
+- [x] `Db::write_tx` and `write_tx_blocking` open a transaction and end with
   `db::commit`; the roughly 40 hand-written `transaction()` then `commit`
   sites use them. Database functions never open transactions, except
   batching functions named as such (`delete_missing`, `platforms::seed`).
-- [ ] `AppState` holds `RwLock<Arc<Config>>` and `config()` returns
+- [x] `AppState` holds `RwLock<Arc<Config>>` and `config()` returns
   `Arc<Config>`; `status::snapshot` clones no `Config`.
-- [ ] `status::publish(app)` replaces the six copies of snapshot-then-publish.
+- [x] `status::publish(app)` replaces the six copies of snapshot-then-publish.
 
 ### WP-56 Config load and validation
 
