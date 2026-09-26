@@ -434,10 +434,10 @@ fn prepare_catalog(c: &mut rusqlite::Connection) -> Result<Prepared> {
     let tx = c.transaction()?;
     db::dats::refresh_families(&tx)?;
     let resolved = db::dats::resolve_families(&tx)?;
-    let renamed = crate::jobs::scan::settle_names(&tx)?;
+    let settled = crate::jobs::scan::settle_names(&tx)?;
     crate::db::commit(tx)?;
-    if renamed > 0 {
-        tracing::info!(renamed, "misnamed files verified under the name rule");
+    if settled > 0 {
+        tracing::info!(settled, "misnamed files verified under the name rule");
     }
     Ok((
         settings::get_json::<RuntimeSettings>(c, keys::RUNTIME),

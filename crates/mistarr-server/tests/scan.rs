@@ -1146,20 +1146,6 @@ async fn a_member_that_fails_to_hash_is_not_retried_while_unchanged() {
     booted.running.shutdown().await.expect("shutdown");
 }
 
-/// A Logiqx DAT named `name` at `version`, one game per `(game, rom, hashes)`.
-fn logiqx_at(name: &str, version: &str, games: &[(&str, String, &HashSet)]) -> String {
-    let mut xml =
-        format!("<datafile><header><name>{name}</name><version>{version}</version></header>");
-    for (game, rom, h) in games {
-        xml.push_str(&format!(
-            "<game name=\"{game}\"><rom name=\"{rom}\" size=\"{}\" crc=\"{}\" md5=\"{}\" sha1=\"{}\"/></game>",
-            h.size, h.crc32, h.md5, h.sha1
-        ));
-    }
-    xml.push_str("</datafile>");
-    xml
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn zipped_nes_files_matched_by_a_headerless_dat_count_as_have() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -1184,13 +1170,17 @@ async fn zipped_nes_files_matched_by_a_headerless_dat_count_as_have() {
     let nes = PlatformId("nes".into());
 
     let dat = |marker: &str, ext: &str, hashes: &[HashSet]| {
-        let games: Vec<(&str, String, &HashSet)> = names
+        let roms: Vec<String> = names.iter().map(|n| format!("{n}.{ext}")).collect();
+        let games: Vec<(&str, &str, &HashSet)> = names
             .iter()
+            .zip(&roms)
             .zip(hashes)
-            .map(|(n, h)| (*n, format!("{n}.{ext}"), h))
+            .map(|((n, r), h)| (*n, r.as_str(), h))
             .collect();
-        let name = format!("Example Vendor - Nintendo Entertainment System ({marker})");
-        logiqx_at(&name, "20260101-000000", &games)
+        logiqx(
+            &format!("Example Vendor - Nintendo Entertainment System ({marker})"),
+            &games,
+        )
     };
     load_dat(&booted, "headered.dat", &dat("Headered", "nes", &headered)).await;
     // The headerless form of the same family replaces it and names its roms `.unh`.

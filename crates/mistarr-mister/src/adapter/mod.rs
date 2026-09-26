@@ -188,8 +188,16 @@ macro_rules! row_methods {
 }
 use row_methods;
 
-/// A DAT name made safe as one exFAT path component.
-fn safe_name(name: &str) -> Result<String> {
+/// A DAT name made safe as one exFAT path component, as placement names files.
+///
+/// # Errors
+///
+/// [`Error::InvalidName`] for a name with nothing left after cleaning.
+///
+/// ```
+/// assert_eq!(mistarr_mister::adapter::safe_name("A/B").unwrap(), "A_B");
+/// ```
+pub fn safe_name(name: &str) -> Result<String> {
     let cleaned: String = name
         .chars()
         .map(|c| match c {

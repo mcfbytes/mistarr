@@ -206,8 +206,8 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
 5. The job's final progress is `{ platform_id, done, total, matched,
    unmatched, unidentified }`: the platform's files with a rom state
    (`verified`, `misnamed`, `bad`), those `unverified` and those
-   `unidentified` once the scan ends. Only `verified` files count toward
-   `have`, so `matched` can exceed the files behind it. When `[scan] chd_tracks` is on and an
+   `unidentified` once the scan ends. `matched` counts `misnamed` and `bad`
+   files that `have` does not. When `[scan] chd_tracks` is on and an
    image of the platform waits, the scan queues `chd_tracks`.
 6. Scans are resumable: hashed rows are written 256 at a time and the
    finished directories at most every 2 s. A directory not yet recorded as
