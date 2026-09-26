@@ -171,13 +171,13 @@ Opus · `mistarr-server` · branch `wp-55-server-blocking`
 Sonnet · `mistarr-server` (`config.rs`, `app.rs`, `http/system.rs`) · branch
 `wp-56-config-validate`
 
-- [ ] A TOML error reads `config: <path>: <error>`, with the prefix once.
-- [ ] An unknown key in `mistarr.toml` is logged as a warning naming the key;
+- [x] A TOML error reads `config: <path>: <error>`, with the prefix once.
+- [x] An unknown key in `mistarr.toml` is logged as a warning naming the key;
   startup continues. A new dependency for this needs the usual justification.
-- [ ] `Config::validate()` runs at load and on `PUT /system/settings`. It holds
+- [x] `Config::validate()` runs at load and on `PUT /system/settings`. It holds
   the remote path map check (moved from `http/system.rs`) and the
   import-floor warning (moved from `open_db`).
-- [ ] Tests for each of the three.
+- [x] Tests for each of the three.
 
 ## Wave 5
 

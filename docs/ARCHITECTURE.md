@@ -1099,6 +1099,13 @@ a `scan` or `transfer` section leave the file's in force, so a faster board
 can default `chd_tracks` on in the file. `server`, `paths`, `sources`, `jobs` and
 `memory` need a restart.
 
+A file that is not valid TOML fails startup with `config: <path>: <error>`,
+the prefix once; a key the schema above does not name is logged as a warning
+naming it and otherwise ignored. `Config::validate` runs at load, only
+logging what it finds, and again on `PUT /system/settings`, which rejects a
+`client.remote_path_map` entry with a blank remote path or a non-absolute
+local path; `[memory] import_floor_mib` left at 0 is a warning either way.
+
 ## Non-goals
 
 - No emulation and no save management. Launching hands a command to MiSTer
