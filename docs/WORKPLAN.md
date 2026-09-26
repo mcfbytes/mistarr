@@ -100,11 +100,43 @@ code. Guidance:
 | WP-50 | Headered and headerless hashes | Opus | 02, 11 | Under the `ines`, `a78` and `lnx` rules a file with the header's magic is hashed whole and without its header in one pass (`hash_forms`, two hasher sets on the one 256 KiB buffer), and the scan, the import, the stored-hash rematch and the recompute match the whole form and size first, then the content and the size less the header, so headered and headerless DATs both match; migration 0020 adds `files.crc32_whole`, `md5_whole` and `sha1_whole` and queues a startup scan of each enabled platform whose rows hold the stripped form alone, which the scan hashes again; the zip pre-check derives a member's content CRC32 from its central-directory CRC32 and header and skips members that match neither form; a placed file that gained a header is hashed again for its whole form; a DAT load that rewrites a kept rom's size or hashes unmatches its files for the recompute; scan tests over the server cover NES, 7800 and Lynx files, loose and zipped, against headered and headerless DATs, rematching after a later load, the upgrade and the rewritten roms, with a proptest of the dual hasher. |
 | WP-51 | Have counts for headerless names | Opus | 50 | A cartridge file or zip member whose hash matches a rom is `verified`, not `misnamed`, when its name fits by VERIFICATION.md "File names": the rom's name, its stem with the rom's extension (any case), the extension placement writes, or any loadable one when the platform does not load the rom's (a headerless `.unh` rom and a `.nes` file), or the game's placed name, so a placed file always fits and rename never loops; an extensionless dotted rom name is not split; scan, the recompute's stored-hash matching and startup, which settles existing `misnamed` cartridge rows, agree; after a headered DAT and then the headerless DAT of its family load, a scan's `matched` zipped NES files show as `have` on the Platforms card and in Browse, checked end to end in `tests/scan.rs`. |
 
+## Waves 4 to 11: consolidation
+
+Each package's acceptance is its task list in CONSOLIDATION.md, every box ticked.
+
+| WP | Name | Model | Depends | Crates |
+|---|---|---|---|---|
+| WP-52 | Web lists and load errors | Sonnet | none | `web/` |
+| WP-53 | Core codecs | Opus | none | `mistarr-core`, `mistarr-sources` |
+| WP-54 | Parser limits in mister | Sonnet | none | `mistarr-mister` |
+| WP-55 | Server errors and blocking | Opus | none | `mistarr-server` |
+| WP-56 | Config load and validation | Sonnet | none | `mistarr-server` |
+| WP-57 | Clients on core codecs | Opus | 53 | `mistarr-clients` |
+| WP-58 | Mister on core | Opus | 53, 54 | `mistarr-mister` |
+| WP-59 | One intake for dropped files | Sonnet | 53, 55 | `mistarr-sources`, `mistarr-server` |
+| WP-60 | Database types | Opus | 55 | `mistarr-server` |
+| WP-61 | Web mock at the API boundary | Opus | 52 | `web/` |
+| WP-62 | Database layout and fixtures | Sonnet | 60 | `mistarr-server` |
+| WP-63 | HTTP shell | Opus | 56, 57, 60 | `mistarr-server`, `web/` |
+| WP-64 | Matching and scan | Opus | 58, 59, 60 | `mistarr-server`, `mistarr-core` |
+| WP-65 | Web stores | Sonnet | 61 | `web/` |
+| WP-66 | Web components and styles | Sonnet | 65 | `web/` |
+| WP-67 | Job framework | Opus | 63, 64 | `mistarr-server` |
+| WP-68 | Typed events and progress | Sonnet | 66, 67 | `mistarr-server`, `web/` |
+| WP-70 | Workspace lints and dependencies | Haiku | 57, 58, 59 | every crate |
+| WP-69 | Digests, names and ids across crates | Opus | 62, 68, 70 | every crate |
+| WP-71 | Server surface and test helpers | Sonnet | 69 | `mistarr-server` |
+| WP-72 | Docs sweep | Haiku | 71 | `docs/` |
+
 ## Suggested fan-out
 
 Wave 1 is eight independent agents. Wave 2 needs WP-09 first, then six in
 parallel with the listed dependencies. Wave 3 is sequential except WP-19 and
 WP-20, which can start any time after their dependencies.
+
+The consolidation waves fan out to five agents in waves 4 and 5 and four in
+wave 6, then narrow to the cross-crate renames and the docs sweep.
+CONSOLIDATION.md gives the merge order inside each wave.
 
 ## Review and merge
 
