@@ -401,7 +401,8 @@ pub struct SettingsPatch {
 }
 
 impl Config {
-    /// Parses TOML text; absent fields take their defaults.
+    /// Parses TOML text; absent fields take their defaults. An unknown key is
+    /// logged as a warning naming it and otherwise ignored.
     ///
     /// # Errors
     ///
@@ -413,11 +414,24 @@ impl Config {
     /// assert_eq!(c.limits.down_kbps_core, 512);
     /// ```
     pub fn parse(text: &str) -> Result<Self> {
-        toml::from_str(text).map_err(|e| Error::Config(e.to_string()))
+        let (config, unknown) = Self::parse_reporting(text)?;
+        warn_unknown_keys(&unknown);
+        Ok(config)
+    }
+
+    /// [`Config::parse`], also returning the dotted path of every key the
+    /// document held that no field of `Config` claimed.
+    fn parse_reporting(text: &str) -> Result<(Self, Vec<String>)> {
+        let de = toml::Deserializer::parse(text).map_err(|e| Error::Config(e.to_string()))?;
+        let mut unknown = Vec::new();
+        let config = serde_ignored::deserialize(de, |path| unknown.push(path.to_string()))
+            .map_err(|e| Error::Config(e.to_string()))?;
+        Ok((config, unknown))
     }
 
     /// Loads `explicit` if given, which must exist, else `<data>/mistarr.toml`
-    /// if present, else defaults. `data` then overrides `paths.data`.
+    /// if present, else defaults. `data` then overrides `paths.data`. Runs
+    /// [`Config::validate`], logging every problem found.
     ///
     /// # Errors
     ///
@@ -440,14 +454,40 @@ impl Config {
             Some(path) => {
                 let text = std::fs::read_to_string(&path)
                     .map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
-                Self::parse(&text).map_err(|e| Error::Config(format!("{}: {e}", path.display())))?
+                let (config, unknown) =
+                    Self::parse_reporting(&text).map_err(|e| with_path(e, &path))?;
+                warn_unknown_keys(&unknown);
+                config
             }
             None => Self::default(),
         };
         if let Some(d) = data {
             config.paths.data = d.to_path_buf();
         }
+        for problem in config.validate() {
+            tracing::warn!("{}", problem.message());
+        }
         Ok(config)
+    }
+
+    /// Problems with this config that are safe to find at load, where every
+    /// one is only logged, and again on `PUT /system/settings`, which rejects
+    /// [`ConfigProblem::PathMap`] and leaves the rest to the log.
+    #[must_use]
+    pub fn validate(&self) -> Vec<ConfigProblem> {
+        let mut problems = Vec::new();
+        if self.memory.import_floor_mib == 0 {
+            problems.push(ConfigProblem::ImportFloor);
+        }
+        if self
+            .client
+            .remote_path_map
+            .iter()
+            .any(|m| !path_map_entry_ok(m))
+        {
+            problems.push(ConfigProblem::PathMap);
+        }
+        problems
     }
 
     /// The runtime-editable subset.
@@ -513,6 +553,55 @@ impl Config {
         if let Some(transfer) = patch.transfer {
             self.transfer = transfer;
         }
+    }
+}
+
+/// A problem [`Config::validate`] finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConfigProblem {
+    /// A remote path map entry has a blank remote path or a non-absolute local path.
+    PathMap,
+    /// `[memory] import_floor_mib` is 0, so a DAT import in RAM may leave no memory
+    /// for the core.
+    ImportFloor,
+}
+
+impl ConfigProblem {
+    /// The message shown to a user or written to the log.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::PathMap => {
+                "Each remote path map entry needs a remote path and an absolute local path."
+            }
+            Self::ImportFloor => {
+                "[memory] import_floor_mib is 0: a DAT import in RAM may leave the core no memory"
+            }
+        }
+    }
+}
+
+/// Rejects a remote path map entry whose remote path is blank, which would
+/// match every path the client reports, or whose local path is not absolute.
+/// The remote side is the client's own spelling, so `C:\\x` or `C:/x` pass.
+fn path_map_entry_ok(m: &PathMapping) -> bool {
+    !m.remote.to_string_lossy().trim().is_empty() && m.local.is_absolute()
+}
+
+/// Prefixes a parse error's message with `path`, keeping the `config:` prefix
+/// [`Error::Config`]'s `Display` adds to it once.
+fn with_path(e: Error, path: &Path) -> Error {
+    match e {
+        Error::Config(msg) => Error::Config(format!("{}: {msg}", path.display())),
+        other => other,
+    }
+}
+
+/// Logs each key [`Config::parse_reporting`] found and no field claimed.
+fn warn_unknown_keys(unknown: &[String]) {
+    for key in unknown {
+        tracing::warn!(key = %key, "unknown key in mistarr.toml");
     }
 }
 
@@ -609,6 +698,65 @@ mod tests {
             Err(Error::Config(_))
         ));
         assert!(matches!(Config::parse("[[["), Err(Error::Config(_))));
+    }
+
+    #[test]
+    fn a_bad_toml_file_names_the_path_with_one_config_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(CONFIG_FILE), "[[[").expect("write");
+        let err = Config::load(None, Some(dir.path())).expect_err("bad toml");
+        let message = err.to_string();
+        let path = dir.path().join(CONFIG_FILE);
+        assert_eq!(message.matches("config:").count(), 1, "{message}");
+        assert!(
+            message.starts_with(&format!("config: {}: ", path.display())),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_and_the_rest_still_parses() {
+        let text = "[server]\nlisten = \"1.2.3.4:1\"\ntypo = 1\n[bogus_section]\nx = 1\n";
+        let (config, unknown) = Config::parse_reporting(text).expect("parse");
+        assert_eq!(config.server.listen, "1.2.3.4:1");
+        let unknown: std::collections::BTreeSet<_> = unknown.into_iter().collect();
+        assert_eq!(
+            unknown,
+            ["server.typo", "bogus_section"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        // The same document parses through the public entry point, unknown keys only logged.
+        assert!(Config::parse(text).is_ok());
+    }
+
+    #[test]
+    fn path_map_entries_need_a_remote_and_an_absolute_local() {
+        let ok = |r: &str, l: &str| path_map_entry_ok(&PathMapping::new(r, l));
+        assert!(ok("/downloads", "/media/fat/mistarr/staging"));
+        assert!(ok("C:\\Downloads", "/media/fat/mistarr/staging"));
+        assert!(ok("C:/Downloads", "/media/fat/mistarr/staging"));
+        assert!(!ok("", "/media/fat/mistarr/staging"));
+        assert!(!ok("  ", "/media/fat/mistarr/staging"));
+        assert!(!ok("/downloads", "staging"));
+        assert!(!ok("/downloads", ""));
+    }
+
+    #[test]
+    fn validate_reports_the_path_map_and_import_floor_problems() {
+        assert_eq!(Config::default().validate(), []);
+        let mut bad_map = Config::default();
+        bad_map.client.remote_path_map = vec![PathMapping::new("/r", "not-absolute")];
+        assert_eq!(bad_map.validate(), [ConfigProblem::PathMap]);
+        let floor_zero = Config {
+            memory: MemoryConfig {
+                import_floor_mib: 0,
+                ..MemoryConfig::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(floor_zero.validate(), [ConfigProblem::ImportFloor]);
     }
 
     #[test]

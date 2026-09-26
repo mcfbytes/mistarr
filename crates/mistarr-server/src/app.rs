@@ -548,11 +548,6 @@ pub(crate) fn open_db(
     for dir in [config.paths.dats(), config.paths.sources()] {
         crate::jobs::url_fetch::spool::clean_parts(&dir, ".upload-");
     }
-    if config.memory.import_floor_mib == 0 {
-        tracing::warn!(
-            "[memory] import_floor_mib is 0: a DAT import in RAM may leave the core no memory"
-        );
-    }
     let progress = match crate::db::migrate::pending(&path)? {
         Some((from, to)) => {
             tracing::info!(from, to, "migrating the database");
