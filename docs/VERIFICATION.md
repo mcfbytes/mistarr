@@ -315,6 +315,18 @@ header. `files.size` is the size on disk, so the CRC32-plus-size tier also
 tries that size less the header the rule strips (for `smc`, only when the
 size is `n*1024 + 512`).
 
+## File names
+
+A cartridge file or zip member that matches a rom is `verified` when its name
+is the one the adapter expects, else `misnamed`. The expected name is the
+rom's file name; when the platform neither loads nor writes the rom's
+extension, as with the headerless `.unh` form or a rom without an extension,
+it is also the rom's stem with any extension the platform loads or writes,
+which is how placement names it: `Example Quest (USA).unh` fits
+`Example Quest (USA).nes` on `nes`. The comparison is exact apart from the
+extension's case. At every start, `misnamed` cartridge files whose name fits
+under this rule become `verified` without being read again.
+
 ## CHD images
 
 A Redump-style DAT lists a disc as a cue sheet plus one `.bin` per track, so a

@@ -199,13 +199,15 @@ pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
    and the zip central-directory CRC is used as a pre-check to skip hashing
    members that cannot match anything.
 3. Match by SHA1, then MD5, then CRC32 plus size. Record `verified`,
-   `unverified` (no DAT match) or `misnamed` (match but wrong filename).
+   `unverified` (no DAT match) or `misnamed` (match but wrong filename, by
+   VERIFICATION.md "File names").
 4. Rows the walk did not see are deleted at the end, except under a
    directory that exists but could not be listed, whose rows are kept.
 5. The job's final progress is `{ platform_id, done, total, matched,
    unmatched, unidentified }`: the platform's files with a rom state
    (`verified`, `misnamed`, `bad`), those `unverified` and those
-   `unidentified` once the scan ends. When `[scan] chd_tracks` is on and an
+   `unidentified` once the scan ends. Only `verified` files count toward
+   `have`, so `matched` can exceed the files behind it. When `[scan] chd_tracks` is on and an
    image of the platform waits, the scan queues `chd_tracks`.
 6. Scans are resumable: hashed rows are written 256 at a time and the
    finished directories at most every 2 s. A directory not yet recorded as

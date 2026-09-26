@@ -1333,7 +1333,7 @@ fn set_matches(conn: &Connection, platform: &PlatformId, rows: &[FileRow]) -> Re
             continue;
         }
         let m = scan::stored_match(conn, platform, f)?;
-        let (rom, state) = scan::cartridge_state(m.as_ref(), scan::own_name(&f.rel_path));
+        let (rom, state) = scan::cartridge_state(platform, m.as_ref(), scan::own_name(&f.rel_path));
         matched += usize::from(f.rom_id.is_none() && rom.is_some());
         set_changed(conn, f, rom, state)?;
     }

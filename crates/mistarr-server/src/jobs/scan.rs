@@ -560,12 +560,13 @@ fn classify(
         &hashes.crc32,
         size,
     )?;
-    Ok(cartridge_state(m.as_ref(), actual_name))
+    Ok(cartridge_state(platform_id, m.as_ref(), actual_name))
 }
 
-/// The rom id and state a cartridge file or zip member named `own_name` takes from
-/// its match: `bad` for a bad dump, else `verified` or `misnamed` by name.
+/// The rom id and state a cartridge file or zip member of `platform` named `own_name`
+/// takes from its match: `bad` for a bad dump, else `verified` or `misnamed` by [`name_fits`].
 pub(crate) fn cartridge_state(
+    platform: &PlatformId,
     m: Option<&files::RomMatch>,
     own_name: &str,
 ) -> (Option<i64>, FileState) {
@@ -574,12 +575,73 @@ pub(crate) fn cartridge_state(
     };
     let state = if m.status == "baddump" {
         FileState::Bad
-    } else if files::basename(&m.name) == own_name {
+    } else if name_fits(platform, &m.name, own_name) {
         FileState::Verified
     } else {
         FileState::Misnamed
     };
     (Some(m.rom_id), state)
+}
+
+/// Whether `own_name` is the name the adapter expects for the rom named `rom_name` on
+/// `platform`: the rom's file name, or, when the platform does not load the rom's
+/// extension (a headerless `.unh`, or none), its stem with an extension the platform
+/// writes or loads, as placement names it.
+///
+/// ```
+/// use mistarr_core::PlatformId;
+/// use mistarr_server::jobs::scan::name_fits;
+/// let nes = PlatformId("nes".into());
+/// assert!(name_fits(&nes, "Example Quest (USA).nes", "Example Quest (USA).nes"));
+/// assert!(name_fits(&nes, "Example Quest (USA).unh", "Example Quest (USA).nes"));
+/// assert!(!name_fits(&nes, "Example Quest (USA).unh", "Example Quest (Japan).nes"));
+/// ```
+#[must_use]
+pub fn name_fits(platform: &PlatformId, rom_name: &str, own_name: &str) -> bool {
+    let rom_name = files::basename(rom_name);
+    if rom_name == own_name {
+        return true;
+    }
+    let Some(row) = platforms::by_id(&platform.0) else {
+        return false;
+    };
+    let loads = |ext: &str| {
+        row.load_extensions
+            .iter()
+            .chain(row.extension_written.iter())
+            .any(|e| e.eq_ignore_ascii_case(ext))
+    };
+    let (rom_stem, rom_ext) = rom_name.rsplit_once('.').unwrap_or((rom_name, ""));
+    if !rom_ext.is_empty() && loads(rom_ext) {
+        return false;
+    }
+    own_name
+        .rsplit_once('.')
+        .is_some_and(|(stem, ext)| stem == rom_stem && loads(ext))
+}
+
+/// Marks `verified` every `misnamed` cartridge file whose name [`name_fits`] its rom,
+/// as a scan would decide it now; returns how many. Disc tracks keep their state.
+///
+/// # Errors
+///
+/// [`Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert_eq!(mistarr_server::jobs::scan::settle_names(&conn).unwrap(), 0);
+/// ```
+pub fn settle_names(conn: &Connection) -> Result<usize> {
+    let mut settled = 0;
+    for row in files::misnamed(conn)? {
+        let disc = platforms::by_id(&row.platform_id.0).is_some_and(|p| p.kind == Kind::Disc);
+        if !disc && name_fits(&row.platform_id, &row.rom_name, own_name(&row.rel_path)) {
+            files::set_match(conn, row.id, Some(row.rom_id), FileState::Verified)?;
+            settled += 1;
+        }
+    }
+    Ok(settled)
 }
 
 /// The name a row's file or zip member has, compared against the rom's name.
@@ -664,7 +726,7 @@ fn known(
     let Some(m) = stored_match(conn, platform_id, &row)? else {
         return Ok(Known::Skip);
     };
-    let (rom_id, state) = cartridge_state(Some(&m), own_name(rel_path));
+    let (rom_id, state) = cartridge_state(platform_id, Some(&m), own_name(rel_path));
     Ok(Known::Matched(NewFile {
         rel_path: row.rel_path,
         size,
@@ -1172,6 +1234,98 @@ mod tests {
         assert!(in_done_unit("GBA", &done));
         assert!(!in_done_unit("PSX/Other (USA)/t.bin", &done));
         assert!(!in_done_unit("GBAX/a.gba", &done));
+    }
+
+    #[test]
+    fn a_rom_extension_the_platform_does_not_load_takes_the_written_one() {
+        let (nes, snes) = (PlatformId("nes".into()), PlatformId("snes".into()));
+        let name = "Example Quest (USA)";
+        assert!(name_fits(
+            &nes,
+            &format!("{name}.unh"),
+            &format!("{name}.nes")
+        ));
+        assert!(
+            name_fits(&nes, name, &format!("{name}.nes")),
+            "no extension"
+        );
+        assert!(name_fits(
+            &nes,
+            &format!("sub/{name}.nes"),
+            &format!("{name}.nes")
+        ));
+        assert!(!name_fits(
+            &nes,
+            &format!("{name}.unh"),
+            &format!("{name}.unh.zip")
+        ));
+        assert!(!name_fits(
+            &nes,
+            &format!("{name}.unh"),
+            &format!("{name} (Alt).nes")
+        ));
+        assert!(!name_fits(
+            &nes,
+            &format!("{name}.unh"),
+            &format!("{name}.fds")
+        ));
+        assert!(
+            !name_fits(&snes, &format!("{name}.sfc"), &format!("{name}.smc")),
+            "a loadable rom extension is kept as the DAT names it"
+        );
+        let other = PlatformId("nowhere".into());
+        assert!(!name_fits(
+            &other,
+            &format!("{name}.unh"),
+            &format!("{name}.nes")
+        ));
+    }
+
+    #[test]
+    fn settling_names_verifies_only_files_that_now_fit() {
+        let mut c = Connection::open_in_memory().expect("open");
+        crate::db::migrate::apply(&mut c).expect("migrate");
+        platform_rows::seed(&mut c, &platforms::PLATFORMS).expect("seed");
+        let nes = PlatformId("nes".into());
+        let h = Hashes {
+            size: 4,
+            crc32: "0a0b0c0d".into(),
+            md5: "0".repeat(32),
+            sha1: "1".repeat(40),
+        };
+        let rom = files::seed_rom_fixture(
+            &c,
+            &nes,
+            "Example Quest (USA)",
+            "Example Quest (USA).unh",
+            &h,
+            "good",
+        )
+        .expect("rom");
+        let row = |rel: &str| NewFile {
+            rel_path: rel.to_owned(),
+            size: 20,
+            mtime: 1,
+            crc32: Some(h.crc32.clone()),
+            md5: Some(h.md5.clone()),
+            sha1: Some(h.sha1.clone()),
+            header_rule: Some("ines".into()),
+            rom_id: Some(rom),
+            state: FileState::Misnamed,
+            reason: None,
+        };
+        let fits =
+            files::upsert_row(&c, &nes, &row("NES/q.zip#Example Quest (USA).nes"), 1).expect("row");
+        let other = files::upsert_row(&c, &nes, &row("NES/Other Name.nes"), 1).expect("row");
+        assert_eq!(settle_names(&c).expect("settle"), 1);
+        let state = |id: FileId| files::get(&c, id).expect("get").expect("row").state;
+        assert_eq!(state(fits), FileState::Verified);
+        assert_eq!(state(other), FileState::Misnamed);
+        assert_eq!(
+            settle_names(&c).expect("settle"),
+            0,
+            "nothing left to settle"
+        );
     }
 
     #[tokio::test]

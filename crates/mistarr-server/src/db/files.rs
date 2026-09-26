@@ -1211,6 +1211,51 @@ pub fn seed_rom_for_title_fixture(
     Ok(conn.last_insert_rowid())
 }
 
+/// A `misnamed` file with the name of the rom it matched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MisnamedRow {
+    /// The file.
+    pub id: FileId,
+    /// Its platform.
+    pub platform_id: PlatformId,
+    /// Relative to `games/`, a zip member as `a.zip#b.nes`.
+    pub rel_path: String,
+    /// The matched `roms.id`.
+    pub rom_id: i64,
+    /// The rom's name in its DAT.
+    pub rom_name: String,
+}
+
+/// Every `misnamed` file with a rom, in id order, so the name rule can be applied
+/// again without hashing.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert!(mistarr_server::db::files::misnamed(&conn).unwrap().is_empty());
+/// ```
+pub fn misnamed(conn: &Connection) -> Result<Vec<MisnamedRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT f.id, f.platform_id, f.rel_path, r.id, r.name
+         FROM files f JOIN roms r ON r.id = f.rom_id
+         WHERE f.state = 'misnamed' ORDER BY f.id",
+    )?;
+    let rows = stmt.query_map([], |r| {
+        Ok(MisnamedRow {
+            id: FileId(r.get(0)?),
+            platform_id: PlatformId(r.get(1)?),
+            rel_path: r.get(2)?,
+            rom_id: r.get(3)?,
+            rom_name: r.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
 /// Inserts a title, `dat_version` and one rom directly, bypassing the DAT
 /// importer. A fixture for this package's tests until WP-10's importer lands.
 ///
