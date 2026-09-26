@@ -206,7 +206,7 @@ impl View {
 }
 
 fn too_large(cap: u64, what: &str) -> Error {
-    Error::Fetch(format!(
+    Error::FetchRefused(format!(
         "The file is larger than {} MiB, the most {what} may be.",
         cap >> 20
     ))
@@ -222,9 +222,9 @@ fn what(found: Option<Found>) -> &'static str {
 /// The type `head` announces, refused when it is none or the announced length exceeds its cap.
 fn identify(head: &[u8], total: Option<u64>) -> Result<Found> {
     if content::is_gzip(head) {
-        return Err(Error::Fetch(COMPRESSED.to_owned()));
+        return Err(Error::FetchRefused(COMPRESSED.to_owned()));
     }
-    let found = content::sniff(head).ok_or_else(|| Error::Fetch(NOT_ACCEPTED.to_owned()))?;
+    let found = content::sniff(head).ok_or_else(|| Error::FetchRefused(NOT_ACCEPTED.to_owned()))?;
     if total.is_some_and(|t| t > found.cap()) {
         return Err(too_large(found.cap(), what(Some(found))));
     }
@@ -259,7 +259,7 @@ impl UrlFetch {
     /// Fails with [`CANCELLED`] once cancelled, [`Error::Cancelled`] on shutdown.
     fn stop_point(&self, ctx: &JobContext) -> Result<()> {
         if self.cancel.is_set() {
-            return Err(Error::Fetch(CANCELLED.to_owned()));
+            return Err(Error::FetchRefused(CANCELLED.to_owned()));
         }
         if *ctx.app.shutdown_signal().borrow() {
             return Err(Error::Cancelled);
@@ -272,7 +272,7 @@ impl UrlFetch {
         let mut stop = ctx.app.shutdown_signal();
         tokio::select! {
             out = work => Ok(out),
-            () = self.cancel.wait() => Err(Error::Fetch(CANCELLED.to_owned())),
+            () = self.cancel.wait() => Err(Error::FetchRefused(CANCELLED.to_owned())),
             _ = stop.wait_for(|s| *s) => Err(Error::Cancelled),
         }
     }
@@ -292,7 +292,9 @@ impl UrlFetch {
                 warn_once(|| {
                     tracing::warn!(path = %path.display(), error = %e, "the CA file cannot be read");
                 });
-                return Err(Error::Fetch(format!("The CA bundle cannot be read: {e}.")));
+                return Err(Error::FetchRefused(format!(
+                    "The CA bundle cannot be read: {e}."
+                )));
             }
         };
         if let Some((path, why)) = roots.skipped() {
@@ -377,7 +379,7 @@ impl UrlFetch {
                 };
                 crate::http::place_source(app, file)
                     .await
-                    .map_err(|e| Error::Fetch(e.message))?
+                    .map_err(|e| Error::FetchRefused(e.message))?
             }
             Checked::Dat { .. } => {
                 let dir = app.config().paths.dats();
@@ -422,15 +424,15 @@ impl UrlFetch {
                 content::MAX_UNPACKED_BYTES,
                 "a DAT or DAT pack unpacked",
             )),
-            Err(Refused::NoRoom) => Err(Error::Fetch(CARD_FULL.to_owned())),
+            Err(Refused::NoRoom) => Err(Error::FetchRefused(CARD_FULL.to_owned())),
             Err(Refused::NotAccepted(why)) => {
                 tracing::debug!(why, "a fetched file was refused");
-                Err(Error::Fetch(NOT_ACCEPTED.to_owned()))
+                Err(Error::FetchRefused(NOT_ACCEPTED.to_owned()))
             }
-            Err(Refused::OtherFiles) => Err(Error::Fetch(OTHER_FILES.to_owned())),
+            Err(Refused::OtherFiles) => Err(Error::FetchRefused(OTHER_FILES.to_owned())),
             Err(Refused::Stopped) => {
                 self.stop_point(ctx)?;
-                Err(Error::Fetch(CANCELLED.to_owned()))
+                Err(Error::FetchRefused(CANCELLED.to_owned()))
             }
             Err(Refused::Io(e)) => Err(e.into()),
         }
@@ -462,7 +464,7 @@ fn pace(app: &AppState) -> Pace {
 fn card_full(e: Error) -> Error {
     match e {
         Error::Io(io) if io.kind() == std::io::ErrorKind::StorageFull => {
-            Error::Fetch(CARD_FULL.to_owned())
+            Error::FetchRefused(CARD_FULL.to_owned())
         }
         e => e,
     }
@@ -574,7 +576,7 @@ mod tests {
     fn a_full_card_is_named_and_other_errors_pass() {
         let full = card_full(std::io::Error::from(std::io::ErrorKind::StorageFull).into());
         assert_eq!(full.to_string(), CARD_FULL);
-        let other = card_full(Error::Fetch("x".into()));
+        let other = card_full(Error::FetchRefused("x".into()));
         assert_eq!(other.to_string(), "x");
         let card = std::path::Path::new("/nonexistent/card");
         if let Some(dir) = ram_dir(card) {

@@ -172,7 +172,7 @@ impl Spool {
         let mut file = self
             .file
             .take()
-            .ok_or_else(|| Error::Fetch("the download was closed".into()))?;
+            .ok_or_else(|| Error::FetchRefused("the download was closed".into()))?;
         let recheck = self.written + len >= self.checked_at + RECHECK_BYTES;
         let (path, places) = (self.path.clone(), self.places.clone());
         let (pace, mut on_card, written) = (Arc::clone(&self.pace), !self.in_ram, self.written);

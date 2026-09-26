@@ -1074,6 +1074,8 @@ fn import_stream<R: BufRead>(
     // Applying the stage grows the copy and SQLite's temporary files at once.
     room(req)?;
     db.write_bulk_blocking(|c| {
+        // Hand-written, not `transact`: the not-current return drops `tx` to roll back
+        // the upsert, which `transact` would commit.
         let tx = c.transaction()?;
         let plan = dats::upsert_version(&tx, &new)?;
         if req.bind.is_some() && !plan.current {

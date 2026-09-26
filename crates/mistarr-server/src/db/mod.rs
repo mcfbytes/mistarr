@@ -158,7 +158,9 @@ impl Db {
     }
 
     /// Runs `f` on the writer connection on the calling thread, once no other write is
-    /// running; it waits for its turn on this thread.
+    /// running; it waits for its turn on this thread. On tokio's blocking pool only the
+    /// background job lane may call it, since an async writer holding the turn needs a
+    /// pool thread to finish.
     ///
     /// # Errors
     ///

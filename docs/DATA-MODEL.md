@@ -495,13 +495,13 @@ refresh, rebuild and check uses it.
 ### Keeping it current
 
 Triggers on `titles` (its `group_root` among the watched columns), `roms`,
-`files`, `title_flags` and `title_regions`
-insert the affected group roots into `title_groups_dirty` (a root is marked
-once per transaction). `db::commit`, the only way a write transaction
-commits and the end of every `Db::write_tx` and `db::transact`, recomputes the dirty groups and empties the list before `COMMIT`,
-so readers never see a group out of step with its titles. It refreshes
-4096 roots per statement, so a DAT load that dirties a whole platform keeps
-SQLite's temporary tables small. A write made outside a
+`files`, `title_flags` and `title_regions` insert the affected group roots
+into `title_groups_dirty` (a root is marked once per transaction).
+`db::commit`, the only way a write transaction commits and the end of every
+`Db::write_tx` and `db::transact`, recomputes the dirty groups and empties
+the list before `COMMIT`, so readers never see a group out of step with its
+titles. It refreshes 4096 roots per statement, so a DAT load that dirties a
+whole platform keeps SQLite's temporary tables small. A write made outside a
 transaction is settled by the writer connection right after, with a warning
 in the log.
 
