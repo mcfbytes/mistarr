@@ -439,12 +439,11 @@ impl Placing<'_> {
         let pid = self.pid();
         self.app()
             .db
-            .write(move |c| {
-                let tx = c.transaction()?;
+            .write_tx(move |tx| {
                 for (rel, rom) in &rows {
-                    files::mark_verified(&tx, &pid, rel, *rom)?;
+                    files::mark_verified(tx, &pid, rel, *rom)?;
                 }
-                crate::db::commit(tx)
+                Ok(())
             })
             .await
     }
@@ -464,7 +463,7 @@ impl Placing<'_> {
         })
         .await?;
         app.db
-            .write(move |c| arcade::store_refreshed(c, &found))
+            .write_tx(move |tx| arcade::store_refreshed(tx, &found))
             .await
     }
 }

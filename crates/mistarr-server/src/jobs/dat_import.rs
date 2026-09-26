@@ -1046,13 +1046,13 @@ fn import_stream<R: BufRead>(
             clone_of |= game.clone_of.is_some();
             chunk.push(staged(&game));
             if chunk.len() >= STAGE_CHUNK {
-                db.write_blocking(|c| append_chunk(c, &chunk))?;
+                db.write_tx_blocking(|tx| dat_stage::append(tx, &chunk))?;
                 chunk.clear();
             }
         }
     }
     if !chunk.is_empty() {
-        db.write_blocking(|c| append_chunk(c, &chunk))?;
+        db.write_tx_blocking(|tx| dat_stage::append(tx, &chunk))?;
     }
     // Applying the stage grows the copy and SQLite's temporary files at once.
     room(req)?;
@@ -1113,14 +1113,6 @@ fn pace(req: &Request, games: u64) -> Result<()> {
         }
         std::thread::sleep(PAUSED_POLL);
     }
-    Ok(())
-}
-
-/// Appends one chunk of parsed games to the stage in its own transaction.
-fn append_chunk(conn: &mut Connection, chunk: &[StagedGame]) -> Result<()> {
-    let tx = conn.transaction()?;
-    dat_stage::append(&tx, chunk)?;
-    crate::db::commit(tx)?;
     Ok(())
 }
 
@@ -1410,16 +1402,15 @@ struct Tally {
 /// Runs one chunk of `pass` over `platform` in its own transaction, adding to `tally`,
 /// and returns the pass that follows.
 fn recompute_pass(
-    conn: &mut Connection,
+    tx: &Connection,
     platform: &PlatformId,
     prefs: &Prefs,
     pass: Pass,
     tally: &mut Tally,
 ) -> Result<Pass> {
-    let tx = conn.transaction()?;
     let next = match pass {
         Pass::Retired => {
-            let taken = rematch_chunk(&tx, platform)?;
+            let taken = rematch_chunk(tx, platform)?;
             tally.checked += taken;
             if taken >= REMATCH_CHUNK as usize {
                 Pass::Retired
@@ -1431,7 +1422,7 @@ fn recompute_pass(
             }
         }
         Pass::Unmatched(after) => {
-            let chunk = match_unmatched_chunk(&tx, platform, after)?;
+            let chunk = match_unmatched_chunk(tx, platform, after)?;
             tally.checked += chunk.read;
             tally.matched += chunk.matched;
             if chunk.read < REMATCH_CHUNK as usize {
@@ -1441,12 +1432,11 @@ fn recompute_pass(
             }
         }
         Pass::Picking => {
-            tally.picked = titles::recompute_platform(&tx, &platform.0, prefs)?;
+            tally.picked = titles::recompute_platform(tx, &platform.0, prefs)?;
             Pass::Done
         }
         Pass::Done => Pass::Done,
     };
-    crate::db::commit(tx)?;
     Ok(next)
 }
 
@@ -1464,7 +1454,7 @@ fn recompute_blocking(
     while pass != Pass::Done {
         check()?;
         report(pass, &tally);
-        pass = db.write_blocking(|c| recompute_pass(c, platform, prefs, pass, &mut tally))?;
+        pass = db.write_tx_blocking(|tx| recompute_pass(tx, platform, prefs, pass, &mut tally))?;
     }
     Ok(tally)
 }
@@ -1531,9 +1521,9 @@ impl Job for Recompute {
             (pass, tally) = ctx
                 .app
                 .db
-                .write(move |c| {
+                .write_tx(move |tx| {
                     let mut tally = tally;
-                    let next = recompute_pass(c, &platform, &prefs, pass, &mut tally)?;
+                    let next = recompute_pass(tx, &platform, &prefs, pass, &mut tally)?;
                     Ok((next, tally))
                 })
                 .await?;

@@ -258,21 +258,19 @@ async fn update(
     let requested = choice.clone();
     let updated = app
         .db
-        .write(move |c| {
-            let tx = c.transaction()?;
+        .write_tx(move |tx| {
             if let Some(choice) = &requested {
-                rows::request_binding(&tx, id, choice)?;
+                rows::request_binding(tx, id, choice)?;
             }
             if let Some(s) = &stored_seed {
-                rows::set_seed_policy(&tx, id, s)?;
+                rows::set_seed_policy(tx, id, s)?;
             }
             match enable {
-                Some(false) => rows::set_state(&tx, id, SourceState::Disabled, None)?,
-                Some(true) => enable_source(&tx, id, threshold)?,
+                Some(false) => rows::set_state(tx, id, SourceState::Disabled, None)?,
+                Some(true) => enable_source(tx, id, threshold)?,
                 None => {}
             }
-            let row = rows::get(&tx, id)?;
-            crate::db::commit(tx)?;
+            let row = rows::get(tx, id)?;
             Ok(row)
         })
         .await?

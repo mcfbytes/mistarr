@@ -701,9 +701,7 @@ pub fn delete_missing(
         .collect();
     let mut removed = 0;
     for batch in gone.chunks(DELETE_BATCH) {
-        let tx = conn.transaction()?;
-        removed += delete_paths(&tx, platform_id, batch)?;
-        crate::db::commit(tx)?;
+        removed += crate::db::transact(conn, |tx| delete_paths(tx, platform_id, batch))?;
     }
     Ok(removed)
 }

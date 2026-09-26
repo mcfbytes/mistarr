@@ -82,23 +82,21 @@ pub async fn rename(app: &AppState, group: TitleId, file_id: FileId) -> Outcome<
     let (to_db, from_db, title) = (to_rel.clone(), from_rel, entry.id);
     let stale_id = stale.map(|s| s.id);
     app.db
-        .write(move |c| {
-            let tx = c.transaction()?;
+        .write_tx(move |tx| {
             let now = crate::unix_now();
             if let Some(id) = stale_id {
-                files::delete(&tx, id)?;
+                files::delete(tx, id)?;
             }
-            files::move_to(&tx, file_id, &to_db, FileState::Verified, mtime, now)?;
+            files::move_to(tx, file_id, &to_db, FileState::Verified, mtime, now)?;
             let detail = json!({ "from": from_db, "rel_path": to_db, "title_id": title.0 });
             imports::log(
-                &tx,
+                tx,
                 now,
                 None,
                 Some(file_id.0),
                 ImportAction::Renamed,
                 &detail,
             )?;
-            crate::db::commit(tx)?;
             Ok(())
         })
         .await?;

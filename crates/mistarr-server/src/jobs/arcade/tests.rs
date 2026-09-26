@@ -492,7 +492,7 @@ async fn a_run_stopped_after_storing_leaves_the_picks_to_the_next() {
     .expect("task")
     .expect("batch");
     app.db
-        .write(move |c| store_batch(c, version, run_no, items))
+        .write_tx(move |tx| store_batch(tx, version, run_no, items))
         .await
         .expect("store");
     assert_eq!(picks(&app).await, 0);

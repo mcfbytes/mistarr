@@ -430,11 +430,11 @@ fn prepare_catalog(c: &mut rusqlite::Connection) -> Result<Prepared> {
         tracing::info!(added, "seeded platforms");
     }
     let unfinished = db::files::platforms_with_progress(c)?;
-    let tx = c.transaction()?;
-    db::dats::refresh_families(&tx)?;
-    let resolved = db::dats::resolve_families(&tx)?;
-    let settled = crate::jobs::scan::settle_names(&tx)?;
-    crate::db::commit(tx)?;
+    let (resolved, settled) = db::transact(c, |tx| {
+        db::dats::refresh_families(tx)?;
+        let resolved = db::dats::resolve_families(tx)?;
+        Ok((resolved, crate::jobs::scan::settle_names(tx)?))
+    })?;
     if settled > 0 {
         tracing::info!(settled, "misnamed files verified under the name rule");
     }
@@ -702,7 +702,7 @@ pub(crate) fn detect_cores(app: &AppState) -> Result<Vec<mistarr_core::PlatformI
     let present: Vec<_> = cores.into_iter().flat_map(|c| c.platforms).collect();
     tracing::info!(platforms = present.len(), "installed cores detected");
     app.db
-        .write_blocking(|c| db::platforms::set_core_present(c, &present))?;
+        .write_tx_blocking(|tx| db::platforms::set_core_present(tx, &present))?;
     Ok(present)
 }
 

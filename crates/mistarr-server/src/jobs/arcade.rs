@@ -222,7 +222,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
         }
         ctx.app
             .db
-            .write(move |c| store_batch(c, version, run, items))
+            .write_tx(move |tx| store_batch(tx, version, run, items))
             .await?;
         ctx.progress(json!({
             "done": ((n + 1) * BATCH).min(total),
@@ -237,7 +237,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
     let (retired, live, changed) = ctx
         .app
         .db
-        .write(move |c| settle_titles(c, version, run, &prefs))
+        .write_tx(move |tx| settle_titles(tx, version, run, &prefs))
         .await?;
     if changed {
         super::remap::enqueue(&ctx.app, Some(vec![PlatformId(PLATFORM.into())])).await;
@@ -399,37 +399,34 @@ fn run_check(
 /// recomputes the picks when titles changed; returns the retired and live
 /// counts and whether this run stored or retired any title.
 fn settle_titles(
-    conn: &mut rusqlite::Connection,
+    tx: &rusqlite::Connection,
     version: DatVersionId,
     run: i64,
     prefs: &mistarr_core::select::Prefs,
 ) -> Result<(usize, u64, bool)> {
-    let tx = conn.transaction()?;
-    let retired = rows::retire_unseen(&tx, PLATFORM, run)?;
-    let live = rows::live_count(&tx, PLATFORM)?;
-    crate::db::dats::set_game_count(&tx, version, live)?;
-    let changed = retired > 0 || rows::recompute_pending(&tx, PLATFORM)?;
+    let retired = rows::retire_unseen(tx, PLATFORM, run)?;
+    let live = rows::live_count(tx, PLATFORM)?;
+    crate::db::dats::set_game_count(tx, version, live)?;
+    let changed = retired > 0 || rows::recompute_pending(tx, PLATFORM)?;
     if changed {
-        titles::recompute_platform(&tx, PLATFORM, prefs)?;
-        rows::set_recompute_pending(&tx, PLATFORM, false)?;
+        titles::recompute_platform(tx, PLATFORM, prefs)?;
+        rows::set_recompute_pending(tx, PLATFORM, false)?;
     }
-    crate::db::commit(tx)?;
     Ok((retired, live, changed))
 }
 
 /// Writes one batch in one transaction, marking the picks stale when it stores a title.
 fn store_batch(
-    conn: &mut rusqlite::Connection,
+    tx: &rusqlite::Connection,
     version: DatVersionId,
     run: i64,
     items: Vec<Item>,
 ) -> Result<()> {
-    let tx = conn.transaction()?;
     if items
         .iter()
         .any(|i| matches!(i.title, Title::Stored { .. }))
     {
-        rows::set_recompute_pending(&tx, PLATFORM, true)?;
+        rows::set_recompute_pending(tx, PLATFORM, true)?;
     }
     for Item { title, check } in items {
         let id = match title {
@@ -474,22 +471,21 @@ fn store_batch(
                         present: z.on_disk.is_some(),
                     })
                     .collect();
-                rows::upsert_title(&tx, PLATFORM, version, &title, &rom_zips)?
+                rows::upsert_title(tx, PLATFORM, version, &title, &rom_zips)?
             }
             Title::Kept { id, present } => {
-                rows::touch(&tx, id, run)?;
+                rows::touch(tx, id, run)?;
                 for (file, dir, on_disk) in &present {
-                    rows::set_zip_present(&tx, id, file, dir, *on_disk)?;
+                    rows::set_zip_present(tx, id, file, dir, *on_disk)?;
                 }
                 id
             }
         };
         if let Pending::Set(outcome, stamp) = check {
             let (check, detail) = outcome.map_or((None, None), |(c, d)| (Some(c), d));
-            rows::set_check(&tx, id, check, detail.as_deref(), stamp.as_deref())?;
+            rows::set_check(tx, id, check, detail.as_deref(), stamp.as_deref())?;
         }
     }
-    crate::db::commit(tx)?;
     Ok(())
 }
 
@@ -937,16 +933,14 @@ pub(super) fn refresh(
 }
 
 /// Records what [`refresh`] found.
-pub(super) fn store_refreshed(conn: &mut rusqlite::Connection, found: &[Refreshed]) -> Result<()> {
-    let tx = conn.transaction()?;
+pub(super) fn store_refreshed(tx: &rusqlite::Connection, found: &[Refreshed]) -> Result<()> {
     for r in found {
         for (file, dir, present) in &r.zips {
-            rows::set_zip_present(&tx, r.id, file, dir, *present)?;
+            rows::set_zip_present(tx, r.id, file, dir, *present)?;
         }
         let (check, detail) = r.check.clone().map_or((None, None), |(c, d)| (Some(c), d));
-        rows::set_check(&tx, r.id, check, detail.as_deref(), r.stamp.as_deref())?;
+        rows::set_check(tx, r.id, check, detail.as_deref(), r.stamp.as_deref())?;
     }
-    crate::db::commit(tx)?;
     Ok(())
 }
 

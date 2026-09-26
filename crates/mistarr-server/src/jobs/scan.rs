@@ -500,9 +500,9 @@ impl<'a> Sink<'a> {
             .ctx
             .app
             .db
-            .write(move |c| {
+            .write_tx(move |tx| {
                 let chd_on = app.config().scan.chd_tracks;
-                commit_unit(c, &pid, rows, done_dirs.as_deref(), now, chd_on)
+                commit_unit(tx, &pid, rows, done_dirs.as_deref(), now, chd_on)
             })
             .await?;
         for (_, id, state) in &written {
@@ -521,26 +521,24 @@ impl<'a> Sink<'a> {
 /// transaction, so the single writer connection is never held for the hashing itself. A
 /// CHD waiting to be decoded is written `pending` or `off` as `chd_on`, read in this write, says.
 fn commit_unit(
-    conn: &mut Connection,
+    tx: &Connection,
     platform_id: &PlatformId,
     rows: Vec<NewFile>,
     done_dirs: Option<&[String]>,
     now: i64,
     chd_on: bool,
 ) -> Result<Written> {
-    let tx = conn.transaction()?;
     let mut written = Vec::with_capacity(rows.len());
     for mut row in rows {
         if let Some(reason) = row.reason.as_deref() {
             row.reason = Some(super::chd::settle(reason, chd_on).to_owned());
         }
-        let id = files::upsert_row(&tx, platform_id, &row, now)?;
+        let id = files::upsert_row(tx, platform_id, &row, now)?;
         written.push((row.rel_path, id, row.state));
     }
     if let Some(done_dirs) = done_dirs {
-        files::save_scan_progress(&tx, platform_id, done_dirs, now)?;
+        files::save_scan_progress(tx, platform_id, done_dirs, now)?;
     }
-    crate::db::commit(tx)?;
     Ok(written)
 }
 

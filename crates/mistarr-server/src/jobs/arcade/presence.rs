@@ -242,18 +242,17 @@ fn recheck(games: &Path, rc: Recheck, out: &mut Changes) {
 
 /// Applies one batch's changes in one transaction; returns rows recorded and removed.
 fn write_changes(
-    conn: &mut Connection,
+    tx: &Connection,
     pid: &PlatformId,
     changes: &Changes,
     now: i64,
 ) -> Result<(usize, usize)> {
-    let tx = conn.transaction()?;
-    let dropped = files::delete_paths(&tx, pid, &changes.drop)?;
+    let dropped = files::delete_paths(tx, pid, &changes.drop)?;
     for (zip, rom) in &changes.record {
         let none = Hashed::default();
         let state = FileState::Unverified;
         files::upsert(
-            &tx,
+            tx,
             pid,
             &zip.rel,
             zip.size,
@@ -265,12 +264,11 @@ fn write_changes(
         )?;
     }
     for (id, mtime) in &changes.restamp {
-        files::restamp(&tx, *id, *mtime, now)?;
+        files::restamp(tx, *id, *mtime, now)?;
     }
     for (id, size, mtime, crc) in &changes.reverify {
-        files::reverify(&tx, *id, *size, *mtime, crc, now)?;
+        files::reverify(tx, *id, *size, *mtime, crc, now)?;
     }
-    crate::db::commit(tx)?;
     Ok((changes.record.len(), dropped))
 }
 
@@ -333,10 +331,8 @@ async fn prune_dir(
             pruned += ctx
                 .app
                 .db
-                .write(move |c| {
-                    let tx = c.transaction()?;
-                    let n = files::delete_paths(&tx, &p, &doomed)?;
-                    crate::db::commit(tx)?;
+                .write_tx(move |tx| {
+                    let n = files::delete_paths(tx, &p, &doomed)?;
                     Ok(n)
                 })
                 .await?;
@@ -411,7 +407,7 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
             let (recorded, dropped) = ctx
                 .app
                 .db
-                .write(move |c| write_changes(c, &p, &changes, now))
+                .write_tx(move |tx| write_changes(tx, &p, &changes, now))
                 .await?;
             stats.recorded += recorded;
             stats.pruned += dropped;

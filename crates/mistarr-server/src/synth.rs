@@ -328,15 +328,15 @@ fn scaled(console: &Console, scale: f64) -> usize {
 /// assert!(seeded.titles > 0 && seeded.roms >= seeded.titles);
 /// ```
 pub fn seed(conn: &mut Connection, scale: f64, seed: u64) -> Result<Seeded> {
-    let tx = conn.transaction()?;
-    let mut rng = Rng(seed | 1);
-    let words = vocabulary(&mut rng, 3_000);
-    let mut out = Seeded::default();
-    for console in &CONSOLES {
-        seed_console(&tx, &mut rng, &words, console, scale, &mut out)?;
-    }
-    db::commit(tx)?;
-    Ok(out)
+    db::transact(conn, |tx| {
+        let mut rng = Rng(seed | 1);
+        let words = vocabulary(&mut rng, 3_000);
+        let mut out = Seeded::default();
+        for console in &CONSOLES {
+            seed_console(tx, &mut rng, &words, console, scale, &mut out)?;
+        }
+        Ok(out)
+    })
 }
 
 /// `count` distinct DAT game names drawn like [`seed`]'s: clone groups of up to five

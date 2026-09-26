@@ -309,7 +309,7 @@ fn plan_and_write_a_batch_against_the_database() {
 
     let (recorded, dropped) = app
         .db
-        .write_blocking(|c| write_changes(c, &p, &out, 2))
+        .write_tx_blocking(|tx| write_changes(tx, &p, &out, 2))
         .expect("write");
     assert_eq!((recorded, dropped), (1, 0));
     let written = app

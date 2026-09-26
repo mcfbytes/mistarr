@@ -305,14 +305,12 @@ async fn want(
     };
     let result = app
         .db
-        .write(move |c| {
-            let tx = c.transaction()?;
-            let wanted = titles::want(&tx, target)?;
+        .write_tx(move |tx| {
+            let wanted = titles::want(tx, target)?;
             let created = match wanted {
-                Ok(()) => downloads::want_title(&tx, target, crate::unix_now())?,
+                Ok(()) => downloads::want_title(tx, target, crate::unix_now())?,
                 Err(_) => Vec::new(),
             };
-            crate::db::commit(tx)?;
             Ok(wanted.map(|()| created))
         })
         .await?;
@@ -343,12 +341,10 @@ async fn unwant(
     let group = current.detail.parent_id;
     let cancelled = app
         .db
-        .write(move |c| {
-            let tx = c.transaction()?;
+        .write_tx(move |tx| {
             let now = crate::unix_now();
-            let cancelled = downloads::cancel_group(&tx, group, now)?;
-            titles::unwant_group(&tx, group, now)?;
-            crate::db::commit(tx)?;
+            let cancelled = downloads::cancel_group(tx, group, now)?;
+            titles::unwant_group(tx, group, now)?;
             Ok(cancelled)
         })
         .await?;

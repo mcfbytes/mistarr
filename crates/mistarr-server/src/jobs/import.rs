@@ -535,8 +535,7 @@ impl Placing<'_> {
         let settled = self
             .app()
             .db
-            .write(move |c| {
-                let tx = c.transaction()?;
+            .write_tx(move |tx| {
                 let quarantined = Quarantined {
                     row,
                     rom_id,
@@ -545,8 +544,7 @@ impl Placing<'_> {
                     reason: &reason,
                     detail: &detail,
                 };
-                let settled = quarantined.record(&tx, crate::unix_now())?;
-                crate::db::commit(tx)?;
+                let settled = quarantined.record(tx, crate::unix_now())?;
                 Ok(settled)
             })
             .await?;
@@ -727,19 +725,17 @@ impl Placing<'_> {
         let settled = self
             .app()
             .db
-            .write(move |c| {
-                let tx = c.transaction()?;
+            .write_tx(move |tx| {
                 let now = crate::unix_now();
                 imports::log(
-                    &tx,
+                    tx,
                     now,
                     Some(id.0),
                     Some(file),
                     ImportAction::SkippedExisting,
                     &detail,
                 )?;
-                let settled = redirect.settle(&tx, id, now)?;
-                crate::db::commit(tx)?;
+                let settled = redirect.settle(tx, id, now)?;
                 Ok(settled)
             })
             .await?;
@@ -778,10 +774,8 @@ impl Placing<'_> {
         let settled = self
             .app()
             .db
-            .write(move |c| {
-                let tx = c.transaction()?;
-                let settled = redirect.settle(&tx, id, crate::unix_now())?;
-                crate::db::commit(tx)?;
+            .write_tx(move |tx| {
+                let settled = redirect.settle(tx, id, crate::unix_now())?;
                 Ok(settled)
             })
             .await?;
@@ -1240,30 +1234,28 @@ impl Placing<'_> {
         let (ids, redirect) = (ids.to_vec(), self.redirect.clone());
         self.app()
             .db
-            .write(move |c| {
-                let tx = c.transaction()?;
+            .write_tx(move |tx| {
                 let now = crate::unix_now();
                 let mut done = Vec::new();
                 for t in &targets {
-                    record_target(&tx, &scope, t, &pieces, now, &mut done)?;
+                    record_target(tx, &scope, t, &pieces, now, &mut done)?;
                 }
                 let mut settled = Settled::default();
                 match (&redirect, complete) {
                     (Some(r), true) => {
                         for id in &ids {
-                            let s = r.settle(&tx, *id, now)?;
+                            let s = r.settle(tx, *id, now)?;
                             settled.moved.extend(s.moved);
                             settled.cancelled.extend(s.cancelled);
                             settled.again = settled.again.or(s.again);
                         }
                     }
                     (None, true) => {
-                        downloads::move_all(&tx, &ids, DownloadState::Done, None, now)?;
-                        prove_single(&tx, &pieces)?;
+                        downloads::move_all(tx, &ids, DownloadState::Done, None, now)?;
+                        prove_single(tx, &pieces)?;
                     }
                     (_, false) => {}
                 }
-                crate::db::commit(tx)?;
                 Ok((done, settled))
             })
             .await

@@ -258,10 +258,8 @@ async fn retire(
     let Path(id) = id.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let row = app
         .db
-        .write(move |c| {
-            let tx = c.transaction()?;
-            let row = dats::retire(&tx, DatVersionId(id), crate::unix_now())?;
-            crate::db::commit(tx)?;
+        .write_tx(move |tx| {
+            let row = dats::retire(tx, DatVersionId(id), crate::unix_now())?;
             Ok(row)
         })
         .await?

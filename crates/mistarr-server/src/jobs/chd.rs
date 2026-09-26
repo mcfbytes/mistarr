@@ -884,22 +884,20 @@ async fn record(
     let written = ctx
         .app
         .db
-        .write(move |c| {
-            let tx = c.transaction()?;
-            rows::store_tracks(&tx, &id, &tracks)?;
+        .write_tx(move |tx| {
+            rows::store_tracks(tx, &id, &tracks)?;
             let m = ChdMembers {
                 container: &container,
                 size,
                 mtime,
                 tracks: &tracks,
             };
-            let members = classify_chd(&tx, &pid, &m)?;
+            let members = classify_chd(tx, &pid, &m)?;
             let changed =
-                rows::replace_container(&tx, &pid, &container, &members, crate::unix_now())?;
+                rows::replace_container(tx, &pid, &container, &members, crate::unix_now())?;
             if let Some(rate) = rate {
-                settings::set_json(&tx, keys::CHD_RATE, &rate)?;
+                settings::set_json(tx, keys::CHD_RATE, &rate)?;
             }
-            crate::db::commit(tx)?;
             Ok((members, changed))
         })
         .await?;

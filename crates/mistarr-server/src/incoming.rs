@@ -495,11 +495,10 @@ mod tests {
         let (release, released) = std::sync::mpsc::channel::<()>();
         let db = app.db.clone();
         let holder = std::thread::spawn(move || {
-            db.write_blocking(|c| {
-                let tx = c.transaction()?;
+            db.write_blocking(|_| {
                 let _ = held.send(());
                 let _ = released.recv();
-                crate::db::commit(tx)
+                Ok(())
             })
         });
         is_held.recv().expect("held");
