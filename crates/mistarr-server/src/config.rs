@@ -37,6 +37,10 @@ pub struct Config {
     pub memory: MemoryConfig,
     /// `[scan]`.
     pub scan: ScanConfig,
+    /// Dotted paths `load` found in the file that no field claimed; not itself
+    /// a config key. [`Config::log_problems`] logs these once the caller can.
+    #[serde(skip)]
+    pub(crate) unknown_keys: Vec<String>,
 }
 
 /// `[scan]`: how the library scan identifies files.
@@ -430,8 +434,10 @@ impl Config {
     }
 
     /// Loads `explicit` if given, which must exist, else `<data>/mistarr.toml`
-    /// if present, else defaults. `data` then overrides `paths.data`. Runs
-    /// [`Config::validate`], logging every problem found.
+    /// if present, else defaults. `data` then overrides `paths.data`. Unknown
+    /// keys are kept on the returned config rather than logged here; call
+    /// [`Config::log_problems`] once logging starts, after laying any saved
+    /// runtime settings over the result.
     ///
     /// # Errors
     ///
@@ -450,41 +456,44 @@ impl Config {
             Some(p) => Some(p.to_path_buf()),
             None => Some(data.unwrap_or(&default_data).join(CONFIG_FILE)).filter(|p| p.exists()),
         };
-        let mut config = match file {
+        let (mut config, unknown) = match file {
             Some(path) => {
                 let text = std::fs::read_to_string(&path)
                     .map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
-                let (config, unknown) =
-                    Self::parse_reporting(&text).map_err(|e| with_path(e, &path))?;
-                warn_unknown_keys(&unknown);
-                config
+                Self::parse_reporting(&text).map_err(|e| with_path(e, &path))?
             }
-            None => Self::default(),
+            None => (Self::default(), Vec::new()),
         };
         if let Some(d) = data {
             config.paths.data = d.to_path_buf();
         }
-        for problem in config.validate() {
-            tracing::warn!("{}", problem.message());
-        }
+        config.unknown_keys = unknown;
         Ok(config)
     }
 
+    /// Logs each key `load` found that no field claimed, then every
+    /// [`Config::validate`] problem. The caller runs this once a `tracing`
+    /// subscriber is installed, so nothing is silently dropped as at startup,
+    /// where `load` itself runs too early for that.
+    pub(crate) fn log_problems(&self) {
+        warn_unknown_keys(&self.unknown_keys);
+        for problem in self.validate() {
+            tracing::warn!("{}", problem.message());
+        }
+    }
+
     /// Problems with this config that are safe to find at load, where every
-    /// one is only logged, and again on `PUT /system/settings`, which rejects
-    /// [`ConfigProblem::PathMap`] and leaves the rest to the log.
+    /// one is only logged, via [`Config::log_problems`]. `PUT
+    /// /system/settings` separately rejects a patch whose own `client`
+    /// section fails the [`ConfigProblem::PathMap`] check; it does not
+    /// re-validate the rest of the stored config.
     #[must_use]
     pub fn validate(&self) -> Vec<ConfigProblem> {
         let mut problems = Vec::new();
         if self.memory.import_floor_mib == 0 {
             problems.push(ConfigProblem::ImportFloor);
         }
-        if self
-            .client
-            .remote_path_map
-            .iter()
-            .any(|m| !path_map_entry_ok(m))
-        {
+        if !client_path_map_ok(&self.client) {
             problems.push(ConfigProblem::PathMap);
         }
         problems
@@ -512,7 +521,8 @@ impl Config {
     ///
     /// ```
     /// use mistarr_server::config::{Config, RuntimeSettings, ScanConfig};
-    /// let mut c = Config { scan: ScanConfig { chd_tracks: true }, ..Config::default() };
+    /// let mut c = Config::default();
+    /// c.scan = ScanConfig { chd_tracks: true };
     /// c.overlay(RuntimeSettings::default());
     /// assert!(c.scan.chd_tracks);
     /// ```
@@ -587,6 +597,13 @@ impl ConfigProblem {
 /// The remote side is the client's own spelling, so `C:\\x` or `C:/x` pass.
 fn path_map_entry_ok(m: &PathMapping) -> bool {
     !m.remote.to_string_lossy().trim().is_empty() && m.local.is_absolute()
+}
+
+/// Whether every entry of `client.remote_path_map` passes [`path_map_entry_ok`].
+/// Shared by [`Config::validate`] and the settings `PUT` handler, which checks
+/// only the `client` section a patch carries.
+pub(crate) fn client_path_map_ok(client: &ClientConfig) -> bool {
+    client.remote_path_map.iter().all(path_map_entry_ok)
 }
 
 /// Prefixes a parse error's message with `path`, keeping the `config:` prefix
@@ -757,6 +774,73 @@ mod tests {
             ..Config::default()
         };
         assert_eq!(floor_zero.validate(), [ConfigProblem::ImportFloor]);
+    }
+
+    /// A `MakeWriter` that appends to a shared buffer, so a test can read back
+    /// what a scoped subscriber wrote without touching stderr or a file.
+    #[derive(Clone, Default)]
+    struct CapturingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn load_keeps_unknown_keys_for_the_caller_to_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(CONFIG_FILE), "typo = 1\n").expect("write");
+        let config = Config::load(None, Some(dir.path())).expect("load");
+        assert_eq!(config.unknown_keys, ["typo"]);
+    }
+
+    #[test]
+    fn log_problems_reports_the_unknown_key_and_the_import_floor() {
+        let buf = CapturingWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+
+        let mut config = Config {
+            memory: MemoryConfig {
+                import_floor_mib: 0,
+                ..MemoryConfig::default()
+            },
+            unknown_keys: vec!["server.typo".to_owned()],
+            ..Config::default()
+        };
+        config.client.remote_path_map = vec![PathMapping::new("/r", "not-absolute")];
+
+        tracing::subscriber::with_default(subscriber, || config.log_problems());
+
+        let logged = String::from_utf8(
+            buf.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone(),
+        )
+        .expect("utf8 log");
+        assert!(logged.contains("server.typo"), "{logged}");
+        assert!(logged.contains("import_floor_mib is 0"), "{logged}");
+        assert!(logged.contains("remote path map entry"), "{logged}");
     }
 
     #[test]

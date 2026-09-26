@@ -580,6 +580,8 @@ pub(crate) fn open_db(
     if let Some(rt) = stored {
         config.overlay(rt);
     }
+    // Logging starts before `open_db`, unlike when `load` ran, so this reaches the log.
+    config.log_problems();
     Ok((db, unfinished, resolved))
 }
 
