@@ -6,6 +6,7 @@ import type {
   ImportLogEntry,
   IncomingFile,
   Job,
+  Paged,
   Platform,
   Settings,
   Source,
@@ -647,6 +648,29 @@ export function mockSources(): Source[] {
     pending_binding: null
   }));
   return [...fixtureSources, ...generated];
+}
+
+const PAGE_SIZE_CAP = 1000;
+
+/** A test's override of the mock page size, from `mistarr.mockPageCap`; the API's own cap otherwise. */
+function mockPageCap(): number {
+  try {
+    const n = Number(localStorage.getItem('mistarr.mockPageCap'));
+    return Number.isInteger(n) && n > 0 ? Math.min(n, PAGE_SIZE_CAP) : PAGE_SIZE_CAP;
+  } catch {
+    return PAGE_SIZE_CAP;
+  }
+}
+
+/** Mimics the server's `?limit=&offset=` rules (default 100, capped at 1000) over an array. */
+function mockPage<T>(all: T[], limit: number | undefined, offset: number): Paged<T> {
+  const capped = Math.min(limit ?? 100, mockPageCap());
+  return { items: all.slice(offset, offset + capped), total: all.length };
+}
+
+/** `mockSources()` paged the way `GET /sources` is, for stores that page through fixtures. */
+export function mockSourcesPage(limit: number, offset: number): Promise<Paged<Source>> {
+  return Promise.resolve(mockPage(mockSources(), limit, offset));
 }
 
 export const fixtureIncomingDats: IncomingFile[] = [
