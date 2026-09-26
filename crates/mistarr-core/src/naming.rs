@@ -717,7 +717,7 @@ impl RevisionBuilder {
 /// Characters replaced with `_`, as libretro does for thumbnail and playlist names.
 const LIBRETRO_SUBSTITUTIONS: &[char] = &['&', '*', '/', ':', '`', '<', '>', '?', '\\', '|', '"'];
 
-/// Normalises a name for pre-download matching: NFKC, lowercase, libretro
+/// Normalizes a name for pre-download matching: NFKC, lowercase, libretro
 /// substitutions to `_`, whitespace runs collapsed to one space and trimmed. Idempotent.
 ///
 /// ```
@@ -744,7 +744,7 @@ pub fn normalize_for_match(name: &str) -> String {
     out
 }
 
-/// Clone-group key for a title whose DAT gives no `cloneof`: the normalised base name.
+/// Clone-group key for a title whose DAT gives no `cloneof`: the normalized base name.
 /// Callers pair it with the platform id, as `docs/VERIFICATION.md` "Clone grouping" says.
 ///
 /// ```

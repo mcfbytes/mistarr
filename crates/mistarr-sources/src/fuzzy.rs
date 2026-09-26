@@ -5,7 +5,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-use crate::binding::{base_name, normalise_name, Confidence, RomRef};
+use crate::binding::{base_name, normalize_name, Confidence, RomRef};
 use crate::torrent::TorrentFile;
 
 /// Most title groups one file may name by the fuzzy tier; a file naming
@@ -20,7 +20,7 @@ pub const MAX_SIZE_ONLY: usize = 4;
 pub struct SizedRom {
     /// The rom.
     pub rom: RomRef,
-    /// Its `match_base`: the normalised name before the first tag.
+    /// Its `match_base`: the normalized name before the first tag.
     pub base: String,
     /// Its title's clone group, so versions of one entry count once.
     pub group: i64,
@@ -267,7 +267,7 @@ fn key(words: &[String]) -> u64 {
 
 fn stem_words(path: &str) -> Vec<String> {
     let leaf = path.rsplit('/').next().unwrap_or(path);
-    words(base_name(&normalise_name(leaf)))
+    words(base_name(&normalize_name(leaf)))
 }
 
 fn dir_words(path: &str) -> Vec<String> {

@@ -94,34 +94,34 @@ Sonnet · `web/` · branch `wp-52-web-lists`
 Opus · `mistarr-core`, `mistarr-sources`, import lines elsewhere · branch
 `wp-53-core-codecs`
 
-- [ ] `mistarr_core::hex` with `encode`, `decode` and `decode_spaced`; core and
+- [x] `mistarr_core::hex` with `encode`, `decode` and `decode_spaced`; core and
   sources use it (`hash.rs` `hex`, `chd/header.rs`, `magnet.rs`
   `decode_hex_20`).
-- [ ] `Digest<const N: usize>` with `Display`, `FromStr` and serde as lowercase
+- [x] `Digest<const N: usize>` with `Display`, `FromStr` and serde as lowercase
   hex; aliases `Crc32`, `Md5`, `Sha1`; `InfoHash` over `Digest<20>`.
   `Sha1Digest` in `chd/header.rs` becomes `Sha1`.
-- [ ] `sources::bencode` moves to `core::bencode` (`Raw`, `Value`, `encode`).
+- [x] `sources::bencode` moves to `core::bencode` (`Raw`, `Value`, `encode`).
   The owned decoder (`decode`, `decode_value`, `decode_list`, `decode_dict`,
   `decode_bytes`) goes; `decode_int` returns `i64`; fixture tests read with
   `Raw`.
-- [ ] `core::magnet` with one `parse_magnet`: `urn:btih:` matched without
+- [x] `core::magnet` with one `parse_magnet`: `urn:btih:` matched without
   regard to case, values percent-decoded, hex and base32 hashes; one
   `percent_decode` in core; proptests for both.
-- [ ] `TorrentMeta.infohash` and `Magnet.infohash` are `InfoHash`.
-- [ ] Sources' `normalise_name` is `normalize_for_match(strip_extension(n))`;
+- [x] `TorrentMeta.infohash` and `Magnet.infohash` are `InfoHash`.
+- [x] Sources' `normalise_name` is `normalize_for_match(strip_extension(n))`;
   `is_disallowed` and `collapse_whitespace` go; `unicode-normalization` leaves
   sources; one spelling, `normalize`, in both crates.
-- [ ] `HeaderRule` gains `as_str`, a `FromStr` that refuses unknown names, and
+- [x] `HeaderRule` gains `as_str`, a `FromStr` that refuses unknown names, and
   serde; `from_name` goes. Header constants (iNES magic and length, copier
   header length), `HeaderRule::smc_applies(size)` and N64 byte-order
   detection are public.
-- [ ] `DatRom::header_bytes()` returns the DAT header as bytes.
-- [ ] `core::xml` gains `resolve_ref`, `attr_value` and
+- [x] `DatRom::header_bytes()` returns the DAT header as bytes.
+- [x] `core::xml` gains `resolve_ref`, `attr_value` and
   `CappedReader::new(reader, event_cap, depth_cap)` built from `Capped` and
   `EscapeInvalid`; the DAT parser uses them.
-- [ ] `read_probe` and `discard` in `hash.rs` use `Read::take` with
+- [x] `read_probe` and `discard` in `hash.rs` use `Read::take` with
   `read_to_end` and `io::copy` to `io::sink`.
-- [ ] ARCHITECTURE.md's crate table says core owns these codecs.
+- [x] ARCHITECTURE.md's crate table says core owns these codecs.
 
 ### WP-54 Parser limits in mister
 

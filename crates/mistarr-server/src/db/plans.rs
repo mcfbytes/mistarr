@@ -115,7 +115,7 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             Box::new(|c| {
                 use mistarr_sources::binding::DatIndex as _;
                 let index = sources::SqlDatIndex::new(c);
-                drop(index.by_normalised_name("example quest.nes"));
+                drop(index.by_normalized_name("example quest.nes"));
                 drop(index.by_base_name_and_size("example quest", 16));
             }),
         ),
