@@ -183,11 +183,16 @@ quoted, Debug-escaped about 6x, plus its fixed wording), for about 39 MiB of
 live data and up to about 79 MiB counting each `Vec`'s own spare capacity
 once it has doubled to fit. The distinct zip names (`MAX_ZIPS`) and the zip
 names kept on individual roms and parts (`MAX_TOTAL_ZIP_REFS`) each add a
-handful of MiB. The open-element stack (a few KiB, per above) and the 1 MiB
-event buffer add at most a few MiB more. That puts the peak at roughly 40 to
-85 MiB: higher than `romsets.xml` above, since an MRA has more kinds of
-accumulated output to bound, but still well inside the board's shared
-budget.
+handful of MiB. `quick_xml`'s own record of currently-open names adds
+roughly 16 to 32 MiB, as for `romsets.xml` above: it keeps the full name of
+every still-open element up to the depth cap, and a document of nested
+opening tags with no closes can spend most of its 16 MiB on those names
+before the cap refuses it; MRA's own open-element stack (a few KiB, per
+above) truncates each name to 64 bytes but is a separate copy, so it does
+not shrink `quick_xml`'s. The 1 MiB event buffer adds at most a few MiB
+more. That puts the peak at roughly 56 to 117 MiB: higher than
+`romsets.xml` above, since an MRA has more kinds of accumulated output to
+bound, but still well inside the board's shared budget.
 
 The arcade catalogue job (ARCHITECTURE.md "Arcade catalogue") turns each MRA
 into one `arcade` title with `source = 'mra'`: `<name>`, `<setname>` and

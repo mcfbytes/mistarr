@@ -12,7 +12,9 @@ use crate::Error;
 /// True element nesting depth: one level added per `Event::Start`, one removed per
 /// `Event::End`, independent of any name a caller's own recovery logic gives an end
 /// tag. This mirrors what `quick_xml` itself keeps in its opened-name buffer under
-/// `check_end_names = false`, so bounding this bounds that buffer's size too.
+/// `check_end_names = false`, so bounding this bounds that buffer's entry count
+/// (at most [`MAX_DEPTH`]); the buffer's bytes are bounded separately, by the event
+/// cap on each name and the capped file's own size (see docs/PLATFORMS.md).
 #[derive(Debug, Default)]
 pub(super) struct Depth(usize);
 
