@@ -32,11 +32,11 @@
   let clientSaved = $state(false);
 
   onMount(() => {
-    void loadPlatforms();
-    void loadDats();
-    void loadStatus();
-    void loadWizard();
-    void loadSettings();
+    void loadPlatforms().catch(() => undefined);
+    void loadDats().catch(() => undefined);
+    void loadStatus().catch(() => undefined);
+    void loadWizard().catch(() => undefined);
+    void loadSettings().catch(() => undefined);
     void loadSources().catch(() => undefined);
     // Leaving the wizard any way at all counts as dismissing it.
     return () => void dismiss();

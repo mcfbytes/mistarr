@@ -14,9 +14,9 @@
   const isMock = import.meta.env.VITE_MOCK === '1';
 
   onMount(() => {
-    void loadDownloads();
-    void loadImports();
-    void loadJobs();
+    void loadDownloads().catch(() => undefined);
+    void loadImports().catch(() => undefined);
+    void loadJobs().catch(() => undefined);
     void loadPlatforms().catch(() => undefined);
     return watchRecent();
   });

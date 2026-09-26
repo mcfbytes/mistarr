@@ -15,7 +15,7 @@
   import type { Job, PlatformCounts } from '../lib/types';
 
   onMount(() => {
-    void loadPlatforms();
+    void loadPlatforms().catch(() => undefined);
   });
 
   const platforms = $derived(getPlatforms());

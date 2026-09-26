@@ -46,7 +46,7 @@
 
   startEvents();
   if (isMock) {
-    void loadStatus();
+    void loadStatus().catch(() => undefined);
   } else {
     void checkFirstRun();
   }

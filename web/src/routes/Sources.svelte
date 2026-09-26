@@ -20,14 +20,14 @@
   const isMock = import.meta.env.VITE_MOCK === '1';
 
   onMount(() => {
-    void loadSources();
-    void loadPlatforms();
+    void loadSources().catch(() => undefined);
+    void loadPlatforms().catch(() => undefined);
   });
 
   const sources = $derived(getSources());
   const pausedWhilePlaying = $derived(getStatus()?.pause_client_while_playing === true);
   const platforms = $derived(getPlatforms());
-
+  let confirmingId = $state<number | null>(null);
 
   async function bind(id: number, platformId: string): Promise<void> {
     if (!platformId) {
@@ -86,7 +86,16 @@
     }
   }
 
+  function askRemove(id: number): void {
+    confirmingId = id;
+  }
+
+  function keepSource(): void {
+    confirmingId = null;
+  }
+
   async function remove(id: number): Promise<void> {
+    confirmingId = null;
     if (isMock) {
       return;
     }
@@ -181,7 +190,15 @@
                 {#if source.state !== 'disabled'}
                   <button onclick={() => disable(source.id)}>Disable</button>
                 {/if}
-                <button onclick={() => remove(source.id)}>Delete</button>
+                {#if confirmingId === source.id}
+                  <span class="confirm-inline" role="group" aria-label={`Remove ${source.display_name}?`}>
+                    <span class="muted">Removed from mistarr and the client; placed files stay.</span>
+                    <button type="button" class="danger" onclick={() => remove(source.id)}>Remove</button>
+                    <button type="button" onclick={keepSource}>Keep</button>
+                  </span>
+                {:else}
+                  <button type="button" onclick={() => askRemove(source.id)}>Delete</button>
+                {/if}
               </div>
             </td>
           </tr>
@@ -250,5 +267,22 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.4em;
+  }
+
+  .confirm-inline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4em;
+  }
+
+  .confirm-inline .muted {
+    flex-basis: 100%;
+    font-size: 0.85em;
+  }
+
+  .danger {
+    border-color: var(--danger);
+    color: var(--danger);
   }
 </style>

@@ -13,11 +13,12 @@ import { announceUpload, markUploadsStale } from './uploads.svelte';
 let subscriber: EventSubscriber | null = null;
 
 // Re-fetches every hydrated store; the server asks for this when a
-// reconnect's replay may have gaps.
+// reconnect's replay may have gaps. One store's failure must not skip the
+// rest; a store left stale here is retried at the next resync or reconnect.
 async function resync(): Promise<void> {
   resetFinished();
   markUploadsStale();
-  await Promise.all([
+  await Promise.allSettled([
     loadPlatforms(),
     loadDats(),
     loadSources(),
@@ -78,7 +79,7 @@ function handle(event: SseEvent): void {
     case 'source.changed':
       applySourceChanged(event.data.source_id, event.data.state, event.data.platform_id);
       scheduleIncoming('sources');
-      void loadWizard();
+      void loadWizard().catch(() => undefined);
       break;
     case 'download.changed':
       applyDownloadChanged(event.data.download_id, event.data.state, event.data.progress);
@@ -101,14 +102,14 @@ function handle(event: SseEvent): void {
       announceUpload('dats', event.data.file, null);
       applyDatLoaded();
       scheduleIncoming('dats');
-      void loadWizard();
+      void loadWizard().catch(() => undefined);
       break;
     case 'dat.rejected':
       announceUpload('dats', event.data.file, event.data.reason);
       scheduleIncoming('dats');
       break;
     case 'import.done':
-      void loadImports();
+      void loadImports().catch(() => undefined);
       scheduleReloadTitles();
       break;
     case 'file.changed':

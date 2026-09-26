@@ -92,8 +92,8 @@
   }
 
   onMount(() => {
-    void loadPlatforms();
-    void loadHideList();
+    void loadPlatforms().catch(() => undefined);
+    void loadHideList().catch(() => undefined);
     if (!getStatus()) {
       void loadStatus().catch(() => {
         statusFailed = true;
