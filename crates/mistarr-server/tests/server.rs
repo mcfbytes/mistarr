@@ -339,6 +339,37 @@ async fn settings_from_file_are_editable_and_persist() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn put_settings_checks_only_the_patch_own_client_section() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut config = config_in(dir.path());
+    config.client.remote_path_map = vec![mistarr_clients::PathMapping::new("/r", "not-absolute")];
+    let booted = boot_with(dir, config).await;
+    let addr = booted.addr();
+
+    // The stored config already fails Config::validate; a patch that never
+    // touches `client` must still succeed, unlike revalidating the whole config.
+    let r = request(
+        addr,
+        "PUT",
+        "/api/v1/system/settings",
+        &[],
+        Some(r#"{"limits":{"down_kbps_core":9}}"#),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["limits"]["down_kbps_core"], 9);
+
+    let bad = r#"{"client":{"remote_path_map":[{"remote":"","local":""}]}}"#;
+    let r = request(addr, "PUT", "/api/v1/system/settings", &[], Some(bad)).await;
+    assert_eq!(
+        r.status, 400,
+        "a patch that carries client is still checked: {}",
+        r.body
+    );
+    booted.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wizard_and_jobs_report_state() {
     let booted = boot().await;
     let addr = booted.addr();
