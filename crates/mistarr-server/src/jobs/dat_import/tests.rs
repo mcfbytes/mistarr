@@ -1999,3 +1999,57 @@ fn a_rewritten_dat_imports_to_the_same_rows() {
     assert_eq!(dump(&copy.db), dump(&original.db));
     assert!(count(&copy, "SELECT COUNT(*) FROM roms") > 0);
 }
+
+#[test]
+fn a_placed_file_stays_verified_when_its_rom_is_matched_again() {
+    let c = conn();
+    let snes = PlatformId("snes".into());
+    let game = "Mock Manor (Europe) (Rev 1)";
+    let row = mistarr_mister::platforms::by_id("snes").expect("snes");
+    // The name the cartridge adapter places the file under.
+    let placed = format!(
+        "{}.{}",
+        mistarr_mister::adapter::safe_name(game).expect("name"),
+        row.extension_written.expect("ext")
+    );
+    let sums = mistarr_core::HashSet {
+        size: 4,
+        crc32: "0a0b0c0d".into(),
+        md5: "e".repeat(32),
+        sha1: "e".repeat(40),
+    };
+    let (file, live) = c
+        .with(|x| {
+            let old = files::seed_rom_fixture(x, &snes, game, "mm.smc", &sums, "good")?;
+            let hashed = files::Hashed {
+                crc32: Some(&sums.crc32),
+                md5: Some(&sums.md5),
+                sha1: Some(&sums.sha1),
+                header_rule: Some("smc"),
+                whole: None,
+            };
+            let rel = format!("SNES/{placed}");
+            let file = files::upsert(
+                x,
+                &snes,
+                &rel,
+                4,
+                1,
+                &hashed,
+                Some(old),
+                FileState::Verified,
+                1,
+            )?;
+            x.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [old])?;
+            let live = files::seed_rom_fixture(x, &snes, game, "Mock Manor.smc", &sums, "good")?;
+            assert_eq!(rematch_chunk(x, &snes)?, 1);
+            Ok((file, live))
+        })
+        .expect("rematch");
+    let got = c.with(|x| files::get(x, file)).expect("get").expect("row");
+    assert_eq!(
+        (got.rom_id, got.state),
+        (Some(live), FileState::Verified),
+        "the placed name fits, so rename has nothing to do"
+    );
+}

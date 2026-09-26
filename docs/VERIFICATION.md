@@ -355,6 +355,28 @@ same is matched at its size only. Without whole-file hashes the
 CRC32-plus-size tier also tries the size less the header the rule strips
 (for `smc`, only when the size is `n*1024 + 512`).
 
+## File names
+
+A cartridge file or zip member that matches a rom is `verified` when its name
+is one the adapter expects, else `misnamed`. The name is split at its last
+dot only when what follows reads as an extension: one to four ASCII letters
+or digits, at least one a letter, so `Example Quest v1.1` has none. A name
+fits when it is the rom's file name, or when its extension is one the
+platform loads or writes and its stem is either
+
+- the rom's stem, with the rom's own extension, the extension placement
+  writes, or any such extension when the platform does not load the rom's
+  (the headerless `.unh` form, or a rom without an extension); or
+- the game's name as placement makes it a file name, with the extension
+  placement writes, which is the path placement gives the file.
+
+So `Example Quest (USA).unh` fits `Example Quest (USA).nes` on `nes`, and
+`Example Quest (USA).smc` fits `Example Quest (USA).sfc` on `snes`, but not
+the reverse. Stems compare exactly and extensions ignoring ASCII case. A
+placed file therefore always fits, and a file the rename action moves takes
+the placed name. At every start, `misnamed` cartridge files whose name fits
+become `verified` without being read again; disc tracks are left alone.
+
 ## CHD images
 
 A Redump-style DAT lists a disc as a cue sheet plus one `.bin` per track, so a

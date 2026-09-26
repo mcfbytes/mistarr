@@ -557,7 +557,7 @@ fn classify(
         platform_id,
         forms.whole.iter().chain([&forms.content]),
     )?;
-    Ok(cartridge_state(m.as_ref(), actual_name))
+    Ok(cartridge_state(platform_id, m.as_ref(), actual_name))
 }
 
 /// The rom `forms` match under `docs/VERIFICATION.md` "Matching order" in each, a caller
@@ -589,9 +589,10 @@ pub(crate) fn match_forms<'a>(
     Ok(None)
 }
 
-/// The rom id and state a cartridge file or zip member named `own_name` takes from
-/// its match: `bad` for a bad dump, else `verified` or `misnamed` by name.
+/// The rom id and state a cartridge file or zip member of `platform` named `own_name`
+/// takes from its match: `bad` for a bad dump, else `verified` or `misnamed` by [`name_fits`].
 pub(crate) fn cartridge_state(
+    platform: &PlatformId,
     m: Option<&files::RomMatch>,
     own_name: &str,
 ) -> (Option<i64>, FileState) {
@@ -600,12 +601,98 @@ pub(crate) fn cartridge_state(
     };
     let state = if m.status == "baddump" {
         FileState::Bad
-    } else if files::basename(&m.name) == own_name {
+    } else if name_fits(platform, &m.name, &m.game, own_name) {
         FileState::Verified
     } else {
         FileState::Misnamed
     };
     (Some(m.rom_id), state)
+}
+
+/// Whether `own_name` is a name the adapter expects for the rom named `rom_name` of the
+/// game `game` on `platform`, per `docs/VERIFICATION.md` "File names": the rom's file
+/// name, or its stem or the game's placed name with an extension the
+/// platform loads that is the rom's, the one placement writes, or any when the platform
+/// does not load the rom's.
+///
+/// ```
+/// use mistarr_core::PlatformId;
+/// use mistarr_server::jobs::scan::name_fits;
+/// let (nes, game) = (PlatformId("nes".into()), "Example Quest (USA)");
+/// assert!(name_fits(&nes, "Example Quest (USA).nes", game, "Example Quest (USA).nes"));
+/// assert!(name_fits(&nes, "Example Quest (USA).unh", game, "Example Quest (USA).nes"));
+/// assert!(!name_fits(&nes, "Example Quest (USA).unh", game, "Example Quest (Japan).nes"));
+/// ```
+#[must_use]
+pub fn name_fits(platform: &PlatformId, rom_name: &str, game: &str, own_name: &str) -> bool {
+    let rom_name = files::basename(rom_name);
+    if rom_name == own_name {
+        return true;
+    }
+    let (Some(row), Some((own_stem, own_ext))) =
+        (platforms::by_id(&platform.0), split_extension(own_name))
+    else {
+        return false;
+    };
+    let loads = |ext: &str| {
+        row.load_extensions
+            .iter()
+            .chain(row.extension_written.iter())
+            .any(|e| e.eq_ignore_ascii_case(ext))
+    };
+    if !loads(own_ext) {
+        return false;
+    }
+    let (rom_stem, rom_ext) = split_extension(rom_name).unwrap_or((rom_name, ""));
+    let written = row
+        .extension_written
+        .is_some_and(|e| e.eq_ignore_ascii_case(own_ext));
+    let ext_fits = own_ext.eq_ignore_ascii_case(rom_ext) || written || !loads(rom_ext);
+    let placed =
+        || written && mistarr_mister::adapter::safe_name(game).is_ok_and(|g| g == own_stem);
+    ext_fits && (own_stem == rom_stem || placed())
+}
+
+/// Splits a file name at a final dot followed by what reads as an extension: one to
+/// four ASCII letters or digits, at least one a letter. `None` when there is none.
+fn split_extension(name: &str) -> Option<(&str, &str)> {
+    let (stem, ext) = name.rsplit_once('.')?;
+    let looks = !stem.is_empty()
+        && (1..=4).contains(&ext.len())
+        && ext.bytes().all(|b| b.is_ascii_alphanumeric())
+        && ext.bytes().any(|b| b.is_ascii_alphabetic());
+    looks.then_some((stem, ext))
+}
+
+/// Marks `verified` every `misnamed` cartridge file whose name [`name_fits`] its rom,
+/// as a scan would decide it now; returns how many. Disc tracks keep their state.
+///
+/// # Errors
+///
+/// [`Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert_eq!(mistarr_server::jobs::scan::settle_names(&conn).unwrap(), 0);
+/// ```
+pub fn settle_names(conn: &Connection) -> Result<usize> {
+    let mut settled = 0;
+    for row in files::misnamed(conn)? {
+        let disc = platforms::by_id(&row.platform_id.0).is_some_and(|p| p.kind == Kind::Disc);
+        if !disc
+            && name_fits(
+                &row.platform_id,
+                &row.rom_name,
+                &row.game,
+                own_name(&row.rel_path),
+            )
+        {
+            files::set_match(conn, row.id, Some(row.rom_id), FileState::Verified)?;
+            settled += 1;
+        }
+    }
+    Ok(settled)
 }
 
 /// The name a row's file or zip member has, compared against the rom's name.
@@ -713,7 +800,7 @@ fn known(
     let Some(m) = stored_match(conn, platform_id, &row)? else {
         return Ok(Known::Skip);
     };
-    let (rom_id, state) = cartridge_state(Some(&m), own_name(rel_path));
+    let (rom_id, state) = cartridge_state(platform_id, Some(&m), own_name(rel_path));
     Ok(Known::Matched(Box::new(NewFile {
         rel_path: row.rel_path,
         size,
@@ -1310,6 +1397,186 @@ mod tests {
         assert!(in_done_unit("GBA", &done));
         assert!(!in_done_unit("PSX/Other (USA)/t.bin", &done));
         assert!(!in_done_unit("GBAX/a.gba", &done));
+    }
+
+    #[test]
+    fn file_names_fit_the_rom_or_what_placement_writes() {
+        let game = "Example Quest (USA)";
+        // (platform, rom name, file name, fits)
+        let cases = [
+            (
+                "nes",
+                "Example Quest (USA).nes",
+                "Example Quest (USA).nes",
+                true,
+            ),
+            (
+                "nes",
+                "Example Quest (USA).unh",
+                "Example Quest (USA).nes",
+                true,
+            ),
+            (
+                "nes",
+                "Example Quest (USA).unh",
+                "Example Quest (USA).NES",
+                true,
+            ),
+            (
+                "nes",
+                "Example Quest (USA).NES",
+                "Example Quest (USA).nes",
+                true,
+            ),
+            (
+                "nes",
+                "Example Quest (USA)",
+                "Example Quest (USA).nes",
+                true,
+            ),
+            (
+                "nes",
+                "sub/Example Quest (USA).nes",
+                "Example Quest (USA).nes",
+                true,
+            ),
+            ("nes", "Example Quest v1.1", "Example Quest v1.1.nes", true),
+            ("nes", "Example Quest v1.1", "Example Quest v1.nes", false),
+            (
+                "nes",
+                "Example Quest (USA).unh",
+                "Example Quest (USA).unh.zip",
+                false,
+            ),
+            (
+                "nes",
+                "Example Quest (USA).unh",
+                "Example Quest (Japan).nes",
+                false,
+            ),
+            (
+                "nes",
+                "Example Quest (USA).unh",
+                "Example Quest (USA).fds",
+                false,
+            ),
+            ("nes", "q.nes", "Example Quest (USA).nes", true),
+            ("nes", "q.nes", "Other Game (USA).nes", false),
+            (
+                "snes",
+                "Example Quest (USA).smc",
+                "Example Quest (USA).sfc",
+                true,
+            ),
+            (
+                "snes",
+                "Example Quest (USA).sfc",
+                "Example Quest (USA).smc",
+                false,
+            ),
+            ("snes", "q.smc", "Example Quest (USA).smc", false),
+            (
+                "nowhere",
+                "Example Quest (USA).unh",
+                "Example Quest (USA).nes",
+                false,
+            ),
+        ];
+        for (platform, rom, file, fits) in cases {
+            let p = PlatformId(platform.into());
+            assert_eq!(
+                name_fits(&p, rom, game, file),
+                fits,
+                "{platform}: {rom} as {file}"
+            );
+        }
+    }
+
+    #[test]
+    fn extensions_need_a_letter_and_at_most_four_characters() {
+        assert_eq!(split_extension("a.unh"), Some(("a", "unh")));
+        assert_eq!(split_extension("a.32x"), Some(("a", "32x")));
+        assert_eq!(split_extension("Example Quest v1.1"), None);
+        assert_eq!(split_extension("a (b.c d)"), None);
+        assert_eq!(split_extension("a.toolong"), None);
+        assert_eq!(split_extension(".nes"), None);
+    }
+
+    #[test]
+    fn settling_names_verifies_only_files_that_now_fit() {
+        let mut c = Connection::open_in_memory().expect("open");
+        crate::db::migrate::apply(&mut c).expect("migrate");
+        platform_rows::seed(&mut c, &platforms::PLATFORMS).expect("seed");
+        let nes = PlatformId("nes".into());
+        let h = Hashes {
+            size: 4,
+            crc32: "0a0b0c0d".into(),
+            md5: "0".repeat(32),
+            sha1: "1".repeat(40),
+        };
+        let rom = files::seed_rom_fixture(
+            &c,
+            &nes,
+            "Example Quest (USA)",
+            "Example Quest (USA).unh",
+            &h,
+            "good",
+        )
+        .expect("rom");
+        let row = |rel: &str| NewFile {
+            rel_path: rel.to_owned(),
+            size: 20,
+            mtime: 1,
+            crc32: Some(h.crc32.clone()),
+            md5: Some(h.md5.clone()),
+            sha1: Some(h.sha1.clone()),
+            header_rule: Some("ines".into()),
+            rom_id: Some(rom),
+            state: FileState::Misnamed,
+            reason: None,
+            whole: files::WholeHashes::default(),
+        };
+        let fits =
+            files::upsert_row(&c, &nes, &row("NES/q.zip#Example Quest (USA).nes"), 1).expect("row");
+        let other = files::upsert_row(&c, &nes, &row("NES/Other Name.nes"), 1).expect("row");
+        let upper =
+            files::upsert_row(&c, &nes, &row("NES/Example Quest (USA).NES"), 1).expect("row");
+        let psx = PlatformId("psx".into());
+        let track = files::seed_rom_fixture(
+            &c,
+            &psx,
+            "Example Disc (USA)",
+            "Example Disc (USA).img",
+            &h,
+            "good",
+        )
+        .expect("rom");
+        let disc = NewFile {
+            rom_id: Some(track),
+            ..row("PSX/Example Disc (USA)/Example Disc (USA).cue")
+        };
+        let disc = files::upsert_row(&c, &psx, &disc, 1).expect("row");
+        assert!(name_fits(
+            &psx,
+            "Example Disc (USA).img",
+            "Example Disc (USA)",
+            "Example Disc (USA).cue"
+        ));
+        assert_eq!(settle_names(&c).expect("settle"), 2);
+        let state = |id: FileId| files::get(&c, id).expect("get").expect("row").state;
+        assert_eq!(state(fits), FileState::Verified);
+        assert_eq!(state(upper), FileState::Verified, "upper-case extension");
+        assert_eq!(state(other), FileState::Misnamed);
+        assert_eq!(
+            state(disc),
+            FileState::Misnamed,
+            "disc tracks are left alone"
+        );
+        assert_eq!(
+            settle_names(&c).expect("settle"),
+            0,
+            "nothing left to settle"
+        );
     }
 
     #[tokio::test]
