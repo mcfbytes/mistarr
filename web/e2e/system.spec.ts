@@ -253,3 +253,19 @@ test('when the browser refuses to copy, the diagnostics are shown to copy by han
   await expect(box).toHaveValue(/^mistarr 0\.3\.0\+dev\.1a2b3c4 \(development build\)\n/);
   await expect(box).not.toHaveValue(/\/media\/fat|scgi:\/\//);
 });
+
+test('a failed settings load shows an error with Retry, not a hidden section', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('mistarr.mockSettingsFail', '1'));
+  await page.goto('/#/system');
+  await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible();
+  await expect(page.getByRole('navigation', { name: 'Settings sections' })).toHaveCount(0);
+  const alert = page.getByRole('alert');
+  await expect(alert).toBeVisible();
+  const retry = alert.getByRole('button', { name: 'Retry' });
+  await expect(retry).toBeVisible();
+
+  await page.evaluate(() => localStorage.removeItem('mistarr.mockSettingsFail'));
+  await retry.click();
+  await expect(page.getByRole('navigation', { name: 'Settings sections' })).toBeVisible();
+  await expect(alert).toHaveCount(0);
+});
