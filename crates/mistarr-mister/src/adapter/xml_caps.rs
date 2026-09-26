@@ -33,9 +33,9 @@ impl Depth {
     }
 }
 
-/// Why [`read_capped`] failed: the event at `TooLarge`'s position exceeded
-/// [`MAX_EVENT_BYTES`], or another XML error.
-pub(super) enum CapError {
+/// Why a capped read failed before [`read_capped_mapped`] turns it into an [`Error`]:
+/// the event at `TooLarge`'s position exceeded [`MAX_EVENT_BYTES`], or another XML error.
+enum CapError {
     /// Byte offset where the oversized event starts.
     TooLarge(u64),
     /// Any other XML parse error.
@@ -44,7 +44,7 @@ pub(super) enum CapError {
 
 /// The next event, capped at [`MAX_EVENT_BYTES`] before it is buffered; `position` is
 /// where it starts, reported back through [`CapError::TooLarge`] on that failure.
-pub(super) fn read_capped<'b, R: BufRead>(
+fn read_capped<'b, R: BufRead>(
     reader: &mut Reader<Capped<R>>,
     buf: &'b mut Vec<u8>,
     position: u64,
@@ -55,5 +55,29 @@ pub(super) fn read_capped<'b, R: BufRead>(
         Ok(event) => Ok(event),
         Err(_) if reader.get_ref().over() => Err(CapError::TooLarge(position)),
         Err(e) => Err(CapError::Xml(e)),
+    }
+}
+
+/// The next event, capped as [`read_capped`] does; a too-large event becomes
+/// [`Error::XmlEventTooLarge`] and any other XML error is passed through `wrap`,
+/// so MRA and romsets.xml need not each write out that match.
+pub(super) fn read_capped_mapped<'b, R: BufRead>(
+    reader: &mut Reader<Capped<R>>,
+    buf: &'b mut Vec<u8>,
+    position: u64,
+    wrap: impl FnOnce(quick_xml::Error, u64) -> Error,
+) -> Result<Event<'b>, Error> {
+    read_capped(reader, buf, position).map_err(|e| match e {
+        CapError::TooLarge(position) => Error::XmlEventTooLarge { position },
+        CapError::Xml(e) => wrap(e, position),
+    })
+}
+
+/// The document accumulates more `kind` than `limit` allows.
+pub(super) fn output_too_large(kind: &'static str, limit: usize, position: u64) -> Error {
+    Error::XmlOutputTooLarge {
+        kind,
+        limit,
+        position,
     }
 }

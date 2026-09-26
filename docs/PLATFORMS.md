@@ -98,12 +98,14 @@ and, like the MRA reader below, capped at one 1 MiB XML event and 64 levels
 of element nesting; either cap failing refuses the file with an error. It
 also caps what it accumulates: at most `MAX_SETS` (4096) distinct `<romset
 name>` values and `MAX_BIOS_NAMES` (4096) distinct BIOS file names from
-comments, each deduplicated through a `HashSet` and refused past its cap.
-For a capped 16 MiB input its worst-case peak is dominated by `quick_xml`'s
-own record of currently-open names (bounded the same way as the MRA reader's
-below, roughly 16 to 32 MiB) plus its 1 MiB event buffer (up to about 2 MiB):
-roughly 17 to 34 MiB; the `sets` and `bios` lists stay under 1 MiB at their
-caps and do not move that total.
+comments, each kept to `MAX_NAME_BYTES` (256) bytes since a real romset or
+BIOS name is a short file or directory name, deduplicated through a
+`HashSet` and refused past its cap. For a capped 16 MiB input its worst-case
+peak is dominated by `quick_xml`'s own record of currently-open names
+(bounded the same way as the MRA reader's below, roughly 16 to 32 MiB) plus
+its 1 MiB event buffer (up to about 2 MiB): roughly 17 to 34 MiB; the `sets`
+and `bios` lists, each name kept twice over at its cap (once in a `HashSet`,
+once in a `Vec`), add under 5 MiB and do not change that order.
 
 ### MRA catalogue
 
@@ -151,20 +153,41 @@ left in place as the `Inline` marker below, so neither cap stops a large but
 legitimate rom.
 
 The parser also caps what it accumulates: at most `MAX_ROMS` (2048) `<rom>`
-elements, at most `MAX_ROM_ITEMS` (64) parts, patches, interleaved parts and
-unsupported entries per `<rom>` (an interleave's own parts count against the
-same budget as the rest of its rom's items), and at most `MAX_ZIPS` (4096)
-distinct zip names; each is refused with `Error::XmlOutputTooLarge`, and zip
-names dedupe through a `HashSet` rather than a linear scan.
+elements; at most `MAX_ROM_ITEMS` (1024) parts, patches, interleaved parts
+and unsupported entries per `<rom>` (an interleave's own parts count against
+the same budget as the rest of its rom's items) and, on top of that, at most
+`MAX_TOTAL_ROM_ITEMS` (131,072) of them summed across every `<rom>` in the
+document, so total item memory is the same whether they sit in one rom or
+many; at most `MAX_ZIPS` (4096) distinct zip names collected from every
+`zip` attribute in the document; and, separately, at most
+`MAX_ZIPS_PER_LIST` (16) zip names kept from any one `<rom>`'s or `<part>`'s
+own `zip` attribute, with duplicates within that one attribute dropped
+first, and at most `MAX_TOTAL_ZIP_REFS` (65,536) of those summed across the
+document. Each cap is refused with `Error::XmlOutputTooLarge`, and zip names
+dedupe through a `HashSet` rather than a linear scan. A corpus of real MRAs
+has been seen with up to about 160 items in one `<rom>`, well under
+`MAX_ROM_ITEMS`. `Mra::md5` is collected from the roms that closed into
+`Mra::roms`, never from a `<rom>`-named tag met in passing (nested inside
+another rom's unsupported content, for instance), so it cannot grow past
+`MAX_ROMS` regardless of what such a tag contains. An unsupported-content
+reason quotes at most 32 bytes of the attribute value that triggered it
+before it is Debug-escaped, so one malformed value cannot make its reason
+far larger than the input needed to write it.
 
 For a capped 16 MiB input read through `read`, the worst case reaches every
-cap: up to 2048 `MraRom` entries and up to 2048 x 64 = 131,072 rom items,
-each under roughly 150 bytes on a 32-bit target including a short heap
-string, for about 19 MiB of live data and up to about 38 MiB counting each
-`Vec`'s own spare capacity once it has doubled to fit; the distinct zip names
-add well under 1 MiB. The open-element stack (a few KiB, per above) and the
-1 MiB event buffer add at most a few MiB more. That puts the peak at roughly
-20 to 40 MiB, the same order as `romsets.xml` above.
+cap: up to 2048 `MraRom` entries and up to `MAX_TOTAL_ROM_ITEMS` (131,072)
+rom items summed across them, no single `<rom>` holding more than
+`MAX_ROM_ITEMS` (1024) of them. Each item stays under roughly 300 bytes on a
+32-bit target even as a worst-case unsupported-content reason (32 bytes
+quoted, Debug-escaped about 6x, plus its fixed wording), for about 39 MiB of
+live data and up to about 79 MiB counting each `Vec`'s own spare capacity
+once it has doubled to fit. The distinct zip names (`MAX_ZIPS`) and the zip
+names kept on individual roms and parts (`MAX_TOTAL_ZIP_REFS`) each add a
+handful of MiB. The open-element stack (a few KiB, per above) and the 1 MiB
+event buffer add at most a few MiB more. That puts the peak at roughly 40 to
+85 MiB: higher than `romsets.xml` above, since an MRA has more kinds of
+accumulated output to bound, but still well inside the board's shared
+budget.
 
 The arcade catalogue job (ARCHITECTURE.md "Arcade catalogue") turns each MRA
 into one `arcade` title with `source = 'mra'`: `<name>`, `<setname>` and

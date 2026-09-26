@@ -136,6 +136,33 @@ fn unknown_rom_content_is_kept_as_unsupported() {
 }
 
 #[test]
+fn unsupported_reasons_quote_a_bounded_slice_of_the_value() {
+    // A huge, control-character-heavy value must not make the Debug-quoted
+    // reason anywhere near as large as the input that produced it.
+    let huge = "\u{1}".repeat(100_000);
+    let xml =
+        format!("<m><rom><part offset=\"{huge}\"/><patch offset=\"{huge}\">00</patch></rom></m>");
+    let mra = parse(xml.as_bytes()).expect("parse");
+    for item in &mra.roms[0].items {
+        let RomItem::Unsupported(reason) = item else {
+            panic!("{item:?}")
+        };
+        assert!(reason.len() < 500, "{reason}");
+    }
+}
+
+#[test]
+fn md5_is_collected_only_for_roms_that_close() {
+    // A `<rom md5>` nested inside another rom's unsupported content never becomes
+    // an `MraRom`, so it must not leak into the document-wide `md5` list either.
+    let outer = "0".repeat(32);
+    let inner = "1".repeat(32);
+    let xml = format!("<m><rom md5=\"{outer}\"><group><rom md5=\"{inner}\"/></group></rom></m>");
+    let mra = parse(xml.as_bytes()).expect("parse");
+    assert_eq!(mra.md5, [outer]);
+}
+
+#[test]
 fn malformed_xml_is_an_error() {
     assert!(matches!(
         parse(b"<misterromdescription><rom zip=\"a.zip\"></oops>"),
@@ -370,12 +397,74 @@ fn rom_item_count_cap_refuses_growth_past_the_limit() {
 }
 
 #[test]
+fn rom_item_total_cap_refuses_growth_across_many_roms() {
+    // Every rom stays at exactly MAX_ROM_ITEMS, under its own cap; only the sum
+    // across roms crosses MAX_TOTAL_ROM_ITEMS.
+    let rom = format!("<rom>{}</rom>", "<part/>".repeat(MAX_ROM_ITEMS));
+    let roms = MAX_TOTAL_ROM_ITEMS / MAX_ROM_ITEMS + 1;
+    let xml = format!("<m>{}</m>", rom.repeat(roms));
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_TOTAL_ROM_ITEMS
+    ));
+}
+
+/// `n` self-closing tags outside any `<rom>`, each naming one distinct zip.
+fn zip_tags(n: usize) -> String {
+    (0..n).fold(String::new(), |mut acc, i| {
+        write!(acc, "<x zip=\"z{i}.zip\"/>").expect("write");
+        acc
+    })
+}
+
+#[test]
 fn zip_count_cap_refuses_growth_past_the_limit() {
-    let names: Vec<String> = (0..=MAX_ZIPS).map(|i| format!("z{i}.zip")).collect();
+    let over = format!("<m>{}</m>", zip_tags(MAX_ZIPS + 1));
+    assert!(matches!(
+        parse(over.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_ZIPS
+    ));
+    let under = format!("<m>{}</m>", zip_tags(MAX_ZIPS));
+    assert_eq!(parse(under.as_bytes()).expect("parse").zips.len(), MAX_ZIPS);
+}
+
+#[test]
+fn zip_list_cap_refuses_one_attribute_with_too_many_names() {
+    let names: Vec<String> = (0..=MAX_ZIPS_PER_LIST)
+        .map(|i| format!("z{i}.zip"))
+        .collect();
     let xml = format!("<m><rom zip=\"{}\"/></m>", names.join("|"));
     assert!(matches!(
         parse(xml.as_bytes()),
-        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_ZIPS
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_ZIPS_PER_LIST
+    ));
+}
+
+#[test]
+fn zip_list_duplicates_within_one_attribute_are_collapsed() {
+    // Without dropping duplicates as they are split, this would hold one entry
+    // per `|`-separated repeat rather than one entry for the whole list.
+    let xml = format!("<m><rom zip=\"{}\"/></m>", "a.zip|".repeat(10_000));
+    let mra = parse(xml.as_bytes()).expect("parse");
+    assert_eq!(mra.roms[0].zips, ["a.zip"]);
+}
+
+#[test]
+fn zip_ref_total_cap_refuses_growth_across_many_parts() {
+    // Every part's own zip list stays at MAX_ZIPS_PER_LIST; only the sum of
+    // every rom's and part's own zip list across the document crosses the total.
+    let list: String = (0..MAX_ZIPS_PER_LIST)
+        .map(|i| format!("z{i}.zip"))
+        .collect::<Vec<_>>()
+        .join("|");
+    let part = format!("<part zip=\"{list}\"/>");
+    let rom = format!("<rom>{}</rom>", part.repeat(MAX_ROM_ITEMS));
+    let needed = MAX_TOTAL_ZIP_REFS / MAX_ZIPS_PER_LIST + 1;
+    let roms = needed.div_ceil(MAX_ROM_ITEMS);
+    let xml = format!("<m>{}</m>", rom.repeat(roms));
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_TOTAL_ZIP_REFS
     ));
 }
 

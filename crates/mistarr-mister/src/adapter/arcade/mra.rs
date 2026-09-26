@@ -243,7 +243,8 @@ pub fn zip_location(zip: &str) -> Option<ZipPath> {
 /// Returns [`Error::Mra`] when the document is not well-formed or ends with open
 /// elements, [`Error::XmlTooDeep`] past [`MAX_DEPTH`] levels of nesting,
 /// [`Error::XmlEventTooLarge`] past one capped event, and [`Error::XmlOutputTooLarge`]
-/// past [`MAX_ROMS`], [`MAX_ROM_ITEMS`] or [`MAX_ZIPS`].
+/// past [`MAX_ROMS`], [`MAX_ROM_ITEMS`], [`MAX_TOTAL_ROM_ITEMS`], [`MAX_ZIPS`],
+/// [`MAX_ZIPS_PER_LIST`] or [`MAX_TOTAL_ZIP_REFS`].
 ///
 /// ```
 /// let mra = mistarr_mister::adapter::arcade::mra::parse(
@@ -262,26 +263,32 @@ pub fn parse(xml: &[u8]) -> Result<Mra> {
 /// anywhere near this long, so truncating it cannot merge two different real tags.
 const MAX_TAG_BYTES: usize = 64;
 
+/// Longest attribute value quoted inside an unsupported-content reason, in bytes; a
+/// reason is a diagnostic, not a field, so it needs far less room than [`MAX_FIELD_BYTES`].
+const MAX_REASON_VALUE_BYTES: usize = 32;
+
+/// `s` cut to `max` bytes on a character boundary.
+fn truncate(s: &str, max: usize) -> &str {
+    let mut end = max.min(s.len());
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// `name` cut to [`MAX_TAG_BYTES`] on a character boundary, bounding the open-element
 /// stack's memory however long an attacker's tag name runs.
 fn tag_key(name: &str) -> String {
-    let mut end = MAX_TAG_BYTES.min(name.len());
-    while !name.is_char_boundary(end) {
-        end -= 1;
-    }
-    name[..end].to_owned()
+    truncate(name, MAX_TAG_BYTES).to_owned()
 }
 
-/// The next event, capped by [`xml_caps::read_capped`]; `position` is where it starts.
+/// The next event, capped by [`xml_caps::read_capped_mapped`]; `position` is where it starts.
 fn read_event<'b, R: BufRead>(
     reader: &mut Reader<Capped<EscapeInvalid<R>>>,
     buf: &'b mut Vec<u8>,
     position: u64,
 ) -> Result<Event<'b>> {
-    xml_caps::read_capped(reader, buf, position).map_err(|e| match e {
-        xml_caps::CapError::TooLarge(position) => Error::XmlEventTooLarge { position },
-        xml_caps::CapError::Xml(e) => xml_err(e, position),
-    })
+    xml_caps::read_capped_mapped(reader, buf, position, xml_err)
 }
 
 /// Parses MRA markup from `input`; inline part bytes are kept in [`Part::data`], or with
@@ -298,6 +305,7 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
     let mut depth = xml_caps::Depth::default();
     let mut rom: Option<RomBuilder> = None;
     let mut zips_seen: HashSet<String> = HashSet::new();
+    let mut budget = Budget::default();
     let keep = file.is_none();
     loop {
         if let Some(RomBuilder {
@@ -324,22 +332,23 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
         match event {
             Event::Start(e) => {
                 if open.len() >= MAX_DEPTH {
-                    return Err(too_deep(before));
+                    return Err(Error::XmlTooDeep { position: before });
                 }
                 let name = tag(e.local_name().as_ref());
                 // A `<rom>` inside an unclosed field never feeds that field.
                 let f = Field::of(&name).or(field.filter(|_| name != "rom"));
                 open.push((tag_key(&name), f));
                 read_attributes(&e, &mut mra, &mut zips_seen, before)?;
-                start(&e, &mut rom, at.after)?;
+                start(&e, &mut rom, &mut budget, at.after)?;
             }
             Event::Empty(e) => {
                 read_attributes(&e, &mut mra, &mut zips_seen, before)?;
-                start(&e, &mut rom, at.after)?;
+                start(&e, &mut rom, &mut budget, at.after)?;
                 end(
                     &tag(e.local_name().as_ref()),
                     &mut rom,
                     &mut mra,
+                    &mut budget,
                     at.after,
                     &at,
                 )?;
@@ -359,7 +368,7 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
                 let name = tag_key(&tag(e.local_name().as_ref()));
                 if let Some(i) = open.iter().rposition(|(n, _)| *n == name) {
                     for (closed, _) in open.drain(i..).rev() {
-                        end(&closed, &mut rom, &mut mra, at.before, &at)?;
+                        end(&closed, &mut rom, &mut mra, &mut budget, at.before, &at)?;
                     }
                 }
             }
@@ -374,6 +383,9 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
     {
         *s = s.trim().to_owned();
     }
+    // Only from roms that closed into `mra.roms`, not any `<rom>`-named tag seen in
+    // passing, so this cannot grow past MAX_ROMS from nested or skipped content.
+    mra.md5 = mra.roms.iter().filter_map(|r| r.md5.clone()).collect();
     Ok(mra)
 }
 
@@ -434,20 +446,6 @@ fn xml_err(e: quick_xml::Error, position: u64) -> Error {
     }
 }
 
-/// The document's own open-element stack nests more than [`MAX_DEPTH`] elements deep.
-fn too_deep(position: u64) -> Error {
-    Error::XmlTooDeep { position }
-}
-
-/// The document accumulates more `kind` than `limit` allows.
-fn output_too_large(kind: &'static str, limit: usize, position: u64) -> Error {
-    Error::XmlOutputTooLarge {
-        kind,
-        limit,
-        position,
-    }
-}
-
 /// The document ends with `open`'s innermost element, if any, still unclosed.
 fn truncated(open: &[(String, Option<Field>)], position: u64) -> Error {
     let name = open.last().map_or_else(String::new, |(n, _)| n.clone());
@@ -469,14 +467,30 @@ pub const MAX_FIELD_BYTES: usize = 256;
 pub const MAX_ROMS: usize = 2048;
 
 /// Most parts, patches, interleaved parts and unsupported entries one `<rom>` may
-/// hold together; further ones are refused.
-pub const MAX_ROM_ITEMS: usize = 64;
+/// hold together; further ones are refused. A corpus of real MRAs has been seen
+/// with up to about 160 in one `<rom>`, so this leaves headroom.
+pub const MAX_ROM_ITEMS: usize = 1024;
+
+/// Most such items summed across every `<rom>` in one document, checked in addition
+/// to [`MAX_ROM_ITEMS`]; further ones are refused even when no single `<rom>` is over
+/// its own cap, so total item memory stays bounded however items are spread out.
+pub const MAX_TOTAL_ROM_ITEMS: usize = 131_072;
 
 /// Most distinct zip names collected from `zip` attributes; further ones are refused.
 pub const MAX_ZIPS: usize = 4096;
 
+/// Most zip names kept from one `zip` attribute on a `<rom>` or `<part>`, after
+/// dropping duplicates within that attribute; further ones are refused. Real MRAs
+/// name at most a handful of fallback zips per element.
+pub const MAX_ZIPS_PER_LIST: usize = 16;
+
+/// Most zip names summed across every `<rom>`'s and `<part>`'s own `zip` attribute
+/// in one document; further ones are refused even under [`MAX_ZIPS_PER_LIST`], so
+/// this list's total memory does not scale with [`MAX_TOTAL_ROM_ITEMS`].
+pub const MAX_TOTAL_ZIP_REFS: usize = 65_536;
+
 /// Version of what [`parse`] reads from an MRA; it changes whenever a file could parse differently.
-pub const PARSER_VERSION: u32 = 3;
+pub const PARSER_VERSION: u32 = 4;
 
 /// Reads and parses an MRA file of at most [`MAX_MRA_BYTES`], streaming it; inline part
 /// data is checked and left in the file as [`Part::inline`].
@@ -721,13 +735,25 @@ fn number(value: &str) -> Option<u64> {
     }
 }
 
-fn split_zips(value: &str) -> Vec<String> {
-    value
-        .split('|')
-        .map(str::trim)
-        .filter(|z| !z.is_empty())
-        .map(str::to_owned)
-        .collect()
+/// Splits a `|`-separated zip list, trimming, dropping empty entries and, within this
+/// one attribute, duplicates; refuses past `cap` distinct names so one attribute value
+/// cannot hold arbitrarily many, however large or repetitive the text behind it is.
+fn split_zips(value: &str, cap: usize, position: u64) -> Result<Vec<String>> {
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut out = Vec::new();
+    for zip in value.split('|').map(str::trim).filter(|z| !z.is_empty()) {
+        if seen.insert(zip) {
+            if out.len() >= cap {
+                return Err(xml_caps::output_too_large(
+                    "zip names in one list",
+                    cap,
+                    position,
+                ));
+            }
+            out.push(zip.to_owned());
+        }
+    }
+    Ok(out)
 }
 
 fn valid_md5(value: &str) -> Option<String> {
@@ -747,13 +773,50 @@ struct RomBuilder {
 }
 
 impl RomBuilder {
-    /// Counts one more item, refusing past [`MAX_ROM_ITEMS`].
-    fn count_item(&mut self, position: u64) -> Result<()> {
+    /// Counts one more item, refusing past [`MAX_ROM_ITEMS`] for this rom or
+    /// [`MAX_TOTAL_ROM_ITEMS`] across the document.
+    fn count_item(&mut self, budget: &mut Budget, position: u64) -> Result<()> {
         self.item_count += 1;
         if self.item_count > MAX_ROM_ITEMS {
-            return Err(output_too_large(
+            return Err(xml_caps::output_too_large(
                 "items in a <rom>",
                 MAX_ROM_ITEMS,
+                position,
+            ));
+        }
+        budget.add_item(position)
+    }
+}
+
+/// Running totals across the whole document, independent of any one `<rom>`.
+#[derive(Default)]
+struct Budget {
+    items: usize,
+    zip_refs: usize,
+}
+
+impl Budget {
+    /// Counts one more item, refusing past [`MAX_TOTAL_ROM_ITEMS`].
+    fn add_item(&mut self, position: u64) -> Result<()> {
+        self.items += 1;
+        if self.items > MAX_TOTAL_ROM_ITEMS {
+            return Err(xml_caps::output_too_large(
+                "items across the document",
+                MAX_TOTAL_ROM_ITEMS,
+                position,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Counts `n` more zip references from one `<rom>` or `<part>`'s own `zip`
+    /// attribute, refusing past [`MAX_TOTAL_ZIP_REFS`].
+    fn add_zip_refs(&mut self, n: usize, position: u64) -> Result<()> {
+        self.zip_refs += n;
+        if self.zip_refs > MAX_TOTAL_ZIP_REFS {
+            return Err(xml_caps::output_too_large(
+                "zip references across the document",
+                MAX_TOTAL_ZIP_REFS,
                 position,
             ));
         }
@@ -786,14 +849,22 @@ fn tag(name: &str) -> String {
     lossy(name).to_ascii_lowercase()
 }
 
-fn start(e: &BytesStart<'_>, rom: &mut Option<RomBuilder>, after: u64) -> Result<()> {
+fn start(
+    e: &BytesStart<'_>,
+    rom: &mut Option<RomBuilder>,
+    budget: &mut Budget,
+    after: u64,
+) -> Result<()> {
     let name = tag(e.local_name().as_ref());
     let Some(b) = rom else {
         if name == "rom" {
             let mut r = MraRom::default();
             for (k, v) in attrs(e, after)? {
                 match k.as_str() {
-                    "zip" => r.zips = split_zips(&v),
+                    "zip" => {
+                        r.zips = split_zips(&v, MAX_ZIPS_PER_LIST, after)?;
+                        budget.add_zip_refs(r.zips.len(), after)?;
+                    }
                     "md5" => r.md5 = valid_md5(&v),
                     "index" => r.index = v.trim().parse().unwrap_or(0),
                     _ => {}
@@ -815,7 +886,7 @@ fn start(e: &BytesStart<'_>, rom: &mut Option<RomBuilder>, after: u64) -> Result
     }
     match (name.as_str(), &b.open) {
         ("part", None) => {
-            let (part, err) = part_from(&attrs(e, after)?);
+            let (part, err) = part_from(&attrs(e, after)?, budget, after)?;
             b.open = Some(Open::Part(part, Hex::default(), err, after));
         }
         ("patch", None) if b.interleave.is_none() => {
@@ -823,10 +894,14 @@ fn start(e: &BytesStart<'_>, rom: &mut Option<RomBuilder>, after: u64) -> Result
             let mut err = None;
             for (k, v) in attrs(e, after)? {
                 match k.as_str() {
-                    "offset" => match number(&v) {
-                        Some(n) => patch.offset = n,
-                        None => err = Some(format!("patch offset {v:?} is not a number")),
-                    },
+                    "offset" => {
+                        if let Some(n) = number(&v) {
+                            patch.offset = n;
+                        } else {
+                            let v = truncate(&v, MAX_REASON_VALUE_BYTES);
+                            err = Some(format!("patch offset {v:?} is not a number"));
+                        }
+                    }
                     "operation" => patch.xor = v.trim().eq_ignore_ascii_case("xor"),
                     _ => {}
                 }
@@ -849,7 +924,8 @@ fn start(e: &BytesStart<'_>, rom: &mut Option<RomBuilder>, after: u64) -> Result
             b.interleave = Some(il);
         }
         _ => {
-            b.count_item(after)?;
+            b.count_item(budget, after)?;
+            let name = truncate(&name, MAX_TAG_BYTES);
             b.rom
                 .items
                 .push(RomItem::Unsupported(format!("<{name}> inside <rom>")));
@@ -859,17 +935,28 @@ fn start(e: &BytesStart<'_>, rom: &mut Option<RomBuilder>, after: u64) -> Result
     Ok(())
 }
 
-fn part_from(attrs: &[(String, String)]) -> (Part, Option<String>) {
+fn part_from(
+    attrs: &[(String, String)],
+    budget: &mut Budget,
+    position: u64,
+) -> Result<(Part, Option<String>)> {
     let mut part = Part::default();
     let mut err = None;
     for (k, v) in attrs {
-        let mut num = |slot: &mut u64| match number(v) {
-            Some(n) => *slot = n,
-            None => err = Some(format!("part {k} {v:?} is not a number")),
+        let mut num = |slot: &mut u64| {
+            if let Some(n) = number(v) {
+                *slot = n;
+            } else {
+                let v = truncate(v, MAX_REASON_VALUE_BYTES);
+                err = Some(format!("part {k} {v:?} is not a number"));
+            }
         };
         match k.as_str() {
             "name" => part.name = Some(v.clone()).filter(|n| !n.is_empty()),
-            "zip" => part.zips = split_zips(v),
+            "zip" => {
+                part.zips = split_zips(v, MAX_ZIPS_PER_LIST, position)?;
+                budget.add_zip_refs(part.zips.len(), position)?;
+            }
             "crc" => part.crc = u32::from_str_radix(v.trim(), 16).ok(),
             "offset" => num(&mut part.offset),
             "repeat" => num(&mut part.repeat),
@@ -882,7 +969,7 @@ fn part_from(attrs: &[(String, String)]) -> (Part, Option<String>) {
             _ => {}
         }
     }
-    (part, err)
+    Ok((part, err))
 }
 
 /// Adds text to the open field and to the open part or patch; `keep` stores inline bytes.
@@ -910,6 +997,7 @@ fn end(
     name: &str,
     rom: &mut Option<RomBuilder>,
     mra: &mut Mra,
+    budget: &mut Budget,
     pos: u64,
     at: &Pos<'_>,
 ) -> Result<()> {
@@ -943,7 +1031,7 @@ fn end(
                     Ok(part)
                 }
             };
-            b.count_item(pos)?;
+            b.count_item(budget, pos)?;
             match (item, &mut b.interleave) {
                 (Ok(p), Some(il)) => il.parts.push(p),
                 (Ok(p), None) => b.rom.items.push(RomItem::Part(p)),
@@ -962,19 +1050,19 @@ fn end(
                     RomItem::Patch(patch)
                 }
             };
-            b.count_item(pos)?;
+            b.count_item(budget, pos)?;
             b.rom.items.push(item);
         }
         "interleave" => {
             if let Some(il) = b.interleave.take() {
-                b.count_item(pos)?;
+                b.count_item(budget, pos)?;
                 b.rom.items.push(RomItem::Interleave(il));
             }
         }
         "rom" => {
             if let Some(b) = rom.take() {
                 if mra.roms.len() >= MAX_ROMS {
-                    return Err(output_too_large("<rom> elements", MAX_ROMS, pos));
+                    return Err(xml_caps::output_too_large("<rom> elements", MAX_ROMS, pos));
                 }
                 mra.roms.push(b.rom);
             }
@@ -1011,11 +1099,7 @@ impl Field {
         }
         .get_or_insert_with(String::new);
         let room = MAX_FIELD_BYTES.saturating_sub(slot.len());
-        let mut end = room.min(text.len());
-        while !text.is_char_boundary(end) {
-            end -= 1;
-        }
-        slot.push_str(&text[..end]);
+        slot.push_str(truncate(text, room));
     }
 }
 
@@ -1025,22 +1109,21 @@ fn read_attributes(
     zips_seen: &mut HashSet<String>,
     position: u64,
 ) -> Result<()> {
-    let is_rom = e.local_name().as_ref().eq_ignore_ascii_case("rom");
     for (key, value) in attrs(e, position)? {
-        match key.as_str() {
-            "zip" => {
-                for zip in split_zips(&value) {
-                    if !zips_seen.insert(zip.clone()) {
-                        continue;
-                    }
-                    if mra.zips.len() >= MAX_ZIPS {
-                        return Err(output_too_large("distinct zip names", MAX_ZIPS, position));
-                    }
-                    mra.zips.push(zip);
+        if key == "zip" {
+            for zip in split_zips(&value, MAX_ZIPS, position)? {
+                if !zips_seen.insert(zip.clone()) {
+                    continue;
                 }
+                if mra.zips.len() >= MAX_ZIPS {
+                    return Err(xml_caps::output_too_large(
+                        "distinct zip names",
+                        MAX_ZIPS,
+                        position,
+                    ));
+                }
+                mra.zips.push(zip);
             }
-            "md5" if is_rom => mra.md5.extend(valid_md5(&value)),
-            _ => {}
         }
     }
     Ok(())

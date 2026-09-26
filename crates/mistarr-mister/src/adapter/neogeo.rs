@@ -39,6 +39,10 @@ pub const MAX_SETS: usize = 4096;
 /// Most distinct BIOS file names collected from comments; further ones are refused.
 pub const MAX_BIOS_NAMES: usize = 4096;
 
+/// Longest romset or BIOS name kept, in bytes; a real name is a short file or
+/// directory name, so a longer one is dropped rather than stored twice over.
+pub const MAX_NAME_BYTES: usize = 256;
+
 fn romsets_err(e: quick_xml::Error, position: u64) -> Error {
     Error::Romsets {
         position,
@@ -49,15 +53,6 @@ fn romsets_err(e: quick_xml::Error, position: u64) -> Error {
 fn too_big() -> Error {
     Error::FileTooLarge {
         limit: MAX_ROMSETS_BYTES,
-    }
-}
-
-/// The document accumulates more `kind` than `limit` allows.
-fn output_too_large(kind: &'static str, limit: usize, position: u64) -> Error {
-    Error::XmlOutputTooLarge {
-        kind,
-        limit,
-        position,
     }
 }
 
@@ -86,11 +81,7 @@ pub fn parse_romsets<R: BufRead>(xml: R) -> Result<Romsets> {
     let mut bios_seen: HashSet<String> = HashSet::new();
     loop {
         let position = reader.get_ref().get_ref().position();
-        let event =
-            xml_caps::read_capped(&mut reader, &mut buf, position).map_err(|e| match e {
-                xml_caps::CapError::TooLarge(position) => Error::XmlEventTooLarge { position },
-                xml_caps::CapError::Xml(e) => romsets_err(e, position),
-            })?;
+        let event = xml_caps::read_capped_mapped(&mut reader, &mut buf, position, romsets_err)?;
         depth.track(&event, position)?;
         match event {
             Event::Start(e) | Event::Empty(e)
@@ -105,9 +96,12 @@ pub fn parse_romsets<R: BufRead>(xml: R) -> Result<Romsets> {
                         check_utf8(&v)
                             .map_err(|e| romsets_err(quick_xml::Error::from(e), position))?;
                         let v = v.trim().to_owned();
-                        if !v.is_empty() && sets_seen.insert(v.clone()) {
+                        if !v.is_empty() && v.len() <= MAX_NAME_BYTES && sets_seen.insert(v.clone())
+                        {
                             if out.sets.len() >= MAX_SETS {
-                                return Err(output_too_large("romsets", MAX_SETS, position));
+                                return Err(xml_caps::output_too_large(
+                                    "romsets", MAX_SETS, position,
+                                ));
                             }
                             out.sets.push(v);
                         }
@@ -119,7 +113,11 @@ pub fn parse_romsets<R: BufRead>(xml: R) -> Result<Romsets> {
                 for line in text.lines().map(str::trim) {
                     if is_file_name(line) && bios_seen.insert(line.to_owned()) {
                         if out.bios.len() >= MAX_BIOS_NAMES {
-                            return Err(output_too_large("bios names", MAX_BIOS_NAMES, position));
+                            return Err(xml_caps::output_too_large(
+                                "bios names",
+                                MAX_BIOS_NAMES,
+                                position,
+                            ));
                         }
                         out.bios.push(line.to_owned());
                     }
@@ -132,8 +130,12 @@ pub fn parse_romsets<R: BufRead>(xml: R) -> Result<Romsets> {
     Ok(out)
 }
 
-/// A single `name.ext` token: letters, digits, `-` and `_`, with a short extension.
+/// A single `name.ext` token within [`MAX_NAME_BYTES`]: letters, digits, `-` and `_`,
+/// with a short extension.
 fn is_file_name(s: &str) -> bool {
+    if s.len() > MAX_NAME_BYTES {
+        return false;
+    }
     let Some((stem, ext)) = s.rsplit_once('.') else {
         return false;
     };
@@ -406,6 +408,24 @@ Files that must be present:
         assert!(!is_file_name("nodot"));
         assert!(!is_file_name(".hidden"));
         assert!(!is_file_name("a.toolongext"));
+        let long = format!("{}.rom", "a".repeat(MAX_NAME_BYTES));
+        assert!(!is_file_name(&long));
+    }
+
+    #[test]
+    fn overlong_names_are_dropped_not_stored() {
+        let long_set = "s".repeat(MAX_NAME_BYTES + 1);
+        let xml = format!("<romsets><romset name=\"{long_set}\"/></romsets>");
+        assert_eq!(
+            parse_romsets(xml.as_bytes()).expect("parse").sets,
+            Vec::<String>::new()
+        );
+        let long_bios = format!("{}.rom", "b".repeat(MAX_NAME_BYTES));
+        let xml = format!("<!--{long_bios}--><romsets/>");
+        assert_eq!(
+            parse_romsets(xml.as_bytes()).expect("parse").bios,
+            Vec::<String>::new()
+        );
     }
 
     #[test]
