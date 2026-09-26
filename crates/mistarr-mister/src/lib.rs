@@ -43,8 +43,13 @@ pub enum Error {
     #[error("name `{0}` cannot be used as a file name")]
     InvalidName(String),
     /// An MRA file is not well-formed XML.
-    #[error("MRA is not valid XML: {0}")]
-    Mra(String),
+    #[error("MRA is not valid XML at byte {position}: {source}")]
+    Mra {
+        /// Byte offset where the error was detected.
+        position: u64,
+        /// Underlying parser error.
+        source: quick_xml::Error,
+    },
     /// An MRA rom uses content the assembler does not implement.
     #[error("MRA content not supported: {0}")]
     MraUnsupported(String),
@@ -57,8 +62,13 @@ pub enum Error {
         zips: String,
     },
     /// A Neo Geo `romsets.xml` is not well-formed XML.
-    #[error("romsets.xml is not valid XML: {0}")]
-    Romsets(String),
+    #[error("romsets.xml is not valid XML at byte {position}: {source}")]
+    Romsets {
+        /// Byte offset where the error was detected.
+        position: u64,
+        /// Underlying parser error.
+        source: quick_xml::Error,
+    },
     /// A path cannot be written into an MGL or a command line.
     #[error("path `{0}` cannot be passed to MiSTer Main")]
     UnsafePath(String),

@@ -139,7 +139,7 @@ fn unknown_rom_content_is_kept_as_unsupported() {
 fn malformed_xml_is_an_error() {
     assert!(matches!(
         parse(b"<misterromdescription><rom zip=\"a.zip\"></oops>"),
-        Err(Error::Mra(_))
+        Err(Error::Mra { .. })
     ));
 }
 
@@ -147,11 +147,11 @@ fn malformed_xml_is_an_error() {
 fn non_utf8_is_refused_in_text_and_skipped_in_comments() {
     assert!(matches!(
         parse(b"<misterromdescription><name>Caf\xe9</name></misterromdescription>"),
-        Err(Error::Mra(_))
+        Err(Error::Mra { .. })
     ));
     assert!(matches!(
         parse(b"<misterromdescription><rom zip=\"\xe9.zip\"/></misterromdescription>"),
-        Err(Error::Mra(_))
+        Err(Error::Mra { .. })
     ));
     let mra = parse(
         b"\xef\xbb\xbf<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><!-- Caf\xe9 -->\
@@ -184,7 +184,7 @@ fn nested_child_text_stays_in_the_enclosing_field() {
 #[test]
 fn truncated_document_is_an_error() {
     let err = parse(b"<misterromdescription><rom zip=\"exblast.zip\"><part name=\"a\"/>");
-    assert!(matches!(err, Err(Error::Mra(_))));
+    assert!(matches!(err, Err(Error::Mra { .. })));
 }
 
 #[test]
@@ -265,7 +265,36 @@ fn read_refuses_an_oversized_file() {
     let path = dir.join("big.mra");
     let pad = " ".repeat(usize::try_from(MAX_MRA_BYTES).expect("fits"));
     std::fs::write(&path, format!("<m>{pad}</m>")).expect("write");
-    assert!(matches!(read(&path), Err(Error::Mra(m)) if m.contains("larger")));
+    assert!(matches!(
+        read(&path),
+        Err(Error::Mra { source, .. }) if source.to_string().contains("larger")
+    ));
+}
+
+/// `n` levels of `<a>` nested inside `<m>`, well-formed either way.
+fn nested(n: usize) -> String {
+    format!("<m>{}{}</m>", "<a>".repeat(n), "</a>".repeat(n))
+}
+
+#[test]
+fn depth_cap_refuses_deep_nesting_without_holding_it_all() {
+    assert!(parse(nested(MAX_DEPTH - 4).as_bytes()).is_ok());
+    assert!(matches!(
+        parse(nested(MAX_DEPTH * 4).as_bytes()),
+        Err(Error::Mra { .. })
+    ));
+    // A document nested far past the cap still refuses promptly, never panicking.
+    assert!(matches!(
+        parse(nested(1_000_000).as_bytes()),
+        Err(Error::Mra { .. })
+    ));
+}
+
+#[test]
+fn event_size_cap_refuses_an_oversized_single_run() {
+    let huge = "x".repeat(2 * 1024 * 1024);
+    let xml = format!("<m><name>{huge}</name></m>");
+    assert!(matches!(parse(xml.as_bytes()), Err(Error::Mra { .. })));
 }
 
 /// `text` with each ASCII letter upper-cased where `mask` has a set bit, cycling the mask.
@@ -458,6 +487,11 @@ proptest! {
     #[test]
     fn parse_never_panics(s in ".{0,200}") {
         let _ = parse(s.as_bytes());
+    }
+
+    #[test]
+    fn depth_cap_never_panics(n in 0usize..300) {
+        let _ = parse(nested(n).as_bytes());
     }
 
     #[test]

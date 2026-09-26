@@ -4,7 +4,7 @@ use std::io::{self, BufRead, BufReader, Read, Seek as _, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 
-use mistarr_core::xml::{check_utf8, lossy, EscapeInvalid};
+use mistarr_core::xml::{check_utf8, lossy, Capped, EscapeInvalid};
 use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
@@ -251,11 +251,31 @@ pub fn parse(xml: &[u8]) -> Result<Mra> {
     parse_from(xml, None)
 }
 
+/// Deepest element nesting an MRA may use, matching `mistarr_core::dat::MAX_DEPTH`; the
+/// open-element stack below holds no more entries than this, however deep the document nests.
+const MAX_DEPTH: usize = 64;
+
+/// Largest single XML event this reader buffers, matching `mistarr_core::dat::MAX_EVENT_BYTES`.
+const MAX_EVENT_BYTES: u64 = 1024 * 1024;
+
+/// The next event, capped at [`MAX_EVENT_BYTES`]; `position` is where it starts, for errors.
+fn read_event<'b, R: BufRead>(
+    reader: &mut Reader<Capped<EscapeInvalid<R>>>,
+    buf: &'b mut Vec<u8>,
+    position: u64,
+) -> Result<Event<'b>> {
+    buf.clear();
+    reader.get_mut().arm(MAX_EVENT_BYTES);
+    reader
+        .read_event_into(buf)
+        .map_err(|e| xml_err(e, position))
+}
+
 /// Parses MRA markup from `input`; inline part bytes are kept in [`Part::data`], or with
 /// `file` set, left in that file as [`Part::inline`] so no payload is held.
 fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra> {
     let bom = skip_bom(&mut input)?;
-    let mut reader = Reader::from_reader(EscapeInvalid::new(input));
+    let mut reader = Reader::from_reader(Capped::new(EscapeInvalid::new(input)));
     reader.config_mut().check_end_names = false;
     let mut buf = Vec::new();
     let mut mra = Mra::default();
@@ -270,29 +290,33 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
         }) = &mut rom
         {
             if part.name.is_none() {
+                // Wide open: a raw hex run may run past one event's cap.
+                reader.get_mut().arm(u64::MAX);
                 take_text(reader.get_mut(), hex, keep.then_some(&mut part.data))?;
             }
         }
-        let before = bom + reader.get_ref().position();
-        buf.clear();
-        let event = reader.read_event_into(&mut buf).map_err(xml_err)?;
+        let before = bom + reader.get_ref().get_ref().position();
+        let event = read_event(&mut reader, &mut buf, before)?;
         let at = Pos {
             before,
-            after: bom + reader.get_ref().position(),
+            after: bom + reader.get_ref().get_ref().position(),
             file,
         };
         let field = open.last().and_then(|(_, f)| *f);
         match event {
             Event::Start(e) => {
+                if open.len() >= MAX_DEPTH {
+                    return Err(too_deep(before));
+                }
                 let name = tag(e.local_name().as_ref());
                 // A `<rom>` inside an unclosed field never feeds that field.
                 let f = Field::of(&name).or(field.filter(|_| name != "rom"));
                 open.push((name, f));
-                read_attributes(&e, &mut mra)?;
+                read_attributes(&e, &mut mra, before)?;
                 start(&e, &mut rom, at.after)?;
             }
             Event::Empty(e) => {
-                read_attributes(&e, &mut mra)?;
+                read_attributes(&e, &mut mra, before)?;
                 start(&e, &mut rom, at.after)?;
                 end(
                     &tag(e.local_name().as_ref()),
@@ -303,14 +327,16 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
                 );
             }
             Event::Text(t) => {
-                utf8(&t)?;
+                utf8(&t, before)?;
                 text(&t, field, &mut mra, &mut rom, keep);
             }
             Event::CData(c) => {
-                utf8(&c)?;
+                utf8(&c, before)?;
                 text(&c, field, &mut mra, &mut rom, keep);
             }
-            Event::GeneralRef(r) => text(&resolve_ref(&r)?, field, &mut mra, &mut rom, keep),
+            Event::GeneralRef(r) => {
+                text(&resolve_ref(&r, before)?, field, &mut mra, &mut rom, keep);
+            }
             Event::End(e) => {
                 let name = tag(e.local_name().as_ref());
                 if let Some(i) = open.iter().rposition(|(n, _)| *n == name) {
@@ -320,7 +346,7 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
                 }
             }
             Event::Eof if open.is_empty() => break,
-            Event::Eof => return Err(Error::Mra("document ends inside an element".into())),
+            Event::Eof => return Err(truncated(before)),
             _ => {}
         }
     }
@@ -374,22 +400,43 @@ struct Pos<'a> {
 }
 
 /// A character or predefined entity reference as text; an unknown entity stays as written.
-fn resolve_ref(r: &quick_xml::events::BytesRef<'_>) -> Result<String> {
-    if let Some(c) = r.resolve_char_ref().map_err(xml_err)? {
+fn resolve_ref(r: &quick_xml::events::BytesRef<'_>, position: u64) -> Result<String> {
+    if let Some(c) = r.resolve_char_ref().map_err(|e| xml_err(e, position))? {
         return Ok(c.to_string());
     }
     let name: &str = r;
-    utf8(name)?;
+    utf8(name, position)?;
     Ok(resolve_predefined_entity(name).map_or_else(|| format!("&{name};"), str::to_owned))
 }
 
-fn xml_err(e: impl std::fmt::Display) -> Error {
-    Error::Mra(e.to_string())
+fn xml_err(e: quick_xml::Error, position: u64) -> Error {
+    Error::Mra {
+        position,
+        source: e,
+    }
+}
+
+/// The document nests more than [`MAX_DEPTH`] elements deep.
+fn too_deep(position: u64) -> Error {
+    xml_err(
+        quick_xml::Error::from(io::Error::other(format!(
+            "elements nest deeper than {MAX_DEPTH} levels"
+        ))),
+        position,
+    )
+}
+
+/// The document ends with elements still open.
+fn truncated(position: u64) -> Error {
+    xml_err(
+        quick_xml::Error::from(io::Error::other("document ends inside an element")),
+        position,
+    )
 }
 
 /// Fails on text read from bytes that are not UTF-8.
-fn utf8(s: &str) -> Result<()> {
-    check_utf8(s).map_err(|e| xml_err(quick_xml::Error::from(e)))
+fn utf8(s: &str, position: u64) -> Result<()> {
+    check_utf8(s).map_err(|e| xml_err(quick_xml::Error::from(e), position))
 }
 
 /// Largest MRA file read, a sanity bound: inline part data makes some a few MiB.
@@ -428,7 +475,12 @@ pub fn read(path: &Path) -> Result<Mra> {
 }
 
 fn too_big() -> Error {
-    Error::Mra(format!("file is larger than {MAX_MRA_BYTES} bytes"))
+    xml_err(
+        quick_xml::Error::from(io::Error::other(format!(
+            "file is larger than {MAX_MRA_BYTES} bytes"
+        ))),
+        0,
+    )
 }
 
 /// Streams the bytes of an inline part read by [`read`], decoding its hex again from the file.
@@ -508,7 +560,9 @@ impl InlineReader {
             let chunk: std::borrow::Cow<'_, str> = match event {
                 Event::Text(t) => t.into_inner(),
                 Event::CData(c) => c.into_inner(),
-                Event::GeneralRef(r) => resolve_ref(&r).map_err(|e| bad(&e))?.into(),
+                Event::GeneralRef(r) => resolve_ref(&r, self.reader.get_ref().position())
+                    .map_err(|e| bad(&e))?
+                    .into(),
                 Event::Eof => {
                     self.done = true;
                     self.hex.finish(Some(&mut self.out));
@@ -519,7 +573,7 @@ impl InlineReader {
                 }
                 _ => continue,
             };
-            utf8(&chunk).map_err(|e| bad(&e))?;
+            utf8(&chunk, self.reader.get_ref().position()).map_err(|e| bad(&e))?;
             self.hex.feed(chunk.as_bytes(), Some(&mut self.out));
         }
         Ok(true)
@@ -669,15 +723,15 @@ enum Open {
     Patch(Patch, String, Option<String>),
 }
 
-fn attrs(e: &BytesStart<'_>) -> Result<Vec<(String, String)>> {
+fn attrs(e: &BytesStart<'_>, position: u64) -> Result<Vec<(String, String)>> {
     e.attributes()
         .map(|a| {
-            let a = a.map_err(xml_err)?;
+            let a = a.map_err(|e| xml_err(e.into(), position))?;
             let key = lossy(a.key.local_name().as_ref()).to_ascii_lowercase();
             let value = a
                 .normalized_value(XmlVersion::Implicit1_0)
-                .map_err(xml_err)?;
-            utf8(&value)?;
+                .map_err(|e| xml_err(e, position))?;
+            utf8(&value, position)?;
             Ok((key, value.into_owned()))
         })
         .collect()
@@ -692,7 +746,7 @@ fn start(e: &BytesStart<'_>, rom: &mut Option<RomBuilder>, after: u64) -> Result
     let Some(b) = rom else {
         if name == "rom" {
             let mut r = MraRom::default();
-            for (k, v) in attrs(e)? {
+            for (k, v) in attrs(e, after)? {
                 match k.as_str() {
                     "zip" => r.zips = split_zips(&v),
                     "md5" => r.md5 = valid_md5(&v),
@@ -715,13 +769,13 @@ fn start(e: &BytesStart<'_>, rom: &mut Option<RomBuilder>, after: u64) -> Result
     }
     match (name.as_str(), &b.open) {
         ("part", None) => {
-            let (part, err) = part_from(&attrs(e)?);
+            let (part, err) = part_from(&attrs(e, after)?);
             b.open = Some(Open::Part(part, Hex::default(), err, after));
         }
         ("patch", None) if b.interleave.is_none() => {
             let mut patch = Patch::default();
             let mut err = None;
-            for (k, v) in attrs(e)? {
+            for (k, v) in attrs(e, after)? {
                 match k.as_str() {
                     "offset" => match number(&v) {
                         Some(n) => patch.offset = n,
@@ -738,7 +792,7 @@ fn start(e: &BytesStart<'_>, rom: &mut Option<RomBuilder>, after: u64) -> Result
                 input: 8,
                 ..Interleave::default()
             };
-            for (k, v) in attrs(e)? {
+            for (k, v) in attrs(e, after)? {
                 let n = u32::try_from(number(&v).unwrap_or(0)).unwrap_or(0);
                 match k.as_str() {
                     "input" => il.input = n,
@@ -905,9 +959,9 @@ impl Field {
     }
 }
 
-fn read_attributes(e: &BytesStart<'_>, mra: &mut Mra) -> Result<()> {
+fn read_attributes(e: &BytesStart<'_>, mra: &mut Mra, position: u64) -> Result<()> {
     let is_rom = e.local_name().as_ref().eq_ignore_ascii_case("rom");
-    for (key, value) in attrs(e)? {
+    for (key, value) in attrs(e, position)? {
         match key.as_str() {
             "zip" => {
                 for zip in split_zips(&value) {
