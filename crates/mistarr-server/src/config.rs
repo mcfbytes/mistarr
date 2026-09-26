@@ -470,17 +470,13 @@ impl Config {
         Ok(config)
     }
 
-    /// Logs each key `load` found that no field claimed, taking them so a
-    /// later clone of this config carries none, then any
-    /// [`ConfigProblem`] [`Config::validate`] finds before a runtime
-    /// settings overlay can move the fields it looks at; the caller runs
-    /// this once a `tracing` subscriber is installed and before anything
-    /// uses `[memory] import_floor_mib`, so nothing is silently dropped as
-    /// at startup, where `load` itself runs too early for logging.
+    /// Logs and clears the unknown keys, then logs each [`ConfigProblem`]
+    /// whose fields a runtime settings overlay cannot move. Needs a
+    /// `tracing` subscriber.
     pub(crate) fn log_problems(&mut self) {
         warn_unknown_keys(&std::mem::take(&mut self.unknown_keys));
         for problem in self.validate() {
-            if matches!(problem, ConfigProblem::ImportFloor) {
+            if !problem.overlay_can_move() {
                 tracing::warn!("{}", problem.message());
             }
         }
@@ -491,7 +487,7 @@ impl Config {
     /// this over the effective config, after that overlay.
     pub(crate) fn log_path_map_problem(&self) {
         for problem in self.validate() {
-            if matches!(problem, ConfigProblem::PathMap) {
+            if problem.overlay_can_move() {
                 tracing::warn!("{}", problem.message());
             }
         }
@@ -601,6 +597,15 @@ impl ConfigProblem {
             }
         }
     }
+
+    /// Whether a runtime settings overlay can move the fields this problem checks.
+    #[must_use]
+    fn overlay_can_move(self) -> bool {
+        match self {
+            Self::PathMap => true,
+            Self::ImportFloor => false,
+        }
+    }
 }
 
 /// Rejects a remote path map entry whose remote path is blank, which would
@@ -611,9 +616,7 @@ fn path_map_entry_ok(m: &PathMapping) -> bool {
 }
 
 /// Whether every entry of `client.remote_path_map` passes [`path_map_entry_ok`].
-/// Shared by [`Config::validate`] and the settings `PUT` handler, which checks
-/// only the `client` section a patch carries.
-pub(crate) fn client_path_map_ok(client: &ClientConfig) -> bool {
+fn client_path_map_ok(client: &ClientConfig) -> bool {
     client.remote_path_map.iter().all(path_map_entry_ok)
 }
 
