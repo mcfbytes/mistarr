@@ -93,6 +93,10 @@ the core expects inside an XML comment, one per line; every comment line that
 is a single `name.ext` token is taken as one, and detail reports each as
 present or missing in `games/NeoGeo`. Nothing else is done with them.
 
+`romsets.xml` is streamed through a `BufReader`, refused unread above 16 MiB,
+and, like the MRA reader below, capped at one 1 MiB XML event and 64 levels
+of element nesting; either cap failing refuses the file with an error.
+
 ### MRA catalogue
 
 The catalogue reads the real MRA files once each. Under `_Arcade` it skips
@@ -120,6 +124,15 @@ an element is refused. `<name>`, `<setname>` and `<rbf>` keep at most 256
 bytes, and a `<rom>` inside one left open never adds to it. Text that is not
 UTF-8 follows VERIFICATION.md "Text encoding": refused in text and
 attribute values, passed over in comments.
+
+As VERIFICATION.md "DAT parsing" caps a DAT, the reader caps one XML event,
+a tag, a text run or a comment, at 1 MiB before it is buffered, and element
+nesting at 64 levels; either refuses the file with an error, and the
+open-element stack used to match end tags never holds more entries than the
+depth cap allows. A `<part>`'s own inline hex, which can run to several MiB,
+bypasses the event cap: it is read straight off the file a buffer at a time
+into `Part::data` or, from `read`, left in place as the `Inline` marker
+below, so neither cap stops a large but legitimate rom.
 
 The arcade catalogue job (ARCHITECTURE.md "Arcade catalogue") turns each MRA
 into one `arcade` title with `source = 'mra'`: `<name>`, `<setname>` and
