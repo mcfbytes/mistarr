@@ -1,7 +1,6 @@
 //! Imports a zip an MRA names: verified by the MRA's md5, a loaded MAME DAT or nothing,
 //! then placed whole; see `docs/ARCHITECTURE.md` "Import".
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use mistarr_mister::adapter::arcade::assemble::PartSource as _;
@@ -344,7 +343,7 @@ impl Placing<'_> {
         };
         let staged = StagedFile {
             path: local.clone(),
-            size: fs::metadata(&local).map_or(0, |m| m.len()),
+            size: super::size_of(&local).await?,
             kind: StagedKind::Zip,
             head: Vec::new(),
             members: Vec::new(),
@@ -353,7 +352,12 @@ impl Placing<'_> {
             Ok(p) => p,
             Err(e) => return fail(app, &ids, &format!("cannot place the file: {e}")).await,
         };
-        if !local.exists() && self.games.join(&plan.final_rel_path).is_file() {
+        let (staged_path, placed) = (local.clone(), self.games.join(&plan.final_rel_path));
+        let done = crate::threads::run(crate::threads::label::IMPORT, move || {
+            !staged_path.exists() && placed.is_file()
+        })
+        .await?;
+        if done {
             finish(app, &ids, DownloadState::Done, None).await?;
             return self.refresh(&zip).await;
         }
@@ -471,6 +475,7 @@ impl Placing<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::Write as _;
 
     use mistarr_core::hash::Md5Stream;

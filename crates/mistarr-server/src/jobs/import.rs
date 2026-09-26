@@ -411,7 +411,7 @@ impl Placing<'_> {
 
     /// True when the staged file is gone because an earlier attempt placed it.
     async fn already_placed(&self, local: &Path, rom_id: i64) -> Result<bool> {
-        if local.exists() {
+        if exists(local).await? {
             return Ok(false);
         }
         self.app()
@@ -562,7 +562,7 @@ impl Placing<'_> {
         if self.already_placed(&local, row.rom_id).await? {
             return finish(app, &[row.id], DownloadState::Done, None).await;
         }
-        if !local.exists() {
+        if !exists(&local).await? {
             if let Some(other) = self.placed_as_other(row).await? {
                 return self.settle_other(row, &other).await;
             }
@@ -597,7 +597,7 @@ impl Placing<'_> {
     ) -> Result<()> {
         let local = local.to_path_buf();
         let head = self.head(&local, hashed.member.as_deref()).await?;
-        let size = fs::metadata(&local).map_or(0, |m| m.len());
+        let size = size_of(&local).await?;
         let staged = match &hashed.member {
             None => StagedFile {
                 path: local.clone(),
@@ -851,7 +851,7 @@ impl Placing<'_> {
         }
         let staged = StagedFile {
             path: local.clone(),
-            size: fs::metadata(&local).map_or(0, |m| m.len()),
+            size: size_of(&local).await?,
             kind: StagedKind::Zip,
             head: Vec::new(),
             members: staged_members,
@@ -1170,7 +1170,7 @@ impl Placing<'_> {
                 continue;
             };
             let rel = rel_string(to);
-            let exists = self.games.join(to).exists();
+            let exists = exists(&self.games.join(to)).await?;
             let whole_zip = whole.is_some_and(|w| w == from);
             let (pid, r) = (self.pid(), rel.clone());
             let rows = self
@@ -1329,6 +1329,21 @@ pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) -> bool {
     })
     .await;
     true
+}
+
+/// Whether `path` exists, asked on a blocking thread.
+async fn exists(path: &Path) -> Result<bool> {
+    let path = path.to_path_buf();
+    crate::threads::run(crate::threads::label::IMPORT, move || path.exists()).await
+}
+
+/// The size of the file at `path`, 0 when it cannot be read, asked on a blocking thread.
+async fn size_of(path: &Path) -> Result<u64> {
+    let path = path.to_path_buf();
+    crate::threads::run(crate::threads::label::IMPORT, move || {
+        fs::metadata(&path).map_or(0, |m| m.len())
+    })
+    .await
 }
 
 /// A download whose staged item was quarantined, for [`Quarantined::record`].

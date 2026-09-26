@@ -61,10 +61,10 @@ pub(crate) struct ScannedChd {
     pub(crate) whole: Option<Track>,
 }
 
-/// Records one `.chd` file for the scan. Its 124-byte header is read; a file of the size of
-/// a whole-file `.chd` rom is then hashed whole, or its whole hashes taken from the cache.
-/// Otherwise its rows come from the track cache, a stored failure, or a container row
-/// waiting to be decoded.
+/// Records one `.chd` file for the scan, given the size and mtime its listing read. Its
+/// 124-byte header is read; a file of the size of a whole-file `.chd` rom is then hashed
+/// whole, or its whole hashes taken from the cache. Otherwise its rows come from the track
+/// cache, a stored failure, or a container row waiting to be decoded.
 ///
 /// # Errors
 ///
@@ -74,13 +74,14 @@ pub(crate) async fn scan_file(
     platform: &PlatformId,
     rel_path: &str,
     path: &Path,
+    meta: std::io::Result<(i64, i64)>,
 ) -> Result<ScannedChd> {
     let bare = |rows| ScannedChd {
         rows,
         seen: vec![rel_path.to_owned()],
         whole: None,
     };
-    let (size, mtime) = match scan::file_meta(path) {
+    let (size, mtime) = match meta {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "cannot read metadata; marking unidentified");

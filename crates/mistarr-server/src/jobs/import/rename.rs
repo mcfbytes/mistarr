@@ -61,7 +61,8 @@ pub async fn rename(app: &AppState, group: TitleId, file_id: FileId) -> Outcome<
         .read(move |c| files::find_by_path(c, &pid, &dest))
         .await?;
     let on_disk = games.join(&to);
-    if stale.is_some() && on_disk.exists() {
+    let taken = crate::threads::run(crate::threads::label::RENAME, move || on_disk.exists());
+    if stale.is_some() && taken.await? {
         return Err(RenameError::Conflict(to_rel));
     }
     let (g, f, t) = (games.clone(), PathBuf::from(&from_rel), to.clone());

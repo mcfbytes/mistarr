@@ -74,7 +74,8 @@ impl Job for ArcadeCatalog {
 pub async fn enqueue_if_relevant(app: &Arc<AppState>) -> Result<Option<JobId>> {
     let dir = app.config().paths.root.join(ARCADE_DIR);
     let known = app.db.read(|c| rows::has_titles(c, PLATFORM)).await?;
-    if !dir.is_dir() && !known {
+    let listed = crate::threads::run(crate::threads::label::ARCADE, move || dir.is_dir());
+    if !known && !listed.await? {
         return Ok(None);
     }
     Scheduler::enqueue(app, Arc::new(ArcadeCatalog))

@@ -353,7 +353,8 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
     let Some(platform) = mistarr_mister::platforms::by_id(super::PLATFORM) else {
         return Ok(Stats::default());
     };
-    if !games.is_dir() {
+    let dir = games.clone();
+    if !crate::threads::run(crate::threads::label::ARCADE, move || dir.is_dir()).await? {
         tracing::warn!(path = %games.display(), "games directory missing; presence pass skipped");
         return Ok(Stats::default());
     }

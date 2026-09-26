@@ -89,11 +89,12 @@ pub async fn enqueue_if_games_dir_exists(
         return Ok(None);
     }
     let config = app.config();
-    let games_root = &config.paths.games;
-    let present = std::iter::once(platform.core_dir)
-        .chain(platform.legacy_dirs.iter().copied())
-        .any(|name| games_root.join(name).is_dir());
-    if !present {
+    let present = crate::threads::run(crate::threads::label::SCAN_LIST, move || {
+        std::iter::once(platform.core_dir)
+            .chain(platform.legacy_dirs.iter().copied())
+            .any(|name| config.paths.games.join(name).is_dir())
+    });
+    if !present.await? {
         return Ok(None);
     }
     Scheduler::enqueue(
@@ -277,24 +278,36 @@ pub(crate) fn all_entries<T>(entries: impl Iterator<Item = io::Result<T>>) -> io
     entries.collect()
 }
 
-/// The paths every directory entry in a unit resolved to, sorted for a
-/// deterministic scan order; empty when `dir` is gone, an error when it cannot be read.
-fn list_files(dir: &Path) -> io::Result<Vec<(PathBuf, String)>> {
+/// A regular file a unit's listing found.
+struct ListedFile {
+    path: PathBuf,
+    name: String,
+    /// Size and mtime as `files` stores them, or why they could not be read.
+    meta: io::Result<(i64, i64)>,
+}
+
+/// The regular files a unit's directory entries resolve to, with their size and mtime,
+/// sorted for a deterministic scan order; empty when `dir` is gone, an error when it
+/// cannot be read.
+fn list_files(dir: &Path) -> io::Result<Vec<ListedFile>> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let mut out: Vec<(PathBuf, String)> = all_entries(entries)?
+    let mut out: Vec<ListedFile> = all_entries(entries)?
         .into_iter()
-        .filter(|e| e.path().is_file())
-        .map(|e| {
+        .filter_map(|e| {
             let path = e.path();
-            let name = e.file_name().to_string_lossy().into_owned();
-            (path, name)
+            let meta = fs::metadata(&path).ok().filter(fs::Metadata::is_file)?;
+            Some(ListedFile {
+                name: e.file_name().to_string_lossy().into_owned(),
+                meta: stored_meta(&meta),
+                path,
+            })
         })
         .collect();
-    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }
 
@@ -424,7 +437,11 @@ async fn report_outcome(ctx: &JobContext, pid: &PlatformId, total: usize) -> Res
 
 /// A file's size and mtime, as stored in `files`.
 pub(crate) fn file_meta(path: &Path) -> io::Result<(i64, i64)> {
-    let meta = fs::metadata(path)?;
+    stored_meta(&fs::metadata(path)?)
+}
+
+/// The size and mtime of `meta`, as stored in `files`.
+fn stored_meta(meta: &fs::Metadata) -> io::Result<(i64, i64)> {
     let size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
     let mtime = meta
         .modified()?
@@ -866,7 +883,7 @@ async fn scan_flat_unit(
     };
     let rule = header_rule(platform.header_rule);
     let mut seen = Vec::new();
-    for (path, name) in entries {
+    for ListedFile { path, name, meta } in entries {
         ctx.checkpoint().await?;
         let Some(ext) = extension(&path) else {
             continue;
@@ -875,7 +892,7 @@ async fn scan_flat_unit(
             continue;
         }
         let rel_path = format!("{unit_id}/{name}");
-        let (size, mtime) = match file_meta(&path) {
+        let (size, mtime) = match meta {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "cannot read metadata; marking unverified");
@@ -1195,7 +1212,7 @@ async fn scan_disc_unit(
     let mut tracks: Vec<Track> = Vec::new();
     let mut chd_rows: Vec<NewFile> = Vec::new();
     let mut seen = Vec::new();
-    for (path, name) in entries {
+    for ListedFile { path, name, meta } in entries {
         ctx.checkpoint().await?;
         let Some(ext) = extension(&path) else {
             continue;
@@ -1205,7 +1222,7 @@ async fn scan_disc_unit(
         }
         let rel_path = format!("{unit_id}/{name}");
         if ext == "chd" {
-            let got = super::chd::scan_file(ctx, platform_id, &rel_path, &path).await?;
+            let got = super::chd::scan_file(ctx, platform_id, &rel_path, &path, meta).await?;
             seen.extend(got.seen);
             match got.whole {
                 Some(track) => tracks.push(track),
@@ -1213,7 +1230,7 @@ async fn scan_disc_unit(
             }
             continue;
         }
-        let (size, mtime) = match file_meta(&path) {
+        let (size, mtime) = match meta {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "cannot read metadata; marking unverified");
@@ -1377,6 +1394,23 @@ mod tests {
     use super::*;
     use crate::app::testutil::state;
     use crate::db::jobs as job_rows;
+
+    #[test]
+    fn a_listing_holds_each_regular_file_with_its_size_and_mtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("b.nes"), b"12345").expect("write");
+        fs::write(dir.path().join("a.nes"), b"1").expect("write");
+        fs::create_dir(dir.path().join("sub")).expect("mkdir");
+        let listed = list_files(dir.path()).expect("list");
+        let names: Vec<_> = listed.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["a.nes", "b.nes"]);
+        let (size, mtime) = *listed[1].meta.as_ref().expect("meta");
+        assert_eq!(size, 5);
+        assert_eq!((size, mtime), file_meta(&listed[1].path).expect("stat"));
+        assert!(list_files(&dir.path().join("gone"))
+            .expect("gone")
+            .is_empty());
+    }
 
     #[test]
     fn done_units_cover_their_files_and_zip_members() {

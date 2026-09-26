@@ -710,7 +710,7 @@ shutdown is left `queued` for this.
 | SQLite page cache | 2 MiB, 1 MiB on each of the two connections; the writer's rises to 8 MiB while a DAT load applies its stage, a source import, resolve, rebind or re-map first keys new roms (one committed batch of 1 000 per transaction), or a source binds (`db::bulk`) |
 | SQLite other | `mmap_size = 0`, `temp_store = FILE` under `/tmp/mistarr` (`SQLITE_TMPDIR`, set at startup and emptied of stale files except the frozen client's record `client.frozen`; `MISTARR_TEMP_DIR` names another; RAM on the board, so temporary pages never reach the card), created with mode 0700 and refused when it is a symlink or another user's, in which case `<data>/tmp` is used and the log warns; WAL checkpoint every 256 pages, WAL cut to 1 MiB after a checkpoint, `soft_heap_limit` 8 MiB, 16 MiB while a bulk write is open |
 | DAT stage | in `/tmp/mistarr` while a DAT loads, about 1.5 times the DAT's size (18 MB for 20 000 games of three roms), given back when the load ends, as the temporary database vacuums itself. A load in RAM keeps its stage in the same place, beside the copy on the same tmpfs, and when `/tmp` fills it drops the copy and loads on the card; a load on the card whose `/tmp` fills fails naming `/tmp/mistarr`, the database unchanged |
-| SQLite writes | one writer; async writes wait their turn on a semaphore before taking a blocking thread, so queued writers never starve reads; a DAT import in RAM holds the writer from its copy to its swap; one on the card, already on a blocking thread, takes it per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
+| SQLite writes | one writer; every write, async or blocking, takes one write turn first, and an async write waits for it before taking a blocking thread, so queued writers never starve reads; a DAT import in RAM holds the writer from its copy to its swap; one on the card, already on a blocking thread, takes it per staged chunk; an upload waits at most 250 ms for the writer to record its import job |
 | DAT import or migration in RAM | a copy in `[memory] import_dir`, tmpfs, so it counts in `MemAvailable` and not in RSS: the database, what the import adds and the copy's rollback journal. Made only when `MemAvailable` covers the file's size and half again, six times the DATs' uncompressed size for the rows and the stage in SQLite's temporary files, and 32 MiB, above `[memory] import_floor_mib` (128 MiB), and dropped when `MemAvailable` falls below the floor during the load; 1 MiB write-back buffer |
 | Hashing buffer | 256 KiB, one file at a time; a file whose header a rule strips feeds two hasher sets from it, twice the CPU for that file (VERIFICATION.md "Hashing") |
 | CHD decode | one image at a time, at most 24 MiB (`decode_budget` at the header limits), about 1 MiB for chdman's default hunks; nothing written to disk (CHD.md "Memory") |
@@ -760,13 +760,12 @@ shares the blocking pool with request handlers.
 ### Thread names
 
 Runtime workers and blocking threads are named `mistarr-rt-N`. While a
-blocking thread runs work, `threads::blocking` sets its `comm` to a label of
+blocking thread runs work, `threads::run` sets its `comm` to a label of
 at most 15 bytes (`threads::label`: `db-read`, `db-write`, `hash`,
 `scan-list`, `zip-list`, `dat-import`, `dat-save`, `source-file`,
-`source-watch`, `import`, `rename`, `arcade`, `romsets`, `launch`, `detect`,
-`incoming`, `io-class`, `chd-header`, `chd-decode`, `client-freeze`, `fetch`) and
-puts the pool name
-back when it ends; the thread that reaps a started rtorrent is
+`source-watch`, `dat-watch`, `import`, `rename`, `arcade`, `romsets`,
+`launch`, `detect`, `incoming`, `io-class`, `chd-header`, `chd-decode`,
+`client-freeze`, `fetch`) and puts the pool name back when it ends; the thread that reaps a started rtorrent is
 `rtorrent-reap`, the one that rewrites `mistarr.migrating` while migrations
 run is `db-migrate`, and a torrent's data is deleted under `torrent-delete`.
 The board's BusyBox `top` and `ps` cannot list threads, so read them from
@@ -834,7 +833,8 @@ the catalogue under 1 500 writes to the database and WAL (about 1 300; 2 000
 with a 1 MiB cache), in a test process of its own since the heap limit is
 process-wide.
 
-Every write transaction commits through `db::commit`, which first refreshes
+Every write transaction commits through `db::commit`, which `Db::write_tx`,
+`write_tx_blocking` and `db::transact` end with and which first refreshes
 the clone groups its writes touched in `title_groups` (DATA-MODEL.md
 "Derived tables"). Browse and the platform counts then read one indexed row
 per group; a page and its total cost about as much as reading the page, and
@@ -883,8 +883,8 @@ three flushed writes, so a DAT import, a bind and a re-import run on a copy
 of the database in RAM and write it back whole (`db::ram`):
 
 1. The job takes the write turn and the writer and holds them to the end, so
-   no other write reaches the file meanwhile; async writes queue on the
-   semaphore, and reads keep running on the card file. An upload still
+   no other write reaches the file meanwhile; other writes queue on the
+   write turn, and reads keep running on the card file. An upload still
    answers: it waits at most 250 ms to record its job, which is recorded
    when the import ends.
 2. It checkpoints the WAL with TRUNCATE, so the file is complete and its WAL
