@@ -87,7 +87,7 @@ pub async fn probe(client: &ClientConfig, launcher: &Launcher) -> ClientStatus {
     };
     let launcher = launcher.clone();
     let installed =
-        crate::threads::blocking(crate::threads::label::DETECT, move || launcher.installed())
+        crate::threads::run(crate::threads::label::DETECT, move || launcher.installed())
             .await
             .unwrap_or_default();
     ClientStatus {

@@ -72,7 +72,7 @@ fn command_error(e: mistarr_mister::Error) -> ApiError {
     match e {
         E::CommandAbsent | E::NotListening | E::CommandBusy => unavailable(&e),
         E::UnsafePath(_) => ApiError::conflict(e.to_string()),
-        e => crate::Error::Job(e.to_string()).into(),
+        e => crate::Error::from(e).into(),
     }
 }
 
@@ -102,12 +102,12 @@ pub async fn launch_title(app: &AppState, id: TitleId) -> Result<Launched, ApiEr
     }
     let paths = app.config().paths;
     let dir = app.options.launch_dir.clone();
-    let launched = blocking(move || {
+    let launched = crate::threads::run(crate::threads::label::LAUNCH, move || {
         let launched = plan_title(&title, &paths.root, &paths.games, &dir)?;
         sink.send(&launched.1).map_err(command_error)?;
-        Ok(launched.0)
+        Ok::<_, ApiError>(launched.0)
     })
-    .await?;
+    .await??;
     *last = Some(Instant::now());
     Ok(launched)
 }
@@ -149,17 +149,17 @@ pub async fn launch_core(app: &AppState, id: &str) -> Result<Launched, ApiError>
         ));
     }
     let root = app.config().paths.root;
-    let launched = blocking(move || {
+    let launched = crate::threads::run(crate::threads::label::LAUNCH, move || {
         let core = mister::find_core(&root, row).ok_or_else(no_core)?;
         let line = mister::load_core(&core.path).map_err(command_error)?;
         sink.send(&line).map_err(command_error)?;
         tracing::info!(core = %core.path.display(), "core launched");
-        Ok(Launched {
+        Ok::<_, ApiError>(Launched {
             core: relative(&core.path, &root),
             file: None,
         })
     })
-    .await?;
+    .await??;
     *last = Some(Instant::now());
     Ok(launched)
 }
@@ -237,15 +237,6 @@ fn relative(path: &FsPath, root: &FsPath) -> String {
         .map_or_else(|_| path.to_path_buf(), PathBuf::from)
         .to_string_lossy()
         .into_owned()
-}
-
-/// Runs file system work off the async workers.
-async fn blocking<T: Send + 'static>(
-    f: impl FnOnce() -> Result<T, ApiError> + Send + 'static,
-) -> Result<T, ApiError> {
-    crate::threads::blocking(crate::threads::label::LAUNCH, f)
-        .await
-        .map_err(|e| crate::Error::Task(e.to_string()))?
 }
 
 #[cfg(test)]

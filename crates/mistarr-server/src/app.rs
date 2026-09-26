@@ -407,7 +407,7 @@ impl Running {
         let mut server = self.server;
         match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
             Ok(Ok(r)) => Ok(r?),
-            Ok(Err(e)) => Err(Error::Task(e.to_string())),
+            Ok(Err(e)) => Err(e.into()),
             Err(_) => {
                 server.abort();
                 Ok(())

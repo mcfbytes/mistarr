@@ -324,7 +324,10 @@ async fn prune_dir(
         after.clone_from(last);
         let full = page.len() == PRUNE_PAGE;
         let (g, n) = (games.to_path_buf(), Arc::clone(&names));
-        let doomed = super::blocking(move || gone(&g, dir, &n, page)).await?;
+        let doomed = crate::threads::run(crate::threads::label::ARCADE, move || {
+            gone(&g, dir, &n, page)
+        })
+        .await?;
         if !doomed.is_empty() {
             let p = pid.clone();
             pruned += ctx
@@ -365,15 +368,16 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
             .read(|c| arcade_rows::live_zip_roms(c, super::PLATFORM))
             .await?,
     );
-    let listed: Vec<(&'static str, io::Result<Vec<String>>)> = super::blocking({
-        let games = games.clone();
-        move || {
-            zip_dirs(platform)
-                .map(|d| (d, zip_names(&games.join(d))))
-                .collect()
-        }
-    })
-    .await?;
+    let listed: Vec<(&'static str, io::Result<Vec<String>>)> =
+        crate::threads::run(crate::threads::label::ARCADE, {
+            let games = games.clone();
+            move || {
+                zip_dirs(platform)
+                    .map(|d| (d, zip_names(&games.join(d))))
+                    .collect()
+            }
+        })
+        .await?;
     let mut listing: Vec<(&'static str, Arc<Vec<String>>)> = Vec::new();
     for (dir, names) in listed {
         match names {
@@ -399,7 +403,10 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
                 Arc::clone(&live),
                 batch.to_vec(),
             );
-            let changes = super::blocking(move || plan_batch(&db, &g, &p, &l, dir, &b)).await??;
+            let changes = crate::threads::run(crate::threads::label::ARCADE, move || {
+                plan_batch(&db, &g, &p, &l, dir, &b)
+            })
+            .await??;
             let (p, now) = (pid.clone(), crate::unix_now());
             let (recorded, dropped) = ctx
                 .app

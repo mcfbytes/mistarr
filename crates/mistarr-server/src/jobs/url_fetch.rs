@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use mistarr_clients::fetch::{FetchError, FetchUrl, Fetcher, Limits, Roots};
+use mistarr_clients::fetch::{FetchUrl, Fetcher, Limits, Roots};
 use serde_json::{json, Value};
 
 use self::content::{Checked, Found, Refused, SNIFF_BYTES};
@@ -19,7 +19,7 @@ use self::spool::{Pace, Places, Spool, Stop};
 use super::{Job, JobContext, Lane};
 use crate::app::AppState;
 use crate::error::{Error, Result};
-use crate::threads::{blocking, label};
+use crate::threads::{label, run};
 
 /// `jobs.kind` of [`UrlFetch`].
 pub const KIND: &str = "url_fetch";
@@ -205,11 +205,6 @@ impl View {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)] // Used as `map_err(fetch_error)`.
-fn fetch_error(e: FetchError) -> Error {
-    Error::Fetch(e.to_string())
-}
-
 fn too_large(cap: u64, what: &str) -> Error {
     Error::Fetch(format!(
         "The file is larger than {} MiB, the most {what} may be.",
@@ -286,12 +281,11 @@ impl UrlFetch {
     /// for http links too, which may redirect to https.
     async fn fetcher(&self, app: &AppState) -> Result<Fetcher> {
         let ca = app.options.ca_file.clone();
-        let loaded = blocking(label::FETCH, move || match ca {
+        let loaded = run(label::FETCH, move || match ca {
             Some(path) => Roots::from_pem_file(&path).map_err(|e| (path, e)),
             None => Ok(Roots::system_or_bundled()),
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+        .await?;
         let roots = match loaded {
             Ok(roots) => roots,
             Err((path, e)) => {
@@ -312,7 +306,7 @@ impl UrlFetch {
             });
         }
         tracing::debug!(origin = ?roots.origin(), count = roots.len(), "TLS roots");
-        Fetcher::new(roots, Limits::default()).map_err(fetch_error)
+        Fetcher::new(roots, Limits::default()).map_err(Error::from)
     }
 
     async fn fetch(&self, ctx: &JobContext) -> Result<()> {
@@ -326,10 +320,7 @@ impl UrlFetch {
         self.stop_point(ctx)?;
         tracing::debug!(host = self.url.host(), "fetching a URL");
         let fetcher = self.fetcher(app).await?;
-        let mut resp = self
-            .until_stopped(ctx, fetcher.get(&self.url))
-            .await?
-            .map_err(fetch_error)?;
+        let mut resp = self.until_stopped(ctx, fetcher.get(&self.url)).await??;
         view.total = resp.content_length();
         if view
             .total
@@ -346,11 +337,7 @@ impl UrlFetch {
             Spool::create(places(app), self.token, view.total, Arc::clone(&pace)).await?;
         let mut head = Vec::with_capacity(SNIFF_BYTES);
         let mut found = None;
-        while let Some(chunk) = self
-            .until_stopped(ctx, resp.chunk())
-            .await?
-            .map_err(fetch_error)?
-        {
+        while let Some(chunk) = self.until_stopped(ctx, resp.chunk()).await?? {
             view.received += chunk.len() as u64;
             if found.is_none() {
                 let take = chunk.len().min(SNIFF_BYTES - head.len());
@@ -419,13 +406,12 @@ impl UrlFetch {
         let target = spool.target(crate::jobs::dat_import::MAX_DAT_BYTES);
         let cancel = Arc::clone(&self.cancel);
         let shutdown = ctx.app.shutdown_signal();
-        let checked = blocking(label::FETCH, move || {
+        let checked = run(label::FETCH, move || {
             content::check(found, &path, &target, &|| {
                 cancel.is_set() || *shutdown.borrow()
             })
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+        .await?;
         match checked {
             Ok(Checked::Dat { path, in_ram }) => {
                 spool.adopt(path.clone(), in_ram);

@@ -479,7 +479,7 @@ async fn a_run_stopped_after_storing_leaves_the_picks_to_the_next() {
         .await
         .expect("version");
     let db = app.db.clone();
-    let items = blocking(move || {
+    let items = crate::threads::run(crate::threads::label::ARCADE, move || {
         scan_batch(
             &db,
             &arcade,

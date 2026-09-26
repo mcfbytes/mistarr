@@ -140,12 +140,11 @@ async fn write_field(
         let Some(mut f) = file.take() else {
             break;
         };
-        let written = crate::threads::blocking(crate::threads::label::DAT_SAVE, move || {
+        let written = crate::threads::run(crate::threads::label::DAT_SAVE, move || {
             f.write_all(&chunk)?;
             Ok::<_, std::io::Error>(f)
         })
-        .await
-        .map_err(|e| crate::Error::Task(e.to_string()))?;
+        .await?;
         file = Some(written.map_err(crate::Error::from)?);
     }
     Ok(())

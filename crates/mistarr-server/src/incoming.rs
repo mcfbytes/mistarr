@@ -185,13 +185,12 @@ pub async fn list(app: &AppState, dir: &Path, kind: &'static str) -> Result<Vec<
     app.live.overlay(&mut open);
     let gate = app.gate.state();
     let dir = dir.to_path_buf();
-    let listed = crate::threads::blocking(crate::threads::label::INCOMING, move || {
+    let listed = crate::threads::run(crate::threads::label::INCOMING, move || {
         let pending = files_in(&dir);
         let rejected = rejected_in(&dir.join(REJECTED_DIR));
         (dir, pending, rejected)
     })
-    .await
-    .map_err(|e| crate::Error::Task(e.to_string()))?;
+    .await?;
     let (dir, pending, rejected) = listed;
     let mut out: Vec<IncomingFile> = pending
         .into_iter()

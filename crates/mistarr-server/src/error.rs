@@ -41,12 +41,24 @@ pub enum Error {
     /// A thread holding a database connection panicked.
     #[error("database connection lock poisoned")]
     Poisoned,
-    /// A blocking task was cancelled or panicked.
+    /// A blocking or spawned task was cancelled or panicked.
     #[error("background task failed: {0}")]
-    Task(String),
-    /// A job kind has no registered implementation.
-    #[error("unknown job kind `{0}`")]
-    UnknownJob(String),
+    Task(#[from] tokio::task::JoinError),
+    /// A value could not be written or read as JSON.
+    #[error("JSON: {0}")]
+    Json(#[from] serde_json::Error),
+    /// The download client refused or failed a request.
+    #[error(transparent)]
+    Client(#[from] mistarr_clients::ClientError),
+    /// A URL fetch failed; the message never names the URL.
+    #[error(transparent)]
+    Fetched(#[from] mistarr_clients::fetch::FetchError),
+    /// A source file could not be read, parsed or moved.
+    #[error(transparent)]
+    Source(#[from] mistarr_sources::SourceError),
+    /// Main refused a command or the command interface failed.
+    #[error(transparent)]
+    Mister(#[from] mistarr_mister::Error),
     /// The server is shutting down; the job stopped at a checkpoint.
     #[error("cancelled by shutdown")]
     Cancelled,
@@ -93,9 +105,12 @@ mod tests {
             source: rusqlite::Error::InvalidQuery,
         };
         assert!(e.to_string().starts_with("migration 3 failed"));
+        let json = serde_json::from_str::<u8>("x").map_err(Error::from);
+        assert!(json.is_err_and(|e| e.to_string().starts_with("JSON: ")));
+        let client = Error::from(mistarr_clients::ClientError::NotFound);
         assert_eq!(
-            Error::UnknownJob("x".into()).to_string(),
-            "unknown job kind `x`"
+            client.to_string(),
+            "torrent not found in the download client"
         );
         let reopen = Error::Reopen(Box::new(Error::NoRoom("full".into())));
         assert_eq!(

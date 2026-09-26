@@ -25,7 +25,7 @@ use crate::db::dats::DatVersionId;
 use crate::db::jobs::JobId;
 use crate::db::titles::{self, TitleId};
 use crate::db::Db;
-use crate::error::{Error, Result};
+use crate::error::Result;
 
 /// `jobs.kind` of [`ArcadeCatalog`].
 pub const KIND: &str = "arcade_catalog";
@@ -168,12 +168,6 @@ impl Pass {
     }
 }
 
-async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T> {
-    crate::threads::blocking(crate::threads::label::ARCADE, f)
-        .await
-        .map_err(|e| Error::Task(e.to_string()))
-}
-
 /// Lists the MRA files, then per batch reads the new and changed ones, runs the md5 checks
 /// whose inputs moved and stores the batch, so memory follows the batch, not the catalogue.
 async fn catalogue(ctx: &JobContext) -> Result<()> {
@@ -181,7 +175,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
     let arcade = config.paths.root.join(ARCADE_DIR);
     let games = config.paths.games;
     ctx.checkpoint().await?;
-    let listed = blocking({
+    let listed = crate::threads::run(crate::threads::label::ARCADE, {
         let arcade = arcade.clone();
         move || list_mras(&arcade)
     })
@@ -204,7 +198,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
             games.clone(),
             batch.to_vec(),
         );
-        let (back, items) = blocking(move || {
+        let (back, items) = crate::threads::run(crate::threads::label::ARCADE, move || {
             let items = scan_batch(&db, &arcade2, &games2, &batch, &mut pass);
             (pass, items)
         })
@@ -218,7 +212,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
             ctx.checkpoint().await?;
             let (mra, rel, stamp, arcade2) =
                 (mra.take(), rel.clone(), stamp.clone(), arcade.clone());
-            let (back, done) = blocking(move || {
+            let (back, done) = crate::threads::run(crate::threads::label::ARCADE, move || {
                 let done = run_check(&arcade2, &mut pass, mra, &rel, stamp);
                 (pass, done)
             })

@@ -235,12 +235,11 @@ impl Db {
             .await
             .map_err(|_| Error::Poisoned)?;
         let db = self.clone();
-        crate::threads::blocking(crate::threads::label::DB_WRITE, move || {
+        crate::threads::run(crate::threads::label::DB_WRITE, move || {
             let _turn = turn;
             db.write_blocking(f)
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?
+        .await?
     }
 
     /// [`Db::write_bulk_blocking`] on tokio's blocking pool, once no other async write
@@ -268,9 +267,7 @@ impl Db {
         F: FnOnce(&Connection) -> Result<T> + Send + 'static,
     {
         let db = self.clone();
-        crate::threads::blocking(crate::threads::label::DB_READ, move || db.read_blocking(f))
-            .await
-            .map_err(|e| Error::Task(e.to_string()))?
+        crate::threads::run(crate::threads::label::DB_READ, move || db.read_blocking(f)).await?
     }
 
     /// Runs `f` with the writer held for all of it, so no other write reaches the file
@@ -314,12 +311,11 @@ impl Db {
             .await
             .map_err(|_| Error::Poisoned)?;
         let db = self.clone();
-        crate::threads::blocking(label, move || {
+        crate::threads::run(label, move || {
             let _turn = turn;
             db.hold_writer_blocking(f)
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?
+        .await?
     }
 
     /// Empties the WAL into the file and closes both connections, so the file stands

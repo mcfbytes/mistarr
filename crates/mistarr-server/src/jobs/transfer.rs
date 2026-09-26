@@ -325,13 +325,12 @@ pub async fn deselect(app: &AppState, source: SourceId) -> Result<bool> {
         return Ok(false);
     };
     let id = ClientTorrentId::new(cid);
-    let refused = |e: ClientError| crate::Error::Job(e.to_string());
     if wanted.is_empty() {
         match client.stop(&id).await {
             Ok(()) | Err(ClientError::NotFound) => {}
             Err(e) => {
                 crate::jobs::core_limits::defer(app, Op::Deselect(source)).await;
-                return Err(refused(e));
+                return Err(e.into());
             }
         }
     }
@@ -339,7 +338,7 @@ pub async fn deselect(app: &AppState, source: SourceId) -> Result<bool> {
         Ok(()) | Err(ClientError::NotFound | ClientError::MetadataPending) => Ok(true),
         Err(e) => {
             crate::jobs::core_limits::defer(app, Op::Deselect(source)).await;
-            Err(refused(e))
+            Err(e.into())
         }
     }
 }

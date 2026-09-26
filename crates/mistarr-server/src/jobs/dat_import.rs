@@ -525,11 +525,10 @@ impl DatImport {
             let req = self.request(ctx, source_file, None, Some(meter));
             let path = self.path.clone();
             let db = ctx.app.db.clone();
-            let outcome = crate::threads::blocking(crate::threads::label::DAT_IMPORT, move || {
+            let outcome = crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
                 import_from(&db, &path, member, &req)
             })
-            .await
-            .map_err(|e| Error::Task(e.to_string()))??;
+            .await??;
             if let Outcome::Loaded(l) = &outcome {
                 games += l.games;
             }

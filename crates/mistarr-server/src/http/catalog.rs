@@ -253,12 +253,11 @@ async fn load_detail(app: &AppState, id: TitleId) -> Result<DetailOut, ApiError>
         Some(p) if p.kind == Kind::Romset => {
             let dir = app.config().paths.games.join(p.core_dir);
             let mut detail = detail;
-            crate::threads::blocking(crate::threads::label::ROMSETS, move || {
+            crate::threads::run(crate::threads::label::ROMSETS, move || {
                 let bios = neogeo_romsets(&dir, &mut detail);
                 (detail, bios)
             })
-            .await
-            .map_err(|e| crate::Error::Task(e.to_string()))?
+            .await?
         }
         _ => (detail, None),
     };

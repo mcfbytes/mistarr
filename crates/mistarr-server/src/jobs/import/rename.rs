@@ -65,15 +65,14 @@ pub async fn rename(app: &AppState, group: TitleId, file_id: FileId) -> Outcome<
         return Err(RenameError::Conflict(to_rel));
     }
     let (g, f, t) = (games.clone(), PathBuf::from(&from_rel), to.clone());
-    let moved = crate::threads::blocking(crate::threads::label::RENAME, move || {
+    let moved = crate::threads::run(crate::threads::label::RENAME, move || {
         place::rename_in_library(&g, &f, &t).and_then(|dst| {
             fs::metadata(&dst)
                 .map(|m| stat(&m))
                 .map_err(|source| PlaceError::Io { path: dst, source })
         })
     })
-    .await
-    .map_err(|e| Error::Task(e.to_string()))?;
+    .await?;
     let (_, mtime) = match moved {
         Ok(s) => s,
         Err(PlaceError::Exists(_)) => return Err(RenameError::Conflict(to_rel)),
@@ -174,11 +173,10 @@ async fn canonical_path(
         .ok_or_else(|| RenameError::Refused("the file's platform has no adapter".into()))?;
     let current = games.join(&file.rel_path);
     let path = current.clone();
-    let head = crate::threads::blocking(crate::threads::label::RENAME, move || {
+    let head = crate::threads::run(crate::threads::label::RENAME, move || {
         read_head(&path, None)
     })
-    .await
-    .map_err(|e| Error::Task(e.to_string()))?
+    .await?
     .map_err(|e| RenameError::Io(format!("cannot read the file: {e}")))?;
     let staged = StagedFile {
         path: current,

@@ -325,7 +325,7 @@ pub async fn follow(gate: Arc<Gate>, priority: Arc<IoPriority>, retry: Duration)
     loop {
         let want = IoClass::for_core(rx.borrow_and_update().core_running());
         let switcher = Arc::clone(&priority);
-        let attempt = crate::threads::blocking(crate::threads::label::IO_CLASS, move || {
+        let attempt = crate::threads::run(crate::threads::label::IO_CLASS, move || {
             switcher.switch(want)
         });
         let failed = match attempt.await {

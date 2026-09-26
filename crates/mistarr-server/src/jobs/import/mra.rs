@@ -13,7 +13,7 @@ use mistarr_mister::{StagedFile, StagedKind};
 use serde_json::{json, Value};
 
 use super::support::{is_zip, match_members, rel_string, Hashed};
-use super::{fail, finish, task, Piece, Placing, Why, BIOS_REFUSED};
+use super::{fail, finish, Piece, Placing, Why, BIOS_REFUSED};
 use crate::db::arcade as arcade_rows;
 use crate::db::downloads::{DownloadRow, DownloadState};
 use crate::db::files::{self, FileState};
@@ -372,11 +372,10 @@ impl Placing<'_> {
             .join(arcade::ARCADE_DIR)
             .join(&zip_rom.mra_path);
         let (games, path, at) = (self.games.clone(), local.clone(), zip.clone());
-        let verdict = crate::threads::blocking(crate::threads::label::ARCADE, move || {
+        let verdict = crate::threads::run(crate::threads::label::ARCADE, move || {
             mra::read(&mra_file).map(|m| examine(&m, &at, &path, &games))
         })
-        .await
-        .map_err(|e| task(&e))?;
+        .await?;
         let verdict = match verdict {
             Ok(v) => v,
             Err(e) => {
@@ -460,11 +459,10 @@ impl Placing<'_> {
             .await?;
         let arcade_dir = app.config().paths.root.join(arcade::ARCADE_DIR);
         let games = self.games.clone();
-        let found = crate::threads::blocking(crate::threads::label::ARCADE, move || {
+        let found = crate::threads::run(crate::threads::label::ARCADE, move || {
             arcade::refresh(&arcade_dir, &games, &titles)
         })
-        .await
-        .map_err(|e| task(&e))?;
+        .await?;
         app.db
             .write(move |c| arcade::store_refreshed(c, &found))
             .await

@@ -321,7 +321,7 @@ pub fn has_waiting(
     reasons: &[Unidentified],
 ) -> Result<bool> {
     let codes: Vec<&str> = reasons.iter().map(|r| r.as_str()).collect();
-    let codes = serde_json::to_string(&codes).map_err(|e| crate::Error::Job(e.to_string()))?;
+    let codes = serde_json::to_string(&codes)?;
     Ok(conn
         .prepare_cached(&format!(
             "SELECT EXISTS(SELECT 1 {WAITING_FROM}

@@ -104,11 +104,10 @@ struct CoresResponse {
 async fn cores(State(app): State<Arc<AppState>>) -> Result<Json<CoresResponse>, ApiError> {
     let platforms = {
         let app = Arc::clone(&app);
-        crate::threads::blocking(crate::threads::label::DETECT, move || {
+        crate::threads::run(crate::threads::label::DETECT, move || {
             crate::app::detect_cores(&app)
         })
-        .await
-        .map_err(|e| crate::Error::Task(e.to_string()))??
+        .await??
     };
     let arcade_job_id = crate::jobs::arcade::enqueue_if_relevant(&app).await?;
     Ok(Json(CoresResponse {
@@ -243,12 +242,11 @@ async fn start_client(
     tracing::info!(kind = body.kind.as_str(), "starting the download client");
     let priority = app.io_priority.clone();
     // The client runs at the default I/O class; the gate's rate limit slows it while a core runs.
-    crate::threads::blocking(crate::threads::label::LAUNCH, move || match priority {
+    crate::threads::run(crate::threads::label::LAUNCH, move || match priority {
         Some(p) => p.at_default(|| launcher.start(body.kind)),
         None => launcher.start(body.kind),
     })
-    .await
-    .map_err(|e| crate::Error::Task(e.to_string()))?
+    .await?
     .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;
     let deadline = tokio::time::Instant::now() + app.options.client_start_wait;
     loop {

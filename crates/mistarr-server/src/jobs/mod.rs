@@ -352,7 +352,7 @@ impl Scheduler {
             queued
         });
         match tokio::time::timeout(wait, &mut task).await {
-            Ok(joined) => joined.map_err(|e| Error::Task(e.to_string()))?.map(Some),
+            Ok(joined) => joined?.map(Some),
             Err(_) => Ok(None),
         }
     }
