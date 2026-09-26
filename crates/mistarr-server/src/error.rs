@@ -4,9 +4,22 @@
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum Error {
-    /// The config file is missing, unreadable or invalid.
-    #[error("config: {0}")]
-    Config(String),
+    /// The config file is missing or unreadable.
+    #[error("config: {}: {source}", path.display())]
+    ConfigRead {
+        /// The config file.
+        path: std::path::PathBuf,
+        /// Why it could not be read.
+        source: std::io::Error,
+    },
+    /// The config file is not valid TOML or a value has the wrong type.
+    #[error("config: {}: {source}", path.display())]
+    Config {
+        /// The config file.
+        path: std::path::PathBuf,
+        /// Where and why parsing failed.
+        source: toml::de::Error,
+    },
     /// A database call failed.
     #[error("database: {0}")]
     Db(#[from] rusqlite::Error),
@@ -112,6 +125,12 @@ mod tests {
             client.to_string(),
             "torrent not found in the download client"
         );
+        let config = Error::Config {
+            path: "/d/mistarr.toml".into(),
+            source: toml::from_str::<toml::Table>("[[[").expect_err("invalid"),
+        };
+        assert!(config.to_string().starts_with("config: /d/mistarr.toml: "));
+        assert_eq!(config.to_string().matches("config:").count(), 1);
         let reopen = Error::Reopen(Box::new(Error::NoRoom("full".into())));
         assert_eq!(
             reopen.to_string(),

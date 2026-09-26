@@ -91,7 +91,7 @@ impl Cli {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Config`] when the file cannot be loaded.
+    /// [`crate::Error::ConfigRead`] or [`crate::Error::Config`] when the file cannot be loaded.
     ///
     /// ```
     /// use clap::Parser;
