@@ -12,9 +12,8 @@ import { announceUpload, markUploadsStale } from './uploads.svelte';
 
 let subscriber: EventSubscriber | null = null;
 
-// Re-fetches every hydrated store; the server asks for this when a
-// reconnect's replay may have gaps. One store's failure must not skip the
-// rest; a store left stale here is retried at the next resync or reconnect.
+// Re-fetches every hydrated store when a reconnect's replay may have gaps;
+// allSettled so one failed store neither rejects resync nor hides the others.
 async function resync(): Promise<void> {
   resetFinished();
   markUploadsStale();
@@ -68,6 +67,26 @@ function scheduleReloadTitles(): void {
   }, FILE_CHANGED_DEBOUNCE_MS);
 }
 
+let importsTimer: ReturnType<typeof setTimeout> | null = null;
+let importsPending = false;
+
+// A mass import fires import.done per file; one log re-read per window is enough,
+// and a miss here just leaves the list stale until the next resync.
+function scheduleReloadImports(): void {
+  if (importsTimer) {
+    importsPending = true;
+    return;
+  }
+  importsPending = false;
+  void loadImports().catch(() => undefined);
+  importsTimer = setTimeout(() => {
+    importsTimer = null;
+    if (importsPending) {
+      scheduleReloadImports();
+    }
+  }, FILE_CHANGED_DEBOUNCE_MS);
+}
+
 function handle(event: SseEvent): void {
   switch (event.name) {
     case 'resync':
@@ -79,6 +98,7 @@ function handle(event: SseEvent): void {
     case 'source.changed':
       applySourceChanged(event.data.source_id, event.data.state, event.data.platform_id);
       scheduleIncoming('sources');
+      // Only matters while the wizard is open; a miss shows up at the next resync.
       void loadWizard().catch(() => undefined);
       break;
     case 'download.changed':
@@ -102,6 +122,7 @@ function handle(event: SseEvent): void {
       announceUpload('dats', event.data.file, null);
       applyDatLoaded();
       scheduleIncoming('dats');
+      // Only matters while the wizard is open; a miss shows up at the next resync.
       void loadWizard().catch(() => undefined);
       break;
     case 'dat.rejected':
@@ -109,7 +130,7 @@ function handle(event: SseEvent): void {
       scheduleIncoming('dats');
       break;
     case 'import.done':
-      void loadImports().catch(() => undefined);
+      scheduleReloadImports();
       scheduleReloadTitles();
       break;
     case 'file.changed':

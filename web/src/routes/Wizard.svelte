@@ -32,6 +32,8 @@
   let clientSaved = $state(false);
 
   onMount(() => {
+    // Each step just displays what's in its store and never blocks Next/Finish;
+    // a miss leaves it empty here and is retried at the next resync.
     void loadPlatforms().catch(() => undefined);
     void loadDats().catch(() => undefined);
     void loadStatus().catch(() => undefined);

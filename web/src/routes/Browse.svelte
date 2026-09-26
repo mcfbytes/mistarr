@@ -92,6 +92,8 @@
   }
 
   onMount(() => {
+    // Both fall back gracefully (platform name/art to the id, hidden filters to none)
+    // and are retried at the next resync.
     void loadPlatforms().catch(() => undefined);
     void loadHideList().catch(() => undefined);
     if (!getStatus()) {

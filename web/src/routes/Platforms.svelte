@@ -14,8 +14,19 @@
   import UnidentifiedList from '../lib/UnidentifiedList.svelte';
   import type { Job, PlatformCounts } from '../lib/types';
 
+  let platformsError = $state<string | null>(null);
+
+  async function loadPlatformsList(): Promise<void> {
+    try {
+      await loadPlatforms();
+      platformsError = null;
+    } catch (err) {
+      platformsError = errorMessage(err);
+    }
+  }
+
   onMount(() => {
-    void loadPlatforms().catch(() => undefined);
+    void loadPlatformsList();
   });
 
   const platforms = $derived(getPlatforms());
@@ -91,68 +102,72 @@
 <div class="page">
   <h1>Platforms</h1>
   <SetupHints />
-  <div class="grid">
-    {#each present as platform (platform.id)}
-      {@const job = scans.get(platform.id)}
-      <div class="card art-card">
-        <div class="banner"><PlatformArt id={platform.id} kind={platform.kind} /></div>
-        <h2><a href={platformUrl(platform.id)}>{platform.name}</a></h2>
-        <p class="muted">{summarize(platform.counts)}</p>
-        {#if platform.counts.unidentified_files > 0}
-          <UnidentifiedList platformId={platform.id} count={platform.counts.unidentified_files} />
-        {/if}
-        {#if job}
-          <div class="scan-state">
-            <StatusPill {...jobStatus(job)} label={`Scan ${jobStatus(job).label.toLowerCase()}`} />
-            {#if job.state === 'running'}
-              <ProgressBar
-                view={describeProgress('scan', job.progress) ?? { fraction: null, text: '' }}
-                label={`Scan of ${platform.name}`}
-                compact
-              />
-            {:else if job.reason}
-              <span class="muted why">{job.reason}</span>
-            {/if}
+  {#if platformsError}
+    <p role="alert">{platformsError} <button type="button" onclick={() => void loadPlatformsList()}>Retry</button></p>
+  {:else}
+    <div class="grid">
+      {#each present as platform (platform.id)}
+        {@const job = scans.get(platform.id)}
+        <div class="card art-card">
+          <div class="banner"><PlatformArt id={platform.id} kind={platform.kind} /></div>
+          <h2><a href={platformUrl(platform.id)}>{platform.name}</a></h2>
+          <p class="muted">{summarize(platform.counts)}</p>
+          {#if platform.counts.unidentified_files > 0}
+            <UnidentifiedList platformId={platform.id} count={platform.counts.unidentified_files} />
+          {/if}
+          {#if job}
+            <div class="scan-state">
+              <StatusPill {...jobStatus(job)} label={`Scan ${jobStatus(job).label.toLowerCase()}`} />
+              {#if job.state === 'running'}
+                <ProgressBar
+                  view={describeProgress('scan', job.progress) ?? { fraction: null, text: '' }}
+                  label={`Scan of ${platform.name}`}
+                  compact
+                />
+              {:else if job.reason}
+                <span class="muted why">{job.reason}</span>
+              {/if}
+            </div>
+          {/if}
+          <div class="actions">
+            <button onclick={() => scan(platform.id)} aria-disabled={scanning.has(platform.id)} aria-busy={scanning.has(platform.id)}>
+              {#if scanning.has(platform.id)}<span class="spinner" aria-hidden="true"></span>Queuing…{:else}Scan{/if}
+            </button>
+            <button onclick={() => setEnabled(platform.id, false)}>Disable</button>
           </div>
-        {/if}
-        <div class="actions">
-          <button onclick={() => scan(platform.id)} aria-disabled={scanning.has(platform.id)} aria-busy={scanning.has(platform.id)}>
-            {#if scanning.has(platform.id)}<span class="spinner" aria-hidden="true"></span>Queuing…{:else}Scan{/if}
-          </button>
-          <button onclick={() => setEnabled(platform.id, false)}>Disable</button>
         </div>
-      </div>
-    {/each}
-  </div>
+      {/each}
+    </div>
 
-  {#if disabled.length > 0}
-    <details>
-      <summary>Disabled platforms ({disabled.length})</summary>
-      <div class="grid">
-        {#each disabled as platform (platform.id)}
-          <div class="card art-card">
-            <div class="banner"><PlatformArt id={platform.id} kind={platform.kind} muted /></div>
-            <h2>{platform.name}</h2>
-            <button onclick={() => setEnabled(platform.id, true)}>Enable</button>
-          </div>
-        {/each}
-      </div>
-    </details>
-  {/if}
+    {#if disabled.length > 0}
+      <details>
+        <summary>Disabled platforms ({disabled.length})</summary>
+        <div class="grid">
+          {#each disabled as platform (platform.id)}
+            <div class="card art-card">
+              <div class="banner"><PlatformArt id={platform.id} kind={platform.kind} muted /></div>
+              <h2>{platform.name}</h2>
+              <button onclick={() => setEnabled(platform.id, true)}>Enable</button>
+            </div>
+          {/each}
+        </div>
+      </details>
+    {/if}
 
-  {#if absent.length > 0}
-    <details>
-      <summary>Platforms with no core present ({absent.length})</summary>
-      <div class="grid">
-        {#each absent as platform (platform.id)}
-          <div class="card art-card">
-            <div class="banner"><PlatformArt id={platform.id} kind={platform.kind} muted /></div>
-            <h2>{platform.name}</h2>
-            <p class="muted">Core not present.</p>
-          </div>
-        {/each}
-      </div>
-    </details>
+    {#if absent.length > 0}
+      <details>
+        <summary>Platforms with no core present ({absent.length})</summary>
+        <div class="grid">
+          {#each absent as platform (platform.id)}
+            <div class="card art-card">
+              <div class="banner"><PlatformArt id={platform.id} kind={platform.kind} muted /></div>
+              <h2>{platform.name}</h2>
+              <p class="muted">Core not present.</p>
+            </div>
+          {/each}
+        </div>
+      </details>
+    {/if}
   {/if}
 </div>
 
