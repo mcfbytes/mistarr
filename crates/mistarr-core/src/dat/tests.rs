@@ -99,6 +99,7 @@ fn parses_full_dat() {
     assert_eq!(g.category, None);
     assert_eq!(g.roms[0].status, RomStatus::BadDump);
     assert_eq!(g.roms[0].header.as_deref(), Some("4E45531A"));
+    assert_eq!(g.roms[0].header_bytes(), Some(b"NES\x1a".to_vec()));
     assert_eq!(g.roms[0].crc32.as_deref(), Some("deadbeef"));
     assert_eq!(g.roms[0].md5, None);
 
@@ -113,6 +114,26 @@ fn parses_full_dat() {
     assert_eq!(g.roms[1].md5, None);
 
     assert!(dat.games[3].roms.is_empty());
+}
+
+#[test]
+fn header_bytes_decode_spaced_hex_or_nothing() {
+    let rom = |header: Option<&str>| DatRom {
+        name: "a.bin".into(),
+        size: 1,
+        crc32: None,
+        md5: None,
+        sha1: None,
+        status: RomStatus::Good,
+        header: header.map(str::to_owned),
+    };
+    assert_eq!(
+        rom(Some("4e 45\n53 1A")).header_bytes(),
+        Some(b"NES\x1a".to_vec())
+    );
+    for none in [None, Some(""), Some("  "), Some("4E4"), Some("NES")] {
+        assert_eq!(rom(none).header_bytes(), None, "{none:?}");
+    }
 }
 
 #[test]
