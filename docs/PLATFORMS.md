@@ -95,7 +95,11 @@ present or missing in `games/NeoGeo`. Nothing else is done with them.
 
 `romsets.xml` is streamed through a `BufReader`, refused unread above 16 MiB,
 and, like the MRA reader below, capped at one 1 MiB XML event and 64 levels
-of element nesting; either cap failing refuses the file with an error.
+of element nesting; either cap failing refuses the file with an error. This
+reader keeps no open-element stack of its own, so for a capped 16 MiB input
+its worst-case peak is `quick_xml`'s own record of currently-open names
+(bounded the same way as the MRA reader's below, roughly 16 to 32 MiB) plus
+its 1 MiB event buffer (up to about 2 MiB): roughly 17 to 34 MiB.
 
 ### MRA catalogue
 
@@ -129,10 +133,29 @@ As VERIFICATION.md "DAT parsing" caps a DAT, the reader caps one XML event,
 a tag, a text run or a comment, at 1 MiB before it is buffered, and element
 nesting at 64 levels; either refuses the file with an error, and the
 open-element stack used to match end tags never holds more entries than the
-depth cap allows. A `<part>`'s own inline hex, which can run to several MiB,
-bypasses the event cap: it is read straight off the file a buffer at a time
-into `Part::data` or, from `read`, left in place as the `Inline` marker
-below, so neither cap stops a large but legitimate rom.
+depth cap allows. Depth is tracked twice, on purpose: once as the reader's
+own open-element stack, matched by name for MiSTer's tolerant recovery, and
+once as a plain count of `quick_xml`'s start and end events, which the
+recovery rules can close several of at once. The plain count is what stays
+true to `quick_xml`'s own internal nesting, so it is what is checked against
+the 64-level cap. Each name kept on the open-element stack is itself cut to
+64 bytes, since matching an end tag never needs more and no real MRA tag
+name comes close, so the stack's own memory stays a few KiB regardless of
+how long an attacker's tag names run. A `<part>`'s own inline hex, which can
+run to several MiB, bypasses the event cap: it is read straight off the
+file a buffer at a time into `Part::data` or, from `read`, left in place as
+the `Inline` marker below, so neither cap stops a large but legitimate rom.
+
+For a capped 16 MiB input read through `read`, the worst case is a document
+of about 16 nested elements each named close to the 1 MiB event cap:
+`quick_xml`'s own record of currently-open names, which the caps above
+bound but cannot shrink, holds at most about 16 MiB of name bytes (bounded
+by the file size itself, well under the 64-level cap's own 64 MiB ceiling),
+up to about 32 MiB of allocated capacity once its buffer has doubled to
+fit; the reader's own 1 MiB event buffer adds at most about 2 MiB more the
+same way. That puts the peak at roughly 17 to 34 MiB, the same order as
+`romsets.xml` above, since the open-element stack's own contribution is now
+only a few KiB.
 
 The arcade catalogue job (ARCHITECTURE.md "Arcade catalogue") turns each MRA
 into one `arcade` title with `source = 'mra'`: `<name>`, `<setname>` and

@@ -4,11 +4,14 @@ use std::io::{self, BufRead, BufReader, Read, Seek as _, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 
+use mistarr_core::dat::MAX_DEPTH;
 use mistarr_core::xml::{check_utf8, lossy, Capped, EscapeInvalid};
+use quick_xml::errors::IllFormedError;
 use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
+use crate::adapter::xml_caps;
 use crate::{Error, Result};
 
 /// What an MRA file asks for.
@@ -236,7 +239,8 @@ pub fn zip_location(zip: &str) -> Option<ZipPath> {
 ///
 /// # Errors
 ///
-/// Returns [`Error::Mra`] when the document is not well-formed or ends with open elements.
+/// Returns [`Error::Mra`] when the document is not well-formed or ends with open
+/// elements, and [`Error::XmlTooDeep`] past [`MAX_DEPTH`] levels of nesting.
 ///
 /// ```
 /// let mra = mistarr_mister::adapter::arcade::mra::parse(
@@ -251,24 +255,27 @@ pub fn parse(xml: &[u8]) -> Result<Mra> {
     parse_from(xml, None)
 }
 
-/// Deepest element nesting an MRA may use, matching `mistarr_core::dat::MAX_DEPTH`; the
-/// open-element stack below holds no more entries than this, however deep the document nests.
-const MAX_DEPTH: usize = 64;
+/// Longest open-element name kept for end-tag matching; no real MRA tag name comes
+/// anywhere near this long, so truncating it cannot merge two different real tags.
+const MAX_TAG_BYTES: usize = 64;
 
-/// Largest single XML event this reader buffers, matching `mistarr_core::dat::MAX_EVENT_BYTES`.
-const MAX_EVENT_BYTES: u64 = 1024 * 1024;
+/// `name` cut to [`MAX_TAG_BYTES`] on a character boundary, bounding the open-element
+/// stack's memory however long an attacker's tag name runs.
+fn tag_key(name: &str) -> String {
+    let mut end = MAX_TAG_BYTES.min(name.len());
+    while !name.is_char_boundary(end) {
+        end -= 1;
+    }
+    name[..end].to_owned()
+}
 
-/// The next event, capped at [`MAX_EVENT_BYTES`]; `position` is where it starts, for errors.
+/// The next event, capped by [`xml_caps::read_capped`]; `position` is where it starts.
 fn read_event<'b, R: BufRead>(
     reader: &mut Reader<Capped<EscapeInvalid<R>>>,
     buf: &'b mut Vec<u8>,
     position: u64,
 ) -> Result<Event<'b>> {
-    buf.clear();
-    reader.get_mut().arm(MAX_EVENT_BYTES);
-    reader
-        .read_event_into(buf)
-        .map_err(|e| xml_err(e, position))
+    xml_caps::read_capped(reader, buf).map_err(|e| xml_err(e, position))
 }
 
 /// Parses MRA markup from `input`; inline part bytes are kept in [`Part::data`], or with
@@ -280,6 +287,9 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
     let mut buf = Vec::new();
     let mut mra = Mra::default();
     let mut open: Vec<(String, Option<Field>)> = Vec::new();
+    // Tracks quick_xml's own true nesting, which end-tag recovery below can close
+    // several levels of in one step, unlike quick_xml's own opened-name buffer.
+    let mut depth = xml_caps::Depth::default();
     let mut rom: Option<RomBuilder> = None;
     let keep = file.is_none();
     loop {
@@ -297,6 +307,7 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
         }
         let before = bom + reader.get_ref().get_ref().position();
         let event = read_event(&mut reader, &mut buf, before)?;
+        depth.track(&event, before)?;
         let at = Pos {
             before,
             after: bom + reader.get_ref().get_ref().position(),
@@ -311,7 +322,7 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
                 let name = tag(e.local_name().as_ref());
                 // A `<rom>` inside an unclosed field never feeds that field.
                 let f = Field::of(&name).or(field.filter(|_| name != "rom"));
-                open.push((name, f));
+                open.push((tag_key(&name), f));
                 read_attributes(&e, &mut mra, before)?;
                 start(&e, &mut rom, at.after)?;
             }
@@ -338,7 +349,7 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
                 text(&resolve_ref(&r, before)?, field, &mut mra, &mut rom, keep);
             }
             Event::End(e) => {
-                let name = tag(e.local_name().as_ref());
+                let name = tag_key(&tag(e.local_name().as_ref()));
                 if let Some(i) = open.iter().rposition(|(n, _)| *n == name) {
                     for (closed, _) in open.drain(i..).rev() {
                         end(&closed, &mut rom, &mut mra, at.before, &at);
@@ -346,7 +357,7 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
                 }
             }
             Event::Eof if open.is_empty() => break,
-            Event::Eof => return Err(truncated(before)),
+            Event::Eof => return Err(truncated(&open, before)),
             _ => {}
         }
     }
@@ -416,22 +427,15 @@ fn xml_err(e: quick_xml::Error, position: u64) -> Error {
     }
 }
 
-/// The document nests more than [`MAX_DEPTH`] elements deep.
+/// The document's own open-element stack nests more than [`MAX_DEPTH`] elements deep.
 fn too_deep(position: u64) -> Error {
-    xml_err(
-        quick_xml::Error::from(io::Error::other(format!(
-            "elements nest deeper than {MAX_DEPTH} levels"
-        ))),
-        position,
-    )
+    Error::XmlTooDeep { position }
 }
 
-/// The document ends with elements still open.
-fn truncated(position: u64) -> Error {
-    xml_err(
-        quick_xml::Error::from(io::Error::other("document ends inside an element")),
-        position,
-    )
+/// The document ends with `open`'s innermost element, if any, still unclosed.
+fn truncated(open: &[(String, Option<Field>)], position: u64) -> Error {
+    let name = open.last().map_or_else(String::new, |(n, _)| n.clone());
+    xml_err(IllFormedError::MissingEndTag(name).into(), position)
 }
 
 /// Fails on text read from bytes that are not UTF-8.
@@ -453,8 +457,9 @@ pub const PARSER_VERSION: u32 = 2;
 ///
 /// # Errors
 ///
-/// Returns [`Error::Io`] when the file cannot be read and [`Error::Mra`] when it is
-/// too large or not well-formed.
+/// Returns [`Error::Io`] when the file cannot be read, [`Error::FileTooLarge`] when it
+/// exceeds [`MAX_MRA_BYTES`], and [`Error::Mra`] or [`Error::XmlTooDeep`] when it is
+/// not well-formed.
 ///
 /// ```
 /// let path = std::env::temp_dir().join("mistarr-doc-example.mra");
@@ -475,12 +480,9 @@ pub fn read(path: &Path) -> Result<Mra> {
 }
 
 fn too_big() -> Error {
-    xml_err(
-        quick_xml::Error::from(io::Error::other(format!(
-            "file is larger than {MAX_MRA_BYTES} bytes"
-        ))),
-        0,
-    )
+    Error::FileTooLarge {
+        limit: MAX_MRA_BYTES,
+    }
 }
 
 /// Streams the bytes of an inline part read by [`read`], decoding its hex again from the file.

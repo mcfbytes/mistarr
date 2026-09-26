@@ -8,6 +8,7 @@ use mistarr_core::xml::{check_utf8, lossy, Capped, EscapeInvalid};
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
 
+use super::xml_caps;
 use super::{
     basename, extension, row_methods, safe_name, staged_name, CoreAdapter, PlacementPlan, Step,
 };
@@ -28,12 +29,6 @@ pub struct Romsets {
     pub bios: Vec<String>,
 }
 
-/// Deepest element nesting a `romsets.xml` may use, matching `mistarr_core::dat::MAX_DEPTH`.
-const MAX_DEPTH: usize = 64;
-
-/// Largest single XML event this reader buffers, matching `mistarr_core::dat::MAX_EVENT_BYTES`.
-const MAX_EVENT_BYTES: u64 = 1024 * 1024;
-
 /// Largest `romsets.xml` read, a sanity bound.
 pub const MAX_ROMSETS_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -44,31 +39,18 @@ fn romsets_err(e: quick_xml::Error, position: u64) -> Error {
     }
 }
 
-/// The document nests more than [`MAX_DEPTH`] elements deep.
-fn too_deep(position: u64) -> Error {
-    romsets_err(
-        quick_xml::Error::from(io::Error::other(format!(
-            "elements nest deeper than {MAX_DEPTH} levels"
-        ))),
-        position,
-    )
-}
-
 fn too_big() -> Error {
-    romsets_err(
-        quick_xml::Error::from(io::Error::other(format!(
-            "file is larger than {MAX_ROMSETS_BYTES} bytes"
-        ))),
-        0,
-    )
+    Error::FileTooLarge {
+        limit: MAX_ROMSETS_BYTES,
+    }
 }
 
 /// Parses a `romsets.xml`, streamed through a [`BufRead`] with size, event and depth caps.
 ///
 /// # Errors
 ///
-/// [`Error::Romsets`] when the document is not well-formed or nests more than
-/// [`MAX_DEPTH`] elements deep.
+/// [`Error::Romsets`] when the document is not well-formed XML, and
+/// [`Error::XmlTooDeep`] past `mistarr_core::dat::MAX_DEPTH` levels of nesting.
 ///
 /// ```
 /// let r = mistarr_mister::adapter::neogeo::parse_romsets(
@@ -81,24 +63,12 @@ pub fn parse_romsets<R: BufRead>(xml: R) -> Result<Romsets> {
     let mut reader = Reader::from_reader(Capped::new(EscapeInvalid::new(xml)));
     let mut buf = Vec::new();
     let mut out = Romsets::default();
-    let mut depth: usize = 0;
+    let mut depth = xml_caps::Depth::default();
     loop {
-        buf.clear();
         let position = reader.get_ref().get_ref().position();
-        reader.get_mut().arm(MAX_EVENT_BYTES);
-        let event = reader
-            .read_event_into(&mut buf)
-            .map_err(|e| romsets_err(e, position))?;
-        match &event {
-            Event::Start(_) => {
-                depth += 1;
-                if depth > MAX_DEPTH {
-                    return Err(too_deep(position));
-                }
-            }
-            Event::End(_) => depth = depth.saturating_sub(1),
-            _ => {}
-        }
+        let event =
+            xml_caps::read_capped(&mut reader, &mut buf).map_err(|e| romsets_err(e, position))?;
+        depth.track(&event, position)?;
         match event {
             Event::Start(e) | Event::Empty(e)
                 if e.local_name().as_ref().eq_ignore_ascii_case("romset") =>
@@ -150,8 +120,8 @@ fn is_file_name(s: &str) -> bool {
 ///
 /// # Errors
 ///
-/// [`Error::Io`] when the file exists but cannot be read, [`Error::Romsets`] when it is
-/// too large or not well-formed.
+/// [`Error::Io`] when the file exists but cannot be read, [`Error::FileTooLarge`] when
+/// it exceeds [`MAX_ROMSETS_BYTES`], [`Error::Romsets`] when it is not well-formed XML.
 ///
 /// ```
 /// let dir = std::env::temp_dir().join("mistarr-doc-romsets-none");
@@ -230,6 +200,7 @@ impl CoreAdapter for NeoGeo {
 
 #[cfg(test)]
 mod tests {
+    use mistarr_core::dat::MAX_DEPTH;
     use proptest::prelude::*;
 
     use super::super::testutil::*;
@@ -338,7 +309,7 @@ Files that must be present:
         assert!(parse_romsets(nested(MAX_DEPTH - 4).as_bytes()).is_ok());
         assert!(matches!(
             parse_romsets(nested(MAX_DEPTH * 4).as_bytes()),
-            Err(Error::Romsets { .. })
+            Err(Error::XmlTooDeep { .. })
         ));
     }
 
@@ -359,7 +330,7 @@ Files that must be present:
         std::fs::write(dir.join(ROMSETS_FILE), format!("<romsets>{pad}</romsets>")).expect("write");
         assert!(matches!(
             read_romsets(&dir),
-            Err(Error::Romsets { source, .. }) if source.to_string().contains("larger")
+            Err(Error::FileTooLarge { limit }) if limit == MAX_ROMSETS_BYTES
         ));
     }
 

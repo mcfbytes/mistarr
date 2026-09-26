@@ -183,8 +183,11 @@ fn nested_child_text_stays_in_the_enclosing_field() {
 
 #[test]
 fn truncated_document_is_an_error() {
-    let err = parse(b"<misterromdescription><rom zip=\"exblast.zip\"><part name=\"a\"/>");
-    assert!(matches!(err, Err(Error::Mra { .. })));
+    let err = parse(b"<misterromdescription><rom zip=\"exblast.zip\"><part name=\"a\"/>")
+        .expect_err("truncated");
+    assert!(matches!(err, Error::Mra { .. }));
+    // The message names the innermost element still open, from the MRA's own recovery.
+    assert!(err.to_string().contains("rom"), "{err}");
 }
 
 #[test]
@@ -267,7 +270,7 @@ fn read_refuses_an_oversized_file() {
     std::fs::write(&path, format!("<m>{pad}</m>")).expect("write");
     assert!(matches!(
         read(&path),
-        Err(Error::Mra { source, .. }) if source.to_string().contains("larger")
+        Err(Error::FileTooLarge { limit }) if limit == MAX_MRA_BYTES
     ));
 }
 
@@ -281,13 +284,46 @@ fn depth_cap_refuses_deep_nesting_without_holding_it_all() {
     assert!(parse(nested(MAX_DEPTH - 4).as_bytes()).is_ok());
     assert!(matches!(
         parse(nested(MAX_DEPTH * 4).as_bytes()),
-        Err(Error::Mra { .. })
+        Err(Error::XmlTooDeep { .. })
     ));
     // A document nested far past the cap still refuses promptly, never panicking.
     assert!(matches!(
         parse(nested(1_000_000).as_bytes()),
-        Err(Error::Mra { .. })
+        Err(Error::XmlTooDeep { .. })
     ));
+}
+
+#[test]
+fn depth_cap_counts_true_nesting_even_when_end_tags_are_mismatched() {
+    // `<a><b></a>` repeated closes both `a` and `b` in the MRA's own open-element
+    // stack (leaving it at 3 or fewer entries) but only pops one name off
+    // quick_xml's own stack, so true nesting still grows by one level per repeat.
+    let xml = format!("<m>{}</m>", "<a><b></a>".repeat(MAX_DEPTH * 4));
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlTooDeep { .. })
+    ));
+}
+
+#[test]
+fn open_stack_cap_refuses_growth_from_stray_end_tags() {
+    // `</x>` never names anything on the open stack, so it drains nothing; true
+    // nesting stays low (each `<a>` closes structurally), but the MRA's own open
+    // stack only ever grows, exercising its cap independently of `depth`.
+    let xml = format!("<m>{}</m>", "<a></x>".repeat(MAX_DEPTH * 4));
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlTooDeep { .. })
+    ));
+}
+
+#[test]
+fn tag_key_caps_length_on_a_char_boundary() {
+    assert_eq!(tag_key("rom"), "rom");
+    let long = "é".repeat(100);
+    let key = tag_key(&long);
+    assert!(key.len() <= MAX_TAG_BYTES);
+    assert!(long.starts_with(&key));
 }
 
 #[test]

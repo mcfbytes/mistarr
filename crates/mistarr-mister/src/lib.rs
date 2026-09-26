@@ -8,6 +8,8 @@
 #![warn(missing_docs)]
 #![warn(clippy::pedantic)]
 
+use mistarr_core::dat::MAX_DEPTH;
+
 pub mod adapter;
 pub mod corename;
 pub mod input;
@@ -68,6 +70,18 @@ pub enum Error {
         position: u64,
         /// Underlying parser error.
         source: quick_xml::Error,
+    },
+    /// An MRA or `romsets.xml` document nests elements deeper than the reader allows.
+    #[error("elements nest deeper than {MAX_DEPTH} levels at byte {position}")]
+    XmlTooDeep {
+        /// Byte offset of the element that went too deep.
+        position: u64,
+    },
+    /// An MRA or `romsets.xml` file is larger than the reader's size cap.
+    #[error("file is larger than {limit} bytes")]
+    FileTooLarge {
+        /// The cap that was exceeded.
+        limit: u64,
     },
     /// A path cannot be written into an MGL or a command line.
     #[error("path `{0}` cannot be passed to MiSTer Main")]
