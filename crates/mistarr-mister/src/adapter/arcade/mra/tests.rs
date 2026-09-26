@@ -295,9 +295,8 @@ fn depth_cap_refuses_deep_nesting_without_holding_it_all() {
 
 #[test]
 fn depth_cap_counts_true_nesting_even_when_end_tags_are_mismatched() {
-    // `<a><b></a>` repeated closes both `a` and `b` in the MRA's own open-element
-    // stack (leaving it at 3 or fewer entries) but only pops one name off
-    // quick_xml's own stack, so true nesting still grows by one level per repeat.
+    // `<a><b></a>` repeated pops one name per repeat from the MRA's open
+    // stack but grows true nesting by one level each time.
     let xml = format!("<m>{}</m>", "<a><b></a>".repeat(MAX_DEPTH * 4));
     assert!(matches!(
         parse(xml.as_bytes()),
@@ -307,9 +306,8 @@ fn depth_cap_counts_true_nesting_even_when_end_tags_are_mismatched() {
 
 #[test]
 fn open_stack_cap_refuses_growth_from_stray_end_tags() {
-    // `</x>` never names anything on the open stack, so it drains nothing; true
-    // nesting stays low (each `<a>` closes structurally), but the MRA's own open
-    // stack only ever grows, exercising its cap independently of `depth`.
+    // `</x>` matches nothing, so the MRA's open stack only grows while true
+    // nesting stays low, exercising its cap independently of `depth`.
     let xml = format!("<m>{}</m>", "<a></x>".repeat(MAX_DEPTH * 4));
     assert!(matches!(
         parse(xml.as_bytes()),
@@ -330,7 +328,55 @@ fn tag_key_caps_length_on_a_char_boundary() {
 fn event_size_cap_refuses_an_oversized_single_run() {
     let huge = "x".repeat(2 * 1024 * 1024);
     let xml = format!("<m><name>{huge}</name></m>");
-    assert!(matches!(parse(xml.as_bytes()), Err(Error::Mra { .. })));
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlEventTooLarge { .. })
+    ));
+}
+
+/// `n` `<rom/>` elements, each with a distinct zip name.
+fn rom_tags(n: usize) -> String {
+    (0..n).fold(String::new(), |mut acc, i| {
+        write!(acc, "<rom zip=\"z{i}.zip\"/>").expect("write");
+        acc
+    })
+}
+
+#[test]
+fn rom_count_cap_refuses_growth_past_the_limit() {
+    let over = format!("<m>{}</m>", rom_tags(MAX_ROMS + 1));
+    assert!(matches!(
+        parse(over.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_ROMS
+    ));
+    let under = format!("<m>{}</m>", rom_tags(MAX_ROMS));
+    assert_eq!(parse(under.as_bytes()).expect("parse").roms.len(), MAX_ROMS);
+}
+
+#[test]
+fn rom_item_count_cap_refuses_growth_past_the_limit() {
+    let parts = "<part/>".repeat(MAX_ROM_ITEMS + 1);
+    let over = format!("<m><rom>{parts}</rom></m>");
+    assert!(matches!(
+        parse(over.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_ROM_ITEMS
+    ));
+    // Parts inside an interleave share the same rom's budget as top-level items.
+    let over_il = format!("<m><rom><interleave>{parts}</interleave></rom></m>");
+    assert!(matches!(
+        parse(over_il.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_ROM_ITEMS
+    ));
+}
+
+#[test]
+fn zip_count_cap_refuses_growth_past_the_limit() {
+    let names: Vec<String> = (0..=MAX_ZIPS).map(|i| format!("z{i}.zip")).collect();
+    let xml = format!("<m><rom zip=\"{}\"/></m>", names.join("|"));
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_ZIPS
+    ));
 }
 
 /// `text` with each ASCII letter upper-cased where `mask` has a set bit, cycling the mask.

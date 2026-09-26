@@ -136,6 +136,10 @@ Sonnet · `mistarr-mister` · branch `wp-54-mister-limits`
   as typed fields, not a `String`.
 - [x] Proptests: `parse_romsets` and the MRA reader never panic.
 - [x] The pull request states the peak memory of the worst capped input.
+- [x] The MRA and NeoGeo readers cap accumulated output, not only event size
+  and depth: roms, items per rom and zip names for MRA, romsets and BIOS
+  names for NeoGeo, each refused past its cap and deduplicated with a
+  `HashSet` rather than a linear scan.
 
 ### WP-55 Server errors and blocking
 

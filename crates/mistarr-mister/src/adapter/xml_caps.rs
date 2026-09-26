@@ -1,6 +1,4 @@
-//! One capped, depth-tracked way to read an XML event, shared by the MRA and
-//! `romsets.xml` readers so their limits cannot drift apart.
-//! See `docs/PLATFORMS.md` "MRA catalogue" and "Neo Geo `romsets.xml`".
+//! Capped, depth-tracked XML event reads for MRA and romsets.xml; see docs/PLATFORMS.md.
 
 use std::io::BufRead;
 
@@ -35,12 +33,27 @@ impl Depth {
     }
 }
 
-/// The next event, capped at [`MAX_EVENT_BYTES`] before it is buffered.
+/// Why [`read_capped`] failed: the event at `TooLarge`'s position exceeded
+/// [`MAX_EVENT_BYTES`], or another XML error.
+pub(super) enum CapError {
+    /// Byte offset where the oversized event starts.
+    TooLarge(u64),
+    /// Any other XML parse error.
+    Xml(quick_xml::Error),
+}
+
+/// The next event, capped at [`MAX_EVENT_BYTES`] before it is buffered; `position` is
+/// where it starts, reported back through [`CapError::TooLarge`] on that failure.
 pub(super) fn read_capped<'b, R: BufRead>(
     reader: &mut Reader<Capped<R>>,
     buf: &'b mut Vec<u8>,
-) -> quick_xml::Result<Event<'b>> {
+    position: u64,
+) -> Result<Event<'b>, CapError> {
     buf.clear();
     reader.get_mut().arm(MAX_EVENT_BYTES);
-    reader.read_event_into(buf)
+    match reader.read_event_into(buf) {
+        Ok(event) => Ok(event),
+        Err(_) if reader.get_ref().over() => Err(CapError::TooLarge(position)),
+        Err(e) => Err(CapError::Xml(e)),
+    }
 }

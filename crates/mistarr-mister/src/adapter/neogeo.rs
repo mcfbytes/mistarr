@@ -1,6 +1,7 @@
 //! Neo Geo adapter: the DAT game is the unit, placed whole as a zip or directory,
 //! and the core's `romsets.xml` read for the romsets and BIOS files it names.
 
+use std::collections::HashSet;
 use std::io::{self, BufRead, BufReader, Read as _};
 use std::path::{Path, PathBuf};
 
@@ -32,6 +33,12 @@ pub struct Romsets {
 /// Largest `romsets.xml` read, a sanity bound.
 pub const MAX_ROMSETS_BYTES: u64 = 16 * 1024 * 1024;
 
+/// Most distinct `<romset name>` values collected; further ones are refused.
+pub const MAX_SETS: usize = 4096;
+
+/// Most distinct BIOS file names collected from comments; further ones are refused.
+pub const MAX_BIOS_NAMES: usize = 4096;
+
 fn romsets_err(e: quick_xml::Error, position: u64) -> Error {
     Error::Romsets {
         position,
@@ -45,12 +52,23 @@ fn too_big() -> Error {
     }
 }
 
+/// The document accumulates more `kind` than `limit` allows.
+fn output_too_large(kind: &'static str, limit: usize, position: u64) -> Error {
+    Error::XmlOutputTooLarge {
+        kind,
+        limit,
+        position,
+    }
+}
+
 /// Parses a `romsets.xml`, streamed through a [`BufRead`] with size, event and depth caps.
 ///
 /// # Errors
 ///
-/// [`Error::Romsets`] when the document is not well-formed XML, and
-/// [`Error::XmlTooDeep`] past `mistarr_core::dat::MAX_DEPTH` levels of nesting.
+/// [`Error::Romsets`] when the document is not well-formed XML,
+/// [`Error::XmlTooDeep`] past `mistarr_core::dat::MAX_DEPTH` levels of nesting,
+/// [`Error::XmlEventTooLarge`] past one capped event, and [`Error::XmlOutputTooLarge`]
+/// past [`MAX_SETS`] or [`MAX_BIOS_NAMES`].
 ///
 /// ```
 /// let r = mistarr_mister::adapter::neogeo::parse_romsets(
@@ -64,10 +82,15 @@ pub fn parse_romsets<R: BufRead>(xml: R) -> Result<Romsets> {
     let mut buf = Vec::new();
     let mut out = Romsets::default();
     let mut depth = xml_caps::Depth::default();
+    let mut sets_seen: HashSet<String> = HashSet::new();
+    let mut bios_seen: HashSet<String> = HashSet::new();
     loop {
         let position = reader.get_ref().get_ref().position();
         let event =
-            xml_caps::read_capped(&mut reader, &mut buf).map_err(|e| romsets_err(e, position))?;
+            xml_caps::read_capped(&mut reader, &mut buf, position).map_err(|e| match e {
+                xml_caps::CapError::TooLarge(position) => Error::XmlEventTooLarge { position },
+                xml_caps::CapError::Xml(e) => romsets_err(e, position),
+            })?;
         depth.track(&event, position)?;
         match event {
             Event::Start(e) | Event::Empty(e)
@@ -82,7 +105,10 @@ pub fn parse_romsets<R: BufRead>(xml: R) -> Result<Romsets> {
                         check_utf8(&v)
                             .map_err(|e| romsets_err(quick_xml::Error::from(e), position))?;
                         let v = v.trim().to_owned();
-                        if !v.is_empty() && !out.sets.contains(&v) {
+                        if !v.is_empty() && sets_seen.insert(v.clone()) {
+                            if out.sets.len() >= MAX_SETS {
+                                return Err(output_too_large("romsets", MAX_SETS, position));
+                            }
                             out.sets.push(v);
                         }
                     }
@@ -91,7 +117,10 @@ pub fn parse_romsets<R: BufRead>(xml: R) -> Result<Romsets> {
             Event::Comment(c) => {
                 let text = lossy(&c);
                 for line in text.lines().map(str::trim) {
-                    if is_file_name(line) && !out.bios.iter().any(|b| b == line) {
+                    if is_file_name(line) && bios_seen.insert(line.to_owned()) {
+                        if out.bios.len() >= MAX_BIOS_NAMES {
+                            return Err(output_too_large("bios names", MAX_BIOS_NAMES, position));
+                        }
                         out.bios.push(line.to_owned());
                     }
                 }
@@ -121,7 +150,8 @@ fn is_file_name(s: &str) -> bool {
 /// # Errors
 ///
 /// [`Error::Io`] when the file exists but cannot be read, [`Error::FileTooLarge`] when
-/// it exceeds [`MAX_ROMSETS_BYTES`], [`Error::Romsets`] when it is not well-formed XML.
+/// it exceeds [`MAX_ROMSETS_BYTES`], and the errors [`parse_romsets`] returns when it is
+/// not well-formed or its output outgrows a cap.
 ///
 /// ```
 /// let dir = std::env::temp_dir().join("mistarr-doc-romsets-none");
@@ -200,6 +230,8 @@ impl CoreAdapter for NeoGeo {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use mistarr_core::dat::MAX_DEPTH;
     use proptest::prelude::*;
 
@@ -319,7 +351,40 @@ Files that must be present:
         let xml = format!("<romsets><romset name=\"{huge}\"/></romsets>");
         assert!(matches!(
             parse_romsets(xml.as_bytes()),
-            Err(Error::Romsets { .. })
+            Err(Error::XmlEventTooLarge { .. })
+        ));
+    }
+
+    /// `n` distinct `<romset name="sI">` tags.
+    fn romset_tags(n: usize) -> String {
+        (0..n).fold(String::new(), |mut acc, i| {
+            write!(acc, "<romset name=\"s{i}\"/>").expect("write");
+            acc
+        })
+    }
+
+    #[test]
+    fn romset_count_cap_refuses_growth_past_the_limit() {
+        let over = format!("<romsets>{}</romsets>", romset_tags(MAX_SETS + 1));
+        assert!(matches!(
+            parse_romsets(over.as_bytes()),
+            Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_SETS
+        ));
+        let under = format!("<romsets>{}</romsets>", romset_tags(MAX_SETS));
+        let sets = parse_romsets(under.as_bytes()).expect("parse").sets;
+        assert_eq!(sets.len(), MAX_SETS);
+    }
+
+    #[test]
+    fn bios_name_count_cap_refuses_growth_past_the_limit() {
+        let lines = (0..=MAX_BIOS_NAMES).fold(String::new(), |mut acc, i| {
+            writeln!(acc, "bios{i}.rom").expect("write");
+            acc
+        });
+        let xml = format!("<!--{lines}--><romsets/>");
+        assert!(matches!(
+            parse_romsets(xml.as_bytes()),
+            Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_BIOS_NAMES
         ));
     }
 

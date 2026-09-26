@@ -8,7 +8,7 @@
 #![warn(missing_docs)]
 #![warn(clippy::pedantic)]
 
-use mistarr_core::dat::MAX_DEPTH;
+use mistarr_core::dat::{MAX_DEPTH, MAX_EVENT_BYTES};
 
 pub mod adapter;
 pub mod corename;
@@ -82,6 +82,23 @@ pub enum Error {
     FileTooLarge {
         /// The cap that was exceeded.
         limit: u64,
+    },
+    /// An MRA or `romsets.xml` element, text run or comment is larger than the reader's cap.
+    #[error("an XML element at byte {position} is larger than {} KiB", MAX_EVENT_BYTES >> 10)]
+    XmlEventTooLarge {
+        /// Byte offset where the element starts.
+        position: u64,
+    },
+    /// An MRA or `romsets.xml` document holds more of one kind of output than the
+    /// reader keeps, such as roms, items in a rom, zip names, romsets or bios names.
+    #[error("more than {limit} {kind} at byte {position}")]
+    XmlOutputTooLarge {
+        /// What was capped, e.g. `"<rom> elements"` or `"distinct zip names"`.
+        kind: &'static str,
+        /// The cap that was exceeded.
+        limit: usize,
+        /// Byte offset near where the cap was hit.
+        position: u64,
     },
     /// A path cannot be written into an MGL or a command line.
     #[error("path `{0}` cannot be passed to MiSTer Main")]
