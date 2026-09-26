@@ -127,6 +127,7 @@ fn catalogue(dir: &Path, scale: f64, unmatched: usize, dat: &[Track]) -> Db {
                 md5: Some(&t.md5),
                 sha1: Some(&t.sha1),
                 header_rule: Some("none"),
+                whole: None,
             };
             let path = format!("{}/{}", t.dir, t.name);
             files::upsert(

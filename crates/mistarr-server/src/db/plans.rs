@@ -97,6 +97,13 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             }),
         ),
         (
+            "changed rom",
+            Box::new(|c| {
+                let listed = [Some("00000000"), None, None];
+                files::unmatch_changed_rom(c, 1, "no such rom", 16, listed).expect("unmatch");
+            }),
+        ),
+        (
             "crc candidate",
             Box::new(|c| {
                 let nes = mistarr_core::PlatformId("nes".into());

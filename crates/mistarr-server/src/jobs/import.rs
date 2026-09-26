@@ -472,9 +472,7 @@ impl Placing<'_> {
             .read(move |c| {
                 let mut other = None;
                 for a in &list {
-                    let h = &a.hashes;
-                    let size = i64::try_from(h.size).unwrap_or(i64::MAX);
-                    if let Some(m) = files::match_rom(c, &pid, &h.sha1, &h.md5, &h.crc32, size)? {
+                    if let Some(m) = super::scan::match_forms(c, &pid, a.forms())? {
                         let title = imports::title_entry(c, TitleId(m.title_id))?;
                         other = title.map(|t| (t.id, t.name, m.name));
                         break;
@@ -586,7 +584,7 @@ impl Placing<'_> {
         };
         let hit = candidates.iter().find_map(|c| {
             let name = c.member.as_deref();
-            pick_rom(&self.entry.roms, &c.hashes, Some(row.rom_id), name, &[]).map(|r| (c, r))
+            pick_rom(&self.entry.roms, c, Some(row.rom_id), name, &[]).map(|r| (c, r))
         });
         let Some((hashed, rom)) = hit else {
             if let Some((hashed, other)) = self.other_version(&candidates).await? {
@@ -653,10 +651,7 @@ impl Placing<'_> {
             .db
             .read(move |c| {
                 for a in list {
-                    let h = &a.hashes;
-                    let size = i64::try_from(h.size).unwrap_or(i64::MAX);
-                    let Some(m) = files::match_rom(c, &pid, &h.sha1, &h.md5, &h.crc32, size)?
-                    else {
+                    let Some(m) = super::scan::match_forms(c, &pid, a.forms())? else {
                         continue;
                     };
                     let other = TitleId(m.title_id);
@@ -685,7 +680,7 @@ impl Placing<'_> {
         other: &TitleEntry,
     ) -> Result<()> {
         let name = hashed.member.as_deref();
-        let Some(rom) = pick_rom(&other.roms, &hashed.hashes, None, name, &[]) else {
+        let Some(rom) = pick_rom(&other.roms, hashed, None, name, &[]) else {
             return self
                 .quarantine(row.id, row.rom_id, local, std::slice::from_ref(hashed))
                 .await;
@@ -948,7 +943,7 @@ impl Placing<'_> {
             let hit = match candidates.first() {
                 Some(c) if c.member.is_none() => pick_rom(
                     &self.entry.roms,
-                    &c.hashes,
+                    c,
                     Some(r.rom_id),
                     Some(&file_name(&local)),
                     &used,
@@ -1112,6 +1107,13 @@ impl Placing<'_> {
         })
         .await
         .map_err(|e| task(&e))?;
+        let pieces = match &applied {
+            Ok(Placed::All(stats) | Placed::Partly(stats, _)) => {
+                self.with_added_header(plan, &targets, stats, pieces)
+                    .await?
+            }
+            Err(_) => pieces,
+        };
         match applied {
             Err(e) => {
                 let reason = format!("cannot place the file, nothing was changed: {e}");
@@ -1142,6 +1144,40 @@ impl Placing<'_> {
                 fail(app, ids, &reason).await.map(|()| false)
             }
         }
+    }
+
+    /// `pieces`, with the one whose placed file gained a header hashed again from the
+    /// library, so the whole-file hashes `files` stores are of the file on disk.
+    async fn with_added_header(
+        &self,
+        plan: &PlacementPlan,
+        targets: &[Target],
+        stats: &HashMap<String, (i64, i64)>,
+        mut pieces: Vec<Piece>,
+    ) -> Result<Vec<Piece>> {
+        let added = plan
+            .steps
+            .iter()
+            .any(|s| matches!(s, Step::AddHeader { .. }));
+        // A header is added only by a single-file plan: one piece, one target.
+        if !added || pieces.len() != 1 || targets.len() != 1 || !stats.contains_key(&targets[0].rel)
+        {
+            return Ok(pieces);
+        }
+        let (path, rule) = (self.games.join(&targets[0].rel), self.rule());
+        let hashed =
+            crate::threads::blocking(crate::threads::label::HASH, move || hash_item(&path, rule))
+                .await
+                .map_err(|e| task(&e))?;
+        match hashed.map(|mut h| h.pop()) {
+            Ok(Some(h)) => {
+                pieces[0].hashed.hashes = h.hashes;
+                pieces[0].hashed.whole = h.whole;
+            }
+            Ok(None) => {}
+            Err(e) => tracing::warn!(error = %e, "cannot hash the placed file again"),
+        }
+        Ok(pieces)
     }
 
     /// Decides, per `Rename` step, whether to place, replace or keep what is there.
@@ -1466,11 +1502,13 @@ fn record_target(
             (t.rel.clone(), size)
         };
         let h = &p.hashed.hashes;
+        let whole = p.hashed.whole_columns(scope.rule);
         let hashed = files::Hashed {
             crc32: Some(&h.crc32),
             md5: Some(&h.md5),
             sha1: Some(&h.sha1),
             header_rule: Some(scope.rule),
+            whole: Some(&whole),
         };
         let placed_state = file_state(p, t.whole_zip);
         let rom = Some(p.rom.id);

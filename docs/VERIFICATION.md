@@ -107,7 +107,9 @@ has, the first in this order is taken:
   formats, headered, headerless.
 
 A headerless rom takes the `header` attribute of the headered file in its
-source, which placement uses to add the header back. Unless it has a
+source, which placement uses to add the header back to a file that arrives
+without one; a headered file matches the same rom by its content and is placed
+unchanged. Unless it has a
 `forcename`, a headerless, extensionless or lone-file image is named with
 the platform's written extension, else the first it loads, else the
 headered file's. Candidates are ordered good, then bad dumps, before
@@ -251,10 +253,24 @@ wrapped with the platform's header rule (PLATFORMS.md). Buffer is 256 KiB.
 Throughput on the DE10-Nano is roughly 40 to 60 MB/s, which is faster than
 the SD card, so hashing is I/O bound; do not add threads.
 
+Under a rule that strips a header (`ines`, `a78`, `lnx`), a file that starts
+with the header's magic is hashed in two forms in the same pass: the whole
+file, and its content after the header. Two hasher sets are fed from the one
+buffer, the second skipping the header bytes, so such a file costs twice the
+CPU of another and no extra read; on the host the pair runs at about half the
+rate of one set (64 MiB in 202 ms against 98 ms). Without the magic the file
+has one form and is hashed once. The whole form matches a headered DAT, the
+content a headerless one (PLATFORMS.md "Header rules").
+
 For zip archives, read the central directory first. For each member compare
 the stored CRC32 and uncompressed size against the rom index. Only members
 with a candidate match are decompressed and fully hashed. Members with no
-candidate are recorded as `unverified` with their CRC only.
+candidate are recorded as `unverified` with their CRC only. The stored CRC32
+is of the whole member; under a stripping rule the member's header alone is
+also decompressed, and the content's CRC32 derived from the whole CRC32 and
+the header bytes (CRC32 is linear), so a member is a candidate when a rom has
+its whole CRC32 and size or its content CRC32 and the size less the header.
+Such a member is recorded with the content CRC32, and the whole one beside it.
 
 For disc games hash every track. The game is `verified` only if every rom in
 the DAT entry matched. A cue with tracks missing is `incomplete`, shown as
@@ -274,6 +290,11 @@ time, so an unchanged file is not read whole again on the next scan.
 2. MD5, exact, only if the DAT lacks SHA1 for the entry.
 3. CRC32 plus size, only if the DAT lacks both.
 4. Otherwise `unverified`.
+
+A file hashed in two forms goes through this order with its whole form and
+size first, then with its content and the size less the header; the first
+form to match decides. Placement does not need to know which form matched:
+it reads the staged file's first bytes to decide whether to add a header.
 
 A file may match roms in more than one DAT version (an old and a new one).
 Prefer the non-superseded version. A file may match roms in more than one
@@ -295,12 +316,25 @@ without reading the files again:
   only the rows whose rom or state changes. Arcade is left out; its presence
   pass and md5 check decide its files.
 - A scan that finds such a file unchanged matches it from its stored hashes.
-  An unchanged file with a rom, or with no stored hash, is skipped.
+  An unchanged file with a rom, or with no stored hash, is skipped, except
+  one hashed under a stripping rule whose whole-file hashes are not stored:
+  it is hashed again. Migration 0020, which adds those columns, queues a
+  scan at startup of each enabled platform holding such rows, so their files
+  are hashed again once and need no manual step.
+
+A DAT load that gives a live rom another size or other hashes, keeping its
+title and name (a headered DAT loaded over the headerless one of its family),
+unmatches the files matched to it in the same transaction: a fully hashed
+file becomes `unverified` with no rom for the recompute to match again from
+its stored hashes, and any other `pending` for the next scan to hash. Arcade
+is left out.
 
 A zip member the pre-check did not decompress is stored with its
-central-directory CRC32 alone and `header_rule` NULL. The recompute leaves
-it alone; a scan that finds it unchanged hashes it once a rom of that CRC32
-and size exists, and then matches it as a new file. A member that fails to
+central-directory CRC32 alone and `header_rule` NULL, and under a stripping
+rule that found a header, with its content CRC32 in `crc32` and the whole
+one in `crc32_whole`. The recompute leaves it alone; a scan that finds it
+unchanged hashes it once a rom of either CRC32 and its size exists, and
+then matches it as a new file. A member that fails to
 hash is stored with the platform's rule, so an unchanged one is not
 decompressed again.
 
@@ -311,9 +345,13 @@ all-or-nothing rule, and the tracks of one CHD are classified together as
 their own set (see "CHD images"). Stored hashes are of the content after the header rule
 named in `files.header_rule`, as the DAT's hashes are: a byte-swapped N64
 image is stored as its big-endian form and a headered NES file without its
-header. `files.size` is the size on disk, so the CRC32-plus-size tier also
-tries that size less the header the rule strips (for `smc`, only when the
-size is `n*1024 + 512`).
+header. Under a stripping rule the whole file's hashes are stored beside
+them, the same values when no header was found. `files.size` is the size on
+disk. A file whose two forms differ is matched with its whole hashes at that
+size, then its content at the size less the header; one whose forms are the
+same is matched at its size only. Without whole-file hashes the
+CRC32-plus-size tier also tries the size less the header the rule strips
+(for `smc`, only when the size is `n*1024 + 512`).
 
 ## CHD images
 

@@ -253,6 +253,15 @@ pub fn upsert_title(
         id
     };
     store_lists(conn, id, t.regions, t.languages, t.flags)?;
+    let arcade = mistarr_mister::platforms::by_id(platform)
+        .is_some_and(mistarr_mister::platforms::Platform::is_arcade);
+    if existing.is_some() && !arcade {
+        for r in roms {
+            let size = i64::try_from(r.size).unwrap_or(i64::MAX);
+            let listed = [r.crc32, r.md5, r.sha1];
+            super::files::unmatch_changed_rom(conn, id, r.name, size, listed)?;
+        }
+    }
     let mut stmt = conn.prepare_cached(
         "INSERT INTO roms (title_id, name, size, crc32, md5, sha1, status, header, retired)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)

@@ -144,6 +144,7 @@ CREATE TABLE files (                    -- what is on disk under games/
   state         TEXT NOT NULL,         -- 'verified' | 'unverified' | 'misnamed' | 'bad' | 'pending' | 'unidentified'
   scanned_at    INTEGER NOT NULL,
   reason        TEXT,                  -- why an 'unidentified' row is not identified; NULL otherwise
+  crc32_whole TEXT, md5_whole TEXT, sha1_whole TEXT,  -- rule ines, a78 or lnx: the whole file's hashes, header included; equal to crc32/md5/sha1 when no header was found; NULL under other rules
   UNIQUE (platform_id, rel_path)
 );
 CREATE INDEX files_rom ON files(rom_id);
@@ -378,7 +379,11 @@ reuses the row with the same game name from any version of the same
 the `files.rom_id` links survive an update. Titles left on older versions
 after a load are the entries the new version dropped; they get `retired = 1`
 and are never deleted, as do titles of the same version a reload of it no
-longer lists. Roms a kept entry no longer lists get `roms.retired = 1`.
+longer lists. Roms a kept entry no longer lists get `roms.retired = 1`. A
+kept rom the new version gives another size or other hashes loses its files'
+links in the same transaction, outside arcade: a fully hashed file becomes
+`unverified` with no rom, for the recompute to match again from its stored
+hashes, and any other `pending` (VERIFICATION.md "Matching stored hashes").
 A version whose string sorts below the newest live one of its name is stored
 already superseded and does not touch titles. An unbound version stores only
 its `dat_versions` row; binding it re-reads the file from `dats/loaded/`.

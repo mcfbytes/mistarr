@@ -503,6 +503,7 @@ mod tests {
             md5: None,
             sha1: None,
             header_rule: Some("chd".into()),
+            whole: files::WholeHashes::default(),
             rom_id: None,
             state: FileState::Unidentified,
             reason: Some(reason.as_str().to_owned()),

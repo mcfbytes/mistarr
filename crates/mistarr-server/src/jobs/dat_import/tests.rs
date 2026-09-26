@@ -924,6 +924,7 @@ fn remove_with_files(c: &TestDb, version: DatVersionId, files: &[(&str, &str, i6
                 md5: Some(&md5),
                 sha1: Some(&sha1),
                 header_rule: Some("none"),
+                whole: None,
             };
             let state = crate::db::files::FileState::Misnamed;
             crate::db::files::upsert(x, &nes, path, 4, 1, &hashed, Some(*id), state, 1)?;
@@ -1217,6 +1218,7 @@ fn a_disc_track_is_matched_again_under_the_all_or_nothing_rule() {
                     md5: Some(&sums.md5),
                     sha1: Some(&sums.sha1),
                     header_rule: Some("none"),
+                    whole: None,
                 };
                 let path = format!("PSX/Example Disc (USA)/{}", track(n));
                 files::upsert(
@@ -1275,6 +1277,7 @@ fn unmatched_file(
         md5: Some(&sums.md5),
         sha1: Some(&sums.sha1),
         header_rule: Some("none"),
+        whole: None,
     };
     files::upsert(
         c,
@@ -1410,6 +1413,7 @@ fn a_stored_crc_matches_a_headered_file_by_its_size_less_the_header() {
                 md5: Some(&rom.md5),
                 sha1: Some(&rom.sha1),
                 header_rule: Some("ines"),
+                whole: None,
             };
             let path = "NES/Crc Quest (USA).nes";
             let unverified = FileState::Unverified;
@@ -1422,6 +1426,72 @@ fn a_stored_crc_matches_a_headered_file_by_its_size_less_the_header() {
         state,
         Some(FileState::Verified),
         "20 bytes on disk hash as the 4 after the iNES header"
+    );
+}
+
+#[test]
+fn stored_whole_and_content_forms_match_headered_and_headerless_roms() {
+    let c = conn();
+    let lynx = PlatformId("lynx".into());
+    let states = c
+        .with(|x| {
+            let title = files::seed_title_fixture(x, &lynx, "Form Quest (USA)")?;
+            // Rom 30 is a headered DAT's whole file, rom 31 a headerless DAT's content.
+            let (whole_rom, content_rom, plain) = (sums(30), sums(31), sums(32));
+            for (name, h, size) in [("a.lnx", &whole_rom, 68), ("b.lnx", &content_rom, 4)] {
+                x.execute(
+                    "INSERT INTO roms (title_id, name, size, crc32, md5, sha1)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    rusqlite::params![title, name, size, h.crc32, h.md5, h.sha1],
+                )?;
+            }
+            x.execute(
+                "INSERT INTO roms (title_id, name, size, crc32) VALUES (?1, 'c.lnx', 4, ?2)",
+                rusqlite::params![title, plain.crc32],
+            )?;
+            let whole_of = |h: &mistarr_core::HashSet| files::WholeHashes {
+                crc32: Some(h.crc32.clone()),
+                md5: Some(h.md5.clone()),
+                sha1: Some(h.sha1.clone()),
+            };
+            let unverified = FileState::Unverified;
+            let mut ids = Vec::new();
+            // a and b hold a 64-byte header; c has none, so its one form is 68 bytes whole.
+            let (other, no_header) = (sums(33), whole_of(&plain));
+            let rows = [
+                ("AtariLynx/a.lnx", &other, whole_of(&whole_rom)),
+                ("AtariLynx/b.lnx", &content_rom, whole_of(&other)),
+                ("AtariLynx/c.lnx", &plain, no_header),
+            ];
+            for (path, content, whole) in &rows {
+                let hashed = files::Hashed {
+                    crc32: Some(&content.crc32),
+                    md5: Some(&content.md5),
+                    sha1: Some(&content.sha1),
+                    header_rule: Some("lnx"),
+                    whole: Some(whole),
+                };
+                ids.push(files::upsert(
+                    x, &lynx, path, 68, 1, &hashed, None, unverified, 1,
+                )?);
+            }
+            match_unmatched_chunk(x, &lynx, files::FileId(0))?;
+            let mut states = Vec::new();
+            for id in ids {
+                states.push(files::get(x, id)?.map(|f| f.state));
+            }
+            Ok(states)
+        })
+        .expect("match");
+    assert_eq!(
+        states,
+        [
+            Some(FileState::Verified),
+            Some(FileState::Verified),
+            Some(FileState::Unverified)
+        ],
+        "the whole form at its size, the content at the size less the header, and no header \
+         means no stripped size"
     );
 }
 
@@ -1443,6 +1513,7 @@ fn a_stored_crc_allows_for_a_copier_header_only_at_its_size() {
                 md5: Some(&rom.md5),
                 sha1: Some(&rom.sha1),
                 header_rule: Some("smc"),
+                whole: None,
             };
             let unverified = FileState::Unverified;
             let mut ids = Vec::new();

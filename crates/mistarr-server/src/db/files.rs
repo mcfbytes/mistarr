@@ -91,6 +91,8 @@ pub struct FileRow {
     /// The header rule the payload was hashed under, or last failed to hash under;
     /// NULL for a zip member known by its central-directory CRC32 alone.
     pub header_rule: Option<String>,
+    /// The whole file's hashes under a rule that strips a header.
+    pub whole: WholeHashes,
     /// The matched `roms.id`, when any.
     pub rom_id: Option<i64>,
     /// Lifecycle state.
@@ -122,12 +124,63 @@ pub struct NewFile {
     /// The header rule the payload was hashed under, or last failed to hash under;
     /// `None` for a zip member known by its central-directory CRC32 alone.
     pub header_rule: Option<String>,
+    /// The whole file's hashes under a rule that strips a header.
+    pub whole: WholeHashes,
     /// The matched `roms.id`, when any.
     pub rom_id: Option<i64>,
     /// The decided state.
     pub state: FileState,
     /// Why an `unidentified` row is not identified; `None` in every other state.
     pub reason: Option<String>,
+}
+
+/// The whole file's hashes, header included, stored beside a row's hashes when it was
+/// hashed under a rule that strips a header (`ines`, `a78`, `lnx`). They equal the row's
+/// hashes when no header was found, and are all `None` under any other rule.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct WholeHashes {
+    /// CRC32 of the whole file, also known for a member the pre-check did not decompress.
+    pub crc32: Option<String>,
+    /// MD5 of the whole file, when fully hashed.
+    pub md5: Option<String>,
+    /// SHA1 of the whole file, when fully hashed.
+    pub sha1: Option<String>,
+}
+
+impl WholeHashes {
+    /// What a row hashed under the rule named `rule` stores from `forms`.
+    ///
+    /// ```
+    /// use mistarr_core::hash::{hash_forms, HeaderRule};
+    /// use mistarr_server::db::files::WholeHashes;
+    /// let forms = hash_forms(&b"abc"[..], HeaderRule::Ines, None).unwrap();
+    /// assert_eq!(WholeHashes::of("ines", &forms).sha1, Some(forms.content.sha1.clone()));
+    /// assert_eq!(WholeHashes::of("none", &forms), WholeHashes::default());
+    /// ```
+    #[must_use]
+    pub fn of(rule: &str, forms: &mistarr_core::hash::HeaderForms) -> Self {
+        Self::whole_file(rule, forms.whole_or_content())
+    }
+
+    /// What a row hashed under the rule named `rule` stores for a file whose whole hashes are `whole`.
+    ///
+    /// ```
+    /// use mistarr_server::db::files::WholeHashes;
+    /// let h = mistarr_core::HashSet { size: 1, crc32: "0".into(), md5: "1".into(), sha1: "2".into() };
+    /// assert_eq!(WholeHashes::whole_file("lnx", &h).md5.as_deref(), Some("1"));
+    /// assert_eq!(WholeHashes::whole_file("n64", &h), WholeHashes::default());
+    /// ```
+    #[must_use]
+    pub fn whole_file(rule: &str, whole: &mistarr_core::HashSet) -> Self {
+        if !mistarr_core::hash::HeaderRule::from_name(rule).strips_header() {
+            return Self::default();
+        }
+        Self {
+            crc32: Some(whole.crc32.clone()),
+            md5: Some(whole.md5.clone()),
+            sha1: Some(whole.sha1.clone()),
+        }
+    }
 }
 
 /// The last path component of a name that may use `/` as a separator, as
@@ -157,7 +210,7 @@ pub struct RomMatch {
 }
 
 pub(crate) const COLUMNS: &str =
-    "id, platform_id, rel_path, size, mtime, crc32, md5, sha1, header_rule, rom_id, state, scanned_at, reason";
+    "id, platform_id, rel_path, size, mtime, crc32, md5, sha1, header_rule, rom_id, state, scanned_at, reason, crc32_whole, md5_whole, sha1_whole";
 
 pub(crate) fn from_row(r: &Row<'_>) -> rusqlite::Result<FileRow> {
     let state: String = r.get(10)?;
@@ -171,6 +224,11 @@ pub(crate) fn from_row(r: &Row<'_>) -> rusqlite::Result<FileRow> {
         md5: r.get(6)?,
         sha1: r.get(7)?,
         header_rule: r.get(8)?,
+        whole: WholeHashes {
+            crc32: r.get(13)?,
+            md5: r.get(14)?,
+            sha1: r.get(15)?,
+        },
         rom_id: r.get(9)?,
         state: FileState::parse(&state).unwrap_or(FileState::Pending),
         scanned_at: r.get(11)?,
@@ -356,7 +414,8 @@ pub fn reverify(
 ) -> Result<()> {
     conn.execute(
         "UPDATE files SET size = ?2, mtime = ?3, crc32 = ?4, md5 = NULL, sha1 = NULL,
-                          header_rule = NULL, state = 'unverified', scanned_at = ?5
+                          header_rule = NULL, crc32_whole = NULL, md5_whole = NULL,
+                          sha1_whole = NULL, state = 'unverified', scanned_at = ?5
          WHERE id = ?1",
         params![id.0, size, mtime, crc32, now],
     )?;
@@ -414,6 +473,8 @@ pub struct Hashed<'a> {
     /// The header rule the payload was hashed under, or last failed to hash under;
     /// `None` for a zip member known by its central-directory CRC32 alone.
     pub header_rule: Option<&'a str>,
+    /// The whole file's hashes under a rule that strips a header, `None` otherwise.
+    pub whole: Option<&'a WholeHashes>,
 }
 
 /// Inserts or replaces a file row keyed on `(platform_id, rel_path)`, with no reason.
@@ -458,7 +519,7 @@ pub fn upsert(
 /// mistarr_server::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).unwrap();
 /// let psx = mistarr_core::PlatformId("psx".into());
 /// let row = NewFile { rel_path: "PSX/g.chd".into(), size: 9, mtime: 1, crc32: None, md5: None,
-///     sha1: None, header_rule: Some("chd".into()), rom_id: None,
+///     sha1: None, header_rule: Some("chd".into()), whole: Default::default(), rom_id: None,
 ///     state: FileState::Unidentified, reason: Some("off".into()) };
 /// upsert_row(&conn, &psx, &row, 5).unwrap();
 /// let got = find_by_path(&conn, &psx, "PSX/g.chd").unwrap().unwrap();
@@ -475,6 +536,7 @@ pub fn upsert_row(
         md5: row.md5.as_deref(),
         sha1: row.sha1.as_deref(),
         header_rule: row.header_rule.as_deref(),
+        whole: Some(&row.whole),
     };
     let columns = Columns {
         rel_path: &row.rel_path,
@@ -505,15 +567,19 @@ fn upsert_columns(
     row: &Columns<'_>,
     now: i64,
 ) -> Result<FileId> {
+    let (crc32_whole, md5_whole, sha1_whole) = row.hashed.whole.map_or((None, None, None), |w| {
+        (w.crc32.as_deref(), w.md5.as_deref(), w.sha1.as_deref())
+    });
     conn.prepare_cached(
         "INSERT INTO files (platform_id, rel_path, size, mtime, crc32, md5, sha1, header_rule,
-                             rom_id, state, scanned_at, reason)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+                             rom_id, state, scanned_at, reason, crc32_whole, md5_whole, sha1_whole)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(platform_id, rel_path) DO UPDATE SET
            size = excluded.size, mtime = excluded.mtime, crc32 = excluded.crc32,
            md5 = excluded.md5, sha1 = excluded.sha1, header_rule = excluded.header_rule,
            rom_id = excluded.rom_id, state = excluded.state, scanned_at = excluded.scanned_at,
-           reason = excluded.reason",
+           reason = excluded.reason, crc32_whole = excluded.crc32_whole,
+           md5_whole = excluded.md5_whole, sha1_whole = excluded.sha1_whole",
     )?
     .execute(params![
         platform_id.0,
@@ -528,6 +594,9 @@ fn upsert_columns(
         row.state.as_str(),
         now,
         row.reason,
+        crc32_whole,
+        md5_whole,
+        sha1_whole,
     ])?;
     Ok(conn
         .query_row(
@@ -1002,6 +1071,40 @@ pub fn set_match(
     Ok(())
 }
 
+/// Unmatches the files of rom `name` of title `title_id` when a DAT load is about to give
+/// it another size or `[crc32, md5, sha1]`, so no file stays verified against hashes it
+/// does not have: a fully hashed file becomes `unverified` for the recompute to match again
+/// from its stored hashes, any other `pending` for the next scan to hash. Returns the files
+/// changed.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let listed = [Some("00000000"), None, None];
+/// assert_eq!(mistarr_server::db::files::unmatch_changed_rom(&conn, 1, "a.nes", 4, listed).unwrap(), 0);
+/// ```
+pub fn unmatch_changed_rom(
+    conn: &Connection,
+    title_id: i64,
+    name: &str,
+    size: i64,
+    [crc32, md5, sha1]: [Option<&str>; 3],
+) -> Result<usize> {
+    Ok(conn
+        .prepare_cached(
+            "UPDATE files SET rom_id = NULL, state = CASE WHEN sha1 IS NOT NULL OR md5 IS NOT NULL
+                                                  THEN 'unverified' ELSE 'pending' END
+             WHERE rom_id = (SELECT id FROM roms WHERE title_id = ?1 AND name = ?2
+                               AND (size IS NOT ?3 OR crc32 IS NOT ?4 OR md5 IS NOT ?5
+                                    OR sha1 IS NOT ?6))",
+        )?
+        .execute(params![title_id, name, size, crc32, md5, sha1])?)
+}
+
 /// Whether any rom of this platform has this CRC32 and size, the pre-check
 /// that decides whether a zip member is worth decompressing.
 ///
@@ -1259,6 +1362,7 @@ mod tests {
             md5: None,
             sha1: None,
             header_rule: Some("ines"),
+            whole: None,
         };
         let id = upsert(
             &c,
@@ -1461,6 +1565,7 @@ mod tests {
             md5: Some("m"),
             sha1: Some("s"),
             header_rule: Some("none"),
+            whole: None,
         };
         let rom = seed_rom_fixture(&c, &pid, "exampleset", "a", &hashes(1), "good").expect("rom");
         let a = upsert(
@@ -1896,6 +2001,62 @@ mod tests {
     }
 
     #[test]
+    fn a_rom_given_other_hashes_unmatches_its_files() {
+        let c = conn();
+        let pid = PlatformId("nes".into());
+        let h = hashes(3);
+        let dv = seed_dat_version(&c, &pid, "only");
+        let title = seed_title(&c, &pid, dv, "Moved Quest");
+        seed_rom(&c, title, "Moved Quest.nes", &h, "good");
+        let rom = c.last_insert_rowid();
+        let full = Hashed {
+            crc32: Some(&h.crc32),
+            md5: Some(&h.md5),
+            sha1: Some(&h.sha1),
+            header_rule: Some("ines"),
+            whole: None,
+        };
+        let crc_only = Hashed {
+            crc32: Some(&h.crc32),
+            ..Hashed::default()
+        };
+        let verified = FileState::Verified;
+        let a = upsert(&c, &pid, "NES/a.nes", 3, 1, &full, Some(rom), verified, 1).expect("a");
+        let b = upsert(
+            &c,
+            &pid,
+            "NES/b.nes",
+            3,
+            1,
+            &crc_only,
+            Some(rom),
+            verified,
+            1,
+        )
+        .expect("b");
+        let same = [
+            Some(h.crc32.as_str()),
+            Some(h.md5.as_str()),
+            Some(h.sha1.as_str()),
+        ];
+        let unmatch =
+            |size, listed| unmatch_changed_rom(&c, title, "Moved Quest.nes", size, listed);
+        assert_eq!(
+            unmatch(3, same).expect("same"),
+            0,
+            "unchanged hashes keep the match"
+        );
+        assert_eq!(unmatch(4, same).expect("size"), 2);
+        let state = |id| get(&c, id).expect("get").map(|f| (f.rom_id, f.state));
+        assert_eq!(state(a), Some((None, FileState::Unverified)));
+        assert_eq!(
+            state(b),
+            Some((None, FileState::Pending)),
+            "hashed again by a scan"
+        );
+    }
+
+    #[test]
     fn states_round_trip() {
         for s in ["pending", "verified", "misnamed", "unverified", "bad"] {
             assert_eq!(FileState::parse(s).map(FileState::as_str), Some(s));
@@ -1924,6 +2085,7 @@ mod tests {
                 md5: None,
                 sha1: None,
                 header_rule: Some("chd".into()),
+                whole: WholeHashes::default(),
                 rom_id: None,
                 state: FileState::Unidentified,
                 reason: Some(reason.into()),

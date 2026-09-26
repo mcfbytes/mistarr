@@ -371,6 +371,7 @@ async fn an_interrupted_scan_resumes_at_startup() {
                     md5: Some(&a_hash.md5),
                     sha1: Some(&a_hash.sha1),
                     header_rule: Some("none"),
+                    whole: None,
                 };
                 files::upsert(
                     c,
@@ -430,13 +431,12 @@ async fn an_interrupted_scan_resumes_at_startup() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn header_ruled_zip_members_are_always_fully_hashed() {
+async fn a_header_ruled_member_passes_the_pre_check_by_its_content_crc() {
     let dir = tempfile::tempdir().expect("tempdir");
     let games = dir.path().join("games");
 
-    // The DAT records the header-stripped hash, but the zip's central
-    // directory only ever sees the raw (headered) bytes: the CRC/size
-    // pre-check can never match, so this platform must always fully hash.
+    // The DAT records the header-stripped hash while the central directory holds the
+    // whole member's CRC32; the pre-check derives the content's from the header.
     let payload = b"quest payload with a header";
     let headered = ines(payload);
     let raw_hash = hash_of(&headered);
@@ -774,7 +774,13 @@ fn swap16(data: &[u8]) -> Vec<u8> {
 
 /// A Logiqx DAT named `name` with one game per `(game, rom, hashes)`.
 fn logiqx(name: &str, games: &[(&str, &str, &HashSet)]) -> String {
-    let mut xml = format!("<datafile><header><name>{name}</name><version>1</version></header>");
+    logiqx_version(name, "1", games)
+}
+
+/// [`logiqx`] at `version`.
+fn logiqx_version(name: &str, version: &str, games: &[(&str, &str, &HashSet)]) -> String {
+    let mut xml =
+        format!("<datafile><header><name>{name}</name><version>{version}</version></header>");
     for (game, rom, h) in games {
         xml.push_str(&format!(
             "<game name=\"{game}\"><rom name=\"{rom}\" size=\"{}\" crc=\"{}\" md5=\"{}\" sha1=\"{}\"/></game>",
@@ -1142,6 +1148,545 @@ async fn a_member_that_fails_to_hash_is_not_retried_while_unchanged() {
     scan_and_wait(app, addr, "gba").await;
     let row = find(app, &gba, rel).await.expect("row");
     assert_eq!((row.sha1, row.state), (None, FileState::Unverified));
+
+    booted.running.shutdown().await.expect("shutdown");
+}
+
+/// A platform whose rule strips a header, as `docs/PLATFORMS.md` "Header rules" lists it.
+struct HeaderPlatform {
+    id: &'static str,
+    dir: &'static str,
+    ext: &'static str,
+    dat: &'static str,
+    header: fn() -> Vec<u8>,
+}
+
+fn ines_header() -> Vec<u8> {
+    ines(&[])
+}
+
+fn a78_header() -> Vec<u8> {
+    let mut h = vec![1];
+    h.extend_from_slice(b"ATARI7800");
+    h.resize(128, 0);
+    h
+}
+
+fn lnx_header() -> Vec<u8> {
+    let mut h = b"LYNX".to_vec();
+    h.resize(64, 0);
+    h
+}
+
+const NES: HeaderPlatform = HeaderPlatform {
+    id: "nes",
+    dir: "NES",
+    ext: "nes",
+    dat: "Example Vendor - Nintendo Entertainment System",
+    header: ines_header,
+};
+
+const A7800: HeaderPlatform = HeaderPlatform {
+    id: "atari7800",
+    dir: "Atari7800",
+    ext: "a78",
+    dat: "Example Vendor - Atari 7800",
+    header: a78_header,
+};
+
+const LYNX: HeaderPlatform = HeaderPlatform {
+    id: "lynx",
+    dir: "AtariLynx",
+    ext: "lnx",
+    dat: "Example Vendor - Atari Lynx",
+    header: lnx_header,
+};
+
+impl HeaderPlatform {
+    /// A synthetic body, distinct per `seed`, that never starts with a header's magic.
+    fn body(&self, seed: &str) -> Vec<u8> {
+        format!("{seed} body of a synthetic {} cartridge. ", self.id)
+            .into_bytes()
+            .repeat(9)
+    }
+
+    fn headered(&self, body: &[u8]) -> Vec<u8> {
+        let mut v = (self.header)();
+        v.extend_from_slice(body);
+        v
+    }
+
+    fn name(&self, title: &str) -> String {
+        format!("{title} Quest (USA).{}", self.ext)
+    }
+
+    fn rel(&self, file: &str) -> String {
+        format!("{}/{file}", self.dir)
+    }
+}
+
+/// Scans a headered file, a headered zip member, a headerless file and a file without the
+/// header's magic against a headered DAT of `p`, or a headerless one, and checks each state.
+async fn both_forms_match(p: &HeaderPlatform, headered_dat: bool) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let games = dir.path().join("games");
+    let (loose, member, bare, plain) = (
+        p.body("loose"),
+        p.body("member"),
+        p.body("bare"),
+        p.body("plain"),
+    );
+    let loose_file = p.headered(&loose);
+    let member_file = p.headered(&member);
+    write(&games.join(p.rel(&p.name("Loose"))), &loose_file);
+    let zip = build_stored_zip(
+        &p.name("Member"),
+        &member_file,
+        &hash_of(&member_file).crc32,
+    );
+    write(&games.join(p.rel("Member Quest (USA).zip")), &zip);
+    write(&games.join(p.rel(&p.name("Bare"))), &bare);
+    write(&games.join(p.rel(&p.name("Plain"))), &plain);
+
+    let mut config = config_in(dir.path());
+    config.paths.games = games.clone();
+    let booted = boot_with(dir, config).await;
+    let (app, addr) = (&booted.running.app, booted.addr());
+    let pid = PlatformId(p.id.into());
+
+    let listed = |body: &[u8]| {
+        if headered_dat {
+            hash_of(&p.headered(body))
+        } else {
+            hash_of(body)
+        }
+    };
+    let header_len = (p.header)().len();
+    let (loose_h, member_h, bare_h) = (listed(&loose), listed(&member), listed(&bare));
+    // A file without the magic is only ever its whole self; its tail must match nothing.
+    let (plain_h, plain_tail_h) = (hash_of(&plain), hash_of(&plain[header_len..]));
+    let names = [
+        p.name("Loose"),
+        p.name("Member"),
+        p.name("Bare"),
+        p.name("Plain"),
+        p.name("Tail"),
+    ];
+    let dat = logiqx(
+        p.dat,
+        &[
+            ("Loose Quest (USA)", &names[0], &loose_h),
+            ("Member Quest (USA)", &names[1], &member_h),
+            ("Bare Quest (USA)", &names[2], &bare_h),
+            ("Plain Quest (USA)", &names[3], &plain_h),
+            ("Tail Quest (USA)", &names[4], &plain_tail_h),
+        ],
+    );
+    load_dat(&booted, &format!("{}.dat", p.id), &dat).await;
+    scan_and_wait(app, addr, p.id).await;
+
+    let state = |rel: String| {
+        let pid = pid.clone();
+        async move { find(app, &pid, &rel).await.map(|r| r.state) }
+    };
+    let kind = if headered_dat {
+        "headered"
+    } else {
+        "headerless"
+    };
+    let loose_row = find(app, &pid, &p.rel(&names[0])).await.expect("row");
+    assert_eq!(
+        loose_row.state,
+        FileState::Verified,
+        "{} loose, {kind} DAT",
+        p.id
+    );
+    assert_eq!(
+        loose_row.sha1,
+        Some(hash_of(&loose).sha1),
+        "the content form"
+    );
+    assert_eq!(
+        loose_row.whole.sha1,
+        Some(hash_of(&loose_file).sha1),
+        "the whole form"
+    );
+    let member_rel = format!("{}#{}", p.rel("Member Quest (USA).zip"), names[1]);
+    assert_eq!(
+        state(member_rel).await,
+        Some(FileState::Verified),
+        "{} member, {kind} DAT",
+        p.id
+    );
+    let bare_state = if headered_dat {
+        FileState::Unverified
+    } else {
+        FileState::Verified
+    };
+    assert_eq!(
+        state(p.rel(&names[2])).await,
+        Some(bare_state),
+        "{} headerless file, {kind} DAT",
+        p.id
+    );
+    assert_eq!(
+        state(p.rel(&names[3])).await,
+        Some(FileState::Verified),
+        "{} file without magic matches its whole form only, {kind} DAT",
+        p.id
+    );
+    let plain_row = find(app, &pid, &p.rel(&names[3])).await.expect("row");
+    assert_eq!(
+        plain_row.whole.sha1, plain_row.sha1,
+        "one form without a header"
+    );
+
+    booted.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nes_files_match_a_headered_dat() {
+    both_forms_match(&NES, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn nes_files_match_a_headerless_dat() {
+    both_forms_match(&NES, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atari_7800_files_match_a_headered_dat() {
+    both_forms_match(&A7800, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn atari_7800_files_match_a_headerless_dat() {
+    both_forms_match(&A7800, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lynx_files_match_a_headered_dat() {
+    both_forms_match(&LYNX, true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn lynx_files_match_a_headerless_dat() {
+    both_forms_match(&LYNX, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_zip_whose_members_match_neither_form_is_not_decompressed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let games = dir.path().join("games");
+    let p = &NES;
+    let file = p.headered(&p.body("stray"));
+    let zip = build_stored_zip(&p.name("Stray"), &file, &hash_of(&file).crc32);
+    write(&games.join(p.rel("Stray Quest (USA).zip")), &zip);
+
+    let mut config = config_in(dir.path());
+    config.paths.games = games.clone();
+    let booted = boot_with(dir, config).await;
+    let (app, addr) = (&booted.running.app, booted.addr());
+    let other = hash_of(&p.headered(&p.body("listed")));
+    load_dat(
+        &booted,
+        "nes.dat",
+        &logiqx(p.dat, &[("Listed Quest (USA)", &p.name("Listed"), &other)]),
+    )
+    .await;
+    scan_and_wait(app, addr, p.id).await;
+
+    let rel = format!("{}#{}", p.rel("Stray Quest (USA).zip"), p.name("Stray"));
+    let row = find(app, &PlatformId(p.id.into()), &rel)
+        .await
+        .expect("row");
+    assert_eq!(
+        (row.md5, row.sha1, row.header_rule),
+        (None, None, None),
+        "not decompressed"
+    );
+    let content_crc = hash_of(&p.body("stray")).crc32;
+    assert_eq!(
+        row.crc32,
+        Some(content_crc),
+        "the content CRC32 from the header alone"
+    );
+    assert_eq!(row.whole.crc32, Some(hash_of(&file).crc32));
+
+    // A later headerless DAT listing it makes the next scan hash it.
+    let listed = hash_of(&p.body("stray"));
+    let dat = logiqx_version(
+        p.dat,
+        "2",
+        &[("Stray Quest (USA)", &p.name("Stray"), &listed)],
+    );
+    load_dat(&booted, "nes.dat", &dat).await;
+    scan_and_wait(app, addr, p.id).await;
+    let row = find(app, &PlatformId(p.id.into()), &rel)
+        .await
+        .expect("row");
+    assert_eq!(row.state, FileState::Verified);
+
+    booted.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stored_forms_match_a_later_dat_in_both_directions() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let games = dir.path().join("games");
+    let p = &NES;
+    let titles = ["Whole", "Content", "Whole Member", "Content Member"];
+    let bodies: Vec<Vec<u8>> = titles.iter().map(|t| p.body(t)).collect();
+    for (title, body) in titles.iter().zip(&bodies) {
+        let file = p.headered(body);
+        if title.ends_with("Member") {
+            let zip = build_stored_zip(&p.name(title), &file, &hash_of(&file).crc32);
+            write(
+                &games.join(p.rel(&format!("{title} Quest (USA).zip"))),
+                &zip,
+            );
+        } else {
+            write(&games.join(p.rel(&p.name(title))), &file);
+        }
+    }
+
+    let mut config = config_in(dir.path());
+    config.paths.games = games.clone();
+    let booted = boot_with(dir, config).await;
+    let (app, addr) = (&booted.running.app, booted.addr());
+    scan_and_wait(app, addr, p.id).await;
+    assert_eq!(platform_counts(addr, p.id).await["unmatched_files"], 4);
+
+    // A running core holds the heavy lane: only the recompute can match the files.
+    std::fs::write(booted.corename(), "NES\n").expect("corename");
+    eventually("the heavy lane to close", || async {
+        app.gate.state().core_running()
+    })
+    .await;
+    let hashes: Vec<HashSet> = titles
+        .iter()
+        .zip(&bodies)
+        .map(|(t, b)| {
+            if t.starts_with("Whole") {
+                hash_of(&p.headered(b))
+            } else {
+                hash_of(b)
+            }
+        })
+        .collect();
+    let names: Vec<String> = titles.iter().map(|t| p.name(t)).collect();
+    let games_listed: Vec<(String, &str, &HashSet)> = titles
+        .iter()
+        .zip(&names)
+        .zip(&hashes)
+        .map(|((t, n), h)| (format!("{t} Quest (USA)"), n.as_str(), h))
+        .collect();
+    let entries: Vec<(&str, &str, &HashSet)> = games_listed
+        .iter()
+        .map(|(g, n, h)| (g.as_str(), *n, *h))
+        .collect();
+    load_dat(&booted, "nes.dat", &logiqx(p.dat, &entries)).await;
+    eventually("the stored forms of the loose files to match", || async {
+        platform_counts(addr, p.id).await["have"] == 2
+    })
+    .await;
+    let pid = PlatformId(p.id.into());
+    for title in ["Whole", "Content"] {
+        let row = find(app, &pid, &p.rel(&p.name(title))).await.expect("row");
+        assert_eq!(row.state, FileState::Verified, "{title}");
+    }
+    let open_scans = app
+        .db
+        .read(|c| {
+            Ok(job_rows::open_rows(c)?
+                .iter()
+                .filter(|j| j.kind == "scan")
+                .count())
+        })
+        .await
+        .expect("jobs");
+    assert_eq!(open_scans, 1, "the scan the load queued still waits");
+
+    // Members known by their CRC32 alone wait for that scan, which the pre-check lets hash them.
+    std::fs::write(booted.corename(), "MENU\n").expect("corename");
+    eventually("the members to match", || async {
+        platform_counts(addr, p.id).await["have"] == 4
+    })
+    .await;
+
+    booted.running.shutdown().await.expect("shutdown");
+}
+
+/// Size and mtime as a scan stores them.
+fn meta(path: &Path) -> (i64, i64) {
+    let m = std::fs::metadata(path).expect("meta");
+    let mtime = m
+        .modified()
+        .expect("mtime")
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("epoch")
+        .as_secs();
+    (
+        i64::try_from(m.len()).expect("size"),
+        i64::try_from(mtime).expect("mtime"),
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn rows_hashed_before_the_whole_form_are_hashed_again_after_the_upgrade() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let games = dir.path().join("games");
+    let p = &NES;
+    let body = p.body("upgraded");
+    let file = p.headered(&body);
+    let path = games.join(p.rel(&p.name("Upgraded")));
+    write(&path, &file);
+    let (size, mtime) = meta(&path);
+
+    let mut config = config_in(dir.path());
+    config.paths.games = games.clone();
+    let booted = boot_with(dir, config).await;
+    let app = &booted.running.app;
+    let pid = PlatformId(p.id.into());
+    let rel = p.rel(&p.name("Upgraded"));
+    let (whole, content) = (hash_of(&file), hash_of(&body));
+    app.db
+        .write({
+            let (pid, rel, whole, content) =
+                (pid.clone(), rel.clone(), whole.clone(), content.clone());
+            let name = p.name("Upgraded");
+            move |c| {
+                files::seed_rom_fixture(c, &pid, "Upgraded Quest (USA)", &name, &whole, "good")?;
+                // The stripped form alone, as a scan stored it before the whole-file columns.
+                let hashed = files::Hashed {
+                    crc32: Some(&content.crc32),
+                    md5: Some(&content.md5),
+                    sha1: Some(&content.sha1),
+                    header_rule: Some("ines"),
+                    whole: None,
+                };
+                files::upsert(
+                    c,
+                    &pid,
+                    &rel,
+                    size,
+                    mtime,
+                    &hashed,
+                    None,
+                    FileState::Unverified,
+                    1,
+                )
+                .map(|_| ())
+            }
+        })
+        .await
+        .expect("seed");
+    let dir = booted.dir;
+    booted.running.shutdown().await.expect("shutdown");
+
+    // Back to the schema before the whole-file columns, so booting runs that migration.
+    let db = rusqlite::Connection::open(config_in(dir.path()).paths.db()).expect("open");
+    db.execute_batch(
+        "ALTER TABLE files DROP COLUMN crc32_whole;
+         ALTER TABLE files DROP COLUMN md5_whole;
+         ALTER TABLE files DROP COLUMN sha1_whole;
+         DELETE FROM schema_version WHERE version = 20;",
+    )
+    .expect("downgrade");
+    drop(db);
+
+    let mut config = config_in(dir.path());
+    config.paths.games = games;
+    let upgraded = boot_with(dir, config).await;
+    let app = &upgraded.running.app;
+    eventually("the scan queued by the upgrade to match the file", || {
+        let (pid, rel) = (pid.clone(), rel.clone());
+        async move {
+            find(app, &pid, &rel)
+                .await
+                .is_some_and(|r| r.state == FileState::Verified)
+        }
+    })
+    .await;
+    let row = find(app, &pid, &rel).await.expect("row");
+    assert_eq!(row.whole.sha1, Some(whole.sha1));
+    assert_eq!(row.sha1, Some(content.sha1));
+
+    upgraded.running.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_headered_dat_after_a_headerless_one_matches_its_files_again() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let games = dir.path().join("games");
+    let p = &NES;
+    let (loose, member, gone) = (p.body("loose"), p.body("member"), p.body("gone"));
+    let member_file = p.headered(&member);
+    write(&games.join(p.rel(&p.name("Loose"))), &p.headered(&loose));
+    let zip = build_stored_zip(
+        &p.name("Member"),
+        &member_file,
+        &hash_of(&member_file).crc32,
+    );
+    write(&games.join(p.rel("Member Quest (USA).zip")), &zip);
+    write(&games.join(p.rel(&p.name("Gone"))), &p.headered(&gone));
+
+    let mut config = config_in(dir.path());
+    config.paths.games = games.clone();
+    let booted = boot_with(dir, config).await;
+    let (app, addr) = (&booted.running.app, booted.addr());
+    let pid = PlatformId(p.id.into());
+    let names = [p.name("Loose"), p.name("Member"), p.name("Gone")];
+    let dat = |version: &str, hashes: [HashSet; 3]| {
+        let games = [
+            ("Loose Quest (USA)", names[0].as_str(), &hashes[0]),
+            ("Member Quest (USA)", names[1].as_str(), &hashes[1]),
+            ("Gone Quest (USA)", names[2].as_str(), &hashes[2]),
+        ];
+        logiqx_version(p.dat, version, &games)
+    };
+    let headerless = [hash_of(&loose), hash_of(&member), hash_of(&gone)];
+    load_dat(&booted, "nes.dat", &dat("1", headerless)).await;
+    scan_and_wait(app, addr, p.id).await;
+    let member_rel = format!("{}#{}", p.rel("Member Quest (USA).zip"), names[1]);
+    let rels = [p.rel(&names[0]), member_rel, p.rel(&names[2])];
+    let mut roms = Vec::new();
+    for rel in &rels {
+        let row = find(app, &pid, rel).await.expect("row");
+        assert_eq!(
+            row.state,
+            FileState::Verified,
+            "{rel} under the headerless DAT"
+        );
+        roms.push(row.rom_id);
+    }
+
+    // The next version lists the same roms by their headered hashes, and one by another dump.
+    std::fs::write(booted.corename(), "NES\n").expect("corename");
+    eventually("the heavy lane to close", || async {
+        app.gate.state().core_running()
+    })
+    .await;
+    let other_dump = hash_of(&p.headered(&p.body("another dump")));
+    let headered = [
+        hash_of(&p.headered(&loose)),
+        hash_of(&member_file),
+        other_dump,
+    ];
+    load_dat(&booted, "nes.dat", &dat("2", headered)).await;
+    let want = vec![
+        Some((FileState::Verified, roms[0])),
+        Some((FileState::Verified, roms[1])),
+        Some((FileState::Unverified, None)),
+    ];
+    eventually("the files to match the rewritten roms again", || async {
+        let mut got = Vec::new();
+        for rel in &rels {
+            got.push(find(app, &pid, rel).await.map(|r| (r.state, r.rom_id)));
+        }
+        got == want
+    })
+    .await;
 
     booted.running.shutdown().await.expect("shutdown");
 }

@@ -5,7 +5,7 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
-use mistarr_core::hash::{hash_reader, hash_zip_member, zip_members, HashError, HeaderRule};
+use mistarr_core::hash::{hash_forms, hash_zip_member_forms, zip_members, HashError, HeaderRule};
 use mistarr_core::HashSet as Hashes;
 use mistarr_mister::DatRom;
 
@@ -23,6 +23,37 @@ pub(super) struct Hashed {
     pub raw_size: u64,
     /// Hashes under the platform's header rule.
     pub hashes: Hashes,
+    /// The whole payload's hashes when the rule stripped a header from it.
+    pub whole: Option<Hashes>,
+}
+
+impl Hashed {
+    /// A payload whose hashes are its whole content.
+    #[cfg(test)]
+    pub fn plain(member: Option<String>, hashes: Hashes) -> Self {
+        Self {
+            member,
+            raw_size: hashes.size,
+            hashes,
+            whole: None,
+        }
+    }
+
+    /// The forms the payload matches a rom in, the whole payload first.
+    pub fn forms(&self) -> impl Iterator<Item = &Hashes> {
+        self.whole.iter().chain([&self.hashes])
+    }
+
+    /// Whether the payload is `rom` in any of its forms.
+    pub fn is(&self, rom: &EntryRom) -> bool {
+        self.forms().any(|h| rom_matches(rom, h))
+    }
+
+    /// What `files` stores beside the hashes of a payload hashed under the rule named `rule`.
+    pub fn whole_columns(&self, rule: &str) -> crate::db::files::WholeHashes {
+        let whole = self.whole.as_ref().unwrap_or(&self.hashes);
+        crate::db::files::WholeHashes::whole_file(rule, whole)
+    }
 }
 
 fn no_parent(path: &Path) -> bool {
@@ -95,25 +126,28 @@ pub(super) fn is_zip(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
 }
 
-/// Hashes a staged file, or every member of a staged zip, under `rule`.
+/// Hashes a staged file, or every member of a staged zip, under `rule`, in both forms
+/// when a stripping rule finds a header.
 pub(super) fn hash_item(path: &Path, rule: HeaderRule) -> Result<Vec<Hashed>, HashError> {
     if !is_zip(path) {
         let size = fs::metadata(path)?.len();
-        let hashes = hash_reader(File::open(path)?, rule, Some(size))?;
+        let forms = hash_forms(File::open(path)?, rule, Some(size))?;
         return Ok(vec![Hashed {
             member: None,
             raw_size: size,
-            hashes,
+            hashes: forms.content,
+            whole: forms.whole,
         }]);
     }
     let mut out = Vec::new();
     for m in zip_members(File::open(path)?)? {
         if !m.name.ends_with('/') {
-            let hashes = hash_zip_member(File::open(path)?, &m.name, rule)?;
+            let forms = hash_zip_member_forms(File::open(path)?, &m.name, rule)?;
             out.push(Hashed {
                 member: Some(m.name),
                 raw_size: m.size,
-                hashes,
+                hashes: forms.content,
+                whole: forms.whole,
             });
         }
     }
@@ -178,18 +212,18 @@ pub(super) fn leaf(name: &str) -> &str {
     name.rsplit(['/', '\\']).next().unwrap_or(name)
 }
 
-/// The rom of `roms` that `h` is, skipping those in `used`. Among identical
-/// roms it prefers `prefer`, then one whose name is `name`, then the first.
+/// The rom of `roms` that `h` is in any form, skipping those in `used`. Among
+/// identical roms it prefers `prefer`, then one whose name is `name`, then the first.
 pub(super) fn pick_rom<'a>(
     roms: &'a [EntryRom],
-    h: &Hashes,
+    h: &Hashed,
     prefer: Option<i64>,
     name: Option<&str>,
     used: &[i64],
 ) -> Option<&'a EntryRom> {
     let hits: Vec<&EntryRom> = roms
         .iter()
-        .filter(|r| !used.contains(&r.id) && rom_matches(r, h))
+        .filter(|r| !used.contains(&r.id) && h.is(r))
         .collect();
     hits.iter()
         .find(|r| Some(r.id) == prefer)
@@ -228,7 +262,7 @@ pub(super) fn match_members<'a>(roms: &'a [EntryRom], members: &'a [Hashed]) -> 
         absent: Vec::new(),
     };
     for m in members {
-        match pick_rom(roms, &m.hashes, None, m.member.as_deref(), &used) {
+        match pick_rom(roms, m, None, m.member.as_deref(), &used) {
             Some(rom) => {
                 used.push(rom.id);
                 out.pairs.push((m, rom));
@@ -252,8 +286,21 @@ pub(super) fn explain(why: &str, actual: &[Hashed]) -> String {
         let h = &a.hashes;
         let _ = writeln!(out, "Actual {label}: {} bytes", h.size);
         let _ = writeln!(out, "  crc32 {}  md5 {}  sha1 {}", h.crc32, h.md5, h.sha1);
+        write_whole(&mut out, a);
     }
     out
+}
+
+/// The whole payload's line of a report, when a header was stripped from it.
+fn write_whole(out: &mut String, a: &Hashed) {
+    if let Some(w) = &a.whole {
+        let (crc32, md5, sha1) = (&w.crc32, &w.md5, &w.sha1);
+        let _ = writeln!(
+            out,
+            "  with its header, {} bytes: crc32 {crc32}  md5 {md5}  sha1 {sha1}",
+            w.size
+        );
+    }
 }
 
 /// A library path as `files.rel_path` stores it.
@@ -304,6 +351,7 @@ pub(super) fn report(
         let h = &a.hashes;
         let _ = writeln!(out, "Actual{label}: {} bytes", h.size);
         let _ = writeln!(out, "  crc32 {}  md5 {}  sha1 {}", h.crc32, h.md5, h.sha1);
+        write_whole(&mut out, a);
     }
     if let Some(other) = other {
         let _ = writeln!(out, "Matches instead: {other}");
@@ -331,6 +379,7 @@ pub(super) fn quarantine(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mistarr_core::hash::hash_reader;
     use std::io::Cursor;
 
     fn rom(id: i64, name: &str, h: &Hashes) -> EntryRom {
@@ -364,20 +413,21 @@ mod tests {
         let a = rom(1, "Disc (Track 1).bin", &h);
         let b = rom(2, "Disc (Track 2).bin", &h);
         let roms = [a.clone(), b.clone()];
-        assert_eq!(pick_rom(&roms, &h, None, None, &[]).map(|r| r.id), Some(1));
+        let p = Hashed::plain(None, h.clone());
+        assert_eq!(pick_rom(&roms, &p, None, None, &[]).map(|r| r.id), Some(1));
         assert_eq!(
-            pick_rom(&roms, &h, Some(2), None, &[]).map(|r| r.id),
+            pick_rom(&roms, &p, Some(2), None, &[]).map(|r| r.id),
             Some(2)
         );
         assert_eq!(
-            pick_rom(&roms, &h, None, Some("x/disc (track 2).bin"), &[]).map(|r| r.id),
+            pick_rom(&roms, &p, None, Some("x/disc (track 2).bin"), &[]).map(|r| r.id),
             Some(2)
         );
         assert_eq!(
-            pick_rom(&roms, &h, Some(1), None, &[1]).map(|r| r.id),
+            pick_rom(&roms, &p, Some(1), None, &[1]).map(|r| r.id),
             Some(2)
         );
-        assert!(pick_rom(&roms, &h, None, None, &[1, 2]).is_none());
+        assert!(pick_rom(&roms, &p, None, None, &[1, 2]).is_none());
         let crc_only = EntryRom {
             sha1: None,
             md5: None,
@@ -400,11 +450,7 @@ mod tests {
         let h = abc();
         let other = hash_reader(Cursor::new(b"xyz"), HeaderRule::None, None).expect("hash");
         let roms = [rom(1, "a.bin", &h), rom(2, "b.bin", &h)];
-        let member = |name: &str, hashes: &Hashes| Hashed {
-            member: Some(name.into()),
-            raw_size: hashes.size,
-            hashes: hashes.clone(),
-        };
+        let member = |name: &str, hashes: &Hashes| Hashed::plain(Some(name.into()), hashes.clone());
         let both = [member("b.bin", &h), member("a.bin", &h)];
         let set = match_members(&roms, &both);
         assert!(set.is_exact());
@@ -456,11 +502,7 @@ mod tests {
             crc32: Some("00000000".into()),
             ..rom(1, "Example Quest (USA).nes", &h)
         };
-        let actual = [Hashed {
-            member: None,
-            raw_size: 3,
-            hashes: h.clone(),
-        }];
+        let actual = [Hashed::plain(None, h.clone())];
         let text = report(Some(&expected), &actual, None, "ines");
         assert!(text.contains("Expected: Example Quest (USA).nes (3 bytes)"));
         assert!(text.contains(&h.sha1));
@@ -492,6 +534,35 @@ mod tests {
             ..rom(1, "a.nes", &abc())
         });
         assert_eq!(dat.header, Some(vec![0x4e, 0x45]));
+    }
+
+    #[test]
+    fn a_headered_payload_is_the_rom_of_either_dat() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("a.nes");
+        let mut data = b"NES\x1a".to_vec();
+        data.resize(16, 0);
+        data.extend_from_slice(b"synthetic body");
+        fs::write(&path, &data).expect("write");
+        let hashed = hash_item(&path, HeaderRule::Ines).expect("hash").remove(0);
+        let whole = hash_reader(&data[..], HeaderRule::None, None).expect("hash");
+        let body = hash_reader(&data[16..], HeaderRule::None, None).expect("hash");
+        assert_eq!(
+            (&hashed.hashes, hashed.whole.as_ref()),
+            (&body, Some(&whole))
+        );
+        assert!(hashed.is(&rom(1, "a.nes", &whole)), "a headered DAT");
+        assert!(hashed.is(&rom(2, "a.nes", &body)), "a headerless DAT");
+        assert_eq!(hashed.forms().next(), Some(&whole), "the whole file first");
+        assert_eq!(hashed.whole_columns("ines").sha1, Some(whole.sha1.clone()));
+        assert_eq!(
+            hashed.whole_columns("none"),
+            crate::db::files::WholeHashes::default()
+        );
+        let plain = Hashed::plain(None, body.clone());
+        assert_eq!(plain.whole_columns("ines").sha1, Some(body.sha1));
+        let text = explain("Why.", std::slice::from_ref(&hashed));
+        assert!(text.contains(&format!("with its header, 30 bytes: crc32 {}", whole.crc32)));
     }
 
     #[test]
