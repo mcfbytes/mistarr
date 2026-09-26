@@ -16,7 +16,6 @@ use crate::config::{RuntimeSettings, SettingsPatch};
 use crate::db::jobs::{self, JobId, JobRow};
 use crate::db::platforms;
 use crate::db::settings::{self, keys};
-use crate::events::EventKind;
 use crate::jobs::dat_import::Recompute;
 use crate::jobs::detect_client::{detect_and_store, ClientStatus, DetectClient};
 use crate::jobs::gate::{GateState, Override};
@@ -345,7 +344,7 @@ async fn put_settings(
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
     check_path_map(&patch)?;
     let before = app.config();
-    let (prefs_before, scan_before) = (before.prefs, before.scan);
+    let (prefs_before, scan_before) = (before.prefs.clone(), before.scan);
     let (runtime, client_changed) = app.update_settings(&patch).await?;
     if runtime.scan != Some(scan_before) {
         crate::jobs::chd::apply_setting(&app).await?;
@@ -361,8 +360,7 @@ async fn put_settings(
         Recompute::enqueue_all(&app).await?;
     }
     if runtime.prefs.launch != prefs_before.launch || transfer_changed {
-        let status = snapshot(&app).await;
-        app.events.publish(EventKind::Status, &status);
+        crate::status::publish(&app).await;
     }
     Ok(Json(runtime))
 }

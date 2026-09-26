@@ -15,7 +15,6 @@ use crate::db::downloads::{self as rows, DownloadId, DownloadState, Observed, Po
 use crate::db::settings::{self, keys};
 use crate::db::sources::{self, SourceId};
 use crate::error::Result;
-use crate::events::EventKind;
 use crate::jobs::detect_client::ClientStatus;
 
 /// Consecutive failed polls after which the client is shown unreachable.
@@ -378,8 +377,7 @@ async fn set_reachable(app: &AppState, reachable: bool) -> Result<()> {
         })
         .await?;
     if changed {
-        let status = crate::status::snapshot(app).await;
-        app.events.publish(EventKind::Status, &status);
+        crate::status::publish(app).await;
     }
     Ok(())
 }

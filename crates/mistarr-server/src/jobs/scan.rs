@@ -88,7 +88,8 @@ pub async fn enqueue_if_games_dir_exists(
     if !row.is_some_and(|r| r.enabled) {
         return Ok(None);
     }
-    let games_root = app.config().paths.games;
+    let config = app.config();
+    let games_root = &config.paths.games;
     let present = std::iter::once(platform.core_dir)
         .chain(platform.legacy_dirs.iter().copied())
         .any(|name| games_root.join(name).is_dir());

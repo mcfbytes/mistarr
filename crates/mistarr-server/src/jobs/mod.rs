@@ -323,7 +323,7 @@ impl Scheduler {
             app.events.publish(EventKind::JobProgress, &queued);
             app.scheduler.dispatch(id, job)?;
             if app.gate.state().hold(lane).is_some() {
-                publish_status(app).await;
+                crate::status::publish(app).await;
             }
         }
         Ok(id)
@@ -430,15 +430,10 @@ async fn after_heavy(app: &Arc<AppState>) {
                 tracing::info!("heavy queue drained; run-now override ended");
             }
         }
-        Ok(_) if app.gate.state().core_running() => publish_status(app).await,
+        Ok(_) if app.gate.state().core_running() => crate::status::publish(app).await,
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "cannot read the heavy queue"),
     }
-}
-
-async fn publish_status(app: &AppState) {
-    let status = crate::status::snapshot(app).await;
-    app.events.publish(EventKind::Status, &status);
 }
 
 /// What [`reconcile`] did with the jobs a previous process left open.

@@ -474,10 +474,10 @@ impl DatImport {
         members: &[Member],
         source_file: &str,
     ) -> Result<Ram<Vec<Outcome>>> {
-        let memory = ctx.app.config().memory;
-        let floor = memory.import_floor_mib.saturating_mul(1024 * 1024);
+        let config = ctx.app.config();
+        let floor = config.memory.import_floor_mib.saturating_mul(1024 * 1024);
         let plan = ram::Plan {
-            dir: memory.import_dir,
+            dir: config.memory.import_dir.clone(),
             floor,
             job: ctx.id.0,
             input: members_size(&self.path, members),

@@ -100,9 +100,10 @@ pub async fn launch_title(app: &AppState, id: TitleId) -> Result<Launched, ApiEr
             "not every file of this entry is in the collection",
         ));
     }
-    let paths = app.config().paths;
+    let config = app.config();
     let dir = app.options.launch_dir.clone();
     let launched = crate::threads::run(crate::threads::label::LAUNCH, move || {
+        let paths = &config.paths;
         let launched = plan_title(&title, &paths.root, &paths.games, &dir)?;
         sink.send(&launched.1).map_err(command_error)?;
         Ok::<_, ApiError>(launched.0)
@@ -148,7 +149,7 @@ pub async fn launch_core(app: &AppState, id: &str) -> Result<Launched, ApiError>
             "arcade cores start from an MRA; launch an arcade title instead",
         ));
     }
-    let root = app.config().paths.root;
+    let root = app.config().paths.root.clone();
     let launched = crate::threads::run(crate::threads::label::LAUNCH, move || {
         let core = mister::find_core(&root, row).ok_or_else(no_core)?;
         let line = mister::load_core(&core.path).map_err(command_error)?;

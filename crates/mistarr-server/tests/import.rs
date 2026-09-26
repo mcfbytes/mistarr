@@ -49,7 +49,7 @@ fn staging(b: &Booted) -> PathBuf {
 }
 
 fn games(b: &Booted) -> PathBuf {
-    b.running.app.config().paths.games
+    b.running.app.config().paths.games.clone()
 }
 
 fn write(path: &Path, data: &[u8]) {

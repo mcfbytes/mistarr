@@ -173,7 +173,7 @@ impl Pass {
 async fn catalogue(ctx: &JobContext) -> Result<()> {
     let config = ctx.app.config();
     let arcade = config.paths.root.join(ARCADE_DIR);
-    let games = config.paths.games;
+    let games = config.paths.games.clone();
     ctx.checkpoint().await?;
     let listed = crate::threads::run(crate::threads::label::ARCADE, {
         let arcade = arcade.clone();

@@ -15,7 +15,7 @@ use crate::config::{Config, RuntimeSettings, SettingsPatch};
 use crate::db::settings::{self, keys};
 use crate::db::{self, Db};
 use crate::error::{Error, Result};
-use crate::events::{EventBus, EventKind};
+use crate::events::EventBus;
 use crate::jobs::core_limits::ClientHold;
 use crate::jobs::detect_client::{ClientStatus, DetectClient};
 use crate::jobs::gate::Gate;
@@ -116,7 +116,7 @@ impl Default for Options {
 
 /// Everything request handlers and jobs share.
 pub struct AppState {
-    config: RwLock<Config>,
+    config: RwLock<Arc<Config>>,
     /// The database.
     pub db: Db,
     /// The SSE bus.
@@ -167,7 +167,7 @@ impl AppState {
     #[must_use]
     pub fn new(config: Config, db: Db, options: Options) -> Arc<Self> {
         Arc::new(Self {
-            config: RwLock::new(config),
+            config: RwLock::new(Arc::new(config)),
             db,
             events: EventBus::new(),
             gate: Arc::new(Gate::new()),
@@ -321,24 +321,23 @@ impl AppState {
         mistarr_clients::launch::Launcher {
             transmission_opt_in: self.options.transmission_opt_in.clone(),
             transmission_init: self.options.transmission_init.clone(),
-            data_dir: self.config().paths.data,
+            data_dir: self.config().paths.data.clone(),
             search_path: self.options.client_search_path.clone(),
             timeout: mistarr_clients::launch::START_TIMEOUT,
         }
     }
 
-    /// A copy of the effective config.
+    /// The effective config; a change made later replaces it rather than altering it.
     #[must_use]
-    pub fn config(&self) -> Config {
-        self.config
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
+    pub fn config(&self) -> Arc<Config> {
+        Arc::clone(&self.config.read().unwrap_or_else(PoisonError::into_inner))
     }
 
-    /// Changes the effective config in place.
+    /// Changes the effective config, copying it first while an earlier [`AppState::config`]
+    /// still holds it.
     pub fn update_config(&self, f: impl FnOnce(&mut Config)) {
-        f(&mut self.config.write().unwrap_or_else(PoisonError::into_inner));
+        let mut slot = self.config.write().unwrap_or_else(PoisonError::into_inner);
+        f(Arc::make_mut(&mut slot));
     }
 
     /// A receiver that turns true when the server is shutting down.
@@ -363,7 +362,7 @@ impl AppState {
     /// the effective config is then unchanged.
     pub async fn update_settings(&self, patch: &SettingsPatch) -> Result<(RuntimeSettings, bool)> {
         let _serial = self.settings_write.lock().await;
-        let mut next = self.config();
+        let mut next = Config::clone(&self.config());
         let before = next.client.clone();
         next.apply(patch);
         let runtime = next.runtime();
@@ -699,8 +698,7 @@ async fn resume_scans(
 
 /// Marks platforms whose core is installed under the SD root and returns them.
 pub(crate) fn detect_cores(app: &AppState) -> Result<Vec<mistarr_core::PlatformId>> {
-    let root = app.config().paths.root;
-    let cores = mistarr_mister::corename::installed_cores(&root);
+    let cores = mistarr_mister::corename::installed_cores(&app.config().paths.root);
     let present: Vec<_> = cores.into_iter().flat_map(|c| c.platforms).collect();
     tracing::info!(platforms = present.len(), "installed cores detected");
     app.db
@@ -730,8 +728,7 @@ async fn scan_on_timer(app: Arc<AppState>, interval: Duration) {
 async fn publish_gate_changes(app: Arc<AppState>) {
     let mut rx = app.gate.subscribe();
     while rx.changed().await.is_ok() {
-        let status = crate::status::snapshot(&app).await;
-        app.events.publish(EventKind::Status, &status);
+        crate::status::publish(&app).await;
     }
 }
 
@@ -801,8 +798,14 @@ mod tests {
     #[tokio::test]
     async fn config_updates_are_visible() {
         let (_dir, app) = testutil::state();
+        let held = app.config();
+        assert!(Arc::ptr_eq(&held, &app.config()), "reads share one config");
         app.update_config(|c| c.limits.up_kbps_core = 3);
         assert_eq!(app.config().limits.up_kbps_core, 3);
+        assert_ne!(
+            held.limits.up_kbps_core, 3,
+            "a config handed out stays as it was"
+        );
         assert!(!*app.shutdown_signal().borrow());
         app.begin_shutdown();
         assert!(*app.shutdown_signal().borrow());

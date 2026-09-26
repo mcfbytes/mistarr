@@ -47,7 +47,7 @@ type Outcome<T> = std::result::Result<T, RenameError>;
 /// [`RenameError`] naming why the file was not renamed.
 pub async fn rename(app: &AppState, group: TitleId, file_id: FileId) -> Outcome<String> {
     let (file, entry, rom) = subject(app, group, file_id).await?;
-    let games = app.config().paths.games;
+    let games = app.config().paths.games.clone();
     let to = canonical_path(&file, &entry, &rom, &games).await?;
     let (from_rel, to_rel) = (file.rel_path.clone(), rel_string(&to));
     if from_rel == to_rel {

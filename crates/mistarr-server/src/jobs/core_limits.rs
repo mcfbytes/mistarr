@@ -18,7 +18,6 @@ use crate::config::LimitsConfig;
 use crate::db::deferred::{self, Op};
 use crate::db::settings::{self, keys};
 use crate::db::sources;
-use crate::events::EventKind;
 use crate::freeze::{self, FreezeError, Frozen, Kill};
 use crate::threads::{self, label};
 
@@ -544,7 +543,7 @@ async fn freeze_client(
     .await;
     match done {
         Ok(Ok(frozen)) => {
-            announce(app).await;
+            crate::status::publish(app).await;
             Ok(Ok(frozen))
         }
         Ok(Err(e @ (FreezeError::Kill(_) | FreezeError::ShuttingDown))) => {
@@ -1032,13 +1031,8 @@ fn current_hold(app: &AppState, a: &Applied) -> Option<ClientHold> {
 /// Records how the client is held and publishes the status when that changed.
 async fn publish(app: &AppState, hold: Option<ClientHold>) {
     if app.set_client_hold(hold) {
-        announce(app).await;
+        crate::status::publish(app).await;
     }
-}
-
-async fn announce(app: &AppState) {
-    let status = crate::status::snapshot(app).await;
-    app.events.publish(EventKind::Status, &status);
 }
 
 /// At startup, resumes a client a previous run left frozen, unless a core

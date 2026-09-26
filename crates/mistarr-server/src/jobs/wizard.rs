@@ -65,7 +65,7 @@ mod tests {
     use mistarr_clients::ClientKind;
 
     async fn complete_everything(app: &Arc<AppState>) {
-        std::fs::create_dir_all(app.config().paths.games).expect("mkdir");
+        std::fs::create_dir_all(&app.config().paths.games).expect("mkdir");
         app.db
             .write(|c| {
                 c.execute_batch(

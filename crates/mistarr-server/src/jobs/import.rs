@@ -241,7 +241,7 @@ async fn import(ctx: &JobContext, id: DownloadId) -> Result<()> {
     let placing = Placing {
         ctx,
         staging: config.paths.staging(),
-        games: config.paths.games,
+        games: config.paths.games.clone(),
         platform,
         adapter,
         source: &source,
