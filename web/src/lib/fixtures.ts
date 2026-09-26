@@ -248,6 +248,15 @@ export function mockStatus(): SystemStatus {
   return fixtureStatus;
 }
 
+/** Whether the mock settings load should fail, from localStorage `mistarr.mockSettingsFail`. */
+export function mockSettingsShouldFail(): boolean {
+  try {
+    return localStorage.getItem('mistarr.mockSettingsFail') === '1';
+  } catch {
+    return false;
+  }
+}
+
 /** Keeps what a mock save would send, in localStorage `mistarr.mockSavedSettings`. */
 export function recordMockSave(settings: Settings): void {
   try {
@@ -605,6 +614,40 @@ export const fixtureSources: Source[] = [
     pending_binding: null
   }
 ];
+
+/**
+ * `fixtureSources` plus `n` synthetic extra rows, from localStorage
+ * `mistarr.mockSourceCount`, to exercise a list past the API's page default.
+ */
+export function mockSources(): Source[] {
+  let extra = 0;
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockSourceCount') ?? '0');
+    extra = typeof parsed === 'number' ? parsed : 0;
+  } catch {
+    // Storage blocked or the value is not JSON: no extra rows.
+  }
+  const generated: Source[] = Array.from({ length: extra }, (_, i) => ({
+    id: 1000 + i,
+    infohash: (1000 + i).toString(16).padStart(40, '0'),
+    display_name: `Generated bundle ${i + 1}`,
+    origin_file: `generated-bundle-${i + 1}.torrent`,
+    platform_id: null,
+    bind_score: null,
+    state: 'unbound',
+    reason: null,
+    seed_policy: 'none',
+    file_count: 1,
+    matched_count: 0,
+    total_size: 1_000_000,
+    client_id: null,
+    added_at: 1_770_000_000 + i,
+    suggested_platform_id: null,
+    user_binding: false,
+    pending_binding: null
+  }));
+  return [...fixtureSources, ...generated];
+}
 
 export const fixtureIncomingDats: IncomingFile[] = [
   {

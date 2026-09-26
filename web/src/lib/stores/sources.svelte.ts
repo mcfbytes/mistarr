@@ -1,5 +1,6 @@
 import { api } from '../api';
-import { fixtureSources } from '../fixtures';
+import { mockSources } from '../fixtures';
+import { readAllPages } from '../paging';
 import type { Source, SourceState } from '../types';
 
 const isMock = import.meta.env.VITE_MOCK === '1';
@@ -13,7 +14,11 @@ export function getSources(): Source[] {
 
 export async function loadSources(): Promise<void> {
   // Mock mode keeps its patched rows, so a change made on one page shows on the next.
-  sources = isMock ? (sources.length > 0 ? sources : fixtureSources) : (await api.sources()).items;
+  sources = isMock
+    ? sources.length > 0
+      ? sources
+      : mockSources()
+    : await readAllPages((limit, offset) => api.sources(limit, offset), (s) => s.id);
 }
 
 export function findSource(id: number): Source | undefined {

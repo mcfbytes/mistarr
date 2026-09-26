@@ -1,5 +1,6 @@
 import { api } from '../api';
 import { mockExtraPlatforms, scenarioPlatforms } from '../fixtures';
+import { readAllPages } from '../paging';
 import type { Platform } from '../types';
 
 const isMock = import.meta.env.VITE_MOCK === '1';
@@ -16,7 +17,9 @@ export function platformsLoaded(): boolean {
 }
 
 export async function loadPlatforms(): Promise<void> {
-  platforms = isMock ? [...scenarioPlatforms(), ...mockExtraPlatforms()] : (await api.platforms()).items;
+  platforms = isMock
+    ? [...scenarioPlatforms(), ...mockExtraPlatforms()]
+    : await readAllPages((limit, offset) => api.platforms(limit, offset), (p) => p.id);
   loaded = true;
 }
 

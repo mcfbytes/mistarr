@@ -1,5 +1,6 @@
 import { api } from '../api';
 import { fixtureIncomingDats, fixtureIncomingSources } from '../fixtures';
+import { readAllPages } from '../paging';
 import type { IncomingFile } from '../types';
 
 const isMock = import.meta.env.VITE_MOCK === '1';
@@ -21,8 +22,11 @@ export async function loadIncoming(which: Watched): Promise<void> {
     };
     return;
   }
-  const page = which === 'dats' ? await api.datsIncoming() : await api.sourcesIncoming();
-  lists = { ...lists, [which]: page.items };
+  const items =
+    which === 'dats'
+      ? await readAllPages((limit, offset) => api.datsIncoming(limit, offset), (f) => f.file)
+      : await readAllPages((limit, offset) => api.sourcesIncoming(limit, offset), (f) => f.file);
+  lists = { ...lists, [which]: items };
 }
 
 /** Replaces or removes one listed file until the next read of the list. */

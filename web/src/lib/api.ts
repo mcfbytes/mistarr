@@ -120,18 +120,22 @@ export const api = {
   cores: (): Promise<CoresResult> => request('/system/cores', { method: 'POST' }),
   pause: (): Promise<SystemStatus> => request('/system/pause', { method: 'POST' }),
   resume: (): Promise<SystemStatus> => request('/system/resume', { method: 'POST' }),
-  jobs: (): Promise<Paged<Job>> => request('/system/jobs'),
-  recentJobs: (): Promise<Paged<Job>> => request('/system/jobs/recent'),
+  jobs: (limit: number, offset: number): Promise<Paged<Job>> => request(`/system/jobs${query({ limit, offset })}`),
+  recentJobs: (limit: number, offset: number): Promise<Paged<Job>> =>
+    request(`/system/jobs/recent${query({ limit, offset })}`),
   wizardDone: (): Promise<WizardStatus> => request('/system/wizard/done', { method: 'POST' }),
   startClient: (kind: ClientKind): Promise<SystemStatus> =>
     request('/system/client/start', { method: 'POST', body: JSON.stringify({ kind }) }),
-  datsIncoming: (): Promise<Paged<IncomingFile>> => request('/dats/incoming'),
-  sourcesIncoming: (): Promise<Paged<IncomingFile>> => request('/sources/incoming'),
+  datsIncoming: (limit: number, offset: number): Promise<Paged<IncomingFile>> =>
+    request(`/dats/incoming${query({ limit, offset })}`),
+  sourcesIncoming: (limit: number, offset: number): Promise<Paged<IncomingFile>> =>
+    request(`/sources/incoming${query({ limit, offset })}`),
   settings: (): Promise<Settings> => request('/system/settings'),
   putSettings: (patch: SettingsPatch): Promise<Settings> =>
     request('/system/settings', { method: 'PUT', body: JSON.stringify(patch) }),
 
-  platforms: (): Promise<Paged<Platform>> => request('/platforms'),
+  platforms: (limit: number, offset: number): Promise<Paged<Platform>> =>
+    request(`/platforms${query({ limit, offset })}`),
   unidentified: (id: string, offset: number, limit: number): Promise<Paged<UnidentifiedFile>> =>
     request(`/platforms/${id}/unidentified${query({ offset, limit })}`),
   setPlatform: (id: string, enabled: boolean): Promise<Platform> =>
@@ -169,7 +173,7 @@ export const api = {
   deleteRejectedDat: (file: string): Promise<void> =>
     request(`/dats/rejected/${encodeURIComponent(file)}`, { method: 'DELETE' }),
 
-  sources: (): Promise<Paged<Source>> => request('/sources'),
+  sources: (limit: number, offset: number): Promise<Paged<Source>> => request(`/sources${query({ limit, offset })}`),
   uploadSource: (file: File): Promise<Uploaded> => {
     const form = new FormData();
     form.append('file', file);
@@ -194,11 +198,12 @@ export const api = {
   sourcePreview: (id: number, signal?: AbortSignal): Promise<SourcePreview> =>
     request(`/sources/${id}/preview`, { signal: signal ?? null }),
 
-  downloads: (state?: DownloadState): Promise<Paged<Download>> =>
-    request(`/downloads${query({ state })}`),
+  downloads: (limit: number, offset: number, state?: DownloadState): Promise<Paged<Download>> =>
+    request(`/downloads${query({ limit, offset, state })}`),
   retryDownload: (id: number): Promise<Download> => request(`/downloads/${id}/retry`, { method: 'POST' }),
   cancelDownload: (id: number): Promise<Download> => request(`/downloads/${id}`, { method: 'DELETE' }),
-  imports: (): Promise<Paged<ImportLogEntry>> => request('/imports')
+  imports: (limit: number, offset: number): Promise<Paged<ImportLogEntry>> =>
+    request(`/imports${query({ limit, offset })}`)
 };
 
 const RECONNECT_MIN_MS = 1000;
