@@ -1,3 +1,4 @@
+import { PAGE_SIZE } from './paging';
 import { BROWSE_FLAGS } from './types';
 import type {
   CoresResult,
@@ -650,21 +651,19 @@ export function mockSources(): Source[] {
   return [...fixtureSources, ...generated];
 }
 
-const PAGE_SIZE_CAP = 1000;
-
 /** A test's override of the mock page size, from `mistarr.mockPageCap`; the API's own cap otherwise. */
 function mockPageCap(): number {
   try {
     const n = Number(localStorage.getItem('mistarr.mockPageCap'));
-    return Number.isInteger(n) && n > 0 ? Math.min(n, PAGE_SIZE_CAP) : PAGE_SIZE_CAP;
+    return Number.isInteger(n) && n > 0 ? Math.min(n, PAGE_SIZE) : PAGE_SIZE;
   } catch {
-    return PAGE_SIZE_CAP;
+    return PAGE_SIZE;
   }
 }
 
-/** Mimics the server's `?limit=&offset=` rules (default 100, capped at 1000) over an array. */
-function mockPage<T>(all: T[], limit: number | undefined, offset: number): Paged<T> {
-  const capped = Math.min(limit ?? 100, mockPageCap());
+/** Mimics the server's `?limit=&offset=` rules (capped at `PAGE_SIZE`) over an array. */
+function mockPage<T>(all: T[], limit: number, offset: number): Paged<T> {
+  const capped = Math.min(limit, mockPageCap());
   return { items: all.slice(offset, offset + capped), total: all.length };
 }
 

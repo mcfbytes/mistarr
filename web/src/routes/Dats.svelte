@@ -23,8 +23,10 @@
 
   onMount(() => {
     void loadDatsList();
+    // Falls back to the id in platformName(); a miss retries at the next resync.
     void loadPlatforms().catch(() => undefined);
     if (!getStatus()) {
+      // Only feeds the dats-dir hint text; a miss just hides it until SSE resync.
       void loadStatus().catch(() => undefined);
     }
   });

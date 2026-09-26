@@ -44,6 +44,7 @@ function scheduleReloadPlatforms(): void {
   }
   platformsTimer = setTimeout(() => {
     platformsTimer = null;
+    // A miss leaves counts stale until the next resync or matching job.
     void loadPlatforms().catch(() => undefined);
     void reloadTitles();
   }, 500);
@@ -153,6 +154,7 @@ export function startEvents(): void {
   subscriber = new EventSubscriber(handle, (connected) => {
     setConnected(connected);
     if (connected) {
+      // A miss leaves the running list stale until the next job.progress event or resync.
       void loadJobs().catch(() => undefined);
     }
   });

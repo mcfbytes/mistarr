@@ -122,6 +122,8 @@
     try {
       await api.deleteSource(id);
       await loadSourcesList();
+      // The removed row is gone from the table; land focus on the heading instead of the body.
+      document.getElementById('sources-heading')?.focus();
     } catch (err) {
       showToast(errorMessage(err));
       void focusButton(id, 'remove');
@@ -136,7 +138,7 @@
 </script>
 
 <div class="page">
-  <h1>Sources</h1>
+  <h1 id="sources-heading" tabindex="-1">Sources</h1>
   <ClientHeld />
 
   <div class="card upload">
