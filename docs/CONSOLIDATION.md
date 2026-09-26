@@ -75,18 +75,18 @@ graph LR
 
 Sonnet · `web/` · branch `wp-52-web-lists`
 
-- [ ] The platforms, sources, downloads, imports, jobs, recent-jobs and both
+- [x] The platforms, sources, downloads, imports, jobs, recent-jobs and both
   incoming stores read every page, as `dats.svelte.ts` does, so no list stops
   at the API's default limit of 100.
-- [ ] A failed title load shows a not-found or error state with Retry, following
+- [x] A failed title load shows a not-found or error state with Retry, following
   SourceDetail's `missing`/`loadError` pattern; the page never stays on
   "Loading…".
-- [ ] A failed settings load on System shows an error with Retry instead of
+- [x] A failed settings load on System shows an error with Retry instead of
   hiding the Settings section.
-- [ ] No bare `void loadX()` remains in routes, `App.svelte` or `events.ts`:
+- [x] No bare `void loadX()` remains in routes, `App.svelte` or `events.ts`:
   each failure is recorded and shown, or caught with a stated reason.
-- [ ] Deleting a source asks for confirmation inline, as Dats does.
-- [ ] Playwright: a mock with 150 sources lists all 150; a missing title shows
+- [x] Deleting a source asks for confirmation inline, as Dats does.
+- [x] Playwright: a mock with 150 sources lists all 150; a missing title shows
   the error state; a failed settings load shows Retry.
 
 ### WP-53 Core codecs
