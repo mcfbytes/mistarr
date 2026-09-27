@@ -73,7 +73,7 @@ async fn boot(dir: tempfile::TempDir, on: bool) -> Booted {
 }
 
 fn games(b: &Booted) -> std::path::PathBuf {
-    b.running.app.config().paths.games
+    b.running.app.config().paths.games.clone()
 }
 
 /// Seeds a DAT title `game` on `platform` with a cue rom and one rom per track, named as

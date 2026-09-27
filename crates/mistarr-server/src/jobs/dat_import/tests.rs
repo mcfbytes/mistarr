@@ -1297,20 +1297,19 @@ async fn recompute_matches_unmatched_files_and_updates_have() {
     let (_dir, app) = state();
     let gb = PlatformId("gb".into());
     app.db
-        .write(move |c| {
-            let tx = c.transaction()?;
+        .write_tx(move |tx| {
             let quest = ("Example Quest (USA)", "Example Quest (USA).gb");
-            files::seed_rom_fixture(&tx, &gb, quest.0, quest.1, &sums(1), "good")?;
+            files::seed_rom_fixture(tx, &gb, quest.0, quest.1, &sums(1), "good")?;
             let manor = ("Mock Manor (USA)", "Mock Manor (USA).gb");
-            files::seed_rom_fixture(&tx, &gb, manor.0, manor.1, &sums(2), "good")?;
-            titles::recompute_platform(&tx, "gb", &Prefs::default())?;
+            files::seed_rom_fixture(tx, &gb, manor.0, manor.1, &sums(2), "good")?;
+            titles::recompute_platform(tx, "gb", &Prefs::default())?;
             // More strays than one chunk, so the cursor pages past files that never match.
             for n in 0..300 {
-                unmatched_file(&tx, &gb, &format!("GAMEBOY/stray {n}.gb"), &sums(1000 + n))?;
+                unmatched_file(tx, &gb, &format!("GAMEBOY/stray {n}.gb"), &sums(1000 + n))?;
             }
-            unmatched_file(&tx, &gb, "GAMEBOY/Example Quest (USA).gb", &sums(1))?;
-            unmatched_file(&tx, &gb, "GAMEBOY/Other Name.gb", &sums(2))?;
-            crate::db::commit(tx)
+            unmatched_file(tx, &gb, "GAMEBOY/Example Quest (USA).gb", &sums(1))?;
+            unmatched_file(tx, &gb, "GAMEBOY/Other Name.gb", &sums(2))?;
+            Ok(())
         })
         .await
         .expect("seed");

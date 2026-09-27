@@ -41,7 +41,7 @@ use crate::db::imports::{self, EntryRom, ImportAction, TitleEntry};
 use crate::db::jobs as job_rows;
 use crate::db::sources::{self, SourceId, SourceRow};
 use crate::db::{downloads_import, titles::TitleId};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::events::EventKind;
 
 /// `jobs.kind` of [`ImportJob`].
@@ -206,10 +206,6 @@ fn stat(meta: &fs::Metadata) -> (i64, i64) {
     (size, mtime)
 }
 
-fn task(e: &tokio::task::JoinError) -> Error {
-    Error::Task(e.to_string())
-}
-
 async fn import(ctx: &JobContext, id: DownloadId) -> Result<()> {
     let app = &ctx.app;
     let Some(row) = app.db.read(move |c| downloads::get(c, id)).await? else {
@@ -245,7 +241,7 @@ async fn import(ctx: &JobContext, id: DownloadId) -> Result<()> {
     let placing = Placing {
         ctx,
         staging: config.paths.staging(),
-        games: config.paths.games,
+        games: config.paths.games.clone(),
         platform,
         adapter,
         source: &source,
@@ -406,17 +402,16 @@ impl Placing<'_> {
             None => None,
         };
         let (staging, hash) = (self.staging.clone(), self.source.infohash.clone());
-        let found = crate::threads::blocking(crate::threads::label::IMPORT, move || {
+        let found = crate::threads::run(crate::threads::label::IMPORT, move || {
             locate(&staging, &hash, &staged, inner.as_deref())
         })
-        .await
-        .map_err(|e| task(&e))?;
+        .await?;
         Ok(found.ok_or(OUTSIDE_STAGING))
     }
 
     /// True when the staged file is gone because an earlier attempt placed it.
     async fn already_placed(&self, local: &Path, rom_id: i64) -> Result<bool> {
-        if local.exists() {
+        if exists(local).await? {
             return Ok(false);
         }
         self.app()
@@ -428,19 +423,17 @@ impl Placing<'_> {
     async fn hash(&self, local: &Path) -> Result<std::result::Result<Vec<Hashed>, String>> {
         let (path, rule) = (local.to_path_buf(), self.rule());
         let hashed =
-            crate::threads::blocking(crate::threads::label::HASH, move || hash_item(&path, rule))
-                .await
-                .map_err(|e| task(&e))?;
+            crate::threads::run(crate::threads::label::HASH, move || hash_item(&path, rule))
+                .await?;
         Ok(hashed.map_err(|e| format!("cannot read the staged file: {e}")))
     }
 
     async fn head(&self, path: &Path, member: Option<&str>) -> Result<Vec<u8>> {
         let (path, member) = (path.to_path_buf(), member.map(str::to_owned));
-        let head = crate::threads::blocking(crate::threads::label::IMPORT, move || {
+        let head = crate::threads::run(crate::threads::label::IMPORT, move || {
             read_head(&path, member.as_deref())
         })
-        .await
-        .map_err(|e| task(&e))?;
+        .await?;
         Ok(head.unwrap_or_default())
     }
 
@@ -502,11 +495,10 @@ impl Placing<'_> {
             self.source.infohash.clone(),
             local.to_path_buf(),
         );
-        let moved = crate::threads::blocking(crate::threads::label::IMPORT, move || {
+        let moved = crate::threads::run(crate::threads::label::IMPORT, move || {
             quarantine(&staging, &hash, &item, &text)
         })
-        .await
-        .map_err(|e| task(&e))?;
+        .await?;
         let dst = moved.unwrap_or_else(|e| {
             tracing::warn!(download = %row, error = %e, "cannot move the file to quarantine");
             local.to_path_buf()
@@ -543,8 +535,7 @@ impl Placing<'_> {
         let settled = self
             .app()
             .db
-            .write(move |c| {
-                let tx = c.transaction()?;
+            .write_tx(move |tx| {
                 let quarantined = Quarantined {
                     row,
                     rom_id,
@@ -553,8 +544,7 @@ impl Placing<'_> {
                     reason: &reason,
                     detail: &detail,
                 };
-                let settled = quarantined.record(&tx, crate::unix_now())?;
-                crate::db::commit(tx)?;
+                let settled = quarantined.record(tx, crate::unix_now())?;
                 Ok(settled)
             })
             .await?;
@@ -572,7 +562,7 @@ impl Placing<'_> {
         if self.already_placed(&local, row.rom_id).await? {
             return finish(app, &[row.id], DownloadState::Done, None).await;
         }
-        if !local.exists() {
+        if !exists(&local).await? {
             if let Some(other) = self.placed_as_other(row).await? {
                 return self.settle_other(row, &other).await;
             }
@@ -607,7 +597,7 @@ impl Placing<'_> {
     ) -> Result<()> {
         let local = local.to_path_buf();
         let head = self.head(&local, hashed.member.as_deref()).await?;
-        let size = fs::metadata(&local).map_or(0, |m| m.len());
+        let size = size_of(&local).await?;
         let staged = match &hashed.member {
             None => StagedFile {
                 path: local.clone(),
@@ -735,19 +725,17 @@ impl Placing<'_> {
         let settled = self
             .app()
             .db
-            .write(move |c| {
-                let tx = c.transaction()?;
+            .write_tx(move |tx| {
                 let now = crate::unix_now();
                 imports::log(
-                    &tx,
+                    tx,
                     now,
                     Some(id.0),
                     Some(file),
                     ImportAction::SkippedExisting,
                     &detail,
                 )?;
-                let settled = redirect.settle(&tx, id, now)?;
-                crate::db::commit(tx)?;
+                let settled = redirect.settle(tx, id, now)?;
                 Ok(settled)
             })
             .await?;
@@ -786,10 +774,8 @@ impl Placing<'_> {
         let settled = self
             .app()
             .db
-            .write(move |c| {
-                let tx = c.transaction()?;
-                let settled = redirect.settle(&tx, id, crate::unix_now())?;
-                crate::db::commit(tx)?;
+            .write_tx(move |tx| {
+                let settled = redirect.settle(tx, id, crate::unix_now())?;
                 Ok(settled)
             })
             .await?;
@@ -865,7 +851,7 @@ impl Placing<'_> {
         }
         let staged = StagedFile {
             path: local.clone(),
-            size: fs::metadata(&local).map_or(0, |m| m.len()),
+            size: size_of(&local).await?,
             kind: StagedKind::Zip,
             head: Vec::new(),
             members: staged_members,
@@ -1102,11 +1088,10 @@ impl Placing<'_> {
             originals.to_vec(),
         );
         self.ctx.checkpoint().await?;
-        let applied = crate::threads::blocking(crate::threads::label::IMPORT, move || {
+        let applied = crate::threads::run(crate::threads::label::IMPORT, move || {
             apply_plan(&staging, &item, &scratch, &games, &steps, &originals)
         })
-        .await
-        .map_err(|e| task(&e))?;
+        .await?;
         let pieces = match &applied {
             Ok(Placed::All(stats) | Placed::Partly(stats, _)) => {
                 self.with_added_header(plan, &targets, stats, pieces)
@@ -1166,9 +1151,8 @@ impl Placing<'_> {
         }
         let (path, rule) = (self.games.join(&targets[0].rel), self.rule());
         let hashed =
-            crate::threads::blocking(crate::threads::label::HASH, move || hash_item(&path, rule))
-                .await
-                .map_err(|e| task(&e))?;
+            crate::threads::run(crate::threads::label::HASH, move || hash_item(&path, rule))
+                .await?;
         if let Err(e) = &hashed {
             tracing::warn!(error = %e, "cannot hash the placed file again");
         }
@@ -1186,7 +1170,7 @@ impl Placing<'_> {
                 continue;
             };
             let rel = rel_string(to);
-            let exists = self.games.join(to).exists();
+            let exists = exists(&self.games.join(to)).await?;
             let whole_zip = whole.is_some_and(|w| w == from);
             let (pid, r) = (self.pid(), rel.clone());
             let rows = self
@@ -1250,30 +1234,28 @@ impl Placing<'_> {
         let (ids, redirect) = (ids.to_vec(), self.redirect.clone());
         self.app()
             .db
-            .write(move |c| {
-                let tx = c.transaction()?;
+            .write_tx(move |tx| {
                 let now = crate::unix_now();
                 let mut done = Vec::new();
                 for t in &targets {
-                    record_target(&tx, &scope, t, &pieces, now, &mut done)?;
+                    record_target(tx, &scope, t, &pieces, now, &mut done)?;
                 }
                 let mut settled = Settled::default();
                 match (&redirect, complete) {
                     (Some(r), true) => {
                         for id in &ids {
-                            let s = r.settle(&tx, *id, now)?;
+                            let s = r.settle(tx, *id, now)?;
                             settled.moved.extend(s.moved);
                             settled.cancelled.extend(s.cancelled);
                             settled.again = settled.again.or(s.again);
                         }
                     }
                     (None, true) => {
-                        downloads::move_all(&tx, &ids, DownloadState::Done, None, now)?;
-                        prove_single(&tx, &pieces)?;
+                        downloads::move_all(tx, &ids, DownloadState::Done, None, now)?;
+                        prove_single(tx, &pieces)?;
                     }
                     (_, false) => {}
                 }
-                crate::db::commit(tx)?;
                 Ok((done, settled))
             })
             .await
@@ -1342,11 +1324,26 @@ pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) -> bool {
         }
     }
     let dir = app.config().paths.staging().join(&source.infohash);
-    let _ = crate::threads::blocking(crate::threads::label::IMPORT, move || {
+    let _ = crate::threads::run(crate::threads::label::IMPORT, move || {
         place::remove_empty_dirs(&dir);
     })
     .await;
     true
+}
+
+/// Whether `path` exists, asked on a blocking thread.
+async fn exists(path: &Path) -> Result<bool> {
+    let path = path.to_path_buf();
+    crate::threads::run(crate::threads::label::IMPORT, move || path.exists()).await
+}
+
+/// The size of the file at `path`, 0 when it cannot be read, asked on a blocking thread.
+async fn size_of(path: &Path) -> Result<u64> {
+    let path = path.to_path_buf();
+    crate::threads::run(crate::threads::label::IMPORT, move || {
+        fs::metadata(&path).map_or(0, |m| m.len())
+    })
+    .await
 }
 
 /// A download whose staged item was quarantined, for [`Quarantined::record`].

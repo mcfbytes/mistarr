@@ -587,7 +587,7 @@ async fn run(kind: Kind) {
     config.transfer.pause_client_while_playing = false;
     let running = start(&config, &home).await;
     let addr = running.addr;
-    let paths = running.app.config().paths;
+    let paths = running.app.config().paths.clone();
     let probe = Probe {
         addr,
         client: Arc::clone(&fetching),

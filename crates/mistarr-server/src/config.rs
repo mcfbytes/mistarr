@@ -405,15 +405,15 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] when the text is not valid TOML or a value has the wrong type.
+    /// The TOML error when the text is not valid TOML or a value has the wrong type.
     ///
     /// ```
     /// let c = mistarr_server::config::Config::parse("[server]\nlisten = \"127.0.0.1:1\"").unwrap();
     /// assert_eq!(c.server.listen, "127.0.0.1:1");
     /// assert_eq!(c.limits.down_kbps_core, 512);
     /// ```
-    pub fn parse(text: &str) -> Result<Self> {
-        toml::from_str(text).map_err(|e| Error::Config(e.to_string()))
+    pub fn parse(text: &str) -> Result<Self, toml::de::Error> {
+        toml::from_str(text)
     }
 
     /// Loads `explicit` if given, which must exist, else `<data>/mistarr.toml`
@@ -421,8 +421,8 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] when a file exists but cannot be read or parsed, or
-    /// `explicit` does not exist.
+    /// [`Error::ConfigRead`] when a file exists but cannot be read, or `explicit`
+    /// does not exist; [`Error::Config`] when it cannot be parsed.
     ///
     /// ```
     /// use std::path::Path;
@@ -438,9 +438,14 @@ impl Config {
         };
         let mut config = match file {
             Some(path) => {
-                let text = std::fs::read_to_string(&path)
-                    .map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
-                Self::parse(&text).map_err(|e| Error::Config(format!("{}: {e}", path.display())))?
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(source) => return Err(Error::ConfigRead { path, source }),
+                };
+                match Self::parse(&text) {
+                    Ok(config) => config,
+                    Err(source) => return Err(Error::Config { path, source }),
+                }
             }
             None => Self::default(),
         };
@@ -604,11 +609,16 @@ mod tests {
 
     #[test]
     fn bad_values_are_config_errors() {
-        assert!(matches!(
-            Config::parse("[client]\nkind = \"other\""),
-            Err(Error::Config(_))
-        ));
-        assert!(matches!(Config::parse("[[["), Err(Error::Config(_))));
+        assert!(Config::parse("[client]\nkind = \"other\"").is_err());
+        assert!(Config::parse("[[[").is_err());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bad = dir.path().join(CONFIG_FILE);
+        std::fs::write(&bad, "[[[").expect("write");
+        let err = Config::load(Some(&bad), None).expect_err("invalid");
+        assert!(matches!(&err, Error::Config { path, .. } if *path == bad));
+        let missing = dir.path().join("missing.toml");
+        let err = Config::load(Some(&missing), None).expect_err("missing");
+        assert!(matches!(&err, Error::ConfigRead { path, .. } if *path == missing));
     }
 
     #[test]

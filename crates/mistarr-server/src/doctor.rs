@@ -211,12 +211,7 @@ pub fn rebuild_groups(path: &Path) -> crate::error::Result<usize> {
     let data = path.parent().unwrap_or_else(|| Path::new("."));
     let _lock = crate::lock::InstanceLock::acquire(data)?;
     let db = crate::db::Db::open(path)?;
-    db.write_blocking(|c| {
-        let tx = c.transaction()?;
-        let n = groups::rebuild(&tx)?;
-        crate::db::commit(tx)?;
-        Ok(n)
-    })
+    db.write_tx_blocking(|tx| groups::rebuild(tx))
 }
 
 fn mib(bytes: u64) -> String {

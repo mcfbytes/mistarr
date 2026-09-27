@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
-use crate::threads::{blocking, label};
+use crate::threads::{label, run};
 
 /// Bytes gathered before each write, and copied per write onto the card.
 pub const CHUNK_BYTES: usize = crate::db::ram::CHUNK_BYTES;
@@ -109,7 +109,7 @@ impl Spool {
         pace: Pace,
     ) -> Result<Self> {
         let expected = length.unwrap_or(UNKNOWN_GUESS);
-        blocking(label::FETCH, move || {
+        run(label::FETCH, move || {
             let name = format!("{PART_PREFIX}{}-{token}.part", std::process::id());
             let ram = places
                 .ram
@@ -135,8 +135,7 @@ impl Spool {
                 pace,
             })
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?
+        .await?
     }
 
     /// Whether the file is in RAM.
@@ -173,11 +172,11 @@ impl Spool {
         let mut file = self
             .file
             .take()
-            .ok_or_else(|| Error::Fetch("the download was closed".into()))?;
+            .ok_or_else(|| Error::FetchRefused("the download was closed".into()))?;
         let recheck = self.written + len >= self.checked_at + RECHECK_BYTES;
         let (path, places) = (self.path.clone(), self.places.clone());
         let (pace, mut on_card, written) = (Arc::clone(&self.pace), !self.in_ram, self.written);
-        let moved = blocking(label::FETCH, move || -> Result<(File, Option<PathBuf>)> {
+        let moved = run(label::FETCH, move || -> Result<(File, Option<PathBuf>)> {
             let mut moved = None;
             if recheck && on_card && !card_allows(&places.card, RECHECK_BYTES) {
                 return Err(no_room().into());
@@ -203,8 +202,7 @@ impl Spool {
             }
             Ok((file, moved))
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))??;
+        .await??;
         let (file, moved) = moved;
         if let Some(to) = moved {
             tracing::info!("memory ran short during a fetch; it continues on the card");
@@ -270,7 +268,7 @@ impl Spool {
         self.file = None;
         let from = std::mem::take(&mut self.path);
         let (in_ram, pace) = (self.in_ram, Arc::clone(&self.pace));
-        blocking(label::FETCH, move || {
+        run(label::FETCH, move || {
             let renamed = !in_ram && std::fs::rename(&from, &to).is_ok();
             if !renamed {
                 let size = std::fs::metadata(&from).map_or(0, |m| m.len());
@@ -291,8 +289,7 @@ impl Spool {
             }
             Ok(())
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?
+        .await?
     }
 }
 

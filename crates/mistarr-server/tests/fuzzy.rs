@@ -310,7 +310,7 @@ async fn assert_alt_placed(b: &Booted, w: &Wanted) {
         "the parent is wanted again: {}",
         p[1]
     );
-    let games = b.running.app.config().paths.games;
+    let games = b.running.app.config().paths.games.clone();
     let placed = games.join(format!("NES/{ALT}.nes"));
     assert_eq!(std::fs::read(&placed).expect("placed"), version(2));
     assert!(!games.join(format!("NES/{PARENT}.nes")).exists());

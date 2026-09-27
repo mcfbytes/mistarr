@@ -11,6 +11,7 @@ use super::*;
 use crate::app::testutil::{state_with, TestDir};
 use crate::app::Options;
 use crate::db::deferred::{self, Op};
+use crate::events::EventKind;
 use crate::freeze::fake::FakeClient;
 use crate::freeze::Signal;
 use crate::jobs::gate::MENU;

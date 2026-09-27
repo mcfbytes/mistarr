@@ -1,7 +1,6 @@
 //! Imports a zip an MRA names: verified by the MRA's md5, a loaded MAME DAT or nothing,
 //! then placed whole; see `docs/ARCHITECTURE.md` "Import".
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use mistarr_mister::adapter::arcade::assemble::PartSource as _;
@@ -13,7 +12,7 @@ use mistarr_mister::{StagedFile, StagedKind};
 use serde_json::{json, Value};
 
 use super::support::{is_zip, match_members, rel_string, Hashed};
-use super::{fail, finish, task, Piece, Placing, Why, BIOS_REFUSED};
+use super::{fail, finish, Piece, Placing, Why, BIOS_REFUSED};
 use crate::db::arcade as arcade_rows;
 use crate::db::downloads::{DownloadRow, DownloadState};
 use crate::db::files::{self, FileState};
@@ -344,7 +343,7 @@ impl Placing<'_> {
         };
         let staged = StagedFile {
             path: local.clone(),
-            size: fs::metadata(&local).map_or(0, |m| m.len()),
+            size: super::size_of(&local).await?,
             kind: StagedKind::Zip,
             head: Vec::new(),
             members: Vec::new(),
@@ -353,7 +352,12 @@ impl Placing<'_> {
             Ok(p) => p,
             Err(e) => return fail(app, &ids, &format!("cannot place the file: {e}")).await,
         };
-        if !local.exists() && self.games.join(&plan.final_rel_path).is_file() {
+        let (staged_path, placed) = (local.clone(), self.games.join(&plan.final_rel_path));
+        let done = crate::threads::run(crate::threads::label::IMPORT, move || {
+            !staged_path.exists() && placed.is_file()
+        })
+        .await?;
+        if done {
             finish(app, &ids, DownloadState::Done, None).await?;
             return self.refresh(&zip).await;
         }
@@ -372,11 +376,10 @@ impl Placing<'_> {
             .join(arcade::ARCADE_DIR)
             .join(&zip_rom.mra_path);
         let (games, path, at) = (self.games.clone(), local.clone(), zip.clone());
-        let verdict = crate::threads::blocking(crate::threads::label::ARCADE, move || {
+        let verdict = crate::threads::run(crate::threads::label::ARCADE, move || {
             mra::read(&mra_file).map(|m| examine(&m, &at, &path, &games))
         })
-        .await
-        .map_err(|e| task(&e))?;
+        .await?;
         let verdict = match verdict {
             Ok(v) => v,
             Err(e) => {
@@ -440,12 +443,11 @@ impl Placing<'_> {
         let pid = self.pid();
         self.app()
             .db
-            .write(move |c| {
-                let tx = c.transaction()?;
+            .write_tx(move |tx| {
                 for (rel, rom) in &rows {
-                    files::mark_verified(&tx, &pid, rel, *rom)?;
+                    files::mark_verified(tx, &pid, rel, *rom)?;
                 }
-                crate::db::commit(tx)
+                Ok(())
             })
             .await
     }
@@ -460,13 +462,12 @@ impl Placing<'_> {
             .await?;
         let arcade_dir = app.config().paths.root.join(arcade::ARCADE_DIR);
         let games = self.games.clone();
-        let found = crate::threads::blocking(crate::threads::label::ARCADE, move || {
+        let found = crate::threads::run(crate::threads::label::ARCADE, move || {
             arcade::refresh(&arcade_dir, &games, &titles)
         })
-        .await
-        .map_err(|e| task(&e))?;
+        .await?;
         app.db
-            .write(move |c| arcade::store_refreshed(c, &found))
+            .write_tx(move |tx| arcade::store_refreshed(tx, &found))
             .await
     }
 }
@@ -474,6 +475,7 @@ impl Placing<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::io::Write as _;
 
     use mistarr_core::hash::Md5Stream;

@@ -315,15 +315,20 @@ impl Job for DatImport {
         if self.bind.is_some() {
             return self.run_bind(ctx, &file).await;
         }
-        if !self.path.is_file() {
-            return Ok(());
-        }
-        let members = match list_members(&self.path) {
-            Ok(m) => m,
-            Err(reason) => return reject(&ctx.app, &self.path, &file, &reason),
-        };
         let dats_dir = self.path.parent().unwrap_or_else(|| Path::new("."));
-        let target = unique_path(&dats_dir.join(LOADED_DIR), &file);
+        let loaded_dir = dats_dir.join(LOADED_DIR);
+        let (path, name) = (self.path.clone(), file.clone());
+        let listed = crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
+            let target = unique_path(&loaded_dir, &name);
+            path.is_file()
+                .then(|| list_members(&path).map(|m| (m, target)))
+        })
+        .await?;
+        let (members, target) = match listed {
+            None => return Ok(()),
+            Some(Ok(listed)) => listed,
+            Some(Err(reason)) => return reject(&ctx.app, &self.path, &file, &reason).await,
+        };
         let stored = file_name(&target);
         let Imported {
             outcomes,
@@ -339,10 +344,14 @@ impl Job for DatImport {
             }
         }
         if loaded.is_empty() {
-            return reject(&ctx.app, &self.path, &file, &reasons.join("\n"));
+            return reject(&ctx.app, &self.path, &file, &reasons.join("\n")).await;
         }
-        std::fs::create_dir_all(dats_dir.join(LOADED_DIR))?;
-        std::fs::rename(&self.path, &target)?;
+        let (path, loaded_dir) = (self.path.clone(), dats_dir.join(LOADED_DIR));
+        crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
+            std::fs::create_dir_all(&loaded_dir)?;
+            std::fs::rename(&path, &target)
+        })
+        .await??;
         for reason in &reasons {
             publish_rejected(&ctx.app, &file, reason);
         }
@@ -370,12 +379,15 @@ impl DatImport {
             publish_rejected(&ctx.app, file, &reason);
             Err(Error::Job(reason))
         };
-        if !self.path.is_file() {
-            return fail(format!("{file} is no longer in dats/{LOADED_DIR}/"));
-        }
-        let members = match list_members(&self.path) {
-            Ok(m) => m,
-            Err(reason) => return fail(reason),
+        let path = self.path.clone();
+        let listed = crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
+            path.is_file().then(|| list_members(&path))
+        })
+        .await?;
+        let members = match listed {
+            None => return fail(format!("{file} is no longer in dats/{LOADED_DIR}/")),
+            Some(Ok(m)) => m,
+            Some(Err(reason)) => return fail(reason),
         };
         let mut reasons = Vec::new();
         let imported = self.import_members(ctx, &members, file).await?;
@@ -474,13 +486,18 @@ impl DatImport {
         members: &[Member],
         source_file: &str,
     ) -> Result<Ram<Vec<Outcome>>> {
-        let memory = ctx.app.config().memory;
-        let floor = memory.import_floor_mib.saturating_mul(1024 * 1024);
+        let config = ctx.app.config();
+        let floor = config.memory.import_floor_mib.saturating_mul(1024 * 1024);
+        let (path, listed) = (self.path.clone(), members.to_vec());
+        let input = crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
+            members_size(&path, &listed)
+        })
+        .await?;
         let plan = ram::Plan {
-            dir: memory.import_dir,
+            dir: config.memory.import_dir.clone(),
             floor,
             job: ctx.id.0,
-            input: members_size(&self.path, members),
+            input,
         };
         let meter = Meter::new(ctx.reporter(), source_file, members.len(), None);
         let req = self.request(ctx, source_file, Some(floor), Some(meter));
@@ -525,11 +542,10 @@ impl DatImport {
             let req = self.request(ctx, source_file, None, Some(meter));
             let path = self.path.clone();
             let db = ctx.app.db.clone();
-            let outcome = crate::threads::blocking(crate::threads::label::DAT_IMPORT, move || {
+            let outcome = crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
                 import_from(&db, &path, member, &req)
             })
-            .await
-            .map_err(|e| Error::Task(e.to_string()))??;
+            .await??;
             if let Outcome::Loaded(l) = &outcome {
                 games += l.games;
             }
@@ -1049,17 +1065,19 @@ fn import_stream<R: BufRead>(
             clone_of |= game.clone_of.is_some();
             chunk.push(staged(&game));
             if chunk.len() >= STAGE_CHUNK {
-                db.write_blocking(|c| append_chunk(c, &chunk))?;
+                db.write_tx_blocking(|tx| dat_stage::append(tx, &chunk))?;
                 chunk.clear();
             }
         }
     }
     if !chunk.is_empty() {
-        db.write_blocking(|c| append_chunk(c, &chunk))?;
+        db.write_tx_blocking(|tx| dat_stage::append(tx, &chunk))?;
     }
     // Applying the stage grows the copy and SQLite's temporary files at once.
     room(req)?;
     db.write_bulk_blocking(|c| {
+        // Hand-written, not `transact`: the not-current return drops `tx` to roll back
+        // the upsert, which `transact` would commit.
         let tx = c.transaction()?;
         let plan = dats::upsert_version(&tx, &new)?;
         if req.bind.is_some() && !plan.current {
@@ -1116,14 +1134,6 @@ fn pace(req: &Request, games: u64) -> Result<()> {
         }
         std::thread::sleep(PAUSED_POLL);
     }
-    Ok(())
-}
-
-/// Appends one chunk of parsed games to the stage in its own transaction.
-fn append_chunk(conn: &mut Connection, chunk: &[StagedGame]) -> Result<()> {
-    let tx = conn.transaction()?;
-    dat_stage::append(&tx, chunk)?;
-    crate::db::commit(tx)?;
     Ok(())
 }
 
@@ -1225,19 +1235,23 @@ fn publish_rejected(app: &AppState, file: &str, reason: &str) {
     );
 }
 
-/// Moves a file into `rejected/` with `<name>.reason.txt` beside it and
-/// publishes `dat.rejected`.
-fn reject(app: &AppState, path: &Path, file: &str, reason: &str) -> Result<()> {
+/// Moves a file into `rejected/` with `<name>.reason.txt` beside it, on a blocking
+/// thread, and publishes `dat.rejected`.
+async fn reject(app: &AppState, path: &Path, file: &str, reason: &str) -> Result<()> {
     let dir = path
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .join(REJECTED_DIR);
-    std::fs::create_dir_all(&dir)?;
-    let target = unique_path(&dir, file);
-    std::fs::rename(path, &target)?;
-    let mut reason_path = target.into_os_string();
-    reason_path.push(REASON_SUFFIX);
-    std::fs::write(reason_path, format!("{reason}\n"))?;
+    let (path, name, text) = (path.to_path_buf(), file.to_owned(), format!("{reason}\n"));
+    crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
+        std::fs::create_dir_all(&dir)?;
+        let target = unique_path(&dir, &name);
+        std::fs::rename(&path, &target)?;
+        let mut reason_path = target.into_os_string();
+        reason_path.push(REASON_SUFFIX);
+        std::fs::write(reason_path, text)
+    })
+    .await??;
     tracing::warn!(file, reason, "DAT rejected");
     publish_rejected(app, file, reason);
     Ok(())
@@ -1410,19 +1424,18 @@ struct Tally {
     picked: titles::Recomputed,
 }
 
-/// Runs one chunk of `pass` over `platform` in its own transaction, adding to `tally`,
-/// and returns the pass that follows.
+/// Runs one chunk of `pass` over `platform` in the caller's transaction, one per chunk,
+/// adding to `tally`, and returns the pass that follows.
 fn recompute_pass(
-    conn: &mut Connection,
+    tx: &Connection,
     platform: &PlatformId,
     prefs: &Prefs,
     pass: Pass,
     tally: &mut Tally,
 ) -> Result<Pass> {
-    let tx = conn.transaction()?;
     let next = match pass {
         Pass::Retired => {
-            let taken = rematch_chunk(&tx, platform)?;
+            let taken = rematch_chunk(tx, platform)?;
             tally.checked += taken;
             if taken >= REMATCH_CHUNK as usize {
                 Pass::Retired
@@ -1434,7 +1447,7 @@ fn recompute_pass(
             }
         }
         Pass::Unmatched(after) => {
-            let chunk = match_unmatched_chunk(&tx, platform, after)?;
+            let chunk = match_unmatched_chunk(tx, platform, after)?;
             tally.checked += chunk.read;
             tally.matched += chunk.matched;
             if chunk.read < REMATCH_CHUNK as usize {
@@ -1444,12 +1457,11 @@ fn recompute_pass(
             }
         }
         Pass::Picking => {
-            tally.picked = titles::recompute_platform(&tx, &platform.0, prefs)?;
+            tally.picked = titles::recompute_platform(tx, &platform.0, prefs)?;
             Pass::Done
         }
         Pass::Done => Pass::Done,
     };
-    crate::db::commit(tx)?;
     Ok(next)
 }
 
@@ -1467,7 +1479,7 @@ fn recompute_blocking(
     while pass != Pass::Done {
         check()?;
         report(pass, &tally);
-        pass = db.write_blocking(|c| recompute_pass(c, platform, prefs, pass, &mut tally))?;
+        pass = db.write_tx_blocking(|tx| recompute_pass(tx, platform, prefs, pass, &mut tally))?;
     }
     Ok(tally)
 }
@@ -1534,9 +1546,9 @@ impl Job for Recompute {
             (pass, tally) = ctx
                 .app
                 .db
-                .write(move |c| {
+                .write_tx(move |tx| {
                     let mut tally = tally;
-                    let next = recompute_pass(c, &platform, &prefs, pass, &mut tally)?;
+                    let next = recompute_pass(tx, &platform, &prefs, pass, &mut tally)?;
                     Ok((next, tally))
                 })
                 .await?;
@@ -1635,8 +1647,8 @@ impl DatWatcher {
     }
 }
 
-/// Polls `dats/` every `options.dats_poll` and enqueues a [`DatImport`] per
-/// stable file. A file whose job failed is enqueued again on a later poll.
+/// Polls `dats/` every `options.dats_poll` on a blocking thread and enqueues a
+/// [`DatImport`] per stable file. A file whose job failed is enqueued again on a later poll.
 pub async fn watch(app: Arc<AppState>) {
     let dir = app.config().paths.dats();
     let mut watcher = DatWatcher::new(app.options.dats_min_age);
@@ -1660,7 +1672,21 @@ pub async fn watch(app: Arc<AppState>) {
         for path in finished {
             pending.remove(&path);
         }
-        for path in watcher.poll(&dir) {
+        let polled = dir.clone();
+        let found;
+        (watcher, found) = match crate::threads::run(crate::threads::label::DAT_WATCH, move || {
+            let found = watcher.poll(&polled);
+            (watcher, found)
+        })
+        .await
+        {
+            Ok(polled) => polled,
+            Err(e) => {
+                tracing::error!(error = %e, "the DAT watcher stopped");
+                return;
+            }
+        };
+        for path in found {
             match Scheduler::enqueue(&app, Arc::new(DatImport::new(&path))).await {
                 Ok(id) => {
                     pending.insert(path, id);

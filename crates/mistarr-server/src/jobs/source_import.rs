@@ -63,7 +63,7 @@ pub struct SourceChanged<'a> {
 pub async fn read_bounded(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     use std::io::Read as _;
     let path = path.to_path_buf();
-    crate::threads::blocking(crate::threads::label::SOURCE_FILE, move || {
+    crate::threads::run(crate::threads::label::SOURCE_FILE, move || {
         let file = std::fs::File::open(&path)?;
         if file.metadata()?.len() > MAX_SOURCE_BYTES {
             return Ok(None);
@@ -166,13 +166,12 @@ impl Job for SourceImport {
 /// Moves into `loaded/`, or into `rejected/` with `reason`, off the async runtime.
 async fn move_blocking(path: &Path, reason: Option<String>) -> Result<()> {
     let path = path.to_path_buf();
-    crate::threads::blocking(crate::threads::label::SOURCE_FILE, move || match reason {
+    crate::threads::run(crate::threads::label::SOURCE_FILE, move || match reason {
         None => watch::mark_loaded(&path),
         Some(r) => watch::mark_rejected(&path, &r),
     })
-    .await
-    .map_err(|e| crate::Error::Task(e.to_string()))?
-    .map_err(|e| crate::Error::Job(e.to_string()))
+    .await?
+    .map_err(crate::Error::from)
 }
 
 /// Parses and binds a `.torrent`, dropping its bytes once parsed. The inner error is a
@@ -192,13 +191,12 @@ async fn import_torrent(
     let origin = origin.to_owned();
     key_new_roms(&app.db).await?;
     app.db
-        .write_bulk(move |c| {
-            let tx = c.transaction()?;
-            let id = match rows::find_by_infohash(&tx, &infohash)? {
+        .write_bulk_tx(move |tx| {
+            let id = match rows::find_by_infohash(tx, &infohash)? {
                 Some(row) if row.state == SourceState::Resolving => row.id,
                 Some(_) => return Ok(Err(DUPLICATE.to_owned())),
                 None => rows::insert(
-                    &tx,
+                    tx,
                     &NewSource {
                         infohash: &infohash,
                         display_name: &meta.name,
@@ -209,11 +207,10 @@ async fn import_torrent(
                     },
                 )?,
             };
-            rows::replace_files(&tx, id, &meta.files)?;
-            suggest(&tx, id, &origin, &meta.name, &meta.files)?;
-            bind_best(&tx, id, &meta.files, threshold)?;
-            let row = rows::get(&tx, id)?;
-            crate::db::commit(tx)?;
+            rows::replace_files(tx, id, &meta.files)?;
+            suggest(tx, id, &origin, &meta.name, &meta.files)?;
+            bind_best(tx, id, &meta.files, threshold)?;
+            let row = rows::get(tx, id)?;
             Ok(row.ok_or_else(|| "The source could not be read back.".to_owned()))
         })
         .await
@@ -363,20 +360,18 @@ pub async fn rebind_after_dat(app: &Arc<AppState>, platforms: &[PlatformId]) -> 
     key_new_roms(&app.db).await?;
     let changed = app
         .db
-        .write_bulk(move |c| {
-            let tx = c.transaction()?;
+        .write_bulk_tx(move |tx| {
             let mut out = Vec::new();
-            for (id, suggested) in rows::list_unbound(&tx)? {
-                let before = rows::get(&tx, id)?;
-                rebind_one(&tx, id, suggested.as_ref(), threshold)?;
-                let after = rows::get(&tx, id)?;
+            for (id, suggested) in rows::list_unbound(tx)? {
+                let before = rows::get(tx, id)?;
+                rebind_one(tx, id, suggested.as_ref(), threshold)?;
+                let after = rows::get(tx, id)?;
                 if let (Some(b), Some(a)) = (before, after) {
                     if (b.state, &b.platform_id) != (a.state, &a.platform_id) {
                         out.push(a);
                     }
                 }
             }
-            crate::db::commit(tx)?;
             Ok(out)
         })
         .await?;
@@ -566,19 +561,17 @@ impl Job for ResolveMagnet {
         key_new_roms(&app.db).await?;
         let bound = app
             .db
-            .write_bulk(move |c| {
-                let tx = c.transaction()?;
-                let still = rows::get(&tx, id)?.is_some_and(|r| r.state == SourceState::Resolving);
+            .write_bulk_tx(move |tx| {
+                let still = rows::get(tx, id)?.is_some_and(|r| r.state == SourceState::Resolving);
                 if !still {
                     return Ok(None);
                 }
-                rows::replace_files(&tx, id, &files)?;
-                if let Some(r) = rows::get(&tx, id)? {
-                    suggest(&tx, id, &r.origin_file, &r.display_name, &files)?;
+                rows::replace_files(tx, id, &files)?;
+                if let Some(r) = rows::get(tx, id)? {
+                    suggest(tx, id, &r.origin_file, &r.display_name, &files)?;
                 }
-                bind_best(&tx, id, &files, threshold)?;
-                let row = rows::get(&tx, id)?;
-                crate::db::commit(tx)?;
+                bind_best(tx, id, &files, threshold)?;
+                let row = rows::get(tx, id)?;
                 Ok(row)
             })
             .await?;
@@ -638,7 +631,7 @@ pub async fn watch(app: Arc<AppState>) {
     loop {
         tick.tick().await;
         let d = dir.clone();
-        let result = crate::threads::blocking(crate::threads::label::SOURCE_WATCH, move || {
+        let result = crate::threads::run(crate::threads::label::SOURCE_WATCH, move || {
             let found = scanner.scan_once(&d);
             (scanner, found)
         })

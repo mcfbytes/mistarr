@@ -140,12 +140,11 @@ async fn write_field(
         let Some(mut f) = file.take() else {
             break;
         };
-        let written = crate::threads::blocking(crate::threads::label::DAT_SAVE, move || {
+        let written = crate::threads::run(crate::threads::label::DAT_SAVE, move || {
             f.write_all(&chunk)?;
             Ok::<_, std::io::Error>(f)
         })
-        .await
-        .map_err(|e| crate::Error::Task(e.to_string()))?;
+        .await?;
         file = Some(written.map_err(crate::Error::from)?);
     }
     Ok(())
@@ -259,10 +258,8 @@ async fn retire(
     let Path(id) = id.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let row = app
         .db
-        .write(move |c| {
-            let tx = c.transaction()?;
-            let row = dats::retire(&tx, DatVersionId(id), crate::unix_now())?;
-            crate::db::commit(tx)?;
+        .write_tx(move |tx| {
+            let row = dats::retire(tx, DatVersionId(id), crate::unix_now())?;
             Ok(row)
         })
         .await?

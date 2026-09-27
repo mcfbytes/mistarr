@@ -39,7 +39,7 @@ const MAX_LIMIT: u32 = 1000;
 
 /// Builds the whole application.
 pub fn router(app: Arc<AppState>) -> Router {
-    let key = Some(app.config().server.api_key).filter(|k| !k.is_empty());
+    let key = Some(app.config().server.api_key.clone()).filter(|k| !k.is_empty());
     let api = Router::new()
         .merge(system::routes())
         .merge(events::routes())

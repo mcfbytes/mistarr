@@ -110,16 +110,14 @@ impl Job for BindSource {
         let row = ctx
             .app
             .db
-            .write_bulk(move |c| {
-                let tx = c.transaction()?;
-                let Some(choice) = rows::take_binding(&tx, id)? else {
+            .write_bulk_tx(move |tx| {
+                let Some(choice) = rows::take_binding(tx, id)? else {
                     return Ok(None);
                 };
-                if rows::get(&tx, id)?.is_some_and(|r| r.file_count > 0) {
-                    apply(&tx, id, &choice, threshold)?;
+                if rows::get(tx, id)?.is_some_and(|r| r.file_count > 0) {
+                    apply(tx, id, &choice, threshold)?;
                 }
-                let row = rows::get(&tx, id)?;
-                crate::db::commit(tx)?;
+                let row = rows::get(tx, id)?;
                 Ok(row)
             })
             .await?;
