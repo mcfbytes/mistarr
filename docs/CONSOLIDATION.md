@@ -127,15 +127,19 @@ Opus · `mistarr-core`, `mistarr-sources`, import lines elsewhere · branch
 
 Sonnet · `mistarr-mister` · branch `wp-54-mister-limits`
 
-- [ ] The MRA reader caps element depth at 64 and event size as the DAT parser
+- [x] The MRA reader caps element depth at 64 and event size as the DAT parser
   does, and its open-element stack stores no per-tag allocation beyond those
   caps. A 16 MiB document nested a million deep is refused with an error.
-- [ ] The NeoGeo romsets reader streams through a `BufReader` with size, event
+- [x] The NeoGeo romsets reader streams through a `BufReader` with size, event
   and depth caps instead of `fs::read`.
-- [ ] `Error::Mra` and `Error::Romsets` carry the XML error and byte position
+- [x] `Error::Mra` and `Error::Romsets` carry the XML error and byte position
   as typed fields, not a `String`.
-- [ ] Proptests: `parse_romsets` and the MRA reader never panic.
-- [ ] The pull request states the peak memory of the worst capped input.
+- [x] Proptests: `parse_romsets` and the MRA reader never panic.
+- [x] The pull request states the peak memory of the worst capped input.
+- [x] The MRA and NeoGeo readers cap accumulated output, not only event size
+  and depth: roms, items per rom and zip names for MRA, romsets and BIOS
+  names for NeoGeo, each refused past its cap and deduplicated with a
+  `HashSet` rather than a linear scan.
 
 ### WP-55 Server errors and blocking
 

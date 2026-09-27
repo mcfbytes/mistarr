@@ -136,10 +136,37 @@ fn unknown_rom_content_is_kept_as_unsupported() {
 }
 
 #[test]
+fn unsupported_reasons_quote_a_bounded_slice_of_the_value() {
+    // A huge, control-character-heavy value must not make the Debug-quoted
+    // reason anywhere near as large as the input that produced it.
+    let huge = "\u{1}".repeat(100_000);
+    let xml =
+        format!("<m><rom><part offset=\"{huge}\"/><patch offset=\"{huge}\">00</patch></rom></m>");
+    let mra = parse(xml.as_bytes()).expect("parse");
+    for item in &mra.roms[0].items {
+        let RomItem::Unsupported(reason) = item else {
+            panic!("{item:?}")
+        };
+        assert!(reason.len() < 500, "{reason}");
+    }
+}
+
+#[test]
+fn md5_is_collected_only_for_roms_that_close() {
+    // A `<rom md5>` nested inside another rom's unsupported content never becomes
+    // an `MraRom`, so it must not leak into the document-wide `md5` list either.
+    let outer = "0".repeat(32);
+    let inner = "1".repeat(32);
+    let xml = format!("<m><rom md5=\"{outer}\"><group><rom md5=\"{inner}\"/></group></rom></m>");
+    let mra = parse(xml.as_bytes()).expect("parse");
+    assert_eq!(mra.md5, [outer]);
+}
+
+#[test]
 fn malformed_xml_is_an_error() {
     assert!(matches!(
         parse(b"<misterromdescription><rom zip=\"a.zip\"></oops>"),
-        Err(Error::Mra(_))
+        Err(Error::Mra { .. })
     ));
 }
 
@@ -147,11 +174,11 @@ fn malformed_xml_is_an_error() {
 fn non_utf8_is_refused_in_text_and_skipped_in_comments() {
     assert!(matches!(
         parse(b"<misterromdescription><name>Caf\xe9</name></misterromdescription>"),
-        Err(Error::Mra(_))
+        Err(Error::Mra { .. })
     ));
     assert!(matches!(
         parse(b"<misterromdescription><rom zip=\"\xe9.zip\"/></misterromdescription>"),
-        Err(Error::Mra(_))
+        Err(Error::Mra { .. })
     ));
     let mra = parse(
         b"\xef\xbb\xbf<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?><!-- Caf\xe9 -->\
@@ -183,8 +210,11 @@ fn nested_child_text_stays_in_the_enclosing_field() {
 
 #[test]
 fn truncated_document_is_an_error() {
-    let err = parse(b"<misterromdescription><rom zip=\"exblast.zip\"><part name=\"a\"/>");
-    assert!(matches!(err, Err(Error::Mra(_))));
+    let err = parse(b"<misterromdescription><rom zip=\"exblast.zip\"><part name=\"a\"/>")
+        .expect_err("truncated");
+    assert!(matches!(err, Error::Mra { .. }));
+    // The message names the innermost element still open, from the MRA's own recovery.
+    assert!(err.to_string().contains("rom"), "{err}");
 }
 
 #[test]
@@ -265,7 +295,213 @@ fn read_refuses_an_oversized_file() {
     let path = dir.join("big.mra");
     let pad = " ".repeat(usize::try_from(MAX_MRA_BYTES).expect("fits"));
     std::fs::write(&path, format!("<m>{pad}</m>")).expect("write");
-    assert!(matches!(read(&path), Err(Error::Mra(m)) if m.contains("larger")));
+    assert!(matches!(
+        read(&path),
+        Err(Error::FileTooLarge { limit }) if limit == MAX_MRA_BYTES
+    ));
+}
+
+/// `n` levels of `<a>` nested inside `<m>`, well-formed either way.
+fn nested(n: usize) -> String {
+    format!("<m>{}{}</m>", "<a>".repeat(n), "</a>".repeat(n))
+}
+
+#[test]
+fn depth_cap_refuses_deep_nesting_without_holding_it_all() {
+    assert!(parse(nested(MAX_DEPTH - 4).as_bytes()).is_ok());
+    assert!(matches!(
+        parse(nested(MAX_DEPTH * 4).as_bytes()),
+        Err(Error::XmlTooDeep { .. })
+    ));
+    // A document nested far past the cap still refuses promptly, never panicking.
+    assert!(matches!(
+        parse(nested(1_000_000).as_bytes()),
+        Err(Error::XmlTooDeep { .. })
+    ));
+}
+
+#[test]
+fn depth_cap_counts_true_nesting_even_when_end_tags_are_mismatched() {
+    // `<a><b></a>` repeated pops one name per repeat from the MRA's open
+    // stack but grows true nesting by one level each time.
+    let xml = format!("<m>{}</m>", "<a><b></a>".repeat(MAX_DEPTH * 4));
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlTooDeep { .. })
+    ));
+}
+
+#[test]
+fn open_stack_cap_refuses_growth_from_stray_end_tags() {
+    // `</x>` matches nothing, so the MRA's open stack only grows while true
+    // nesting stays low, exercising its cap independently of `depth`.
+    let xml = format!("<m>{}</m>", "<a></x>".repeat(MAX_DEPTH * 4));
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlTooDeep { .. })
+    ));
+}
+
+#[test]
+fn tag_key_caps_length_on_a_char_boundary() {
+    assert_eq!(tag_key("rom"), "rom");
+    let long = "é".repeat(100);
+    let key = tag_key(&long);
+    assert!(key.len() <= MAX_TAG_BYTES);
+    assert!(long.starts_with(&key));
+}
+
+#[test]
+fn event_size_cap_refuses_an_oversized_single_run() {
+    let huge = "x".repeat(2 * 1024 * 1024);
+    let xml = format!("<m><name>{huge}</name></m>");
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlEventTooLarge { .. })
+    ));
+}
+
+/// `n` `<rom/>` elements, each with a distinct zip name.
+fn rom_tags(n: usize) -> String {
+    (0..n).fold(String::new(), |mut acc, i| {
+        write!(acc, "<rom zip=\"z{i}.zip\"/>").expect("write");
+        acc
+    })
+}
+
+#[test]
+fn rom_count_cap_refuses_growth_past_the_limit() {
+    let over = format!("<m>{}</m>", rom_tags(MAX_ROMS + 1));
+    assert!(matches!(
+        parse(over.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_ROMS
+    ));
+    let under = format!("<m>{}</m>", rom_tags(MAX_ROMS));
+    assert_eq!(parse(under.as_bytes()).expect("parse").roms.len(), MAX_ROMS);
+}
+
+#[test]
+fn rom_item_count_cap_refuses_growth_past_the_limit() {
+    let parts = "<part/>".repeat(MAX_ROM_ITEMS + 1);
+    let over = format!("<m><rom>{parts}</rom></m>");
+    assert!(matches!(
+        parse(over.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_ROM_ITEMS
+    ));
+    // Parts inside an interleave share the same rom's budget as top-level items.
+    let over_il = format!("<m><rom><interleave>{parts}</interleave></rom></m>");
+    assert!(matches!(
+        parse(over_il.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_ROM_ITEMS
+    ));
+}
+
+#[test]
+fn rom_item_total_cap_refuses_growth_across_many_roms() {
+    // Every rom stays at exactly MAX_ROM_ITEMS, under its own cap; only the sum
+    // across roms crosses MAX_TOTAL_ROM_ITEMS.
+    let rom = format!("<rom>{}</rom>", "<part/>".repeat(MAX_ROM_ITEMS));
+    let roms = MAX_TOTAL_ROM_ITEMS / MAX_ROM_ITEMS + 1;
+    let xml = format!("<m>{}</m>", rom.repeat(roms));
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_TOTAL_ROM_ITEMS
+    ));
+}
+
+/// `n` self-closing tags outside any `<rom>`, each naming one distinct zip.
+fn zip_tags(n: usize) -> String {
+    (0..n).fold(String::new(), |mut acc, i| {
+        write!(acc, "<x zip=\"z{i}.zip\"/>").expect("write");
+        acc
+    })
+}
+
+#[test]
+fn zip_count_cap_refuses_growth_past_the_limit() {
+    let over = format!("<m>{}</m>", zip_tags(MAX_ZIPS + 1));
+    assert!(matches!(
+        parse(over.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_ZIPS
+    ));
+    let under = format!("<m>{}</m>", zip_tags(MAX_ZIPS));
+    assert_eq!(parse(under.as_bytes()).expect("parse").zips.len(), MAX_ZIPS);
+}
+
+#[test]
+fn zip_list_cap_refuses_one_attribute_with_too_many_names() {
+    let names: Vec<String> = (0..=MAX_ZIPS_PER_LIST)
+        .map(|i| format!("z{i}.zip"))
+        .collect();
+    let xml = format!("<m><rom zip=\"{}\"/></m>", names.join("|"));
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_ZIPS_PER_LIST
+    ));
+}
+
+#[test]
+fn zip_list_duplicates_within_one_attribute_are_collapsed() {
+    // Without dropping duplicates as they are split, this would hold one entry
+    // per `|`-separated repeat rather than one entry for the whole list.
+    let xml = format!("<m><rom zip=\"{}\"/></m>", "a.zip|".repeat(10_000));
+    let mra = parse(xml.as_bytes()).expect("parse");
+    assert_eq!(mra.roms[0].zips, ["a.zip"]);
+}
+
+#[test]
+fn zip_ref_total_cap_refuses_growth_across_many_parts() {
+    // Every part's own zip list stays at MAX_ZIPS_PER_LIST; only the sum of
+    // every rom's and part's own zip list across the document crosses the total.
+    let list: String = (0..MAX_ZIPS_PER_LIST)
+        .map(|i| format!("z{i}.zip"))
+        .collect::<Vec<_>>()
+        .join("|");
+    let part = format!("<part zip=\"{list}\"/>");
+    let rom = format!("<rom>{}</rom>", part.repeat(MAX_ROM_ITEMS));
+    let needed = MAX_TOTAL_ZIP_REFS / MAX_ZIPS_PER_LIST + 1;
+    let roms = needed.div_ceil(MAX_ROM_ITEMS);
+    let xml = format!("<m>{}</m>", rom.repeat(roms));
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_TOTAL_ZIP_REFS
+    ));
+}
+
+#[test]
+fn zip_name_length_cap_accepts_the_cap_and_refuses_past_it() {
+    let at_cap = format!("{}.zip", "z".repeat(MAX_NAME_BYTES - 4));
+    assert_eq!(at_cap.len(), MAX_NAME_BYTES);
+    let xml = format!("<m><rom zip=\"{at_cap}\"/></m>");
+    assert_eq!(
+        parse(xml.as_bytes()).expect("parse").zips,
+        [at_cap.as_str()]
+    );
+
+    let over = format!("{at_cap}x");
+    let xml = format!("<m><rom zip=\"{over}\"/></m>");
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_NAME_BYTES
+    ));
+}
+
+#[test]
+fn part_name_length_cap_accepts_the_cap_and_refuses_past_it() {
+    let at_cap = "p".repeat(MAX_NAME_BYTES);
+    let xml = format!("<m><rom><part name=\"{at_cap}\"/></rom></m>");
+    let mra = parse(xml.as_bytes()).expect("parse");
+    let RomItem::Part(part) = &mra.roms[0].items[0] else {
+        panic!("part expected");
+    };
+    assert_eq!(part.name.as_deref(), Some(at_cap.as_str()));
+
+    let over = format!("{at_cap}x");
+    let xml = format!("<m><rom><part name=\"{over}\"/></rom></m>");
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_NAME_BYTES
+    ));
 }
 
 /// `text` with each ASCII letter upper-cased where `mask` has a set bit, cycling the mask.
@@ -458,6 +694,11 @@ proptest! {
     #[test]
     fn parse_never_panics(s in ".{0,200}") {
         let _ = parse(s.as_bytes());
+    }
+
+    #[test]
+    fn depth_cap_never_panics(n in 0usize..300) {
+        let _ = parse(nested(n).as_bytes());
     }
 
     #[test]

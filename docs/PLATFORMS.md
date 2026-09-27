@@ -93,6 +93,20 @@ the core expects inside an XML comment, one per line; every comment line that
 is a single `name.ext` token is taken as one, and detail reports each as
 present or missing in `games/NeoGeo`. Nothing else is done with them.
 
+`romsets.xml` is streamed through a `BufReader`, refused unread above 16 MiB,
+and, like the MRA reader below, capped at one 1 MiB XML event and 64 levels
+of element nesting; either cap failing refuses the file with an error. It
+also caps what it accumulates: at most `MAX_SETS` (4096) distinct `<romset
+name>` values and `MAX_BIOS_NAMES` (4096) distinct BIOS file names from
+comments, each kept to `MAX_NAME_BYTES` (256) bytes since a real romset or
+BIOS name is a short file or directory name, deduplicated through a
+`HashSet` and refused past its cap. For a capped 16 MiB input its worst-case
+peak is dominated by `quick_xml`'s own record of currently-open names
+(bounded the same way as the MRA reader's below, roughly 16 to 32 MiB) plus
+its 1 MiB event buffer (up to about 2 MiB): roughly 17 to 34 MiB; the `sets`
+and `bios` lists, each name kept twice over at its cap (once in a `HashSet`,
+once in a `Vec`), add under 5 MiB and do not change that order.
+
 ### MRA catalogue
 
 The catalogue reads the real MRA files once each. Under `_Arcade` it skips
@@ -120,6 +134,72 @@ an element is refused. `<name>`, `<setname>` and `<rbf>` keep at most 256
 bytes, and a `<rom>` inside one left open never adds to it. Text that is not
 UTF-8 follows VERIFICATION.md "Text encoding": refused in text and
 attribute values, passed over in comments.
+
+As VERIFICATION.md "DAT parsing" caps a DAT, the reader caps one XML event, a
+tag, a text run or a comment, at 1 MiB before it is buffered
+(`Error::XmlEventTooLarge`), and element nesting at 64 levels
+(`Error::XmlTooDeep`); the open-element stack used to match end tags never
+holds more entries than the depth cap allows. Depth is tracked separately
+from that stack's own length, as a plain count of `quick_xml`'s start and end
+events: MiSTer's tolerant end-tag recovery can close several stack entries at
+once, so the plain count is what stays true to the document's real nesting
+and is what the 64-level cap checks. Each name kept on the open-element stack
+is itself cut to 64 bytes, since matching an end tag never needs more and no
+real MRA tag name comes close, so the stack's own memory stays a few KiB
+regardless of how long an attacker's tag names run. A `<part>`'s own inline
+hex, which can run to several MiB, bypasses the event cap: it is read
+straight off the file a buffer at a time into `Part::data` or, from `read`,
+left in place as the `Inline` marker below, so neither cap stops a large but
+legitimate rom.
+
+The parser also caps what it accumulates: at most `MAX_ROMS` (2048) `<rom>`
+elements; at most `MAX_ROM_ITEMS` (1024) parts, patches, interleaved parts
+and unsupported entries per `<rom>` (an interleave's own parts count against
+the same budget as the rest of its rom's items) and, on top of that, at most
+`MAX_TOTAL_ROM_ITEMS` (131,072) of them summed across every `<rom>` in the
+document, so total item memory is the same whether they sit in one rom or
+many; at most `MAX_ZIPS` (4096) distinct zip names collected from every
+`zip` attribute in the document; and, separately, at most
+`MAX_ZIPS_PER_LIST` (16) zip names kept from any one `<rom>`'s or `<part>`'s
+own `zip` attribute, with duplicates within that one attribute dropped
+first, and at most `MAX_TOTAL_ZIP_REFS` (65,536) of those summed across the
+document. Every zip name and a `<part>`'s own `name` attribute are kept to
+`MAX_NAME_BYTES` (255) bytes, since both are real file names; a longer one
+is refused rather than stored, as `romsets.xml`'s own name cap above. Each
+cap is refused with `Error::XmlOutputTooLarge`, and zip names dedupe through
+a `HashSet` rather than a linear scan. A corpus of real MRAs
+has been seen with up to about 160 items in one `<rom>`, well under
+`MAX_ROM_ITEMS`. `Mra::md5` is collected from the roms that closed into
+`Mra::roms`, never from a `<rom>`-named tag met in passing (nested inside
+another rom's unsupported content, for instance), so it cannot grow past
+`MAX_ROMS` regardless of what such a tag contains. An unsupported-content
+reason quotes at most 32 bytes of the attribute value that triggered it
+before it is Debug-escaped, so one malformed value cannot make its reason
+far larger than the input needed to write it.
+
+For a capped 16 MiB input read through `read`, the worst case reaches every
+cap: up to 2048 `MraRom` entries and up to `MAX_TOTAL_ROM_ITEMS` (131,072)
+rom items summed across them, no single `<rom>` holding more than
+`MAX_ROM_ITEMS` (1024) of them. Each item stays under roughly 400 bytes on a
+32-bit target: a named `<part>` holding a full `MAX_NAME_BYTES` (255) byte
+name, or a worst-case unsupported-content reason (32 bytes quoted,
+Debug-escaped about 6x, plus its fixed wording), for about 50 MiB of live
+data and up to about 100 MiB counting each `Vec`'s own spare capacity once
+it has doubled to fit. Zip names are capped the same way but stored three
+times over: in `mra.zips` and the `zips_seen` `HashSet` (up to `MAX_ZIPS`
+each) and in the per-`<rom>` or per-`<part>` `zips` lists (up to
+`MAX_TOTAL_ZIP_REFS` summed); at up to 4096 + 4096 + 65,536 names of
+`MAX_NAME_BYTES` (255) bytes each, that adds roughly 18 MiB. `quick_xml`'s
+own record of currently-open names adds roughly 16 to 32 MiB, as for
+`romsets.xml` above: it keeps the full name of every still-open element up
+to the depth cap, and a document of nested opening tags with no closes can
+spend most of its 16 MiB on those names before the cap refuses it; MRA's own
+open-element stack (a few KiB, per above) truncates each name to 64 bytes
+but is a separate copy, so it does not shrink `quick_xml`'s. The 1 MiB event
+buffer adds at most a few MiB more. That puts the peak at roughly 86 to 153
+MiB: higher than `romsets.xml` above, since an MRA has more kinds of
+accumulated output to bound, but still well inside the board's shared
+budget.
 
 The arcade catalogue job (ARCHITECTURE.md "Arcade catalogue") turns each MRA
 into one `arcade` title with `source = 'mra'`: `<name>`, `<setname>` and

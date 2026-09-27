@@ -1,12 +1,15 @@
 //! Neo Geo adapter: the DAT game is the unit, placed whole as a zip or directory,
 //! and the core's `romsets.xml` read for the romsets and BIOS files it names.
 
+use std::collections::HashSet;
+use std::io::{self, BufRead, BufReader, Read as _};
 use std::path::{Path, PathBuf};
 
-use mistarr_core::xml::{check_utf8, lossy, EscapeInvalid};
+use mistarr_core::xml::{check_utf8, lossy, Capped, EscapeInvalid};
 use quick_xml::events::Event;
 use quick_xml::{Reader, XmlVersion};
 
+use super::xml_caps;
 use super::{
     basename, extension, row_methods, safe_name, staged_name, CoreAdapter, PlacementPlan, Step,
 };
@@ -27,39 +30,79 @@ pub struct Romsets {
     pub bios: Vec<String>,
 }
 
-/// Parses a `romsets.xml`.
+/// Largest `romsets.xml` read, a sanity bound.
+pub const MAX_ROMSETS_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Most distinct `<romset name>` values collected; further ones are refused.
+pub const MAX_SETS: usize = 4096;
+
+/// Most distinct BIOS file names collected from comments; further ones are refused.
+pub const MAX_BIOS_NAMES: usize = 4096;
+
+/// Longest romset or BIOS name kept, in bytes; a real name is a short file or
+/// directory name, so a longer one is dropped rather than stored twice over.
+pub const MAX_NAME_BYTES: usize = 256;
+
+fn romsets_err(e: quick_xml::Error, position: u64) -> Error {
+    Error::Romsets {
+        position,
+        source: e,
+    }
+}
+
+fn too_big() -> Error {
+    Error::FileTooLarge {
+        limit: MAX_ROMSETS_BYTES,
+    }
+}
+
+/// Parses a `romsets.xml`, streamed through a [`BufRead`] with size, event and depth caps.
 ///
 /// # Errors
 ///
-/// [`Error::Romsets`] when the document is not well-formed.
+/// [`Error::Romsets`] when the document is not well-formed XML,
+/// [`Error::XmlTooDeep`] past `mistarr_core::dat::MAX_DEPTH` levels of nesting,
+/// [`Error::XmlEventTooLarge`] past one capped event, and [`Error::XmlOutputTooLarge`]
+/// past [`MAX_SETS`] or [`MAX_BIOS_NAMES`].
 ///
 /// ```
 /// let r = mistarr_mister::adapter::neogeo::parse_romsets(
-///     b"<!-- needs:\n  exbios.rom\n--><romsets><romset name=\"examplequest\"/></romsets>",
+///     b"<!-- needs:\n  exbios.rom\n--><romsets><romset name=\"examplequest\"/></romsets>".as_slice(),
 /// ).unwrap();
 /// assert_eq!(r.sets, ["examplequest"]);
 /// assert_eq!(r.bios, ["exbios.rom"]);
 /// ```
-pub fn parse_romsets(xml: &[u8]) -> Result<Romsets> {
-    let err = |e: &dyn std::fmt::Display| Error::Romsets(e.to_string());
-    let mut reader = Reader::from_reader(EscapeInvalid::new(xml));
+pub fn parse_romsets<R: BufRead>(xml: R) -> Result<Romsets> {
+    let mut reader = Reader::from_reader(Capped::new(EscapeInvalid::new(xml)));
     let mut buf = Vec::new();
     let mut out = Romsets::default();
+    let mut depth = xml_caps::Depth::default();
+    let mut sets_seen: HashSet<String> = HashSet::new();
+    let mut bios_seen: HashSet<String> = HashSet::new();
     loop {
-        buf.clear();
-        match reader.read_event_into(&mut buf).map_err(|e| err(&e))? {
+        let position = reader.get_ref().get_ref().position();
+        let event = xml_caps::read_capped_mapped(&mut reader, &mut buf, position, romsets_err)?;
+        depth.track(&event, position)?;
+        match event {
             Event::Start(e) | Event::Empty(e)
                 if e.local_name().as_ref().eq_ignore_ascii_case("romset") =>
             {
                 for a in e.attributes() {
-                    let a = a.map_err(|e| err(&e))?;
+                    let a = a.map_err(|e| romsets_err(e.into(), position))?;
                     if a.key.local_name().as_ref() == "name" {
                         let v = a
                             .normalized_value(XmlVersion::Implicit1_0)
-                            .map_err(|e| err(&e))?;
-                        check_utf8(&v).map_err(|e| err(&quick_xml::Error::from(e)))?;
+                            .map_err(|e| romsets_err(e, position))?;
+                        check_utf8(&v)
+                            .map_err(|e| romsets_err(quick_xml::Error::from(e), position))?;
                         let v = v.trim().to_owned();
-                        if !v.is_empty() && !out.sets.contains(&v) {
+                        if !v.is_empty() && v.len() <= MAX_NAME_BYTES && sets_seen.insert(v.clone())
+                        {
+                            if out.sets.len() >= MAX_SETS {
+                                return Err(xml_caps::output_too_large(
+                                    "romsets", MAX_SETS, position,
+                                ));
+                            }
                             out.sets.push(v);
                         }
                     }
@@ -68,7 +111,14 @@ pub fn parse_romsets(xml: &[u8]) -> Result<Romsets> {
             Event::Comment(c) => {
                 let text = lossy(&c);
                 for line in text.lines().map(str::trim) {
-                    if is_file_name(line) && !out.bios.iter().any(|b| b == line) {
+                    if is_file_name(line) && bios_seen.insert(line.to_owned()) {
+                        if out.bios.len() >= MAX_BIOS_NAMES {
+                            return Err(xml_caps::output_too_large(
+                                "bios names",
+                                MAX_BIOS_NAMES,
+                                position,
+                            ));
+                        }
                         out.bios.push(line.to_owned());
                     }
                 }
@@ -80,8 +130,12 @@ pub fn parse_romsets(xml: &[u8]) -> Result<Romsets> {
     Ok(out)
 }
 
-/// A single `name.ext` token: letters, digits, `-` and `_`, with a short extension.
+/// A single `name.ext` token within [`MAX_NAME_BYTES`]: letters, digits, `-` and `_`,
+/// with a short extension.
 fn is_file_name(s: &str) -> bool {
+    if s.len() > MAX_NAME_BYTES {
+        return false;
+    }
     let Some((stem, ext)) = s.rsplit_once('.') else {
         return false;
     };
@@ -92,22 +146,34 @@ fn is_file_name(s: &str) -> bool {
         && stem.chars().all(ok)
 }
 
-/// Reads and parses `romsets.xml` from `neogeo_dir`, or `None` when the file is absent.
+/// Reads and parses `romsets.xml` from `neogeo_dir`, streaming it through a [`BufReader`]
+/// rather than reading the whole file into memory first; `None` when the file is absent.
 ///
 /// # Errors
 ///
-/// [`Error::Io`] when the file exists but cannot be read, [`Error::Romsets`] when it is not well-formed.
+/// [`Error::Io`] when the file exists but cannot be read, [`Error::FileTooLarge`] when
+/// it exceeds [`MAX_ROMSETS_BYTES`], and the errors [`parse_romsets`] returns when it is
+/// not well-formed or its output outgrows a cap.
 ///
 /// ```
 /// let dir = std::env::temp_dir().join("mistarr-doc-romsets-none");
 /// assert!(mistarr_mister::adapter::neogeo::read_romsets(&dir).unwrap().is_none());
 /// ```
 pub fn read_romsets(neogeo_dir: &Path) -> Result<Option<Romsets>> {
-    match std::fs::read(neogeo_dir.join(ROMSETS_FILE)) {
-        Ok(bytes) => parse_romsets(&bytes).map(Some),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(e.into()),
+    let file = match std::fs::File::open(neogeo_dir.join(ROMSETS_FILE)) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    if file.metadata()?.len() > MAX_ROMSETS_BYTES {
+        return Err(too_big());
     }
+    let mut limited = BufReader::new(file.take(MAX_ROMSETS_BYTES + 1));
+    let romsets = parse_romsets(&mut limited)?;
+    if limited.into_inner().limit() == 0 {
+        return Err(too_big());
+    }
+    Ok(Some(romsets))
 }
 
 /// Whether romset `name` is in `neogeo_dir` as a directory or a `.zip`.
@@ -166,6 +232,11 @@ impl CoreAdapter for NeoGeo {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
+    use mistarr_core::dat::MAX_DEPTH;
+    use proptest::prelude::*;
+
     use super::super::testutil::*;
     use super::*;
 
@@ -245,11 +316,11 @@ Files that must be present:
         assert_eq!(r.sets, ["examplequest", "exblast"]);
         assert_eq!(r.bios, ["exbios.rom", "ex-lo.lo", "exfix.fix"]);
         assert!(matches!(
-            parse_romsets(b"<romsets><romset name=\"a\"></oops>"),
-            Err(Error::Romsets(_))
+            parse_romsets(b"<romsets><romset name=\"a\"></oops>".as_slice()),
+            Err(Error::Romsets { .. })
         ));
         let latin1 = parse_romsets(
-            b"<!-- Caf\xe9\n  exbios.rom\n--><romsets><romset name=\"a\"/></romsets>",
+            b"<!-- Caf\xe9\n  exbios.rom\n--><romsets><romset name=\"a\"/></romsets>".as_slice(),
         )
         .expect("parse");
         assert_eq!(
@@ -257,8 +328,76 @@ Files that must be present:
             (vec!["a".to_owned()], vec!["exbios.rom".to_owned()])
         );
         assert!(matches!(
-            parse_romsets(b"<romsets><romset name=\"\xe9\"/></romsets>"),
-            Err(Error::Romsets(_))
+            parse_romsets(b"<romsets><romset name=\"\xe9\"/></romsets>".as_slice()),
+            Err(Error::Romsets { .. })
+        ));
+    }
+
+    /// `n` levels of `<a>` nested inside `<romsets>`, well-formed either way.
+    fn nested(n: usize) -> String {
+        format!("<romsets>{}{}</romsets>", "<a>".repeat(n), "</a>".repeat(n))
+    }
+
+    #[test]
+    fn depth_cap_refuses_deep_nesting_without_panicking() {
+        assert!(parse_romsets(nested(MAX_DEPTH - 4).as_bytes()).is_ok());
+        assert!(matches!(
+            parse_romsets(nested(MAX_DEPTH * 4).as_bytes()),
+            Err(Error::XmlTooDeep { .. })
+        ));
+    }
+
+    #[test]
+    fn event_size_cap_refuses_an_oversized_attribute() {
+        let huge = "x".repeat(2 * 1024 * 1024);
+        let xml = format!("<romsets><romset name=\"{huge}\"/></romsets>");
+        assert!(matches!(
+            parse_romsets(xml.as_bytes()),
+            Err(Error::XmlEventTooLarge { .. })
+        ));
+    }
+
+    /// `n` distinct `<romset name="sI">` tags.
+    fn romset_tags(n: usize) -> String {
+        (0..n).fold(String::new(), |mut acc, i| {
+            write!(acc, "<romset name=\"s{i}\"/>").expect("write");
+            acc
+        })
+    }
+
+    #[test]
+    fn romset_count_cap_refuses_growth_past_the_limit() {
+        let over = format!("<romsets>{}</romsets>", romset_tags(MAX_SETS + 1));
+        assert!(matches!(
+            parse_romsets(over.as_bytes()),
+            Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_SETS
+        ));
+        let under = format!("<romsets>{}</romsets>", romset_tags(MAX_SETS));
+        let sets = parse_romsets(under.as_bytes()).expect("parse").sets;
+        assert_eq!(sets.len(), MAX_SETS);
+    }
+
+    #[test]
+    fn bios_name_count_cap_refuses_growth_past_the_limit() {
+        let lines = (0..=MAX_BIOS_NAMES).fold(String::new(), |mut acc, i| {
+            writeln!(acc, "bios{i}.rom").expect("write");
+            acc
+        });
+        let xml = format!("<!--{lines}--><romsets/>");
+        assert!(matches!(
+            parse_romsets(xml.as_bytes()),
+            Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_BIOS_NAMES
+        ));
+    }
+
+    #[test]
+    fn read_romsets_refuses_an_oversized_file() {
+        let dir = crate::adapter::testutil::scratch("neogeo-romsets-big");
+        let pad = " ".repeat(usize::try_from(MAX_ROMSETS_BYTES).expect("fits"));
+        std::fs::write(dir.join(ROMSETS_FILE), format!("<romsets>{pad}</romsets>")).expect("write");
+        assert!(matches!(
+            read_romsets(&dir),
+            Err(Error::FileTooLarge { limit }) if limit == MAX_ROMSETS_BYTES
         ));
     }
 
@@ -269,6 +408,24 @@ Files that must be present:
         assert!(!is_file_name("nodot"));
         assert!(!is_file_name(".hidden"));
         assert!(!is_file_name("a.toolongext"));
+        let long = format!("{}.rom", "a".repeat(MAX_NAME_BYTES));
+        assert!(!is_file_name(&long));
+    }
+
+    #[test]
+    fn overlong_names_are_dropped_not_stored() {
+        let long_set = "s".repeat(MAX_NAME_BYTES + 1);
+        let xml = format!("<romsets><romset name=\"{long_set}\"/></romsets>");
+        assert_eq!(
+            parse_romsets(xml.as_bytes()).expect("parse").sets,
+            Vec::<String>::new()
+        );
+        let long_bios = format!("{}.rom", "b".repeat(MAX_NAME_BYTES));
+        let xml = format!("<!--{long_bios}--><romsets/>");
+        assert_eq!(
+            parse_romsets(xml.as_bytes()).expect("parse").bios,
+            Vec::<String>::new()
+        );
     }
 
     #[test]
@@ -284,5 +441,17 @@ Files that must be present:
         assert!(romset_on_disk(&dir, "exblast"));
         assert!(!romset_on_disk(&dir, "exmissing"));
         assert!(!romset_on_disk(&dir, "../neogeo-romsets"));
+    }
+
+    proptest! {
+        #[test]
+        fn parse_romsets_never_panics(s in ".{0,200}") {
+            let _ = parse_romsets(s.as_bytes());
+        }
+
+        #[test]
+        fn depth_cap_never_panics(n in 0usize..300) {
+            let _ = parse_romsets(nested(n).as_bytes());
+        }
     }
 }

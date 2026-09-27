@@ -8,6 +8,8 @@
 #![warn(missing_docs)]
 #![warn(clippy::pedantic)]
 
+use mistarr_core::dat::{MAX_DEPTH, MAX_EVENT_BYTES};
+
 pub mod adapter;
 pub mod corename;
 pub mod input;
@@ -43,8 +45,13 @@ pub enum Error {
     #[error("name `{0}` cannot be used as a file name")]
     InvalidName(String),
     /// An MRA file is not well-formed XML.
-    #[error("MRA is not valid XML: {0}")]
-    Mra(String),
+    #[error("MRA is not valid XML at byte {position}: {source}")]
+    Mra {
+        /// Byte offset where the error was detected.
+        position: u64,
+        /// Underlying parser error.
+        source: quick_xml::Error,
+    },
     /// An MRA rom uses content the assembler does not implement.
     #[error("MRA content not supported: {0}")]
     MraUnsupported(String),
@@ -57,8 +64,42 @@ pub enum Error {
         zips: String,
     },
     /// A Neo Geo `romsets.xml` is not well-formed XML.
-    #[error("romsets.xml is not valid XML: {0}")]
-    Romsets(String),
+    #[error("romsets.xml is not valid XML at byte {position}: {source}")]
+    Romsets {
+        /// Byte offset where the error was detected.
+        position: u64,
+        /// Underlying parser error.
+        source: quick_xml::Error,
+    },
+    /// An MRA or `romsets.xml` document nests elements deeper than the reader allows.
+    #[error("elements nest deeper than {MAX_DEPTH} levels at byte {position}")]
+    XmlTooDeep {
+        /// Byte offset of the element that went too deep.
+        position: u64,
+    },
+    /// An MRA or `romsets.xml` file is larger than the reader's size cap.
+    #[error("file is larger than {limit} bytes")]
+    FileTooLarge {
+        /// The cap that was exceeded.
+        limit: u64,
+    },
+    /// An MRA or `romsets.xml` element, text run or comment is larger than the reader's cap.
+    #[error("an XML element at byte {position} is larger than {} KiB", MAX_EVENT_BYTES >> 10)]
+    XmlEventTooLarge {
+        /// Byte offset where the element starts.
+        position: u64,
+    },
+    /// An MRA or `romsets.xml` document holds more of one kind of output than the
+    /// reader keeps, such as roms, items in a rom, zip names, romsets or bios names.
+    #[error("more than {limit} {kind} at byte {position}")]
+    XmlOutputTooLarge {
+        /// What was capped, e.g. `"<rom> elements"` or `"distinct zip names"`.
+        kind: &'static str,
+        /// The cap that was exceeded.
+        limit: usize,
+        /// Byte offset near where the cap was hit.
+        position: u64,
+    },
     /// A path cannot be written into an MGL or a command line.
     #[error("path `{0}` cannot be passed to MiSTer Main")]
     UnsafePath(String),

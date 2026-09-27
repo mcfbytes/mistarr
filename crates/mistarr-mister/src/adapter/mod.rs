@@ -14,6 +14,7 @@ pub mod arcade;
 mod cart;
 mod disc;
 pub mod neogeo;
+mod xml_caps;
 
 /// Placement rules for one MiSTer core.
 ///
