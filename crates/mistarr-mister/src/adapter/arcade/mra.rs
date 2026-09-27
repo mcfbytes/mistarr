@@ -244,7 +244,7 @@ pub fn zip_location(zip: &str) -> Option<ZipPath> {
 /// elements, [`Error::XmlTooDeep`] past [`MAX_DEPTH`] levels of nesting,
 /// [`Error::XmlEventTooLarge`] past one capped event, and [`Error::XmlOutputTooLarge`]
 /// past [`MAX_ROMS`], [`MAX_ROM_ITEMS`], [`MAX_TOTAL_ROM_ITEMS`], [`MAX_ZIPS`],
-/// [`MAX_ZIPS_PER_LIST`] or [`MAX_TOTAL_ZIP_REFS`].
+/// [`MAX_ZIPS_PER_LIST`], [`MAX_TOTAL_ZIP_REFS`] or [`MAX_NAME_BYTES`].
 ///
 /// ```
 /// let mra = mistarr_mister::adapter::arcade::mra::parse(
@@ -300,8 +300,8 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
     let mut buf = Vec::new();
     let mut mra = Mra::default();
     let mut open: Vec<(String, Option<Field>)> = Vec::new();
-    // Tracks quick_xml's own true nesting, which end-tag recovery below can close
-    // several levels of in one step, unlike quick_xml's own opened-name buffer.
+    // Tracks quick_xml's own true nesting, one level per Start/End; end-tag
+    // recovery below instead drains several entries at once from `open`.
     let mut depth = xml_caps::Depth::default();
     let mut rom: Option<RomBuilder> = None;
     let mut zips_seen: HashSet<String> = HashSet::new();
@@ -488,6 +488,11 @@ pub const MAX_ZIPS_PER_LIST: usize = 16;
 /// in one document; further ones are refused even under [`MAX_ZIPS_PER_LIST`], so
 /// this list's total memory does not scale with [`MAX_TOTAL_ROM_ITEMS`].
 pub const MAX_TOTAL_ZIP_REFS: usize = 65_536;
+
+/// Longest zip name or `<part>` `name` attribute kept, in bytes; both are real file
+/// names, and a zip name is stored three times over ([`Mra::zips`], the dedupe
+/// `HashSet` and a rom's or part's own list), so a longer one is refused outright.
+pub const MAX_NAME_BYTES: usize = 255;
 
 /// Version of what [`parse`] reads from an MRA; it changes whenever a file could parse differently.
 pub const PARSER_VERSION: u32 = 4;
@@ -737,11 +742,19 @@ fn number(value: &str) -> Option<u64> {
 
 /// Splits a `|`-separated zip list, trimming, dropping empty entries and, within this
 /// one attribute, duplicates; refuses past `cap` distinct names so one attribute value
-/// cannot hold arbitrarily many, however large or repetitive the text behind it is.
+/// cannot hold arbitrarily many, however large or repetitive the text behind it is,
+/// and refuses any single name past [`MAX_NAME_BYTES`].
 fn split_zips(value: &str, cap: usize, position: u64) -> Result<Vec<String>> {
     let mut seen: HashSet<&str> = HashSet::new();
     let mut out = Vec::new();
     for zip in value.split('|').map(str::trim).filter(|z| !z.is_empty()) {
+        if zip.len() > MAX_NAME_BYTES {
+            return Err(xml_caps::output_too_large(
+                "bytes in a zip name",
+                MAX_NAME_BYTES,
+                position,
+            ));
+        }
         if seen.insert(zip) {
             if out.len() >= cap {
                 return Err(xml_caps::output_too_large(
@@ -952,7 +965,16 @@ fn part_from(
             }
         };
         match k.as_str() {
-            "name" => part.name = Some(v.clone()).filter(|n| !n.is_empty()),
+            "name" if !v.is_empty() => {
+                if v.len() > MAX_NAME_BYTES {
+                    return Err(xml_caps::output_too_large(
+                        "bytes in a part name",
+                        MAX_NAME_BYTES,
+                        position,
+                    ));
+                }
+                part.name = Some(v.clone());
+            }
             "zip" => {
                 part.zips = split_zips(v, MAX_ZIPS_PER_LIST, position)?;
                 budget.add_zip_refs(part.zips.len(), position)?;

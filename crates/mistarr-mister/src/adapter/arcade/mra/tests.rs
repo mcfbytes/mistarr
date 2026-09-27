@@ -468,6 +468,42 @@ fn zip_ref_total_cap_refuses_growth_across_many_parts() {
     ));
 }
 
+#[test]
+fn zip_name_length_cap_accepts_the_cap_and_refuses_past_it() {
+    let at_cap = format!("{}.zip", "z".repeat(MAX_NAME_BYTES - 4));
+    assert_eq!(at_cap.len(), MAX_NAME_BYTES);
+    let xml = format!("<m><rom zip=\"{at_cap}\"/></m>");
+    assert_eq!(
+        parse(xml.as_bytes()).expect("parse").zips,
+        [at_cap.as_str()]
+    );
+
+    let over = format!("{at_cap}x");
+    let xml = format!("<m><rom zip=\"{over}\"/></m>");
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_NAME_BYTES
+    ));
+}
+
+#[test]
+fn part_name_length_cap_accepts_the_cap_and_refuses_past_it() {
+    let at_cap = "p".repeat(MAX_NAME_BYTES);
+    let xml = format!("<m><rom><part name=\"{at_cap}\"/></rom></m>");
+    let mra = parse(xml.as_bytes()).expect("parse");
+    let RomItem::Part(part) = &mra.roms[0].items[0] else {
+        panic!("part expected");
+    };
+    assert_eq!(part.name.as_deref(), Some(at_cap.as_str()));
+
+    let over = format!("{at_cap}x");
+    let xml = format!("<m><rom><part name=\"{over}\"/></rom></m>");
+    assert!(matches!(
+        parse(xml.as_bytes()),
+        Err(Error::XmlOutputTooLarge { limit, .. }) if limit == MAX_NAME_BYTES
+    ));
+}
+
 /// `text` with each ASCII letter upper-cased where `mask` has a set bit, cycling the mask.
 fn recase(text: &str, mask: &[bool]) -> String {
     text.chars()

@@ -163,8 +163,11 @@ many; at most `MAX_ZIPS` (4096) distinct zip names collected from every
 `MAX_ZIPS_PER_LIST` (16) zip names kept from any one `<rom>`'s or `<part>`'s
 own `zip` attribute, with duplicates within that one attribute dropped
 first, and at most `MAX_TOTAL_ZIP_REFS` (65,536) of those summed across the
-document. Each cap is refused with `Error::XmlOutputTooLarge`, and zip names
-dedupe through a `HashSet` rather than a linear scan. A corpus of real MRAs
+document. Every zip name and a `<part>`'s own `name` attribute are kept to
+`MAX_NAME_BYTES` (255) bytes, since both are real file names; a longer one
+is refused rather than stored, as `romsets.xml`'s own name cap above. Each
+cap is refused with `Error::XmlOutputTooLarge`, and zip names dedupe through
+a `HashSet` rather than a linear scan. A corpus of real MRAs
 has been seen with up to about 160 items in one `<rom>`, well under
 `MAX_ROM_ITEMS`. `Mra::md5` is collected from the roms that closed into
 `Mra::roms`, never from a `<rom>`-named tag met in passing (nested inside
@@ -177,22 +180,26 @@ far larger than the input needed to write it.
 For a capped 16 MiB input read through `read`, the worst case reaches every
 cap: up to 2048 `MraRom` entries and up to `MAX_TOTAL_ROM_ITEMS` (131,072)
 rom items summed across them, no single `<rom>` holding more than
-`MAX_ROM_ITEMS` (1024) of them. Each item stays under roughly 300 bytes on a
-32-bit target even as a worst-case unsupported-content reason (32 bytes
-quoted, Debug-escaped about 6x, plus its fixed wording), for about 39 MiB of
-live data and up to about 79 MiB counting each `Vec`'s own spare capacity
-once it has doubled to fit. The distinct zip names (`MAX_ZIPS`) and the zip
-names kept on individual roms and parts (`MAX_TOTAL_ZIP_REFS`) each add a
-handful of MiB. `quick_xml`'s own record of currently-open names adds
-roughly 16 to 32 MiB, as for `romsets.xml` above: it keeps the full name of
-every still-open element up to the depth cap, and a document of nested
-opening tags with no closes can spend most of its 16 MiB on those names
-before the cap refuses it; MRA's own open-element stack (a few KiB, per
-above) truncates each name to 64 bytes but is a separate copy, so it does
-not shrink `quick_xml`'s. The 1 MiB event buffer adds at most a few MiB
-more. That puts the peak at roughly 56 to 117 MiB: higher than
-`romsets.xml` above, since an MRA has more kinds of accumulated output to
-bound, but still well inside the board's shared budget.
+`MAX_ROM_ITEMS` (1024) of them. Each item stays under roughly 400 bytes on a
+32-bit target: a named `<part>` holding a full `MAX_NAME_BYTES` (255) byte
+name, or a worst-case unsupported-content reason (32 bytes quoted,
+Debug-escaped about 6x, plus its fixed wording), for about 50 MiB of live
+data and up to about 100 MiB counting each `Vec`'s own spare capacity once
+it has doubled to fit. Zip names are capped the same way but stored three
+times over: in `mra.zips` and the `zips_seen` `HashSet` (up to `MAX_ZIPS`
+each) and in the per-`<rom>` or per-`<part>` `zips` lists (up to
+`MAX_TOTAL_ZIP_REFS` summed); at up to 4096 + 4096 + 65,536 names of
+`MAX_NAME_BYTES` (255) bytes each, that adds roughly 18 MiB. `quick_xml`'s
+own record of currently-open names adds roughly 16 to 32 MiB, as for
+`romsets.xml` above: it keeps the full name of every still-open element up
+to the depth cap, and a document of nested opening tags with no closes can
+spend most of its 16 MiB on those names before the cap refuses it; MRA's own
+open-element stack (a few KiB, per above) truncates each name to 64 bytes
+but is a separate copy, so it does not shrink `quick_xml`'s. The 1 MiB event
+buffer adds at most a few MiB more. That puts the peak at roughly 86 to 153
+MiB: higher than `romsets.xml` above, since an MRA has more kinds of
+accumulated output to bound, but still well inside the board's shared
+budget.
 
 The arcade catalogue job (ARCHITECTURE.md "Arcade catalogue") turns each MRA
 into one `arcade` title with `source = 'mra'`: `<name>`, `<setname>` and
