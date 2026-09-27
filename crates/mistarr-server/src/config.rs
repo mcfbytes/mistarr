@@ -37,6 +37,10 @@ pub struct Config {
     pub memory: MemoryConfig,
     /// `[scan]`.
     pub scan: ScanConfig,
+    /// Dotted paths `load` found in the file that no field claimed; not itself
+    /// a config key. [`Config::log_problems`] logs these once the caller can.
+    #[serde(skip)]
+    pub(crate) unknown_keys: Vec<String>,
 }
 
 /// `[scan]`: how the library scan identifies files.
@@ -401,7 +405,8 @@ pub struct SettingsPatch {
 }
 
 impl Config {
-    /// Parses TOML text; absent fields take their defaults.
+    /// Parses TOML text; absent fields take their defaults. An unknown key is
+    /// logged as a warning naming it and otherwise ignored.
     ///
     /// # Errors
     ///
@@ -413,11 +418,24 @@ impl Config {
     /// assert_eq!(c.limits.down_kbps_core, 512);
     /// ```
     pub fn parse(text: &str) -> Result<Self, toml::de::Error> {
-        toml::from_str(text)
+        let (config, unknown) = Self::parse_reporting(text)?;
+        warn_unknown_keys(&unknown);
+        Ok(config)
+    }
+
+    /// [`Config::parse`], also returning the dotted path of every key the
+    /// document held that no field of `Config` claimed.
+    fn parse_reporting(text: &str) -> Result<(Self, Vec<String>), toml::de::Error> {
+        let de = toml::Deserializer::parse(text)?;
+        let mut unknown = Vec::new();
+        let config = serde_ignored::deserialize(de, |path| unknown.push(path.to_string()))?;
+        Ok((config, unknown))
     }
 
     /// Loads `explicit` if given, which must exist, else `<data>/mistarr.toml`
-    /// if present, else defaults. `data` then overrides `paths.data`.
+    /// if present, else defaults; `data` then overrides `paths.data`. Unknown
+    /// keys are kept on the result rather than logged here, since logging
+    /// must wait until a `tracing` subscriber exists.
     ///
     /// # Errors
     ///
@@ -436,23 +454,60 @@ impl Config {
             Some(p) => Some(p.to_path_buf()),
             None => Some(data.unwrap_or(&default_data).join(CONFIG_FILE)).filter(|p| p.exists()),
         };
-        let mut config = match file {
+        let (mut config, unknown) = match file {
             Some(path) => {
                 let text = match std::fs::read_to_string(&path) {
                     Ok(text) => text,
                     Err(source) => return Err(Error::ConfigRead { path, source }),
                 };
-                match Self::parse(&text) {
-                    Ok(config) => config,
+                match Self::parse_reporting(&text) {
+                    Ok(parsed) => parsed,
                     Err(source) => return Err(Error::Config { path, source }),
                 }
             }
-            None => Self::default(),
+            None => (Self::default(), Vec::new()),
         };
         if let Some(d) = data {
             config.paths.data = d.to_path_buf();
         }
+        config.unknown_keys = unknown;
         Ok(config)
+    }
+
+    /// Logs and clears the unknown keys, then logs each [`ConfigProblem`]
+    /// whose fields a runtime settings overlay cannot move. Needs a
+    /// `tracing` subscriber.
+    pub(crate) fn log_problems(&mut self) {
+        warn_unknown_keys(&std::mem::take(&mut self.unknown_keys));
+        for problem in self.validate() {
+            if !problem.overlay_can_move() {
+                tracing::warn!("{}", problem.message());
+            }
+        }
+    }
+
+    /// Logs any [`ConfigProblem`] [`Config::validate`] finds that a runtime
+    /// settings overlay can move the fields it looks at. The caller runs
+    /// this over the effective config, after that overlay.
+    pub(crate) fn log_path_map_problem(&self) {
+        for problem in self.validate() {
+            if problem.overlay_can_move() {
+                tracing::warn!("{}", problem.message());
+            }
+        }
+    }
+
+    /// Every [`ConfigProblem`] this config currently has.
+    #[must_use]
+    pub fn validate(&self) -> Vec<ConfigProblem> {
+        let mut problems = Vec::new();
+        if self.memory.import_floor_mib == 0 {
+            problems.push(ConfigProblem::ImportFloor);
+        }
+        if !client_path_map_ok(&self.client) {
+            problems.push(ConfigProblem::PathMap);
+        }
+        problems
     }
 
     /// The runtime-editable subset.
@@ -477,7 +532,8 @@ impl Config {
     ///
     /// ```
     /// use mistarr_server::config::{Config, RuntimeSettings, ScanConfig};
-    /// let mut c = Config { scan: ScanConfig { chd_tracks: true }, ..Config::default() };
+    /// let mut c = Config::default();
+    /// c.scan = ScanConfig { chd_tracks: true };
     /// c.overlay(RuntimeSettings::default());
     /// assert!(c.scan.chd_tracks);
     /// ```
@@ -518,6 +574,60 @@ impl Config {
         if let Some(transfer) = patch.transfer {
             self.transfer = transfer;
         }
+    }
+}
+
+/// A problem [`Config::validate`] finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ConfigProblem {
+    /// A remote path map entry has a blank remote path or a non-absolute local path.
+    PathMap,
+    /// `[memory] import_floor_mib` is 0, so a DAT import in RAM may leave no memory
+    /// for the core.
+    ImportFloor,
+}
+
+impl ConfigProblem {
+    /// The message shown to a user or written to the log.
+    #[must_use]
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::PathMap => {
+                "Each remote path map entry needs a remote path and an absolute local path."
+            }
+            Self::ImportFloor => {
+                "[memory] import_floor_mib is 0: a DAT import in RAM may leave the core no memory"
+            }
+        }
+    }
+
+    /// Whether a runtime settings overlay can move the fields this problem checks.
+    #[must_use]
+    fn overlay_can_move(self) -> bool {
+        match self {
+            Self::PathMap => true,
+            Self::ImportFloor => false,
+        }
+    }
+}
+
+/// Rejects a remote path map entry whose remote path is blank, which would
+/// match every path the client reports, or whose local path is not absolute.
+/// The remote side is the client's own spelling, so `C:\\x` or `C:/x` pass.
+fn path_map_entry_ok(m: &PathMapping) -> bool {
+    !m.remote.to_string_lossy().trim().is_empty() && m.local.is_absolute()
+}
+
+/// Whether every entry of `client.remote_path_map` passes [`path_map_entry_ok`].
+fn client_path_map_ok(client: &ClientConfig) -> bool {
+    client.remote_path_map.iter().all(path_map_entry_ok)
+}
+
+/// Logs each key [`Config::parse_reporting`] found and no field claimed.
+fn warn_unknown_keys(unknown: &[String]) {
+    for key in unknown {
+        tracing::warn!(key = %key, "unknown config key");
     }
 }
 
@@ -619,6 +729,144 @@ mod tests {
         let missing = dir.path().join("missing.toml");
         let err = Config::load(Some(&missing), None).expect_err("missing");
         assert!(matches!(&err, Error::ConfigRead { path, .. } if *path == missing));
+    }
+
+    #[test]
+    fn a_bad_toml_file_names_the_path_with_one_config_prefix() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(CONFIG_FILE), "[[[").expect("write");
+        let err = Config::load(None, Some(dir.path())).expect_err("bad toml");
+        let message = err.to_string();
+        let path = dir.path().join(CONFIG_FILE);
+        assert_eq!(message.matches("config:").count(), 1, "{message}");
+        assert!(
+            message.starts_with(&format!("config: {}: ", path.display())),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn unknown_keys_are_reported_and_the_rest_still_parses() {
+        let text = "[server]\nlisten = \"1.2.3.4:1\"\ntypo = 1\n[bogus_section]\nx = 1\n";
+        let (config, unknown) = Config::parse_reporting(text).expect("parse");
+        assert_eq!(config.server.listen, "1.2.3.4:1");
+        let unknown: std::collections::BTreeSet<_> = unknown.into_iter().collect();
+        assert_eq!(
+            unknown,
+            ["server.typo", "bogus_section"]
+                .into_iter()
+                .map(str::to_owned)
+                .collect()
+        );
+        // The same document parses through the public entry point, unknown keys only logged.
+        assert!(Config::parse(text).is_ok());
+    }
+
+    #[test]
+    fn path_map_entries_need_a_remote_and_an_absolute_local() {
+        let ok = |r: &str, l: &str| path_map_entry_ok(&PathMapping::new(r, l));
+        assert!(ok("/downloads", "/media/fat/mistarr/staging"));
+        assert!(ok("C:\\Downloads", "/media/fat/mistarr/staging"));
+        assert!(ok("C:/Downloads", "/media/fat/mistarr/staging"));
+        assert!(!ok("", "/media/fat/mistarr/staging"));
+        assert!(!ok("  ", "/media/fat/mistarr/staging"));
+        assert!(!ok("/downloads", "staging"));
+        assert!(!ok("/downloads", ""));
+    }
+
+    #[test]
+    fn validate_reports_the_path_map_and_import_floor_problems() {
+        assert_eq!(Config::default().validate(), []);
+        let mut bad_map = Config::default();
+        bad_map.client.remote_path_map = vec![PathMapping::new("/r", "not-absolute")];
+        assert_eq!(bad_map.validate(), [ConfigProblem::PathMap]);
+        let floor_zero = Config {
+            memory: MemoryConfig {
+                import_floor_mib: 0,
+                ..MemoryConfig::default()
+            },
+            ..Config::default()
+        };
+        assert_eq!(floor_zero.validate(), [ConfigProblem::ImportFloor]);
+    }
+
+    /// A `MakeWriter` that appends to a shared buffer, so a test can read back
+    /// what a scoped subscriber wrote without touching stderr or a file.
+    #[derive(Clone, Default)]
+    struct CapturingWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CapturingWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturingWriter {
+        type Writer = Self;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// Runs `f` under a scoped subscriber and returns what it logged.
+    fn captured(f: impl FnOnce()) -> String {
+        let buf = CapturingWriter::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(buf.clone())
+            .with_ansi(false)
+            .finish();
+        tracing::subscriber::with_default(subscriber, f);
+        let bytes = buf
+            .0
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        String::from_utf8(bytes).expect("utf8 log")
+    }
+
+    #[test]
+    fn load_keeps_unknown_keys_for_the_caller_to_log() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(CONFIG_FILE), "typo = 1\n").expect("write");
+        let config = Config::load(None, Some(dir.path())).expect("load");
+        assert_eq!(config.unknown_keys, ["typo"]);
+    }
+
+    #[test]
+    fn log_problems_reports_the_unknown_key_and_the_import_floor() {
+        let mut config = Config {
+            memory: MemoryConfig {
+                import_floor_mib: 0,
+                ..MemoryConfig::default()
+            },
+            unknown_keys: vec!["server.typo".to_owned()],
+            ..Config::default()
+        };
+
+        let logged = captured(|| config.log_problems());
+
+        assert!(logged.contains("server.typo"), "{logged}");
+        assert!(logged.contains("import_floor_mib is 0"), "{logged}");
+        assert!(config.unknown_keys.is_empty(), "keys should be taken");
+    }
+
+    #[test]
+    fn log_path_map_problem_reports_a_bad_entry() {
+        let mut config = Config::default();
+        config.client.remote_path_map = vec![PathMapping::new("/r", "not-absolute")];
+
+        let logged = captured(|| config.log_path_map_problem());
+
+        assert!(logged.contains("remote path map entry"), "{logged}");
     }
 
     #[test]

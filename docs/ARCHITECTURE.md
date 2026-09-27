@@ -1099,6 +1099,18 @@ a `scan` or `transfer` section leave the file's in force, so a faster board
 can default `chd_tracks` on in the file. `server`, `paths`, `sources`, `jobs` and
 `memory` need a restart.
 
+A file that is not valid TOML fails startup with `config: <path>: <error>`,
+the prefix once. A key the schema above does not name is ignored, and logged
+as a warning naming it once the server's logging starts, before `open_db`
+migrates the database in RAM. `[memory] import_floor_mib` left at 0 is logged
+there too, since `[memory]` needs a restart and cannot move from the settings
+overlay that follows. The `client.remote_path_map` check instead runs after
+that overlay, over the effective config, logging a blank remote path or a
+non-absolute local path as a warning. `PUT /system/settings` does not re-run
+this check over the stored config: it rejects only such an entry inside the
+`client` section a patch itself carries, so a `client`-less patch succeeds
+even over a stored map that already fails the check.
+
 ## Non-goals
 
 - No emulation and no save management. Launching hands a command to MiSTer

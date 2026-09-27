@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{ApiError, Page, Paging};
 use crate::app::AppState;
-use crate::config::{RuntimeSettings, SettingsPatch};
+use crate::config::{Config, ConfigProblem, RuntimeSettings, SettingsPatch};
 use crate::db::jobs::{self, JobId, JobRow};
 use crate::db::platforms;
 use crate::db::settings::{self, keys};
@@ -173,25 +173,6 @@ async fn wizard_done(State(app): State<Arc<AppState>>) -> Result<Json<Wizard>, A
     wizard(State(app)).await
 }
 
-/// Rejects a remote path map entry whose remote path is blank, which would
-/// match every path the client reports, or whose local path is not absolute.
-/// The remote side is the client's own spelling, so `C:\\x` or `C:/x` pass.
-fn check_path_map(patch: &SettingsPatch) -> Result<(), ApiError> {
-    let Some(client) = &patch.client else {
-        return Ok(());
-    };
-    if client.remote_path_map.iter().any(|m| !path_map_entry_ok(m)) {
-        return Err(ApiError::bad_request(
-            "Each remote path map entry needs a remote path and an absolute local path.",
-        ));
-    }
-    Ok(())
-}
-
-fn path_map_entry_ok(m: &mistarr_clients::PathMapping) -> bool {
-    !m.remote.to_string_lossy().trim().is_empty() && m.local.is_absolute()
-}
-
 /// `POST /system/client/start` body.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -336,8 +317,14 @@ async fn put_settings(
 ) -> Result<Json<RuntimeSettings>, ApiError> {
     let patch: SettingsPatch =
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
-    check_path_map(&patch)?;
     let before = app.config();
+    if patch.client.is_some() {
+        let mut effective = Config::clone(&before);
+        effective.apply(&patch);
+        if effective.validate().contains(&ConfigProblem::PathMap) {
+            return Err(ApiError::bad_request(ConfigProblem::PathMap.message()));
+        }
+    }
     let (prefs_before, scan_before) = (before.prefs.clone(), before.scan);
     let (runtime, client_changed) = app.update_settings(&patch).await?;
     if runtime.scan != Some(scan_before) {
@@ -362,7 +349,6 @@ async fn put_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use mistarr_clients::PathMapping;
 
     #[test]
     fn a_queued_job_says_what_it_waits_for() {
@@ -394,17 +380,5 @@ mod tests {
             job_reason(&paused, &open[1], &open).as_deref(),
             Some("Paused by the user")
         );
-    }
-
-    #[test]
-    fn path_map_entries_need_a_remote_and_an_absolute_local() {
-        let ok = |r: &str, l: &str| path_map_entry_ok(&PathMapping::new(r, l));
-        assert!(ok("/downloads", "/media/fat/mistarr/staging"));
-        assert!(ok("C:\\Downloads", "/media/fat/mistarr/staging"));
-        assert!(ok("C:/Downloads", "/media/fat/mistarr/staging"));
-        assert!(!ok("", "/media/fat/mistarr/staging"));
-        assert!(!ok("  ", "/media/fat/mistarr/staging"));
-        assert!(!ok("/downloads", "staging"));
-        assert!(!ok("/downloads", ""));
     }
 }
