@@ -638,7 +638,7 @@ pub fn delete_paths(
     if paths.is_empty() {
         return Ok(0);
     }
-    let list = serde_json::to_string(paths).map_err(|e| crate::Error::Job(e.to_string()))?;
+    let list = serde_json::to_string(paths)?;
     let ids: Vec<i64> = conn
         .prepare_cached(
             "SELECT id FROM files WHERE platform_id = ?1
@@ -665,7 +665,7 @@ pub fn delete_ids(conn: &Connection, ids: &[i64]) -> Result<usize> {
     if ids.is_empty() {
         return Ok(0);
     }
-    let list = serde_json::to_string(ids).map_err(|e| crate::Error::Job(e.to_string()))?;
+    let list = serde_json::to_string(ids)?;
     conn.prepare_cached(
         "UPDATE import_log SET file_id = NULL WHERE file_id IN (SELECT value FROM json_each(?1))",
     )?
@@ -701,9 +701,7 @@ pub fn delete_missing(
         .collect();
     let mut removed = 0;
     for batch in gone.chunks(DELETE_BATCH) {
-        let tx = conn.transaction()?;
-        removed += delete_paths(&tx, platform_id, batch)?;
-        crate::db::commit(tx)?;
+        removed += crate::db::transact(conn, |tx| delete_paths(tx, platform_id, batch))?;
     }
     Ok(removed)
 }

@@ -15,7 +15,6 @@ use crate::app::AppState;
 use crate::config::ClientConfig;
 use crate::db::settings::{self, keys};
 use crate::error::Result;
-use crate::events::EventKind;
 
 /// Time allowed for each probe.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -87,7 +86,7 @@ pub async fn probe(client: &ClientConfig, launcher: &Launcher) -> ClientStatus {
     };
     let launcher = launcher.clone();
     let installed =
-        crate::threads::blocking(crate::threads::label::DETECT, move || launcher.installed())
+        crate::threads::run(crate::threads::label::DETECT, move || launcher.installed())
             .await
             .unwrap_or_default();
     ClientStatus {
@@ -125,7 +124,7 @@ pub async fn detect_and_store(app: &Arc<AppState>, announce: bool) -> Result<Cli
         return Ok(stored);
     }
     let began = crate::unix_now();
-    let client = app.config().client;
+    let client = app.config().client.clone();
     let status = probe(&client, &app.launcher()).await;
     let stored = status.clone();
     let before = app
@@ -161,8 +160,7 @@ pub async fn detect_and_store(app: &Arc<AppState>, announce: bool) -> Result<Cli
     }
     app.refresh_client(&status);
     if changed || announce {
-        let snapshot = crate::status::snapshot(app).await;
-        app.events.publish(EventKind::Status, &snapshot);
+        crate::status::publish(app).await;
     }
     if let Err(e) = wizard::on_change(app).await {
         tracing::warn!(error = %e, "cannot check wizard completion");

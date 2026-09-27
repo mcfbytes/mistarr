@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use mistarr_clients::fetch::{FetchError, FetchUrl, Fetcher, Limits, Roots};
+use mistarr_clients::fetch::{FetchUrl, Fetcher, Limits, Roots};
 use serde_json::{json, Value};
 
 use self::content::{Checked, Found, Refused, SNIFF_BYTES};
@@ -19,7 +19,7 @@ use self::spool::{Pace, Places, Spool, Stop};
 use super::{Job, JobContext, Lane};
 use crate::app::AppState;
 use crate::error::{Error, Result};
-use crate::threads::{blocking, label};
+use crate::threads::{label, run};
 
 /// `jobs.kind` of [`UrlFetch`].
 pub const KIND: &str = "url_fetch";
@@ -205,13 +205,8 @@ impl View {
     }
 }
 
-#[allow(clippy::needless_pass_by_value)] // Used as `map_err(fetch_error)`.
-fn fetch_error(e: FetchError) -> Error {
-    Error::Fetch(e.to_string())
-}
-
 fn too_large(cap: u64, what: &str) -> Error {
-    Error::Fetch(format!(
+    Error::FetchRefused(format!(
         "The file is larger than {} MiB, the most {what} may be.",
         cap >> 20
     ))
@@ -227,9 +222,9 @@ fn what(found: Option<Found>) -> &'static str {
 /// The type `head` announces, refused when it is none or the announced length exceeds its cap.
 fn identify(head: &[u8], total: Option<u64>) -> Result<Found> {
     if content::is_gzip(head) {
-        return Err(Error::Fetch(COMPRESSED.to_owned()));
+        return Err(Error::FetchRefused(COMPRESSED.to_owned()));
     }
-    let found = content::sniff(head).ok_or_else(|| Error::Fetch(NOT_ACCEPTED.to_owned()))?;
+    let found = content::sniff(head).ok_or_else(|| Error::FetchRefused(NOT_ACCEPTED.to_owned()))?;
     if total.is_some_and(|t| t > found.cap()) {
         return Err(too_large(found.cap(), what(Some(found))));
     }
@@ -264,7 +259,7 @@ impl UrlFetch {
     /// Fails with [`CANCELLED`] once cancelled, [`Error::Cancelled`] on shutdown.
     fn stop_point(&self, ctx: &JobContext) -> Result<()> {
         if self.cancel.is_set() {
-            return Err(Error::Fetch(CANCELLED.to_owned()));
+            return Err(Error::FetchRefused(CANCELLED.to_owned()));
         }
         if *ctx.app.shutdown_signal().borrow() {
             return Err(Error::Cancelled);
@@ -277,7 +272,7 @@ impl UrlFetch {
         let mut stop = ctx.app.shutdown_signal();
         tokio::select! {
             out = work => Ok(out),
-            () = self.cancel.wait() => Err(Error::Fetch(CANCELLED.to_owned())),
+            () = self.cancel.wait() => Err(Error::FetchRefused(CANCELLED.to_owned())),
             _ = stop.wait_for(|s| *s) => Err(Error::Cancelled),
         }
     }
@@ -286,19 +281,18 @@ impl UrlFetch {
     /// for http links too, which may redirect to https.
     async fn fetcher(&self, app: &AppState) -> Result<Fetcher> {
         let ca = app.options.ca_file.clone();
-        let loaded = blocking(label::FETCH, move || match ca {
+        let loaded = run(label::FETCH, move || match ca {
             Some(path) => Roots::from_pem_file(&path).map_err(|e| (path, e)),
             None => Ok(Roots::system_or_bundled()),
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+        .await?;
         let roots = match loaded {
             Ok(roots) => roots,
             Err((path, e)) => {
                 warn_once(|| {
                     tracing::warn!(path = %path.display(), error = %e, "the CA file cannot be read");
                 });
-                return Err(Error::Fetch(format!("The CA bundle cannot be read: {e}.")));
+                return Err(Error::CaFile(e));
             }
         };
         if let Some((path, why)) = roots.skipped() {
@@ -312,7 +306,7 @@ impl UrlFetch {
             });
         }
         tracing::debug!(origin = ?roots.origin(), count = roots.len(), "TLS roots");
-        Fetcher::new(roots, Limits::default()).map_err(fetch_error)
+        Fetcher::new(roots, Limits::default()).map_err(Error::from)
     }
 
     async fn fetch(&self, ctx: &JobContext) -> Result<()> {
@@ -326,10 +320,7 @@ impl UrlFetch {
         self.stop_point(ctx)?;
         tracing::debug!(host = self.url.host(), "fetching a URL");
         let fetcher = self.fetcher(app).await?;
-        let mut resp = self
-            .until_stopped(ctx, fetcher.get(&self.url))
-            .await?
-            .map_err(fetch_error)?;
+        let mut resp = self.until_stopped(ctx, fetcher.get(&self.url)).await??;
         view.total = resp.content_length();
         if view
             .total
@@ -346,11 +337,7 @@ impl UrlFetch {
             Spool::create(places(app), self.token, view.total, Arc::clone(&pace)).await?;
         let mut head = Vec::with_capacity(SNIFF_BYTES);
         let mut found = None;
-        while let Some(chunk) = self
-            .until_stopped(ctx, resp.chunk())
-            .await?
-            .map_err(fetch_error)?
-        {
+        while let Some(chunk) = self.until_stopped(ctx, resp.chunk()).await?? {
             view.received += chunk.len() as u64;
             if found.is_none() {
                 let take = chunk.len().min(SNIFF_BYTES - head.len());
@@ -390,7 +377,7 @@ impl UrlFetch {
                 };
                 crate::http::place_source(app, file)
                     .await
-                    .map_err(|e| Error::Fetch(e.message))?
+                    .map_err(|e| Error::FetchRefused(e.message))?
             }
             Checked::Dat { .. } => {
                 let dir = app.config().paths.dats();
@@ -419,13 +406,12 @@ impl UrlFetch {
         let target = spool.target(crate::jobs::dat_import::MAX_DAT_BYTES);
         let cancel = Arc::clone(&self.cancel);
         let shutdown = ctx.app.shutdown_signal();
-        let checked = blocking(label::FETCH, move || {
+        let checked = run(label::FETCH, move || {
             content::check(found, &path, &target, &|| {
                 cancel.is_set() || *shutdown.borrow()
             })
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+        .await?;
         match checked {
             Ok(Checked::Dat { path, in_ram }) => {
                 spool.adopt(path.clone(), in_ram);
@@ -436,15 +422,15 @@ impl UrlFetch {
                 content::MAX_UNPACKED_BYTES,
                 "a DAT or DAT pack unpacked",
             )),
-            Err(Refused::NoRoom) => Err(Error::Fetch(CARD_FULL.to_owned())),
+            Err(Refused::NoRoom) => Err(Error::FetchRefused(CARD_FULL.to_owned())),
             Err(Refused::NotAccepted(why)) => {
                 tracing::debug!(why, "a fetched file was refused");
-                Err(Error::Fetch(NOT_ACCEPTED.to_owned()))
+                Err(Error::FetchRefused(NOT_ACCEPTED.to_owned()))
             }
-            Err(Refused::OtherFiles) => Err(Error::Fetch(OTHER_FILES.to_owned())),
+            Err(Refused::OtherFiles) => Err(Error::FetchRefused(OTHER_FILES.to_owned())),
             Err(Refused::Stopped) => {
                 self.stop_point(ctx)?;
-                Err(Error::Fetch(CANCELLED.to_owned()))
+                Err(Error::FetchRefused(CANCELLED.to_owned()))
             }
             Err(Refused::Io(e)) => Err(e.into()),
         }
@@ -476,7 +462,7 @@ fn pace(app: &AppState) -> Pace {
 fn card_full(e: Error) -> Error {
     match e {
         Error::Io(io) if io.kind() == std::io::ErrorKind::StorageFull => {
-            Error::Fetch(CARD_FULL.to_owned())
+            Error::FetchRefused(CARD_FULL.to_owned())
         }
         e => e,
     }
@@ -588,7 +574,7 @@ mod tests {
     fn a_full_card_is_named_and_other_errors_pass() {
         let full = card_full(std::io::Error::from(std::io::ErrorKind::StorageFull).into());
         assert_eq!(full.to_string(), CARD_FULL);
-        let other = card_full(Error::Fetch("x".into()));
+        let other = card_full(Error::FetchRefused("x".into()));
         assert_eq!(other.to_string(), "x");
         let card = std::path::Path::new("/nonexistent/card");
         if let Some(dir) = ram_dir(card) {

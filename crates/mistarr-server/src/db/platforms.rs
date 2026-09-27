@@ -55,9 +55,8 @@ pub fn kind_str(kind: Kind) -> &'static str {
 /// assert_eq!(mistarr_server::db::platforms::seed(&mut conn, table).unwrap(), table.len());
 /// ```
 pub fn seed(conn: &mut Connection, table: &[Platform]) -> Result<usize> {
-    let tx = conn.transaction()?;
-    let before = count(&tx)?;
-    {
+    super::transact(conn, |tx| {
+        let before = count(tx)?;
         let mut stmt = tx.prepare(
             "INSERT INTO platforms (id, name, core_dir, kind) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(id) DO UPDATE SET
@@ -66,10 +65,9 @@ pub fn seed(conn: &mut Connection, table: &[Platform]) -> Result<usize> {
         for p in table {
             stmt.execute(params![p.id, p.name, p.core_dir, kind_str(p.kind)])?;
         }
-    }
-    let after = count(&tx)?;
-    super::commit(tx)?;
-    Ok(after.saturating_sub(before))
+        drop(stmt);
+        Ok(count(tx)?.saturating_sub(before))
+    })
 }
 
 /// Number of platform rows.
@@ -151,24 +149,23 @@ pub fn find(conn: &Connection, id: &PlatformId) -> Result<Option<PlatformRow>> {
 ///
 /// # Errors
 ///
-/// [`crate::Error::Db`] on SQLite failure; nothing is written then.
+/// [`crate::Error::Db`] on SQLite failure. Run it in the caller's transaction, such as
+/// [`crate::db::Db::write_tx`], so that a failure part way writes nothing.
 ///
 /// ```
 /// use mistarr_core::PlatformId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// mistarr_server::db::platforms::set_core_present(&mut conn, &[PlatformId("nes".into())]).unwrap();
+/// mistarr_server::db::platforms::set_core_present(&conn, &[PlatformId("nes".into())]).unwrap();
 /// ```
-pub fn set_core_present(conn: &mut Connection, present: &[PlatformId]) -> Result<()> {
-    let tx = conn.transaction()?;
-    tx.execute("UPDATE platforms SET core_present = 0", [])?;
+pub fn set_core_present(conn: &Connection, present: &[PlatformId]) -> Result<()> {
+    conn.execute("UPDATE platforms SET core_present = 0", [])?;
     {
-        let mut stmt = tx.prepare("UPDATE platforms SET core_present = 1 WHERE id = ?1")?;
+        let mut stmt = conn.prepare("UPDATE platforms SET core_present = 1 WHERE id = ?1")?;
         for id in present {
             stmt.execute([&id.0])?;
         }
     }
-    super::commit(tx)?;
     Ok(())
 }
 
@@ -235,8 +232,8 @@ mod tests {
     fn core_presence_is_replaced_and_survives_reseed() {
         let mut c = conn();
         seed(&mut c, &PLATFORMS).expect("seed");
-        set_core_present(&mut c, &[PlatformId("nes".into())]).expect("set");
-        set_core_present(&mut c, &[PlatformId("snes".into())]).expect("set");
+        set_core_present(&c, &[PlatformId("nes".into())]).expect("set");
+        set_core_present(&c, &[PlatformId("snes".into())]).expect("set");
         seed(&mut c, &PLATFORMS).expect("reseed");
         let present: Vec<_> = list(&c)
             .expect("list")

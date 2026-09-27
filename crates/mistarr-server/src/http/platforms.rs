@@ -65,7 +65,7 @@ async fn list(
 ) -> Result<Json<Page<PlatformOut>>, ApiError> {
     let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let (limit, offset) = paging.resolve();
-    let hide = app.config().prefs.hide;
+    let hide = app.config().prefs.hide.clone();
     let (rows, mut counts) = app
         .db
         .read(move |c| Ok((platforms::list(c)?, titles::counts(c, &hide)?)))
@@ -106,7 +106,7 @@ async fn update(
 ) -> Result<Json<PlatformOut>, ApiError> {
     let id = path_id(id)?;
     let UpdateBody { enabled } = body(&bytes)?;
-    let hide = app.config().prefs.hide;
+    let hide = app.config().prefs.hide.clone();
     let found = app
         .db
         .write(move |c| {

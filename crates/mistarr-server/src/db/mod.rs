@@ -23,7 +23,7 @@ pub mod system;
 pub mod titles;
 
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use rusqlite::{Connection, Transaction};
@@ -61,9 +61,9 @@ pub struct Db {
 }
 
 struct Inner {
-    /// One permit, taken before a write reaches the blocking pool, so writers waiting
-    /// their turn hold no blocking thread and reads keep running.
-    write_turn: Arc<tokio::sync::Semaphore>,
+    /// Taken by every write before the writer connection: an async write waits for it
+    /// before it reaches the blocking pool, so it holds no blocking thread meanwhile.
+    write_turn: Arc<WriteTurn>,
     writer: Mutex<Connection>,
     reader: Mutex<Connection>,
     path: PathBuf,
@@ -135,7 +135,7 @@ impl Db {
     fn from_pair(path: &Path, writer: Connection, reader: Connection, scratch: bool) -> Self {
         Self {
             inner: Arc::new(Inner {
-                write_turn: Arc::new(tokio::sync::Semaphore::new(1)),
+                write_turn: Arc::new(WriteTurn::default()),
                 writer: Mutex::new(writer),
                 reader: Mutex::new(reader),
                 path: path.to_path_buf(),
@@ -157,7 +157,10 @@ impl Db {
         &self.inner.path
     }
 
-    /// Runs `f` on the writer connection on the calling thread.
+    /// Runs `f` on the writer connection on the calling thread, once no other write is
+    /// running; it waits for its turn on this thread. On tokio's blocking pool only the
+    /// background job lane may call it, since an async writer holding the turn needs a
+    /// pool thread to finish.
     ///
     /// # Errors
     ///
@@ -171,6 +174,12 @@ impl Db {
     /// db.write_blocking(|c| settings::set(c, "k", "v")).unwrap();
     /// ```
     pub fn write_blocking<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
+        let _turn = self.inner.write_turn.take_blocking();
+        self.write_in_turn(f)
+    }
+
+    /// [`Db::write_blocking`] with the write turn already held.
+    fn write_in_turn<T>(&self, f: impl FnOnce(&mut Connection) -> Result<T>) -> Result<T> {
         let mut conn = self.inner.writer.lock().map_err(|_| Error::Poisoned)?;
         let out = f(&mut conn);
         // A failed settle leaves the groups dirty for the next commit; `f`'s own result stands.
@@ -202,6 +211,24 @@ impl Db {
         self.write_blocking(|c| bulk(c, f))
     }
 
+    /// [`Db::write_blocking`] inside one transaction that ends with [`commit`]; a failure
+    /// rolls it back.
+    ///
+    /// # Errors
+    ///
+    /// Whatever `f` returns, [`Error::Poisoned`], or [`Error::Db`] when the transaction
+    /// cannot begin or commit.
+    ///
+    /// ```
+    /// # let dir = tempfile::tempdir().unwrap();
+    /// # let db = mistarr_server::db::Db::open(&dir.path().join("t.db")).unwrap();
+    /// use mistarr_server::db::settings;
+    /// db.write_tx_blocking(|tx| settings::set(tx, "k", "v")).unwrap();
+    /// ```
+    pub fn write_tx_blocking<T>(&self, f: impl FnOnce(&Transaction<'_>) -> Result<T>) -> Result<T> {
+        self.write_blocking(|c| transact(c, f))
+    }
+
     /// Runs `f` on the read-only connection on the calling thread.
     ///
     /// # Errors
@@ -220,7 +247,7 @@ impl Db {
         f(&conn)
     }
 
-    /// [`Db::write_blocking`] on tokio's blocking pool, once no other async write is running.
+    /// [`Db::write_blocking`] on tokio's blocking pool, once no other write is running.
     ///
     /// # Errors
     ///
@@ -230,21 +257,30 @@ impl Db {
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
-        let turn = Arc::clone(&self.inner.write_turn)
-            .acquire_owned()
-            .await
-            .map_err(|_| Error::Poisoned)?;
+        let turn = self.inner.write_turn.take().await;
         let db = self.clone();
-        crate::threads::blocking(crate::threads::label::DB_WRITE, move || {
+        crate::threads::run(crate::threads::label::DB_WRITE, move || {
             let _turn = turn;
-            db.write_blocking(f)
+            db.write_in_turn(f)
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?
+        .await?
     }
 
-    /// [`Db::write_bulk_blocking`] on tokio's blocking pool, once no other async write
-    /// is running.
+    /// [`Db::write_tx_blocking`] on tokio's blocking pool, once no other write is running.
+    ///
+    /// # Errors
+    ///
+    /// As [`Db::write_tx_blocking`], or [`Error::Task`].
+    pub async fn write_tx<T, F>(&self, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Transaction<'_>) -> Result<T> + Send + 'static,
+    {
+        self.write(move |c| transact(c, f)).await
+    }
+
+    /// [`Db::write_bulk_blocking`] on tokio's blocking pool, once no other write is
+    /// running.
     ///
     /// # Errors
     ///
@@ -255,6 +291,20 @@ impl Db {
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
         self.write(move |c| bulk(c, f)).await
+    }
+
+    /// [`Db::write_bulk`] inside one transaction that ends with [`commit`]; a failure
+    /// rolls it back.
+    ///
+    /// # Errors
+    ///
+    /// As [`Db::write_tx`], or [`Error::Db`] when the cache cannot be set or restored.
+    pub async fn write_bulk_tx<T, F>(&self, f: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&Transaction<'_>) -> Result<T> + Send + 'static,
+    {
+        self.write_bulk(move |c| transact(c, f)).await
     }
 
     /// [`Db::read_blocking`] on tokio's blocking pool.
@@ -268,13 +318,12 @@ impl Db {
         F: FnOnce(&Connection) -> Result<T> + Send + 'static,
     {
         let db = self.clone();
-        crate::threads::blocking(crate::threads::label::DB_READ, move || db.read_blocking(f))
-            .await
-            .map_err(|e| Error::Task(e.to_string()))?
+        crate::threads::run(crate::threads::label::DB_READ, move || db.read_blocking(f)).await?
     }
 
-    /// Runs `f` with the writer held for all of it, so no other write reaches the file
-    /// until `f` returns; reads keep running. [`HeldWriter::replace_file`] swaps the file.
+    /// Runs `f` with the writer held for all of it, once no other write is running, so no
+    /// other write reaches the file until `f` returns; reads keep running.
+    /// [`HeldWriter::replace_file`] swaps the file.
     ///
     /// # Errors
     ///
@@ -290,6 +339,12 @@ impl Db {
         &self,
         f: impl FnOnce(&mut HeldWriter<'_>) -> Result<T>,
     ) -> Result<T> {
+        let _turn = self.inner.write_turn.take_blocking();
+        self.hold_in_turn(f)
+    }
+
+    /// [`Db::hold_writer_blocking`] with the write turn already held.
+    fn hold_in_turn<T>(&self, f: impl FnOnce(&mut HeldWriter<'_>) -> Result<T>) -> Result<T> {
         let conn = self.inner.writer.lock().map_err(|_| Error::Poisoned)?;
         let mut held = HeldWriter {
             inner: &self.inner,
@@ -299,7 +354,7 @@ impl Db {
     }
 
     /// [`Db::hold_writer_blocking`] on tokio's blocking pool under `label`, once no other
-    /// async write is running; async writes queued meanwhile wait until `f` returns.
+    /// write is running; writes queued meanwhile wait until `f` returns.
     ///
     /// # Errors
     ///
@@ -309,17 +364,13 @@ impl Db {
         T: Send + 'static,
         F: FnOnce(&mut HeldWriter<'_>) -> Result<T> + Send + 'static,
     {
-        let turn = Arc::clone(&self.inner.write_turn)
-            .acquire_owned()
-            .await
-            .map_err(|_| Error::Poisoned)?;
+        let turn = self.inner.write_turn.take().await;
         let db = self.clone();
-        crate::threads::blocking(label, move || {
+        crate::threads::run(label, move || {
             let _turn = turn;
-            db.hold_writer_blocking(f)
+            db.hold_in_turn(f)
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?
+        .await?
     }
 
     /// Empties the WAL into the file and closes both connections, so the file stands
@@ -354,6 +405,66 @@ impl Db {
             close_connection(conn)?;
         }
         Ok(())
+    }
+}
+
+/// The turn every write takes before the writer connection. Async writers wait for it
+/// on the runtime and blocking writers on their own thread; each release wakes one of each.
+/// Blocking-pool writers must stay fewer than [`crate::memory::BLOCKING_THREADS`], since an
+/// async holder needs a pool thread to finish; only the background job lane writes from it.
+/// The turn is not FIFO: a newly arriving writer may take a free turn ahead of queued ones.
+#[derive(Default)]
+struct WriteTurn {
+    taken: Mutex<bool>,
+    freed: Condvar,
+    notify: tokio::sync::Notify,
+}
+
+impl WriteTurn {
+    fn try_take(self: &Arc<Self>) -> Option<Turn> {
+        let mut taken = self.taken.lock().unwrap_or_else(PoisonError::into_inner);
+        if *taken {
+            return None;
+        }
+        *taken = true;
+        Some(Turn(Arc::clone(self)))
+    }
+
+    /// Waits for the turn without holding a thread.
+    async fn take(self: &Arc<Self>) -> Turn {
+        loop {
+            let mut freed = std::pin::pin!(self.notify.notified());
+            // Registered before the check, so a release between the two still wakes it.
+            freed.as_mut().enable();
+            if let Some(turn) = self.try_take() {
+                return turn;
+            }
+            freed.await;
+        }
+    }
+
+    /// Waits for the turn on the calling thread.
+    fn take_blocking(self: &Arc<Self>) -> Turn {
+        let mut taken = self.taken.lock().unwrap_or_else(PoisonError::into_inner);
+        while *taken {
+            taken = self
+                .freed
+                .wait(taken)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+        *taken = true;
+        Turn(Arc::clone(self))
+    }
+}
+
+/// A held [`WriteTurn`], given back when dropped.
+struct Turn(Arc<WriteTurn>);
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        *self.0.taken.lock().unwrap_or_else(PoisonError::into_inner) = false;
+        self.0.freed.notify_one();
+        self.0.notify.notify_one();
     }
 }
 
@@ -584,6 +695,29 @@ pub fn commit(tx: Transaction<'_>) -> Result<()> {
     groups::flush(&tx)?;
     tx.commit()?;
     Ok(())
+}
+
+/// Runs `f` in one transaction on `conn` and ends it with [`commit`]; when `f` fails the
+/// transaction is rolled back. [`Db::write_tx`] is this on the writer.
+///
+/// # Errors
+///
+/// Whatever `f` returns, or [`Error::Db`] when the transaction cannot begin or commit.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// mistarr_server::db::transact(&mut conn, |tx| mistarr_server::db::settings::set(tx, "k", "v"))
+///     .unwrap();
+/// ```
+pub fn transact<T>(
+    conn: &mut Connection,
+    f: impl FnOnce(&Transaction<'_>) -> Result<T>,
+) -> Result<T> {
+    let tx = conn.transaction()?;
+    let out = f(&tx)?;
+    commit(tx)?;
+    Ok(out)
 }
 
 /// Refreshes groups an autocommit write left dirty, in a transaction of their own, and
@@ -1166,6 +1300,80 @@ mod tests {
                 q.await.expect("join").expect("queued write");
             }
         });
+    }
+
+    #[test]
+    fn an_async_write_queued_behind_a_blocking_bulk_write_holds_no_thread() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_time()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let (_dir, db) = testutil::db();
+            let (held, holding) = std::sync::mpsc::channel();
+            let (release, released) = std::sync::mpsc::channel::<()>();
+            let bulk = std::thread::spawn({
+                let db = db.clone();
+                move || {
+                    db.write_bulk_blocking(move |c| {
+                        held.send(()).ok();
+                        released.recv().ok();
+                        settings::set(c, "k", "bulk")
+                    })
+                }
+            });
+            while holding.try_recv().is_err() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let write = tokio::spawn({
+                let db = db.clone();
+                async move { db.write(|c| settings::set(c, "k", "async")).await }
+            });
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            // The pool's one thread is free, so a read runs while the write waits.
+            let read =
+                tokio::time::timeout(Duration::from_secs(2), db.read(|c| settings::get(c, "k")))
+                    .await;
+            assert!(
+                read.is_ok_and(|r| r.is_ok()),
+                "the queued write took the thread"
+            );
+            assert!(
+                !write.is_finished(),
+                "the async write waits for the bulk write"
+            );
+            release.send(()).expect("release");
+            bulk.join().expect("join").expect("bulk write");
+            write.await.expect("join").expect("async write");
+            let k = db.read(|c| settings::get(c, "k")).await.expect("read");
+            assert_eq!(k.as_deref(), Some("async"));
+        });
+    }
+
+    #[tokio::test]
+    async fn a_write_transaction_commits_or_rolls_back_whole() {
+        let (_dir, db) = testutil::db();
+        db.write_tx(|tx| settings::set(tx, "a", "1"))
+            .await
+            .expect("commit");
+        let failed = db
+            .write_tx(|tx| {
+                settings::set(tx, "a", "2")?;
+                settings::set(tx, "b", "2")?;
+                Err::<(), _>(Error::Cancelled)
+            })
+            .await;
+        assert!(matches!(failed, Err(Error::Cancelled)));
+        let held = db.write_tx_blocking(|tx| Ok(tx.is_autocommit()));
+        assert!(!held.expect("in a transaction"));
+        let bulk = db.write_bulk_tx(|tx| Ok(tx.is_autocommit())).await;
+        assert!(!bulk.expect("a bulk write in a transaction"));
+        let (a, b) = db
+            .read(|c| Ok((settings::get(c, "a")?, settings::get(c, "b")?)))
+            .await
+            .expect("read");
+        assert_eq!((a.as_deref(), b), (Some("1"), None));
     }
 
     #[tokio::test]

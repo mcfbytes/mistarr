@@ -270,7 +270,7 @@ fn recheck_records_a_presence_row_once_no_member_is_left() {
 #[test]
 fn plan_and_write_a_batch_against_the_database() {
     let (_dir, app) = state();
-    let games = app.config().paths.games;
+    let games = app.config().paths.games.clone();
     write_zip(&games.join("mame/A.zip"), &[("a.bin", b"A")]);
     write_zip(&games.join("mame/b.zip"), &[("a.bin", b"B")]);
     let p = pid();
@@ -309,7 +309,7 @@ fn plan_and_write_a_batch_against_the_database() {
 
     let (recorded, dropped) = app
         .db
-        .write_blocking(|c| write_changes(c, &p, &out, 2))
+        .write_tx_blocking(|tx| write_changes(tx, &p, &out, 2))
         .expect("write");
     assert_eq!((recorded, dropped), (1, 0));
     let written = app
@@ -458,7 +458,7 @@ fn import_row(app: &Arc<AppState>, rel: &str, mtime: i64, rom: i64) -> i64 {
 #[tokio::test]
 async fn a_zip_the_user_places_gets_a_row_that_follows_its_mra() {
     let (dir, app) = state();
-    let games = app.config().paths.games;
+    let games = app.config().paths.games.clone();
     write_zip(&games.join("mame/exblast.zip"), &[("a.bin", b"AAAA")]);
     write_zip(&games.join("mame/stray.zip"), &[("a.bin", b"S")]);
     write_mra(dir.path(), "Example Blaster", "exblast.zip");
@@ -501,7 +501,7 @@ async fn a_zip_the_user_places_gets_a_row_that_follows_its_mra() {
 #[tokio::test]
 async fn an_unchanged_import_row_is_never_downgraded() {
     let (dir, app) = state();
-    let games = app.config().paths.games;
+    let games = app.config().paths.games.clone();
     let path = games.join("mame/exblast.zip");
     write_zip(&path, &[("a.bin", b"AAAA")]);
     write_mra(dir.path(), "Example Blaster", "exblast.zip");
@@ -532,7 +532,7 @@ async fn an_unchanged_import_row_is_never_downgraded() {
 #[tokio::test]
 async fn an_unreadable_zip_leaves_its_rows_alone() {
     let (dir, app) = state();
-    let games = app.config().paths.games;
+    let games = app.config().paths.games.clone();
     let path = games.join("mame/exblast.zip");
     fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
     fs::write(&path, b"still being copied").expect("write");
@@ -558,7 +558,7 @@ async fn an_unreadable_zip_leaves_its_rows_alone() {
 #[tokio::test]
 async fn a_rewritten_zip_keeps_matching_members_verified() {
     let (dir, app) = state();
-    let games = app.config().paths.games;
+    let games = app.config().paths.games.clone();
     let path = games.join("mame/exblast.zip");
     write_zip(&path, &[("a.bin", b"AAAA")]);
     write_mra(dir.path(), "Example Blaster", "exblast.zip");
@@ -608,7 +608,7 @@ async fn a_rewritten_zip_keeps_matching_members_verified() {
 #[tokio::test]
 async fn deleting_a_zip_prunes_its_rows_and_have_drops() {
     let (_dir, app) = state();
-    let games = app.config().paths.games;
+    let games = app.config().paths.games.clone();
     let path = games.join("mame/exampleset.zip");
     write_zip(&path, &[("a.bin", b"AAAA")]);
     let (title, rom) = app
@@ -655,7 +655,7 @@ async fn deleting_a_zip_prunes_its_rows_and_have_drops() {
 #[tokio::test]
 async fn a_directory_that_cannot_be_listed_keeps_its_rows() {
     let (dir, app) = state();
-    let games = app.config().paths.games;
+    let games = app.config().paths.games.clone();
     write_zip(&games.join("mame/exblast.zip"), &[("a.bin", b"AAAA")]);
     write_mra(dir.path(), "Example Blaster", "exblast.zip");
     catalogue(&app).await;
@@ -675,7 +675,7 @@ async fn a_directory_that_cannot_be_listed_keeps_its_rows() {
 #[tokio::test]
 async fn a_zip_two_mras_name_keeps_the_promotion_either_gave() {
     let (dir, app) = state();
-    let games = app.config().paths.games;
+    let games = app.config().paths.games.clone();
     write_zip(&games.join("mame/exparent.zip"), &[("a.bin", b"AAAA")]);
     write_mra(dir.path(), "Example Blaster", "exparent.zip");
     write_mra(dir.path(), "Example Quest", "exparent.zip");
@@ -708,7 +708,7 @@ async fn a_zip_two_mras_name_keeps_the_promotion_either_gave() {
 #[tokio::test]
 async fn import_rows_match_a_zip_whatever_its_case() {
     let (dir, app) = state();
-    let games = app.config().paths.games;
+    let games = app.config().paths.games.clone();
     let path = games.join("mame/foo.zip");
     write_zip(&path, &[("a.bin", b"AAAA")]);
     write_mra(dir.path(), "Example Blaster", "Foo.zip");

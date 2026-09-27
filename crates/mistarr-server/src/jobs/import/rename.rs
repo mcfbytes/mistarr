@@ -47,7 +47,7 @@ type Outcome<T> = std::result::Result<T, RenameError>;
 /// [`RenameError`] naming why the file was not renamed.
 pub async fn rename(app: &AppState, group: TitleId, file_id: FileId) -> Outcome<String> {
     let (file, entry, rom) = subject(app, group, file_id).await?;
-    let games = app.config().paths.games;
+    let games = app.config().paths.games.clone();
     let to = canonical_path(&file, &entry, &rom, &games).await?;
     let (from_rel, to_rel) = (file.rel_path.clone(), rel_string(&to));
     if from_rel == to_rel {
@@ -61,19 +61,19 @@ pub async fn rename(app: &AppState, group: TitleId, file_id: FileId) -> Outcome<
         .read(move |c| files::find_by_path(c, &pid, &dest))
         .await?;
     let on_disk = games.join(&to);
-    if stale.is_some() && on_disk.exists() {
+    let taken = crate::threads::run(crate::threads::label::RENAME, move || on_disk.exists());
+    if stale.is_some() && taken.await? {
         return Err(RenameError::Conflict(to_rel));
     }
     let (g, f, t) = (games.clone(), PathBuf::from(&from_rel), to.clone());
-    let moved = crate::threads::blocking(crate::threads::label::RENAME, move || {
+    let moved = crate::threads::run(crate::threads::label::RENAME, move || {
         place::rename_in_library(&g, &f, &t).and_then(|dst| {
             fs::metadata(&dst)
                 .map(|m| stat(&m))
                 .map_err(|source| PlaceError::Io { path: dst, source })
         })
     })
-    .await
-    .map_err(|e| Error::Task(e.to_string()))?;
+    .await?;
     let (_, mtime) = match moved {
         Ok(s) => s,
         Err(PlaceError::Exists(_)) => return Err(RenameError::Conflict(to_rel)),
@@ -83,23 +83,21 @@ pub async fn rename(app: &AppState, group: TitleId, file_id: FileId) -> Outcome<
     let (to_db, from_db, title) = (to_rel.clone(), from_rel, entry.id);
     let stale_id = stale.map(|s| s.id);
     app.db
-        .write(move |c| {
-            let tx = c.transaction()?;
+        .write_tx(move |tx| {
             let now = crate::unix_now();
             if let Some(id) = stale_id {
-                files::delete(&tx, id)?;
+                files::delete(tx, id)?;
             }
-            files::move_to(&tx, file_id, &to_db, FileState::Verified, mtime, now)?;
+            files::move_to(tx, file_id, &to_db, FileState::Verified, mtime, now)?;
             let detail = json!({ "from": from_db, "rel_path": to_db, "title_id": title.0 });
             imports::log(
-                &tx,
+                tx,
                 now,
                 None,
                 Some(file_id.0),
                 ImportAction::Renamed,
                 &detail,
             )?;
-            crate::db::commit(tx)?;
             Ok(())
         })
         .await?;
@@ -174,11 +172,10 @@ async fn canonical_path(
         .ok_or_else(|| RenameError::Refused("the file's platform has no adapter".into()))?;
     let current = games.join(&file.rel_path);
     let path = current.clone();
-    let head = crate::threads::blocking(crate::threads::label::RENAME, move || {
+    let head = crate::threads::run(crate::threads::label::RENAME, move || {
         read_head(&path, None)
     })
-    .await
-    .map_err(|e| Error::Task(e.to_string()))?
+    .await?
     .map_err(|e| RenameError::Io(format!("cannot read the file: {e}")))?;
     let staged = StagedFile {
         path: current,

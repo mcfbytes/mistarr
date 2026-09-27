@@ -18,7 +18,6 @@ use crate::config::LimitsConfig;
 use crate::db::deferred::{self, Op};
 use crate::db::settings::{self, keys};
 use crate::db::sources;
-use crate::events::EventKind;
 use crate::freeze::{self, FreezeError, Frozen, Kill};
 use crate::threads::{self, label};
 
@@ -232,6 +231,12 @@ struct Failure {
     error: String,
 }
 
+impl From<crate::Error> for Failure {
+    fn from(e: crate::Error) -> Self {
+        failed("a client task failed")(e)
+    }
+}
+
 fn failed<E: Display>(what: &'static str) -> impl FnOnce(E) -> Failure {
     move |e| Failure {
         what,
@@ -411,7 +416,11 @@ async fn load(app: &AppState) -> Result<Applied, Failure> {
         .map_err(failed("cannot read the limits saved for a previous client"))?
         .unwrap_or_default();
     let file = app.options.frozen_file.clone();
-    let frozen = match blocking(move || freeze::read_file(&file, freeze::euid())).await? {
+    let frozen = match threads::run(label::CLIENT_FREEZE, move || {
+        freeze::read_file(&file, freeze::euid())
+    })
+    .await?
+    {
         Ok(frozen) => frozen,
         Err(e @ FreezeError::Untrusted(_)) => {
             tracing::warn!(error = %e, "ignoring the frozen client record");
@@ -429,16 +438,6 @@ async fn load(app: &AppState) -> Result<Applied, Failure> {
         frozen,
         refused: None,
     })
-}
-
-async fn blocking<T, F>(f: F) -> Result<T, Failure>
-where
-    T: Send + 'static,
-    F: FnOnce() -> T + Send + 'static,
-{
-    threads::blocking(label::CLIENT_FREEZE, f)
-        .await
-        .map_err(failed("a client task failed"))
 }
 
 /// Moves the client towards what the gate wants now, then, unless the client
@@ -515,7 +514,11 @@ async fn freeze_client(
         }
         ClientKind::Transmission => {
             let (proc, port) = (proc.clone(), client::port(&id.url));
-            match blocking(move || freeze::find(&proc, "transmission-daemon", port)).await? {
+            match threads::run(label::CLIENT_FREEZE, move || {
+                freeze::find(&proc, "transmission-daemon", port)
+            })
+            .await?
+            {
                 Ok(pid) => pid,
                 Err(e) => return Ok(Err(e)),
             }
@@ -530,7 +533,7 @@ async fn freeze_client(
         app.options.frozen_file.clone(),
     );
     let (lock, stop) = (Arc::clone(&app.freeze_lock), app.shutdown_signal());
-    let done = blocking(move || {
+    let done = threads::run(label::CLIENT_FREEZE, move || {
         let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
         if *stop.borrow() {
             return Err(FreezeError::ShuttingDown);
@@ -540,7 +543,7 @@ async fn freeze_client(
     .await;
     match done {
         Ok(Ok(frozen)) => {
-            announce(app).await;
+            crate::status::publish(app).await;
             Ok(Ok(frozen))
         }
         Ok(Err(e @ (FreezeError::Kill(_) | FreezeError::ShuttingDown))) => {
@@ -551,9 +554,9 @@ async fn freeze_client(
             app.set_client_hold(before);
             Ok(Err(e))
         }
-        Err(f) => {
+        Err(e) => {
             app.set_client_hold(before);
-            Err(f)
+            Err(e.into())
         }
     }
 }
@@ -562,7 +565,11 @@ async fn freeze_client(
 /// then lets polling and transfers carry on.
 async fn thaw_client(app: &Arc<AppState>, a: &mut Applied, frozen: Frozen) -> Result<(), Failure> {
     let (proc, kill) = (app.options.proc_dir.clone(), Kill::new(&app.options.kill));
-    match blocking(move || freeze::thaw(&proc, &kill, frozen)).await? {
+    match threads::run(label::CLIENT_FREEZE, move || {
+        freeze::thaw(&proc, &kill, frozen)
+    })
+    .await?
+    {
         Ok(()) => tracing::info!(pid = frozen.pid, "download client resumed"),
         Err(e @ (FreezeError::Gone(_) | FreezeError::Reused(_) | FreezeError::NotClient(_))) => {
             tracing::warn!(error = %e, "the paused download client is gone; nothing to resume");
@@ -571,7 +578,7 @@ async fn thaw_client(app: &Arc<AppState>, a: &mut Applied, frozen: Frozen) -> Re
         Err(e) => return Err(failed("cannot resume the download client")(e)),
     }
     let file = app.options.frozen_file.clone();
-    blocking(move || freeze::remove_file(&file))
+    threads::run(label::CLIENT_FREEZE, move || freeze::remove_file(&file))
         .await?
         .map_err(failed("cannot remove the frozen client record"))?;
     a.frozen = None;
@@ -939,7 +946,11 @@ async fn persist(app: &AppState, saved: Option<&SavedLimits>) -> Result<(), Fail
 async fn recheck_hold(app: &AppState, a: &mut Applied) {
     if let Some(frozen) = a.frozen {
         let proc = app.options.proc_dir.clone();
-        match blocking(move || freeze::is_stopped(&proc, frozen)).await {
+        match threads::run(label::CLIENT_FREEZE, move || {
+            freeze::is_stopped(&proc, frozen)
+        })
+        .await
+        {
             Ok(Ok(true)) => {}
             Ok(Ok(false)) => {
                 tracing::info!(
@@ -948,7 +959,7 @@ async fn recheck_hold(app: &AppState, a: &mut Applied) {
                 );
                 let (proc, kill) = (app.options.proc_dir.clone(), Kill::new(&app.options.kill));
                 let (lock, stop) = (Arc::clone(&app.freeze_lock), app.shutdown_signal());
-                let sent = blocking(move || {
+                let sent = threads::run(label::CLIENT_FREEZE, move || {
                     let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
                     if *stop.borrow() {
                         return Err(FreezeError::ShuttingDown);
@@ -965,7 +976,7 @@ async fn recheck_hold(app: &AppState, a: &mut Applied) {
                 }
             }
             Ok(Err(e)) => let_go(app, a, &e).await,
-            Err(f) => tracing::debug!(error = %f.error, "{}", f.what),
+            Err(e) => tracing::debug!(error = %e, "a client task failed"),
         }
         return;
     }
@@ -993,7 +1004,8 @@ async fn let_go(app: &AppState, a: &mut Applied, why: &FreezeError) {
     tracing::warn!(error = %why, "the paused download client exited");
     defer(app, Op::Detect).await;
     let file = app.options.frozen_file.clone();
-    if let Ok(Err(e)) = blocking(move || freeze::remove_file(&file)).await {
+    if let Ok(Err(e)) = threads::run(label::CLIENT_FREEZE, move || freeze::remove_file(&file)).await
+    {
         tracing::warn!(error = %e, "cannot remove the frozen client record");
     }
     a.frozen = None;
@@ -1019,28 +1031,27 @@ fn current_hold(app: &AppState, a: &Applied) -> Option<ClientHold> {
 /// Records how the client is held and publishes the status when that changed.
 async fn publish(app: &AppState, hold: Option<ClientHold>) {
     if app.set_client_hold(hold) {
-        announce(app).await;
+        crate::status::publish(app).await;
     }
-}
-
-async fn announce(app: &AppState) {
-    let status = crate::status::snapshot(app).await;
-    app.events.publish(EventKind::Status, &status);
 }
 
 /// At startup, resumes a client a previous run left frozen, unless a core
 /// still runs and the setting holds it; then it stays frozen.
 pub async fn recover_frozen(app: &Arc<AppState>) {
     let file = app.options.frozen_file.clone();
-    let frozen = match blocking(move || freeze::read_file(&file, freeze::euid())).await {
+    let frozen = match threads::run(label::CLIENT_FREEZE, move || {
+        freeze::read_file(&file, freeze::euid())
+    })
+    .await
+    {
         Ok(Ok(Some(frozen))) => frozen,
         Ok(Ok(None)) => return,
         Ok(Err(e)) => {
             tracing::warn!(error = %e, "cannot read the frozen client record");
             return;
         }
-        Err(f) => {
-            tracing::warn!(error = %f.error, "{}", f.what);
+        Err(e) => {
+            tracing::warn!(error = %e, "a client task failed");
             return;
         }
     };
@@ -1062,7 +1073,7 @@ pub async fn thaw_for_shutdown(app: &AppState) {
         Kill::new(&app.options.kill),
     );
     let lock = Arc::clone(&app.freeze_lock);
-    let done = blocking(move || {
+    let done = threads::run(label::CLIENT_FREEZE, move || {
         let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(frozen) = freeze::read_file(&file, freeze::euid())? else {
             return Ok(false);
@@ -1076,7 +1087,7 @@ pub async fn thaw_for_shutdown(app: &AppState) {
         }
         Ok(Ok(false)) => {}
         Ok(Err(e)) => tracing::warn!(error = %e, "cannot resume the download client"),
-        Err(f) => tracing::warn!(error = %f.error, "{}", f.what),
+        Err(e) => tracing::warn!(error = %e, "a client task failed"),
     }
 }
 
@@ -1088,7 +1099,7 @@ async fn resume(app: &AppState, frozen: Frozen) -> bool {
         app.options.frozen_file.clone(),
     );
     let lock = Arc::clone(&app.freeze_lock);
-    let done = blocking(move || {
+    let done = threads::run(label::CLIENT_FREEZE, move || {
         let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
         resume_now(&proc, &kill, &file, frozen)
     })
@@ -1099,8 +1110,8 @@ async fn resume(app: &AppState, frozen: Frozen) -> bool {
             tracing::warn!(error = %e, "cannot resume the download client");
             false
         }
-        Err(f) => {
-            tracing::warn!(error = %f.error, "{}", f.what);
+        Err(e) => {
+            tracing::warn!(error = %e, "a client task failed");
             false
         }
     }

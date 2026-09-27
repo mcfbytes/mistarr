@@ -323,7 +323,7 @@ impl Scheduler {
             app.events.publish(EventKind::JobProgress, &queued);
             app.scheduler.dispatch(id, job)?;
             if app.gate.state().hold(lane).is_some() {
-                publish_status(app).await;
+                crate::status::publish(app).await;
             }
         }
         Ok(id)
@@ -352,7 +352,7 @@ impl Scheduler {
             queued
         });
         match tokio::time::timeout(wait, &mut task).await {
-            Ok(joined) => joined.map_err(|e| Error::Task(e.to_string()))?.map(Some),
+            Ok(joined) => joined?.map(Some),
             Err(_) => Ok(None),
         }
     }
@@ -430,15 +430,10 @@ async fn after_heavy(app: &Arc<AppState>) {
                 tracing::info!("heavy queue drained; run-now override ended");
             }
         }
-        Ok(_) if app.gate.state().core_running() => publish_status(app).await,
+        Ok(_) if app.gate.state().core_running() => crate::status::publish(app).await,
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "cannot read the heavy queue"),
     }
-}
-
-async fn publish_status(app: &AppState) {
-    let status = crate::status::snapshot(app).await;
-    app.events.publish(EventKind::Status, &status);
 }
 
 /// What [`reconcile`] did with the jobs a previous process left open.
@@ -646,11 +641,10 @@ mod tests {
         let (release, released) = std::sync::mpsc::channel::<()>();
         let db = app.db.clone();
         let holder = std::thread::spawn(move || {
-            db.write_blocking(|c| {
-                let tx = c.transaction()?;
+            db.write_blocking(|_| {
                 let _ = held.send(());
                 let _ = released.recv();
-                crate::db::commit(tx)
+                Ok(())
             })
         });
         is_held.recv().expect("held");

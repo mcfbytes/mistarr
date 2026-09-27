@@ -22,7 +22,7 @@ use crate::app::AppState;
 use crate::db::chd::{self as rows, Unidentified};
 use crate::db::files::{self, FileId, FileRow, FileState, NewFile, RomMatch};
 use crate::db::settings::{self, keys};
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::events::EventKind;
 use crate::threads::{self, label};
 
@@ -61,10 +61,10 @@ pub(crate) struct ScannedChd {
     pub(crate) whole: Option<Track>,
 }
 
-/// Records one `.chd` file for the scan. Its 124-byte header is read; a file of the size of
-/// a whole-file `.chd` rom is then hashed whole, or its whole hashes taken from the cache.
-/// Otherwise its rows come from the track cache, a stored failure, or a container row
-/// waiting to be decoded.
+/// Records one `.chd` file for the scan, given the size and mtime its listing read. Its
+/// 124-byte header is read; a file of the size of a whole-file `.chd` rom is then hashed
+/// whole, or its whole hashes taken from the cache. Otherwise its rows come from the track
+/// cache, a stored failure, or a container row waiting to be decoded.
 ///
 /// # Errors
 ///
@@ -74,13 +74,14 @@ pub(crate) async fn scan_file(
     platform: &PlatformId,
     rel_path: &str,
     path: &Path,
+    meta: std::io::Result<(i64, i64)>,
 ) -> Result<ScannedChd> {
     let bare = |rows| ScannedChd {
         rows,
         seen: vec![rel_path.to_owned()],
         whole: None,
     };
-    let (size, mtime) = match scan::file_meta(path) {
+    let (size, mtime) = match meta {
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(path = %path.display(), error = %e, "cannot read metadata; marking unidentified");
@@ -93,13 +94,12 @@ pub(crate) async fn scan_file(
         }
     };
     let owned = path.to_path_buf();
-    let read = threads::blocking(label::CHD_HEADER, move || {
+    let read = threads::run(label::CHD_HEADER, move || {
         File::open(&owned)
             .map_err(ChdError::from)
             .and_then(core::read_header)
     })
-    .await
-    .map_err(|e| Error::Task(e.to_string()))?;
+    .await?;
     let id = read
         .as_ref()
         .ok()
@@ -230,11 +230,10 @@ async fn whole_file(
         h
     } else {
         let (owned, hint) = (path.to_path_buf(), u64::try_from(size).unwrap_or(0));
-        let hashed = threads::blocking(label::HASH, move || {
+        let hashed = threads::run(label::HASH, move || {
             File::open(&owned).and_then(|f| hash_reader(f, HeaderRule::None, Some(hint)))
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+        .await?;
         match hashed {
             Ok(h) => h,
             Err(e) => {
@@ -772,9 +771,7 @@ fn open(path: &Path) -> std::result::Result<Ready, (Seen, ChdError)> {
 /// Identifies one waiting image: cache, layout pre-filter, then a decode in slices.
 async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcome> {
     let path = ctx.app.config().paths.games.join(&row.rel_path);
-    let opened = threads::blocking(label::CHD_HEADER, move || open(&path))
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+    let opened = threads::run(label::CHD_HEADER, move || open(&path)).await?;
     let ready = match opened {
         Ok(r) => r,
         Err((id, e)) => return failed(ctx, row, id, &e).await,
@@ -809,11 +806,10 @@ async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcom
     let bytes_total = header.logical_bytes;
     let hunk_bytes = u64::from(header.hunk_bytes);
     let slice = slice_hunks(header.hunk_bytes);
-    let made = threads::blocking(label::CHD_DECODE, move || {
+    let made = threads::run(label::CHD_DECODE, move || {
         Decoder::new(file, header, layout)
     })
-    .await
-    .map_err(|e| Error::Task(e.to_string()))?;
+    .await?;
     let mut dec = match made {
         Ok(d) => d,
         Err(e) => return failed(ctx, row, Some((id, mtime)), &e).await,
@@ -825,12 +821,11 @@ async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcom
             return Ok(Outcome::Stopped);
         }
         let started = Instant::now();
-        let (d, step) = threads::blocking(label::CHD_DECODE, move || {
+        let (d, step) = threads::run(label::CHD_DECODE, move || {
             let step = dec.step(slice);
             (dec, step)
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+        .await?;
         active += started.elapsed();
         dec = d;
         match step {
@@ -890,22 +885,20 @@ async fn record(
     let written = ctx
         .app
         .db
-        .write(move |c| {
-            let tx = c.transaction()?;
-            rows::store_tracks(&tx, &id, &tracks)?;
+        .write_tx(move |tx| {
+            rows::store_tracks(tx, &id, &tracks)?;
             let m = ChdMembers {
                 container: &container,
                 size,
                 mtime,
                 tracks: &tracks,
             };
-            let members = classify_chd(&tx, &pid, &m)?;
+            let members = classify_chd(tx, &pid, &m)?;
             let changed =
-                rows::replace_container(&tx, &pid, &container, &members, crate::unix_now())?;
+                rows::replace_container(tx, &pid, &container, &members, crate::unix_now())?;
             if let Some(rate) = rate {
-                settings::set_json(&tx, keys::CHD_RATE, &rate)?;
+                settings::set_json(tx, keys::CHD_RATE, &rate)?;
             }
-            crate::db::commit(tx)?;
             Ok((members, changed))
         })
         .await?;

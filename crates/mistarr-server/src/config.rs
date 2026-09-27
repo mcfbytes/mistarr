@@ -410,14 +410,14 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] when the text is not valid TOML or a value has the wrong type.
+    /// The TOML error when the text is not valid TOML or a value has the wrong type.
     ///
     /// ```
     /// let c = mistarr_server::config::Config::parse("[server]\nlisten = \"127.0.0.1:1\"").unwrap();
     /// assert_eq!(c.server.listen, "127.0.0.1:1");
     /// assert_eq!(c.limits.down_kbps_core, 512);
     /// ```
-    pub fn parse(text: &str) -> Result<Self> {
+    pub fn parse(text: &str) -> Result<Self, toml::de::Error> {
         let (config, unknown) = Self::parse_reporting(text)?;
         warn_unknown_keys(&unknown);
         Ok(config)
@@ -425,11 +425,10 @@ impl Config {
 
     /// [`Config::parse`], also returning the dotted path of every key the
     /// document held that no field of `Config` claimed.
-    fn parse_reporting(text: &str) -> Result<(Self, Vec<String>)> {
-        let de = toml::Deserializer::parse(text).map_err(|e| Error::Config(e.to_string()))?;
+    fn parse_reporting(text: &str) -> Result<(Self, Vec<String>), toml::de::Error> {
+        let de = toml::Deserializer::parse(text)?;
         let mut unknown = Vec::new();
-        let config = serde_ignored::deserialize(de, |path| unknown.push(path.to_string()))
-            .map_err(|e| Error::Config(e.to_string()))?;
+        let config = serde_ignored::deserialize(de, |path| unknown.push(path.to_string()))?;
         Ok((config, unknown))
     }
 
@@ -440,8 +439,8 @@ impl Config {
     ///
     /// # Errors
     ///
-    /// [`Error::Config`] when a file exists but cannot be read or parsed, or
-    /// `explicit` does not exist.
+    /// [`Error::ConfigRead`] when a file exists but cannot be read, or `explicit`
+    /// does not exist; [`Error::Config`] when it cannot be parsed.
     ///
     /// ```
     /// use std::path::Path;
@@ -457,9 +456,14 @@ impl Config {
         };
         let (mut config, unknown) = match file {
             Some(path) => {
-                let text = std::fs::read_to_string(&path)
-                    .map_err(|e| Error::Config(format!("{}: {e}", path.display())))?;
-                Self::parse_reporting(&text).map_err(|e| with_path(e, &path))?
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(text) => text,
+                    Err(source) => return Err(Error::ConfigRead { path, source }),
+                };
+                match Self::parse_reporting(&text) {
+                    Ok(parsed) => parsed,
+                    Err(source) => return Err(Error::Config { path, source }),
+                }
             }
             None => (Self::default(), Vec::new()),
         };
@@ -620,15 +624,6 @@ fn client_path_map_ok(client: &ClientConfig) -> bool {
     client.remote_path_map.iter().all(path_map_entry_ok)
 }
 
-/// Prefixes a parse error's message with `path`, keeping the `config:` prefix
-/// [`Error::Config`]'s `Display` adds to it once.
-fn with_path(e: Error, path: &Path) -> Error {
-    match e {
-        Error::Config(msg) => Error::Config(format!("{}: {msg}", path.display())),
-        other => other,
-    }
-}
-
 /// Logs each key [`Config::parse_reporting`] found and no field claimed.
 fn warn_unknown_keys(unknown: &[String]) {
     for key in unknown {
@@ -724,11 +719,16 @@ mod tests {
 
     #[test]
     fn bad_values_are_config_errors() {
-        assert!(matches!(
-            Config::parse("[client]\nkind = \"other\""),
-            Err(Error::Config(_))
-        ));
-        assert!(matches!(Config::parse("[[["), Err(Error::Config(_))));
+        assert!(Config::parse("[client]\nkind = \"other\"").is_err());
+        assert!(Config::parse("[[[").is_err());
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bad = dir.path().join(CONFIG_FILE);
+        std::fs::write(&bad, "[[[").expect("write");
+        let err = Config::load(Some(&bad), None).expect_err("invalid");
+        assert!(matches!(&err, Error::Config { path, .. } if *path == bad));
+        let missing = dir.path().join("missing.toml");
+        let err = Config::load(Some(&missing), None).expect_err("missing");
+        assert!(matches!(&err, Error::ConfigRead { path, .. } if *path == missing));
     }
 
     #[test]

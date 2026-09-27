@@ -240,20 +240,19 @@ fn recheck(games: &Path, rc: Recheck, out: &mut Changes) {
     }
 }
 
-/// Applies one batch's changes in one transaction; returns rows recorded and removed.
+/// Applies one batch's changes in the caller's transaction, one per batch; returns rows recorded and removed.
 fn write_changes(
-    conn: &mut Connection,
+    tx: &Connection,
     pid: &PlatformId,
     changes: &Changes,
     now: i64,
 ) -> Result<(usize, usize)> {
-    let tx = conn.transaction()?;
-    let dropped = files::delete_paths(&tx, pid, &changes.drop)?;
+    let dropped = files::delete_paths(tx, pid, &changes.drop)?;
     for (zip, rom) in &changes.record {
         let none = Hashed::default();
         let state = FileState::Unverified;
         files::upsert(
-            &tx,
+            tx,
             pid,
             &zip.rel,
             zip.size,
@@ -265,12 +264,11 @@ fn write_changes(
         )?;
     }
     for (id, mtime) in &changes.restamp {
-        files::restamp(&tx, *id, *mtime, now)?;
+        files::restamp(tx, *id, *mtime, now)?;
     }
     for (id, size, mtime, crc) in &changes.reverify {
-        files::reverify(&tx, *id, *size, *mtime, crc, now)?;
+        files::reverify(tx, *id, *size, *mtime, crc, now)?;
     }
-    crate::db::commit(tx)?;
     Ok((changes.record.len(), dropped))
 }
 
@@ -324,16 +322,17 @@ async fn prune_dir(
         after.clone_from(last);
         let full = page.len() == PRUNE_PAGE;
         let (g, n) = (games.to_path_buf(), Arc::clone(&names));
-        let doomed = super::blocking(move || gone(&g, dir, &n, page)).await?;
+        let doomed = crate::threads::run(crate::threads::label::ARCADE, move || {
+            gone(&g, dir, &n, page)
+        })
+        .await?;
         if !doomed.is_empty() {
             let p = pid.clone();
             pruned += ctx
                 .app
                 .db
-                .write(move |c| {
-                    let tx = c.transaction()?;
-                    let n = files::delete_paths(&tx, &p, &doomed)?;
-                    crate::db::commit(tx)?;
+                .write_tx(move |tx| {
+                    let n = files::delete_paths(tx, &p, &doomed)?;
                     Ok(n)
                 })
                 .await?;
@@ -354,7 +353,8 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
     let Some(platform) = mistarr_mister::platforms::by_id(super::PLATFORM) else {
         return Ok(Stats::default());
     };
-    if !games.is_dir() {
+    let dir = games.clone();
+    if !crate::threads::run(crate::threads::label::ARCADE, move || dir.is_dir()).await? {
         tracing::warn!(path = %games.display(), "games directory missing; presence pass skipped");
         return Ok(Stats::default());
     }
@@ -365,15 +365,16 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
             .read(|c| arcade_rows::live_zip_roms(c, super::PLATFORM))
             .await?,
     );
-    let listed: Vec<(&'static str, io::Result<Vec<String>>)> = super::blocking({
-        let games = games.clone();
-        move || {
-            zip_dirs(platform)
-                .map(|d| (d, zip_names(&games.join(d))))
-                .collect()
-        }
-    })
-    .await?;
+    let listed: Vec<(&'static str, io::Result<Vec<String>>)> =
+        crate::threads::run(crate::threads::label::ARCADE, {
+            let games = games.clone();
+            move || {
+                zip_dirs(platform)
+                    .map(|d| (d, zip_names(&games.join(d))))
+                    .collect()
+            }
+        })
+        .await?;
     let mut listing: Vec<(&'static str, Arc<Vec<String>>)> = Vec::new();
     for (dir, names) in listed {
         match names {
@@ -399,12 +400,15 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
                 Arc::clone(&live),
                 batch.to_vec(),
             );
-            let changes = super::blocking(move || plan_batch(&db, &g, &p, &l, dir, &b)).await??;
+            let changes = crate::threads::run(crate::threads::label::ARCADE, move || {
+                plan_batch(&db, &g, &p, &l, dir, &b)
+            })
+            .await??;
             let (p, now) = (pid.clone(), crate::unix_now());
             let (recorded, dropped) = ctx
                 .app
                 .db
-                .write(move |c| write_changes(c, &p, &changes, now))
+                .write_tx(move |tx| write_changes(tx, &p, &changes, now))
                 .await?;
             stats.recorded += recorded;
             stats.pruned += dropped;

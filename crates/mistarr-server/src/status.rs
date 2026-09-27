@@ -174,6 +174,13 @@ pub fn hold_reason(gate: &GateState, lane: &str, state: JobState) -> Option<Stri
     }
 }
 
+/// Publishes a fresh [`snapshot`] as the `status` event.
+pub async fn publish(app: &AppState) {
+    let status = snapshot(app).await;
+    app.events
+        .publish(crate::events::EventKind::Status, &status);
+}
+
 /// Builds the status body from the gate, settings and the host.
 pub async fn snapshot(app: &AppState) -> Status {
     let client = app
@@ -204,7 +211,7 @@ pub async fn snapshot(app: &AppState) -> Status {
                 .map(WaitingJob::from_row),
         );
     }
-    let data = app.config().paths.data;
+    let config = app.config();
     let chd_rate = app
         .db
         .read(|c| settings::get_json::<u64>(c, keys::CHD_RATE))
@@ -214,7 +221,7 @@ pub async fn snapshot(app: &AppState) -> Status {
             None
         });
     let mem = meminfo();
-    let disk = disk_space(&data);
+    let disk = disk_space(&config.paths.data);
     Status {
         version: crate::version::version(),
         commit: crate::version::commit(),
@@ -225,12 +232,12 @@ pub async fn snapshot(app: &AppState) -> Status {
         paused: gate.paused(),
         manual_override: gate.manual,
         client_hold: app.client_hold(),
-        pause_client_while_playing: app.config().transfer.pause_client_while_playing,
+        pause_client_while_playing: config.transfer.pause_client_while_playing,
         waiting,
         corename: gate.corename,
         disk_free_bytes: disk.free,
         disk_total_bytes: disk.total,
-        dats_dir: app.config().paths.dats().to_string_lossy().into_owned(),
+        dats_dir: config.paths.dats().to_string_lossy().into_owned(),
         rss_bytes: rss_bytes(),
         mem_total_bytes: mem.total,
         mem_available_bytes: mem.available,
@@ -426,6 +433,17 @@ mod tests {
         assert_eq!(json["version"], crate::version::version());
         assert!(json["mem_total_bytes"].is_u64());
         assert!(json["disk_total_bytes"].is_u64());
+    }
+
+    #[tokio::test]
+    async fn publish_sends_the_snapshot_as_a_status_event() {
+        let (_dir, app) = state();
+        let mut sub = app.events.subscribe(None);
+        app.gate.set_corename(Some("SNES".into()));
+        publish(&app).await;
+        let ev = sub.live.recv().await.expect("event");
+        assert_eq!(ev.kind, crate::events::EventKind::Status);
+        assert!(ev.data.contains("SNES"), "{}", ev.data);
     }
 
     #[tokio::test]

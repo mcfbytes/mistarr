@@ -164,7 +164,7 @@ fn staging(b: &Booted) -> PathBuf {
 }
 
 fn games(b: &Booted) -> PathBuf {
-    b.running.app.config().paths.games
+    b.running.app.config().paths.games.clone()
 }
 
 fn stage(b: &Booted, name: &str, data: &[u8]) -> PathBuf {

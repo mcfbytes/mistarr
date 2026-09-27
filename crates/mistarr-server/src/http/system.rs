@@ -12,11 +12,10 @@ use serde::{Deserialize, Serialize};
 
 use super::{ApiError, Page, Paging};
 use crate::app::AppState;
-use crate::config::{ConfigProblem, RuntimeSettings, SettingsPatch};
+use crate::config::{Config, ConfigProblem, RuntimeSettings, SettingsPatch};
 use crate::db::jobs::{self, JobId, JobRow};
 use crate::db::platforms;
 use crate::db::settings::{self, keys};
-use crate::events::EventKind;
 use crate::jobs::dat_import::Recompute;
 use crate::jobs::detect_client::{detect_and_store, ClientStatus, DetectClient};
 use crate::jobs::gate::{GateState, Override};
@@ -102,14 +101,7 @@ struct CoresResponse {
 /// Detects installed cores again, for the wizard's detected-cores step, and
 /// queues the arcade catalogue when there are MRA files to read.
 async fn cores(State(app): State<Arc<AppState>>) -> Result<Json<CoresResponse>, ApiError> {
-    let platforms = {
-        let app = Arc::clone(&app);
-        crate::threads::blocking(crate::threads::label::DETECT, move || {
-            crate::app::detect_cores(&app)
-        })
-        .await
-        .map_err(|e| crate::Error::Task(e.to_string()))??
-    };
+    let platforms = crate::app::detect_cores(&app).await?;
     let arcade_job_id = crate::jobs::arcade::enqueue_if_relevant(&app).await?;
     Ok(Json(CoresResponse {
         platforms,
@@ -224,12 +216,11 @@ async fn start_client(
     tracing::info!(kind = body.kind.as_str(), "starting the download client");
     let priority = app.io_priority.clone();
     // The client runs at the default I/O class; the gate's rate limit slows it while a core runs.
-    crate::threads::blocking(crate::threads::label::LAUNCH, move || match priority {
+    crate::threads::run(crate::threads::label::LAUNCH, move || match priority {
         Some(p) => p.at_default(|| launcher.start(body.kind)),
         None => launcher.start(body.kind),
     })
-    .await
-    .map_err(|e| crate::Error::Task(e.to_string()))?
+    .await?
     .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;
     let deadline = tokio::time::Instant::now() + app.options.client_start_wait;
     loop {
@@ -328,13 +319,13 @@ async fn put_settings(
         serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
     let before = app.config();
     if patch.client.is_some() {
-        let mut effective = before.clone();
+        let mut effective = Config::clone(&before);
         effective.apply(&patch);
         if effective.validate().contains(&ConfigProblem::PathMap) {
             return Err(ApiError::bad_request(ConfigProblem::PathMap.message()));
         }
     }
-    let (prefs_before, scan_before) = (before.prefs, before.scan);
+    let (prefs_before, scan_before) = (before.prefs.clone(), before.scan);
     let (runtime, client_changed) = app.update_settings(&patch).await?;
     if runtime.scan != Some(scan_before) {
         crate::jobs::chd::apply_setting(&app).await?;
@@ -350,8 +341,7 @@ async fn put_settings(
         Recompute::enqueue_all(&app).await?;
     }
     if runtime.prefs.launch != prefs_before.launch || transfer_changed {
-        let status = snapshot(&app).await;
-        app.events.publish(EventKind::Status, &status);
+        crate::status::publish(&app).await;
     }
     Ok(Json(runtime))
 }

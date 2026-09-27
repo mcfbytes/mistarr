@@ -96,7 +96,7 @@ pub fn append(conn: &Connection, games: &[StagedGame]) -> Result<()> {
     ensure(conn)?;
     let mut stmt = conn.prepare_cached("INSERT INTO temp.dat_stage (game) VALUES (?1)")?;
     for game in games {
-        let text = serde_json::to_string(game).map_err(|e| crate::Error::Job(e.to_string()))?;
+        let text = serde_json::to_string(game)?;
         stmt.execute(params![text])?;
     }
     Ok(())
@@ -107,7 +107,7 @@ pub fn append(conn: &Connection, games: &[StagedGame]) -> Result<()> {
 ///
 /// # Errors
 ///
-/// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Job`] for a row
+/// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Json`] for a row
 /// that does not read back.
 pub fn apply(conn: &Connection, platform: &str, version: DatVersionId) -> Result<u64> {
     ensure(conn)?;
@@ -116,8 +116,7 @@ pub fn apply(conn: &Connection, platform: &str, version: DatVersionId) -> Result
     let mut n = 0;
     while let Some(row) = staged.next()? {
         let text: String = row.get(0)?;
-        let game: StagedGame =
-            serde_json::from_str(&text).map_err(|e| crate::Error::Job(e.to_string()))?;
+        let game: StagedGame = serde_json::from_str(&text)?;
         let title = TitleInput {
             name: &game.name,
             base_name: &game.base_name,

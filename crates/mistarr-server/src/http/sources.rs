@@ -258,21 +258,19 @@ async fn update(
     let requested = choice.clone();
     let updated = app
         .db
-        .write(move |c| {
-            let tx = c.transaction()?;
+        .write_tx(move |tx| {
             if let Some(choice) = &requested {
-                rows::request_binding(&tx, id, choice)?;
+                rows::request_binding(tx, id, choice)?;
             }
             if let Some(s) = &stored_seed {
-                rows::set_seed_policy(&tx, id, s)?;
+                rows::set_seed_policy(tx, id, s)?;
             }
             match enable {
-                Some(false) => rows::set_state(&tx, id, SourceState::Disabled, None)?,
-                Some(true) => enable_source(&tx, id, threshold)?,
+                Some(false) => rows::set_state(tx, id, SourceState::Disabled, None)?,
+                Some(true) => enable_source(tx, id, threshold)?,
                 None => {}
             }
-            let row = rows::get(&tx, id)?;
-            crate::db::commit(tx)?;
+            let row = rows::get(tx, id)?;
             Ok(row)
         })
         .await?
@@ -376,7 +374,7 @@ async fn upload(
     let file = if content_type.starts_with("multipart/form-data") {
         let content_type = content_type.to_owned();
         // Parsing walks every file entry, so it stays off the async workers.
-        crate::threads::blocking(crate::threads::label::SOURCE_FILE, move || {
+        crate::threads::run(crate::threads::label::SOURCE_FILE, move || {
             let (filename, data) = multipart_file(&content_type, &body).ok_or_else(|| {
                 ApiError::bad_request("Send one .torrent file as multipart form data.")
             })?;
@@ -389,8 +387,7 @@ async fn upload(
                 is_torrent: true,
             })
         })
-        .await
-        .map_err(|e| crate::Error::Task(e.to_string()))??
+        .await??
     } else {
         let req: MagnetBody = serde_json::from_slice(&body).map_err(|e| {
             ApiError::bad_request(format!(
@@ -459,11 +456,10 @@ pub(crate) async fn place_source(
         return Err(ApiError::bad_request(DUPLICATE));
     }
     let dir = app.config().paths.sources();
-    let placed = crate::threads::blocking(crate::threads::label::SOURCE_FILE, move || {
+    let placed = crate::threads::run(crate::threads::label::SOURCE_FILE, move || {
         place(&dir, &name, &bytes)
     })
-    .await
-    .map_err(|e| crate::Error::Task(e.to_string()))?;
+    .await?;
     let path = match placed {
         Ok(p) => p,
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {

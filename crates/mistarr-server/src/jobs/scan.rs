@@ -88,11 +88,13 @@ pub async fn enqueue_if_games_dir_exists(
     if !row.is_some_and(|r| r.enabled) {
         return Ok(None);
     }
-    let games_root = app.config().paths.games;
-    let present = std::iter::once(platform.core_dir)
-        .chain(platform.legacy_dirs.iter().copied())
-        .any(|name| games_root.join(name).is_dir());
-    if !present {
+    let config = app.config();
+    let present = crate::threads::run(crate::threads::label::SCAN_LIST, move || {
+        std::iter::once(platform.core_dir)
+            .chain(platform.legacy_dirs.iter().copied())
+            .any(|name| config.paths.games.join(name).is_dir())
+    });
+    if !present.await? {
         return Ok(None);
     }
     Scheduler::enqueue(
@@ -276,24 +278,36 @@ pub(crate) fn all_entries<T>(entries: impl Iterator<Item = io::Result<T>>) -> io
     entries.collect()
 }
 
-/// The paths every directory entry in a unit resolved to, sorted for a
-/// deterministic scan order; empty when `dir` is gone, an error when it cannot be read.
-fn list_files(dir: &Path) -> io::Result<Vec<(PathBuf, String)>> {
+/// A regular file a unit's listing found.
+struct ListedFile {
+    path: PathBuf,
+    name: String,
+    /// Size and mtime as `files` stores them, or why they could not be read.
+    meta: io::Result<(i64, i64)>,
+}
+
+/// The regular files a unit's directory entries resolve to, with their size and mtime,
+/// sorted for a deterministic scan order; empty when `dir` is gone, an error when it
+/// cannot be read.
+fn list_files(dir: &Path) -> io::Result<Vec<ListedFile>> {
     let entries = match fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let mut out: Vec<(PathBuf, String)> = all_entries(entries)?
+    let mut out: Vec<ListedFile> = all_entries(entries)?
         .into_iter()
-        .filter(|e| e.path().is_file())
-        .map(|e| {
+        .filter_map(|e| {
             let path = e.path();
-            let name = e.file_name().to_string_lossy().into_owned();
-            (path, name)
+            let meta = fs::metadata(&path).ok().filter(fs::Metadata::is_file)?;
+            Some(ListedFile {
+                name: e.file_name().to_string_lossy().into_owned(),
+                meta: stored_meta(&meta),
+                path,
+            })
         })
         .collect();
-    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }
 
@@ -314,11 +328,10 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     let games_root = ctx.app.config().paths.games.clone();
     let pid = id.clone();
     let (units, mut unreadable) =
-        crate::threads::blocking(crate::threads::label::SCAN_LIST, move || {
+        crate::threads::run(crate::threads::label::SCAN_LIST, move || {
             discover_units(&games_root, platform)
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+        .await?;
 
     let existing = ctx
         .app
@@ -424,7 +437,11 @@ async fn report_outcome(ctx: &JobContext, pid: &PlatformId, total: usize) -> Res
 
 /// A file's size and mtime, as stored in `files`.
 pub(crate) fn file_meta(path: &Path) -> io::Result<(i64, i64)> {
-    let meta = fs::metadata(path)?;
+    stored_meta(&fs::metadata(path)?)
+}
+
+/// The size and mtime of `meta`, as stored in `files`.
+fn stored_meta(meta: &fs::Metadata) -> io::Result<(i64, i64)> {
     let size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
     let mtime = meta
         .modified()?
@@ -500,9 +517,9 @@ impl<'a> Sink<'a> {
             .ctx
             .app
             .db
-            .write(move |c| {
+            .write_tx(move |tx| {
                 let chd_on = app.config().scan.chd_tracks;
-                commit_unit(c, &pid, rows, done_dirs.as_deref(), now, chd_on)
+                commit_unit(tx, &pid, rows, done_dirs.as_deref(), now, chd_on)
             })
             .await?;
         for (_, id, state) in &written {
@@ -521,26 +538,24 @@ impl<'a> Sink<'a> {
 /// transaction, so the single writer connection is never held for the hashing itself. A
 /// CHD waiting to be decoded is written `pending` or `off` as `chd_on`, read in this write, says.
 fn commit_unit(
-    conn: &mut Connection,
+    tx: &Connection,
     platform_id: &PlatformId,
     rows: Vec<NewFile>,
     done_dirs: Option<&[String]>,
     now: i64,
     chd_on: bool,
 ) -> Result<Written> {
-    let tx = conn.transaction()?;
     let mut written = Vec::with_capacity(rows.len());
     for mut row in rows {
         if let Some(reason) = row.reason.as_deref() {
             row.reason = Some(super::chd::settle(reason, chd_on).to_owned());
         }
-        let id = files::upsert_row(&tx, platform_id, &row, now)?;
+        let id = files::upsert_row(tx, platform_id, &row, now)?;
         written.push((row.rel_path, id, row.state));
     }
     if let Some(done_dirs) = done_dirs {
-        files::save_scan_progress(&tx, platform_id, done_dirs, now)?;
+        files::save_scan_progress(tx, platform_id, done_dirs, now)?;
     }
-    crate::db::commit(tx)?;
     Ok(written)
 }
 
@@ -859,17 +874,16 @@ async fn scan_flat_unit(
     let (ctx, platform_id) = (sink.ctx, sink.platform_id.clone());
     let platform_id = &platform_id;
     let dir_owned = dir.to_path_buf();
-    let listed = crate::threads::blocking(crate::threads::label::SCAN_LIST, move || {
+    let listed = crate::threads::run(crate::threads::label::SCAN_LIST, move || {
         list_files(&dir_owned)
     })
-    .await
-    .map_err(|e| Error::Task(e.to_string()))?;
+    .await?;
     let Some(entries) = readable(dir, listed) else {
         return Ok(None);
     };
     let rule = header_rule(platform.header_rule);
     let mut seen = Vec::new();
-    for (path, name) in entries {
+    for ListedFile { path, name, meta } in entries {
         ctx.checkpoint().await?;
         let Some(ext) = extension(&path) else {
             continue;
@@ -878,7 +892,7 @@ async fn scan_flat_unit(
             continue;
         }
         let rel_path = format!("{unit_id}/{name}");
-        let (size, mtime) = match file_meta(&path) {
+        let (size, mtime) = match meta {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "cannot read metadata; marking unverified");
@@ -918,11 +932,10 @@ async fn scan_flat_unit(
         }
         let hint = u64::try_from(size).unwrap_or(0);
         let path_owned = path.clone();
-        let hash_result = crate::threads::blocking(crate::threads::label::HASH, move || {
+        let hash_result = crate::threads::run(crate::threads::label::HASH, move || {
             File::open(&path_owned).and_then(|f| hash_forms(f, rule, Some(hint)))
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+        .await?;
         let row = match hash_result {
             Ok(forms) => {
                 let (pid2, name2, forms2) = (platform_id.clone(), name.clone(), forms.clone());
@@ -1007,11 +1020,10 @@ async fn scan_zip_unit(
     let platform_id = &platform_id;
     let path_owned = path.to_path_buf();
     let listed: std::result::Result<Vec<ZipMember>, HashError> =
-        crate::threads::blocking(crate::threads::label::ZIP_LIST, move || {
+        crate::threads::run(crate::threads::label::ZIP_LIST, move || {
             zip_members(File::open(&path_owned)?)
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+        .await?;
     let members = match listed {
         Ok(m) => m,
         Err(e) => {
@@ -1060,11 +1072,10 @@ async fn scan_zip_unit(
 
         let path_owned = path.to_path_buf();
         let member_name = member.name.clone();
-        let hash_result = crate::threads::blocking(crate::threads::label::HASH, move || {
+        let hash_result = crate::threads::run(crate::threads::label::HASH, move || {
             hash_zip_member_forms(File::open(&path_owned)?, &member_name, rule)
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+        .await?;
         let row = match hash_result {
             Ok(forms) => {
                 let (pid2, basename2, forms2) = (platform_id.clone(), basename, forms.clone());
@@ -1109,11 +1120,10 @@ async fn precheck_member(
 ) -> Result<Option<NewFile>> {
     let content_crc = if rule.strips_header() {
         let (path_owned, m) = (path.to_path_buf(), member.clone());
-        let got = crate::threads::blocking(crate::threads::label::HASH, move || {
+        let got = crate::threads::run(crate::threads::label::HASH, move || {
             zip_member_content_crc(File::open(&path_owned)?, &m, rule)
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+        .await?;
         // A header that cannot be read makes the member a candidate: hashing records why.
         let Ok(crc) = got else {
             return Ok(None);
@@ -1191,11 +1201,10 @@ async fn scan_disc_unit(
     dir: &Path,
 ) -> Result<Option<(Vec<NewFile>, Vec<String>)>> {
     let dir_owned = dir.to_path_buf();
-    let listed = crate::threads::blocking(crate::threads::label::SCAN_LIST, move || {
+    let listed = crate::threads::run(crate::threads::label::SCAN_LIST, move || {
         list_files(&dir_owned)
     })
-    .await
-    .map_err(|e| Error::Task(e.to_string()))?;
+    .await?;
     let Some(entries) = readable(dir, listed) else {
         return Ok(None);
     };
@@ -1203,7 +1212,7 @@ async fn scan_disc_unit(
     let mut tracks: Vec<Track> = Vec::new();
     let mut chd_rows: Vec<NewFile> = Vec::new();
     let mut seen = Vec::new();
-    for (path, name) in entries {
+    for ListedFile { path, name, meta } in entries {
         ctx.checkpoint().await?;
         let Some(ext) = extension(&path) else {
             continue;
@@ -1213,7 +1222,7 @@ async fn scan_disc_unit(
         }
         let rel_path = format!("{unit_id}/{name}");
         if ext == "chd" {
-            let got = super::chd::scan_file(ctx, platform_id, &rel_path, &path).await?;
+            let got = super::chd::scan_file(ctx, platform_id, &rel_path, &path, meta).await?;
             seen.extend(got.seen);
             match got.whole {
                 Some(track) => tracks.push(track),
@@ -1221,7 +1230,7 @@ async fn scan_disc_unit(
             }
             continue;
         }
-        let (size, mtime) = match file_meta(&path) {
+        let (size, mtime) = match meta {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "cannot read metadata; marking unverified");
@@ -1274,11 +1283,10 @@ async fn disc_track(
     } else {
         let hint = u64::try_from(size).unwrap_or(0);
         let path_owned = path.to_path_buf();
-        let hash_result = crate::threads::blocking(crate::threads::label::HASH, move || {
+        let hash_result = crate::threads::run(crate::threads::label::HASH, move || {
             File::open(&path_owned).and_then(|f| hash_reader(f, HeaderRule::None, Some(hint)))
         })
-        .await
-        .map_err(|e| Error::Task(e.to_string()))?;
+        .await?;
         match hash_result {
             Ok(h) => Some(h),
             Err(e) => {
@@ -1386,6 +1394,23 @@ mod tests {
     use super::*;
     use crate::app::testutil::state;
     use crate::db::jobs as job_rows;
+
+    #[test]
+    fn a_listing_holds_each_regular_file_with_its_size_and_mtime() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join("b.nes"), b"12345").expect("write");
+        fs::write(dir.path().join("a.nes"), b"1").expect("write");
+        fs::create_dir(dir.path().join("sub")).expect("mkdir");
+        let listed = list_files(dir.path()).expect("list");
+        let names: Vec<_> = listed.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["a.nes", "b.nes"]);
+        let (size, mtime) = *listed[1].meta.as_ref().expect("meta");
+        assert_eq!(size, 5);
+        assert_eq!((size, mtime), file_meta(&listed[1].path).expect("stat"));
+        assert!(list_files(&dir.path().join("gone"))
+            .expect("gone")
+            .is_empty());
+    }
 
     #[test]
     fn done_units_cover_their_files_and_zip_members() {

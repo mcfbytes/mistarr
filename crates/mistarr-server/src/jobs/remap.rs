@@ -187,10 +187,8 @@ pub async fn key_new_roms(db: &crate::db::Db) -> Result<usize> {
     let mut total = 0;
     loop {
         let keyed = db
-            .write_bulk(|c| {
-                let tx = c.transaction()?;
-                let keyed = rows::key_batch(&tx)?;
-                crate::db::commit(tx)?;
+            .write_bulk_tx(|tx| {
+                let keyed = rows::key_batch(tx)?;
                 Ok(keyed)
             })
             .await?;
@@ -230,10 +228,9 @@ pub async fn remap_one(app: &AppState, id: SourceId) -> Result<bool> {
     key_new_roms(&app.db).await?;
     let p = platform.clone();
     app.db
-        .write(move |c| {
-            let tx = c.transaction()?;
-            candidates::drop_foreign_proofs(&tx, id, &p)?;
-            crate::db::commit(tx)
+        .write_tx(move |tx| {
+            candidates::drop_foreign_proofs(tx, id, &p)?;
+            Ok(())
         })
         .await?;
     let p = platform.clone();
@@ -249,13 +246,11 @@ pub async fn remap_one(app: &AppState, id: SourceId) -> Result<bool> {
         let p = platform.clone();
         let written = app
             .db
-            .write(move |c| {
-                let tx = c.transaction()?;
-                if !still_on(&tx, id, &p)? {
+            .write_tx(move |tx| {
+                if !still_on(tx, id, &p)? {
                     return Ok(false);
                 }
-                candidates::apply(&tx, id, &piece)?;
-                crate::db::commit(tx)?;
+                candidates::apply(tx, id, &piece)?;
                 Ok(true)
             })
             .await?;

@@ -157,10 +157,8 @@ fn recompute(db: &Db) {
     let psx = PlatformId("psx".into());
     loop {
         let taken = db
-            .write_blocking(|c| {
-                let tx = c.transaction()?;
-                let taken = rematch_chunk(&tx, &psx)?;
-                crate::db::commit(tx)?;
+            .write_tx_blocking(|tx| {
+                let taken = rematch_chunk(tx, &psx)?;
                 Ok(taken)
             })
             .expect("rematch");
@@ -171,10 +169,8 @@ fn recompute(db: &Db) {
     let mut after = FileId(0);
     loop {
         let chunk = db
-            .write_blocking(|c| {
-                let tx = c.transaction()?;
-                let chunk = match_unmatched_chunk(&tx, &psx, after)?;
-                crate::db::commit(tx)?;
+            .write_tx_blocking(|tx| {
+                let chunk = match_unmatched_chunk(tx, &psx, after)?;
                 Ok(chunk)
             })
             .expect("unmatched");
@@ -183,10 +179,9 @@ fn recompute(db: &Db) {
             break;
         }
     }
-    db.write_blocking(|c| {
-        let tx = c.transaction()?;
-        titles::recompute_platform(&tx, "psx", &Prefs::default())?;
-        crate::db::commit(tx)
+    db.write_tx_blocking(|tx| {
+        titles::recompute_platform(tx, "psx", &Prefs::default())?;
+        Ok(())
     })
     .expect("recompute");
 }
@@ -324,15 +319,14 @@ fn stage_shrinks_alone() {
     let staged = db
         .write_blocking(|c| {
             for chunk in games.chunks(500) {
-                append_chunk(c, chunk)?;
+                crate::db::transact(c, |tx| dat_stage::append(tx, chunk))?;
             }
             Ok(open_bytes_under(&tmp))
         })
         .expect("stage");
-    db.write_blocking(|c| {
-        let tx = c.transaction()?;
-        dat_stage::clear(&tx)?;
-        crate::db::commit(tx)
+    db.write_tx_blocking(|tx| {
+        dat_stage::clear(tx)?;
+        Ok(())
     })
     .expect("clear");
     let cleared = open_bytes_under(&tmp);

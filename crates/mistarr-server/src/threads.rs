@@ -2,8 +2,6 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use tokio::task::JoinHandle;
-
 /// Longest thread name Linux keeps in `comm`, without the terminating NUL.
 pub const MAX_NAME: usize = 15;
 
@@ -91,6 +89,8 @@ pub mod label {
     pub const INCOMING: Label = Label::new("incoming");
     /// Polling `sources/` for new files.
     pub const SOURCE_WATCH: Label = Label::new("source-watch");
+    /// Polling `dats/` for new files.
+    pub const DAT_WATCH: Label = Label::new("dat-watch");
     /// Checking which romset archives a title's directory holds.
     pub const ROMSETS: Label = Label::new("romsets");
     /// Switching the daemon's I/O class.
@@ -105,7 +105,7 @@ pub mod label {
     pub const CLIENT_FREEZE: Label = Label::new("client-freeze");
 
     /// Every label, for tests and docs.
-    pub const ALL: [Label; 21] = [
+    pub const ALL: [Label; 22] = [
         DB_READ,
         DB_WRITE,
         HASH,
@@ -121,6 +121,7 @@ pub mod label {
         DETECT,
         INCOMING,
         SOURCE_WATCH,
+        DAT_WATCH,
         ROMSETS,
         IO_CLASS,
         CHD_HEADER,
@@ -132,19 +133,23 @@ pub mod label {
 
 /// Runs `f` on tokio's blocking pool with the thread named `label` while it runs.
 ///
+/// # Errors
+///
+/// [`crate::Error::Task`] when `f` panicked or the runtime cancelled it.
+///
 /// ```
 /// let rt = mistarr_server::memory::runtime().unwrap();
 /// let n = rt.block_on(async {
-///     mistarr_server::threads::blocking(mistarr_server::threads::label::HASH, || 7).await
+///     mistarr_server::threads::run(mistarr_server::threads::label::HASH, || 7).await
 /// });
 /// assert_eq!(n.unwrap(), 7);
 /// ```
-pub fn blocking<F, R>(label: Label, f: F) -> JoinHandle<R>
+pub async fn run<F, R>(label: Label, f: F) -> crate::Result<R>
 where
     F: FnOnce() -> R + Send + 'static,
     R: Send + 'static,
 {
-    tokio::task::spawn_blocking(move || named(label, f))
+    Ok(tokio::task::spawn_blocking(move || named(label, f)).await?)
 }
 
 /// Runs `f` on the current thread with its `comm` set to `label`, then restores the
@@ -259,9 +264,16 @@ mod tests {
         assert_eq!(during, "dat-import");
         assert_eq!(after, before);
         let seen = rt
-            .block_on(async { blocking(label::HASH, comm).await })
+            .block_on(async { run(label::HASH, comm).await })
             .expect("join");
         assert_eq!(seen, "hash");
+    }
+
+    #[test]
+    fn a_panic_in_run_is_a_task_error() {
+        let rt = crate::memory::runtime().expect("runtime");
+        let r: crate::Result<()> = rt.block_on(run(label::HASH, || panic!("inside run")));
+        assert!(matches!(r, Err(crate::Error::Task(_))), "{r:?}");
     }
 
     #[cfg(target_os = "linux")]
