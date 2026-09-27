@@ -1,6 +1,13 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getDownloads, getImports, loadDownloads, loadImports, patchDownload } from '../lib/stores/downloads.svelte';
+  import {
+    getDownloads,
+    getImports,
+    loadDownloads,
+    loadImports,
+    patchDownload,
+    watchImports
+  } from '../lib/stores/downloads.svelte';
   import { getJobs, getRecentJobs, jobOutcome, loadJobs, watchRecent } from '../lib/stores/jobs.svelte';
   import { findPlatform, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { api, errorMessage } from '../lib/api';
@@ -13,12 +20,49 @@
 
   const isMock = import.meta.env.VITE_MOCK === '1';
 
+  let downloadsError = $state<string | null>(null);
+  let jobsError = $state<string | null>(null);
+  let importsError = $state<string | null>(null);
+
+  async function loadDownloadsList(): Promise<void> {
+    try {
+      await loadDownloads();
+      downloadsError = null;
+    } catch (err) {
+      downloadsError = errorMessage(err);
+    }
+  }
+
+  async function loadJobsList(): Promise<void> {
+    try {
+      await loadJobs();
+      jobsError = null;
+    } catch (err) {
+      jobsError = errorMessage(err);
+    }
+  }
+
+  async function loadImportsList(): Promise<void> {
+    try {
+      await loadImports();
+      importsError = null;
+    } catch (err) {
+      importsError = errorMessage(err);
+    }
+  }
+
   onMount(() => {
-    void loadDownloads();
-    void loadImports();
-    void loadJobs();
+    void loadDownloadsList();
+    void loadImportsList();
+    void loadJobsList();
+    // The platform name falls back to its id in jobTitle(); it retries at the next resync.
     void loadPlatforms().catch(() => undefined);
-    return watchRecent();
+    const stopRecent = watchRecent();
+    const stopImports = watchImports();
+    return () => {
+      stopRecent();
+      stopImports();
+    };
   });
 
   const downloads = $derived(getDownloads());
@@ -73,46 +117,54 @@
   <h1>Activity</h1>
 
   <h2>Downloads</h2>
-  {#each downloads as d (d.id)}
-    <div class="card row">
-      <div class="head">
-        <strong>{d.title_name}</strong>
-        <span class="muted">{d.rom_name}</span>
-        <StatusPill {...downloadStatus(d.state)} />
-        {#if d.error}<span class="error">{d.error}</span>{/if}
-      </div>
-      <ProgressBar view={{ fraction: d.progress, text: '' }} label={`${d.title_name} transfer`} />
-      <div class="actions">
-        {#if d.state === 'failed'}
-          <button onclick={() => retry(d.id)}>Retry</button>
-        {/if}
-        {#if ['wanted', 'queued', 'transferring', 'checking'].includes(d.state)}
-          <button onclick={() => cancel(d.id)}>Cancel</button>
-        {/if}
-      </div>
-    </div>
+  {#if downloadsError}
+    <p role="alert">{downloadsError} <button type="button" onclick={() => void loadDownloadsList()}>Retry</button></p>
   {:else}
-    <p class="muted">No downloads.</p>
-  {/each}
+    {#each downloads as d (d.id)}
+      <div class="card row">
+        <div class="head">
+          <strong>{d.title_name}</strong>
+          <span class="muted">{d.rom_name}</span>
+          <StatusPill {...downloadStatus(d.state)} />
+          {#if d.error}<span class="error">{d.error}</span>{/if}
+        </div>
+        <ProgressBar view={{ fraction: d.progress, text: '' }} label={`${d.title_name} transfer`} />
+        <div class="actions">
+          {#if d.state === 'failed'}
+            <button onclick={() => retry(d.id)}>Retry</button>
+          {/if}
+          {#if ['wanted', 'queued', 'transferring', 'checking'].includes(d.state)}
+            <button onclick={() => cancel(d.id)}>Cancel</button>
+          {/if}
+        </div>
+      </div>
+    {:else}
+      <p class="muted">No downloads.</p>
+    {/each}
+  {/if}
 
   <h2>Jobs</h2>
-  {#each jobs as job (job.id)}
-    {@const view = job.state === 'running' ? describeProgress(job.kind, job.progress) : null}
-    <div class="card row job" data-job={job.id}>
-      <div class="head">
-        <StatusPill {...jobStatus(job)} />
-        <a href={jobHref(job)}><strong>{jobTitle(job)}</strong></a>
-        <span class="muted">{job.lane} lane</span>
-        <FetchCancel {job} label={jobTitle(job)} />
-      </div>
-      {#if job.state === 'running'}
-        <ProgressBar view={view ?? { fraction: null, text: 'Starting' }} label={`${jobTitle(job)} progress`} />
-      {/if}
-      {#if job.reason}<p class="muted why">{job.reason}</p>{/if}
-    </div>
+  {#if jobsError}
+    <p role="alert">{jobsError} <button type="button" onclick={() => void loadJobsList()}>Retry</button></p>
   {:else}
-    <p class="muted">No jobs queued or running.</p>
-  {/each}
+    {#each jobs as job (job.id)}
+      {@const view = job.state === 'running' ? describeProgress(job.kind, job.progress) : null}
+      <div class="card row job" data-job={job.id}>
+        <div class="head">
+          <StatusPill {...jobStatus(job)} />
+          <a href={jobHref(job)}><strong>{jobTitle(job)}</strong></a>
+          <span class="muted">{job.lane} lane</span>
+          <FetchCancel {job} label={jobTitle(job)} />
+        </div>
+        {#if job.state === 'running'}
+          <ProgressBar view={view ?? { fraction: null, text: 'Starting' }} label={`${jobTitle(job)} progress`} />
+        {/if}
+        {#if job.reason}<p class="muted why">{job.reason}</p>{/if}
+      </div>
+    {:else}
+      <p class="muted">No jobs queued or running.</p>
+    {/each}
+  {/if}
 
   <h2>Recent</h2>
   <ul class="imports" aria-live="polite">
@@ -128,13 +180,17 @@
   </ul>
 
   <h2>Imports</h2>
-  <ul class="imports">
-    {#each imports as entry (entry.id)}
-      <li>{entry.action}</li>
-    {:else}
-      <li class="muted">No imports yet.</li>
-    {/each}
-  </ul>
+  {#if importsError}
+    <p role="alert">{importsError} <button type="button" onclick={() => void loadImportsList()}>Retry</button></p>
+  {:else}
+    <ul class="imports">
+      {#each imports as entry (entry.id)}
+        <li>{entry.action}</li>
+      {:else}
+        <li class="muted">No imports yet.</li>
+      {/each}
+    </ul>
+  {/if}
 </div>
 
 <style>

@@ -1,6 +1,7 @@
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import { api } from '../api';
 import { fixtureJobs, fixtureRecentJobs, mockScenario } from '../fixtures';
+import { readAllPages } from '../paging';
 import type { IncomingFile, Job, JobState } from '../types';
 import { received } from '../upload';
 import { findPlatform } from './platforms.svelte';
@@ -65,7 +66,7 @@ export async function loadJobs(): Promise<void> {
     startMockProgress();
     return;
   }
-  jobs = (await api.jobs()).items;
+  jobs = await readAllPages((limit, offset) => api.jobs(limit, offset), (j) => j.id);
 }
 
 export function getRecentJobs(): Job[] {
@@ -76,7 +77,7 @@ export async function loadRecentJobs(): Promise<void> {
   if (isMock) {
     recent = mockScenario() === 'idle' ? [] : fixtureRecentJobs;
   } else {
-    recent = (await api.recentJobs()).items;
+    recent = await readAllPages((limit, offset) => api.recentJobs(limit, offset), (j) => j.id);
   }
   for (const job of recent) {
     announce(job.id, job.state, job.progress);

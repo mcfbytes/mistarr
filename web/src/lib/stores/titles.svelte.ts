@@ -1,4 +1,4 @@
-import { api, errorMessage } from '../api';
+import { api, ApiError, errorMessage } from '../api';
 import { fixtureTitle, fixtureTitles, mockDelayMs, mockRemovedIds } from '../fixtures';
 import type { FileState, TitleDetail, TitleFilters, TitleGroup } from '../types';
 
@@ -12,6 +12,8 @@ let groupsLoading = $state(false);
 let groupsError = $state<string | null>(null);
 let lastFilters: TitleFilters = {};
 let detail = $state<TitleDetail | null>(null);
+let detailMissing = $state(false);
+let detailLoadError = $state<string | null>(null);
 let detailId: number | null = null;
 let groupsController: AbortController | null = null;
 /** Counts the loads a user asked for, so a background reload stops once one starts. */
@@ -81,6 +83,16 @@ export function nextOffset(): number {
 
 export function getDetail(): TitleDetail | null {
   return detail;
+}
+
+/** True once the open title's load has answered 404. */
+export function isDetailMissing(): boolean {
+  return detailMissing;
+}
+
+/** Why the open title failed to load, other than not found, or null. */
+export function getDetailLoadError(): string | null {
+  return detailLoadError;
 }
 
 /**
@@ -260,14 +272,34 @@ export async function loadTitleDetail(id: number): Promise<void> {
   const token = ++detailToken;
   detailId = id;
   detail = null;
-  const next = isMock ? fixtureTitle(id) : await api.title(id);
-  if (token === detailToken) {
-    detail = next;
+  detailMissing = false;
+  detailLoadError = null;
+  if (isMock) {
+    if (mockRemovedIds().includes(id)) {
+      detailMissing = true;
+    } else {
+      detail = fixtureTitle(id);
+    }
+    return;
+  }
+  try {
+    const next = await api.title(id);
+    if (token === detailToken) {
+      detail = next;
+    }
+  } catch (err) {
+    if (token !== detailToken) {
+      return;
+    }
+    detailMissing = err instanceof ApiError && err.status === 404;
+    detailLoadError = detailMissing ? null : errorMessage(err);
   }
 }
 
 export function clearDetail(): void {
   detail = null;
+  detailMissing = false;
+  detailLoadError = null;
   detailId = null;
   detailToken += 1;
 }

@@ -1,3 +1,4 @@
+import { PAGE_SIZE } from './paging';
 import { BROWSE_FLAGS } from './types';
 import type {
   CoresResult,
@@ -6,6 +7,7 @@ import type {
   ImportLogEntry,
   IncomingFile,
   Job,
+  Paged,
   Platform,
   Settings,
   Source,
@@ -246,6 +248,15 @@ export function mockStatus(): SystemStatus {
     // Storage blocked or the value is not JSON: the plain fixture.
   }
   return fixtureStatus;
+}
+
+/** Whether the mock settings load should fail, from localStorage `mistarr.mockSettingsFail`. */
+export function mockSettingsShouldFail(): boolean {
+  try {
+    return localStorage.getItem('mistarr.mockSettingsFail') === '1';
+  } catch {
+    return false;
+  }
 }
 
 /** Keeps what a mock save would send, in localStorage `mistarr.mockSavedSettings`. */
@@ -605,6 +616,61 @@ export const fixtureSources: Source[] = [
     pending_binding: null
   }
 ];
+
+/**
+ * `fixtureSources` plus `n` synthetic extra rows, from localStorage
+ * `mistarr.mockSourceCount`, to exercise a list past the API's page default.
+ */
+export function mockSources(): Source[] {
+  let extra = 0;
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockSourceCount') ?? '0');
+    extra = typeof parsed === 'number' ? parsed : 0;
+  } catch {
+    // Storage blocked or the value is not JSON: no extra rows.
+  }
+  const generated: Source[] = Array.from({ length: extra }, (_, i) => ({
+    id: 1000 + i,
+    infohash: (1000 + i).toString(16).padStart(40, '0'),
+    display_name: `Generated bundle ${i + 1}`,
+    origin_file: `generated-bundle-${i + 1}.torrent`,
+    platform_id: null,
+    bind_score: null,
+    state: 'unbound',
+    reason: null,
+    seed_policy: 'none',
+    file_count: 1,
+    matched_count: 0,
+    total_size: 1_000_000,
+    client_id: null,
+    added_at: 1_770_000_000 + i,
+    suggested_platform_id: null,
+    user_binding: false,
+    pending_binding: null
+  }));
+  return [...fixtureSources, ...generated];
+}
+
+/** A test's override of the mock page size, from `mistarr.mockPageCap`; the API's own cap otherwise. */
+function mockPageCap(): number {
+  try {
+    const n = Number(localStorage.getItem('mistarr.mockPageCap'));
+    return Number.isInteger(n) && n > 0 ? Math.min(n, PAGE_SIZE) : PAGE_SIZE;
+  } catch {
+    return PAGE_SIZE;
+  }
+}
+
+/** Mimics the server's `?limit=&offset=` rules (capped at `PAGE_SIZE`) over an array. */
+function mockPage<T>(all: T[], limit: number, offset: number): Paged<T> {
+  const capped = Math.min(limit, mockPageCap());
+  return { items: all.slice(offset, offset + capped), total: all.length };
+}
+
+/** `mockSources()` paged the way `GET /sources` is, for stores that page through fixtures. */
+export function mockSourcesPage(limit: number, offset: number): Promise<Paged<Source>> {
+  return Promise.resolve(mockPage(mockSources(), limit, offset));
+}
 
 export const fixtureIncomingDats: IncomingFile[] = [
   {

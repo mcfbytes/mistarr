@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { showToast } from '../lib/stores/toast.svelte';
-  import { fixtureSettings, recordMockSave } from '../lib/fixtures';
+  import { fixtureSettings, mockSettingsShouldFail, recordMockSave } from '../lib/fixtures';
   import { api, errorMessage } from '../lib/api';
   import ClientStart from '../lib/ClientStart.svelte';
   import ClientHeld from '../lib/ClientHeld.svelte';
@@ -84,7 +84,8 @@
   );
 
   onMount(() => {
-    void loadStatus();
+    // The board's own status can't block the settings form; SSE brings it once connected.
+    void loadStatus().catch(() => undefined);
     void loadSettings();
   });
 
@@ -94,7 +95,15 @@
   }
 
   async function loadSettings(): Promise<void> {
-    adopt(isMock ? fixtureSettings : await api.settings());
+    try {
+      if (isMock && mockSettingsShouldFail()) {
+        throw new Error('mock settings load told to fail');
+      }
+      adopt(isMock ? fixtureSettings : await api.settings());
+      settingsError = null;
+    } catch (err) {
+      settingsError = errorMessage(err);
+    }
   }
 
   // Unsaved settings survive neither a reload nor leaving the screen without a question.
@@ -407,7 +416,12 @@
     </section>
   {/if}
 
-  {#if settings}
+  {#if !settings && settingsError}
+    <section class="settings" aria-labelledby="settings-h">
+      <h2 id="settings-h">Settings</h2>
+      <p class="error" role="alert">{settingsError} <button type="button" onclick={() => void loadSettings()}>Retry</button></p>
+    </section>
+  {:else if settings}
     <section class="settings" aria-labelledby="settings-h">
       <h2 id="settings-h">Settings</h2>
       <p class="help intro">

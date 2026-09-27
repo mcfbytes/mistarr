@@ -2,7 +2,7 @@ import { EventSubscriber } from '../api';
 import type { SseEvent } from '../types';
 import { applyStatus, loadStatus, loadWizard, setConnected } from './status.svelte';
 import { applySourceChanged, loadSources } from './sources.svelte';
-import { applyDownloadChanged, loadDownloads, loadImports } from './downloads.svelte';
+import { applyDownloadChanged, loadDownloads, loadImports, watchingImports } from './downloads.svelte';
 import { applyJobProgress, isRunning, loadJobs, resetFinished, resyncRecent } from './jobs.svelte';
 import { applyDatLoaded, loadDats } from './dats.svelte';
 import { loadPlatforms } from './platforms.svelte';
@@ -12,12 +12,12 @@ import { announceUpload, markUploadsStale } from './uploads.svelte';
 
 let subscriber: EventSubscriber | null = null;
 
-// Re-fetches every hydrated store; the server asks for this when a
-// reconnect's replay may have gaps.
+// Re-fetches every hydrated store when a reconnect's replay may have gaps;
+// allSettled so one failed store neither rejects resync nor hides the others.
 async function resync(): Promise<void> {
   resetFinished();
   markUploadsStale();
-  await Promise.all([
+  await Promise.allSettled([
     loadPlatforms(),
     loadDats(),
     loadSources(),
@@ -44,6 +44,7 @@ function scheduleReloadPlatforms(): void {
   }
   platformsTimer = setTimeout(() => {
     platformsTimer = null;
+    // A miss leaves counts stale until the next resync or matching job.
     void loadPlatforms().catch(() => undefined);
     void reloadTitles();
   }, 500);
@@ -67,6 +68,29 @@ function scheduleReloadTitles(): void {
   }, FILE_CHANGED_DEBOUNCE_MS);
 }
 
+let importsTimer: ReturnType<typeof setTimeout> | null = null;
+let importsPending = false;
+
+// A mass import fires import.done per file; one full-log re-read per window is enough,
+// and only while Activity has it open — otherwise the next mount or resync pages it in.
+function scheduleReloadImports(): void {
+  if (!watchingImports()) {
+    return;
+  }
+  if (importsTimer) {
+    importsPending = true;
+    return;
+  }
+  importsPending = false;
+  void loadImports().catch(() => undefined);
+  importsTimer = setTimeout(() => {
+    importsTimer = null;
+    if (importsPending) {
+      scheduleReloadImports();
+    }
+  }, FILE_CHANGED_DEBOUNCE_MS);
+}
+
 function handle(event: SseEvent): void {
   switch (event.name) {
     case 'resync':
@@ -78,7 +102,8 @@ function handle(event: SseEvent): void {
     case 'source.changed':
       applySourceChanged(event.data.source_id, event.data.state, event.data.platform_id);
       scheduleIncoming('sources');
-      void loadWizard();
+      // Only matters while the wizard is open; a miss shows up at the next resync.
+      void loadWizard().catch(() => undefined);
       break;
     case 'download.changed':
       applyDownloadChanged(event.data.download_id, event.data.state, event.data.progress);
@@ -101,14 +126,15 @@ function handle(event: SseEvent): void {
       announceUpload('dats', event.data.file, null);
       applyDatLoaded();
       scheduleIncoming('dats');
-      void loadWizard();
+      // Only matters while the wizard is open; a miss shows up at the next resync.
+      void loadWizard().catch(() => undefined);
       break;
     case 'dat.rejected':
       announceUpload('dats', event.data.file, event.data.reason);
       scheduleIncoming('dats');
       break;
     case 'import.done':
-      void loadImports();
+      scheduleReloadImports();
       scheduleReloadTitles();
       break;
     case 'file.changed':
@@ -128,6 +154,7 @@ export function startEvents(): void {
   subscriber = new EventSubscriber(handle, (connected) => {
     setConnected(connected);
     if (connected) {
+      // A miss leaves the running list stale until the next job.progress event or resync.
       void loadJobs().catch(() => undefined);
     }
   });

@@ -37,6 +37,7 @@
     }
     wizardRetryMs = 1000;
     setUnauthorized(false);
+    // Best-effort warm-up: any route that needs status retries its own load if this misses.
     void loadStatus().catch(() => undefined);
     const wizard = getWizard();
     if (wizard && wizard.open_on_start && getRoute().name !== 'wizard') {
@@ -46,7 +47,8 @@
 
   startEvents();
   if (isMock) {
-    void loadStatus();
+    // Best-effort warm-up: any route that needs status retries its own load if this misses.
+    void loadStatus().catch(() => undefined);
   } else {
     void checkFirstRun();
   }

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, tick } from 'svelte';
   import { getSources, loadSources, patchSource } from '../lib/stores/sources.svelte';
   import { getPlatforms, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { api, errorMessage } from '../lib/api';
@@ -18,16 +18,33 @@
   import type { SeedPolicy } from '../lib/types';
 
   const isMock = import.meta.env.VITE_MOCK === '1';
+  let sourcesError = $state<string | null>(null);
+
+  async function loadSourcesList(): Promise<void> {
+    try {
+      await loadSources();
+      sourcesError = null;
+    } catch (err) {
+      sourcesError = errorMessage(err);
+    }
+  }
 
   onMount(() => {
-    void loadSources();
-    void loadPlatforms();
+    void loadSourcesList();
+    // The bind dropdown just shows no platforms on a miss; it retries at the next resync.
+    void loadPlatforms().catch(() => undefined);
   });
 
   const sources = $derived(getSources());
   const pausedWhilePlaying = $derived(getStatus()?.pause_client_while_playing === true);
   const platforms = $derived(getPlatforms());
+  let confirmingId = $state<number | null>(null);
+  let removingId = $state<number | null>(null);
 
+  async function focusButton(id: number, which: 'remove' | 'confirm'): Promise<void> {
+    await tick();
+    document.querySelector<HTMLButtonElement>(`[data-source="${id}"][data-action="${which}"]`)?.focus();
+  }
 
   async function bind(id: number, platformId: string): Promise<void> {
     if (!platformId) {
@@ -86,15 +103,32 @@
     }
   }
 
+  function askRemove(id: number): void {
+    confirmingId = id;
+    void focusButton(id, 'confirm');
+  }
+
+  function keepSource(id: number): void {
+    confirmingId = null;
+    void focusButton(id, 'remove');
+  }
+
   async function remove(id: number): Promise<void> {
+    confirmingId = null;
     if (isMock) {
       return;
     }
+    removingId = id;
     try {
       await api.deleteSource(id);
-      await loadSources();
+      await loadSourcesList();
+      // The removed row is gone from the table; land focus on the heading instead of the body.
+      document.getElementById('sources-heading')?.focus();
     } catch (err) {
       showToast(errorMessage(err));
+      void focusButton(id, 'remove');
+    } finally {
+      removingId = null;
     }
   }
 
@@ -104,7 +138,7 @@
 </script>
 
 <div class="page">
-  <h1>Sources</h1>
+  <h1 id="sources-heading" tabindex="-1">Sources</h1>
   <ClientHeld />
 
   <div class="card upload">
@@ -116,7 +150,9 @@
   <h2>Waiting in <code>sources/</code></h2>
   <IncomingList which="sources" />
 
-  {#if sources.length === 0}
+  {#if sourcesError}
+    <p role="alert">{sourcesError} <button type="button" onclick={() => void loadSourcesList()}>Retry</button></p>
+  {:else if sources.length === 0}
     <p>No sources yet. Place a .torrent or .magnet file in <code>/media/fat/mistarr/sources</code> or drop one here.</p>
   {:else}
     <div class="table-wrap">
@@ -181,7 +217,28 @@
                 {#if source.state !== 'disabled'}
                   <button onclick={() => disable(source.id)}>Disable</button>
                 {/if}
-                <button onclick={() => remove(source.id)}>Delete</button>
+                {#if confirmingId === source.id}
+                  <span class="confirm-inline" role="group" aria-label={`Remove ${source.display_name}?`}>
+                    <span class="muted">Removed from mistarr and the client; placed files stay.</span>
+                    <button
+                      type="button"
+                      class="danger"
+                      data-source={source.id}
+                      data-action="confirm"
+                      onclick={() => remove(source.id)}>Remove source</button
+                    >
+                    <button type="button" aria-label={`Keep ${source.display_name}`} onclick={() => keepSource(source.id)}>Keep</button>
+                  </span>
+                {:else}
+                  <button
+                    type="button"
+                    data-source={source.id}
+                    data-action="remove"
+                    aria-label={`Remove ${source.display_name}`}
+                    disabled={removingId === source.id}
+                    onclick={() => askRemove(source.id)}>{removingId === source.id ? 'Removing…' : 'Remove'}</button
+                  >
+                {/if}
               </div>
             </td>
           </tr>
@@ -250,5 +307,22 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.4em;
+  }
+
+  .confirm-inline {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4em;
+  }
+
+  .confirm-inline .muted {
+    flex-basis: 100%;
+    font-size: 0.85em;
+  }
+
+  .danger {
+    border-color: var(--danger);
+    color: var(--danger);
   }
 </style>
