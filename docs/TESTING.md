@@ -5,7 +5,8 @@ Three layers. All of them run on x86-64 in CI; only the last needs a board.
 ## 1. Unit tests, per crate
 
 - `mistarr-core`: DAT parsing against synthetic DATs generated in the test,
-  name parsing corpus, header rules, hashing against known vectors, 1G1R
+  name parsing corpus, header rules, hashing against known vectors, the
+  hex, digest, bencode, magnet and percent codecs, 1G1R
   selection tables, cue parsing, and the CHD decoder: known answers worked
   out in CHD.md for the map, canonical codes and CHT2 layout, and
   `decode_budget` under 24 MiB at the header limits.
@@ -13,8 +14,8 @@ Three layers. All of them run on x86-64 in CI; only the last needs a board.
   synthetic inputs; MRA parsing; DAT-name to platform binding; MGL building
   and escaping, core selection and the command FIFO against a real FIFO in a
   temporary directory.
-- `mistarr-sources`: bencode parsing, binding score computation, name
-  normalisation.
+- `mistarr-sources`: torrent parsing, binding score computation, name
+  normalization.
 - `mistarr-clients`: each RPC implementation against a recorded fake that
   asserts the exact calls, including the 409 handshake and SCGI framing.
 

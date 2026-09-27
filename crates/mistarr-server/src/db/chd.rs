@@ -1,7 +1,8 @@
 //! The `chd_tracks` and `chd_whole` caches, `chd_failures`, and the `files` rows of CHD images waiting to
 //! be identified. See `docs/VERIFICATION.md` "CHD images" and `docs/DATA-MODEL.md`.
 
-use mistarr_core::chd::{ChdId, Sha1Digest, Unidentifiable};
+use mistarr_core::chd::{ChdId, Unidentifiable};
+use mistarr_core::Sha1;
 use mistarr_core::{HashSet, PlatformId};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Serialize, Serializer};
@@ -78,10 +79,10 @@ fn size_i64(n: u64) -> i64 {
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_core::chd::{ChdId, Sha1Digest};
+/// use mistarr_core::{chd::ChdId, Sha1};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let id = ChdId { sha1: Sha1Digest([7; 20]), size: 10 };
+/// let id = ChdId { sha1: Sha1::from_bytes([7; 20]), size: 10 };
 /// assert!(mistarr_server::db::chd::cached_tracks(&conn, &id).unwrap().is_none());
 /// ```
 pub fn cached_tracks(conn: &Connection, id: &ChdId) -> Result<Option<Vec<HashSet>>> {
@@ -90,7 +91,7 @@ pub fn cached_tracks(conn: &Connection, id: &ChdId) -> Result<Option<Vec<HashSet
             "SELECT track, size, crc32, md5, sha1 FROM chd_tracks
              WHERE chd_sha1 = ?1 AND chd_size = ?2 ORDER BY track",
         )?
-        .query_map(params![id.sha1.to_hex(), size_i64(id.size)], |r| {
+        .query_map(params![id.sha1.to_string(), size_i64(id.size)], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -119,7 +120,7 @@ pub fn cached_tracks(conn: &Connection, id: &ChdId) -> Result<Option<Vec<HashSet
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn store_tracks(conn: &Connection, id: &ChdId, tracks: &[HashSet]) -> Result<()> {
-    let (sha1, size) = (id.sha1.to_hex(), size_i64(id.size));
+    let (sha1, size) = (id.sha1.to_string(), size_i64(id.size));
     conn.prepare_cached("DELETE FROM chd_tracks WHERE chd_sha1 = ?1 AND chd_size = ?2")?
         .execute(params![sha1, size])?;
     let mut insert = conn.prepare_cached(
@@ -152,9 +153,10 @@ pub fn whole_hashes(conn: &Connection, id: &ChdId, mtime: i64) -> Result<Option<
             "SELECT crc32, md5, sha1 FROM chd_whole
              WHERE chd_sha1 = ?1 AND chd_size = ?2 AND mtime = ?3",
         )?
-        .query_row(params![id.sha1.to_hex(), size_i64(id.size), mtime], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })
+        .query_row(
+            params![id.sha1.to_string(), size_i64(id.size), mtime],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .optional()?;
     Ok(row.map(|(crc32, md5, sha1)| HashSet {
         size: id.size,
@@ -175,7 +177,7 @@ pub fn store_whole_hashes(conn: &Connection, id: &ChdId, mtime: i64, h: &HashSet
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )?
     .execute(params![
-        id.sha1.to_hex(),
+        id.sha1.to_string(),
         size_i64(id.size),
         mtime,
         h.crc32,
@@ -204,7 +206,7 @@ pub fn find_id(conn: &Connection, tracks: &[HashSet]) -> Result<Option<ChdId>> {
         })?
         .collect::<rusqlite::Result<_>>()?;
     for (sha1, size) in found {
-        let Some(sha1) = Sha1Digest::from_hex(&sha1) else {
+        let Ok(sha1) = sha1.parse::<Sha1>() else {
             continue;
         };
         let id = ChdId {
@@ -231,9 +233,10 @@ pub fn failure(conn: &Connection, id: &ChdId, mtime: i64) -> Result<Option<(Unid
             "SELECT reason, decoder FROM chd_failures
              WHERE chd_sha1 = ?1 AND chd_size = ?2 AND mtime = ?3",
         )?
-        .query_row(params![id.sha1.to_hex(), size_i64(id.size), mtime], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })
+        .query_row(
+            params![id.sha1.to_string(), size_i64(id.size), mtime],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
         .optional()?;
     Ok(row.map(|(code, decoder)| {
         let reason = Unidentifiable::from_code(&code).unwrap_or(Unidentifiable::Corrupt);
@@ -262,7 +265,7 @@ pub fn store_failure(
          WHERE chd_failures.reason <> excluded.reason OR chd_failures.decoder <> excluded.decoder",
     )?
     .execute(params![
-        id.sha1.to_hex(),
+        id.sha1.to_string(),
         size_i64(id.size),
         mtime,
         reason.code(),
@@ -480,7 +483,7 @@ mod tests {
 
     fn id(n: u8, size: u64) -> ChdId {
         ChdId {
-            sha1: Sha1Digest([n; 20]),
+            sha1: Sha1::from_bytes([n; 20]),
             size,
         }
     }

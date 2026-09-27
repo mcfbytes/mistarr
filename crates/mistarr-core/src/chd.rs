@@ -14,7 +14,7 @@ use std::io;
 
 pub use cdrom::{crc16, ecc};
 pub use decode::{decode_budget, Decoder, Step};
-pub use header::{read_header, ChdId, FourCc, Header, Sha1Digest};
+pub use header::{read_header, ChdId, FourCc, Header};
 pub use layout::{read_layout, Layout, Track, TrackKind};
 
 /// Length of a v5 header, the only bytes the scan reads with track hashing off.

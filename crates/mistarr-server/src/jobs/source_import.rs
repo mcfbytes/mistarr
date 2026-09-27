@@ -4,12 +4,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mistarr_clients::{ClientError, ClientTorrentId, InfoHash, SeedPolicy, TorrentSource};
+use mistarr_clients::{ClientError, ClientTorrentId, SeedPolicy, TorrentSource};
+use mistarr_core::magnet;
 use mistarr_core::PlatformId;
 use mistarr_sources::binding::{self, Binding};
+use mistarr_sources::torrent;
 use mistarr_sources::torrent::TorrentFile;
 use mistarr_sources::watch::{self, Scanner};
-use mistarr_sources::{magnet, torrent};
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -186,7 +187,7 @@ async fn import_torrent(
         Err(e) => return Ok(Err(format!("Not a valid .torrent file: {e}."))),
     };
     drop(data);
-    let infohash = InfoHash::from_bytes(meta.infohash).to_string();
+    let infohash = meta.infohash.to_string();
     let threshold = app.config().sources.bind_threshold;
     let origin = origin.to_owned();
     key_new_roms(&app.db).await?;
@@ -234,7 +235,7 @@ async fn import_magnet(
         Ok(m) => m,
         Err(e) => return Ok(Err(format!("Not a valid .magnet file: {e}."))),
     };
-    let infohash = InfoHash::from_bytes(parsed.infohash).to_string();
+    let infohash = parsed.infohash.to_string();
     let name = parsed.display_name.unwrap_or_else(|| {
         Path::new(origin)
             .file_stem()
@@ -620,8 +621,7 @@ async fn magnet_uri(app: &AppState, row: &SourceRow) -> String {
     let dropped = text.lines().map(str::trim).find(|l| !l.is_empty());
     match dropped {
         Some(uri)
-            if magnet::parse_magnet(uri)
-                .is_ok_and(|m| InfoHash::from_bytes(m.infohash).to_string() == row.infohash) =>
+            if magnet::parse_magnet(uri).is_ok_and(|m| m.infohash.to_string() == row.infohash) =>
         {
             uri.to_owned()
         }

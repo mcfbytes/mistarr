@@ -1,16 +1,13 @@
 //! Streaming DAT parsing, Logiqx and No-Intro DB export; the contract is `docs/VERIFICATION.md` "DAT parsing".
 
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Seek};
 
-use quick_xml::escape::resolve_predefined_entity;
-use quick_xml::events::{BytesRef, BytesStart, Event};
-use quick_xml::{Reader, XmlVersion};
+use quick_xml::events::{BytesStart, Event};
 use serde::{Deserialize, Serialize};
 
 use crate::hash::HeaderRule;
-use crate::xml::{check_utf8, lossy, Capped, EscapeInvalid};
+use crate::xml::{attr_value, check_utf8, lossy, resolve_ref, CappedReader, ReadError};
 
 mod canon;
 mod export;
@@ -131,6 +128,16 @@ pub enum DatError {
     },
 }
 
+impl From<ReadError> for DatError {
+    fn from(err: ReadError) -> Self {
+        match err {
+            ReadError::Xml { position, source } => DatError::Xml { position, source },
+            ReadError::EventTooLarge { position } => DatError::EventTooLarge { position },
+            ReadError::TooDeep { position } => DatError::TooDeep { position },
+        }
+    }
+}
+
 /// Largest single XML event, a tag with its attributes, a text run or a comment, that a
 /// DAT may hold; larger ones fail with [`DatError::EventTooLarge`] before being buffered.
 pub const MAX_EVENT_BYTES: u64 = 1024 * 1024;
@@ -248,6 +255,25 @@ pub struct DatRom {
     pub status: RomStatus,
     /// The `header` attribute, verbatim.
     pub header: Option<String>,
+}
+
+impl DatRom {
+    /// The bytes the `header` attribute writes in hex, such as `4E 45 53 1A`; `None`
+    /// when it is absent, empty or not hex.
+    ///
+    /// ```
+    /// use mistarr_core::dat::{DatRom, RomStatus};
+    /// let rom = DatRom { name: "q.nes".into(), size: 4, crc32: None, md5: None, sha1: None,
+    ///     status: RomStatus::Good, header: Some("4E 45 53 1a".into()) };
+    /// assert_eq!(rom.header_bytes(), Some(b"NES\x1a".to_vec()));
+    /// ```
+    #[must_use]
+    pub fn header_bytes(&self) -> Option<Vec<u8>> {
+        self.header
+            .as_deref()
+            .and_then(crate::hex::decode_spaced)
+            .filter(|bytes| !bytes.is_empty())
+    }
 }
 
 /// One `<game>` (or `<machine>`) entry.
@@ -465,8 +491,7 @@ enum Mode {
 /// Iterator over the games of a DAT, holding one game in memory at a time.
 /// Yields [`DatError::NoGames`] once if the document ends without any game.
 pub struct DatStream<R: BufRead> {
-    reader: Reader<Capped<EscapeInvalid<R>>>,
-    buf: Vec<u8>,
+    xml: CappedReader<R>,
     header: DatHeader,
     format: DatFormat,
     options: ExportOptions,
@@ -474,7 +499,6 @@ pub struct DatStream<R: BufRead> {
     raw: Option<(export::Archive, Vec<export::Source>)>,
     first: Option<(DatGame, Option<String>)>,
     count: usize,
-    depth: usize,
     done: bool,
     fused: bool,
 }
@@ -517,8 +541,7 @@ impl<R: BufRead> DatStream<R> {
 
     fn open(reader: R, options: ExportOptions, mode: Mode) -> Result<Self, DatError> {
         let mut stream = DatStream {
-            reader: Reader::from_reader(Capped::new(EscapeInvalid::new(reader))),
-            buf: Vec::new(),
+            xml: CappedReader::new(reader, MAX_EVENT_BYTES, MAX_DEPTH),
             header: DatHeader::default(),
             format: DatFormat::Logiqx,
             options,
@@ -526,7 +549,6 @@ impl<R: BufRead> DatStream<R> {
             raw: None,
             first: None,
             count: 0,
-            depth: 0,
             done: false,
             fused: false,
         };
@@ -564,14 +586,11 @@ impl<R: BufRead> DatStream<R> {
     }
 
     fn xml_error(&self, source: quick_xml::Error) -> DatError {
-        DatError::Xml {
-            position: self.offset(),
-            source,
-        }
+        self.xml.error(source).into()
     }
 
     fn offset(&self) -> u64 {
-        self.reader.get_ref().get_ref().position()
+        self.xml.position()
     }
 
     /// Fails when `value` is longer than `limit`.
@@ -593,27 +612,7 @@ impl<R: BufRead> DatStream<R> {
 
     /// The next event, each capped at [`MAX_EVENT_BYTES`] and nested at most [`MAX_DEPTH`] deep.
     fn read_event(&mut self) -> Result<Event<'static>, DatError> {
-        self.buf.clear();
-        let start = self.offset();
-        self.reader.get_mut().arm(MAX_EVENT_BYTES);
-        let event = match self.reader.read_event_into(&mut self.buf) {
-            Ok(event) => event.into_owned(),
-            Err(_) if self.reader.get_ref().over() => {
-                return Err(DatError::EventTooLarge { position: start })
-            }
-            Err(err) => return Err(self.xml_error(err)),
-        };
-        match event {
-            Event::Start(_) => {
-                self.depth += 1;
-                if self.depth > MAX_DEPTH {
-                    return Err(DatError::TooDeep { position: start });
-                }
-            }
-            Event::End(_) => self.depth = self.depth.saturating_sub(1),
-            _ => {}
-        }
-        Ok(event)
+        Ok(self.xml.read_event()?)
     }
 
     /// Reads to the end of input after the root element closes, refusing anything but
@@ -762,7 +761,7 @@ impl<R: BufRead> DatStream<R> {
                     self.cap(field, &text, limit)?;
                 }
                 Event::GeneralRef(r) => {
-                    text.push_str(&self.resolve_ref(&r)?);
+                    text.push_str(&resolve_ref(&r).map_err(|e| self.xml_error(e))?);
                     self.cap(field, &text, limit)?;
                 }
                 Event::Start(e) => self.skip(&e)?,
@@ -776,35 +775,18 @@ impl<R: BufRead> DatStream<R> {
         }
     }
 
-    /// Resolves a predefined or character reference; unknown entities are kept as written.
-    fn resolve_ref(&self, r: &BytesRef<'_>) -> Result<String, DatError> {
-        if let Some(c) = r.resolve_char_ref().map_err(|e| self.xml_error(e))? {
-            return Ok(c.to_string());
-        }
-        let name: &str = r;
-        self.utf8(name)?;
-        Ok(resolve_predefined_entity(name).map_or_else(|| format!("&{name};"), str::to_owned))
-    }
-
     /// Attribute `key`, capped at [`MAX_NAME_BYTES`] for names, else [`MAX_FIELD_BYTES`].
     fn attr(&self, e: &BytesStart<'_>, key: &'static str) -> Result<Option<String>, DatError> {
-        for attr in e.attributes() {
-            let attr = attr.map_err(|err| self.xml_error(err.into()))?;
-            if attr.key.local_name().as_ref() == key {
-                let value: Cow<'_, str> = attr
-                    .normalized_value(XmlVersion::Implicit1_0)
-                    .map_err(|err| self.xml_error(err))?;
-                self.utf8(&value)?;
-                let limit = if NAME_KEYS.contains(&key) {
-                    MAX_NAME_BYTES
-                } else {
-                    MAX_FIELD_BYTES
-                };
-                self.cap(key, &value, limit)?;
-                return Ok(Some(value.into_owned()));
-            }
+        let value = attr_value(e, key).map_err(|err| self.xml_error(err))?;
+        if let Some(value) = &value {
+            let limit = if NAME_KEYS.contains(&key) {
+                MAX_NAME_BYTES
+            } else {
+                MAX_FIELD_BYTES
+            };
+            self.cap(key, value, limit)?;
         }
-        Ok(None)
+        Ok(value)
     }
 
     fn read_game(

@@ -4,7 +4,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use unicode_normalization::UnicodeNormalization;
+use mistarr_core::naming::normalize_for_match;
 
 use crate::torrent::TorrentFile;
 use crate::PlatformId;
@@ -19,7 +19,7 @@ pub struct RomRef(pub i64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[non_exhaustive]
 pub enum Confidence {
-    /// Matched by exact or normalised name.
+    /// Matched by exact or normalized name.
     Name,
     /// Matched by base name (before the first parenthesised tag) plus size.
     Base,
@@ -34,9 +34,9 @@ pub enum Confidence {
 /// A minimal read-only view over loaded DATs, sufficient to bind and match
 /// without depending on `mistarr-core`'s DAT model (WP-01).
 pub trait DatIndex {
-    /// Roms whose normalised name equals `name`, with the platform each
+    /// Roms whose normalized name equals `name`, with the platform each
     /// belongs to.
-    fn by_normalised_name(&self, name: &str) -> Vec<(PlatformId, RomRef)>;
+    fn by_normalized_name(&self, name: &str) -> Vec<(PlatformId, RomRef)>;
     /// Roms whose base name equals `base_name` and whose size equals `size`.
     fn by_base_name_and_size(&self, base_name: &str, size: u64) -> Vec<(PlatformId, RomRef)>;
 }
@@ -50,23 +50,16 @@ pub enum Binding {
     Unbound(Vec<(PlatformId, f32)>),
 }
 
-/// Strips a file extension, applies Unicode NFKC, lowercases, replaces the
-/// libretro-style disallowed characters with `_`, and collapses whitespace.
+/// A file name with its extension stripped, then put through
+/// [`normalize_for_match`].
 ///
 /// ```
-/// use mistarr_sources::binding::normalise_name;
-/// assert_eq!(normalise_name("Example: Quest (USA).nes"), "example_ quest (usa)");
+/// use mistarr_sources::binding::normalize_name;
+/// assert_eq!(normalize_name("Example: Quest (USA).nes"), "example_ quest (usa)");
 /// ```
 #[must_use]
-pub fn normalise_name(name: &str) -> String {
-    let without_ext = strip_extension(name);
-    let nfkc: String = without_ext.nfkc().collect();
-    let lowered = nfkc.to_lowercase();
-    let substituted: String = lowered
-        .chars()
-        .map(|c| if is_disallowed(c) { '_' } else { c })
-        .collect();
-    collapse_whitespace(&substituted)
+pub fn normalize_name(name: &str) -> String {
+    normalize_for_match(strip_extension(name))
 }
 
 fn strip_extension(name: &str) -> &str {
@@ -76,31 +69,7 @@ fn strip_extension(name: &str) -> &str {
     }
 }
 
-fn is_disallowed(c: char) -> bool {
-    matches!(
-        c,
-        '&' | '*' | '/' | ':' | '`' | '<' | '>' | '?' | '\\' | '|' | '"'
-    )
-}
-
-fn collapse_whitespace(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut last_was_space = false;
-    for c in s.trim().chars() {
-        if c.is_whitespace() {
-            if !last_was_space {
-                out.push(' ');
-            }
-            last_was_space = true;
-        } else {
-            out.push(c);
-            last_was_space = false;
-        }
-    }
-    out
-}
-
-/// The part of a normalised name before its first parenthesised tag, per
+/// The part of a normalized name before its first parenthesised tag, per
 /// `docs/VERIFICATION.md` "Name parsing".
 ///
 /// ```
@@ -108,15 +77,15 @@ fn collapse_whitespace(s: &str) -> String {
 /// assert_eq!(base_name("example quest (usa) (rev 1)"), "example quest");
 /// ```
 #[must_use]
-pub fn base_name(normalised: &str) -> &str {
-    match normalised.find('(') {
-        Some(i) => normalised[..i].trim_end(),
-        None => normalised,
+pub fn base_name(normalized: &str) -> &str {
+    match normalized.find('(') {
+        Some(i) => normalized[..i].trim_end(),
+        None => normalized,
     }
 }
 
 // The torrent's directory segments are not part of the rom's own name; only
-// the final path segment (the file name) is normalised and matched.
+// the final path segment (the file name) is normalized and matched.
 fn leaf_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
@@ -125,8 +94,8 @@ fn candidates_for(
     file: &TorrentFile,
     index: &dyn DatIndex,
 ) -> Vec<(PlatformId, RomRef, Confidence)> {
-    let normalised = normalise_name(leaf_name(&file.path));
-    let name_matches = index.by_normalised_name(&normalised);
+    let normalized = normalize_name(leaf_name(&file.path));
+    let name_matches = index.by_normalized_name(&normalized);
     let matched_platforms: HashSet<PlatformId> =
         name_matches.iter().map(|(p, _)| p.clone()).collect();
 
@@ -137,7 +106,7 @@ fn candidates_for(
 
     // A platform already matched by name keeps that stronger match; only
     // platforms with no name match fall back to base name plus size.
-    let size_matches = index.by_base_name_and_size(base_name(&normalised), file.size);
+    let size_matches = index.by_base_name_and_size(base_name(&normalized), file.size);
     candidates.extend(
         size_matches
             .into_iter()
@@ -157,7 +126,7 @@ fn candidates_for(
 ///
 /// struct Empty;
 /// impl DatIndex for Empty {
-///     fn by_normalised_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> { Vec::new() }
+///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> { Vec::new() }
 ///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomRef)> { Vec::new() }
 /// }
 /// let files = vec![TorrentFile { index: 0, path: "a.nes".into(), size: 1 }];
@@ -207,7 +176,7 @@ pub fn score_platforms(files: &[TorrentFile], index: &dyn DatIndex) -> Vec<(Plat
 ///
 /// struct Empty;
 /// impl DatIndex for Empty {
-///     fn by_normalised_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> { Vec::new() }
+///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> { Vec::new() }
 ///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomRef)> { Vec::new() }
 /// }
 /// let files = vec![TorrentFile { index: 0, path: "a.nes".into(), size: 1 }];
@@ -232,7 +201,7 @@ pub fn bind(files: &[TorrentFile], index: &dyn DatIndex, threshold: f32) -> Bind
 ///
 /// struct Empty;
 /// impl DatIndex for Empty {
-///     fn by_normalised_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> { Vec::new() }
+///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> { Vec::new() }
 ///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomRef)> { Vec::new() }
 /// }
 /// let files = vec![TorrentFile { index: 0, path: "a.nes".into(), size: 1 }];
@@ -307,7 +276,7 @@ impl Mapping {
 ///
 /// struct One;
 /// impl DatIndex for One {
-///     fn by_normalised_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> {
+///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> {
 ///         vec![(PlatformId("nes".into()), RomRef(7))]
 ///     }
 ///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomRef)> { Vec::new() }
@@ -400,7 +369,7 @@ pub fn bind_and_map(
 ///
 /// struct Two;
 /// impl DatIndex for Two {
-///     fn by_normalised_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> { Vec::new() }
+///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> { Vec::new() }
 ///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomRef)> {
 ///         vec![(PlatformId("nes".into()), RomRef(1)), (PlatformId("nes".into()), RomRef(2))]
 ///     }
@@ -567,7 +536,7 @@ mod tests {
     }
 
     impl DatIndex for FakeDat {
-        fn by_normalised_name(&self, name: &str) -> Vec<(PlatformId, RomRef)> {
+        fn by_normalized_name(&self, name: &str) -> Vec<(PlatformId, RomRef)> {
             self.by_name.get(name).cloned().unwrap_or_default()
         }
 
@@ -621,16 +590,16 @@ mod tests {
     }
 
     #[test]
-    fn normalise_matches_pre_download_matching_spec() {
+    fn normalize_matches_pre_download_matching_spec() {
         assert_eq!(
-            normalise_name("Example Quest (USA).nes"),
+            normalize_name("Example Quest (USA).nes"),
             "example quest (usa)"
         );
         assert_eq!(
-            normalise_name("A/B:C*D<E>F?G|H\"I`J&K"),
+            normalize_name("A/B:C*D<E>F?G|H\"I`J&K"),
             "a_b_c_d_e_f_g_h_i_j_k"
         );
-        assert_eq!(normalise_name("Spaced   Out.bin"), "spaced out");
+        assert_eq!(normalize_name("Spaced   Out.bin"), "spaced out");
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Domain types and pure logic: DAT parsing, name parsing, hashing with
-//! header rules, matching and 1G1R selection.
+//! header rules, matching and 1G1R selection, and the codecs every crate
+//! shares: hex, digests, bencode, magnet links and percent-decoding.
 //!
 //! This crate is synchronous, does no network I/O and owns no files. See
 //! `docs/VERIFICATION.md` for the contracts implemented here and
@@ -9,11 +10,19 @@
 #![warn(missing_docs)]
 #![warn(clippy::pedantic)]
 
+pub mod bencode;
 /// CHD v5 CD images: header, track layout and track decoding.
 pub mod chd;
 pub mod dat;
+mod digest;
+pub mod hex;
+pub mod magnet;
 pub mod naming;
+mod percent;
 pub mod xml;
+
+pub use digest::{Crc32, Digest, InfoHash, Md5, ParseDigestError, Sha1};
+pub use percent::percent_decode;
 
 /// 1G1R selection and clone-group inference.
 pub mod select;

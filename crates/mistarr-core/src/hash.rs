@@ -3,9 +3,12 @@
 //! the central directory. See `docs/VERIFICATION.md` "Hashing".
 
 use std::io::{self, Read, Seek};
+use std::str::FromStr;
 
 use md5::Digest as _;
+use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
+use crate::hex::encode as hex;
 use crate::HashSet;
 
 /// Streaming buffer size, matching the "Hashing buffer" budget in
@@ -29,29 +32,52 @@ pub enum HeaderRule {
     /// Atari Lynx: skip the 64-byte header when it starts with `LYNX`.
     Lnx,
     /// Nintendo 64: detect byte order from the first four bytes and
-    /// normalise to big-endian while hashing.
+    /// normalize to big-endian while hashing.
     N64,
 }
 
 impl HeaderRule {
-    /// The rule a platform table `header_rule` name stands for; unknown names hash whole files.
+    /// Every rule, in table order.
+    const ALL: [Self; 6] = [
+        Self::None,
+        Self::Ines,
+        Self::Smc,
+        Self::A78,
+        Self::Lnx,
+        Self::N64,
+    ];
+
+    /// The rule's name in the platform table's `header_rule` column.
     ///
     /// ```
     /// use mistarr_core::hash::HeaderRule;
-    /// assert_eq!(HeaderRule::from_name("ines"), HeaderRule::Ines);
-    /// assert_eq!(HeaderRule::from_name("none"), HeaderRule::None);
-    /// assert_eq!(HeaderRule::from_name("other"), HeaderRule::None);
+    /// assert_eq!(HeaderRule::Ines.as_str(), "ines");
+    /// assert_eq!("ines".parse(), Ok(HeaderRule::Ines));
+    /// assert!("other".parse::<HeaderRule>().is_err());
     /// ```
     #[must_use]
-    pub fn from_name(name: &str) -> Self {
-        match name {
-            "ines" => Self::Ines,
-            "smc" => Self::Smc,
-            "a78" => Self::A78,
-            "lnx" => Self::Lnx,
-            "n64" => Self::N64,
-            _ => Self::None,
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Ines => "ines",
+            Self::Smc => "smc",
+            Self::A78 => "a78",
+            Self::Lnx => "lnx",
+            Self::N64 => "n64",
         }
+    }
+
+    /// Whether a copier header is present in a file of `size` bytes: the size is
+    /// a whole number of KiB plus [`COPIER_HEADER_LEN`].
+    ///
+    /// ```
+    /// use mistarr_core::hash::HeaderRule;
+    /// assert!(HeaderRule::smc_applies(2048 + 512));
+    /// assert!(!HeaderRule::smc_applies(2048));
+    /// ```
+    #[must_use]
+    pub fn smc_applies(size: u64) -> bool {
+        size % 1024 == COPIER_HEADER_LEN as u64
     }
 
     /// Whether the rule drops a header a headered DAT would include in its hashes.
@@ -75,8 +101,8 @@ impl HeaderRule {
     #[must_use]
     pub fn header_len(self) -> u64 {
         match self {
-            Self::Ines => INES_HEADER as u64,
-            Self::Smc => SMC_HEADER as u64,
+            Self::Ines => INES_HEADER_LEN as u64,
+            Self::Smc => COPIER_HEADER_LEN as u64,
             Self::A78 => A78_HEADER as u64,
             Self::Lnx => LNX_HEADER as u64,
             Self::None | Self::N64 => 0,
@@ -84,10 +110,74 @@ impl HeaderRule {
     }
 }
 
-const INES_HEADER: usize = 16;
-const SMC_HEADER: usize = 512;
+/// A name that is not a [`HeaderRule`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown header rule {0:?}")]
+pub struct UnknownHeaderRule(pub String);
+
+impl FromStr for HeaderRule {
+    type Err = UnknownHeaderRule;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|rule| rule.as_str() == s)
+            .ok_or_else(|| UnknownHeaderRule(s.to_owned()))
+    }
+}
+
+impl Serialize for HeaderRule {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for HeaderRule {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(deserializer)?;
+        name.parse().map_err(de::Error::custom)
+    }
+}
+
+/// The magic an iNES header starts with.
+pub const INES_MAGIC: &[u8; 4] = b"NES\x1a";
+/// Bytes in an iNES header.
+pub const INES_HEADER_LEN: usize = 16;
+/// Bytes in a copier header, as SNES dumps carry.
+pub const COPIER_HEADER_LEN: usize = 512;
 const A78_HEADER: usize = 128;
 const LNX_HEADER: usize = 64;
+
+/// Byte order of an N64 image, told apart by its first four bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteOrder {
+    /// Native order, conventionally `.z64`.
+    BigEndian,
+    /// 16-bit words swapped, conventionally `.v64`.
+    ByteSwapped,
+    /// 32-bit words reversed, conventionally `.n64`.
+    LittleEndian,
+}
+
+impl ByteOrder {
+    /// Detects the byte order from the start of an image; `None` when the first
+    /// four bytes match no order.
+    ///
+    /// ```
+    /// use mistarr_core::hash::ByteOrder;
+    /// assert_eq!(ByteOrder::detect(&[0x80, 0x37, 0x12, 0x40]), Some(ByteOrder::BigEndian));
+    /// assert_eq!(ByteOrder::detect(b"NES\x1a"), None);
+    /// ```
+    #[must_use]
+    pub fn detect(head: &[u8]) -> Option<Self> {
+        match head.get(..4)? {
+            [0x80, 0x37, 0x12, 0x40] => Some(Self::BigEndian),
+            [0x37, 0x80, 0x40, 0x12] => Some(Self::ByteSwapped),
+            [0x40, 0x12, 0x37, 0x80] => Some(Self::LittleEndian),
+            _ => None,
+        }
+    }
+}
 
 /// Error reading a zip archive's central directory or one of its members.
 #[derive(Debug, thiserror::Error)]
@@ -146,16 +236,6 @@ impl Hashers {
     }
 }
 
-pub(crate) fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write as _;
-    bytes
-        .iter()
-        .fold(String::with_capacity(bytes.len() * 2), |mut s, b| {
-            let _ = write!(s, "{b:02x}");
-            s
-        })
-}
-
 /// Computes CRC32, MD5 and SHA1 in one streaming pass, applying `rule` to
 /// the byte stream first. Never buffers more than a small header probe.
 ///
@@ -182,7 +262,7 @@ pub fn hash_reader<R: Read>(r: R, rule: HeaderRule, size_hint: Option<u64>) -> i
 /// `docs/VERIFICATION.md` "Hashing".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderForms {
-    /// The content after the rule: header stripped, byte order normalised.
+    /// The content after the rule: header stripped, byte order normalized.
     pub content: HashSet,
     /// The whole payload, header included, when a stripping rule found and
     /// stripped a header; `None` when `content` already is the whole payload
@@ -252,7 +332,7 @@ fn hash_under<R: Read>(
 }
 
 /// Bytes a stripping rule reads to recognise its header.
-fn probe_len(rule: HeaderRule) -> usize {
+fn probe_len(rule: HeaderRule) -> u64 {
     match rule {
         HeaderRule::A78 => 10,
         _ => 4,
@@ -262,7 +342,7 @@ fn probe_len(rule: HeaderRule) -> usize {
 /// Whether `head`, a payload's first bytes, starts with the header `rule` strips.
 fn header_found(rule: HeaderRule, head: &[u8]) -> bool {
     match rule {
-        HeaderRule::Ines => head.starts_with(b"NES\x1a"),
+        HeaderRule::Ines => head.starts_with(INES_MAGIC),
         HeaderRule::A78 => head.get(1..10) == Some(&b"ATARI7800"[..]),
         HeaderRule::Lnx => head.starts_with(b"LYNX"),
         _ => false,
@@ -283,31 +363,16 @@ fn hash_stream<R: Read>(mut r: R, prefix: &[u8]) -> io::Result<HashSet> {
     Ok(h.finish())
 }
 
-fn read_probe<R: Read>(r: &mut R, len: usize) -> io::Result<Vec<u8>> {
-    let mut buf = vec![0u8; len];
-    let mut read = 0;
-    while read < len {
-        let n = r.read(&mut buf[read..])?;
-        if n == 0 {
-            break;
-        }
-        read += n;
-    }
-    buf.truncate(read);
+/// Up to `len` bytes from the start of `r`, fewer only when it ends first.
+fn read_probe<R: Read>(r: &mut R, len: u64) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    Read::take(&mut *r, len).read_to_end(&mut buf)?;
     Ok(buf)
 }
 
-fn discard<R: Read>(r: &mut R, mut n: usize) -> io::Result<()> {
-    let mut buf = [0u8; 4096];
-    while n > 0 {
-        let want = n.min(buf.len());
-        let read = r.read(&mut buf[..want])?;
-        if read == 0 {
-            break;
-        }
-        n -= read;
-    }
-    Ok(())
+/// Skips up to `n` bytes of `r`.
+fn discard<R: Read>(r: &mut R, n: u64) -> io::Result<()> {
+    io::copy(&mut Read::take(&mut *r, n), &mut io::sink()).map(drop)
 }
 
 fn hash_header_forms<R: Read>(mut r: R, rule: HeaderRule, both: bool) -> io::Result<HeaderForms> {
@@ -321,9 +386,7 @@ fn hash_header_forms<R: Read>(mut r: R, rule: HeaderRule, both: bool) -> io::Res
     }
     let header = rule.header_len();
     if !both {
-        // Every header is longer than its probe, and at most 128 bytes.
-        #[allow(clippy::cast_possible_truncation)]
-        discard(&mut r, header as usize - probe.len())?;
+        discard(&mut r, header.saturating_sub(probe.len() as u64))?;
         return hash_stream(r, &[]).map(content_only);
     }
     let mut dual = Skipping::new(header);
@@ -381,10 +444,10 @@ impl Skipping {
 }
 
 fn hash_smc<R: Read>(mut r: R, size_hint: Option<u64>) -> io::Result<HashSet> {
-    let header = SMC_HEADER as u64;
+    let header = COPIER_HEADER_LEN as u64;
     if let Some(size) = size_hint {
-        if size % 1024 == header {
-            discard(&mut r, SMC_HEADER)?;
+        if HeaderRule::smc_applies(size) {
+            discard(&mut r, header)?;
         }
         return hash_stream(r, &[]);
     }
@@ -401,39 +464,23 @@ fn hash_smc<R: Read>(mut r: R, size_hint: Option<u64>) -> io::Result<HashSet> {
     }
     let total = dual.pos;
     let (whole, skipped) = dual.finish();
-    Ok(if total % 1024 == header {
+    Ok(if HeaderRule::smc_applies(total) {
         skipped
     } else {
         whole
     })
 }
 
-#[derive(Clone, Copy)]
-enum N64Order {
-    Big,
-    Swap16,
-    Swap32,
-}
-
-fn n64_variant(probe: &[u8]) -> N64Order {
-    match probe {
-        [0x37, 0x80, 0x40, 0x12] => N64Order::Swap16,
-        [0x40, 0x12, 0x37, 0x80] => N64Order::Swap32,
-        // Big-endian z64 magic, and anything unrecognised, pass through unchanged.
-        _ => N64Order::Big,
-    }
-}
-
-fn swap_into(data: &[u8], order: N64Order, out: &mut [u8]) {
+fn swap_into(data: &[u8], order: ByteOrder, out: &mut [u8]) {
     out.copy_from_slice(data);
     match order {
-        N64Order::Big => {}
-        N64Order::Swap16 => {
+        ByteOrder::BigEndian => {}
+        ByteOrder::ByteSwapped => {
             for pair in out.as_chunks_mut::<2>().0 {
                 pair.swap(0, 1);
             }
         }
-        N64Order::Swap32 => {
+        ByteOrder::LittleEndian => {
             for quad in out.as_chunks_mut::<4>().0 {
                 quad.swap(0, 3);
                 quad.swap(1, 2);
@@ -444,14 +491,12 @@ fn swap_into(data: &[u8], order: N64Order, out: &mut [u8]) {
 
 fn hash_n64<R: Read>(mut r: R) -> io::Result<HashSet> {
     let probe = read_probe(&mut r, 4)?;
-    let order = n64_variant(&probe);
-    if matches!(order, N64Order::Big) {
-        return hash_stream(r, &probe);
-    }
-    let group = if matches!(order, N64Order::Swap16) {
-        2
-    } else {
-        4
+    // Big-endian images, and anything unrecognised, pass through unchanged.
+    let order = ByteOrder::detect(&probe).unwrap_or(ByteOrder::BigEndian);
+    let group = match order {
+        ByteOrder::BigEndian => return hash_stream(r, &probe),
+        ByteOrder::ByteSwapped => 2,
+        ByteOrder::LittleEndian => 4,
     };
     let mut h = Hashers::new();
     let mut carry = probe;
@@ -611,12 +656,7 @@ pub fn zip_member_content_crc<R: Read + Seek>(
     let whole = u32::from_str_radix(&member.crc32, 16)
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "member CRC32 is not hex"))?;
     let mut archive = zip::ZipArchive::new(r)?;
-    // At most 128 bytes, so the length always fits in usize.
-    #[allow(clippy::cast_possible_truncation)]
-    let head = read_probe(
-        &mut archive.by_name(&member.name)?,
-        rule.header_len() as usize,
-    )?;
+    let head = read_probe(&mut archive.by_name(&member.name)?, rule.header_len())?;
     if !header_found(rule, &head) || (head.len() as u64) < rule.header_len() {
         return Ok(None);
     }
@@ -681,9 +721,59 @@ mod tests {
             ("lnx", HeaderRule::Lnx, 64),
             ("n64", HeaderRule::N64, 0),
         ] {
-            assert_eq!(HeaderRule::from_name(name), rule);
+            assert_eq!(name.parse(), Ok(rule));
+            assert_eq!(rule.as_str(), name);
             assert_eq!(rule.header_len(), len);
+            let json = serde_json::to_string(&rule).expect("json");
+            assert_eq!(json, format!("\"{name}\""));
+            assert_eq!(
+                serde_json::from_str::<HeaderRule>(&json).expect("rule"),
+                rule
+            );
         }
+        assert_eq!(HeaderRule::ALL.len(), 6);
+        for unknown in ["", "INES", "other"] {
+            assert_eq!(
+                unknown.parse::<HeaderRule>(),
+                Err(UnknownHeaderRule(unknown.to_owned()))
+            );
+        }
+        assert!(serde_json::from_str::<HeaderRule>("\"other\"").is_err());
+    }
+
+    #[test]
+    fn smc_applies_to_a_kib_multiple_plus_a_copier_header() {
+        assert!(HeaderRule::smc_applies(512));
+        assert!(HeaderRule::smc_applies(4 * 1024 + 512));
+        assert!(!HeaderRule::smc_applies(0));
+        assert!(!HeaderRule::smc_applies(4 * 1024 + 511));
+    }
+
+    #[test]
+    fn byte_order_reads_the_first_four_bytes() {
+        let cases: [(&[u8], Option<ByteOrder>); 5] = [
+            (&[0x80, 0x37, 0x12, 0x40, 9], Some(ByteOrder::BigEndian)),
+            (&[0x37, 0x80, 0x40, 0x12], Some(ByteOrder::ByteSwapped)),
+            (&[0x40, 0x12, 0x37, 0x80], Some(ByteOrder::LittleEndian)),
+            (&[0x80, 0x37, 0x12], None),
+            (&INES_MAGIC[..], None),
+        ];
+        for (head, order) in cases {
+            assert_eq!(ByteOrder::detect(head), order, "{head:?}");
+        }
+    }
+
+    #[test]
+    fn probe_and_discard_stop_at_the_end() {
+        let mut r = Chunked {
+            data: b"abcdef",
+            chunk: 1,
+        };
+        assert_eq!(read_probe(&mut r, 2).expect("probe"), b"ab");
+        discard(&mut r, 3).expect("discard");
+        assert_eq!(read_probe(&mut r, 9).expect("probe"), b"f");
+        discard(&mut r, 9).expect("discard");
+        assert!(read_probe(&mut r, 1).expect("probe").is_empty());
     }
 
     #[test]
@@ -1016,7 +1106,7 @@ mod tests {
     fn synthetic(rule: HeaderRule, headered: bool, len: usize) -> Vec<u8> {
         let mut data: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
         let magic: &[u8] = match rule {
-            HeaderRule::Ines => b"NES\x1a",
+            HeaderRule::Ines => INES_MAGIC,
             HeaderRule::A78 => b"\x01ATARI7800",
             _ => b"LYNX",
         };

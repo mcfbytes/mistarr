@@ -409,9 +409,8 @@ fn hex(hash: [u8; 20]) -> String {
 }
 
 fn infohash(metainfo: &[u8]) -> [u8; 20] {
-    mistarr_sources::torrent::parse_torrent(metainfo)
-        .expect("parse")
-        .infohash
+    let meta = mistarr_sources::torrent::parse_torrent(metainfo).expect("parse");
+    *meta.infohash.as_bytes()
 }
 
 /// Adds `metainfo` to the seeder with every file wanted and waits until it seeds.

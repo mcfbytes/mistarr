@@ -11,8 +11,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
+use mistarr_core::bencode::{self, Value};
 use mistarr_core::hash::Md5Stream;
-use mistarr_sources::bencode::{self, Value};
 use serde_json::{json, Value as Json};
 
 /// Peak RSS budget during scan or import, `docs/ARCHITECTURE.md` "Resource budgets".

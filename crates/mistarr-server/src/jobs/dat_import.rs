@@ -932,7 +932,9 @@ fn logiqx_identity(req: &Request, member: &str, header: &DatHeader) -> Identity 
 fn export_options(platform: Option<&str>, parents: HashMap<String, String>) -> ExportOptions {
     let row = platform.and_then(mistarr_mister::platforms::by_id);
     ExportOptions {
-        header_rule: row.map_or(HeaderRule::None, |p| HeaderRule::from_name(p.header_rule)),
+        header_rule: row.map_or(HeaderRule::None, |p| {
+            p.header_rule.parse().unwrap_or_default()
+        }),
         extension: row
             .and_then(|p| {
                 p.extension_written

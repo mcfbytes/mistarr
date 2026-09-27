@@ -178,7 +178,7 @@ impl<W: Write> Out<W> {
 }
 
 /// Whether `c` is written as a reference: markup, and the line breaks and tabs the
-/// parser would otherwise normalise, in attributes all three and in text `\r`.
+/// parser would otherwise normalize, in attributes all three and in text `\r`.
 fn needs_ref(c: char, attr: bool) -> bool {
     match c {
         '&' | '<' | '>' | '\r' => true,

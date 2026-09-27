@@ -172,7 +172,11 @@ impl WholeHashes {
     /// ```
     #[must_use]
     pub fn whole_file(rule: &str, whole: &mistarr_core::HashSet) -> Self {
-        if !mistarr_core::hash::HeaderRule::from_name(rule).strips_header() {
+        if !rule
+            .parse::<mistarr_core::hash::HeaderRule>()
+            .unwrap_or_default()
+            .strips_header()
+        {
             return Self::default();
         }
         Self {

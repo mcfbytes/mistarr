@@ -720,7 +720,11 @@ pub(crate) fn stored_match(
     }
     let hash = |h: &Option<String>| h.clone().unwrap_or_default();
     let (sha1, md5, crc32) = (hash(&f.sha1), hash(&f.md5), hash(&f.crc32));
-    let rule = HeaderRule::from_name(f.header_rule.as_deref().unwrap_or_default());
+    let rule = f
+        .header_rule
+        .as_deref()
+        .and_then(|n| n.parse::<HeaderRule>().ok())
+        .unwrap_or_default();
     let header = i64::try_from(rule.header_len()).unwrap_or(0);
     let w = &f.whole;
     let has_whole = w.sha1.is_some() || w.md5.is_some();
@@ -819,7 +823,11 @@ fn known(
 /// Whether a fully hashed row was hashed under a rule that strips a header but holds
 /// the stripped form alone, with no whole-file hashes to match a headered DAT by.
 fn lacks_whole(row: &files::FileRow) -> bool {
-    let rule = HeaderRule::from_name(row.header_rule.as_deref().unwrap_or_default());
+    let rule = row
+        .header_rule
+        .as_deref()
+        .and_then(|n| n.parse::<HeaderRule>().ok())
+        .unwrap_or_default();
     rule.strips_header()
         && (row.sha1.is_some() || row.md5.is_some())
         && row.whole.sha1.is_none()

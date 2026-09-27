@@ -6,7 +6,6 @@ mod common;
 use std::io::Cursor;
 
 use common::{boot, eventually, get, request, Booted};
-use mistarr_clients::InfoHash;
 use mistarr_core::hash::{hash_reader, HeaderRule};
 use mistarr_server::db::downloads::DownloadId;
 use mistarr_server::events::EventKind;
@@ -278,7 +277,7 @@ async fn both_wanted(b: &Booted) -> Wanted {
     let staged = config
         .paths
         .staging()
-        .join(InfoHash::from_bytes(meta.infohash).to_string())
+        .join(meta.infohash.to_string())
         .join(TORRENT)
         .join("nova.nes");
     std::fs::create_dir_all(staged.parent().expect("parent")).expect("mkdir");

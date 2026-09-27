@@ -1150,7 +1150,7 @@ mod tests {
         let c = conn();
         let tracks = [track(1), track(2)];
         let id = ChdId {
-            sha1: core::Sha1Digest([4; 20]),
+            sha1: mistarr_core::Sha1::from_bytes([4; 20]),
             size: 1000,
         };
         rows::store_tracks(&c, &id, &tracks).expect("cache");

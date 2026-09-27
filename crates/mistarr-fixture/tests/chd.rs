@@ -434,8 +434,8 @@ impl Read for Fence<'_> {
 fn header_only_reads_124_bytes() {
     let (bytes, w) = to_vec(&small("fence")).expect("write");
     let h = chd::read_header(Fence(&bytes, 0)).expect("header");
-    assert_eq!(h.id(w.size).sha1.0, w.sha1);
-    assert_eq!(h.raw_sha1.0, w.raw_sha1);
+    assert_eq!(h.id(w.size).sha1.as_bytes(), &w.sha1);
+    assert_eq!(h.raw_sha1.as_bytes(), &w.raw_sha1);
 }
 
 #[test]

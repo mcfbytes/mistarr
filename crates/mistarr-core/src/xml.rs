@@ -4,6 +4,10 @@ use std::borrow::Cow;
 use std::io::{self, BufRead, Read};
 use std::str::Utf8Error;
 
+use quick_xml::escape::resolve_predefined_entity;
+use quick_xml::events::{BytesRef, BytesStart, Event};
+use quick_xml::{Reader, XmlVersion};
+
 /// First code point of the escapes: byte `b` becomes `ESCAPE_BASE + b`, all in plane 16.
 const ESCAPE_BASE: u32 = 0x10_FF00;
 /// UTF-8 length of one escape.
@@ -307,6 +311,162 @@ impl<R: BufRead> Read for Capped<R> {
     }
 }
 
+/// A character or predefined entity reference as text; an unknown entity is kept as written.
+///
+/// ```
+/// use quick_xml::events::BytesRef;
+/// use mistarr_core::xml::resolve_ref;
+/// assert_eq!(resolve_ref(&BytesRef::new("amp"))?, "&");
+/// assert_eq!(resolve_ref(&BytesRef::new("#x41"))?, "A");
+/// assert_eq!(resolve_ref(&BytesRef::new("custom"))?, "&custom;");
+/// # Ok::<(), quick_xml::Error>(())
+/// ```
+///
+/// # Errors
+/// A malformed character reference, or a name read from bytes that are not UTF-8.
+pub fn resolve_ref(r: &BytesRef<'_>) -> Result<String, quick_xml::Error> {
+    if let Some(c) = r.resolve_char_ref()? {
+        return Ok(c.to_string());
+    }
+    let name: &str = r;
+    check_utf8(name)?;
+    Ok(resolve_predefined_entity(name).map_or_else(|| format!("&{name};"), str::to_owned))
+}
+
+/// The value of the attribute whose local name is `key`, with references resolved and
+/// whitespace normalized as XML 1.0 says; `None` when the element has no such attribute.
+///
+/// ```
+/// use quick_xml::events::BytesStart;
+/// use mistarr_core::xml::attr_value;
+/// let e = BytesStart::from_content(r#"rom name="a &amp; b"  size="4""#, 3);
+/// assert_eq!(attr_value(&e, "name")?.as_deref(), Some("a & b"));
+/// assert_eq!(attr_value(&e, "crc")?, None);
+/// # Ok::<(), quick_xml::Error>(())
+/// ```
+///
+/// # Errors
+/// A malformed attribute, or a value read from bytes that are not UTF-8.
+pub fn attr_value(e: &BytesStart<'_>, key: &str) -> Result<Option<String>, quick_xml::Error> {
+    for attr in e.attributes() {
+        let attr = attr?;
+        if attr.key.local_name().as_ref() == key {
+            let value = attr.normalized_value(XmlVersion::Implicit1_0)?;
+            check_utf8(&value)?;
+            return Ok(Some(value.into_owned()));
+        }
+    }
+    Ok(None)
+}
+
+/// Why a [`CappedReader`] stopped.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum ReadError {
+    /// The XML is malformed or could not be read.
+    #[error("invalid XML at byte {position}: {source}")]
+    Xml {
+        /// Byte offset where the error was detected.
+        position: u64,
+        /// Underlying parser error.
+        source: quick_xml::Error,
+    },
+    /// One event, a tag with its attributes, a text run or a comment, is over the event cap.
+    #[error("an XML event at byte {position} is too large")]
+    EventTooLarge {
+        /// Byte offset where the event starts.
+        position: u64,
+    },
+    /// Elements nest deeper than the depth cap.
+    #[error("elements nest too deep at byte {position}")]
+    TooDeep {
+        /// Byte offset of the element that went too deep.
+        position: u64,
+    },
+}
+
+/// An XML reader over input that may hold invalid UTF-8 (see [`EscapeInvalid`]) which
+/// never buffers one event past its event cap nor nests past its depth cap.
+///
+/// ```
+/// use quick_xml::events::Event;
+/// use mistarr_core::xml::{CappedReader, ReadError};
+/// let mut r = CappedReader::new(&b"<a><b/></a>"[..], 64, 1);
+/// assert!(matches!(r.read_event()?, Event::Start(_)));
+/// assert!(matches!(r.read_event()?, Event::Empty(_)));
+/// assert_eq!(r.position(), 7);
+/// let mut deep = CappedReader::new(&b"<a><b>"[..], 64, 1);
+/// deep.read_event()?;
+/// assert!(matches!(deep.read_event(), Err(ReadError::TooDeep { position: 3 })));
+/// # Ok::<(), ReadError>(())
+/// ```
+pub struct CappedReader<R: BufRead> {
+    reader: Reader<Capped<EscapeInvalid<R>>>,
+    buf: Vec<u8>,
+    event_cap: u64,
+    depth_cap: usize,
+    depth: usize,
+}
+
+impl<R: BufRead> CappedReader<R> {
+    /// Wraps `reader`, allowing each event at most `event_cap` bytes and elements at
+    /// most `depth_cap` levels deep, the root at level 1.
+    #[must_use]
+    pub fn new(reader: R, event_cap: u64, depth_cap: usize) -> Self {
+        Self {
+            reader: Reader::from_reader(Capped::new(EscapeInvalid::new(reader))),
+            buf: Vec::new(),
+            event_cap,
+            depth_cap,
+            depth: 0,
+        }
+    }
+
+    /// Bytes of the input behind everything read so far.
+    #[must_use]
+    pub fn position(&self) -> u64 {
+        self.reader.get_ref().get_ref().position()
+    }
+
+    /// A parser error at the current position.
+    #[must_use]
+    pub fn error(&self, source: quick_xml::Error) -> ReadError {
+        ReadError::Xml {
+            position: self.position(),
+            source,
+        }
+    }
+
+    /// The next event.
+    ///
+    /// # Errors
+    /// [`ReadError::EventTooLarge`] or [`ReadError::TooDeep`] past a cap, else
+    /// [`ReadError::Xml`] for malformed XML or a failed read.
+    pub fn read_event(&mut self) -> Result<Event<'static>, ReadError> {
+        self.buf.clear();
+        let start = self.position();
+        self.reader.get_mut().arm(self.event_cap);
+        let event = match self.reader.read_event_into(&mut self.buf) {
+            Ok(event) => event.into_owned(),
+            Err(_) if self.reader.get_ref().over() => {
+                return Err(ReadError::EventTooLarge { position: start })
+            }
+            Err(err) => return Err(self.error(err)),
+        };
+        match event {
+            Event::Start(_) => {
+                self.depth += 1;
+                if self.depth > self.depth_cap {
+                    return Err(ReadError::TooDeep { position: start });
+                }
+            }
+            Event::End(_) => self.depth = self.depth.saturating_sub(1),
+            _ => {}
+        }
+        Ok(event)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -355,7 +515,67 @@ mod tests {
         assert!(check_utf8("\u{10ff7f}").is_ok());
     }
 
+    #[test]
+    fn refs_resolve_and_bad_ones_fail() {
+        assert_eq!(resolve_ref(&BytesRef::new("lt")).unwrap(), "<");
+        assert_eq!(resolve_ref(&BytesRef::new("#233")).unwrap(), "é");
+        assert_eq!(resolve_ref(&BytesRef::new("unknown")).unwrap(), "&unknown;");
+        assert!(resolve_ref(&BytesRef::new("#xZZ")).is_err());
+        assert!(resolve_ref(&BytesRef::new("a\u{10ffe9}")).is_err());
+    }
+
+    #[test]
+    fn attr_values_match_local_names_and_check_utf8() {
+        let e = BytesStart::from_content("rom x:crc=\" 0A \" name=\"a\u{10ffe9}\"", 3);
+        assert_eq!(attr_value(&e, "crc").unwrap().as_deref(), Some(" 0A "));
+        assert!(attr_value(&e, "name").is_err());
+        assert_eq!(attr_value(&e, "size").unwrap(), None);
+        let bad = BytesStart::from_content("rom name=unquoted", 3);
+        assert!(attr_value(&bad, "name").is_err());
+    }
+
+    #[test]
+    fn capped_reader_enforces_both_caps_and_reports_positions() {
+        let mut r = CappedReader::new(&b"<a><b>text</b></a>"[..], 16, 2);
+        let mut kinds = Vec::new();
+        loop {
+            match r.read_event().unwrap() {
+                Event::Eof => break,
+                e => kinds.push(std::mem::discriminant(&e)),
+            }
+        }
+        assert_eq!(kinds.len(), 5);
+        assert_eq!(r.position(), 18);
+
+        let mut big = CappedReader::new(&b"<a>0123456789abcdef</a>"[..], 8, 4);
+        big.read_event().unwrap();
+        assert!(matches!(
+            big.read_event(),
+            Err(ReadError::EventTooLarge { position: 3 })
+        ));
+
+        let mut bad = CappedReader::new(&b"<a></b>"[..], 64, 4);
+        bad.read_event().unwrap();
+        let err = bad.read_event().unwrap_err();
+        assert!(matches!(err, ReadError::Xml { .. }), "{err}");
+        let made = bad.error(quick_xml::Error::from(
+            check_utf8("\u{10ffe9}").unwrap_err(),
+        ));
+        assert!(matches!(made, ReadError::Xml { position, .. } if position == bad.position()));
+    }
+
     proptest! {
+        #[test]
+        fn capped_reader_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..128), cap in 1u64..32) {
+            let mut r = CappedReader::new(&bytes[..], cap, 3);
+            for _ in 0..256 {
+                match r.read_event() {
+                    Ok(Event::Eof) | Err(_) => break,
+                    Ok(_) => {}
+                }
+            }
+        }
+
         #[test]
         fn restores_input_at_any_capacity(
             bytes in prop::collection::vec(any::<u8>(), 0..64),

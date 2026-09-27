@@ -792,7 +792,7 @@ fn leaf(name: &str) -> &str {
 }
 
 /// Fills `roms.match_name` and `roms.match_base` where missing, with the keys
-/// [`binding::normalise_name`] and [`binding::base_name`] give. Returns rows keyed.
+/// [`binding::normalize_name`] and [`binding::base_name`] give. Returns rows keyed.
 ///
 /// # Errors
 ///
@@ -822,8 +822,8 @@ pub fn key_batch(conn: &Connection) -> Result<usize> {
         .query_map([KEY_BATCH], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     for (id, name) in &batch {
-        let normalised = binding::normalise_name(leaf(name));
-        update.execute(params![id, normalised, binding::base_name(&normalised)])?;
+        let normalized = binding::normalize_name(leaf(name));
+        update.execute(params![id, normalized, binding::base_name(&normalized)])?;
     }
     Ok(batch.len())
 }
@@ -855,7 +855,7 @@ impl<'c> SqlDatIndex<'c> {
 }
 
 impl DatIndex for SqlDatIndex<'_> {
-    fn by_normalised_name(&self, name: &str) -> Vec<(PlatformId, RomRef)> {
+    fn by_normalized_name(&self, name: &str) -> Vec<(PlatformId, RomRef)> {
         self.lookup(
             "SELECT t.platform_id, r.id FROM roms r JOIN titles t ON t.id = r.title_id
              WHERE r.match_name = ?1 AND t.retired = 0
@@ -1104,7 +1104,7 @@ mod tests {
         assert_eq!(refresh_match_keys(&c).expect("keys"), 0);
         let index = SqlDatIndex::new(&c);
         assert_eq!(
-            index.by_normalised_name("example quest (usa)"),
+            index.by_normalized_name("example quest (usa)"),
             [(nes(), RomRef(a))]
         );
         assert_eq!(
@@ -1112,7 +1112,7 @@ mod tests {
             [(PlatformId("snes".into()), RomRef(b))]
         );
         assert!(index.by_base_name_and_size("other tale", 33).is_empty());
-        assert!(index.by_normalised_name("boot code (world)").is_empty());
+        assert!(index.by_normalized_name("boot code (world)").is_empty());
     }
 
     #[test]

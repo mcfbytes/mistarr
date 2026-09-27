@@ -7,7 +7,6 @@ use std::time::Duration;
 use common::{boot_with, config_in, eventually, get, request, Booted};
 use mistarr_clients::fake::{FakeResponse, FakeScgiServer, FakeServer, ScgiReply};
 use mistarr_clients::xmlrpc::Value as Xml;
-use mistarr_clients::InfoHash;
 use mistarr_server::config::ClientChoice;
 use mistarr_server::db::downloads::{self as rows, DownloadState};
 use mistarr_server::db::sources::fixtures::seed_rom;
@@ -54,7 +53,7 @@ fn set_bytes() -> Vec<u8> {
 
 fn set_hash() -> String {
     let meta = mistarr_sources::torrent::parse_torrent(&set_bytes()).expect("parse");
-    InfoHash::from_bytes(meta.infohash).to_string()
+    meta.infohash.to_string()
 }
 
 /// Seeds the three roms of [`FILES`] and returns their title ids by file index 0, 2, 3.
