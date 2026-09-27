@@ -1744,8 +1744,12 @@ async fn zipped_nes_files_matched_by_a_headerless_dat_count_as_have() {
             .expect("row");
         assert_eq!(row.state, FileState::Verified, "{name}");
     }
-    let counts = platform_counts(addr, "nes").await;
-    assert_eq!((&counts["have"], &counts["titles"]), (&2.into(), &2.into()));
+    // The platform counts can trail the scan job's final progress.
+    eventually("two NES titles counted as have", || async {
+        let counts = platform_counts(addr, "nes").await;
+        (&counts["have"], &counts["titles"]) == (&2.into(), &2.into())
+    })
+    .await;
     let r = request(
         addr,
         "GET",
