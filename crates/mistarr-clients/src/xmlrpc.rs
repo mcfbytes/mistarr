@@ -1,4 +1,5 @@
 //! Minimal XML-RPC encoder and decoder for rtorrent; see `docs/DOWNLOAD-CLIENTS.md` "rtorrent".
+//! Public only with `test-support`, which adds the server side for the fake rtorrent.
 
 use std::fmt::Write as _;
 
@@ -163,6 +164,7 @@ impl Fault {
     /// let v = Fault { code: 1, message: "m".into() }.to_value();
     /// assert_eq!(v.member("faultCode").and_then(|c| c.as_i64()), Some(1));
     /// ```
+    #[cfg(any(test, feature = "test-support"))]
     #[must_use]
     pub fn to_value(&self) -> Value {
         Value::Struct(vec![
@@ -226,6 +228,7 @@ pub fn encode_call(method: &str, params: &[Value]) -> Vec<u8> {
 /// assert_eq!(decode_response(&xml)?, MethodResponse::Success(Value::Int(7)));
 /// # Ok::<(), mistarr_clients::xmlrpc::DecodeError>(())
 /// ```
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn encode_response(value: &Value) -> Vec<u8> {
     let mut out = String::from("<?xml version=\"1.0\"?><methodResponse><params><param>");
@@ -242,6 +245,7 @@ pub fn encode_response(value: &Value) -> Vec<u8> {
 /// assert_eq!(decode_response(&encode_fault(&f))?, MethodResponse::Fault(f));
 /// # Ok::<(), mistarr_clients::xmlrpc::DecodeError>(())
 /// ```
+#[cfg(any(test, feature = "test-support"))]
 #[must_use]
 pub fn encode_fault(fault: &Fault) -> Vec<u8> {
     let mut out = String::from("<?xml version=\"1.0\"?><methodResponse><fault>");
@@ -261,6 +265,7 @@ pub fn encode_fault(fault: &Fault) -> Vec<u8> {
 /// assert_eq!((m.as_str(), p), ("d.stop", vec![Value::from("AB")]));
 /// # Ok::<(), mistarr_clients::xmlrpc::DecodeError>(())
 /// ```
+#[cfg(any(test, feature = "test-support"))]
 pub fn decode_call(xml: &[u8]) -> Result<(String, Vec<Value>), DecodeError> {
     let mut p = Parser::new(xml);
     p.expect_open("methodCall")?;
@@ -582,6 +587,7 @@ fn bad_scalar(tag: &str, text: &str) -> DecodeError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     fn every_type() -> Value {
         Value::Struct(vec![
@@ -732,5 +738,44 @@ mod tests {
         assert_eq!(Value::from(false).as_i64(), Some(0));
         assert_eq!(Value::from(vec![]).as_array(), Some(&[][..]));
         assert_eq!(Value::Int(1).member("a"), None);
+    }
+
+    fn value() -> impl Strategy<Value = Value> {
+        let leaf = prop_oneof![
+            any::<i64>().prop_map(Value::Int),
+            any::<bool>().prop_map(Value::Bool),
+            "[ -~]{0,12}".prop_map(Value::String),
+            (-1e9f64..1e9).prop_map(Value::Double),
+            prop::collection::vec(any::<u8>(), 0..16).prop_map(Value::Base64),
+        ];
+        leaf.prop_recursive(4, 32, 4, |inner| {
+            prop_oneof![
+                prop::collection::vec(inner.clone(), 0..4).prop_map(Value::Array),
+                prop::collection::vec(("[ -~]{0,6}", inner), 0..4).prop_map(Value::Struct),
+            ]
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn decoding_any_bytes_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..512)) {
+            let _ = decode_response(&bytes);
+            let _ = decode_call(&bytes);
+        }
+
+        #[test]
+        fn decoding_tag_soup_never_panics(
+            xml in "(<(methodResponse|params|param|value|fault|array|data|struct|member|name|string|i4|int|base64)>|</[a-zA-Z4]{1,14}>|[ -~]{0,4}){0,48}"
+        ) {
+            let _ = decode_response(xml.as_bytes());
+            let _ = decode_call(xml.as_bytes());
+        }
+
+        #[test]
+        fn responses_round_trip_and_survive_truncation(v in value(), cut in any::<prop::sample::Index>()) {
+            let xml = encode_response(&v);
+            prop_assert_eq!(decode_response(&xml), Ok(MethodResponse::Success(v)));
+            let _ = decode_response(&xml[..cut.index(xml.len())]);
+        }
     }
 }

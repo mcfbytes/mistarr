@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use super::*;
 use crate::fake::{FakeScgiServer, ScgiReply};
-use crate::metainfo::tests::synthetic_metainfo;
+use crate::testutil::{metainfo, synthetic_metainfo};
 use crate::PathMapping;
 
 type Call = (String, Vec<Value>);
@@ -14,7 +14,7 @@ fn hash(byte: u8) -> String {
 }
 
 fn id(byte: u8) -> ClientTorrentId {
-    ClientTorrentId::new(hash(byte))
+    ClientTorrentId::new(InfoHash::from_bytes([byte; 20]))
 }
 
 fn t(byte: u8) -> String {
@@ -86,9 +86,8 @@ async fn add_existing(fake: &FakeScgiServer, client: &Rtorrent, byte: u8, seed: 
     fake.push(ints(&[0, 1]));
     fake.push(ints(&[0]));
     fake.push(ok());
-    let magnet = format!("magnet:?xt=urn:btih:{}", hash(byte));
     let got = client
-        .add(TorrentSource::Magnet(magnet), Path::new("/s"), &[0], seed)
+        .add(crate::testutil::magnet(byte), Path::new("/s"), &[0], seed)
         .await
         .expect("add");
     assert_eq!(got, id(byte));
@@ -197,21 +196,21 @@ async fn probe_reads_version_and_frames_headers() {
 async fn add_loads_paused_then_prioritises_then_start() {
     let (fake, client) = setup().await;
     let meta = synthetic_metainfo(3);
-    let h = metainfo::info_hash(&meta).expect("hash");
+    let h = InfoHash::from_bytes([0xa1; 20]);
     let target = target(&h);
     for reply in [not_found(), ok(), ok(), ints(&[0, 0, 0]), ok(), ok()] {
         fake.push(reply);
     }
     let got = client
         .add(
-            TorrentSource::Metainfo(meta.clone()),
+            metainfo(3, 0xa1),
             Path::new("/media/fat/mistarr/staging/x"),
             &[1],
             SeedPolicy::None,
         )
         .await
         .expect("add");
-    assert_eq!(got.as_str(), h.to_string());
+    assert_eq!(got.infohash(), h);
     client.start(&got).await.expect("start");
     assert_eq!(
         fake.calls(),
@@ -245,7 +244,10 @@ async fn add_magnet_loads_normal_and_defers_selection() {
     }
     let got = client
         .add(
-            TorrentSource::Magnet(magnet.clone()),
+            TorrentSource::Magnet {
+                uri: magnet.clone(),
+                infohash: id(0xab).infohash(),
+            },
             Path::new("/s/x"),
             &[4],
             SeedPolicy::Client,
@@ -274,10 +276,9 @@ async fn add_existing_torrent_reapplies_selection_without_loading() {
     fake.push(ints(&[0, 2]));
     fake.push(ints(&[0, 0]));
     fake.push(ok());
-    let magnet = format!("magnet:?xt=urn:btih:{}", hash(1));
     client
         .add(
-            TorrentSource::Magnet(magnet),
+            crate::testutil::magnet(1),
             Path::new("/s"),
             &[0],
             SeedPolicy::None,
@@ -302,12 +303,7 @@ async fn add_rejected_by_rtorrent_is_a_protocol_error() {
         fake.push(reply);
     }
     let err = client
-        .add(
-            TorrentSource::Metainfo(synthetic_metainfo(1)),
-            Path::new("/s"),
-            &[],
-            SeedPolicy::None,
-        )
+        .add(metainfo(1, 1), Path::new("/s"), &[], SeedPolicy::None)
         .await
         .expect_err("not loaded");
     assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
@@ -328,12 +324,7 @@ async fn add_waits_for_a_load_that_lands_on_the_next_tick() {
         fake.push(reply);
     }
     client
-        .add(
-            TorrentSource::Metainfo(synthetic_metainfo(1)),
-            Path::new("/s"),
-            &[0],
-            SeedPolicy::Client,
-        )
+        .add(metainfo(1, 1), Path::new("/s"), &[0], SeedPolicy::Client)
         .await
         .expect("add");
     let methods = fake.methods();
@@ -348,12 +339,7 @@ async fn add_waits_for_a_load_that_lands_on_the_next_tick() {
 async fn add_checks_indices_and_sources_before_any_call() {
     let (fake, client) = setup().await;
     let err = client
-        .add(
-            TorrentSource::Metainfo(synthetic_metainfo(3)),
-            Path::new("/s"),
-            &[3],
-            SeedPolicy::None,
-        )
+        .add(metainfo(3, 1), Path::new("/s"), &[3], SeedPolicy::None)
         .await
         .expect_err("out of range");
     assert!(
@@ -366,24 +352,13 @@ async fn add_checks_indices_and_sources_before_any_call() {
         ),
         "{err:?}"
     );
-    for src in [
-        TorrentSource::Metainfo(b"not bencode".to_vec()),
-        TorrentSource::Magnet("magnet:?dn=nohash".into()),
-    ] {
-        let err = client
-            .add(src, Path::new("/s"), &[], SeedPolicy::None)
-            .await
-            .expect_err("rejected");
-        assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
-    }
     assert!(fake.requests().is_empty());
 }
 
 #[tokio::test]
 async fn priorities_are_chunked_at_500() {
     let (fake, client) = setup().await;
-    let meta = synthetic_metainfo(1201);
-    let target = target(&metainfo::info_hash(&meta).expect("hash"));
+    let target = t(0xa2);
     for reply in [not_found(), ok(), ok()] {
         fake.push(reply);
     }
@@ -393,7 +368,7 @@ async fn priorities_are_chunked_at_500() {
     fake.push(ok());
     client
         .add(
-            TorrentSource::Metainfo(meta),
+            metainfo(1201, 0xa2),
             Path::new("/s"),
             &[0, 1200],
             SeedPolicy::None,
@@ -472,9 +447,6 @@ async fn unknown_torrent_is_not_found() {
     let (fake, client) = setup().await;
     fake.push(not_found());
     let err = client.stop(&id(4)).await.expect_err("missing");
-    assert!(matches!(err, ClientError::NotFound), "{err:?}");
-    let bad = ClientTorrentId::new("not-a-hash");
-    let err = client.start(&bad).await.expect_err("malformed");
     assert!(matches!(err, ClientError::NotFound), "{err:?}");
     assert_eq!(fake.requests().len(), 1);
 }
@@ -972,36 +944,6 @@ fn recommended_rc_is_the_documented_rc() {
 }
 
 #[test]
-fn magnet_hashes_parse() {
-    let hex = format!(
-        "magnet:?dn=x&xt=urn:btih:{}",
-        hash(0xcd).to_ascii_uppercase()
-    );
-    assert_eq!(magnet_hash(&hex), Some(InfoHash::from_bytes([0xcd; 20])));
-    let zeros = format!("magnet:?xt=urn:btih:{}", "a".repeat(32));
-    assert_eq!(magnet_hash(&zeros), Some(InfoHash::from_bytes([0; 20])));
-    let ones = format!("magnet:?xt=URN:BTIH:{}", "7".repeat(32));
-    assert_eq!(magnet_hash(&ones), Some(InfoHash::from_bytes([0xff; 20])));
-    let encoded = format!("magnet:?dn=a%20b&xt=urn%3Abtih%3A{}", hash(0x5e));
-    assert_eq!(
-        magnet_hash(&encoded),
-        Some(InfoHash::from_bytes([0x5e; 20]))
-    );
-    let mixed = "magnet:?xt=urn:btih:AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIB";
-    assert_eq!(magnet_hash(mixed), Some(InfoHash::from_bytes([1; 20])));
-    for bad in [
-        "magnet:?xt=urn:btih:abc",
-        "magnet:?xt=urn:sha1:",
-        "magnet:?xt=urn%3Abtih%3",
-        "magnet:?xt=urn%ZZbtih",
-        "http://x/?xt=urn:btih:",
-        &format!("magnet:?xt=urn:btih:{}", "1".repeat(32)),
-    ] {
-        assert_eq!(magnet_hash(bad), None, "{bad}");
-    }
-}
-
-#[test]
 fn directory_command_quotes_the_path() {
     assert_eq!(directory_command("/s/a b"), "d.directory.set=\"/s/a b\"");
     assert_eq!(
@@ -1137,4 +1079,34 @@ async fn rtorrent_has_no_alternate_upload_rate() {
     assert_eq!(client.alt_up_limit().await.expect("alt"), None);
     client.set_alt_up_rate(0).await.expect("ignored");
     assert!(fake.calls().is_empty());
+}
+
+#[tokio::test]
+async fn add_maps_the_download_dir_to_the_remote_path() {
+    let fake = FakeScgiServer::start().await.expect("bind fake");
+    let map = RemotePathMap::new(vec![PathMapping::new(
+        "/srv/dl",
+        "/media/fat/mistarr/staging",
+    )]);
+    let client = Rtorrent::new(&fake.addr())
+        .expect("valid addr")
+        .with_path_map(map);
+    for reply in [not_found(), ok(), ok(), ints(&[1, 1])] {
+        fake.push(reply);
+    }
+    client
+        .add(
+            crate::testutil::magnet(0xc1),
+            Path::new("/media/fat/mistarr/staging/c1"),
+            &[],
+            SeedPolicy::None,
+        )
+        .await
+        .expect("add");
+    let calls = fake.calls();
+    assert_eq!(calls[1].1[2], v("d.directory.set=\"/srv/dl/c1\""));
+    assert_eq!(
+        calls[2],
+        call("d.directory.set", vec![v(&t(0xc1)), v("/srv/dl/c1")])
+    );
 }

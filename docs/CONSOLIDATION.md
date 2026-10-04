@@ -191,25 +191,26 @@ Merge order: 57, 58, 59, then 60, which touches the most server files.
 
 Opus · `mistarr-clients`, server callers · branch `wp-57-clients-core`
 
-- [ ] `metainfo.rs` and the clients' `sha1` dependency go.
+- [x] `metainfo.rs` and the clients' `sha1` dependency go.
   `TorrentSource::Metainfo { bytes, infohash, file_count }` and
   `TorrentSource::Magnet { uri, infohash }` are built by the server from the
   sources parse.
-- [ ] rtorrent's `magnet_hash`, `percent_decode` and `base32_hash` go;
+- [x] rtorrent's `magnet_hash`, `percent_decode` and `base32_hash` go;
   `fetch/url.rs` uses core's `percent_decode`.
-- [ ] `InfoHash` comes from core; `ClientTorrentId` wraps it, so rtorrent's
+- [x] `InfoHash` comes from core; `ClientTorrentId` wraps it, so rtorrent's
   `parse_id` and Transmission's lowercasing go.
-- [ ] `Wanted(BTreeSet<u32>)` with `from_slice` and `check(file_count)`
+- [x] `Wanted(BTreeSet<u32>)` with `from_slice` and `check(file_count)`
   replaces both `check_indices` and the per-call sets.
-- [ ] `ClientError::protocol(impl Display)` replaces both `protocol()` helpers;
+- [x] `ClientError::protocol(impl Display)` replaces both `protocol()` helpers;
   one `http::handshake(io)` returns the sender and one `AbortOnDrop`.
-- [ ] Transmission's `simple` goes through the same helper as `torrent_set`.
-- [ ] `RemotePathMap::to_remote`; each client maps `download_dir` inside `add`,
+- [x] Transmission's `simple` goes through the same helper as `torrent_set`.
+- [x] `RemotePathMap::to_remote`; each client maps `download_dir` inside `add`,
   so the trait takes local paths. `mistarr_clients::connect(kind, url, map)`
   replaces the server's `ClientKey::build` and `client.rs` `to_remote`.
-- [ ] The XML-RPC server-side encoders sit behind `test-support`; `xmlrpc` is
-  `pub(crate)`.
-- [ ] Proptests: the XML-RPC parser and `scgi::body_range` never panic.
+- [x] The XML-RPC server-side encoders sit behind `test-support`; `xmlrpc` is
+  private, public only with `test-support` for the fake rtorrent and the
+  server's tests.
+- [x] Proptests: the XML-RPC parser and `scgi::body_range` never panic.
 
 ### WP-58 Mister on core
 

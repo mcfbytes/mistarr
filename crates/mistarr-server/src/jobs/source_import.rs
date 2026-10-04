@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mistarr_clients::{ClientError, ClientTorrentId, SeedPolicy, TorrentSource};
+use mistarr_clients::{ClientError, SeedPolicy, TorrentSource};
 use mistarr_core::magnet;
-use mistarr_core::PlatformId;
+use mistarr_core::{InfoHash, PlatformId};
 use mistarr_sources::binding::{self, Binding};
 use mistarr_sources::torrent;
 use mistarr_sources::torrent::TorrentFile;
@@ -32,6 +32,9 @@ pub const RESOLVE_KIND: &str = "resolve_magnet";
 pub const NO_CLIENT: &str = "No download client found. The file list is read once one is detected.";
 /// Reason shown while the client fetches a magnet's metadata.
 pub const WAITING: &str = "Waiting for the download client to read the file list.";
+/// Reason shown on a resolving source whose stored infohash cannot be read.
+const BAD_INFOHASH: &str =
+    "The source's infohash is not valid. Remove the source and add it again.";
 /// Rejection reason for a second copy of a loaded source.
 pub const DUPLICATE: &str = "A source with the same content is already loaded.";
 
@@ -503,28 +506,24 @@ impl Job for ResolveMagnet {
         let Some(client) = app.client() else {
             return note(app, &row, NO_CLIENT).await;
         };
-        let torrent = if let Some(existing) = &row.client_id {
-            ClientTorrentId::new(existing.as_str())
+        let torrent = if let Some(existing) = row.client_id {
+            existing
         } else {
-            let uri = magnet_uri(app, &row).await;
-            let config = app.config();
-            let local = config.paths.staging().join(&row.infohash);
-            let dir = crate::client::to_remote(&config.client.remote_path_map, &local);
+            let Some(src) = magnet_source(app, &row).await else {
+                return note(app, &row, BAD_INFOHASH).await;
+            };
+            let local = app.config().paths.staging().join(&row.infohash);
             crate::client::prepare_download_dir(&local).await;
             let seed = rows::seed_from_text(&row.seed_policy).unwrap_or(SeedPolicy::None);
-            match client
-                .add(TorrentSource::Magnet(uri), &dir, &[], seed)
-                .await
-            {
+            match client.add(src, &local, &[], seed).await {
                 Ok(added) => {
                     // A paused magnet never fetches metadata; with nothing
                     // wanted, starting it transfers only the file list.
                     if let Err(e) = client.start(&added).await {
                         return note(app, &row, &unanswered(&e)).await;
                     }
-                    let stored = added.as_str().to_owned();
                     app.db
-                        .write(move |c| rows::set_client_id(c, id, Some(&stored)))
+                        .write(move |c| rows::set_client_id(c, id, Some(added)))
                         .await?;
                     added
                 }
@@ -532,7 +531,7 @@ impl Job for ResolveMagnet {
             }
         };
         let listed = match client.files(&torrent).await {
-            Ok(files) => files,
+            Ok(found) => found,
             Err(ClientError::MetadataPending) => return note(app, &row, WAITING).await,
             Err(ClientError::NotFound) => {
                 app.db
@@ -602,8 +601,9 @@ async fn note(app: &AppState, row: &SourceRow, reason: &str) -> Result<()> {
 }
 
 /// The magnet as the user dropped it, from `sources/loaded/`, or one built
-/// from the infohash when that file is gone or now holds another source.
-async fn magnet_uri(app: &AppState, row: &SourceRow) -> String {
+/// from the infohash when that file is gone or now holds another source;
+/// `None` when the stored infohash is not one.
+async fn magnet_source(app: &AppState, row: &SourceRow) -> Option<TorrentSource> {
     let file = app
         .config()
         .paths
@@ -612,14 +612,15 @@ async fn magnet_uri(app: &AppState, row: &SourceRow) -> String {
         .join(&row.origin_file);
     let text = tokio::fs::read_to_string(&file).await.unwrap_or_default();
     let dropped = text.lines().map(str::trim).find(|l| !l.is_empty());
-    match dropped {
-        Some(uri)
-            if magnet::parse_magnet(uri).is_ok_and(|m| m.infohash.to_string() == row.infohash) =>
-        {
-            uri.to_owned()
+    let parsed = dropped.and_then(|uri| Some((uri, magnet::parse_magnet(uri).ok()?.infohash)));
+    let (uri, infohash) = match parsed {
+        Some((uri, infohash)) if infohash.to_string() == row.infohash => (uri.to_owned(), infohash),
+        _ => {
+            let infohash: InfoHash = row.infohash.parse().ok()?;
+            (format!("magnet:?xt=urn:btih:{infohash}"), infohash)
         }
-        _ => format!("magnet:?xt=urn:btih:{}", row.infohash),
-    }
+    };
+    Some(TorrentSource::Magnet { uri, infohash })
 }
 
 /// Scans `sources/` every [`crate::app::Options::sources_poll`] and enqueues

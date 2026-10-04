@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mistarr_clients::{ClientError, ClientTorrentId, SeedPolicy};
+use mistarr_clients::{ClientError, SeedPolicy};
 use mistarr_core::hash::HeaderRule;
 use mistarr_core::PlatformId;
 use mistarr_mister::platforms::{self, Kind, Platform};
@@ -1301,12 +1301,12 @@ pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) -> bool {
     if !settled || sources::seed_from_text(&source.seed_policy) != Some(SeedPolicy::None) {
         return true;
     }
-    if let Some(client_id) = source.client_id.as_deref() {
+    if let Some(client_id) = &source.client_id {
         let Some(client) = app.client() else {
             crate::jobs::core_limits::defer(app, Op::Release(source_id)).await;
             return false;
         };
-        match client.remove(&ClientTorrentId::new(client_id), false).await {
+        match client.remove(client_id, false).await {
             Ok(()) | Err(ClientError::NotFound) => {}
             Err(e) => {
                 tracing::warn!(source = %source.id.0, error = %e, "cannot remove the finished torrent from the client");

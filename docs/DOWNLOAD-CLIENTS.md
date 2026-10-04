@@ -84,7 +84,8 @@ SCGI enabled, the status screen says which line to add.
 
 JSON-RPC over HTTP. Handle the 409 session-id handshake and retry once.
 Serialize all calls through one client instance, holding the lock for the
-whole operation. The torrent id is the lowercase `hashString`.
+whole operation. The torrent id is the infohash in `hashString`, read in
+either case.
 
 Transmission reads an empty `files-wanted`, `files-unwanted` or `priority-*`
 array as "all files". An empty list is never sent to mean "none".
@@ -128,7 +129,8 @@ missing parent fails with "Could not create directory".
 
 Every command after `load.*` takes the uppercase hex infohash as its target,
 and file commands take `<HASH>:f<index>`. `load.*` does not return the hash,
-so mistarr computes it: SHA-1 of the metainfo's `info` dictionary, or the
+so `add` uses the one the server's parse of the source found, which the
+`TorrentSource` carries: SHA-1 of the metainfo's `info` dictionary, or the
 `xt=urn:btih:` value (hex or base32) of a magnet. rtorrent answers an unknown
 hash with a fault naming the info-hash, which maps to "not found".
 
@@ -160,9 +162,12 @@ before priorities apply.
 
 When the client runs on another machine, its `download-dir` differs from
 where mistarr sees the same bytes. `client.remote_path_map` is a list of
-`{ remote, local }` prefixes applied to paths reported by the client. This is
-the same model as the *arr apps. The common MiSTer case is a NAS writing to
-the SD card over SMB, mapped to `/media/fat/mistarr/staging`.
+`{ remote, local }` prefixes, matched by whole components with the longest
+prefix winning. Each client holds the map: `add` takes the local staging
+directory and sends the client its remote form, and paths the client
+reports are turned back into local ones. This is the same model as the *arr
+apps. The common MiSTer case is a NAS writing to the SD card over SMB,
+mapped to `/media/fat/mistarr/staging`.
 
 ## Polling
 

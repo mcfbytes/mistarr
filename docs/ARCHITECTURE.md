@@ -46,7 +46,7 @@ contracts in this document.
 | `mistarr-core` | Domain types. DAT parser for Logiqx XML and No-Intro DB exports. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. The codecs every crate shares: hex, `Digest` values (`Crc32`, `Md5`, `Sha1`, `InfoHash`), bencode, magnet links, percent-decoding, and the capped XML reader. | none |
 | `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
 | `mistarr-sources` | Watched-directory scanner. `.torrent` parsing into a file list, over core's bencode. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
-| `mistarr-clients` | `DownloadClient` trait. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping. The one GET of a URL the user supplies, over hyper and rustls (`fetch`). | none |
+| `mistarr-clients` | `DownloadClient` trait and `connect`, which builds the client for a detected kind and address. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping, both ways, inside each client. The one GET of a URL the user supplies, over hyper and rustls (`fetch`). Torrents arrive already parsed: a `TorrentSource` carries the infohash and file count, and `ClientTorrentId` wraps core's `InfoHash`. | core |
 | `mistarr-server` | The binary. axum HTTP server, SQLite via `rusqlite` (bundled), job scheduler, SSE event bus, embedded SPA via `rust-embed`, config, first-run wizard state, CLI flags. | all |
 | `mistarr-fixture` | Development tool, never shipped: synthetic DATs, `.torrent` files, the synthetic set and a local tracker for the tests in TESTING.md. | core, mister, sources |
 | `web/` | Svelte 5 + Vite + TypeScript SPA. Built to `web/dist`, embedded at compile time. | API.md |
@@ -58,7 +58,8 @@ contracts in this document.
 #[async_trait]
 pub trait DownloadClient: Send + Sync {
     async fn probe(&self) -> Result<ClientInfo>;
-    /// Add a torrent paused, with only `wanted` file indices selected, into `download_dir`.
+    /// Add a torrent paused, with only `wanted` file indices selected, into `download_dir`,
+    /// a local path the client maps to its own.
     async fn add(&self, src: TorrentSource, download_dir: &Path, wanted: &[u32], seed: SeedPolicy) -> Result<ClientTorrentId>;
     async fn set_wanted(&self, id: &ClientTorrentId, wanted: &[u32]) -> Result<()>;
     async fn set_seed_policy(&self, id: &ClientTorrentId, seed: SeedPolicy) -> Result<()>;
@@ -540,10 +541,10 @@ is not set yet.
    one. Two wanted versions may share one file.
 2. A light `transfer` job takes `queued` downloads per source. If the torrent
    is not yet in the client, create `staging/<infohash>/` (rtorrent makes only
-   the last level of a download path) and add the torrent paused to it, through
-   the remote path map, with only the selected files wanted and the source's
-   seed policy. If it is, extend the wanted set. Start it. A magnet whose
-   metadata is pending keeps its downloads queued.
+   the last level of a download path) and add the torrent paused to it, which
+   the client maps through the remote path map, with only the selected files
+   wanted and the source's seed policy. If it is, extend the wanted set. Start
+   it. A magnet whose metadata is pending keeps its downloads queued.
 3. Poll the client at an interval (5 s while something is transferring or
    checking, 60 s otherwise, 5 minutes after three failed polls). Per-file
    progress is written to `downloads` and fanned out on SSE as
