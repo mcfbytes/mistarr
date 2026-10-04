@@ -44,7 +44,7 @@ contracts in this document.
 | Crate | Responsibility | Depends on |
 |---|---|---|
 | `mistarr-core` | Domain types. DAT parser for Logiqx XML and No-Intro DB exports. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. The codecs every crate shares: hex, `Digest` values (`Crc32`, `Md5`, `Sha1`, `InfoHash`), bencode, magnet links, percent-decoding, and the capped XML reader. | none |
-| `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
+| `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk, built on core's header constants, byte-order detection and XML reader. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
 | `mistarr-sources` | Watched-directory scanner. `.torrent` parsing into a file list, over core's bencode. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
 | `mistarr-clients` | `DownloadClient` trait. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping. The one GET of a URL the user supplies, over hyper and rustls (`fetch`). | none |
 | `mistarr-server` | The binary. axum HTTP server, SQLite via `rusqlite` (bundled), job scheduler, SSE event bus, embedded SPA via `rust-embed`, config, first-run wizard state, CLI flags. | all |
@@ -76,14 +76,15 @@ pub trait DownloadClient: Send + Sync {
 
 // mistarr-mister
 pub trait CoreAdapter: Send + Sync {
-    fn platform(&self) -> PlatformId;
-    fn games_dir(&self, root: &Path) -> PathBuf;                     // e.g. root/games/NES
     /// Decide the final filename and any transformation (unzip, header, byte order).
     fn plan_placement(&self, entry: &DatEntry, staged: &StagedFile) -> Result<PlacementPlan>;
-    /// True if this file, as found on disk, is loadable by the core without change.
-    fn accepts(&self, path: &Path) -> bool;
-    fn requires_bios(&self) -> Option<&'static str>;                 // reported, never fetched
 }
+// The other platform facts are fields of the `Platform` row: `platform_id()`,
+// `games_dir(root)` (e.g. root/games/NES), `bios` (reported, never fetched),
+// `load_extensions` and `header_rule`. `adapter_for` picks an adapter by the
+// row's kind and header rule. The library scan keeps its own extension rules
+// and checks no content: a headerless NES file is found and matched, though
+// placement must give it the iNES header (PLATFORMS.md "Adapter contract").
 
 // mistarr-core
 pub struct HashSet { pub size: u64, pub crc32: u32, pub md5: [u8;16], pub sha1: [u8;20] }
