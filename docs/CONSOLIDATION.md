@@ -208,7 +208,8 @@ Opus · `mistarr-clients`, server callers · branch `wp-57-clients-core`
   so the trait takes local paths. `mistarr_clients::connect(kind, url, map)`
   replaces the server's `ClientKey::build` and `client.rs` `to_remote`.
 - [x] The XML-RPC server-side encoders sit behind `test-support`; `xmlrpc` is
-  `pub(crate)`.
+  private, public only with `test-support` for the fake rtorrent and the
+  server's tests.
 - [x] Proptests: the XML-RPC parser and `scgi::body_range` never panic.
 
 ### WP-58 Mister on core
