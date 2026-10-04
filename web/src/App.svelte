@@ -17,7 +17,6 @@
   import Dats from './routes/Dats.svelte';
   import System from './routes/System.svelte';
 
-  const isMock = import.meta.env.VITE_MOCK === '1';
   let apiKeyInput = $state('');
   let wizardRetryMs = 1000;
 
@@ -46,12 +45,7 @@
   }
 
   startEvents();
-  if (isMock) {
-    // Best-effort warm-up: any route that needs status retries its own load if this misses.
-    void loadStatus().catch(() => undefined);
-  } else {
-    void checkFirstRun();
-  }
+  void checkFirstRun();
 
   function submitApiKey(): void {
     setApiKey(apiKeyInput.trim() || null);

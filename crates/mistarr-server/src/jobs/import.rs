@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mistarr_clients::{ClientError, ClientTorrentId, SeedPolicy};
+use mistarr_clients::{ClientError, SeedPolicy};
 use mistarr_core::hash::HeaderRule;
 use mistarr_core::PlatformId;
 use mistarr_mister::platforms::{self, Kind, Platform};
@@ -25,10 +25,9 @@ use tokio::sync::broadcast::error::RecvError;
 
 use self::place::{Partial, PlaceError, Roots};
 pub use self::rename::{rename, RenameError};
-pub use self::support::parse_header;
 use self::support::{
-    dat_rom, explain, file_name, hash_item, header_rule, is_zip, leaf, locate, match_members,
-    pick_rom, quarantine, read_head, rel_string, report, Hashed,
+    explain, file_name, hash_item, is_zip, leaf, locate, match_members, pick_rom, place_rom,
+    quarantine, read_head, rel_string, report, Hashed,
 };
 use super::{transfer, Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
@@ -394,7 +393,7 @@ impl Placing<'_> {
     }
 
     fn rule(&self) -> HeaderRule {
-        header_rule(self.platform.header_rule)
+        self.platform.header_rule
     }
 
     /// The staged file of `row` on disk, or why there is none to import.
@@ -498,7 +497,7 @@ impl Placing<'_> {
                 expected.as_ref(),
                 actual,
                 named.as_deref(),
-                self.platform.header_rule,
+                self.platform.header_rule.as_str(),
             ),
         };
         let (staging, hash, item) = (
@@ -631,7 +630,7 @@ impl Placing<'_> {
         };
         let dat = DatEntry {
             name: self.entry.name.clone(),
-            roms: vec![dat_rom(rom)],
+            roms: vec![place_rom(rom)],
         };
         let piece = Piece {
             download,
@@ -869,7 +868,7 @@ impl Placing<'_> {
         };
         let dat = DatEntry {
             name: self.entry.name.clone(),
-            roms: self.entry.roms.iter().map(dat_rom).collect(),
+            roms: self.entry.roms.iter().map(place_rom).collect(),
         };
         self.place(&dat, &staged, pieces, &ids, &[local]).await
     }
@@ -970,7 +969,7 @@ impl Placing<'_> {
         };
         let dat = DatEntry {
             name: self.entry.name.clone(),
-            roms: self.entry.roms.iter().map(dat_rom).collect(),
+            roms: self.entry.roms.iter().map(place_rom).collect(),
         };
         let originals: Vec<PathBuf> = pieces.iter().map(|p| p.source.clone()).collect();
         self.place(&dat, &staged_dir, pieces, &ids, &originals)
@@ -1237,7 +1236,7 @@ impl Placing<'_> {
     ) -> Result<(Vec<(FileId, ImportAction)>, Settled)> {
         let scope = Scope {
             pid: self.pid(),
-            rule: self.platform.header_rule,
+            rule: self.platform.header_rule.as_str(),
             title: self.entry.id,
             stats: stats.clone(),
             note,
@@ -1312,12 +1311,12 @@ pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) -> bool {
     if !settled || sources::seed_from_text(&source.seed_policy) != Some(SeedPolicy::None) {
         return true;
     }
-    if let Some(client_id) = source.client_id.as_deref() {
+    if let Some(client_id) = &source.client_id {
         let Some(client) = app.client() else {
             crate::jobs::core_limits::defer(app, Op::Release(source_id)).await;
             return false;
         };
-        match client.remove(&ClientTorrentId::new(client_id), false).await {
+        match client.remove(client_id, false).await {
             Ok(()) | Err(ClientError::NotFound) => {}
             Err(e) => {
                 tracing::warn!(source = %source.id.0, error = %e, "cannot remove the finished torrent from the client");

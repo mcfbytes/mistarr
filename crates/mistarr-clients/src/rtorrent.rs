@@ -6,14 +6,16 @@ use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use mistarr_core::InfoHash;
 use tokio::sync::Mutex;
 
 use crate::detect::ScgiAddr;
+use crate::wanted::Wanted;
 use crate::xmlrpc::{self, Fault, MethodResponse, Value};
 use crate::{
-    metainfo, scgi, ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId, Direction,
-    DownloadClient, FileProgress, InfoHash, RateLimit, RemotePathMap, Result, SeedPolicy,
-    TorrentSource, TorrentState, TorrentStatus,
+    scgi, ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId, Direction,
+    DownloadClient, FileProgress, RateLimit, RemotePathMap, Result, SeedPolicy, TorrentSource,
+    TorrentState, TorrentStatus,
 };
 
 /// The global limit's getter, in bytes per second with 0 for none, and its
@@ -129,7 +131,7 @@ impl Rtorrent {
     /// ```
     pub fn new(addr: &str) -> Result<Self> {
         let addr = ScgiAddr::parse(addr)
-            .ok_or_else(|| ClientError::Protocol(format!("invalid SCGI address {addr:?}")))?;
+            .ok_or_else(|| ClientError::protocol(format!("invalid SCGI address {addr:?}")))?;
         Ok(Self {
             addr,
             timeout: Self::DEFAULT_TIMEOUT,
@@ -176,8 +178,9 @@ impl Rtorrent {
         self
     }
 
-    /// Sets the map applied to paths rtorrent reports before mistarr deletes
-    /// data in [`DownloadClient::remove`].
+    /// Sets the map between mistarr's paths and rtorrent's: the download
+    /// directory given to [`DownloadClient::add`], and the paths rtorrent
+    /// reports before mistarr deletes data in [`DownloadClient::remove`].
     ///
     /// ```
     /// let rt = mistarr_clients::Rtorrent::new("127.0.0.1:5000")?
@@ -194,7 +197,7 @@ impl Rtorrent {
     async fn call(&self, method: &str, params: &[Value]) -> Result<Value> {
         let body = xmlrpc::encode_call(method, params);
         let reply = scgi::request(&self.addr, &body, self.timeout).await?;
-        match xmlrpc::decode_response(&reply).map_err(protocol)? {
+        match xmlrpc::decode_response(&reply).map_err(ClientError::protocol)? {
             MethodResponse::Success(v) => Ok(v),
             MethodResponse::Fault(f) => Err(fault_error(&f)),
         }
@@ -214,17 +217,21 @@ impl Rtorrent {
             .collect();
         let Value::Array(results) = self.call("system.multicall", &[Value::Array(list)]).await?
         else {
-            return Err(protocol("system.multicall reply is not an array"));
+            return Err(ClientError::protocol(
+                "system.multicall reply is not an array",
+            ));
         };
         if results.len() != count {
-            return Err(protocol("system.multicall reply has the wrong length"));
+            return Err(ClientError::protocol(
+                "system.multicall reply has the wrong length",
+            ));
         }
         results
             .into_iter()
             .map(|entry| match entry {
                 Value::Array(mut one) if one.len() == 1 => Ok(one.remove(0)),
                 other => Err(Fault::from_value(&other).map_or_else(
-                    || protocol("malformed system.multicall entry"),
+                    || ClientError::protocol("malformed system.multicall entry"),
                     |f| fault_error(&f),
                 )),
             })
@@ -242,7 +249,7 @@ impl Rtorrent {
         if int(&r[0])? != 0 {
             return Ok(None);
         }
-        let count = usize::try_from(int(&r[1])?).map_err(protocol)?;
+        let count = usize::try_from(int(&r[1])?).map_err(ClientError::protocol)?;
         Ok(Some(count))
     }
 
@@ -252,14 +259,14 @@ impl Rtorrent {
         &self,
         target: &str,
         file_count: usize,
-        wanted: &BTreeSet<u32>,
+        wanted: &Wanted,
     ) -> Result<()> {
         let mut start = 0;
         while start < file_count {
             let end = file_count.min(start + Self::MULTICALL_CHUNK);
             let calls = (start..end)
                 .map(|i| {
-                    let on = u32::try_from(i).is_ok_and(|i| wanted.contains(&i));
+                    let on = u32::try_from(i).is_ok_and(|i| wanted.contains(i));
                     let params = vec![Value::from(format!("{target}:f{i}")), i64::from(on).into()];
                     ("f.priority.set", params)
                 })
@@ -280,7 +287,7 @@ impl DownloadClient for Rtorrent {
         let version = self.call("system.client_version", &[]).await?;
         let version = version
             .as_str()
-            .ok_or_else(|| protocol("system.client_version is not a string"))?;
+            .ok_or_else(|| ClientError::protocol("system.client_version is not a string"))?;
         Ok(ClientInfo {
             kind: ClientKind::Rtorrent,
             version: version.to_owned(),
@@ -294,25 +301,20 @@ impl DownloadClient for Rtorrent {
         wanted: &[u32],
         seed: SeedPolicy,
     ) -> Result<ClientTorrentId> {
-        let wanted: BTreeSet<u32> = wanted.iter().copied().collect();
-        let dir = download_dir
+        let wanted = Wanted::from_slice(wanted);
+        let dir = self.path_map.to_remote(download_dir);
+        let dir = dir
             .to_str()
-            .ok_or_else(|| protocol("download dir is not UTF-8"))?;
-        let (hash, known_count, method, data) = match src {
-            TorrentSource::Metainfo(bytes) => {
-                let hash = metainfo::info_hash(&bytes)
-                    .ok_or_else(|| protocol("metainfo has no info dictionary"))?;
-                let count = metainfo::file_count(&bytes);
-                (hash, count, "load.raw", Value::Base64(bytes))
-            }
-            TorrentSource::Magnet(uri) => {
-                let hash =
-                    magnet_hash(&uri).ok_or_else(|| protocol("magnet without a btih hash"))?;
-                (hash, None, "load.normal", Value::String(uri))
-            }
+            .ok_or_else(|| ClientError::protocol("download dir is not UTF-8"))?;
+        let hash = src.infohash();
+        let (known_count, method, data) = match src {
+            TorrentSource::Metainfo {
+                bytes, file_count, ..
+            } => (Some(file_count), "load.raw", Value::Base64(bytes)),
+            TorrentSource::Magnet { uri, .. } => (None, "load.normal", Value::String(uri)),
         };
         if let Some(count) = known_count {
-            check_indices(&wanted, count)?;
+            wanted.check(count)?;
         }
         let target = target(&hash);
 
@@ -334,27 +336,27 @@ impl DownloadClient for Rtorrent {
             None => self.file_count(&target).await.map_err(not_loaded)?,
         };
         if let Some(count) = count {
-            check_indices(&wanted, count)?;
+            wanted.check(count)?;
             self.apply_selection(&target, count, &wanted).await?;
         }
         torrents.insert(hash, seed);
-        Ok(ClientTorrentId::new(hash.to_string()))
+        Ok(ClientTorrentId::new(hash))
     }
 
     async fn set_wanted(&self, id: &ClientTorrentId, wanted: &[u32]) -> Result<()> {
-        let wanted: BTreeSet<u32> = wanted.iter().copied().collect();
-        let target = target(&parse_id(id)?);
+        let wanted = Wanted::from_slice(wanted);
+        let target = target(&id.infohash());
         let _guard = self.torrents.lock().await;
         let count = self
             .file_count(&target)
             .await?
             .ok_or(ClientError::MetadataPending)?;
-        check_indices(&wanted, count)?;
+        wanted.check(count)?;
         self.apply_selection(&target, count, &wanted).await
     }
 
     async fn set_seed_policy(&self, id: &ClientTorrentId, seed: SeedPolicy) -> Result<()> {
-        let hash = parse_id(id)?;
+        let hash = id.infohash();
         let mut torrents = self.torrents.lock().await;
         self.call("d.hash", &[target(&hash).into()]).await?;
         torrents.insert(hash, seed);
@@ -362,7 +364,7 @@ impl DownloadClient for Rtorrent {
     }
 
     async fn start(&self, id: &ClientTorrentId) -> Result<()> {
-        let hash = parse_id(id)?;
+        let hash = id.infohash();
         let _guard = self.torrents.lock().await;
         self.call("d.start", &[target(&hash).into()])
             .await
@@ -370,13 +372,13 @@ impl DownloadClient for Rtorrent {
     }
 
     async fn stop(&self, id: &ClientTorrentId) -> Result<()> {
-        let hash = parse_id(id)?;
+        let hash = id.infohash();
         let _guard = self.torrents.lock().await;
         self.call("d.stop", &[target(&hash).into()]).await.map(drop)
     }
 
     async fn status(&self, id: &ClientTorrentId) -> Result<TorrentStatus> {
-        let hash = parse_id(id)?;
+        let hash = id.infohash();
         let target = target(&hash);
         let torrents = self.torrents.lock().await;
         let mut calls: Vec<(&str, Vec<Value>)> = STATUS_COMMANDS
@@ -414,7 +416,7 @@ impl DownloadClient for Rtorrent {
     }
 
     async fn files(&self, id: &ClientTorrentId) -> Result<Vec<ClientFile>> {
-        let target = target(&parse_id(id)?);
+        let target = target(&id.infohash());
         let _guard = self.torrents.lock().await;
         let listing = vec![
             target.as_str().into(),
@@ -429,19 +431,21 @@ impl DownloadClient for Rtorrent {
             ])
             .await?;
         let [meta, rows] = r.as_slice() else {
-            return Err(protocol("file list reply has the wrong length"));
+            return Err(ClientError::protocol(
+                "file list reply has the wrong length",
+            ));
         };
         if int(meta)? != 0 {
             return Err(ClientError::MetadataPending);
         }
         let rows = rows
             .as_array()
-            .ok_or_else(|| protocol("f.multicall reply is not an array"))?;
+            .ok_or_else(|| ClientError::protocol("f.multicall reply is not an array"))?;
         rows.iter()
             .zip(0u32..)
             .map(|(row, index)| {
                 let [path, size] = row.as_array().unwrap_or_default() else {
-                    return Err(protocol("malformed f.multicall row"));
+                    return Err(ClientError::protocol("malformed f.multicall row"));
                 };
                 Ok(ClientFile {
                     index,
@@ -453,7 +457,7 @@ impl DownloadClient for Rtorrent {
     }
 
     async fn remove(&self, id: &ClientTorrentId, delete_data: bool) -> Result<()> {
-        let hash = parse_id(id)?;
+        let hash = id.infohash();
         let target = target(&hash);
         let mut torrents = self.torrents.lock().await;
         let data = if delete_data {
@@ -488,7 +492,7 @@ impl DownloadClient for Rtorrent {
         let _guard = self.torrents.lock().await;
         let bytes = uint(&self.call(throttle(dir).0, &["".into()]).await?)?;
         // Rounded up, so a limit under 1 KiB/s is never read back as none.
-        let kbps = u32::try_from(bytes.div_ceil(1024)).map_err(protocol)?;
+        let kbps = u32::try_from(bytes.div_ceil(1024)).map_err(ClientError::protocol)?;
         Ok(RateLimit {
             enabled: kbps > 0,
             kbps,
@@ -507,7 +511,7 @@ impl DownloadClient for Rtorrent {
     async fn process_id(&self) -> Result<Option<u32>> {
         let _guard = self.torrents.lock().await;
         let pid = uint(&self.call("system.pid", &[]).await?)?;
-        u32::try_from(pid).map(Some).map_err(protocol)
+        u32::try_from(pid).map(Some).map_err(ClientError::protocol)
     }
 }
 
@@ -526,92 +530,41 @@ fn delete_labelled(layout: DataLayout) -> io::Result<()> {
     r
 }
 
-fn protocol(e: impl std::fmt::Display) -> ClientError {
-    ClientError::Protocol(e.to_string())
-}
-
 /// rtorrent reports an unknown hash as a fault naming the info-hash.
 fn fault_error(fault: &Fault) -> ClientError {
     if fault.message.contains("Could not find info-hash") {
         ClientError::NotFound
     } else {
-        ClientError::Protocol(format!("fault {}: {}", fault.code, fault.message))
+        ClientError::protocol(format!("fault {}: {}", fault.code, fault.message))
     }
 }
 
 /// After a load, a missing torrent means rtorrent rejected the data.
 fn not_loaded(e: ClientError) -> ClientError {
     match e {
-        ClientError::NotFound => protocol("rtorrent did not load the torrent"),
+        ClientError::NotFound => ClientError::protocol("rtorrent did not load the torrent"),
         other => other,
     }
 }
 
 fn int(v: &Value) -> Result<i64> {
     v.as_i64()
-        .ok_or_else(|| protocol(format!("expected an integer, got {v:?}")))
+        .ok_or_else(|| ClientError::protocol(format!("expected an integer, got {v:?}")))
 }
 
 fn uint(v: &Value) -> Result<u64> {
-    u64::try_from(int(v)?).map_err(protocol)
+    u64::try_from(int(v)?).map_err(ClientError::protocol)
 }
 
 fn text(v: &Value) -> Result<String> {
     v.as_str()
         .map(str::to_owned)
-        .ok_or_else(|| protocol(format!("expected a string, got {v:?}")))
+        .ok_or_else(|| ClientError::protocol(format!("expected a string, got {v:?}")))
 }
 
 /// rtorrent addresses a download by its uppercase hex infohash.
 fn target(hash: &InfoHash) -> String {
     hash.to_string().to_ascii_uppercase()
-}
-
-fn parse_id(id: &ClientTorrentId) -> Result<InfoHash> {
-    InfoHash::from_hex(id.as_str()).ok_or(ClientError::NotFound)
-}
-
-fn check_indices(wanted: &BTreeSet<u32>, file_count: usize) -> Result<()> {
-    match wanted.last() {
-        Some(&index) if usize::try_from(index).unwrap_or(usize::MAX) >= file_count => {
-            Err(ClientError::FileIndex { index, file_count })
-        }
-        _ => Ok(()),
-    }
-}
-
-/// The infohash in a magnet's `xt=urn:btih:` parameter, hex or base32.
-fn magnet_hash(uri: &str) -> Option<InfoHash> {
-    let query = uri.strip_prefix("magnet:?")?;
-    query.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        if key != "xt" {
-            return None;
-        }
-        let value = percent_decode(value)?;
-        let prefix = value.get(..9)?;
-        if !prefix.eq_ignore_ascii_case("urn:btih:") {
-            return None;
-        }
-        let hash = &value[9..];
-        InfoHash::from_hex(hash).or_else(|| base32_hash(hash))
-    })
-}
-
-/// Decodes `%XX` escapes; `None` for a malformed escape or non-UTF-8 result.
-fn percent_decode(s: &str) -> Option<String> {
-    let mut out = Vec::with_capacity(s.len());
-    let mut bytes = s.bytes();
-    while let Some(b) = bytes.next() {
-        if b == b'%' {
-            let hi = char::from(bytes.next()?).to_digit(16)?;
-            let lo = char::from(bytes.next()?).to_digit(16)?;
-            out.push(u8::try_from(hi << 4 | lo).ok()?);
-        } else {
-            out.push(b);
-        }
-    }
-    String::from_utf8(out).ok()
 }
 
 /// A `d.directory.set` command for the trailing arguments of `load.*`, with
@@ -625,31 +578,6 @@ fn directory_command(dir: &str) -> String {
         quoted.push(c);
     }
     format!("d.directory.set=\"{quoted}\"")
-}
-
-fn base32_hash(s: &str) -> Option<InfoHash> {
-    if s.len() != 32 {
-        return None;
-    }
-    let mut out = [0u8; 20];
-    let mut acc: u32 = 0;
-    let mut bits = 0;
-    let mut pos = 0;
-    for c in s.bytes() {
-        let v = match c.to_ascii_uppercase() {
-            c @ b'A'..=b'Z' => c - b'A',
-            c @ b'2'..=b'7' => c - b'2' + 26,
-            _ => return None,
-        };
-        acc = (acc << 5 | u32::from(v)) & 0xfff;
-        bits += 5;
-        if bits >= 8 {
-            bits -= 8;
-            out[pos] = u8::try_from((acc >> bits) & 0xff).ok()?;
-            pos += 1;
-        }
-    }
-    Some(InfoHash::from_bytes(out))
 }
 
 /// The reply to the status multicall: [`STATUS_COMMANDS`] then `f.multicall`.
@@ -669,7 +597,7 @@ impl RawStatus {
     fn read(r: &[Value]) -> Result<Self> {
         let [state, active, complete, checking, hashing, ratio, down, up, message, meta, files] = r
         else {
-            return Err(protocol("status reply has the wrong length"));
+            return Err(ClientError::protocol("status reply has the wrong length"));
         };
         let files = if int(meta)? == 0 {
             read_files(files)?
@@ -735,12 +663,12 @@ impl RawStatus {
 fn read_files(v: &Value) -> Result<Vec<FileProgress>> {
     let rows = v
         .as_array()
-        .ok_or_else(|| protocol("f.multicall reply is not an array"))?;
+        .ok_or_else(|| ClientError::protocol("f.multicall reply is not an array"))?;
     rows.iter()
         .zip(0u32..)
         .map(|(row, index)| {
             let [size, done, chunks, priority] = row.as_array().unwrap_or_default() else {
-                return Err(protocol("malformed f.multicall row"));
+                return Err(ClientError::protocol("malformed f.multicall row"));
             };
             let size = uint(size)?;
             let (done, chunks) = (uint(done)?, uint(chunks)?);
@@ -748,7 +676,7 @@ fn read_files(v: &Value) -> Result<Vec<FileProgress>> {
                 size
             } else {
                 u64::try_from(u128::from(size) * u128::from(done) / u128::from(chunks))
-                    .map_err(protocol)?
+                    .map_err(ClientError::protocol)?
             };
             Ok(FileProgress {
                 index,
@@ -770,27 +698,30 @@ struct DataLayout {
 impl DataLayout {
     fn read(r: &[Value], map: &RemotePathMap) -> Result<Self> {
         let [directory, multi, files] = r else {
-            return Err(protocol("remove reply has the wrong length"));
+            return Err(ClientError::protocol("remove reply has the wrong length"));
         };
         let directory = map.to_local(Path::new(&text(directory)?));
         let files = files
             .as_array()
-            .ok_or_else(|| protocol("f.multicall reply is not an array"))?
+            .ok_or_else(|| ClientError::protocol("f.multicall reply is not an array"))?
             .iter()
             .map(|row| {
                 let [path] = row.as_array().unwrap_or_default() else {
-                    return Err(protocol("malformed f.multicall row"));
+                    return Err(ClientError::protocol("malformed f.multicall row"));
                 };
                 let rel = PathBuf::from(text(path)?);
                 if rel.components().all(|c| matches!(c, Component::Normal(_))) {
                     Ok(rel)
                 } else {
-                    Err(protocol(format!("unsafe file path {}", rel.display())))
+                    Err(ClientError::protocol(format!(
+                        "unsafe file path {}",
+                        rel.display()
+                    )))
                 }
             })
             .collect::<Result<_>>()?;
         if !directory.is_absolute() {
-            return Err(protocol("download directory is not absolute"));
+            return Err(ClientError::protocol("download directory is not absolute"));
         }
         Ok(Self {
             directory,

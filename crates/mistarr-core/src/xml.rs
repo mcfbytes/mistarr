@@ -428,6 +428,31 @@ impl<R: BufRead> CappedReader<R> {
         self.reader.get_ref().get_ref().position()
     }
 
+    /// Whether the parser refuses an end tag that does not close the open element; on by
+    /// default, off for a caller that pairs end tags itself.
+    pub fn set_check_end_names(&mut self, check: bool) {
+        self.reader.config_mut().check_end_names = check;
+    }
+
+    /// The input after everything read so far, uncapped until the next
+    /// [`CappedReader::read_event`], for a caller that consumes a long text run itself.
+    ///
+    /// ```
+    /// use std::io::BufRead as _;
+    /// let mut r = mistarr_core::xml::CappedReader::new(&b"<a>0123456789</a>"[..], 8, 4);
+    /// r.read_event()?;
+    /// let input = r.input_mut();
+    /// let n = input.fill_buf()?.iter().position(|&b| b == b'<').unwrap_or(0);
+    /// input.consume(n);
+    /// assert_eq!((n, r.position()), (10, 13));
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn input_mut(&mut self) -> &mut impl BufRead {
+        let input = self.reader.get_mut();
+        input.arm(u64::MAX);
+        input
+    }
+
     /// A parser error at the current position.
     #[must_use]
     pub fn error(&self, source: quick_xml::Error) -> ReadError {
@@ -562,6 +587,23 @@ mod tests {
             check_utf8("\u{10ffe9}").unwrap_err(),
         ));
         assert!(matches!(made, ReadError::Xml { position, .. } if position == bad.position()));
+    }
+
+    #[test]
+    fn capped_reader_config_and_raw_input() {
+        let mut r = CappedReader::new(&b"<a></b>"[..], 64, 4);
+        r.set_check_end_names(false);
+        r.read_event().unwrap();
+        assert!(matches!(r.read_event().unwrap(), Event::End(_)));
+
+        let mut long = CappedReader::new(&b"<a>0123456789abcdef</a>"[..], 8, 4);
+        long.read_event().unwrap();
+        let input = long.input_mut();
+        let n = input.fill_buf().unwrap().iter().position(|&b| b == b'<');
+        assert_eq!(n, Some(16));
+        input.consume(16);
+        assert!(matches!(long.read_event().unwrap(), Event::End(_)));
+        assert_eq!(long.position(), 23);
     }
 
     proptest! {

@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+# The recording command sink, for tests of this crate and its dependents.
+test-support = []
+
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
@@ -16,4 +20,6 @@ regex-lite = "0.1"
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 
 [dev-dependencies]
+mistarr-mister = { path = ".", features = ["test-support"] }
 proptest = { version = "1", default-features = false, features = ["std"] }
+tempfile = "3"

@@ -16,7 +16,6 @@
    */
   let { which, manage = false }: { which: Watched; manage?: boolean } = $props();
 
-  const isMock = import.meta.env.VITE_MOCK === '1';
   let confirming = $state<string | null>(null);
   let busy = $state<Set<string>>(new Set());
   let announcement = $state('');
@@ -94,15 +93,11 @@
   async function retry(f: IncomingFile): Promise<void> {
     setBusy(f.file, true);
     try {
-      if (isMock) {
-        patchIncoming(which, f.file, { ...f, state: 'waiting', reason: 'Queued.', job_id: 99 });
-      } else {
-        const up = await api.retryRejectedDat(f.file);
-        addUpload({ kind: which, file: up.file, jobId: up.job_id, reason: up.reason });
-        patchIncoming(which, f.file, null);
-        patchIncoming(which, up.file, up);
-        scheduleIncoming(which);
-      }
+      const up = await api.retryRejectedDat(f.file);
+      addUpload({ kind: which, file: up.file, jobId: up.job_id, reason: up.reason });
+      patchIncoming(which, f.file, null);
+      patchIncoming(which, up.file, up);
+      scheduleIncoming(which);
       announcement = `${f.file} queued to load again.`;
       await focusList();
     } catch (err) {
@@ -117,9 +112,7 @@
     confirming = null;
     setBusy(f.file, true);
     try {
-      if (!isMock) {
-        await api.deleteRejectedDat(f.file);
-      }
+      await api.deleteRejectedDat(f.file);
       patchIncoming(which, f.file, null);
       announcement = `${f.file} deleted.`;
       await focusList();

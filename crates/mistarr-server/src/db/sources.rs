@@ -1,6 +1,6 @@
 //! The `sources` and `torrent_files` tables, and the [`DatIndex`] binding reads roms through.
 
-use mistarr_clients::SeedPolicy;
+use mistarr_clients::{ClientTorrentId, SeedPolicy};
 use mistarr_core::PlatformId;
 use mistarr_sources::binding::{self, Confidence, DatIndex, RomRef};
 use mistarr_sources::torrent::TorrentFile;
@@ -76,6 +76,8 @@ pub enum SourceReason {
     NoClient,
     /// The client is fetching a magnet's file list.
     WaitingMetadata,
+    /// The stored infohash cannot be read, so the magnet cannot be added.
+    BadInfohash,
     /// The client refused the source.
     ClientRefused {
         /// The client's error.
@@ -156,8 +158,9 @@ pub struct SourceRow {
     pub matched_count: u64,
     /// Sum of file sizes.
     pub total_size: u64,
-    /// Id in the download client once added.
-    pub client_id: Option<String>,
+    /// Id in the download client once added; a stored id that is not an
+    /// infohash names no torrent, so it reads as `None`.
+    pub client_id: Option<ClientTorrentId>,
     /// Unix seconds.
     pub added_at: i64,
     /// The platform the torrent's names point at, found without any DAT.
@@ -254,6 +257,11 @@ const COLUMNS: &str = "s.id, s.infohash, s.display_name, s.origin_file, s.platfo
              WHERE c.source_id = f.source_id AND c.file_index = f.file_index))),
     s.suggested_platform_id, s.user_binding, s.bind_pending";
 
+/// Reads a `client_id` column; text that is not an infohash names no torrent.
+pub(crate) fn client_id(r: &Row<'_>, i: usize) -> rusqlite::Result<Option<ClientTorrentId>> {
+    Ok(r.get::<_, Option<String>>(i)?.and_then(|s| s.parse().ok()))
+}
+
 fn from_row(r: &Row<'_>) -> rusqlite::Result<SourceRow> {
     Ok(SourceRow {
         id: r.get(0)?,
@@ -267,7 +275,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<SourceRow> {
         seed_policy: r.get(8)?,
         file_count: sql::get_u64(r, 9)?,
         total_size: sql::get_u64(r, 10)?,
-        client_id: r.get(11)?,
+        client_id: client_id(r, 11)?,
         added_at: r.get(12)?,
         matched_count: sql::get_u64(r, 13)?,
         suggested_platform_id: r.get::<_, Option<String>>(14)?.map(PlatformId),
@@ -497,24 +505,23 @@ pub fn list_mapped(conn: &Connection) -> Result<Vec<SourceId>> {
     Ok(ids)
 }
 
-/// Sources with a torrent in the client: id, the client's id for it and its seed policy.
+/// Sources with a readable torrent id in the client: id, the client's id
+/// for it and its seed policy.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn list_in_client(conn: &Connection) -> Result<Vec<(SourceId, String, SeedPolicy)>> {
+pub fn list_in_client(conn: &Connection) -> Result<Vec<(SourceId, ClientTorrentId, SeedPolicy)>> {
     let mut stmt = conn.prepare(
         "SELECT id, client_id, seed_policy FROM sources WHERE client_id IS NOT NULL ORDER BY id",
     )?;
     let rows = stmt
         .query_map([], |r| {
-            let policy: String = r.get(2)?;
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                seed_from_text(&policy).unwrap_or(SeedPolicy::None),
-            ))
+            let (id, policy) = (r.get(0)?, r.get::<_, String>(2)?);
+            let seed = seed_from_text(&policy).unwrap_or(SeedPolicy::None);
+            Ok(client_id(r, 1)?.map(|cid| (id, cid, seed)))
         })?
+        .filter_map(Result::transpose)
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
@@ -612,10 +619,14 @@ pub fn set_seed_policy(conn: &Connection, id: SourceId, policy: &SeedPolicy) -> 
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn set_client_id(conn: &Connection, id: SourceId, client_id: Option<&str>) -> Result<()> {
+pub fn set_client_id(
+    conn: &Connection,
+    id: SourceId,
+    client_id: Option<ClientTorrentId>,
+) -> Result<()> {
     conn.execute(
         "UPDATE sources SET client_id = ?2 WHERE id = ?1",
-        params![id, client_id],
+        params![id, client_id.map(|c| c.to_string())],
     )?;
     Ok(())
 }
@@ -1009,12 +1020,18 @@ mod tests {
         assert_eq!((page.items.len(), page.total), (1, 2));
         assert_eq!(page.items[0].id, b);
         assert_eq!(list_resolving(&c).expect("resolving"), [(b, false)]);
-        set_client_id(&c, b, Some("x")).expect("client");
+        let cid = ClientTorrentId::new(mistarr_core::InfoHash::from_bytes([0x0b; 20]));
+        set_client_id(&c, b, Some(cid)).expect("client");
         assert_eq!(list_resolving(&c).expect("resolving"), [(b, true)]);
         assert_eq!(
             list_in_client(&c).expect("in client"),
-            [(b, "x".to_owned(), SeedPolicy::None)]
+            [(b, cid, SeedPolicy::None)]
         );
+        c.execute("UPDATE sources SET client_id = 'x' WHERE id = ?1", [b.0])
+            .expect("unreadable id");
+        assert_eq!(list_resolving(&c).expect("resolving"), [(b, true)]);
+        assert!(list_in_client(&c).expect("in client").is_empty());
+        assert_eq!(get(&c, b).expect("get").expect("row").client_id, None);
         assert_eq!(SourceId(3).to_string(), "3");
     }
 
@@ -1023,12 +1040,13 @@ mod tests {
         let c = conn();
         let id = insert(&c, &new(&"03".repeat(20), SourceState::Resolving)).expect("insert");
         set_reason(&c, id, Some(&SourceReason::WaitingMetadata)).expect("reason");
-        set_client_id(&c, id, Some("abc")).expect("client");
+        let cid = ClientTorrentId::new(mistarr_core::InfoHash::from_bytes([0xab; 20]));
+        set_client_id(&c, id, Some(cid)).expect("client");
         set_seed_policy(&c, id, &SeedPolicy::Ratio { ratio: 2.0 }).expect("seed");
         set_binding(&c, id, Some(&nes()), Some(0.75)).expect("bind");
         let row = get(&c, id).expect("get").expect("row");
         assert_eq!(row.reason, Some(SourceReason::WaitingMetadata));
-        assert_eq!(row.client_id.as_deref(), Some("abc"));
+        assert_eq!(row.client_id, Some(cid));
         assert_eq!(row.seed_policy, "ratio:2.0");
         assert_eq!(row.platform_id, Some(nes()));
         assert_eq!(row.bind_score, Some(0.75));

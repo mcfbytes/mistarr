@@ -11,8 +11,9 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use mistarr_clients::{ClientError, ClientTorrentId, InfoHash};
+use mistarr_clients::ClientError;
 use mistarr_core::magnet;
+use mistarr_core::InfoHash;
 use mistarr_core::PlatformId;
 use mistarr_sources::torrent;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -82,6 +83,9 @@ fn reason_text(reason: &SourceReason) -> String {
         }
         SourceReason::WaitingMetadata => {
             "Waiting for the download client to read the file list.".to_owned()
+        }
+        SourceReason::BadInfohash => {
+            "The source's infohash is not valid. Remove the source and add it again.".to_owned()
         }
         SourceReason::ClientRefused { error } => {
             format!("The download client did not accept the source: {error}.")
@@ -338,13 +342,15 @@ async fn update(
         })
         .await?
         .ok_or_else(|| ApiError::not_found("No such source."))?;
-    if let (Some(seed), Some(cid)) = (seed, &updated.client_id) {
+    if let (Some(seed), Some(cid)) = (seed, updated.client_id) {
         let applied = match app.client() {
-            Some(client) => client
-                .set_seed_policy(&ClientTorrentId::new(cid.as_str()), seed)
-                .await
-                .map_err(|e| tracing::warn!(source = %id, error = %e, "cannot apply the seed policy in the client"))
-                .is_ok(),
+            Some(client) => match client.set_seed_policy(&cid, seed).await {
+                Ok(()) => true,
+                Err(e) => {
+                    tracing::warn!(source = %id, error = %e, "cannot apply the seed policy in the client");
+                    false
+                }
+            },
             None => false,
         };
         // A frozen, missing or refusing client gets every policy again later.
@@ -401,10 +407,7 @@ async fn remove(
         ));
     }
     if let (Some(cid), Some(client)) = (&row.client_id, app.client()) {
-        match client
-            .remove(&ClientTorrentId::new(cid.as_str()), false)
-            .await
-        {
+        match client.remove(cid, false).await {
             Ok(()) | Err(ClientError::NotFound) => {}
             Err(e) => {
                 return Err(ApiError::new(
@@ -675,6 +678,7 @@ mod tests {
         for r in [
             SourceReason::NoClient,
             SourceReason::WaitingMetadata,
+            SourceReason::BadInfohash,
             SourceReason::Ignored,
         ] {
             assert!(words(r).ends_with('.'));

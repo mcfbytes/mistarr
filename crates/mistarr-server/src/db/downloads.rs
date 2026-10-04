@@ -1,10 +1,12 @@
 //! The `downloads` table and its state machine; see `docs/DATA-MODEL.md`.
 
+use mistarr_clients::ClientTorrentId;
 use mistarr_core::PlatformId;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
 use super::ids::{DownloadId, RomId, SourceId, TitleId};
+use super::sources;
 use super::sql::{self, text_enum, Page, Paged};
 use crate::error::Result;
 
@@ -716,7 +718,7 @@ pub struct PollRow {
     /// True when the torrent is one file stored under the torrent's name.
     pub single_file: bool,
     /// The source's id in the client.
-    pub client_id: Option<String>,
+    pub client_id: Option<ClientTorrentId>,
     /// The source's seed policy text.
     pub seed_policy: String,
     /// The file's size in bytes, from the metainfo.
@@ -753,7 +755,7 @@ pub fn polled(conn: &Connection) -> Result<Vec<PollRow>> {
                 infohash: r.get(7)?,
                 torrent_name: r.get(8)?,
                 single_file: r.get(9)?,
-                client_id: r.get(10)?,
+                client_id: sources::client_id(r, 10)?,
                 seed_policy: r.get(11)?,
                 size: sql::get_u64(r, 12)?,
             })

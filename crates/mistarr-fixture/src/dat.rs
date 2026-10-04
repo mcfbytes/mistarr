@@ -59,19 +59,6 @@ pub fn header_name(platform: &Platform, name: &str) -> String {
     format!("{name} - {}", platform.name)
 }
 
-/// The hashing rule named in the platform table's `header_rule` column.
-#[must_use]
-pub fn header_rule(name: &str) -> HeaderRule {
-    match name {
-        "ines" => HeaderRule::Ines,
-        "smc" => HeaderRule::Smc,
-        "a78" => HeaderRule::A78,
-        "lnx" => HeaderRule::Lnx,
-        "n64" => HeaderRule::N64,
-        _ => HeaderRule::None,
-    }
-}
-
 /// Rules whose skipped bytes a headered DAT records in the `header` attribute.
 fn records_header(rule: HeaderRule) -> bool {
     matches!(rule, HeaderRule::Ines | HeaderRule::A78 | HeaderRule::Lnx)
@@ -187,7 +174,7 @@ fn is_zip(rel: &Path) -> bool {
 /// [`Error::Io`] or [`Error::Zip`] when a file cannot be read,
 /// [`Error::Empty`] when there is nothing to describe.
 pub fn games_from_dir(dir: &Path, platform: &Platform) -> Result<Vec<Game>> {
-    let rule = header_rule(platform.header_rule);
+    let rule = platform.header_rule;
     let mut games: Vec<Game> = Vec::new();
     for rel in walk(dir)? {
         let abs = dir.join(&rel);
@@ -327,16 +314,6 @@ mod tests {
     fn unknown_platform_is_an_error() {
         assert!(matches!(platform("nope"), Err(Error::UnknownPlatform(_))));
         assert_eq!(platform("psx").unwrap().id, "psx");
-    }
-
-    #[test]
-    fn header_rules_follow_the_table_names() {
-        assert_eq!(header_rule("ines"), HeaderRule::Ines);
-        assert_eq!(header_rule("smc"), HeaderRule::Smc);
-        assert_eq!(header_rule("a78"), HeaderRule::A78);
-        assert_eq!(header_rule("lnx"), HeaderRule::Lnx);
-        assert_eq!(header_rule("n64"), HeaderRule::N64);
-        assert_eq!(header_rule("none"), HeaderRule::None);
     }
 
     #[test]

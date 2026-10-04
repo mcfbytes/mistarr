@@ -94,8 +94,9 @@ is a single `name.ext` token is taken as one, and detail reports each as
 present or missing in `games/NeoGeo`. Nothing else is done with them.
 
 `romsets.xml` is streamed through a `BufReader`, refused unread above 16 MiB,
-and, like the MRA reader below, capped at one 1 MiB XML event and 64 levels
-of element nesting; either cap failing refuses the file with an error. It
+and, through core's `CappedReader` like the MRA reader below, capped at one
+1 MiB XML event and 64 levels of element nesting; either cap failing refuses
+the file with an error. It
 also caps what it accumulates: at most `MAX_SETS` (4096) distinct `<romset
 name>` values and `MAX_BIOS_NAMES` (4096) distinct BIOS file names from
 comments, each kept to `MAX_NAME_BYTES` (256) bytes since a real romset or
@@ -135,7 +136,8 @@ bytes, and a `<rom>` inside one left open never adds to it. Text that is not
 UTF-8 follows VERIFICATION.md "Text encoding": refused in text and
 attribute values, passed over in comments.
 
-As VERIFICATION.md "DAT parsing" caps a DAT, the reader caps one XML event, a
+As VERIFICATION.md "DAT parsing" caps a DAT, and through the same
+`mistarr_core::xml::CappedReader`, the reader caps one XML event, a
 tag, a text run or a comment, at 1 MiB before it is buffered
 (`Error::XmlEventTooLarge`), and element nesting at 64 levels
 (`Error::XmlTooDeep`); the open-element stack used to match end tags never
@@ -248,7 +250,7 @@ the rom from this subset and refuses anything else by name:
 |---|---|
 | `<part name zip crc>` | the member from the part's `zip`, else the rom's, trying each of a `\|` list in order; found by exact name, then case-insensitive name, then `crc` |
 | `offset`, `length`, `repeat` | numbers as C `strtoul` reads them (`0x` hex, leading-zero octal, decimal); `length="0"` takes the rest; `repeat="0"` emits nothing and reads nothing; the md5 check streams a named part again from its zip for each repeat, holding no part in memory; an offset past the end, `repeat` above 4096, an empty part repeated, and any offset or length that overflows are refused |
-| `<part>hex</part>` | inline bytes, digit pairs separated by spaces, commas or newlines; the md5 check, one MRA at a time, decodes them again from the file straight into the digest, for each repeat, holding no payload |
+| `<part>hex</part>` | inline bytes, digit pairs separated by spaces, tabs, commas or newlines, a lone final digit being one byte; `mra.rs` decodes this grammar itself, streaming, since core's `hex` does not cover it; the md5 check, one MRA at a time, decodes them again from the file straight into the digest, for each repeat, holding no payload |
 | `<interleave input="8" output="8..64">` | parts spread by `map`, hex digits read from the right, one per output byte: the k-th non-zero digit `d` writes input byte k of each word at output byte `first + d - 1 + gaps`, `first` being the first non-zero digit's position and `gaps` the zero digits after it so far; a missing `map` is `1`; a part that is not a whole number of words is refused |
 | `<patch offset operation="xor">hex</patch>` | overwrite or exclusive-or into the assembled bytes; past the end is refused |
 | `map` outside `<interleave>`, other `input` widths, `<group>` and any other element inside `<rom>` | refused |
@@ -414,23 +416,28 @@ cartridge and disc adapters are proven.
 
 ## Adapter contract
 
-Every adapter implements `CoreAdapter` from ARCHITECTURE.md and must provide:
+Every adapter implements `CoreAdapter` from ARCHITECTURE.md, whose one
+method is `plan_placement`: the final relative path and the list of
+transformations. Transformations are limited to: unzip, zip, add header,
+strip header, swap byte order, create directory, rename. Nothing else.
+Staging paths in a step are relative to the directory holding the staged
+item; library paths and the final path are relative to `games/`. Cartridge
+files are unzipped and named `<DAT entry name>.<ext written>`. Disc tracks
+take the DAT rom names, which are the names a DAT-verified cue already
+references, so a cue is never rewritten.
 
-- `games_dir`: the directory above, plus any legacy aliases accepted on scan.
-- `accepts`: whether a path on disk is loadable as-is (extension, zipped or
-  not, header present). Cartridge rows without a content rule also accept a
-  `.zip`; NES, SNES and N64 accept only files whose header or byte order they
-  can check.
-- `plan_placement`: the final relative path and the list of transformations.
-  Transformations are limited to: unzip, zip, add header, strip header, swap
-  byte order, create directory, rename. Nothing else. Staging paths in a step
-  are relative to the directory holding the staged item; library paths and
-  the final path are relative to `games/`. Cartridge files are unzipped and
-  named `<DAT entry name>.<ext written>`. Disc tracks take the DAT rom names,
-  which are the names a DAT-verified cue already references, so a cue is
-  never rewritten.
-- `requires_bios`: the BIOS filename the core documents, for the status
-  screen. The adapter never handles the file.
+`adapter_for` picks the adapter by the row's kind and, for a cartridge, its
+header rule: `ines` adds the DAT's iNES header to a file that lacks one,
+`smc` strips a copier header, `n64` swaps a file to big-endian, and any other
+cartridge row is only unzipped and renamed.
+
+Every other platform fact is a field or method of the `Platform` row, not of
+the adapter: `platform_id`, `games_dir`, `legacy_dirs`, `load_extensions`,
+and `bios`, the BIOS filename the core documents for the status screen,
+which nothing handles. The library scan keeps its own extension rules: a
+file is found by the row's `load_extensions`, and on a cartridge row also as
+a `.zip`. It checks no content, so a headerless NES file is still found,
+hashed and matched; only placement needs the iNES header the core loads.
 
 ## Header rules
 

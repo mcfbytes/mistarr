@@ -365,7 +365,7 @@ single-file one. It is the path mistarr sees, after the remote path map.
 
 `reason` is a JSON object whose `code` says why, with the parameters the
 sentence the API shows needs: `no_client`, `waiting_metadata`,
-`client_refused` (`error`, the client's message), `no_match` (`percent`, the
+`bad_infohash` (the stored infohash cannot be read), `client_refused` (`error`, the client's message), `no_match` (`percent`, the
 bind threshold, and `suggested`, the platform its names suggest when that
 platform has a DAT), `awaiting_dat` (`platform`, suggested by its names, with
 no DAT loaded) and `ignored` (the user marked it as not a game set).

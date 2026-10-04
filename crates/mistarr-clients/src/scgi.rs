@@ -152,6 +152,27 @@ mod tests {
         assert!(body_range(b"Content-Length: x\r\n\r\nab").is_err());
     }
 
+    proptest::proptest! {
+        #[test]
+        fn body_range_never_panics_and_stays_inside(
+            head in "((Status|Content-Length|content-length|X): ?[0-9a-z ]{0,6}(\r\n|\n)){0,4}(\r\n|\n)?",
+            body in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..64),
+        ) {
+            let mut response = head.into_bytes();
+            response.extend_from_slice(&body);
+            if let Ok(range) = body_range(&response) {
+                proptest::prop_assert!(range.start <= range.end && range.end <= response.len());
+            }
+        }
+
+        #[test]
+        fn body_range_of_any_bytes_never_panics(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..256),
+        ) {
+            let _ = body_range(&bytes);
+        }
+    }
+
     #[tokio::test]
     async fn request_sends_frame_and_returns_body() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

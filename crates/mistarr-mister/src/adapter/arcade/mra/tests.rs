@@ -291,7 +291,8 @@ fn an_unclosed_field_keeps_out_rom_data_and_is_capped() {
 
 #[test]
 fn read_refuses_an_oversized_file() {
-    let dir = crate::adapter::testutil::scratch("mra-big");
+    let tmp = crate::adapter::testutil::scratch();
+    let dir = tmp.path();
     let path = dir.join("big.mra");
     let pad = " ".repeat(usize::try_from(MAX_MRA_BYTES).expect("fits"));
     std::fs::write(&path, format!("<m>{pad}</m>")).expect("write");
@@ -557,7 +558,8 @@ fn hex_text(bytes: &[u8], seps: &[usize]) -> String {
 
 #[test]
 fn a_read_mra_leaves_inline_data_in_the_file() {
-    let dir = crate::adapter::testutil::scratch("mra-inline");
+    let tmp = crate::adapter::testutil::scratch();
+    let dir = tmp.path();
     let path = dir.join("Example Inline.mra");
     let body = "01 02 03 ".repeat(1000);
     let xml = format!(
@@ -620,7 +622,8 @@ fn a_read_mra_leaves_inline_data_in_the_file() {
 
 #[test]
 fn a_large_mra_under_the_cap_is_read() {
-    let dir = crate::adapter::testutil::scratch("mra-large");
+    let tmp = crate::adapter::testutil::scratch();
+    let dir = tmp.path();
     let path = dir.join("Example Large.mra");
     let body = "00 11 22 33 44 55 66 77\n".repeat(128 * 1024);
     let xml = format!("<m><rom index=\"0\"><part>{body}</part></rom></m>");
@@ -643,12 +646,13 @@ fn empty_document_has_no_zips() {
 
 #[test]
 fn read_and_missing_zips() {
-    let dir = crate::adapter::testutil::scratch("mra");
+    let tmp = crate::adapter::testutil::scratch();
+    let dir = tmp.path();
     let path = dir.join("Example Blaster.mra");
     std::fs::write(&path, SAMPLE).expect("write");
     let mra = read(&path).expect("read");
     std::fs::write(dir.join("EXBLAST.ZIP"), b"").expect("write");
-    assert_eq!(missing_zips(&mra, &dir), ["exparent.zip", "exsound.zip"]);
+    assert_eq!(missing_zips(&mra, dir), ["exparent.zip", "exsound.zip"]);
     assert!(matches!(read(&dir.join("absent.mra")), Err(Error::Io(_))));
 }
 
@@ -724,7 +728,8 @@ proptest! {
         let text = hex_text(&bytes, &seps);
         let xml = format!("<m><name>x</name><rom index=\"0\"><part>{text}</part><part>0A</part></rom></m>");
         let from_memory = parse(xml.as_bytes()).expect("parse");
-        let dir = crate::adapter::testutil::scratch("mra-inline-prop");
+        let tmp = crate::adapter::testutil::scratch();
+        let dir = tmp.path();
         let path = dir.join(format!("{tag}.mra"));
         std::fs::write(&path, &xml).expect("write");
         let from_file = read(&path).expect("read");
@@ -745,7 +750,7 @@ proptest! {
     }
 
     #[test]
-    fn hex_decodes_the_same_however_the_text_is_split(text in "[0-9a-fA-F ,\n]{0,64}", cut in 0usize..64) {
+    fn hex_decodes_the_same_however_the_text_is_split(text in "[0-9a-fA-Fgx+é ,\t\r\n]{0,64}", cut in 0usize..64) {
         let (head, tail) = text.as_bytes().split_at(cut.min(text.len()));
         let mut hex = Hex::default();
         let mut out = Vec::new();

@@ -5,9 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mistarr_clients::{
-    ClientError, ClientTorrentId, DownloadClient, SeedPolicy, TorrentState, TorrentStatus,
-};
+use mistarr_clients::{ClientError, DownloadClient, SeedPolicy, TorrentState, TorrentStatus};
 
 use super::transfer;
 use crate::app::{AppState, Options};
@@ -109,10 +107,10 @@ fn push_relative(out: &mut PathBuf, rel: &str) {
 ///
 /// ```
 /// use std::path::Path;
-/// use mistarr_clients::{FileProgress, InfoHash, TorrentState, TorrentStatus};
+/// use mistarr_clients::{FileProgress, TorrentState, TorrentStatus};
+/// use mistarr_core::InfoHash;
 /// use mistarr_server::db::downloads::{DownloadState, PollRow};
-/// use mistarr_server::db::ids::DownloadId;
-/// use mistarr_server::db::ids::SourceId;
+/// use mistarr_server::db::ids::{DownloadId, SourceId};
 /// let row = PollRow { id: DownloadId(1), state: DownloadState::Transferring, progress: 0.0,
 ///     staged_path: None, source_id: SourceId(1), file_index: 0, path: "a.nes".into(),
 ///     infohash: "ab".into(), torrent_name: "a.nes".into(), single_file: true,
@@ -250,10 +248,10 @@ impl Poller {
         group: &[PollRow],
     ) -> Result<Option<bool>> {
         let first = &group[0];
-        let Some(cid) = first.client_id.as_deref() else {
+        let Some(id) = first.client_id else {
             return Ok(Some(false));
         };
-        let (source, id) = (first.source_id, ClientTorrentId::new(cid));
+        let source = first.source_id;
         let policy = sources::seed_from_text(&first.seed_policy).unwrap_or(SeedPolicy::None);
         if !self.seeded.contains(&source) {
             match client.set_seed_policy(&id, policy.clone()).await {
@@ -434,7 +432,8 @@ pub fn should_stop(status: &TorrentStatus, open: usize, policy: &SeedPolicy) -> 
 mod tests {
     use super::*;
     use crate::app::testutil::state;
-    use mistarr_clients::{FileProgress, InfoHash};
+    use mistarr_clients::{ClientTorrentId, FileProgress};
+    use mistarr_core::InfoHash;
 
     fn row(file_index: u32, single: bool) -> PollRow {
         PollRow {
@@ -448,7 +447,7 @@ mod tests {
             infohash: "cd".into(),
             torrent_name: "Set".into(),
             single_file: single,
-            client_id: Some("cd".into()),
+            client_id: Some(ClientTorrentId::new(InfoHash::from_bytes([0xcd; 20]))),
             seed_policy: "none".into(),
             size: if file_index == 1 { 0 } else { 8 },
         }

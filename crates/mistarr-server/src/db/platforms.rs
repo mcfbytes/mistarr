@@ -1,7 +1,7 @@
 //! The `platforms` table, seeded from `mistarr_mister::platforms::PLATFORMS`.
 
 use mistarr_core::PlatformId;
-use mistarr_mister::{Kind, Platform};
+use mistarr_mister::Platform;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
@@ -22,23 +22,6 @@ pub struct PlatformRow {
     pub core_present: bool,
     /// Whether the user has the platform switched on.
     pub enabled: bool,
-}
-
-/// The `kind` column value for a table row's adapter family.
-///
-/// ```
-/// use mistarr_mister::Kind;
-/// assert_eq!(mistarr_server::db::platforms::kind_str(Kind::Disc), "disc");
-/// ```
-#[must_use]
-pub fn kind_str(kind: Kind) -> &'static str {
-    match kind {
-        Kind::Cartridge => "cartridge",
-        Kind::Disc => "disc",
-        Kind::Romset => "romset",
-        Kind::Arcade => "arcade",
-        _ => "other",
-    }
 }
 
 /// Inserts every row of `table`, refreshing name, directory and kind of rows
@@ -63,7 +46,7 @@ pub fn seed(conn: &mut Connection, table: &[Platform]) -> Result<usize> {
                name = excluded.name, core_dir = excluded.core_dir, kind = excluded.kind",
         )?;
         for p in table {
-            stmt.execute(params![p.id, p.name, p.core_dir, kind_str(p.kind)])?;
+            stmt.execute(params![p.id, p.name, p.core_dir, p.kind.as_str()])?;
         }
         drop(stmt);
         Ok(count(tx)?.saturating_sub(before))
@@ -266,17 +249,5 @@ mod tests {
         assert!(find(&c, &PlatformId("no-such-platform".into()))
             .expect("find")
             .is_none());
-    }
-
-    #[test]
-    fn every_kind_has_a_column_value() {
-        for (k, s) in [
-            (Kind::Cartridge, "cartridge"),
-            (Kind::Disc, "disc"),
-            (Kind::Romset, "romset"),
-            (Kind::Arcade, "arcade"),
-        ] {
-            assert_eq!(kind_str(k), s);
-        }
     }
 }

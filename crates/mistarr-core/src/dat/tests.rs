@@ -134,6 +134,8 @@ fn header_bytes_decode_spaced_hex_or_nothing() {
     for none in [None, Some(""), Some("  "), Some("4E4"), Some("NES")] {
         assert_eq!(rom(none).header_bytes(), None, "{none:?}");
     }
+    assert_eq!(decode_header("00 ff"), Some(vec![0, 0xff]));
+    assert_eq!(decode_header(""), None);
 }
 
 #[test]

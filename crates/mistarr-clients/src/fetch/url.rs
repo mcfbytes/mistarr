@@ -159,7 +159,7 @@ impl FetchUrl {
     pub fn last_segment(&self) -> Option<String> {
         let path = self.target.split(['?']).next().unwrap_or("");
         let last = path.rsplit('/').next().unwrap_or("");
-        let decoded = percent_decode(last);
+        let decoded = String::from_utf8_lossy(&mistarr_core::percent_decode(last)).into_owned();
         (!decoded.is_empty()).then_some(decoded)
     }
 
@@ -203,36 +203,6 @@ impl FetchUrl {
         };
         Self::parse(&absolute)
     }
-}
-
-/// Decodes `%XX` escapes, keeping malformed ones as written; invalid UTF-8 is replaced.
-///
-/// ```
-/// assert_eq!(mistarr_clients::fetch::percent_decode("a%20b%zz"), "a b%zz");
-/// ```
-#[must_use]
-pub fn percent_decode(text: &str) -> String {
-    String::from_utf8_lossy(&percent_decode_bytes(text)).into_owned()
-}
-
-/// The bytes `%XX` escapes in `text` stand for, malformed escapes kept as written.
-pub(crate) fn percent_decode_bytes(text: &str) -> Vec<u8> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        let hex = |b: u8| char::from(b).to_digit(16);
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
-                out.push(u8::try_from(h * 16 + l).unwrap_or(b'?'));
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    out
 }
 
 #[cfg(test)]
@@ -305,14 +275,20 @@ mod tests {
                 let _ = u.last_segment();
                 let _ = u.join(&text);
             }
-            let _ = percent_decode(&text);
         }
     }
 
     #[test]
-    fn percent_escapes_decode() {
-        assert_eq!(percent_decode("%41%2f%"), "A/%");
-        assert_eq!(percent_decode("%4"), "%4");
-        assert_eq!(percent_decode("%ff"), "\u{fffd}");
+    fn last_segments_decode_escapes_and_keep_malformed_ones() {
+        let seg = |u: &str| FetchUrl::parse(u).expect("valid").last_segment();
+        assert_eq!(
+            seg("http://example.invalid/%41%2f%").as_deref(),
+            Some("A/%")
+        );
+        assert_eq!(seg("http://example.invalid/a%4").as_deref(), Some("a%4"));
+        assert_eq!(
+            seg("http://example.invalid/%ff").as_deref(),
+            Some("\u{fffd}")
+        );
     }
 }

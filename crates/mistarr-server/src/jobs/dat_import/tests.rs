@@ -1047,11 +1047,11 @@ fn an_export_header_lets_placement_add_it_back() {
             })?)
         })
         .expect("rom");
-    let bytes = crate::jobs::import::parse_header(&stored).expect("hex");
+    let bytes = mistarr_core::hex::decode_spaced(&stored).expect("hex");
     assert_eq!(bytes.len(), 16);
     let entry = mistarr_mister::DatEntry {
         name: "Example Quest (World)".into(),
-        roms: vec![mistarr_mister::DatRom {
+        roms: vec![mistarr_mister::PlaceRom {
             name,
             size: u64::try_from(size).expect("size"),
             header: Some(bytes.clone()),

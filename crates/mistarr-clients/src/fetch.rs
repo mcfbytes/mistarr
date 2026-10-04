@@ -8,11 +8,11 @@ use http_body_util::{BodyExt, Empty};
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{self, HeaderMap};
 use hyper::{Request, StatusCode};
-use hyper_util::rt::TokioIo;
 use rustls::pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
-use tokio::task::JoinHandle;
+
+use crate::http::{self, AbortOnDrop};
 
 mod disposition;
 mod roots;
@@ -20,8 +20,7 @@ mod url;
 
 pub use disposition::disposition_file_name;
 pub use roots::{Roots, RootsOrigin, CERT_FILE_ENV, SYSTEM_BUNDLES};
-use url::percent_decode_bytes;
-pub use url::{percent_decode, FetchUrl};
+pub use url::FetchUrl;
 
 #[cfg(test)]
 mod tests;
@@ -182,14 +181,6 @@ pub struct Fetcher {
     local: fn(IpAddr) -> bool,
 }
 
-struct AbortOnDrop(JoinHandle<()>);
-
-impl Drop for AbortOnDrop {
-    fn drop(&mut self) {
-        self.0.abort();
-    }
-}
-
 impl Fetcher {
     /// A fetcher trusting `roots` for https, over rustls with the ring provider.
     ///
@@ -332,13 +323,7 @@ impl Fetcher {
         IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let broke = |e: hyper::Error| FetchError::Transfer(e.to_string());
-        let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io))
-            .await
-            .map_err(broke)?;
-        // Errors surface through the request and body futures instead.
-        let driver = AbortOnDrop(tokio::spawn(async move {
-            let _ = conn.await;
-        }));
+        let (mut sender, driver) = http::handshake(io).await.map_err(broke)?;
         let req = Request::get(url.target())
             .header(header::HOST, url.authority())
             .header(

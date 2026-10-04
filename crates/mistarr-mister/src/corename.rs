@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use mistarr_core::PlatformId;
 
+use crate::adapter::has_extension;
 use crate::platforms::{by_id, for_core, Platform, PLATFORMS};
 use crate::Result;
 
@@ -39,7 +40,8 @@ pub struct InstalledCore {
 ///
 /// ```
 /// use mistarr_mister::corename::{read_corename, CoreState};
-/// let path = std::env::temp_dir().join("mistarr-doc-corename");
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = dir.path().join("CORENAME");
 /// std::fs::write(&path, "SNES\n").unwrap();
 /// assert_eq!(read_corename(&path).unwrap(), CoreState::Running("SNES".into()));
 /// ```
@@ -58,10 +60,11 @@ pub fn read_corename(path: &Path) -> Result<CoreState> {
 /// and also to any row whose launch cores claim it by name.
 ///
 /// ```
-/// let root = std::env::temp_dir().join("mistarr-doc-cores");
+/// let tmp = tempfile::tempdir().unwrap();
+/// let root = tmp.path();
 /// std::fs::create_dir_all(root.join("_Console")).unwrap();
 /// std::fs::write(root.join("_Console/SNES_20240101.rbf"), b"").unwrap();
-/// let cores = mistarr_mister::corename::installed_cores(&root);
+/// let cores = mistarr_mister::corename::installed_cores(root);
 /// assert!(cores.iter().any(|c| c.name == "SNES" && c.platforms[0].0 == "snes"));
 /// ```
 #[must_use]
@@ -131,10 +134,7 @@ fn collect_rbf(dir: &Path, depth: u8, arcade: bool, out: &mut Vec<RbfFile>) {
             if depth > 0 {
                 collect_rbf(&path, depth - 1, arcade, out);
             }
-        } else if path
-            .extension()
-            .is_some_and(|e| e.eq_ignore_ascii_case("rbf"))
-        {
+        } else if has_extension(&path, "rbf") {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                 let (name, date) = split_date(stem);
                 out.push(RbfFile {
@@ -165,7 +165,8 @@ mod tests {
 
     #[test]
     fn corename_states() {
-        let dir = scratch("corename");
+        let tmp = scratch();
+        let dir = tmp.path();
         let path = dir.join("CORENAME");
         for (text, want) in [
             ("MENU", CoreState::Menu),
@@ -181,7 +182,8 @@ mod tests {
 
     #[test]
     fn installed_cores_walks_one_level_and_maps_platforms() {
-        let root = scratch("cores");
+        let tmp = scratch();
+        let root = tmp.path();
         for (dir, file) in [
             ("_Console", "NES_20240101.rbf"),
             ("_Console", "NES_20230101.rbf"),
@@ -194,7 +196,7 @@ mod tests {
             std::fs::create_dir_all(root.join(dir)).expect("mkdir");
             std::fs::write(root.join(dir).join(file), b"").expect("write");
         }
-        let cores = installed_cores(&root);
+        let cores = installed_cores(root);
         let names: Vec<_> = cores.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, ["Gameboy", "Minimig", "NES", "examplecore"]);
         let nes = cores.iter().find(|c| c.name == "NES").expect("nes");
@@ -210,7 +212,8 @@ mod tests {
 
     #[test]
     fn every_core_under_arcade_maps_to_the_arcade_platform() {
-        let root = scratch("arcade-cores");
+        let tmp = scratch();
+        let root = tmp.path();
         for (dir, file) in [
             ("_Arcade", "Arcade-Example_20240101.rbf"),
             ("_Arcade/cores", "examplecore_20240101.rbf"),
@@ -219,7 +222,7 @@ mod tests {
             std::fs::create_dir_all(root.join(dir)).expect("mkdir");
             std::fs::write(root.join(dir).join(file), b"").expect("write");
         }
-        let cores = installed_cores(&root);
+        let cores = installed_cores(root);
         assert_eq!(cores.len(), 2);
         for core in &cores {
             assert_eq!(
@@ -233,10 +236,11 @@ mod tests {
 
     #[test]
     fn an_arcade_core_a_row_claims_also_maps_to_that_row() {
-        let root = scratch("claimed-arcade");
+        let tmp = scratch();
+        let root = tmp.path();
         std::fs::create_dir_all(root.join("_Arcade/cores")).expect("mkdir");
         std::fs::write(root.join("_Arcade/cores/JTNGP_20240101.rbf"), b"").expect("write");
-        let cores = installed_cores(&root);
+        let cores = installed_cores(root);
         let ngp = cores.iter().find(|c| c.name == "JTNGP").expect("core");
         assert_eq!(
             ngp.platforms,
@@ -253,10 +257,11 @@ mod tests {
 
     #[test]
     fn rbf_files_keep_dates_and_paths() {
-        let root = scratch("rbf-files");
+        let tmp = scratch();
+        let root = tmp.path();
         std::fs::create_dir_all(root.join("_Console")).expect("mkdir");
         std::fs::write(root.join("_Console/NES_20240101.rbf"), b"").expect("write");
-        let files = rbf_files(&root);
+        let files = rbf_files(root);
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].date.as_deref(), Some("20240101"));
         assert_eq!(files[0].path, root.join("_Console/NES_20240101.rbf"));

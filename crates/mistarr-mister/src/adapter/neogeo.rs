@@ -5,14 +5,12 @@ use std::collections::HashSet;
 use std::io::{self, BufRead, BufReader, Read as _};
 use std::path::{Path, PathBuf};
 
-use mistarr_core::xml::{check_utf8, lossy, Capped, EscapeInvalid};
+use mistarr_core::dat::{MAX_DEPTH, MAX_EVENT_BYTES};
+use mistarr_core::xml::{attr_value, lossy, CappedReader};
 use quick_xml::events::Event;
-use quick_xml::{Reader, XmlVersion};
 
 use super::xml_caps;
-use super::{
-    basename, extension, row_methods, safe_name, staged_name, CoreAdapter, PlacementPlan, Step,
-};
+use super::{basename, safe_name, staged_name, CoreAdapter, PlacementPlan};
 use crate::input::{DatEntry, StagedFile, StagedKind};
 use crate::platforms::Platform;
 use crate::{Error, Result};
@@ -61,7 +59,7 @@ fn too_big() -> Error {
 /// # Errors
 ///
 /// [`Error::Romsets`] when the document is not well-formed XML,
-/// [`Error::XmlTooDeep`] past `mistarr_core::dat::MAX_DEPTH` levels of nesting,
+/// [`Error::XmlTooDeep`] past [`MAX_DEPTH`] levels of nesting,
 /// [`Error::XmlEventTooLarge`] past one capped event, and [`Error::XmlOutputTooLarge`]
 /// past [`MAX_SETS`] or [`MAX_BIOS_NAMES`].
 ///
@@ -73,39 +71,26 @@ fn too_big() -> Error {
 /// assert_eq!(r.bios, ["exbios.rom"]);
 /// ```
 pub fn parse_romsets<R: BufRead>(xml: R) -> Result<Romsets> {
-    let mut reader = Reader::from_reader(Capped::new(EscapeInvalid::new(xml)));
-    let mut buf = Vec::new();
+    let mut reader = CappedReader::new(xml, MAX_EVENT_BYTES, MAX_DEPTH);
     let mut out = Romsets::default();
-    let mut depth = xml_caps::Depth::default();
     let mut sets_seen: HashSet<String> = HashSet::new();
     let mut bios_seen: HashSet<String> = HashSet::new();
     loop {
-        let position = reader.get_ref().get_ref().position();
-        let event = xml_caps::read_capped_mapped(&mut reader, &mut buf, position, romsets_err)?;
-        depth.track(&event, position)?;
+        let position = reader.position();
+        let event = reader
+            .read_event()
+            .map_err(|e| xml_caps::read_error(e, 0, romsets_err))?;
         match event {
             Event::Start(e) | Event::Empty(e)
                 if e.local_name().as_ref().eq_ignore_ascii_case("romset") =>
             {
-                for a in e.attributes() {
-                    let a = a.map_err(|e| romsets_err(e.into(), position))?;
-                    if a.key.local_name().as_ref() == "name" {
-                        let v = a
-                            .normalized_value(XmlVersion::Implicit1_0)
-                            .map_err(|e| romsets_err(e, position))?;
-                        check_utf8(&v)
-                            .map_err(|e| romsets_err(quick_xml::Error::from(e), position))?;
-                        let v = v.trim().to_owned();
-                        if !v.is_empty() && v.len() <= MAX_NAME_BYTES && sets_seen.insert(v.clone())
-                        {
-                            if out.sets.len() >= MAX_SETS {
-                                return Err(xml_caps::output_too_large(
-                                    "romsets", MAX_SETS, position,
-                                ));
-                            }
-                            out.sets.push(v);
-                        }
+                let name = attr_value(&e, "name").map_err(|e| romsets_err(e, position))?;
+                let v = name.as_deref().map_or("", str::trim);
+                if !v.is_empty() && v.len() <= MAX_NAME_BYTES && sets_seen.insert(v.to_owned()) {
+                    if out.sets.len() >= MAX_SETS {
+                        return Err(xml_caps::output_too_large("romsets", MAX_SETS, position));
                     }
+                    out.sets.push(v.to_owned());
                 }
             }
             Event::Comment(c) => {
@@ -156,8 +141,8 @@ fn is_file_name(s: &str) -> bool {
 /// not well-formed or its output outgrows a cap.
 ///
 /// ```
-/// let dir = std::env::temp_dir().join("mistarr-doc-romsets-none");
-/// assert!(mistarr_mister::adapter::neogeo::read_romsets(&dir).unwrap().is_none());
+/// let dir = tempfile::tempdir().unwrap();
+/// assert!(mistarr_mister::adapter::neogeo::read_romsets(dir.path()).unwrap().is_none());
 /// ```
 pub fn read_romsets(neogeo_dir: &Path) -> Result<Option<Romsets>> {
     let file = match std::fs::File::open(neogeo_dir.join(ROMSETS_FILE)) {
@@ -179,8 +164,10 @@ pub fn read_romsets(neogeo_dir: &Path) -> Result<Option<Romsets>> {
 /// Whether romset `name` is in `neogeo_dir` as a directory or a `.zip`.
 ///
 /// ```
-/// let dir = std::env::temp_dir();
-/// assert!(!mistarr_mister::adapter::neogeo::romset_on_disk(&dir, "mistarr-absent-set"));
+/// let dir = tempfile::tempdir().unwrap();
+/// std::fs::write(dir.path().join("exblast.zip"), b"").unwrap();
+/// assert!(mistarr_mister::adapter::neogeo::romset_on_disk(dir.path(), "exblast"));
+/// assert!(!mistarr_mister::adapter::neogeo::romset_on_disk(dir.path(), "exmissing"));
 /// ```
 #[must_use]
 pub fn romset_on_disk(neogeo_dir: &Path, name: &str) -> bool {
@@ -194,8 +181,6 @@ pub fn romset_on_disk(neogeo_dir: &Path, name: &str) -> bool {
 pub(super) struct NeoGeo(pub &'static Platform);
 
 impl CoreAdapter for NeoGeo {
-    row_methods!();
-
     fn plan_placement(&self, entry: &DatEntry, staged: &StagedFile) -> Result<PlacementPlan> {
         let name = safe_name(&entry.name)?;
         let final_rel_path = match staged.kind {
@@ -216,17 +201,7 @@ impl CoreAdapter for NeoGeo {
                 return Err(Error::MissingRom(rom.name.clone()));
             }
         }
-        Ok(PlacementPlan {
-            steps: vec![Step::Rename {
-                from: staged_name(staged)?,
-                to: final_rel_path.clone(),
-            }],
-            final_rel_path,
-        })
-    }
-
-    fn accepts(&self, path: &Path) -> bool {
-        extension(path).as_deref() == Some("zip") || path.is_dir()
+        Ok(PlacementPlan::rename(staged_name(staged)?, final_rel_path))
     }
 }
 
@@ -234,10 +209,10 @@ impl CoreAdapter for NeoGeo {
 mod tests {
     use std::fmt::Write as _;
 
-    use mistarr_core::dat::MAX_DEPTH;
     use proptest::prelude::*;
 
     use super::super::testutil::*;
+    use super::super::Step;
     use super::*;
 
     fn game() -> DatEntry {
@@ -283,14 +258,6 @@ mod tests {
         assert!(adapter("neogeo")
             .plan_placement(&game(), &file("x.p1", 1, &[]))
             .is_err());
-    }
-
-    #[test]
-    fn accepts_zip_and_directory() {
-        let a = adapter("neogeo");
-        assert!(a.accepts(Path::new("examplequest.zip")));
-        assert!(a.accepts(&scratch("neogeo-dir")));
-        assert!(!a.accepts(Path::new("examplequest.p1")));
     }
 
     const ROMSETS: &str = r#"<!--
@@ -392,11 +359,12 @@ Files that must be present:
 
     #[test]
     fn read_romsets_refuses_an_oversized_file() {
-        let dir = crate::adapter::testutil::scratch("neogeo-romsets-big");
+        let tmp = crate::adapter::testutil::scratch();
+        let dir = tmp.path();
         let pad = " ".repeat(usize::try_from(MAX_ROMSETS_BYTES).expect("fits"));
         std::fs::write(dir.join(ROMSETS_FILE), format!("<romsets>{pad}</romsets>")).expect("write");
         assert!(matches!(
-            read_romsets(&dir),
+            read_romsets(dir),
             Err(Error::FileTooLarge { limit }) if limit == MAX_ROMSETS_BYTES
         ));
     }
@@ -430,17 +398,18 @@ Files that must be present:
 
     #[test]
     fn romsets_file_and_presence_on_disk() {
-        let dir = scratch("neogeo-romsets");
-        assert!(read_romsets(&dir).expect("read").is_none());
+        let tmp = scratch();
+        let dir = tmp.path();
+        assert!(read_romsets(dir).expect("read").is_none());
         std::fs::write(dir.join(ROMSETS_FILE), ROMSETS).expect("write");
-        let r = read_romsets(&dir).expect("read").expect("present");
+        let r = read_romsets(dir).expect("read").expect("present");
         assert_eq!(r.sets.len(), 2);
         std::fs::create_dir_all(dir.join("examplequest")).expect("mkdir");
         std::fs::write(dir.join("exblast.zip"), b"").expect("write");
-        assert!(romset_on_disk(&dir, "examplequest"));
-        assert!(romset_on_disk(&dir, "exblast"));
-        assert!(!romset_on_disk(&dir, "exmissing"));
-        assert!(!romset_on_disk(&dir, "../neogeo-romsets"));
+        assert!(romset_on_disk(dir, "examplequest"));
+        assert!(romset_on_disk(dir, "exblast"));
+        assert!(!romset_on_disk(dir, "exmissing"));
+        assert!(!romset_on_disk(dir, "../neogeo-romsets"));
     }
 
     proptest! {

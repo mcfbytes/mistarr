@@ -3,8 +3,6 @@
   import { applyStatus, getStatus } from './stores/status.svelte';
   import type { ClientKind } from './types';
 
-  const isMock = import.meta.env.VITE_MOCK === '1';
-
   const client = $derived(getStatus()?.client ?? null);
   const canTransmission = $derived(
     !!client && (client.transmission_service || client.transmission_on_path)
@@ -14,9 +12,6 @@
   let error = $state<string | null>(null);
 
   async function start(kind: ClientKind): Promise<void> {
-    if (isMock) {
-      return;
-    }
     starting = kind;
     error = null;
     try {

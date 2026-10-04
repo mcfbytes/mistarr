@@ -3,7 +3,6 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use mistarr_core::hash::HeaderRule;
 use mistarr_core::PlatformId;
 use mistarr_sources::binding::{Confidence, RomRef};
 use mistarr_sources::fuzzy::{SizeIndex, SizedRom};
@@ -642,12 +641,7 @@ impl<'c> SqlSizeIndex<'c> {
 /// ```
 #[must_use]
 pub fn header_len(platform: &PlatformId) -> u64 {
-    mistarr_mister::platforms::by_id(&platform.0).map_or(0, |p| {
-        p.header_rule
-            .parse::<HeaderRule>()
-            .unwrap_or_default()
-            .header_len()
-    })
+    mistarr_mister::platforms::by_id(&platform.0).map_or(0, |p| p.header_rule.header_len())
 }
 
 impl SizeIndex for SqlSizeIndex<'_> {

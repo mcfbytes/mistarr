@@ -1,5 +1,4 @@
-import { PAGE_SIZE } from './paging';
-import { BROWSE_FLAGS } from './types';
+import { mockKnob, mockScenario } from './knobs';
 import type {
   CoresResult,
   DatVersion,
@@ -7,7 +6,6 @@ import type {
   ImportLogEntry,
   IncomingFile,
   Job,
-  Paged,
   Platform,
   Settings,
   Source,
@@ -21,15 +19,7 @@ import type {
   TitleGroup,
   UnidentifiedFile,
   WizardStatus
-} from './types';
-
-/**
- * Mock mode's scenario, from `?mock=` in the page URL: `idle` shows no work,
- * and `showcase` an idle, fully set up board with more platforms, for the README.
- */
-export function mockScenario(): string {
-  return new URLSearchParams(globalThis.location.search).get('mock') ?? 'busy';
-}
+} from '../lib/types';
 
 export const fixturePlatforms: Platform[] = [
   {
@@ -197,101 +187,37 @@ export function fixtureTitles(platformId: string, count = 60, filters: TitleFilt
 }
 
 /**
- * Mock group ids the mock server no longer lists, read from localStorage
- * `mistarr.mockRemovedIds` as a JSON array of numbers, standing in for rows a
+ * Group ids the mock no longer lists, from knob `removedIds`, standing in for rows a
  * scan or an import moves out of the browsed list.
  */
-export function mockRemovedIds(): number[] {
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockRemovedIds') ?? '[]');
-    return Array.isArray(parsed) ? parsed.filter((v): v is number => typeof v === 'number') : [];
-  } catch {
-    // Storage blocked or the value is not JSON: nothing removed.
-    return [];
-  }
+export function removedIds(): number[] {
+  return mockKnob<unknown[]>('removedIds', []).filter((v): v is number => typeof v === 'number');
 }
 
 /**
- * Mock latency in ms of page `page` of a title search for `q`, read from
- * localStorage `mistarr.mockDelayMs`: a number for every request, or an object
- * of numbers keyed `q#page` or `q`, with `*` as the default. A negative value
+ * Latency in ms of page `page` of a title search for `q`, from knob `delayMs`: an
+ * object of numbers keyed `q#page` or `q`, with `*` as the default. A negative value
  * makes the request fail.
  */
-export function mockDelayMs(q: string, page: number): number {
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockDelayMs') ?? '0');
-    if (typeof parsed === 'number') {
-      return parsed;
-    }
-    if (parsed !== null && typeof parsed === 'object') {
-      const byQuery = parsed as Record<string, unknown>;
-      const ms = byQuery[`${q}#${page}`] ?? byQuery[q] ?? byQuery['*'];
-      return typeof ms === 'number' ? ms : 0;
-    }
-  } catch {
-    // Storage blocked or the value is not JSON: no delay.
-  }
-  return 0;
+export function delayMs(q: string, page: number): number {
+  const byQuery = mockKnob<Record<string, unknown>>('delayMs', {});
+  const ms = byQuery[`${q}#${page}`] ?? byQuery[q] ?? byQuery['*'];
+  return typeof ms === 'number' ? ms : 0;
 }
 
-/**
- * The mock status: `fixtureStatus` with the fields in localStorage
- * `mistarr.mockStatus`, a JSON object, laid over it.
- */
-export function mockStatus(): SystemStatus {
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockStatus') ?? '{}');
-    if (parsed !== null && typeof parsed === 'object') {
-      return { ...fixtureStatus, ...(parsed as Partial<SystemStatus>) };
-    }
-  } catch {
-    // Storage blocked or the value is not JSON: the plain fixture.
-  }
-  return fixtureStatus;
-}
-
-/** Whether the mock settings load should fail, from localStorage `mistarr.mockSettingsFail`. */
-export function mockSettingsShouldFail(): boolean {
-  try {
-    return localStorage.getItem('mistarr.mockSettingsFail') === '1';
-  } catch {
-    return false;
-  }
-}
-
-/** Keeps what a mock save would send, in localStorage `mistarr.mockSavedSettings`. */
-export function recordMockSave(settings: Settings): void {
-  try {
-    localStorage.setItem('mistarr.mockSavedSettings', JSON.stringify(settings));
-  } catch {
-    // Storage blocked: nothing to keep.
-  }
-}
-
-/**
- * Extra present, enabled mock platforms named by their ids, read from
- * localStorage `mistarr.mockPlatformIds` as a JSON array of strings.
- */
-export function mockExtraPlatforms(): Platform[] {
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockPlatformIds') ?? '[]');
-    if (Array.isArray(parsed)) {
-      return parsed
-        .filter((id): id is string => typeof id === 'string')
-        .map((id) => ({
-          id,
-          name: id,
-          core_dir: id,
-          kind: 'cartridge',
-          core_present: true,
-          enabled: true,
-          counts: { titles: 0, have: 0, wanted: 0, unmatched_files: 0, unidentified_files: 0, failing_check: 0, partial: 0 }
-        }));
-    }
-  } catch {
-    // Storage blocked or the value is not JSON: no extra platforms.
-  }
-  return [];
+/** Extra present, enabled platforms named by their ids, from knob `platformIds`. */
+export function extraPlatforms(): Platform[] {
+  return mockKnob<unknown[]>('platformIds', [])
+    .filter((id): id is string => typeof id === 'string')
+    .map((id) => ({
+      id,
+      name: id,
+      core_dir: id,
+      kind: 'cartridge',
+      core_present: true,
+      enabled: true,
+      counts: { titles: 0, have: 0, wanted: 0, unmatched_files: 0, unidentified_files: 0, failing_check: 0, partial: 0 }
+    }));
 }
 
 export function fixtureTitle(id: number): TitleDetail {
@@ -459,19 +385,14 @@ export const fixtureStatus: SystemStatus = {
 };
 
 /**
- * The status mock mode reports: `mockStatus`, or at the menu with nothing
- * held for `showcase`.
+ * The status mock mode reports: `fixtureStatus` with the fields of knob `status` laid
+ * over it, or at the menu with nothing held for `showcase`.
  */
 export function scenarioStatus(): SystemStatus {
-  const base = mockStatus();
+  const base = { ...fixtureStatus, ...mockKnob<Partial<SystemStatus>>('status', {}) };
   return mockScenario() === 'showcase'
     ? { ...base, version: '0.3.0', release: true, corename: 'MENU', paused: false, pause_reason: null, waiting: [], client_hold: null }
     : base;
-}
-
-/** Browse's flag choices: the README showcase leaves out the `pirate` DAT tag. */
-export function scenarioBrowseFlags(): readonly string[] {
-  return mockScenario() === 'showcase' ? BROWSE_FLAGS.filter((f) => f !== 'pirate') : BROWSE_FLAGS;
 }
 
 /** Files not identified, by platform, for the Platforms card. */
@@ -618,18 +539,11 @@ export const fixtureSources: Source[] = [
 ];
 
 /**
- * `fixtureSources` plus `n` synthetic extra rows, from localStorage
- * `mistarr.mockSourceCount`, to exercise a list past the API's page default.
+ * `fixtureSources` plus as many synthetic rows as knob `sourceCount` says, to
+ * exercise a list past the API's page default.
  */
 export function mockSources(): Source[] {
-  let extra = 0;
-  try {
-    const parsed: unknown = JSON.parse(localStorage.getItem('mistarr.mockSourceCount') ?? '0');
-    extra = typeof parsed === 'number' ? parsed : 0;
-  } catch {
-    // Storage blocked or the value is not JSON: no extra rows.
-  }
-  const generated: Source[] = Array.from({ length: extra }, (_, i) => ({
+  const generated: Source[] = Array.from({ length: mockKnob<number>('sourceCount', 0) }, (_, i) => ({
     id: 1000 + i,
     infohash: (1000 + i).toString(16).padStart(40, '0'),
     display_name: `Generated bundle ${i + 1}`,
@@ -649,27 +563,6 @@ export function mockSources(): Source[] {
     pending_binding: null
   }));
   return [...fixtureSources, ...generated];
-}
-
-/** A test's override of the mock page size, from `mistarr.mockPageCap`; the API's own cap otherwise. */
-function mockPageCap(): number {
-  try {
-    const n = Number(localStorage.getItem('mistarr.mockPageCap'));
-    return Number.isInteger(n) && n > 0 ? Math.min(n, PAGE_SIZE) : PAGE_SIZE;
-  } catch {
-    return PAGE_SIZE;
-  }
-}
-
-/** Mimics the server's `?limit=&offset=` rules (capped at `PAGE_SIZE`) over an array. */
-function mockPage<T>(all: T[], limit: number, offset: number): Paged<T> {
-  const capped = Math.min(limit, mockPageCap());
-  return { items: all.slice(offset, offset + capped), total: all.length };
-}
-
-/** `mockSources()` paged the way `GET /sources` is, for stores that page through fixtures. */
-export function mockSourcesPage(limit: number, offset: number): Promise<Paged<Source>> {
-  return Promise.resolve(mockPage(mockSources(), limit, offset));
 }
 
 export const fixtureIncomingDats: IncomingFile[] = [

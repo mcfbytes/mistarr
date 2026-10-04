@@ -3,9 +3,8 @@
   import { api, ApiError, errorMessage } from '../lib/api';
   import { findSource, loadSources, patchSource } from '../lib/stores/sources.svelte';
   import { findPlatform, loadPlatforms, platformsLoaded } from '../lib/stores/platforms.svelte';
-  import { getFinishedJob, getJobs, jobOutcome, runMockJob } from '../lib/stores/jobs.svelte';
+  import { getFinishedJob, getJobs, jobOutcome } from '../lib/stores/jobs.svelte';
   import { showToast } from '../lib/stores/toast.svelte';
-  import { fixtureSources, mockSourceDetail, mockSourceFilesPage, mockSourcePreview } from '../lib/fixtures';
   import { describeProgress, jobStatus, sourceStatus } from '../lib/status';
   import { confidenceLabel } from '../lib/availability';
   import { titleUrl } from '../lib/router.svelte';
@@ -26,7 +25,6 @@
 
   const { sourceId }: { sourceId: number } = $props();
 
-  const isMock = import.meta.env.VITE_MOCK === '1';
   const PAGE = 50;
   const NONE = '-';
   const FILTERS: { value: SourceFileFilter | undefined; label: string }[] = [
@@ -61,7 +59,6 @@
   let applying = $state(false);
   let resetting = $state(false);
   let jobId = $state<number | null>(null);
-  let mockJobs = 0;
 
   const row = $derived(findSource(sourceId));
   const status = $derived(getStatus());
@@ -98,12 +95,6 @@
   });
 
   async function loadDetail(): Promise<void> {
-    if (isMock) {
-      const r = findSource(sourceId);
-      missing = !r;
-      detail = r ? mockSourceDetail(r) : null;
-      return;
-    }
     try {
       detail = await api.source(sourceId);
       missing = false;
@@ -152,12 +143,7 @@
     controller = c;
     filesLoading = true;
     try {
-      const r = findSource(sourceId);
-      const page = isMock
-        ? r
-          ? mockSourceFilesPage(r, opts)
-          : { items: [], total: 0 }
-        : await api.sourceFiles(sourceId, opts, c.signal);
+      const page = await api.sourceFiles(sourceId, opts, c.signal);
       if (c.signal.aborted) {
         return;
       }
@@ -230,9 +216,6 @@
     if (detail) {
       detail = { ...detail, seed_policy: policy };
     }
-    if (isMock) {
-      return;
-    }
     try {
       const updated = await api.updateSource(sourceId, { seed_policy: policy });
       patchSource(sourceId, updated);
@@ -271,8 +254,7 @@
     const c = new AbortController();
     previewController = c;
     try {
-      const r = findSource(sourceId);
-      const got = isMock ? (r ? mockSourcePreview(r) : null) : await api.sourcePreview(sourceId, c.signal);
+      const got = await api.sourcePreview(sourceId, c.signal);
       if (!c.signal.aborted) {
         preview = got;
       }
@@ -302,37 +284,6 @@
     return `Binding to ${name} would match ${about}${chosenMatch ?? 0} of ${preview?.total ?? 0} files. Its files are matched again in the background, and later DAT loads keep this choice.`;
   }
 
-  /** Mock mode: runs a binding job, then shows the source as the server would leave it. */
-  function mockBinding(platformId: string | null, automatic: boolean, matched: number): void {
-    mockJobs += 1;
-    const id = 9000 + mockJobs;
-    const name = detail?.display_name ?? '';
-    const payload: Record<string, unknown> = { source_id: sourceId, source_name: name };
-    jobId = id;
-    const fileCount = detail?.file_count ?? 0;
-    const job = {
-      id,
-      kind: 'bind_source',
-      lane: 'background' as const,
-      payload,
-      state: 'running' as const,
-      progress: { phase: 'binding', source_id: sourceId },
-      reason: null,
-      created_at: 0,
-      updated_at: 0
-    };
-    runMockJob(job, { source_id: sourceId, platform_id: platformId, matched, total: fileCount }, 2500, () => {
-      patchSource(sourceId, {
-        pending_binding: null,
-        platform_id: platformId,
-        state: platformId ? 'bound' : 'unbound',
-        matched_count: matched,
-        bind_score: platformId && fileCount > 0 ? matched / fileCount : null,
-        reason: platformId ? null : automatic ? detail?.reason ?? null : 'Marked as not a game set. It is not bound automatically.'
-      });
-    });
-  }
-
   async function apply(): Promise<void> {
     if (!choice || applying) {
       return;
@@ -340,14 +291,9 @@
     applying = true;
     const platformId = choice === NONE ? null : choice;
     try {
-      if (isMock) {
-        patchSource(sourceId, { user_binding: true, pending_binding: { automatic: false, platform_id: platformId } });
-        mockBinding(platformId, false, chosenMatch ?? 0);
-      } else {
-        const updated = await api.updateSource(sourceId, { platform_id: platformId });
-        jobId = updated.job_id;
-        patchSource(sourceId, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
-      }
+      const updated = await api.updateSource(sourceId, { platform_id: platformId });
+      jobId = updated.job_id;
+      patchSource(sourceId, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
       void closePanel();
       showToast(platformId ? `Binding to ${platformName(platformId)} queued.` : 'Setting the source aside queued.', 'info');
     } catch (err) {
@@ -363,15 +309,9 @@
     }
     resetting = true;
     try {
-      if (isMock) {
-        const original = fixtureSources.find((s) => s.id === sourceId);
-        patchSource(sourceId, { user_binding: false, pending_binding: { automatic: true, platform_id: null } });
-        mockBinding(original?.platform_id ?? null, true, original?.matched_count ?? 0);
-      } else {
-        const updated = await api.updateSource(sourceId, { binding: 'automatic' });
-        jobId = updated.job_id;
-        patchSource(sourceId, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
-      }
+      const updated = await api.updateSource(sourceId, { binding: 'automatic' });
+      jobId = updated.job_id;
+      patchSource(sourceId, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
       showToast('Automatic binding queued.', 'info');
       // Reset leaves with the user's binding; focus goes to the control that stays.
       await tick();
@@ -396,9 +336,7 @@
     untrack(() => {
       jobId = null;
       showToast(text, done.state === 'done' ? 'success' : 'error');
-      if (!isMock) {
-        void loadSources().catch(() => undefined);
-      }
+      void loadSources().catch(() => undefined);
     });
   });
 

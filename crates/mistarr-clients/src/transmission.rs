@@ -1,6 +1,5 @@
 //! Transmission over JSON-RPC; see `docs/DOWNLOAD-CLIENTS.md` "Transmission".
 
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -8,16 +7,18 @@ use async_trait::async_trait;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use hyper::body::Bytes;
+use mistarr_core::InfoHash;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use tokio::sync::Mutex;
 
 use crate::http::{self, Endpoint, Headers};
+use crate::wanted::Wanted;
 use crate::{
-    metainfo, ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId, Direction,
-    DownloadClient, FileProgress, InfoHash, RateLimit, Result, SeedPolicy, TorrentSource,
-    TorrentState, TorrentStatus,
+    ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId, Direction, DownloadClient,
+    FileProgress, RateLimit, RemotePathMap, Result, SeedPolicy, TorrentSource, TorrentState,
+    TorrentStatus,
 };
 
 /// Fields requested by [`DownloadClient::status`]: `fileStats` without `files`, whose
@@ -56,6 +57,7 @@ pub struct Transmission {
     endpoint: Endpoint,
     authorization: Option<String>,
     timeout: Duration,
+    path_map: RemotePathMap,
     session: Mutex<Option<String>>,
 }
 
@@ -68,6 +70,7 @@ impl std::fmt::Debug for Transmission {
                 &self.authorization.as_ref().map(|_| "<redacted>"),
             )
             .field("timeout", &self.timeout)
+            .field("path_map", &self.path_map)
             .finish_non_exhaustive()
     }
 }
@@ -111,6 +114,7 @@ impl Transmission {
             endpoint: Endpoint::parse(url)?,
             authorization: None,
             timeout: Self::DEFAULT_TIMEOUT,
+            path_map: RemotePathMap::default(),
             session: Mutex::new(None),
         })
     }
@@ -143,6 +147,21 @@ impl Transmission {
         self
     }
 
+    /// Sets the map that turns the local download directory given to
+    /// [`DownloadClient::add`] into the daemon's own.
+    ///
+    /// ```
+    /// use mistarr_clients::{PathMapping, RemotePathMap, Transmission};
+    /// let t = Transmission::new(Transmission::DEFAULT_URL)?
+    ///     .with_path_map(RemotePathMap::new(vec![PathMapping::new("/srv", "/media/fat")]));
+    /// # Ok::<(), mistarr_clients::ClientError>(())
+    /// ```
+    #[must_use]
+    pub fn with_path_map(mut self, path_map: RemotePathMap) -> Self {
+        self.path_map = path_map;
+        self
+    }
+
     /// Sends one RPC, renewing the session id once on a 409, and returns its `arguments`.
     async fn rpc(
         &self,
@@ -171,18 +190,16 @@ impl Transmission {
             match resp.status {
                 409 => {
                     let id = resp.session_id.ok_or_else(|| {
-                        ClientError::Protocol("409 without X-Transmission-Session-Id".into())
+                        ClientError::protocol("409 without X-Transmission-Session-Id")
                     })?;
                     *session = Some(id);
                 }
                 401 | 403 => return Err(ClientError::Auth),
                 200 => return parse_reply(&resp.body),
-                status => return Err(ClientError::Protocol(format!("HTTP status {status}"))),
+                status => return Err(ClientError::protocol(format!("HTTP status {status}"))),
             }
         }
-        Err(ClientError::Protocol(
-            "session id rejected after renewal".into(),
-        ))
+        Err(ClientError::protocol("session id rejected after renewal"))
     }
 
     /// `torrent-get` for one torrent read as `T`; [`ClientError::NotFound`] if absent.
@@ -192,11 +209,11 @@ impl Transmission {
         id: &ClientTorrentId,
         fields: &[&str],
     ) -> Result<T> {
-        let args = json!({ "ids": [id.as_str()], "fields": fields });
+        let args = json!({ "ids": [id], "fields": fields });
         let reply: Torrents<T> = self.rpc_as(session, "torrent-get", args).await?;
         match reply.torrents {
             Some(list) => list.into_iter().next().ok_or(ClientError::NotFound),
-            None => Err(ClientError::Protocol("torrent-get without torrents".into())),
+            None => Err(ClientError::protocol("torrent-get without torrents")),
         }
     }
 
@@ -210,18 +227,20 @@ impl Transmission {
         Ok(raw.wanted.into_iter().map(Flag::into_bool).collect())
     }
 
-    async fn torrent_set(
+    /// Sends `method` for torrent `id` with the members of `fields` beside its `ids`.
+    async fn on_torrent(
         &self,
         session: &mut Option<String>,
+        method: &str,
         id: &ClientTorrentId,
         fields: Value,
     ) -> Result<()> {
         let mut args = Map::new();
-        args.insert("ids".into(), json!([id.as_str()]));
+        args.insert("ids".into(), json!([id]));
         if let Value::Object(extra) = fields {
             args.extend(extra);
         }
-        self.rpc(session, "torrent-set", Value::Object(args))
+        self.rpc(session, method, Value::Object(args))
             .await
             .map(drop)
     }
@@ -232,41 +251,42 @@ impl Transmission {
         session: &mut Option<String>,
         id: &ClientTorrentId,
         file_count: usize,
-        wanted: &BTreeSet<u32>,
+        wanted: &Wanted,
     ) -> Result<()> {
+        const SET: &str = "torrent-set";
         if file_count <= Self::LARGE_TORRENT_FILES {
             // An empty index list means "all files" to Transmission, so omit empty lists.
             let mut fields = Map::new();
             if !wanted.is_empty() {
-                fields.insert("files-wanted".into(), json!(wanted));
+                fields.insert("files-wanted".into(), json!(wanted.indices()));
             }
-            let unwanted = complement(wanted, file_count);
+            let unwanted = wanted.complement(file_count);
             if !unwanted.is_empty() {
                 fields.insert("files-unwanted".into(), json!(unwanted));
             }
             if fields.is_empty() {
                 return Ok(());
             }
-            return self.torrent_set(session, id, Value::Object(fields)).await;
+            return self
+                .on_torrent(session, SET, id, Value::Object(fields))
+                .await;
         }
-        self.torrent_set(session, id, json!({ "files-unwanted": [] }))
+        self.on_torrent(session, SET, id, json!({ "files-unwanted": [] }))
             .await?;
         if !wanted.is_empty() {
-            self.torrent_set(session, id, json!({ "files-wanted": wanted }))
-                .await?;
+            let fields = json!({ "files-wanted": wanted.indices() });
+            self.on_torrent(session, SET, id, fields).await?;
         }
         let flags = self.wanted_flags(session, id).await?;
         let applied = flags.len() == file_count
             && flags
                 .iter()
                 .zip(0u32..)
-                .all(|(&on, i)| on == wanted.contains(&i));
+                .all(|(&on, i)| on == wanted.contains(i));
         if applied {
             Ok(())
         } else {
-            Err(ClientError::Protocol(
-                "file selection was not applied".into(),
-            ))
+            Err(ClientError::protocol("file selection was not applied"))
         }
     }
 
@@ -287,20 +307,14 @@ impl Transmission {
                 json!({ "seedRatioMode": 1, "seedRatioLimit": f64::from(*ratio) })
             }
         };
-        self.torrent_set(session, id, fields).await
+        self.on_torrent(session, "torrent-set", id, fields).await
     }
 
+    /// Checks the torrent exists, then sends `method` for it with `extra`.
     async fn simple(&self, method: &str, id: &ClientTorrentId, extra: Value) -> Result<()> {
         let mut session = self.session.lock().await;
         self.get_one::<Value>(&mut session, id, &["id"]).await?;
-        let mut args = Map::new();
-        args.insert("ids".into(), json!([id.as_str()]));
-        if let Value::Object(extra) = extra {
-            args.extend(extra);
-        }
-        self.rpc(&mut session, method, Value::Object(args))
-            .await
-            .map(drop)
+        self.on_torrent(&mut session, method, id, extra).await
     }
 }
 
@@ -318,7 +332,7 @@ impl DownloadClient for Transmission {
         let version = reply
             .get("version")
             .and_then(Value::as_str)
-            .ok_or_else(|| ClientError::Protocol("session-get without version".into()))?;
+            .ok_or_else(|| ClientError::protocol("session-get without version"))?;
         Ok(ClientInfo {
             kind: ClientKind::Transmission,
             version: version.to_owned(),
@@ -332,26 +346,29 @@ impl DownloadClient for Transmission {
         wanted: &[u32],
         seed: SeedPolicy,
     ) -> Result<ClientTorrentId> {
-        let wanted: BTreeSet<u32> = wanted.iter().copied().collect();
-        let dir = download_dir
+        let wanted = Wanted::from_slice(wanted);
+        let dir = self.path_map.to_remote(download_dir);
+        let dir = dir
             .to_str()
-            .ok_or_else(|| ClientError::Protocol("download dir is not UTF-8".into()))?;
+            .ok_or_else(|| ClientError::protocol("download dir is not UTF-8"))?;
         let mut args = Map::new();
         args.insert("download-dir".into(), json!(dir));
         args.insert("paused".into(), json!(true));
         let known_count = match &src {
-            TorrentSource::Metainfo(bytes) => {
+            TorrentSource::Metainfo {
+                bytes, file_count, ..
+            } => {
                 args.insert("metainfo".into(), json!(BASE64.encode(bytes)));
-                metainfo::file_count(bytes)
+                Some(*file_count)
             }
-            TorrentSource::Magnet(uri) => {
+            TorrentSource::Magnet { uri, .. } => {
                 args.insert("filename".into(), json!(uri));
                 None
             }
         };
         if let Some(count) = known_count {
-            check_indices(&wanted, count)?;
-            let unwanted = complement(&wanted, count);
+            wanted.check(count)?;
+            let unwanted = wanted.complement(count);
             if count <= Self::LARGE_TORRENT_FILES && !unwanted.is_empty() {
                 args.insert("files-unwanted".into(), json!(unwanted));
             }
@@ -364,11 +381,7 @@ impl DownloadClient for Transmission {
         let (id, fresh) = match (reply.get("torrent-added"), reply.get("torrent-duplicate")) {
             (Some(added), _) => (torrent_id(added)?, true),
             (None, Some(dup)) => (torrent_id(dup)?, false),
-            (None, None) => {
-                return Err(ClientError::Protocol(
-                    "torrent-add without torrent-added".into(),
-                ))
-            }
+            (None, None) => return Err(ClientError::protocol("torrent-add without torrent-added")),
         };
         let sent_with_add = fresh && known_count.is_some_and(|c| c <= Self::LARGE_TORRENT_FILES);
         if !sent_with_add {
@@ -377,7 +390,7 @@ impl DownloadClient for Transmission {
                 None => self.wanted_flags(&mut session, &id).await?.len(),
             };
             if count > 0 {
-                check_indices(&wanted, count)?;
+                wanted.check(count)?;
                 self.apply_selection(&mut session, &id, count, &wanted)
                     .await?;
             }
@@ -387,13 +400,13 @@ impl DownloadClient for Transmission {
     }
 
     async fn set_wanted(&self, id: &ClientTorrentId, wanted: &[u32]) -> Result<()> {
-        let wanted: BTreeSet<u32> = wanted.iter().copied().collect();
+        let wanted = Wanted::from_slice(wanted);
         let mut session = self.session.lock().await;
         let count = self.wanted_flags(&mut session, id).await?.len();
         if count == 0 {
             return Err(ClientError::MetadataPending);
         }
-        check_indices(&wanted, count)?;
+        wanted.check(count)?;
         self.apply_selection(&mut session, id, count, &wanted).await
     }
 
@@ -444,9 +457,9 @@ impl DownloadClient for Transmission {
         match (reply.get(enabled).and_then(Value::as_bool), kbps) {
             (Some(enabled), Some(kbps)) => Ok(RateLimit {
                 enabled,
-                kbps: u32::try_from(kbps).map_err(protocol)?,
+                kbps: u32::try_from(kbps).map_err(ClientError::protocol)?,
             }),
-            _ => Err(ClientError::Protocol(format!("session-get without {rate}"))),
+            _ => Err(ClientError::protocol(format!("session-get without {rate}"))),
         }
     }
 
@@ -474,9 +487,9 @@ impl DownloadClient for Transmission {
         match (reply.get(ALT_ENABLED).and_then(Value::as_bool), kbps) {
             (Some(enabled), Some(kbps)) => Ok(Some(RateLimit {
                 enabled,
-                kbps: u32::try_from(kbps).map_err(protocol)?,
+                kbps: u32::try_from(kbps).map_err(ClientError::protocol)?,
             })),
-            _ => Err(ClientError::Protocol(format!(
+            _ => Err(ClientError::protocol(format!(
                 "session-get without {ALT_UP}"
             ))),
         }
@@ -502,10 +515,6 @@ const fn speed_fields(dir: Direction) -> (&'static str, &'static str) {
     }
 }
 
-fn protocol(e: impl std::fmt::Display) -> ClientError {
-    ClientError::Protocol(e.to_string())
-}
-
 /// A reply's `arguments` as `T`, or its `result` as the error when that is not `success`.
 fn parse_reply<T: DeserializeOwned + Default>(body: &[u8]) -> Result<T> {
     #[derive(Deserialize)]
@@ -523,7 +532,7 @@ fn parse_reply<T: DeserializeOwned + Default>(body: &[u8]) -> Result<T> {
         Ok(reply) => Err(ClientError::Protocol(reply.result)),
         Err(e) => match serde_json::from_slice::<Head>(body) {
             Ok(head) if head.result != "success" => Err(ClientError::Protocol(head.result)),
-            _ => Err(protocol(e)),
+            _ => Err(ClientError::protocol(e)),
         },
     }
 }
@@ -540,28 +549,15 @@ impl<T> Default for Torrents<T> {
     }
 }
 
+/// The id of an added torrent: its `hashString` in either case.
 fn torrent_id(entry: &Value) -> Result<ClientTorrentId> {
     let hash = entry
         .get("hashString")
         .and_then(Value::as_str)
-        .ok_or_else(|| ClientError::Protocol("added torrent without hashString".into()))?;
-    Ok(ClientTorrentId::new(hash.to_ascii_lowercase()))
-}
-
-fn complement(wanted: &BTreeSet<u32>, file_count: usize) -> Vec<u32> {
-    (0u32..)
-        .take(file_count)
-        .filter(|i| !wanted.contains(i))
-        .collect()
-}
-
-fn check_indices(wanted: &BTreeSet<u32>, file_count: usize) -> Result<()> {
-    match wanted.last() {
-        Some(&index) if usize::try_from(index).unwrap_or(usize::MAX) >= file_count => {
-            Err(ClientError::FileIndex { index, file_count })
-        }
-        _ => Ok(()),
-    }
+        .ok_or_else(|| ClientError::protocol("added torrent without hashString"))?;
+    hash.parse::<InfoHash>()
+        .map(ClientTorrentId::new)
+        .map_err(|_| ClientError::protocol(format!("bad hashString {hash:?}")))
 }
 
 /// A flag Transmission sends as a boolean or, in older versions, as 0 or 1.
@@ -656,8 +652,10 @@ struct RawFileStat {
 
 impl RawTorrent {
     fn into_status(self) -> Result<TorrentStatus> {
-        let infohash = InfoHash::from_hex(&self.hash_string)
-            .ok_or_else(|| protocol(format!("bad hashString {:?}", self.hash_string)))?;
+        let infohash: InfoHash = self
+            .hash_string
+            .parse()
+            .map_err(|_| ClientError::protocol(format!("bad hashString {:?}", self.hash_string)))?;
         // With nothing left every wanted file is whole, so its size is what the client has.
         let all_done = self.left_until_done == Some(0);
         let files = self
@@ -683,7 +681,11 @@ impl RawTorrent {
                 3 | 5 => TorrentState::Queued,
                 4 => TorrentState::Downloading,
                 6 => TorrentState::Seeding,
-                other => return Err(protocol(format!("unknown torrent status {other}"))),
+                other => {
+                    return Err(ClientError::protocol(format!(
+                        "unknown torrent status {other}"
+                    )))
+                }
             }
         };
         // A ratio needs no f64 precision.

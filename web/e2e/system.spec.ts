@@ -1,4 +1,5 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
+import { setMockKnob } from './helpers';
 
 test.use({ permissions: ['clipboard-read', 'clipboard-write'] });
 
@@ -41,13 +42,13 @@ test('the status tiles show the board, client, scheduler, memory, storage and up
 
 test('held uploads on rtorrent show in both tiles, the 1 KiB/s line in the client tile only', async ({ page }) => {
   await page.goto('/#/');
-  await page.evaluate(() => localStorage.setItem('mistarr.mockStatus', JSON.stringify({ client_hold: 'uploads' })));
+  await setMockKnob(page, 'status', { client_hold: 'uploads' });
   await page.goto('/#/system');
   const text = 'Uploads paused while FCEUmm is running';
   await expect(tile(page, 'MiSTer').locator('[data-status="paused"]')).toHaveText(text);
   await expect(tile(page, 'MiSTer')).not.toContainText('1 KiB/s');
   await expect(tile(page, 'Download client')).toContainText('rtorrent holds uploads at 1 KiB/s');
-  await page.evaluate(() => localStorage.removeItem('mistarr.mockStatus'));
+  await setMockKnob(page, 'status', null);
 });
 
 test('at the menu with nothing held, the board and scheduler say so', async ({ page }) => {
@@ -181,11 +182,11 @@ test('a modifier or middle click on a link opens elsewhere without asking', asyn
     void d.dismiss();
   });
   const link = page.getByRole('link', { name: 'Platforms' });
-  const opened = context.waitForEvent('page');
-  await link.click({ modifiers: ['ControlOrMeta'] });
-  await (await opened).close();
-  await link.click({ button: 'middle' });
-  await page.waitForTimeout(300);
+  for (const click of [{ modifiers: ['ControlOrMeta' as const] }, { button: 'middle' as const }]) {
+    const opened = context.waitForEvent('page');
+    await link.click(click);
+    await (await opened).close();
+  }
   expect(asked).toBe(false);
   await expect(page).toHaveURL(/#\/system$/);
   await expect(page.getByRole('region', { name: 'Unsaved changes' })).toBeVisible();
@@ -255,7 +256,7 @@ test('when the browser refuses to copy, the diagnostics are shown to copy by han
 });
 
 test('a failed settings load shows an error with Retry, not a hidden section', async ({ page }) => {
-  await page.addInitScript(() => localStorage.setItem('mistarr.mockSettingsFail', '1'));
+  await setMockKnob(page, 'settingsFail', true);
   await page.goto('/#/system');
   await expect(page.getByRole('heading', { name: 'Settings' })).toBeVisible();
   await expect(page.getByRole('navigation', { name: 'Settings sections' })).toHaveCount(0);
@@ -264,7 +265,7 @@ test('a failed settings load shows an error with Retry, not a hidden section', a
   const retry = alert.getByRole('button', { name: 'Retry' });
   await expect(retry).toBeVisible();
 
-  await page.evaluate(() => localStorage.removeItem('mistarr.mockSettingsFail'));
+  await setMockKnob(page, 'settingsFail', null);
   await retry.click();
   await expect(page.getByRole('navigation', { name: 'Settings sections' })).toBeVisible();
   await expect(alert).toHaveCount(0);
