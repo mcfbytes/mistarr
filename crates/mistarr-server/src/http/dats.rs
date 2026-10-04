@@ -17,7 +17,7 @@ use crate::db::dats::{self, DatVersionId, DatVersionRow};
 use crate::incoming::IncomingFile;
 use crate::jobs::dat_import::{DatImport, Recompute, KIND};
 use crate::jobs::Scheduler;
-use mistarr_sources::intake::{candidates, exhausted, REASON_SUFFIX, REJECTED_DIR};
+use mistarr_sources::intake::{candidates, REASON_SUFFIX, REJECTED_DIR};
 
 /// Largest accepted upload, [`crate::jobs::dat_import::MAX_DAT_BYTES`].
 #[allow(clippy::cast_possible_truncation)] // 512 MiB fits every usize the target has.
@@ -191,7 +191,10 @@ fn move_new(from: &FsPath, dir: &FsPath, name: &str) -> std::io::Result<PathBuf>
             Err(e) => return Err(e),
         }
     }
-    Err(exhausted())
+    Err(std::io::Error::new(
+        ErrorKind::AlreadyExists,
+        "no free file name",
+    ))
 }
 
 fn copy_new(from: &FsPath, to: &FsPath) -> std::io::Result<()> {

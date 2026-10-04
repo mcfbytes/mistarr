@@ -69,7 +69,7 @@ impl StableFiles {
         let mut stable = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            let Ok(meta) = entry.metadata() else {
+            let Ok(meta) = fs::metadata(&path) else {
                 continue;
             };
             if !meta.is_file() || !(self.accepts)(&entry.file_name().to_string_lossy()) {
@@ -107,8 +107,7 @@ pub fn candidates<'a>(dir: &'a Path, name: &'a OsStr) -> impl Iterator<Item = Pa
 }
 
 /// The error for a name that no candidate could take.
-#[must_use]
-pub fn exhausted() -> io::Error {
+fn exhausted() -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, "no free file name")
 }
 
@@ -131,7 +130,7 @@ pub fn exhausted() -> io::Error {
 /// ```
 pub fn accept(path: &Path) -> io::Result<PathBuf> {
     let target = claim(path, LOADED_DIR)?;
-    place(path, &target)?;
+    move_onto(path, &target)?;
     Ok(target)
 }
 
@@ -154,7 +153,7 @@ pub fn accept(path: &Path) -> io::Result<PathBuf> {
 /// ```
 pub fn reject(path: &Path, reason: &str) -> io::Result<PathBuf> {
     let target = claim(path, REJECTED_DIR)?;
-    place(path, &target)?;
+    move_onto(path, &target)?;
     let mut sidecar = target.clone().into_os_string();
     sidecar.push(REASON_SUFFIX);
     fs::write(sidecar, format!("{reason}\n"))?;
@@ -162,27 +161,11 @@ pub fn reject(path: &Path, reason: &str) -> io::Result<PathBuf> {
 }
 
 /// Creates an empty file for `path`'s name in `subdir` beside it with
-/// `create_new`, so a concurrent writer cannot take the same name, and returns
-/// its path. Follow with [`place`], or [`release`] to give the name up.
-///
-/// # Errors
-///
-/// [`io::Error`] when the directory cannot be made or no name is free.
-///
-/// ```
-/// let dir = tempfile::tempdir().unwrap();
-/// let file = dir.path().join("a.dat");
-/// std::fs::write(&file, b"data").unwrap();
-/// let claimed = mistarr_sources::intake::claim(&file, "loaded").unwrap();
-/// mistarr_sources::intake::place(&file, &claimed).unwrap();
-/// assert_eq!(std::fs::read(claimed).unwrap(), b"data");
-/// ```
-pub fn claim(path: &Path, subdir: &str) -> io::Result<PathBuf> {
+/// `create_new`, so a concurrent writer cannot take the same name.
+fn claim(path: &Path, subdir: &str) -> io::Result<PathBuf> {
     let dir = path.parent().unwrap_or_else(|| Path::new(".")).join(subdir);
     fs::create_dir_all(&dir)?;
-    let name = path
-        .file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
+    let name = file_name(path)?;
     for target in candidates(&dir, name) {
         match OpenOptions::new()
             .write(true)
@@ -197,19 +180,67 @@ pub fn claim(path: &Path, subdir: &str) -> io::Result<PathBuf> {
     Err(exhausted())
 }
 
-/// Moves `path` onto a path from [`claim`]. When the move fails the claim is
-/// released, so no empty placeholder is left behind.
+/// Moves `path` onto a path from [`claim`], removing the claim when the move fails.
+fn move_onto(path: &Path, claimed: &Path) -> io::Result<()> {
+    fs::rename(path, claimed).inspect_err(|_| {
+        let _ = fs::remove_file(claimed);
+    })
+}
+
+fn file_name(path: &Path) -> io::Result<&OsStr> {
+    path.file_name()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))
+}
+
+/// The first name for `path` in `subdir` beside it that is free now, without
+/// creating anything, so a crash before [`place`] leaves nothing behind.
 ///
 /// # Errors
 ///
-/// [`io::Error`] when the move fails.
-pub fn place(path: &Path, claimed: &Path) -> io::Result<()> {
-    fs::rename(path, claimed).inspect_err(|_| release(claimed))
+/// [`io::Error`] when the directory cannot be made or no name is free.
+///
+/// ```
+/// let dir = tempfile::tempdir().unwrap();
+/// let file = dir.path().join("a.dat");
+/// std::fs::write(&file, b"data").unwrap();
+/// let planned = mistarr_sources::intake::plan(&file, "loaded").unwrap();
+/// mistarr_sources::intake::place(&file, &planned).unwrap();
+/// assert_eq!(std::fs::read(planned).unwrap(), b"data");
+/// ```
+pub fn plan(path: &Path, subdir: &str) -> io::Result<PathBuf> {
+    let dir = path.parent().unwrap_or_else(|| Path::new(".")).join(subdir);
+    fs::create_dir_all(&dir)?;
+    let name = file_name(path)?;
+    for target in candidates(&dir, name) {
+        match fs::symlink_metadata(&target) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(target),
+            Err(e) => return Err(e),
+            Ok(_) => {}
+        }
+    }
+    Err(exhausted())
 }
 
-/// Gives up a path from [`claim`] that was not [`place`]d into.
-pub fn release(claimed: &Path) {
-    let _ = fs::remove_file(claimed);
+/// Moves `path` onto a name from [`plan`] without replacing a file: a hard
+/// link where the file system has them, else a rename.
+///
+/// # Errors
+///
+/// [`io::Error`] of kind `AlreadyExists` when the name was taken since
+/// [`plan`], or when the move fails.
+pub fn place(path: &Path, planned: &Path) -> io::Result<()> {
+    match fs::hard_link(path, planned) {
+        Ok(()) => fs::remove_file(path),
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::AlreadyExists
+            ) =>
+        {
+            Err(e)
+        }
+        Err(_) => fs::rename(path, planned),
+    }
 }
 
 /// `dir/name` for 0, else `dir/stem (n).ext`.
@@ -407,9 +438,64 @@ mod tests {
         let first = claim(&file, LOADED_DIR).unwrap();
         let second = claim(&file, LOADED_DIR).unwrap();
         assert_eq!(second, dir.path().join(LOADED_DIR).join("a (1).dat"));
-        release(&first);
-        release(&second);
+        fs::remove_file(&first).unwrap();
+        fs::remove_file(&second).unwrap();
         assert_eq!(claim(&file, LOADED_DIR).unwrap(), first);
+    }
+
+    #[test]
+    fn claiming_and_planning_give_up_when_every_name_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.dat");
+        let loaded = dir.path().join(LOADED_DIR);
+        fs::create_dir(&loaded).unwrap();
+        for taken in candidates(&loaded, OsStr::new("a.dat")) {
+            fs::write(taken, b"").unwrap();
+        }
+        let err = claim(&file, LOADED_DIR).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            plan(&file, LOADED_DIR).unwrap_err().kind(),
+            io::ErrorKind::AlreadyExists
+        );
+    }
+
+    #[test]
+    fn a_planned_name_creates_nothing_and_is_never_replaced() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.dat");
+        fs::write(&file, b"new").unwrap();
+        let planned = plan(&file, LOADED_DIR).unwrap();
+        assert_eq!(planned, dir.path().join(LOADED_DIR).join("a.dat"));
+        assert_eq!(
+            fs::read_dir(dir.path().join(LOADED_DIR)).unwrap().count(),
+            0
+        );
+        fs::write(&planned, b"old").unwrap();
+        let err = place(&file, &planned).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        assert_eq!(fs::read(&planned).unwrap(), b"old");
+        assert!(file.exists());
+        assert_eq!(
+            plan(&file, LOADED_DIR).unwrap(),
+            dir.path().join("loaded/a (1).dat")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_file_is_watched_and_a_broken_link_is_not() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let real = elsewhere.path().join("real.torrent");
+        fs::write(&real, b"x").unwrap();
+        let link = dir.path().join("a.torrent");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path().join("none"), dir.path().join("b.torrent"))
+            .unwrap();
+        let mut w = StableFiles::new(Duration::ZERO, any);
+        w.poll(dir.path());
+        assert_eq!(w.poll(dir.path()), [link]);
     }
 
     #[test]

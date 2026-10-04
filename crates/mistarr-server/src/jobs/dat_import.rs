@@ -314,7 +314,7 @@ impl Job for DatImport {
         let path = self.path.clone();
         let listed = crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
             path.is_file().then(|| match list_members(&path) {
-                Ok(members) => intake::claim(&path, LOADED_DIR).map(|c| Ok((members, c))),
+                Ok(members) => intake::plan(&path, LOADED_DIR).map(|c| Ok((members, c))),
                 Err(reason) => Ok(Err(reason)),
             })
         })
@@ -332,7 +332,6 @@ impl Job for DatImport {
             recomputed,
         }) = imported
         else {
-            release_blocking(target).await;
             return imported.map(|_| ());
         };
         let mut loaded = Vec::new();
@@ -345,12 +344,11 @@ impl Job for DatImport {
             }
         }
         if loaded.is_empty() {
-            release_blocking(target).await;
             return reject(&ctx.app, &self.path, &file, &reasons.join("\n")).await;
         }
-        let (path, claimed) = (self.path.clone(), target);
+        let (path, planned) = (self.path.clone(), target);
         crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
-            intake::place(&path, &claimed)
+            intake::place(&path, &planned)
         })
         .await??;
         for reason in &reasons {
@@ -1531,14 +1529,6 @@ impl Job for Recompute {
         }
         Ok(())
     }
-}
-
-/// Gives up a reserved name in `loaded/`, off the async runtime.
-async fn release_blocking(claimed: PathBuf) {
-    let _ = crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
-        intake::release(&claimed);
-    })
-    .await;
 }
 
 /// A recompute's live progress before `pass`.

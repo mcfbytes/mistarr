@@ -125,8 +125,8 @@ impl Job for SourceImport {
             Err(e) => return Err(e.into()),
         };
         let ext = self.path.extension().and_then(|e| e.to_str());
-        let claim = if matches!(ext, Some("torrent" | "magnet")) {
-            Some(claim_blocking(&self.path).await?)
+        let planned = if matches!(ext, Some("torrent" | "magnet")) {
+            Some(plan_blocking(&self.path).await?)
         } else {
             None
         };
@@ -135,24 +135,19 @@ impl Job for SourceImport {
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
         };
         let origin = name_of(&self.path);
-        let stored = name_of(claim.as_deref().unwrap_or(&self.path));
+        let stored = name_of(planned.as_deref().unwrap_or(&self.path));
         let outcome = match (ext, data) {
             (_, None) => Ok(Err(TOO_LARGE.to_owned())),
             (Some("torrent"), Some(data)) => import_torrent(&ctx.app, &origin, &stored, data).await,
             (Some("magnet"), Some(data)) => import_magnet(&ctx.app, &origin, &stored, &data).await,
             _ => Ok(Err("Only .torrent and .magnet files are read.".to_owned())),
         };
-        let outcome = match outcome {
-            Ok(o) => o,
-            Err(e) => {
-                release_blocking(claim).await;
-                return Err(e);
-            }
-        };
-        match outcome {
+        match outcome? {
             Ok(row) => {
-                if let Err(e) = place_blocking(&self.path, claim).await {
-                    tracing::warn!(file = %origin, error = %e, "cannot move source into loaded/");
+                if let Some(planned) = planned {
+                    if let Err(e) = place_blocking(&self.path, planned).await {
+                        tracing::warn!(file = %origin, error = %e, "cannot move source into loaded/");
+                    }
                 }
                 ctx.progress(json!({ "file": origin, "source_id": row.id, "state": row.state }))
                     .await?;
@@ -167,7 +162,6 @@ impl Job for SourceImport {
             }
             Err(reason) => {
                 tracing::info!(file = %origin, reason, "source rejected");
-                release_blocking(claim).await;
                 if let Err(e) = reject_blocking(&self.path, &reason).await {
                     tracing::warn!(file = %origin, error = %e, "cannot move source into rejected/");
                 }
@@ -179,35 +173,24 @@ impl Job for SourceImport {
     }
 }
 
-/// Reserves the name `path` will have in `loaded/`, off the async runtime.
-async fn claim_blocking(path: &Path) -> Result<PathBuf> {
+/// Picks the name `path` will have in `loaded/`, off the async runtime.
+async fn plan_blocking(path: &Path) -> Result<PathBuf> {
     let path = path.to_path_buf();
-    let claimed = crate::threads::run(crate::threads::label::SOURCE_FILE, move || {
-        intake::claim(&path, intake::LOADED_DIR)
+    let planned = crate::threads::run(crate::threads::label::SOURCE_FILE, move || {
+        intake::plan(&path, intake::LOADED_DIR)
     })
     .await??;
-    Ok(claimed)
+    Ok(planned)
 }
 
-/// Moves `path` onto its reserved name in `loaded/`, off the async runtime.
-async fn place_blocking(path: &Path, claim: Option<PathBuf>) -> Result<()> {
+/// Moves `path` onto its planned name in `loaded/`, off the async runtime.
+async fn place_blocking(path: &Path, planned: PathBuf) -> Result<()> {
     let path = path.to_path_buf();
-    crate::threads::run(crate::threads::label::SOURCE_FILE, move || match claim {
-        Some(c) => intake::place(&path, &c),
-        None => intake::accept(&path).map(drop),
+    crate::threads::run(crate::threads::label::SOURCE_FILE, move || {
+        intake::place(&path, &planned)
     })
     .await??;
     Ok(())
-}
-
-/// Gives up a reserved name in `loaded/`, off the async runtime.
-async fn release_blocking(claim: Option<PathBuf>) {
-    if let Some(c) = claim {
-        let _ = crate::threads::run(crate::threads::label::SOURCE_FILE, move || {
-            intake::release(&c);
-        })
-        .await;
-    }
 }
 
 /// Moves into `rejected/` with `reason`, off the async runtime.
@@ -1079,6 +1062,7 @@ mod tests {
         std::fs::write(&file, format!("magnet:?xt=urn:btih:{}", "0e".repeat(20))).expect("write");
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o0)).expect("chmod");
         if std::fs::read(&file).is_ok() {
+            eprintln!("skipped: a mode-000 file is readable here (running as root)");
             return;
         }
         Scheduler::start(&app);
