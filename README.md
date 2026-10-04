@@ -147,6 +147,7 @@ architecture and the work still open are in
 | [docs/DOWNLOAD-CLIENTS.md](docs/DOWNLOAD-CLIENTS.md) | Transmission and rtorrent integration |
 | [docs/UI.md](docs/UI.md) | Screens, states and the SPA build |
 | [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) | Cross-compiling, installing on MiSTer, startup |
+| [docs/NONROOT-PLAN.md](docs/NONROOT-PLAN.md) | Proposal: running mistarr and the BitTorrent clients as non-root users |
 | [docs/DATS.md](docs/DATS.md) | DAT formats, loading, platform binding, versions and rejection reasons |
 | [docs/TESTING.md](docs/TESTING.md) | Fixtures, open-licensed test content, end-to-end runs |
 | [docs/WORKPLAN.md](docs/WORKPLAN.md) | Work packages for parallel development |
