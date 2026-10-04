@@ -17,7 +17,7 @@ use crate::db::dats::{self, DatVersionId, DatVersionRow};
 use crate::incoming::IncomingFile;
 use crate::jobs::dat_import::{DatImport, Recompute, KIND};
 use crate::jobs::Scheduler;
-use mistarr_sources::intake::{free_name, REASON_SUFFIX, REJECTED_DIR};
+use mistarr_sources::intake::{candidates, exhausted, REASON_SUFFIX, REJECTED_DIR};
 
 /// Largest accepted upload, [`crate::jobs::dat_import::MAX_DAT_BYTES`].
 #[allow(clippy::cast_possible_truncation)] // 512 MiB fits every usize the target has.
@@ -116,11 +116,16 @@ pub(crate) async fn place_part(
     name: &str,
 ) -> crate::Result<IncomingFile> {
     let dir = app.config().paths.dats();
-    let target = free_name(&dir, name)?;
-    if let Err(e) = std::fs::rename(part, &target) {
-        let _ = std::fs::remove_file(part);
-        return Err(e.into());
-    }
+    let (from, name) = (part.to_path_buf(), name.to_owned());
+    let moved = crate::threads::run(crate::threads::label::DAT_SAVE, move || {
+        let moved = move_new(&from, &dir, &name);
+        if moved.is_err() {
+            let _ = std::fs::remove_file(&from);
+        }
+        moved
+    })
+    .await?;
+    let target = moved?;
     let job = Arc::new(DatImport::new(&target));
     crate::incoming::queue_placed(app, &target, KIND, job).await
 }
@@ -169,8 +174,7 @@ fn rejected_file(dats: &FsPath, name: &str) -> Result<PathBuf, ApiError> {
 /// file: a hard link where the file system has them, else a copy made with `create_new`.
 fn move_new(from: &FsPath, dir: &FsPath, name: &str) -> std::io::Result<PathBuf> {
     use std::io::ErrorKind;
-    loop {
-        let target = free_name(dir, name)?;
+    for target in candidates(dir, name.as_ref()) {
         let placed = match std::fs::hard_link(from, &target) {
             Err(e) if e.kind() == ErrorKind::NotFound || e.kind() == ErrorKind::AlreadyExists => {
                 Err(e)
@@ -187,6 +191,7 @@ fn move_new(from: &FsPath, dir: &FsPath, name: &str) -> std::io::Result<PathBuf>
             Err(e) => return Err(e),
         }
     }
+    Err(exhausted())
 }
 
 fn copy_new(from: &FsPath, to: &FsPath) -> std::io::Result<()> {

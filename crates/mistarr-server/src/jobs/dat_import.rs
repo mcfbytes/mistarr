@@ -30,7 +30,7 @@ use crate::config::PrefsConfig;
 use crate::db::dat_stage::{self, StagedGame, StagedRom};
 use crate::db::dats::{self, DatVersionId, NewVersion};
 use crate::db::files::{self, FileId, FileRow, FileState};
-use crate::db::jobs::{JobId, JobState};
+use crate::db::jobs::JobId;
 use crate::db::ram::{self, Ram};
 use crate::db::titles;
 use crate::db::Db;
@@ -332,7 +332,7 @@ impl Job for DatImport {
             recomputed,
         }) = imported
         else {
-            intake::release(&target);
+            release_blocking(target).await;
             return imported.map(|_| ());
         };
         let mut loaded = Vec::new();
@@ -345,7 +345,7 @@ impl Job for DatImport {
             }
         }
         if loaded.is_empty() {
-            intake::release(&target);
+            release_blocking(target).await;
             return reject(&ctx.app, &self.path, &file, &reasons.join("\n")).await;
         }
         let (path, claimed) = (self.path.clone(), target);
@@ -1533,6 +1533,14 @@ impl Job for Recompute {
     }
 }
 
+/// Gives up a reserved name in `loaded/`, off the async runtime.
+async fn release_blocking(claimed: PathBuf) {
+    let _ = crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
+        intake::release(&claimed);
+    })
+    .await;
+}
+
 /// A recompute's live progress before `pass`.
 fn pass_progress(pass: Pass, tally: &Tally) -> Value {
     match pass {
@@ -1543,54 +1551,21 @@ fn pass_progress(pass: Pass, tally: &Tally) -> Value {
     }
 }
 
-/// Polls `dats/` every `options.dats_poll` on a blocking thread and enqueues a
-/// [`DatImport`] per stable file. A file whose job failed is enqueued again on a later poll.
+/// Polls `dats/` every `options.dats_poll` and enqueues a [`DatImport`] per stable file;
+/// see [`super::drop_watch::run`].
 pub async fn watch(app: Arc<AppState>) {
     let dir = app.config().paths.dats();
-    let mut watcher = StableFiles::new(app.options.dats_min_age, |name| !name.starts_with('.'));
-    let mut pending: HashMap<PathBuf, JobId> = HashMap::new();
-    let mut tick = tokio::time::interval(app.options.dats_poll);
-    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    loop {
-        tick.tick().await;
-        let mut finished = Vec::new();
-        for (path, &id) in &pending {
-            match app.db.read(move |c| crate::db::jobs::get(c, id)).await {
-                Ok(Some(row)) if row.state == JobState::Failed => {
-                    watcher.forget(path);
-                    finished.push(path.clone());
-                }
-                Ok(Some(row)) if !row.state.is_finished() => {}
-                Ok(_) => finished.push(path.clone()),
-                Err(e) => tracing::warn!(error = %e, "cannot read DAT import job"),
-            }
-        }
-        for path in finished {
-            pending.remove(&path);
-        }
-        let polled = dir.clone();
-        let found;
-        (watcher, found) = match crate::threads::run(crate::threads::label::DAT_WATCH, move || {
-            let found = watcher.poll(&polled);
-            (watcher, found)
-        })
-        .await
-        {
-            Ok(polled) => polled,
-            Err(e) => {
-                tracing::error!(error = %e, "the DAT watcher stopped");
-                return;
-            }
-        };
-        for path in found {
-            match Scheduler::enqueue(&app, Arc::new(DatImport::new(&path))).await {
-                Ok(id) => {
-                    pending.insert(path, id);
-                }
-                Err(e) => tracing::warn!(error = %e, "cannot enqueue DAT import"),
-            }
-        }
-    }
+    let files = StableFiles::new(app.options.dats_min_age, |name| !name.starts_with('.'));
+    let poll = app.options.dats_poll;
+    super::drop_watch::run(
+        app,
+        dir,
+        files,
+        poll,
+        crate::threads::label::DAT_WATCH,
+        |path| Arc::new(DatImport::new(path)),
+    )
+    .await;
 }
 
 #[cfg(test)]

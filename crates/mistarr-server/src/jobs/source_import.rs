@@ -1,6 +1,5 @@
 //! Source import, binding and magnet resolving; the flow is `docs/ARCHITECTURE.md` "Source import".
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -21,7 +20,6 @@ use super::remap::{key_new_roms, map_files, store_mapping};
 use super::{wizard, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::candidates;
-use crate::db::jobs::{JobId, JobState};
 use crate::db::sources::{self as rows, NewSource, SourceId, SourceRow, SourceState, SqlDatIndex};
 use crate::error::Result;
 use crate::events::EventKind;
@@ -136,11 +134,12 @@ impl Job for SourceImport {
             p.file_name()
                 .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
         };
-        let origin = name_of(claim.as_deref().unwrap_or(&self.path));
+        let origin = name_of(&self.path);
+        let stored = name_of(claim.as_deref().unwrap_or(&self.path));
         let outcome = match (ext, data) {
             (_, None) => Ok(Err(TOO_LARGE.to_owned())),
-            (Some("torrent"), Some(data)) => import_torrent(&ctx.app, &origin, data).await,
-            (Some("magnet"), Some(data)) => import_magnet(&ctx.app, &origin, &data).await,
+            (Some("torrent"), Some(data)) => import_torrent(&ctx.app, &origin, &stored, data).await,
+            (Some("magnet"), Some(data)) => import_magnet(&ctx.app, &origin, &stored, &data).await,
             _ => Ok(Err("Only .torrent and .magnet files are read.".to_owned())),
         };
         let outcome = match outcome {
@@ -226,6 +225,7 @@ async fn reject_blocking(path: &Path, reason: &str) -> Result<()> {
 async fn import_torrent(
     app: &AppState,
     origin: &str,
+    stored: &str,
     data: Vec<u8>,
 ) -> Result<Result<SourceRow, String>> {
     let meta = match torrent::parse_torrent(&data) {
@@ -235,7 +235,7 @@ async fn import_torrent(
     drop(data);
     let infohash = meta.infohash.to_string();
     let threshold = app.config().sources.bind_threshold;
-    let origin = origin.to_owned();
+    let (origin, stored) = (origin.to_owned(), stored.to_owned());
     key_new_roms(&app.db).await?;
     app.db
         .write_bulk_tx(move |tx| {
@@ -247,7 +247,7 @@ async fn import_torrent(
                     &NewSource {
                         infohash: &infohash,
                         display_name: &meta.name,
-                        origin_file: &origin,
+                        origin_file: &stored,
                         state: SourceState::Unbound,
                         reason: None,
                         added_at: crate::unix_now(),
@@ -267,6 +267,7 @@ async fn import_torrent(
 async fn import_magnet(
     app: &AppState,
     origin: &str,
+    stored: &str,
     data: &[u8],
 ) -> Result<Result<SourceRow, String>> {
     let text = String::from_utf8_lossy(data);
@@ -285,7 +286,7 @@ async fn import_magnet(
             .file_stem()
             .map_or_else(|| infohash.clone(), |s| s.to_string_lossy().into_owned())
     });
-    let origin = origin.to_owned();
+    let stored = stored.to_owned();
     app.db
         .write(move |c| {
             if rows::find_by_infohash(c, &infohash)?.is_some() {
@@ -296,7 +297,7 @@ async fn import_magnet(
                 &NewSource {
                     infohash: &infohash,
                     display_name: &name,
-                    origin_file: &origin,
+                    origin_file: &stored,
                     state: SourceState::Resolving,
                     reason: None,
                     added_at: crate::unix_now(),
@@ -677,58 +678,28 @@ fn is_source_name(name: &str) -> bool {
     )
 }
 
-/// Scans `sources/` every [`crate::app::Options::sources_poll`] and enqueues
-/// one [`SourceImport`] per stable file. A file whose job failed, or that could
-/// not be queued, is enqueued again on a later poll.
+/// Scans `sources/` every [`crate::app::Options::sources_poll`] and enqueues one
+/// [`SourceImport`] per stable file; see [`super::drop_watch::run`].
 pub async fn watch(app: Arc<AppState>) {
     let dir = app.config().paths.sources();
-    let mut scanner = StableFiles::new(
+    let files = StableFiles::new(
         Duration::from_secs(app.options.sources_min_age_secs),
         is_source_name,
     );
-    let mut pending: HashMap<PathBuf, JobId> = HashMap::new();
-    let mut tick = tokio::time::interval(app.options.sources_poll);
-    loop {
-        tick.tick().await;
-        let mut finished = Vec::new();
-        for (path, &id) in &pending {
-            match app.db.read(move |c| crate::db::jobs::get(c, id)).await {
-                Ok(Some(row)) if row.state == JobState::Failed => {
-                    scanner.forget(path);
-                    finished.push(path.clone());
-                }
-                Ok(Some(row)) if !row.state.is_finished() => {}
-                Ok(_) => finished.push(path.clone()),
-                Err(e) => tracing::warn!(error = %e, "cannot read source import job"),
-            }
-        }
-        for path in finished {
-            pending.remove(&path);
-        }
-        let d = dir.clone();
-        let result = crate::threads::run(crate::threads::label::SOURCE_WATCH, move || {
-            let found = scanner.poll(&d);
-            (scanner, found)
-        })
-        .await;
-        let Ok((back, found)) = result else {
-            tracing::warn!("sources scan stopped");
-            return;
-        };
-        scanner = back;
-        for path in found {
-            let job = Arc::new(SourceImport { path: path.clone() });
-            match Scheduler::enqueue(&app, job).await {
-                Ok(id) => {
-                    pending.insert(path, id);
-                }
-                Err(e) => {
-                    scanner.forget(&path);
-                    tracing::warn!(error = %e, "cannot queue a source import");
-                }
-            }
-        }
-    }
+    let poll = app.options.sources_poll;
+    super::drop_watch::run(
+        app,
+        dir,
+        files,
+        poll,
+        crate::threads::label::SOURCE_WATCH,
+        |path| {
+            Arc::new(SourceImport {
+                path: path.to_path_buf(),
+            })
+        },
+    )
+    .await;
 }
 
 /// Enqueues a [`ResolveMagnet`] for resolving sources: every

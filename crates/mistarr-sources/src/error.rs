@@ -20,7 +20,4 @@ pub enum SourceError {
     /// The torrent describes only a `BitTorrent` v2 layout (`file tree`, no v1 `files`/`length`).
     #[error("v2-only torrents are not supported; a v1 or hybrid file list is required")]
     V2Only,
-    /// Moving or writing a file under the watched directory failed.
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
 }

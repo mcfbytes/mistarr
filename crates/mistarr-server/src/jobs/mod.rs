@@ -7,6 +7,7 @@ pub mod core_limits;
 pub mod corename;
 pub mod dat_import;
 pub mod detect_client;
+pub mod drop_watch;
 pub mod gate;
 pub mod import;
 pub mod io_priority;

@@ -1,6 +1,7 @@
 //! Files dropped into a watched directory; see the `mistarr-sources` row of `docs/ARCHITECTURE.md`.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -92,26 +93,23 @@ impl StableFiles {
     }
 }
 
-/// `dir/name`, or `dir/stem (N).ext` for the first N that is free. Nothing is
-/// created, so the name can be read before the caller uses it.
-///
-/// # Errors
-///
-/// [`io::ErrorKind::AlreadyExists`] when no name is free within a bounded
-/// number of attempts.
+/// `dir/name`, then `dir/stem (N).ext` for N from 1, a bounded number of names. Nothing
+/// is created; callers take the first one they can create without replacing a file.
 ///
 /// ```
-/// let dir = tempfile::tempdir().unwrap();
-/// let first = mistarr_sources::intake::free_name(dir.path(), "a.dat").unwrap();
-/// std::fs::write(&first, b"").unwrap();
-/// let second = mistarr_sources::intake::free_name(dir.path(), "a.dat").unwrap();
-/// assert!(second.ends_with("a (1).dat"));
+/// let dir = std::path::Path::new("d");
+/// let name = std::ffi::OsStr::new("a.dat");
+/// let names: Vec<_> = mistarr_sources::intake::candidates(dir, name).take(2).collect();
+/// assert!(names[1].ends_with("a (1).dat"));
 /// ```
-pub fn free_name(dir: &Path, name: &str) -> io::Result<PathBuf> {
-    (0..=ATTEMPTS)
-        .map(|n| numbered(dir, name, n))
-        .find(|c| !c.exists())
-        .ok_or_else(exhausted)
+pub fn candidates<'a>(dir: &'a Path, name: &'a OsStr) -> impl Iterator<Item = PathBuf> + 'a {
+    (0..=ATTEMPTS).map(move |n| numbered(dir, name, n))
+}
+
+/// The error for a name that no candidate could take.
+#[must_use]
+pub fn exhausted() -> io::Error {
+    io::Error::new(io::ErrorKind::AlreadyExists, "no free file name")
 }
 
 /// Moves `path` into `loaded/` beside it, under its name or the first free
@@ -184,10 +182,8 @@ pub fn claim(path: &Path, subdir: &str) -> io::Result<PathBuf> {
     fs::create_dir_all(&dir)?;
     let name = path
         .file_name()
-        .and_then(|n| n.to_str())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))?;
-    for n in 0..=ATTEMPTS {
-        let target = numbered(&dir, name, n);
+    for target in candidates(&dir, name) {
         match OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -217,23 +213,18 @@ pub fn release(claimed: &Path) {
 }
 
 /// `dir/name` for 0, else `dir/stem (n).ext`.
-fn numbered(dir: &Path, name: &str, n: u32) -> PathBuf {
+fn numbered(dir: &Path, name: &OsStr, n: u32) -> PathBuf {
     if n == 0 {
         return dir.join(name);
     }
     let p = Path::new(name);
-    let stem = p
-        .file_stem()
-        .map_or_else(|| name.to_owned(), |s| s.to_string_lossy().into_owned());
-    let ext = p
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
-    dir.join(format!("{stem} ({n}){ext}"))
-}
-
-fn exhausted() -> io::Error {
-    io::Error::new(io::ErrorKind::AlreadyExists, "no free file name")
+    let mut numbered = p.file_stem().unwrap_or(name).to_owned();
+    numbered.push(format!(" ({n})"));
+    if let Some(ext) = p.extension() {
+        numbered.push(".");
+        numbered.push(ext);
+    }
+    dir.join(numbered)
 }
 
 #[cfg(test)]
@@ -328,17 +319,38 @@ mod tests {
     }
 
     #[test]
-    fn free_name_numbers_taken_names() {
-        let dir = tempfile::tempdir().unwrap();
-        for expected in ["a.dat", "a (1).dat", "a (2).dat"] {
-            let p = free_name(dir.path(), "a.dat").unwrap();
-            assert_eq!(p, dir.path().join(expected));
-            fs::write(p, b"").unwrap();
-        }
+    fn candidates_number_the_name_and_stop() {
+        let dir = Path::new("d");
+        let names: Vec<_> = candidates(dir, OsStr::new("a.dat")).take(3).collect();
         assert_eq!(
-            free_name(dir.path(), "plain").unwrap(),
-            dir.path().join("plain")
+            names,
+            ["d/a.dat", "d/a (1).dat", "d/a (2).dat"].map(PathBuf::from)
         );
+        assert_eq!(
+            candidates(dir, OsStr::new("plain")).nth(1),
+            Some(PathBuf::from("d/plain (1)"))
+        );
+        assert_eq!(
+            candidates(dir, OsStr::new("a")).count(),
+            ATTEMPTS as usize + 1
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_name_that_is_not_utf8_is_claimed() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join(OsStr::from_bytes(b"\xff.dat"));
+        fs::write(&file, b"x").unwrap();
+        let moved = accept(&file).unwrap();
+        assert_eq!(
+            moved,
+            dir.path()
+                .join(LOADED_DIR)
+                .join(OsStr::from_bytes(b"\xff.dat"))
+        );
+        assert!(moved.is_file());
     }
 
     #[test]
