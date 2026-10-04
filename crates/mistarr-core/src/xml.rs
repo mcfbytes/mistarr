@@ -428,10 +428,10 @@ impl<R: BufRead> CappedReader<R> {
         self.reader.get_ref().get_ref().position()
     }
 
-    /// The parser's settings, such as `check_end_names` for a caller that pairs end tags
-    /// itself.
-    pub fn config_mut(&mut self) -> &mut quick_xml::reader::Config {
-        self.reader.config_mut()
+    /// Whether the parser refuses an end tag that does not close the open element; on by
+    /// default, off for a caller that pairs end tags itself.
+    pub fn set_check_end_names(&mut self, check: bool) {
+        self.reader.config_mut().check_end_names = check;
     }
 
     /// The input after everything read so far, uncapped until the next
@@ -592,7 +592,7 @@ mod tests {
     #[test]
     fn capped_reader_config_and_raw_input() {
         let mut r = CappedReader::new(&b"<a></b>"[..], 64, 4);
-        r.config_mut().check_end_names = false;
+        r.set_check_end_names(false);
         r.read_event().unwrap();
         assert!(matches!(r.read_event().unwrap(), Event::End(_)));
 

@@ -288,7 +288,7 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
     // The reader caps true nesting, one level per Start/End; end-tag recovery
     // below instead drains several entries at once from `open`.
     let mut reader = CappedReader::new(input, MAX_EVENT_BYTES, MAX_DEPTH);
-    reader.config_mut().check_end_names = false;
+    reader.set_check_end_names(false);
     let mut mra = Mra::default();
     let mut open: Vec<(String, Option<Field>)> = Vec::new();
     let mut rom: Option<RomBuilder> = None;
