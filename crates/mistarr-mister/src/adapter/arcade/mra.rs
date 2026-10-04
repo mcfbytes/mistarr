@@ -703,23 +703,10 @@ pub fn missing_zips(mra: &Mra, mame_dir: &Path) -> Vec<String> {
 #[must_use]
 pub fn hex_bytes(text: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() / 2);
-    let mut runs = text.split([' ', ',', '\t', '\n', '\r']).peekable();
-    while let Some(run) = runs.next() {
-        if !run.is_ascii() {
-            return None;
-        }
-        // Only the very end of the text may hold a lone digit, read as one byte.
-        let (pairs, lone) = if run.len() % 2 == 1 && runs.peek().is_none() {
-            run.split_at(run.len() - 1)
-        } else {
-            (run, "")
-        };
-        out.extend(mistarr_core::hex::decode(pairs)?);
-        if !lone.is_empty() {
-            out.push(u8::from_str_radix(lone, 16).ok()?);
-        }
-    }
-    Some(out)
+    let mut hex = Hex::default();
+    hex.feed(text.as_bytes(), Some(&mut out));
+    hex.finish(Some(&mut out));
+    (!hex.bad).then_some(out)
 }
 
 /// Reads a number the way `strtoul(value, NULL, 0)` does: `0x` hex, leading-zero octal, else decimal.
