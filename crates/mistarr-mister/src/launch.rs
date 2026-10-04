@@ -7,11 +7,13 @@ use std::io::{Read as _, Write as _};
 use std::os::unix::fs::FileTypeExt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(any(test, feature = "test-support"))]
 use std::sync::{Mutex, PoisonError};
 
 use rustix::fs::{Mode, OFlags};
 use rustix::io::Errno;
 
+use crate::adapter::has_extension;
 use crate::corename::{rbf_files, RbfFile};
 use crate::platforms::{Kind, Platform};
 use crate::{Error, Result};
@@ -99,11 +101,12 @@ pub struct CoreFile {
 /// `_Arcade` file is chosen only for a core whose row names it with `arcade_dir`.
 ///
 /// ```
-/// let root = std::env::temp_dir().join("mistarr-doc-find-core");
+/// let tmp = tempfile::tempdir().unwrap();
+/// let root = tmp.path();
 /// std::fs::create_dir_all(root.join("_Console")).unwrap();
 /// std::fs::write(root.join("_Console/NES_20240101.rbf"), b"").unwrap();
 /// let nes = mistarr_mister::platforms::by_id("nes").unwrap();
-/// let core = mistarr_mister::launch::find_core(&root, nes).unwrap();
+/// let core = mistarr_mister::launch::find_core(root, nes).unwrap();
 /// assert_eq!(core.mgl_rbf, "_Console/NES");
 /// ```
 #[must_use]
@@ -199,13 +202,16 @@ pub fn game_path(kind: Kind, games: &Path, rel_paths: &[&str]) -> Option<String>
                 .copied()
                 .find(|p| {
                     split_chd_member(p).1.is_none()
-                        && has_extension(p, "cue")
+                        && has_extension(Path::new(p), "cue")
                         && cue_complete(&games.join(p))
                 })
                 .or_else(|| {
-                    ["chd", "iso"]
-                        .iter()
-                        .find_map(|ext| images.iter().copied().find(|p| has_extension(p, ext)))
+                    ["chd", "iso"].iter().find_map(|ext| {
+                        images
+                            .iter()
+                            .copied()
+                            .find(|p| has_extension(Path::new(p), ext))
+                    })
                 })
                 .map(str::to_owned)
         }
@@ -215,11 +221,6 @@ pub fn game_path(kind: Kind, games: &Path, rel_paths: &[&str]) -> Option<String>
             (file, None) => file.to_owned(),
         }),
     }
-}
-
-fn has_extension(path: &str, ext: &str) -> bool {
-    path.rsplit_once('.')
-        .is_some_and(|(_, e)| e.eq_ignore_ascii_case(ext))
 }
 
 /// The zip, or the set directory right below the platform's folder: a directory
@@ -339,9 +340,8 @@ fn escape(s: &str) -> String {
 /// [`Error::Io`] when the directory cannot be written.
 ///
 /// ```
-/// let dir = std::env::temp_dir().join("mistarr-doc-mgl");
-/// std::fs::create_dir_all(&dir).unwrap();
-/// let path = mistarr_mister::launch::write_mgl(&dir, "<mistergamedescription/>").unwrap();
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = mistarr_mister::launch::write_mgl(dir.path(), "<mistergamedescription/>").unwrap();
 /// assert!(path.extension().is_some_and(|e| e == "mgl"));
 /// ```
 pub fn write_mgl(dir: &Path, doc: &str) -> Result<PathBuf> {
@@ -372,7 +372,7 @@ fn prune_mgl(dir: &Path) {
     let mut names: Vec<String> = entries
         .filter_map(std::result::Result::ok)
         .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| n.starts_with(MGL_PREFIX) && has_extension(n, "mgl"))
+        .filter(|n| n.starts_with(MGL_PREFIX) && has_extension(Path::new(n), "mgl"))
         .collect();
     names.sort_unstable();
     let excess = names.len().saturating_sub(MGL_KEEP);
@@ -472,6 +472,7 @@ impl CommandSink for FifoSink {
 }
 
 /// What a [`RecordingSink`] does with the next command.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FakeOutcome {
     /// Record the line.
@@ -484,12 +485,14 @@ pub enum FakeOutcome {
 }
 
 /// A [`CommandSink`] that records lines in memory, for tests.
+#[cfg(any(test, feature = "test-support"))]
 #[derive(Debug, Default)]
 pub struct RecordingSink {
     lines: Mutex<Vec<String>>,
     outcome: Mutex<FakeOutcome>,
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl RecordingSink {
     /// A sink that accepts every command.
     ///
@@ -534,6 +537,7 @@ impl RecordingSink {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
 impl CommandSink for RecordingSink {
     fn present(&self) -> bool {
         self.outcome() != FakeOutcome::Absent

@@ -5,7 +5,8 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
 
-use mistarr_mister::{ByteOrder, Step};
+use mistarr_core::hash::ByteOrder;
+use mistarr_mister::Step;
 
 /// Streaming buffer, the hashing budget of `docs/ARCHITECTURE.md`.
 const BUF_SIZE: usize = 256 * 1024;

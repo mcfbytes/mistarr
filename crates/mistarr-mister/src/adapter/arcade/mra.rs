@@ -5,10 +5,9 @@ use std::io::{self, BufRead, BufReader, Read, Seek as _, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 
-use mistarr_core::dat::MAX_DEPTH;
-use mistarr_core::xml::{check_utf8, lossy, Capped, EscapeInvalid};
+use mistarr_core::dat::{MAX_DEPTH, MAX_EVENT_BYTES};
+use mistarr_core::xml::{check_utf8, lossy, resolve_ref, CappedReader, EscapeInvalid};
 use quick_xml::errors::IllFormedError;
-use quick_xml::escape::resolve_predefined_entity;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
 
@@ -282,27 +281,16 @@ fn tag_key(name: &str) -> String {
     truncate(name, MAX_TAG_BYTES).to_owned()
 }
 
-/// The next event, capped by [`xml_caps::read_capped_mapped`]; `position` is where it starts.
-fn read_event<'b, R: BufRead>(
-    reader: &mut Reader<Capped<EscapeInvalid<R>>>,
-    buf: &'b mut Vec<u8>,
-    position: u64,
-) -> Result<Event<'b>> {
-    xml_caps::read_capped_mapped(reader, buf, position, xml_err)
-}
-
 /// Parses MRA markup from `input`; inline part bytes are kept in [`Part::data`], or with
 /// `file` set, left in that file as [`Part::inline`] so no payload is held.
 fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra> {
     let bom = skip_bom(&mut input)?;
-    let mut reader = Reader::from_reader(Capped::new(EscapeInvalid::new(input)));
+    // The reader caps true nesting, one level per Start/End; end-tag recovery
+    // below instead drains several entries at once from `open`.
+    let mut reader = CappedReader::new(input, MAX_EVENT_BYTES, MAX_DEPTH);
     reader.config_mut().check_end_names = false;
-    let mut buf = Vec::new();
     let mut mra = Mra::default();
     let mut open: Vec<(String, Option<Field>)> = Vec::new();
-    // Tracks quick_xml's own true nesting, one level per Start/End; end-tag
-    // recovery below instead drains several entries at once from `open`.
-    let mut depth = xml_caps::Depth::default();
     let mut rom: Option<RomBuilder> = None;
     let mut zips_seen: HashSet<String> = HashSet::new();
     let mut budget = Budget::default();
@@ -315,17 +303,17 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
         }) = &mut rom
         {
             if part.name.is_none() {
-                // Wide open: a raw hex run may run past one event's cap.
-                reader.get_mut().arm(u64::MAX);
-                take_text(reader.get_mut(), hex, keep.then_some(&mut part.data))?;
+                // Uncapped: a raw hex run may run past one event's cap.
+                take_text(reader.input_mut(), hex, keep.then_some(&mut part.data))?;
             }
         }
-        let before = bom + reader.get_ref().get_ref().position();
-        let event = read_event(&mut reader, &mut buf, before)?;
-        depth.track(&event, before)?;
+        let before = bom + reader.position();
+        let event = reader
+            .read_event()
+            .map_err(|e| xml_caps::read_error(e, bom, xml_err))?;
         let at = Pos {
             before,
-            after: bom + reader.get_ref().get_ref().position(),
+            after: bom + reader.position(),
             file,
         };
         let field = open.last().and_then(|(_, f)| *f);
@@ -362,7 +350,8 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
                 text(&c, field, &mut mra, &mut rom, keep);
             }
             Event::GeneralRef(r) => {
-                text(&resolve_ref(&r, before)?, field, &mut mra, &mut rom, keep);
+                let resolved = resolve_ref(&r).map_err(|e| xml_err(e, before))?;
+                text(&resolved, field, &mut mra, &mut rom, keep);
             }
             Event::End(e) => {
                 let name = tag_key(&tag(e.local_name().as_ref()));
@@ -427,16 +416,6 @@ struct Pos<'a> {
     before: u64,
     after: u64,
     file: Option<&'a Arc<Path>>,
-}
-
-/// A character or predefined entity reference as text; an unknown entity stays as written.
-fn resolve_ref(r: &quick_xml::events::BytesRef<'_>, position: u64) -> Result<String> {
-    if let Some(c) = r.resolve_char_ref().map_err(|e| xml_err(e, position))? {
-        return Ok(c.to_string());
-    }
-    let name: &str = r;
-    utf8(name, position)?;
-    Ok(resolve_predefined_entity(name).map_or_else(|| format!("&{name};"), str::to_owned))
 }
 
 fn xml_err(e: quick_xml::Error, position: u64) -> Error {
@@ -507,7 +486,8 @@ pub const PARSER_VERSION: u32 = 4;
 /// or its output outgrows a cap.
 ///
 /// ```
-/// let path = std::env::temp_dir().join("mistarr-doc-example.mra");
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = dir.path().join("example.mra");
 /// std::fs::write(&path, r#"<misterromdescription><rom zip="exblast.zip"/></misterromdescription>"#).unwrap();
 /// assert_eq!(mistarr_mister::adapter::arcade::mra::read(&path).unwrap().zips, ["exblast.zip"]);
 /// ```
@@ -540,14 +520,14 @@ fn too_big() -> Error {
 /// ```
 /// use std::io::Read as _;
 /// use mistarr_mister::adapter::arcade::mra;
-/// let path = std::env::temp_dir().join(format!("mistarr-doc-inline-{}.mra", std::process::id()));
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = dir.path().join("inline.mra");
 /// std::fs::write(&path, "<m><rom><part>61 62 63</part></rom></m>").unwrap();
 /// let parsed = mra::read(&path).unwrap();
 /// let mra::RomItem::Part(part) = &parsed.roms[0].items[0] else { panic!() };
 /// let mut bytes = Vec::new();
 /// mra::open_inline(part.inline.as_ref().unwrap()).unwrap().read_to_end(&mut bytes).unwrap();
 /// assert_eq!(bytes, b"abc");
-/// std::fs::remove_file(&path).unwrap();
 /// ```
 pub fn open_inline(inline: &Inline) -> io::Result<InlineReader> {
     let mut file = std::fs::File::open(&inline.file)?;
@@ -607,8 +587,8 @@ impl InlineReader {
             let chunk: std::borrow::Cow<'_, str> = match event {
                 Event::Text(t) => t.into_inner(),
                 Event::CData(c) => c.into_inner(),
-                Event::GeneralRef(r) => resolve_ref(&r, self.reader.get_ref().position())
-                    .map_err(|e| bad(&e))?
+                Event::GeneralRef(r) => resolve_ref(&r)
+                    .map_err(|e| bad(&xml_err(e, self.reader.get_ref().position())))?
                     .into(),
                 Event::Eof => {
                     self.done = true;
@@ -639,7 +619,8 @@ impl Read for InlineReader {
     }
 }
 
-/// Incremental form of [`hex_bytes`]: the same result however the text is split.
+/// Incremental form of [`hex_bytes`]: the same result however the text is split, for
+/// inline part data too long to hold as one string.
 #[derive(Debug, Default)]
 struct Hex {
     high: Option<u8>,
@@ -722,10 +703,23 @@ pub fn missing_zips(mra: &Mra, mame_dir: &Path) -> Vec<String> {
 #[must_use]
 pub fn hex_bytes(text: &str) -> Option<Vec<u8>> {
     let mut out = Vec::with_capacity(text.len() / 2);
-    let mut hex = Hex::default();
-    hex.feed(text.as_bytes(), Some(&mut out));
-    hex.finish(Some(&mut out));
-    (!hex.bad).then_some(out)
+    let mut runs = text.split([' ', ',', '\t', '\n', '\r']).peekable();
+    while let Some(run) = runs.next() {
+        if !run.is_ascii() {
+            return None;
+        }
+        // Only the very end of the text may hold a lone digit, read as one byte.
+        let (pairs, lone) = if run.len() % 2 == 1 && runs.peek().is_none() {
+            run.split_at(run.len() - 1)
+        } else {
+            (run, "")
+        };
+        out.extend(mistarr_core::hex::decode(pairs)?);
+        if !lone.is_empty() {
+            out.push(u8::from_str_radix(lone, 16).ok()?);
+        }
+    }
+    Some(out)
 }
 
 /// Reads a number the way `strtoul(value, NULL, 0)` does: `0x` hex, leading-zero octal, else decimal.

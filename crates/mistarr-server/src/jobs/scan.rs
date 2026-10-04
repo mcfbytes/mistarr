@@ -141,18 +141,6 @@ async fn fan_out(ctx: &JobContext) -> Result<()> {
     Ok(())
 }
 
-/// The header rule named in `docs/PLATFORMS.md` "Header rules".
-fn header_rule(name: &str) -> HeaderRule {
-    match name {
-        "ines" => HeaderRule::Ines,
-        "smc" => HeaderRule::Smc,
-        "a78" => HeaderRule::A78,
-        "lnx" => HeaderRule::Lnx,
-        "n64" => HeaderRule::N64,
-        _ => HeaderRule::None,
-    }
-}
-
 /// Extensions a disc directory scan hashes: cue sheets plus track and image
 /// formats, per `docs/PLATFORMS.md` "Disc". Anything else (`.m3u`, cover
 /// art, …) is ignored.
@@ -889,7 +877,7 @@ async fn scan_flat_unit(
     let Some(entries) = readable(dir, listed) else {
         return Ok(None);
     };
-    let rule = header_rule(platform.header_rule);
+    let rule = platform.header_rule;
     let mut seen = Vec::new();
     for ListedFile { path, name, meta } in entries {
         ctx.checkpoint().await?;
@@ -914,7 +902,7 @@ async fn scan_flat_unit(
             scan_zip_unit(
                 sink,
                 rule,
-                platform.header_rule,
+                rule.as_str(),
                 &rel_path,
                 &path,
                 mtime,
@@ -952,15 +940,7 @@ async fn scan_flat_unit(
                     .db
                     .read(move |c| classify(c, &pid2, &name2, &forms2))
                     .await?;
-                hashed_row(
-                    rel_path,
-                    size,
-                    mtime,
-                    platform.header_rule,
-                    &forms,
-                    rom_id,
-                    state,
-                )
+                hashed_row(rel_path, size, mtime, rule.as_str(), &forms, rom_id, state)
             }
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "cannot hash file; marking unverified");
@@ -1858,13 +1838,6 @@ mod tests {
             !lacks_whole(&row(None, None, None)),
             "a member known by CRC32"
         );
-    }
-
-    #[test]
-    fn header_rule_names_map() {
-        assert!(matches!(header_rule("ines"), HeaderRule::Ines));
-        assert!(matches!(header_rule("smc"), HeaderRule::Smc));
-        assert!(matches!(header_rule("nope"), HeaderRule::None));
     }
 
     #[test]

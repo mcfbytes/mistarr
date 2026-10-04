@@ -391,7 +391,8 @@ fn inline_parts_read_from_a_file_hash_and_assemble_as_in_memory() {
         ("exblast.zip", "a.bin", b"abcd"),
         ("exblast.zip", "b.bin", &b),
     ]);
-    let dir = crate::adapter::testutil::scratch("assemble-inline");
+    let tmp = crate::adapter::testutil::scratch();
+    let dir = tmp.path();
     let path = dir.join("Example Inline.mra");
     std::fs::write(&path, &xml).expect("write");
     let from_file = crate::adapter::arcade::mra::read(&path).expect("read");
@@ -412,7 +413,8 @@ fn inline_parts_after_a_byte_order_mark_are_read_at_their_offsets() {
         <part name="a.bin"/><part>fe
         ff</part></rom></m>"#;
     let mut src = Mem::with(&[("exblast.zip", "a.bin", b"abcd")]);
-    let dir = crate::adapter::testutil::scratch("assemble-bom");
+    let tmp = crate::adapter::testutil::scratch();
+    let dir = tmp.path();
     let path = dir.join("Example Bom.mra");
     let mut bytes = b"\xEF\xBB\xBF".to_vec();
     bytes.extend_from_slice(xml.as_bytes());

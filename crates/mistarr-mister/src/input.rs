@@ -2,24 +2,45 @@
 
 use std::path::PathBuf;
 
+use mistarr_core::dat::DatRom;
+
 /// One DAT `<game>` as far as placement needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatEntry {
     /// The entry name, used as the title of the placed file or directory.
     pub name: String,
     /// The roms the entry lists, in DAT order.
-    pub roms: Vec<DatRom>,
+    pub roms: Vec<PlaceRom>,
 }
 
-/// One DAT `<rom>`.
+/// One DAT `<rom>` as far as placement needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DatRom {
+pub struct PlaceRom {
     /// File name the DAT gives the rom.
     pub name: String,
     /// Size in bytes.
     pub size: u64,
     /// Header bytes from the rom's `header` attribute, when the DAT has one.
     pub header: Option<Vec<u8>>,
+}
+
+impl From<&DatRom> for PlaceRom {
+    /// Takes the name and size, and the header bytes from [`DatRom::header_bytes`].
+    ///
+    /// ```
+    /// use mistarr_core::dat::{DatRom, RomStatus};
+    /// let rom = DatRom { name: "q.nes".into(), size: 4, crc32: None, md5: None, sha1: None,
+    ///     status: RomStatus::Good, header: Some("4E 45 53 1A".into()) };
+    /// let place = mistarr_mister::PlaceRom::from(&rom);
+    /// assert_eq!((place.size, place.header), (4, Some(b"NES\x1a".to_vec())));
+    /// ```
+    fn from(rom: &DatRom) -> Self {
+        Self {
+            name: rom.name.clone(),
+            size: rom.size,
+            header: rom.header_bytes(),
+        }
+    }
 }
 
 /// What kind of item sits at [`StagedFile::path`].
@@ -58,4 +79,32 @@ pub struct StagedMember {
     pub size: u64,
     /// First bytes of the member's uncompressed contents.
     pub head: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use mistarr_core::dat::RomStatus;
+
+    use super::*;
+
+    #[test]
+    fn place_rom_takes_header_bytes_from_the_dat_rom() {
+        let mut rom = DatRom {
+            name: "Example Quest (USA).nes".into(),
+            size: 40_976,
+            crc32: None,
+            md5: None,
+            sha1: None,
+            status: RomStatus::Good,
+            header: Some("4E 45 53 1a 00".into()),
+        };
+        let place = PlaceRom::from(&rom);
+        assert_eq!(place.name, rom.name);
+        assert_eq!(place.size, 40_976);
+        assert_eq!(place.header, Some(b"NES\x1a\0".to_vec()));
+        for bad in [None, Some(String::new()), Some("4E 4".into())] {
+            rom.header = bad;
+            assert_eq!(PlaceRom::from(&rom).header, None);
+        }
+    }
 }

@@ -7,7 +7,7 @@ use mistarr_mister::{adapter_for, DatEntry, StagedFile, StagedKind, Step};
 use serde_json::json;
 
 use super::place::{self, PlaceError};
-use super::support::{dat_rom, read_head, rel_string};
+use super::support::{place_rom, read_head, rel_string};
 use super::{stat, BIOS_REFUSED};
 use crate::app::AppState;
 use crate::db::files::{self, FileId, FileRow, FileState};
@@ -186,7 +186,7 @@ async fn canonical_path(
     };
     let dat = DatEntry {
         name: entry.name.clone(),
-        roms: vec![dat_rom(rom)],
+        roms: vec![place_rom(rom)],
     };
     let plan = adapter
         .plan_placement(&dat, &staged)
