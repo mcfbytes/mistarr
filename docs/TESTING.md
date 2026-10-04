@@ -288,14 +288,32 @@ counts and every browse filter combination in every search shape with the
 reference aggregation query kept in the test. `db::plans` prints the query
 plan of every hot read and fails on a scan of a growing table.
 
-The web e2e suite drives the Browse screen against the mock API with a
-latency from localStorage `mistarr.mockDelayMs`: a number, or an object of
-numbers keyed `search#page` or `search` with `*` as the default; negative
-fails the request. It checks the loading bar, stale answers, a background
-reload overtaken by a search, a failed next page and the error state.
-localStorage `mistarr.mockPlatformIds`, a JSON array of ids, adds present,
-enabled mock platforms named by their ids, so a test can use ids such as
-`constructor` that name members of a plain object's prototype.
+The web e2e suite runs against a build with `VITE_MOCK=1`, where `main.ts`
+replaces every method of the `api` object with `web/src/mock/api.ts` before the
+app mounts. The mock answers from synthetic fixtures and the state its own
+calls build up, runs its jobs on timers and sends their events down an
+in-memory stream that feeds the same `handle()` as the server's SSE; the app
+itself never knows it is mocked, which a lint rule keeps true. A production
+build carries none of it, and `npm run size` fails if a fixture string is in
+`dist/`.
+
+Tests steer the mock through knobs, JSON in localStorage `mistarr.mock.<key>`
+set with `setMockKnob` in `web/e2e/helpers.ts`, and push SSE events with
+`emitEvent`:
+
+- `delayMs`: title search latency, an object of numbers keyed `search#page`
+  or `search` with `*` as the default; negative fails the request. The suite
+  checks the loading bar, stale answers, a background reload overtaken by a
+  search, a failed next page and the error state.
+- `removedIds`: group ids the mock no longer lists, and whose title answers 404.
+- `platformIds`: extra present, enabled platforms named by their ids, so a test
+  can use ids such as `constructor` that name members of a plain object's
+  prototype.
+- `status`: fields laid over the mock's system status.
+- `settingsFail`: `true` makes the settings load fail.
+- `sourceCount` and `pageCap`: synthetic extra sources, and a smaller page cap
+  so a store reads several pages.
+- `savedSettings`: written by the mock with the last settings it was sent.
 
 ## 3. End-to-end on a board with real, open-licensed content
 
