@@ -154,9 +154,9 @@ async fn start_source(
     if ids.is_empty() {
         return Ok((Flow::Next, 0));
     }
-    let torrent = match row.client_id.as_deref() {
-        Some(cid) => match select(client, cid, &wanted).await {
-            Ok(id) => id,
+    let torrent = match row.client_id {
+        Some(id) => match client.set_wanted(&id, &wanted).await {
+            Ok(()) => id,
             Err(ClientError::MetadataPending) => return Ok((Flow::Next, 0)),
             Err(ClientError::NotFound) => {
                 app.db
@@ -199,17 +199,6 @@ async fn start_source(
         Scheduler::enqueue(app, job).await?;
     }
     Ok((Flow::Next, n))
-}
-
-/// Applies `wanted` to the torrent stored as `cid`; an id that is not an
-/// infohash is one the client does not have.
-async fn select(
-    client: &dyn DownloadClient,
-    cid: &str,
-    wanted: &[u32],
-) -> mistarr_clients::Result<ClientTorrentId> {
-    let id: ClientTorrentId = cid.parse()?;
-    client.set_wanted(&id, wanted).await.map(|()| id)
 }
 
 /// Fails the downloads for an error the client will repeat, else keeps them
@@ -265,9 +254,9 @@ async fn add(
     let seed = sources::seed_from_text(&row.seed_policy).unwrap_or(SeedPolicy::None);
     match client.add(src, &local, wanted, seed).await {
         Ok(id) => {
-            let (source, stored) = (row.id, id.to_string());
+            let source = row.id;
             app.db
-                .write(move |c| sources::set_client_id(c, source, Some(&stored)))
+                .write(move |c| sources::set_client_id(c, source, Some(id)))
                 .await?;
             Ok(Ok(id))
         }
@@ -325,15 +314,12 @@ pub async fn deselect(app: &AppState, source: SourceId) -> Result<bool> {
         .db
         .read(move |c| Ok((sources::get(c, source)?, rows::selected_indices(c, source)?)))
         .await?;
-    let Some(cid) = row.and_then(|r| r.client_id) else {
+    let Some(id) = row.and_then(|r| r.client_id) else {
         return Ok(true);
     };
     let Some(client) = app.client() else {
         crate::jobs::core_limits::defer(app, Op::Deselect(source)).await;
         return Ok(false);
-    };
-    let Ok(id) = cid.parse::<ClientTorrentId>() else {
-        return Ok(true);
     };
     if wanted.is_empty() {
         match client.stop(&id).await {

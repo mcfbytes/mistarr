@@ -2,12 +2,13 @@
 
 use std::fmt;
 
+use mistarr_clients::ClientTorrentId;
 use mistarr_core::PlatformId;
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
-use super::sources::SourceId;
+use super::sources::{self, SourceId};
 use super::titles::TitleId;
 use crate::error::Result;
 
@@ -775,7 +776,7 @@ pub struct PollRow {
     /// True when the torrent is one file stored under the torrent's name.
     pub single_file: bool,
     /// The source's id in the client.
-    pub client_id: Option<String>,
+    pub client_id: Option<ClientTorrentId>,
     /// The source's seed policy text.
     pub seed_policy: String,
     /// The file's size in bytes, from the metainfo.
@@ -811,7 +812,7 @@ pub fn polled(conn: &Connection) -> Result<Vec<PollRow>> {
                 infohash: r.get(7)?,
                 torrent_name: r.get(8)?,
                 single_file: r.get(9)?,
-                client_id: r.get(10)?,
+                client_id: sources::client_id(r, 10)?,
                 seed_policy: r.get(11)?,
                 size: u64::try_from(r.get::<_, i64>(12)?).unwrap_or(0),
             })

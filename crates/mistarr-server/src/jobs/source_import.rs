@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mistarr_clients::{ClientError, ClientTorrentId, SeedPolicy, TorrentSource};
+use mistarr_clients::{ClientError, SeedPolicy, TorrentSource};
 use mistarr_core::magnet;
 use mistarr_core::{InfoHash, PlatformId};
 use mistarr_sources::binding::{self, Binding};
@@ -506,8 +506,8 @@ impl Job for ResolveMagnet {
         let Some(client) = app.client() else {
             return note(app, &row, NO_CLIENT).await;
         };
-        let torrent = if let Some(existing) = &row.client_id {
-            existing.parse::<ClientTorrentId>()
+        let torrent = if let Some(existing) = row.client_id {
+            existing
         } else {
             let Some(src) = magnet_source(app, &row).await else {
                 return note(app, &row, BAD_INFOHASH).await;
@@ -522,20 +522,15 @@ impl Job for ResolveMagnet {
                     if let Err(e) = client.start(&added).await {
                         return note(app, &row, &unanswered(&e)).await;
                     }
-                    let stored = added.to_string();
                     app.db
-                        .write(move |c| rows::set_client_id(c, id, Some(&stored)))
+                        .write(move |c| rows::set_client_id(c, id, Some(added)))
                         .await?;
-                    Ok(added)
+                    added
                 }
                 Err(e) => return note(app, &row, &unanswered(&e)).await,
             }
         };
-        let listed = match torrent {
-            Ok(t) => client.files(&t).await.map(|files| (t, files)),
-            Err(e) => Err(e),
-        };
-        let (torrent, listed) = match listed {
+        let listed = match client.files(&torrent).await {
             Ok(found) => found,
             Err(ClientError::MetadataPending) => return note(app, &row, WAITING).await,
             Err(ClientError::NotFound) => {

@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use mistarr_clients::{
-    ClientError, ClientKind, ClientTorrentId, Direction, DownloadClient, RateLimit, RemotePathMap,
+    ClientError, ClientKind, Direction, DownloadClient, RateLimit, RemotePathMap,
 };
 use serde::{Deserialize, Serialize};
 
@@ -673,11 +673,7 @@ async fn apply_seed_policies(app: &AppState, client: &dyn DownloadClient) -> boo
     };
     let mut all = true;
     for (source, cid, seed) in rows {
-        let applied = match cid.parse::<ClientTorrentId>() {
-            Ok(id) => client.set_seed_policy(&id, seed).await,
-            Err(e) => Err(e),
-        };
-        match applied {
+        match client.set_seed_policy(&cid, seed).await {
             Ok(()) | Err(ClientError::NotFound) => {}
             Err(e) => {
                 tracing::warn!(source = %source, error = %e, "cannot apply the seed policy in the client");

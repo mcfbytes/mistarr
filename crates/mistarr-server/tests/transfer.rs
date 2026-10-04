@@ -277,7 +277,7 @@ async fn want_adds_selects_starts_extends_and_polls_through_transmission() {
         .await
         .expect("sources")
         .0;
-    assert_eq!(source[0].client_id.as_deref(), Some(h.as_str()));
+    assert_eq!(source[0].client_id.map(|c| c.to_string()), Some(h.clone()));
 
     push_extend(&fake, [true, false, false, false]);
     let r = want(&b, second).await;

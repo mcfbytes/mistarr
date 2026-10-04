@@ -313,7 +313,7 @@ async fn a_seed_policy_no_client_took_is_kept_for_one() {
     let source = SourceId(id.as_i64().expect("id"));
     let db = b.running.app.db.clone();
     db.write(move |c| {
-        mistarr_server::db::sources::set_client_id(c, source, Some(&"0c".repeat(20)))
+        mistarr_server::db::sources::set_client_id(c, source, "0c".repeat(20).parse().ok())
     })
     .await
     .expect("client id");

@@ -74,7 +74,7 @@ fn source(b: &Booted, client_id: Option<&str>) -> SourceId {
                     added_at: 1,
                 },
             )?;
-            sources::set_client_id(c, id, client_id)?;
+            sources::set_client_id(c, id, client_id.and_then(|s| s.parse().ok()))?;
             Ok(id)
         })
         .expect("source")

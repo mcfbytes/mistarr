@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use mistarr_clients::{
-    ClientError, ClientFile, ClientInfo, SeedPolicy, TorrentSource, TorrentStatus,
+    ClientError, ClientFile, ClientInfo, ClientTorrentId, SeedPolicy, TorrentSource, TorrentStatus,
 };
 
 use super::*;
@@ -699,7 +699,7 @@ fn source_in_client(app: &AppState) -> sources::SourceId {
                     added_at: 0,
                 },
             )?;
-            sources::set_client_id(c, id, Some(&"0b".repeat(20)))?;
+            sources::set_client_id(c, id, "0b".repeat(20).parse().ok())?;
             Ok(id)
         })
         .expect("source")
