@@ -1001,11 +1001,13 @@ name = "mistarr-mister"
 version = "0.4.1"
 dependencies = [
  "mistarr-core",
+ "mistarr-mister",
  "proptest",
  "quick-xml",
  "regex-lite",
  "rustix",
  "serde",
+ "tempfile",
  "thiserror",
 ]
 

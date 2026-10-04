@@ -1,7 +1,10 @@
 //! The platform table from `docs/PLATFORMS.md` and DAT-name binding.
 
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::OnceLock;
 
+use mistarr_core::hash::HeaderRule;
 use mistarr_core::PlatformId;
 use regex_lite::Regex;
 
@@ -19,6 +22,45 @@ pub enum Kind {
     Romset,
     /// MAME zips under `games/mame`, requested by MRA files.
     Arcade,
+}
+
+impl Kind {
+    /// Every kind, in table order.
+    const ALL: [Self; 4] = [Self::Cartridge, Self::Disc, Self::Romset, Self::Arcade];
+
+    /// The kind's name, as the `platforms.kind` column and the API store it.
+    ///
+    /// ```
+    /// use mistarr_mister::Kind;
+    /// assert_eq!(Kind::Disc.as_str(), "disc");
+    /// assert_eq!("disc".parse(), Ok(Kind::Disc));
+    /// assert!("other".parse::<Kind>().is_err());
+    /// ```
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Cartridge => "cartridge",
+            Self::Disc => "disc",
+            Self::Romset => "romset",
+            Self::Arcade => "arcade",
+        }
+    }
+}
+
+/// A name that is not a [`Kind`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("unknown platform kind {0:?}")]
+pub struct UnknownKind(pub String);
+
+impl FromStr for Kind {
+    type Err = UnknownKind;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|kind| kind.as_str() == s)
+            .ok_or_else(|| UnknownKind(s.to_owned()))
+    }
 }
 
 /// One row of the platform table.
@@ -40,8 +82,8 @@ pub struct Platform {
     pub load_extensions: &'static [&'static str],
     /// Regular expressions matched against the normalised DAT name; see [`bind_dat_name`].
     pub dat_name_patterns: &'static [&'static str],
-    /// Header rule name from the "Header rules" table.
-    pub header_rule: &'static str,
+    /// Hashing rule from the "Header rules" table; cartridge placement follows it too.
+    pub header_rule: HeaderRule,
     /// BIOS file name the core documents, reported and never handled.
     pub bios: Option<&'static str>,
     /// Row must be confirmed against a live board.
@@ -67,6 +109,18 @@ impl Platform {
         PlatformId(self.id.to_owned())
     }
 
+    /// The directory the core reads from, `root/games/<core_dir>`.
+    ///
+    /// ```
+    /// use std::path::Path;
+    /// let snes = mistarr_mister::platforms::by_id("snes").unwrap();
+    /// assert_eq!(snes.games_dir(Path::new("/media/fat")), Path::new("/media/fat/games/SNES"));
+    /// ```
+    #[must_use]
+    pub fn games_dir(&self, root: &Path) -> PathBuf {
+        root.join("games").join(self.core_dir)
+    }
+
     /// Whether presence and verification for this platform come from the
     /// arcade catalogue (PLATFORMS.md "MRA catalogue") rather than a library scan.
     ///
@@ -89,7 +143,7 @@ const CART: Platform = Platform {
     extension_written: None,
     load_extensions: &[],
     dat_name_patterns: &[],
-    header_rule: "none",
+    header_rule: HeaderRule::None,
     bios: None,
     verify_on_board: false,
     core_names: &[],
@@ -151,7 +205,7 @@ pub static PLATFORMS: [Platform; 33] = [
         extension_written: Some("nes"),
         load_extensions: &["nes"],
         dat_name_patterns: &["nintendo entertainment system", "nes"],
-        header_rule: "ines",
+        header_rule: HeaderRule::Ines,
         ..CART
     },
     Platform {
@@ -179,7 +233,7 @@ pub static PLATFORMS: [Platform; 33] = [
             "super famicom",
             "satellaview",
         ],
-        header_rule: "smc",
+        header_rule: HeaderRule::Smc,
         ..CART
     },
     Platform {
@@ -191,7 +245,7 @@ pub static PLATFORMS: [Platform; 33] = [
         extension_written: Some("z64"),
         load_extensions: &["z64", "v64", "n64"],
         dat_name_patterns: &["nintendo 64"],
-        header_rule: "n64",
+        header_rule: HeaderRule::N64,
         ..CART
     },
     Platform {
@@ -341,7 +395,7 @@ pub static PLATFORMS: [Platform; 33] = [
         extension_written: Some("a78"),
         load_extensions: &["a78"],
         dat_name_patterns: &["atari 7800"],
-        header_rule: "a78",
+        header_rule: HeaderRule::A78,
         ..CART
     },
     Platform {
@@ -353,7 +407,7 @@ pub static PLATFORMS: [Platform; 33] = [
         extension_written: Some("lnx"),
         load_extensions: &["lnx"],
         dat_name_patterns: &["atari lynx"],
-        header_rule: "lnx",
+        header_rule: HeaderRule::Lnx,
         ..CART
     },
     Platform {
@@ -684,11 +738,6 @@ mod tests {
             assert!(!p.load_extensions.is_empty(), "{}", p.id);
             assert!(PLATFORMS[i + 1..].iter().all(|q| q.id != p.id), "{}", p.id);
             assert!(!p.libretro_playlist.is_empty(), "{}", p.id);
-            assert!(
-                ["none", "ines", "smc", "a78", "lnx", "n64"].contains(&p.header_rule),
-                "{}",
-                p.id
-            );
             if p.kind == Kind::Cartridge {
                 let ext = p
                     .extension_written
@@ -803,6 +852,37 @@ mod tests {
             by_id("psx").map(Platform::platform_id),
             Some(PlatformId("psx".into()))
         );
+    }
+
+    #[test]
+    fn kinds_round_trip_through_their_names() {
+        for (kind, name) in [
+            (Kind::Cartridge, "cartridge"),
+            (Kind::Disc, "disc"),
+            (Kind::Romset, "romset"),
+            (Kind::Arcade, "arcade"),
+        ] {
+            assert_eq!(kind.as_str(), name);
+            assert_eq!(name.parse(), Ok(kind));
+        }
+        assert_eq!("Disc".parse::<Kind>(), Err(UnknownKind("Disc".into())));
+    }
+
+    #[test]
+    fn games_dir_is_the_core_dir_under_games() {
+        for p in &PLATFORMS {
+            assert_eq!(
+                p.games_dir(Path::new("/r")),
+                Path::new("/r/games").join(p.core_dir)
+            );
+        }
+    }
+
+    #[test]
+    fn header_rules_sit_on_cartridge_rows_only() {
+        for p in PLATFORMS.iter().filter(|p| p.kind != Kind::Cartridge) {
+            assert_eq!(p.header_rule, HeaderRule::None, "{}", p.id);
+        }
     }
 
     /// Rows marked **verify**, each with a `board_verify_<id>` test below.

@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use mistarr_core::hash::{hash_forms, hash_zip_member_forms, zip_members, HashError, HeaderRule};
 use mistarr_core::HashSet as Hashes;
-use mistarr_mister::DatRom;
+use mistarr_mister::PlaceRom;
 
 use crate::db::imports::EntryRom;
 
@@ -129,18 +129,6 @@ pub(super) fn locate(
         .or(Some(local))
 }
 
-/// The header rule named in `docs/PLATFORMS.md` "Header rules".
-pub(super) fn header_rule(name: &str) -> HeaderRule {
-    match name {
-        "ines" => HeaderRule::Ines,
-        "smc" => HeaderRule::Smc,
-        "a78" => HeaderRule::A78,
-        "lnx" => HeaderRule::Lnx,
-        "n64" => HeaderRule::N64,
-        _ => HeaderRule::None,
-    }
-}
-
 pub(super) fn is_zip(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
@@ -192,30 +180,9 @@ pub(super) fn read_head(path: &Path, member: Option<&str>) -> Result<Vec<u8>, Ha
     Ok(buf)
 }
 
-/// Header bytes from a DAT `header` attribute written as hex, spaces allowed.
-///
-/// ```
-/// use mistarr_server::jobs::import::parse_header;
-/// assert_eq!(parse_header("4E 45 53 1a"), Some(b"NES\x1a".to_vec()));
-/// assert_eq!(parse_header("no header"), None);
-/// ```
-#[must_use]
-pub fn parse_header(text: &str) -> Option<Vec<u8>> {
-    let hex: Vec<u8> = text.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
-    if hex.is_empty() || !hex.len().is_multiple_of(2) {
-        return None;
-    }
-    hex.chunks(2)
-        .map(|p| u8::from_str_radix(std::str::from_utf8(p).ok()?, 16).ok())
-        .collect()
-}
-
-pub(super) fn dat_rom(rom: &EntryRom) -> DatRom {
-    DatRom {
-        name: rom.name.clone(),
-        size: rom.size,
-        header: rom.header.as_deref().and_then(parse_header),
-    }
+/// The rom as placement sees it, its header bytes decoded by [`PlaceRom::new`].
+pub(super) fn place_rom(rom: &EntryRom) -> PlaceRom {
+    PlaceRom::new(&rom.name, rom.size, rom.header.as_deref())
 }
 
 /// Whether `h` is rom `rom` under `docs/VERIFICATION.md` "Matching order":
@@ -423,14 +390,6 @@ mod tests {
     }
 
     #[test]
-    fn headers_parse_from_spaced_hex() {
-        assert_eq!(parse_header("4e45531a"), Some(b"NES\x1a".to_vec()));
-        assert_eq!(parse_header("4e4"), None);
-        assert_eq!(parse_header(""), None);
-        assert_eq!(parse_header("zz"), None);
-    }
-
-    #[test]
     fn roms_match_in_order_and_identical_ones_are_told_apart() {
         let h = abc();
         let a = rom(1, "Disc (Track 1).bin", &h);
@@ -549,14 +508,13 @@ mod tests {
         );
         assert!(is_zip(Path::new("a.ZIP")));
         assert!(!is_zip(Path::new("a.nes")));
-        assert_eq!(header_rule("n64"), HeaderRule::N64);
-        assert_eq!(header_rule("none"), HeaderRule::None);
         assert_eq!(leaf("a/b.bin"), "b.bin");
-        let dat = dat_rom(&EntryRom {
+        let place = place_rom(&EntryRom {
             header: Some("4E 45".into()),
             ..rom(1, "a.nes", &abc())
         });
-        assert_eq!(dat.header, Some(vec![0x4e, 0x45]));
+        assert_eq!((place.name.as_str(), place.size), ("a.nes", 3));
+        assert_eq!(place.header, Some(vec![0x4e, 0x45]));
     }
 
     #[test]

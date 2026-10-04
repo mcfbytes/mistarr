@@ -216,25 +216,27 @@ Opus · `mistarr-clients`, server callers · branch `wp-57-clients-core`
 
 Opus · `mistarr-mister`, server callers · branch `wp-58-mister-core`
 
-- [ ] `Platform.header_rule` is a `HeaderRule`. `adapter::build` matches on
+- [x] `Platform.header_rule` is a `HeaderRule`. `adapter::build` matches on
   kind and rule, not on id strings. The server's copies of `header_rule` in
   `jobs/scan.rs` and `jobs/import/support.rs` go.
-- [ ] Adapters use core's header constants and byte-order detection;
+- [x] Adapters use core's header constants and byte-order detection;
   `cart.rs` and `ByteOrder` duplicates go.
-- [ ] `CoreAdapter` keeps `plan_placement` only; the platform, directory,
+- [x] `CoreAdapter` keeps `plan_placement` only; the platform, directory,
   BIOS and accepts facts are read from the `Platform` row, and
   `row_methods!` goes. The scan keeps its own extension rules, since
   `Nes::accepts` requires the iNES magic that headerless files lack.
   ARCHITECTURE.md's adapter section says so.
-- [ ] `PlacementPlan::rename(from, to)`, `exact_name(&str)` and one
+- [x] `PlacementPlan::rename(from, to)`, `exact_name(&str)` and one
   `has_extension` replace the repeated constructions.
-- [ ] `Kind` gains `as_str` and `FromStr`; the server's `kind_str` goes.
-- [ ] Mister's `DatRom` becomes `PlaceRom` and takes header bytes from
-  `DatRom::header_bytes()`; `mra.rs` `hex_bytes` uses core's hex.
-- [ ] MRA and romsets readers use `core::xml` `CappedReader`, `attr_value` and
+- [x] `Kind` gains `as_str` and `FromStr`; the server's `kind_str` goes.
+- [x] Mister's `DatRom` becomes `PlaceRom` and takes header bytes from
+  core's `dat::decode_header`, the rule behind `DatRom::header_bytes()`.
+  `mra.rs` keeps its own streaming hex decoder, since MRA hex (a lone final
+  digit, `,` separators) is a grammar core's `hex` does not cover.
+- [x] MRA and romsets readers use `core::xml` `CappedReader`, `attr_value` and
   `resolve_ref`.
-- [ ] `RecordingSink` and `FakeOutcome` sit behind `test-support`.
-- [ ] Tests use `tempfile::TempDir`; none leaves a directory in the system temp
+- [x] `RecordingSink` and `FakeOutcome` sit behind `test-support`.
+- [x] Tests use `tempfile::TempDir`; none leaves a directory in the system temp
   directory.
 
 ### WP-59 One intake for dropped files

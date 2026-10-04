@@ -3,10 +3,10 @@
 pub mod assemble;
 pub mod mra;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use self::mra::ZipPath;
-use super::{extension, row_methods, safe_name, staged_name, CoreAdapter, PlacementPlan, Step};
+use super::{exact_name, safe_name, staged_name, CoreAdapter, PlacementPlan, Step};
 use crate::input::{DatEntry, StagedFile, StagedKind};
 use crate::platforms::Platform;
 use crate::{Error, Result};
@@ -15,37 +15,25 @@ use crate::{Error, Result};
 pub(super) struct Arcade(pub &'static Platform);
 
 impl CoreAdapter for Arcade {
-    row_methods!();
-
     fn plan_placement(&self, entry: &DatEntry, staged: &StagedFile) -> Result<PlacementPlan> {
         let zip_name = format!("{}.zip", safe_name(&entry.name)?);
         let final_rel_path = PathBuf::from(self.0.core_dir).join(&zip_name);
         let from = staged_name(staged)?;
-        let steps = match staged.kind {
-            StagedKind::Zip => vec![Step::Rename {
-                from,
-                to: final_rel_path.clone(),
-            }],
-            StagedKind::Dir => vec![
-                Step::Zip {
-                    from,
-                    to: PathBuf::from(&zip_name),
-                },
-                Step::Rename {
-                    from: PathBuf::from(zip_name),
-                    to: final_rel_path.clone(),
-                },
-            ],
-            StagedKind::File => return Err(Error::Unplaceable("arcade sets are placed as zips")),
-        };
-        Ok(PlacementPlan {
-            final_rel_path,
-            steps,
-        })
-    }
-
-    fn accepts(&self, path: &Path) -> bool {
-        extension(path).as_deref() == Some("zip")
+        match staged.kind {
+            StagedKind::Zip => Ok(PlacementPlan::rename(from, final_rel_path)),
+            StagedKind::Dir => {
+                let mut plan = PlacementPlan::rename(PathBuf::from(&zip_name), final_rel_path);
+                plan.steps.insert(
+                    0,
+                    Step::Zip {
+                        from,
+                        to: PathBuf::from(zip_name),
+                    },
+                );
+                Ok(plan)
+            }
+            StagedKind::File => Err(Error::Unplaceable("arcade sets are placed as zips")),
+        }
     }
 }
 
@@ -77,21 +65,14 @@ pub fn zip_placement(zip: &ZipPath, staged: &StagedFile) -> Result<PlacementPlan
             "an MRA zip is placed only into games/mame or games/hbmame",
         ));
     };
-    if safe_name(&zip.file)? != zip.file {
-        return Err(Error::InvalidName(zip.file.clone()));
-    }
-    let final_rel_path = PathBuf::from(dir).join(&zip.file);
-    Ok(PlacementPlan {
-        steps: vec![Step::Rename {
-            from: staged_name(staged)?,
-            to: final_rel_path.clone(),
-        }],
-        final_rel_path,
-    })
+    let final_rel_path = PathBuf::from(dir).join(exact_name(&zip.file)?);
+    Ok(PlacementPlan::rename(staged_name(staged)?, final_rel_path))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::super::testutil::*;
     use super::*;
 
@@ -107,10 +88,6 @@ mod tests {
                 from: "exblast.zip".into(),
                 to: "mame/exblast.zip".into()
             }]
-        );
-        assert_eq!(
-            adapter("arcade").games_dir(Path::new("/media/fat")),
-            Path::new("/media/fat/games/mame")
         );
     }
 
@@ -156,13 +133,10 @@ mod tests {
     }
 
     #[test]
-    fn loose_file_is_refused_and_only_zips_accepted() {
+    fn loose_file_is_refused() {
         let e = entry("exblast", &[("cpu.bin", 16)]);
         assert!(adapter("arcade")
             .plan_placement(&e, &file("cpu.bin", 16, &[]))
             .is_err());
-        assert!(adapter("arcade").accepts(Path::new("exblast.zip")));
-        assert!(!adapter("arcade").accepts(Path::new("exblast.7z")));
-        assert_eq!(adapter("arcade").requires_bios(), None);
     }
 }

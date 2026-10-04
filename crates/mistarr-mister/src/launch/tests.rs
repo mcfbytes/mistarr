@@ -12,13 +12,6 @@ fn touch(root: &Path, rel: &str) {
     std::fs::write(path, b"").expect("write");
 }
 
-fn fresh(tag: &str) -> PathBuf {
-    let dir = scratch(tag);
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("mkdir");
-    dir
-}
-
 fn row(id: &str) -> &'static Platform {
     by_id(id).expect("id is in the table")
 }
@@ -32,47 +25,48 @@ const SLOT: LaunchSlot = LaunchSlot {
 
 #[test]
 fn newest_dated_core_wins_across_folders() {
-    let root = fresh("find-newest");
-    touch(&root, "_Console/NES_20230101.rbf");
-    touch(&root, "_Console/Older/NES_20240301.rbf");
-    touch(&root, "_Console/NES.rbf");
-    touch(&root, "_Console/SNES_20250101.rbf");
-    let core = find_core(&root, row("nes")).expect("core");
+    let tmp = scratch();
+    let root = tmp.path();
+    touch(root, "_Console/NES_20230101.rbf");
+    touch(root, "_Console/Older/NES_20240301.rbf");
+    touch(root, "_Console/NES.rbf");
+    touch(root, "_Console/SNES_20250101.rbf");
+    let core = find_core(root, row("nes")).expect("core");
     assert_eq!(core.path, root.join("_Console/Older/NES_20240301.rbf"));
     assert_eq!(core.mgl_rbf, "_Console/Older/NES");
-    assert_eq!(
-        find_core(&root, row("fds")).map(|c| c.path),
-        Some(core.path)
-    );
+    assert_eq!(find_core(root, row("fds")).map(|c| c.path), Some(core.path));
 }
 
 #[test]
 fn equal_dates_prefer_the_shorter_path() {
-    let root = fresh("find-tie");
-    touch(&root, "_Console/Sub/NES_20240101.rbf");
-    touch(&root, "_Console/NES_20240101.rbf");
-    let core = find_core(&root, row("nes")).expect("core");
+    let tmp = scratch();
+    let root = tmp.path();
+    touch(root, "_Console/Sub/NES_20240101.rbf");
+    touch(root, "_Console/NES_20240101.rbf");
+    let core = find_core(root, row("nes")).expect("core");
     assert_eq!(core.mgl_rbf, "_Console/NES");
 }
 
 #[test]
 fn undated_core_is_used_when_alone() {
-    let root = fresh("find-undated");
-    touch(&root, "_Other/Gameboy.rbf");
-    let core = find_core(&root, row("gbc")).expect("core");
+    let tmp = scratch();
+    let root = tmp.path();
+    touch(root, "_Other/Gameboy.rbf");
+    let core = find_core(root, row("gbc")).expect("core");
     assert_eq!(core.mgl_rbf, "_Other/Gameboy");
 }
 
 #[test]
 fn row_core_names_choose_and_carry_their_parameters() {
-    let root = fresh("find-alias");
-    touch(&root, "_Console/Genesis_20240101.rbf");
-    touch(&root, "_Console/TurboGrafx16_20240101.rbf");
-    touch(&root, "_Console/ColecoVision_20240101.rbf");
-    touch(&root, "_Console/Atari7800_20240101.rbf");
-    touch(&root, "_Arcade/cores/NES_20990101.rbf");
-    touch(&root, "_Arcade/cores/jtngp_20240101.rbf");
-    let rbf = |id: &str| find_core(&root, row(id)).map(|c| c.mgl_rbf);
+    let tmp = scratch();
+    let root = tmp.path();
+    touch(root, "_Console/Genesis_20240101.rbf");
+    touch(root, "_Console/TurboGrafx16_20240101.rbf");
+    touch(root, "_Console/ColecoVision_20240101.rbf");
+    touch(root, "_Console/Atari7800_20240101.rbf");
+    touch(root, "_Arcade/cores/NES_20990101.rbf");
+    touch(root, "_Arcade/cores/jtngp_20240101.rbf");
+    let rbf = |id: &str| find_core(root, row(id)).map(|c| c.mgl_rbf);
     assert_eq!(rbf("megadrive").as_deref(), Some("_Console/Genesis"));
     assert_eq!(rbf("pcecd").as_deref(), Some("_Console/TurboGrafx16"));
     assert_eq!(rbf("sg1000").as_deref(), Some("_Console/ColecoVision"));
@@ -80,9 +74,9 @@ fn row_core_names_choose_and_carry_their_parameters() {
     assert_eq!(rbf("ngp").as_deref(), Some("_Arcade/cores/jtngp"));
     assert_eq!(rbf("nes"), None, "an _Arcade rbf needs an explicit row");
     assert_eq!(rbf("arcade"), None);
-    let sg = find_core(&root, row("sg1000")).expect("core");
+    let sg = find_core(root, row("sg1000")).expect("core");
     assert_eq!((sg.slot.index, sg.slot.delay), (0, 1));
-    let coleco = find_core(&root, row("coleco")).expect("core");
+    let coleco = find_core(root, row("coleco")).expect("core");
     assert_eq!(coleco.path, sg.path);
     assert_eq!((coleco.slot.index, coleco.slot.delay), (1, 1));
     assert!(find_core(&root.join("absent"), row("snes")).is_none());
@@ -90,10 +84,11 @@ fn row_core_names_choose_and_carry_their_parameters() {
 
 #[test]
 fn an_earlier_core_name_wins_over_a_fallback() {
-    let root = fresh("find-fallback");
-    touch(&root, "_Console/Atari7800_20250101.rbf");
-    touch(&root, "_Console/Atari2600_20200101.rbf");
-    let core = find_core(&root, row("atari2600")).expect("core");
+    let tmp = scratch();
+    let root = tmp.path();
+    touch(root, "_Console/Atari7800_20250101.rbf");
+    touch(root, "_Console/Atari2600_20200101.rbf");
+    let core = find_core(root, row("atari2600")).expect("core");
     assert_eq!(core.mgl_rbf, "_Console/Atari2600");
 }
 
@@ -135,8 +130,9 @@ fn chd_members_split_only_after_a_chd() {
 
 #[test]
 fn a_chd_member_loads_its_image_after_a_complete_cue() {
-    let games = fresh("chd-member");
-    let path = |files: &[&str]| game_path(Kind::Disc, &games, files);
+    let tmp = scratch();
+    let games = tmp.path();
+    let path = |files: &[&str]| game_path(Kind::Disc, games, files);
     assert_eq!(
         path(&["PSX/G/g.chd#01", "PSX/G/g.chd#02", "PSX/G/g.chd#cue"]).as_deref(),
         Some("PSX/G/g.chd")
@@ -146,7 +142,7 @@ fn a_chd_member_loads_its_image_after_a_complete_cue() {
         Some("PSX/G/g.chd"),
         "the track list member is never taken for a cue sheet"
     );
-    touch(&games, "PSX/G/g.bin");
+    touch(games, "PSX/G/g.bin");
     std::fs::write(games.join("PSX/G/g.cue"), "FILE \"g.bin\" BINARY\n").expect("cue");
     assert_eq!(
         path(&["PSX/G/g.chd#01", "PSX/G/g.cue", "PSX/G/g.bin"]).as_deref(),
@@ -201,7 +197,8 @@ fn game_paths_per_kind() {
 
 #[test]
 fn a_disc_loads_the_cue_whose_files_exist() {
-    let games = fresh("cue-pick");
+    let tmp = scratch();
+    let games = tmp.path();
     std::fs::create_dir_all(games.join("PSX/G")).expect("mkdir");
     std::fs::write(
         games.join("PSX/G/broken.cue"),
@@ -213,15 +210,15 @@ fn a_disc_loads_the_cue_whose_files_exist() {
         "REM x\nFILE \"G (Track 1).bin\" BINARY\nfile G2.bin BINARY\n",
     )
     .expect("write");
-    touch(&games, "PSX/G/G (Track 1).bin");
-    touch(&games, "PSX/G/G2.bin");
+    touch(games, "PSX/G/G (Track 1).bin");
+    touch(games, "PSX/G/G2.bin");
     let files = ["PSX/G/G (Track 1).bin", "PSX/G/broken.cue", "PSX/G/G.CUE"];
     assert_eq!(
-        game_path(Kind::Disc, &games, &files).as_deref(),
+        game_path(Kind::Disc, games, &files).as_deref(),
         Some("PSX/G/G.CUE")
     );
     std::fs::write(games.join("PSX/G/G.CUE"), "FILE \"../G2.bin\" BINARY\n").expect("write");
-    assert_eq!(game_path(Kind::Disc, &games, &files), None);
+    assert_eq!(game_path(Kind::Disc, games, &files), None);
 }
 
 #[test]
@@ -316,10 +313,11 @@ proptest! {
 
 #[test]
 fn write_mgl_makes_a_new_file_and_keeps_the_last_few() {
-    let dir = fresh("write-mgl");
-    touch(&dir, "other.mgl");
+    let tmp = scratch();
+    let dir = tmp.path();
+    touch(dir, "other.mgl");
     let paths: Vec<PathBuf> = (0..5)
-        .map(|i| write_mgl(&dir, &format!("doc {i}")).expect("write"))
+        .map(|i| write_mgl(dir, &format!("doc {i}")).expect("write"))
         .collect();
     let mut unique = paths.clone();
     unique.dedup();
@@ -365,7 +363,8 @@ fn mkfifo(path: &Path) {
 
 #[test]
 fn fifo_sink_maps_an_absent_path() {
-    let dir = fresh("fifo-absent");
+    let tmp = scratch();
+    let dir = tmp.path();
     let sink = FifoSink::new(dir.join("MiSTer_cmd"));
     assert!(!sink.present());
     assert!(matches!(sink.send("x\n"), Err(Error::CommandAbsent)));
@@ -375,7 +374,8 @@ fn fifo_sink_maps_an_absent_path() {
 
 #[test]
 fn fifo_sink_refuses_a_regular_file() {
-    let dir = fresh("fifo-regular");
+    let tmp = scratch();
+    let dir = tmp.path();
     let path = dir.join("MiSTer_cmd");
     std::fs::write(&path, b"").expect("write");
     let sink = FifoSink::new(&path);
@@ -386,7 +386,8 @@ fn fifo_sink_refuses_a_regular_file() {
 
 #[test]
 fn fifo_without_a_reader_is_not_listening() {
-    let dir = fresh("fifo-noreader");
+    let tmp = scratch();
+    let dir = tmp.path();
     let path = dir.join("MiSTer_cmd");
     mkfifo(&path);
     let sink = FifoSink::new(&path);
@@ -396,7 +397,8 @@ fn fifo_without_a_reader_is_not_listening() {
 
 #[test]
 fn fifo_with_a_reader_receives_the_line() {
-    let dir = fresh("fifo-reader");
+    let tmp = scratch();
+    let dir = tmp.path();
     let path = dir.join("MiSTer_cmd");
     mkfifo(&path);
     let fd = rustix::fs::open(&path, OFlags::RDONLY | OFlags::NONBLOCK, Mode::empty())

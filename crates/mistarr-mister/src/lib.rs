@@ -16,10 +16,10 @@ pub mod input;
 pub mod launch;
 pub mod platforms;
 
-pub use adapter::{adapter_for, ByteOrder, CoreAdapter, PlacementPlan, Step};
-pub use input::{DatEntry, DatRom, StagedFile, StagedKind, StagedMember};
+pub use adapter::{adapter_for, CoreAdapter, PlacementPlan, Step};
+pub use input::{DatEntry, PlaceRom, StagedFile, StagedKind, StagedMember};
 pub use mistarr_core::PlatformId;
-pub use platforms::{bind_dat_name, Kind, Platform};
+pub use platforms::{bind_dat_name, Kind, Platform, UnknownKind};
 
 /// Path of the file MiSTer writes the running core's name to. `MENU` means
 /// no core is running.

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{extension, row_methods, safe_name, source_for, CoreAdapter, PlacementPlan, Step};
+use super::{exact_name, has_extension, safe_name, source_for, CoreAdapter, PlacementPlan, Step};
 use crate::input::{DatEntry, StagedFile};
 use crate::platforms::Platform;
 use crate::{Error, Result};
@@ -28,29 +28,24 @@ fn title(entry_name: &str) -> String {
 }
 
 impl CoreAdapter for Disc {
-    row_methods!();
-
     fn plan_placement(&self, entry: &DatEntry, staged: &StagedFile) -> Result<PlacementPlan> {
         let dir = PathBuf::from(self.0.core_dir).join(safe_name(&title(&entry.name))?);
         let mut steps = vec![Step::CreateDir { path: dir.clone() }];
         let mut used = Vec::new();
         for rom in &entry.roms {
-            let target = safe_name(&rom.name)?;
-            if target != rom.name {
-                return Err(Error::InvalidName(rom.name.clone()));
-            }
+            let target = exact_name(&rom.name)?;
             let src = source_for(rom, staged, &mut used)?;
             steps.extend(src.unzip);
             steps.push(Step::Rename {
                 from: src.work,
-                to: dir.join(&target),
+                to: dir.join(target),
             });
         }
         let with_ext = |want: &str| {
             entry
                 .roms
                 .iter()
-                .find(|r| extension(Path::new(&r.name)).as_deref() == Some(want))
+                .find(|r| has_extension(Path::new(&r.name), want))
         };
         let primary = with_ext("cue")
             .or_else(|| with_ext("iso"))
@@ -61,10 +56,6 @@ impl CoreAdapter for Disc {
             final_rel_path,
             steps,
         })
-    }
-
-    fn accepts(&self, path: &Path) -> bool {
-        extension(path).is_some_and(|e| self.0.load_extensions.contains(&e.as_str()))
     }
 }
 
@@ -131,22 +122,6 @@ mod tests {
                 p.id
             );
             assert!(!plan.steps.iter().any(|s| matches!(s, Step::Zip { .. })));
-        }
-    }
-
-    #[test]
-    fn every_disc_row_accepts_cue_iso_and_chd_but_not_zip() {
-        for p in PLATFORMS.iter().filter(|p| p.kind == Kind::Disc) {
-            let a = adapter(p.id);
-            for ext in ["cue", "iso", "chd", "CHD"] {
-                assert!(
-                    a.accepts(Path::new(&format!("Example Quest (USA).{ext}"))),
-                    "{}",
-                    p.id
-                );
-            }
-            assert!(!a.accepts(Path::new("Example Quest (USA).zip")), "{}", p.id);
-            assert!(!a.accepts(Path::new(T1)), "{}", p.id);
         }
     }
 

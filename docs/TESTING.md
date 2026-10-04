@@ -10,7 +10,7 @@ Three layers. All of them run on x86-64 in CI; only the last needs a board.
   selection tables, cue parsing, and the CHD decoder: known answers worked
   out in CHD.md for the map, canonical codes and CHT2 layout, and
   `decode_budget` under 24 MiB at the header limits.
-- `mistarr-mister`: every adapter's `plan_placement` and `accepts` against
+- `mistarr-mister`: every adapter's `plan_placement` against
   synthetic inputs; MRA parsing; DAT-name to platform binding; MGL building
   and escaping, core selection and the command FIFO against a real FIFO in a
   temporary directory.

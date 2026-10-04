@@ -269,11 +269,21 @@ impl DatRom {
     /// ```
     #[must_use]
     pub fn header_bytes(&self) -> Option<Vec<u8>> {
-        self.header
-            .as_deref()
-            .and_then(crate::hex::decode_spaced)
-            .filter(|bytes| !bytes.is_empty())
+        self.header.as_deref().and_then(decode_header)
     }
+}
+
+/// The bytes a DAT `header` attribute such as `4E 45 53 1A` writes in hex; `None` when
+/// it is empty or not hex.
+///
+/// ```
+/// use mistarr_core::dat::decode_header;
+/// assert_eq!(decode_header("4E 45 53 1a"), Some(b"NES\x1a".to_vec()));
+/// assert_eq!(decode_header(" "), None);
+/// ```
+#[must_use]
+pub fn decode_header(text: &str) -> Option<Vec<u8>> {
+    crate::hex::decode_spaced(text).filter(|bytes| !bytes.is_empty())
 }
 
 /// One `<game>` (or `<machine>`) entry.
