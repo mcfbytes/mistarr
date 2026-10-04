@@ -16,7 +16,7 @@ Markers:
 
 **Permissions cannot do this on the SD card.** The card is exFAT, mounted once with no `uid=`/`gid=` and with `fmask=0022,dmask=0022`:
 - Buildroot_MiSTer: `board/mister/common/initramfs-overlay/init:27` [V].
-- Stock: the kernel mounts it with an empty option string ([do_mounts.c#L456-L474](https://github.com/MiSTer-devel/Linux-Kernel_MiSTer/blob/e24da5873d22f5c99b4f35fd1e172dbd6c3dc137/init/do_mounts.c#L456-L474)) [V].
+- Stock: the kernel mounts it with an empty option string ([do_mounts.c#L456-L474](https://github.com/MiSTer-devel/Linux-Kernel_MiSTer/blob/e24da58/init/do_mounts.c#L456-L474)) [V].
 
 Every file is therefore `root:root 0755`. exFAT refuses a remount that changes owner or masks ([super.c#L751-L782](https://github.com/torvalds/linux/blob/v6.18/fs/exfat/super.c#L751-L782)) [V]. Idmapped mounts would need `CONFIG_USER_NS`, which is off on every MiSTer kernel [V]. So a plain non-root uid can write nothing on the card, and any card-wide grant lets it write everything. Writing anything on the card is root code execution (ADR 0031:58-61) [V].
 
