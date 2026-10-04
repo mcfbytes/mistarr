@@ -6,8 +6,11 @@
 
 use std::fmt;
 use std::path::Path;
+use std::str::FromStr;
+use std::sync::Arc;
 
 use async_trait::async_trait;
+use mistarr_core::InfoHash;
 use serde::{Deserialize, Serialize};
 
 pub mod detect;
@@ -17,12 +20,17 @@ pub mod fake;
 pub mod fetch;
 mod http;
 pub mod launch;
-mod metainfo;
 mod path_map;
 pub mod rtorrent;
 mod scgi;
+#[cfg(test)]
+mod testutil;
 pub mod transmission;
+mod wanted;
+#[cfg(any(test, feature = "test-support"))]
 pub mod xmlrpc;
+#[cfg(not(any(test, feature = "test-support")))]
+mod xmlrpc;
 
 pub use error::ClientError;
 pub use path_map::{PathMapping, RemotePathMap};
@@ -181,124 +189,128 @@ impl RateLimit {
     }
 }
 
-/// The torrent to hand to the client.
+/// The torrent to hand to the client, with what the caller's own parse of it
+/// found, so no client reads the metainfo or the magnet again.
 ///
 /// ```
 /// use mistarr_clients::TorrentSource;
-/// let src = TorrentSource::Metainfo(b"d4:infod6:lengthi1e4:name1:aee".to_vec());
-/// assert!(matches!(src, TorrentSource::Metainfo(_)));
+/// use mistarr_core::InfoHash;
+/// let infohash = InfoHash::from_bytes([1; 20]);
+/// let src = TorrentSource::Magnet { uri: format!("magnet:?xt=urn:btih:{infohash}"), infohash };
+/// assert_eq!(src.infohash(), infohash);
 /// ```
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TorrentSource {
     /// The bytes of a `.torrent` file.
-    Metainfo(Vec<u8>),
+    Metainfo {
+        /// The whole file.
+        bytes: Vec<u8>,
+        /// Its v1 infohash.
+        infohash: InfoHash,
+        /// Entries in its v1 file list: the length of `info.files`, or 1 for a single file.
+        file_count: usize,
+    },
     /// A magnet URI; the client fetches the metadata from peers.
-    Magnet(String),
+    Magnet {
+        /// The URI as the user gave it.
+        uri: String,
+        /// The infohash of its `xt=urn:btih:` topic.
+        infohash: InfoHash,
+    },
+}
+
+impl TorrentSource {
+    /// The torrent's v1 infohash.
+    ///
+    /// ```
+    /// use mistarr_clients::TorrentSource;
+    /// use mistarr_core::InfoHash;
+    /// let infohash = InfoHash::from_bytes([2; 20]);
+    /// let src = TorrentSource::Metainfo { bytes: Vec::new(), infohash, file_count: 1 };
+    /// assert_eq!(src.infohash(), infohash);
+    /// ```
+    #[must_use]
+    pub fn infohash(&self) -> InfoHash {
+        match self {
+            Self::Metainfo { infohash, .. } | Self::Magnet { infohash, .. } => *infohash,
+        }
+    }
 }
 
 /// The client's own identifier for a torrent, stored in `sources.client_id`.
-/// For Transmission and rtorrent it is the lowercase hex infohash.
+/// Transmission and rtorrent both name a torrent by its v1 infohash; it
+/// displays and serialises as 40 lowercase hex digits.
 ///
 /// ```
 /// use mistarr_clients::ClientTorrentId;
-/// let id = ClientTorrentId::new("00ff");
-/// assert_eq!(id.as_str(), "00ff");
-/// assert_eq!(id.to_string(), "00ff");
+/// use mistarr_core::InfoHash;
+/// let id = ClientTorrentId::new(InfoHash::from_bytes([0xab; 20]));
+/// assert_eq!(id.to_string(), "ab".repeat(20));
+/// assert_eq!(id.to_string().parse::<ClientTorrentId>().ok(), Some(id));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct ClientTorrentId(String);
+pub struct ClientTorrentId(InfoHash);
 
 impl ClientTorrentId {
-    /// Wraps an identifier as the client reported it.
+    /// The id of the torrent with `infohash`.
     ///
     /// ```
-    /// let id = mistarr_clients::ClientTorrentId::new(String::from("ab"));
-    /// assert_eq!(id.as_str(), "ab");
-    /// ```
-    pub fn new(id: impl Into<String>) -> Self {
-        Self(id.into())
-    }
-
-    /// The identifier as sent to the client.
-    ///
-    /// ```
-    /// assert_eq!(mistarr_clients::ClientTorrentId::new("x").as_str(), "x");
+    /// use mistarr_core::InfoHash;
+    /// let h = InfoHash::from_bytes([1; 20]);
+    /// assert_eq!(mistarr_clients::ClientTorrentId::new(h).infohash(), h);
     /// ```
     #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
+    pub const fn new(infohash: InfoHash) -> Self {
+        Self(infohash)
+    }
+
+    /// The infohash the id names.
+    ///
+    /// ```
+    /// use mistarr_core::InfoHash;
+    /// let id = mistarr_clients::ClientTorrentId::new(InfoHash::from_bytes([3; 20]));
+    /// assert_eq!(id.infohash().as_bytes()[0], 3);
+    /// ```
+    #[must_use]
+    pub const fn infohash(&self) -> InfoHash {
+        self.0
     }
 }
 
 impl fmt::Display for ClientTorrentId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        self.0.fmt(f)
     }
 }
 
-/// A 20-byte v1 infohash. Displays as 40 lowercase hex digits.
+/// Reads a stored id in either case. Text that is not an infohash names no
+/// torrent in any client, so it fails as [`ClientError::NotFound`].
+impl FromStr for ClientTorrentId {
+    type Err = ClientError;
+
+    fn from_str(s: &str) -> Result<Self> {
+        s.parse().map(Self).map_err(|_| ClientError::NotFound)
+    }
+}
+
+/// The client for `kind` at `url`, an RPC URL or SCGI address, with `map`
+/// translating paths between mistarr and the client both ways.
+/// No request is made until the first operation.
+///
+/// # Errors
+/// [`ClientError::Protocol`] when `url` does not suit `kind`.
 ///
 /// ```
-/// use mistarr_clients::InfoHash;
-/// let h = InfoHash::from_bytes([0xab; 20]);
-/// assert_eq!(InfoHash::from_hex(&h.to_string()), Some(h));
+/// use mistarr_clients::{connect, ClientKind, RemotePathMap};
+/// assert!(connect(ClientKind::Rtorrent, "127.0.0.1:5000", RemotePathMap::default()).is_ok());
+/// assert!(connect(ClientKind::Transmission, "127.0.0.1:5000", RemotePathMap::default()).is_err());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct InfoHash([u8; 20]);
-
-impl InfoHash {
-    /// Wraps raw hash bytes.
-    ///
-    /// ```
-    /// let h = mistarr_clients::InfoHash::from_bytes([1; 20]);
-    /// assert_eq!(h.as_bytes(), &[1; 20]);
-    /// ```
-    #[must_use]
-    pub const fn from_bytes(bytes: [u8; 20]) -> Self {
-        Self(bytes)
-    }
-
-    /// Parses 40 hex digits in either case; `None` for anything else.
-    ///
-    /// ```
-    /// use mistarr_clients::InfoHash;
-    /// assert_eq!(InfoHash::from_hex(&"0A".repeat(20)), Some(InfoHash::from_bytes([10; 20])));
-    /// assert_eq!(InfoHash::from_hex("0a"), None);
-    /// ```
-    #[must_use]
-    pub fn from_hex(hex: &str) -> Option<Self> {
-        let digits = hex.as_bytes();
-        if digits.len() != 40 {
-            return None;
-        }
-        let mut out = [0u8; 20];
-        for (byte, pair) in out.iter_mut().zip(digits.as_chunks::<2>().0) {
-            let hi = char::from(pair[0]).to_digit(16)?;
-            let lo = char::from(pair[1]).to_digit(16)?;
-            *byte = u8::try_from(hi << 4 | lo).ok()?;
-        }
-        Some(Self(out))
-    }
-
-    /// The raw hash bytes.
-    ///
-    /// ```
-    /// assert_eq!(mistarr_clients::InfoHash::from_bytes([2; 20]).as_bytes()[0], 2);
-    /// ```
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 20] {
-        &self.0
-    }
-}
-
-impl fmt::Display for InfoHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for b in &self.0 {
-            write!(f, "{b:02x}")?;
-        }
-        Ok(())
-    }
+pub fn connect(kind: ClientKind, url: &str, map: RemotePathMap) -> Result<Arc<dyn DownloadClient>> {
+    Ok(match kind {
+        ClientKind::Transmission => Arc::new(Transmission::new(url)?.with_path_map(map)),
+        ClientKind::Rtorrent => Arc::new(Rtorrent::new(url)?.with_path_map(map)),
+    })
 }
 
 /// Coarse state of a torrent as the client reports it.
@@ -392,7 +404,8 @@ pub struct ClientFile {
 /// A snapshot of one torrent, as returned by [`DownloadClient::status`].
 ///
 /// ```
-/// use mistarr_clients::{FileProgress, InfoHash, TorrentState, TorrentStatus};
+/// use mistarr_clients::{FileProgress, TorrentState, TorrentStatus};
+/// use mistarr_core::InfoHash;
 /// let st = TorrentStatus {
 ///     infohash: InfoHash::from_bytes([7; 20]),
 ///     state: TorrentState::Downloading,
@@ -428,7 +441,8 @@ impl TorrentStatus {
     /// is not checking, which is when the importer may take it (docs/DOWNLOAD-CLIENTS.md).
     ///
     /// ```
-    /// use mistarr_clients::{FileProgress, InfoHash, TorrentState, TorrentStatus};
+    /// use mistarr_clients::{FileProgress, TorrentState, TorrentStatus};
+    /// use mistarr_core::InfoHash;
     /// let mut st = TorrentStatus {
     ///     infohash: InfoHash::from_bytes([7; 20]),
     ///     state: TorrentState::Checking,
@@ -453,7 +467,8 @@ impl TorrentStatus {
     /// lookup, falling back to a search for a list that is not.
     ///
     /// ```
-    /// use mistarr_clients::{FileProgress, InfoHash, TorrentState, TorrentStatus};
+    /// use mistarr_clients::{FileProgress, TorrentState, TorrentStatus};
+    /// use mistarr_core::InfoHash;
     /// let file = |index| FileProgress { index, bytes_done: 0, size: Some(4), wanted: true };
     /// let st = TorrentStatus {
     ///     infohash: InfoHash::from_bytes([7; 20]),
@@ -484,10 +499,11 @@ impl TorrentStatus {
 /// ```no_run
 /// use std::path::Path;
 /// use mistarr_clients::{DownloadClient, SeedPolicy, TorrentSource, Transmission};
+/// use mistarr_core::InfoHash;
 ///
-/// async fn fetch(metainfo: Vec<u8>) -> mistarr_clients::Result<()> {
+/// async fn fetch(bytes: Vec<u8>, infohash: InfoHash) -> mistarr_clients::Result<()> {
 ///     let client = Transmission::new(Transmission::DEFAULT_URL)?;
-///     let src = TorrentSource::Metainfo(metainfo);
+///     let src = TorrentSource::Metainfo { bytes, infohash, file_count: 1 };
 ///     let id = client.add(src, Path::new("/media/fat/mistarr/staging/x"), &[0], SeedPolicy::None).await?;
 ///     client.start(&id).await?;
 ///     let status = client.status(&id).await?;
@@ -500,8 +516,9 @@ pub trait DownloadClient: Send + Sync {
     /// Checks the client answers and reports its version.
     async fn probe(&self) -> Result<ClientInfo>;
 
-    /// Adds a torrent paused into `download_dir` with only the `wanted` file
-    /// indices selected and `seed` applied, and returns its id.
+    /// Adds a torrent paused into `download_dir`, a local path the client
+    /// maps to its own, with only the `wanted` file indices selected and
+    /// `seed` applied, and returns its id.
     ///
     /// If the client already has the torrent, `wanted` replaces its selection
     /// and `seed` is applied, so retrying a failed `add` repairs it.
@@ -559,5 +576,40 @@ pub trait DownloadClient: Send + Sync {
     async fn set_alt_up_rate(&self, kbps: u32) -> Result<()> {
         let _ = kbps;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ids_read_either_case_and_refuse_other_text_as_not_found() {
+        let id = ClientTorrentId::new(InfoHash::from_bytes([0xcd; 20]));
+        assert_eq!("CD".repeat(20).parse::<ClientTorrentId>().ok(), Some(id));
+        for bad in ["", "not-a-hash", &"cd".repeat(19)] {
+            let err = bad.parse::<ClientTorrentId>().expect_err(bad);
+            assert!(matches!(err, ClientError::NotFound), "{err:?}");
+        }
+        let json = serde_json::to_string(&id).expect("json");
+        assert_eq!(json, format!("\"{}\"", "cd".repeat(20)));
+        assert_eq!(
+            serde_json::from_str::<ClientTorrentId>(&json).expect("id"),
+            id
+        );
+    }
+
+    #[test]
+    fn connect_builds_each_kind_from_its_own_address() {
+        let none = RemotePathMap::default;
+        assert!(connect(ClientKind::Transmission, Transmission::DEFAULT_URL, none()).is_ok());
+        assert!(connect(ClientKind::Rtorrent, "scgi://127.0.0.1:5000", none()).is_ok());
+        for (kind, url) in [
+            (ClientKind::Transmission, "not a url"),
+            (ClientKind::Rtorrent, "http://127.0.0.1:9091/"),
+        ] {
+            let err = connect(kind, url, none()).err();
+            assert!(matches!(err, Some(ClientError::Protocol(_))), "{kind}");
+        }
     }
 }

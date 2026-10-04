@@ -1,14 +1,11 @@
 import { SvelteMap, SvelteSet } from 'svelte/reactivity';
 import { api } from '../api';
-import { fixtureJobs, fixtureRecentJobs, mockScenario } from '../fixtures';
 import { readAllPages } from '../paging';
 import type { IncomingFile, Job, JobState } from '../types';
 import { received } from '../upload';
 import { findPlatform } from './platforms.svelte';
 import { showToast } from './toast.svelte';
 import { announceUpload, resolveUpload } from './uploads.svelte';
-
-const isMock = import.meta.env.VITE_MOCK === '1';
 
 /** What a finished job left behind, kept so an upload can show its outcome. */
 export interface FinishedJob {
@@ -61,11 +58,6 @@ export function getFinishedJob(id: number): FinishedJob | undefined {
 }
 
 export async function loadJobs(): Promise<void> {
-  if (isMock) {
-    jobs = mockScenario() === 'busy' ? fixtureJobs : [];
-    startMockProgress();
-    return;
-  }
   jobs = await readAllPages((limit, offset) => api.jobs(limit, offset), (j) => j.id);
 }
 
@@ -74,11 +66,7 @@ export function getRecentJobs(): Job[] {
 }
 
 export async function loadRecentJobs(): Promise<void> {
-  if (isMock) {
-    recent = mockScenario() === 'idle' ? [] : fixtureRecentJobs;
-  } else {
-    recent = await readAllPages((limit, offset) => api.recentJobs(limit, offset), (j) => j.id);
-  }
+  recent = await readAllPages((limit, offset) => api.recentJobs(limit, offset), (j) => j.id);
   for (const job of recent) {
     announce(job.id, job.state, job.progress);
   }
@@ -175,7 +163,7 @@ export function resyncRecent(): Promise<void> {
 
 // One re-read of the recent list per burst of finished jobs, while it is shown.
 function scheduleRecent(): void {
-  if (isMock || recentTimer || recentWatchers === 0) {
+  if (recentTimer || recentWatchers === 0) {
     return;
   }
   recentTimer = setTimeout(() => {
@@ -243,7 +231,7 @@ export function resetFinished(): void {
 
 // Lane and hold reason come only from /system/jobs, so a new or moved job re-reads it.
 function scheduleReload(): void {
-  if (isMock || reloadTimer) {
+  if (reloadTimer) {
     return;
   }
   reloadTimer = setTimeout(() => {
@@ -292,121 +280,5 @@ export function applyJobProgress(
     jobs = jobs.map((j) => (j.id === id ? { ...j, progress } : j));
   } else {
     scheduleReload();
-  }
-}
-
-/** Mock mode: shows `job` running, then finishes it with `outcome` after `ms` and calls `done`. */
-export function runMockJob(job: Job, outcome: Record<string, unknown>, ms: number, done: () => void): void {
-  jobs = [...jobs, job];
-  setTimeout(() => {
-    applyJobProgress(job.id, job.kind, 'done', outcome);
-    done();
-  }, ms);
-}
-
-let mockTimer: ReturnType<typeof setInterval> | null = null;
-
-// Mock mode moves the fixture DAT import through its phases so its bar is seen to move.
-function startMockProgress(): void {
-  if (mockTimer || jobs.length === 0) {
-    return;
-  }
-  const total = 18_400_000;
-  let read = 5_200_000;
-  let games = 4_120;
-  let tick = 0;
-  mockTimer = setInterval(() => {
-    const job = jobs.find((j) => j.kind === 'dat_import' && j.state === 'running');
-    if (!job) {
-      return;
-    }
-    tick += 1;
-    let phase = 'reading';
-    if (read < total) {
-      read = Math.min(total, read + 460_000);
-      games += 104;
-    } else {
-      phase = tick % 12 < 6 ? 'storing' : 'refreshing';
-      if (tick % 12 === 11) {
-        read = 1_000_000;
-        games = 900;
-      }
-    }
-    const bytes = phase === 'reading' ? { bytes_read: read, bytes_total: total } : {};
-    const progress = { file: job.progress?.file, members: 1, done: 0, games, phase, ...bytes };
-    applyJobProgress(job.id, job.kind, 'running', progress);
-  }, 600);
-}
-
-let mockFetchId = 9000;
-// eslint-disable-next-line svelte/prefer-svelte-reactivity -- only timers and handlers read it, never markup
-const mockFetches = new Map<number, { id: number; timer: ReturnType<typeof setInterval> }>();
-
-/** The refusal the server gives for anything but a DAT, DAT pack or torrent. */
-export const NOT_ACCEPTED = "This isn't a DAT, DAT pack or torrent file.";
-
-/** Mock mode: a fetch job that moves through its phases; a link to an HTML page is refused. */
-export function startMockFetch(link: string, token: number): void {
-  mockFetchId += 1;
-  const id = mockFetchId;
-  const segment = link.split(/[?#]/)[0]?.split('/').pop() ?? '';
-  const refuse = /\.html?$/i.test(segment);
-  // A link whose last segment starts with "wait" stays connecting until it is cancelled.
-  const hold = /^wait/i.test(segment);
-  const file = !segment ? 'download.dat' : /\.(dat|xml|zip|torrent)$/i.test(segment) ? segment : `${segment}.dat`;
-  const total = 2_400_000;
-  let got = 0;
-  const now = Math.floor(Date.now() / 1000);
-  jobs = [
-    ...jobs,
-    {
-      id,
-      kind: 'url_fetch',
-      lane: 'fetch',
-      payload: { fetch: token },
-      state: 'running',
-      progress: { token, phase: 'connecting', bytes_received: 0 },
-      reason: null,
-      created_at: now,
-      updated_at: now
-    }
-  ];
-  trackFetch(token, id);
-  const timer = setInterval(() => {
-    if (hold) {
-      return;
-    }
-    got = Math.min(total, got + 300_000);
-    if (refuse && got > 300_000) {
-      stopMockFetch(token);
-      applyJobProgress(id, 'url_fetch', 'failed', { error: NOT_ACCEPTED });
-    } else if (got < total) {
-      const known = refuse ? {} : { file };
-      applyJobProgress(id, 'url_fetch', 'running', { token, phase: 'receiving', bytes_received: got, bytes_total: total, ...known });
-    } else {
-      stopMockFetch(token);
-      const target = file.endsWith('.torrent') ? 'sources' : 'dats';
-      const placed: IncomingFile = { file, size: total, state: 'waiting', reason: 'Queued.', job_id: null, progress: null, modified: now };
-      applyJobProgress(id, 'url_fetch', 'done', { token, phase: 'placed', file, target, bytes_received: total, bytes_total: total, placed });
-    }
-  }, 600);
-  mockFetches.set(token, { id, timer });
-}
-
-function stopMockFetch(token: number): number | null {
-  const running = mockFetches.get(token);
-  if (!running) {
-    return null;
-  }
-  clearInterval(running.timer);
-  mockFetches.delete(token);
-  return running.id;
-}
-
-/** Mock mode: cancels fetch `token` as the server would. */
-export function cancelMockFetch(token: number): void {
-  const id = stopMockFetch(token);
-  if (id !== null) {
-    applyJobProgress(id, 'url_fetch', 'failed', { error: FETCH_CANCELLED });
   }
 }

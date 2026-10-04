@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 
 use common::{config_in, get, request, Sse};
 use mistarr_clients::{
-    ClientError, ClientTorrentId, DownloadClient, InfoHash, Rtorrent, SeedPolicy, TorrentSource,
+    ClientError, ClientTorrentId, DownloadClient, Rtorrent, SeedPolicy, TorrentSource,
     TorrentState, Transmission,
 };
+use mistarr_core::InfoHash;
 use mistarr_fixture::set::{self, Layout};
 use mistarr_fixture::torrent;
 use mistarr_fixture::tracker::Tracker;
@@ -404,23 +405,22 @@ async fn start(config: &Config, dir: &Path) -> Running {
         .expect("start")
 }
 
-fn hex(hash: [u8; 20]) -> String {
-    InfoHash::from_bytes(hash).to_string()
-}
-
-fn infohash(metainfo: &[u8]) -> [u8; 20] {
-    let meta = mistarr_sources::torrent::parse_torrent(metainfo).expect("parse");
-    *meta.infohash.as_bytes()
+fn infohash(metainfo: &[u8]) -> InfoHash {
+    mistarr_sources::torrent::parse_torrent(metainfo)
+        .expect("parse")
+        .infohash
 }
 
 /// Adds `metainfo` to the seeder with every file wanted and waits until it seeds.
 async fn seed(client: &dyn DownloadClient, metainfo: &[u8], dir: &Path, tracker: &Tracker) {
-    let count = mistarr_sources::torrent::parse_torrent(metainfo)
-        .expect("parse")
-        .files
-        .len();
+    let meta = mistarr_sources::torrent::parse_torrent(metainfo).expect("parse");
+    let count = meta.files.len();
     let all: Vec<u32> = (0..u32::try_from(count).expect("count")).collect();
-    let src = TorrentSource::Metainfo(metainfo.to_vec());
+    let src = TorrentSource::Metainfo {
+        bytes: metainfo.to_vec(),
+        infohash: meta.infohash,
+        file_count: count,
+    };
     let id = client
         .add(src, dir, &all, SeedPolicy::Client)
         .await
@@ -435,7 +435,7 @@ async fn seed(client: &dyn DownloadClient, metainfo: &[u8], dir: &Path, tracker:
         },
     )
     .await;
-    let hash = infohash(metainfo);
+    let hash = *infohash(metainfo).as_bytes();
     wait_for("the seeder's announce", Duration::from_secs(60), || async {
         tracker.peers(&hash).iter().any(|(_, seeding)| *seeding)
     })
@@ -593,7 +593,7 @@ async fn run(kind: Kind) {
         client: Arc::clone(&fetching),
         torrents: [&cart, &disc]
             .iter()
-            .map(|m| ClientTorrentId::new(hex(infohash(m))))
+            .map(|m| ClientTorrentId::new(infohash(m)))
             .collect(),
     };
     probe
@@ -731,7 +731,7 @@ async fn run(kind: Kind) {
     let quarantine = paths
         .staging()
         .join("quarantine")
-        .join(hex(infohash(&cart)));
+        .join(infohash(&cart).to_string());
     assert!(quarantine.join(&bad_name).is_file(), "quarantined file");
     let report =
         std::fs::read_to_string(quarantine.join(format!("{bad_name}.report.txt"))).expect("report");
@@ -757,7 +757,7 @@ async fn run(kind: Kind) {
         )
         .await;
     for meta in [&cart, &disc] {
-        let id = ClientTorrentId::new(hex(infohash(meta)));
+        let id = ClientTorrentId::new(infohash(meta));
         let gone = fetching.status(&id).await;
         assert!(matches!(gone, Err(ClientError::NotFound)), "{gone:?}");
     }

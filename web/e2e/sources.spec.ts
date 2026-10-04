@@ -1,11 +1,10 @@
 import { expect, test } from '@playwright/test';
+import { setMockKnob } from './helpers';
 
 test('a mock with 150 sources lists all 150 over several small pages', async ({ page }) => {
-  await page.addInitScript(() => {
-    localStorage.setItem('mistarr.mockSourceCount', '148');
-    // Forces the store to loop several times instead of fitting in one page.
-    localStorage.setItem('mistarr.mockPageCap', '40');
-  });
+  await setMockKnob(page, 'sourceCount', 148);
+  // Forces the store to loop several times instead of fitting in one page.
+  await setMockKnob(page, 'pageCap', 40);
   await page.goto('/#/sources');
   await expect(page.locator('table tbody tr')).toHaveCount(150);
 });

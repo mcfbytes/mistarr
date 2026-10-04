@@ -1,14 +1,16 @@
 import { test, expect, type Page } from '@playwright/test';
+import { noCovers, readMockKnob, setMockKnob } from './helpers';
 
+/** Each screen, with a selector for content that shows once its data has loaded. */
 const routes = [
-  { name: 'wizard', hash: '#/wizard' },
-  { name: 'platforms', hash: '#/' },
-  { name: 'browse', hash: '#/p/nes' },
-  { name: 'title', hash: '#/t/1' },
-  { name: 'activity', hash: '#/activity' },
-  { name: 'sources', hash: '#/sources' },
-  { name: 'dats', hash: '#/dats' },
-  { name: 'system', hash: '#/system' }
+  { name: 'wizard', hash: '#/wizard', ready: '.steps li.current' },
+  { name: 'platforms', hash: '#/', ready: '.art-card' },
+  { name: 'browse', hash: '#/p/nes', ready: '.grid .name' },
+  { name: 'title', hash: '#/t/1', ready: '.page h1' },
+  { name: 'activity', hash: '#/activity', ready: '.job' },
+  { name: 'sources', hash: '#/sources', ready: 'table tbody tr' },
+  { name: 'dats', hash: '#/dats', ready: 'h3[data-family]' },
+  { name: 'system', hash: '#/system', ready: '.tile' }
 ];
 
 const viewports = [
@@ -21,7 +23,7 @@ for (const viewport of viewports) {
     test(`${route.name} at ${viewport.name}`, async ({ page }) => {
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
       await page.goto(`/${route.hash}`);
-      await page.waitForTimeout(200);
+      await page.locator(route.ready).first().waitFor();
 
       const overflow = await page.evaluate(() => {
         const doc = document.documentElement;
@@ -44,7 +46,7 @@ for (const viewport of viewports) {
 
 test('requiring a hidden-by-default flag auto-shows hidden entries', async ({ page }) => {
   await page.goto('/#/p/nes');
-  await page.waitForTimeout(200);
+  await page.locator('.grid .name').first().waitFor();
 
   const showHidden = page.getByLabel('Show hidden');
   await expect(showHidden).not.toBeChecked();
@@ -114,7 +116,7 @@ test('the status and Want button line up across a row of posters', async ({ page
 });
 
 test('a title without a cover gets a generated poster with its name, hidden from screen readers', async ({ page }) => {
-  await page.route(/^https?:\/\/(?!localhost)/, (route) => route.abort());
+  await noCovers(page);
   await page.goto('/#/p/nes');
   const poster = page.locator('a.poster').filter({ hasText: 'Sample Racer (USA)' }).first();
   const placeholder = poster.getByTestId('poster-placeholder');
@@ -153,7 +155,7 @@ const held = '[data-testid="client-held"] [data-status="paused"]';
 
 async function mockStatus(page: Page, fields: Record<string, unknown>): Promise<void> {
   await page.goto('/#/');
-  await page.evaluate((f) => localStorage.setItem('mistarr.mockStatus', JSON.stringify(f)), fields);
+  await setMockKnob(page, 'status', fields);
   await page.reload();
 }
 
@@ -174,7 +176,7 @@ test('held uploads on rtorrent say they are held at 1 KiB/s', async ({ page }) =
   await page.goto('/#/sources');
   await expect(page.locator(held)).toHaveText('Uploads paused while FCEUmm is running');
   await expect(page.locator('[data-testid="client-held"]')).toContainText('rtorrent holds uploads at 1 KiB/s');
-  await page.evaluate(() => localStorage.removeItem('mistarr.mockStatus'));
+  await setMockKnob(page, 'status', null);
 });
 
 test('nothing shows while the client is not held or the setting is off', async ({ page }) => {
@@ -186,7 +188,7 @@ test('nothing shows while the client is not held or the setting is off', async (
   await page.goto('/#/system');
   await expect(page.locator('h1', { hasText: 'System' })).toBeVisible();
   await expect(page.locator('[data-testid="client-held"]')).toHaveCount(0);
-  await page.evaluate(() => localStorage.removeItem('mistarr.mockStatus'));
+  await setMockKnob(page, 'status', null);
 });
 
 test('the client pause setting is saved with the settings', async ({ page }) => {
@@ -199,9 +201,9 @@ test('the client pause setting is saved with the settings', async ({ page }) => 
   await setting.uncheck();
   await page.getByRole('button', { name: 'Save' }).click();
   await expect(page.locator('.toasts').getByText('Settings saved.')).toBeVisible();
-  const saved = await page.evaluate(() => localStorage.getItem('mistarr.mockSavedSettings') ?? '{}');
-  expect((JSON.parse(saved) as { transfer?: unknown }).transfer).toEqual({ pause_client_while_playing: false });
-  await page.evaluate(() => localStorage.removeItem('mistarr.mockSavedSettings'));
+  const saved = (await readMockKnob(page, 'savedSettings')) as { transfer?: unknown } | null;
+  expect(saved?.transfer).toEqual({ pause_client_while_playing: false });
+  await setMockKnob(page, 'savedSettings', null);
 });
 
 test('the wizard says transfers pause while a core runs', async ({ page }) => {
@@ -232,9 +234,7 @@ test('Scan says it was queued and Activity lists finished jobs with their outcom
 });
 
 test('platform ids naming prototype members get a working Scan button', async ({ page }) => {
-  await page.addInitScript(() => {
-    localStorage.setItem('mistarr.mockPlatformIds', '["constructor", "__proto__", "toString"]');
-  });
+  await setMockKnob(page, 'platformIds', ['constructor', '__proto__', 'toString']);
   await page.goto('/#/');
   for (const id of ['constructor', '__proto__', 'toString']) {
     const card = page.locator('.card').filter({ has: page.getByRole('heading', { name: id, exact: true }) });

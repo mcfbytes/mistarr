@@ -17,7 +17,6 @@
   import { getStatus } from '../lib/stores/status.svelte';
   import type { SeedPolicy } from '../lib/types';
 
-  const isMock = import.meta.env.VITE_MOCK === '1';
   let sourcesError = $state<string | null>(null);
 
   async function loadSourcesList(): Promise<void> {
@@ -51,10 +50,6 @@
       return;
     }
     const prev = sources.find((s) => s.id === id);
-    if (isMock) {
-      patchSource(id, { platform_id: platformId, state: 'bound', user_binding: true });
-      return;
-    }
     const pending = { automatic: false, platform_id: platformId };
     patchSource(id, { user_binding: true, pending_binding: pending });
     try {
@@ -72,9 +67,6 @@
   async function setSeedPolicy(id: number, policy: SeedPolicy): Promise<void> {
     const prev = sources.find((s) => s.id === id);
     patchSource(id, { seed_policy: policy });
-    if (isMock) {
-      return;
-    }
     try {
       const row = await api.updateSource(id, { seed_policy: policy });
       patchSource(id, row);
@@ -89,9 +81,6 @@
   async function disable(id: number): Promise<void> {
     const prev = sources.find((s) => s.id === id);
     patchSource(id, { state: 'disabled' });
-    if (isMock) {
-      return;
-    }
     try {
       const row = await api.updateSource(id, { state: 'disabled' });
       patchSource(id, row);
@@ -115,9 +104,6 @@
 
   async function remove(id: number): Promise<void> {
     confirmingId = null;
-    if (isMock) {
-      return;
-    }
     removingId = id;
     try {
       await api.deleteSource(id);

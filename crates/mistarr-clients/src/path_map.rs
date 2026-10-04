@@ -71,17 +71,41 @@ impl RemotePathMap {
     /// ```
     #[must_use]
     pub fn to_local(&self, remote: &Path) -> PathBuf {
+        self.rewrite(remote, |m| &m.remote, |m| &m.local)
+    }
+
+    /// The inverse of [`RemotePathMap::to_local`]: rewrites the longest matching
+    /// local prefix of `local` to the path the client knows it by.
+    ///
+    /// ```
+    /// use std::path::Path;
+    /// use mistarr_clients::{PathMapping, RemotePathMap};
+    /// let map = RemotePathMap::new(vec![PathMapping::new("/downloads", "/media/fat/mistarr/staging")]);
+    /// assert_eq!(map.to_remote(Path::new("/media/fat/mistarr/staging/ab")), Path::new("/downloads/ab"));
+    /// ```
+    #[must_use]
+    pub fn to_remote(&self, local: &Path) -> PathBuf {
+        self.rewrite(local, |m| &m.local, |m| &m.remote)
+    }
+
+    /// Replaces the longest `from` prefix of `path`, by whole components, with its `to`.
+    fn rewrite(
+        &self,
+        path: &Path,
+        from: fn(&PathMapping) -> &PathBuf,
+        to: fn(&PathMapping) -> &PathBuf,
+    ) -> PathBuf {
         self.entries
             .iter()
-            .filter_map(|m| remote.strip_prefix(&m.remote).ok().map(|rest| (m, rest)))
-            .max_by_key(|(m, _)| m.remote.components().count())
+            .filter_map(|m| path.strip_prefix(from(m)).ok().map(|rest| (m, rest)))
+            .max_by_key(|(m, _)| from(m).components().count())
             .map_or_else(
-                || remote.to_path_buf(),
+                || path.to_path_buf(),
                 |(m, rest)| {
                     if rest.as_os_str().is_empty() {
-                        m.local.clone()
+                        to(m).clone()
                     } else {
-                        m.local.join(rest)
+                        to(m).join(rest)
                     }
                 },
             )
@@ -133,6 +157,24 @@ mod tests {
         assert_eq!(
             m.to_local(Path::new("/other/f")),
             Path::new("/local/other/f")
+        );
+    }
+
+    #[test]
+    fn remote_paths_invert_the_map() {
+        let m = RemotePathMap::new(vec![
+            PathMapping::new("/dl", "/data"),
+            PathMapping::new("/dl2", "/data/staging"),
+        ]);
+        assert_eq!(
+            m.to_remote(Path::new("/data/staging/x")),
+            Path::new("/dl2/x")
+        );
+        assert_eq!(m.to_remote(Path::new("/data")), Path::new("/dl"));
+        assert_eq!(m.to_remote(Path::new("/database")), Path::new("/database"));
+        assert_eq!(
+            RemotePathMap::default().to_remote(Path::new("/a")),
+            Path::new("/a")
         );
     }
 

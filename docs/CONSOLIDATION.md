@@ -22,12 +22,12 @@ Rules for these packages, on top of the ones in WORKPLAN.md:
 
 ## Progress
 
-- [ ] **Wave 4**: no dependencies
-  - [ ] WP-52 Web lists and load errors · Sonnet
-  - [ ] WP-53 Core codecs · Opus
-  - [ ] WP-54 Parser limits in mister · Sonnet
-  - [ ] WP-55 Server errors and blocking · Opus
-  - [ ] WP-56 Config load and validation · Sonnet
+- [x] **Wave 4**: no dependencies
+  - [x] WP-52 Web lists and load errors · Sonnet
+  - [x] WP-53 Core codecs · Opus
+  - [x] WP-54 Parser limits in mister · Sonnet
+  - [x] WP-55 Server errors and blocking · Opus
+  - [x] WP-56 Config load and validation · Sonnet
 - [ ] **Wave 5**: merge order 57, 58, 59, 60
   - [ ] WP-57 Clients on core codecs · Opus · after 53
   - [ ] WP-58 Mister on core · Opus · after 53, 54
@@ -145,30 +145,30 @@ Sonnet · `mistarr-mister` · branch `wp-54-mister-limits`
 
 Opus · `mistarr-server` · branch `wp-55-server-blocking`
 
-- [ ] `threads::run(label, f)` is async and returns `Result<R>`;
+- [x] `threads::run(label, f)` is async and returns `Result<R>`;
   `Error::Task` carries the `JoinError` through `#[from]`. Every
   `.map_err(|e| Error::Task(e.to_string()))` goes, as do the local blocking
   wrappers in `jobs/arcade.rs`, `jobs/core_limits.rs`, `http/launch.rs` and
   `jobs/import.rs` (`task`).
-- [ ] `Error` gains `Json(#[from] serde_json::Error)` and
+- [x] `Error` gains `Json(#[from] serde_json::Error)` and
   `Client(#[from] ClientError)`; no variant wraps a typed error's
   `to_string()`; `Error::UnknownJob` goes if nothing builds it.
-- [ ] Blocking filesystem calls leave the async workers: the DAT watcher's
+- [x] Blocking filesystem calls leave the async workers: the DAT watcher's
   poll, the DAT import's `is_file`, `list_members`, `create_dir_all`,
   `rename` and `reject`, `import_in_ram`'s `members_size`, and the remaining
   `exists` and `is_dir` calls in `import.rs`, `scan.rs` and `arcade.rs`.
   `scan::file_meta` folds into the blocking listing, which returns size and
   mtime.
-- [ ] One write gate: `write_blocking`, `write_bulk_blocking` and
+- [x] One write gate: `write_blocking`, `write_bulk_blocking` and
   `hold_writer_blocking` take the `write_turn` permit. A test shows an async
   writer queued behind a blocking bulk write holds no blocking thread.
-- [ ] `Db::write_tx` and `write_tx_blocking` open a transaction and end with
+- [x] `Db::write_tx` and `write_tx_blocking` open a transaction and end with
   `db::commit`; the roughly 40 hand-written `transaction()` then `commit`
   sites use them. Database functions never open transactions, except
   batching functions named as such (`delete_missing`, `platforms::seed`).
-- [ ] `AppState` holds `RwLock<Arc<Config>>` and `config()` returns
+- [x] `AppState` holds `RwLock<Arc<Config>>` and `config()` returns
   `Arc<Config>`; `status::snapshot` clones no `Config`.
-- [ ] `status::publish(app)` replaces the six copies of snapshot-then-publish.
+- [x] `status::publish(app)` replaces the six copies of snapshot-then-publish.
 
 ### WP-56 Config load and validation
 
@@ -191,49 +191,52 @@ Merge order: 57, 58, 59, then 60, which touches the most server files.
 
 Opus · `mistarr-clients`, server callers · branch `wp-57-clients-core`
 
-- [ ] `metainfo.rs` and the clients' `sha1` dependency go.
+- [x] `metainfo.rs` and the clients' `sha1` dependency go.
   `TorrentSource::Metainfo { bytes, infohash, file_count }` and
   `TorrentSource::Magnet { uri, infohash }` are built by the server from the
   sources parse.
-- [ ] rtorrent's `magnet_hash`, `percent_decode` and `base32_hash` go;
+- [x] rtorrent's `magnet_hash`, `percent_decode` and `base32_hash` go;
   `fetch/url.rs` uses core's `percent_decode`.
-- [ ] `InfoHash` comes from core; `ClientTorrentId` wraps it, so rtorrent's
+- [x] `InfoHash` comes from core; `ClientTorrentId` wraps it, so rtorrent's
   `parse_id` and Transmission's lowercasing go.
-- [ ] `Wanted(BTreeSet<u32>)` with `from_slice` and `check(file_count)`
+- [x] `Wanted(BTreeSet<u32>)` with `from_slice` and `check(file_count)`
   replaces both `check_indices` and the per-call sets.
-- [ ] `ClientError::protocol(impl Display)` replaces both `protocol()` helpers;
+- [x] `ClientError::protocol(impl Display)` replaces both `protocol()` helpers;
   one `http::handshake(io)` returns the sender and one `AbortOnDrop`.
-- [ ] Transmission's `simple` goes through the same helper as `torrent_set`.
-- [ ] `RemotePathMap::to_remote`; each client maps `download_dir` inside `add`,
+- [x] Transmission's `simple` goes through the same helper as `torrent_set`.
+- [x] `RemotePathMap::to_remote`; each client maps `download_dir` inside `add`,
   so the trait takes local paths. `mistarr_clients::connect(kind, url, map)`
   replaces the server's `ClientKey::build` and `client.rs` `to_remote`.
-- [ ] The XML-RPC server-side encoders sit behind `test-support`; `xmlrpc` is
-  `pub(crate)`.
-- [ ] Proptests: the XML-RPC parser and `scgi::body_range` never panic.
+- [x] The XML-RPC server-side encoders sit behind `test-support`; `xmlrpc` is
+  private, public only with `test-support` for the fake rtorrent and the
+  server's tests.
+- [x] Proptests: the XML-RPC parser and `scgi::body_range` never panic.
 
 ### WP-58 Mister on core
 
 Opus · `mistarr-mister`, server callers · branch `wp-58-mister-core`
 
-- [ ] `Platform.header_rule` is a `HeaderRule`. `adapter::build` matches on
+- [x] `Platform.header_rule` is a `HeaderRule`. `adapter::build` matches on
   kind and rule, not on id strings. The server's copies of `header_rule` in
   `jobs/scan.rs` and `jobs/import/support.rs` go.
-- [ ] Adapters use core's header constants and byte-order detection;
+- [x] Adapters use core's header constants and byte-order detection;
   `cart.rs` and `ByteOrder` duplicates go.
-- [ ] `CoreAdapter` keeps `plan_placement` only; the platform, directory,
+- [x] `CoreAdapter` keeps `plan_placement` only; the platform, directory,
   BIOS and accepts facts are read from the `Platform` row, and
   `row_methods!` goes. The scan keeps its own extension rules, since
   `Nes::accepts` requires the iNES magic that headerless files lack.
   ARCHITECTURE.md's adapter section says so.
-- [ ] `PlacementPlan::rename(from, to)`, `exact_name(&str)` and one
+- [x] `PlacementPlan::rename(from, to)`, `exact_name(&str)` and one
   `has_extension` replace the repeated constructions.
-- [ ] `Kind` gains `as_str` and `FromStr`; the server's `kind_str` goes.
-- [ ] Mister's `DatRom` becomes `PlaceRom` and takes header bytes from
-  `DatRom::header_bytes()`; `mra.rs` `hex_bytes` uses core's hex.
-- [ ] MRA and romsets readers use `core::xml` `CappedReader`, `attr_value` and
+- [x] `Kind` gains `as_str` and `FromStr`; the server's `kind_str` goes.
+- [x] Mister's `DatRom` becomes `PlaceRom` and takes header bytes from
+  core's `dat::decode_header`, the rule behind `DatRom::header_bytes()`.
+  `mra.rs` keeps its own streaming hex decoder, since MRA hex (a lone final
+  digit, `,` separators) is a grammar core's `hex` does not cover.
+- [x] MRA and romsets readers use `core::xml` `CappedReader`, `attr_value` and
   `resolve_ref`.
-- [ ] `RecordingSink` and `FakeOutcome` sit behind `test-support`.
-- [ ] Tests use `tempfile::TempDir`; none leaves a directory in the system temp
+- [x] `RecordingSink` and `FakeOutcome` sit behind `test-support`.
+- [x] Tests use `tempfile::TempDir`; none leaves a directory in the system temp
   directory.
 
 ### WP-59 One intake for dropped files
@@ -291,18 +294,18 @@ Opus · `mistarr-server` · branch `wp-60-db-types`
 
 Opus · `web/` · branch `wp-61-web-mock`
 
-- [ ] `src/mock/` implements the `api` object's type and an in-memory event
+- [x] `src/mock/` implements the `api` object's type and an in-memory event
   stream that feeds `events.ts` `handle()`; `main.ts` installs it when
   `VITE_MOCK=1`.
-- [ ] No `isMock` or `VITE_MOCK` outside `src/mock/` and `main.ts`, enforced by
+- [x] No `isMock` or `VITE_MOCK` outside `src/mock/` and `main.ts`, enforced by
   a lint rule or a check in `npm run lint`.
-- [ ] The fetch and progress simulation leaves `jobs.svelte.ts`; the mock
+- [x] The fetch and progress simulation leaves `jobs.svelte.ts`; the mock
   binding leaves `SourceDetail.svelte`.
-- [ ] One `mockKnob<T>(key, fallback)` replaces the localStorage readers in
+- [x] One `mockKnob<T>(key, fallback)` replaces the localStorage readers in
   `fixtures.ts`; `window.mistarrReloadTitles` goes.
-- [ ] `e2e/helpers.ts` holds `openPanel`, `noCovers` and `setMockKnob`;
+- [x] `e2e/helpers.ts` holds `openPanel`, `noCovers` and `setMockKnob`;
   `waitForTimeout` calls become locator waits.
-- [ ] The production bundle contains no fixture strings and stays inside its
+- [x] The production bundle contains no fixture strings and stays inside its
   size budget.
 
 ## Wave 6

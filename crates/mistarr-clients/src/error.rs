@@ -43,6 +43,19 @@ pub enum ClientError {
     Io(#[from] std::io::Error),
 }
 
+impl ClientError {
+    /// A [`ClientError::Protocol`] carrying `what` as its text.
+    ///
+    /// ```
+    /// use mistarr_clients::ClientError;
+    /// let e = ClientError::protocol(format_args!("status {}", 7));
+    /// assert!(matches!(e, ClientError::Protocol(ref m) if m == "status 7"));
+    /// ```
+    pub fn protocol(what: impl std::fmt::Display) -> Self {
+        Self::Protocol(what.to_string())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ClientError;
@@ -59,5 +72,7 @@ mod tests {
         );
         let io = ClientError::from(std::io::Error::other("disk"));
         assert!(matches!(io, ClientError::Io(_)));
+        let p = ClientError::protocol("bad reply");
+        assert_eq!(p.to_string(), "download client protocol error: bad reply");
     }
 }

@@ -24,3 +24,9 @@ updates:
     groups:
       npm-minor:
         update-types: [minor, patch]
+    # TypeScript 7 and a newer Node typings line than the Node 24 CI runtime are not supported.
+    ignore:
+      - dependency-name: typescript
+        versions: [">=7"]
+      - dependency-name: "@types/node"
+        update-types: ["version-update:semver-major"]

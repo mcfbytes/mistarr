@@ -20,7 +20,7 @@ let titleId = '';
 
 async function goto(page: Page, hash: string): Promise<void> {
   await page.goto(`/${hash}`);
-  await page.waitForTimeout(150);
+  await page.getByRole('heading', { level: 1 }).first().waitFor();
 }
 
 test.describe.configure({ mode: 'serial' });

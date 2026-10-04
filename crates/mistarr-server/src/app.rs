@@ -218,7 +218,7 @@ impl AppState {
 
     /// The download client from the last `detect_client` run, or `None` when
     /// detection found none. It is a Transmission or rtorrent handle for the
-    /// detected URL, rtorrent's carrying `client.remote_path_map`; it is
+    /// detected URL, carrying `client.remote_path_map`; it is
     /// replaced only when the detected kind, URL or path map changes. Take a
     /// fresh handle per operation rather than keeping one, and expect calls to
     /// fail with `Unreachable` when the client is down. `None` while the client
@@ -280,9 +280,13 @@ impl AppState {
             Some((k, _)) => status.reachable || (k.kind == key.kind && k.url == key.url),
         };
         if replace {
-            if let Some(client) = key.build() {
-                *slot = Some((key, client));
-                self.limits_wake.notify_one();
+            let map = mistarr_clients::RemotePathMap::new(key.path_map.clone());
+            match mistarr_clients::connect(key.kind, &key.url, map) {
+                Ok(client) => {
+                    *slot = Some((key, client));
+                    self.limits_wake.notify_one();
+                }
+                Err(e) => tracing::warn!(error = %e, "cannot use the detected client"),
             }
         }
     }

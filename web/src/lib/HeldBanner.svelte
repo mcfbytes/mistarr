@@ -3,8 +3,6 @@
   import { applyStatus, getStatus } from './stores/status.svelte';
   import { showToast } from './stores/toast.svelte';
 
-  const isMock = import.meta.env.VITE_MOCK === '1';
-
   const status = $derived(getStatus());
   const waiting = $derived(status?.paused ? status.waiting : []);
   const why = $derived(
@@ -13,9 +11,6 @@
   let busy = $state(false);
 
   async function runNow(): Promise<void> {
-    if (isMock) {
-      return;
-    }
     busy = true;
     try {
       applyStatus(await api.resume());

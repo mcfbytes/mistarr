@@ -4,9 +4,10 @@
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+use mistarr_core::hash::{ByteOrder, HeaderRule};
 use mistarr_core::PlatformId;
 
-use crate::input::{DatEntry, DatRom, StagedFile, StagedKind, StagedMember};
+use crate::input::{DatEntry, PlaceRom, StagedFile, StagedKind, StagedMember};
 use crate::platforms::{Kind, Platform, PLATFORMS};
 use crate::{Error, Result};
 
@@ -16,21 +17,20 @@ mod disc;
 pub mod neogeo;
 mod xml_caps;
 
-/// Placement rules for one MiSTer core.
+/// Placement rules for one MiSTer core. The platform, its directory, BIOS and the
+/// extensions it loads are facts of the [`Platform`] row, not of the adapter.
 ///
 /// ```
-/// use std::path::Path;
-/// use mistarr_mister::{adapter_for, PlatformId};
+/// use mistarr_mister::{adapter_for, DatEntry, PlaceRom, PlatformId, StagedFile, StagedKind};
 /// let snes = adapter_for(&PlatformId("snes".into())).unwrap();
-/// assert_eq!(snes.games_dir(Path::new("/media/fat")), Path::new("/media/fat/games/SNES"));
-/// assert_eq!(snes.requires_bios(), None);
-/// assert_eq!(snes.platform().0, "snes");
+/// let entry = DatEntry { name: "Example Quest (USA)".into(),
+///     roms: vec![PlaceRom { name: "Example Quest (USA).sfc".into(), size: 1024, header: None }] };
+/// let staged = StagedFile { path: "/s/x.sfc".into(), size: 1024, kind: StagedKind::File,
+///     head: vec![], members: vec![] };
+/// let plan = snes.plan_placement(&entry, &staged).unwrap();
+/// assert_eq!(plan.final_rel_path, std::path::Path::new("SNES/Example Quest (USA).sfc"));
 /// ```
 pub trait CoreAdapter: Send + Sync {
-    /// The platform this adapter places files for.
-    fn platform(&self) -> PlatformId;
-    /// The directory the core reads from, e.g. `root/games/NES`.
-    fn games_dir(&self, root: &Path) -> PathBuf;
     /// Decides the final path and the transformations that get the staged item there.
     ///
     /// # Errors
@@ -38,18 +38,6 @@ pub trait CoreAdapter: Send + Sync {
     /// Returns an error when the staged item cannot be made loadable with the
     /// permitted steps, for example a headerless NES file with no DAT header.
     fn plan_placement(&self, entry: &DatEntry, staged: &StagedFile) -> Result<PlacementPlan>;
-    /// True if this file, as found on disk, is loadable by the core without change.
-    ///
-    /// ```
-    /// use std::path::Path;
-    /// use mistarr_mister::{adapter_for, PlatformId};
-    /// let gba = adapter_for(&PlatformId("gba".into())).unwrap();
-    /// assert!(gba.accepts(Path::new("Example Quest (USA).gba")));
-    /// assert!(!gba.accepts(Path::new("Example Quest (USA).txt")));
-    /// ```
-    fn accepts(&self, path: &Path) -> bool;
-    /// BIOS file the core documents, reported on the status screen and never handled.
-    fn requires_bios(&self) -> Option<&'static str>;
 }
 
 /// Where a staged item ends up and how it gets there.
@@ -59,6 +47,27 @@ pub struct PlacementPlan {
     pub final_rel_path: PathBuf,
     /// Steps to apply in order.
     pub steps: Vec<Step>,
+}
+
+impl PlacementPlan {
+    /// A plan that moves staging item `from` to library path `to` unchanged.
+    ///
+    /// ```
+    /// use mistarr_mister::{PlacementPlan, Step};
+    /// let plan = PlacementPlan::rename("dl.zip".into(), "mame/exblast.zip".into());
+    /// assert_eq!(plan.final_rel_path, std::path::Path::new("mame/exblast.zip"));
+    /// assert!(matches!(&plan.steps[..], [Step::Rename { .. }]));
+    /// ```
+    #[must_use]
+    pub fn rename(from: PathBuf, to: PathBuf) -> Self {
+        Self {
+            steps: vec![Step::Rename {
+                from,
+                to: to.clone(),
+            }],
+            final_rel_path: to,
+        }
+    }
 }
 
 /// One permitted transformation.
@@ -116,36 +125,6 @@ pub enum Step {
     },
 }
 
-/// Byte order of an N64 image, told apart by its first four bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ByteOrder {
-    /// Native order, conventionally `.z64`.
-    BigEndian,
-    /// 16-bit words swapped, conventionally `.v64`.
-    ByteSwapped,
-    /// 32-bit words reversed, conventionally `.n64`.
-    LittleEndian,
-}
-
-impl ByteOrder {
-    /// Detects the byte order from the start of an image.
-    ///
-    /// ```
-    /// use mistarr_mister::ByteOrder;
-    /// assert_eq!(ByteOrder::detect(&[0x80, 0x37, 0x12, 0x40]), Some(ByteOrder::BigEndian));
-    /// assert_eq!(ByteOrder::detect(b"NES\x1a"), None);
-    /// ```
-    #[must_use]
-    pub fn detect(head: &[u8]) -> Option<Self> {
-        match head.get(..4)? {
-            [0x80, 0x37, 0x12, 0x40] => Some(Self::BigEndian),
-            [0x37, 0x80, 0x40, 0x12] => Some(Self::ByteSwapped),
-            [0x40, 0x12, 0x37, 0x80] => Some(Self::LittleEndian),
-            _ => None,
-        }
-    }
-}
-
 /// The adapter for a platform id, or `None` when the id is not in the table.
 ///
 /// ```
@@ -162,32 +141,16 @@ pub fn adapter_for(id: &PlatformId) -> Option<&'static dyn CoreAdapter> {
 }
 
 fn build(row: &'static Platform) -> Box<dyn CoreAdapter> {
-    match (row.kind, row.id) {
-        (_, "nes") => Box::new(cart::Nes(row)),
-        (_, "snes") => Box::new(cart::Snes(row)),
-        (_, "n64") => Box::new(cart::N64(row)),
+    match (row.kind, row.header_rule) {
+        (Kind::Cartridge, HeaderRule::Ines) => Box::new(cart::Nes(row)),
+        (Kind::Cartridge, HeaderRule::Smc) => Box::new(cart::Snes(row)),
+        (Kind::Cartridge, HeaderRule::N64) => Box::new(cart::N64(row)),
+        (Kind::Cartridge, _) => Box::new(cart::Cart(row)),
         (Kind::Disc, _) => Box::new(disc::Disc(row)),
         (Kind::Romset, _) => Box::new(neogeo::NeoGeo(row)),
         (Kind::Arcade, _) => Box::new(arcade::Arcade(row)),
-        _ => Box::new(cart::Cart(row)),
     }
 }
-
-/// Implements the trait methods that only read the platform row in field `.0`.
-macro_rules! row_methods {
-    () => {
-        fn platform(&self) -> ::mistarr_core::PlatformId {
-            self.0.platform_id()
-        }
-        fn games_dir(&self, root: &::std::path::Path) -> ::std::path::PathBuf {
-            root.join("games").join(self.0.core_dir)
-        }
-        fn requires_bios(&self) -> Option<&'static str> {
-            self.0.bios
-        }
-    };
-}
-use row_methods;
 
 /// A DAT name made safe as one exFAT path component, as placement names files.
 ///
@@ -214,11 +177,23 @@ pub fn safe_name(name: &str) -> Result<String> {
     Ok(cleaned)
 }
 
-/// Lowercased extension of a path, without the dot.
-fn extension(path: &Path) -> Option<String> {
+/// `name` itself when it is already safe as one path component.
+///
+/// # Errors
+///
+/// [`Error::InvalidName`] when [`safe_name`] would change it.
+fn exact_name(name: &str) -> Result<&str> {
+    if safe_name(name)? == name {
+        Ok(name)
+    } else {
+        Err(Error::InvalidName(name.to_owned()))
+    }
+}
+
+/// Whether `path` ends in `.ext`, compared without regard to ASCII case.
+pub(crate) fn has_extension(path: &Path, ext: &str) -> bool {
     path.extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
+        .is_some_and(|e| e.eq_ignore_ascii_case(ext))
 }
 
 /// Final path component of a staged item, as a staging path.
@@ -249,7 +224,7 @@ struct Source {
 
 /// Picks the member of `staged` that holds `rom`: by name, then by unique size.
 fn pick<'a>(
-    rom: &DatRom,
+    rom: &PlaceRom,
     members: &'a [StagedMember],
     used: &[usize],
 ) -> Option<(usize, &'a StagedMember)> {
@@ -271,7 +246,7 @@ fn pick<'a>(
 }
 
 /// Resolves the payload for `rom`, marking the chosen member in `used`.
-fn source_for(rom: &DatRom, staged: &StagedFile, used: &mut Vec<usize>) -> Result<Source> {
+fn source_for(rom: &PlaceRom, staged: &StagedFile, used: &mut Vec<usize>) -> Result<Source> {
     let missing = || Error::MissingRom(rom.name.clone());
     match staged.kind {
         StagedKind::File => {
@@ -322,7 +297,7 @@ pub(crate) mod testutil {
             name: name.to_owned(),
             roms: roms
                 .iter()
-                .map(|(n, s)| DatRom {
+                .map(|(n, s)| PlaceRom {
                     name: (*n).to_owned(),
                     size: *s,
                     header: None,
@@ -362,10 +337,9 @@ pub(crate) mod testutil {
         adapter_for(&PlatformId(id.to_owned())).expect("id is in the table")
     }
 
-    pub fn scratch(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("mistarr-mister-{}-{tag}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create scratch dir");
-        dir
+    /// A fresh directory, removed with everything in it when dropped.
+    pub fn scratch() -> tempfile::TempDir {
+        tempfile::tempdir().expect("create scratch dir")
     }
 }
 
@@ -375,29 +349,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_row_has_an_adapter_for_its_own_id() {
+    fn every_row_has_an_adapter_and_unknown_ids_none() {
         for p in &PLATFORMS {
-            let a = adapter(p.id);
-            assert_eq!(a.platform().0, p.id);
-            assert_eq!(a.requires_bios(), p.bios);
-            assert_eq!(
-                a.games_dir(Path::new("/r")),
-                Path::new("/r/games").join(p.core_dir)
-            );
+            assert!(adapter_for(&p.platform_id()).is_some(), "{}", p.id);
         }
+        assert!(adapter_for(&PlatformId("unknown".into())).is_none());
     }
 
     #[test]
-    fn byte_order_detection() {
+    fn rename_plans_one_move_to_the_final_path() {
+        let plan = PlacementPlan::rename("a".into(), "NES/b.nes".into());
+        assert_eq!(plan.final_rel_path, Path::new("NES/b.nes"));
         assert_eq!(
-            ByteOrder::detect(&[0x37, 0x80, 0x40, 0x12, 0]),
-            Some(ByteOrder::ByteSwapped)
+            plan.steps,
+            [Step::Rename {
+                from: "a".into(),
+                to: "NES/b.nes".into()
+            }]
         );
-        assert_eq!(
-            ByteOrder::detect(&[0x40, 0x12, 0x37, 0x80]),
-            Some(ByteOrder::LittleEndian)
-        );
-        assert_eq!(ByteOrder::detect(&[0x80, 0x37]), None);
+    }
+
+    #[test]
+    fn exact_name_refuses_what_safe_name_changes() {
+        assert_eq!(exact_name("a.bin").ok(), Some("a.bin"));
+        assert!(matches!(exact_name("a/b.bin"), Err(Error::InvalidName(n)) if n == "a/b.bin"));
+        assert!(exact_name("a.").is_err());
+    }
+
+    #[test]
+    fn extensions_compare_without_case() {
+        assert!(has_extension(Path::new("NES/a.ZIP"), "zip"));
+        assert!(has_extension(Path::new("a.cue"), "CUE"));
+        assert!(!has_extension(Path::new("a.zip.bak"), "zip"));
+        assert!(!has_extension(Path::new(".cue"), "cue"));
+        assert!(!has_extension(Path::new("cue"), "cue"));
     }
 
     #[test]
@@ -409,7 +394,7 @@ mod tests {
 
     #[test]
     fn pick_prefers_name_then_unique_size() {
-        let rom = DatRom {
+        let rom = PlaceRom {
             name: "b.bin".into(),
             size: 5,
             header: None,
@@ -421,7 +406,7 @@ mod tests {
         )
         .members;
         assert_eq!(pick(&rom, &members, &[]).map(|(i, _)| i), Some(1));
-        let rom = DatRom {
+        let rom = PlaceRom {
             name: "z.bin".into(),
             size: 5,
             header: None,

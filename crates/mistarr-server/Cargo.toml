@@ -16,8 +16,8 @@ name = "mistarr"
 path = "src/main.rs"
 
 [features]
-# Catalog fixtures and the client fakes, for integration tests.
-test-support = ["mistarr-clients/test-support"]
+# Catalog fixtures, the client fakes and the recording command sink, for integration tests.
+test-support = ["mistarr-clients/test-support", "mistarr-mister/test-support"]
 
 [dependencies]
 anyhow.workspace = true

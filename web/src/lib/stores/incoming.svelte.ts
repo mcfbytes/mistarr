@@ -1,9 +1,6 @@
 import { api } from '../api';
-import { fixtureIncomingDats, fixtureIncomingSources } from '../fixtures';
 import { readAllPages } from '../paging';
 import type { IncomingFile } from '../types';
-
-const isMock = import.meta.env.VITE_MOCK === '1';
 
 export type Watched = 'dats' | 'sources';
 
@@ -15,13 +12,6 @@ export function getIncoming(which: Watched): IncomingFile[] {
 }
 
 export async function loadIncoming(which: Watched): Promise<void> {
-  if (isMock) {
-    lists = {
-      ...lists,
-      [which]: which === 'dats' ? fixtureIncomingDats : fixtureIncomingSources
-    };
-    return;
-  }
   const items =
     which === 'dats'
       ? await readAllPages((limit, offset) => api.datsIncoming(limit, offset), (f) => f.file)
@@ -37,7 +27,7 @@ export function patchIncoming(which: Watched, file: string, next: IncomingFile |
 
 // Events arrive in bursts while a pack loads; one re-read per burst is enough.
 export function scheduleIncoming(which: Watched): void {
-  if (isMock || timers[which]) {
+  if (timers[which]) {
     return;
   }
   timers[which] = setTimeout(() => {

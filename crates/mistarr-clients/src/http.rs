@@ -1,12 +1,14 @@
-//! One-shot HTTP/1.1 POST over plain TCP, enough for a client RPC on the LAN.
+//! One-shot HTTP/1.1 exchanges: a client RPC POST over plain TCP, and the handshake `fetch` shares.
 
 use std::time::Duration;
 
 use http_body_util::{BodyExt, Full, Limited};
-use hyper::body::Bytes;
+use hyper::body::{Body, Bytes};
+use hyper::client::conn::http1::SendRequest;
 use hyper::header::{HeaderValue, AUTHORIZATION, CONTENT_TYPE, HOST, WWW_AUTHENTICATE};
 use hyper::{Request, Uri};
 use hyper_util::rt::TokioIo;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
@@ -29,7 +31,7 @@ pub(crate) struct Endpoint {
 impl Endpoint {
     /// Parses an `http://host[:port]/path` URL; other schemes are rejected.
     pub(crate) fn parse(url: &str) -> Result<Self, ClientError> {
-        let bad = |why: &str| ClientError::Protocol(format!("invalid client url {url:?}: {why}"));
+        let bad = |why: &str| ClientError::protocol(format!("invalid client url {url:?}: {why}"));
         let uri: Uri = url.parse().map_err(|_| bad("not a URL"))?;
         if uri.scheme_str() != Some("http") {
             return Err(bad("only http:// is supported"));
@@ -59,12 +61,29 @@ pub(crate) struct Headers<'a> {
     pub(crate) authorization: Option<&'a str>,
 }
 
-struct AbortOnDrop(JoinHandle<()>);
+/// The task driving one connection, aborted when the exchange that owns it is dropped.
+pub(crate) struct AbortOnDrop(JoinHandle<()>);
 
 impl Drop for AbortOnDrop {
     fn drop(&mut self) {
         self.0.abort();
     }
+}
+
+/// Opens HTTP/1.1 on `io` and spawns the task that drives it; its errors
+/// surface through the request and body futures.
+pub(crate) async fn handshake<IO, B>(io: IO) -> hyper::Result<(SendRequest<B>, AbortOnDrop)>
+where
+    IO: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    B: Body + Send + 'static,
+    B::Data: Send,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let (sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
+    let driver = AbortOnDrop(tokio::spawn(async move {
+        let _ = conn.await;
+    }));
+    Ok((sender, driver))
 }
 
 /// POSTs a JSON `body` on a fresh connection and reads the whole response,
@@ -91,13 +110,7 @@ async fn exchange(
     let stream = TcpStream::connect(&endpoint.authority)
         .await
         .map_err(|e| unreachable(&e))?;
-    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
-        .await
-        .map_err(|e| unreachable(&e))?;
-    let _driver = AbortOnDrop(tokio::spawn(async move {
-        // Errors surface through the request future instead.
-        let _ = conn.await;
-    }));
+    let (mut sender, _driver) = handshake(stream).await.map_err(|e| unreachable(&e))?;
 
     let mut req = Request::post(endpoint.path.as_str())
         .header(HOST, endpoint.authority.as_str())
@@ -110,7 +123,7 @@ async fn exchange(
     }
     let req = req
         .body(Full::new(body))
-        .map_err(|e| ClientError::Protocol(format!("building request: {e}")))?;
+        .map_err(|e| ClientError::protocol(format!("building request: {e}")))?;
 
     let resp = sender
         .send_request(req)
@@ -125,7 +138,7 @@ async fn exchange(
         .await
         .map_err(|e| {
             if e.is::<http_body_util::LengthLimitError>() {
-                ClientError::Protocol(format!("response larger than {MAX_BODY} bytes"))
+                ClientError::protocol(format!("response larger than {MAX_BODY} bytes"))
             } else {
                 unreachable(&e)
             }
@@ -154,6 +167,36 @@ mod tests {
         assert_eq!(e.path, "/");
         assert!(Endpoint::parse("https://127.0.0.1/").is_err());
         assert!(Endpoint::parse("127.0.0.1:5000").is_err());
+    }
+
+    #[tokio::test]
+    async fn handshake_sends_on_io_until_its_driver_drops() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (near, mut far) = tokio::io::duplex(4096);
+        let (mut sender, driver) = handshake(near).await.expect("handshake");
+        let peer = tokio::spawn(async move {
+            let mut buf = vec![0u8; 1024];
+            let n = far.read(&mut buf).await.expect("read");
+            far.write_all(b"HTTP/1.1 204 No Content\r\n\r\n")
+                .await
+                .expect("write");
+            (String::from_utf8_lossy(&buf[..n]).into_owned(), far)
+        });
+        let req = Request::get("/x")
+            .header(HOST, "h")
+            .body(http_body_util::Empty::<Bytes>::new())
+            .expect("request");
+        let resp = sender.send_request(req).await.expect("answer");
+        assert_eq!(resp.status().as_u16(), 204);
+        let (head, _far) = peer.await.expect("join");
+        assert!(head.starts_with("GET /x HTTP/1.1\r\n"), "{head}");
+        drop(driver);
+        let closed = tokio::time::timeout(Duration::from_secs(5), async {
+            while sender.ready().await.is_ok() {
+                tokio::task::yield_now().await;
+            }
+        });
+        assert!(closed.await.is_ok(), "the connection outlived its driver");
     }
 
     #[tokio::test]

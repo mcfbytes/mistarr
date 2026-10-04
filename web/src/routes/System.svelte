@@ -2,7 +2,6 @@
   import { onMount } from 'svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { showToast } from '../lib/stores/toast.svelte';
-  import { fixtureSettings, mockSettingsShouldFail, recordMockSave } from '../lib/fixtures';
   import { api, errorMessage } from '../lib/api';
   import ClientStart from '../lib/ClientStart.svelte';
   import ClientHeld from '../lib/ClientHeld.svelte';
@@ -23,8 +22,6 @@
   import type { LimitsSettings, Settings } from '../lib/types';
 
   type LimitKey = keyof LimitsSettings;
-
-  const isMock = import.meta.env.VITE_MOCK === '1';
 
   /** The settings sections, in page order, for the section list. */
   const SECTIONS = [
@@ -96,10 +93,7 @@
 
   async function loadSettings(): Promise<void> {
     try {
-      if (isMock && mockSettingsShouldFail()) {
-        throw new Error('mock settings load told to fail');
-      }
-      adopt(isMock ? fixtureSettings : await api.settings());
+      adopt(await api.settings());
       settingsError = null;
     } catch (err) {
       settingsError = errorMessage(err);
@@ -173,9 +167,6 @@
 
   async function togglePause(): Promise<void> {
     statusError = null;
-    if (isMock) {
-      return;
-    }
     try {
       if (status?.paused) {
         await api.resume();
@@ -258,10 +249,7 @@
     const next = { ...settings, client: { ...settings.client, remote_path_map: cleaned.map } };
     saving = true;
     try {
-      if (isMock) {
-        recordMockSave(next);
-      }
-      adopt(isMock ? next : await api.putSettings(next));
+      adopt(await api.putSettings(next));
       showToast('Settings saved.', 'success');
     } catch (err) {
       settingsError = errorMessage(err);
@@ -269,10 +257,8 @@
     } finally {
       saving = false;
     }
-    if (!isMock) {
-      // A failed refresh leaves the tiles as they were; SSE brings the next status.
-      await loadStatus().catch(() => undefined);
-    }
+    // A failed refresh leaves the tiles as they were; SSE brings the next status.
+    await loadStatus().catch(() => undefined);
   }
 </script>
 

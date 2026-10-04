@@ -9,7 +9,6 @@
   } from '../lib/stores/titles.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
-  import { fixtureTitle } from '../lib/fixtures';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { findPlatform, loadPlatforms, platformsLoaded } from '../lib/stores/platforms.svelte';
   import { canPlay, launchBlocker } from '../lib/launch';
@@ -24,7 +23,6 @@
 
   const { titleId }: Props = $props();
 
-  const isMock = import.meta.env.VITE_MOCK === '1';
   let tab = $state<'boxart' | 'title' | 'snap'>('boxart');
   let busy = $state(false);
   /** Art tabs whose image failed to load; a missing boxart shows the generated poster. */
@@ -70,9 +68,7 @@
   async function play(variantId: number): Promise<void> {
     busy = true;
     try {
-      if (!isMock) {
-        await api.launchTitle(variantId);
-      }
+      await api.launchTitle(variantId);
       showToast('Started on the MiSTer.', 'success');
     } catch (err) {
       showToast(errorMessage(err));
@@ -84,14 +80,7 @@
   async function want(variantId: number): Promise<void> {
     busy = true;
     try {
-      if (isMock) {
-        setDetail({
-          ...fixtureTitle(titleId),
-          variants: (detail?.variants ?? []).map((v) => (v.id === variantId ? { ...v, wanted: true } : v))
-        });
-      } else {
-        setDetail(await api.want(titleId, variantId));
-      }
+      setDetail(await api.want(titleId, variantId));
     } catch (err) {
       showToast(errorMessage(err));
     } finally {
@@ -102,14 +91,7 @@
   async function unwant(): Promise<void> {
     busy = true;
     try {
-      if (isMock) {
-        setDetail({
-          ...fixtureTitle(titleId),
-          variants: (detail?.variants ?? []).map((v) => ({ ...v, wanted: false }))
-        });
-      } else {
-        setDetail(await api.unwant(titleId));
-      }
+      setDetail(await api.unwant(titleId));
     } catch (err) {
       showToast(errorMessage(err));
     } finally {
@@ -120,9 +102,7 @@
   async function rename(fileId: number): Promise<void> {
     busy = true;
     try {
-      if (!isMock) {
-        setDetail(await api.rename(titleId, fileId));
-      }
+      setDetail(await api.rename(titleId, fileId));
     } catch (err) {
       showToast(errorMessage(err));
     } finally {

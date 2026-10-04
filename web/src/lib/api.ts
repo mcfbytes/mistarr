@@ -203,13 +203,31 @@ export const api = {
   retryDownload: (id: number): Promise<Download> => request(`/downloads/${id}/retry`, { method: 'POST' }),
   cancelDownload: (id: number): Promise<Download> => request(`/downloads/${id}`, { method: 'DELETE' }),
   imports: (limit: number, offset: number): Promise<Paged<ImportLogEntry>> =>
-    request(`/imports${query({ limit, offset })}`)
+    request(`/imports${query({ limit, offset })}`),
+
+  /** The `GET /events` stream, delivering each event to `onEvent` once started. */
+  events: (onEvent: (event: SseEvent) => void, onStateChange: (connected: boolean) => void): EventStream =>
+    new EventSubscriber(onEvent, onStateChange)
 };
+
+/** Everything the app asks of the server; `src/mock/` answers it in mock mode. */
+export type Api = typeof api;
+
+/** A live event subscription: `start` connects and keeps reconnecting until `stop`. */
+export interface EventStream {
+  start(): void;
+  stop(): void;
+}
+
+/** Answers every `api` call from `impl`; main.ts installs the mock with it before mounting. */
+export function useApi(impl: Api): void {
+  Object.assign(api, impl);
+}
 
 const RECONNECT_MIN_MS = 1000;
 const RECONNECT_MAX_MS = 30000;
 
-export class EventSubscriber {
+export class EventSubscriber implements EventStream {
   private lastEventId: string | null = null;
   private controller: AbortController | null = null;
   private closed = false;

@@ -44,9 +44,9 @@ contracts in this document.
 | Crate | Responsibility | Depends on |
 |---|---|---|
 | `mistarr-core` | Domain types. DAT parser for Logiqx XML and No-Intro DB exports. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. The codecs every crate shares: hex, `Digest` values (`Crc32`, `Md5`, `Sha1`, `InfoHash`), bencode, magnet links, percent-decoding, and the capped XML reader. | none |
-| `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
+| `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk, built on core's header constants, byte-order detection and XML reader. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
 | `mistarr-sources` | Intake of dropped files: `StableFiles` reports a file once its mtime is old enough and its size held across two polls, once per size and mtime, and forgets files that are gone; `plan` picks a free name in `loaded/` without creating it, so the database can store it, and `place` then moves the file there by hard link, or by a rename after a name check where the file system has no hard links; `accept` and `reject` move a file into `loaded/` or `rejected/` under a free name picked with `create_new`, and `reject` writes `<name>.reason.txt` holding `reason\n`. `.torrent` parsing into a file list, over core's bencode. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
-| `mistarr-clients` | `DownloadClient` trait. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping. The one GET of a URL the user supplies, over hyper and rustls (`fetch`). | none |
+| `mistarr-clients` | `DownloadClient` trait and `connect`, which builds the client for a detected kind and address. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping, both ways, inside each client. The one GET of a URL the user supplies, over hyper and rustls (`fetch`). Torrents arrive already parsed: a `TorrentSource` carries the infohash and file count, and `ClientTorrentId` wraps core's `InfoHash`. | core |
 | `mistarr-server` | The binary. axum HTTP server, SQLite via `rusqlite` (bundled), job scheduler, SSE event bus, embedded SPA via `rust-embed`, config, first-run wizard state, CLI flags. | all |
 | `mistarr-fixture` | Development tool, never shipped: synthetic DATs, `.torrent` files, the synthetic set and a local tracker for the tests in TESTING.md. | core, mister, sources |
 | `web/` | Svelte 5 + Vite + TypeScript SPA. Built to `web/dist`, embedded at compile time. | API.md |
@@ -58,7 +58,8 @@ contracts in this document.
 #[async_trait]
 pub trait DownloadClient: Send + Sync {
     async fn probe(&self) -> Result<ClientInfo>;
-    /// Add a torrent paused, with only `wanted` file indices selected, into `download_dir`.
+    /// Add a torrent paused, with only `wanted` file indices selected, into `download_dir`,
+    /// a local path the client maps to its own.
     async fn add(&self, src: TorrentSource, download_dir: &Path, wanted: &[u32], seed: SeedPolicy) -> Result<ClientTorrentId>;
     async fn set_wanted(&self, id: &ClientTorrentId, wanted: &[u32]) -> Result<()>;
     async fn set_seed_policy(&self, id: &ClientTorrentId, seed: SeedPolicy) -> Result<()>;
@@ -76,14 +77,15 @@ pub trait DownloadClient: Send + Sync {
 
 // mistarr-mister
 pub trait CoreAdapter: Send + Sync {
-    fn platform(&self) -> PlatformId;
-    fn games_dir(&self, root: &Path) -> PathBuf;                     // e.g. root/games/NES
     /// Decide the final filename and any transformation (unzip, header, byte order).
     fn plan_placement(&self, entry: &DatEntry, staged: &StagedFile) -> Result<PlacementPlan>;
-    /// True if this file, as found on disk, is loadable by the core without change.
-    fn accepts(&self, path: &Path) -> bool;
-    fn requires_bios(&self) -> Option<&'static str>;                 // reported, never fetched
 }
+// The other platform facts are fields of the `Platform` row: `platform_id()`,
+// `games_dir(root)` (e.g. root/games/NES), `bios` (reported, never fetched),
+// `load_extensions` and `header_rule`. `adapter_for` picks an adapter by the
+// row's kind and header rule. The library scan keeps its own extension rules
+// and checks no content: a headerless NES file is found and matched, though
+// placement must give it the iNES header (PLATFORMS.md "Adapter contract").
 
 // mistarr-core
 pub struct HashSet { pub size: u64, pub crc32: u32, pub md5: [u8;16], pub sha1: [u8;20] }
@@ -542,10 +544,10 @@ is not set yet.
    one. Two wanted versions may share one file.
 2. A light `transfer` job takes `queued` downloads per source. If the torrent
    is not yet in the client, create `staging/<infohash>/` (rtorrent makes only
-   the last level of a download path) and add the torrent paused to it, through
-   the remote path map, with only the selected files wanted and the source's
-   seed policy. If it is, extend the wanted set. Start it. A magnet whose
-   metadata is pending keeps its downloads queued.
+   the last level of a download path) and add the torrent paused to it, which
+   the client maps through the remote path map, with only the selected files
+   wanted and the source's seed policy. If it is, extend the wanted set. Start
+   it. A magnet whose metadata is pending keeps its downloads queued.
 3. Poll the client at an interval (5 s while something is transferring or
    checking, 60 s otherwise, 5 minutes after three failed polls). Per-file
    progress is written to `downloads` and fanned out on SSE as

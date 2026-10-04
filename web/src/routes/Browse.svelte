@@ -13,7 +13,6 @@
   import { titleUrl } from '../lib/router.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
-  import { fixtureSettings, scenarioBrowseFlags } from '../lib/fixtures';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { launchBlocker } from '../lib/launch';
   import PlatformArt from '../lib/PlatformArt.svelte';
@@ -27,8 +26,6 @@
 
   const { platformId }: Props = $props();
 
-  const isMock = import.meta.env.VITE_MOCK === '1';
-  const flagChoices: readonly string[] = isMock ? scenarioBrowseFlags() : BROWSE_FLAGS;
   /** Typing pauses this long before the search runs. */
   const SEARCH_DEBOUNCE_MS = 250;
 
@@ -54,9 +51,7 @@
   async function startCore(): Promise<void> {
     coreBusy = true;
     try {
-      if (!isMock) {
-        await api.launchCore(platformId);
-      }
+      await api.launchCore(platformId);
       showToast('Core started on the MiSTer.', 'success');
     } catch (err) {
       showToast(errorMessage(err));
@@ -104,7 +99,7 @@
   });
 
   async function loadHideList(): Promise<void> {
-    const settings = isMock ? fixtureSettings : await api.settings();
+    const settings = await api.settings();
     hideList = settings.prefs.hide;
   }
 
@@ -154,9 +149,6 @@
     }
     const next = currentlyWanted > 0 ? 0 : 1;
     patchGroup(parentId, { wanted: next });
-    if (isMock) {
-      return;
-    }
     try {
       if (next > 0) {
         await api.want(pickId);
@@ -209,7 +201,7 @@
     </label>
     <fieldset class="flags">
       <legend>Require flags</legend>
-      {#each flagChoices as flag (flag)}
+      {#each BROWSE_FLAGS as flag (flag)}
         <label>
           <input
             type="checkbox"

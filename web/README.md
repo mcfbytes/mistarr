@@ -12,10 +12,14 @@ VITE_MOCK=1 npm run dev  # dev server against fixture data, no backend needed;
 npm run check            # svelte-check
 npm run lint             # eslint
 npm run build            # -> dist/
-npm run size             # gzip budget check against dist/
+npm run size             # gzip budget and no-mock check against dist/
 npm run e2e              # playwright screenshots of every screen, two viewports
 ./scripts/readme-images.sh  # the README images in ../docs/images, see docs/TESTING.md
 ```
+
+`npm run e2e` builds with `VITE_MOCK=1` and serves the preview on port 4173,
+or on `E2E_PORT` when set. Mock mode lives in `src/mock/` behind the `api`
+object; docs/TESTING.md describes it and its test knobs.
 
 `npm run e2e` uses Playwright's own browser resolution by default. Set
 `PLAYWRIGHT_CHROMIUM_PATH` to point at a pre-installed Chromium binary

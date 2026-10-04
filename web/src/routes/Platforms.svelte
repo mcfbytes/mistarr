@@ -34,7 +34,6 @@
   const absent = $derived(platforms.filter((p) => !p.core_present));
   const disabled = $derived(platforms.filter((p) => p.core_present && !p.enabled));
 
-  const isMock = import.meta.env.VITE_MOCK === '1';
   const scanning = new SvelteSet<string>();
 
   // The open scan of each platform, shown on its card.
@@ -72,9 +71,9 @@
     }
     scanning.add(id);
     try {
-      const queued = isMock ? await new Promise<null>((r) => setTimeout(() => r(null), 400)) : await api.scan(id);
+      const queued = await api.scan(id);
       showToast(`Scan of ${platformName(id)} queued`, 'info');
-      const jobId = queued?.job_id ?? queued?.arcade_job_id;
+      const jobId = queued.job_id ?? queued.arcade_job_id;
       if (jobId != null) {
         trackScan(jobId, id);
       }
@@ -87,9 +86,6 @@
 
   async function setEnabled(id: string, enabled: boolean): Promise<void> {
     patchPlatform(id, { enabled });
-    if (isMock) {
-      return;
-    }
     try {
       await api.setPlatform(id, enabled);
     } catch (err) {
