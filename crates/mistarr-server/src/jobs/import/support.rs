@@ -5,7 +5,6 @@ use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
-use mistarr_core::dat::{DatRom, RomStatus};
 use mistarr_core::hash::{hash_forms, hash_zip_member_forms, zip_members, HashError, HeaderRule};
 use mistarr_core::HashSet as Hashes;
 use mistarr_mister::PlaceRom;
@@ -181,17 +180,9 @@ pub(super) fn read_head(path: &Path, member: Option<&str>) -> Result<Vec<u8>, Ha
     Ok(buf)
 }
 
-/// The rom as placement sees it, its header bytes read as [`DatRom::header_bytes`] does.
+/// The rom as placement sees it, its header bytes decoded by [`PlaceRom::new`].
 pub(super) fn place_rom(rom: &EntryRom) -> PlaceRom {
-    PlaceRom::from(&DatRom {
-        name: rom.name.clone(),
-        size: rom.size,
-        crc32: None,
-        md5: None,
-        sha1: None,
-        status: RomStatus::Good,
-        header: rom.header.clone(),
-    })
+    PlaceRom::new(&rom.name, rom.size, rom.header.as_deref())
 }
 
 /// Whether `h` is rom `rom` under `docs/VERIFICATION.md` "Matching order":

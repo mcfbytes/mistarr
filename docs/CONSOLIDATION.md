@@ -229,7 +229,8 @@ Opus · `mistarr-mister`, server callers · branch `wp-58-mister-core`
   `has_extension` replace the repeated constructions.
 - [x] `Kind` gains `as_str` and `FromStr`; the server's `kind_str` goes.
 - [x] Mister's `DatRom` becomes `PlaceRom` and takes header bytes from
-  `DatRom::header_bytes()`; `mra.rs` `hex_bytes` uses core's hex.
+  core's `dat::decode_header`, the rule behind `DatRom::header_bytes()`;
+  `mra.rs` `hex_bytes` uses core's hex.
 - [x] MRA and romsets readers use `core::xml` `CappedReader`, `attr_value` and
   `resolve_ref`.
 - [x] `RecordingSink` and `FakeOutcome` sit behind `test-support`.

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use mistarr_core::dat::DatRom;
+use mistarr_core::dat::{decode_header, DatRom};
 
 /// One DAT `<game>` as far as placement needs it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,8 +24,26 @@ pub struct PlaceRom {
     pub header: Option<Vec<u8>>,
 }
 
+impl PlaceRom {
+    /// A rom named `name` of `size` bytes, its header bytes decoded from the DAT's
+    /// `header` text by [`decode_header`].
+    ///
+    /// ```
+    /// let place = mistarr_mister::PlaceRom::new("q.nes", 4, Some("4E 45 53 1A"));
+    /// assert_eq!((place.size, place.header), (4, Some(b"NES\x1a".to_vec())));
+    /// ```
+    #[must_use]
+    pub fn new(name: &str, size: u64, header: Option<&str>) -> Self {
+        Self {
+            name: name.to_owned(),
+            size,
+            header: header.and_then(decode_header),
+        }
+    }
+}
+
 impl From<&DatRom> for PlaceRom {
-    /// Takes the name and size, and the header bytes from [`DatRom::header_bytes`].
+    /// [`PlaceRom::new`] with the rom's name, size and `header` attribute.
     ///
     /// ```
     /// use mistarr_core::dat::{DatRom, RomStatus};
@@ -35,11 +53,7 @@ impl From<&DatRom> for PlaceRom {
     /// assert_eq!((place.size, place.header), (4, Some(b"NES\x1a".to_vec())));
     /// ```
     fn from(rom: &DatRom) -> Self {
-        Self {
-            name: rom.name.clone(),
-            size: rom.size,
-            header: rom.header_bytes(),
-        }
+        Self::new(&rom.name, rom.size, rom.header.as_deref())
     }
 }
 
@@ -105,6 +119,18 @@ mod tests {
         for bad in [None, Some(String::new()), Some("4E 4".into())] {
             rom.header = bad;
             assert_eq!(PlaceRom::from(&rom).header, None);
+        }
+    }
+
+    #[test]
+    fn place_rom_new_decodes_header_text() {
+        let place = PlaceRom::new("a.nes", 2, Some("4e\t45"));
+        assert_eq!(
+            (place.name.as_str(), place.size, place.header),
+            ("a.nes", 2, Some(b"NE".to_vec()))
+        );
+        for bad in [None, Some(""), Some(" "), Some("4E 4")] {
+            assert_eq!(PlaceRom::new("a.nes", 2, bad).header, None, "{bad:?}");
         }
     }
 }
