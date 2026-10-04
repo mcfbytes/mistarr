@@ -27,7 +27,10 @@ mod scgi;
 mod testutil;
 pub mod transmission;
 mod wanted;
+#[cfg(any(test, feature = "test-support"))]
 pub mod xmlrpc;
+#[cfg(not(any(test, feature = "test-support")))]
+mod xmlrpc;
 
 pub use error::ClientError;
 pub use path_map::{PathMapping, RemotePathMap};
