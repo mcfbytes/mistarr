@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::UNIX_EPOCH;
 
+use mistarr_sources::intake::{REASON_SUFFIX, REJECTED_DIR};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -237,11 +238,6 @@ fn rejected_in(dir: &Path) -> Vec<IncomingFile> {
         })
         .collect()
 }
-
-/// The directory beside the dropped files that holds rejected ones.
-pub const REJECTED_DIR: &str = "rejected";
-/// Suffix of the file beside a rejected one that says why.
-pub const REASON_SUFFIX: &str = ".reason.txt";
 
 /// What is known of a pending file besides its name and job.
 struct Pending {

@@ -12,8 +12,8 @@
 pub mod binding;
 mod error;
 pub mod fuzzy;
+pub mod intake;
 pub mod torrent;
-pub mod watch;
 
 pub use error::SourceError;
 pub use mistarr_core::PlatformId;

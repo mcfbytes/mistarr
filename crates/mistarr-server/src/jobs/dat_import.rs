@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use mistarr_core::dat::{
@@ -17,6 +17,7 @@ use mistarr_core::hash::HeaderRule;
 use mistarr_core::naming::{group_key, parse_name};
 use mistarr_core::select::{HiddenFlag, Prefs};
 use mistarr_core::PlatformId;
+use mistarr_sources::intake::{self, StableFiles, LOADED_DIR};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use tokio::sync::watch;
@@ -45,11 +46,6 @@ pub const RECOMPUTE_KIND: &str = "recompute_1g1r";
 /// Largest DAT or DAT pack an upload or a URL fetch accepts; daily packs of every
 /// system fit well inside.
 pub const MAX_DAT_BYTES: u64 = 512 * 1024 * 1024;
-
-/// Subdirectory of `dats/` for files that loaded.
-pub const LOADED_DIR: &str = "loaded";
-
-pub use crate::incoming::{REASON_SUFFIX, REJECTED_DIR};
 
 /// Games read between checks for shutdown.
 const CANCEL_EVERY: u64 = 500;
@@ -315,19 +311,21 @@ impl Job for DatImport {
         if self.bind.is_some() {
             return self.run_bind(ctx, &file).await;
         }
-        let dats_dir = self.path.parent().unwrap_or_else(|| Path::new("."));
-        let loaded_dir = dats_dir.join(LOADED_DIR);
+        let loaded_dir = self
+            .path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join(LOADED_DIR);
         let (path, name) = (self.path.clone(), file.clone());
         let listed = crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
-            let target = unique_path(&loaded_dir, &name);
             path.is_file()
-                .then(|| list_members(&path).map(|m| (m, target)))
+                .then(|| (list_members(&path), intake::free_name(&loaded_dir, &name)))
         })
         .await?;
         let (members, target) = match listed {
             None => return Ok(()),
-            Some(Ok(listed)) => listed,
-            Some(Err(reason)) => return reject(&ctx.app, &self.path, &file, &reason).await,
+            Some((Ok(members), target)) => (members, target?),
+            Some((Err(reason), _)) => return reject(&ctx.app, &self.path, &file, &reason).await,
         };
         let stored = file_name(&target);
         let Imported {
@@ -346,12 +344,14 @@ impl Job for DatImport {
         if loaded.is_empty() {
             return reject(&ctx.app, &self.path, &file, &reasons.join("\n")).await;
         }
-        let (path, loaded_dir) = (self.path.clone(), dats_dir.join(LOADED_DIR));
-        crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
-            std::fs::create_dir_all(&loaded_dir)?;
-            std::fs::rename(&path, &target)
+        let path = self.path.clone();
+        let moved = crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
+            intake::accept(&path)
         })
         .await??;
+        if moved != target {
+            tracing::warn!(file, stored, "DAT took another name in loaded/");
+        }
         for reason in &reasons {
             publish_rejected(&ctx.app, &file, reason);
         }
@@ -1238,50 +1238,14 @@ fn publish_rejected(app: &AppState, file: &str, reason: &str) {
 /// Moves a file into `rejected/` with `<name>.reason.txt` beside it, on a blocking
 /// thread, and publishes `dat.rejected`.
 async fn reject(app: &AppState, path: &Path, file: &str, reason: &str) -> Result<()> {
-    let dir = path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(REJECTED_DIR);
-    let (path, name, text) = (path.to_path_buf(), file.to_owned(), format!("{reason}\n"));
+    let (path, text) = (path.to_path_buf(), reason.to_owned());
     crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
-        std::fs::create_dir_all(&dir)?;
-        let target = unique_path(&dir, &name);
-        std::fs::rename(&path, &target)?;
-        let mut reason_path = target.into_os_string();
-        reason_path.push(REASON_SUFFIX);
-        std::fs::write(reason_path, text)
+        intake::reject(&path, &text)
     })
     .await??;
     tracing::warn!(file, reason, "DAT rejected");
     publish_rejected(app, file, reason);
     Ok(())
-}
-
-/// `dir/name`, or `dir/stem (N).ext` for the first N that is free.
-///
-/// ```
-/// let dir = tempfile::tempdir().unwrap();
-/// let first = mistarr_server::jobs::dat_import::unique_path(dir.path(), "a.dat");
-/// std::fs::write(&first, b"").unwrap();
-/// let second = mistarr_server::jobs::dat_import::unique_path(dir.path(), "a.dat");
-/// assert!(second.ends_with("a (1).dat"));
-/// ```
-#[must_use]
-pub fn unique_path(dir: &Path, name: &str) -> PathBuf {
-    let candidate = dir.join(name);
-    if !candidate.exists() {
-        return candidate;
-    }
-    let p = Path::new(name);
-    let stem = stem(p);
-    let ext = p
-        .extension()
-        .map(|e| format!(".{}", e.to_string_lossy()))
-        .unwrap_or_default();
-    (1..=u32::MAX)
-        .map(|n| dir.join(format!("{stem} ({n}){ext}")))
-        .find(|c| !c.exists())
-        .unwrap_or(candidate)
 }
 
 /// Files matched again per transaction by [`rematch_chunk`] and [`match_unmatched_chunk`].
@@ -1578,80 +1542,11 @@ fn pass_progress(pass: Pass, tally: &Tally) -> Value {
     }
 }
 
-/// Finds files in `dats/` that have stopped changing: mtime at least
-/// `min_age` old and size equal across two polls. Each file is reported once
-/// per size and mtime, so a new file under a reused name is reported again.
-#[derive(Debug)]
-pub struct DatWatcher {
-    min_age: Duration,
-    sizes: HashMap<PathBuf, u64>,
-    reported: HashMap<PathBuf, (u64, Option<SystemTime>)>,
-}
-
-impl DatWatcher {
-    /// A watcher with the given stability age.
-    ///
-    /// ```
-    /// let dir = tempfile::tempdir().unwrap();
-    /// std::fs::write(dir.path().join("a.dat"), b"x").unwrap();
-    /// let mut w = mistarr_server::jobs::dat_import::DatWatcher::new(std::time::Duration::ZERO);
-    /// assert!(w.poll(dir.path()).is_empty());
-    /// assert_eq!(w.poll(dir.path()).len(), 1);
-    /// assert!(w.poll(dir.path()).is_empty());
-    /// ```
-    #[must_use]
-    pub fn new(min_age: Duration) -> Self {
-        Self {
-            min_age,
-            sizes: HashMap::new(),
-            reported: HashMap::new(),
-        }
-    }
-
-    /// Reports `path` again once it is stable, for a file whose import failed.
-    pub fn forget(&mut self, path: &Path) {
-        self.reported.remove(path);
-    }
-
-    /// Regular files in `dir`, not dotfiles, that became stable since the last poll.
-    pub fn poll(&mut self, dir: &Path) -> Vec<PathBuf> {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return Vec::new();
-        };
-        let now = SystemTime::now();
-        let mut present = HashSet::new();
-        let mut stable = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let Ok(meta) = entry.metadata() else {
-                continue;
-            };
-            if !meta.is_file() || entry.file_name().to_string_lossy().starts_with('.') {
-                continue;
-            }
-            present.insert(path.clone());
-            let old = meta
-                .modified()
-                .is_ok_and(|m| now.duration_since(m).unwrap_or(Duration::ZERO) >= self.min_age);
-            let same = self.sizes.insert(path.clone(), meta.len()) == Some(meta.len());
-            let signature = (meta.len(), meta.modified().ok());
-            if old && same && self.reported.get(&path) != Some(&signature) {
-                self.reported.insert(path.clone(), signature);
-                stable.push(path);
-            }
-        }
-        self.sizes.retain(|p, _| present.contains(p));
-        self.reported.retain(|p, _| present.contains(p));
-        stable.sort();
-        stable
-    }
-}
-
 /// Polls `dats/` every `options.dats_poll` on a blocking thread and enqueues a
 /// [`DatImport`] per stable file. A file whose job failed is enqueued again on a later poll.
 pub async fn watch(app: Arc<AppState>) {
     let dir = app.config().paths.dats();
-    let mut watcher = DatWatcher::new(app.options.dats_min_age);
+    let mut watcher = StableFiles::new(app.options.dats_min_age, |name| !name.starts_with('.'));
     let mut pending: HashMap<PathBuf, JobId> = HashMap::new();
     let mut tick = tokio::time::interval(app.options.dats_poll);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);

@@ -280,7 +280,7 @@ async fn metainfo(app: &AppState, row: &SourceRow) -> Option<Vec<u8>> {
         .config()
         .paths
         .sources()
-        .join(mistarr_sources::watch::LOADED_DIR)
+        .join(mistarr_sources::intake::LOADED_DIR)
         .join(&row.origin_file);
     let bytes = tokio::fs::read(&path).await.ok()?;
     let hash = torrent::infohash(&bytes).ok()?;
@@ -487,7 +487,7 @@ mod tests {
             .config()
             .paths
             .sources()
-            .join(mistarr_sources::watch::LOADED_DIR);
+            .join(mistarr_sources::intake::LOADED_DIR);
         std::fs::create_dir_all(&loaded).expect("mkdir");
         std::fs::write(loaded.join(&origin), &bytes).expect("write");
         app.db

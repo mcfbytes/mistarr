@@ -241,15 +241,15 @@ Opus · `mistarr-mister`, server callers · branch `wp-58-mister-core`
 Sonnet · `mistarr-sources`, server `jobs/dat_import.rs`,
 `jobs/source_import.rs` · branch `wp-59-intake`
 
-- [ ] `mistarr_sources::intake::StableFiles` reports a file once it is older
+- [x] `mistarr_sources::intake::StableFiles` reports a file once it is older
   than the minimum age and its size held across two polls, once per size and
   mtime, and forgets files that are gone. It takes a name filter. `Scanner`
   and `DatWatcher` go.
-- [ ] `intake::accept` and `intake::reject` pick a free name with `create_new`
+- [x] `intake::accept` and `intake::reject` pick a free name with `create_new`
   and a bounded number of attempts, write the reason as `reason\n`, and run on
   a blocking thread. `dat_import::reject`, `unique_path` and
   `watch::mark_loaded`, `mark_rejected` and `move_into` go.
-- [ ] Tests: a stable file is reported once; a moved file is forgotten; a name
+- [x] Tests: a stable file is reported once; a moved file is forgotten; a name
   already in `loaded/` gets a new name.
 
 ### WP-60 Database types

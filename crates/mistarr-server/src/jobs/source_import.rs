@@ -2,15 +2,16 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use mistarr_clients::{ClientError, ClientTorrentId, SeedPolicy, TorrentSource};
 use mistarr_core::magnet;
 use mistarr_core::PlatformId;
 use mistarr_sources::binding::{self, Binding};
+use mistarr_sources::intake::{self, StableFiles};
 use mistarr_sources::torrent;
 use mistarr_sources::torrent::TorrentFile;
-use mistarr_sources::watch::{self, Scanner};
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -167,11 +168,11 @@ impl Job for SourceImport {
 async fn move_blocking(path: &Path, reason: Option<String>) -> Result<()> {
     let path = path.to_path_buf();
     crate::threads::run(crate::threads::label::SOURCE_FILE, move || match reason {
-        None => watch::mark_loaded(&path),
-        Some(r) => watch::mark_rejected(&path, &r),
+        None => intake::accept(&path),
+        Some(r) => intake::reject(&path, &r),
     })
-    .await?
-    .map_err(crate::Error::from)
+    .await??;
+    Ok(())
 }
 
 /// Parses and binds a `.torrent`, dropping its bytes once parsed. The inner error is a
@@ -608,7 +609,7 @@ async fn magnet_uri(app: &AppState, row: &SourceRow) -> String {
         .config()
         .paths
         .sources()
-        .join(watch::LOADED_DIR)
+        .join(intake::LOADED_DIR)
         .join(&row.origin_file);
     let text = tokio::fs::read_to_string(&file).await.unwrap_or_default();
     let dropped = text.lines().map(str::trim).find(|l| !l.is_empty());
@@ -622,17 +623,28 @@ async fn magnet_uri(app: &AppState, row: &SourceRow) -> String {
     }
 }
 
+/// Whether `name` is a `.torrent` or `.magnet` file name.
+fn is_source_name(name: &str) -> bool {
+    matches!(
+        Path::new(name).extension().and_then(|e| e.to_str()),
+        Some("torrent" | "magnet")
+    )
+}
+
 /// Scans `sources/` every [`crate::app::Options::sources_poll`] and enqueues
 /// one [`SourceImport`] per stable file; a file already queued is not queued twice.
 pub async fn watch(app: Arc<AppState>) {
     let dir = app.config().paths.sources();
-    let mut scanner = Scanner::with_min_age_secs(app.options.sources_min_age_secs);
+    let mut scanner = StableFiles::new(
+        Duration::from_secs(app.options.sources_min_age_secs),
+        is_source_name,
+    );
     let mut tick = tokio::time::interval(app.options.sources_poll);
     loop {
         tick.tick().await;
         let d = dir.clone();
         let result = crate::threads::run(crate::threads::label::SOURCE_WATCH, move || {
-            let found = scanner.scan_once(&d);
+            let found = scanner.poll(&d);
             (scanner, found)
         })
         .await;
@@ -641,10 +653,8 @@ pub async fn watch(app: Arc<AppState>) {
             return;
         };
         scanner = back;
-        for incoming in found {
-            let job = Arc::new(SourceImport {
-                path: incoming.path,
-            });
+        for path in found {
+            let job = Arc::new(SourceImport { path });
             if let Err(e) = Scheduler::enqueue(&app, job).await {
                 tracing::warn!(error = %e, "cannot queue a source import");
             }

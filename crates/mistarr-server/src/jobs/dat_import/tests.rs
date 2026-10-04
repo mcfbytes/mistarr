@@ -276,40 +276,6 @@ fn members_are_listed_by_extension() {
     ));
 }
 
-#[test]
-fn the_watcher_waits_for_age_and_a_steady_size() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let a = dir.path().join("a.dat");
-    std::fs::write(&a, b"one").expect("write");
-    std::fs::write(dir.path().join(".upload.part"), b"x").expect("write");
-    std::fs::create_dir(dir.path().join("loaded")).expect("mkdir");
-    let mut aged = DatWatcher::new(Duration::from_secs(3600));
-    assert!(aged.poll(dir.path()).is_empty());
-    assert!(aged.poll(dir.path()).is_empty(), "too young");
-
-    let mut w = DatWatcher::new(Duration::ZERO);
-    assert!(w.poll(dir.path()).is_empty());
-    std::fs::write(&a, b"grown").expect("write");
-    assert!(w.poll(dir.path()).is_empty(), "size changed");
-    assert_eq!(w.poll(dir.path()), std::slice::from_ref(&a));
-    assert!(w.poll(dir.path()).is_empty(), "reported once");
-    std::fs::write(&a, b"replaced").expect("write");
-    w.poll(dir.path());
-    assert_eq!(
-        w.poll(dir.path()),
-        std::slice::from_ref(&a),
-        "a new file under the same name"
-    );
-    std::fs::remove_file(&a).expect("remove");
-    assert!(w.poll(dir.path()).is_empty());
-    std::fs::write(&a, b"back").expect("write");
-    w.poll(dir.path());
-    assert_eq!(w.poll(dir.path()), [a], "a returning file is new again");
-    assert!(DatWatcher::new(Duration::ZERO)
-        .poll(&dir.path().join("none"))
-        .is_empty());
-}
-
 #[tokio::test]
 async fn the_job_moves_files_and_publishes_events() {
     let (_dir, app) = state();
@@ -841,19 +807,6 @@ async fn binding_fails_loudly_and_finds_renamed_nameless_files() {
         .expect("get")
         .expect("row");
     assert_eq!(row.platform_id, None, "still unbound");
-}
-
-#[test]
-fn a_forgotten_file_is_reported_again() {
-    let dir = tempfile::tempdir().expect("tempdir");
-    let a = dir.path().join("a.dat");
-    std::fs::write(&a, b"x").expect("write");
-    let mut w = DatWatcher::new(Duration::ZERO);
-    w.poll(dir.path());
-    assert_eq!(w.poll(dir.path()), std::slice::from_ref(&a));
-    assert!(w.poll(dir.path()).is_empty());
-    w.forget(&a);
-    assert_eq!(w.poll(dir.path()), std::slice::from_ref(&a));
 }
 
 const NES_LOGIQX: &str = "Example Vendor - Nintendo Entertainment System (Headered)";
