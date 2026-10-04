@@ -8,12 +8,12 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use mistarr_clients::{
-    ClientError, ClientKind, ClientTorrentId, Direction, DownloadClient, RateLimit,
+    ClientError, ClientKind, ClientTorrentId, Direction, DownloadClient, RateLimit, RemotePathMap,
 };
 use serde::{Deserialize, Serialize};
 
 use crate::app::AppState;
-use crate::client::{self, ClientEndpoint, ClientKey};
+use crate::client::{self, ClientEndpoint};
 use crate::config::LimitsConfig;
 use crate::db::deferred::{self, Op};
 use crate::db::settings::{self, keys};
@@ -673,10 +673,11 @@ async fn apply_seed_policies(app: &AppState, client: &dyn DownloadClient) -> boo
     };
     let mut all = true;
     for (source, cid, seed) in rows {
-        match client
-            .set_seed_policy(&ClientTorrentId::new(cid), seed)
-            .await
-        {
+        let applied = match cid.parse::<ClientTorrentId>() {
+            Ok(id) => client.set_seed_policy(&id, seed).await,
+            Err(e) => Err(e),
+        };
+        match applied {
             Ok(()) | Err(ClientError::NotFound) => {}
             Err(e) => {
                 tracing::warn!(source = %source, error = %e, "cannot apply the seed policy in the client");
@@ -799,15 +800,14 @@ async fn keep(app: &AppState, a: &mut Applied, saved: &SavedLimits) -> Result<()
 
 /// Puts `saved` back in the client it names, through a handle built for it.
 async fn restore_saved(app: &AppState, saved: &SavedLimits) -> Result<(), Failure> {
-    let key = ClientKey {
-        kind: saved.client.kind,
-        url: saved.client.url.clone(),
-        path_map: app.config().client.remote_path_map.clone(),
-    };
-    let client = key.build().ok_or_else(|| Failure {
-        what: "cannot restore the client's own limits",
-        error: format!("cannot reach the {} client", saved.client.kind),
-    })?;
+    let map = RemotePathMap::new(app.config().client.remote_path_map.clone());
+    let client =
+        mistarr_clients::connect(saved.client.kind, &saved.client.url, map).map_err(|e| {
+            Failure {
+                what: "cannot restore the client's own limits",
+                error: format!("cannot reach the {} client: {e}", saved.client.kind),
+            }
+        })?;
     restore_into(client.as_ref(), saved).await
 }
 

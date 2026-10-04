@@ -11,8 +11,9 @@ use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use mistarr_clients::{ClientError, ClientTorrentId, InfoHash};
+use mistarr_clients::{ClientError, ClientTorrentId};
 use mistarr_core::magnet;
+use mistarr_core::InfoHash;
 use mistarr_core::PlatformId;
 use mistarr_sources::torrent;
 use serde::{Deserialize, Deserializer, Serialize};
@@ -278,11 +279,12 @@ async fn update(
         .ok_or_else(|| ApiError::not_found("No such source."))?;
     if let (Some(seed), Some(cid)) = (seed, &updated.client_id) {
         let applied = match app.client() {
-            Some(client) => client
-                .set_seed_policy(&ClientTorrentId::new(cid.as_str()), seed)
-                .await
-                .map_err(|e| tracing::warn!(source = %id, error = %e, "cannot apply the seed policy in the client"))
-                .is_ok(),
+            Some(client) => match cid.parse::<ClientTorrentId>() {
+                Ok(cid) => client.set_seed_policy(&cid, seed).await,
+                Err(e) => Err(e),
+            }
+            .map_err(|e| tracing::warn!(source = %id, error = %e, "cannot apply the seed policy in the client"))
+            .is_ok(),
             None => false,
         };
         // A frozen, missing or refusing client gets every policy again later.
@@ -339,10 +341,11 @@ async fn remove(
         ));
     }
     if let (Some(cid), Some(client)) = (&row.client_id, app.client()) {
-        match client
-            .remove(&ClientTorrentId::new(cid.as_str()), false)
-            .await
-        {
+        let removed = match cid.parse::<ClientTorrentId>() {
+            Ok(cid) => client.remove(&cid, false).await,
+            Err(e) => Err(e),
+        };
+        match removed {
             Ok(()) | Err(ClientError::NotFound) => {}
             Err(e) => {
                 return Err(ApiError::new(

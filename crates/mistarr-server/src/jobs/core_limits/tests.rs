@@ -99,6 +99,11 @@ fn nope<T>() -> mistarr_clients::Result<T> {
     Err(ClientError::Protocol("not scripted".into()))
 }
 
+/// An id as the mock logs it: its first byte in hex.
+fn short(id: &ClientTorrentId) -> String {
+    id.to_string()[..2].to_owned()
+}
+
 #[async_trait]
 impl DownloadClient for Mock {
     async fn probe(&self) -> mistarr_clients::Result<ClientInfo> {
@@ -114,14 +119,14 @@ impl DownloadClient for Mock {
         nope()
     }
     async fn set_wanted(&self, id: &ClientTorrentId, w: &[u32]) -> mistarr_clients::Result<()> {
-        self.log(format!("wanted:{id}:{w:?}"))
+        self.log(format!("wanted:{}:{w:?}", short(id)))
     }
     async fn set_seed_policy(
         &self,
         id: &ClientTorrentId,
         _seed: SeedPolicy,
     ) -> mistarr_clients::Result<()> {
-        self.log(format!("seed:{id}"))?;
+        self.log(format!("seed:{}", short(id)))?;
         if *self.refuse_seed.lock().expect("lock") {
             return Err(ClientError::Protocol("refused".into()));
         }
@@ -131,7 +136,7 @@ impl DownloadClient for Mock {
         nope()
     }
     async fn stop(&self, id: &ClientTorrentId) -> mistarr_clients::Result<()> {
-        self.log(format!("stop:{id}"))
+        self.log(format!("stop:{}", short(id)))
     }
     async fn status(&self, _id: &ClientTorrentId) -> mistarr_clients::Result<TorrentStatus> {
         nope()
@@ -140,7 +145,7 @@ impl DownloadClient for Mock {
         nope()
     }
     async fn remove(&self, id: &ClientTorrentId, _data: bool) -> mistarr_clients::Result<()> {
-        self.log(format!("remove:{id}"))
+        self.log(format!("remove:{}", short(id)))
     }
     async fn rate_limit(&self, dir: Direction) -> mistarr_clients::Result<RateLimit> {
         self.log(format!("read:{}", name(dir)))?;
@@ -694,7 +699,7 @@ fn source_in_client(app: &AppState) -> sources::SourceId {
                     added_at: 0,
                 },
             )?;
-            sources::set_client_id(c, id, Some("t"))?;
+            sources::set_client_id(c, id, Some(&"0b".repeat(20)))?;
             Ok(id)
         })
         .expect("source")
@@ -727,7 +732,7 @@ async fn a_cancel_during_a_game_waits_for_the_client_and_runs_at_the_resume() {
 
     app.set_client_hold(None);
     replay_deferred(&app).await.expect("replay");
-    assert_eq!(wait_calls(&mock, 2).await, ["stop:t", "wanted:t:[]"]);
+    assert_eq!(wait_calls(&mock, 2).await, ["stop:0b", "wanted:0b:[]"]);
     assert!(waiting(&app).await.is_empty());
 }
 
@@ -749,7 +754,7 @@ async fn a_finished_torrent_is_released_at_the_resume() {
 
     app.set_client_hold(None);
     replay_deferred(&app).await.expect("replay");
-    assert_eq!(mock.calls(), ["remove:t"]);
+    assert_eq!(mock.calls(), ["remove:0b"]);
     let row = app
         .db
         .read(move |c| sources::get(c, source))
@@ -771,7 +776,7 @@ async fn seed_policies_changed_during_a_game_apply_at_the_resume() {
 
     app.set_client_hold(None);
     replay_deferred(&app).await.expect("replay");
-    assert_eq!(mock.calls(), ["seed:t"]);
+    assert_eq!(mock.calls(), ["seed:0b"]);
     assert!(waiting(&app).await.is_empty());
 }
 
@@ -796,7 +801,7 @@ async fn work_kept_before_a_restart_runs_when_the_gate_starts() {
         .write_blocking(move |c| deferred::add(c, Op::Deselect(source), 0))
         .expect("kept");
     let _gate = start_at_state(&mock, &app);
-    assert_eq!(wait_calls(&mock, 2).await, ["stop:t", "wanted:t:[]"]);
+    assert_eq!(wait_calls(&mock, 2).await, ["stop:0b", "wanted:0b:[]"]);
     wait_for_async(&app).await;
     drop(dir);
 }
@@ -1050,7 +1055,7 @@ async fn work_kept_for_a_client_that_died_during_the_game_waits_until_it_is_back
     replay_deferred(&app).await.expect("replay");
     assert_eq!(
         mock.calls(),
-        ["seed:t", "stop:t", "wanted:t:[]", "remove:t"]
+        ["seed:0b", "stop:0b", "wanted:0b:[]", "remove:0b"]
     );
     assert!(waiting(&app).await.is_empty());
     let row = app
@@ -1076,7 +1081,7 @@ async fn a_deselect_with_no_client_waits_for_one() {
     assert_eq!(waiting(&app).await, [Op::Deselect(source)]);
     app.set_client_at(nas(), Arc::clone(&mock) as Arc<dyn DownloadClient>);
     replay_deferred(&app).await.expect("replay");
-    assert_eq!(mock.calls(), ["stop:t", "wanted:t:[]"]);
+    assert_eq!(mock.calls(), ["stop:0b", "wanted:0b:[]"]);
 }
 
 #[test]
@@ -1154,13 +1159,8 @@ async fn the_same_daemon_under_a_new_address_gets_its_own_limit_back_before_it_i
     let port = fake.addr().port();
     let at = |host: &str| remote(&format!("http://{host}:{port}/transmission/rpc"));
     let handle = |e: &ClientEndpoint| {
-        ClientKey {
-            kind: e.kind,
-            url: e.url.clone(),
-            path_map: Vec::new(),
-        }
-        .build()
-        .expect("client")
+        mistarr_clients::connect(e.kind, &e.url, mistarr_clients::RemotePathMap::default())
+            .expect("client")
     };
     let own = json!({ "speed-limit-up": 30, "speed-limit-up-enabled": true });
     let (_dir, app) = state_with(fast);

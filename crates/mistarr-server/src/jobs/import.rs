@@ -1306,7 +1306,11 @@ pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) -> bool {
             crate::jobs::core_limits::defer(app, Op::Release(source_id)).await;
             return false;
         };
-        match client.remove(&ClientTorrentId::new(client_id), false).await {
+        let removed = match client_id.parse::<ClientTorrentId>() {
+            Ok(id) => client.remove(&id, false).await,
+            Err(e) => Err(e),
+        };
+        match removed {
             Ok(()) | Err(ClientError::NotFound) => {}
             Err(e) => {
                 tracing::warn!(source = %source.id.0, error = %e, "cannot remove the finished torrent from the client");

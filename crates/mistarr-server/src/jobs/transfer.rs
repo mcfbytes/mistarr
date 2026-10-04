@@ -154,10 +154,9 @@ async fn start_source(
     if ids.is_empty() {
         return Ok((Flow::Next, 0));
     }
-    let existing = row.client_id.as_deref().map(ClientTorrentId::new);
-    let torrent = match existing {
-        Some(id) => match client.set_wanted(&id, &wanted).await {
-            Ok(()) => id,
+    let torrent = match row.client_id.as_deref() {
+        Some(cid) => match select(client, cid, &wanted).await {
+            Ok(id) => id,
             Err(ClientError::MetadataPending) => return Ok((Flow::Next, 0)),
             Err(ClientError::NotFound) => {
                 app.db
@@ -202,6 +201,17 @@ async fn start_source(
     Ok((Flow::Next, n))
 }
 
+/// Applies `wanted` to the torrent stored as `cid`; an id that is not an
+/// infohash is one the client does not have.
+async fn select(
+    client: &dyn DownloadClient,
+    cid: &str,
+    wanted: &[u32],
+) -> mistarr_clients::Result<ClientTorrentId> {
+    let id: ClientTorrentId = cid.parse()?;
+    client.set_wanted(&id, wanted).await.map(|()| id)
+}
+
 /// Fails the downloads for an error the client will repeat, else keeps them
 /// queued and stops this pass.
 async fn unanswered(app: &AppState, ids: &[DownloadId], e: &ClientError) -> Result<(Flow, usize)> {
@@ -231,9 +241,9 @@ async fn fail(app: &AppState, ids: &[DownloadId], error: &str) -> Result<()> {
     publish_ids(app, moved).await
 }
 
-/// Adds the source's torrent paused into `staging/<infohash>/`, mapped for the
-/// client, and records its id. Otherwise the downloads were failed or must
-/// wait, and the flow says whether the pass carries on.
+/// Adds the source's torrent paused into `staging/<infohash>/`, which the
+/// client maps to its own path, and records its id. Otherwise the downloads
+/// were failed or must wait, and the flow says whether the pass carries on.
 async fn add(
     app: &AppState,
     client: &dyn DownloadClient,
@@ -241,7 +251,7 @@ async fn add(
     wanted: &[u32],
     ids: &[DownloadId],
 ) -> Result<std::result::Result<ClientTorrentId, Flow>> {
-    let Some(bytes) = metainfo(app, row).await else {
+    let Some(src) = metainfo(app, row).await else {
         let why = if row.origin_file.ends_with(".magnet") {
             LOST_MAGNET
         } else {
@@ -250,17 +260,12 @@ async fn add(
         fail(app, ids, why).await?;
         return Ok(Err(Flow::Next));
     };
-    let config = app.config();
-    let local = config.paths.staging().join(&row.infohash);
-    let dir = crate::client::to_remote(&config.client.remote_path_map, &local);
+    let local = app.config().paths.staging().join(&row.infohash);
     crate::client::prepare_download_dir(&local).await;
     let seed = sources::seed_from_text(&row.seed_policy).unwrap_or(SeedPolicy::None);
-    match client
-        .add(TorrentSource::Metainfo(bytes), &dir, wanted, seed)
-        .await
-    {
+    match client.add(src, &local, wanted, seed).await {
         Ok(id) => {
-            let (source, stored) = (row.id, id.as_str().to_owned());
+            let (source, stored) = (row.id, id.to_string());
             app.db
                 .write(move |c| sources::set_client_id(c, source, Some(&stored)))
                 .await?;
@@ -271,8 +276,8 @@ async fn add(
 }
 
 /// The source's `.torrent` from `sources/loaded/`, when it is still there
-/// and still holds this source.
-async fn metainfo(app: &AppState, row: &SourceRow) -> Option<Vec<u8>> {
+/// and still holds this source, with the file count its import recorded.
+async fn metainfo(app: &AppState, row: &SourceRow) -> Option<TorrentSource> {
     if !row.origin_file.ends_with(".torrent") {
         return None;
     }
@@ -283,8 +288,13 @@ async fn metainfo(app: &AppState, row: &SourceRow) -> Option<Vec<u8>> {
         .join(mistarr_sources::watch::LOADED_DIR)
         .join(&row.origin_file);
     let bytes = tokio::fs::read(&path).await.ok()?;
-    let hash = torrent::infohash(&bytes).ok()?;
-    (hash.to_string() == row.infohash).then_some(bytes)
+    let infohash = torrent::infohash(&bytes).ok()?;
+    let file_count = usize::try_from(row.file_count).ok()?;
+    (infohash.to_string() == row.infohash).then_some(TorrentSource::Metainfo {
+        bytes,
+        infohash,
+        file_count,
+    })
 }
 
 #[async_trait]
@@ -322,7 +332,9 @@ pub async fn deselect(app: &AppState, source: SourceId) -> Result<bool> {
         crate::jobs::core_limits::defer(app, Op::Deselect(source)).await;
         return Ok(false);
     };
-    let id = ClientTorrentId::new(cid);
+    let Ok(id) = cid.parse::<ClientTorrentId>() else {
+        return Ok(true);
+    };
     if wanted.is_empty() {
         match client.stop(&id).await {
             Ok(()) | Err(ClientError::NotFound) => {}
@@ -420,7 +432,9 @@ mod tests {
             if self.unreachable {
                 return Err(ClientError::Unreachable("down".into()));
             }
-            Ok(ClientTorrentId::new("t"))
+            Ok(ClientTorrentId::new(mistarr_core::InfoHash::from_bytes(
+                [7; 20],
+            )))
         }
         async fn set_wanted(
             &self,

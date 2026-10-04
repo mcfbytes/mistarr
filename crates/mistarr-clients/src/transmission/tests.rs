@@ -4,7 +4,7 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::fake::{FakeResponse, FakeServer};
-use crate::metainfo::tests::synthetic_metainfo;
+use crate::testutil::synthetic_metainfo;
 
 /// A synthetic 40-hex-digit infohash built from one repeated byte.
 fn hash(byte: u8) -> String {
@@ -39,7 +39,24 @@ async fn setup() -> (FakeServer, Transmission) {
 }
 
 fn id(byte: u8) -> ClientTorrentId {
-    ClientTorrentId::new(hash(byte))
+    ClientTorrentId::new(InfoHash::from_bytes([byte; 20]))
+}
+
+/// `meta`, a synthetic metainfo of `files` entries, as a source.
+fn torrent(meta: &[u8], files: usize) -> TorrentSource {
+    TorrentSource::Metainfo {
+        bytes: meta.to_vec(),
+        infohash: InfoHash::from_bytes([0; 20]),
+        file_count: files.max(1),
+    }
+}
+
+/// The source for the magnet `uri` naming the infohash `byte` repeated.
+fn magnet(uri: &str, byte: u8) -> TorrentSource {
+    TorrentSource::Magnet {
+        uri: uri.to_owned(),
+        infohash: InfoHash::from_bytes([byte; 20]),
+    }
 }
 
 #[tokio::test]
@@ -168,7 +185,7 @@ async fn add_deselects_unwanted_files_and_makes_none_unlimited() {
     fake.push(FakeResponse::success(json!({})));
     let got = client
         .add(
-            TorrentSource::Metainfo(meta.clone()),
+            torrent(&meta, 3),
             Path::new("/staging/x"),
             &[1],
             SeedPolicy::None,
@@ -203,7 +220,7 @@ async fn add_with_client_policy_and_all_wanted_sends_one_call() {
     fake.push(added(0xa2));
     client
         .add(
-            TorrentSource::Metainfo(meta.clone()),
+            torrent(&meta, 0),
             Path::new("/staging/y"),
             &[0],
             SeedPolicy::Client,
@@ -233,7 +250,7 @@ async fn add_large_torrent_uses_shorthand_and_verifies() {
     fake.push(FakeResponse::success(json!({})));
     client
         .add(
-            TorrentSource::Metainfo(meta.clone()),
+            torrent(&meta, 2001),
             Path::new("/staging/z"),
             &[2000, 5],
             SeedPolicy::Ratio { ratio: 1.5 },
@@ -271,7 +288,7 @@ async fn add_large_torrent_fails_when_selection_did_not_apply() {
     fake.push(wanted_reply(&[true; 2001]));
     let err = client
         .add(
-            TorrentSource::Metainfo(synthetic_metainfo(2001)),
+            torrent(&synthetic_metainfo(2001), 2001),
             Path::new("/staging/z"),
             &[0],
             SeedPolicy::Client,
@@ -296,7 +313,7 @@ async fn add_duplicate_reapplies_selection_and_seed() {
     fake.push(FakeResponse::success(json!({})));
     let got = client
         .add(
-            TorrentSource::Metainfo(meta.clone()),
+            torrent(&meta, 3),
             Path::new("/staging/d"),
             &[0],
             SeedPolicy::Ratio { ratio: 2.0 },
@@ -332,14 +349,14 @@ async fn add_duplicate_reapplies_selection_and_seed() {
 #[tokio::test]
 async fn add_duplicate_magnet_reads_count_and_restores_client_policy() {
     let (fake, client) = setup().await;
-    let magnet = format!("magnet:?xt=urn:btih:{}", hash(0xa8));
+    let uri = format!("magnet:?xt=urn:btih:{}", hash(0xa8));
     fake.push(duplicate(0xa8));
     fake.push(wanted_reply(&[true, true]));
     fake.push(FakeResponse::success(json!({})));
     fake.push(FakeResponse::success(json!({})));
     client
         .add(
-            TorrentSource::Magnet(magnet),
+            magnet(&uri, 0xa8),
             Path::new("/staging/m"),
             &[1],
             SeedPolicy::Client,
@@ -420,7 +437,7 @@ async fn add_rejects_out_of_range_index_before_calling() {
     let (fake, client) = setup().await;
     let err = client
         .add(
-            TorrentSource::Metainfo(synthetic_metainfo(2)),
+            torrent(&synthetic_metainfo(2), 2),
             Path::new("/staging/d"),
             &[2],
             SeedPolicy::None,
@@ -443,12 +460,12 @@ async fn add_rejects_out_of_range_index_before_calling() {
 #[tokio::test]
 async fn add_magnet_without_metadata_skips_selection() {
     let (fake, client) = setup().await;
-    let magnet = format!("magnet:?xt=urn:btih:{}", hash(0xa6));
+    let uri = format!("magnet:?xt=urn:btih:{}", hash(0xa6));
     fake.push(added(0xa6));
     fake.push(wanted_reply(&[]));
     client
         .add(
-            TorrentSource::Magnet(magnet.clone()),
+            magnet(&uri, 0xa6),
             Path::new("/staging/m"),
             &[0],
             SeedPolicy::Client,
@@ -461,7 +478,7 @@ async fn add_magnet_without_metadata_skips_selection() {
         vec![
             rpc(
                 "torrent-add",
-                json!({ "download-dir": "/staging/m", "paused": true, "filename": magnet })
+                json!({ "download-dir": "/staging/m", "paused": true, "filename": uri })
             ),
             rpc("torrent-get", json!({ "ids": [h], "fields": ["wanted"] })),
         ]
@@ -471,13 +488,13 @@ async fn add_magnet_without_metadata_skips_selection() {
 #[tokio::test]
 async fn add_magnet_with_metadata_applies_selection() {
     let (fake, client) = setup().await;
-    let magnet = format!("magnet:?xt=urn:btih:{}", hash(0xa7));
+    let uri = format!("magnet:?xt=urn:btih:{}", hash(0xa7));
     fake.push(added(0xa7));
     fake.push(wanted_reply(&[true, true, true]));
     fake.push(FakeResponse::success(json!({})));
     client
         .add(
-            TorrentSource::Magnet(magnet),
+            magnet(&uri, 0xa7),
             Path::new("/staging/m"),
             &[2],
             SeedPolicy::Client,
@@ -684,7 +701,7 @@ async fn status_unknown_torrent_is_not_found() {
 
 fn convert(torrent: Value) -> Result<TorrentStatus> {
     serde_json::from_value::<RawTorrent>(torrent)
-        .map_err(protocol)
+        .map_err(ClientError::protocol)
         .and_then(RawTorrent::into_status)
 }
 
@@ -773,15 +790,6 @@ async fn concurrent_calls_are_serialised() {
     let reqs = fake.requests();
     assert_eq!(reqs.len(), 3);
     assert_eq!(reqs[2].header("x-transmission-session-id"), Some("sid-1"));
-}
-
-#[test]
-fn complement_and_index_checks() {
-    let wanted: BTreeSet<u32> = [1, 3].into_iter().collect();
-    assert_eq!(complement(&wanted, 5), vec![0, 2, 4]);
-    assert!(check_indices(&wanted, 4).is_ok());
-    assert!(check_indices(&wanted, 3).is_err());
-    assert!(check_indices(&BTreeSet::new(), 0).is_ok());
 }
 
 #[test]
@@ -979,5 +987,46 @@ async fn the_turtle_upload_rate_is_read_and_set_alone() {
                 json!({ "fields": ["alt-speed-up", "alt-speed-enabled"] })
             ),
         ]
+    );
+}
+
+#[tokio::test]
+async fn add_maps_the_download_dir_to_the_daemon_path() {
+    let fake = FakeServer::start().await.expect("bind fake");
+    let map = RemotePathMap::new(vec![crate::PathMapping::new("/downloads", "/staging")]);
+    let client = Transmission::new(&fake.url())
+        .expect("valid url")
+        .with_path_map(map);
+    fake.push(added(0xc1));
+    let meta = synthetic_metainfo(0);
+    client
+        .add(
+            torrent(&meta, 0),
+            Path::new("/staging/c1"),
+            &[0],
+            SeedPolicy::Client,
+        )
+        .await
+        .expect("add");
+    assert_eq!(
+        fake.bodies()[0]["arguments"]["download-dir"],
+        "/downloads/c1"
+    );
+}
+
+#[tokio::test]
+async fn an_added_torrent_without_a_valid_hash_is_a_protocol_error() {
+    let (fake, client) = setup().await;
+    fake.push(FakeResponse::success(json!({
+        "torrent-added": { "id": 1, "name": "test", "hashString": "short" }
+    })));
+    let uri = format!("magnet:?xt=urn:btih:{}", hash(0xc2));
+    let err = client
+        .add(magnet(&uri, 0xc2), Path::new("/s"), &[], SeedPolicy::Client)
+        .await
+        .expect_err("bad hash");
+    assert!(
+        matches!(err, ClientError::Protocol(ref m) if m.contains("hashString")),
+        "{err:?}"
     );
 }

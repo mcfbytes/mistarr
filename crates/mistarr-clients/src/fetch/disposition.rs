@@ -1,6 +1,6 @@
 //! The file name of a `Content-Disposition` header (RFC 6266, with RFC 8187 for `filename*`).
 
-use super::percent_decode_bytes;
+use mistarr_core::percent_decode;
 
 /// The parameters of a header value after its disposition type, keys lowercased, quoted
 /// strings unquoted with their `\` escapes resolved; `;` inside quotes is kept.
@@ -63,7 +63,7 @@ fn params(value: &str) -> Vec<(String, String)> {
 fn extended(value: &str) -> Option<String> {
     let (charset, rest) = value.split_once('\'')?;
     let (_language, encoded) = rest.split_once('\'')?;
-    let bytes = percent_decode_bytes(encoded);
+    let bytes = percent_decode(encoded);
     match charset.to_ascii_lowercase().as_str() {
         "utf-8" => String::from_utf8(bytes).ok(),
         "iso-8859-1" => Some(bytes.into_iter().map(char::from).collect()),

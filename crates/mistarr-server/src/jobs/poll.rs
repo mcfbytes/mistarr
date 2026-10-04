@@ -106,7 +106,8 @@ fn push_relative(out: &mut PathBuf, rel: &str) {
 ///
 /// ```
 /// use std::path::Path;
-/// use mistarr_clients::{FileProgress, InfoHash, TorrentState, TorrentStatus};
+/// use mistarr_clients::{FileProgress, TorrentState, TorrentStatus};
+/// use mistarr_core::InfoHash;
 /// use mistarr_server::db::downloads::{DownloadId, DownloadState, PollRow};
 /// use mistarr_server::db::sources::SourceId;
 /// let row = PollRow { id: DownloadId(1), state: DownloadState::Transferring, progress: 0.0,
@@ -249,7 +250,10 @@ impl Poller {
         let Some(cid) = first.client_id.as_deref() else {
             return Ok(Some(false));
         };
-        let (source, id) = (first.source_id, ClientTorrentId::new(cid));
+        let source = first.source_id;
+        let Ok(id) = cid.parse::<ClientTorrentId>() else {
+            return lost(app, source, group).await;
+        };
         let policy = sources::seed_from_text(&first.seed_policy).unwrap_or(SeedPolicy::None);
         if !self.seeded.contains(&source) {
             match client.set_seed_policy(&id, policy.clone()).await {
@@ -430,7 +434,8 @@ pub fn should_stop(status: &TorrentStatus, open: usize, policy: &SeedPolicy) -> 
 mod tests {
     use super::*;
     use crate::app::testutil::state;
-    use mistarr_clients::{FileProgress, InfoHash};
+    use mistarr_clients::FileProgress;
+    use mistarr_core::InfoHash;
 
     fn row(file_index: u32, single: bool) -> PollRow {
         PollRow {
