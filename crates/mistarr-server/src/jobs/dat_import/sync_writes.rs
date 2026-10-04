@@ -406,7 +406,7 @@ fn measure_ram(db: &Db, dir: &std::path::Path, xml: &str) -> ram::Report {
     let plan = ram::Plan {
         dir: ram_dir.path().to_path_buf(),
         floor: 0,
-        job: crate::db::ids::JobId(1),
+        job: Some(crate::db::ids::JobId(1)),
         input: 0,
     };
     let req = request();
@@ -526,7 +526,7 @@ fn migration_writes_on_the_bench_catalogue() {
     let plan = ram::Plan {
         dir: ram_dir.path().to_path_buf(),
         floor: 0,
-        job: crate::db::ids::JobId(0),
+        job: None,
         input: 0,
     };
     let start = std::time::Instant::now();

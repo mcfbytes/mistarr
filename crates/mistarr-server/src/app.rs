@@ -594,7 +594,7 @@ fn migrate_in_ram(config: &Config, progress: Option<&crate::migrating::Migrating
     let plan = db::ram::Plan {
         dir: config.memory.import_dir.clone(),
         floor: config.memory.import_floor_mib.saturating_mul(1024 * 1024),
-        job: crate::db::ids::JobId(0),
+        job: None,
         input: 0,
     };
     match db::ram::migrate_in_ram(

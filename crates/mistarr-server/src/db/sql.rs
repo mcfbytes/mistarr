@@ -293,8 +293,8 @@ impl Page {
     /// ```
     #[must_use]
     pub fn slice<T>(self, all: Vec<T>) -> Paged<T> {
-        let total = to_u64(to_i64(all.len()));
-        let items = all
+        let Paged { items, total } = Paged::all(all);
+        let items = items
             .into_iter()
             .skip(usize::try_from(self.offset).unwrap_or(usize::MAX))
             .take(usize::try_from(self.limit).unwrap_or(usize::MAX))
@@ -310,6 +310,20 @@ pub struct Paged<T> {
     pub items: Vec<T>,
     /// Rows across all pages.
     pub total: u64,
+}
+
+impl<T> Paged<T> {
+    /// Every row of a list on one page, with their number as the total.
+    ///
+    /// ```
+    /// let p = mistarr_server::db::sql::Paged::all(vec![1, 2]);
+    /// assert_eq!((p.items, p.total), (vec![1, 2], 2));
+    /// ```
+    #[must_use]
+    pub fn all(items: Vec<T>) -> Self {
+        let total = to_u64(to_i64(items.len()));
+        Self { items, total }
+    }
 }
 
 /// Runs `f` inside one read transaction, so every statement it runs sees the same

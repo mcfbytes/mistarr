@@ -11,14 +11,12 @@ use axum::{Json, Router};
 use serde::Deserialize;
 
 use super::{ApiError, Paging};
-use crate::db::sql::Paged;
-
 use crate::app::AppState;
 use crate::db::downloads::{
     self as rows, CancelOutcome, Cancelled, DownloadRow, DownloadState, RetryOutcome,
 };
-use crate::db::ids::DownloadId;
-use crate::db::ids::SourceId;
+use crate::db::ids::{DownloadId, SourceId};
+use crate::db::sql::Paged;
 use crate::jobs::transfer::{self, Deselect};
 use crate::jobs::Scheduler;
 

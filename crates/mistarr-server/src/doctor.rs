@@ -163,7 +163,6 @@ pub fn groups_line(path: &Path) -> String {
         .map_err(crate::Error::from)
         .and_then(|mut c| {
             c.busy_timeout(crate::db::BUSY_TIMEOUT)?;
-
             // The long reads hold only a read snapshot; the index check takes the write
             // lock on its own, briefly, and is rolled back.
             let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;

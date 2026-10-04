@@ -494,7 +494,7 @@ impl DatImport {
         let plan = ram::Plan {
             dir: config.memory.import_dir.clone(),
             floor,
-            job: ctx.id,
+            job: Some(ctx.id),
             input,
         };
         let meter = Meter::new(ctx.reporter(), source_file, members.len(), None);

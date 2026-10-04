@@ -48,8 +48,8 @@ pub struct Plan {
     pub dir: PathBuf,
     /// Bytes of `MemAvailable` kept free on top of what the copy needs.
     pub floor: u64,
-    /// Names the working directory; the job's id, 0 for a migration.
-    pub job: JobId,
+    /// Names the working directory: the job's id, `None` for a migration.
+    pub job: Option<JobId>,
     /// Uncompressed bytes of the DATs the work loads, 0 for a migration.
     pub input: u64,
 }
@@ -960,8 +960,9 @@ fn work_prefix(db: &Path) -> String {
 struct WorkDir(PathBuf);
 
 impl WorkDir {
-    fn create(dir: &Path, db: &Path, job: JobId) -> io::Result<Self> {
-        let path = dir.join(format!("{}{job}", work_prefix(db)));
+    fn create(dir: &Path, db: &Path, job: Option<JobId>) -> io::Result<Self> {
+        let name = job.map_or_else(|| "migration".to_owned(), |j| j.to_string());
+        let path = dir.join(format!("{}{name}", work_prefix(db)));
         if path.exists() {
             fs::remove_dir_all(&path)?;
         }

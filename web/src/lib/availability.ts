@@ -18,5 +18,6 @@ export function confidenceLabel(confidence: MatchConfidence): string {
 /** One line per file that may hold a rom, e.g. "nova.nes in Example Pack (name guess)". */
 export function availabilityLine(found: TitleAvailability): string {
   const file = found.path.split('/').pop() || found.path;
-  return `${file} in ${found.source_name} (${confidenceLabel(found.confidence)})`;
+  const line = `${file} in ${found.source_name}`;
+  return found.confidence === null ? line : `${line} (${confidenceLabel(found.confidence)})`;
 }

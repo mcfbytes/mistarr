@@ -3,7 +3,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use super::candidates;
+use super::candidates::{self, MatchConfidence};
 use super::downloads::{self, CancelOutcome, Cancelled, DownloadState, NewDownload};
 use super::ids::{DownloadId, FileId, RomId, SourceId, TitleId};
 use crate::error::Result;
@@ -231,8 +231,11 @@ pub fn want_again(
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn guessed(conn: &Connection, source: SourceId, index: u32, rom: RomId) -> Result<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM torrent_candidates WHERE source_id = ?1
-           AND file_index = ?2 AND rom_id = ?3 AND confidence IN ('fuzzy', 'size'))",
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM torrent_candidates WHERE source_id = ?1
+               AND file_index = ?2 AND rom_id = ?3 AND confidence IN {})",
+            MatchConfidence::GUESSED_SQL
+        ),
         params![source, index, rom],
         |r| r.get(0),
     )?)
@@ -282,9 +285,7 @@ pub fn insert_fixture(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::candidates::MatchConfidence;
     use crate::db::imports::ImportAction;
-
     use crate::db::sources::{self, NewSource, SourceState};
 
     #[test]

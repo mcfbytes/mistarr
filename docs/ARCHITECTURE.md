@@ -908,7 +908,8 @@ of the database in RAM and write it back whole (`db::ram`):
    a few words, as `reason`, and the log at info gives the numbers. A floor
    of 0 is allowed and warned about at startup.
 3. SQLite's backup copies the file through the held writer into
-   `<import_dir>/import-<key>-<job>/mistarr.db`, 1 MiB a step. The key hashes
+   `<import_dir>/import-<key>-<job>/mistarr.db`, 1 MiB a step, where `<job>`
+   is the job's id, or `migration` for a migration. The key hashes
    the database's path, so servers of two data directories never touch each
    other's copies. SQLite reads the source itself: a descriptor of the card
    file opened and closed beside its connections would drop their POSIX locks.

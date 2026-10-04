@@ -233,7 +233,7 @@ fn plan(ram: &Path) -> Plan {
     Plan {
         dir: ram.to_path_buf(),
         floor: 0,
-        job: crate::db::ids::JobId(7),
+        job: Some(crate::db::ids::JobId(7)),
         input: 0,
     }
 }

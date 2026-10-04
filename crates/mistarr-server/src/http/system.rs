@@ -307,12 +307,11 @@ async fn recent_jobs(State(app): State<Arc<AppState>>) -> Result<Json<Paged<JobI
         .db
         .read(|c| jobs::recent_finished(c, RECENT_JOBS))
         .await?;
-    let items: Vec<JobItem> = rows
+    let items = rows
         .into_iter()
         .map(|row| JobItem { row, reason: None })
         .collect();
-    let total = u64::try_from(items.len()).unwrap_or(0);
-    Ok(Json(Paged { items, total }))
+    Ok(Json(Paged::all(items)))
 }
 
 async fn get_settings(State(app): State<Arc<AppState>>) -> Json<RuntimeSettings> {

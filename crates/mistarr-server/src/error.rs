@@ -165,7 +165,6 @@ mod tests {
         let other = rusqlite::Error::InvalidQuery;
         assert!(matches!(Error::from(other), Error::Db(_)));
         let reopen = Error::Reopen(Box::new(Error::NoRoom("full".into())));
-
         assert_eq!(
             reopen.to_string(),
             "cannot reopen the database; restart mistarr: full"

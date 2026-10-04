@@ -1624,7 +1624,7 @@ fn load_all(c: &TestDb, dats: &[String], via_ram: bool) -> Vec<Outcome> {
             let plan = ram::Plan {
                 dir: ram_dir.path().to_path_buf(),
                 floor: 0,
-                job: crate::db::ids::JobId(1),
+                job: Some(crate::db::ids::JobId(1)),
                 input: 0,
             };
             let ran =
@@ -1830,7 +1830,7 @@ fn a_copy_that_fills_partway_through_the_load_falls_back_with_the_card_untouched
     let plan = ram::Plan {
         dir: ram_dir.path().to_path_buf(),
         floor: 0,
-        job: crate::db::ids::JobId(1),
+        job: Some(crate::db::ids::JobId(1)),
         input: 0,
     };
     let req = request(false, None);
@@ -1872,7 +1872,7 @@ fn memory_falling_short_during_a_load_in_ram_falls_back_with_the_card_untouched(
     let plan = ram::Plan {
         dir: ram_dir.path().to_path_buf(),
         floor: 0,
-        job: crate::db::ids::JobId(1),
+        job: Some(crate::db::ids::JobId(1)),
         input: 0,
     };
     // The copy was allowed; from the first member on, no memory is ever enough.

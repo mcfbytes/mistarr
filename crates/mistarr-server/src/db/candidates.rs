@@ -33,6 +33,16 @@ text_enum! {
 }
 
 impl MatchConfidence {
+    /// A hash and the name tiers: confidences a download may act on without a guess.
+    pub const FIRM: [Self; 3] = [Self::Hash, Self::Name, Self::Base];
+    /// [`MatchConfidence::FIRM`] as an SQL list.
+    pub const FIRM_SQL: &'static str = "('hash', 'name', 'base')";
+
+    /// The fuzzy and size-only tiers: confidences that are guesses.
+    pub const GUESSED: [Self; 2] = [Self::Fuzzy, Self::Size];
+    /// [`MatchConfidence::GUESSED`] as an SQL list.
+    pub const GUESSED_SQL: &'static str = "('fuzzy', 'size')";
+
     /// The stored confidence of a binding match; `None` for an unmatched file.
     ///
     /// ```
@@ -62,12 +72,12 @@ fn rom_id(r: RomRef) -> RomId {
 pub(crate) const RANK: &str = "CASE {c} WHEN 'hash' THEN 0 WHEN 'name' THEN 1 WHEN 'base' THEN 2
     WHEN 'fuzzy' THEN 3 WHEN 'size' THEN 4 ELSE 5 END";
 
-/// 0 for a confidence of the name tiers or a hash, 1 for the fuzzy and size-only tiers.
-pub(crate) const TIER: &str = "CASE WHEN {c} IN ('hash', 'name', 'base') THEN 0 ELSE 1 END";
-
-/// [`TIER`] over the column `column`.
+/// 0 when the column `column` holds a [`MatchConfidence::FIRM`] confidence, 1 otherwise.
 pub(crate) fn tier(column: &str) -> String {
-    TIER.replace("{c}", column)
+    format!(
+        "CASE WHEN {column} IN {} THEN 0 ELSE 1 END",
+        MatchConfidence::FIRM_SQL
+    )
 }
 
 /// [`RANK`] over the column `column`.
@@ -794,6 +804,25 @@ mod tests {
         assert!(MatchConfidence::Fuzzy < MatchConfidence::Size);
         assert_eq!(MatchConfidence::parse("hash"), Some(MatchConfidence::Hash));
         assert_eq!(MatchConfidence::parse("other"), None);
+    }
+
+    #[test]
+    fn confidence_sets_match_their_sql() {
+        let text = |set: &[MatchConfidence]| {
+            sql::text_list(&set.iter().map(|c| c.as_str()).collect::<Vec<_>>())
+        };
+        assert_eq!(MatchConfidence::FIRM_SQL, text(&MatchConfidence::FIRM));
+        assert_eq!(
+            MatchConfidence::GUESSED_SQL,
+            text(&MatchConfidence::GUESSED)
+        );
+        for c in MatchConfidence::ALL {
+            assert_ne!(
+                MatchConfidence::FIRM.contains(c),
+                MatchConfidence::GUESSED.contains(c),
+                "{c}"
+            );
+        }
     }
 
     #[test]

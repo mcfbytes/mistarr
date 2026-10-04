@@ -913,7 +913,6 @@ mod tests {
         let row = row.expect("row");
         assert_eq!(row.state, SourceState::Resolving);
         assert_eq!(row.reason, Some(SourceReason::NoClient));
-
         let ev = events.recv().await.expect("event");
         assert_eq!(ev.kind, EventKind::SourceChanged);
         assert!(ev.data.contains(r#""state":"resolving""#));
