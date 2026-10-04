@@ -690,8 +690,10 @@ another kind, between images ("CHD identification").
 
 At startup the scheduler takes over the queued, running and paused rows the
 previous process left. A row whose kind or lane this version does not list, or
-whose JSON does not parse, fails with "not readable by this version", so it
-never stops startup or a job listing. The first row of each kind and payload goes back on
+whose JSON does not parse, fails with "not readable by this version". Its lane
+becomes `light` when unlisted and its payload `{}` when unparseable, so it never
+stops startup, and a failed row of a listed kind reads back in
+`/system/jobs/recent`. The first row of each kind and payload goes back on
 its lane under its own id when the kind can be re-run (`scan`,
 `arcade_catalog`, `dat_import` of a dropped file, `recompute_1g1r`,
 `source_import`, `import`, `chd_tracks`); other kinds fail with "interrupted by a

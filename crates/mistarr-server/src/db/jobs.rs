@@ -374,8 +374,10 @@ pub fn open_rows(conn: &Connection) -> Result<Vec<JobRow>> {
 }
 
 /// Fails, with `error`, every queued, running or paused job whose row this binary
-/// cannot read: a kind or lane it does not list, or JSON that does not parse. Returns
-/// how many, so [`open_rows`] can read the rest.
+/// cannot read: a kind or lane it does not list, or JSON that does not parse. A lane
+/// it does not list becomes `light` and a payload that does not parse becomes `{}`, so
+/// a failed row of a listed kind reads back. Returns how many, so [`open_rows`] can
+/// read the rest.
 ///
 /// # Errors
 ///
@@ -392,15 +394,27 @@ pub fn fail_unreadable(conn: &Connection, error: &str, now: i64) -> Result<usize
             "SELECT {COLUMNS} FROM jobs WHERE state IN {} ORDER BY id",
             JobState::ACTIVE_SQL
         ))?
-        .query_map([], |r| Ok((r.get::<_, JobId>(0)?, from_row(r).is_err())))?
+        .query_map([], |r| {
+            let lane = r.get::<_, Lane>(7).is_err().then_some(Lane::Light);
+            let payload = sql::get_json::<Value>(r, 2, "jobs.payload")
+                .is_err()
+                .then_some("{}");
+            Ok((r.get::<_, JobId>(0)?, from_row(r).is_err(), lane, payload))
+        })?
         .filter_map(|row| match row {
-            Ok((id, true)) => Some(Ok(id)),
-            Ok((_, false)) => None,
+            Ok((id, true, lane, payload)) => Some(Ok((id, lane, payload))),
+            Ok((_, false, ..)) => None,
             Err(e) => Some(Err(e)),
         })
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    for &id in &bad {
-        fail(conn, id, error, now)?;
+    let progress = serde_json::json!({ "error": error }).to_string();
+    for (id, lane, payload) in &bad {
+        conn.execute(
+            "UPDATE jobs SET state = ?2, progress = ?3, updated_at = ?4,
+                 lane = COALESCE(?5, lane), payload = COALESCE(?6, payload)
+             WHERE id = ?1",
+            params![id, JobState::Failed, progress, now, lane, payload],
+        )?;
     }
     Ok(bad.len())
 }
@@ -807,5 +821,33 @@ mod tests {
         assert_eq!(failed.state, JobState::Failed);
         assert_eq!(failed.progress, Some(json!({ "error": "unreadable" })));
         assert_eq!(fail_unreadable(&c, "unreadable", 3).expect("again"), 0);
+    }
+
+    #[test]
+    fn failed_unreadable_rows_of_a_listed_kind_read_back() {
+        let c = conn();
+        let done = insert(&c, JobKind::Scan, &json!({}), Lane::Heavy, 1).expect("insert");
+        let lane = insert(&c, JobKind::Import, &json!({"a": 1}), Lane::Heavy, 1).expect("x");
+        let payload = insert(&c, JobKind::DatImport, &json!({"a": 2}), Lane::Heavy, 1).expect("x");
+        c.execute_batch(&format!(
+            "UPDATE jobs SET state = 'done' WHERE id = {done};
+             UPDATE jobs SET lane = 'nope' WHERE id = {lane};
+             UPDATE jobs SET payload = '{{' WHERE id = {payload};"
+        ))
+        .expect("corrupt");
+        assert!(get(&c, lane).is_err() && get(&c, payload).is_err());
+        assert_eq!(fail_unreadable(&c, "unreadable", 2).expect("fail"), 2);
+        let recent = recent_finished(&c, 10).expect("recent");
+        let ids = recent.iter().map(|r| r.id).collect::<Vec<_>>();
+        assert_eq!(ids, [payload, lane, done]);
+        assert_eq!(
+            (recent[0].lane, &recent[0].payload),
+            (Lane::Heavy, &json!({}))
+        );
+        assert_eq!(
+            (recent[1].lane, &recent[1].payload),
+            (Lane::Light, &json!({"a": 1}))
+        );
+        assert_eq!(recent[0].progress, Some(json!({ "error": "unreadable" })));
     }
 }
