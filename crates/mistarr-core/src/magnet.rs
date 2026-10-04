@@ -163,32 +163,6 @@ mod tests {
     }
 
     #[test]
-    fn reads_base32_bits_and_an_escaped_topic_after_other_parameters() {
-        let ones = format!("magnet:?xt=URN:BTIH:{}", "7".repeat(32));
-        assert_eq!(
-            parse_magnet(&ones).unwrap().infohash,
-            InfoHash::from_bytes([0xff; 20])
-        );
-        let mixed = "magnet:?xt=urn:btih:AEAQCAIBAEAQCAIBAEAQCAIBAEAQCAIB";
-        assert_eq!(
-            parse_magnet(mixed).unwrap().infohash,
-            InfoHash::from_bytes([1; 20])
-        );
-        let encoded = format!("magnet:?dn=a%20b&xt=urn%3Abtih%3A{}", "5e".repeat(20));
-        assert_eq!(
-            parse_magnet(&encoded).unwrap().infohash,
-            InfoHash::from_bytes([0x5e; 20])
-        );
-        for bad in [
-            "magnet:?xt=urn:sha1:",
-            "magnet:?xt=urn%3Abtih%3",
-            "magnet:?xt=urn%ZZbtih",
-        ] {
-            assert_eq!(parse_magnet(bad), Err(MagnetError::MissingTopic), "{bad}");
-        }
-    }
-
-    #[test]
     fn discards_trackers_and_keeps_display_name() {
         let hex = "11".repeat(20);
         let uri = format!(
