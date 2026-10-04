@@ -689,7 +689,9 @@ not started. `chd_tracks` hands the heavy lane only to a queued job of
 another kind, between images ("CHD identification").
 
 At startup the scheduler takes over the queued, running and paused rows the
-previous process left. The first row of each kind and payload goes back on
+previous process left. A row whose kind or lane this version does not list, or
+whose JSON does not parse, fails with "not readable by this version", so it
+never stops startup or a job listing. The first row of each kind and payload goes back on
 its lane under its own id when the kind can be re-run (`scan`,
 `arcade_catalog`, `dat_import` of a dropped file, `recompute_1g1r`,
 `source_import`, `import`, `chd_tracks`); other kinds fail with "interrupted by a

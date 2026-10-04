@@ -51,6 +51,9 @@ pub const SINGLETON_KINDS: [JobKind; 4] = [
 /// Error recorded on a job a previous process left unfinished and that is not re-run.
 pub const INTERRUPTED: &str = "interrupted by a restart";
 
+/// Error recorded on an unfinished job whose row this version cannot read.
+pub const UNREADABLE: &str = "not readable by this version";
+
 text_enum! {
     /// Which serial queue a job runs on: `jobs.lane`.
     pub enum Lane {
@@ -462,21 +465,32 @@ pub struct Reconciled {
     pub failed: usize,
     /// Deleted as repeats of an earlier row with the same kind and payload.
     pub dropped: usize,
+    /// Failed as [`UNREADABLE`]: a kind or lane this binary does not list, or bad JSON.
+    pub unreadable: usize,
 }
 
 /// Takes over the queued, running and paused rows a previous process left:
-/// the first row of each kind and payload goes back on its lane under its
-/// own id when [`revive`] knows the kind, else fails as [`INTERRUPTED`];
-/// later repeats are deleted. Run it before anything else is enqueued.
+/// rows this binary cannot read fail as [`UNREADABLE`]; the first row of each
+/// kind and payload goes back on its lane under its own id when [`revive`]
+/// knows the kind, else fails as [`INTERRUPTED`]; later repeats are deleted.
+/// Run it before anything else is enqueued.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] when the rows cannot be read or written,
 /// [`crate::Error::Job`] when a lane has stopped.
 pub async fn reconcile(app: &Arc<AppState>) -> Result<Reconciled> {
+    let now = crate::unix_now();
+    let unreadable = app
+        .db
+        .write(move |c| rows::fail_unreadable(c, UNREADABLE, now))
+        .await?;
     let open = app.db.read(rows::open_rows).await?;
     let mut seen = std::collections::HashSet::new();
-    let mut done = Reconciled::default();
+    let mut done = Reconciled {
+        unreadable,
+        ..Reconciled::default()
+    };
     for row in open {
         let id = row.id;
         if !seen.insert((row.kind, row.payload.to_string())) {
@@ -956,10 +970,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_requeues_known_kinds_and_drops_repeats() {
+    async fn reconcile_requeues_known_kinds_drops_repeats_and_fails_unknown_ones() {
         let (dir, app) = state();
         let dat = dir.path().join("gone.dat");
-        let (scan, repeat, poll) = app
+        let (scan, repeat, poll, nope) = app
             .db
             .write(move |c| {
                 let path = json!({ "path": dat });
@@ -967,7 +981,9 @@ mod tests {
                 rows::set_state(c, scan, JobState::Paused, 1)?;
                 let repeat = rows::insert(c, JobKind::DatImport, &path, Lane::Heavy, 1)?;
                 let poll = rows::insert(c, JobKind::DetectClient, &json!({}), Lane::Light, 1)?;
-                Ok((scan, repeat, poll))
+                let nope = rows::insert(c, JobKind::Scan, &json!({"n": 1}), Lane::Heavy, 1)?;
+                c.execute("UPDATE jobs SET kind = 'nope' WHERE id = ?1", [nope])?;
+                Ok((scan, repeat, poll, nope))
             })
             .await
             .expect("seed");
@@ -977,9 +993,23 @@ mod tests {
             Reconciled {
                 requeued: 1,
                 failed: 1,
-                dropped: 1
+                dropped: 1,
+                unreadable: 1,
             }
         );
+        let (state, progress): (String, String) = app
+            .db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT state, progress FROM jobs WHERE id = ?1",
+                    [nope],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .await
+            .expect("unknown row");
+        assert_eq!(state, "failed");
+        assert_eq!(progress, json!({ "error": UNREADABLE }).to_string());
         let get = |id| {
             let app = Arc::clone(&app);
             async move { app.db.read(move |c| rows::get(c, id)).await.expect("get") }

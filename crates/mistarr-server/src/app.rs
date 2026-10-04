@@ -475,6 +475,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
             requeued = reconciled.requeued,
             failed = reconciled.failed,
             dropped = reconciled.dropped,
+            unreadable = reconciled.unreadable,
             "reconciled unfinished jobs"
         );
     }

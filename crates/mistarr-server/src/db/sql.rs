@@ -175,7 +175,8 @@ pub struct StoredJson {
     pub source: serde_json::Error,
 }
 
-/// Reads the JSON text of column `key` as `T`, for a `FromSql` impl.
+/// Reads the JSON text of column `key` as `T`, for a `FromSql` impl; SQL `NULL` reads
+/// as JSON `null`, so an `Option<T>` of a nullable column is `None`.
 ///
 /// # Errors
 ///
@@ -188,13 +189,48 @@ pub struct StoredJson {
 /// let v: Vec<u8> = json_from_sql("t.c", ValueRef::Text(b"[1]")).unwrap();
 /// assert_eq!(v, [1]);
 /// assert!(json_from_sql::<Vec<u8>>("t.c", ValueRef::Text(b"{")).is_err());
+/// assert_eq!(json_from_sql::<Option<u8>>("t.c", ValueRef::Null).unwrap(), None);
 /// ```
 pub fn json_from_sql<T: DeserializeOwned>(
     key: &'static str,
     value: rusqlite::types::ValueRef<'_>,
 ) -> rusqlite::types::FromSqlResult<T> {
-    serde_json::from_str(value.as_str()?).map_err(|source| {
+    let text = match value {
+        rusqlite::types::ValueRef::Null => "null",
+        other => other.as_str()?,
+    };
+    serde_json::from_str(text).map_err(|source| {
         rusqlite::types::FromSqlError::Other(Box::new(StoredJson { key, source }))
+    })
+}
+
+/// Column `i` of `r` read with [`json_from_sql`] as the JSON of column `key`.
+///
+/// # Errors
+///
+/// [`rusqlite::Error`] carrying [`StoredJson`] when the value is not the JSON `T`
+/// expects, which [`Error`] turns into [`Error::Stored`].
+///
+/// ```
+/// use mistarr_server::db::sql::get_json;
+/// let conn = rusqlite::Connection::open_in_memory().unwrap();
+/// let v = conn.query_row("SELECT '[1]', NULL", [], |r| {
+///     Ok((get_json::<Vec<u8>>(r, 0, "t.a")?, get_json::<Option<u8>>(r, 1, "t.b")?))
+/// });
+/// assert_eq!(v.unwrap(), (vec![1], None));
+/// ```
+pub fn get_json<T: DeserializeOwned>(
+    r: &Row<'_>,
+    i: usize,
+    key: &'static str,
+) -> rusqlite::Result<T> {
+    let value = r.get_ref(i)?;
+    json_from_sql(key, value).map_err(|e| {
+        let inner = match e {
+            rusqlite::types::FromSqlError::Other(inner) => inner,
+            e => Box::new(e),
+        };
+        rusqlite::Error::FromSqlConversionFailure(i, value.data_type(), inner)
     })
 }
 
@@ -354,6 +390,12 @@ mod tests {
         assert_eq!(json_list::<&str>(&[]).expect("list"), "[]");
         let err = from_json::<u8>("settings.k", "x").expect_err("invalid");
         assert!(matches!(err, Error::Stored { ref key, .. } if key == "settings.k"));
+        let c = Connection::open_in_memory().expect("open");
+        let err = c
+            .query_row("SELECT '{'", [], |r| get_json::<u8>(r, 0, "t.c"))
+            .map_err(Error::from)
+            .expect_err("invalid");
+        assert!(matches!(err, Error::Stored { ref key, .. } if key == "t.c"));
         assert_eq!(to_i64(-2_i32), -2);
         let p = Page {
             limit: 10,

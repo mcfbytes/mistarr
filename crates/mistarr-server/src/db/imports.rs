@@ -99,30 +99,18 @@ pub fn list(conn: &Connection, page: Page) -> Result<Paged<LogRow>> {
             "SELECT id, at, download_id, file_id, action, detail FROM import_log
              ORDER BY id DESC LIMIT ?1 OFFSET ?2",
         )?;
-        let rows = stmt
+        let items = stmt
             .query_map([page.limit, page.offset], |r| {
-                Ok((
-                    LogRow {
-                        id: r.get(0)?,
-                        at: r.get(1)?,
-                        download_id: r.get(2)?,
-                        file_id: r.get(3)?,
-                        action: r.get(4)?,
-                        detail: Value::Null,
-                    },
-                    r.get::<_, String>(5)?,
-                ))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let items = rows
-            .into_iter()
-            .map(|(row, detail)| {
                 Ok(LogRow {
-                    detail: sql::from_json("import_log.detail", &detail)?,
-                    ..row
+                    id: r.get(0)?,
+                    at: r.get(1)?,
+                    download_id: r.get(2)?,
+                    file_id: r.get(3)?,
+                    action: r.get(4)?,
+                    detail: sql::get_json(r, 5, "import_log.detail")?,
                 })
-            })
-            .collect::<Result<_>>()?;
+            })?
+            .collect::<rusqlite::Result<_>>()?;
         Ok(Paged { items, total })
     })
 }

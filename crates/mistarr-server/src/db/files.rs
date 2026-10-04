@@ -1163,19 +1163,16 @@ pub fn state_counts(conn: &Connection, platform_id: &PlatformId) -> Result<State
 ///
 /// # Errors
 ///
-/// [`crate::Error::Db`] on SQLite failure or unparseable JSON.
+/// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Stored`] on unparseable JSON.
 pub fn scan_progress(conn: &Connection, platform_id: &PlatformId) -> Result<Vec<String>> {
-    let stored: Option<String> = conn
+    Ok(conn
         .query_row(
             "SELECT done_dirs FROM scan_progress WHERE platform_id = ?1",
             [&platform_id.0],
-            |r| r.get(0),
+            |r| sql::get_json(r, 0, "scan_progress.done_dirs"),
         )
-        .optional()?;
-    Ok(match stored {
-        Some(json) => sql::from_json("scan_progress.done_dirs", &json)?,
-        None => Vec::new(),
-    })
+        .optional()?
+        .unwrap_or_default())
 }
 
 /// Replaces the committed-directory list for a platform's scan.

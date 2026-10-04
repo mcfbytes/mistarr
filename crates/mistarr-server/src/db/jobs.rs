@@ -70,51 +70,18 @@ pub struct JobRow {
 
 const COLUMNS: &str = "id, kind, payload, state, progress, created_at, updated_at, lane";
 
-/// A `jobs` row with its JSON columns still text, so a parse failure is
-/// [`crate::Error::Stored`] rather than a column error.
-struct Stored {
-    row: JobRow,
-    payload: String,
-    progress: Option<String>,
-}
-
-fn stored(r: &Row<'_>) -> rusqlite::Result<Stored> {
-    Ok(Stored {
-        row: JobRow {
-            id: r.get(0)?,
-            kind: r.get(1)?,
-            lane: r.get(7)?,
-            payload: Value::Null,
-            state: r.get(3)?,
-            progress: None,
-            created_at: r.get(5)?,
-            updated_at: r.get(6)?,
-        },
-        payload: r.get(2)?,
-        progress: r.get(4)?,
+/// One row of [`COLUMNS`]; JSON that does not parse becomes [`crate::Error::Stored`].
+fn from_row(r: &Row<'_>) -> rusqlite::Result<JobRow> {
+    Ok(JobRow {
+        id: r.get(0)?,
+        kind: r.get(1)?,
+        lane: r.get(7)?,
+        payload: sql::get_json(r, 2, "jobs.payload")?,
+        state: r.get(3)?,
+        progress: sql::get_json(r, 4, "jobs.progress")?,
+        created_at: r.get(5)?,
+        updated_at: r.get(6)?,
     })
-}
-
-impl Stored {
-    fn parse(self) -> Result<JobRow> {
-        let progress = self.progress.as_deref();
-        Ok(JobRow {
-            payload: sql::from_json("jobs.payload", &self.payload)?,
-            progress: progress
-                .map(|p| sql::from_json("jobs.progress", p))
-                .transpose()?,
-            ..self.row
-        })
-    }
-}
-
-/// Every row `sql` selects with `args`, parsed.
-fn select(conn: &Connection, sql: &str, args: impl rusqlite::Params) -> Result<Vec<JobRow>> {
-    let mut stmt = conn.prepare(sql)?;
-    let rows = stmt
-        .query_map(args, stored)?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
-    rows.into_iter().map(Stored::parse).collect()
 }
 
 /// The dedupe key of a job payload: each top-level field as `name`, 0x1F, value, sorted
@@ -193,14 +160,21 @@ pub fn insert(
 /// assert!(jobs::get(&conn, JobId(9)).unwrap().is_none());
 /// ```
 pub fn get(conn: &Connection, id: JobId) -> Result<Option<JobRow>> {
-    conn.query_row(
-        &format!("SELECT {COLUMNS} FROM jobs WHERE id = ?1"),
-        [id],
-        stored,
-    )
-    .optional()?
-    .map(Stored::parse)
-    .transpose()
+    Ok(conn
+        .query_row(
+            &format!("SELECT {COLUMNS} FROM jobs WHERE id = ?1"),
+            [id],
+            from_row,
+        )
+        .optional()?)
+}
+
+/// Every row `sql` selects with `args`.
+fn select(conn: &Connection, sql: &str, args: impl rusqlite::Params) -> Result<Vec<JobRow>> {
+    Ok(conn
+        .prepare(sql)?
+        .query_map(args, from_row)?
+        .collect::<rusqlite::Result<_>>()?)
 }
 
 /// Sets a job's state.
@@ -397,6 +371,38 @@ pub fn open_rows(conn: &Connection) -> Result<Vec<JobRow>> {
         ),
         [],
     )
+}
+
+/// Fails, with `error`, every queued, running or paused job whose row this binary
+/// cannot read: a kind or lane it does not list, or JSON that does not parse. Returns
+/// how many, so [`open_rows`] can read the rest.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// assert_eq!(mistarr_server::db::jobs::fail_unreadable(&conn, "x", 1).unwrap(), 0);
+/// ```
+pub fn fail_unreadable(conn: &Connection, error: &str, now: i64) -> Result<usize> {
+    let bad = conn
+        .prepare(&format!(
+            "SELECT {COLUMNS} FROM jobs WHERE state IN {} ORDER BY id",
+            JobState::ACTIVE_SQL
+        ))?
+        .query_map([], |r| Ok((r.get::<_, JobId>(0)?, from_row(r).is_err())))?
+        .filter_map(|row| match row {
+            Ok((id, true)) => Some(Ok(id)),
+            Ok((_, false)) => None,
+            Err(e) => Some(Err(e)),
+        })
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for &id in &bad {
+        fail(conn, id, error, now)?;
+    }
+    Ok(bad.len())
 }
 
 /// The kinds `/system/jobs/recent` lists: work a user starts or waits on.
@@ -776,5 +782,30 @@ mod tests {
         )
         .expect("unknown kind");
         assert!(matches!(get(&c, id), Err(crate::Error::Db(_))));
+    }
+
+    #[test]
+    fn unreadable_open_rows_fail_and_the_rest_stay_open() {
+        let c = conn();
+        let good = insert(&c, JobKind::Scan, &json!({}), Lane::Heavy, 1).expect("insert");
+        let kind = insert(&c, JobKind::Scan, &json!({"a": 1}), Lane::Heavy, 1).expect("insert");
+        let lane = insert(&c, JobKind::Scan, &json!({"a": 2}), Lane::Heavy, 1).expect("insert");
+        let json = insert(&c, JobKind::Scan, &json!({"a": 3}), Lane::Heavy, 1).expect("insert");
+        let unknown_done = insert(&c, JobKind::Scan, &json!({"a": 4}), Lane::Heavy, 1).expect("x");
+        c.execute_batch(&format!(
+            "UPDATE jobs SET kind = 'nope' WHERE id IN ({kind}, {unknown_done});
+             UPDATE jobs SET lane = 'nope' WHERE id = {lane};
+             UPDATE jobs SET progress = '{{' WHERE id = {json};
+             UPDATE jobs SET state = 'done' WHERE id = {unknown_done};"
+        ))
+        .expect("corrupt");
+        assert!(open_rows(&c).is_err());
+        assert_eq!(fail_unreadable(&c, "unreadable", 2).expect("fail"), 3);
+        let open = open_rows(&c).expect("open");
+        assert_eq!(open.iter().map(|r| r.id).collect::<Vec<_>>(), [good]);
+        let failed = get(&c, json).expect("get").expect("row");
+        assert_eq!(failed.state, JobState::Failed);
+        assert_eq!(failed.progress, Some(json!({ "error": "unreadable" })));
+        assert_eq!(fail_unreadable(&c, "unreadable", 3).expect("again"), 0);
     }
 }

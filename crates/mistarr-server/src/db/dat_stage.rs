@@ -112,8 +112,7 @@ pub fn apply(conn: &Connection, platform: &str, version: DatVersionId) -> Result
     let mut staged = stmt.query([])?;
     let mut n = 0;
     while let Some(row) = staged.next()? {
-        let text: String = row.get(0)?;
-        let game: StagedGame = sql::from_json("dat_stage.game", &text)?;
+        let game: StagedGame = sql::get_json(row, 0, "dat_stage.game")?;
         let title = TitleInput {
             name: &game.name,
             base_name: &game.base_name,
