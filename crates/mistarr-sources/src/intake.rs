@@ -133,7 +133,7 @@ pub fn free_name(dir: &Path, name: &str) -> io::Result<PathBuf> {
 /// ```
 pub fn accept(path: &Path) -> io::Result<PathBuf> {
     let target = claim(path, LOADED_DIR)?;
-    fs::rename(path, &target)?;
+    place(path, &target)?;
     Ok(target)
 }
 
@@ -156,7 +156,7 @@ pub fn accept(path: &Path) -> io::Result<PathBuf> {
 /// ```
 pub fn reject(path: &Path, reason: &str) -> io::Result<PathBuf> {
     let target = claim(path, REJECTED_DIR)?;
-    fs::rename(path, &target)?;
+    place(path, &target)?;
     let mut sidecar = target.clone().into_os_string();
     sidecar.push(REASON_SUFFIX);
     fs::write(sidecar, format!("{reason}\n"))?;
@@ -164,8 +164,22 @@ pub fn reject(path: &Path, reason: &str) -> io::Result<PathBuf> {
 }
 
 /// Creates an empty file for `path`'s name in `subdir` beside it with
-/// `create_new`, so a concurrent writer cannot take the same name.
-fn claim(path: &Path, subdir: &str) -> io::Result<PathBuf> {
+/// `create_new`, so a concurrent writer cannot take the same name, and returns
+/// its path. Follow with [`place`], or [`release`] to give the name up.
+///
+/// # Errors
+///
+/// [`io::Error`] when the directory cannot be made or no name is free.
+///
+/// ```
+/// let dir = tempfile::tempdir().unwrap();
+/// let file = dir.path().join("a.dat");
+/// std::fs::write(&file, b"data").unwrap();
+/// let claimed = mistarr_sources::intake::claim(&file, "loaded").unwrap();
+/// mistarr_sources::intake::place(&file, &claimed).unwrap();
+/// assert_eq!(std::fs::read(claimed).unwrap(), b"data");
+/// ```
+pub fn claim(path: &Path, subdir: &str) -> io::Result<PathBuf> {
     let dir = path.parent().unwrap_or_else(|| Path::new(".")).join(subdir);
     fs::create_dir_all(&dir)?;
     let name = path
@@ -185,6 +199,21 @@ fn claim(path: &Path, subdir: &str) -> io::Result<PathBuf> {
         }
     }
     Err(exhausted())
+}
+
+/// Moves `path` onto a path from [`claim`]. When the move fails the claim is
+/// released, so no empty placeholder is left behind.
+///
+/// # Errors
+///
+/// [`io::Error`] when the move fails.
+pub fn place(path: &Path, claimed: &Path) -> io::Result<()> {
+    fs::rename(path, claimed).inspect_err(|_| release(claimed))
+}
+
+/// Gives up a path from [`claim`] that was not [`place`]d into.
+pub fn release(claimed: &Path) {
+    let _ = fs::remove_file(claimed);
 }
 
 /// `dir/name` for 0, else `dir/stem (n).ext`.
@@ -341,6 +370,34 @@ mod tests {
         fs::write(&file, b"y").unwrap();
         let again = reject(&file, "worse").unwrap();
         assert_eq!(again, dir.path().join(REJECTED_DIR).join("b (1).magnet"));
+    }
+
+    #[test]
+    fn a_failed_move_leaves_no_placeholder() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = accept(&dir.path().join("gone.torrent")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        assert_eq!(
+            fs::read_dir(dir.path().join(LOADED_DIR)).unwrap().count(),
+            0
+        );
+        assert!(reject(&dir.path().join("gone.torrent"), "x").is_err());
+        assert_eq!(
+            fs::read_dir(dir.path().join(REJECTED_DIR)).unwrap().count(),
+            0
+        );
+    }
+
+    #[test]
+    fn a_released_claim_frees_the_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.dat");
+        let first = claim(&file, LOADED_DIR).unwrap();
+        let second = claim(&file, LOADED_DIR).unwrap();
+        assert_eq!(second, dir.path().join(LOADED_DIR).join("a (1).dat"));
+        release(&first);
+        release(&second);
+        assert_eq!(claim(&file, LOADED_DIR).unwrap(), first);
     }
 
     #[test]

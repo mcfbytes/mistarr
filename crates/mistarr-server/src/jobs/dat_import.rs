@@ -311,27 +311,30 @@ impl Job for DatImport {
         if self.bind.is_some() {
             return self.run_bind(ctx, &file).await;
         }
-        let loaded_dir = self
-            .path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join(LOADED_DIR);
-        let (path, name) = (self.path.clone(), file.clone());
+        let path = self.path.clone();
         let listed = crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
-            path.is_file()
-                .then(|| (list_members(&path), intake::free_name(&loaded_dir, &name)))
+            path.is_file().then(|| match list_members(&path) {
+                Ok(members) => intake::claim(&path, LOADED_DIR).map(|c| Ok((members, c))),
+                Err(reason) => Ok(Err(reason)),
+            })
         })
         .await?;
         let (members, target) = match listed {
             None => return Ok(()),
-            Some((Ok(members), target)) => (members, target?),
-            Some((Err(reason), _)) => return reject(&ctx.app, &self.path, &file, &reason).await,
+            Some(Ok(Ok(found))) => found,
+            Some(Ok(Err(reason))) => return reject(&ctx.app, &self.path, &file, &reason).await,
+            Some(Err(e)) => return Err(e.into()),
         };
         let stored = file_name(&target);
-        let Imported {
+        let imported = self.import_members(ctx, &members, &stored).await;
+        let Ok(Imported {
             outcomes,
             recomputed,
-        } = self.import_members(ctx, &members, &stored).await?;
+        }) = imported
+        else {
+            intake::release(&target);
+            return imported.map(|_| ());
+        };
         let mut loaded = Vec::new();
         let mut reasons = Vec::new();
         for o in outcomes {
@@ -342,16 +345,14 @@ impl Job for DatImport {
             }
         }
         if loaded.is_empty() {
+            intake::release(&target);
             return reject(&ctx.app, &self.path, &file, &reasons.join("\n")).await;
         }
-        let path = self.path.clone();
-        let moved = crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
-            intake::accept(&path)
+        let (path, claimed) = (self.path.clone(), target);
+        crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
+            intake::place(&path, &claimed)
         })
         .await??;
-        if moved != target {
-            tracing::warn!(file, stored, "DAT took another name in loaded/");
-        }
         for reason in &reasons {
             publish_rejected(&ctx.app, &file, reason);
         }

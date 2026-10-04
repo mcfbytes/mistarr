@@ -367,7 +367,8 @@ On shutdown the job stays queued and starts the image it was decoding again.
 5. Store the file list in `torrent_files` with the matched `rom_id` and its
    confidence where one exists, and the further candidate roms of every tier
    in `torrent_candidates` (VERIFICATION.md "Pre-download matching"). Move
-   the file to `sources/loaded/` and emit `source.changed`. A `.torrent` is
+   the file to `sources/loaded/` under a name reserved before the source is
+   stored, kept as `origin_file`, and emit `source.changed`. A `.torrent` is
    not told to the client until something is wanted. Binding and mapping
    share one pass over the files, and a source with nothing stored gets its
    matches written straight. When a DAT loads titles for a platform, the

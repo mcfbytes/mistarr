@@ -1,5 +1,6 @@
 //! Source import, binding and magnet resolving; the flow is `docs/ARCHITECTURE.md` "Source import".
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +21,7 @@ use super::remap::{key_new_roms, map_files, store_mapping};
 use super::{wizard, Job, JobContext, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::candidates;
+use crate::db::jobs::{JobId, JobState};
 use crate::db::sources::{self as rows, NewSource, SourceId, SourceRow, SourceState, SqlDatIndex};
 use crate::error::Result;
 use crate::events::EventKind;
@@ -124,20 +126,33 @@ impl Job for SourceImport {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
         };
-        let origin = self
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let outcome = match (self.path.extension().and_then(|e| e.to_str()), data) {
-            (_, None) => Err(TOO_LARGE.to_owned()),
-            (Some("torrent"), Some(data)) => import_torrent(&ctx.app, &origin, data).await?,
-            (Some("magnet"), Some(data)) => import_magnet(&ctx.app, &origin, &data).await?,
-            _ => Err("Only .torrent and .magnet files are read.".to_owned()),
+        let ext = self.path.extension().and_then(|e| e.to_str());
+        let claim = if matches!(ext, Some("torrent" | "magnet")) {
+            Some(claim_blocking(&self.path).await?)
+        } else {
+            None
+        };
+        let name_of = |p: &Path| {
+            p.file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+        };
+        let origin = name_of(claim.as_deref().unwrap_or(&self.path));
+        let outcome = match (ext, data) {
+            (_, None) => Ok(Err(TOO_LARGE.to_owned())),
+            (Some("torrent"), Some(data)) => import_torrent(&ctx.app, &origin, data).await,
+            (Some("magnet"), Some(data)) => import_magnet(&ctx.app, &origin, &data).await,
+            _ => Ok(Err("Only .torrent and .magnet files are read.".to_owned())),
+        };
+        let outcome = match outcome {
+            Ok(o) => o,
+            Err(e) => {
+                release_blocking(claim).await;
+                return Err(e);
+            }
         };
         match outcome {
             Ok(row) => {
-                if let Err(e) = move_blocking(&self.path, None).await {
+                if let Err(e) = place_blocking(&self.path, claim).await {
                     tracing::warn!(file = %origin, error = %e, "cannot move source into loaded/");
                 }
                 ctx.progress(json!({ "file": origin, "source_id": row.id, "state": row.state }))
@@ -153,7 +168,8 @@ impl Job for SourceImport {
             }
             Err(reason) => {
                 tracing::info!(file = %origin, reason, "source rejected");
-                if let Err(e) = move_blocking(&self.path, Some(reason.clone())).await {
+                release_blocking(claim).await;
+                if let Err(e) = reject_blocking(&self.path, &reason).await {
                     tracing::warn!(file = %origin, error = %e, "cannot move source into rejected/");
                 }
                 ctx.progress(json!({ "file": origin, "rejected": reason }))
@@ -164,12 +180,42 @@ impl Job for SourceImport {
     }
 }
 
-/// Moves into `loaded/`, or into `rejected/` with `reason`, off the async runtime.
-async fn move_blocking(path: &Path, reason: Option<String>) -> Result<()> {
+/// Reserves the name `path` will have in `loaded/`, off the async runtime.
+async fn claim_blocking(path: &Path) -> Result<PathBuf> {
     let path = path.to_path_buf();
-    crate::threads::run(crate::threads::label::SOURCE_FILE, move || match reason {
-        None => intake::accept(&path),
-        Some(r) => intake::reject(&path, &r),
+    let claimed = crate::threads::run(crate::threads::label::SOURCE_FILE, move || {
+        intake::claim(&path, intake::LOADED_DIR)
+    })
+    .await??;
+    Ok(claimed)
+}
+
+/// Moves `path` onto its reserved name in `loaded/`, off the async runtime.
+async fn place_blocking(path: &Path, claim: Option<PathBuf>) -> Result<()> {
+    let path = path.to_path_buf();
+    crate::threads::run(crate::threads::label::SOURCE_FILE, move || match claim {
+        Some(c) => intake::place(&path, &c),
+        None => intake::accept(&path).map(drop),
+    })
+    .await??;
+    Ok(())
+}
+
+/// Gives up a reserved name in `loaded/`, off the async runtime.
+async fn release_blocking(claim: Option<PathBuf>) {
+    if let Some(c) = claim {
+        let _ = crate::threads::run(crate::threads::label::SOURCE_FILE, move || {
+            intake::release(&c);
+        })
+        .await;
+    }
+}
+
+/// Moves into `rejected/` with `reason`, off the async runtime.
+async fn reject_blocking(path: &Path, reason: &str) -> Result<()> {
+    let (path, reason) = (path.to_path_buf(), reason.to_owned());
+    crate::threads::run(crate::threads::label::SOURCE_FILE, move || {
+        intake::reject(&path, &reason)
     })
     .await??;
     Ok(())
@@ -632,16 +678,33 @@ fn is_source_name(name: &str) -> bool {
 }
 
 /// Scans `sources/` every [`crate::app::Options::sources_poll`] and enqueues
-/// one [`SourceImport`] per stable file; a file already queued is not queued twice.
+/// one [`SourceImport`] per stable file. A file whose job failed, or that could
+/// not be queued, is enqueued again on a later poll.
 pub async fn watch(app: Arc<AppState>) {
     let dir = app.config().paths.sources();
     let mut scanner = StableFiles::new(
         Duration::from_secs(app.options.sources_min_age_secs),
         is_source_name,
     );
+    let mut pending: HashMap<PathBuf, JobId> = HashMap::new();
     let mut tick = tokio::time::interval(app.options.sources_poll);
     loop {
         tick.tick().await;
+        let mut finished = Vec::new();
+        for (path, &id) in &pending {
+            match app.db.read(move |c| crate::db::jobs::get(c, id)).await {
+                Ok(Some(row)) if row.state == JobState::Failed => {
+                    scanner.forget(path);
+                    finished.push(path.clone());
+                }
+                Ok(Some(row)) if !row.state.is_finished() => {}
+                Ok(_) => finished.push(path.clone()),
+                Err(e) => tracing::warn!(error = %e, "cannot read source import job"),
+            }
+        }
+        for path in finished {
+            pending.remove(&path);
+        }
         let d = dir.clone();
         let result = crate::threads::run(crate::threads::label::SOURCE_WATCH, move || {
             let found = scanner.poll(&d);
@@ -654,9 +717,15 @@ pub async fn watch(app: Arc<AppState>) {
         };
         scanner = back;
         for path in found {
-            let job = Arc::new(SourceImport { path });
-            if let Err(e) = Scheduler::enqueue(&app, job).await {
-                tracing::warn!(error = %e, "cannot queue a source import");
+            let job = Arc::new(SourceImport { path: path.clone() });
+            match Scheduler::enqueue(&app, job).await {
+                Ok(id) => {
+                    pending.insert(path, id);
+                }
+                Err(e) => {
+                    scanner.forget(&path);
+                    tracing::warn!(error = %e, "cannot queue a source import");
+                }
             }
         }
     }
@@ -696,6 +765,8 @@ pub async fn resolve_pending(app: Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::app::testutil::state;
     use crate::db::sources::fixtures::seed_rom;
@@ -997,6 +1068,61 @@ mod tests {
         let reason = std::fs::read_to_string(sources.join("rejected/big.torrent.reason.txt"))
             .expect("reason");
         assert!(reason.starts_with(TOO_LARGE), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn sources_dropped_under_one_name_keep_their_own_files() {
+        let (_dir, app) = state();
+        let sources = app.config().paths.sources();
+        std::fs::create_dir_all(&sources).expect("mkdir");
+        let mut uris = Vec::new();
+        for hash in ["0c", "0d"] {
+            let uri = format!("magnet:?xt=urn:btih:{}", hash.repeat(20));
+            let file = sources.join("set.magnet");
+            std::fs::write(&file, &uri).expect("write");
+            let job = Arc::new(SourceImport { path: file });
+            Scheduler::run_inline(&app, job).await.expect("run");
+            uris.push(uri);
+        }
+        let (items, _) = app.db.read(|c| rows::list(c, 10, 0)).await.expect("list");
+        assert_eq!(items.len(), 2);
+        let names: HashSet<_> = items.iter().map(|r| r.origin_file.clone()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        for row in &items {
+            let uri = magnet_uri(&app, row).await;
+            assert!(uri.contains(&row.infohash), "{uri}");
+            assert!(uris.contains(&uri), "kept as dropped: {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_import_is_retried_by_the_watcher() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, app) = crate::app::testutil::state_with(|o| {
+            o.sources_poll = Duration::from_millis(20);
+            o.sources_min_age_secs = 0;
+        });
+        let sources = app.config().paths.sources();
+        std::fs::create_dir_all(&sources).expect("mkdir");
+        let file = sources.join("late.magnet");
+        std::fs::write(&file, format!("magnet:?xt=urn:btih:{}", "0e".repeat(20))).expect("write");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o0)).expect("chmod");
+        if std::fs::read(&file).is_ok() {
+            return;
+        }
+        Scheduler::start(&app);
+        let task = tokio::spawn(watch(Arc::clone(&app)));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        for _ in 0..200 {
+            let (items, _) = app.db.read(|c| rows::list(c, 10, 0)).await.expect("list");
+            if !items.is_empty() {
+                task.abort();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the failed import was never retried");
     }
 
     #[tokio::test]

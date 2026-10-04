@@ -155,7 +155,7 @@ CREATE TABLE sources (                  -- one per torrent the user dropped in
   id            INTEGER PRIMARY KEY,
   infohash      TEXT NOT NULL UNIQUE,
   display_name  TEXT NOT NULL,         -- torrent name field
-  origin_file   TEXT NOT NULL,         -- basename as dropped
+  origin_file   TEXT NOT NULL,         -- name of the file under sources/loaded/
   platform_id   TEXT REFERENCES platforms(id),   -- NULL while unbound
   bind_score    REAL,                  -- hit rate that produced the binding
   state         TEXT NOT NULL,         -- 'resolving' | 'unbound' | 'bound' | 'disabled'
