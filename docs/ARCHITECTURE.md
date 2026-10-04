@@ -45,7 +45,7 @@ contracts in this document.
 |---|---|---|
 | `mistarr-core` | Domain types. DAT parser for Logiqx XML and No-Intro DB exports. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. The codecs every crate shares: hex, `Digest` values (`Crc32`, `Md5`, `Sha1`, `InfoHash`), bencode, magnet links, percent-decoding, and the capped XML reader. | none |
 | `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
-| `mistarr-sources` | Intake of dropped files: `StableFiles` reports a file once its mtime is old enough and its size held across two polls, once per size and mtime, and forgets files that are gone; `accept` and `reject` move a file into `loaded/` or `rejected/` under a free name picked with `create_new`, and `reject` writes `<name>.reason.txt` holding `reason\n`. `.torrent` parsing into a file list, over core's bencode. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
+| `mistarr-sources` | Intake of dropped files: `StableFiles` reports a file once its mtime is old enough and its size held across two polls, once per size and mtime, and forgets files that are gone; `plan` picks a free name in `loaded/` without creating it, so the database can store it, and `place` then moves the file there by hard link, or by a rename after a name check where the file system has no hard links; `accept` and `reject` move a file into `loaded/` or `rejected/` under a free name picked with `create_new`, and `reject` writes `<name>.reason.txt` holding `reason\n`. `.torrent` parsing into a file list, over core's bencode. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
 | `mistarr-clients` | `DownloadClient` trait. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping. The one GET of a URL the user supplies, over hyper and rustls (`fetch`). | none |
 | `mistarr-server` | The binary. axum HTTP server, SQLite via `rusqlite` (bundled), job scheduler, SSE event bus, embedded SPA via `rust-embed`, config, first-run wizard state, CLI flags. | all |
 | `mistarr-fixture` | Development tool, never shipped: synthetic DATs, `.torrent` files, the synthetic set and a local tracker for the tests in TESTING.md. | core, mister, sources |
@@ -368,8 +368,9 @@ On shutdown the job stays queued and starts the image it was decoding again.
    confidence where one exists, and the further candidate roms of every tier
    in `torrent_candidates` (VERIFICATION.md "Pre-download matching"). Move
    the file to `sources/loaded/` under a free name picked before the source is
-   stored and taken without replacing a file, kept as `origin_file`, and emit `source.changed`. A `.torrent` is
-   not told to the client until something is wanted. Binding and mapping
+   stored and taken without replacing a file (best-effort on exFAT, which has
+   no hard links), kept as `origin_file`, and emit `source.changed`. A
+   `.torrent` is not told to the client until something is wanted. Binding and mapping
    share one pass over the files, and a source with nothing stored gets its
    matches written straight. When a DAT loads titles for a platform, the
    rebind of step 4 runs and a background `remap_sources` job maps every

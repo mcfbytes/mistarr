@@ -125,7 +125,7 @@ impl Job for SourceImport {
             Err(e) => return Err(e.into()),
         };
         let ext = self.path.extension().and_then(|e| e.to_str());
-        let planned = if matches!(ext, Some("torrent" | "magnet")) {
+        let planned = if data.is_some() && matches!(ext, Some("torrent" | "magnet")) {
             Some(plan_blocking(&self.path).await?)
         } else {
             None

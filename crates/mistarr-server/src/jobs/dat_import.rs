@@ -326,14 +326,10 @@ impl Job for DatImport {
             Some(Err(e)) => return Err(e.into()),
         };
         let stored = file_name(&target);
-        let imported = self.import_members(ctx, &members, &stored).await;
-        let Ok(Imported {
+        let Imported {
             outcomes,
             recomputed,
-        }) = imported
-        else {
-            return imported.map(|_| ());
-        };
+        } = self.import_members(ctx, &members, &stored).await?;
         let mut loaded = Vec::new();
         let mut reasons = Vec::new();
         for o in outcomes {

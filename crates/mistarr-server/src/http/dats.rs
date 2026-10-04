@@ -171,7 +171,8 @@ fn rejected_file(dats: &FsPath, name: &str) -> Result<PathBuf, ApiError> {
 }
 
 /// Moves `from` into `dir` under `name` or the first free variant, never replacing a
-/// file: a hard link where the file system has them, else a copy made with `create_new`.
+/// file: a hard link where the file system has them, else a copy made with `create_new`,
+/// since an upload may come from another file system, unlike intake's `place` rename.
 fn move_new(from: &FsPath, dir: &FsPath, name: &str) -> std::io::Result<PathBuf> {
     use std::io::ErrorKind;
     for target in candidates(dir, name.as_ref()) {

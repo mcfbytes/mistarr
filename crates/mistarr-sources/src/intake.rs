@@ -112,8 +112,9 @@ fn exhausted() -> io::Error {
 }
 
 /// Moves `path` into `loaded/` beside it, under its name or the first free
-/// variant, and returns the new path. The work is synchronous; async callers
-/// run it on a blocking thread.
+/// variant, and returns the new path. For callers that do not record the name
+/// first; the import jobs use [`plan`] and [`place`]. The work is synchronous;
+/// async callers run it on a blocking thread.
 ///
 /// # Errors
 ///
@@ -221,8 +222,9 @@ pub fn plan(path: &Path, subdir: &str) -> io::Result<PathBuf> {
     Err(exhausted())
 }
 
-/// Moves `path` onto a name from [`plan`] without replacing a file: a hard
-/// link where the file system has them, else a rename.
+/// Moves `path` onto a name from [`plan`]. A hard link never replaces a file;
+/// where the file system has none (exFAT), the name is checked just before a
+/// rename, so the guarantee is best-effort.
 ///
 /// # Errors
 ///
@@ -239,7 +241,14 @@ pub fn place(path: &Path, planned: &Path) -> io::Result<()> {
         {
             Err(e)
         }
-        Err(_) => fs::rename(path, planned),
+        Err(_) => {
+            match fs::symlink_metadata(planned) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+                Ok(_) => return Err(io::ErrorKind::AlreadyExists.into()),
+            }
+            fs::rename(path, planned)
+        }
     }
 }
 
