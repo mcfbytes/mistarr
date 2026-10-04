@@ -256,36 +256,36 @@ Sonnet · `mistarr-sources`, server `jobs/dat_import.rs`,
 
 Opus · `mistarr-server` · branch `wp-60-db-types`
 
-- [x] `db/ids.rs` has an `id!` macro emitting the struct, one derive set,
+- [ ] `db/ids.rs` has an `id!` macro emitting the struct, one derive set,
   `Display`, `ToSql`, `FromSql` and transparent serde, for `FileId`,
   `TitleId`, `SourceId`, `JobId`, `DownloadId`, `DatVersionId` and a new
   `RomId`. No database function or row carries a bare `i64` id.
-- [x] A `text_enum!` macro emits `as_str`, `ALL`, `ToSql` and a `FromSql` that
+- [ ] A `text_enum!` macro emits `as_str`, `ALL`, `ToSql` and a `FromSql` that
   fails on unknown text, for `FileState`, `JobState`, `SourceState`,
   `DownloadState`, `Lane`, title source, rom status and confidence. The four
   different fallbacks for unknown text go.
-- [x] Sets of states are named once: `DownloadState::OPEN` and `SELECTED`,
+- [ ] Sets of states are named once: `DownloadState::OPEN` and `SELECTED`,
   `JobState::ACTIVE` and `FINISHED`, each with an SQL fragment a unit test
   checks against the array. The second constant named `OPEN`, in
   `source_detail.rs`, and about 20 literal lists go; `RECENT_KINDS` is bound,
   not interpolated.
-- [x] `JobRow.kind` and `lane` are typed; `status::hold_reason` takes a `Lane`.
-- [x] `db/sql.rs` holds `to_u64`, `to_i64` and `get_u64`; the six local
+- [ ] `JobRow.kind` and `lane` are typed; `status::hold_reason` takes a `Lane`.
+- [ ] `db/sql.rs` holds `to_u64`, `to_i64` and `get_u64`; the six local
   conversion helpers go.
-- [x] Lists are bound one way, with `json_each`; `groups::placeholders` goes.
-- [x] Every JSON failure maps to `Error::Stored`; nothing substitutes `"[]"`.
-- [x] `Page { limit, offset }` and `Paged<T> { items, total }`; the count and
+- [ ] Lists are bound one way, with `json_each`; `groups::placeholders` goes.
+- [ ] Every JSON failure maps to `Error::Stored`; nothing substitutes `"[]"`.
+- [ ] `Page { limit, offset }` and `Paged<T> { items, total }`; the count and
   the page run in one read transaction; `files::unidentified` takes its
   arguments in the same order as every other pager.
-- [x] The file upsert uses `RETURNING id`.
-- [x] `has_table` takes a schema and is used everywhere; every read-only open
+- [ ] The file upsert uses `RETURNING id`.
+- [ ] `has_table` takes a schema and is used everywhere; every read-only open
   goes through `open_read_only`; one `BUSY_TIMEOUT` constant.
-- [x] The arcade recompute flag goes through `settings::keys` and
+- [ ] The arcade recompute flag goes through `settings::keys` and
   `settings::set`.
-- [x] `sources.reason` and the DAT replaced and older reasons are stored as
+- [ ] `sources.reason` and the DAT replaced and older reasons are stored as
   codes with parameters and worded in `http/`; migration 0021 rewrites stored
   prose to codes.
-- [x] `db/plans.rs` passes unchanged in intent.
+- [ ] `db/plans.rs` passes unchanged in intent.
 
 ### WP-61 Web mock at the API boundary
 
