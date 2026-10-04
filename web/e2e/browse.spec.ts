@@ -1,10 +1,21 @@
 import { expect, test, type Page } from '@playwright/test';
+import { MOCK_EVENT } from '../src/mock/events';
+import { emitEvent, readMockKnob, setMockKnob } from './helpers';
 
-/** Sets the mock search latency per query before the app starts; see `mockDelayMs`. */
-async function delays(page: Page, byQuery: Record<string, number>): Promise<void> {
-  await page.addInitScript((value) => {
-    localStorage.setItem('mistarr.mockDelayMs', value);
-  }, JSON.stringify(byQuery));
+/** Sets the mock search latency per query; see `delayMs` in `src/mock/fixtures.ts`. */
+async function delays(page: Page, byQuery: Record<string, number> | null): Promise<void> {
+  await setMockKnob(page, 'delayMs', byQuery);
+}
+
+/** A file's state changed, as a scan reports it; the grid reloads its pages. */
+async function fileChanged(page: Page): Promise<void> {
+  await emitEvent(page, { name: 'file.changed', data: { file_id: 0, state: 'verified' } });
+}
+
+/** How many title requests for `key` (`search#page`) the mock has answered or cut short. */
+async function settled(page: Page, key: string): Promise<number> {
+  const counts = (await readMockKnob(page, 'titlesSettled')) as Record<string, number> | null;
+  return counts?.[key] ?? 0;
 }
 
 function names(page: Page) {
@@ -44,11 +55,9 @@ test('a newer search wins over a slower one still on its way', async ({ page }) 
   await expect(names(page).first()).toHaveText('Mock Manor (USA)');
   await expect(busy).toHaveCount(0);
 
-  // Past the slow answer's due time the grid still shows the newer search.
-  await page.waitForTimeout(2000);
-  for (const name of await names(page).allTextContents()) {
-    expect(name).toBe('Mock Manor (USA)');
-  }
+  // Once the slow answer is in, cut short or not, the grid still shows the newer search.
+  await expect.poll(() => settled(page, 'Example#0'), { timeout: 5000 }).toBe(1);
+  await expect(names(page).filter({ hasNotText: 'Mock Manor (USA)' })).toHaveCount(0);
 });
 
 test('a failed search says so and offers Retry', async ({ page }) => {
@@ -83,13 +92,13 @@ test('a failed next page is loaded again after Retry, never skipped', async ({ p
   await scrollForMore(page, 120);
   const expected = (await ids(page)).slice(0, 120);
 
-  await page.evaluate(() => localStorage.setItem('mistarr.mockDelayMs', '{"#1": -1}'));
+  await delays(page, { '#1': -1 });
   await page.reload();
   await expect(names(page).first()).toBeVisible();
   await page.mouse.wheel(0, 50_000);
   await expect(page.getByRole('alert')).toContainText('Titles could not be loaded');
 
-  await page.evaluate(() => localStorage.removeItem('mistarr.mockDelayMs'));
+  await delays(page, null);
   await page.getByRole('button', { name: 'Retry' }).click();
   await expect(page.getByRole('alert')).toHaveCount(0);
   await scrollForMore(page, 120);
@@ -102,12 +111,12 @@ test('a slow search lands while background reloads keep arriving', async ({ page
   await expect(names(page).first()).toBeVisible();
 
   await page.getByPlaceholder('Search').fill('Mock');
-  // A scan's file.changed events ask for reloads faster than this search answers.
-  await page.evaluate(() => {
-    const w = window as unknown as { mistarrReloadTitles: () => Promise<void> };
-    const timer = setInterval(() => void w.mistarrReloadTitles(), 500);
+  // Resyncs ask for reloads faster than this search answers.
+  await page.evaluate((name) => {
+    const resync = () => window.dispatchEvent(new CustomEvent(name, { detail: { name: 'resync', data: {} } }));
+    const timer = setInterval(resync, 500);
     setTimeout(() => clearInterval(timer), 10_000);
-  });
+  }, MOCK_EVENT);
   await expect(names(page).first()).toHaveText('Mock Manor (USA)', { timeout: 5000 });
   await expect(page.getByRole('progressbar', { name: 'Loading titles' })).toHaveCount(0);
 });
@@ -120,14 +129,11 @@ test('a reload asked for during a load runs once that load has landed', async ({
   await page.getByPlaceholder('Search').fill('Mock');
   await expect(page.getByRole('progressbar', { name: 'Loading titles' })).toBeVisible();
   // The search already read its delay; the reload's own request will fail, which shows.
-  await page.evaluate(() => {
-    localStorage.setItem('mistarr.mockDelayMs', '{"Mock": -1}');
-    const w = window as unknown as { mistarrReloadTitles: () => Promise<void> };
-    void w.mistarrReloadTitles();
-  });
+  await delays(page, { Mock: -1 });
+  await fileChanged(page);
   const alert = page.getByRole('alert');
-  await page.waitForTimeout(500);
   await expect(alert).toHaveCount(0);
+  // Had the reload cut the search short, its rows would never land.
   await expect(names(page).first()).toHaveText('Mock Manor (USA)', { timeout: 5000 });
   await expect(alert).toContainText('Titles could not be loaded');
 });
@@ -142,15 +148,10 @@ test('scrolling on after a reload loads the next page with no gap', async ({ pag
   await expect(names(page).first()).toBeVisible();
   await scrollForMore(page, 120);
   // Page 0 reloads at once and page 1 slowly, while the grid sits scrolled to its end.
-  await page.evaluate(() => {
-    localStorage.setItem('mistarr.mockDelayMs', '{"#1": 1500}');
-    const w = window as unknown as { mistarrReloadTitles: () => Promise<void> };
-    void w.mistarrReloadTitles();
-  });
-  await page.mouse.wheel(0, 50_000);
-  await page.waitForTimeout(2500);
-  await page.evaluate(() => localStorage.removeItem('mistarr.mockDelayMs'));
+  await delays(page, { '#1': 1500 });
+  await fileChanged(page);
   await scrollForMore(page, 180);
+  await delays(page, null);
   const got = await ids(page);
   expect(got.slice(0, 180)).toEqual(expected.slice(0, 180));
 });
@@ -172,7 +173,7 @@ test('a reload after a row left the list never shows a group twice or skips one'
   await expect(names(page).first()).toBeVisible();
   await scrollForMore(page, 120);
   const removed = Number((await ids(page))[4]?.split('/').pop());
-  await page.evaluate((id) => localStorage.setItem('mistarr.mockRemovedIds', JSON.stringify([id])), removed);
+  await setMockKnob(page, 'removedIds', [removed]);
 
   // The list as a fresh visit sees it, from a second tab sharing the storage.
   const other = await page.context().newPage();
@@ -182,18 +183,15 @@ test('a reload after a row left the list never shows a group twice or skips one'
   expect(fresh.some((id) => id.endsWith(`/${removed}`))).toBe(false);
 
   // Page 0 reloads at once and page 1 slowly; the grid is then the fresh list's start.
-  await page.evaluate(() => {
-    localStorage.setItem('mistarr.mockDelayMs', '{"#1": 1500}');
-    const w = window as unknown as { mistarrReloadTitles: () => Promise<void> };
-    void w.mistarrReloadTitles();
-  });
-  await page.waitForTimeout(500);
+  await delays(page, { '#1': 1500 });
+  await fileChanged(page);
+  await expect(page.locator(`.grid a.poster[href$="/${removed}"]`)).toHaveCount(0);
   const during = await ids(page);
   expect(during.length).toBeGreaterThanOrEqual(119);
   expect(during).toEqual(fresh.slice(0, during.length));
 
   // Scrolling on cuts the reload short; what follows must still end at the fresh list.
-  await page.evaluate(() => localStorage.removeItem('mistarr.mockDelayMs'));
+  await delays(page, null);
   await expect(async () => {
     const shown = await scrollToEnd(page);
     expect(duplicates(shown)).toEqual([]);
@@ -206,17 +204,14 @@ test('a background reload stops when the user searches', async ({ page }) => {
   await expect(names(page).first()).toBeVisible();
   await scrollForMore(page, 120);
 
-  await page.evaluate(() => {
-    localStorage.setItem('mistarr.mockDelayMs', '{"": 1000}');
-    const w = window as unknown as { mistarrReloadTitles: () => Promise<void> };
-    void w.mistarrReloadTitles();
-  });
+  await delays(page, { '': 1000 });
+  const before = await settled(page, '#0');
+  await fileChanged(page);
   await page.getByPlaceholder('Search').fill('Mock');
   await expect(names(page).first()).toHaveText('Mock Manor (USA)');
 
-  // Past the reload's due time for every page it had, only the search's rows show.
-  await page.waitForTimeout(2500);
-  for (const name of await names(page).allTextContents()) {
-    expect(name).toBe('Mock Manor (USA)');
-  }
+  // Once the reload's first page is in, cut short or not, it has not landed over the search.
+  await expect.poll(() => settled(page, '#0'), { timeout: 5000 }).toBe(before + 1);
+  await expect(page.getByRole('progressbar', { name: 'Loading titles' })).toHaveCount(0);
+  await expect(names(page).filter({ hasNotText: 'Mock Manor (USA)' })).toHaveCount(0);
 });

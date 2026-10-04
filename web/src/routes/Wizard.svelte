@@ -6,7 +6,6 @@
   import { getPlatforms, loadPlatforms } from '../lib/stores/platforms.svelte';
   import { getDats, loadDats } from '../lib/stores/dats.svelte';
   import { getStatus, getWizard, loadStatus, loadWizard } from '../lib/stores/status.svelte';
-  import { fixtureCores, fixtureDats, fixtureSettings } from '../lib/fixtures';
   import { getSources, loadSources } from '../lib/stores/sources.svelte';
   import UploadField from '../lib/UploadField.svelte';
   import MagnetField from '../lib/MagnetField.svelte';
@@ -17,8 +16,6 @@
   import PathMapEditor from '../lib/PathMapEditor.svelte';
   import { cleanPathMap } from '../lib/pathmap';
   import type { Settings } from '../lib/types';
-
-  const isMock = import.meta.env.VITE_MOCK === '1';
 
   let step = $state(0);
   const steps = ['Paths', 'DATs', 'Client', 'Sources'];
@@ -61,10 +58,6 @@
   });
 
   async function runCoreDetection(): Promise<void> {
-    if (isMock) {
-      coresResult = fixtureCores.platforms;
-      return;
-    }
     detectingCores = true;
     try {
       const result = await api.cores();
@@ -79,14 +72,14 @@
 
   async function loadSettings(): Promise<void> {
     try {
-      settings = isMock ? fixtureSettings : await api.settings();
+      settings = await api.settings();
       settingsError = null;
     } catch (err) {
       settingsError = errorMessage(err);
     }
   }
 
-  const dats = $derived(isMock ? fixtureDats : getDats());
+  const dats = $derived(getDats());
   const status = $derived(getStatus());
   const wizard = $derived(getWizard());
   const sources = $derived(getSources());
@@ -107,7 +100,7 @@
 
   // Marks setup as seen so a reload lands on the library, not back here.
   async function dismiss(): Promise<void> {
-    if (dismissed || isMock) {
+    if (dismissed) {
       return;
     }
     dismissed = true;
@@ -140,11 +133,9 @@
     clientError = null;
     const client = { ...settings.client, remote_path_map: cleaned.map };
     try {
-      settings = isMock ? { ...settings, client } : await api.putSettings({ client });
+      settings = await api.putSettings({ client });
       clientSaved = true;
-      if (!isMock) {
-        await loadStatus();
-      }
+      await loadStatus();
     } catch (err) {
       clientError = errorMessage(err);
     }

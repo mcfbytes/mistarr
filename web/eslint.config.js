@@ -44,6 +44,22 @@ export default tseslint.config(
     }
   },
   {
+    // Mock mode lives behind the API boundary: only main.ts may choose it.
+    files: ['src/**'],
+    ignores: ['src/mock/**', 'src/main.ts'],
+    rules: {
+      'no-restricted-syntax': [
+        'error',
+        { selector: 'Identifier[name=/^(isMock|VITE_MOCK)$/]', message: 'Only src/mock and main.ts know about mock mode.' },
+        { selector: 'Literal[value="VITE_MOCK"]', message: 'Only src/mock and main.ts know about mock mode.' }
+      ],
+      'no-restricted-imports': [
+        'error',
+        { patterns: [{ group: ['**/mock', '**/mock/**'], message: 'The app reaches the mock only through the api object.' }] }
+      ]
+    }
+  },
+  {
     // Build tooling outside every tsconfig: linted without type information.
     files: ['*.config.js', '*.config.ts', 'scripts/**/*.mjs'],
     ...tseslint.configs.disableTypeChecked

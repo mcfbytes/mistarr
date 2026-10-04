@@ -1,4 +1,5 @@
-import { test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
+import { openPanel } from './helpers';
 
 // Review screenshots of the activity indicator and status pills, written only when SHOTS_DIR is set.
 const dir = process.env.SHOTS_DIR;
@@ -9,9 +10,11 @@ const sizes = [
 ];
 const schemes = ['dark', 'light'] as const;
 
-async function openPanel(page: Page): Promise<void> {
-  await page.getByRole('button', { name: /^Background work:/ }).click();
-  await page.getByRole('region', { name: 'Background work' }).waitFor();
+/** Waits for the DAT import's bar to move past where it first showed. */
+async function barMoves(page: Page): Promise<void> {
+  const bar = page.getByRole('progressbar', { name: /import progress$/ });
+  const first = Number(await bar.getAttribute('aria-valuenow'));
+  await expect.poll(async () => Number(await bar.getAttribute('aria-valuenow'))).toBeGreaterThan(first);
 }
 
 const shots: { name: string; url: string; act?: (page: Page) => Promise<void>; full?: boolean }[] = [
@@ -31,7 +34,7 @@ const shots: { name: string; url: string; act?: (page: Page) => Promise<void>; f
     }
   },
   { name: 'sources-pills', url: '/#/sources', full: true },
-  { name: 'dat-progress', url: '/#/dats', act: async (page) => page.waitForTimeout(1500) },
+  { name: 'dat-progress', url: '/#/dats', act: barMoves },
   { name: 'activity-page', url: '/#/activity', full: true }
 ];
 
@@ -43,7 +46,7 @@ for (const size of sizes) {
         await page.emulateMedia({ colorScheme: scheme });
         await page.setViewportSize({ width: size.width, height: size.height });
         await page.goto(shot.url);
-        await page.waitForTimeout(300);
+        await page.getByRole('heading', { level: 1 }).first().waitFor();
         await shot.act?.(page);
         await page.screenshot({
           path: `${dir ?? ''}/${shot.name}-${scheme}-${size.width}x${size.height}.png`,

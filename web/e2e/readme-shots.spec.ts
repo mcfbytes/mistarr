@@ -1,6 +1,7 @@
 import { test, type Page } from '@playwright/test';
 import { renderArt } from '../src/lib/art/generate';
-import { fixturePlatforms } from '../src/lib/fixtures';
+import { fixturePlatforms } from '../src/mock/fixtures';
+import { noCovers, openPanel } from './helpers';
 
 // README screenshots from mock data, written only when README_SHOTS_DIR is set; see docs/TESTING.md.
 const dir = process.env.README_SHOTS_DIR;
@@ -10,15 +11,17 @@ test.use({ deviceScaleFactor: 2, locale: 'en-US', timezoneId: 'UTC' });
 /** A few minutes after the fixtures' job times, so "ago" reads as recent. */
 const NOW = new Date(1_770_032_700_000);
 
-/** Blocks cover art so every poster is the generated one; covers are third-party images. */
-async function noCovers(page: Page): Promise<void> {
-  await page.route(/^https?:\/\/(?!localhost)/, (route) => route.abort());
+/** Opens the activity panel once its finished jobs have loaded. */
+async function panel(page: Page): Promise<void> {
+  await openPanel(page);
+  await page.getByRole('list', { name: 'Finished' }).getByRole('listitem').first().waitFor();
 }
 
-async function openPanel(page: Page): Promise<void> {
-  await page.getByRole('button', { name: /^Background work:/ }).click();
-  await page.getByRole('region', { name: 'Background work' }).waitFor();
-  await page.waitForTimeout(1200);
+/** Leaves the `pirate` DAT tag out of Browse's flag choices, as the showcase shows them. */
+async function showcaseFlags(page: Page): Promise<void> {
+  await page.getByLabel('pirate', { exact: true }).evaluate((input) => {
+    (input.closest('label') as HTMLElement).style.display = 'none';
+  });
 }
 
 interface Shot {
@@ -31,9 +34,9 @@ interface Shot {
 
 const shots: Shot[] = [
   { name: 'platforms', url: '/?mock=showcase#/', width: 1280, height: 860 },
-  { name: 'browse', url: '/?mock=showcase#/p/snes', width: 1280, height: 760 },
+  { name: 'browse', url: '/?mock=showcase#/p/snes', width: 1280, height: 760, act: showcaseFlags },
   { name: 'title', url: '/?mock=showcase#/t/10', width: 1280, height: 660 },
-  { name: 'activity', url: '/#/dats', width: 1280, height: 800, act: openPanel },
+  { name: 'activity', url: '/#/dats', width: 1280, height: 800, act: panel },
   { name: 'system', url: '/?mock=showcase#/system', width: 1280, height: 800 },
   { name: 'wizard', url: '/?mock=showcase#/wizard', width: 1280, height: 640 },
   { name: 'phone', url: '/?mock=showcase#/', width: 390, height: 844 }
@@ -49,7 +52,7 @@ for (const scheme of ['dark', 'light'] as const) {
       await page.setViewportSize({ width: shot.width, height: shot.height });
       await page.goto(shot.url);
       await page.waitForLoadState('networkidle');
-      await page.waitForTimeout(400);
+      await page.getByRole('heading', { level: 1 }).first().waitFor();
       await shot.act?.(page);
       await page.screenshot({ path: `${dir ?? ''}/${shot.name}-${scheme}.png` });
     });

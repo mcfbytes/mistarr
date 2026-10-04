@@ -9,7 +9,6 @@
   import UrlField from '../lib/UrlField.svelte';
   import type { DatVersion } from '../lib/types';
 
-  const isMock = import.meta.env.VITE_MOCK === '1';
   let datsError = $state<string | null>(null);
 
   async function loadDatsList(): Promise<void> {
@@ -120,9 +119,7 @@
     busy = new Set([...busy, d.id]);
     announcement = `Removing ${label(d)}`;
     try {
-      if (!isMock) {
-        await api.deleteDat(d.id);
-      }
+      await api.deleteDat(d.id);
       markDatRemoved(d.id);
       announcement = `${label(d)} removed. Files on the card stay where they are.`;
       await tick();

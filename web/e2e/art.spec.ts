@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 import { familyFor, platformArt, renderArt, type ArtFormat } from '../src/lib/art/generate';
 import { hardware } from '../src/lib/art/hardware';
 import { SLOTS, slotVars } from '../src/lib/art/palette';
-import { fixturePlatforms } from '../src/lib/fixtures';
+import { fixturePlatforms } from '../src/mock/fixtures';
 import type { PlatformKind } from '../src/lib/types';
 
 const ids = [

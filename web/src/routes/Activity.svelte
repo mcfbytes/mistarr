@@ -18,8 +18,6 @@
   import ProgressBar from '../lib/ProgressBar.svelte';
   import type { Job } from '../lib/types';
 
-  const isMock = import.meta.env.VITE_MOCK === '1';
-
   let downloadsError = $state<string | null>(null);
   let jobsError = $state<string | null>(null);
   let importsError = $state<string | null>(null);
@@ -87,10 +85,6 @@
   }
 
   async function retry(id: number): Promise<void> {
-    if (isMock) {
-      patchDownload(id, { state: 'queued', error: null });
-      return;
-    }
     try {
       const row = await api.retryDownload(id);
       patchDownload(id, row);
@@ -100,10 +94,6 @@
   }
 
   async function cancel(id: number): Promise<void> {
-    if (isMock) {
-      patchDownload(id, { state: 'cancelled' });
-      return;
-    }
     try {
       const row = await api.cancelDownload(id);
       patchDownload(id, row);

@@ -1,9 +1,8 @@
 <script lang="ts">
   import { untrack } from 'svelte';
   import { api, errorMessage } from './api';
-  import { fixtureUnidentified } from './fixtures';
   import { reasonText } from './unidentified';
-  import type { Paged, UnidentifiedFile } from './types';
+  import type { UnidentifiedFile } from './types';
 
   interface Props {
     platformId: string;
@@ -13,7 +12,6 @@
   const { platformId, count }: Props = $props();
 
   const PAGE = 50;
-  const isMock = import.meta.env.VITE_MOCK === '1';
   let items = $state<UnidentifiedFile[]>([]);
   let total = $state(0);
   let loading = $state(false);
@@ -43,17 +41,12 @@
     });
   });
 
-  function mockPage(offset: number): Paged<UnidentifiedFile> {
-    const all = fixtureUnidentified[platformId] ?? [];
-    return { items: all.slice(offset, offset + PAGE), total: all.length };
-  }
-
   async function more(): Promise<void> {
     const mine = generation;
     loading = true;
     error = null;
     try {
-      const page = isMock ? mockPage(items.length) : await api.unidentified(platformId, items.length, PAGE);
+      const page = await api.unidentified(platformId, items.length, PAGE);
       if (mine !== generation) {
         return;
       }
