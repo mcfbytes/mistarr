@@ -96,6 +96,12 @@ function pause(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
+/** Counts one more title request for `key` (`search#page`) answered or cut short, in knob `titlesSettled`. */
+function settled(key: string): void {
+  const counts = mockKnob<Record<string, number>>('titlesSettled', {});
+  recordKnob('titlesSettled', { ...counts, [key]: (counts[key] ?? 0) + 1 });
+}
+
 async function titles(
   platformId: string,
   filters: TitleFilters,
@@ -103,8 +109,11 @@ async function titles(
   offset: number,
   signal?: AbortSignal
 ): Promise<Paged<TitleGroup>> {
-  const ms = delayMs(filters.q ?? '', Math.floor((offset + limit - 1) / TITLES_PAGE));
+  const q = filters.q ?? '';
+  const page = Math.floor((offset + limit - 1) / TITLES_PAGE);
+  const ms = delayMs(q, page);
   await pause(Math.abs(ms), signal);
+  settled(`${q}#${page}`);
   if (ms < 0) {
     throw new ApiError('internal', 'Mock search failed.', 500);
   }

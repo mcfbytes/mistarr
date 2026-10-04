@@ -314,6 +314,8 @@ set with `setMockKnob` in `web/e2e/helpers.ts`, and push SSE events with
 - `sourceCount` and `pageCap`: synthetic extra sources, and a smaller page cap
   so a store reads several pages.
 - `savedSettings`: written by the mock with the last settings it was sent.
+- `titlesSettled`: written by the mock, how many title requests per `search#page`
+  it has answered or cut short, so a test can wait out a slow one.
 
 ## 3. End-to-end on a board with real, open-licensed content
 

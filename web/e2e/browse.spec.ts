@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { MOCK_EVENT } from '../src/mock/events';
-import { emitEvent, setMockKnob } from './helpers';
+import { emitEvent, readMockKnob, setMockKnob } from './helpers';
 
 /** Sets the mock search latency per query; see `delayMs` in `src/mock/fixtures.ts`. */
 async function delays(page: Page, byQuery: Record<string, number> | null): Promise<void> {
@@ -10,6 +10,12 @@ async function delays(page: Page, byQuery: Record<string, number> | null): Promi
 /** A file's state changed, as a scan reports it; the grid reloads its pages. */
 async function fileChanged(page: Page): Promise<void> {
   await emitEvent(page, { name: 'file.changed', data: { file_id: 0, state: 'verified' } });
+}
+
+/** How many title requests for `key` (`search#page`) the mock has answered or cut short. */
+async function settled(page: Page, key: string): Promise<number> {
+  const counts = (await readMockKnob(page, 'titlesSettled')) as Record<string, number> | null;
+  return counts?.[key] ?? 0;
 }
 
 function names(page: Page) {
@@ -49,7 +55,8 @@ test('a newer search wins over a slower one still on its way', async ({ page }) 
   await expect(names(page).first()).toHaveText('Mock Manor (USA)');
   await expect(busy).toHaveCount(0);
 
-  // The newer search cut the slow one short, whose answer landed first and was dropped.
+  // Once the slow answer is in, cut short or not, the grid still shows the newer search.
+  await expect.poll(() => settled(page, 'Example#0'), { timeout: 5000 }).toBe(1);
   await expect(names(page).filter({ hasNotText: 'Mock Manor (USA)' })).toHaveCount(0);
 });
 
@@ -198,11 +205,13 @@ test('a background reload stops when the user searches', async ({ page }) => {
   await scrollForMore(page, 120);
 
   await delays(page, { '': 1000 });
+  const before = await settled(page, '#0');
   await fileChanged(page);
   await page.getByPlaceholder('Search').fill('Mock');
   await expect(names(page).first()).toHaveText('Mock Manor (USA)');
 
-  // The search cut the reload short, whose pages never land over its rows.
+  // Once the reload's first page is in, cut short or not, it has not landed over the search.
+  await expect.poll(() => settled(page, '#0'), { timeout: 5000 }).toBe(before + 1);
   await expect(page.getByRole('progressbar', { name: 'Loading titles' })).toHaveCount(0);
   await expect(names(page).filter({ hasNotText: 'Mock Manor (USA)' })).toHaveCount(0);
 });
