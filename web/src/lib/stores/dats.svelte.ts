@@ -1,9 +1,6 @@
 import { api } from '../api';
-import { fixtureDats } from '../fixtures';
 import { readAllPages } from '../paging';
 import type { DatVersion } from '../types';
-
-const isMock = import.meta.env.VITE_MOCK === '1';
 
 let dats = $state<DatVersion[]>([]);
 let total = $state(0);
@@ -18,11 +15,6 @@ export function getDatTotal(): number {
 }
 
 export async function loadDats(): Promise<void> {
-  if (isMock) {
-    dats = fixtureDats.map((d) => ({ ...d }));
-    total = dats.length;
-    return;
-  }
   const all = await readAllPages((limit, offset) => api.dats(limit, offset), (d) => d.id);
   dats = all.sort((a, b) => b.loaded_at - a.loaded_at || b.id - a.id);
   total = dats.length;

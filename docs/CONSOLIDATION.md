@@ -291,18 +291,18 @@ Opus · `mistarr-server` · branch `wp-60-db-types`
 
 Opus · `web/` · branch `wp-61-web-mock`
 
-- [ ] `src/mock/` implements the `api` object's type and an in-memory event
+- [x] `src/mock/` implements the `api` object's type and an in-memory event
   stream that feeds `events.ts` `handle()`; `main.ts` installs it when
   `VITE_MOCK=1`.
-- [ ] No `isMock` or `VITE_MOCK` outside `src/mock/` and `main.ts`, enforced by
+- [x] No `isMock` or `VITE_MOCK` outside `src/mock/` and `main.ts`, enforced by
   a lint rule or a check in `npm run lint`.
-- [ ] The fetch and progress simulation leaves `jobs.svelte.ts`; the mock
+- [x] The fetch and progress simulation leaves `jobs.svelte.ts`; the mock
   binding leaves `SourceDetail.svelte`.
-- [ ] One `mockKnob<T>(key, fallback)` replaces the localStorage readers in
+- [x] One `mockKnob<T>(key, fallback)` replaces the localStorage readers in
   `fixtures.ts`; `window.mistarrReloadTitles` goes.
-- [ ] `e2e/helpers.ts` holds `openPanel`, `noCovers` and `setMockKnob`;
+- [x] `e2e/helpers.ts` holds `openPanel`, `noCovers` and `setMockKnob`;
   `waitForTimeout` calls become locator waits.
-- [ ] The production bundle contains no fixture strings and stays inside its
+- [x] The production bundle contains no fixture strings and stays inside its
   size budget.
 
 ## Wave 6

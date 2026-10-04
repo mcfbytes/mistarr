@@ -1,8 +1,6 @@
 import { api, ApiError, errorMessage } from '../api';
-import { fixtureTitle, fixtureTitles, mockDelayMs, mockRemovedIds } from '../fixtures';
 import type { FileState, TitleDetail, TitleFilters, TitleGroup } from '../types';
 
-const isMock = import.meta.env.VITE_MOCK === '1';
 const PAGE_SIZE = 60;
 
 let groups = $state<TitleGroup[]>([]);
@@ -44,33 +42,6 @@ export function isGroupsLoading(): boolean {
 /** Why the latest page failed to load, or null. */
 export function getGroupsError(): string | null {
   return groupsError;
-}
-
-/** Waits `ms`, or less when `signal` aborts first. */
-function pause(ms: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve) => {
-    const timer = setTimeout(resolve, ms);
-    signal.addEventListener('abort', () => {
-      clearTimeout(timer);
-      resolve();
-    });
-  });
-}
-
-async function mockTitles(
-  platformId: string,
-  filters: TitleFilters,
-  page: number,
-  signal: AbortSignal
-): Promise<{ items: TitleGroup[]; total: number }> {
-  const ms = mockDelayMs(filters.q ?? '', page);
-  await pause(Math.abs(ms), signal);
-  if (ms < 0) {
-    throw new Error('Mock search failed.');
-  }
-  const removed = mockRemovedIds();
-  const all = fixtureTitles(platformId, 240, filters).filter((g) => !removed.includes(g.parent_id));
-  return { items: all, total: all.length };
 }
 
 /**
@@ -128,12 +99,7 @@ export async function loadTitlesPage(
   const from = offset - overlap;
   const limit = PAGE_SIZE + overlap;
   try {
-    const res = isMock
-      ? await mockTitles(platformId, filters, Math.floor(offset / PAGE_SIZE), controller.signal).then((all) => ({
-          items: all.items.slice(from, from + limit),
-          total: all.total
-        }))
-      : await api.titles(platformId, filters, limit, from, controller.signal);
+    const res = await api.titles(platformId, filters, limit, from, controller.signal);
     if (controller.signal.aborted) {
       return false;
     }
@@ -225,11 +191,6 @@ export async function reloadTitles(): Promise<void> {
   }
 }
 
-if (isMock && typeof window !== 'undefined') {
-  // Lets the mock e2e suite stand in for the server's file.changed events.
-  (window as unknown as { mistarrReloadTitles: () => Promise<void> }).mistarrReloadTitles = reloadTitles;
-}
-
 // Re-fetches the open title without clearing it first, so the page only
 // swaps once the new detail arrives instead of flashing blank.
 async function refreshDetail(): Promise<void> {
@@ -242,7 +203,7 @@ async function refreshDetail(): Promise<void> {
   const id = detailId;
   const token = detailToken;
   try {
-    const next = isMock ? fixtureTitle(id) : await api.title(id, controller.signal);
+    const next = await api.title(id, controller.signal);
     if (token === detailToken && detailId === id && !controller.signal.aborted) {
       detail = next;
     }
@@ -274,14 +235,6 @@ export async function loadTitleDetail(id: number): Promise<void> {
   detail = null;
   detailMissing = false;
   detailLoadError = null;
-  if (isMock) {
-    if (mockRemovedIds().includes(id)) {
-      detailMissing = true;
-    } else {
-      detail = fixtureTitle(id);
-    }
-    return;
-  }
   try {
     const next = await api.title(id);
     if (token === detailToken) {

@@ -1,9 +1,6 @@
 import { api } from '../api';
-import { fixtureDownloads, fixtureImports } from '../fixtures';
 import { readAllPages } from '../paging';
 import type { Download, DownloadState, ImportLogEntry } from '../types';
-
-const isMock = import.meta.env.VITE_MOCK === '1';
 
 let downloads = $state<Download[]>([]);
 let imports = $state<ImportLogEntry[]>([]);
@@ -32,13 +29,11 @@ export function watchImports(): () => void {
 }
 
 export async function loadDownloads(): Promise<void> {
-  downloads = isMock
-    ? fixtureDownloads
-    : await readAllPages((limit, offset) => api.downloads(limit, offset), (d) => d.id);
+  downloads = await readAllPages((limit, offset) => api.downloads(limit, offset), (d) => d.id);
 }
 
 export async function loadImports(): Promise<void> {
-  imports = isMock ? fixtureImports : await readAllPages((limit, offset) => api.imports(limit, offset), (i) => i.id);
+  imports = await readAllPages((limit, offset) => api.imports(limit, offset), (i) => i.id);
 }
 
 export function patchDownload(id: number, patch: Partial<Download>): void {

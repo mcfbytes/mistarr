@@ -1,4 +1,4 @@
-import { EventSubscriber } from '../api';
+import { api, type EventStream } from '../api';
 import type { SseEvent } from '../types';
 import { applyStatus, loadStatus, loadWizard, setConnected } from './status.svelte';
 import { applySourceChanged, loadSources } from './sources.svelte';
@@ -10,7 +10,7 @@ import { applyFileChanged, reloadTitles } from './titles.svelte';
 import { loadIncoming, scheduleIncoming } from './incoming.svelte';
 import { announceUpload, markUploadsStale } from './uploads.svelte';
 
-let subscriber: EventSubscriber | null = null;
+let subscriber: EventStream | null = null;
 
 // Re-fetches every hydrated store when a reconnect's replay may have gaps;
 // allSettled so one failed store neither rejects resync nor hides the others.
@@ -147,11 +147,11 @@ function handle(event: SseEvent): void {
 }
 
 export function startEvents(): void {
-  if (subscriber || import.meta.env.VITE_MOCK === '1') {
+  if (subscriber) {
     return;
   }
   // Live progress is never replayed, so every (re)connection reads the open jobs again.
-  subscriber = new EventSubscriber(handle, (connected) => {
+  subscriber = api.events(handle, (connected) => {
     setConnected(connected);
     if (connected) {
       // A miss leaves the running list stale until the next job.progress event or resync.
