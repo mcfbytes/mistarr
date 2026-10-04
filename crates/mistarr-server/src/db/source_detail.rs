@@ -4,15 +4,15 @@ use mistarr_core::PlatformId;
 use mistarr_mister::platforms::{self, Kind};
 use mistarr_sources::binding;
 use mistarr_sources::torrent::TorrentFile;
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
-use super::candidates::FileCandidate;
-use super::sources::{self, SourceId, SourceRow, SqlDatIndex};
+use super::candidates::{FileCandidate, MatchConfidence};
+use super::downloads::DownloadState;
+use super::ids::{DatVersionId, DownloadId, RomId, SourceId, TitleId};
+use super::sources::{self, SourceRow, SqlDatIndex};
+use super::sql::{self, get_u64, Page, Paged};
 use crate::error::Result;
-
-/// Download states that keep a file selected in the client.
-const OPEN: &str = "('queued', 'transferring', 'checking', 'importing')";
 
 /// A file that holds a matched rom or a candidate rom, as `matched_count` counts it.
 const HAS_MATCH: &str = "(f.rom_id IS NOT NULL OR EXISTS (SELECT 1 FROM torrent_candidates c
@@ -141,9 +141,9 @@ pub enum Unmatched {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct FileDownload {
     /// The download's id.
-    pub id: i64,
-    /// Its state, as `/downloads` names it.
-    pub state: String,
+    pub id: DownloadId,
+    /// Its state.
+    pub state: DownloadState,
     /// Share transferred, 0 to 1.
     pub progress: f64,
 }
@@ -160,13 +160,13 @@ pub struct FileRow {
     /// What the file is.
     pub kind: FileKind,
     /// Matched rom.
-    pub rom_id: Option<i64>,
+    pub rom_id: Option<RomId>,
     /// The matched rom's DAT name.
     pub rom_name: Option<String>,
     /// The matched rom's title.
-    pub title_id: Option<i64>,
+    pub title_id: Option<TitleId>,
     /// `hash`, `name` or `base`, `None` when unmatched.
-    pub confidence: Option<String>,
+    pub confidence: Option<MatchConfidence>,
     /// The file's candidate roms, strongest first.
     pub candidates: Vec<FileCandidate>,
     /// Why nothing matched, `None` when a rom or a candidate did.
@@ -175,17 +175,11 @@ pub struct FileRow {
     pub download: Option<FileDownload>,
 }
 
-fn uint(r: &Row<'_>, i: usize) -> rusqlite::Result<u64> {
-    Ok(u64::try_from(r.get::<_, i64>(i)?).unwrap_or(0))
-}
-
 fn platform_of(conn: &Connection, id: SourceId) -> Result<Option<String>> {
     Ok(conn
-        .query_row(
-            "SELECT platform_id FROM sources WHERE id = ?1",
-            [id.0],
-            |r| r.get(0),
-        )
+        .query_row("SELECT platform_id FROM sources WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
         .optional()?
         .flatten())
 }
@@ -200,9 +194,17 @@ pub fn files(
     conn: &Connection,
     id: SourceId,
     query: &FileQuery,
-    limit: u32,
-    offset: u32,
-) -> Result<(Vec<FileRow>, u64)> {
+    page: Page,
+) -> Result<Paged<FileRow>> {
+    sql::snapshot(conn, |conn| files_in(conn, id, query, page))
+}
+
+fn files_in(
+    conn: &Connection,
+    id: SourceId,
+    query: &FileQuery,
+    page: Page,
+) -> Result<Paged<FileRow>> {
     let platform = platform_of(conn, id)?;
     let mut filter = String::new();
     if let Some(f) = query.filter {
@@ -219,8 +221,8 @@ pub fn files(
         &format!(
             "SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = ?1 AND {search}{filter}"
         ),
-        params![id.0, q],
-        |r| uint(r, 0),
+        params![id, q],
+        |r| get_u64(r, 0),
     )?;
     let mut stmt = conn.prepare(&format!(
         "SELECT f.file_index, f.path, f.size, f.rom_id, r.name, r.title_id, f.confidence,
@@ -232,9 +234,9 @@ pub fn files(
          ORDER BY f.file_index LIMIT ?3 OFFSET ?4"
     ))?;
     let mut rows = stmt
-        .query_map(params![id.0, q, limit, offset], |r| {
+        .query_map(params![id, q, page.limit, page.offset], |r| {
             let path: String = r.get(1)?;
-            let download = match r.get::<_, Option<i64>>(7)? {
+            let download = match r.get::<_, Option<DownloadId>>(7)? {
                 Some(id) => Some(FileDownload {
                     id,
                     state: r.get(8)?,
@@ -246,7 +248,7 @@ pub fn files(
                 file_index: r.get(0)?,
                 kind: file_kind(&path, platform.as_deref()),
                 path,
-                size: uint(r, 2)?,
+                size: get_u64(r, 2)?,
                 rom_id: r.get(3)?,
                 rom_name: r.get(4)?,
                 title_id: r.get(5)?,
@@ -276,7 +278,7 @@ pub fn files(
             });
         }
     }
-    Ok((rows, total))
+    Ok(Paged { items: rows, total })
 }
 
 /// How a source's files classify; the first four add up to its file count.
@@ -298,7 +300,7 @@ pub struct Summary {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DatShare {
     /// The `dat_versions` row.
-    pub dat_version_id: i64,
+    pub dat_version_id: DatVersionId,
     /// Its name.
     pub dat_name: String,
     /// Its version string.
@@ -346,7 +348,7 @@ pub fn detail(conn: &Connection, id: SourceId) -> Result<Option<SourceDetail>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT f.path, f.rom_id IS NOT NULL, {HAS_MATCH} FROM torrent_files f WHERE f.source_id = ?1"
     ))?;
-    let mut rows = stmt.query([id.0])?;
+    let mut rows = stmt.query([id])?;
     while let Some(r) = rows.next()? {
         let (path, rom, any): (String, bool, bool) = (r.get(0)?, r.get(1)?, r.get(2)?);
         let slot = if rom {
@@ -363,8 +365,8 @@ pub fn detail(conn: &Connection, id: SourceId) -> Result<Option<SourceDetail>> {
     summary.wanted = conn.query_row(
         "SELECT COUNT(DISTINCT file_index) FROM downloads
          WHERE source_id = ?1 AND file_index IS NOT NULL AND state != 'cancelled'",
-        [id.0],
-        |r| uint(r, 0),
+        [id],
+        |r| get_u64(r, 0),
     )?;
     let dats = conn
         .prepare(
@@ -373,12 +375,12 @@ pub fn detail(conn: &Connection, id: SourceId) -> Result<Option<SourceDetail>> {
              JOIN titles t ON t.id = r.title_id JOIN dat_versions d ON d.id = t.dat_version_id
              WHERE f.source_id = ?1 GROUP BY d.id ORDER BY n DESC, d.id",
         )?
-        .query_map([id.0], |r| {
+        .query_map([id], |r| {
             Ok(DatShare {
                 dat_version_id: r.get(0)?,
                 dat_name: r.get(1)?,
                 version: r.get(2)?,
-                matched: uint(r, 3)?,
+                matched: get_u64(r, 3)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -388,14 +390,15 @@ pub fn detail(conn: &Connection, id: SourceId) -> Result<Option<SourceDetail>> {
                     COALESCE(SUM(CAST(d.progress * f.size AS INTEGER)), 0)
              FROM downloads d JOIN torrent_files f
                ON f.source_id = d.source_id AND f.file_index = d.file_index
-             WHERE d.source_id = ?1 AND d.state IN {OPEN}"
+             WHERE d.source_id = ?1 AND d.state IN {}",
+            DownloadState::SELECTED_SQL
         ),
-        [id.0],
+        [id],
         |r| {
             Ok(Transfer {
-                files: uint(r, 0)?,
-                size: uint(r, 1)?,
-                done: uint(r, 2)?,
+                files: get_u64(r, 0)?,
+                size: get_u64(r, 1)?,
+                done: get_u64(r, 2)?,
             })
         },
     )?;
@@ -478,12 +481,12 @@ pub fn preview_chunk(
              ORDER BY file_index LIMIT ?4",
         )?
         .query_map(
-            params![id.0, after.map_or(-1, i64::from), step.max(1), limit],
+            params![id, after.map_or(-1, i64::from), step.max(1), limit],
             |r| {
                 Ok(TorrentFile {
                     index: r.get(0)?,
                     path: r.get(1)?,
-                    size: uint(r, 2)?,
+                    size: get_u64(r, 2)?,
                 })
             },
         )?
@@ -631,7 +634,7 @@ mod tests {
     }
 
     /// A source on `nes` with a matched rom, a candidate, an unmatched rom and a readme.
-    fn source(c: &Connection) -> (SourceId, i64) {
+    fn source(c: &Connection) -> (SourceId, RomId) {
         let a = seed_rom(c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
         let b = seed_rom(c, "nes", "Second Try (Japan).nes", 24, &[]).expect("rom");
         let id = sources::insert(
@@ -654,11 +657,11 @@ mod tests {
         ];
         sources::replace_files(c, id, &list).expect("files");
         sources::set_binding(c, id, Some(&PlatformId("nes".into())), Some(0.25)).expect("bind");
-        sources::set_matches(c, id, &[(0, Some(RomRef(a)), Confidence::Name)]).expect("m");
+        sources::set_matches(c, id, &[(0, Some(RomRef(a.0)), Confidence::Name)]).expect("m");
         c.execute(
             "INSERT INTO torrent_candidates (source_id, file_index, rom_id, confidence)
              VALUES (?1, 1, ?2, 'fuzzy')",
-            params![id.0, b],
+            params![id, b],
         )
         .expect("candidate");
         (id, a)
@@ -672,7 +675,7 @@ mod tests {
             "INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, progress,
                created_at, updated_at)
              SELECT title_id, id, ?1, 0, 'transferring', 0.5, 0, 0 FROM roms WHERE id = ?2",
-            params![id.0, rom],
+            params![id, rom],
         )
         .expect("download");
         let d = detail(&c, id).expect("detail").expect("some");
@@ -706,21 +709,27 @@ mod tests {
     fn file_pages_filter_search_and_explain() {
         let c = conn();
         let (id, rom) = source(&c);
-        let all = files(&c, id, &FileQuery::default(), 10, 0).expect("files");
-        assert_eq!(all.1, 4);
-        let reasons: Vec<_> = all.0.iter().map(|f| f.unmatched).collect();
+        let every = Page {
+            limit: 10,
+            offset: 0,
+        };
+        let all = files(&c, id, &FileQuery::default(), every).expect("files");
+        assert_eq!(all.total, 4);
+        let reasons: Vec<_> = all.items.iter().map(|f| f.unmatched).collect();
         assert_eq!(
             reasons,
             [None, None, Some(Unmatched::NoEntry), Some(Unmatched::Extra)]
         );
-        assert_eq!(all.0[3].kind, FileKind::Extra);
+        assert_eq!(all.items[0].confidence, Some(MatchConfidence::Name));
+        assert_eq!(all.items[3].kind, FileKind::Extra);
         let page = |filter, q: Option<&str>, limit, offset| {
             let query = FileQuery {
                 filter,
                 q: q.map(str::to_owned),
             };
-            let (rows, total) = files(&c, id, &query, limit, offset).expect("files");
-            (rows.iter().map(|f| f.file_index).collect::<Vec<_>>(), total)
+            let got = files(&c, id, &query, Page { limit, offset }).expect("files");
+            let indices = got.items.iter().map(|f| f.file_index).collect::<Vec<_>>();
+            (indices, got.total)
         };
         assert_eq!(
             page(Some(FileFilter::Matched), None, 10, 0),
@@ -732,19 +741,26 @@ mod tests {
         c.execute(
             "INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, created_at, updated_at)
              SELECT title_id, id, ?1, 0, 'queued', 0, 0 FROM roms WHERE id = ?2",
-            params![id.0, rom],
+            params![id, rom],
         )
         .expect("download");
         assert_eq!(page(Some(FileFilter::Wanted), None, 10, 0), (vec![0], 1));
-        let first = files(&c, id, &FileQuery::default(), 1, 0).expect("files").0;
+        let one = Page {
+            limit: 1,
+            offset: 0,
+        };
+        let first = files(&c, id, &FileQuery::default(), one)
+            .expect("files")
+            .items;
         assert_eq!(
-            first[0].download.as_ref().map(|d| d.state.as_str()),
-            Some("queued")
+            first[0].download.as_ref().map(|d| d.state),
+            Some(DownloadState::Queued)
         );
         sources::set_binding(&c, id, None, None).expect("unbind");
-        let rows = files(&c, id, &FileQuery::default(), 10, 0)
+        let rows = files(&c, id, &FileQuery::default(), every)
             .expect("files")
-            .0;
+            .items;
+
         assert_eq!(rows[2].unmatched, Some(Unmatched::Unbound));
     }
 

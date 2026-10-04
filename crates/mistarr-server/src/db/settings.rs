@@ -4,7 +4,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 
-use crate::error::{Error, Result};
+use super::sql;
+use crate::error::Result;
 
 /// Keys the server stores.
 pub mod keys {
@@ -26,13 +27,24 @@ pub mod keys {
     /// JSON list of [`crate::jobs::core_limits::PreviousLimits`]: limits saved
     /// for clients no longer in use, until they are put back or dropped.
     pub const CLIENT_PREVIOUS_LIMITS: &str = "client.previous_limits";
+
+    /// Present while `platform`'s 1G1R picks lag the MRA titles a catalogue run stored.
+    ///
+    /// ```
+    /// use mistarr_server::db::settings::keys;
+    /// assert_eq!(keys::mra_recompute_pending("arcade"), "mra.recompute_pending.arcade");
+    /// ```
+    #[must_use]
+    pub fn mra_recompute_pending(platform: &str) -> String {
+        format!("mra.recompute_pending.{platform}")
+    }
 }
 
 /// Reads a value.
 ///
 /// # Errors
 ///
-/// [`Error::Db`] on SQLite failure.
+/// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
@@ -51,7 +63,7 @@ pub fn get(conn: &Connection, key: &str) -> Result<Option<String>> {
 ///
 /// # Errors
 ///
-/// [`Error::Db`] on SQLite failure.
+/// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
 /// use mistarr_server::db::settings;
@@ -73,7 +85,7 @@ pub fn set(conn: &Connection, key: &str, value: &str) -> Result<()> {
 ///
 /// # Errors
 ///
-/// [`Error::Db`] on SQLite failure, [`Error::Stored`] when the value is not a `T`.
+/// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Stored`] when the value is not a `T`.
 ///
 /// ```
 /// use mistarr_server::db::settings;
@@ -84,12 +96,7 @@ pub fn set(conn: &Connection, key: &str, value: &str) -> Result<()> {
 /// ```
 pub fn get_json<T: DeserializeOwned>(conn: &Connection, key: &str) -> Result<Option<T>> {
     get(conn, key)?
-        .map(|text| {
-            serde_json::from_str(&text).map_err(|source| Error::Stored {
-                key: key.to_owned(),
-                source,
-            })
-        })
+        .map(|text| sql::from_json(key, &text))
         .transpose()
 }
 
@@ -97,7 +104,7 @@ pub fn get_json<T: DeserializeOwned>(conn: &Connection, key: &str) -> Result<Opt
 ///
 /// # Errors
 ///
-/// [`Error::Db`] on SQLite failure, [`Error::Stored`] if `value` cannot be serialised.
+/// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Stored`] if `value` cannot be serialised.
 ///
 /// ```
 /// use mistarr_server::db::settings;
@@ -107,18 +114,14 @@ pub fn get_json<T: DeserializeOwned>(conn: &Connection, key: &str) -> Result<Opt
 /// assert_eq!(settings::get(&conn, "v").unwrap().as_deref(), Some(r#"["a"]"#));
 /// ```
 pub fn set_json<T: Serialize>(conn: &Connection, key: &str, value: &T) -> Result<()> {
-    let text = serde_json::to_string(value).map_err(|source| Error::Stored {
-        key: key.to_owned(),
-        source,
-    })?;
-    set(conn, key, &text)
+    set(conn, key, &sql::to_json(key, value)?)
 }
 
 /// Deletes a value; absent keys are fine.
 ///
 /// # Errors
 ///
-/// [`Error::Db`] on SQLite failure.
+/// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
 /// use mistarr_server::db::settings;
@@ -136,6 +139,7 @@ pub fn remove(conn: &Connection, key: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::Error;
 
     fn conn() -> Connection {
         let mut c = Connection::open_in_memory().expect("open");

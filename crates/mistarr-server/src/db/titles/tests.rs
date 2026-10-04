@@ -1,9 +1,16 @@
 use super::*;
 use crate::db::dats::{self, NewVersion};
+use crate::db::sql::Page;
 use mistarr_core::naming::group_key;
 use proptest::prelude::*;
 
 const DAT: &str = "Maker - Game Boy";
+
+/// The first page of sixty, the Browse screen's.
+const SIXTY: Page = Page {
+    limit: 60,
+    offset: 0,
+};
 
 /// [`super::browse`] after refreshing the groups the test's autocommit writes left dirty.
 fn browse(
@@ -14,7 +21,7 @@ fn browse(
     offset: u32,
 ) -> Result<(Vec<GroupRow>, u64)> {
     groups::flush(c)?;
-    super::browse(c, platform, filter, limit, offset)
+    super::browse(c, platform, filter, Page { limit, offset }).map(|p| (p.items, p.total))
 }
 
 /// [`super::counts`] after the same refresh.
@@ -75,7 +82,7 @@ fn add(
             crc32: Some("0a0b0c0d"),
             md5: None,
             sha1: None,
-            status,
+            status: RomStatus::parse(status).expect("status"),
             header: None,
         })
         .collect();
@@ -184,10 +191,7 @@ fn upsert_keeps_ids_across_versions_and_retires_dropped_roms() {
         )
         .expect("title");
     assert_eq!(dv, v2.0);
-    assert_eq!(
-        tags_of(&c, id.0, Tag::Regions).expect("regions"),
-        ["Europe"]
-    );
+    assert_eq!(tags_of(&c, id, Tag::Regions).expect("regions"), ["Europe"]);
     let roms: Vec<(String, String, bool)> = c
         .prepare("SELECT name, status, retired FROM roms WHERE title_id = ?1 ORDER BY name")
         .expect("prepare")
@@ -543,7 +547,7 @@ fn failing_check_and_partial_count_clone_groups_not_titles() {
     // The real grouping path: matching group_key clusters both pairs into one
     // clone group each, exactly as a catalogue run would.
     recompute_platform(&c, "arcade", &Prefs::default()).expect("recompute");
-    let parent_of = |id: crate::db::titles::TitleId| -> i64 {
+    let parent_of = |id: crate::db::ids::TitleId| -> i64 {
         c.query_row("SELECT parent_id FROM titles WHERE id = ?1", [id.0], |r| {
             r.get(0)
         })
@@ -761,8 +765,8 @@ fn detail_lists_variants_roms_files_and_sources() {
     assert_eq!(v.torrent_files_available, 1);
     assert_eq!(v.roms.len(), 1);
     assert_eq!(
-        (v.roms[0].file_id, v.roms[0].file_state.as_deref()),
-        (Some(f), Some("misnamed"))
+        (v.roms[0].file_id, v.roms[0].file_state),
+        (Some(FileId(f)), Some(FileState::Misnamed))
     );
     let beta = d
         .variants
@@ -854,9 +858,10 @@ fn browse_walks_an_index_in_every_sort_order() {
             assert!(!plan.contains("TEMP B-TREE"), "{sort:?}: {plan}");
             assert!(plan.contains("titles_group_root"), "{sort:?}: {plan}");
             let fts = shape != SearchShape::Like;
+            // The hidden flags are one bound list; a full-text shape adds the search's own.
             assert_eq!(
-                plan.contains("LIST SUBQUERY"),
-                fts,
+                plan.matches("LIST SUBQUERY").count(),
+                1 + usize::from(fts),
                 "{sort:?} {shape:?}: {plan}"
             );
             assert_eq!(
@@ -888,7 +893,7 @@ fn every_search_shape_finds_the_same_groups() {
         };
         let pages: Vec<_> = SearchShape::ALL
             .into_iter()
-            .map(|s| browse_with(&c, platform, &filter, 60, 0, s).expect("browse"))
+            .map(|s| browse_with(&c, platform, &filter, SIXTY, s).expect("browse"))
             .collect();
         assert!(pages.windows(2).all(|w| w[0] == w[1]), "{platform} {q}");
     }
@@ -946,7 +951,7 @@ fn removing_a_dat_retires_its_roms_unwants_and_cancels_queued_downloads() {
 /// The reference for [`reroot`], one title at a time: a title keeps its group unless that
 /// group's root title is known and in another group, and then takes the group's
 /// lowest live member, or its lowest member when none is live.
-fn reference_reroot(nodes: &[Node]) -> Vec<Option<i64>> {
+fn reference_reroot(nodes: &[Node]) -> Vec<Option<TitleId>> {
     nodes
         .iter()
         .map(|n| {
@@ -980,9 +985,10 @@ fn nodes_strategy() -> impl Strategy<Value = Vec<Node>> {
     })
     .prop_map(|(specs, order)| {
         let id = |i: usize| {
-            order
+            let raw = order
                 .get(i)
-                .map_or(1000 + i64::try_from(i).expect("i"), |&o| o * 3 + 1)
+                .map_or(1000 + i64::try_from(i).expect("i"), |&o| o * 3 + 1);
+            TitleId(raw)
         };
         let mut nodes: Vec<Node> = specs
             .iter()
@@ -1077,12 +1083,12 @@ fn store_catalogue(c: &Connection, counts: [i64; 3], games: &[GameSpec], ids: &[
 
 /// A title as [`reference_groups`] reads it: id, parent, version, live, and its sorted
 /// rom keys when every live rom has one.
-type RefTitle = (i64, Option<i64>, i64, bool, Option<Vec<String>>);
+type RefTitle = (TitleId, Option<TitleId>, i64, bool, Option<Vec<String>>);
 
 /// The documented `group_root` of every `nes` title, worked out without the code under
 /// test: DAT groups, then links by sorted rom keys, then the lowest live id of each
 /// group left behind.
-fn reference_groups(c: &Connection) -> Vec<(i64, Option<i64>)> {
+fn reference_groups(c: &Connection) -> Vec<(TitleId, Option<TitleId>)> {
     let versions: Vec<i64> = c
         .prepare(
             "SELECT id FROM dat_versions WHERE platform_id = 'nes' AND source = 'dat'
@@ -1159,7 +1165,7 @@ fn reference_groups(c: &Connection) -> Vec<(i64, Option<i64>)> {
     nodes.iter().zip(roots).map(|(n, r)| (n.id, r)).collect()
 }
 
-fn stored_groups(c: &Connection) -> Vec<(i64, Option<i64>)> {
+fn stored_groups(c: &Connection) -> Vec<(TitleId, Option<TitleId>)> {
     c.prepare("SELECT id, group_root FROM titles WHERE platform_id = 'nes' ORDER BY id")
         .expect("prepare")
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
@@ -1198,7 +1204,7 @@ proptest! {
         let expected = reference_reroot(&nodes);
         let mut got = nodes.clone();
         reroot(&mut got);
-        let got: Vec<Option<i64>> = got.iter().map(|n| n.target).collect();
+        let got: Vec<Option<TitleId>> = got.iter().map(|n| n.target).collect();
         prop_assert_eq!(&got, &expected);
         for (i, a) in nodes.iter().enumerate() {
             for (j, b) in nodes.iter().enumerate() {
@@ -1247,15 +1253,16 @@ fn chained_re_rooting_keeps_every_group_apart() {
     .expect("rows");
     recompute_nes(&mut c);
     let groups = stored_groups(&c);
+    let want = [
+        (10, Some(10)),
+        (11, Some(11)),
+        (40, Some(50)),
+        (41, Some(10)),
+        (50, Some(50)),
+    ]
+    .map(|(t, g): (i64, Option<i64>)| (TitleId(t), g.map(TitleId)));
     assert_eq!(
-        groups,
-        [
-            (10, Some(10)),
-            (11, Some(11)),
-            (40, Some(50)),
-            (41, Some(10)),
-            (50, Some(50))
-        ],
+        groups, want,
         "X links to A; B and N keep a group rooted at N; C keeps its own"
     );
     assert_eq!(groups, reference_groups(&c));

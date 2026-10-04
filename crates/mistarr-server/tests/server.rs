@@ -445,7 +445,7 @@ async fn each_client_change_triggers_its_own_detection() {
         .running
         .app
         .db
-        .read(|c| db::jobs::count_kind(c, "detect_client"))
+        .read(|c| db::jobs::count_kind(c, mistarr_server::jobs::JobKind::DetectClient))
         .await
         .expect("count");
     assert_eq!(detections, 3, "startup plus one per change");

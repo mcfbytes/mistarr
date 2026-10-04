@@ -17,17 +17,16 @@ use serde_json::json;
 use tokio::time::Instant;
 
 use super::scan::{self, Track};
-use super::{Job, JobContext, Lane, Scheduler};
+use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::chd::{self as rows, Unidentified};
-use crate::db::files::{self, FileId, FileRow, FileState, NewFile, RomMatch};
+use crate::db::files::{self, FileRow, FileState, NewFile, RomMatch};
+use crate::db::ids::{FileId, RomId, TitleId};
 use crate::db::settings::{self, keys};
+use crate::db::titles::RomStatus;
 use crate::error::Result;
 use crate::events::EventKind;
 use crate::threads::{self, label};
-
-/// `jobs.kind` of [`ChdTracks`].
-pub const KIND: &str = "chd_tracks";
 
 /// Bytes decoded between two checkpoints, a fraction of a second on the board.
 const SLICE_BYTES: u32 = 640 << 10;
@@ -330,9 +329,9 @@ pub(crate) fn classify_chd(
     let mut out = Vec::with_capacity(m.tracks.len() + 1);
     match winner(conn, &cands)? {
         Some((assigned, cues)) => {
-            let bad = assigned.iter().any(|r| r.status == "baddump");
+            let bad = assigned.iter().any(|r| r.status == RomStatus::BadDump);
             for (i, (t, r)) in m.tracks.iter().zip(&assigned).enumerate() {
-                let state = match (bad, r.status == "baddump") {
+                let state = match (bad, r.status == RomStatus::BadDump) {
                     (false, _) => FileState::Verified,
                     (true, true) => FileState::Bad,
                     (true, false) => FileState::Unverified,
@@ -364,7 +363,7 @@ fn winner(
     let Some(first) = cands.first() else {
         return Ok(None);
     };
-    let mut titles: Vec<i64> = first.iter().map(|r| r.title_id).collect();
+    let mut titles: Vec<TitleId> = first.iter().map(|r| r.title_id).collect();
     titles.sort_unstable();
     titles.dedup();
     titles.retain(|t| cands.iter().all(|c| c.iter().any(|r| r.title_id == *t)));
@@ -400,7 +399,7 @@ fn member(
     m: &ChdMembers<'_>,
     i: usize,
     t: &HashSet,
-    rom: Option<i64>,
+    rom: Option<RomId>,
     state: FileState,
 ) -> NewFile {
     NewFile {
@@ -418,7 +417,7 @@ fn member(
     }
 }
 
-fn cue_row(m: &ChdMembers<'_>, n: usize, rom: i64) -> NewFile {
+fn cue_row(m: &ChdMembers<'_>, n: usize, rom: RomId) -> NewFile {
     let suffix = if n == 0 {
         "cue".to_owned()
     } else {
@@ -613,8 +612,8 @@ struct Tally {
 
 #[async_trait]
 impl Job for ChdTracks {
-    fn kind(&self) -> &'static str {
-        KIND
+    fn kind(&self) -> JobKind {
+        JobKind::ChdTracks
     }
 
     fn lane(&self) -> Lane {
@@ -695,7 +694,8 @@ async fn yield_lane(ctx: &JobContext) -> Result<bool> {
         .app
         .db
         .read(|c| {
-            let other = crate::db::jobs::queued_other_in_lane(c, Lane::Heavy.as_str(), KIND)?;
+            let other = crate::db::jobs::queued_other_in_lane(c, Lane::Heavy, JobKind::ChdTracks)?;
+
             Ok((other, rows::waiting_count(c)? > 0))
         })
         .await?;
@@ -977,7 +977,7 @@ mod tests {
     }
 
     /// A title with a cue and one rom per `(name, hashes, status)`; the cue's id comes first.
-    fn title(c: &Connection, name: &str, roms: &[(&str, HashSet, &str)]) -> Vec<i64> {
+    fn title(c: &Connection, name: &str, roms: &[(&str, HashSet, &str)]) -> Vec<RomId> {
         let t = files::seed_title_fixture(c, &psx(), name).expect("title");
         let cue = HashSet {
             size: 90,
@@ -1002,7 +1002,7 @@ mod tests {
         classify_chd(c, &psx(), &m).expect("classify")
     }
 
-    fn summary(rows: &[NewFile]) -> Vec<(String, Option<i64>, FileState)> {
+    fn summary(rows: &[NewFile]) -> Vec<(String, Option<RomId>, FileState)> {
         rows.iter()
             .map(|r| {
                 let tail = r.rel_path.rsplit('#').next().unwrap_or_default();

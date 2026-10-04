@@ -39,7 +39,7 @@ struct Started {
     /// The fetch's token for `DELETE /fetch/{token}`; `null` for a magnet.
     token: Option<u64>,
     /// Its `url_fetch` job, `null` for a magnet or while the writer is busy.
-    job_id: Option<crate::db::jobs::JobId>,
+    job_id: Option<crate::db::ids::JobId>,
     /// `sources` for a magnet, placed at once; `null` for a fetch.
     target: Option<&'static str>,
     /// The placed `.magnet` file as `/sources/incoming` lists it; `null` for a fetch.

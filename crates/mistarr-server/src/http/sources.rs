@@ -17,15 +17,16 @@ use mistarr_core::PlatformId;
 use mistarr_sources::torrent;
 use serde::{Deserialize, Deserializer, Serialize};
 
-use super::{ApiError, Page, Paging};
+use super::{ApiError, Paging};
 use crate::app::AppState;
-use crate::db::jobs::JobId;
+use crate::db::ids::{JobId, SourceId};
 use crate::db::source_detail::{
     self as detail, FileFilter, FileQuery, FileRow, Preview, SourceDetail,
 };
-use crate::db::sources::{self as rows, SourceId, SourceRow, SourceState};
+use crate::db::sources::{self as rows, SourceReason, SourceRow, SourceState};
+use crate::db::sql::Paged;
 use crate::jobs::bind_source::{BindSource, Choice};
-use crate::jobs::source_import::{self, publish_changed, SourceImport, DUPLICATE};
+use crate::jobs::source_import::{publish_changed, SourceImport, DUPLICATE};
 use crate::jobs::Scheduler;
 
 /// Largest accepted upload; set torrents with many files run to a few MiB.
@@ -47,25 +48,84 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
         .route("/sources/{id}/preview", get(preview))
 }
 
+/// A source as the API returns it: the row with its reason worded.
+#[derive(Debug, Serialize)]
+struct SourceItem {
+    #[serde(flatten)]
+    row: SourceRow,
+    reason: Option<String>,
+}
+
+impl From<SourceRow> for SourceItem {
+    fn from(row: SourceRow) -> Self {
+        let reason = row.reason.as_ref().map(reason_text);
+        Self { row, reason }
+    }
+}
+
+/// `GET /sources/{id}`: the item with how its files classify.
+#[derive(Debug, Serialize)]
+struct DetailItem {
+    #[serde(flatten)]
+    detail: SourceDetail,
+    reason: Option<String>,
+}
+
+/// The sentence the API shows for `reason`.
+fn reason_text(reason: &SourceReason) -> String {
+    let name = |p: &PlatformId| {
+        mistarr_mister::platforms::by_id(&p.0).map_or_else(|| p.0.clone(), |t| t.name.to_owned())
+    };
+    match reason {
+        SourceReason::NoClient => {
+            "No download client found. The file list is read once one is detected.".to_owned()
+        }
+        SourceReason::WaitingMetadata => {
+            "Waiting for the download client to read the file list.".to_owned()
+        }
+        SourceReason::ClientRefused { error } => {
+            format!("The download client did not accept the source: {error}.")
+        }
+        SourceReason::NoMatch { percent, suggested } => {
+            let base =
+                format!("No platform matched {percent}% of the files. Pick a platform to bind it.");
+            match suggested {
+                Some(p) => format!("{base} Its names suggest {}.", name(p)),
+                None => base,
+            }
+        }
+        SourceReason::AwaitingDat { platform } => format!(
+            "Looks like {}. No DAT for it is loaded yet; it binds once one loads.",
+            name(platform)
+        ),
+        SourceReason::Ignored => {
+            "Marked as not a game set. It is not bound automatically.".to_owned()
+        }
+    }
+}
+
 async fn list(
     State(app): State<Arc<AppState>>,
     paging: Result<Query<Paging>, QueryRejection>,
-) -> Result<Json<Page<SourceRow>>, ApiError> {
+) -> Result<Json<Paged<SourceItem>>, ApiError> {
     let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let (limit, offset) = paging.resolve();
-    let (items, total) = app.db.read(move |c| rows::list(c, limit, offset)).await?;
-    Ok(Json(Page { items, total }))
+    let page = paging.resolve();
+    let rows = app.db.read(move |c| rows::list(c, page)).await?;
+    Ok(Json(Paged {
+        items: rows.items.into_iter().map(SourceItem::from).collect(),
+        total: rows.total,
+    }))
 }
 
 /// `GET /sources/incoming`: files in `sources/` not loaded yet, and rejected ones.
 async fn incoming(
     State(app): State<Arc<AppState>>,
     paging: Result<Query<Paging>, QueryRejection>,
-) -> Result<Json<Page<crate::incoming::IncomingFile>>, ApiError> {
+) -> Result<Json<Paged<crate::incoming::IncomingFile>>, ApiError> {
     let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let dir = app.config().paths.sources();
-    let all = crate::incoming::list(&app, &dir, crate::jobs::source_import::IMPORT_KIND).await?;
-    Ok(Json(Page::slice(all, &paging)))
+    let all = crate::incoming::list(&app, &dir, crate::jobs::JobKind::SourceImport).await?;
+    Ok(Json(paging.resolve().slice(all)))
 }
 
 fn source_id(id: Result<UrlPath<i64>, PathRejection>) -> Result<SourceId, ApiError> {
@@ -94,7 +154,7 @@ async fn files(
     State(app): State<Arc<AppState>>,
     id: Result<UrlPath<i64>, PathRejection>,
     query: Result<Query<FilesQuery>, QueryRejection>,
-) -> Result<Json<Page<FileRow>>, ApiError> {
+) -> Result<Json<Paged<FileRow>>, ApiError> {
     let id = source_id(id)?;
     let Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let filter = query
@@ -110,27 +170,29 @@ async fn files(
         limit: query.limit,
         offset: query.offset,
     };
-    let (limit, offset) = paging.resolve();
+    let page = paging.resolve();
     let query = FileQuery { filter, q: query.q };
     load(&app, id).await?;
-    let (items, total) = app
+    let files = app
         .db
-        .read(move |c| detail::files(c, id, &query, limit, offset))
+        .read(move |c| detail::files(c, id, &query, page))
         .await?;
-    Ok(Json(Page { items, total }))
+    Ok(Json(files))
 }
 
 /// `GET /sources/{id}`: the source with how its files classify.
 async fn show(
     State(app): State<Arc<AppState>>,
     id: Result<UrlPath<i64>, PathRejection>,
-) -> Result<Json<SourceDetail>, ApiError> {
+) -> Result<Json<DetailItem>, ApiError> {
     let id = source_id(id)?;
-    app.db
+    let detail = app
+        .db
         .read(move |c| detail::detail(c, id))
         .await?
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found("No such source."))
+        .ok_or_else(|| ApiError::not_found("No such source."))?;
+    let reason = detail.source.reason.as_ref().map(reason_text);
+    Ok(Json(DetailItem { detail, reason }))
 }
 
 /// `GET /sources/{id}/preview`: how many files each platform with a DAT would match.
@@ -183,7 +245,7 @@ fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<String>>, D:
 #[derive(Debug, Serialize)]
 struct Updated {
     #[serde(flatten)]
-    source: SourceRow,
+    source: SourceItem,
     job_id: Option<JobId>,
 }
 
@@ -196,10 +258,10 @@ fn enable_source(conn: &rusqlite::Connection, id: SourceId, threshold: f32) -> c
         } else if r.file_count == 0 {
             (SourceState::Resolving, None)
         } else {
-            let why = source_import::unbound_reason(threshold);
+            let why = SourceReason::no_match(threshold, None);
             (SourceState::Unbound, Some(why))
         };
-        rows::set_state(conn, id, state, reason.as_deref())?;
+        rows::set_state(conn, id, state, reason.as_ref())?;
     }
     Ok(())
 }
@@ -308,7 +370,7 @@ async fn update(
         StatusCode::OK
     };
     let body = Updated {
-        source: updated,
+        source: updated.into(),
         job_id,
     };
     Ok((status, Json(body)).into_response())
@@ -473,7 +535,7 @@ pub(crate) async fn place_source(
         Err(e) => return Err(crate::Error::Io(e).into()),
     };
     let job = Arc::new(SourceImport { path: path.clone() });
-    Ok(crate::incoming::queue_placed(app, &path, source_import::IMPORT_KIND, job).await?)
+    Ok(crate::incoming::queue_placed(app, &path, crate::jobs::JobKind::SourceImport, job).await?)
 }
 
 /// Writes `bytes` under `name`, or `name (N)` when taken, in `dir`. The name
@@ -588,6 +650,69 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasons_are_worded_with_their_parameters() {
+        let words = |r: SourceReason| reason_text(&r);
+        assert_eq!(
+            words(SourceReason::no_match(0.6, None)),
+            "No platform matched 60% of the files. Pick a platform to bind it."
+        );
+        assert!(
+            words(SourceReason::no_match(0.6, Some(PlatformId("gb".into()))))
+                .ends_with(" Its names suggest Game Boy.")
+        );
+        assert_eq!(
+            words(SourceReason::AwaitingDat {
+                platform: PlatformId("gb".into())
+            }),
+            "Looks like Game Boy. No DAT for it is loaded yet; it binds once one loads."
+        );
+        let refused = SourceReason::ClientRefused {
+            error: "refused".into(),
+        };
+        assert!(words(refused).ends_with("source: refused."));
+        for r in [
+            SourceReason::NoClient,
+            SourceReason::WaitingMetadata,
+            SourceReason::Ignored,
+        ] {
+            assert!(words(r).ends_with('.'));
+        }
+        let mut row = SourceItem::from(sample_row());
+        assert_eq!(row.reason, None);
+        row = SourceItem::from(SourceRow {
+            reason: Some(SourceReason::Ignored),
+            ..sample_row()
+        });
+        let json = serde_json::to_value(&row).expect("json");
+        assert_eq!(
+            json["reason"],
+            "Marked as not a game set. It is not bound automatically."
+        );
+    }
+
+    fn sample_row() -> SourceRow {
+        SourceRow {
+            id: SourceId(1),
+            infohash: "0a".repeat(20),
+            display_name: "Synthetic Set".into(),
+            origin_file: "set.torrent".into(),
+            platform_id: None,
+            bind_score: None,
+            state: SourceState::Unbound,
+            reason: None,
+            seed_policy: "none".into(),
+            file_count: 0,
+            matched_count: 0,
+            total_size: 0,
+            client_id: None,
+            added_at: 0,
+            suggested_platform_id: None,
+            user_binding: false,
+            pending_binding: None,
+        }
+    }
 
     #[test]
     fn multipart_finds_the_file_part() {

@@ -1,71 +1,38 @@
 //! The `files` table and the resumable `scan_progress` table it is scanned
 //! against. See `docs/DATA-MODEL.md` "files" and "files.state".
 
-use std::fmt;
-
 use mistarr_core::PlatformId;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
+use super::ids::{FileId, RomId, TitleId};
+use super::sql::{self, text_enum, Page, Paged};
+use super::titles::RomStatus;
 use crate::error::Result;
 
-/// A `files.id`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
-#[serde(transparent)]
-pub struct FileId(pub i64);
-
-impl fmt::Display for FileId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+text_enum! {
+    /// `files.state`.
+    pub enum FileState {
+        /// Seen, not yet hashed.
+        Pending = "pending",
+        /// Hash matches a rom and the filename is what the adapter expects.
+        Verified = "verified",
+        /// Hash matches a rom, name differs.
+        Misnamed = "misnamed",
+        /// No rom matches in any loaded DAT.
+        Unverified = "unverified",
+        /// Matches a rom flagged `baddump`.
+        Bad = "bad",
+        /// A disc image whose tracks are not identified yet or cannot be; `reason` says why.
+        Unidentified = "unidentified",
     }
-}
-
-/// `files.state`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FileState {
-    /// Seen, not yet hashed.
-    Pending,
-    /// Hash matches a rom and the filename is what the adapter expects.
-    Verified,
-    /// Hash matches a rom, name differs.
-    Misnamed,
-    /// No rom matches in any loaded DAT.
-    Unverified,
-    /// Matches a rom flagged `baddump`.
-    Bad,
-    /// A disc image whose tracks are not identified yet or cannot be; `reason` says why.
-    Unidentified,
 }
 
 impl FileState {
-    /// The column value.
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Verified => "verified",
-            Self::Misnamed => "misnamed",
-            Self::Unverified => "unverified",
-            Self::Bad => "bad",
-            Self::Unidentified => "unidentified",
-        }
-    }
-
-    /// Parses a column value.
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        [
-            Self::Pending,
-            Self::Verified,
-            Self::Misnamed,
-            Self::Unverified,
-            Self::Bad,
-            Self::Unidentified,
-        ]
-        .into_iter()
-        .find(|v| v.as_str() == s)
-    }
+    /// States whose file holds its rom's content, which a launch may load.
+    pub const LOADABLE: [Self; 3] = [Self::Verified, Self::Misnamed, Self::Bad];
+    /// [`FileState::LOADABLE`] as an SQL list.
+    pub const LOADABLE_SQL: &'static str = "('verified', 'misnamed', 'bad')";
 }
 
 /// One `files` row.
@@ -94,7 +61,7 @@ pub struct FileRow {
     /// The whole file's hashes under a rule that strips a header.
     pub whole: WholeHashes,
     /// The matched `roms.id`, when any.
-    pub rom_id: Option<i64>,
+    pub rom_id: Option<RomId>,
     /// Lifecycle state.
     pub state: FileState,
     /// Unix seconds this row was last written by a scan.
@@ -127,7 +94,7 @@ pub struct NewFile {
     /// The whole file's hashes under a rule that strips a header.
     pub whole: WholeHashes,
     /// The matched `roms.id`, when any.
-    pub rom_id: Option<i64>,
+    pub rom_id: Option<RomId>,
     /// The decided state.
     pub state: FileState,
     /// Why an `unidentified` row is not identified; `None` in every other state.
@@ -204,13 +171,13 @@ pub fn basename(name: &str) -> &str {
 #[derive(Debug, Clone, PartialEq)]
 pub struct RomMatch {
     /// The matched `roms.id`.
-    pub rom_id: i64,
+    pub rom_id: RomId,
     /// The rom's owning `titles.id`.
-    pub title_id: i64,
+    pub title_id: TitleId,
     /// The filename the DAT expects, compared against the file's own name.
     pub name: String,
-    /// `good`, `baddump`, `nodump` or `verified`.
-    pub status: String,
+    /// The rom's dump status.
+    pub status: RomStatus,
     /// The owning title's name, which placement names the file after.
     pub game: String,
 }
@@ -219,9 +186,8 @@ pub(crate) const COLUMNS: &str =
     "id, platform_id, rel_path, size, mtime, crc32, md5, sha1, header_rule, rom_id, state, scanned_at, reason, crc32_whole, md5_whole, sha1_whole";
 
 pub(crate) fn from_row(r: &Row<'_>) -> rusqlite::Result<FileRow> {
-    let state: String = r.get(10)?;
     Ok(FileRow {
-        id: FileId(r.get(0)?),
+        id: r.get(0)?,
         platform_id: PlatformId(r.get(1)?),
         rel_path: r.get(2)?,
         size: r.get(3)?,
@@ -236,7 +202,7 @@ pub(crate) fn from_row(r: &Row<'_>) -> rusqlite::Result<FileRow> {
             sha1: r.get(15)?,
         },
         rom_id: r.get(9)?,
-        state: FileState::parse(&state).unwrap_or(FileState::Pending),
+        state: r.get(10)?,
         scanned_at: r.get(11)?,
         reason: r.get(12)?,
     })
@@ -271,7 +237,7 @@ pub fn get(conn: &Connection, id: FileId) -> Result<Option<FileRow>> {
     Ok(conn
         .query_row(
             &format!("SELECT {COLUMNS} FROM files WHERE id = ?1"),
-            [id.0],
+            [id],
             from_row,
         )
         .optional()?)
@@ -293,7 +259,7 @@ pub fn move_to(
 ) -> Result<()> {
     conn.execute(
         "UPDATE files SET rel_path = ?2, state = ?3, mtime = ?4, scanned_at = ?5 WHERE id = ?1",
-        params![id.0, rel_path, state.as_str(), mtime, now],
+        params![id, rel_path, state, mtime, now],
     )?;
     Ok(())
 }
@@ -304,7 +270,7 @@ pub fn move_to(
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn delete(conn: &Connection, id: FileId) -> Result<()> {
-    conn.execute("DELETE FROM files WHERE id = ?1", [id.0])?;
+    conn.execute("DELETE FROM files WHERE id = ?1", [id])?;
     Ok(())
 }
 
@@ -384,8 +350,9 @@ pub fn paths_under(
         "SELECT rel_path FROM files WHERE platform_id = ?1 AND rel_path > ?2 AND rel_path < ?3
          ORDER BY rel_path LIMIT ?4",
     )?;
-    let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-    let rows = stmt.query_map(params![platform_id.0, after, to, limit], |r| r.get(0))?;
+    let rows = stmt.query_map(params![platform_id.0, after, to, sql::to_i64(limit)], |r| {
+        r.get(0)
+    })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -398,7 +365,7 @@ pub fn paths_under(
 pub fn restamp(conn: &Connection, id: FileId, mtime: i64, now: i64) -> Result<()> {
     conn.execute(
         "UPDATE files SET mtime = ?2, scanned_at = ?3 WHERE id = ?1",
-        params![id.0, mtime, now],
+        params![id, mtime, now],
     )?;
     Ok(())
 }
@@ -423,7 +390,7 @@ pub fn reverify(
                           header_rule = NULL, crc32_whole = NULL, md5_whole = NULL,
                           sha1_whole = NULL, state = 'unverified', scanned_at = ?5
          WHERE id = ?1",
-        params![id.0, size, mtime, crc32, now],
+        params![id, size, mtime, crc32, now],
     )?;
     Ok(())
 }
@@ -433,7 +400,7 @@ pub fn reverify(
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn has_verified(conn: &Connection, rom_id: i64) -> Result<bool> {
+pub fn has_verified(conn: &Connection, rom_id: RomId) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM files WHERE rom_id = ?1 AND state = 'verified')",
         [rom_id],
@@ -452,13 +419,14 @@ pub fn has_verified(conn: &Connection, rom_id: i64) -> Result<bool> {
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let pid = PlatformId("arcade".into());
-/// assert!(!mistarr_server::db::files::mark_verified(&conn, &pid, "mame/a.zip#a.bin", 1).unwrap());
+/// let rom = mistarr_server::db::ids::RomId(1);
+/// assert!(!mistarr_server::db::files::mark_verified(&conn, &pid, "mame/a.zip#a.bin", rom).unwrap());
 /// ```
 pub fn mark_verified(
     conn: &Connection,
     platform_id: &PlatformId,
     rel_path: &str,
-    rom_id: i64,
+    rom_id: RomId,
 ) -> Result<bool> {
     Ok(conn.execute(
         "UPDATE files SET state = 'verified', rom_id = ?3
@@ -496,7 +464,7 @@ pub fn upsert(
     size: i64,
     mtime: i64,
     hashed: &Hashed<'_>,
-    rom_id: Option<i64>,
+    rom_id: Option<RomId>,
     state: FileState,
     now: i64,
 ) -> Result<FileId> {
@@ -562,7 +530,7 @@ struct Columns<'a> {
     size: i64,
     mtime: i64,
     hashed: &'a Hashed<'a>,
-    rom_id: Option<i64>,
+    rom_id: Option<RomId>,
     state: FileState,
     reason: Option<&'a str>,
 }
@@ -576,8 +544,9 @@ fn upsert_columns(
     let (crc32_whole, md5_whole, sha1_whole) = row.hashed.whole.map_or((None, None, None), |w| {
         (w.crc32.as_deref(), w.md5.as_deref(), w.sha1.as_deref())
     });
-    conn.prepare_cached(
-        "INSERT INTO files (platform_id, rel_path, size, mtime, crc32, md5, sha1, header_rule,
+    Ok(conn
+        .prepare_cached(
+            "INSERT INTO files (platform_id, rel_path, size, mtime, crc32, md5, sha1, header_rule,
                              rom_id, state, scanned_at, reason, crc32_whole, md5_whole, sha1_whole)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)
          ON CONFLICT(platform_id, rel_path) DO UPDATE SET
@@ -585,33 +554,29 @@ fn upsert_columns(
            md5 = excluded.md5, sha1 = excluded.sha1, header_rule = excluded.header_rule,
            rom_id = excluded.rom_id, state = excluded.state, scanned_at = excluded.scanned_at,
            reason = excluded.reason, crc32_whole = excluded.crc32_whole,
-           md5_whole = excluded.md5_whole, sha1_whole = excluded.sha1_whole",
-    )?
-    .execute(params![
-        platform_id.0,
-        row.rel_path,
-        row.size,
-        row.mtime,
-        row.hashed.crc32,
-        row.hashed.md5,
-        row.hashed.sha1,
-        row.hashed.header_rule,
-        row.rom_id,
-        row.state.as_str(),
-        now,
-        row.reason,
-        crc32_whole,
-        md5_whole,
-        sha1_whole,
-    ])?;
-    Ok(conn
+           md5_whole = excluded.md5_whole, sha1_whole = excluded.sha1_whole
+         RETURNING id",
+        )?
         .query_row(
-            "SELECT id FROM files WHERE platform_id = ?1 AND rel_path = ?2",
-            params![platform_id.0, row.rel_path],
-            |r| r.get(0).map(FileId),
-        )
-        .optional()?
-        .unwrap_or(FileId(conn.last_insert_rowid())))
+            params![
+                platform_id.0,
+                row.rel_path,
+                row.size,
+                row.mtime,
+                row.hashed.crc32,
+                row.hashed.md5,
+                row.hashed.sha1,
+                row.hashed.header_rule,
+                row.rom_id,
+                row.state,
+                now,
+                row.reason,
+                crc32_whole,
+                md5_whole,
+                sha1_whole,
+            ],
+            |r| r.get(0),
+        )?)
 }
 
 /// The relative paths currently recorded for a platform.
@@ -642,8 +607,8 @@ pub fn delete_paths(
     if paths.is_empty() {
         return Ok(0);
     }
-    let list = serde_json::to_string(paths)?;
-    let ids: Vec<i64> = conn
+    let list = sql::json_list(paths)?;
+    let ids: Vec<FileId> = conn
         .prepare_cached(
             "SELECT id FROM files WHERE platform_id = ?1
                AND rel_path IN (SELECT value FROM json_each(?2))",
@@ -663,13 +628,14 @@ pub fn delete_paths(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert_eq!(mistarr_server::db::files::delete_ids(&conn, &[1, 2]).unwrap(), 0);
+/// use mistarr_server::db::ids::FileId;
+/// assert_eq!(mistarr_server::db::files::delete_ids(&conn, &[FileId(1), FileId(2)]).unwrap(), 0);
 /// ```
-pub fn delete_ids(conn: &Connection, ids: &[i64]) -> Result<usize> {
+pub fn delete_ids(conn: &Connection, ids: &[FileId]) -> Result<usize> {
     if ids.is_empty() {
         return Ok(0);
     }
-    let list = serde_json::to_string(ids)?;
+    let list = sql::json_list(ids)?;
     conn.prepare_cached(
         "UPDATE import_log SET file_id = NULL WHERE file_id IN (SELECT value FROM json_each(?1))",
     )?
@@ -799,7 +765,7 @@ pub fn roms_matching(
     let select = "SELECT r.id, r.title_id, r.name, r.status, t.name
          FROM roms r JOIN titles t ON t.id = r.title_id
          WHERE t.platform_id = ?1 AND t.source = 'dat' AND r.retired = 0 AND t.retired = 0 AND ";
-    let size = i64::try_from(hashes.size).unwrap_or(i64::MAX);
+    let size = sql::to_i64(hashes.size);
     let run = |cond: &str, p: &[&dyn rusqlite::ToSql]| -> Result<Vec<RomMatch>> {
         Ok(conn
             .prepare_cached(&format!("{select}{cond} ORDER BY r.id"))?
@@ -842,9 +808,10 @@ fn rom_match(r: &Row<'_>) -> rusqlite::Result<RomMatch> {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(mistarr_server::db::files::disc_roms(&conn, 1).unwrap().is_empty());
+/// let title = mistarr_server::db::ids::TitleId(1);
+/// assert!(mistarr_server::db::files::disc_roms(&conn, title).unwrap().is_empty());
 /// ```
-pub fn disc_roms(conn: &Connection, title_id: i64) -> Result<Vec<RomMatch>> {
+pub fn disc_roms(conn: &Connection, title_id: TitleId) -> Result<Vec<RomMatch>> {
     Ok(conn
         .prepare_cached(
             "SELECT r.id, r.title_id, r.name, r.status, t.name FROM roms r JOIN titles t ON t.id = r.title_id
@@ -899,35 +866,37 @@ pub struct UnidentifiedFile {
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let psx = mistarr_core::PlatformId("psx".into());
-/// let (items, total) = mistarr_server::db::files::unidentified(&conn, &psx, 0, 50).unwrap();
-/// assert!(items.is_empty() && total == 0);
+/// let page = mistarr_server::db::sql::Page { limit: 50, offset: 0 };
+/// let got = mistarr_server::db::files::unidentified(&conn, &psx, page).unwrap();
+/// assert!(got.items.is_empty() && got.total == 0);
 /// ```
 pub fn unidentified(
     conn: &Connection,
     platform_id: &PlatformId,
-    offset: u32,
-    limit: u32,
-) -> Result<(Vec<UnidentifiedFile>, u64)> {
-    let items = conn
-        .prepare_cached(
-            "SELECT rel_path, size, COALESCE(reason, 'corrupt') FROM files
-             WHERE state = 'unidentified' AND platform_id = ?1
-             ORDER BY rel_path LIMIT ?2 OFFSET ?3",
-        )?
-        .query_map(params![platform_id.0, limit, offset], |r| {
-            Ok(UnidentifiedFile {
-                rel_path: r.get(0)?,
-                size: r.get(1)?,
-                reason: r.get(2)?,
-            })
-        })?
-        .collect::<rusqlite::Result<_>>()?;
-    let total: i64 = conn
-        .prepare_cached(
-            "SELECT COUNT(*) FROM files WHERE state = 'unidentified' AND platform_id = ?1",
-        )?
-        .query_row([&platform_id.0], |r| r.get(0))?;
-    Ok((items, u64::try_from(total).unwrap_or(0)))
+    page: Page,
+) -> Result<Paged<UnidentifiedFile>> {
+    sql::snapshot(conn, |conn| {
+        let total = conn
+            .prepare_cached(
+                "SELECT COUNT(*) FROM files WHERE state = 'unidentified' AND platform_id = ?1",
+            )?
+            .query_row([&platform_id.0], |r| sql::get_u64(r, 0))?;
+        let items = conn
+            .prepare_cached(
+                "SELECT rel_path, size, COALESCE(reason, 'corrupt') FROM files
+                 WHERE state = 'unidentified' AND platform_id = ?1
+                 ORDER BY rel_path LIMIT ?2 OFFSET ?3",
+            )?
+            .query_map(params![platform_id.0, page.limit, page.offset], |r| {
+                Ok(UnidentifiedFile {
+                    rel_path: r.get(0)?,
+                    size: r.get(1)?,
+                    reason: r.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Paged { items, total })
+    })
 }
 
 /// Up to `limit` files on `platform_id` matched to a rom that is retired or whose title is.
@@ -973,7 +942,8 @@ pub fn retired_matches(
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::files::{unmatched_after, FileId};
+/// use mistarr_server::db::files::unmatched_after;
+/// use mistarr_server::db::ids::FileId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let nes = mistarr_core::PlatformId("nes".into());
@@ -992,7 +962,7 @@ pub fn unmatched_after(
                AND (sha1 IS NOT NULL OR md5 IS NOT NULL)
              ORDER BY id LIMIT ?3"
         ))?
-        .query_map(params![platform_id.0, after.0, limit], from_row)?
+        .query_map(params![platform_id.0, after, limit], from_row)?
         .collect::<rusqlite::Result<_>>()?)
 }
 
@@ -1061,7 +1031,8 @@ pub fn match_live_rom(
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::files::{set_match, FileId, FileState};
+/// use mistarr_server::db::files::{set_match, FileState};
+/// use mistarr_server::db::ids::FileId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// set_match(&conn, FileId(1), None, FileState::Unverified).unwrap();
@@ -1069,11 +1040,11 @@ pub fn match_live_rom(
 pub fn set_match(
     conn: &Connection,
     id: FileId,
-    rom_id: Option<i64>,
+    rom_id: Option<RomId>,
     state: FileState,
 ) -> Result<()> {
     conn.prepare_cached("UPDATE files SET rom_id = ?2, state = ?3 WHERE id = ?1")?
-        .execute(params![id.0, rom_id, state.as_str()])?;
+        .execute(params![id, rom_id, state])?;
     Ok(())
 }
 
@@ -1091,11 +1062,12 @@ pub fn set_match(
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let listed = [Some("00000000"), None, None];
-/// assert_eq!(mistarr_server::db::files::unmatch_changed_rom(&conn, 1, "a.nes", 4, listed).unwrap(), 0);
+/// let title = mistarr_server::db::ids::TitleId(1);
+/// assert_eq!(mistarr_server::db::files::unmatch_changed_rom(&conn, title, "a.nes", 4, listed).unwrap(), 0);
 /// ```
 pub fn unmatch_changed_rom(
     conn: &Connection,
-    title_id: i64,
+    title_id: TitleId,
     name: &str,
     size: i64,
     [crc32, md5, sha1]: [Option<&str>; 3],
@@ -1138,7 +1110,7 @@ pub fn crc_candidate_exists(
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn count_roms_for_title(conn: &Connection, title_id: i64) -> Result<i64> {
+pub fn count_roms_for_title(conn: &Connection, title_id: TitleId) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT COUNT(*) FROM roms WHERE title_id = ?1",
         [title_id],
@@ -1172,19 +1144,16 @@ pub fn state_counts(conn: &Connection, platform_id: &PlatformId) -> Result<State
     let mut stmt =
         conn.prepare("SELECT state, COUNT(*) FROM files WHERE platform_id = ?1 GROUP BY state")?;
     let mut counts = StateCounts::default();
-    let rows = stmt.query_map([&platform_id.0], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-    })?;
+    let rows = stmt.query_map([&platform_id.0], |r| Ok((r.get(0)?, sql::get_u64(r, 1)?)))?;
     for row in rows {
         let (state, n) = row?;
-        let n = u64::try_from(n).unwrap_or(0);
-        match FileState::parse(&state) {
-            Some(FileState::Verified) => counts.verified = n,
-            Some(FileState::Misnamed) => counts.misnamed = n,
-            Some(FileState::Unverified) => counts.unverified = n,
-            Some(FileState::Bad) => counts.bad = n,
-            Some(FileState::Unidentified) => counts.unidentified = n,
-            Some(FileState::Pending) | None => counts.pending = n,
+        match state {
+            FileState::Verified => counts.verified = n,
+            FileState::Misnamed => counts.misnamed = n,
+            FileState::Unverified => counts.unverified = n,
+            FileState::Bad => counts.bad = n,
+            FileState::Unidentified => counts.unidentified = n,
+            FileState::Pending => counts.pending = n,
         }
     }
     Ok(counts)
@@ -1204,10 +1173,7 @@ pub fn scan_progress(conn: &Connection, platform_id: &PlatformId) -> Result<Vec<
         )
         .optional()?;
     Ok(match stored {
-        Some(json) => serde_json::from_str(&json).map_err(|e| crate::Error::Stored {
-            key: "scan_progress".to_owned(),
-            source: e,
-        })?,
+        Some(json) => sql::from_json("scan_progress.done_dirs", &json)?,
         None => Vec::new(),
     })
 }
@@ -1216,14 +1182,15 @@ pub fn scan_progress(conn: &Connection, platform_id: &PlatformId) -> Result<Vec<
 ///
 /// # Errors
 ///
-/// [`crate::Error::Db`] on SQLite failure.
+/// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Stored`] when the list cannot
+/// be written as JSON.
 pub fn save_scan_progress(
     conn: &Connection,
     platform_id: &PlatformId,
     done_dirs: &[String],
     now: i64,
 ) -> Result<()> {
-    let json = serde_json::to_string(done_dirs).unwrap_or_else(|_| "[]".to_owned());
+    let json = sql::to_json("scan_progress.done_dirs", done_dirs)?;
     conn.execute(
         "INSERT INTO scan_progress (platform_id, done_dirs, updated_at) VALUES (?1, ?2, ?3)
          ON CONFLICT(platform_id) DO UPDATE SET done_dirs = excluded.done_dirs, updated_at = excluded.updated_at",
@@ -1271,7 +1238,7 @@ pub fn seed_title_fixture(
     conn: &Connection,
     platform_id: &PlatformId,
     game_name: &str,
-) -> Result<i64> {
+) -> Result<TitleId> {
     // Each fixture is its own dat_version: version must be unique per dat_name.
     let version = conn.query_row("SELECT COUNT(*) + 1 FROM dat_versions", [], |r| {
         r.get::<_, i64>(0)
@@ -1287,7 +1254,7 @@ pub fn seed_title_fixture(
          VALUES (?1, ?2, ?3, ?3)",
         params![platform_id.0, dat_version_id, game_name],
     )?;
-    let title_id = conn.last_insert_rowid();
+    let title_id = TitleId(conn.last_insert_rowid());
     conn.execute("UPDATE titles SET parent_id = ?1 WHERE id = ?1", [title_id])?;
     Ok(title_id)
 }
@@ -1300,25 +1267,25 @@ pub fn seed_title_fixture(
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn seed_rom_for_title_fixture(
     conn: &Connection,
-    title_id: i64,
+    title_id: TitleId,
     rom_name: &str,
     hashes: &mistarr_core::HashSet,
     status: &str,
-) -> Result<i64> {
+) -> Result<RomId> {
     conn.execute(
         "INSERT INTO roms (title_id, name, size, crc32, md5, sha1, status)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
         params![
             title_id,
             rom_name,
-            i64::try_from(hashes.size).unwrap_or(i64::MAX),
+            sql::to_i64(hashes.size),
             hashes.crc32,
             hashes.md5,
             hashes.sha1,
             status,
         ],
     )?;
-    Ok(conn.last_insert_rowid())
+    Ok(RomId(conn.last_insert_rowid()))
 }
 
 /// A `misnamed` file with the name of the rom it matched.
@@ -1331,7 +1298,7 @@ pub struct MisnamedRow {
     /// Relative to `games/`, a zip member as `a.zip#b.nes`.
     pub rel_path: String,
     /// The matched `roms.id`.
-    pub rom_id: i64,
+    pub rom_id: RomId,
     /// The rom's name in its DAT.
     pub rom_name: String,
     /// The name of the rom's title.
@@ -1358,7 +1325,7 @@ pub fn misnamed(conn: &Connection) -> Result<Vec<MisnamedRow>> {
     )?;
     let rows = stmt.query_map([], |r| {
         Ok(MisnamedRow {
-            id: FileId(r.get(0)?),
+            id: r.get(0)?,
             platform_id: PlatformId(r.get(1)?),
             rel_path: r.get(2)?,
             rom_id: r.get(3)?,
@@ -1382,8 +1349,9 @@ pub fn seed_rom_fixture(
     rom_name: &str,
     hashes: &mistarr_core::HashSet,
     status: &str,
-) -> Result<i64> {
+) -> Result<RomId> {
     let title_id = seed_title_fixture(conn, platform_id, game_name)?;
+
     seed_rom_for_title_fixture(conn, title_id, rom_name, hashes, status)
 }
 
@@ -1406,6 +1374,12 @@ mod tests {
             md5: "900150983cd24fb0d6963f7d28e17f72".into(),
             sha1: "a9993e364706816aba3e25717850c26c9cd0d89d".into(),
         }
+    }
+
+    #[test]
+    fn loadable_matches_its_sql() {
+        let text: Vec<&str> = FileState::LOADABLE.iter().map(|s| s.as_str()).collect();
+        assert_eq!(FileState::LOADABLE_SQL, crate::db::sql::text_list(&text));
     }
 
     #[test]
@@ -1800,7 +1774,7 @@ mod tests {
             .expect("match")
             .expect("found");
         assert_eq!(m.name, "Example Quest (USA).nes");
-        assert_eq!(m.status, "good");
+        assert_eq!(m.status, RomStatus::Good);
 
         // A wrong sha1 with the right md5 falls through to the md5 match
         // only because this rom has no sha1 recorded.
@@ -1817,7 +1791,7 @@ mod tests {
         )
         .expect("match")
         .expect("found");
-        assert!(m.rom_id > 0);
+        assert!(m.rom_id > RomId(0));
     }
 
     fn conn_insert_sha1_less_rom(c: &Connection, pid: &PlatformId, h: &HashSet) {
@@ -1886,17 +1860,17 @@ mod tests {
         c.last_insert_rowid()
     }
 
-    fn seed_title(c: &Connection, pid: &PlatformId, dv: i64, name: &str) -> i64 {
+    fn seed_title(c: &Connection, pid: &PlatformId, dv: i64, name: &str) -> TitleId {
         c.execute(
             "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
              VALUES (?1, ?2, ?3, ?3)",
             params![pid.0, dv, name],
         )
         .expect("title");
-        c.last_insert_rowid()
+        TitleId(c.last_insert_rowid())
     }
 
-    fn seed_rom(c: &Connection, title_id: i64, name: &str, h: &HashSet, status: &str) {
+    fn seed_rom(c: &Connection, title_id: TitleId, name: &str, h: &HashSet, status: &str) {
         c.execute(
             "INSERT INTO roms (title_id, name, size, crc32, md5, sha1, status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -2063,7 +2037,7 @@ mod tests {
         let dv = seed_dat_version(&c, &pid, "only");
         let title = seed_title(&c, &pid, dv, "Moved Quest");
         seed_rom(&c, title, "Moved Quest.nes", &h, "good");
-        let rom = c.last_insert_rowid();
+        let rom = RomId(c.last_insert_rowid());
         let full = Hashed {
             crc32: Some(&h.crc32),
             md5: Some(&h.md5),
@@ -2193,13 +2167,30 @@ mod tests {
             .expect("row");
         assert_eq!(row.reason, None, "a plain upsert clears the reason");
 
-        let (page, total) = unidentified(&c, &pid, 0, 1).expect("page");
-        assert_eq!(total, 2);
-        assert_eq!(page[0].rel_path, "PSX/B/b.chd");
-        assert_eq!(page[0].reason, "off");
-        let (page, _) = unidentified(&c, &pid, 1, 5).expect("page");
-        assert_eq!(page.len(), 1);
-        assert_eq!(page[0].rel_path, "PSX/C/c.chd");
+        let first = unidentified(
+            &c,
+            &pid,
+            Page {
+                limit: 1,
+                offset: 0,
+            },
+        )
+        .expect("page");
+        assert_eq!(first.total, 2);
+        assert_eq!(first.items[0].rel_path, "PSX/B/b.chd");
+        assert_eq!(first.items[0].reason, "off");
+        let rest = unidentified(
+            &c,
+            &pid,
+            Page {
+                limit: 5,
+                offset: 1,
+            },
+        )
+        .expect("page");
+        assert_eq!(rest.items.len(), 1);
+        assert_eq!(rest.items[0].rel_path, "PSX/C/c.chd");
+
         assert_eq!(state_counts(&c, &pid).expect("counts").unidentified, 2);
     }
 
@@ -2212,7 +2203,7 @@ mod tests {
         let b = seed_title_fixture(&c, &pid, "Disc B").expect("title");
         let ra = seed_rom_for_title_fixture(&c, a, "a.bin", &h, "good").expect("rom");
         let rb = seed_rom_for_title_fixture(&c, b, "b.bin", &h, "good").expect("rom");
-        let got: Vec<i64> = roms_matching(&c, &pid, &h)
+        let got: Vec<RomId> = roms_matching(&c, &pid, &h)
             .expect("match")
             .iter()
             .map(|m| m.rom_id)
@@ -2220,7 +2211,7 @@ mod tests {
         assert_eq!(got, [ra, rb]);
         c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [rb])
             .expect("retire");
-        let got: Vec<i64> = roms_matching(&c, &pid, &h)
+        let got: Vec<RomId> = roms_matching(&c, &pid, &h)
             .expect("match")
             .iter()
             .map(|m| m.rom_id)
@@ -2288,7 +2279,7 @@ mod tests {
         )
         .expect("log");
         c.execute_batch("PRAGMA foreign_keys = ON").expect("fk");
-        assert_eq!(delete_ids(&c, &[id.0, 999]).expect("delete"), 1);
+        assert_eq!(delete_ids(&c, &[id, FileId(999)]).expect("delete"), 1);
         let logged: Option<i64> = c
             .query_row("SELECT file_id FROM import_log", [], |r| r.get(0))
             .expect("log");

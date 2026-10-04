@@ -10,9 +10,53 @@ use mistarr_sources::fuzzy::{SizeIndex, SizedRom};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
-use super::sources::{confidence_text, SourceId};
-use super::titles::TitleId;
+use super::ids::{RomId, SourceId, TitleId};
+use super::sql::{self, text_enum};
 use crate::error::Result;
+
+text_enum! {
+    /// `torrent_files.confidence` and `torrent_candidates.confidence`: how a file was
+    /// paired with a rom, strongest first, so the derived order ranks them.
+    #[derive(PartialOrd, Ord)]
+    pub enum MatchConfidence {
+        /// The file's hashes proved it; only `torrent_files` holds it.
+        Hash = "hash",
+        /// Exact or normalized name.
+        Name = "name",
+        /// Base name and size.
+        Base = "base",
+        /// Size, and names sharing their significant words.
+        Fuzzy = "fuzzy",
+        /// Size alone, under the narrow size-only rule.
+        Size = "size",
+    }
+}
+
+impl MatchConfidence {
+    /// The stored confidence of a binding match; `None` for an unmatched file.
+    ///
+    /// ```
+    /// use mistarr_server::db::candidates::MatchConfidence;
+    /// use mistarr_sources::binding::Confidence;
+    /// assert_eq!(MatchConfidence::of(Confidence::Base), Some(MatchConfidence::Base));
+    /// assert_eq!(MatchConfidence::of(Confidence::Unmatched), None);
+    /// ```
+    #[must_use]
+    pub fn of(c: Confidence) -> Option<Self> {
+        match c {
+            Confidence::Name => Some(Self::Name),
+            Confidence::Base => Some(Self::Base),
+            Confidence::Fuzzy => Some(Self::Fuzzy),
+            Confidence::Size => Some(Self::Size),
+            _ => None,
+        }
+    }
+}
+
+/// The server's id of a rom the binding crate names.
+fn rom_id(r: RomRef) -> RomId {
+    RomId(r.0)
+}
 
 /// Orders a `confidence` column from strongest to weakest: hash, name, base, fuzzy, size.
 pub(crate) const RANK: &str = "CASE {c} WHEN 'hash' THEN 0 WHEN 'name' THEN 1 WHEN 'base' THEN 2
@@ -43,18 +87,6 @@ pub(crate) fn not_bad(rom: &str, src: &str, idx: &str) -> String {
         .replace("{idx}", idx)
 }
 
-/// The confidence of a pair a hash proved, stored in `torrent_files`.
-pub const PROVEN: &str = "hash";
-
-/// The static text of a stored `confidence`, so a mapping of many files
-/// holds no string per file; `None` for a value this build does not know.
-#[must_use]
-pub fn known(text: &str) -> Option<&'static str> {
-    ["hash", "name", "base", "fuzzy", "size"]
-        .into_iter()
-        .find(|k| *k == text)
-}
-
 /// What a mapping of a source must respect, beyond its per-file matches,
 /// which [`diff_matches`] reads from the database as it goes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -64,9 +96,9 @@ pub struct Stored {
     /// Whether any file has a matched rom.
     pub matched: bool,
     /// Each `(file, rom)` candidate and its confidence.
-    pub candidates: BTreeMap<(u32, i64), &'static str>,
+    pub candidates: BTreeMap<(u32, RomId), MatchConfidence>,
     /// `(file, rom)` pairs a `bad` download used.
-    pub bad: HashSet<(u32, i64)>,
+    pub bad: HashSet<(u32, RomId)>,
 }
 
 impl Stored {
@@ -94,11 +126,11 @@ pub fn stored(conn: &Connection, source: SourceId) -> Result<Stored> {
             "SELECT file_index FROM torrent_files WHERE source_id = ?1 AND confidence = 'hash'
              ORDER BY file_index",
         )?
-        .query_map([source.0], |r| r.get(0))?
+        .query_map([source], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let matched = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM torrent_files WHERE source_id = ?1 AND rom_id IS NOT NULL)",
-        [source.0],
+        [source],
         |r| r.get(0),
     )?;
     let mut out = Stored {
@@ -109,17 +141,15 @@ pub fn stored(conn: &Connection, source: SourceId) -> Result<Stored> {
     let mut stmt = conn.prepare_cached(
         "SELECT file_index, rom_id, confidence FROM torrent_candidates WHERE source_id = ?1",
     )?;
-    let mut rows = stmt.query([source.0])?;
+    let mut rows = stmt.query([source])?;
     while let Some(r) = rows.next()? {
-        let text: String = r.get(2)?;
-        out.candidates
-            .insert((r.get(0)?, r.get(1)?), known(&text).unwrap_or_default());
+        out.candidates.insert((r.get(0)?, r.get(1)?), r.get(2)?);
     }
     let mut stmt = conn.prepare_cached(
         "SELECT file_index, rom_id FROM downloads
          WHERE source_id = ?1 AND state = 'bad' AND file_index IS NOT NULL",
     )?;
-    let mut rows = stmt.query([source.0])?;
+    let mut rows = stmt.query([source])?;
     while let Some(r) = rows.next()? {
         out.bad.insert((r.get(0)?, r.get(1)?));
     }
@@ -127,7 +157,7 @@ pub fn stored(conn: &Connection, source: SourceId) -> Result<Stored> {
 }
 
 /// A `torrent_files` row to write: file index, rom and confidence.
-pub type MatchRow = (u32, Option<i64>, Option<&'static str>);
+pub type MatchRow = (u32, Option<RomId>, Option<MatchConfidence>);
 
 /// The writes that turn a stored mapping into a new one.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -135,9 +165,9 @@ pub struct Change {
     /// `torrent_files` rows whose rom or confidence changes.
     pub matches: Vec<MatchRow>,
     /// Candidates to remove.
-    pub remove: Vec<(u32, i64)>,
+    pub remove: Vec<(u32, RomId)>,
     /// Candidates to add.
-    pub add: Vec<(u32, i64, &'static str)>,
+    pub add: Vec<(u32, RomId, MatchConfidence)>,
 }
 
 impl Change {
@@ -221,20 +251,19 @@ pub fn diff_matches(
         };
         &sorted
     };
-    let mut rows = stmt.query([source.0])?;
+    let mut rows = stmt.query([source])?;
     let mut out = Vec::new();
     while let Some(r) = rows.next()? {
         let index: u32 = r.get(0)?;
-        let text: Option<String> = r.get(2)?;
-        let now = (r.get::<_, Option<i64>>(1)?, text.as_deref().and_then(known));
-        if now.1 == Some(PROVEN) {
+        let now: (Option<RomId>, Option<MatchConfidence>) = (r.get(1)?, r.get(2)?);
+        if now.1 == Some(MatchConfidence::Hash) {
             continue;
         }
         let new = matches
             .binary_search_by_key(&index, |m| m.0)
             .map_or((None, None), |at| {
                 let (_, rom, confidence) = matches[at];
-                (rom.map(|r| r.0), confidence_text(confidence))
+                (rom.map(rom_id), MatchConfidence::of(confidence))
             });
         if now != new {
             out.push((index, new.0, new.1));
@@ -261,31 +290,26 @@ pub fn diff_candidates(
             .ok()
             .and_then(|at| matches[at].1)
     };
-    let mut wanted: BTreeMap<(u32, i64), Confidence> = BTreeMap::new();
+    let mut wanted: BTreeMap<(u32, RomId), MatchConfidence> = BTreeMap::new();
     for (i, rom, confidence) in found {
-        let keep = confidence_text(*confidence).is_some()
-            && !proven(*i)
-            && !stored.bad.contains(&(*i, rom.0))
-            && own(*i) != Some(*rom);
-        if keep {
-            let slot = wanted.entry((*i, rom.0)).or_insert(*confidence);
-            *slot = (*slot).min(*confidence);
+        let Some(confidence) = MatchConfidence::of(*confidence) else {
+            continue;
+        };
+        let pair = (*i, rom_id(*rom));
+        if !proven(*i) && !stored.bad.contains(&pair) && own(*i) != Some(*rom) {
+            let slot = wanted.entry(pair).or_insert(confidence);
+            *slot = (*slot).min(confidence);
         }
     }
     let mut change = Change::default();
-    for (pair, text) in &stored.candidates {
-        let same = wanted
-            .get(pair)
-            .and_then(|c| confidence_text(*c))
-            .is_some_and(|t| t == *text);
-        if !same {
+    for (pair, confidence) in &stored.candidates {
+        if wanted.get(pair) != Some(confidence) {
             change.remove.push(*pair);
         }
     }
     for ((i, rom), confidence) in wanted {
-        let text = confidence_text(confidence).unwrap_or_default();
-        if stored.candidates.get(&(i, rom)).copied() != Some(text) {
-            change.add.push((i, rom, text));
+        if stored.candidates.get(&(i, rom)) != Some(&confidence) {
+            change.add.push((i, rom, confidence));
         }
     }
     change
@@ -303,14 +327,14 @@ pub fn apply(conn: &Connection, source: SourceId, change: &Change) -> Result<()>
         "UPDATE torrent_files SET rom_id = ?3, confidence = ?4
          WHERE source_id = ?1 AND file_index = ?2 AND confidence IS NOT 'hash'",
     )?;
-    for (i, rom, text) in &change.matches {
-        update.execute(params![source.0, i, rom, text])?;
+    for (i, rom, confidence) in &change.matches {
+        update.execute(params![source, i, rom, confidence])?;
     }
     let mut remove = conn.prepare_cached(
         "DELETE FROM torrent_candidates WHERE source_id = ?1 AND file_index = ?2 AND rom_id = ?3",
     )?;
     for (i, rom) in &change.remove {
-        remove.execute(params![source.0, i, rom])?;
+        remove.execute(params![source, i, rom])?;
     }
     let mut add = conn.prepare_cached(&format!(
         "INSERT OR REPLACE INTO torrent_candidates (source_id, file_index, rom_id, confidence)
@@ -320,8 +344,8 @@ pub fn apply(conn: &Connection, source: SourceId, change: &Change) -> Result<()>
            AND {}",
         not_bad("?3", "?1", "?2")
     ))?;
-    for (i, rom, text) in &change.add {
-        add.execute(params![source.0, i, rom, text])?;
+    for (i, rom, confidence) in &change.add {
+        add.execute(params![source, i, rom, confidence])?;
     }
     Ok(())
 }
@@ -343,25 +367,25 @@ pub fn drop_foreign_proofs(
            SELECT 1 FROM roms r JOIN titles t ON t.id = r.title_id
            WHERE r.id = torrent_files.rom_id AND t.platform_id = ?2
              AND r.retired = 0 AND t.retired = 0)",
-        params![source.0, platform.0],
+        params![source, platform.0],
     )?)
 }
 
 /// Records that file `index` of `source` hashed to `rom`: its row names the
-/// rom as [`PROVEN`] and its candidates are dropped.
+/// rom as [`MatchConfidence::Hash`] and its candidates are dropped.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn prove(conn: &Connection, source: SourceId, index: u32, rom: i64) -> Result<()> {
+pub fn prove(conn: &Connection, source: SourceId, index: u32, rom: RomId) -> Result<()> {
     conn.execute(
         "DELETE FROM torrent_candidates WHERE source_id = ?1 AND file_index = ?2",
-        params![source.0, index],
+        params![source, index],
     )?;
     conn.execute(
         "UPDATE torrent_files SET rom_id = ?3, confidence = ?4
          WHERE source_id = ?1 AND file_index = ?2",
-        params![source.0, index, rom, PROVEN],
+        params![source, index, rom, MatchConfidence::Hash],
     )?;
     Ok(())
 }
@@ -392,9 +416,9 @@ pub fn rom_stamp(conn: &Connection, platform: &PlatformId) -> Result<String> {
     let mut rows = stmt.query([&platform.0])?;
     let (mut count, mut sum) = (0u64, 0u64);
     while let Some(r) = rows.next()? {
-        let (rom, group): (i64, i64) = (r.get(0)?, r.get(1)?);
+        let (rom, group): (RomId, TitleId) = (r.get(0)?, r.get(1)?);
         count += 1;
-        sum = sum.wrapping_add(mix(mix(rom.cast_unsigned()) ^ group.cast_unsigned()));
+        sum = sum.wrapping_add(mix(mix(rom.0.cast_unsigned()) ^ group.0.cast_unsigned()));
     }
     Ok(format!("{versions};{count}:{sum:016x}"))
 }
@@ -426,7 +450,7 @@ pub fn of_files(
         rank("c.confidence")
     ))?;
     let rows = stmt
-        .query_map(params![source.0, from, to], |r| {
+        .query_map(params![source, from, to], |r| {
             Ok((
                 r.get(0)?,
                 FileCandidate {
@@ -445,13 +469,13 @@ pub fn of_files(
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct FileCandidate {
     /// The rom.
-    pub rom_id: i64,
+    pub rom_id: RomId,
     /// Its DAT name.
     pub rom_name: String,
     /// Its title.
-    pub title_id: i64,
+    pub title_id: TitleId,
     /// `name`, `base`, `fuzzy` or `size`.
-    pub confidence: String,
+    pub confidence: MatchConfidence,
 }
 
 /// Removes every candidate of the source.
@@ -462,7 +486,7 @@ pub struct FileCandidate {
 pub fn clear(conn: &Connection, source: SourceId) -> Result<()> {
     conn.execute(
         "DELETE FROM torrent_candidates WHERE source_id = ?1",
-        [source.0],
+        [source],
     )?;
     Ok(())
 }
@@ -473,15 +497,15 @@ pub fn clear(conn: &Connection, source: SourceId) -> Result<()> {
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn drop_pair(conn: &Connection, source: SourceId, index: u32, rom: i64) -> Result<()> {
+pub fn drop_pair(conn: &Connection, source: SourceId, index: u32, rom: RomId) -> Result<()> {
     conn.execute(
         "DELETE FROM torrent_candidates WHERE source_id = ?1 AND file_index = ?2 AND rom_id = ?3",
-        params![source.0, index, rom],
+        params![source, index, rom],
     )?;
     conn.execute(
         "UPDATE torrent_files SET rom_id = NULL, confidence = NULL
          WHERE source_id = ?1 AND file_index = ?2 AND rom_id = ?3",
-        params![source.0, index, rom],
+        params![source, index, rom],
     )?;
     Ok(())
 }
@@ -491,14 +515,18 @@ pub fn drop_pair(conn: &Connection, source: SourceId, index: u32, rom: i64) -> R
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn of_file(conn: &Connection, source: SourceId, index: u32) -> Result<Vec<(i64, String)>> {
+pub fn of_file(
+    conn: &Connection,
+    source: SourceId,
+    index: u32,
+) -> Result<Vec<(RomId, MatchConfidence)>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT rom_id, confidence FROM torrent_candidates
          WHERE source_id = ?1 AND file_index = ?2 ORDER BY {}, rom_id",
         rank("confidence")
     ))?;
     let rows = stmt
-        .query_map(params![source.0, index], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(params![source, index], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
@@ -515,9 +543,10 @@ pub struct Availability {
     /// The file's path inside the torrent.
     pub path: String,
     /// The rom the file may be.
-    pub rom_id: i64,
-    /// `name`, `base`, `fuzzy` or `size`.
-    pub confidence: String,
+    pub rom_id: RomId,
+    /// How the file was paired with the rom; `None` for a file mapped before
+    /// confidences were stored.
+    pub confidence: Option<MatchConfidence>,
 }
 
 /// Every file of a bound source mapped to, or a candidate for, a live rom of
@@ -553,16 +582,16 @@ pub fn for_group(conn: &Connection, parent: TitleId) -> Result<Vec<(TitleId, Ava
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt
-        .query_map([parent.0], |r| {
+        .query_map([parent], |r| {
             Ok((
-                TitleId(r.get(0)?),
+                r.get(0)?,
                 Availability {
-                    source_id: SourceId(r.get(1)?),
+                    source_id: r.get(1)?,
                     source_name: r.get(2)?,
                     file_index: r.get(3)?,
                     path: r.get(4)?,
                     rom_id: r.get(5)?,
-                    confidence: r.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                    confidence: r.get(6)?,
                 },
             ))
         })?
@@ -624,8 +653,9 @@ impl SizeIndex for SqlSizeIndex<'_> {
                  ORDER BY r.id",
             )?;
             let bare = size.checked_sub(self.header).filter(|_| self.header > 0);
-            let size = i64::try_from(size).unwrap_or(i64::MAX);
-            let bare = bare.map_or(size, |b| i64::try_from(b).unwrap_or(i64::MAX));
+            let size = sql::to_i64(size);
+            let bare = bare.map_or(size, sql::to_i64);
+
             let rows = stmt.query_map(params![self.platform.0, size, bare], |r| {
                 Ok(SizedRom {
                     rom: RomRef(r.get(0)?),
@@ -686,9 +716,9 @@ mod tests {
         id
     }
 
-    fn title_of(c: &Connection, rom: i64) -> TitleId {
+    fn title_of(c: &Connection, rom: RomId) -> TitleId {
         c.query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
-            r.get(0).map(TitleId)
+            r.get(0)
         })
         .expect("title")
     }
@@ -711,10 +741,10 @@ mod tests {
             &c,
             src,
             &stored(&c, src).expect("stored"),
-            &[(0, Some(RomRef(a)), Confidence::Name)],
+            &[(0, Some(RomRef(a.0)), Confidence::Name)],
             &[
-                (0, RomRef(b), Confidence::Fuzzy),
-                (1, RomRef(a), Confidence::Size),
+                (0, RomRef(b.0), Confidence::Fuzzy),
+                (1, RomRef(a.0), Confidence::Size),
             ],
         )
         .expect("diff");
@@ -728,11 +758,11 @@ mod tests {
         );
         let unsorted = [
             (1, None, Confidence::Unmatched),
-            (0, Some(RomRef(a)), Confidence::Name),
+            (0, Some(RomRef(a.0)), Confidence::Name),
         ];
         assert_eq!(
             diff_matches(&c, src, &unsorted).expect("diff"),
-            [(0, Some(a), Some("name"))]
+            [(0, Some(a), Some(MatchConfidence::Name))]
         );
         prove(&c, src, 0, b).expect("prove");
         crate::db::downloads_import::insert_fixture(&c, a, src, 1, "bad", None).expect("bad");
@@ -755,10 +785,15 @@ mod tests {
     }
 
     #[test]
-    fn known_confidences_are_static() {
-        assert_eq!(known("fuzzy"), Some("fuzzy"));
-        assert_eq!(known(PROVEN), Some(PROVEN));
-        assert_eq!(known("other"), None);
+    fn confidences_rank_strongest_first() {
+        assert_eq!(
+            MatchConfidence::of(Confidence::Fuzzy),
+            Some(MatchConfidence::Fuzzy)
+        );
+        assert!(MatchConfidence::Hash < MatchConfidence::Name);
+        assert!(MatchConfidence::Fuzzy < MatchConfidence::Size);
+        assert_eq!(MatchConfidence::parse("hash"), Some(MatchConfidence::Hash));
+        assert_eq!(MatchConfidence::parse("other"), None);
     }
 
     #[test]
@@ -768,26 +803,29 @@ mod tests {
         let b = seed_rom(&c, "nes", "Nova Quest (World) (Alt).nes", 16, &[]).expect("rom");
         let src = source(&c, "0a", SourceState::Bound);
         let found = [
-            (0, RomRef(b), Confidence::Size),
-            (0, RomRef(a), Confidence::Size),
-            (0, RomRef(a), Confidence::Fuzzy),
-            (1, RomRef(a), Confidence::Unmatched),
+            (0, RomRef(b.0), Confidence::Size),
+            (0, RomRef(a.0), Confidence::Size),
+            (0, RomRef(a.0), Confidence::Fuzzy),
+            (1, RomRef(a.0), Confidence::Unmatched),
         ];
         assert_eq!(put(&c, src, &found), 2);
         assert_eq!(put(&c, src, &found), 0, "unchanged");
         assert_eq!(
             of_file(&c, src, 0).expect("of"),
-            [(a, "fuzzy".to_owned()), (b, "size".to_owned())]
+            [(a, MatchConfidence::Fuzzy), (b, MatchConfidence::Size)]
         );
         let (ta, tb) = (title_of(&c, a), title_of(&c, b));
-        c.execute("UPDATE titles SET group_root = ?1", [ta.0])
+        c.execute("UPDATE titles SET group_root = ?1", [ta])
             .expect("group");
         let listed = for_group(&c, ta).expect("group");
         assert_eq!(listed.len(), 2);
         assert_eq!(listed[0].0, ta);
         assert_eq!(listed[0].1.path, "Set/nova.nes");
         assert_eq!(listed[0].1.source_name, "Synthetic Set");
-        assert_eq!((listed[1].0, listed[1].1.confidence.as_str()), (tb, "size"));
+        assert_eq!(
+            (listed[1].0, listed[1].1.confidence),
+            (tb, Some(MatchConfidence::Size))
+        );
         let named = of_files(&c, src, 0, 10).expect("files");
         assert_eq!(named.len(), 2);
         assert_eq!(named[0].1.rom_name, "Nova Quest (World).nes");
@@ -801,7 +839,7 @@ mod tests {
         assert!(of_file(&c, src, 0).expect("of").is_empty());
 
         sources::set_state(&c, src, SourceState::Disabled, None).expect("disable");
-        put(&c, src, &[(0, RomRef(b), Confidence::Size)]);
+        put(&c, src, &[(0, RomRef(b.0), Confidence::Size)]);
         assert!(for_group(&c, ta).expect("group").is_empty(), "bound only");
         clear(&c, src).expect("clear");
         assert!(of_file(&c, src, 0).expect("of").is_empty());
@@ -813,15 +851,15 @@ mod tests {
         let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, &[]).expect("rom");
         let b = seed_rom(&c, "nes", "Nova Quest (World) (Alt).nes", 16, &[]).expect("rom");
         let src = source(&c, "0b", SourceState::Bound);
-        let matches = [(0, Some(RomRef(a)), Confidence::Name)];
+        let matches = [(0, Some(RomRef(a.0)), Confidence::Name)];
         let found = [
-            (0, RomRef(a), Confidence::Fuzzy),
-            (0, RomRef(b), Confidence::Fuzzy),
+            (0, RomRef(a.0), Confidence::Fuzzy),
+            (0, RomRef(b.0), Confidence::Fuzzy),
         ];
         let change =
             diff(&c, src, &stored(&c, src).expect("stored"), &matches, &found).expect("diff");
-        assert_eq!(change.matches, [(0, Some(a), Some("name"))]);
-        assert_eq!(change.add, [(0, b, "fuzzy")]);
+        assert_eq!(change.matches, [(0, Some(a), Some(MatchConfidence::Name))]);
+        assert_eq!(change.add, [(0, b, MatchConfidence::Fuzzy)]);
         let pieces = change.clone().split(1);
         assert_eq!(pieces.len(), 2);
         assert!(pieces.iter().all(|p| !p.is_empty()));
@@ -849,15 +887,17 @@ mod tests {
                 &c,
                 src,
                 &crate::db::source_detail::FileQuery::default(),
-                10,
-                0
+                crate::db::sql::Page {
+                    limit: 10,
+                    offset: 0
+                }
             )
             .expect("files")
-            .0[0]
+            .items[0]
                 .rom_id,
             None
         );
-        put(&c, src, &[(0, RomRef(a), Confidence::Fuzzy)]);
+        put(&c, src, &[(0, RomRef(a.0), Confidence::Fuzzy)]);
         sources::replace_files(&c, src, &[]).expect("empty");
         assert!(of_file(&c, src, 0).expect("of").is_empty(), "cascaded");
     }
@@ -876,7 +916,7 @@ mod tests {
         assert_eq!(
             index.roms_of_size(16),
             [SizedRom {
-                rom: RomRef(a),
+                rom: RomRef(a.0),
                 base: "nova quest".to_owned(),
                 group
             }]

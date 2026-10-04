@@ -16,13 +16,10 @@ use serde_json::{json, Value};
 
 use self::content::{Checked, Found, Refused, SNIFF_BYTES};
 use self::spool::{Pace, Places, Spool, Stop};
-use super::{Job, JobContext, Lane};
+use super::{Job, JobContext, JobKind, Lane};
 use crate::app::AppState;
 use crate::error::{Error, Result};
 use crate::threads::{label, run};
-
-/// `jobs.kind` of [`UrlFetch`].
-pub const KIND: &str = "url_fetch";
 
 /// Why a fetched file was refused, whatever it turned out to be.
 pub const NOT_ACCEPTED: &str = "This isn't a DAT, DAT pack or torrent file.";
@@ -492,8 +489,8 @@ fn places(app: &AppState) -> Places {
 
 #[async_trait]
 impl Job for UrlFetch {
-    fn kind(&self) -> &'static str {
-        KIND
+    fn kind(&self) -> JobKind {
+        JobKind::UrlFetch
     }
 
     fn payload(&self) -> Value {

@@ -41,7 +41,7 @@ async fn seed(app: &AppState, platform: &str, roms: &[(&str, FileState)]) -> Tit
                 let rom = files::seed_rom_for_title_fixture(c, t, name, &hashes(), "good")?;
                 files::upsert(c, &pid, rel, 4, 0, &Hashed::default(), Some(rom), *st, 0)?;
             }
-            Ok(TitleId(t))
+            Ok(t)
         })
         .await
         .expect("seed")
@@ -238,7 +238,7 @@ async fn an_mra_title_loads_its_mra() {
             )?;
             let rom = files::seed_rom_for_title_fixture(c, t, "exb.zip", &hashes(), "good")?;
             c.execute("UPDATE roms SET present = 1 WHERE id = ?1", [rom])?;
-            Ok(TitleId(t))
+            Ok(t)
         })
         .await
         .expect("seed");

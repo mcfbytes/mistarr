@@ -6,8 +6,9 @@ use std::collections::HashMap;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
-use super::dats::DatVersionId;
-use super::titles::TitleId;
+use super::ids::{DatVersionId, RomId, TitleId};
+use super::settings::{self, keys};
+use super::sql;
 use crate::error::Result;
 
 /// The `dat_versions.dat_name` every MRA title hangs off; the row has `source = 'mra'`.
@@ -27,7 +28,7 @@ pub const MRA_DAT_NAME: &str = "_Arcade";
 /// assert_eq!(mistarr_server::db::arcade::mra_version(&conn, "arcade", 2).unwrap(), v);
 /// ```
 pub fn mra_version(conn: &Connection, platform: &str, now: i64) -> Result<DatVersionId> {
-    let found: Option<i64> = conn
+    let found: Option<DatVersionId> = conn
         .query_row(
             "SELECT id FROM dat_versions WHERE source = 'mra' AND platform_id = ?1",
             [platform],
@@ -39,7 +40,7 @@ pub fn mra_version(conn: &Connection, platform: &str, now: i64) -> Result<DatVer
             "UPDATE dat_versions SET loaded_at = ?2 WHERE id = ?1",
             params![id, now],
         )?;
-        return Ok(DatVersionId(id));
+        return Ok(id);
     }
     conn.execute(
         "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count, source)
@@ -117,14 +118,14 @@ pub fn next_run(conn: &Connection, platform: &str) -> Result<i64> {
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::{arcade, titles::TitleId};
+/// use mistarr_server::db::{arcade, ids::TitleId};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// arcade::touch(&conn, TitleId(1), 1).unwrap();
 /// ```
 pub fn touch(conn: &Connection, id: TitleId, run: i64) -> Result<()> {
     conn.prepare_cached("UPDATE titles SET mra_seen = ?2 WHERE id = ?1")?
-        .execute(params![id.0, run])?;
+        .execute(params![id, run])?;
     Ok(())
 }
 
@@ -159,17 +160,11 @@ pub fn retire_unseen(conn: &Connection, platform: &str, run: i64) -> Result<usiz
 /// assert_eq!(mistarr_server::db::arcade::live_count(&conn, "arcade").unwrap(), 0);
 /// ```
 pub fn live_count(conn: &Connection, platform: &str) -> Result<u64> {
-    let n: i64 = conn.query_row(
+    Ok(conn.query_row(
         "SELECT COUNT(*) FROM titles WHERE platform_id = ?1 AND source = 'mra' AND retired = 0",
         [platform],
-        |r| r.get(0),
-    )?;
-    Ok(u64::try_from(n).unwrap_or(0))
-}
-
-/// The `settings` key marking that `platform`'s 1G1R picks lag its stored titles.
-fn recompute_key(platform: &str) -> String {
-    format!("mra.recompute_pending.{platform}")
+        |r| sql::get_u64(r, 0),
+    )?)
 }
 
 /// Marks or clears that `platform` needs its 1G1R picks recomputed, so a catalogue run
@@ -189,15 +184,12 @@ fn recompute_key(platform: &str) -> String {
 /// assert!(!arcade::recompute_pending(&conn, "arcade").unwrap());
 /// ```
 pub fn set_recompute_pending(conn: &Connection, platform: &str, pending: bool) -> Result<()> {
-    let key = recompute_key(platform);
+    let key = keys::mra_recompute_pending(platform);
     if pending {
-        conn.prepare_cached("INSERT OR REPLACE INTO settings (key, value) VALUES (?1, '1')")?
-            .execute([key])?;
+        settings::set(conn, &key, "1")
     } else {
-        conn.prepare_cached("DELETE FROM settings WHERE key = ?1")?
-            .execute([key])?;
+        settings::remove(conn, &key)
     }
-    Ok(())
 }
 
 /// Whether [`set_recompute_pending`] marked `platform`.
@@ -212,14 +204,7 @@ pub fn set_recompute_pending(conn: &Connection, platform: &str, pending: bool) -
 /// assert!(!mistarr_server::db::arcade::recompute_pending(&conn, "arcade").unwrap());
 /// ```
 pub fn recompute_pending(conn: &Connection, platform: &str) -> Result<bool> {
-    Ok(conn
-        .query_row(
-            "SELECT 1 FROM settings WHERE key = ?1",
-            [recompute_key(platform)],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
+    Ok(settings::get(conn, &keys::mra_recompute_pending(platform))?.is_some())
 }
 
 /// Stores an MRA title and its zips, reusing the MRA title of the same name so
@@ -249,7 +234,7 @@ pub fn upsert_title(
     t: &MraTitle<'_>,
     zips: &[MraZip<'_>],
 ) -> Result<TitleId> {
-    let existing: Option<i64> = conn
+    let existing: Option<TitleId> = conn
         .prepare_cached(
             "SELECT id FROM titles WHERE platform_id = ?1 AND source = 'mra' AND name = ?2",
         )?
@@ -264,7 +249,7 @@ pub fn upsert_title(
         )?
         .execute(params![
             id,
-            version.0,
+            version,
             t.base_name,
             t.revision,
             t.group_key,
@@ -285,7 +270,7 @@ pub fn upsert_title(
         )?
         .execute(params![
             platform,
-            version.0,
+            version,
             t.name,
             t.base_name,
             t.revision,
@@ -296,7 +281,7 @@ pub fn upsert_title(
             t.file_stamp,
             t.run
         ])?;
-        let id = conn.last_insert_rowid();
+        let id = TitleId(conn.last_insert_rowid());
         conn.prepare_cached("UPDATE titles SET parent_id = id WHERE id = ?1")?
             .execute([id])?;
         id
@@ -316,7 +301,7 @@ pub fn upsert_title(
         seen.push(z.name);
         stmt.execute(params![id, z.name, z.md5, z.zip_dir, z.present])?;
     }
-    Ok(TitleId(id))
+    Ok(id)
 }
 
 /// A live MRA title as the catalogue last stored it.
@@ -352,7 +337,7 @@ pub fn stored_mra(conn: &Connection, platform: &str, mra_path: &str) -> Result<O
         )?
         .query_row(params![platform, mra_path], |r| {
             Ok(StoredMra {
-                id: TitleId(r.get(0)?),
+                id: r.get(0)?,
                 name: r.get(1)?,
                 file_stamp: r.get(2)?,
                 check_stamp: r.get(3)?,
@@ -400,7 +385,7 @@ pub struct StoredZip {
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::{arcade, titles::TitleId};
+/// use mistarr_server::db::{arcade, ids::TitleId};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert!(arcade::zip_roms(&conn, TitleId(1)).unwrap().is_empty());
@@ -410,7 +395,7 @@ pub fn zip_roms(conn: &Connection, id: TitleId) -> Result<Vec<StoredZip>> {
         "SELECT name, COALESCE(zip_dir, ''), present, md5 IS NOT NULL FROM roms
          WHERE title_id = ?1 AND retired = 0 ORDER BY id",
     )?;
-    let rows = stmt.query_map([id.0], |r| {
+    let rows = stmt.query_map([id], |r| {
         Ok(StoredZip {
             name: r.get(0)?,
             zip_dir: r.get(1)?,
@@ -428,7 +413,7 @@ pub fn zip_roms(conn: &Connection, id: TitleId) -> Result<Vec<StoredZip>> {
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::{arcade, titles::TitleId};
+/// use mistarr_server::db::{arcade, ids::TitleId};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// arcade::set_check(&conn, TitleId(1), None, None, None).unwrap();
@@ -443,7 +428,7 @@ pub fn set_check(
     conn.prepare_cached(
         "UPDATE titles SET mra_check = ?2, mra_detail = ?3, mra_stamp = ?4 WHERE id = ?1",
     )?
-    .execute(params![id.0, check, detail, stamp])?;
+    .execute(params![id, check, detail, stamp])?;
     Ok(())
 }
 
@@ -469,9 +454,10 @@ pub struct ZipRom {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(mistarr_server::db::arcade::zip_rom(&conn, 1).unwrap().is_none());
+/// let rom = mistarr_server::db::ids::RomId(1);
+/// assert!(mistarr_server::db::arcade::zip_rom(&conn, rom).unwrap().is_none());
 /// ```
-pub fn zip_rom(conn: &Connection, rom_id: i64) -> Result<Option<ZipRom>> {
+pub fn zip_rom(conn: &Connection, rom_id: RomId) -> Result<Option<ZipRom>> {
     Ok(conn
         .query_row(
             "SELECT t.id, r.name, COALESCE(r.zip_dir, ''), COALESCE(t.mra_path, '')
@@ -480,7 +466,7 @@ pub fn zip_rom(conn: &Connection, rom_id: i64) -> Result<Option<ZipRom>> {
             [rom_id],
             |r| {
                 Ok(ZipRom {
-                    title_id: TitleId(r.get(0)?),
+                    title_id: r.get(0)?,
                     name: r.get(1)?,
                     zip_dir: r.get(2)?,
                     mra_path: r.get(3)?,
@@ -517,7 +503,7 @@ pub fn titles_naming(
          ORDER BY t.id",
     )?;
     let rows = stmt.query_map(params![platform, zip_dir, name], |r| {
-        Ok((TitleId(r.get(0)?), r.get(1)?))
+        Ok((r.get(0)?, r.get(1)?))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
@@ -534,16 +520,16 @@ pub fn titles_naming(
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert!(mistarr_server::db::arcade::live_zip_roms(&conn, "arcade").unwrap().is_empty());
 /// ```
-pub fn live_zip_roms(conn: &Connection, platform: &str) -> Result<HashMap<String, Vec<i64>>> {
+pub fn live_zip_roms(conn: &Connection, platform: &str) -> Result<HashMap<String, Vec<RomId>>> {
     let mut stmt = conn.prepare(
         "SELECT COALESCE(r.zip_dir, ''), r.name, r.id FROM roms r JOIN titles t ON t.id = r.title_id
          WHERE t.platform_id = ?1 AND t.source = 'mra' AND t.retired = 0 AND r.retired = 0
          ORDER BY r.id",
     )?;
     let mut rows = stmt.query([platform])?;
-    let mut out: HashMap<String, Vec<i64>> = HashMap::new();
+    let mut out: HashMap<String, Vec<RomId>> = HashMap::new();
     while let Some(r) = rows.next()? {
-        let (dir, name, id): (String, String, i64) = (r.get(0)?, r.get(1)?, r.get(2)?);
+        let (dir, name, id): (String, String, RomId) = (r.get(0)?, r.get(1)?, r.get(2)?);
         out.entry(format!("{dir}/{name}").to_ascii_lowercase())
             .or_default()
             .push(id);
@@ -558,7 +544,7 @@ pub fn live_zip_roms(conn: &Connection, platform: &str) -> Result<HashMap<String
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::{arcade, titles::TitleId};
+/// use mistarr_server::db::{arcade, ids::TitleId};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert_eq!(arcade::set_zip_present(&conn, TitleId(1), "exblast.zip", "mame", true).unwrap(), 0);
@@ -576,7 +562,7 @@ pub fn set_zip_present(
              WHERE title_id = ?1 AND retired = 0 AND lower(name) = lower(?2)
                AND lower(COALESCE(zip_dir, '')) = lower(?3)",
         )?
-        .execute(params![title.0, name, zip_dir, present])?)
+        .execute(params![title, name, zip_dir, present])?)
 }
 
 /// The live DAT entry of `platform` named `set`, as a MAME DAT names the zip `set.zip`:
@@ -606,7 +592,7 @@ pub fn dat_entry_named(
                AND (instr(lower(v.dat_name), 'hbmame') > 0) = ?3
              ORDER BY t.name = ?2 DESC, t.id LIMIT 1",
             params![platform, set, hbmame],
-            |r| r.get(0).map(TitleId),
+            |r| r.get(0),
         )
         .optional()?)
 }
@@ -635,7 +621,7 @@ pub struct MraInfo {
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::{arcade, titles::TitleId};
+/// use mistarr_server::db::{arcade, ids::TitleId};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert!(arcade::info(&conn, TitleId(1)).unwrap().is_none());
@@ -645,7 +631,7 @@ pub fn info(conn: &Connection, id: TitleId) -> Result<Option<MraInfo>> {
         .query_row(
             "SELECT setname, rbf, mra_path, mra_check, mra_detail FROM titles
              WHERE id = ?1 AND source = 'mra'",
-            [id.0],
+            [id],
             |r| {
                 Ok(MraInfo {
                     setname: r.get(0)?,
@@ -666,7 +652,7 @@ pub fn info(conn: &Connection, id: TitleId) -> Result<Option<MraInfo>> {
          FROM roms WHERE title_id = ?1 AND retired = 0 AND present = 0 ORDER BY id",
     )?;
     info.missing_zips = stmt
-        .query_map([id.0], |r| r.get(0))?
+        .query_map([id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(Some(info))
 }

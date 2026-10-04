@@ -2,6 +2,7 @@
 
 use rusqlite::Connection;
 
+use super::sql::get_u64;
 use crate::error::Result;
 
 /// Row counts that decide which wizard steps are complete.
@@ -26,15 +27,16 @@ pub struct WizardCounts {
 /// assert_eq!(c.dat_versions, 0);
 /// ```
 pub fn wizard_counts(conn: &Connection) -> Result<WizardCounts> {
-    let (dats, sources): (i64, i64) = conn.query_row(
+    Ok(conn.query_row(
         "SELECT (SELECT COUNT(*) FROM dat_versions WHERE source = 'dat'), (SELECT COUNT(*) FROM sources)",
         [],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    )?;
-    Ok(WizardCounts {
-        dat_versions: u64::try_from(dats).unwrap_or(0),
-        sources: u64::try_from(sources).unwrap_or(0),
-    })
+        |r| {
+            Ok(WizardCounts {
+                dat_versions: get_u64(r, 0)?,
+                sources: get_u64(r, 1)?,
+            })
+        },
+    )?)
 }
 
 #[cfg(test)]

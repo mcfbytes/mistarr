@@ -132,10 +132,7 @@ pub fn schema_status(path: &Path) -> crate::error::Result<Option<u32>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let flags =
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
-    let conn = rusqlite::Connection::open_with_flags(path, flags)?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    let conn = crate::db::open_read_only(path)?;
     crate::db::migrate::check_supported(&conn).map(Some)
 }
 
@@ -165,7 +162,8 @@ pub fn groups_line(path: &Path) -> String {
     let drift = rusqlite::Connection::open_with_flags(path, flags)
         .map_err(crate::Error::from)
         .and_then(|mut c| {
-            c.busy_timeout(std::time::Duration::from_secs(5))?;
+            c.busy_timeout(crate::db::BUSY_TIMEOUT)?;
+
             // The long reads hold only a read snapshot; the index check takes the write
             // lock on its own, briefly, and is rolled back.
             let tx = c.transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)?;

@@ -2,11 +2,10 @@
 
 use rusqlite::{Connection, OptionalExtension};
 
-use super::titles::TitleId;
+use super::files::FileState;
+use super::ids::TitleId;
+use super::titles::TitleSource;
 use crate::error::Result;
-
-/// File states that mean a file holds the entry's content.
-const LOADABLE: &str = "('verified', 'misnamed', 'bad')";
 
 /// A title as the launch route sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,8 +15,8 @@ pub struct LaunchTitle {
     pub platform_id: String,
     /// The DAT entry is flagged `bios`.
     pub bios: bool,
-    /// `mra` for an arcade title read from an MRA file, else `dat`.
-    pub source: String,
+    /// Where the title was read from.
+    pub source: TitleSource,
     /// The MRA file relative to `_Arcade`, for an MRA title.
     pub mra_path: Option<String>,
     /// Every live rom has a file on disk: a loadable file for a DAT entry, a
@@ -36,7 +35,7 @@ pub struct LaunchTitle {
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::{launch, titles::TitleId};
+/// use mistarr_server::db::{launch, ids::TitleId};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert!(launch::title(&conn, TitleId(1)).unwrap().is_none());
@@ -51,16 +50,17 @@ pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
                         (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0),
                         (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0
                            AND EXISTS (SELECT 1 FROM files f
-                                       WHERE f.rom_id = r.id AND f.state IN {LOADABLE})),
+                                       WHERE f.rom_id = r.id AND f.state IN {loadable})),
                         (SELECT COUNT(*) FROM roms r
                          WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 1),
                         COALESCE(t.mra_check, '') IN ('mismatch', 'missing_part'),
                         (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0
                            AND EXISTS (SELECT 1 FROM files f
                                        WHERE f.rom_id = r.id AND f.state = 'verified'))
-                 FROM titles t WHERE t.id = ?1"
+                 FROM titles t WHERE t.id = ?1",
+                loadable = FileState::LOADABLE_SQL
             ),
-            [id.0],
+            [id],
             |r| {
                 Ok((
                     LaunchTitle {
@@ -86,19 +86,20 @@ pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
     };
     title.all_verified = roms > 0 && verified == roms;
     title.complete = roms > 0
-        && if title.source == "mra" {
+        && if title.source == TitleSource::Mra {
             present == roms && !check_failed
         } else {
             with_file == roms
         };
     let mut stmt = conn.prepare(&format!(
         "SELECT f.rel_path FROM roms r JOIN files f ON f.rom_id = r.id
-         WHERE r.title_id = ?1 AND r.retired = 0 AND f.state IN {LOADABLE}
+         WHERE r.title_id = ?1 AND r.retired = 0 AND f.state IN {loadable}
          ORDER BY CASE f.state WHEN 'verified' THEN 0 WHEN 'misnamed' THEN 1 ELSE 2 END,
-                  r.name, f.id"
+                  r.name, f.id",
+        loadable = FileState::LOADABLE_SQL
     ))?;
     title.files = stmt
-        .query_map([id.0], |r| r.get(0))?
+        .query_map([id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(Some(title))
 }
@@ -108,7 +109,8 @@ mod tests {
     use mistarr_core::{HashSet, PlatformId};
 
     use super::*;
-    use crate::db::files::{self, FileState, Hashed};
+    use crate::db::files::{self, Hashed};
+    use crate::db::ids::RomId;
 
     fn conn() -> Connection {
         let mut c = Connection::open_in_memory().expect("open");
@@ -126,7 +128,7 @@ mod tests {
         }
     }
 
-    fn file(c: &Connection, pid: &PlatformId, rel: &str, rom: i64, state: FileState) {
+    fn file(c: &Connection, pid: &PlatformId, rel: &str, rom: RomId, state: FileState) {
         files::upsert(c, pid, rel, 4, 0, &Hashed::default(), Some(rom), state, 0).expect("file");
     }
 
@@ -140,24 +142,19 @@ mod tests {
         let bin =
             files::seed_rom_for_title_fixture(&c, t, "g.bin", &hashes(), "good").expect("rom");
         file(&c, &pid, "PSX/G/g.cue", cue, FileState::Verified);
-        let got = title(&c, TitleId(t)).expect("read").expect("title");
+        let got = title(&c, t).expect("read").expect("title");
         assert!(!got.complete && !got.all_verified);
         assert_eq!(got.files, ["PSX/G/g.cue"]);
         file(&c, &pid, "PSX/G/g.bin", bin, FileState::Misnamed);
-        let got = title(&c, TitleId(t)).expect("read").expect("title");
+        let got = title(&c, t).expect("read").expect("title");
         assert!(got.complete && !got.all_verified && !got.bios);
         assert_eq!(got.files, ["PSX/G/g.cue", "PSX/G/g.bin"]);
         assert_eq!(
-            (got.platform_id.as_str(), got.source.as_str()),
-            ("psx", "dat")
+            (got.platform_id.as_str(), got.source),
+            ("psx", TitleSource::Dat)
         );
         file(&c, &pid, "PSX/G/g.bin", bin, FileState::Verified);
-        assert!(
-            title(&c, TitleId(t))
-                .expect("read")
-                .expect("title")
-                .all_verified
-        );
+        assert!(title(&c, t).expect("read").expect("title").all_verified);
     }
 
     #[test]
@@ -166,16 +163,16 @@ mod tests {
         let pid = PlatformId("nes".into());
         let rom = files::seed_rom_fixture(&c, &pid, "Example Quest", "a.nes", &hashes(), "good")
             .expect("rom");
-        let t: i64 = c
+        let t: TitleId = c
             .query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
                 r.get(0)
             })
             .expect("title");
         file(&c, &pid, "NES/a.nes", rom, FileState::Pending);
-        let got = title(&c, TitleId(t)).expect("read").expect("title");
+        let got = title(&c, t).expect("read").expect("title");
         assert!(!got.complete && got.files.is_empty());
-        crate::db::titles::set_flags(&c, TitleId(t), &["bios".to_owned()]).expect("flag");
-        assert!(title(&c, TitleId(t)).expect("read").expect("title").bios);
+        crate::db::titles::set_flags(&c, t, &["bios".to_owned()]).expect("flag");
+        assert!(title(&c, t).expect("read").expect("title").bios);
     }
 
     #[test]
@@ -190,28 +187,18 @@ mod tests {
         .expect("mra");
         let rom =
             files::seed_rom_for_title_fixture(&c, t, "exb.zip", &hashes(), "good").expect("rom");
-        let got = title(&c, TitleId(t)).expect("read").expect("title");
+        let got = title(&c, t).expect("read").expect("title");
         assert!(!got.complete);
         assert_eq!(got.mra_path.as_deref(), Some("Example Blaster.mra"));
         c.execute("UPDATE roms SET present = 1 WHERE id = ?1", [rom])
             .expect("present");
-        assert!(
-            title(&c, TitleId(t))
-                .expect("read")
-                .expect("title")
-                .complete
-        );
+        assert!(title(&c, t).expect("read").expect("title").complete);
         c.execute(
             "UPDATE titles SET mra_check = 'mismatch' WHERE id = ?1",
             [t],
         )
         .expect("check");
-        assert!(
-            !title(&c, TitleId(t))
-                .expect("read")
-                .expect("title")
-                .complete
-        );
+        assert!(!title(&c, t).expect("read").expect("title").complete);
     }
 
     #[test]
@@ -224,14 +211,10 @@ mod tests {
         let bin = files::seed_rom_for_title_fixture(&c, title, "Disc.bin", &hashes(), "good")
             .expect("bin");
         file(&c, &pid, "PSX/Disc/Disc.chd#01", bin, FileState::Verified);
-        let t = super::title(&c, TitleId(title))
-            .expect("read")
-            .expect("title");
+        let t = super::title(&c, title).expect("read").expect("title");
         assert!(!t.all_verified, "the cue row is still missing");
         file(&c, &pid, "PSX/Disc/Disc.chd#cue", cue, FileState::Verified);
-        let t = super::title(&c, TitleId(title))
-            .expect("read")
-            .expect("title");
+        let t = super::title(&c, title).expect("read").expect("title");
         assert!(t.all_verified && t.complete);
         assert!(t.files.iter().all(|f| f.starts_with("PSX/Disc/Disc.chd#")));
     }

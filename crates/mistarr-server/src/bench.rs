@@ -5,13 +5,17 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use crate::config::PrefsConfig;
+use crate::db::sql::Page;
 use crate::db::titles::{self, Browse, SearchShape};
 use crate::db::{self, platforms, Db};
 use crate::error::{Error, Result};
 use crate::synth::{self, Seeded};
 
-/// Page size of the benchmarked browse, the Browse screen's.
-const PAGE: u32 = 60;
+/// The benchmarked browse page, the Browse screen's first.
+const PAGE: Page = Page {
+    limit: 60,
+    offset: 0,
+};
 
 /// Writes the synthetic catalogue at `scale` into a new database at `path`; refuses a
 /// path that exists, so it never writes into an install's database.
@@ -79,7 +83,7 @@ pub fn search(
     shapes: &[SearchShape],
 ) -> Result<Vec<Timing>> {
     let conn = db::open_read_only(path)?;
-    if !db::has_table(&conn, "title_groups")? {
+    if !db::has_table(&conn, "main", "title_groups")? {
         return Err(Error::Bench(format!(
             "{} has no title_groups table; open it once with this version of mistarr",
             path.display()
@@ -92,11 +96,11 @@ pub fn search(
     };
     let mut out = Vec::with_capacity(shapes.len());
     for &shape in shapes {
-        let (_, total) = titles::browse_with(&conn, platform, &filter, PAGE, 0, shape)?;
+        let total = titles::browse_with(&conn, platform, &filter, PAGE, shape)?.total;
         let mut runs = Vec::with_capacity(usize::try_from(iterations).unwrap_or(0));
         for _ in 0..iterations.max(1) {
             let start = Instant::now();
-            titles::browse_with(&conn, platform, &filter, PAGE, 0, shape)?;
+            titles::browse_with(&conn, platform, &filter, PAGE, shape)?;
             runs.push(start.elapsed());
         }
         runs.sort();

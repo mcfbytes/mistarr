@@ -3,6 +3,7 @@ use mistarr_sources::torrent::TorrentFile;
 
 use super::*;
 use crate::db::sources::{self, fixtures::seed_rom, NewSource, SourceState};
+use crate::db::sql::Page;
 
 fn conn() -> Connection {
     let mut c = Connection::open_in_memory().expect("open");
@@ -11,17 +12,36 @@ fn conn() -> Connection {
     c
 }
 
-fn title_of(c: &Connection, rom: i64) -> TitleId {
-    TitleId(
-        c.query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
-            r.get(0)
-        })
-        .expect("title"),
-    )
+fn title_of(c: &Connection, rom: RomId) -> TitleId {
+    c.query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
+        r.get(0)
+    })
+    .expect("title")
+}
+
+#[test]
+fn state_sets_match_their_sql() {
+    let text = |states: &[DownloadState]| {
+        crate::db::sql::text_list(&states.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+    };
+    assert_eq!(DownloadState::OPEN_SQL, text(&DownloadState::OPEN));
+    assert_eq!(DownloadState::SELECTED_SQL, text(&DownloadState::SELECTED));
+    assert_eq!(DownloadState::STARTED_SQL, text(&DownloadState::STARTED));
+    assert_eq!(
+        DownloadState::CANCELLABLE_SQL,
+        text(&DownloadState::CANCELLABLE)
+    );
+    assert_eq!(
+        DownloadState::UNSTARTED_SQL,
+        text(&DownloadState::UNSTARTED)
+    );
+    for s in DownloadState::ALL {
+        assert_ne!(DownloadState::OPEN.contains(s), s.is_terminal(), "{s}");
+    }
 }
 
 /// A bound source whose files are `(path, size, rom, confidence)`.
-fn source(c: &Connection, byte: u8, files: &[(&str, u64, Option<i64>, Confidence)]) -> SourceId {
+fn source(c: &Connection, byte: u8, files: &[(&str, u64, Option<RomId>, Confidence)]) -> SourceId {
     let hash = format!("{byte:02x}").repeat(20);
     let id = sources::insert(
         c,
@@ -48,7 +68,7 @@ fn source(c: &Connection, byte: u8, files: &[(&str, u64, Option<i64>, Confidence
     let matches: Vec<_> = files
         .iter()
         .zip(0u32..)
-        .map(|((_, _, rom, conf), i)| (i, rom.map(RomRef), *conf))
+        .map(|((_, _, rom, conf), i)| (i, rom.map(|r| RomRef(r.0)), *conf))
         .collect();
     sources::set_matches(c, id, &matches).expect("matches");
     id
@@ -65,7 +85,7 @@ fn candidate(source_id: SourceId, file_index: u32) -> Option<Candidate> {
 #[test]
 fn states_round_trip_and_follow_the_machine() {
     use DownloadState::*;
-    for s in DownloadState::ALL {
+    for &s in DownloadState::ALL {
         assert_eq!(DownloadState::parse(s.as_str()), Some(s));
         assert_eq!(s.to_string(), s.as_str());
     }
@@ -136,7 +156,7 @@ fn best_file_prefers_size_then_name_then_load_then_id() {
     c.execute("UPDATE downloads SET state = 'bad' WHERE id = ?1", [bad.0])
         .expect("bad");
     assert_eq!(best_file(&c, rom).expect("best"), candidate(by_size, 0));
-    assert_eq!(best_file(&c, 999).expect("best"), None);
+    assert_eq!(best_file(&c, RomId(999)).expect("best"), None);
 }
 
 #[test]
@@ -253,10 +273,14 @@ fn transitions_progress_and_lookups() {
     );
     assert!(find_by_file(&c, src, 1).expect("find").is_none());
 
-    let (page, total) = list(&c, &[], 10, 0).expect("list");
-    assert_eq!((page.len(), total), (1, 1));
-    let (page, total) = list(&c, &[DownloadState::Failed], 10, 0).expect("list");
-    assert!(page.is_empty() && total == 0);
+    let page = Page {
+        limit: 10,
+        offset: 0,
+    };
+    let all = list(&c, &[], page).expect("list");
+    assert_eq!((all.items.len(), all.total), (1, 1));
+    let failed = list(&c, &[DownloadState::Failed], page).expect("list");
+    assert!(failed.items.is_empty() && failed.total == 0);
 }
 
 #[test]
@@ -401,7 +425,7 @@ fn deleting_a_source_keeps_finished_downloads_without_it() {
 fn works_on_the_file_database() {
     let (_dir, db) = crate::db::testutil::db();
     let n = db
-        .read_blocking(|c| count_in(c, &DownloadState::ALL))
+        .read_blocking(|c| count_in(c, DownloadState::ALL))
         .expect("count");
     assert_eq!(n, 0);
 }
@@ -412,7 +436,7 @@ fn name_tier_files_beat_candidates_and_a_header_on_top_counts_as_the_size() {
     let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
     let guessed = source(&c, 1, &[("example.nes", 16, None, Confidence::Unmatched)]);
     let change = crate::db::candidates::Change {
-        add: vec![(0, rom, "fuzzy")],
+        add: vec![(0, rom, crate::db::candidates::MatchConfidence::Fuzzy)],
         ..Default::default()
     };
     crate::db::candidates::apply(&c, guessed, &change).expect("candidate");

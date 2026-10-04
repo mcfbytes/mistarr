@@ -14,9 +14,11 @@ use mistarr_core::{HashSet, PlatformId};
 use mistarr_fixture::chd::{to_vec, write_redump_set, Codec, Kind, Spec, TrackSpec, Written};
 use mistarr_server::app::AppState;
 use mistarr_server::db::files::{self, FileRow, FileState};
-use mistarr_server::db::jobs::{self as job_rows, JobId, JobState};
+use mistarr_server::db::ids::{JobId, TitleId};
+use mistarr_server::db::jobs::{self as job_rows, JobState};
 use mistarr_server::events::EventKind;
 use mistarr_server::jobs::gate::Override;
+use mistarr_server::jobs::{JobKind, Lane};
 use serde_json::json;
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -78,7 +80,7 @@ fn games(b: &Booted) -> std::path::PathBuf {
 
 /// Seeds a DAT title `game` on `platform` with a cue rom and one rom per track, named as
 /// `write_redump_set` names them; returns the title id.
-async fn seed_title(app: &AppState, platform: &str, game: &str, tracks: &[HashSet]) -> i64 {
+async fn seed_title(app: &AppState, platform: &str, game: &str, tracks: &[HashSet]) -> TitleId {
     seed_title_with(app, platform, game, &cue_hash(game), tracks).await
 }
 
@@ -88,7 +90,7 @@ async fn seed_title_with(
     game: &str,
     cue: &HashSet,
     tracks: &[HashSet],
-) -> i64 {
+) -> TitleId {
     let (pid, game, cue, tracks) = (
         PlatformId(platform.into()),
         game.to_owned(),
@@ -128,9 +130,10 @@ where
     }
 }
 
-async fn count(app: &AppState, sql: &'static str) -> i64 {
+async fn count(app: &AppState, sql: &str) -> i64 {
+    let sql = sql.to_owned();
     app.db
-        .read(move |c| Ok(c.query_row(sql, [], |r| r.get(0))?))
+        .read(move |c| Ok(c.query_row(&sql, [], |r| r.get(0))?))
         .await
         .expect("count")
 }
@@ -140,7 +143,10 @@ async fn idle(app: &AppState) {
     wait_for("the queues to drain", || async {
         count(
             app,
-            "SELECT COUNT(*) FROM jobs WHERE state IN ('queued', 'running', 'paused')",
+            &format!(
+                "SELECT COUNT(*) FROM jobs WHERE state IN {}",
+                JobState::ACTIVE_SQL
+            ),
         )
         .await
             == 0
@@ -419,8 +425,10 @@ async fn load_dat_in_background(b: &Booted, file: &str, xml: &str) {
     wait_for("the background lane", || async {
         count(
             app,
-            "SELECT COUNT(*) FROM jobs WHERE lane = 'background'
-               AND state IN ('queued', 'running', 'paused')",
+            &format!(
+                "SELECT COUNT(*) FROM jobs WHERE lane = 'background' AND state IN {}",
+                JobState::ACTIVE_SQL
+            ),
         )
         .await
             == 0
@@ -573,11 +581,11 @@ async fn decoding(app: &AppState, file: &str) -> JobId {
     loop {
         let open = app
             .db
-            .read(|c| job_rows::open_in_lane(c, "heavy"))
+            .read(|c| job_rows::open_in_lane(c, Lane::Heavy))
             .await
             .expect("open");
         let found = open.into_iter().find(|r| {
-            r.kind == "chd_tracks"
+            r.kind == JobKind::ChdTracks
                 && app
                     .live
                     .get(r.id)

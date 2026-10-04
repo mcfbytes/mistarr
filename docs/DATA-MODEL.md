@@ -10,8 +10,10 @@ they can be compared with DAT values without conversion.
 
 JSON may stage data or carry opaque blobs; nothing filters or joins on JSON.
 The JSON columns are `dat_stage.game`, `scan_progress.done_dirs`,
-`import_log.detail`, `jobs.payload`, `jobs.progress` and `settings.value`;
-anything a query compares is a real column or a row of its own table.
+`import_log.detail`, `jobs.payload`, `jobs.progress`, `sources.reason` and
+`settings.value`; anything a query compares is a real column or a row of its
+own table. A value in one of them that does not parse is an error naming the
+column, never a default.
 
 ## Tables
 
@@ -159,7 +161,7 @@ CREATE TABLE sources (                  -- one per torrent the user dropped in
   platform_id   TEXT REFERENCES platforms(id),   -- NULL while unbound
   bind_score    REAL,                  -- hit rate that produced the binding
   state         TEXT NOT NULL,         -- 'resolving' | 'unbound' | 'bound' | 'disabled'
-  reason        TEXT,                  -- why it is resolving or unbound, shown to the user
+  reason        TEXT,                  -- json: why it is resolving or unbound, as a code the API words; see "sources.state"
   seed_policy   TEXT NOT NULL DEFAULT 'none',   -- 'none' | 'ratio:1.0' | 'client'
   file_count    INTEGER NOT NULL DEFAULT 0,
   total_size    INTEGER NOT NULL DEFAULT 0,
@@ -254,13 +256,13 @@ CREATE TABLE chd_whole (                      -- whole-file hashes of CHDs a DAT
 
 CREATE TABLE jobs (
   id            INTEGER PRIMARY KEY,
-  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'poll' | 'detect_client' | 'dat_import' | 'recompute_1g1r' | 'source_import' | 'resolve_magnet' | 'transfer' | 'deselect' | 'arcade_catalog' | 'chd_tracks' | 'remap_sources' | 'bind_source'
+  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'detect_client' | 'dat_import' | 'recompute_1g1r' | 'source_import' | 'resolve_magnet' | 'transfer' | 'deselect' | 'arcade_catalog' | 'chd_tracks' | 'remap_sources' | 'bind_source' | 'url_fetch'
   payload       TEXT NOT NULL,         -- json
   state         TEXT NOT NULL,         -- 'queued' | 'running' | 'paused' | 'done' | 'failed'
   progress      TEXT,                  -- json, job specific
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL,
-  lane          TEXT NOT NULL DEFAULT 'light',  -- 'heavy' | 'background' | 'light'
+  lane          TEXT NOT NULL DEFAULT 'light',  -- 'heavy' | 'background' | 'light' | 'fetch'
   subject       TEXT NOT NULL DEFAULT ''        -- dedupe key: payload fields as name 0x1F value, sorted, joined by 0x1E
 );
 CREATE INDEX jobs_subject ON jobs(kind, subject, state);
@@ -361,6 +363,14 @@ single-file one. It is the path mistarr sees, after the remote path map.
 - `disabled`: user turned it off; existing downloads finish, nothing new is
   chosen from it.
 
+`reason` is a JSON object whose `code` says why, with the parameters the
+sentence the API shows needs: `no_client`, `waiting_metadata`,
+`client_refused` (`error`, the client's message), `no_match` (`percent`, the
+bind threshold, and `suggested`, the platform its names suggest when that
+platform has a DAT), `awaiting_dat` (`platform`, suggested by its names, with
+no DAT loaded) and `ignored` (the user marked it as not a game set).
+Migration 0021 turns each sentence an earlier version stored into its code.
+
 `user_binding` is the user's override of the classifier. `PUT /sources/{id}`
 with a `platform_id`, or `null` for "not a game set", sets it; `binding:
 "automatic"` clears it. While it is set, the rebind after a DAT load skips
@@ -370,8 +380,7 @@ roms change. Each request also stores the choice in `bind_pending` and queues
 a `bind_source` job; the job takes the value when it runs and applies it, and
 finds nothing when a later job already took it, so requests that share a
 queued job, or run in any order, end on the last choice. Migration 0019 gives
-sources the user had unbound the reason "Marked as not a game set. It is not
-bound automatically."
+sources the user had unbound the `ignored` reason.
 
 ## Titles across DAT versions
 

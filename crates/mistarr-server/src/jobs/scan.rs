@@ -20,16 +20,14 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
-use super::{Job, JobContext, Lane, Scheduler};
+use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
-use crate::db::files::{self, FileId, FileState, NewFile};
-use crate::db::jobs::JobId;
+use crate::db::files::{self, FileState, NewFile};
+use crate::db::ids::{FileId, JobId, RomId, TitleId};
 use crate::db::platforms as platform_rows;
+use crate::db::titles::RomStatus;
 use crate::error::{Error, Result};
 use crate::events::EventKind;
-
-/// `jobs.kind` of [`ScanJob`].
-pub const KIND: &str = "scan";
 
 /// A library scan: one platform, or every enabled platform fanned out as
 /// one job each.
@@ -40,8 +38,8 @@ pub struct ScanJob {
 
 #[async_trait]
 impl Job for ScanJob {
-    fn kind(&self) -> &'static str {
-        KIND
+    fn kind(&self) -> JobKind {
+        JobKind::Scan
     }
 
     fn payload(&self) -> Value {
@@ -130,7 +128,7 @@ async fn fan_out(ctx: &JobContext) -> Result<()> {
         let already_open = ctx
             .app
             .db
-            .read(move |c| crate::db::jobs::find_open(c, "scan", &payload))
+            .read(move |c| crate::db::jobs::find_open(c, JobKind::Scan, &payload))
             .await?
             .is_some();
         if already_open {
@@ -566,7 +564,7 @@ fn classify(
     platform_id: &PlatformId,
     actual_name: &str,
     forms: &HeaderForms,
-) -> Result<(Option<i64>, FileState)> {
+) -> Result<(Option<RomId>, FileState)> {
     let m = match_forms(
         conn,
         platform_id,
@@ -610,11 +608,11 @@ pub(crate) fn cartridge_state(
     platform: &PlatformId,
     m: Option<&files::RomMatch>,
     own_name: &str,
-) -> (Option<i64>, FileState) {
+) -> (Option<RomId>, FileState) {
     let Some(m) = m else {
         return (None, FileState::Unverified);
     };
-    let state = if m.status == "baddump" {
+    let state = if m.status == RomStatus::BadDump {
         FileState::Bad
     } else if name_fits(platform, &m.name, &m.game, own_name) {
         FileState::Verified
@@ -979,7 +977,7 @@ fn hashed_row(
     mtime: i64,
     rule: &str,
     forms: &HeaderForms,
-    rom_id: Option<i64>,
+    rom_id: Option<RomId>,
     state: FileState,
 ) -> NewFile {
     NewFile {
@@ -1335,13 +1333,13 @@ async fn disc_track(
 /// Decides each track's final state from the all-or-nothing rule, evaluated
 /// once per matched title rather than once for the whole directory.
 pub(crate) fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Result<Vec<NewFile>> {
-    let mut groups: HashMap<i64, Vec<usize>> = HashMap::new();
+    let mut groups: HashMap<TitleId, Vec<usize>> = HashMap::new();
     for (i, t) in tracks.iter().enumerate() {
         if let Some(m) = &t.matched {
             groups.entry(m.title_id).or_default().push(i);
         }
     }
-    let mut complete: HashMap<i64, bool> = HashMap::new();
+    let mut complete: HashMap<TitleId, bool> = HashMap::new();
     for (&title_id, idxs) in &groups {
         let want = files::count_roms_for_title(conn, title_id)?;
         let ok = i64::try_from(idxs.len()).unwrap_or(-1) == want
@@ -1349,7 +1347,7 @@ pub(crate) fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Res
                 tracks[i]
                     .matched
                     .as_ref()
-                    .is_some_and(|m| m.status != "baddump")
+                    .is_some_and(|m| m.status != RomStatus::BadDump)
             });
         complete.insert(title_id, ok);
     }
@@ -1358,7 +1356,7 @@ pub(crate) fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Res
     for t in tracks {
         let (rom_id, state) = match &t.matched {
             None => (None, FileState::Unverified),
-            Some(m) if m.status == "baddump" => (Some(m.rom_id), FileState::Bad),
+            Some(m) if m.status == RomStatus::BadDump => (Some(m.rom_id), FileState::Bad),
             Some(m) => {
                 let is_complete = complete.get(&m.title_id).copied().unwrap_or(false);
                 let state = if !is_complete {
@@ -1632,7 +1630,7 @@ mod tests {
             .await
             .expect("read")
             .expect("row");
-        assert_eq!(row.kind, "scan");
+        assert_eq!(row.kind, JobKind::Scan);
         assert!(
             enqueue_if_games_dir_exists(&app, &PlatformId("no-such".into()))
                 .await
@@ -1663,7 +1661,7 @@ mod tests {
             .db
             .write({
                 let payload = nes_payload.clone();
-                move |c| job_rows::insert(c, "scan", &payload, "heavy", 0)
+                move |c| job_rows::insert(c, JobKind::Scan, &payload, Lane::Heavy, 0)
             })
             .await
             .expect("insert");

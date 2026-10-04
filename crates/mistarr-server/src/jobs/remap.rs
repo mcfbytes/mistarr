@@ -14,14 +14,12 @@ use rusqlite::Connection;
 use serde_json::{json, Value};
 
 use super::source_import::publish_changed;
-use super::{Job, JobContext, Lane};
+use super::{Job, JobContext, JobKind, Lane};
 use crate::app::AppState;
 use crate::db::candidates::{self, Change, SqlSizeIndex};
-use crate::db::sources::{self as rows, SourceId, SqlDatIndex};
+use crate::db::ids::SourceId;
+use crate::db::sources::{self as rows, SqlDatIndex};
 use crate::error::Result;
-
-/// The `jobs.kind` of [`RemapSources`].
-pub const KIND: &str = "remap_sources";
 
 /// Rows written per transaction when a source is mapped again.
 const CHUNK: usize = 2_000;
@@ -296,8 +294,8 @@ pub struct RemapSources {
 
 #[async_trait]
 impl Job for RemapSources {
-    fn kind(&self) -> &'static str {
-        KIND
+    fn kind(&self) -> JobKind {
+        JobKind::RemapSources
     }
 
     fn payload(&self) -> Value {
@@ -393,6 +391,7 @@ mod tests {
 
     use super::*;
     use crate::app::testutil::state;
+    use crate::db::ids::RomId;
     use crate::db::sources::fixtures::seed_rom;
     use crate::db::sources::{NewSource, SourceState};
     use crate::jobs::Scheduler;
@@ -488,7 +487,7 @@ mod tests {
         enqueue(&app, None).await;
         let queued = app
             .db
-            .read(|c| crate::db::jobs::count_kind(c, KIND))
+            .read(|c| crate::db::jobs::count_kind(c, JobKind::RemapSources))
             .await
             .expect("count");
         assert_eq!(queued, 1);
@@ -584,12 +583,12 @@ mod tests {
                     [dat],
                     |r| r.get(0),
                 )?;
-                crate::db::dats::retire(c, crate::db::dats::DatVersionId(dat), 1)?;
+                crate::db::dats::retire(c, crate::db::ids::DatVersionId(dat), 1)?;
                 Ok((id, a, b))
             })
             .expect("db");
         assert!(remap_one(&app, id).await.expect("remap"));
-        let rom: Option<i64> = app
+        let rom: Option<RomId> = app
             .db
             .read(move |c| {
                 Ok(c.query_row(
@@ -601,6 +600,6 @@ mod tests {
             .await
             .expect("rom");
         assert_ne!(rom, Some(a), "the proof on the removed DAT is dropped");
-        assert_eq!(rom, Some(b));
+        assert_eq!(rom, Some(RomId(b)));
     }
 }

@@ -5,14 +5,15 @@ use std::path::Path;
 use serde::Serialize;
 
 use crate::app::AppState;
-use crate::db::jobs::{self, JobId, JobRow, JobState};
+use crate::db::ids::JobId;
+use crate::db::jobs::{self, JobRow, JobState};
 use crate::db::settings::{self, keys};
 use crate::db::system::wizard_counts;
 use crate::error::Result;
 use crate::jobs::core_limits::ClientHold;
 use crate::jobs::detect_client::ClientStatus;
 use crate::jobs::gate::{GateState, Override, PauseReason};
-use crate::jobs::Lane;
+use crate::jobs::{JobKind, Lane};
 
 /// `GET /system/status` and the `status` event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -90,7 +91,7 @@ pub struct WaitingJob {
     /// The job's row.
     pub id: JobId,
     /// Its kind.
-    pub kind: String,
+    pub kind: JobKind,
     /// `queued`, or `paused` when it stopped at a checkpoint.
     pub state: JobState,
     /// The file name or platform the job is about, when its payload names one.
@@ -101,8 +102,10 @@ impl WaitingJob {
     /// The summary of a job row.
     ///
     /// ```
-    /// use mistarr_server::db::jobs::{JobId, JobRow, JobState};
-    /// let row = JobRow { id: JobId(1), kind: "scan".into(), lane: "heavy".into(),
+    /// use mistarr_server::db::jobs::{JobRow, JobState};
+    /// use mistarr_server::db::ids::JobId;
+    /// use mistarr_server::jobs::{JobKind, Lane};
+    /// let row = JobRow { id: JobId(1), kind: JobKind::Scan, lane: Lane::Heavy,
     ///     payload: serde_json::json!({"platform_id": "nes"}), state: JobState::Queued,
     ///     progress: None, created_at: 0, updated_at: 0 };
     /// let w = mistarr_server::status::WaitingJob::from_row(&row);
@@ -112,7 +115,7 @@ impl WaitingJob {
     pub fn from_row(row: &JobRow) -> Self {
         Self {
             id: row.id,
-            kind: row.kind.clone(),
+            kind: row.kind,
             state: row.state,
             detail: job_detail(&row.payload),
         }
@@ -151,20 +154,17 @@ pub fn job_detail(payload: &serde_json::Value) -> Option<String> {
 ///
 /// ```
 /// use mistarr_server::db::jobs::JobState;
-/// use mistarr_server::jobs::gate::GateState;
+/// use mistarr_server::jobs::{gate::GateState, Lane};
 /// let gate = GateState { corename: Some("SNES".into()), manual: None };
-/// let why = mistarr_server::status::hold_reason(&gate, "heavy", JobState::Queued);
+/// let why = mistarr_server::status::hold_reason(&gate, Lane::Heavy, JobState::Queued);
 /// assert_eq!(why.as_deref(), Some("Paused while SNES is running"));
-/// assert!(mistarr_server::status::hold_reason(&gate, "background", JobState::Queued).is_none());
+/// assert!(mistarr_server::status::hold_reason(&gate, Lane::Background, JobState::Queued).is_none());
 /// ```
 #[must_use]
-pub fn hold_reason(gate: &GateState, lane: &str, state: JobState) -> Option<String> {
+pub fn hold_reason(gate: &GateState, lane: Lane, state: JobState) -> Option<String> {
     if !matches!(state, JobState::Queued | JobState::Paused) {
         return None;
     }
-    let lane = [Lane::Heavy, Lane::Background, Lane::Light]
-        .into_iter()
-        .find(|l| l.as_str() == lane)?;
     match gate.hold(lane)? {
         PauseReason::Core => Some(format!(
             "Paused while {} is running",
@@ -199,7 +199,7 @@ pub async fn snapshot(app: &AppState) -> Status {
         }
         let rows = app
             .db
-            .read(move |c| jobs::open_in_lane(c, lane.as_str()))
+            .read(move |c| jobs::open_in_lane(c, lane))
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "cannot list waiting jobs");

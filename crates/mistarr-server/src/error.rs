@@ -22,7 +22,7 @@ pub enum Error {
     },
     /// A database call failed.
     #[error("database: {0}")]
-    Db(#[from] rusqlite::Error),
+    Db(rusqlite::Error),
     /// A migration failed; the database is left at the previous version.
     #[error("migration {version} failed: {source}")]
     Migration {
@@ -107,6 +107,22 @@ pub enum Error {
     Bench(String),
 }
 
+impl From<rusqlite::Error> for Error {
+    /// [`Error::Stored`] for a column [`crate::db::sql::StoredJson`] refused, else [`Error::Db`].
+    fn from(e: rusqlite::Error) -> Self {
+        let rusqlite::Error::FromSqlConversionFailure(i, ty, inner) = e else {
+            return Self::Db(e);
+        };
+        match inner.downcast::<crate::db::sql::StoredJson>() {
+            Ok(bad) => Self::Stored {
+                key: bad.key.to_owned(),
+                source: bad.source,
+            },
+            Err(inner) => Self::Db(rusqlite::Error::FromSqlConversionFailure(i, ty, inner)),
+        }
+    }
+}
+
 /// Result alias for this crate.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -139,7 +155,17 @@ mod tests {
             ca.to_string(),
             "The CA bundle cannot be read: no certificate."
         );
+        let source = serde_json::from_str::<u8>("x").expect_err("not JSON");
+        let stored = rusqlite::Error::FromSqlConversionFailure(
+            0,
+            rusqlite::types::Type::Text,
+            Box::new(crate::db::sql::StoredJson { key: "t.c", source }),
+        );
+        assert!(matches!(Error::from(stored), Error::Stored { key, .. } if key == "t.c"));
+        let other = rusqlite::Error::InvalidQuery;
+        assert!(matches!(Error::from(other), Error::Db(_)));
         let reopen = Error::Reopen(Box::new(Error::NoRoom("full".into())));
+
         assert_eq!(
             reopen.to_string(),
             "cannot reopen the database; restart mistarr: full"

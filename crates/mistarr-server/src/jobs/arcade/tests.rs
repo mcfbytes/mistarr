@@ -523,7 +523,7 @@ async fn an_unchanged_catalogue_leaves_bound_sources_mapped() {
     fs::write(arcade.join("Example Blaster.mra"), &body).expect("write");
     let remaps = || async {
         app.db
-            .read(|c| crate::db::jobs::count_kind(c, crate::jobs::remap::KIND))
+            .read(|c| crate::db::jobs::count_kind(c, crate::jobs::JobKind::RemapSources))
             .await
             .expect("count")
     };

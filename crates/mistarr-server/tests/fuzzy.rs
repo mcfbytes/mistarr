@@ -7,7 +7,7 @@ use std::io::Cursor;
 
 use common::{boot, eventually, get, request, Booted};
 use mistarr_core::hash::{hash_reader, HeaderRule};
-use mistarr_server::db::downloads::DownloadId;
+use mistarr_server::db::ids::DownloadId;
 use mistarr_server::events::EventKind;
 use serde_json::{json, Value};
 

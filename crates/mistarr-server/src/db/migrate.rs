@@ -40,12 +40,7 @@ pub fn latest() -> u32 {
 /// assert_eq!(mistarr_server::db::migrate::recorded_version(&conn).unwrap(), 0);
 /// ```
 pub fn recorded_version(conn: &Connection) -> Result<u32> {
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_version')",
-        [],
-        |r| r.get(0),
-    )?;
-    if exists {
+    if super::has_table(conn, "main", "schema_version")? {
         current_version(conn)
     } else {
         Ok(0)
@@ -70,7 +65,7 @@ pub fn pending(path: &std::path::Path) -> Result<Option<(u32, u32)>> {
     if !path.is_file() {
         return Ok(None);
     }
-    let conn = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let conn = super::open_read_only(path)?;
     let found = recorded_version(&conn)?;
     Ok((found > 0 && found < latest()).then_some((found, latest())))
 }
@@ -147,12 +142,7 @@ pub fn apply(conn: &mut Connection) -> Result<Vec<u32>> {
 
 /// Builds the `title_groups` rows a migration's writes left dirty, once the table exists.
 fn flush_groups(conn: &Connection) -> Result<()> {
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'title_groups_dirty')",
-        [],
-        |r| r.get(0),
-    )?;
-    if exists {
+    if super::has_table(conn, "main", "title_groups_dirty")? {
         super::groups::flush(conn)?;
     }
     Ok(())
@@ -364,11 +354,83 @@ mod tests {
             .expect("query")
             .collect::<rusqlite::Result<_>>()
             .expect("rows");
-        let ignored = crate::jobs::bind_source::IGNORED.to_owned();
+        let ignored = r#"{"code":"ignored"}"#.to_owned();
         assert_eq!(
             rows,
             [(true, Some(ignored), None), (false, None, None)],
             "the user's choice survives as user_binding with its reason"
+        );
+    }
+
+    #[test]
+    fn stored_source_reasons_become_codes() {
+        use crate::db::sources::SourceReason;
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, name TEXT NOT NULL,
+               applied_at INTEGER NOT NULL)",
+        )
+        .expect("versions");
+        for m in MIGRATIONS.iter().filter(|m| m.version < 21) {
+            conn.execute_batch(m.sql).expect("older migration");
+            conn.execute(
+                "INSERT INTO schema_version (version, name, applied_at) VALUES (?1, ?2, 0)",
+                params![m.version, m.name],
+            )
+            .expect("record");
+        }
+        crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+        let reasons = [
+            ("No download client found. The file list is read once one is detected.", None),
+            ("Waiting for the download client to read the file list.", None),
+            ("The download client did not accept the source: refused (403).", None),
+            ("No platform matched 60% of the files. Pick a platform to bind it.", Some("nes")),
+            (
+                "No platform matched 75% of the files. Pick a platform to bind it. Its names suggest NES.",
+                Some("nes"),
+            ),
+            ("Looks like NES. No DAT for it is loaded yet; it binds once one loads.", Some("nes")),
+            ("Marked as not a game set. It is not bound automatically.", None),
+            ("Something else.", None),
+        ];
+        for (i, (reason, suggested)) in reasons.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO sources (infohash, display_name, origin_file, state, reason, added_at,
+                                      suggested_platform_id)
+                 VALUES (?1, 'Set', 'a.torrent', 'unbound', ?2, 0, ?3)",
+                params![format!("{i:040x}"), reason, suggested],
+            )
+            .expect("source");
+        }
+        assert!(apply(&mut conn).expect("apply").contains(&21));
+        let got: Vec<Option<SourceReason>> = conn
+            .prepare("SELECT reason FROM sources ORDER BY id")
+            .expect("prepare")
+            .query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        let nes = || mistarr_core::PlatformId("nes".into());
+        assert_eq!(
+            got,
+            [
+                Some(SourceReason::NoClient),
+                Some(SourceReason::WaitingMetadata),
+                Some(SourceReason::ClientRefused {
+                    error: "refused (403)".into()
+                }),
+                Some(SourceReason::NoMatch {
+                    percent: 60,
+                    suggested: None
+                }),
+                Some(SourceReason::NoMatch {
+                    percent: 75,
+                    suggested: Some(nes())
+                }),
+                Some(SourceReason::AwaitingDat { platform: nes() }),
+                Some(SourceReason::Ignored),
+                None,
+            ]
         );
     }
 

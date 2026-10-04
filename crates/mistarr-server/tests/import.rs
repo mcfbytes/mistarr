@@ -11,12 +11,15 @@ use mistarr_clients::fake::{FakeResponse, FakeServer};
 use mistarr_clients::SeedPolicy;
 use mistarr_core::hash::{hash_reader, HeaderRule};
 use mistarr_core::{HashSet, PlatformId};
-use mistarr_server::db::downloads::{self, DownloadId, DownloadRow, DownloadState};
+use mistarr_server::db::downloads::{self, DownloadRow, DownloadState};
 use mistarr_server::db::downloads_import;
-use mistarr_server::db::files::{self, FileId, FileState, Hashed};
+use mistarr_server::db::files::{self, FileState, Hashed};
+use mistarr_server::db::ids::{DownloadId, FileId, RomId, SourceId, TitleId};
 use mistarr_server::db::imports::{self, ImportAction};
-use mistarr_server::db::sources::{self, NewSource, SourceId, SourceState};
+use mistarr_server::db::sources::{self, NewSource, SourceState};
+use mistarr_server::db::sql::Page;
 use mistarr_server::events::EventKind;
+use mistarr_server::jobs::JobKind;
 use serde_json::{json, Value};
 
 /// A synthetic infohash.
@@ -81,7 +84,7 @@ fn source(b: &Booted, client_id: Option<&str>) -> SourceId {
 }
 
 /// Seeds one entry with one rom and returns `(title_id, rom_id)`.
-fn entry(b: &Booted, platform: &str, game: &str, rom: &str, hashes: &HashSet) -> (i64, i64) {
+fn entry(b: &Booted, platform: &str, game: &str, rom: &str, hashes: &HashSet) -> (TitleId, RomId) {
     let (pid, game, rom, hashes) = (
         PlatformId(platform.into()),
         game.to_owned(),
@@ -94,12 +97,12 @@ fn entry(b: &Booted, platform: &str, game: &str, rom: &str, hashes: &HashSet) ->
         .write_blocking(move |c| {
             let rom_id = files::seed_rom_fixture(c, &pid, &game, &rom, &hashes, "good")?;
             let title = imports::title_of_rom(c, rom_id)?.expect("title");
-            Ok((title.0, rom_id))
+            Ok((title, rom_id))
         })
         .expect("seed")
 }
 
-fn set_header(b: &Booted, rom_id: i64, header: &str) {
+fn set_header(b: &Booted, rom_id: RomId, header: &str) {
     let header = header.to_owned();
     b.running
         .app
@@ -122,7 +125,7 @@ fn stage(b: &Booted, rel: &str, data: &[u8]) -> PathBuf {
 }
 
 /// Inserts a download in `importing` without announcing it.
-fn insert(b: &Booted, rom_id: i64, src: SourceId, index: u32, path: &Path) -> DownloadId {
+fn insert(b: &Booted, rom_id: RomId, src: SourceId, index: u32, path: &Path) -> DownloadId {
     let staged = path.to_string_lossy().into_owned();
     b.running
         .app
@@ -141,7 +144,7 @@ fn announce(b: &Booted, id: DownloadId) {
     );
 }
 
-fn hand_off(b: &Booted, rom_id: i64, src: SourceId, index: u32, path: &Path) -> DownloadId {
+fn hand_off(b: &Booted, rom_id: RomId, src: SourceId, index: u32, path: &Path) -> DownloadId {
     let id = insert(b, rom_id, src, index, path);
     announce(b, id);
     id
@@ -168,7 +171,16 @@ fn log(b: &Booted) -> Vec<imports::LogRow> {
     b.running
         .app
         .db
-        .read_blocking(|c| imports::list(c, 100, 0).map(|(items, _)| items))
+        .read_blocking(|c| {
+            imports::list(
+                c,
+                Page {
+                    limit: 100,
+                    offset: 0,
+                },
+            )
+            .map(|p| p.items)
+        })
         .expect("log")
 }
 
@@ -181,7 +193,13 @@ fn file_at(b: &Booted, platform: &str, rel: &str) -> Option<files::FileRow> {
         .expect("files")
 }
 
-fn existing_file(b: &Booted, rel: &str, data: &[u8], rom_id: Option<i64>, st: FileState) -> FileId {
+fn existing_file(
+    b: &Booted,
+    rel: &str,
+    data: &[u8],
+    rom_id: Option<RomId>,
+    st: FileState,
+) -> FileId {
     write(&games(b).join(rel), data);
     let h = hash_of(data);
     let (rel, size) = (rel.to_owned(), i64::try_from(data.len()).expect("size"));
@@ -248,8 +266,8 @@ async fn headerless_nes_is_placed_with_the_dat_header() {
     );
     let entries = log(&b);
     assert_eq!(entries[0].action, "placed");
-    assert_eq!(entries[0].download_id, Some(id.0));
-    assert_eq!(entries[0].file_id, Some(row.id.0));
+    assert_eq!(entries[0].download_id, Some(id));
+    assert_eq!(entries[0].file_id, Some(row.id));
     let detail = get(b.addr(), &format!("/api/v1/titles/{title}"))
         .await
         .json();
@@ -391,11 +409,7 @@ async fn a_transfer_whose_dat_was_removed_is_quarantined_saying_so() {
                 [title],
                 |r| r.get(0),
             )?;
-            mistarr_server::db::dats::retire(
-                c,
-                mistarr_server::db::dats::DatVersionId(version),
-                1,
-            )?;
+            mistarr_server::db::dats::retire(c, mistarr_server::db::ids::DatVersionId(version), 1)?;
             Ok(())
         })
         .expect("remove");
@@ -438,7 +452,7 @@ async fn an_existing_verified_target_is_kept() {
     );
     let entries = log(&b);
     assert_eq!(entries[0].action, "skipped_existing");
-    assert_eq!(entries[0].file_id, Some(kept.0));
+    assert_eq!(entries[0].file_id, Some(kept));
     assert_eq!(file_at(&b, "nes", NES_TARGET).expect("row").mtime, 1);
     b.running.shutdown().await.expect("shutdown");
 }
@@ -481,7 +495,7 @@ async fn an_unverified_target_is_replaced() {
 }
 
 /// Seeds a three-track disc entry and stages its tracks; returns the rom ids.
-fn disc(b: &Booted) -> (i64, Vec<(i64, PathBuf)>) {
+fn disc(b: &Booted) -> (TitleId, Vec<(RomId, PathBuf)>) {
     let data: Vec<Vec<u8>> = (0u8..3)
         .map(|i| payload(10 + i, 512 + usize::from(i)))
         .collect();
@@ -495,7 +509,7 @@ const DISC_NAMES: [&str; 3] = [
 ];
 
 /// Seeds a disc entry whose three tracks hold `data` and stages them.
-fn disc_with(b: &Booted, data: Vec<Vec<u8>>) -> (i64, Vec<(i64, PathBuf)>) {
+fn disc_with(b: &Booted, data: Vec<Vec<u8>>) -> (TitleId, Vec<(RomId, PathBuf)>) {
     let names = DISC_NAMES;
     let pid = PlatformId("psx".into());
     let hashes: Vec<HashSet> = data.iter().map(|d| hash_of(d)).collect();
@@ -601,11 +615,7 @@ async fn a_bios_entry_is_refused() {
         .app
         .db
         .write_blocking(move |c| {
-            mistarr_server::db::titles::set_flags(
-                c,
-                mistarr_server::db::titles::TitleId(title),
-                &["bios".to_owned()],
-            )
+            mistarr_server::db::titles::set_flags(c, title, &["bios".to_owned()])
         })
         .expect("flag");
     let src = source(&b, None);
@@ -825,7 +835,7 @@ async fn identical_tracks_of_one_disc_are_each_placed() {
 }
 
 /// Seeds a two-rom Neo Geo entry and stages a zip of `members`.
-fn romset(b: &Booted, members: &[(&str, &[u8])]) -> (Vec<i64>, PathBuf) {
+fn romset(b: &Booted, members: &[(&str, &[u8])]) -> (Vec<RomId>, PathBuf) {
     let pid = PlatformId("neogeo".into());
     let (ha, hb) = (hash_of(&payload(30, 256)), hash_of(&payload(31, 128)));
     let roms = b
@@ -1069,7 +1079,7 @@ async fn only_entering_importing_enqueues_and_once_per_download() {
         b.running
             .app
             .db
-            .read_blocking(|c| mistarr_server::db::jobs::count_kind(c, "import"))
+            .read_blocking(|c| mistarr_server::db::jobs::count_kind(c, JobKind::Import))
             .expect("count")
     };
     publish("transferring");

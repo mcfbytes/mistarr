@@ -233,7 +233,7 @@ fn plan(ram: &Path) -> Plan {
     Plan {
         dir: ram.to_path_buf(),
         floor: 0,
-        job: 7,
+        job: crate::db::ids::JobId(7),
         input: 0,
     }
 }
@@ -721,7 +721,7 @@ fn at_version(path: &Path, version: u32, scale: f64) {
         // Each migration in one transaction, as `migrate::apply` runs them.
         c.execute_batch("BEGIN").expect("begin");
         c.execute_batch(m.sql).expect("migration");
-        if super::super::has_table(&c, "title_groups_dirty").expect("table") {
+        if super::super::has_table(&c, "main", "title_groups_dirty").expect("table") {
             super::super::groups::flush(&c).expect("flush");
         }
         c.execute(
@@ -891,9 +891,13 @@ fn found(db: &Db, platform: &str, q: Option<&str>) -> u64 {
         q: q.map(str::to_owned),
         ..crate::db::titles::Browse::default()
     };
-    db.read_blocking(|c| crate::db::titles::browse(c, platform, &filter, 10, 0))
+    let page = crate::db::sql::Page {
+        limit: 10,
+        offset: 0,
+    };
+    db.read_blocking(|c| crate::db::titles::browse(c, platform, &filter, page))
         .expect("browse")
-        .1
+        .total
 }
 
 #[test]

@@ -11,9 +11,11 @@ use mistarr_clients::{
 
 use super::transfer;
 use crate::app::{AppState, Options};
-use crate::db::downloads::{self as rows, DownloadId, DownloadState, Observed, PollRow};
+use crate::db::downloads::{self as rows, DownloadState, Observed, PollRow};
+use crate::db::ids::DownloadId;
+use crate::db::ids::SourceId;
 use crate::db::settings::{self, keys};
-use crate::db::sources::{self, SourceId};
+use crate::db::sources;
 use crate::error::Result;
 use crate::jobs::detect_client::ClientStatus;
 
@@ -73,8 +75,9 @@ pub struct Seen {
 ///
 /// ```
 /// use std::path::Path;
-/// use mistarr_server::db::downloads::{DownloadId, DownloadState, PollRow};
-/// use mistarr_server::db::sources::SourceId;
+/// use mistarr_server::db::downloads::{DownloadState, PollRow};
+/// use mistarr_server::db::ids::DownloadId;
+/// use mistarr_server::db::ids::SourceId;
 /// let row = PollRow { id: DownloadId(1), state: DownloadState::Transferring, progress: 0.0,
 ///     staged_path: None, source_id: SourceId(1), file_index: 0, path: "NES/a.nes".into(),
 ///     infohash: "ab".into(), torrent_name: "Set".into(), single_file: false,
@@ -107,8 +110,9 @@ fn push_relative(out: &mut PathBuf, rel: &str) {
 /// ```
 /// use std::path::Path;
 /// use mistarr_clients::{FileProgress, InfoHash, TorrentState, TorrentStatus};
-/// use mistarr_server::db::downloads::{DownloadId, DownloadState, PollRow};
-/// use mistarr_server::db::sources::SourceId;
+/// use mistarr_server::db::downloads::{DownloadState, PollRow};
+/// use mistarr_server::db::ids::DownloadId;
+/// use mistarr_server::db::ids::SourceId;
 /// let row = PollRow { id: DownloadId(1), state: DownloadState::Transferring, progress: 0.0,
 ///     staged_path: None, source_id: SourceId(1), file_index: 0, path: "a.nes".into(),
 ///     infohash: "ab".into(), torrent_name: "a.nes".into(), single_file: true,

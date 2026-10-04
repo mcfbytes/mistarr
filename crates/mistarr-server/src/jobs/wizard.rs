@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use super::scan::ScanJob;
 use super::Scheduler;
 use crate::app::AppState;
-use crate::db::jobs::JobId;
+use crate::db::ids::JobId;
 use crate::db::settings::{self, keys};
 use crate::error::Result;
 use crate::status::wizard_status;
@@ -62,6 +62,7 @@ mod tests {
     use crate::app::testutil::state;
     use crate::db::jobs as job_rows;
     use crate::jobs::detect_client::ClientStatus;
+    use crate::jobs::JobKind;
     use mistarr_clients::ClientKind;
 
     async fn complete_everything(app: &Arc<AppState>) {
@@ -105,7 +106,7 @@ mod tests {
             .await
             .expect("read")
             .expect("row");
-        assert_eq!(row.kind, "scan");
+        assert_eq!(row.kind, JobKind::Scan);
         assert_eq!(
             on_change(&app).await.expect("run"),
             None,
@@ -125,7 +126,7 @@ mod tests {
         assert_eq!(ids.len(), 1, "exactly one caller claims the scan");
         let n = app
             .db
-            .read(|c| job_rows::count_kind(c, "scan"))
+            .read(|c| job_rows::count_kind(c, JobKind::Scan))
             .await
             .expect("count");
         assert_eq!(n, 1);

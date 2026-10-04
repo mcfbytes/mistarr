@@ -1,102 +1,79 @@
 //! The `downloads` table and its state machine; see `docs/DATA-MODEL.md`.
 
-use std::fmt;
-
 use mistarr_core::PlatformId;
-use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
-use super::sources::SourceId;
-use super::titles::TitleId;
+use super::ids::{DownloadId, RomId, SourceId, TitleId};
+use super::sql::{self, text_enum, Page, Paged};
 use crate::error::Result;
 
-/// A `downloads.id`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct DownloadId(pub i64);
-
-impl fmt::Display for DownloadId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+text_enum! {
+    /// `downloads.state`.
+    pub enum DownloadState {
+        /// Title marked, no `torrent_file` chosen yet.
+        Wanted = "wanted",
+        /// `torrent_file` chosen, not yet started in the client.
+        Queued = "queued",
+        /// The client is fetching the file.
+        Transferring = "transferring",
+        /// The client has every byte and is still checking them.
+        Checking = "checking",
+        /// Handed to the importer.
+        Importing = "importing",
+        /// Placed.
+        Done = "done",
+        /// Hash mismatch, quarantined.
+        Bad = "bad",
+        /// Stopped by an error; may be retried.
+        Failed = "failed",
+        /// Stopped by the user.
+        Cancelled = "cancelled",
     }
 }
 
-/// `downloads.state`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum DownloadState {
-    /// Title marked, no `torrent_file` chosen yet.
-    Wanted,
-    /// `torrent_file` chosen, not yet started in the client.
-    Queued,
-    /// The client is fetching the file.
-    Transferring,
-    /// The client has every byte and is still checking them.
-    Checking,
-    /// Handed to the importer.
-    Importing,
-    /// Placed.
-    Done,
-    /// Hash mismatch, quarantined.
-    Bad,
-    /// Stopped by an error; may be retried.
-    Failed,
-    /// Stopped by the user.
-    Cancelled,
-}
-
-/// States a download leaves only by being worked on or cancelled.
-const OPEN: &str = "'wanted', 'queued', 'transferring', 'checking', 'importing'";
-/// States in which the file is, or is about to be, selected in the client.
-const SELECTED: &str = "'queued', 'transferring', 'checking', 'importing'";
-
 impl DownloadState {
-    /// Every state, in state-machine order.
-    pub const ALL: [Self; 9] = [
+    /// States a download leaves only by being worked on or cancelled; every other is terminal.
+    pub const OPEN: [Self; 5] = [
         Self::Wanted,
         Self::Queued,
         Self::Transferring,
         Self::Checking,
         Self::Importing,
-        Self::Done,
-        Self::Bad,
-        Self::Failed,
-        Self::Cancelled,
     ];
+    /// [`DownloadState::OPEN`] as an SQL list.
+    pub const OPEN_SQL: &'static str =
+        "('wanted', 'queued', 'transferring', 'checking', 'importing')";
 
-    /// The column value.
-    ///
-    /// ```
-    /// use mistarr_server::db::downloads::DownloadState;
-    /// assert_eq!(DownloadState::Checking.as_str(), "checking");
-    /// ```
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Wanted => "wanted",
-            Self::Queued => "queued",
-            Self::Transferring => "transferring",
-            Self::Checking => "checking",
-            Self::Importing => "importing",
-            Self::Done => "done",
-            Self::Bad => "bad",
-            Self::Failed => "failed",
-            Self::Cancelled => "cancelled",
-        }
-    }
+    /// States in which the file is, or is about to be, selected in the client.
+    pub const SELECTED: [Self; 4] = [
+        Self::Queued,
+        Self::Transferring,
+        Self::Checking,
+        Self::Importing,
+    ];
+    /// [`DownloadState::SELECTED`] as an SQL list.
+    pub const SELECTED_SQL: &'static str = "('queued', 'transferring', 'checking', 'importing')";
 
-    /// Parses a column value.
-    ///
-    /// ```
-    /// use mistarr_server::db::downloads::DownloadState;
-    /// assert_eq!(DownloadState::parse("queued"), Some(DownloadState::Queued));
-    /// assert_eq!(DownloadState::parse("x"), None);
-    /// ```
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|v| v.as_str() == s)
-    }
+    /// States in which the client transfers or checks the file.
+    pub const STARTED: [Self; 2] = [Self::Transferring, Self::Checking];
+    /// [`DownloadState::STARTED`] as an SQL list.
+    pub const STARTED_SQL: &'static str = "('transferring', 'checking')";
+
+    /// States a cancel stops: every open one but `importing`.
+    pub const CANCELLABLE: [Self; 4] = [
+        Self::Wanted,
+        Self::Queued,
+        Self::Transferring,
+        Self::Checking,
+    ];
+    /// [`DownloadState::CANCELLABLE`] as an SQL list.
+    pub const CANCELLABLE_SQL: &'static str = "('wanted', 'queued', 'transferring', 'checking')";
+
+    /// States in which the client has not been asked for the file yet.
+    pub const UNSTARTED: [Self; 2] = [Self::Wanted, Self::Queued];
+    /// [`DownloadState::UNSTARTED`] as an SQL list.
+    pub const UNSTARTED_SQL: &'static str = "('wanted', 'queued')";
 
     /// True for `done`, `bad`, `failed` and `cancelled`.
     ///
@@ -107,10 +84,7 @@ impl DownloadState {
     /// ```
     #[must_use]
     pub fn is_terminal(self) -> bool {
-        matches!(
-            self,
-            Self::Done | Self::Bad | Self::Failed | Self::Cancelled
-        )
+        !Self::OPEN.contains(&self)
     }
 
     /// True while the client transfers or checks the file.
@@ -122,7 +96,7 @@ impl DownloadState {
     /// ```
     #[must_use]
     pub fn started(self) -> bool {
-        matches!(self, Self::Transferring | Self::Checking)
+        Self::STARTED.contains(&self)
     }
 
     /// Whether the state machine has an edge from `self` to `to`.
@@ -149,12 +123,6 @@ impl DownloadState {
     }
 }
 
-impl fmt::Display for DownloadState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 /// One download with the names the downloads screen shows.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct DownloadRow {
@@ -167,7 +135,7 @@ pub struct DownloadRow {
     /// Its platform.
     pub platform_id: PlatformId,
     /// The rom being fetched.
-    pub rom_id: i64,
+    pub rom_id: RomId,
     /// The rom's DAT file name.
     pub rom_name: String,
     /// The rom's size in bytes.
@@ -195,26 +163,18 @@ const COLUMNS: &str = "d.id, d.title_id, t.name, t.platform_id, d.rom_id, r.name
     d.updated_at";
 const FROM: &str = "downloads d JOIN titles t ON t.id = d.title_id JOIN roms r ON r.id = d.rom_id";
 
-fn uint(n: i64) -> u64 {
-    u64::try_from(n).unwrap_or(0)
-}
-
-fn state_of(text: &str) -> DownloadState {
-    DownloadState::parse(text).unwrap_or(DownloadState::Failed)
-}
-
 fn from_row(r: &Row<'_>) -> rusqlite::Result<DownloadRow> {
     Ok(DownloadRow {
-        id: DownloadId(r.get(0)?),
-        title_id: TitleId(r.get(1)?),
+        id: r.get(0)?,
+        title_id: r.get(1)?,
         title_name: r.get(2)?,
         platform_id: PlatformId(r.get(3)?),
         rom_id: r.get(4)?,
         rom_name: r.get(5)?,
-        size: uint(r.get(6)?),
-        source_id: r.get::<_, Option<i64>>(7)?.map(SourceId),
+        size: sql::get_u64(r, 6)?,
+        source_id: r.get(7)?,
         file_index: r.get(8)?,
-        state: state_of(&r.get::<_, String>(9)?),
+        state: r.get(9)?,
         progress: r.get(10)?,
         staged_path: r.get(11)?,
         error: r.get(12)?,
@@ -223,25 +183,13 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<DownloadRow> {
     })
 }
 
-/// `IN (?, ...)` for `states`, with their values.
-fn states_in(states: &[DownloadState]) -> (String, Vec<Value>) {
-    let values = states
-        .iter()
-        .map(|s| Value::Text(s.as_str().to_owned()))
-        .collect();
-    (
-        format!("IN ({})", super::groups::placeholders(states.len())),
-        values,
-    )
-}
-
 /// A download to insert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NewDownload {
     /// The wanted title.
     pub title_id: TitleId,
     /// The rom to fetch.
-    pub rom_id: i64,
+    pub rom_id: RomId,
     /// The chosen `torrent_file`; `None` makes the row `wanted`, else `queued`.
     pub file: Option<Candidate>,
     /// Unix seconds.
@@ -263,11 +211,11 @@ pub fn create(conn: &Connection, d: &NewDownload) -> Result<DownloadId> {
         "INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, created_at, updated_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
         params![
-            d.title_id.0,
+            d.title_id,
             d.rom_id,
-            d.file.map(|c| c.source_id.0),
+            d.file.map(|c| c.source_id),
             d.file.map(|c| c.file_index),
-            state.as_str(),
+            state,
             d.now
         ],
     )?;
@@ -283,44 +231,40 @@ pub fn get(conn: &Connection, id: DownloadId) -> Result<Option<DownloadRow>> {
     Ok(conn
         .query_row(
             &format!("SELECT {COLUMNS} FROM {FROM} WHERE d.id = ?1"),
-            [id.0],
+            [id],
             from_row,
         )
         .optional()?)
 }
 
 /// Downloads in any of `states`, or all when empty, most recently changed
-/// first, with the total before paging.
+/// first, with the total before paging, both read in one snapshot.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn list(
-    conn: &Connection,
-    states: &[DownloadState],
-    limit: u32,
-    offset: u32,
-) -> Result<(Vec<DownloadRow>, u64)> {
-    let (filter, mut args) = if states.is_empty() {
-        ("1".to_owned(), Vec::new())
+pub fn list(conn: &Connection, states: &[DownloadState], page: Page) -> Result<Paged<DownloadRow>> {
+    let (filter, list) = if states.is_empty() {
+        ("1", None)
     } else {
-        let (inside, args) = states_in(states);
-        (format!("d.state {inside}"), args)
+        let list = sql::json_list(states)?;
+        ("d.state IN (SELECT value FROM json_each(?1))", Some(list))
     };
-    let total: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM downloads d WHERE {filter}"),
-        params_from_iter(&args),
-        |r| r.get(0),
-    )?;
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM {FROM} WHERE {filter}
-         ORDER BY d.updated_at DESC, d.id DESC LIMIT ? OFFSET ?"
-    ))?;
-    args.extend([Value::from(limit), Value::from(offset)]);
-    let rows = stmt
-        .query_map(params_from_iter(&args), from_row)?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok((rows, uint(total)))
+    sql::snapshot(conn, |c| {
+        let total = c.query_row(
+            &format!("SELECT COUNT(*) FROM downloads d WHERE {filter}"),
+            params_from_iter(&list),
+            |r| sql::get_u64(r, 0),
+        )?;
+        let items = c
+            .prepare(&format!(
+                "SELECT {COLUMNS} FROM {FROM} WHERE {filter}
+                 ORDER BY d.updated_at DESC, d.id DESC LIMIT ?2 OFFSET ?3"
+            ))?
+            .query_map(params![list, page.limit, page.offset], from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Paged { items, total })
+    })
 }
 
 /// The newest download of file `index` in `source` that is not finished,
@@ -338,9 +282,10 @@ pub fn find_by_file(
         .query_row(
             &format!(
                 "SELECT {COLUMNS} FROM {FROM} WHERE d.source_id = ?1 AND d.file_index = ?2
-                 ORDER BY d.state IN ({OPEN}) DESC, d.id DESC LIMIT 1"
+                 ORDER BY d.state IN {} DESC, d.id DESC LIMIT 1",
+                DownloadState::OPEN_SQL
             ),
-            params![source.0, index],
+            params![source, index],
             from_row,
         )
         .optional()?)
@@ -365,18 +310,17 @@ pub fn set_state(conn: &Connection, id: DownloadId, to: DownloadState, now: i64)
            error = CASE WHEN ?5 THEN NULL ELSE error END,
            progress = CASE WHEN ?5 THEN 0 ELSE progress END
          WHERE id = ?1 AND state = ?2",
-        params![id.0, from.as_str(), to.as_str(), now, reset],
+        params![id, from, to, now, reset],
     )?;
     Ok(n > 0)
 }
 
 fn current(conn: &Connection, id: DownloadId) -> Result<Option<DownloadState>> {
-    let s: Option<String> = conn
-        .query_row("SELECT state FROM downloads WHERE id = ?1", [id.0], |r| {
+    Ok(conn
+        .query_row("SELECT state FROM downloads WHERE id = ?1", [id], |r| {
             r.get(0)
         })
-        .optional()?;
-    Ok(s.as_deref().map(state_of))
+        .optional()?)
 }
 
 /// What the poller observed for one download.
@@ -410,15 +354,7 @@ pub fn observe(conn: &Connection, id: DownloadId, o: &Observed<'_>, now: i64) ->
            updated_at = ?7
          WHERE id = ?1 AND state = ?2
            AND (state IS NOT ?3 OR progress IS NOT ?4 OR staged_path IS NOT ?5 OR error IS NOT ?6)",
-        params![
-            id.0,
-            from.as_str(),
-            o.state.as_str(),
-            o.progress,
-            o.staged_path,
-            o.error,
-            now
-        ],
+        params![id, from, o.state, o.progress, o.staged_path, o.error, now],
     )?;
     Ok(n > 0)
 }
@@ -451,9 +387,10 @@ pub fn retry(conn: &Connection, id: DownloadId, now: i64) -> Result<RetryOutcome
     let busy: bool = conn.query_row(
         &format!(
             "SELECT EXISTS (SELECT 1 FROM downloads WHERE rom_id = ?1 AND id != ?2
-                            AND state IN ({OPEN}))"
+                            AND state IN {})",
+            DownloadState::OPEN_SQL
         ),
-        params![row.rom_id, id.0],
+        params![row.rom_id, id],
         |r| r.get(0),
     )?;
     if busy {
@@ -511,18 +448,20 @@ pub fn cancel(conn: &Connection, id: DownloadId, now: i64) -> Result<CancelOutco
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn cancel_group(conn: &Connection, parent: TitleId, now: i64) -> Result<Vec<Cancelled>> {
-    let mut stmt = conn.prepare(
-        "SELECT d.id, d.source_id, d.state IN ('transferring', 'checking') FROM downloads d
+    let mut stmt = conn.prepare(&format!(
+        "SELECT d.id, d.source_id, d.state IN {} FROM downloads d
          JOIN titles t ON t.id = d.title_id
          WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL))
-           AND d.state IN ('wanted', 'queued', 'transferring', 'checking')
+           AND d.state IN {}
          ORDER BY d.id",
-    )?;
+        DownloadState::STARTED_SQL,
+        DownloadState::CANCELLABLE_SQL
+    ))?;
     let found: Vec<Cancelled> = stmt
-        .query_map([parent.0], |r| {
+        .query_map([parent], |r| {
             Ok(Cancelled {
-                id: DownloadId(r.get(0)?),
-                source_id: r.get::<_, Option<i64>>(1)?.map(SourceId),
+                id: r.get(0)?,
+                source_id: r.get(1)?,
                 started: r.get(2)?,
             })
         })?
@@ -531,7 +470,7 @@ pub fn cancel_group(conn: &Connection, parent: TitleId, now: i64) -> Result<Vec<
         "UPDATE downloads SET state = 'cancelled', updated_at = ?2 WHERE id = ?1",
     )?;
     for c in &found {
-        update.execute(params![c.id.0, now])?;
+        update.execute(params![c.id, now])?;
     }
     Ok(found)
 }
@@ -555,7 +494,7 @@ pub struct Candidate {
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn best_file(conn: &Connection, rom: i64) -> Result<Option<Candidate>> {
+pub fn best_file(conn: &Connection, rom: RomId) -> Result<Option<Candidate>> {
     let platform: Option<String> = conn
         .query_row(
             "SELECT t.platform_id FROM roms r JOIN titles t ON t.id = r.title_id WHERE r.id = ?1",
@@ -564,7 +503,7 @@ pub fn best_file(conn: &Connection, rom: i64) -> Result<Option<Candidate>> {
         )
         .optional()?;
     let header = platform.map_or(0, |p| super::candidates::header_len(&PlatformId(p)));
-    let header = i64::try_from(header).unwrap_or(0);
+    let header = sql::to_i64(header);
     Ok(conn
         .prepare_cached(&format!(
             "SELECT m.source_id, m.file_index FROM (
@@ -581,16 +520,17 @@ pub fn best_file(conn: &Connection, rom: i64) -> Result<Option<Candidate>> {
              WHERE {bad}
              ORDER BY {tier}, (m.size = r.size OR m.size = r.size + ?2) DESC, {rank},
                (SELECT COUNT(*) FROM downloads a
-                WHERE a.source_id = s.id AND a.state IN ({SELECTED})),
+                WHERE a.source_id = s.id AND a.state IN {selected}),
                s.id, m.file_index
              LIMIT 1",
             bad = super::candidates::not_bad("?1", "m.source_id", "m.file_index"),
             rank = super::candidates::rank("m.confidence"),
             tier = super::candidates::tier("m.confidence"),
+            selected = DownloadState::SELECTED_SQL,
         ))?
         .query_row(params![rom, header], |r| {
             Ok(Candidate {
-                source_id: SourceId(r.get(0)?),
+                source_id: r.get(0)?,
                 file_index: r.get(1)?,
             })
         })
@@ -609,15 +549,16 @@ pub fn want_title(
     title: TitleId,
     now: i64,
 ) -> Result<Vec<(DownloadId, DownloadState)>> {
-    let roms: Vec<i64> = conn
+    let roms: Vec<RomId> = conn
         .prepare(&format!(
             "SELECT r.id FROM roms r WHERE r.title_id = ?1 AND r.retired = 0
                AND r.present = 0
                AND NOT EXISTS (SELECT 1 FROM files f WHERE f.rom_id = r.id AND f.state = 'verified')
-               AND NOT EXISTS (SELECT 1 FROM downloads d WHERE d.rom_id = r.id AND d.state IN ({OPEN}))
-             ORDER BY r.id"
+               AND NOT EXISTS (SELECT 1 FROM downloads d WHERE d.rom_id = r.id AND d.state IN {})
+             ORDER BY r.id",
+            DownloadState::OPEN_SQL
         ))?
-        .query_map([title.0], |r| r.get(0))?
+        .query_map([title], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let mut out = Vec::with_capacity(roms.len());
     for rom_id in roms {
@@ -648,7 +589,7 @@ pub fn want_title(
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn promote_wanted(conn: &Connection, now: i64) -> Result<Vec<DownloadId>> {
-    let waiting: Vec<(i64, i64)> = conn
+    let waiting: Vec<(DownloadId, RomId)> = conn
         .prepare("SELECT id, rom_id FROM downloads WHERE state = 'wanted' ORDER BY id")?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
@@ -660,9 +601,9 @@ pub fn promote_wanted(conn: &Connection, now: i64) -> Result<Vec<DownloadId>> {
         conn.execute(
             "UPDATE downloads SET state = 'queued', source_id = ?2, file_index = ?3, updated_at = ?4
              WHERE id = ?1 AND state = 'wanted'",
-            params![id, c.source_id.0, c.file_index, now],
+            params![id, c.source_id, c.file_index, now],
         )?;
-        moved.push(DownloadId(id));
+        moved.push(id);
     }
     Ok(moved)
 }
@@ -678,7 +619,7 @@ pub fn queued_sources(conn: &Connection) -> Result<Vec<SourceId>> {
             "SELECT DISTINCT source_id FROM downloads
              WHERE state = 'queued' AND source_id IS NOT NULL ORDER BY source_id",
         )?
-        .query_map([], |r| r.get(0).map(SourceId))?
+        .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(ids)
 }
@@ -693,13 +634,12 @@ pub fn of_source(
     source: SourceId,
     states: &[DownloadState],
 ) -> Result<Vec<DownloadRow>> {
-    let (inside, mut args) = states_in(states);
-    args.insert(0, Value::from(source.0));
     let rows = conn
         .prepare(&format!(
-            "SELECT {COLUMNS} FROM {FROM} WHERE d.source_id = ? AND d.state {inside} ORDER BY d.id"
+            "SELECT {COLUMNS} FROM {FROM}
+             WHERE d.source_id = ?1 AND d.state IN (SELECT value FROM json_each(?2)) ORDER BY d.id"
         ))?
-        .query_map(params_from_iter(&args), from_row)?
+        .query_map(params![source, sql::json_list(states)?], from_row)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
@@ -714,10 +654,11 @@ pub fn selected_indices(conn: &Connection, source: SourceId) -> Result<Vec<u32>>
     let ids = conn
         .prepare(&format!(
             "SELECT DISTINCT file_index FROM downloads
-             WHERE source_id = ?1 AND file_index IS NOT NULL AND state IN ({SELECTED})
-             ORDER BY file_index"
+             WHERE source_id = ?1 AND file_index IS NOT NULL AND state IN {}
+             ORDER BY file_index",
+            DownloadState::SELECTED_SQL
         ))?
-        .query_map([source.0], |r| r.get(0))?
+        .query_map([source], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(ids)
 }
@@ -741,7 +682,7 @@ pub fn move_all(
             if error.is_some() {
                 conn.execute(
                     "UPDATE downloads SET error = ?2 WHERE id = ?1",
-                    params![id.0, error],
+                    params![id, error],
                 )?;
             }
             moved.push(id);
@@ -789,23 +730,24 @@ pub struct PollRow {
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn polled(conn: &Connection) -> Result<Vec<PollRow>> {
     let rows = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT d.id, d.state, d.progress, d.staged_path, d.source_id, d.file_index,
                     tf.path, s.infohash, s.display_name,
                     s.file_count = 1 AND tf.path = s.display_name, s.client_id, s.seed_policy, tf.size
              FROM downloads d
              JOIN sources s ON s.id = d.source_id
              JOIN torrent_files tf ON tf.source_id = d.source_id AND tf.file_index = d.file_index
-             WHERE d.state IN ('transferring', 'checking')
+             WHERE d.state IN {}
              ORDER BY d.source_id, d.id",
-        )?
+            DownloadState::STARTED_SQL
+        ))?
         .query_map([], |r| {
             Ok(PollRow {
-                id: DownloadId(r.get(0)?),
-                state: state_of(&r.get::<_, String>(1)?),
+                id: r.get(0)?,
+                state: r.get(1)?,
                 progress: r.get(2)?,
                 staged_path: r.get(3)?,
-                source_id: SourceId(r.get(4)?),
+                source_id: r.get(4)?,
                 file_index: r.get(5)?,
                 path: r.get(6)?,
                 infohash: r.get(7)?,
@@ -813,7 +755,7 @@ pub fn polled(conn: &Connection) -> Result<Vec<PollRow>> {
                 single_file: r.get(9)?,
                 client_id: r.get(10)?,
                 seed_policy: r.get(11)?,
-                size: u64::try_from(r.get::<_, i64>(12)?).unwrap_or(0),
+                size: sql::get_u64(r, 12)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -826,13 +768,11 @@ pub fn polled(conn: &Connection) -> Result<Vec<PollRow>> {
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn count_in(conn: &Connection, states: &[DownloadState]) -> Result<u64> {
-    let (inside, args) = states_in(states);
-    let n: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM downloads WHERE state {inside}"),
-        params_from_iter(&args),
-        |r| r.get(0),
-    )?;
-    Ok(uint(n))
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM downloads WHERE state IN (SELECT value FROM json_each(?1))",
+        [sql::json_list(states)?],
+        |r| sql::get_u64(r, 0),
+    )?)
 }
 
 #[cfg(test)]

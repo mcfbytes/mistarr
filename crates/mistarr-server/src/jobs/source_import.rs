@@ -16,22 +16,16 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::remap::{key_new_roms, map_files, store_mapping};
-use super::{wizard, Job, JobContext, Lane, Scheduler};
+use super::{wizard, Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::candidates;
-use crate::db::sources::{self as rows, NewSource, SourceId, SourceRow, SourceState, SqlDatIndex};
+use crate::db::ids::SourceId;
+use crate::db::sources::{
+    self as rows, NewSource, SourceReason, SourceRow, SourceState, SqlDatIndex,
+};
 use crate::error::Result;
 use crate::events::EventKind;
 
-/// The `jobs.kind` of [`SourceImport`].
-pub const IMPORT_KIND: &str = "source_import";
-/// The `jobs.kind` of [`ResolveMagnet`].
-pub const RESOLVE_KIND: &str = "resolve_magnet";
-
-/// Reason shown on a resolving source while no client is detected.
-pub const NO_CLIENT: &str = "No download client found. The file list is read once one is detected.";
-/// Reason shown while the client fetches a magnet's metadata.
-pub const WAITING: &str = "Waiting for the download client to read the file list.";
 /// Rejection reason for a second copy of a loaded source.
 pub const DUPLICATE: &str = "A source with the same content is already loaded.";
 
@@ -105,8 +99,8 @@ pub struct ResolveMagnet {
 
 #[async_trait]
 impl Job for SourceImport {
-    fn kind(&self) -> &'static str {
-        IMPORT_KIND
+    fn kind(&self) -> JobKind {
+        JobKind::SourceImport
     }
 
     fn payload(&self) -> Value {
@@ -289,7 +283,7 @@ pub fn bind_best(
             )
         }
     };
-    keep_disabled(conn, id, state, reason.as_deref())
+    keep_disabled(conn, id, state, reason.as_ref())
 }
 
 /// Guesses the source's platform from its names, with no DAT, and stores it;
@@ -316,32 +310,16 @@ pub fn suggest(
 
 /// The reason an unbound source shows, naming its suggested platform and
 /// whether a DAT for that platform is loaded yet.
-fn unbound_explained(conn: &Connection, id: SourceId, threshold: f32) -> Result<String> {
+fn unbound_explained(conn: &Connection, id: SourceId, threshold: f32) -> Result<SourceReason> {
     let suggested = rows::get(conn, id)?.and_then(|r| r.suggested_platform_id);
     let Some(platform) = suggested else {
-        return Ok(unbound_reason(threshold));
+        return Ok(SourceReason::no_match(threshold, None));
     };
-    let name =
-        mistarr_mister::platforms::by_id(&platform.0).map_or(platform.0.as_str(), |p| p.name);
     if rows::platform_has_dat(conn, &platform)? {
-        Ok(format!(
-            "{} Its names suggest {name}.",
-            unbound_reason(threshold)
-        ))
+        Ok(SourceReason::no_match(threshold, Some(platform)))
     } else {
-        Ok(awaiting_dat_reason(name))
+        Ok(SourceReason::AwaitingDat { platform })
     }
-}
-
-/// The reason a source shows while the DAT of its suggested platform is missing.
-///
-/// ```
-/// let r = mistarr_server::jobs::source_import::awaiting_dat_reason("Example System");
-/// assert!(r.starts_with("Looks like Example System."));
-/// ```
-#[must_use]
-pub fn awaiting_dat_reason(platform_name: &str) -> String {
-    format!("Looks like {platform_name}. No DAT for it is loaded yet; it binds once one loads.")
 }
 
 /// Binds the unbound sources again after a DAT loaded titles for `platforms`,
@@ -456,7 +434,7 @@ fn keep_disabled(
     conn: &Connection,
     id: SourceId,
     state: SourceState,
-    reason: Option<&str>,
+    reason: Option<&SourceReason>,
 ) -> Result<()> {
     let disabled = rows::get(conn, id)?.is_some_and(|r| r.state == SourceState::Disabled);
     if disabled {
@@ -466,22 +444,10 @@ fn keep_disabled(
     }
 }
 
-/// The reason an unbound source shows.
-///
-/// ```
-/// let r = mistarr_server::jobs::source_import::unbound_reason(0.6);
-/// assert!(r.contains("60%"));
-/// ```
-#[must_use]
-pub fn unbound_reason(threshold: f32) -> String {
-    let pct = (threshold * 100.0).round();
-    format!("No platform matched {pct}% of the files. Pick a platform to bind it.")
-}
-
 #[async_trait]
 impl Job for ResolveMagnet {
-    fn kind(&self) -> &'static str {
-        RESOLVE_KIND
+    fn kind(&self) -> JobKind {
+        JobKind::ResolveMagnet
     }
 
     fn payload(&self) -> Value {
@@ -501,7 +467,7 @@ impl Job for ResolveMagnet {
             return Ok(());
         }
         let Some(client) = app.client() else {
-            return note(app, &row, NO_CLIENT).await;
+            return note(app, &row, SourceReason::NoClient).await;
         };
         let torrent = if let Some(existing) = &row.client_id {
             ClientTorrentId::new(existing.as_str())
@@ -520,7 +486,7 @@ impl Job for ResolveMagnet {
                     // A paused magnet never fetches metadata; with nothing
                     // wanted, starting it transfers only the file list.
                     if let Err(e) = client.start(&added).await {
-                        return note(app, &row, &unanswered(&e)).await;
+                        return note(app, &row, unanswered(&e)).await;
                     }
                     let stored = added.as_str().to_owned();
                     app.db
@@ -528,19 +494,21 @@ impl Job for ResolveMagnet {
                         .await?;
                     added
                 }
-                Err(e) => return note(app, &row, &unanswered(&e)).await,
+                Err(e) => return note(app, &row, unanswered(&e)).await,
             }
         };
         let listed = match client.files(&torrent).await {
             Ok(files) => files,
-            Err(ClientError::MetadataPending) => return note(app, &row, WAITING).await,
+            Err(ClientError::MetadataPending) => {
+                return note(app, &row, SourceReason::WaitingMetadata).await
+            }
             Err(ClientError::NotFound) => {
                 app.db
                     .write(move |c| rows::set_client_id(c, id, None))
                     .await?;
-                return note(app, &row, WAITING).await;
+                return note(app, &row, SourceReason::WaitingMetadata).await;
             }
-            Err(e) => return note(app, &row, &unanswered(&e)).await,
+            Err(e) => return note(app, &row, unanswered(&e)).await,
         };
         // Stop first: once metadata is in, the client wants every file.
         if let Err(e) = client.stop(&torrent).await {
@@ -584,18 +552,20 @@ impl Job for ResolveMagnet {
     }
 }
 
-fn unanswered(e: &ClientError) -> String {
-    format!("The download client did not accept the source: {e}.")
+fn unanswered(e: &ClientError) -> SourceReason {
+    SourceReason::ClientRefused {
+        error: e.to_string(),
+    }
 }
 
 /// Stores `reason` on a resolving source and announces it, unless it is already shown.
-async fn note(app: &AppState, row: &SourceRow, reason: &str) -> Result<()> {
-    if row.reason.as_deref() == Some(reason) {
+async fn note(app: &AppState, row: &SourceRow, reason: SourceReason) -> Result<()> {
+    if row.reason.as_ref() == Some(&reason) {
         return Ok(());
     }
-    let (id, text) = (row.id, reason.to_owned());
+    let id = row.id;
     app.db
-        .write(move |c| rows::set_reason(c, id, Some(&text)))
+        .write(move |c| rows::set_reason(c, id, Some(&reason)))
         .await?;
     publish_changed(app, row);
     Ok(())
@@ -688,6 +658,7 @@ pub async fn resolve_pending(app: Arc<AppState>) {
 mod tests {
     use super::*;
     use crate::app::testutil::state;
+    use crate::db::candidates::MatchConfidence;
     use crate::db::sources::fixtures::seed_rom;
 
     fn file(index: u32, path: &str, size: u64) -> TorrentFile {
@@ -736,7 +707,10 @@ mod tests {
                 let id = source(c, &"0e".repeat(20), &files);
                 assert_eq!(map_files(c, id, &nes, &files)?, 0);
                 let found = candidates::of_file(c, id, 0)?;
-                assert_eq!(found, [(a, "fuzzy".into()), (b, "fuzzy".into())]);
+                assert_eq!(
+                    found,
+                    [(a, MatchConfidence::Fuzzy), (b, MatchConfidence::Fuzzy)]
+                );
                 assert_eq!(rows::get(c, id)?.expect("row").matched_count, 1);
 
                 let lone = [file(0, "rom.nes", 16)];
@@ -745,7 +719,7 @@ mod tests {
                 assert_eq!(candidates::of_file(c, other, 0)?.len(), 2);
                 assert!(candidates::of_file(c, other, 0)?
                     .iter()
-                    .all(|(_, k)| k == "size"));
+                    .all(|(_, k)| *k == MatchConfidence::Size));
                 bind_to(c, other, None)?;
                 assert_eq!(candidate_count(c, other), 0);
                 Ok(())
@@ -791,7 +765,7 @@ mod tests {
         assert_eq!(rebind_after_dat(&app, &nes).await.expect("rebind"), 0);
         let queued = app
             .db
-            .read(|c| crate::db::jobs::count_kind(c, super::super::remap::KIND))
+            .read(|c| crate::db::jobs::count_kind(c, crate::jobs::JobKind::RemapSources))
             .await;
         assert_eq!(queued.expect("count"), 1);
         let job = crate::jobs::remap::RemapSources {
@@ -823,7 +797,7 @@ mod tests {
                 bind_best(c, id, &files, 0.6)?;
                 let row = rows::get(c, id)?.expect("row");
                 assert_eq!(row.state, SourceState::Unbound);
-                assert_eq!(row.reason, Some(unbound_reason(0.6)));
+                assert_eq!(row.reason, Some(SourceReason::no_match(0.6, None)));
                 bind_best(c, id, &files, 0.5)?;
                 let row = rows::get(c, id)?.expect("row");
                 assert_eq!((row.state, row.matched_count), (SourceState::Bound, 1));
@@ -860,7 +834,8 @@ mod tests {
                 assert_eq!(guess, Some(PlatformId("gb".into())));
                 bind_best(c, id, &files, 0.6)?;
                 let row = rows::get(c, id)?.expect("row");
-                assert_eq!(row.reason, Some(awaiting_dat_reason("Game Boy")));
+                let gb = PlatformId("gb".into());
+                assert_eq!(row.reason, Some(SourceReason::AwaitingDat { platform: gb }));
                 seed_rom(c, "gb", "Example Quest (USA).gb", 16, &[])?;
                 Ok(id)
             })
@@ -937,7 +912,8 @@ mod tests {
         let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");
         let row = row.expect("row");
         assert_eq!(row.state, SourceState::Resolving);
-        assert_eq!(row.reason.as_deref(), Some(NO_CLIENT));
+        assert_eq!(row.reason, Some(SourceReason::NoClient));
+
         let ev = events.recv().await.expect("event");
         assert_eq!(ev.kind, EventKind::SourceChanged);
         assert!(ev.data.contains(r#""state":"resolving""#));
@@ -953,8 +929,16 @@ mod tests {
         Scheduler::run_inline(&app, Arc::new(job))
             .await
             .expect("run");
-        let (items, _) = app.db.read(|c| rows::list(c, 10, 0)).await.expect("list");
-        assert!(items.is_empty());
+        let page = crate::db::sql::Page {
+            limit: 10,
+            offset: 0,
+        };
+        let listed = app
+            .db
+            .read(move |c| rows::list(c, page))
+            .await
+            .expect("list");
+        assert!(listed.items.is_empty());
     }
 
     #[tokio::test]

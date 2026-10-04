@@ -10,6 +10,7 @@ pub mod downloads;
 pub mod downloads_import;
 pub mod files;
 pub mod groups;
+pub mod ids;
 pub mod imports;
 pub mod jobs;
 pub mod launch;
@@ -19,6 +20,7 @@ pub mod ram;
 pub mod settings;
 pub mod source_detail;
 pub mod sources;
+pub mod sql;
 pub mod system;
 pub mod titles;
 
@@ -50,8 +52,9 @@ const SOFT_HEAP_LIMIT: i64 = 8 * 1024 * 1024;
 /// [`SOFT_HEAP_LIMIT`] while a bulk write holds the writer: room for its cache on top.
 const BULK_HEAP_LIMIT: i64 = SOFT_HEAP_LIMIT + BULK_CACHE_KIB * 1024;
 
-/// How long a statement waits on a lock held by the other connection.
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a statement waits on a lock held by another connection; every connection
+/// opened on the database file sets it.
+pub(crate) const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The database: one writer and one reader connection, each behind a mutex.
 /// WAL lets the reader run while the writer holds a transaction.
@@ -954,8 +957,8 @@ pub fn prepare_temp_dir(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Opens `path` read-only with the reader's memory settings, for measuring queries on a
-/// database a server may be using; it never writes or migrates.
+/// Opens `path` read-only with the reader's memory settings, the one way a database a
+/// server may be using is read from outside it; it never writes or migrates.
 ///
 /// # Errors
 ///
@@ -980,7 +983,7 @@ pub fn open_read_only(path: &Path) -> Result<Connection> {
     Ok(conn)
 }
 
-/// Whether the database has a table named `name`.
+/// Whether schema `schema` of the connection, `main` or `temp`, has a table named `name`.
 ///
 /// # Errors
 ///
@@ -988,14 +991,18 @@ pub fn open_read_only(path: &Path) -> Result<Connection> {
 ///
 /// ```
 /// let conn = rusqlite::Connection::open_in_memory().unwrap();
-/// assert!(!mistarr_server::db::has_table(&conn, "titles").unwrap());
+/// assert!(!mistarr_server::db::has_table(&conn, "main", "titles").unwrap());
+/// conn.execute_batch("CREATE TEMP TABLE t (x)").unwrap();
+/// assert!(mistarr_server::db::has_table(&conn, "temp", "t").unwrap());
+/// assert!(!mistarr_server::db::has_table(&conn, "main", "t").unwrap());
 /// ```
-pub fn has_table(conn: &Connection, name: &str) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1)",
-        [name],
-        |r| r.get(0),
-    )?)
+pub fn has_table(conn: &Connection, schema: &str, name: &str) -> Result<bool> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS (SELECT 1 FROM pragma_table_list
+                            WHERE schema = ?1 AND name = ?2 AND type = 'table')",
+        )?
+        .query_row([schema, name], |r| r.get(0))?)
 }
 
 /// Applies the connection pragmas every connection shares; the memory-related ones are

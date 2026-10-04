@@ -3,8 +3,8 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
+use crate::db::ids::SourceId;
 use crate::db::settings::{self, keys};
-use crate::db::sources::SourceId;
 use crate::error::Result;
 
 /// Failed tries after which, once [`DROP_AFTER_SECS`] have also passed, an entry is dropped.

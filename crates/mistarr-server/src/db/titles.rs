@@ -2,29 +2,58 @@
 //! query over `title_groups`; see `docs/DATA-MODEL.md` and `docs/VERIFICATION.md`.
 
 use std::collections::HashMap;
-use std::fmt;
 
 use mistarr_core::naming::{parse_name, ParsedName};
 use mistarr_core::select::{infer_groups, select_1g1r, Prefs, Variant};
 use mistarr_core::PlatformId;
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use super::arcade::MraInfo;
 use super::candidates::Availability;
-use super::dats::DatVersionId;
+use super::downloads::DownloadState;
+use super::files::FileState;
 use super::groups::{self, Clause};
+use super::ids::{DatVersionId, FileId, RomId, TitleId};
+use super::sql::{self, text_enum, Page, Paged};
+
 use crate::error::Result;
 
-/// A `titles.id`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct TitleId(pub i64);
+text_enum! {
+    /// `titles.source` and `dat_versions.source`: where a title was read from.
+    pub enum TitleSource {
+        /// An entry of a DAT file.
+        Dat = "dat",
+        /// An arcade title read from an MRA file.
+        Mra = "mra",
+    }
+}
 
-impl fmt::Display for TitleId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
+text_enum! {
+    /// `roms.status`: the DAT's dump status of a rom.
+    pub enum RomStatus {
+        /// A good dump, the DAT's default.
+        Good = "good",
+        /// A known bad dump.
+        BadDump = "baddump",
+        /// No known dump; hashes are usually absent.
+        NoDump = "nodump",
+        /// A dump the DAT marks verified.
+        Verified = "verified",
+    }
+}
+
+impl From<mistarr_core::dat::RomStatus> for RomStatus {
+    fn from(status: mistarr_core::dat::RomStatus) -> Self {
+        use mistarr_core::dat::RomStatus as Dat;
+        match status {
+            Dat::BadDump => Self::BadDump,
+            Dat::NoDump => Self::NoDump,
+            Dat::Verified => Self::Verified,
+            // Core's enum is non-exhaustive; a status it adds is stored as its default.
+            _ => Self::Good,
+        }
     }
 }
 
@@ -62,15 +91,10 @@ pub struct RomInput<'a> {
     pub md5: Option<&'a str>,
     /// Lowercase hex SHA1.
     pub sha1: Option<&'a str>,
-    /// `good`, `baddump`, `nodump` or `verified`.
-    pub status: &'a str,
+    /// The DAT's dump status.
+    pub status: RomStatus,
     /// The DAT's `header` attribute, verbatim.
     pub header: Option<&'a str>,
-}
-
-/// A non-negative SQLite integer as `u64`.
-fn unsigned(n: i64) -> u64 {
-    u64::try_from(n).unwrap_or(0)
 }
 
 /// A title's list stored in its own table, one row per value in DAT order.
@@ -93,7 +117,7 @@ impl Tag {
 }
 
 /// Title `id`'s `tag` values in order.
-fn tags_of(conn: &Connection, id: i64, tag: Tag) -> Result<Vec<String>> {
+fn tags_of(conn: &Connection, id: TitleId, tag: Tag) -> Result<Vec<String>> {
     let (table, column) = tag.table();
     let rows = conn
         .prepare_cached(&format!(
@@ -106,7 +130,7 @@ fn tags_of(conn: &Connection, id: i64, tag: Tag) -> Result<Vec<String>> {
 
 /// Replaces title `id`'s `tag` values with `values`, keeping the first of repeats, and
 /// writes nothing when they are unchanged so the title's group stays clean.
-fn store_tags(conn: &Connection, id: i64, tag: Tag, values: &[String]) -> Result<()> {
+fn store_tags(conn: &Connection, id: TitleId, tag: Tag, values: &[String]) -> Result<()> {
     let mut wanted: Vec<&str> = Vec::with_capacity(values.len());
     for v in values {
         if !wanted.contains(&v.as_str()) {
@@ -127,7 +151,7 @@ fn store_tags(conn: &Connection, id: i64, tag: Tag, values: &[String]) -> Result
         "INSERT INTO {table} (title_id, pos, {column}) VALUES (?1, ?2, ?3)"
     ))?;
     for (pos, v) in wanted.iter().enumerate() {
-        insert.execute(params![id, i64::try_from(pos).unwrap_or(i64::MAX), v])?;
+        insert.execute(params![id, sql::to_i64(pos), v])?;
     }
     Ok(())
 }
@@ -135,7 +159,7 @@ fn store_tags(conn: &Connection, id: i64, tag: Tag, values: &[String]) -> Result
 /// Stores a title's regions, languages and flags in their tables.
 pub(crate) fn store_lists(
     conn: &Connection,
-    id: i64,
+    id: TitleId,
     regions: &[String],
     languages: &[String],
     flags: &[String],
@@ -152,13 +176,14 @@ pub(crate) fn store_lists(
 /// [`crate::Error::Db`] on SQLite failure, including a title that does not exist.
 ///
 /// ```
-/// use mistarr_server::db::titles::{set_flags, TitleId};
+/// use mistarr_server::db::titles::set_flags;
+/// use mistarr_server::db::ids::TitleId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert!(set_flags(&conn, TitleId(1), &[]).is_ok());
 /// ```
 pub fn set_flags(conn: &Connection, id: TitleId, flags: &[String]) -> Result<()> {
-    store_tags(conn, id.0, Tag::Flags, flags)
+    store_tags(conn, id, Tag::Flags, flags)
 }
 
 /// The flags of title `id`, in order.
@@ -168,13 +193,14 @@ pub fn set_flags(conn: &Connection, id: TitleId, flags: &[String]) -> Result<()>
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::titles::{flags_of, TitleId};
+/// use mistarr_server::db::titles::flags_of;
+/// use mistarr_server::db::ids::TitleId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert!(flags_of(&conn, TitleId(1)).unwrap().is_empty());
 /// ```
 pub fn flags_of(conn: &Connection, id: TitleId) -> Result<Vec<String>> {
-    tags_of(conn, id.0, Tag::Flags)
+    tags_of(conn, id, Tag::Flags)
 }
 
 /// Stores a game under `version`, reusing the title of the same name from any version
@@ -204,7 +230,7 @@ pub fn upsert_title(
     t: &TitleInput<'_>,
     roms: &[RomInput<'_>],
 ) -> Result<TitleId> {
-    let existing: Option<i64> = conn
+    let existing: Option<TitleId> = conn
         .prepare_cached(
             // Unary plus keeps the lookup on (dat_version_id, name), not a platform-wide index.
             "SELECT t.id FROM dat_versions d JOIN titles t ON t.dat_version_id = d.id AND t.name = ?1
@@ -212,7 +238,7 @@ pub fn upsert_title(
                AND +t.source = 'dat' AND +t.platform_id = ?3
              ORDER BY d.id = ?2 DESC, d.loaded_at DESC LIMIT 1",
         )?
-        .query_row(params![t.name, version.0, platform], |r| r.get(0))
+        .query_row(params![t.name, version, platform], |r| r.get(0))
         .optional()?;
     let id = if let Some(id) = existing {
         conn.prepare_cached(
@@ -222,7 +248,7 @@ pub fn upsert_title(
         )?
         .execute(params![
             platform,
-            version.0,
+            version,
             t.base_name,
             t.revision,
             t.clone_of,
@@ -240,14 +266,14 @@ pub fn upsert_title(
         )?
         .execute(params![
             platform,
-            version.0,
+            version,
             t.name,
             t.base_name,
             t.revision,
             t.clone_of,
             t.group_key
         ])?;
-        let id = conn.last_insert_rowid();
+        let id = TitleId(conn.last_insert_rowid());
         conn.prepare_cached("UPDATE titles SET parent_id = id WHERE id = ?1")?
             .execute([id])?;
         id
@@ -257,7 +283,7 @@ pub fn upsert_title(
         .is_some_and(mistarr_mister::platforms::Platform::is_arcade);
     if existing.is_some() && !arcade {
         for r in roms {
-            let size = i64::try_from(r.size).unwrap_or(i64::MAX);
+            let size = sql::to_i64(r.size);
             let listed = [r.crc32, r.md5, r.sha1];
             super::files::unmatch_changed_rom(conn, id, r.name, size, listed)?;
         }
@@ -270,12 +296,12 @@ pub fn upsert_title(
            header = excluded.header, retired = 0",
     )?;
     for r in roms {
-        let size = i64::try_from(r.size).unwrap_or(i64::MAX);
+        let size = sql::to_i64(r.size);
         stmt.execute(params![
             id, r.name, size, r.crc32, r.md5, r.sha1, r.status, r.header
         ])?;
     }
-    Ok(TitleId(id))
+    Ok(id)
 }
 
 /// Sets clone parents for the titles of `version`. With `use_clone_of` each
@@ -287,7 +313,7 @@ pub fn upsert_title(
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::{dats::DatVersionId, titles};
+/// use mistarr_server::db::{ids::DatVersionId, titles};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// titles::link_parents(&conn, DatVersionId(1), true).unwrap();
@@ -300,12 +326,12 @@ pub fn link_parents(conn: &Connection, version: DatVersionId, use_clone_of: bool
                 WHERE p.dat_version_id = titles.dat_version_id AND p.name = titles.clone_of),
                id)
              WHERE dat_version_id = ?1",
-            [version.0],
+            [version],
         )?;
     } else {
         conn.execute(
             "UPDATE titles SET inferred = 1 WHERE dat_version_id = ?1",
-            [version.0],
+            [version],
         )?;
     }
     Ok(())
@@ -322,7 +348,7 @@ pub struct Recomputed {
 
 /// A title as input to selection.
 struct Candidate {
-    id: i64,
+    id: TitleId,
     name: String,
     bad_dump: bool,
 }
@@ -339,7 +365,7 @@ fn variants(group: &[Candidate]) -> Vec<Variant> {
             // Dense rank within the group keeps the revision order exactly.
             let rank = ranks.binary_search(&p.revision_rank()).unwrap_or(0);
             Variant {
-                id: u64::try_from(c.id).unwrap_or(0),
+                id: sql::to_u64(c.id.0),
                 name: c.name.clone(),
                 regions: p.regions.iter().map(|r| r.name().to_owned()).collect(),
                 languages: p.languages.clone(),
@@ -402,7 +428,7 @@ const BAD_DUMP: &str =
 /// ```
 pub fn recompute_platform(conn: &Connection, platform: &str, prefs: &Prefs) -> Result<Recomputed> {
     let defaults = Prefs::default();
-    let mut parents: Vec<(i64, i64)> = Vec::new();
+    let mut parents: Vec<(TitleId, TitleId)> = Vec::new();
     grouped(
         conn,
         &format!(
@@ -415,12 +441,11 @@ pub fn recompute_platform(conn: &Connection, platform: &str, prefs: &Prefs) -> R
             let key = String::new();
             let items = variants(group).into_iter().map(|v| (key.clone(), v));
             if let Some(g) = infer_groups(items, &defaults).into_iter().next() {
-                let parent = g.member_ids.first().copied().unwrap_or(0);
-                let parent = i64::try_from(parent).unwrap_or(0);
+                let parent = TitleId(sql::to_i64(g.member_ids.first().copied().unwrap_or(0)));
                 parents.extend(
                     g.member_ids
                         .iter()
-                        .map(|&m| (i64::try_from(m).unwrap_or(0), parent)),
+                        .map(|&m| (TitleId(sql::to_i64(m)), parent)),
                 );
             }
         },
@@ -436,7 +461,7 @@ pub fn recompute_platform(conn: &Connection, platform: &str, prefs: &Prefs) -> R
     link_shared_titles(conn, platform)?;
 
     let mut out = Recomputed::default();
-    let mut picks: Vec<i64> = Vec::new();
+    let mut picks: Vec<TitleId> = Vec::new();
     grouped(
         conn,
         &format!(
@@ -448,21 +473,21 @@ pub fn recompute_platform(conn: &Connection, platform: &str, prefs: &Prefs) -> R
             out.groups += 1;
             let vs = variants(group);
             if let Some(pick) = select_1g1r(&vs, prefs) {
-                picks.push(i64::try_from(pick.id).unwrap_or(0));
+                picks.push(TitleId(sql::to_i64(pick.id)));
             }
         },
     )?;
-    out.picks = u64::try_from(picks.len()).unwrap_or(u64::MAX);
+    out.picks = sql::to_u64(sql::to_i64(picks.len()));
     store_picks(conn, platform, picks)?;
     Ok(out)
 }
 
 /// Sets `is_1g1r_pick` on exactly `picks` among `platform`'s titles, writing only the
 /// rows that change so unchanged groups stay clean.
-fn store_picks(conn: &Connection, platform: &str, mut picks: Vec<i64>) -> Result<()> {
+fn store_picks(conn: &Connection, platform: &str, mut picks: Vec<TitleId>) -> Result<()> {
     picks.sort_unstable();
     picks.dedup();
-    let current: Vec<i64> = conn
+    let current: Vec<TitleId> = conn
         .prepare_cached(
             "SELECT id FROM titles WHERE platform_id = ?1 AND is_1g1r_pick = 1 ORDER BY id",
         )?
@@ -470,10 +495,10 @@ fn store_picks(conn: &Connection, platform: &str, mut picks: Vec<i64>) -> Result
         .collect::<rusqlite::Result<_>>()?;
     let mut set = conn.prepare_cached("UPDATE titles SET is_1g1r_pick = ?2 WHERE id = ?1")?;
     for &id in current.iter().filter(|id| picks.binary_search(id).is_err()) {
-        set.execute([id, 0])?;
+        set.execute(params![id, false])?;
     }
     for &id in picks.iter().filter(|id| current.binary_search(id).is_err()) {
-        set.execute([id, 1])?;
+        set.execute(params![id, true])?;
     }
     Ok(())
 }
@@ -487,7 +512,7 @@ fn store_picks(conn: &Connection, platform: &str, mut picks: Vec<i64>) -> Result
 /// The groups are worked out in memory and only rows whose `group_root` changes are
 /// written, so a recompute that changes nothing leaves every group clean.
 fn link_shared_titles(conn: &Connection, platform: &str) -> Result<()> {
-    let versions: Vec<i64> = conn
+    let versions: Vec<DatVersionId> = conn
         .prepare_cached(
             "SELECT id FROM dat_versions
              WHERE platform_id = ?1 AND source = 'dat' AND retired = 0 AND superseded_by IS NULL
@@ -527,17 +552,17 @@ fn link_shared_titles(conn: &Connection, platform: &str) -> Result<()> {
 fn shared_links(
     conn: &Connection,
     platform: &str,
-    largest: i64,
-    rest: &[i64],
-) -> Result<Vec<(i64, i64)>> {
+    largest: DatVersionId,
+    rest: &[DatVersionId],
+) -> Result<Vec<(TitleId, TitleId)>> {
     // Titles outside the largest version by signature, in version order: (version, id, parent).
-    let mut others: HashMap<u64, Vec<(i64, i64, i64)>> = HashMap::new();
+    let mut others: HashMap<u64, Vec<(DatVersionId, TitleId, TitleId)>> = HashMap::new();
     for &version in rest {
         each_signature(conn, platform, version, |id, parent, sig| {
             others.entry(sig).or_default().push((version, id, parent));
         })?;
     }
-    let mut anchors: HashMap<u64, i64> = HashMap::new();
+    let mut anchors: HashMap<u64, TitleId> = HashMap::new();
     each_signature(conn, platform, largest, |_, parent, sig| {
         if others.contains_key(&sig) {
             anchors.entry(sig).or_insert(parent);
@@ -562,11 +587,11 @@ fn shared_links(
 /// A title as [`link_shared_titles`] regroups it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Node {
-    id: i64,
+    id: TitleId,
     /// The group it is to belong to.
-    target: Option<i64>,
+    target: Option<TitleId>,
     /// Its stored `group_root`.
-    current: Option<i64>,
+    current: Option<TitleId>,
     live: bool,
 }
 
@@ -592,7 +617,7 @@ fn group_nodes(conn: &Connection, platform: &str) -> Result<Vec<Node>> {
          WHERE r.platform_id = ?1 AND m.platform_id IS NOT ?1",
     )?;
     let away = away.query_map([platform], |r| {
-        let root: Option<i64> = r.get(1)?;
+        let root: Option<TitleId> = r.get(1)?;
         Ok(Node {
             id: r.get(0)?,
             target: root,
@@ -612,13 +637,13 @@ fn group_nodes(conn: &Connection, platform: &str) -> Result<Vec<Node>> {
 /// is worked out before any is applied, so no group gains or loses members whatever
 /// order they come in. `nodes` must be sorted by id.
 fn reroot(nodes: &mut [Node]) {
-    let stranded = |label: i64| {
+    let stranded = |label: TitleId| {
         nodes
             .binary_search_by_key(&label, |n| n.id)
             .is_ok_and(|i| nodes[i].target != Some(label))
     };
     // Stranded group -> (lowest live member, lowest member); ids come in ascending order.
-    let mut roots: HashMap<i64, (Option<i64>, i64)> = HashMap::new();
+    let mut roots: HashMap<TitleId, (Option<TitleId>, TitleId)> = HashMap::new();
     for n in nodes.iter() {
         let Some(label) = n.target.filter(|&l| l != n.id) else {
             continue;
@@ -643,8 +668,8 @@ fn reroot(nodes: &mut [Node]) {
 fn each_signature(
     conn: &Connection,
     platform: &str,
-    version: i64,
-    mut each: impl FnMut(i64, i64, u64),
+    version: DatVersionId,
+    mut each: impl FnMut(TitleId, TitleId, u64),
 ) -> Result<()> {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut stmt = conn.prepare_cached(
@@ -656,8 +681,8 @@ fn each_signature(
     )?;
     let mut rows = stmt.query(params![version, platform])?;
     // Per title: id, parent, sum of key hashes, rom count, whether every rom had a key.
-    let mut open: Option<(i64, i64, u64, u64, bool)> = None;
-    let mut settle = |t: Option<(i64, i64, u64, u64, bool)>| {
+    let mut open: Option<(TitleId, TitleId, u64, u64, bool)> = None;
+    let mut settle = |t: Option<(TitleId, TitleId, u64, u64, bool)>| {
         if let Some((id, parent, sum, n, true)) = t {
             let mut h = DefaultHasher::new();
             (sum, n).hash(&mut h);
@@ -665,7 +690,7 @@ fn each_signature(
         }
     };
     while let Some(r) = rows.next()? {
-        let (id, parent): (i64, i64) = (r.get(0)?, r.get(1)?);
+        let (id, parent): (TitleId, TitleId) = (r.get(0)?, r.get(1)?);
         let key: Option<String> = r.get(2)?;
         if open.is_none_or(|o| o.0 != id) {
             settle(open.take());
@@ -739,9 +764,9 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
     let mut rows = stmt.query(params_from_iter(&clause.args))?;
     while let Some(r) = rows.next()? {
         let e = out.entry(r.get(0)?).or_default();
-        e.titles = unsigned(r.get(1)?);
-        e.have = unsigned(r.get(2)?);
-        e.wanted = unsigned(r.get(3)?);
+        e.titles = sql::get_u64(r, 1)?;
+        e.have = sql::get_u64(r, 2)?;
+        e.wanted = sql::get_u64(r, 3)?;
     }
     let mut stmt = conn.prepare(
         "SELECT platform_id, COUNT(*) FROM files
@@ -749,18 +774,18 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
     )?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        out.entry(r.get(0)?).or_default().unmatched_files = unsigned(r.get(1)?);
+        out.entry(r.get(0)?).or_default().unmatched_files = sql::get_u64(r, 1)?;
     }
     let mut stmt = conn.prepare(
         "SELECT platform_id, COUNT(*) FROM files WHERE state = 'unidentified' GROUP BY platform_id",
     )?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
-        out.entry(r.get(0)?).or_default().unidentified_files = unsigned(r.get(1)?);
+        out.entry(r.get(0)?).or_default().unidentified_files = sql::get_u64(r, 1)?;
     }
     // Per visible MRA title, failing its md5 check or partly present, by clone group;
     // a group with a have-verified variant in title_groups counts as neither.
-    let mut stmt = conn.prepare(&format!(
+    let mut stmt = conn.prepare(
         "WITH mra AS (
            SELECT t.platform_id, t.group_root AS parent_id,
                   MAX(COALESCE(t.mra_check IN ('mismatch', 'missing_part'), 0)) AS any_failing,
@@ -771,7 +796,7 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
            FROM titles t
            WHERE t.source = 'mra' AND t.retired = 0
              AND NOT EXISTS (SELECT 1 FROM title_flags f
-                             WHERE f.title_id = t.id AND f.flag IN ({}))
+                             WHERE f.title_id = t.id AND f.flag IN (SELECT value FROM json_each(?1)))
            GROUP BY t.platform_id, t.group_root
          )
          SELECT g.platform_id,
@@ -779,13 +804,12 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
                 COALESCE(SUM(m.any_partial AND g.have_verified = 0), 0)
          FROM mra m JOIN title_groups g ON g.platform_id = m.platform_id AND g.parent_id = m.parent_id
          GROUP BY g.platform_id",
-        groups::placeholders(hidden.len())
-    ))?;
-    let mut rows = stmt.query(params_from_iter(hidden))?;
+    )?;
+    let mut rows = stmt.query([sql::json_list(hidden)?])?;
     while let Some(r) = rows.next()? {
         let e = out.entry(r.get(0)?).or_default();
-        e.failing_check = unsigned(r.get(1)?);
-        e.partial = unsigned(r.get(2)?);
+        e.failing_check = sql::get_u64(r, 1)?;
+        e.partial = sql::get_u64(r, 2)?;
     }
     Ok(out)
 }
@@ -1030,20 +1054,21 @@ fn like_pattern(q: &str) -> String {
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
+/// use mistarr_server::db::sql::Page;
 /// use mistarr_server::db::titles::{browse, Browse};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let (rows, total) = browse(&conn, "nes", &Browse::default(), 10, 0).unwrap();
-/// assert!(rows.is_empty() && total == 0);
+/// let page = Page { limit: 10, offset: 0 };
+/// let got = browse(&conn, "nes", &Browse::default(), page).unwrap();
+/// assert!(got.items.is_empty() && got.total == 0);
 /// ```
 pub fn browse(
     conn: &Connection,
     platform: &str,
     filter: &Browse,
-    limit: u32,
-    offset: u32,
-) -> Result<(Vec<GroupRow>, u64)> {
-    browse_with(conn, platform, filter, limit, offset, SEARCH_SHAPE)
+    page: Page,
+) -> Result<Paged<GroupRow>> {
+    browse_with(conn, platform, filter, page, SEARCH_SHAPE)
 }
 
 /// [`browse`] with the search done by `shape`, for comparing shapes.
@@ -1053,52 +1078,63 @@ pub fn browse(
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
+/// use mistarr_server::db::sql::Page;
 /// use mistarr_server::db::titles::{browse_with, Browse, SearchShape};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let filter = Browse { q: Some("quest".into()), ..Browse::default() };
-/// let (rows, total) = browse_with(&conn, "nes", &filter, 10, 0, SearchShape::Like).unwrap();
-/// assert!(rows.is_empty() && total == 0);
+/// let page = Page { limit: 10, offset: 0 };
+/// let got = browse_with(&conn, "nes", &filter, page, SearchShape::Like).unwrap();
+/// assert!(got.items.is_empty() && got.total == 0);
 /// ```
 pub fn browse_with(
     conn: &Connection,
     platform: &str,
     filter: &Browse,
-    limit: u32,
-    offset: u32,
+    page: Page,
     shape: SearchShape,
-) -> Result<(Vec<GroupRow>, u64)> {
+) -> Result<Paged<GroupRow>> {
+    sql::snapshot(conn, |conn| browse_in(conn, platform, filter, page, shape))
+}
+
+fn browse_in(
+    conn: &Connection,
+    platform: &str,
+    filter: &Browse,
+    page: Page,
+    shape: SearchShape,
+) -> Result<Paged<GroupRow>> {
     let clause = browse_clause(conn, platform, filter, shape)?;
-    let total: i64 = conn
+    let total = conn
         .prepare_cached(&format!(
             "SELECT COUNT(*) FROM title_groups g WHERE {}",
             clause.sql()
         ))?
-        .query_row(params_from_iter(&clause.args), |r| r.get(0))?;
+        .query_row(params_from_iter(&clause.args), |r| sql::get_u64(r, 0))?;
     let mut stmt = conn.prepare_cached(&page_sql(&clause, filter.sort))?;
     let args = clause
         .args
         .iter()
         .cloned()
-        .chain([Value::from(limit), Value::from(offset)]);
-    let rows = stmt
+        .chain([Value::from(page.limit), Value::from(page.offset)]);
+    let items = stmt
         .query_map(params_from_iter(args), |r| {
             Ok(GroupRow {
-                parent_id: TitleId(r.get(0)?),
+                parent_id: r.get(0)?,
                 platform_id: PlatformId(r.get(1)?),
                 base_name: r.get(2)?,
                 name: r.get(3)?,
-                pick_id: r.get::<_, Option<i64>>(4)?.map(TitleId),
+                pick_id: r.get(4)?,
                 pick_name: r.get(5)?,
-                variants: unsigned(r.get(6)?),
-                have_verified: unsigned(r.get(7)?),
-                wanted: unsigned(r.get(8)?),
+                variants: sql::get_u64(r, 6)?,
+                have_verified: sql::get_u64(r, 7)?,
+                wanted: sql::get_u64(r, 8)?,
                 has_pick: r.get(9)?,
                 bios: r.get(10)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
-    Ok((rows, unsigned(total)))
+    Ok(Paged { items, total })
 }
 
 /// The clone-group root of a title, or `None` when there is no such title.
@@ -1108,7 +1144,8 @@ pub fn browse_with(
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::titles::{group_of, TitleId};
+/// use mistarr_server::db::titles::group_of;
+/// use mistarr_server::db::ids::TitleId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert!(group_of(&conn, TitleId(1)).unwrap().is_none());
@@ -1117,8 +1154,8 @@ pub fn group_of(conn: &Connection, id: TitleId) -> Result<Option<TitleId>> {
     Ok(conn
         .query_row(
             "SELECT COALESCE(group_root, parent_id, id) FROM titles WHERE id = ?1",
-            [id.0],
-            |r| r.get(0).map(TitleId),
+            [id],
+            |r| r.get(0),
         )
         .optional()?)
 }
@@ -1127,7 +1164,7 @@ pub fn group_of(conn: &Connection, id: TitleId) -> Result<Option<TitleId>> {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RomRow {
     /// `roms.id`.
-    pub id: i64,
+    pub id: RomId,
     /// File name in the DAT.
     pub name: String,
     /// Size in bytes.
@@ -1139,11 +1176,11 @@ pub struct RomRow {
     /// Lowercase hex SHA1.
     pub sha1: Option<String>,
     /// DAT status.
-    pub status: String,
+    pub status: RomStatus,
     /// The file matched to this rom, verified first.
-    pub file_id: Option<i64>,
+    pub file_id: Option<FileId>,
     /// That file's state.
-    pub file_state: Option<String>,
+    pub file_state: Option<FileState>,
     /// That file's path relative to the platform's games directory.
     pub file_path: Option<String>,
 }
@@ -1180,8 +1217,8 @@ pub struct VariantRow {
     pub torrent_files_available: u64,
     /// Files of bound sources mapped to a live rom or a candidate for one, strongest first.
     pub availability: Vec<Availability>,
-    /// `dat` for a DAT entry, `mra` for an arcade title read from an MRA file.
-    pub source: String,
+    /// Where the title was read from.
+    pub source: TitleSource,
     /// MRA details, for an MRA title.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mra: Option<MraInfo>,
@@ -1216,7 +1253,7 @@ pub struct GroupDetail {
 
 fn variant_row(r: &Row<'_>) -> rusqlite::Result<VariantRow> {
     Ok(VariantRow {
-        id: TitleId(r.get(0)?),
+        id: r.get(0)?,
         name: r.get(1)?,
         regions: Vec::new(),
         languages: Vec::new(),
@@ -1226,7 +1263,7 @@ fn variant_row(r: &Row<'_>) -> rusqlite::Result<VariantRow> {
         wanted: r.get(4)?,
         retired: r.get(5)?,
         inferred: r.get(6)?,
-        dat_version_id: DatVersionId(r.get(7)?),
+        dat_version_id: r.get(7)?,
         roms: Vec::new(),
         torrent_files_available: 0,
         availability: Vec::new(),
@@ -1245,10 +1282,10 @@ fn fill_lists(conn: &Connection, gid: TitleId, variants: &mut [VariantRow]) -> R
              WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
              ORDER BY x.title_id, x.pos"
         ))?;
-        let mut rows = stmt.query([gid.0])?;
+        let mut rows = stmt.query([gid])?;
         while let Some(r) = rows.next()? {
-            let (title, value): (i64, String) = (r.get(0)?, r.get(1)?);
-            if let Some(v) = variants.iter_mut().find(|v| v.id.0 == title) {
+            let (title, value): (TitleId, String) = (r.get(0)?, r.get(1)?);
+            if let Some(v) = variants.iter_mut().find(|v| v.id == title) {
                 match tag {
                     Tag::Regions => v.regions.push(value),
                     Tag::Languages => v.languages.push(value),
@@ -1267,7 +1304,8 @@ fn fill_lists(conn: &Connection, gid: TitleId, variants: &mut [VariantRow]) -> R
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::titles::{group_detail, TitleId};
+/// use mistarr_server::db::titles::group_detail;
+/// use mistarr_server::db::ids::TitleId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert!(group_detail(&conn, TitleId(1)).unwrap().is_none());
@@ -1279,7 +1317,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
     let Some((platform, base_name)): Option<(String, String)> = conn
         .query_row(
             "SELECT platform_id, base_name FROM titles WHERE id = ?1",
-            [gid.0],
+            [gid],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?
@@ -1293,7 +1331,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
          ORDER BY t.retired, t.is_1g1r_pick DESC, t.name",
     )?;
     let mut variants: Vec<VariantRow> = stmt
-        .query_map([gid.0], variant_row)?
+        .query_map([gid], variant_row)?
         .collect::<rusqlite::Result<_>>()?;
     fill_lists(conn, gid, &mut variants)?;
     let mut stmt = conn.prepare(
@@ -1308,13 +1346,13 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
          WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
          ORDER BY r.title_id, r.name",
     )?;
-    let mut rows = stmt.query([gid.0])?;
+    let mut rows = stmt.query([gid])?;
     while let Some(r) = rows.next()? {
-        let title: i64 = r.get(0)?;
+        let title: TitleId = r.get(0)?;
         let rom = RomRow {
             id: r.get(1)?,
             name: r.get(2)?,
-            size: unsigned(r.get(3)?),
+            size: sql::get_u64(r, 3)?,
             crc32: r.get(4)?,
             md5: r.get(5)?,
             sha1: r.get(6)?,
@@ -1323,7 +1361,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
             file_state: r.get(9)?,
             file_path: r.get(10)?,
         };
-        if let Some(v) = variants.iter_mut().find(|v| v.id.0 == title) {
+        if let Some(v) = variants.iter_mut().find(|v| v.id == title) {
             v.roms.push(rom);
         }
     }
@@ -1338,7 +1376,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
             v.availability.push(found);
         }
     }
-    for v in variants.iter_mut().filter(|v| v.source == "mra") {
+    for v in variants.iter_mut().filter(|v| v.source == TitleSource::Mra) {
         v.mra = super::arcade::info(conn, v.id)?;
     }
     let pick_variant_id = variants.iter().find(|v| v.is_1g1r_pick).map(|v| v.id);
@@ -1369,7 +1407,8 @@ pub enum WantRefused {
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::titles::{want, TitleId, WantRefused};
+/// use mistarr_server::db::titles::{want, WantRefused};
+/// use mistarr_server::db::ids::TitleId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert_eq!(want(&conn, TitleId(1)).unwrap(), Err(WantRefused::Missing));
@@ -1379,7 +1418,7 @@ pub fn want(conn: &Connection, id: TitleId) -> Result<std::result::Result<(), Wa
         .query_row(
             "SELECT retired, EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = titles.id AND f.flag = 'bios')
              FROM titles WHERE id = ?1",
-            [id.0],
+            [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
@@ -1388,7 +1427,7 @@ pub fn want(conn: &Connection, id: TitleId) -> Result<std::result::Result<(), Wa
         Some((true, _)) => Ok(Err(WantRefused::Retired)),
         Some((_, true)) => Ok(Err(WantRefused::Bios)),
         Some(_) => {
-            conn.execute("UPDATE titles SET wanted = 1 WHERE id = ?1", [id.0])?;
+            conn.execute("UPDATE titles SET wanted = 1 WHERE id = ?1", [id])?;
             Ok(Ok(()))
         }
     }
@@ -1402,7 +1441,8 @@ pub fn want(conn: &Connection, id: TitleId) -> Result<std::result::Result<(), Wa
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::titles::{unwant_group, TitleId};
+/// use mistarr_server::db::titles::unwant_group;
+/// use mistarr_server::db::ids::TitleId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert_eq!(unwant_group(&conn, TitleId(1), 0).unwrap(), 0);
@@ -1410,14 +1450,18 @@ pub fn want(conn: &Connection, id: TitleId) -> Result<std::result::Result<(), Wa
 pub fn unwant_group(conn: &Connection, parent: TitleId, now: i64) -> Result<usize> {
     let n = conn.execute(
         "UPDATE titles SET wanted = 0 WHERE (group_root = ?1 OR (id = ?1 AND group_root IS NULL)) AND wanted = 1",
-        [parent.0],
+        [parent],
     )?;
     conn.execute(
-        "UPDATE downloads SET state = 'cancelled', updated_at = ?2
-         WHERE state IN ('wanted', 'queued')
-           AND title_id IN (SELECT id FROM titles WHERE group_root = ?1 OR (id = ?1 AND group_root IS NULL))",
-        params![parent.0, now],
+        &format!(
+            "UPDATE downloads SET state = 'cancelled', updated_at = ?2
+             WHERE state IN {} AND title_id IN
+               (SELECT id FROM titles WHERE group_root = ?1 OR (id = ?1 AND group_root IS NULL))",
+            DownloadState::UNSTARTED_SQL
+        ),
+        params![parent, now],
     )?;
+
     Ok(n)
 }
 

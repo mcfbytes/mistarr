@@ -9,6 +9,7 @@ use mistarr_core::hash::{hash_forms, hash_zip_member_forms, zip_members, HashErr
 use mistarr_core::HashSet as Hashes;
 use mistarr_mister::DatRom;
 
+use crate::db::ids::RomId;
 use crate::db::imports::EntryRom;
 
 /// Bytes of a staged payload handed to the adapter as its head.
@@ -240,9 +241,9 @@ pub(super) fn leaf(name: &str) -> &str {
 pub(super) fn pick_rom<'a>(
     roms: &'a [EntryRom],
     h: &Hashed,
-    prefer: Option<i64>,
+    prefer: Option<RomId>,
     name: Option<&str>,
-    used: &[i64],
+    used: &[RomId],
 ) -> Option<&'a EntryRom> {
     let hits: Vec<&EntryRom> = roms
         .iter()
@@ -407,13 +408,13 @@ mod tests {
 
     fn rom(id: i64, name: &str, h: &Hashes) -> EntryRom {
         EntryRom {
-            id,
+            id: RomId(id),
             name: name.into(),
             size: h.size,
             crc32: Some(h.crc32.clone()),
             md5: Some(h.md5.clone()),
             sha1: Some(h.sha1.clone()),
-            status: "good".into(),
+            status: crate::db::titles::RomStatus::Good,
             header: None,
         }
     }
@@ -437,20 +438,23 @@ mod tests {
         let b = rom(2, "Disc (Track 2).bin", &h);
         let roms = [a.clone(), b.clone()];
         let p = Hashed::plain(None, h.clone());
-        assert_eq!(pick_rom(&roms, &p, None, None, &[]).map(|r| r.id), Some(1));
         assert_eq!(
-            pick_rom(&roms, &p, Some(2), None, &[]).map(|r| r.id),
-            Some(2)
+            pick_rom(&roms, &p, None, None, &[]).map(|r| r.id),
+            Some(RomId(1))
+        );
+        assert_eq!(
+            pick_rom(&roms, &p, Some(RomId(2)), None, &[]).map(|r| r.id),
+            Some(RomId(2))
         );
         assert_eq!(
             pick_rom(&roms, &p, None, Some("x/disc (track 2).bin"), &[]).map(|r| r.id),
-            Some(2)
+            Some(RomId(2))
         );
         assert_eq!(
-            pick_rom(&roms, &p, Some(1), None, &[1]).map(|r| r.id),
-            Some(2)
+            pick_rom(&roms, &p, Some(RomId(1)), None, &[RomId(1)]).map(|r| r.id),
+            Some(RomId(2))
         );
-        assert!(pick_rom(&roms, &p, None, None, &[1, 2]).is_none());
+        assert!(pick_rom(&roms, &p, None, None, &[RomId(1), RomId(2)]).is_none());
         let crc_only = EntryRom {
             sha1: None,
             md5: None,
@@ -478,7 +482,7 @@ mod tests {
         let set = match_members(&roms, &both);
         assert!(set.is_exact());
         assert_eq!(
-            set.pairs.iter().map(|(_, r)| r.id).collect::<Vec<_>>(),
+            set.pairs.iter().map(|(_, r)| r.id.0).collect::<Vec<_>>(),
             [2, 1]
         );
         let odd = [member("a.bin", &h), member("c.bin", &other)];

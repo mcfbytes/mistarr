@@ -4,8 +4,9 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
-use super::dats::DatVersionId;
-use super::titles::{self, RomInput, TitleInput};
+use super::ids::DatVersionId;
+use super::sql;
+use super::titles::{self, RomInput, RomStatus, TitleInput};
 use crate::error::Result;
 
 /// One parsed game waiting to be applied.
@@ -44,8 +45,8 @@ pub struct StagedRom {
     pub md5: Option<String>,
     /// Lowercase hex SHA1.
     pub sha1: Option<String>,
-    /// `good`, `baddump`, `nodump` or `verified`.
-    pub status: String,
+    /// The DAT's dump status.
+    pub status: RomStatus,
     /// The DAT's `header` attribute, verbatim.
     pub header: Option<String>,
 }
@@ -54,12 +55,7 @@ pub struct StagedRom {
 /// temporary directory rather than the database file, and nothing survives a restart.
 /// The temporary database vacuums itself, so the file shrinks back when the stage empties.
 fn ensure(conn: &Connection) -> Result<()> {
-    let exists: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM temp.sqlite_master WHERE name = 'dat_stage')",
-        [],
-        |r| r.get(0),
-    )?;
-    if !exists {
+    if !super::has_table(conn, "temp", "dat_stage")? {
         // Takes effect only before the temporary database holds its first table.
         conn.execute_batch(
             "PRAGMA temp.auto_vacuum = FULL;
@@ -91,12 +87,13 @@ pub fn clear(conn: &Connection) -> Result<()> {
 ///
 /// # Errors
 ///
-/// [`crate::Error::Db`] on SQLite failure.
+/// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Stored`] for a game that cannot
+/// be written as JSON.
 pub fn append(conn: &Connection, games: &[StagedGame]) -> Result<()> {
     ensure(conn)?;
     let mut stmt = conn.prepare_cached("INSERT INTO temp.dat_stage (game) VALUES (?1)")?;
     for game in games {
-        let text = serde_json::to_string(game)?;
+        let text = sql::to_json("dat_stage.game", game)?;
         stmt.execute(params![text])?;
     }
     Ok(())
@@ -107,7 +104,7 @@ pub fn append(conn: &Connection, games: &[StagedGame]) -> Result<()> {
 ///
 /// # Errors
 ///
-/// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Json`] for a row
+/// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Stored`] for a row
 /// that does not read back.
 pub fn apply(conn: &Connection, platform: &str, version: DatVersionId) -> Result<u64> {
     ensure(conn)?;
@@ -116,7 +113,7 @@ pub fn apply(conn: &Connection, platform: &str, version: DatVersionId) -> Result
     let mut n = 0;
     while let Some(row) = staged.next()? {
         let text: String = row.get(0)?;
-        let game: StagedGame = serde_json::from_str(&text)?;
+        let game: StagedGame = sql::from_json("dat_stage.game", &text)?;
         let title = TitleInput {
             name: &game.name,
             base_name: &game.base_name,
@@ -136,7 +133,7 @@ pub fn apply(conn: &Connection, platform: &str, version: DatVersionId) -> Result
                 crc32: r.crc32.as_deref(),
                 md5: r.md5.as_deref(),
                 sha1: r.sha1.as_deref(),
-                status: &r.status,
+                status: r.status,
                 header: r.header.as_deref(),
             })
             .collect();
@@ -167,7 +164,7 @@ mod tests {
                 crc32: Some("00000001".into()),
                 md5: None,
                 sha1: None,
-                status: "good".into(),
+                status: RomStatus::Good,
                 header: None,
             }],
         }
@@ -199,13 +196,7 @@ mod tests {
         assert_eq!(names, ["Example Quest (USA)", "Other Tale (USA)"]);
         clear(&c).expect("clear");
         assert_eq!(apply(&c, "gb", id).expect("apply"), 0);
-        let in_main: i64 = c
-            .query_row(
-                "SELECT COUNT(*) FROM main.sqlite_master WHERE name = 'dat_stage'",
-                [],
-                |r| r.get(0),
-            )
-            .expect("schema");
-        assert_eq!(in_main, 0, "the stage never reaches the database file");
+        let in_main = crate::db::has_table(&c, "main", "dat_stage").expect("schema");
+        assert!(!in_main, "the stage never reaches the database file");
     }
 }

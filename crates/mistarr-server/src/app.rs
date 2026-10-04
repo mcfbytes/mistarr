@@ -593,7 +593,7 @@ fn migrate_in_ram(config: &Config, progress: Option<&crate::migrating::Migrating
     let plan = db::ram::Plan {
         dir: config.memory.import_dir.clone(),
         floor: config.memory.import_floor_mib.saturating_mul(1024 * 1024),
-        job: 0,
+        job: crate::db::ids::JobId(0),
         input: 0,
     };
     match db::ram::migrate_in_ram(
@@ -950,16 +950,24 @@ mod tests {
 
         let n = app
             .db
-            .read(|c| db::jobs::count_kind(c, "scan"))
+            .read(|c| db::jobs::count_kind(c, crate::jobs::JobKind::Scan))
             .await
             .expect("count");
         assert_eq!(n, 1, "exactly one scan queued while paused");
-        let (rows, _) = app
+        let page = db::sql::Page {
+            limit: 10,
+            offset: 0,
+        };
+        let rows = app
             .db
-            .read(|c| db::jobs::list_active(c, 10, 0))
+            .read(move |c| db::jobs::list_active(c, page))
             .await
-            .expect("list");
-        let scan = rows.iter().find(|r| r.kind == "scan").expect("queued");
+            .expect("list")
+            .items;
+        let scan = rows
+            .iter()
+            .find(|r| r.kind == crate::jobs::JobKind::Scan)
+            .expect("queued");
         let id = scan.id;
         assert_eq!(
             scan.state,

@@ -11,12 +11,14 @@ use axum::{Json, Router};
 use mistarr_core::PlatformId;
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, Page, Paging};
+use super::{ApiError, Paging};
 use crate::app::AppState;
-use crate::db::dats::{self, DatVersionId};
+use crate::db::dats;
 use crate::db::files::{self, UnidentifiedFile};
-use crate::db::jobs::JobId;
+use crate::db::ids::DatVersionId;
+use crate::db::ids::JobId;
 use crate::db::platforms::{self, PlatformRow};
+use crate::db::sql::Paged;
 use crate::db::titles::{self, Counts};
 use crate::jobs::dat_import::{DatImport, LOADED_DIR};
 use crate::jobs::Scheduler;
@@ -34,21 +36,22 @@ async fn unidentified(
     State(app): State<Arc<AppState>>,
     id: Result<Path<String>, PathRejection>,
     paging: Result<Query<Paging>, QueryRejection>,
-) -> Result<Json<Page<UnidentifiedFile>>, ApiError> {
+) -> Result<Json<Paged<UnidentifiedFile>>, ApiError> {
     let id = PlatformId(path_id(id)?);
     let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let (limit, offset) = paging.resolve();
+    let page = paging.resolve();
     let found = app
         .db
         .read(move |c| {
             if platforms::get(c, &id.0)?.is_none() {
                 return Ok(None);
             }
-            files::unidentified(c, &id, offset, limit).map(Some)
+            files::unidentified(c, &id, page).map(Some)
         })
         .await?;
-    let (items, total) = found.ok_or_else(|| ApiError::not_found("no such platform"))?;
-    Ok(Json(Page { items, total }))
+    Ok(Json(
+        found.ok_or_else(|| ApiError::not_found("no such platform"))?,
+    ))
 }
 
 /// A platform with its catalog counts.
@@ -62,25 +65,22 @@ struct PlatformOut {
 async fn list(
     State(app): State<Arc<AppState>>,
     paging: Result<Query<Paging>, QueryRejection>,
-) -> Result<Json<Page<PlatformOut>>, ApiError> {
+) -> Result<Json<Paged<PlatformOut>>, ApiError> {
     let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let (limit, offset) = paging.resolve();
     let hide = app.config().prefs.hide.clone();
     let (rows, mut counts) = app
         .db
         .read(move |c| Ok((platforms::list(c)?, titles::counts(c, &hide)?)))
         .await?;
-    let total = rows.len() as u64;
-    let items = rows
+    let Paged { items, total } = paging.resolve().slice(rows);
+    let items = items
         .into_iter()
-        .skip(offset as usize)
-        .take(limit as usize)
         .map(|row| {
             let counts = counts.remove(&row.id.0).unwrap_or_default();
             PlatformOut { row, counts }
         })
         .collect();
-    Ok(Json(Page { items, total }))
+    Ok(Json(Paged { items, total }))
 }
 
 fn body<T: for<'de> Deserialize<'de>>(bytes: &Bytes) -> Result<T, ApiError> {

@@ -6,7 +6,9 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::titles::TitleId;
+use super::ids::{DownloadId, FileId, ImportId, RomId, TitleId};
+use super::sql::{self, Page, Paged};
+use super::titles::{RomStatus, TitleSource};
 use crate::error::Result;
 
 /// `import_log.action`.
@@ -49,13 +51,13 @@ impl ImportAction {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct LogRow {
     /// Row id.
-    pub id: i64,
+    pub id: ImportId,
     /// Unix seconds.
     pub at: i64,
     /// The download imported, when the entry came from one.
-    pub download_id: Option<i64>,
+    pub download_id: Option<DownloadId>,
     /// The file placed, kept or renamed.
-    pub file_id: Option<i64>,
+    pub file_id: Option<FileId>,
     /// What happened.
     pub action: String,
     /// Action-specific JSON.
@@ -70,49 +72,66 @@ pub struct LogRow {
 pub fn log(
     conn: &Connection,
     at: i64,
-    download_id: Option<i64>,
-    file_id: Option<i64>,
+    download_id: Option<DownloadId>,
+    file_id: Option<FileId>,
     action: ImportAction,
     detail: &Value,
-) -> Result<i64> {
+) -> Result<ImportId> {
     conn.execute(
         "INSERT INTO import_log (at, download_id, file_id, action, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![at, download_id, file_id, action.as_str(), detail.to_string()],
     )?;
-    Ok(conn.last_insert_rowid())
+    Ok(ImportId(conn.last_insert_rowid()))
 }
 
 /// A page of the log, newest first, and the total row count.
 ///
 /// # Errors
 ///
-/// [`crate::Error::Db`] on SQLite failure.
-pub fn list(conn: &Connection, limit: u32, offset: u32) -> Result<(Vec<LogRow>, u64)> {
-    let total: i64 = conn.query_row("SELECT COUNT(*) FROM import_log", [], |r| r.get(0))?;
-    let mut stmt = conn.prepare(
-        "SELECT id, at, download_id, file_id, action, detail FROM import_log
-         ORDER BY id DESC LIMIT ?1 OFFSET ?2",
-    )?;
-    let rows = stmt.query_map([limit, offset], |r| {
-        let detail: String = r.get(5)?;
-        Ok(LogRow {
-            id: r.get(0)?,
-            at: r.get(1)?,
-            download_id: r.get(2)?,
-            file_id: r.get(3)?,
-            action: r.get(4)?,
-            detail: serde_json::from_str(&detail).unwrap_or(Value::Null),
-        })
-    })?;
-    let items = rows.collect::<rusqlite::Result<_>>()?;
-    Ok((items, u64::try_from(total).unwrap_or(0)))
+/// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Stored`] for a detail that is
+/// not JSON.
+pub fn list(conn: &Connection, page: Page) -> Result<Paged<LogRow>> {
+    sql::snapshot(conn, |conn| {
+        let total = conn.query_row("SELECT COUNT(*) FROM import_log", [], |r| {
+            sql::get_u64(r, 0)
+        })?;
+        let mut stmt = conn.prepare(
+            "SELECT id, at, download_id, file_id, action, detail FROM import_log
+             ORDER BY id DESC LIMIT ?1 OFFSET ?2",
+        )?;
+        let rows = stmt
+            .query_map([page.limit, page.offset], |r| {
+                Ok((
+                    LogRow {
+                        id: r.get(0)?,
+                        at: r.get(1)?,
+                        download_id: r.get(2)?,
+                        file_id: r.get(3)?,
+                        action: r.get(4)?,
+                        detail: Value::Null,
+                    },
+                    r.get::<_, String>(5)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let items = rows
+            .into_iter()
+            .map(|(row, detail)| {
+                Ok(LogRow {
+                    detail: sql::from_json("import_log.detail", &detail)?,
+                    ..row
+                })
+            })
+            .collect::<Result<_>>()?;
+        Ok(Paged { items, total })
+    })
 }
 
 /// A rom with everything placement and the quarantine report need.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct EntryRom {
     /// `roms.id`.
-    pub id: i64,
+    pub id: RomId,
     /// File name in the DAT.
     pub name: String,
     /// Size in bytes.
@@ -124,7 +143,7 @@ pub struct EntryRom {
     /// Lowercase hex SHA1.
     pub sha1: Option<String>,
     /// DAT status.
-    pub status: String,
+    pub status: RomStatus,
     /// The DAT's `header` attribute, verbatim.
     pub header: Option<String>,
 }
@@ -160,7 +179,7 @@ fn rom_row(r: &Row<'_>) -> rusqlite::Result<EntryRom> {
     Ok(EntryRom {
         id: r.get(0)?,
         name: r.get(1)?,
-        size: u64::try_from(r.get::<_, i64>(2)?).unwrap_or(0),
+        size: sql::get_u64(r, 2)?,
         crc32: r.get(3)?,
         md5: r.get(4)?,
         sha1: r.get(5)?,
@@ -174,7 +193,7 @@ fn rom_row(r: &Row<'_>) -> rusqlite::Result<EntryRom> {
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn rom(conn: &Connection, id: i64) -> Result<Option<EntryRom>> {
+pub fn rom(conn: &Connection, id: RomId) -> Result<Option<EntryRom>> {
     Ok(conn
         .query_row(
             &format!("SELECT {ROM_COLUMNS} FROM roms WHERE id = ?1"),
@@ -193,9 +212,10 @@ pub fn rom(conn: &Connection, id: i64) -> Result<Option<EntryRom>> {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(!mistarr_server::db::imports::rom_retired(&conn, 1).unwrap());
+/// let rom = mistarr_server::db::ids::RomId(1);
+/// assert!(!mistarr_server::db::imports::rom_retired(&conn, rom).unwrap());
 /// ```
-pub fn rom_retired(conn: &Connection, id: i64) -> Result<bool> {
+pub fn rom_retired(conn: &Connection, id: RomId) -> Result<bool> {
     Ok(conn
         .query_row(
             "SELECT r.retired = 1 OR t.retired = 1 FROM roms r JOIN titles t ON t.id = r.title_id
@@ -212,10 +232,10 @@ pub fn rom_retired(conn: &Connection, id: i64) -> Result<bool> {
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn title_of_rom(conn: &Connection, rom_id: i64) -> Result<Option<TitleId>> {
+pub fn title_of_rom(conn: &Connection, rom_id: RomId) -> Result<Option<TitleId>> {
     Ok(conn
         .query_row("SELECT title_id FROM roms WHERE id = ?1", [rom_id], |r| {
-            r.get(0).map(TitleId)
+            r.get(0)
         })
         .optional()?)
 }
@@ -226,10 +246,10 @@ pub fn title_of_rom(conn: &Connection, rom_id: i64) -> Result<Option<TitleId>> {
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn title_entry(conn: &Connection, id: TitleId) -> Result<Option<TitleEntry>> {
-    let Some((platform, name, source)): Option<(String, String, String)> = conn
+    let Some((platform, name, source)): Option<(String, String, TitleSource)> = conn
         .query_row(
             "SELECT platform_id, name, source FROM titles WHERE id = ?1",
-            [id.0],
+            [id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?
@@ -240,7 +260,7 @@ pub fn title_entry(conn: &Connection, id: TitleId) -> Result<Option<TitleEntry>>
         "SELECT {ROM_COLUMNS} FROM roms WHERE title_id = ?1 AND retired = 0 ORDER BY id"
     ))?;
     let roms = stmt
-        .query_map([id.0], rom_row)?
+        .query_map([id], rom_row)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(Some(TitleEntry {
         id,
@@ -248,7 +268,7 @@ pub fn title_entry(conn: &Connection, id: TitleId) -> Result<Option<TitleEntry>>
         name,
         flags: super::titles::flags_of(conn, id)?,
         roms,
-        from_mra: source == "mra",
+        from_mra: source == TitleSource::Mra,
     }))
 }
 
@@ -277,14 +297,40 @@ mod tests {
         {
             log(&c, 10, None, None, action, &json!({ "n": i })).expect("log");
         }
-        let (items, total) = list(&c, 2, 0).expect("list");
-        assert_eq!(total, 3);
-        assert_eq!(items[0].action, "renamed");
-        assert_eq!(items[0].detail, json!({ "n": 2 }));
-        let (rest, _) = list(&c, 2, 2).expect("list");
-        assert_eq!(rest.len(), 1);
-        assert_eq!(rest[0].action, "placed");
+        let first = list(
+            &c,
+            Page {
+                limit: 2,
+                offset: 0,
+            },
+        )
+        .expect("list");
+        assert_eq!(first.total, 3);
+        assert_eq!(first.items[0].action, "renamed");
+        assert_eq!(first.items[0].detail, json!({ "n": 2 }));
+        let rest = list(
+            &c,
+            Page {
+                limit: 2,
+                offset: 2,
+            },
+        )
+        .expect("list");
+        assert_eq!(rest.items.len(), 1);
+        assert_eq!(rest.items[0].action, "placed");
         assert_eq!(ImportAction::Quarantined.as_str(), "quarantined");
+        c.execute("UPDATE import_log SET detail = 'not json'", [])
+            .expect("corrupt");
+        assert!(matches!(
+            list(
+                &c,
+                Page {
+                    limit: 2,
+                    offset: 0
+                }
+            ),
+            Err(crate::Error::Stored { .. })
+        ));
     }
 
     #[test]
@@ -317,6 +363,6 @@ mod tests {
             .roms
             .is_empty());
         assert!(title_entry(&c, TitleId(99)).expect("entry").is_none());
-        assert!(title_of_rom(&c, 99).expect("none").is_none());
+        assert!(title_of_rom(&c, RomId(99)).expect("none").is_none());
     }
 }

@@ -6,8 +6,16 @@ use rusqlite::params;
 use super::*;
 use mistarr_core::select::Prefs;
 
-use crate::db::dats::{self, DatVersionId};
-use crate::db::titles::{self, Browse, Counts, GroupRow, SearchShape, Sort, TitleId, Tri};
+use crate::db::dats;
+use crate::db::ids::{DatVersionId, TitleId};
+use crate::db::sql::{Page, Paged};
+use crate::db::titles::{self, Browse, Counts, GroupRow, SearchShape, Sort, Tri};
+
+/// The first ten rows.
+const TEN: Page = Page {
+    limit: 10,
+    offset: 0,
+};
 
 /// The reference aggregation query for `title_groups`, as a view the table must equal.
 const REFERENCE: &str = "CREATE TEMP VIEW reference_groups AS
@@ -164,7 +172,7 @@ fn reference_browse(
     f: &Browse,
     limit: u32,
     offset: u32,
-) -> (Vec<GroupRow>, u64) {
+) -> Paged<GroupRow> {
     let q =
         f.q.as_deref()
             .map(str::trim)
@@ -227,7 +235,10 @@ fn reference_browse(
         .expect("query")
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
-    (items, u64::try_from(total).unwrap_or(0))
+    Paged {
+        items,
+        total: u64::try_from(total).unwrap_or(0),
+    }
 }
 
 /// The reference per-platform counts, without the unverified-file count.
@@ -365,8 +376,8 @@ fn assert_matches_reference(c: &Connection) {
                 let (limit, offset) = if n.is_multiple_of(4) { (3, 1) } else { (50, 0) };
                 let want = reference_browse(c, platform, &f, limit, offset);
                 for shape in SearchShape::ALL {
-                    let got =
-                        titles::browse_with(c, platform, &f, limit, offset, shape).expect("browse");
+                    let got = titles::browse_with(c, platform, &f, Page { limit, offset }, shape)
+                        .expect("browse");
                     assert_eq!(got, want, "{platform} {shape:?} {f:?}");
                 }
                 let unfiltered = Browse {
@@ -375,7 +386,11 @@ fn assert_matches_reference(c: &Connection) {
                     wanted: Tri::Any,
                     ..f
                 };
-                let got = titles::browse(c, platform, &unfiltered, 50, 0).expect("browse");
+                let all = Page {
+                    limit: 50,
+                    offset: 0,
+                };
+                let got = titles::browse(c, platform, &unfiltered, all).expect("browse");
                 assert_eq!(
                     got,
                     reference_browse(c, platform, &unfiltered, 50, 0),
@@ -562,8 +577,14 @@ fn apply(c: &Connection, op: &Op, seq: &mut u32) {
                 "UPDATE titles SET parent_id = COALESCE(?2, id) WHERE id = ?1",
                 &[&id, &parent],
             );
-            titles::store_lists(c, id, &pick(&REGIONS, regions), &[], &pick(&FLAGS, flags))
-                .expect("lists");
+            titles::store_lists(
+                c,
+                TitleId(id),
+                &pick(&REGIONS, regions),
+                &[],
+                &pick(&FLAGS, flags),
+            )
+            .expect("lists");
         }
         Op::SetParent { title: t, parent } => {
             if let (Some(t), Some(p)) = (title(t), title(parent)) {
@@ -625,8 +646,14 @@ fn apply(c: &Connection, op: &Op, seq: &mut u32) {
             regions,
         } => {
             if let Some(t) = title(t) {
-                titles::store_lists(c, t, &pick(&REGIONS, regions), &[], &pick(&FLAGS, flags))
-                    .expect("lists");
+                titles::store_lists(
+                    c,
+                    TitleId(t),
+                    &pick(&REGIONS, regions),
+                    &[],
+                    &pick(&FLAGS, flags),
+                )
+                .expect("lists");
             }
         }
         Op::Move { title: t, platform } => {
@@ -968,7 +995,14 @@ fn bits_follow_the_known_tables() {
     };
     assert_eq!(summary(&c), (8, 0, 8 | OTHER, 2 | OTHER));
     let tx = c.transaction().expect("tx");
-    titles::store_lists(&tx, 1, &["usa".to_owned()], &[], &["other:x".to_owned()]).expect("lists");
+    titles::store_lists(
+        &tx,
+        TitleId(1),
+        &["usa".to_owned()],
+        &[],
+        &["other:x".to_owned()],
+    )
+    .expect("lists");
     crate::db::commit(tx).expect("commit");
     assert_eq!(summary(&c), (0, 2, OTHER, 2));
 }
@@ -1016,9 +1050,9 @@ fn a_group_whose_parent_is_on_another_platform_is_found_by_every_shape() {
         ..Browse::default()
     };
     for shape in SearchShape::ALL {
-        let (rows, total) = titles::browse_with(&c, "nes", &f, 10, 0, shape).expect("browse");
-        assert_eq!(total, 1, "{shape:?}");
-        assert_eq!(rows[0].parent_id, TitleId(1), "{shape:?}");
+        let got = titles::browse_with(&c, "nes", &f, TEN, shape).expect("browse");
+        assert_eq!(got.total, 1, "{shape:?}");
+        assert_eq!(got.items[0].parent_id, TitleId(1), "{shape:?}");
     }
     let tx = c.transaction().expect("tx");
     tx.execute("UPDATE titles SET platform_id = 'nes' WHERE id = 1", [])
@@ -1030,9 +1064,8 @@ fn a_group_whose_parent_is_on_another_platform_is_found_by_every_shape() {
         })
         .expect("count");
     assert_eq!(splits, 0);
-    let (_, total) =
-        titles::browse_with(&c, "nes", &f, 10, 0, SearchShape::FtsPlatform).expect("browse");
-    assert_eq!(total, 1);
+    let got = titles::browse_with(&c, "nes", &f, TEN, SearchShape::FtsPlatform).expect("browse");
+    assert_eq!(got.total, 1);
 }
 
 #[test]
@@ -1166,7 +1199,8 @@ fn visibility_uses_the_summary_before_the_variants() {
         "{}",
         c.sql()
     );
-    assert!(!c.sql().contains("json_each"), "{}", c.sql());
+    assert!(c.sql().contains("json_each(?)"), "{}", c.sql());
+    assert_eq!(c.args.len(), 1, "the hidden list is one bound value");
     let mut c = Clause::default();
     visible(
         &mut c,
@@ -1174,7 +1208,8 @@ fn visibility_uses_the_summary_before_the_variants() {
         Some("Atlantis"),
         &strings(&["demo", "other:y"]),
     );
-    assert_eq!(c.args.len(), 5);
+    assert_eq!(c.args.len(), 4);
+
     assert!(c.sql().contains("g.flag_union & 64 = 64"), "{}", c.sql());
 }
 

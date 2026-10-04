@@ -680,7 +680,7 @@ fn targets_follow_the_config() {
 }
 
 /// A source whose torrent `t` is in the client, under seed policy `none`.
-fn source_in_client(app: &AppState) -> sources::SourceId {
+fn source_in_client(app: &AppState) -> crate::db::ids::SourceId {
     app.db
         .write_blocking(|c| {
             let id = sources::insert(

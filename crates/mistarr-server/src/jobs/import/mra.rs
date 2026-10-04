@@ -16,6 +16,7 @@ use super::{fail, finish, Piece, Placing, Why, BIOS_REFUSED};
 use crate::db::arcade as arcade_rows;
 use crate::db::downloads::{DownloadRow, DownloadState};
 use crate::db::files::{self, FileState};
+use crate::db::ids::RomId;
 use crate::db::imports::{self, EntryRom, TitleEntry};
 use crate::error::Result;
 use crate::jobs::arcade::{self, check_rom, same_zip, Check, ZipIndex, ZipSource};
@@ -305,7 +306,7 @@ fn decide(
 /// directory, if any: an HBMAME DAT for a `hbmame` zip, any other DAT otherwise.
 fn lookup(
     c: &rusqlite::Connection,
-    rom_id: i64,
+    rom_id: RomId,
 ) -> Result<(Option<arcade_rows::ZipRom>, Option<TitleEntry>)> {
     let Some(z) = arcade_rows::zip_rom(c, rom_id)? else {
         return Ok((None, None));
@@ -417,7 +418,7 @@ impl Placing<'_> {
     /// Marks the members an md5 match read from zips already in `games/` verified, as
     /// the zips of this title they belong to, and each such zip's presence row too.
     async fn verify_siblings(&self, read: &[(PathBuf, String)], staged: &Path) -> Result<()> {
-        let mut rows: Vec<(String, i64)> = Vec::new();
+        let mut rows: Vec<(String, RomId)> = Vec::new();
         for (path, member) in read.iter().filter(|(p, _)| p != staged) {
             let (Ok(rel), Some(name)) = (path.strip_prefix(&self.games), path.file_name()) else {
                 continue;

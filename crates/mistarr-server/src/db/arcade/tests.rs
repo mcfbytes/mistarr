@@ -50,9 +50,13 @@ fn recompute(c: &Connection) {
 
 fn browse(c: &Connection) -> Vec<(String, u64)> {
     crate::db::groups::flush(c).expect("flush");
-    titles::browse(c, "arcade", &Browse::default(), 100, 0)
+    let page = crate::db::sql::Page {
+        limit: 100,
+        offset: 0,
+    };
+    titles::browse(c, "arcade", &Browse::default(), page)
         .expect("browse")
-        .0
+        .items
         .into_iter()
         .map(|g| (g.name, g.have_verified))
         .collect()
@@ -182,7 +186,7 @@ fn dat_game(c: &Connection, version: &str, name: &str) -> TitleId {
         crc32: Some("0a0b0c0d"),
         md5: Some("0123456789abcdef0123456789abcdef"),
         sha1: None,
-        status: "good",
+        status: titles::RomStatus::Good,
         header: None,
     };
     let id = titles::upsert_title(c, "arcade", v, &t, &[rom]).expect("upsert");
@@ -208,8 +212,12 @@ fn dat_loads_never_touch_mra_titles() {
     assert!(dats::get(&c, mra_version).expect("get").is_none());
     assert!(dats::retire(&c, mra_version, 1).expect("retire").is_none());
     assert!(!retired(m));
-    let (items, total) = dats::list(&c, 10, 0).expect("list");
-    assert_eq!((items.len(), total), (2, 2));
+    let page = crate::db::sql::Page {
+        limit: 10,
+        offset: 0,
+    };
+    let listed = dats::list(&c, page).expect("list");
+    assert_eq!((listed.items.len(), listed.total), (2, 2));
     assert_eq!(
         crate::db::system::wizard_counts(&c)
             .expect("counts")
@@ -281,7 +289,7 @@ fn group_detail_carries_the_mra_block() {
     recompute(&c);
     let d = titles::group_detail(&c, t).expect("detail").expect("group");
     let v = &d.variants[0];
-    assert_eq!(v.source, "mra");
+    assert_eq!(v.source, titles::TitleSource::Mra);
     let mra = v.mra.as_ref().expect("mra");
     assert_eq!(mra.missing_zips, ["mame/exblast.zip"]);
     let json = serde_json::to_value(v).expect("json");
@@ -298,10 +306,10 @@ fn import_reads_find_zip_roms_their_titles_and_dat_entries() {
         &[("exblast.zip", false), ("exparent.zip", true)],
     );
     let alt = mra(&c, "Example Blaster (set 2)", &[("ExBlast.zip", false)]);
-    let rom: i64 = c
+    let rom: RomId = c
         .query_row(
             "SELECT id FROM roms WHERE title_id = ?1 AND name = 'exblast.zip'",
-            [main.0],
+            [main],
             |r| r.get(0),
         )
         .expect("rom");
@@ -340,7 +348,7 @@ fn import_reads_find_zip_roms_their_titles_and_dat_entries() {
     );
 
     let dat = dat_game(&c, "1", "exblast");
-    assert!(zip_rom(&c, 0).expect("read").is_none());
+    assert!(zip_rom(&c, RomId(0)).expect("read").is_none());
     assert_eq!(
         dat_entry_named(&c, "arcade", "ExBlast", false).expect("dat"),
         Some(dat)
