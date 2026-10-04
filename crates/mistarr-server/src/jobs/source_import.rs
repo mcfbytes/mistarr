@@ -1044,7 +1044,9 @@ mod tests {
         let names: HashSet<_> = items.iter().map(|r| r.origin_file.clone()).collect();
         assert_eq!(names.len(), 2, "{names:?}");
         for row in &items {
-            let uri = magnet_uri(&app, row).await;
+            let Some(TorrentSource::Magnet { uri, .. }) = magnet_source(&app, row).await else {
+                panic!("not a magnet: {row:?}");
+            };
             assert!(uri.contains(&row.infohash), "{uri}");
             assert!(uris.contains(&uri), "kept as dropped: {uri}");
         }
