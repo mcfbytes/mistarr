@@ -72,9 +72,13 @@ impl Progress {
         self
     }
 
-    /// Adds a field of this job kind.
+    /// Adds a field of this job kind; `key` must not be one of the named fields.
     #[must_use]
     pub fn with(mut self, key: &str, value: impl Serialize) -> Self {
+        debug_assert!(
+            !["phase", "done", "total", "bytes", "bytes_total"].contains(&key),
+            "{key} is a named field"
+        );
         let value = serde_json::to_value(value).unwrap_or(Value::Null);
         self.extra.insert(key.to_owned(), value);
         self

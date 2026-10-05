@@ -514,7 +514,8 @@ restart never names a new fetch.
 The job reports live progress `{ token, phase, bytes, bytes_total,
 file }`: `phase` is `connecting`, `receiving`, `checking` (the parsers read
 the whole file) or `placing` (the file goes into `dats/` or `sources/`);
-`bytes_total` is the announced length and is absent without one, and `file`
+`bytes` and `bytes_total` are reported through `receiving` and left out while
+`checking` and `placing`; `bytes_total` is the announced length and is absent without one, and `file`
 is the name the file will be placed under, absent until the first bytes
 have said what it is. On success it stores `{ token, phase: "placed",
 bytes, bytes_total, file, target, placed }`, `target` being `dats`

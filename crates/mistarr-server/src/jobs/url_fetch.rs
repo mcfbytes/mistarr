@@ -176,9 +176,10 @@ struct View {
 
 impl View {
     fn progress(&self, phase: &str) -> Progress {
-        let mut p = Progress::phase(phase)
-            .bytes(self.received, self.total)
-            .with("token", self.token);
+        let mut p = Progress::phase(phase).with("token", self.token);
+        if !matches!(phase, "checking" | "placing") {
+            p = p.bytes(self.received, self.total);
+        }
         if let Some(f) = &self.file {
             p = p.with("file", f);
         }
@@ -644,5 +645,10 @@ mod tests {
         v.file = Some("a.dat".into());
         assert_eq!(value(&v, "receiving")["bytes_total"], 9);
         assert_eq!(value(&v, "receiving")["file"], "a.dat");
+        for phase in ["checking", "placing"] {
+            assert!(value(&v, phase).get("bytes").is_none());
+            assert!(value(&v, phase).get("bytes_total").is_none());
+        }
+        assert_eq!(value(&v, "placed")["bytes_total"], 9);
     }
 }

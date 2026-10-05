@@ -579,4 +579,19 @@ mod tests {
         named.sort_unstable();
         assert_eq!(documented, named);
     }
+
+    #[test]
+    fn all_lists_every_kind_once_in_order() {
+        let index = |k: EventKind| match k {
+            EventKind::Status => 0,
+            EventKind::JobProgress => 1,
+            EventKind::DatLoaded => 2,
+            EventKind::DatRejected => 3,
+            EventKind::SourceChanged => 4,
+            EventKind::DownloadChanged => 5,
+            EventKind::ImportDone => 6,
+            EventKind::FileChanged => 7,
+        };
+        assert_eq!(EventKind::ALL.map(index), [0, 1, 2, 3, 4, 5, 6, 7]);
+    }
 }
