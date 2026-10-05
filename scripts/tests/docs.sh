@@ -13,8 +13,8 @@ grep -rhIoE '[A-Za-z_][A-Za-z0-9_]*' crates web/src web/e2e web/scripts scripts 
 
 # Names of other projects, the kernel, sshd, wire values and plan-only names the docs
 # mention in code font.
-external='no_new_privs pivot_root oom_score_adj uevent_helper core_pattern exfat_symlink test_perm open_local S99user Presets Satellaview bad_infohash launch_game launch_mra stop_client quiesce_client board_checks decisions_for_user dlopen SvelteMap prctl _exit umount2 capable statat CapEff NoNewPrivs PasswordAuthentication'
-# Build output and files the docs say are not shipped.
+external='no_new_privs pivot_root oom_score_adj uevent_helper core_pattern exfat_symlink test_perm open_local S99user Presets Satellaview bad_infohash launch_game launch_mra stop_client quiesce_client dlopen SvelteMap prctl _exit umount2 capable statat CapEff NoNewPrivs PasswordAuthentication'
+# Build output and files the plans propose.
 absent='web/dist docs/SANDBOX.md'
 
 for doc in docs/*.md; do
@@ -58,7 +58,10 @@ for doc in docs/*.md; do
         case " $external " in *" $last "*) continue ;; esac
         for seg in $(echo "$name" | tr ':' ' '); do
             case " $external " in *" $seg "*) continue ;; esac
-            grep -qxF "$seg" "$work/words" || echo "$doc:$line: missing symbol $tok"
+            grep -qxF "$seg" "$work/words" || {
+                echo "$doc:$line: missing symbol $tok"
+                break
+            }
         done
     done
     # Fenced rust and ts blocks: CamelCase names and names after fn.
