@@ -91,7 +91,7 @@ pub fn search(
     }
     let filter = Browse {
         q: Some(term.to_owned()).filter(|t| !t.is_empty()),
-        hidden: PrefsConfig::default().hide,
+        hidden: PrefsConfig::default().hidden_names(),
         ..Browse::default()
     };
     let mut out = Vec::with_capacity(shapes.len());

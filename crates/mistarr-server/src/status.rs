@@ -78,7 +78,7 @@ pub enum LaunchState {
 pub fn launch_state(app: &AppState) -> LaunchState {
     if !app.config().prefs.launch {
         LaunchState::Disabled
-    } else if app.command_sink().present() {
+    } else if app.launch.sink().present() {
         LaunchState::Ready
     } else {
         LaunchState::Unavailable
@@ -231,7 +231,7 @@ pub async fn snapshot(app: &AppState) -> Status {
         pause_reason: gate.pause_reason(),
         paused: gate.paused(),
         manual_override: gate.manual,
-        client_hold: app.client_hold(),
+        client_hold: app.client.hold(),
         pause_client_while_playing: config.transfer.pause_client_while_playing,
         waiting,
         corename: gate.corename,
@@ -450,7 +450,7 @@ mod tests {
     async fn launch_state_follows_prefs_and_sink() {
         let (_dir, app) = state();
         assert_eq!(launch_state(&app), LaunchState::Unavailable);
-        app.set_command_sink(std::sync::Arc::new(
+        app.launch.set_sink(std::sync::Arc::new(
             mistarr_mister::launch::RecordingSink::new(),
         ));
         assert_eq!(launch_state(&app), LaunchState::Ready);

@@ -49,7 +49,7 @@ async fn json_of(addr: SocketAddr, path: &str) -> Value {
 
 async fn post(addr: SocketAddr, path: &str, body: &str) -> Value {
     let r = request(addr, "POST", path, &[], Some(body)).await;
-    assert_eq!(r.status, 200, "{path}: {}", r.body);
+    assert_eq!(r.status, 202, "{path}: {}", r.body);
     r.json()
 }
 

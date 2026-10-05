@@ -1,24 +1,18 @@
 //! The Downloads routes of `docs/API.md`.
 
-use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use axum::extract::rejection::{PathRejection, QueryRejection};
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use super::{ApiError, Paging};
+use super::{ApiError, ApiPath, ApiQuery, Paging};
 use crate::app::AppState;
-use crate::db::downloads::{
-    self as rows, CancelOutcome, Cancelled, DownloadRow, DownloadState, RetryOutcome,
-};
-use crate::db::ids::{DownloadId, SourceId};
+use crate::db::downloads::{self as rows, CancelOutcome, DownloadRow, DownloadState, RetryOutcome};
+use crate::db::ids::DownloadId;
 use crate::db::sql::Paged;
-use crate::jobs::transfer::{self, Deselect};
-use crate::jobs::Scheduler;
+use crate::jobs::transfer;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -31,8 +25,8 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
 #[derive(Debug, Default, Deserialize)]
 struct ListQuery {
     state: Option<String>,
-    limit: Option<u32>,
-    offset: Option<u32>,
+    #[serde(flatten)]
+    paging: Paging,
 }
 
 /// Parses a comma list of state names; empty means every state.
@@ -50,54 +44,39 @@ fn states(text: Option<&str>) -> Result<Vec<DownloadState>, ApiError> {
 
 async fn list(
     State(app): State<Arc<AppState>>,
-    query: Result<Query<ListQuery>, QueryRejection>,
+    ApiQuery(query): ApiQuery<ListQuery>,
 ) -> Result<Json<Paged<DownloadRow>>, ApiError> {
-    let Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let states = states(query.state.as_deref())?;
-    let page = Paging {
-        limit: query.limit,
-        offset: query.offset,
-    }
-    .resolve();
+    let page = query.paging.resolve();
     let rows = app.db.read(move |c| rows::list(c, &states, page)).await?;
     Ok(Json(rows))
-}
-
-fn download_id(id: Result<Path<i64>, PathRejection>) -> Result<DownloadId, ApiError> {
-    id.map(|Path(id)| DownloadId(id))
-        .map_err(|e| ApiError::bad_request(e.body_text()))
-}
-
-fn conflict(message: impl Into<String>) -> ApiError {
-    ApiError::new(StatusCode::CONFLICT, "conflict", message)
 }
 
 async fn load(app: &AppState, id: DownloadId) -> Result<DownloadRow, ApiError> {
     app.db
         .read(move |c| rows::get(c, id))
         .await?
-        .ok_or_else(|| ApiError::not_found("No such download."))
+        .ok_or_else(|| ApiError::no_such("download"))
 }
 
 async fn retry(
     State(app): State<Arc<AppState>>,
-    id: Result<Path<i64>, PathRejection>,
+    ApiPath(id): ApiPath<DownloadId>,
 ) -> Result<Json<DownloadRow>, ApiError> {
-    let id = download_id(id)?;
     let outcome = app
         .db
         .write(move |c| rows::retry(c, id, crate::unix_now()))
         .await?;
     match outcome {
         RetryOutcome::Queued => {}
-        RetryOutcome::Missing => return Err(ApiError::not_found("No such download.")),
+        RetryOutcome::Missing => return Err(ApiError::no_such("download")),
         RetryOutcome::NotFailed(state) => {
-            return Err(conflict(format!(
+            return Err(ApiError::conflict(format!(
                 "Only failed downloads can be retried; this one is {state}."
             )))
         }
         RetryOutcome::Busy => {
-            return Err(conflict(
+            return Err(ApiError::conflict(
                 "Another download already fetches this file. Cancel it first.",
             ))
         }
@@ -110,18 +89,17 @@ async fn retry(
 
 async fn cancel(
     State(app): State<Arc<AppState>>,
-    id: Result<Path<i64>, PathRejection>,
+    ApiPath(id): ApiPath<DownloadId>,
 ) -> Result<Json<DownloadRow>, ApiError> {
-    let id = download_id(id)?;
     let outcome = app
         .db
         .write(move |c| rows::cancel(c, id, crate::unix_now()))
         .await?;
     match outcome {
-        CancelOutcome::Cancelled(c) => after_cancel(&app, &[c]).await,
-        CancelOutcome::Missing => return Err(ApiError::not_found("No such download.")),
+        CancelOutcome::Cancelled(c) => transfer::after_cancel(&app, &[c]).await,
+        CancelOutcome::Missing => return Err(ApiError::no_such("download")),
         CancelOutcome::Final(state) => {
-            return Err(conflict(format!(
+            return Err(ApiError::conflict(format!(
                 "A download that is {state} cannot be cancelled."
             )))
         }
@@ -129,31 +107,10 @@ async fn cancel(
     Ok(Json(load(&app, id).await?))
 }
 
-/// Announces cancelled downloads and, for those the client had started,
-/// queues a [`Deselect`] per source so the client stops fetching them.
-pub(crate) async fn after_cancel(app: &Arc<AppState>, cancelled: &[Cancelled]) {
-    let ids = cancelled.iter().map(|c| c.id).collect();
-    if let Err(e) = transfer::publish_ids(app, ids).await {
-        tracing::warn!(error = %e, "cannot announce cancelled downloads");
-    }
-    let started: BTreeSet<i64> = cancelled
-        .iter()
-        .filter(|c| c.started)
-        .filter_map(|c| c.source_id.map(|s| s.0))
-        .collect();
-    for source in started {
-        let job = Arc::new(Deselect {
-            source_id: SourceId(source),
-        });
-        if let Err(e) = Scheduler::enqueue(app, job).await {
-            tracing::warn!(error = %e, "cannot queue a deselect");
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
 
     #[test]
     fn state_filters_parse() {
@@ -163,9 +120,8 @@ mod tests {
             [DownloadState::Queued, DownloadState::Failed]
         );
         assert_eq!(
-            states(Some("x")).map_err(|e| e.status),
+            states(Some("x")).map_err(|e| e.status()),
             Err(StatusCode::BAD_REQUEST)
         );
-        assert_eq!(conflict("c").status, StatusCode::CONFLICT);
     }
 }

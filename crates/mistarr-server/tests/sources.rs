@@ -489,7 +489,7 @@ async fn magnet_resolves_through_the_client() {
     let mut options = options_in(dir.path());
     options.magnet_poll = Duration::from_secs(3600);
     let b = boot_with_options(dir, config, options).await;
-    assert!(b.running.app.client().is_some());
+    assert!(b.running.app.client.get().is_some());
     seed_catalog(&b);
     let mut sse = Sse::open(b.addr(), "/api/v1/events", &[]).await;
     let uri = format!(

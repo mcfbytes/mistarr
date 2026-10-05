@@ -772,18 +772,6 @@ pub fn open_download_count(conn: &Connection, id: SourceId) -> Result<u64> {
     )?)
 }
 
-/// Whether a platform with this id exists.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure.
-pub fn platform_exists(conn: &Connection, id: &PlatformId) -> Result<bool> {
-    Ok(conn
-        .query_row("SELECT 1 FROM platforms WHERE id = ?1", [&id.0], |_| Ok(()))
-        .optional()?
-        .is_some())
-}
-
 /// The file name part of a DAT rom name, which may carry a subdirectory.
 fn leaf(name: &str) -> &str {
     name.rsplit(['/', '\\']).next().unwrap_or(name)
@@ -1053,8 +1041,6 @@ mod tests {
         set_state(&c, id, SourceState::Disabled, None).expect("state");
         let row = get(&c, id).expect("get").expect("row");
         assert_eq!((row.state, row.reason), (SourceState::Disabled, None));
-        assert!(platform_exists(&c, &nes()).expect("exists"));
-        assert!(!platform_exists(&c, &PlatformId("none".into())).expect("exists"));
         c.execute("UPDATE sources SET reason = 'prose' WHERE id = ?1", [id])
             .expect("corrupt");
         assert!(matches!(get(&c, id), Err(crate::Error::Stored { .. })));

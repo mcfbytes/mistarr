@@ -152,21 +152,6 @@ pub fn set_core_present(conn: &Connection, present: &[PlatformId]) -> Result<()>
     Ok(())
 }
 
-/// One platform, or `None` for an unknown id.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure.
-///
-/// ```
-/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(mistarr_server::db::platforms::get(&conn, "nes").unwrap().is_none());
-/// ```
-pub fn get(conn: &Connection, id: &str) -> Result<Option<PlatformRow>> {
-    Ok(list(conn)?.into_iter().find(|r| r.id.0 == id))
-}
-
 /// Switches a platform on or off; false when there is no such platform.
 ///
 /// # Errors
@@ -228,14 +213,13 @@ mod tests {
     }
 
     #[test]
-    fn enabled_toggles_and_get_finds_one_row() {
+    fn enabled_toggles() {
         let mut c = conn();
         seed(&mut c, &PLATFORMS).expect("seed");
         assert!(set_enabled(&c, "nes", false).expect("set"));
         assert!(!set_enabled(&c, "nope", false).expect("set"));
-        let nes = get(&c, "nes").expect("get").expect("row");
-        assert!(!nes.enabled);
-        assert!(get(&c, "nope").expect("get").is_none());
+        let nes = find(&c, &PlatformId("nes".into())).expect("find");
+        assert!(!nes.expect("row").enabled);
     }
 
     #[test]

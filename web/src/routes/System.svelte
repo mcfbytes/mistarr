@@ -553,7 +553,9 @@
                 value={csv(settings.prefs.hide)}
                 oninput={(e) => settings && (settings.prefs.hide = fromCsv(e.currentTarget.value))}
               />
-              <p id="hide-help" class="help">Comma-separated DAT flags whose entries are left out.</p>
+              <p id="hide-help" class="help">
+                Comma-separated flags whose entries are left out: any of bios, beta, proto, demo, sample and program.
+              </p>
             </div>
             <div class="field check">
               <label>

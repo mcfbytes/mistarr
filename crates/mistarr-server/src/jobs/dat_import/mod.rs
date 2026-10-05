@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use mistarr_core::select::{HiddenFlag, Prefs};
+use mistarr_core::select::Prefs;
 use mistarr_core::PlatformId;
 use mistarr_sources::intake::{self, StableFiles, LOADED_DIR};
 use serde_json::{json, Value};
@@ -23,7 +23,6 @@ use super::gate::GateState;
 use super::progress::Reporter;
 use super::{scan, wizard, Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
-use crate::config::PrefsConfig;
 use crate::db::dats;
 use crate::db::ids::DatVersionId;
 use crate::db::ids::JobId;
@@ -41,35 +40,6 @@ const YIELD_FOR: Duration = Duration::from_millis(20);
 
 /// Longest pause between two chunks of the copy into RAM or back while a core runs.
 const YIELD_AT_MOST: Duration = Duration::from_secs(1);
-
-/// The 1G1R preferences of `[prefs]`; hide names that are not selection flags are ignored.
-///
-/// ```
-/// let p = mistarr_server::jobs::dat_import::prefs(&Default::default());
-/// assert_eq!(p, mistarr_core::select::Prefs::default());
-/// ```
-#[must_use]
-pub fn prefs(cfg: &PrefsConfig) -> Prefs {
-    let hide = cfg
-        .hide
-        .iter()
-        .filter_map(|h| match h.as_str() {
-            "bios" => Some(HiddenFlag::Bios),
-            "beta" => Some(HiddenFlag::Beta),
-            "proto" => Some(HiddenFlag::Proto),
-            "demo" => Some(HiddenFlag::Demo),
-            "sample" => Some(HiddenFlag::Sample),
-            "program" => Some(HiddenFlag::Program),
-            _ => None,
-        })
-        .collect();
-    Prefs {
-        regions: cfg.regions.clone(),
-        languages: cfg.languages.clone(),
-        prefer_latest_revision: cfg.prefer_latest_revision,
-        hide,
-    }
-}
 
 /// Binding an unbound version: re-read it from `dats/loaded/` for one platform.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -441,7 +411,7 @@ impl DatImport {
             source_file: source_file.to_owned(),
             file_stem: stem(&self.path),
             bind: self.bind.clone(),
-            prefs: prefs(&ctx.app.config().prefs),
+            prefs: ctx.app.config().prefs.select.clone(),
             now: crate::unix_now(),
             stop: ctx.app.shutdown_signal(),
             gate: ctx.app.gate.subscribe(),
@@ -862,7 +832,7 @@ impl Job for Recompute {
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
         let reporter = ctx.reporter();
-        let prefs = Arc::new(prefs(&ctx.app.config().prefs));
+        let prefs = Arc::new(ctx.app.config().prefs.select.clone());
         let mut tally = Tally::default();
         let mut pass = Pass::Retired;
         while pass != Pass::Done {
