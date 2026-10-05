@@ -46,15 +46,34 @@ where
 /// # Panics
 ///
 /// After [`PATIENCE`] without `f` returning true.
-pub fn eventually_blocking(what: &str, mut f: impl FnMut() -> bool) {
+pub fn eventually_blocking(what: &str, f: impl FnMut() -> bool) {
+    eventually_blocking_within(what, PATIENCE, f);
+}
+
+/// [`eventually_blocking`] with its own time limit.
+///
+/// # Panics
+///
+/// When `limit` passes before `f` returns true.
+pub fn eventually_blocking_within(what: &str, limit: Duration, mut f: impl FnMut() -> bool) {
     let start = Instant::now();
     while !f() {
         assert!(
-            start.elapsed() < PATIENCE,
-            "timed out after {PATIENCE:?} waiting for {what}"
+            start.elapsed() < limit,
+            "timed out after {limit:?} waiting for {what}"
         );
         std::thread::sleep(POLL);
     }
+}
+
+/// The MD5 of `parts` read as one stream.
+#[must_use]
+pub fn md5_of(parts: &[&[u8]]) -> mistarr_core::Md5 {
+    let mut m = mistarr_core::hash::Md5Stream::new();
+    for p in parts {
+        m.update(p);
+    }
+    m.finish()
 }
 
 #[cfg(test)]

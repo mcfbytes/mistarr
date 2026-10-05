@@ -329,13 +329,10 @@ mod tests {
             let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");
             row.expect("row").state
         };
-        for _ in 0..200 {
-            if state().await == JobState::Paused {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(state().await, JobState::Paused);
+        crate::testing::eventually("the row to pause", || async {
+            state().await == JobState::Paused
+        })
+        .await;
         gate.send_replace(GateState::default());
         waiting.await.expect("join").expect("free");
         assert_eq!(state().await, JobState::Running);

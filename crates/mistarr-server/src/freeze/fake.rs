@@ -49,12 +49,9 @@ impl FakeClient {
         };
         // A vfork parent may resume a moment before the child's `exe` names the new program.
         let link = format!("/proc/{}/exe", child.id());
-        for _ in 0..200 {
-            if std::fs::read_link(&link).is_ok_and(|p| p.ends_with(name)) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        crate::testing::eventually_blocking("the child to exec", || {
+            std::fs::read_link(&link).is_ok_and(|p| p.ends_with(name))
+        });
         Self { child, _dir: dir }
     }
 
@@ -70,15 +67,9 @@ impl FakeClient {
         super::stat(Path::new("/proc"), self.pid()).expect("stat").0
     }
 
-    /// Waits up to two seconds for the process state to satisfy `want`.
+    /// Waits for the process state to satisfy `want`, failing the test when it never does.
     pub(crate) fn wait_state(&self, want: impl Fn(char) -> bool) -> char {
-        for _ in 0..200 {
-            let s = self.state();
-            if want(s) {
-                return s;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        crate::testing::eventually_blocking("the process state", || want(self.state()));
         self.state()
     }
 }

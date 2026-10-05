@@ -109,7 +109,8 @@ pub(crate) fn private_dir(dir: &Path) -> Result<()> {
 /// [`Error::File`] naming `dir` when it cannot be created or listed.
 ///
 /// ```
-/// let dir = std::env::temp_dir().join("mistarr-doc-sqlite-tmp");
+/// let base = tempfile::tempdir().unwrap();
+/// let dir = base.path().join("sqlite-tmp");
 /// mistarr_server::db::tempdir::prepare_temp_dir(&dir).unwrap();
 /// assert!(dir.is_dir());
 /// ```

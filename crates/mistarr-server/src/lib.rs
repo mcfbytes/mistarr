@@ -1,5 +1,5 @@
 //! The mistarr server: config, database, jobs, SSE and the HTTP API.
-//! See `docs/ARCHITECTURE.md`; the binary in `main.rs` only parses flags and calls [`app::start`].
+//! See `docs/ARCHITECTURE.md`; the binary in `main.rs` only parses flags and calls [`cli::run`].
 
 pub mod app;
 pub mod cli;

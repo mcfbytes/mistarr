@@ -119,6 +119,14 @@ pub enum Error {
     /// An operating system call with no file of its own failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// A command-line step failed; `what` names it and the source says why.
+    #[error("{what}")]
+    Command {
+        /// What was being done.
+        what: String,
+        /// The underlying failure.
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
     /// A benchmark command refused its database file.
     #[error("bench: {0}")]
     Bench(String),

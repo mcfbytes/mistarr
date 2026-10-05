@@ -8,7 +8,6 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use mistarr_core::hash::Md5Stream;
 use mistarr_server::app::{self, Options, Running};
 use mistarr_server::config::Config;
 use mistarr_server::events::{EventKind, Message};
@@ -332,11 +331,7 @@ pub async fn json_of(addr: SocketAddr, path: &str) -> Value {
 
 /// The MD5 of `parts` read as one stream.
 pub fn md5_of(parts: &[&[u8]]) -> mistarr_core::Md5 {
-    let mut m = Md5Stream::new();
-    for p in parts {
-        m.update(p);
-    }
-    m.finish()
+    mistarr_server::testing::md5_of(parts)
 }
 
 /// A MiSTer Recorder description of set `setname` with `roms` as its body.

@@ -810,7 +810,10 @@ async fn work_kept_before_a_restart_runs_when_the_gate_starts() {
         .expect("kept");
     let _gate = start_at_state(&mock, &app);
     assert_eq!(wait_calls(&mock, 2).await, ["stop:0b", "wanted:0b:[]"]);
-    wait_for_async(&app).await;
+    crate::testing::eventually("the kept work to go", || async {
+        waiting(&app).await.is_empty()
+    })
+    .await;
     drop(dir);
 }
 
@@ -818,16 +821,6 @@ fn start_at_state(mock: &Arc<Mock>, app: &Arc<AppState>) -> tokio::task::JoinHan
     app.set_client_at(nas(), Arc::clone(mock) as Arc<dyn DownloadClient>);
     app.gate.set_corename(Some(MENU.into()));
     tokio::spawn(follow_gate(Arc::clone(app)))
-}
-
-async fn wait_for_async(app: &AppState) {
-    for _ in 0..300 {
-        if waiting(app).await.is_empty() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("the kept work stayed");
 }
 
 #[tokio::test]
@@ -895,14 +888,14 @@ async fn limits_of_a_client_no_longer_in_use_are_set_aside_and_tried_again() {
     let now = stored(&app).await.expect("saved");
     assert_eq!((now.client, now.up), (nas(), Some(RateLimit::kbps(9))));
     let before = crate::unix_now();
-    let mut previous = Vec::new();
-    for _ in 0..300 {
-        previous = previous_list(&app).await;
-        if previous.first().is_some_and(|p| p.tries == 1) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    crate::testing::eventually("one failed try", || async {
+        previous_list(&app)
+            .await
+            .first()
+            .is_some_and(|p| p.tries == 1)
+    })
+    .await;
+    let previous = previous_list(&app).await;
     assert_eq!(previous.len(), 1, "the old client's limits are kept");
     assert_eq!(previous[0].saved.client, gone_socket());
     assert_eq!(previous[0].tries, 1);
@@ -944,13 +937,10 @@ async fn limits_set_aside_a_day_ago_are_dropped_after_a_failed_try() {
     };
     set_previous(&app, &[stale]);
     tokio::spawn(follow_gate(Arc::clone(&app)));
-    for _ in 0..300 {
-        if previous_list(&app).await.is_empty() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("the stale limits stayed");
+    crate::testing::eventually("the stale limits to go", || async {
+        previous_list(&app).await.is_empty()
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -961,12 +951,10 @@ async fn with_no_client_the_saved_limits_are_set_aside_and_taken_back() {
         .write_blocking(move |c| settings::set(c, keys::CLIENT_SAVED_LIMITS, &text))
         .expect("saved");
     tokio::spawn(follow_gate(Arc::clone(&app)));
-    for _ in 0..300 {
-        if !previous_list(&app).await.is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    crate::testing::eventually("the limits set aside", || async {
+        !previous_list(&app).await.is_empty()
+    })
+    .await;
     assert_eq!(previous_list(&app).await[0].saved.up, Some(OWN));
     assert_eq!(stored(&app).await, None);
 

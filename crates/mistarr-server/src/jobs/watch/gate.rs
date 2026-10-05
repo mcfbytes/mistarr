@@ -155,7 +155,7 @@ impl Gate {
     /// assert!(gate.state().paused());
     /// assert!(!gate.set_corename(Some("N64".into())));
     /// ```
-    #[expect(
+    #[allow(
         clippy::must_use_candidate,
         reason = "Callers may ignore whether it changed."
     )]
@@ -178,7 +178,7 @@ impl Gate {
     /// assert!(gate.set_override(Some(Override::Paused)));
     /// assert!(gate.state().paused());
     /// ```
-    #[expect(
+    #[allow(
         clippy::must_use_candidate,
         reason = "Callers may ignore whether it changed."
     )]
@@ -202,7 +202,7 @@ impl Gate {
     /// assert!(gate.state().paused());
     /// assert!(!gate.end_run_now());
     /// ```
-    #[expect(
+    #[allow(
         clippy::must_use_candidate,
         reason = "Callers may ignore whether it changed."
     )]

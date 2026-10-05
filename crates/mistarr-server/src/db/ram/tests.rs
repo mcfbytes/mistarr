@@ -427,19 +427,17 @@ fn another_process_holding_the_database_its_wal_or_its_shm_is_seen() {
         let file = sibling(&db, suffix);
         fs::write(&file, b"x").expect("write");
         assert!(!held_elsewhere(&db));
-        let mut child = std::process::Command::new("sleep")
+        let child = std::process::Command::new("sleep")
             .arg("30")
             .stdin(File::open(&file).expect("open"))
             .spawn()
             .expect("sleep");
-        let seen = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            crate::testing::eventually_blocking("a child holding the file to be seen", || {
-                held_elsewhere(&db)
-            });
-        }));
-        child.kill().expect("kill");
-        child.wait().expect("wait");
-        assert!(seen.is_ok(), "a child holding {suffix:?} is seen");
+        let mut child = KillOnDrop(child);
+        crate::testing::eventually_blocking("a child holding the file to be seen", || {
+            held_elsewhere(&db)
+        });
+        child.0.kill().expect("kill");
+        child.0.wait().expect("wait");
         assert!(!held_elsewhere(&db));
     }
 }
@@ -923,4 +921,14 @@ fn a_search_run_before_an_import_finds_its_titles_after_the_swap_and_in_place() 
         .expect("in place");
     assert_eq!(found(&db, "gba", None), 3);
     assert_eq!(found(&db, "gba", Some("zorbl")), 2);
+}
+
+/// Kills the child when a failed assertion unwinds past it.
+struct KillOnDrop(std::process::Child);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
 }

@@ -481,15 +481,8 @@ mod tests {
     use super::*;
     use crate::app::testutil::write_zip;
 
-    use mistarr_core::hash::Md5Stream;
 
-    fn md5_of(parts: &[&[u8]]) -> mistarr_core::Md5 {
-        let mut m = Md5Stream::new();
-        for p in parts {
-            m.update(p);
-        }
-        m.finish()
-    }
+    use crate::testing::md5_of;
 
     fn at(name: &str) -> ZipPath {
         zip_location(name).expect("location")

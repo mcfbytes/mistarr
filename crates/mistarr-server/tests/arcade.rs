@@ -48,15 +48,12 @@ async fn arcade_rows(addr: SocketAddr) -> Vec<(String, u64)> {
 
 async fn wait_rows(addr: SocketAddr, want: &[(&str, u64)]) {
     let want: Vec<(String, u64)> = want.iter().map(|(n, h)| ((*n).to_owned(), *h)).collect();
-    let mut last = Vec::new();
-    for _ in 0..250 {
-        last = arcade_rows(addr).await;
-        if last == want {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    panic!("arcade rows stayed {last:?}, wanted {want:?}");
+    mistarr_server::testing::eventually_within(
+        &format!("arcade rows {want:?}"),
+        std::time::Duration::from_secs(10),
+        || async { arcade_rows(addr).await == want },
+    )
+    .await;
 }
 
 async fn detail_of(addr: SocketAddr, platform: &str, name: &str) -> Value {

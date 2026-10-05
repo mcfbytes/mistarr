@@ -1,4 +1,3 @@
-use mistarr_core::hash::Md5Stream;
 
 use super::*;
 use crate::app::testutil::{state, write_zip};
@@ -7,13 +6,7 @@ use crate::jobs::Scheduler;
 /// Zips as `(file, members)`, each member `(name, bytes)`.
 type Zips<'a> = &'a [(&'a str, &'a [(&'a str, &'a [u8])])];
 
-fn md5_of(parts: &[&[u8]]) -> mistarr_core::Md5 {
-    let mut m = Md5Stream::new();
-    for p in parts {
-        m.update(p);
-    }
-    m.finish()
-}
+use crate::testing::md5_of;
 
 fn mra_xml(name: &str, rom: &str) -> String {
     format!(
