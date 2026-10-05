@@ -374,6 +374,11 @@ kill "$other" "$client" 2>/dev/null
 rm -f "$root/rtorrent" "$root/planted-record"
 unset MISTARR_FROZEN
 
+if ! sh "$here/docs.sh"; then
+    fail=$((fail + 1))
+    echo "FAIL: scripts/tests/docs.sh"
+fi
+
 if ! sh "$here/install.sh"; then
     fail=$((fail + 1))
     echo "FAIL: scripts/tests/install.sh"

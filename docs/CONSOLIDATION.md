@@ -555,8 +555,8 @@ Sonnet · `mistarr-server`, `tests/` · branch `wp-71-server-surface`
 
 Haiku · `docs/` · branch `wp-72-docs-sweep`
 
-- [ ] ARCHITECTURE.md matches the code: no cue sheet parser listed, the
+- [x] ARCHITECTURE.md matches the code: no cue sheet parser listed, the
   `select_1g1r` signature, the crate table, the adapter trait and the hash
   types.
-- [ ] Every path and symbol named in `docs/` exists, checked by a script in
+- [x] Every path and symbol named in `docs/` exists, checked by a script in
   `scripts/tests/`.

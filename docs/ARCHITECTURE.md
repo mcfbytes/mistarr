@@ -43,7 +43,7 @@ contracts in this document.
 
 | Crate | Responsibility | Depends on |
 |---|---|---|
-| `mistarr-core` | Domain types. DAT parser for Logiqx XML and No-Intro DB exports. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of hashed files and zip members to the roms of one DAT entry in memory (`matching`, over its `Rom` and `Payload` traits); the server finds a file's rom in the catalogue in SQL and decides its state in `jobs::matching`. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. The codecs every crate shares: hex, `Digest` values (`Crc32`, `Md5`, `Sha1`, `InfoHash`), bencode, magnet links, percent-decoding, and the capped XML reader. Its `rusqlite` feature, which only the server enables, binds and reads digests and ids as SQL values. | none |
+| `mistarr-core` | Domain types. DAT parser for Logiqx XML and No-Intro DB exports. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of hashed files and zip members to the roms of one DAT entry in memory (`matching`, over its `Rom` and `Payload` traits); the server finds a file's rom in the catalogue in SQL and decides its state in `jobs::matching`. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. The codecs every crate shares: hex, `Digest` values (`Crc32`, `Md5`, `Sha1`, `InfoHash`), bencode, magnet links, percent-decoding, and the capped XML reader. Its `rusqlite` feature, which only the server enables, binds and reads digests and ids as SQL values. | none |
 | `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk, built on core's header constants, byte-order detection and XML reader. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
 | `mistarr-sources` | Intake of dropped files: `StableFiles` reports a file once its mtime is old enough and its size held across two polls, once per size and mtime, and forgets files that are gone; `plan` picks a free name in `loaded/` without creating it, so the database can store it, and `place` then moves the file there by hard link, or by a rename after a name check where the file system has no hard links; `accept` and `reject` move a file into `loaded/` or `rejected/` under a free name picked with `create_new`, and `reject` writes `<name>.reason.txt` holding `reason\n`. `.torrent` parsing into a file list, over core's bencode. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
 | `mistarr-clients` | `DownloadClient` trait and `connect`, which builds the client for a detected kind and address. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping, both ways, inside each client. The one GET of a URL the user supplies, over hyper and rustls (`fetch`). Torrents arrive already parsed: a `TorrentSource` carries the infohash and file count, and `ClientTorrentId` wraps core's `InfoHash`. | core |
@@ -89,7 +89,7 @@ pub trait CoreAdapter: Send + Sync {
 }
 // The other platform facts are fields of the `Platform` row: `platform_id()`,
 // `games_dir(root)` (e.g. root/games/NES), `bios` (reported, never fetched),
-// `load_extensions` and `header_rule`. `adapter_for` picks an adapter by the
+// `load_extensions` and `header_rule`. `adapter_for(&PlatformId) -> Option<&'static dyn CoreAdapter>` picks an adapter by the
 // row's kind and header rule. The library scan keeps its own extension rules
 // and checks no content: a headerless NES file is found and matched, though
 // placement must give it the iNES header (PLATFORMS.md "Adapter contract").
@@ -101,8 +101,8 @@ pub struct Hashes { pub size: u64, pub crc32: Crc32, pub md5: Md5, pub sha1: Sha
 // DatRom, MRA roms and the server's rows hold Option<Crc32>, Option<Md5> and Option<Sha1>.
 pub fn hash_reader<R: Read>(r: R, rule: HeaderRule, size_hint: Option<u64>) -> io::Result<Hashes>;
 pub fn hash_forms<R: Read>(r: R, rule: HeaderRule, size_hint: Option<u64>) -> io::Result<HeaderForms>; // content, and the whole file when a header was stripped
-pub fn parse_dat(xml: &[u8]) -> Result<Dat>;
-pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
+pub fn parse_dat(bytes: &[u8]) -> Result<Dat, DatError>;
+pub fn select_1g1r<'a>(group: &'a [Variant], prefs: &Prefs) -> Option<&'a Variant>;
 pub fn match_members<'a, R: Rom, P: Payload>(roms: &'a [R], members: &'a [P]) -> SetMatch<'a, P, R>; // pick_rom for one payload
 ```
 
