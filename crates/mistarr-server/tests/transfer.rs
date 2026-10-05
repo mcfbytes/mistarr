@@ -12,7 +12,7 @@ use mistarr_server::config::ClientChoice;
 use mistarr_server::db::downloads::{self as rows, DownloadState};
 use mistarr_server::db::fixtures::{pid, seed_rom};
 use mistarr_server::db::sql::Page;
-use mistarr_server::events::{Event, EventKind};
+use mistarr_server::events::{EventKind, Message};
 use mistarr_server::jobs::watch::poll::{Cadence, Poller};
 use mistarr_server::jobs::{Job, JobContext, JobKind, Lane, Scheduler};
 use serde_json::{json, Value};
@@ -134,7 +134,7 @@ async fn wait_state(b: &Booted, title: i64, state: &str) {
 }
 
 /// `download.changed` bodies published since the last drain.
-fn changes(rx: &mut Receiver<std::sync::Arc<Event>>) -> Vec<Value> {
+fn changes(rx: &mut Receiver<std::sync::Arc<Message>>) -> Vec<Value> {
     let mut out = Vec::new();
     while let Ok(ev) = rx.try_recv() {
         if ev.kind == EventKind::DownloadChanged {

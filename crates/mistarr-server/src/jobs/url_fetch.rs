@@ -12,10 +12,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use mistarr_clients::fetch::{FetchUrl, Fetcher, Limits, Roots};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use self::content::{Checked, Found, Refused, SNIFF_BYTES};
 use self::spool::{Pace, Places, Spool};
+use super::progress::Progress;
 use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::ids::JobId;
@@ -174,15 +175,15 @@ struct View {
 }
 
 impl View {
-    fn json(&self, phase: &str) -> Value {
-        let mut v = json!({ "token": self.token, "phase": phase, "bytes_received": self.received });
-        if let Some(t) = self.total {
-            v["bytes_total"] = json!(t);
+    fn progress(&self, phase: &str) -> Progress {
+        let mut p = Progress::phase(phase).with("token", self.token);
+        if !matches!(phase, "checking" | "placing") {
+            p = p.bytes(self.received, self.total);
         }
         if let Some(f) = &self.file {
-            v["file"] = json!(f);
+            p = p.with("file", f);
         }
-        v
+        p
     }
 }
 
@@ -284,7 +285,7 @@ impl UrlFetch {
             token: self.token,
             ..View::default()
         };
-        reporter.report("connecting", || view.json("connecting"));
+        reporter.report("connecting", || view.progress("connecting"));
         ctx.stop.stopped()?;
         tracing::debug!(host = self.url.host(), "fetching a URL");
         let fetcher = self.fetcher(app).await?;
@@ -321,7 +322,7 @@ impl UrlFetch {
                 return Err(too_large(cap, what(found)));
             }
             spool.push(&chunk).await?;
-            reporter.report("receiving", || view.json("receiving"));
+            reporter.report("receiving", || view.progress("receiving"));
         }
         let found = match found {
             Some(f) => f,
@@ -330,10 +331,10 @@ impl UrlFetch {
         let name = placed_name(hint.as_deref(), found);
         view.file = Some(name.clone());
         spool.finish().await?;
-        reporter.report("checking", || view.json("checking"));
+        reporter.report("checking", || view.progress("checking"));
         let checked = self.check(ctx, found, &mut spool).await?;
         ctx.stop.stopped()?;
-        reporter.report("placing", || view.json("placing"));
+        reporter.report("placing", || view.progress("placing"));
         let placed = match checked {
             Checked::Torrent { bytes, infohash } => {
                 drop(spool);
@@ -358,11 +359,12 @@ impl UrlFetch {
                 place::place_part(app, &part, &name).await?
             }
         };
-        let mut done = view.json("placed");
-        done["file"] = json!(placed.file);
-        done["target"] = json!(found.target());
-        done["placed"] = serde_json::to_value(&placed).unwrap_or(Value::Null);
-        ctx.progress(done).await
+        let done = view
+            .progress("placed")
+            .with("file", &placed.file)
+            .with("target", found.target())
+            .with("placed", &placed);
+        ctx.progress(done.into_value()).await
     }
 
     /// Checks the spooled file on a blocking thread, stopping when cancelled; a DAT or
@@ -484,6 +486,7 @@ impl Drop for UrlFetch {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn names_take_the_extension_of_their_type() {
@@ -633,13 +636,19 @@ mod tests {
             token: 3,
             ..View::default()
         };
+        let value = |v: &View, phase| v.progress(phase).into_value();
         assert_eq!(
-            v.json("connecting"),
-            json!({ "token": 3, "phase": "connecting", "bytes_received": 0 })
+            value(&v, "connecting"),
+            json!({ "token": 3, "phase": "connecting", "bytes": 0 })
         );
         v.total = Some(9);
         v.file = Some("a.dat".into());
-        assert_eq!(v.json("receiving")["bytes_total"], 9);
-        assert_eq!(v.json("receiving")["file"], "a.dat");
+        assert_eq!(value(&v, "receiving")["bytes_total"], 9);
+        assert_eq!(value(&v, "receiving")["file"], "a.dat");
+        for phase in ["checking", "placing"] {
+            assert!(value(&v, phase).get("bytes").is_none());
+            assert!(value(&v, phase).get("bytes_total").is_none());
+        }
+        assert_eq!(value(&v, "placed")["bytes_total"], 9);
     }
 }

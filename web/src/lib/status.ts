@@ -268,15 +268,13 @@ export function describeProgress(kind: string, p: Record<string, unknown> | null
   }
   const phase = typeof p.phase === 'string' ? p.phase : null;
   const parts: string[] = [];
-  let fraction: number | null = null;
+  const bytes = num(p.bytes);
+  const bytesTotal = num(p.bytes_total);
+  let fraction: number | null =
+    bytes !== null && bytesTotal !== null && bytesTotal > 0 ? Math.min(1, bytes / bytesTotal) : null;
   if (kind === 'dat_import') {
     const members = num(p.members);
     const done = num(p.done) ?? 0;
-    const read = num(p.bytes_read);
-    const total = num(p.bytes_total);
-    if (read !== null && total !== null && total > 0) {
-      fraction = Math.min(1, read / total);
-    }
     if (members !== null && members > 1) {
       parts.push(`DAT ${Math.min(done + 1, members)} of ${members}`);
       if (fraction !== null) {
@@ -299,11 +297,6 @@ export function describeProgress(kind: string, p: Record<string, unknown> | null
       parts.push(`${done.toLocaleString()} of ${total.toLocaleString()} folders`);
     }
   } else if (kind === 'chd_tracks') {
-    const read = num(p.bytes_done);
-    const total = num(p.bytes_total);
-    if (read !== null && total !== null && total > 0) {
-      fraction = Math.min(1, read / total);
-    }
     if (typeof p.file === 'string') {
       parts.push(p.file);
     }
@@ -313,15 +306,12 @@ export function describeProgress(kind: string, p: Record<string, unknown> | null
       parts.push(`image ${Math.min(done + 1, images)} of ${images}`);
     }
   } else if (kind === 'url_fetch') {
-    const got = num(p.bytes_received);
-    const total = num(p.bytes_total);
-    if (phase === 'receiving' && got !== null) {
-      if (total !== null && total > 0) {
-        fraction = Math.min(1, got / total);
-        parts.push(`${bytesText(got)} of ${bytesText(total)}`);
-      } else {
-        parts.push(`${bytesText(got)} received`);
-      }
+    if (phase === 'receiving' && bytes !== null) {
+      parts.push(
+        bytesTotal !== null && bytesTotal > 0
+          ? `${bytesText(bytes)} of ${bytesText(bytesTotal)}`
+          : `${bytesText(bytes)} received`
+      );
     }
   } else if (kind === 'recompute_1g1r') {
     const checked = num(p.checked);

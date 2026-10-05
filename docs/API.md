@@ -147,11 +147,15 @@ a phase plus one at every phase change, and becomes the job's `progress` in
 `/system/jobs` and `/dats/incoming`. The value stored on the row replaces it
 when the job next stores progress or finishes.
 
-A `dat_import` reports `{ file, members, done, games, phase, bytes_read,
+Every report is an object of `phase`, `done`, `total`, `bytes`, `bytes_total`
+and fields of its job kind, each left out when it does not apply; `bytes` is
+the one byte counter, of `bytes_total` when that is known.
+
+A `dat_import` reports `{ file, members, done, games, phase, bytes,
 bytes_total }`: `members` is the DATs in the file, `done` those finished,
 `games` those read so far. `phase` is `indexing` (a DB export's first pass,
 for its clone list), `reading`, `storing` (applying the titles), `picking`
-(the 1G1R picks) or `refreshing` (the title groups); `bytes_read` of
+(the 1G1R picks) or `refreshing` (the title groups); `bytes` of
 `bytes_total` of the current DAT, uncompressed, is present while `reading`
 and absent in the other phases, whose share done is unknown, so a bar of
 the bytes read never moves backwards. An import on a copy of the database
@@ -171,9 +175,9 @@ place", reason }` after each DAT. A `recompute_1g1r` reports
 `total` counting directories, and a `remap_sources` job `{ phase: "mapping",
 done, total, changed }`, counting sources, storing `{ done, total, changed }`
 once it ends. A `chd_tracks` job reports `{ platform_id, done, total, file,
-bytes_done, bytes_total }` while it decodes: `done` and `total` count images,
+bytes, bytes_total }` while it decodes: `done` and `total` count images,
 `file` names the image being decoded, and the bytes are its decoded share.
-A `url_fetch` reports `{ token, phase, bytes_received, bytes_total, file }`
+A `url_fetch` reports `{ token, phase, bytes, bytes_total, file }`
 ("Fetching a URL").
 
 `/system/settings` body: `{ client, limits, transfer, prefs, scan }` with the
@@ -507,13 +511,14 @@ it is recorded. Its payload is `{ fetch: token }` and nothing else. Tokens
 start at a random number each run and stay below 2^53, so one from before a
 restart never names a new fetch.
 
-The job reports live progress `{ token, phase, bytes_received, bytes_total,
+The job reports live progress `{ token, phase, bytes, bytes_total,
 file }`: `phase` is `connecting`, `receiving`, `checking` (the parsers read
 the whole file) or `placing` (the file goes into `dats/` or `sources/`);
-`bytes_total` is the announced length and is absent without one, and `file`
+`bytes` and `bytes_total` are reported through `receiving` and left out while
+`checking` and `placing`; `bytes_total` is the announced length and is absent without one, and `file`
 is the name the file will be placed under, absent until the first bytes
 have said what it is. On success it stores `{ token, phase: "placed",
-bytes_received, bytes_total, file, target, placed }`, `target` being `dats`
+bytes, bytes_total, file, target, placed }`, `target` being `dats`
 or `sources` and `placed` the file as that directory's incoming list shows
 it, whose import then runs as an upload's. A failure stores `{ error }`, one
 sentence that names neither the URL nor its host, such as:

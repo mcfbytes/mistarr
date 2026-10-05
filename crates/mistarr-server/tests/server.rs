@@ -4,8 +4,12 @@ mod common;
 
 use common::{boot, boot_with, config_in, eventually, get, request, Sse};
 use mistarr_server::cli::Cli;
+use mistarr_server::db::files::FileState;
+use mistarr_server::db::ids::{FileId, SourceId, TitleId};
+use mistarr_server::db::imports::ImportAction;
+use mistarr_server::db::sources::SourceState;
 use mistarr_server::db::{self, migrate, Db};
-use mistarr_server::events::EventKind;
+use mistarr_server::events::{DatRejected, Event, FileChanged, ImportDone, SourceChanged};
 use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -153,10 +157,10 @@ async fn sse_replays_after_last_event_id_then_streams() {
     let id = |seq: u64| format!("{:x}-{seq}", bus.epoch());
     let seqs: Vec<u64> = (1..=3)
         .map(|i| {
-            bus.publish(
-                EventKind::DatLoaded,
-                &json!({ "file": format!("f{i}.dat") }),
-            )
+            bus.publish(&Event::DatRejected(DatRejected {
+                file: &format!("f{i}.dat"),
+                reason: "test",
+            }))
         })
         .collect();
     let last = id(seqs[0]);
@@ -166,13 +170,14 @@ async fn sse_replays_after_last_event_id_then_streams() {
     assert!(sse.text.contains("text/event-stream"));
     assert!(!sse.text.contains("f1.dat"));
     assert!(!sse.text.contains("event: resync"));
-    assert!(sse.text.contains("event: dat.loaded"));
+    assert!(sse.text.contains("event: dat.rejected"));
     assert!(sse.text.contains("f2.dat") && sse.text.contains("f3.dat"));
 
-    let seq = bus.publish(
-        EventKind::SourceChanged,
-        &json!({ "source_id": 7, "state": "bound" }),
-    );
+    let seq = bus.publish(&Event::SourceChanged(SourceChanged {
+        source_id: SourceId(7),
+        state: SourceState::Bound,
+        platform_id: None,
+    }));
     sse.until("event: source.changed").await;
     assert!(sse.text.contains(&format!("id: {}", id(seq))));
     booted.running.shutdown().await.expect("shutdown");
@@ -183,10 +188,10 @@ async fn sse_after_restart_replays_the_new_ring_and_asks_for_resync() {
     let booted = boot().await;
     let old = &booted.running.app.events;
     for _ in 0..20 {
-        old.publish(
-            EventKind::FileChanged,
-            &json!({ "file_id": 1, "state": "verified" }),
-        );
+        old.publish(&Event::FileChanged(FileChanged {
+            file_id: FileId(1),
+            state: FileState::Verified,
+        }));
     }
     let stale = format!("{:x}-{}", old.epoch(), old.latest_seq());
     let dir = booted.dir;
@@ -195,10 +200,10 @@ async fn sse_after_restart_replays_the_new_ring_and_asks_for_resync() {
     let config = config_in(dir.path());
     let again = boot_with(dir, config).await;
     let bus = &again.running.app.events;
-    let first = bus.publish(
-        EventKind::DatLoaded,
-        &json!({ "file": "after-restart.dat" }),
-    );
+    let first = bus.publish(&Event::DatRejected(DatRejected {
+        file: "after-restart.dat",
+        reason: "test",
+    }));
     assert!(first < 20, "the new counter starts below the stale id");
     let mut sse = Sse::open(again.addr(), "/api/v1/events", &[("Last-Event-ID", &stale)]).await;
     sse.until("after-restart.dat").await;
@@ -214,14 +219,22 @@ async fn sse_without_last_event_id_gets_status_then_live_events() {
         .running
         .app
         .events
-        .publish(EventKind::DatRejected, &json!({ "file": "old.dat" }));
+        .publish(&Event::DatRejected(DatRejected {
+            file: "old.dat",
+            reason: "test",
+        }));
     let mut sse = Sse::open(booted.addr(), "/api/v1/events", &[]).await;
     sse.until("event: status").await;
     assert!(!sse.text.contains("old.dat"));
-    booted.running.app.events.publish(
-        EventKind::ImportDone,
-        &json!({ "title_id": 1, "file_id": 2, "action": "placed" }),
-    );
+    booted
+        .running
+        .app
+        .events
+        .publish(&Event::ImportDone(ImportDone {
+            title_id: TitleId(1),
+            file_id: FileId(2),
+            action: ImportAction::Placed,
+        }));
     sse.until("event: import.done").await;
     booted.running.shutdown().await.expect("shutdown");
 }

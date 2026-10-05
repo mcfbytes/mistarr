@@ -495,14 +495,14 @@ Opus · `mistarr-server` (`jobs/`, `status.rs`, `threads.rs`) · branch
 Sonnet · `mistarr-server` (`events.rs` and publishers), `web/`, API.md ·
 branch `wp-68-typed-events`
 
-- [ ] `enum Event` has one variant per event name carrying its payload;
+- [x] `enum Event` has one variant per event name carrying its payload;
   `kind()` comes from the variant and `publish` takes `&Event`. The `json!`
   payloads go, and `publish` and `publish_transient` treat a serialisation
   failure the same way.
-- [ ] A `Progress` struct with `phase`, `done`, `total`, one byte counter and
+- [x] A `Progress` struct with `phase`, `done`, `total`, one byte counter and
   extra fields replaces `bytes_read`, `bytes_done` and `bytes_received`;
   `status.ts` has one branch for bytes.
-- [ ] API.md's events section matches the enum, checked by a test that
+- [x] API.md's events section matches the enum, checked by a test that
   compares the names.
 
 ### WP-70 Workspace lints and dependencies

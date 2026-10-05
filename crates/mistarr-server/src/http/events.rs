@@ -15,7 +15,7 @@ use tokio::sync::{broadcast, watch};
 use tokio::time::{Interval, MissedTickBehavior};
 
 use crate::app::AppState;
-use crate::events::{Event, EventKind};
+use crate::events::{EventKind, Message};
 
 /// Interval of SSE comment lines that keep proxies from closing the stream.
 const KEEP_ALIVE: Duration = Duration::from_secs(15);
@@ -29,8 +29,8 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
 
 struct Conn {
     app: Arc<AppState>,
-    replay: VecDeque<Arc<Event>>,
-    live: broadcast::Receiver<Arc<Event>>,
+    replay: VecDeque<Arc<Message>>,
+    live: broadcast::Receiver<Arc<Message>>,
     tick: Interval,
     shutdown: watch::Receiver<bool>,
     resync: bool,
@@ -91,7 +91,7 @@ async fn next(mut conn: Conn) -> Option<(Result<SseEvent, Infallible>, Conn)> {
 }
 
 /// A transient event, sequence 0, goes out without an id so it never moves `Last-Event-ID`.
-fn to_sse(ev: &Event) -> SseEvent {
+fn to_sse(ev: &Message) -> SseEvent {
     let sse = SseEvent::default().event(ev.kind.as_str()).data(&ev.data);
     if ev.seq == 0 {
         sse

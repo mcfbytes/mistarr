@@ -5,7 +5,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mistarr_clients::{ClientError, ClientTorrentId, DownloadClient, SeedPolicy, TorrentSource};
 use mistarr_sources::torrent;
-use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::broadcast::error::RecvError;
 
@@ -17,7 +16,7 @@ use crate::db::ids::DownloadId;
 use crate::db::ids::SourceId;
 use crate::db::sources::{self, SourceRow};
 use crate::error::Result;
-use crate::events::EventKind;
+use crate::events::{DownloadChanged, Event, EventKind};
 
 /// Error stored on downloads whose `.torrent` is gone from `sources/loaded/`.
 pub const MISSING_TORRENT: &str =
@@ -26,25 +25,13 @@ pub const MISSING_TORRENT: &str =
 pub const LOST_MAGNET: &str =
     "The download client no longer has this magnet. Remove the source and add it again.";
 
-/// The `download.changed` event body.
-#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
-pub struct DownloadChanged {
-    /// The download.
-    pub download_id: DownloadId,
-    /// Its state now.
-    pub state: DownloadState,
-    /// Its progress, 0 to 1.
-    pub progress: f64,
-}
-
 /// Publishes `download.changed`.
 pub fn publish(app: &AppState, download_id: DownloadId, state: DownloadState, progress: f64) {
-    let body = DownloadChanged {
+    app.events.publish(&Event::DownloadChanged(DownloadChanged {
         download_id,
         state,
         progress,
-    };
-    app.events.publish(EventKind::DownloadChanged, &body);
+    }));
 }
 
 /// Publishes `download.changed` for each of `ids` as stored now.

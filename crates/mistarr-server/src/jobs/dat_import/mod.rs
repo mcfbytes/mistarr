@@ -18,7 +18,7 @@ use serde_json::{json, Value};
 use self::recompute::{pass_progress, recompute_blocking, recompute_pass, Pass, Tally};
 use self::stream::import_from;
 use super::fsutil::extension;
-use super::progress::Reporter;
+use super::progress::{Progress, Reporter};
 use super::stop::StopToken;
 use super::watch::wizard;
 use super::{follow_up, Job, JobContext, JobKind, Lane, Scheduler};
@@ -29,7 +29,7 @@ use crate::db::ids::JobId;
 use crate::db::ram::{self, Ram};
 use crate::db::Db;
 use crate::error::{Error, Result};
-use crate::events::EventKind;
+use crate::events::{DatLoaded, DatRejected, Event};
 
 /// Largest DAT or DAT pack an upload or a URL fetch accepts; daily packs of every
 /// system fit well inside.
@@ -196,7 +196,7 @@ struct Imported {
 const INDEX_SHOWN_AFTER: u64 = 64 * 1024;
 
 /// Live progress of a file's import: `{ file, members, done, games, phase,
-/// bytes_read, bytes_total }`, and `reason` when it runs on the card, sent through the
+/// bytes, bytes_total }`, and `reason` when it runs on the card, sent through the
 /// job's [`Reporter`] without the database.
 struct Meter {
     reporter: Reporter,
@@ -246,23 +246,20 @@ impl Meter {
         self.reporter.report(phase, || self.value(phase, None));
     }
 
-    fn value(&self, phase: &str, bytes: Option<(u64, u64)>) -> Value {
+    fn value(&self, phase: &str, bytes: Option<(u64, u64)>) -> Progress {
         let games = self.games_before.load(Ordering::Relaxed) + self.games.load(Ordering::Relaxed);
-        let mut v = json!({
-            "file": self.file,
-            "members": self.members,
-            "done": self.done.load(Ordering::Relaxed),
-            "games": games,
-            "phase": phase,
-        });
+        let mut p = Progress::phase(phase)
+            .with("file", &self.file)
+            .with("members", self.members)
+            .with("games", games);
+        p.done = u64::try_from(self.done.load(Ordering::Relaxed)).ok();
         if let Some((read, total)) = bytes {
-            v["bytes_read"] = json!(read.min(total));
-            v["bytes_total"] = json!(total);
+            p = p.bytes(read.min(total), Some(total));
         }
         if let Some(r) = &self.reason {
-            v["reason"] = json!(r);
+            p = p.with("reason", r);
         }
-        v
+        p
     }
 }
 
@@ -591,10 +588,9 @@ fn import_all(
     let report = |pass: Pass, tally: &Tally| {
         if let Some(m) = &req.meter {
             m.reporter.report(pass.label(), || {
-                let mut v = m.value(pass.label(), None);
-                v["checked"] = json!(tally.checked);
-                v["matched"] = json!(tally.matched);
-                v
+                m.value(pass.label(), None)
+                    .with("checked", tally.checked)
+                    .with("matched", tally.matched)
             });
         }
     };
@@ -655,8 +651,11 @@ impl ram::Watch for RamWatch {
         if phase == ram::Phase::Importing {
             return;
         }
-        let body = json!({ "file": self.file, "members": self.members, "phase": phase.label() });
-        self.reporter.report(phase.label(), || body);
+        self.reporter.report(phase.label(), || {
+            Progress::phase(phase.label())
+                .with("file", &self.file)
+                .with("members", self.members)
+        });
     }
 
     fn between(&mut self, phase: ram::Phase) -> Result<()> {
@@ -754,17 +753,16 @@ async fn follow_up_load(app: &Arc<AppState>, loaded: &[Loaded], recomputed: bool
 }
 
 fn publish_loaded(app: &AppState, l: &Loaded, file: &str) {
-    app.events.publish(
-        EventKind::DatLoaded,
-        &json!({ "dat_version_id": l.version, "file": file, "platform_id": l.platform }),
-    );
+    app.events.publish(&Event::DatLoaded(DatLoaded {
+        dat_version_id: l.version,
+        file,
+        platform_id: l.platform.as_ref(),
+    }));
 }
 
 fn publish_rejected(app: &AppState, file: &str, reason: &str) {
-    app.events.publish(
-        EventKind::DatRejected,
-        &json!({ "file": file, "reason": reason }),
-    );
+    app.events
+        .publish(&Event::DatRejected(DatRejected { file, reason }));
 }
 
 /// Moves a file into `rejected/` with `<name>.reason.txt` beside it, on a blocking

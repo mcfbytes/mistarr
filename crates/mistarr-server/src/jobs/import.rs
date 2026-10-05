@@ -46,7 +46,7 @@ use crate::db::sql::Page;
 use crate::db::titles::RomStatus;
 use crate::db::{downloads_import, ids::TitleId};
 use crate::error::Result;
-use crate::events::EventKind;
+use crate::events::{Event, EventKind, ImportDone};
 
 /// Why a BIOS entry is never imported, from `docs/PRINCIPLES.md` section 3.
 const BIOS_REFUSED: &str = "BIOS entries are never imported";
@@ -1158,10 +1158,11 @@ impl Placing<'_> {
             transfer::publish(app, *id, DownloadState::Done, 1.0);
         }
         for (file_id, action) in done {
-            app.events.publish(
-                EventKind::ImportDone,
-                &json!({ "title_id": self.entry.id.0, "file_id": file_id.0, "action": action.as_str() }),
-            );
+            app.events.publish(&Event::ImportDone(ImportDone {
+                title_id: self.entry.id,
+                file_id: *file_id,
+                action: *action,
+            }));
         }
     }
 

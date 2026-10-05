@@ -8,8 +8,9 @@ use std::io::Cursor;
 
 use common::{boot, eventually, get, request, Booted};
 use mistarr_core::hash::{hash_reader, HeaderRule};
+use mistarr_server::db::downloads::DownloadState;
 use mistarr_server::db::ids::DownloadId;
-use mistarr_server::events::EventKind;
+use mistarr_server::events::{DownloadChanged, Event};
 use serde_json::{json, Value};
 
 const SIZE: usize = 262_160;
@@ -189,10 +190,14 @@ fn hand_off(b: &Booted, id: i64, staged: &str) {
             Ok(())
         })
         .expect("importing");
-    b.running.app.events.publish(
-        EventKind::DownloadChanged,
-        &json!({ "download_id": DownloadId(id).0, "state": "importing", "progress": 1.0 }),
-    );
+    b.running
+        .app
+        .events
+        .publish(&Event::DownloadChanged(DownloadChanged {
+            download_id: DownloadId(id),
+            state: DownloadState::Importing,
+            progress: 1.0,
+        }));
 }
 
 /// The Nova titles, and the two queued downloads on `nova.nes` staged with the Alt bytes.

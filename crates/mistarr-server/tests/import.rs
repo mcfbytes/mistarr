@@ -19,7 +19,7 @@ use mistarr_server::db::roms;
 use mistarr_server::db::sources::{self, NewSource, SourceState};
 use mistarr_server::db::sql::Page;
 use mistarr_server::db::titles::RomStatus;
-use mistarr_server::events::EventKind;
+use mistarr_server::events::{DownloadChanged, Event};
 use mistarr_server::jobs::JobKind;
 use serde_json::{json, Value};
 
@@ -150,10 +150,14 @@ fn insert(b: &Booted, rom_id: RomId, src: SourceId, index: u32, path: &Path) -> 
 
 /// Publishes `download.changed` as the poller does on entering `importing`.
 fn announce(b: &Booted, id: DownloadId) {
-    b.running.app.events.publish(
-        EventKind::DownloadChanged,
-        &json!({ "download_id": id.0, "state": "importing", "progress": 1.0 }),
-    );
+    b.running
+        .app
+        .events
+        .publish(&Event::DownloadChanged(DownloadChanged {
+            download_id: id,
+            state: DownloadState::Importing,
+            progress: 1.0,
+        }));
 }
 
 fn hand_off(b: &Booted, rom_id: RomId, src: SourceId, index: u32, path: &Path) -> DownloadId {
@@ -1076,10 +1080,14 @@ async fn only_entering_importing_enqueues_and_once_per_download() {
     let staged = stage(&b, "GBA/quest.gba", &body);
     let id = insert(&b, rom, src, 0, &staged);
     let publish = |state: &str| {
-        b.running.app.events.publish(
-            EventKind::DownloadChanged,
-            &json!({ "download_id": id.0, "state": state, "progress": 0.5 }),
-        );
+        b.running
+            .app
+            .events
+            .publish(&Event::DownloadChanged(DownloadChanged {
+                download_id: id,
+                state: DownloadState::parse(state).expect("state"),
+                progress: 0.5,
+            }));
     };
     let jobs = |b: &Booted| {
         b.running
