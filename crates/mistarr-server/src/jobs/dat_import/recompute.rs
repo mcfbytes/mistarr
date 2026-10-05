@@ -87,7 +87,7 @@ impl Pass {
 pub(super) struct Tally {
     pub(super) checked: usize,
     pub(super) matched: usize,
-    pub(super) picked: titles::Recomputed,
+    pub(super) picked: titles::recompute::Recomputed,
 }
 
 /// Runs one chunk of `pass` over `platform` in the caller's transaction, one per chunk,
@@ -123,7 +123,7 @@ pub(super) fn recompute_pass(
             }
         }
         Pass::Picking => {
-            tally.picked = titles::recompute_platform(tx, &platform.0, prefs)?;
+            tally.picked = titles::recompute::recompute_platform(tx, platform, prefs)?;
             Pass::Done
         }
         Pass::Done => Pass::Done,
