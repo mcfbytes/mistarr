@@ -24,7 +24,7 @@ pub enum Code {
     MethodNotAllowed,
     /// 409: the item's state refuses the request.
     Conflict,
-    /// 409: the same action ran moments ago.
+    /// 409: the same action ran moments ago or is still running.
     Busy,
     /// 503: something outside the server cannot take the request.
     Unavailable,
@@ -197,14 +197,23 @@ impl ApiError {
     }
 }
 
-/// `message` trimmed, with a capital first letter and a closing full stop.
+/// `message` trimmed, with a closing full stop and a capital first letter when it opens
+/// with a plain word, so an interpolated path or value keeps its case.
 fn sentence(message: &str) -> String {
     let trimmed = message.trim();
+    let first_word = trimmed
+        .split(char::is_whitespace)
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([',', ':', ';', '.', '!', '?']);
     let mut out = String::with_capacity(trimmed.len() + 1);
     let mut chars = trimmed.chars();
-    if let Some(first) = chars.next() {
-        out.extend(first.to_uppercase());
-        out.push_str(chars.as_str());
+    match chars.next() {
+        Some(first) if first_word.chars().all(char::is_alphabetic) => {
+            out.extend(first.to_uppercase());
+            out.push_str(chars.as_str());
+        }
+        _ => out.push_str(trimmed),
     }
     if !out.ends_with(['.', '!', '?']) {
         out.push('.');
@@ -295,6 +304,8 @@ mod tests {
         }
         assert_eq!(sentence(" done! "), "Done!");
         assert_eq!(sentence(""), ".");
+        assert_eq!(sentence("not a torrent: x"), "Not a torrent: x.");
+        assert_eq!(sentence("nes/x.nes exists"), "nes/x.nes exists.");
         let r = ApiError::bad_request("nope").into_response();
         assert_eq!(r.status(), StatusCode::BAD_REQUEST);
     }

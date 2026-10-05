@@ -347,9 +347,9 @@ async fn rename(
     match import::rename(&app, group, body.file_id).await {
         Ok(_) => Ok(Json(load_detail(&app, id).await?)),
         Err(RenameError::NotFound) => Err(ApiError::no_such("file in this title")),
-        Err(RenameError::Conflict(path)) => {
-            Err(ApiError::conflict(format!("{path} already exists.")))
-        }
+        Err(RenameError::Conflict(path)) => Err(ApiError::conflict(format!(
+            "The file {path} already exists."
+        ))),
         Err(RenameError::Server(e)) => Err(e.into()),
         Err(RenameError::Io(message)) => Err(ApiError::internal(message)),
         Err(e) => Err(ApiError::bad_request(e.to_string())),
