@@ -130,7 +130,7 @@
   {:else if sources.items.length === 0}
     <p>No sources yet. Place a .torrent or .magnet file in <code>/media/fat/mistarr/sources</code> or drop one here.</p>
   {/if}
-  {#if sources.loaded || !sources.error}
+  {#if sources.items.length > 0}
     <div class="table-wrap">
     <table>
       <thead>

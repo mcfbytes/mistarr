@@ -316,6 +316,7 @@ set with `setMockKnob` in `web/e2e/helpers.ts`, and push SSE events with
 - `settingsFail`: `true` makes the settings load fail.
 - `sourceCount` and `pageCap`: synthetic extra sources, and a smaller page cap
   so a store reads several pages.
+- `noSources` and `noDats`: `true` starts the mock with none of them.
 - `scanJobId`: the job id the mock's `POST /platforms/{id}/scan` answers with, so a
   test can end it with a `job.progress` event; unset answers no job.
 - `platformsFail`: `true` makes reading platforms fail.

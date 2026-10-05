@@ -27,3 +27,17 @@ test('deleting a source asks for confirmation inline before it runs', async ({ p
   await expect(trigger).toBeVisible();
   await expect(trigger).toBeFocused();
 });
+
+test('with no sources the page shows its empty text and no table', async ({ page }) => {
+  await setMockKnob(page, 'noSources', true);
+  await page.goto('/#/sources');
+  await expect(page.getByText('No sources yet.')).toBeVisible();
+  await expect(page.locator('table')).toHaveCount(0);
+});
+
+test('with no DATs the page shows its empty text and no list', async ({ page }) => {
+  await setMockKnob(page, 'noDats', true);
+  await page.goto('/#/dats');
+  await expect(page.getByText('No DAT loaded yet.')).toBeVisible();
+  await expect(page.getByRole('list', { name: 'Loaded DATs' })).toHaveCount(0);
+});

@@ -144,7 +144,7 @@
   {:else if dats.items.length === 0}
     <p class="muted">No DAT loaded yet.</p>
   {/if}
-  {#if dats.loaded || !dats.error}
+  {#if families.length > 0}
     <ul class="families" aria-label="Loaded DATs">
       {#each families as f (f.key)}
         {@const d = f.head}
