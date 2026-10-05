@@ -94,8 +94,8 @@ impl Spool {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] when no file can be created, of kind `StorageFull` when the card
-    /// lacks room for `length`.
+    /// [`Error::File`] naming the directory or file that cannot be created, and
+    /// [`Error::Io`] of kind `StorageFull` when the card lacks room for `length`.
     pub async fn create(
         places: Places,
         token: u64,
@@ -112,12 +112,12 @@ impl Spool {
                 .filter(|dir| ram_allows(dir, expected, places.floor));
             let in_ram = ram.is_some();
             let dir = ram.cloned().unwrap_or_else(|| places.card.clone());
-            std::fs::create_dir_all(&dir)?;
+            std::fs::create_dir_all(&dir).map_err(crate::Error::io_at(&dir))?;
             if !in_ram && !card_allows(&dir, expected) {
                 return Err(no_room().into());
             }
             let path = dir.join(name);
-            let file = File::create(&path)?;
+            let file = File::create(&path).map_err(crate::Error::io_at(&path))?;
             Ok(Self {
                 path,
                 file: Some(file),

@@ -1,11 +1,11 @@
 //! Synthetic catalog rows standing in for the DAT import; compiled for tests and the
 //! `test-support` feature only.
 
-use mistarr_core::{HashSet, PlatformId};
+use mistarr_core::{Hashes, PlatformId, RomId};
 use rusqlite::{params, Connection};
 
 use super::downloads::DownloadState;
-use super::ids::{DatVersionId, DownloadId, RomId, SourceId, TitleId};
+use super::ids::{DatVersionId, DownloadId, SourceId, TitleId};
 use super::sql;
 use super::titles::RomStatus;
 use crate::error::Result;
@@ -26,7 +26,7 @@ pub fn conn() -> Connection {
 /// The platform id `id`.
 #[must_use]
 pub fn pid(id: &str) -> PlatformId {
-    PlatformId(id.to_owned())
+    PlatformId::new(id.to_owned())
 }
 
 /// The three roms of the standard `nes` catalog, in id order: `(rom name, size)`.
@@ -65,27 +65,27 @@ pub fn seed_rom(
         "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
          VALUES (?1, ?1 || ' test', '1', 'test.dat', 0, 0)
          ON CONFLICT (dat_name, version) DO NOTHING",
-        [&platform.0],
+        [platform],
     )?;
     let dat: i64 = conn.query_row(
         "SELECT id FROM dat_versions WHERE dat_name = ?1 || ' test'",
-        [&platform.0],
+        [platform],
         |r| r.get(0),
     )?;
     let title = rom_name.rsplit_once('.').map_or(rom_name, |(t, _)| t);
     conn.execute(
         "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
          VALUES (?1, ?2, ?3, ?3)",
-        params![platform.0, dat, title],
+        params![platform, dat, title],
     )?;
-    let title_id = TitleId(conn.last_insert_rowid());
+    let title_id = TitleId::new(conn.last_insert_rowid());
     let flags: Vec<String> = flags.iter().map(|f| (*f).to_owned()).collect();
     super::titles::set_flags(conn, title_id, &flags)?;
     conn.execute(
         "INSERT INTO roms (title_id, name, size, status) VALUES (?1, ?2, ?3, 'good')",
         params![title_id, rom_name, sql::to_i64(size)],
     )?;
-    Ok(RomId(conn.last_insert_rowid()))
+    Ok(RomId::new(conn.last_insert_rowid()))
 }
 
 /// Inserts a download row in `state`, standing in for the transfer poller.
@@ -107,11 +107,11 @@ pub fn download(
          SELECT title_id, ?1, ?2, ?3, ?4, 1, ?5, 0, 0 FROM roms WHERE id = ?1",
         params![rom_id, source_id, file_index, state, staged_path],
     )?;
-    Ok(DownloadId(conn.last_insert_rowid()))
+    Ok(DownloadId::new(conn.last_insert_rowid()))
 }
 
 /// A rom to write: its name, hashes and status.
-type RomSpec = (String, HashSet, RomStatus);
+type RomSpec = (String, Hashes, RomStatus);
 
 /// A DAT version with titles and roms to write, started by [`dat`].
 #[derive(Debug, Clone)]
@@ -147,11 +147,11 @@ impl Written {
 /// [`Dat::write`].
 ///
 /// ```
-/// use mistarr_core::{HashSet, PlatformId};
+/// use mistarr_core::{Hashes, PlatformId};
 /// use mistarr_server::db::{fixtures, titles::RomStatus};
 /// let conn = fixtures::conn();
-/// let h = HashSet { size: 3, crc32: "352441c2".into(), md5: "0".repeat(32), sha1: "0".repeat(40) };
-/// let w = fixtures::dat(&PlatformId("nes".into()))
+/// let h = Hashes { size: 3, crc32: "352441c2".parse().expect("hex"), md5: "0".repeat(32).parse().expect("hex"), sha1: "0".repeat(40).parse().expect("hex") };
+/// let w = fixtures::dat(&PlatformId::new("nes"))
 ///     .title("Example Quest (USA)")
 ///     .rom("a.nes", &h, RomStatus::Good)
 ///     .write(&conn)
@@ -185,9 +185,9 @@ impl Dat {
         conn.execute(
             "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
              VALUES (?1, 'fixture', ?2, 'fixture.dat', 0, ?3)",
-            params![self.platform.0, version.to_string(), i64::try_from(self.titles.len()).unwrap_or(i64::MAX)],
+            params![self.platform, version.to_string(), i64::try_from(self.titles.len()).unwrap_or(i64::MAX)],
         )?;
-        let dat_version = DatVersionId(conn.last_insert_rowid());
+        let dat_version = DatVersionId::new(conn.last_insert_rowid());
         let mut written = Written {
             dat_version,
             titles: Vec::new(),
@@ -197,9 +197,9 @@ impl Dat {
             conn.execute(
                 "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
                  VALUES (?1, ?2, ?3, ?3)",
-                params![self.platform.0, dat_version, name],
+                params![self.platform, dat_version, name],
             )?;
-            let title = TitleId(conn.last_insert_rowid());
+            let title = TitleId::new(conn.last_insert_rowid());
             conn.execute("UPDATE titles SET parent_id = ?1 WHERE id = ?1", [title])?;
             written.titles.push(title);
             for (rom, hashes, status) in roms {
@@ -216,7 +216,7 @@ impl Dat {
                         status,
                     ],
                 )?;
-                written.roms.push(RomId(conn.last_insert_rowid()));
+                written.roms.push(RomId::new(conn.last_insert_rowid()));
             }
         }
         Ok(written)
@@ -230,9 +230,9 @@ pub struct DatTitle(Dat);
 impl DatTitle {
     /// Adds a rom to the current title.
     #[must_use]
-    pub fn rom(mut self, name: &str, hashes: &HashSet, status: RomStatus) -> Self {
+    pub fn rom(mut self, name: &str, hashes: &Hashes, status: RomStatus) -> Self {
         if let Some((_, roms)) = self.0.titles.last_mut() {
-            roms.push((name.to_owned(), hashes.clone(), status));
+            roms.push((name.to_owned(), *hashes, status));
         }
         self
     }
@@ -257,12 +257,14 @@ impl DatTitle {
 mod tests {
     use super::*;
 
-    fn hashes(size: u64) -> HashSet {
-        HashSet {
+    fn hashes(size: u64) -> Hashes {
+        Hashes {
             size,
-            crc32: "352441c2".into(),
-            md5: "900150983cd24fb0d6963f7d28e17f72".into(),
-            sha1: "a9993e364706816aba3e25717850c26c9cd0d89d".into(),
+            crc32: "352441c2".parse().expect("hex"),
+            md5: "900150983cd24fb0d6963f7d28e17f72".parse().expect("hex"),
+            sha1: "a9993e364706816aba3e25717850c26c9cd0d89d"
+                .parse()
+                .expect("hex"),
         }
     }
 
@@ -283,7 +285,7 @@ mod tests {
     #[test]
     fn a_dat_writes_titles_with_their_roms_in_order() {
         let c = conn();
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         let w = dat(&pid)
             .title("One")
             .rom("a.nes", &hashes(3), RomStatus::Good)
@@ -322,6 +324,6 @@ mod tests {
         )
         .expect("source");
         let id = download(&c, rom, src, 0, DownloadState::Queued, None).expect("download");
-        assert!(id.0 > 0);
+        assert!(id.get() > 0);
     }
 }

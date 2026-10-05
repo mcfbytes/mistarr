@@ -3,13 +3,13 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use mistarr_core::PlatformId;
-use mistarr_sources::binding::{Confidence, RomRef};
+use mistarr_core::{PlatformId, RomId};
+use mistarr_sources::binding::Confidence;
 use mistarr_sources::fuzzy::{SizeIndex, SizedRom};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
-use super::ids::{RomId, SourceId, TitleId};
+use super::ids::{SourceId, TitleId};
 use super::sql::{self, text_enum};
 use crate::error::Result;
 
@@ -60,11 +60,6 @@ impl MatchConfidence {
             _ => None,
         }
     }
-}
-
-/// The server's id of a rom the binding crate names.
-fn rom_id(r: RomRef) -> RomId {
-    RomId(r.0)
 }
 
 /// Orders a `confidence` column from strongest to weakest: hash, name, base, fuzzy, size.
@@ -224,8 +219,8 @@ pub fn diff(
     conn: &Connection,
     source: SourceId,
     stored: &Stored,
-    matches: &[(u32, Option<RomRef>, Confidence)],
-    found: &[(u32, RomRef, Confidence)],
+    matches: &[(u32, Option<RomId>, Confidence)],
+    found: &[(u32, RomId, Confidence)],
 ) -> Result<Change> {
     Ok(Change {
         matches: diff_matches(conn, source, matches)?,
@@ -243,7 +238,7 @@ pub fn diff(
 pub fn diff_matches(
     conn: &Connection,
     source: SourceId,
-    matches: &[(u32, Option<RomRef>, Confidence)],
+    matches: &[(u32, Option<RomId>, Confidence)],
 ) -> Result<Vec<MatchRow>> {
     let mut stmt = conn.prepare_cached(
         "SELECT file_index, rom_id, confidence FROM torrent_files WHERE source_id = ?1
@@ -272,7 +267,7 @@ pub fn diff_matches(
             .binary_search_by_key(&index, |m| m.0)
             .map_or((None, None), |at| {
                 let (_, rom, confidence) = matches[at];
-                (rom.map(rom_id), MatchConfidence::of(confidence))
+                (rom, MatchConfidence::of(confidence))
             });
         if now != new {
             out.push((index, new.0, new.1));
@@ -289,8 +284,8 @@ pub fn diff_matches(
 #[must_use]
 pub fn diff_candidates(
     stored: &Stored,
-    matches: &[(u32, Option<RomRef>, Confidence)],
-    found: &[(u32, RomRef, Confidence)],
+    matches: &[(u32, Option<RomId>, Confidence)],
+    found: &[(u32, RomId, Confidence)],
 ) -> Change {
     let proven = |i: u32| stored.is_proven(i);
     let own = |i: u32| {
@@ -304,7 +299,7 @@ pub fn diff_candidates(
         let Some(confidence) = MatchConfidence::of(*confidence) else {
             continue;
         };
-        let pair = (*i, rom_id(*rom));
+        let pair = (*i, *rom);
         if !proven(*i) && !stored.bad.contains(&pair) && own(*i) != Some(*rom) {
             let slot = wanted.entry(pair).or_insert(confidence);
             *slot = (*slot).min(confidence);
@@ -376,7 +371,7 @@ pub fn drop_foreign_proofs(
            SELECT 1 FROM roms r JOIN titles t ON t.id = r.title_id
            WHERE r.id = torrent_files.rom_id AND t.platform_id = ?2
              AND r.retired = 0 AND t.retired = 0)",
-        params![source, platform.0],
+        params![source, platform],
     )?)
 }
 
@@ -414,7 +409,7 @@ pub fn rom_stamp(conn: &Connection, platform: &PlatformId) -> Result<String> {
         "SELECT COALESCE(group_concat(id || '@' || loaded_at, ','), '')
          FROM (SELECT id, loaded_at FROM dat_versions
                WHERE platform_id = ?1 AND retired = 0 AND source != 'mra' ORDER BY id)",
-        [&platform.0],
+        [platform],
         |r| r.get(0),
     )?;
     let mut stmt = conn.prepare_cached(
@@ -422,12 +417,14 @@ pub fn rom_stamp(conn: &Connection, platform: &PlatformId) -> Result<String> {
          FROM roms r JOIN titles t ON t.id = r.title_id
          WHERE t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0",
     )?;
-    let mut rows = stmt.query([&platform.0])?;
+    let mut rows = stmt.query([platform])?;
     let (mut count, mut sum) = (0u64, 0u64);
     while let Some(r) = rows.next()? {
         let (rom, group): (RomId, TitleId) = (r.get(0)?, r.get(1)?);
         count += 1;
-        sum = sum.wrapping_add(mix(mix(rom.0.cast_unsigned()) ^ group.0.cast_unsigned()));
+        sum = sum.wrapping_add(mix(
+            mix(rom.get().cast_unsigned()) ^ group.get().cast_unsigned()
+        ));
     }
     Ok(format!("{versions};{count}:{sum:016x}"))
 }
@@ -636,12 +633,12 @@ impl<'c> SqlSizeIndex<'c> {
 /// ```
 /// use mistarr_core::PlatformId;
 /// use mistarr_server::db::candidates::header_len;
-/// assert_eq!(header_len(&PlatformId("nes".into())), 16);
-/// assert_eq!(header_len(&PlatformId("gba".into())), 0);
+/// assert_eq!(header_len(&PlatformId::new("nes")), 16);
+/// assert_eq!(header_len(&PlatformId::new("gba")), 0);
 /// ```
 #[must_use]
 pub fn header_len(platform: &PlatformId) -> u64 {
-    mistarr_mister::platforms::by_id(&platform.0).map_or(0, |p| p.header_rule.header_len())
+    mistarr_mister::platforms::by_id(platform.as_str()).map_or(0, |p| p.header_rule.header_len())
 }
 
 impl SizeIndex for SqlSizeIndex<'_> {
@@ -660,9 +657,9 @@ impl SizeIndex for SqlSizeIndex<'_> {
             let size = sql::to_i64(size);
             let bare = bare.map_or(size, sql::to_i64);
 
-            let rows = stmt.query_map(params![self.platform.0, size, bare], |r| {
+            let rows = stmt.query_map(params![self.platform, size, bare], |r| {
                 Ok(SizedRom {
-                    rom: RomRef(r.get(0)?),
+                    rom: r.get(0)?,
                     base: r.get(1)?,
                     group: r.get(2)?,
                 })
@@ -711,7 +708,7 @@ mod tests {
             },
         ];
         sources::replace_files(c, id, &files).expect("files");
-        sources::set_binding(c, id, Some(&PlatformId("nes".into())), Some(0.0)).expect("bind");
+        sources::set_binding(c, id, Some(&PlatformId::new("nes")), Some(0.0)).expect("bind");
         id
     }
 
@@ -723,7 +720,7 @@ mod tests {
     }
 
     /// Replaces the candidates of `src` with `found`, as a mapping does.
-    fn put(c: &Connection, src: SourceId, found: &[(u32, RomRef, Confidence)]) -> usize {
+    fn put(c: &Connection, src: SourceId, found: &[(u32, RomId, Confidence)]) -> usize {
         let change = diff(c, src, &stored(c, src).expect("stored"), &[], found).expect("diff");
         apply(c, src, &change).expect("apply");
         change.add.len()
@@ -740,11 +737,8 @@ mod tests {
             &c,
             src,
             &stored(&c, src).expect("stored"),
-            &[(0, Some(RomRef(a.0)), Confidence::Name)],
-            &[
-                (0, RomRef(b.0), Confidence::Fuzzy),
-                (1, RomRef(a.0), Confidence::Size),
-            ],
+            &[(0, Some(a), Confidence::Name)],
+            &[(0, b, Confidence::Fuzzy), (1, a, Confidence::Size)],
         )
         .expect("diff");
         assert_eq!(
@@ -757,7 +751,7 @@ mod tests {
         );
         let unsorted = [
             (1, None, Confidence::Unmatched),
-            (0, Some(RomRef(a.0)), Confidence::Name),
+            (0, Some(a), Confidence::Name),
         ];
         assert_eq!(
             diff_matches(&c, src, &unsorted).expect("diff"),
@@ -782,9 +776,9 @@ mod tests {
             now.candidates.is_empty(),
             "no guess on a proven or ruled-out file"
         );
-        let snes = PlatformId("snes".into());
+        let snes = PlatformId::new("snes");
         assert_eq!(
-            drop_foreign_proofs(&c, src, &PlatformId("nes".into())).expect("nes"),
+            drop_foreign_proofs(&c, src, &PlatformId::new("nes")).expect("nes"),
             0
         );
         assert_eq!(drop_foreign_proofs(&c, src, &snes).expect("snes"), 1);
@@ -829,10 +823,10 @@ mod tests {
         let b = seed_rom(&c, &pid("nes"), "Nova Quest (World) (Alt).nes", 16, &[]).expect("rom");
         let src = source(&c, "0a", SourceState::Bound);
         let found = [
-            (0, RomRef(b.0), Confidence::Size),
-            (0, RomRef(a.0), Confidence::Size),
-            (0, RomRef(a.0), Confidence::Fuzzy),
-            (1, RomRef(a.0), Confidence::Unmatched),
+            (0, b, Confidence::Size),
+            (0, a, Confidence::Size),
+            (0, a, Confidence::Fuzzy),
+            (1, a, Confidence::Unmatched),
         ];
         assert_eq!(put(&c, src, &found), 2);
         assert_eq!(put(&c, src, &found), 0, "unchanged");
@@ -873,7 +867,7 @@ mod tests {
         assert!(of_file(&c, src, 0).expect("of").is_empty());
 
         sources::set_state(&c, src, SourceState::Disabled, None).expect("disable");
-        put(&c, src, &[(0, RomRef(b.0), Confidence::Size)]);
+        put(&c, src, &[(0, b, Confidence::Size)]);
         assert!(for_group(&c, ta).expect("group").is_empty(), "bound only");
         clear(&c, src).expect("clear");
         assert!(of_file(&c, src, 0).expect("of").is_empty());
@@ -885,11 +879,8 @@ mod tests {
         let a = seed_rom(&c, &pid("nes"), "Nova Quest (World).nes", 16, &[]).expect("rom");
         let b = seed_rom(&c, &pid("nes"), "Nova Quest (World) (Alt).nes", 16, &[]).expect("rom");
         let src = source(&c, "0b", SourceState::Bound);
-        let matches = [(0, Some(RomRef(a.0)), Confidence::Name)];
-        let found = [
-            (0, RomRef(a.0), Confidence::Fuzzy),
-            (0, RomRef(b.0), Confidence::Fuzzy),
-        ];
+        let matches = [(0, Some(a), Confidence::Name)];
+        let found = [(0, a, Confidence::Fuzzy), (0, b, Confidence::Fuzzy)];
         let change =
             diff(&c, src, &stored(&c, src).expect("stored"), &matches, &found).expect("diff");
         assert_eq!(change.matches, [(0, Some(a), Some(MatchConfidence::Name))]);
@@ -931,7 +922,7 @@ mod tests {
                 .rom_id,
             None
         );
-        put(&c, src, &[(0, RomRef(a.0), Confidence::Fuzzy)]);
+        put(&c, src, &[(0, a, Confidence::Fuzzy)]);
         sources::replace_files(&c, src, &[]).expect("empty");
         assert!(of_file(&c, src, 0).expect("of").is_empty(), "cascaded");
     }
@@ -944,27 +935,31 @@ mod tests {
         seed_rom(&c, &pid("snes"), "Nova Quest (World).sfc", 16, &[]).expect("snes");
         let other = seed_rom(&c, &pid("nes"), "Other (World).nes", 8, &[]).expect("other");
         sources::refresh_match_keys(&c).expect("keys");
-        let nes = PlatformId("nes".into());
+        let nes = PlatformId::new("nes");
         let index = SqlSizeIndex::new(&c, &nes);
-        let group = title_of(&c, a).0;
+        let group = title_of(&c, a).get();
         assert_eq!(
             index.roms_of_size(16),
             [SizedRom {
-                rom: RomRef(a.0),
+                rom: a,
                 base: "nova quest".to_owned(),
-                group
+                group: mistarr_core::GroupId::new(group)
             }]
         );
         assert!(index.roms_of_size(u64::MAX).is_empty());
         assert_eq!(index.roms_of_size(32).len(), 1, "an iNES header on top");
-        let root = title_of(&c, other).0;
+        let root = title_of(&c, other).get();
         c.execute(
             "UPDATE titles SET group_root = ?1 WHERE id = ?2",
             [root, group],
         )
         .expect("link");
-        assert_eq!(index.roms_of_size(16)[0].group, root, "the effective group");
-        assert_eq!(header_len(&PlatformId("snes".into())), 512);
+        assert_eq!(
+            index.roms_of_size(16)[0].group.get(),
+            root,
+            "the effective group"
+        );
+        assert_eq!(header_len(&PlatformId::new("snes")), 512);
         assert!(rank("x").contains("WHEN 'fuzzy' THEN 3"));
         assert!(tier("x").contains("'base'"));
         assert!(not_bad("1", "2", "3").contains("b.rom_id = 1"));
@@ -1041,7 +1036,7 @@ mod tests {
             };
             let (ra, rb) = (root(a), root(b));
             proptest::prop_assume!(ra != rb);
-            let nes = PlatformId("nes".into());
+            let nes = PlatformId::new("nes");
             let before = rom_stamp(&c, &nes).expect("stamp");
             c.execute("UPDATE titles SET group_root = ?2 WHERE id = ?1", params![a, rb])
                 .expect("swap");

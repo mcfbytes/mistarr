@@ -1,6 +1,6 @@
 //! One group's detail and the want and unwant writes; see `docs/API.md` "Titles".
 
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, RomId};
 use rusqlite::{Connection, OptionalExtension, Row};
 use serde::Serialize;
 
@@ -8,7 +8,7 @@ use super::{RomStatus, Tag, TitleSource};
 use crate::db::arcade::MraInfo;
 use crate::db::candidates::Availability;
 use crate::db::files::FileState;
-use crate::db::ids::{DatVersionId, FileId, RomId, TitleId};
+use crate::db::ids::{DatVersionId, FileId, TitleId};
 use crate::db::sql;
 use crate::error::Result;
 
@@ -21,12 +21,12 @@ pub struct RomRow {
     pub name: String,
     /// Size in bytes.
     pub size: u64,
-    /// Lowercase hex CRC32.
-    pub crc32: Option<String>,
-    /// Lowercase hex MD5.
-    pub md5: Option<String>,
-    /// Lowercase hex SHA1.
-    pub sha1: Option<String>,
+    /// CRC32, when the DAT lists it.
+    pub crc32: Option<mistarr_core::Crc32>,
+    /// MD5, when the DAT lists it.
+    pub md5: Option<mistarr_core::Md5>,
+    /// SHA1, when the DAT lists it.
+    pub sha1: Option<mistarr_core::Sha1>,
     /// DAT status.
     pub status: RomStatus,
     /// The file matched to this rom, verified first.
@@ -163,7 +163,7 @@ fn fill_lists(conn: &Connection, gid: TitleId, variants: &mut [VariantRow]) -> R
 /// use mistarr_server::db::ids::TitleId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(group_detail(&conn, TitleId(1)).unwrap().is_none());
+/// assert!(group_detail(&conn, TitleId::new(1)).unwrap().is_none());
 /// ```
 pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail>> {
     let Some(gid) = super::browse::group_of(conn, id)? else {
@@ -237,7 +237,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
     let pick_variant_id = variants.iter().find(|v| v.is_1g1r_pick).map(|v| v.id);
     Ok(Some(GroupDetail {
         parent_id: gid,
-        platform_id: PlatformId(platform),
+        platform_id: PlatformId::new(platform),
         base_name,
         pick_variant_id,
         variants,
@@ -266,7 +266,7 @@ pub enum WantRefused {
 /// use mistarr_server::db::ids::TitleId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert_eq!(want(&conn, TitleId(1)).unwrap(), Err(WantRefused::Missing));
+/// assert_eq!(want(&conn, TitleId::new(1)).unwrap(), Err(WantRefused::Missing));
 /// ```
 pub fn want(conn: &Connection, id: TitleId) -> Result<std::result::Result<(), WantRefused>> {
     let row: Option<(bool, bool)> = conn
@@ -300,7 +300,7 @@ pub fn want(conn: &Connection, id: TitleId) -> Result<std::result::Result<(), Wa
 /// use mistarr_server::db::ids::TitleId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert_eq!(unwant_group(&conn, TitleId(1), 0).unwrap(), 0);
+/// assert_eq!(unwant_group(&conn, TitleId::new(1), 0).unwrap(), 0);
 /// ```
 pub fn unwant_group(conn: &Connection, parent: TitleId, now: i64) -> Result<usize> {
     let n = conn.execute(

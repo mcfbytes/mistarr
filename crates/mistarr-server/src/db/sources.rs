@@ -1,15 +1,15 @@
 //! The `sources` and `torrent_files` tables, and the [`DatIndex`] binding reads roms through.
 
 use mistarr_clients::{ClientTorrentId, SeedPolicy};
-use mistarr_core::PlatformId;
-use mistarr_sources::binding::{self, Confidence, DatIndex, RomRef};
+use mistarr_core::{PlatformId, RomId};
+use mistarr_sources::binding::{self, Confidence, DatIndex};
 use mistarr_sources::torrent::TorrentFile;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
 use super::candidates::MatchConfidence;
 use super::downloads::DownloadState;
-use super::ids::{RomId, SourceId};
+use super::ids::SourceId;
 use super::sql::{self, text_enum, Page, Paged};
 use crate::error::Result;
 
@@ -191,7 +191,7 @@ impl BindChoice {
     /// ```
     /// use mistarr_core::PlatformId;
     /// use mistarr_server::db::sources::BindChoice;
-    /// let nes = BindChoice::Platform(PlatformId("nes".into()));
+    /// let nes = BindChoice::Platform(PlatformId::new("nes"));
     /// assert_eq!(nes.to_text(), "platform:nes");
     /// assert_eq!(BindChoice::parse("platform:nes"), Some(nes));
     /// assert_eq!(BindChoice::parse("none"), Some(BindChoice::Ignore));
@@ -200,7 +200,7 @@ impl BindChoice {
     #[must_use]
     pub fn to_text(&self) -> String {
         match self {
-            Self::Platform(p) => format!("platform:{}", p.0),
+            Self::Platform(p) => format!("platform:{}", p.as_str()),
             Self::Ignore => "none".to_owned(),
             Self::Automatic => "automatic".to_owned(),
         }
@@ -215,7 +215,7 @@ impl BindChoice {
             other => other
                 .strip_prefix("platform:")
                 .filter(|p| !p.is_empty())
-                .map(|p| Self::Platform(PlatformId(p.to_owned()))),
+                .map(|p| Self::Platform(PlatformId::new(p.to_owned()))),
         }
     }
 }
@@ -227,7 +227,7 @@ impl Serialize for BindChoice {
         let mut out = s.serialize_struct("BindChoice", 2)?;
         out.serialize_field("automatic", &matches!(self, Self::Automatic))?;
         let platform = match self {
-            Self::Platform(p) => Some(p.0.as_str()),
+            Self::Platform(p) => Some(p.as_str()),
             _ => None,
         };
         out.serialize_field("platform_id", &platform)?;
@@ -271,7 +271,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<SourceRow> {
         infohash: r.get(1)?,
         display_name: r.get(2)?,
         origin_file: r.get(3)?,
-        platform_id: r.get::<_, Option<String>>(4)?.map(PlatformId),
+        platform_id: r.get(4)?,
         bind_score: r.get(5)?,
         state: r.get(6)?,
         reason: r.get(7)?,
@@ -281,7 +281,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<SourceRow> {
         client_id: client_id(r, 11)?,
         added_at: r.get(12)?,
         matched_count: sql::get_u64(r, 13)?,
-        suggested_platform_id: r.get::<_, Option<String>>(14)?.map(PlatformId),
+        suggested_platform_id: r.get(14)?,
         user_binding: r.get(15)?,
         pending_binding: r
             .get::<_, Option<String>>(16)?
@@ -308,7 +308,7 @@ pub fn insert(conn: &Connection, s: &NewSource<'_>) -> Result<SourceId> {
             s.added_at
         ],
     )?;
-    Ok(SourceId(conn.last_insert_rowid()))
+    Ok(SourceId::new(conn.last_insert_rowid()))
 }
 
 /// Reads one source.
@@ -404,7 +404,7 @@ pub fn set_suggestion(
 ) -> Result<()> {
     conn.execute(
         "UPDATE sources SET suggested_platform_id = ?2 WHERE id = ?1",
-        params![id, platform.map(|p| p.0.as_str())],
+        params![id, platform],
     )?;
     Ok(())
 }
@@ -467,9 +467,7 @@ pub fn list_unbound(conn: &Connection) -> Result<Vec<(SourceId, Option<PlatformI
          WHERE state = 'unbound' AND user_binding = 0 ORDER BY id",
     )?;
     let rows = stmt
-        .query_map([], |r| {
-            Ok((r.get(0)?, r.get::<_, Option<String>>(1)?.map(PlatformId)))
-        })?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
@@ -485,7 +483,7 @@ pub fn list_on_platforms(conn: &Connection, platforms: &[PlatformId]) -> Result<
     )?;
     let mut out: Vec<SourceId> = Vec::new();
     for p in platforms {
-        let ids = stmt.query_map([&p.0], |r| r.get::<_, SourceId>(0))?;
+        let ids = stmt.query_map([p], |r| r.get::<_, SourceId>(0))?;
         out.extend(ids.collect::<rusqlite::Result<Vec<_>>>()?);
     }
     out.sort_unstable();
@@ -557,7 +555,7 @@ pub fn mapped_against(
         .query_row(
             "SELECT platform_id, map_stamp FROM sources WHERE id = ?1 AND platform_id IS NOT NULL",
             [id],
-            |r| Ok((PlatformId(r.get(0)?), r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?)
 }
@@ -584,7 +582,7 @@ pub fn platform_has_dat(conn: &Connection, platform: &PlatformId) -> Result<bool
     Ok(conn
         .query_row(
             "SELECT 1 FROM titles WHERE platform_id = ?1 AND retired = 0 AND source = 'dat' LIMIT 1",
-            [&platform.0],
+            [platform],
             |_| Ok(()),
         )
         .optional()?
@@ -647,7 +645,7 @@ pub fn set_binding(
 ) -> Result<()> {
     conn.execute(
         "UPDATE sources SET platform_id = ?2, bind_score = ?3 WHERE id = ?1",
-        params![id, platform.map(|p| p.0.as_str()), score],
+        params![id, platform, score],
     )?;
     Ok(())
 }
@@ -711,19 +709,14 @@ pub fn clear_matches(conn: &Connection, id: SourceId) -> Result<()> {
 pub fn set_matches(
     conn: &Connection,
     id: SourceId,
-    matches: &[(u32, Option<RomRef>, Confidence)],
+    matches: &[(u32, Option<RomId>, Confidence)],
 ) -> Result<()> {
     let mut stmt = conn.prepare_cached(
         "UPDATE torrent_files SET rom_id = ?3, confidence = ?4
          WHERE source_id = ?1 AND file_index = ?2",
     )?;
     for (index, rom, confidence) in matches {
-        stmt.execute(params![
-            id,
-            index,
-            rom.map(|r| RomId(r.0)),
-            MatchConfidence::of(*confidence)
-        ])?;
+        stmt.execute(params![id, index, rom, MatchConfidence::of(*confidence)])?;
     }
     Ok(())
 }
@@ -830,10 +823,10 @@ impl<'c> SqlDatIndex<'c> {
         Self { conn }
     }
 
-    fn lookup(&self, sql: &str, args: impl rusqlite::Params) -> Vec<(PlatformId, RomRef)> {
-        let run = || -> rusqlite::Result<Vec<(PlatformId, RomRef)>> {
+    fn lookup(&self, sql: &str, args: impl rusqlite::Params) -> Vec<(PlatformId, RomId)> {
+        let run = || -> rusqlite::Result<Vec<(PlatformId, RomId)>> {
             let mut stmt = self.conn.prepare_cached(sql)?;
-            let rows = stmt.query_map(args, |r| Ok((PlatformId(r.get(0)?), RomRef(r.get(1)?))))?;
+            let rows = stmt.query_map(args, |r| Ok((r.get(0)?, r.get(1)?)))?;
             rows.collect()
         };
         run().unwrap_or_else(|e| {
@@ -844,7 +837,7 @@ impl<'c> SqlDatIndex<'c> {
 }
 
 impl DatIndex for SqlDatIndex<'_> {
-    fn by_normalized_name(&self, name: &str) -> Vec<(PlatformId, RomRef)> {
+    fn by_normalized_name(&self, name: &str) -> Vec<(PlatformId, RomId)> {
         self.lookup(
             "SELECT t.platform_id, r.id FROM roms r JOIN titles t ON t.id = r.title_id
              WHERE r.match_name = ?1 AND t.retired = 0
@@ -854,7 +847,7 @@ impl DatIndex for SqlDatIndex<'_> {
         )
     }
 
-    fn by_base_name_and_size(&self, base_name: &str, size: u64) -> Vec<(PlatformId, RomRef)> {
+    fn by_base_name_and_size(&self, base_name: &str, size: u64) -> Vec<(PlatformId, RomId)> {
         self.lookup(
             "SELECT t.platform_id, r.id FROM roms r JOIN titles t ON t.id = r.title_id
              WHERE r.match_base = ?1 AND r.size = ?2 AND t.retired = 0
@@ -901,7 +894,7 @@ mod tests {
     }
 
     fn nes() -> PlatformId {
-        PlatformId("nes".into())
+        PlatformId::new("nes")
     }
 
     #[test]
@@ -921,7 +914,7 @@ mod tests {
         assert_eq!(list_unbound(&c).expect("list"), [(a, None)]);
         assert!(list_on_platforms(&c, &[nes()]).expect("on").is_empty());
         set_binding(&c, a, Some(&nes()), Some(1.0)).expect("bind");
-        let snes = PlatformId("snes".into());
+        let snes = PlatformId::new("snes");
         assert_eq!(list_on_platforms(&c, &[snes, nes()]).expect("on"), [a]);
         assert_eq!(list_mapped(&c).expect("mapped"), [a]);
         assert_eq!(map_stamp(&c, a).expect("stamp"), None);
@@ -945,7 +938,7 @@ mod tests {
         assert_eq!((row.file_count, row.matched_count), (0, 0));
         let found = find_by_infohash(&c, &"02".repeat(20)).expect("find");
         assert_eq!(found.map(|r| r.id), Some(b));
-        assert!(get(&c, SourceId(99)).expect("get").is_none());
+        assert!(get(&c, SourceId::new(99)).expect("get").is_none());
         let page = list(
             &c,
             Page {
@@ -964,12 +957,15 @@ mod tests {
             list_in_client(&c).expect("in client"),
             [(b, cid, SeedPolicy::None)]
         );
-        c.execute("UPDATE sources SET client_id = 'x' WHERE id = ?1", [b.0])
-            .expect("unreadable id");
+        c.execute(
+            "UPDATE sources SET client_id = 'x' WHERE id = ?1",
+            [b.get()],
+        )
+        .expect("unreadable id");
         assert_eq!(list_resolving(&c).expect("resolving"), [(b, true)]);
         assert!(list_in_client(&c).expect("in client").is_empty());
         assert_eq!(get(&c, b).expect("get").expect("row").client_id, None);
-        assert_eq!(SourceId(3).to_string(), "3");
+        assert_eq!(SourceId::new(3).to_string(), "3");
     }
 
     #[test]
@@ -1009,7 +1005,7 @@ mod tests {
             &c,
             id,
             &[
-                (0, Some(RomRef(rom.0)), Confidence::Name),
+                (0, Some(rom), Confidence::Name),
                 (1, None, Confidence::Unmatched),
             ],
         )
@@ -1057,11 +1053,11 @@ mod tests {
         let index = SqlDatIndex::new(&c);
         assert_eq!(
             index.by_normalized_name("example quest (usa)"),
-            [(nes(), RomRef(a.0))]
+            [(nes(), a)]
         );
         assert_eq!(
             index.by_base_name_and_size("other tale", 32),
-            [(PlatformId("snes".into()), RomRef(b.0))]
+            [(PlatformId::new("snes"), b)]
         );
         assert!(index.by_base_name_and_size("other tale", 33).is_empty());
         assert!(index.by_normalized_name("boot code (world)").is_empty());

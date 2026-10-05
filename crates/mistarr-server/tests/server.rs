@@ -52,7 +52,7 @@ async fn every_platform_is_seeded() {
         .expect("list");
     assert_eq!(rows.len(), mistarr_mister::platforms::PLATFORMS.len());
     for p in &mistarr_mister::platforms::PLATFORMS {
-        let row = rows.iter().find(|r| r.id.0 == p.id).expect("row");
+        let row = rows.iter().find(|r| r.id.as_str() == p.id).expect("row");
         assert_eq!(row.core_dir, p.core_dir);
         assert!(!row.core_present);
     }
@@ -74,7 +74,9 @@ async fn installed_cores_are_marked_at_startup() {
         .read(db::platforms::list)
         .await
         .expect("list");
-    assert!(rows.iter().any(|r| r.id.0 == "nes" && r.core_present));
+    assert!(rows
+        .iter()
+        .any(|r| r.id.as_str() == "nes" && r.core_present));
     booted.running.shutdown().await.expect("shutdown");
 }
 
@@ -174,7 +176,7 @@ async fn sse_replays_after_last_event_id_then_streams() {
     assert!(sse.text.contains("f2.dat") && sse.text.contains("f3.dat"));
 
     let seq = bus.publish(&Event::SourceChanged(SourceChanged {
-        source_id: SourceId(7),
+        source_id: SourceId::new(7),
         state: SourceState::Bound,
         platform_id: None,
     }));
@@ -189,7 +191,7 @@ async fn sse_after_restart_replays_the_new_ring_and_asks_for_resync() {
     let old = &booted.running.app.events;
     for _ in 0..20 {
         old.publish(&Event::FileChanged(FileChanged {
-            file_id: FileId(1),
+            file_id: FileId::new(1),
             state: FileState::Verified,
         }));
     }
@@ -231,8 +233,8 @@ async fn sse_without_last_event_id_gets_status_then_live_events() {
         .app
         .events
         .publish(&Event::ImportDone(ImportDone {
-            title_id: TitleId(1),
-            file_id: FileId(2),
+            title_id: TitleId::new(1),
+            file_id: FileId::new(2),
             action: ImportAction::Placed,
         }));
     sse.until("event: import.done").await;

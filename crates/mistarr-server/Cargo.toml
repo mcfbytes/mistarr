@@ -28,7 +28,7 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-mistarr-core.workspace = true
+mistarr-core = { workspace = true, features = ["rusqlite"] }
 mistarr-mister.workspace = true
 mistarr-sources.workspace = true
 mistarr-clients.workspace = true
@@ -36,7 +36,7 @@ async-trait.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "multipart", "query", "tokio"] }
 clap.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
-rusqlite = { version = "0.40", features = ["bundled", "backup", "hooks"] }
+rusqlite = { workspace = true, features = ["bundled", "backup", "hooks"] }
 rust-embed = "8"
 rustix = { workspace = true, features = ["process"] }
 serde_ignored = "0.1"
@@ -52,5 +52,5 @@ tempfile.workspace = true
 proptest.workspace = true
 rcgen.workspace = true
 rustls.workspace = true
-rusqlite = { version = "0.40", features = ["bundled", "hooks", "trace"] }
+rusqlite = { workspace = true, features = ["bundled", "hooks", "trace"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros"] }

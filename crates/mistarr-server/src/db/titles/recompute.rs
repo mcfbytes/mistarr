@@ -24,7 +24,7 @@ use crate::error::Result;
 /// use mistarr_server::db::{ids::DatVersionId, titles};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// titles::recompute::link_parents(&conn, DatVersionId(1), true).unwrap();
+/// titles::recompute::link_parents(&conn, DatVersionId::new(1), true).unwrap();
 /// ```
 pub fn link_parents(conn: &Connection, version: DatVersionId, use_clone_of: bool) -> Result<()> {
     if use_clone_of {
@@ -73,7 +73,7 @@ fn variants(group: &[Candidate]) -> Vec<Variant> {
             // Dense rank within the group keeps the revision order exactly.
             let rank = ranks.binary_search(&p.revision_rank()).unwrap_or(0);
             Variant {
-                id: sql::to_u64(c.id.0),
+                id: sql::to_u64(c.id.get()),
                 name: c.name.clone(),
                 regions: p.regions.iter().map(|r| r.name().to_owned()).collect(),
                 languages: p.languages.clone(),
@@ -93,7 +93,7 @@ fn grouped(
     mut each: impl FnMut(&[Candidate]),
 ) -> Result<()> {
     let mut stmt = conn.prepare(sql)?;
-    let mut rows = stmt.query([&platform.0])?;
+    let mut rows = stmt.query([platform])?;
     let mut key: Option<String> = None;
     let mut group = Vec::new();
     while let Some(r) = rows.next()? {
@@ -131,7 +131,7 @@ const BAD_DUMP: &str =
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let prefs = mistarr_core::select::Prefs::default();
-/// let r = mistarr_server::db::titles::recompute::recompute_platform(&conn, &mistarr_core::PlatformId("nes".into()), &prefs).unwrap();
+/// let r = mistarr_server::db::titles::recompute::recompute_platform(&conn, &mistarr_core::PlatformId::new("nes"), &prefs).unwrap();
 /// assert_eq!(r.groups, 0);
 /// ```
 pub fn recompute_platform(
@@ -153,11 +153,11 @@ pub fn recompute_platform(
             let key = String::new();
             let items = variants(group).into_iter().map(|v| (key.clone(), v));
             if let Some(g) = infer_groups(items, &defaults).into_iter().next() {
-                let parent = TitleId(sql::to_i64(g.member_ids.first().copied().unwrap_or(0)));
+                let parent = TitleId::new(sql::to_i64(g.member_ids.first().copied().unwrap_or(0)));
                 parents.extend(
                     g.member_ids
                         .iter()
-                        .map(|&m| (TitleId(sql::to_i64(m)), parent)),
+                        .map(|&m| (TitleId::new(sql::to_i64(m)), parent)),
                 );
             }
         },
@@ -185,7 +185,7 @@ pub fn recompute_platform(
             out.groups += 1;
             let vs = variants(group);
             if let Some(pick) = select_1g1r(&vs, prefs) {
-                picks.push(TitleId(sql::to_i64(pick.id)));
+                picks.push(TitleId::new(sql::to_i64(pick.id)));
             }
         },
     )?;
@@ -203,7 +203,7 @@ fn store_picks(conn: &Connection, platform: &PlatformId, mut picks: Vec<TitleId>
         .prepare_cached(
             "SELECT id FROM titles WHERE platform_id = ?1 AND is_1g1r_pick = 1 ORDER BY id",
         )?
-        .query_map([&platform.0], |r| r.get(0))?
+        .query_map([platform], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let mut set = conn.prepare_cached("UPDATE titles SET is_1g1r_pick = ?2 WHERE id = ?1")?;
     for &id in current.iter().filter(|id| picks.binary_search(id).is_err()) {
@@ -230,7 +230,7 @@ fn link_shared_titles(conn: &Connection, platform: &PlatformId) -> Result<()> {
              WHERE platform_id = ?1 AND source = 'dat' AND retired = 0 AND superseded_by IS NULL
              ORDER BY game_count DESC, id",
         )?
-        .query_map([&platform.0], |r| r.get(0))?
+        .query_map([platform], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let (largest, mut rest) = match versions.split_first() {
         Some((&largest, rest)) if !rest.is_empty() => (largest, rest.to_vec()),
@@ -238,7 +238,7 @@ fn link_shared_titles(conn: &Connection, platform: &PlatformId) -> Result<()> {
             conn.execute(
                 "UPDATE titles SET group_root = parent_id
                  WHERE platform_id = ?1 AND group_root IS NOT parent_id",
-                [&platform.0],
+                [platform],
             )?;
             return Ok(());
         }
@@ -314,7 +314,7 @@ fn group_nodes(conn: &Connection, platform: &PlatformId) -> Result<Vec<Node>> {
         .prepare_cached(
             "SELECT id, parent_id, group_root, retired = 0 FROM titles WHERE platform_id = ?1",
         )?
-        .query_map([&platform.0], |r| {
+        .query_map([platform], |r| {
             Ok(Node {
                 id: r.get(0)?,
                 target: r.get(1)?,
@@ -328,7 +328,7 @@ fn group_nodes(conn: &Connection, platform: &PlatformId) -> Result<Vec<Node>> {
          FROM titles r JOIN titles m ON m.group_root = r.id
          WHERE r.platform_id = ?1 AND m.platform_id IS NOT ?1",
     )?;
-    let away = away.query_map([&platform.0], |r| {
+    let away = away.query_map([platform], |r| {
         let root: Option<TitleId> = r.get(1)?;
         Ok(Node {
             id: r.get(0)?,
@@ -391,7 +391,7 @@ fn each_signature(
            AND t.platform_id = ?2
          ORDER BY t.id",
     )?;
-    let mut rows = stmt.query(params![version, platform.0])?;
+    let mut rows = stmt.query(params![version, platform])?;
     // Per title: id, parent, sum of key hashes, rom count, whether every rom had a key.
     let mut open: Option<(TitleId, TitleId, u64, u64, bool)> = None;
     let mut settle = |t: Option<(TitleId, TitleId, u64, u64, bool)>| {

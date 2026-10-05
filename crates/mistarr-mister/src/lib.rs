@@ -108,10 +108,31 @@ pub enum Error {
     /// The command FIFO is full or took only part of the command.
     #[error("MiSTer Main did not take the command")]
     CommandBusy,
-    /// Reading a board file failed.
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    /// Reading or writing a board file failed.
+    #[error("{}: {source}", path.display())]
+    Io {
+        /// The file, directory or command interface involved.
+        path: std::path::PathBuf,
+        /// The underlying error.
+        source: std::io::Error,
+    },
+}
+
+impl Error {
+    /// Wraps an I/O error with the path it concerns.
+    ///
+    /// ```
+    /// use std::path::Path;
+    /// let e = mistarr_mister::Error::io_at(Path::new("/x"))(std::io::Error::other("no"));
+    /// assert_eq!(e.to_string(), "/x: no");
+    /// ```
+    pub fn io_at(path: &std::path::Path) -> impl FnOnce(std::io::Error) -> Self + '_ {
+        move |source| Self::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
 }
 
 /// Result alias for this crate.
-pub type Result<T> = std::result::Result<T, Error>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;

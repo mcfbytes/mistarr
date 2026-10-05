@@ -11,5 +11,4 @@ pub mod fuzzy;
 pub mod intake;
 pub mod torrent;
 
-pub use error::SourceError;
-pub use mistarr_core::PlatformId;
+pub use error::{Error, Result};

@@ -1,8 +1,10 @@
 //! Builds one MRA `<rom>` the way MiSTer's loader does; see `docs/PLATFORMS.md` "MRA assembly".
 
 use std::io::{self, Read};
+use std::path::Path;
 
 use mistarr_core::hash::Md5Stream;
+use mistarr_core::Md5;
 
 use super::mra::{self, Inline, Interleave, MraRom, Part, Patch, RomItem};
 use crate::{Error, Result};
@@ -39,7 +41,7 @@ pub struct Assembled {
     pub data: Vec<u8>,
     /// MD5 of the part bytes in document order, before interleaving and without patches,
     /// which is what MiSTer compares with the `md5` attribute.
-    pub md5: String,
+    pub md5: Md5,
 }
 
 /// Builds `rom` in memory from `src`.
@@ -47,7 +49,8 @@ pub struct Assembled {
 /// # Errors
 ///
 /// [`Error::MraUnsupported`] for content outside the implemented subset, [`Error::MissingPart`]
-/// when a named part is in none of its zips, [`Error::Io`] when a zip cannot be read.
+/// when a named part is in none of its zips, [`Error::Io`] naming the zip or MRA that cannot
+/// be read.
 ///
 /// ```
 /// use mistarr_mister::adapter::arcade::{assemble, mra};
@@ -77,9 +80,10 @@ pub fn assemble(rom: &MraRom, src: &mut dyn PartSource) -> Result<Assembled> {
 /// ```
 /// use mistarr_mister::adapter::arcade::{assemble, mra};
 /// let rom = &mra::parse(b"<m><rom><part>616263</part></rom></m>").unwrap().roms[0];
-/// assert_eq!(assemble::md5(rom, &mut assemble::NoParts).unwrap(), "900150983cd24fb0d6963f7d28e17f72");
+/// let md5 = assemble::md5(rom, &mut assemble::NoParts).unwrap();
+/// assert_eq!(md5.to_string(), "900150983cd24fb0d6963f7d28e17f72");
 /// ```
-pub fn md5(rom: &MraRom, src: &mut dyn PartSource) -> Result<String> {
+pub fn md5(rom: &MraRom, src: &mut dyn PartSource) -> Result<Md5> {
     let mut w = Walker::new(false);
     w.run(rom, src)?;
     Ok(w.md5.finish())
@@ -103,7 +107,9 @@ impl PartSource for NoParts {
 /// The bytes of an inline part left in its MRA file, for building a rom in memory.
 fn read_inline(inline: &Inline) -> Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    mra::open_inline(inline)?.read_to_end(&mut bytes)?;
+    mra::open_inline(inline)
+        .and_then(|mut r| r.read_to_end(&mut bytes))
+        .map_err(Error::io_at(&inline.file))?;
     Ok(bytes)
 }
 
@@ -324,17 +330,19 @@ impl Walker {
         }
         let budget = MAX_ROM_BYTES.saturating_sub(self.fed);
         for zip in zips {
-            let Some(mut reader) = src.open(zip, name, p.crc)? else {
+            let at = |e| Error::io_at(Path::new(zip))(e);
+            let Some(mut reader) = src.open(zip, name, p.crc).map_err(at)? else {
                 continue;
             };
-            let skipped = io::copy(&mut (&mut reader).take(p.offset), &mut io::sink())?;
+            let skipped =
+                io::copy(&mut (&mut reader).take(p.offset), &mut io::sink()).map_err(at)?;
             if skipped < p.offset {
                 return Err(refuse(format!("offset of part {name} is past its end")));
             }
             let over = budget.saturating_add(1);
             let limit = p.length.map_or(over, |l| l.min(over));
             let mut bytes = Vec::new();
-            reader.take(limit).read_to_end(&mut bytes)?;
+            reader.take(limit).read_to_end(&mut bytes).map_err(at)?;
             if bytes.len() as u64 > budget {
                 return Err(too_large());
             }
@@ -399,13 +407,13 @@ impl Walker {
         let mut k = 0;
         let mut buf = vec![0; STREAM_CHUNK];
         for _ in 0..p.repeat {
-            let mut reader = mra::open_inline(inline)?;
+            let mut reader = mra::open_inline(inline).map_err(Error::io_at(&inline.file))?;
             loop {
                 let n = match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => n,
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e.into()),
+                    Err(e) => return Err(Error::io_at(&inline.file)(e)),
                 };
                 self.feed(&buf[..n], layout, &mut k)?;
             }
@@ -424,10 +432,12 @@ impl Walker {
         k: &mut usize,
     ) -> Result<()> {
         for zip in zips {
-            let Some(mut reader) = src.open(zip, name, p.crc)? else {
+            let at = |e| Error::io_at(Path::new(zip))(e);
+            let Some(mut reader) = src.open(zip, name, p.crc).map_err(at)? else {
                 continue;
             };
-            let skipped = io::copy(&mut (&mut reader).take(p.offset), &mut io::sink())?;
+            let skipped =
+                io::copy(&mut (&mut reader).take(p.offset), &mut io::sink()).map_err(at)?;
             if skipped < p.offset {
                 return Err(refuse(format!("offset of part {name} is past its end")));
             }
@@ -438,7 +448,7 @@ impl Walker {
                     Ok(0) => break,
                     Ok(n) => n,
                     Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e.into()),
+                    Err(e) => return Err(at(e)),
                 };
                 self.feed(&buf[..n], layout, k)?;
             }

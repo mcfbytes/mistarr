@@ -2,15 +2,14 @@
 
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use mistarr_core::hash::{hash_forms, hash_zip_member_forms, zip_members, HashError, HeaderRule};
 use mistarr_core::matching::{Payload, Rom};
-use mistarr_core::HashSet as Hashes;
+use mistarr_core::{Crc32, Hashes, Md5, RomId, Sha1};
 use mistarr_mister::PlaceRom;
 
-use crate::db::ids::RomId;
 use crate::db::roms::EntryRom;
 
 /// Bytes of a staged payload handed to the adapter as its head.
@@ -94,16 +93,16 @@ impl Rom for EntryRom {
         self.size
     }
 
-    fn crc32(&self) -> Option<&str> {
-        self.crc32.as_deref()
+    fn crc32(&self) -> Option<Crc32> {
+        self.crc32
     }
 
-    fn md5(&self) -> Option<&str> {
-        self.md5.as_deref()
+    fn md5(&self) -> Option<Md5> {
+        self.md5
     }
 
-    fn sha1(&self) -> Option<&str> {
-        self.sha1.as_deref()
+    fn sha1(&self) -> Option<Sha1> {
+        self.sha1
     }
 }
 
@@ -263,14 +262,8 @@ pub(super) fn report(
     match expected {
         Some(r) => {
             let _ = writeln!(out, "Expected: {} ({} bytes)", r.name, r.size);
-            let dash = || "-".to_owned();
-            let _ = writeln!(
-                out,
-                "  crc32 {}  md5 {}  sha1 {}",
-                r.crc32.clone().unwrap_or_else(dash),
-                r.md5.clone().unwrap_or_else(dash),
-                r.sha1.clone().unwrap_or_else(dash)
-            );
+            let (crc32, md5, sha1) = (dash(r.crc32), dash(r.md5), dash(r.sha1));
+            let _ = writeln!(out, "  crc32 {crc32}  md5 {md5}  sha1 {sha1}");
         }
         None => out.push_str("Expected: unknown rom\n"),
     }
@@ -291,19 +284,27 @@ pub(super) fn report(
     out
 }
 
-/// Moves a staged item to `staging/quarantine/<infohash>/` with its report beside it.
+/// A digest's hex, or `-` when the entry lacks it.
+fn dash<D: std::fmt::Display>(d: Option<D>) -> String {
+    d.map_or_else(|| "-".to_owned(), |d| d.to_string())
+}
+
+/// Moves a staged item to `staging/quarantine/<infohash>/` with its report beside it;
+/// an error names the directory, item or report that failed.
 pub(super) fn quarantine(
     staging: &Path,
     infohash: &str,
     item: &Path,
     report: &str,
-) -> io::Result<PathBuf> {
+) -> crate::Result<PathBuf> {
+    use crate::Error;
     let dir = staging.join("quarantine").join(infohash);
-    fs::create_dir_all(&dir)?;
+    fs::create_dir_all(&dir).map_err(Error::io_at(&dir))?;
     let name = file_name(item);
     let dst = dir.join(&name);
-    fs::rename(item, &dst)?;
-    fs::write(dir.join(format!("{name}.report.txt")), report)?;
+    fs::rename(item, &dst).map_err(Error::io_at(item))?;
+    let text = dir.join(format!("{name}.report.txt"));
+    fs::write(&text, report).map_err(Error::io_at(&text))?;
     Ok(dst)
 }
 
@@ -316,12 +317,12 @@ mod tests {
 
     fn rom(id: i64, name: &str, h: &Hashes) -> EntryRom {
         EntryRom {
-            id: RomId(id),
+            id: RomId::new(id),
             name: name.into(),
             size: h.size,
-            crc32: Some(h.crc32.clone()),
-            md5: Some(h.md5.clone()),
-            sha1: Some(h.sha1.clone()),
+            crc32: Some(h.crc32),
+            md5: Some(h.md5),
+            sha1: Some(h.sha1),
             status: crate::db::titles::RomStatus::Good,
             header: None,
         }
@@ -336,22 +337,25 @@ mod tests {
         let h = abc();
         let other = hash_reader(Cursor::new(b"xyz"), HeaderRule::None, None).expect("hash");
         let roms = [rom(1, "a.bin", &h), rom(2, "b.bin", &h)];
-        let member = |name: &str, hashes: &Hashes| Hashed::plain(Some(name.into()), hashes.clone());
+        let member = |name: &str, hashes: &Hashes| Hashed::plain(Some(name.into()), *hashes);
         let both = [member("b.bin", &h), member("a.bin", &h)];
         let set = match_members(&roms, &both);
         assert!(set.is_exact());
         assert_eq!(
-            set.pairs.iter().map(|(_, r)| r.id.0).collect::<Vec<_>>(),
+            set.pairs
+                .iter()
+                .map(|(_, r)| r.id.get())
+                .collect::<Vec<_>>(),
             [2, 1]
         );
-        let p = Hashed::plain(None, h.clone());
-        let picked = pick_rom(&roms, &p, Some(RomId(2)), None, &[]).map(|r| r.id);
-        assert_eq!(picked, Some(RomId(2)));
+        let p = Hashed::plain(None, h);
+        let picked = pick_rom(&roms, &p, Some(RomId::new(2)), None, &[]).map(|r| r.id);
+        assert_eq!(picked, Some(RomId::new(2)));
         let odd = [member("a.bin", &h), member("c.bin", &other)];
         assert_eq!(match_members(&roms, &odd).extra, ["c.bin"]);
         let text = explain("This zip lacks members.", &odd);
         assert!(text.starts_with("This zip lacks members.\n\nActual a.bin: 3 bytes\n"));
-        assert!(text.contains(&other.sha1));
+        assert!(text.contains(&other.sha1.to_string()));
     }
 
     #[test]
@@ -385,13 +389,13 @@ mod tests {
         let expected = EntryRom {
             md5: None,
             sha1: None,
-            crc32: Some("00000000".into()),
+            crc32: Some("00000000".parse().expect("hex")),
             ..rom(1, "Example Quest (USA).nes", &h)
         };
-        let actual = [Hashed::plain(None, h.clone())];
+        let actual = [Hashed::plain(None, h)];
         let text = report(Some(&expected), &actual, None, "ines");
         assert!(text.contains("Expected: Example Quest (USA).nes (3 bytes)"));
-        assert!(text.contains(&h.sha1));
+        assert!(text.contains(&h.sha1.to_string()));
         assert!(text.contains("md5 -"));
         assert!(text.ends_with("Header rule: ines\n"));
         let member = [Hashed {
@@ -421,7 +425,7 @@ mod tests {
     #[test]
     fn a_placed_file_not_read_again_stores_no_whole_hashes() {
         let body = abc();
-        let mut staged = Hashed::plain(None, body.clone());
+        let mut staged = Hashed::plain(None, body);
         staged.take_rehash(None);
         assert_eq!(
             staged.whole_columns("ines"),
@@ -432,7 +436,7 @@ mod tests {
         let mut placed = hash_reader(Cursor::new(b"NES\x1a"), HeaderRule::None, None).expect("h");
         placed.size = 19;
         let again = Hashed {
-            whole: Some(placed.clone()),
+            whole: Some(placed),
             ..Hashed::plain(None, body)
         };
         staged.take_rehash(Some(again));
@@ -457,12 +461,12 @@ mod tests {
         assert!(hashed.is(&rom(1, "a.nes", &whole)), "a headered DAT");
         assert!(hashed.is(&rom(2, "a.nes", &body)), "a headerless DAT");
         assert_eq!(hashed.forms().next(), Some(&whole), "the whole file first");
-        assert_eq!(hashed.whole_columns("ines").sha1, Some(whole.sha1.clone()));
+        assert_eq!(hashed.whole_columns("ines").sha1, Some(whole.sha1));
         assert_eq!(
             hashed.whole_columns("none"),
             crate::db::files::WholeHashes::default()
         );
-        let plain = Hashed::plain(None, body.clone());
+        let plain = Hashed::plain(None, body);
         assert_eq!(plain.whole_columns("ines").sha1, Some(body.sha1));
         let text = explain("Why.", std::slice::from_ref(&hashed));
         assert!(text.contains(&format!("with its header, 30 bytes: crc32 {}", whole.crc32)));
@@ -489,6 +493,11 @@ mod tests {
         assert_eq!(
             fs::read_to_string(staging.join("quarantine/0a0a/a.bin.report.txt")).expect("read"),
             "report"
+        );
+        let gone = quarantine(&staging, "0a0a", &plain, "report").expect_err("moved already");
+        assert!(
+            gone.to_string().contains(&*plain.to_string_lossy()),
+            "{gone}"
         );
     }
 }

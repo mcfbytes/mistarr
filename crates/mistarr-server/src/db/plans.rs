@@ -2,13 +2,14 @@
 
 use std::cell::RefCell;
 
+use mistarr_core::{Crc32, Md5, RomId, Sha1};
 use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use rusqlite::Connection;
 use serde_json::json;
 
 use super::downloads::{self, DownloadState};
 use super::fixtures::pid;
-use super::ids::TitleId;
+use super::ids::{SourceId, TitleId};
 use super::sql::Page;
 use super::titles;
 use super::titles::browse::{Browse, SearchShape, Sort, SEARCH_SHAPE};
@@ -77,8 +78,8 @@ fn seeded() -> Connection {
     imports::log(
         &c,
         0,
-        Some(super::ids::DownloadId(1)),
-        Some(super::ids::FileId(1)),
+        Some(super::ids::DownloadId::new(1)),
+        Some(super::ids::FileId::new(1)),
         imports::ImportAction::Placed,
         &json!({}),
     )
@@ -101,33 +102,35 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
         (
             "unmatched files",
             Box::new(|c| {
-                let nes = mistarr_core::PlatformId("nes".into());
+                let nes = mistarr_core::PlatformId::new("nes");
                 drop(
-                    files::unmatched_after(c, &nes, super::ids::FileId(0), 256).expect("unmatched"),
+                    files::unmatched_after(c, &nes, super::ids::FileId::new(0), 256)
+                        .expect("unmatched"),
                 );
             }),
         ),
         (
             "stored match",
             Box::new(|c| {
-                let nes = mistarr_core::PlatformId("nes".into());
-                let (sha1, md5) = ("0".repeat(40), "0".repeat(32));
-                roms::match_live_rom(c, &nes, &sha1, &md5, "00000000", 16).expect("match");
+                let nes = mistarr_core::PlatformId::new("nes");
+                let (sha1, md5) = (Sha1::from_bytes([0; 20]), Md5::from_bytes([0; 16]));
+                let crc = Some(Crc32::from_u32(0));
+                roms::match_live_rom(c, &nes, Some(sha1), Some(md5), crc, 16).expect("match");
             }),
         ),
         (
             "changed rom",
             Box::new(|c| {
-                let listed = [Some("00000000"), None, None];
-                files::unmatch_changed_rom(c, TitleId(1), "no such rom", 16, listed)
+                let listed = (Some(Crc32::from_u32(0)), None, None);
+                files::unmatch_changed_rom(c, TitleId::new(1), "no such rom", 16, listed)
                     .expect("unmatch");
             }),
         ),
         (
             "crc candidate",
             Box::new(|c| {
-                let nes = mistarr_core::PlatformId("nes".into());
-                roms::crc_candidate_exists(c, &nes, "00000000", 16).expect("candidate");
+                let nes = mistarr_core::PlatformId::new("nes");
+                roms::crc_candidate_exists(c, &nes, Crc32::from_u32(0), 16).expect("candidate");
             }),
         ),
         (
@@ -143,21 +146,21 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             "size candidates",
             Box::new(|c| {
                 use mistarr_sources::fuzzy::SizeIndex as _;
-                let nes = mistarr_core::PlatformId("nes".into());
+                let nes = mistarr_core::PlatformId::new("nes");
                 drop(candidates::SqlSizeIndex::new(c, &nes).roms_of_size(40_976));
             }),
         ),
         (
             "directory tracks",
             Box::new(|c| {
-                let psx = mistarr_core::PlatformId("psx".into());
+                let psx = mistarr_core::PlatformId::new("psx");
                 drop(files::in_directory(c, &psx, "psx/Example Disc").expect("tracks"));
             }),
         ),
         (
             "chd lookups",
             Box::new(|c| {
-                let psx = mistarr_core::PlatformId("psx".into());
+                let psx = mistarr_core::PlatformId::new("psx");
                 roms::chd_rom_sized(c, &psx, 4_704).expect("chd rom");
                 chd::layout_known(c, &psx, &[4_704]).expect("layout");
             }),
@@ -180,20 +183,24 @@ fn source_reads() -> Vec<(&'static str, Read<'static>)> {
                         filter: Some(filter),
                         q: Some("track".into()),
                     };
-                    let id = super::ids::SourceId(1);
+                    let id = super::ids::SourceId::new(1);
                     drop(source_detail::files(c, id, &query, FIFTY).expect("files"));
                 }
             }),
         ),
         (
             "source detail",
-            Box::new(|c| drop(source_detail::detail(c, super::ids::SourceId(1)).expect("detail"))),
+            Box::new(|c| {
+                drop(source_detail::detail(c, super::ids::SourceId::new(1)).expect("detail"));
+            }),
         ),
         (
             "reclassify preview",
             Box::new(|c| {
                 let max = source_detail::PREVIEW_SAMPLE;
-                drop(source_detail::preview(c, super::ids::SourceId(1), max).expect("preview"));
+                drop(
+                    source_detail::preview(c, super::ids::SourceId::new(1), max).expect("preview"),
+                );
             }),
         ),
     ]
@@ -227,21 +234,21 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
         ),
         (
             "title detail",
-            Box::new(|c| drop(titles::detail::group_detail(c, TitleId(1)).expect("detail"))),
+            Box::new(|c| drop(titles::detail::group_detail(c, TitleId::new(1)).expect("detail"))),
         ),
         (
             "launch",
-            Box::new(|c| drop(launch::title(c, TitleId(1)).expect("launch"))),
+            Box::new(|c| drop(launch::title(c, TitleId::new(1)).expect("launch"))),
         ),
         (
             "best file",
             Box::new(|c| {
-                downloads::best_file(c, super::ids::RomId(1)).expect("best");
+                downloads::best_file(c, RomId::new(1)).expect("best");
             }),
         ),
         (
             "want",
-            Box::new(|c| drop(downloads::want_title(c, TitleId(1), 0).expect("want"))),
+            Box::new(|c| drop(downloads::want_title(c, TitleId::new(1), 0).expect("want"))),
         ),
         (
             "sources list",
@@ -251,7 +258,7 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
             "source files",
             Box::new(|c| {
                 let all = source_detail::FileQuery::default();
-                drop(source_detail::files(c, super::ids::SourceId(1), &all, FIFTY).expect("files"));
+                drop(source_detail::files(c, SourceId::new(1), &all, FIFTY).expect("files"));
             }),
         ),
         (

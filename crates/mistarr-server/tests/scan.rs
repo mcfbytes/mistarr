@@ -10,7 +10,7 @@ use std::path::Path;
 
 use common::{boot_with, config_in, eventually, request, Sse};
 use mistarr_core::hash::{hash_reader, HeaderRule};
-use mistarr_core::{HashSet, PlatformId};
+use mistarr_core::{Crc32, Hashes, PlatformId};
 use mistarr_server::db::files::{self, FileState, NewFile};
 use mistarr_server::db::ids::JobId;
 use mistarr_server::db::jobs::{self as job_rows, JobState};
@@ -23,7 +23,7 @@ fn write(path: &Path, data: &[u8]) {
     std::fs::write(path, data).expect("write");
 }
 
-fn hash_of(data: &[u8]) -> HashSet {
+fn hash_of(data: &[u8]) -> Hashes {
     hash_reader(Cursor::new(data), HeaderRule::None, None).expect("hash")
 }
 
@@ -48,11 +48,11 @@ fn smc(payload: &[u8]) -> Vec<u8> {
     clippy::cast_possible_truncation,
     reason = "Synthetic zip fields are small."
 )]
-fn build_stored_zip_multi(entries: &[(&str, &[u8], &str)]) -> Vec<u8> {
+fn build_stored_zip_multi(entries: &[(&str, &[u8], Crc32)]) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut central = Vec::new();
-    for (name, data, crc32_hex) in entries {
-        let crc32 = u32::from_str_radix(crc32_hex, 16).expect("hex crc32");
+    for (name, data, crc32) in entries {
+        let crc32 = crc32.to_u32();
         let name = name.as_bytes();
         let local_offset = u32::try_from(buf.len()).expect("offset fits");
         buf.extend_from_slice(&0x0403_4b50u32.to_le_bytes());
@@ -103,8 +103,8 @@ fn build_stored_zip_multi(entries: &[(&str, &[u8], &str)]) -> Vec<u8> {
 }
 
 /// A minimal single-member, stored-method (uncompressed) zip.
-fn build_stored_zip(name: &str, data: &[u8], crc32_hex: &str) -> Vec<u8> {
-    build_stored_zip_multi(&[(name, data, crc32_hex)])
+fn build_stored_zip(name: &str, data: &[u8], crc32: Crc32) -> Vec<u8> {
+    build_stored_zip_multi(&[(name, data, crc32)])
 }
 
 async fn post_scan(addr: std::net::SocketAddr, platform_id: Option<&str>) -> serde_json::Value {
@@ -124,7 +124,7 @@ async fn scan_and_wait(
     platform_id: &str,
 ) -> job_rows::JobRow {
     let body = post_scan(addr, Some(platform_id)).await;
-    let id = JobId(body["job_id"].as_i64().expect("job_id"));
+    let id = JobId::new(body["job_id"].as_i64().expect("job_id"));
     eventually("scan job to finish", || async move {
         app.db
             .read(move |c| job_rows::get(c, id))
@@ -176,7 +176,7 @@ async fn scan_matches_hashes_and_states_over_the_api() {
     // check independent from the iNES header-stripping one above.
     let zipped_payload = b"zipped payload for gba";
     let zipped_hash = hash_of(zipped_payload);
-    let zip = build_stored_zip("Zip Quest (USA).gba", zipped_payload, &zipped_hash.crc32);
+    let zip = build_stored_zip("Zip Quest (USA).gba", zipped_payload, zipped_hash.crc32);
     write(&games.join("GBA/Zip Quest (USA).zip"), &zip);
 
     let snes_payload = vec![7u8; 1024];
@@ -190,14 +190,13 @@ async fn scan_matches_hashes_and_states_over_the_api() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let nes = PlatformId("nes".into());
-    let gba = PlatformId("gba".into());
-    let snes = PlatformId("snes".into());
+    let nes = PlatformId::new("nes");
+    let gba = PlatformId::new("gba");
+    let snes = PlatformId::new("snes");
 
     app.db
         .write({
             let (nes, gba, snes) = (nes.clone(), gba.clone(), snes.clone());
-            let headered = headered.clone();
             move |c| {
                 mistarr_server::db::fixtures::dat(&nes)
                     .title("Example Quest (USA)")
@@ -230,7 +229,7 @@ async fn scan_matches_hashes_and_states_over_the_api() {
         .await
         .expect("row");
     assert_eq!(headered_row.state, FileState::Verified);
-    assert_eq!(headered_row.sha1.as_deref(), Some(headered.sha1.as_str()));
+    assert_eq!(headered_row.sha1, Some(headered.sha1));
 
     let zip_row = find(app, &gba, "GBA/Zip Quest (USA).zip#Zip Quest (USA).gba")
         .await
@@ -281,7 +280,7 @@ async fn disc_game_is_verified_only_when_every_track_matches() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let pid = PlatformId("psx".into());
+    let pid = PlatformId::new("psx");
 
     app.db
         .write({
@@ -353,12 +352,12 @@ async fn an_interrupted_scan_resumes_at_startup() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let pid = PlatformId("megadrive".into());
+    let pid = PlatformId::new("megadrive");
 
     app.db
         .write({
             let pid = pid.clone();
-            let (a_hash, b_hash) = (a_hash.clone(), b_hash.clone());
+            let (a_hash, b_hash) = (a_hash, b_hash);
             move |c| {
                 mistarr_server::db::fixtures::dat(&pid)
                     .title("A")
@@ -374,9 +373,9 @@ async fn an_interrupted_scan_resumes_at_startup() {
                     c,
                     &pid,
                     &NewFile {
-                        crc32: Some(a_hash.crc32.clone()),
-                        md5: Some(a_hash.md5.clone()),
-                        sha1: Some(a_hash.sha1.clone()),
+                        crc32: Some(a_hash.crc32),
+                        md5: Some(a_hash.md5),
+                        sha1: Some(a_hash.sha1),
                         header_rule: Some("none".to_string()),
                         ..NewFile::unhashed("Genesis/A.md", 18, now, FileState::Pending)
                     },
@@ -439,19 +438,18 @@ async fn a_header_ruled_member_passes_the_pre_check_by_its_content_crc() {
     let headered = ines(payload);
     let raw_hash = hash_of(&headered);
     let stripped_hash = hash_of(payload);
-    let zip = build_stored_zip("Ines Quest (USA).nes", &headered, &raw_hash.crc32);
+    let zip = build_stored_zip("Ines Quest (USA).nes", &headered, raw_hash.crc32);
     write(&games.join("NES/Ines Quest (USA).zip"), &zip);
 
     let mut config = config_in(dir.path());
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let nes = PlatformId("nes".into());
+    let nes = PlatformId::new("nes");
 
     app.db
         .write({
             let nes = nes.clone();
-            let stripped_hash = stripped_hash.clone();
             move |c| {
                 mistarr_server::db::fixtures::dat(&nes)
                     .title("Ines Quest (USA)")
@@ -468,7 +466,7 @@ async fn a_header_ruled_member_passes_the_pre_check_by_its_content_crc() {
         .await
         .expect("row");
     assert_eq!(row.state, FileState::Verified);
-    assert_eq!(row.sha1.as_deref(), Some(stripped_hash.sha1.as_str()));
+    assert_eq!(row.sha1, Some(stripped_hash.sha1));
 
     booted.running.shutdown().await.expect("shutdown");
 }
@@ -491,12 +489,12 @@ async fn each_loose_disc_title_verifies_independently() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let pid = PlatformId("psx".into());
+    let pid = PlatformId::new("psx");
 
     app.db
         .write({
             let pid = pid.clone();
-            let (a, b) = (a.clone(), b.clone());
+            let (a, b) = (a, b);
             move |c| {
                 mistarr_server::db::fixtures::dat(&pid)
                     .title("Loose A (USA)")
@@ -535,7 +533,7 @@ async fn a_corrupt_zip_does_not_abort_the_platform_scan() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let gba = PlatformId("gba".into());
+    let gba = PlatformId::new("gba");
 
     app.db
         .write({
@@ -569,8 +567,8 @@ async fn zip_directory_entries_are_not_recorded_as_files() {
     let payload = b"zipped payload";
     let hash = hash_of(payload);
     let zip = build_stored_zip_multi(&[
-        ("sub/", b"", "00000000"),
-        ("sub/Dir Quest (USA).gba", payload, &hash.crc32),
+        ("sub/", b"", Crc32::from_u32(0)),
+        ("sub/Dir Quest (USA).gba", payload, hash.crc32),
     ]);
     write(&games.join("GBA/Dir Quest (USA).zip"), &zip);
 
@@ -578,7 +576,7 @@ async fn zip_directory_entries_are_not_recorded_as_files() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let gba = PlatformId("gba".into());
+    let gba = PlatformId::new("gba");
 
     app.db
         .write({
@@ -618,13 +616,12 @@ async fn unchanged_disc_track_reuses_its_cached_hash() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let pid = PlatformId("psx".into());
+    let pid = PlatformId::new("psx");
     let hash = hash_of(original);
 
     app.db
         .write({
             let pid = pid.clone();
-            let hash = hash.clone();
             move |c| {
                 mistarr_server::db::fixtures::dat(&pid)
                     .title("Cached Quest (USA)")
@@ -665,7 +662,7 @@ async fn unchanged_disc_track_reuses_its_cached_hash() {
         FileState::Verified,
         "cached hash should be reused"
     );
-    assert_eq!(row.sha1.as_deref(), Some(hash.sha1.as_str()));
+    assert_eq!(row.sha1, Some(hash.sha1));
 
     booted.running.shutdown().await.expect("shutdown");
 }
@@ -682,7 +679,7 @@ async fn scan_of_a_large_file_does_not_block_other_writes() {
     let addr = booted.addr();
 
     let body = post_scan(addr, Some("gba")).await;
-    let job_id = JobId(body["job_id"].as_i64().expect("job_id"));
+    let job_id = JobId::new(body["job_id"].as_i64().expect("job_id"));
 
     let settings_body =
         r#"{"limits":{"down_kbps_menu":1,"down_kbps_core":1,"up_kbps_menu":1,"up_kbps_core":1}}"#;
@@ -770,12 +767,12 @@ fn swap16(data: &[u8]) -> Vec<u8> {
 }
 
 /// A Logiqx DAT named `name` with one game per `(game, rom, hashes)`.
-fn logiqx(name: &str, games: &[(&str, &str, &HashSet)]) -> String {
+fn logiqx(name: &str, games: &[(&str, &str, &Hashes)]) -> String {
     logiqx_version(name, "1", games)
 }
 
 /// [`logiqx`] at `version`.
-fn logiqx_version(name: &str, version: &str, games: &[(&str, &str, &HashSet)]) -> String {
+fn logiqx_version(name: &str, version: &str, games: &[(&str, &str, &Hashes)]) -> String {
     let mut xml =
         format!("<datafile><header><name>{name}</name><version>{version}</version></header>");
     for (game, rom, h) in games {
@@ -843,7 +840,7 @@ async fn a_dat_loaded_after_the_first_scan_matches_the_files_already_there() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let (n64, nes) = (PlatformId("n64".into()), PlatformId("nes".into()));
+    let (n64, nes) = (PlatformId::new("n64"), PlatformId::new("nes"));
 
     scan_and_wait(app, addr, "n64").await;
     scan_and_wait(app, addr, "nes").await;
@@ -943,7 +940,7 @@ async fn a_rescan_matches_unchanged_unmatched_files_without_hashing_them() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let gb = PlatformId("gb".into());
+    let gb = PlatformId::new("gb");
 
     let first = scan_and_wait(app, addr, "gb").await;
     let progress = first.progress.expect("progress");
@@ -959,7 +956,7 @@ async fn a_rescan_matches_unchanged_unmatched_files_without_hashing_them() {
     let hash = hash_of(original);
     app.db
         .write({
-            let (gb, hash) = (gb.clone(), hash.clone());
+            let (gb, hash) = (gb.clone(), hash);
             move |c| {
                 let name = "Example Quest (USA)";
                 mistarr_server::db::fixtures::dat(&gb)
@@ -991,18 +988,14 @@ async fn a_rescan_matches_unchanged_unmatched_files_without_hashing_them() {
         .expect("row");
     assert_eq!(row.state, FileState::Verified);
     assert!(row.rom_id.is_some());
-    assert_eq!(
-        row.sha1.as_deref(),
-        Some(hash.sha1.as_str()),
-        "not hashed again"
-    );
+    assert_eq!(row.sha1, Some(hash.sha1), "not hashed again");
 
     let r = request(addr, "GET", "/api/v1/system/jobs/recent", &[], None).await;
     assert_eq!(r.status, 200, "{}", r.body);
     let recent = r.json();
-    assert_eq!(recent["items"][0]["id"], second.id.0, "newest first");
+    assert_eq!(recent["items"][0]["id"], second.id.get(), "newest first");
     assert_eq!(recent["items"][0]["progress"]["matched"], 1);
-    assert_eq!(recent["items"][1]["id"], first.id.0);
+    assert_eq!(recent["items"][1]["id"], first.id.get());
 
     booted.running.shutdown().await.expect("shutdown");
 }
@@ -1037,20 +1030,20 @@ fn encrypted(zip: &[u8]) -> Vec<u8> {
 }
 
 /// A rom whose CRC32 and size are `h`'s but whose sha1 and md5 are other, synthetic ones.
-fn same_crc_other_sha1(h: &HashSet) -> HashSet {
-    HashSet {
+fn same_crc_other_sha1(h: &Hashes) -> Hashes {
+    Hashes {
         size: h.size,
-        crc32: h.crc32.clone(),
-        md5: "7".repeat(32),
-        sha1: "7".repeat(40),
+        crc32: h.crc32,
+        md5: "7".repeat(32).parse().expect("hex"),
+        sha1: "7".repeat(40).parse().expect("hex"),
     }
 }
 
-async fn seed_gba_rom(app: &mistarr_server::app::AppState, name: &str, h: &HashSet) {
-    let (name, h) = (name.to_owned(), h.clone());
+async fn seed_gba_rom(app: &mistarr_server::app::AppState, name: &str, h: &Hashes) {
+    let (name, h) = (name.to_owned(), *h);
     app.db
         .write(move |c| {
-            let gba = PlatformId("gba".into());
+            let gba = PlatformId::new("gba");
             mistarr_server::db::fixtures::dat(&gba)
                 .title(&name)
                 .rom(&format!("{name}.gba"), &h, RomStatus::Good)
@@ -1067,26 +1060,29 @@ async fn a_crc_only_member_is_hashed_once_a_candidate_appears_and_never_again() 
     let zip_path = games.join("GBA/Crc Quest (USA).zip");
     let payload = b"gba member payload known by crc only";
     let h = hash_of(payload);
-    let zip = build_stored_zip("Crc Quest (USA).gba", payload, &h.crc32);
+    let zip = build_stored_zip("Crc Quest (USA).gba", payload, h.crc32);
     write(&zip_path, &zip);
 
     let mut config = config_in(dir.path());
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let gba = PlatformId("gba".into());
+    let gba = PlatformId::new("gba");
     let rel = "GBA/Crc Quest (USA).zip#Crc Quest (USA).gba";
 
     scan_and_wait(app, addr, "gba").await;
     let row = find(app, &gba, rel).await.expect("row");
     assert_eq!(
-        (row.sha1.as_deref(), row.header_rule.as_deref()),
+        (
+            row.sha1.map(|d| d.to_string()).as_deref(),
+            row.header_rule.as_deref()
+        ),
         (None, None)
     );
 
     // The candidate shares the CRC32 and size but not the sha1: the CRC32 decides nothing.
     seed_gba_rom(app, "Crc Quest (USA)", &same_crc_other_sha1(&h)).await;
-    let recompute = mistarr_server::jobs::dat_import::Recompute::new("gba");
+    let recompute = mistarr_server::jobs::dat_import::Recompute::new(&PlatformId::new("gba"));
     mistarr_server::jobs::Scheduler::run_inline(app, std::sync::Arc::new(recompute))
         .await
         .expect("recompute");
@@ -1099,22 +1095,18 @@ async fn a_crc_only_member_is_hashed_once_a_candidate_appears_and_never_again() 
 
     scan_and_wait(app, addr, "gba").await;
     let row = find(app, &gba, rel).await.expect("row");
-    assert_eq!(row.sha1.as_deref(), Some(h.sha1.as_str()), "hashed once");
+    assert_eq!(row.sha1, Some(h.sha1), "hashed once");
     assert_eq!(row.state, FileState::Unverified);
 
     // Other bytes of the same length: a second hash would store another sha1.
     let other = vec![b'Z'; payload.len()];
     rewrite_keeping_mtime(
         &zip_path,
-        &build_stored_zip("Crc Quest (USA).gba", &other, &h.crc32),
+        &build_stored_zip("Crc Quest (USA).gba", &other, h.crc32),
     );
     scan_and_wait(app, addr, "gba").await;
     let row = find(app, &gba, rel).await.expect("row");
-    assert_eq!(
-        row.sha1.as_deref(),
-        Some(h.sha1.as_str()),
-        "never hashed again"
-    );
+    assert_eq!(row.sha1, Some(h.sha1), "never hashed again");
 
     booted.running.shutdown().await.expect("shutdown");
 }
@@ -1126,14 +1118,14 @@ async fn a_member_that_fails_to_hash_is_not_retried_while_unchanged() {
     let zip_path = games.join("GBA/Odd Quest (USA).zip");
     let payload = b"gba member behind a password flag";
     let h = hash_of(payload);
-    let stored = build_stored_zip("Odd Quest (USA).gba", payload, &h.crc32);
+    let stored = build_stored_zip("Odd Quest (USA).gba", payload, h.crc32);
     write(&zip_path, &encrypted(&stored));
 
     let mut config = config_in(dir.path());
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let gba = PlatformId("gba".into());
+    let gba = PlatformId::new("gba");
     let rel = "GBA/Odd Quest (USA).zip#Odd Quest (USA).gba";
 
     scan_and_wait(app, addr, "gba").await;
@@ -1247,11 +1239,7 @@ async fn both_forms_match(p: &HeaderPlatform, headered_dat: bool) {
     let loose_file = p.headered(&loose);
     let member_file = p.headered(&member);
     write(&games.join(p.rel(&p.name("Loose"))), &loose_file);
-    let zip = build_stored_zip(
-        &p.name("Member"),
-        &member_file,
-        &hash_of(&member_file).crc32,
-    );
+    let zip = build_stored_zip(&p.name("Member"), &member_file, hash_of(&member_file).crc32);
     write(&games.join(p.rel("Member Quest (USA).zip")), &zip);
     write(&games.join(p.rel(&p.name("Bare"))), &bare);
     write(&games.join(p.rel(&p.name("Plain"))), &plain);
@@ -1260,7 +1248,7 @@ async fn both_forms_match(p: &HeaderPlatform, headered_dat: bool) {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let pid = PlatformId(p.id.into());
+    let pid = PlatformId::new(p.id.to_owned());
 
     let listed = |body: &[u8]| {
         if headered_dat {
@@ -1388,7 +1376,7 @@ async fn a_zip_whose_members_match_neither_form_is_not_decompressed() {
     let games = dir.path().join("games");
     let p = &NES;
     let file = p.headered(&p.body("stray"));
-    let zip = build_stored_zip(&p.name("Stray"), &file, &hash_of(&file).crc32);
+    let zip = build_stored_zip(&p.name("Stray"), &file, hash_of(&file).crc32);
     write(&games.join(p.rel("Stray Quest (USA).zip")), &zip);
 
     let mut config = config_in(dir.path());
@@ -1405,7 +1393,7 @@ async fn a_zip_whose_members_match_neither_form_is_not_decompressed() {
     scan_and_wait(app, addr, p.id).await;
 
     let rel = format!("{}#{}", p.rel("Stray Quest (USA).zip"), p.name("Stray"));
-    let row = find(app, &PlatformId(p.id.into()), &rel)
+    let row = find(app, &PlatformId::new(p.id.to_owned()), &rel)
         .await
         .expect("row");
     assert_eq!(
@@ -1430,7 +1418,7 @@ async fn a_zip_whose_members_match_neither_form_is_not_decompressed() {
     );
     load_dat(&booted, "nes.dat", &dat).await;
     scan_and_wait(app, addr, p.id).await;
-    let row = find(app, &PlatformId(p.id.into()), &rel)
+    let row = find(app, &PlatformId::new(p.id.to_owned()), &rel)
         .await
         .expect("row");
     assert_eq!(row.state, FileState::Verified);
@@ -1448,7 +1436,7 @@ async fn stored_forms_match_a_later_dat_in_both_directions() {
     for (title, body) in titles.iter().zip(&bodies) {
         let file = p.headered(body);
         if title.ends_with("Member") {
-            let zip = build_stored_zip(&p.name(title), &file, &hash_of(&file).crc32);
+            let zip = build_stored_zip(&p.name(title), &file, hash_of(&file).crc32);
             write(
                 &games.join(p.rel(&format!("{title} Quest (USA).zip"))),
                 &zip,
@@ -1471,7 +1459,7 @@ async fn stored_forms_match_a_later_dat_in_both_directions() {
         app.gate.state().core_running()
     })
     .await;
-    let hashes: Vec<HashSet> = titles
+    let hashes: Vec<Hashes> = titles
         .iter()
         .zip(&bodies)
         .map(|(t, b)| {
@@ -1483,13 +1471,13 @@ async fn stored_forms_match_a_later_dat_in_both_directions() {
         })
         .collect();
     let names: Vec<String> = titles.iter().map(|t| p.name(t)).collect();
-    let games_listed: Vec<(String, &str, &HashSet)> = titles
+    let games_listed: Vec<(String, &str, &Hashes)> = titles
         .iter()
         .zip(&names)
         .zip(&hashes)
         .map(|((t, n), h)| (format!("{t} Quest (USA)"), n.as_str(), h))
         .collect();
-    let entries: Vec<(&str, &str, &HashSet)> = games_listed
+    let entries: Vec<(&str, &str, &Hashes)> = games_listed
         .iter()
         .map(|(g, n, h)| (g.as_str(), *n, *h))
         .collect();
@@ -1498,7 +1486,7 @@ async fn stored_forms_match_a_later_dat_in_both_directions() {
         platform_counts(addr, p.id).await["have"] == 2
     })
     .await;
-    let pid = PlatformId(p.id.into());
+    let pid = PlatformId::new(p.id.to_owned());
     for title in ["Whole", "Content"] {
         let row = find(app, &pid, &p.rel(&p.name(title))).await.expect("row");
         assert_eq!(row.state, FileState::Verified, "{title}");
@@ -1555,13 +1543,12 @@ async fn rows_hashed_before_the_whole_form_are_hashed_again_after_the_upgrade() 
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let pid = PlatformId(p.id.into());
+    let pid = PlatformId::new(p.id.to_owned());
     let rel = p.rel(&p.name("Upgraded"));
     let (whole, content) = (hash_of(&file), hash_of(&body));
     app.db
         .write({
-            let (pid, rel, whole, content) =
-                (pid.clone(), rel.clone(), whole.clone(), content.clone());
+            let (pid, rel, whole, content) = (pid.clone(), rel.clone(), whole, content);
             let name = p.name("Upgraded");
             move |c| {
                 mistarr_server::db::fixtures::dat(&pid)
@@ -1573,9 +1560,9 @@ async fn rows_hashed_before_the_whole_form_are_hashed_again_after_the_upgrade() 
                     c,
                     &pid,
                     &NewFile {
-                        crc32: Some(content.crc32.clone()),
-                        md5: Some(content.md5.clone()),
-                        sha1: Some(content.sha1.clone()),
+                        crc32: Some(content.crc32),
+                        md5: Some(content.md5),
+                        sha1: Some(content.sha1),
                         header_rule: Some("ines".to_string()),
                         ..NewFile::unhashed(&rel, size, mtime, FileState::Unverified)
                     },
@@ -1628,11 +1615,7 @@ async fn a_headered_dat_after_a_headerless_one_matches_its_files_again() {
     let (loose, member, gone) = (p.body("loose"), p.body("member"), p.body("gone"));
     let member_file = p.headered(&member);
     write(&games.join(p.rel(&p.name("Loose"))), &p.headered(&loose));
-    let zip = build_stored_zip(
-        &p.name("Member"),
-        &member_file,
-        &hash_of(&member_file).crc32,
-    );
+    let zip = build_stored_zip(&p.name("Member"), &member_file, hash_of(&member_file).crc32);
     write(&games.join(p.rel("Member Quest (USA).zip")), &zip);
     write(&games.join(p.rel(&p.name("Gone"))), &p.headered(&gone));
 
@@ -1640,9 +1623,9 @@ async fn a_headered_dat_after_a_headerless_one_matches_its_files_again() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let pid = PlatformId(p.id.into());
+    let pid = PlatformId::new(p.id.to_owned());
     let names = [p.name("Loose"), p.name("Member"), p.name("Gone")];
-    let dat = |version: &str, hashes: [HashSet; 3]| {
+    let dat = |version: &str, hashes: [Hashes; 3]| {
         let games = [
             ("Loose Quest (USA)", names[0].as_str(), &hashes[0]),
             ("Member Quest (USA)", names[1].as_str(), &hashes[1]),
@@ -1707,21 +1690,21 @@ async fn zipped_nes_files_matched_by_a_headerless_dat_count_as_have() {
         .collect();
     for (name, payload) in names.iter().zip(&payloads) {
         let image = ines(payload);
-        let zip = build_stored_zip(&format!("{name}.nes"), &image, &hash_of(&image).crc32);
+        let zip = build_stored_zip(&format!("{name}.nes"), &image, hash_of(&image).crc32);
         write(&games.join(format!("NES/{name}.zip")), &zip);
     }
-    let headered: Vec<HashSet> = payloads.iter().map(|p| hash_of(&ines(p))).collect();
-    let headerless: Vec<HashSet> = payloads.iter().map(|p| hash_of(p)).collect();
+    let headered: Vec<Hashes> = payloads.iter().map(|p| hash_of(&ines(p))).collect();
+    let headerless: Vec<Hashes> = payloads.iter().map(|p| hash_of(p)).collect();
 
     let mut config = config_in(dir.path());
     config.paths.games = games;
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let nes = PlatformId("nes".into());
+    let nes = PlatformId::new("nes");
 
-    let dat = |marker: &str, ext: &str, hashes: &[HashSet]| {
+    let dat = |marker: &str, ext: &str, hashes: &[Hashes]| {
         let roms: Vec<String> = names.iter().map(|n| format!("{n}.{ext}")).collect();
-        let games: Vec<(&str, &str, &HashSet)> = names
+        let games: Vec<(&str, &str, &Hashes)> = names
             .iter()
             .zip(&roms)
             .zip(hashes)

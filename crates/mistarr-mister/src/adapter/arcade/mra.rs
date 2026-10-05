@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use mistarr_core::dat::{MAX_DEPTH, MAX_EVENT_BYTES};
 use mistarr_core::xml::{check_utf8, lossy, resolve_ref, CappedReader, EscapeInvalid};
+use mistarr_core::Md5;
 use quick_xml::errors::IllFormedError;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
@@ -25,8 +26,8 @@ pub struct Mra {
     pub rbf: Option<String>,
     /// Zip file names from every `zip` attribute, `|`-separated lists split, first-seen order.
     pub zips: Vec<String>,
-    /// Lowercase `md5` attributes of `<rom>` elements that carry a 32-digit hex value.
-    pub md5: Vec<String>,
+    /// `md5` attributes of `<rom>` elements that carry a 32-digit hex value.
+    pub md5: Vec<Md5>,
     /// Every `<rom>` element in document order.
     pub roms: Vec<MraRom>,
 }
@@ -64,8 +65,8 @@ pub struct MraRom {
     pub index: u32,
     /// Zip names from the `zip` attribute, tried in order for each named part.
     pub zips: Vec<String>,
-    /// Lowercase expected MD5; `None` when absent, `none` or not 32 hex digits.
-    pub md5: Option<String>,
+    /// Expected MD5; `None` when absent, `none` or not 32 hex digits.
+    pub md5: Option<Md5>,
     /// Content in document order.
     pub items: Vec<RomItem>,
 }
@@ -284,7 +285,9 @@ fn tag_key(name: &str) -> String {
 /// Parses MRA markup from `input`; inline part bytes are kept in [`Part::data`], or with
 /// `file` set, left in that file as [`Part::inline`] so no payload is held.
 fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra> {
-    let bom = skip_bom(&mut input)?;
+    // Only a file can fail to read; markup in memory has no path to name.
+    let io_err = |e| Error::io_at(file.map_or(Path::new(""), |f| f))(e);
+    let bom = skip_bom(&mut input).map_err(io_err)?;
     // The reader caps true nesting, one level per Start/End; end-tag recovery
     // below instead drains several entries at once from `open`.
     let mut reader = CappedReader::new(input, MAX_EVENT_BYTES, MAX_DEPTH);
@@ -304,7 +307,8 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
         {
             if part.name.is_none() {
                 // Uncapped: a raw hex run may run past one event's cap.
-                take_text(reader.input_mut(), hex, keep.then_some(&mut part.data))?;
+                take_text(reader.input_mut(), hex, keep.then_some(&mut part.data))
+                    .map_err(io_err)?;
             }
         }
         let before = bom + reader.position();
@@ -374,7 +378,7 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
     }
     // Only from roms that closed into `mra.roms`, not any `<rom>`-named tag seen in
     // passing, so this cannot grow past MAX_ROMS from nested or skipped content.
-    mra.md5 = mra.roms.iter().filter_map(|r| r.md5.clone()).collect();
+    mra.md5 = mra.roms.iter().filter_map(|r| r.md5).collect();
     Ok(mra)
 }
 
@@ -492,8 +496,8 @@ pub const PARSER_VERSION: u32 = 4;
 /// assert_eq!(mistarr_mister::adapter::arcade::mra::read(&path).unwrap().zips, ["exblast.zip"]);
 /// ```
 pub fn read(path: &Path) -> Result<Mra> {
-    let file = std::fs::File::open(path)?;
-    if file.metadata()?.len() > MAX_MRA_BYTES {
+    let file = std::fs::File::open(path).map_err(Error::io_at(path))?;
+    if file.metadata().map_err(Error::io_at(path))?.len() > MAX_MRA_BYTES {
         return Err(too_big());
     }
     let mut limited = BufReader::new(file.take(MAX_MRA_BYTES + 1));
@@ -750,11 +754,6 @@ fn split_zips(value: &str, cap: usize, position: u64) -> Result<Vec<String>> {
     Ok(out)
 }
 
-fn valid_md5(value: &str) -> Option<String> {
-    let md5 = value.trim().to_ascii_lowercase();
-    (md5.len() == 32 && md5.bytes().all(|b| b.is_ascii_hexdigit())).then_some(md5)
-}
-
 /// A `<rom>` being read, with the element open inside it.
 struct RomBuilder {
     rom: MraRom,
@@ -859,7 +858,7 @@ fn start(
                         r.zips = split_zips(&v, MAX_ZIPS_PER_LIST, after)?;
                         budget.add_zip_refs(r.zips.len(), after)?;
                     }
-                    "md5" => r.md5 = valid_md5(&v),
+                    "md5" => r.md5 = v.trim().parse().ok(),
                     "index" => r.index = v.trim().parse().unwrap_or(0),
                     _ => {}
                 }

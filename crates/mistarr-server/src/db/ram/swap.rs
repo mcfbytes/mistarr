@@ -3,6 +3,8 @@
 
 use std::path::Path;
 
+use crate::{Error, Result};
+
 /// Suffix the old database file takes while [`install_file`] puts a new one in its place.
 pub const OLD_SUFFIX: &str = ".old";
 
@@ -19,20 +21,22 @@ pub const SWAP_SUFFIX: &str = ".swap";
 ///
 /// # Errors
 ///
-/// The I/O failure of a removal or a rename; the old file is then back under `path`,
-/// unless renaming it back failed too, which the error names.
-pub(crate) fn install_file(path: &Path, new: &Path) -> std::io::Result<()> {
+/// [`Error::File`] naming the file a removal or a rename failed on; the old file is then
+/// back under `path`, unless renaming it back failed too, which the error names.
+pub(crate) fn install_file(path: &Path, new: &Path) -> Result<()> {
     for suffix in ["-wal", "-shm"] {
         remove_if_present(&crate::db::sibling(path, suffix))?;
     }
     let old = crate::db::sibling(path, OLD_SUFFIX);
     remove_if_present(&old)?;
     let marker = crate::db::sibling(path, SWAP_SUFFIX);
-    std::fs::File::create(&marker)?.sync_all()?;
+    std::fs::File::create(&marker)
+        .and_then(|f| f.sync_all())
+        .map_err(Error::io_at(&marker))?;
     sync_parent(path);
     if let Err(e) = std::fs::rename(path, &old) {
         remove_if_present(&marker)?;
-        return Err(e);
+        return Err(Error::io_at(path)(e));
     }
     sync_parent(path);
     if let Err(e) = std::fs::rename(new, path) {
@@ -41,12 +45,12 @@ pub(crate) fn install_file(path: &Path, new: &Path) -> std::io::Result<()> {
         return Err(match back {
             Ok(()) => {
                 remove_if_present(&marker)?;
-                e
+                Error::io_at(new)(e)
             }
-            Err(b) => std::io::Error::other(format!(
+            Err(b) => Error::io_at(new)(std::io::Error::other(format!(
                 "{e}; the old database stays at {}: {b}",
                 old.display()
-            )),
+            ))),
         });
     }
     sync_parent(path);
@@ -70,9 +74,9 @@ pub(super) fn sync_parent(path: &Path) {
 }
 
 /// Removes `path`, treating a file already gone as removed.
-fn remove_if_present(path: &Path) -> std::io::Result<()> {
+fn remove_if_present(path: &Path) -> Result<()> {
     match std::fs::remove_file(path) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(Error::io_at(path)(e)),
         _ => Ok(()),
     }
 }

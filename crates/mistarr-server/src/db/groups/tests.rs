@@ -220,11 +220,11 @@ fn reference_browse(
         .expect("prepare")
         .query_map(args, |r| {
             Ok(GroupRow {
-                parent_id: TitleId(r.get(0)?),
-                platform_id: mistarr_core::PlatformId(r.get(1)?),
+                parent_id: TitleId::new(r.get(0)?),
+                platform_id: r.get(1)?,
                 base_name: r.get(2)?,
                 name: r.get(3)?,
-                pick_id: r.get::<_, Option<i64>>(4)?.map(TitleId),
+                pick_id: r.get::<_, Option<i64>>(4)?.map(TitleId::new),
                 pick_name: r.get(5)?,
                 variants: u64::try_from(r.get::<_, i64>(6)?).unwrap_or(0),
                 have_verified: u64::try_from(r.get::<_, i64>(7)?).unwrap_or(0),
@@ -587,7 +587,7 @@ fn apply(c: &Connection, op: &Op, seq: &mut u32) {
             );
             titles::store_lists(
                 c,
-                TitleId(id),
+                TitleId::new(id),
                 &pick(&REGIONS, regions),
                 &[],
                 &pick(&FLAGS, flags),
@@ -656,7 +656,7 @@ fn apply(c: &Connection, op: &Op, seq: &mut u32) {
             if let Some(t) = title(t) {
                 titles::store_lists(
                     c,
-                    TitleId(t),
+                    TitleId::new(t),
                     &pick(&REGIONS, regions),
                     &[],
                     &pick(&FLAGS, flags),
@@ -914,7 +914,7 @@ fn refresh_rebuild_and_check_agree() {
     assert_eq!(flush(&c).expect("flush"), 6);
     assert!(check(&c).expect("check").is_consistent());
     c.execute("DELETE FROM title_groups", []).expect("empty");
-    let ids: Vec<TitleId> = (1..=6).map(TitleId).collect();
+    let ids: Vec<TitleId> = (1..=6).map(TitleId::new).collect();
     assert_eq!(refresh_groups(&c, &ids).expect("refresh"), 6);
     assert!(check(&c).expect("check").is_consistent());
 
@@ -1005,7 +1005,7 @@ fn bits_follow_the_known_tables() {
     let tx = c.transaction().expect("tx");
     titles::store_lists(
         &tx,
-        TitleId(1),
+        TitleId::new(1),
         &["usa".to_owned()],
         &[],
         &["other:x".to_owned()],
@@ -1060,7 +1060,7 @@ fn a_group_whose_parent_is_on_another_platform_is_found_by_every_shape() {
     for shape in SearchShape::ALL {
         let got = titles::browse::browse_with(&c, &pid("nes"), &f, TEN, shape).expect("browse");
         assert_eq!(got.total, 1, "{shape:?}");
-        assert_eq!(got.items[0].parent_id, TitleId(1), "{shape:?}");
+        assert_eq!(got.items[0].parent_id, TitleId::new(1), "{shape:?}");
     }
     let tx = c.transaction().expect("tx");
     tx.execute("UPDATE titles SET platform_id = 'nes' WHERE id = 1", [])
@@ -1239,7 +1239,7 @@ fn linking_across_dats_and_retiring_one_keeps_the_table_equal_to_the_reference()
     assert_matches_reference(&c);
 
     let tx = c.transaction().expect("tx");
-    dats::retire(&tx, DatVersionId(2), 0).expect("retire");
+    dats::retire(&tx, DatVersionId::new(2), 0).expect("retire");
     titles::recompute::recompute_platform(&tx, &pid("nes"), &Prefs::default()).expect("recompute");
     crate::db::commit(tx).expect("commit");
     assert_eq!((root(&c, 20), root(&c, 21)), (20, 20));

@@ -513,7 +513,7 @@ fn seed_console(
                 parent = id;
                 parent_of.execute([id])?;
             }
-            titles::set_flags(c, crate::db::ids::TitleId(id), &flags)?;
+            titles::set_flags(c, crate::db::ids::TitleId::new(id), &flags)?;
             tag.execute(params![id, region])?;
             for (pos, l) in langs.split(',').enumerate() {
                 language.execute(params![id, i64::try_from(pos).unwrap_or(0), l])?;

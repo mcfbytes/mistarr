@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use crate::detect::ScgiAddr;
-use crate::ClientError;
+use crate::Error;
 
 /// Largest response accepted; an `f.multicall` over 10 000 files is a few MiB.
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
@@ -23,7 +23,7 @@ pub(crate) fn frame(body: &[u8]) -> Vec<u8> {
 
 /// Where the body of an SCGI response starts and ends, after its CGI-style
 /// headers. A `Status` other than 200 or a body shorter than `Content-Length` is an error.
-pub(crate) fn body_range(response: &[u8]) -> Result<Range<usize>, ClientError> {
+pub(crate) fn body_range(response: &[u8]) -> Result<Range<usize>, Error> {
     let (head_end, start) = [&b"\r\n\r\n"[..], b"\n\n"]
         .iter()
         .filter_map(|sep| {
@@ -33,7 +33,7 @@ pub(crate) fn body_range(response: &[u8]) -> Result<Range<usize>, ClientError> {
                 .map(|i| (i, i + sep.len()))
         })
         .min_by_key(|(head_end, _)| *head_end)
-        .ok_or_else(|| ClientError::Protocol("SCGI response without headers".into()))?;
+        .ok_or_else(|| Error::Protocol("SCGI response without headers".into()))?;
     let head = String::from_utf8_lossy(&response[..head_end]);
     let mut body = start..response.len();
     for line in head.lines() {
@@ -42,14 +42,14 @@ pub(crate) fn body_range(response: &[u8]) -> Result<Range<usize>, ClientError> {
         };
         let value = value.trim();
         if name.eq_ignore_ascii_case("status") && !value.starts_with("200") {
-            return Err(ClientError::Protocol(format!("SCGI status {value}")));
+            return Err(Error::Protocol(format!("SCGI status {value}")));
         }
         if name.eq_ignore_ascii_case("content-length") {
             let len: usize = value
                 .parse()
-                .map_err(|_| ClientError::Protocol(format!("bad Content-Length {value:?}")))?;
+                .map_err(|_| Error::Protocol(format!("bad Content-Length {value:?}")))?;
             if body.len() < len {
-                return Err(ClientError::Protocol("truncated SCGI response".into()));
+                return Err(Error::Protocol("truncated SCGI response".into()));
             }
             body.end = start + len;
         }
@@ -63,12 +63,12 @@ pub(crate) async fn request(
     addr: &ScgiAddr,
     body: &[u8],
     timeout: Duration,
-) -> Result<Vec<u8>, ClientError> {
+) -> Result<Vec<u8>, Error> {
     let name = match addr {
         ScgiAddr::Tcp(a) => a.clone(),
         ScgiAddr::Unix(p) => p.display().to_string(),
     };
-    let unreachable = |e: &dyn std::fmt::Display| ClientError::Unreachable(format!("{name}: {e}"));
+    let unreachable = |e: &dyn std::fmt::Display| Error::Unreachable(format!("{name}: {e}"));
     let framed = frame(body);
     let work = async {
         let mut raw = match addr {
@@ -88,7 +88,7 @@ pub(crate) async fn request(
         }
         .map_err(|e| unreachable(&e))?;
         if raw.len() > MAX_RESPONSE {
-            return Err(ClientError::Protocol(format!(
+            return Err(Error::Protocol(format!(
                 "response larger than {MAX_RESPONSE} bytes"
             )));
         }
@@ -99,7 +99,7 @@ pub(crate) async fn request(
     };
     tokio::time::timeout(timeout, work)
         .await
-        .map_err(|_| ClientError::Unreachable(format!("{name} timed out")))?
+        .map_err(|_| Error::Unreachable(format!("{name} timed out")))?
 }
 
 async fn exchange<S: AsyncRead + AsyncWrite + Unpin>(
@@ -203,11 +203,11 @@ mod tests {
         let err = request(&open, b"", Duration::from_millis(100))
             .await
             .expect_err("silent");
-        assert!(matches!(err, ClientError::Unreachable(_)), "{err:?}");
+        assert!(matches!(err, Error::Unreachable(_)), "{err:?}");
         drop(listener);
         let err = request(&open, b"", Duration::from_secs(5))
             .await
             .expect_err("refused");
-        assert!(matches!(err, ClientError::Unreachable(_)), "{err:?}");
+        assert!(matches!(err, Error::Unreachable(_)), "{err:?}");
     }
 }

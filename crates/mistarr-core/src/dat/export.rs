@@ -5,6 +5,7 @@ use std::path::Path;
 
 use super::{DatRom, ExportOptions, RomStatus};
 use crate::hash::HeaderRule;
+use crate::{Crc32, Md5, Sha1};
 
 /// A game's `<archive>`: its number, parent reference, region, languages and release status.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -47,9 +48,9 @@ pub(super) struct File {
     pub(super) extension: String,
     pub(super) format: String,
     pub(super) size: u64,
-    pub(super) crc32: Option<String>,
-    pub(super) md5: Option<String>,
-    pub(super) sha1: Option<String>,
+    pub(super) crc32: Option<Crc32>,
+    pub(super) md5: Option<Md5>,
+    pub(super) sha1: Option<Sha1>,
     pub(super) header: Option<String>,
     /// `item`: the file is an extra, such as save data, not the game image.
     pub(super) item: Option<String>,
@@ -57,6 +58,13 @@ pub(super) struct File {
     pub(super) forcename: Option<String>,
     /// `bad="1"`: a known bad dump.
     pub(super) bad: bool,
+}
+
+/// What tells two files' dumps apart, from [`File::key`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Key {
+    Sha1(Sha1),
+    Rest(u64, Option<Crc32>, Option<Md5>),
 }
 
 /// How a file is stored, from its `format` attribute and extension.
@@ -75,9 +83,6 @@ impl File {
         let len = |s: &Option<String>| s.as_deref().map_or(0, str::len);
         self.extension.len()
             + self.format.len()
-            + len(&self.crc32)
-            + len(&self.md5)
-            + len(&self.sha1)
             + len(&self.header)
             + len(&self.item)
             + len(&self.forcename)
@@ -96,15 +101,10 @@ impl File {
     }
 
     /// What identifies the dump: its SHA1, else its size and other hashes.
-    fn key(&self) -> String {
-        match &self.sha1 {
-            Some(sha1) => sha1.clone(),
-            None => format!(
-                "{}:{}:{}",
-                self.size,
-                self.crc32.as_deref().unwrap_or(""),
-                self.md5.as_deref().unwrap_or("")
-            ),
+    fn key(&self) -> Key {
+        match self.sha1 {
+            Some(sha1) => Key::Sha1(sha1),
+            None => Key::Rest(self.size, self.crc32, self.md5),
         }
     }
 
@@ -219,7 +219,7 @@ pub(super) fn roms(game: &str, sources: &[Source], options: &ExportOptions) -> V
     images.sort_by_key(|(_, f)| status_rank(f.status()));
     let sibling = headered.or_else(|| accepted.first().copied());
     let mut out: Vec<DatRom> = Vec::new();
-    let mut keys: Vec<String> = Vec::new();
+    let mut keys: Vec<Key> = Vec::new();
     for (source, file) in images {
         let key = file.key();
         if keys.contains(&key) {
@@ -242,9 +242,9 @@ pub(super) fn roms(game: &str, sources: &[Source], options: &ExportOptions) -> V
         out.push(DatRom {
             name,
             size: file.size,
-            crc32: file.crc32.clone(),
-            md5: file.md5.clone(),
-            sha1: file.sha1.clone(),
+            crc32: file.crc32,
+            md5: file.md5,
+            sha1: file.sha1,
             status: file.status(),
             header,
         });

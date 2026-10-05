@@ -16,7 +16,7 @@ pub fn get(conn: &Connection, platform_id: &PlatformId) -> Result<Vec<String>> {
     Ok(conn
         .query_row(
             "SELECT done_dirs FROM scan_progress WHERE platform_id = ?1",
-            [&platform_id.0],
+            [platform_id],
             |r| sql::get_json(r, 0, "scan_progress.done_dirs"),
         )
         .optional()?
@@ -40,7 +40,7 @@ pub fn save(
         "INSERT INTO scan_progress (platform_id, done_dirs, updated_at) VALUES (?1, ?2, ?3)
          ON CONFLICT(platform_id) DO UPDATE SET done_dirs = excluded.done_dirs, updated_at = excluded.updated_at",
     )?
-    .execute(params![platform_id.0, json, now])?;
+    .execute(params![platform_id, json, now])?;
     Ok(())
 }
 
@@ -52,7 +52,7 @@ pub fn save(
 pub fn clear(conn: &Connection, platform_id: &PlatformId) -> Result<()> {
     conn.execute(
         "DELETE FROM scan_progress WHERE platform_id = ?1",
-        [&platform_id.0],
+        [platform_id],
     )?;
     Ok(())
 }
@@ -69,7 +69,7 @@ pub fn platforms_with_progress(conn: &Connection) -> Result<Vec<PlatformId>> {
     Ok(rows
         .collect::<rusqlite::Result<Vec<_>>>()?
         .into_iter()
-        .map(PlatformId)
+        .map(PlatformId::new)
         .collect())
 }
 
@@ -81,13 +81,13 @@ mod tests {
     #[test]
     fn progress_round_trips_and_clears() {
         let c = conn();
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         assert!(get(&c, &pid).expect("empty").is_empty());
         save(&c, &pid, &["NES".to_owned()], 5).expect("save");
         assert_eq!(get(&c, &pid).expect("get"), ["NES".to_owned()]);
         let got = platforms_with_progress(&c).expect("list");
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].0, pid.0);
+        assert_eq!(got[0].as_str(), pid.as_str());
         clear(&c, &pid).expect("clear");
         assert!(get(&c, &pid).expect("empty").is_empty());
         assert!(platforms_with_progress(&c).expect("list").is_empty());

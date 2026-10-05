@@ -112,11 +112,16 @@ fn page(
         limit: 60,
         offset: 0,
     };
-    let got =
-        titles::browse::browse_with(c, &PlatformId(platform.to_owned()), &filter, page, shape)
-            .expect("browse");
+    let got = titles::browse::browse_with(
+        c,
+        &PlatformId::new(platform.to_owned()),
+        &filter,
+        page,
+        shape,
+    )
+    .expect("browse");
     (
-        got.items.into_iter().map(|r| r.parent_id.0).collect(),
+        got.items.into_iter().map(|r| r.parent_id.get()).collect(),
         got.total,
     )
 }
@@ -242,7 +247,7 @@ fn stage(c: &Connection, count: usize) {
                 roms: vec![StagedRom {
                     name: format!("{name}.sfc"),
                     size: 16,
-                    crc32: Some(format!("{i:08x}")),
+                    crc32: Some(format!("{i:08x}").parse().expect("hex")),
                     md5: None,
                     sha1: None,
                     status: RomStatus::Good,

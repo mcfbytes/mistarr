@@ -499,8 +499,8 @@ impl HeldWriter<'_> {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] when the WAL cannot be emptied or a file cannot be removed or renamed,
-    /// with the old file reopened; [`Error::Reopen`] when no file could be reopened, which
+    /// [`Error::Io`] when the WAL cannot be emptied, [`Error::File`] naming a file that cannot
+    /// be removed or renamed, with the old file reopened; [`Error::Reopen`] when no file could be reopened, which
     /// leaves connections that fail every statement until a restart.
     pub fn replace_file(&mut self, new: &Path) -> Result<()> {
         self.replace_with(new, reopen_pair)
@@ -521,7 +521,7 @@ impl HeldWriter<'_> {
         let writer = std::mem::replace(&mut *self.conn, hold_writer);
         let old_reader = std::mem::replace(&mut *reader, hold_reader);
         let closed = close_connection(old_reader).and(close_connection(writer));
-        let swapped = closed.and_then(|()| Ok(ram::swap::install_file(&path, new)?));
+        let swapped = closed.and_then(|()| ram::swap::install_file(&path, new));
         let (w, r) = reopen(&path).map_err(|e| {
             tracing::error!(error = %e, "cannot reopen the database; restart mistarr");
             Error::Reopen(Box::new(e))

@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use mistarr_core::matching::match_members;
+use mistarr_core::RomId;
 use mistarr_mister::adapter::arcade::assemble::PartSource as _;
 use mistarr_mister::adapter::arcade::mra::{
     self, zip_location, Mra, MraRom, Part, RomItem, ZipPath,
@@ -17,7 +18,6 @@ use super::{fail, finish, Piece, Placing, Why, BIOS_REFUSED};
 use crate::db::arcade as arcade_rows;
 use crate::db::downloads::DownloadRow;
 use crate::db::files::{self, FileState};
-use crate::db::ids::RomId;
 use crate::db::imports::{self, TitleEntry};
 use crate::db::roms::{self, EntryRom};
 use crate::error::Result;
@@ -137,7 +137,7 @@ fn examine(mra: &Mra, zip: &ZipPath, staged: &Path, games: &Path) -> Verdict {
     let mut by_index: Vec<(u32, Outcome)> = Vec::new();
     let mut matched: Vec<(PathBuf, String)> = Vec::new();
     for rom in &fed {
-        let Some(expected) = &rom.md5 else {
+        let Some(expected) = rom.md5 else {
             continue;
         };
         let before = src.read.len();
@@ -483,7 +483,7 @@ mod tests {
 
     use mistarr_core::hash::Md5Stream;
 
-    fn md5_of(parts: &[&[u8]]) -> String {
+    fn md5_of(parts: &[&[u8]]) -> mistarr_core::Md5 {
         let mut m = Md5Stream::new();
         for p in parts {
             m.update(p);

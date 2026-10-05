@@ -1,6 +1,6 @@
 //! Reads behind a source's detail view: its file page, summary, DATs and re-classify preview.
 
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, RomId};
 use mistarr_mister::platforms::{self, Kind};
 use mistarr_sources::binding;
 use mistarr_sources::torrent::TorrentFile;
@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::db::candidates::{FileCandidate, MatchConfidence};
 use crate::db::downloads::DownloadState;
-use crate::db::ids::{DatVersionId, DownloadId, RomId, SourceId, TitleId};
+use crate::db::ids::{DatVersionId, DownloadId, SourceId, TitleId};
 use crate::db::sources::{self, SourceRow, SqlDatIndex};
 use crate::db::sql::{self, get_u64, Page, Paged};
 use crate::error::Result;
@@ -343,7 +343,7 @@ pub fn detail(conn: &Connection, id: SourceId) -> Result<Option<SourceDetail>> {
     let Some(source) = sources::get(conn, id)? else {
         return Ok(None);
     };
-    let platform = source.platform_id.as_ref().map(|p| p.0.as_str());
+    let platform = source.platform_id.as_ref().map(PlatformId::as_str);
     let mut summary = Summary::default();
     let mut stmt = conn.prepare(&format!(
         "SELECT f.path, f.rom_id IS NOT NULL, {HAS_MATCH} FROM torrent_files f WHERE f.source_id = ?1"
@@ -559,7 +559,7 @@ impl PreviewTally {
         platforms.sort_by(|a, b| {
             b.matched
                 .cmp(&a.matched)
-                .then_with(|| a.platform_id.0.cmp(&b.platform_id.0))
+                .then_with(|| a.platform_id.as_str().cmp(b.platform_id.as_str()))
         });
         Preview {
             total,
@@ -581,7 +581,7 @@ pub fn platforms_with_dat(conn: &Connection) -> Result<Vec<PlatformId>> {
                WHERE t.platform_id = p.id AND t.source = 'dat' AND t.retired = 0)
              ORDER BY p.id",
         )?
-        .query_map([], |r| r.get(0).map(PlatformId))?
+        .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(ids)
 }
@@ -611,7 +611,7 @@ pub fn preview(conn: &Connection, id: SourceId, max: u64) -> Result<Preview> {
 
 #[cfg(test)]
 mod tests {
-    use mistarr_sources::binding::{Confidence, RomRef};
+    use mistarr_sources::binding::Confidence;
     use mistarr_sources::torrent::TorrentFile;
 
     use super::*;
@@ -650,8 +650,8 @@ mod tests {
             file(3, "Set/readme.txt", 4),
         ];
         sources::replace_files(c, id, &list).expect("files");
-        sources::set_binding(c, id, Some(&PlatformId("nes".into())), Some(0.25)).expect("bind");
-        sources::set_matches(c, id, &[(0, Some(RomRef(a.0)), Confidence::Name)]).expect("m");
+        sources::set_binding(c, id, Some(&PlatformId::new("nes")), Some(0.25)).expect("bind");
+        sources::set_matches(c, id, &[(0, Some(a), Confidence::Name)]).expect("m");
         c.execute(
             "INSERT INTO torrent_candidates (source_id, file_index, rom_id, confidence)
              VALUES (?1, 1, ?2, 'fuzzy')",
@@ -696,7 +696,7 @@ mod tests {
                 done: 8
             }
         );
-        assert!(detail(&c, SourceId(99)).expect("detail").is_none());
+        assert!(detail(&c, SourceId::new(99)).expect("detail").is_none());
     }
 
     #[test]
@@ -776,13 +776,10 @@ mod tests {
         let mut tally = PreviewTally::default();
         tally.add(&PreviewChunk {
             files: 4,
-            hits: vec![(PlatformId("nes".into()), 1)],
+            hits: vec![(PlatformId::new("nes"), 1)],
             last: Some(9),
         });
-        let scaled = tally.finish(
-            12,
-            vec![PlatformId("nes".into()), PlatformId("snes".into())],
-        );
+        let scaled = tally.finish(12, vec![PlatformId::new("nes"), PlatformId::new("snes")]);
         let got: Vec<_> = scaled.platforms.iter().map(|m| m.matched).collect();
         assert_eq!(got, [3, 0]);
     }
@@ -798,12 +795,12 @@ mod tests {
         let got: Vec<_> = p
             .platforms
             .iter()
-            .map(|m| (m.platform_id.0.as_str(), m.matched))
+            .map(|m| (m.platform_id.as_str(), m.matched))
             .collect();
         assert_eq!(got, [("nes", 1), ("snes", 1)]);
         assert_eq!(
             platforms_with_dat(&c).expect("dat"),
-            [PlatformId("nes".into()), PlatformId("snes".into())]
+            [PlatformId::new("nes"), PlatformId::new("snes")]
         );
     }
 }

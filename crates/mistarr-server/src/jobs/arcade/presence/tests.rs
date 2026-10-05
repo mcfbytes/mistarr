@@ -1,26 +1,28 @@
 use std::time::{Duration, SystemTime};
 
+use mistarr_core::RomId;
 use rusqlite::params;
 
 use super::*;
 use crate::app::testutil::{state, write_zip};
 use crate::app::AppState;
-use crate::db::ids::RomId;
 use crate::db::titles::RomStatus;
 use crate::jobs::arcade::{ArcadeCatalog, ARCADE_DIR};
 use crate::jobs::Scheduler;
 
-fn hashes() -> mistarr_core::HashSet {
-    mistarr_core::HashSet {
+fn hashes() -> mistarr_core::Hashes {
+    mistarr_core::Hashes {
         size: 4,
-        crc32: "0000abcd".into(),
-        md5: "0123456789abcdef0123456789abcdef".into(),
-        sha1: "0123456789abcdef0123456789abcdef01234567".into(),
+        crc32: "0000abcd".parse().expect("hex"),
+        md5: "0123456789abcdef0123456789abcdef".parse().expect("hex"),
+        sha1: "0123456789abcdef0123456789abcdef01234567"
+            .parse()
+            .expect("hex"),
     }
 }
 
 fn pid() -> PlatformId {
-    PlatformId("arcade".into())
+    PlatformId::new("arcade")
 }
 
 /// Moves `path`'s mtime `secs` seconds into the past.
@@ -45,17 +47,17 @@ fn zip(rel: &str, size: i64, mtime: i64) -> Zip {
 /// A row as `find_by_path` would return it.
 fn row(id: i64, rel: &str, size: i64, mtime: i64, rom: Option<i64>, state: FileState) -> FileRow {
     FileRow {
-        id: FileId(id),
+        id: FileId::new(id),
         platform_id: pid(),
         rel_path: rel.to_owned(),
         size,
         mtime,
-        crc32: Some("0000abcd".into()),
-        md5: Some("m".into()),
-        sha1: Some("s".into()),
+        crc32: Some("0000abcd".parse().expect("hex")),
+        md5: Some(mistarr_core::Md5::from_bytes([1; 16])),
+        sha1: Some(mistarr_core::Sha1::from_bytes([2; 20])),
         header_rule: Some("none".into()),
         whole: crate::db::files::WholeHashes::default(),
-        rom_id: rom.map(RomId),
+        rom_id: rom.map(RomId::new),
         state,
         scanned_at: 1,
         reason: None,
@@ -99,8 +101,8 @@ fn stat_leaves_out_a_zip_it_cannot_stat() {
 fn an_mra_named_zip_with_no_rows_gets_one_presence_row() {
     let mut out = Changes::default();
     let z = zip("mame/a.zip", 10, 5);
-    assert!(decide(&z, &[RomId(7)], Vec::new(), Vec::new(), &mut out).is_none());
-    assert_eq!(out.record, [(z, RomId(7))]);
+    assert!(decide(&z, &[RomId::new(7)], Vec::new(), Vec::new(), &mut out).is_none());
+    assert_eq!(out.record, [(z, RomId::new(7))]);
     assert!(out.drop.is_empty());
 
     let mut out = Changes::default();
@@ -117,7 +119,7 @@ fn a_presence_row_follows_its_zip_and_the_live_mra_set() {
     let mut out = Changes::default();
     decide(
         &z,
-        &[RomId(7)],
+        &[RomId::new(7)],
         vec![promoted.clone()],
         Vec::new(),
         &mut out,
@@ -132,21 +134,21 @@ fn a_presence_row_follows_its_zip_and_the_live_mra_set() {
     let touched = zip("mame/a.zip", 10, 6);
     decide(
         &touched,
-        &[RomId(7)],
+        &[RomId::new(7)],
         vec![promoted.clone()],
         Vec::new(),
         &mut out,
     );
     assert_eq!(
         out.record,
-        [(touched, RomId(7))],
+        [(touched, RomId::new(7))],
         "a changed zip is recorded again"
     );
 
     let mut out = Changes::default();
     decide(
         &z,
-        &[RomId(3), RomId(7)],
+        &[RomId::new(3), RomId::new(7)],
         vec![promoted.clone()],
         Vec::new(),
         &mut out,
@@ -160,21 +162,27 @@ fn a_presence_row_follows_its_zip_and_the_live_mra_set() {
     let mut out = Changes::default();
     decide(
         &z,
-        &[RomId(8)],
+        &[RomId::new(8)],
         vec![promoted.clone()],
         Vec::new(),
         &mut out,
     );
     assert_eq!(
         out.record,
-        [(z.clone(), RomId(8))],
+        [(z.clone(), RomId::new(8))],
         "only another MRA's rom names it now"
     );
 
     let mut out = Changes::default();
     let spelled = row(1, "mame/A.zip", 10, 6, Some(7), FileState::Unverified);
     let other = row(2, "mame/a.ZIP", 10, 6, Some(7), FileState::Unverified);
-    decide(&z, &[RomId(7)], vec![spelled, other], Vec::new(), &mut out);
+    decide(
+        &z,
+        &[RomId::new(7)],
+        vec![spelled, other],
+        Vec::new(),
+        &mut out,
+    );
     assert_eq!(
         out.drop,
         ["mame/a.ZIP"],
@@ -196,14 +204,20 @@ fn member_rows_stand_for_the_zip_and_are_left_alone_while_it_is_unchanged() {
     let bare = row(1, "mame/a.zip", 10, 5, Some(7), FileState::Unverified);
     let member = row(2, "mame/a.zip#a.bin", 1, 5, Some(9), FileState::Verified);
     let mut out = Changes::default();
-    let rc = decide(&z, &[RomId(7)], vec![bare], vec![member.clone()], &mut out);
+    let rc = decide(
+        &z,
+        &[RomId::new(7)],
+        vec![bare],
+        vec![member.clone()],
+        &mut out,
+    );
     assert!(rc.is_none(), "an unchanged zip is never read");
     assert_eq!(out.drop, ["mame/a.zip"], "the presence row gives way");
     assert!(out.record.is_empty() && out.restamp.is_empty() && out.reverify.is_empty());
 
     let mut out = Changes::default();
     let moved = zip("mame/a.zip", 10, 6);
-    let rc = decide(&moved, &[RomId(7)], Vec::new(), vec![member], &mut out).expect("recheck");
+    let rc = decide(&moved, &[RomId::new(7)], Vec::new(), vec![member], &mut out).expect("recheck");
     assert_eq!(rc.members.len(), 1);
     assert_eq!(out, Changes::default());
 }
@@ -221,11 +235,11 @@ fn recheck_keeps_matching_members_and_marks_changed_ones() {
         listed
             .iter()
             .find(|m| m.name == n)
-            .map(|m| m.crc32.clone())
+            .map(|m| m.crc32)
             .expect("member")
     };
     let mut same = row(1, "mame/a.zip#same.bin", 4, 5, Some(9), FileState::Verified);
-    same.crc32 = Some(crc_of("same.bin").to_ascii_uppercase());
+    same.crc32 = Some(crc_of("same.bin"));
     let changed = row(
         2,
         "mame/a.zip#changed.bin",
@@ -237,13 +251,16 @@ fn recheck_keeps_matching_members_and_marks_changed_ones() {
     let gone = row(3, "mame/a.zip#gone.bin", 4, 5, Some(9), FileState::Verified);
     let rc = Recheck {
         zip: zip("mame/a.zip", 99, 6),
-        roms: vec![RomId(7)],
+        roms: vec![RomId::new(7)],
         members: vec![same, changed, gone],
     };
     let mut out = Changes::default();
     recheck(dir.path(), rc, &mut out);
-    assert_eq!(out.restamp, [(FileId(1), 6)]);
-    assert_eq!(out.reverify, [(FileId(2), 4, 6, crc_of("changed.bin"))]);
+    assert_eq!(out.restamp, [(FileId::new(1), 6)]);
+    assert_eq!(
+        out.reverify,
+        [(FileId::new(2), 4, 6, crc_of("changed.bin"))]
+    );
     assert_eq!(out.drop, ["mame/a.zip#gone.bin"]);
     assert!(out.record.is_empty(), "member rows still stand for the zip");
 }
@@ -256,7 +273,7 @@ fn recheck_of_an_unreadable_zip_changes_nothing() {
     let member = row(2, "mame/a.zip#a.bin", 1, 5, Some(9), FileState::Verified);
     let rc = Recheck {
         zip: zip("mame/a.zip", 13, 6),
-        roms: vec![RomId(7)],
+        roms: vec![RomId::new(7)],
         members: vec![member],
     };
     let mut out = Changes::default();
@@ -272,13 +289,13 @@ fn recheck_records_a_presence_row_once_no_member_is_left() {
     let z = zip("mame/a.zip", 50, 6);
     let rc = Recheck {
         zip: z.clone(),
-        roms: vec![RomId(7)],
+        roms: vec![RomId::new(7)],
         members: vec![member],
     };
     let mut out = Changes::default();
     recheck(dir.path(), rc, &mut out);
     assert_eq!(out.drop, ["mame/a.zip#a.bin"]);
-    assert_eq!(out.record, [(z, RomId(7))]);
+    assert_eq!(out.record, [(z, RomId::new(7))]);
 }
 
 #[test]
@@ -365,15 +382,15 @@ fn recheck_splits_a_member_at_the_zip_not_the_first_hash() {
     let listed =
         zip_members(File::open(dir.path().join("mame/a#b.zip")).expect("open")).expect("members");
     let mut member = row(2, "mame/a#b.zip#x.bin", 1, 5, Some(9), FileState::Verified);
-    member.crc32 = Some(listed[0].crc32.clone());
+    member.crc32 = Some(listed[0].crc32);
     let rc = Recheck {
         zip: zip("mame/a#b.zip", 99, 6),
-        roms: vec![RomId(7)],
+        roms: vec![RomId::new(7)],
         members: vec![member],
     };
     let mut out = Changes::default();
     recheck(dir.path(), rc, &mut out);
-    assert_eq!(out.restamp, [(FileId(2), 6)]);
+    assert_eq!(out.restamp, [(FileId::new(2), 6)]);
     assert!(out.drop.is_empty());
 }
 
@@ -447,16 +464,16 @@ fn import_row(app: &Arc<AppState>, rel: &str, mtime: i64, rom: RomId) -> i64 {
         .write_blocking(move |c| {
                         let id = files::upsert(c, &pid(), &NewFile {
 rom_id: Some(rom),
-crc32: Some("0000abcd".to_string()),
-md5: Some("0123456789abcdef0123456789abcdef".to_string()),
+crc32: Some("0000abcd".parse().expect("hex")),
+md5: Some("0123456789abcdef0123456789abcdef".parse().expect("hex")),
 header_rule: Some("none".to_string()),
 ..NewFile::unhashed(&member, 1, mtime, FileState::Verified)
 }, 1)?;
             c.execute(
                 "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 'placed', '{}')",
-                [id.0],
+                [id.get()],
             )?;
-            Ok(id.0)
+            Ok(id.get())
         })
         .expect("seed")
 }
@@ -570,9 +587,7 @@ async fn a_rewritten_zip_keeps_matching_members_verified() {
     write_mra(dir.path(), "Example Blaster", "exblast.zip");
     catalogue(&app).await;
     let rom = zip_rom(&app, "exblast.zip");
-    let crc = zip_members(File::open(&path).expect("open")).expect("members")[0]
-        .crc32
-        .clone();
+    let crc = zip_members(File::open(&path).expect("open")).expect("members")[0].crc32;
     let old = mtime_of(&path);
     let id = import_row(&app, "mame/exblast.zip", old, rom);
     app.db

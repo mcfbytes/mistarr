@@ -13,10 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mistarr_clients::{ClientError, SeedPolicy};
+use mistarr_clients::{Error as ClientError, SeedPolicy};
 use mistarr_core::hash::HeaderRule;
 use mistarr_core::matching::{leaf, match_members, pick_rom, Payload as _};
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, RomId};
 use mistarr_mister::platforms::{self, Kind, Platform};
 use mistarr_mister::{
     adapter_for, CoreAdapter, DatEntry, PlacementPlan, StagedFile, StagedKind, StagedMember, Step,
@@ -38,7 +38,7 @@ use crate::db::candidates;
 use crate::db::deferred::Op;
 use crate::db::downloads::{self, DownloadRow, DownloadState, Elsewhere, Settled};
 use crate::db::files::{self, FileRow, FileState, NewFile};
-use crate::db::ids::{DownloadId, FileId, RomId, SourceId};
+use crate::db::ids::{DownloadId, FileId, SourceId};
 use crate::db::imports::{self, ImportAction, TitleEntry};
 use crate::db::roms::{self, EntryRom};
 use crate::db::sources::{self, SourceRow};
@@ -91,7 +91,7 @@ pub async fn watch(app: Arc<AppState>) {
         match live.recv().await {
             Ok(ev) if ev.kind == EventKind::DownloadChanged => {
                 let body: Value = serde_json::from_str(&ev.data).unwrap_or(Value::Null);
-                let Some(id) = body["download_id"].as_i64().map(DownloadId) else {
+                let Some(id) = body["download_id"].as_i64().map(DownloadId::new) else {
                     continue;
                 };
                 match body["state"].as_str() {
@@ -199,7 +199,7 @@ async fn import(ctx: &JobContext, id: DownloadId) -> Result<()> {
         return fail(app, &[id], BIOS_REFUSED).await;
     }
     let (Some(platform), Some(adapter)) = (
-        platforms::by_id(&entry.platform_id.0),
+        platforms::by_id(entry.platform_id.as_str()),
         adapter_for(&entry.platform_id),
     ) else {
         return fail(app, &[id], "the entry's platform has no adapter").await;
@@ -502,7 +502,7 @@ impl Placing<'_> {
             "path": dst.to_string_lossy(),
             "expected": expected,
             "actual": actual_json,
-            "other": other.map(|(id, title, rom)| json!({ "title_id": id.0, "title": title, "rom": rom })),
+            "other": other.map(|(id, title, rom)| json!({ "title_id": id.get(), "title": title, "rom": rom })),
         });
         let reason = match (why, named) {
             (Some(w), _) => {
@@ -698,7 +698,7 @@ impl Placing<'_> {
     ) -> Result<()> {
         tracing::info!(download = %row.id, title = %other.id, "the other version is already in the library");
         let detail = json!({
-            "title_id": other.id.0,
+            "title_id": other.id.get(),
             "rom_id": redirect.0.proven,
             "staged": hashed.member.clone().unwrap_or_default(),
             "reason": "the library already holds this version",
@@ -1041,7 +1041,7 @@ impl Placing<'_> {
         let scratch = self
             .staging
             .join(".import")
-            .join(ids.first().map_or(0, |i| i.0).to_string());
+            .join(ids.first().map_or(0, |i| i.get()).to_string());
         let (staging, games, item, originals) = (
             self.staging.clone(),
             self.games.clone(),
@@ -1275,7 +1275,7 @@ pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) -> bool {
         match client.remove(client_id, false).await {
             Ok(()) | Err(ClientError::NotFound) => {}
             Err(e) => {
-                tracing::warn!(source = %source.id.0, error = %e, "cannot remove the finished torrent from the client");
+                tracing::warn!(source = %source.id.get(), error = %e, "cannot remove the finished torrent from the client");
                 crate::jobs::watch::core_limits::defer(app, Op::Release(source_id)).await;
                 return false;
             }
@@ -1392,7 +1392,7 @@ fn merge(into: &mut Value, extra: &Value) {
 fn log_detail(scope: &Scope, p: &Piece, rel: &str) -> Value {
     let mut detail = json!({
         "rel_path": rel,
-        "title_id": scope.title.0,
+        "title_id": scope.title.get(),
         "rom_id": p.rom.id,
         "staged": file_name(&p.source),
         "member": p.hashed.member,
@@ -1408,7 +1408,7 @@ fn previous(prev: Option<&FileRow>, rel: &str) -> Value {
         "rel_path": prev.map_or(rel, |f| f.rel_path.as_str()),
         "state": prev.map(|f| f.state.as_str()),
         "rom_id": prev.and_then(|f| f.rom_id),
-        "sha1": prev.and_then(|f| f.sha1.clone()),
+        "sha1": prev.and_then(|f| f.sha1),
     })
 }
 
@@ -1465,9 +1465,9 @@ fn record_target(
         let h = &p.hashed.hashes;
         let whole = p.hashed.whole_columns(scope.rule);
         let row = NewFile {
-            crc32: Some(h.crc32.clone()),
-            md5: Some(h.md5.clone()),
-            sha1: Some(h.sha1.clone()),
+            crc32: Some(h.crc32),
+            md5: Some(h.md5),
+            sha1: Some(h.sha1),
             header_rule: Some(scope.rule.to_owned()),
             whole,
             rom_id: Some(p.rom.id),

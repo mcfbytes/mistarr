@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use mistarr_clients::{ClientError, SeedPolicy, TorrentSource};
+use mistarr_clients::{Error as ClientError, SeedPolicy, TorrentSource};
 use mistarr_core::magnet;
 use mistarr_core::{InfoHash, PlatformId};
 use mistarr_sources::binding::{self, Binding};
@@ -110,7 +110,7 @@ impl Job for SourceImport {
         let data = match read_bounded(&self.path).await {
             Ok(d) => d,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(crate::Error::io_at(&self.path)(e)),
         };
         let ext = self.path.extension().and_then(|e| e.to_str());
         let planned = if data.is_some() && matches!(ext, Some("torrent" | "magnet")) {
@@ -714,7 +714,7 @@ mod tests {
     fn candidate_count(c: &Connection, id: SourceId) -> i64 {
         c.query_row(
             "SELECT COUNT(*) FROM torrent_candidates WHERE source_id = ?1",
-            [id.0],
+            [id.get()],
             |r| r.get(0),
         )
         .expect("count")
@@ -727,7 +727,7 @@ mod tests {
             .write_blocking(|c| {
                 let a = seed_rom(c, &pid("nes"), "Nova Quest (World).nes", 16, &[])?;
                 let b = seed_rom(c, &pid("nes"), "Nova Quest (World) (Alt).nes", 16, &[])?;
-                let nes = PlatformId("nes".into());
+                let nes = PlatformId::new("nes");
                 let files = [file(0, "nova.nes", 16), file(1, "nova.png", 16)];
                 let id = source(c, &"0e".repeat(20), &files);
                 assert_eq!(map_files(c, id, &nes, &files)?, 0);
@@ -770,7 +770,7 @@ mod tests {
                     .map(|i| file(i, &format!("Set/track {i}.nes"), 40_976))
                     .collect();
                 let id = source(c, &"1a".repeat(20), &files);
-                bind_to(c, id, Some(&PlatformId("nes".into())))?;
+                bind_to(c, id, Some(&PlatformId::new("nes")))?;
                 assert_eq!(candidate_count(c, id), 0);
                 Ok(())
             })
@@ -785,14 +785,14 @@ mod tests {
             .write_blocking(|c| {
                 let files = [file(0, "nova.nes", 16), file(1, "a.txt", 1)];
                 let id = source(c, &"1b".repeat(20), &files);
-                bind_to(c, id, Some(&PlatformId("nes".into())))?;
+                bind_to(c, id, Some(&PlatformId::new("nes")))?;
                 assert_eq!(candidate_count(c, id), 0);
                 seed_rom(c, &pid("nes"), "Nova Quest (World).nes", 16, &[])?;
                 Ok(id)
             })
             .expect("db");
         let mut events = app.events.subscribe(None).live;
-        let nes = [PlatformId("nes".into())];
+        let nes = [PlatformId::new("nes")];
         assert_eq!(rebind_waiting(&app).await.expect("rebind"), 0);
         crate::jobs::follow_up::catalogue_changed(&app, &nes, true).await;
         let queued = app
@@ -835,12 +835,12 @@ mod tests {
                 assert_eq!((row.state, row.matched_count), (SourceState::Bound, 1));
                 assert_eq!(row.bind_score, Some(0.5));
                 rows::set_state(c, id, SourceState::Disabled, None)?;
-                bind_to(c, id, Some(&PlatformId("snes".into())))?;
+                bind_to(c, id, Some(&PlatformId::new("snes")))?;
                 let row = rows::get(c, id)?.expect("row");
                 assert_eq!(row.state, SourceState::Disabled);
                 assert_eq!((row.matched_count, row.bind_score), (0, Some(0.0)));
                 rows::set_state(c, id, SourceState::Unbound, None)?;
-                bind_to(c, id, Some(&PlatformId("nes".into())))?;
+                bind_to(c, id, Some(&PlatformId::new("nes")))?;
                 let row = rows::get(c, id)?.expect("row");
                 assert_eq!((row.state, row.matched_count), (SourceState::Bound, 1));
                 bind_to(c, id, None)?;
@@ -863,10 +863,10 @@ mod tests {
             .write_blocking(|c| {
                 let id = source(c, &"0c".repeat(20), &files);
                 let guess = suggest(c, id, "pack.torrent", "Example Pack", &files)?;
-                assert_eq!(guess, Some(PlatformId("gb".into())));
+                assert_eq!(guess, Some(PlatformId::new("gb")));
                 bind_best(c, id, &files, 0.6)?;
                 let row = rows::get(c, id)?.expect("row");
-                let gb = PlatformId("gb".into());
+                let gb = PlatformId::new("gb");
                 assert_eq!(row.reason, Some(SourceReason::AwaitingDat { platform: gb }));
                 seed_rom(c, &pid("gb"), "Example Quest (USA).gb", 16, &[])?;
                 Ok(id)
@@ -903,7 +903,7 @@ mod tests {
         assert!(events.try_recv().is_err(), "only once");
         let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");
         let row = row.expect("row");
-        assert_eq!(row.platform_id, Some(PlatformId("gb".into())));
+        assert_eq!(row.platform_id, Some(PlatformId::new("gb")));
         assert_eq!((row.state, row.matched_count), (SourceState::Bound, 2));
         let kept = app
             .db
@@ -970,6 +970,22 @@ mod tests {
             .await
             .expect("list");
         assert!(listed.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_source_fails_naming_its_file() {
+        let (_dir, app) = state();
+        let sources = app.config().paths.sources();
+        let odd = sources.join("odd.torrent");
+        std::fs::create_dir_all(&odd).expect("mkdir");
+        let id = Scheduler::run_inline(&app, Arc::new(SourceImport { path: odd.clone() }))
+            .await
+            .expect("run");
+        let row = app.db.read(move |c| crate::db::jobs::get(c, id)).await;
+        let row = row.expect("get").expect("row");
+        assert_eq!(row.state, crate::db::jobs::JobState::Failed);
+        let error = row.progress.expect("progress")["error"].to_string();
+        assert!(error.contains(&*odd.to_string_lossy()), "{error}");
     }
 
     #[tokio::test]

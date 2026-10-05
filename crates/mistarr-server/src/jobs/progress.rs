@@ -211,8 +211,8 @@ impl LiveProgress {
     /// use mistarr_server::jobs::progress::LiveProgress;
     /// use mistarr_server::jobs::{JobKind, Lane};
     /// let live = LiveProgress::default();
-    /// live.set(JobId(1), serde_json::json!({ "phase": "reading" }));
-    /// let mut rows = vec![JobRow { id: JobId(1), kind: JobKind::DatImport, lane: Lane::Background,
+    /// live.set(JobId::new(1), serde_json::json!({ "phase": "reading" }));
+    /// let mut rows = vec![JobRow { id: JobId::new(1), kind: JobKind::DatImport, lane: Lane::Background,
     ///     payload: serde_json::json!({}), state: JobState::Running, progress: None,
     ///     created_at: 0, updated_at: 0 }];
     /// live.overlay(&mut rows);
@@ -333,10 +333,10 @@ mod tests {
     #[test]
     fn live_progress_is_kept_until_cleared() {
         let live = LiveProgress::default();
-        live.set(JobId(3), json!({ "phase": "reading" }));
-        assert_eq!(live.get(JobId(3)), Some(json!({ "phase": "reading" })));
-        live.clear(JobId(3));
-        assert_eq!(live.get(JobId(3)), None);
+        live.set(JobId::new(3), json!({ "phase": "reading" }));
+        assert_eq!(live.get(JobId::new(3)), Some(json!({ "phase": "reading" })));
+        live.clear(JobId::new(3));
+        assert_eq!(live.get(JobId::new(3)), None);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -357,7 +357,7 @@ mod tests {
         is_held.recv().expect("held");
         let reporter = Reporter::new(
             Arc::clone(&app),
-            JobId(9),
+            JobId::new(9),
             JobKind::DatImport,
             Some("a.dat".into()),
         );
@@ -379,7 +379,10 @@ mod tests {
         let body: Value = serde_json::from_str(&event.data).expect("json");
         assert_eq!(body["detail"], "a.dat");
         assert_eq!(body["progress"]["bytes"], 10);
-        assert_eq!(app.live.get(JobId(9)).expect("live")["phase"], "reading");
+        assert_eq!(
+            app.live.get(JobId::new(9)).expect("live")["phase"],
+            "reading"
+        );
         release.send(()).expect("release");
         holder.join().expect("join").expect("write");
     }

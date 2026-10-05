@@ -5,14 +5,9 @@
 use std::collections::{HashMap, HashSet};
 
 use mistarr_core::naming::normalize_for_match;
+use mistarr_core::{PlatformId, RomId};
 
 use crate::torrent::TorrentFile;
-use crate::PlatformId;
-
-/// A DAT entry's row id, mirroring `roms.id` in `docs/DATA-MODEL.md`. A
-/// placeholder until `mistarr-core` (WP-01) exposes its own rom id type.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RomRef(pub i64);
 
 /// How a torrent file was matched to a rom, from strongest to weakest; the
 /// tiers are in `docs/VERIFICATION.md` "Pre-download matching".
@@ -36,9 +31,9 @@ pub enum Confidence {
 pub trait DatIndex {
     /// Roms whose normalized name equals `name`, with the platform each
     /// belongs to.
-    fn by_normalized_name(&self, name: &str) -> Vec<(PlatformId, RomRef)>;
+    fn by_normalized_name(&self, name: &str) -> Vec<(PlatformId, RomId)>;
     /// Roms whose base name equals `base_name` and whose size equals `size`.
-    fn by_base_name_and_size(&self, base_name: &str, size: u64) -> Vec<(PlatformId, RomRef)>;
+    fn by_base_name_and_size(&self, base_name: &str, size: u64) -> Vec<(PlatformId, RomId)>;
 }
 
 /// The result of [`bind`].
@@ -93,13 +88,13 @@ fn leaf_name(path: &str) -> &str {
 fn candidates_for(
     file: &TorrentFile,
     index: &dyn DatIndex,
-) -> Vec<(PlatformId, RomRef, Confidence)> {
+) -> Vec<(PlatformId, RomId, Confidence)> {
     let normalized = normalize_name(leaf_name(&file.path));
     let name_matches = index.by_normalized_name(&normalized);
     let matched_platforms: HashSet<PlatformId> =
         name_matches.iter().map(|(p, _)| p.clone()).collect();
 
-    let mut candidates: Vec<(PlatformId, RomRef, Confidence)> = name_matches
+    let mut candidates: Vec<(PlatformId, RomId, Confidence)> = name_matches
         .into_iter()
         .map(|(p, r)| (p, r, Confidence::Name))
         .collect();
@@ -120,14 +115,14 @@ fn candidates_for(
 /// platform any file matched, descending by rate then platform id.
 ///
 /// ```
-/// use mistarr_sources::binding::{score_platforms, DatIndex, RomRef};
+/// use mistarr_sources::binding::{score_platforms, DatIndex};
 /// use mistarr_sources::torrent::TorrentFile;
-/// use mistarr_sources::PlatformId;
+/// use mistarr_core::{PlatformId, RomId};
 ///
 /// struct Empty;
 /// impl DatIndex for Empty {
-///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> { Vec::new() }
-///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomRef)> { Vec::new() }
+///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomId)> { Vec::new() }
+///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomId)> { Vec::new() }
 /// }
 /// let files = vec![TorrentFile { index: 0, path: "a.nes".into(), size: 1 }];
 /// assert!(score_platforms(&files, &Empty).is_empty());
@@ -158,7 +153,7 @@ pub fn score_platforms(files: &[TorrentFile], index: &dyn DatIndex) -> Vec<(Plat
     scored.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0 .0.cmp(&b.0 .0))
+            .then_with(|| a.0.cmp(&b.0))
     });
     scored
 }
@@ -170,14 +165,14 @@ pub fn score_platforms(files: &[TorrentFile], index: &dyn DatIndex) -> Vec<(Plat
 /// `docs/ARCHITECTURE.md`.
 ///
 /// ```
-/// use mistarr_sources::binding::{bind, Binding, DatIndex, RomRef};
+/// use mistarr_sources::binding::{bind, Binding, DatIndex};
 /// use mistarr_sources::torrent::TorrentFile;
-/// use mistarr_sources::PlatformId;
+/// use mistarr_core::{PlatformId, RomId};
 ///
 /// struct Empty;
 /// impl DatIndex for Empty {
-///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> { Vec::new() }
-///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomRef)> { Vec::new() }
+///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomId)> { Vec::new() }
+///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomId)> { Vec::new() }
 /// }
 /// let files = vec![TorrentFile { index: 0, path: "a.nes".into(), size: 1 }];
 /// assert_eq!(bind(&files, &Empty, 0.6), Binding::Unbound(Vec::new()));
@@ -195,17 +190,17 @@ pub fn bind(files: &[TorrentFile], index: &dyn DatIndex, threshold: f32) -> Bind
 /// `torrent_files`. Files under a different platform's roms are ignored.
 ///
 /// ```
-/// use mistarr_sources::binding::{match_files, Confidence, DatIndex, RomRef};
+/// use mistarr_sources::binding::{match_files, Confidence, DatIndex};
 /// use mistarr_sources::torrent::TorrentFile;
-/// use mistarr_sources::PlatformId;
+/// use mistarr_core::{PlatformId, RomId};
 ///
 /// struct Empty;
 /// impl DatIndex for Empty {
-///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> { Vec::new() }
-///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomRef)> { Vec::new() }
+///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomId)> { Vec::new() }
+///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomId)> { Vec::new() }
 /// }
 /// let files = vec![TorrentFile { index: 0, path: "a.nes".into(), size: 1 }];
-/// let out = match_files(&files, &PlatformId("nes".into()), &Empty);
+/// let out = match_files(&files, &PlatformId::new("nes"), &Empty);
 /// assert_eq!(out, vec![(0, None, Confidence::Unmatched)]);
 /// ```
 #[must_use]
@@ -213,7 +208,7 @@ pub fn match_files(
     files: &[TorrentFile],
     platform: &PlatformId,
     index: &dyn DatIndex,
-) -> Vec<(u32, Option<RomRef>, Confidence)> {
+) -> Vec<(u32, Option<RomId>, Confidence)> {
     files
         .iter()
         .map(|file| {
@@ -233,9 +228,9 @@ pub fn match_files(
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Mapping {
     /// Each file's best rom and confidence, as [`match_files`] gives them.
-    pub matches: Vec<(u32, Option<RomRef>, Confidence)>,
+    pub matches: Vec<(u32, Option<RomId>, Confidence)>,
     /// Further roms a file matched as well as its best one, for `torrent_candidates`.
-    pub extra: Vec<(u32, RomRef, Confidence)>,
+    pub extra: Vec<(u32, RomId, Confidence)>,
 }
 
 impl Mapping {
@@ -270,21 +265,21 @@ impl Mapping {
 /// pass over the files; the mapping is empty when unbound.
 ///
 /// ```
-/// use mistarr_sources::binding::{bind_and_map, Binding, Confidence, DatIndex, RomRef};
+/// use mistarr_sources::binding::{bind_and_map, Binding, Confidence, DatIndex};
 /// use mistarr_sources::torrent::TorrentFile;
-/// use mistarr_sources::PlatformId;
+/// use mistarr_core::{PlatformId, RomId};
 ///
 /// struct One;
 /// impl DatIndex for One {
-///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> {
-///         vec![(PlatformId("nes".into()), RomRef(7))]
+///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomId)> {
+///         vec![(PlatformId::new("nes"), RomId::new(7))]
 ///     }
-///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomRef)> { Vec::new() }
+///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomId)> { Vec::new() }
 /// }
 /// let files = vec![TorrentFile { index: 0, path: "a.nes".into(), size: 1 }];
 /// let (binding, mapping) = bind_and_map(&files, &One, 0.6);
-/// assert_eq!(binding, Binding::Bound(PlatformId("nes".into()), 1.0));
-/// assert_eq!(mapping.matches, vec![(0, Some(RomRef(7)), Confidence::Name)]);
+/// assert_eq!(binding, Binding::Bound(PlatformId::new("nes"), 1.0));
+/// assert_eq!(mapping.matches, vec![(0, Some(RomId::new(7)), Confidence::Name)]);
 /// ```
 #[must_use]
 #[expect(
@@ -298,7 +293,7 @@ pub fn bind_and_map(
 ) -> (Binding, Mapping) {
     let mut platforms: Vec<(PlatformId, usize)> = Vec::new();
     // Per file, in order: (file index, platform slot, rom, confidence).
-    let mut found: Vec<(u32, u16, RomRef, Confidence)> = Vec::new();
+    let mut found: Vec<(u32, u16, RomId, Confidence)> = Vec::new();
     for file in files {
         let mut seen: Vec<u16> = Vec::new();
         for (platform, rom, confidence) in candidates_for(file, index) {
@@ -326,7 +321,7 @@ pub fn bind_and_map(
     scored.sort_by(|a, b| {
         b.1.partial_cmp(&a.1)
             .unwrap_or(std::cmp::Ordering::Equal)
-            .then_with(|| a.0 .0.cmp(&b.0 .0))
+            .then_with(|| a.0.cmp(&b.0))
     });
     let winner = match scored.first() {
         Some((platform, rate)) if *rate >= threshold => (platform.clone(), *rate),
@@ -342,7 +337,7 @@ pub fn bind_and_map(
     };
     let mut rest = found.into_iter().filter(|e| Some(e.1) == tag).peekable();
     for file in files {
-        let mut best: Option<(RomRef, Confidence)> = None;
+        let mut best: Option<(RomId, Confidence)> = None;
         while let Some((_, _, rom, c)) = rest.next_if(|e| e.0 == file.index) {
             match best {
                 None => best = Some((rom, c)),
@@ -363,21 +358,21 @@ pub fn bind_and_map(
 /// a base name and size.
 ///
 /// ```
-/// use mistarr_sources::binding::{map_files, Confidence, DatIndex, RomRef};
+/// use mistarr_sources::binding::{map_files, Confidence, DatIndex};
 /// use mistarr_sources::torrent::TorrentFile;
-/// use mistarr_sources::PlatformId;
+/// use mistarr_core::{PlatformId, RomId};
 ///
 /// struct Two;
 /// impl DatIndex for Two {
-///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomRef)> { Vec::new() }
-///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomRef)> {
-///         vec![(PlatformId("nes".into()), RomRef(1)), (PlatformId("nes".into()), RomRef(2))]
+///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomId)> { Vec::new() }
+///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomId)> {
+///         vec![(PlatformId::new("nes"), RomId::new(1)), (PlatformId::new("nes"), RomId::new(2))]
 ///     }
 /// }
 /// let files = vec![TorrentFile { index: 0, path: "a.nes".into(), size: 1 }];
-/// let m = map_files(&files, &PlatformId("nes".into()), &Two);
-/// assert_eq!(m.matches, vec![(0, Some(RomRef(1)), Confidence::Base)]);
-/// assert_eq!(m.extra, vec![(0, RomRef(2), Confidence::Base)]);
+/// let m = map_files(&files, &PlatformId::new("nes"), &Two);
+/// assert_eq!(m.matches, vec![(0, Some(RomId::new(1)), Confidence::Base)]);
+/// assert_eq!(m.extra, vec![(0, RomId::new(2), Confidence::Base)]);
 /// ```
 #[must_use]
 pub fn map_files(files: &[TorrentFile], platform: &PlatformId, index: &dyn DatIndex) -> Mapping {
@@ -531,16 +526,16 @@ mod tests {
     }
 
     struct FakeDat {
-        by_name: BTreeMap<String, Vec<(PlatformId, RomRef)>>,
-        by_size: BTreeMap<(String, u64), Vec<(PlatformId, RomRef)>>,
+        by_name: BTreeMap<String, Vec<(PlatformId, RomId)>>,
+        by_size: BTreeMap<(String, u64), Vec<(PlatformId, RomId)>>,
     }
 
     impl DatIndex for FakeDat {
-        fn by_normalized_name(&self, name: &str) -> Vec<(PlatformId, RomRef)> {
+        fn by_normalized_name(&self, name: &str) -> Vec<(PlatformId, RomId)> {
             self.by_name.get(name).cloned().unwrap_or_default()
         }
 
-        fn by_base_name_and_size(&self, base_name: &str, size: u64) -> Vec<(PlatformId, RomRef)> {
+        fn by_base_name_and_size(&self, base_name: &str, size: u64) -> Vec<(PlatformId, RomId)> {
             self.by_size
                 .get(&(base_name.to_owned(), size))
                 .cloned()
@@ -549,7 +544,7 @@ mod tests {
     }
 
     fn platform(id: &str) -> PlatformId {
-        PlatformId(id.to_owned())
+        PlatformId::new(id.to_owned())
     }
 
     proptest! {
@@ -559,10 +554,10 @@ mod tests {
             leaves in prop::collection::vec(("[a-c]{1,2}", 1u64..3), 0..12),
             threshold in 0.0f32..1.0,
         ) {
-            let mut by_name: BTreeMap<String, Vec<(PlatformId, RomRef)>> = BTreeMap::new();
-            let mut by_size: BTreeMap<(String, u64), Vec<(PlatformId, RomRef)>> = BTreeMap::new();
+            let mut by_name: BTreeMap<String, Vec<(PlatformId, RomId)>> = BTreeMap::new();
+            let mut by_size: BTreeMap<(String, u64), Vec<(PlatformId, RomId)>> = BTreeMap::new();
             for (name, p, rom, sized) in names {
-                let entry = (platform(["nes", "snes", "gb"][usize::from(p)]), RomRef(rom));
+                let entry = (platform(["nes", "snes", "gb"][usize::from(p)]), RomId::new(rom));
                 if sized {
                     by_size.entry((name, 1)).or_default().push(entry);
                 } else {
@@ -613,11 +608,11 @@ mod tests {
         let mut by_name = BTreeMap::new();
         by_name.insert(
             "example quest (usa)".to_owned(),
-            vec![(platform("nes"), RomRef(1))],
+            vec![(platform("nes"), RomId::new(1))],
         );
         by_name.insert(
             "other title (usa)".to_owned(),
-            vec![(platform("snes"), RomRef(2))],
+            vec![(platform("snes"), RomId::new(2))],
         );
         let dat = FakeDat {
             by_name,
@@ -651,7 +646,10 @@ mod tests {
     #[test]
     fn threshold_boundary_binds_at_and_rejects_below() {
         let mut by_name = BTreeMap::new();
-        by_name.insert("hit (usa)".to_owned(), vec![(platform("nes"), RomRef(1))]);
+        by_name.insert(
+            "hit (usa)".to_owned(),
+            vec![(platform("nes"), RomId::new(1))],
+        );
         let dat = FakeDat {
             by_name,
             by_size: BTreeMap::new(),
@@ -684,7 +682,7 @@ mod tests {
         let mut by_size = BTreeMap::new();
         by_size.insert(
             ("fallback".to_owned(), 99),
-            vec![(platform("genesis"), RomRef(7))],
+            vec![(platform("genesis"), RomId::new(7))],
         );
         let dat = FakeDat {
             by_name: BTreeMap::new(),
@@ -696,7 +694,7 @@ mod tests {
             size: 99,
         }];
         let matches = match_files(&files, &platform("genesis"), &dat);
-        assert_eq!(matches, vec![(0, Some(RomRef(7)), Confidence::Base)]);
+        assert_eq!(matches, vec![(0, Some(RomId::new(7)), Confidence::Base)]);
     }
 
     #[test]
@@ -704,7 +702,7 @@ mod tests {
         let mut by_name = BTreeMap::new();
         by_name.insert(
             "example quest (usa)".to_owned(),
-            vec![(platform("nes"), RomRef(1))],
+            vec![(platform("nes"), RomId::new(1))],
         );
         let dat = FakeDat {
             by_name,
@@ -724,12 +722,12 @@ mod tests {
         let mut by_name = BTreeMap::new();
         by_name.insert(
             "matched (usa)".to_owned(),
-            vec![(platform("nes"), RomRef(1))],
+            vec![(platform("nes"), RomId::new(1))],
         );
         let mut by_size = BTreeMap::new();
         by_size.insert(
             ("matched".to_owned(), 10),
-            vec![(platform("snes"), RomRef(2))],
+            vec![(platform("snes"), RomId::new(2))],
         );
         let dat = FakeDat { by_name, by_size };
         let files = vec![TorrentFile {
@@ -744,7 +742,7 @@ mod tests {
         assert!(scores.contains(&(platform("snes"), 1.0)));
 
         let matches = match_files(&files, &platform("snes"), &dat);
-        assert_eq!(matches, vec![(0, Some(RomRef(2)), Confidence::Base)]);
+        assert_eq!(matches, vec![(0, Some(RomId::new(2)), Confidence::Base)]);
     }
 
     #[test]
@@ -752,12 +750,18 @@ mod tests {
         let mut by_name = BTreeMap::new();
         by_name.insert(
             "twin (usa)".to_owned(),
-            vec![(platform("nes"), RomRef(1)), (platform("nes"), RomRef(2))],
+            vec![
+                (platform("nes"), RomId::new(1)),
+                (platform("nes"), RomId::new(2)),
+            ],
         );
         let mut by_size = BTreeMap::new();
         by_size.insert(
             ("twin".to_owned(), 10),
-            vec![(platform("nes"), RomRef(3)), (platform("snes"), RomRef(4))],
+            vec![
+                (platform("nes"), RomId::new(3)),
+                (platform("snes"), RomId::new(4)),
+            ],
         );
         let dat = FakeDat { by_name, by_size };
         let files = vec![
@@ -781,12 +785,12 @@ mod tests {
         assert_eq!(
             m.matches,
             vec![
-                (0, Some(RomRef(1)), Confidence::Name),
-                (1, Some(RomRef(3)), Confidence::Base),
+                (0, Some(RomId::new(1)), Confidence::Name),
+                (1, Some(RomId::new(3)), Confidence::Base),
                 (2, None, Confidence::Unmatched),
             ]
         );
-        assert_eq!(m.extra, vec![(0, RomRef(2), Confidence::Name)]);
+        assert_eq!(m.extra, vec![(0, RomId::new(2), Confidence::Name)]);
         let left: Vec<u32> = m.unmatched(&files).iter().map(|f| f.index).collect();
         assert_eq!(left, [2]);
         assert!(Confidence::Name < Confidence::Base && Confidence::Fuzzy < Confidence::Size);

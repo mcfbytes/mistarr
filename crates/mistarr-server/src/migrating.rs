@@ -42,7 +42,8 @@ impl Migrating {
     ///
     /// # Errors
     ///
-    /// [`crate::Error::Io`] when the file cannot be written or the thread not started.
+    /// [`crate::Error::File`] when the file cannot be written, [`crate::Error::Io`] when
+    /// the thread cannot be started.
     ///
     /// ```
     /// let dir = tempfile::tempdir().unwrap();
@@ -75,7 +76,7 @@ impl Migrating {
             let size = std::fs::metadata(&wal).map_or(0, |m| m.len());
             format!("migrating from {from} to {to}: steps {n} wal {size}\n")
         };
-        std::fs::write(&path, line())?;
+        std::fs::write(&path, line()).map_err(crate::Error::io_at(&path))?;
         let (stop, stopped) = mpsc::channel::<()>();
         let target = path.clone();
         let thread = std::thread::Builder::new()
@@ -118,7 +119,7 @@ impl Drop for Migrating {
 ///
 /// # Errors
 ///
-/// [`crate::Error::Io`] when it exists and cannot be removed.
+/// [`crate::Error::File`] naming the file when it exists and cannot be removed.
 ///
 /// ```
 /// let dir = tempfile::tempdir().unwrap();
@@ -127,8 +128,9 @@ impl Drop for Migrating {
 /// assert!(!dir.path().join(mistarr_server::migrating::FILE).exists());
 /// ```
 pub fn clear_stale(data: &Path) -> Result<()> {
-    match std::fs::remove_file(data.join(FILE)) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e.into()),
+    let path = data.join(FILE);
+    match std::fs::remove_file(&path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(crate::Error::io_at(&path)(e)),
         _ => Ok(()),
     }
 }

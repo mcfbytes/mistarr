@@ -194,7 +194,7 @@ fn hand_off(b: &Booted, id: i64, staged: &str) {
         .app
         .events
         .publish(&Event::DownloadChanged(DownloadChanged {
-            download_id: DownloadId(id),
+            download_id: DownloadId::new(id),
             state: DownloadState::Importing,
             progress: 1.0,
         }));

@@ -74,12 +74,12 @@ pub struct RomInput<'a> {
     pub name: &'a str,
     /// Size in bytes.
     pub size: u64,
-    /// Lowercase hex CRC32.
-    pub crc32: Option<&'a str>,
-    /// Lowercase hex MD5.
-    pub md5: Option<&'a str>,
-    /// Lowercase hex SHA1.
-    pub sha1: Option<&'a str>,
+    /// CRC32, when the DAT lists it.
+    pub crc32: Option<mistarr_core::Crc32>,
+    /// MD5, when the DAT lists it.
+    pub md5: Option<mistarr_core::Md5>,
+    /// SHA1, when the DAT lists it.
+    pub sha1: Option<mistarr_core::Sha1>,
     /// The DAT's dump status.
     pub status: RomStatus,
     /// The DAT's `header` attribute, verbatim.
@@ -169,7 +169,7 @@ pub(crate) fn store_lists(
 /// use mistarr_server::db::ids::TitleId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(set_flags(&conn, TitleId(1), &[]).is_ok());
+/// assert!(set_flags(&conn, TitleId::new(1), &[]).is_ok());
 /// ```
 pub fn set_flags(conn: &Connection, id: TitleId, flags: &[String]) -> Result<()> {
     store_tags(conn, id, Tag::Flags, flags)
@@ -186,7 +186,7 @@ pub fn set_flags(conn: &Connection, id: TitleId, flags: &[String]) -> Result<()>
 /// use mistarr_server::db::ids::TitleId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(flags_of(&conn, TitleId(1)).unwrap().is_empty());
+/// assert!(flags_of(&conn, TitleId::new(1)).unwrap().is_empty());
 /// ```
 pub fn flags_of(conn: &Connection, id: TitleId) -> Result<Vec<String>> {
     tags_of(conn, id, Tag::Flags)
@@ -234,13 +234,13 @@ pub(crate) fn put_title(
                    AND +t.source = 'dat' AND +t.platform_id = ?3
                  ORDER BY d.id = ?2 DESC, d.loaded_at DESC LIMIT 1",
             )?
-            .query_row(params![put.name, version, platform.0], |r| r.get(0))
+            .query_row(params![put.name, version, platform], |r| r.get(0))
             .optional()?,
         TitleSource::Mra => conn
             .prepare_cached(
                 "SELECT id FROM titles WHERE platform_id = ?1 AND source = 'mra' AND name = ?2",
             )?
-            .query_row(params![platform.0, put.name], |r| r.get(0))
+            .query_row(params![platform, put.name], |r| r.get(0))
             .optional()?,
     };
     let mra = put.mra.as_ref();
@@ -254,7 +254,7 @@ pub(crate) fn put_title(
         )?
         .execute(params![
             id,
-            platform.0,
+            platform,
             version,
             put.base_name,
             put.revision,
@@ -277,7 +277,7 @@ pub(crate) fn put_title(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, COALESCE(?14, 0))",
         )?
         .execute(params![
-            platform.0,
+            platform,
             version,
             put.name,
             put.base_name,
@@ -292,7 +292,7 @@ pub(crate) fn put_title(
             mra.map(|m| m.run),
             inferred,
         ])?;
-        let id = TitleId(conn.last_insert_rowid());
+        let id = TitleId::new(conn.last_insert_rowid());
         conn.prepare_cached("UPDATE titles SET parent_id = id WHERE id = ?1")?
             .execute([id])?;
         id
@@ -318,8 +318,8 @@ pub(crate) fn put_title(
 /// let version = dats::upsert_version(&conn, &v).unwrap().id;
 /// let t = titles::TitleInput { name: "Example Quest (USA)", base_name: "Example Quest",
 ///     group_key: "example quest", clone_of: None, regions: &[], languages: &[], revision: None, flags: &[] };
-/// let id = titles::upsert_title(&conn, &mistarr_core::PlatformId("gb".into()), version, &t, &[]).unwrap();
-/// assert_eq!(titles::upsert_title(&conn, &mistarr_core::PlatformId("gb".into()), version, &t, &[]).unwrap(), id);
+/// let id = titles::upsert_title(&conn, &mistarr_core::PlatformId::new("gb"), version, &t, &[]).unwrap();
+/// assert_eq!(titles::upsert_title(&conn, &mistarr_core::PlatformId::new("gb"), version, &t, &[]).unwrap(), id);
 /// ```
 pub fn upsert_title(
     conn: &Connection,
@@ -341,12 +341,12 @@ pub fn upsert_title(
         mra: None,
     };
     let (id, existed) = put_title(conn, platform, version, &put)?;
-    let arcade = mistarr_mister::platforms::by_id(&platform.0)
+    let arcade = mistarr_mister::platforms::by_id(platform.as_str())
         .is_some_and(mistarr_mister::platforms::Platform::is_arcade);
     if existed && !arcade {
         for r in roms {
             let size = sql::to_i64(r.size);
-            let listed = [r.crc32, r.md5, r.sha1];
+            let listed = (r.crc32, r.md5, r.sha1);
             super::files::unmatch_changed_rom(conn, id, r.name, size, listed)?;
         }
     }

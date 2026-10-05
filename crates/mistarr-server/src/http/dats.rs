@@ -125,7 +125,7 @@ async fn upload(
 
 /// Streams one multipart field to `path`, one chunk in memory at a time.
 async fn write_field(mut field: Field<'_>, path: &FsPath) -> Result<(), ApiError> {
-    let mut file = Some(std::fs::File::create(path).map_err(crate::Error::from)?);
+    let mut file = Some(std::fs::File::create(path).map_err(crate::Error::io_at(path))?);
     while let Some(chunk) = field
         .chunk()
         .await
@@ -177,7 +177,7 @@ async fn retry_rejected(
     let dir = app.config().paths.dats();
     let path = rejected_file(&dir, &name)?;
     let target = match place_moved(&path, &dir, &name) {
-        Err(PlaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(PlaceError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
             return Err(ApiError::no_such("rejected file"))
         }
         moved => moved.map_err(crate::Error::from)?,
@@ -194,7 +194,7 @@ async fn delete_rejected(
     ApiPath(name): ApiPath<String>,
 ) -> Result<StatusCode, ApiError> {
     let path = rejected_file(&app.config().paths.dats(), &name)?;
-    std::fs::remove_file(&path).map_err(crate::Error::from)?;
+    std::fs::remove_file(&path).map_err(crate::Error::io_at(&path))?;
     remove_if_present(&reason_of(&path))?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -306,9 +306,9 @@ mod tests {
             .await
             .expect("retire");
         assert_eq!(status, StatusCode::NO_CONTENT);
-        let recompute = Recompute::new("nes").payload();
+        let recompute = Recompute::new(&mistarr_core::PlatformId::new("nes")).payload();
         let scan = ScanJob {
-            platform_id: Some(PlatformId("nes".into())),
+            platform_id: Some(PlatformId::new("nes")),
         }
         .payload();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);

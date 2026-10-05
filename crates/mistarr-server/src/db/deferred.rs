@@ -119,25 +119,32 @@ mod tests {
     fn work_is_added_once_and_removed_only_as_done() {
         let c = conn();
         assert!(get(&c).expect("get").is_empty());
-        assert!(add(&c, Op::Deselect(SourceId(1)), 5).expect("add"));
-        assert!(!add(&c, Op::Deselect(SourceId(1)), 6).expect("again"));
-        assert!(add(&c, Op::Release(SourceId(2)), 5).expect("add"));
+        assert!(add(&c, Op::Deselect(SourceId::new(1)), 5).expect("add"));
+        assert!(!add(&c, Op::Deselect(SourceId::new(1)), 6).expect("again"));
+        assert!(add(&c, Op::Release(SourceId::new(2)), 5).expect("add"));
         assert!(add(&c, Op::Detect, 5).expect("add"));
         assert!(
             !add(&c, Op::Detect, 7).expect("again"),
             "an unchanged queue is not written"
         );
         assert_eq!(get(&c).expect("get")[0].since, 5);
-        let dropped = finish(&c, &[Op::Detect], &[Op::Release(SourceId(2))], 9).expect("finish");
+        let dropped =
+            finish(&c, &[Op::Detect], &[Op::Release(SourceId::new(2))], 9).expect("finish");
         assert!(dropped.is_empty());
         assert_eq!(
             ops(&c),
-            [Op::Deselect(SourceId(1)), Op::Release(SourceId(2))]
+            [
+                Op::Deselect(SourceId::new(1)),
+                Op::Release(SourceId::new(2))
+            ]
         );
         assert_eq!(get(&c).expect("get")[1].tries, 1);
         finish(
             &c,
-            &[Op::Deselect(SourceId(1)), Op::Release(SourceId(2))],
+            &[
+                Op::Deselect(SourceId::new(1)),
+                Op::Release(SourceId::new(2)),
+            ],
             &[],
             9,
         )
@@ -173,7 +180,7 @@ mod tests {
 
     #[test]
     fn ops_are_stored_by_name() {
-        let json = serde_json::to_string(&Op::Release(SourceId(4))).expect("json");
+        let json = serde_json::to_string(&Op::Release(SourceId::new(4))).expect("json");
         assert_eq!(json, r#"{"op":"release","source":4}"#);
         assert_eq!(
             serde_json::to_string(&Op::Seed).expect("json"),

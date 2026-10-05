@@ -11,7 +11,9 @@ pub mod bencode;
 pub mod chd;
 pub mod dat;
 mod digest;
+mod error;
 pub mod hex;
+mod id;
 pub mod magnet;
 pub mod matching;
 pub mod naming;
@@ -19,7 +21,13 @@ mod percent;
 pub mod xml;
 
 pub use digest::{Crc32, Digest, InfoHash, Md5, ParseDigestError, Sha1};
+pub use error::{Error, Result};
+pub use id::{GroupId, PlatformId, RomId};
 pub use percent::percent_decode;
+
+#[cfg(feature = "rusqlite")]
+#[doc(hidden)]
+pub use rusqlite as __rusqlite;
 
 /// 1G1R selection and clone-group inference.
 pub mod select;
@@ -27,20 +35,16 @@ pub mod select;
 /// One-pass hashing and platform header rules.
 pub mod hash;
 
-/// Stable platform identifier, e.g. `nes`, `megadrive`, `psx`.
-/// The full table lives in `docs/PLATFORMS.md` and in `mistarr-mister`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct PlatformId(pub String);
-
-/// The three hashes and size that identify a dump. Hex fields are lowercase.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct HashSet {
+/// The three hashes and size that identify a dump; serde writes each digest as
+/// lowercase hex.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Hashes {
     /// File size in bytes after any header rule was applied.
     pub size: u64,
-    /// CRC32 as 8 lowercase hex characters.
-    pub crc32: String,
-    /// MD5 as 32 lowercase hex characters.
-    pub md5: String,
-    /// SHA1 as 40 lowercase hex characters.
-    pub sha1: String,
+    /// CRC32 of the content.
+    pub crc32: Crc32,
+    /// MD5 of the content.
+    pub md5: Md5,
+    /// SHA1 of the content.
+    pub sha1: Sha1,
 }

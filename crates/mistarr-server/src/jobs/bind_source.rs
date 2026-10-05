@@ -35,7 +35,7 @@ impl BindSource {
     /// ```
     /// use mistarr_server::jobs::bind_source::BindSource;
     /// let job = BindSource::from_payload(&serde_json::json!({ "source_id": 3 }));
-    /// assert_eq!(job.map(|j| j.source_id.0), Some(3));
+    /// assert_eq!(job.map(|j| j.source_id.get()), Some(3));
     /// ```
     #[must_use]
     pub fn from_payload(payload: &Value) -> Option<Self> {
@@ -151,7 +151,7 @@ mod tests {
     }
 
     fn nes() -> PlatformId {
-        PlatformId("nes".into())
+        PlatformId::new("nes")
     }
 
     /// A source of four files, one matching `nes` and two `snes`, bound to `snes` at half.
@@ -214,7 +214,7 @@ mod tests {
     #[test]
     fn payloads_round_trip() {
         let job = BindSource {
-            source_id: SourceId(4),
+            source_id: SourceId::new(4),
             source_name: "Synthetic Set".into(),
         };
         assert_eq!(BindSource::from_payload(&job.payload()), Some(job));
@@ -253,7 +253,7 @@ mod tests {
         let before = row(&app, id).await;
         assert_eq!(
             (before.platform_id.clone(), before.user_binding),
-            (Some(PlatformId("snes".into())), false)
+            (Some(PlatformId::new("snes")), false)
         );
 
         run(&app, id, Choice::Platform(nes())).await;
@@ -301,7 +301,7 @@ mod tests {
         let reset = row(&app, id).await;
         assert_eq!(
             (reset.platform_id, reset.user_binding, reset.state),
-            (Some(PlatformId("snes".into())), false, SourceState::Bound)
+            (Some(PlatformId::new("snes")), false, SourceState::Bound)
         );
         assert_eq!(reset.matched_count, 3);
     }

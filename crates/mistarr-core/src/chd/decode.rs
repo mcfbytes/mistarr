@@ -11,7 +11,7 @@ use super::layout::{Layout, TrackKind};
 use super::map::{self, MapEntry};
 use super::{corrupt, crc16, fail, ChdError, Unidentifiable, FRAME_BYTES, SECTOR_BYTES};
 use crate::hash::Hashers;
-use crate::HashSet;
+use crate::Hashes;
 
 const FRAME: usize = FRAME_BYTES as usize;
 const SECTOR: usize = SECTOR_BYTES as usize;
@@ -112,7 +112,7 @@ pub struct Decoder<R> {
     raw: sha1::Sha1,
     track: usize,
     hashers: Option<Hashers>,
-    done: Vec<HashSet>,
+    done: Vec<Hashes>,
 }
 
 impl<R: Read + Seek> Decoder<R> {
@@ -176,12 +176,12 @@ impl<R: Read + Seek> Decoder<R> {
     }
 
     /// Checks the whole image was decoded and matches its raw and combined SHA1, then
-    /// returns one [`HashSet`] per track.
+    /// returns one [`Hashes`] per track.
     ///
     /// # Errors
     ///
     /// `Corrupt` when hunks remain, `Checksum` when a header SHA1 does not match.
-    pub fn finish(self) -> Result<Vec<HashSet>, ChdError> {
+    pub fn finish(self) -> Result<Vec<Hashes>, ChdError> {
         if self.next < self.map.len() as u64 || self.done.len() != self.layout.tracks().len() {
             return Err(corrupt("the image was not decoded to its end"));
         }
@@ -445,7 +445,7 @@ mod tests {
         (file, bins)
     }
 
-    fn decode(file: &[u8], k: u32) -> Result<Vec<HashSet>, ChdError> {
+    fn decode(file: &[u8], k: u32) -> Result<Vec<Hashes>, ChdError> {
         let h = read_header(file)?;
         let mut c = Cursor::new(file);
         let layout = read_layout(&mut c, &h)?;
@@ -483,7 +483,7 @@ mod tests {
     fn an_uncompressed_image_rebuilds_every_track() {
         let (file, bins) = image(&specs(), 3);
         let got = decode(&file, 1).expect("decode");
-        let want: Vec<HashSet> = bins
+        let want: Vec<Hashes> = bins
             .iter()
             .map(|b| hash_reader(&b[..], HeaderRule::None, None).expect("hash"))
             .collect();

@@ -123,20 +123,21 @@ impl DatImport {
     /// use mistarr_server::db::dats::DatVersionRow;
     /// use mistarr_server::db::ids::DatVersionId;
     /// use mistarr_server::jobs::{dat_import::DatImport, Job};
-    /// let row = DatVersionRow { id: DatVersionId(3), platform_id: None, dat_name: "Test Console".into(),
+    /// let row = DatVersionRow { id: DatVersionId::new(3), platform_id: None, dat_name: "Test Console".into(),
     ///     version: "1".into(), source_file: "t.dat".into(), loaded_at: 0, superseded_by: None,
     ///     game_count: 1, retired: false, family: "test console".into(), reason: None,
     ///     suggested: Vec::new() };
-    /// let job = DatImport::bind(&row, "nes", "/d/loaded".as_ref());
+    /// let nes = mistarr_core::PlatformId::new("nes");
+    /// let job = DatImport::bind(&row, &nes, "/d/loaded".as_ref());
     /// assert_eq!(job.payload()["dat_version_id"], 3);
     /// ```
     #[must_use]
-    pub fn bind(row: &dats::DatVersionRow, platform: &str, loaded: &Path) -> Self {
+    pub fn bind(row: &dats::DatVersionRow, platform: &PlatformId, loaded: &Path) -> Self {
         Self {
             path: loaded.join(&row.source_file),
             bind: Some(Bind {
                 version: row.id,
-                platform: PlatformId(platform.to_owned()),
+                platform: platform.clone(),
                 dat_name: row.dat_name.clone(),
                 dat_version: row.version.clone(),
             }),
@@ -792,12 +793,13 @@ impl Recompute {
     ///
     /// ```
     /// use mistarr_server::jobs::{dat_import::Recompute, Job};
-    /// assert_eq!(Recompute::new("nes").payload()["platform_id"], "nes");
+    /// let nes = mistarr_core::PlatformId::new("nes");
+    /// assert_eq!(Recompute::new(&nes).payload()["platform_id"], "nes");
     /// ```
     #[must_use]
-    pub fn new(platform: &str) -> Self {
+    pub fn new(platform: &PlatformId) -> Self {
         Self {
-            platform: PlatformId(platform.to_owned()),
+            platform: platform.clone(),
         }
     }
 
@@ -809,7 +811,7 @@ impl Recompute {
     pub async fn enqueue_all(app: &Arc<AppState>) -> Result<()> {
         let platforms = app.db.read(crate::db::platforms::list).await?;
         for p in platforms {
-            Scheduler::enqueue(app, Arc::new(Self::new(&p.id.0))).await?;
+            Scheduler::enqueue(app, Arc::new(Self::new(&p.id))).await?;
         }
         Ok(())
     }
@@ -826,7 +828,7 @@ impl Job for Recompute {
     }
 
     fn detail(&self) -> Option<String> {
-        Some(self.platform.0.clone())
+        Some(self.platform.as_str().to_owned())
     }
 
     fn lane(&self) -> Lane {

@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mistarr_core::hash::{zip_members, HashError};
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, RomId};
 use mistarr_mister::launch::split_zip_member;
 use mistarr_mister::platforms::Platform;
 use rusqlite::Connection;
 
 use crate::db::files::{self, FileRow, FileState, NewFile};
-use crate::db::ids::{FileId, RomId};
+use crate::db::ids::FileId;
 use crate::db::roms;
 use crate::db::Db;
 use crate::error::Result;
@@ -72,7 +72,7 @@ struct Changes {
     /// Member rows whose hashes still apply: the new mtime.
     restamp: Vec<(FileId, i64)>,
     /// Member rows whose content changed: new size, mtime and CRC32.
-    reverify: Vec<(FileId, i64, i64, String)>,
+    reverify: Vec<(FileId, i64, i64, mistarr_core::Crc32)>,
 }
 
 /// `platform`'s zip directories under `games/`: its core directory and any legacy one.
@@ -225,15 +225,10 @@ fn recheck(games: &Path, rc: Recheck, out: &mut Changes) {
         };
         kept += 1;
         let size = i64::try_from(m.size).unwrap_or(i64::MAX);
-        let same_crc = row
-            .crc32
-            .as_deref()
-            .is_some_and(|c| c.eq_ignore_ascii_case(&m.crc32));
-        if row.size == size && same_crc {
+        if row.size == size && row.crc32 == Some(m.crc32) {
             out.restamp.push((row.id, rc.zip.mtime));
         } else {
-            out.reverify
-                .push((row.id, size, rc.zip.mtime, m.crc32.clone()));
+            out.reverify.push((row.id, size, rc.zip.mtime, m.crc32));
         }
     }
     if kept == 0 {
@@ -260,7 +255,7 @@ fn write_changes(
         files::restamp(tx, *id, *mtime, now)?;
     }
     for (id, size, mtime, crc) in &changes.reverify {
-        files::reverify(tx, *id, *size, *mtime, crc, now)?;
+        files::reverify(tx, *id, *size, *mtime, *crc, now)?;
     }
     Ok((changes.record.len(), dropped))
 }

@@ -92,7 +92,7 @@ pub async fn rename(app: &AppState, group: TitleId, file_id: FileId) -> Outcome<
                 files::delete(tx, id)?;
             }
             files::move_to(tx, file_id, &to_db, FileState::Verified, mtime, now)?;
-            let detail = json!({ "from": from_db, "rel_path": to_db, "title_id": title.0 });
+            let detail = json!({ "from": from_db, "rel_path": to_db, "title_id": title.get() });
             imports::log(tx, now, None, Some(file_id), ImportAction::Renamed, &detail)?;
             Ok(())
         })

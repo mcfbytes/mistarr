@@ -479,12 +479,12 @@ fn saved_settings(db: &Db) -> Result<Option<RuntimeSettings>> {
 /// # Errors
 ///
 /// [`Error::AlreadyRunning`] when another server uses the data directory,
-/// [`Error::Io`] when a directory cannot be created or the address cannot be
-/// bound, [`Error::Db`] or [`Error::Migration`] when the database cannot be opened.
+/// [`Error::File`] naming a directory that cannot be created, [`Error::Io`] when
+/// the address cannot be bound, [`Error::Db`] or [`Error::Migration`] when the database cannot be opened.
 pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     // Step 1, loading the config, is the caller's.
     for dir in config.paths.layout() {
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(&dir).map_err(crate::Error::io_at(&dir))?;
     }
     let lock = crate::lock::InstanceLock::acquire(&config.paths.data)?;
 
@@ -513,11 +513,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     }
 
     for platform in &resolved {
-        Scheduler::enqueue(
-            &app,
-            Arc::new(jobs::dat_import::Recompute::new(&platform.0)),
-        )
-        .await?;
+        Scheduler::enqueue(&app, Arc::new(jobs::dat_import::Recompute::new(platform))).await?;
     }
 
     // Step 3: download client, resumed first if a previous run left it frozen at the menu.
@@ -577,7 +573,8 @@ fn clean_leftovers(config: &Config) -> Result<bool> {
 ///
 /// # Errors
 ///
-/// [`Error::Io`] when leftovers cannot be removed or a cut-short swap left no database,
+/// [`Error::File`] naming the file a leftover removal or a cut-short swap's rename failed
+/// on, [`Error::Io`] when that swap's copy fails its check or it left no database,
 /// [`Error::SchemaTooNew`], [`Error::Migration`] or [`Error::Db`] when it cannot be opened.
 pub(crate) fn open_db(config: &mut Config) -> Result<Startup> {
     if let Some(dir) = std::env::var_os(crate::db::tempdir::SQLITE_TMPDIR) {
@@ -711,7 +708,7 @@ async fn resume_scans(app: &Arc<AppState>, unfinished: Vec<PlatformId>) -> Resul
         .into_iter()
         .filter(|id| !jobs::scan::is_arcade(id))
     {
-        tracing::info!(platform = %platform_id.0, "resuming interrupted scan");
+        tracing::info!(platform = %platform_id.as_str(), "resuming interrupted scan");
         Scheduler::enqueue(
             app,
             Arc::new(jobs::scan::ScanJob {
@@ -922,7 +919,7 @@ mod tests {
         let present: Vec<_> = rows
             .iter()
             .filter(|r| r.core_present)
-            .map(|r| r.id.0.as_str())
+            .map(|r| r.id.as_str())
             .collect();
         assert_eq!(present, ["snes"]);
     }
@@ -938,7 +935,7 @@ mod tests {
         let mut present: Vec<_> = rows
             .iter()
             .filter(|r| r.core_present)
-            .map(|r| r.id.0.as_str())
+            .map(|r| r.id.as_str())
             .collect();
         present.sort_unstable();
         assert_eq!(present, ["arcade", "ngp"]);

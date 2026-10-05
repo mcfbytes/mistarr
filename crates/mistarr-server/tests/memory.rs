@@ -495,7 +495,10 @@ fn arcade_tree(root: &Path) -> usize {
             let dir = arcade.join(format!("_alternatives/_Example Game {:04}", i - MRAS));
             (name.clone(), dir.join(format!("{name}.mra")))
         };
-        write(&path, mra_text(&name, &zip, &md5.finish(), i).as_bytes());
+        write(
+            &path,
+            mra_text(&name, &zip, &md5.finish().to_string(), i).as_bytes(),
+        );
     }
     let big = bytes_for(0, 1024).repeat(BIG_PART_BYTES / 1024);
     let mut md5 = Md5Stream::new();

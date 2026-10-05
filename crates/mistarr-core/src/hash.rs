@@ -8,8 +8,7 @@ use std::str::FromStr;
 use md5::Digest as _;
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
 
-use crate::hex::encode as hex;
-use crate::HashSet;
+use crate::{Crc32, Hashes, Md5, Sha1};
 
 /// Streaming buffer size, matching the "Hashing buffer" budget in
 /// `docs/ARCHITECTURE.md`.
@@ -197,11 +196,11 @@ pub struct ZipMember {
     pub name: String,
     /// Uncompressed size in bytes.
     pub size: u64,
-    /// Stored CRC32 as 8 lowercase hex characters.
-    pub crc32: String,
+    /// Stored CRC32.
+    pub crc32: Crc32,
 }
 
-/// CRC32, MD5 and SHA1 fed together, finished into a [`HashSet`].
+/// CRC32, MD5 and SHA1 fed together, finished into a [`Hashes`].
 pub(crate) struct Hashers {
     crc: crc32fast::Hasher,
     md5: md5::Md5,
@@ -226,12 +225,12 @@ impl Hashers {
         self.len += buf.len() as u64;
     }
 
-    pub(crate) fn finish(self) -> HashSet {
-        HashSet {
+    pub(crate) fn finish(self) -> Hashes {
+        Hashes {
             size: self.len,
-            crc32: format!("{:08x}", self.crc.finalize()),
-            md5: hex(&self.md5.finalize()),
-            sha1: hex(&self.sha1.finalize()),
+            crc32: Crc32::from_u32(self.crc.finalize()),
+            md5: Md5::from_bytes(self.md5.finalize().into()),
+            sha1: Sha1::from_bytes(self.sha1.finalize().into()),
         }
     }
 }
@@ -252,9 +251,9 @@ impl Hashers {
 /// use std::io::Cursor;
 ///
 /// let hashes = hash_reader(Cursor::new(b"abc"), HeaderRule::None, None).unwrap();
-/// assert_eq!(hashes.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+/// assert_eq!(hashes.sha1.to_string(), "a9993e364706816aba3e25717850c26c9cd0d89d");
 /// ```
-pub fn hash_reader<R: Read>(r: R, rule: HeaderRule, size_hint: Option<u64>) -> io::Result<HashSet> {
+pub fn hash_reader<R: Read>(r: R, rule: HeaderRule, size_hint: Option<u64>) -> io::Result<Hashes> {
     Ok(hash_under(r, rule, size_hint, false)?.content)
 }
 
@@ -263,11 +262,11 @@ pub fn hash_reader<R: Read>(r: R, rule: HeaderRule, size_hint: Option<u64>) -> i
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HeaderForms {
     /// The content after the rule: header stripped, byte order normalized.
-    pub content: HashSet,
+    pub content: Hashes,
     /// The whole payload, header included, when a stripping rule found and
     /// stripped a header; `None` when `content` already is the whole payload
     /// or the rule is not one of [`HeaderRule::strips_header`].
-    pub whole: Option<HashSet>,
+    pub whole: Option<Hashes>,
 }
 
 impl HeaderForms {
@@ -279,7 +278,7 @@ impl HeaderForms {
     /// assert_eq!(forms.whole_or_content(), &forms.content);
     /// ```
     #[must_use]
-    pub fn whole_or_content(&self) -> &HashSet {
+    pub fn whole_or_content(&self) -> &Hashes {
         self.whole.as_ref().unwrap_or(&self.content)
     }
 }
@@ -299,7 +298,7 @@ impl HeaderForms {
 /// file.resize(16, 0);
 /// file.extend_from_slice(b"abc");
 /// let forms = hash_forms(&file[..], HeaderRule::Ines, None).unwrap();
-/// assert_eq!(forms.content.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+/// assert_eq!(forms.content.sha1.to_string(), "a9993e364706816aba3e25717850c26c9cd0d89d");
 /// let whole = forms.whole.unwrap();
 /// assert_eq!(whole, hash_reader(&file[..], HeaderRule::None, None).unwrap());
 /// ```
@@ -349,7 +348,7 @@ fn header_found(rule: HeaderRule, head: &[u8]) -> bool {
     }
 }
 
-fn hash_stream<R: Read>(mut r: R, prefix: &[u8]) -> io::Result<HashSet> {
+fn hash_stream<R: Read>(mut r: R, prefix: &[u8]) -> io::Result<Hashes> {
     let mut h = Hashers::new();
     h.update(prefix);
     let mut buf = vec![0u8; BUF_SIZE];
@@ -440,12 +439,12 @@ impl Skipping {
     }
 
     /// The whole stream's hashes, then the skipped stream's.
-    fn finish(self) -> (HashSet, HashSet) {
+    fn finish(self) -> (Hashes, Hashes) {
         (self.whole.finish(), self.skipped.finish())
     }
 }
 
-fn hash_smc<R: Read>(mut r: R, size_hint: Option<u64>) -> io::Result<HashSet> {
+fn hash_smc<R: Read>(mut r: R, size_hint: Option<u64>) -> io::Result<Hashes> {
     let header = COPIER_HEADER_LEN as u64;
     if let Some(size) = size_hint {
         if HeaderRule::smc_applies(size) {
@@ -491,7 +490,7 @@ fn swap_into(data: &[u8], order: ByteOrder, out: &mut [u8]) {
     }
 }
 
-fn hash_n64<R: Read>(mut r: R) -> io::Result<HashSet> {
+fn hash_n64<R: Read>(mut r: R) -> io::Result<Hashes> {
     let probe = read_probe(&mut r, 4)?;
     // Big-endian images, and anything unrecognised, pass through unchanged.
     let order = ByteOrder::detect(&probe).unwrap_or(ByteOrder::BigEndian);
@@ -554,7 +553,7 @@ pub fn zip_members<R: Read + Seek>(r: R) -> Result<Vec<ZipMember>, HashError> {
         members.push(ZipMember {
             name: file.name().to_string(),
             size: file.size(),
-            crc32: format!("{:08x}", file.crc32()),
+            crc32: Crc32::from_u32(file.crc32()),
         });
     }
     Ok(members)
@@ -578,13 +577,13 @@ pub fn zip_members<R: Read + Seek>(r: R) -> Result<Vec<ZipMember>, HashError> {
 /// zip.finish().unwrap();
 ///
 /// let hashes = hash_zip_member(Cursor::new(buf), "a.bin", HeaderRule::None).unwrap();
-/// assert_eq!(hashes.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+/// assert_eq!(hashes.sha1.to_string(), "a9993e364706816aba3e25717850c26c9cd0d89d");
 /// ```
 pub fn hash_zip_member<R: Read + Seek>(
     r: R,
     name: &str,
     rule: HeaderRule,
-) -> Result<HashSet, HashError> {
+) -> Result<Hashes, HashError> {
     let mut archive = zip::ZipArchive::new(r)?;
     let file = archive.by_name(name)?;
     let size_hint = Some(file.size());
@@ -628,7 +627,7 @@ pub fn hash_zip_member_forms<R: Read + Seek>(
 ///
 /// # Errors
 ///
-/// As [`hash_zip_member`], or when `member.crc32` is not 8 hex digits.
+/// As [`hash_zip_member`].
 ///
 /// ```
 /// use mistarr_core::hash::{hash_reader, zip_member_content_crc, zip_members, HeaderRule};
@@ -645,27 +644,27 @@ pub fn hash_zip_member_forms<R: Read + Seek>(
 ///
 /// let member = &zip_members(Cursor::new(&buf)).unwrap()[0];
 /// let crc = zip_member_content_crc(Cursor::new(&buf), member, HeaderRule::Lnx).unwrap();
-/// assert_eq!(crc.as_deref(), Some("352441c2"));
+/// assert_eq!(crc.map(|c| c.to_string()).as_deref(), Some("352441c2"));
 /// ```
 pub fn zip_member_content_crc<R: Read + Seek>(
     r: R,
     member: &ZipMember,
     rule: HeaderRule,
-) -> Result<Option<String>, HashError> {
+) -> Result<Option<Crc32>, HashError> {
     if !rule.strips_header() || member.size < rule.header_len() {
         return Ok(None);
     }
-    let whole = u32::from_str_radix(&member.crc32, 16)
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "member CRC32 is not hex"))?;
     let mut archive = zip::ZipArchive::new(r)?;
     let head = read_probe(&mut archive.by_name(&member.name)?, rule.header_len())?;
     if !header_found(rule, &head) || (head.len() as u64) < rule.header_len() {
         return Ok(None);
     }
-    Ok(Some(format!(
-        "{:08x}",
-        strip_crc(whole, &head, member.size - rule.header_len())
-    )))
+    let rest = member.size - rule.header_len();
+    Ok(Some(Crc32::from_u32(strip_crc(
+        member.crc32.to_u32(),
+        &head,
+        rest,
+    ))))
 }
 
 /// The CRC32 of the last `rest` bytes of a stream whose CRC32 is `whole` and
@@ -684,7 +683,7 @@ fn strip_crc(whole: u32, head: &[u8], rest: u64) -> u32 {
 /// let mut md5 = mistarr_core::hash::Md5Stream::new();
 /// md5.update(b"a");
 /// md5.update(b"bc");
-/// assert_eq!(md5.finish(), "900150983cd24fb0d6963f7d28e17f72");
+/// assert_eq!(md5.finish().to_string(), "900150983cd24fb0d6963f7d28e17f72");
 /// ```
 #[derive(Debug, Clone, Default)]
 pub struct Md5Stream(md5::Md5);
@@ -701,10 +700,10 @@ impl Md5Stream {
         self.0.update(buf);
     }
 
-    /// The digest as 32 lowercase hex characters.
+    /// The digest.
     #[must_use]
-    pub fn finish(self) -> String {
-        hex(&self.0.finalize())
+    pub fn finish(self) -> Md5 {
+        Md5::from_bytes(self.0.finalize().into())
     }
 }
 
@@ -786,7 +785,7 @@ mod tests {
         }
         let one = hash_reader(Cursor::new(b"abc"), HeaderRule::None, None).expect("hash");
         assert_eq!(m.finish(), one.md5);
-        assert_eq!(Md5Stream::new().finish(), empty().1);
+        assert_eq!(Md5Stream::new().finish().to_string(), empty().1);
     }
 
     fn empty() -> (&'static str, &'static str, &'static str) {
@@ -802,18 +801,21 @@ mod tests {
         let (crc, md5, sha1) = empty();
         let h = hash_reader(Cursor::new(b""), HeaderRule::None, None).unwrap();
         assert_eq!(h.size, 0);
-        assert_eq!(h.crc32, crc);
-        assert_eq!(h.md5, md5);
-        assert_eq!(h.sha1, sha1);
+        assert_eq!(h.crc32.to_string(), crc);
+        assert_eq!(h.md5.to_string(), md5);
+        assert_eq!(h.sha1.to_string(), sha1);
     }
 
     #[test]
     fn reference_vectors_abc() {
         let h = hash_reader(Cursor::new(b"abc"), HeaderRule::None, None).unwrap();
         assert_eq!(h.size, 3);
-        assert_eq!(h.crc32, "352441c2");
-        assert_eq!(h.md5, "900150983cd24fb0d6963f7d28e17f72");
-        assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(h.crc32.to_string(), "352441c2");
+        assert_eq!(h.md5.to_string(), "900150983cd24fb0d6963f7d28e17f72");
+        assert_eq!(
+            h.sha1.to_string(),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
     }
 
     #[test]
@@ -821,8 +823,11 @@ mod tests {
         let data = vec![b'a'; 1_000_000];
         let h = hash_reader(Cursor::new(data), HeaderRule::None, None).unwrap();
         assert_eq!(h.size, 1_000_000);
-        assert_eq!(h.sha1, "34aa973cd4c4daa4f61eeb2bdbad27316534016f");
-        assert_eq!(h.md5, "7707d6ae4e027c70eea2a935c2296f21");
+        assert_eq!(
+            h.sha1.to_string(),
+            "34aa973cd4c4daa4f61eeb2bdbad27316534016f"
+        );
+        assert_eq!(h.md5.to_string(), "7707d6ae4e027c70eea2a935c2296f21");
     }
 
     #[test]
@@ -832,14 +837,20 @@ mod tests {
         data.extend_from_slice(b"abc");
         let h = hash_reader(Cursor::new(data), HeaderRule::Ines, None).unwrap();
         assert_eq!(h.size, 3);
-        assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            h.sha1.to_string(),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
     }
 
     #[test]
     fn ines_hashes_whole_file_when_absent() {
         let h = hash_reader(Cursor::new(b"abc"), HeaderRule::Ines, None).unwrap();
         assert_eq!(h.size, 3);
-        assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            h.sha1.to_string(),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
     }
 
     #[test]
@@ -888,13 +899,19 @@ mod tests {
         data.extend_from_slice(b"abc");
         let h = hash_reader(Cursor::new(data), HeaderRule::A78, None).unwrap();
         assert_eq!(h.size, 3);
-        assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            h.sha1.to_string(),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
     }
 
     #[test]
     fn a78_hashes_whole_file_when_absent() {
         let h = hash_reader(Cursor::new(b"abc"), HeaderRule::A78, None).unwrap();
-        assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            h.sha1.to_string(),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
     }
 
     #[test]
@@ -904,13 +921,19 @@ mod tests {
         data.extend_from_slice(b"abc");
         let h = hash_reader(Cursor::new(data), HeaderRule::Lnx, None).unwrap();
         assert_eq!(h.size, 3);
-        assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            h.sha1.to_string(),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
     }
 
     #[test]
     fn lnx_hashes_whole_file_when_absent() {
         let h = hash_reader(Cursor::new(b"abc"), HeaderRule::Lnx, None).unwrap();
-        assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            h.sha1.to_string(),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
     }
 
     #[test]
@@ -963,7 +986,7 @@ mod tests {
         assert_eq!(members.len(), 2);
         assert_eq!(members[0].name, "rom.bin");
         assert_eq!(members[0].size, 3);
-        assert_eq!(members[0].crc32, "352441c2");
+        assert_eq!(members[0].crc32.to_string(), "352441c2");
     }
 
     /// Hand-assembled: the `zip` crate's writer refuses a compression method
@@ -1065,7 +1088,7 @@ mod tests {
         assert_eq!(members[0].size, 3);
         assert_eq!(members[1].name, "bzip2.bin");
         assert_eq!(members[1].size, 7);
-        assert_eq!(members[1].crc32, "deadbeef");
+        assert_eq!(members[1].crc32.to_string(), "deadbeef");
     }
 
     #[test]
@@ -1081,7 +1104,10 @@ mod tests {
     #[test]
     fn hash_zip_member_decompresses_and_hashes() {
         let h = hash_zip_member(Cursor::new(build_zip()), "rom.bin", HeaderRule::None).unwrap();
-        assert_eq!(h.sha1, "a9993e364706816aba3e25717850c26c9cd0d89d");
+        assert_eq!(
+            h.sha1.to_string(),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
     }
 
     #[test]
@@ -1122,7 +1148,7 @@ mod tests {
         data
     }
 
-    fn plain(data: &[u8]) -> HashSet {
+    fn plain(data: &[u8]) -> Hashes {
         hash_reader(data, HeaderRule::None, None).expect("hash")
     }
 
@@ -1151,10 +1177,7 @@ mod tests {
         ] {
             let data = synthetic(rule, false, 1000);
             let forms = hash_forms(&data[..], rule, None).expect("hash");
-            assert_eq!(
-                (forms.content.clone(), forms.whole.clone()),
-                (plain(&data), None)
-            );
+            assert_eq!((forms.content, forms.whole), (plain(&data), None));
             assert_eq!(forms.whole_or_content(), &plain(&data));
         }
     }
@@ -1182,7 +1205,7 @@ mod tests {
                 let forms = hash_zip_member_forms(Cursor::new(&buf), "a.bin", rule).unwrap();
                 assert_eq!(forms, hash_forms(&data[..], rule, None).unwrap());
                 let crc = zip_member_content_crc(Cursor::new(&buf), member, rule).unwrap();
-                let expect = headered.then(|| forms.content.crc32.clone());
+                let expect = headered.then_some(forms.content.crc32);
                 assert_eq!(crc, expect, "{rule:?} headered={headered}");
             }
         }
@@ -1193,7 +1216,7 @@ mod tests {
         let member = ZipMember {
             name: "a.bin".into(),
             size: 3,
-            crc32: "352441c2".into(),
+            crc32: Crc32::from_u32(0x3524_41c2),
         };
         let none = zip_member_content_crc(Cursor::new(build_zip()), &member, HeaderRule::None);
         assert!(none.unwrap().is_none());

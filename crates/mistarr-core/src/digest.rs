@@ -52,9 +52,31 @@ impl<const N: usize> From<[u8; N]> for Digest<N> {
     }
 }
 
+impl Digest<4> {
+    /// A CRC32 from its value.
+    ///
+    /// ```
+    /// assert_eq!(mistarr_core::Crc32::from_u32(0x0102_0304).to_string(), "01020304");
+    /// ```
+    #[must_use]
+    pub const fn from_u32(value: u32) -> Self {
+        Self(value.to_be_bytes())
+    }
+
+    /// The CRC32's value.
+    ///
+    /// ```
+    /// assert_eq!(mistarr_core::Crc32::from_bytes([0, 0, 1, 2]).to_u32(), 0x0102);
+    /// ```
+    #[must_use]
+    pub const fn to_u32(self) -> u32 {
+        u32::from_be_bytes(self.0)
+    }
+}
+
 impl<const N: usize> fmt::Display for Digest<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&crate::hex::encode(&self.0))
+        crate::hex::write(f, &self.0)
     }
 }
 
@@ -70,10 +92,9 @@ impl<const N: usize> FromStr for Digest<N> {
     type Err = ParseDigestError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        crate::hex::decode(s)
-            .and_then(|bytes| <[u8; N]>::try_from(bytes).ok())
-            .map(Self)
-            .ok_or(ParseDigestError { digits: 2 * N })
+        let mut bytes = [0; N];
+        crate::hex::decode_into(s, &mut bytes).ok_or(ParseDigestError { digits: 2 * N })?;
+        Ok(Self(bytes))
     }
 }
 
@@ -85,8 +106,40 @@ impl<const N: usize> Serialize for Digest<N> {
 
 impl<'de, const N: usize> Deserialize<'de> for Digest<N> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
-        text.parse().map_err(de::Error::custom)
+        deserializer.deserialize_str(HexVisitor)
+    }
+}
+
+/// Parses the hex text in place, so reading a digest allocates nothing.
+struct HexVisitor<const N: usize>;
+
+impl<const N: usize> de::Visitor<'_> for HexVisitor<N> {
+    type Value = Digest<N>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} hex digits", 2 * N)
+    }
+
+    fn visit_str<E: de::Error>(self, s: &str) -> Result<Self::Value, E> {
+        s.parse().map_err(E::custom)
+    }
+}
+
+/// Stored as lowercase hex text; a column that is not that hex fails to read.
+#[cfg(feature = "rusqlite")]
+impl<const N: usize> rusqlite::types::ToSql for Digest<N> {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.to_string().into())
+    }
+}
+
+#[cfg(feature = "rusqlite")]
+impl<const N: usize> rusqlite::types::FromSql for Digest<N> {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value
+            .as_str()?
+            .parse()
+            .map_err(|e| rusqlite::types::FromSqlError::Other(Box::new(e)))
     }
 }
 
@@ -170,6 +223,9 @@ mod tests {
         let json = serde_json::to_string(&md5).expect("json");
         assert_eq!(json, format!("\"{}\"", "cd".repeat(16)));
         assert_eq!(serde_json::from_str::<Md5>(&json).expect("md5"), md5);
+        let read = serde_json::from_reader::<_, Md5>(json.as_bytes()).expect("read");
+        assert_eq!(read, md5);
+        assert!(serde_json::from_str::<Md5>("7").is_err());
         let h = InfoHash::from_bytes([0xef; 20]);
         let json = serde_json::to_string(&h).expect("json");
         assert_eq!(json, format!("\"{}\"", "ef".repeat(20)));
@@ -180,6 +236,23 @@ mod tests {
         assert!(serde_json::from_str::<Md5>("\"00\"").is_err());
     }
 
+    #[cfg(feature = "rusqlite")]
+    #[test]
+    fn sql_stores_lowercase_hex_and_refuses_anything_else() {
+        let c = rusqlite::Connection::open_in_memory().expect("open");
+        let d = Sha1::from_bytes([0xab; 20]);
+        let text: String = c.query_row("SELECT ?1", [d], |r| r.get(0)).expect("text");
+        assert_eq!(text, "ab".repeat(20));
+        let back: Sha1 = c
+            .query_row("SELECT upper(?1)", [d], |r| r.get(0))
+            .expect("back");
+        assert_eq!(back, d);
+        assert!(c
+            .query_row("SELECT 'zz'", [], |r| r.get::<_, Md5>(0))
+            .is_err());
+        assert!(c.query_row("SELECT 7", [], |r| r.get::<_, Md5>(0)).is_err());
+    }
+
     proptest! {
         #[test]
         fn display_and_parse_round_trip(bytes in any::<[u8; 20]>()) {
@@ -188,6 +261,12 @@ mod tests {
             let h = InfoHash::from_bytes(bytes);
             prop_assert_eq!(h.to_string(), d.to_string());
             prop_assert_eq!(h.to_string().to_uppercase().parse::<InfoHash>(), Ok(h));
+        }
+
+        #[test]
+        fn parse_agrees_with_hex_decode(text in "[0-9a-fA-Fg é]{0,10}|\\PC*") {
+            let parsed = text.parse::<Crc32>().ok().map(|d| d.as_bytes().to_vec());
+            prop_assert_eq!(parsed, crate::hex::decode(&text).filter(|b| b.len() == 4));
         }
     }
 }

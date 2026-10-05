@@ -102,7 +102,7 @@ fn with_member<T>(
     (phase, meter): (&str, Option<&Meter>),
     f: impl FnOnce(&mut dyn BufRead, &str) -> Result<T>,
 ) -> Result<std::result::Result<T, String>> {
-    let file = File::open(path)?;
+    let file = File::open(path).map_err(crate::Error::io_at(path))?;
     let report = |read: u64, total: u64| {
         if let Some(m) = meter {
             m.bytes(phase, read, total);
@@ -230,7 +230,7 @@ pub(super) fn export_options(
 /// The platform a DAT named `dat_name` loads into: the one being bound, else the table's.
 fn platform_for(req: &Request, dat_name: &str) -> Option<String> {
     match &req.bind {
-        Some(b) => Some(b.platform.0.clone()),
+        Some(b) => Some(b.platform.as_str().to_owned()),
         None => mistarr_mister::bind_dat_name(dat_name).map(|p| p.id.to_owned()),
     }
 }
@@ -427,9 +427,9 @@ pub(super) fn staged(game: &DatGame) -> StagedGame {
             .map(|r| StagedRom {
                 name: r.name.clone(),
                 size: r.size,
-                crc32: r.crc32.clone(),
-                md5: r.md5.clone(),
-                sha1: r.sha1.clone(),
+                crc32: r.crc32,
+                md5: r.md5,
+                sha1: r.sha1,
                 status: r.status.into(),
                 header: r.header.clone(),
             })

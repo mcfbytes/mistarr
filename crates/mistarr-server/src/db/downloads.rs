@@ -1,12 +1,12 @@
 //! The `downloads` table and its state machine; see `docs/DATA-MODEL.md`.
 
 use mistarr_clients::ClientTorrentId;
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, RomId};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
 use super::candidates;
-use super::ids::{DatVersionId, DownloadId, RomId, SourceId, TitleId};
+use super::ids::{DatVersionId, DownloadId, SourceId, TitleId};
 use super::sources;
 use super::sql::{self, text_enum, Page, Paged};
 use crate::error::Result;
@@ -171,7 +171,7 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<DownloadRow> {
         id: r.get(0)?,
         title_id: r.get(1)?,
         title_name: r.get(2)?,
-        platform_id: PlatformId(r.get(3)?),
+        platform_id: r.get(3)?,
         rom_id: r.get(4)?,
         rom_name: r.get(5)?,
         size: sql::get_u64(r, 6)?,
@@ -222,7 +222,7 @@ pub fn create(conn: &Connection, d: &NewDownload) -> Result<DownloadId> {
             d.now
         ],
     )?;
-    Ok(DownloadId(conn.last_insert_rowid()))
+    Ok(DownloadId::new(conn.last_insert_rowid()))
 }
 
 /// Reads one download.
@@ -505,7 +505,7 @@ pub fn best_file(conn: &Connection, rom: RomId) -> Result<Option<Candidate>> {
             |r| r.get(0),
         )
         .optional()?;
-    let header = platform.map_or(0, |p| super::candidates::header_len(&PlatformId(p)));
+    let header = platform.map_or(0, |p| super::candidates::header_len(&PlatformId::new(p)));
     let header = sql::to_i64(header);
     Ok(conn
         .prepare_cached(&format!(

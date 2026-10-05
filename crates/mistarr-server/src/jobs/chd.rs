@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mistarr_core::chd::{self as core, ChdError, ChdId, Decoder, Header, Layout, Step};
 use mistarr_core::hash::{hash_reader, HeaderRule};
-use mistarr_core::{HashSet, PlatformId};
+use mistarr_core::{Hashes, PlatformId, RomId};
 use mistarr_mister::launch::split_chd_member;
 use rusqlite::Connection;
 use serde_json::json;
@@ -23,7 +23,7 @@ use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::chd::{self as rows, Unidentified};
 use crate::db::files::{self, FileRow, FileState, NewFile};
-use crate::db::ids::{FileId, RomId, TitleId};
+use crate::db::ids::{FileId, TitleId};
 use crate::db::roms::{self, RomMatch};
 use crate::db::settings::{self, keys};
 use crate::db::titles::RomStatus;
@@ -247,13 +247,13 @@ async fn whole_file(
             }
         }
     };
-    let (pid, h) = (platform.clone(), hashes.clone());
+    let (pid, h) = (platform.clone(), hashes);
     let matched = ctx
         .app
         .db
         .write(move |c| {
             let size = i64::try_from(h.size).unwrap_or(i64::MAX);
-            let m = roms::match_rom(c, &pid, &h.sha1, &h.md5, &h.crc32, size)?;
+            let m = roms::match_rom(c, &pid, Some(h.sha1), Some(h.md5), Some(h.crc32), size)?;
             if let (None, Some(id)) = (&m, id) {
                 rows::store_whole_hashes(c, &id, mtime, &h)?;
             }
@@ -312,7 +312,7 @@ pub(crate) struct ChdMembers<'a> {
     pub(crate) container: &'a str,
     pub(crate) size: i64,
     pub(crate) mtime: i64,
-    pub(crate) tracks: &'a [HashSet],
+    pub(crate) tracks: &'a [Hashes],
 }
 
 /// Whether `name` is a cue sheet rom.
@@ -404,7 +404,7 @@ fn winner(
 fn member(
     m: &ChdMembers<'_>,
     i: usize,
-    t: &HashSet,
+    t: &Hashes,
     rom: Option<RomId>,
     state: FileState,
 ) -> NewFile {
@@ -412,9 +412,9 @@ fn member(
         rel_path: format!("{}#{:02}", m.container, i + 1),
         size: i64::try_from(t.size).unwrap_or(i64::MAX),
         mtime: m.mtime,
-        crc32: Some(t.crc32.clone()),
-        md5: Some(t.md5.clone()),
-        sha1: Some(t.sha1.clone()),
+        crc32: Some(t.crc32),
+        md5: Some(t.md5),
+        sha1: Some(t.sha1),
         header_rule: Some(HEADER_RULE.to_owned()),
         whole: files::WholeHashes::default(),
         rom_id: rom,
@@ -499,7 +499,7 @@ pub(crate) fn rematch_container(
         .collect();
     tracks.sort_by_key(|(n, _)| *n);
     let numbered = tracks.iter().enumerate().all(|(i, (n, _))| *n == i + 1);
-    let hashes: Option<Vec<HashSet>> = tracks.iter().map(|(_, r)| r.hashes()).collect();
+    let hashes: Option<Vec<Hashes>> = tracks.iter().map(|(_, r)| r.hashes()).collect();
     let (Some(hashes), true, Some((_, first))) = (hashes, numbered, tracks.first()) else {
         return Ok(0);
     };
@@ -560,7 +560,7 @@ pub async fn apply_setting(app: &Arc<AppState>) -> Result<()> {
 ///
 /// [`Error::Db`] when the rows cannot be read or the job recorded.
 pub async fn queue_for(app: &Arc<AppState>, platform: &PlatformId, recheck: bool) -> Result<()> {
-    let disc = mistarr_mister::platforms::by_id(&platform.0)
+    let disc = mistarr_mister::platforms::by_id(platform.as_str())
         .is_some_and(|p| p.kind == mistarr_mister::Kind::Disc);
     if !disc || !app.config().scan.chd_tracks {
         return Ok(());
@@ -621,7 +621,7 @@ impl Job for ChdTracks {
         let mut total = ctx.app.db.read(rows::waiting_count).await?;
         let mut tally = Tally::default();
         let mut live = Live::new(ctx, total);
-        let mut after = FileId(0);
+        let mut after = FileId::new(0);
         // Rows left pending this run, and whether this pass from id 0 identified any.
         let mut skipped = std::collections::HashSet::new();
         let mut progressed = false;
@@ -636,7 +636,7 @@ impl Job for ChdTracks {
                 if !progressed {
                     break;
                 }
-                (after, progressed) = (FileId(0), false);
+                (after, progressed) = (FileId::new(0), false);
                 let left = ctx.app.db.read(rows::waiting_count).await?;
                 total = tally.done + left.saturating_sub(skipped.len() as u64);
                 live.total = total;
@@ -872,7 +872,7 @@ async fn record(
     ctx: &JobContext,
     row: &FileRow,
     image: Opened,
-    tracks: Vec<HashSet>,
+    tracks: Vec<Hashes>,
     rate: Option<u64>,
 ) -> Result<Outcome> {
     let Opened { id, size, mtime } = image;
@@ -952,21 +952,21 @@ mod tests {
     use crate::db::fixtures::conn;
 
     fn psx() -> PlatformId {
-        PlatformId("psx".into())
+        PlatformId::new("psx")
     }
 
-    fn track(n: u8) -> HashSet {
-        HashSet {
+    fn track(n: u8) -> Hashes {
+        Hashes {
             size: 2352 * u64::from(n),
-            crc32: format!("{n:08x}"),
-            md5: format!("{n:032x}"),
-            sha1: format!("{n:040x}"),
+            crc32: format!("{n:08x}").parse().expect("hex"),
+            md5: format!("{n:032x}").parse().expect("hex"),
+            sha1: format!("{n:040x}").parse().expect("hex"),
         }
     }
 
     /// A title with a cue and one rom per `(name, hashes, status)`; the cue's id comes first.
-    fn title(c: &Connection, name: &str, roms: &[(&str, HashSet, RomStatus)]) -> Vec<RomId> {
-        let cue = HashSet {
+    fn title(c: &Connection, name: &str, roms: &[(&str, Hashes, RomStatus)]) -> Vec<RomId> {
+        let cue = Hashes {
             size: 90,
             ..track(200)
         };
@@ -981,7 +981,7 @@ mod tests {
         disc.write(c).expect("disc").roms
     }
 
-    fn classify(c: &Connection, tracks: &[HashSet]) -> Vec<NewFile> {
+    fn classify(c: &Connection, tracks: &[Hashes]) -> Vec<NewFile> {
         let m = ChdMembers {
             container: "PSX/G/g.chd",
             size: 1000,
@@ -1110,7 +1110,7 @@ mod tests {
     #[test]
     fn split_keeps_chd_members_apart_and_drops_unidentified_rows() {
         let row = |rel: &str, state| FileRow {
-            id: FileId(1),
+            id: FileId::new(1),
             platform_id: psx(),
             rel_path: rel.to_owned(),
             size: 1,

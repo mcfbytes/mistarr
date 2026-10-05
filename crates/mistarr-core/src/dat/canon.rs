@@ -7,6 +7,7 @@ use super::{
     DatError, DatFormat, DatGame, DatHeader, DatRom, DatStream, ExportOptions, Mode, RomStatus,
     MAX_EVENT_BYTES, MAX_FIELD_BYTES,
 };
+use crate::Digest;
 
 /// What [`rewrite`] wrote.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -166,6 +167,10 @@ impl<W: Write> Out<W> {
         Ok(())
     }
 
+    fn hex<const N: usize>(&mut self, key: &str, value: Option<Digest<N>>) -> std::io::Result<()> {
+        self.attr(key, value.map(|d| d.to_string()).as_deref())
+    }
+
     fn element(&mut self, indent: &str, name: &str, text: Option<&str>) -> std::io::Result<()> {
         if let Some(t) = text {
             self.put(indent)?;
@@ -248,9 +253,9 @@ fn write_rom<W: Write>(w: &mut Out<W>, r: &DatRom, game: &str) -> Result<(), Rew
     w.open("  ", "rom")?;
     w.attr("name", Some(&r.name))?;
     w.attr("size", Some(&r.size.to_string()))?;
-    w.attr("crc", r.crc32.as_deref())?;
-    w.attr("md5", r.md5.as_deref())?;
-    w.attr("sha1", r.sha1.as_deref())?;
+    w.hex("crc", r.crc32)?;
+    w.hex("md5", r.md5)?;
+    w.hex("sha1", r.sha1)?;
     if r.status != RomStatus::Good {
         w.attr("status", Some(r.status.as_str()))?;
     }
@@ -295,9 +300,9 @@ fn write_file<W: Write>(w: &mut Out<W>, f: &File, game: &str) -> Result<(), Rewr
     w.attr("extension", nonempty(&f.extension))?;
     w.attr("format", nonempty(&f.format))?;
     w.attr("size", Some(&f.size.to_string()))?;
-    w.attr("crc32", f.crc32.as_deref())?;
-    w.attr("md5", f.md5.as_deref())?;
-    w.attr("sha1", f.sha1.as_deref())?;
+    w.hex("crc32", f.crc32)?;
+    w.hex("md5", f.md5)?;
+    w.hex("sha1", f.sha1)?;
     w.attr("header", f.header.as_deref())?;
     w.attr("item", f.item.as_deref())?;
     w.attr("forcename", f.forcename.as_deref())?;

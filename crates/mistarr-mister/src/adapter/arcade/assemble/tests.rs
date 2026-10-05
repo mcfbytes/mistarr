@@ -60,7 +60,7 @@ fn rom(xml: &str) -> MraRom {
     mra.roms.into_iter().next().expect("one rom")
 }
 
-fn md5_of(bytes: &[u8]) -> String {
+fn md5_of(bytes: &[u8]) -> mistarr_core::Md5 {
     let mut m = Md5Stream::new();
     m.update(bytes);
     m.finish()

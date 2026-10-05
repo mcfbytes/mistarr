@@ -242,13 +242,16 @@ pub(super) fn browse_clause(
     shape: SearchShape,
 ) -> Result<Clause> {
     let mut clause = Clause::default();
-    clause.and("g.platform_id = ?", [Value::Text(platform.0.clone())]);
+    clause.and(
+        "g.platform_id = ?",
+        [Value::Text(platform.as_str().to_owned())],
+    );
     let mra: bool = conn
         .prepare(
             "SELECT EXISTS (SELECT 1 FROM titles
              WHERE platform_id = ?1 AND source = 'mra' AND retired = 0)",
         )?
-        .query_row([&platform.0], |r| r.get(0))?;
+        .query_row([platform], |r| r.get(0))?;
     if mra {
         clause.and("g.source = 'mra'", []);
     }
@@ -262,10 +265,10 @@ pub(super) fn browse_clause(
                     [
                         Value::Text(format!(
                             "platform : \"\u{1f}{}\u{1f}\" AND base_name : {}",
-                            platform.0,
+                            platform.as_str(),
                             phrase(q)
                         )),
-                        Value::Text(platform.0.clone()),
+                        Value::Text(platform.as_str().to_owned()),
                     ],
                 ),
             }
@@ -360,7 +363,7 @@ fn like_pattern(q: &str) -> String {
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let page = Page { limit: 10, offset: 0 };
-/// let nes = mistarr_core::PlatformId("nes".into());
+/// let nes = mistarr_core::PlatformId::new("nes");
 /// let got = browse(&conn, &nes, &Browse::default(), page).unwrap();
 /// assert!(got.items.is_empty() && got.total == 0);
 /// ```
@@ -386,7 +389,7 @@ pub fn browse(
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let filter = Browse { q: Some("quest".into()), ..Browse::default() };
 /// let page = Page { limit: 10, offset: 0 };
-/// let got = browse_with(&conn, &mistarr_core::PlatformId("nes".into()), &filter, page, SearchShape::Like).unwrap();
+/// let got = browse_with(&conn, &mistarr_core::PlatformId::new("nes"), &filter, page, SearchShape::Like).unwrap();
 /// assert!(got.items.is_empty() && got.total == 0);
 /// ```
 pub fn browse_with(
@@ -423,7 +426,7 @@ fn browse_in(
         .query_map(params_from_iter(args), |r| {
             Ok(GroupRow {
                 parent_id: r.get(0)?,
-                platform_id: PlatformId(r.get(1)?),
+                platform_id: r.get(1)?,
                 base_name: r.get(2)?,
                 name: r.get(3)?,
                 pick_id: r.get(4)?,
@@ -450,7 +453,7 @@ fn browse_in(
 /// use mistarr_server::db::ids::TitleId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(group_of(&conn, TitleId(1)).unwrap().is_none());
+/// assert!(group_of(&conn, TitleId::new(1)).unwrap().is_none());
 /// ```
 pub fn group_of(conn: &Connection, id: TitleId) -> Result<Option<TitleId>> {
     Ok(conn

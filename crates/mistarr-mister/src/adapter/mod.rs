@@ -22,7 +22,7 @@ mod xml_caps;
 ///
 /// ```
 /// use mistarr_mister::{adapter_for, DatEntry, PlaceRom, PlatformId, StagedFile, StagedKind};
-/// let snes = adapter_for(&PlatformId("snes".into())).unwrap();
+/// let snes = adapter_for(&PlatformId::new("snes")).unwrap();
 /// let entry = DatEntry { name: "Example Quest (USA)".into(),
 ///     roms: vec![PlaceRom { name: "Example Quest (USA).sfc".into(), size: 1024, header: None }] };
 /// let staged = StagedFile { path: "/s/x.sfc".into(), size: 1024, kind: StagedKind::File,
@@ -129,14 +129,14 @@ pub enum Step {
 ///
 /// ```
 /// use mistarr_mister::{adapter_for, PlatformId};
-/// assert!(adapter_for(&PlatformId("n64".into())).is_some());
-/// assert!(adapter_for(&PlatformId("unknown".into())).is_none());
+/// assert!(adapter_for(&PlatformId::new("n64")).is_some());
+/// assert!(adapter_for(&PlatformId::new("unknown")).is_none());
 /// ```
 #[must_use]
 pub fn adapter_for(id: &PlatformId) -> Option<&'static dyn CoreAdapter> {
     static CELL: OnceLock<Vec<Box<dyn CoreAdapter>>> = OnceLock::new();
     let all = CELL.get_or_init(|| PLATFORMS.iter().map(build).collect());
-    let index = PLATFORMS.iter().position(|p| p.id == id.0)?;
+    let index = PLATFORMS.iter().position(|p| p.id == id.as_str())?;
     all.get(index).map(AsRef::as_ref)
 }
 
@@ -334,7 +334,7 @@ pub(crate) mod testutil {
     }
 
     pub fn adapter(id: &str) -> &'static dyn CoreAdapter {
-        adapter_for(&PlatformId(id.to_owned())).expect("id is in the table")
+        adapter_for(&PlatformId::new(id.to_owned())).expect("id is in the table")
     }
 
     /// A fresh directory, removed with everything in it when dropped.
@@ -353,7 +353,7 @@ mod tests {
         for p in &PLATFORMS {
             assert!(adapter_for(&p.platform_id()).is_some(), "{}", p.id);
         }
-        assert!(adapter_for(&PlatformId("unknown".into())).is_none());
+        assert!(adapter_for(&PlatformId::new("unknown")).is_none());
     }
 
     #[test]

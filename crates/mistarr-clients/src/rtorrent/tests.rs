@@ -306,7 +306,7 @@ async fn add_rejected_by_rtorrent_is_a_protocol_error() {
         .add(metainfo(1, 1), Path::new("/s"), &[], SeedPolicy::None)
         .await
         .expect_err("not loaded");
-    assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
+    assert!(matches!(err, Error::Protocol(_)), "{err:?}");
 }
 
 #[tokio::test]
@@ -345,7 +345,7 @@ async fn add_checks_indices_and_sources_before_any_call() {
     assert!(
         matches!(
             err,
-            ClientError::FileIndex {
+            Error::FileIndex {
                 index: 3,
                 file_count: 3
             }
@@ -419,10 +419,10 @@ async fn set_wanted_errors() {
     let (fake, client) = setup().await;
     fake.push(ints(&[1, 1]));
     let err = client.set_wanted(&id(2), &[0]).await.expect_err("pending");
-    assert!(matches!(err, ClientError::MetadataPending), "{err:?}");
+    assert!(matches!(err, Error::MetadataPending), "{err:?}");
     fake.push(ints(&[0, 2]));
     let err = client.set_wanted(&id(2), &[2]).await.expect_err("range");
-    assert!(matches!(err, ClientError::FileIndex { .. }), "{err:?}");
+    assert!(matches!(err, Error::FileIndex { .. }), "{err:?}");
     assert_eq!(fake.requests().len(), 2);
 }
 
@@ -447,7 +447,7 @@ async fn unknown_torrent_is_not_found() {
     let (fake, client) = setup().await;
     fake.push(not_found());
     let err = client.stop(&id(4)).await.expect_err("missing");
-    assert!(matches!(err, ClientError::NotFound), "{err:?}");
+    assert!(matches!(err, Error::NotFound), "{err:?}");
     assert_eq!(fake.requests().len(), 1);
 }
 
@@ -564,7 +564,7 @@ async fn status_fault_in_multicall_entry_is_not_found() {
     .to_value();
     fake.push(ScgiReply::Value(Value::Array(vec![fault; 11])));
     let err = client.status(&id(7)).await.expect_err("missing");
-    assert!(matches!(err, ClientError::NotFound), "{err:?}");
+    assert!(matches!(err, Error::NotFound), "{err:?}");
 }
 
 #[tokio::test]
@@ -723,7 +723,7 @@ async fn set_seed_policy_replaces_the_policy_evaluated_by_status() {
         .set_seed_policy(&id(12), SeedPolicy::None)
         .await
         .expect_err("missing");
-    assert!(matches!(err, ClientError::NotFound), "{err:?}");
+    assert!(matches!(err, Error::NotFound), "{err:?}");
 }
 
 #[tokio::test]
@@ -821,7 +821,11 @@ async fn remove_deletes_what_it_can_then_erases_and_reports_the_failure() {
     fake.push(layout_reply(&dir, 0, &["stuck.bin", "gone.bin"]));
     fake.push(ok());
     let err = client.remove(&id(20), true).await.expect_err("partial");
-    assert!(matches!(err, ClientError::Io(_)), "{err:?}");
+    let stuck = local.join("stuck.bin");
+    assert!(
+        matches!(err, Error::Io { ref path, .. } if *path == stuck),
+        "{err:?}"
+    );
     assert!(!local.join("gone.bin").exists());
     assert!(local.join("stuck.bin").exists());
     assert_eq!(
@@ -836,10 +840,10 @@ async fn remove_refuses_unsafe_paths_before_erasing() {
     let (fake, client) = setup().await;
     fake.push(layout_reply("/srv/x", 1, &["../escape.bin"]));
     let err = client.remove(&id(17), true).await.expect_err("unsafe");
-    assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
+    assert!(matches!(err, Error::Protocol(_)), "{err:?}");
     fake.push(layout_reply("relative", 1, &["a.bin"]));
     let err = client.remove(&id(17), true).await.expect_err("relative");
-    assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
+    assert!(matches!(err, Error::Protocol(_)), "{err:?}");
     assert!(!fake.methods().iter().any(|m| m == "d.erase"));
 }
 
@@ -879,15 +883,15 @@ async fn fault_and_garbage_map_to_protocol() {
     fake.push(ScgiReply::fault(-506, "Method 'x' not defined"));
     let err = client.probe().await.expect_err("fault");
     assert!(
-        matches!(err, ClientError::Protocol(ref m) if m.contains("-506")),
+        matches!(err, Error::Protocol(ref m) if m.contains("-506")),
         "{err:?}"
     );
     fake.push(ScgiReply::Raw(b"Status: 200 OK\r\n\r\n<html/>".to_vec()));
     let err = client.probe().await.expect_err("garbage");
-    assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
+    assert!(matches!(err, Error::Protocol(_)), "{err:?}");
     fake.push(ScgiReply::Value(Value::Int(1)));
     let err = client.probe().await.expect_err("not a string");
-    assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
+    assert!(matches!(err, Error::Protocol(_)), "{err:?}");
 }
 
 #[tokio::test]
@@ -899,7 +903,7 @@ async fn connection_refused_is_unreachable() {
     drop(listener);
     let client = Rtorrent::new(&addr).expect("addr");
     let err = client.probe().await.expect_err("refused");
-    assert!(matches!(err, ClientError::Unreachable(_)), "{err:?}");
+    assert!(matches!(err, Error::Unreachable(_)), "{err:?}");
 }
 
 #[tokio::test]
@@ -911,7 +915,7 @@ async fn silence_times_out_as_unreachable() {
         .with_timeout(Duration::from_millis(100));
     let err = client.probe().await.expect_err("timeout");
     assert!(
-        matches!(err, ClientError::Unreachable(ref m) if m.contains("timed out")),
+        matches!(err, Error::Unreachable(ref m) if m.contains("timed out")),
         "{err:?}"
     );
 }
@@ -972,7 +976,7 @@ async fn files_list_paths_once_metadata_is_present() {
     ]));
     assert!(matches!(
         client.files(&id(6)).await,
-        Err(ClientError::MetadataPending)
+        Err(Error::MetadataPending)
     ));
     let files = client.files(&id(6)).await.expect("files");
     let listed: Vec<(u32, &str, u64)> = files

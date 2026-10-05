@@ -4,7 +4,8 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 use mistarr_clients::{
-    ClientError, ClientFile, ClientInfo, ClientTorrentId, SeedPolicy, TorrentSource, TorrentStatus,
+    ClientFile, ClientInfo, ClientTorrentId, Error as ClientError, SeedPolicy, TorrentSource,
+    TorrentStatus,
 };
 
 use super::*;

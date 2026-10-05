@@ -145,12 +145,13 @@ fn is_file_name(s: &str) -> bool {
 /// assert!(mistarr_mister::adapter::neogeo::read_romsets(dir.path()).unwrap().is_none());
 /// ```
 pub fn read_romsets(neogeo_dir: &Path) -> Result<Option<Romsets>> {
-    let file = match std::fs::File::open(neogeo_dir.join(ROMSETS_FILE)) {
+    let path = neogeo_dir.join(ROMSETS_FILE);
+    let file = match std::fs::File::open(&path) {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(Error::io_at(&path)(e)),
     };
-    if file.metadata()?.len() > MAX_ROMSETS_BYTES {
+    if file.metadata().map_err(Error::io_at(&path))?.len() > MAX_ROMSETS_BYTES {
         return Err(too_big());
     }
     let mut limited = BufReader::new(file.take(MAX_ROMSETS_BYTES + 1));

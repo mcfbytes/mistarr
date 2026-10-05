@@ -13,9 +13,9 @@ use crate::detect::ScgiAddr;
 use crate::wanted::Wanted;
 use crate::xmlrpc::{self, Fault, MethodResponse, Value};
 use crate::{
-    scgi, ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId, Direction,
-    DownloadClient, FileProgress, RateLimit, RemotePathMap, Result, SeedPolicy, TorrentSource,
-    TorrentState, TorrentStatus,
+    scgi, ClientFile, ClientInfo, ClientKind, ClientTorrentId, Direction, DownloadClient, Error,
+    FileProgress, RateLimit, RemotePathMap, Result, SeedPolicy, TorrentSource, TorrentState,
+    TorrentStatus,
 };
 
 /// The global limit's getter, in bytes per second with 0 for none, and its
@@ -92,7 +92,7 @@ pub fn recommended_rc() -> &'static str {
 /// let rt = Rtorrent::new("/media/fat/mistarr/rtorrent.sock")?
 ///     .with_timeout(Duration::from_secs(10))
 ///     .with_path_map(RemotePathMap::new(vec![PathMapping::new("/srv", "/media/fat")]));
-/// # Ok::<(), mistarr_clients::ClientError>(())
+/// # Ok::<(), mistarr_clients::Error>(())
 /// ```
 #[derive(Debug)]
 pub struct Rtorrent {
@@ -122,7 +122,7 @@ impl Rtorrent {
     /// [`ScgiAddr::parse`] accepts. No request is made until the first operation.
     ///
     /// # Errors
-    /// [`ClientError::Protocol`] if `addr` is not an SCGI address.
+    /// [`Error::Protocol`] if `addr` is not an SCGI address.
     ///
     /// ```
     /// use mistarr_clients::Rtorrent;
@@ -131,7 +131,7 @@ impl Rtorrent {
     /// ```
     pub fn new(addr: &str) -> Result<Self> {
         let addr = ScgiAddr::parse(addr)
-            .ok_or_else(|| ClientError::protocol(format!("invalid SCGI address {addr:?}")))?;
+            .ok_or_else(|| Error::protocol(format!("invalid SCGI address {addr:?}")))?;
         Ok(Self {
             addr,
             timeout: Self::DEFAULT_TIMEOUT,
@@ -150,7 +150,7 @@ impl Rtorrent {
                 .call("d.directory.set", &[target.into(), dir.into()])
                 .await
             {
-                Err(ClientError::NotFound) if tokio::time::Instant::now() < deadline => {
+                Err(Error::NotFound) if tokio::time::Instant::now() < deadline => {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 other => return other.map(drop).map_err(not_loaded),
@@ -170,7 +170,7 @@ impl Rtorrent {
     /// ```
     /// use std::time::Duration;
     /// let rt = mistarr_clients::Rtorrent::new("127.0.0.1:5000")?.with_timeout(Duration::from_secs(5));
-    /// # Ok::<(), mistarr_clients::ClientError>(())
+    /// # Ok::<(), mistarr_clients::Error>(())
     /// ```
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -185,7 +185,7 @@ impl Rtorrent {
     /// ```
     /// let rt = mistarr_clients::Rtorrent::new("127.0.0.1:5000")?
     ///     .with_path_map(mistarr_clients::RemotePathMap::default());
-    /// # Ok::<(), mistarr_clients::ClientError>(())
+    /// # Ok::<(), mistarr_clients::Error>(())
     /// ```
     #[must_use]
     pub fn with_path_map(mut self, path_map: RemotePathMap) -> Self {
@@ -197,7 +197,7 @@ impl Rtorrent {
     async fn call(&self, method: &str, params: &[Value]) -> Result<Value> {
         let body = xmlrpc::encode_call(method, params);
         let reply = scgi::request(&self.addr, &body, self.timeout).await?;
-        match xmlrpc::decode_response(&reply).map_err(ClientError::protocol)? {
+        match xmlrpc::decode_response(&reply).map_err(Error::protocol)? {
             MethodResponse::Success(v) => Ok(v),
             MethodResponse::Fault(f) => Err(fault_error(&f)),
         }
@@ -217,12 +217,10 @@ impl Rtorrent {
             .collect();
         let Value::Array(results) = self.call("system.multicall", &[Value::Array(list)]).await?
         else {
-            return Err(ClientError::protocol(
-                "system.multicall reply is not an array",
-            ));
+            return Err(Error::protocol("system.multicall reply is not an array"));
         };
         if results.len() != count {
-            return Err(ClientError::protocol(
+            return Err(Error::protocol(
                 "system.multicall reply has the wrong length",
             ));
         }
@@ -231,7 +229,7 @@ impl Rtorrent {
             .map(|entry| match entry {
                 Value::Array(mut one) if one.len() == 1 => Ok(one.remove(0)),
                 other => Err(Fault::from_value(&other).map_or_else(
-                    || ClientError::protocol("malformed system.multicall entry"),
+                    || Error::protocol("malformed system.multicall entry"),
                     |f| fault_error(&f),
                 )),
             })
@@ -249,7 +247,7 @@ impl Rtorrent {
         if int(&r[0])? != 0 {
             return Ok(None);
         }
-        let count = usize::try_from(int(&r[1])?).map_err(ClientError::protocol)?;
+        let count = usize::try_from(int(&r[1])?).map_err(Error::protocol)?;
         Ok(Some(count))
     }
 
@@ -287,7 +285,7 @@ impl DownloadClient for Rtorrent {
         let version = self.call("system.client_version", &[]).await?;
         let version = version
             .as_str()
-            .ok_or_else(|| ClientError::protocol("system.client_version is not a string"))?;
+            .ok_or_else(|| Error::protocol("system.client_version is not a string"))?;
         Ok(ClientInfo {
             kind: ClientKind::Rtorrent,
             version: version.to_owned(),
@@ -305,7 +303,7 @@ impl DownloadClient for Rtorrent {
         let dir = self.path_map.to_remote(download_dir);
         let dir = dir
             .to_str()
-            .ok_or_else(|| ClientError::protocol("download dir is not UTF-8"))?;
+            .ok_or_else(|| Error::protocol("download dir is not UTF-8"))?;
         let hash = src.infohash();
         let (known_count, method, data) = match src {
             TorrentSource::Metainfo {
@@ -321,7 +319,7 @@ impl DownloadClient for Rtorrent {
         let mut torrents = self.torrents.lock().await;
         let fresh = match self.call("d.hash", &[target.as_str().into()]).await {
             Ok(_) => false,
-            Err(ClientError::NotFound) => true,
+            Err(Error::NotFound) => true,
             Err(e) => return Err(e),
         };
         if fresh {
@@ -350,7 +348,7 @@ impl DownloadClient for Rtorrent {
         let count = self
             .file_count(&target)
             .await?
-            .ok_or(ClientError::MetadataPending)?;
+            .ok_or(Error::MetadataPending)?;
         wanted.check(count)?;
         self.apply_selection(&target, count, &wanted).await
     }
@@ -431,21 +429,19 @@ impl DownloadClient for Rtorrent {
             ])
             .await?;
         let [meta, rows] = r.as_slice() else {
-            return Err(ClientError::protocol(
-                "file list reply has the wrong length",
-            ));
+            return Err(Error::protocol("file list reply has the wrong length"));
         };
         if int(meta)? != 0 {
-            return Err(ClientError::MetadataPending);
+            return Err(Error::MetadataPending);
         }
         let rows = rows
             .as_array()
-            .ok_or_else(|| ClientError::protocol("f.multicall reply is not an array"))?;
+            .ok_or_else(|| Error::protocol("f.multicall reply is not an array"))?;
         rows.iter()
             .zip(0u32..)
             .map(|(row, index)| {
                 let [path, size] = row.as_array().unwrap_or_default() else {
-                    return Err(ClientError::protocol("malformed f.multicall row"));
+                    return Err(Error::protocol("malformed f.multicall row"));
                 };
                 Ok(ClientFile {
                     index,
@@ -478,21 +474,25 @@ impl DownloadClient for Rtorrent {
         // Files go before the erase, so a failed erase leaves a torrent whose
         // file list a retry can still read.
         let deleted = match data {
-            Some(layout) => tokio::task::spawn_blocking(move || delete_labelled(layout))
-                .await
-                .map_err(|e| ClientError::Io(io::Error::other(e)))?,
+            Some(layout) => {
+                // The directory names a delete whose thread panicked.
+                let dir = layout.directory.clone();
+                tokio::task::spawn_blocking(move || delete_labelled(layout))
+                    .await
+                    .map_err(|e| Error::io_at(&dir)(io::Error::other(e)))?
+            }
             None => Ok(()),
         };
         self.call("d.erase", &[target.as_str().into()]).await?;
         torrents.remove(&hash);
-        deleted.map_err(ClientError::Io)
+        deleted
     }
 
     async fn rate_limit(&self, dir: Direction) -> Result<RateLimit> {
         let _guard = self.torrents.lock().await;
         let bytes = uint(&self.call(throttle(dir).0, &["".into()]).await?)?;
         // Rounded up, so a limit under 1 KiB/s is never read back as none.
-        let kbps = u32::try_from(bytes.div_ceil(1024)).map_err(ClientError::protocol)?;
+        let kbps = u32::try_from(bytes.div_ceil(1024)).map_err(Error::protocol)?;
         Ok(RateLimit {
             enabled: kbps > 0,
             kbps,
@@ -511,13 +511,13 @@ impl DownloadClient for Rtorrent {
     async fn process_id(&self) -> Result<Option<u32>> {
         let _guard = self.torrents.lock().await;
         let pid = uint(&self.call("system.pid", &[]).await?)?;
-        u32::try_from(pid).map(Some).map_err(ClientError::protocol)
+        u32::try_from(pid).map(Some).map_err(Error::protocol)
     }
 }
 
 /// Deletes `layout` with the thread's `comm` set to `torrent-delete`, then puts the
 /// pool thread's name back; off Linux, or without `/proc`, it only deletes.
-fn delete_labelled(layout: DataLayout) -> io::Result<()> {
+fn delete_labelled(layout: DataLayout) -> Result<()> {
     const COMM: &str = "/proc/thread-self/comm";
     let saved = std::fs::read_to_string(COMM).ok();
     if saved.is_some() {
@@ -531,35 +531,35 @@ fn delete_labelled(layout: DataLayout) -> io::Result<()> {
 }
 
 /// rtorrent reports an unknown hash as a fault naming the info-hash.
-fn fault_error(fault: &Fault) -> ClientError {
+fn fault_error(fault: &Fault) -> Error {
     if fault.message.contains("Could not find info-hash") {
-        ClientError::NotFound
+        Error::NotFound
     } else {
-        ClientError::protocol(format!("fault {}: {}", fault.code, fault.message))
+        Error::protocol(format!("fault {}: {}", fault.code, fault.message))
     }
 }
 
 /// After a load, a missing torrent means rtorrent rejected the data.
-fn not_loaded(e: ClientError) -> ClientError {
+fn not_loaded(e: Error) -> Error {
     match e {
-        ClientError::NotFound => ClientError::protocol("rtorrent did not load the torrent"),
+        Error::NotFound => Error::protocol("rtorrent did not load the torrent"),
         other => other,
     }
 }
 
 fn int(v: &Value) -> Result<i64> {
     v.as_i64()
-        .ok_or_else(|| ClientError::protocol(format!("expected an integer, got {v:?}")))
+        .ok_or_else(|| Error::protocol(format!("expected an integer, got {v:?}")))
 }
 
 fn uint(v: &Value) -> Result<u64> {
-    u64::try_from(int(v)?).map_err(ClientError::protocol)
+    u64::try_from(int(v)?).map_err(Error::protocol)
 }
 
 fn text(v: &Value) -> Result<String> {
     v.as_str()
         .map(str::to_owned)
-        .ok_or_else(|| ClientError::protocol(format!("expected a string, got {v:?}")))
+        .ok_or_else(|| Error::protocol(format!("expected a string, got {v:?}")))
 }
 
 /// rtorrent addresses a download by its uppercase hex infohash.
@@ -597,7 +597,7 @@ impl RawStatus {
     fn read(r: &[Value]) -> Result<Self> {
         let [state, active, complete, checking, hashing, ratio, down, up, message, meta, files] = r
         else {
-            return Err(ClientError::protocol("status reply has the wrong length"));
+            return Err(Error::protocol("status reply has the wrong length"));
         };
         let files = if int(meta)? == 0 {
             read_files(files)?
@@ -665,12 +665,12 @@ impl RawStatus {
 fn read_files(v: &Value) -> Result<Vec<FileProgress>> {
     let rows = v
         .as_array()
-        .ok_or_else(|| ClientError::protocol("f.multicall reply is not an array"))?;
+        .ok_or_else(|| Error::protocol("f.multicall reply is not an array"))?;
     rows.iter()
         .zip(0u32..)
         .map(|(row, index)| {
             let [size, done, chunks, priority] = row.as_array().unwrap_or_default() else {
-                return Err(ClientError::protocol("malformed f.multicall row"));
+                return Err(Error::protocol("malformed f.multicall row"));
             };
             let size = uint(size)?;
             let (done, chunks) = (uint(done)?, uint(chunks)?);
@@ -678,7 +678,7 @@ fn read_files(v: &Value) -> Result<Vec<FileProgress>> {
                 size
             } else {
                 u64::try_from(u128::from(size) * u128::from(done) / u128::from(chunks))
-                    .map_err(ClientError::protocol)?
+                    .map_err(Error::protocol)?
             };
             Ok(FileProgress {
                 index,
@@ -700,22 +700,22 @@ struct DataLayout {
 impl DataLayout {
     fn read(r: &[Value], map: &RemotePathMap) -> Result<Self> {
         let [directory, multi, files] = r else {
-            return Err(ClientError::protocol("remove reply has the wrong length"));
+            return Err(Error::protocol("remove reply has the wrong length"));
         };
         let directory = map.to_local(Path::new(&text(directory)?));
         let files = files
             .as_array()
-            .ok_or_else(|| ClientError::protocol("f.multicall reply is not an array"))?
+            .ok_or_else(|| Error::protocol("f.multicall reply is not an array"))?
             .iter()
             .map(|row| {
                 let [path] = row.as_array().unwrap_or_default() else {
-                    return Err(ClientError::protocol("malformed f.multicall row"));
+                    return Err(Error::protocol("malformed f.multicall row"));
                 };
                 let rel = PathBuf::from(text(path)?);
                 if rel.components().all(|c| matches!(c, Component::Normal(_))) {
                     Ok(rel)
                 } else {
-                    Err(ClientError::protocol(format!(
+                    Err(Error::protocol(format!(
                         "unsafe file path {}",
                         rel.display()
                     )))
@@ -723,7 +723,7 @@ impl DataLayout {
             })
             .collect::<Result<_>>()?;
         if !directory.is_absolute() {
-            return Err(ClientError::protocol("download directory is not absolute"));
+            return Err(Error::protocol("download directory is not absolute"));
         }
         Ok(Self {
             directory,
@@ -734,14 +734,15 @@ impl DataLayout {
 
     /// Removes the torrent's files, then any directories they leave empty
     /// inside a multi-file torrent's own directory. Carries on past failures
-    /// and returns the first.
-    fn delete(self) -> io::Result<()> {
+    /// and returns the first, naming its file.
+    fn delete(self) -> Result<()> {
         let mut first_error = None;
         let mut dirs = BTreeSet::new();
         for rel in &self.files {
-            match std::fs::remove_file(self.directory.join(rel)) {
+            let path = self.directory.join(rel);
+            match std::fs::remove_file(&path) {
                 Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                    first_error.get_or_insert(e);
+                    first_error.get_or_insert_with(|| Error::io_at(&path)(e));
                 }
                 _ => {}
             }

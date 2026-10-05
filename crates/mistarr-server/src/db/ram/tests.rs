@@ -226,12 +226,12 @@ fn plan(ram: &Path) -> Plan {
     Plan {
         dir: ram.to_path_buf(),
         floor: 0,
-        job: Some(crate::db::ids::JobId(7)),
+        job: Some(crate::db::ids::JobId::new(7)),
         input: 0,
     }
 }
 
-fn sha1(path: &Path) -> String {
+fn sha1(path: &Path) -> mistarr_core::Sha1 {
     let file = File::open(path).expect("open");
     mistarr_core::hash::hash_reader(file, mistarr_core::hash::HeaderRule::None, None)
         .expect("hash")
@@ -410,7 +410,10 @@ fn a_swap_refuses_a_file_it_cannot_rename_and_keeps_the_old_one() {
     let (dir, db) = card(1024);
     let missing = dir.path().join("absent.new");
     let r = db.hold_writer_blocking(|h| h.replace_file(&missing));
-    assert!(matches!(r, Err(Error::Io(_))), "{r:?}");
+    assert!(
+        matches!(r, Err(Error::File { ref path, .. }) if *path == missing),
+        "{r:?}"
+    );
     assert_eq!(get(&db, "k").as_deref(), Some("old"));
     db.write_blocking(|c| settings::set(c, "k", "kept"))
         .expect("reopened on the old file");

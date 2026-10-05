@@ -431,7 +431,7 @@ mod tests {
 
     fn changed(i: i64) -> Event<'static> {
         Event::FileChanged(FileChanged {
-            file_id: FileId(i),
+            file_id: FileId::new(i),
             state: FileState::Verified,
         })
     }
@@ -503,8 +503,8 @@ mod tests {
         bus.publish(&changed(1));
         let mut sub = bus.subscribe(None);
         bus.publish(&Event::ImportDone(ImportDone {
-            title_id: TitleId(1),
-            file_id: FileId(2),
+            title_id: TitleId::new(1),
+            file_id: FileId::new(2),
             action: ImportAction::Placed,
         }));
         let got = sub.live.recv().await.expect("event");
@@ -544,9 +544,9 @@ mod tests {
 
     #[test]
     fn payloads_serialise_as_their_own_body() {
-        let platform = PlatformId("nes".into());
+        let platform = PlatformId::new("nes");
         let loaded = Event::DatLoaded(DatLoaded {
-            dat_version_id: DatVersionId(4),
+            dat_version_id: DatVersionId::new(4),
             file: "a.dat",
             platform_id: Some(&platform),
         });
@@ -556,7 +556,7 @@ mod tests {
             r#"{"dat_version_id":4,"file":"a.dat","platform_id":"nes"}"#
         );
         let unbound = Event::SourceChanged(SourceChanged {
-            source_id: SourceId(1),
+            source_id: SourceId::new(1),
             state: SourceState::Bound,
             platform_id: None,
         });

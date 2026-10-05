@@ -30,12 +30,12 @@ const CHUNK: usize = 2_000;
 /// ```
 /// use mistarr_core::PlatformId;
 /// use mistarr_server::jobs::remap::fuzzy_extensions;
-/// assert_eq!(fuzzy_extensions(&PlatformId("nes".into())), ["nes"]);
-/// assert!(fuzzy_extensions(&PlatformId("psx".into())).is_empty());
+/// assert_eq!(fuzzy_extensions(&PlatformId::new("nes")), ["nes"]);
+/// assert!(fuzzy_extensions(&PlatformId::new("psx")).is_empty());
 /// ```
 #[must_use]
 pub fn fuzzy_extensions(platform: &PlatformId) -> Vec<&'static str> {
-    platforms::by_id(&platform.0)
+    platforms::by_id(platform.as_str())
         .filter(|row| row.kind == Kind::Cartridge)
         .map(|row| row.load_extensions.to_vec())
         .unwrap_or_default()
@@ -106,8 +106,8 @@ fn guesses(
     platform: &PlatformId,
     files: &[TorrentFile],
     unmatched: &[&TorrentFile],
-    mut extra: Vec<(u32, binding::RomRef, binding::Confidence)>,
-) -> Vec<(u32, binding::RomRef, binding::Confidence)> {
+    mut extra: Vec<(u32, mistarr_core::RomId, binding::Confidence)>,
+) -> Vec<(u32, mistarr_core::RomId, binding::Confidence)> {
     let extensions = fuzzy_extensions(platform);
     let size_index = SqlSizeIndex::new(conn, platform);
     extra.extend(fuzzy::candidates(
@@ -276,7 +276,7 @@ pub async fn remap_one(app: &AppState, id: SourceId) -> Result<bool> {
         })
         .await?;
     if changed {
-        tracing::info!(source = %id, platform = %platform.0, "source mapped again");
+        tracing::info!(source = %id, platform = %platform.as_str(), "source mapped again");
         publish_changed(app, &row);
     }
     Ok(changed)
@@ -386,9 +386,9 @@ mod tests {
     use super::*;
     use crate::app::testutil::state;
     use crate::db::fixtures::{pid, seed_rom};
-    use crate::db::ids::RomId;
     use crate::db::sources::{NewSource, SourceState};
     use crate::jobs::Scheduler;
+    use mistarr_core::RomId;
 
     fn file(index: u32, path: &str, size: u64) -> TorrentFile {
         TorrentFile {
@@ -412,7 +412,7 @@ mod tests {
         )
         .expect("insert");
         rows::replace_files(c, id, files).expect("files");
-        rows::set_binding(c, id, Some(&PlatformId("nes".into())), Some(0.0)).expect("bind");
+        rows::set_binding(c, id, Some(&PlatformId::new("nes")), Some(0.0)).expect("bind");
         id
     }
 
@@ -427,10 +427,10 @@ mod tests {
 
     #[test]
     fn fuzzy_extensions_are_those_of_cartridge_platforms() {
-        assert_eq!(fuzzy_extensions(&PlatformId("snes".into())), ["sfc", "smc"]);
-        assert!(fuzzy_extensions(&PlatformId("psx".into())).is_empty());
-        assert!(fuzzy_extensions(&PlatformId("neogeo".into())).is_empty());
-        assert!(fuzzy_extensions(&PlatformId("none".into())).is_empty());
+        assert_eq!(fuzzy_extensions(&PlatformId::new("snes")), ["sfc", "smc"]);
+        assert!(fuzzy_extensions(&PlatformId::new("psx")).is_empty());
+        assert!(fuzzy_extensions(&PlatformId::new("neogeo")).is_empty());
+        assert!(fuzzy_extensions(&PlatformId::new("none")).is_empty());
     }
 
     #[tokio::test]
@@ -455,7 +455,7 @@ mod tests {
             .write_blocking(|c| {
                 let a = source(c, &"2b".repeat(20), &[file(0, "a.nes", 16)]);
                 let b = source(c, &"2c".repeat(20), &[file(0, "b.nes", 16)]);
-                let stamp = candidates::rom_stamp(c, &PlatformId("nes".into()))?;
+                let stamp = candidates::rom_stamp(c, &PlatformId::new("nes"))?;
                 rows::set_map_stamp(c, a, Some(&stamp))?;
                 Ok((a, b))
             })
@@ -491,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn a_source_is_mapped_again_only_when_its_roms_change() {
         let (_dir, app) = state();
-        let nes = PlatformId("nes".into());
+        let nes = PlatformId::new("nes");
         let id = app
             .db
             .write_blocking(|c| {
@@ -501,7 +501,7 @@ mod tests {
                     file(2, "a.txt", 1),
                 ];
                 let id = source(c, &"2a".repeat(20), &files);
-                assert_eq!(map_files(c, id, &PlatformId("nes".into()), &files)?, 0);
+                assert_eq!(map_files(c, id, &PlatformId::new("nes"), &files)?, 0);
                 Ok(id)
             })
             .expect("db");
@@ -546,7 +546,7 @@ mod tests {
     #[tokio::test]
     async fn a_proof_on_a_removed_dat_moves_to_the_live_copy() {
         let (_dir, app) = state();
-        let nes = PlatformId("nes".into());
+        let nes = PlatformId::new("nes");
         let (id, a, b) = app
             .db
             .write_blocking(|c| {
@@ -581,7 +581,7 @@ mod tests {
                     [dat],
                     |r| r.get(0),
                 )?;
-                crate::db::dats::retire(c, crate::db::ids::DatVersionId(dat), 1)?;
+                crate::db::dats::retire(c, crate::db::ids::DatVersionId::new(dat), 1)?;
                 Ok((id, a, b))
             })
             .expect("db");
@@ -591,13 +591,13 @@ mod tests {
             .read(move |c| {
                 Ok(c.query_row(
                     "SELECT rom_id FROM torrent_files WHERE source_id = ?1 AND file_index = 0",
-                    [id.0],
+                    [id.get()],
                     |r| r.get(0),
                 )?)
             })
             .await
             .expect("rom");
         assert_ne!(rom, Some(a), "the proof on the removed DAT is dropped");
-        assert_eq!(rom, Some(RomId(b)));
+        assert_eq!(rom, Some(RomId::new(b)));
     }
 }

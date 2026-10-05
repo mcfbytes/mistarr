@@ -21,13 +21,24 @@ pub const FORMAT_MARKERS: &[&str] = &[
 /// current version of the same family on the same platform.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct DatFamily(pub String);
+pub struct DatFamily(String);
 
 impl DatFamily {
     /// The key as stored.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// The key as stored, without a copy.
+    ///
+    /// ```
+    /// let key = mistarr_core::dat::family_key("Example System (2)");
+    /// assert_eq!(key.into_string(), "example system");
+    /// ```
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
     }
 }
 

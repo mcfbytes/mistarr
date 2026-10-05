@@ -1,5 +1,6 @@
 //! What the launch route needs to know about a title; see `docs/API.md` "Launching".
 
+use mistarr_core::PlatformId;
 use rusqlite::{Connection, OptionalExtension};
 
 use super::files::FileState;
@@ -11,7 +12,7 @@ use crate::error::Result;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaunchTitle {
     /// Platform id.
-    pub platform_id: String,
+    pub platform_id: PlatformId,
     /// The DAT entry is flagged `bios`.
     pub bios: bool,
     /// Where the title was read from.
@@ -37,7 +38,7 @@ pub struct LaunchTitle {
 /// use mistarr_server::db::{launch, ids::TitleId};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(launch::title(&conn, TitleId(1)).unwrap().is_none());
+/// assert!(launch::title(&conn, TitleId::new(1)).unwrap().is_none());
 /// ```
 pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
     let row = conn
@@ -105,20 +106,20 @@ pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
 
 #[cfg(test)]
 mod tests {
-    use mistarr_core::{HashSet, PlatformId};
+    use mistarr_core::{Hashes, PlatformId};
 
     use super::*;
     use crate::db::files::{self, NewFile};
     use crate::db::fixtures::{conn, dat};
-    use crate::db::ids::RomId;
     use crate::db::titles::RomStatus;
+    use mistarr_core::RomId;
 
-    fn hashes() -> HashSet {
-        HashSet {
+    fn hashes() -> Hashes {
+        Hashes {
             size: 4,
-            crc32: "00000001".into(),
-            md5: "0".repeat(32),
-            sha1: "1".repeat(40),
+            crc32: "00000001".parse().expect("hex"),
+            md5: "0".repeat(32).parse().expect("hex"),
+            sha1: "1".repeat(40).parse().expect("hex"),
         }
     }
 
@@ -138,7 +139,7 @@ mod tests {
     #[test]
     fn disc_title_is_complete_only_with_every_track() {
         let c = conn();
-        let pid = PlatformId("psx".into());
+        let pid = PlatformId::new("psx");
         let disc = dat(&pid)
             .title("Example Disc (USA)")
             .rom("g.cue", &hashes(), RomStatus::Good)
@@ -165,7 +166,7 @@ mod tests {
     #[test]
     fn unverified_and_pending_files_do_not_count() {
         let c = conn();
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         let rom = dat(&pid)
             .title("Example Quest")
             .rom("a.nes", &hashes(), RomStatus::Good)
@@ -187,7 +188,7 @@ mod tests {
     #[test]
     fn mra_title_needs_every_zip_and_no_failed_check() {
         let c = conn();
-        let pid = PlatformId("arcade".into());
+        let pid = PlatformId::new("arcade");
         let blaster = dat(&pid)
             .title("Example Blaster")
             .rom("exb.zip", &hashes(), RomStatus::Good)
@@ -216,7 +217,7 @@ mod tests {
     #[test]
     fn a_chd_identified_by_its_tracks_counts_as_verified() {
         let c = conn();
-        let pid = PlatformId("psx".into());
+        let pid = PlatformId::new("psx");
         let disc = dat(&pid)
             .title("Disc")
             .rom("Disc.cue", &hashes(), RomStatus::Good)

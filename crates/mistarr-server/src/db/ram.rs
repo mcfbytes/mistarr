@@ -347,7 +347,7 @@ pub fn run<T>(
     if let Some(reason) = dir_refusal(&plan.dir, &path) {
         return Ok(Ram::fallback(why::DIR, reason));
     }
-    let size = fs::metadata(&path)?.len();
+    let size = file_len(&path)?;
     let budget = Budget::read(&plan.dir, &path);
     if let Some(reason) = refusal(&budget, size, plan.input, plan.floor) {
         return Ok(Ram::fallback(why::SHORT, reason));
@@ -392,7 +392,7 @@ pub fn run<T>(
 
     watch.phase(Phase::Writing);
     let started = Instant::now();
-    let bytes = fs::metadata(&copy)?.len();
+    let bytes = file_len(&copy)?;
     let card_room = path.parent().and_then(status::free_bytes);
     if card_room.is_some_and(|room| room < bytes.saturating_add(CHUNK_BYTES as u64)) {
         return Ok(Ram::fallback(
@@ -548,7 +548,7 @@ pub fn migrate_in_ram(
     if let Some(reason) = dir_refusal(&plan.dir, db) {
         return skip(&reason);
     }
-    let size = fs::metadata(db)?.len();
+    let size = file_len(db)?;
     if let Some(reason) = refusal(&Budget::read(&plan.dir, db), size, 0, plan.floor) {
         return skip(&reason);
     }
@@ -571,7 +571,7 @@ pub fn migrate_in_ram(
     }
     report.work = started.elapsed();
     let started = Instant::now();
-    let bytes = fs::metadata(&copy)?.len();
+    let bytes = file_len(&copy)?;
     if status::free_bytes(db.parent().unwrap_or(Path::new(".")))
         .is_some_and(|room| room < bytes.saturating_add(CHUNK_BYTES as u64))
     {
@@ -626,20 +626,25 @@ fn full_as_reason<T>(r: Result<T>, during: &str) -> Result<std::result::Result<T
 /// ```
 #[must_use]
 pub fn storage_full(e: &Error) -> bool {
+    if let Some(io) = e.io() {
+        return matches!(io.raw_os_error(), Some(12 | 28 | 122))
+            || matches!(
+                io.kind(),
+                io::ErrorKind::StorageFull | io::ErrorKind::OutOfMemory
+            );
+    }
     match e {
-        Error::Io(io) => {
-            matches!(io.raw_os_error(), Some(12 | 28 | 122))
-                || matches!(
-                    io.kind(),
-                    io::ErrorKind::StorageFull | io::ErrorKind::OutOfMemory
-                )
-        }
         Error::Db(rusqlite::Error::SqliteFailure(f, _)) => {
             matches!(f.code, ErrorCode::DiskFull | ErrorCode::OutOfMemory)
         }
         Error::NoRoom(_) => true,
         _ => false,
     }
+}
+
+/// The length of the file at `path`.
+fn file_len(path: &Path) -> Result<u64> {
+    Ok(fs::metadata(path).map_err(Error::io_at(path))?.len())
 }
 
 /// Copies the database `src` reads into a new file at `dst` through SQLite's backup,
@@ -747,7 +752,7 @@ fn fill(src: &mut impl Read, buf: &mut [u8]) -> io::Result<usize> {
 /// assert_eq!(std::fs::read(&new).unwrap(), b"page");
 /// ```
 pub fn write_new(src: &Path, new: &Path, between: &mut dyn FnMut() -> Result<()>) -> Result<u64> {
-    let mut from = File::open(src)?;
+    let mut from = File::open(src).map_err(Error::io_at(src))?;
     let mut to = OpenOptions::new()
         .write(true)
         .create(true)
@@ -763,7 +768,8 @@ pub fn write_new(src: &Path, new: &Path, between: &mut dyn FnMut() -> Result<()>
 ///
 /// # Errors
 ///
-/// [`Error::Io`] when a swap cut short cannot be finished; the database cannot open.
+/// [`Error::Io`] or [`Error::File`] when a swap cut short cannot be finished; the
+/// database cannot open.
 ///
 /// ```
 /// let dir = tempfile::tempdir().unwrap();
@@ -816,14 +822,15 @@ pub fn clean_stale(db: &Path, dir: &Path) -> Result<usize> {
 /// # Errors
 ///
 /// [`Error::Io`] naming `.new` when it fails the check or stands alone without the
-/// marker, which only a stale copy does, or a rename or removal failing.
+/// marker, which only a stale copy does; [`Error::File`] naming the file a rename or
+/// removal failed on.
 fn finish_swap(db: &Path) -> Result<usize> {
     let (old, new) = (sibling(db, OLD_SUFFIX), sibling(db, NEW_SUFFIX));
     let marker = sibling(db, SWAP_SUFFIX);
     let mut removed = 0;
     if db.exists() {
         if old.exists() {
-            fs::remove_file(&old)?;
+            fs::remove_file(&old).map_err(Error::io_at(&old))?;
             tracing::info!(file = %old.display(), "removed the database a finished swap replaced");
             removed += 1;
         }
@@ -838,20 +845,20 @@ fn finish_swap(db: &Path) -> Result<usize> {
             .into());
         }
         check_whole(&new)?;
-        fs::rename(&new, db)?;
+        fs::rename(&new, db).map_err(Error::io_at(&new))?;
         swap::sync_parent(db);
         if old.exists() {
-            fs::remove_file(&old)?;
+            fs::remove_file(&old).map_err(Error::io_at(&old))?;
             removed += 1;
         }
         tracing::info!("finished swapping in the database written from RAM");
     } else if old.exists() {
-        fs::rename(&old, db)?;
+        fs::rename(&old, db).map_err(Error::io_at(&old))?;
         tracing::warn!("put the old database back; the swap had lost its new file");
     }
     swap::sync_parent(db);
     if db.exists() && marker.exists() {
-        fs::remove_file(&marker)?;
+        fs::remove_file(&marker).map_err(Error::io_at(&marker))?;
         swap::sync_parent(db);
     }
     Ok(removed)

@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 
 use common::{boot_with, config_in, eventually, get, request, Booted};
 use mistarr_core::hash::{hash_reader, HeaderRule, Md5Stream};
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, RomId};
 use mistarr_server::db::downloads::{self, DownloadState};
 use mistarr_server::db::files::{self, FileRow, FileState};
-use mistarr_server::db::ids::{DownloadId, RomId, SourceId, TitleId};
+use mistarr_server::db::ids::{DownloadId, SourceId, TitleId};
 use mistarr_server::db::imports;
 use mistarr_server::db::sources::{self, NewSource, SourceState};
 use mistarr_server::db::sql::Page;
@@ -38,7 +38,7 @@ fn zip_bytes(members: &[(&str, &[u8])]) -> Vec<u8> {
     z.finish().expect("finish").into_inner()
 }
 
-fn md5_of(parts: &[&[u8]]) -> String {
+fn md5_of(parts: &[&[u8]]) -> mistarr_core::Md5 {
     let mut m = Md5Stream::new();
     for p in parts {
         m.update(p);
@@ -219,7 +219,7 @@ async fn settled(b: &Booted, id: DownloadId, want: DownloadState) -> downloads::
     };
     // The import job refreshes the MRA checks after the download settles.
     let open = || {
-        let payload = serde_json::json!({ "download_id": id.0 });
+        let payload = serde_json::json!({ "download_id": id.get() });
         b.running
             .app
             .db
@@ -241,7 +241,7 @@ fn rows(b: &Booted, zip_rel: &str) -> Vec<FileRow> {
     b.running
         .app
         .db
-        .read_blocking(move |c| files::zip_member_rows(c, &PlatformId("arcade".into()), &zip_rel))
+        .read_blocking(move |c| files::zip_member_rows(c, &PlatformId::new("arcade"), &zip_rel))
         .expect("rows")
 }
 
@@ -251,7 +251,7 @@ fn presence(b: &Booted, zip_rel: &str) -> Option<(FileState, Option<RomId>)> {
     b.running
         .app
         .db
-        .read_blocking(move |c| files::find_by_path(c, &PlatformId("arcade".into()), &zip_rel))
+        .read_blocking(move |c| files::find_by_path(c, &PlatformId::new("arcade"), &zip_rel))
         .expect("row")
         .map(|r| (r.state, r.rom_id))
 }
@@ -366,7 +366,7 @@ async fn without_an_md5_a_loaded_dat_verifies_member_by_member() {
         .app
         .db
         .write_blocking(move |c| {
-            let written = mistarr_server::db::fixtures::dat(&PlatformId("arcade".into()))
+            let written = mistarr_server::db::fixtures::dat(&PlatformId::new("arcade"))
                 .title("exblast")
                 .rom("cpu.bin", &hc, mistarr_server::db::titles::RomStatus::Good)
                 .rom("snd.bin", &hs, mistarr_server::db::titles::RomStatus::Good)
@@ -418,7 +418,7 @@ async fn a_zip_the_dat_disagrees_with_is_quarantined() {
         .app
         .db
         .write_blocking(move |c| {
-            mistarr_server::db::fixtures::dat(&PlatformId("arcade".into()))
+            mistarr_server::db::fixtures::dat(&PlatformId::new("arcade"))
                 .title("exblast")
                 .rom("cpu.bin", &hc, mistarr_server::db::titles::RomStatus::Good)
                 .write(c)
@@ -611,7 +611,7 @@ fn dat_entry(b: &Booted, dat_name: &str, set: &str, rom: &str, data: &[u8], bios
         .app
         .db
         .write_blocking(move |c| {
-            let written = mistarr_server::db::fixtures::dat(&PlatformId("arcade".into()))
+            let written = mistarr_server::db::fixtures::dat(&PlatformId::new("arcade"))
                 .title(&set)
                 .rom(&rom, &hashes, mistarr_server::db::titles::RomStatus::Good)
                 .write(c)?;
@@ -838,7 +838,7 @@ async fn two_zips_arrive(first: &str) {
                 c.execute(
                     "UPDATE downloads SET state = 'importing', source_id = ?2, file_index = ?3,
                        staged_path = ?4 WHERE id = ?1",
-                    rusqlite::params![download.0, src.0, index, staged],
+                    rusqlite::params![download.get(), src.get(), index, staged],
                 )?;
                 Ok(())
             })

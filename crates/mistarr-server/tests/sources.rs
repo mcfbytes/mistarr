@@ -313,7 +313,7 @@ async fn a_seed_policy_no_client_took_is_kept_for_one() {
     std::fs::write(sources_dir(&b).join("s.torrent"), matching_set("Seed Set")).expect("write");
     eventually("a source", || async { sources(&b).await.len() == 1 }).await;
     let id = only_source(&b).await["id"].clone();
-    let source = SourceId(id.as_i64().expect("id"));
+    let source = SourceId::new(id.as_i64().expect("id"));
     let db = b.running.app.db.clone();
     db.write(move |c| {
         mistarr_server::db::sources::set_client_id(c, source, "0c".repeat(20).parse().ok())

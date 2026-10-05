@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use common::{config_in, get, request, Sse};
 use mistarr_clients::{
-    ClientError, ClientTorrentId, DownloadClient, Rtorrent, SeedPolicy, TorrentSource,
+    ClientTorrentId, DownloadClient, Error as ClientError, Rtorrent, SeedPolicy, TorrentSource,
     TorrentState, Transmission,
 };
 use mistarr_core::InfoHash;
