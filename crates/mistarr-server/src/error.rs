@@ -88,6 +88,9 @@ pub enum Error {
     /// The configured CA bundle cannot be read, so a URL fetch is refused.
     #[error("The CA bundle cannot be read: {0}.")]
     CaFile(std::io::Error),
+    /// A settings change was refused; the effective settings are unchanged.
+    #[error("{}", .0.message())]
+    Settings(crate::config::ConfigProblem),
     /// Memory, the RAM directory or the card ran short; the message says which and what
     /// was left unchanged. An import in RAM falls back to the card on it.
     #[error("{0}")]
@@ -99,6 +102,9 @@ pub enum Error {
     /// Another server holds the data directory's lock.
     #[error("another mistarr is already running with data directory {}", .0.display())]
     AlreadyRunning(std::path::PathBuf),
+    /// A file was not placed in a watched directory.
+    #[error(transparent)]
+    Place(#[from] crate::incoming::place::PlaceError),
     /// File system access failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),

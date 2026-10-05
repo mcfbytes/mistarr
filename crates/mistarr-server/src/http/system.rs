@@ -2,31 +2,28 @@
 
 use std::sync::Arc;
 
-use axum::body::Bytes;
-use axum::extract::rejection::QueryRejection;
-use axum::extract::{Query, State};
+use axum::extract::State;
+use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use mistarr_clients::launch::Launcher;
+use mistarr_clients::ClientKind;
 use mistarr_core::PlatformId;
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, Paging};
+use super::{ApiError, ApiJson, ApiQuery, OptionalJson, Paging};
 use crate::app::AppState;
-use crate::config::{Config, ConfigProblem, RuntimeSettings, SettingsPatch};
+use crate::config::RuntimeSettings;
 use crate::db::ids::JobId;
 use crate::db::jobs::{self, JobRow};
 use crate::db::platforms;
 use crate::db::settings::{self, keys};
 use crate::db::sql::Paged;
-use crate::jobs::dat_import::Recompute;
-use crate::jobs::detect_client::{detect_and_store, ClientStatus, DetectClient};
+use crate::jobs::detect_client::{detect_and_store, ClientStatus};
 use crate::jobs::gate::{GateState, Override};
 use crate::jobs::scan::{is_arcade, ScanJob};
 use crate::jobs::Scheduler;
 use crate::status::{hold_reason, snapshot, wizard_status, Status};
-use axum::http::StatusCode;
-use mistarr_clients::launch::Launcher;
-use mistarr_clients::ClientKind;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -45,9 +42,9 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
 
 /// `POST /system/scan` body: an omitted or empty body scans every platform.
 #[derive(Debug, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 struct ScanBody {
-    platform_id: Option<String>,
+    platform_id: Option<PlatformId>,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,17 +57,13 @@ struct ScanResponse {
     arcade_job_id: Option<JobId>,
 }
 
+/// `POST /system/scan`: 202 with the queued jobs.
 async fn scan(
     State(app): State<Arc<AppState>>,
-    body: Bytes,
-) -> Result<Json<ScanResponse>, ApiError> {
-    let body: ScanBody = if body.is_empty() {
-        ScanBody::default()
-    } else {
-        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
-    };
+    OptionalJson(body): OptionalJson<ScanBody>,
+) -> Result<(StatusCode, Json<ScanResponse>), ApiError> {
     let platform_id = match body.platform_id {
-        Some(raw) => Some(validate_platform(&app, raw).await?),
+        Some(id) => Some(validate_platform(&app, id).await?),
         None => None,
     };
     let arcade_only = platform_id.as_ref().is_some_and(is_arcade);
@@ -87,10 +80,11 @@ async fn scan(
     } else {
         None
     };
-    Ok(Json(ScanResponse {
+    let queued = ScanResponse {
         job_id,
         arcade_job_id,
-    }))
+    };
+    Ok((StatusCode::ACCEPTED, Json(queued)))
 }
 
 /// `POST /system/cores` answer.
@@ -101,34 +95,35 @@ struct CoresResponse {
 }
 
 /// Detects installed cores again, for the wizard's detected-cores step, and
-/// queues the arcade catalogue when there are MRA files to read.
-async fn cores(State(app): State<Arc<AppState>>) -> Result<Json<CoresResponse>, ApiError> {
+/// queues the arcade catalogue when there are MRA files to read; 202, since the
+/// catalogue is the job it answers with.
+async fn cores(
+    State(app): State<Arc<AppState>>,
+) -> Result<(StatusCode, Json<CoresResponse>), ApiError> {
     let platforms = crate::app::detect_cores(&app).await?;
     let arcade_job_id = crate::jobs::arcade::enqueue_if_relevant(&app).await?;
-    Ok(Json(CoresResponse {
+    let found = CoresResponse {
         platforms,
         arcade_job_id,
-    }))
+    };
+    Ok((StatusCode::ACCEPTED, Json(found)))
 }
 
-/// Looks up `raw` among the seeded platforms, for `POST /system/scan`.
+/// Looks up `id` among the seeded platforms, for `POST /system/scan`.
 ///
 /// # Errors
 ///
 /// [`ApiError`] 404 when no such platform exists, 400 when it is disabled.
-async fn validate_platform(app: &AppState, raw: String) -> Result<PlatformId, ApiError> {
-    let id = PlatformId(raw);
+async fn validate_platform(app: &AppState, id: PlatformId) -> Result<PlatformId, ApiError> {
+    let lookup = id.clone();
     let row = app
         .db
-        .read({
-            let id = id.clone();
-            move |c| platforms::find(c, &id)
-        })
+        .read(move |c| platforms::find(c, &lookup))
         .await?
-        .ok_or_else(|| ApiError::not_found(format!("no such platform `{}`", id.0)))?;
+        .ok_or_else(|| ApiError::no_such(&format!("platform `{}`", id.0)))?;
     if !row.enabled {
         return Err(ApiError::bad_request(format!(
-            "platform `{}` is disabled",
+            "The platform `{}` is disabled.",
             id.0
         )));
     }
@@ -186,14 +181,10 @@ struct StartBody {
 /// answers or `client_start_wait` passes; see `docs/DOWNLOAD-CLIENTS.md`.
 async fn start_client(
     State(app): State<Arc<AppState>>,
-    body: Bytes,
+    ApiJson(body): ApiJson<StartBody>,
 ) -> Result<Json<Status>, ApiError> {
-    let body: StartBody =
-        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let Ok(_starting) = app.client_start.try_lock() else {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "busy",
+    let Ok(_starting) = app.client.start_lock.try_lock() else {
+        return Err(ApiError::busy(
             "A download client is already being started.",
         ));
     };
@@ -202,11 +193,7 @@ async fn start_client(
         .read(|c| settings::get_json::<ClientStatus>(c, keys::CLIENT_DETECTED))
         .await?;
     if current.is_some_and(|c| c.usable()) {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "conflict",
-            "A download client is already running.",
-        ));
+        return Err(ApiError::conflict("A download client is already running."));
     }
     let launcher = app.launcher();
     if !launcher_offers(&launcher, body.kind) {
@@ -223,7 +210,7 @@ async fn start_client(
         None => launcher.start(body.kind),
     })
     .await?
-    .map_err(|e| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", e.to_string()))?;
+    .map_err(|e| ApiError::internal(e.to_string()))?;
     let deadline = tokio::time::Instant::now() + app.options.client_start_wait;
     loop {
         let found = detect_and_store(&app, true).await?;
@@ -266,9 +253,8 @@ struct JobItem {
 
 async fn list_jobs(
     State(app): State<Arc<AppState>>,
-    paging: Result<Query<Paging>, QueryRejection>,
+    ApiQuery(paging): ApiQuery<Paging>,
 ) -> Result<Json<Paged<JobItem>>, ApiError> {
-    let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let page = paging.resolve();
     let (
         Paged {
@@ -318,39 +304,12 @@ async fn get_settings(State(app): State<Arc<AppState>>) -> Json<RuntimeSettings>
     Json(app.config().runtime())
 }
 
+/// `PUT /system/settings`: replaces the sections the body carries.
 async fn put_settings(
     State(app): State<Arc<AppState>>,
-    body: Bytes,
+    ApiJson(patch): ApiJson<RuntimeSettings>,
 ) -> Result<Json<RuntimeSettings>, ApiError> {
-    let patch: SettingsPatch =
-        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
-    let before = app.config();
-    if patch.client.is_some() {
-        let mut effective = Config::clone(&before);
-        effective.apply(&patch);
-        if effective.validate().contains(&ConfigProblem::PathMap) {
-            return Err(ApiError::bad_request(ConfigProblem::PathMap.message()));
-        }
-    }
-    let (prefs_before, scan_before) = (before.prefs.clone(), before.scan);
-    let (runtime, client_changed) = app.update_settings(&patch).await?;
-    if runtime.scan != Some(scan_before) {
-        crate::jobs::chd::apply_setting(&app).await?;
-    }
-    if client_changed {
-        Scheduler::enqueue(&app, Arc::new(DetectClient)).await?;
-    }
-    let transfer_changed = runtime.transfer != Some(before.transfer);
-    if transfer_changed || runtime.limits != before.limits {
-        app.limits_wake.notify_one();
-    }
-    if !runtime.prefs.same_selection(&prefs_before) {
-        Recompute::enqueue_all(&app).await?;
-    }
-    if runtime.prefs.launch != prefs_before.launch || transfer_changed {
-        crate::status::publish(&app).await;
-    }
-    Ok(Json(runtime))
+    Ok(Json(app.update_settings(patch).await?.settings))
 }
 
 #[cfg(test)]

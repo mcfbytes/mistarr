@@ -1108,7 +1108,7 @@ async fn a_finished_torrent_without_seeding_leaves_the_client() {
     let mut config = config_in(dir.path());
     config.client.url = fake.url();
     let b = boot_with(dir, config).await;
-    assert!(b.running.app.client().is_some());
+    assert!(b.running.app.client.get().is_some());
     let body = payload(12, 512);
     let (_, rom) = entry(
         &b,

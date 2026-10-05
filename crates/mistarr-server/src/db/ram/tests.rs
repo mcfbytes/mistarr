@@ -563,7 +563,7 @@ fn a_start_after_a_crash_at_any_step_of_the_swap_opens_one_whole_database() {
             }
             continue;
         };
-        let (db, _, _) = opened.unwrap_or_else(|e| panic!("case {i}: {e}"));
+        let db = opened.unwrap_or_else(|e| panic!("case {i}: {e}")).db;
         assert_eq!(get(&db, "k").as_deref(), Some(want), "case {i}");
         for suffix in [NEW_SUFFIX, OLD_SUFFIX, SWAP_SUFFIX] {
             assert!(!sibling(&path, suffix).exists(), "case {i}: {suffix} left");
@@ -601,7 +601,7 @@ fn a_start_after_a_torn_rename_in_a_migrations_swap_keeps_the_migrated_copy() {
     // The first rename torn: only the migrated copy and the marker can be read.
     fs::write(sibling(&path, SWAP_SUFFIX), b"").expect("marker");
     fs::remove_file(&path).expect("tear");
-    let (db, _, _) = crate::app::open_db(&mut config).expect("open");
+    let db = crate::app::open_db(&mut config).expect("open").db;
     let v = db
         .read_blocking(super::super::migrate::current_version)
         .expect("version");
@@ -629,7 +629,7 @@ fn a_start_after_a_crash_before_a_migrations_swap_migrates_again() {
     assert!(clean_stale(&path, ram.path()).expect("clean") >= 1);
     assert_eq!(sha1(&path), before, "the card file is not the copy");
     fs::copy(&path, &new).expect("copy again");
-    let (db, _, _) = crate::app::open_db(&mut config).expect("open");
+    let db = crate::app::open_db(&mut config).expect("open").db;
     let v = db
         .read_blocking(super::super::migrate::current_version)
         .expect("version");

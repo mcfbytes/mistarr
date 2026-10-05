@@ -3,19 +3,16 @@
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use axum::body::Bytes;
-use axum::extract::rejection::{PathRejection, QueryRejection};
-use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use mistarr_core::PlatformId;
 use mistarr_mister::platforms::Kind;
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, Paging};
+use super::{ApiError, ApiJson, ApiPath, ApiQuery, OptionalJson, Paging};
 use crate::app::AppState;
-use crate::db::ids::FileId;
-use crate::db::ids::TitleId;
+use crate::db::ids::{FileId, TitleId};
 use crate::db::sql::Paged;
 use crate::db::titles::{self, Browse, GroupDetail, GroupRow, RomsetState, Sort, Tri, WantRefused};
 use crate::db::{downloads, platforms};
@@ -96,8 +93,8 @@ struct ListQuery {
     flags: Option<String>,
     hidden: Option<String>,
     sort: Option<String>,
-    limit: Option<u32>,
-    offset: Option<u32>,
+    #[serde(flatten)]
+    paging: Paging,
 }
 
 fn tri(name: &str, v: Option<&str>) -> Result<Tri, ApiError> {
@@ -106,7 +103,7 @@ fn tri(name: &str, v: Option<&str>) -> Result<Tri, ApiError> {
         "yes" | "true" => Ok(Tri::Yes),
         "no" | "false" => Ok(Tri::No),
         other => Err(ApiError::bad_request(format!(
-            "{name} must be yes, no or any, not {other:?}"
+            "{name} is yes, no or any, not {other:?}."
         ))),
     }
 }
@@ -119,7 +116,7 @@ impl ListQuery {
             "recent" => Sort::Recent,
             other => {
                 return Err(ApiError::bad_request(format!(
-                    "sort must be name, have or recent, not {other:?}"
+                    "The sort is name, have or recent, not {other:?}."
                 )))
             }
         };
@@ -137,7 +134,7 @@ impl ListQuery {
             "show" => Vec::new(),
             other => {
                 return Err(ApiError::bad_request(format!(
-                    "hidden must be hide or show, not {other:?}"
+                    "Hidden is hide or show, not {other:?}."
                 )))
             }
         };
@@ -163,27 +160,21 @@ struct GroupOut {
 
 async fn list(
     State(app): State<Arc<AppState>>,
-    id: Result<Path<String>, PathRejection>,
-    query: Result<Query<ListQuery>, QueryRejection>,
+    ApiPath(id): ApiPath<PlatformId>,
+    ApiQuery(query): ApiQuery<ListQuery>,
 ) -> Result<Json<Paged<GroupOut>>, ApiError> {
-    let Path(id) = id.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let filter = query.browse(&app.config().prefs.hide)?;
-    let page = Paging {
-        limit: query.limit,
-        offset: query.offset,
-    }
-    .resolve();
+    let filter = query.browse(&app.config().prefs.hidden_names())?;
+    let page = query.paging.resolve();
     let Paged { items, total } = app
         .db
         .read(move |c| {
-            if platforms::get(c, &id)?.is_none() {
+            if platforms::find(c, &id)?.is_none() {
                 return Ok(None);
             }
-            titles::browse(c, &id, &filter, page).map(Some)
+            titles::browse(c, &id.0, &filter, page).map(Some)
         })
         .await?
-        .ok_or_else(|| ApiError::not_found("no such platform"))?;
+        .ok_or_else(|| ApiError::no_such("platform"))?;
     let items = items
         .into_iter()
         .map(|row| {
@@ -238,17 +229,12 @@ fn neogeo_romsets(dir: &std::path::Path, detail: &mut GroupDetail) -> Option<Vec
     })
 }
 
-fn title_id(id: Result<Path<i64>, PathRejection>) -> Result<TitleId, ApiError> {
-    id.map(|Path(id)| TitleId(id))
-        .map_err(|e| ApiError::bad_request(e.body_text()))
-}
-
 async fn load_detail(app: &AppState, id: TitleId) -> Result<DetailOut, ApiError> {
     let detail = app
         .db
         .read(move |c| titles::group_detail(c, id))
         .await?
-        .ok_or_else(|| ApiError::not_found("no such title"))?;
+        .ok_or_else(|| ApiError::no_such("title"))?;
     let (detail, bios) = match mistarr_mister::platforms::by_id(&detail.platform_id.0) {
         Some(p) if p.kind == Kind::Romset => {
             let dir = app.config().paths.games.join(p.core_dir);
@@ -272,35 +258,29 @@ async fn load_detail(app: &AppState, id: TitleId) -> Result<DetailOut, ApiError>
 
 async fn detail(
     State(app): State<Arc<AppState>>,
-    id: Result<Path<i64>, PathRejection>,
+    ApiPath(id): ApiPath<TitleId>,
 ) -> Result<Json<DetailOut>, ApiError> {
-    Ok(Json(load_detail(&app, title_id(id)?).await?))
+    Ok(Json(load_detail(&app, id).await?))
 }
 
-/// `POST /titles/{id}/want` body.
+/// `POST /titles/{id}/want` body; an empty body wants the pick.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WantBody {
-    variant_id: Option<i64>,
+    variant_id: Option<TitleId>,
 }
 
 async fn want(
     State(app): State<Arc<AppState>>,
-    id: Result<Path<i64>, PathRejection>,
-    body: Bytes,
+    ApiPath(id): ApiPath<TitleId>,
+    OptionalJson(body): OptionalJson<WantBody>,
 ) -> Result<Json<DetailOut>, ApiError> {
-    let id = title_id(id)?;
-    let body: WantBody = if body.iter().all(u8::is_ascii_whitespace) {
-        WantBody::default()
-    } else {
-        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?
-    };
     let current = load_detail(&app, id).await?;
-    let target = match body.variant_id.map(TitleId) {
+    let target = match body.variant_id {
         Some(v) if current.detail.variants.iter().any(|x| x.id == v) => v,
-        Some(_) => return Err(ApiError::bad_request("variant_id is not in this group")),
+        Some(_) => return Err(ApiError::bad_request("That variant is not in this group.")),
         None => current.detail.pick_variant_id.ok_or_else(|| {
-            ApiError::bad_request("no variant is selectable under the current preferences")
+            ApiError::bad_request("No variant is selectable under the current preferences.")
         })?,
     };
     let result = app
@@ -321,12 +301,12 @@ async fn want(
             }
             transfer::kick(&app).await;
         }
-        Err(WantRefused::Missing) => return Err(ApiError::not_found("no such title")),
+        Err(WantRefused::Missing) => return Err(ApiError::no_such("title")),
         Err(WantRefused::Retired) => {
-            return Err(ApiError::bad_request("the entry is retired from its DAT"))
+            return Err(ApiError::bad_request("The entry is retired from its DAT."))
         }
         Err(WantRefused::Bios) => {
-            return Err(ApiError::bad_request("BIOS entries cannot be wanted"))
+            return Err(ApiError::bad_request("BIOS entries cannot be wanted."))
         }
     }
     Ok(Json(load_detail(&app, id).await?))
@@ -334,9 +314,8 @@ async fn want(
 
 async fn unwant(
     State(app): State<Arc<AppState>>,
-    id: Result<Path<i64>, PathRejection>,
+    ApiPath(id): ApiPath<TitleId>,
 ) -> Result<Json<DetailOut>, ApiError> {
-    let id = title_id(id)?;
     let current = load_detail(&app, id).await?;
     let group = current.detail.parent_id;
     let cancelled = app
@@ -348,7 +327,7 @@ async fn unwant(
             Ok(cancelled)
         })
         .await?;
-    super::downloads::after_cancel(&app, &cancelled).await;
+    transfer::after_cancel(&app, &cancelled).await;
     Ok(Json(load_detail(&app, id).await?))
 }
 
@@ -356,32 +335,23 @@ async fn unwant(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RenameBody {
-    file_id: i64,
+    file_id: FileId,
 }
 
 async fn rename(
     State(app): State<Arc<AppState>>,
-    id: Result<Path<i64>, PathRejection>,
-    body: Bytes,
+    ApiPath(id): ApiPath<TitleId>,
+    ApiJson(body): ApiJson<RenameBody>,
 ) -> Result<Json<DetailOut>, ApiError> {
-    let id = title_id(id)?;
-    let body: RenameBody =
-        serde_json::from_slice(&body).map_err(|e| ApiError::bad_request(e.to_string()))?;
     let group = load_detail(&app, id).await?.detail.parent_id;
-    match import::rename(&app, group, FileId(body.file_id)).await {
+    match import::rename(&app, group, body.file_id).await {
         Ok(_) => Ok(Json(load_detail(&app, id).await?)),
-        Err(RenameError::NotFound) => Err(ApiError::not_found("no such file in this title")),
-        Err(RenameError::Conflict(path)) => Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "conflict",
-            format!("{path} already exists"),
-        )),
+        Err(RenameError::NotFound) => Err(ApiError::no_such("file in this title")),
+        Err(RenameError::Conflict(path)) => {
+            Err(ApiError::conflict(format!("{path} already exists.")))
+        }
         Err(RenameError::Server(e)) => Err(e.into()),
-        Err(RenameError::Io(message)) => Err(ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal",
-            message,
-        )),
+        Err(RenameError::Io(message)) => Err(ApiError::internal(message)),
         Err(e) => Err(ApiError::bad_request(e.to_string())),
     }
 }

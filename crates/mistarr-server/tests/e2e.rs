@@ -764,7 +764,7 @@ async fn run(kind: Kind) {
     t.mark("torrents removed");
 
     let r = request(addr, "POST", "/api/v1/system/scan", &[], Some("{}")).await;
-    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.status, 202, "{}", r.body);
     assert!(r.json()["job_id"].is_i64(), "{}", r.body);
     probe
         .wait("the scan to finish", Duration::from_secs(60), || async {

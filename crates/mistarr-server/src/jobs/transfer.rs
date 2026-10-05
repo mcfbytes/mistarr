@@ -12,7 +12,7 @@ use tokio::sync::broadcast::error::RecvError;
 use super::{Job, JobContext, JobKind, Scheduler};
 use crate::app::AppState;
 use crate::db::deferred::Op;
-use crate::db::downloads::{self as rows, DownloadRow, DownloadState};
+use crate::db::downloads::{self as rows, Cancelled, DownloadRow, DownloadState};
 use crate::db::ids::DownloadId;
 use crate::db::ids::SourceId;
 use crate::db::sources::{self, SourceRow};
@@ -105,7 +105,7 @@ impl Job for Transfer {
             .write(|c| rows::promote_wanted(c, crate::unix_now()))
             .await?;
         publish_ids(app, promoted).await?;
-        let Some(client) = app.client() else {
+        let Some(client) = app.client.get() else {
             return Ok(());
         };
         let queued = app.db.read(rows::queued_sources).await?;
@@ -314,7 +314,7 @@ pub async fn deselect(app: &AppState, source: SourceId) -> Result<bool> {
     let Some(id) = row.and_then(|r| r.client_id) else {
         return Ok(true);
     };
-    let Some(client) = app.client() else {
+    let Some(client) = app.client.get() else {
         crate::jobs::core_limits::defer(app, Op::Deselect(source)).await;
         return Ok(false);
     };
@@ -332,6 +332,25 @@ pub async fn deselect(app: &AppState, source: SourceId) -> Result<bool> {
         Err(e) => {
             crate::jobs::core_limits::defer(app, Op::Deselect(source)).await;
             Err(e.into())
+        }
+    }
+}
+
+/// Announces cancelled downloads and, for those the client had started,
+/// queues a [`Deselect`] per source so the client stops fetching them.
+pub async fn after_cancel(app: &Arc<AppState>, cancelled: &[Cancelled]) {
+    let ids = cancelled.iter().map(|c| c.id).collect();
+    if let Err(e) = publish_ids(app, ids).await {
+        tracing::warn!(error = %e, "cannot announce cancelled downloads");
+    }
+    let started: std::collections::BTreeSet<SourceId> = cancelled
+        .iter()
+        .filter(|c| c.started)
+        .filter_map(|c| c.source_id)
+        .collect();
+    for source_id in started {
+        if let Err(e) = Scheduler::enqueue(app, Arc::new(Deselect { source_id })).await {
+            tracing::warn!(error = %e, "cannot queue a deselect");
         }
     }
 }
@@ -621,6 +640,29 @@ mod tests {
         Scheduler::run_inline(&app, Arc::new(job))
             .await
             .expect("run");
+    }
+
+    #[tokio::test]
+    async fn a_cancel_deselects_each_started_source_once() {
+        let (_dir, app) = state();
+        let cancelled = |id, source: Option<i64>, started| Cancelled {
+            id: DownloadId(id),
+            source_id: source.map(SourceId),
+            started,
+        };
+        let all = [
+            cancelled(1, Some(4), true),
+            cancelled(2, Some(4), true),
+            cancelled(3, Some(5), false),
+            cancelled(4, None, true),
+        ];
+        after_cancel(&app, &all).await;
+        let deselects = app
+            .db
+            .read(|c| crate::db::jobs::count_kind(c, JobKind::Deselect))
+            .await
+            .expect("count");
+        assert_eq!(deselects, 1);
     }
 
     #[test]

@@ -373,7 +373,7 @@ async fn after_settle(app: &Arc<AppState>, settled: Settled) {
         transfer::publish(app, id, DownloadState::Bad, 1.0);
     }
     if !settled.cancelled.is_empty() {
-        crate::http::downloads::after_cancel(app, &settled.cancelled).await;
+        transfer::after_cancel(app, &settled.cancelled).await;
     }
     if let Some((id, state)) = settled.again {
         transfer::publish(app, id, state, 0.0);
@@ -1312,7 +1312,7 @@ pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) -> bool {
         return true;
     }
     if let Some(client_id) = &source.client_id {
-        let Some(client) = app.client() else {
+        let Some(client) = app.client.get() else {
             crate::jobs::core_limits::defer(app, Op::Release(source_id)).await;
             return false;
         };

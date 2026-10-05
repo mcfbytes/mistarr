@@ -2,18 +2,17 @@
 
 use std::sync::Arc;
 
-use axum::body::Bytes;
-use axum::extract::rejection::PathRejection;
-use axum::extract::{Path, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{delete, post};
 use axum::{Json, Router};
 use mistarr_clients::fetch::{FetchError, FetchUrl};
 use serde::{Deserialize, Serialize};
 
-use super::sources::{magnet_file, place_source};
-use super::ApiError;
+use super::sources::magnet_file;
+use super::{ApiError, ApiPath};
 use crate::app::AppState;
+use crate::incoming::place::place_source;
 use crate::incoming::{IncomingFile, QUEUE_WAIT};
 use crate::jobs::url_fetch::UrlFetch;
 use crate::jobs::Scheduler;
@@ -47,10 +46,11 @@ struct Started {
 }
 
 /// `POST /fetch`: places a magnet link at once, or queues one fetch of an http(s) URL.
-/// The URL is never stored, logged or echoed in an error.
+/// The URL is never stored, logged or echoed in an error, so a body that does not
+/// parse gets a fixed message rather than the parser's.
 async fn start(
     State(app): State<Arc<AppState>>,
-    body: Bytes,
+    body: axum::body::Bytes,
 ) -> Result<(StatusCode, Json<Started>), ApiError> {
     let req: FetchBody = serde_json::from_slice(&body)
         .map_err(|_| ApiError::bad_request("Send { \"url\": \"...\" }."))?;
@@ -98,12 +98,11 @@ async fn start(
 /// `DELETE /fetch/{token}`: asks a queued or running fetch to stop; 404 when none is open.
 async fn cancel(
     State(app): State<Arc<AppState>>,
-    token: Result<Path<u64>, PathRejection>,
+    ApiPath(token): ApiPath<u64>,
 ) -> Result<StatusCode, ApiError> {
-    let Path(token) = token.map_err(|e| ApiError::bad_request(e.body_text()))?;
     if app.fetches.cancel(token) {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(ApiError::not_found("No such fetch is open."))
+        Err(ApiError::no_such("fetch is open"))
     }
 }

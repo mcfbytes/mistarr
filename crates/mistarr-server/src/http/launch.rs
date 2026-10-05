@@ -5,17 +5,16 @@ use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::rejection::PathRejection;
-use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::extract::State;
 use axum::routing::post;
 use axum::{Json, Router};
+use mistarr_core::PlatformId;
 use mistarr_mister::launch::{self as mister, CommandSink};
 use mistarr_mister::platforms::{self as table, Kind};
 use serde::Serialize;
 use tokio::sync::MutexGuard;
 
-use super::ApiError;
+use super::{ApiError, ApiPath};
 use crate::app::AppState;
 use crate::db::ids::TitleId;
 use crate::db::launch::{self, LaunchTitle};
@@ -40,41 +39,30 @@ pub struct Launched {
 
 async fn title(
     State(app): State<Arc<AppState>>,
-    id: Result<Path<i64>, PathRejection>,
+    ApiPath(id): ApiPath<TitleId>,
 ) -> Result<Json<Launched>, ApiError> {
-    let Path(id) = id.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    Ok(Json(launch_title(&app, TitleId(id)).await?))
+    Ok(Json(launch_title(&app, id).await?))
 }
 
 async fn core(
     State(app): State<Arc<AppState>>,
-    id: Result<Path<String>, PathRejection>,
+    ApiPath(id): ApiPath<PlatformId>,
 ) -> Result<Json<Launched>, ApiError> {
-    let Path(id) = id.map_err(|e| ApiError::bad_request(e.body_text()))?;
     Ok(Json(launch_core(&app, &id).await?))
 }
 
 /// The sink, when launching is enabled and MiSTer Main's FIFO exists.
 fn sink(app: &AppState) -> Result<Arc<dyn CommandSink>, ApiError> {
     match launch_state(app) {
-        LaunchState::Ready => Ok(app.command_sink()),
-        LaunchState::Disabled => Err(ApiError::conflict("launching is turned off in settings")),
-        LaunchState::Unavailable => Err(unavailable(&mistarr_mister::Error::CommandAbsent)),
+        LaunchState::Ready => Ok(app.launch.sink()),
+        LaunchState::Disabled => Err(ApiError::conflict("Launching is turned off in settings.")),
+        LaunchState::Unavailable => Err(command_error(mistarr_mister::Error::CommandAbsent)),
     }
 }
 
-fn unavailable(e: &mistarr_mister::Error) -> ApiError {
-    ApiError::unavailable(e.to_string())
-}
-
-/// Maps a failure to hand a command to Main onto the documented statuses.
+/// A failure to hand a command to Main, with the status `docs/API.md` gives it.
 fn command_error(e: mistarr_mister::Error) -> ApiError {
-    use mistarr_mister::Error as E;
-    match e {
-        E::CommandAbsent | E::NotListening | E::CommandBusy => unavailable(&e),
-        E::UnsafePath(_) => ApiError::conflict(e.to_string()),
-        e => crate::Error::from(e).into(),
-    }
+    crate::Error::from(e).into()
 }
 
 /// Starts title `id` in its platform's newest core, or its MRA for an arcade title.
@@ -92,13 +80,13 @@ pub async fn launch_title(app: &AppState, id: TitleId) -> Result<Launched, ApiEr
         .db
         .read(move |c| launch::title(c, id))
         .await?
-        .ok_or_else(|| ApiError::not_found("no such title"))?;
+        .ok_or_else(|| ApiError::no_such("title"))?;
     if title.bios {
-        return Err(ApiError::conflict("BIOS entries are not launched"));
+        return Err(ApiError::conflict("BIOS entries are not launched."));
     }
     if !title.complete {
         return Err(ApiError::conflict(
-            "not every file of this entry is in the collection",
+            "Not every file of this entry is in the collection.",
         ));
     }
     let config = app.config();
@@ -117,10 +105,10 @@ pub async fn launch_title(app: &AppState, id: TitleId) -> Result<Launched, ApiEr
 /// Holds the launch lock for the whole plan and send, refusing with 409 `busy`
 /// while the last launch is younger than `options.launch_gap`.
 async fn exclusive(app: &AppState) -> Result<MutexGuard<'_, Option<Instant>>, ApiError> {
-    let last = app.launch_lock.lock().await;
+    let last = app.launch.last.lock().await;
     if last.is_some_and(|t| t.elapsed() < app.options.launch_gap) {
         return Err(ApiError::busy(
-            "a launch was just sent; wait a few seconds before the next",
+            "A launch was just sent; wait a few seconds before the next.",
         ));
     }
     Ok(last)
@@ -133,21 +121,21 @@ async fn exclusive(app: &AppState) -> Result<MutexGuard<'_, Option<Instant>>, Ap
 /// [`ApiError`] 404 for an unknown platform, 409 when launching is off, another
 /// launch was just sent (`busy`), no core for it is installed or it is the arcade
 /// platform, 503 when MiSTer Main cannot take the command.
-pub async fn launch_core(app: &AppState, id: &str) -> Result<Launched, ApiError> {
+pub async fn launch_core(app: &AppState, id: &PlatformId) -> Result<Launched, ApiError> {
     let sink = sink(app)?;
     let mut last = exclusive(app).await?;
-    let lookup = id.to_owned();
+    let lookup = id.clone();
     let known = app
         .db
-        .read(move |c| platforms::get(c, &lookup))
+        .read(move |c| platforms::find(c, &lookup))
         .await?
         .is_some();
-    let row = table::by_id(id)
+    let row = table::by_id(&id.0)
         .filter(|_| known)
-        .ok_or_else(|| ApiError::not_found("no such platform"))?;
+        .ok_or_else(|| ApiError::no_such("platform"))?;
     if row.kind == Kind::Arcade {
         return Err(ApiError::conflict(
-            "arcade cores start from an MRA; launch an arcade title instead",
+            "Arcade cores start from an MRA; launch an arcade title instead.",
         ));
     }
     let root = app.config().paths.root.clone();
@@ -167,7 +155,7 @@ pub async fn launch_core(app: &AppState, id: &str) -> Result<Launched, ApiError>
 }
 
 fn no_core() -> ApiError {
-    ApiError::conflict("no core for this platform is installed")
+    ApiError::conflict("No core for this platform is installed.")
 }
 
 /// What to launch for `title` and the command line that does it, writing the MGL
@@ -182,18 +170,18 @@ fn plan_title(
         let rel = title
             .mra_path
             .as_deref()
-            .ok_or_else(|| ApiError::conflict("the entry names no MRA file"))?;
+            .ok_or_else(|| ApiError::conflict("The entry names no MRA file."))?;
         let rel_path = FsPath::new(rel);
         if !rel_path
             .components()
             .all(|c| matches!(c, Component::Normal(_)))
         {
-            return Err(ApiError::conflict("the entry's MRA path leaves _Arcade"));
+            return Err(ApiError::conflict("The entry's MRA path leaves _Arcade."));
         }
         let mra = root.join("_Arcade").join(rel_path);
         if !mra.is_file() {
             return Err(ApiError::conflict(format!(
-                "_Arcade/{rel} is no longer on the SD card"
+                "_Arcade/{rel} is no longer on the SD card."
             )));
         }
         let line = mister::load_core(&mra).map_err(command_error)?;
@@ -201,28 +189,25 @@ fn plan_title(
         let core = relative(&mra, root);
         return Ok((Launched { core, file: None }, line));
     }
-    let row =
-        table::by_id(&title.platform_id).ok_or_else(|| ApiError::not_found("no such platform"))?;
+    let row = table::by_id(&title.platform_id).ok_or_else(|| ApiError::no_such("platform"))?;
     if row.launch.is_empty() {
-        return Err(ApiError::conflict("this entry has no MRA to start it from"));
+        return Err(ApiError::conflict(
+            "This entry has no MRA to start it from.",
+        ));
     }
     if row.kind == Kind::Disc && !title.all_verified {
         return Err(ApiError::conflict(
-            "every track of a disc must be verified before it is launched",
+            "Every track of a disc must be verified before it is launched.",
         ));
     }
     let core = mister::find_core(root, row).ok_or_else(no_core)?;
     let files: Vec<&str> = title.files.iter().map(String::as_str).collect();
     let file = mister::game_path(row.kind, games, &files)
-        .ok_or_else(|| ApiError::conflict("the entry has no file the core can load"))?;
+        .ok_or_else(|| ApiError::conflict("The entry has no file the core can load."))?;
     let doc = mister::mgl(&core.mgl_rbf, core.slot, &games.join(&file)).map_err(command_error)?;
     let mgl = mister::write_mgl(dir, &doc).map_err(|e| {
         tracing::warn!(dir = %dir.display(), error = %e, "cannot write the launch MGL");
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "internal",
-            "the launch file could not be written",
-        )
+        ApiError::internal("The launch file could not be written.")
     })?;
     let line = mister::load_core(&mgl).map_err(command_error)?;
     tracing::info!(core = %core.mgl_rbf, file = %file, "game launched");

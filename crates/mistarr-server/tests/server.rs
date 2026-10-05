@@ -473,8 +473,8 @@ async fn concurrent_settings_puts_keep_both_sections() {
         .await
         .expect("read")
         .expect("stored");
-    assert_eq!(stored.limits.up_kbps_core, 11);
-    assert_eq!(stored.prefs.regions, ["Japan"]);
+    assert_eq!(stored.limits.map(|l| l.up_kbps_core), Some(11));
+    assert_eq!(stored.prefs.expect("prefs").select.regions, ["Japan"]);
     booted.running.shutdown().await.expect("shutdown");
 }
 
