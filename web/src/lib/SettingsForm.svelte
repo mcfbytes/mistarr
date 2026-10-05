@@ -157,6 +157,7 @@
     limitsKey += 1;
     settings = JSON.parse(baseline) as Settings;
   }
+
   async function save(): Promise<void> {
     if (!settings) {
       return;

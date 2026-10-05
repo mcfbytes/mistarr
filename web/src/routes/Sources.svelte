@@ -88,7 +88,6 @@
     }
     return done === true;
   }
-
 </script>
 
 <div class="page">
@@ -223,5 +222,4 @@
     flex-wrap: wrap;
     gap: 0.4em;
   }
-
 </style>

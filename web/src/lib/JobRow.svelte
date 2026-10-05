@@ -32,7 +32,7 @@
 {#if view}
   <ProgressBar {view} label={`${title} progress`} {compact} />
 {/if}
-{#if job.reason}<p class="why" class:muted={!compact}>{job.reason}</p>{/if}
+{#if job.reason}<p class="why" class:compact class:muted={!compact}>{job.reason}</p>{/if}
 
 <style>
   .head {
@@ -62,7 +62,7 @@
     overflow-wrap: anywhere;
   }
 
-  .why:not(.muted) {
+  .why.compact {
     margin: 0;
     font-size: 0.8rem;
     color: var(--fg-dim);

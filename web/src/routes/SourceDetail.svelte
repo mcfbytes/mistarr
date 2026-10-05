@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, untrack } from 'svelte';
   import { api, ApiError, errorMessage } from '../lib/api';
-  import { sources } from '../lib/stores/sources.svelte';
+  import { findSource, sources } from '../lib/stores/sources.svelte';
   import { platformName, platforms } from '../lib/stores/platforms.svelte';
   import { showToast } from '../lib/stores/toast.svelte';
   import { optimistic } from '../lib/actions';
@@ -36,7 +36,9 @@
         ? `uploads paused while ${status.corename ?? 'a core'} is running`
         : null
   );
-  const source = $derived(detail ?? null);
+  const row = $derived(findSource(sourceId));
+  // `source.changed` moves the list row; these fields moving means a re-read.
+  const rowKey = $derived(JSON.stringify([row?.state, row?.platform_id, row?.file_count]));
 
   onMount(() => {
     // Falls back to the id in platformName(); a miss retries at the next resync.
@@ -45,7 +47,18 @@
     if (!getStatus()) {
       void loadStatus().catch(() => undefined);
     }
+    if (!findSource(sourceId)) {
+      void sources.load();
+    }
     void loadDetail();
+  });
+
+  let seenKey = untrack(() => rowKey);
+  $effect(() => {
+    if (rowKey !== seenKey) {
+      seenKey = rowKey;
+      untrack(refresh);
+    }
   });
 
   async function loadDetail(): Promise<void> {
@@ -103,34 +116,34 @@
   {:else if loadError}
     <h1>Source</h1>
     <p role="alert">{loadError} <button onclick={() => void loadDetail()}>Retry</button></p>
-  {:else if !source}
+  {:else if !detail}
     <h1>Source</h1>
     <p class="muted" aria-busy="true">Loading…</p>
   {:else}
-    <h1>{source.display_name}</h1>
+    <h1>{detail.display_name}</h1>
 
     <section class="card head" aria-label="Overview">
       <dl>
-        <div><dt>Size</dt><dd>{bytesText(source.total_size)}</dd></div>
-        <div><dt>Files</dt><dd>{source.file_count.toLocaleString()}</dd></div>
+        <div><dt>Size</dt><dd>{bytesText(detail.total_size)}</dd></div>
+        <div><dt>Files</dt><dd>{detail.file_count.toLocaleString()}</dd></div>
         <div>
           <dt>Infohash</dt>
           <dd class="hash">
             {#if fullHash}
-              <input class="full" readonly value={source.infohash} aria-label="Infohash" onfocus={(e) => e.currentTarget.select()} />
+              <input class="full" readonly value={detail.infohash} aria-label="Infohash" onfocus={(e) => e.currentTarget.select()} />
             {:else}
-              <code title={source.infohash}>{shortHash(source.infohash)}</code>
+              <code title={detail.infohash}>{shortHash(detail.infohash)}</code>
             {/if}
-            <button class="small" onclick={() => void copyHash(source.infohash)} aria-label="Copy infohash">Copy</button>
+            <button class="small" onclick={() => void copyHash(detail?.infohash ?? '')} aria-label="Copy infohash">Copy</button>
           </dd>
         </div>
-        <div><dt>Added</dt><dd>{new Date(source.added_at * 1000).toLocaleDateString()}</dd></div>
-        <div><dt>File</dt><dd class="wrap">{source.origin_file}</dd></div>
+        <div><dt>Added</dt><dd>{new Date(detail.added_at * 1000).toLocaleDateString()}</dd></div>
+        <div><dt>File</dt><dd class="wrap">{detail.origin_file}</dd></div>
         <div>
           <dt>Client</dt>
           <dd>
-            {#if source.client_id}
-              In the client{#if source.transfer.files > 0}, {source.transfer.files} {source.transfer.files === 1 ? 'file' : 'files'} selected{/if}{#if clientHeld}<span
+            {#if detail.client_id}
+              In the client{#if detail.transfer.files > 0}, {detail.transfer.files} {detail.transfer.files === 1 ? 'file' : 'files'} selected{/if}{#if clientHeld}<span
                   class="held"
                   data-testid="client-held-line"
                 >
@@ -142,13 +155,13 @@
           </dd>
         </div>
       </dl>
-      {#if source.transfer.files > 0}
-        {@const share = transferShare(source.transfer)}
+      {#if detail.transfer.files > 0}
+        {@const share = transferShare(detail.transfer)}
         <ProgressBar
           label="Transfer of the selected files"
           view={{
             fraction: share,
-            text: `${bytesText(source.transfer.done)} of ${bytesText(source.transfer.size)}`
+            text: `${bytesText(detail.transfer.done)} of ${bytesText(detail.transfer.size)}`
           }}
         />
       {/if}
@@ -157,7 +170,7 @@
     <section class="card" aria-labelledby="seed-h">
       <h2 id="seed-h">Seed policy</h2>
       <div class="seed">
-        <SeedPolicySelect policy={source.seed_policy} label="Seed policy" onpick={(p: SeedPolicy) => void setSeedPolicy(p)} />
+        <SeedPolicySelect policy={detail.seed_policy} label="Seed policy" onpick={(p: SeedPolicy) => void setSeedPolicy(p)} />
         <span class="muted">How long the client keeps sharing this source's files once they are complete.</span>
       </div>
       {#if pausedWhilePlaying}<p class="muted seed-note">Paused while a core runs</p>{/if}
@@ -166,27 +179,27 @@
     <section class="card" aria-labelledby="class-h">
       <h2 id="class-h">Classification</h2>
       <div class="state">
-        <StatusPill {...sourceStatus(source.state)} />
-        {#if source.user_binding}<span class="tag" data-testid="overridden">Set by you</span>{/if}
+        <StatusPill {...sourceStatus(detail.state)} />
+        {#if detail.user_binding}<span class="tag" data-testid="overridden">Set by you</span>{/if}
       </div>
-      <p>{bindingText(source, platformName)}</p>
-      {#if source.reason && !source.user_binding}<p class="muted">{source.reason}</p>{/if}
-      {#if source.dats.length > 0}
+      <p>{bindingText(detail, platformName)}</p>
+      {#if detail.reason && !detail.user_binding}<p class="muted">{detail.reason}</p>{/if}
+      {#if detail.dats.length > 0}
         <p class="muted">
           Matched against
-          {#each source.dats as d, i (d.dat_version_id)}{i > 0 ? '; ' : ' '}{d.dat_name} ({d.version}), {d.matched.toLocaleString()}
+          {#each detail.dats as d, i (d.dat_version_id)}{i > 0 ? '; ' : ' '}{d.dat_name} ({d.version}), {d.matched.toLocaleString()}
             {d.matched === 1 ? 'file' : 'files'}{/each}.
         </p>
       {/if}
       <ul class="counts" aria-label="Files by match">
-        <li><strong>{source.summary.matched.toLocaleString()}</strong> matched</li>
-        <li><strong>{source.summary.candidates.toLocaleString()}</strong> {source.summary.candidates === 1 ? 'possible match' : 'possible matches'}</li>
-        <li><strong>{source.summary.unmatched.toLocaleString()}</strong> unmatched</li>
-        <li><strong>{source.summary.extra.toLocaleString()}</strong> {source.summary.extra === 1 ? 'extra' : 'extras'} (text, images, checksums)</li>
-        <li><strong>{source.summary.wanted.toLocaleString()}</strong> wanted</li>
+        <li><strong>{detail.summary.matched.toLocaleString()}</strong> matched</li>
+        <li><strong>{detail.summary.candidates.toLocaleString()}</strong> {detail.summary.candidates === 1 ? 'possible match' : 'possible matches'}</li>
+        <li><strong>{detail.summary.unmatched.toLocaleString()}</strong> unmatched</li>
+        <li><strong>{detail.summary.extra.toLocaleString()}</strong> {detail.summary.extra === 1 ? 'extra' : 'extras'} (text, images, checksums)</li>
+        <li><strong>{detail.summary.wanted.toLocaleString()}</strong> wanted</li>
       </ul>
 
-      <ReclassifyPanel {source} onchange={refresh} />
+      <ReclassifyPanel source={detail} onchange={refresh} />
     </section>
 
     <SourceFiles bind:this={files} {sourceId} />

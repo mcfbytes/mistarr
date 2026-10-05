@@ -159,8 +159,8 @@ it, so it can be corrected; the link is never written to storage, and a
 reload shows the box empty (PRINCIPLES.md section 2). Whatever screen it is
 on, the file goes where its content says. The magnet box is the same field
 labelled "Or a magnet link", with an Add button ("Adding…" while sent) and
-no note; a magnet is received as an upload. An http(s) link says "Fetching the file. Its progress is under
-Background work." and appears there and on Activity as "URL fetch: sent at
+no note; a magnet is received as an upload. An http(s) link says "Fetching
+the file. Its progress is under Background work." and appears there and on Activity as "URL fetch: sent at
 14:02:31", the time it was sent, with "(1)", "(2)" by job when several were
 sent in the same second, and never any part of the URL; then "URL fetch:
 <file>" once the first bytes name it, with a bar of the bytes received
@@ -186,8 +186,8 @@ fetched one came from a server, and mistarr places only what it rewrote, so
 a member it could not rewrite has no place to go.
 
 **Source** (`/sources/{id}`). A link back to Sources, then the name; size,
-file count, the infohash shortened with Copy (over plain http, where the
-browser has no clipboard, Copy shows the whole infohash to copy by hand),
+file count, the infohash shortened with Copy (Copy copies the infohash, and
+when the browser refuses it shows the whole infohash to copy by hand),
 added date, dropped file, and whether the client has it, with a paused pill
 ("Client paused while NES is running", or "Client uploads paused while…")
 while a `client_hold` applies, and a bar of the
