@@ -343,10 +343,7 @@ pub fn detail(conn: &Connection, id: SourceId) -> Result<Option<SourceDetail>> {
     let Some(source) = sources::get(conn, id)? else {
         return Ok(None);
     };
-    let platform = source
-        .platform_id
-        .as_ref()
-        .map(mistarr_core::PlatformId::as_str);
+    let platform = source.platform_id.as_ref().map(PlatformId::as_str);
     let mut summary = Summary::default();
     let mut stmt = conn.prepare(&format!(
         "SELECT f.path, f.rom_id IS NOT NULL, {HAS_MATCH} FROM torrent_files f WHERE f.source_id = ?1"

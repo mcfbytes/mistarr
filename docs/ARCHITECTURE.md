@@ -111,7 +111,8 @@ pub fn match_members<'a, R: Rom, P: Payload>(roms: &'a [R], members: &'a [P]) ->
 Every id is a newtype with a private field. A row id is declared with core's
 `row_id!`, which gives `new(i64)`, `get()`, ordering, `Display` and transparent
 serde; `row_id_sql!` adds its SQLite conversions. `RomId`, which source binding
-names as well as the catalogue, is core's; the server's other row ids
+names as well as the catalogue, and `GroupId`, the clone group fuzzy matching
+counts, are core's; the server's other row ids
 (`FileId`, `TitleId`, `SourceId`, `JobId`, `DownloadId`, `DatVersionId`,
 `ImportId`) are in `db/ids.rs`. `PlatformId` is core's, built with `new` and
 read with `as_str`; one from the platform table borrows the table's text, so

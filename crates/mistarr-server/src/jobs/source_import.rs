@@ -110,7 +110,7 @@ impl Job for SourceImport {
         let data = match read_bounded(&self.path).await {
             Ok(d) => d,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(crate::Error::io_at(&self.path)(e)),
         };
         let ext = self.path.extension().and_then(|e| e.to_str());
         let planned = if data.is_some() && matches!(ext, Some("torrent" | "magnet")) {
@@ -970,6 +970,22 @@ mod tests {
             .await
             .expect("list");
         assert!(listed.items.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unreadable_source_fails_naming_its_file() {
+        let (_dir, app) = state();
+        let sources = app.config().paths.sources();
+        let odd = sources.join("odd.torrent");
+        std::fs::create_dir_all(&odd).expect("mkdir");
+        let id = Scheduler::run_inline(&app, Arc::new(SourceImport { path: odd.clone() }))
+            .await
+            .expect("run");
+        let row = app.db.read(move |c| crate::db::jobs::get(c, id)).await;
+        let row = row.expect("get").expect("row");
+        assert_eq!(row.state, crate::db::jobs::JobState::Failed);
+        let error = row.progress.expect("progress")["error"].to_string();
+        assert!(error.contains(&*odd.to_string_lossy()), "{error}");
     }
 
     #[tokio::test]

@@ -2,7 +2,7 @@
 
 use std::fmt::Write as _;
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 use mistarr_core::hash::{hash_forms, hash_zip_member_forms, zip_members, HashError, HeaderRule};
@@ -262,14 +262,8 @@ pub(super) fn report(
     match expected {
         Some(r) => {
             let _ = writeln!(out, "Expected: {} ({} bytes)", r.name, r.size);
-            let hex = |d: Option<String>| d.unwrap_or_else(|| "-".to_owned());
-            let _ = writeln!(
-                out,
-                "  crc32 {}  md5 {}  sha1 {}",
-                hex(r.crc32.map(|d| d.to_string())),
-                hex(r.md5.map(|d| d.to_string())),
-                hex(r.sha1.map(|d| d.to_string()))
-            );
+            let (crc32, md5, sha1) = (dash(r.crc32), dash(r.md5), dash(r.sha1));
+            let _ = writeln!(out, "  crc32 {crc32}  md5 {md5}  sha1 {sha1}");
         }
         None => out.push_str("Expected: unknown rom\n"),
     }
@@ -290,19 +284,27 @@ pub(super) fn report(
     out
 }
 
-/// Moves a staged item to `staging/quarantine/<infohash>/` with its report beside it.
+/// A digest's hex, or `-` when the entry lacks it.
+fn dash<D: std::fmt::Display>(d: Option<D>) -> String {
+    d.map_or_else(|| "-".to_owned(), |d| d.to_string())
+}
+
+/// Moves a staged item to `staging/quarantine/<infohash>/` with its report beside it;
+/// an error names the directory, item or report that failed.
 pub(super) fn quarantine(
     staging: &Path,
     infohash: &str,
     item: &Path,
     report: &str,
-) -> io::Result<PathBuf> {
+) -> crate::Result<PathBuf> {
+    use crate::Error;
     let dir = staging.join("quarantine").join(infohash);
-    fs::create_dir_all(&dir)?;
+    fs::create_dir_all(&dir).map_err(Error::io_at(&dir))?;
     let name = file_name(item);
     let dst = dir.join(&name);
-    fs::rename(item, &dst)?;
-    fs::write(dir.join(format!("{name}.report.txt")), report)?;
+    fs::rename(item, &dst).map_err(Error::io_at(item))?;
+    let text = dir.join(format!("{name}.report.txt"));
+    fs::write(&text, report).map_err(Error::io_at(&text))?;
     Ok(dst)
 }
 
@@ -491,6 +493,11 @@ mod tests {
         assert_eq!(
             fs::read_to_string(staging.join("quarantine/0a0a/a.bin.report.txt")).expect("read"),
             "report"
+        );
+        let gone = quarantine(&staging, "0a0a", &plain, "report").expect_err("moved already");
+        assert!(
+            gone.to_string().contains(&*plain.to_string_lossy()),
+            "{gone}"
         );
     }
 }

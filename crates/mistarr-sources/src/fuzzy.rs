@@ -5,7 +5,7 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-use mistarr_core::RomId;
+use mistarr_core::{GroupId, RomId};
 
 use crate::binding::{base_name, normalize_name, Confidence};
 use crate::torrent::TorrentFile;
@@ -25,7 +25,7 @@ pub struct SizedRom {
     /// Its `match_base`: the normalized name before the first tag.
     pub base: String,
     /// Its title's clone group, so versions of one entry count once.
-    pub group: i64,
+    pub group: GroupId,
 }
 
 /// The roms of the bound platform by size, for the fuzzy tiers.
@@ -180,7 +180,7 @@ pub fn signal(file: &[String], rom: &[String]) -> Signal {
 ///
 /// ```
 /// use mistarr_sources::binding::Confidence;
-/// use mistarr_core::RomId;
+/// use mistarr_core::{GroupId, RomId};
 /// use mistarr_sources::fuzzy::{candidates, SizeIndex, SizedRom};
 /// use mistarr_sources::torrent::TorrentFile;
 ///
@@ -188,7 +188,7 @@ pub fn signal(file: &[String], rom: &[String]) -> Signal {
 /// impl SizeIndex for Nova {
 ///     fn roms_of_size(&self, size: u64) -> Vec<SizedRom> {
 ///         if size != 16 { return Vec::new(); }
-///         let rom = |id, base: &str| SizedRom { rom: RomId::new(id), base: base.into(), group: id };
+///         let rom = |id, base: &str| SizedRom { rom: RomId::new(id), base: base.into(), group: GroupId::new(id) };
 ///         vec![rom(1, "nova the squirrel"), rom(2, "other tale")]
 ///     }
 /// }
@@ -349,7 +349,7 @@ impl<'r> Group<'r> {
             .iter()
             .flat_map(|&i| self.sets[i].1.iter().copied())
             .collect();
-        let groups: HashSet<i64> = roms.iter().map(|r| r.group).collect();
+        let groups: HashSet<GroupId> = roms.iter().map(|r| r.group).collect();
         if groups.len() > MAX_FUZZY_GROUPS {
             return Vec::new();
         }
@@ -381,7 +381,7 @@ mod tests {
         let r = SizedRom {
             rom: RomId::new(id),
             base: base.to_owned(),
-            group,
+            group: GroupId::new(group),
         };
         (r, size)
     }

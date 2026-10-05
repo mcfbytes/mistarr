@@ -5,6 +5,7 @@ use std::fmt;
 
 /// Declares a database row id: a newtype over `i64` with a private field, `new` and `get`,
 /// `Display`, ordering and transparent serde. [`row_id_sql!`] adds the SQLite conversions.
+/// The serde derives expand in the caller, which must depend on `serde` with `derive`.
 ///
 /// ```
 /// mistarr_core::row_id! {
@@ -78,6 +79,14 @@ row_id! {
 
 #[cfg(feature = "rusqlite")]
 row_id_sql!(RomId);
+
+row_id! {
+    /// A title's clone group: the `titles.id` of the group's root, as fuzzy matching counts it.
+    GroupId
+}
+
+#[cfg(feature = "rusqlite")]
+row_id_sql!(GroupId);
 
 /// Stable platform identifier, e.g. `nes`, `megadrive`, `psx`. The full table lives in
 /// `docs/PLATFORMS.md` and in `mistarr-mister`; an id from that table borrows its text.

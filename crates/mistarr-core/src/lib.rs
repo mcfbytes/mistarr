@@ -22,7 +22,7 @@ pub mod xml;
 
 pub use digest::{Crc32, Digest, InfoHash, Md5, ParseDigestError, Sha1};
 pub use error::{Error, Result};
-pub use id::{PlatformId, RomId};
+pub use id::{GroupId, PlatformId, RomId};
 pub use percent::percent_decode;
 
 #[cfg(feature = "rusqlite")]

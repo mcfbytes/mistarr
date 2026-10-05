@@ -943,7 +943,7 @@ mod tests {
             [SizedRom {
                 rom: a,
                 base: "nova quest".to_owned(),
-                group
+                group: mistarr_core::GroupId::new(group)
             }]
         );
         assert!(index.roms_of_size(u64::MAX).is_empty());
@@ -954,7 +954,11 @@ mod tests {
             [root, group],
         )
         .expect("link");
-        assert_eq!(index.roms_of_size(16)[0].group, root, "the effective group");
+        assert_eq!(
+            index.roms_of_size(16)[0].group.get(),
+            root,
+            "the effective group"
+        );
         assert_eq!(header_len(&PlatformId::new("snes")), 512);
         assert!(rank("x").contains("WHEN 'fuzzy' THEN 3"));
         assert!(tier("x").contains("'base'"));
