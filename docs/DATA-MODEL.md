@@ -15,6 +15,29 @@ The JSON columns are `dat_stage.game`, `scan_progress.done_dirs`,
 own table. A value in one of them that does not parse is an error naming the
 column, never a default.
 
+## Module layout
+
+SQL lives in `crates/mistarr-server/src/db/`, one typed function per
+statement. A table module owns the writes to its table: `files`, `roms`,
+`scan_progress`, `titles/` (`mod.rs` stores titles, `recompute.rs` groups and
+picks them, `browse.rs` and `detail.rs` read them), `downloads` and so on.
+Read-only composite views over several tables sit in `db/views/`. Rom
+lookups, the SHA1, MD5 then CRC32 and size tiers among them, are in `roms`.
+A platform is named by a `PlatformId` in every signature, read with
+`platforms::find`.
+
+A statement run once per row of a loop or per file is prepared with
+`prepare_cached`; a statement a request or a job runs once is prepared with
+`prepare`, so the connection's statement cache holds only the hot ones.
+
+Tests build catalogs with `db::fixtures`, compiled for tests and the
+`test-support` feature only: `conn()` is a migrated database with the
+platform table, `dat(&platform).title(name).rom(name, &hashes, status)` writes
+a DAT version and returns the ids it wrote, and `catalog` writes the
+standard `nes` roms. A migration test applies the schema of the version
+before the one it checks with `migrate::apply_through` and seeds it with SQL
+written for that version.
+
 ## Tables
 
 ```sql

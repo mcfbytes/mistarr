@@ -316,32 +316,32 @@ Merge order: 62, 63, 64.
 
 Sonnet · `mistarr-server` (`db/`, tests) · branch `wp-62-db-layout`
 
-- [ ] `files.rs` splits into `files.rs` (the `files` table), `roms.rs` and
+- [x] `files.rs` splits into `files.rs` (the `files` table), `roms.rs` and
   `scan_progress.rs`. `roms.rs` has one `match_tiers` behind `match_rom`,
   `match_live_rom` and `roms_matching`, and the rom lookups from `files.rs`,
   `imports.rs`, `downloads_import.rs` and `arcade.rs`.
-- [ ] `NewFile` is the one input for a file row; `Hashed`, `Columns` and the
+- [x] `NewFile` is the one input for a file row; `Hashed`, `Columns` and the
   many-argument `upsert` go.
-- [ ] `titles.rs` becomes `titles/` with `mod.rs`, `recompute.rs`, `browse.rs`
+- [x] `titles.rs` becomes `titles/` with `mod.rs`, `recompute.rs`, `browse.rs`
   and `detail.rs`.
-- [ ] One `put_title` serves the DAT and MRA `upsert_title`.
-- [ ] `platforms::find(&PlatformId)` with `COLUMNS` and `from_row`;
+- [x] One `put_title` serves the DAT and MRA `upsert_title`.
+- [x] `platforms::find(&PlatformId)` with `COLUMNS` and `from_row`;
   `platforms::get` and `sources::platform_exists` go; `titles` and `arcade`
   take `&PlatformId`.
-- [ ] `db::fixtures`, gated by `test` or `test-support`, has `conn()`,
+- [x] `db::fixtures`, gated by `test` or `test-support`, has `conn()`,
   `catalog()` and a builder `dat(pid).title(name).rom(name, hashes, status)`
   returning typed ids. The `seed_*_fixture` families and the 16 `conn()`
   copies go; no fixture ships in a release build.
-- [ ] The temp-directory code leaves `db/mod.rs` for `tempdir.rs`;
+- [x] The temp-directory code leaves `db/mod.rs` for `tempdir.rs`;
   `install_file`, `sync_parent` and `remove_if_present` move to
   `db/ram/swap.rs`; `ram.rs` uses the memory and free-space readers in
   `status.rs`.
-- [ ] `settle_elsewhere` and `want_again` move to `downloads.rs`. DATA-MODEL.md
+- [x] `settle_elsewhere` and `want_again` move to `downloads.rs`. DATA-MODEL.md
   states the rule: table modules own writes, and read-only composite views
   sit in `db/views/`.
-- [ ] Migration tests use `apply_through(conn, n)` and seed old schemas with
+- [x] Migration tests use `apply_through(conn, n)` and seed old schemas with
   SQL written for that version.
-- [ ] The statement rule is written in DATA-MODEL.md and applied:
+- [x] The statement rule is written in DATA-MODEL.md and applied:
   `prepare_cached` for statements run per row, `prepare` for one-shot reads.
 
 ### WP-63 HTTP shell
