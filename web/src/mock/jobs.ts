@@ -1,4 +1,4 @@
-import { FETCH_CANCELLED } from '../lib/stores/jobs.svelte';
+import { FETCH_CANCELLED } from '../lib/fetch';
 import type { IncomingFile, Job, JobState } from '../lib/types';
 import { emit, streamOpen } from './events';
 import { mock, nextJobId, nowSecs } from './state';

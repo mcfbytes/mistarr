@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { findPlatform, loadPlatforms } from '../lib/stores/platforms.svelte';
+  import { debounce, DELAY_MS } from '../lib/coalesce';
+  import { findPlatform, platforms } from '../lib/stores/platforms.svelte';
   import {
     getGroups,
     getGroupsError,
@@ -11,6 +12,7 @@
     patchGroup
   } from '../lib/stores/titles.svelte';
   import { titleUrl } from '../lib/router.svelte';
+  import { attempt } from '../lib/actions';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
@@ -25,9 +27,6 @@
   }
 
   const { platformId }: Props = $props();
-
-  /** Typing pauses this long before the search runs. */
-  const SEARCH_DEBOUNCE_MS = 250;
 
   let q = $state('');
   let search = $state('');
@@ -50,14 +49,10 @@
 
   async function startCore(): Promise<void> {
     coreBusy = true;
-    try {
-      await api.launchCore(platformId);
+    if (await attempt(() => api.launchCore(platformId).then(() => true))) {
       showToast('Core started on the MiSTer.', 'success');
-    } catch (err) {
-      showToast(errorMessage(err));
-    } finally {
-      coreBusy = false;
     }
+    coreBusy = false;
   }
   const groups = $derived(getGroups());
   const total = $derived(getGroupsTotal());
@@ -89,7 +84,7 @@
   onMount(() => {
     // Both fall back gracefully (platform name/art to the id, hidden filters to none)
     // and are retried at the next resync.
-    void loadPlatforms().catch(() => undefined);
+    void platforms.load();
     void loadHideList().catch(() => undefined);
     if (!getStatus()) {
       void loadStatus().catch(() => {
@@ -103,12 +98,14 @@
     hideList = settings.prefs.hide;
   }
 
+  // Typing pauses this long before the search runs.
+  const applySearch = debounce((next: string) => {
+    search = next;
+  }, DELAY_MS.search);
+
   $effect(() => {
-    const next = q;
-    const timer = setTimeout(() => {
-      search = next;
-    }, SEARCH_DEBOUNCE_MS);
-    return () => clearTimeout(timer);
+    applySearch(q);
+    return () => applySearch.cancel();
   });
 
   $effect(() => {

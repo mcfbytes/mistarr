@@ -1,60 +1,31 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { downloads, imports, watchImports } from '../lib/stores/downloads.svelte';
+  import { jobs, recent, watchRecent } from '../lib/stores/jobs.svelte';
+  import { findPlatform, platforms } from '../lib/stores/platforms.svelte';
+  import { attempt } from '../lib/actions';
+  import { api } from '../lib/api';
   import {
-    getDownloads,
-    getImports,
-    loadDownloads,
-    loadImports,
-    patchDownload,
-    watchImports
-  } from '../lib/stores/downloads.svelte';
-  import { getJobs, getRecentJobs, jobOutcome, loadJobs, watchRecent } from '../lib/stores/jobs.svelte';
-  import { findPlatform, loadPlatforms } from '../lib/stores/platforms.svelte';
-  import { api, errorMessage } from '../lib/api';
-  import { showToast } from '../lib/stores/toast.svelte';
-  import { describeProgress, downloadStatus, fetchSubject, jobDetail, jobHref, jobStatus, kindLabel } from '../lib/status';
+    describeProgress,
+    downloadStatus,
+    fetchSubject,
+    jobDetail,
+    jobHref,
+    jobOutcome,
+    jobStatus,
+    kindLabel
+  } from '../lib/status';
   import FetchCancel from '../lib/FetchCancel.svelte';
   import StatusPill from '../lib/StatusPill.svelte';
   import ProgressBar from '../lib/ProgressBar.svelte';
-  import type { Job } from '../lib/types';
-
-  let downloadsError = $state<string | null>(null);
-  let jobsError = $state<string | null>(null);
-  let importsError = $state<string | null>(null);
-
-  async function loadDownloadsList(): Promise<void> {
-    try {
-      await loadDownloads();
-      downloadsError = null;
-    } catch (err) {
-      downloadsError = errorMessage(err);
-    }
-  }
-
-  async function loadJobsList(): Promise<void> {
-    try {
-      await loadJobs();
-      jobsError = null;
-    } catch (err) {
-      jobsError = errorMessage(err);
-    }
-  }
-
-  async function loadImportsList(): Promise<void> {
-    try {
-      await loadImports();
-      importsError = null;
-    } catch (err) {
-      importsError = errorMessage(err);
-    }
-  }
+  import type { Download, Job } from '../lib/types';
 
   onMount(() => {
-    void loadDownloadsList();
-    void loadImportsList();
-    void loadJobsList();
+    void downloads.load();
+    void imports.load();
+    void jobs.load();
     // The platform name falls back to its id in jobTitle(); it retries at the next resync.
-    void loadPlatforms().catch(() => undefined);
+    void platforms.ensure();
     const stopRecent = watchRecent();
     const stopImports = watchImports();
     return () => {
@@ -62,11 +33,6 @@
       stopImports();
     };
   });
-
-  const downloads = $derived(getDownloads());
-  const imports = $derived(getImports());
-  const jobs = $derived(getJobs());
-  const recent = $derived(getRecentJobs());
 
   function platformName(id: string): string {
     return findPlatform(id)?.name ?? id;
@@ -77,28 +43,17 @@
     const named = typeof job.payload.source_name === 'string';
     const detail =
       job.kind === 'url_fetch'
-        ? fetchSubject(job, jobs)
+        ? fetchSubject(job, jobs.items)
         : typeof pid === 'string' && !named
           ? platformName(pid)
           : jobDetail(job.payload);
     return detail ? `${kindLabel(job.kind)}: ${detail}` : kindLabel(job.kind);
   }
 
-  async function retry(id: number): Promise<void> {
-    try {
-      const row = await api.retryDownload(id);
-      patchDownload(id, row);
-    } catch (err) {
-      showToast(errorMessage(err));
-    }
-  }
-
-  async function cancel(id: number): Promise<void> {
-    try {
-      const row = await api.cancelDownload(id);
-      patchDownload(id, row);
-    } catch (err) {
-      showToast(errorMessage(err));
+  async function change(id: number, call: () => Promise<Download>): Promise<void> {
+    const row = await attempt(call);
+    if (row) {
+      downloads.patch(id, row);
     }
   }
 </script>
@@ -107,10 +62,10 @@
   <h1>Activity</h1>
 
   <h2>Downloads</h2>
-  {#if downloadsError}
-    <p role="alert">{downloadsError} <button type="button" onclick={() => void loadDownloadsList()}>Retry</button></p>
+  {#if downloads.error}
+    <p role="alert">{downloads.error} <button type="button" onclick={() => void downloads.load()}>Retry</button></p>
   {:else}
-    {#each downloads as d (d.id)}
+    {#each downloads.items as d (d.id)}
       <div class="card row">
         <div class="head">
           <strong>{d.title_name}</strong>
@@ -121,10 +76,10 @@
         <ProgressBar view={{ fraction: d.progress, text: '' }} label={`${d.title_name} transfer`} />
         <div class="actions">
           {#if d.state === 'failed'}
-            <button onclick={() => retry(d.id)}>Retry</button>
+            <button onclick={() => change(d.id, () => api.retryDownload(d.id))}>Retry</button>
           {/if}
           {#if ['wanted', 'queued', 'transferring', 'checking'].includes(d.state)}
-            <button onclick={() => cancel(d.id)}>Cancel</button>
+            <button onclick={() => change(d.id, () => api.cancelDownload(d.id))}>Cancel</button>
           {/if}
         </div>
       </div>
@@ -134,10 +89,10 @@
   {/if}
 
   <h2>Jobs</h2>
-  {#if jobsError}
-    <p role="alert">{jobsError} <button type="button" onclick={() => void loadJobsList()}>Retry</button></p>
+  {#if jobs.error}
+    <p role="alert">{jobs.error} <button type="button" onclick={() => void jobs.load()}>Retry</button></p>
   {:else}
-    {#each jobs as job (job.id)}
+    {#each jobs.items as job (job.id)}
       {@const view = job.state === 'running' ? describeProgress(job.kind, job.progress) : null}
       <div class="card row job" data-job={job.id}>
         <div class="head">
@@ -158,7 +113,7 @@
 
   <h2>Recent</h2>
   <ul class="imports" aria-live="polite">
-    {#each recent as job (job.id)}
+    {#each recent.items as job (job.id)}
       <li>
         <StatusPill {...jobStatus(job)} />
         <span class:error={job.state === 'failed'}>{jobOutcome(job, platformName)}</span>
@@ -170,11 +125,11 @@
   </ul>
 
   <h2>Imports</h2>
-  {#if importsError}
-    <p role="alert">{importsError} <button type="button" onclick={() => void loadImportsList()}>Retry</button></p>
+  {#if imports.error}
+    <p role="alert">{imports.error} <button type="button" onclick={() => void imports.load()}>Retry</button></p>
   {:else}
     <ul class="imports">
-      {#each imports as entry (entry.id)}
+      {#each imports.items as entry (entry.id)}
         <li>{entry.action}</li>
       {:else}
         <li class="muted">No imports yet.</li>

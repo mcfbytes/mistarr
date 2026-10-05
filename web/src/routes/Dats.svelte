@@ -1,29 +1,19 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { api, errorMessage } from '../lib/api';
-  import { getDats, getDatTotal, loadDats, markDatRemoved } from '../lib/stores/dats.svelte';
-  import { getPlatforms, loadPlatforms } from '../lib/stores/platforms.svelte';
+  import { dats, markDatRemoved } from '../lib/stores/dats.svelte';
+  import { platforms } from '../lib/stores/platforms.svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import IncomingList from '../lib/IncomingList.svelte';
   import UploadField from '../lib/UploadField.svelte';
   import UrlField from '../lib/UrlField.svelte';
   import type { DatVersion } from '../lib/types';
 
-  let datsError = $state<string | null>(null);
-
-  async function loadDatsList(): Promise<void> {
-    try {
-      await loadDats();
-      datsError = null;
-    } catch (err) {
-      datsError = errorMessage(err);
-    }
-  }
-
   onMount(() => {
-    void loadDatsList();
+    void dats.load();
     // Falls back to the id in platformName(); a miss retries at the next resync.
-    void loadPlatforms().catch(() => undefined);
+    void platforms.ensure();
     if (!getStatus()) {
       // Only feeds the dats-dir hint text; a miss just hides it until SSE resync.
       void loadStatus().catch(() => undefined);
@@ -31,12 +21,9 @@
   });
 
   let confirming = $state<number | null>(null);
-  let busy = $state<Set<number>>(new Set());
+  const busy = new SvelteSet<number>();
   let announcement = $state('');
 
-  const platforms = $derived(getPlatforms());
-  const dats = $derived(getDats());
-  const total = $derived(getDatTotal());
   const datsDir = $derived(getStatus()?.dats_dir ?? null);
 
   interface Family {
@@ -48,7 +35,7 @@
   // One entry per family on a platform: the current version, else the newest, then the rest.
   const families = $derived.by((): Family[] => {
     const byKey: Record<string, DatVersion[]> = {};
-    for (const d of dats) {
+    for (const d of dats.items) {
       const key = familyKey(d);
       byKey[key] = [...(byKey[key] ?? []), d];
     }
@@ -81,7 +68,7 @@
     if (!id) {
       return 'Not bound';
     }
-    return platforms.find((p) => p.id === id)?.name ?? id;
+    return platforms.items.find((p) => p.id === id)?.name ?? id;
   }
 
   function loadedAt(d: DatVersion): string {
@@ -116,7 +103,7 @@
 
   async function remove(d: DatVersion): Promise<void> {
     confirming = null;
-    busy = new Set([...busy, d.id]);
+    busy.add(d.id);
     announcement = `Removing ${label(d)}`;
     try {
       await api.deleteDat(d.id);
@@ -130,7 +117,7 @@
       announcement = `${label(d)}: ${errorMessage(err)}`;
       void focusButton(d.id, 'remove');
     } finally {
-      busy = new Set([...busy].filter((id) => id !== d.id));
+      busy.delete(d.id);
     }
   }
 </script>
@@ -150,11 +137,11 @@
   <h2>Waiting in <code>dats/</code></h2>
   <IncomingList which="dats" manage />
 
-  <h2>Loaded <span class="muted count">({total} {total === 1 ? 'version' : 'versions'})</span></h2>
+  <h2>Loaded <span class="muted count">({dats.total} {dats.total === 1 ? 'version' : 'versions'})</span></h2>
   <p class="live" aria-live="polite">{announcement}</p>
-  {#if datsError}
-    <p role="alert">{datsError} <button type="button" onclick={() => void loadDatsList()}>Retry</button></p>
-  {:else if dats.length === 0}
+  {#if dats.error}
+    <p role="alert">{dats.error} <button type="button" onclick={() => void dats.load()}>Retry</button></p>
+  {:else if dats.items.length === 0}
     <p class="muted">No DAT loaded yet.</p>
   {:else}
     <ul class="families" aria-label="Loaded DATs">

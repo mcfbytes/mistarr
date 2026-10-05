@@ -3,10 +3,10 @@
   import { navigate } from '../lib/router.svelte';
   import { api, errorMessage } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
-  import { getPlatforms, loadPlatforms } from '../lib/stores/platforms.svelte';
-  import { getDats, loadDats } from '../lib/stores/dats.svelte';
+  import { platforms } from '../lib/stores/platforms.svelte';
+  import { dats } from '../lib/stores/dats.svelte';
   import { getStatus, getWizard, loadStatus, loadWizard } from '../lib/stores/status.svelte';
-  import { getSources, loadSources } from '../lib/stores/sources.svelte';
+  import { sources } from '../lib/stores/sources.svelte';
   import UploadField from '../lib/UploadField.svelte';
   import MagnetField from '../lib/MagnetField.svelte';
   import UrlField from '../lib/UrlField.svelte';
@@ -32,26 +32,25 @@
   onMount(() => {
     // The other steps show a store's data and retry at the next resync on a miss;
     // settings is local here, so its failure is shown with Retry in the Client step.
-    void loadPlatforms().catch(() => undefined);
-    void loadDats().catch(() => undefined);
+    void platforms.load();
+    void dats.load();
     void loadStatus().catch(() => undefined);
     void loadWizard().catch(() => undefined);
     void loadSettings();
-    void loadSources().catch(() => undefined);
+    void sources.load();
     // Leaving the wizard any way at all counts as dismissing it.
     return () => void dismiss();
   });
 
-  const platforms = $derived(getPlatforms());
   const detectedCores = $derived(
-    coresResult ?? platforms.filter((p) => p.core_present).map((p) => p.id)
+    coresResult ?? platforms.items.filter((p) => p.core_present).map((p) => p.id)
   );
 
   $effect(() => {
     if (step === 0 && !coresChecked) {
       coresChecked = true;
       // Only auto-run when boot detection (already reflected in `platforms`) found nothing.
-      if (!platforms.some((p) => p.core_present)) {
+      if (!platforms.items.some((p) => p.core_present)) {
         void runCoreDetection();
       }
     }
@@ -62,7 +61,7 @@
     try {
       const result = await api.cores();
       coresResult = result.platforms;
-      await loadPlatforms();
+      await platforms.load();
     } catch (err) {
       showToast(errorMessage(err));
     } finally {
@@ -79,10 +78,8 @@
     }
   }
 
-  const dats = $derived(getDats());
   const status = $derived(getStatus());
   const wizard = $derived(getWizard());
-  const sources = $derived(getSources());
 
   function next(): void {
     if (step < steps.length - 1) {
@@ -117,7 +114,7 @@
   }
 
   function platformName(id: string): string {
-    return platforms.find((p) => p.id === id)?.name ?? id;
+    return platforms.items.find((p) => p.id === id)?.name ?? id;
   }
 
   async function saveClientSettings(): Promise<void> {
@@ -179,7 +176,7 @@
       <IncomingList which="dats" />
       <p class="muted">Loaded DATs:</p>
       <ul>
-        {#each dats as dat (dat.id)}
+        {#each dats.items as dat (dat.id)}
           <li>{dat.dat_name} — {dat.platform_id ?? 'unbound'}</li>
         {:else}
           <li class="muted">None loaded yet.</li>
@@ -225,7 +222,7 @@
       <IncomingList which="sources" />
       <p class="muted">Added sources:</p>
       <ul>
-        {#each sources as source (source.id)}
+        {#each sources.items as source (source.id)}
           <li>
             {source.display_name} — {source.platform_id ? platformName(source.platform_id) : source.state}
             {#if source.reason}<span class="muted">({source.reason})</span>{/if}

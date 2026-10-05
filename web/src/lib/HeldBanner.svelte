@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { api, errorMessage } from './api';
+  import { attempt } from './actions';
+  import { api } from './api';
   import { applyStatus, getStatus } from './stores/status.svelte';
-  import { showToast } from './stores/toast.svelte';
 
   const status = $derived(getStatus());
   const waiting = $derived(status?.paused ? status.waiting : []);
@@ -12,13 +12,11 @@
 
   async function runNow(): Promise<void> {
     busy = true;
-    try {
-      applyStatus(await api.resume());
-    } catch (err) {
-      showToast(errorMessage(err));
-    } finally {
-      busy = false;
+    const next = await attempt(() => api.resume());
+    if (next) {
+      applyStatus(next);
     }
+    busy = false;
   }
 </script>
 
