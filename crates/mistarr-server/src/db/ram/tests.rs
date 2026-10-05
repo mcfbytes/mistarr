@@ -1,6 +1,7 @@
 //! Tests of the import in RAM: the chunked copy, the check, the swap and every way out.
 
 use super::*;
+use crate::db::fixtures::pid;
 use crate::db::settings;
 use crate::db::testutil;
 
@@ -90,14 +91,6 @@ fn write_new_makes_one_write_syscall_per_mebibyte() {
     if let Some(w) = writes {
         assert_eq!(w, 4, "one write per MiB and one for the rest");
     }
-}
-
-#[test]
-fn meminfo_gives_the_available_bytes() {
-    let text = "MemTotal:  498000 kB\nMemFree: 1 kB\nMemAvailable:   378000 kB\n";
-    assert_eq!(mem_available(text), Some(378_000 * 1024));
-    assert_eq!(mem_available("MemTotal: 1 kB\n"), None);
-    assert_eq!(mem_available("MemAvailable: lots kB\n"), None);
 }
 
 #[test]
@@ -878,24 +871,28 @@ fn load_games(
             revision: None,
             flags: &[],
         };
-        titles::upsert_title(&tx, platform, version, &t, &[])?;
+        titles::upsert_title(&tx, &pid(platform), version, &t, &[])?;
     }
-    titles::link_parents(&tx, version, true)?;
-    titles::recompute_platform(&tx, platform, &mistarr_core::select::Prefs::default())?;
+    titles::recompute::link_parents(&tx, version, true)?;
+    titles::recompute::recompute_platform(
+        &tx,
+        &pid(platform),
+        &mistarr_core::select::Prefs::default(),
+    )?;
     crate::db::commit(tx)
 }
 
 /// Groups on `platform` a browse finds, searching for `q` when given.
 fn found(db: &Db, platform: &str, q: Option<&str>) -> u64 {
-    let filter = crate::db::titles::Browse {
+    let filter = crate::db::titles::browse::Browse {
         q: q.map(str::to_owned),
-        ..crate::db::titles::Browse::default()
+        ..crate::db::titles::browse::Browse::default()
     };
     let page = crate::db::sql::Page {
         limit: 10,
         offset: 0,
     };
-    db.read_blocking(|c| crate::db::titles::browse(c, platform, &filter, page))
+    db.read_blocking(|c| crate::db::titles::browse::browse(c, &pid(platform), &filter, page))
         .expect("browse")
         .total
 }

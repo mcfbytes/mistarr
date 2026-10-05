@@ -391,8 +391,8 @@ mod tests {
 
     use super::*;
     use crate::app::testutil::state;
+    use crate::db::fixtures::seed_rom;
     use crate::db::ids::RomId;
-    use crate::db::sources::fixtures::seed_rom;
     use crate::db::sources::{NewSource, SourceState};
     use crate::jobs::Scheduler;
 

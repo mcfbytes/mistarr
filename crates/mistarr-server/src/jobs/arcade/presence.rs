@@ -15,9 +15,9 @@ use mistarr_mister::platforms::Platform;
 use rusqlite::Connection;
 use serde_json::json;
 
-use crate::db::arcade as arcade_rows;
-use crate::db::files::{self, FileRow, FileState, Hashed};
+use crate::db::files::{self, FileRow, FileState, NewFile};
 use crate::db::ids::{FileId, RomId};
+use crate::db::roms;
 use crate::db::Db;
 use crate::error::Result;
 use crate::jobs::scan::{all_entries, extension, file_meta};
@@ -250,19 +250,11 @@ fn write_changes(
 ) -> Result<(usize, usize)> {
     let dropped = files::delete_paths(tx, pid, &changes.drop)?;
     for (zip, rom) in &changes.record {
-        let none = Hashed::default();
-        let state = FileState::Unverified;
-        files::upsert(
-            tx,
-            pid,
-            &zip.rel,
-            zip.size,
-            zip.mtime,
-            &none,
-            Some(*rom),
-            state,
-            now,
-        )?;
+        let row = NewFile {
+            rom_id: Some(*rom),
+            ..NewFile::unhashed(&zip.rel, zip.size, zip.mtime, FileState::Unverified)
+        };
+        files::upsert(tx, pid, &row, now)?;
     }
     for (id, mtime) in &changes.restamp {
         files::restamp(tx, *id, *mtime, now)?;
@@ -363,7 +355,7 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
     let live = Arc::new(
         ctx.app
             .db
-            .read(|c| arcade_rows::live_zip_roms(c, super::PLATFORM))
+            .read(|c| roms::live_zip_roms(c, &super::platform()))
             .await?,
     );
     let listed: Vec<(&'static str, io::Result<Vec<String>>)> =

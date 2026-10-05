@@ -362,8 +362,8 @@ mod tests {
     use super::*;
     use crate::app::testutil::state;
     use crate::db::downloads::{CancelOutcome, Candidate, NewDownload};
+    use crate::db::fixtures::seed_rom;
     use crate::db::ids::TitleId;
-    use crate::db::sources::fixtures::seed_rom;
     use crate::db::sources::{NewSource, SourceState};
     use mistarr_clients::{ClientFile, ClientInfo, TorrentStatus};
     use mistarr_sources::binding::{Confidence, RomRef};

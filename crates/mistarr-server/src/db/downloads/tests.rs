@@ -2,15 +2,11 @@ use mistarr_sources::binding::{Confidence, RomRef};
 use mistarr_sources::torrent::TorrentFile;
 
 use super::*;
-use crate::db::sources::{self, fixtures::seed_rom, NewSource, SourceState};
+use crate::db::candidates::{self, MatchConfidence};
+use crate::db::fixtures::conn;
+use crate::db::fixtures::seed_rom;
+use crate::db::sources::{self, NewSource, SourceState};
 use crate::db::sql::Page;
-
-fn conn() -> Connection {
-    let mut c = Connection::open_in_memory().expect("open");
-    crate::db::migrate::apply(&mut c).expect("migrate");
-    crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-    c
-}
 
 fn title_of(c: &Connection, rom: RomId) -> TitleId {
     c.query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
@@ -461,4 +457,130 @@ fn name_tier_files_beat_candidates_and_a_header_on_top_counts_as_the_size() {
         candidate(headered, 0),
         "a size with the iNES header on top matches"
     );
+}
+
+/// A database with a wanted title of two versions and a torrent of two files.
+fn grouped() -> (Connection, SourceId, RomId, RomId) {
+    let mut c = Connection::open_in_memory().expect("open");
+    crate::db::migrate::apply(&mut c).expect("migrate");
+    crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+    let src = sources::insert(
+        &c,
+        &NewSource {
+            infohash: &"0b".repeat(20),
+            display_name: "Synthetic Set",
+            origin_file: "set.torrent",
+            state: SourceState::Bound,
+            reason: None,
+            added_at: 1,
+        },
+    )
+    .expect("source");
+    let files: Vec<_> = ["a.nes", "b.nes"]
+        .iter()
+        .zip(0..)
+        .map(|(p, index)| mistarr_sources::torrent::TorrentFile {
+            index,
+            path: (*p).to_owned(),
+            size: 10,
+        })
+        .collect();
+    sources::replace_files(&c, src, &files).expect("files");
+    let rom =
+        crate::db::fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 10, &[]).expect("rom");
+    let alt = crate::db::fixtures::seed_rom(&c, "nes", "Example Quest (USA) (Alt).nes", 10, &[])
+        .expect("alt");
+    c.execute(
+        "UPDATE titles SET wanted = 1, parent_id = (SELECT title_id FROM roms WHERE id = ?1)
+         WHERE id IN (SELECT title_id FROM roms WHERE id IN (?1, ?2))",
+        [rom, alt],
+    )
+    .expect("group");
+    (c, src, rom, alt)
+}
+
+fn add(c: &Connection, src: SourceId, index: u32, rom: RomId, confidence: MatchConfidence) {
+    let change = candidates::Change {
+        add: vec![(index, rom, confidence)],
+        ..Default::default()
+    };
+    candidates::apply(c, src, &change).expect("candidate");
+}
+
+fn state_of(c: &Connection, id: DownloadId) -> DownloadState {
+    get(c, id).expect("get").expect("row").state
+}
+
+#[test]
+fn settling_elsewhere_proves_the_file_cancels_the_rest_and_wants_again() {
+    let (c, src, rom, alt) = grouped();
+    add(&c, src, 0, rom, MatchConfidence::Fuzzy);
+    add(&c, src, 0, alt, MatchConfidence::Size);
+    add(&c, src, 1, rom, MatchConfidence::Size);
+    let first = crate::db::fixtures::download(&c, rom, src, 0, "importing", None).expect("first");
+    let alt_elsewhere =
+        crate::db::fixtures::download(&c, alt, src, 1, "queued", None).expect("alt");
+    assert!(crate::db::downloads_import::guessed(&c, src, 0, rom).expect("guessed"));
+    let e = Elsewhere {
+        reason: "the file in this source is a different version: Alt".to_owned(),
+        source: src,
+        file_index: Some(0),
+        rom_id: rom,
+        proven: Some(alt),
+        whole: true,
+        placed: true,
+    };
+    let settled = settle_elsewhere(&c, first, &e, 5).expect("settle");
+    assert_eq!(settled.moved, [first]);
+    assert_eq!(state_of(&c, first), DownloadState::Bad);
+    assert_eq!(settled.cancelled.len(), 1);
+    assert_eq!(settled.cancelled[0].id, alt_elsewhere);
+    assert!(candidates::of_file(&c, src, 0).expect("of").is_empty());
+    let proven: (RomId, MatchConfidence) = c
+        .query_row(
+            "SELECT rom_id, confidence FROM torrent_files WHERE source_id = ?1 AND file_index = 0",
+            [src],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .expect("file");
+    assert_eq!(proven, (alt, MatchConfidence::Hash));
+    let (again, state) = settled.again.expect("wanted again");
+    assert_eq!(state, DownloadState::Queued, "the next file is tried");
+    let row = get(&c, again).expect("get").expect("row");
+    assert_eq!((row.rom_id, row.file_index), (rom, Some(1)));
+    assert_eq!(row.error.as_deref(), Some(e.reason.as_str()));
+}
+
+#[test]
+fn a_rom_is_wanted_again_only_while_nothing_holds_it() {
+    let (c, src, rom, alt) = grouped();
+    let open = crate::db::fixtures::download(&c, rom, src, 0, "queued", None).expect("open");
+    let bad = crate::db::fixtures::download(&c, rom, src, 1, "bad", None).expect("bad");
+    assert_eq!(want_again(&c, open, "n", 1).expect("open"), None, "not bad");
+    assert_eq!(
+        want_again(&c, bad, "n", 1).expect("busy"),
+        None,
+        "one is open"
+    );
+    c.execute("UPDATE downloads SET state = 'bad' WHERE id = ?1", [open])
+        .expect("bad");
+    let (again, state) = want_again(&c, bad, "n", 1)
+        .expect("again")
+        .expect("reopened");
+    assert_eq!(state, DownloadState::Wanted, "both files ruled out");
+    assert_eq!(state_of(&c, again), DownloadState::Wanted);
+    cancel(&c, again, 1).expect("cancel");
+    assert_eq!(crate::db::roms::verified_file(&c, rom).expect("none"), None);
+    c.execute(
+        "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
+         VALUES ('nes', 'Example Quest (USA).nes', 10, 0, ?1, 'verified', 0)",
+        [rom],
+    )
+    .expect("file");
+    assert!(crate::db::roms::verified_file(&c, rom)
+        .expect("verified")
+        .is_some());
+    assert_eq!(crate::db::roms::verified_file(&c, alt).expect("alt"), None);
+    assert_eq!(want_again(&c, bad, "n", 1).expect("held"), None, "held");
+    assert!(!crate::db::downloads_import::guessed(&c, src, 0, rom).expect("no candidate"));
 }

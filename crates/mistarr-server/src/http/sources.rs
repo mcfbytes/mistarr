@@ -21,11 +21,12 @@ use serde::{Deserialize, Deserializer, Serialize};
 use super::{ApiError, Paging};
 use crate::app::AppState;
 use crate::db::ids::{JobId, SourceId};
-use crate::db::source_detail::{
-    self as detail, FileFilter, FileQuery, FileRow, Preview, SourceDetail,
-};
+use crate::db::platforms;
 use crate::db::sources::{self as rows, SourceReason, SourceRow, SourceState};
 use crate::db::sql::Paged;
+use crate::db::views::source_detail::{
+    self as detail, FileFilter, FileQuery, FileRow, Preview, SourceDetail,
+};
 use crate::jobs::bind_source::{BindSource, Choice};
 use crate::jobs::source_import::{publish_changed, SourceImport, DUPLICATE};
 use crate::jobs::Scheduler;
@@ -311,7 +312,12 @@ async fn update(
     let choice = choice(&req)?;
     if let Some(Choice::Platform(p)) = &choice {
         let p = p.clone();
-        if !app.db.read(move |c| rows::platform_exists(c, &p)).await? {
+        if app
+            .db
+            .read(move |c| platforms::find(c, &p))
+            .await?
+            .is_none()
+        {
             return Err(ApiError::bad_request("No such platform."));
         }
     }

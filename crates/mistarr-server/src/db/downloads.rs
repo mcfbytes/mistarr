@@ -5,6 +5,7 @@ use mistarr_core::PlatformId;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
+use super::candidates;
 use super::ids::{DownloadId, RomId, SourceId, TitleId};
 use super::sources;
 use super::sql::{self, text_enum, Page, Paged};
@@ -775,6 +776,132 @@ pub fn count_in(conn: &Connection, states: &[DownloadState]) -> Result<u64> {
         [sql::json_list(states)?],
         |r| sql::get_u64(r, 0),
     )?)
+}
+
+/// Why a download's file was not its wanted rom, for [`settle_elsewhere`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Elsewhere {
+    /// The download's error.
+    pub reason: String,
+    /// The torrent file.
+    pub source: SourceId,
+    /// Its index, when the download named one.
+    pub file_index: Option<u32>,
+    /// The wanted rom, which the file is not.
+    pub rom_id: RomId,
+    /// The rom the file hashed to, when it was another version.
+    pub proven: Option<RomId>,
+    /// Whether the torrent file itself hashed to `proven`, not a member of it.
+    pub whole: bool,
+    /// Whether the file was placed or kept as that rom.
+    pub placed: bool,
+}
+
+/// What [`settle_elsewhere`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Settled {
+    /// The download, when it moved to `bad`.
+    pub moved: Vec<DownloadId>,
+    /// The download opened again for the wanted rom, and its state.
+    pub again: Option<(DownloadId, DownloadState)>,
+    /// Open downloads of the proven rom that its placed file made redundant.
+    pub cancelled: Vec<Cancelled>,
+}
+
+/// Ends download `id` `bad` with the reason, forgets that its file may be the
+/// wanted rom, records the rom the file proved to be and cancels that rom's
+/// other open downloads once placed, then opens the wanted rom again on its
+/// next best file, or `wanted` without one, while its title is still wanted.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn settle_elsewhere(
+    conn: &Connection,
+    id: DownloadId,
+    e: &Elsewhere,
+    now: i64,
+) -> Result<Settled> {
+    let mut out = Settled {
+        moved: move_all(conn, &[id], DownloadState::Bad, Some(&e.reason), now)?,
+        ..Settled::default()
+    };
+    if let Some(index) = e.file_index {
+        if let (Some(proven), true) = (e.proven, e.whole) {
+            candidates::prove(conn, e.source, index, proven)?;
+        }
+        candidates::drop_pair(conn, e.source, index, e.rom_id)?;
+    }
+    if let (Some(proven), true) = (e.proven, e.placed) {
+        let redundant: Vec<DownloadId> = conn
+            .prepare(&format!(
+                "SELECT id FROM downloads WHERE rom_id = ?1
+                   AND state IN {}
+                   AND NOT (source_id IS ?2 AND file_index IS ?3)",
+                DownloadState::CANCELLABLE_SQL
+            ))?
+            .query_map(params![proven, e.source, e.file_index], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for other in redundant {
+            if let CancelOutcome::Cancelled(c) = cancel(conn, other, now)? {
+                out.cancelled.push(c);
+            }
+        }
+    }
+    out.again = want_again(conn, id, &e.reason, now)?;
+    Ok(out)
+}
+
+/// Opens the rom of `bad`, a download that ended `bad`, again when its
+/// title is still wanted and the rom has neither a verified file nor an open
+/// download: `queued` on its next best file, else `wanted`, with `note` as
+/// its error so the history shows.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn want_again(
+    conn: &Connection,
+    bad: DownloadId,
+    note: &str,
+    now: i64,
+) -> Result<Option<(DownloadId, DownloadState)>> {
+    let Some(row) = get(conn, bad)? else {
+        return Ok(None);
+    };
+    let open: bool = conn.query_row(
+        &format!(
+            "SELECT (SELECT wanted = 0 OR retired = 1 FROM titles WHERE id = ?1)
+                 OR EXISTS (SELECT 1 FROM files WHERE rom_id = ?2 AND state = 'verified')
+                 OR EXISTS (SELECT 1 FROM downloads WHERE rom_id = ?2 AND state IN {})",
+            DownloadState::OPEN_SQL
+        ),
+        params![row.title_id, row.rom_id],
+        |r| r.get(0),
+    )?;
+    if row.state != DownloadState::Bad || open {
+        return Ok(None);
+    }
+    let file = best_file(conn, row.rom_id)?;
+    let again = create(
+        conn,
+        &NewDownload {
+            title_id: row.title_id,
+            rom_id: row.rom_id,
+            file,
+            now,
+        },
+    )?;
+    conn.execute(
+        "UPDATE downloads SET error = ?2 WHERE id = ?1",
+        params![again, note],
+    )?;
+    let state = if file.is_some() {
+        DownloadState::Queued
+    } else {
+        DownloadState::Wanted
+    };
+    Ok(Some((again, state)))
 }
 
 #[cfg(test)]

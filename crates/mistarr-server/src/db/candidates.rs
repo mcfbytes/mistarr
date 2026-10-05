@@ -681,14 +681,9 @@ mod tests {
     use mistarr_sources::torrent::TorrentFile;
 
     use super::*;
-    use crate::db::sources::{self, fixtures::seed_rom, NewSource, SourceState};
-
-    fn conn() -> Connection {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-        c
-    }
+    use crate::db::fixtures::conn;
+    use crate::db::fixtures::seed_rom;
+    use crate::db::sources::{self, NewSource, SourceState};
 
     fn source(c: &Connection, byte: &str, state: SourceState) -> SourceId {
         let id = sources::insert(
@@ -769,7 +764,7 @@ mod tests {
             [(0, Some(a), Some(MatchConfidence::Name))]
         );
         prove(&c, src, 0, b).expect("prove");
-        crate::db::downloads_import::insert_fixture(&c, a, src, 1, "bad", None).expect("bad");
+        crate::db::fixtures::download(&c, a, src, 1, "bad", None).expect("bad");
         apply(&c, src, &stale).expect("apply");
         let now = stored(&c, src).expect("stored");
         assert!(!now.is_empty());
@@ -853,7 +848,7 @@ mod tests {
         assert_eq!(named.len(), 2);
         assert_eq!(named[0].1.rom_name, "Nova Quest (World).nes");
 
-        crate::db::downloads_import::insert_fixture(&c, a, src, 0, "bad", None).expect("bad");
+        crate::db::fixtures::download(&c, a, src, 0, "bad", None).expect("bad");
         assert_eq!(for_group(&c, ta).expect("group").len(), 1, "ruled out");
         let change = diff(&c, src, &stored(&c, src).expect("stored"), &[], &found).expect("diff");
         assert_eq!(change.remove, [(0, a)], "a ruled-out pair is removed");
@@ -906,10 +901,10 @@ mod tests {
 
         drop_pair(&c, src, 0, b).expect("drop");
         assert_eq!(
-            crate::db::source_detail::files(
+            crate::db::views::source_detail::files(
                 &c,
                 src,
-                &crate::db::source_detail::FileQuery::default(),
+                &crate::db::views::source_detail::FileQuery::default(),
                 crate::db::sql::Page {
                     limit: 10,
                     offset: 0

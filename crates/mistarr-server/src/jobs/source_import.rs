@@ -692,7 +692,7 @@ mod tests {
     use super::*;
     use crate::app::testutil::state;
     use crate::db::candidates::MatchConfidence;
-    use crate::db::sources::fixtures::seed_rom;
+    use crate::db::fixtures::seed_rom;
 
     fn file(index: u32, path: &str, size: u64) -> TorrentFile {
         TorrentFile {

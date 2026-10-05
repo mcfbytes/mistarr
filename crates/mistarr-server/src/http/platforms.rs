@@ -18,7 +18,8 @@ use crate::db::files::{self, UnidentifiedFile};
 use crate::db::ids::{DatVersionId, JobId};
 use crate::db::platforms::{self, PlatformRow};
 use crate::db::sql::Paged;
-use crate::db::titles::{self, Counts};
+use crate::db::titles;
+use crate::db::titles::browse::Counts;
 use crate::jobs::dat_import::DatImport;
 use crate::jobs::Scheduler;
 use mistarr_sources::intake::LOADED_DIR;
@@ -43,7 +44,7 @@ async fn unidentified(
     let found = app
         .db
         .read(move |c| {
-            if platforms::get(c, &id.0)?.is_none() {
+            if platforms::find(c, &id)?.is_none() {
                 return Ok(None);
             }
             files::unidentified(c, &id, page).map(Some)
@@ -70,7 +71,7 @@ async fn list(
     let hide = app.config().prefs.hide.clone();
     let (rows, mut counts) = app
         .db
-        .read(move |c| Ok((platforms::list(c)?, titles::counts(c, &hide)?)))
+        .read(move |c| Ok((platforms::list(c)?, titles::browse::counts(c, &hide)?)))
         .await?;
     let Paged { items, total } = paging.resolve().slice(rows);
     let items = items
@@ -113,8 +114,10 @@ async fn update(
             if !platforms::set_enabled(c, &id, enabled)? {
                 return Ok(None);
             }
-            let counts = titles::counts(c, &hide)?.remove(&id).unwrap_or_default();
-            Ok(platforms::get(c, &id)?.map(|row| PlatformOut { row, counts }))
+            let counts = titles::browse::counts(c, &hide)?
+                .remove(&id)
+                .unwrap_or_default();
+            Ok(platforms::find(c, &PlatformId(id))?.map(|row| PlatformOut { row, counts }))
         })
         .await?;
     found
@@ -145,12 +148,12 @@ async fn bind(
 ) -> Result<(StatusCode, Json<Binding>), ApiError> {
     let platform = path_id(id)?;
     let BindBody { dat_version_id } = body(&bytes)?;
-    let lookup = platform.clone();
+    let lookup = PlatformId(platform.clone());
     let (known, row) = app
         .db
         .read(move |c| {
             Ok((
-                platforms::get(c, &lookup)?.is_some(),
+                platforms::find(c, &lookup)?.is_some(),
                 dats::get(c, dat_version_id)?,
             ))
         })

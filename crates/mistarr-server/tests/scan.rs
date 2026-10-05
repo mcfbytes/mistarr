@@ -10,9 +10,11 @@ use std::path::Path;
 use common::{boot_with, config_in, eventually, request, Sse};
 use mistarr_core::hash::{hash_reader, HeaderRule};
 use mistarr_core::{HashSet, PlatformId};
-use mistarr_server::db::files::{self, FileState};
+use mistarr_server::db::files::{self, FileState, NewFile};
 use mistarr_server::db::ids::JobId;
 use mistarr_server::db::jobs::{self as job_rows, JobState};
+use mistarr_server::db::scan_progress;
+use mistarr_server::db::titles::RomStatus;
 use mistarr_server::jobs::JobKind;
 
 fn write(path: &Path, data: &[u8]) {
@@ -192,38 +194,22 @@ async fn scan_matches_hashes_and_states_over_the_api() {
             let (nes, gba, snes) = (nes.clone(), gba.clone(), snes.clone());
             let headered = headered.clone();
             move |c| {
-                files::seed_rom_fixture(
-                    c,
-                    &nes,
-                    "Example Quest (USA)",
-                    "Example Quest (USA).nes",
-                    &headered,
-                    "good",
-                )?;
-                files::seed_rom_fixture(
-                    c,
-                    &nes,
-                    "Correct Name (USA)",
-                    "Correct Name (USA).nes",
-                    &misnamed,
-                    "good",
-                )?;
-                files::seed_rom_fixture(
-                    c,
-                    &gba,
-                    "Zip Quest (USA)",
-                    "Zip Quest (USA).gba",
-                    &zipped_hash,
-                    "good",
-                )?;
-                files::seed_rom_fixture(
-                    c,
-                    &snes,
-                    "Example Quest (USA)",
-                    "Example Quest (USA).sfc",
-                    &snes_hash,
-                    "good",
-                )
+                mistarr_server::db::fixtures::dat(&nes)
+                    .title("Example Quest (USA)")
+                    .rom("Example Quest (USA).nes", &headered, RomStatus::Good)
+                    .write(c)?;
+                mistarr_server::db::fixtures::dat(&nes)
+                    .title("Correct Name (USA)")
+                    .rom("Correct Name (USA).nes", &misnamed, RomStatus::Good)
+                    .write(c)?;
+                mistarr_server::db::fixtures::dat(&gba)
+                    .title("Zip Quest (USA)")
+                    .rom("Zip Quest (USA).gba", &zipped_hash, RomStatus::Good)
+                    .write(c)?;
+                mistarr_server::db::fixtures::dat(&snes)
+                    .title("Example Quest (USA)")
+                    .rom("Example Quest (USA).sfc", &snes_hash, RomStatus::Good)
+                    .write(c)
             }
         })
         .await
@@ -296,10 +282,15 @@ async fn disc_game_is_verified_only_when_every_track_matches() {
         .write({
             let pid = pid.clone();
             move |c| {
-                let title = files::seed_title_fixture(c, &pid, "Example Quest (USA)")?;
+                let mut disc = mistarr_server::db::fixtures::dat(&pid).title("Example Quest (USA)");
                 for (name, data) in tracks {
-                    files::seed_rom_for_title_fixture(c, title, name, &hash_of(data), "good")?;
+                    disc = disc.rom(
+                        name,
+                        &hash_of(data),
+                        mistarr_server::db::titles::RomStatus::Good,
+                    );
                 }
+                disc.write(c)?;
                 Ok(())
             }
         })
@@ -364,29 +355,29 @@ async fn an_interrupted_scan_resumes_at_startup() {
             let pid = pid.clone();
             let (a_hash, b_hash) = (a_hash.clone(), b_hash.clone());
             move |c| {
-                files::seed_rom_fixture(c, &pid, "A", "A.md", &a_hash, "good")?;
-                files::seed_rom_fixture(c, &pid, "B", "B.md", &b_hash, "good")?;
+                mistarr_server::db::fixtures::dat(&pid)
+                    .title("A")
+                    .rom("A.md", &a_hash, RomStatus::Good)
+                    .write(c)?;
+                mistarr_server::db::fixtures::dat(&pid)
+                    .title("B")
+                    .rom("B.md", &b_hash, RomStatus::Good)
+                    .write(c)?;
                 // Genesis/A.md was already committed by a scan that never reached MegaDrive.
                 let now = mistarr_server::unix_now();
-                let hashed = files::Hashed {
-                    crc32: Some(&a_hash.crc32),
-                    md5: Some(&a_hash.md5),
-                    sha1: Some(&a_hash.sha1),
-                    header_rule: Some("none"),
-                    whole: None,
-                };
                 files::upsert(
                     c,
                     &pid,
-                    "Genesis/A.md",
-                    18,
-                    now,
-                    &hashed,
-                    None,
-                    FileState::Pending,
+                    &NewFile {
+                        crc32: Some(a_hash.crc32.clone()),
+                        md5: Some(a_hash.md5.clone()),
+                        sha1: Some(a_hash.sha1.clone()),
+                        header_rule: Some("none".to_string()),
+                        ..NewFile::unhashed("Genesis/A.md", 18, now, FileState::Pending)
+                    },
                     now,
                 )?;
-                files::save_scan_progress(c, &pid, &["Genesis".to_owned()], now)
+                scan_progress::save_scan_progress(c, &pid, &["Genesis".to_owned()], now)
             }
         })
         .await
@@ -410,7 +401,7 @@ async fn an_interrupted_scan_resumes_at_startup() {
                 .db
                 .read({
                     let pid2 = pid2.clone();
-                    move |c| files::scan_progress(c, &pid2)
+                    move |c| scan_progress::scan_progress(c, &pid2)
                 })
                 .await
                 .is_ok_and(|d| d.is_empty());
@@ -457,14 +448,10 @@ async fn a_header_ruled_member_passes_the_pre_check_by_its_content_crc() {
             let nes = nes.clone();
             let stripped_hash = stripped_hash.clone();
             move |c| {
-                files::seed_rom_fixture(
-                    c,
-                    &nes,
-                    "Ines Quest (USA)",
-                    "Ines Quest (USA).nes",
-                    &stripped_hash,
-                    "good",
-                )
+                mistarr_server::db::fixtures::dat(&nes)
+                    .title("Ines Quest (USA)")
+                    .rom("Ines Quest (USA).nes", &stripped_hash, RomStatus::Good)
+                    .write(c)
             }
         })
         .await
@@ -506,8 +493,14 @@ async fn each_loose_disc_title_verifies_independently() {
             let pid = pid.clone();
             let (a, b) = (a.clone(), b.clone());
             move |c| {
-                files::seed_rom_fixture(c, &pid, "Loose A (USA)", "Loose A (USA).iso", &a, "good")?;
-                files::seed_rom_fixture(c, &pid, "Loose B (USA)", "Loose B (USA).iso", &b, "good")
+                mistarr_server::db::fixtures::dat(&pid)
+                    .title("Loose A (USA)")
+                    .rom("Loose A (USA).iso", &a, RomStatus::Good)
+                    .write(c)?;
+                mistarr_server::db::fixtures::dat(&pid)
+                    .title("Loose B (USA)")
+                    .rom("Loose B (USA).iso", &b, RomStatus::Good)
+                    .write(c)
             }
         })
         .await
@@ -542,7 +535,12 @@ async fn a_corrupt_zip_does_not_abort_the_platform_scan() {
     app.db
         .write({
             let gba = gba.clone();
-            move |c| files::seed_rom_fixture(c, &gba, "Good (USA)", "Good.gba", &good, "good")
+            move |c| {
+                mistarr_server::db::fixtures::dat(&gba)
+                    .title("Good (USA)")
+                    .rom("Good.gba", &good, RomStatus::Good)
+                    .write(c)
+            }
         })
         .await
         .expect("seed");
@@ -581,14 +579,10 @@ async fn zip_directory_entries_are_not_recorded_as_files() {
         .write({
             let gba = gba.clone();
             move |c| {
-                files::seed_rom_fixture(
-                    c,
-                    &gba,
-                    "Dir Quest (USA)",
-                    "sub/Dir Quest (USA).gba",
-                    &hash,
-                    "good",
-                )
+                mistarr_server::db::fixtures::dat(&gba)
+                    .title("Dir Quest (USA)")
+                    .rom("sub/Dir Quest (USA).gba", &hash, RomStatus::Good)
+                    .write(c)
             }
         })
         .await
@@ -627,14 +621,10 @@ async fn unchanged_disc_track_reuses_its_cached_hash() {
             let pid = pid.clone();
             let hash = hash.clone();
             move |c| {
-                files::seed_rom_fixture(
-                    c,
-                    &pid,
-                    "Cached Quest (USA)",
-                    "Cached Quest (USA).iso",
-                    &hash,
-                    "good",
-                )
+                mistarr_server::db::fixtures::dat(&pid)
+                    .title("Cached Quest (USA)")
+                    .rom("Cached Quest (USA).iso", &hash, RomStatus::Good)
+                    .write(c)
             }
         })
         .await
@@ -966,7 +956,10 @@ async fn a_rescan_matches_unchanged_unmatched_files_without_hashing_them() {
             let (gb, hash) = (gb.clone(), hash.clone());
             move |c| {
                 let name = "Example Quest (USA)";
-                files::seed_rom_fixture(c, &gb, name, "Example Quest (USA).gb", &hash, "good")
+                mistarr_server::db::fixtures::dat(&gb)
+                    .title(name)
+                    .rom("Example Quest (USA).gb", &hash, RomStatus::Good)
+                    .write(c)
             }
         })
         .await
@@ -1052,7 +1045,10 @@ async fn seed_gba_rom(app: &mistarr_server::app::AppState, name: &str, h: &HashS
     app.db
         .write(move |c| {
             let gba = PlatformId("gba".into());
-            files::seed_rom_fixture(c, &gba, &name, &format!("{name}.gba"), &h, "good")
+            mistarr_server::db::fixtures::dat(&gba)
+                .title(&name)
+                .rom(&format!("{name}.gba"), &h, RomStatus::Good)
+                .write(c)
         })
         .await
         .expect("seed");
@@ -1558,24 +1554,21 @@ async fn rows_hashed_before_the_whole_form_are_hashed_again_after_the_upgrade() 
                 (pid.clone(), rel.clone(), whole.clone(), content.clone());
             let name = p.name("Upgraded");
             move |c| {
-                files::seed_rom_fixture(c, &pid, "Upgraded Quest (USA)", &name, &whole, "good")?;
+                mistarr_server::db::fixtures::dat(&pid)
+                    .title("Upgraded Quest (USA)")
+                    .rom(&name, &whole, RomStatus::Good)
+                    .write(c)?;
                 // The stripped form alone, as a scan stored it before the whole-file columns.
-                let hashed = files::Hashed {
-                    crc32: Some(&content.crc32),
-                    md5: Some(&content.md5),
-                    sha1: Some(&content.sha1),
-                    header_rule: Some("ines"),
-                    whole: None,
-                };
                 files::upsert(
                     c,
                     &pid,
-                    &rel,
-                    size,
-                    mtime,
-                    &hashed,
-                    None,
-                    FileState::Unverified,
+                    &NewFile {
+                        crc32: Some(content.crc32.clone()),
+                        md5: Some(content.md5.clone()),
+                        sha1: Some(content.sha1.clone()),
+                        header_rule: Some("ines".to_string()),
+                        ..NewFile::unhashed(&rel, size, mtime, FileState::Unverified)
+                    },
                     1,
                 )
                 .map(|_| ())

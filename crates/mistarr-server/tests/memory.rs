@@ -97,7 +97,10 @@ fn spawn_env(root: &Path, memory: &str, envs: &[(&str, &Path)]) -> Server {
         let child = Command::new(env!("CARGO_BIN_EXE_mistarr"))
             .arg("--data")
             .arg(&data)
-            .env(mistarr_server::db::TEMP_DIR_ENV, root.join("sqlite-tmp"))
+            .env(
+                mistarr_server::db::tempdir::TEMP_DIR_ENV,
+                root.join("sqlite-tmp"),
+            )
             .envs(envs.iter().copied())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

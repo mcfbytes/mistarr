@@ -70,7 +70,7 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             data_limit_mib: 192,
-            import_dir: PathBuf::from(crate::db::RAM_TEMP_DIR),
+            import_dir: PathBuf::from(crate::db::tempdir::RAM_TEMP_DIR),
             import_floor_mib: 128,
         }
     }
@@ -166,7 +166,7 @@ impl PathsConfig {
         self.data.join("mistarr.db")
     }
 
-    /// Where SQLite writes its temporary files when `db::RAM_TEMP_DIR` cannot be written.
+    /// Where SQLite writes its temporary files when `db::tempdir::RAM_TEMP_DIR` cannot be written.
     ///
     /// ```
     /// assert!(mistarr_server::config::PathsConfig::default().tmp().ends_with("tmp"));
@@ -665,7 +665,7 @@ mod tests {
     #[test]
     fn the_import_in_ram_settings_default_beside_the_temp_dir() {
         let m = Config::default().memory;
-        assert_eq!(m.import_dir, Path::new(crate::db::RAM_TEMP_DIR));
+        assert_eq!(m.import_dir, Path::new(crate::db::tempdir::RAM_TEMP_DIR));
         assert_eq!(m.import_floor_mib, 128);
         let c = Config::parse("[memory]\nimport_dir = \"/run/x\"\nimport_floor_mib = 9")
             .expect("parse");

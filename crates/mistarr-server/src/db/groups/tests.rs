@@ -4,12 +4,14 @@ use proptest::prelude::*;
 use rusqlite::params;
 
 use super::*;
+use crate::db::fixtures::pid;
 use mistarr_core::select::Prefs;
 
 use crate::db::dats;
 use crate::db::ids::{DatVersionId, TitleId};
 use crate::db::sql::{Page, Paged};
-use crate::db::titles::{self, Browse, Counts, GroupRow, SearchShape, Sort, Tri};
+use crate::db::titles;
+use crate::db::titles::browse::{Browse, Counts, GroupRow, SearchShape, Sort, Tri};
 
 /// The first ten rows.
 const TEN: Page = Page {
@@ -70,10 +72,9 @@ const REFERENCE_MRA_ONLY: &str =
     OR NOT EXISTS (SELECT 1 FROM titles m WHERE m.platform_id = g.platform_id
                    AND m.source = 'mra' AND m.retired = 0))";
 
+/// The fixture database with the reference query's view and one `gb` DAT version.
 fn conn() -> Connection {
-    let mut c = Connection::open_in_memory().expect("open");
-    crate::db::migrate::apply(&mut c).expect("migrate");
-    crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+    let c = crate::db::fixtures::conn();
     c.pragma_update(None, "foreign_keys", false).expect("fk");
     c.execute_batch(REFERENCE).expect("reference");
     c.execute(
@@ -264,7 +265,7 @@ fn reference_counts(c: &Connection, hidden: &[String]) -> HashMap<String, (u64, 
 }
 
 fn new_counts(c: &Connection, hidden: &[String]) -> HashMap<String, (u64, u64, u64)> {
-    titles::counts(c, hidden)
+    titles::browse::counts(c, hidden)
         .expect("counts")
         .into_iter()
         .filter(|(_, v)| v.titles > 0)
@@ -376,8 +377,14 @@ fn assert_matches_reference(c: &Connection) {
                 let (limit, offset) = if n.is_multiple_of(4) { (3, 1) } else { (50, 0) };
                 let want = reference_browse(c, platform, &f, limit, offset);
                 for shape in SearchShape::ALL {
-                    let got = titles::browse_with(c, platform, &f, Page { limit, offset }, shape)
-                        .expect("browse");
+                    let got = titles::browse::browse_with(
+                        c,
+                        &pid(platform),
+                        &f,
+                        Page { limit, offset },
+                        shape,
+                    )
+                    .expect("browse");
                     assert_eq!(got, want, "{platform} {shape:?} {f:?}");
                 }
                 let unfiltered = Browse {
@@ -390,7 +397,8 @@ fn assert_matches_reference(c: &Connection) {
                     limit: 50,
                     offset: 0,
                 };
-                let got = titles::browse(c, platform, &unfiltered, all).expect("browse");
+                let got =
+                    titles::browse::browse(c, &pid(platform), &unfiltered, all).expect("browse");
                 assert_eq!(
                     got,
                     reference_browse(c, platform, &unfiltered, 50, 0),
@@ -597,7 +605,7 @@ fn apply(c: &Connection, op: &Op, seq: &mut u32) {
             }
         }
         Op::Recompute { platform } => {
-            titles::recompute_platform(c, PLATFORMS[platform], &Prefs::default())
+            titles::recompute::recompute_platform(c, &pid(PLATFORMS[platform]), &Prefs::default())
                 .expect("recompute");
         }
         Op::Retire { title: t, retired } => {
@@ -1050,7 +1058,7 @@ fn a_group_whose_parent_is_on_another_platform_is_found_by_every_shape() {
         ..Browse::default()
     };
     for shape in SearchShape::ALL {
-        let got = titles::browse_with(&c, "nes", &f, TEN, shape).expect("browse");
+        let got = titles::browse::browse_with(&c, &pid("nes"), &f, TEN, shape).expect("browse");
         assert_eq!(got.total, 1, "{shape:?}");
         assert_eq!(got.items[0].parent_id, TitleId(1), "{shape:?}");
     }
@@ -1064,7 +1072,8 @@ fn a_group_whose_parent_is_on_another_platform_is_found_by_every_shape() {
         })
         .expect("count");
     assert_eq!(splits, 0);
-    let got = titles::browse_with(&c, "nes", &f, TEN, SearchShape::FtsPlatform).expect("browse");
+    let got = titles::browse::browse_with(&c, &pid("nes"), &f, TEN, SearchShape::FtsPlatform)
+        .expect("browse");
     assert_eq!(got.total, 1);
 }
 
@@ -1233,7 +1242,7 @@ fn linking_across_dats_and_retiring_one_keeps_the_table_equal_to_the_reference()
                   (20, 'a.nes', 4, 'aa'), (21, 'd.nes', 4, 'dd');",
     )
     .expect("rows");
-    titles::recompute_platform(&tx, "nes", &Prefs::default()).expect("recompute");
+    titles::recompute::recompute_platform(&tx, &pid("nes"), &Prefs::default()).expect("recompute");
     crate::db::commit(tx).expect("commit");
     let root = |c: &Connection, id: i64| -> i64 {
         c.query_row("SELECT group_root FROM titles WHERE id = ?1", [id], |r| {
@@ -1246,7 +1255,7 @@ fn linking_across_dats_and_retiring_one_keeps_the_table_equal_to_the_reference()
 
     let tx = c.transaction().expect("tx");
     dats::retire(&tx, DatVersionId(2), 0).expect("retire");
-    titles::recompute_platform(&tx, "nes", &Prefs::default()).expect("recompute");
+    titles::recompute::recompute_platform(&tx, &pid("nes"), &Prefs::default()).expect("recompute");
     crate::db::commit(tx).expect("commit");
     assert_eq!((root(&c, 20), root(&c, 21)), (20, 20));
     assert_matches_reference(&c);

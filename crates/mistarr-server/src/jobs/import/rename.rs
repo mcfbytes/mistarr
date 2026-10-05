@@ -13,7 +13,8 @@ use crate::app::AppState;
 use crate::db::files::{self, FileRow, FileState};
 use crate::db::ids::FileId;
 use crate::db::ids::TitleId;
-use crate::db::imports::{self, EntryRom, ImportAction, TitleEntry};
+use crate::db::imports::{self, ImportAction, TitleEntry};
+use crate::db::roms::{self, EntryRom};
 use crate::error::Error;
 use crate::events::EventKind;
 
@@ -115,13 +116,13 @@ async fn subject(
                 return Ok(None);
             };
             let title = match file.rom_id {
-                Some(r) => imports::title_of_rom(c, r)?,
+                Some(r) => roms::title_of_rom(c, r)?,
                 None => None,
             };
             let Some(title) = title else {
                 return Ok(Some((file, None)));
             };
-            if crate::db::titles::group_of(c, title)? != Some(group) {
+            if crate::db::titles::browse::group_of(c, title)? != Some(group) {
                 return Ok(None);
             }
             Ok(Some((file, imports::title_entry(c, title)?)))

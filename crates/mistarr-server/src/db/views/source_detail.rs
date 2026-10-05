@@ -7,11 +7,11 @@ use mistarr_sources::torrent::TorrentFile;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
-use super::candidates::{FileCandidate, MatchConfidence};
-use super::downloads::DownloadState;
-use super::ids::{DatVersionId, DownloadId, RomId, SourceId, TitleId};
-use super::sources::{self, SourceRow, SqlDatIndex};
-use super::sql::{self, get_u64, Page, Paged};
+use crate::db::candidates::{FileCandidate, MatchConfidence};
+use crate::db::downloads::DownloadState;
+use crate::db::ids::{DatVersionId, DownloadId, RomId, SourceId, TitleId};
+use crate::db::sources::{self, SourceRow, SqlDatIndex};
+use crate::db::sql::{self, get_u64, Page, Paged};
 use crate::error::Result;
 
 /// A file that holds a matched rom or a candidate rom, as `matched_count` counts it.
@@ -38,7 +38,7 @@ impl FileFilter {
     /// Parses the `filter` query value.
     ///
     /// ```
-    /// use mistarr_server::db::source_detail::FileFilter;
+    /// use mistarr_server::db::views::source_detail::FileFilter;
     /// assert_eq!(FileFilter::parse("wanted"), Some(FileFilter::Wanted));
     /// assert_eq!(FileFilter::parse("x"), None);
     /// ```
@@ -96,7 +96,7 @@ const DISC: [&str; 10] = [
 /// The kind of the file at `path` in a source bound to `platform`, if any.
 ///
 /// ```
-/// use mistarr_server::db::source_detail::{file_kind, FileKind};
+/// use mistarr_server::db::views::source_detail::{file_kind, FileKind};
 /// assert_eq!(file_kind("Set/readme.NFO", None), FileKind::Extra);
 /// assert_eq!(file_kind("a.zip", Some("nes")), FileKind::Archive);
 /// assert_eq!(file_kind("a.zip", Some("arcade")), FileKind::Rom);
@@ -261,7 +261,7 @@ fn files_in(
         .collect::<rusqlite::Result<Vec<FileRow>>>()?;
     if let (Some(first), Some(last)) = (rows.first(), rows.last()) {
         let (from, to) = (first.file_index, last.file_index);
-        for (index, found) in super::candidates::of_files(conn, id, from, to)? {
+        for (index, found) in crate::db::candidates::of_files(conn, id, from, to)? {
             if let Some(row) = rows.iter_mut().find(|r| r.file_index == index) {
                 row.candidates.push(found);
             }
@@ -440,7 +440,7 @@ pub const PREVIEW_CHUNK: u32 = 500;
 /// within `max` files.
 ///
 /// ```
-/// use mistarr_server::db::source_detail::sample_step;
+/// use mistarr_server::db::views::source_detail::sample_step;
 /// assert_eq!(sample_step(100, 4_000), 1);
 /// assert_eq!(sample_step(10_000, 4_000), 3);
 /// ```
@@ -615,15 +615,9 @@ mod tests {
     use mistarr_sources::torrent::TorrentFile;
 
     use super::*;
-    use crate::db::sources::fixtures::seed_rom;
+    use crate::db::fixtures::conn;
+    use crate::db::fixtures::seed_rom;
     use crate::db::sources::{NewSource, SourceState};
-
-    fn conn() -> Connection {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &platforms::PLATFORMS).expect("seed");
-        c
-    }
 
     fn file(index: u32, path: &str, size: u64) -> TorrentFile {
         TorrentFile {

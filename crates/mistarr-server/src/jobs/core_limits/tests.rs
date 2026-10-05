@@ -743,8 +743,8 @@ async fn a_finished_torrent_is_released_at_the_resume() {
     let source = source_in_client(&app);
     app.db
         .write_blocking(move |c| {
-            let rom = sources::fixtures::seed_rom(c, "nes", "Example Quest (USA).nes", 16, &[])?;
-            crate::db::downloads_import::insert_fixture(c, rom, source, 0, "done", None)?;
+            let rom = crate::db::fixtures::seed_rom(c, "nes", "Example Quest (USA).nes", 16, &[])?;
+            crate::db::fixtures::download(c, rom, source, 0, "done", None)?;
             Ok(())
         })
         .expect("placed");
@@ -1026,8 +1026,8 @@ async fn work_kept_for_a_client_that_died_during_the_game_waits_until_it_is_back
     let source = source_in_client(&app);
     app.db
         .write_blocking(move |c| {
-            let rom = sources::fixtures::seed_rom(c, "nes", "Example Quest (USA).nes", 16, &[])?;
-            crate::db::downloads_import::insert_fixture(c, rom, source, 0, "done", None)?;
+            let rom = crate::db::fixtures::seed_rom(c, "nes", "Example Quest (USA).nes", 16, &[])?;
+            crate::db::fixtures::download(c, rom, source, 0, "done", None)?;
             Ok(())
         })
         .expect("placed");

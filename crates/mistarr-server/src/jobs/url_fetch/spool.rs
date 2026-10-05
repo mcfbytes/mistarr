@@ -50,12 +50,8 @@ fn rest(pace: &dyn Fn(Duration) -> Duration, took: Duration) {
 
 /// Whether memory and the RAM directory's room allow `need` more bytes there.
 fn ram_allows(dir: &Path, need: u64, floor: u64) -> bool {
-    let available = std::fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|t| crate::db::ram::mem_available(&t));
-    let room = rustix::fs::statvfs(dir)
-        .ok()
-        .and_then(|s| s.f_bavail.checked_mul(s.f_frsize));
+    let available = crate::status::mem_available_bytes();
+    let room = crate::status::free_bytes(dir);
     matches!((available, room), (Some(a), Some(r)) if a >= need.saturating_add(floor) && r >= need)
 }
 

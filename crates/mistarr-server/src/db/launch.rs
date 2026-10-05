@@ -109,15 +109,10 @@ mod tests {
     use mistarr_core::{HashSet, PlatformId};
 
     use super::*;
-    use crate::db::files::{self, Hashed};
+    use crate::db::files::{self, NewFile};
+    use crate::db::fixtures::conn;
     use crate::db::ids::RomId;
-
-    fn conn() -> Connection {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-        c
-    }
+    use crate::db::titles::RomStatus;
 
     fn hashes() -> HashSet {
         HashSet {
@@ -129,18 +124,29 @@ mod tests {
     }
 
     fn file(c: &Connection, pid: &PlatformId, rel: &str, rom: RomId, state: FileState) {
-        files::upsert(c, pid, rel, 4, 0, &Hashed::default(), Some(rom), state, 0).expect("file");
+        files::upsert(
+            c,
+            pid,
+            &NewFile {
+                rom_id: Some(rom),
+                ..NewFile::unhashed(rel, 4, 0, state)
+            },
+            0,
+        )
+        .expect("file");
     }
 
     #[test]
     fn disc_title_is_complete_only_with_every_track() {
         let c = conn();
         let pid = PlatformId("psx".into());
-        let t = files::seed_title_fixture(&c, &pid, "Example Disc (USA)").expect("title");
-        let cue =
-            files::seed_rom_for_title_fixture(&c, t, "g.cue", &hashes(), "good").expect("rom");
-        let bin =
-            files::seed_rom_for_title_fixture(&c, t, "g.bin", &hashes(), "good").expect("rom");
+        let disc = crate::db::fixtures::dat(&pid)
+            .title("Example Disc (USA)")
+            .rom("g.cue", &hashes(), crate::db::titles::RomStatus::Good)
+            .rom("g.bin", &hashes(), crate::db::titles::RomStatus::Good)
+            .write(&c)
+            .expect("disc");
+        let (t, cue, bin) = (disc.titles[0], disc.roms[0], disc.roms[1]);
         file(&c, &pid, "PSX/G/g.cue", cue, FileState::Verified);
         let got = title(&c, t).expect("read").expect("title");
         assert!(!got.complete && !got.all_verified);
@@ -161,8 +167,12 @@ mod tests {
     fn unverified_and_pending_files_do_not_count() {
         let c = conn();
         let pid = PlatformId("nes".into());
-        let rom = files::seed_rom_fixture(&c, &pid, "Example Quest", "a.nes", &hashes(), "good")
-            .expect("rom");
+        let rom = crate::db::fixtures::dat(&pid)
+            .title("Example Quest")
+            .rom("a.nes", &hashes(), RomStatus::Good)
+            .write(&c)
+            .expect("rom")
+            .first_rom();
         let t: TitleId = c
             .query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
                 r.get(0)
@@ -179,14 +189,17 @@ mod tests {
     fn mra_title_needs_every_zip_and_no_failed_check() {
         let c = conn();
         let pid = PlatformId("arcade".into());
-        let t = files::seed_title_fixture(&c, &pid, "Example Blaster").expect("title");
+        let blaster = crate::db::fixtures::dat(&pid)
+            .title("Example Blaster")
+            .rom("exb.zip", &hashes(), crate::db::titles::RomStatus::Good)
+            .write(&c)
+            .expect("blaster");
+        let (t, rom) = (blaster.titles[0], blaster.first_rom());
         c.execute(
             "UPDATE titles SET source = 'mra', mra_path = 'Example Blaster.mra' WHERE id = ?1",
             [t],
         )
         .expect("mra");
-        let rom =
-            files::seed_rom_for_title_fixture(&c, t, "exb.zip", &hashes(), "good").expect("rom");
         let got = title(&c, t).expect("read").expect("title");
         assert!(!got.complete);
         assert_eq!(got.mra_path.as_deref(), Some("Example Blaster.mra"));
@@ -205,11 +218,13 @@ mod tests {
     fn a_chd_identified_by_its_tracks_counts_as_verified() {
         let c = conn();
         let pid = PlatformId("psx".into());
-        let title = files::seed_title_fixture(&c, &pid, "Disc").expect("title");
-        let cue = files::seed_rom_for_title_fixture(&c, title, "Disc.cue", &hashes(), "good")
-            .expect("cue");
-        let bin = files::seed_rom_for_title_fixture(&c, title, "Disc.bin", &hashes(), "good")
-            .expect("bin");
+        let disc = crate::db::fixtures::dat(&pid)
+            .title("Disc")
+            .rom("Disc.cue", &hashes(), crate::db::titles::RomStatus::Good)
+            .rom("Disc.bin", &hashes(), crate::db::titles::RomStatus::Good)
+            .write(&c)
+            .expect("disc");
+        let (title, cue, bin) = (disc.titles[0], disc.roms[0], disc.roms[1]);
         file(&c, &pid, "PSX/Disc/Disc.chd#01", bin, FileState::Verified);
         let t = super::title(&c, title).expect("read").expect("title");
         assert!(!t.all_verified, "the cue row is still missing");

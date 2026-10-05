@@ -577,13 +577,7 @@ pub fn resolve_families(conn: &Connection) -> Result<Vec<PlatformId>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn conn() -> Connection {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-        c
-    }
+    use crate::db::fixtures::conn;
 
     fn new<'a>(version: &'a str, platform: Option<&'a str>, now: i64) -> NewVersion<'a> {
         NewVersion {

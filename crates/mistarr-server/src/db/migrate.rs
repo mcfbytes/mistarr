@@ -107,6 +107,15 @@ pub fn check_supported(conn: &Connection) -> Result<u32> {
 /// assert!(mistarr_server::db::migrate::apply(&mut conn).unwrap().is_empty());
 /// ```
 pub fn apply(conn: &mut Connection) -> Result<Vec<u32>> {
+    apply_through(conn, u32::MAX)
+}
+
+/// [`apply`] stopping after migration `last`, so a test can seed the schema of that version.
+///
+/// # Errors
+///
+/// As [`apply`].
+pub(crate) fn apply_through(conn: &mut Connection, last: u32) -> Result<Vec<u32>> {
     check_supported(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (
@@ -117,7 +126,10 @@ pub fn apply(conn: &mut Connection) -> Result<Vec<u32>> {
     )?;
     let current = current_version(conn)?;
     let mut applied = Vec::new();
-    for m in MIGRATIONS.iter().filter(|m| m.version > current) {
+    for m in MIGRATIONS
+        .iter()
+        .filter(|m| m.version > current && m.version <= last)
+    {
         let fail = |source| Error::Migration {
             version: m.version,
             source,
@@ -225,41 +237,22 @@ mod tests {
     #[test]
     fn arcade_scan_cleanup_prunes_scan_noise_but_keeps_import_rows() {
         let mut conn = Connection::open_in_memory().expect("open");
-        apply(&mut conn).expect("apply");
-        crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-        // An MRA zip rom, as import and presence rows link `files.rom_id` to.
-        let version = crate::db::arcade::mra_version(&conn, "arcade", 1).expect("version");
-        let title = crate::db::arcade::upsert_title(
-            &conn,
-            "arcade",
-            version,
-            &crate::db::arcade::MraTitle {
-                name: "Example Blaster",
-                base_name: "Example Blaster",
-                group_key: "",
-                regions: &[],
-                languages: &[],
-                revision: None,
-                flags: &[],
-                setname: Some("exblast"),
-                rbf: Some("core"),
-                mra_path: "x.mra",
-                file_stamp: "1:1",
-                run: 1,
-            },
-            &[crate::db::arcade::MraZip {
-                name: "exampleset.zip",
-                zip_dir: "mame",
-                md5: None,
-                present: true,
-            }],
+        apply_through(&mut conn, 11).expect("older migrations");
+        conn.execute_batch(
+            "INSERT INTO platforms (id, name, core_dir, kind) VALUES
+               ('arcade', 'Arcade', '_Arcade', 'arcade'), ('nes', 'NES', 'NES', 'cartridge');",
         )
-        .expect("upsert");
-        let rom_id: i64 = conn
-            .query_row("SELECT id FROM roms WHERE title_id = ?1", [title.0], |r| {
-                r.get(0)
-            })
-            .expect("rom id");
+        .expect("platforms");
+        // An MRA zip rom, as import and presence rows link `files.rom_id` to.
+        conn.execute_batch(
+            "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
+               VALUES ('arcade', 'MRA', '1', 'mra', 0, 0);
+             INSERT INTO titles (platform_id, dat_version_id, name, base_name, regions, languages, flags, source)
+               VALUES ('arcade', 1, 'Example Blaster', 'Example Blaster', '[]', '[]', '[]', 'mra');
+             INSERT INTO roms (title_id, name, size, status) VALUES (1, 'exampleset.zip', 0, 'good');",
+        )
+        .expect("mra title");
+        let rom_id = conn.last_insert_rowid();
 
         let insert = |rel_path: &str, state: &str, rom_id: Option<i64>| {
             conn.execute(
@@ -291,11 +284,7 @@ mod tests {
         )
         .expect("insert progress");
 
-        let cleanup = MIGRATIONS
-            .iter()
-            .find(|m| m.name == "0012_arcade_scan_cleanup")
-            .expect("migration present");
-        conn.execute_batch(cleanup.sql).expect("cleanup");
+        assert_eq!(apply_through(&mut conn, 12).expect("cleanup"), [12]);
 
         let mut left: Vec<String> = conn
             .prepare("SELECT rel_path FROM files ORDER BY rel_path")
@@ -327,19 +316,7 @@ mod tests {
     #[test]
     fn a_source_the_user_unbound_keeps_its_choice_and_gets_the_reason() {
         let mut conn = Connection::open_in_memory().expect("open");
-        conn.execute_batch(
-            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, name TEXT NOT NULL,
-               applied_at INTEGER NOT NULL);",
-        )
-        .expect("versions");
-        for m in MIGRATIONS.iter().filter(|m| m.version < 19) {
-            conn.execute_batch(m.sql).expect("older migration");
-            conn.execute(
-                "INSERT INTO schema_version (version, name, applied_at) VALUES (?1, ?2, 0)",
-                params![m.version, m.name],
-            )
-            .expect("record");
-        }
+        apply_through(&mut conn, 18).expect("older migrations");
         conn.execute_batch(
             "INSERT INTO sources (infohash, display_name, origin_file, state, added_at, user_unbound)
                VALUES ('aa', 'Set aside', 'a.torrent', 'unbound', 0, 1),
@@ -366,19 +343,7 @@ mod tests {
     fn stored_source_reasons_become_codes() {
         use crate::db::sources::SourceReason;
         let mut conn = Connection::open_in_memory().expect("open");
-        conn.execute_batch(
-            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, name TEXT NOT NULL,
-               applied_at INTEGER NOT NULL)",
-        )
-        .expect("versions");
-        for m in MIGRATIONS.iter().filter(|m| m.version < 21) {
-            conn.execute_batch(m.sql).expect("older migration");
-            conn.execute(
-                "INSERT INTO schema_version (version, name, applied_at) VALUES (?1, ?2, 0)",
-                params![m.version, m.name],
-            )
-            .expect("record");
-        }
+        apply_through(&mut conn, 20).expect("older migrations");
         crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
         let reasons = [
             ("No download client found. The file list is read once one is detected.", None),
@@ -441,9 +406,7 @@ mod tests {
             .iter()
             .find(|m| m.name.ends_with("_whole_hashes"))
             .expect("the whole-hashes migration");
-        for m in MIGRATIONS.iter().filter(|m| m.version < whole.version) {
-            conn.execute_batch(m.sql).expect("migration");
-        }
+        apply_through(&mut conn, whole.version - 1).expect("older migrations");
         crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
         crate::db::platforms::set_enabled(&conn, "lynx", false).expect("disable");
         let insert = |platform: &str, rel: &str, rule: Option<&str>, sha1: Option<&str>| {
@@ -461,8 +424,10 @@ mod tests {
         insert("snes", "SNES/d.sfc", Some("smc"), Some("dd"));
         insert("gba", "GBA/e.zip#e.gba", None, None);
         insert("nes", "NES/f.zip#f.nes", Some("ines"), None);
-        conn.execute_batch(whole.sql)
-            .expect("the whole-hashes migration");
+        assert_eq!(
+            apply_through(&mut conn, whole.version).expect("the whole-hashes migration"),
+            [whole.version]
+        );
         let queued: Vec<String> = conn
             .prepare("SELECT platform_id FROM scan_progress ORDER BY platform_id")
             .expect("prepare")
@@ -488,8 +453,12 @@ mod tests {
     #[test]
     fn arcade_presence_migration_indexes_and_drops_md5_less_member_rows() {
         let mut conn = Connection::open_in_memory().expect("open");
-        apply(&mut conn).expect("apply");
-        crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+        apply_through(&mut conn, 12).expect("older migrations");
+        conn.execute_batch(
+            "INSERT INTO platforms (id, name, core_dir, kind) VALUES
+               ('arcade', 'Arcade', '_Arcade', 'arcade'), ('nes', 'NES', 'NES', 'cartridge');",
+        )
+        .expect("platforms");
         let insert = |platform: &str, rel_path: &str, md5: Option<&str>| -> i64 {
             conn.execute(
                 "INSERT INTO files (platform_id, rel_path, size, mtime, md5, state, scanned_at)
@@ -515,14 +484,7 @@ mod tests {
         )
         .expect("log");
 
-        let presence = MIGRATIONS
-            .iter()
-            .find(|m| m.name == "0013_arcade_presence")
-            .expect("migration present");
-        let rerun = presence
-            .sql
-            .replace("CREATE INDEX", "CREATE INDEX IF NOT EXISTS");
-        conn.execute_batch(&rerun).expect("migrate");
+        assert_eq!(apply_through(&mut conn, 13).expect("migrate"), [13]);
 
         let left: Vec<String> = conn
             .prepare("SELECT rel_path FROM files ORDER BY rel_path")
@@ -693,21 +655,16 @@ mod tests {
             .iter()
             .find(|m| m.name.ends_with("_chd_tracks"))
             .expect("the CHD migration");
-        for m in MIGRATIONS.iter().filter(|m| m.version < chd.version) {
-            conn.execute_batch(m.sql).expect("migration");
-        }
+        apply_through(&mut conn, chd.version - 1).expect("older migrations");
         crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-        let title = crate::db::files::seed_title_fixture(
-            &conn,
-            &mistarr_core::PlatformId("psx".into()),
-            "Disc",
+        conn.execute_batch(
+            "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
+               VALUES ('psx', 'Discs', '1', 'discs.dat', 0, 1);
+             INSERT INTO titles (platform_id, dat_version_id, name, base_name)
+               VALUES ('psx', 1, 'Disc', 'Disc');
+             INSERT INTO roms (title_id, name, size, status) VALUES (1, 'Disc.chd', 9, 'good');",
         )
-        .expect("title");
-        conn.execute(
-            "INSERT INTO roms (title_id, name, size, status) VALUES (?1, 'Disc.chd', 9, 'good')",
-            [title],
-        )
-        .expect("rom");
+        .expect("disc");
         let rom = conn.last_insert_rowid();
         let insert = |platform: &str, rel: &str, rom: Option<i64>| {
             conn.execute(
@@ -727,7 +684,10 @@ mod tests {
             [logged],
         )
         .expect("log");
-        conn.execute_batch(chd.sql).expect("the CHD migration");
+        assert_eq!(
+            apply_through(&mut conn, chd.version).expect("the CHD migration"),
+            [chd.version]
+        );
         let left: Vec<String> = conn
             .prepare("SELECT rel_path FROM files ORDER BY rel_path")
             .expect("prepare")

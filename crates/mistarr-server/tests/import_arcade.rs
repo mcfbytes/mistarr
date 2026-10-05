@@ -10,7 +10,6 @@ use common::{boot_with, config_in, eventually, get, request, Booted};
 use mistarr_core::hash::{hash_reader, HeaderRule, Md5Stream};
 use mistarr_core::PlatformId;
 use mistarr_server::db::downloads::{self, DownloadState};
-use mistarr_server::db::downloads_import;
 use mistarr_server::db::files::{self, FileRow, FileState};
 use mistarr_server::db::ids::{DownloadId, RomId, SourceId, TitleId};
 use mistarr_server::db::imports;
@@ -191,7 +190,14 @@ fn hand_off(b: &Booted, rom_id: RomId, src: SourceId, index: u32, path: &Path) -
         .app
         .db
         .write_blocking(move |c| {
-            downloads_import::insert_fixture(c, rom_id, src, index, "importing", Some(&staged))
+            mistarr_server::db::fixtures::download(
+                c,
+                rom_id,
+                src,
+                index,
+                "importing",
+                Some(&staged),
+            )
         })
         .expect("download");
     announce(b, id);
@@ -355,11 +361,12 @@ async fn without_an_md5_a_loaded_dat_verifies_member_by_member() {
         .app
         .db
         .write_blocking(move |c| {
-            let t = files::seed_title_fixture(c, &PlatformId("arcade".into()), "exblast")?;
-            Ok([
-                files::seed_rom_for_title_fixture(c, t, "cpu.bin", &hc, "good")?,
-                files::seed_rom_for_title_fixture(c, t, "snd.bin", &hs, "good")?,
-            ])
+            let written = mistarr_server::db::fixtures::dat(&PlatformId("arcade".into()))
+                .title("exblast")
+                .rom("cpu.bin", &hc, mistarr_server::db::titles::RomStatus::Good)
+                .rom("snd.bin", &hs, mistarr_server::db::titles::RomStatus::Good)
+                .write(c)?;
+            Ok([written.roms[0], written.roms[1]])
         })
         .expect("dat");
     let rom = zip_rom(&b, "exblast.zip");
@@ -406,8 +413,10 @@ async fn a_zip_the_dat_disagrees_with_is_quarantined() {
         .app
         .db
         .write_blocking(move |c| {
-            let t = files::seed_title_fixture(c, &PlatformId("arcade".into()), "exblast")?;
-            files::seed_rom_for_title_fixture(c, t, "cpu.bin", &hc, "good")
+            mistarr_server::db::fixtures::dat(&PlatformId("arcade".into()))
+                .title("exblast")
+                .rom("cpu.bin", &hc, mistarr_server::db::titles::RomStatus::Good)
+                .write(c)
         })
         .expect("dat");
     let rom = zip_rom(&b, "exblast.zip");
@@ -597,8 +606,11 @@ fn dat_entry(b: &Booted, dat_name: &str, set: &str, rom: &str, data: &[u8], bios
         .app
         .db
         .write_blocking(move |c| {
-            let t = files::seed_title_fixture(c, &PlatformId("arcade".into()), &set)?;
-            let id = files::seed_rom_for_title_fixture(c, t, &rom, &hashes, "good")?;
+            let written = mistarr_server::db::fixtures::dat(&PlatformId("arcade".into()))
+                .title(&set)
+                .rom(&rom, &hashes, mistarr_server::db::titles::RomStatus::Good)
+                .write(c)?;
+            let (t, id) = (written.titles[0], written.first_rom());
             let flags = if bios {
                 vec!["bios".to_owned()]
             } else {

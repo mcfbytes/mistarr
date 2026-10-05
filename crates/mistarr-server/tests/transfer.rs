@@ -9,7 +9,7 @@ use mistarr_clients::fake::{FakeResponse, FakeScgiServer, FakeServer, ScgiReply}
 use mistarr_clients::xmlrpc::Value as Xml;
 use mistarr_server::config::ClientChoice;
 use mistarr_server::db::downloads::{self as rows, DownloadState};
-use mistarr_server::db::sources::fixtures::seed_rom;
+use mistarr_server::db::fixtures::seed_rom;
 use mistarr_server::db::sql::Page;
 use mistarr_server::events::{Event, EventKind};
 use mistarr_server::jobs::poll::{Cadence, Poller};
