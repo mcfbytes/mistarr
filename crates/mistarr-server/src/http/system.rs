@@ -10,12 +10,14 @@ use axum::{Json, Router};
 use mistarr_core::PlatformId;
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, Page, Paging};
+use super::{ApiError, Paging};
 use crate::app::AppState;
 use crate::config::{Config, ConfigProblem, RuntimeSettings, SettingsPatch};
-use crate::db::jobs::{self, JobId, JobRow};
+use crate::db::ids::JobId;
+use crate::db::jobs::{self, JobRow};
 use crate::db::platforms;
 use crate::db::settings::{self, keys};
+use crate::db::sql::Paged;
 use crate::jobs::dat_import::Recompute;
 use crate::jobs::detect_client::{detect_and_store, ClientStatus, DetectClient};
 use crate::jobs::gate::{GateState, Override};
@@ -265,12 +267,18 @@ struct JobItem {
 async fn list_jobs(
     State(app): State<Arc<AppState>>,
     paging: Result<Query<Paging>, QueryRejection>,
-) -> Result<Json<Page<JobItem>>, ApiError> {
+) -> Result<Json<Paged<JobItem>>, ApiError> {
     let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let (limit, offset) = paging.resolve();
-    let ((mut rows, total), open) = app
+    let page = paging.resolve();
+    let (
+        Paged {
+            items: mut rows,
+            total,
+        },
+        open,
+    ) = app
         .db
-        .read(move |c| Ok((jobs::list_active(c, limit, offset)?, jobs::open_rows(c)?)))
+        .read(move |c| Ok((jobs::list_active(c, page)?, jobs::open_rows(c)?)))
         .await?;
     app.live.overlay(&mut rows);
     let gate = app.gate.state();
@@ -281,12 +289,12 @@ async fn list_jobs(
             row,
         })
         .collect();
-    Ok(Json(Page { items, total }))
+    Ok(Json(Paged { items, total }))
 }
 
 /// Why an open job is not running: the gate's hold, else, while queued, what it waits for.
 fn job_reason(gate: &GateState, row: &JobRow, open: &[JobRow]) -> Option<String> {
-    hold_reason(gate, &row.lane, row.state).or_else(|| {
+    hold_reason(gate, row.lane, row.state).or_else(|| {
         (row.state == jobs::JobState::Queued).then(|| crate::incoming::queued_reason(row, open))
     })
 }
@@ -294,17 +302,16 @@ fn job_reason(gate: &GateState, row: &JobRow, open: &[JobRow]) -> Option<String>
 /// Finished jobs `/system/jobs/recent` lists.
 const RECENT_JOBS: u32 = 10;
 
-async fn recent_jobs(State(app): State<Arc<AppState>>) -> Result<Json<Page<JobItem>>, ApiError> {
+async fn recent_jobs(State(app): State<Arc<AppState>>) -> Result<Json<Paged<JobItem>>, ApiError> {
     let rows = app
         .db
         .read(|c| jobs::recent_finished(c, RECENT_JOBS))
         .await?;
-    let items: Vec<JobItem> = rows
+    let items = rows
         .into_iter()
         .map(|row| JobItem { row, reason: None })
         .collect();
-    let total = u64::try_from(items.len()).unwrap_or(0);
-    Ok(Json(Page { items, total }))
+    Ok(Json(Paged::all(items)))
 }
 
 async fn get_settings(State(app): State<Arc<AppState>>) -> Json<RuntimeSettings> {
@@ -349,13 +356,14 @@ async fn put_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::jobs::JobKind;
 
     #[test]
     fn a_queued_job_says_what_it_waits_for() {
-        let row = |id, kind: &str, state| JobRow {
+        let row = |id, kind, state| JobRow {
             id: JobId(id),
-            kind: kind.into(),
-            lane: "background".into(),
+            kind,
+            lane: crate::jobs::Lane::Background,
             payload: serde_json::json!({ "path": "/d/a.dat" }),
             state,
             progress: None,
@@ -363,8 +371,8 @@ mod tests {
             updated_at: 0,
         };
         let open = [
-            row(1, "dat_import", jobs::JobState::Running),
-            row(2, "source_import", jobs::JobState::Queued),
+            row(1, JobKind::DatImport, jobs::JobState::Running),
+            row(2, JobKind::SourceImport, jobs::JobState::Queued),
         ];
         let free = GateState::default();
         assert_eq!(job_reason(&free, &open[0], &open), None);

@@ -29,22 +29,22 @@ use self::support::{
     explain, file_name, hash_item, is_zip, leaf, locate, match_members, pick_rom, place_rom,
     quarantine, read_head, rel_string, report, Hashed,
 };
-use super::{transfer, Job, JobContext, Lane, Scheduler};
+use super::{transfer, Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::candidates;
 use crate::db::deferred::Op;
-use crate::db::downloads::{self, DownloadId, DownloadRow, DownloadState};
+use crate::db::downloads::{self, DownloadRow, DownloadState};
 use crate::db::downloads_import::{Elsewhere, Settled};
-use crate::db::files::{self, FileId, FileRow, FileState};
+use crate::db::files::{self, FileRow, FileState};
+use crate::db::ids::{DownloadId, FileId, RomId, SourceId};
 use crate::db::imports::{self, EntryRom, ImportAction, TitleEntry};
 use crate::db::jobs as job_rows;
-use crate::db::sources::{self, SourceId, SourceRow};
-use crate::db::{downloads_import, titles::TitleId};
+use crate::db::sources::{self, SourceRow};
+use crate::db::sql::Page;
+use crate::db::titles::RomStatus;
+use crate::db::{downloads_import, ids::TitleId};
 use crate::error::Result;
 use crate::events::EventKind;
-
-/// `jobs.kind` of [`ImportJob`].
-pub const KIND: &str = "import";
 
 /// Why a BIOS entry is never imported, from `docs/PRINCIPLES.md` section 3.
 const BIOS_REFUSED: &str = "BIOS entries are never imported";
@@ -65,8 +65,8 @@ impl ImportJob {
 
 #[async_trait]
 impl Job for ImportJob {
-    fn kind(&self) -> &'static str {
-        KIND
+    fn kind(&self) -> JobKind {
+        JobKind::Import
     }
 
     fn payload(&self) -> Value {
@@ -120,7 +120,7 @@ async fn enqueue(app: &Arc<AppState>, ids: Vec<DownloadId>) {
         let payload = ImportJob::payload_of(download_id);
         let open = app
             .db
-            .read(move |c| job_rows::find_open(c, KIND, &payload))
+            .read(move |c| job_rows::find_open(c, JobKind::Import, &payload))
             .await;
         match open {
             Ok(Some(_)) => continue,
@@ -136,13 +136,19 @@ async fn enqueue(app: &Arc<AppState>, ids: Vec<DownloadId>) {
 async fn sweep(app: &Arc<AppState>) {
     let rows = app
         .db
-        .read(|c| downloads::list(c, &[DownloadState::Importing], u32::MAX, 0))
+        .read(|c| {
+            let all = Page {
+                limit: u32::MAX,
+                offset: 0,
+            };
+            downloads::list(c, &[DownloadState::Importing], all)
+        })
         .await;
     match rows {
-        Ok((rows, _)) => {
+        Ok(rows) => {
             // Oldest first, as the downloads were handed over.
-            let mut ids: Vec<DownloadId> = rows.into_iter().map(|r| r.id).collect();
-            ids.sort_by_key(|id| id.0);
+            let mut ids: Vec<DownloadId> = rows.items.into_iter().map(|r| r.id).collect();
+            ids.sort_unstable();
             enqueue(app, ids).await;
         }
         Err(e) => tracing::warn!(error = %e, "cannot list downloads to import"),
@@ -333,7 +339,12 @@ struct Placing<'a> {
 struct Redirect(Elsewhere);
 
 impl Redirect {
-    fn new(other: &str, row: &DownloadRow, source: SourceId, proven: Option<(i64, bool)>) -> Self {
+    fn new(
+        other: &str,
+        row: &DownloadRow,
+        source: SourceId,
+        proven: Option<(RomId, bool)>,
+    ) -> Self {
         Self(Elsewhere {
             reason: different_version(other),
             source,
@@ -409,7 +420,7 @@ impl Placing<'_> {
     }
 
     /// True when the staged file is gone because an earlier attempt placed it.
-    async fn already_placed(&self, local: &Path, rom_id: i64) -> Result<bool> {
+    async fn already_placed(&self, local: &Path, rom_id: RomId) -> Result<bool> {
         if exists(local).await? {
             return Ok(false);
         }
@@ -441,7 +452,7 @@ impl Placing<'_> {
     async fn quarantine(
         &self,
         row: DownloadId,
-        rom_id: i64,
+        rom_id: RomId,
         local: &Path,
         actual: &[Hashed],
     ) -> Result<()> {
@@ -452,7 +463,7 @@ impl Placing<'_> {
     async fn quarantine_with(
         &self,
         row: DownloadId,
-        rom_id: i64,
+        rom_id: RomId,
         local: &Path,
         actual: &[Hashed],
         why: Option<Why>,
@@ -465,7 +476,7 @@ impl Placing<'_> {
                 let mut other = None;
                 for a in &list {
                     if let Some(m) = super::scan::match_forms(c, &pid, a.forms())? {
-                        let title = imports::title_entry(c, TitleId(m.title_id))?;
+                        let title = imports::title_entry(c, m.title_id)?;
                         other = title.map(|t| (t.id, t.name, m.name));
                         break;
                     }
@@ -643,7 +654,7 @@ impl Placing<'_> {
                     let Some(m) = super::scan::match_forms(c, &pid, a.forms())? else {
                         continue;
                     };
-                    let other = TitleId(m.title_id);
+                    let other = m.title_id;
                     if !downloads_import::other_version_of(c, wanted, other)? {
                         continue;
                     }
@@ -711,7 +722,7 @@ impl Placing<'_> {
         other: &TitleEntry,
         hashed: &Hashed,
         redirect: &Redirect,
-        file: i64,
+        file: FileId,
     ) -> Result<()> {
         tracing::info!(download = %row.id, title = %other.id, "the other version is already in the library");
         let detail = json!({
@@ -729,7 +740,7 @@ impl Placing<'_> {
                 imports::log(
                     tx,
                     now,
-                    Some(id.0),
+                    Some(id),
                     Some(file),
                     ImportAction::SkippedExisting,
                     &detail,
@@ -971,7 +982,7 @@ impl Placing<'_> {
     async fn staged_dir(
         &self,
         pieces: &[Piece],
-        placed_before: &[(i64, PathBuf)],
+        placed_before: &[(RomId, PathBuf)],
     ) -> Result<Option<StagedFile>> {
         let parent = pieces
             .first()
@@ -1348,7 +1359,7 @@ async fn size_of(path: &Path) -> Result<u64> {
 /// A download whose staged item was quarantined, for [`Quarantined::record`].
 struct Quarantined<'a> {
     row: DownloadId,
-    rom_id: i64,
+    rom_id: RomId,
     source: SourceId,
     redirect: Option<&'a Redirect>,
     reason: &'a str,
@@ -1375,7 +1386,7 @@ impl Quarantined<'_> {
             return Ok(settled);
         }
         let action = ImportAction::Quarantined;
-        imports::log(tx, now, Some(self.row.0), None, action, self.detail)?;
+        imports::log(tx, now, Some(self.row), None, action, self.detail)?;
         let whole = self.redirect.filter(|r| r.0.whole);
         if let (Some(proven), Some(i)) = (whole.and_then(|r| r.0.proven), index) {
             candidates::prove(tx, self.source, i, proven)?;
@@ -1468,7 +1479,7 @@ fn record_target(
     if let Decision::Skip(id) = t.decision {
         let detail = log_detail(scope, first, &t.rel);
         let action = ImportAction::SkippedExisting;
-        imports::log(tx, now, Some(first.download.0), Some(id.0), action, &detail)?;
+        imports::log(tx, now, Some(first.download), Some(id), action, &detail)?;
         done.push((id, action));
         return Ok(());
     }
@@ -1525,7 +1536,7 @@ fn record_target(
             }
             _ => ImportAction::Placed,
         };
-        imports::log(tx, now, Some(p.download.0), Some(id.0), action, &detail)?;
+        imports::log(tx, now, Some(p.download), Some(id), action, &detail)?;
         done.push((id, action));
     }
     Ok(())
@@ -1541,7 +1552,7 @@ fn file_state(p: &Piece, whole_zip: bool) -> FileState {
         .member
         .as_deref()
         .is_none_or(|m| leaf(m) == leaf(&p.rom.name));
-    if p.rom.status == "baddump" {
+    if p.rom.status == RomStatus::BadDump {
         FileState::Bad
     } else if whole_zip && !named {
         FileState::Misnamed

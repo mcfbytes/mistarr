@@ -3,10 +3,9 @@
 
 use rusqlite::{params, Connection, OptionalExtension};
 
-use super::candidates;
-use super::downloads::{self, CancelOutcome, Cancelled, DownloadId, DownloadState, NewDownload};
-use super::sources::SourceId;
-use super::titles::TitleId;
+use super::candidates::{self, MatchConfidence};
+use super::downloads::{self, CancelOutcome, Cancelled, DownloadState, NewDownload};
+use super::ids::{DownloadId, FileId, RomId, SourceId, TitleId};
 use crate::error::Result;
 
 /// Every download of a title, oldest first.
@@ -16,7 +15,7 @@ use crate::error::Result;
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn for_title(conn: &Connection, title_id: TitleId) -> Result<Vec<DownloadId>> {
     let mut stmt = conn.prepare("SELECT id FROM downloads WHERE title_id = ?1 ORDER BY id")?;
-    let rows = stmt.query_map([title_id.0], |r| r.get(0).map(DownloadId))?;
+    let rows = stmt.query_map([title_id], |r| r.get(0))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -29,7 +28,7 @@ pub fn torrent_path(conn: &Connection, source_id: SourceId, index: u32) -> Resul
     Ok(conn
         .query_row(
             "SELECT path FROM torrent_files WHERE source_id = ?1 AND file_index = ?2",
-            params![source_id.0, index],
+            params![source_id, index],
             |r| r.get(0),
         )
         .optional()?)
@@ -46,7 +45,7 @@ pub fn other_version_of(conn: &Connection, wanted: TitleId, other: TitleId) -> R
             "SELECT 1 FROM titles w JOIN titles o
                ON COALESCE(o.group_root, o.parent_id, o.id) = COALESCE(w.group_root, w.parent_id, w.id)
              WHERE w.id = ?1 AND o.id = ?2 AND o.id != w.id AND o.retired = 0",
-            params![wanted.0, other.0],
+            params![wanted, other],
             |_| Ok(()),
         )
         .optional()?
@@ -65,7 +64,7 @@ pub fn placed_on_file(
     conn: &Connection,
     source: SourceId,
     index: u32,
-    rom: i64,
+    rom: RomId,
 ) -> Result<Option<TitleId>> {
     Ok(conn
         .query_row(
@@ -76,12 +75,11 @@ pub fn placed_on_file(
                AND l.action IN ('placed', 'replaced', 'skipped_existing')
                AND json_extract(l.detail, '$.rom_id') != ?3
              ORDER BY l.id DESC LIMIT 1",
-            params![source.0, index, rom],
-            |r| r.get::<_, Option<i64>>(0),
+            params![source, index, rom],
+            |r| r.get::<_, Option<TitleId>>(0),
         )
         .optional()?
-        .flatten()
-        .map(TitleId))
+        .flatten())
 }
 
 /// A verified file of `rom`, if any.
@@ -89,7 +87,7 @@ pub fn placed_on_file(
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn verified_file(conn: &Connection, rom: i64) -> Result<Option<i64>> {
+pub fn verified_file(conn: &Connection, rom: RomId) -> Result<Option<FileId>> {
     Ok(conn
         .query_row(
             "SELECT id FROM files WHERE rom_id = ?1 AND state = 'verified' ORDER BY id LIMIT 1",
@@ -109,9 +107,9 @@ pub struct Elsewhere {
     /// Its index, when the download named one.
     pub file_index: Option<u32>,
     /// The wanted rom, which the file is not.
-    pub rom_id: i64,
+    pub rom_id: RomId,
     /// The rom the file hashed to, when it was another version.
-    pub proven: Option<i64>,
+    pub proven: Option<RomId>,
     /// Whether the torrent file itself hashed to `proven`, not a member of it.
     pub whole: bool,
     /// Whether the file was placed or kept as that rom.
@@ -154,16 +152,17 @@ pub fn settle_elsewhere(
         candidates::drop_pair(conn, e.source, index, e.rom_id)?;
     }
     if let (Some(proven), true) = (e.proven, e.placed) {
-        let redundant: Vec<i64> = conn
-            .prepare(
+        let redundant: Vec<DownloadId> = conn
+            .prepare(&format!(
                 "SELECT id FROM downloads WHERE rom_id = ?1
-                   AND state IN ('wanted', 'queued', 'transferring', 'checking')
+                   AND state IN {}
                    AND NOT (source_id IS ?2 AND file_index IS ?3)",
-            )?
-            .query_map(params![proven, e.source.0, e.file_index], |r| r.get(0))?
+                DownloadState::CANCELLABLE_SQL
+            ))?
+            .query_map(params![proven, e.source, e.file_index], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
         for other in redundant {
-            if let CancelOutcome::Cancelled(c) = downloads::cancel(conn, DownloadId(other), now)? {
+            if let CancelOutcome::Cancelled(c) = downloads::cancel(conn, other, now)? {
                 out.cancelled.push(c);
             }
         }
@@ -190,11 +189,13 @@ pub fn want_again(
         return Ok(None);
     };
     let open: bool = conn.query_row(
-        "SELECT (SELECT wanted = 0 OR retired = 1 FROM titles WHERE id = ?1)
-             OR EXISTS (SELECT 1 FROM files WHERE rom_id = ?2 AND state = 'verified')
-             OR EXISTS (SELECT 1 FROM downloads WHERE rom_id = ?2
-                        AND state IN ('wanted', 'queued', 'transferring', 'checking', 'importing'))",
-        params![row.title_id.0, row.rom_id],
+        &format!(
+            "SELECT (SELECT wanted = 0 OR retired = 1 FROM titles WHERE id = ?1)
+                 OR EXISTS (SELECT 1 FROM files WHERE rom_id = ?2 AND state = 'verified')
+                 OR EXISTS (SELECT 1 FROM downloads WHERE rom_id = ?2 AND state IN {})",
+            DownloadState::OPEN_SQL
+        ),
+        params![row.title_id, row.rom_id],
         |r| r.get(0),
     )?;
     if row.state != DownloadState::Bad || open {
@@ -212,7 +213,7 @@ pub fn want_again(
     )?;
     conn.execute(
         "UPDATE downloads SET error = ?2 WHERE id = ?1",
-        params![again.0, note],
+        params![again, note],
     )?;
     let state = if file.is_some() {
         DownloadState::Queued
@@ -228,11 +229,14 @@ pub fn want_again(
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn guessed(conn: &Connection, source: SourceId, index: u32, rom: i64) -> Result<bool> {
+pub fn guessed(conn: &Connection, source: SourceId, index: u32, rom: RomId) -> Result<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM torrent_candidates WHERE source_id = ?1
-           AND file_index = ?2 AND rom_id = ?3 AND confidence IN ('fuzzy', 'size'))",
-        params![source.0, index, rom],
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM torrent_candidates WHERE source_id = ?1
+               AND file_index = ?2 AND rom_id = ?3 AND confidence IN {})",
+            MatchConfidence::GUESSED_SQL
+        ),
+        params![source, index, rom],
         |r| r.get(0),
     )?)
 }
@@ -249,7 +253,7 @@ pub fn placed_any(conn: &Connection, source: SourceId) -> Result<bool> {
            AND (d.state = 'done' OR (d.state = 'bad' AND EXISTS (
                  SELECT 1 FROM import_log l WHERE l.download_id = d.id
                    AND l.action IN ('placed', 'replaced', 'skipped_existing')))))",
-        [source.0],
+        [source],
         |r| r.get(0),
     )?)
 }
@@ -263,7 +267,7 @@ pub fn placed_any(conn: &Connection, source: SourceId) -> Result<bool> {
 #[cfg(any(test, feature = "test-support"))]
 pub fn insert_fixture(
     conn: &Connection,
-    rom_id: i64,
+    rom_id: RomId,
     source_id: SourceId,
     file_index: u32,
     state: &str,
@@ -273,7 +277,7 @@ pub fn insert_fixture(
         "INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, progress,
                                 staged_path, created_at, updated_at)
          SELECT title_id, ?1, ?2, ?3, ?4, 1, ?5, 0, 0 FROM roms WHERE id = ?1",
-        params![rom_id, source_id.0, file_index, state, staged_path],
+        params![rom_id, source_id, file_index, state, staged_path],
     )?;
     Ok(DownloadId(conn.last_insert_rowid()))
 }
@@ -303,13 +307,13 @@ mod tests {
         .expect("source");
         let rom = sources::fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 10, &[])
             .expect("rom");
-        let title: i64 = c
+        let title: TitleId = c
             .query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
                 r.get(0)
             })
             .expect("title");
         let id = insert_fixture(&c, rom, src, 0, "importing", Some("/s/a.nes")).expect("insert");
-        assert_eq!(for_title(&c, TitleId(title)).expect("rows"), [id]);
+        assert_eq!(for_title(&c, title).expect("rows"), [id]);
         let row = crate::db::downloads::get(&c, id)
             .expect("get")
             .expect("row");
@@ -330,30 +334,30 @@ mod tests {
             .expect("rom");
         let other =
             sources::fixtures::seed_rom(&c, "nes", "Other Tale (USA).nes", 10, &[]).expect("rom");
-        let title_of = |rom: i64| {
+        let title_of = |rom: RomId| {
             c.query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
-                r.get(0).map(TitleId)
+                r.get::<_, TitleId>(0)
             })
             .expect("title")
         };
-        let (main, alt_title) = (TitleId(title), title_of(alt));
+        let (main, alt_title) = (title, title_of(alt));
         c.execute(
             "UPDATE titles SET parent_id = ?1 WHERE id IN (?1, ?2)",
-            [main.0, alt_title.0],
+            [main, alt_title],
         )
         .expect("group");
         assert!(other_version_of(&c, main, alt_title).expect("group"));
         assert!(other_version_of(&c, alt_title, main).expect("group"));
         assert!(!other_version_of(&c, main, main).expect("self"));
         assert!(!other_version_of(&c, main, title_of(other)).expect("other group"));
-        let linked = title_of(other).0;
+        let linked = title_of(other);
         c.execute(
             "UPDATE titles SET group_root = ?1 WHERE id = ?2",
-            [main.0, linked],
+            [main, linked],
         )
         .expect("link");
-        assert!(other_version_of(&c, main, TitleId(linked)).expect("linked by another DAT"));
-        c.execute("UPDATE titles SET retired = 1 WHERE id = ?1", [alt_title.0])
+        assert!(other_version_of(&c, main, linked).expect("linked by another DAT"));
+        c.execute("UPDATE titles SET retired = 1 WHERE id = ?1", [alt_title])
             .expect("retire");
         assert!(!other_version_of(&c, main, alt_title).expect("retired"));
 
@@ -362,7 +366,7 @@ mod tests {
         assert!(!placed_any(&c, src).expect("quarantined only"));
         assert_eq!(placed_on_file(&c, src, 0, rom).expect("none"), None);
         let detail = serde_json::json!({ "title_id": alt_title.0, "rom_id": alt });
-        crate::db::imports::log(&c, 1, Some(bad.0), None, ImportAction::Placed, &detail)
+        crate::db::imports::log(&c, 1, Some(bad), None, ImportAction::Placed, &detail)
             .expect("log");
         assert!(placed_any(&c, src).expect("placed as another version"));
         assert_eq!(
@@ -374,9 +378,10 @@ mod tests {
         assert_eq!(placed_on_file(&c, src, 1, rom).expect("other file"), None);
         c.execute(
             "UPDATE torrent_files SET path = 'Set/pack.ZIP' WHERE source_id = ?1",
-            [src.0],
+            [src],
         )
         .expect("zip");
+
         assert_eq!(
             placed_on_file(&c, src, 0, rom).expect("zip"),
             None,
@@ -385,7 +390,7 @@ mod tests {
     }
 
     /// A database with a wanted title of two versions and a torrent of two files.
-    fn grouped() -> (Connection, SourceId, i64, i64) {
+    fn grouped() -> (Connection, SourceId, RomId, RomId) {
         let mut c = Connection::open_in_memory().expect("open");
         crate::db::migrate::apply(&mut c).expect("migrate");
         crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
@@ -424,7 +429,7 @@ mod tests {
         (c, src, rom, alt)
     }
 
-    fn add(c: &Connection, src: SourceId, index: u32, rom: i64, confidence: &'static str) {
+    fn add(c: &Connection, src: SourceId, index: u32, rom: RomId, confidence: MatchConfidence) {
         let change = candidates::Change {
             add: vec![(index, rom, confidence)],
             ..Default::default()
@@ -439,9 +444,9 @@ mod tests {
     #[test]
     fn settling_elsewhere_proves_the_file_cancels_the_rest_and_wants_again() {
         let (c, src, rom, alt) = grouped();
-        add(&c, src, 0, rom, "fuzzy");
-        add(&c, src, 0, alt, "size");
-        add(&c, src, 1, rom, "size");
+        add(&c, src, 0, rom, MatchConfidence::Fuzzy);
+        add(&c, src, 0, alt, MatchConfidence::Size);
+        add(&c, src, 1, rom, MatchConfidence::Size);
         let first = insert_fixture(&c, rom, src, 0, "importing", None).expect("first");
         let alt_elsewhere = insert_fixture(&c, alt, src, 1, "queued", None).expect("alt");
         assert!(guessed(&c, src, 0, rom).expect("guessed"));
@@ -460,14 +465,14 @@ mod tests {
         assert_eq!(settled.cancelled.len(), 1);
         assert_eq!(settled.cancelled[0].id, alt_elsewhere);
         assert!(candidates::of_file(&c, src, 0).expect("of").is_empty());
-        let (proven, confidence): (i64, String) = c
+        let proven: (RomId, MatchConfidence) = c
             .query_row(
                 "SELECT rom_id, confidence FROM torrent_files WHERE source_id = ?1 AND file_index = 0",
-                [src.0],
+                [src],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .expect("file");
-        assert_eq!((proven, confidence.as_str()), (alt, candidates::PROVEN));
+        assert_eq!(proven, (alt, MatchConfidence::Hash));
         let (again, state) = settled.again.expect("wanted again");
         assert_eq!(state, DownloadState::Queued, "the next file is tried");
         let row = downloads::get(&c, again).expect("get").expect("row");
@@ -486,7 +491,7 @@ mod tests {
             None,
             "one is open"
         );
-        c.execute("UPDATE downloads SET state = 'bad' WHERE id = ?1", [open.0])
+        c.execute("UPDATE downloads SET state = 'bad' WHERE id = ?1", [open])
             .expect("bad");
         let (again, state) = want_again(&c, bad, "n", 1)
             .expect("again")

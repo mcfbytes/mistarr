@@ -10,7 +10,7 @@ use mistarr_clients::launch::Launcher;
 use mistarr_clients::{ClientKind, DownloadClient, Transmission};
 use serde::{Deserialize, Serialize};
 
-use super::{wizard, Job, JobContext};
+use super::{wizard, Job, JobContext, JobKind};
 use crate::app::AppState;
 use crate::config::ClientConfig;
 use crate::db::settings::{self, keys};
@@ -198,13 +198,10 @@ pub async fn watch(app: Arc<AppState>) {
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DetectClient;
 
-/// The `jobs.kind` of [`DetectClient`].
-pub const KIND: &str = "detect_client";
-
 #[async_trait]
 impl Job for DetectClient {
-    fn kind(&self) -> &'static str {
-        KIND
+    fn kind(&self) -> JobKind {
+        JobKind::DetectClient
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {

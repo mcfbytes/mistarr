@@ -341,7 +341,7 @@ async fn the_job_moves_files_and_publishes_events() {
     );
     let remaps = app
         .db
-        .read(|c| crate::db::jobs::count_kind(c, crate::jobs::remap::KIND))
+        .read(|c| crate::db::jobs::count_kind(c, crate::jobs::JobKind::RemapSources))
         .await
         .expect("count");
     assert_eq!(remaps, 1, "a recompute queues a re-map of its platform");
@@ -616,7 +616,7 @@ async fn recompute_is_enqueued_for_every_platform() {
     Recompute::enqueue_all(&app).await.expect("enqueue");
     let n = app
         .db
-        .read(|c| rows::count_kind(c, RECOMPUTE_KIND))
+        .read(|c| rows::count_kind(c, JobKind::Recompute))
         .await
         .expect("count");
     assert_eq!(n, mistarr_mister::platforms::PLATFORMS.len() as u64);
@@ -734,7 +734,7 @@ fn an_unbound_version_never_blocks_binding_one_of_its_family() {
     assert!(loaded(import(&c, &v1, &request(false, Some(bind)))).has_titles);
 }
 
-async fn job_state(app: &AppState, id: crate::db::jobs::JobId) -> rows::JobRow {
+async fn job_state(app: &AppState, id: crate::db::ids::JobId) -> rows::JobRow {
     app.db
         .read(move |c| rows::get(c, id))
         .await
@@ -759,7 +759,16 @@ async fn binding_fails_loudly_and_finds_renamed_nameless_files() {
             .await
             .expect("run");
     }
-    let (rows, _) = app.db.read(|c| dats::list(c, 10, 0)).await.expect("list");
+    let page = crate::db::sql::Page {
+        limit: 10,
+        offset: 0,
+    };
+    let rows = app
+        .db
+        .read(move |c| dats::list(c, page))
+        .await
+        .expect("list")
+        .items;
     let newest = rows.iter().find(|r| r.version == "2").expect("v2").clone();
     assert_eq!(
         (newest.dat_name.as_str(), newest.source_file.as_str()),
@@ -880,7 +889,8 @@ fn remove_with_files(c: &TestDb, version: DatVersionId, files: &[(&str, &str, i6
                 whole: None,
             };
             let state = crate::db::files::FileState::Misnamed;
-            crate::db::files::upsert(x, &nes, path, 4, 1, &hashed, Some(*id), state, 1)?;
+            let rom = Some(crate::db::ids::RomId(*id));
+            crate::db::files::upsert(x, &nes, path, 4, 1, &hashed, rom, state, 1)?;
         }
         dats::retire(x, version, 1)?;
         let matched = rematch_chunk(x, &nes)?;
@@ -1224,7 +1234,7 @@ fn unmatched_file(
     platform: &PlatformId,
     path: &str,
     sums: &mistarr_core::HashSet,
-) -> Result<files::FileId> {
+) -> Result<crate::db::ids::FileId> {
     let hashed = files::Hashed {
         crc32: Some(&sums.crc32),
         md5: Some(&sums.md5),
@@ -1321,7 +1331,7 @@ fn unmatched_pages_end_on_a_file_that_never_matches() {
     let (first, pages) = c
         .with(|x| {
             let first = unmatched_file(x, &nes, "NES/stray.nes", &sums(7))?;
-            let mut after = files::FileId(0);
+            let mut after = crate::db::ids::FileId(0);
             let mut pages = 0;
             loop {
                 let chunk = match_unmatched_chunk(x, &nes, after)?;
@@ -1370,7 +1380,7 @@ fn a_stored_crc_matches_a_headered_file_by_its_size_less_the_header() {
             let path = "NES/Crc Quest (USA).nes";
             let unverified = FileState::Unverified;
             let id = files::upsert(x, &nes, path, 20, 1, &hashed, None, unverified, 1)?;
-            match_unmatched_chunk(x, &nes, files::FileId(0))?;
+            match_unmatched_chunk(x, &nes, crate::db::ids::FileId(0))?;
             Ok(files::get(x, id)?.map(|f| f.state))
         })
         .expect("match");
@@ -1427,7 +1437,7 @@ fn stored_whole_and_content_forms_match_headered_and_headerless_roms() {
                     x, &lynx, path, 68, 1, &hashed, None, unverified, 1,
                 )?);
             }
-            match_unmatched_chunk(x, &lynx, files::FileId(0))?;
+            match_unmatched_chunk(x, &lynx, crate::db::ids::FileId(0))?;
             let mut states = Vec::new();
             for id in ids {
                 states.push(files::get(x, id)?.map(|f| f.state));
@@ -1475,7 +1485,7 @@ fn a_stored_crc_allows_for_a_copier_header_only_at_its_size() {
                     x, &snes, path, size, 1, &hashed, None, unverified, 1,
                 )?);
             }
-            match_unmatched_chunk(x, &snes, files::FileId(0))?;
+            match_unmatched_chunk(x, &snes, crate::db::ids::FileId(0))?;
             let mut states = Vec::new();
             for id in ids {
                 states.push(files::get(x, id)?.map(|f| f.state));
@@ -1497,7 +1507,7 @@ fn a_recompute_that_changes_nothing_writes_nothing() {
         .with(|x| {
             unmatched_file(x, &nes, "NES/stray.nes", &sums(12))?;
             let before = x.total_changes();
-            match_unmatched_chunk(x, &nes, files::FileId(0))?;
+            match_unmatched_chunk(x, &nes, crate::db::ids::FileId(0))?;
             Ok(x.total_changes() - before)
         })
         .expect("page");
@@ -1567,7 +1577,7 @@ fn load_all(c: &TestDb, dats: &[String], via_ram: bool) -> Vec<Outcome> {
             let plan = ram::Plan {
                 dir: ram_dir.path().to_path_buf(),
                 floor: 0,
-                job: 1,
+                job: Some(crate::db::ids::JobId(1)),
                 input: 0,
             };
             let ran =
@@ -1654,14 +1664,14 @@ fn an_import_in_ram_stores_the_same_rows_as_one_in_place() {
     }
 }
 
-fn job_row(app: &AppState, id: crate::db::jobs::JobId) -> rows::JobRow {
+fn job_row(app: &AppState, id: crate::db::ids::JobId) -> rows::JobRow {
     app.db
         .read_blocking(|c| rows::get(c, id))
         .expect("get")
         .expect("row")
 }
 
-fn count_kind(app: &AppState, kind: &str) -> u64 {
+fn count_kind(app: &AppState, kind: JobKind) -> u64 {
     app.db
         .read_blocking(|c| rows::count_kind(c, kind))
         .expect("count")
@@ -1697,11 +1707,11 @@ async fn a_dat_job_imports_in_ram_and_queues_the_remap_its_recompute_ends_with()
         .expect("titles");
     assert_eq!(titles, 2);
     assert_eq!(
-        count_kind(&app, RECOMPUTE_KIND),
+        count_kind(&app, JobKind::Recompute),
         0,
         "the recompute ran in RAM"
     );
-    assert_eq!(count_kind(&app, crate::jobs::remap::KIND), 1);
+    assert_eq!(count_kind(&app, JobKind::RemapSources), 1);
     let mut phases = Vec::new();
     while let Ok(e) = events.try_recv() {
         if e.kind == EventKind::JobProgress {
@@ -1753,7 +1763,7 @@ async fn short_memory_imports_in_place_and_says_why() {
     );
     assert_eq!(progress["games"], 1);
     assert_eq!(
-        count_kind(&app, RECOMPUTE_KIND),
+        count_kind(&app, JobKind::Recompute),
         1,
         "the recompute is queued"
     );
@@ -1773,7 +1783,7 @@ fn a_copy_that_fills_partway_through_the_load_falls_back_with_the_card_untouched
     let plan = ram::Plan {
         dir: ram_dir.path().to_path_buf(),
         floor: 0,
-        job: 1,
+        job: Some(crate::db::ids::JobId(1)),
         input: 0,
     };
     let req = request(false, None);
@@ -1815,7 +1825,7 @@ fn memory_falling_short_during_a_load_in_ram_falls_back_with_the_card_untouched(
     let plan = ram::Plan {
         dir: ram_dir.path().to_path_buf(),
         floor: 0,
-        job: 1,
+        job: Some(crate::db::ids::JobId(1)),
         input: 0,
     };
     // The copy was allowed; from the first member on, no memory is ever enough.
@@ -1860,7 +1870,7 @@ async fn a_running_core_halves_the_pace_of_the_copy() {
     let (_dir, app) = state();
     let (tx, gate) = watch::channel(GateState::default());
     let mut watch = RamWatch {
-        reporter: Reporter::new(Arc::clone(&app), JobId(1), KIND, None),
+        reporter: Reporter::new(Arc::clone(&app), JobId(1), JobKind::DatImport, None),
         id: JobId(1),
         file: "a.dat".into(),
         members: 1,

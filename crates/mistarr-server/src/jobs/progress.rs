@@ -7,9 +7,10 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use super::ProgressEvent;
+use super::{JobKind, ProgressEvent};
 use crate::app::AppState;
-use crate::db::jobs::{JobId, JobRow, JobState};
+use crate::db::ids::JobId;
+use crate::db::jobs::{JobRow, JobState};
 use crate::events::EventKind;
 
 /// Shortest gap between two live reports of one job in the same phase.
@@ -129,11 +130,13 @@ impl LiveProgress {
     /// Replaces the stored progress of each running row with its live progress, if any.
     ///
     /// ```
-    /// use mistarr_server::db::jobs::{JobId, JobRow, JobState};
+    /// use mistarr_server::db::jobs::{JobRow, JobState};
+    /// use mistarr_server::db::ids::JobId;
     /// use mistarr_server::jobs::progress::LiveProgress;
+    /// use mistarr_server::jobs::{JobKind, Lane};
     /// let live = LiveProgress::default();
     /// live.set(JobId(1), serde_json::json!({ "phase": "reading" }));
-    /// let mut rows = vec![JobRow { id: JobId(1), kind: "dat_import".into(), lane: "background".into(),
+    /// let mut rows = vec![JobRow { id: JobId(1), kind: JobKind::DatImport, lane: Lane::Background,
     ///     payload: serde_json::json!({}), state: JobState::Running, progress: None,
     ///     created_at: 0, updated_at: 0 }];
     /// live.overlay(&mut rows);
@@ -158,7 +161,7 @@ impl LiveProgress {
 pub struct Reporter {
     app: Arc<AppState>,
     id: JobId,
-    kind: &'static str,
+    kind: JobKind,
     detail: Option<String>,
     throttle: Mutex<Throttle>,
 }
@@ -166,7 +169,7 @@ pub struct Reporter {
 impl Reporter {
     /// A reporter for job `id` of `kind` about `detail`.
     #[must_use]
-    pub fn new(app: Arc<AppState>, id: JobId, kind: &'static str, detail: Option<String>) -> Self {
+    pub fn new(app: Arc<AppState>, id: JobId, kind: JobKind, detail: Option<String>) -> Self {
         Self {
             app,
             id,
@@ -265,7 +268,7 @@ mod tests {
         let reporter = Reporter::new(
             Arc::clone(&app),
             JobId(9),
-            "dat_import",
+            JobKind::DatImport,
             Some("a.dat".into()),
         );
         let progress = json!({ "phase": "reading", "bytes_read": 10, "bytes_total": 100 });

@@ -1,7 +1,5 @@
 //! The `sources` and `torrent_files` tables, and the [`DatIndex`] binding reads roms through.
 
-use std::fmt;
-
 use mistarr_clients::{ClientTorrentId, SeedPolicy};
 use mistarr_core::PlatformId;
 use mistarr_sources::binding::{self, Confidence, DatIndex, RomRef};
@@ -9,64 +7,26 @@ use mistarr_sources::torrent::TorrentFile;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::{Deserialize, Serialize};
 
+use super::candidates::MatchConfidence;
+use super::downloads::DownloadState;
+use super::ids::{RomId, SourceId};
+use super::sql::{self, text_enum, Page, Paged};
 use crate::error::Result;
 
 /// Roms given match keys per statement batch in [`refresh_match_keys`].
 const KEY_BATCH: u32 = 1000;
 
-/// A `sources.id`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct SourceId(pub i64);
-
-impl fmt::Display for SourceId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
-
-/// `sources.state`; the machine is in `docs/DATA-MODEL.md`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum SourceState {
-    /// A magnet whose file list the client has not fetched yet.
-    Resolving,
-    /// File list known, no platform reached the threshold.
-    Unbound,
-    /// Attached to a platform.
-    Bound,
-    /// Turned off by the user.
-    Disabled,
-}
-
-impl SourceState {
-    /// The column value.
-    ///
-    /// ```
-    /// assert_eq!(mistarr_server::db::sources::SourceState::Bound.as_str(), "bound");
-    /// ```
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Resolving => "resolving",
-            Self::Unbound => "unbound",
-            Self::Bound => "bound",
-            Self::Disabled => "disabled",
-        }
-    }
-
-    /// Parses a column value.
-    ///
-    /// ```
-    /// use mistarr_server::db::sources::SourceState;
-    /// assert_eq!(SourceState::parse("unbound"), Some(SourceState::Unbound));
-    /// assert_eq!(SourceState::parse("x"), None);
-    /// ```
-    #[must_use]
-    pub fn parse(s: &str) -> Option<Self> {
-        [Self::Resolving, Self::Unbound, Self::Bound, Self::Disabled]
-            .into_iter()
-            .find(|v| v.as_str() == s)
+text_enum! {
+    /// `sources.state`; the machine is in `docs/DATA-MODEL.md`.
+    pub enum SourceState {
+        /// A magnet whose file list the client has not fetched yet.
+        Resolving = "resolving",
+        /// File list known, no platform reached the threshold.
+        Unbound = "unbound",
+        /// Attached to a platform.
+        Bound = "bound",
+        /// Turned off by the user.
+        Disabled = "disabled",
     }
 }
 
@@ -106,22 +66,67 @@ pub fn seed_from_text(text: &str) -> Option<SeedPolicy> {
     }
 }
 
-/// The `confidence` text of `torrent_files` and `torrent_candidates`, `None` for an unmatched file.
-///
-/// ```
-/// use mistarr_server::db::sources::confidence_text;
-/// use mistarr_sources::binding::Confidence;
-/// assert_eq!(confidence_text(Confidence::Base), Some("base"));
-/// assert_eq!(confidence_text(Confidence::Unmatched), None);
-/// ```
-#[must_use]
-pub fn confidence_text(c: Confidence) -> Option<&'static str> {
-    match c {
-        Confidence::Name => Some("name"),
-        Confidence::Base => Some("base"),
-        Confidence::Fuzzy => Some("fuzzy"),
-        Confidence::Size => Some("size"),
-        _ => None,
+/// Why a source is in its state: `sources.reason`, stored as JSON tagged by `code`;
+/// `http` words it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum SourceReason {
+    /// No download client is detected to read a magnet's file list.
+    NoClient,
+    /// The client is fetching a magnet's file list.
+    WaitingMetadata,
+    /// The stored infohash cannot be read, so the magnet cannot be added.
+    BadInfohash,
+    /// The client refused the source.
+    ClientRefused {
+        /// The client's error.
+        error: String,
+    },
+    /// No platform matched enough of the files.
+    NoMatch {
+        /// The bind threshold, in percent.
+        percent: u32,
+        /// The platform its names suggest, when that platform has a DAT.
+        suggested: Option<PlatformId>,
+    },
+    /// Its names suggest a platform whose DAT is not loaded yet.
+    AwaitingDat {
+        /// That platform.
+        platform: PlatformId,
+    },
+    /// The user marked it as not a game set.
+    Ignored,
+}
+
+impl SourceReason {
+    /// [`SourceReason::NoMatch`] at bind threshold `threshold`, a share of the files.
+    ///
+    /// ```
+    /// use mistarr_server::db::sources::SourceReason;
+    /// let r = SourceReason::no_match(0.6, None);
+    /// assert_eq!(r, SourceReason::NoMatch { percent: 60, suggested: None });
+    /// ```
+    #[must_use]
+    pub fn no_match(threshold: f32, suggested: Option<PlatformId>) -> Self {
+        // The threshold is validated to lie in 0..=1, so the percent fits.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let percent = (threshold.clamp(0.0, 1.0) * 100.0).round() as u32;
+        Self::NoMatch { percent, suggested }
+    }
+}
+
+impl rusqlite::types::ToSql for SourceReason {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        serde_json::to_string(self)
+            .map(rusqlite::types::ToSqlOutput::from)
+            .map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+    }
+}
+
+impl rusqlite::types::FromSql for SourceReason {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        sql::json_from_sql("sources.reason", value)
     }
 }
 
@@ -142,8 +147,9 @@ pub struct SourceRow {
     pub bind_score: Option<f64>,
     /// Lifecycle state.
     pub state: SourceState,
-    /// Why the source is resolving or unbound, for the user.
-    pub reason: Option<String>,
+    /// Why the source is resolving or unbound; `http` words it.
+    #[serde(skip)]
+    pub reason: Option<SourceReason>,
     /// `none`, `client` or `ratio:N`.
     pub seed_policy: String,
     /// Files in the torrent.
@@ -238,7 +244,7 @@ pub struct NewSource<'a> {
     /// Initial state.
     pub state: SourceState,
     /// Why it is in that state, if the user should know.
-    pub reason: Option<&'a str>,
+    pub reason: Option<SourceReason>,
     /// Unix seconds.
     pub added_at: i64,
 }
@@ -251,38 +257,27 @@ const COLUMNS: &str = "s.id, s.infohash, s.display_name, s.origin_file, s.platfo
              WHERE c.source_id = f.source_id AND c.file_index = f.file_index))),
     s.suggested_platform_id, s.user_binding, s.bind_pending";
 
-/// Reads a non-negative integer column; SQLite stores it as `i64`.
-fn uint(r: &Row<'_>, i: usize) -> rusqlite::Result<u64> {
-    Ok(u64::try_from(r.get::<_, i64>(i)?).unwrap_or(0))
-}
-
 /// Reads a `client_id` column; text that is not an infohash names no torrent.
 pub(crate) fn client_id(r: &Row<'_>, i: usize) -> rusqlite::Result<Option<ClientTorrentId>> {
     Ok(r.get::<_, Option<String>>(i)?.and_then(|s| s.parse().ok()))
 }
 
-/// A size or count as SQLite stores it.
-fn sql_int(n: u64) -> i64 {
-    i64::try_from(n).unwrap_or(i64::MAX)
-}
-
 fn from_row(r: &Row<'_>) -> rusqlite::Result<SourceRow> {
-    let state: String = r.get(6)?;
     Ok(SourceRow {
-        id: SourceId(r.get(0)?),
+        id: r.get(0)?,
         infohash: r.get(1)?,
         display_name: r.get(2)?,
         origin_file: r.get(3)?,
         platform_id: r.get::<_, Option<String>>(4)?.map(PlatformId),
         bind_score: r.get(5)?,
-        state: SourceState::parse(&state).unwrap_or(SourceState::Disabled),
+        state: r.get(6)?,
         reason: r.get(7)?,
         seed_policy: r.get(8)?,
-        file_count: uint(r, 9)?,
-        total_size: uint(r, 10)?,
+        file_count: sql::get_u64(r, 9)?,
+        total_size: sql::get_u64(r, 10)?,
         client_id: client_id(r, 11)?,
         added_at: r.get(12)?,
-        matched_count: uint(r, 13)?,
+        matched_count: sql::get_u64(r, 13)?,
         suggested_platform_id: r.get::<_, Option<String>>(14)?.map(PlatformId),
         user_binding: r.get(15)?,
         pending_binding: r
@@ -305,7 +300,7 @@ pub fn insert(conn: &Connection, s: &NewSource<'_>) -> Result<SourceId> {
             s.infohash,
             s.display_name,
             s.origin_file,
-            s.state.as_str(),
+            s.state,
             s.reason,
             s.added_at
         ],
@@ -322,7 +317,7 @@ pub fn get(conn: &Connection, id: SourceId) -> Result<Option<SourceRow>> {
     Ok(conn
         .query_row(
             &format!("SELECT {COLUMNS} FROM sources s WHERE s.id = ?1"),
-            [id.0],
+            [id],
             from_row,
         )
         .optional()?)
@@ -348,15 +343,17 @@ pub fn find_by_infohash(conn: &Connection, infohash: &str) -> Result<Option<Sour
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn list(conn: &Connection, limit: u32, offset: u32) -> Result<(Vec<SourceRow>, u64)> {
-    let total = conn.query_row("SELECT COUNT(*) FROM sources", [], |r| uint(r, 0))?;
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {COLUMNS} FROM sources s ORDER BY s.id LIMIT ?1 OFFSET ?2"
-    ))?;
-    let rows = stmt
-        .query_map(params![limit, offset], from_row)?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok((rows, total))
+pub fn list(conn: &Connection, page: Page) -> Result<Paged<SourceRow>> {
+    sql::snapshot(conn, |conn| {
+        let total = conn.query_row("SELECT COUNT(*) FROM sources", [], |r| sql::get_u64(r, 0))?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLUMNS} FROM sources s ORDER BY s.id LIMIT ?1 OFFSET ?2"
+        ))?;
+        let items = stmt
+            .query_map(params![page.limit, page.offset], from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Paged { items, total })
+    })
 }
 
 /// Every source in `resolving`, each with whether the client already has it.
@@ -369,7 +366,7 @@ pub fn list_resolving(conn: &Connection) -> Result<Vec<(SourceId, bool)>> {
         "SELECT id, client_id IS NOT NULL FROM sources WHERE state = 'resolving' ORDER BY id",
     )?;
     let ids = stmt
-        .query_map([], |r| Ok((SourceId(r.get(0)?), r.get(1)?)))?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(ids)
 }
@@ -383,11 +380,11 @@ pub fn set_state(
     conn: &Connection,
     id: SourceId,
     state: SourceState,
-    reason: Option<&str>,
+    reason: Option<&SourceReason>,
 ) -> Result<()> {
     conn.execute(
         "UPDATE sources SET state = ?2, reason = ?3 WHERE id = ?1",
-        params![id.0, state.as_str(), reason],
+        params![id, state, reason],
     )?;
     Ok(())
 }
@@ -404,7 +401,7 @@ pub fn set_suggestion(
 ) -> Result<()> {
     conn.execute(
         "UPDATE sources SET suggested_platform_id = ?2 WHERE id = ?1",
-        params![id.0, platform.map(|p| p.0.as_str())],
+        params![id, platform.map(|p| p.0.as_str())],
     )?;
     Ok(())
 }
@@ -418,7 +415,7 @@ pub fn set_suggestion(
 pub fn set_user_binding(conn: &Connection, id: SourceId, chosen: bool) -> Result<()> {
     conn.execute(
         "UPDATE sources SET user_binding = ?2 WHERE id = ?1",
-        params![id.0, chosen],
+        params![id, chosen],
     )?;
     Ok(())
 }
@@ -432,7 +429,7 @@ pub fn set_user_binding(conn: &Connection, id: SourceId, chosen: bool) -> Result
 pub fn request_binding(conn: &Connection, id: SourceId, choice: &BindChoice) -> Result<()> {
     conn.execute(
         "UPDATE sources SET bind_pending = ?2, user_binding = ?3 WHERE id = ?1",
-        params![id.0, choice.to_text(), *choice != BindChoice::Automatic],
+        params![id, choice.to_text(), *choice != BindChoice::Automatic],
     )?;
     Ok(())
 }
@@ -446,15 +443,12 @@ pub fn take_binding(conn: &Connection, id: SourceId) -> Result<Option<BindChoice
     let text: Option<String> = conn
         .query_row(
             "SELECT bind_pending FROM sources WHERE id = ?1",
-            [id.0],
+            [id],
             |r| r.get(0),
         )
         .optional()?
         .flatten();
-    conn.execute(
-        "UPDATE sources SET bind_pending = NULL WHERE id = ?1",
-        [id.0],
-    )?;
+    conn.execute("UPDATE sources SET bind_pending = NULL WHERE id = ?1", [id])?;
     Ok(text.as_deref().and_then(BindChoice::parse))
 }
 
@@ -471,10 +465,7 @@ pub fn list_unbound(conn: &Connection) -> Result<Vec<(SourceId, Option<PlatformI
     )?;
     let rows = stmt
         .query_map([], |r| {
-            Ok((
-                SourceId(r.get(0)?),
-                r.get::<_, Option<String>>(1)?.map(PlatformId),
-            ))
+            Ok((r.get(0)?, r.get::<_, Option<String>>(1)?.map(PlatformId)))
         })?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
@@ -489,12 +480,12 @@ pub fn list_on_platforms(conn: &Connection, platforms: &[PlatformId]) -> Result<
     let mut stmt = conn.prepare_cached(
         "SELECT id FROM sources WHERE platform_id = ?1 AND state != 'resolving' ORDER BY id",
     )?;
-    let mut out = Vec::new();
+    let mut out: Vec<SourceId> = Vec::new();
     for p in platforms {
-        let ids = stmt.query_map([&p.0], |r| r.get(0).map(SourceId))?;
+        let ids = stmt.query_map([&p.0], |r| r.get::<_, SourceId>(0))?;
         out.extend(ids.collect::<rusqlite::Result<Vec<_>>>()?);
     }
-    out.sort_unstable_by_key(|s| s.0);
+    out.sort_unstable();
     out.dedup();
     Ok(out)
 }
@@ -509,7 +500,7 @@ pub fn list_mapped(conn: &Connection) -> Result<Vec<SourceId>> {
         "SELECT id FROM sources WHERE platform_id IS NOT NULL AND state != 'resolving' ORDER BY id",
     )?;
     let ids = stmt
-        .query_map([], |r| r.get(0).map(SourceId))?
+        .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(ids)
 }
@@ -526,7 +517,7 @@ pub fn list_in_client(conn: &Connection) -> Result<Vec<(SourceId, ClientTorrentI
     )?;
     let rows = stmt
         .query_map([], |r| {
-            let (id, policy) = (SourceId(r.get(0)?), r.get::<_, String>(2)?);
+            let (id, policy) = (r.get(0)?, r.get::<_, String>(2)?);
             let seed = seed_from_text(&policy).unwrap_or(SeedPolicy::None);
             Ok(client_id(r, 1)?.map(|cid| (id, cid, seed)))
         })?
@@ -542,7 +533,7 @@ pub fn list_in_client(conn: &Connection) -> Result<Vec<(SourceId, ClientTorrentI
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn map_stamp(conn: &Connection, id: SourceId) -> Result<Option<String>> {
     Ok(conn
-        .query_row("SELECT map_stamp FROM sources WHERE id = ?1", [id.0], |r| {
+        .query_row("SELECT map_stamp FROM sources WHERE id = ?1", [id], |r| {
             r.get(0)
         })
         .optional()?
@@ -562,7 +553,7 @@ pub fn mapped_against(
     Ok(conn
         .query_row(
             "SELECT platform_id, map_stamp FROM sources WHERE id = ?1 AND platform_id IS NOT NULL",
-            [id.0],
+            [id],
             |r| Ok((PlatformId(r.get(0)?), r.get(1)?)),
         )
         .optional()?)
@@ -576,7 +567,7 @@ pub fn mapped_against(
 pub fn set_map_stamp(conn: &Connection, id: SourceId, stamp: Option<&str>) -> Result<()> {
     conn.execute(
         "UPDATE sources SET map_stamp = ?2 WHERE id = ?1",
-        params![id.0, stamp],
+        params![id, stamp],
     )?;
     Ok(())
 }
@@ -602,10 +593,10 @@ pub fn platform_has_dat(conn: &Connection, platform: &PlatformId) -> Result<bool
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn set_reason(conn: &Connection, id: SourceId, reason: Option<&str>) -> Result<()> {
+pub fn set_reason(conn: &Connection, id: SourceId, reason: Option<&SourceReason>) -> Result<()> {
     conn.execute(
         "UPDATE sources SET reason = ?2 WHERE id = ?1",
-        params![id.0, reason],
+        params![id, reason],
     )?;
     Ok(())
 }
@@ -618,7 +609,7 @@ pub fn set_reason(conn: &Connection, id: SourceId, reason: Option<&str>) -> Resu
 pub fn set_seed_policy(conn: &Connection, id: SourceId, policy: &SeedPolicy) -> Result<()> {
     conn.execute(
         "UPDATE sources SET seed_policy = ?2 WHERE id = ?1",
-        params![id.0, seed_to_text(policy)],
+        params![id, seed_to_text(policy)],
     )?;
     Ok(())
 }
@@ -635,7 +626,7 @@ pub fn set_client_id(
 ) -> Result<()> {
     conn.execute(
         "UPDATE sources SET client_id = ?2 WHERE id = ?1",
-        params![id.0, client_id.map(|c| c.to_string())],
+        params![id, client_id.map(|c| c.to_string())],
     )?;
     Ok(())
 }
@@ -653,7 +644,7 @@ pub fn set_binding(
 ) -> Result<()> {
     conn.execute(
         "UPDATE sources SET platform_id = ?2, bind_score = ?3 WHERE id = ?1",
-        params![id.0, platform.map(|p| p.0.as_str()), score],
+        params![id, platform.map(|p| p.0.as_str()), score],
     )?;
     Ok(())
 }
@@ -666,35 +657,31 @@ pub fn set_binding(
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn replace_files(conn: &Connection, id: SourceId, files: &[TorrentFile]) -> Result<()> {
-    let proofs: Vec<(u32, String, i64, i64)> = conn
+    let proofs: Vec<(u32, String, i64, RomId)> = conn
         .prepare_cached(
             "SELECT file_index, path, size, rom_id FROM torrent_files
              WHERE source_id = ?1 AND confidence = 'hash' AND rom_id IS NOT NULL",
         )?
-        .query_map([id.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    conn.execute("DELETE FROM torrent_files WHERE source_id = ?1", [id.0])?;
+    conn.execute("DELETE FROM torrent_files WHERE source_id = ?1", [id])?;
     let mut stmt = conn.prepare_cached(
         "INSERT INTO torrent_files (source_id, file_index, path, size) VALUES (?1, ?2, ?3, ?4)",
     )?;
     for f in files {
-        stmt.execute(params![id.0, f.index, f.path, sql_int(f.size)])?;
+        stmt.execute(params![id, f.index, f.path, sql::to_i64(f.size)])?;
     }
     let mut proven = conn.prepare_cached(
         "UPDATE torrent_files SET rom_id = ?5, confidence = 'hash'
          WHERE source_id = ?1 AND file_index = ?2 AND path = ?3 AND size = ?4",
     )?;
     for (index, path, size, rom) in proofs {
-        proven.execute(params![id.0, index, path, size, rom])?;
+        proven.execute(params![id, index, path, size, rom])?;
     }
     let total: u64 = files.iter().map(|f| f.size).sum();
     conn.execute(
         "UPDATE sources SET file_count = ?2, total_size = ?3 WHERE id = ?1",
-        params![
-            id.0,
-            i64::try_from(files.len()).unwrap_or(i64::MAX),
-            sql_int(total)
-        ],
+        params![id, sql::to_i64(files.len()), sql::to_i64(total)],
     )?;
     Ok(())
 }
@@ -708,7 +695,7 @@ pub fn clear_matches(conn: &Connection, id: SourceId) -> Result<()> {
     conn.execute(
         "UPDATE torrent_files SET rom_id = NULL, confidence = NULL
          WHERE source_id = ?1 AND rom_id IS NOT NULL",
-        [id.0],
+        [id],
     )?;
     Ok(())
 }
@@ -729,10 +716,10 @@ pub fn set_matches(
     )?;
     for (index, rom, confidence) in matches {
         stmt.execute(params![
-            id.0,
+            id,
             index,
-            rom.map(|r| r.0),
-            confidence_text(*confidence)
+            rom.map(|r| RomId(r.0)),
+            MatchConfidence::of(*confidence)
         ])?;
     }
     Ok(())
@@ -748,11 +735,11 @@ pub fn torrent_files(conn: &Connection, id: SourceId) -> Result<Vec<TorrentFile>
         "SELECT file_index, path, size FROM torrent_files WHERE source_id = ?1 ORDER BY file_index",
     )?;
     let files = stmt
-        .query_map([id.0], |r| {
+        .query_map([id], |r| {
             Ok(TorrentFile {
                 index: r.get(0)?,
                 path: r.get(1)?,
-                size: uint(r, 2)?,
+                size: sql::get_u64(r, 2)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -766,7 +753,7 @@ pub fn torrent_files(conn: &Connection, id: SourceId) -> Result<Vec<TorrentFile>
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn delete(conn: &Connection, id: SourceId) -> Result<bool> {
-    Ok(conn.execute("DELETE FROM sources WHERE id = ?1", [id.0])? > 0)
+    Ok(conn.execute("DELETE FROM sources WHERE id = ?1", [id])? > 0)
 }
 
 /// Downloads of the source that are queued, transferring, checking or importing.
@@ -776,10 +763,12 @@ pub fn delete(conn: &Connection, id: SourceId) -> Result<bool> {
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn open_download_count(conn: &Connection, id: SourceId) -> Result<u64> {
     Ok(conn.query_row(
-        "SELECT COUNT(*) FROM downloads WHERE source_id = ?1
-           AND state IN ('queued', 'transferring', 'checking', 'importing')",
-        [id.0],
-        |r| uint(r, 0),
+        &format!(
+            "SELECT COUNT(*) FROM downloads WHERE source_id = ?1 AND state IN {}",
+            DownloadState::SELECTED_SQL
+        ),
+        [id],
+        |r| sql::get_u64(r, 0),
     )?)
 }
 
@@ -827,7 +816,7 @@ pub fn key_batch(conn: &Connection) -> Result<usize> {
         conn.prepare_cached("SELECT id, name FROM roms WHERE match_name IS NULL LIMIT ?1")?;
     let mut update =
         conn.prepare_cached("UPDATE roms SET match_name = ?2, match_base = ?3 WHERE id = ?1")?;
-    let batch: Vec<(i64, String)> = select
+    let batch: Vec<(RomId, String)> = select
         .query_map([KEY_BATCH], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     for (id, name) in &batch {
@@ -880,7 +869,7 @@ impl DatIndex for SqlDatIndex<'_> {
              WHERE r.match_base = ?1 AND r.size = ?2 AND t.retired = 0
                AND NOT EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.flag = 'bios')
              ORDER BY r.id",
-            params![base_name, sql_int(size)],
+            params![base_name, sql::to_i64(size)],
         )
     }
 }
@@ -890,6 +879,7 @@ impl DatIndex for SqlDatIndex<'_> {
 pub mod fixtures {
     use rusqlite::{params, Connection};
 
+    use crate::db::ids::{RomId, TitleId};
     use crate::error::Result;
 
     /// Inserts a DAT version, a title with `flags` and one rom, returning the rom id.
@@ -903,7 +893,7 @@ pub mod fixtures {
         rom_name: &str,
         size: u64,
         flags: &[&str],
-    ) -> Result<i64> {
+    ) -> Result<RomId> {
         conn.execute(
             "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
              VALUES (?1, ?1 || ' test', '1', 'test.dat', 0, 0)
@@ -921,14 +911,14 @@ pub mod fixtures {
              VALUES (?1, ?2, ?3, ?3)",
             params![platform, dat, title],
         )?;
-        let title_id = conn.last_insert_rowid();
+        let title_id = TitleId(conn.last_insert_rowid());
         let flags: Vec<String> = flags.iter().map(|f| (*f).to_owned()).collect();
-        crate::db::titles::set_flags(conn, crate::db::titles::TitleId(title_id), &flags)?;
+        crate::db::titles::set_flags(conn, title_id, &flags)?;
         conn.execute(
             "INSERT INTO roms (title_id, name, size, status) VALUES (?1, ?2, ?3, 'good')",
-            params![title_id, rom_name, super::sql_int(size)],
+            params![title_id, rom_name, crate::db::sql::to_i64(size)],
         )?;
-        Ok(conn.last_insert_rowid())
+        Ok(RomId(conn.last_insert_rowid()))
     }
 }
 
@@ -938,8 +928,13 @@ mod tests {
     use crate::db::source_detail::{self, FileRow};
     use crate::db::testutil;
 
-    fn files(c: &Connection, id: SourceId, limit: u32, offset: u32) -> Result<(Vec<FileRow>, u64)> {
-        source_detail::files(c, id, &source_detail::FileQuery::default(), limit, offset)
+    fn files(c: &Connection, id: SourceId, limit: u32, offset: u32) -> Result<Paged<FileRow>> {
+        source_detail::files(
+            c,
+            id,
+            &source_detail::FileQuery::default(),
+            Page { limit, offset },
+        )
     }
 
     fn conn() -> Connection {
@@ -1014,9 +1009,16 @@ mod tests {
         let found = find_by_infohash(&c, &"02".repeat(20)).expect("find");
         assert_eq!(found.map(|r| r.id), Some(b));
         assert!(get(&c, SourceId(99)).expect("get").is_none());
-        let (page, total) = list(&c, 1, 1).expect("list");
-        assert_eq!((page.len(), total), (1, 2));
-        assert_eq!(page[0].id, b);
+        let page = list(
+            &c,
+            Page {
+                limit: 1,
+                offset: 1,
+            },
+        )
+        .expect("list");
+        assert_eq!((page.items.len(), page.total), (1, 2));
+        assert_eq!(page.items[0].id, b);
         assert_eq!(list_resolving(&c).expect("resolving"), [(b, false)]);
         let cid = ClientTorrentId::new(mistarr_core::InfoHash::from_bytes([0x0b; 20]));
         set_client_id(&c, b, Some(cid)).expect("client");
@@ -1037,13 +1039,13 @@ mod tests {
     fn updates_touch_one_column_each() {
         let c = conn();
         let id = insert(&c, &new(&"03".repeat(20), SourceState::Resolving)).expect("insert");
-        set_reason(&c, id, Some("waiting")).expect("reason");
+        set_reason(&c, id, Some(&SourceReason::WaitingMetadata)).expect("reason");
         let cid = ClientTorrentId::new(mistarr_core::InfoHash::from_bytes([0xab; 20]));
         set_client_id(&c, id, Some(cid)).expect("client");
         set_seed_policy(&c, id, &SeedPolicy::Ratio { ratio: 2.0 }).expect("seed");
         set_binding(&c, id, Some(&nes()), Some(0.75)).expect("bind");
         let row = get(&c, id).expect("get").expect("row");
-        assert_eq!(row.reason.as_deref(), Some("waiting"));
+        assert_eq!(row.reason, Some(SourceReason::WaitingMetadata));
         assert_eq!(row.client_id, Some(cid));
         assert_eq!(row.seed_policy, "ratio:2.0");
         assert_eq!(row.platform_id, Some(nes()));
@@ -1053,6 +1055,9 @@ mod tests {
         assert_eq!((row.state, row.reason), (SourceState::Disabled, None));
         assert!(platform_exists(&c, &nes()).expect("exists"));
         assert!(!platform_exists(&c, &PlatformId("none".into())).expect("exists"));
+        c.execute("UPDATE sources SET reason = 'prose' WHERE id = ?1", [id])
+            .expect("corrupt");
+        assert!(matches!(get(&c, id), Err(crate::Error::Stored { .. })));
     }
 
     #[test]
@@ -1069,7 +1074,7 @@ mod tests {
             &c,
             id,
             &[
-                (0, Some(RomRef(rom)), Confidence::Name),
+                (0, Some(RomRef(rom.0)), Confidence::Name),
                 (1, None, Confidence::Unmatched),
             ],
         )
@@ -1079,22 +1084,19 @@ mod tests {
             (row.file_count, row.matched_count, row.total_size),
             (2, 1, 20)
         );
-        let (rows, total) = files(&c, id, 10, 0).expect("files");
+        let Paged { items: rows, total } = files(&c, id, 10, 0).expect("files");
         assert_eq!(total, 2);
         assert_eq!(rows[0].rom_name.as_deref(), Some("Example Quest (USA).nes"));
-        assert_eq!(rows[0].confidence.as_deref(), Some("name"));
+        assert_eq!(rows[0].confidence, Some(MatchConfidence::Name));
         assert!(rows[0].title_id.is_some());
-        assert_eq!(
-            (rows[1].rom_id, rows[1].confidence.as_deref()),
-            (None, None)
-        );
+        assert_eq!((rows[1].rom_id, rows[1].confidence), (None, None));
         assert_eq!(torrent_files(&c, id).expect("list"), list);
         crate::db::candidates::prove(&c, id, 0, rom).expect("prove");
         replace_files(&c, id, &list).expect("replace");
-        let rows = files(&c, id, 10, 0).expect("files").0;
+        let rows = files(&c, id, 10, 0).expect("files").items;
         assert_eq!(
-            rows[0].confidence.as_deref(),
-            Some("hash"),
+            rows[0].confidence,
+            Some(MatchConfidence::Hash),
             "a proof survives"
         );
         clear_matches(&c, id).expect("clear");
@@ -1106,7 +1108,7 @@ mod tests {
         assert_eq!(open_download_count(&c, id).expect("downloads"), 0);
         assert!(delete(&c, id).expect("delete"));
         assert!(!delete(&c, id).expect("delete again"));
-        assert_eq!(files(&c, id, 10, 0).expect("files").1, 0);
+        assert_eq!(files(&c, id, 10, 0).expect("files").total, 0);
     }
 
     #[test]
@@ -1121,11 +1123,11 @@ mod tests {
         let index = SqlDatIndex::new(&c);
         assert_eq!(
             index.by_normalized_name("example quest (usa)"),
-            [(nes(), RomRef(a))]
+            [(nes(), RomRef(a.0))]
         );
         assert_eq!(
             index.by_base_name_and_size("other tale", 32),
-            [(PlatformId("snes".into()), RomRef(b))]
+            [(PlatformId("snes".into()), RomRef(b.0))]
         );
         assert!(index.by_base_name_and_size("other tale", 33).is_empty());
         assert!(index.by_normalized_name("boot code (world)").is_empty());
@@ -1185,9 +1187,14 @@ mod tests {
         for s in ["resolving", "unbound", "bound", "disabled"] {
             assert_eq!(SourceState::parse(s).map(SourceState::as_str), Some(s));
         }
-        assert_eq!(confidence_text(Confidence::Name), Some("name"));
-        assert_eq!(confidence_text(Confidence::Fuzzy), Some("fuzzy"));
-        assert_eq!(confidence_text(Confidence::Size), Some("size"));
+        assert_eq!(
+            MatchConfidence::of(Confidence::Name),
+            Some(MatchConfidence::Name)
+        );
+        assert_eq!(
+            MatchConfidence::of(Confidence::Size),
+            Some(MatchConfidence::Size)
+        );
     }
 
     #[test]

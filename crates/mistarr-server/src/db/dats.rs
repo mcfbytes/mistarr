@@ -1,24 +1,15 @@
 //! The `dat_versions` table and supersession; see `docs/ARCHITECTURE.md` "DAT import".
 
-use std::fmt;
-
 use mistarr_core::dat::{family_key, version_order};
 use mistarr_core::PlatformId;
 use rusqlite::{params, Connection, OptionalExtension, Row};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+
+use super::downloads::DownloadState;
+use super::ids::DatVersionId;
+use super::sql::{self, Page, Paged};
 
 use crate::error::Result;
-
-/// A `dat_versions.id`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct DatVersionId(pub i64);
-
-impl fmt::Display for DatVersionId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.fmt(f)
-    }
-}
 
 /// One `dat_versions` row as the API returns it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -43,10 +34,32 @@ pub struct DatVersionRow {
     pub retired: bool,
     /// The family key of `dat_name`: versions and forms of one list share it.
     pub family: String,
-    /// Why the version is not current, when it is not.
-    pub reason: Option<String>,
+    /// Why the version is not current, when it is not; `http` words it.
+    #[serde(skip)]
+    pub reason: Option<DatReason>,
     /// For an unbound version, the platforms its family is current on, to bind it to one.
     pub suggested: Vec<PlatformId>,
+}
+
+/// Why a DAT version is not current.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DatReason {
+    /// Retired through `DELETE /dats/{id}`.
+    Removed,
+    /// A version loaded after it superseded it.
+    Replaced(DatRef),
+    /// It was loaded after the version that superseded it, which is newer and stays current.
+    Older(DatRef),
+}
+
+/// The version a [`DatReason`] names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DatRef {
+    /// Its `dat_name`, `None` when the same as the superseded version's.
+    pub dat_name: Option<String>,
+    /// Its version string.
+    pub version: String,
 }
 
 const COLUMNS: &str = "d.id, d.platform_id, d.dat_name, d.version, d.source_file, d.loaded_at,
@@ -66,30 +79,29 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<DatVersionRow> {
         None => None,
     };
     let reason = if retired {
-        Some("Removed; its games are no longer listed".to_owned())
+        Some(DatReason::Removed)
     } else {
         by.map(|(name, version, at)| {
-            let other = if name == dat_name {
-                format!("version {version}")
-            } else {
-                format!("{name} version {version}")
+            let other = DatRef {
+                dat_name: (name != dat_name).then_some(name),
+                version,
             };
             if loaded_at > at {
-                format!("Older than {other}, which stays current")
+                DatReason::Older(other)
             } else {
-                format!("Replaced by {other}")
+                DatReason::Replaced(other)
             }
         })
     };
     Ok(DatVersionRow {
-        id: DatVersionId(r.get(0)?),
+        id: r.get(0)?,
         platform_id: r.get::<_, Option<String>>(1)?.map(PlatformId),
         dat_name,
         version: r.get(3)?,
         source_file: r.get(4)?,
         loaded_at,
-        superseded_by: r.get::<_, Option<i64>>(6)?.map(DatVersionId),
-        game_count: unsigned(r.get(7)?),
+        superseded_by: r.get(6)?,
+        game_count: sql::get_u64(r, 7)?,
         retired,
         family: r.get(9)?,
         reason,
@@ -131,16 +143,16 @@ pub struct VersionPlan {
 /// What [`upsert_version`] reads before it writes.
 struct Decision {
     family: String,
-    existing: Option<i64>,
+    existing: Option<DatVersionId>,
     inherited: Option<String>,
     platform: Option<String>,
     current: bool,
-    superseded_by: Option<i64>,
+    superseded_by: Option<DatVersionId>,
 }
 
 fn decide(conn: &Connection, v: &NewVersion<'_>) -> Result<Decision> {
     let family = family_key(v.dat_name).0;
-    let existing: Option<(i64, Option<String>)> = conn
+    let existing: Option<(DatVersionId, Option<String>)> = conn
         .query_row(
             "SELECT id, platform_id FROM dat_versions
              WHERE dat_name = ?1 AND version = ?2 AND source = 'dat'",
@@ -155,7 +167,7 @@ fn decide(conn: &Connection, v: &NewVersion<'_>) -> Result<Decision> {
     };
     let (existing, stored) = existing.map_or((None, None), |(id, p)| (Some(id), p));
     let platform = inherited.clone().or(stored);
-    let newest: Option<(i64, String)> = conn
+    let newest: Option<(DatVersionId, String)> = conn
         .query_row(
             "SELECT id, version FROM dat_versions
              WHERE family = ?1 AND platform_id IS ?2 AND superseded_by IS NULL AND retired = 0
@@ -275,7 +287,7 @@ pub fn upsert_version(conn: &Connection, v: &NewVersion<'_>) -> Result<VersionPl
                 family
             ],
         )?;
-        conn.last_insert_rowid()
+        DatVersionId(conn.last_insert_rowid())
     };
     let platform_id: Option<String> = conn.query_row(
         "SELECT platform_id FROM dat_versions WHERE id = ?1",
@@ -291,7 +303,7 @@ pub fn upsert_version(conn: &Connection, v: &NewVersion<'_>) -> Result<VersionPl
         )?;
     }
     Ok(VersionPlan {
-        id: DatVersionId(id),
+        id,
         platform_id: platform_id.map(PlatformId),
         current,
     })
@@ -315,7 +327,7 @@ pub fn upsert_version(conn: &Connection, v: &NewVersion<'_>) -> Result<VersionPl
 pub fn set_game_count(conn: &Connection, id: DatVersionId, count: u64) -> Result<()> {
     conn.execute(
         "UPDATE dat_versions SET game_count = ?2 WHERE id = ?1",
-        params![id.0, i64::try_from(count).unwrap_or(i64::MAX)],
+        params![id, sql::to_i64(count)],
     )?;
     Ok(())
 }
@@ -329,7 +341,8 @@ pub fn set_game_count(conn: &Connection, id: DatVersionId, count: u64) -> Result
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::dats::{self, DatVersionId};
+/// use mistarr_server::db::dats;
+/// use mistarr_server::db::ids::DatVersionId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert_eq!(dats::begin_load(&conn, DatVersionId(1)).unwrap(), 0);
@@ -337,7 +350,7 @@ pub fn set_game_count(conn: &Connection, id: DatVersionId, count: u64) -> Result
 pub fn begin_load(conn: &Connection, id: DatVersionId) -> Result<usize> {
     Ok(conn.execute(
         "UPDATE titles SET retired = 2 WHERE dat_version_id = ?1 AND retired = 0 AND source = 'dat'",
-        [id.0],
+        [id],
     )?)
 }
 
@@ -363,11 +376,11 @@ pub fn retire_absent(conn: &Connection, id: DatVersionId) -> Result<usize> {
            SELECT o.id FROM dat_versions o
            JOIN dat_versions n ON n.family = o.family AND n.platform_id IS o.platform_id
            WHERE n.id = ?1 AND o.id != ?1 AND o.source = 'dat')",
-        [id.0],
+        [id],
     )?;
     let pending = conn.execute(
         "UPDATE titles SET retired = 1, is_1g1r_pick = 0 WHERE dat_version_id = ?1 AND retired = 2 AND source = 'dat'",
-        [id.0],
+        [id],
     )?;
     Ok(others + pending)
 }
@@ -381,7 +394,8 @@ pub fn retire_absent(conn: &Connection, id: DatVersionId) -> Result<usize> {
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::dats::{self, DatVersionId};
+/// use mistarr_server::db::dats;
+/// use mistarr_server::db::ids::DatVersionId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert!(dats::retire(&conn, DatVersionId(1), 0).unwrap().is_none());
@@ -391,22 +405,23 @@ pub fn retire(conn: &Connection, id: DatVersionId, now: i64) -> Result<Option<Da
     let Some(row) = get(conn, id)? else {
         return Ok(None);
     };
-    conn.execute("UPDATE dat_versions SET retired = 1 WHERE id = ?1", [id.0])?;
+    conn.execute("UPDATE dat_versions SET retired = 1 WHERE id = ?1", [id])?;
     conn.execute(
         &format!(
             "UPDATE downloads SET state = 'cancelled', updated_at = ?2
-             WHERE state IN ('wanted', 'queued') AND title_id IN ({OWN})"
+             WHERE state IN {} AND title_id IN ({OWN})",
+            DownloadState::UNSTARTED_SQL
         ),
-        params![id.0, now],
+        params![id, now],
     )?;
     conn.execute(
         &format!("UPDATE roms SET retired = 1 WHERE title_id IN ({OWN})"),
-        [id.0],
+        [id],
     )?;
     conn.execute(
         "UPDATE titles SET retired = 1, is_1g1r_pick = 0, wanted = 0
          WHERE dat_version_id = ?1 AND source = 'dat'",
-        [id.0],
+        [id],
     )?;
     Ok(Some(row))
 }
@@ -418,7 +433,8 @@ pub fn retire(conn: &Connection, id: DatVersionId, now: i64) -> Result<Option<Da
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::dats::{self, DatVersionId};
+/// use mistarr_server::db::dats;
+/// use mistarr_server::db::ids::DatVersionId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert!(dats::get(&conn, DatVersionId(1)).unwrap().is_none());
@@ -427,7 +443,7 @@ pub fn get(conn: &Connection, id: DatVersionId) -> Result<Option<DatVersionRow>>
     Ok(conn
         .query_row(
             &format!("SELECT {COLUMNS} WHERE d.id = ?1 AND d.source = 'dat'"),
-            [id.0],
+            [id],
             from_row,
         )
         .optional()?)
@@ -442,23 +458,27 @@ pub fn get(conn: &Connection, id: DatVersionId) -> Result<Option<DatVersionRow>>
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let (items, total) = mistarr_server::db::dats::list(&conn, 10, 0).unwrap();
-/// assert!(items.is_empty() && total == 0);
+/// use mistarr_server::db::sql::Page;
+/// let page = Page { limit: 10, offset: 0 };
+/// let got = mistarr_server::db::dats::list(&conn, page).unwrap();
+/// assert!(got.items.is_empty() && got.total == 0);
 /// ```
-pub fn list(conn: &Connection, limit: u32, offset: u32) -> Result<(Vec<DatVersionRow>, u64)> {
-    let total: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM dat_versions WHERE source = 'dat'",
-        [],
-        |r| r.get(0),
-    )?;
-    let mut stmt = conn.prepare(&format!(
-        "SELECT {COLUMNS} WHERE d.source = 'dat' ORDER BY d.loaded_at DESC, d.id DESC
-         LIMIT ?1 OFFSET ?2"
-    ))?;
-    let rows = stmt
-        .query_map(params![limit, offset], from_row)?
-        .collect::<rusqlite::Result<_>>()?;
-    Ok((rows, unsigned(total)))
+pub fn list(conn: &Connection, page: Page) -> Result<Paged<DatVersionRow>> {
+    sql::snapshot(conn, |conn| {
+        let total = conn.query_row(
+            "SELECT COUNT(*) FROM dat_versions WHERE source = 'dat'",
+            [],
+            |r| sql::get_u64(r, 0),
+        )?;
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {COLUMNS} WHERE d.source = 'dat' ORDER BY d.loaded_at DESC, d.id DESC
+             LIMIT ?1 OFFSET ?2"
+        ))?;
+        let items = stmt
+            .query_map(params![page.limit, page.offset], from_row)?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(Paged { items, total })
+    })
 }
 
 /// Stores the family key of every version whose stored key differs from the current rule;
@@ -478,7 +498,7 @@ pub fn list(conn: &Connection, limit: u32, offset: u32) -> Result<(Vec<DatVersio
 /// assert_eq!(dats::refresh_families(&conn).unwrap(), 0);
 /// ```
 pub fn refresh_families(conn: &Connection) -> Result<usize> {
-    let rows: Vec<(i64, String, String)> = conn
+    let rows: Vec<(DatVersionId, String, String)> = conn
         .prepare("SELECT id, dat_name, family FROM dat_versions")?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<_>>()?;
@@ -508,7 +528,7 @@ pub fn refresh_families(conn: &Connection) -> Result<usize> {
 /// assert!(mistarr_server::db::dats::resolve_families(&conn).unwrap().is_empty());
 /// ```
 pub fn resolve_families(conn: &Connection) -> Result<Vec<PlatformId>> {
-    let live: Vec<(i64, String, Option<String>, String)> = conn
+    let live: Vec<(DatVersionId, String, Option<String>, String)> = conn
         .prepare(
             "SELECT id, family, platform_id, version FROM dat_versions
              WHERE source = 'dat' AND retired = 0 AND superseded_by IS NULL
@@ -552,11 +572,6 @@ pub fn resolve_families(conn: &Connection) -> Result<Vec<PlatformId>> {
     }
     changed.dedup();
     Ok(changed)
-}
-
-/// A non-negative SQLite integer as `u64`.
-fn unsigned(n: i64) -> u64 {
-    u64::try_from(n).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -606,9 +621,16 @@ mod tests {
         let again = upsert_version(&c, &new("3", None, 4)).expect("reload");
         assert_eq!(again.id, v2.id);
         assert!(again.current);
-        let (rows, total) = list(&c, 2, 0).expect("list");
-        assert_eq!(total, 3);
-        assert_eq!(rows[0].id, v2.id, "newest first");
+        let page = list(
+            &c,
+            Page {
+                limit: 2,
+                offset: 0,
+            },
+        )
+        .expect("list");
+        assert_eq!(page.total, 3);
+        assert_eq!(page.items[0].id, v2.id, "newest first");
     }
 
     fn row_of(c: &Connection, id: DatVersionId) -> DatVersionRow {
@@ -648,8 +670,11 @@ mod tests {
             "a refresh supersedes"
         );
         assert_eq!(
-            row_of(&c, first.id).reason.as_deref(),
-            Some("Replaced by version 20260201")
+            row_of(&c, first.id).reason,
+            Some(DatReason::Replaced(DatRef {
+                dat_name: None,
+                version: "20260201".into()
+            }))
         );
         upsert_version(&c, &named(samples, "1", 3)).expect("add-on");
         let replaced = upsert_version(&c, &named(export, "20260301", 4)).expect("export");
@@ -667,8 +692,11 @@ mod tests {
         let row = row_of(&c, late.id);
         assert_eq!(row.superseded_by, Some(replaced.id));
         assert_eq!(
-            row.reason.as_deref(),
-            Some(format!("Older than {export} version 20260301, which stays current").as_str())
+            row.reason,
+            Some(DatReason::Older(DatRef {
+                dat_name: Some(export.into()),
+                version: "20260301".into()
+            }))
         );
         assert_eq!(row.family, "example vendor - example system");
         let other = upsert_version(
@@ -685,10 +713,7 @@ mod tests {
             "a family on another platform supersedes nothing here"
         );
         retire(&c, replaced.id, 7).expect("retire");
-        assert_eq!(
-            row_of(&c, replaced.id).reason.as_deref(),
-            Some("Removed; its games are no longer listed")
-        );
+        assert_eq!(row_of(&c, replaced.id).reason, Some(DatReason::Removed));
         assert!(
             row_of(&c, late.id).superseded_by.is_some(),
             "removing the current version does not bring back an older one"
@@ -802,7 +827,15 @@ mod tests {
         )
         .expect("insert");
         assert_eq!(refresh_families(&c).expect("refresh"), 1);
-        let (rows, _) = list(&c, 10, 0).expect("list");
+        let rows = list(
+            &c,
+            Page {
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .expect("list")
+        .items;
         assert_eq!(rows[0].family, "example");
         assert_eq!(rows[0].reason, None);
     }

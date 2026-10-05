@@ -10,9 +10,10 @@ use mistarr_clients::xmlrpc::Value as Xml;
 use mistarr_server::config::ClientChoice;
 use mistarr_server::db::downloads::{self as rows, DownloadState};
 use mistarr_server::db::sources::fixtures::seed_rom;
+use mistarr_server::db::sql::Page;
 use mistarr_server::events::{Event, EventKind};
 use mistarr_server::jobs::poll::{Cadence, Poller};
-use mistarr_server::jobs::{Job, JobContext, Lane, Scheduler};
+use mistarr_server::jobs::{Job, JobContext, JobKind, Lane, Scheduler};
 use serde_json::{json, Value};
 use tokio::sync::broadcast::Receiver;
 
@@ -86,7 +87,7 @@ async fn drop_source(b: &Booted) {
     let app = &b.running.app;
     eventually("the bind's transfer", || async {
         app.db
-            .read(|c| mistarr_server::db::jobs::count_kind(c, "transfer"))
+            .read(|c| mistarr_server::db::jobs::count_kind(c, JobKind::Transfer))
             .await
             .expect("count")
             > 0
@@ -155,8 +156,8 @@ struct Hold(std::sync::Arc<tokio::sync::Notify>);
 
 #[async_trait::async_trait]
 impl Job for Hold {
-    fn kind(&self) -> &'static str {
-        "hold"
+    fn kind(&self) -> JobKind {
+        JobKind::Deselect
     }
 
     fn lane(&self) -> Lane {
@@ -273,10 +274,18 @@ async fn want_adds_selects_starts_extends_and_polls_through_transmission() {
     assert_eq!(states, [&json!("queued"), &json!("transferring")]);
     let source = app
         .db
-        .read(|c| mistarr_server::db::sources::list(c, 1, 0))
+        .read(|c| {
+            mistarr_server::db::sources::list(
+                c,
+                Page {
+                    limit: 1,
+                    offset: 0,
+                },
+            )
+        })
         .await
         .expect("sources")
-        .0;
+        .items;
     assert_eq!(source[0].client_id.map(|c| c.to_string()), Some(h.clone()));
 
     push_extend(&fake, [true, false, false, false]);
@@ -849,7 +858,9 @@ async fn a_source_with_only_finished_downloads_can_be_deleted() {
     assert_eq!(want(&b, second).await.status, 200);
     wait_state(&b, second, "transferring").await;
 
-    let done = rows::DownloadId(download_of(&b, quest).await["id"].as_i64().expect("id"));
+    let done = mistarr_server::db::ids::DownloadId(
+        download_of(&b, quest).await["id"].as_i64().expect("id"),
+    );
     app.db
         .write(move |c| {
             for to in [DownloadState::Importing, DownloadState::Done] {

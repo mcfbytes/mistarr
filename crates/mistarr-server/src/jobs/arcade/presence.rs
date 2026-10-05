@@ -16,7 +16,8 @@ use rusqlite::Connection;
 use serde_json::json;
 
 use crate::db::arcade as arcade_rows;
-use crate::db::files::{self, FileId, FileRow, FileState, Hashed};
+use crate::db::files::{self, FileRow, FileState, Hashed};
+use crate::db::ids::{FileId, RomId};
 use crate::db::Db;
 use crate::error::Result;
 use crate::jobs::scan::{all_entries, extension, file_meta};
@@ -56,7 +57,7 @@ struct Recheck {
     /// The zip as stated this run.
     zip: Zip,
     /// The zip roms live MRAs give it, lowest first; empty when none names it.
-    roms: Vec<i64>,
+    roms: Vec<RomId>,
     /// Its `zip#member` rows.
     members: Vec<FileRow>,
 }
@@ -67,7 +68,7 @@ struct Changes {
     /// Rows to delete.
     drop: Vec<String>,
     /// Presence rows to write: the zip, and the MRA zip rom it stands for.
-    record: Vec<(Zip, i64)>,
+    record: Vec<(Zip, RomId)>,
     /// Member rows whose hashes still apply: the new mtime.
     restamp: Vec<(FileId, i64)>,
     /// Member rows whose content changed: new size, mtime and CRC32.
@@ -120,7 +121,7 @@ fn stat(games: &Path, dir: &str, name: &str) -> Option<Zip> {
 /// of a live MRA naming it, the lowest of `roms` when written. The row is left alone while
 /// the zip's size and mtime and one of `roms` still match it, so a row `verify_siblings`
 /// promoted under another MRA's rom stays promoted; it is removed when no MRA names the zip.
-fn record(zip: &Zip, roms: &[i64], bare: Option<&FileRow>, out: &mut Changes) {
+fn record(zip: &Zip, roms: &[RomId], bare: Option<&FileRow>, out: &mut Changes) {
     let Some(&first) = roms.first() else {
         if let Some(b) = bare {
             out.drop.push(b.rel_path.clone());
@@ -147,7 +148,7 @@ fn record(zip: &Zip, roms: &[i64], bare: Option<&FileRow>, out: &mut Changes) {
 /// zip and replace any presence row; they are left alone unless the zip's mtime moved.
 fn decide(
     zip: &Zip,
-    roms: &[i64],
+    roms: &[RomId],
     bare: Vec<FileRow>,
     members: Vec<FileRow>,
     out: &mut Changes,
@@ -180,7 +181,7 @@ fn plan_batch(
     db: &Db,
     games: &Path,
     pid: &PlatformId,
-    live: &HashMap<String, Vec<i64>>,
+    live: &HashMap<String, Vec<RomId>>,
     dir: &str,
     names: &[String],
 ) -> Result<Changes> {

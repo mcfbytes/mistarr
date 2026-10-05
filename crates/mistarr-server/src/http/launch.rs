@@ -17,9 +17,10 @@ use tokio::sync::MutexGuard;
 
 use super::ApiError;
 use crate::app::AppState;
+use crate::db::ids::TitleId;
 use crate::db::launch::{self, LaunchTitle};
 use crate::db::platforms;
-use crate::db::titles::TitleId;
+use crate::db::titles::TitleSource;
 use crate::status::{launch_state, LaunchState};
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
@@ -177,7 +178,7 @@ fn plan_title(
     games: &FsPath,
     dir: &FsPath,
 ) -> Result<(Launched, String), ApiError> {
-    if title.source == "mra" {
+    if title.source == TitleSource::Mra {
         let rel = title
             .mra_path
             .as_deref()

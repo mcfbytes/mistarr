@@ -18,17 +18,15 @@ use mistarr_mister::adapter::arcade::mra::{self, zip_location, Mra, MraRom, ZipP
 use serde_json::json;
 
 use super::dat_import::prefs;
-use super::{Job, JobContext, Lane, Scheduler};
+use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::arcade::{self as rows, MraTitle, MraZip, StoredMra, StoredZip};
-use crate::db::dats::DatVersionId;
-use crate::db::jobs::JobId;
-use crate::db::titles::{self, TitleId};
+use crate::db::ids::DatVersionId;
+use crate::db::ids::JobId;
+use crate::db::ids::TitleId;
+use crate::db::titles;
 use crate::db::Db;
 use crate::error::Result;
-
-/// `jobs.kind` of [`ArcadeCatalog`].
-pub const KIND: &str = "arcade_catalog";
 
 /// The platform MRA titles belong to.
 pub const PLATFORM: &str = "arcade";
@@ -52,8 +50,8 @@ pub struct ArcadeCatalog;
 
 #[async_trait]
 impl Job for ArcadeCatalog {
-    fn kind(&self) -> &'static str {
-        KIND
+    fn kind(&self) -> JobKind {
+        JobKind::ArcadeCatalog
     }
 
     fn lane(&self) -> Lane {

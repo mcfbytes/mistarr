@@ -176,7 +176,8 @@ export interface TitleAvailability {
   file_index: number;
   path: string;
   rom_id: number;
-  confidence: MatchConfidence;
+  /** `null` for a file mapped before confidences were stored. */
+  confidence: MatchConfidence | null;
 }
 
 export interface TitleMra {

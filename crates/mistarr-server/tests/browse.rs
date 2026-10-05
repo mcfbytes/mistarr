@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use mistarr_core::naming::{group_key, parse_name};
 use mistarr_server::db::dat_stage::{self, StagedGame, StagedRom};
-use mistarr_server::db::titles::{self, Browse, SearchShape, Sort, SEARCH_SHAPE};
+use mistarr_server::db::sql::Page;
+use mistarr_server::db::titles::{self, Browse, RomStatus, SearchShape, Sort, SEARCH_SHAPE};
 use mistarr_server::db::{self, dats, groups};
 use mistarr_server::synth::{self, BROWSED, ELSEWHERE, RARE};
 use rusqlite::{params, Connection};
@@ -103,8 +104,15 @@ fn page(
         sort,
         ..Browse::default()
     };
-    let (rows, total) = titles::browse_with(c, platform, &filter, 60, 0, shape).expect("browse");
-    (rows.into_iter().map(|r| r.parent_id.0).collect(), total)
+    let page = Page {
+        limit: 60,
+        offset: 0,
+    };
+    let got = titles::browse_with(c, platform, &filter, page, shape).expect("browse");
+    (
+        got.items.into_iter().map(|r| r.parent_id.0).collect(),
+        got.total,
+    )
 }
 
 /// A file database with the full catalogue and the board's reader cache size.
@@ -229,7 +237,7 @@ fn stage(c: &Connection, count: usize) {
                     crc32: Some(format!("{i:08x}")),
                     md5: None,
                     sha1: None,
-                    status: "good".into(),
+                    status: RomStatus::Good,
                     header: None,
                 }],
                 name,

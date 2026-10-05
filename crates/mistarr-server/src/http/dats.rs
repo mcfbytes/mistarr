@@ -10,13 +10,16 @@ use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use serde::Serialize;
 
-use super::{ApiError, Page, Paging};
+use super::{ApiError, Paging};
 use crate::app::AppState;
-use crate::db::dats::{self, DatVersionId, DatVersionRow};
+use crate::db::dats::{self, DatReason, DatRef, DatVersionRow};
+use crate::db::ids::DatVersionId;
+use crate::db::sql::Paged;
 use crate::incoming::IncomingFile;
-use crate::jobs::dat_import::{DatImport, Recompute, KIND};
-use crate::jobs::Scheduler;
+use crate::jobs::dat_import::{DatImport, Recompute};
+use crate::jobs::{JobKind, Scheduler};
 use mistarr_sources::intake::{candidates, REASON_SUFFIX, REJECTED_DIR};
 
 /// Largest accepted upload, [`crate::jobs::dat_import::MAX_DAT_BYTES`].
@@ -39,22 +42,53 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
 async fn list(
     State(app): State<Arc<AppState>>,
     paging: Result<Query<Paging>, QueryRejection>,
-) -> Result<Json<Page<DatVersionRow>>, ApiError> {
+) -> Result<Json<Paged<DatItem>>, ApiError> {
     let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let (limit, offset) = paging.resolve();
-    let (items, total) = app.db.read(move |c| dats::list(c, limit, offset)).await?;
-    Ok(Json(Page { items, total }))
+    let page = paging.resolve();
+    let rows = app.db.read(move |c| dats::list(c, page)).await?;
+    Ok(Json(Paged {
+        items: rows.items.into_iter().map(DatItem::from).collect(),
+        total: rows.total,
+    }))
+}
+
+/// A DAT version as the API returns it: the row with its reason worded.
+#[derive(Debug, Serialize)]
+struct DatItem {
+    #[serde(flatten)]
+    row: DatVersionRow,
+    reason: Option<String>,
+}
+
+impl From<DatVersionRow> for DatItem {
+    fn from(row: DatVersionRow) -> Self {
+        let reason = row.reason.as_ref().map(reason_text);
+        Self { row, reason }
+    }
+}
+
+/// The sentence the API shows for `reason`.
+fn reason_text(reason: &DatReason) -> String {
+    let other = |r: &DatRef| match &r.dat_name {
+        Some(name) => format!("{name} version {}", r.version),
+        None => format!("version {}", r.version),
+    };
+    match reason {
+        DatReason::Removed => "Removed; its games are no longer listed".to_owned(),
+        DatReason::Replaced(by) => format!("Replaced by {}", other(by)),
+        DatReason::Older(than) => format!("Older than {}, which stays current", other(than)),
+    }
 }
 
 /// `GET /dats/incoming`: files in `dats/` not loaded yet, and rejected ones.
 async fn incoming(
     State(app): State<Arc<AppState>>,
     paging: Result<Query<Paging>, QueryRejection>,
-) -> Result<Json<Page<IncomingFile>>, ApiError> {
+) -> Result<Json<Paged<IncomingFile>>, ApiError> {
     let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let dir = app.config().paths.dats();
-    let all = crate::incoming::list(&app, &dir, crate::jobs::dat_import::KIND).await?;
-    Ok(Json(Page::slice(all, &paging)))
+    let all = crate::incoming::list(&app, &dir, JobKind::DatImport).await?;
+    Ok(Json(paging.resolve().slice(all)))
 }
 
 fn accepted(name: &str) -> bool {
@@ -127,7 +161,7 @@ pub(crate) async fn place_part(
     .await?;
     let target = moved?;
     let job = Arc::new(DatImport::new(&target));
-    crate::incoming::queue_placed(app, &target, KIND, job).await
+    crate::incoming::queue_placed(app, &target, JobKind::DatImport, job).await
 }
 
 /// Streams one multipart field to `path`, one chunk in memory at a time.
@@ -234,7 +268,7 @@ async fn retry_rejected(
     };
     remove_if_present(&reason_of(&path))?;
     let job = Arc::new(DatImport::new(&target));
-    let placed = crate::incoming::queue_placed(&app, &target, KIND, job).await?;
+    let placed = crate::incoming::queue_placed(&app, &target, JobKind::DatImport, job).await?;
     Ok((StatusCode::ACCEPTED, Json(placed)))
 }
 
@@ -282,6 +316,30 @@ async fn retire(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasons_name_the_other_version() {
+        let same = DatRef {
+            dat_name: None,
+            version: "20260201".into(),
+        };
+        let other = DatRef {
+            dat_name: Some("Example Vendor - Example System (DB Export)".into()),
+            version: "20260301".into(),
+        };
+        assert_eq!(
+            reason_text(&DatReason::Replaced(same)),
+            "Replaced by version 20260201"
+        );
+        assert_eq!(
+            reason_text(&DatReason::Older(other)),
+            "Older than Example Vendor - Example System (DB Export) version 20260301, which stays current"
+        );
+        assert_eq!(
+            reason_text(&DatReason::Removed),
+            "Removed; its games are no longer listed"
+        );
+    }
 
     #[test]
     fn rejected_files_are_named_plainly_and_must_exist() {

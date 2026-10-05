@@ -10,10 +10,11 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::app::AppState;
-use crate::db::jobs::{self, JobId, JobRow, JobState};
+use crate::db::ids::JobId;
+use crate::db::jobs::{self, JobRow, JobState};
 use crate::error::Result;
 use crate::jobs::gate::GateState;
-use crate::jobs::Lane;
+use crate::jobs::{JobKind, Lane};
 use crate::status::{hold_reason, job_detail};
 
 /// Where an incoming file stands.
@@ -94,7 +95,7 @@ impl Drop for PlacedGuard {
 pub async fn queue_placed(
     app: &Arc<AppState>,
     path: &Path,
-    kind: &'static str,
+    kind: JobKind,
     job: Arc<dyn crate::jobs::Job>,
 ) -> Result<IncomingFile> {
     let (size, modified) = stat(path).await;
@@ -117,7 +118,7 @@ pub async fn queue_placed(
 /// # Errors
 ///
 /// [`crate::Error::Db`] when the open jobs cannot be read.
-pub async fn one(app: &AppState, path: &Path, kind: &'static str) -> Result<IncomingFile> {
+pub async fn one(app: &AppState, path: &Path, kind: JobKind) -> Result<IncomingFile> {
     let (size, modified) = stat(path).await;
     let pending = Pending {
         size,
@@ -144,7 +145,7 @@ async fn stat(path: &Path) -> (u64, i64) {
 async fn describe(
     app: &AppState,
     path: &Path,
-    kind: &'static str,
+    kind: JobKind,
     pending: &Pending,
     known: Option<JobId>,
 ) -> Result<IncomingFile> {
@@ -181,7 +182,7 @@ async fn describe(
 /// # Errors
 ///
 /// [`crate::Error::Db`] when the open jobs cannot be read.
-pub async fn list(app: &AppState, dir: &Path, kind: &'static str) -> Result<Vec<IncomingFile>> {
+pub async fn list(app: &AppState, dir: &Path, kind: JobKind) -> Result<Vec<IncomingFile>> {
     let mut open = app.db.read(jobs::open_rows).await?;
     app.live.overlay(&mut open);
     let gate = app.gate.state();
@@ -280,11 +281,11 @@ fn pending_file(
         JobState::Running => (IncomingState::Importing, None),
         JobState::Paused => (
             IncomingState::Importing,
-            hold_reason(gate, &job.lane, job.state),
+            hold_reason(gate, job.lane, job.state),
         ),
         _ => (
             IncomingState::Waiting,
-            hold_reason(gate, &job.lane, job.state).or_else(|| Some(queued_reason(job, open))),
+            hold_reason(gate, job.lane, job.state).or_else(|| Some(queued_reason(job, open))),
         ),
     };
     IncomingFile {
@@ -301,8 +302,10 @@ fn pending_file(
 /// Why a job cannot be recorded yet: the DAT import holding the writer, if one runs.
 ///
 /// ```
-/// use mistarr_server::db::jobs::{JobId, JobRow, JobState};
-/// let row = JobRow { id: JobId(1), kind: "dat_import".into(), lane: "background".into(),
+/// use mistarr_server::db::jobs::{JobRow, JobState};
+/// use mistarr_server::db::ids::JobId;
+/// use mistarr_server::jobs::{JobKind, Lane};
+/// let row = JobRow { id: JobId(1), kind: JobKind::DatImport, lane: Lane::Background,
 ///     payload: serde_json::json!({ "path": "/d/a.dat" }), state: JobState::Running,
 ///     progress: None, created_at: 0, updated_at: 0 };
 /// let why = mistarr_server::incoming::writer_reason(&[row]);
@@ -312,7 +315,7 @@ fn pending_file(
 #[must_use]
 pub fn writer_reason(open: &[JobRow]) -> String {
     open.iter()
-        .find(|r| r.state == JobState::Running && r.kind == crate::jobs::dat_import::KIND)
+        .find(|r| r.state == JobState::Running && r.kind == JobKind::DatImport)
         .map_or_else(|| "Waiting to be queued.".to_owned(), dat_wait)
 }
 
@@ -327,14 +330,16 @@ fn dat_wait(row: &JobRow) -> String {
 /// import ahead of other work is named as such.
 ///
 /// ```
-/// use mistarr_server::db::jobs::{JobId, JobRow, JobState};
-/// let row = |id, kind: &str, state, path: &str| JobRow { id: JobId(id), kind: kind.into(),
-///     lane: "background".into(), payload: serde_json::json!({ "path": path }), state,
+/// use mistarr_server::db::jobs::{JobRow, JobState};
+/// use mistarr_server::db::ids::JobId;
+/// use mistarr_server::jobs::{JobKind, Lane};
+/// let row = |id, kind, state, path: &str| JobRow { id: JobId(id), kind,
+///     lane: Lane::Background, payload: serde_json::json!({ "path": path }), state,
 ///     progress: None, created_at: 0, updated_at: 0 };
-/// let open = [row(1, "dat_import", JobState::Running, "/d/a.dat"), row(2, "dat_import", JobState::Queued, "/d/b.dat")];
+/// let open = [row(1, JobKind::DatImport, JobState::Running, "/d/a.dat"), row(2, JobKind::DatImport, JobState::Queued, "/d/b.dat")];
 /// let why = mistarr_server::incoming::queued_reason(&open[1], &open);
 /// assert_eq!(why, "Queued behind a.dat.");
-/// let torrent = row(3, "source_import", JobState::Queued, "/s/b.torrent");
+/// let torrent = row(3, JobKind::SourceImport, JobState::Queued, "/s/b.torrent");
 /// let why = mistarr_server::incoming::queued_reason(&torrent, &open);
 /// assert_eq!(why, "Waiting for the DAT import of a.dat to finish.");
 /// ```
@@ -344,12 +349,12 @@ pub fn queued_reason(job: &JobRow, open: &[JobRow]) -> String {
         .iter()
         .find(|r| r.lane == job.lane && r.id != job.id && r.state != JobState::Queued);
     match ahead {
-        Some(r) if r.kind == crate::jobs::dat_import::KIND && job.kind != r.kind => dat_wait(r),
+        Some(r) if r.kind == JobKind::DatImport && job.kind != r.kind => dat_wait(r),
         Some(r) => format!(
             "Queued behind {}.",
-            job_detail(&r.payload).unwrap_or_else(|| r.kind.replace('_', " "))
+            job_detail(&r.payload).unwrap_or_else(|| r.kind.as_str().replace('_', " "))
         ),
-        None if job.lane == Lane::Heavy.as_str() => "Queued behind other library work.".to_owned(),
+        None if job.lane == Lane::Heavy => "Queued behind other library work.".to_owned(),
         None => "Queued.".to_owned(),
     }
 }
@@ -399,13 +404,19 @@ mod tests {
         let a = dats.join("a.dat").to_string_lossy().into_owned();
         app.db
             .write(move |c| {
-                let id = jobs::insert(c, "dat_import", &json!({ "path": a }), "background", 1)?;
+                let id = jobs::insert(
+                    c,
+                    JobKind::DatImport,
+                    &json!({ "path": a }),
+                    Lane::Background,
+                    1,
+                )?;
                 jobs::set_state(c, id, JobState::Running, 1)?;
                 jobs::set_progress(c, id, &json!({ "games": 3 }), 1)
             })
             .await
             .expect("seed");
-        let items = list(&app, &dats, "dat_import").await.expect("list");
+        let items = list(&app, &dats, JobKind::DatImport).await.expect("list");
         let names: Vec<_> = items.iter().map(|i| i.file.as_str()).collect();
         assert_eq!(names, ["a.dat", "b.dat", "bad.dat"]);
         assert_eq!(items[0].state, IncomingState::Importing);
@@ -415,7 +426,7 @@ mod tests {
         assert_eq!(items[1].size, 2);
         assert_eq!(items[2].state, IncomingState::Rejected);
         assert_eq!(items[2].reason.as_deref(), Some("not a DAT"));
-        assert!(list(&app, &dir.path().join("none"), "dat_import")
+        assert!(list(&app, &dir.path().join("none"), JobKind::DatImport)
             .await
             .expect("list")
             .is_empty());
@@ -425,8 +436,8 @@ mod tests {
     fn a_held_heavy_job_says_so() {
         let row = JobRow {
             id: JobId(4),
-            kind: "scan".into(),
-            lane: "heavy".into(),
+            kind: JobKind::Scan,
+            lane: Lane::Heavy,
             payload: json!({ "path": "/d/x" }),
             state: JobState::Queued,
             progress: None,
@@ -463,8 +474,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl crate::jobs::Job for Noop {
-        fn kind(&self) -> &'static str {
-            "source_import"
+        fn kind(&self) -> JobKind {
+            JobKind::SourceImport
         }
         fn payload(&self) -> Value {
             json!({ "path": "/nowhere/x.torrent" })
@@ -482,7 +493,7 @@ mod tests {
         let dat = json!({ "path": "/d/big.dat" });
         app.db
             .write(move |c| {
-                let id = jobs::insert(c, "dat_import", &dat, "background", 1)?;
+                let id = jobs::insert(c, JobKind::DatImport, &dat, Lane::Background, 1)?;
                 jobs::set_state(c, id, JobState::Running, 1)
             })
             .await
@@ -499,7 +510,7 @@ mod tests {
         });
         is_held.recv().expect("held");
         let started = std::time::Instant::now();
-        let f = queue_placed(&app, &path, "source_import", Arc::new(Noop))
+        let f = queue_placed(&app, &path, JobKind::SourceImport, Arc::new(Noop))
             .await
             .expect("queued");
         assert!(started.elapsed() < std::time::Duration::from_secs(1));
@@ -527,17 +538,17 @@ mod tests {
         let (dir, app) = state();
         let path = dir.path().join("y.torrent");
         std::fs::write(&path, b"abc").expect("write");
-        let f = one(&app, &path, "source_import").await.expect("one");
+        let f = one(&app, &path, JobKind::SourceImport).await.expect("one");
         assert_eq!((f.file.as_str(), f.size), ("y.torrent", 3));
         assert_eq!(f.reason.as_deref(), Some(SETTLING));
         let text = path.to_string_lossy().into_owned();
         let payload = json!({ "path": text });
         let id = app
             .db
-            .write(move |c| jobs::insert(c, "source_import", &payload, "background", 1))
+            .write(move |c| jobs::insert(c, JobKind::SourceImport, &payload, Lane::Background, 1))
             .await
             .expect("seed");
-        let f = one(&app, &path, "source_import").await.expect("one");
+        let f = one(&app, &path, JobKind::SourceImport).await.expect("one");
         assert_eq!(f.job_id, Some(id));
         assert_eq!(f.state, IncomingState::Waiting);
         assert_eq!(f.reason.as_deref(), Some("Queued."));
@@ -546,9 +557,15 @@ mod tests {
             modified: 0,
             placed: true,
         };
-        let ran = describe(&app, &path, "source_import", &pending, Some(JobId(999)))
-            .await
-            .expect("describe");
+        let ran = describe(
+            &app,
+            &path,
+            JobKind::SourceImport,
+            &pending,
+            Some(JobId(999)),
+        )
+        .await
+        .expect("describe");
         assert_eq!(ran.job_id, Some(JobId(999)));
         assert_eq!(ran.size, 3);
         assert_eq!(ran.state, IncomingState::Importing);

@@ -6,7 +6,8 @@ use std::path::{Path, PathBuf};
 
 use super::*;
 use crate::db::dat_stage::{StagedGame, StagedRom};
-use crate::db::files::{FileId, FileState, Hashed};
+use crate::db::files::{FileState, Hashed};
+use crate::db::ids::FileId;
 
 /// Write syscalls and bytes the calling thread made so far, from `/proc/thread-self/io`;
 /// `None` where the kernel does not account them.
@@ -283,7 +284,7 @@ fn staged_game(name: String, rng: &mut Rng) -> StagedGame {
             crc32: Some(rng.hex(8)),
             md5: Some(rng.hex(32)),
             sha1: Some(rng.hex(40)),
-            status: "good".into(),
+            status: crate::db::titles::RomStatus::Good,
             header: None,
         })
         .collect();
@@ -405,7 +406,7 @@ fn measure_ram(db: &Db, dir: &std::path::Path, xml: &str) -> ram::Report {
     let plan = ram::Plan {
         dir: ram_dir.path().to_path_buf(),
         floor: 0,
-        job: 1,
+        job: Some(crate::db::ids::JobId(1)),
         input: 0,
     };
     let req = request();
@@ -525,7 +526,7 @@ fn migration_writes_on_the_bench_catalogue() {
     let plan = ram::Plan {
         dir: ram_dir.path().to_path_buf(),
         floor: 0,
-        job: 0,
+        job: None,
         input: 0,
     };
     let start = std::time::Instant::now();

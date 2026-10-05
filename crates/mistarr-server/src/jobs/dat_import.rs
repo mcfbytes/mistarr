@@ -24,24 +24,20 @@ use tokio::sync::watch;
 
 use super::gate::GateState;
 use super::progress::{CountingReader, Reporter};
-use super::{scan, wizard, Job, JobContext, Lane, Scheduler};
+use super::{scan, wizard, Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::config::PrefsConfig;
 use crate::db::dat_stage::{self, StagedGame, StagedRom};
-use crate::db::dats::{self, DatVersionId, NewVersion};
-use crate::db::files::{self, FileId, FileRow, FileState};
-use crate::db::jobs::JobId;
+use crate::db::dats::{self, NewVersion};
+use crate::db::files::{self, FileRow, FileState};
+use crate::db::ids::DatVersionId;
+use crate::db::ids::JobId;
+use crate::db::ids::{FileId, RomId};
 use crate::db::ram::{self, Ram};
 use crate::db::titles;
 use crate::db::Db;
 use crate::error::{Error, Result};
 use crate::events::EventKind;
-
-/// `jobs.kind` of [`DatImport`].
-pub const KIND: &str = "dat_import";
-
-/// `jobs.kind` of [`Recompute`].
-pub const RECOMPUTE_KIND: &str = "recompute_1g1r";
 
 /// Largest DAT or DAT pack an upload or a URL fetch accepts; daily packs of every
 /// system fit well inside.
@@ -132,7 +128,8 @@ impl DatImport {
     /// `loaded` is the `dats/loaded/` directory holding its source file.
     ///
     /// ```
-    /// use mistarr_server::db::dats::{DatVersionId, DatVersionRow};
+    /// use mistarr_server::db::dats::DatVersionRow;
+    /// use mistarr_server::db::ids::DatVersionId;
     /// use mistarr_server::jobs::{dat_import::DatImport, Job};
     /// let row = DatVersionRow { id: DatVersionId(3), platform_id: None, dat_name: "Test Console".into(),
     ///     version: "1".into(), source_file: "t.dat".into(), loaded_at: 0, superseded_by: None,
@@ -287,8 +284,8 @@ fn phase(req: &Request, phase: &str) {
 
 #[async_trait]
 impl Job for DatImport {
-    fn kind(&self) -> &'static str {
-        KIND
+    fn kind(&self) -> JobKind {
+        JobKind::DatImport
     }
 
     fn payload(&self) -> Value {
@@ -491,7 +488,7 @@ impl DatImport {
         let plan = ram::Plan {
             dir: config.memory.import_dir.clone(),
             floor,
-            job: ctx.id.0,
+            job: Some(ctx.id),
             input,
         };
         let meter = Meter::new(ctx.reporter(), source_file, members.len(), None);
@@ -1167,7 +1164,7 @@ fn staged(game: &DatGame) -> StagedGame {
                 crc32: r.crc32.clone(),
                 md5: r.md5.clone(),
                 sha1: r.sha1.clone(),
-                status: r.status.as_str().to_owned(),
+                status: r.status.into(),
                 header: r.header.clone(),
             })
             .collect(),
@@ -1337,7 +1334,7 @@ fn set_matches(conn: &Connection, platform: &PlatformId, rows: &[FileRow]) -> Re
 
 /// [`files::set_match`] only when the rom or state differs, so a recompute that changes
 /// nothing writes nothing.
-fn set_changed(conn: &Connection, f: &FileRow, rom: Option<i64>, state: FileState) -> Result<()> {
+fn set_changed(conn: &Connection, f: &FileRow, rom: Option<RomId>, state: FileState) -> Result<()> {
     if f.rom_id == rom && f.state == state {
         return Ok(());
     }
@@ -1479,8 +1476,8 @@ impl Recompute {
 
 #[async_trait]
 impl Job for Recompute {
-    fn kind(&self) -> &'static str {
-        RECOMPUTE_KIND
+    fn kind(&self) -> JobKind {
+        JobKind::Recompute
     }
 
     fn payload(&self) -> Value {

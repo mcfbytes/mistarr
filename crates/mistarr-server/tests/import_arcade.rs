@@ -9,12 +9,15 @@ use std::path::{Path, PathBuf};
 use common::{boot_with, config_in, eventually, get, request, Booted};
 use mistarr_core::hash::{hash_reader, HeaderRule, Md5Stream};
 use mistarr_core::PlatformId;
-use mistarr_server::db::downloads::{self, DownloadId, DownloadState};
+use mistarr_server::db::downloads::{self, DownloadState};
 use mistarr_server::db::downloads_import;
 use mistarr_server::db::files::{self, FileRow, FileState};
+use mistarr_server::db::ids::{DownloadId, RomId, SourceId, TitleId};
 use mistarr_server::db::imports;
-use mistarr_server::db::sources::{self, NewSource, SourceId, SourceState};
+use mistarr_server::db::sources::{self, NewSource, SourceState};
+use mistarr_server::db::sql::Page;
 use mistarr_server::events::EventKind;
+use mistarr_server::jobs::JobKind;
 use serde_json::{json, Value};
 
 fn infohash() -> String {
@@ -101,7 +104,7 @@ async fn have(b: &Booted, name: &str) -> u64 {
         .map_or_else(|| panic!("no {name}"), |(_, h, _)| h)
 }
 
-fn title_id(b: &Booted, name: &str) -> i64 {
+fn title_id(b: &Booted, name: &str) -> TitleId {
     let name = name.to_owned();
     b.running
         .app
@@ -122,7 +125,7 @@ async fn mra_block(b: &Booted, name: &str) -> Value {
     detail["variants"][0]["mra"].clone()
 }
 
-fn zip_rom(b: &Booted, zip: &str) -> i64 {
+fn zip_rom(b: &Booted, zip: &str) -> RomId {
     let zip = zip.to_owned();
     b.running
         .app
@@ -181,7 +184,7 @@ fn announce(b: &Booted, id: DownloadId) {
 }
 
 /// Hands `path` to the importer as the transfer of `rom_id`.
-fn hand_off(b: &Booted, rom_id: i64, src: SourceId, index: u32, path: &Path) -> DownloadId {
+fn hand_off(b: &Booted, rom_id: RomId, src: SourceId, index: u32, path: &Path) -> DownloadId {
     let staged = path.to_string_lossy().into_owned();
     let id = b
         .running
@@ -210,7 +213,9 @@ async fn settled(b: &Booted, id: DownloadId, want: DownloadState) -> downloads::
         b.running
             .app
             .db
-            .read_blocking(move |c| mistarr_server::db::jobs::find_open(c, "import", &payload))
+            .read_blocking(move |c| {
+                mistarr_server::db::jobs::find_open(c, JobKind::Import, &payload)
+            })
             .expect("jobs")
     };
     eventually(&format!("download {id} {want}"), || async {
@@ -230,7 +235,7 @@ fn rows(b: &Booted, zip_rel: &str) -> Vec<FileRow> {
 }
 
 /// The state and rom of zip `zip_rel`'s own presence row, if it has one.
-fn presence(b: &Booted, zip_rel: &str) -> Option<(FileState, Option<i64>)> {
+fn presence(b: &Booted, zip_rel: &str) -> Option<(FileState, Option<RomId>)> {
     let zip_rel = zip_rel.to_owned();
     b.running
         .app
@@ -240,7 +245,7 @@ fn presence(b: &Booted, zip_rel: &str) -> Option<(FileState, Option<i64>)> {
         .map(|r| (r.state, r.rom_id))
 }
 
-fn states(rows: &[FileRow]) -> Vec<(String, FileState, Option<i64>)> {
+fn states(rows: &[FileRow]) -> Vec<(String, FileState, Option<RomId>)> {
     rows.iter()
         .map(|r| (r.rel_path.clone(), r.state, r.rom_id))
         .collect()
@@ -250,7 +255,16 @@ fn log(b: &Booted) -> Vec<imports::LogRow> {
     b.running
         .app
         .db
-        .read_blocking(|c| imports::list(c, 100, 0).map(|(items, _)| items))
+        .read_blocking(|c| {
+            imports::list(
+                c,
+                Page {
+                    limit: 100,
+                    offset: 0,
+                },
+            )
+            .map(|p| p.items)
+        })
         .expect("log")
 }
 
@@ -576,7 +590,7 @@ async fn wanting_creates_one_download_per_missing_zip() {
 }
 
 /// Seeds a DAT entry `set` on the arcade platform with one rom and names its DAT `dat_name`.
-fn dat_entry(b: &Booted, dat_name: &str, set: &str, rom: &str, data: &[u8], bios: bool) -> i64 {
+fn dat_entry(b: &Booted, dat_name: &str, set: &str, rom: &str, data: &[u8], bios: bool) -> RomId {
     let hashes = hash_reader(Cursor::new(data), HeaderRule::None, None).expect("hash");
     let (dat_name, set, rom) = (dat_name.to_owned(), set.to_owned(), rom.to_owned());
     b.running
@@ -590,11 +604,7 @@ fn dat_entry(b: &Booted, dat_name: &str, set: &str, rom: &str, data: &[u8], bios
             } else {
                 Vec::new()
             };
-            mistarr_server::db::titles::set_flags(
-                c,
-                mistarr_server::db::titles::TitleId(t),
-                &flags,
-            )?;
+            mistarr_server::db::titles::set_flags(c, t, &flags)?;
             c.execute(
                 "UPDATE dat_versions SET dat_name = ?2
                  WHERE id = (SELECT dat_version_id FROM titles WHERE id = ?1)",
@@ -768,13 +778,17 @@ async fn two_zips_arrive(first: &str) {
     )
     .await;
     assert_eq!(r.status, 200, "{}", r.body);
-    let wanted: Vec<(DownloadId, i64)> = b
+    let wanted: Vec<(DownloadId, RomId)> = b
         .running
         .app
         .db
         .read_blocking(|c| {
-            let (rows, _) = downloads::list(c, &[DownloadState::Wanted], 10, 0)?;
-            Ok(rows.into_iter().map(|r| (r.id, r.rom_id)).collect())
+            let page = Page {
+                limit: 10,
+                offset: 0,
+            };
+            let rows = downloads::list(c, &[DownloadState::Wanted], page)?;
+            Ok(rows.items.into_iter().map(|r| (r.id, r.rom_id)).collect())
         })
         .expect("downloads");
     assert_eq!(wanted.len(), 2);

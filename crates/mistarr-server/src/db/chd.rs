@@ -7,7 +7,9 @@ use mistarr_core::{HashSet, PlatformId};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Serialize, Serializer};
 
-use super::files::{self, FileId, FileRow, FileState, NewFile};
+use super::files::{self, FileRow, FileState, NewFile};
+use super::ids::{FileId, TitleId};
+use super::sql::{self, to_i64};
 use crate::error::Result;
 
 /// Why a CHD's `files` row is `unidentified`: the stable code stored in `files.reason`.
@@ -68,10 +70,6 @@ impl Serialize for Unidentified {
     }
 }
 
-fn size_i64(n: u64) -> i64 {
-    i64::try_from(n).unwrap_or(i64::MAX)
-}
-
 /// The cached track hashes of image `id`, `Some` only when tracks 1 to n are all present.
 ///
 /// # Errors
@@ -91,7 +89,7 @@ pub fn cached_tracks(conn: &Connection, id: &ChdId) -> Result<Option<Vec<HashSet
             "SELECT track, size, crc32, md5, sha1 FROM chd_tracks
              WHERE chd_sha1 = ?1 AND chd_size = ?2 ORDER BY track",
         )?
-        .query_map(params![id.sha1.to_string(), size_i64(id.size)], |r| {
+        .query_map(params![id.sha1.to_string(), to_i64(id.size)], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -105,7 +103,7 @@ pub fn cached_tracks(conn: &Connection, id: &ChdId) -> Result<Option<Vec<HashSet
     Ok(Some(
         rows.into_iter()
             .map(|(_, size, crc32, md5, sha1)| HashSet {
-                size: u64::try_from(size).unwrap_or(0),
+                size: sql::to_u64(size),
                 crc32,
                 md5,
                 sha1,
@@ -120,7 +118,7 @@ pub fn cached_tracks(conn: &Connection, id: &ChdId) -> Result<Option<Vec<HashSet
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn store_tracks(conn: &Connection, id: &ChdId, tracks: &[HashSet]) -> Result<()> {
-    let (sha1, size) = (id.sha1.to_string(), size_i64(id.size));
+    let (sha1, size) = (id.sha1.to_string(), to_i64(id.size));
     conn.prepare_cached("DELETE FROM chd_tracks WHERE chd_sha1 = ?1 AND chd_size = ?2")?
         .execute(params![sha1, size])?;
     let mut insert = conn.prepare_cached(
@@ -132,7 +130,7 @@ pub fn store_tracks(conn: &Connection, id: &ChdId, tracks: &[HashSet]) -> Result
             sha1,
             size,
             n,
-            size_i64(t.size),
+            to_i64(t.size),
             t.crc32,
             t.md5,
             t.sha1
@@ -153,10 +151,9 @@ pub fn whole_hashes(conn: &Connection, id: &ChdId, mtime: i64) -> Result<Option<
             "SELECT crc32, md5, sha1 FROM chd_whole
              WHERE chd_sha1 = ?1 AND chd_size = ?2 AND mtime = ?3",
         )?
-        .query_row(
-            params![id.sha1.to_string(), size_i64(id.size), mtime],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        )
+        .query_row(params![id.sha1.to_string(), to_i64(id.size), mtime], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
         .optional()?;
     Ok(row.map(|(crc32, md5, sha1)| HashSet {
         size: id.size,
@@ -178,7 +175,7 @@ pub fn store_whole_hashes(conn: &Connection, id: &ChdId, mtime: i64, h: &HashSet
     )?
     .execute(params![
         id.sha1.to_string(),
-        size_i64(id.size),
+        to_i64(id.size),
         mtime,
         h.crc32,
         h.md5,
@@ -201,7 +198,7 @@ pub fn find_id(conn: &Connection, tracks: &[HashSet]) -> Result<Option<ChdId>> {
             "SELECT chd_sha1, chd_size FROM chd_tracks
              WHERE sha1 = ?1 AND track = 1 AND size = ?2 ORDER BY chd_sha1, chd_size",
         )?
-        .query_map(params![first.sha1, size_i64(first.size)], |r| {
+        .query_map(params![first.sha1, to_i64(first.size)], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -211,7 +208,7 @@ pub fn find_id(conn: &Connection, tracks: &[HashSet]) -> Result<Option<ChdId>> {
         };
         let id = ChdId {
             sha1,
-            size: u64::try_from(size).unwrap_or(0),
+            size: sql::to_u64(size),
         };
         if cached_tracks(conn, &id)?.as_deref() == Some(tracks) {
             return Ok(Some(id));
@@ -233,10 +230,9 @@ pub fn failure(conn: &Connection, id: &ChdId, mtime: i64) -> Result<Option<(Unid
             "SELECT reason, decoder FROM chd_failures
              WHERE chd_sha1 = ?1 AND chd_size = ?2 AND mtime = ?3",
         )?
-        .query_row(
-            params![id.sha1.to_string(), size_i64(id.size), mtime],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        )
+        .query_row(params![id.sha1.to_string(), to_i64(id.size), mtime], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })
         .optional()?;
     Ok(row.map(|(code, decoder)| {
         let reason = Unidentifiable::from_code(&code).unwrap_or(Unidentifiable::Corrupt);
@@ -266,7 +262,7 @@ pub fn store_failure(
     )?
     .execute(params![
         id.sha1.to_string(),
-        size_i64(id.size),
+        to_i64(id.size),
         mtime,
         reason.code(),
         mistarr_core::chd::DECODER_VERSION,
@@ -295,7 +291,7 @@ pub fn waiting(conn: &Connection, after: FileId, limit: u32) -> Result<Vec<FileR
             "SELECT {cols} {WAITING_FROM} AND f.reason = 'pending' AND f.id > ?1
              ORDER BY f.id LIMIT ?2"
         ))?
-        .query_map(params![after.0, limit], files::from_row)?
+        .query_map(params![after, limit], files::from_row)?
         .collect::<rusqlite::Result<_>>()?)
 }
 
@@ -305,12 +301,11 @@ pub fn waiting(conn: &Connection, after: FileId, limit: u32) -> Result<Vec<FileR
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn waiting_count(conn: &Connection) -> Result<u64> {
-    let n: i64 = conn
+    Ok(conn
         .prepare_cached(&format!(
             "SELECT COUNT(*) {WAITING_FROM} AND f.reason = 'pending'"
         ))?
-        .query_row([], |r| r.get(0))?;
-    Ok(u64::try_from(n).unwrap_or(0))
+        .query_row([], |r| sql::get_u64(r, 0))?)
 }
 
 /// Whether an enabled disc platform, or `platform` alone, has a row with one of `reasons`.
@@ -324,7 +319,7 @@ pub fn has_waiting(
     reasons: &[Unidentified],
 ) -> Result<bool> {
     let codes: Vec<&str> = reasons.iter().map(|r| r.as_str()).collect();
-    let codes = serde_json::to_string(&codes)?;
+    let codes = sql::json_list(&codes)?;
     Ok(conn
         .prepare_cached(&format!(
             "SELECT EXISTS(SELECT 1 {WAITING_FROM}
@@ -380,7 +375,7 @@ pub fn set_reason_if(
         .prepare_cached(
             "UPDATE files SET reason = ?3 WHERE id = ?1 AND state = 'unidentified' AND reason = ?2",
         )?
-        .execute(params![id.0, from.as_str(), to.as_str()])?
+        .execute(params![id, from.as_str(), to.as_str()])?
         > 0)
 }
 
@@ -394,16 +389,16 @@ pub fn layout_known(conn: &Connection, platform: &PlatformId, sizes: &[u64]) -> 
     let Some(&first) = sizes.first() else {
         return Ok(false);
     };
-    let titles: Vec<i64> = conn
+    let titles: Vec<TitleId> = conn
         .prepare_cached(
             "SELECT DISTINCT r.title_id FROM roms r INDEXED BY roms_track_size
              JOIN titles t ON t.id = r.title_id
              WHERE r.size = ?2 AND r.size % 2352 = 0 AND t.platform_id = ?1 AND t.source = 'dat'
                AND r.retired = 0 AND t.retired = 0 AND lower(r.name) NOT LIKE '%.cue'",
         )?
-        .query_map(params![platform.0, size_i64(first)], |r| r.get(0))?
+        .query_map(params![platform.0, to_i64(first)], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    let mut want: Vec<i64> = sizes.iter().map(|&s| size_i64(s)).collect();
+    let mut want: Vec<i64> = sizes.iter().map(|&s| to_i64(s)).collect();
     want.sort_unstable();
     let mut stmt = conn.prepare_cached(
         "SELECT COALESCE(size, -1) FROM roms
@@ -436,14 +431,15 @@ pub fn replace_container(
     now: i64,
 ) -> Result<Vec<(FileId, FileState)>> {
     let existing = files::zip_member_rows(conn, platform, container)?;
-    let mut stale: Vec<i64> = existing
+    let mut stale: Vec<FileId> = existing
         .iter()
         .filter(|e| !rows.iter().any(|r| r.rel_path == e.rel_path))
-        .map(|e| e.id.0)
+        .map(|e| e.id)
         .collect();
     if let Some(bare) = files::find_by_path(conn, platform, container)? {
-        stale.push(bare.id.0);
+        stale.push(bare.id);
     }
+
     files::delete_ids(conn, &stale)?;
     let mut written = Vec::new();
     for row in rows {

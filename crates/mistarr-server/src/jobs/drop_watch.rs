@@ -9,7 +9,8 @@ use mistarr_sources::intake::StableFiles;
 
 use super::{Job, Scheduler};
 use crate::app::AppState;
-use crate::db::jobs::{JobId, JobState};
+use crate::db::ids::JobId;
+use crate::db::jobs::JobState;
 use crate::threads::Label;
 
 /// Polls `dir` every `poll` on a blocking thread labelled `label` and enqueues

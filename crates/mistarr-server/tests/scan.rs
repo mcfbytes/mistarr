@@ -11,7 +11,9 @@ use common::{boot_with, config_in, eventually, request, Sse};
 use mistarr_core::hash::{hash_reader, HeaderRule};
 use mistarr_core::{HashSet, PlatformId};
 use mistarr_server::db::files::{self, FileState};
-use mistarr_server::db::jobs::{self as job_rows, JobId, JobState};
+use mistarr_server::db::ids::JobId;
+use mistarr_server::db::jobs::{self as job_rows, JobState};
+use mistarr_server::jobs::JobKind;
 
 fn write(path: &Path, data: &[u8]) {
     std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
@@ -908,7 +910,7 @@ async fn a_dat_loaded_after_the_first_scan_matches_the_files_already_there() {
         .db
         .read(|c| {
             let open = job_rows::open_rows(c)?;
-            Ok(open.iter().filter(|j| j.kind == "scan").count())
+            Ok(open.iter().filter(|j| j.kind == JobKind::Scan).count())
         })
         .await
         .expect("jobs");
@@ -1500,7 +1502,7 @@ async fn stored_forms_match_a_later_dat_in_both_directions() {
         .read(|c| {
             Ok(job_rows::open_rows(c)?
                 .iter()
-                .filter(|j| j.kind == "scan")
+                .filter(|j| j.kind == JobKind::Scan)
                 .count())
         })
         .await
@@ -1590,7 +1592,7 @@ async fn rows_hashed_before_the_whole_form_are_hashed_again_after_the_upgrade() 
         "ALTER TABLE files DROP COLUMN crc32_whole;
          ALTER TABLE files DROP COLUMN md5_whole;
          ALTER TABLE files DROP COLUMN sha1_whole;
-         DELETE FROM schema_version WHERE version = 20;",
+         DELETE FROM schema_version WHERE version >= 20;",
     )
     .expect("downgrade");
     drop(db);

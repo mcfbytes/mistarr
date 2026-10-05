@@ -304,7 +304,7 @@ async fn detail_files_preview_and_reset_to_automatic() {
 
 #[tokio::test]
 async fn a_seed_policy_no_client_took_is_kept_for_one() {
-    use mistarr_server::db::{deferred, sources::SourceId};
+    use mistarr_server::db::{deferred, ids::SourceId};
     let b = boot().await;
     seed_catalog(&b);
     std::fs::write(sources_dir(&b).join("s.torrent"), matching_set("Seed Set")).expect("write");
@@ -687,7 +687,9 @@ async fn unstarted_magnets_keep_the_slow_cadence() {
     let app = &b.running.app;
     let runs = app
         .db
-        .read(|c| mistarr_server::db::jobs::count_kind(c, "resolve_magnet"))
+        .read(|c| {
+            mistarr_server::db::jobs::count_kind(c, mistarr_server::jobs::JobKind::ResolveMagnet)
+        })
         .await
         .expect("count");
     // The import's own run, plus at most the first slow tick.

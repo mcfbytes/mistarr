@@ -257,7 +257,8 @@ file_id, file_state, file_path }` for its best file, verified first.
 `availability` lists the files of bound sources that may hold a live rom of
 the variant, strongest first, as `{ source_id, source_name, file_index, path,
 rom_id, confidence }`, where `confidence` is `hash`, `name`, `base`, `fuzzy`
-or `size` (VERIFICATION.md "Pre-download matching"), and
+or `size` (VERIFICATION.md "Pre-download matching"), or `null` for a file
+mapped before confidences were stored, and
 `torrent_files_available` counts its distinct files. `source`
 is `dat` or `mra`. An MRA variant adds `mra: { setname, rbf, path,
 missing_zips, md5_check, md5_detail }`, where `missing_zips` are paths

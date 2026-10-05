@@ -693,7 +693,11 @@ not started. `chd_tracks` hands the heavy lane only to a queued job of
 another kind, between images ("CHD identification").
 
 At startup the scheduler takes over the queued, running and paused rows the
-previous process left. The first row of each kind and payload goes back on
+previous process left. A row whose kind or lane this version does not list, or
+whose JSON does not parse, fails with "not readable by this version". Its lane
+becomes `light` when unlisted and its payload `{}` when unparseable, so it never
+stops startup, and a failed row of a listed kind reads back in
+`/system/jobs/recent`. The first row of each kind and payload goes back on
 its lane under its own id when the kind can be re-run (`scan`,
 `arcade_catalog`, `dat_import` of a dropped file, `recompute_1g1r`,
 `source_import`, `import`, `chd_tracks`); other kinds fail with "interrupted by a
@@ -908,7 +912,8 @@ of the database in RAM and write it back whole (`db::ram`):
    a few words, as `reason`, and the log at info gives the numbers. A floor
    of 0 is allowed and warned about at startup.
 3. SQLite's backup copies the file through the held writer into
-   `<import_dir>/import-<key>-<job>/mistarr.db`, 1 MiB a step. The key hashes
+   `<import_dir>/import-<key>-<job>/mistarr.db`, 1 MiB a step, where `<job>`
+   is the job's id, or `migration` for a migration. The key hashes
    the database's path, so servers of two data directories never touch each
    other's copies. SQLite reads the source itself: a descriptor of the card
    file opened and closed beside its connections would drop their POSIX locks.

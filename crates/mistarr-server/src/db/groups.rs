@@ -199,14 +199,14 @@ fn refresh_dirty(conn: &Connection, upto: i64) -> Result<usize> {
 #[cfg(test)]
 pub(crate) fn refresh_groups(
     conn: &Connection,
-    parent_ids: &[super::titles::TitleId],
+    parent_ids: &[super::ids::TitleId],
 ) -> Result<usize> {
     let mut mark = conn.prepare_cached(
         "INSERT INTO title_groups_dirty (parent_id) SELECT ?1
          WHERE ?1 NOT IN (SELECT parent_id FROM title_groups_dirty)",
     )?;
     for id in parent_ids {
-        mark.execute([id.0])?;
+        mark.execute([id])?;
     }
     refresh_dirty(conn, i64::MAX)
 }
@@ -378,10 +378,8 @@ pub fn search_damaged(conn: &Connection) -> Result<bool> {
 /// ```
 pub fn drift(conn: &Connection) -> Result<Drift> {
     let fresh = select(Scope::All);
-    let count = |sql: &str| -> Result<u64> {
-        let n: i64 = conn.query_row(sql, [], |r| r.get(0))?;
-        Ok(u64::try_from(n).unwrap_or(0))
-    };
+    let count =
+        |sql: &str| -> Result<u64> { Ok(conn.query_row(sql, [], |r| super::sql::get_u64(r, 0))?) };
     Ok(Drift {
         stale: count(&format!(
             "SELECT COUNT(*) FROM (SELECT {COLUMNS} FROM title_groups EXCEPT {fresh})"
@@ -423,11 +421,6 @@ impl Clause {
             &self.text
         }
     }
-}
-
-/// `?, ?, ?` for `n` parameters.
-pub(crate) fn placeholders(n: usize) -> String {
-    vec!["?"; n].join(", ")
 }
 
 /// Adds to `clause` the browse visibility of group `g`: a live variant of its root
@@ -490,12 +483,11 @@ pub(crate) fn visible(
     let mut args = Vec::new();
     if !hidden.is_empty() {
         variant.push_str(
-            " AND NOT EXISTS (SELECT 1 FROM title_flags f
-                              WHERE f.title_id = v.id AND f.flag IN (",
+            " AND NOT EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = v.id
+                              AND f.flag IN (SELECT value FROM json_each(?)))",
         );
-        variant.push_str(&placeholders(hidden.len()));
-        variant.push_str("))");
-        args.extend(hidden.iter().map(|h| Value::Text(h.clone())));
+        let list = serde_json::Value::from(hidden.to_vec()).to_string();
+        args.push(Value::Text(list));
     }
     if let Some(r) = region {
         variant.push_str(

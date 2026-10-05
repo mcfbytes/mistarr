@@ -12,12 +12,12 @@ use axum::{Json, Router};
 use mistarr_mister::platforms::Kind;
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, Page, Paging};
+use super::{ApiError, Paging};
 use crate::app::AppState;
-use crate::db::files::FileId;
-use crate::db::titles::{
-    self, Browse, GroupDetail, GroupRow, RomsetState, Sort, TitleId, Tri, WantRefused,
-};
+use crate::db::ids::FileId;
+use crate::db::ids::TitleId;
+use crate::db::sql::Paged;
+use crate::db::titles::{self, Browse, GroupDetail, GroupRow, RomsetState, Sort, Tri, WantRefused};
 use crate::db::{downloads, platforms};
 use crate::jobs::import::{self, RenameError};
 use crate::jobs::transfer;
@@ -165,22 +165,22 @@ async fn list(
     State(app): State<Arc<AppState>>,
     id: Result<Path<String>, PathRejection>,
     query: Result<Query<ListQuery>, QueryRejection>,
-) -> Result<Json<Page<GroupOut>>, ApiError> {
+) -> Result<Json<Paged<GroupOut>>, ApiError> {
     let Path(id) = id.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let filter = query.browse(&app.config().prefs.hide)?;
-    let (limit, offset) = Paging {
+    let page = Paging {
         limit: query.limit,
         offset: query.offset,
     }
     .resolve();
-    let (items, total) = app
+    let Paged { items, total } = app
         .db
         .read(move |c| {
             if platforms::get(c, &id)?.is_none() {
                 return Ok(None);
             }
-            titles::browse(c, &id, &filter, limit, offset).map(Some)
+            titles::browse(c, &id, &filter, page).map(Some)
         })
         .await?
         .ok_or_else(|| ApiError::not_found("no such platform"))?;
@@ -192,7 +192,7 @@ async fn list(
             GroupOut { row, art }
         })
         .collect();
-    Ok(Json(Page { items, total }))
+    Ok(Json(Paged { items, total }))
 }
 
 /// A clone group with the art of its pick, or of its parent when nothing is selectable.

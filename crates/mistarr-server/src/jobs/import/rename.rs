@@ -10,9 +10,10 @@ use super::place::{self, PlaceError};
 use super::support::{place_rom, read_head, rel_string};
 use super::{stat, BIOS_REFUSED};
 use crate::app::AppState;
-use crate::db::files::{self, FileId, FileRow, FileState};
+use crate::db::files::{self, FileRow, FileState};
+use crate::db::ids::FileId;
+use crate::db::ids::TitleId;
 use crate::db::imports::{self, EntryRom, ImportAction, TitleEntry};
-use crate::db::titles::TitleId;
 use crate::error::Error;
 use crate::events::EventKind;
 
@@ -90,14 +91,7 @@ pub async fn rename(app: &AppState, group: TitleId, file_id: FileId) -> Outcome<
             }
             files::move_to(tx, file_id, &to_db, FileState::Verified, mtime, now)?;
             let detail = json!({ "from": from_db, "rel_path": to_db, "title_id": title.0 });
-            imports::log(
-                tx,
-                now,
-                None,
-                Some(file_id.0),
-                ImportAction::Renamed,
-                &detail,
-            )?;
+            imports::log(tx, now, None, Some(file_id), ImportAction::Renamed, &detail)?;
             Ok(())
         })
         .await?;

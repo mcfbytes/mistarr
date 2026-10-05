@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{Connection, ErrorCode};
 
+use super::ids::JobId;
 use super::{sibling, Db, HeldWriter, OLD_SUFFIX, SWAP_SUFFIX};
 use crate::error::{Error, Result};
 
@@ -47,8 +48,8 @@ pub struct Plan {
     pub dir: PathBuf,
     /// Bytes of `MemAvailable` kept free on top of what the copy needs.
     pub floor: u64,
-    /// Names the working directory; the job's id.
-    pub job: i64,
+    /// Names the working directory: the job's id, `None` for a migration.
+    pub job: Option<JobId>,
     /// Uncompressed bytes of the DATs the work loads, 0 for a migration.
     pub input: u64,
 }
@@ -550,7 +551,7 @@ pub fn migrate_in_ram(
         return Ok(None);
     }
     let conn = Connection::open(db)?;
-    conn.busy_timeout(Duration::from_secs(5))?;
+    conn.busy_timeout(super::BUSY_TIMEOUT)?;
     let found = super::migrate::check_supported(&conn)?;
     if found == 0 || found >= super::migrate::latest() {
         return Ok(None);
@@ -959,8 +960,9 @@ fn work_prefix(db: &Path) -> String {
 struct WorkDir(PathBuf);
 
 impl WorkDir {
-    fn create(dir: &Path, db: &Path, job: i64) -> io::Result<Self> {
-        let path = dir.join(format!("{}{job}", work_prefix(db)));
+    fn create(dir: &Path, db: &Path, job: Option<JobId>) -> io::Result<Self> {
+        let name = job.map_or_else(|| "migration".to_owned(), |j| j.to_string());
+        let path = dir.join(format!("{}{name}", work_prefix(db)));
         if path.exists() {
             fs::remove_dir_all(&path)?;
         }

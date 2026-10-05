@@ -7,8 +7,17 @@ use rusqlite::Connection;
 use serde_json::json;
 
 use super::downloads::{self, DownloadState};
-use super::titles::{self, Browse, SearchShape, Sort, TitleId, SEARCH_SHAPE};
+use super::ids::TitleId;
+use super::sql::Page;
+use super::titles::{self, Browse, SearchShape, Sort, SEARCH_SHAPE};
 use super::{candidates, chd, files, groups, imports, jobs, launch, source_detail, sources};
+use crate::jobs::{JobKind, Lane};
+
+/// The first page of a list as the API's default asks for it.
+const FIFTY: Page = Page {
+    limit: 50,
+    offset: 0,
+};
 
 thread_local! {
     static TRACED: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
@@ -56,12 +65,19 @@ fn seeded() -> Connection {
            VALUES (1, 1, 1, 0, 'transferring', 0, 0);",
     )
     .expect("sources");
-    jobs::insert(&c, "import", &json!({"download_id": 1}), "background", 0).expect("job");
+    jobs::insert(
+        &c,
+        JobKind::Import,
+        &json!({"download_id": 1}),
+        Lane::Background,
+        0,
+    )
+    .expect("job");
     imports::log(
         &c,
         0,
-        Some(1),
-        Some(1),
+        Some(super::ids::DownloadId(1)),
+        Some(super::ids::FileId(1)),
         imports::ImportAction::Placed,
         &json!({}),
     )
@@ -85,7 +101,9 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             "unmatched files",
             Box::new(|c| {
                 let nes = mistarr_core::PlatformId("nes".into());
-                drop(files::unmatched_after(c, &nes, files::FileId(0), 256).expect("unmatched"));
+                drop(
+                    files::unmatched_after(c, &nes, super::ids::FileId(0), 256).expect("unmatched"),
+                );
             }),
         ),
         (
@@ -100,7 +118,8 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             "changed rom",
             Box::new(|c| {
                 let listed = [Some("00000000"), None, None];
-                files::unmatch_changed_rom(c, 1, "no such rom", 16, listed).expect("unmatch");
+                files::unmatch_changed_rom(c, TitleId(1), "no such rom", 16, listed)
+                    .expect("unmatch");
             }),
         ),
         (
@@ -160,20 +179,20 @@ fn source_reads() -> Vec<(&'static str, Read<'static>)> {
                         filter: Some(filter),
                         q: Some("track".into()),
                     };
-                    let id = sources::SourceId(1);
-                    drop(source_detail::files(c, id, &query, 50, 0).expect("files"));
+                    let id = super::ids::SourceId(1);
+                    drop(source_detail::files(c, id, &query, FIFTY).expect("files"));
                 }
             }),
         ),
         (
             "source detail",
-            Box::new(|c| drop(source_detail::detail(c, sources::SourceId(1)).expect("detail"))),
+            Box::new(|c| drop(source_detail::detail(c, super::ids::SourceId(1)).expect("detail"))),
         ),
         (
             "reclassify preview",
             Box::new(|c| {
                 let max = source_detail::PREVIEW_SAMPLE;
-                drop(source_detail::preview(c, sources::SourceId(1), max).expect("preview"));
+                drop(source_detail::preview(c, super::ids::SourceId(1), max).expect("preview"));
             }),
         ),
     ]
@@ -193,7 +212,13 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
     let reads: Vec<(&str, Read)> = vec![
         (
             "browse",
-            Box::new(|c| drop(titles::browse(c, "nes", &search, 60, 0).expect("browse"))),
+            Box::new(|c| {
+                let page = Page {
+                    limit: 60,
+                    offset: 0,
+                };
+                drop(titles::browse(c, "nes", &search, page).expect("browse"));
+            }),
         ),
         (
             "counts",
@@ -210,7 +235,7 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
         (
             "best file",
             Box::new(|c| {
-                downloads::best_file(c, 1).expect("best");
+                downloads::best_file(c, super::ids::RomId(1)).expect("best");
             }),
         ),
         (
@@ -219,39 +244,39 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
         ),
         (
             "sources list",
-            Box::new(|c| drop(sources::list(c, 50, 0).expect("sources"))),
+            Box::new(|c| drop(sources::list(c, FIFTY).expect("sources"))),
         ),
         (
             "source files",
             Box::new(|c| {
                 let all = source_detail::FileQuery::default();
-                drop(source_detail::files(c, sources::SourceId(1), &all, 50, 0).expect("files"));
+                drop(source_detail::files(c, super::ids::SourceId(1), &all, FIFTY).expect("files"));
             }),
         ),
         (
             "downloads list",
-            Box::new(|c| drop(downloads::list(c, &[], 50, 0).expect("downloads"))),
+            Box::new(|c| drop(downloads::list(c, &[], FIFTY).expect("downloads"))),
         ),
         (
             "open downloads",
             Box::new(|c| {
                 let open = [DownloadState::Queued, DownloadState::Transferring];
-                drop(downloads::list(c, &open, 50, 0).expect("downloads"));
+                drop(downloads::list(c, &open, FIFTY).expect("downloads"));
             }),
         ),
         (
             "activity jobs",
-            Box::new(|c| drop(jobs::list_active(c, 50, 0).expect("jobs"))),
+            Box::new(|c| drop(jobs::list_active(c, FIFTY).expect("jobs"))),
         ),
         (
             "job dedupe",
             Box::new(|c| {
-                jobs::find_open(c, "import", &json!({"download_id": 1})).expect("find");
+                jobs::find_open(c, JobKind::Import, &json!({"download_id": 1})).expect("find");
             }),
         ),
         (
             "activity imports",
-            Box::new(|c| drop(imports::list(c, 50, 0).expect("imports"))),
+            Box::new(|c| drop(imports::list(c, FIFTY).expect("imports"))),
         ),
         (
             "group refresh",
@@ -314,7 +339,9 @@ fn hot_reads_walk_indexes_not_growing_tables() {
         let sql = sql.split_whitespace().collect::<Vec<_>>().join(" ");
         eprintln!("== {name}\n{sql}\n{}\n", plan.join("\n"));
         for line in &plan {
+            // A bound list is read whole; it holds what the caller passed, not table rows.
             let scan = line.starts_with("SCAN ")
+                && !line.starts_with("SCAN json_each VIRTUAL TABLE")
                 && !ALLOWED_SCANS
                     .iter()
                     .any(|(n, p)| *n == name && line.starts_with(p));

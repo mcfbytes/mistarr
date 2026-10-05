@@ -6,6 +6,7 @@ use rusqlite::params;
 use super::*;
 use crate::app::testutil::state;
 use crate::app::AppState;
+use crate::db::ids::RomId;
 use crate::jobs::arcade::{ArcadeCatalog, ARCADE_DIR};
 use crate::jobs::Scheduler;
 
@@ -65,7 +66,7 @@ fn row(id: i64, rel: &str, size: i64, mtime: i64, rom: Option<i64>, state: FileS
         sha1: Some("s".into()),
         header_rule: Some("none".into()),
         whole: crate::db::files::WholeHashes::default(),
-        rom_id: rom,
+        rom_id: rom.map(RomId),
         state,
         scanned_at: 1,
         reason: None,
@@ -109,8 +110,8 @@ fn stat_leaves_out_a_zip_it_cannot_stat() {
 fn an_mra_named_zip_with_no_rows_gets_one_presence_row() {
     let mut out = Changes::default();
     let z = zip("mame/a.zip", 10, 5);
-    assert!(decide(&z, &[7], Vec::new(), Vec::new(), &mut out).is_none());
-    assert_eq!(out.record, [(z, 7)]);
+    assert!(decide(&z, &[RomId(7)], Vec::new(), Vec::new(), &mut out).is_none());
+    assert_eq!(out.record, [(z, RomId(7))]);
     assert!(out.drop.is_empty());
 
     let mut out = Changes::default();
@@ -125,7 +126,13 @@ fn a_presence_row_follows_its_zip_and_the_live_mra_set() {
     let promoted = row(1, "mame/a.zip", 10, 5, Some(7), FileState::Verified);
 
     let mut out = Changes::default();
-    decide(&z, &[7], vec![promoted.clone()], Vec::new(), &mut out);
+    decide(
+        &z,
+        &[RomId(7)],
+        vec![promoted.clone()],
+        Vec::new(),
+        &mut out,
+    );
     assert_eq!(
         out,
         Changes::default(),
@@ -134,15 +141,27 @@ fn a_presence_row_follows_its_zip_and_the_live_mra_set() {
 
     let mut out = Changes::default();
     let touched = zip("mame/a.zip", 10, 6);
-    decide(&touched, &[7], vec![promoted.clone()], Vec::new(), &mut out);
+    decide(
+        &touched,
+        &[RomId(7)],
+        vec![promoted.clone()],
+        Vec::new(),
+        &mut out,
+    );
     assert_eq!(
         out.record,
-        [(touched, 7)],
+        [(touched, RomId(7))],
         "a changed zip is recorded again"
     );
 
     let mut out = Changes::default();
-    decide(&z, &[3, 7], vec![promoted.clone()], Vec::new(), &mut out);
+    decide(
+        &z,
+        &[RomId(3), RomId(7)],
+        vec![promoted.clone()],
+        Vec::new(),
+        &mut out,
+    );
     assert_eq!(
         out,
         Changes::default(),
@@ -150,17 +169,23 @@ fn a_presence_row_follows_its_zip_and_the_live_mra_set() {
     );
 
     let mut out = Changes::default();
-    decide(&z, &[8], vec![promoted.clone()], Vec::new(), &mut out);
+    decide(
+        &z,
+        &[RomId(8)],
+        vec![promoted.clone()],
+        Vec::new(),
+        &mut out,
+    );
     assert_eq!(
         out.record,
-        [(z.clone(), 8)],
+        [(z.clone(), RomId(8))],
         "only another MRA's rom names it now"
     );
 
     let mut out = Changes::default();
     let spelled = row(1, "mame/A.zip", 10, 6, Some(7), FileState::Unverified);
     let other = row(2, "mame/a.ZIP", 10, 6, Some(7), FileState::Unverified);
-    decide(&z, &[7], vec![spelled, other], Vec::new(), &mut out);
+    decide(&z, &[RomId(7)], vec![spelled, other], Vec::new(), &mut out);
     assert_eq!(
         out.drop,
         ["mame/a.ZIP"],
@@ -182,14 +207,14 @@ fn member_rows_stand_for_the_zip_and_are_left_alone_while_it_is_unchanged() {
     let bare = row(1, "mame/a.zip", 10, 5, Some(7), FileState::Unverified);
     let member = row(2, "mame/a.zip#a.bin", 1, 5, Some(9), FileState::Verified);
     let mut out = Changes::default();
-    let rc = decide(&z, &[7], vec![bare], vec![member.clone()], &mut out);
+    let rc = decide(&z, &[RomId(7)], vec![bare], vec![member.clone()], &mut out);
     assert!(rc.is_none(), "an unchanged zip is never read");
     assert_eq!(out.drop, ["mame/a.zip"], "the presence row gives way");
     assert!(out.record.is_empty() && out.restamp.is_empty() && out.reverify.is_empty());
 
     let mut out = Changes::default();
     let moved = zip("mame/a.zip", 10, 6);
-    let rc = decide(&moved, &[7], Vec::new(), vec![member], &mut out).expect("recheck");
+    let rc = decide(&moved, &[RomId(7)], Vec::new(), vec![member], &mut out).expect("recheck");
     assert_eq!(rc.members.len(), 1);
     assert_eq!(out, Changes::default());
 }
@@ -223,7 +248,7 @@ fn recheck_keeps_matching_members_and_marks_changed_ones() {
     let gone = row(3, "mame/a.zip#gone.bin", 4, 5, Some(9), FileState::Verified);
     let rc = Recheck {
         zip: zip("mame/a.zip", 99, 6),
-        roms: vec![7],
+        roms: vec![RomId(7)],
         members: vec![same, changed, gone],
     };
     let mut out = Changes::default();
@@ -242,7 +267,7 @@ fn recheck_of_an_unreadable_zip_changes_nothing() {
     let member = row(2, "mame/a.zip#a.bin", 1, 5, Some(9), FileState::Verified);
     let rc = Recheck {
         zip: zip("mame/a.zip", 13, 6),
-        roms: vec![7],
+        roms: vec![RomId(7)],
         members: vec![member],
     };
     let mut out = Changes::default();
@@ -258,13 +283,13 @@ fn recheck_records_a_presence_row_once_no_member_is_left() {
     let z = zip("mame/a.zip", 50, 6);
     let rc = Recheck {
         zip: z.clone(),
-        roms: vec![7],
+        roms: vec![RomId(7)],
         members: vec![member],
     };
     let mut out = Changes::default();
     recheck(dir.path(), rc, &mut out);
     assert_eq!(out.drop, ["mame/a.zip#a.bin"]);
-    assert_eq!(out.record, [(z, 7)]);
+    assert_eq!(out.record, [(z, RomId(7))]);
 }
 
 #[test]
@@ -295,7 +320,7 @@ fn plan_and_write_a_batch_against_the_database() {
             Ok(rom)
         })
         .expect("seed");
-    let live: HashMap<String, Vec<i64>> =
+    let live: HashMap<String, Vec<RomId>> =
         [("mame/a.zip".to_owned(), vec![rom])].into_iter().collect();
     let names = [
         "A.zip".to_owned(),
@@ -353,7 +378,7 @@ fn recheck_splits_a_member_at_the_zip_not_the_first_hash() {
     member.crc32 = Some(listed[0].crc32.clone());
     let rc = Recheck {
         zip: zip("mame/a#b.zip", 99, 6),
-        roms: vec![7],
+        roms: vec![RomId(7)],
         members: vec![member],
     };
     let mut out = Changes::default();
@@ -395,28 +420,20 @@ async fn catalogue(app: &Arc<AppState>) -> serde_json::Value {
     row.progress.expect("progress")
 }
 
-fn arcade_rows(app: &Arc<AppState>) -> Vec<(String, FileState, Option<i64>, i64)> {
+fn arcade_rows(app: &Arc<AppState>) -> Vec<(String, FileState, Option<RomId>, i64)> {
     app.db
         .read_blocking(|c| {
             let mut stmt = c.prepare(
                 "SELECT rel_path, state, rom_id, mtime FROM files
                  WHERE platform_id = 'arcade' ORDER BY rel_path",
             )?;
-            let rows = stmt.query_map([], |r| {
-                let state: String = r.get(1)?;
-                Ok((
-                    r.get(0)?,
-                    FileState::parse(&state).unwrap_or(FileState::Pending),
-                    r.get(2)?,
-                    r.get(3)?,
-                ))
-            })?;
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
         })
         .expect("rows")
 }
 
-fn zip_rom(app: &Arc<AppState>, name: &str) -> i64 {
+fn zip_rom(app: &Arc<AppState>, name: &str) -> RomId {
     let name = name.to_owned();
     app.db
         .read_blocking(move |c| {
@@ -434,7 +451,7 @@ fn mtime_of(path: &Path) -> i64 {
 }
 
 /// Seeds a row the import path would write for member `a.bin` of `rel`.
-fn import_row(app: &Arc<AppState>, rel: &str, mtime: i64, rom: i64) -> i64 {
+fn import_row(app: &Arc<AppState>, rel: &str, mtime: i64, rom: RomId) -> i64 {
     let member = format!("{rel}#a.bin");
     app.db
         .write_blocking(move |c| {
@@ -680,7 +697,7 @@ async fn a_zip_two_mras_name_keeps_the_promotion_either_gave() {
     write_mra(dir.path(), "Example Blaster", "exparent.zip");
     write_mra(dir.path(), "Example Quest", "exparent.zip");
     catalogue(&app).await;
-    let highest: i64 = app
+    let highest: RomId = app
         .db
         .read_blocking(|c| {
             Ok(c.query_row(

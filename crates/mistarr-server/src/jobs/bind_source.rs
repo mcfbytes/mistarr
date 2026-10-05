@@ -7,15 +7,10 @@ use serde_json::{json, Value};
 
 use super::remap::key_new_roms;
 use super::source_import::{bind_to, publish_changed, rebind_one};
-use super::{Job, JobContext, Lane};
-use crate::db::sources::{self as rows, SourceId};
+use super::{Job, JobContext, JobKind, Lane};
+use crate::db::ids::SourceId;
+use crate::db::sources::{self as rows, SourceReason};
 use crate::error::Result;
-
-/// The `jobs.kind` of [`BindSource`].
-pub const KIND: &str = "bind_source";
-
-/// The reason a source the user marked as not a game set shows.
-pub const IGNORED: &str = "Marked as not a game set. It is not bound automatically.";
 
 pub use crate::db::sources::BindChoice as Choice;
 
@@ -70,7 +65,7 @@ pub fn apply(conn: &Connection, id: SourceId, choice: &Choice, threshold: f32) -
         Choice::Ignore => {
             rows::set_user_binding(conn, id, true)?;
             bind_to(conn, id, None)?;
-            rows::set_reason(conn, id, Some(IGNORED))
+            rows::set_reason(conn, id, Some(&SourceReason::Ignored))
         }
         Choice::Automatic => {
             rows::set_user_binding(conn, id, false)?;
@@ -89,8 +84,8 @@ pub fn apply(conn: &Connection, id: SourceId, choice: &Choice, threshold: f32) -
 
 #[async_trait]
 impl Job for BindSource {
-    fn kind(&self) -> &'static str {
-        KIND
+    fn kind(&self) -> JobKind {
+        JobKind::BindSource
     }
 
     fn payload(&self) -> Value {
@@ -297,8 +292,8 @@ mod tests {
             (SourceState::Unbound, None)
         );
         assert_eq!(
-            (ignored.matched_count, ignored.reason.as_deref()),
-            (0, Some(IGNORED))
+            (ignored.matched_count, ignored.reason),
+            (0, Some(SourceReason::Ignored))
         );
         rebind_after_dat(&app, &[]).await.expect("rebind");
         assert_eq!(

@@ -10,12 +10,13 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use super::{ApiError, Page, Paging};
+use super::{ApiError, Paging};
 use crate::app::AppState;
 use crate::db::downloads::{
-    self as rows, CancelOutcome, Cancelled, DownloadId, DownloadRow, DownloadState, RetryOutcome,
+    self as rows, CancelOutcome, Cancelled, DownloadRow, DownloadState, RetryOutcome,
 };
-use crate::db::sources::SourceId;
+use crate::db::ids::{DownloadId, SourceId};
+use crate::db::sql::Paged;
 use crate::jobs::transfer::{self, Deselect};
 use crate::jobs::Scheduler;
 
@@ -50,19 +51,16 @@ fn states(text: Option<&str>) -> Result<Vec<DownloadState>, ApiError> {
 async fn list(
     State(app): State<Arc<AppState>>,
     query: Result<Query<ListQuery>, QueryRejection>,
-) -> Result<Json<Page<DownloadRow>>, ApiError> {
+) -> Result<Json<Paged<DownloadRow>>, ApiError> {
     let Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let states = states(query.state.as_deref())?;
-    let (limit, offset) = Paging {
+    let page = Paging {
         limit: query.limit,
         offset: query.offset,
     }
     .resolve();
-    let (items, total) = app
-        .db
-        .read(move |c| rows::list(c, &states, limit, offset))
-        .await?;
-    Ok(Json(Page { items, total }))
+    let rows = app.db.read(move |c| rows::list(c, &states, page)).await?;
+    Ok(Json(rows))
 }
 
 fn download_id(id: Result<Path<i64>, PathRejection>) -> Result<DownloadId, ApiError> {

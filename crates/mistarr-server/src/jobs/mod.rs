@@ -31,7 +31,9 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use crate::app::AppState;
-use crate::db::jobs::{self as rows, JobId, JobState};
+use crate::db::ids::JobId;
+use crate::db::jobs::{self as rows, JobState};
+use crate::db::sql::text_enum;
 use crate::error::{Error, Result};
 use crate::events::EventKind;
 
@@ -40,43 +42,64 @@ const KEEP_FINISHED: u32 = 200;
 
 /// Kinds whose whole work a paused run of the same payload still covers, so a
 /// second request never queues behind it.
-pub const SINGLETON_KINDS: [&str; 4] = [
-    arcade::KIND,
-    scan::KIND,
-    dat_import::RECOMPUTE_KIND,
-    chd::KIND,
+pub const SINGLETON_KINDS: [JobKind; 4] = [
+    JobKind::ArcadeCatalog,
+    JobKind::Scan,
+    JobKind::Recompute,
+    JobKind::ChdTracks,
 ];
 
 /// Error recorded on a job a previous process left unfinished and that is not re-run.
 pub const INTERRUPTED: &str = "interrupted by a restart";
 
-/// Which serial queue a job runs on.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Lane {
-    /// Hashing, scanning, placing files: one at a time, held by the gate.
-    Heavy,
-    /// DAT and source parsing: one at a time, held only by a manual pause, yielding while a core runs.
-    Background,
-    /// Client polling, detection and transfers: one at a time, never held.
-    Light,
-    /// Fetches of a URL the user supplied: one at a time, never held.
-    Fetch,
+/// Error recorded on an unfinished job whose row this version cannot read.
+pub const UNREADABLE: &str = "not readable by this version";
+
+text_enum! {
+    /// Which serial queue a job runs on: `jobs.lane`.
+    pub enum Lane {
+        /// Hashing, scanning, placing files: one at a time, held by the gate.
+        Heavy = "heavy",
+        /// DAT and source parsing: one at a time, held only by a manual pause, yielding while a core runs.
+        Background = "background",
+        /// Client polling, detection and transfers: one at a time, never held.
+        Light = "light",
+        /// Fetches of a URL the user supplied: one at a time, never held.
+        Fetch = "fetch",
+    }
 }
 
-impl Lane {
-    /// The `jobs.lane` value.
-    ///
-    /// ```
-    /// assert_eq!(mistarr_server::jobs::Lane::Background.as_str(), "background");
-    /// ```
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Heavy => "heavy",
-            Self::Background => "background",
-            Self::Light => "light",
-            Self::Fetch => "fetch",
-        }
+text_enum! {
+    /// What a job does: `jobs.kind`.
+    pub enum JobKind {
+        /// [`scan::ScanJob`].
+        Scan = "scan",
+        /// [`import::ImportJob`].
+        Import = "import",
+        /// [`detect_client::DetectClient`].
+        DetectClient = "detect_client",
+        /// [`dat_import::DatImport`].
+        DatImport = "dat_import",
+        /// [`dat_import::Recompute`].
+        Recompute = "recompute_1g1r",
+        /// [`source_import::SourceImport`].
+        SourceImport = "source_import",
+        /// [`source_import::ResolveMagnet`].
+        ResolveMagnet = "resolve_magnet",
+        /// [`transfer::Transfer`].
+        Transfer = "transfer",
+        /// [`transfer::Deselect`].
+        Deselect = "deselect",
+        /// [`arcade::ArcadeCatalog`].
+        ArcadeCatalog = "arcade_catalog",
+        /// [`chd::ChdTracks`].
+        ChdTracks = "chd_tracks",
+        /// [`remap::RemapSources`].
+        RemapSources = "remap_sources",
+        /// [`bind_source::BindSource`].
+        BindSource = "bind_source",
+        /// [`url_fetch::UrlFetch`].
+        UrlFetch = "url_fetch",
     }
 }
 
@@ -84,8 +107,8 @@ impl Lane {
 /// them through [`Scheduler::enqueue`].
 #[async_trait]
 pub trait Job: Send + Sync {
-    /// The `jobs.kind` value.
-    fn kind(&self) -> &'static str;
+    /// What the job does.
+    fn kind(&self) -> JobKind;
 
     /// The `jobs.payload` value; equal kind and payload deduplicate while queued.
     fn payload(&self) -> Value {
@@ -112,7 +135,7 @@ pub struct JobContext {
     /// The job's row.
     pub id: JobId,
     /// The job's kind.
-    pub kind: &'static str,
+    pub kind: JobKind,
     /// The server.
     pub app: Arc<AppState>,
     lane: Lane,
@@ -123,7 +146,7 @@ pub struct JobContext {
 #[derive(Debug, Clone, Serialize)]
 struct ProgressEvent<'a> {
     id: JobId,
-    kind: &'a str,
+    kind: JobKind,
     state: JobState,
     detail: Option<&'a str>,
     progress: &'a Value,
@@ -308,7 +331,7 @@ impl Scheduler {
                 if let Some(id) = rows::find_queued(c, kind, &payload, singleton)? {
                     return Ok((id, false));
                 }
-                let id = rows::insert(c, kind, &payload, lane.as_str(), crate::unix_now())?;
+                let id = rows::insert(c, kind, &payload, lane, crate::unix_now())?;
                 Ok((id, true))
             })
             .await?;
@@ -381,7 +404,7 @@ impl Scheduler {
         let (kind, payload) = (job.kind(), job.payload());
         let id = app
             .db
-            .write(move |c| rows::insert(c, kind, &payload, "light", crate::unix_now()))
+            .write(move |c| rows::insert(c, kind, &payload, Lane::Light, crate::unix_now()))
             .await?;
         execute(app, id, job.as_ref(), Lane::Light).await?;
         Ok(id)
@@ -421,10 +444,7 @@ async fn lane(
 /// Once the heavy queue drains, ends a "Run now" override so later work
 /// waits for the core again; otherwise refreshes the waiting list in `status`.
 async fn after_heavy(app: &Arc<AppState>) {
-    let open = app
-        .db
-        .read(|c| rows::open_in_lane(c, Lane::Heavy.as_str()))
-        .await;
+    let open = app.db.read(|c| rows::open_in_lane(c, Lane::Heavy)).await;
     match open {
         Ok(rows) if rows.is_empty() => {
             if app.gate.end_run_now() {
@@ -446,31 +466,42 @@ pub struct Reconciled {
     pub failed: usize,
     /// Deleted as repeats of an earlier row with the same kind and payload.
     pub dropped: usize,
+    /// Failed as [`UNREADABLE`]: a kind or lane this binary does not list, or bad JSON.
+    pub unreadable: usize,
 }
 
 /// Takes over the queued, running and paused rows a previous process left:
-/// the first row of each kind and payload goes back on its lane under its
-/// own id when [`revive`] knows the kind, else fails as [`INTERRUPTED`];
-/// later repeats are deleted. Run it before anything else is enqueued.
+/// rows this binary cannot read fail as [`UNREADABLE`]; the first row of each
+/// kind and payload goes back on its lane under its own id when [`revive`]
+/// knows the kind, else fails as [`INTERRUPTED`]; later repeats are deleted.
+/// Run it before anything else is enqueued.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] when the rows cannot be read or written,
 /// [`crate::Error::Job`] when a lane has stopped.
 pub async fn reconcile(app: &Arc<AppState>) -> Result<Reconciled> {
+    let now = crate::unix_now();
+    let unreadable = app
+        .db
+        .write(move |c| rows::fail_unreadable(c, UNREADABLE, now))
+        .await?;
     let open = app.db.read(rows::open_rows).await?;
     let mut seen = std::collections::HashSet::new();
-    let mut done = Reconciled::default();
+    let mut done = Reconciled {
+        unreadable,
+        ..Reconciled::default()
+    };
     for row in open {
         let id = row.id;
-        if !seen.insert((row.kind.clone(), row.payload.to_string())) {
+        if !seen.insert((row.kind, row.payload.to_string())) {
             app.db.write(move |c| rows::delete(c, id)).await?;
             done.dropped += 1;
             continue;
         }
         let now = crate::unix_now();
-        if let Some(job) = revive(&row.kind, &row.payload) {
-            let lane = job.lane().as_str();
+        if let Some(job) = revive(row.kind, &row.payload) {
+            let lane = job.lane();
             app.db
                 .write(move |c| rows::requeue(c, id, lane, now))
                 .await?;
@@ -490,35 +521,40 @@ pub async fn reconcile(app: &Arc<AppState>) -> Result<Reconciled> {
 /// safe to run again after a restart; `None` for the rest.
 ///
 /// ```
-/// use mistarr_server::jobs::revive;
-/// assert!(revive("arcade_catalog", &serde_json::json!({})).is_some());
-/// assert!(revive("chd_tracks", &serde_json::json!({})).is_some());
-/// assert!(revive("dat_import", &serde_json::json!({"path": "/d/a.dat"})).is_some());
-/// assert!(revive("detect_client", &serde_json::json!({})).is_none());
+/// use mistarr_server::jobs::{revive, JobKind};
+/// assert!(revive(JobKind::ArcadeCatalog, &serde_json::json!({})).is_some());
+/// assert!(revive(JobKind::ChdTracks, &serde_json::json!({})).is_some());
+/// assert!(revive(JobKind::DatImport, &serde_json::json!({"path": "/d/a.dat"})).is_some());
+/// assert!(revive(JobKind::DetectClient, &serde_json::json!({})).is_none());
 /// ```
 #[must_use]
-pub fn revive(kind: &str, payload: &Value) -> Option<Arc<dyn Job>> {
+pub fn revive(kind: JobKind, payload: &Value) -> Option<Arc<dyn Job>> {
     let text = |key: &str| payload.get(key).and_then(Value::as_str);
     let job: Arc<dyn Job> = match kind {
-        arcade::KIND => Arc::new(arcade::ArcadeCatalog),
-        chd::KIND => Arc::new(chd::ChdTracks),
-        scan::KIND => Arc::new(scan::ScanJob {
+        JobKind::ArcadeCatalog => Arc::new(arcade::ArcadeCatalog),
+        JobKind::ChdTracks => Arc::new(chd::ChdTracks),
+        JobKind::Scan => Arc::new(scan::ScanJob {
             platform_id: text("platform_id").map(|p| mistarr_core::PlatformId(p.to_owned())),
         }),
         // A bind request names a version; the user repeats it from the UI instead.
-        dat_import::KIND if payload.get("dat_version_id").is_none() => Arc::new(
+        JobKind::DatImport if payload.get("dat_version_id").is_none() => Arc::new(
             dat_import::DatImport::new(std::path::Path::new(text("path")?)),
         ),
-        dat_import::RECOMPUTE_KIND => Arc::new(dat_import::Recompute::new(text("platform_id")?)),
-        source_import::IMPORT_KIND => Arc::new(source_import::SourceImport {
+        JobKind::Recompute => Arc::new(dat_import::Recompute::new(text("platform_id")?)),
+        JobKind::SourceImport => Arc::new(source_import::SourceImport {
             path: text("path")?.into(),
         }),
-        remap::KIND => Arc::new(remap::RemapSources::from_payload(payload)),
-        bind_source::KIND => Arc::new(bind_source::BindSource::from_payload(payload)?),
-        import::KIND => Arc::new(import::ImportJob {
-            download_id: crate::db::downloads::DownloadId(payload.get("download_id")?.as_i64()?),
+        JobKind::RemapSources => Arc::new(remap::RemapSources::from_payload(payload)),
+        JobKind::BindSource => Arc::new(bind_source::BindSource::from_payload(payload)?),
+        JobKind::Import => Arc::new(import::ImportJob {
+            download_id: crate::db::ids::DownloadId(payload.get("download_id")?.as_i64()?),
         }),
-        _ => return None,
+        JobKind::DatImport
+        | JobKind::DetectClient
+        | JobKind::ResolveMagnet
+        | JobKind::Transfer
+        | JobKind::Deselect
+        | JobKind::UrlFetch => return None,
     };
     Some(job)
 }
@@ -533,7 +569,7 @@ async fn execute(app: &Arc<AppState>, id: JobId, job: &dyn Job, lane: Lane) -> R
         detail: crate::status::job_detail(&job.payload()),
     };
     set_state(app, id, JobState::Running).await?;
-    tracing::debug!(job = %id, kind = ctx.kind, "job started");
+    tracing::debug!(job = %id, kind = %ctx.kind, "job started");
     let ran = job.run(&ctx).await;
     // Cleared before any exit below, including shutdown and a failed final write.
     app.live.clear(id);
@@ -541,11 +577,11 @@ async fn execute(app: &Arc<AppState>, id: JobId, job: &dyn Job, lane: Lane) -> R
         Ok(()) => (JobState::Done, None),
         // Left queued so the next start runs it again; see `reconcile`.
         Err(Error::Cancelled) if *app.shutdown_signal().borrow() => {
-            tracing::debug!(job = %id, kind = ctx.kind, "job stopped for shutdown");
+            tracing::debug!(job = %id, kind = %ctx.kind, "job stopped for shutdown");
             return set_state(app, id, JobState::Queued).await;
         }
         Err(e) => {
-            tracing::warn!(job = %id, kind = ctx.kind, error = %e, "job failed");
+            tracing::warn!(job = %id, kind = %ctx.kind, error = %e, "job failed");
             (JobState::Failed, Some(json!({ "error": e.to_string() })))
         }
     };
@@ -586,8 +622,8 @@ mod tests {
 
     #[async_trait]
     impl Job for Probe {
-        fn kind(&self) -> &'static str {
-            "probe"
+        fn kind(&self) -> JobKind {
+            JobKind::UrlFetch
         }
         fn payload(&self) -> Value {
             json!({ "tag": self.tag })
@@ -667,8 +703,8 @@ mod tests {
 
     #[async_trait]
     impl Job for Reports {
-        fn kind(&self) -> &'static str {
-            "reports"
+        fn kind(&self) -> JobKind {
+            JobKind::Transfer
         }
         fn payload(&self) -> Value {
             json!({ "path": "/d/r.dat" })
@@ -734,7 +770,7 @@ mod tests {
         while let Ok(ev) = events.try_recv() {
             kinds.push(ev.kind);
             if ev.kind == EventKind::JobProgress {
-                assert!(ev.data.contains(r#""kind":"probe""#));
+                assert!(ev.data.contains(r#""kind":"url_fetch""#));
             }
         }
         assert_eq!(kinds.first(), Some(&EventKind::JobProgress), "queued first");
@@ -787,8 +823,8 @@ mod tests {
 
     #[async_trait]
     impl Job for Blocker {
-        fn kind(&self) -> &'static str {
-            "blocker"
+        fn kind(&self) -> JobKind {
+            JobKind::Deselect
         }
         fn lane(&self) -> Lane {
             self.lane
@@ -850,7 +886,7 @@ mod tests {
         let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");
         let row = row.expect("row");
         assert_eq!(row.state, JobState::Queued, "left for the next start");
-        assert_eq!(row.lane, "heavy");
+        assert_eq!(row.lane, Lane::Heavy);
     }
 
     #[tokio::test]
@@ -902,8 +938,8 @@ mod tests {
 
     #[async_trait]
     impl Job for Singleton {
-        fn kind(&self) -> &'static str {
-            arcade::KIND
+        fn kind(&self) -> JobKind {
+            JobKind::ArcadeCatalog
         }
         fn lane(&self) -> Lane {
             Lane::Heavy
@@ -935,18 +971,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reconcile_requeues_known_kinds_and_drops_repeats() {
+    async fn reconcile_requeues_known_kinds_drops_repeats_and_fails_unknown_ones() {
         let (dir, app) = state();
         let dat = dir.path().join("gone.dat");
-        let (scan, repeat, poll) = app
+        let (scan, repeat, poll, nope) = app
             .db
             .write(move |c| {
                 let path = json!({ "path": dat });
-                let scan = rows::insert(c, "dat_import", &path, "heavy", 1)?;
+                let scan = rows::insert(c, JobKind::DatImport, &path, Lane::Heavy, 1)?;
                 rows::set_state(c, scan, JobState::Paused, 1)?;
-                let repeat = rows::insert(c, "dat_import", &path, "heavy", 1)?;
-                let poll = rows::insert(c, "detect_client", &json!({}), "light", 1)?;
-                Ok((scan, repeat, poll))
+                let repeat = rows::insert(c, JobKind::DatImport, &path, Lane::Heavy, 1)?;
+                let poll = rows::insert(c, JobKind::DetectClient, &json!({}), Lane::Light, 1)?;
+                let nope = rows::insert(c, JobKind::Scan, &json!({"n": 1}), Lane::Heavy, 1)?;
+                c.execute("UPDATE jobs SET kind = 'nope' WHERE id = ?1", [nope])?;
+                Ok((scan, repeat, poll, nope))
             })
             .await
             .expect("seed");
@@ -956,17 +994,31 @@ mod tests {
             Reconciled {
                 requeued: 1,
                 failed: 1,
-                dropped: 1
+                dropped: 1,
+                unreadable: 1,
             }
         );
+        let (state, progress): (String, String) = app
+            .db
+            .read(move |c| {
+                Ok(c.query_row(
+                    "SELECT state, progress FROM jobs WHERE id = ?1",
+                    [nope],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )?)
+            })
+            .await
+            .expect("unknown row");
+        assert_eq!(state, "failed");
+        assert_eq!(progress, json!({ "error": UNREADABLE }).to_string());
         let get = |id| {
             let app = Arc::clone(&app);
             async move { app.db.read(move |c| rows::get(c, id)).await.expect("get") }
         };
         let revived = get(scan).await.expect("row");
         assert_eq!(
-            (revived.state, revived.lane.as_str()),
-            (JobState::Queued, "background")
+            (revived.state, revived.lane),
+            (JobState::Queued, Lane::Background)
         );
         assert!(get(repeat).await.is_none());
         let failed = get(poll).await.expect("row");
@@ -978,20 +1030,20 @@ mod tests {
     #[test]
     fn revive_covers_the_rerunnable_kinds() {
         for (kind, payload) in [
-            ("scan", json!({ "platform_id": null })),
-            ("scan", json!({ "platform_id": "nes" })),
-            ("recompute_1g1r", json!({ "platform_id": "nes" })),
-            ("source_import", json!({ "path": "/s/a.torrent" })),
-            ("import", json!({ "download_id": 3 })),
-            ("remap_sources", json!({ "platforms": null })),
-            ("remap_sources", json!({ "platforms": ["nes"] })),
+            (JobKind::Scan, json!({ "platform_id": null })),
+            (JobKind::Scan, json!({ "platform_id": "nes" })),
+            (JobKind::Recompute, json!({ "platform_id": "nes" })),
+            (JobKind::SourceImport, json!({ "path": "/s/a.torrent" })),
+            (JobKind::Import, json!({ "download_id": 3 })),
+            (JobKind::RemapSources, json!({ "platforms": null })),
+            (JobKind::RemapSources, json!({ "platforms": ["nes"] })),
         ] {
-            let job = revive(kind, &payload).expect(kind);
+            let job = revive(kind, &payload).expect("a rerunnable kind");
             assert_eq!((job.kind(), job.payload()), (kind, payload));
         }
         let bind = json!({ "path": "/d/a.dat", "dat_version_id": 1, "platform_id": "nes" });
-        assert!(revive("dat_import", &bind).is_none());
-        assert!(revive("import", &json!({})).is_none());
+        assert!(revive(JobKind::DatImport, &bind).is_none());
+        assert!(revive(JobKind::Import, &json!({})).is_none());
         assert_eq!(Lane::Heavy.as_str(), "heavy");
     }
 }

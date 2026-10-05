@@ -9,18 +9,15 @@ use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::broadcast::error::RecvError;
 
-use super::{Job, JobContext, Scheduler};
+use super::{Job, JobContext, JobKind, Scheduler};
 use crate::app::AppState;
 use crate::db::deferred::Op;
-use crate::db::downloads::{self as rows, DownloadId, DownloadRow, DownloadState};
-use crate::db::sources::{self, SourceId, SourceRow};
+use crate::db::downloads::{self as rows, DownloadRow, DownloadState};
+use crate::db::ids::DownloadId;
+use crate::db::ids::SourceId;
+use crate::db::sources::{self, SourceRow};
 use crate::error::Result;
 use crate::events::EventKind;
-
-/// The `jobs.kind` of [`Transfer`].
-pub const KIND: &str = "transfer";
-/// The `jobs.kind` of [`Deselect`].
-pub const DESELECT_KIND: &str = "deselect";
 
 /// Error stored on downloads whose `.torrent` is gone from `sources/loaded/`.
 pub const MISSING_TORRENT: &str =
@@ -97,8 +94,8 @@ enum Flow {
 
 #[async_trait]
 impl Job for Transfer {
-    fn kind(&self) -> &'static str {
-        KIND
+    fn kind(&self) -> JobKind {
+        JobKind::Transfer
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
@@ -288,8 +285,8 @@ async fn metainfo(app: &AppState, row: &SourceRow) -> Option<TorrentSource> {
 
 #[async_trait]
 impl Job for Deselect {
-    fn kind(&self) -> &'static str {
-        DESELECT_KIND
+    fn kind(&self) -> JobKind {
+        JobKind::Deselect
     }
 
     fn payload(&self) -> Value {
@@ -365,9 +362,9 @@ mod tests {
     use super::*;
     use crate::app::testutil::state;
     use crate::db::downloads::{CancelOutcome, Candidate, NewDownload};
+    use crate::db::ids::TitleId;
     use crate::db::sources::fixtures::seed_rom;
     use crate::db::sources::{NewSource, SourceState};
-    use crate::db::titles::TitleId;
     use mistarr_clients::{ClientFile, ClientInfo, TorrentStatus};
     use mistarr_sources::binding::{Confidence, RomRef};
     use std::path::Path;
@@ -509,7 +506,7 @@ mod tests {
                     },
                 )?;
                 sources::replace_files(c, source, &meta.files)?;
-                sources::set_matches(c, source, &[(0, Some(RomRef(rom)), Confidence::Name)])?;
+                sources::set_matches(c, source, &[(0, Some(RomRef(rom.0)), Confidence::Name)])?;
                 let id = rows::create(
                     c,
                     &NewDownload {
@@ -599,12 +596,16 @@ mod tests {
         Scheduler::run_inline(&app, Arc::new(Transfer))
             .await
             .expect("run");
-        let (_, total) = app
+        let page = crate::db::sql::Page {
+            limit: 10,
+            offset: 0,
+        };
+        let listed = app
             .db
-            .read(|c| rows::list(c, &[], 10, 0))
+            .read(move |c| rows::list(c, &[], page))
             .await
             .expect("list");
-        assert_eq!(total, 0);
+        assert_eq!(listed.total, 0);
         let ev = events.recv().await.expect("job event");
         assert_eq!(ev.kind, EventKind::JobProgress);
         assert!(ev.data.contains(r#""kind":"transfer""#));

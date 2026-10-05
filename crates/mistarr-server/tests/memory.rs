@@ -13,6 +13,8 @@ use std::time::{Duration, Instant};
 
 use mistarr_core::bencode::{self, Value};
 use mistarr_core::hash::Md5Stream;
+use mistarr_server::db::jobs::JobState;
+
 use serde_json::{json, Value as Json};
 
 /// Peak RSS budget during scan or import, `docs/ARCHITECTURE.md` "Resource budgets".
@@ -239,20 +241,23 @@ impl Server {
     }
 
     fn finished(&self, kind: &str, count: usize) -> Option<Vec<(String, Json)>> {
-        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
-        let conn = rusqlite::Connection::open_with_flags(&self.db, flags).ok()?;
+        let conn = mistarr_server::db::open_read_only(&self.db).ok()?;
         let open: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM jobs WHERE state IN ('queued', 'running', 'paused')",
+                &format!(
+                    "SELECT COUNT(*) FROM jobs WHERE state IN {}",
+                    JobState::ACTIVE_SQL
+                ),
                 [],
                 |r| r.get(0),
             )
             .ok()?;
         let mut stmt = conn
-            .prepare(
+            .prepare(&format!(
                 "SELECT state, COALESCE(progress, 'null') FROM jobs
-                 WHERE kind = ?1 AND state IN ('done', 'failed') ORDER BY id",
-            )
+                 WHERE kind = ?1 AND state IN {} ORDER BY id",
+                JobState::FINISHED_SQL
+            ))
             .ok()?;
         let rows: Vec<(String, Json)> = stmt
             .query_map([kind], |r| {
@@ -269,8 +274,7 @@ impl Server {
     }
 
     fn count(&self, sql: &str) -> i64 {
-        let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
-        let conn = rusqlite::Connection::open_with_flags(&self.db, flags).expect("open db");
+        let conn = mistarr_server::db::open_read_only(&self.db).expect("open db");
         conn.query_row(sql, [], |r| r.get(0)).expect("count")
     }
 
@@ -1001,14 +1005,16 @@ fn a_url_fetch_stays_under_budget() {
     s.read_to_string(&mut reply).expect("read");
     assert!(reply.starts_with("HTTP/1.1 202"), "{reply}");
     let start = Instant::now();
-    let flags = rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY;
     let (state, progress) = loop {
-        let row = rusqlite::Connection::open_with_flags(&server.db, flags)
+        let row = mistarr_server::db::open_read_only(&server.db)
             .ok()
             .and_then(|c| {
                 c.query_row(
-                    "SELECT state, COALESCE(progress, 'null') FROM jobs
-                     WHERE kind = 'url_fetch' AND state IN ('done', 'failed')",
+                    &format!(
+                        "SELECT state, COALESCE(progress, 'null') FROM jobs
+                         WHERE kind = 'url_fetch' AND state IN {}",
+                        JobState::FINISHED_SQL
+                    ),
                     [],
                     |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
                 )
