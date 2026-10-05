@@ -403,7 +403,7 @@ fn describe(src: &[u8], kind: Kind) -> Result<(u32, Vec<i32>, usize), ChdError> 
             return Err(corrupt("zstd FSE table has too many symbols"));
         }
         let max = 2 * threshold - 1 - remaining;
-        #[allow(clippy::cast_possible_wrap)] // at most 10 bits
+        #[expect(clippy::cast_possible_wrap, reason = "at most 10 bits")]
         let v = bits.peek(width) as i32;
         let mut count = if v & (threshold - 1) < max {
             bits.pos += width as usize - 1;
@@ -564,7 +564,10 @@ impl<'a> Reverse<'a> {
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_possible_truncation)] // synthetic test bytes wrap on purpose
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "synthetic test bytes wrap on purpose"
+)]
 mod tests {
     use super::*;
     use proptest::prelude::*;

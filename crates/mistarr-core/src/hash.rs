@@ -431,8 +431,10 @@ impl Skipping {
         if start >= self.skip {
             self.skipped.update(chunk);
         } else if self.pos > self.skip {
-            // start < skip here, so the difference always fits in usize.
-            #[allow(clippy::cast_possible_truncation)]
+            #[expect(
+                clippy::cast_possible_truncation,
+                reason = "start < skip here, so the difference always fits in usize."
+            )]
             self.skipped.update(&chunk[(self.skip - start) as usize..]);
         }
     }
@@ -964,10 +966,12 @@ mod tests {
         assert_eq!(members[0].crc32, "352441c2");
     }
 
-    // Hand-assembled: the `zip` crate's writer refuses a compression method
-    // it cannot encode, but listing must not decode anything to succeed.
-    // Buffers here are a few dozen bytes, so length casts never truncate.
-    #[allow(clippy::cast_possible_truncation)]
+    /// Hand-assembled: the `zip` crate's writer refuses a compression method
+    /// it cannot encode, but listing must not decode anything to succeed.
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "Buffers here are a few dozen bytes, so length casts never truncate."
+    )]
     fn build_mixed_method_zip() -> Vec<u8> {
         fn entry(
             buf: &mut Vec<u8>,
@@ -1102,7 +1106,7 @@ mod tests {
     }
 
     /// A payload of `len` bytes starting with `rule`'s header when `headered`.
-    #[allow(clippy::cast_possible_truncation)] // A byte-filler pattern.
+    #[expect(clippy::cast_possible_truncation, reason = "A byte-filler pattern.")]
     fn synthetic(rule: HeaderRule, headered: bool, len: usize) -> Vec<u8> {
         let mut data: Vec<u8> = (0..len).map(|i| (i * 7 + 3) as u8).collect();
         let magic: &[u8] = match rule {

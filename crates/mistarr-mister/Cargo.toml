@@ -7,6 +7,9 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [features]
 # The recording command sink, for tests of this crate and its dependents.
 test-support = []
@@ -14,12 +17,12 @@ test-support = []
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
-mistarr-core = { path = "../mistarr-core" }
-quick-xml = { version = "0.42", default-features = false }
+mistarr-core.workspace = true
+quick-xml.workspace = true
 regex-lite = "0.1"
-rustix = { version = "1", default-features = false, features = ["std", "fs"] }
+rustix.workspace = true
 
 [dev-dependencies]
 mistarr-mister = { path = ".", features = ["test-support"] }
-proptest = { version = "1", default-features = false, features = ["std"] }
-tempfile = "3"
+proptest.workspace = true
+tempfile.workspace = true

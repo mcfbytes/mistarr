@@ -252,9 +252,16 @@ impl Rng {
     fn zipf(&mut self, n: usize) -> usize {
         // Inverse of the continuous 1/x distribution over [1, n + 1).
         let u = f64::from(u32::try_from(self.next() >> 40).unwrap_or(0)) / f64::from(1_u32 << 24);
-        #[allow(clippy::cast_precision_loss)]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "Titles per console are far below 2^52, so the float is exact."
+        )]
         let x = ((n + 1) as f64).powf(u);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "u is below 1, so x is below n + 1 and fits in usize."
+        )]
         let i = x as usize;
         i.saturating_sub(1).min(n - 1)
     }
@@ -303,9 +310,16 @@ fn base_name(rng: &mut Rng, words: &[String]) -> String {
 
 /// `count` titles of `console` scaled by `scale`, at least one group's worth.
 fn scaled(console: &Console, scale: f64) -> usize {
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Table sizes are far below 2^52, so the float is exact."
+    )]
     let n = console.titles as f64 * scale;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "The scaled count is small and non-negative, so it fits in usize."
+    )]
     let n = n.round() as usize;
     n.max(3)
 }
@@ -376,7 +390,10 @@ pub fn game_names(count: usize, seed: u64) -> Vec<String> {
     out
 }
 
-#[allow(clippy::too_many_lines)] // One DAT's worth of rows, read top to bottom.
+#[expect(
+    clippy::too_many_lines,
+    reason = "One DAT's worth of rows, read top to bottom."
+)]
 fn seed_console(
     c: &Connection,
     rng: &mut Rng,

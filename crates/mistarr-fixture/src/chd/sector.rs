@@ -9,7 +9,7 @@ pub(crate) const SYNC: [u8; 12] = [
     0, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0,
 ];
 
-#[allow(clippy::cast_possible_truncation)] // indexes are below 256
+#[expect(clippy::cast_possible_truncation, reason = "indexes are below 256")]
 const fn edc_table() -> [u32; 256] {
     let mut t = [0u32; 256];
     let mut i = 0;

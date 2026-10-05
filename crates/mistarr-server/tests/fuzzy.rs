@@ -3,6 +3,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::io::Cursor;
 
 use common::{boot, eventually, get, request, Booted};
@@ -70,7 +71,7 @@ fn bstr(s: &str) -> String {
 fn torrent() -> Vec<u8> {
     let mut list = String::from("l");
     for (file, len) in FILES {
-        list.push_str(&format!("d6:lengthi{len}e4:pathl{}ee", bstr(file)));
+        let _ = write!(list, "d6:lengthi{len}e4:pathl{}ee", bstr(file));
     }
     list.push('e');
     format!(
@@ -205,6 +206,10 @@ struct Wanted {
 
 /// Loads the DAT and the torrent, binds the source to NES as a user would,
 /// checks both titles are offered `nova.nes`, and wants both.
+#[expect(
+    clippy::many_single_char_names,
+    reason = "Short names mirror the fixture rows."
+)]
 async fn both_wanted(b: &Booted) -> Wanted {
     let config = b.running.app.config();
     std::fs::create_dir_all(config.paths.dats()).expect("dats");
@@ -294,6 +299,10 @@ async fn both_wanted(b: &Booted) -> Wanted {
 /// The Alt is placed and verified, the parent's download names it, the
 /// parent is wanted again with that history, and `nova.nes` is no longer
 /// offered for the parent.
+#[expect(
+    clippy::many_single_char_names,
+    reason = "Short names mirror the fixture rows."
+)]
 async fn assert_alt_placed(b: &Booted, w: &Wanted) {
     eventually("both downloads settle", || async {
         let p = downloads_of(b, w.parent).await;

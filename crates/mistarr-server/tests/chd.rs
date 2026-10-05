@@ -3,6 +3,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
@@ -219,6 +220,10 @@ async fn scan_jobs(app: &AppState) -> i64 {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One user journey, read top to bottom."
+)]
 async fn the_setting_off_reads_only_the_header_and_turning_it_on_verifies_the_tracks() {
     let dir = tempfile::tempdir().expect("tempdir");
     let b = boot(dir, false).await;
@@ -389,12 +394,12 @@ async fn a_chd_beside_its_bins_and_cue_leaves_both_verified() {
     b.running.shutdown().await.expect("shutdown");
 }
 
-/// A Logiqx DAT for PlayStation with one game `g` of a cue and `tracks`.
+/// A Logiqx DAT for `PlayStation` with one game `g` of a cue and `tracks`.
 fn psx_dat(version: &str, tracks: &[HashSet]) -> String {
     psx_dat_of(version, &[("g", tracks)])
 }
 
-/// A Logiqx DAT for PlayStation with a game per `(name, tracks)`, each with a cue.
+/// A Logiqx DAT for `PlayStation` with a game per `(name, tracks)`, each with a cue.
 fn psx_dat_of(version: &str, games: &[(&str, &[HashSet])]) -> String {
     let rom = |name: &str, h: &HashSet| {
         format!(
@@ -408,9 +413,10 @@ fn psx_dat_of(version: &str, games: &[(&str, &[HashSet])]) -> String {
         for (i, h) in tracks.iter().enumerate() {
             roms.push_str(&rom(&format!("{game} (Track {:02}).bin", i + 1), h));
         }
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             "<game name=\"{game}\"><description>{game}</description>{roms}</game>"
-        ));
+        );
     }
     format!(
         "<datafile><header><name>Sony - PlayStation</name><version>{version}</version></header>\

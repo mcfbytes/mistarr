@@ -509,11 +509,11 @@ branch `wp-68-typed-events`
 
 Haiku · every `Cargo.toml`, crate roots · branch `wp-70-workspace-lints`
 
-- [ ] `[workspace.lints]` with `lints.workspace = true` in every crate and one
+- [x] `[workspace.lints]` with `lints.workspace = true` in every crate and one
   root `clippy.toml`; the per-crate lint attributes go.
-- [ ] Every allowed lint is `#[expect(lint, reason = "…")]`; none lacks a
+- [x] Every allowed lint is `#[expect(lint, reason = "…")]`; none lacks a
   reason.
-- [ ] `[workspace.dependencies]` lists every dependency used by two or more
+- [x] `[workspace.dependencies]` lists every dependency used by two or more
   crates, with one version and feature set each.
 - [ ] `cargo zigbuild` for armv7 passes and the binary is no larger.
 

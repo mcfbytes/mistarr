@@ -193,13 +193,14 @@ fn set_torrent(games: usize) -> Vec<u8> {
     let mut list = String::from("l");
     for i in 0..games {
         let leaf = format!("Example Title {i} (USA).zip");
-        list.push_str(&format!(
+        let _ = write!(
+            list,
             "d6:lengthi{}e4:pathl{}{}{}ee",
             100 + i,
             bstr("No-Intro"),
             bstr(SYSTEM),
             bstr(&leaf)
-        ));
+        );
     }
     list.push('e');
     let info = format!(
@@ -410,6 +411,7 @@ async fn a_rejected_dat_can_be_retried_after_a_fix_or_deleted() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(clippy::similar_names, reason = "The two listings read as a pair.")]
 async fn incoming_files_show_why_they_are_not_loaded() {
     let booted = boot_with_core(tempfile::tempdir().expect("tempdir")).await;
     let mut events = booted.running.app.events.subscribe(None).live;

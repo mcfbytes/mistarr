@@ -419,8 +419,10 @@ pub(crate) fn rebind_one(
         .iter()
         .filter(|(_, rom, _)| rom.is_some())
         .count();
-    // File counts are far below 2^24, so the rate is exact enough.
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "File counts are far below 2^24, so the rate is exact enough."
+    )]
     let rate = if files.is_empty() {
         0.0
     } else {
@@ -453,8 +455,10 @@ pub fn bind_to(conn: &Connection, id: SourceId, platform: Option<&PlatformId>) -
         return keep_disabled(conn, id, SourceState::Unbound, None);
     };
     let hits = map_files(conn, id, platform, &files)?;
-    // File counts are far below 2^52, so the rate is exact enough.
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "File counts are far below 2^52, so the rate is exact enough."
+    )]
     let rate = if files.is_empty() {
         0.0
     } else {

@@ -70,7 +70,10 @@ fn source(c: &Connection, byte: u8, files: &[(&str, u64, Option<RomId>, Confiden
     id
 }
 
-#[allow(clippy::unnecessary_wraps)] // Reads as the `Option` the functions return.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "Reads as the `Option` the functions return."
+)]
 fn candidate(source_id: SourceId, file_index: u32) -> Option<Candidate> {
     Some(Candidate {
         source_id,

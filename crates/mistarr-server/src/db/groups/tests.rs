@@ -548,7 +548,7 @@ fn nth(c: &Connection, table: &str, k: usize) -> Option<i64> {
     .ok()
 }
 
-#[allow(clippy::too_many_lines)] // One arm per kind of write.
+#[expect(clippy::too_many_lines, reason = "One arm per kind of write.")]
 fn apply(c: &Connection, op: &Op, seq: &mut u32) {
     let title = |k| nth(c, "titles", k);
     let rom = |k| nth(c, "roms", k);

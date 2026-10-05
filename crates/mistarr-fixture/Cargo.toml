@@ -8,6 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lints]
+workspace = true
+
 [lib]
 path = "src/lib.rs"
 
@@ -18,20 +21,20 @@ path = "src/main.rs"
 [dependencies]
 anyhow.workspace = true
 thiserror.workspace = true
-mistarr-core = { path = "../mistarr-core" }
-mistarr-mister = { path = "../mistarr-mister" }
-mistarr-sources = { path = "../mistarr-sources" }
-clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
-sha1 = "0.11"
-zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
-flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-lzma-rs = "0.3"
-ruzstd = "0.9"
+mistarr-core.workspace = true
+mistarr-mister.workspace = true
+mistarr-sources.workspace = true
+clap.workspace = true
+sha1.workspace = true
+zip.workspace = true
+flate2.workspace = true
+lzma-rs.workspace = true
+ruzstd = { workspace = true, features = ["hash"] }
 
 [dev-dependencies]
-tempfile = "3"
-proptest = { version = "1", default-features = false, features = ["std"] }
-claxon = "0.4.3"
-md-5 = "0.11"
-crc32fast = "1"
+tempfile.workspace = true
+proptest.workspace = true
+claxon.workspace = true
+md-5.workspace = true
+crc32fast.workspace = true
 chd = { version = "0.3.4", default-features = false, features = ["std", "cd_full", "verify_block_crc"] }

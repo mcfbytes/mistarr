@@ -39,7 +39,10 @@ pub struct RomRow {
 
 /// One variant of a clone group.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[allow(clippy::struct_excessive_bools)] // One flag per title column is the JSON shape.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "One flag per title column is the JSON shape."
+)]
 pub struct VariantRow {
     /// `titles.id`.
     pub id: TitleId,

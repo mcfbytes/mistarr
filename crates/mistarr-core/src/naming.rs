@@ -10,8 +10,7 @@ mod tests;
 /// A release region as written in a No-Intro or Redump region tag.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
-// Each variant is the region its name spells; `REGIONS` gives the tag text.
-#[allow(missing_docs)]
+#[expect(missing_docs, reason = "Each variant is the region its name spells.")]
 pub enum Region {
     World,
     Usa,
@@ -619,8 +618,10 @@ fn parse_number(s: &str) -> Option<u32> {
 }
 
 /// `None` for a malformed argument, `Some(None)` for no argument, `Some(Some(n))` for a number.
-// The outer option is validity, the inner one presence.
-#[allow(clippy::option_option)]
+#[expect(
+    clippy::option_option,
+    reason = "The outer option is validity, the inner one presence."
+)]
 fn opt_number(arg: Option<&str>) -> Option<Option<u32>> {
     match arg {
         None => Some(None),

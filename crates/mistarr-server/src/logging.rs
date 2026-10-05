@@ -155,7 +155,10 @@ pub fn init(log: Option<&Path>) -> io::Result<()> {
 /// assert!(mistarr_server::logging::same_file(&f, &path));
 /// assert!(!mistarr_server::logging::same_file(&f, std::path::Path::new("/")));
 /// ```
-#[allow(clippy::useless_conversion)] // `st_dev` and `st_ino` are not u64 on every target.
+#[expect(
+    clippy::useless_conversion,
+    reason = "`st_dev` and `st_ino` are not u64 on every target."
+)]
 pub fn same_file(fd: impl std::os::fd::AsFd, path: &Path) -> bool {
     use std::os::unix::fs::MetadataExt;
     let (Ok(open), Ok(named)) = (rustix::fs::fstat(fd), std::fs::metadata(path)) else {

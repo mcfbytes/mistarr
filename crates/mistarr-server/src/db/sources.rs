@@ -109,8 +109,11 @@ impl SourceReason {
     /// ```
     #[must_use]
     pub fn no_match(threshold: f32, suggested: Option<PlatformId>) -> Self {
-        // The threshold is validated to lie in 0..=1, so the percent fits.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_sign_loss,
+            reason = "The threshold is validated to lie in 0..=1, so the percent fits."
+        )]
         let percent = (threshold.clamp(0.0, 1.0) * 100.0).round() as u32;
         Self::NoMatch { percent, suggested }
     }

@@ -8,6 +8,9 @@ repository.workspace = true
 rust-version.workspace = true
 build = "build.rs"
 
+[lints]
+workspace = true
+
 [lib]
 path = "src/lib.rs"
 
@@ -25,29 +28,29 @@ serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
-mistarr-core = { path = "../mistarr-core" }
-mistarr-mister = { path = "../mistarr-mister" }
-mistarr-sources = { path = "../mistarr-sources" }
-mistarr-clients = { path = "../mistarr-clients" }
-async-trait = "0.1"
+mistarr-core.workspace = true
+mistarr-mister.workspace = true
+mistarr-sources.workspace = true
+mistarr-clients.workspace = true
+async-trait.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "multipart", "query", "tokio"] }
-clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+clap.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rusqlite = { version = "0.40", features = ["bundled", "backup", "hooks"] }
 rust-embed = "8"
-rustix = { version = "1", default-features = false, features = ["std", "fs", "process"] }
+rustix = { workspace = true, features = ["process"] }
 serde_ignored = "0.1"
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "fs", "signal", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "time", "fs", "signal", "macros"] }
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }
-zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+zip.workspace = true
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter"] }
 
 [dev-dependencies]
 mistarr-server = { path = ".", features = ["test-support"] }
-mistarr-fixture = { path = "../mistarr-fixture" }
-tempfile = "3"
-proptest = { version = "1", default-features = false, features = ["std"] }
-rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+mistarr-fixture.workspace = true
+tempfile.workspace = true
+proptest.workspace = true
+rcgen.workspace = true
+rustls.workspace = true
 rusqlite = { version = "0.40", features = ["bundled", "hooks", "trace"] }
-tokio = { version = "1", default-features = false, features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "time", "io-util", "macros"] }

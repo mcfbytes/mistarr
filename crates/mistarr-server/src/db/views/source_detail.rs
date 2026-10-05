@@ -495,11 +495,11 @@ pub fn preview_chunk(
     let hits = binding::score_platforms(&files, &SqlDatIndex::new(conn))
         .into_iter()
         .map(|(p, rate)| {
-            // Rates are hits over a chunk's file count, far below 2^24, so this restores the count.
-            #[allow(
+            #[expect(
                 clippy::cast_possible_truncation,
                 clippy::cast_sign_loss,
-                clippy::cast_precision_loss
+                clippy::cast_precision_loss,
+                reason = "Rates are hits over a chunk's file count, far below 2^24, so this restores the count."
             )]
             let hit = (f64::from(rate) * n as f64).round() as u64;
             (p, hit)

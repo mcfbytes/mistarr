@@ -38,7 +38,10 @@ const RC_DATA_DIR: &str = "/media/fat/mistarr";
 
 /// Which clients are installed on this machine, whether or not they run.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)] // One flag per thing the UI offers.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "One flag per thing the UI offers."
+)]
 pub struct Installed {
     /// `transmission-daemon` is an executable on `PATH`.
     pub transmission_on_path: bool,

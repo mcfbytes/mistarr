@@ -604,8 +604,10 @@ impl RawStatus {
         } else {
             Vec::new()
         };
-        // d.ratio is in thousandths; f32 is ample for a ratio.
-        #[allow(clippy::cast_precision_loss)]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "d.ratio is in thousandths; f32 is ample for a ratio."
+        )]
         let ratio = int(ratio)? as f32 / 1000.0;
         Ok(Self {
             open_state: int(state)?,

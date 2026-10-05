@@ -77,6 +77,10 @@ fn spawn(root: &Path, memory: &str) -> Server {
 }
 
 /// [`spawn`] with `envs` added to the server's environment.
+#[expect(
+    clippy::unnecessary_debug_formatting,
+    reason = "The quoted path reads best in the failure."
+)]
 fn spawn_env(root: &Path, memory: &str, envs: &[(&str, &Path)]) -> Server {
     for _ in 0..5 {
         let port = free_port();
@@ -353,7 +357,10 @@ impl Drop for Server {
     }
 }
 
-#[allow(clippy::cast_precision_loss)]
+#[expect(
+    clippy::cast_precision_loss,
+    reason = "Resident sizes in KiB are far below 2^52, so the float is exact."
+)]
 fn kib_to_mib(kib: u64) -> f64 {
     kib as f64 / 1024.0
 }
@@ -412,7 +419,7 @@ fn hex_of(i: usize, digits: usize) -> String {
         .wrapping_add(1)
         .wrapping_mul(0x2545_F491_4F6C_DD1D);
     while out.len() < digits {
-        let _ = write!(out, "{:016x}", x);
+        let _ = write!(out, "{x:016x}");
         x = x.rotate_left(17).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     }
     out.truncate(digits);
@@ -632,6 +639,7 @@ fn rom_size(i: usize) -> u64 {
 
 /// A multi-file torrent of `TORRENT_FILES` files named after the DAT's roms,
 /// every [`LOOSE_EVERY`]th only loosely, which leaves the name tiers to the fuzzy one.
+#[expect(clippy::cast_possible_wrap, reason = "Synthetic sizes are small.")]
 fn big_torrent(path: &Path) {
     let regions = ["USA", "Europe", "Japan"];
     let files: Vec<Value> = (0..TORRENT_FILES)
@@ -1065,7 +1073,7 @@ fn a_tiny_memory_limit_is_raised_to_the_floor() {
 }
 
 /// Four CHD images of 2 to 4 MB of CD data under `games/PSX`, each with a different codec
-/// setup, and a PlayStation DAT listing their tracks. Returns the member rows they verify to.
+/// setup, and a `PlayStation` DAT listing their tracks. Returns the member rows they verify to.
 fn chd_tree(root: &Path) -> usize {
     use mistarr_fixture::chd::{to_vec, Codec, Kind, Spec, TrackSpec};
     let track = |kind, frames| TrackSpec {

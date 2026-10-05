@@ -1,6 +1,6 @@
 //! CD sector helpers: the hunk CRC16 and ECC regeneration; see `docs/CHD.md` "ECC".
 
-#[allow(clippy::cast_possible_truncation)] // indexes are below 256
+#[expect(clippy::cast_possible_truncation, reason = "indexes are below 256")]
 const fn crc16_table() -> [u16; 256] {
     let mut t = [0u16; 256];
     let mut i = 0;
@@ -49,7 +49,7 @@ pub mod ecc {
     const Q_ROWS: usize = 52;
     const Q_COMPONENTS: usize = 43;
 
-    #[allow(clippy::cast_possible_truncation)] // indexes are below 256
+    #[expect(clippy::cast_possible_truncation, reason = "indexes are below 256")]
     const fn tables() -> ([u8; 256], [u8; 256]) {
         let mut low = [0u8; 256];
         let mut high = [0u8; 256];
@@ -136,7 +136,10 @@ pub mod ecc {
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_possible_truncation)] // synthetic test bytes wrap on purpose
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "synthetic test bytes wrap on purpose"
+)]
 mod tests {
     use super::*;
 

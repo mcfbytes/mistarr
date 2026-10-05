@@ -1,10 +1,6 @@
 //! Synthetic test inputs: DATs, `.torrent` files, the synthetic set and a
 //! local tracker. A development tool, never shipped; see `docs/TESTING.md`.
 
-#![forbid(unsafe_code)]
-#![warn(missing_docs)]
-#![warn(clippy::pedantic)]
-
 use std::path::{Path, PathBuf};
 
 pub mod chd;

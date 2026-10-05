@@ -221,7 +221,10 @@ pub async fn snapshot(app: &AppState) -> Status {
 
 /// Which first-run steps are complete, per `docs/API.md` "System".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-#[allow(clippy::struct_excessive_bools)] // One flag per wizard step is the JSON shape.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "One flag per wizard step is the JSON shape."
+)]
 pub struct WizardStatus {
     /// The games directory exists.
     pub paths: bool,

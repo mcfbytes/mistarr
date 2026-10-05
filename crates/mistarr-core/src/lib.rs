@@ -6,10 +6,6 @@
 //! `docs/VERIFICATION.md` for the contracts implemented here and
 //! `docs/WORKPLAN.md` WP-01 to WP-03 for the packages that fill it in.
 
-#![forbid(unsafe_code)]
-#![warn(missing_docs)]
-#![warn(clippy::pedantic)]
-
 pub mod bencode;
 /// CHD v5 CD images: header, track layout and track decoding.
 pub mod chd;

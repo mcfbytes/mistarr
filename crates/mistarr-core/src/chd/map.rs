@@ -299,7 +299,10 @@ fn check(
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_possible_truncation)] // synthetic test bytes wrap on purpose
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "synthetic test bytes wrap on purpose"
+)]
 pub(crate) mod tests {
     use super::*;
     use crate::chd::cdrom::crc16;

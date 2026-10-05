@@ -770,6 +770,10 @@ async fn members_read_by_a_failing_alternative_stay_unverified() {
 }
 
 /// A two-zip MRA whose one md5 spans both zips, imported with `first` landing first.
+#[expect(
+    clippy::similar_names,
+    reason = "The page and its rows read as a pair."
+)]
 async fn two_zips_arrive(first: &str) {
     let md5 = md5_of(&[b"AAAA", b"BBBB"]);
     let roms = format!(

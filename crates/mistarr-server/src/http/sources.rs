@@ -210,7 +210,10 @@ async fn preview(
 /// `disabled`, or `enabled` to return to the state the source would otherwise have.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(clippy::option_option)] // Absent keeps the binding; null unbinds.
+#[expect(
+    clippy::option_option,
+    reason = "Absent keeps the binding; null unbinds."
+)]
 struct Update {
     #[serde(default, deserialize_with = "present")]
     platform_id: Option<Option<PlatformId>>,
@@ -220,7 +223,10 @@ struct Update {
 }
 
 /// Distinguishes a `null` field from an absent one.
-#[allow(clippy::option_option)] // The shape `Update::platform_id` needs.
+#[expect(
+    clippy::option_option,
+    reason = "The shape `Update::platform_id` needs."
+)]
 fn present<'de, D: Deserializer<'de>>(d: D) -> Result<Option<Option<PlatformId>>, D::Error> {
     Option::<PlatformId>::deserialize(d).map(Some)
 }

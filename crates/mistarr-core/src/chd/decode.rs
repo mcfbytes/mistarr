@@ -338,7 +338,10 @@ pub fn decode_budget(h: &Header) -> usize {
 }
 
 #[cfg(test)]
-#[allow(clippy::cast_possible_truncation)] // synthetic test bytes wrap on purpose
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "synthetic test bytes wrap on purpose"
+)]
 mod tests {
     use super::*;
     use crate::chd::header::tests::sample;

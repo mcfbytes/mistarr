@@ -15,6 +15,10 @@ fn touch(path: &std::path::Path) {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One user journey, read top to bottom."
+)]
 async fn launch_routes_answer_with_documented_statuses() {
     let b = boot().await;
     let addr = b.addr();

@@ -133,7 +133,7 @@ fn candidates_for(
 /// assert!(score_platforms(&files, &Empty).is_empty());
 /// ```
 #[must_use]
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     reason = "file and hit counts fit f32 exactly for any realistic torrent"
 )]
@@ -287,7 +287,7 @@ impl Mapping {
 /// assert_eq!(mapping.matches, vec![(0, Some(RomRef(7)), Confidence::Name)]);
 /// ```
 #[must_use]
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     reason = "file and hit counts fit f32 exactly for any realistic torrent"
 )]
