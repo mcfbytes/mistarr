@@ -15,38 +15,26 @@ export interface Route {
   params: Record<string, string>;
 }
 
-function parseHash(hash: string): Route {
-  const path = hash.replace(/^#/, '') || '/';
-  const segments = path.split('/').filter(Boolean);
+/** Path heads and the screens they open; a `param` row needs a second segment and is tried first. */
+const ROUTES: { head: string; param: boolean; name: RouteName }[] = [
+  { head: 'wizard', param: false, name: 'wizard' },
+  { head: 'activity', param: false, name: 'activity' },
+  { head: 'sources', param: true, name: 'source' },
+  { head: 'sources', param: false, name: 'sources' },
+  { head: 'dats', param: false, name: 'dats' },
+  { head: 'system', param: false, name: 'system' },
+  { head: 'p', param: true, name: 'browse' },
+  { head: 't', param: true, name: 'title' }
+];
 
-  if (segments.length === 0) {
+function parseHash(hash: string): Route {
+  const segments = hash.replace(/^#/, '').split('/').filter(Boolean);
+  const [head, id] = segments;
+  if (head === undefined) {
     return { name: 'platforms', params: {} };
   }
-  if (segments[0] === 'wizard') {
-    return { name: 'wizard', params: {} };
-  }
-  if (segments[0] === 'activity') {
-    return { name: 'activity', params: {} };
-  }
-  if (segments[0] === 'sources' && segments[1]) {
-    return { name: 'source', params: { id: segments[1] } };
-  }
-  if (segments[0] === 'sources') {
-    return { name: 'sources', params: {} };
-  }
-  if (segments[0] === 'dats') {
-    return { name: 'dats', params: {} };
-  }
-  if (segments[0] === 'system') {
-    return { name: 'system', params: {} };
-  }
-  if (segments[0] === 'p' && segments[1]) {
-    return { name: 'browse', params: { id: segments[1] } };
-  }
-  if (segments[0] === 't' && segments[1]) {
-    return { name: 'title', params: { id: segments[1] } };
-  }
-  return { name: 'notfound', params: {} };
+  const row = ROUTES.find((r) => r.head === head && (!r.param || id));
+  return { name: row?.name ?? 'notfound', params: row?.param && id ? { id } : {} };
 }
 
 function currentHash(): string {
@@ -121,6 +109,14 @@ export function navigate(path: string): void {
     return;
   }
   window.location.hash = path.startsWith('#') ? path : `#${path}`;
+}
+
+/** The address of the platform list. */
+export const HOME_URL = '#/';
+
+/** The address of a screen that takes no parameter. */
+export function pageUrl(page: 'wizard' | 'activity' | 'sources' | 'dats' | 'system'): string {
+  return `#/${page}`;
 }
 
 export function platformUrl(id: string): string {

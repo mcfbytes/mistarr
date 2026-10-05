@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
-  import { findPlatform, followedScans, platforms } from '../lib/stores/platforms.svelte';
+  import { followedScans, platformName, platforms } from '../lib/stores/platforms.svelte';
   import { followJob, jobs } from '../lib/stores/jobs.svelte';
   import { attempt, optimistic } from '../lib/actions';
   import { describeProgress, jobOutcome, jobStatus } from '../lib/status';
@@ -47,10 +47,6 @@
       parts.push(`${counts.partial} partial`);
     }
     return parts.join(' · ');
-  }
-
-  function platformName(id: string): string {
-    return findPlatform(id)?.name ?? id;
   }
 
   // The button keeps focus while the request is out, so a second press is ignored here.

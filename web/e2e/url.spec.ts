@@ -7,7 +7,7 @@ async function expectUrlField(page: Page): Promise<void> {
   await expect(input).toBeVisible();
   await expect(input).toHaveAttribute('autocomplete', 'off');
   await expect(input).toHaveAttribute('placeholder', 'https://example.invalid/…');
-  await expect(page.locator('form.url')).toHaveAttribute('autocomplete', 'off');
+  await expect(page.locator('form.url').filter({ hasText: 'Add from a URL' })).toHaveAttribute('autocomplete', 'off');
   await expect(page.locator('datalist')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Fetch' })).toBeVisible();
 }
@@ -36,7 +36,7 @@ test('a fetch shows its progress in the activity panel and a toast when it lands
   const row = running.getByRole('listitem').filter({ hasText: 'URL fetch: Example.dat' });
   await expect(row).toBeVisible();
   await expect(row.getByRole('progressbar')).toBeVisible();
-  await expect(row).toContainText(/Receiving · \d+% · [\d.]+ MiB of 2\.3 MiB/);
+  await expect(row).toContainText(/Receiving · \d+% · [\d.]+ MB of 2\.4 MB/);
   await expect(row.getByRole('button', { name: 'Cancel URL fetch: Example.dat' })).toBeVisible();
   await expect(row.getByRole('link')).toHaveAttribute('href', '#/activity');
   await expect(toasts(page).getByText('DAT received: Example.dat. Queued.')).toBeVisible({ timeout: 10_000 });

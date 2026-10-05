@@ -17,6 +17,7 @@
   import { showToast } from '../lib/stores/toast.svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { launchBlocker } from '../lib/launch';
+  import ProgressBar from '../lib/ProgressBar.svelte';
   import PlatformArt from '../lib/PlatformArt.svelte';
   import PosterPlaceholder from '../lib/PosterPlaceholder.svelte';
   import { SvelteSet } from 'svelte/reactivity';
@@ -212,9 +213,9 @@
   {/if}
 
   <div class="status">
-    <span class="hidden-text" aria-live="polite">{loading ? 'Loading titles' : ''}</span>
+    <span class="visually-hidden" aria-live="polite">{loading ? 'Loading titles' : ''}</span>
     {#if loading}
-      <div class="busy" role="progressbar" aria-label="Loading titles" aria-valuetext="Loading"></div>
+      <ProgressBar view={{ fraction: null, text: '' }} label="Loading titles" compact />
     {/if}
   </div>
   {#if loadError}
@@ -361,43 +362,8 @@
     margin: -0.5em 0 0.5em;
   }
 
-  .busy {
-    height: 3px;
-    border-radius: 2px;
-    background: linear-gradient(90deg, transparent, var(--accent), transparent);
-    background-size: 40% 100%;
-    background-repeat: no-repeat;
-    animation: sweep 1s linear infinite;
-  }
-
-  @keyframes sweep {
-    from {
-      background-position: -40% 0;
-    }
-    to {
-      background-position: 140% 0;
-    }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .busy {
-      animation: none;
-      background-size: 100% 100%;
-    }
-  }
-
-  .hidden-text {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
-    white-space: nowrap;
-  }
-
   .error {
     margin: 0.5em 0;
-    color: var(--danger);
   }
 
   .sentinel {

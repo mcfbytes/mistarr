@@ -1,15 +1,15 @@
 <script lang="ts">
-  import { getRoute } from './router.svelte';
+  import { HOME_URL, getRoute, pageUrl } from './router.svelte';
   import ActivityIndicator from './ActivityIndicator.svelte';
 
   const route = $derived(getRoute());
 
   const links: { hash: string; label: string; match: string[] }[] = [
-    { hash: '#/', label: 'Platforms', match: ['platforms', 'browse'] },
-    { hash: '#/activity', label: 'Activity', match: ['activity'] },
-    { hash: '#/sources', label: 'Sources', match: ['sources', 'source'] },
-    { hash: '#/dats', label: 'DATs', match: ['dats'] },
-    { hash: '#/system', label: 'System', match: ['system'] }
+    { hash: HOME_URL, label: 'Platforms', match: ['platforms', 'browse'] },
+    { hash: pageUrl('activity'), label: 'Activity', match: ['activity'] },
+    { hash: pageUrl('sources'), label: 'Sources', match: ['sources', 'source'] },
+    { hash: pageUrl('dats'), label: 'DATs', match: ['dats'] },
+    { hash: pageUrl('system'), label: 'System', match: ['system'] }
   ];
 </script>
 

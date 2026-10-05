@@ -509,10 +509,6 @@ export interface Paged<T> {
   total: number;
 }
 
-export interface ApiErrorBody {
-  error: { code: string; message: string };
-}
-
 export interface SseStatusEvent {
   name: 'status';
   data: SystemStatus;

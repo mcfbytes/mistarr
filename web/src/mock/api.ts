@@ -325,7 +325,6 @@ export const mockApi: Api = {
 
   sources: (limit, offset) => reply(() => paged(mock().sources, limit, offset)),
   uploadSource: (file) => reply(() => receive('sources', file.name), 900),
-  addMagnet: () => reply(() => receive('sources', 'Example magnet.magnet'), 900),
   fetchUrl: (url) =>
     reply(() => {
       if (/^magnet:/i.test(url)) {

@@ -114,8 +114,4 @@
     display: block;
     overflow-wrap: anywhere;
   }
-
-  .error {
-    color: var(--danger);
-  }
 </style>
