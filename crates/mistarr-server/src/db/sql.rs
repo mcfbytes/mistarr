@@ -24,6 +24,7 @@ macro_rules! text_enum {
 
         impl $name {
             /// Every value, in declaration order.
+            #[cfg(any(test, feature = "test-support"))]
             pub const ALL: &'static [Self] = &[$(Self::$variant),+];
 
             /// The column text.
@@ -109,6 +110,7 @@ pub struct UnknownText {
 /// assert_eq!(mistarr_server::db::sql::text_list(&["a", "b"]), "('a', 'b')");
 /// ```
 #[must_use]
+#[cfg(any(test, feature = "test-support"))]
 pub fn text_list(values: &[&str]) -> String {
     let quoted: Vec<String> = values.iter().map(|v| format!("'{v}'")).collect();
     format!("({})", quoted.join(", "))

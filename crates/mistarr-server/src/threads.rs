@@ -105,6 +105,7 @@ pub mod label {
     pub const CLIENT_FREEZE: Label = Label::new("client-freeze");
 
     /// Every label, for tests and docs.
+    #[cfg(any(test, feature = "test-support"))]
     pub const ALL: [Label; 22] = [
         DB_READ,
         DB_WRITE,

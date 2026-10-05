@@ -183,6 +183,7 @@ impl Poller {
 
     /// Consecutive polls in which a client call failed.
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn failures(&self) -> u32 {
         self.failures
     }

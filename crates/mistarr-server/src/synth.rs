@@ -362,6 +362,7 @@ pub fn seed(conn: &mut Connection, scale: f64, seed: u64) -> Result<Seeded> {
 /// assert!(names[0].ends_with("(USA)"));
 /// ```
 #[must_use]
+#[cfg(any(test, feature = "test-support"))]
 pub fn game_names(count: usize, seed: u64) -> Vec<String> {
     let mut rng = Rng(seed | 1);
     let words = vocabulary(&mut rng, 3_000);

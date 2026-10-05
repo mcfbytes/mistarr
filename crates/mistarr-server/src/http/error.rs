@@ -108,6 +108,7 @@ impl ApiError {
     /// assert_eq!(ApiError::busy("Wait.").code(), Code::Busy);
     /// ```
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn code(&self) -> Code {
         self.code
     }
@@ -130,6 +131,7 @@ impl ApiError {
     /// assert_eq!(e.message(), "The body is empty.");
     /// ```
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn message(&self) -> &str {
         &self.message
     }

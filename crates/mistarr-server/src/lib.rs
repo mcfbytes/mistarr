@@ -2,26 +2,40 @@
 //! See `docs/ARCHITECTURE.md`; the binary in `main.rs` only parses flags and calls [`app::start`].
 
 pub mod app;
-pub mod bench;
 pub mod cli;
-pub mod client;
 pub mod config;
-pub mod db;
-pub mod doctor;
 mod error;
-pub mod events;
-pub mod freeze;
-pub mod http;
-pub mod incoming;
-pub mod jobs;
-pub mod lock;
-pub mod logging;
-pub mod memory;
-pub mod migrating;
-pub mod status;
-pub mod synth;
-pub mod threads;
-pub mod version;
+
+/// Declares modules that are crate-private, and public with `test-support` so
+/// integration tests and doctests reach them.
+macro_rules! test_visible {
+    ($($name:ident),* $(,)?) => {$(
+        #[cfg(feature = "test-support")]
+        pub mod $name;
+        #[cfg(not(feature = "test-support"))]
+        pub(crate) mod $name;
+    )*};
+}
+
+test_visible!(
+    bench,
+    client,
+    db,
+    doctor,
+    events,
+    freeze,
+    http,
+    incoming,
+    jobs,
+    lock,
+    logging,
+    memory,
+    migrating,
+    status,
+    synth,
+    threads,
+    version
+);
 
 pub use error::{Error, Result};
 

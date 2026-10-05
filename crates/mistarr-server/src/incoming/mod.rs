@@ -120,6 +120,7 @@ pub async fn queue_placed(
 /// # Errors
 ///
 /// [`crate::Error::Db`] when the open jobs cannot be read.
+#[cfg(any(test, feature = "test-support"))]
 pub async fn one(app: &AppState, path: &Path, kind: JobKind) -> Result<IncomingFile> {
     let (size, modified) = stat(path).await;
     let pending = Pending {

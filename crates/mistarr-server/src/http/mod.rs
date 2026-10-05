@@ -24,7 +24,9 @@ use axum::Router;
 
 use crate::app::AppState;
 
-pub use error::{ApiError, Code};
+pub use error::ApiError;
+#[cfg(any(test, feature = "test-support"))]
+pub use error::Code;
 pub use extract::{ApiJson, ApiPath, ApiQuery, OptionalJson, Paging};
 
 /// Header carrying the API key.

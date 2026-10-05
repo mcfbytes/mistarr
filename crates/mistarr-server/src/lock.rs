@@ -12,6 +12,10 @@ pub const LOCK_FILE: &str = "mistarr.lock";
 
 /// Holds the data directory's lock until dropped.
 #[derive(Debug)]
+#[cfg_attr(
+    not(any(test, feature = "test-support")),
+    allow(dead_code, reason = "Read by tests.")
+)]
 pub struct InstanceLock {
     _file: File,
     path: PathBuf,
@@ -97,6 +101,7 @@ impl InstanceLock {
     /// assert!(mistarr_server::lock::InstanceLock::acquire(dir.path()).unwrap().held());
     /// ```
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn held(&self) -> bool {
         self.held
     }
@@ -109,6 +114,7 @@ impl InstanceLock {
     /// assert!(held.path().is_file());
     /// ```
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn path(&self) -> &Path {
         &self.path
     }
