@@ -437,9 +437,9 @@ pub struct Startup {
 }
 
 /// Seeds the platforms, refreshes DAT family keys and leaves one current version per
-/// family; returns those with the saved runtime settings, or why they cannot be read.
-fn prepare_catalog(db: Db) -> Result<(Startup, Result<Option<serde_json::Value>>)> {
-    db.write_blocking(|c| {
+/// family, returning what that settled.
+fn prepare_catalog(db: Db) -> Result<Startup> {
+    let (unfinished_scans, resolved) = db.write_blocking(|c| {
         let added = db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS)?;
         if added > 0 {
             tracing::info!(added, "seeded platforms");
@@ -453,17 +453,19 @@ fn prepare_catalog(db: Db) -> Result<(Startup, Result<Option<serde_json::Value>>
         if settled > 0 {
             tracing::info!(settled, "misnamed files verified under the name rule");
         }
-        let stored = settings::get_json::<serde_json::Value>(c, keys::RUNTIME);
-        Ok((unfinished_scans, resolved, stored))
+        Ok((unfinished_scans, resolved))
+    })?;
+    Ok(Startup {
+        db,
+        unfinished_scans,
+        resolved,
     })
-    .map(|(unfinished_scans, resolved, stored)| {
-        let startup = Startup {
-            db,
-            unfinished_scans,
-            resolved,
-        };
-        (startup, stored)
-    })
+}
+
+/// The runtime settings saved in `db`, if any.
+fn saved_settings(db: &Db) -> Result<Option<RuntimeSettings>> {
+    let stored = db.read_blocking(|c| settings::get_json::<serde_json::Value>(c, keys::RUNTIME))?;
+    Ok(stored.map(RuntimeSettings::from_saved).transpose()?)
 }
 
 /// Runs the startup sequence and returns once the HTTP server is listening.
@@ -605,15 +607,8 @@ pub(crate) fn open_db(config: &mut Config) -> Result<Startup> {
         Some(m) => Db::open_counting(&path, &m.steps())?,
         None => Db::open(&path)?,
     };
-    let (startup, stored) = prepare_catalog(db)?;
-    let saved = match stored {
-        Ok(value) => value
-            .map(RuntimeSettings::from_saved)
-            .transpose()
-            .map_err(Error::from),
-        Err(e) => Err(e),
-    };
-    match saved {
+    let startup = prepare_catalog(db)?;
+    match saved_settings(&startup.db) {
         Ok(Some(saved)) => config.apply(&saved),
         Ok(None) => {}
         Err(e) => {
