@@ -8,7 +8,6 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
 use super::ids::{FileId, TitleId};
-
 use super::sql;
 use super::titles::RomStatus;
 use crate::error::Result;

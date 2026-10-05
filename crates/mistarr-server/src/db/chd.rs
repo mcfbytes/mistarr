@@ -325,10 +325,7 @@ pub fn has_waiting(
                AND f.reason IN (SELECT value FROM json_each(?1))
                AND (?2 IS NULL OR f.platform_id = ?2))"
         ))?
-        .query_row(
-            params![codes, platform.map(mistarr_core::PlatformId::as_str)],
-            |r| r.get(0),
-        )?)
+        .query_row(params![codes, platform], |r| r.get(0))?)
 }
 
 /// Follows the setting: on moves `off` rows to `pending`; off moves `pending` and

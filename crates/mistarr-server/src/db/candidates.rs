@@ -10,7 +10,6 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 
 use super::ids::{SourceId, TitleId};
-
 use super::sql::{self, text_enum};
 use crate::error::Result;
 
@@ -660,7 +659,7 @@ impl SizeIndex for SqlSizeIndex<'_> {
 
             let rows = stmt.query_map(params![self.platform, size, bare], |r| {
                 Ok(SizedRom {
-                    rom: RomId::new(r.get(0)?),
+                    rom: r.get(0)?,
                     base: r.get(1)?,
                     group: r.get(2)?,
                 })

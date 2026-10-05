@@ -404,7 +404,7 @@ pub fn set_suggestion(
 ) -> Result<()> {
     conn.execute(
         "UPDATE sources SET suggested_platform_id = ?2 WHERE id = ?1",
-        params![id, platform.map(mistarr_core::PlatformId::as_str)],
+        params![id, platform],
     )?;
     Ok(())
 }
@@ -645,7 +645,7 @@ pub fn set_binding(
 ) -> Result<()> {
     conn.execute(
         "UPDATE sources SET platform_id = ?2, bind_score = ?3 WHERE id = ?1",
-        params![id, platform.map(mistarr_core::PlatformId::as_str), score],
+        params![id, platform, score],
     )?;
     Ok(())
 }
@@ -826,7 +826,7 @@ impl<'c> SqlDatIndex<'c> {
     fn lookup(&self, sql: &str, args: impl rusqlite::Params) -> Vec<(PlatformId, RomId)> {
         let run = || -> rusqlite::Result<Vec<(PlatformId, RomId)>> {
             let mut stmt = self.conn.prepare_cached(sql)?;
-            let rows = stmt.query_map(args, |r| Ok((r.get(0)?, RomId::new(r.get(1)?))))?;
+            let rows = stmt.query_map(args, |r| Ok((r.get(0)?, r.get(1)?)))?;
             rows.collect()
         };
         run().unwrap_or_else(|e| {

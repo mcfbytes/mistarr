@@ -6,7 +6,6 @@ use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
 use super::ids::{FileId, TitleId};
-
 use super::sql::{self, text_enum, Page, Paged};
 use crate::error::Result;
 
