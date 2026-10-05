@@ -39,18 +39,18 @@ Rules for these packages, on top of the ones in WORKPLAN.md:
   - [x] WP-63 HTTP shell · Opus · after 56, 57, 60
   - [x] WP-64 Matching and scan · Opus · after 58, 59, 60
   - [x] WP-65 Web stores · Sonnet · after 61
-- [ ] **Wave 7**
-  - [ ] WP-66 Web components and styles · Sonnet · after 65
-  - [ ] WP-67 Job framework · Opus · after 63, 64
+- [x] **Wave 7**
+  - [x] WP-66 Web components and styles · Sonnet · after 65
+  - [x] WP-67 Job framework · Opus · after 63, 64
 - [ ] **Wave 8**
-  - [ ] WP-68 Typed events and progress · Sonnet · after 66, 67
+  - [x] WP-68 Typed events and progress · Sonnet · after 66, 67
   - [ ] WP-70 Workspace lints and dependencies · Haiku · after 57, 58, 59
-- [ ] **Wave 9**
-  - [ ] WP-69 Digests, names and ids across crates · Opus · after 62, 68, 70
-- [ ] **Wave 10**
-  - [ ] WP-71 Server surface and test helpers · Sonnet · after 69
-- [ ] **Wave 11**
-  - [ ] WP-72 Docs sweep · Haiku · after 71
+- [x] **Wave 9**
+  - [x] WP-69 Digests, names and ids across crates · Opus · after 62, 68, 70
+- [x] **Wave 10**
+  - [x] WP-71 Server surface and test helpers · Sonnet · after 69
+- [x] **Wave 11**
+  - [x] WP-72 Docs sweep · Haiku · after 71
 
 ```mermaid
 graph LR
