@@ -204,7 +204,7 @@ function updateSource(id: number, patch: SourcePatch): SourceUpdated {
 export const mockApi: Api = {
   status: () => reply(status),
   wizard: () => reply(wizard),
-  scan: () => reply(() => ({ job_id: null }), 400),
+  scan: () => reply(() => ({ job_id: mockKnob<number>('scanJobId', -1) >= 0 ? mockKnob<number>('scanJobId', -1) : null }), 400),
   cores: () => reply(() => fixtureCores),
   pause: () =>
     reply(() => {
@@ -251,7 +251,13 @@ export const mockApi: Api = {
       return s.settings;
     }),
 
-  platforms: (limit, offset) => reply(() => paged(platforms(), limit, offset)),
+  platforms: (limit, offset) =>
+    reply(() => {
+      if (mockKnob<boolean>('platformsFail', false)) {
+        throw new ApiError('internal', 'The platforms could not be read.', 500);
+      }
+      return paged(platforms(), limit, offset);
+    }),
   unidentified: (id, offset, limit) =>
     reply(() => paged(Object.hasOwn(fixtureUnidentified, id) ? (fixtureUnidentified[id] ?? []) : [], limit, offset)),
   setPlatform: (id, enabled) =>

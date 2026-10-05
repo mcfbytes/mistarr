@@ -8,12 +8,14 @@ export interface ListOptions<T> {
   sort?: (a: T, b: T) => number;
   /** The window `reloadSoon` merges calls in; one re-read per window, at its end unless `leading`. */
   reload?: { ms: number; leading?: boolean };
+  /** Asked when a `reloadSoon` run is due; false skips the read. */
+  reloadWhen?: () => boolean;
   onLoaded?: (items: readonly T[]) => void;
 }
 
 /**
- * Every row of a paginated endpoint, kept in memory. `error` holds why the first read
- * failed and clears when one succeeds; a failed re-read keeps the rows already held.
+ * Every row of a paginated endpoint, kept in memory. `error` holds why the last read
+ * failed and clears when one succeeds; a failed read keeps the rows already held.
  */
 export class ListStore<T> {
   items = $state.raw<T[]>([]);
@@ -36,11 +38,15 @@ export class ListStore<T> {
     this.keyOf = keyOf;
     this.options = options;
     const { ms, leading } = options.reload ?? { ms: DELAY_MS.reload };
-    this.soon = coalesce(() => void this.load(), ms, { leading: leading ?? false });
+    this.soon = coalesce(() => {
+      if (options.reloadWhen?.() ?? true) {
+        void this.load();
+      }
+    }, ms, { leading: leading ?? false });
   }
 
   /**
-   * Reads every page; never throws, a failure lands in `error` while nothing has loaded.
+   * Reads every page; never throws, a failure lands in `error`.
    * It resolves with rows read after the call: a read already under way is followed by one more.
    */
   load(): Promise<void> {
@@ -57,9 +63,9 @@ export class ListStore<T> {
     return this.again;
   }
 
-  /** Reads the list once, if it has not been read. */
+  /** Reads the list once, if it has not been read; joins a read already under way. */
   ensure(): Promise<void> {
-    return this.loaded ? Promise.resolve() : this.load();
+    return this.loaded ? Promise.resolve() : (this.reading ?? this.load());
   }
 
   /** Merges `change` into the row with `key`, or drops the row when `change` is null. */
@@ -84,9 +90,7 @@ export class ListStore<T> {
       this.error = null;
       this.options.onLoaded?.(this.items);
     } catch (err) {
-      if (!this.loaded) {
-        this.error = errorMessage(err);
-      }
+      this.error = errorMessage(err);
     }
   }
 }

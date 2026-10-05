@@ -32,13 +32,13 @@
     document.querySelector<HTMLButtonElement>(`[data-source="${id}"][data-action="${which}"]`)?.focus();
   }
 
-  function bind(id: number, platformId: string): Promise<boolean> | undefined {
+  async function bind(id: number, platformId: string): Promise<void> {
     if (!platformId) {
-      return undefined;
+      return;
     }
     const prev = sources.items.find((s) => s.id === id);
     const pending = { automatic: false, platform_id: platformId };
-    return optimistic({
+    await optimistic({
       apply: () => sources.patch(id, { user_binding: true, pending_binding: pending }),
       revert: () => {
         if (prev) {
@@ -51,9 +51,9 @@
     });
   }
 
-  function setSeedPolicy(id: number, policy: SeedPolicy): Promise<boolean> {
+  async function setSeedPolicy(id: number, policy: SeedPolicy): Promise<void> {
     const prev = sources.items.find((s) => s.id === id);
-    return optimistic({
+    await optimistic({
       apply: () => sources.patch(id, { seed_policy: policy }),
       revert: () => {
         if (prev) {
@@ -65,9 +65,9 @@
     });
   }
 
-  function disable(id: number): Promise<boolean> {
+  async function disable(id: number): Promise<void> {
     const prev = sources.items.find((s) => s.id === id);
-    return optimistic({
+    await optimistic({
       apply: () => sources.patch(id, { state: 'disabled' }),
       revert: () => {
         if (prev) {

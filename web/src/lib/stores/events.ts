@@ -3,7 +3,7 @@ import { coalesce, DELAY_MS } from '../coalesce';
 import type { DownloadState, SourceState, SseEvent } from '../types';
 import { applyStatus, loadStatus, loadWizard, setConnected } from './status.svelte';
 import { sources } from './sources.svelte';
-import { downloads, imports, watchingImports } from './downloads.svelte';
+import { downloads, imports } from './downloads.svelte';
 import { applyJobProgress, DAT_FILE, isRunning, jobs, reportEnd, resetFinished, resyncRecent } from './jobs.svelte';
 import { dats } from './dats.svelte';
 import { platforms } from './platforms.svelte';
@@ -39,13 +39,6 @@ const MATCHING_KINDS = new Set(['scan', 'recompute_1g1r', 'arcade_catalog', 'chd
 const reloadTitlesSoon = coalesce(() => void reloadTitles(), DELAY_MS.reload);
 // At most one titles reload per window; a scan fires file.changed rapidly.
 const reloadTitlesBurst = coalesce(() => void reloadTitles(), DELAY_MS.window, { leading: true });
-
-// The imports log is re-read only while Activity shows it; the next mount or resync pages it in.
-function reloadImportsSoon(): void {
-  if (watchingImports()) {
-    imports.reloadSoon();
-  }
-}
 
 // The event carries no reason or suggestion, so the list is re-read, once per burst.
 function sourceChanged(sourceId: number, state: SourceState, platformId: string | null): void {
@@ -116,7 +109,7 @@ function handle(event: SseEvent): void {
       incoming('dats').reloadSoon();
       break;
     case 'import.done':
-      reloadImportsSoon();
+      imports.reloadSoon();
       reloadTitlesBurst();
       break;
     case 'file.changed':

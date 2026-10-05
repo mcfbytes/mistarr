@@ -38,17 +38,17 @@ test('cancel drops a pending run', async () => {
 
 test('debounce runs with the latest value once calls pause', async () => {
   const seen: string[] = [];
-  const typed = debounce((value: string) => seen.push(value), 50);
+  const typed = debounce((value: string) => seen.push(value), 400);
   typed('a');
   await sleep(20);
   typed('ab');
   await sleep(20);
   typed('abc');
-  await sleep(150);
+  await sleep(800);
   expect(seen).toEqual(['abc']);
   typed('x');
   typed.cancel();
-  await sleep(100);
+  await sleep(600);
   expect(seen).toEqual(['abc']);
 });
 

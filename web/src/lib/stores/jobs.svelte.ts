@@ -1,4 +1,3 @@
-import { SvelteSet } from 'svelte/reactivity';
 import { api } from '../api';
 import { jobDetail } from '../status';
 import type { Job, JobKind, JobState } from '../types';
@@ -51,7 +50,8 @@ interface Follower {
   onEnd: (end: JobEnd) => void;
 }
 
-const followers = new SvelteSet<Follower>();
+// eslint-disable-next-line svelte/prefer-svelte-reactivity -- only event handlers read it, never markup
+const followers = new Set<Follower>();
 // Fetch tokens to job ids, from live progress; dropped when the job ends.
 // eslint-disable-next-line svelte/prefer-svelte-reactivity -- only event handlers read it, never markup
 const fetchJobs = new Map<number, number>();

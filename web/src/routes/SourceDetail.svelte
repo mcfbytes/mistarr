@@ -208,7 +208,7 @@
     }
   }
 
-  function setSeedPolicy(policy: SeedPolicy): Promise<boolean> {
+  async function setSeedPolicy(policy: SeedPolicy): Promise<void> {
     const prev = detail?.seed_policy;
     const set = (value: string): void => {
       sources.patch(sourceId, { seed_policy: value });
@@ -216,7 +216,7 @@
         detail = { ...detail, seed_policy: value };
       }
     };
-    return optimistic({
+    await optimistic({
       apply: () => set(policy),
       revert: () => {
         if (prev !== undefined) {

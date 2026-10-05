@@ -1,4 +1,3 @@
-import { SvelteMap } from 'svelte/reactivity';
 import { DAT_FILE, followJob, jobIdFor, type JobEnd } from './jobs.svelte';
 import type { Watched } from './incoming.svelte';
 import { showToast } from './toast.svelte';
@@ -17,7 +16,8 @@ export interface Upload {
 
 let uploads = $state<Upload[]>([]);
 // Stops following each upload's ending; keyed by kind and file.
-const following = new SvelteMap<string, () => void>();
+// eslint-disable-next-line svelte/prefer-svelte-reactivity -- only event handlers read it, never markup
+const following = new Map<string, () => void>();
 
 function followKey(kind: Watched, file: string): string {
   return `${kind}/${file}`;
@@ -51,11 +51,12 @@ export function addUpload(upload: Upload, since: number): void {
     stopFollowing(gone.kind, gone.file);
   }
   uploads = next.slice(0, 10);
-  const ending = { over: false };
+  // followJob may call onEnd before it returns, which the compiler cannot see.
+  let over = false as boolean;
   const stop = followJob(
     (end) => end.detail === file && end.kind === (kind === 'dats' ? DAT_FILE : 'source_import'),
     (end) => {
-      ending.over = true;
+      over = true;
       following.delete(key);
       const why = rejection(end);
       if (why !== null) {
@@ -66,7 +67,7 @@ export function addUpload(upload: Upload, since: number): void {
     },
     since
   );
-  if (!ending.over) {
+  if (!over) {
     following.set(key, stop);
   }
 }

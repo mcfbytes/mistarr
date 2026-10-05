@@ -3,16 +3,17 @@ import { DELAY_MS } from '../coalesce';
 import type { Download, ImportLogEntry } from '../types';
 import { ListStore } from './list.svelte';
 
+/** The torrents and downloads the client reports. */
 export const downloads = new ListStore<Download>(
   (limit, offset) => api.downloads(limit, offset),
   (d) => d.id
 );
 
-// A mass import fires import.done per file; one full-log re-read per window is enough.
+/** The import log; a mass import fires `import.done` per file, so it is re-read once per window. */
 export const imports = new ListStore<ImportLogEntry>(
   (limit, offset) => api.imports(limit, offset),
   (i) => i.id,
-  { reload: { ms: DELAY_MS.window, leading: true } }
+  { reload: { ms: DELAY_MS.window, leading: true }, reloadWhen: watchingImports }
 );
 
 // Pages showing the imports list; it is re-read on import.done only while one is open.
