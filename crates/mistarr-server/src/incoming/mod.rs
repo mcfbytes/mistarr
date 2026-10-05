@@ -527,13 +527,10 @@ mod tests {
         assert!(app.placed.contains(&path));
         release.send(()).expect("release");
         holder.join().expect("join").expect("write");
-        for _ in 0..200 {
-            if !app.placed.contains(&path) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(!app.placed.contains(&path), "forgotten once recorded");
+        crate::testing::eventually("the path to be forgotten once recorded", || async {
+            !app.placed.contains(&path)
+        })
+        .await;
         assert_eq!(writer_reason(&[]), "Waiting to be queued.");
     }
 

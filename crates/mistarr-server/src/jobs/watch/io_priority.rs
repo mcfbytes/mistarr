@@ -510,20 +510,9 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(60)).await;
         assert_eq!(priority.class(), Some(IoClass::Default));
         fake.refuse.store(0, SeqCst);
-        for _ in 0..200 {
-            if priority.class() == Some(IoClass::Idle) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(priority.class(), Some(IoClass::Idle));
+        wait_for_class(&priority, IoClass::Idle).await;
         gate.set_corename(Some("MENU".into()));
-        for _ in 0..200 {
-            if priority.class() == Some(IoClass::Default) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        wait_for_class(&priority, IoClass::Default).await;
         let calls = fake.calls.lock().expect("lock").clone();
         assert_eq!(calls, vec![(5, IoClass::Idle), (5, IoClass::Default)]);
         task.abort();
@@ -579,15 +568,10 @@ mod tests {
         let task = tokio::spawn(follow(Arc::clone(&gate), Arc::new(priority), RETRY));
         let wait_for = |n: usize| {
             let fake = Arc::clone(&fake);
-            async move {
-                for _ in 0..200 {
-                    if fake.calls.lock().expect("lock").len() >= n {
-                        return;
-                    }
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                panic!("no switch");
-            }
+            crate::testing::eventually("a class switch", move || {
+                let seen = fake.calls.lock().expect("lock").len() >= n;
+                async move { seen }
+            })
         };
         gate.set_corename(Some("MENU".into()));
         gate.set_corename(Some("SNES".into()));
@@ -645,13 +629,10 @@ mod tests {
     }
 
     async fn wait_for_class(priority: &IoPriority, want: IoClass) {
-        for _ in 0..200 {
-            if priority.class() == Some(want) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("class never became {want:?}");
+        crate::testing::eventually(&format!("class {want:?}"), || async {
+            priority.class() == Some(want)
+        })
+        .await;
     }
 
     #[test]
@@ -749,12 +730,11 @@ mod tests {
         })
         .await
         .expect("launch");
-        for _ in 0..200 {
-            if fake.calls.lock().expect("lock").len() >= 5 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        crate::testing::eventually("five class switches", || {
+            let seen = fake.calls.lock().expect("lock").len() >= 5;
+            async move { seen }
+        })
+        .await;
         let calls = fake.calls.lock().expect("lock").clone();
         assert_eq!(calls[3..], [(5, IoClass::Idle), (6, IoClass::Idle)]);
         wait_for_class(&priority, IoClass::Idle).await;

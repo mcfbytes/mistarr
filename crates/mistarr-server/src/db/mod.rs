@@ -88,9 +88,8 @@ impl Db {
     /// [`Error::Migration`] when a migration fails.
     ///
     /// ```
-    /// let dir = std::env::temp_dir().join(format!("mistarr-doc-db-open-{}", std::process::id()));
-    /// std::fs::create_dir_all(&dir).unwrap();
-    /// let db = mistarr_server::db::Db::open(&dir.join("t.db")).unwrap();
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let db = mistarr_server::db::Db::open(&dir.path().join("t.db")).unwrap();
     /// assert!(db.path().ends_with("t.db"));
     /// ```
     pub fn open(path: &Path) -> Result<Self> {
@@ -154,9 +153,8 @@ impl Db {
     /// The database file.
     ///
     /// ```
-    /// # let dir = std::env::temp_dir().join(format!("mistarr-doc-db-path-{}", std::process::id()));
-    /// # std::fs::create_dir_all(&dir).unwrap();
-    /// let db = mistarr_server::db::Db::open(&dir.join("p.db")).unwrap();
+    /// # let dir = tempfile::tempdir().unwrap();
+    /// let db = mistarr_server::db::Db::open(&dir.path().join("p.db")).unwrap();
     /// assert!(db.path().is_file());
     /// ```
     #[must_use]
@@ -174,9 +172,8 @@ impl Db {
     /// Whatever `f` returns, or [`Error::Poisoned`].
     ///
     /// ```
-    /// # let dir = std::env::temp_dir().join(format!("mistarr-doc-db-wb-{}", std::process::id()));
-    /// # std::fs::create_dir_all(&dir).unwrap();
-    /// # let db = mistarr_server::db::Db::open(&dir.join("w.db")).unwrap();
+    /// # let dir = tempfile::tempdir().unwrap();
+    /// # let db = mistarr_server::db::Db::open(&dir.path().join("w.db")).unwrap();
     /// use mistarr_server::db::settings;
     /// db.write_blocking(|c| settings::set(c, "k", "v")).unwrap();
     /// ```
@@ -205,9 +202,8 @@ impl Db {
     /// cannot be set or restored.
     ///
     /// ```
-    /// # let dir = std::env::temp_dir().join(format!("mistarr-doc-db-bulk-{}", std::process::id()));
-    /// # std::fs::create_dir_all(&dir).unwrap();
-    /// # let db = mistarr_server::db::Db::open(&dir.join("b.db")).unwrap();
+    /// # let dir = tempfile::tempdir().unwrap();
+    /// # let db = mistarr_server::db::Db::open(&dir.path().join("b.db")).unwrap();
     /// use mistarr_server::db::settings;
     /// db.write_bulk_blocking(|c| settings::set(c, "k", "v")).unwrap();
     /// ```
@@ -243,9 +239,8 @@ impl Db {
     /// Whatever `f` returns, or [`Error::Poisoned`].
     ///
     /// ```
-    /// # let dir = std::env::temp_dir().join(format!("mistarr-doc-db-rb-{}", std::process::id()));
-    /// # std::fs::create_dir_all(&dir).unwrap();
-    /// # let db = mistarr_server::db::Db::open(&dir.join("r.db")).unwrap();
+    /// # let dir = tempfile::tempdir().unwrap();
+    /// # let db = mistarr_server::db::Db::open(&dir.path().join("r.db")).unwrap();
     /// let n = db.read_blocking(mistarr_server::db::migrate::current_version).unwrap();
     /// assert!(n >= 1);
     /// ```
@@ -1032,9 +1027,11 @@ mod tests {
                     .await
                 }
             });
-            while holding.try_recv().is_err() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
+            crate::testing::eventually("the writer to be held", || {
+                let held = holding.try_recv().is_ok();
+                async move { held }
+            })
+            .await;
             let queued: Vec<_> = (0..4)
                 .map(|i| {
                     let db = db.clone();
@@ -1081,9 +1078,11 @@ mod tests {
                     })
                 }
             });
-            while holding.try_recv().is_err() {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
+            crate::testing::eventually("the writer to be held", || {
+                let held = holding.try_recv().is_ok();
+                async move { held }
+            })
+            .await;
             let write = tokio::spawn({
                 let db = db.clone();
                 async move { db.write(|c| settings::set(c, "k", "async")).await }

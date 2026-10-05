@@ -311,8 +311,7 @@ mod tests {
             platform_id: Some(PlatformId::new("nes")),
         }
         .payload();
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-        loop {
+        crate::testing::eventually("a recompute and a scan", || async {
             let (r, s) = (recompute.clone(), scan.clone());
             let found = app
                 .db
@@ -323,15 +322,9 @@ mod tests {
                 })
                 .await
                 .expect("jobs");
-            if found {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "no recompute and scan"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+            found
+        })
+        .await;
     }
 
     #[test]

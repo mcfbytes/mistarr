@@ -18,24 +18,12 @@ macro_rules! test_visible {
 }
 
 test_visible!(
-    bench,
-    client,
-    db,
-    doctor,
-    events,
-    freeze,
-    http,
-    incoming,
-    jobs,
-    lock,
-    logging,
-    memory,
-    migrating,
-    status,
-    synth,
-    threads,
-    version
+    bench, client, db, doctor, events, freeze, http, incoming, jobs, lock, logging, memory,
+    migrating, status, synth, threads, version
 );
+
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 
 pub use error::{Error, Result};
 

@@ -134,8 +134,8 @@ pub fn run(cli: &Cli) -> anyhow::Result<()> {
         return Ok(());
     }
     // Set before any thread starts, so every stack and heap counts against it.
-    let data_limit =
-        crate::memory::limit_data(config.memory.data_limit_mib).context("cannot set the memory limit")?;
+    let data_limit = crate::memory::limit_data(config.memory.data_limit_mib)
+        .context("cannot set the memory limit")?;
     let mut temp_refused = None;
     let ram = std::env::var_os(crate::db::tempdir::TEMP_DIR_ENV).map_or_else(
         || std::path::PathBuf::from(crate::db::tempdir::RAM_TEMP_DIR),

@@ -788,14 +788,11 @@ mod tests {
     }
 
     async fn wait_state(app: &AppState, id: JobId, want: JobState) {
-        for _ in 0..200 {
+        crate::testing::eventually(&format!("job {id} to reach {want:?}"), || async {
             let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");
-            if row.is_some_and(|r| r.state == want) {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("job {id} never reached {want:?}");
+            row.is_some_and(|r| r.state == want)
+        })
+        .await;
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1057,13 +1054,10 @@ mod tests {
             .await
             .expect("ran after run now");
         wait_state(&app, id, JobState::Done).await;
-        for _ in 0..200 {
-            if app.gate.state().manual.is_none() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert_eq!(app.gate.state().manual, None);
+        crate::testing::eventually("the manual override to clear", || async {
+            app.gate.state().manual.is_none()
+        })
+        .await;
         assert!(
             app.gate.state().paused(),
             "later work waits for the core again"

@@ -432,16 +432,14 @@ fn another_process_holding_the_database_its_wal_or_its_shm_is_seen() {
             .stdin(File::open(&file).expect("open"))
             .spawn()
             .expect("sleep");
-        let seen = (0..200).any(|_| {
-            let held = held_elsewhere(&db);
-            if !held {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            held
-        });
+        let seen = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            crate::testing::eventually_blocking("a child holding the file to be seen", || {
+                held_elsewhere(&db)
+            });
+        }));
         child.kill().expect("kill");
         child.wait().expect("wait");
-        assert!(seen, "a child holding {suffix:?} is seen");
+        assert!(seen.is_ok(), "a child holding {suffix:?} is seen");
         assert!(!held_elsewhere(&db));
     }
 }
