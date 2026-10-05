@@ -1081,22 +1081,7 @@ fn a_group_whose_parent_is_on_another_platform_is_found_by_every_shape() {
 fn the_migration_builds_the_table_from_existing_rows() {
     let mut c = Connection::open_in_memory().expect("open");
     c.pragma_update(None, "foreign_keys", false).expect("fk");
-    c.execute_batch(
-        "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, name TEXT NOT NULL,
-                                      applied_at INTEGER NOT NULL);",
-    )
-    .expect("schema_version");
-    for m in crate::db::migrate::MIGRATIONS
-        .iter()
-        .filter(|m| m.version < 16)
-    {
-        c.execute_batch(m.sql).expect(m.name);
-        c.execute(
-            "INSERT INTO schema_version VALUES (?1, ?2, 0)",
-            params![m.version, m.name],
-        )
-        .expect("record");
-    }
+    crate::db::migrate::apply_through(&mut c, 15).expect("older migrations");
     c.execute_batch(
         "INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at, game_count)
            VALUES (1, 'gb', 'Test', '1', 't.dat', 0, 0);

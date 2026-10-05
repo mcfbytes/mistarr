@@ -23,11 +23,11 @@ pub const SWAP_SUFFIX: &str = ".swap";
 /// unless renaming it back failed too, which the error names.
 pub(crate) fn install_file(path: &Path, new: &Path) -> std::io::Result<()> {
     for suffix in ["-wal", "-shm"] {
-        remove_if_present(&super::super::sibling(path, suffix))?;
+        remove_if_present(&crate::db::sibling(path, suffix))?;
     }
-    let old = super::super::sibling(path, OLD_SUFFIX);
+    let old = crate::db::sibling(path, OLD_SUFFIX);
     remove_if_present(&old)?;
-    let marker = super::super::sibling(path, SWAP_SUFFIX);
+    let marker = crate::db::sibling(path, SWAP_SUFFIX);
     std::fs::File::create(&marker)?.sync_all()?;
     sync_parent(path);
     if let Err(e) = std::fs::rename(path, &old) {

@@ -376,7 +376,7 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
             Err(e) => tracing::warn!(dir, error = %e, "cannot list zips; keeping their rows"),
         }
     }
-    let pid = PlatformId(super::PLATFORM.to_owned());
+    let pid = super::platform();
     let mut stats = Stats {
         zips: listing.iter().map(|(_, n)| n.len()).sum(),
         ..Stats::default()

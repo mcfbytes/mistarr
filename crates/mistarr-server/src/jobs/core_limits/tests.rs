@@ -11,6 +11,7 @@ use super::*;
 use crate::app::testutil::{state_with, TestDir};
 use crate::app::Options;
 use crate::db::deferred::{self, Op};
+use crate::db::fixtures::{download, pid, seed_rom};
 use crate::events::EventKind;
 use crate::freeze::fake::FakeClient;
 use crate::freeze::Signal;
@@ -743,14 +744,8 @@ async fn a_finished_torrent_is_released_at_the_resume() {
     let source = source_in_client(&app);
     app.db
         .write_blocking(move |c| {
-            let rom = crate::db::fixtures::seed_rom(
-                c,
-                &crate::db::fixtures::pid("nes"),
-                "Example Quest (USA).nes",
-                16,
-                &[],
-            )?;
-            crate::db::fixtures::download(
+            let rom = seed_rom(c, &pid("nes"), "Example Quest (USA).nes", 16, &[])?;
+            download(
                 c,
                 rom,
                 source,
@@ -1039,14 +1034,8 @@ async fn work_kept_for_a_client_that_died_during_the_game_waits_until_it_is_back
     let source = source_in_client(&app);
     app.db
         .write_blocking(move |c| {
-            let rom = crate::db::fixtures::seed_rom(
-                c,
-                &crate::db::fixtures::pid("nes"),
-                "Example Quest (USA).nes",
-                16,
-                &[],
-            )?;
-            crate::db::fixtures::download(
+            let rom = seed_rom(c, &pid("nes"), "Example Quest (USA).nes", 16, &[])?;
+            download(
                 c,
                 rom,
                 source,

@@ -613,7 +613,7 @@ mod tests {
         assert_eq!(set_waiting(&c, true).expect("on"), 3);
         assert_eq!(waiting_count(&c).expect("count"), 3);
 
-        crate::db::platforms::set_enabled(&c, "psx", false).expect("disable");
+        crate::db::platforms::set_enabled(&c, &PlatformId("psx".into()), false).expect("disable");
         assert_eq!(
             waiting_count(&c).expect("count"),
             0,

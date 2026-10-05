@@ -105,7 +105,7 @@ async fn update(
     id: Result<Path<String>, PathRejection>,
     bytes: Bytes,
 ) -> Result<Json<PlatformOut>, ApiError> {
-    let id = path_id(id)?;
+    let id = PlatformId(path_id(id)?);
     let UpdateBody { enabled } = body(&bytes)?;
     let hide = app.config().prefs.hide.clone();
     let found = app
@@ -115,9 +115,9 @@ async fn update(
                 return Ok(None);
             }
             let counts = titles::browse::counts(c, &hide)?
-                .remove(&id)
+                .remove(&id.0)
                 .unwrap_or_default();
-            Ok(platforms::find(c, &PlatformId(id))?.map(|row| PlatformOut { row, counts }))
+            Ok(platforms::find(c, &id)?.map(|row| PlatformOut { row, counts }))
         })
         .await?;
     found

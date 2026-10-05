@@ -377,7 +377,7 @@ async fn an_interrupted_scan_resumes_at_startup() {
                     },
                     now,
                 )?;
-                scan_progress::save_scan_progress(c, &pid, &["Genesis".to_owned()], now)
+                scan_progress::save(c, &pid, &["Genesis".to_owned()], now)
             }
         })
         .await
@@ -401,7 +401,7 @@ async fn an_interrupted_scan_resumes_at_startup() {
                 .db
                 .read({
                     let pid2 = pid2.clone();
-                    move |c| scan_progress::scan_progress(c, &pid2)
+                    move |c| scan_progress::get(c, &pid2)
                 })
                 .await
                 .is_ok_and(|d| d.is_empty());

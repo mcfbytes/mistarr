@@ -154,12 +154,13 @@ pub fn set_core_present(conn: &Connection, present: &[PlatformId]) -> Result<()>
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(!mistarr_server::db::platforms::set_enabled(&conn, "nes", false).unwrap());
+/// let nes = mistarr_core::PlatformId("nes".into());
+/// assert!(!mistarr_server::db::platforms::set_enabled(&conn, &nes, false).unwrap());
 /// ```
-pub fn set_enabled(conn: &Connection, id: &str, enabled: bool) -> Result<bool> {
+pub fn set_enabled(conn: &Connection, id: &PlatformId, enabled: bool) -> Result<bool> {
     let n = conn.execute(
         "UPDATE platforms SET enabled = ?2 WHERE id = ?1",
-        params![id, enabled],
+        params![id.0, enabled],
     )?;
     Ok(n > 0)
 }
@@ -209,8 +210,8 @@ mod tests {
     fn enabled_toggles() {
         let mut c = conn();
         seed(&mut c, &PLATFORMS).expect("seed");
-        assert!(set_enabled(&c, "nes", false).expect("set"));
-        assert!(!set_enabled(&c, "nope", false).expect("set"));
+        assert!(set_enabled(&c, &PlatformId("nes".into()), false).expect("set"));
+        assert!(!set_enabled(&c, &PlatformId("nope".into()), false).expect("set"));
         let nes = find(&c, &PlatformId("nes".into()))
             .expect("find")
             .expect("row");

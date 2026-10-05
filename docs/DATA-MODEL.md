@@ -25,12 +25,13 @@ a group and holds the want and unwant writes to `titles`), `downloads` and so
 on. A statement of one table's lifecycle may touch a neighbour: `dats::retire`
 retires roms and titles, `chd` and `sources` update `files` and `roms` in step
 with their own rows, and `candidates` updates `torrent_files`; downloads are
-cancelled through `downloads`.
+cancelled through `downloads`, `arcade::mra_version` writes `dat_versions`, and
+`files::delete_ids` clears `import_log`.
 Read-only composite views over several tables sit in `db/views/`. Rom
 lookups, the SHA1, MD5 then CRC32 and size tiers among them, are in `roms`;
 `titles` and `arcade` write the rom rows.
-A platform is named by a `PlatformId` in every signature, read with
-`platforms::find`.
+A platform is named by a `PlatformId` in the `titles`, `arcade`, `roms`, `files`
+and `platforms` signatures, read with `platforms::find`.
 
 A statement run once per row of a loop or per file is prepared with
 `prepare_cached`; a statement a request or a job runs once is prepared with

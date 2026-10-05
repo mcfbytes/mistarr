@@ -33,6 +33,10 @@ use crate::error::Result;
 pub const PLATFORM: &str = "arcade";
 
 /// [`PLATFORM`] as an id.
+///
+/// ```
+/// assert_eq!(mistarr_server::jobs::arcade::platform().0, "arcade");
+/// ```
 #[must_use]
 pub fn platform() -> PlatformId {
     PlatformId(PLATFORM.to_owned())
@@ -246,7 +250,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
         .write_tx(move |tx| settle_titles(tx, version, run, &prefs))
         .await?;
     if changed {
-        super::remap::enqueue(&ctx.app, Some(vec![PlatformId(PLATFORM.into())])).await;
+        super::remap::enqueue(&ctx.app, Some(vec![platform()])).await;
     }
     // After titles are committed, so the presence pass sees this run's live MRA zips.
     let stats = presence::run(ctx).await?;
@@ -272,9 +276,10 @@ fn scan_batch(
     batch: &[Listed],
     pass: &mut Pass,
 ) -> Result<Vec<Item>> {
+    let pid = platform();
     let mut items = Vec::with_capacity(batch.len());
     for listed in batch {
-        let stored = db.read_blocking(|c| rows::stored_mra(c, &platform(), &listed.rel))?;
+        let stored = db.read_blocking(|c| rows::stored_mra(c, &pid, &listed.rel))?;
         if let Some(s) = stored
             .as_ref()
             .filter(|s| s.file_stamp.as_deref() == Some(listed.stamp.as_str()))
@@ -410,13 +415,14 @@ fn settle_titles(
     run: i64,
     prefs: &mistarr_core::select::Prefs,
 ) -> Result<(usize, u64, bool)> {
-    let retired = rows::retire_unseen(tx, &platform(), run)?;
-    let live = rows::live_count(tx, &platform())?;
+    let pid = platform();
+    let retired = rows::retire_unseen(tx, &pid, run)?;
+    let live = rows::live_count(tx, &pid)?;
     crate::db::dats::set_game_count(tx, version, live)?;
-    let changed = retired > 0 || rows::recompute_pending(tx, &platform())?;
+    let changed = retired > 0 || rows::recompute_pending(tx, &pid)?;
     if changed {
-        titles::recompute::recompute_platform(tx, &platform(), prefs)?;
-        rows::set_recompute_pending(tx, &platform(), false)?;
+        titles::recompute::recompute_platform(tx, &pid, prefs)?;
+        rows::set_recompute_pending(tx, &pid, false)?;
     }
     Ok((retired, live, changed))
 }

@@ -865,7 +865,7 @@ impl DatIndex for SqlDatIndex<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::fixtures::conn;
+    use crate::db::fixtures::{conn, pid, seed_rom};
     use crate::db::testutil;
     use crate::db::views::source_detail::{self, FileRow};
 
@@ -912,14 +912,7 @@ mod tests {
         let row = get(&c, a).expect("get").expect("row");
         assert_eq!(row.suggested_platform_id, Some(nes()));
         assert!(!platform_has_dat(&c, &nes()).expect("dat"));
-        crate::db::fixtures::seed_rom(
-            &c,
-            &crate::db::fixtures::pid("nes"),
-            "Example Quest (USA).nes",
-            1,
-            &[],
-        )
-        .expect("seed");
+        seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 1, &[]).expect("seed");
         assert!(platform_has_dat(&c, &nes()).expect("dat"));
         set_suggestion(&c, a, None).expect("clear");
         assert_eq!(list_unbound(&c).expect("list"), [(a, None)]);
@@ -1002,14 +995,7 @@ mod tests {
     #[test]
     fn files_carry_matches_confidence_and_rom_names() {
         let c = conn();
-        let rom = crate::db::fixtures::seed_rom(
-            &c,
-            &crate::db::fixtures::pid("nes"),
-            "Example Quest (USA).nes",
-            16,
-            &[],
-        )
-        .expect("rom");
+        let rom = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
         let id = insert(&c, &new(&"04".repeat(20), SourceState::Bound)).expect("insert");
         let list = [
             file(0, "Sub/Example Quest (USA).nes", 16),
@@ -1060,30 +1046,9 @@ mod tests {
     #[test]
     fn index_finds_by_name_and_by_base_name_and_size() {
         let c = conn();
-        let a = crate::db::fixtures::seed_rom(
-            &c,
-            &crate::db::fixtures::pid("nes"),
-            "Example Quest (USA).nes",
-            16,
-            &[],
-        )
-        .expect("rom");
-        let b = crate::db::fixtures::seed_rom(
-            &c,
-            &crate::db::fixtures::pid("snes"),
-            "Sub\\Other Tale (Europe).sfc",
-            32,
-            &[],
-        )
-        .expect("rom");
-        crate::db::fixtures::seed_rom(
-            &c,
-            &crate::db::fixtures::pid("nes"),
-            "Boot Code (World).nes",
-            8,
-            &["bios"],
-        )
-        .expect("rom");
+        let a = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
+        let b = seed_rom(&c, &pid("snes"), "Sub\\Other Tale (Europe).sfc", 32, &[]).expect("rom");
+        seed_rom(&c, &pid("nes"), "Boot Code (World).nes", 8, &["bios"]).expect("rom");
         assert_eq!(refresh_match_keys(&c).expect("keys"), 3);
         assert_eq!(refresh_match_keys(&c).expect("keys"), 0);
         let index = SqlDatIndex::new(&c);
@@ -1104,9 +1069,9 @@ mod tests {
         let c = conn();
         let count = KEY_BATCH as usize + 5;
         for i in 0..count {
-            crate::db::fixtures::seed_rom(
+            seed_rom(
                 &c,
-                &crate::db::fixtures::pid("nes"),
+                &pid("nes"),
                 &format!("Example Quest {i} (USA).nes"),
                 16,
                 &[],
@@ -1121,22 +1086,8 @@ mod tests {
     #[test]
     fn binding_runs_against_the_index() {
         let c = conn();
-        crate::db::fixtures::seed_rom(
-            &c,
-            &crate::db::fixtures::pid("nes"),
-            "Example Quest (USA).nes",
-            16,
-            &[],
-        )
-        .expect("rom");
-        crate::db::fixtures::seed_rom(
-            &c,
-            &crate::db::fixtures::pid("nes"),
-            "Second Try (Japan).nes",
-            24,
-            &[],
-        )
-        .expect("rom");
+        seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
+        seed_rom(&c, &pid("nes"), "Second Try (Japan).nes", 24, &[]).expect("rom");
         refresh_match_keys(&c).expect("keys");
         let files = [
             file(0, "Set/Example Quest (USA).nes", 16),

@@ -12,7 +12,7 @@ use crate::error::Result;
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Stored`] on unparseable JSON.
-pub fn scan_progress(conn: &Connection, platform_id: &PlatformId) -> Result<Vec<String>> {
+pub fn get(conn: &Connection, platform_id: &PlatformId) -> Result<Vec<String>> {
     Ok(conn
         .query_row(
             "SELECT done_dirs FROM scan_progress WHERE platform_id = ?1",
@@ -29,7 +29,7 @@ pub fn scan_progress(conn: &Connection, platform_id: &PlatformId) -> Result<Vec<
 ///
 /// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Stored`] when the list cannot
 /// be written as JSON.
-pub fn save_scan_progress(
+pub fn save(
     conn: &Connection,
     platform_id: &PlatformId,
     done_dirs: &[String],
@@ -49,7 +49,7 @@ pub fn save_scan_progress(
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn clear_scan_progress(conn: &Connection, platform_id: &PlatformId) -> Result<()> {
+pub fn clear(conn: &Connection, platform_id: &PlatformId) -> Result<()> {
     conn.execute(
         "DELETE FROM scan_progress WHERE platform_id = ?1",
         [&platform_id.0],
@@ -79,17 +79,17 @@ mod tests {
     use crate::db::fixtures::conn;
 
     #[test]
-    fn scan_progress_round_trips_and_clears() {
+    fn progress_round_trips_and_clears() {
         let c = conn();
         let pid = PlatformId("nes".into());
-        assert!(scan_progress(&c, &pid).expect("empty").is_empty());
-        save_scan_progress(&c, &pid, &["NES".to_owned()], 5).expect("save");
-        assert_eq!(scan_progress(&c, &pid).expect("get"), ["NES".to_owned()]);
+        assert!(get(&c, &pid).expect("empty").is_empty());
+        save(&c, &pid, &["NES".to_owned()], 5).expect("save");
+        assert_eq!(get(&c, &pid).expect("get"), ["NES".to_owned()]);
         let got = platforms_with_progress(&c).expect("list");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0].0, pid.0);
-        clear_scan_progress(&c, &pid).expect("clear");
-        assert!(scan_progress(&c, &pid).expect("empty").is_empty());
+        clear(&c, &pid).expect("clear");
+        assert!(get(&c, &pid).expect("empty").is_empty());
         assert!(platforms_with_progress(&c).expect("list").is_empty());
     }
 }

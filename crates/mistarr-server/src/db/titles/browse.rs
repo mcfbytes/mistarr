@@ -1,14 +1,16 @@
 //! The browse query over `title_groups`; see `docs/API.md` "Titles".
 
-use crate::db::groups::{self, Clause};
-use crate::db::ids::TitleId;
-use crate::db::sql::{self, Page, Paged};
-use crate::error::Result;
+use std::collections::HashMap;
+
 use mistarr_core::PlatformId;
 use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use serde::Serialize;
-use std::collections::HashMap;
+
+use crate::db::groups::{self, Clause};
+use crate::db::ids::TitleId;
+use crate::db::sql::{self, Page, Paged};
+use crate::error::Result;
 
 /// Keeps a group of `title_groups g` only when its parent is an MRA title or its platform
 /// has no live MRA title, so a platform with MRAs browses its MRA catalogue alone.

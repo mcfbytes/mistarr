@@ -279,7 +279,8 @@ pub fn move_to(
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn delete(conn: &Connection, id: FileId) -> Result<()> {
-    conn.execute("DELETE FROM files WHERE id = ?1", [id])?;
+    conn.prepare_cached("DELETE FROM files WHERE id = ?1")?
+        .execute([id])?;
     Ok(())
 }
 
@@ -452,7 +453,9 @@ pub fn mark_verified(
 ///
 /// ```
 /// use mistarr_server::db::files::{find_by_path, upsert, FileState, NewFile};
-/// let conn = mistarr_server::db::fixtures::conn();
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// mistarr_server::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).unwrap();
 /// let psx = mistarr_core::PlatformId("psx".into());
 /// let row = NewFile { rel_path: "PSX/g.chd".into(), size: 9, mtime: 1, crc32: None, md5: None,
 ///     sha1: None, header_rule: Some("chd".into()), whole: Default::default(), rom_id: None,

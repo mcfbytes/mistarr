@@ -1,14 +1,16 @@
 //! Clone parents, groups and 1G1R picks of a platform's titles; see `docs/VERIFICATION.md`
 //! "Clone groups".
 
-use crate::db::ids::{DatVersionId, TitleId};
-use crate::db::sql::{self};
-use crate::error::Result;
+use std::collections::HashMap;
+
 use mistarr_core::naming::{parse_name, ParsedName};
 use mistarr_core::select::{infer_groups, select_1g1r, Prefs, Variant};
 use mistarr_core::PlatformId;
 use rusqlite::{params, Connection};
-use std::collections::HashMap;
+
+use crate::db::ids::{DatVersionId, TitleId};
+use crate::db::sql;
+use crate::error::Result;
 
 /// Sets clone parents for the titles of `version`. With `use_clone_of` each
 /// title's parent is the game its `cloneof` names, else itself; without it the

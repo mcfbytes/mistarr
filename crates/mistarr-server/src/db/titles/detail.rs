@@ -1,15 +1,16 @@
 //! One group's detail and the want and unwant writes; see `docs/API.md` "Titles".
 
+use mistarr_core::PlatformId;
+use rusqlite::{Connection, OptionalExtension, Row};
+use serde::Serialize;
+
 use super::{RomStatus, Tag, TitleSource};
 use crate::db::arcade::MraInfo;
 use crate::db::candidates::Availability;
 use crate::db::files::FileState;
 use crate::db::ids::{DatVersionId, FileId, RomId, TitleId};
-use crate::db::sql::{self};
+use crate::db::sql;
 use crate::error::Result;
-use mistarr_core::PlatformId;
-use rusqlite::{Connection, OptionalExtension, Row};
-use serde::Serialize;
 
 /// A rom of a variant with the best file on disk for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

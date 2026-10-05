@@ -308,7 +308,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
             .db
             .write({
                 let id = id.clone();
-                move |c| scan_progress::clear_scan_progress(c, &id)
+                move |c| scan_progress::clear(c, &id)
             })
             .await?;
         return Ok(());
@@ -334,7 +334,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         .db
         .read({
             let pid = pid.clone();
-            move |c| scan_progress::scan_progress(c, &pid)
+            move |c| scan_progress::get(c, &pid)
         })
         .await?;
 
@@ -397,7 +397,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     let pid4 = pid.clone();
     ctx.app
         .db
-        .write(move |c| scan_progress::clear_scan_progress(c, &pid4))
+        .write(move |c| scan_progress::clear(c, &pid4))
         .await?;
     super::chd::queue_for(&ctx.app, &pid, false).await?;
     report_outcome(ctx, &pid, total).await
@@ -542,7 +542,7 @@ fn commit_unit(
         written.push((row.rel_path, id, row.state));
     }
     if let Some(done_dirs) = done_dirs {
-        scan_progress::save_scan_progress(tx, platform_id, done_dirs, now)?;
+        scan_progress::save(tx, platform_id, done_dirs, now)?;
     }
     Ok(written)
 }
@@ -1753,7 +1753,7 @@ mod tests {
         let nes = PlatformId("nes".into());
         fs::create_dir_all(app.config().paths.games.join("NES")).expect("mkdir");
         app.db
-            .write(|c| platform_rows::set_enabled(c, "nes", false).map(|_| ()))
+            .write(|c| platform_rows::set_enabled(c, &PlatformId("nes".into()), false).map(|_| ()))
             .await
             .expect("disable");
         assert_eq!(

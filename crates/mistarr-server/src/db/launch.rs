@@ -110,7 +110,7 @@ mod tests {
 
     use super::*;
     use crate::db::files::{self, NewFile};
-    use crate::db::fixtures::conn;
+    use crate::db::fixtures::{conn, dat};
     use crate::db::ids::RomId;
     use crate::db::titles::RomStatus;
 
@@ -140,10 +140,10 @@ mod tests {
     fn disc_title_is_complete_only_with_every_track() {
         let c = conn();
         let pid = PlatformId("psx".into());
-        let disc = crate::db::fixtures::dat(&pid)
+        let disc = dat(&pid)
             .title("Example Disc (USA)")
-            .rom("g.cue", &hashes(), crate::db::titles::RomStatus::Good)
-            .rom("g.bin", &hashes(), crate::db::titles::RomStatus::Good)
+            .rom("g.cue", &hashes(), RomStatus::Good)
+            .rom("g.bin", &hashes(), RomStatus::Good)
             .write(&c)
             .expect("disc");
         let (t, cue, bin) = (disc.titles[0], disc.roms[0], disc.roms[1]);
@@ -167,7 +167,7 @@ mod tests {
     fn unverified_and_pending_files_do_not_count() {
         let c = conn();
         let pid = PlatformId("nes".into());
-        let rom = crate::db::fixtures::dat(&pid)
+        let rom = dat(&pid)
             .title("Example Quest")
             .rom("a.nes", &hashes(), RomStatus::Good)
             .write(&c)
@@ -189,9 +189,9 @@ mod tests {
     fn mra_title_needs_every_zip_and_no_failed_check() {
         let c = conn();
         let pid = PlatformId("arcade".into());
-        let blaster = crate::db::fixtures::dat(&pid)
+        let blaster = dat(&pid)
             .title("Example Blaster")
-            .rom("exb.zip", &hashes(), crate::db::titles::RomStatus::Good)
+            .rom("exb.zip", &hashes(), RomStatus::Good)
             .write(&c)
             .expect("blaster");
         let (t, rom) = (blaster.titles[0], blaster.first_rom());
@@ -218,10 +218,10 @@ mod tests {
     fn a_chd_identified_by_its_tracks_counts_as_verified() {
         let c = conn();
         let pid = PlatformId("psx".into());
-        let disc = crate::db::fixtures::dat(&pid)
+        let disc = dat(&pid)
             .title("Disc")
-            .rom("Disc.cue", &hashes(), crate::db::titles::RomStatus::Good)
-            .rom("Disc.bin", &hashes(), crate::db::titles::RomStatus::Good)
+            .rom("Disc.cue", &hashes(), RomStatus::Good)
+            .rom("Disc.bin", &hashes(), RomStatus::Good)
             .write(&c)
             .expect("disc");
         let (title, cue, bin) = (disc.titles[0], disc.roms[0], disc.roms[1]);
