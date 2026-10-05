@@ -6,7 +6,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
 use super::candidates;
-use super::ids::{DownloadId, RomId, SourceId, TitleId};
+use super::ids::{DatVersionId, DownloadId, RomId, SourceId, TitleId};
 use super::sources;
 use super::sql::{self, text_enum, Page, Paged};
 use crate::error::Result;
@@ -826,6 +826,28 @@ pub(crate) fn cancel_unstarted_in_group(
             DownloadState::UNSTARTED_SQL
         ),
         params![parent, now],
+    )?;
+    Ok(())
+}
+
+/// Cancels the unstarted downloads of every DAT title of version `dat_version`.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub(crate) fn cancel_unstarted_in_dat_version(
+    conn: &Connection,
+    dat_version: DatVersionId,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        &format!(
+            "UPDATE downloads SET state = 'cancelled', updated_at = ?2
+             WHERE state IN {} AND title_id IN
+               (SELECT id FROM titles WHERE dat_version_id = ?1 AND source = 'dat')",
+            DownloadState::UNSTARTED_SQL
+        ),
+        params![dat_version, now],
     )?;
     Ok(())
 }

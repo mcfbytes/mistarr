@@ -5,7 +5,6 @@ use mistarr_core::PlatformId;
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
-use super::downloads::DownloadState;
 use super::ids::DatVersionId;
 use super::sql::{self, Page, Paged};
 
@@ -406,14 +405,7 @@ pub fn retire(conn: &Connection, id: DatVersionId, now: i64) -> Result<Option<Da
         return Ok(None);
     };
     conn.execute("UPDATE dat_versions SET retired = 1 WHERE id = ?1", [id])?;
-    conn.execute(
-        &format!(
-            "UPDATE downloads SET state = 'cancelled', updated_at = ?2
-             WHERE state IN {} AND title_id IN ({OWN})",
-            DownloadState::UNSTARTED_SQL
-        ),
-        params![id, now],
-    )?;
+    super::downloads::cancel_unstarted_in_dat_version(conn, id, now)?;
     conn.execute(
         &format!("UPDATE roms SET retired = 1 WHERE title_id IN ({OWN})"),
         [id],

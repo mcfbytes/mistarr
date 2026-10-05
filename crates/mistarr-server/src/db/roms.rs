@@ -1,5 +1,5 @@
 //! Rom lookups: the hash tiers of `docs/VERIFICATION.md` "Matching order" and the reads of
-//! a rom, its title and its zip. `titles` and `arcade` own the rom writes.
+//! a rom, its title and its zip. `titles` and `arcade` write the rom rows.
 
 use std::collections::HashMap;
 

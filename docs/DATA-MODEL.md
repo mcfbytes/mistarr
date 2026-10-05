@@ -22,7 +22,10 @@ statement. A table module owns the writes to its table: `files`,
 `scan_progress`, `titles/` (`mod.rs` stores titles and their roms,
 `recompute.rs` groups and picks them, `browse.rs` reads them, `detail.rs` reads
 a group and holds the want and unwant writes to `titles`), `downloads` and so
-on; a write to another module's table goes through that module.
+on. A statement of one table's lifecycle may touch a neighbour: `dats::retire`
+retires roms and titles, `chd` and `sources` update `files` and `roms` in step
+with their own rows, and `candidates` updates `torrent_files`; downloads are
+cancelled through `downloads`.
 Read-only composite views over several tables sit in `db/views/`. Rom
 lookups, the SHA1, MD5 then CRC32 and size tiers among them, are in `roms`;
 `titles` and `arcade` write the rom rows.

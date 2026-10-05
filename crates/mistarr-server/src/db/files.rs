@@ -372,10 +372,8 @@ pub fn paths_under(
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn restamp(conn: &Connection, id: FileId, mtime: i64, now: i64) -> Result<()> {
-    conn.execute(
-        "UPDATE files SET mtime = ?2, scanned_at = ?3 WHERE id = ?1",
-        params![id, mtime, now],
-    )?;
+    conn.prepare_cached("UPDATE files SET mtime = ?2, scanned_at = ?3 WHERE id = ?1")?
+        .execute(params![id, mtime, now])?;
     Ok(())
 }
 
@@ -394,13 +392,13 @@ pub fn reverify(
     crc32: &str,
     now: i64,
 ) -> Result<()> {
-    conn.execute(
+    conn.prepare_cached(
         "UPDATE files SET size = ?2, mtime = ?3, crc32 = ?4, md5 = NULL, sha1 = NULL,
                           header_rule = NULL, crc32_whole = NULL, md5_whole = NULL,
                           sha1_whole = NULL, state = 'unverified', scanned_at = ?5
          WHERE id = ?1",
-        params![id, size, mtime, crc32, now],
-    )?;
+    )?
+    .execute(params![id, size, mtime, crc32, now])?;
     Ok(())
 }
 
