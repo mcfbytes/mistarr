@@ -18,11 +18,11 @@ use super::{ApiError, ApiJson, ApiPath, ApiQuery, Paging};
 use crate::app::AppState;
 use crate::db::ids::{JobId, SourceId};
 use crate::db::platforms;
-use crate::db::source_detail::{
-    self as detail, FileFilter, FileQuery, FileRow, Preview, SourceDetail,
-};
 use crate::db::sources::{self as rows, SourceReason, SourceRow, SourceState};
 use crate::db::sql::Paged;
+use crate::db::views::source_detail::{
+    self as detail, FileFilter, FileQuery, FileRow, Preview, SourceDetail,
+};
 use crate::incoming::place::{file_name, place_source, SourceFile};
 use crate::incoming::IncomingFile;
 use crate::jobs::bind_source::{BindSource, Choice};

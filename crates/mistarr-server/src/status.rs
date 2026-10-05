@@ -8,7 +8,7 @@ use crate::app::AppState;
 use crate::db::ids::JobId;
 use crate::db::jobs::{self, JobRow, JobState};
 use crate::db::settings::{self, keys};
-use crate::db::system::wizard_counts;
+use crate::db::views::system::wizard_counts;
 use crate::error::Result;
 use crate::jobs::core_limits::ClientHold;
 use crate::jobs::detect_client::ClientStatus;

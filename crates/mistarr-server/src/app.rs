@@ -444,7 +444,7 @@ fn prepare_catalog(db: Db) -> Result<Startup> {
         if added > 0 {
             tracing::info!(added, "seeded platforms");
         }
-        let unfinished_scans = db::files::platforms_with_progress(c)?;
+        let unfinished_scans = db::scan_progress::platforms_with_progress(c)?;
         let (resolved, settled) = db::transact(c, |tx| {
             db::dats::refresh_families(tx)?;
             let resolved = db::dats::resolve_families(tx)?;
@@ -575,7 +575,7 @@ fn clean_leftovers(config: &Config) -> Result<bool> {
 /// [`Error::Io`] when leftovers cannot be removed or a cut-short swap left no database,
 /// [`Error::SchemaTooNew`], [`Error::Migration`] or [`Error::Db`] when it cannot be opened.
 pub(crate) fn open_db(config: &mut Config) -> Result<Startup> {
-    if let Some(dir) = std::env::var_os(crate::db::SQLITE_TMPDIR) {
+    if let Some(dir) = std::env::var_os(crate::db::tempdir::SQLITE_TMPDIR) {
         tracing::info!(dir = %Path::new(&dir).display(), "SQLite temporary files");
     }
     // `[memory]` cannot move from the overlay below, so this reaches the log

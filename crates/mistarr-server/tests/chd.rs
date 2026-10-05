@@ -16,6 +16,7 @@ use mistarr_server::app::AppState;
 use mistarr_server::db::files::{self, FileRow, FileState};
 use mistarr_server::db::ids::{JobId, TitleId};
 use mistarr_server::db::jobs::{self as job_rows, JobState};
+use mistarr_server::db::titles::RomStatus;
 use mistarr_server::events::EventKind;
 use mistarr_server::jobs::gate::Override;
 use mistarr_server::jobs::{JobKind, Lane};
@@ -99,13 +100,16 @@ async fn seed_title_with(
     );
     app.db
         .write(move |c| {
-            let t = files::seed_title_fixture(c, &pid, &game)?;
-            files::seed_rom_for_title_fixture(c, t, &format!("{game}.cue"), &cue, "good")?;
+            let mut disc = mistarr_server::db::fixtures::dat(&pid).title(&game).rom(
+                &format!("{game}.cue"),
+                &cue,
+                mistarr_server::db::titles::RomStatus::Good,
+            );
             for (i, h) in tracks.iter().enumerate() {
                 let name = format!("{game} (Track {:02}).bin", i + 1);
-                files::seed_rom_for_title_fixture(c, t, &name, h, "good")?;
+                disc = disc.rom(&name, h, mistarr_server::db::titles::RomStatus::Good);
             }
-            Ok(t)
+            Ok(disc.write(c)?.titles[0])
         })
         .await
         .expect("seed")
@@ -798,7 +802,13 @@ async fn a_dat_listing_whole_chd_files_still_hashes_them_whole() {
     let whole = hash_reader(Cursor::new(&bytes), HeaderRule::None, None).expect("hash");
     let pid = PlatformId("psx".into());
     app.db
-        .write(move |c| files::seed_rom_fixture(c, &pid, "w", "w.chd", &whole, "good").map(|_| ()))
+        .write(move |c| {
+            mistarr_server::db::fixtures::dat(&pid)
+                .title("w")
+                .rom("w.chd", &whole, RomStatus::Good)
+                .write(c)
+                .map(|_| ())
+        })
         .await
         .expect("seed");
 
@@ -826,7 +836,13 @@ async fn a_chd_the_size_of_a_whole_chd_rom_is_hashed_whole_once() {
     };
     let pid = PlatformId("psx".into());
     app.db
-        .write(move |c| files::seed_rom_fixture(c, &pid, "o", "o.chd", &other, "good").map(|_| ()))
+        .write(move |c| {
+            mistarr_server::db::fixtures::dat(&pid)
+                .title("o")
+                .rom("o.chd", &other, RomStatus::Good)
+                .write(c)
+                .map(|_| ())
+        })
         .await
         .expect("seed");
 

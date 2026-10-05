@@ -398,7 +398,7 @@ pub fn write_file(file: &Path, frozen: Frozen) -> Result<(), FreezeError> {
     let dir = file
         .parent()
         .ok_or_else(|| untrusted(file, "has no directory"))?;
-    crate::db::private_dir(dir).map_err(|e| FreezeError::Untrusted(e.to_string()))?;
+    crate::db::tempdir::private_dir(dir).map_err(|e| FreezeError::Untrusted(e.to_string()))?;
     check_dir(dir, euid())?;
     let mut name = file.as_os_str().to_owned();
     name.push(".new");

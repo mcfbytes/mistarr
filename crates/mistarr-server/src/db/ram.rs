@@ -9,8 +9,12 @@ use rusqlite::backup::{Backup, StepResult};
 use rusqlite::{Connection, ErrorCode};
 
 use super::ids::JobId;
-use super::{sibling, Db, HeldWriter, OLD_SUFFIX, SWAP_SUFFIX};
+use super::{sibling, Db, HeldWriter};
 use crate::error::{Error, Result};
+use crate::status;
+use swap::{OLD_SUFFIX, SWAP_SUFFIX};
+
+pub mod swap;
 
 /// Bytes per `write` when the copy goes back to the card; a sync mount flushes each once.
 pub const CHUNK_BYTES: usize = 1024 * 1024;
@@ -180,13 +184,10 @@ impl Budget {
     /// Reads the memory available, and the free space in `dir` and beside `db`.
     #[must_use]
     pub fn read(dir: &Path, db: &Path) -> Self {
-        let available = fs::read_to_string("/proc/meminfo")
-            .ok()
-            .and_then(|t| mem_available(&t));
         Self {
-            available,
-            ram_room: free_bytes(dir),
-            card_room: db.parent().and_then(free_bytes),
+            available: status::mem_available_bytes(),
+            ram_room: status::free_bytes(dir),
+            card_room: db.parent().and_then(status::free_bytes),
         }
     }
 }
@@ -205,21 +206,6 @@ pub fn need(size: u64, input: u64) -> u64 {
     size.saturating_add(size / 2)
         .saturating_add(input.saturating_mul(INPUT_FACTOR))
         .saturating_add(MARGIN_BYTES)
-}
-
-/// `MemAvailable` of a `/proc/meminfo` text, in bytes.
-///
-/// ```
-/// let text = "MemTotal: 498 kB\nMemAvailable:     387072 kB\n";
-/// assert_eq!(mistarr_server::db::ram::mem_available(text), Some(387_072 * 1024));
-/// ```
-#[must_use]
-pub fn mem_available(meminfo: &str) -> Option<u64> {
-    let line = meminfo
-        .lines()
-        .find_map(|l| l.strip_prefix("MemAvailable:"))?;
-    let kib: u64 = line.split_whitespace().next()?.parse().ok()?;
-    kib.checked_mul(1024)
 }
 
 /// Why a `size`-byte database loading `input` bytes of DAT cannot be copied into RAM
@@ -269,12 +255,6 @@ pub fn refusal(budget: &Budget, size: u64, input: u64, floor: u64) -> Option<Str
     }
 }
 
-/// Free bytes for an unprivileged writer on the filesystem holding `dir`.
-fn free_bytes(dir: &Path) -> Option<u64> {
-    let st = rustix::fs::statvfs(dir).ok()?;
-    st.f_bavail.checked_mul(st.f_frsize)
-}
-
 /// Why `dir` cannot hold a copy of the database `db`, or `None` when it can: it must be,
 /// or become, a private directory as SQLite's temporary one is, on tmpfs or ramfs, and
 /// not on the file system holding `db`.
@@ -288,7 +268,7 @@ fn free_bytes(dir: &Path) -> Option<u64> {
 #[must_use]
 pub fn dir_refusal(dir: &Path, db: &Path) -> Option<String> {
     use std::os::unix::fs::MetadataExt;
-    if let Err(e) = super::private_dir(dir) {
+    if let Err(e) = super::tempdir::private_dir(dir) {
         return Some(format!("the memory directory cannot be used: {e}"));
     }
     let kind = rustix::fs::statfs(dir)
@@ -322,10 +302,7 @@ pub fn dir_refusal(dir: &Path, db: &Path) -> Option<String> {
 /// assert!(mistarr_server::db::ram::memory_left(u64::MAX).is_err());
 /// ```
 pub fn memory_left(floor: u64) -> Result<()> {
-    let available = fs::read_to_string("/proc/meminfo")
-        .ok()
-        .and_then(|t| mem_available(&t));
-    match available {
+    match status::mem_available_bytes() {
         Some(a) if a < floor => Err(Error::NoRoom(format!(
             "memory available fell to {} MiB, under the {} MiB kept free",
             a.div_ceil(MIB),
@@ -416,7 +393,7 @@ pub fn run<T>(
     watch.phase(Phase::Writing);
     let started = Instant::now();
     let bytes = fs::metadata(&copy)?.len();
-    let card_room = path.parent().and_then(free_bytes);
+    let card_room = path.parent().and_then(status::free_bytes);
     if card_room.is_some_and(|room| room < bytes.saturating_add(CHUNK_BYTES as u64)) {
         return Ok(Ram::fallback(
             why::CARD,
@@ -595,7 +572,7 @@ pub fn migrate_in_ram(
     report.work = started.elapsed();
     let started = Instant::now();
     let bytes = fs::metadata(&copy)?.len();
-    if free_bytes(db.parent().unwrap_or(Path::new(".")))
+    if status::free_bytes(db.parent().unwrap_or(Path::new(".")))
         .is_some_and(|room| room < bytes.saturating_add(CHUNK_BYTES as u64))
     {
         return skip("the card has no room for a second copy of the database");
@@ -606,7 +583,7 @@ pub fn migrate_in_ram(
         if !wait_unshared(db, &mut || Ok(()))? {
             return Ok(false);
         }
-        super::install_file(db, &new)?;
+        swap::install_file(db, &new)?;
         Ok(true)
     });
     match written {
@@ -829,7 +806,7 @@ pub fn clean_stale(db: &Path, dir: &Path) -> Result<usize> {
     Ok(removed)
 }
 
-/// The step of [`super::install_file`] a crash stopped at, from the files present.
+/// The step of [`swap::install_file`] a crash stopped at, from the files present.
 /// Beside `db`, `.old` is removed. Without `db`, a `.new` beside `.old` or the `.swap`
 /// marker that passes SQLite's `quick_check` is renamed in and `.old` removed, since
 /// `.new` is synced before the swap begins and a rename on exFAT may leave neither of
@@ -862,7 +839,7 @@ fn finish_swap(db: &Path) -> Result<usize> {
         }
         check_whole(&new)?;
         fs::rename(&new, db)?;
-        super::sync_parent(db);
+        swap::sync_parent(db);
         if old.exists() {
             fs::remove_file(&old)?;
             removed += 1;
@@ -872,10 +849,10 @@ fn finish_swap(db: &Path) -> Result<usize> {
         fs::rename(&old, db)?;
         tracing::warn!("put the old database back; the swap had lost its new file");
     }
-    super::sync_parent(db);
+    swap::sync_parent(db);
     if db.exists() && marker.exists() {
         fs::remove_file(&marker)?;
-        super::sync_parent(db);
+        swap::sync_parent(db);
     }
     Ok(removed)
 }

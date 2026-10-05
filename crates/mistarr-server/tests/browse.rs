@@ -1,13 +1,16 @@
 //! Browse and search speed on the synthetic full catalogue; see `docs/TESTING.md`
 //! "Browse speed". Run with `--nocapture` to print the timings.
 
+use mistarr_server::db::fixtures::pid;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use mistarr_core::naming::{group_key, parse_name};
+use mistarr_core::PlatformId;
 use mistarr_server::db::dat_stage::{self, StagedGame, StagedRom};
 use mistarr_server::db::sql::Page;
-use mistarr_server::db::titles::{self, Browse, RomStatus, SearchShape, Sort, SEARCH_SHAPE};
+use mistarr_server::db::titles::browse::{Browse, SearchShape, Sort, SEARCH_SHAPE};
+use mistarr_server::db::titles::{self, RomStatus};
 use mistarr_server::db::{self, dats, groups};
 use mistarr_server::synth::{self, BROWSED, ELSEWHERE, RARE};
 use rusqlite::{params, Connection};
@@ -108,7 +111,9 @@ fn page(
         limit: 60,
         offset: 0,
     };
-    let got = titles::browse_with(c, platform, &filter, page, shape).expect("browse");
+    let got =
+        titles::browse::browse_with(c, &PlatformId(platform.to_owned()), &filter, page, shape)
+            .expect("browse");
     (
         got.items.into_iter().map(|r| r.parent_id.0).collect(),
         got.total,
@@ -165,7 +170,9 @@ fn browse_and_search_stay_fast_on_a_full_catalogue() {
         let (t, _) = time(runs, || page(&c, "psx", "", sort, SEARCH_SHAPE));
         eprintln!("  sort {sort:?}: {} ms", ms(t));
     }
-    let (t, _) = time(runs, || titles::counts(&c, &hide()).expect("counts"));
+    let (t, _) = time(runs, || {
+        titles::browse::counts(&c, &hide()).expect("counts")
+    });
     eprintln!("counts of every platform: {} ms", ms(t));
 
     let mut worst = [Duration::ZERO; SearchShape::ALL.len()];
@@ -262,11 +269,15 @@ fn load(c: &mut Connection, maintained: bool) -> Duration {
     };
     let plan = dats::upsert_version(&tx, &v).expect("version");
     dats::begin_load(&tx, plan.id).expect("begin");
-    dat_stage::apply(&tx, "snes", plan.id).expect("apply");
-    titles::link_parents(&tx, plan.id, false).expect("link");
+    dat_stage::apply(&tx, &pid("snes"), plan.id).expect("apply");
+    titles::recompute::link_parents(&tx, plan.id, false).expect("link");
     dats::retire_absent(&tx, plan.id).expect("retire");
-    titles::recompute_platform(&tx, "snes", &mistarr_core::select::Prefs::default())
-        .expect("recompute");
+    titles::recompute::recompute_platform(
+        &tx,
+        &pid("snes"),
+        &mistarr_core::select::Prefs::default(),
+    )
+    .expect("recompute");
     dat_stage::clear(&tx).expect("clear");
     if maintained {
         db::commit(tx).expect("commit");

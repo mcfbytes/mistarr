@@ -33,12 +33,12 @@ use super::{transfer, Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::candidates;
 use crate::db::deferred::Op;
-use crate::db::downloads::{self, DownloadRow, DownloadState};
-use crate::db::downloads_import::{Elsewhere, Settled};
-use crate::db::files::{self, FileRow, FileState};
+use crate::db::downloads::{self, DownloadRow, DownloadState, Elsewhere, Settled};
+use crate::db::files::{self, FileRow, FileState, NewFile};
 use crate::db::ids::{DownloadId, FileId, RomId, SourceId};
-use crate::db::imports::{self, EntryRom, ImportAction, TitleEntry};
+use crate::db::imports::{self, ImportAction, TitleEntry};
 use crate::db::jobs as job_rows;
+use crate::db::roms::{self, EntryRom};
 use crate::db::sources::{self, SourceRow};
 use crate::db::sql::Page;
 use crate::db::titles::RomStatus;
@@ -334,7 +334,7 @@ struct Placing<'a> {
 
 /// How a download ends whose file hashed to another version of its entry:
 /// the file is kept as that version, the download ends `bad` and the wanted
-/// rom is wanted again, as [`downloads_import::settle_elsewhere`] does.
+/// rom is wanted again, as [`downloads::settle_elsewhere`] does.
 #[derive(Debug, Clone)]
 struct Redirect(Elsewhere);
 
@@ -357,7 +357,7 @@ impl Redirect {
     }
 
     fn settle(&self, c: &rusqlite::Connection, id: DownloadId, now: i64) -> Result<Settled> {
-        downloads_import::settle_elsewhere(c, id, &self.0, now)
+        downloads::settle_elsewhere(c, id, &self.0, now)
     }
 }
 
@@ -481,11 +481,7 @@ impl Placing<'_> {
                         break;
                     }
                 }
-                Ok((
-                    imports::rom(c, rom_id)?,
-                    other,
-                    imports::rom_retired(c, rom_id)?,
-                ))
+                Ok((roms::rom(c, rom_id)?, other, roms::rom_retired(c, rom_id)?))
             })
             .await?;
         let named = other
@@ -696,7 +692,7 @@ impl Placing<'_> {
         let kept = self
             .app()
             .db
-            .read(move |c| downloads_import::verified_file(c, proven))
+            .read(move |c| roms::verified_file(c, proven))
             .await?;
         if let Some(file) = kept {
             return self.keep_other(row, other, hashed, &redirect, file).await;
@@ -1392,7 +1388,7 @@ impl Quarantined<'_> {
             candidates::prove(tx, self.source, i, proven)?;
         }
         if guessed || self.redirect.is_some() {
-            settled.again = downloads_import::want_again(tx, self.row, self.reason, now)?;
+            settled.again = downloads::want_again(tx, self.row, self.reason, now)?;
         }
         Ok(settled)
     }
@@ -1508,26 +1504,16 @@ fn record_target(
         };
         let h = &p.hashed.hashes;
         let whole = p.hashed.whole_columns(scope.rule);
-        let hashed = files::Hashed {
-            crc32: Some(&h.crc32),
-            md5: Some(&h.md5),
-            sha1: Some(&h.sha1),
-            header_rule: Some(scope.rule),
-            whole: Some(&whole),
+        let row = NewFile {
+            crc32: Some(h.crc32.clone()),
+            md5: Some(h.md5.clone()),
+            sha1: Some(h.sha1.clone()),
+            header_rule: Some(scope.rule.to_owned()),
+            whole,
+            rom_id: Some(p.rom.id),
+            ..NewFile::unhashed(&rel, size, mtime, file_state(p, t.whole_zip))
         };
-        let placed_state = file_state(p, t.whole_zip);
-        let rom = Some(p.rom.id);
-        let id = files::upsert(
-            tx,
-            &scope.pid,
-            &rel,
-            size,
-            mtime,
-            &hashed,
-            rom,
-            placed_state,
-            now,
-        )?;
+        let id = files::upsert(tx, &scope.pid, &row, now)?;
         let mut detail = log_detail(scope, p, &rel);
         let action = match &t.decision {
             Decision::Replace(prev) => {

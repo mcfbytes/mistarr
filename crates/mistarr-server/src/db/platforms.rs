@@ -69,6 +69,19 @@ pub fn count(conn: &Connection) -> Result<usize> {
     Ok(usize::try_from(n).unwrap_or(0))
 }
 
+const COLUMNS: &str = "id, name, core_dir, kind, core_present, enabled";
+
+fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PlatformRow> {
+    Ok(PlatformRow {
+        id: PlatformId(r.get(0)?),
+        name: r.get(1)?,
+        core_dir: r.get(2)?,
+        kind: r.get(3)?,
+        core_present: r.get(4)?,
+        enabled: r.get(5)?,
+    })
+}
+
 /// Every platform, ordered by id.
 ///
 /// # Errors
@@ -81,19 +94,8 @@ pub fn count(conn: &Connection) -> Result<usize> {
 /// assert!(mistarr_server::db::platforms::list(&conn).unwrap().is_empty());
 /// ```
 pub fn list(conn: &Connection) -> Result<Vec<PlatformRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, name, core_dir, kind, core_present, enabled FROM platforms ORDER BY id",
-    )?;
-    let rows = stmt.query_map([], |r| {
-        Ok(PlatformRow {
-            id: PlatformId(r.get(0)?),
-            name: r.get(1)?,
-            core_dir: r.get(2)?,
-            kind: r.get(3)?,
-            core_present: r.get(4)?,
-            enabled: r.get(5)?,
-        })
-    })?;
+    let mut stmt = conn.prepare(&format!("SELECT {COLUMNS} FROM platforms ORDER BY id"))?;
+    let rows = stmt.query_map([], from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -111,18 +113,9 @@ pub fn list(conn: &Connection) -> Result<Vec<PlatformRow>> {
 /// ```
 pub fn find(conn: &Connection, id: &PlatformId) -> Result<Option<PlatformRow>> {
     conn.query_row(
-        "SELECT id, name, core_dir, kind, core_present, enabled FROM platforms WHERE id = ?1",
+        &format!("SELECT {COLUMNS} FROM platforms WHERE id = ?1"),
         [&id.0],
-        |r| {
-            Ok(PlatformRow {
-                id: PlatformId(r.get(0)?),
-                name: r.get(1)?,
-                core_dir: r.get(2)?,
-                kind: r.get(3)?,
-                core_present: r.get(4)?,
-                enabled: r.get(5)?,
-            })
-        },
+        from_row,
     )
     .optional()
     .map_err(Into::into)
@@ -161,12 +154,13 @@ pub fn set_core_present(conn: &Connection, present: &[PlatformId]) -> Result<()>
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(!mistarr_server::db::platforms::set_enabled(&conn, "nes", false).unwrap());
+/// let nes = mistarr_core::PlatformId("nes".into());
+/// assert!(!mistarr_server::db::platforms::set_enabled(&conn, &nes, false).unwrap());
 /// ```
-pub fn set_enabled(conn: &Connection, id: &str, enabled: bool) -> Result<bool> {
+pub fn set_enabled(conn: &Connection, id: &PlatformId, enabled: bool) -> Result<bool> {
     let n = conn.execute(
         "UPDATE platforms SET enabled = ?2 WHERE id = ?1",
-        params![id, enabled],
+        params![id.0, enabled],
     )?;
     Ok(n > 0)
 }
@@ -216,10 +210,12 @@ mod tests {
     fn enabled_toggles() {
         let mut c = conn();
         seed(&mut c, &PLATFORMS).expect("seed");
-        assert!(set_enabled(&c, "nes", false).expect("set"));
-        assert!(!set_enabled(&c, "nope", false).expect("set"));
-        let nes = find(&c, &PlatformId("nes".into())).expect("find");
-        assert!(!nes.expect("row").enabled);
+        assert!(set_enabled(&c, &PlatformId("nes".into()), false).expect("set"));
+        assert!(!set_enabled(&c, &PlatformId("nope".into()), false).expect("set"));
+        let nes = find(&c, &PlatformId("nes".into()))
+            .expect("find")
+            .expect("row");
+        assert!(!nes.enabled);
     }
 
     #[test]

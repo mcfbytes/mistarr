@@ -601,13 +601,8 @@ pub const PRUNE_GRACE_SECS: i64 = 3600;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::fixtures::conn;
     use serde_json::json;
-
-    fn conn() -> Connection {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        c
-    }
 
     #[test]
     fn queued_other_in_lane_ignores_its_own_kind_and_other_lanes() {
