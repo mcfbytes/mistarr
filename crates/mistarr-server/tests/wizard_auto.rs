@@ -3,6 +3,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::io::{Cursor, Write as _};
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -18,12 +19,13 @@ fn dat(name: &str, version: &str, games: &[(&str, &[&str])]) -> String {
     );
     let mut n = 0u32;
     for (game, roms) in games {
-        xml.push_str(&format!("<game name=\"{game}\">\n"));
+        let _ = writeln!(xml, "<game name=\"{game}\">");
         for rom in *roms {
             n += 1;
-            xml.push_str(&format!(
-                "  <rom name=\"{rom}\" size=\"{n}\" crc=\"{n:08x}\" sha1=\"{n:040x}\"/>\n"
-            ));
+            let _ = writeln!(
+                xml,
+                "  <rom name=\"{rom}\" size=\"{n}\" crc=\"{n:08x}\" sha1=\"{n:040x}\"/>"
+            );
         }
         xml.push_str("</game>\n");
     }

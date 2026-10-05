@@ -3,6 +3,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::Ordering::SeqCst;
@@ -264,7 +265,7 @@ async fn limit_kbps(kind: Kind, url: &str, dir: &str) -> Option<u32> {
                     l.strip_prefix("X-Transmission-Session-Id: ")
                         .filter(|_| text.starts_with("HTTP/1.1 409"))
                 }) {
-                    session = id.trim().to_owned();
+                    id.trim().clone_into(&mut session);
                     continue;
                 }
                 let json: Value = serde_json::from_str(text.split("\r\n\r\n").nth(1)?).ok()?;
@@ -327,13 +328,10 @@ impl Probe {
         let mut out = String::new();
         for path in ["downloads", "sources", "system/jobs", "imports"] {
             let body = get(self.addr, &format!("/api/v1/{path}")).await.body;
-            out.push_str(&format!("{path}: {body}\n"));
+            let _ = writeln!(out, "{path}: {body}");
         }
         for id in &self.torrents {
-            out.push_str(&format!(
-                "client {id}: {:?}\n",
-                self.client.status(id).await
-            ));
+            let _ = writeln!(out, "client {id}: {:?}", self.client.status(id).await);
         }
         out
     }
@@ -345,12 +343,11 @@ impl Probe {
     {
         let deadline = Instant::now() + limit;
         while !f().await {
-            if Instant::now() >= deadline {
-                panic!(
-                    "timed out after {limit:?} waiting for {what}\n{}",
-                    self.report().await
-                );
-            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out after {limit:?} waiting for {what}\n{}",
+                self.report().await
+            );
             tokio::time::sleep(Duration::from_millis(200)).await;
         }
     }
@@ -431,7 +428,11 @@ async fn seed(client: &dyn DownloadClient, metainfo: &[u8], dir: &Path, tracker:
         Duration::from_secs(60),
         || async {
             let st = client.status(&id).await.expect("seeder status");
-            st.state == TorrentState::Seeding && st.files.iter().all(|f| f.is_complete())
+            st.state == TorrentState::Seeding
+                && st
+                    .files
+                    .iter()
+                    .all(mistarr_clients::FileProgress::is_complete)
         },
     )
     .await;
@@ -542,7 +543,10 @@ async fn synthetic_set_through_rtorrent() {
     }
 }
 
-#[allow(clippy::too_many_lines)] // One user journey, read top to bottom.
+#[expect(
+    clippy::too_many_lines,
+    reason = "One user journey, read top to bottom."
+)]
 async fn run(kind: Kind) {
     let mut t = Timings {
         started: Instant::now(),

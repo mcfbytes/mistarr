@@ -506,7 +506,7 @@ fn disc(b: &Booted) -> (TitleId, Vec<(RomId, PathBuf)>) {
     let data: Vec<Vec<u8>> = (0u8..3)
         .map(|i| payload(10 + i, 512 + usize::from(i)))
         .collect();
-    disc_with(b, data)
+    disc_with(b, &data)
 }
 
 const DISC_NAMES: [&str; 3] = [
@@ -516,7 +516,7 @@ const DISC_NAMES: [&str; 3] = [
 ];
 
 /// Seeds a disc entry whose three tracks hold `data` and stages them.
-fn disc_with(b: &Booted, data: Vec<Vec<u8>>) -> (TitleId, Vec<(RomId, PathBuf)>) {
+fn disc_with(b: &Booted, data: &[Vec<u8>]) -> (TitleId, Vec<(RomId, PathBuf)>) {
     let names = DISC_NAMES;
     let pid = PlatformId("psx".into());
     let hashes: Vec<HashSet> = data.iter().map(|d| hash_of(d)).collect();
@@ -535,7 +535,7 @@ fn disc_with(b: &Booted, data: Vec<Vec<u8>>) -> (TitleId, Vec<(RomId, PathBuf)>)
         .expect("seed");
     let staged = roms
         .into_iter()
-        .zip(names.iter().zip(&data))
+        .zip(names.iter().zip(data))
         .map(|(rom, (name, d))| (rom, stage(b, &format!("Example Disc (USA)/{name}"), d)))
         .collect();
     (title, staged)
@@ -819,7 +819,7 @@ async fn a_file_of_another_entry_is_quarantined_naming_it() {
 async fn identical_tracks_of_one_disc_are_each_placed() {
     let b = boot().await;
     let same = payload(23, 600);
-    let (_, tracks) = disc_with(&b, vec![payload(24, 90), same.clone(), same]);
+    let (_, tracks) = disc_with(&b, &[payload(24, 90), same.clone(), same]);
     let src = source(&b, None);
     let ids: Vec<DownloadId> = tracks
         .iter()

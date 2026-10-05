@@ -213,7 +213,10 @@ pub fn rebuild_groups(path: &Path) -> crate::error::Result<usize> {
 
 fn mib(bytes: u64) -> String {
     // Display rounding only; exact values are not needed.
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Counts convert to a float for a display ratio."
+    )]
     let v = bytes as f64 / MIB as f64;
     format!("{v:.0} MiB")
 }

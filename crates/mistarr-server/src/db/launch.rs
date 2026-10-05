@@ -9,7 +9,6 @@ use crate::error::Result;
 
 /// A title as the launch route sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::struct_excessive_bools)] // Each flag is a separate refusal reason.
 pub struct LaunchTitle {
     /// Platform id.
     pub platform_id: String,

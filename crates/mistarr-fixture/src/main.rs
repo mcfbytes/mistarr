@@ -1,10 +1,6 @@
 //! `mistarr-fixture`: builds DATs, torrents and the synthetic set, and runs a
 //! local tracker. Usage is in `docs/TESTING.md`.
 
-#![forbid(unsafe_code)]
-#![warn(missing_docs)]
-#![warn(clippy::pedantic)]
-
 use std::io::Write;
 use std::path::PathBuf;
 

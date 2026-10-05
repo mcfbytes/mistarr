@@ -155,7 +155,10 @@ impl Gate {
     /// assert!(gate.state().paused());
     /// assert!(!gate.set_corename(Some("N64".into())));
     /// ```
-    #[allow(clippy::must_use_candidate)] // Callers may ignore whether it changed.
+    #[expect(
+        clippy::must_use_candidate,
+        reason = "Callers may ignore whether it changed."
+    )]
     pub fn set_corename(&self, corename: Option<String>) -> bool {
         self.tx.send_if_modified(|s| {
             if s.corename == corename {
@@ -175,7 +178,10 @@ impl Gate {
     /// assert!(gate.set_override(Some(Override::Paused)));
     /// assert!(gate.state().paused());
     /// ```
-    #[allow(clippy::must_use_candidate)] // Callers may ignore whether it changed.
+    #[expect(
+        clippy::must_use_candidate,
+        reason = "Callers may ignore whether it changed."
+    )]
     pub fn set_override(&self, manual: Option<Override>) -> bool {
         self.tx.send_if_modified(|s| {
             let changed = s.manual != manual;
@@ -196,7 +202,10 @@ impl Gate {
     /// assert!(gate.state().paused());
     /// assert!(!gate.end_run_now());
     /// ```
-    #[allow(clippy::must_use_candidate)] // Callers may ignore whether it changed.
+    #[expect(
+        clippy::must_use_candidate,
+        reason = "Callers may ignore whether it changed."
+    )]
     pub fn end_run_now(&self) -> bool {
         self.tx.send_if_modified(|s| {
             if s.manual != Some(Override::Running) {

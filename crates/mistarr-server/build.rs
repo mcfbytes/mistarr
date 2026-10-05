@@ -53,9 +53,10 @@ fn collect(dir: &Path) -> Vec<(u32, String, String)> {
         let Ok(version) = num.parse::<u32>() else {
             panic!("migration {stem} does not start with a number");
         };
-        if found.iter().any(|(v, _, _)| *v == version) {
-            panic!("migration number {version} is used twice");
-        }
+        assert!(
+            !found.iter().any(|(v, _, _)| *v == version),
+            "migration number {version} is used twice"
+        );
         found.push((version, stem.to_owned(), path.display().to_string()));
     }
     found

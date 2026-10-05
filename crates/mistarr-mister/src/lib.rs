@@ -4,10 +4,6 @@
 //!
 //! See `docs/PLATFORMS.md` and `docs/WORKPLAN.md` WP-04, WP-19 and WP-26.
 
-#![forbid(unsafe_code)]
-#![warn(missing_docs)]
-#![warn(clippy::pedantic)]
-
 use mistarr_core::dat::{MAX_DEPTH, MAX_EVENT_BYTES};
 
 pub mod adapter;

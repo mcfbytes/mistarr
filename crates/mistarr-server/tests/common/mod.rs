@@ -1,7 +1,8 @@
 //! Boots the server on an ephemeral port and speaks just enough HTTP/1.1 to test it.
 
-#![allow(dead_code)] // Each test binary uses a different subset.
+#![allow(dead_code, reason = "Each test binary uses a different subset.")]
 
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -160,14 +161,15 @@ pub async fn request_plain(
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     let mut req = format!("{method} {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n");
     for (k, v) in headers {
-        req.push_str(&format!("{k}: {v}\r\n"));
+        let _ = write!(req, "{k}: {v}\r\n");
     }
     let body = body.unwrap_or("");
     if !body.is_empty() || method != "GET" {
-        req.push_str(&format!(
+        let _ = write!(
+            req,
             "Content-Type: application/json\r\nContent-Length: {}\r\n",
             body.len()
-        ));
+        );
     }
     req.push_str("\r\n");
     req.push_str(body);
@@ -262,7 +264,7 @@ impl Sse {
         let mut req =
             format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nAccept: text/event-stream\r\n");
         for (k, v) in headers {
-            req.push_str(&format!("{k}: {v}\r\n"));
+            let _ = write!(req, "{k}: {v}\r\n");
         }
         req.push_str("\r\n");
         stream.write_all(req.as_bytes()).await.expect("write");

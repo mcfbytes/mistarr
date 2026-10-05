@@ -1,9 +1,5 @@
 //! The `mistarr` binary: flags, logging, the tokio runtime and signal handling.
 
-#![forbid(unsafe_code)]
-#![warn(missing_docs)]
-#![warn(clippy::pedantic)]
-
 use anyhow::Context as _;
 use clap::Parser as _;
 use mistarr_server::app::{self, Options};

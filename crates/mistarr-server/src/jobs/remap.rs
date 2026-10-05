@@ -257,7 +257,10 @@ pub async fn remap_one(app: &AppState, id: SourceId) -> Result<bool> {
         }
     }
     // File counts are far below 2^52, so the rate is exact enough.
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Counts convert to a float for a display ratio."
+    )]
     let rate = if total == 0 {
         0.0
     } else {

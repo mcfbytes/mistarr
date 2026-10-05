@@ -166,7 +166,10 @@ impl LaunchSlot {
 
 /// What a settings change altered, and the settings now in force.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(clippy::struct_excessive_bools)] // One flag per section that has side effects.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "One flag per section that has side effects."
+)]
 pub struct SettingsChange {
     /// The runtime settings after the change, every section present.
     pub settings: RuntimeSettings,

@@ -1,9 +1,5 @@
 //! The `DownloadClient` trait and its implementations; see `docs/DOWNLOAD-CLIENTS.md`.
 
-#![forbid(unsafe_code)]
-#![warn(missing_docs)]
-#![warn(clippy::pedantic)]
-
 use std::fmt;
 use std::path::Path;
 use std::str::FromStr;

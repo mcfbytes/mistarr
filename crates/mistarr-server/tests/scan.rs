@@ -4,6 +4,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::io::Cursor;
 use std::path::Path;
 
@@ -43,6 +44,10 @@ fn smc(payload: &[u8]) -> Vec<u8> {
 
 /// A minimal multi-member, stored-method (uncompressed) zip, so this test
 /// binary does not need its own copy of the `zip` crate.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "Synthetic zip fields are small."
+)]
 fn build_stored_zip_multi(entries: &[(&str, &[u8], &str)]) -> Vec<u8> {
     let mut buf = Vec::new();
     let mut central = Vec::new();
@@ -774,10 +779,10 @@ fn logiqx_version(name: &str, version: &str, games: &[(&str, &str, &HashSet)]) -
     let mut xml =
         format!("<datafile><header><name>{name}</name><version>{version}</version></header>");
     for (game, rom, h) in games {
-        xml.push_str(&format!(
+        let _ = write!(xml,
             "<game name=\"{game}\"><rom name=\"{rom}\" size=\"{}\" crc=\"{}\" md5=\"{}\" sha1=\"{}\"/></game>",
             h.size, h.crc32, h.md5, h.sha1
-        ));
+        );
     }
     xml.push_str("</datafile>");
     xml
@@ -1225,6 +1230,10 @@ impl HeaderPlatform {
 
 /// Scans a headered file, a headered zip member, a headerless file and a file without the
 /// header's magic against a headered DAT of `p`, or a headerless one, and checks each state.
+#[expect(
+    clippy::too_many_lines,
+    reason = "One user journey, read top to bottom."
+)]
 async fn both_forms_match(p: &HeaderPlatform, headered_dat: bool) {
     let dir = tempfile::tempdir().expect("tempdir");
     let games = dir.path().join("games");

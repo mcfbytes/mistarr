@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -32,11 +33,12 @@ fn bstr(s: &str) -> String {
 fn torrent(name: &str, files: &[(&str, u64)]) -> Vec<u8> {
     let mut list = String::from("l");
     for (file, len) in files {
-        list.push_str(&format!(
+        let _ = write!(
+            list,
             "d6:lengthi{len}e4:pathl{}{}ee",
             bstr("NES"),
             bstr(file)
-        ));
+        );
     }
     list.push('e');
     let info = format!(
@@ -220,6 +222,10 @@ async fn below_threshold_stays_unbound_until_bound_by_hand() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::many_single_char_names,
+    reason = "Short names mirror the fixture rows."
+)]
 async fn detail_files_preview_and_reset_to_automatic() {
     let b = boot().await;
     seed_catalog(&b);
@@ -700,6 +706,7 @@ async fn unstarted_magnets_keep_the_slow_cadence() {
 
 /// Holds the writer in one open transaction for `hold`, as a DAT apply does, and
 /// returns once it is held.
+#[expect(clippy::similar_names, reason = "The channel ends read as a pair.")]
 fn hold_writer(b: &Booted, hold: Duration) -> std::thread::JoinHandle<()> {
     let db = b.running.app.db.clone();
     let (held, is_held) = std::sync::mpsc::channel();

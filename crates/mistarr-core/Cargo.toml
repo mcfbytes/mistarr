@@ -7,22 +7,25 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
-crc32fast = "1"
-md-5 = "0.11"
-sha1 = "0.11"
-quick-xml = "0.42"
-zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+crc32fast.workspace = true
+md-5.workspace = true
+sha1.workspace = true
+quick-xml.workspace = true
+zip.workspace = true
 unicode-normalization = "0.1"
-flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
-lzma-rs = { version = "0.3", default-features = false, features = ["raw_decoder"] }
-claxon = "0.4.3"
-ruzstd = { version = "0.9", default-features = false, features = ["std"] }
+flate2.workspace = true
+lzma-rs.workspace = true
+claxon.workspace = true
+ruzstd.workspace = true
 
 [dev-dependencies]
-proptest = { version = "1", default-features = false, features = ["std"] }
+proptest.workspace = true
 serde_json.workspace = true
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 

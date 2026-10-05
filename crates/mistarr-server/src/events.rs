@@ -140,7 +140,10 @@ impl EventBus {
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_nanos());
         // Truncation keeps the low 64 bits, which change every nanosecond.
-        #[allow(clippy::cast_possible_truncation)]
+        #[expect(
+            clippy::cast_possible_truncation,
+            reason = "The value is bounded by construction."
+        )]
         Self::with_epoch(nanos as u64)
     }
 

@@ -137,7 +137,10 @@ async fn status(State(app): State<Arc<AppState>>) -> Json<Status> {
 
 /// `GET /system/wizard`: which first-run steps are complete.
 #[derive(Debug, Serialize)]
-#[allow(clippy::struct_excessive_bools)] // One flag per wizard step is the JSON shape.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "One flag per wizard step is the JSON shape."
+)]
 struct Wizard {
     paths: bool,
     dats: bool,

@@ -39,10 +39,12 @@ parallel on the work packages in `docs/WORKPLAN.md`. Read this file, then
 
 ## Rust practices
 
-- Rust 2021, stable, `#![forbid(unsafe_code)]` and `#![warn(missing_docs)]`
-  in every crate. `cargo clippy --all-targets -- -D warnings` is the bar,
-  with `clippy::pedantic` enabled at the crate level and specific lints
-  allowed only with a one-line reason.
+- Rust 2021, stable. Lints live in `[workspace.lints]` (`unsafe_code`
+  forbidden, `missing_docs`, `clippy::pedantic`) and each crate opts in with
+  `lints.workspace = true`. `cargo clippy --all-targets -- -D warnings` is the
+  bar. A lint is silenced only with `#[expect(lint, reason = "…")]`.
+- A dependency used by two or more crates is declared once in
+  `[workspace.dependencies]` and referenced with `dep.workspace = true`.
 - Errors: `thiserror` enums per crate with a variant per failure the caller
   can act on. `anyhow` only in the binary. No `unwrap` or `expect` outside
   tests and `const` contexts. No `panic!` on user input.

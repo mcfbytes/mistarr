@@ -1,10 +1,6 @@
 //! The mistarr server: config, database, jobs, SSE and the HTTP API.
 //! See `docs/ARCHITECTURE.md`; the binary in `main.rs` only parses flags and calls [`app::start`].
 
-#![forbid(unsafe_code)]
-#![warn(missing_docs)]
-#![warn(clippy::pedantic)]
-
 pub mod app;
 pub mod bench;
 pub mod cli;

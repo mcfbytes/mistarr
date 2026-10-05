@@ -5,10 +5,6 @@
 //! This crate never fetches anything. See `docs/PRINCIPLES.md` and
 //! `docs/WORKPLAN.md` WP-05.
 
-#![forbid(unsafe_code)]
-#![warn(missing_docs)]
-#![warn(clippy::pedantic)]
-
 pub mod binding;
 mod error;
 pub mod fuzzy;

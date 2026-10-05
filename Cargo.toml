@@ -25,6 +25,35 @@ anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
+mistarr-core = { path = "crates/mistarr-core" }
+mistarr-mister = { path = "crates/mistarr-mister" }
+mistarr-sources = { path = "crates/mistarr-sources" }
+mistarr-clients = { path = "crates/mistarr-clients" }
+mistarr-fixture = { path = "crates/mistarr-fixture" }
+async-trait = "0.1"
+claxon = "0.4.3"
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context"] }
+crc32fast = "1"
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+lzma-rs = { version = "0.3", default-features = false, features = ["raw_decoder"] }
+md-5 = "0.11"
+proptest = { version = "1", default-features = false, features = ["std"] }
+quick-xml = { version = "0.42", default-features = false }
+rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rustix = { version = "1", default-features = false, features = ["std", "fs"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+ruzstd = { version = "0.9", default-features = false, features = ["std"] }
+sha1 = "0.11"
+tempfile = "3"
+tokio = { version = "1", default-features = false }
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
 
 [profile.release]
 opt-level = "z"

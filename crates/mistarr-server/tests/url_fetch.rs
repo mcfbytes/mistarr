@@ -250,6 +250,10 @@ async fn a_torrent_goes_to_sources_and_its_web_seeds_are_never_fetched() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "The byte is the low bits on purpose."
+)]
 async fn pages_binaries_and_oversized_bodies_are_refused() {
     let b = boot().await;
     let server = FileServer::start().await.expect("bind");

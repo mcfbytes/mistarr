@@ -7,12 +7,15 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
-mistarr-core = { path = "../mistarr-core" }
-sha1 = "0.11"
+mistarr-core.workspace = true
+sha1.workspace = true
 
 [dev-dependencies]
-proptest = "1.8.0"
-tempfile = "3.27.0"
+proptest.workspace = true
+tempfile.workspace = true

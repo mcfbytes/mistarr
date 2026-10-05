@@ -1,10 +1,6 @@
 //! Measures CHD track decoding: `write <out.chd> <MB>` makes a synthetic image with chdman's
 //! default codecs; `decode <in.chd>` times the decoder and the hash passes it runs.
 
-#![forbid(unsafe_code)]
-#![warn(missing_docs)]
-#![warn(clippy::pedantic)]
-
 use std::io::BufWriter;
 use std::time::Instant;
 
@@ -47,7 +43,7 @@ fn main() -> anyhow::Result<()> {
 
 fn rate(bytes: u64, start: Instant) -> String {
     let secs = start.elapsed().as_secs_f64();
-    #[allow(clippy::cast_precision_loss)] // a rate to one decimal
+    #[expect(clippy::cast_precision_loss, reason = "a rate to one decimal")]
     let mb = bytes as f64 / 1e6;
     format!("{secs:.2} s, {:.1} MB/s", mb / secs)
 }

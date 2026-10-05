@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::time::Duration;
 
 use common::{boot_with, config_in, eventually, get, request, Booted};
@@ -25,11 +26,12 @@ fn bstr(s: &str) -> String {
 fn torrent(name: &str, files: &[(&str, u64)]) -> Vec<u8> {
     let mut list = String::from("l");
     for (file, len) in files {
-        list.push_str(&format!(
+        let _ = write!(
+            list,
             "d6:lengthi{len}e4:pathl{}{}ee",
             bstr("NES"),
             bstr(file)
-        ));
+        );
     }
     list.push('e');
     let info = format!(
@@ -705,6 +707,10 @@ fn rt_names(fake: &FakeScgiServer) -> Vec<String> {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One user journey, read top to bottom."
+)]
 async fn want_extend_and_poll_through_rtorrent() {
     let fake = FakeScgiServer::start().await.expect("fake");
     let dir = tempfile::tempdir().expect("tempdir");

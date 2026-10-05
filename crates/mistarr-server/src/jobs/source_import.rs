@@ -417,7 +417,10 @@ pub(crate) fn rebind_one(
         .filter(|(_, rom, _)| rom.is_some())
         .count();
     // File counts are far below 2^24, so the rate is exact enough.
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Counts convert to a float for a display ratio."
+    )]
     let rate = if files.is_empty() {
         0.0
     } else {
@@ -451,7 +454,10 @@ pub fn bind_to(conn: &Connection, id: SourceId, platform: Option<&PlatformId>) -
     };
     let hits = map_files(conn, id, platform, &files)?;
     // File counts are far below 2^52, so the rate is exact enough.
-    #[allow(clippy::cast_precision_loss)]
+    #[expect(
+        clippy::cast_precision_loss,
+        reason = "Counts convert to a float for a display ratio."
+    )]
     let rate = if files.is_empty() {
         0.0
     } else {

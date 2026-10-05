@@ -841,11 +841,12 @@ async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcom
         Err(e) => return failed(ctx, row, Some((id, mtime)), &e).await,
     };
     let secs = active.as_secs_f64().max(0.001);
-    #[allow(
+    #[expect(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )] // A speed estimate.
+        clippy::cast_sign_loss,
+        reason = "A speed estimate."
+    )]
     let rate = (bytes_total as f64 / secs) as u64;
     let image = Opened { id, size, mtime };
     record(ctx, row, image, tracks, Some(rate)).await

@@ -2,6 +2,7 @@
 //! "Browse speed". Run with `--nocapture` to print the timings.
 
 use mistarr_server::db::fixtures::pid;
+use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -191,7 +192,7 @@ fn browse_and_search_stay_fast_on_a_full_catalogue() {
                 let want = expected.get_or_insert_with(|| got.clone());
                 assert_eq!(&got, want, "{platform} {term:?} {shape:?}");
                 worst[i] = worst[i].max(t);
-                line.push_str(&format!("{:>14}", ms(t)));
+                let _ = write!(line, "{:>14}", ms(t));
             }
             let total = expected.map_or(0, |e| e.1);
             eprintln!(

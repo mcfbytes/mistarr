@@ -24,7 +24,10 @@ use crate::jobs::dat_import::{DatImport, Recompute};
 use crate::jobs::{JobKind, Scheduler};
 
 /// Largest accepted upload, [`crate::jobs::dat_import::MAX_DAT_BYTES`].
-#[allow(clippy::cast_possible_truncation)] // 512 MiB fits every usize the target has.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "512 MiB fits every usize the target has."
+)]
 const MAX_UPLOAD: usize = crate::jobs::dat_import::MAX_DAT_BYTES as usize;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {

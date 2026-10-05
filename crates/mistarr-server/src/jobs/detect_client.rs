@@ -21,7 +21,10 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// What detection found, stored under `client.detected` and shown in `/system/status`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[allow(clippy::struct_excessive_bools)] // One flag per offer the UI makes.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "One flag per offer the UI makes."
+)]
 pub struct ClientStatus {
     /// The client in use, or `None` when nothing answered.
     pub kind: Option<ClientKind>,

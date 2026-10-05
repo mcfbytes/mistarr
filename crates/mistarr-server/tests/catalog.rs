@@ -2,6 +2,7 @@
 
 mod common;
 
+use std::fmt::Write as _;
 use std::io::{Cursor, Write as _};
 use std::net::SocketAddr;
 use std::path::Path;
@@ -22,12 +23,13 @@ fn dat(name: &str, version: &str, games: &[(&str, &[&str])]) -> String {
     );
     let mut n = 0u32;
     for (game, roms) in games {
-        xml.push_str(&format!("<game name=\"{game}\">\n"));
+        let _ = writeln!(xml, "<game name=\"{game}\">");
         for rom in *roms {
             n += 1;
-            xml.push_str(&format!(
-                "  <rom name=\"{rom}\" size=\"{n}\" crc=\"{n:08x}\" sha1=\"{n:040x}\"/>\n"
-            ));
+            let _ = writeln!(
+                xml,
+                "  <rom name=\"{rom}\" size=\"{n}\" crc=\"{n:08x}\" sha1=\"{n:040x}\"/>"
+            );
         }
         xml.push_str("</game>\n");
     }
@@ -158,6 +160,10 @@ fn quest_games() -> Vec<(&'static str, &'static [&'static str])> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "One user journey, read top to bottom."
+)]
 async fn a_dropped_pack_loads_and_the_catalog_answers() {
     let booted = boot().await;
     let addr = booted.addr();

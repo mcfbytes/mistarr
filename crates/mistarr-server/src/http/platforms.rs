@@ -114,7 +114,7 @@ struct BindBody {
 
 /// The answer to a bind: the import job that loads the titles.
 #[derive(Debug, Serialize)]
-#[allow(clippy::struct_field_names)] // The JSON field names.
+#[expect(clippy::struct_field_names, reason = "The JSON field names.")]
 struct Binding {
     dat_version_id: DatVersionId,
     platform_id: PlatformId,
