@@ -619,10 +619,9 @@ fn parse_number(s: &str) -> Option<u32> {
 }
 
 /// `None` for a malformed argument, `Some(None)` for no argument, `Some(Some(n))` for a number.
-// The outer option is validity, the inner one presence.
 #[expect(
     clippy::option_option,
-    reason = "Absent and null mean different things."
+    reason = "The outer option is validity, the inner one presence."
 )]
 fn opt_number(arg: Option<&str>) -> Option<Option<u32>> {
     match arg {

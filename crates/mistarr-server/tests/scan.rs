@@ -779,7 +779,8 @@ fn logiqx_version(name: &str, version: &str, games: &[(&str, &str, &HashSet)]) -
     let mut xml =
         format!("<datafile><header><name>{name}</name><version>{version}</version></header>");
     for (game, rom, h) in games {
-        let _ = write!(xml,
+        let _ = write!(
+            xml,
             "<game name=\"{game}\"><rom name=\"{rom}\" size=\"{}\" crc=\"{}\" md5=\"{}\" sha1=\"{}\"/></game>",
             h.size, h.crc32, h.md5, h.sha1
         );

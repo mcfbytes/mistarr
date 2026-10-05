@@ -359,7 +359,7 @@ impl Drop for Server {
 
 #[expect(
     clippy::cast_precision_loss,
-    reason = "Counts convert to a float for a display ratio."
+    reason = "Resident sizes in KiB are far below 2^52, so the float is exact."
 )]
 fn kib_to_mib(kib: u64) -> f64 {
     kib as f64 / 1024.0

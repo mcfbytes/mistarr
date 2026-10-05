@@ -134,10 +134,9 @@ pub fn observe(status: &TorrentStatus, row: &PollRow, staging: &Path) -> Option<
     }
     let file = status.file(row.file_index)?;
     let size = file.size_or(row.size);
-    // Byte counts stay far below 2^52, so the ratio is exact enough.
     #[expect(
         clippy::cast_precision_loss,
-        reason = "Counts convert to a float for a display ratio."
+        reason = "Byte counts stay far below 2^52, so the ratio is exact enough."
     )]
     let progress = if size == 0 {
         1.0

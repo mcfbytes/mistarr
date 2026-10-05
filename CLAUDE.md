@@ -42,7 +42,9 @@ parallel on the work packages in `docs/WORKPLAN.md`. Read this file, then
 - Rust 2021, stable. Lints live in `[workspace.lints]` (`unsafe_code`
   forbidden, `missing_docs`, `clippy::pedantic`) and each crate opts in with
   `lints.workspace = true`. `cargo clippy --all-targets -- -D warnings` is the
-  bar. A lint is silenced only with `#[expect(lint, reason = "…")]`.
+  bar. A lint is silenced only with `#[expect(lint, reason = "…")]`; `allow`
+  with a reason is acceptable where an expectation would go unfulfilled in
+  some targets (a shared test module).
 - A dependency used by two or more crates is declared once in
   `[workspace.dependencies]` and referenced with `dep.workspace = true`.
 - Errors: `thiserror` enums per crate with a variant per failure the caller

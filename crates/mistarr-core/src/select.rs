@@ -800,8 +800,7 @@ mod tests {
                     if i % 5 == 0 {
                         flags.push("unl".to_string());
                     }
-                    // Test ids are tiny, so the u64 to usize casts cannot truncate.
-                    #[expect(clippy::cast_possible_truncation, reason = "The value is bounded by construction.")]
+                    #[expect(clippy::cast_possible_truncation, reason = "Test ids are tiny, so the u64 to usize casts cannot truncate.")]
                     let (ri, li) = ((i + perm_seed) as usize, i as usize);
                     Variant {
                         id: i,

@@ -9,10 +9,9 @@ use mistarr_core::hash::{hash_forms, hash_reader, HeaderRule};
 
 const SIZE: usize = 64 * 1024 * 1024;
 
-// Truncating casts are the point: a cheap, deterministic byte-filler pattern.
 #[expect(
     clippy::cast_possible_truncation,
-    reason = "The value is bounded by construction."
+    reason = "Truncating casts are the point: a cheap, deterministic byte-filler pattern."
 )]
 fn deterministic_bytes(first_four: [u8; 4]) -> Vec<u8> {
     let mut buf = vec![0u8; SIZE];

@@ -254,13 +254,13 @@ impl Rng {
         let u = f64::from(u32::try_from(self.next() >> 40).unwrap_or(0)) / f64::from(1_u32 << 24);
         #[expect(
             clippy::cast_precision_loss,
-            reason = "Counts convert to a float for a display ratio."
+            reason = "Titles per console are far below 2^52, so the float is exact."
         )]
         let x = ((n + 1) as f64).powf(u);
         #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
-            reason = "The value is bounded by construction."
+            reason = "u is below 1, so x is below n + 1 and fits in usize."
         )]
         let i = x as usize;
         i.saturating_sub(1).min(n - 1)
@@ -312,13 +312,13 @@ fn base_name(rng: &mut Rng, words: &[String]) -> String {
 fn scaled(console: &Console, scale: f64) -> usize {
     #[expect(
         clippy::cast_precision_loss,
-        reason = "Counts convert to a float for a display ratio."
+        reason = "Table sizes are far below 2^52, so the float is exact."
     )]
     let n = console.titles as f64 * scale;
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
-        reason = "The value is bounded by construction."
+        reason = "The scaled count is small and non-negative, so it fits in usize."
     )]
     let n = n.round() as usize;
     n.max(3)

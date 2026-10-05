@@ -431,10 +431,9 @@ impl Skipping {
         if start >= self.skip {
             self.skipped.update(chunk);
         } else if self.pos > self.skip {
-            // start < skip here, so the difference always fits in usize.
             #[expect(
                 clippy::cast_possible_truncation,
-                reason = "The value is bounded by construction."
+                reason = "start < skip here, so the difference always fits in usize."
             )]
             self.skipped.update(&chunk[(self.skip - start) as usize..]);
         }
@@ -967,12 +966,9 @@ mod tests {
         assert_eq!(members[0].crc32, "352441c2");
     }
 
-    // Hand-assembled: the `zip` crate's writer refuses a compression method
-    // it cannot encode, but listing must not decode anything to succeed.
-    // Buffers here are a few dozen bytes, so length casts never truncate.
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "The value is bounded by construction."
+        reason = "Buffers here are a few dozen bytes, so length casts never truncate."
     )]
     fn build_mixed_method_zip() -> Vec<u8> {
         fn entry(

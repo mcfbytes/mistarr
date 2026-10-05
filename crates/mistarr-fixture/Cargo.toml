@@ -29,7 +29,7 @@ sha1.workspace = true
 zip.workspace = true
 flate2.workspace = true
 lzma-rs.workspace = true
-ruzstd.workspace = true
+ruzstd = { workspace = true, features = ["hash"] }
 
 [dev-dependencies]
 tempfile.workspace = true

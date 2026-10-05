@@ -688,10 +688,9 @@ impl RawTorrent {
                 }
             }
         };
-        // A ratio needs no f64 precision.
         #[expect(
             clippy::cast_possible_truncation,
-            reason = "The value is bounded by construction."
+            reason = "A ratio needs no f64 precision."
         )]
         let ratio = match self.upload_ratio {
             r if r >= 0.0 => r as f32,

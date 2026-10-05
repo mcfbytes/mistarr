@@ -256,10 +256,9 @@ pub async fn remap_one(app: &AppState, id: SourceId) -> Result<bool> {
             return Ok(false);
         }
     }
-    // File counts are far below 2^52, so the rate is exact enough.
     #[expect(
         clippy::cast_precision_loss,
-        reason = "Counts convert to a float for a display ratio."
+        reason = "File counts are far below 2^52, so the rate is exact enough."
     )]
     let rate = if total == 0 {
         0.0
