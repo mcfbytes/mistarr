@@ -186,6 +186,21 @@ fn a_record_of_another_owner_or_kind_or_place_is_refused() {
 }
 
 #[test]
+fn a_record_that_cannot_be_written_names_its_file() {
+    let (_dir, file) = private();
+    let mut new = file.as_os_str().to_owned();
+    new.push(".new");
+    let new = PathBuf::from(new);
+    std::fs::create_dir(&new).expect("dir");
+    let err = write_file(&file, ONE).expect_err("a directory in the way");
+    assert!(
+        matches!(&err, FreezeError::File { path, .. } if *path == new),
+        "{err:?}"
+    );
+    assert!(err.to_string().contains(".new"), "{err}");
+}
+
+#[test]
 fn a_real_client_is_stopped_and_resumed_only_while_it_is_the_same() {
     let proc = Path::new("/proc");
     let (_dir, file) = private();
