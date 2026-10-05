@@ -440,7 +440,8 @@ Sonnet · `web/` · branch `wp-66-web-components`
   a reusable `SaveBar`; the Wizard shares one `saveSettings(patch)`.
 - [x] `SourceDetail.svelte` splits into `ReclassifyPanel` and `SourceFiles`;
   `loadFiles` is called by the handlers that change filter, page or search,
-  so `reloadTick` and the `rowKey` effect go.
+  so `reloadTick` goes; one `rowKey` effect stays to re-read the summary and
+  files when `source.changed` moves the source's row.
 - [x] `ConfirmButton` serves Dats, IncomingList and Sources.
 - [x] `JobRow` serves Activity and ActivityIndicator; `jobTitle` sits in
   `status.ts`.

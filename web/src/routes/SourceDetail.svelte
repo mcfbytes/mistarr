@@ -38,7 +38,16 @@
   );
   const row = $derived(findSource(sourceId));
   // `source.changed` moves the list row; these fields moving means a re-read.
-  const rowKey = $derived(JSON.stringify([row?.state, row?.platform_id, row?.file_count]));
+  const rowKey = $derived(
+    JSON.stringify([
+      row?.state,
+      row?.platform_id,
+      row?.matched_count,
+      row?.user_binding,
+      row?.pending_binding,
+      row?.file_count
+    ])
+  );
 
   onMount(() => {
     // Falls back to the id in platformName(); a miss retries at the next resync.

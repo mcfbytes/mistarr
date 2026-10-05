@@ -3,6 +3,7 @@
 /web/node_modules
 /web/dist
 /web/e2e/out
+/web/test-results
 *.db
 *.db-wal
 *.db-shm

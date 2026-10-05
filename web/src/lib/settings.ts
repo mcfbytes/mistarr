@@ -26,6 +26,6 @@ export async function saveSettings(patch: SettingsPatch): Promise<SaveResult> {
     return { error: errorMessage(err) };
   }
   // A failed refresh leaves the tiles as they were; SSE brings the next status.
-  await loadStatus().catch(() => undefined);
+  void loadStatus().catch(() => undefined);
   return { settings };
 }

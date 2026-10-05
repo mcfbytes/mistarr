@@ -8,7 +8,8 @@
   import { bytesText } from './format';
   import { uptimeText, usedFraction } from './system';
 
-  /** The board's status as tiles: MiSTer, download client, scheduler, memory, storage and uptime. */
+  // The board's status as tiles: MiSTer, download client, scheduler, memory, storage and uptime.
+
   const LAUNCH_TEXT = { ready: 'Ready', disabled: 'Off in settings', unavailable: 'Unavailable here' };
 
   let statusError = $state<string | null>(null);

@@ -4,7 +4,8 @@
   import StatusPill from './StatusPill.svelte';
   import { copyText, diagnosticsText, releaseNotesUrl } from './system';
 
-  /** The build's version and commit, release notes and a copyable diagnostics summary. */
+  // The build's version and commit, release notes and a copyable diagnostics summary.
+
   let manualCopy = $state<string | null>(null);
 
   const status = $derived(getStatus());
