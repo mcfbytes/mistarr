@@ -329,10 +329,8 @@ pub async fn json_of(addr: SocketAddr, path: &str) -> Value {
     r.json()
 }
 
-/// The MD5 of `parts` read as one stream.
-pub fn md5_of(parts: &[&[u8]]) -> mistarr_core::Md5 {
-    mistarr_server::testing::md5_of(parts)
-}
+#[allow(unused_imports, reason = "Each test binary uses a different subset.")]
+pub use mistarr_server::testing::md5_of;
 
 /// A MiSTer Recorder description of set `setname` with `roms` as its body.
 pub fn mra(name: &str, setname: &str, roms: &str) -> Vec<u8> {
