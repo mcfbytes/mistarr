@@ -38,7 +38,7 @@ use crate::db::ids::JobId;
 use crate::db::jobs::{self as rows, JobState};
 use crate::db::sql::text_enum;
 use crate::error::{Error, Result};
-use crate::events::EventKind;
+use crate::events::{Event, JobProgress};
 
 /// Finished rows kept in `jobs` for the activity screen.
 const KEEP_FINISHED: u32 = 200;
@@ -213,16 +213,6 @@ pub struct JobContext {
     detail: Option<String>,
 }
 
-/// The `job.progress` event body.
-#[derive(Debug, Clone, Serialize)]
-struct ProgressEvent<'a> {
-    id: JobId,
-    kind: JobKind,
-    state: JobState,
-    detail: Option<&'a str>,
-    progress: &'a Value,
-}
-
 impl JobContext {
     /// Stores `progress` on the job row as its resume state or outcome, replacing any
     /// live progress, and publishes `job.progress`; live progress goes through
@@ -272,14 +262,13 @@ impl JobContext {
     }
 
     fn publish(&self, state: JobState, progress: &Value) {
-        let body = ProgressEvent {
+        self.app.events.publish(&Event::JobProgress(JobProgress {
             id: self.id,
             kind: self.kind,
             state,
             detail: self.detail.as_deref(),
             progress,
-        };
-        self.app.events.publish(EventKind::JobProgress, &body);
+        }));
     }
 }
 
@@ -406,14 +395,13 @@ impl Scheduler {
             .await?;
         if fresh {
             let detail = job.detail();
-            let queued = ProgressEvent {
+            app.events.publish(&Event::JobProgress(JobProgress {
                 id,
                 kind,
                 state: JobState::Queued,
                 detail: detail.as_deref(),
                 progress: &Value::Null,
-            };
-            app.events.publish(EventKind::JobProgress, &queued);
+            }));
             app.scheduler.dispatch(id, job)?;
             if app.gate.state().hold(lane).is_some() {
                 crate::status::publish(app).await;
@@ -754,6 +742,7 @@ async fn execute(
 mod tests {
     use super::*;
     use crate::app::testutil::state;
+    use crate::events::EventKind;
     use crate::jobs::watch::gate::Override;
     use std::time::Duration;
     use tokio::sync::Notify;
@@ -860,7 +849,7 @@ mod tests {
         async fn run(&self, ctx: &JobContext) -> Result<()> {
             assert!(ctx
                 .reporter()
-                .report("reading", || json!({ "phase": "reading" })));
+                .report("reading", || progress::Progress::phase("reading")));
             assert!(ctx.app.live.get(ctx.id).is_some(), "held while running");
             Ok(())
         }

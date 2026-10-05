@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{boot, eventually, get, request, Booted};
-use mistarr_server::events::{Event, EventKind};
+use mistarr_server::events::{EventKind, Message};
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -64,7 +64,7 @@ fn drop_file(dir: &Path, name: &str, bytes: &[u8]) {
 
 /// Waits for an event of `kind` whose data contains `needle`.
 async fn wait_event(
-    rx: &mut broadcast::Receiver<Arc<Event>>,
+    rx: &mut broadcast::Receiver<Arc<Message>>,
     kind: EventKind,
     needle: &str,
 ) -> Value {

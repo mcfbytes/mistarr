@@ -150,8 +150,7 @@ pub fn hold_reason(gate: &GateState, lane: Lane, state: JobState) -> Option<Stri
 /// Publishes a fresh [`snapshot`] as the `status` event.
 pub async fn publish(app: &AppState) {
     let status = snapshot(app).await;
-    app.events
-        .publish(crate::events::EventKind::Status, &status);
+    app.events.publish(&crate::events::Event::Status(&status));
 }
 
 /// Builds the status body from the gate, settings and the host.

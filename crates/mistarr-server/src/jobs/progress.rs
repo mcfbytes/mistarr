@@ -5,16 +5,87 @@ use std::io::Read;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde::Serialize;
+use serde_json::{Map, Value};
 
-use super::{JobKind, ProgressEvent};
+use super::JobKind;
 use crate::app::AppState;
 use crate::db::ids::JobId;
 use crate::db::jobs::{JobRow, JobState};
-use crate::events::EventKind;
+use crate::events::{Event, JobProgress};
 
 /// Shortest gap between two live reports of one job in the same phase.
 pub const REPORT_EVERY: Duration = Duration::from_millis(250);
+
+/// Live progress of a job, as `docs/API.md` "Live progress" lists it; unset fields are
+/// left out and `extra` holds what only one job kind reports.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct Progress {
+    /// The stage the job is in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub phase: Option<String>,
+    /// Units finished.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done: Option<u64>,
+    /// Units in all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    /// Bytes of the current unit processed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes: Option<u64>,
+    /// Bytes in the current unit, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bytes_total: Option<u64>,
+    /// Fields of one job kind.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl Progress {
+    /// Progress in `phase` with nothing else set.
+    ///
+    /// ```
+    /// use mistarr_server::jobs::progress::Progress;
+    /// assert_eq!(Progress::phase("reading").into_value()["phase"], "reading");
+    /// ```
+    #[must_use]
+    pub fn phase(phase: &str) -> Self {
+        Self {
+            phase: Some(phase.to_owned()),
+            ..Self::default()
+        }
+    }
+
+    /// Sets the units finished and in all.
+    #[must_use]
+    pub fn units(mut self, done: impl TryInto<u64>, total: impl TryInto<u64>) -> Self {
+        self.done = done.try_into().ok();
+        self.total = total.try_into().ok();
+        self
+    }
+
+    /// Sets the bytes processed, of `total` when known.
+    #[must_use]
+    pub fn bytes(mut self, bytes: u64, total: Option<u64>) -> Self {
+        self.bytes = Some(bytes);
+        self.bytes_total = total;
+        self
+    }
+
+    /// Adds a field of this job kind.
+    #[must_use]
+    pub fn with(mut self, key: &str, value: impl Serialize) -> Self {
+        let value = serde_json::to_value(value).unwrap_or(Value::Null);
+        self.extra.insert(key.to_owned(), value);
+        self
+    }
+
+    /// The JSON object sent and stored for this progress.
+    #[must_use]
+    pub fn into_value(self) -> Value {
+        serde_json::to_value(self).unwrap_or(Value::Null)
+    }
+}
 
 /// A [`Read`] that counts the bytes it hands out and passes the running total to a callback.
 pub struct CountingReader<R, F> {
@@ -183,25 +254,24 @@ impl Reporter {
 
     /// Reports the progress `build` makes for `phase` when the throttle lets it
     /// through, so a report held back costs nothing; returns whether it went out.
-    pub fn report(&self, phase: &str, build: impl FnOnce() -> Value) -> bool {
+    pub fn report(&self, phase: &str, build: impl FnOnce() -> Progress) -> bool {
         let due = self
             .throttle
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .due(Instant::now(), phase);
         if due {
-            let progress = build();
+            let progress = build().into_value();
             self.app.live.set(self.id, progress.clone());
-            let body = ProgressEvent {
-                id: self.id,
-                kind: self.kind,
-                state: JobState::Running,
-                detail: self.detail.as_deref(),
-                progress: &progress,
-            };
             self.app
                 .events
-                .publish_transient(EventKind::JobProgress, &body);
+                .publish_transient(&Event::JobProgress(JobProgress {
+                    id: self.id,
+                    kind: self.kind,
+                    state: JobState::Running,
+                    detail: self.detail.as_deref(),
+                    progress: &progress,
+                }));
         }
         due
     }
@@ -243,6 +313,20 @@ mod tests {
     }
 
     #[test]
+    fn progress_leaves_out_what_is_unset_and_flattens_extras() {
+        let p = Progress::phase("decoding")
+            .units(1_usize, 3_usize)
+            .bytes(5, Some(9))
+            .with("file", "a.chd");
+        assert_eq!(
+            p.into_value(),
+            json!({ "phase": "decoding", "done": 1, "total": 3, "bytes": 5,
+                    "bytes_total": 9, "file": "a.chd" })
+        );
+        assert_eq!(Progress::default().into_value(), json!({}));
+    }
+
+    #[test]
     fn live_progress_is_kept_until_cleared() {
         let live = LiveProgress::default();
         live.set(JobId(3), json!({ "phase": "reading" }));
@@ -273,10 +357,10 @@ mod tests {
             JobKind::DatImport,
             Some("a.dat".into()),
         );
-        let progress = json!({ "phase": "reading", "bytes_read": 10, "bytes_total": 100 });
+        let progress = Progress::phase("reading").bytes(10, Some(100));
         let sent = tokio::task::spawn_blocking(move || {
             let first = reporter.report("reading", || progress);
-            let held_back = reporter.report("reading", || json!({ "phase": "reading" }));
+            let held_back = reporter.report("reading", || Progress::phase("reading"));
             (first, held_back)
         })
         .await
@@ -286,11 +370,11 @@ mod tests {
             .await
             .expect("in time")
             .expect("event");
-        assert_eq!(event.kind, EventKind::JobProgress);
+        assert_eq!(event.kind, crate::events::EventKind::JobProgress);
         assert_eq!(event.seq, 0, "transient events take no ring slot");
         let body: Value = serde_json::from_str(&event.data).expect("json");
         assert_eq!(body["detail"], "a.dat");
-        assert_eq!(body["progress"]["bytes_read"], 10);
+        assert_eq!(body["progress"]["bytes"], 10);
         assert_eq!(app.live.get(JobId(9)).expect("live")["phase"], "reading");
         release.send(()).expect("release");
         holder.join().expect("join").expect("write");

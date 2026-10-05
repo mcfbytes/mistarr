@@ -12,6 +12,7 @@ use mistarr_sources::torrent::TorrentFile;
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
+use super::progress::Progress;
 use super::source_import::publish_changed;
 use super::{Job, JobContext, JobKind, Lane};
 use crate::app::AppState;
@@ -324,10 +325,11 @@ impl Job for RemapSources {
         let (reporter, total) = (ctx.reporter(), ids.len());
         let mut changed = 0;
         for (done, id) in ids.iter().enumerate() {
-            reporter.report(
-                "mapping",
-                || json!({ "phase": "mapping", "done": done, "total": total, "changed": changed }),
-            );
+            reporter.report("mapping", || {
+                Progress::phase("mapping")
+                    .units(done, total)
+                    .with("changed", changed)
+            });
             ctx.checkpoint().await?;
             if remap_one(&ctx.app, *id).await? {
                 changed += 1;
@@ -415,7 +417,7 @@ mod tests {
     }
 
     /// Whether a `source.changed` arrived since the last call.
-    fn announced(rx: &mut tokio::sync::broadcast::Receiver<Arc<crate::events::Event>>) -> bool {
+    fn announced(rx: &mut tokio::sync::broadcast::Receiver<Arc<crate::events::Message>>) -> bool {
         let mut seen = false;
         while let Ok(ev) = rx.try_recv() {
             seen |= ev.kind == crate::events::EventKind::SourceChanged;

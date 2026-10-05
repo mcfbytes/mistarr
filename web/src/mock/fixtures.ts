@@ -797,7 +797,7 @@ export const fixtureJobs: Job[] = [
       done: 0,
       games: 4_120,
       phase: 'reading',
-      bytes_read: 5_200_000,
+      bytes: 5_200_000,
       bytes_total: 18_400_000
     },
     reason: null,

@@ -13,7 +13,6 @@ use mistarr_core::PlatformId;
 use mistarr_mister::launch::split_zip_member;
 use mistarr_mister::platforms::Platform;
 use rusqlite::Connection;
-use serde_json::json;
 
 use crate::db::files::{self, FileRow, FileState, NewFile};
 use crate::db::ids::{FileId, RomId};
@@ -21,6 +20,7 @@ use crate::db::roms;
 use crate::db::Db;
 use crate::error::Result;
 use crate::jobs::fsutil::{all_entries, extension, file_meta};
+use crate::jobs::progress::Progress;
 use crate::jobs::JobContext;
 
 /// Zips stated, looked up and written per batch; each batch is one write transaction.
@@ -407,10 +407,11 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
             stats.recorded += recorded;
             stats.pruned += dropped;
             done += batch.len();
-            reporter.report(
-                "presence",
-                || json!({ "presence_done": done, "presence_total": stats.zips }),
-            );
+            reporter.report("presence", || {
+                Progress::default()
+                    .with("presence_done", done)
+                    .with("presence_total", stats.zips)
+            });
         }
         stats.pruned += prune_dir(ctx, &pid, &games, dir, Arc::clone(names)).await?;
     }

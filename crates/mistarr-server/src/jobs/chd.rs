@@ -18,6 +18,7 @@ use tokio::time::Instant;
 
 use super::fsutil::file_meta;
 use super::matching::Track;
+use super::progress::Progress;
 use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::chd::{self as rows, Unidentified};
@@ -27,7 +28,7 @@ use crate::db::roms::{self, RomMatch};
 use crate::db::settings::{self, keys};
 use crate::db::titles::RomStatus;
 use crate::error::Result;
-use crate::events::EventKind;
+use crate::events::{Event, FileChanged};
 use crate::threads::{self, label};
 
 /// Bytes decoded between two checkpoints, a fraction of a second on the board.
@@ -722,14 +723,11 @@ impl Live {
 
     fn report(&self, row: &FileRow, bytes: (u64, u64)) {
         self.reporter.report("decoding", || {
-            json!({
-                "platform_id": row.platform_id.0,
-                "done": self.done,
-                "total": self.total,
-                "file": files::basename(&row.rel_path),
-                "bytes_done": bytes.0,
-                "bytes_total": bytes.1,
-            })
+            Progress::default()
+                .units(self.done, self.total)
+                .bytes(bytes.0, Some(bytes.1))
+                .with("platform_id", &row.platform_id)
+                .with("file", files::basename(&row.rel_path))
         });
     }
 }
@@ -943,10 +941,9 @@ async fn set_reason(ctx: &JobContext, id: FileId, to: Unidentified) -> Result<()
 
 /// Tells open views that a row this job wrote changed; one image writes at most 101 rows.
 fn file_changed(ctx: &JobContext, id: FileId, state: FileState) {
-    ctx.app.events.publish(
-        EventKind::FileChanged,
-        &json!({ "file_id": id.0, "state": state.as_str() }),
-    );
+    ctx.app
+        .events
+        .publish(&Event::FileChanged(FileChanged { file_id: id, state }));
 }
 
 #[cfg(test)]

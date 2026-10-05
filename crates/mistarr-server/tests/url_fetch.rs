@@ -147,7 +147,7 @@ async fn a_dat_is_fetched_once_placed_and_never_stored() {
     assert_eq!(state, "done", "{progress}");
     assert_eq!(progress["target"], "dats");
     assert_eq!(progress["file"], "Example.dat");
-    assert_eq!(progress["bytes_received"], DAT.len());
+    assert_eq!(progress["bytes"], DAT.len());
     assert_eq!(progress["placed"]["file"], "Example.dat");
     assert_eq!(server.hits(), [path]);
     let dats = data(&b).join("dats");
@@ -336,9 +336,7 @@ async fn a_cancelled_fetch_leaves_no_partial_file() {
         let r = request(b.addr(), "GET", "/api/v1/system/jobs", &[], None).await;
         let items = r.json()["items"].as_array().cloned().unwrap_or_default();
         items.iter().any(|j| {
-            j["id"] == id
-                && j["lane"] == "fetch"
-                && j["progress"]["bytes_received"].as_u64() > Some(0)
+            j["id"] == id && j["lane"] == "fetch" && j["progress"]["bytes"].as_u64() > Some(0)
         })
     })
     .await;

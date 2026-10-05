@@ -16,6 +16,7 @@ use crate::db::fixtures::pid;
 use crate::db::jobs::{self as rows, JobState};
 use crate::db::titles::RomStatus;
 use crate::db::{files, titles};
+use crate::events::EventKind;
 use crate::jobs::watch::gate::GateState;
 
 /// A database in its own temporary directory, dropped with it.

@@ -15,7 +15,7 @@ use mistarr_server::db::ids::{DownloadId, RomId, SourceId, TitleId};
 use mistarr_server::db::imports;
 use mistarr_server::db::sources::{self, NewSource, SourceState};
 use mistarr_server::db::sql::Page;
-use mistarr_server::events::EventKind;
+use mistarr_server::events::{DownloadChanged, Event};
 use mistarr_server::jobs::JobKind;
 use serde_json::{json, Value};
 
@@ -176,10 +176,14 @@ fn stage(b: &Booted, name: &str, data: &[u8]) -> PathBuf {
 }
 
 fn announce(b: &Booted, id: DownloadId) {
-    b.running.app.events.publish(
-        EventKind::DownloadChanged,
-        &json!({ "download_id": id.0, "state": "importing", "progress": 1.0 }),
-    );
+    b.running
+        .app
+        .events
+        .publish(&Event::DownloadChanged(DownloadChanged {
+            download_id: id,
+            state: DownloadState::Importing,
+            progress: 1.0,
+        }));
 }
 
 /// Hands `path` to the importer as the transfer of `rom_id`.

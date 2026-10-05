@@ -16,7 +16,7 @@ use crate::db::ids::TitleId;
 use crate::db::imports::{self, ImportAction, TitleEntry};
 use crate::db::roms::{self, EntryRom};
 use crate::error::Error;
-use crate::events::EventKind;
+use crate::events::{Event, ImportDone};
 use crate::jobs::fsutil::stat;
 
 /// Why a rename request was not carried out, for the API to report.
@@ -97,10 +97,11 @@ pub async fn rename(app: &AppState, group: TitleId, file_id: FileId) -> Outcome<
             Ok(())
         })
         .await?;
-    app.events.publish(
-        EventKind::ImportDone,
-        &json!({ "title_id": entry.id.0, "file_id": file_id.0, "action": ImportAction::Renamed.as_str() }),
-    );
+    app.events.publish(&Event::ImportDone(ImportDone {
+        title_id: entry.id,
+        file_id,
+        action: ImportAction::Renamed,
+    }));
     Ok(to_rel)
 }
 

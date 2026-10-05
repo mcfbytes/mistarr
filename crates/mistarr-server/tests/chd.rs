@@ -600,7 +600,7 @@ async fn decoding(app: &AppState, file: &str) -> JobId {
                 && app
                     .live
                     .get(r.id)
-                    .is_some_and(|p| p["file"] == file && p["bytes_done"].as_u64() > Some(0))
+                    .is_some_and(|p| p["file"] == file && p["bytes"].as_u64() > Some(0))
         });
         if let Some(r) = found {
             return r.id;

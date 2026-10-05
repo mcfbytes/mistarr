@@ -76,7 +76,7 @@ export function startProgress(): void {
         games = 900;
       }
     }
-    const bytes = phase === 'reading' ? { bytes_read: read, bytes_total: total } : {};
+    const bytes = phase === 'reading' ? { bytes: read, bytes_total: total } : {};
     update(job.id, { file: job.progress?.file, members: 1, done: 0, games, phase, ...bytes });
   }, 600);
 }
@@ -106,7 +106,7 @@ export function startFetch(link: string): { token: number; id: number } {
     lane: 'fetch',
     payload: { fetch: token },
     state: 'running',
-    progress: { token, phase: 'connecting', bytes_received: 0 },
+    progress: { token, phase: 'connecting', bytes: 0 },
     reason: null,
     created_at: now,
     updated_at: now
@@ -121,13 +121,13 @@ export function startFetch(link: string): { token: number; id: number } {
       finish(id, 'failed', { error: NOT_ACCEPTED });
     } else if (got < total) {
       const known = refuse ? {} : { file };
-      update(id, { token, phase: 'receiving', bytes_received: got, bytes_total: total, ...known });
+      update(id, { token, phase: 'receiving', bytes: got, bytes_total: total, ...known });
     } else {
       stopFetch(token);
       const target = file.endsWith('.torrent') ? 'sources' : 'dats';
       const placed: IncomingFile = { file, size: total, state: 'waiting', reason: 'Queued.', job_id: null, progress: null, modified: now };
       mock().incoming[target].unshift(placed);
-      finish(id, 'done', { token, phase: 'placed', file, target, bytes_received: total, bytes_total: total, placed });
+      finish(id, 'done', { token, phase: 'placed', file, target, bytes: total, bytes_total: total, placed });
     }
   }, 600);
   fetches.set(token, { id, timer });

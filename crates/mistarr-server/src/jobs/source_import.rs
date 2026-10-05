@@ -13,7 +13,6 @@ use mistarr_sources::intake::{self, StableFiles};
 use mistarr_sources::torrent;
 use mistarr_sources::torrent::TorrentFile;
 use rusqlite::Connection;
-use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::remap::{key_new_roms, map_files, store_mapping};
@@ -26,7 +25,7 @@ use crate::db::sources::{
     self as rows, NewSource, SourceReason, SourceRow, SourceState, SqlDatIndex,
 };
 use crate::error::Result;
-use crate::events::EventKind;
+use crate::events::{Event, SourceChanged};
 
 /// Rejection reason for a second copy of a loaded source.
 pub const DUPLICATE: &str = "A source with the same content is already loaded.";
@@ -37,18 +36,6 @@ pub const MAX_SOURCE_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Rejection reason for a file above [`MAX_SOURCE_BYTES`].
 pub const TOO_LARGE: &str = "The file is larger than 16 MiB, the most a source may be.";
-
-/// The `source.changed` event body.
-#[derive(Debug, Clone, Serialize)]
-pub struct SourceChanged<'a> {
-    /// The source.
-    pub source_id: SourceId,
-    /// Its state now.
-    pub state: SourceState,
-    /// Its platform, when bound.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub platform_id: Option<&'a PlatformId>,
-}
 
 /// The bytes of the file at `path`, or `None` when it holds more than [`MAX_SOURCE_BYTES`];
 /// never reads more than one byte past the limit, even from a file that grows meanwhile.
@@ -74,12 +61,11 @@ pub async fn read_bounded(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
 
 /// Publishes `source.changed` for a source row.
 pub fn publish_changed(app: &AppState, row: &SourceRow) {
-    let body = SourceChanged {
+    app.events.publish(&Event::SourceChanged(SourceChanged {
         source_id: row.id,
         state: row.state,
         platform_id: row.platform_id.as_ref(),
-    };
-    app.events.publish(EventKind::SourceChanged, &body);
+    }));
 }
 
 /// Reads one `.torrent` or `.magnet` file from `sources/`, records it and moves
@@ -698,6 +684,7 @@ mod tests {
     use crate::app::testutil::state;
     use crate::db::candidates::MatchConfidence;
     use crate::db::fixtures::{pid, seed_rom};
+    use crate::events::EventKind;
 
     fn file(index: u32, path: &str, size: u64) -> TorrentFile {
         TorrentFile {

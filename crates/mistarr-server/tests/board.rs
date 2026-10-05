@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{boot_with, config_in, eventually, get, request, Booted};
-use mistarr_server::events::{Event, EventKind};
+use mistarr_server::events::{EventKind, Message};
 use serde_json::Value;
 use tokio::sync::broadcast;
 
@@ -63,7 +63,7 @@ fn drop_file(dir: &Path, name: &str, bytes: &[u8]) {
 }
 
 async fn wait_event(
-    rx: &mut broadcast::Receiver<Arc<Event>>,
+    rx: &mut broadcast::Receiver<Arc<Message>>,
     kind: EventKind,
     needle: &str,
 ) -> Value {

@@ -22,7 +22,7 @@ use tokio::time::Instant;
 
 use super::fsutil::{all_entries, extension, stat};
 use super::matching::{self, cartridge_state, classify_disc_tracks, own_name, stored_match, Track};
-use super::progress::Throttle;
+use super::progress::{Progress, Throttle};
 use super::{Dedupe, Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::files::{self, FileState, NewFile};
@@ -31,7 +31,7 @@ use crate::db::platforms as platform_rows;
 use crate::db::roms;
 use crate::db::scan_progress;
 use crate::error::{Error, Result};
-use crate::events::EventKind;
+use crate::events::{Event, FileChanged};
 
 /// A library scan: one platform, or every enabled platform fanned out as
 /// one job each. Its payload is the struct itself.
@@ -346,12 +346,10 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         let done_dirs = save.then(|| done_set.iter().cloned().collect::<Vec<_>>());
         sink.flush(done_dirs).await?;
         reporter.report("scanning", || {
-            json!({
-                "platform_id": pid.0,
-                "dir": unit.id,
-                "done": done_set.len(),
-                "total": total,
-            })
+            Progress::default()
+                .units(done_set.len(), total)
+                .with("platform_id", &pid)
+                .with("dir", &unit.id)
         });
     }
 
@@ -461,10 +459,13 @@ impl<'a> Sink<'a> {
             .await?;
         for (_, id, state) in &written {
             if self.throttle.due(std::time::Instant::now(), "file.changed") {
-                self.ctx.app.events.publish(
-                    EventKind::FileChanged,
-                    &json!({ "file_id": id.0, "state": state.as_str() }),
-                );
+                self.ctx
+                    .app
+                    .events
+                    .publish(&Event::FileChanged(FileChanged {
+                        file_id: *id,
+                        state: *state,
+                    }));
             }
         }
         Ok(())

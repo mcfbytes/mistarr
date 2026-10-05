@@ -5,7 +5,6 @@ use mistarr_core::select::Prefs;
 use mistarr_core::PlatformId;
 use mistarr_mister::platforms::{self, Platform};
 use rusqlite::Connection;
-use serde_json::{json, Value};
 
 use crate::db::files;
 use crate::db::ids::FileId;
@@ -13,6 +12,7 @@ use crate::db::titles;
 use crate::db::Db;
 use crate::error::Result;
 use crate::jobs::matching::set_matches;
+use crate::jobs::progress::Progress;
 
 /// Files matched again per transaction by [`rematch_chunk`] and [`match_unmatched_chunk`].
 pub(super) const REMATCH_CHUNK: u32 = 256;
@@ -151,11 +151,11 @@ pub(super) fn recompute_blocking(
 }
 
 /// A recompute's live progress before `pass`.
-pub(super) fn pass_progress(pass: Pass, tally: &Tally) -> Value {
+pub(super) fn pass_progress(pass: Pass, tally: &Tally) -> Progress {
     match pass {
-        Pass::Retired | Pass::Unmatched(_) => {
-            json!({ "phase": "matching", "checked": tally.checked, "matched": tally.matched })
-        }
-        Pass::Picking | Pass::Done => json!({ "phase": "picking", "matched": tally.matched }),
+        Pass::Retired | Pass::Unmatched(_) => Progress::phase("matching")
+            .with("checked", tally.checked)
+            .with("matched", tally.matched),
+        Pass::Picking | Pass::Done => Progress::phase("picking").with("matched", tally.matched),
     }
 }
