@@ -172,7 +172,7 @@ pub fn match_members<'a, R: Rom, P: Payload>(roms: &'a [R], members: &'a [P]) ->
    `unverified`; then, outside arcade, it matches the platform's unmatched
    files by their stored hashes (VERIFICATION.md "Matching stored hashes");
    it recomputes the picks and then queues a re-map of the platform's bound
-   sources.
+   sources and CHD decoding.
 4. Parent/clone data is read from `cloneof` attributes when present. When
    absent, clone groups are inferred by normalising the name (strip region,
    revision, language and flag tags) so 1G1R still works with plain DATs.
@@ -181,11 +181,17 @@ pub fn match_members<'a, R: Rom, P: Payload>(roms: &'a [R], members: &'a [P]) ->
    for that platform ("Source import" step 4). Changing `prefs` recomputes the
    picks of every platform.
 
+What follows a load is queued in one order (`jobs::follow_up`): the
+platform's recompute, or after one in RAM the re-map and CHD decoding a
+recompute ends with; a scan of each platform whose games directory exists;
+then the binding of the unbound sources. Removing a loaded version and an
+arcade catalogue run that stores or retires titles queue the same.
+
 ### Library scan
 
 1. Triggered manually, on the `[jobs] scan_interval_minutes` schedule,
-   automatically for a platform once its DAT finishes loading if that
-   platform's games directory already exists (deduped per platform, so a
+   automatically for a platform once its DAT finishes loading, or a loaded
+   version of it is removed, if that platform's games directory already exists (deduped per platform, so a
    zipped pack of several DATs queues one scan each), or once, full, the
    first time every wizard step reports done. Walk each platform's
    `games/<Core>` directory and its other accepted directories, except
@@ -672,7 +678,7 @@ Jobs run on four serial lanes, one job at a time each:
 | Lane | Jobs | While a core runs |
 |---|---|---|
 | heavy | `scan`, `import`, `arcade_catalog`, `chd_tracks` | Held: a queued job does not start and a running one stops at its next file boundary, or for `chd_tracks` its next slice of about 640 KiB, `paused`. |
-| background | `dat_import`, `recompute_1g1r`, `source_import` | Runs. A DAT parse sleeps 20 ms every 200 entries, on top of the process's `nice` level. Held, like the heavy lane, by a manual pause; a DAT import in RAM drops its copy and starts again after it, and while a core runs its copy into RAM and back rests as long as each 1 MiB step took. |
+| background | `dat_import`, `recompute_1g1r`, `source_import`, `remap_sources`, `bind_source` | Runs. A DAT parse sleeps 20 ms every 200 entries, on top of the process's `nice` level. Held, like the heavy lane, by a manual pause; a DAT import in RAM drops its copy and starts again after it, and while a core runs its copy into RAM and back rests as long as each 1 MiB step took. |
 | light | `detect_client`, `transfer`, `resolve_magnet`, `deselect` | Runs. |
 | fetch | `url_fetch` | Runs; never held, not even by a manual pause, and never calls the download client, so it runs while the client is stopped ("Fetching a URL"). |
 
@@ -687,17 +693,19 @@ changed them, and each source's seed policy applies as before (DOWNLOAD-CLIENTS.
 scheduler-level gate, not something each job needs to know about.
 
 "Pause" (`POST /system/pause`) holds the heavy and background lanes; a DAT
-parse in progress waits at its next 200 entries. While a lane is held,
+parse in progress waits at its next 200 entries, its row `paused` as a heavy
+job's is at a checkpoint. While a lane is held,
 `/system/status` lists its queued and paused jobs as `waiting`, and each of
 them carries a `reason` in `/system/jobs`, so the UI can say what waits and
 why. "Run now" (`POST /system/resume`) opens the gate
 until CORENAME changes or the heavy queue drains, whichever comes first;
 after that, new heavy work waits for the core again.
 
-`scan`, `arcade_catalog`, `recompute_1g1r` and `chd_tracks` are singletons
-per payload: a request joins a queued or paused job of the same kind and
-payload instead of queueing another. Any other kind joins only a job that has
-not started. `chd_tracks` hands the heavy lane only to a queued job of
+Each kind states which job of the same kind and payload a new request joins
+instead of queueing another (`JobKind::dedupe`). `scan`, `arcade_catalog`,
+`recompute_1g1r` and `chd_tracks` join a queued or paused job; `import` joins
+any that has not finished; any other kind joins only a job that has not
+started. `chd_tracks` hands the heavy lane only to a queued job of
 another kind, between images ("CHD identification").
 
 At startup the scheduler takes over the queued, running and paused rows the
@@ -711,6 +719,11 @@ its lane under its own id when the kind can be re-run (`scan`,
 `source_import`, `import`, `chd_tracks`); other kinds fail with "interrupted by a
 restart", and repeats of a kind and payload are deleted. A job stopped by a
 shutdown is left `queued` for this.
+
+A running job reads one stop token (`jobs::stop::StopToken`) from any thread:
+the shutdown, the gate on its lane and its own cancel, which the scheduler
+holds by job id while the job is queued or running. `DELETE /fetch/{token}`
+cancels a fetch through it; a cancelled job fails with "Cancelled.".
 
 ## Resource budgets
 

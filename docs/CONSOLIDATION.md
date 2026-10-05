@@ -458,30 +458,30 @@ Sonnet · `web/` · branch `wp-66-web-components`
 Opus · `mistarr-server` (`jobs/`, `status.rs`, `threads.rs`) · branch
 `wp-67-job-framework`
 
-- [ ] Job payloads derive serde; `revive`, `RemapSources::from_payload` and
+- [x] Job payloads derive serde; `revive`, `RemapSources::from_payload` and
   `BindSource::from_payload` use `from_value`. `Job::detail()` replaces the
   key sniffing in `status::job_detail`.
-- [ ] Each kind states `Dedupe { Queued, QueuedOrPaused, Open }`, replacing
+- [x] Each kind states `Dedupe { Queued, QueuedOrPaused, Open }`, replacing
   `SINGLETON_KINDS`; `enqueue` honours `Open`. `Scheduler::submit(app, job)`
   logs a failure with kind and detail; the hand-written enqueue-or-warn
   sites, `transfer::kick` and `remap::enqueue` go.
-- [ ] `follow_up::catalogue_changed(app, platforms, recomputed)` owns the order
+- [x] `follow_up::catalogue_changed(app, platforms, recomputed)` owns the order
   recompute, remap, CHD, scan, rebind; `dat_import`, `Recompute::run`,
   `source_import`, `arcade` and `http/dats` call it.
-- [ ] `JobContext` carries a cloneable `StopToken` (shutdown, gate, lane,
+- [x] `JobContext` carries a cloneable `StopToken` (shutdown, gate, lane,
   per-job cancel) with a synchronous `check()`. It replaces the DAT import's
   `Request`, `RamWatch::between` and url_fetch's `Stop`. The scheduler owns
   per-job cancel by `JobId`, and url_fetch's token maps to it. A paused DAT
   import's row shows `paused`.
-- [ ] Live progress goes through `reporter()` and the resume state through
+- [x] Live progress goes through `reporter()` and the resume state through
   `progress()`; remap and scan follow the rule and stop writing a row per
   item.
-- [ ] `transfer::move_downloads(app, ids, to, reason)` serves the importer, the
+- [x] `transfer::move_downloads(app, ids, to, reason)` serves the importer, the
   two transfer failures and poll's lost downloads.
-- [ ] `spawn_watcher(app, name, fut)` gives every watcher one shutdown
+- [x] `spawn_watcher(app, name, fut)` gives every watcher one shutdown
   behaviour.
-- [ ] One `doubling(base, n, max)` serves the three backoffs.
-- [ ] Gate followers and pollers (`core_limits`, `io_priority`, `gate`,
+- [x] One `doubling(base, n, max)` serves the three backoffs.
+- [x] Gate followers and pollers (`core_limits`, `io_priority`, `gate`,
   `corename`, `poll`, `wizard`) move to a `watch/` module. ARCHITECTURE.md's
   lane table lists every kind, and every doc comment counts four lanes.
 

@@ -167,8 +167,10 @@ numbers, in each
 report, and stores `{ file, members, done, games, phase: "importing in
 place", reason }` after each DAT. A `recompute_1g1r` reports
 `{ phase: "matching", checked, matched }`, then `{ phase: "picking", matched
-}`. A scan stores `{ platform_id, done, total, matched, unmatched }` as it
-goes. A `chd_tracks` job reports `{ platform_id, done, total, file,
+}`. A scan reports `{ platform_id, dir, done, total }` as it walks, `done` and
+`total` counting directories, and a `remap_sources` job `{ phase: "mapping",
+done, total, changed }`, counting sources, storing `{ done, total, changed }`
+once it ends. A `chd_tracks` job reports `{ platform_id, done, total, file,
 bytes_done, bytes_total }` while it decodes: `done` and `total` count images,
 `file` names the image being decoded, and the bytes are its decoded share.
 A `url_fetch` reports `{ token, phase, bytes_received, bytes_total, file }`
@@ -619,7 +621,7 @@ connection that falls further behind is closed and, on reconnecting, gets
 | Event | Data |
 |---|---|
 | `status` | Same shape as `/system/status`, sent on change and every 30 s. |
-| `job.progress` | `{ id, kind, state, detail, progress }`, `detail` being the file name or platform the job is about or `null`; also sent with `state: "queued"` and `progress: null` when a job is queued, and without an id for live progress |
+| `job.progress` | `{ id, kind, state, detail, progress }`, `detail` being the file name, platform or source the job is about or `null`; also sent with `state: "queued"` and `progress: null` when a job is queued, and without an id for live progress |
 | `dat.loaded` / `dat.rejected` | `{ dat_version_id, file, platform_id }` / `{ file, reason }`; one per DAT in a pack, `file` as dropped |
 | `source.changed` | `{ source_id, state, platform_id? }` |
 | `download.changed` | `{ download_id, state, progress }` |
