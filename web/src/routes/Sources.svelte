@@ -94,7 +94,8 @@
     removingId = id;
     const done = await attempt(async () => {
       await api.deleteSource(id);
-      await sources.load();
+      sources.patch(id, null);
+      void sources.load();
       return true;
     });
     removingId = null;

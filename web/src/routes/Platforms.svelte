@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { SvelteSet } from 'svelte/reactivity';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import { findPlatform, platforms } from '../lib/stores/platforms.svelte';
   import { followJob, jobs } from '../lib/stores/jobs.svelte';
   import { attempt, optimistic } from '../lib/actions';
@@ -24,6 +24,8 @@
   const disabled = $derived(platforms.items.filter((p) => p.core_present && !p.enabled));
 
   const scanning = new SvelteSet<string>();
+  // Stops the outcome follower of each platform's latest queued scan.
+  const stopScans = new SvelteMap<string, () => void>();
 
   // The open scan of each platform, shown on its card.
   const scans: Map<string, Job> = $derived(
@@ -67,13 +69,14 @@
     showToast(`Scan of ${platformName(id)} queued`, 'info');
     const jobId = queued.job_id ?? queued.arcade_job_id;
     if (jobId != null) {
-      followJob(
+      stopScans.get(id)?.();
+      stopScans.set(id, followJob(
         (end) => end.id === jobId,
         (end) => {
           const text = jobOutcome({ ...end, kind: 'scan', payload: { platform_id: id } }, platformName);
           showToast(text, end.state === 'done' ? 'success' : 'error');
         }
-      );
+      ));
     }
   }
 

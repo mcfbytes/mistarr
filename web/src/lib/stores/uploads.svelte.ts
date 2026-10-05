@@ -83,9 +83,6 @@ export function resolveUpload(kind: Watched, file: string, jobId: number): void 
 }
 
 export function markUploadsStale(): void {
-  for (const u of uploads) {
-    stopFollowing(u.kind, u.file);
-  }
   uploads = uploads.map((u) => ({ ...u, stale: true }));
 }
 
