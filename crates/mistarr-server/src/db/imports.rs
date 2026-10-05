@@ -233,9 +233,14 @@ mod tests {
     #[test]
     fn title_entry_carries_flags_live_roms_and_headers() {
         let c = conn();
-        let rom_id =
-            crate::db::fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 8, &["bios"])
-                .expect("seed");
+        let rom_id = crate::db::fixtures::seed_rom(
+            &c,
+            &crate::db::fixtures::pid("nes"),
+            "Example Quest (USA).nes",
+            8,
+            &["bios"],
+        )
+        .expect("seed");
         c.execute(
             "UPDATE roms SET header = '4E 45 53 1A' WHERE id = ?1",
             [rom_id],

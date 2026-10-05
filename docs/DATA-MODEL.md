@@ -18,11 +18,14 @@ column, never a default.
 ## Module layout
 
 SQL lives in `crates/mistarr-server/src/db/`, one typed function per
-statement. A table module owns the writes to its table: `files`, `roms`,
-`scan_progress`, `titles/` (`mod.rs` stores titles, `recompute.rs` groups and
-picks them, `browse.rs` and `detail.rs` read them), `downloads` and so on.
+statement. A table module owns the writes to its table: `files`,
+`scan_progress`, `titles/` (`mod.rs` stores titles and their roms,
+`recompute.rs` groups and picks them, `browse.rs` reads them, `detail.rs` reads
+a group and holds the want and unwant writes to `titles`), `downloads` and so
+on; a write to another module's table goes through that module.
 Read-only composite views over several tables sit in `db/views/`. Rom
-lookups, the SHA1, MD5 then CRC32 and size tiers among them, are in `roms`.
+lookups, the SHA1, MD5 then CRC32 and size tiers among them, are in `roms`;
+`titles` and `arcade` write the rom rows.
 A platform is named by a `PlatformId` in every signature, read with
 `platforms::find`.
 

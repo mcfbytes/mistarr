@@ -4,7 +4,7 @@ use mistarr_sources::torrent::TorrentFile;
 use super::*;
 use crate::db::candidates::{self, MatchConfidence};
 use crate::db::fixtures::conn;
-use crate::db::fixtures::seed_rom;
+use crate::db::fixtures::{pid, seed_rom};
 use crate::db::sources::{self, NewSource, SourceState};
 use crate::db::sql::Page;
 
@@ -97,7 +97,7 @@ fn states_round_trip_and_follow_the_machine() {
 #[test]
 fn best_file_prefers_size_then_name_then_load_then_id() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
+    let rom = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
     let wrong_size = source(
         &c,
         1,
@@ -123,7 +123,7 @@ fn best_file_prefers_size_then_name_then_load_then_id() {
     assert_eq!(best_file(&c, rom).expect("best"), candidate(by_name, 1));
 
     let title = title_of(&c, rom);
-    let other = seed_rom(&c, "nes", "Second Try (USA).nes", 8, &[]).expect("rom");
+    let other = seed_rom(&c, &pid("nes"), "Second Try (USA).nes", 8, &[]).expect("rom");
     let busy = create(
         &c,
         &NewDownload {
@@ -158,7 +158,7 @@ fn best_file_prefers_size_then_name_then_load_then_id() {
 #[test]
 fn want_title_queues_or_waits_and_skips_open_and_verified_roms() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
+    let rom = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
     let title = title_of(&c, rom);
     let wanted = want_title(&c, title, 5).expect("want");
     assert_eq!(wanted.len(), 1);
@@ -199,7 +199,7 @@ fn want_title_queues_or_waits_and_skips_open_and_verified_roms() {
 #[test]
 fn transitions_progress_and_lookups() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
+    let rom = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
     let src = source(
         &c,
         1,
@@ -282,7 +282,7 @@ fn transitions_progress_and_lookups() {
 #[test]
 fn retry_and_cancel() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
+    let rom = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
     let title = title_of(&c, rom);
     let src = source(
         &c,
@@ -341,7 +341,7 @@ fn retry_and_cancel() {
 #[test]
 fn cancel_group_reports_started_downloads() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
+    let rom = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
     let title = title_of(&c, rom);
     let src = source(
         &c,
@@ -383,7 +383,7 @@ fn cancel_group_reports_started_downloads() {
 #[test]
 fn deleting_a_source_keeps_finished_downloads_without_it() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
+    let rom = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
     let src = source(
         &c,
         1,
@@ -429,7 +429,7 @@ fn works_on_the_file_database() {
 #[test]
 fn name_tier_files_beat_candidates_and_a_header_on_top_counts_as_the_size() {
     let c = conn();
-    let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
+    let rom = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
     let guessed = source(&c, 1, &[("example.nes", 16, None, Confidence::Unmatched)]);
     let change = crate::db::candidates::Change {
         add: vec![(0, rom, crate::db::candidates::MatchConfidence::Fuzzy)],
@@ -461,9 +461,7 @@ fn name_tier_files_beat_candidates_and_a_header_on_top_counts_as_the_size() {
 
 /// A database with a wanted title of two versions and a torrent of two files.
 fn grouped() -> (Connection, SourceId, RomId, RomId) {
-    let mut c = Connection::open_in_memory().expect("open");
-    crate::db::migrate::apply(&mut c).expect("migrate");
-    crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+    let c = crate::db::fixtures::conn();
     let src = sources::insert(
         &c,
         &NewSource {
@@ -486,10 +484,22 @@ fn grouped() -> (Connection, SourceId, RomId, RomId) {
         })
         .collect();
     sources::replace_files(&c, src, &files).expect("files");
-    let rom =
-        crate::db::fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 10, &[]).expect("rom");
-    let alt = crate::db::fixtures::seed_rom(&c, "nes", "Example Quest (USA) (Alt).nes", 10, &[])
-        .expect("alt");
+    let rom = crate::db::fixtures::seed_rom(
+        &c,
+        &crate::db::fixtures::pid("nes"),
+        "Example Quest (USA).nes",
+        10,
+        &[],
+    )
+    .expect("rom");
+    let alt = crate::db::fixtures::seed_rom(
+        &c,
+        &crate::db::fixtures::pid("nes"),
+        "Example Quest (USA) (Alt).nes",
+        10,
+        &[],
+    )
+    .expect("alt");
     c.execute(
         "UPDATE titles SET wanted = 1, parent_id = (SELECT title_id FROM roms WHERE id = ?1)
          WHERE id IN (SELECT title_id FROM roms WHERE id IN (?1, ?2))",
@@ -517,9 +527,24 @@ fn settling_elsewhere_proves_the_file_cancels_the_rest_and_wants_again() {
     add(&c, src, 0, rom, MatchConfidence::Fuzzy);
     add(&c, src, 0, alt, MatchConfidence::Size);
     add(&c, src, 1, rom, MatchConfidence::Size);
-    let first = crate::db::fixtures::download(&c, rom, src, 0, "importing", None).expect("first");
-    let alt_elsewhere =
-        crate::db::fixtures::download(&c, alt, src, 1, "queued", None).expect("alt");
+    let first = crate::db::fixtures::download(
+        &c,
+        rom,
+        src,
+        0,
+        crate::db::downloads::DownloadState::Importing,
+        None,
+    )
+    .expect("first");
+    let alt_elsewhere = crate::db::fixtures::download(
+        &c,
+        alt,
+        src,
+        1,
+        crate::db::downloads::DownloadState::Queued,
+        None,
+    )
+    .expect("alt");
     assert!(crate::db::downloads_import::guessed(&c, src, 0, rom).expect("guessed"));
     let e = Elsewhere {
         reason: "the file in this source is a different version: Alt".to_owned(),
@@ -554,8 +579,24 @@ fn settling_elsewhere_proves_the_file_cancels_the_rest_and_wants_again() {
 #[test]
 fn a_rom_is_wanted_again_only_while_nothing_holds_it() {
     let (c, src, rom, alt) = grouped();
-    let open = crate::db::fixtures::download(&c, rom, src, 0, "queued", None).expect("open");
-    let bad = crate::db::fixtures::download(&c, rom, src, 1, "bad", None).expect("bad");
+    let open = crate::db::fixtures::download(
+        &c,
+        rom,
+        src,
+        0,
+        crate::db::downloads::DownloadState::Queued,
+        None,
+    )
+    .expect("open");
+    let bad = crate::db::fixtures::download(
+        &c,
+        rom,
+        src,
+        1,
+        crate::db::downloads::DownloadState::Bad,
+        None,
+    )
+    .expect("bad");
     assert_eq!(want_again(&c, open, "n", 1).expect("open"), None, "not bad");
     assert_eq!(
         want_again(&c, bad, "n", 1).expect("busy"),

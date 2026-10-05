@@ -391,7 +391,7 @@ mod tests {
 
     use super::*;
     use crate::app::testutil::state;
-    use crate::db::fixtures::seed_rom;
+    use crate::db::fixtures::{pid, seed_rom};
     use crate::db::ids::RomId;
     use crate::db::sources::{NewSource, SourceState};
     use crate::jobs::Scheduler;
@@ -444,8 +444,8 @@ mod tests {
         let (_dir, app) = state();
         app.db
             .write_blocking(|c| {
-                seed_rom(c, "nes", "Nova Quest (World).nes", 16, &[])?;
-                seed_rom(c, "nes", "Other Tale (Europe).nes", 16, &[])?;
+                seed_rom(c, &pid("nes"), "Nova Quest (World).nes", 16, &[])?;
+                seed_rom(c, &pid("nes"), "Other Tale (Europe).nes", 16, &[])?;
                 Ok(())
             })
             .expect("seed");
@@ -474,7 +474,7 @@ mod tests {
         assert_eq!(found, [b], "an unstamped source is stale");
         app.db
             .write_blocking(|c| {
-                seed_rom(c, "nes", "Nova Quest (World).nes", 16, &[])?;
+                seed_rom(c, &pid("nes"), "Nova Quest (World).nes", 16, &[])?;
                 Ok(())
             })
             .expect("seed");
@@ -513,8 +513,8 @@ mod tests {
         assert!(!remap_one(&app, id).await.expect("remap"), "no rom changed");
         app.db
             .write_blocking(|c| {
-                seed_rom(c, "nes", "Nova Quest (World).nes", 16, &[])?;
-                seed_rom(c, "nes", "Other Tale (USA).nes", 8, &[])?;
+                seed_rom(c, &pid("nes"), "Nova Quest (World).nes", 16, &[])?;
+                seed_rom(c, &pid("nes"), "Other Tale (USA).nes", 8, &[])?;
                 Ok(())
             })
             .expect("seed");
@@ -552,7 +552,7 @@ mod tests {
         let (id, a, b) = app
             .db
             .write_blocking(|c| {
-                let a = seed_rom(c, "nes", "Nova Quest (World).nes", 16, &[])?;
+                let a = seed_rom(c, &pid("nes"), "Nova Quest (World).nes", 16, &[])?;
                 c.execute(
                     "INSERT INTO dat_versions (platform_id, dat_name, version, source_file,
                                                loaded_at, game_count)

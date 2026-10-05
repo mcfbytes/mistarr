@@ -616,7 +616,7 @@ mod tests {
 
     use super::*;
     use crate::db::fixtures::conn;
-    use crate::db::fixtures::seed_rom;
+    use crate::db::fixtures::{pid, seed_rom};
     use crate::db::sources::{NewSource, SourceState};
 
     fn file(index: u32, path: &str, size: u64) -> TorrentFile {
@@ -629,8 +629,8 @@ mod tests {
 
     /// A source on `nes` with a matched rom, a candidate, an unmatched rom and a readme.
     fn source(c: &Connection) -> (SourceId, RomId) {
-        let a = seed_rom(c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
-        let b = seed_rom(c, "nes", "Second Try (Japan).nes", 24, &[]).expect("rom");
+        let a = seed_rom(c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
+        let b = seed_rom(c, &pid("nes"), "Second Try (Japan).nes", 24, &[]).expect("rom");
         let id = sources::insert(
             c,
             &NewSource {
@@ -791,7 +791,7 @@ mod tests {
     fn preview_scores_every_platform_with_a_dat() {
         let c = conn();
         let (id, _) = source(&c);
-        seed_rom(&c, "snes", "Unlisted (USA).sfc", 8, &[]).expect("rom");
+        seed_rom(&c, &pid("snes"), "Unlisted (USA).sfc", 8, &[]).expect("rom");
         sources::refresh_match_keys(&c).expect("keys");
         let p = preview(&c, id, PREVIEW_SAMPLE).expect("preview");
         assert_eq!((p.total, p.sampled), (4, 4));

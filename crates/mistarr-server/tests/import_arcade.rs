@@ -195,7 +195,7 @@ fn hand_off(b: &Booted, rom_id: RomId, src: SourceId, index: u32, path: &Path) -
                 rom_id,
                 src,
                 index,
-                "importing",
+                mistarr_server::db::downloads::DownloadState::Importing,
                 Some(&staged),
             )
         })

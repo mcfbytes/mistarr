@@ -36,11 +36,11 @@ pub fn save_scan_progress(
     now: i64,
 ) -> Result<()> {
     let json = sql::to_json("scan_progress.done_dirs", done_dirs)?;
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO scan_progress (platform_id, done_dirs, updated_at) VALUES (?1, ?2, ?3)
          ON CONFLICT(platform_id) DO UPDATE SET done_dirs = excluded.done_dirs, updated_at = excluded.updated_at",
-        params![platform_id.0, json, now],
-    )?;
+    )?
+    .execute(params![platform_id.0, json, now])?;
     Ok(())
 }
 

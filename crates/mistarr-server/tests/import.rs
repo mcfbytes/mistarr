@@ -141,7 +141,7 @@ fn insert(b: &Booted, rom_id: RomId, src: SourceId, index: u32, path: &Path) -> 
                 rom_id,
                 src,
                 index,
-                "importing",
+                DownloadState::Importing,
                 Some(&staged),
             )
         })
@@ -1193,7 +1193,14 @@ async fn a_quarantine_that_settles_the_source_releases_the_torrent() {
         .app
         .db
         .write_blocking(move |c| {
-            mistarr_server::db::fixtures::download(c, placed, src, 0, "done", None)?;
+            mistarr_server::db::fixtures::download(
+                c,
+                placed,
+                src,
+                0,
+                mistarr_server::db::downloads::DownloadState::Done,
+                None,
+            )?;
             sources::set_seed_policy(c, src, &SeedPolicy::None)
         })
         .expect("done download");

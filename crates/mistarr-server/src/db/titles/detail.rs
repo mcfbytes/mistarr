@@ -3,13 +3,12 @@
 use super::{RomStatus, Tag, TitleSource};
 use crate::db::arcade::MraInfo;
 use crate::db::candidates::Availability;
-use crate::db::downloads::DownloadState;
 use crate::db::files::FileState;
 use crate::db::ids::{DatVersionId, FileId, RomId, TitleId};
 use crate::db::sql::{self};
 use crate::error::Result;
 use mistarr_core::PlatformId;
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{Connection, OptionalExtension, Row};
 use serde::Serialize;
 
 /// A rom of a variant with the best file on disk for it.
@@ -304,15 +303,6 @@ pub fn unwant_group(conn: &Connection, parent: TitleId, now: i64) -> Result<usiz
         "UPDATE titles SET wanted = 0 WHERE (group_root = ?1 OR (id = ?1 AND group_root IS NULL)) AND wanted = 1",
         [parent],
     )?;
-    conn.execute(
-        &format!(
-            "UPDATE downloads SET state = 'cancelled', updated_at = ?2
-             WHERE state IN {} AND title_id IN
-               (SELECT id FROM titles WHERE group_root = ?1 OR (id = ?1 AND group_root IS NULL))",
-            DownloadState::UNSTARTED_SQL
-        ),
-        params![parent, now],
-    )?;
-
+    crate::db::downloads::cancel_unstarted_in_group(conn, parent, now)?;
     Ok(n)
 }

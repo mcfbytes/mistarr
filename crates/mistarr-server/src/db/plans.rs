@@ -55,9 +55,7 @@ fn plan(c: &Connection, sql: &str) -> Vec<String> {
 }
 
 fn seeded() -> Connection {
-    let mut c = Connection::open_in_memory().expect("open");
-    super::migrate::apply(&mut c).expect("migrate");
-    super::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+    let mut c = crate::db::fixtures::conn();
     crate::synth::seed(&mut c, 0.01, 4).expect("catalogue");
     c.execute_batch(
         "INSERT INTO sources (infohash, display_name, origin_file, platform_id, state, added_at)

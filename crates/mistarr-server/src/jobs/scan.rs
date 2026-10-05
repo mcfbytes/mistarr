@@ -1517,9 +1517,7 @@ mod tests {
 
     #[test]
     fn settling_names_verifies_only_files_that_now_fit() {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        platform_rows::seed(&mut c, &platforms::PLATFORMS).expect("seed");
+        let c = crate::db::fixtures::conn();
         let nes = PlatformId("nes".into());
         let h = Hashes {
             size: 4,
@@ -1767,9 +1765,7 @@ mod tests {
 
     #[test]
     fn a_live_rom_of_the_content_beats_a_retired_rom_of_the_whole_file() {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &platforms::PLATFORMS).expect("seed");
+        let c = crate::db::fixtures::conn();
         let nes = PlatformId("nes".into());
         let mut file = b"NES\x1a".to_vec();
         file.resize(16, 0);

@@ -173,9 +173,7 @@ mod tests {
 
     #[test]
     fn staged_games_apply_in_order_and_clear() {
-        let mut c = rusqlite::Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+        let c = crate::db::fixtures::conn();
         let v = NewVersion {
             dat_name: "Maker - Game Boy",
             version: "1",

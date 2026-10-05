@@ -4,6 +4,7 @@
 use mistarr_core::{HashSet, PlatformId};
 use rusqlite::{params, Connection};
 
+use super::downloads::DownloadState;
 use super::ids::{DatVersionId, DownloadId, RomId, SourceId, TitleId};
 use super::sql;
 use super::titles::RomStatus;
@@ -43,7 +44,7 @@ pub const CATALOG: [(&str, u64); 3] = [
 pub fn catalog(conn: &Connection) -> Result<Vec<RomId>> {
     CATALOG
         .iter()
-        .map(|(name, size)| seed_rom(conn, "nes", name, *size, &[]))
+        .map(|(name, size)| seed_rom(conn, &pid("nes"), name, *size, &[]))
         .collect()
 }
 
@@ -55,7 +56,7 @@ pub fn catalog(conn: &Connection) -> Result<Vec<RomId>> {
 /// [`crate::Error::Db`] on SQLite failure, e.g. an unknown platform.
 pub fn seed_rom(
     conn: &Connection,
-    platform: &str,
+    platform: &PlatformId,
     rom_name: &str,
     size: u64,
     flags: &[&str],
@@ -64,18 +65,18 @@ pub fn seed_rom(
         "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
          VALUES (?1, ?1 || ' test', '1', 'test.dat', 0, 0)
          ON CONFLICT (dat_name, version) DO NOTHING",
-        [platform],
+        [&platform.0],
     )?;
     let dat: i64 = conn.query_row(
         "SELECT id FROM dat_versions WHERE dat_name = ?1 || ' test'",
-        [platform],
+        [&platform.0],
         |r| r.get(0),
     )?;
     let title = rom_name.rsplit_once('.').map_or(rom_name, |(t, _)| t);
     conn.execute(
         "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
          VALUES (?1, ?2, ?3, ?3)",
-        params![platform, dat, title],
+        params![platform.0, dat, title],
     )?;
     let title_id = TitleId(conn.last_insert_rowid());
     let flags: Vec<String> = flags.iter().map(|f| (*f).to_owned()).collect();
@@ -97,7 +98,7 @@ pub fn download(
     rom_id: RomId,
     source_id: SourceId,
     file_index: u32,
-    state: &str,
+    state: DownloadState,
     staged_path: Option<&str>,
 ) -> Result<DownloadId> {
     conn.execute(
@@ -307,7 +308,7 @@ mod tests {
     #[test]
     fn seed_rom_and_download_write_one_row_each() {
         let c = conn();
-        let rom = seed_rom(&c, "nes", "Example Quest (USA).nes", 8, &["bios"]).expect("rom");
+        let rom = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 8, &["bios"]).expect("rom");
         let src = crate::db::sources::insert(
             &c,
             &crate::db::sources::NewSource {
@@ -320,7 +321,7 @@ mod tests {
             },
         )
         .expect("source");
-        let id = download(&c, rom, src, 0, "queued", None).expect("download");
+        let id = download(&c, rom, src, 0, DownloadState::Queued, None).expect("download");
         assert!(id.0 > 0);
     }
 }

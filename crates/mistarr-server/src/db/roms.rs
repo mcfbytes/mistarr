@@ -1,5 +1,5 @@
 //! Rom lookups: the hash tiers of `docs/VERIFICATION.md` "Matching order" and the reads of
-//! a rom, its title and its zip. The rows are written by `titles` and `arcade`.
+//! a rom, its title and its zip. `titles` and `arcade` own the rom writes.
 
 use std::collections::HashMap;
 
@@ -223,13 +223,13 @@ pub fn crc_candidate_exists(
     crc32: &str,
     size: i64,
 ) -> Result<bool> {
-    Ok(conn.query_row(
-        "SELECT EXISTS(
+    Ok(conn
+        .prepare_cached(
+            "SELECT EXISTS(
            SELECT 1 FROM roms r JOIN titles t ON t.id = r.title_id
            WHERE t.platform_id = ?1 AND t.source = 'dat' AND r.crc32 = ?2 AND r.size = ?3)",
-        params![platform_id.0, crc32, size],
-        |r| r.get(0),
-    )?)
+        )?
+        .query_row(params![platform_id.0, crc32, size], |r| r.get(0))?)
 }
 
 /// Number of roms belonging to a title, for the disc all-or-nothing rule.
@@ -238,11 +238,9 @@ pub fn crc_candidate_exists(
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn count_roms_for_title(conn: &Connection, title_id: TitleId) -> Result<i64> {
-    Ok(conn.query_row(
-        "SELECT COUNT(*) FROM roms WHERE title_id = ?1",
-        [title_id],
-        |r| r.get(0),
-    )?)
+    Ok(conn
+        .prepare_cached("SELECT COUNT(*) FROM roms WHERE title_id = ?1")?
+        .query_row([title_id], |r| r.get(0))?)
 }
 
 /// A rom with everything placement and the quarantine report need.

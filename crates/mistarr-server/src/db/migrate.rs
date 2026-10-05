@@ -344,7 +344,11 @@ mod tests {
         use crate::db::sources::SourceReason;
         let mut conn = Connection::open_in_memory().expect("open");
         apply_through(&mut conn, 20).expect("older migrations");
-        crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+        conn.execute_batch(
+            "INSERT INTO platforms (id, name, core_dir, kind, enabled) VALUES
+               ('nes', 'NES', 'NES', 'cartridge', 1);",
+        )
+        .expect("platforms");
         let reasons = [
             ("No download client found. The file list is read once one is detected.", None),
             ("Waiting for the download client to read the file list.", None),
@@ -407,8 +411,13 @@ mod tests {
             .find(|m| m.name.ends_with("_whole_hashes"))
             .expect("the whole-hashes migration");
         apply_through(&mut conn, whole.version - 1).expect("older migrations");
-        crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-        crate::db::platforms::set_enabled(&conn, "lynx", false).expect("disable");
+        conn.execute_batch(
+            "INSERT INTO platforms (id, name, core_dir, kind, enabled) VALUES
+               ('nes', 'NES', 'NES', 'cartridge', 1), ('atari7800', 'Atari 7800', 'Atari7800', 'cartridge', 1),
+               ('lynx', 'Lynx', 'AtariLynx', 'cartridge', 0), ('snes', 'SNES', 'SNES', 'cartridge', 1),
+               ('gba', 'GBA', 'GBA', 'cartridge', 1);",
+        )
+        .expect("platforms");
         let insert = |platform: &str, rel: &str, rule: Option<&str>, sha1: Option<&str>| {
             conn.execute(
                 "INSERT INTO files (platform_id, rel_path, size, mtime, sha1, header_rule, state,
@@ -656,7 +665,11 @@ mod tests {
             .find(|m| m.name.ends_with("_chd_tracks"))
             .expect("the CHD migration");
         apply_through(&mut conn, chd.version - 1).expect("older migrations");
-        crate::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+        conn.execute_batch(
+            "INSERT INTO platforms (id, name, core_dir, kind, enabled) VALUES
+               ('psx', 'PSX', 'PSX', 'disc', 1), ('nes', 'NES', 'NES', 'cartridge', 1);",
+        )
+        .expect("platforms");
         conn.execute_batch(
             "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
                VALUES ('psx', 'Discs', '1', 'discs.dat', 0, 1);

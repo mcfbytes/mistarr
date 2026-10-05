@@ -124,9 +124,9 @@ mod tests {
 
     #[test]
     fn title_rows_and_torrent_paths() {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+        use crate::db::downloads::DownloadState;
+        use crate::db::fixtures::{conn, download, pid, seed_rom};
+        let c = conn();
         let src = sources::insert(
             &c,
             &NewSource {
@@ -139,15 +139,14 @@ mod tests {
             },
         )
         .expect("source");
-        let rom = crate::db::fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 10, &[])
-            .expect("rom");
+        let rom = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 10, &[]).expect("rom");
         let title: TitleId = c
             .query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
                 r.get(0)
             })
             .expect("title");
-        let id = crate::db::fixtures::download(&c, rom, src, 0, "importing", Some("/s/a.nes"))
-            .expect("insert");
+        let id =
+            download(&c, rom, src, 0, DownloadState::Importing, Some("/s/a.nes")).expect("insert");
         assert_eq!(for_title(&c, title).expect("rows"), [id]);
         let row = crate::db::downloads::get(&c, id)
             .expect("get")
@@ -165,11 +164,8 @@ mod tests {
         );
         assert!(torrent_path(&c, src, 1).expect("path").is_none());
 
-        let alt =
-            crate::db::fixtures::seed_rom(&c, "nes", "Example Quest (USA) (Alt).nes", 10, &[])
-                .expect("rom");
-        let other =
-            crate::db::fixtures::seed_rom(&c, "nes", "Other Tale (USA).nes", 10, &[]).expect("rom");
+        let alt = seed_rom(&c, &pid("nes"), "Example Quest (USA) (Alt).nes", 10, &[]).expect("rom");
+        let other = seed_rom(&c, &pid("nes"), "Other Tale (USA).nes", 10, &[]).expect("rom");
         let title_of = |rom: RomId| {
             c.query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
                 r.get::<_, TitleId>(0)
@@ -198,7 +194,15 @@ mod tests {
         assert!(!other_version_of(&c, main, alt_title).expect("retired"));
 
         assert!(!placed_any(&c, src).expect("placed"));
-        let bad = crate::db::fixtures::download(&c, rom, src, 0, "bad", None).expect("bad");
+        let bad = download(
+            &c,
+            rom,
+            src,
+            0,
+            crate::db::downloads::DownloadState::Bad,
+            None,
+        )
+        .expect("bad");
         assert!(!placed_any(&c, src).expect("quarantined only"));
         assert_eq!(placed_on_file(&c, src, 0, rom).expect("none"), None);
         let detail = serde_json::json!({ "title_id": alt_title.0, "rom_id": alt });

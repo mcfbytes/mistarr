@@ -808,6 +808,28 @@ pub struct Settled {
     pub cancelled: Vec<Cancelled>,
 }
 
+/// Cancels the unstarted downloads of every title in the group of `parent`.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub(crate) fn cancel_unstarted_in_group(
+    conn: &Connection,
+    parent: TitleId,
+    now: i64,
+) -> Result<()> {
+    conn.execute(
+        &format!(
+            "UPDATE downloads SET state = 'cancelled', updated_at = ?2
+             WHERE state IN {} AND title_id IN
+               (SELECT id FROM titles WHERE group_root = ?1 OR (id = ?1 AND group_root IS NULL))",
+            DownloadState::UNSTARTED_SQL
+        ),
+        params![parent, now],
+    )?;
+    Ok(())
+}
+
 /// Ends download `id` `bad` with the reason, forgets that its file may be the
 /// wanted rom, records the rom the file proved to be and cancels that rom's
 /// other open downloads once placed, then opens the wanted rom again on its

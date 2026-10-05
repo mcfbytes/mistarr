@@ -9,7 +9,7 @@ use mistarr_clients::fake::{FakeResponse, FakeScgiServer, FakeServer, ScgiReply}
 use mistarr_clients::xmlrpc::Value as Xml;
 use mistarr_server::config::ClientChoice;
 use mistarr_server::db::downloads::{self as rows, DownloadState};
-use mistarr_server::db::fixtures::seed_rom;
+use mistarr_server::db::fixtures::{pid, seed_rom};
 use mistarr_server::db::sql::Page;
 use mistarr_server::events::{Event, EventKind};
 use mistarr_server::jobs::poll::{Cadence, Poller};
@@ -65,7 +65,7 @@ fn seed_catalog(b: &Booted) -> [i64; 3] {
         .write_blocking(|c| {
             let mut out = [0; 3];
             for (slot, (name, size)) in [FILES[0], FILES[2], FILES[3]].into_iter().enumerate() {
-                let rom = seed_rom(c, "nes", name, size, &[])?;
+                let rom = seed_rom(c, &pid("nes"), name, size, &[])?;
                 out[slot] = c.query_row("SELECT title_id FROM roms WHERE id = ?1", [rom], |r| {
                     r.get(0)
                 })?;

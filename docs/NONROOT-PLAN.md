@@ -77,7 +77,7 @@ Four small root pieces stay outside every jail:
 
 | Need | Code [V] | Root today | Route under the jail |
 |---|---|---|---|
-| Write data dir (DB, WAL, swap, dats, sources, log, lock, migrating) | config.rs:165-236; db/ram.rs:773-876; logging.rs:64-84 | yes | Anchored read-write bind of `<data>` plus DAC override |
+| Write data dir (DB, WAL, swap, dats, sources, log, lock, migrating) | config.rs:165-236; db/ram.rs:775-858; logging.rs:64-84 | yes | Anchored read-write bind of `<data>` plus DAC override |
 | Staging, `.import`, quarantine; rename into `games/` | transfer.rs:254-256; place.rs:93-370 | yes | Staging moves to `<games>/.mistarr/staging` so the rename stays inside one mount (EXDEV [V rename.2]). The `Roots::new` invariant must change (place.rs:95, 209 reject staging under `games/` today) |
 | Library scan, placement, rename | `[paths] games` | yes | Recursive anchored bind of `games/` |
 | Read cores and MRAs (`_*`) | corename.rs:115-121; arcade.rs | no | Read-only binds |
@@ -86,7 +86,7 @@ Four small root pieces stay outside every jail:
 | Start Transmission (`mkdir linux/transmission`, run `S92transmission`) | clients launch.rs:128-131 | yes | Broker verb |
 | Start rtorrent as mistarr's child, with `<data>/rtorrent.rc` | launch.rs:142-172 | inherits | Root launcher or broker starts it in its own jail. Never as root with an rc from the data dir |
 | Fallback `transmission-daemon` start (upstream defaults: RPC on 0.0.0.0, UPnP) | launch.rs:133-139 | inherits | Pass `--rpc-bind-address 127.0.0.1 --no-portmap` now |
-| `/tmp/mistarr` RAM dir | db/mod.rs:868-926 | no | Private jail tmpfs, sized by the launcher |
+| `/tmp/mistarr` RAM dir | db/tempdir.rs:43-101 | no | Private jail tmpfs, sized by the launcher |
 | Thread names via `/proc/thread-self/comm` | threads.rs:209 | no | `prctl(PR_SET_NAME)` through rustix [I: rustix `thread::set_name`, check the docs] |
 | Autostart line, install, upgrade, rollback | mistarr.sh:21,303-319; install.sh | yes | Stays root, outside the jails, with no writes through jail-writable paths |
 | Supervisor pidfiles and `>> mistarr.log` written as root in `<data>` | mistarr.sh:7-12,30,130 | yes | Move to root-only `/run/mistarr/`. The daemon owns its log |
@@ -165,7 +165,7 @@ sh -c 'echo $$ > /sys/fs/cgroup/mistarr/cgroup.procs; exec /path/minijail0 -T st
 Notes on this command line:
 - **`-I`, always.** Without it, minijail's PID-namespace init handles SIGTERM with `_exit()` (libminijail.c:3250-3260 [V]), which kills the daemon with SIGKILL. That loses rtorrent's session and skips mistarr's graceful shutdown (main.rs:121-124).
 - **Fresh read-only procfs via `-k`.** With `-I`, minijail skips its own `/proc` remount (`if (pid_namespace && !do_init)`, libminijail.c:3894,4221 [V]). The critic's `-b /proc,/proc` is wrong: it would show every host pid. Without `-I`, `-p` dies on `umount2("/proc")` in an empty view (libminijail.c:2573-2620,3160 [V]). The fresh procfs is mounted in the child after it has joined the new PID namespace [I, rig test].
-- **`/tmp` via `-k tmpfs`, not `-t`.** minijail processes `-b`/`-k` mounts before `pivot_root` and `-t` after it (libminijail.c:3150-3160 [V]), so `-t` would cover the `/tmp/CORENAME` bind. `-t` also defaults to 64 MiB [V], which would push RAM-copy migrations onto the card (ram.rs:180-188).
+- **`/tmp` via `-k tmpfs`, not `-t`.** minijail processes `-b`/`-k` mounts before `pivot_root` and `-t` after it (libminijail.c:3150-3160 [V]), so `-t` would cover the `/tmp/CORENAME` bind. `-t` also defaults to 64 MiB [V], which would push RAM-copy migrations onto the card (ram.rs:183-195).
 - **`/etc/localtime`** is a symlink into `linux/` [V], hence the explicit bind of `/media/fat/linux/timezone`. Use `TZ` when that file is absent.
 - **`resolv.conf`.** On Buildroot, `resolv.conf` → `/run/resolv.conf` [V]. The launcher keeps a copy at `/run/mistarr/net/resolv.conf` and refreshes it in place (`cat > existing`), so the bound inode stays valid.
 - **No `/sys`, no cgroupfs, no `linux/`, `Scripts/`, `config/` or `saves/`.**
@@ -321,7 +321,7 @@ Buildroot can also turn off `CONFIG_UEVENT_HELPER`, since eudev does the job [V;
    - Log euid, `NoNewPrivs` and `CapEff`.
    - Refuse euid 0 when the marker exists.
    - Thread names via `prctl`.
-   - `held_elsewhere` (ram.rs:490-531) is blind across PID namespaces. Rely on the flock in lock.rs.
+   - `held_elsewhere` (ram.rs:481-510) is blind across PID namespaces. Rely on the flock in lock.rs.
 
 **mistarr.sh:**
 - Pidfiles and the launcher log go to `/run/mistarr/`.
@@ -361,7 +361,7 @@ Buildroot can also turn off `CONFIG_UEVENT_HELPER`, since eudev does the job [V;
    2. stop a root rtorrent and a root Transmission (`S92transmission stop`, then check the pid is gone);
    3. scrub symlinks under `<data>` (exFAT can hold them [V]);
    4. move the binary;
-   5. remove a root-owned `/tmp/mistarr` (db/mod.rs:920 [V]).
+   5. remove a root-owned `/tmp/mistarr` (db/tempdir.rs:private_dir [V]).
 3. **Staging move without re-verify (gap 19).**
    - Rename `<data>/staging` to `<games>/.mistarr/staging`; this works when both are on one filesystem, which today's placement already requires (ARCHITECTURE.md:606-608).
    - Inside the client jail, bind the staging anchor at the old path `/media/fat/mistarr/staging`. Set `remote_path_map = [{remote="/media/fat/mistarr/staging", local="<games>/.mistarr/staging"}]`.

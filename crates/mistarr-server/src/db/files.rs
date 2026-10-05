@@ -230,11 +230,10 @@ pub fn find_by_path(
     rel_path: &str,
 ) -> Result<Option<FileRow>> {
     Ok(conn
-        .query_row(
-            &format!("SELECT {COLUMNS} FROM files WHERE platform_id = ?1 AND rel_path = ?2"),
-            params![platform_id.0, rel_path],
-            from_row,
-        )
+        .prepare_cached(&format!(
+            "SELECT {COLUMNS} FROM files WHERE platform_id = ?1 AND rel_path = ?2"
+        ))?
+        .query_row(params![platform_id.0, rel_path], from_row)
         .optional()?)
 }
 
@@ -438,11 +437,13 @@ pub fn mark_verified(
     rel_path: &str,
     rom_id: RomId,
 ) -> Result<bool> {
-    Ok(conn.execute(
-        "UPDATE files SET state = 'verified', rom_id = ?3
+    Ok(conn
+        .prepare_cached(
+            "UPDATE files SET state = 'verified', rom_id = ?3
          WHERE platform_id = ?1 AND rel_path = ?2 AND state = 'unverified'",
-        params![platform_id.0, rel_path, rom_id],
-    )? > 0)
+        )?
+        .execute(params![platform_id.0, rel_path, rom_id])?
+        > 0)
 }
 
 /// Inserts or replaces the row `row` describes, keyed on `(platform_id, rel_path)`.
