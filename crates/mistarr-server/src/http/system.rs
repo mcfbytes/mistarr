@@ -11,10 +11,10 @@ use mistarr_clients::ClientKind;
 use mistarr_core::PlatformId;
 use serde::{Deserialize, Serialize};
 
-use super::extract::from_value;
+use super::extract::{from_value, unknown_field};
 use super::{ApiError, ApiJson, ApiQuery, OptionalJson, Paging};
 use crate::app::AppState;
-use crate::config::{dropped_flags, hideable_flags, RuntimeSettings};
+use crate::config::{dropped_flags, hideable_flags, unknown_prefs_fields, RuntimeSettings};
 use crate::db::ids::JobId;
 use crate::db::jobs::{self, JobRow};
 use crate::db::platforms;
@@ -305,8 +305,8 @@ async fn get_settings(State(app): State<Arc<AppState>>) -> Json<RuntimeSettings>
     Json(app.config().runtime())
 }
 
-/// `PUT /system/settings`: replaces the sections the body carries, refusing a
-/// `prefs.hide` name that is not a flag that can be hidden.
+/// `PUT /system/settings`: replaces the sections the body carries, refusing a key no
+/// field claims and a `prefs.hide` name that is not a flag that can be hidden.
 async fn put_settings(
     State(app): State<Arc<AppState>>,
     ApiJson(body): ApiJson<serde_json::Value>,
@@ -315,6 +315,9 @@ async fn put_settings(
         let only = hideable_flags();
         let msg = format!("Only {only} can be hidden, not \"{name}\".");
         return Err(ApiError::bad_request(msg));
+    }
+    if let Some(path) = unknown_prefs_fields(&body).first() {
+        return Err(unknown_field(path));
     }
     let patch = from_value(body)?;
     Ok(Json(app.update_settings(patch).await?.settings))

@@ -345,6 +345,18 @@ async fn settings_from_file_are_editable_and_persist() {
     .await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.json()["prefs"]["hide"], serde_json::json!(["demo"]));
+    for (typo, path) in [
+        (r#"{"limits":{"up_kbps":5}}"#, "limits.up_kbps"),
+        (r#"{"prefs":{"region":["Europe"]}}"#, "prefs.region"),
+    ] {
+        let r = request(addr, "PUT", "/api/v1/system/settings", &[], Some(typo)).await;
+        assert_eq!(r.status, 400, "{}", r.body);
+        let message = r.json()["error"]["message"].as_str().map(str::to_owned);
+        assert!(message.is_some_and(|m| m.contains(&format!("\"{path}\""))));
+    }
+    let s = get(addr, "/api/v1/system/settings").await.json();
+    assert_eq!(s["limits"]["up_kbps_core"], 6);
+    assert_eq!(s["prefs"]["regions"][0], "USA");
 
     let dir = booted.dir;
     booted.running.shutdown().await.expect("shutdown");

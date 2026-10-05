@@ -82,13 +82,44 @@ fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ApiError> {
     serde_json::from_slice(bytes).map_err(|e| invalid(&e))
 }
 
-/// A body read as [`serde_json::Value`] as `T`, refused as [`ApiJson`] refuses one.
+/// A body read as [`serde_json::Value`] as `T`, refused as [`ApiJson`] refuses one and
+/// also when it holds a key, at any depth, that no field of `T` claims.
 pub(crate) fn from_value<T: DeserializeOwned>(value: serde_json::Value) -> Result<T, ApiError> {
-    serde_json::from_value(value).map_err(|e| invalid(&e))
+    let mut ignored = None;
+    let parsed = serde_ignored::deserialize(value, |path| {
+        ignored.get_or_insert_with(|| dotted(&path));
+    });
+    match (parsed, ignored) {
+        (Err(e), _) => Err(invalid(&e)),
+        (Ok(_), Some(path)) => Err(unknown_field(&path)),
+        (Ok(t), None) => Ok(t),
+    }
+}
+
+/// `path` as keys and indexes joined by dots, without the `?` of an `Option` or newtype layer.
+fn dotted(path: &serde_ignored::Path<'_>) -> String {
+    use serde_ignored::Path;
+    let (parent, segment) = match path {
+        Path::Root => return String::new(),
+        Path::Seq { parent, index } => (parent, index.to_string()),
+        Path::Map { parent, key } => (parent, key.clone()),
+        Path::Some { parent }
+        | Path::NewtypeStruct { parent }
+        | Path::NewtypeVariant { parent } => return dotted(parent),
+    };
+    match dotted(parent) {
+        head if head.is_empty() => segment,
+        head => format!("{head}.{segment}"),
+    }
 }
 
 fn invalid(e: &serde_json::Error) -> ApiError {
     ApiError::bad_request(format!("The body is not valid: {e}"))
+}
+
+/// The 400 for a body key no field claims, named by its dotted `path`.
+pub(crate) fn unknown_field(path: &str) -> ApiError {
+    ApiError::bad_request(format!("The body is not valid: unknown field \"{path}\"."))
 }
 
 /// `?limit=&offset=` of list endpoints; a query struct embeds it with `#[serde(flatten)]`.
@@ -168,6 +199,18 @@ mod tests {
         a: Option<u8>,
     }
 
+    #[derive(Debug, Default, Deserialize, PartialEq)]
+    #[serde(deny_unknown_fields)]
+    struct Outer {
+        inner: Option<Inner>,
+    }
+
+    #[derive(Debug, Default, Deserialize, PartialEq)]
+    #[serde(default)]
+    struct Inner {
+        a: u8,
+    }
+
     #[derive(Debug, Deserialize)]
     struct ListQuery {
         q: Option<String>,
@@ -206,6 +249,11 @@ mod tests {
         assert_eq!(b.a, Some(2));
         let e = from_value::<Body1>(serde_json::json!({ "b": 1 })).expect_err("unknown");
         assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+        let o: Outer = from_value(serde_json::json!({ "inner": { "a": 3 } })).expect("nested");
+        assert_eq!(o.inner, Some(Inner { a: 3 }));
+        let e = from_value::<Outer>(serde_json::json!({ "inner": { "b": 3 } })).expect_err("typo");
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
+        assert!(e.message().contains("\"inner.b\""), "{}", e.message());
     }
 
     #[tokio::test]

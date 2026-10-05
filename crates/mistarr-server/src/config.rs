@@ -447,7 +447,7 @@ impl Config {
         let mut config: Self =
             serde_ignored::deserialize(de, |path| unknown.push(path.to_string()))?;
         let prefs = prefs_table(text);
-        unknown.extend(unknown_prefs_keys(&prefs));
+        unknown.extend(unknown_prefs_keys(prefs.keys()));
         let hide = prefs.get("hide").and_then(toml::Value::as_array);
         config.dropped_flags =
             unknown_flags(hide.into_iter().flatten().filter_map(toml::Value::as_str));
@@ -638,14 +638,27 @@ fn prefs_table(text: &str) -> toml::Table {
     toml::from_str::<Sections>(text).map_or_else(|_| toml::Table::new(), |s| s.prefs)
 }
 
-/// The keys of `prefs` no field of [`PrefsConfig`] claims, which `serde_ignored` cannot
+/// The `prefs` keys no field of [`PrefsConfig`] claims, which `serde_ignored` cannot
 /// see past the flattened [`Prefs`]; the known names come from its JSON form.
-fn unknown_prefs_keys(prefs: &toml::Table) -> Vec<String> {
+fn unknown_prefs_keys<'a>(keys: impl IntoIterator<Item = &'a String>) -> Vec<String> {
     let Ok(known) = serde_json::to_value(PrefsConfig::default()) else {
         return Vec::new();
     };
-    let unclaimed = prefs.keys().filter(|k| known.get(k.as_str()).is_none());
+    let unclaimed = keys.into_iter().filter(|k| known.get(k.as_str()).is_none());
     unclaimed.map(|k| format!("prefs.{k}")).collect()
+}
+
+/// The dotted paths of the `prefs` keys of `value`, a [`RuntimeSettings`] as JSON, that
+/// no field claims, which reading it would ignore.
+///
+/// ```
+/// let v = serde_json::json!({ "prefs": { "regions": [], "region": ["Europe"] } });
+/// assert_eq!(mistarr_server::config::unknown_prefs_fields(&v), ["prefs.region"]);
+/// ```
+#[must_use]
+pub fn unknown_prefs_fields(value: &serde_json::Value) -> Vec<String> {
+    let prefs = value.get("prefs").and_then(serde_json::Value::as_object);
+    unknown_prefs_keys(prefs.into_iter().flat_map(serde_json::Map::keys))
 }
 
 /// The names that are not a [`HiddenFlag`], which reading a `hide` list drops.
