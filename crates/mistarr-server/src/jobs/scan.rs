@@ -16,6 +16,7 @@ use mistarr_core::hash::{
 use mistarr_core::PlatformId;
 use mistarr_mister::platforms::{self, Kind, Platform};
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
@@ -33,7 +34,8 @@ use crate::error::{Error, Result};
 use crate::events::EventKind;
 
 /// A library scan: one platform, or every enabled platform fanned out as
-/// one job each.
+/// one job each. Its payload is the struct itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanJob {
     /// `None` fans out one job per enabled platform.
     pub platform_id: Option<PlatformId>,
@@ -46,7 +48,11 @@ impl Job for ScanJob {
     }
 
     fn payload(&self) -> Value {
-        json!({ "platform_id": self.platform_id.as_ref().map(|p| p.0.clone()) })
+        super::to_payload(self)
+    }
+
+    fn detail(&self) -> Option<String> {
+        self.platform_id.as_ref().map(|p| p.0.clone())
     }
 
     fn lane(&self) -> Lane {
@@ -306,6 +312,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         .collect();
 
     let mut sink = Sink::new(ctx, &pid);
+    let reporter = ctx.reporter();
     let mut saved = Instant::now();
     let total = units.len();
     let remaining: Vec<Unit> = units
@@ -336,13 +343,14 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         }
         let done_dirs = save.then(|| done_set.iter().cloned().collect::<Vec<_>>());
         sink.flush(done_dirs).await?;
-        ctx.progress(json!({
-            "platform_id": pid.0,
-            "dir": unit.id,
-            "done": done_set.len(),
-            "total": total,
-        }))
-        .await?;
+        reporter.report("scanning", || {
+            json!({
+                "platform_id": pid.0,
+                "dir": unit.id,
+                "done": done_set.len(),
+                "total": total,
+            })
+        });
     }
 
     ctx.checkpoint().await?;

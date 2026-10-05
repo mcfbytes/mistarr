@@ -17,7 +17,8 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use super::remap::{key_new_roms, map_files, store_mapping};
-use super::{wizard, Job, JobContext, JobKind, Lane, Scheduler};
+use super::watch::wizard;
+use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::candidates;
 use crate::db::ids::SourceId;
@@ -83,16 +84,19 @@ pub fn publish_changed(app: &AppState, row: &SourceRow) {
 
 /// Reads one `.torrent` or `.magnet` file from `sources/`, records it and moves
 /// it to `loaded/` or, with a reason file, to `rejected/`. A missing file is a no-op.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Its payload is the struct itself.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SourceImport {
     /// The file, directly inside `sources/`.
+    #[serde(serialize_with = "super::path_text")]
     pub path: PathBuf,
 }
 
 /// Adds a resolving magnet to the client with nothing wanted and starts it so
 /// the client fetches metadata; once the client lists the files, leaves them
 /// unwanted, stops the torrent and binds the source. Leaves a reason while it waits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Its payload is the struct itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ResolveMagnet {
     /// The resolving source.
     pub source_id: SourceId,
@@ -105,7 +109,11 @@ impl Job for SourceImport {
     }
 
     fn payload(&self) -> Value {
-        json!({ "path": self.path.to_string_lossy() })
+        super::to_payload(self)
+    }
+
+    fn detail(&self) -> Option<String> {
+        super::file_detail(&self.path)
     }
 
     fn lane(&self) -> Lane {
@@ -353,19 +361,17 @@ fn unbound_explained(conn: &Connection, id: SourceId, threshold: f32) -> Result<
     }
 }
 
-/// Binds the unbound sources again after a DAT loaded titles for `platforms`,
-/// skipping those the user unbound, and queues a [`RemapSources`] for the
-/// sources already bound to one of `platforms`. A source binds to its suggested platform
-/// when that reaches the threshold and no other platform scores higher, else
-/// as [`bind_best`] decides. Publishes `source.changed` for sources whose
+/// Binds the unbound sources again after the catalogue changed, skipping those the
+/// user unbound; see [`super::follow_up::catalogue_changed`]. A source binds to its
+/// suggested platform when that reaches the threshold and no other platform scores
+/// higher, else as [`bind_best`] decides. Publishes `source.changed` for sources whose
 /// state or platform changed, and returns how many bound.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub async fn rebind_after_dat(app: &Arc<AppState>, platforms: &[PlatformId]) -> Result<usize> {
+pub async fn rebind_waiting(app: &Arc<AppState>) -> Result<usize> {
     let threshold = app.config().sources.bind_threshold;
-    let platforms_queued = platforms.to_vec();
     key_new_roms(&app.db).await?;
     let changed = app
         .db
@@ -384,9 +390,6 @@ pub async fn rebind_after_dat(app: &Arc<AppState>, platforms: &[PlatformId]) -> 
             Ok(out)
         })
         .await?;
-    if !platforms_queued.is_empty() {
-        super::remap::enqueue(app, Some(platforms_queued)).await;
-    }
     let mut bound = 0;
     for row in &changed {
         if row.state == SourceState::Bound {
@@ -482,7 +485,7 @@ impl Job for ResolveMagnet {
     }
 
     fn payload(&self) -> Value {
-        json!({ "source_id": self.source_id })
+        super::to_payload(self)
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
@@ -678,9 +681,7 @@ pub async fn resolve_pending(app: Arc<AppState>) {
             if !started && !slow_due {
                 continue;
             }
-            if let Err(e) = Scheduler::enqueue(&app, Arc::new(ResolveMagnet { source_id })).await {
-                tracing::warn!(error = %e, "cannot queue magnet resolving");
-            }
+            Scheduler::submit(&app, Arc::new(ResolveMagnet { source_id })).await;
         }
     }
 }
@@ -801,7 +802,8 @@ mod tests {
             .expect("db");
         let mut events = app.events.subscribe(None).live;
         let nes = [PlatformId("nes".into())];
-        assert_eq!(rebind_after_dat(&app, &nes).await.expect("rebind"), 0);
+        assert_eq!(rebind_waiting(&app).await.expect("rebind"), 0);
+        crate::jobs::follow_up::catalogue_changed(&app, &nes, true).await;
         let queued = app
             .db
             .read(|c| crate::db::jobs::count_kind(c, crate::jobs::JobKind::RemapSources))
@@ -880,7 +882,7 @@ mod tests {
             })
             .expect("db");
         let mut events = app.events.subscribe(None).live;
-        assert_eq!(rebind_after_dat(&app, &[]).await.expect("rebind"), 0);
+        assert_eq!(rebind_waiting(&app).await.expect("rebind"), 0);
         assert!(
             events.try_recv().is_err(),
             "an unchanged source is not announced"
@@ -905,7 +907,7 @@ mod tests {
                 Ok(other)
             })
             .expect("db");
-        assert_eq!(rebind_after_dat(&app, &[]).await.expect("rebind"), 1);
+        assert_eq!(rebind_waiting(&app).await.expect("rebind"), 1);
         assert!(events.try_recv().is_ok(), "the bound source is announced");
         assert!(events.try_recv().is_err(), "only once");
         let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");

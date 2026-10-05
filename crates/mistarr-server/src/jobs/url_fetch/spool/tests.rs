@@ -14,8 +14,15 @@ fn no_rest() -> Pace {
     Arc::new(|_| Duration::ZERO)
 }
 
-fn never() -> Stop {
-    Arc::new(|| false)
+/// A token for a fetch lane whose shutdown is `down`.
+fn token(down: bool) -> StopToken {
+    let (_down, shutdown) = tokio::sync::watch::channel(down);
+    let (_gate, gate) = tokio::sync::watch::channel(crate::jobs::watch::gate::GateState::default());
+    StopToken::new(shutdown, gate, crate::jobs::Lane::Fetch, Arc::default())
+}
+
+fn never() -> StopToken {
+    token(false)
 }
 
 /// A pace that counts its calls and never rests.
@@ -135,11 +142,11 @@ async fn a_stop_while_placing_leaves_nothing() {
     spool.push(&body(CHUNK_BYTES * 3)).await.expect("push");
     spool.finish().await.expect("finish");
     let from = spool.path().to_path_buf();
-    let asked = Arc::new(AtomicUsize::new(0));
-    let seen = Arc::clone(&asked);
-    let stop: Stop = Arc::new(move || seen.fetch_add(1, Ordering::Relaxed) >= 1);
     let to = dir.path().join("placed.dat");
-    let e = spool.place(to.clone(), stop).await.expect_err("stopped");
+    let e = spool
+        .place(to.clone(), token(true))
+        .await
+        .expect_err("stopped");
     assert!(matches!(e, Error::Cancelled), "{e:?}");
     assert!(!to.exists() && !from.exists());
 }

@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, Result};
+use crate::jobs::stop::StopToken;
 use crate::threads::{label, run};
 
 /// Bytes gathered before each write, and copied per write onto the card.
@@ -37,9 +38,6 @@ pub struct Places {
 
 /// The rest after a write to the card, given how long it took; zero unless a core runs.
 pub type Pace = Arc<dyn Fn(Duration) -> Duration + Send + Sync>;
-
-/// Whether the work should stop, asked between writes.
-pub type Stop = Arc<dyn Fn() -> bool + Send + Sync>;
 
 fn rest(pace: &dyn Fn(Duration) -> Duration, took: Duration) {
     let pause = pace(took);
@@ -259,8 +257,9 @@ impl Spool {
     /// # Errors
     ///
     /// [`Error::Io`] when it cannot be moved, of kind `StorageFull` when the card lacks
-    /// room for the copy, [`Error::Cancelled`] when `stop` said so; nothing is left at `to` then.
-    pub async fn place(mut self, to: PathBuf, stop: Stop) -> Result<()> {
+    /// room for the copy, the error of [`StopToken::stopped`] when the job must stop;
+    /// nothing is left at `to` then.
+    pub async fn place(mut self, to: PathBuf, stop: StopToken) -> Result<()> {
         self.file = None;
         let from = std::mem::take(&mut self.path);
         let (in_ram, pace) = (self.in_ram, Arc::clone(&self.pace));
@@ -270,7 +269,7 @@ impl Spool {
                 let size = std::fs::metadata(&from).map_or(0, |m| m.len());
                 let dir = to.parent().unwrap_or(Path::new("/"));
                 let copied = if card_allows(dir, size) {
-                    copy_chunked(&from, &to, &*pace, &*stop)
+                    copy_chunked(&from, &to, &*pace, &|| stop.is_stopped())
                 } else {
                     Err(no_room())
                 };
@@ -278,7 +277,7 @@ impl Spool {
                 if let Err(e) = copied {
                     let _ = std::fs::remove_file(&to);
                     if e.kind() == std::io::ErrorKind::Interrupted {
-                        return Err(Error::Cancelled);
+                        return Err(stop.stopped().err().unwrap_or(Error::Cancelled));
                     }
                     return Err(e.into());
                 }

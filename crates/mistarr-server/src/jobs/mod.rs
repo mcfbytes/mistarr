@@ -1,37 +1,38 @@
-//! Background jobs: the [`Job`] trait, three serial lanes and the gate; see `docs/ARCHITECTURE.md`.
+//! Background jobs: the [`Job`] trait, four serial lanes and the gate; see `docs/ARCHITECTURE.md`.
 
 pub mod arcade;
 pub mod bind_source;
 pub mod chd;
-pub mod core_limits;
-pub mod corename;
 pub mod dat_import;
 pub mod detect_client;
 pub mod drop_watch;
+pub mod follow_up;
 mod fsutil;
-pub mod gate;
 pub mod import;
-pub mod io_priority;
 pub mod matching;
-pub mod poll;
 pub mod progress;
 pub mod remap;
 pub mod scan;
 pub mod source_import;
+pub mod stop;
 pub mod transfer;
 pub mod url_fetch;
-pub mod wizard;
+pub mod watch;
 
+use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use self::stop::{Cancel, StopToken};
 use crate::app::AppState;
 use crate::db::ids::JobId;
 use crate::db::jobs::{self as rows, JobState};
@@ -41,15 +42,6 @@ use crate::events::EventKind;
 
 /// Finished rows kept in `jobs` for the activity screen.
 const KEEP_FINISHED: u32 = 200;
-
-/// Kinds whose whole work a paused run of the same payload still covers, so a
-/// second request never queues behind it.
-pub const SINGLETON_KINDS: [JobKind; 4] = [
-    JobKind::ArcadeCatalog,
-    JobKind::Scan,
-    JobKind::Recompute,
-    JobKind::ChdTracks,
-];
 
 /// Error recorded on a job a previous process left unfinished and that is not re-run.
 pub const INTERRUPTED: &str = "interrupted by a restart";
@@ -105,16 +97,79 @@ text_enum! {
     }
 }
 
-/// A unit of background work. Later packages add implementations and enqueue
-/// them through [`Scheduler::enqueue`].
+/// Which job of the same kind and payload a new request joins instead of queueing another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Dedupe {
+    /// One that has not started.
+    Queued,
+    /// One that has not started or waits at the gate, whose run still covers the request.
+    QueuedOrPaused,
+    /// Any that has not finished.
+    Open,
+}
+
+impl Dedupe {
+    /// The states of a job a request joins.
+    ///
+    /// ```
+    /// use mistarr_server::db::jobs::JobState;
+    /// use mistarr_server::jobs::Dedupe;
+    /// assert_eq!(Dedupe::Queued.states(), [JobState::Queued]);
+    /// assert!(Dedupe::Open.states().contains(&JobState::Running));
+    /// ```
+    #[must_use]
+    pub fn states(self) -> &'static [JobState] {
+        match self {
+            Self::Queued => &[JobState::Queued],
+            Self::QueuedOrPaused => &[JobState::Queued, JobState::Paused],
+            Self::Open => &JobState::ACTIVE,
+        }
+    }
+}
+
+impl JobKind {
+    /// How a request of this kind joins an earlier one.
+    ///
+    /// ```
+    /// use mistarr_server::jobs::{Dedupe, JobKind};
+    /// assert_eq!(JobKind::Scan.dedupe(), Dedupe::QueuedOrPaused);
+    /// assert_eq!(JobKind::Import.dedupe(), Dedupe::Open);
+    /// assert_eq!(JobKind::Transfer.dedupe(), Dedupe::Queued);
+    /// ```
+    #[must_use]
+    pub fn dedupe(self) -> Dedupe {
+        match self {
+            Self::ArcadeCatalog | Self::Scan | Self::Recompute | Self::ChdTracks => {
+                Dedupe::QueuedOrPaused
+            }
+            Self::Import => Dedupe::Open,
+            Self::DetectClient
+            | Self::DatImport
+            | Self::SourceImport
+            | Self::ResolveMagnet
+            | Self::Transfer
+            | Self::Deselect
+            | Self::RemapSources
+            | Self::BindSource
+            | Self::UrlFetch => Dedupe::Queued,
+        }
+    }
+}
+
+/// A unit of background work, enqueued through [`Scheduler::enqueue`] or [`Scheduler::submit`].
 #[async_trait]
 pub trait Job: Send + Sync {
     /// What the job does.
     fn kind(&self) -> JobKind;
 
-    /// The `jobs.payload` value; equal kind and payload deduplicate while queued.
+    /// The `jobs.payload` value; equal kind and payload deduplicate as [`JobKind::dedupe`] says.
     fn payload(&self) -> Value {
         json!({})
+    }
+
+    /// The file name, platform or source the job is about, for the activity list.
+    fn detail(&self) -> Option<String> {
+        None
     }
 
     /// The lane to run on.
@@ -122,14 +177,27 @@ pub trait Job: Send + Sync {
         Lane::Light
     }
 
-    /// True when a request joins a job of the same kind and payload that is
-    /// waiting at the gate, not only one still queued; see [`SINGLETON_KINDS`].
-    fn singleton(&self) -> bool {
-        SINGLETON_KINDS.contains(&self.kind())
-    }
-
     /// Does the work. Heavy jobs call [`JobContext::checkpoint`] at file boundaries.
     async fn run(&self, ctx: &JobContext) -> Result<()>;
+}
+
+/// `payload` as a job stores it; payloads are structs of strings, numbers and ids,
+/// which always serialise, so a failure only logs and stores `null`.
+pub(crate) fn to_payload<T: Serialize>(payload: &T) -> Value {
+    serde_json::to_value(payload).unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "cannot store a job payload");
+        Value::Null
+    })
+}
+
+/// Writes a path into a payload as its text, replacing what is not UTF-8.
+pub(crate) fn path_text<S: serde::Serializer>(path: &Path, s: S) -> Result<S::Ok, S::Error> {
+    s.serialize_str(&path.to_string_lossy())
+}
+
+/// The file name of `path`, for [`Job::detail`].
+pub(crate) fn file_detail(path: &Path) -> Option<String> {
+    Some(path.file_name()?.to_string_lossy().into_owned())
 }
 
 /// What a running job gets from the scheduler.
@@ -140,7 +208,8 @@ pub struct JobContext {
     pub kind: JobKind,
     /// The server.
     pub app: Arc<AppState>,
-    lane: Lane,
+    /// When the job must stop or wait.
+    pub stop: StopToken,
     detail: Option<String>,
 }
 
@@ -155,7 +224,9 @@ struct ProgressEvent<'a> {
 }
 
 impl JobContext {
-    /// Stores `progress` on the job row, replacing any live progress, and publishes `job.progress`.
+    /// Stores `progress` on the job row as its resume state or outcome, replacing any
+    /// live progress, and publishes `job.progress`; live progress goes through
+    /// [`JobContext::reporter`] instead.
     ///
     /// # Errors
     ///
@@ -172,25 +243,19 @@ impl JobContext {
         Ok(())
     }
 
-    /// Fails with [`Error::Cancelled`] once the server is shutting down. While
-    /// the job's lane is held, waits, marking the row `paused`; see [`gate::GateState::hold`].
+    /// Fails as [`StopToken::stopped`] does. While the job's lane is held, waits,
+    /// marking the row `paused`; see [`watch::gate::GateState::hold`].
     ///
     /// # Errors
     ///
-    /// [`Error::Cancelled`] on shutdown, [`Error::Db`] when the row state cannot be updated.
+    /// As [`StopToken::stopped`], [`Error::Db`] when the row state cannot be updated.
     pub async fn checkpoint(&self) -> Result<()> {
-        let mut stop = self.app.shutdown_signal();
-        if *stop.borrow() {
-            return Err(Error::Cancelled);
-        }
-        if self.app.gate.state().hold(self.lane).is_none() {
+        self.stop.stopped()?;
+        if self.stop.held().is_none() {
             return Ok(());
         }
         set_state(&self.app, self.id, JobState::Paused).await?;
-        tokio::select! {
-            () = self.app.gate.wait_free(self.lane) => {}
-            _ = stop.wait_for(|s| *s) => return Err(Error::Cancelled),
-        }
+        self.stop.wait_free().await?;
         set_state(&self.app, self.id, JobState::Running).await
     }
 
@@ -227,18 +292,21 @@ async fn set_state(app: &AppState, id: JobId, state: JobState) -> Result<()> {
 struct Queued {
     id: JobId,
     job: Arc<dyn Job>,
+    cancel: Arc<Cancel>,
 }
 
 const LANES: [Lane; 4] = [Lane::Heavy, Lane::Background, Lane::Light, Lane::Fetch];
 
 type Receivers = Vec<(Lane, mpsc::UnboundedReceiver<Queued>)>;
 
-/// Queues jobs onto the three lanes and records them in `jobs`.
+/// Queues jobs onto the four lanes, records them in `jobs` and holds the cancel
+/// request of each job not finished.
 pub struct Scheduler {
     senders: Vec<(Lane, mpsc::UnboundedSender<Queued>)>,
     receivers: Mutex<Option<Receivers>>,
     lanes: Mutex<Vec<JoinHandle<()>>>,
     alive: Arc<AtomicUsize>,
+    cancels: Mutex<HashMap<JobId, Arc<Cancel>>>,
 }
 
 /// Decrements the live-lane count when a lane task ends or is aborted.
@@ -272,6 +340,7 @@ impl Scheduler {
             receivers: Mutex::new(Some(receivers)),
             lanes: Mutex::new(Vec::new()),
             alive: Arc::new(AtomicUsize::new(0)),
+            cancels: Mutex::new(HashMap::new()),
         }
     }
 
@@ -316,9 +385,8 @@ impl Scheduler {
         }
     }
 
-    /// Records a queued job and hands it to its lane. A job with the same kind
-    /// and payload that has not started yet is returned instead of a second
-    /// one; for a [`Job::singleton`], so is one waiting at the gate.
+    /// Records a queued job and hands it to its lane. A job of the same kind and
+    /// payload that [`JobKind::dedupe`] says covers it is returned instead of a second one.
     ///
     /// # Errors
     ///
@@ -326,11 +394,10 @@ impl Scheduler {
     /// when the lane has stopped.
     pub async fn enqueue(app: &Arc<AppState>, job: Arc<dyn Job>) -> Result<JobId> {
         let (kind, payload, lane) = (job.kind(), job.payload(), job.lane());
-        let singleton = job.singleton();
         let (id, fresh) = app
             .db
             .write(move |c| {
-                if let Some(id) = rows::find_queued(c, kind, &payload, singleton)? {
+                if let Some(id) = rows::find_in(c, kind, &payload, kind.dedupe().states())? {
                     return Ok((id, false));
                 }
                 let id = rows::insert(c, kind, &payload, lane, crate::unix_now())?;
@@ -338,7 +405,7 @@ impl Scheduler {
             })
             .await?;
         if fresh {
-            let detail = crate::status::job_detail(&job.payload());
+            let detail = job.detail();
             let queued = ProgressEvent {
                 id,
                 kind,
@@ -353,6 +420,19 @@ impl Scheduler {
             }
         }
         Ok(id)
+    }
+
+    /// [`Scheduler::enqueue`] for a caller that carries on without the job: a failure
+    /// is logged with the job's kind and detail, and `None` returned.
+    pub async fn submit(app: &Arc<AppState>, job: Arc<dyn Job>) -> Option<JobId> {
+        let (kind, detail) = (job.kind(), job.detail());
+        match Self::enqueue(app, job).await {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(kind = %kind, detail, error = %e, "cannot queue a job");
+                None
+            }
+        }
     }
 
     /// [`Scheduler::enqueue`] on a task of its own, waiting at most `wait` for it:
@@ -383,6 +463,21 @@ impl Scheduler {
         }
     }
 
+    /// Asks job `id` to stop at its next check, or not to start; false when no job
+    /// of that id is waiting or running.
+    pub fn cancel(&self, id: JobId) -> bool {
+        self.cancels().get(&id).map(|c| c.cancel()).is_some()
+    }
+
+    fn cancels(&self) -> std::sync::MutexGuard<'_, HashMap<JobId, Arc<Cancel>>> {
+        self.cancels.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// A cancel request for job `id`, held until [`execute`] finishes it.
+    fn open(&self, id: JobId) -> Arc<Cancel> {
+        Arc::clone(self.cancels().entry(id).or_default())
+    }
+
     /// Hands an already recorded job to its lane.
     fn dispatch(&self, id: JobId, job: Arc<dyn Job>) -> Result<()> {
         let lane = job.lane();
@@ -391,8 +486,11 @@ impl Scheduler {
             .iter()
             .find_map(|(l, tx)| (*l == lane).then_some(tx))
             .ok_or_else(|| crate::Error::Job("no such lane".to_owned()))?;
-        tx.send(Queued { id, job })
-            .map_err(|_| crate::Error::Job("scheduler has stopped".to_owned()))
+        let cancel = self.open(id);
+        tx.send(Queued { id, job, cancel }).map_err(|_| {
+            self.cancels().remove(&id);
+            crate::Error::Job("scheduler has stopped".to_owned())
+        })
     }
 
     /// Records and runs a job on the calling task, bypassing the lanes and
@@ -408,7 +506,8 @@ impl Scheduler {
             .db
             .write(move |c| rows::insert(c, kind, &payload, Lane::Light, crate::unix_now()))
             .await?;
-        execute(app, id, job.as_ref(), Lane::Light).await?;
+        let cancel = app.scheduler.open(id);
+        execute(app, id, job.as_ref(), Lane::Light, cancel).await?;
         Ok(id)
     }
 }
@@ -427,14 +526,14 @@ async fn lane(
             q = rx.recv() => q,
             _ = stop.wait_for(|s| *s) => None,
         };
-        let Some(Queued { id, job }) = next else {
+        let Some(Queued { id, job, cancel }) = next else {
             break;
         };
         tokio::select! {
             () = app.gate.wait_free(lane) => {}
             _ = stop.wait_for(|s| *s) => break,
         }
-        if let Err(e) = execute(&app, id, job.as_ref(), lane).await {
+        if let Err(e) = execute(&app, id, job.as_ref(), lane, cancel).await {
             tracing::warn!(job = %id, error = %e, "cannot record job state");
         }
         if lane == Lane::Heavy {
@@ -531,50 +630,89 @@ pub async fn reconcile(app: &Arc<AppState>) -> Result<Reconciled> {
 /// ```
 #[must_use]
 pub fn revive(kind: JobKind, payload: &Value) -> Option<Arc<dyn Job>> {
-    let text = |key: &str| payload.get(key).and_then(Value::as_str);
-    let job: Arc<dyn Job> = match kind {
-        JobKind::ArcadeCatalog => Arc::new(arcade::ArcadeCatalog),
-        JobKind::ChdTracks => Arc::new(chd::ChdTracks),
-        JobKind::Scan => Arc::new(scan::ScanJob {
-            platform_id: text("platform_id").map(|p| mistarr_core::PlatformId(p.to_owned())),
-        }),
+    match kind {
         // A bind request names a version; the user repeats it from the UI instead.
-        JobKind::DatImport if payload.get("dat_version_id").is_none() => Arc::new(
-            dat_import::DatImport::new(std::path::Path::new(text("path")?)),
-        ),
-        JobKind::Recompute => Arc::new(dat_import::Recompute::new(text("platform_id")?)),
-        JobKind::SourceImport => Arc::new(source_import::SourceImport {
-            path: text("path")?.into(),
-        }),
-        JobKind::RemapSources => Arc::new(remap::RemapSources::from_payload(payload)),
-        JobKind::BindSource => Arc::new(bind_source::BindSource::from_payload(payload)?),
-        JobKind::Import => Arc::new(import::ImportJob {
-            download_id: crate::db::ids::DownloadId(payload.get("download_id")?.as_i64()?),
-        }),
-        JobKind::DatImport
-        | JobKind::DetectClient
+        JobKind::DatImport => {
+            let job = dat_import::DatImport::from_payload(payload)?;
+            (!job.binds()).then(|| Arc::new(job) as Arc<dyn Job>)
+        }
+        JobKind::DetectClient
         | JobKind::ResolveMagnet
         | JobKind::Transfer
         | JobKind::Deselect
-        | JobKind::UrlFetch => return None,
-    };
-    Some(job)
+        | JobKind::UrlFetch => None,
+        _ => decode(kind, payload),
+    }
+}
+
+/// The detail of a stored job, as [`Job::detail`] gives it; `None` when the payload
+/// does not read as its kind's.
+///
+/// ```
+/// use mistarr_server::jobs::{detail, JobKind};
+/// let p = serde_json::json!({"path": "/data/dats/a.dat"});
+/// assert_eq!(detail(JobKind::DatImport, &p).as_deref(), Some("a.dat"));
+/// let s = serde_json::json!({"source_id": 2, "source_name": "Set"});
+/// assert_eq!(detail(JobKind::BindSource, &s).as_deref(), Some("Set"));
+/// assert_eq!(detail(JobKind::Scan, &serde_json::json!({"platform_id": "nes"})).as_deref(), Some("nes"));
+/// assert_eq!(detail(JobKind::Transfer, &serde_json::json!({})), None);
+/// ```
+#[must_use]
+pub fn detail(kind: JobKind, payload: &Value) -> Option<String> {
+    decode(kind, payload)?.detail()
+}
+
+/// The job a stored kind and payload describe; `None` for a fetch, whose URL is
+/// never stored, or a payload that does not read.
+fn decode(kind: JobKind, payload: &Value) -> Option<Arc<dyn Job>> {
+    fn read<T: Job + DeserializeOwned + 'static>(payload: &Value) -> Option<Arc<dyn Job>> {
+        let job: T = serde_json::from_value(payload.clone()).ok()?;
+        Some(Arc::new(job))
+    }
+    match kind {
+        JobKind::Scan => read::<scan::ScanJob>(payload),
+        JobKind::Import => read::<import::ImportJob>(payload),
+        JobKind::DetectClient => Some(Arc::new(detect_client::DetectClient)),
+        JobKind::DatImport => Some(Arc::new(dat_import::DatImport::from_payload(payload)?)),
+        JobKind::Recompute => read::<dat_import::Recompute>(payload),
+        JobKind::SourceImport => read::<source_import::SourceImport>(payload),
+        JobKind::ResolveMagnet => read::<source_import::ResolveMagnet>(payload),
+        JobKind::Transfer => Some(Arc::new(transfer::Transfer)),
+        JobKind::Deselect => read::<transfer::Deselect>(payload),
+        JobKind::ArcadeCatalog => Some(Arc::new(arcade::ArcadeCatalog)),
+        JobKind::ChdTracks => Some(Arc::new(chd::ChdTracks)),
+        JobKind::RemapSources => Some(Arc::new(remap::RemapSources::from_payload(payload)?)),
+        JobKind::BindSource => Some(Arc::new(bind_source::BindSource::from_payload(payload)?)),
+        JobKind::UrlFetch => None,
+    }
 }
 
 /// Runs one job and records its outcome; only bookkeeping failures are returned.
-async fn execute(app: &Arc<AppState>, id: JobId, job: &dyn Job, lane: Lane) -> Result<()> {
+async fn execute(
+    app: &Arc<AppState>,
+    id: JobId,
+    job: &dyn Job,
+    lane: Lane,
+    cancel: Arc<Cancel>,
+) -> Result<()> {
+    let stop = StopToken::new(app.shutdown_signal(), app.gate.subscribe(), lane, cancel)
+        .marking(app.db.clone(), id);
     let ctx = JobContext {
         id,
         kind: job.kind(),
         app: Arc::clone(app),
-        lane,
-        detail: crate::status::job_detail(&job.payload()),
+        stop,
+        detail: job.detail(),
     };
-    set_state(app, id, JobState::Running).await?;
+    if let Err(e) = set_state(app, id, JobState::Running).await {
+        app.scheduler.cancels().remove(&id);
+        return Err(e);
+    }
     tracing::debug!(job = %id, kind = %ctx.kind, "job started");
     let ran = job.run(&ctx).await;
     // Cleared before any exit below, including shutdown and a failed final write.
     app.live.clear(id);
+    app.scheduler.cancels().remove(&id);
     let (state, progress) = match ran {
         Ok(()) => (JobState::Done, None),
         // Left queued so the next start runs it again; see `reconcile`.
@@ -611,7 +749,7 @@ async fn execute(app: &Arc<AppState>, id: JobId, job: &dyn Job, lane: Lane) -> R
 mod tests {
     use super::*;
     use crate::app::testutil::state;
-    use crate::jobs::gate::Override;
+    use crate::jobs::watch::gate::Override;
     use std::time::Duration;
     use tokio::sync::Notify;
 
@@ -710,6 +848,9 @@ mod tests {
         }
         fn payload(&self) -> Value {
             json!({ "path": "/d/r.dat" })
+        }
+        fn detail(&self) -> Option<String> {
+            file_detail(Path::new("/d/r.dat"))
         }
         async fn run(&self, ctx: &JobContext) -> Result<()> {
             assert!(ctx
@@ -1047,5 +1188,96 @@ mod tests {
         assert!(revive(JobKind::DatImport, &bind).is_none());
         assert!(revive(JobKind::Import, &json!({})).is_none());
         assert_eq!(Lane::Heavy.as_str(), "heavy");
+    }
+
+    #[test]
+    fn every_stored_payload_reads_back_as_its_job() {
+        for (kind, payload, want) in [
+            (JobKind::DetectClient, json!({}), None),
+            (JobKind::ResolveMagnet, json!({ "source_id": 2 }), None),
+            (JobKind::Transfer, json!({}), None),
+            (JobKind::Deselect, json!({ "source_id": 2 }), None),
+            (JobKind::ArcadeCatalog, json!({}), None),
+            (JobKind::ChdTracks, json!({}), None),
+            (
+                JobKind::BindSource,
+                json!({ "source_id": 2, "source_name": "Set" }),
+                Some("Set"),
+            ),
+            (
+                JobKind::Recompute,
+                json!({ "platform_id": "nes" }),
+                Some("nes"),
+            ),
+            (
+                JobKind::SourceImport,
+                json!({ "path": "/s/a.torrent" }),
+                Some("a.torrent"),
+            ),
+            (
+                JobKind::DatImport,
+                json!({ "path": "/d/b.dat", "dat_version_id": 1, "platform_id": "nes" }),
+                Some("b.dat"),
+            ),
+        ] {
+            let job = decode(kind, &payload).expect("reads");
+            assert_eq!((job.kind(), job.payload()), (kind, payload.clone()));
+            assert_eq!(detail(kind, &payload).as_deref(), want, "{kind}");
+        }
+        assert!(decode(JobKind::UrlFetch, &json!({ "fetch": 1 })).is_none());
+        assert_eq!(detail(JobKind::Scan, &json!({ "platform_id": 3 })), None);
+    }
+
+    #[test]
+    fn a_path_that_is_not_utf8_is_stored_as_text() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let path = Path::new(std::ffi::OsStr::from_bytes(b"/s/\xff.torrent"));
+        let job = source_import::SourceImport {
+            path: path.to_path_buf(),
+        };
+        assert_eq!(job.payload()["path"], "/s/\u{fffd}.torrent");
+        let refused = std::collections::BTreeMap::from([((1, 2), 3)]);
+        assert_eq!(
+            to_payload(&refused),
+            Value::Null,
+            "a map key that is not a string"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_open_kind_joins_a_running_job_and_submit_returns_the_id() {
+        let (_dir, app) = state();
+        let payload = json!({ "download_id": 9 });
+        let running = app
+            .db
+            .write(move |c| {
+                let id = rows::insert(c, JobKind::Import, &payload, Lane::Heavy, 1)?;
+                rows::set_state(c, id, JobState::Running, 1)?;
+                Ok(id)
+            })
+            .await
+            .expect("seed");
+        let job = import::ImportJob {
+            download_id: crate::db::ids::DownloadId(9),
+        };
+        let joined = Scheduler::submit(&app, Arc::new(job)).await;
+        assert_eq!(joined, Some(running));
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_job_fails_as_cancelled_and_is_forgotten() {
+        let (_dir, app) = state();
+        Scheduler::start(&app);
+        let (job, started, _release) = blocker(Lane::Light);
+        let id = Scheduler::enqueue(&app, job).await.expect("enqueue");
+        started.notified().await;
+        assert!(app.scheduler.cancel(id));
+        wait_state(&app, id, JobState::Failed).await;
+        let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");
+        assert_eq!(
+            row.expect("row").progress,
+            Some(json!({ "error": "Cancelled." }))
+        );
+        assert!(!app.scheduler.cancel(id), "a finished job has no cancel");
     }
 }

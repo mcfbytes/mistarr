@@ -15,9 +15,9 @@ use crate::app::AppState;
 use crate::db::ids::JobId;
 use crate::db::jobs::{self, JobRow, JobState};
 use crate::error::Result;
-use crate::jobs::gate::GateState;
+use crate::jobs::watch::gate::GateState;
 use crate::jobs::{JobKind, Lane};
-use crate::status::{hold_reason, job_detail};
+use crate::status::hold_reason;
 
 /// Where an incoming file stands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -322,7 +322,7 @@ pub fn writer_reason(open: &[JobRow]) -> String {
 }
 
 fn dat_wait(row: &JobRow) -> String {
-    match job_detail(&row.payload) {
+    match crate::jobs::detail(row.kind, &row.payload) {
         Some(file) => format!("Waiting for the DAT import of {file} to finish."),
         None => "Waiting for the DAT import to finish.".to_owned(),
     }
@@ -354,7 +354,8 @@ pub fn queued_reason(job: &JobRow, open: &[JobRow]) -> String {
         Some(r) if r.kind == JobKind::DatImport && job.kind != r.kind => dat_wait(r),
         Some(r) => format!(
             "Queued behind {}.",
-            job_detail(&r.payload).unwrap_or_else(|| r.kind.as_str().replace('_', " "))
+            crate::jobs::detail(r.kind, &r.payload)
+                .unwrap_or_else(|| r.kind.as_str().replace('_', " "))
         ),
         None if job.lane == Lane::Heavy => "Queued behind other library work.".to_owned(),
         None => "Queued.".to_owned(),

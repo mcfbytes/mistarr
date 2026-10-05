@@ -81,9 +81,17 @@ async fn start(
         _ => ApiError::bad_request("This is not a valid link."),
     })?;
     let job = UrlFetch::new(&app, url);
-    let (token, flag) = (job.token(), job.cancel_flag());
-    let job_id = Scheduler::enqueue_within(&app, Arc::new(job), QUEUE_WAIT, ()).await?;
-    app.fetches.register(token, &flag);
+    let token = job.token();
+    let job_id = match Scheduler::enqueue_within(&app, Arc::new(job), QUEUE_WAIT, ()).await {
+        Ok(id) => id,
+        Err(e) => {
+            app.fetches.close(token);
+            return Err(e.into());
+        }
+    };
+    if let Some(id) = job_id {
+        app.fetches.bind(token, id, &app.scheduler);
+    }
     Ok((
         StatusCode::ACCEPTED,
         Json(Started {
@@ -100,7 +108,7 @@ async fn cancel(
     State(app): State<Arc<AppState>>,
     ApiPath(token): ApiPath<u64>,
 ) -> Result<StatusCode, ApiError> {
-    if app.fetches.cancel(token) {
+    if app.fetches.cancel(token, &app.scheduler) {
         Ok(StatusCode::NO_CONTENT)
     } else {
         Err(ApiError::no_such("fetch is open"))

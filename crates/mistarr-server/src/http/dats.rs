@@ -20,8 +20,8 @@ use crate::db::ids::DatVersionId;
 use crate::db::sql::Paged;
 use crate::incoming::place::{part_path, place_moved, place_part, PlaceError};
 use crate::incoming::IncomingFile;
-use crate::jobs::dat_import::{DatImport, Recompute};
-use crate::jobs::{JobKind, Scheduler};
+use crate::jobs::dat_import::DatImport;
+use crate::jobs::JobKind;
 
 /// Largest accepted upload, [`crate::jobs::dat_import::MAX_DAT_BYTES`].
 #[allow(clippy::cast_possible_truncation)] // 512 MiB fits every usize the target has.
@@ -218,8 +218,7 @@ async fn retire(
         .await?
         .ok_or_else(|| ApiError::no_such("DAT version"))?;
     if let Some(p) = row.platform_id {
-        Scheduler::enqueue(&app, Arc::new(Recompute::new(&p.0))).await?;
-        crate::jobs::remap::enqueue(&app, Some(vec![p])).await;
+        crate::jobs::follow_up::catalogue_changed(&app, &[p], false).await;
     }
     Ok(StatusCode::NO_CONTENT)
 }

@@ -19,11 +19,13 @@ pub use crate::db::sources::BindChoice as Choice;
 /// the automatic classifier uses, on the background lane. A job that finds no
 /// request waiting does nothing, so requests sharing one queued job, or a job
 /// queued behind one that already applied the latest request, are harmless.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Its payload is the struct itself.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct BindSource {
     /// The source.
     pub source_id: SourceId,
     /// Its display name, for the activity list.
+    #[serde(default)]
     pub source_name: String,
 }
 
@@ -37,16 +39,7 @@ impl BindSource {
     /// ```
     #[must_use]
     pub fn from_payload(payload: &Value) -> Option<Self> {
-        let source_id = SourceId(payload.get("source_id")?.as_i64()?);
-        let source_name = payload
-            .get("source_name")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned();
-        Some(Self {
-            source_id,
-            source_name,
-        })
+        serde_json::from_value(payload.clone()).ok()
     }
 }
 
@@ -89,7 +82,11 @@ impl Job for BindSource {
     }
 
     fn payload(&self) -> Value {
-        json!({ "source_id": self.source_id, "source_name": self.source_name })
+        super::to_payload(self)
+    }
+
+    fn detail(&self) -> Option<String> {
+        (!self.source_name.is_empty()).then(|| self.source_name.clone())
     }
 
     fn lane(&self) -> Lane {
@@ -142,7 +139,7 @@ mod tests {
     use crate::app::testutil::state;
     use crate::db::fixtures::{pid, seed_rom};
     use crate::db::sources::{NewSource, SourceState};
-    use crate::jobs::source_import::{bind_best, rebind_after_dat};
+    use crate::jobs::source_import::{bind_best, rebind_waiting};
     use crate::jobs::Scheduler;
 
     fn file(index: u32, path: &str, size: u64) -> TorrentFile {
@@ -273,9 +270,7 @@ mod tests {
                 Ok(())
             })
             .expect("seed");
-        rebind_after_dat(&app, &[PlatformId("snes".into()), nes()])
-            .await
-            .expect("rebind");
+        rebind_waiting(&app).await.expect("rebind");
         crate::jobs::remap::remap_one(&app, id)
             .await
             .expect("remap");
@@ -295,7 +290,7 @@ mod tests {
             (ignored.matched_count, ignored.reason),
             (0, Some(SourceReason::Ignored))
         );
-        rebind_after_dat(&app, &[]).await.expect("rebind");
+        rebind_waiting(&app).await.expect("rebind");
         assert_eq!(
             row(&app, id).await.platform_id,
             None,

@@ -254,34 +254,28 @@ pub fn list_active(conn: &Connection, page: Page) -> Result<Paged<JobRow>> {
     })
 }
 
-/// The id of a job with this kind and payload that has not started, if any;
-/// with `include_paused`, a started job waiting at the gate matches too.
-/// Running jobs never match, so work requested after a job began runs again.
+/// The oldest job with this kind and payload in one of `states`, if any; see
+/// [`crate::jobs::Dedupe::states`].
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::jobs;
+/// use mistarr_server::db::jobs::{self, JobState};
 /// use mistarr_server::jobs::{JobKind, Lane};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let p = serde_json::json!({});
 /// let id = jobs::insert(&conn, JobKind::Scan, &p, Lane::Heavy, 1).unwrap();
-/// assert_eq!(jobs::find_queued(&conn, JobKind::Scan, &p, false).unwrap(), Some(id));
+/// assert_eq!(jobs::find_in(&conn, JobKind::Scan, &p, &[JobState::Queued]).unwrap(), Some(id));
 /// ```
-pub fn find_queued(
+pub fn find_in(
     conn: &Connection,
     kind: JobKind,
     payload: &Value,
-    include_paused: bool,
+    states: &[JobState],
 ) -> Result<Option<JobId>> {
-    let states: &[JobState] = if include_paused {
-        &[JobState::Queued, JobState::Paused]
-    } else {
-        &[JobState::Queued]
-    };
     Ok(conn
         .query_row(
             "SELECT id FROM jobs WHERE kind = ?1 AND subject = ?2
@@ -602,6 +596,7 @@ pub const PRUNE_GRACE_SECS: i64 = 3600;
 mod tests {
     use super::*;
     use crate::db::fixtures::conn;
+    use crate::jobs::Dedupe;
     use serde_json::json;
 
     #[test]
@@ -631,7 +626,13 @@ mod tests {
         assert!(!queued_other_in_lane(&c, Lane::Heavy, JobKind::ChdTracks).expect("query"));
         set_state(&c, own, JobState::Running, 1).expect("running");
         assert_eq!(
-            find_queued(&c, JobKind::ChdTracks, &json!({}), true).expect("find"),
+            find_in(
+                &c,
+                JobKind::ChdTracks,
+                &json!({}),
+                Dedupe::QueuedOrPaused.states()
+            )
+            .expect("find"),
             None,
             "a running singleton is never joined, so a yield queues a fresh row"
         );
@@ -679,26 +680,36 @@ mod tests {
         let a = json!({"p": "a"});
         let id = insert(&c, JobKind::Scan, &a, Lane::Heavy, 1).expect("insert");
         assert_eq!(
-            find_queued(&c, JobKind::Scan, &a, false).expect("find"),
+            find_in(&c, JobKind::Scan, &a, Dedupe::Queued.states()).expect("find"),
             Some(id)
         );
         assert_eq!(
-            find_queued(&c, JobKind::Scan, &json!({"p": "b"}), false).expect("find"),
+            find_in(
+                &c,
+                JobKind::Scan,
+                &json!({"p": "b"}),
+                Dedupe::Queued.states()
+            )
+            .expect("find"),
             None
         );
         set_state(&c, id, JobState::Paused, 2).expect("paused");
         assert_eq!(
-            find_queued(&c, JobKind::Scan, &a, false).expect("find"),
+            find_in(&c, JobKind::Scan, &a, Dedupe::Queued.states()).expect("find"),
             None
         );
         assert_eq!(
-            find_queued(&c, JobKind::Scan, &a, true).expect("find"),
+            find_in(&c, JobKind::Scan, &a, Dedupe::QueuedOrPaused.states()).expect("find"),
             Some(id)
         );
         set_state(&c, id, JobState::Running, 2).expect("running");
         assert_eq!(
-            find_queued(&c, JobKind::Scan, &a, true).expect("find"),
+            find_in(&c, JobKind::Scan, &a, Dedupe::QueuedOrPaused.states()).expect("find"),
             None
+        );
+        assert_eq!(
+            find_in(&c, JobKind::Scan, &a, Dedupe::Open.states()).expect("find"),
+            Some(id)
         );
     }
 

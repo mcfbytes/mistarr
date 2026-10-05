@@ -13,8 +13,8 @@ use super::gate::{Gate, MENU};
 /// ```
 /// let path = std::env::temp_dir().join("mistarr-doc-corename-read");
 /// std::fs::write(&path, "MENU\n").unwrap();
-/// assert_eq!(mistarr_server::jobs::corename::read(&path).as_deref(), Some("MENU"));
-/// assert_eq!(mistarr_server::jobs::corename::read(&path.join("absent")), None);
+/// assert_eq!(mistarr_server::jobs::watch::corename::read(&path).as_deref(), Some("MENU"));
+/// assert_eq!(mistarr_server::jobs::watch::corename::read(&path.join("absent")), None);
 /// ```
 #[must_use]
 pub fn read(path: &Path) -> Option<String> {

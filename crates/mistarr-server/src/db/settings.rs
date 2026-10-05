@@ -19,12 +19,12 @@ pub mod keys {
     pub const WIZARD_DISMISSED: &str = "wizard.dismissed";
     /// JSON `u64`: decoded CHD bytes per active second, from the last image decoded.
     pub const CHD_RATE: &str = "chd.rate";
-    /// JSON [`crate::jobs::core_limits::SavedLimits`]: the client's own limits
+    /// JSON [`crate::jobs::watch::core_limits::SavedLimits`]: the client's own limits
     /// in each direction the core gate replaced, until they are put back.
     pub const CLIENT_SAVED_LIMITS: &str = "client.saved_limits";
     /// JSON list of [`crate::db::deferred::Entry`]: client work waiting for the client.
     pub const CLIENT_DEFERRED: &str = "client.deferred";
-    /// JSON list of [`crate::jobs::core_limits::PreviousLimits`]: limits saved
+    /// JSON list of [`crate::jobs::watch::core_limits::PreviousLimits`]: limits saved
     /// for clients no longer in use, until they are put back or dropped.
     pub const CLIENT_PREVIOUS_LIMITS: &str = "client.previous_limits";
 

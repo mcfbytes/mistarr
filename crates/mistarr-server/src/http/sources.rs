@@ -338,7 +338,7 @@ async fn update(
         };
         // A frozen, missing or refusing client gets every policy again later.
         if !applied {
-            crate::jobs::core_limits::defer(&app, crate::db::deferred::Op::Seed).await;
+            crate::jobs::watch::core_limits::defer(&app, crate::db::deferred::Op::Seed).await;
         }
     }
     // The job applies whichever request is newest when it runs, so sharing a queued one is safe.
