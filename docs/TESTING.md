@@ -407,7 +407,9 @@ CI records them; a regression over 20 percent fails the build. On the board,
   asserts "statically linked".
 - `npm run build` and a size check on the gzipped bundle.
 - `shellcheck` on the board scripts and `scripts/tests/run.sh`, which runs
-  `mistarr.sh` and `install.sh` against fake roots. The install tests put
+  `mistarr.sh` and `install.sh` against fake roots and runs
+  `scripts/tests/docs.sh`, which fails when a path or code symbol named in
+  `docs/` does not exist. The install tests put
   stand-ins for the board's BusyBox on the installer's `PATH`: `tar` refuses
   compression options and gzip input, `od` refuses `-t` and `-A`. The
   stand-ins wrap `busybox` applets when the host has them, else the host's

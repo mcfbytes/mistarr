@@ -8,7 +8,7 @@ cd "$here/../.." || exit 1
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-grep -rhIoE '[A-Za-z_][A-Za-z0-9_]*' crates web/src scripts \
+grep -rhIoE '[A-Za-z_][A-Za-z0-9_]*' crates web/src web/e2e web/scripts scripts \
     --exclude-dir=node_modules --exclude-dir=target --exclude=docs.sh | sort -u > "$work/words"
 
 # Names of other projects, the kernel, sshd, wire values and plan-only names the docs
@@ -28,6 +28,13 @@ for doc in docs/*.md; do
                 case "$tok" in *[!A-Za-z0-9_./-]*) continue ;; esac
                 case " $absent " in *" $tok "*) continue ;; esac
                 [ -e "${tok%/}" ] || echo "$doc:$line: missing path $tok"
+                continue
+                ;;
+        esac
+        case "$tok" in
+            MISTARR_[A-Z0-9_]*)
+                case "$tok" in *[!A-Z0-9_]*) continue ;; esac
+                grep -qxF "$tok" "$work/words" || echo "$doc:$line: missing symbol $tok"
                 continue
                 ;;
         esac
@@ -53,6 +60,21 @@ for doc in docs/*.md; do
             case " $external " in *" $seg "*) continue ;; esac
             grep -qxF "$seg" "$work/words" || echo "$doc:$line: missing symbol $tok"
         done
+    done
+    # Fenced rust and ts blocks: CamelCase names and names after fn.
+    awk -v doc="$doc" '
+        /^```/ { if (infence) infence = 0; else infence = ($0 ~ /^```(rust|ts)/); next }
+        infence {
+            line = $0
+            while (match(line, /(fn +[a-z_][A-Za-z0-9_]*|[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*)/)) {
+                tok = substr(line, RSTART, RLENGTH)
+                sub(/^fn +/, "", tok)
+                print doc ":" FNR ": " tok
+                line = substr(line, RSTART + RLENGTH)
+            }
+        }' "$doc" | while IFS=' ' read -r where tok; do
+        case " $external " in *" $tok "*) continue ;; esac
+        grep -qxF "$tok" "$work/words" || echo "$where missing symbol $tok"
     done
 done > "$work/out"
 
