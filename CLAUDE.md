@@ -45,8 +45,6 @@ parallel on the work packages in `docs/WORKPLAN.md`. Read this file, then
   bar. A lint is silenced only with `#[expect(lint, reason = "…")]`; `allow`
   with a reason is acceptable where an expectation would go unfulfilled in
   some targets (a shared test module).
-- A dependency used by two or more crates is declared once in
-  `[workspace.dependencies]` and referenced with `dep.workspace = true`.
 - Errors: `thiserror` enums per crate with a variant per failure the caller
   can act on. `anyhow` only in the binary. No `unwrap` or `expect` outside
   tests and `const` contexts. No `panic!` on user input.
@@ -65,8 +63,9 @@ parallel on the work packages in `docs/WORKPLAN.md`. Read this file, then
 - Log with `tracing`; never log file contents or hashes at info level.
 - Prefer the standard library and small, well-maintained crates. Check a
   crate's size, transitive dependencies and ARMv7 support before adding it.
-- Versions and `default-features` are set once in `[workspace.dependencies]`.
-  A crate may add features to a workspace entry, never change those two.
+- A dependency used by two or more crates is declared once in
+  `[workspace.dependencies]` with its version and `default-features`, and
+  referenced with `dep.workspace = true`. A crate may only add features.
 
 ## Stack
 

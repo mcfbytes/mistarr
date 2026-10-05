@@ -10,8 +10,7 @@ mod tests;
 /// A release region as written in a No-Intro or Redump region tag.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 #[non_exhaustive]
-// Each variant is the region its name spells; `REGIONS` gives the tag text.
-#[expect(missing_docs, reason = "The variants are named by the DAT format.")]
+#[expect(missing_docs, reason = "Each variant is the region its name spells.")]
 pub enum Region {
     World,
     Usa,
