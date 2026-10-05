@@ -22,8 +22,10 @@ fn main() -> anyhow::Result<()> {
     let data_limit =
         memory::limit_data(config.memory.data_limit_mib).context("cannot set the memory limit")?;
     let mut temp_refused = None;
-    let ram = std::env::var_os(db::tempdir::TEMP_DIR_ENV)
-        .map_or_else(|| std::path::PathBuf::from(db::tempdir::RAM_TEMP_DIR), Into::into);
+    let ram = std::env::var_os(db::tempdir::TEMP_DIR_ENV).map_or_else(
+        || std::path::PathBuf::from(db::tempdir::RAM_TEMP_DIR),
+        Into::into,
+    );
     let options = Options::for_board(&ram);
     if matches!(cli.command(), Command::Serve) {
         let disk = config.paths.tmp();

@@ -21,7 +21,6 @@ use crate::db::launch::{self, LaunchTitle};
 use crate::db::platforms;
 use crate::db::titles::TitleSource;
 use crate::status::{launch_state, LaunchState};
-use mistarr_core::PlatformId;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()

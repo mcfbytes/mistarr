@@ -93,7 +93,7 @@ async fn update(
     let found = app
         .db
         .write(move |c| {
-            if !platforms::set_enabled(c, &id.0, enabled)? {
+            if !platforms::set_enabled(c, &id, enabled)? {
                 return Ok(None);
             }
             let counts = titles::browse::counts(c, &hide)?

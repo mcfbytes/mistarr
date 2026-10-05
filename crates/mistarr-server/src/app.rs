@@ -81,9 +81,9 @@ pub struct Options {
 }
 
 impl Default for Options {
-    /// [`Options::for_board`] with the RAM directory at [`crate::db::RAM_TEMP_DIR`].
+    /// [`Options::for_board`] with the RAM directory at [`crate::db::tempdir::RAM_TEMP_DIR`].
     fn default() -> Self {
-        Self::for_board(Path::new(crate::db::RAM_TEMP_DIR))
+        Self::for_board(Path::new(crate::db::tempdir::RAM_TEMP_DIR))
     }
 }
 
@@ -974,7 +974,10 @@ mod tests {
     #[test]
     fn default_options_follow_the_board() {
         let o = Options::default();
-        assert_eq!(o, Options::for_board(Path::new(crate::db::RAM_TEMP_DIR)));
+        assert_eq!(
+            o,
+            Options::for_board(Path::new(crate::db::tempdir::RAM_TEMP_DIR))
+        );
         assert_eq!(o.corename_path, PathBuf::from("/tmp/CORENAME"));
         assert_eq!(o.corename_poll, Duration::from_secs(2));
         assert_eq!(o.command_path, PathBuf::from("/dev/MiSTer_cmd"));
