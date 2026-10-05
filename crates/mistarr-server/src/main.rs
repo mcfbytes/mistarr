@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use clap::Parser as _;
 use mistarr_server::app::{self, Options};
 use mistarr_server::cli::{Cli, Command};
-use mistarr_server::db::titles::SearchShape;
+use mistarr_server::db::titles::browse::SearchShape;
 use mistarr_server::{db, doctor, logging, memory};
 
 fn main() -> anyhow::Result<()> {
@@ -22,15 +22,17 @@ fn main() -> anyhow::Result<()> {
     let data_limit =
         memory::limit_data(config.memory.data_limit_mib).context("cannot set the memory limit")?;
     let mut temp_refused = None;
-    let ram = std::env::var_os(db::TEMP_DIR_ENV)
-        .map_or_else(|| std::path::PathBuf::from(db::RAM_TEMP_DIR), Into::into);
+    let ram = std::env::var_os(db::tempdir::TEMP_DIR_ENV).map_or_else(
+        || std::path::PathBuf::from(db::tempdir::RAM_TEMP_DIR),
+        Into::into,
+    );
     let frozen_file = ram.join(mistarr_server::freeze::FROZEN_NAME);
     if matches!(cli.command(), Command::Serve) {
         let disk = config.paths.tmp();
-        let tmp = db::choose_temp_dir(&ram, &disk)
+        let tmp = db::tempdir::choose_temp_dir(&ram, &disk)
             .with_context(|| format!("cannot create {}", disk.display()))?;
         // Set before any thread starts, as the environment is shared.
-        std::env::set_var(db::SQLITE_TMPDIR, &tmp.dir);
+        std::env::set_var(db::tempdir::SQLITE_TMPDIR, &tmp.dir);
         temp_refused = tmp.refused.map(|e| (ram, e));
     }
     let runtime = memory::runtime().context("cannot start the async runtime")?;

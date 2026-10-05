@@ -788,11 +788,11 @@ fn import_from(db: &Db, path: &Path, member: Member, req: &Request) -> Result<Ou
             if let Err(c) = db.write_blocking(|c| dat_stage::clear(c)) {
                 tracing::warn!(error = %c, "cannot empty the DAT stage");
             }
-            let tmp = std::env::var_os(crate::db::SQLITE_TMPDIR).map(PathBuf::from);
+            let tmp = std::env::var_os(crate::db::tempdir::SQLITE_TMPDIR).map(PathBuf::from);
             Err(Error::NoRoom(full_message(
                 tmp.as_deref(),
                 db.path(),
-                free_bytes,
+                crate::status::free_bytes,
             )))
         }
         Err(e) => Err(e),
@@ -803,12 +803,6 @@ fn import_from(db: &Db, path: &Path, member: Member, req: &Request) -> Result<Ou
 fn disk_full(e: &Error) -> bool {
     matches!(e, Error::Db(rusqlite::Error::SqliteFailure(f, _))
         if f.code == rusqlite::ErrorCode::DiskFull)
-}
-
-/// Bytes free to this process on the filesystem holding `path`.
-fn free_bytes(path: &Path) -> Option<u64> {
-    let s = rustix::fs::statvfs(path).ok()?;
-    Some(s.f_bavail.saturating_mul(s.f_frsize))
 }
 
 /// Why a load failed for lack of space, naming SQLite's temporary directory `tmp` when
@@ -1077,15 +1071,15 @@ fn import_stream<R: BufRead>(
         if let Some(p) = &platform {
             phase(req, "storing");
             dats::begin_load(&tx, plan.id)?;
-            dat_stage::apply(&tx, &p.0, plan.id)?;
+            dat_stage::apply(&tx, p, plan.id)?;
         }
         dats::set_game_count(&tx, plan.id, games)?;
         let mut retired = 0;
         if let Some(p) = &platform {
-            titles::link_parents(&tx, plan.id, clone_of)?;
+            titles::recompute::link_parents(&tx, plan.id, clone_of)?;
             retired = dats::retire_absent(&tx, plan.id)?;
             phase(req, "picking");
-            titles::recompute_platform(&tx, &p.0, &req.prefs)?;
+            titles::recompute::recompute_platform(&tx, p, &req.prefs)?;
         }
         dat_stage::clear(&tx)?;
         phase(req, "refreshing");
@@ -1375,7 +1369,7 @@ impl Pass {
 struct Tally {
     checked: usize,
     matched: usize,
-    picked: titles::Recomputed,
+    picked: titles::recompute::Recomputed,
 }
 
 /// Runs one chunk of `pass` over `platform` in the caller's transaction, one per chunk,
@@ -1411,7 +1405,7 @@ fn recompute_pass(
             }
         }
         Pass::Picking => {
-            tally.picked = titles::recompute_platform(tx, &platform.0, prefs)?;
+            tally.picked = titles::recompute::recompute_platform(tx, platform, prefs)?;
             Pass::Done
         }
         Pass::Done => Pass::Done,

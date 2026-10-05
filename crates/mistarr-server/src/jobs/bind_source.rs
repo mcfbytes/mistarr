@@ -140,7 +140,7 @@ mod tests {
 
     use super::*;
     use crate::app::testutil::state;
-    use crate::db::sources::fixtures::seed_rom;
+    use crate::db::fixtures::{pid, seed_rom};
     use crate::db::sources::{NewSource, SourceState};
     use crate::jobs::source_import::{bind_best, rebind_after_dat};
     use crate::jobs::Scheduler;
@@ -159,9 +159,9 @@ mod tests {
 
     /// A source of four files, one matching `nes` and two `snes`, bound to `snes` at half.
     fn source(c: &Connection) -> Result<SourceId> {
-        seed_rom(c, "nes", "Example Quest (USA).nes", 16, &[])?;
-        seed_rom(c, "snes", "Other Tale (USA).sfc", 32, &[])?;
-        seed_rom(c, "snes", "Third Tale (USA).sfc", 64, &[])?;
+        seed_rom(c, &pid("nes"), "Example Quest (USA).nes", 16, &[])?;
+        seed_rom(c, &pid("snes"), "Other Tale (USA).sfc", 32, &[])?;
+        seed_rom(c, &pid("snes"), "Third Tale (USA).sfc", 64, &[])?;
         let id = rows::insert(
             c,
             &NewSource {
@@ -269,7 +269,7 @@ mod tests {
 
         app.db
             .write_blocking(|c| {
-                seed_rom(c, "snes", "Example Quest (USA).sfc", 16, &[])?;
+                seed_rom(c, &pid("snes"), "Example Quest (USA).sfc", 16, &[])?;
                 Ok(())
             })
             .expect("seed");

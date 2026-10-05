@@ -9,6 +9,7 @@ use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use mistarr_core::PlatformId;
 use mistarr_mister::platforms::Kind;
 use serde::{Deserialize, Serialize};
 
@@ -17,7 +18,9 @@ use crate::app::AppState;
 use crate::db::ids::FileId;
 use crate::db::ids::TitleId;
 use crate::db::sql::Paged;
-use crate::db::titles::{self, Browse, GroupDetail, GroupRow, RomsetState, Sort, Tri, WantRefused};
+use crate::db::titles;
+use crate::db::titles::browse::{Browse, GroupRow, Sort, Tri};
+use crate::db::titles::detail::{GroupDetail, RomsetState, WantRefused};
 use crate::db::{downloads, platforms};
 use crate::jobs::import::{self, RenameError};
 use crate::jobs::transfer;
@@ -167,6 +170,7 @@ async fn list(
     query: Result<Query<ListQuery>, QueryRejection>,
 ) -> Result<Json<Paged<GroupOut>>, ApiError> {
     let Path(id) = id.map_err(|e| ApiError::bad_request(e.body_text()))?;
+    let id = PlatformId(id);
     let Query(query) = query.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let filter = query.browse(&app.config().prefs.hide)?;
     let page = Paging {
@@ -177,10 +181,10 @@ async fn list(
     let Paged { items, total } = app
         .db
         .read(move |c| {
-            if platforms::get(c, &id)?.is_none() {
+            if platforms::find(c, &id)?.is_none() {
                 return Ok(None);
             }
-            titles::browse(c, &id, &filter, page).map(Some)
+            titles::browse::browse(c, &id, &filter, page).map(Some)
         })
         .await?
         .ok_or_else(|| ApiError::not_found("no such platform"))?;
@@ -246,7 +250,7 @@ fn title_id(id: Result<Path<i64>, PathRejection>) -> Result<TitleId, ApiError> {
 async fn load_detail(app: &AppState, id: TitleId) -> Result<DetailOut, ApiError> {
     let detail = app
         .db
-        .read(move |c| titles::group_detail(c, id))
+        .read(move |c| titles::detail::group_detail(c, id))
         .await?
         .ok_or_else(|| ApiError::not_found("no such title"))?;
     let (detail, bios) = match mistarr_mister::platforms::by_id(&detail.platform_id.0) {
@@ -306,7 +310,7 @@ async fn want(
     let result = app
         .db
         .write_tx(move |tx| {
-            let wanted = titles::want(tx, target)?;
+            let wanted = titles::detail::want(tx, target)?;
             let created = match wanted {
                 Ok(()) => downloads::want_title(tx, target, crate::unix_now())?,
                 Err(_) => Vec::new(),
@@ -344,7 +348,7 @@ async fn unwant(
         .write_tx(move |tx| {
             let now = crate::unix_now();
             let cancelled = downloads::cancel_group(tx, group, now)?;
-            titles::unwant_group(tx, group, now)?;
+            titles::detail::unwant_group(tx, group, now)?;
             Ok(cancelled)
         })
         .await?;

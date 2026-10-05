@@ -31,7 +31,7 @@ fn fake_listener(proc: &Path, port: u16, inode: u64) {
 fn private() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let rec = dir.path().join("tmp");
-    crate::db::private_dir(&rec).expect("private");
+    crate::db::tempdir::private_dir(&rec).expect("private");
     let file = rec.join(FROZEN_NAME);
     (dir, file)
 }

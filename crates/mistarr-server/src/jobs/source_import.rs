@@ -692,7 +692,7 @@ mod tests {
     use super::*;
     use crate::app::testutil::state;
     use crate::db::candidates::MatchConfidence;
-    use crate::db::sources::fixtures::seed_rom;
+    use crate::db::fixtures::{pid, seed_rom};
 
     fn file(index: u32, path: &str, size: u64) -> TorrentFile {
         TorrentFile {
@@ -733,8 +733,8 @@ mod tests {
         let (_dir, app) = state();
         app.db
             .write_blocking(|c| {
-                let a = seed_rom(c, "nes", "Nova Quest (World).nes", 16, &[])?;
-                let b = seed_rom(c, "nes", "Nova Quest (World) (Alt).nes", 16, &[])?;
+                let a = seed_rom(c, &pid("nes"), "Nova Quest (World).nes", 16, &[])?;
+                let b = seed_rom(c, &pid("nes"), "Nova Quest (World) (Alt).nes", 16, &[])?;
                 let nes = PlatformId("nes".into());
                 let files = [file(0, "nova.nes", 16), file(1, "nova.png", 16)];
                 let id = source(c, &"0e".repeat(20), &files);
@@ -766,7 +766,13 @@ mod tests {
         app.db
             .write_blocking(|c| {
                 for i in 0..6 {
-                    seed_rom(c, "nes", &format!("Title {i} (World).nes"), 40_976, &[])?;
+                    seed_rom(
+                        c,
+                        &pid("nes"),
+                        &format!("Title {i} (World).nes"),
+                        40_976,
+                        &[],
+                    )?;
                 }
                 let files: Vec<TorrentFile> = (0..2_000)
                     .map(|i| file(i, &format!("Set/track {i}.nes"), 40_976))
@@ -789,7 +795,7 @@ mod tests {
                 let id = source(c, &"1b".repeat(20), &files);
                 bind_to(c, id, Some(&PlatformId("nes".into())))?;
                 assert_eq!(candidate_count(c, id), 0);
-                seed_rom(c, "nes", "Nova Quest (World).nes", 16, &[])?;
+                seed_rom(c, &pid("nes"), "Nova Quest (World).nes", 16, &[])?;
                 Ok(id)
             })
             .expect("db");
@@ -821,7 +827,7 @@ mod tests {
         let (_dir, app) = state();
         app.db
             .write_blocking(|c| {
-                seed_rom(c, "nes", "Example Quest (USA).nes", 16, &[])?;
+                seed_rom(c, &pid("nes"), "Example Quest (USA).nes", 16, &[])?;
                 let files = [
                     file(0, "a/Example Quest (USA).nes", 16),
                     file(1, "b.txt", 1),
@@ -869,7 +875,7 @@ mod tests {
                 let row = rows::get(c, id)?.expect("row");
                 let gb = PlatformId("gb".into());
                 assert_eq!(row.reason, Some(SourceReason::AwaitingDat { platform: gb }));
-                seed_rom(c, "gb", "Example Quest (USA).gb", 16, &[])?;
+                seed_rom(c, &pid("gb"), "Example Quest (USA).gb", 16, &[])?;
                 Ok(id)
             })
             .expect("db");
@@ -887,7 +893,7 @@ mod tests {
         );
 
         app.db
-            .write_blocking(|c| seed_rom(c, "gb", "Other Tale (USA).gb", 8, &[]))
+            .write_blocking(|c| seed_rom(c, &pid("gb"), "Other Tale (USA).gb", 8, &[]))
             .expect("seed");
         let other = app
             .db

@@ -25,6 +25,8 @@ use crate::app::AppState;
 use crate::db::files::{self, FileState, NewFile};
 use crate::db::ids::{FileId, JobId, RomId, TitleId};
 use crate::db::platforms as platform_rows;
+use crate::db::roms;
+use crate::db::scan_progress;
 use crate::db::titles::RomStatus;
 use crate::error::{Error, Result};
 use crate::events::EventKind;
@@ -306,7 +308,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
             .db
             .write({
                 let id = id.clone();
-                move |c| files::clear_scan_progress(c, &id)
+                move |c| scan_progress::clear(c, &id)
             })
             .await?;
         return Ok(());
@@ -332,7 +334,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         .db
         .read({
             let pid = pid.clone();
-            move |c| files::scan_progress(c, &pid)
+            move |c| scan_progress::get(c, &pid)
         })
         .await?;
 
@@ -395,7 +397,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     let pid4 = pid.clone();
     ctx.app
         .db
-        .write(move |c| files::clear_scan_progress(c, &pid4))
+        .write(move |c| scan_progress::clear(c, &pid4))
         .await?;
     super::chd::queue_for(&ctx.app, &pid, false).await?;
     report_outcome(ctx, &pid, total).await
@@ -536,11 +538,11 @@ fn commit_unit(
         if let Some(reason) = row.reason.as_deref() {
             row.reason = Some(super::chd::settle(reason, chd_on).to_owned());
         }
-        let id = files::upsert_row(tx, platform_id, &row, now)?;
+        let id = files::upsert(tx, platform_id, &row, now)?;
         written.push((row.rel_path, id, row.state));
     }
     if let Some(done_dirs) = done_dirs {
-        files::save_scan_progress(tx, platform_id, done_dirs, now)?;
+        scan_progress::save(tx, platform_id, done_dirs, now)?;
     }
     Ok(written)
 }
@@ -572,18 +574,18 @@ pub(crate) fn match_forms<'a>(
     conn: &Connection,
     platform_id: &PlatformId,
     forms: impl IntoIterator<Item = &'a Hashes>,
-) -> Result<Option<files::RomMatch>> {
+) -> Result<Option<roms::RomMatch>> {
     let forms: Vec<&Hashes> = forms.into_iter().collect();
     let size = |h: &Hashes| i64::try_from(h.size).unwrap_or(i64::MAX);
     for h in &forms {
         let (sha1, md5, crc32) = (&h.sha1, &h.md5, &h.crc32);
-        if let Some(m) = files::match_live_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
+        if let Some(m) = roms::match_live_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
             return Ok(Some(m));
         }
     }
     for h in &forms {
         let (sha1, md5, crc32) = (&h.sha1, &h.md5, &h.crc32);
-        if let Some(m) = files::match_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
+        if let Some(m) = roms::match_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
             return Ok(Some(m));
         }
     }
@@ -594,7 +596,7 @@ pub(crate) fn match_forms<'a>(
 /// takes from its match: `bad` for a bad dump, else `verified` or `misnamed` by [`name_fits`].
 pub(crate) fn cartridge_state(
     platform: &PlatformId,
-    m: Option<&files::RomMatch>,
+    m: Option<&roms::RomMatch>,
     own_name: &str,
 ) -> (Option<RomId>, FileState) {
     let Some(m) = m else {
@@ -715,7 +717,7 @@ pub(crate) fn stored_match(
     conn: &Connection,
     platform_id: &PlatformId,
     f: &files::FileRow,
-) -> Result<Option<files::RomMatch>> {
+) -> Result<Option<roms::RomMatch>> {
     if f.md5.is_none() && f.sha1.is_none() {
         return Ok(None);
     }
@@ -731,13 +733,13 @@ pub(crate) fn stored_match(
     let has_whole = w.sha1.is_some() || w.md5.is_some();
     if has_whole && (&w.sha1, &w.md5) != (&f.sha1, &f.md5) {
         let (wsha1, wmd5, wcrc) = (hash(&w.sha1), hash(&w.md5), hash(&w.crc32));
-        if let Some(m) = files::match_live_rom(conn, platform_id, &wsha1, &wmd5, &wcrc, f.size)? {
+        if let Some(m) = roms::match_live_rom(conn, platform_id, &wsha1, &wmd5, &wcrc, f.size)? {
             return Ok(Some(m));
         }
         let size = f.size - header;
-        return files::match_live_rom(conn, platform_id, &sha1, &md5, &crc32, size);
+        return roms::match_live_rom(conn, platform_id, &sha1, &md5, &crc32, size);
     }
-    if let Some(m) = files::match_live_rom(conn, platform_id, &sha1, &md5, &crc32, f.size)? {
+    if let Some(m) = roms::match_live_rom(conn, platform_id, &sha1, &md5, &crc32, f.size)? {
         return Ok(Some(m));
     }
     if has_whole {
@@ -752,7 +754,7 @@ pub(crate) fn stored_match(
         return Ok(None);
     }
     // The hash tiers failed above whatever the size; only the CRC32 tier is left.
-    files::match_live_rom(conn, platform_id, "", "", &crc32, f.size - header)
+    roms::match_live_rom(conn, platform_id, "", "", &crc32, f.size - header)
 }
 
 /// What a scan does with a file it found, given the row it has for it.
@@ -846,14 +848,14 @@ fn member_candidate(
     content: Option<&str>,
     size: i64,
 ) -> Result<bool> {
-    if files::crc_candidate_exists(conn, platform_id, whole, size)? {
+    if roms::crc_candidate_exists(conn, platform_id, whole, size)? {
         return Ok(true);
     }
     let Some(content) = content else {
         return Ok(false);
     };
     let header = i64::try_from(rule.header_len()).unwrap_or(0);
-    files::crc_candidate_exists(conn, platform_id, content, size - header)
+    roms::crc_candidate_exists(conn, platform_id, content, size - header)
 }
 
 /// Walks one cartridge, romset or arcade directory, handing each row to `sink`, and
@@ -1147,7 +1149,7 @@ pub(crate) struct Track {
     pub(crate) size: i64,
     pub(crate) mtime: i64,
     pub(crate) hashes: Option<Hashes>,
-    pub(crate) matched: Option<files::RomMatch>,
+    pub(crate) matched: Option<roms::RomMatch>,
 }
 
 /// The stored hashes of an unchanged track, reused instead of re-hashing.
@@ -1287,7 +1289,7 @@ async fn disc_track(
             ctx.app
                 .db
                 .read(move |c| {
-                    files::match_rom(
+                    roms::match_rom(
                         c,
                         &pid2,
                         &h2.sha1,
@@ -1321,7 +1323,7 @@ pub(crate) fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Res
     }
     let mut complete: HashMap<TitleId, bool> = HashMap::new();
     for (&title_id, idxs) in &groups {
-        let want = files::count_roms_for_title(conn, title_id)?;
+        let want = roms::count_roms_for_title(conn, title_id)?;
         let ok = i64::try_from(idxs.len()).unwrap_or(-1) == want
             && idxs.iter().all(|&i| {
                 tracks[i]
@@ -1515,9 +1517,7 @@ mod tests {
 
     #[test]
     fn settling_names_verifies_only_files_that_now_fit() {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        platform_rows::seed(&mut c, &platforms::PLATFORMS).expect("seed");
+        let c = crate::db::fixtures::conn();
         let nes = PlatformId("nes".into());
         let h = Hashes {
             size: 4,
@@ -1525,15 +1525,12 @@ mod tests {
             md5: "0".repeat(32),
             sha1: "1".repeat(40),
         };
-        let rom = files::seed_rom_fixture(
-            &c,
-            &nes,
-            "Example Quest (USA)",
-            "Example Quest (USA).unh",
-            &h,
-            "good",
-        )
-        .expect("rom");
+        let rom = crate::db::fixtures::dat(&nes)
+            .title("Example Quest (USA)")
+            .rom("Example Quest (USA).unh", &h, RomStatus::Good)
+            .write(&c)
+            .expect("rom")
+            .first_rom();
         let row = |rel: &str| NewFile {
             rel_path: rel.to_owned(),
             size: 20,
@@ -1548,25 +1545,21 @@ mod tests {
             whole: files::WholeHashes::default(),
         };
         let fits =
-            files::upsert_row(&c, &nes, &row("NES/q.zip#Example Quest (USA).nes"), 1).expect("row");
-        let other = files::upsert_row(&c, &nes, &row("NES/Other Name.nes"), 1).expect("row");
-        let upper =
-            files::upsert_row(&c, &nes, &row("NES/Example Quest (USA).NES"), 1).expect("row");
+            files::upsert(&c, &nes, &row("NES/q.zip#Example Quest (USA).nes"), 1).expect("row");
+        let other = files::upsert(&c, &nes, &row("NES/Other Name.nes"), 1).expect("row");
+        let upper = files::upsert(&c, &nes, &row("NES/Example Quest (USA).NES"), 1).expect("row");
         let psx = PlatformId("psx".into());
-        let track = files::seed_rom_fixture(
-            &c,
-            &psx,
-            "Example Disc (USA)",
-            "Example Disc (USA).img",
-            &h,
-            "good",
-        )
-        .expect("rom");
+        let track = crate::db::fixtures::dat(&psx)
+            .title("Example Disc (USA)")
+            .rom("Example Disc (USA).img", &h, RomStatus::Good)
+            .write(&c)
+            .expect("rom")
+            .first_rom();
         let disc = NewFile {
             rom_id: Some(track),
             ..row("PSX/Example Disc (USA)/Example Disc (USA).cue")
         };
-        let disc = files::upsert_row(&c, &psx, &disc, 1).expect("row");
+        let disc = files::upsert(&c, &psx, &disc, 1).expect("row");
         assert!(name_fits(
             &psx,
             "Example Disc (USA).img",
@@ -1699,9 +1692,13 @@ mod tests {
             .write_blocking({
                 let pid = pid.clone();
                 move |c| {
-                    let h = files::Hashed::default();
-                    files::upsert(c, &pid, "NES/a.nes", 1, 1, &h, None, FileState::Verified, 1)
-                        .map(|_| ())
+                    files::upsert(
+                        c,
+                        &pid,
+                        &NewFile::unhashed("NES/a.nes", 1, 1, FileState::Verified),
+                        1,
+                    )
+                    .map(|_| ())
                 }
             })
             .expect("seed");
@@ -1756,7 +1753,7 @@ mod tests {
         let nes = PlatformId("nes".into());
         fs::create_dir_all(app.config().paths.games.join("NES")).expect("mkdir");
         app.db
-            .write(|c| platform_rows::set_enabled(c, "nes", false).map(|_| ()))
+            .write(|c| platform_rows::set_enabled(c, &PlatformId("nes".into()), false).map(|_| ()))
             .await
             .expect("disable");
         assert_eq!(
@@ -1768,29 +1765,27 @@ mod tests {
 
     #[test]
     fn a_live_rom_of_the_content_beats_a_retired_rom_of_the_whole_file() {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &platforms::PLATFORMS).expect("seed");
+        let c = crate::db::fixtures::conn();
         let nes = PlatformId("nes".into());
         let mut file = b"NES\x1a".to_vec();
         file.resize(16, 0);
         file.extend_from_slice(b"synthetic body of a retired and a live rom");
         let forms = hash_forms(&file[..], HeaderRule::Ines, None).expect("hash");
         let whole = forms.whole.clone().expect("a header");
-        let retired =
-            files::seed_rom_fixture(&c, &nes, "Old (USA)", "Old (USA).nes", &whole, "good")
-                .expect("retired rom");
+        let retired = crate::db::fixtures::dat(&nes)
+            .title("Old (USA)")
+            .rom("Old (USA).nes", &whole, RomStatus::Good)
+            .write(&c)
+            .expect("retired rom")
+            .first_rom();
         c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [retired])
             .expect("retire");
-        let live = files::seed_rom_fixture(
-            &c,
-            &nes,
-            "New (USA)",
-            "New (USA).nes",
-            &forms.content,
-            "good",
-        )
-        .expect("live rom");
+        let live = crate::db::fixtures::dat(&nes)
+            .title("New (USA)")
+            .rom("New (USA).nes", &forms.content, RomStatus::Good)
+            .write(&c)
+            .expect("live rom")
+            .first_rom();
         let (rom, _) = classify(&c, &nes, "New (USA).nes", &forms).expect("classify");
         assert_eq!(rom, Some(live));
         c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [live])

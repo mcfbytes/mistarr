@@ -3,8 +3,10 @@ use std::io::{Cursor, Write as _};
 
 use super::*;
 use crate::app::testutil::state;
-use crate::db::files::FileState;
+use crate::db::files::{FileState, NewFile};
+use crate::db::fixtures::pid;
 use crate::db::jobs::{self as rows, JobState};
+use crate::db::titles::RomStatus;
 
 /// A database in its own temporary directory, dropped with it.
 struct TestDb {
@@ -881,20 +883,25 @@ fn remove_with_files(c: &TestDb, version: DatVersionId, files: &[(&str, &str, i6
         let nes = PlatformId("nes".into());
         let (md5, sha1) = ("d".repeat(32), "d".repeat(40));
         for (path, crc, id) in files {
-            let hashed = crate::db::files::Hashed {
-                crc32: Some(crc),
-                md5: Some(&md5),
-                sha1: Some(&sha1),
-                header_rule: Some("none"),
-                whole: None,
-            };
             let state = crate::db::files::FileState::Misnamed;
             let rom = Some(crate::db::ids::RomId(*id));
-            crate::db::files::upsert(x, &nes, path, 4, 1, &hashed, rom, state, 1)?;
+            crate::db::files::upsert(
+                x,
+                &nes,
+                &NewFile {
+                    rom_id: rom,
+                    crc32: Some(crc.to_string()),
+                    md5: Some(md5.clone()),
+                    sha1: Some(sha1.clone()),
+                    header_rule: Some("none".to_string()),
+                    ..NewFile::unhashed(path, 4, 1, state)
+                },
+                1,
+            )?;
         }
         dats::retire(x, version, 1)?;
         let matched = rematch_chunk(x, &nes)?;
-        titles::recompute_platform(x, "nes", &Prefs::default())?;
+        titles::recompute::recompute_platform(x, &pid("nes"), &Prefs::default())?;
         Ok(matched)
     })
     .expect("remove")
@@ -1143,7 +1150,7 @@ fn one_family_on_two_platforms_keeps_separate_titles() {
                     },
                 )?;
                 assert!(v.current, "{platform}");
-                ids.push(titles::upsert_title(x, platform, v.id, &t, &[])?);
+                ids.push(titles::upsert_title(x, &pid(platform), v.id, &t, &[])?);
             }
             Ok(ids)
         })
@@ -1168,31 +1175,32 @@ fn a_disc_track_is_matched_again_under_the_all_or_nothing_rule() {
     let track = |n: u8| format!("Example Disc (USA) (Track {n}).bin");
     let states = c
         .with(|x| {
-            let old = files::seed_title_fixture(x, &psx, "Example Disc (USA)")?;
-            let new = files::seed_title_fixture(x, &psx, "Example Disc (USA) (Rev 1)")?;
-            for n in 1..=3 {
-                files::seed_rom_for_title_fixture(x, new, &track(n), &h(n), "good")?;
-            }
+            let mut old_disc = crate::db::fixtures::dat(&psx).title("Example Disc (USA)");
             for n in 1..=2 {
-                let rom = files::seed_rom_for_title_fixture(x, old, &track(n), &h(n), "good")?;
+                old_disc = old_disc.rom(&track(n), &h(n), crate::db::titles::RomStatus::Good);
+            }
+            let written = old_disc.write(x)?;
+            let (old, old_roms) = (written.titles[0], written.roms);
+            let mut new_disc = crate::db::fixtures::dat(&psx).title("Example Disc (USA) (Rev 1)");
+            for n in 1..=3 {
+                new_disc = new_disc.rom(&track(n), &h(n), crate::db::titles::RomStatus::Good);
+            }
+            new_disc.write(x)?;
+            for n in 1..=2 {
+                let rom = old_roms[usize::from(n) - 1];
                 let sums = h(n);
-                let hashed = files::Hashed {
-                    crc32: Some(&sums.crc32),
-                    md5: Some(&sums.md5),
-                    sha1: Some(&sums.sha1),
-                    header_rule: Some("none"),
-                    whole: None,
-                };
                 let path = format!("PSX/Example Disc (USA)/{}", track(n));
                 files::upsert(
                     x,
                     &psx,
-                    &path,
-                    4,
-                    1,
-                    &hashed,
-                    Some(rom),
-                    FileState::Verified,
+                    &NewFile {
+                        rom_id: Some(rom),
+                        crc32: Some(sums.crc32.clone()),
+                        md5: Some(sums.md5.clone()),
+                        sha1: Some(sums.sha1.clone()),
+                        header_rule: Some("none".to_string()),
+                        ..NewFile::unhashed(&path, 4, 1, FileState::Verified)
+                    },
                     1,
                 )?;
             }
@@ -1235,22 +1243,16 @@ fn unmatched_file(
     path: &str,
     sums: &mistarr_core::HashSet,
 ) -> Result<crate::db::ids::FileId> {
-    let hashed = files::Hashed {
-        crc32: Some(&sums.crc32),
-        md5: Some(&sums.md5),
-        sha1: Some(&sums.sha1),
-        header_rule: Some("none"),
-        whole: None,
-    };
     files::upsert(
         c,
         platform,
-        path,
-        4,
-        1,
-        &hashed,
-        None,
-        FileState::Unverified,
+        &NewFile {
+            crc32: Some(sums.crc32.clone()),
+            md5: Some(sums.md5.clone()),
+            sha1: Some(sums.sha1.clone()),
+            header_rule: Some("none".to_string()),
+            ..NewFile::unhashed(path, 4, 1, FileState::Unverified)
+        },
         1,
     )
 }
@@ -1262,10 +1264,16 @@ async fn recompute_matches_unmatched_files_and_updates_have() {
     app.db
         .write_tx(move |tx| {
             let quest = ("Example Quest (USA)", "Example Quest (USA).gb");
-            files::seed_rom_fixture(tx, &gb, quest.0, quest.1, &sums(1), "good")?;
+            crate::db::fixtures::dat(&gb)
+                .title(quest.0)
+                .rom(quest.1, &sums(1), RomStatus::Good)
+                .write(tx)?;
             let manor = ("Mock Manor (USA)", "Mock Manor (USA).gb");
-            files::seed_rom_fixture(tx, &gb, manor.0, manor.1, &sums(2), "good")?;
-            titles::recompute_platform(tx, "gb", &Prefs::default())?;
+            crate::db::fixtures::dat(&gb)
+                .title(manor.0)
+                .rom(manor.1, &sums(2), RomStatus::Good)
+                .write(tx)?;
+            titles::recompute::recompute_platform(tx, &pid("gb"), &Prefs::default())?;
             // More strays than one chunk, so the cursor pages past files that never match.
             for n in 0..300 {
                 unmatched_file(tx, &gb, &format!("GAMEBOY/stray {n}.gb"), &sums(1000 + n))?;
@@ -1364,22 +1372,29 @@ fn a_stored_crc_matches_a_headered_file_by_its_size_less_the_header() {
     let state = c
         .with(|x| {
             let rom = sums(9);
-            let title = files::seed_title_fixture(x, &nes, "Crc Quest (USA)")?;
+            let title = crate::db::fixtures::dat(&nes)
+                .title("Crc Quest (USA)")
+                .write(x)?
+                .titles[0];
             x.execute(
                 "INSERT INTO roms (title_id, name, size, crc32)
                  VALUES (?1, 'Crc Quest (USA).nes', 4, ?2)",
                 rusqlite::params![title, rom.crc32],
             )?;
-            let hashed = files::Hashed {
-                crc32: Some(&rom.crc32),
-                md5: Some(&rom.md5),
-                sha1: Some(&rom.sha1),
-                header_rule: Some("ines"),
-                whole: None,
-            };
             let path = "NES/Crc Quest (USA).nes";
             let unverified = FileState::Unverified;
-            let id = files::upsert(x, &nes, path, 20, 1, &hashed, None, unverified, 1)?;
+            let id = files::upsert(
+                x,
+                &nes,
+                &NewFile {
+                    crc32: Some(rom.crc32.clone()),
+                    md5: Some(rom.md5.clone()),
+                    sha1: Some(rom.sha1.clone()),
+                    header_rule: Some("ines".to_string()),
+                    ..NewFile::unhashed(path, 20, 1, unverified)
+                },
+                1,
+            )?;
             match_unmatched_chunk(x, &nes, crate::db::ids::FileId(0))?;
             Ok(files::get(x, id)?.map(|f| f.state))
         })
@@ -1397,7 +1412,10 @@ fn stored_whole_and_content_forms_match_headered_and_headerless_roms() {
     let lynx = PlatformId("lynx".into());
     let states = c
         .with(|x| {
-            let title = files::seed_title_fixture(x, &lynx, "Form Quest (USA)")?;
+            let title = crate::db::fixtures::dat(&lynx)
+                .title("Form Quest (USA)")
+                .write(x)?
+                .titles[0];
             // Rom 30 is a headered DAT's whole file, rom 31 a headerless DAT's content.
             let (whole_rom, content_rom, plain) = (sums(30), sums(31), sums(32));
             for (name, h, size) in [("a.lnx", &whole_rom, 68), ("b.lnx", &content_rom, 4)] {
@@ -1426,15 +1444,18 @@ fn stored_whole_and_content_forms_match_headered_and_headerless_roms() {
                 ("AtariLynx/c.lnx", &plain, no_header),
             ];
             for (path, content, whole) in &rows {
-                let hashed = files::Hashed {
-                    crc32: Some(&content.crc32),
-                    md5: Some(&content.md5),
-                    sha1: Some(&content.sha1),
-                    header_rule: Some("lnx"),
-                    whole: Some(whole),
-                };
                 ids.push(files::upsert(
-                    x, &lynx, path, 68, 1, &hashed, None, unverified, 1,
+                    x,
+                    &lynx,
+                    &NewFile {
+                        crc32: Some(content.crc32.clone()),
+                        md5: Some(content.md5.clone()),
+                        sha1: Some(content.sha1.clone()),
+                        header_rule: Some("lnx".to_string()),
+                        whole: whole.clone(),
+                        ..NewFile::unhashed(path, 68, 1, unverified)
+                    },
+                    1,
                 )?);
             }
             match_unmatched_chunk(x, &lynx, crate::db::ids::FileId(0))?;
@@ -1464,25 +1485,30 @@ fn a_stored_crc_allows_for_a_copier_header_only_at_its_size() {
     let states = c
         .with(|x| {
             let rom = sums(11);
-            let title = files::seed_title_fixture(x, &snes, "Copier Quest (USA)")?;
+            let title = crate::db::fixtures::dat(&snes)
+                .title("Copier Quest (USA)")
+                .write(x)?
+                .titles[0];
             x.execute(
                 "INSERT INTO roms (title_id, name, size, crc32)
                  VALUES (?1, 'Copier Quest (USA).sfc', 1024, ?2)",
                 rusqlite::params![title, rom.crc32],
             )?;
-            let hashed = files::Hashed {
-                crc32: Some(&rom.crc32),
-                md5: Some(&rom.md5),
-                sha1: Some(&rom.sha1),
-                header_rule: Some("smc"),
-                whole: None,
-            };
             let unverified = FileState::Unverified;
             let mut ids = Vec::new();
             // 1536 is 1024 plus a 512-byte copier header; 1040 is no copier size.
             for (path, size) in [("SNES/Copier Quest (USA).sfc", 1536), ("SNES/b.sfc", 1040)] {
                 ids.push(files::upsert(
-                    x, &snes, path, size, 1, &hashed, None, unverified, 1,
+                    x,
+                    &snes,
+                    &NewFile {
+                        crc32: Some(rom.crc32.clone()),
+                        md5: Some(rom.md5.clone()),
+                        sha1: Some(rom.sha1.clone()),
+                        header_rule: Some("smc".to_string()),
+                        ..NewFile::unhashed(path, size, 1, unverified)
+                    },
+                    1,
                 )?);
             }
             match_unmatched_chunk(x, &snes, crate::db::ids::FileId(0))?;
@@ -1982,28 +2008,31 @@ fn a_placed_file_stays_verified_when_its_rom_is_matched_again() {
     };
     let (file, live) = c
         .with(|x| {
-            let old = files::seed_rom_fixture(x, &snes, game, "mm.smc", &sums, "good")?;
-            let hashed = files::Hashed {
-                crc32: Some(&sums.crc32),
-                md5: Some(&sums.md5),
-                sha1: Some(&sums.sha1),
-                header_rule: Some("smc"),
-                whole: None,
-            };
+            let old = crate::db::fixtures::dat(&snes)
+                .title(game)
+                .rom("mm.smc", &sums, RomStatus::Good)
+                .write(x)?
+                .first_rom();
             let rel = format!("SNES/{placed}");
             let file = files::upsert(
                 x,
                 &snes,
-                &rel,
-                4,
-                1,
-                &hashed,
-                Some(old),
-                FileState::Verified,
+                &NewFile {
+                    rom_id: Some(old),
+                    crc32: Some(sums.crc32.clone()),
+                    md5: Some(sums.md5.clone()),
+                    sha1: Some(sums.sha1.clone()),
+                    header_rule: Some("smc".to_string()),
+                    ..NewFile::unhashed(&rel, 4, 1, FileState::Verified)
+                },
                 1,
             )?;
             x.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [old])?;
-            let live = files::seed_rom_fixture(x, &snes, game, "Mock Manor.smc", &sums, "good")?;
+            let live = crate::db::fixtures::dat(&snes)
+                .title(game)
+                .rom("Mock Manor.smc", &sums, RomStatus::Good)
+                .write(x)?
+                .first_rom();
             assert_eq!(rematch_chunk(x, &snes)?, 1);
             Ok((file, live))
         })

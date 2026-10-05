@@ -109,12 +109,7 @@ pub fn finish(conn: &Connection, done: &[Op], refused: &[Op], now: i64) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn conn() -> Connection {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        c
-    }
+    use crate::db::fixtures::conn;
 
     fn ops(c: &Connection) -> Vec<Op> {
         get(c).expect("get").into_iter().map(|e| e.op).collect()

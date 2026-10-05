@@ -456,7 +456,7 @@ pub fn replace_container(
                 && e.reason == row.reason
         });
         if !same {
-            written.push((files::upsert_row(conn, platform, row, now)?, row.state));
+            written.push((files::upsert(conn, platform, row, now)?, row.state));
         }
     }
     Ok(written)
@@ -465,13 +465,7 @@ pub fn replace_container(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn conn() -> Connection {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-        c
-    }
+    use crate::db::fixtures::conn;
 
     fn psx() -> PlatformId {
         PlatformId("psx".into())
@@ -510,7 +504,7 @@ mod tests {
     }
 
     fn put(c: &Connection, pid: &PlatformId, row: &NewFile) -> FileId {
-        files::upsert_row(c, pid, row, 1).expect("upsert")
+        files::upsert(c, pid, row, 1).expect("upsert")
     }
 
     fn reason_of(c: &Connection, rel: &str) -> Option<String> {
@@ -619,7 +613,7 @@ mod tests {
         assert_eq!(set_waiting(&c, true).expect("on"), 3);
         assert_eq!(waiting_count(&c).expect("count"), 3);
 
-        crate::db::platforms::set_enabled(&c, "psx", false).expect("disable");
+        crate::db::platforms::set_enabled(&c, &PlatformId("psx".into()), false).expect("disable");
         assert_eq!(
             waiting_count(&c).expect("count"),
             0,
@@ -645,14 +639,15 @@ mod tests {
     fn layout_known_needs_the_same_track_sizes() {
         let c = conn();
         let pid = psx();
-        let title = files::seed_title_fixture(&c, &pid, "Disc").expect("title");
+        let mut disc = crate::db::fixtures::dat(&pid).title("Disc");
         for (name, t) in [
             ("a.cue", track(9, 70)),
             ("a1.bin", track(1, 4704)),
             ("a2.bin", track(2, 2352)),
         ] {
-            files::seed_rom_for_title_fixture(&c, title, name, &t, "good").expect("rom");
+            disc = disc.rom(name, &t, crate::db::titles::RomStatus::Good);
         }
+        disc.write(&c).expect("disc");
         assert!(layout_known(&c, &pid, &[2352, 4704]).expect("known"));
         assert!(layout_known(&c, &pid, &[4704, 2352]).expect("known"));
         assert!(!layout_known(&c, &pid, &[4704]).expect("fewer"));

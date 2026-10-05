@@ -17,7 +17,8 @@ use crate::db::arcade as arcade_rows;
 use crate::db::downloads::{DownloadRow, DownloadState};
 use crate::db::files::{self, FileState};
 use crate::db::ids::RomId;
-use crate::db::imports::{self, EntryRom, TitleEntry};
+use crate::db::imports::{self, TitleEntry};
+use crate::db::roms::{self, EntryRom};
 use crate::error::Result;
 use crate::jobs::arcade::{self, check_rom, same_zip, Check, ZipIndex, ZipSource};
 
@@ -307,13 +308,13 @@ fn decide(
 fn lookup(
     c: &rusqlite::Connection,
     rom_id: RomId,
-) -> Result<(Option<arcade_rows::ZipRom>, Option<TitleEntry>)> {
-    let Some(z) = arcade_rows::zip_rom(c, rom_id)? else {
+) -> Result<(Option<roms::ZipRom>, Option<TitleEntry>)> {
+    let Some(z) = roms::zip_rom(c, rom_id)? else {
         return Ok((None, None));
     };
     let hbmame = z.zip_dir.eq_ignore_ascii_case("hbmame");
     let set = set_name(&z.name);
-    let dat = match arcade_rows::dat_entry_named(c, arcade::PLATFORM, set, hbmame)? {
+    let dat = match arcade_rows::dat_entry_named(c, &arcade::platform(), set, hbmame)? {
         Some(t) => imports::title_entry(c, t)?,
         None => None,
     };
@@ -459,7 +460,7 @@ impl Placing<'_> {
         let (dir, file) = (zip.dir.clone(), zip.file.clone());
         let titles = app
             .db
-            .read(move |c| arcade_rows::titles_naming(c, arcade::PLATFORM, &dir, &file))
+            .read(move |c| arcade_rows::titles_naming(c, &arcade::platform(), &dir, &file))
             .await?;
         let arcade_dir = app.config().paths.root.join(arcade::ARCADE_DIR);
         let games = self.games.clone();

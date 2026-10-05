@@ -7,7 +7,7 @@ use std::sync::Arc;
 use common::{boot, request, request_plain};
 use mistarr_core::PlatformId;
 use mistarr_mister::launch::{CommandSink, RecordingSink};
-use mistarr_server::db::files::{self, FileState, Hashed};
+use mistarr_server::db::files::{self, FileState, NewFile};
 
 fn touch(path: &std::path::Path) {
     std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
@@ -58,24 +58,28 @@ async fn launch_routes_answer_with_documented_statuses() {
         .app
         .db
         .write(move |c| {
-            let t = files::seed_title_fixture(c, &pid, "Example Quest (USA)")?;
             let hashes = mistarr_core::HashSet {
                 size: 4,
                 crc32: "00000001".into(),
                 md5: "0".repeat(32),
                 sha1: "1".repeat(40),
             };
-            let rom = files::seed_rom_for_title_fixture(c, t, "a.nes", &hashes, "good")?;
-            let hashed = Hashed::default();
+            let written = mistarr_server::db::fixtures::dat(&pid)
+                .title("Example Quest (USA)")
+                .rom(
+                    "a.nes",
+                    &hashes,
+                    mistarr_server::db::titles::RomStatus::Good,
+                )
+                .write(c)?;
+            let (t, rom) = (written.titles[0], written.first_rom());
             files::upsert(
                 c,
                 &pid,
-                "NES/a.nes",
-                4,
-                0,
-                &hashed,
-                Some(rom),
-                FileState::Pending,
+                &NewFile {
+                    rom_id: Some(rom),
+                    ..NewFile::unhashed("NES/a.nes", 4, 0, FileState::Pending)
+                },
                 0,
             )?;
             Ok(t)

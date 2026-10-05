@@ -20,16 +20,27 @@ use serde_json::json;
 use super::dat_import::prefs;
 use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
-use crate::db::arcade::{self as rows, MraTitle, MraZip, StoredMra, StoredZip};
+use crate::db::arcade::{self as rows, MraTitle, MraZip, StoredMra};
 use crate::db::ids::DatVersionId;
 use crate::db::ids::JobId;
 use crate::db::ids::TitleId;
+use crate::db::roms::{self, StoredZip};
 use crate::db::titles;
 use crate::db::Db;
 use crate::error::Result;
 
 /// The platform MRA titles belong to.
 pub const PLATFORM: &str = "arcade";
+
+/// [`PLATFORM`] as an id.
+///
+/// ```
+/// assert_eq!(mistarr_server::jobs::arcade::platform().0, "arcade");
+/// ```
+#[must_use]
+pub fn platform() -> PlatformId {
+    PlatformId(PLATFORM.to_owned())
+}
 
 /// Directory under the SD root holding the MRA files.
 pub const ARCADE_DIR: &str = "_Arcade";
@@ -71,7 +82,7 @@ impl Job for ArcadeCatalog {
 /// [`Error::Db`] when the job cannot be recorded.
 pub async fn enqueue_if_relevant(app: &Arc<AppState>) -> Result<Option<JobId>> {
     let dir = app.config().paths.root.join(ARCADE_DIR);
-    let known = app.db.read(|c| rows::has_titles(c, PLATFORM)).await?;
+    let known = app.db.read(|c| rows::has_titles(c, &platform())).await?;
     let listed = crate::threads::run(crate::threads::label::ARCADE, move || dir.is_dir());
     if !known && !listed.await? {
         return Ok(None);
@@ -184,8 +195,8 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
         .app
         .db
         .write(|c| {
-            let version = rows::mra_version(c, PLATFORM, crate::unix_now())?;
-            Ok((version, rows::next_run(c, PLATFORM)?))
+            let version = rows::mra_version(c, &platform(), crate::unix_now())?;
+            Ok((version, rows::next_run(c, &platform())?))
         })
         .await?;
     let mut pass = Pass::default();
@@ -239,7 +250,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
         .write_tx(move |tx| settle_titles(tx, version, run, &prefs))
         .await?;
     if changed {
-        super::remap::enqueue(&ctx.app, Some(vec![PlatformId(PLATFORM.into())])).await;
+        super::remap::enqueue(&ctx.app, Some(vec![platform()])).await;
     }
     // After titles are committed, so the presence pass sees this run's live MRA zips.
     let stats = presence::run(ctx).await?;
@@ -265,15 +276,16 @@ fn scan_batch(
     batch: &[Listed],
     pass: &mut Pass,
 ) -> Result<Vec<Item>> {
+    let pid = platform();
     let mut items = Vec::with_capacity(batch.len());
     for listed in batch {
-        let stored = db.read_blocking(|c| rows::stored_mra(c, PLATFORM, &listed.rel))?;
+        let stored = db.read_blocking(|c| rows::stored_mra(c, &pid, &listed.rel))?;
         if let Some(s) = stored
             .as_ref()
             .filter(|s| s.file_stamp.as_deref() == Some(listed.stamp.as_str()))
         {
             if pass.claim(&s.name, &listed.rel) {
-                let zips = db.read_blocking(|c| rows::zip_roms(c, s.id))?;
+                let zips = db.read_blocking(|c| roms::zip_roms(c, s.id))?;
                 items.push(kept(s, listed, &zips, games, &mut pass.index));
             }
             continue;
@@ -403,13 +415,14 @@ fn settle_titles(
     run: i64,
     prefs: &mistarr_core::select::Prefs,
 ) -> Result<(usize, u64, bool)> {
-    let retired = rows::retire_unseen(tx, PLATFORM, run)?;
-    let live = rows::live_count(tx, PLATFORM)?;
+    let pid = platform();
+    let retired = rows::retire_unseen(tx, &pid, run)?;
+    let live = rows::live_count(tx, &pid)?;
     crate::db::dats::set_game_count(tx, version, live)?;
-    let changed = retired > 0 || rows::recompute_pending(tx, PLATFORM)?;
+    let changed = retired > 0 || rows::recompute_pending(tx, &pid)?;
     if changed {
-        titles::recompute_platform(tx, PLATFORM, prefs)?;
-        rows::set_recompute_pending(tx, PLATFORM, false)?;
+        titles::recompute::recompute_platform(tx, &pid, prefs)?;
+        rows::set_recompute_pending(tx, &pid, false)?;
     }
     Ok((retired, live, changed))
 }
@@ -425,7 +438,7 @@ fn store_batch(
         .iter()
         .any(|i| matches!(i.title, Title::Stored { .. }))
     {
-        rows::set_recompute_pending(tx, PLATFORM, true)?;
+        rows::set_recompute_pending(tx, &platform(), true)?;
     }
     for Item { title, check } in items {
         let id = match title {
@@ -470,7 +483,7 @@ fn store_batch(
                         present: z.on_disk.is_some(),
                     })
                     .collect();
-                rows::upsert_title(tx, PLATFORM, version, &title, &rom_zips)?
+                rows::upsert_title(tx, &platform(), version, &title, &rom_zips)?
             }
             Title::Kept { id, present } => {
                 rows::touch(tx, id, run)?;

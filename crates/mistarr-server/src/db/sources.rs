@@ -772,18 +772,6 @@ pub fn open_download_count(conn: &Connection, id: SourceId) -> Result<u64> {
     )?)
 }
 
-/// Whether a platform with this id exists.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure.
-pub fn platform_exists(conn: &Connection, id: &PlatformId) -> Result<bool> {
-    Ok(conn
-        .query_row("SELECT 1 FROM platforms WHERE id = ?1", [&id.0], |_| Ok(()))
-        .optional()?
-        .is_some())
-}
-
 /// The file name part of a DAT rom name, which may carry a subdirectory.
 fn leaf(name: &str) -> &str {
     name.rsplit(['/', '\\']).next().unwrap_or(name)
@@ -874,59 +862,12 @@ impl DatIndex for SqlDatIndex<'_> {
     }
 }
 
-/// Catalog rows for tests, standing in for the DAT import.
-#[cfg(any(test, feature = "test-support"))]
-pub mod fixtures {
-    use rusqlite::{params, Connection};
-
-    use crate::db::ids::{RomId, TitleId};
-    use crate::error::Result;
-
-    /// Inserts a DAT version, a title with `flags` and one rom, returning the rom id.
-    ///
-    /// # Errors
-    ///
-    /// [`crate::Error::Db`] on SQLite failure, e.g. an unknown platform.
-    pub fn seed_rom(
-        conn: &Connection,
-        platform: &str,
-        rom_name: &str,
-        size: u64,
-        flags: &[&str],
-    ) -> Result<RomId> {
-        conn.execute(
-            "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
-             VALUES (?1, ?1 || ' test', '1', 'test.dat', 0, 0)
-             ON CONFLICT (dat_name, version) DO NOTHING",
-            [platform],
-        )?;
-        let dat: i64 = conn.query_row(
-            "SELECT id FROM dat_versions WHERE dat_name = ?1 || ' test'",
-            [platform],
-            |r| r.get(0),
-        )?;
-        let title = rom_name.rsplit_once('.').map_or(rom_name, |(t, _)| t);
-        conn.execute(
-            "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
-             VALUES (?1, ?2, ?3, ?3)",
-            params![platform, dat, title],
-        )?;
-        let title_id = TitleId(conn.last_insert_rowid());
-        let flags: Vec<String> = flags.iter().map(|f| (*f).to_owned()).collect();
-        crate::db::titles::set_flags(conn, title_id, &flags)?;
-        conn.execute(
-            "INSERT INTO roms (title_id, name, size, status) VALUES (?1, ?2, ?3, 'good')",
-            params![title_id, rom_name, crate::db::sql::to_i64(size)],
-        )?;
-        Ok(RomId(conn.last_insert_rowid()))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::source_detail::{self, FileRow};
+    use crate::db::fixtures::{conn, pid, seed_rom};
     use crate::db::testutil;
+    use crate::db::views::source_detail::{self, FileRow};
 
     fn files(c: &Connection, id: SourceId, limit: u32, offset: u32) -> Result<Paged<FileRow>> {
         source_detail::files(
@@ -935,13 +876,6 @@ mod tests {
             &source_detail::FileQuery::default(),
             Page { limit, offset },
         )
-    }
-
-    fn conn() -> Connection {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-        c
     }
 
     fn new(hash: &str, state: SourceState) -> NewSource<'_> {
@@ -978,7 +912,7 @@ mod tests {
         let row = get(&c, a).expect("get").expect("row");
         assert_eq!(row.suggested_platform_id, Some(nes()));
         assert!(!platform_has_dat(&c, &nes()).expect("dat"));
-        fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 1, &[]).expect("seed");
+        seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 1, &[]).expect("seed");
         assert!(platform_has_dat(&c, &nes()).expect("dat"));
         set_suggestion(&c, a, None).expect("clear");
         assert_eq!(list_unbound(&c).expect("list"), [(a, None)]);
@@ -1053,8 +987,6 @@ mod tests {
         set_state(&c, id, SourceState::Disabled, None).expect("state");
         let row = get(&c, id).expect("get").expect("row");
         assert_eq!((row.state, row.reason), (SourceState::Disabled, None));
-        assert!(platform_exists(&c, &nes()).expect("exists"));
-        assert!(!platform_exists(&c, &PlatformId("none".into())).expect("exists"));
         c.execute("UPDATE sources SET reason = 'prose' WHERE id = ?1", [id])
             .expect("corrupt");
         assert!(matches!(get(&c, id), Err(crate::Error::Stored { .. })));
@@ -1063,7 +995,7 @@ mod tests {
     #[test]
     fn files_carry_matches_confidence_and_rom_names() {
         let c = conn();
-        let rom = fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
+        let rom = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
         let id = insert(&c, &new(&"04".repeat(20), SourceState::Bound)).expect("insert");
         let list = [
             file(0, "Sub/Example Quest (USA).nes", 16),
@@ -1114,10 +1046,9 @@ mod tests {
     #[test]
     fn index_finds_by_name_and_by_base_name_and_size() {
         let c = conn();
-        let a = fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
-        let b =
-            fixtures::seed_rom(&c, "snes", "Sub\\Other Tale (Europe).sfc", 32, &[]).expect("rom");
-        fixtures::seed_rom(&c, "nes", "Boot Code (World).nes", 8, &["bios"]).expect("rom");
+        let a = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
+        let b = seed_rom(&c, &pid("snes"), "Sub\\Other Tale (Europe).sfc", 32, &[]).expect("rom");
+        seed_rom(&c, &pid("nes"), "Boot Code (World).nes", 8, &["bios"]).expect("rom");
         assert_eq!(refresh_match_keys(&c).expect("keys"), 3);
         assert_eq!(refresh_match_keys(&c).expect("keys"), 0);
         let index = SqlDatIndex::new(&c);
@@ -1138,8 +1069,14 @@ mod tests {
         let c = conn();
         let count = KEY_BATCH as usize + 5;
         for i in 0..count {
-            fixtures::seed_rom(&c, "nes", &format!("Example Quest {i} (USA).nes"), 16, &[])
-                .expect("rom");
+            seed_rom(
+                &c,
+                &pid("nes"),
+                &format!("Example Quest {i} (USA).nes"),
+                16,
+                &[],
+            )
+            .expect("rom");
         }
         assert_eq!(key_batch(&c).expect("first"), KEY_BATCH as usize);
         assert_eq!(key_batch(&c).expect("second"), 5);
@@ -1149,8 +1086,8 @@ mod tests {
     #[test]
     fn binding_runs_against_the_index() {
         let c = conn();
-        fixtures::seed_rom(&c, "nes", "Example Quest (USA).nes", 16, &[]).expect("rom");
-        fixtures::seed_rom(&c, "nes", "Second Try (Japan).nes", 24, &[]).expect("rom");
+        seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
+        seed_rom(&c, &pid("nes"), "Second Try (Japan).nes", 24, &[]).expect("rom");
         refresh_match_keys(&c).expect("keys");
         let files = [
             file(0, "Set/Example Quest (USA).nes", 16),

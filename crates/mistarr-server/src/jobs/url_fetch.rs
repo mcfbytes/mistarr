@@ -469,7 +469,7 @@ fn card_full(e: Error) -> Error {
 /// that is set and is not `card`.
 #[must_use]
 pub fn ram_dir(card: &std::path::Path) -> Option<PathBuf> {
-    std::env::var_os(crate::db::SQLITE_TMPDIR)
+    std::env::var_os(crate::db::tempdir::SQLITE_TMPDIR)
         .map(PathBuf::from)
         .filter(|d| d != card)
         .map(|d| d.join(RAM_SUBDIR))

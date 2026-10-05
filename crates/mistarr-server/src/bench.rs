@@ -4,9 +4,12 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use mistarr_core::PlatformId;
+
 use crate::config::PrefsConfig;
 use crate::db::sql::Page;
-use crate::db::titles::{self, Browse, SearchShape};
+use crate::db::titles;
+use crate::db::titles::browse::{Browse, SearchShape};
 use crate::db::{self, platforms, Db};
 use crate::error::{Error, Result};
 use crate::synth::{self, Seeded};
@@ -68,7 +71,7 @@ pub struct Timing {
 /// [`Error::Bench`] for a file without the browse tables, [`Error::Db`] on SQLite failure.
 ///
 /// ```
-/// use mistarr_server::db::titles::SearchShape;
+/// use mistarr_server::db::titles::browse::SearchShape;
 /// let dir = tempfile::tempdir().unwrap();
 /// let path = dir.path().join("s.db");
 /// mistarr_server::bench::seed_file(&path, 0.002).unwrap();
@@ -83,6 +86,7 @@ pub fn search(
     shapes: &[SearchShape],
 ) -> Result<Vec<Timing>> {
     let conn = db::open_read_only(path)?;
+    let platform = &PlatformId(platform.to_owned());
     if !db::has_table(&conn, "main", "title_groups")? {
         return Err(Error::Bench(format!(
             "{} has no title_groups table; open it once with this version of mistarr",
@@ -96,11 +100,11 @@ pub fn search(
     };
     let mut out = Vec::with_capacity(shapes.len());
     for &shape in shapes {
-        let total = titles::browse_with(&conn, platform, &filter, PAGE, shape)?.total;
+        let total = titles::browse::browse_with(&conn, platform, &filter, PAGE, shape)?.total;
         let mut runs = Vec::with_capacity(usize::try_from(iterations).unwrap_or(0));
         for _ in 0..iterations.max(1) {
             let start = Instant::now();
-            titles::browse_with(&conn, platform, &filter, PAGE, shape)?;
+            titles::browse::browse_with(&conn, platform, &filter, PAGE, shape)?;
             runs.push(start.elapsed());
         }
         runs.sort();
@@ -121,7 +125,7 @@ pub fn search(
 /// ```
 /// use std::time::Duration;
 /// use mistarr_server::bench::{report, Timing};
-/// use mistarr_server::db::titles::SearchShape;
+/// use mistarr_server::db::titles::browse::SearchShape;
 /// let ms = Duration::from_millis(2);
 /// let t = Timing { shape: SearchShape::Like, total: 4, min: ms, median: ms, p95: ms };
 /// assert!(report(&[t]).contains("like"));

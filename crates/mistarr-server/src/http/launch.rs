@@ -22,6 +22,7 @@ use crate::db::launch::{self, LaunchTitle};
 use crate::db::platforms;
 use crate::db::titles::TitleSource;
 use crate::status::{launch_state, LaunchState};
+use mistarr_core::PlatformId;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -136,10 +137,10 @@ async fn exclusive(app: &AppState) -> Result<MutexGuard<'_, Option<Instant>>, Ap
 pub async fn launch_core(app: &AppState, id: &str) -> Result<Launched, ApiError> {
     let sink = sink(app)?;
     let mut last = exclusive(app).await?;
-    let lookup = id.to_owned();
+    let lookup = PlatformId(id.to_owned());
     let known = app
         .db
-        .read(move |c| platforms::get(c, &lookup))
+        .read(move |c| platforms::find(c, &lookup))
         .await?
         .is_some();
     let row = table::by_id(id)

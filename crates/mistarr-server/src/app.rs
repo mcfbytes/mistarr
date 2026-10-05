@@ -108,7 +108,8 @@ impl Default for Options {
             ca_file: None,
             kill: PathBuf::from("kill"),
             proc_dir: PathBuf::from("/proc"),
-            frozen_file: Path::new(crate::db::RAM_TEMP_DIR).join(crate::freeze::FROZEN_NAME),
+            frozen_file: Path::new(crate::db::tempdir::RAM_TEMP_DIR)
+                .join(crate::freeze::FROZEN_NAME),
             hold_recheck: Duration::from_secs(60),
         }
     }
@@ -433,7 +434,7 @@ fn prepare_catalog(c: &mut rusqlite::Connection) -> Result<Prepared> {
     if added > 0 {
         tracing::info!(added, "seeded platforms");
     }
-    let unfinished = db::files::platforms_with_progress(c)?;
+    let unfinished = db::scan_progress::platforms_with_progress(c)?;
     let (resolved, settled) = db::transact(c, |tx| {
         db::dats::refresh_families(tx)?;
         let resolved = db::dats::resolve_families(tx)?;
@@ -536,7 +537,7 @@ pub(crate) fn open_db(
     Vec<mistarr_core::PlatformId>,
     Vec<mistarr_core::PlatformId>,
 )> {
-    if let Some(dir) = std::env::var_os(crate::db::SQLITE_TMPDIR) {
+    if let Some(dir) = std::env::var_os(crate::db::tempdir::SQLITE_TMPDIR) {
         tracing::info!(dir = %Path::new(&dir).display(), "SQLite temporary files");
     }
     // `[memory]` cannot move from the overlay below, so this reaches the log
