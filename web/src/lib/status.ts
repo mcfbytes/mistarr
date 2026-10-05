@@ -254,7 +254,12 @@ const PHASE_TEXT: Record<string, string> = {
   connecting: 'Connecting',
   receiving: 'Receiving',
   checking: 'Checking the file',
-  placing: 'Writing to the card'
+  placing: 'Writing to the card',
+  placed: 'Placed',
+  scanning: 'Scanning folders',
+  presence: 'Checking arcade games on the card',
+  decoding: 'Reading disc images',
+  mapping: 'Matching files to sources'
 };
 
 function num(v: unknown): number | null {

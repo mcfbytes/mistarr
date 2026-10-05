@@ -393,7 +393,7 @@ Buildroot can also turn off `CONFIG_UEVENT_HELPER`, since eudev does the job [V;
 
 ## 13. Board checks needed before implementation
 
-All are read-only and none were run. The full list is in `board_checks`. The decisive ones:
+All are read-only and none were run. The checks:
 - card mount options;
 - FIFO mode and Main's umask;
 - the running kernel config;
@@ -412,7 +412,7 @@ All are read-only and none were run. The full list is in `board_checks`. The dec
 
 ## 14. Open decisions
 
-See `decisions_for_user`.
+Each open decision is marked `[decision]` in sections 7, 8 and 10; none is settled.
 
 ## 15. Disposition of the critic's findings
 
