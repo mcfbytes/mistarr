@@ -8,13 +8,13 @@ Three layers. All of them run on x86-64 in CI; only the last needs a board.
   name parsing corpus, header rules, hashing against known vectors, the
   hex, digest, bencode, magnet and percent codecs, 1G1R
   selection tables, in-memory matching of payloads to a DAT entry's roms,
-  cue parsing, and the CHD decoder: known answers worked
+  and the CHD decoder: known answers worked
   out in CHD.md for the map, canonical codes and CHT2 layout, and
   `decode_budget` under 24 MiB at the header limits.
 - `mistarr-mister`: every adapter's `plan_placement` against
   synthetic inputs; MRA parsing; DAT-name to platform binding; MGL building
   and escaping, core selection and the command FIFO against a real FIFO in a
-  temporary directory.
+  temporary directory, and cue file lists (`cue_files`) in the launcher.
 - `mistarr-sources`: torrent parsing, binding score computation, name
   normalization.
 - `mistarr-clients`: each RPC implementation against a recorded fake that
@@ -409,7 +409,10 @@ CI records them; a regression over 20 percent fails the build. On the board,
 - `shellcheck` on the board scripts and `scripts/tests/run.sh`, which runs
   `mistarr.sh` and `install.sh` against fake roots and runs
   `scripts/tests/docs.sh`, which fails when a path or code symbol named in
-  `docs/`, other than `CONSOLIDATION.md`, does not exist. The install tests put
+  `docs/` does not exist. It skips `CONSOLIDATION.md` and the check's own
+  allowlists of external names and of paths that exist only at run time.
+  `scripts/tests/phases.sh` fails when a job phase the server publishes has no
+  text in `web/src/lib/status.ts`. The install tests put
   stand-ins for the board's BusyBox on the installer's `PATH`: `tar` refuses
   compression options and gzip input, `od` refuses `-t` and `-A`. The
   stand-ins wrap `busybox` applets when the host has them, else the host's
