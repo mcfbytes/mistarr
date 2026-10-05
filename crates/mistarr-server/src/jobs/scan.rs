@@ -27,6 +27,8 @@ use crate::app::AppState;
 use crate::db::files::{self, FileState, NewFile};
 use crate::db::ids::{FileId, JobId};
 use crate::db::platforms as platform_rows;
+use crate::db::roms;
+use crate::db::scan_progress;
 use crate::error::{Error, Result};
 use crate::events::EventKind;
 
@@ -263,7 +265,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
             .db
             .write({
                 let id = id.clone();
-                move |c| files::clear_scan_progress(c, &id)
+                move |c| scan_progress::clear(c, &id)
             })
             .await?;
         return Ok(());
@@ -289,7 +291,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         .db
         .read({
             let pid = pid.clone();
-            move |c| files::scan_progress(c, &pid)
+            move |c| scan_progress::get(c, &pid)
         })
         .await?;
 
@@ -352,7 +354,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     let pid4 = pid.clone();
     ctx.app
         .db
-        .write(move |c| files::clear_scan_progress(c, &pid4))
+        .write(move |c| scan_progress::clear(c, &pid4))
         .await?;
     super::chd::queue_for(&ctx.app, &pid, false).await?;
     report_outcome(ctx, &pid, total).await
@@ -538,11 +540,11 @@ fn commit_unit(
         if let Some(reason) = row.reason.as_deref() {
             row.reason = Some(super::chd::settle(reason, chd_on).to_owned());
         }
-        let id = files::upsert_row(tx, platform_id, &row, now)?;
+        let id = files::upsert(tx, platform_id, &row, now)?;
         written.push((row.rel_path, id, row.state));
     }
     if let Some(done_dirs) = done_dirs {
-        files::save_scan_progress(tx, platform_id, done_dirs, now)?;
+        scan_progress::save(tx, platform_id, done_dirs, now)?;
     }
     Ok(written)
 }
@@ -635,14 +637,14 @@ fn member_candidate(
     content: Option<&str>,
     size: i64,
 ) -> Result<bool> {
-    if files::crc_candidate_exists(conn, platform_id, whole, size)? {
+    if roms::crc_candidate_exists(conn, platform_id, whole, size)? {
         return Ok(true);
     }
     let Some(content) = content else {
         return Ok(false);
     };
     let header = i64::try_from(rule.header_len()).unwrap_or(0);
-    files::crc_candidate_exists(conn, platform_id, content, size - header)
+    roms::crc_candidate_exists(conn, platform_id, content, size - header)
 }
 
 /// Walks one cartridge, romset or arcade directory, handing each row to `sink`, and
@@ -977,7 +979,7 @@ async fn disc_track(
             ctx.app
                 .db
                 .read(move |c| {
-                    files::match_rom(
+                    roms::match_rom(
                         c,
                         &pid2,
                         &h2.sha1,
@@ -1147,9 +1149,13 @@ mod tests {
             .write_blocking({
                 let pid = pid.clone();
                 move |c| {
-                    let h = files::Hashed::default();
-                    files::upsert(c, &pid, "NES/a.nes", 1, 1, &h, None, FileState::Verified, 1)
-                        .map(|_| ())
+                    files::upsert(
+                        c,
+                        &pid,
+                        &NewFile::unhashed("NES/a.nes", 1, 1, FileState::Verified),
+                        1,
+                    )
+                    .map(|_| ())
                 }
             })
             .expect("seed");
@@ -1204,7 +1210,7 @@ mod tests {
         let nes = PlatformId("nes".into());
         fs::create_dir_all(app.config().paths.games.join("NES")).expect("mkdir");
         app.db
-            .write(|c| platform_rows::set_enabled(c, "nes", false).map(|_| ()))
+            .write(|c| platform_rows::set_enabled(c, &PlatformId("nes".into()), false).map(|_| ()))
             .await
             .expect("disable");
         assert_eq!(

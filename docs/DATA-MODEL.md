@@ -15,6 +15,36 @@ The JSON columns are `dat_stage.game`, `scan_progress.done_dirs`,
 own table. A value in one of them that does not parse is an error naming the
 column, never a default.
 
+## Module layout
+
+SQL lives in `crates/mistarr-server/src/db/`, one typed function per
+statement. A table module owns the writes to its table: `files`,
+`scan_progress`, `titles/` (`mod.rs` stores titles and their roms,
+`recompute.rs` groups and picks them, `browse.rs` reads them, `detail.rs` reads
+a group and holds the want and unwant writes to `titles`), `downloads` and so
+on. A statement of one table's lifecycle may touch a neighbour: `dats::retire`
+retires roms and titles, `chd` and `sources` update `files` and `roms` in step
+with their own rows, and `candidates` updates `torrent_files`; downloads are
+cancelled through `downloads`, `arcade::mra_version` writes `dat_versions`, and
+`files::delete_ids` clears `import_log`.
+Read-only composite views over several tables sit in `db/views/`. Rom
+lookups, the SHA1, MD5 then CRC32 and size tiers among them, are in `roms`;
+`titles` and `arcade` write the rom rows.
+A platform is named by a `PlatformId` in the `titles`, `arcade`, `roms`, `files`
+and `platforms` signatures, read with `platforms::find`.
+
+A statement run once per row of a loop or per file is prepared with
+`prepare_cached`; a statement a request or a job runs once is prepared with
+`prepare`, so the connection's statement cache holds only the hot ones.
+
+Tests build catalogs with `db::fixtures`, compiled for tests and the
+`test-support` feature only: `conn()` is a migrated database with the
+platform table, `dat(&platform).title(name).rom(name, &hashes, status)` writes
+a DAT version and returns the ids it wrote, and `catalog` writes the
+standard `nes` roms. A migration test applies the schema of the version
+before the one it checks with `migrate::apply_through` and seeds it with SQL
+written for that version.
+
 ## Tables
 
 ```sql

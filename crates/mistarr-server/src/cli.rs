@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use crate::config::Config;
-use crate::db::titles::SearchShape;
+use crate::db::titles::browse::SearchShape;
 use crate::error::Result;
 
 /// `mistarr [--config FILE] [--data DIR] [--listen ADDR] [serve | doctor]`.

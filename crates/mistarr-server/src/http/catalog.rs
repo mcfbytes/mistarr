@@ -14,7 +14,9 @@ use super::{ApiError, ApiJson, ApiPath, ApiQuery, OptionalJson, Paging};
 use crate::app::AppState;
 use crate::db::ids::{FileId, TitleId};
 use crate::db::sql::Paged;
-use crate::db::titles::{self, Browse, GroupDetail, GroupRow, RomsetState, Sort, Tri, WantRefused};
+use crate::db::titles;
+use crate::db::titles::browse::{Browse, GroupRow, Sort, Tri};
+use crate::db::titles::detail::{GroupDetail, RomsetState, WantRefused};
 use crate::db::{downloads, platforms};
 use crate::jobs::import::{self, RenameError};
 use crate::jobs::transfer;
@@ -171,7 +173,7 @@ async fn list(
             if platforms::find(c, &id)?.is_none() {
                 return Ok(None);
             }
-            titles::browse(c, &id.0, &filter, page).map(Some)
+            titles::browse::browse(c, &id, &filter, page).map(Some)
         })
         .await?
         .ok_or_else(|| ApiError::no_such("platform"))?;
@@ -232,7 +234,7 @@ fn neogeo_romsets(dir: &std::path::Path, detail: &mut GroupDetail) -> Option<Vec
 async fn load_detail(app: &AppState, id: TitleId) -> Result<DetailOut, ApiError> {
     let detail = app
         .db
-        .read(move |c| titles::group_detail(c, id))
+        .read(move |c| titles::detail::group_detail(c, id))
         .await?
         .ok_or_else(|| ApiError::no_such("title"))?;
     let (detail, bios) = match mistarr_mister::platforms::by_id(&detail.platform_id.0) {
@@ -286,7 +288,7 @@ async fn want(
     let result = app
         .db
         .write_tx(move |tx| {
-            let wanted = titles::want(tx, target)?;
+            let wanted = titles::detail::want(tx, target)?;
             let created = match wanted {
                 Ok(()) => downloads::want_title(tx, target, crate::unix_now())?,
                 Err(_) => Vec::new(),
@@ -323,7 +325,7 @@ async fn unwant(
         .write_tx(move |tx| {
             let now = crate::unix_now();
             let cancelled = downloads::cancel_group(tx, group, now)?;
-            titles::unwant_group(tx, group, now)?;
+            titles::detail::unwant_group(tx, group, now)?;
             Ok(cancelled)
         })
         .await?;
@@ -347,9 +349,9 @@ async fn rename(
     match import::rename(&app, group, body.file_id).await {
         Ok(_) => Ok(Json(load_detail(&app, id).await?)),
         Err(RenameError::NotFound) => Err(ApiError::no_such("file in this title")),
-        Err(RenameError::Conflict(path)) => {
-            Err(ApiError::conflict(format!("{path} already exists.")))
-        }
+        Err(RenameError::Conflict(path)) => Err(ApiError::conflict(format!(
+            "The file {path} already exists."
+        ))),
         Err(RenameError::Server(e)) => Err(e.into()),
         Err(RenameError::Io(message)) => Err(ApiError::internal(message)),
         Err(e) => Err(ApiError::bad_request(e.to_string())),

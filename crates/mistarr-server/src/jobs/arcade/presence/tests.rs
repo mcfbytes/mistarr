@@ -6,6 +6,7 @@ use super::*;
 use crate::app::testutil::{state, write_zip};
 use crate::app::AppState;
 use crate::db::ids::RomId;
+use crate::db::titles::RomStatus;
 use crate::jobs::arcade::{ArcadeCatalog, ARCADE_DIR};
 use crate::jobs::Scheduler;
 
@@ -291,18 +292,19 @@ fn plan_and_write_a_batch_against_the_database() {
     let rom = app
         .db
         .write_blocking(|c| {
-            let rom = files::seed_rom_fixture(c, &p, "exampleset", "a.bin", &hashes(), "good")?;
-            let none = Hashed::default();
+            let rom = crate::db::fixtures::dat(&p)
+                .title("exampleset")
+                .rom("a.bin", &hashes(), RomStatus::Good)
+                .write(c)?
+                .first_rom();
             let verified = FileState::Verified;
             files::upsert(
                 c,
                 &p,
-                "mame/b.zip#a.bin",
-                1,
-                b_mtime,
-                &none,
-                Some(rom),
-                verified,
+                &NewFile {
+                    rom_id: Some(rom),
+                    ..NewFile::unhashed("mame/b.zip#a.bin", 1, b_mtime, verified)
+                },
                 1,
             )?;
             Ok(rom)
@@ -443,14 +445,13 @@ fn import_row(app: &Arc<AppState>, rel: &str, mtime: i64, rom: RomId) -> i64 {
     let member = format!("{rel}#a.bin");
     app.db
         .write_blocking(move |c| {
-            let h = Hashed {
-                crc32: Some("0000abcd"),
-                md5: Some("0123456789abcdef0123456789abcdef"),
-                sha1: None,
-                header_rule: Some("none"),
-                whole: None,
-            };
-            let id = files::upsert(c, &pid(), &member, 1, mtime, &h, Some(rom), FileState::Verified, 1)?;
+                        let id = files::upsert(c, &pid(), &NewFile {
+rom_id: Some(rom),
+crc32: Some("0000abcd".to_string()),
+md5: Some("0123456789abcdef0123456789abcdef".to_string()),
+header_rule: Some("none".to_string()),
+..NewFile::unhashed(&member, 1, mtime, FileState::Verified)
+}, 1)?;
             c.execute(
                 "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 'placed', '{}')",
                 [id.0],
@@ -619,9 +620,11 @@ async fn deleting_a_zip_prunes_its_rows_and_have_drops() {
     let (title, rom) = app
         .db
         .write_blocking(|c| {
-            let t = files::seed_title_fixture(c, &pid(), "exampleset")?;
-            let r = files::seed_rom_for_title_fixture(c, t, "a.bin", &hashes(), "good")?;
-            Ok((t, r))
+            let written = crate::db::fixtures::dat(&pid())
+                .title("exampleset")
+                .rom("a.bin", &hashes(), crate::db::titles::RomStatus::Good)
+                .write(c)?;
+            Ok((written.titles[0], written.first_rom()))
         })
         .expect("seed");
     let log = import_row(&app, "mame/exampleset.zip", mtime_of(&path), rom);

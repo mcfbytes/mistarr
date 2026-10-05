@@ -38,13 +38,13 @@ pub enum PlaceError {
 
 /// A `.torrent` or `.magnet` file on its way into `sources/`.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceFile {
+pub(crate) struct SourceFile {
     /// The safe file name to place it under.
     pub name: String,
     /// Its contents.
     pub bytes: Vec<u8>,
     /// The torrent's infohash.
-    pub infohash: [u8; 20],
+    pub infohash: InfoHash,
     /// A `.torrent`, which may complete a magnet that is still resolving.
     pub is_torrent: bool,
 }
@@ -207,14 +207,14 @@ pub fn file_name(given: &str, fallback: &str, ext: &str) -> String {
 ///
 /// [`PlaceError::Duplicate`] when it repeats a loaded source, other [`PlaceError`]s as
 /// [`place`] has them, and [`crate::Error::Db`] when its job cannot be recorded.
-pub async fn place_source(app: &Arc<AppState>, file: SourceFile) -> Result<IncomingFile> {
+pub(crate) async fn place_source(app: &Arc<AppState>, file: SourceFile) -> Result<IncomingFile> {
     let SourceFile {
         name,
         bytes,
         infohash,
         is_torrent,
     } = file;
-    let hex = InfoHash::from_bytes(infohash).to_string();
+    let hex = infohash.to_string();
     let existing = app
         .db
         .read(move |c| rows::find_by_infohash(c, &hex))
@@ -357,7 +357,7 @@ mod tests {
         let file = SourceFile {
             name: "Set.magnet".into(),
             bytes: b"magnet:?xt=urn:btih:00\n".to_vec(),
-            infohash: [7; 20],
+            infohash: InfoHash::from_bytes([7; 20]),
             is_torrent: false,
         };
         let placed = place_source(&app, file.clone()).await.expect("placed");
@@ -389,7 +389,7 @@ mod tests {
         let file = SourceFile {
             name: "Set.magnet".into(),
             bytes: Vec::new(),
-            infohash: [9; 20],
+            infohash: InfoHash::from_bytes([9; 20]),
             is_torrent: false,
         };
         let err = place_source(&app, file).await.expect_err("duplicate");

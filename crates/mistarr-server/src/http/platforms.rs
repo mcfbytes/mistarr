@@ -16,7 +16,8 @@ use crate::db::files::{self, UnidentifiedFile};
 use crate::db::ids::{DatVersionId, JobId};
 use crate::db::platforms::{self, PlatformRow};
 use crate::db::sql::Paged;
-use crate::db::titles::{self, Counts};
+use crate::db::titles;
+use crate::db::titles::browse::Counts;
 use crate::jobs::dat_import::DatImport;
 use crate::jobs::Scheduler;
 use mistarr_sources::intake::LOADED_DIR;
@@ -63,7 +64,7 @@ async fn list(
     let hide = app.config().prefs.hidden_names();
     let (rows, mut counts) = app
         .db
-        .read(move |c| Ok((platforms::list(c)?, titles::counts(c, &hide)?)))
+        .read(move |c| Ok((platforms::list(c)?, titles::browse::counts(c, &hide)?)))
         .await?;
     let Paged { items, total } = paging.resolve().slice(rows);
     let items = items
@@ -92,10 +93,12 @@ async fn update(
     let found = app
         .db
         .write(move |c| {
-            if !platforms::set_enabled(c, &id.0, enabled)? {
+            if !platforms::set_enabled(c, &id, enabled)? {
                 return Ok(None);
             }
-            let counts = titles::counts(c, &hide)?.remove(&id.0).unwrap_or_default();
+            let counts = titles::browse::counts(c, &hide)?
+                .remove(&id.0)
+                .unwrap_or_default();
             Ok(platforms::find(c, &id)?.map(|row| PlatformOut { row, counts }))
         })
         .await?;

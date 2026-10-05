@@ -2,13 +2,14 @@
 //! `docs/DATA-MODEL.md` and `docs/ARCHITECTURE.md` "Import".
 
 use mistarr_core::PlatformId;
-use rusqlite::{params, Connection, OptionalExtension, Row};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use serde_json::Value;
 
-use super::ids::{DownloadId, FileId, ImportId, RomId, TitleId};
+use super::ids::{DownloadId, FileId, ImportId, TitleId};
+use super::roms::{rom_row, EntryRom, ROM_COLUMNS};
 use super::sql::{self, Page, Paged};
-use super::titles::{RomStatus, TitleSource};
+use super::titles::TitleSource;
 use crate::error::Result;
 
 /// `import_log.action`.
@@ -115,27 +116,6 @@ pub fn list(conn: &Connection, page: Page) -> Result<Paged<LogRow>> {
     })
 }
 
-/// A rom with everything placement and the quarantine report need.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct EntryRom {
-    /// `roms.id`.
-    pub id: RomId,
-    /// File name in the DAT.
-    pub name: String,
-    /// Size in bytes.
-    pub size: u64,
-    /// Lowercase hex CRC32.
-    pub crc32: Option<String>,
-    /// Lowercase hex MD5.
-    pub md5: Option<String>,
-    /// Lowercase hex SHA1.
-    pub sha1: Option<String>,
-    /// DAT status.
-    pub status: RomStatus,
-    /// The DAT's `header` attribute, verbatim.
-    pub header: Option<String>,
-}
-
 /// A DAT game with its live roms.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TitleEntry {
@@ -159,73 +139,6 @@ impl TitleEntry {
     pub fn is_bios(&self) -> bool {
         self.flags.iter().any(|f| f == "bios")
     }
-}
-
-const ROM_COLUMNS: &str = "id, name, size, crc32, md5, sha1, status, header";
-
-fn rom_row(r: &Row<'_>) -> rusqlite::Result<EntryRom> {
-    Ok(EntryRom {
-        id: r.get(0)?,
-        name: r.get(1)?,
-        size: sql::get_u64(r, 2)?,
-        crc32: r.get(3)?,
-        md5: r.get(4)?,
-        sha1: r.get(5)?,
-        status: r.get(6)?,
-        header: r.get(7)?,
-    })
-}
-
-/// One rom, live or retired.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure.
-pub fn rom(conn: &Connection, id: RomId) -> Result<Option<EntryRom>> {
-    Ok(conn
-        .query_row(
-            &format!("SELECT {ROM_COLUMNS} FROM roms WHERE id = ?1"),
-            [id],
-            rom_row,
-        )
-        .optional()?)
-}
-
-/// Whether rom `id` or its title is retired, as after its DAT was removed; false for none.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure.
-///
-/// ```
-/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let rom = mistarr_server::db::ids::RomId(1);
-/// assert!(!mistarr_server::db::imports::rom_retired(&conn, rom).unwrap());
-/// ```
-pub fn rom_retired(conn: &Connection, id: RomId) -> Result<bool> {
-    Ok(conn
-        .query_row(
-            "SELECT r.retired = 1 OR t.retired = 1 FROM roms r JOIN titles t ON t.id = r.title_id
-             WHERE r.id = ?1",
-            [id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or(false))
-}
-
-/// The title owning rom `rom_id`.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure.
-pub fn title_of_rom(conn: &Connection, rom_id: RomId) -> Result<Option<TitleId>> {
-    Ok(conn
-        .query_row("SELECT title_id FROM roms WHERE id = ?1", [rom_id], |r| {
-            r.get(0)
-        })
-        .optional()?)
 }
 
 /// A title and its live roms, or `None` when there is no such title.
@@ -263,14 +176,10 @@ pub fn title_entry(conn: &Connection, id: TitleId) -> Result<Option<TitleEntry>>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::fixtures::conn;
+    use crate::db::ids::RomId;
+    use crate::db::roms;
     use serde_json::json;
-
-    fn conn() -> Connection {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-        c
-    }
 
     #[test]
     fn log_lists_newest_first_with_paging() {
@@ -324,9 +233,9 @@ mod tests {
     #[test]
     fn title_entry_carries_flags_live_roms_and_headers() {
         let c = conn();
-        let rom_id = crate::db::sources::fixtures::seed_rom(
+        let rom_id = crate::db::fixtures::seed_rom(
             &c,
-            "nes",
+            &crate::db::fixtures::pid("nes"),
             "Example Quest (USA).nes",
             8,
             &["bios"],
@@ -337,12 +246,14 @@ mod tests {
             [rom_id],
         )
         .expect("header");
-        let title = title_of_rom(&c, rom_id).expect("title").expect("some");
+        let title = roms::title_of_rom(&c, rom_id)
+            .expect("title")
+            .expect("some");
         let entry = title_entry(&c, title).expect("entry").expect("some");
         assert!(entry.is_bios());
         assert_eq!(entry.name, "Example Quest (USA)");
         assert_eq!(entry.roms[0].header.as_deref(), Some("4E 45 53 1A"));
-        assert_eq!(rom(&c, rom_id).expect("rom").map(|r| r.size), Some(8));
+        assert_eq!(roms::rom(&c, rom_id).expect("rom").map(|r| r.size), Some(8));
         c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [rom_id])
             .expect("retire");
         assert!(title_entry(&c, title)
@@ -351,6 +262,6 @@ mod tests {
             .roms
             .is_empty());
         assert!(title_entry(&c, TitleId(99)).expect("entry").is_none());
-        assert!(title_of_rom(&c, RomId(99)).expect("none").is_none());
+        assert!(roms::title_of_rom(&c, RomId(99)).expect("none").is_none());
     }
 }

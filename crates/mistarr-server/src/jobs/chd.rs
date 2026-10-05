@@ -21,8 +21,9 @@ use super::matching::Track;
 use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::chd::{self as rows, Unidentified};
-use crate::db::files::{self, FileRow, FileState, NewFile, RomMatch};
+use crate::db::files::{self, FileRow, FileState, NewFile};
 use crate::db::ids::{FileId, RomId, TitleId};
+use crate::db::roms::{self, RomMatch};
 use crate::db::settings::{self, keys};
 use crate::db::titles::RomStatus;
 use crate::error::Result;
@@ -108,7 +109,7 @@ pub(crate) async fn scan_file(
     if ctx
         .app
         .db
-        .read(move |c| files::chd_rom_sized(c, &pid, size))
+        .read(move |c| roms::chd_rom_sized(c, &pid, size))
         .await?
     {
         let file = Whole {
@@ -251,7 +252,7 @@ async fn whole_file(
         .db
         .write(move |c| {
             let size = i64::try_from(h.size).unwrap_or(i64::MAX);
-            let m = files::match_rom(c, &pid, &h.sha1, &h.md5, &h.crc32, size)?;
+            let m = roms::match_rom(c, &pid, &h.sha1, &h.md5, &h.crc32, size)?;
             if let (None, Some(id)) = (&m, id) {
                 rows::store_whole_hashes(c, &id, mtime, &h)?;
             }
@@ -328,7 +329,7 @@ pub(crate) fn classify_chd(
 ) -> Result<Vec<NewFile>> {
     let mut cands = Vec::with_capacity(m.tracks.len());
     for t in m.tracks {
-        cands.push(files::roms_matching(conn, platform, t)?);
+        cands.push(roms::roms_matching(conn, platform, t)?);
     }
     let mut out = Vec::with_capacity(m.tracks.len() + 1);
     match winner(conn, &cands)? {
@@ -372,7 +373,7 @@ fn winner(
     titles.dedup();
     titles.retain(|t| cands.iter().all(|c| c.iter().any(|r| r.title_id == *t)));
     for title in titles {
-        let (cues, tracks): (Vec<RomMatch>, Vec<RomMatch>) = files::disc_roms(conn, title)?
+        let (cues, tracks): (Vec<RomMatch>, Vec<RomMatch>) = roms::disc_roms(conn, title)?
             .into_iter()
             .partition(|r| is_cue(&r.name));
         if tracks.len() != cands.len() {
@@ -950,13 +951,7 @@ fn file_changed(ctx: &JobContext, id: FileId, state: FileState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn conn() -> Connection {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-        c
-    }
+    use crate::db::fixtures::conn;
 
     fn psx() -> PlatformId {
         PlatformId("psx".into())
@@ -972,19 +967,20 @@ mod tests {
     }
 
     /// A title with a cue and one rom per `(name, hashes, status)`; the cue's id comes first.
-    fn title(c: &Connection, name: &str, roms: &[(&str, HashSet, &str)]) -> Vec<RomId> {
-        let t = files::seed_title_fixture(c, &psx(), name).expect("title");
+    fn title(c: &Connection, name: &str, roms: &[(&str, HashSet, RomStatus)]) -> Vec<RomId> {
         let cue = HashSet {
             size: 90,
             ..track(200)
         };
-        let cue_name = format!("{name}.cue");
-        let mut ids =
-            vec![files::seed_rom_for_title_fixture(c, t, &cue_name, &cue, "good").expect("cue")];
+        let mut disc = crate::db::fixtures::dat(&psx()).title(name).rom(
+            &format!("{name}.cue"),
+            &cue,
+            RomStatus::Good,
+        );
         for (rom, h, status) in roms {
-            ids.push(files::seed_rom_for_title_fixture(c, t, rom, h, status).expect("rom"));
+            disc = disc.rom(rom, h, *status);
         }
-        ids
+        disc.write(c).expect("disc").roms
     }
 
     fn classify(c: &Connection, tracks: &[HashSet]) -> Vec<NewFile> {
@@ -1012,7 +1008,10 @@ mod tests {
         let ids = title(
             &c,
             "G",
-            &[("g1.bin", track(1), "good"), ("g2.bin", track(2), "good")],
+            &[
+                ("g1.bin", track(1), RomStatus::Good),
+                ("g2.bin", track(2), RomStatus::Good),
+            ],
         );
         let rows = classify(&c, &[track(1), track(2)]);
         assert_eq!(
@@ -1036,7 +1035,10 @@ mod tests {
         let ids = title(
             &c,
             "G",
-            &[("g1.bin", track(3), "good"), ("g2.bin", track(3), "good")],
+            &[
+                ("g1.bin", track(3), RomStatus::Good),
+                ("g2.bin", track(3), RomStatus::Good),
+            ],
         );
         let rows = classify(&c, &[track(3), track(3)]);
         let rom_ids: Vec<_> = rows.iter().map(|r| r.rom_id).collect();
@@ -1051,8 +1053,8 @@ mod tests {
             &c,
             "G",
             &[
-                ("g1.bin", track(1), "good"),
-                ("g2.bin", track(2), "baddump"),
+                ("g1.bin", track(1), RomStatus::Good),
+                ("g2.bin", track(2), RomStatus::BadDump),
             ],
         );
         let rows = classify(&c, &[track(1), track(2)]);
@@ -1064,9 +1066,9 @@ mod tests {
     fn an_incomplete_or_mismatched_set_stays_unverified() {
         let c = conn();
         let listed = [
-            ("g1.bin", track(1), "good"),
-            ("g2.bin", track(2), "good"),
-            ("g3.bin", track(3), "good"),
+            ("g1.bin", track(1), RomStatus::Good),
+            ("g2.bin", track(2), RomStatus::Good),
+            ("g3.bin", track(3), RomStatus::Good),
         ];
         let ids = title(&c, "G", &listed);
         let rows = classify(&c, &[track(1), track(2)]);
@@ -1089,12 +1091,15 @@ mod tests {
         title(
             &c,
             "Short",
-            &[("s1.bin", track(1), "good"), ("s2.bin", track(2), "good")],
+            &[
+                ("s1.bin", track(1), RomStatus::Good),
+                ("s2.bin", track(2), RomStatus::Good),
+            ],
         );
         let listed = [
-            ("l1.bin", track(1), "good"),
-            ("l2.bin", track(2), "good"),
-            ("l3.bin", track(3), "good"),
+            ("l1.bin", track(1), RomStatus::Good),
+            ("l2.bin", track(2), RomStatus::Good),
+            ("l3.bin", track(3), RomStatus::Good),
         ];
         let long = title(&c, "Long", &listed);
         let rows = classify(&c, &[track(1), track(2), track(3)]);
@@ -1152,7 +1157,10 @@ mod tests {
         let ids = title(
             &c,
             "G",
-            &[("g1.bin", track(1), "good"), ("g2.bin", track(2), "good")],
+            &[
+                ("g1.bin", track(1), RomStatus::Good),
+                ("g2.bin", track(2), RomStatus::Good),
+            ],
         );
         assert_eq!(
             rematch_container(&c, &psx(), "PSX/G/g.chd", 3).expect("rematch"),

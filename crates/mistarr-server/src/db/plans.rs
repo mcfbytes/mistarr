@@ -7,10 +7,13 @@ use rusqlite::Connection;
 use serde_json::json;
 
 use super::downloads::{self, DownloadState};
+use super::fixtures::pid;
 use super::ids::TitleId;
 use super::sql::Page;
-use super::titles::{self, Browse, SearchShape, Sort, SEARCH_SHAPE};
-use super::{candidates, chd, files, groups, imports, jobs, launch, source_detail, sources};
+use super::titles;
+use super::titles::browse::{Browse, SearchShape, Sort, SEARCH_SHAPE};
+use super::views::source_detail;
+use super::{candidates, chd, files, groups, imports, jobs, launch, roms, sources};
 use crate::jobs::{JobKind, Lane};
 
 /// The first page of a list as the API's default asks for it.
@@ -52,9 +55,7 @@ fn plan(c: &Connection, sql: &str) -> Vec<String> {
 }
 
 fn seeded() -> Connection {
-    let mut c = Connection::open_in_memory().expect("open");
-    super::migrate::apply(&mut c).expect("migrate");
-    super::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+    let mut c = crate::db::fixtures::conn();
     crate::synth::seed(&mut c, 0.01, 4).expect("catalogue");
     c.execute_batch(
         "INSERT INTO sources (infohash, display_name, origin_file, platform_id, state, added_at)
@@ -111,7 +112,7 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             Box::new(|c| {
                 let nes = mistarr_core::PlatformId("nes".into());
                 let (sha1, md5) = ("0".repeat(40), "0".repeat(32));
-                files::match_live_rom(c, &nes, &sha1, &md5, "00000000", 16).expect("match");
+                roms::match_live_rom(c, &nes, &sha1, &md5, "00000000", 16).expect("match");
             }),
         ),
         (
@@ -126,7 +127,7 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             "crc candidate",
             Box::new(|c| {
                 let nes = mistarr_core::PlatformId("nes".into());
-                files::crc_candidate_exists(c, &nes, "00000000", 16).expect("candidate");
+                roms::crc_candidate_exists(c, &nes, "00000000", 16).expect("candidate");
             }),
         ),
         (
@@ -157,7 +158,7 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             "chd lookups",
             Box::new(|c| {
                 let psx = mistarr_core::PlatformId("psx".into());
-                files::chd_rom_sized(c, &psx, 4_704).expect("chd rom");
+                roms::chd_rom_sized(c, &psx, 4_704).expect("chd rom");
                 chd::layout_known(c, &psx, &[4_704]).expect("layout");
             }),
         ),
@@ -217,16 +218,16 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
                     limit: 60,
                     offset: 0,
                 };
-                drop(titles::browse(c, "nes", &search, page).expect("browse"));
+                drop(titles::browse::browse(c, &pid("nes"), &search, page).expect("browse"));
             }),
         ),
         (
             "counts",
-            Box::new(|c| drop(titles::counts(c, &hide).expect("counts"))),
+            Box::new(|c| drop(titles::browse::counts(c, &hide).expect("counts"))),
         ),
         (
             "title detail",
-            Box::new(|c| drop(titles::group_detail(c, TitleId(1)).expect("detail"))),
+            Box::new(|c| drop(titles::detail::group_detail(c, TitleId(1)).expect("detail"))),
         ),
         (
             "launch",

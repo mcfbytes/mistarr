@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use mistarr_core::dat::{rewrite, RewriteError};
+use mistarr_core::InfoHash;
 
 use crate::jobs::dat_import::MAX_DAT_BYTES;
 use crate::jobs::source_import::MAX_SOURCE_BYTES;
@@ -128,7 +129,7 @@ pub enum Checked {
         /// The whole file.
         bytes: Vec<u8>,
         /// Its infohash.
-        infohash: [u8; 20],
+        infohash: InfoHash,
     },
 }
 
@@ -203,7 +204,7 @@ pub fn check(
             let meta = mistarr_sources::torrent::parse_torrent(&bytes)
                 .map_err(|e| Refused::NotAccepted(format!("not a torrent: {e}")))?;
             Ok(Checked::Torrent {
-                infohash: *meta.infohash.as_bytes(),
+                infohash: meta.infohash,
                 bytes,
             })
         }
@@ -579,7 +580,7 @@ mod tests {
             panic!("a torrent");
         };
         assert_eq!(bytes, torrent);
-        assert_ne!(infohash, [0; 20]);
+        assert_ne!(infohash, InfoHash::from_bytes([0; 20]));
     }
 
     #[test]

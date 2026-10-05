@@ -2,7 +2,7 @@
 
 use rusqlite::Connection;
 
-use super::sql::get_u64;
+use crate::db::sql::get_u64;
 use crate::error::Result;
 
 /// Row counts that decide which wizard steps are complete.
@@ -23,7 +23,7 @@ pub struct WizardCounts {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let c = mistarr_server::db::system::wizard_counts(&conn).unwrap();
+/// let c = mistarr_server::db::views::system::wizard_counts(&conn).unwrap();
 /// assert_eq!(c.dat_versions, 0);
 /// ```
 pub fn wizard_counts(conn: &Connection) -> Result<WizardCounts> {

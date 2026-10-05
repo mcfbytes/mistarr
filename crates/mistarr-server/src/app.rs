@@ -81,9 +81,9 @@ pub struct Options {
 }
 
 impl Default for Options {
-    /// [`Options::for_board`] with the RAM directory at [`crate::db::RAM_TEMP_DIR`].
+    /// [`Options::for_board`] with the RAM directory at [`crate::db::tempdir::RAM_TEMP_DIR`].
     fn default() -> Self {
-        Self::for_board(Path::new(crate::db::RAM_TEMP_DIR))
+        Self::for_board(Path::new(crate::db::tempdir::RAM_TEMP_DIR))
     }
 }
 
@@ -437,14 +437,14 @@ pub struct Startup {
 }
 
 /// Seeds the platforms, refreshes DAT family keys and leaves one current version per
-/// family; returns those with the saved runtime settings, or why they cannot be read.
-fn prepare_catalog(db: Db) -> Result<(Startup, Result<Option<serde_json::Value>>)> {
-    db.write_blocking(|c| {
+/// family, returning what that settled.
+fn prepare_catalog(db: Db) -> Result<Startup> {
+    let (unfinished_scans, resolved) = db.write_blocking(|c| {
         let added = db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS)?;
         if added > 0 {
             tracing::info!(added, "seeded platforms");
         }
-        let unfinished_scans = db::files::platforms_with_progress(c)?;
+        let unfinished_scans = db::scan_progress::platforms_with_progress(c)?;
         let (resolved, settled) = db::transact(c, |tx| {
             db::dats::refresh_families(tx)?;
             let resolved = db::dats::resolve_families(tx)?;
@@ -453,17 +453,19 @@ fn prepare_catalog(db: Db) -> Result<(Startup, Result<Option<serde_json::Value>>
         if settled > 0 {
             tracing::info!(settled, "misnamed files verified under the name rule");
         }
-        let stored = settings::get_json::<serde_json::Value>(c, keys::RUNTIME);
-        Ok((unfinished_scans, resolved, stored))
+        Ok((unfinished_scans, resolved))
+    })?;
+    Ok(Startup {
+        db,
+        unfinished_scans,
+        resolved,
     })
-    .map(|(unfinished_scans, resolved, stored)| {
-        let startup = Startup {
-            db,
-            unfinished_scans,
-            resolved,
-        };
-        (startup, stored)
-    })
+}
+
+/// The runtime settings saved in `db`, if any.
+fn saved_settings(db: &Db) -> Result<Option<RuntimeSettings>> {
+    let stored = db.read_blocking(|c| settings::get_json::<serde_json::Value>(c, keys::RUNTIME))?;
+    Ok(stored.map(RuntimeSettings::from_saved).transpose()?)
 }
 
 /// Runs the startup sequence and returns once the HTTP server is listening.
@@ -573,7 +575,7 @@ fn clean_leftovers(config: &Config) -> Result<bool> {
 /// [`Error::Io`] when leftovers cannot be removed or a cut-short swap left no database,
 /// [`Error::SchemaTooNew`], [`Error::Migration`] or [`Error::Db`] when it cannot be opened.
 pub(crate) fn open_db(config: &mut Config) -> Result<Startup> {
-    if let Some(dir) = std::env::var_os(crate::db::SQLITE_TMPDIR) {
+    if let Some(dir) = std::env::var_os(crate::db::tempdir::SQLITE_TMPDIR) {
         tracing::info!(dir = %Path::new(&dir).display(), "SQLite temporary files");
     }
     // `[memory]` cannot move from the overlay below, so this reaches the log
@@ -605,15 +607,8 @@ pub(crate) fn open_db(config: &mut Config) -> Result<Startup> {
         Some(m) => Db::open_counting(&path, &m.steps())?,
         None => Db::open(&path)?,
     };
-    let (startup, stored) = prepare_catalog(db)?;
-    let saved = match stored {
-        Ok(value) => value
-            .map(RuntimeSettings::from_saved)
-            .transpose()
-            .map_err(Error::from),
-        Err(e) => Err(e),
-    };
-    match saved {
+    let startup = prepare_catalog(db)?;
+    match saved_settings(&startup.db) {
         Ok(Some(saved)) => config.apply(&saved),
         Ok(None) => {}
         Err(e) => {
@@ -1002,7 +997,10 @@ mod tests {
     #[test]
     fn default_options_follow_the_board() {
         let o = Options::default();
-        assert_eq!(o, Options::for_board(Path::new(crate::db::RAM_TEMP_DIR)));
+        assert_eq!(
+            o,
+            Options::for_board(Path::new(crate::db::tempdir::RAM_TEMP_DIR))
+        );
         assert_eq!(o.corename_path, PathBuf::from("/tmp/CORENAME"));
         assert_eq!(o.corename_poll, Duration::from_secs(2));
         assert_eq!(o.command_path, PathBuf::from("/dev/MiSTer_cmd"));

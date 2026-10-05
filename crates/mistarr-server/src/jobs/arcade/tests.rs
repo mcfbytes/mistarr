@@ -363,7 +363,7 @@ async fn run(app: &Arc<AppState>) -> serde_json::Value {
 async fn stored(app: &Arc<AppState>, rel: &str) -> Option<rows::StoredMra> {
     let rel = rel.to_owned();
     app.db
-        .read(move |c| rows::stored_mra(c, PLATFORM, &rel))
+        .read(move |c| rows::stored_mra(c, &platform(), &rel))
         .await
         .expect("stored")
 }
@@ -460,8 +460,8 @@ async fn a_run_stopped_after_storing_leaves_the_picks_to_the_next() {
     let (version, run_no) = app
         .db
         .write(|c| {
-            let v = rows::mra_version(c, PLATFORM, 1)?;
-            Ok((v, rows::next_run(c, PLATFORM)?))
+            let v = rows::mra_version(c, &platform(), 1)?;
+            Ok((v, rows::next_run(c, &platform())?))
         })
         .await
         .expect("version");
@@ -489,7 +489,7 @@ async fn a_run_stopped_after_storing_leaves_the_picks_to_the_next() {
     assert_eq!(picks(&app).await, 2);
     let pending = app
         .db
-        .read(|c| rows::recompute_pending(c, PLATFORM))
+        .read(|c| rows::recompute_pending(c, &platform()))
         .await
         .expect("pending");
     assert!(!pending);

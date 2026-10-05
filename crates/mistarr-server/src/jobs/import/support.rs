@@ -11,7 +11,7 @@ use mistarr_core::HashSet as Hashes;
 use mistarr_mister::PlaceRom;
 
 use crate::db::ids::RomId;
-use crate::db::imports::EntryRom;
+use crate::db::roms::EntryRom;
 
 /// Bytes of a staged payload handed to the adapter as its head.
 const HEAD_LEN: u64 = 16;

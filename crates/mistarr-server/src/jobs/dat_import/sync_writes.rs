@@ -8,7 +8,8 @@ use super::recompute::*;
 use super::stream::*;
 use super::*;
 use crate::db::dat_stage::{StagedGame, StagedRom};
-use crate::db::files::{FileState, Hashed};
+use crate::db::files::{FileState, NewFile};
+use crate::db::fixtures::pid;
 use crate::db::ids::FileId;
 use crate::db::{dat_stage, files, titles};
 
@@ -126,23 +127,17 @@ fn catalogue(dir: &Path, scale: f64, unmatched: usize, dat: &[Track]) -> Db {
                 sha1: rng.hex(40),
             };
             let t = known.unwrap_or(&own);
-            let hashed = Hashed {
-                crc32: Some(&t.crc32),
-                md5: Some(&t.md5),
-                sha1: Some(&t.sha1),
-                header_rule: Some("none"),
-                whole: None,
-            };
             let path = format!("{}/{}", t.dir, t.name);
             files::upsert(
                 &tx,
                 &psx,
-                &path,
-                t.size,
-                1,
-                &hashed,
-                None,
-                FileState::Unverified,
+                &NewFile {
+                    crc32: Some(t.crc32.clone()),
+                    md5: Some(t.md5.clone()),
+                    sha1: Some(t.sha1.clone()),
+                    header_rule: Some("none".to_string()),
+                    ..NewFile::unhashed(&path, t.size, 1, FileState::Unverified)
+                },
                 1,
             )?;
         }
@@ -184,7 +179,7 @@ fn recompute(db: &Db) {
         }
     }
     db.write_tx_blocking(|tx| {
-        titles::recompute_platform(tx, "psx", &Prefs::default())?;
+        titles::recompute::recompute_platform(tx, &pid("psx"), &Prefs::default())?;
         Ok(())
     })
     .expect("recompute");
@@ -258,7 +253,7 @@ fn the_stage_gives_its_temporary_space_back() {
     let dir = tempfile::tempdir().expect("tempdir");
     run_alone(
         "stage_shrinks_alone",
-        &[(crate::db::SQLITE_TMPDIR, dir.path())],
+        &[(crate::db::tempdir::SQLITE_TMPDIR, dir.path())],
     );
 }
 
@@ -310,7 +305,8 @@ fn staged_game(name: String, rng: &mut Rng) -> StagedGame {
 #[test]
 #[ignore = "run alone by the_stage_gives_its_temporary_space_back"]
 fn stage_shrinks_alone() {
-    let tmp = PathBuf::from(std::env::var_os(crate::db::SQLITE_TMPDIR).expect("SQLITE_TMPDIR"));
+    let tmp =
+        PathBuf::from(std::env::var_os(crate::db::tempdir::SQLITE_TMPDIR).expect("SQLITE_TMPDIR"));
     let dir = tempfile::tempdir().expect("tempdir");
     let db = catalogue(dir.path(), 0.01, 0, &[]);
     db.write_blocking(|c| Ok(c.pragma_update(None, "temp_store", "FILE")?))

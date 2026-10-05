@@ -6,7 +6,7 @@ use mistarr_mister::launch::{FakeOutcome, RecordingSink};
 
 use super::*;
 use crate::app::testutil::state;
-use crate::db::files::{self, FileState, Hashed};
+use crate::db::files::{self, FileState, NewFile};
 
 fn hashes() -> HashSet {
     HashSet {
@@ -36,13 +36,24 @@ async fn seed(app: &AppState, platform: &str, roms: &[(&str, FileState)]) -> Tit
     let roms: Vec<(String, FileState)> = roms.iter().map(|(n, s)| ((*n).to_owned(), *s)).collect();
     app.db
         .write(move |c| {
-            let t = files::seed_title_fixture(c, &pid, "Example Quest (USA)")?;
-            for (rel, st) in &roms {
+            let mut dat = crate::db::fixtures::dat(&pid).title("Example Quest (USA)");
+            for (rel, _) in &roms {
                 let name = rel.rsplit('/').next().unwrap_or(rel);
-                let rom = files::seed_rom_for_title_fixture(c, t, name, &hashes(), "good")?;
-                files::upsert(c, &pid, rel, 4, 0, &Hashed::default(), Some(rom), *st, 0)?;
+                dat = dat.rom(name, &hashes(), crate::db::titles::RomStatus::Good);
             }
-            Ok(t)
+            let written = dat.write(c)?;
+            for ((rel, st), rom) in roms.iter().zip(&written.roms) {
+                files::upsert(
+                    c,
+                    &pid,
+                    &NewFile {
+                        rom_id: Some(*rom),
+                        ..NewFile::unhashed(rel, 4, 0, *st)
+                    },
+                    0,
+                )?;
+            }
+            Ok(written.titles[0])
         })
         .await
         .expect("seed")
@@ -243,12 +254,15 @@ async fn an_mra_title_loads_its_mra() {
     let id = app
         .db
         .write(|c| {
-            let t = files::seed_title_fixture(c, &PlatformId("arcade".into()), "Example Blaster")?;
+            let written = crate::db::fixtures::dat(&PlatformId("arcade".into()))
+                .title("Example Blaster")
+                .rom("exb.zip", &hashes(), crate::db::titles::RomStatus::Good)
+                .write(c)?;
+            let (t, rom) = (written.titles[0], written.first_rom());
             c.execute(
                 "UPDATE titles SET source = 'mra', mra_path = 'Example Blaster.mra' WHERE id = ?1",
                 [t],
             )?;
-            let rom = files::seed_rom_for_title_fixture(c, t, "exb.zip", &hashes(), "good")?;
             c.execute("UPDATE roms SET present = 1 WHERE id = ?1", [rom])?;
             Ok(t)
         })
