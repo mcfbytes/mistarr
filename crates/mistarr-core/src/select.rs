@@ -44,11 +44,33 @@ impl HiddenFlag {
             HiddenFlag::Program => "program",
         }
     }
+
+    /// The flag named `name`, ignoring ASCII case; `None` for a flag that is never hidden.
+    ///
+    /// ```
+    /// use mistarr_core::select::HiddenFlag;
+    /// assert_eq!(HiddenFlag::from_name("Proto"), Some(HiddenFlag::Proto));
+    /// assert_eq!(HiddenFlag::from_name("unl"), None);
+    /// ```
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<Self> {
+        [
+            HiddenFlag::Bios,
+            HiddenFlag::Beta,
+            HiddenFlag::Proto,
+            HiddenFlag::Demo,
+            HiddenFlag::Sample,
+            HiddenFlag::Program,
+        ]
+        .into_iter()
+        .find(|f| f.as_flag_name().eq_ignore_ascii_case(name))
+    }
 }
 
 /// User preferences that drive 1G1R selection, matching the `[prefs]` block
-/// in `docs/ARCHITECTURE.md`.
+/// in `docs/ARCHITECTURE.md`. Absent fields take their defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
 pub struct Prefs {
     /// Preferred regions, most preferred first.
     pub regions: Vec<String>,
@@ -56,8 +78,19 @@ pub struct Prefs {
     pub languages: Vec<String>,
     /// Prefer the highest revision when `true`, else the lowest.
     pub prefer_latest_revision: bool,
-    /// Flags that hide a variant from the pick by default.
+    /// Flags that hide a variant from the pick by default; names that are not a
+    /// [`HiddenFlag`] are dropped when read.
+    #[serde(deserialize_with = "hidden_flags")]
     pub hide: Vec<HiddenFlag>,
+}
+
+/// Reads flag names through [`HiddenFlag::from_name`], dropping the others.
+fn hidden_flags<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<HiddenFlag>, D::Error> {
+    let names = Vec::<String>::deserialize(d)?;
+    Ok(names
+        .iter()
+        .filter_map(|n| HiddenFlag::from_name(n))
+        .collect())
 }
 
 impl Default for Prefs {
@@ -317,6 +350,18 @@ mod tests {
         assert_eq!(HiddenFlag::Demo.as_flag_name(), "demo");
         assert_eq!(HiddenFlag::Sample.as_flag_name(), "sample");
         assert_eq!(HiddenFlag::Program.as_flag_name(), "program");
+    }
+
+    #[test]
+    fn hidden_flags_read_by_name_and_drop_the_rest() {
+        for f in Prefs::default().hide {
+            assert_eq!(HiddenFlag::from_name(f.as_flag_name()), Some(f));
+        }
+        assert_eq!(HiddenFlag::from_name("BIOS"), Some(HiddenFlag::Bios));
+        assert_eq!(HiddenFlag::from_name("pirate"), None);
+        let p: Prefs = serde_json::from_str(r#"{"hide":["demo","unl"]}"#).expect("prefs");
+        assert_eq!(p.hide, [HiddenFlag::Demo]);
+        assert_eq!(p.regions, Prefs::default().regions);
     }
 
     #[test]
