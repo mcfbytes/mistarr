@@ -102,9 +102,10 @@
 
   // Moves the file back into dats/; the list shows it waiting until the next read.
   async function retry(f: IncomingFile): Promise<void> {
+    const since = Date.now();
     const up = await working(f, () => api.retryRejectedDat(f.file));
     if (up) {
-      addUpload({ kind: which, file: up.file, jobId: up.job_id, reason: up.reason });
+      addUpload({ kind: which, file: up.file, jobId: up.job_id, reason: up.reason }, since);
       patchIncoming(which, f.file, null);
       patchIncoming(which, up.file, up);
       incoming(which).reloadSoon();

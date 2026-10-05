@@ -16,9 +16,9 @@ export function receivedText(up: Pick<IncomingFile, 'file' | 'state' | 'reason'>
   return `${uploadNoun(up.file)} received: ${up.file}. ${next}`;
 }
 
-/** Follows a received file as a session upload and says so. */
-export function received(which: Watched, up: IncomingFile): void {
-  addUpload({ kind: which, file: up.file, jobId: up.job_id, reason: up.reason });
+/** Follows a received file as a session upload and says so; `since` is when its request began. */
+export function received(which: Watched, up: IncomingFile, since: number): void {
+  addUpload({ kind: which, file: up.file, jobId: up.job_id, reason: up.reason }, since);
   showToast(receivedText(up), 'info');
   incoming(which).reloadSoon();
 }
@@ -30,9 +30,10 @@ export function received(which: Watched, up: IncomingFile): void {
 export async function uploadFiles(which: Watched, input: HTMLInputElement | undefined): Promise<void> {
   const files = Array.from(input?.files ?? []);
   for (const file of files) {
+    const since = Date.now();
     const up = await attempt(() => (which === 'dats' ? api.uploadDat(file) : api.uploadSource(file)), `${file.name}: `);
     if (up) {
-      received(which, up);
+      received(which, up, since);
     }
   }
   if (input) {
@@ -42,9 +43,10 @@ export async function uploadFiles(which: Watched, input: HTMLInputElement | unde
 
 /** Sends a magnet link; true when the server took it. */
 export async function addMagnet(uri: string): Promise<boolean> {
+  const since = Date.now();
   const up = await attempt(() => api.addMagnet(uri));
   if (up) {
-    received('sources', up);
+    received('sources', up, since);
   }
   return up !== undefined;
 }

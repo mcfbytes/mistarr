@@ -2,7 +2,7 @@
   import { onMount } from 'svelte';
   import { navigate } from '../lib/router.svelte';
   import { api, errorMessage } from '../lib/api';
-  import { showToast } from '../lib/stores/toast.svelte';
+  import { attempt } from '../lib/actions';
   import { platforms } from '../lib/stores/platforms.svelte';
   import { dats } from '../lib/stores/dats.svelte';
   import { getStatus, getWizard, loadStatus, loadWizard } from '../lib/stores/status.svelte';
@@ -58,15 +58,12 @@
 
   async function runCoreDetection(): Promise<void> {
     detectingCores = true;
-    try {
-      const result = await api.cores();
+    const result = await attempt(() => api.cores());
+    if (result) {
       coresResult = result.platforms;
       await platforms.load();
-    } catch (err) {
-      showToast(errorMessage(err));
-    } finally {
-      detectingCores = false;
     }
+    detectingCores = false;
   }
 
   async function loadSettings(): Promise<void> {
@@ -101,11 +98,7 @@
       return;
     }
     dismissed = true;
-    try {
-      await api.wizardDone();
-    } catch (err) {
-      showToast(errorMessage(err));
-    }
+    await attempt(() => api.wizardDone());
   }
 
   async function finish(): Promise<void> {

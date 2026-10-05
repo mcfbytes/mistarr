@@ -12,8 +12,8 @@
     patchGroup
   } from '../lib/stores/titles.svelte';
   import { titleUrl } from '../lib/router.svelte';
-  import { attempt } from '../lib/actions';
-  import { api, errorMessage } from '../lib/api';
+  import { attempt, optimistic } from '../lib/actions';
+  import { api } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { launchBlocker } from '../lib/launch';
@@ -145,17 +145,11 @@
       return;
     }
     const next = currentlyWanted > 0 ? 0 : 1;
-    patchGroup(parentId, { wanted: next });
-    try {
-      if (next > 0) {
-        await api.want(pickId);
-      } else {
-        await api.unwant(pickId);
-      }
-    } catch (err) {
-      patchGroup(parentId, { wanted: currentlyWanted });
-      showToast(errorMessage(err));
-    }
+    await optimistic({
+      apply: () => patchGroup(parentId, { wanted: next }),
+      revert: () => patchGroup(parentId, { wanted: currentlyWanted }),
+      call: () => (next > 0 ? api.want(pickId) : api.unwant(pickId))
+    });
   }
 
   /** Groups whose cover failed to load, drawn with the generated poster instead. */

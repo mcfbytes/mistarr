@@ -37,30 +37,44 @@ export function getUploads(kind: Watched): Upload[] {
 
 /**
  * Follows an upload and says once how its import ended: a DAT's from `dat.loaded` or
- * `dat.rejected`, a source's from its job. An ending heard before the upload's answer counts.
+ * `dat.rejected`, a source's from its job. An ending heard since `since`, when the request
+ * began, counts even if it came before the answer; an earlier attempt's does not.
  */
-export function addUpload(upload: Upload): void {
+export function addUpload(upload: Upload, since: number): void {
   const { kind, file } = upload;
   const key = followKey(kind, file);
   following.get(key)?.();
   const rest = uploads.filter((u) => !(u.kind === kind && u.file === file));
-  const jobId = upload.jobId ?? jobIdFor(kind === 'dats' ? 'dat_import' : 'source_import', file);
-  uploads = [{ ...upload, jobId }, ...rest].slice(0, 10);
-  following.set(
-    key,
-    followJob(
-      (end) => end.detail === file && end.kind === (kind === 'dats' ? DAT_FILE : 'source_import'),
-      (end) => {
-        following.delete(key);
-        const why = rejection(end);
-        if (why !== null) {
-          showToast(`${file} was rejected: ${why}`, 'error');
-        } else {
-          showToast(kind === 'dats' ? `${file} loaded.` : `${file} added as a source.`, 'success');
-        }
+  const jobId = upload.jobId ?? jobIdFor(kind === 'dats' ? 'dat_import' : 'source_import', file, since);
+  const next = [{ ...upload, jobId }, ...rest];
+  for (const gone of next.slice(10)) {
+    stopFollowing(gone.kind, gone.file);
+  }
+  uploads = next.slice(0, 10);
+  const ending = { over: false };
+  const stop = followJob(
+    (end) => end.detail === file && end.kind === (kind === 'dats' ? DAT_FILE : 'source_import'),
+    (end) => {
+      ending.over = true;
+      following.delete(key);
+      const why = rejection(end);
+      if (why !== null) {
+        showToast(`${file} was rejected: ${why}`, 'error');
+      } else {
+        showToast(kind === 'dats' ? `${file} loaded.` : `${file} added as a source.`, 'success');
       }
-    )
+    },
+    since
   );
+  if (!ending.over) {
+    following.set(key, stop);
+  }
+}
+
+function stopFollowing(kind: Watched, file: string): void {
+  const key = followKey(kind, file);
+  following.get(key)?.();
+  following.delete(key);
 }
 
 /** Gives an upload received before its job was recorded the job the server queued for it. */
@@ -69,11 +83,13 @@ export function resolveUpload(kind: Watched, file: string, jobId: number): void 
 }
 
 export function markUploadsStale(): void {
+  for (const u of uploads) {
+    stopFollowing(u.kind, u.file);
+  }
   uploads = uploads.map((u) => ({ ...u, stale: true }));
 }
 
 export function dismissUpload(kind: Watched, file: string): void {
-  following.get(followKey(kind, file))?.();
-  following.delete(followKey(kind, file));
+  stopFollowing(kind, file);
   uploads = uploads.filter((u) => !(u.kind === kind && u.file === file));
 }

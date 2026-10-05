@@ -112,3 +112,12 @@ test('unnamed fetches are told apart without the URL and a cancel shows it is pe
   await expect(pending).toHaveText('Cancelling…');
   await expect(toasts(page).getByText('The fetch was cancelled.')).toBeVisible();
 });
+
+test('a fetch answered without a job id still says when it fails', async ({ page }) => {
+  await page.goto('/#/sources');
+  await page.getByLabel('Add from a URL').fill('https://example.invalid/busy.html');
+  await page.getByRole('button', { name: 'Fetch' }).click();
+  await expect(
+    toasts(page).getByText("The fetch failed: This isn't a DAT, DAT pack or torrent file.")
+  ).toBeVisible({ timeout: 10_000 });
+});

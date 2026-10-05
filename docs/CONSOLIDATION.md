@@ -413,19 +413,19 @@ Opus · `mistarr-server` (`jobs/`), `mistarr-core` · branch `wp-64-matching`
 
 Sonnet · `web/` · branch `wp-65-web-stores`
 
-- [x] `ListStore<T>` in `stores/list.svelte.ts` with `items`, `total`,
+- [ ] `ListStore<T>` in `stores/list.svelte.ts` with `items`, `total`,
   `loaded`, `error`, `load()` over every page, `ensure()`, `patch()` and
   `reloadSoon()`, used by every list store. Consumers read `store.items`, and
   the `getX`/`$derived(getX())` pairs go. Titles keeps its own store.
-- [x] `coalesce(fn, ms, { leading })` in `lib/coalesce.ts`, with every delay
+- [ ] `coalesce(fn, ms, { leading })` in `lib/coalesce.ts`, with every delay
   constant in one place, replaces the six timers; one search debounce.
-- [x] `optimistic({ apply, revert, call, commit })` and `attempt(fn)` in
+- [ ] `optimistic({ apply, revert, call, commit })` and `attempt(fn)` in
   `lib/actions.ts` replace the copied try, rollback and toast blocks.
-- [x] `followJob(match, onEnd)` replaces `pendingScans`, `pendingFetches`, the
+- [ ] `followJob(match, onEnd)` replaces `pendingScans`, `pendingFetches`, the
   uploads' early notes and SourceDetail's bind effect; `jobOutcome` moves to
   `status.ts` and the two label maps merge.
-- [x] Every busy set is a `SvelteSet`.
-- [x] `api.ts`: `updateSource` uses `SeedPolicy` and `SourceState`; `Job.kind`
+- [ ] Every busy set is a `SvelteSet`.
+- [ ] `api.ts`: `updateSource` uses `SeedPolicy` and `SourceState`; `Job.kind`
   is a `JobKind` union; `scan` returns a named type; `bindPlatformDat`,
   `Binding` and `Uploaded` go; `EventSubscriber` uses `headers()`; pause and
   resume both apply the status they return.

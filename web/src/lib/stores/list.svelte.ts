@@ -25,6 +25,7 @@ export class ListStore<T> {
   private readonly options: ListOptions<T>;
   private readonly soon: Coalesced;
   private reading: Promise<void> | null = null;
+  private again: Promise<void> | null = null;
 
   constructor(
     fetchPage: (limit: number, offset: number) => Promise<Paged<T>>,
@@ -38,12 +39,22 @@ export class ListStore<T> {
     this.soon = coalesce(() => void this.load(), ms, { leading: leading ?? false });
   }
 
-  /** Reads every page; never throws, a failure lands in `error` while nothing has loaded. */
+  /**
+   * Reads every page; never throws, a failure lands in `error` while nothing has loaded.
+   * It resolves with rows read after the call: a read already under way is followed by one more.
+   */
   load(): Promise<void> {
-    this.reading ??= this.read().finally(() => {
-      this.reading = null;
+    if (!this.reading) {
+      this.reading = this.read().finally(() => {
+        this.reading = null;
+      });
+      return this.reading;
+    }
+    this.again ??= this.reading.then(() => {
+      this.again = null;
+      return this.load();
     });
-    return this.reading;
+    return this.again;
   }
 
   /** Reads the list once, if it has not been read. */

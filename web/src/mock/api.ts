@@ -331,7 +331,7 @@ export const mockApi: Api = {
         throw new ApiError('bad_request', 'Only http, https and magnet links are accepted.', 400);
       }
       const { token, id } = startFetch(url);
-      return { token, job_id: id, target: null, file: null };
+      return { token, job_id: /busy/.test(url) ? null : id, target: null, file: null };
     }, 600),
   cancelFetch: (token) => reply(() => cancelFetch(token), 800),
   updateSource: (id, patch) => reply(() => updateSource(id, patch)),

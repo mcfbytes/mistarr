@@ -1,7 +1,7 @@
 import { SvelteSet } from 'svelte/reactivity';
 import { attempt } from './actions';
 import { api } from './api';
-import { followJob, type JobEnd } from './stores/jobs.svelte';
+import { fetchJobId, followJob, type JobEnd } from './stores/jobs.svelte';
 import { showToast } from './stores/toast.svelte';
 import { received } from './upload';
 import type { IncomingFile, Job } from './types';
@@ -21,13 +21,13 @@ export function isCancelling(token: number): boolean {
 }
 
 // Says how fetch job `end` ended: a placed file is followed as an upload, a failure is toasted.
-function announceFetch(end: JobEnd): void {
+function announceFetch(end: JobEnd, since: number): void {
   const progress = end.progress;
   if (end.state === 'done') {
     const target = progress?.target;
     const placed = progress?.placed;
     if ((target === 'dats' || target === 'sources') && placed && typeof placed === 'object') {
-      received(target, placed as IncomingFile);
+      received(target, placed as IncomingFile, since);
     }
     return;
   }
@@ -40,8 +40,10 @@ function announceFetch(end: JobEnd): void {
 }
 
 // Follows URL fetch `token`, whose job is `jobId` once recorded; never the URL.
-function followFetch(token: number, jobId: number | null): void {
-  followJob((end) => end.kind === 'url_fetch' && (end.id === jobId || end.progress?.token === token), announceFetch);
+function followFetch(token: number, jobId: number | null, since: number): void {
+  const mine = (end: JobEnd): boolean =>
+    end.kind === 'url_fetch' && (end.id === (jobId ?? fetchJobId(token)) || end.progress?.token === token);
+  followJob(mine, (end) => announceFetch(end, since), since);
 }
 
 /**
@@ -49,16 +51,17 @@ function followFetch(token: number, jobId: number | null): void {
  * in the background. The link is kept nowhere; true when the server took it.
  */
 export async function addFromUrl(link: string): Promise<boolean> {
+  const since = Date.now();
   const started = await attempt(() => api.fetchUrl(link));
   if (!started) {
     return false;
   }
   if (started.target && started.file) {
-    received(started.target, started.file);
+    received(started.target, started.file, since);
     return true;
   }
   if (started.token !== null) {
-    followFetch(started.token, started.job_id);
+    followFetch(started.token, started.job_id, since);
   }
   showToast(FETCH_QUEUED, 'info');
   return true;

@@ -52,6 +52,9 @@ interface Follower {
 }
 
 const followers = new SvelteSet<Follower>();
+// Fetch tokens to job ids, from live progress; dropped when the job ends.
+// eslint-disable-next-line svelte/prefer-svelte-reactivity -- only event handlers read it, never markup
+const fetchJobs = new Map<number, number>();
 // Pages showing the recent list; it is re-read only while one is open.
 let recentWatchers = 0;
 
@@ -60,19 +63,28 @@ export function getFinishedJob(id: number): JobEnd | undefined {
   return ended.find((e) => e.id === id);
 }
 
-/** The job queued for `file` of `kind`, from the open jobs or an ending heard lately. */
-export function jobIdFor(kind: JobKind, file: string): number | null {
+/** The job queued for `file` of `kind`: an open one, else the newest that ended at or after `since`. */
+export function jobIdFor(kind: JobKind, file: string, since: number): number | null {
   const open = jobs.items.find((j) => j.kind === kind && jobDetail(j.payload) === file);
-  return open?.id ?? ended.find((e) => e.kind === kind && e.detail === file)?.id ?? null;
+  const late = [...ended].reverse().find((e) => e.at >= since && e.kind === kind && e.detail === file);
+  return open?.id ?? late?.id ?? null;
+}
+
+/** The job of URL fetch `token`, once a progress event has named both. */
+export function fetchJobId(token: number): number | null {
+  return fetchJobs.get(token) ?? null;
 }
 
 /**
- * Calls `onEnd` once, with the first ending `match` accepts, among those heard in the
- * last half minute or still to come; returns the function that stops following.
+ * Calls `onEnd` once, with the first ending `match` accepts, among those heard since
+ * `since` (default: the last half minute) or still to come; returns the function that stops following.
  */
-export function followJob(match: (end: JobEnd) => boolean, onEnd: (end: JobEnd) => void): () => void {
-  const now = Date.now();
-  const heard = ended.find((e) => now - e.at <= ENDED_HEARD_MS && match(e));
+export function followJob(
+  match: (end: JobEnd) => boolean,
+  onEnd: (end: JobEnd) => void,
+  since = Date.now() - ENDED_HEARD_MS
+): () => void {
+  const heard = ended.find((e) => e.at >= since && match(e));
   if (heard) {
     onEnd(heard);
     return () => undefined;
@@ -115,6 +127,7 @@ export function resyncRecent(): Promise<void> {
 // After a resync the events that finished jobs may be lost; forget what is known.
 export function resetFinished(): void {
   ended = [];
+  fetchJobs.clear();
 }
 
 /** Whether job `id` is known to be running, so its next progress needs no re-read. */
@@ -129,9 +142,17 @@ export function applyJobProgress(
   progress: Record<string, unknown> | null,
   detail: string | null = null
 ): void {
+  if (kind === 'url_fetch' && typeof progress?.token === 'number') {
+    fetchJobs.set(progress.token, id);
+  }
   if (state === 'done' || state === 'failed') {
     jobs.patch(id, null);
     reportEnd({ id, kind, state, progress, detail });
+    for (const [token, job] of fetchJobs) {
+      if (job === id) {
+        fetchJobs.delete(token);
+      }
+    }
     if (recentWatchers > 0) {
       recent.reloadSoon();
     }
