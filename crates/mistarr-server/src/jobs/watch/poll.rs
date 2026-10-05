@@ -7,7 +7,6 @@ use std::time::Duration;
 
 use mistarr_clients::{ClientError, DownloadClient, SeedPolicy, TorrentState, TorrentStatus};
 
-use super::transfer;
 use crate::app::{AppState, Options};
 use crate::db::downloads::{self as rows, DownloadState, Observed, PollRow};
 use crate::db::ids::DownloadId;
@@ -16,6 +15,7 @@ use crate::db::settings::{self, keys};
 use crate::db::sources;
 use crate::error::Result;
 use crate::jobs::detect_client::ClientStatus;
+use crate::jobs::{transfer, Scheduler};
 
 /// Consecutive failed polls after which the client is shown unreachable.
 pub const FAILURES_BEFORE_UNREACHABLE: u32 = 3;
@@ -40,7 +40,7 @@ impl Cadence {
     ///
     /// ```
     /// use mistarr_server::app::Options;
-    /// use mistarr_server::jobs::poll::Cadence;
+    /// use mistarr_server::jobs::watch::poll::Cadence;
     /// assert_eq!(Cadence::Active.interval(&Options::default()).as_secs(), 5);
     /// ```
     #[must_use]
@@ -80,7 +80,7 @@ pub struct Seen {
 ///     staged_path: None, source_id: SourceId(1), file_index: 0, path: "NES/a.nes".into(),
 ///     infohash: "ab".into(), torrent_name: "Set".into(), single_file: false,
 ///     client_id: None, seed_policy: "none".into(), size: 4 };
-/// let p = mistarr_server::jobs::poll::staged_path(Path::new("/s"), &row);
+/// let p = mistarr_server::jobs::watch::poll::staged_path(Path::new("/s"), &row);
 /// assert_eq!(p, Path::new("/s/ab/Set/NES/a.nes"));
 /// ```
 #[must_use]
@@ -118,7 +118,7 @@ fn push_relative(out: &mut PathBuf, rel: &str) {
 /// let st = TorrentStatus { infohash: InfoHash::from_bytes([0; 20]), state: TorrentState::Downloading,
 ///     files: vec![FileProgress { index: 0, bytes_done: 1, size: None, wanted: true }],
 ///     ratio: 0.0, down_rate: 0, up_rate: 0, is_finished: false };
-/// let seen = mistarr_server::jobs::poll::observe(&st, &row, Path::new("/s")).unwrap();
+/// let seen = mistarr_server::jobs::watch::poll::observe(&st, &row, Path::new("/s")).unwrap();
 /// assert_eq!((seen.state, seen.progress), (DownloadState::Transferring, 0.25));
 /// ```
 #[must_use]
@@ -347,15 +347,10 @@ async fn lost(app: &AppState, source: SourceId, group: &[PollRow]) -> Result<Opt
     let ids: Vec<DownloadId> = group.iter().map(|r| r.id).collect();
     let moved = app
         .db
-        .write(move |c| {
-            sources::set_client_id(c, source, None)?;
-            rows::move_all(
-                c,
-                &ids,
-                DownloadState::Failed,
-                Some(LOST_TORRENT),
-                crate::unix_now(),
-            )
+        .write_tx(move |tx| {
+            sources::set_client_id(tx, source, None)?;
+            let now = crate::unix_now();
+            rows::move_all(tx, &ids, DownloadState::Failed, Some(LOST_TORRENT), now)
         })
         .await?;
     transfer::publish_ids(app, moved).await?;
@@ -404,7 +399,7 @@ pub async fn run(app: Arc<AppState>) {
             .await
             .unwrap_or(0);
         if waiting > 0 {
-            transfer::kick(&app).await;
+            Scheduler::submit(&app, Arc::new(transfer::Transfer)).await;
         }
         next = poller.tick(&app).await.unwrap_or_else(|e| {
             tracing::warn!(error = %e, "poll failed");

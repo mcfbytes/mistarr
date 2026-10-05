@@ -272,7 +272,8 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
         (
             "job dedupe",
             Box::new(|c| {
-                jobs::find_open(c, JobKind::Import, &json!({"download_id": 1})).expect("find");
+                let open = &jobs::JobState::ACTIVE;
+                jobs::find_in(c, JobKind::Import, &json!({"download_id": 1}), open).expect("find");
             }),
         ),
         (

@@ -66,7 +66,7 @@ the panel is open.
 
 **Platforms** (`/`). One card per platform with core present, counts, and a
 scan button, below a banner of the platform's art. While the platform's scan
-is open the card shows its status pill, with a progress bar of files done
+is open the card shows its status pill, with a progress bar of folders done
 while it runs or its reason while it waits. Scan shows a toast when
 the scan is queued and another with its outcome when it finishes, such as
 "Scan of Nintendo 64: 410 matched, 2 unmatched", followed by "3 not

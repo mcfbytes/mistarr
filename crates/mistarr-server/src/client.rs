@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use mistarr_clients::{ClientKind, DownloadClient, PathMapping};
 
 use crate::config::ClientConfig;
-use crate::jobs::core_limits::ClientHold;
 use crate::jobs::detect_client::ClientStatus;
+use crate::jobs::watch::core_limits::ClientHold;
 
 /// The detected download client, how it is held for a running core, and the locks that
 /// order detection, starting and freezing it. The handle and the hold change only
@@ -82,7 +82,7 @@ impl ClientSlot {
     /// Whether the client's process is stopped for a running core.
     ///
     /// ```
-    /// use mistarr_server::{client::ClientSlot, jobs::core_limits::ClientHold};
+    /// use mistarr_server::{client::ClientSlot, jobs::watch::core_limits::ClientHold};
     /// let slot = ClientSlot::default();
     /// assert!(slot.set_hold(Some(ClientHold::Frozen)) && slot.frozen());
     /// ```

@@ -55,7 +55,7 @@ pub enum ClientHold {
 /// ```
 /// use mistarr_clients::{ClientKind, RateLimit};
 /// use mistarr_server::client::ClientEndpoint;
-/// use mistarr_server::jobs::core_limits::SavedLimits;
+/// use mistarr_server::jobs::watch::core_limits::SavedLimits;
 /// let s = SavedLimits { client: ClientEndpoint { kind: ClientKind::Rtorrent, url: "127.0.0.1:5000".into() },
 ///     down: None, up: Some(RateLimit::kbps(40)), alt_up: None };
 /// let json = serde_json::to_string(&s).unwrap();
@@ -112,7 +112,7 @@ impl SavedLimits {
 /// ```
 /// use mistarr_clients::{ClientKind, RateLimit};
 /// use mistarr_server::client::ClientEndpoint;
-/// use mistarr_server::jobs::core_limits::{PreviousLimits, SavedLimits};
+/// use mistarr_server::jobs::watch::core_limits::{PreviousLimits, SavedLimits};
 /// let saved = SavedLimits { client: ClientEndpoint { kind: ClientKind::Rtorrent, url: "127.0.0.1:5000".into() },
 ///     down: None, up: Some(RateLimit::kbps(40)), alt_up: None };
 /// let p = PreviousLimits { saved, since: 10, tries: 1, next_at: 70 };
@@ -135,16 +135,18 @@ pub struct PreviousLimits {
 ///
 /// ```
 /// use std::time::Duration;
-/// use mistarr_server::jobs::core_limits::previous_retry;
+/// use mistarr_server::jobs::watch::core_limits::previous_retry;
 /// assert_eq!(previous_retry(1), Duration::from_secs(60));
 /// assert_eq!(previous_retry(3), Duration::from_secs(240));
 /// assert_eq!(previous_retry(30), Duration::from_secs(3600));
 /// ```
 #[must_use]
 pub fn previous_retry(tries: u32) -> Duration {
-    PREVIOUS_RETRY_FIRST
-        .saturating_mul(1 << tries.saturating_sub(1).min(16))
-        .min(PREVIOUS_RETRY_MAX)
+    super::doubling(
+        PREVIOUS_RETRY_FIRST,
+        tries.saturating_sub(1),
+        PREVIOUS_RETRY_MAX,
+    )
 }
 
 /// What the gate sets in each direction; `None` leaves the client's own limit.
@@ -178,7 +180,7 @@ impl Target {
 /// ```
 /// use mistarr_clients::RateLimit;
 /// use mistarr_server::config::LimitsConfig;
-/// use mistarr_server::jobs::core_limits::target;
+/// use mistarr_server::jobs::watch::core_limits::target;
 /// let l = LimitsConfig::default();
 /// assert_eq!(target(&l, true, false).down, Some(RateLimit::kbps(512)));
 /// assert_eq!(target(&l, true, true).up, Some(RateLimit::HELD));
@@ -209,7 +211,7 @@ pub fn target(limits: &LimitsConfig, core: bool, hold_uploads: bool) -> Target {
 ///
 /// ```
 /// use mistarr_clients::RateLimit;
-/// use mistarr_server::jobs::core_limits::lowered;
+/// use mistarr_server::jobs::watch::core_limits::lowered;
 /// assert_eq!(lowered(RateLimit::kbps(64), RateLimit::kbps(40)), RateLimit::kbps(40));
 /// assert_eq!(lowered(RateLimit::kbps(8), RateLimit::kbps(40)), RateLimit::kbps(8));
 /// assert_eq!(lowered(RateLimit::kbps(64), RateLimit::default()), RateLimit::kbps(64));
@@ -317,7 +319,7 @@ impl Streak {
                 } else {
                     tracing::debug!(error = %f.error, failures = self.failures, "{}", f.what);
                 }
-                Some(Instant::now() + backoff(base, self.failures))
+                Some(Instant::now() + super::doubling(base, self.failures - 1, RETRY_MAX))
             }
         }
     }
@@ -394,12 +396,6 @@ pub async fn follow_gate(app: Arc<AppState>) {
             () = tokio::time::sleep_until(wake.unwrap_or_else(Instant::now)), if wake.is_some() => {}
         }
     }
-}
-
-/// `base` doubled for each failure after the first, up to [`RETRY_MAX`].
-fn backoff(base: Duration, failures: u32) -> Duration {
-    base.saturating_mul(1 << failures.saturating_sub(1).min(16))
-        .min(RETRY_MAX)
 }
 
 /// Reads what a previous run left: the saved limits and a frozen client.
@@ -584,7 +580,7 @@ async fn thaw_client(app: &Arc<AppState>, a: &mut Applied, frozen: Frozen) -> Re
     a.frozen = None;
     publish(app, None).await;
     app.poll_wake.notify_one();
-    crate::jobs::transfer::kick(app).await;
+    crate::jobs::Scheduler::submit(app, Arc::new(crate::jobs::transfer::Transfer)).await;
     Ok(())
 }
 

@@ -3,7 +3,7 @@
 use serde::Serialize;
 use tokio::sync::watch;
 
-use super::Lane;
+use crate::jobs::Lane;
 
 /// The value MiSTer writes to CORENAME while the menu is loaded.
 pub const MENU: &str = "MENU";
@@ -41,7 +41,7 @@ impl GateState {
     /// True while a core other than the menu is loaded.
     ///
     /// ```
-    /// use mistarr_server::jobs::gate::GateState;
+    /// use mistarr_server::jobs::watch::gate::GateState;
     /// let s = GateState { corename: Some("SNES".into()), manual: None };
     /// assert!(s.core_running());
     /// ```
@@ -53,7 +53,7 @@ impl GateState {
     /// Why gated jobs are held, or `None` when they may run.
     ///
     /// ```
-    /// use mistarr_server::jobs::gate::{GateState, Override, PauseReason};
+    /// use mistarr_server::jobs::watch::gate::{GateState, Override, PauseReason};
     /// let s = GateState { corename: Some("MENU".into()), manual: Some(Override::Paused) };
     /// assert_eq!(s.pause_reason(), Some(PauseReason::Manual));
     /// ```
@@ -69,7 +69,7 @@ impl GateState {
     /// True when gated jobs are held.
     ///
     /// ```
-    /// assert!(!mistarr_server::jobs::gate::GateState::default().paused());
+    /// assert!(!mistarr_server::jobs::watch::gate::GateState::default().paused());
     /// ```
     #[must_use]
     pub fn paused(&self) -> bool {
@@ -80,7 +80,7 @@ impl GateState {
     /// background lane only a manual pause, the light lane never.
     ///
     /// ```
-    /// use mistarr_server::jobs::gate::{GateState, Override, PauseReason};
+    /// use mistarr_server::jobs::watch::gate::{GateState, Override, PauseReason};
     /// use mistarr_server::jobs::Lane;
     /// let core = GateState { corename: Some("SNES".into()), manual: None };
     /// assert_eq!(core.hold(Lane::Heavy), Some(PauseReason::Core));
@@ -116,7 +116,7 @@ impl Gate {
     /// An open gate with no CORENAME seen.
     ///
     /// ```
-    /// assert!(!mistarr_server::jobs::gate::Gate::new().state().paused());
+    /// assert!(!mistarr_server::jobs::watch::gate::Gate::new().state().paused());
     /// ```
     #[must_use]
     pub fn new() -> Self {
@@ -128,7 +128,7 @@ impl Gate {
     /// A copy of the current state.
     ///
     /// ```
-    /// assert!(mistarr_server::jobs::gate::Gate::new().state().corename.is_none());
+    /// assert!(mistarr_server::jobs::watch::gate::Gate::new().state().corename.is_none());
     /// ```
     #[must_use]
     pub fn state(&self) -> GateState {
@@ -138,7 +138,7 @@ impl Gate {
     /// A receiver notified on every change.
     ///
     /// ```
-    /// let gate = mistarr_server::jobs::gate::Gate::new();
+    /// let gate = mistarr_server::jobs::watch::gate::Gate::new();
     /// assert!(!gate.subscribe().borrow().paused());
     /// ```
     #[must_use]
@@ -150,7 +150,7 @@ impl Gate {
     /// override. Returns true if anything changed.
     ///
     /// ```
-    /// let gate = mistarr_server::jobs::gate::Gate::new();
+    /// let gate = mistarr_server::jobs::watch::gate::Gate::new();
     /// assert!(gate.set_corename(Some("N64".into())));
     /// assert!(gate.state().paused());
     /// assert!(!gate.set_corename(Some("N64".into())));
@@ -170,7 +170,7 @@ impl Gate {
     /// Sets or clears the manual override. Returns true if it changed.
     ///
     /// ```
-    /// use mistarr_server::jobs::gate::{Gate, Override};
+    /// use mistarr_server::jobs::watch::gate::{Gate, Override};
     /// let gate = Gate::new();
     /// assert!(gate.set_override(Some(Override::Paused)));
     /// assert!(gate.state().paused());
@@ -188,7 +188,7 @@ impl Gate {
     /// release has drained. Returns true if it was set.
     ///
     /// ```
-    /// use mistarr_server::jobs::gate::{Gate, Override};
+    /// use mistarr_server::jobs::watch::gate::{Gate, Override};
     /// let gate = Gate::new();
     /// gate.set_corename(Some("SNES".into()));
     /// gate.set_override(Some(Override::Running));
@@ -211,7 +211,7 @@ impl Gate {
     ///
     /// ```
     /// # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
-    /// mistarr_server::jobs::gate::Gate::new().wait_open().await;
+    /// mistarr_server::jobs::watch::gate::Gate::new().wait_open().await;
     /// # });
     /// ```
     pub async fn wait_open(&self) {
@@ -222,7 +222,7 @@ impl Gate {
     ///
     /// ```
     /// # tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(async {
-    /// let gate = mistarr_server::jobs::gate::Gate::new();
+    /// let gate = mistarr_server::jobs::watch::gate::Gate::new();
     /// gate.wait_free(mistarr_server::jobs::Lane::Background).await;
     /// # });
     /// ```

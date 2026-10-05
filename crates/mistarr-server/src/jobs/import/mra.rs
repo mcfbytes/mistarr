@@ -15,7 +15,7 @@ use serde_json::{json, Value};
 use super::support::{rel_string, Hashed};
 use super::{fail, finish, Piece, Placing, Why, BIOS_REFUSED};
 use crate::db::arcade as arcade_rows;
-use crate::db::downloads::{DownloadRow, DownloadState};
+use crate::db::downloads::DownloadRow;
 use crate::db::files::{self, FileState};
 use crate::db::ids::RomId;
 use crate::db::imports::{self, TitleEntry};
@@ -362,7 +362,7 @@ impl Placing<'_> {
         })
         .await?;
         if done {
-            finish(app, &ids, DownloadState::Done, None).await?;
+            finish(app, &ids).await?;
             return self.refresh(&zip).await;
         }
         if !is_zip(&local) {

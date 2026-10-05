@@ -18,8 +18,9 @@ use crate::error::{Error, Result};
 use crate::events::EventBus;
 use crate::jobs::dat_import::Recompute;
 use crate::jobs::detect_client::{ClientStatus, DetectClient};
-use crate::jobs::gate::Gate;
-use crate::jobs::{self, corename, poll, source_import, transfer, Scheduler};
+use crate::jobs::watch::gate::Gate;
+use crate::jobs::watch::{core_limits, corename, io_priority, poll, spawn_watcher};
+use crate::jobs::{self, source_import, transfer, Scheduler};
 
 /// Runtime knobs that are not part of `mistarr.toml`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -233,7 +234,7 @@ pub struct AppState {
     #[cfg(test)]
     pub gate_passes: std::sync::atomic::AtomicU64,
     /// The daemon's I/O class, when `options.ionice` names a tool to set it.
-    pub io_priority: Option<Arc<jobs::io_priority::IoPriority>>,
+    pub io_priority: Option<Arc<io_priority::IoPriority>>,
     shutdown: watch::Sender<bool>,
     settings_write: tokio::sync::Mutex<()>,
 }
@@ -262,10 +263,10 @@ impl AppState {
             shutdown: watch::Sender::new(false),
             settings_write: tokio::sync::Mutex::new(()),
             io_priority: options.ionice.as_deref().map(|program| {
-                let setter = Arc::new(jobs::io_priority::Ionice::new(program));
-                Arc::new(jobs::io_priority::IoPriority::new(
+                let setter = Arc::new(io_priority::Ionice::new(program));
+                Arc::new(io_priority::IoPriority::new(
                     setter,
-                    Path::new(jobs::io_priority::TASK_DIR),
+                    Path::new(io_priority::TASK_DIR),
                 ))
             }),
             options,
@@ -400,19 +401,20 @@ pub struct Running {
 
 impl Running {
     /// Stops accepting requests, ends SSE streams, cancels jobs at their next
-    /// checkpoint and waits up to five seconds each for the job lanes and
-    /// in-flight requests.
+    /// checkpoint, joins the watchers, which end on the shutdown signal, then
+    /// waits up to five seconds each for the job lanes and in-flight requests.
     ///
     /// # Errors
     ///
     /// [`Error::Io`] when the server loop failed.
     pub async fn shutdown(self) -> Result<()> {
         self.app.begin_shutdown();
-        for t in &self.tasks {
-            t.abort();
+        for t in self.tasks {
+            // Each watcher ends on the shutdown signal; a panic in one is already logged.
+            let _ = t.await;
         }
         // A stopped mistarr never leaves the client frozen.
-        jobs::core_limits::thaw_for_shutdown(&self.app).await;
+        core_limits::thaw_for_shutdown(&self.app).await;
         self.app.scheduler.stop(Duration::from_secs(5)).await;
         let mut server = self.server;
         match tokio::time::timeout(Duration::from_secs(5), &mut server).await {
@@ -516,7 +518,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     }
 
     // Step 3: download client, resumed first if a previous run left it frozen at the menu.
-    jobs::core_limits::recover_frozen(&app).await;
+    core_limits::recover_frozen(&app).await;
     Scheduler::run_inline(&app, Arc::new(DetectClient)).await?;
 
     // Step 4: installed cores.
@@ -663,44 +665,39 @@ async fn queue_startup_jobs(app: &Arc<AppState>, unfinished: Vec<PlatformId>) ->
 
 /// Starts the scheduler and the watchers that run until shutdown.
 fn spawn_tasks(app: &Arc<AppState>, scan_interval: u32) -> Vec<tokio::task::JoinHandle<()>> {
-    let mut tasks = Vec::new();
     let opts = app.options.clone();
     let gate = Arc::clone(&app.gate);
-    tasks.push(tokio::spawn(async move {
-        corename::watch(&opts.corename_path, opts.corename_poll, gate).await;
-    }));
-    tasks.push(tokio::spawn(publish_gate_changes(Arc::clone(app))));
+    let mut tasks = vec![
+        spawn_watcher(app, "corename", async move {
+            corename::watch(&opts.corename_path, opts.corename_poll, gate).await;
+        }),
+        spawn_watcher(app, "gate-status", publish_gate_changes(Arc::clone(app))),
+    ];
     if let Some(priority) = &app.io_priority {
-        tasks.push(tokio::spawn(jobs::io_priority::follow(
+        let follow = io_priority::follow(
             Arc::clone(&app.gate),
             Arc::clone(priority),
-            jobs::io_priority::RETRY,
-        )));
+            io_priority::RETRY,
+        );
+        tasks.push(spawn_watcher(app, "io-priority", follow));
     }
     if scan_interval > 0 {
-        tasks.push(tokio::spawn(scan_on_timer(
-            Arc::clone(app),
-            Duration::from_secs(u64::from(scan_interval) * 60),
-        )));
+        let every = Duration::from_secs(u64::from(scan_interval) * 60);
+        let timer = scan_on_timer(Arc::clone(app), every);
+        tasks.push(spawn_watcher(app, "scan-timer", timer));
     }
     Scheduler::start(app);
-    tasks.push(tokio::spawn(source_import::watch(Arc::clone(app))));
-    tasks.push(tokio::spawn(source_import::resolve_pending(Arc::clone(
-        app,
-    ))));
-    tasks.push(tokio::spawn(crate::jobs::dat_import::watch(Arc::clone(
-        app,
-    ))));
-    tasks.push(tokio::spawn(crate::jobs::import::watch(Arc::clone(app))));
-    tasks.push(tokio::spawn(transfer::watch(Arc::clone(app))));
-    tasks.push(tokio::spawn(poll::run(Arc::clone(app))));
-    tasks.push(tokio::spawn(crate::jobs::detect_client::watch(Arc::clone(
-        app,
-    ))));
-    tasks.push(tokio::spawn(jobs::core_limits::follow_gate(Arc::clone(
-        app,
-    ))));
-
+    let a = || Arc::clone(app);
+    tasks.extend([
+        spawn_watcher(app, "source-watch", source_import::watch(a())),
+        spawn_watcher(app, "magnets", source_import::resolve_pending(a())),
+        spawn_watcher(app, "dat-watch", jobs::dat_import::watch(a())),
+        spawn_watcher(app, "import-watch", jobs::import::watch(a())),
+        spawn_watcher(app, "transfer-watch", transfer::watch(a())),
+        spawn_watcher(app, "poll", poll::run(a())),
+        spawn_watcher(app, "redetect", jobs::detect_client::watch(a())),
+        spawn_watcher(app, "core-limits", core_limits::follow_gate(a())),
+    ]);
     tasks
 }
 
@@ -745,19 +742,11 @@ pub(crate) async fn detect_cores(app: &AppState) -> Result<Vec<PlatformId>> {
 
 /// Enqueues a full library scan every `interval`, from `[jobs] scan_interval_minutes`.
 async fn scan_on_timer(app: Arc<AppState>, interval: Duration) {
-    let mut stop = app.shutdown_signal();
     let mut ticker = tokio::time::interval(interval);
     ticker.tick().await;
     loop {
-        tokio::select! {
-            _ = ticker.tick() => {}
-            _ = stop.wait_for(|s| *s) => return,
-        }
-        if let Err(e) =
-            Scheduler::enqueue(&app, Arc::new(jobs::scan::ScanJob { platform_id: None })).await
-        {
-            tracing::warn!(error = %e, "cannot enqueue scheduled scan");
-        }
+        ticker.tick().await;
+        Scheduler::submit(&app, Arc::new(jobs::scan::ScanJob { platform_id: None })).await;
     }
 }
 
@@ -1059,7 +1048,7 @@ mod tests {
         );
 
         app.gate
-            .set_corename(Some(crate::jobs::gate::MENU.to_owned()));
+            .set_corename(Some(crate::jobs::watch::gate::MENU.to_owned()));
         for _ in 0..200 {
             let row = app
                 .db

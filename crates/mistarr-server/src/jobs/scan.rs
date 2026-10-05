@@ -16,13 +16,14 @@ use mistarr_core::hash::{
 use mistarr_core::PlatformId;
 use mistarr_mister::platforms::{self, Kind, Platform};
 use rusqlite::Connection;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
 use super::fsutil::{all_entries, extension, stat};
 use super::matching::{self, cartridge_state, classify_disc_tracks, own_name, stored_match, Track};
 use super::progress::Throttle;
-use super::{Job, JobContext, JobKind, Lane, Scheduler};
+use super::{Dedupe, Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::files::{self, FileState, NewFile};
 use crate::db::ids::{FileId, JobId};
@@ -33,7 +34,8 @@ use crate::error::{Error, Result};
 use crate::events::EventKind;
 
 /// A library scan: one platform, or every enabled platform fanned out as
-/// one job each.
+/// one job each. Its payload is the struct itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ScanJob {
     /// `None` fans out one job per enabled platform.
     pub platform_id: Option<PlatformId>,
@@ -46,7 +48,11 @@ impl Job for ScanJob {
     }
 
     fn payload(&self) -> Value {
-        json!({ "platform_id": self.platform_id.as_ref().map(|p| p.0.clone()) })
+        super::to_payload(self)
+    }
+
+    fn detail(&self) -> Option<String> {
+        self.platform_id.as_ref().map(|p| p.0.clone())
     }
 
     fn lane(&self) -> Lane {
@@ -62,8 +68,8 @@ impl Job for ScanJob {
 }
 
 /// Enqueues a scan of `platform_id` when its games directory already exists,
-/// for a DAT that just finished loading. `None` when there is nothing to
-/// walk yet; the caller dedupes several DATs from one pack before calling.
+/// after the catalogue changes ([`super::follow_up`]). `None` when there is nothing
+/// to walk yet; the caller dedupes several DATs from one pack before calling.
 ///
 /// # Errors
 ///
@@ -131,7 +137,9 @@ async fn fan_out(ctx: &JobContext) -> Result<()> {
         let already_open = ctx
             .app
             .db
-            .read(move |c| crate::db::jobs::find_open(c, JobKind::Scan, &payload))
+            .read(move |c| {
+                crate::db::jobs::find_in(c, JobKind::Scan, &payload, Dedupe::Open.states())
+            })
             .await?
             .is_some();
         if already_open {
@@ -306,6 +314,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         .collect();
 
     let mut sink = Sink::new(ctx, &pid);
+    let reporter = ctx.reporter();
     let mut saved = Instant::now();
     let total = units.len();
     let remaining: Vec<Unit> = units
@@ -336,13 +345,14 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         }
         let done_dirs = save.then(|| done_set.iter().cloned().collect::<Vec<_>>());
         sink.flush(done_dirs).await?;
-        ctx.progress(json!({
-            "platform_id": pid.0,
-            "dir": unit.id,
-            "done": done_set.len(),
-            "total": total,
-        }))
-        .await?;
+        reporter.report("scanning", || {
+            json!({
+                "platform_id": pid.0,
+                "dir": unit.id,
+                "done": done_set.len(),
+                "total": total,
+            })
+        });
     }
 
     ctx.checkpoint().await?;

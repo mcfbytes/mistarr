@@ -12,7 +12,7 @@ use mistarr_server::db::downloads::{self as rows, DownloadState};
 use mistarr_server::db::fixtures::{pid, seed_rom};
 use mistarr_server::db::sql::Page;
 use mistarr_server::events::{Event, EventKind};
-use mistarr_server::jobs::poll::{Cadence, Poller};
+use mistarr_server::jobs::watch::poll::{Cadence, Poller};
 use mistarr_server::jobs::{Job, JobContext, JobKind, Lane, Scheduler};
 use serde_json::{json, Value};
 use tokio::sync::broadcast::Receiver;

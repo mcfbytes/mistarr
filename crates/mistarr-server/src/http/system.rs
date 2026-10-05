@@ -21,8 +21,8 @@ use crate::db::platforms;
 use crate::db::settings::{self, keys};
 use crate::db::sql::Paged;
 use crate::jobs::detect_client::{detect_and_store, ClientStatus};
-use crate::jobs::gate::{GateState, Override};
 use crate::jobs::scan::{is_arcade, ScanJob};
+use crate::jobs::watch::gate::{GateState, Override};
 use crate::jobs::Scheduler;
 use crate::status::{hold_reason, snapshot, wizard_status, Status};
 
