@@ -20,7 +20,7 @@ use crate::db::ids::{FileId, RomId};
 use crate::db::roms;
 use crate::db::Db;
 use crate::error::Result;
-use crate::jobs::scan::{all_entries, extension, file_meta};
+use crate::jobs::fsutil::{all_entries, extension, file_meta};
 use crate::jobs::JobContext;
 
 /// Zips stated, looked up and written per batch; each batch is one write transaction.

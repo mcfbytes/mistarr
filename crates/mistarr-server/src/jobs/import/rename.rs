@@ -8,7 +8,7 @@ use serde_json::json;
 
 use super::place::{self, PlaceError};
 use super::support::{place_rom, read_head, rel_string};
-use super::{stat, BIOS_REFUSED};
+use super::BIOS_REFUSED;
 use crate::app::AppState;
 use crate::db::files::{self, FileRow, FileState};
 use crate::db::ids::FileId;
@@ -17,6 +17,7 @@ use crate::db::imports::{self, ImportAction, TitleEntry};
 use crate::db::roms::{self, EntryRom};
 use crate::error::Error;
 use crate::events::EventKind;
+use crate::jobs::fsutil::stat;
 
 /// Why a rename request was not carried out, for the API to report.
 #[derive(Debug, thiserror::Error)]
@@ -71,7 +72,7 @@ pub async fn rename(app: &AppState, group: TitleId, file_id: FileId) -> Outcome<
     let moved = crate::threads::run(crate::threads::label::RENAME, move || {
         place::rename_in_library(&g, &f, &t).and_then(|dst| {
             fs::metadata(&dst)
-                .map(|m| stat(&m))
+                .and_then(|m| stat(&m))
                 .map_err(|source| PlaceError::Io { path: dst, source })
         })
     })

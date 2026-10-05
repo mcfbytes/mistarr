@@ -17,6 +17,7 @@ pub mod dat;
 mod digest;
 pub mod hex;
 pub mod magnet;
+pub mod matching;
 pub mod naming;
 mod percent;
 pub mod xml;

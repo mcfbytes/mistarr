@@ -3,6 +3,7 @@
 
 use std::path::{Path, PathBuf};
 
+use mistarr_core::matching::match_members;
 use mistarr_mister::adapter::arcade::assemble::PartSource as _;
 use mistarr_mister::adapter::arcade::mra::{
     self, zip_location, Mra, MraRom, Part, RomItem, ZipPath,
@@ -11,7 +12,7 @@ use mistarr_mister::adapter::arcade::zip_placement;
 use mistarr_mister::{StagedFile, StagedKind};
 use serde_json::{json, Value};
 
-use super::support::{is_zip, match_members, rel_string, Hashed};
+use super::support::{rel_string, Hashed};
 use super::{fail, finish, Piece, Placing, Why, BIOS_REFUSED};
 use crate::db::arcade as arcade_rows;
 use crate::db::downloads::{DownloadRow, DownloadState};
@@ -21,6 +22,7 @@ use crate::db::imports::{self, TitleEntry};
 use crate::db::roms::{self, EntryRom};
 use crate::error::Result;
 use crate::jobs::arcade::{self, check_rom, same_zip, Check, ZipIndex, ZipSource};
+use crate::jobs::fsutil::is_zip;
 
 /// What the MRA says about a staged zip.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -477,21 +479,9 @@ impl Placing<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use std::io::Write as _;
+    use crate::app::testutil::write_zip;
 
     use mistarr_core::hash::Md5Stream;
-
-    fn write_zip(path: &Path, members: &[(&str, &[u8])]) {
-        fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-        let mut z = zip::ZipWriter::new(fs::File::create(path).expect("create"));
-        for (name, body) in members {
-            z.start_file(*name, zip::write::SimpleFileOptions::default())
-                .expect("start");
-            z.write_all(body).expect("write");
-        }
-        z.finish().expect("finish");
-    }
 
     fn md5_of(parts: &[&[u8]]) -> String {
         let mut m = Md5Stream::new();

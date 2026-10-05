@@ -6,6 +6,7 @@ use std::io::{self, Read};
 use std::path::{Component, Path, PathBuf};
 
 use mistarr_core::hash::{hash_forms, hash_zip_member_forms, zip_members, HashError, HeaderRule};
+use mistarr_core::matching::{Payload, Rom};
 use mistarr_core::HashSet as Hashes;
 use mistarr_mister::PlaceRom;
 
@@ -44,16 +45,6 @@ impl Hashed {
         }
     }
 
-    /// The forms the payload matches a rom in, the whole payload first.
-    pub fn forms(&self) -> impl Iterator<Item = &Hashes> {
-        self.whole.iter().chain([&self.hashes])
-    }
-
-    /// Whether the payload is `rom` in any of its forms.
-    pub fn is(&self, rom: &EntryRom) -> bool {
-        self.forms().any(|h| rom_matches(rom, h))
-    }
-
     /// Takes the hashes of the placed file, `again`, after it gained a header; without them
     /// the whole form is unread.
     pub fn take_rehash(&mut self, again: Option<Hashed>) {
@@ -75,6 +66,44 @@ impl Hashed {
         }
         let whole = self.whole.as_ref().unwrap_or(&self.hashes);
         crate::db::files::WholeHashes::whole_file(rule, whole)
+    }
+}
+
+impl Payload for Hashed {
+    fn forms(&self) -> impl Iterator<Item = &Hashes> {
+        self.whole.iter().chain([&self.hashes])
+    }
+
+    fn member(&self) -> Option<&str> {
+        self.member.as_deref()
+    }
+}
+
+impl Rom for EntryRom {
+    type Id = RomId;
+
+    fn id(&self) -> RomId {
+        self.id
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn crc32(&self) -> Option<&str> {
+        self.crc32.as_deref()
+    }
+
+    fn md5(&self) -> Option<&str> {
+        self.md5.as_deref()
+    }
+
+    fn sha1(&self) -> Option<&str> {
+        self.sha1.as_deref()
     }
 }
 
@@ -130,16 +159,10 @@ pub(super) fn locate(
         .or(Some(local))
 }
 
-pub(super) fn is_zip(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| e.eq_ignore_ascii_case("zip"))
-}
-
 /// Hashes a staged file, or every member of a staged zip, under `rule`, in both forms
 /// when a stripping rule finds a header.
 pub(super) fn hash_item(path: &Path, rule: HeaderRule) -> Result<Vec<Hashed>, HashError> {
-    if !is_zip(path) {
+    if !crate::jobs::fsutil::is_zip(path) {
         let size = fs::metadata(path)?.len();
         let forms = hash_forms(File::open(path)?, rule, Some(size))?;
         return Ok(vec![Hashed {
@@ -184,89 +207,6 @@ pub(super) fn read_head(path: &Path, member: Option<&str>) -> Result<Vec<u8>, Ha
 /// The rom as placement sees it, its header bytes decoded by [`PlaceRom::new`].
 pub(super) fn place_rom(rom: &EntryRom) -> PlaceRom {
     PlaceRom::new(&rom.name, rom.size, rom.header.as_deref())
-}
-
-/// Whether `h` is rom `rom` under `docs/VERIFICATION.md` "Matching order":
-/// SHA1 when the DAT has it, else MD5, else CRC32 plus size.
-pub(super) fn rom_matches(rom: &EntryRom, h: &Hashes) -> bool {
-    if let Some(sha1) = &rom.sha1 {
-        return *sha1 == h.sha1;
-    }
-    if let Some(md5) = &rom.md5 {
-        return *md5 == h.md5;
-    }
-    rom.crc32.as_deref() == Some(h.crc32.as_str()) && rom.size == h.size
-}
-
-/// The last component of a `/`-separated name.
-pub(super) fn leaf(name: &str) -> &str {
-    name.rsplit(['/', '\\']).next().unwrap_or(name)
-}
-
-/// The rom of `roms` that `h` is in any form, skipping those in `used`. Among
-/// identical roms it prefers `prefer`, then one whose name is `name`, then the first.
-pub(super) fn pick_rom<'a>(
-    roms: &'a [EntryRom],
-    h: &Hashed,
-    prefer: Option<RomId>,
-    name: Option<&str>,
-    used: &[RomId],
-) -> Option<&'a EntryRom> {
-    let hits: Vec<&EntryRom> = roms
-        .iter()
-        .filter(|r| !used.contains(&r.id) && h.is(r))
-        .collect();
-    hits.iter()
-        .find(|r| Some(r.id) == prefer)
-        .or_else(|| {
-            hits.iter()
-                .find(|r| name.is_some_and(|n| leaf(&r.name).eq_ignore_ascii_case(leaf(n))))
-        })
-        .or_else(|| hits.first())
-        .copied()
-}
-
-/// How the members of a zip pair with the roms of a DAT entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct SetMatch<'a> {
-    /// Each member that is a rom of the entry, with that rom.
-    pub pairs: Vec<(&'a Hashed, &'a EntryRom)>,
-    /// Members that are no rom of the entry.
-    pub extra: Vec<String>,
-    /// Roms of the entry no member is.
-    pub absent: Vec<String>,
-}
-
-impl SetMatch<'_> {
-    /// Every member is a rom of the entry and every rom is a member.
-    pub fn is_exact(&self) -> bool {
-        self.extra.is_empty() && self.absent.is_empty()
-    }
-}
-
-/// Pairs each member with a distinct rom of `roms` by hash, preferring the same name.
-pub(super) fn match_members<'a>(roms: &'a [EntryRom], members: &'a [Hashed]) -> SetMatch<'a> {
-    let mut used = Vec::with_capacity(members.len());
-    let mut out = SetMatch {
-        pairs: Vec::with_capacity(members.len()),
-        extra: Vec::new(),
-        absent: Vec::new(),
-    };
-    for m in members {
-        match pick_rom(roms, m, None, m.member.as_deref(), &used) {
-            Some(rom) => {
-                used.push(rom.id);
-                out.pairs.push((m, rom));
-            }
-            None => out.extra.push(m.member.clone().unwrap_or_default()),
-        }
-    }
-    out.absent = roms
-        .iter()
-        .filter(|r| !used.contains(&r.id))
-        .map(|r| r.name.clone())
-        .collect();
-    out
 }
 
 /// A quarantine report that opens with `why` and lists what arrived.
@@ -371,6 +311,7 @@ pub(super) fn quarantine(
 mod tests {
     use super::*;
     use mistarr_core::hash::hash_reader;
+    use mistarr_core::matching::{match_members, pick_rom};
     use std::io::Cursor;
 
     fn rom(id: i64, name: &str, h: &Hashes) -> EntryRom {
@@ -391,48 +332,7 @@ mod tests {
     }
 
     #[test]
-    fn roms_match_in_order_and_identical_ones_are_told_apart() {
-        let h = abc();
-        let a = rom(1, "Disc (Track 1).bin", &h);
-        let b = rom(2, "Disc (Track 2).bin", &h);
-        let roms = [a.clone(), b.clone()];
-        let p = Hashed::plain(None, h.clone());
-        assert_eq!(
-            pick_rom(&roms, &p, None, None, &[]).map(|r| r.id),
-            Some(RomId(1))
-        );
-        assert_eq!(
-            pick_rom(&roms, &p, Some(RomId(2)), None, &[]).map(|r| r.id),
-            Some(RomId(2))
-        );
-        assert_eq!(
-            pick_rom(&roms, &p, None, Some("x/disc (track 2).bin"), &[]).map(|r| r.id),
-            Some(RomId(2))
-        );
-        assert_eq!(
-            pick_rom(&roms, &p, Some(RomId(1)), None, &[RomId(1)]).map(|r| r.id),
-            Some(RomId(2))
-        );
-        assert!(pick_rom(&roms, &p, None, None, &[RomId(1), RomId(2)]).is_none());
-        let crc_only = EntryRom {
-            sha1: None,
-            md5: None,
-            ..a.clone()
-        };
-        assert!(rom_matches(&crc_only, &h));
-        let wrong_size = EntryRom {
-            size: 4,
-            ..crc_only
-        };
-        assert!(!rom_matches(&wrong_size, &h));
-        let md5_only = EntryRom { sha1: None, ..b };
-        assert!(rom_matches(&md5_only, &h));
-        let other = hash_reader(Cursor::new(b"abd"), HeaderRule::None, None).expect("hash");
-        assert!(!rom_matches(&a, &other));
-    }
-
-    #[test]
-    fn members_pair_with_distinct_roms_and_leftovers_are_named() {
+    fn entry_roms_pair_with_staged_members_by_hash_and_name() {
         let h = abc();
         let other = hash_reader(Cursor::new(b"xyz"), HeaderRule::None, None).expect("hash");
         let roms = [rom(1, "a.bin", &h), rom(2, "b.bin", &h)];
@@ -444,11 +344,11 @@ mod tests {
             set.pairs.iter().map(|(_, r)| r.id.0).collect::<Vec<_>>(),
             [2, 1]
         );
+        let p = Hashed::plain(None, h.clone());
+        let picked = pick_rom(&roms, &p, Some(RomId(2)), None, &[]).map(|r| r.id);
+        assert_eq!(picked, Some(RomId(2)));
         let odd = [member("a.bin", &h), member("c.bin", &other)];
-        let set = match_members(&roms, &odd);
-        assert!(!set.is_exact());
-        assert_eq!(set.extra, ["c.bin"]);
-        assert_eq!(set.absent, ["b.bin"]);
+        assert_eq!(match_members(&roms, &odd).extra, ["c.bin"]);
         let text = explain("This zip lacks members.", &odd);
         assert!(text.starts_with("This zip lacks members.\n\nActual a.bin: 3 bytes\n"));
         assert!(text.contains(&other.sha1));
@@ -510,9 +410,6 @@ mod tests {
             rel_string(Path::new("NES/Example Quest (USA).nes")),
             "NES/Example Quest (USA).nes"
         );
-        assert!(is_zip(Path::new("a.ZIP")));
-        assert!(!is_zip(Path::new("a.nes")));
-        assert_eq!(leaf("a/b.bin"), "b.bin");
         let place = place_rom(&EntryRom {
             header: Some("4E 45".into()),
             ..rom(1, "a.nes", &abc())
@@ -581,13 +478,7 @@ mod tests {
         assert_eq!((hashed[0].hashes.size, hashed[0].raw_size), (26, 26));
         assert_eq!(read_head(&plain, None).expect("head").len(), 16);
         let zipped = dir.path().join("a.zip");
-        let mut z = zip::ZipWriter::new(File::create(&zipped).expect("create"));
-        z.add_directory("d/", zip::write::SimpleFileOptions::default())
-            .expect("dir");
-        z.start_file("d/a.bin", zip::write::SimpleFileOptions::default())
-            .expect("start");
-        std::io::Write::write_all(&mut z, b"abc").expect("write");
-        z.finish().expect("finish");
+        crate::app::testutil::write_zip(&zipped, &[("d/", b""), ("d/a.bin", b"abc")]);
         let hashed = hash_item(&zipped, HeaderRule::None).expect("hash");
         assert_eq!(hashed.len(), 1);
         assert_eq!(hashed[0].member.as_deref(), Some("d/a.bin"));

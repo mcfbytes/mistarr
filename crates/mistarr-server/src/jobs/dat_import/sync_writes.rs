@@ -4,11 +4,14 @@ use std::fmt::Write as _;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
+use super::recompute::*;
+use super::stream::*;
 use super::*;
 use crate::db::dat_stage::{StagedGame, StagedRom};
 use crate::db::files::{FileState, NewFile};
 use crate::db::fixtures::pid;
 use crate::db::ids::FileId;
+use crate::db::{dat_stage, files, titles};
 
 /// Write syscalls and bytes the calling thread made so far, from `/proc/thread-self/io`;
 /// `None` where the kernel does not account them.

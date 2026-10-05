@@ -388,25 +388,25 @@ Opus · `mistarr-server` (`http/`, `app.rs`, `config.rs`, `incoming.rs`,
 
 Opus · `mistarr-server` (`jobs/`), `mistarr-core` · branch `wp-64-matching`
 
-- [ ] `jobs/matching.rs` holds `name_fits`, `cartridge_state`, `stored_match`,
+- [x] `jobs/matching.rs` holds `name_fits`, `cartridge_state`, `stored_match`,
   `match_forms`, `Track`, `classify_disc_tracks`, `set_matches` and
   `own_name`. `dat_import`, `chd` and `arcade/presence` call `matching::`,
   never `scan::`.
-- [ ] `FileRow::hashes()` and `FileRow::unchanged(size, mtime)`;
+- [x] `FileRow::hashes()` and `FileRow::unchanged(size, mtime)`;
   `dat_import::stored_hashes`, `chd::stored` and the repeated unchanged-row
   test in `scan.rs` go.
-- [ ] `rom_matches`, `pick_rom` and `match_members` move to
+- [x] `rom_matches`, `pick_rom` and `match_members` move to
   `mistarr_core::matching`; the server keeps only the SQL tier.
-- [ ] `scan.rs` uses one `hashed_row` and one `handle_known` for flat files and
+- [x] `scan.rs` uses one `hashed_row` and one `handle_known` for flat files and
   zip members, `progress::Throttle` instead of its own, and one helper for an
   unreadable directory.
-- [ ] `jobs/fsutil.rs` holds `all_entries`, `file_meta`, `extension`, `stat` and
+- [x] `jobs/fsutil.rs` holds `all_entries`, `file_meta`, `extension`, `stat` and
   `is_zip`; the copies in `import.rs` and `support.rs` go.
-- [ ] `dat_import.rs` splits into `dat_import/` modules for streaming and the
+- [x] `dat_import.rs` splits into `dat_import/` modules for streaming and the
   recompute.
-- [ ] `import.rs` `quarantine_with`, `disc` and `place_plan` end in one shared
+- [x] `import.rs` `quarantine_with`, `disc` and `place_plan` end in one shared
   `settle` step.
-- [ ] Unit tests share one `zip_bytes` in `app::testutil`; the six zip writers
+- [x] Unit tests share one `zip_bytes` in `app::testutil`; the six zip writers
   go.
 
 ### WP-65 Web stores

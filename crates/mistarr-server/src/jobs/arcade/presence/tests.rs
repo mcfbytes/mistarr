@@ -1,10 +1,9 @@
-use std::io::Write as _;
 use std::time::{Duration, SystemTime};
 
 use rusqlite::params;
 
 use super::*;
-use crate::app::testutil::state;
+use crate::app::testutil::{state, write_zip};
 use crate::app::AppState;
 use crate::db::ids::RomId;
 use crate::db::titles::RomStatus;
@@ -22,17 +21,6 @@ fn hashes() -> mistarr_core::HashSet {
 
 fn pid() -> PlatformId {
     PlatformId("arcade".into())
-}
-
-fn write_zip(path: &Path, members: &[(&str, &[u8])]) {
-    fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-    let mut z = zip::ZipWriter::new(File::create(path).expect("create"));
-    for (name, body) in members {
-        z.start_file(*name, zip::write::SimpleFileOptions::default())
-            .expect("start");
-        z.write_all(body).expect("write");
-    }
-    z.finish().expect("finish");
 }
 
 /// Moves `path`'s mtime `secs` seconds into the past.
