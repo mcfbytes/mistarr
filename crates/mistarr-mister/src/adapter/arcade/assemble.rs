@@ -3,6 +3,7 @@
 use std::io::{self, Read};
 
 use mistarr_core::hash::Md5Stream;
+use mistarr_core::Md5;
 
 use super::mra::{self, Inline, Interleave, MraRom, Part, Patch, RomItem};
 use crate::{Error, Result};
@@ -39,7 +40,7 @@ pub struct Assembled {
     pub data: Vec<u8>,
     /// MD5 of the part bytes in document order, before interleaving and without patches,
     /// which is what MiSTer compares with the `md5` attribute.
-    pub md5: String,
+    pub md5: Md5,
 }
 
 /// Builds `rom` in memory from `src`.
@@ -77,9 +78,10 @@ pub fn assemble(rom: &MraRom, src: &mut dyn PartSource) -> Result<Assembled> {
 /// ```
 /// use mistarr_mister::adapter::arcade::{assemble, mra};
 /// let rom = &mra::parse(b"<m><rom><part>616263</part></rom></m>").unwrap().roms[0];
-/// assert_eq!(assemble::md5(rom, &mut assemble::NoParts).unwrap(), "900150983cd24fb0d6963f7d28e17f72");
+/// let md5 = assemble::md5(rom, &mut assemble::NoParts).unwrap();
+/// assert_eq!(md5.to_string(), "900150983cd24fb0d6963f7d28e17f72");
 /// ```
-pub fn md5(rom: &MraRom, src: &mut dyn PartSource) -> Result<String> {
+pub fn md5(rom: &MraRom, src: &mut dyn PartSource) -> Result<Md5> {
     let mut w = Walker::new(false);
     w.run(rom, src)?;
     Ok(w.md5.finish())

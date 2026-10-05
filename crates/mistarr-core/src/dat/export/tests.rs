@@ -314,9 +314,9 @@ fn a_db_export_yields_headerless_roms_named_like_the_dat() {
         [DatRom {
             name: "Example Quest (USA).nes".into(),
             size: 32_768,
-            crc32: Some(hex(11, 8)),
-            md5: Some(hex(11, 32)),
-            sha1: Some(hex(11, 40)),
+            crc32: hex(11, 8).parse().ok(),
+            md5: hex(11, 32).parse().ok(),
+            sha1: hex(11, 40).parse().ok(),
             status: RomStatus::Good,
             header: Some(header_hex(&ines_header(2))),
         }]
@@ -377,7 +377,10 @@ fn without_a_header_rule_the_headered_file_is_taken() {
     let rom = &dat.games[1].roms[0];
     assert_eq!(rom.name, "Example Quest (Japan).nes");
     assert_eq!(rom.size, 32_768 + 16);
-    assert_eq!(rom.sha1.as_deref(), Some(hex(0b1100 ^ 0b11, 40).as_str()));
+    assert_eq!(
+        rom.sha1.map(|d| d.to_string()).as_deref(),
+        Some(hex(0b1100 ^ 0b11, 40).as_str())
+    );
     assert_eq!(rom.header, None);
 }
 
@@ -474,7 +477,10 @@ fn any_loaded_extension_is_an_image_and_a_lone_file_is_renamed() {
     assert_eq!(md.games[0].roms[0].name, "Example Quest (World).gen");
     let sgx = parse_dat_with(xml.as_bytes(), platform(HeaderRule::None, "sgx", &["sgx"])).unwrap();
     assert_eq!(sgx.games[1].roms[0].name, "Sample Racer (World).sgx");
-    assert_eq!(sgx.games[1].roms[0].crc32.as_deref(), Some("00000003"));
+    assert_eq!(
+        sgx.games[1].roms[0].crc32.map(|d| d.to_string()).as_deref(),
+        Some("00000003")
+    );
     assert!(
         sgx.games[2].roms.is_empty(),
         "two unknown files give no image"
@@ -489,7 +495,10 @@ fn lynx_takes_the_headerless_image_under_the_written_name() {
     let dat = parse_dat_with(xml.as_bytes(), platform(HeaderRule::Lnx, "lnx", &["lnx"])).unwrap();
     let rom = &dat.games[0].roms[0];
     assert_eq!(rom.name, "Example Quest (World).lnx");
-    assert_eq!(rom.crc32.as_deref(), Some("00000002"));
+    assert_eq!(
+        rom.crc32.map(|d| d.to_string()).as_deref(),
+        Some("00000002")
+    );
     assert_eq!(rom.header.as_deref(), Some("4c594e5800"));
 }
 
@@ -500,7 +509,10 @@ fn a_good_dump_wins_over_a_bad_one_of_the_same_name() {
       <source><file extension="gb" size="8" crc32="00000002" mia="1"/></source></game></datafile>"#;
     let dat = parse_dat_with(xml.as_bytes(), platform(HeaderRule::None, "gb", &["gb"])).unwrap();
     assert_eq!(dat.games[0].roms.len(), 1);
-    assert_eq!(dat.games[0].roms[0].crc32.as_deref(), Some("00000002"));
+    assert_eq!(
+        dat.games[0].roms[0].crc32.map(|d| d.to_string()).as_deref(),
+        Some("00000002")
+    );
     assert_eq!(dat.games[0].roms[0].status, RomStatus::Good);
 }
 

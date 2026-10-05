@@ -137,7 +137,7 @@ fn examine(mra: &Mra, zip: &ZipPath, staged: &Path, games: &Path) -> Verdict {
     let mut by_index: Vec<(u32, Outcome)> = Vec::new();
     let mut matched: Vec<(PathBuf, String)> = Vec::new();
     for rom in &fed {
-        let Some(expected) = &rom.md5 else {
+        let Some(expected) = rom.md5 else {
             continue;
         };
         let before = src.read.len();
@@ -483,7 +483,7 @@ mod tests {
 
     use mistarr_core::hash::Md5Stream;
 
-    fn md5_of(parts: &[&[u8]]) -> String {
+    fn md5_of(parts: &[&[u8]]) -> mistarr_core::Md5 {
         let mut m = Md5Stream::new();
         for p in parts {
             m.update(p);

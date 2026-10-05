@@ -2,6 +2,7 @@
 
 use std::cell::RefCell;
 
+use mistarr_core::{Crc32, Md5, Sha1};
 use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use rusqlite::Connection;
 use serde_json::json;
@@ -111,14 +112,15 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             "stored match",
             Box::new(|c| {
                 let nes = mistarr_core::PlatformId("nes".into());
-                let (sha1, md5) = ("0".repeat(40), "0".repeat(32));
-                roms::match_live_rom(c, &nes, &sha1, &md5, "00000000", 16).expect("match");
+                let (sha1, md5) = (Sha1::from_bytes([0; 20]), Md5::from_bytes([0; 16]));
+                let crc = Some(Crc32::from_u32(0));
+                roms::match_live_rom(c, &nes, Some(sha1), Some(md5), crc, 16).expect("match");
             }),
         ),
         (
             "changed rom",
             Box::new(|c| {
-                let listed = [Some("00000000"), None, None];
+                let listed = (Some(Crc32::from_u32(0)), None, None);
                 files::unmatch_changed_rom(c, TitleId(1), "no such rom", 16, listed)
                     .expect("unmatch");
             }),
@@ -127,7 +129,7 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             "crc candidate",
             Box::new(|c| {
                 let nes = mistarr_core::PlatformId("nes".into());
-                roms::crc_candidate_exists(c, &nes, "00000000", 16).expect("candidate");
+                roms::crc_candidate_exists(c, &nes, Crc32::from_u32(0), 16).expect("candidate");
             }),
         ),
         (

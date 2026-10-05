@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use mistarr_core::PlatformId;
+use mistarr_core::{Crc32, Hashes, Md5, PlatformId, Sha1};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
@@ -43,7 +43,7 @@ enum Scope {
 fn match_tiers(
     conn: &Connection,
     platform_id: &PlatformId,
-    [sha1, md5, crc32]: [&str; 3],
+    (sha1, md5, crc32): (Option<Sha1>, Option<Md5>, Option<Crc32>),
     size: i64,
     scope: Scope,
 ) -> Result<Vec<RomMatch>> {
@@ -94,12 +94,12 @@ fn match_tiers(
 pub fn match_rom(
     conn: &Connection,
     platform_id: &PlatformId,
-    sha1: &str,
-    md5: &str,
-    crc32: &str,
+    sha1: Option<Sha1>,
+    md5: Option<Md5>,
+    crc32: Option<Crc32>,
     size: i64,
 ) -> Result<Option<RomMatch>> {
-    let found = match_tiers(conn, platform_id, [sha1, md5, crc32], size, Scope::Best)?;
+    let found = match_tiers(conn, platform_id, (sha1, md5, crc32), size, Scope::Best)?;
     Ok(found.into_iter().next())
 }
 
@@ -113,17 +113,18 @@ pub fn match_rom(
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let nes = mistarr_core::PlatformId("nes".into());
-/// assert!(mistarr_server::db::roms::match_live_rom(&conn, &nes, "", "", "0", 1).unwrap().is_none());
+/// let crc = Some(mistarr_core::Crc32::from_u32(0));
+/// assert!(mistarr_server::db::roms::match_live_rom(&conn, &nes, None, None, crc, 1).unwrap().is_none());
 /// ```
 pub fn match_live_rom(
     conn: &Connection,
     platform_id: &PlatformId,
-    sha1: &str,
-    md5: &str,
-    crc32: &str,
+    sha1: Option<Sha1>,
+    md5: Option<Md5>,
+    crc32: Option<Crc32>,
     size: i64,
 ) -> Result<Option<RomMatch>> {
-    let found = match_tiers(conn, platform_id, [sha1, md5, crc32], size, Scope::BestLive)?;
+    let found = match_tiers(conn, platform_id, (sha1, md5, crc32), size, Scope::BestLive)?;
     Ok(found.into_iter().next())
 }
 
@@ -138,20 +139,16 @@ pub fn match_live_rom(
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let psx = mistarr_core::PlatformId("psx".into());
-/// let h = mistarr_core::HashSet { size: 1, crc32: "0".into(), md5: "0".into(), sha1: "0".into() };
+/// let h = mistarr_core::hash::hash_reader(&b"a"[..], Default::default(), None).unwrap();
 /// assert!(mistarr_server::db::roms::roms_matching(&conn, &psx, &h).unwrap().is_empty());
 /// ```
 pub fn roms_matching(
     conn: &Connection,
     platform_id: &PlatformId,
-    hashes: &mistarr_core::HashSet,
+    hashes: &Hashes,
 ) -> Result<Vec<RomMatch>> {
     let size = sql::to_i64(hashes.size);
-    let by = [
-        hashes.sha1.as_str(),
-        hashes.md5.as_str(),
-        hashes.crc32.as_str(),
-    ];
+    let by = (Some(hashes.sha1), Some(hashes.md5), Some(hashes.crc32));
     match_tiers(conn, platform_id, by, size, Scope::AllLive)
 }
 
@@ -220,7 +217,7 @@ pub fn chd_rom_sized(conn: &Connection, platform_id: &PlatformId, size: i64) -> 
 pub fn crc_candidate_exists(
     conn: &Connection,
     platform_id: &PlatformId,
-    crc32: &str,
+    crc32: Crc32,
     size: i64,
 ) -> Result<bool> {
     Ok(conn
@@ -252,12 +249,12 @@ pub struct EntryRom {
     pub name: String,
     /// Size in bytes.
     pub size: u64,
-    /// Lowercase hex CRC32.
-    pub crc32: Option<String>,
-    /// Lowercase hex MD5.
-    pub md5: Option<String>,
-    /// Lowercase hex SHA1.
-    pub sha1: Option<String>,
+    /// CRC32, when the DAT lists it.
+    pub crc32: Option<Crc32>,
+    /// MD5, when the DAT lists it.
+    pub md5: Option<Md5>,
+    /// SHA1, when the DAT lists it.
+    pub sha1: Option<Sha1>,
     /// DAT status.
     pub status: RomStatus,
     /// The DAT's `header` attribute, verbatim.
@@ -467,14 +464,16 @@ pub fn verified_file(conn: &Connection, rom: RomId) -> Result<Option<FileId>> {
 mod tests {
     use super::*;
     use crate::db::fixtures::{conn, dat, pid};
-    use mistarr_core::HashSet;
+    use mistarr_core::Hashes;
 
-    fn hashes(size: u64) -> HashSet {
-        HashSet {
+    fn hashes(size: u64) -> Hashes {
+        Hashes {
             size,
-            crc32: "352441c2".into(),
-            md5: "900150983cd24fb0d6963f7d28e17f72".into(),
-            sha1: "a9993e364706816aba3e25717850c26c9cd0d89d".into(),
+            crc32: "352441c2".parse().expect("hex"),
+            md5: "900150983cd24fb0d6963f7d28e17f72".parse().expect("hex"),
+            sha1: "a9993e364706816aba3e25717850c26c9cd0d89d"
+                .parse()
+                .expect("hex"),
         }
     }
 
@@ -488,7 +487,7 @@ mod tests {
             .rom("Example Quest (USA).nes", &h, RomStatus::Good)
             .write(&c)
             .expect("seed");
-        let m = match_rom(&c, &nes, &h.sha1, &h.md5, &h.crc32, 3)
+        let m = match_rom(&c, &nes, Some(h.sha1), Some(h.md5), Some(h.crc32), 3)
             .expect("match")
             .expect("found");
         assert_eq!(m.name, "Example Quest (USA).nes");
@@ -505,18 +504,19 @@ mod tests {
             params![other, "1".repeat(32), "00000001"],
         )
         .expect("clear sha1");
-        let wrong = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
-        let m = match_rom(&c, &nes, wrong, &"1".repeat(32), "ffffffff", 4)
+        let wrong = Some(Sha1::from_bytes([0xde; 20]));
+        let crc = |n| Some(Crc32::from_u32(n));
+        let m = match_rom(&c, &nes, wrong, Some(Md5::from_bytes([0x11; 16])), crc(!0), 4)
             .expect("match")
             .expect("a wrong sha1 falls to the md5 of a rom with no sha1");
         assert_eq!(m.rom_id, other);
         c.execute("UPDATE roms SET md5 = NULL WHERE id = ?1", [other])
             .expect("clear md5");
-        let m = match_rom(&c, &nes, wrong, "0", "00000001", 4)
+        let m = match_rom(&c, &nes, wrong, None, crc(1), 4)
             .expect("match")
             .expect("crc32 and size match a rom with neither");
         assert_eq!(m.rom_id, other);
-        assert!(match_rom(&c, &nes, wrong, "0", "00000001", 5)
+        assert!(match_rom(&c, &nes, wrong, None, crc(1), 5)
             .expect("match")
             .is_none());
     }
@@ -541,7 +541,7 @@ mod tests {
             [new.dat_version, old.dat_version],
         )
         .expect("supersede");
-        let m = match_rom(&c, &nes, &h.sha1, &h.md5, &h.crc32, 3)
+        let m = match_rom(&c, &nes, Some(h.sha1), Some(h.md5), Some(h.crc32), 3)
             .expect("match")
             .expect("found");
         assert_eq!(m.name, "New Pick.nes");
@@ -562,8 +562,11 @@ mod tests {
             [gone.titles[0]],
         )
         .expect("retire");
-        let any = || match_rom(&c, &nes, &h.sha1, &h.md5, &h.crc32, 3).expect("match");
-        let live = || match_live_rom(&c, &nes, &h.sha1, &h.md5, &h.crc32, 3).expect("match");
+        let any =
+            || match_rom(&c, &nes, Some(h.sha1), Some(h.md5), Some(h.crc32), 3).expect("match");
+        let live = || {
+            match_live_rom(&c, &nes, Some(h.sha1), Some(h.md5), Some(h.crc32), 3).expect("match")
+        };
         assert_eq!(any().expect("retired still matches").name, "Gone Quest.nes");
         assert!(live().is_none(), "a retired rom is not live");
         dat(&nes)
@@ -585,9 +588,9 @@ mod tests {
             .rom("a.nes", &h, RomStatus::Good)
             .write(&c)
             .expect("seed");
-        assert!(crc_candidate_exists(&c, &nes, &h.crc32, 3).expect("exists"));
-        assert!(!crc_candidate_exists(&c, &nes, &h.crc32, 4).expect("size"));
-        assert!(!crc_candidate_exists(&c, &pid("snes"), &h.crc32, 3).expect("platform"));
+        assert!(crc_candidate_exists(&c, &nes, h.crc32, 3).expect("exists"));
+        assert!(!crc_candidate_exists(&c, &nes, h.crc32, 4).expect("size"));
+        assert!(!crc_candidate_exists(&c, &pid("snes"), h.crc32, 3).expect("platform"));
     }
 
     #[test]
@@ -621,7 +624,7 @@ mod tests {
             .expect("seed");
         let (a, b) = (seeded.titles[0], seeded.titles[1]);
         let (ra, rb) = (seeded.roms[0], seeded.roms[1]);
-        let ids = |hashes: &HashSet, platform: &PlatformId| -> Vec<RomId> {
+        let ids = |hashes: &Hashes, platform: &PlatformId| -> Vec<RomId> {
             roms_matching(&c, platform, hashes)
                 .expect("match")
                 .iter()
@@ -632,10 +635,10 @@ mod tests {
         c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [rb])
             .expect("retire");
         assert_eq!(ids(&h, &psx), [ra], "retired roms never match");
-        let crc_only = HashSet {
-            sha1: "f".repeat(40),
-            md5: "e".repeat(32),
-            ..h.clone()
+        let crc_only = Hashes {
+            sha1: "f".repeat(40).parse().expect("hex"),
+            md5: "e".repeat(32).parse().expect("hex"),
+            ..h
         };
         assert!(ids(&crc_only, &psx).is_empty(), "sha1 roms need sha1");
         assert!(ids(&h, &pid("saturn")).is_empty());

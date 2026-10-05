@@ -34,7 +34,7 @@ fn mra_run(c: &Connection, name: &str, zips: &[(&str, bool)], run: i64) -> Title
         .map(|&(name, present)| MraZip {
             name,
             zip_dir: "mame",
-            md5: Some("0123456789abcdef0123456789abcdef"),
+            md5: "0123456789abcdef0123456789abcdef".parse().ok(),
             present,
         })
         .collect();
@@ -185,8 +185,8 @@ fn dat_game(c: &Connection, version: &str, name: &str) -> TitleId {
     let rom = RomInput {
         name: "cpu.bin",
         size: 4,
-        crc32: Some("0a0b0c0d"),
-        md5: Some("0123456789abcdef0123456789abcdef"),
+        crc32: Some(mistarr_core::Crc32::from_u32(0x0a0b_0c0d)),
+        md5: "0123456789abcdef0123456789abcdef".parse().ok(),
         sha1: None,
         status: titles::RomStatus::Good,
         header: None,
@@ -255,9 +255,9 @@ fn scans_never_match_members_to_mra_roms() {
     let m = crate::db::roms::match_rom(
         &c,
         &pid,
-        "0000000000000000000000000000000000000000",
-        "0123456789abcdef0123456789abcdef",
-        "00000000",
+        Some(mistarr_core::Sha1::from_bytes([0; 20])),
+        "0123456789abcdef0123456789abcdef".parse().ok(),
+        Some(mistarr_core::Crc32::from_u32(0)),
         0,
     )
     .expect("match");

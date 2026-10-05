@@ -10,7 +10,7 @@ use common::{boot, boot_with, config_in, eventually, get, request, Booted, Sse};
 use mistarr_clients::fake::{FakeResponse, FakeServer};
 use mistarr_clients::SeedPolicy;
 use mistarr_core::hash::{hash_reader, HeaderRule};
-use mistarr_core::{HashSet, PlatformId};
+use mistarr_core::{Hashes, PlatformId};
 use mistarr_server::db::downloads::{self, DownloadRow, DownloadState};
 use mistarr_server::db::files::{self, FileState, NewFile};
 use mistarr_server::db::ids::{DownloadId, FileId, RomId, SourceId, TitleId};
@@ -44,7 +44,7 @@ fn payload(seed: u8, len: usize) -> Vec<u8> {
         .collect()
 }
 
-fn hash_of(data: &[u8]) -> HashSet {
+fn hash_of(data: &[u8]) -> Hashes {
     hash_reader(Cursor::new(data), HeaderRule::None, None).expect("hash")
 }
 
@@ -85,12 +85,12 @@ fn source(b: &Booted, client_id: Option<&str>) -> SourceId {
 }
 
 /// Seeds one entry with one rom and returns `(title_id, rom_id)`.
-fn entry(b: &Booted, platform: &str, game: &str, rom: &str, hashes: &HashSet) -> (TitleId, RomId) {
+fn entry(b: &Booted, platform: &str, game: &str, rom: &str, hashes: &Hashes) -> (TitleId, RomId) {
     let (pid, game, rom, hashes) = (
         PlatformId(platform.into()),
         game.to_owned(),
         rom.to_owned(),
-        hashes.clone(),
+        *hashes,
     );
     b.running
         .app
@@ -228,9 +228,9 @@ fn existing_file(
                 &PlatformId("nes".into()),
                 &NewFile {
                     rom_id,
-                    crc32: Some(h.crc32.clone()),
-                    md5: Some(h.md5.clone()),
-                    sha1: Some(h.sha1.clone()),
+                    crc32: Some(h.crc32),
+                    md5: Some(h.md5),
+                    sha1: Some(h.sha1),
                     header_rule: Some("ines".to_string()),
                     ..NewFile::unhashed(&rel, size, 1, st)
                 },
@@ -269,7 +269,7 @@ async fn headerless_nes_is_placed_with_the_dat_header() {
     assert!(!staged.exists());
     let row = file_at(&b, "nes", NES_TARGET).expect("files row");
     assert_eq!((row.state, row.rom_id), (FileState::Verified, Some(rom)));
-    assert_eq!(row.sha1.as_deref(), Some(hash_of(&body).sha1.as_str()));
+    assert_eq!(row.sha1, Some(hash_of(&body).sha1));
     assert_eq!(
         row.whole.sha1,
         Some(hash_of(&placed).sha1),
@@ -392,7 +392,10 @@ async fn a_mismatch_is_quarantined_with_a_report() {
         report.contains("Expected: Example Quest (USA).nes (64 bytes)"),
         "{report}"
     );
-    assert!(report.contains(&hash_of(&wrong).sha1), "{report}");
+    assert!(
+        report.contains(&hash_of(&wrong).sha1.to_string()),
+        "{report}"
+    );
     assert!(!games(&b).join(NES_TARGET).exists());
     let entries = log(&b);
     assert_eq!(entries[0].action, "quarantined");
@@ -523,7 +526,7 @@ const DISC_NAMES: [&str; 3] = [
 fn disc_with(b: &Booted, data: &[Vec<u8>]) -> (TitleId, Vec<(RomId, PathBuf)>) {
     let names = DISC_NAMES;
     let pid = PlatformId("psx".into());
-    let hashes: Vec<HashSet> = data.iter().map(|d| hash_of(d)).collect();
+    let hashes: Vec<Hashes> = data.iter().map(|d| hash_of(d)).collect();
     let (title, roms) = b
         .running
         .app

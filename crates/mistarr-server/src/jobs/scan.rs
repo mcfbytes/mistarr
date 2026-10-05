@@ -13,7 +13,7 @@ use mistarr_core::hash::{
     hash_forms, hash_reader, hash_zip_member_forms, zip_member_content_crc, zip_members, HashError,
     HeaderForms, HeaderRule, ZipMember,
 };
-use mistarr_core::PlatformId;
+use mistarr_core::{Crc32, PlatformId};
 use mistarr_mister::platforms::{self, Kind, Platform};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -516,9 +516,9 @@ impl<'a> Sink<'a> {
             rel_path: found.rel_path,
             size: found.size,
             mtime: found.mtime,
-            crc32: Some(forms.content.crc32.clone()),
-            md5: Some(forms.content.md5.clone()),
-            sha1: Some(forms.content.sha1.clone()),
+            crc32: Some(forms.content.crc32),
+            md5: Some(forms.content.md5),
+            sha1: Some(forms.content.sha1),
             header_rule: Some(rule.as_str().to_owned()),
             whole: files::WholeHashes::of(rule.as_str(), &forms),
             rom_id,
@@ -594,9 +594,9 @@ fn known(
     }
     if row.sha1.is_none() && row.md5.is_none() {
         // A NULL rule marks a member never hashed; a failed hash records its rule instead.
-        let candidate = match (precheck, row.crc32.as_deref()) {
+        let candidate = match (precheck, row.crc32) {
             (Some(rule), Some(crc)) if row.header_rule.is_none() => {
-                let whole = row.whole.crc32.as_deref().unwrap_or(crc);
+                let whole = row.whole.crc32.unwrap_or(crc);
                 let content = (whole != crc).then_some(crc);
                 member_candidate(conn, platform_id, rule, whole, content, size)?
             }
@@ -644,8 +644,8 @@ fn member_candidate(
     conn: &Connection,
     platform_id: &PlatformId,
     rule: HeaderRule,
-    whole: &str,
-    content: Option<&str>,
+    whole: Crc32,
+    content: Option<Crc32>,
     size: i64,
 ) -> Result<bool> {
     if roms::crc_candidate_exists(conn, platform_id, whole, size)? {
@@ -732,7 +732,7 @@ async fn scan_flat_unit(
 
 /// An unmatched or unreadable file's row: no hash was trusted enough to
 /// classify it, so it is recorded `unverified` rather than aborting the scan.
-fn unverified_row(rel_path: String, size: i64, mtime: i64, crc32: Option<String>) -> NewFile {
+fn unverified_row(rel_path: String, size: i64, mtime: i64, crc32: Option<Crc32>) -> NewFile {
     NewFile {
         rel_path,
         size,
@@ -817,8 +817,7 @@ async fn scan_zip_unit(
             }
             Err(e) => {
                 tracing::warn!(member = %member.name, error = %e, "cannot hash zip member; marking unverified");
-                let mut row =
-                    unverified_row(member_rel, member_size, mtime, Some(member.crc32.clone()));
+                let mut row = unverified_row(member_rel, member_size, mtime, Some(member.crc32));
                 // The rule records the attempt, so an unchanged member is not decompressed again.
                 row.header_rule = Some(rule.as_str().to_owned());
                 row
@@ -854,22 +853,18 @@ async fn precheck_member(
         None
     };
     let size = i64::try_from(member.size).unwrap_or(i64::MAX);
-    let (pid, whole, content) = (
-        platform_id.clone(),
-        member.crc32.clone(),
-        content_crc.clone(),
-    );
+    let (pid, whole) = (platform_id.clone(), member.crc32);
     let candidate = ctx
         .app
         .db
-        .read(move |c| member_candidate(c, &pid, rule, &whole, content.as_deref(), size))
+        .read(move |c| member_candidate(c, &pid, rule, whole, content_crc, size))
         .await?;
     if candidate {
         return Ok(None);
     }
-    let crc = content_crc.unwrap_or_else(|| member.crc32.clone());
+    let crc = content_crc.unwrap_or(member.crc32);
     let mut row = unverified_row(member_rel.to_owned(), size, mtime, Some(crc));
-    row.whole.crc32 = rule.strips_header().then(|| member.crc32.clone());
+    row.whole.crc32 = rule.strips_header().then_some(member.crc32);
     Ok(Some(row))
 }
 
@@ -986,16 +981,16 @@ async fn disc_track(
     };
     let matched = match &hashes {
         Some(h) => {
-            let (pid2, h2) = (platform_id.clone(), h.clone());
+            let (pid2, h2) = (platform_id.clone(), *h);
             ctx.app
                 .db
                 .read(move |c| {
                     roms::match_rom(
                         c,
                         &pid2,
-                        &h2.sha1,
-                        &h2.md5,
-                        &h2.crc32,
+                        Some(h2.sha1),
+                        Some(h2.md5),
+                        Some(h2.crc32),
                         i64::try_from(h2.size).unwrap_or(i64::MAX),
                     )
                 })
@@ -1018,6 +1013,7 @@ mod tests {
     use super::*;
     use crate::app::testutil::state;
     use crate::db::jobs as job_rows;
+    use mistarr_core::Sha1;
 
     #[test]
     fn a_listing_holds_each_regular_file_with_its_size_and_mtime() {
@@ -1233,18 +1229,19 @@ mod tests {
 
     #[test]
     fn only_stripping_rule_rows_without_the_whole_form_lack_it() {
-        let row = |rule: Option<&str>, sha1: Option<&str>, whole: Option<&str>| files::FileRow {
+        let (a, b) = (Sha1::from_bytes([0xa; 20]), Sha1::from_bytes([0xb; 20]));
+        let row = |rule: Option<&str>, sha1: Option<Sha1>, whole: Option<Sha1>| files::FileRow {
             id: FileId(1),
             platform_id: PlatformId("nes".into()),
             rel_path: "NES/a.nes".into(),
             size: 20,
             mtime: 1,
-            crc32: Some("00000000".into()),
+            crc32: Some("00000000".parse().expect("hex")),
             md5: None,
-            sha1: sha1.map(Into::into),
+            sha1,
             header_rule: rule.map(Into::into),
             whole: files::WholeHashes {
-                sha1: whole.map(Into::into),
+                sha1: whole,
                 ..files::WholeHashes::default()
             },
             rom_id: None,
@@ -1252,14 +1249,14 @@ mod tests {
             scanned_at: 1,
             reason: None,
         };
-        assert!(lacks_whole(&row(Some("ines"), Some("a"), None)));
-        assert!(lacks_whole(&row(Some("lnx"), Some("a"), None)));
-        assert!(!lacks_whole(&row(Some("ines"), Some("a"), Some("b"))));
+        assert!(lacks_whole(&row(Some("ines"), Some(a), None)));
+        assert!(lacks_whole(&row(Some("lnx"), Some(a), None)));
+        assert!(!lacks_whole(&row(Some("ines"), Some(a), Some(b))));
         assert!(
             !lacks_whole(&row(Some("ines"), None, None)),
             "a failed hash"
         );
-        assert!(!lacks_whole(&row(Some("smc"), Some("a"), None)));
+        assert!(!lacks_whole(&row(Some("smc"), Some(a), None)));
         assert!(
             !lacks_whole(&row(None, None, None)),
             "a member known by CRC32"
@@ -1319,12 +1316,12 @@ mod tests {
         let dir_entry = ZipMember {
             name: "sub/".to_owned(),
             size: 0,
-            crc32: "00000000".to_owned(),
+            crc32: "00000000".parse().expect("hex"),
         };
         let file_entry = ZipMember {
             name: "sub/a.bin".to_owned(),
             size: 3,
-            crc32: "352441c2".to_owned(),
+            crc32: "352441c2".parse().expect("hex"),
         };
         assert!(dir_entry.name.ends_with('/'));
         assert!(!file_entry.name.ends_with('/'));

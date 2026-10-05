@@ -3,7 +3,7 @@
 use std::io::{Cursor, Read};
 
 use mistarr_core::chd::{self, ChdError, Decoder, Step, TrackKind, Unidentifiable};
-use mistarr_core::HashSet;
+use mistarr_core::Hashes;
 use mistarr_fixture::chd::{to_vec, Codec, Kind, Pick, Spec, TrackSpec, Tree, Written};
 use proptest::prelude::*;
 use sha1::{Digest as _, Sha1};
@@ -26,7 +26,7 @@ fn three_tracks() -> Vec<TrackSpec> {
     ]
 }
 
-fn decode_steps(bytes: &[u8], step: u32) -> Result<Vec<HashSet>, ChdError> {
+fn decode_steps(bytes: &[u8], step: u32) -> Result<Vec<Hashes>, ChdError> {
     let h = chd::read_header(bytes)?;
     let mut c = Cursor::new(bytes);
     let layout = chd::read_layout(&mut c, &h)?;
@@ -35,7 +35,7 @@ fn decode_steps(bytes: &[u8], step: u32) -> Result<Vec<HashSet>, ChdError> {
     d.finish()
 }
 
-fn decode(bytes: &[u8]) -> Result<Vec<HashSet>, ChdError> {
+fn decode(bytes: &[u8]) -> Result<Vec<Hashes>, ChdError> {
     decode_steps(bytes, 32)
 }
 

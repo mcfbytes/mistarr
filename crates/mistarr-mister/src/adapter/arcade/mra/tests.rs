@@ -24,7 +24,10 @@ fn parses_synthetic_mra() {
     assert_eq!(mra.setname.as_deref(), Some("exblast"));
     assert_eq!(mra.rbf.as_deref(), Some("examplecore"));
     assert_eq!(mra.zips, ["exblast.zip", "exparent.zip", "exsound.zip"]);
-    assert_eq!(mra.md5, ["0123456789abcdef0123456789abcdef"]);
+    assert_eq!(
+        mra.md5,
+        ["0123456789abcdef0123456789abcdef".parse().expect("md5")]
+    );
 }
 
 #[test]
@@ -34,7 +37,10 @@ fn rom_structure_is_kept() {
     let r0 = &mra.roms[0];
     assert_eq!(r0.index, 0);
     assert_eq!(r0.zips, ["exblast.zip", "exparent.zip"]);
-    assert_eq!(r0.md5.as_deref(), Some("0123456789abcdef0123456789abcdef"));
+    assert_eq!(
+        r0.md5.map(|d| d.to_string()).as_deref(),
+        Some("0123456789abcdef0123456789abcdef")
+    );
     let names: Vec<_> = r0
         .items
         .iter()
@@ -159,7 +165,7 @@ fn md5_is_collected_only_for_roms_that_close() {
     let inner = "1".repeat(32);
     let xml = format!("<m><rom md5=\"{outer}\"><group><rom md5=\"{inner}\"/></group></rom></m>");
     let mra = parse(xml.as_bytes()).expect("parse");
-    assert_eq!(mra.md5, [outer]);
+    assert_eq!(mra.md5, [outer.parse().expect("md5")]);
 }
 
 #[test]
@@ -248,7 +254,10 @@ fn tag_and_attribute_case_is_ignored() {
     assert_eq!(mixed.zips, ["exblast.zip"]);
     let rom = &mixed.roms[0];
     assert_eq!(rom.index, 1);
-    assert_eq!(rom.md5.as_deref(), Some("0123456789abcdef0123456789abcdef"));
+    assert_eq!(
+        rom.md5.map(|d| d.to_string()).as_deref(),
+        Some("0123456789abcdef0123456789abcdef")
+    );
     assert!(matches!(&rom.items[0], RomItem::Part(p) if p.crc == Some(10) && p.offset == 16));
     assert!(matches!(&rom.items[1], RomItem::Interleave(il) if il.parts.len() == 2));
     assert!(matches!(&rom.items[2], RomItem::Patch(p) if p.data == [0xff]));

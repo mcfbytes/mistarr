@@ -231,7 +231,7 @@ fn plan(ram: &Path) -> Plan {
     }
 }
 
-fn sha1(path: &Path) -> String {
+fn sha1(path: &Path) -> mistarr_core::Sha1 {
     let file = File::open(path).expect("open");
     mistarr_core::hash::hash_reader(file, mistarr_core::hash::HeaderRule::None, None)
         .expect("hash")

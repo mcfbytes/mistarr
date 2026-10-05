@@ -1,19 +1,19 @@
 use std::time::Duration;
 
 use axum::http::StatusCode;
-use mistarr_core::{HashSet, PlatformId};
+use mistarr_core::{Hashes, PlatformId};
 use mistarr_mister::launch::{FakeOutcome, RecordingSink};
 
 use super::*;
 use crate::app::testutil::state;
 use crate::db::files::{self, FileState, NewFile};
 
-fn hashes() -> HashSet {
-    HashSet {
+fn hashes() -> Hashes {
+    Hashes {
         size: 4,
-        crc32: "00000001".into(),
-        md5: "0".repeat(32),
-        sha1: "1".repeat(40),
+        crc32: "00000001".parse().expect("hex"),
+        md5: "0".repeat(32).parse().expect("hex"),
+        sha1: "1".repeat(40).parse().expect("hex"),
     }
 }
 

@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::hash::HeaderRule;
 use crate::xml::{attr_value, check_utf8, lossy, resolve_ref, CappedReader, ReadError};
+use crate::{Crc32, Digest, Md5, Sha1};
 
 mod canon;
 mod export;
@@ -238,19 +239,19 @@ impl RomStatus {
     }
 }
 
-/// One `<rom>` of a game. Hash fields are lowercase hex of the documented length.
+/// One `<rom>` of a game.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DatRom {
     /// File name, possibly with a subdirectory for disc images.
     pub name: String,
     /// Size in bytes.
     pub size: u64,
-    /// CRC32, 8 hex characters.
-    pub crc32: Option<String>,
-    /// MD5, 32 hex characters.
-    pub md5: Option<String>,
-    /// SHA1, 40 hex characters.
-    pub sha1: Option<String>,
+    /// CRC32, when the DAT lists it.
+    pub crc32: Option<Crc32>,
+    /// MD5, when the DAT lists it.
+    pub md5: Option<Md5>,
+    /// SHA1, when the DAT lists it.
+    pub sha1: Option<Sha1>,
     /// Dump status.
     pub status: RomStatus,
     /// The `header` attribute, verbatim.
@@ -385,7 +386,7 @@ pub struct Dat {
 /// </datafile>"#;
 /// let dat = mistarr_core::dat::parse_dat(xml)?;
 /// assert_eq!(dat.header.name, "Example System");
-/// assert_eq!(dat.games[0].roms[0].crc32.as_deref(), Some("0a0b0c0d"));
+/// assert_eq!(dat.games[0].roms[0].crc32.map(|d| d.to_string()).as_deref(), Some("0a0b0c0d"));
 /// # Ok::<(), mistarr_core::dat::DatError>(())
 /// ```
 ///
@@ -960,9 +961,9 @@ impl<R: BufRead> DatStream<R> {
             extension: self.attr(e, "extension")?.unwrap_or_default(),
             format: self.attr(e, "format")?.unwrap_or_default(),
             size: parse_size(game, &size_text)?,
-            crc32: self.hex(e, "crc32", 8, game)?,
-            md5: self.hex(e, "md5", 32, game)?,
-            sha1: self.hex(e, "sha1", 40, game)?,
+            crc32: self.digest(e, "crc32", game)?,
+            md5: self.digest(e, "md5", game)?,
+            sha1: self.digest(e, "sha1", game)?,
             header: self.attr(e, "header")?.filter(|h| !h.trim().is_empty()),
             item,
             forcename: self.attr(e, "forcename")?,
@@ -970,29 +971,24 @@ impl<R: BufRead> DatStream<R> {
         })
     }
 
-    /// A hash attribute as lowercase hex of `len` digits; empty counts as absent.
-    fn hex(
+    /// A hash attribute as a digest; empty counts as absent.
+    fn digest<const N: usize>(
         &self,
         e: &BytesStart<'_>,
         key: &'static str,
-        len: usize,
         game: &str,
-    ) -> Result<Option<String>, DatError> {
+    ) -> Result<Option<Digest<N>>, DatError> {
         match self.attr(e, key)? {
             None => Ok(None),
             Some(v) if v.trim().is_empty() => Ok(None),
-            Some(v) => {
-                let t = v.trim();
-                if t.len() == len && t.bytes().all(|b| b.is_ascii_hexdigit()) {
-                    Ok(Some(t.to_ascii_lowercase()))
-                } else {
-                    Err(DatError::InvalidAttribute {
-                        game: game.to_owned(),
-                        attribute: key,
-                        value: v,
-                    })
-                }
-            }
+            Some(v) => match v.trim().parse() {
+                Ok(digest) => Ok(Some(digest)),
+                Err(_) => Err(DatError::InvalidAttribute {
+                    game: game.to_owned(),
+                    attribute: key,
+                    value: v,
+                }),
+            },
         }
     }
 
@@ -1013,9 +1009,9 @@ impl<R: BufRead> DatStream<R> {
                 value: v,
             })?,
         };
-        let crc32 = self.hex(e, "crc", 8, game)?;
-        let md5 = self.hex(e, "md5", 32, game)?;
-        let sha1 = self.hex(e, "sha1", 40, game)?;
+        let crc32 = self.digest(e, "crc", game)?;
+        let md5 = self.digest(e, "md5", game)?;
+        let sha1 = self.digest(e, "sha1", game)?;
         Ok(DatRom {
             header: self.attr(e, "header")?,
             name,
@@ -1054,8 +1050,7 @@ impl Budget {
 }
 
 fn rom_bytes(rom: &DatRom) -> usize {
-    let len = |s: &Option<String>| s.as_deref().map_or(0, str::len);
-    rom.name.len() + len(&rom.crc32) + len(&rom.md5) + len(&rom.sha1) + len(&rom.header)
+    rom.name.len() + rom.header.as_deref().map_or(0, str::len)
 }
 
 fn parse_size(game: &str, text: &str) -> Result<u64, DatError> {

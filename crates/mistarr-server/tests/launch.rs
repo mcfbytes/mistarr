@@ -63,11 +63,11 @@ async fn launch_routes_answer_with_documented_statuses() {
         .app
         .db
         .write(move |c| {
-            let hashes = mistarr_core::HashSet {
+            let hashes = mistarr_core::Hashes {
                 size: 4,
-                crc32: "00000001".into(),
-                md5: "0".repeat(32),
-                sha1: "1".repeat(40),
+                crc32: "00000001".parse().expect("hex"),
+                md5: "0".repeat(32).parse().expect("hex"),
+                sha1: "1".repeat(40).parse().expect("hex"),
             };
             let written = mistarr_server::db::fixtures::dat(&pid)
                 .title("Example Quest (USA)")

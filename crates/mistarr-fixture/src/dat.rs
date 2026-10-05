@@ -7,7 +7,7 @@ use std::io::{BufReader, Read};
 use std::path::Path;
 
 use mistarr_core::hash::{hash_reader, hash_zip_member, zip_members, HashError, HeaderRule};
-use mistarr_core::HashSet;
+use mistarr_core::Hashes;
 use mistarr_mister::platforms::{self, Platform};
 use mistarr_mister::Kind;
 
@@ -19,7 +19,7 @@ pub struct Rom {
     /// File name the DAT gives the rom.
     pub name: String,
     /// Size and hashes, after the platform's header rule.
-    pub hashes: HashSet,
+    pub hashes: Hashes,
     /// `status` attribute, such as `baddump`; `None` means good.
     pub status: Option<String>,
     /// Header bytes the header rule skipped, written as the `header` attribute.
@@ -82,7 +82,7 @@ pub fn rom_from_bytes(name: &str, data: &[u8], rule: HeaderRule) -> Result<Rom> 
 
 /// A rom whose header, if the rule skipped one, is the first `total - size`
 /// bytes of `head`, the start of an item `total` bytes long.
-fn rom(name: &str, hashes: HashSet, head: &[u8], total: u64, rule: HeaderRule) -> Rom {
+fn rom(name: &str, hashes: Hashes, head: &[u8], total: u64, rule: HeaderRule) -> Rom {
     let skipped = usize::try_from(total.saturating_sub(hashes.size)).unwrap_or(usize::MAX);
     let header = (records_header(rule) && skipped > 0 && skipped <= head.len())
         .then(|| head[..skipped].to_vec());

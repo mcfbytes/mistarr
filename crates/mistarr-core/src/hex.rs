@@ -53,7 +53,7 @@ pub fn decode_spaced(text: &str) -> Option<Vec<u8>> {
 }
 
 /// The value of one hex digit.
-fn digit(b: u8) -> Option<u8> {
+pub(crate) fn digit(b: u8) -> Option<u8> {
     char::from(b)
         .to_digit(16)
         .and_then(|d| u8::try_from(d).ok())

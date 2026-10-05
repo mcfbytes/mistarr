@@ -2,8 +2,7 @@
 //! be identified. See `docs/VERIFICATION.md` "CHD images" and `docs/DATA-MODEL.md`.
 
 use mistarr_core::chd::{ChdId, Unidentifiable};
-use mistarr_core::Sha1;
-use mistarr_core::{HashSet, PlatformId};
+use mistarr_core::{Crc32, Hashes, Md5, PlatformId, Sha1};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Serialize, Serializer};
 
@@ -83,13 +82,13 @@ impl Serialize for Unidentified {
 /// let id = ChdId { sha1: Sha1::from_bytes([7; 20]), size: 10 };
 /// assert!(mistarr_server::db::chd::cached_tracks(&conn, &id).unwrap().is_none());
 /// ```
-pub fn cached_tracks(conn: &Connection, id: &ChdId) -> Result<Option<Vec<HashSet>>> {
-    let rows: Vec<(i64, i64, String, String, String)> = conn
+pub fn cached_tracks(conn: &Connection, id: &ChdId) -> Result<Option<Vec<Hashes>>> {
+    let rows: Vec<(i64, i64, Crc32, Md5, Sha1)> = conn
         .prepare_cached(
             "SELECT track, size, crc32, md5, sha1 FROM chd_tracks
              WHERE chd_sha1 = ?1 AND chd_size = ?2 ORDER BY track",
         )?
-        .query_map(params![id.sha1.to_string(), to_i64(id.size)], |r| {
+        .query_map(params![id.sha1, to_i64(id.size)], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -102,7 +101,7 @@ pub fn cached_tracks(conn: &Connection, id: &ChdId) -> Result<Option<Vec<HashSet
     }
     Ok(Some(
         rows.into_iter()
-            .map(|(_, size, crc32, md5, sha1)| HashSet {
+            .map(|(_, size, crc32, md5, sha1)| Hashes {
                 size: sql::to_u64(size),
                 crc32,
                 md5,
@@ -117,8 +116,8 @@ pub fn cached_tracks(conn: &Connection, id: &ChdId) -> Result<Option<Vec<HashSet
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn store_tracks(conn: &Connection, id: &ChdId, tracks: &[HashSet]) -> Result<()> {
-    let (sha1, size) = (id.sha1.to_string(), to_i64(id.size));
+pub fn store_tracks(conn: &Connection, id: &ChdId, tracks: &[Hashes]) -> Result<()> {
+    let (sha1, size) = (id.sha1, to_i64(id.size));
     conn.prepare_cached("DELETE FROM chd_tracks WHERE chd_sha1 = ?1 AND chd_size = ?2")?
         .execute(params![sha1, size])?;
     let mut insert = conn.prepare_cached(
@@ -145,17 +144,17 @@ pub fn store_tracks(conn: &Connection, id: &ChdId, tracks: &[HashSet]) -> Result
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn whole_hashes(conn: &Connection, id: &ChdId, mtime: i64) -> Result<Option<HashSet>> {
-    let row: Option<(String, String, String)> = conn
+pub fn whole_hashes(conn: &Connection, id: &ChdId, mtime: i64) -> Result<Option<Hashes>> {
+    let row: Option<(Crc32, Md5, Sha1)> = conn
         .prepare_cached(
             "SELECT crc32, md5, sha1 FROM chd_whole
              WHERE chd_sha1 = ?1 AND chd_size = ?2 AND mtime = ?3",
         )?
-        .query_row(params![id.sha1.to_string(), to_i64(id.size), mtime], |r| {
+        .query_row(params![id.sha1, to_i64(id.size), mtime], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
         .optional()?;
-    Ok(row.map(|(crc32, md5, sha1)| HashSet {
+    Ok(row.map(|(crc32, md5, sha1)| Hashes {
         size: id.size,
         crc32,
         md5,
@@ -168,13 +167,13 @@ pub fn whole_hashes(conn: &Connection, id: &ChdId, mtime: i64) -> Result<Option<
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn store_whole_hashes(conn: &Connection, id: &ChdId, mtime: i64, h: &HashSet) -> Result<()> {
+pub fn store_whole_hashes(conn: &Connection, id: &ChdId, mtime: i64, h: &Hashes) -> Result<()> {
     conn.prepare_cached(
         "INSERT OR REPLACE INTO chd_whole (chd_sha1, chd_size, mtime, crc32, md5, sha1)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
     )?
     .execute(params![
-        id.sha1.to_string(),
+        id.sha1,
         to_i64(id.size),
         mtime,
         h.crc32,
@@ -189,7 +188,7 @@ pub fn store_whole_hashes(conn: &Connection, id: &ChdId, mtime: i64, h: &HashSet
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn find_id(conn: &Connection, tracks: &[HashSet]) -> Result<Option<ChdId>> {
+pub fn find_id(conn: &Connection, tracks: &[Hashes]) -> Result<Option<ChdId>> {
     let Some(first) = tracks.first() else {
         return Ok(None);
     };
@@ -230,7 +229,7 @@ pub fn failure(conn: &Connection, id: &ChdId, mtime: i64) -> Result<Option<(Unid
             "SELECT reason, decoder FROM chd_failures
              WHERE chd_sha1 = ?1 AND chd_size = ?2 AND mtime = ?3",
         )?
-        .query_row(params![id.sha1.to_string(), to_i64(id.size), mtime], |r| {
+        .query_row(params![id.sha1, to_i64(id.size), mtime], |r| {
             Ok((r.get(0)?, r.get(1)?))
         })
         .optional()?;
@@ -261,7 +260,7 @@ pub fn store_failure(
          WHERE chd_failures.reason <> excluded.reason OR chd_failures.decoder <> excluded.decoder",
     )?
     .execute(params![
-        id.sha1.to_string(),
+        id.sha1,
         to_i64(id.size),
         mtime,
         reason.code(),
@@ -478,12 +477,12 @@ mod tests {
         }
     }
 
-    fn track(n: u8, size: u64) -> HashSet {
-        HashSet {
+    fn track(n: u8, size: u64) -> Hashes {
+        Hashes {
             size,
-            crc32: format!("{n:08x}"),
-            md5: format!("{n:032x}"),
-            sha1: format!("{n:040x}"),
+            crc32: format!("{n:08x}").parse().expect("hex"),
+            md5: format!("{n:032x}").parse().expect("hex"),
+            sha1: format!("{n:040x}").parse().expect("hex"),
         }
     }
 
@@ -677,9 +676,9 @@ mod tests {
         .expect("log");
         let member = NewFile {
             rel_path: "PSX/G/g.chd#01".into(),
-            crc32: Some("1".into()),
-            md5: Some("2".into()),
-            sha1: Some("3".into()),
+            crc32: Some(Crc32::from_u32(1)),
+            md5: Some(Md5::from_bytes([2; 16])),
+            sha1: Some(Sha1::from_bytes([3; 20])),
             state: FileState::Unverified,
             reason: None,
             ..container("x", Unidentified::Off)

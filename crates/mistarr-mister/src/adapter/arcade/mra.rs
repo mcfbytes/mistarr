@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use mistarr_core::dat::{MAX_DEPTH, MAX_EVENT_BYTES};
 use mistarr_core::xml::{check_utf8, lossy, resolve_ref, CappedReader, EscapeInvalid};
+use mistarr_core::Md5;
 use quick_xml::errors::IllFormedError;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::{Reader, XmlVersion};
@@ -25,8 +26,8 @@ pub struct Mra {
     pub rbf: Option<String>,
     /// Zip file names from every `zip` attribute, `|`-separated lists split, first-seen order.
     pub zips: Vec<String>,
-    /// Lowercase `md5` attributes of `<rom>` elements that carry a 32-digit hex value.
-    pub md5: Vec<String>,
+    /// `md5` attributes of `<rom>` elements that carry a 32-digit hex value.
+    pub md5: Vec<Md5>,
     /// Every `<rom>` element in document order.
     pub roms: Vec<MraRom>,
 }
@@ -64,8 +65,8 @@ pub struct MraRom {
     pub index: u32,
     /// Zip names from the `zip` attribute, tried in order for each named part.
     pub zips: Vec<String>,
-    /// Lowercase expected MD5; `None` when absent, `none` or not 32 hex digits.
-    pub md5: Option<String>,
+    /// Expected MD5; `None` when absent, `none` or not 32 hex digits.
+    pub md5: Option<Md5>,
     /// Content in document order.
     pub items: Vec<RomItem>,
 }
@@ -374,7 +375,7 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
     }
     // Only from roms that closed into `mra.roms`, not any `<rom>`-named tag seen in
     // passing, so this cannot grow past MAX_ROMS from nested or skipped content.
-    mra.md5 = mra.roms.iter().filter_map(|r| r.md5.clone()).collect();
+    mra.md5 = mra.roms.iter().filter_map(|r| r.md5).collect();
     Ok(mra)
 }
 
@@ -750,11 +751,6 @@ fn split_zips(value: &str, cap: usize, position: u64) -> Result<Vec<String>> {
     Ok(out)
 }
 
-fn valid_md5(value: &str) -> Option<String> {
-    let md5 = value.trim().to_ascii_lowercase();
-    (md5.len() == 32 && md5.bytes().all(|b| b.is_ascii_hexdigit())).then_some(md5)
-}
-
 /// A `<rom>` being read, with the element open inside it.
 struct RomBuilder {
     rom: MraRom,
@@ -859,7 +855,7 @@ fn start(
                         r.zips = split_zips(&v, MAX_ZIPS_PER_LIST, after)?;
                         budget.add_zip_refs(r.zips.len(), after)?;
                     }
-                    "md5" => r.md5 = valid_md5(&v),
+                    "md5" => r.md5 = v.trim().parse().ok(),
                     "index" => r.index = v.trim().parse().unwrap_or(0),
                     _ => {}
                 }

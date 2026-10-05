@@ -40,12 +40,12 @@ pub struct StagedRom {
     pub name: String,
     /// Size in bytes.
     pub size: u64,
-    /// Lowercase hex CRC32.
-    pub crc32: Option<String>,
-    /// Lowercase hex MD5.
-    pub md5: Option<String>,
-    /// Lowercase hex SHA1.
-    pub sha1: Option<String>,
+    /// CRC32, when the DAT lists it.
+    pub crc32: Option<mistarr_core::Crc32>,
+    /// MD5, when the DAT lists it.
+    pub md5: Option<mistarr_core::Md5>,
+    /// SHA1, when the DAT lists it.
+    pub sha1: Option<mistarr_core::Sha1>,
     /// The DAT's dump status.
     pub status: RomStatus,
     /// The DAT's `header` attribute, verbatim.
@@ -130,9 +130,9 @@ pub fn apply(conn: &Connection, platform: &PlatformId, version: DatVersionId) ->
             .map(|r| RomInput {
                 name: &r.name,
                 size: r.size,
-                crc32: r.crc32.as_deref(),
-                md5: r.md5.as_deref(),
-                sha1: r.sha1.as_deref(),
+                crc32: r.crc32,
+                md5: r.md5,
+                sha1: r.sha1,
                 status: r.status,
                 header: r.header.as_deref(),
             })
@@ -162,7 +162,7 @@ mod tests {
             roms: vec![StagedRom {
                 name: format!("{name}.gb"),
                 size: 16,
-                crc32: Some("00000001".into()),
+                crc32: Some(mistarr_core::Crc32::from_u32(1)),
                 md5: None,
                 sha1: None,
                 status: RomStatus::Good,

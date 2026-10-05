@@ -21,12 +21,12 @@ pub struct RomRow {
     pub name: String,
     /// Size in bytes.
     pub size: u64,
-    /// Lowercase hex CRC32.
-    pub crc32: Option<String>,
-    /// Lowercase hex MD5.
-    pub md5: Option<String>,
-    /// Lowercase hex SHA1.
-    pub sha1: Option<String>,
+    /// CRC32, when the DAT lists it.
+    pub crc32: Option<mistarr_core::Crc32>,
+    /// MD5, when the DAT lists it.
+    pub md5: Option<mistarr_core::Md5>,
+    /// SHA1, when the DAT lists it.
+    pub sha1: Option<mistarr_core::Sha1>,
     /// DAT status.
     pub status: RomStatus,
     /// The file matched to this rom, verified first.

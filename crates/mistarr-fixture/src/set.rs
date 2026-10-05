@@ -381,13 +381,13 @@ mod tests {
         let quest = cart.games.iter().find(|g| g.name == CLONE_PARENT).unwrap();
         let file = std::fs::read(layout.cart_dir.join("Example Quest (USA).nes")).unwrap();
         let h = hash_reader(&file[..], HeaderRule::Ines, None).unwrap();
-        assert_eq!(quest.roms[0].sha1.as_deref(), Some(h.sha1.as_str()));
+        assert_eq!(quest.roms[0].sha1, Some(h.sha1));
         assert!(quest.roms[0].header.is_some());
 
         let bad = cart.games.iter().find(|g| g.name == BAD_DUMP).unwrap();
         let file = std::fs::read(layout.cart_dir.join(format!("{BAD_DUMP}.nes"))).unwrap();
         let h = hash_reader(&file[..], HeaderRule::Ines, None).unwrap();
-        assert_ne!(bad.roms[0].sha1.as_deref(), Some(h.sha1.as_str()));
+        assert_ne!(bad.roms[0].sha1, Some(h.sha1));
         assert_eq!(bad.roms[0].status.as_str(), "baddump");
 
         assert!(!layout.cart_dir.join(format!("{BIOS}.nes")).exists());

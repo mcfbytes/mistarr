@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use mistarr_core::hash::{hash_forms, hash_zip_member_forms, zip_members, HashError, HeaderRule};
 use mistarr_core::matching::{Payload, Rom};
-use mistarr_core::HashSet as Hashes;
+use mistarr_core::{Crc32, Hashes, Md5, Sha1};
 use mistarr_mister::PlaceRom;
 
 use crate::db::ids::RomId;
@@ -94,16 +94,16 @@ impl Rom for EntryRom {
         self.size
     }
 
-    fn crc32(&self) -> Option<&str> {
-        self.crc32.as_deref()
+    fn crc32(&self) -> Option<Crc32> {
+        self.crc32
     }
 
-    fn md5(&self) -> Option<&str> {
-        self.md5.as_deref()
+    fn md5(&self) -> Option<Md5> {
+        self.md5
     }
 
-    fn sha1(&self) -> Option<&str> {
-        self.sha1.as_deref()
+    fn sha1(&self) -> Option<Sha1> {
+        self.sha1
     }
 }
 
@@ -263,13 +263,13 @@ pub(super) fn report(
     match expected {
         Some(r) => {
             let _ = writeln!(out, "Expected: {} ({} bytes)", r.name, r.size);
-            let dash = || "-".to_owned();
+            let hex = |d: Option<String>| d.unwrap_or_else(|| "-".to_owned());
             let _ = writeln!(
                 out,
                 "  crc32 {}  md5 {}  sha1 {}",
-                r.crc32.clone().unwrap_or_else(dash),
-                r.md5.clone().unwrap_or_else(dash),
-                r.sha1.clone().unwrap_or_else(dash)
+                hex(r.crc32.map(|d| d.to_string())),
+                hex(r.md5.map(|d| d.to_string())),
+                hex(r.sha1.map(|d| d.to_string()))
             );
         }
         None => out.push_str("Expected: unknown rom\n"),
@@ -319,9 +319,9 @@ mod tests {
             id: RomId(id),
             name: name.into(),
             size: h.size,
-            crc32: Some(h.crc32.clone()),
-            md5: Some(h.md5.clone()),
-            sha1: Some(h.sha1.clone()),
+            crc32: Some(h.crc32),
+            md5: Some(h.md5),
+            sha1: Some(h.sha1),
             status: crate::db::titles::RomStatus::Good,
             header: None,
         }
@@ -336,7 +336,7 @@ mod tests {
         let h = abc();
         let other = hash_reader(Cursor::new(b"xyz"), HeaderRule::None, None).expect("hash");
         let roms = [rom(1, "a.bin", &h), rom(2, "b.bin", &h)];
-        let member = |name: &str, hashes: &Hashes| Hashed::plain(Some(name.into()), hashes.clone());
+        let member = |name: &str, hashes: &Hashes| Hashed::plain(Some(name.into()), *hashes);
         let both = [member("b.bin", &h), member("a.bin", &h)];
         let set = match_members(&roms, &both);
         assert!(set.is_exact());
@@ -344,14 +344,14 @@ mod tests {
             set.pairs.iter().map(|(_, r)| r.id.0).collect::<Vec<_>>(),
             [2, 1]
         );
-        let p = Hashed::plain(None, h.clone());
+        let p = Hashed::plain(None, h);
         let picked = pick_rom(&roms, &p, Some(RomId(2)), None, &[]).map(|r| r.id);
         assert_eq!(picked, Some(RomId(2)));
         let odd = [member("a.bin", &h), member("c.bin", &other)];
         assert_eq!(match_members(&roms, &odd).extra, ["c.bin"]);
         let text = explain("This zip lacks members.", &odd);
         assert!(text.starts_with("This zip lacks members.\n\nActual a.bin: 3 bytes\n"));
-        assert!(text.contains(&other.sha1));
+        assert!(text.contains(&other.sha1.to_string()));
     }
 
     #[test]
@@ -385,13 +385,13 @@ mod tests {
         let expected = EntryRom {
             md5: None,
             sha1: None,
-            crc32: Some("00000000".into()),
+            crc32: Some("00000000".parse().expect("hex")),
             ..rom(1, "Example Quest (USA).nes", &h)
         };
-        let actual = [Hashed::plain(None, h.clone())];
+        let actual = [Hashed::plain(None, h)];
         let text = report(Some(&expected), &actual, None, "ines");
         assert!(text.contains("Expected: Example Quest (USA).nes (3 bytes)"));
-        assert!(text.contains(&h.sha1));
+        assert!(text.contains(&h.sha1.to_string()));
         assert!(text.contains("md5 -"));
         assert!(text.ends_with("Header rule: ines\n"));
         let member = [Hashed {
@@ -421,7 +421,7 @@ mod tests {
     #[test]
     fn a_placed_file_not_read_again_stores_no_whole_hashes() {
         let body = abc();
-        let mut staged = Hashed::plain(None, body.clone());
+        let mut staged = Hashed::plain(None, body);
         staged.take_rehash(None);
         assert_eq!(
             staged.whole_columns("ines"),
@@ -432,7 +432,7 @@ mod tests {
         let mut placed = hash_reader(Cursor::new(b"NES\x1a"), HeaderRule::None, None).expect("h");
         placed.size = 19;
         let again = Hashed {
-            whole: Some(placed.clone()),
+            whole: Some(placed),
             ..Hashed::plain(None, body)
         };
         staged.take_rehash(Some(again));
@@ -457,12 +457,12 @@ mod tests {
         assert!(hashed.is(&rom(1, "a.nes", &whole)), "a headered DAT");
         assert!(hashed.is(&rom(2, "a.nes", &body)), "a headerless DAT");
         assert_eq!(hashed.forms().next(), Some(&whole), "the whole file first");
-        assert_eq!(hashed.whole_columns("ines").sha1, Some(whole.sha1.clone()));
+        assert_eq!(hashed.whole_columns("ines").sha1, Some(whole.sha1));
         assert_eq!(
             hashed.whole_columns("none"),
             crate::db::files::WholeHashes::default()
         );
-        let plain = Hashed::plain(None, body.clone());
+        let plain = Hashed::plain(None, body);
         assert_eq!(plain.whole_columns("ines").sha1, Some(body.sha1));
         let text = explain("Why.", std::slice::from_ref(&hashed));
         assert!(text.contains(&format!("with its header, 30 bytes: crc32 {}", whole.crc32)));

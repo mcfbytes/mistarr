@@ -10,12 +10,14 @@ use crate::db::titles::RomStatus;
 use crate::jobs::arcade::{ArcadeCatalog, ARCADE_DIR};
 use crate::jobs::Scheduler;
 
-fn hashes() -> mistarr_core::HashSet {
-    mistarr_core::HashSet {
+fn hashes() -> mistarr_core::Hashes {
+    mistarr_core::Hashes {
         size: 4,
-        crc32: "0000abcd".into(),
-        md5: "0123456789abcdef0123456789abcdef".into(),
-        sha1: "0123456789abcdef0123456789abcdef01234567".into(),
+        crc32: "0000abcd".parse().expect("hex"),
+        md5: "0123456789abcdef0123456789abcdef".parse().expect("hex"),
+        sha1: "0123456789abcdef0123456789abcdef01234567"
+            .parse()
+            .expect("hex"),
     }
 }
 
@@ -50,9 +52,9 @@ fn row(id: i64, rel: &str, size: i64, mtime: i64, rom: Option<i64>, state: FileS
         rel_path: rel.to_owned(),
         size,
         mtime,
-        crc32: Some("0000abcd".into()),
-        md5: Some("m".into()),
-        sha1: Some("s".into()),
+        crc32: Some("0000abcd".parse().expect("hex")),
+        md5: Some(mistarr_core::Md5::from_bytes([1; 16])),
+        sha1: Some(mistarr_core::Sha1::from_bytes([2; 20])),
         header_rule: Some("none".into()),
         whole: crate::db::files::WholeHashes::default(),
         rom_id: rom.map(RomId),
@@ -221,11 +223,11 @@ fn recheck_keeps_matching_members_and_marks_changed_ones() {
         listed
             .iter()
             .find(|m| m.name == n)
-            .map(|m| m.crc32.clone())
+            .map(|m| m.crc32)
             .expect("member")
     };
     let mut same = row(1, "mame/a.zip#same.bin", 4, 5, Some(9), FileState::Verified);
-    same.crc32 = Some(crc_of("same.bin").to_ascii_uppercase());
+    same.crc32 = Some(crc_of("same.bin"));
     let changed = row(
         2,
         "mame/a.zip#changed.bin",
@@ -365,7 +367,7 @@ fn recheck_splits_a_member_at_the_zip_not_the_first_hash() {
     let listed =
         zip_members(File::open(dir.path().join("mame/a#b.zip")).expect("open")).expect("members");
     let mut member = row(2, "mame/a#b.zip#x.bin", 1, 5, Some(9), FileState::Verified);
-    member.crc32 = Some(listed[0].crc32.clone());
+    member.crc32 = Some(listed[0].crc32);
     let rc = Recheck {
         zip: zip("mame/a#b.zip", 99, 6),
         roms: vec![RomId(7)],
@@ -447,8 +449,8 @@ fn import_row(app: &Arc<AppState>, rel: &str, mtime: i64, rom: RomId) -> i64 {
         .write_blocking(move |c| {
                         let id = files::upsert(c, &pid(), &NewFile {
 rom_id: Some(rom),
-crc32: Some("0000abcd".to_string()),
-md5: Some("0123456789abcdef0123456789abcdef".to_string()),
+crc32: Some("0000abcd".parse().expect("hex")),
+md5: Some("0123456789abcdef0123456789abcdef".parse().expect("hex")),
 header_rule: Some("none".to_string()),
 ..NewFile::unhashed(&member, 1, mtime, FileState::Verified)
 }, 1)?;
@@ -570,9 +572,7 @@ async fn a_rewritten_zip_keeps_matching_members_verified() {
     write_mra(dir.path(), "Example Blaster", "exblast.zip");
     catalogue(&app).await;
     let rom = zip_rom(&app, "exblast.zip");
-    let crc = zip_members(File::open(&path).expect("open")).expect("members")[0]
-        .crc32
-        .clone();
+    let crc = zip_members(File::open(&path).expect("open")).expect("members")[0].crc32;
     let old = mtime_of(&path);
     let id = import_row(&app, "mame/exblast.zip", old, rom);
     app.db

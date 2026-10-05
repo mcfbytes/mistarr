@@ -81,9 +81,9 @@ fn parses_full_dat() {
         vec![DatRom {
             name: "Example Quest (USA).bin".into(),
             size: 1024,
-            crc32: Some("0a0b0c0d".into()),
-            md5: Some(MD5.into()),
-            sha1: Some(SHA1.into()),
+            crc32: Some(Crc32::from_u32(0x0a0b_0c0d)),
+            md5: MD5.parse().ok(),
+            sha1: SHA1.parse().ok(),
             status: RomStatus::Good,
             header: None,
         }]
@@ -100,7 +100,10 @@ fn parses_full_dat() {
     assert_eq!(g.roms[0].status, RomStatus::BadDump);
     assert_eq!(g.roms[0].header.as_deref(), Some("4E45531A"));
     assert_eq!(g.roms[0].header_bytes(), Some(b"NES\x1a".to_vec()));
-    assert_eq!(g.roms[0].crc32.as_deref(), Some("deadbeef"));
+    assert_eq!(
+        g.roms[0].crc32.map(|d| d.to_string()).as_deref(),
+        Some("deadbeef")
+    );
     assert_eq!(g.roms[0].md5, None);
 
     let g = &dat.games[2];
@@ -338,8 +341,11 @@ fn status_and_hash_whitespace_is_tolerated() {
     );
     let rom = &parse_dat(xml.as_bytes()).unwrap().games[0].roms[0];
     assert_eq!(rom.size, 7);
-    assert_eq!(rom.crc32.as_deref(), Some("0a0b0c0d"));
-    assert_eq!(rom.sha1.as_deref(), Some(SHA1));
+    assert_eq!(
+        rom.crc32.map(|d| d.to_string()).as_deref(),
+        Some("0a0b0c0d")
+    );
+    assert_eq!(rom.sha1.map(|d| d.to_string()).as_deref(), Some(SHA1));
     assert_eq!(rom.status, RomStatus::BadDump);
 }
 
@@ -445,7 +451,10 @@ fn stream_yields_games_in_order() {
     for game in &mut stream {
         let game = game.unwrap();
         assert_eq!(game.roms[0].size, n);
-        assert_eq!(game.roms[0].crc32, Some(format!("{n:08x}")));
+        assert_eq!(
+            game.roms[0].crc32,
+            Some(Crc32::from_u32(u32::try_from(n).unwrap()))
+        );
         n += 1;
     }
     assert_eq!(n, 5000);
@@ -589,7 +598,7 @@ prop_compose! {
         DatRom {
             name: name.trim().to_owned(),
             size,
-            crc32: crc.map(|c| format!("{c:08x}")),
+            crc32: crc.map(Crc32::from_u32),
             md5: None,
             sha1: None,
             status: RomStatus::Good,
@@ -631,7 +640,7 @@ fn render(games: &[DatGame]) -> String {
             )
             .unwrap();
             if let Some(c) = &r.crc32 {
-                write!(xml, " crc=\"{}\"", c.to_ascii_uppercase()).unwrap();
+                write!(xml, " crc=\"{}\"", c.to_string().to_ascii_uppercase()).unwrap();
             }
             xml.push_str("/>");
         }

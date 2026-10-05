@@ -86,7 +86,7 @@ fn add(
         .map(|&(name, status)| RomInput {
             name,
             size: 4,
-            crc32: Some("0a0b0c0d"),
+            crc32: Some(mistarr_core::Crc32::from_u32(0x0a0b_0c0d)),
             md5: None,
             sha1: None,
             status: RomStatus::parse(status).expect("status"),

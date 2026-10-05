@@ -38,7 +38,7 @@ fn zip_bytes(members: &[(&str, &[u8])]) -> Vec<u8> {
     z.finish().expect("finish").into_inner()
 }
 
-fn md5_of(parts: &[&[u8]]) -> String {
+fn md5_of(parts: &[&[u8]]) -> mistarr_core::Md5 {
     let mut m = Md5Stream::new();
     for p in parts {
         m.update(p);

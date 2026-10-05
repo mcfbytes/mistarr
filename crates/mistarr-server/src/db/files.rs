@@ -1,7 +1,7 @@
 //! The `files` table; the files rows are matched to roms by `roms` and scanned against
 //! `scan_progress`. See `docs/DATA-MODEL.md` "files" and "files.state".
 
-use mistarr_core::PlatformId;
+use mistarr_core::{Crc32, Hashes, Md5, PlatformId, Sha1};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
@@ -48,12 +48,12 @@ pub struct FileRow {
     pub size: i64,
     /// Filesystem mtime, Unix seconds.
     pub mtime: i64,
-    /// CRC32 as lowercase hex, when hashed.
-    pub crc32: Option<String>,
-    /// MD5 as lowercase hex, when fully hashed.
-    pub md5: Option<String>,
-    /// SHA1 as lowercase hex, when fully hashed.
-    pub sha1: Option<String>,
+    /// CRC32, when hashed.
+    pub crc32: Option<Crc32>,
+    /// MD5, when fully hashed.
+    pub md5: Option<Md5>,
+    /// SHA1, when fully hashed.
+    pub sha1: Option<Sha1>,
     /// The header rule the payload was hashed under, or last failed to hash under;
     /// NULL for a zip member known by its central-directory CRC32 alone.
     pub header_rule: Option<String>,
@@ -77,22 +77,23 @@ impl FileRow {
     /// use mistarr_core::PlatformId;
     /// use mistarr_server::db::files::{FileRow, FileState, WholeHashes};
     /// use mistarr_server::db::ids::FileId;
+    /// let h = mistarr_core::hash::hash_reader(&b"abc"[..], Default::default(), None).unwrap();
     /// let mut row = FileRow { id: FileId(1), platform_id: PlatformId("nes".into()),
-    ///     rel_path: "NES/a.nes".into(), size: 3, mtime: 1, crc32: Some("0".into()),
-    ///     md5: Some("1".into()), sha1: Some("2".into()), header_rule: None,
+    ///     rel_path: "NES/a.nes".into(), size: 3, mtime: 1, crc32: Some(h.crc32),
+    ///     md5: Some(h.md5), sha1: Some(h.sha1), header_rule: None,
     ///     whole: WholeHashes::default(), rom_id: None, state: FileState::Unverified,
     ///     scanned_at: 1, reason: None };
-    /// assert_eq!(row.hashes().map(|h| h.size), Some(3));
+    /// assert_eq!(row.hashes(), Some(h));
     /// row.md5 = None;
     /// assert!(row.hashes().is_none());
     /// ```
     #[must_use]
-    pub fn hashes(&self) -> Option<mistarr_core::HashSet> {
-        Some(mistarr_core::HashSet {
+    pub fn hashes(&self) -> Option<Hashes> {
+        Some(Hashes {
             size: u64::try_from(self.size).ok()?,
-            crc32: self.crc32.clone()?,
-            md5: self.md5.clone()?,
-            sha1: self.sha1.clone()?,
+            crc32: self.crc32?,
+            md5: self.md5?,
+            sha1: self.sha1?,
         })
     }
 
@@ -129,12 +130,12 @@ pub struct NewFile {
     pub size: i64,
     /// Filesystem mtime, Unix seconds.
     pub mtime: i64,
-    /// CRC32 as lowercase hex.
-    pub crc32: Option<String>,
-    /// MD5 as lowercase hex, when fully hashed.
-    pub md5: Option<String>,
-    /// SHA1 as lowercase hex, when fully hashed.
-    pub sha1: Option<String>,
+    /// CRC32.
+    pub crc32: Option<Crc32>,
+    /// MD5, when fully hashed.
+    pub md5: Option<Md5>,
+    /// SHA1, when fully hashed.
+    pub sha1: Option<Sha1>,
     /// The header rule the payload was hashed under, or last failed to hash under;
     /// `None` for a zip member known by its central-directory CRC32 alone.
     pub header_rule: Option<String>,
@@ -180,11 +181,11 @@ impl NewFile {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct WholeHashes {
     /// CRC32 of the whole file, also known for a member the pre-check did not decompress.
-    pub crc32: Option<String>,
+    pub crc32: Option<Crc32>,
     /// MD5 of the whole file, when fully hashed.
-    pub md5: Option<String>,
+    pub md5: Option<Md5>,
     /// SHA1 of the whole file, when fully hashed.
-    pub sha1: Option<String>,
+    pub sha1: Option<Sha1>,
 }
 
 impl WholeHashes {
@@ -194,7 +195,7 @@ impl WholeHashes {
     /// use mistarr_core::hash::{hash_forms, HeaderRule};
     /// use mistarr_server::db::files::WholeHashes;
     /// let forms = hash_forms(&b"abc"[..], HeaderRule::Ines, None).unwrap();
-    /// assert_eq!(WholeHashes::of("ines", &forms).sha1, Some(forms.content.sha1.clone()));
+    /// assert_eq!(WholeHashes::of("ines", &forms).sha1, Some(forms.content.sha1));
     /// assert_eq!(WholeHashes::of("none", &forms), WholeHashes::default());
     /// ```
     #[must_use]
@@ -206,12 +207,12 @@ impl WholeHashes {
     ///
     /// ```
     /// use mistarr_server::db::files::WholeHashes;
-    /// let h = mistarr_core::HashSet { size: 1, crc32: "0".into(), md5: "1".into(), sha1: "2".into() };
-    /// assert_eq!(WholeHashes::whole_file("lnx", &h).md5.as_deref(), Some("1"));
+    /// let h = mistarr_core::hash::hash_reader(&b"abc"[..], Default::default(), None).unwrap();
+    /// assert_eq!(WholeHashes::whole_file("lnx", &h).md5, Some(h.md5));
     /// assert_eq!(WholeHashes::whole_file("n64", &h), WholeHashes::default());
     /// ```
     #[must_use]
-    pub fn whole_file(rule: &str, whole: &mistarr_core::HashSet) -> Self {
+    pub fn whole_file(rule: &str, whole: &Hashes) -> Self {
         if !rule
             .parse::<mistarr_core::hash::HeaderRule>()
             .unwrap_or_default()
@@ -220,9 +221,9 @@ impl WholeHashes {
             return Self::default();
         }
         Self {
-            crc32: Some(whole.crc32.clone()),
-            md5: Some(whole.md5.clone()),
-            sha1: Some(whole.sha1.clone()),
+            crc32: Some(whole.crc32),
+            md5: Some(whole.md5),
+            sha1: Some(whole.sha1),
         }
     }
 }
@@ -438,7 +439,7 @@ pub fn reverify(
     id: FileId,
     size: i64,
     mtime: i64,
-    crc32: &str,
+    crc32: Crc32,
     now: i64,
 ) -> Result<()> {
     conn.prepare_cached(
@@ -830,7 +831,7 @@ pub fn set_match(
 }
 
 /// Unmatches the files of rom `name` of title `title_id` when a DAT load is about to give
-/// it another size or `[crc32, md5, sha1]`, so no file stays verified against hashes it
+/// it another size or `(crc32, md5, sha1)`, so no file stays verified against hashes it
 /// does not have: a fully hashed file becomes `unverified` for the recompute to match again
 /// from its stored hashes, any other `pending` for the next scan to hash. A CHD's cue row is
 /// left alone: it holds no hashes and follows its tracks. Returns the files changed.
@@ -842,7 +843,7 @@ pub fn set_match(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let listed = [Some("00000000"), None, None];
+/// let listed = (Some(mistarr_core::Crc32::from_u32(0)), None, None);
 /// let title = mistarr_server::db::ids::TitleId(1);
 /// assert_eq!(mistarr_server::db::files::unmatch_changed_rom(&conn, title, "a.nes", 4, listed).unwrap(), 0);
 /// ```
@@ -851,7 +852,7 @@ pub fn unmatch_changed_rom(
     title_id: TitleId,
     name: &str,
     size: i64,
-    [crc32, md5, sha1]: [Option<&str>; 3],
+    (crc32, md5, sha1): (Option<Crc32>, Option<Md5>, Option<Sha1>),
 ) -> Result<usize> {
     Ok(conn
         .prepare_cached(
@@ -959,14 +960,16 @@ mod tests {
     use super::*;
     use crate::db::fixtures::{conn, dat};
     use crate::db::titles::RomStatus;
-    use mistarr_core::HashSet;
+    use mistarr_core::Hashes;
 
-    fn hashes(size: u64) -> HashSet {
-        HashSet {
+    fn hashes(size: u64) -> Hashes {
+        Hashes {
             size,
-            crc32: "352441c2".into(),
-            md5: "900150983cd24fb0d6963f7d28e17f72".into(),
-            sha1: "a9993e364706816aba3e25717850c26c9cd0d89d".into(),
+            crc32: "352441c2".parse().expect("hex"),
+            md5: "900150983cd24fb0d6963f7d28e17f72".parse().expect("hex"),
+            sha1: "a9993e364706816aba3e25717850c26c9cd0d89d"
+                .parse()
+                .expect("hex"),
         }
     }
 
@@ -981,7 +984,7 @@ mod tests {
         let c = conn();
         let pid = PlatformId("nes".into());
         let hashed = NewFile {
-            crc32: Some("352441c2".into()),
+            crc32: Some("352441c2".parse().expect("hex")),
             header_rule: Some("ines".into()),
             ..NewFile::unhashed("a.nes", 3, 10, FileState::Unverified)
         };
@@ -989,7 +992,10 @@ mod tests {
         let row = find_by_path(&c, &pid, "a.nes").expect("find").expect("row");
         assert_eq!(row.id, id);
         assert_eq!(row.state, FileState::Unverified);
-        assert_eq!(row.crc32.as_deref(), Some("352441c2"));
+        assert_eq!(
+            row.crc32.map(|d| d.to_string()).as_deref(),
+            Some("352441c2")
+        );
 
         let again = NewFile {
             mtime: 11,
@@ -1185,27 +1191,27 @@ mod tests {
             .first_rom();
         let row = |rel: &str| NewFile {
             rom_id: Some(rom),
-            crc32: Some("0000abcd".into()),
-            md5: Some("m".into()),
-            sha1: Some("s".into()),
+            crc32: Some("0000abcd".parse().expect("hex")),
+            md5: Some(Md5::from_bytes([1; 16])),
+            sha1: Some(Sha1::from_bytes([2; 20])),
             header_rule: Some("none".into()),
             ..NewFile::unhashed(rel, 1, 1, FileState::Verified)
         };
         let a = upsert(&c, &pid, &row("mame/a.zip#a"), 1).expect("insert");
         let b = upsert(&c, &pid, &row("mame/a.zip#b"), 1).expect("insert");
         restamp(&c, a, 9, 2).expect("restamp");
-        reverify(&c, b, 5, 9, "ffff0000", 2).expect("reverify");
+        reverify(&c, b, 5, 9, Crc32::from_u32(0xffff_0000), 2).expect("reverify");
         let a = get(&c, a).expect("get").expect("row");
         assert_eq!(
-            (a.mtime, a.state, a.md5.as_deref()),
-            (9, FileState::Verified, Some("m"))
+            (a.mtime, a.state, a.md5),
+            (9, FileState::Verified, Some(Md5::from_bytes([1; 16])))
         );
         let b = get(&c, b).expect("get").expect("row");
         assert_eq!(
             (
                 b.size,
                 b.mtime,
-                b.crc32.as_deref(),
+                b.crc32.map(|d| d.to_string()).as_deref(),
                 b.md5,
                 b.sha1,
                 b.rom_id,
@@ -1449,9 +1455,9 @@ mod tests {
             &pid,
             &NewFile {
                 rom_id: Some(rom),
-                crc32: Some(h.crc32.clone()),
-                md5: Some(h.md5.clone()),
-                sha1: Some(h.sha1.clone()),
+                crc32: Some(h.crc32),
+                md5: Some(h.md5),
+                sha1: Some(h.sha1),
                 header_rule: Some("ines".to_string()),
                 ..NewFile::unhashed("NES/a.nes", 3, 1, verified)
             },
@@ -1463,7 +1469,7 @@ mod tests {
             &pid,
             &NewFile {
                 rom_id: Some(rom),
-                crc32: Some(h.crc32.clone()),
+                crc32: Some(h.crc32),
                 ..NewFile::unhashed("NES/b.nes", 3, 1, verified)
             },
             1,
@@ -1480,11 +1486,7 @@ mod tests {
             1,
         )
         .expect("d");
-        let same = [
-            Some(h.crc32.as_str()),
-            Some(h.md5.as_str()),
-            Some(h.sha1.as_str()),
-        ];
+        let same = (Some(h.crc32), Some(h.md5), Some(h.sha1));
         let unmatch =
             |size, listed| unmatch_changed_rom(&c, title, "Moved Quest.nes", size, listed);
         assert_eq!(

@@ -1408,7 +1408,7 @@ fn previous(prev: Option<&FileRow>, rel: &str) -> Value {
         "rel_path": prev.map_or(rel, |f| f.rel_path.as_str()),
         "state": prev.map(|f| f.state.as_str()),
         "rom_id": prev.and_then(|f| f.rom_id),
-        "sha1": prev.and_then(|f| f.sha1.clone()),
+        "sha1": prev.and_then(|f| f.sha1),
     })
 }
 
@@ -1465,9 +1465,9 @@ fn record_target(
         let h = &p.hashed.hashes;
         let whole = p.hashed.whole_columns(scope.rule);
         let row = NewFile {
-            crc32: Some(h.crc32.clone()),
-            md5: Some(h.md5.clone()),
-            sha1: Some(h.sha1.clone()),
+            crc32: Some(h.crc32),
+            md5: Some(h.md5),
+            sha1: Some(h.sha1),
             header_rule: Some(scope.rule.to_owned()),
             whole,
             rom_id: Some(p.rom.id),

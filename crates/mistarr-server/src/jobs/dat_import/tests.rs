@@ -4,6 +4,7 @@ use std::io::Cursor;
 use std::collections::HashMap;
 
 use mistarr_core::dat::export_parents;
+use mistarr_core::{Crc32, Md5, Sha1};
 use rusqlite::Connection;
 
 use super::recompute::*;
@@ -874,10 +875,10 @@ fn an_export_after_a_logiqx_dat_of_the_system_leaves_one_live_set() {
 
 /// Stores fully hashed files `(path, crc32, rom id)` of 4 bytes on NES, removes `version`
 /// as `DELETE /dats/{id}` does and recomputes; returns how many files were matched again.
-fn remove_with_files(c: &TestDb, version: DatVersionId, files: &[(&str, &str, i64)]) -> usize {
+fn remove_with_files(c: &TestDb, version: DatVersionId, files: &[(&str, u32, i64)]) -> usize {
     c.with(|x| {
         let nes = PlatformId("nes".into());
-        let (md5, sha1) = ("d".repeat(32), "d".repeat(40));
+        let (md5, sha1) = (Md5::from_bytes([0xdd; 16]), Sha1::from_bytes([0xdd; 20]));
         for (path, crc, id) in files {
             let state = crate::db::files::FileState::Misnamed;
             let rom = Some(crate::db::ids::RomId(*id));
@@ -886,9 +887,9 @@ fn remove_with_files(c: &TestDb, version: DatVersionId, files: &[(&str, &str, i6
                 &nes,
                 &NewFile {
                     rom_id: rom,
-                    crc32: Some(crc.to_string()),
-                    md5: Some(md5.clone()),
-                    sha1: Some(sha1.clone()),
+                    crc32: Some(Crc32::from_u32(*crc)),
+                    md5: Some(md5),
+                    sha1: Some(sha1),
                     header_rule: Some("none".to_string()),
                     ..NewFile::unhashed(path, 4, 1, state)
                 },
@@ -950,7 +951,7 @@ fn an_add_on_dat_coexists_and_shares_groups_by_rom() {
         rom("Example Quest (USA) (Sample Copy)"),
         rom("Sample Only (World)"),
     );
-    let files = [("a.bin", "00000000", shared), ("b.bin", "00000002", own)];
+    let files = [("a.bin", 0, shared), ("b.bin", 2, own)];
     assert_eq!(remove_with_files(&c, added.version, &files), 2);
     assert_eq!(
         count(
@@ -1162,11 +1163,11 @@ fn one_family_on_two_platforms_keeps_separate_titles() {
 fn a_disc_track_is_matched_again_under_the_all_or_nothing_rule() {
     let c = conn();
     let psx = PlatformId("psx".into());
-    let h = |n: u8| mistarr_core::HashSet {
+    let h = |n: u8| mistarr_core::Hashes {
         size: 4,
-        crc32: format!("{n:08x}"),
-        md5: format!("{n:032x}"),
-        sha1: format!("{n:040x}"),
+        crc32: format!("{n:08x}").parse().expect("hex"),
+        md5: format!("{n:032x}").parse().expect("hex"),
+        sha1: format!("{n:040x}").parse().expect("hex"),
     };
     let track = |n: u8| format!("Example Disc (USA) (Track {n}).bin");
     let states = c
@@ -1191,9 +1192,9 @@ fn a_disc_track_is_matched_again_under_the_all_or_nothing_rule() {
                     &psx,
                     &NewFile {
                         rom_id: Some(rom),
-                        crc32: Some(sums.crc32.clone()),
-                        md5: Some(sums.md5.clone()),
-                        sha1: Some(sums.sha1.clone()),
+                        crc32: Some(sums.crc32),
+                        md5: Some(sums.md5),
+                        sha1: Some(sums.sha1),
                         header_rule: Some("none".to_string()),
                         ..NewFile::unhashed(&path, 4, 1, FileState::Verified)
                     },
@@ -1223,12 +1224,12 @@ fn a_disc_track_is_matched_again_under_the_all_or_nothing_rule() {
 }
 
 /// Synthetic hashes numbered `n`, of a 4-byte payload.
-fn sums(n: u32) -> mistarr_core::HashSet {
-    mistarr_core::HashSet {
+fn sums(n: u32) -> mistarr_core::Hashes {
+    mistarr_core::Hashes {
         size: 4,
-        crc32: format!("{n:08x}"),
-        md5: format!("{n:032x}"),
-        sha1: format!("{n:040x}"),
+        crc32: format!("{n:08x}").parse().expect("hex"),
+        md5: format!("{n:032x}").parse().expect("hex"),
+        sha1: format!("{n:040x}").parse().expect("hex"),
     }
 }
 
@@ -1237,15 +1238,15 @@ fn unmatched_file(
     c: &Connection,
     platform: &PlatformId,
     path: &str,
-    sums: &mistarr_core::HashSet,
+    sums: &mistarr_core::Hashes,
 ) -> Result<crate::db::ids::FileId> {
     files::upsert(
         c,
         platform,
         &NewFile {
-            crc32: Some(sums.crc32.clone()),
-            md5: Some(sums.md5.clone()),
-            sha1: Some(sums.sha1.clone()),
+            crc32: Some(sums.crc32),
+            md5: Some(sums.md5),
+            sha1: Some(sums.sha1),
             header_rule: Some("none".to_string()),
             ..NewFile::unhashed(path, 4, 1, FileState::Unverified)
         },
@@ -1383,9 +1384,9 @@ fn a_stored_crc_matches_a_headered_file_by_its_size_less_the_header() {
                 x,
                 &nes,
                 &NewFile {
-                    crc32: Some(rom.crc32.clone()),
-                    md5: Some(rom.md5.clone()),
-                    sha1: Some(rom.sha1.clone()),
+                    crc32: Some(rom.crc32),
+                    md5: Some(rom.md5),
+                    sha1: Some(rom.sha1),
                     header_rule: Some("ines".to_string()),
                     ..NewFile::unhashed(path, 20, 1, unverified)
                 },
@@ -1425,10 +1426,10 @@ fn stored_whole_and_content_forms_match_headered_and_headerless_roms() {
                 "INSERT INTO roms (title_id, name, size, crc32) VALUES (?1, 'c.lnx', 4, ?2)",
                 rusqlite::params![title, plain.crc32],
             )?;
-            let whole_of = |h: &mistarr_core::HashSet| files::WholeHashes {
-                crc32: Some(h.crc32.clone()),
-                md5: Some(h.md5.clone()),
-                sha1: Some(h.sha1.clone()),
+            let whole_of = |h: &mistarr_core::Hashes| files::WholeHashes {
+                crc32: Some(h.crc32),
+                md5: Some(h.md5),
+                sha1: Some(h.sha1),
             };
             let unverified = FileState::Unverified;
             let mut ids = Vec::new();
@@ -1444,9 +1445,9 @@ fn stored_whole_and_content_forms_match_headered_and_headerless_roms() {
                     x,
                     &lynx,
                     &NewFile {
-                        crc32: Some(content.crc32.clone()),
-                        md5: Some(content.md5.clone()),
-                        sha1: Some(content.sha1.clone()),
+                        crc32: Some(content.crc32),
+                        md5: Some(content.md5),
+                        sha1: Some(content.sha1),
                         header_rule: Some("lnx".to_string()),
                         whole: whole.clone(),
                         ..NewFile::unhashed(path, 68, 1, unverified)
@@ -1498,9 +1499,9 @@ fn a_stored_crc_allows_for_a_copier_header_only_at_its_size() {
                     x,
                     &snes,
                     &NewFile {
-                        crc32: Some(rom.crc32.clone()),
-                        md5: Some(rom.md5.clone()),
-                        sha1: Some(rom.sha1.clone()),
+                        crc32: Some(rom.crc32),
+                        md5: Some(rom.md5),
+                        sha1: Some(rom.sha1),
                         header_rule: Some("smc".to_string()),
                         ..NewFile::unhashed(path, size, 1, unverified)
                     },
@@ -1995,11 +1996,11 @@ fn a_placed_file_stays_verified_when_its_rom_is_matched_again() {
         mistarr_mister::adapter::safe_name(game).expect("name"),
         row.extension_written.expect("ext")
     );
-    let sums = mistarr_core::HashSet {
+    let sums = mistarr_core::Hashes {
         size: 4,
-        crc32: "0a0b0c0d".into(),
-        md5: "e".repeat(32),
-        sha1: "e".repeat(40),
+        crc32: "0a0b0c0d".parse().expect("hex"),
+        md5: "e".repeat(32).parse().expect("hex"),
+        sha1: "e".repeat(40).parse().expect("hex"),
     };
     let (file, live) = c
         .with(|x| {
@@ -2014,9 +2015,9 @@ fn a_placed_file_stays_verified_when_its_rom_is_matched_again() {
                 &snes,
                 &NewFile {
                     rom_id: Some(old),
-                    crc32: Some(sums.crc32.clone()),
-                    md5: Some(sums.md5.clone()),
-                    sha1: Some(sums.sha1.clone()),
+                    crc32: Some(sums.crc32),
+                    md5: Some(sums.md5),
+                    sha1: Some(sums.sha1),
                     header_rule: Some("smc".to_string()),
                     ..NewFile::unhashed(&rel, 4, 1, FileState::Verified)
                 },

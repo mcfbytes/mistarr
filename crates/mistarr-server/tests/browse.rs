@@ -242,7 +242,7 @@ fn stage(c: &Connection, count: usize) {
                 roms: vec![StagedRom {
                     name: format!("{name}.sfc"),
                     size: 16,
-                    crc32: Some(format!("{i:08x}")),
+                    crc32: Some(format!("{i:08x}").parse().expect("hex")),
                     md5: None,
                     sha1: None,
                     status: RomStatus::Good,

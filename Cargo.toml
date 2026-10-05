@@ -40,6 +40,7 @@ md-5 = "0.11"
 proptest = { version = "1", default-features = false, features = ["std"] }
 quick-xml = { version = "0.42", default-features = false }
 rcgen = { version = "0.14", default-features = false, features = ["ring", "pem"] }
+rusqlite = "0.40"
 rustix = { version = "1", default-features = false, features = ["std", "fs"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 ruzstd = { version = "0.9", default-features = false, features = ["std"] }

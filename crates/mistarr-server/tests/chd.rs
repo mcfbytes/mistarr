@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use common::{boot_with, config_in, request, Booted};
 use mistarr_core::hash::{hash_reader, HeaderRule};
-use mistarr_core::{HashSet, PlatformId};
+use mistarr_core::{Hashes, PlatformId};
 use mistarr_fixture::chd::{to_vec, write_redump_set, Codec, Kind, Spec, TrackSpec, Written};
 use mistarr_server::app::AppState;
 use mistarr_server::db::files::{self, FileRow, FileState};
@@ -60,7 +60,7 @@ fn image(path: &Path, spec: &Spec) -> Written {
     written
 }
 
-fn cue_hash(label: &str) -> HashSet {
+fn cue_hash(label: &str) -> Hashes {
     hash_reader(
         Cursor::new(format!("cue sheet of {label}")),
         HeaderRule::None,
@@ -82,7 +82,7 @@ fn games(b: &Booted) -> std::path::PathBuf {
 
 /// Seeds a DAT title `game` on `platform` with a cue rom and one rom per track, named as
 /// `write_redump_set` names them; returns the title id.
-async fn seed_title(app: &AppState, platform: &str, game: &str, tracks: &[HashSet]) -> TitleId {
+async fn seed_title(app: &AppState, platform: &str, game: &str, tracks: &[Hashes]) -> TitleId {
     seed_title_with(app, platform, game, &cue_hash(game), tracks).await
 }
 
@@ -90,13 +90,13 @@ async fn seed_title_with(
     app: &AppState,
     platform: &str,
     game: &str,
-    cue: &HashSet,
-    tracks: &[HashSet],
+    cue: &Hashes,
+    tracks: &[Hashes],
 ) -> TitleId {
     let (pid, game, cue, tracks) = (
         PlatformId(platform.into()),
         game.to_owned(),
-        cue.clone(),
+        *cue,
         tracks.to_vec(),
     );
     app.db
@@ -292,7 +292,7 @@ async fn the_setting_off_reads_only_the_header_and_turning_it_on_verifies_the_tr
     ));
     assert_eq!(rows(app, "psx").await, want);
     let t1 = row(app, "psx", "PSX/G/g.chd#01").await.expect("track");
-    assert_eq!(t1.sha1.as_deref(), Some(written.tracks[0].sha1.as_str()));
+    assert_eq!(t1.sha1, Some(written.tracks[0].sha1));
     let event = json!({ "file_id": t1.id.0, "state": "verified" }).to_string();
     assert!(
         changed.contains(&event),
@@ -395,13 +395,13 @@ async fn a_chd_beside_its_bins_and_cue_leaves_both_verified() {
 }
 
 /// A Logiqx DAT for `PlayStation` with one game `g` of a cue and `tracks`.
-fn psx_dat(version: &str, tracks: &[HashSet]) -> String {
+fn psx_dat(version: &str, tracks: &[Hashes]) -> String {
     psx_dat_of(version, &[("g", tracks)])
 }
 
 /// A Logiqx DAT for `PlayStation` with a game per `(name, tracks)`, each with a cue.
-fn psx_dat_of(version: &str, games: &[(&str, &[HashSet])]) -> String {
-    let rom = |name: &str, h: &HashSet| {
+fn psx_dat_of(version: &str, games: &[(&str, &[Hashes])]) -> String {
+    let rom = |name: &str, h: &Hashes| {
         format!(
             "<rom name=\"{name}\" size=\"{}\" crc=\"{}\" md5=\"{}\" sha1=\"{}\"/>",
             h.size, h.crc32, h.md5, h.sha1
@@ -503,8 +503,8 @@ async fn an_unknown_layout_waits_for_a_dat_without_decoding() {
 
     // A new DAT version that changes track 2 retires the old roms and rematches the members.
     let mut changed = written.tracks.clone();
-    changed[1].sha1 = "0".repeat(40);
-    changed[1].md5 = "0".repeat(32);
+    changed[1].sha1 = mistarr_core::Sha1::from_bytes([0; 20]);
+    changed[1].md5 = mistarr_core::Md5::from_bytes([0; 16]);
     load_dat(&b, "psx2.dat", &psx_dat("2", &changed)).await;
     let t1 = row(app, "psx", "PSX/G/g.chd#01").await.expect("track 1");
     let t2 = row(app, "psx", "PSX/G/g.chd#02").await.expect("track 2");
@@ -652,7 +652,7 @@ async fn a_held_gate_pauses_decoding_and_turning_off_stops_it() {
     let t1 = row(app, "psx", "PSX/L/l.chd#01").await.expect("track");
     assert_eq!(
         (t1.state, t1.sha1),
-        (FileState::Verified, Some(written.tracks[0].sha1.clone()))
+        (FileState::Verified, Some(written.tracks[0].sha1))
     );
 
     // Turned off while the second image decodes: the job stops and nothing is left waiting.
@@ -834,11 +834,11 @@ async fn a_chd_the_size_of_a_whole_chd_rom_is_hashed_whole_once() {
     let app = &b.running.app;
     let (bytes, _) = to_vec(&disc("v")).expect("image");
     write(&games(&b).join("PSX/V/v.chd"), &bytes);
-    let other = HashSet {
+    let other = Hashes {
         size: bytes.len() as u64,
-        crc32: "0badf00d".into(),
-        md5: "0".repeat(32),
-        sha1: "1".repeat(40),
+        crc32: "0badf00d".parse().expect("hex"),
+        md5: "0".repeat(32).parse().expect("hex"),
+        sha1: "1".repeat(40).parse().expect("hex"),
     };
     let pid = PlatformId("psx".into());
     app.db
@@ -861,7 +861,11 @@ async fn a_chd_the_size_of_a_whole_chd_rom_is_hashed_whole_once() {
     assert_eq!(rows(app, "psx").await, off);
     let kept = || async {
         app.db
-            .read(|c| Ok(c.query_row("SELECT sha1 FROM chd_whole", [], |r| r.get::<_, String>(0))?))
+            .read(|c| {
+                Ok(c.query_row("SELECT sha1 FROM chd_whole", [], |r| {
+                    r.get::<_, mistarr_core::Sha1>(0)
+                })?)
+            })
             .await
             .expect("kept")
     };

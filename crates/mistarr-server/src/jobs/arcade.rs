@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mistarr_core::naming::{group_key, parse_name};
-use mistarr_core::PlatformId;
+use mistarr_core::{Md5, PlatformId};
 use mistarr_mister::adapter::arcade::assemble::{self, PartSource};
 use mistarr_mister::adapter::arcade::mra::{self, zip_location, Mra, MraRom, ZipPath};
 use serde_json::json;
@@ -113,7 +113,7 @@ struct Entry {
 #[derive(Debug, Clone)]
 struct Zip {
     path: ZipPath,
-    md5: Option<String>,
+    md5: Option<Md5>,
     on_disk: Option<PathBuf>,
 }
 
@@ -478,7 +478,7 @@ fn store_batch(
                     .map(|z| MraZip {
                         name: &z.path.file,
                         zip_dir: &z.path.dir,
-                        md5: z.md5.as_deref(),
+                        md5: z.md5,
                         present: z.on_disk.is_some(),
                     })
                     .collect();
@@ -700,7 +700,7 @@ fn zips_of(mra: &Mra, index: &ZipIndex) -> Vec<Zip> {
                         .iter()
                         .any(|z| zip_location(z).as_ref() == Some(&path))
                 })
-                .and_then(|r| r.md5.clone());
+                .and_then(|r| r.md5);
             let on_disk = index.find(&path);
             Zip { path, md5, on_disk }
         })
@@ -863,7 +863,7 @@ fn verify(mra: &Mra, index: &ZipIndex) -> Option<(&'static str, Option<String>)>
 /// The md5 check of one `<rom>` against `expected`, with why it did not match.
 pub(super) fn check_rom(
     rom: &MraRom,
-    expected: &str,
+    expected: Md5,
     src: &mut dyn PartSource,
 ) -> (Check, Option<String>) {
     match assemble::md5(rom, src) {
@@ -887,7 +887,7 @@ pub(super) fn verify_roms<'r>(
 ) -> Option<(Check, Option<String>)> {
     let mut by_index: Vec<(u32, Check, Option<String>)> = Vec::new();
     for rom in roms {
-        let Some(expected) = &rom.md5 else {
+        let Some(expected) = rom.md5 else {
             continue;
         };
         let (check, detail) = check_rom(rom, expected, src);

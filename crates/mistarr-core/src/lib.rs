@@ -32,15 +32,16 @@ pub mod hash;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct PlatformId(pub String);
 
-/// The three hashes and size that identify a dump. Hex fields are lowercase.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct HashSet {
+/// The three hashes and size that identify a dump; serde writes each digest as
+/// lowercase hex.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct Hashes {
     /// File size in bytes after any header rule was applied.
     pub size: u64,
-    /// CRC32 as 8 lowercase hex characters.
-    pub crc32: String,
-    /// MD5 as 32 lowercase hex characters.
-    pub md5: String,
-    /// SHA1 as 40 lowercase hex characters.
-    pub sha1: String,
+    /// CRC32 of the content.
+    pub crc32: Crc32,
+    /// MD5 of the content.
+    pub md5: Md5,
+    /// SHA1 of the content.
+    pub sha1: Sha1,
 }

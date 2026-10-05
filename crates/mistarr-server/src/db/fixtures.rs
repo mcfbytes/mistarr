@@ -1,7 +1,7 @@
 //! Synthetic catalog rows standing in for the DAT import; compiled for tests and the
 //! `test-support` feature only.
 
-use mistarr_core::{HashSet, PlatformId};
+use mistarr_core::{Hashes, PlatformId};
 use rusqlite::{params, Connection};
 
 use super::downloads::DownloadState;
@@ -111,7 +111,7 @@ pub fn download(
 }
 
 /// A rom to write: its name, hashes and status.
-type RomSpec = (String, HashSet, RomStatus);
+type RomSpec = (String, Hashes, RomStatus);
 
 /// A DAT version with titles and roms to write, started by [`dat`].
 #[derive(Debug, Clone)]
@@ -147,10 +147,10 @@ impl Written {
 /// [`Dat::write`].
 ///
 /// ```
-/// use mistarr_core::{HashSet, PlatformId};
+/// use mistarr_core::{Hashes, PlatformId};
 /// use mistarr_server::db::{fixtures, titles::RomStatus};
 /// let conn = fixtures::conn();
-/// let h = HashSet { size: 3, crc32: "352441c2".into(), md5: "0".repeat(32), sha1: "0".repeat(40) };
+/// let h = Hashes { size: 3, crc32: "352441c2".parse().expect("hex"), md5: "0".repeat(32).parse().expect("hex"), sha1: "0".repeat(40).parse().expect("hex") };
 /// let w = fixtures::dat(&PlatformId("nes".into()))
 ///     .title("Example Quest (USA)")
 ///     .rom("a.nes", &h, RomStatus::Good)
@@ -230,9 +230,9 @@ pub struct DatTitle(Dat);
 impl DatTitle {
     /// Adds a rom to the current title.
     #[must_use]
-    pub fn rom(mut self, name: &str, hashes: &HashSet, status: RomStatus) -> Self {
+    pub fn rom(mut self, name: &str, hashes: &Hashes, status: RomStatus) -> Self {
         if let Some((_, roms)) = self.0.titles.last_mut() {
-            roms.push((name.to_owned(), hashes.clone(), status));
+            roms.push((name.to_owned(), *hashes, status));
         }
         self
     }
@@ -257,12 +257,14 @@ impl DatTitle {
 mod tests {
     use super::*;
 
-    fn hashes(size: u64) -> HashSet {
-        HashSet {
+    fn hashes(size: u64) -> Hashes {
+        Hashes {
             size,
-            crc32: "352441c2".into(),
-            md5: "900150983cd24fb0d6963f7d28e17f72".into(),
-            sha1: "a9993e364706816aba3e25717850c26c9cd0d89d".into(),
+            crc32: "352441c2".parse().expect("hex"),
+            md5: "900150983cd24fb0d6963f7d28e17f72".parse().expect("hex"),
+            sha1: "a9993e364706816aba3e25717850c26c9cd0d89d"
+                .parse()
+                .expect("hex"),
         }
     }
 

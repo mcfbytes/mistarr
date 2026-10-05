@@ -1,7 +1,7 @@
 //! Matching hashed payloads to the roms of one DAT entry in memory, by
 //! `docs/VERIFICATION.md` "Matching order".
 
-use crate::HashSet;
+use crate::{Crc32, Hashes, Md5, Sha1};
 
 /// A DAT rom as matching reads it.
 pub trait Rom {
@@ -13,18 +13,18 @@ pub trait Rom {
     fn name(&self) -> &str;
     /// Size in bytes.
     fn size(&self) -> u64;
-    /// CRC32 as lowercase hex, when the DAT lists it.
-    fn crc32(&self) -> Option<&str>;
-    /// MD5 as lowercase hex, when the DAT lists it.
-    fn md5(&self) -> Option<&str>;
-    /// SHA1 as lowercase hex, when the DAT lists it.
-    fn sha1(&self) -> Option<&str>;
+    /// CRC32, when the DAT lists it.
+    fn crc32(&self) -> Option<Crc32>;
+    /// MD5, when the DAT lists it.
+    fn md5(&self) -> Option<Md5>;
+    /// SHA1, when the DAT lists it.
+    fn sha1(&self) -> Option<Sha1>;
 }
 
 /// A hashed file or zip member as matching reads it.
 pub trait Payload {
     /// The forms the payload matches a rom in, the whole payload first.
-    fn forms(&self) -> impl Iterator<Item = &HashSet>;
+    fn forms(&self) -> impl Iterator<Item = &Hashes>;
     /// The zip member name, `None` for a plain file.
     fn member(&self) -> Option<&str>;
 
@@ -38,28 +38,30 @@ pub trait Payload {
 ///
 /// ```
 /// use mistarr_core::matching::{rom_matches, Rom};
+/// use mistarr_core::{Crc32, Hashes, Md5, Sha1};
 /// struct R;
 /// impl Rom for R {
 ///     type Id = u8;
 ///     fn id(&self) -> u8 { 1 }
 ///     fn name(&self) -> &str { "a.bin" }
 ///     fn size(&self) -> u64 { 3 }
-///     fn crc32(&self) -> Option<&str> { Some("352441c2") }
-///     fn md5(&self) -> Option<&str> { None }
-///     fn sha1(&self) -> Option<&str> { None }
+///     fn crc32(&self) -> Option<Crc32> { Some(Crc32::from_u32(0x3524_41c2)) }
+///     fn md5(&self) -> Option<Md5> { None }
+///     fn sha1(&self) -> Option<Sha1> { None }
 /// }
-/// let h = mistarr_core::HashSet { size: 3, crc32: "352441c2".into(), md5: String::new(), sha1: String::new() };
+/// let crc32 = Crc32::from_u32(0x3524_41c2);
+/// let h = Hashes { size: 3, crc32, md5: Md5::from_bytes([0; 16]), sha1: Sha1::from_bytes([0; 20]) };
 /// assert!(rom_matches(&R, &h));
 /// ```
 #[must_use]
-pub fn rom_matches<R: Rom + ?Sized>(rom: &R, h: &HashSet) -> bool {
+pub fn rom_matches<R: Rom + ?Sized>(rom: &R, h: &Hashes) -> bool {
     if let Some(sha1) = rom.sha1() {
         return sha1 == h.sha1;
     }
     if let Some(md5) = rom.md5() {
         return md5 == h.md5;
     }
-    rom.crc32() == Some(h.crc32.as_str()) && rom.size() == h.size
+    rom.crc32() == Some(h.crc32) && rom.size() == h.size
 }
 
 /// The last component of a name that may use `/` or `\` as a separator.
@@ -155,9 +157,9 @@ mod tests {
         id: i64,
         name: String,
         size: u64,
-        crc32: Option<String>,
-        md5: Option<String>,
-        sha1: Option<String>,
+        crc32: Option<Crc32>,
+        md5: Option<Md5>,
+        sha1: Option<Sha1>,
     }
 
     impl Rom for TestRom {
@@ -171,26 +173,26 @@ mod tests {
         fn size(&self) -> u64 {
             self.size
         }
-        fn crc32(&self) -> Option<&str> {
-            self.crc32.as_deref()
+        fn crc32(&self) -> Option<Crc32> {
+            self.crc32
         }
-        fn md5(&self) -> Option<&str> {
-            self.md5.as_deref()
+        fn md5(&self) -> Option<Md5> {
+            self.md5
         }
-        fn sha1(&self) -> Option<&str> {
-            self.sha1.as_deref()
+        fn sha1(&self) -> Option<Sha1> {
+            self.sha1
         }
     }
 
     #[derive(Debug, Clone, PartialEq)]
     struct TestPayload {
         member: Option<String>,
-        hashes: HashSet,
-        whole: Option<HashSet>,
+        hashes: Hashes,
+        whole: Option<Hashes>,
     }
 
     impl Payload for TestPayload {
-        fn forms(&self) -> impl Iterator<Item = &HashSet> {
+        fn forms(&self) -> impl Iterator<Item = &Hashes> {
             self.whole.iter().chain([&self.hashes])
         }
         fn member(&self) -> Option<&str> {
@@ -198,26 +200,26 @@ mod tests {
         }
     }
 
-    fn rom(id: i64, name: &str, h: &HashSet) -> TestRom {
+    fn rom(id: i64, name: &str, h: &Hashes) -> TestRom {
         TestRom {
             id,
             name: name.into(),
             size: h.size,
-            crc32: Some(h.crc32.clone()),
-            md5: Some(h.md5.clone()),
-            sha1: Some(h.sha1.clone()),
+            crc32: Some(h.crc32),
+            md5: Some(h.md5),
+            sha1: Some(h.sha1),
         }
     }
 
-    fn plain(member: Option<&str>, hashes: &HashSet) -> TestPayload {
+    fn plain(member: Option<&str>, hashes: &Hashes) -> TestPayload {
         TestPayload {
             member: member.map(Into::into),
-            hashes: hashes.clone(),
+            hashes: *hashes,
             whole: None,
         }
     }
 
-    fn hash(bytes: &[u8]) -> HashSet {
+    fn hash(bytes: &[u8]) -> Hashes {
         hash_reader(Cursor::new(bytes), HeaderRule::None, None).expect("hash")
     }
 
@@ -255,7 +257,7 @@ mod tests {
     fn a_payload_is_the_rom_of_either_form() {
         let (whole, body) = (hash(b"NES\x1abody"), hash(b"body"));
         let p = TestPayload {
-            whole: Some(whole.clone()),
+            whole: Some(whole),
             ..plain(None, &body)
         };
         assert!(p.is(&rom(1, "a.nes", &whole)), "a headered DAT");

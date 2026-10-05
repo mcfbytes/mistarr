@@ -40,16 +40,15 @@ fn writes_of<T>(f: impl FnOnce() -> T) -> (T, Option<(u64, u64)>) {
 struct Rng(u64);
 
 impl Rng {
-    fn hex(&mut self, digits: usize) -> String {
-        let mut out = String::with_capacity(digits);
-        while out.len() < digits {
+    fn digest<const N: usize>(&mut self) -> mistarr_core::Digest<N> {
+        let mut out = [0; N];
+        for chunk in out.chunks_mut(8) {
             self.0 ^= self.0 << 13;
             self.0 ^= self.0 >> 7;
             self.0 ^= self.0 << 17;
-            let _ = write!(out, "{:016x}", self.0);
+            chunk.copy_from_slice(&self.0.to_be_bytes()[..chunk.len()]);
         }
-        out.truncate(digits);
-        out
+        mistarr_core::Digest::from_bytes(out)
     }
 }
 
@@ -58,9 +57,9 @@ struct Track {
     dir: String,
     name: String,
     size: i64,
-    crc32: String,
-    md5: String,
-    sha1: String,
+    crc32: mistarr_core::Crc32,
+    md5: mistarr_core::Md5,
+    sha1: mistarr_core::Sha1,
 }
 
 /// A Logiqx DAT of `games` disc entries binding to psx under a family of its own, each a
@@ -80,7 +79,7 @@ fn psx_dat(games: usize) -> (String, Vec<Track>) {
             "<game name=\"{name}\"><description>{name}</description>"
         );
         let mut rom = |file: String, size: i64, rng: &mut Rng| {
-            let (crc32, md5, sha1) = (rng.hex(8), rng.hex(32), rng.hex(40));
+            let (crc32, md5, sha1) = (rng.digest(), rng.digest(), rng.digest());
             let _ = writeln!(
                 xml,
                 "<rom name=\"{file}\" size=\"{size}\" crc=\"{crc32}\" md5=\"{md5}\" sha1=\"{sha1}\"/>"
@@ -122,9 +121,9 @@ fn catalogue(dir: &Path, scale: f64, unmatched: usize, dat: &[Track]) -> Db {
                 dir: format!("PSX/Unlisted Disc {:05}", i / 3),
                 name: format!("Unlisted Disc {:05} (Track {}).bin", i / 3, i % 3 + 1),
                 size: 2_000_000,
-                crc32: rng.hex(8),
-                md5: rng.hex(32),
-                sha1: rng.hex(40),
+                crc32: rng.digest(),
+                md5: rng.digest(),
+                sha1: rng.digest(),
             };
             let t = known.unwrap_or(&own);
             let path = format!("{}/{}", t.dir, t.name);
@@ -132,9 +131,9 @@ fn catalogue(dir: &Path, scale: f64, unmatched: usize, dat: &[Track]) -> Db {
                 &tx,
                 &psx,
                 &NewFile {
-                    crc32: Some(t.crc32.clone()),
-                    md5: Some(t.md5.clone()),
-                    sha1: Some(t.sha1.clone()),
+                    crc32: Some(t.crc32),
+                    md5: Some(t.md5),
+                    sha1: Some(t.sha1),
                     header_rule: Some("none".to_string()),
                     ..NewFile::unhashed(&path, t.size, 1, FileState::Unverified)
                 },
@@ -278,9 +277,9 @@ fn staged_game(name: String, rng: &mut Rng) -> StagedGame {
         .map(|t| StagedRom {
             name: format!("{name} (Track {t}).bin"),
             size: 1_000_000,
-            crc32: Some(rng.hex(8)),
-            md5: Some(rng.hex(32)),
-            sha1: Some(rng.hex(40)),
+            crc32: Some(rng.digest()),
+            md5: Some(rng.digest()),
+            sha1: Some(rng.digest()),
             status: crate::db::titles::RomStatus::Good,
             header: None,
         })

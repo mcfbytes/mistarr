@@ -87,7 +87,7 @@ pub struct MraZip<'a> {
     /// Directory under `games/` it is read from.
     pub zip_dir: &'a str,
     /// The md5 of the MRA `<rom>` naming this zip, when it carries one.
-    pub md5: Option<&'a str>,
+    pub md5: Option<mistarr_core::Md5>,
     /// Whether the zip is on disk.
     pub present: bool,
 }

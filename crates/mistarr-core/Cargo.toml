@@ -10,6 +10,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+# SQLite conversions for digests and ids, for the server's database layer.
+rusqlite = ["dep:rusqlite"]
+
 [dependencies]
 thiserror.workspace = true
 serde.workspace = true
@@ -23,10 +27,12 @@ flate2.workspace = true
 lzma-rs.workspace = true
 claxon.workspace = true
 ruzstd.workspace = true
+rusqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
 proptest.workspace = true
 serde_json.workspace = true
+rusqlite = { workspace = true, features = ["bundled"] }
 criterion = { version = "0.8", default-features = false, features = ["cargo_bench_support"] }
 
 [[bench]]

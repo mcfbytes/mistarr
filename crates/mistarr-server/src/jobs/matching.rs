@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use mistarr_core::hash::{HeaderForms, HeaderRule};
-use mistarr_core::{HashSet as Hashes, PlatformId};
+use mistarr_core::{Hashes, PlatformId};
 use mistarr_mister::platforms::{self, Kind};
 use rusqlite::Connection;
 
@@ -49,13 +49,13 @@ pub(crate) fn match_forms<'a>(
     let forms: Vec<&Hashes> = forms.into_iter().collect();
     let size = |h: &Hashes| i64::try_from(h.size).unwrap_or(i64::MAX);
     for h in &forms {
-        let (sha1, md5, crc32) = (&h.sha1, &h.md5, &h.crc32);
+        let (sha1, md5, crc32) = (Some(h.sha1), Some(h.md5), Some(h.crc32));
         if let Some(m) = roms::match_live_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
             return Ok(Some(m));
         }
     }
     for h in &forms {
-        let (sha1, md5, crc32) = (&h.sha1, &h.md5, &h.crc32);
+        let (sha1, md5, crc32) = (Some(h.sha1), Some(h.md5), Some(h.crc32));
         if let Some(m) = roms::match_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
             return Ok(Some(m));
         }
@@ -192,8 +192,7 @@ pub(crate) fn stored_match(
     if f.md5.is_none() && f.sha1.is_none() {
         return Ok(None);
     }
-    let hash = |h: &Option<String>| h.clone().unwrap_or_default();
-    let (sha1, md5, crc32) = (hash(&f.sha1), hash(&f.md5), hash(&f.crc32));
+    let (sha1, md5, crc32) = (f.sha1, f.md5, f.crc32);
     let rule = f
         .header_rule
         .as_deref()
@@ -202,15 +201,14 @@ pub(crate) fn stored_match(
     let header = i64::try_from(rule.header_len()).unwrap_or(0);
     let w = &f.whole;
     let has_whole = w.sha1.is_some() || w.md5.is_some();
-    if has_whole && (&w.sha1, &w.md5) != (&f.sha1, &f.md5) {
-        let (wsha1, wmd5, wcrc) = (hash(&w.sha1), hash(&w.md5), hash(&w.crc32));
-        if let Some(m) = roms::match_live_rom(conn, platform_id, &wsha1, &wmd5, &wcrc, f.size)? {
+    if has_whole && (w.sha1, w.md5) != (f.sha1, f.md5) {
+        if let Some(m) = roms::match_live_rom(conn, platform_id, w.sha1, w.md5, w.crc32, f.size)? {
             return Ok(Some(m));
         }
         let size = f.size - header;
-        return roms::match_live_rom(conn, platform_id, &sha1, &md5, &crc32, size);
+        return roms::match_live_rom(conn, platform_id, sha1, md5, crc32, size);
     }
-    if let Some(m) = roms::match_live_rom(conn, platform_id, &sha1, &md5, &crc32, f.size)? {
+    if let Some(m) = roms::match_live_rom(conn, platform_id, sha1, md5, crc32, f.size)? {
         return Ok(Some(m));
     }
     if has_whole {
@@ -221,11 +219,11 @@ pub(crate) fn stored_match(
         HeaderRule::Smc => f.size % 1024 == 512,
         _ => header > 0 && f.size > header,
     };
-    if !stripped || crc32.is_empty() {
+    if !stripped || crc32.is_none() {
         return Ok(None);
     }
     // The hash tiers failed above whatever the size; only the CRC32 tier is left.
-    roms::match_live_rom(conn, platform_id, "", "", &crc32, f.size - header)
+    roms::match_live_rom(conn, platform_id, None, None, crc32, f.size - header)
 }
 
 /// One hashed track of a disc game directory, before the all-or-nothing rule
@@ -380,9 +378,9 @@ mod tests {
     fn hashes() -> Hashes {
         Hashes {
             size: 4,
-            crc32: "0a0b0c0d".into(),
-            md5: "0".repeat(32),
-            sha1: "1".repeat(40),
+            crc32: "0a0b0c0d".parse().expect("hex"),
+            md5: "0".repeat(32).parse().expect("hex"),
+            sha1: "1".repeat(40).parse().expect("hex"),
         }
     }
 
@@ -540,9 +538,9 @@ mod tests {
             rel_path: rel.to_owned(),
             size: 20,
             mtime: 1,
-            crc32: Some(h.crc32.clone()),
-            md5: Some(h.md5.clone()),
-            sha1: Some(h.sha1.clone()),
+            crc32: Some(h.crc32),
+            md5: Some(h.md5),
+            sha1: Some(h.sha1),
             header_rule: Some("ines".into()),
             rom_id: Some(rom),
             state: FileState::Misnamed,
@@ -596,7 +594,7 @@ mod tests {
         file.resize(16, 0);
         file.extend_from_slice(b"synthetic body of a retired and a live rom");
         let forms = hash_forms(&file[..], HeaderRule::Ines, None).expect("hash");
-        let whole = forms.whole.clone().expect("a header");
+        let whole = forms.whole.expect("a header");
         let retired = crate::db::fixtures::dat(&nes)
             .title("Old (USA)")
             .rom("Old (USA).nes", &whole, RomStatus::Good)
@@ -641,7 +639,7 @@ mod tests {
             name: name.to_owned(),
             size: 4,
             mtime: 1,
-            hashes: Some(h.clone()),
+            hashes: Some(h),
             matched,
         };
         let rows = classify_disc_tracks(&c, vec![track("Disc (USA).bin", Some(m.clone()))])

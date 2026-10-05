@@ -15,7 +15,7 @@ use flate2::write::DeflateEncoder;
 use flate2::Compression;
 use mistarr_core::chd::{crc16, ecc};
 use mistarr_core::hash::{hash_reader, HeaderRule};
-use mistarr_core::HashSet;
+use mistarr_core::Hashes;
 use sha1::{Digest as _, Sha1};
 
 use crate::rng::SplitMix;
@@ -306,7 +306,7 @@ pub struct Written {
     /// File size.
     pub size: u64,
     /// Hashes of each track's `.bin`, computed from the bin bytes rather than the image.
-    pub tracks: Vec<HashSet>,
+    pub tracks: Vec<Hashes>,
     /// SHA1 of the decoded image data.
     pub raw_sha1: [u8; 20],
     /// Combined SHA1 of the raw SHA1 and the checksummed metadata.

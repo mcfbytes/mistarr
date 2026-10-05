@@ -8,7 +8,7 @@ use std::process::Command;
 
 use mistarr_core::chd::{self, ChdError, Decoder, Step, Unidentifiable};
 use mistarr_core::hash::{hash_reader, HeaderRule};
-use mistarr_core::HashSet;
+use mistarr_core::Hashes;
 use mistarr_fixture::chd::{track_bin, write_redump_set, Kind, Spec, TrackSpec};
 
 fn chdman() -> Option<PathBuf> {
@@ -78,7 +78,7 @@ fn create(chdman: &Path, cue: &Path, out: &Path, args: &[&str]) {
     );
 }
 
-fn decode(bytes: &[u8]) -> Result<Vec<HashSet>, ChdError> {
+fn decode(bytes: &[u8]) -> Result<Vec<Hashes>, ChdError> {
     let h = chd::read_header(bytes)?;
     let mut c = Cursor::new(bytes);
     let layout = chd::read_layout(&mut c, &h)?;
@@ -87,7 +87,7 @@ fn decode(bytes: &[u8]) -> Result<Vec<HashSet>, ChdError> {
     d.finish()
 }
 
-fn source_hashes(spec: &Spec) -> Vec<HashSet> {
+fn source_hashes(spec: &Spec) -> Vec<Hashes> {
     (0..spec.tracks.len())
         .map(|t| hash_reader(track_bin(spec, t), HeaderRule::None, None).expect("hash"))
         .collect()

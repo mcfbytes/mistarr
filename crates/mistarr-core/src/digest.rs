@@ -1,6 +1,6 @@
 //! Fixed-length digests that read and write as lowercase hex.
 
-use std::fmt;
+use std::fmt::{self, Write as _};
 use std::str::FromStr;
 
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -52,9 +52,35 @@ impl<const N: usize> From<[u8; N]> for Digest<N> {
     }
 }
 
+impl Digest<4> {
+    /// A CRC32 from its value.
+    ///
+    /// ```
+    /// assert_eq!(mistarr_core::Crc32::from_u32(0x0102_0304).to_string(), "01020304");
+    /// ```
+    #[must_use]
+    pub const fn from_u32(value: u32) -> Self {
+        Self(value.to_be_bytes())
+    }
+
+    /// The CRC32's value.
+    ///
+    /// ```
+    /// assert_eq!(mistarr_core::Crc32::from_bytes([0, 0, 1, 2]).to_u32(), 0x0102);
+    /// ```
+    #[must_use]
+    pub const fn to_u32(self) -> u32 {
+        u32::from_be_bytes(self.0)
+    }
+}
+
 impl<const N: usize> fmt::Display for Digest<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&crate::hex::encode(&self.0))
+        const DIGITS: &[u8; 16] = b"0123456789abcdef";
+        self.0.iter().try_for_each(|b| {
+            f.write_char(char::from(DIGITS[usize::from(b >> 4)]))?;
+            f.write_char(char::from(DIGITS[usize::from(b & 0xf)]))
+        })
     }
 }
 
@@ -70,10 +96,16 @@ impl<const N: usize> FromStr for Digest<N> {
     type Err = ParseDigestError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        crate::hex::decode(s)
-            .and_then(|bytes| <[u8; N]>::try_from(bytes).ok())
-            .map(Self)
-            .ok_or(ParseDigestError { digits: 2 * N })
+        let err = ParseDigestError { digits: 2 * N };
+        let (pairs, rest) = s.as_bytes().as_chunks::<2>();
+        if pairs.len() != N || !rest.is_empty() {
+            return Err(err);
+        }
+        let mut bytes = [0; N];
+        for (out, &[hi, lo]) in bytes.iter_mut().zip(pairs) {
+            *out = crate::hex::digit(hi).ok_or(err)? << 4 | crate::hex::digit(lo).ok_or(err)?;
+        }
+        Ok(Self(bytes))
     }
 }
 
@@ -85,8 +117,26 @@ impl<const N: usize> Serialize for Digest<N> {
 
 impl<'de, const N: usize> Deserialize<'de> for Digest<N> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = String::deserialize(deserializer)?;
+        let text = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
         text.parse().map_err(de::Error::custom)
+    }
+}
+
+/// Stored as lowercase hex text; a column that is not that hex fails to read.
+#[cfg(feature = "rusqlite")]
+impl<const N: usize> rusqlite::types::ToSql for Digest<N> {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(self.to_string().into())
+    }
+}
+
+#[cfg(feature = "rusqlite")]
+impl<const N: usize> rusqlite::types::FromSql for Digest<N> {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        value
+            .as_str()?
+            .parse()
+            .map_err(|e| rusqlite::types::FromSqlError::Other(Box::new(e)))
     }
 }
 
@@ -178,6 +228,23 @@ mod tests {
             h
         );
         assert!(serde_json::from_str::<Md5>("\"00\"").is_err());
+    }
+
+    #[cfg(feature = "rusqlite")]
+    #[test]
+    fn sql_stores_lowercase_hex_and_refuses_anything_else() {
+        let c = rusqlite::Connection::open_in_memory().expect("open");
+        let d = Sha1::from_bytes([0xab; 20]);
+        let text: String = c.query_row("SELECT ?1", [d], |r| r.get(0)).expect("text");
+        assert_eq!(text, "ab".repeat(20));
+        let back: Sha1 = c
+            .query_row("SELECT upper(?1)", [d], |r| r.get(0))
+            .expect("back");
+        assert_eq!(back, d);
+        assert!(c
+            .query_row("SELECT 'zz'", [], |r| r.get::<_, Md5>(0))
+            .is_err());
+        assert!(c.query_row("SELECT 7", [], |r| r.get::<_, Md5>(0)).is_err());
     }
 
     proptest! {

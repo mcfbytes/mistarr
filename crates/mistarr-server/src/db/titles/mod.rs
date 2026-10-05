@@ -74,12 +74,12 @@ pub struct RomInput<'a> {
     pub name: &'a str,
     /// Size in bytes.
     pub size: u64,
-    /// Lowercase hex CRC32.
-    pub crc32: Option<&'a str>,
-    /// Lowercase hex MD5.
-    pub md5: Option<&'a str>,
-    /// Lowercase hex SHA1.
-    pub sha1: Option<&'a str>,
+    /// CRC32, when the DAT lists it.
+    pub crc32: Option<mistarr_core::Crc32>,
+    /// MD5, when the DAT lists it.
+    pub md5: Option<mistarr_core::Md5>,
+    /// SHA1, when the DAT lists it.
+    pub sha1: Option<mistarr_core::Sha1>,
     /// The DAT's dump status.
     pub status: RomStatus,
     /// The DAT's `header` attribute, verbatim.
@@ -346,7 +346,7 @@ pub fn upsert_title(
     if existed && !arcade {
         for r in roms {
             let size = sql::to_i64(r.size);
-            let listed = [r.crc32, r.md5, r.sha1];
+            let listed = (r.crc32, r.md5, r.sha1);
             super::files::unmatch_changed_rom(conn, id, r.name, size, listed)?;
         }
     }

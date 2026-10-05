@@ -7,7 +7,7 @@ use crate::jobs::Scheduler;
 /// Zips as `(file, members)`, each member `(name, bytes)`.
 type Zips<'a> = &'a [(&'a str, &'a [(&'a str, &'a [u8])])];
 
-fn md5_of(parts: &[&[u8]]) -> String {
+fn md5_of(parts: &[&[u8]]) -> mistarr_core::Md5 {
     let mut m = Md5Stream::new();
     for p in parts {
         m.update(p);
@@ -221,7 +221,7 @@ fn verify_assembles_parts_and_compares_the_md5() {
     ];
     assert_eq!(verify_with(zips, &rom), Some(("match", None)));
 
-    let bad = rom.replace(&md5, &md5_of(&[b"other"]));
+    let bad = rom.replace(&md5.to_string(), &md5_of(&[b"other"]).to_string());
     let (state, detail) = verify_with(zips, &bad).expect("checked");
     assert_eq!(state, "mismatch");
     assert!(detail.is_some_and(|d| d.contains("rom 0")));

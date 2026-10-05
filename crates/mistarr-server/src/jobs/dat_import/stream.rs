@@ -427,9 +427,9 @@ pub(super) fn staged(game: &DatGame) -> StagedGame {
             .map(|r| StagedRom {
                 name: r.name.clone(),
                 size: r.size,
-                crc32: r.crc32.clone(),
-                md5: r.md5.clone(),
-                sha1: r.sha1.clone(),
+                crc32: r.crc32,
+                md5: r.md5,
+                sha1: r.sha1,
                 status: r.status.into(),
                 header: r.header.clone(),
             })
