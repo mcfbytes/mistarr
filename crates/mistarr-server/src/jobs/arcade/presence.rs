@@ -382,6 +382,7 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
         ..Stats::default()
     };
     let mut done = 0;
+    let reporter = ctx.reporter();
     for (dir, names) in &listing {
         let dir: &'static str = dir;
         for batch in names.chunks(BATCH) {
@@ -406,8 +407,10 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
             stats.recorded += recorded;
             stats.pruned += dropped;
             done += batch.len();
-            ctx.progress(json!({ "presence_done": done, "presence_total": stats.zips }))
-                .await?;
+            reporter.report(
+                "presence",
+                || json!({ "presence_done": done, "presence_total": stats.zips }),
+            );
         }
         stats.pruned += prune_dir(ctx, &pid, &games, dir, Arc::clone(names)).await?;
     }

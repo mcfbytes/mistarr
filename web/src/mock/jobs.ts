@@ -11,7 +11,7 @@ function announce(job: Pick<Job, 'id' | 'kind'>, state: JobState, progress: Reco
 }
 
 /** Lists `job` as open and says so. */
-function open(job: Job): void {
+export function openJob(job: Job): void {
   mock().jobs.push(job);
   announce(job, job.state, job.progress);
 }
@@ -41,7 +41,7 @@ function finish(id: number, state: 'done' | 'failed', progress: Record<string, u
 
 /** Runs `job` for `ms`, then makes its change with `apply` and finishes it with `outcome`. */
 export function runJob(job: Job, outcome: Record<string, unknown>, ms: number, apply: () => void): void {
-  open(job);
+  openJob(job);
   setTimeout(() => {
     apply();
     finish(job.id, 'done', outcome);
@@ -100,7 +100,7 @@ export function startFetch(link: string): { token: number; id: number } {
   const total = 2_400_000;
   let got = 0;
   const now = nowSecs();
-  open({
+  openJob({
     id,
     kind: 'url_fetch',
     lane: 'fetch',

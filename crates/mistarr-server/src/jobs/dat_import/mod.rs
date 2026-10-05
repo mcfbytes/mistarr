@@ -1,7 +1,6 @@
 //! The DAT import and 1G1R recompute jobs and the `dats/` watcher; the flow is
 //! `docs/ARCHITECTURE.md` "DAT import".
 
-use std::collections::HashSet;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -13,15 +12,16 @@ use async_trait::async_trait;
 use mistarr_core::select::Prefs;
 use mistarr_core::PlatformId;
 use mistarr_sources::intake::{self, StableFiles, LOADED_DIR};
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::watch;
 
 use self::recompute::{pass_progress, recompute_blocking, recompute_pass, Pass, Tally};
 use self::stream::import_from;
 use super::fsutil::extension;
-use super::gate::GateState;
 use super::progress::Reporter;
-use super::{scan, wizard, Job, JobContext, JobKind, Lane, Scheduler};
+use super::stop::StopToken;
+use super::watch::wizard;
+use super::{follow_up, Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::dats;
 use crate::db::ids::DatVersionId;
@@ -59,7 +59,48 @@ pub struct DatImport {
     bind: Option<Bind>,
 }
 
+/// What a [`DatImport`] stores as its payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct Payload {
+    #[serde(serialize_with = "super::path_text")]
+    path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    dat_version_id: Option<DatVersionId>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    platform_id: Option<PlatformId>,
+}
+
 impl DatImport {
+    /// The job a stored payload describes, `None` when it does not read as one. A
+    /// bind request's payload names no DAT, so such a job is never run; see [`Self::binds`].
+    ///
+    /// ```
+    /// use mistarr_server::jobs::{dat_import::DatImport, Job};
+    /// let job = DatImport::from_payload(&serde_json::json!({ "path": "/d/a.dat" })).unwrap();
+    /// assert_eq!(job.detail().as_deref(), Some("a.dat"));
+    /// assert!(!job.binds());
+    /// ```
+    #[must_use]
+    pub fn from_payload(payload: &Value) -> Option<Self> {
+        let p: Payload = serde_json::from_value(payload.clone()).ok()?;
+        let bind = match (p.dat_version_id, p.platform_id) {
+            (Some(version), Some(platform)) => Some(Bind {
+                version,
+                platform,
+                dat_name: String::new(),
+                dat_version: String::new(),
+            }),
+            _ => None,
+        };
+        Some(Self { path: p.path, bind })
+    }
+
+    /// Whether the job binds an unbound version rather than loading a dropped file.
+    #[must_use]
+    pub fn binds(&self) -> bool {
+        self.bind.is_some()
+    }
+
     /// A job for a file in `dats/`.
     ///
     /// ```
@@ -135,8 +176,7 @@ struct Request {
     bind: Option<Bind>,
     prefs: Prefs,
     now: i64,
-    stop: watch::Receiver<bool>,
-    gate: watch::Receiver<GateState>,
+    stop: StopToken,
     meter: Option<Meter>,
     /// Fail with [`Error::Paused`] on a manual pause instead of waiting it out, for an
     /// import that holds the writer meanwhile.
@@ -240,14 +280,15 @@ impl Job for DatImport {
     }
 
     fn payload(&self) -> Value {
-        match &self.bind {
-            None => json!({ "path": self.path }),
-            Some(b) => json!({
-                "path": self.path,
-                "dat_version_id": b.version,
-                "platform_id": b.platform.0,
-            }),
-        }
+        super::to_payload(&Payload {
+            path: self.path.clone(),
+            dat_version_id: self.bind.as_ref().map(|b| b.version),
+            platform_id: self.bind.as_ref().map(|b| b.platform.clone()),
+        })
+    }
+
+    fn detail(&self) -> Option<String> {
+        super::file_detail(&self.path)
     }
 
     fn lane(&self) -> Lane {
@@ -309,7 +350,7 @@ impl Job for DatImport {
             );
             publish_loaded(&ctx.app, l, &file);
         }
-        enqueue_follow_up_work(&ctx.app, &loaded, recomputed).await;
+        follow_up_load(&ctx.app, &loaded, recomputed).await;
         Ok(())
     }
 }
@@ -339,7 +380,7 @@ impl DatImport {
                 Outcome::Loaded(l) => {
                     publish_loaded(&ctx.app, &l, file);
                     let loaded = std::slice::from_ref(&l);
-                    enqueue_follow_up_work(&ctx.app, loaded, imported.recomputed).await;
+                    follow_up_load(&ctx.app, loaded, imported.recomputed).await;
                     return Ok(());
                 }
                 Outcome::Rejected(r) => reasons.push(r),
@@ -413,8 +454,7 @@ impl DatImport {
             bind: self.bind.clone(),
             prefs: ctx.app.config().prefs.select.clone(),
             now: crate::unix_now(),
-            stop: ctx.app.shutdown_signal(),
-            gate: ctx.app.gate.subscribe(),
+            stop: ctx.stop.clone(),
             meter,
             abort_on_hold: floor.is_some(),
             floor,
@@ -449,8 +489,7 @@ impl DatImport {
             id: ctx.id,
             file: source_file.to_owned(),
             members: members.len(),
-            stop: ctx.app.shutdown_signal(),
-            gate: ctx.app.gate.subscribe(),
+            stop: ctx.stop.clone(),
             chunk_started: Instant::now(),
         };
         let path = self.path.clone();
@@ -523,7 +562,7 @@ fn import_all(
     let mut outcomes = Vec::with_capacity(members.len());
     let mut games = 0;
     for (done, &member) in members.iter().enumerate() {
-        check(req)?;
+        req.stop.check()?;
         // The first member follows the check that allowed the copy.
         if done > 0 {
             room(req)?;
@@ -564,23 +603,12 @@ fn import_all(
             db,
             p,
             &req.prefs,
-            &|| check(req).and_then(|()| room(req)),
+            &|| req.stop.check().and_then(|()| room(req)),
             &report,
         )?;
     }
     let loaded = outcomes.iter().any(|o| matches!(o, Outcome::Loaded(_)));
     Ok((outcomes, loaded))
-}
-
-/// [`Error::Cancelled`] on shutdown, [`Error::Paused`] while a pause holds the lane.
-fn check(req: &Request) -> Result<()> {
-    if *req.stop.borrow() {
-        return Err(Error::Cancelled);
-    }
-    if req.gate.borrow().hold(Lane::Background).is_some() {
-        return Err(Error::Paused);
-    }
-    Ok(())
 }
 
 /// [`Error::NoRoom`] when memory fell below the floor of a request in RAM.
@@ -609,15 +637,14 @@ fn members_size(path: &Path, members: &[Member]) -> u64 {
 }
 
 /// Reports an import in RAM's copy and write-back as live progress, stops it between
-/// their steps on shutdown or, while copying in, on a pause, and while a core runs
-/// rests as long as the last chunk took.
+/// their steps when the job must stop or, while copying in, on a pause, and while a
+/// core runs rests as long as the last chunk took.
 struct RamWatch {
     reporter: Reporter,
     id: JobId,
     file: String,
     members: usize,
-    stop: watch::Receiver<bool>,
-    gate: watch::Receiver<GateState>,
+    stop: StopToken,
     chunk_started: Instant,
 }
 
@@ -633,18 +660,16 @@ impl ram::Watch for RamWatch {
     }
 
     fn between(&mut self, phase: ram::Phase) -> Result<()> {
-        if *self.stop.borrow() {
-            return Err(Error::Cancelled);
-        }
-        if self.gate.borrow().core_running() {
+        self.stop.stopped()?;
+        if self.stop.core_running() {
             // At most half the time busy while a core runs.
             let took = self.chunk_started.elapsed();
             std::thread::sleep(took.clamp(YIELD_FOR, YIELD_AT_MOST));
         }
         self.chunk_started = Instant::now();
         // The write-back lasts seconds and a pause lets it finish.
-        if phase != ram::Phase::Writing && self.gate.borrow().hold(Lane::Background).is_some() {
-            return Err(Error::Paused);
+        if phase != ram::Phase::Writing {
+            self.stop.check()?;
         }
         Ok(())
     }
@@ -713,41 +738,16 @@ fn is_dat_name(name: &str) -> bool {
     !name.ends_with('/') && matches!(ext.as_deref(), Some("dat" | "xml"))
 }
 
-/// Queues the recompute job, which matches files of retired roms and unmatched files
-/// again from their stored hashes, or when the import already ran it, the re-map and CHD
-/// decoding it ends with; and an automatic scan for each platform a DAT just loaded titles for,
-/// deduped so several DATs in one pack queue at most one each, binds waiting
-/// sources once for the whole pack, then checks whether the wizard just
-/// became complete.
-async fn enqueue_follow_up_work(app: &Arc<AppState>, loaded: &[Loaded], recomputed: bool) {
-    let mut queued = HashSet::new();
-    for l in loaded {
-        let Some(platform) = &l.platform else {
-            continue;
-        };
-        if !queued.insert(platform.clone()) {
-            continue;
-        }
-        if recomputed {
-            super::remap::enqueue(app, Some(vec![platform.clone()])).await;
-            // The recompute job queues this itself; one run inside the import cannot.
-            if let Err(e) = super::chd::queue_for(app, platform, true).await {
-                tracing::warn!(platform = %platform.0, error = %e, "cannot queue CHD decoding");
-            }
-        } else if let Err(e) = Scheduler::enqueue(app, Arc::new(Recompute::new(&platform.0))).await
-        {
-            tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue the recompute");
-        }
-        if let Err(e) = scan::enqueue_if_games_dir_exists(app, platform).await {
-            tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue automatic scan");
+/// Queues what follows the members that loaded titles, once per platform however
+/// many DATs of a pack loaded into it, then checks whether the wizard just became complete.
+async fn follow_up_load(app: &Arc<AppState>, loaded: &[Loaded], recomputed: bool) {
+    let mut platforms: Vec<PlatformId> = Vec::new();
+    for p in loaded.iter().filter_map(|l| l.platform.as_ref()) {
+        if !platforms.contains(p) {
+            platforms.push(p.clone());
         }
     }
-    if !queued.is_empty() {
-        let platforms: Vec<_> = queued.into_iter().collect();
-        if let Err(e) = super::source_import::rebind_after_dat(app, &platforms).await {
-            tracing::warn!(error = %e, "cannot bind waiting sources");
-        }
-    }
+    follow_up::catalogue_changed(app, &platforms, recomputed).await;
     if let Err(e) = wizard::on_change(app).await {
         tracing::warn!(error = %e, "cannot check wizard completion");
     }
@@ -782,9 +782,10 @@ async fn reject(app: &AppState, path: &Path, file: &str, reason: &str) -> Result
 
 /// Matches files of retired roms again, then, outside arcade, the platform's unmatched
 /// files; recomputes the 1G1R picks of one platform under the current preferences, then
-/// queues a re-map of its bound sources.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// queues what [`follow_up::recomputed`] says. Its payload is the struct itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Recompute {
+    #[serde(rename = "platform_id")]
     platform: PlatformId,
 }
 
@@ -823,7 +824,11 @@ impl Job for Recompute {
     }
 
     fn payload(&self) -> Value {
-        json!({ "platform_id": self.platform.0 })
+        super::to_payload(self)
+    }
+
+    fn detail(&self) -> Option<String> {
+        Some(self.platform.0.clone())
     }
 
     fn lane(&self) -> Lane {
@@ -854,12 +859,7 @@ impl Job for Recompute {
         } = tally;
         ctx.progress(json!({ "groups": picked.groups, "picks": picked.picks, "matched": matched }))
             .await?;
-        // Groups are settled now; a re-map that ran earlier stored a stamp without them.
-        super::remap::enqueue(&ctx.app, Some(vec![self.platform.clone()])).await;
-        // New roms may fit CHD track layouts no DAT had before.
-        if let Err(e) = super::chd::queue_for(&ctx.app, &self.platform, true).await {
-            tracing::warn!(platform = %self.platform.0, error = %e, "cannot queue CHD decoding");
-        }
+        follow_up::recomputed(&ctx.app, &self.platform).await;
         Ok(())
     }
 }

@@ -19,7 +19,7 @@ use mistarr_server::db::ids::{JobId, TitleId};
 use mistarr_server::db::jobs::{self as job_rows, JobState};
 use mistarr_server::db::titles::RomStatus;
 use mistarr_server::events::EventKind;
-use mistarr_server::jobs::gate::Override;
+use mistarr_server::jobs::watch::gate::Override;
 use mistarr_server::jobs::{JobKind, Lane};
 use serde_json::json;
 use tokio::sync::broadcast::error::TryRecvError;

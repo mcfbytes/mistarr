@@ -10,9 +10,9 @@ use crate::db::jobs::{self, JobRow, JobState};
 use crate::db::settings::{self, keys};
 use crate::db::views::system::wizard_counts;
 use crate::error::Result;
-use crate::jobs::core_limits::ClientHold;
 use crate::jobs::detect_client::ClientStatus;
-use crate::jobs::gate::{GateState, Override, PauseReason};
+use crate::jobs::watch::core_limits::ClientHold;
+use crate::jobs::watch::gate::{GateState, Override, PauseReason};
 use crate::jobs::{JobKind, Lane};
 
 /// `GET /system/status` and the `status` event.
@@ -94,7 +94,7 @@ pub struct WaitingJob {
     pub kind: JobKind,
     /// `queued`, or `paused` when it stopped at a checkpoint.
     pub state: JobState,
-    /// The file name or platform the job is about, when its payload names one.
+    /// The file name, platform or source the job is about; see [`crate::jobs::Job::detail`].
     pub detail: Option<String>,
 }
 
@@ -117,36 +117,9 @@ impl WaitingJob {
             id: row.id,
             kind: row.kind,
             state: row.state,
-            detail: job_detail(&row.payload),
+            detail: crate::jobs::detail(row.kind, &row.payload),
         }
     }
-}
-
-/// The file name in a payload's `path`, else its `source_name`, else its `platform_id`.
-///
-/// ```
-/// let p = serde_json::json!({"path": "/data/dats/a.dat"});
-/// assert_eq!(mistarr_server::status::job_detail(&p).as_deref(), Some("a.dat"));
-/// let s = serde_json::json!({"source_name": "Set", "platform_id": "nes"});
-/// assert_eq!(mistarr_server::status::job_detail(&s).as_deref(), Some("Set"));
-/// assert_eq!(mistarr_server::status::job_detail(&serde_json::json!({})), None);
-/// ```
-#[must_use]
-pub fn job_detail(payload: &serde_json::Value) -> Option<String> {
-    if let Some(path) = payload.get("path").and_then(serde_json::Value::as_str) {
-        let name = Path::new(path).file_name()?;
-        return Some(name.to_string_lossy().into_owned());
-    }
-    if let Some(name) = payload
-        .get("source_name")
-        .and_then(serde_json::Value::as_str)
-    {
-        return Some(name.to_owned());
-    }
-    payload
-        .get("platform_id")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
 }
 
 /// Why a queued or paused job on `lane` is not running, from the gate; `None`
@@ -154,7 +127,7 @@ pub fn job_detail(payload: &serde_json::Value) -> Option<String> {
 ///
 /// ```
 /// use mistarr_server::db::jobs::JobState;
-/// use mistarr_server::jobs::{gate::GateState, Lane};
+/// use mistarr_server::jobs::{watch::gate::GateState, Lane};
 /// let gate = GateState { corename: Some("SNES".into()), manual: None };
 /// let why = mistarr_server::status::hold_reason(&gate, Lane::Heavy, JobState::Queued);
 /// assert_eq!(why.as_deref(), Some("Paused while SNES is running"));

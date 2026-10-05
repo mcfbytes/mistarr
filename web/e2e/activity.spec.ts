@@ -143,7 +143,7 @@ test('the sources table fits its page on a desktop and scrolls whole on a phone'
 
   await page.setViewportSize({ width: 390, height: 844 });
   const row = table.getByRole('row').filter({ hasText: 'Example bundle two' });
-  const del = row.locator('[data-action="remove"]');
+  const del = row.locator('[data-confirm="ask"]');
   await del.scrollIntoViewIfNeeded();
   await expect(del).toBeInViewport();
   await expect(row.locator('[data-status="waiting"]')).toHaveText('Unbound');

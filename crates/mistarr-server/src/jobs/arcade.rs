@@ -249,7 +249,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
         .write_tx(move |tx| settle_titles(tx, version, run, &prefs))
         .await?;
     if changed {
-        super::remap::enqueue(&ctx.app, Some(vec![platform()])).await;
+        super::follow_up::catalogue_changed(&ctx.app, &[platform()], true).await;
     }
     // After titles are committed, so the presence pass sees this run's live MRA zips.
     let stats = presence::run(ctx).await?;

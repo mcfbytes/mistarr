@@ -436,52 +436,55 @@ Sonnet · `web/` · branch `wp-65-web-stores`
 
 Sonnet · `web/` · branch `wp-66-web-components`
 
-- [ ] `System.svelte` splits into `StatusTiles`, `AboutCard`, `SettingsForm` and
+- [x] `System.svelte` splits into `StatusTiles`, `AboutCard`, `SettingsForm` and
   a reusable `SaveBar`; the Wizard shares one `saveSettings(patch)`.
-- [ ] `SourceDetail.svelte` splits into `ReclassifyPanel` and `SourceFiles`;
+- [x] `SourceDetail.svelte` splits into `ReclassifyPanel` and `SourceFiles`;
   `loadFiles` is called by the handlers that change filter, page or search,
-  so `reloadTick` and the `rowKey` effect go.
-- [ ] `ConfirmButton` serves Dats, IncomingList and Sources.
-- [ ] `JobRow` serves Activity and ActivityIndicator; `jobTitle` sits in
+  so `reloadTick` goes; one `rowKey` effect stays to re-read the summary and
+  files when `source.changed` moves the source's row.
+- [x] `ConfirmButton` serves Dats, IncomingList and Sources.
+- [x] `JobRow` serves Activity and ActivityIndicator; `jobTitle` sits in
   `status.ts`.
-- [ ] `platformName` is exported once; `format.ts` has one byte formatter, with
+- [x] `platformName` is exported once; `format.ts` has one byte formatter, with
   the unit rule in UI.md; SourceDetail copies through `copyText`.
-- [ ] Every route with a parameter renders inside `{#key}`; the manual resets go.
-- [ ] `app.css` holds `.error`, `.tag`, `.danger`, the table base,
+- [x] Every route with a parameter renders inside `{#key}`; the manual resets go.
+- [x] `app.css` holds `.error`, `.tag`, `.danger`, the table base,
   `.table-wrap`, `.help` and a `--mono` token; the unused `.progress` rule
   and `ApiErrorBody` go; Browse uses `ProgressBar` for its indeterminate bar.
-- [ ] The magnet box is a `UrlField`; `MagnetField` and `addMagnet` go.
-- [ ] Links use the router's URL helpers; `parseHash` is a table.
+- [x] The magnet box is a `UrlField`; `MagnetField` and `addMagnet` go.
+- [x] Links use the router's URL helpers; `parseHash` is a table.
 
 ### WP-67 Job framework
 
 Opus · `mistarr-server` (`jobs/`, `status.rs`, `threads.rs`) · branch
 `wp-67-job-framework`
 
-- [ ] Job payloads derive serde; `revive`, `RemapSources::from_payload` and
+- [x] Job payloads derive serde; `revive`, `RemapSources::from_payload` and
   `BindSource::from_payload` use `from_value`. `Job::detail()` replaces the
   key sniffing in `status::job_detail`.
-- [ ] Each kind states `Dedupe { Queued, QueuedOrPaused, Open }`, replacing
+- [x] Each kind states `Dedupe { Queued, QueuedOrPaused, Open }`, replacing
   `SINGLETON_KINDS`; `enqueue` honours `Open`. `Scheduler::submit(app, job)`
   logs a failure with kind and detail; the hand-written enqueue-or-warn
   sites, `transfer::kick` and `remap::enqueue` go.
-- [ ] `follow_up::catalogue_changed(app, platforms, recomputed)` owns the order
-  recompute, remap, CHD, scan, rebind; `dat_import`, `Recompute::run`,
-  `source_import`, `arcade` and `http/dats` call it.
-- [ ] `JobContext` carries a cloneable `StopToken` (shutdown, gate, lane,
+- [x] `follow_up::catalogue_changed(app, platforms, recomputed)` owns the order
+  recompute, remap, CHD, scan, rebind; `dat_import`, `arcade` and `http/dats`
+  call it. `Recompute::run` calls `follow_up::recomputed`, and
+  `source_import`'s rebind no longer queues a remap.
+- [x] `JobContext` carries a cloneable `StopToken` (shutdown, gate, lane,
   per-job cancel) with a synchronous `check()`. It replaces the DAT import's
   `Request`, `RamWatch::between` and url_fetch's `Stop`. The scheduler owns
   per-job cancel by `JobId`, and url_fetch's token maps to it. A paused DAT
   import's row shows `paused`.
-- [ ] Live progress goes through `reporter()` and the resume state through
+- [x] Live progress goes through `reporter()` and the resume state through
   `progress()`; remap and scan follow the rule and stop writing a row per
   item.
-- [ ] `transfer::move_downloads(app, ids, to, reason)` serves the importer, the
-  two transfer failures and poll's lost downloads.
-- [ ] `spawn_watcher(app, name, fut)` gives every watcher one shutdown
+- [x] `transfer::move_downloads(app, ids, to, reason)` serves the importer and
+  the two transfer failures. Poll's lost downloads fail in the transaction
+  that clears the source's client id, then go through `publish_ids`.
+- [x] `spawn_watcher(app, name, fut)` gives every watcher one shutdown
   behaviour.
-- [ ] One `doubling(base, n, max)` serves the three backoffs.
-- [ ] Gate followers and pollers (`core_limits`, `io_priority`, `gate`,
+- [x] One `doubling(base, n, max)` serves the three backoffs.
+- [x] Gate followers and pollers (`core_limits`, `io_priority`, `gate`,
   `corename`, `poll`, `wizard`) move to a `watch/` module. ARCHITECTURE.md's
   lane table lists every kind, and every doc comment counts four lanes.
 

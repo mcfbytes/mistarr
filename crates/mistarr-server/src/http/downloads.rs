@@ -12,7 +12,7 @@ use crate::app::AppState;
 use crate::db::downloads::{self as rows, CancelOutcome, DownloadRow, DownloadState, RetryOutcome};
 use crate::db::ids::DownloadId;
 use crate::db::sql::Paged;
-use crate::jobs::transfer;
+use crate::jobs::{transfer, Scheduler};
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -83,7 +83,7 @@ async fn retry(
     }
     let row = load(&app, id).await?;
     transfer::publish(&app, row.id, row.state, row.progress);
-    transfer::kick(&app).await;
+    Scheduler::submit(&app, Arc::new(transfer::Transfer)).await;
     Ok(Json(row))
 }
 

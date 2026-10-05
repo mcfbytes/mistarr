@@ -1,4 +1,6 @@
 import type { DownloadState, IncomingFile, Job, JobKind, JobState, SourceState } from './types';
+import { bytesText } from './format';
+import { HOME_URL, pageUrl, platformUrl, sourceUrl } from './router.svelte';
 
 /** The fixed status vocabulary every job, file and transfer is shown in; see docs/UI.md. */
 export type WorkStatus = 'queued' | 'running' | 'waiting' | 'paused' | 'done' | 'failed';
@@ -193,24 +195,41 @@ export function fetchSubject(job: FetchJob, all: readonly FetchJob[] = []): stri
   return same.length > 1 && n >= 0 ? `sent at ${time} (${n + 1})` : `sent at ${time}`;
 }
 
+/** A job's heading: its kind and what it is about, such as "Scan: NES"; `all` numbers unnamed fetches. */
+export function jobTitle(job: Job, all: readonly Job[], platformName: (id: string) => string): string {
+  const pid = job.payload.platform_id;
+  const named = typeof job.payload.source_name === 'string';
+  const detail =
+    job.kind === 'url_fetch'
+      ? fetchSubject(job, all)
+      : typeof pid === 'string' && !named
+        ? platformName(pid)
+        : jobDetail(job.payload);
+  return detail ? `${kindLabel(job.kind)}: ${detail}` : kindLabel(job.kind);
+}
+
 /** The page that owns a job's result. */
 export function jobHref(job: Pick<Job, 'kind' | 'payload'> & { progress?: Job['progress'] }): string {
   switch (job.kind) {
     case 'url_fetch':
-      return job.progress?.target === 'sources' ? '#/sources' : job.progress?.target === 'dats' ? '#/dats' : '#/activity';
+      return job.progress?.target === 'sources'
+        ? pageUrl('sources')
+        : job.progress?.target === 'dats'
+          ? pageUrl('dats')
+          : pageUrl('activity');
     case 'dat_import':
-      return '#/dats';
+      return pageUrl('dats');
     case 'source_import':
     case 'resolve_magnet':
     case 'remap_sources':
-      return '#/sources';
+      return pageUrl('sources');
     case 'bind_source':
-      return typeof job.payload.source_id === 'number' ? `#/sources/${job.payload.source_id}` : '#/sources';
+      return typeof job.payload.source_id === 'number' ? sourceUrl(job.payload.source_id) : pageUrl('sources');
     case 'scan':
     case 'recompute_1g1r':
-      return typeof job.payload.platform_id === 'string' ? `#/p/${job.payload.platform_id}` : '#/';
+      return typeof job.payload.platform_id === 'string' ? platformUrl(job.payload.platform_id) : HOME_URL;
     default:
-      return '#/activity';
+      return pageUrl('activity');
   }
 }
 
@@ -237,14 +256,6 @@ const PHASE_TEXT: Record<string, string> = {
   checking: 'Checking the file',
   placing: 'Writing to the card'
 };
-
-/** Bytes as "4.2 MiB" or "812 KiB", the units the size caps are given in. */
-export function bytesText(n: number): string {
-  if (n >= 1024 * 1024) {
-    return `${(n / (1024 * 1024)).toFixed(1)} MiB`;
-  }
-  return `${Math.max(0, Math.round(n / 1024)).toLocaleString()} KiB`;
-}
 
 function num(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
@@ -285,7 +296,7 @@ export function describeProgress(kind: string, p: Record<string, unknown> | null
     const total = num(p.total);
     if (done !== null && total !== null && total > 0) {
       fraction = Math.min(1, done / total);
-      parts.push(`${done.toLocaleString()} of ${total.toLocaleString()} files`);
+      parts.push(`${done.toLocaleString()} of ${total.toLocaleString()} folders`);
     }
   } else if (kind === 'chd_tracks') {
     const read = num(p.bytes_done);

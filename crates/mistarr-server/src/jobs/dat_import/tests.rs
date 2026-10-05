@@ -16,6 +16,7 @@ use crate::db::fixtures::pid;
 use crate::db::jobs::{self as rows, JobState};
 use crate::db::titles::RomStatus;
 use crate::db::{files, titles};
+use crate::jobs::watch::gate::GateState;
 
 /// A database in its own temporary directory, dropped with it.
 struct TestDb {
@@ -62,8 +63,7 @@ fn request(stop: bool, bind: Option<Bind>) -> Request {
         bind,
         prefs: Prefs::default(),
         now: 1,
-        stop: watch::channel(stop).1,
-        gate: watch::channel(GateState::default()).1,
+        stop: StopToken::open(stop, Lane::Background),
         meter: None,
         abort_on_hold: false,
         floor: None,
@@ -1889,14 +1889,13 @@ fn the_ram_budget_counts_every_member_uncompressed() {
 #[tokio::test]
 async fn a_running_core_halves_the_pace_of_the_copy() {
     let (_dir, app) = state();
-    let (tx, gate) = watch::channel(GateState::default());
+    let (tx, gate) = tokio::sync::watch::channel(GateState::default());
     let mut watch = RamWatch {
         reporter: Reporter::new(Arc::clone(&app), JobId(1), JobKind::DatImport, None),
         id: JobId(1),
         file: "a.dat".into(),
         members: 1,
-        stop: watch::channel(false).1,
-        gate,
+        stop: StopToken::fixed(false, gate, Lane::Background),
         chunk_started: Instant::now(),
     };
     let chunk = Duration::from_millis(60);
@@ -1924,7 +1923,7 @@ fn memory_under_the_floor_stops_a_load_in_ram() {
         floor: Some(u64::MAX),
         ..request(false, None)
     };
-    assert!(check(&req).is_ok(), "a pause or a stop only");
+    assert!(req.stop.check().is_ok(), "a pause or a stop only");
     assert!(matches!(room(&req), Err(Error::NoRoom(_))));
     assert!(matches!(pace(&req, CANCEL_EVERY), Err(Error::NoRoom(_))));
     assert!(
@@ -1935,20 +1934,20 @@ fn memory_under_the_floor_stops_a_load_in_ram() {
 
 #[test]
 fn a_pause_stops_an_import_that_holds_the_writer() {
-    let (tx, gate) = watch::channel(GateState::default());
+    let (tx, gate) = tokio::sync::watch::channel(GateState::default());
     let req = Request {
-        gate,
+        stop: StopToken::fixed(false, gate, Lane::Background),
         ..request(false, None)
     };
-    assert!(check(&req).is_ok());
+    assert!(req.stop.check().is_ok());
     let held = GateState {
         corename: None,
-        manual: Some(crate::jobs::gate::Override::Paused),
+        manual: Some(crate::jobs::watch::gate::Override::Paused),
     };
     tx.send(held).expect("send");
-    assert!(matches!(check(&req), Err(Error::Paused)));
+    assert!(matches!(req.stop.check(), Err(Error::Paused)));
     let stopped = request(true, None);
-    assert!(matches!(check(&stopped), Err(Error::Cancelled)));
+    assert!(matches!(stopped.stop.check(), Err(Error::Cancelled)));
 }
 
 /// mistarr's rewrite of `xml`, as a fetch places it.

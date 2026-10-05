@@ -21,7 +21,6 @@ use crate::db::titles;
 use crate::db::Db;
 use crate::error::{Error, Result};
 use crate::jobs::progress::CountingReader;
-use crate::jobs::Lane;
 
 /// Games read between checks for shutdown.
 pub(super) const CANCEL_EVERY: u64 = 500;
@@ -374,31 +373,24 @@ pub(super) fn import_stream<R: BufRead>(
     })
 }
 
-/// Stops on shutdown, sleeps briefly while a core runs and waits out a
-/// manual pause, which holds the background lane; checked every few games.
+/// Stops when the job must, sleeps briefly while a core runs and waits out a
+/// manual pause, which holds the background lane, with the row `paused`; an import
+/// that holds the writer fails with [`Error::Paused`] instead. Checked every few games.
 pub(super) fn pace(req: &Request, games: u64) -> Result<()> {
     if games.is_multiple_of(CANCEL_EVERY) {
-        if *req.stop.borrow() {
-            return Err(Error::Cancelled);
-        }
+        req.stop.stopped()?;
         room(req)?;
     }
     if !games.is_multiple_of(YIELD_EVERY) {
         return Ok(());
     }
-    if req.gate.borrow().core_running() {
+    if req.stop.core_running() {
         std::thread::sleep(YIELD_FOR);
     }
-    while req.gate.borrow().hold(Lane::Background).is_some() {
-        if *req.stop.borrow() {
-            return Err(Error::Cancelled);
-        }
-        if req.abort_on_hold {
-            return Err(Error::Paused);
-        }
-        std::thread::sleep(PAUSED_POLL);
+    if req.abort_on_hold {
+        return req.stop.check();
     }
-    Ok(())
+    req.stop.wait_free_blocking(PAUSED_POLL)
 }
 
 /// Parses a game's name into the row its title is stored from; regions, languages and

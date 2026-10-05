@@ -66,7 +66,7 @@ the panel is open.
 
 **Platforms** (`/`). One card per platform with core present, counts, and a
 scan button, below a banner of the platform's art. While the platform's scan
-is open the card shows its status pill, with a progress bar of files done
+is open the card shows its status pill, with a progress bar of folders done
 while it runs or its reason while it waits. Scan shows a toast when
 the scan is queued and another with its outcome when it finishes, such as
 "Scan of Nintendo 64: 410 matched, 2 unmatched", followed by "3 not
@@ -148,28 +148,28 @@ chose. Above the table, the upload control, the magnet box and the URL
 field, then the files still in `sources/` and this session's uploads, as in
 the wizard.
 
-**URL field.** On DATs, Sources and the wizard's DAT and source steps: a
-text box labelled "Add from a URL" with the placeholder
+**URL field.** On DATs, Sources and the wizard's DAT and source steps: a text
+box labelled "Add from a URL" with the placeholder
 `https://example.invalid/…`, `autocomplete="off"` on it and its form,
 `inputmode="url"`, no spell check or capitalisation, no `datalist`, and a
 Fetch button; a note under it says it takes a DAT, a zipped DAT pack, a
 .torrent file or a magnet link, fetched once and not remembered. The box
 empties once the server takes the link and keeps it when the server refuses
-it, so it can be corrected; the link is never written to storage, and a
-reload shows the box empty (PRINCIPLES.md section 2). Whatever screen it is
-on, the file goes where its content says. A magnet is received like the
-magnet box's. An http(s) link says "Fetching the file. Its progress is under
-Background work." and appears there and on Activity as "URL fetch: sent at
-14:02:31", the time it was sent, with "(1)", "(2)" by job when several were
-sent in the same second, and never any part of the URL; then "URL fetch:
-<file>" once the first bytes name it, with a bar of the bytes received
-("Receiving · 40% · 1.0 MiB of 2.3 MiB", or a moving band and "1.0 MiB
-received" without a length), then "Checking the file" and "Writing to the
-card", and a Cancel button, which says "Cancelling…" and is disabled until
-the fetch ends. When it lands the toast is an upload's ("DAT received:
-a.dat. Importing now.") and the file is followed as an upload; when it
-fails the toast is "The fetch failed: <reason>", or "The fetch was
-cancelled.".
+it, so it can be corrected; the link is never written to storage, and a reload
+shows the box empty (PRINCIPLES.md section 2). Whatever screen it is on, the
+file goes where its content says. The magnet box is the same field labelled
+"Or a magnet link", with an Add button ("Adding…" while sent) and no note; a
+magnet is received as an upload. An http(s) link says "Fetching the file. Its
+progress is under Background work." and appears there and on Activity as "URL
+fetch: sent at 14:02:31", the time it was sent, with "(1)", "(2)" by job when
+several were sent in the same second, and never any part of the URL; then "URL
+fetch: <file>" once the first bytes name it, with a bar of the bytes received
+("Receiving · 40% · 1.0 MB of 2.4 MB", or a moving band and "1.0 MB received"
+without a length), then "Checking the file" and "Writing to the card", and a
+Cancel button, which says "Cancelling…" and is disabled until the fetch ends.
+When it lands the toast is an upload's ("DAT received: a.dat. Importing now.")
+and the file is followed as an upload; when it fails the toast is "The fetch
+failed: <reason>", or "The fetch was cancelled.".
 
 A fetched DAT is not placed as the server sent it: the file that lands in
 `dats/` is mistarr's rewrite of the DAT's entries, the header fields and the
@@ -185,8 +185,8 @@ fetched one came from a server, and mistarr places only what it rewrote, so
 a member it could not rewrite has no place to go.
 
 **Source** (`/sources/{id}`). A link back to Sources, then the name; size,
-file count, the infohash shortened with Copy (over plain http, where the
-browser has no clipboard, Copy shows the whole infohash to copy by hand),
+file count, the infohash shortened with Copy (Copy copies the infohash, and
+when the browser refuses it shows the whole infohash to copy by hand),
 added date, dropped file, and whether the client has it, with a paused pill
 ("Client paused while NES is running", or "Client uploads paused while…")
 while a `client_hold` applies, and a bar of the
@@ -480,3 +480,9 @@ disconnected and reconnects with backoff.
 Follow PRINCIPLES.md section 5. Buttons say "Want", "Scan", "Bind",
 "Rename", "Play", "Start core". The empty state on Sources says: "No sources yet. Place a .torrent
 or .magnet file in `<path>` or drop one here." and nothing more.
+
+Byte counts everywhere in the web UI come from one formatter in decimal
+units: "B", "kB", "MB", "GB", "TB", with one decimal below 10 and none above
+("812 kB", "1.4 GB", "214 MB"), and "unknown" when the size is not known. The
+diagnostics text is the exception: it prints binary "MiB" as `mistarr doctor`
+does.

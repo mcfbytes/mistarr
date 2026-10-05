@@ -1,6 +1,6 @@
 <script lang="ts">
   import './app.css';
-  import { getRoute, navigate } from './lib/router.svelte';
+  import { getRoute, navigate, pageUrl } from './lib/router.svelte';
   import { getWizard, isConnected, isUnauthorized, loadStatus, loadWizard, setUnauthorized } from './lib/stores/status.svelte';
   import { startEvents } from './lib/stores/events';
   import { ApiError, setApiKey } from './lib/api';
@@ -40,7 +40,7 @@
     void loadStatus().catch(() => undefined);
     const wizard = getWizard();
     if (wizard && wizard.open_on_start && getRoute().name !== 'wizard') {
-      navigate('/wizard');
+      navigate(pageUrl('wizard'));
     }
   }
 
@@ -87,9 +87,13 @@
   {:else if route.name === 'platforms'}
     <Platforms />
   {:else if route.name === 'browse'}
-    <Browse platformId={route.params.id ?? ''} />
+    {#key route.params.id}
+      <Browse platformId={route.params.id ?? ''} />
+    {/key}
   {:else if route.name === 'title'}
-    <TitleScreen titleId={Number(route.params.id ?? 0)} />
+    {#key route.params.id}
+      <TitleScreen titleId={Number(route.params.id ?? 0)} />
+    {/key}
   {:else if route.name === 'activity'}
     <Activity />
   {:else if route.name === 'sources'}

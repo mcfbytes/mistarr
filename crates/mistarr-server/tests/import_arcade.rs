@@ -220,7 +220,8 @@ async fn settled(b: &Booted, id: DownloadId, want: DownloadState) -> downloads::
             .app
             .db
             .read_blocking(move |c| {
-                mistarr_server::db::jobs::find_open(c, JobKind::Import, &payload)
+                let open = &mistarr_server::db::jobs::JobState::ACTIVE;
+                mistarr_server::db::jobs::find_in(c, JobKind::Import, &payload, open)
             })
             .expect("jobs")
     };

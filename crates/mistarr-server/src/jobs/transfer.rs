@@ -79,8 +79,8 @@ pub async fn publish_ids(app: &AppState, ids: Vec<DownloadId>) -> Result<()> {
 pub struct Transfer;
 
 /// Re-applies a source's selection after downloads left it, stopping the
-/// torrent when nothing of it is selected any more.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// torrent when nothing of it is selected any more. Its payload is the struct itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Deselect {
     /// The source.
     pub source_id: SourceId,
@@ -177,20 +177,9 @@ async fn start_source(
     }
     let expected = ids.len();
     // Moving checks each row is still queued, so a row cancelled meanwhile stays cancelled.
-    let moved = app
-        .db
-        .write(move |c| {
-            rows::move_all(
-                c,
-                &ids,
-                DownloadState::Transferring,
-                None,
-                crate::unix_now(),
-            )
-        })
-        .await?;
-    let n = moved.len();
-    publish_ids(app, moved).await?;
+    let n = move_downloads(app, &ids, DownloadState::Transferring, None)
+        .await?
+        .len();
     if n < expected {
         let job = Arc::new(Deselect { source_id: source });
         Scheduler::enqueue(app, job).await?;
@@ -203,28 +192,32 @@ async fn start_source(
 async fn unanswered(app: &AppState, ids: &[DownloadId], e: &ClientError) -> Result<(Flow, usize)> {
     if let ClientError::FileIndex { .. } = e {
         let text = format!("The download client does not list this file: {e}.");
-        fail(app, ids, &text).await?;
+        move_downloads(app, ids, DownloadState::Failed, Some(&text)).await?;
         return Ok((Flow::Next, 0));
     }
     tracing::warn!(error = %e, "the download client did not take the selection");
     Ok((Flow::Stop, 0))
 }
 
-async fn fail(app: &AppState, ids: &[DownloadId], error: &str) -> Result<()> {
-    let (ids, error) = (ids.to_vec(), error.to_owned());
+/// Moves those of `ids` that may go to `to`, storing `reason` as their error when
+/// given, publishes `download.changed` for each that moved and returns them.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] when the rows cannot be written or read back.
+pub async fn move_downloads(
+    app: &AppState,
+    ids: &[DownloadId],
+    to: DownloadState,
+    reason: Option<&str>,
+) -> Result<Vec<DownloadId>> {
+    let (ids, reason) = (ids.to_vec(), reason.map(str::to_owned));
     let moved = app
         .db
-        .write(move |c| {
-            rows::move_all(
-                c,
-                &ids,
-                DownloadState::Failed,
-                Some(&error),
-                crate::unix_now(),
-            )
-        })
+        .write(move |c| rows::move_all(c, &ids, to, reason.as_deref(), crate::unix_now()))
         .await?;
-    publish_ids(app, moved).await
+    publish_ids(app, moved.clone()).await?;
+    Ok(moved)
 }
 
 /// Adds the source's torrent paused into `staging/<infohash>/`, which the
@@ -243,7 +236,7 @@ async fn add(
         } else {
             MISSING_TORRENT
         };
-        fail(app, ids, why).await?;
+        move_downloads(app, ids, DownloadState::Failed, Some(why)).await?;
         return Ok(Err(Flow::Next));
     };
     let local = app.config().paths.staging().join(&row.infohash);
@@ -290,7 +283,7 @@ impl Job for Deselect {
     }
 
     fn payload(&self) -> Value {
-        json!({ "source_id": self.source_id })
+        super::to_payload(self)
     }
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
@@ -315,14 +308,14 @@ pub async fn deselect(app: &AppState, source: SourceId) -> Result<bool> {
         return Ok(true);
     };
     let Some(client) = app.client.get() else {
-        crate::jobs::core_limits::defer(app, Op::Deselect(source)).await;
+        crate::jobs::watch::core_limits::defer(app, Op::Deselect(source)).await;
         return Ok(false);
     };
     if wanted.is_empty() {
         match client.stop(&id).await {
             Ok(()) | Err(ClientError::NotFound) => {}
             Err(e) => {
-                crate::jobs::core_limits::defer(app, Op::Deselect(source)).await;
+                crate::jobs::watch::core_limits::defer(app, Op::Deselect(source)).await;
                 return Err(e.into());
             }
         }
@@ -330,7 +323,7 @@ pub async fn deselect(app: &AppState, source: SourceId) -> Result<bool> {
     match client.set_wanted(&id, &wanted).await {
         Ok(()) | Err(ClientError::NotFound | ClientError::MetadataPending) => Ok(true),
         Err(e) => {
-            crate::jobs::core_limits::defer(app, Op::Deselect(source)).await;
+            crate::jobs::watch::core_limits::defer(app, Op::Deselect(source)).await;
             Err(e.into())
         }
     }
@@ -349,16 +342,7 @@ pub async fn after_cancel(app: &Arc<AppState>, cancelled: &[Cancelled]) {
         .filter_map(|c| c.source_id)
         .collect();
     for source_id in started {
-        if let Err(e) = Scheduler::enqueue(app, Arc::new(Deselect { source_id })).await {
-            tracing::warn!(error = %e, "cannot queue a deselect");
-        }
-    }
-}
-
-/// Queues a [`Transfer`], logging when the scheduler has stopped.
-pub async fn kick(app: &Arc<AppState>) {
-    if let Err(e) = Scheduler::enqueue(app, Arc::new(Transfer)).await {
-        tracing::warn!(error = %e, "cannot queue a transfer");
+        Scheduler::submit(app, Arc::new(Deselect { source_id })).await;
     }
 }
 
@@ -368,9 +352,13 @@ pub async fn watch(app: Arc<AppState>) {
     let mut live = app.events.subscribe(None).live;
     loop {
         match live.recv().await {
-            Ok(ev) if ev.kind == EventKind::SourceChanged => kick(&app).await,
+            Ok(ev) if ev.kind == EventKind::SourceChanged => {
+                Scheduler::submit(&app, Arc::new(Transfer)).await;
+            }
             Ok(_) => {}
-            Err(RecvError::Lagged(_)) => kick(&app).await,
+            Err(RecvError::Lagged(_)) => {
+                Scheduler::submit(&app, Arc::new(Transfer)).await;
+            }
             Err(RecvError::Closed) => return,
         }
     }
@@ -588,6 +576,34 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         assert_eq!(mock.calls(), ["add:[0]", "start", "stop", "set_wanted:[]"]);
+    }
+
+    #[tokio::test]
+    async fn move_downloads_moves_and_announces_only_those_that_may_move() {
+        let (_dir, app) = state();
+        let (_, open) = seed(&app, 1);
+        let (_, done) = seed(&app, 2);
+        app.db
+            .write(move |c| rows::cancel(c, done, 1))
+            .await
+            .expect("cancel");
+        let mut sub = app.events.subscribe(None);
+        let moved = move_downloads(&app, &[open, done], DownloadState::Failed, Some("Gone."))
+            .await
+            .expect("move");
+        assert_eq!(moved, [open]);
+        let row = app.db.read(move |c| rows::get(c, open)).await.expect("get");
+        assert_eq!(row.and_then(|r| r.error).as_deref(), Some("Gone."));
+        assert_eq!(state_of(&app, done).await, DownloadState::Cancelled);
+        let mut changed = Vec::new();
+        while let Ok(e) = sub.live.try_recv() {
+            if e.kind == EventKind::DownloadChanged {
+                changed.push(serde_json::from_str::<Value>(&e.data).expect("json"));
+            }
+        }
+        assert_eq!(changed.len(), 1, "{changed:?}");
+        assert_eq!(changed[0]["download_id"], open.0);
+        assert_eq!(changed[0]["state"], "failed");
     }
 
     #[tokio::test]

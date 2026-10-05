@@ -2,7 +2,6 @@
 //! again when those roms change; see `docs/VERIFICATION.md` "Pre-download matching".
 
 use std::collections::HashMap;
-use std::sync::Arc;
 
 use async_trait::async_trait;
 use mistarr_core::PlatformId;
@@ -288,7 +287,8 @@ fn still_on(conn: &Connection, id: SourceId, platform: &PlatformId) -> Result<bo
 
 /// Maps again, one at a time, the sources bound to `platforms`, or to any
 /// platform when `None`, whose platform's roms changed since they were mapped.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Its payload is the struct itself.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RemapSources {
     /// The platforms whose roms changed; `None` for all.
     pub platforms: Option<Vec<PlatformId>>,
@@ -301,7 +301,7 @@ impl Job for RemapSources {
     }
 
     fn payload(&self) -> Value {
-        json!({ "platforms": self.platforms.as_ref().map(|p| p.iter().map(|x| x.0.clone()).collect::<Vec<_>>()) })
+        super::to_payload(self)
     }
 
     fn lane(&self) -> Lane {
@@ -321,16 +321,20 @@ impl Job for RemapSources {
                 stale(c, &ids)
             })
             .await?;
+        let (reporter, total) = (ctx.reporter(), ids.len());
         let mut changed = 0;
         for (done, id) in ids.iter().enumerate() {
+            reporter.report(
+                "mapping",
+                || json!({ "phase": "mapping", "done": done, "total": total, "changed": changed }),
+            );
             ctx.checkpoint().await?;
             if remap_one(&ctx.app, *id).await? {
                 changed += 1;
             }
-            ctx.progress(json!({ "done": done + 1, "total": ids.len(), "changed": changed }))
-                .await?;
         }
-        Ok(())
+        ctx.progress(json!({ "done": total, "total": total, "changed": changed }))
+            .await
     }
 }
 
@@ -358,32 +362,18 @@ pub fn stale(conn: &Connection, ids: &[SourceId]) -> Result<Vec<SourceId>> {
     Ok(out)
 }
 
-/// Queues a [`RemapSources`] for `platforms`, or for every platform when
-/// `None`, logging instead of failing when the scheduler has stopped.
-pub async fn enqueue(app: &Arc<AppState>, platforms: Option<Vec<PlatformId>>) {
-    let job = RemapSources { platforms };
-    if let Err(e) = super::Scheduler::enqueue(app, Arc::new(job)).await {
-        tracing::warn!(error = %e, "cannot queue a re-map of the bound sources");
-    }
-}
-
 impl RemapSources {
-    /// The job a stored payload describes.
+    /// The job a stored payload describes, `None` when it does not read as one.
     ///
     /// ```
     /// use mistarr_server::jobs::remap::RemapSources;
     /// let job = RemapSources::from_payload(&serde_json::json!({ "platforms": ["nes"] }));
-    /// assert_eq!(job.platforms.map(|p| p.len()), Some(1));
+    /// assert_eq!(job.and_then(|j| j.platforms).map(|p| p.len()), Some(1));
+    /// assert!(RemapSources::from_payload(&serde_json::json!({ "platforms": 3 })).is_none());
     /// ```
     #[must_use]
-    pub fn from_payload(payload: &Value) -> Self {
-        let platforms = payload.get("platforms").and_then(Value::as_array).map(|a| {
-            a.iter()
-                .filter_map(Value::as_str)
-                .map(|p| PlatformId(p.to_owned()))
-                .collect()
-        });
-        Self { platforms }
+    pub fn from_payload(payload: &Value) -> Option<Self> {
+        serde_json::from_value(payload.clone()).ok()
     }
 }
 
@@ -486,7 +476,8 @@ mod tests {
             .await
             .expect("stale");
         assert_eq!(found, [a, b]);
-        enqueue(&app, None).await;
+        let all = RemapSources { platforms: None };
+        Scheduler::submit(&app, Arc::new(all)).await;
         let queued = app
             .db
             .read(|c| crate::db::jobs::count_kind(c, JobKind::RemapSources))
@@ -524,7 +515,10 @@ mod tests {
         let job = RemapSources {
             platforms: Some(vec![nes.clone()]),
         };
-        assert_eq!(RemapSources::from_payload(&job.payload()), job);
+        assert_eq!(
+            RemapSources::from_payload(&job.payload()),
+            Some(job.clone())
+        );
         Scheduler::run_inline(&app, Arc::new(job))
             .await
             .expect("run");

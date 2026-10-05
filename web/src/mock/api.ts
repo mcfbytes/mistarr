@@ -30,7 +30,7 @@ import {
   scenarioStatus,
   scenarioWizard
 } from './fixtures';
-import { cancelFetch, runJob, startFetch, startProgress } from './jobs';
+import { cancelFetch, openJob, runJob, startFetch, startProgress } from './jobs';
 import { mockKnob, recordKnob } from './knobs';
 import { mock, nextJobId, notFound, nowSecs, paged, reply, wire, type Watched } from './state';
 
@@ -204,9 +204,17 @@ function updateSource(id: number, patch: SourcePatch): SourceUpdated {
 export const mockApi: Api = {
   status: () => reply(status),
   wizard: () => reply(wizard),
-  scan: () =>
+  scan: (platformId) =>
     reply(() => {
       const id = mockKnob<number>('scanJobId', -1);
+      const dirs = mockKnob<number>('scanDirs', 0);
+      if (id >= 0 && dirs > 0 && platformId) {
+        // A scan left running at its first directory, so its card shows live progress.
+        const now = nowSecs();
+        const progress = { platform_id: platformId, dir: `${platformId}/Example`, done: 1, total: dirs };
+        const payload = { platform_id: platformId };
+        openJob({ id, kind: 'scan', lane: 'heavy', payload, state: 'running', progress, reason: null, created_at: now, updated_at: now });
+      }
       return { job_id: id >= 0 ? id : null };
     }, 400),
   cores: () => reply(() => fixtureCores),
@@ -325,7 +333,6 @@ export const mockApi: Api = {
 
   sources: (limit, offset) => reply(() => paged(mock().sources, limit, offset)),
   uploadSource: (file) => reply(() => receive('sources', file.name), 900),
-  addMagnet: () => reply(() => receive('sources', 'Example magnet.magnet'), 900),
   fetchUrl: (url) =>
     reply(() => {
       if (/^magnet:/i.test(url)) {

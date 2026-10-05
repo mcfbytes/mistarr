@@ -20,8 +20,8 @@ use crate::db::ids::DatVersionId;
 use crate::db::sql::Paged;
 use crate::incoming::place::{part_path, place_moved, place_part, PlaceError};
 use crate::incoming::IncomingFile;
-use crate::jobs::dat_import::{DatImport, Recompute};
-use crate::jobs::{JobKind, Scheduler};
+use crate::jobs::dat_import::DatImport;
+use crate::jobs::JobKind;
 
 /// Largest accepted upload, [`crate::jobs::dat_import::MAX_DAT_BYTES`].
 #[expect(
@@ -206,8 +206,8 @@ fn remove_if_present(path: &FsPath) -> Result<(), ApiError> {
     }
 }
 
-/// `DELETE /dats/{id}`: retires a loaded version with its titles and roms, unwants them and
-/// queues the recompute job, which matches their files again and recomputes 1G1R.
+/// `DELETE /dats/{id}`: retires a loaded version with its titles and roms and unwants them.
+/// A detached task then queues the recompute and scan and binds the waiting sources.
 async fn retire(
     State(app): State<Arc<AppState>>,
     ApiPath(id): ApiPath<DatVersionId>,
@@ -221,8 +221,10 @@ async fn retire(
         .await?
         .ok_or_else(|| ApiError::no_such("DAT version"))?;
     if let Some(p) = row.platform_id {
-        Scheduler::enqueue(&app, Arc::new(Recompute::new(&p.0))).await?;
-        crate::jobs::remap::enqueue(&app, Some(vec![p])).await;
+        // The rebind re-scores every unbound source, so it stays off the request.
+        tokio::spawn(
+            async move { crate::jobs::follow_up::catalogue_changed(&app, &[p], false).await },
+        );
     }
     Ok(StatusCode::NO_CONTENT)
 }
@@ -276,6 +278,60 @@ mod tests {
         .expect("symlink");
         let e = rejected_file(dir.path(), "l.dat").expect_err("a link is not a rejected file");
         assert_eq!(e.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn retiring_a_version_queues_its_recompute_and_scan() {
+        use crate::db::jobs::{find_in, JobState};
+        use crate::jobs::{dat_import::Recompute, scan::ScanJob, Job as _};
+        use mistarr_core::PlatformId;
+
+        let (_dir, app) = crate::app::testutil::state();
+        std::fs::create_dir_all(app.config().paths.games.join("NES")).expect("games");
+        let id = app
+            .db
+            .write_tx(|tx| {
+                let v = dats::NewVersion {
+                    dat_name: "Example Console",
+                    version: "1",
+                    source_file: "a.dat",
+                    platform: Some("nes"),
+                    now: 1,
+                };
+                Ok(dats::upsert_version(tx, &v)?.id)
+            })
+            .await
+            .expect("version");
+        let status = retire(State(Arc::clone(&app)), ApiPath(id))
+            .await
+            .expect("retire");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+        let recompute = Recompute::new("nes").payload();
+        let scan = ScanJob {
+            platform_id: Some(PlatformId("nes".into())),
+        }
+        .payload();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let (r, s) = (recompute.clone(), scan.clone());
+            let found = app
+                .db
+                .read(move |c| {
+                    let any = [&JobState::ACTIVE[..], &JobState::FINISHED].concat();
+                    Ok(find_in(c, JobKind::Recompute, &r, &any)?.is_some()
+                        && find_in(c, JobKind::Scan, &s, &any)?.is_some())
+                })
+                .await
+                .expect("jobs");
+            if found {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no recompute and scan"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 
     #[test]

@@ -19,7 +19,7 @@ use crate::db::titles::browse::{Browse, GroupRow, Sort, Tri};
 use crate::db::titles::detail::{GroupDetail, RomsetState, WantRefused};
 use crate::db::{downloads, platforms};
 use crate::jobs::import::{self, RenameError};
-use crate::jobs::transfer;
+use crate::jobs::{transfer, Scheduler};
 
 /// The libretro thumbnail server, the one external URL family the app names.
 const THUMBNAILS: &str = "https://thumbnails.libretro.com";
@@ -301,7 +301,7 @@ async fn want(
             for (id, state) in created {
                 transfer::publish(&app, id, state, 0.0);
             }
-            transfer::kick(&app).await;
+            Scheduler::submit(&app, Arc::new(transfer::Transfer)).await;
         }
         Err(WantRefused::Missing) => return Err(ApiError::no_such("title")),
         Err(WantRefused::Retired) => {

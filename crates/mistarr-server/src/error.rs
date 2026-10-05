@@ -75,6 +75,9 @@ pub enum Error {
     /// The server is shutting down; the job stopped at a checkpoint.
     #[error("cancelled by shutdown")]
     Cancelled,
+    /// The user cancelled the job; see [`crate::jobs::Scheduler::cancel`].
+    #[error("Cancelled.")]
+    CancelledByUser,
     /// A pause held the job's lane while it held the writer; it let go to wait.
     #[error("stopped for a pause")]
     Paused,

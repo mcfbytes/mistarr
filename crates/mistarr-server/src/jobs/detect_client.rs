@@ -10,7 +10,8 @@ use mistarr_clients::launch::Launcher;
 use mistarr_clients::{ClientKind, DownloadClient, Transmission};
 use serde::{Deserialize, Serialize};
 
-use super::{wizard, Job, JobContext, JobKind};
+use super::watch::wizard;
+use super::{Job, JobContext, JobKind};
 use crate::app::AppState;
 use crate::config::ClientConfig;
 use crate::db::settings::{self, keys};
@@ -117,7 +118,7 @@ pub async fn detect_and_store(app: &Arc<AppState>, announce: bool) -> Result<Cli
     let _one = app.client.detect_lock.lock().await;
     if app.client.frozen() {
         // A stopped client never answers; keep the last result and detect again at resume.
-        crate::jobs::core_limits::defer(app, crate::db::deferred::Op::Detect).await;
+        crate::jobs::watch::core_limits::defer(app, crate::db::deferred::Op::Detect).await;
         let stored = app
             .db
             .read(|c| settings::get_json::<ClientStatus>(c, keys::CLIENT_DETECTED))
@@ -175,12 +176,10 @@ pub async fn detect_and_store(app: &Arc<AppState>, announce: bool) -> Result<Cli
 /// client answers, and whenever [`AppState::redetect`] is notified, so a
 /// client started after mistarr is picked up without the wizard.
 pub async fn watch(app: Arc<AppState>) {
-    let mut stop = app.shutdown_signal();
     loop {
         let woken = tokio::select! {
             () = tokio::time::sleep(app.options.redetect_poll) => false,
             () = app.redetect.notified() => true,
-            _ = stop.wait_for(|s| *s) => return,
         };
         let usable = app
             .db

@@ -40,7 +40,6 @@ use crate::db::downloads::{self, DownloadRow, DownloadState, Elsewhere, Settled}
 use crate::db::files::{self, FileRow, FileState, NewFile};
 use crate::db::ids::{DownloadId, FileId, RomId, SourceId};
 use crate::db::imports::{self, ImportAction, TitleEntry};
-use crate::db::jobs as job_rows;
 use crate::db::roms::{self, EntryRom};
 use crate::db::sources::{self, SourceRow};
 use crate::db::sql::Page;
@@ -55,15 +54,11 @@ const BIOS_REFUSED: &str = "BIOS entries are never imported";
 const OUTSIDE_STAGING: &str = "the staged file is outside the staging directory";
 
 /// Imports one download in `importing`; a disc entry's tracks are imported together.
+/// Its payload is the struct itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImportJob {
     /// The download to import.
     pub download_id: DownloadId,
-}
-
-impl ImportJob {
-    fn payload_of(id: DownloadId) -> Value {
-        json!({ "download_id": id.0 })
-    }
 }
 
 #[async_trait]
@@ -73,7 +68,7 @@ impl Job for ImportJob {
     }
 
     fn payload(&self) -> Value {
-        Self::payload_of(self.download_id)
+        super::to_payload(self)
     }
 
     fn lane(&self) -> Lane {
@@ -92,13 +87,8 @@ impl Job for ImportJob {
 pub async fn watch(app: Arc<AppState>) {
     let mut live = app.events.subscribe(None).live;
     sweep(&app).await;
-    let mut stop = app.shutdown_signal();
     loop {
-        let next = tokio::select! {
-            r = live.recv() => r,
-            _ = stop.wait_for(|s| *s) => return,
-        };
-        match next {
+        match live.recv().await {
             Ok(ev) if ev.kind == EventKind::DownloadChanged => {
                 let body: Value = serde_json::from_str(&ev.data).unwrap_or(Value::Null);
                 let Some(id) = body["download_id"].as_i64().map(DownloadId) else {
@@ -117,22 +107,10 @@ pub async fn watch(app: Arc<AppState>) {
     }
 }
 
-/// Enqueues an import per download unless one is queued or running for it.
+/// Enqueues an import per download; one already open for it absorbs the request.
 async fn enqueue(app: &Arc<AppState>, ids: Vec<DownloadId>) {
     for download_id in ids {
-        let payload = ImportJob::payload_of(download_id);
-        let open = app
-            .db
-            .read(move |c| job_rows::find_open(c, JobKind::Import, &payload))
-            .await;
-        match open {
-            Ok(Some(_)) => continue,
-            Ok(None) => {}
-            Err(e) => tracing::warn!(error = %e, "cannot read import jobs"),
-        }
-        if let Err(e) = Scheduler::enqueue(app, Arc::new(ImportJob { download_id })).await {
-            tracing::warn!(download = %download_id, error = %e, "cannot enqueue import");
-        }
+        Scheduler::submit(app, Arc::new(ImportJob { download_id })).await;
     }
 }
 
@@ -181,26 +159,18 @@ async fn waiting_siblings(app: &Arc<AppState>, id: DownloadId) {
     }
 }
 
-/// Moves downloads out of `importing` and publishes each change.
-async fn finish(
-    app: &AppState,
-    ids: &[DownloadId],
-    to: DownloadState,
-    reason: Option<&str>,
-) -> Result<()> {
-    let (list, error) = (ids.to_vec(), reason.map(str::to_owned));
-    let moved = app
-        .db
-        .write(move |c| downloads::move_all(c, &list, to, error.as_deref(), crate::unix_now()))
-        .await?;
-    for id in moved {
-        transfer::publish(app, id, to, 1.0);
-    }
-    Ok(())
+/// Moves downloads out of `importing` as done.
+async fn finish(app: &AppState, ids: &[DownloadId]) -> Result<()> {
+    transfer::move_downloads(app, ids, DownloadState::Done, None)
+        .await
+        .map(drop)
 }
 
+/// Moves downloads out of `importing` as failed for `reason`.
 async fn fail(app: &AppState, ids: &[DownloadId], reason: &str) -> Result<()> {
-    finish(app, ids, DownloadState::Failed, Some(reason)).await
+    transfer::move_downloads(app, ids, DownloadState::Failed, Some(reason))
+        .await
+        .map(drop)
 }
 
 async fn import(ctx: &JobContext, id: DownloadId) -> Result<()> {
@@ -390,7 +360,7 @@ async fn after_settle(app: &Arc<AppState>, settled: Settled) {
     if let Some((id, state)) = settled.again {
         transfer::publish(app, id, state, 0.0);
         if state == DownloadState::Queued {
-            transfer::kick(app).await;
+            Scheduler::submit(app, Arc::new(transfer::Transfer)).await;
         }
     }
 }
@@ -572,7 +542,7 @@ impl Placing<'_> {
             Err(reason) => return fail(app, &[row.id], reason).await,
         };
         if self.already_placed(&local, row.rom_id).await? {
-            return finish(app, &[row.id], DownloadState::Done, None).await;
+            return finish(app, &[row.id]).await;
         }
         if !exists(&local).await? {
             if let Some(other) = self.placed_as_other(row).await? {
@@ -803,7 +773,7 @@ impl Placing<'_> {
             Err(reason) => return fail(app, &ids, reason).await,
         };
         if self.already_placed(&local, row.rom_id).await? {
-            return finish(app, &ids, DownloadState::Done, None).await;
+            return finish(app, &ids).await;
         }
         if !is_zip(&local) {
             return fail(app, &ids, "a romset is imported from a zip").await;
@@ -943,7 +913,7 @@ impl Placing<'_> {
             });
         }
         if pieces.is_empty() {
-            return finish(app, &ids, DownloadState::Done, None).await;
+            return finish(app, &ids).await;
         }
         let Some(staged_dir) = self.staged_dir(&pieces, &placed_before).await? else {
             return fail(app, &ids, "the tracks are in different staging directories").await;
@@ -1298,14 +1268,14 @@ pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) -> bool {
     }
     if let Some(client_id) = &source.client_id {
         let Some(client) = app.client.get() else {
-            crate::jobs::core_limits::defer(app, Op::Release(source_id)).await;
+            crate::jobs::watch::core_limits::defer(app, Op::Release(source_id)).await;
             return false;
         };
         match client.remove(client_id, false).await {
             Ok(()) | Err(ClientError::NotFound) => {}
             Err(e) => {
                 tracing::warn!(source = %source.id.0, error = %e, "cannot remove the finished torrent from the client");
-                crate::jobs::core_limits::defer(app, Op::Release(source_id)).await;
+                crate::jobs::watch::core_limits::defer(app, Op::Release(source_id)).await;
                 return false;
             }
         }

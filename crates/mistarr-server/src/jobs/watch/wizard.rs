@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use rusqlite::Connection;
 
-use super::scan::ScanJob;
-use super::Scheduler;
 use crate::app::AppState;
 use crate::db::ids::JobId;
 use crate::db::settings::{self, keys};
 use crate::error::Result;
+use crate::jobs::scan::ScanJob;
+use crate::jobs::Scheduler;
 use crate::status::wizard_status;
 
 /// Checks whether the wizard just became complete and, the first time it

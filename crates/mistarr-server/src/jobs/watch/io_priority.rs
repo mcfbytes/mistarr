@@ -42,7 +42,7 @@ impl IoClass {
     /// The class for a board with or without a core loaded.
     ///
     /// ```
-    /// use mistarr_server::jobs::io_priority::IoClass;
+    /// use mistarr_server::jobs::watch::io_priority::IoClass;
     /// assert_eq!(IoClass::for_core(true), IoClass::Idle);
     /// assert_eq!(IoClass::for_core(false), IoClass::Default);
     /// ```
@@ -58,7 +58,7 @@ impl IoClass {
     /// The `ionice -c` argument, which `BusyBox` and util-linux both accept.
     ///
     /// ```
-    /// assert_eq!(mistarr_server::jobs::io_priority::IoClass::Idle.arg(), "3");
+    /// assert_eq!(mistarr_server::jobs::watch::io_priority::IoClass::Idle.arg(), "3");
     /// ```
     #[must_use]
     pub fn arg(self) -> &'static str {
@@ -104,7 +104,7 @@ impl Ionice {
     /// Uses `program`, looked up on `PATH` when it has no directory part.
     ///
     /// ```
-    /// let _ = mistarr_server::jobs::io_priority::Ionice::new(std::path::Path::new("ionice"));
+    /// let _ = mistarr_server::jobs::watch::io_priority::Ionice::new(std::path::Path::new("ionice"));
     /// ```
     #[must_use]
     pub fn new(program: &Path) -> Self {
@@ -156,8 +156,8 @@ impl SetClass for Ionice {
 /// [`PriorityError::Threads`] when the directory cannot be read.
 ///
 /// ```
-/// let dir = std::path::Path::new(mistarr_server::jobs::io_priority::TASK_DIR);
-/// let tids = mistarr_server::jobs::io_priority::thread_ids(dir).unwrap();
+/// let dir = std::path::Path::new(mistarr_server::jobs::watch::io_priority::TASK_DIR);
+/// let tids = mistarr_server::jobs::watch::io_priority::thread_ids(dir).unwrap();
 /// assert!(tids.contains(&std::process::id()));
 /// ```
 pub fn thread_ids(task_dir: &Path) -> Result<Vec<u32>, PriorityError> {
@@ -215,7 +215,7 @@ pub fn apply(
 /// The calling thread's id, read from `/proc/thread-self`; `None` without `/proc`.
 ///
 /// ```
-/// let tid = mistarr_server::jobs::io_priority::current_tid();
+/// let tid = mistarr_server::jobs::watch::io_priority::current_tid();
 /// assert!(tid.is_none() || tid.is_some_and(|t| t > 0));
 /// ```
 #[must_use]
@@ -238,7 +238,7 @@ impl IoPriority {
     /// Starts at [`IoClass::Default`], the class the launcher leaves the daemon in.
     ///
     /// ```
-    /// use mistarr_server::jobs::io_priority::{IoPriority, Ionice, TASK_DIR};
+    /// use mistarr_server::jobs::watch::io_priority::{IoPriority, Ionice, TASK_DIR};
     /// let ionice = std::sync::Arc::new(Ionice::new(std::path::Path::new("ionice")));
     /// let _ = IoPriority::new(ionice, std::path::Path::new(TASK_DIR));
     /// ```
@@ -256,7 +256,7 @@ impl IoPriority {
     /// and threads may be in either class. Blocks while a switch or launch runs.
     ///
     /// ```
-    /// use mistarr_server::jobs::io_priority::{IoClass, IoPriority, Ionice, TASK_DIR};
+    /// use mistarr_server::jobs::watch::io_priority::{IoClass, IoPriority, Ionice, TASK_DIR};
     /// let ionice = std::sync::Arc::new(Ionice::new(std::path::Path::new("ionice")));
     /// let priority = IoPriority::new(ionice, std::path::Path::new(TASK_DIR));
     /// assert_eq!(priority.class(), Some(IoClass::Default));
@@ -320,9 +320,11 @@ impl IoPriority {
 /// restore; returns when the gate is dropped or `ionice` is absent.
 pub async fn follow(gate: Arc<Gate>, priority: Arc<IoPriority>, retry: Duration) {
     let mut rx = gate.subscribe();
-    let mut delay = retry;
+    let max = MAX_RETRY.max(retry);
+    let mut failures = 0;
     let mut logged = None;
     loop {
+        let delay = super::doubling(retry, failures, max);
         let want = IoClass::for_core(rx.borrow_and_update().core_running());
         let switcher = Arc::clone(&priority);
         let attempt = crate::threads::run(crate::threads::label::IO_CLASS, move || {
@@ -352,7 +354,7 @@ pub async fn follow(gate: Arc<Gate>, priority: Arc<IoPriority>, retry: Duration)
             }
         };
         if !failed {
-            delay = retry;
+            failures = 0;
             logged = None;
         }
         tokio::select! {
@@ -360,13 +362,11 @@ pub async fn follow(gate: Arc<Gate>, priority: Arc<IoPriority>, retry: Duration)
                 if changed.is_err() {
                     return;
                 }
-                delay = retry;
+                failures = 0;
                 logged = None;
             }
             () = priority.stale.notified() => {}
-            () = tokio::time::sleep(delay), if failed => {
-                delay = delay.saturating_mul(2).min(MAX_RETRY.max(retry));
-            }
+            () = tokio::time::sleep(delay), if failed => failures += 1,
         }
     }
 }

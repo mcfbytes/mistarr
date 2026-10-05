@@ -15,8 +15,8 @@ use crate::db::fixtures::{download, pid, seed_rom};
 use crate::events::EventKind;
 use crate::freeze::fake::FakeClient;
 use crate::freeze::Signal;
-use crate::jobs::gate::MENU;
 use crate::jobs::transfer::Deselect;
+use crate::jobs::watch::gate::MENU;
 use crate::jobs::Scheduler;
 use serde_json::json;
 
@@ -459,9 +459,20 @@ async fn an_unreachable_client_is_retried_until_it_answers() {
 #[test]
 fn the_retry_wait_doubles_up_to_a_minute() {
     let base = Duration::from_secs(2);
-    assert_eq!(backoff(base, 1), base);
-    assert_eq!(backoff(base, 3), Duration::from_secs(8));
-    assert_eq!(backoff(base, 40), RETRY_MAX);
+    let mut streak = Streak::default();
+    let failed = Err(Failure {
+        what: "test",
+        error: "refused".into(),
+    });
+    let mut waits = Vec::new();
+    for _ in 0..40 {
+        let before = Instant::now();
+        let at = streak.record(&failed, base, "recovered").expect("a retry");
+        waits.push((at - before).as_secs());
+    }
+    assert_eq!(waits[..3], [2, 4, 8]);
+    assert_eq!(waits[39], RETRY_MAX.as_secs());
+    assert_eq!(streak.record(&Ok(()), base, "recovered"), None);
 }
 
 #[tokio::test]

@@ -8,7 +8,8 @@ use mistarr_core::hash::{hash_reader, HeaderRule};
 
 use crate::config::Config;
 use crate::db::groups;
-use crate::jobs::{corename, detect_client};
+use crate::jobs::detect_client;
+use crate::jobs::watch::corename;
 use crate::status::{free_bytes, mem_available_bytes};
 
 /// Default size of the hashing benchmark in MiB.

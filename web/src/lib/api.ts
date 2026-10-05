@@ -171,8 +171,6 @@ export const api = {
     form.append('file', file);
     return request('/sources/upload', { method: 'POST', body: form });
   },
-  addMagnet: (magnet: string): Promise<IncomingFile> =>
-    request('/sources/upload', { method: 'POST', body: JSON.stringify({ magnet }) }),
   fetchUrl: (url: string): Promise<FetchStarted> => request('/fetch', { method: 'POST', body: JSON.stringify({ url }) }),
   cancelFetch: (token: number): Promise<void> => request(`/fetch/${token}`, { method: 'DELETE' }),
   updateSource: (
