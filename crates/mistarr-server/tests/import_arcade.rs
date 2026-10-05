@@ -285,7 +285,7 @@ async fn rerun_catalogue(b: &Booted) {
         Some(r#"{"platform_id":"arcade"}"#),
     )
     .await;
-    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.status, 202, "{}", r.body);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

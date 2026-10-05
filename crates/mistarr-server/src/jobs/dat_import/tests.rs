@@ -91,18 +91,6 @@ fn rom_header_attributes_are_stored() {
 }
 
 #[test]
-fn prefs_map_known_hide_flags() {
-    let cfg = PrefsConfig {
-        hide: vec!["bios".into(), "unl".into()],
-        regions: vec!["Japan".into()],
-        ..PrefsConfig::default()
-    };
-    let p = prefs(&cfg);
-    assert_eq!(p.hide, [HiddenFlag::Bios]);
-    assert_eq!(p.regions, ["Japan"]);
-}
-
-#[test]
 fn bound_dats_load_titles_and_pick() {
     let c = conn();
     let xml = dat(

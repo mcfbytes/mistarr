@@ -162,7 +162,7 @@ async fn idle(app: &AppState) {
 async fn scan(b: &Booted, platform: &str) {
     let body = format!(r#"{{"platform_id":"{platform}"}}"#);
     let r = request(b.addr(), "POST", "/api/v1/system/scan", &[], Some(&body)).await;
-    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.status, 202, "{}", r.body);
     let id = JobId(r.json()["job_id"].as_i64().expect("job_id"));
     let app = &b.running.app;
     wait_for("the scan", || async move {
@@ -315,7 +315,8 @@ async fn the_setting_off_reads_only_the_header_and_turning_it_on_verifies_the_tr
         .is_some_and(|r| r > 0));
 
     let sink = Arc::new(mistarr_mister::launch::RecordingSink::new());
-    app.set_command_sink(Arc::clone(&sink) as Arc<dyn mistarr_mister::launch::CommandSink>);
+    app.launch
+        .set_sink(Arc::clone(&sink) as Arc<dyn mistarr_mister::launch::CommandSink>);
     write(&b.dir.path().join("_Console/PSX_20240101.rbf"), b"");
     let launch = request(
         b.addr(),
@@ -686,7 +687,7 @@ async fn a_recheck_while_decoding_is_paused_joins_the_run() {
     write(&games(&b).join("PSX/L/l.chd"), &bytes);
     let body = r#"{"platform_id":"psx"}"#;
     let r = request(b.addr(), "POST", "/api/v1/system/scan", &[], Some(body)).await;
-    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.status, 202, "{}", r.body);
     let id = decoding(app, "l.chd").await;
     // A running core holds the heavy lane only, so the recompute below goes ahead.
     std::fs::write(b.corename(), "SNES\n").expect("corename");
@@ -749,7 +750,7 @@ async fn the_job_hands_the_lane_to_a_scan_between_images() {
     put_setting(&b, true).await;
     let body = r#"{"platform_id":"psx"}"#;
     let r = request(b.addr(), "POST", "/api/v1/system/scan", &[], Some(body)).await;
-    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.status, 202, "{}", r.body);
     let scan_id = JobId(r.json()["job_id"].as_i64().expect("job_id"));
     app.gate.set_override(None);
     idle(app).await;

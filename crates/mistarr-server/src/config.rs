@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use mistarr_clients::{ClientKind, PathMapping};
+use mistarr_core::select::{HiddenFlag, Prefs};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -41,6 +42,10 @@ pub struct Config {
     /// a config key. [`Config::log_problems`] logs these once the caller can.
     #[serde(skip)]
     pub(crate) unknown_keys: Vec<String>,
+    /// The `[prefs] hide` names `load` dropped for not being a [`HiddenFlag`], kept
+    /// like `unknown_keys` until [`Config::log_problems`] logs them.
+    #[serde(skip)]
+    pub(crate) dropped_flags: Vec<String>,
 }
 
 /// `[scan]`: how the library scan identifies files.
@@ -322,18 +327,14 @@ impl Default for TransferConfig {
     }
 }
 
-/// `[prefs]`: 1G1R preferences, the flags hidden by default and whether games may be launched.
+/// `[prefs]`: the 1G1R preferences of core's [`Prefs`], whose `hide` flags are also the
+/// ones the catalog hides, and whether games may be launched.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PrefsConfig {
-    /// Region order, most preferred first.
-    pub regions: Vec<String>,
-    /// Language order, most preferred first.
-    pub languages: Vec<String>,
-    /// Prefer the highest revision within a region.
-    pub prefer_latest_revision: bool,
-    /// DAT flags hidden in the catalog.
-    pub hide: Vec<String>,
+    /// Regions, languages, revision order and the hidden flags.
+    #[serde(flatten)]
+    pub select: Prefs,
     /// Whether the API may start cores and games through MiSTer Main.
     pub launch: bool,
 }
@@ -345,41 +346,52 @@ impl PrefsConfig {
     /// use mistarr_server::config::PrefsConfig;
     /// let a = PrefsConfig::default();
     /// assert!(a.same_selection(&PrefsConfig { launch: false, ..a.clone() }));
-    /// assert!(!a.same_selection(&PrefsConfig { hide: vec![], ..a.clone() }));
+    /// let mut b = a.clone();
+    /// b.select.hide.clear();
+    /// assert!(!a.same_selection(&b));
     /// ```
     #[must_use]
     pub fn same_selection(&self, other: &Self) -> bool {
-        self.regions == other.regions
-            && self.languages == other.languages
-            && self.prefer_latest_revision == other.prefer_latest_revision
-            && self.hide == other.hide
+        self.select == other.select
+    }
+
+    /// The hidden flags by name, as the catalog filters on them.
+    ///
+    /// ```
+    /// let names = mistarr_server::config::PrefsConfig::default().hidden_names();
+    /// assert_eq!(names[0], "bios");
+    /// ```
+    #[must_use]
+    pub fn hidden_names(&self) -> Vec<String> {
+        let names = self.select.hide.iter().map(|f| f.as_flag_name());
+        names.map(str::to_owned).collect()
     }
 }
 
 impl Default for PrefsConfig {
     fn default() -> Self {
-        let owned = |xs: &[&str]| xs.iter().map(|s| (*s).to_owned()).collect();
         Self {
-            regions: owned(&["USA", "World", "Europe", "Japan"]),
-            languages: owned(&["En"]),
-            prefer_latest_revision: true,
-            hide: owned(&["bios", "beta", "proto", "demo", "sample", "program"]),
+            select: Prefs::default(),
             launch: true,
         }
     }
 }
 
-/// The part of the config the API may change at runtime; stored in `settings`
-/// and laid over the file on every start. Missing fields take their defaults.
+/// The part of the config the API may change at runtime, a section per field. Stored
+/// in `settings` with every section and laid over the file on every start; a
+/// `PUT /system/settings` body carries the sections it replaces.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(deny_unknown_fields)]
 pub struct RuntimeSettings {
     /// `[client]`.
-    pub client: ClientConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<ClientConfig>,
     /// `[limits]`.
-    pub limits: LimitsConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limits: Option<LimitsConfig>,
     /// `[prefs]`.
-    pub prefs: PrefsConfig,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prefs: Option<PrefsConfig>,
     /// `[scan]`; absent in settings saved before it existed, which then keep the file's.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scan: Option<ScanConfig>,
@@ -388,20 +400,23 @@ pub struct RuntimeSettings {
     pub transfer: Option<TransferConfig>,
 }
 
-/// A partial [`RuntimeSettings`], as accepted by `PUT /system/settings`.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct SettingsPatch {
-    /// Replaces `[client]` when present.
-    pub client: Option<ClientConfig>,
-    /// Replaces `[limits]` when present.
-    pub limits: Option<LimitsConfig>,
-    /// Replaces `[prefs]` when present.
-    pub prefs: Option<PrefsConfig>,
-    /// Replaces `[scan]` when present.
-    pub scan: Option<ScanConfig>,
-    /// Replaces `[transfer]` when present.
-    pub transfer: Option<TransferConfig>,
+impl RuntimeSettings {
+    /// Reads settings saved as JSON, logging each `prefs.hide` name it drops.
+    ///
+    /// # Errors
+    ///
+    /// The JSON error when `value` does not hold runtime settings.
+    ///
+    /// ```
+    /// use mistarr_server::config::RuntimeSettings;
+    /// let v = serde_json::json!({ "prefs": { "hide": ["demo", "unl"] } });
+    /// let saved = RuntimeSettings::from_saved(v).unwrap();
+    /// assert_eq!(saved.prefs.unwrap().hidden_names(), ["demo"]);
+    /// ```
+    pub fn from_saved(value: serde_json::Value) -> serde_json::Result<Self> {
+        warn_dropped_flags(&dropped_flags(&value), "saved settings");
+        serde_json::from_value(value)
+    }
 }
 
 impl Config {
@@ -418,8 +433,9 @@ impl Config {
     /// assert_eq!(c.limits.down_kbps_core, 512);
     /// ```
     pub fn parse(text: &str) -> Result<Self, toml::de::Error> {
-        let (config, unknown) = Self::parse_reporting(text)?;
+        let (mut config, unknown) = Self::parse_reporting(text)?;
         warn_unknown_keys(&unknown);
+        warn_dropped_flags(&std::mem::take(&mut config.dropped_flags), CONFIG_FILE);
         Ok(config)
     }
 
@@ -428,7 +444,13 @@ impl Config {
     fn parse_reporting(text: &str) -> Result<(Self, Vec<String>), toml::de::Error> {
         let de = toml::Deserializer::parse(text)?;
         let mut unknown = Vec::new();
-        let config = serde_ignored::deserialize(de, |path| unknown.push(path.to_string()))?;
+        let mut config: Self =
+            serde_ignored::deserialize(de, |path| unknown.push(path.to_string()))?;
+        let prefs = prefs_table(text);
+        unknown.extend(unknown_prefs_keys(prefs.keys()));
+        let hide = prefs.get("hide").and_then(toml::Value::as_array);
+        config.dropped_flags =
+            unknown_flags(hide.into_iter().flatten().filter_map(toml::Value::as_str));
         Ok((config, unknown))
     }
 
@@ -474,11 +496,12 @@ impl Config {
         Ok(config)
     }
 
-    /// Logs and clears the unknown keys, then logs each [`ConfigProblem`]
-    /// whose fields a runtime settings overlay cannot move. Needs a
-    /// `tracing` subscriber.
+    /// Logs and clears the unknown keys and dropped hidden flags, then logs each
+    /// [`ConfigProblem`] whose fields a runtime settings overlay cannot move. Needs
+    /// a `tracing` subscriber.
     pub(crate) fn log_problems(&mut self) {
         warn_unknown_keys(&std::mem::take(&mut self.unknown_keys));
+        warn_dropped_flags(&std::mem::take(&mut self.dropped_flags), CONFIG_FILE);
         for problem in self.validate() {
             if !problem.overlay_can_move() {
                 tracing::warn!("{}", problem.message());
@@ -510,55 +533,36 @@ impl Config {
         problems
     }
 
-    /// The runtime-editable subset.
+    /// The runtime-editable subset, every section present.
     ///
     /// ```
     /// let c = mistarr_server::config::Config::default();
-    /// assert_eq!(c.runtime().limits, c.limits);
+    /// assert_eq!(c.runtime().limits, Some(c.limits));
     /// ```
     #[must_use]
     pub fn runtime(&self) -> RuntimeSettings {
         RuntimeSettings {
-            client: self.client.clone(),
-            limits: self.limits,
-            prefs: self.prefs.clone(),
+            client: Some(self.client.clone()),
+            limits: Some(self.limits),
+            prefs: Some(self.prefs.clone()),
             scan: Some(self.scan),
             transfer: Some(self.transfer),
         }
     }
 
-    /// Lays saved runtime settings over this config; `[scan]` and `[transfer]` only
-    /// when they carry them.
+    /// Replaces each section `patch` carries and keeps the others, for saved settings
+    /// laid over the file and for a settings change alike.
     ///
     /// ```
-    /// use mistarr_server::config::{Config, RuntimeSettings, ScanConfig};
+    /// use mistarr_server::config::{Config, LimitsConfig, RuntimeSettings, ScanConfig};
     /// let mut c = Config::default();
     /// c.scan = ScanConfig { chd_tracks: true };
-    /// c.overlay(RuntimeSettings::default());
+    /// let limits = LimitsConfig { up_kbps_core: 1, ..LimitsConfig::default() };
+    /// c.apply(&RuntimeSettings { limits: Some(limits), ..RuntimeSettings::default() });
+    /// assert_eq!(c.limits.up_kbps_core, 1);
     /// assert!(c.scan.chd_tracks);
     /// ```
-    pub fn overlay(&mut self, runtime: RuntimeSettings) {
-        self.client = runtime.client;
-        self.limits = runtime.limits;
-        self.prefs = runtime.prefs;
-        if let Some(scan) = runtime.scan {
-            self.scan = scan;
-        }
-        if let Some(transfer) = runtime.transfer {
-            self.transfer = transfer;
-        }
-    }
-
-    /// Replaces each section the patch carries.
-    ///
-    /// ```
-    /// use mistarr_server::config::{Config, LimitsConfig, SettingsPatch};
-    /// let mut c = Config::default();
-    /// let limits = LimitsConfig { up_kbps_core: 1, ..LimitsConfig::default() };
-    /// c.apply(&SettingsPatch { limits: Some(limits), ..SettingsPatch::default() });
-    /// assert_eq!(c.limits.up_kbps_core, 1);
-    /// ```
-    pub fn apply(&mut self, patch: &SettingsPatch) {
+    pub fn apply(&mut self, patch: &RuntimeSettings) {
         if let Some(client) = &patch.client {
             self.client.clone_from(client);
         }
@@ -624,6 +628,88 @@ fn client_path_map_ok(client: &ClientConfig) -> bool {
     client.remote_path_map.iter().all(path_map_entry_ok)
 }
 
+/// The `[prefs]` table of `text`, empty when it has none or `text` is not TOML.
+fn prefs_table(text: &str) -> toml::Table {
+    #[derive(Deserialize)]
+    struct Sections {
+        #[serde(default)]
+        prefs: toml::Table,
+    }
+    toml::from_str::<Sections>(text).map_or_else(|_| toml::Table::new(), |s| s.prefs)
+}
+
+/// The `prefs` keys no field of [`PrefsConfig`] claims, which `serde_ignored` cannot
+/// see past the flattened [`Prefs`]; the known names come from its JSON form.
+fn unknown_prefs_keys<'a>(keys: impl IntoIterator<Item = &'a String>) -> Vec<String> {
+    let Ok(known) = serde_json::to_value(PrefsConfig::default()) else {
+        return Vec::new();
+    };
+    let unclaimed = keys.into_iter().filter(|k| known.get(k.as_str()).is_none());
+    unclaimed.map(|k| format!("prefs.{k}")).collect()
+}
+
+/// The dotted paths of the `prefs` keys of `value`, a [`RuntimeSettings`] as JSON, that
+/// no field claims, which reading it would ignore.
+///
+/// ```
+/// let v = serde_json::json!({ "prefs": { "regions": [], "region": ["Europe"] } });
+/// assert_eq!(mistarr_server::config::unknown_prefs_fields(&v), ["prefs.region"]);
+/// ```
+#[must_use]
+pub fn unknown_prefs_fields(value: &serde_json::Value) -> Vec<String> {
+    let prefs = value.get("prefs").and_then(serde_json::Value::as_object);
+    unknown_prefs_keys(prefs.into_iter().flat_map(serde_json::Map::keys))
+}
+
+/// The names that are not a [`HiddenFlag`], which reading a `hide` list drops.
+fn unknown_flags<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let unknown = names
+        .into_iter()
+        .filter(|n| HiddenFlag::from_name(n).is_none());
+    unknown.map(str::to_owned).collect()
+}
+
+/// The `prefs.hide` names of `value`, a [`RuntimeSettings`] as JSON, that are not a
+/// [`HiddenFlag`] and so are dropped when it is read.
+///
+/// ```
+/// let v = serde_json::json!({ "prefs": { "hide": ["demo", "unl"] } });
+/// assert_eq!(mistarr_server::config::dropped_flags(&v), ["unl"]);
+/// ```
+#[must_use]
+pub fn dropped_flags(value: &serde_json::Value) -> Vec<String> {
+    let hide = value
+        .pointer("/prefs/hide")
+        .and_then(serde_json::Value::as_array);
+    unknown_flags(
+        hide.into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str),
+    )
+}
+
+/// The names of [`HiddenFlag::ALL`] as a sentence lists them.
+///
+/// ```
+/// let names = mistarr_server::config::hideable_flags();
+/// assert_eq!(names, "bios, beta, proto, demo, sample and program");
+/// ```
+#[must_use]
+pub fn hideable_flags() -> String {
+    let names = HiddenFlag::ALL.map(HiddenFlag::as_flag_name);
+    match names.split_last() {
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
+/// Logs each `prefs.hide` name `origin` held that was dropped for not being a [`HiddenFlag`].
+fn warn_dropped_flags(names: &[String], origin: &str) {
+    for name in names {
+        tracing::warn!(flag = %name, origin, "hidden flag dropped: only {} can be hidden", hideable_flags());
+    }
+}
+
 /// Logs each key [`Config::parse_reporting`] found and no field claimed.
 fn warn_unknown_keys(unknown: &[String]) {
     for key in unknown {
@@ -643,8 +729,8 @@ mod tests {
         assert!(c.server.api_key.is_empty());
         assert_eq!(c.paths.games, Path::new("/media/fat/games"));
         assert_eq!(c.client.kind, ClientChoice::Auto);
-        assert_eq!(c.prefs.regions[0], "USA");
-        assert!(c.prefs.prefer_latest_revision);
+        assert_eq!(c.prefs.select.regions[0], "USA");
+        assert!(c.prefs.select.prefer_latest_revision);
         assert!(c.prefs.launch);
         assert_eq!(c.jobs.scan_interval_minutes, 1440);
     }
@@ -709,8 +795,8 @@ mod tests {
         assert_eq!(c.client.remote_path_map.len(), 1);
         assert_eq!(c.limits.down_kbps_core, 1);
         assert_eq!(c.limits.up_kbps_core, 64);
-        assert_eq!(c.prefs.regions, ["Europe"]);
-        assert_eq!(c.prefs.languages, ["En"]);
+        assert_eq!(c.prefs.select.regions, ["Europe"]);
+        assert_eq!(c.prefs.select.languages, ["En"]);
         assert!(!c.prefs.launch);
         assert!((c.sources.bind_threshold - 0.8).abs() < f32::EPSILON);
         assert!((Config::default().sources.bind_threshold - 0.6).abs() < f32::EPSILON);
@@ -747,13 +833,13 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_reported_and_the_rest_still_parses() {
-        let text = "[server]\nlisten = \"1.2.3.4:1\"\ntypo = 1\n[bogus_section]\nx = 1\n";
+        let text = "[server]\nlisten = \"1.2.3.4:1\"\ntypo = 1\n[bogus_section]\nx = 1\n[prefs]\nregion = 2\n";
         let (config, unknown) = Config::parse_reporting(text).expect("parse");
         assert_eq!(config.server.listen, "1.2.3.4:1");
         let unknown: std::collections::BTreeSet<_> = unknown.into_iter().collect();
         assert_eq!(
             unknown,
-            ["server.typo", "bogus_section"]
+            ["server.typo", "bogus_section", "prefs.region"]
                 .into_iter()
                 .map(str::to_owned)
                 .collect()
@@ -891,16 +977,53 @@ mod tests {
     #[test]
     fn runtime_and_patch_round_trip() {
         let mut c = Config::default();
-        let patch: SettingsPatch =
+        let patch: RuntimeSettings =
             serde_json::from_str(r#"{"prefs":{"regions":["Japan"]}}"#).expect("json");
         c.apply(&patch);
-        assert_eq!(c.runtime().prefs.regions, ["Japan"]);
-        assert_eq!(c.runtime().prefs.languages, ["En"]);
-        assert!(serde_json::from_str::<SettingsPatch>(r#"{"server":{}}"#).is_err());
+        let prefs = c.runtime().prefs.expect("prefs");
+        assert_eq!(prefs.select.regions, ["Japan"]);
+        assert_eq!(prefs.select.languages, ["En"]);
+        assert!(serde_json::from_str::<RuntimeSettings>(r#"{"server":{}}"#).is_err());
         let partial: RuntimeSettings =
             serde_json::from_str(r#"{"limits":{"up_kbps_core":2}}"#).expect("partial");
-        assert_eq!(partial.limits.up_kbps_core, 2);
-        assert_eq!(partial.prefs, PrefsConfig::default());
+        assert_eq!(partial.limits.map(|l| l.up_kbps_core), Some(2));
+        assert_eq!(partial.prefs, None);
+        let all = serde_json::to_value(Config::default().runtime()).expect("json");
+        for section in ["client", "limits", "prefs", "scan", "transfer"] {
+            assert!(all.get(section).is_some(), "{section}");
+        }
+        assert_eq!(
+            serde_json::to_string(&partial)
+                .expect("json")
+                .matches(':')
+                .count(),
+            5
+        );
+    }
+
+    #[test]
+    fn prefs_flatten_the_selection_and_drop_unknown_hidden_flags() {
+        let c = Config::parse(
+            "[prefs]\nregions = [\"Europe\"]\nhide = [\"beta\", \"unl\", \"Proto\"]\nlaunch = false",
+        )
+        .expect("parse");
+        assert_eq!(c.prefs.select.regions, ["Europe"]);
+        assert_eq!(c.prefs.select.languages, ["En"]);
+        assert_eq!(c.prefs.hidden_names(), ["beta", "proto"]);
+        assert!(!c.prefs.launch);
+        let (dropping, _) =
+            Config::parse_reporting("[prefs]\nhide = [\"pirate\", \"demo\", \"unl\"]")
+                .expect("parse");
+        assert_eq!(dropping.dropped_flags, ["pirate", "unl"]);
+        assert!(Config::parse("[prefs]\nhide = [\"unl\"]")
+            .expect("parse")
+            .dropped_flags
+            .is_empty());
+        let json = serde_json::to_value(&c.prefs).expect("json");
+        assert_eq!(json["hide"], serde_json::json!(["beta", "proto"]));
+        assert_eq!(json["launch"], false);
+        let back: PrefsConfig = serde_json::from_value(json).expect("back");
+        assert_eq!(back, c.prefs);
     }
 
     #[test]
@@ -921,7 +1044,7 @@ mod tests {
                 scan: file,
                 ..Config::default()
             };
-            c.overlay(RuntimeSettings {
+            c.apply(&RuntimeSettings {
                 scan: saved,
                 ..old.clone()
             });
@@ -939,7 +1062,7 @@ mod tests {
             Config::parse("[transfer]\npause_client_while_playing = false").expect("parse");
         assert!(!file_off.transfer.pause_client_while_playing);
         let mut c = file_off.clone();
-        c.overlay(serde_json::from_str(r#"{"limits":{}}"#).expect("old settings"));
+        c.apply(&serde_json::from_str(r#"{"limits":{}}"#).expect("old settings"));
         assert!(!c.transfer.pause_client_while_playing);
         c.apply(&serde_json::from_str(r#"{"transfer":{}}"#).expect("patch"));
         assert_eq!(c.runtime().transfer, Some(TransferConfig::default()));

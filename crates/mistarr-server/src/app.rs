@@ -2,21 +2,21 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError, RwLock};
+use std::sync::{Arc, PoisonError, RwLock};
 use std::time::{Duration, Instant};
 
-use mistarr_clients::DownloadClient;
+use mistarr_core::PlatformId;
 use mistarr_mister::launch::{CommandSink, FifoSink};
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::client::{ClientEndpoint, ClientKey};
-use crate::config::{Config, RuntimeSettings, SettingsPatch};
+use crate::client::ClientSlot;
+use crate::config::{Config, ConfigProblem, RuntimeSettings};
 use crate::db::settings::{self, keys};
 use crate::db::{self, Db};
 use crate::error::{Error, Result};
 use crate::events::EventBus;
-use crate::jobs::core_limits::ClientHold;
+use crate::jobs::dat_import::Recompute;
 use crate::jobs::detect_client::{ClientStatus, DetectClient};
 use crate::jobs::gate::Gate;
 use crate::jobs::{self, corename, poll, source_import, transfer, Scheduler};
@@ -81,7 +81,22 @@ pub struct Options {
 }
 
 impl Default for Options {
+    /// [`Options::for_board`] with the RAM directory at [`crate::db::tempdir::RAM_TEMP_DIR`].
     fn default() -> Self {
+        Self::for_board(Path::new(crate::db::tempdir::RAM_TEMP_DIR))
+    }
+}
+
+impl Options {
+    /// The board's paths and cadences, with the frozen client's record in `ram_dir`.
+    ///
+    /// ```
+    /// use mistarr_server::app::Options;
+    /// let o = Options::for_board(std::path::Path::new("/run/m"));
+    /// assert!(o.frozen_file.starts_with("/run/m"));
+    /// ```
+    #[must_use]
+    pub fn for_board(ram_dir: &Path) -> Self {
         Self {
             corename_path: PathBuf::from(mistarr_mister::CORENAME_PATH),
             corename_poll: Duration::from_secs(2),
@@ -108,14 +123,82 @@ impl Default for Options {
             ca_file: None,
             kill: PathBuf::from("kill"),
             proc_dir: PathBuf::from("/proc"),
-            frozen_file: Path::new(crate::db::tempdir::RAM_TEMP_DIR)
-                .join(crate::freeze::FROZEN_NAME),
+            frozen_file: ram_dir.join(crate::freeze::FROZEN_NAME),
             hold_recheck: Duration::from_secs(60),
         }
     }
 }
 
-/// Everything request handlers and jobs share.
+/// Launch state: where commands for MiSTer Main go, and when the last launch was sent.
+pub struct LaunchSlot {
+    sink: RwLock<Arc<dyn CommandSink>>,
+    /// Serialises launches and holds when the last one was sent.
+    pub last: tokio::sync::Mutex<Option<Instant>>,
+}
+
+impl LaunchSlot {
+    /// Commands go to the FIFO at `command_path`.
+    ///
+    /// ```
+    /// let slot = mistarr_server::app::LaunchSlot::new(std::path::Path::new("/nowhere/cmd"));
+    /// assert!(!slot.sink().present());
+    /// ```
+    #[must_use]
+    pub fn new(command_path: &Path) -> Self {
+        Self {
+            sink: RwLock::new(Arc::new(FifoSink::new(command_path))),
+            last: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// Where launch commands for MiSTer Main go.
+    #[must_use]
+    pub fn sink(&self) -> Arc<dyn CommandSink> {
+        Arc::clone(&self.sink.read().unwrap_or_else(PoisonError::into_inner))
+    }
+
+    /// Replaces the command sink, for tests that record launches.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_sink(&self, sink: Arc<dyn CommandSink>) {
+        *self.sink.write().unwrap_or_else(PoisonError::into_inner) = sink;
+    }
+}
+
+/// What a settings change altered, and the settings now in force.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::struct_excessive_bools)] // One flag per section that has side effects.
+pub struct SettingsChange {
+    /// The runtime settings after the change, every section present.
+    pub settings: RuntimeSettings,
+    /// `[client]` changed, so the client is detected again.
+    pub client: bool,
+    /// `[limits]` or `[transfer]` changed, so the core gate's hold is re-applied.
+    pub limits: bool,
+    /// The 1G1R preferences changed, so every platform is recomputed.
+    pub selection: bool,
+    /// `[scan]` changed, so CHD decoding is queued or dropped.
+    pub scan: bool,
+    /// What `/system/status` reports changed: `prefs.launch` or `[transfer]`.
+    pub status: bool,
+}
+
+impl SettingsChange {
+    /// The change from `before` to `after`.
+    fn between(before: &Config, after: &Config) -> Self {
+        let transfer = before.transfer != after.transfer;
+        Self {
+            settings: after.runtime(),
+            client: before.client != after.client,
+            limits: transfer || before.limits != after.limits,
+            selection: !before.prefs.same_selection(&after.prefs),
+            scan: before.scan != after.scan,
+            status: transfer || before.prefs.launch != after.prefs.launch,
+        }
+    }
+}
+
+/// Everything request handlers and jobs share. A field is public unless it changes only
+/// through a method that keeps an invariant, in which case it is private.
 pub struct AppState {
     config: RwLock<Arc<Config>>,
     /// The database.
@@ -142,25 +225,17 @@ pub struct AppState {
     pub redetect: tokio::sync::Notify,
     /// Wakes the core gate's client hold after the settings or the client change.
     pub limits_wake: tokio::sync::Notify,
-    client_hold: RwLock<Option<ClientHold>>,
-    /// Held while the client is stopped or resumed for shutdown, so no stop
-    /// lands after shutdown resumed it.
-    pub(crate) freeze_lock: Arc<Mutex<()>>,
+    /// The download client.
+    pub client: ClientSlot,
+    /// Launching through MiSTer Main.
+    pub launch: LaunchSlot,
     /// Passes of the core gate's loop, for tests that bound how often it wakes.
     #[cfg(test)]
-    pub(crate) gate_passes: std::sync::atomic::AtomicU64,
-    /// Serialises client detection so an older probe never overwrites a newer one.
-    pub(crate) detect_lock: tokio::sync::Mutex<()>,
-    /// Held while `POST /system/client/start` runs, so a second one is `busy`.
-    pub(crate) client_start: tokio::sync::Mutex<()>,
+    pub gate_passes: std::sync::atomic::AtomicU64,
+    /// The daemon's I/O class, when `options.ionice` names a tool to set it.
+    pub io_priority: Option<Arc<jobs::io_priority::IoPriority>>,
     shutdown: watch::Sender<bool>,
     settings_write: tokio::sync::Mutex<()>,
-    client: RwLock<Option<(ClientKey, Arc<dyn DownloadClient>)>>,
-    commands: RwLock<Arc<dyn CommandSink>>,
-    /// Serialises launches and holds when the last one was sent.
-    pub(crate) launch_lock: tokio::sync::Mutex<Option<Instant>>,
-    /// The daemon's I/O class, when `options.ionice` names a tool to set it.
-    pub(crate) io_priority: Option<Arc<jobs::io_priority::IoPriority>>,
 }
 
 impl AppState {
@@ -180,17 +255,12 @@ impl AppState {
             poll_wake: tokio::sync::Notify::new(),
             redetect: tokio::sync::Notify::new(),
             limits_wake: tokio::sync::Notify::new(),
-            client_hold: RwLock::new(None),
-            freeze_lock: Arc::new(Mutex::new(())),
+            client: ClientSlot::default(),
+            launch: LaunchSlot::new(&options.command_path),
             #[cfg(test)]
             gate_passes: std::sync::atomic::AtomicU64::new(0),
-            detect_lock: tokio::sync::Mutex::new(()),
-            client_start: tokio::sync::Mutex::new(()),
             shutdown: watch::Sender::new(false),
             settings_write: tokio::sync::Mutex::new(()),
-            client: RwLock::new(None),
-            commands: RwLock::new(Arc::new(FifoSink::new(&options.command_path))),
-            launch_lock: tokio::sync::Mutex::new(None),
             io_priority: options.ionice.as_deref().map(|program| {
                 let setter = Arc::new(jobs::io_priority::Ionice::new(program));
                 Arc::new(jobs::io_priority::IoPriority::new(
@@ -202,121 +272,32 @@ impl AppState {
         })
     }
 
-    /// Where launch commands for MiSTer Main go: the FIFO at `options.command_path`.
-    #[must_use]
-    pub fn command_sink(&self) -> Arc<dyn CommandSink> {
-        Arc::clone(&self.commands.read().unwrap_or_else(PoisonError::into_inner))
-    }
-
-    /// Replaces the command sink, for tests that record launches.
-    #[cfg(any(test, feature = "test-support"))]
-    pub fn set_command_sink(&self, sink: Arc<dyn CommandSink>) {
-        *self
-            .commands
-            .write()
-            .unwrap_or_else(PoisonError::into_inner) = sink;
-    }
-
-    /// The download client from the last `detect_client` run, or `None` when
-    /// detection found none. It is a Transmission or rtorrent handle for the
-    /// detected URL, carrying `client.remote_path_map`; it is
-    /// replaced only when the detected kind, URL or path map changes. Take a
-    /// fresh handle per operation rather than keeping one, and expect calls to
-    /// fail with `Unreachable` when the client is down. `None` while the client
-    /// is frozen for a running core, since a stopped process never answers.
-    #[must_use]
-    pub fn client(&self) -> Option<Arc<dyn DownloadClient>> {
-        if self.client_frozen() {
-            return None;
-        }
-        self.client_entry().map(|(_, c)| c)
-    }
-
-    /// The detected client and which one it is, frozen or not; only the core
-    /// gate talks to it through this.
-    #[must_use]
-    pub fn client_entry(&self) -> Option<(ClientEndpoint, Arc<dyn DownloadClient>)> {
-        self.client
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .as_ref()
-            .map(|(k, c)| (k.endpoint(), Arc::clone(c)))
-    }
-
-    /// How the client is held for a running core, if it is.
-    #[must_use]
-    pub fn client_hold(&self) -> Option<ClientHold> {
-        *self
-            .client_hold
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-    }
-
-    /// Whether the client's process is stopped for a running core.
-    #[must_use]
-    pub fn client_frozen(&self) -> bool {
-        self.client_hold() == Some(ClientHold::Frozen)
-    }
-
-    /// Records how the client is held; true when that changed.
-    pub(crate) fn set_client_hold(&self, hold: Option<ClientHold>) -> bool {
-        let mut slot = self
-            .client_hold
-            .write()
-            .unwrap_or_else(PoisonError::into_inner);
-        std::mem::replace(&mut *slot, hold) != hold
-    }
-
-    /// Points [`AppState::client`] at what `status` found. The current handle
-    /// stays unless the probe answered from a different client, or only the
-    /// path map changed; a probe that found nothing never drops it.
+    /// Points [`ClientSlot::get`] at what `status` found under the current `[client]`,
+    /// and wakes the core gate's hold when the handle changed.
     pub fn refresh_client(&self, status: &ClientStatus) {
-        let Some(key) = ClientKey::from_detection(status, &self.config().client) else {
-            return;
-        };
-        let mut slot = self.client.write().unwrap_or_else(PoisonError::into_inner);
-        let replace = match slot.as_ref() {
-            None => true,
-            Some((k, _)) if *k == key => false,
-            Some((k, _)) => status.reachable || (k.kind == key.kind && k.url == key.url),
-        };
-        if replace {
-            let map = mistarr_clients::RemotePathMap::new(key.path_map.clone());
-            match mistarr_clients::connect(key.kind, &key.url, map) {
-                Ok(client) => {
-                    *slot = Some((key, client));
-                    self.limits_wake.notify_one();
-                }
-                Err(e) => tracing::warn!(error = %e, "cannot use the detected client"),
-            }
+        if self.client.refresh(status, &self.config().client) {
+            self.limits_wake.notify_one();
         }
     }
 
     /// Installs `client` as the detected client, for tests that script one in process.
     #[cfg(test)]
-    pub(crate) fn set_client(&self, client: Arc<dyn DownloadClient>) {
-        let at = ClientEndpoint {
+    pub(crate) fn set_client(&self, client: Arc<dyn mistarr_clients::DownloadClient>) {
+        let at = crate::client::ClientEndpoint {
             kind: mistarr_clients::ClientKind::Transmission,
             url: String::new(),
         };
         self.set_client_at(at, client);
     }
 
-    /// Drops the client handle, leaving no client, as before the first detection.
-    #[cfg(test)]
-    pub(crate) fn clear_client(&self) {
-        *self.client.write().unwrap_or_else(PoisonError::into_inner) = None;
-    }
-
     /// [`AppState::set_client`] as the client at `at`.
     #[cfg(test)]
-    pub(crate) fn set_client_at(&self, at: ClientEndpoint, client: Arc<dyn DownloadClient>) {
-        let key = ClientKey {
-            kind: at.kind,
-            url: at.url,
-            path_map: Vec::new(),
-        };
-        *self.client.write().unwrap_or_else(PoisonError::into_inner) = Some((key, client));
+    pub(crate) fn set_client_at(
+        &self,
+        at: crate::client::ClientEndpoint,
+        client: Arc<dyn mistarr_clients::DownloadClient>,
+    ) {
+        self.client.set(at, client);
         self.limits_wake.notify_one();
     }
 
@@ -356,28 +337,53 @@ impl AppState {
         self.shutdown.send_replace(true);
     }
 
-    /// Applies a settings patch, stores the resulting runtime settings and
-    /// makes them effective. Calls are serialised, so concurrent patches to
-    /// different sections all survive. Returns the new settings and whether
-    /// `client` changed.
+    /// Replaces the sections `patch` carries, stores the resulting runtime settings,
+    /// makes them effective and runs what each changed section needs: client
+    /// detection, the core gate's hold, a recompute, CHD decoding, a `status` event.
+    /// Calls are serialised, so concurrent patches to different sections all survive.
     ///
     /// # Errors
     ///
-    /// [`Error::Db`] or [`Error::Stored`] when the settings cannot be saved;
-    /// the effective config is then unchanged.
-    pub async fn update_settings(&self, patch: &SettingsPatch) -> Result<(RuntimeSettings, bool)> {
-        let _serial = self.settings_write.lock().await;
-        let mut next = Config::clone(&self.config());
-        let before = next.client.clone();
-        next.apply(patch);
-        let runtime = next.runtime();
-        let stored = runtime.clone();
-        self.db
-            .write(move |c| settings::set_json(c, keys::RUNTIME, &stored))
-            .await?;
-        self.update_config(|c| c.overlay(runtime.clone()));
-        let client_changed = runtime.client != before;
-        Ok((runtime, client_changed))
+    /// [`Error::Settings`] when a `[client]` the patch carries has a path map entry
+    /// that fails the check, [`Error::Db`] or [`Error::Stored`] when the settings
+    /// cannot be saved; the effective config is then unchanged. An error queuing the
+    /// follow-up work comes after the settings took effect.
+    pub async fn update_settings(
+        self: &Arc<Self>,
+        patch: RuntimeSettings,
+    ) -> Result<SettingsChange> {
+        let change = {
+            let _serial = self.settings_write.lock().await;
+            let before = self.config();
+            let mut next = Config::clone(&before);
+            next.apply(&patch);
+            if patch.client.is_some() && next.validate().contains(&ConfigProblem::PathMap) {
+                return Err(Error::Settings(ConfigProblem::PathMap));
+            }
+            let change = SettingsChange::between(&before, &next);
+            let stored = change.settings.clone();
+            self.db
+                .write(move |c| settings::set_json(c, keys::RUNTIME, &stored))
+                .await?;
+            self.update_config(|c| c.apply(&change.settings));
+            change
+        };
+        if change.scan {
+            jobs::chd::apply_setting(self).await?;
+        }
+        if change.client {
+            Scheduler::enqueue(self, Arc::new(DetectClient)).await?;
+        }
+        if change.limits {
+            self.limits_wake.notify_one();
+        }
+        if change.selection {
+            Recompute::enqueue_all(self).await?;
+        }
+        if change.status {
+            crate::status::publish(self).await;
+        }
+        Ok(change)
     }
 }
 
@@ -420,34 +426,46 @@ impl Running {
     }
 }
 
-/// What startup reads and settles in the database before anything runs: saved runtime
-/// settings, the platforms with an unfinished scan, and those whose DAT families resolved.
-type Prepared = (
-    Result<Option<RuntimeSettings>>,
-    Vec<mistarr_core::PlatformId>,
-    Vec<mistarr_core::PlatformId>,
-);
+/// The opened database and what startup settled in it before anything runs.
+pub struct Startup {
+    /// The database, migrated, with the platforms seeded.
+    pub db: Db,
+    /// Platforms whose scan a previous run left unfinished.
+    pub unfinished_scans: Vec<PlatformId>,
+    /// Platforms whose DAT families resolved to one current version, to recompute.
+    pub resolved: Vec<PlatformId>,
+}
 
-/// Seeds the platforms, refreshes DAT family keys and leaves one current version per family.
-fn prepare_catalog(c: &mut rusqlite::Connection) -> Result<Prepared> {
-    let added = db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS)?;
-    if added > 0 {
-        tracing::info!(added, "seeded platforms");
-    }
-    let unfinished = db::scan_progress::platforms_with_progress(c)?;
-    let (resolved, settled) = db::transact(c, |tx| {
-        db::dats::refresh_families(tx)?;
-        let resolved = db::dats::resolve_families(tx)?;
-        Ok((resolved, crate::jobs::scan::settle_names(tx)?))
+/// Seeds the platforms, refreshes DAT family keys and leaves one current version per
+/// family, returning what that settled.
+fn prepare_catalog(db: Db) -> Result<Startup> {
+    let (unfinished_scans, resolved) = db.write_blocking(|c| {
+        let added = db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS)?;
+        if added > 0 {
+            tracing::info!(added, "seeded platforms");
+        }
+        let unfinished_scans = db::scan_progress::platforms_with_progress(c)?;
+        let (resolved, settled) = db::transact(c, |tx| {
+            db::dats::refresh_families(tx)?;
+            let resolved = db::dats::resolve_families(tx)?;
+            Ok((resolved, crate::jobs::scan::settle_names(tx)?))
+        })?;
+        if settled > 0 {
+            tracing::info!(settled, "misnamed files verified under the name rule");
+        }
+        Ok((unfinished_scans, resolved))
     })?;
-    if settled > 0 {
-        tracing::info!(settled, "misnamed files verified under the name rule");
-    }
-    Ok((
-        settings::get_json::<RuntimeSettings>(c, keys::RUNTIME),
-        unfinished,
+    Ok(Startup {
+        db,
+        unfinished_scans,
         resolved,
-    ))
+    })
+}
+
+/// The runtime settings saved in `db`, if any.
+fn saved_settings(db: &Db) -> Result<Option<RuntimeSettings>> {
+    let stored = db.read_blocking(|c| settings::get_json::<serde_json::Value>(c, keys::RUNTIME))?;
+    Ok(stored.map(RuntimeSettings::from_saved).transpose()?)
 }
 
 /// Runs the startup sequence and returns once the HTTP server is listening.
@@ -466,7 +484,11 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     let lock = crate::lock::InstanceLock::acquire(&config.paths.data)?;
 
     // Step 2: database, migrations, platform seed, runtime settings.
-    let (db, unfinished_scans, resolved) = open_db(&mut config)?;
+    let Startup {
+        db,
+        unfinished_scans,
+        resolved,
+    } = open_db(&mut config)?;
     let scan_interval = config.jobs.scan_interval_minutes;
     let app = AppState::new(config, db, options);
     // The gate starts closed for a loaded core, so no heavy job slips through before the first poll.
@@ -527,35 +549,40 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     })
 }
 
-/// Opens the database, prepares the catalog and applies the saved runtime
-/// settings to `config`; returns the database, the platforms whose scan a
-/// previous run left unfinished, and the platforms whose DAT families resolved.
-pub(crate) fn open_db(
-    config: &mut Config,
-) -> Result<(
-    Db,
-    Vec<mistarr_core::PlatformId>,
-    Vec<mistarr_core::PlatformId>,
-)> {
+/// Removes what a run cut short left behind: a stale migration progress file, the
+/// leftovers of an import in RAM, and partial fetches and uploads. Returns whether a
+/// database swap was cut short; the database itself is always whole.
+fn clean_leftovers(config: &Config) -> Result<bool> {
+    let path = config.paths.db();
+    crate::migrating::clear_stale(&config.paths.data)?;
+    let swapping = db::ram::swap_files(&path);
+    db::ram::clean_stale(&path, &config.memory.import_dir)?;
+    crate::jobs::url_fetch::spool::clean_stale(&config.paths.tmp());
+    if let Some(ram) = crate::jobs::url_fetch::ram_dir(&config.paths.tmp()) {
+        crate::jobs::url_fetch::spool::clean_stale(&ram);
+    }
+    for dir in [config.paths.dats(), config.paths.sources()] {
+        crate::jobs::url_fetch::spool::clean_parts(&dir, crate::incoming::place::PART_PREFIX);
+    }
+    Ok(swapping)
+}
+
+/// Cleans up after an interrupted run, migrates and opens the database, prepares the
+/// catalog and lays the saved runtime settings over `config`.
+///
+/// # Errors
+///
+/// [`Error::Io`] when leftovers cannot be removed or a cut-short swap left no database,
+/// [`Error::SchemaTooNew`], [`Error::Migration`] or [`Error::Db`] when it cannot be opened.
+pub(crate) fn open_db(config: &mut Config) -> Result<Startup> {
     if let Some(dir) = std::env::var_os(crate::db::tempdir::SQLITE_TMPDIR) {
         tracing::info!(dir = %Path::new(&dir).display(), "SQLite temporary files");
     }
     // `[memory]` cannot move from the overlay below, so this reaches the log
     // before `migrate_in_ram` reads `import_floor_mib` as its floor.
     config.log_problems();
+    let swapping = clean_leftovers(config)?;
     let path = config.paths.db();
-    crate::migrating::clear_stale(&config.paths.data)?;
-    // Leftovers of an import in RAM cut short; the database itself is always whole.
-    let swapping = db::ram::swap_files(&path);
-    db::ram::clean_stale(&path, &config.memory.import_dir)?;
-    // Leftovers of a fetch or upload that a restart or power cut broke off.
-    crate::jobs::url_fetch::spool::clean_stale(&config.paths.tmp());
-    if let Some(ram) = crate::jobs::url_fetch::ram_dir(&config.paths.tmp()) {
-        crate::jobs::url_fetch::spool::clean_stale(&ram);
-    }
-    for dir in [config.paths.dats(), config.paths.sources()] {
-        crate::jobs::url_fetch::spool::clean_parts(&dir, ".upload-");
-    }
     let progress = match crate::db::migrate::pending(&path)? {
         Some((from, to)) => {
             tracing::info!(from, to, "migrating the database");
@@ -580,17 +607,17 @@ pub(crate) fn open_db(
         Some(m) => Db::open_counting(&path, &m.steps())?,
         None => Db::open(&path)?,
     };
-    let (stored, unfinished, resolved) = db.write_blocking(prepare_catalog)?;
-    let stored = stored.unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "ignoring unreadable saved settings; using the config file");
-        None
-    });
-    if let Some(rt) = stored {
-        config.overlay(rt);
+    let startup = prepare_catalog(db)?;
+    match saved_settings(&startup.db) {
+        Ok(Some(saved)) => config.apply(&saved),
+        Ok(None) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "ignoring unreadable saved settings; using the config file");
+        }
     }
     // `client` can move from the overlay above, unlike `[memory]`.
     config.log_path_map_problem();
-    Ok((db, unfinished, resolved))
+    Ok(startup)
 }
 
 /// Runs pending migrations on a copy of the database in RAM when memory allows, so an
@@ -625,10 +652,7 @@ fn migrate_in_ram(config: &Config, progress: Option<&crate::migrating::Migrating
 
 /// Queues the jobs every start runs: unfinished scans (never arcade's), CHD decoding when
 /// its setting is on, the arcade catalogue, and a re-map of the bound sources whose roms changed.
-async fn queue_startup_jobs(
-    app: &Arc<AppState>,
-    unfinished: Vec<mistarr_core::PlatformId>,
-) -> Result<()> {
+async fn queue_startup_jobs(app: &Arc<AppState>, unfinished: Vec<PlatformId>) -> Result<()> {
     resume_scans(app, unfinished).await?;
     jobs::chd::apply_setting(app).await?;
     jobs::arcade::enqueue_if_relevant(app).await?;
@@ -682,10 +706,7 @@ fn spawn_tasks(app: &Arc<AppState>, scan_interval: u32) -> Vec<tokio::task::Join
 
 /// Re-enqueues each platform's scan left unfinished by a previous run, skipping
 /// arcade, which has no library scan whatever `scan_progress` holds.
-async fn resume_scans(
-    app: &Arc<AppState>,
-    unfinished: Vec<mistarr_core::PlatformId>,
-) -> Result<()> {
+async fn resume_scans(app: &Arc<AppState>, unfinished: Vec<PlatformId>) -> Result<()> {
     for platform_id in unfinished
         .into_iter()
         .filter(|id| !jobs::scan::is_arcade(id))
@@ -704,7 +725,7 @@ async fn resume_scans(
 
 /// Marks platforms whose core is installed under the SD root and returns them; the walk
 /// runs on the blocking pool and the write goes through [`Db::write_tx`].
-pub(crate) async fn detect_cores(app: &AppState) -> Result<Vec<mistarr_core::PlatformId>> {
+pub(crate) async fn detect_cores(app: &AppState) -> Result<Vec<PlatformId>> {
     let root = app.config().paths.root.clone();
     let present: Vec<_> = crate::threads::run(crate::threads::label::DETECT, move || {
         mistarr_mister::corename::installed_cores(&root)
@@ -830,21 +851,49 @@ mod tests {
     #[tokio::test]
     async fn concurrent_settings_updates_all_persist() {
         let (_dir, app) = testutil::state();
-        let limits: SettingsPatch =
+        let limits: RuntimeSettings =
             serde_json::from_str(r#"{"limits":{"up_kbps_core":9}}"#).expect("json");
-        let prefs: SettingsPatch =
+        let prefs: RuntimeSettings =
             serde_json::from_str(r#"{"prefs":{"languages":["Fr"]}}"#).expect("json");
-        let (a, b) = tokio::join!(app.update_settings(&limits), app.update_settings(&prefs));
-        assert!(!a.expect("limits").1 && !b.expect("prefs").1);
+        let (a, b) = tokio::join!(app.update_settings(limits), app.update_settings(prefs));
+        let (a, b) = (a.expect("limits"), b.expect("prefs"));
+        assert!(a.limits && !a.client && !a.selection);
+        assert!(b.selection && !b.client && !b.limits);
         let stored: RuntimeSettings = app
             .db
             .read(|c| settings::get_json(c, keys::RUNTIME))
             .await
             .expect("read")
             .expect("stored");
-        assert_eq!(stored.limits.up_kbps_core, 9);
-        assert_eq!(stored.prefs.languages, ["Fr"]);
+        assert_eq!(stored.limits.map(|l| l.up_kbps_core), Some(9));
+        assert_eq!(
+            stored.prefs.as_ref().expect("prefs").select.languages,
+            ["Fr"]
+        );
         assert_eq!(app.config().runtime(), stored);
+    }
+
+    #[tokio::test]
+    async fn a_settings_change_says_what_it_changed_and_refuses_a_bad_path_map() {
+        let (_dir, app) = testutil::state();
+        let same = app.update_settings(RuntimeSettings::default()).await;
+        let same = same.expect("nothing");
+        assert!(!(same.client || same.limits || same.selection || same.scan || same.status));
+        assert_eq!(same.settings, app.config().runtime());
+        let off: RuntimeSettings =
+            serde_json::from_str(r#"{"prefs":{"launch":false},"scan":{"chd_tracks":true}}"#)
+                .expect("json");
+        let change = app.update_settings(off).await.expect("off");
+        assert!(change.status && change.scan && !change.selection);
+        let bad: RuntimeSettings =
+            serde_json::from_str(r#"{"client":{"remote_path_map":[{"remote":"","local":"/l"}]}}"#)
+                .expect("json");
+        let refused = app.update_settings(bad).await.expect_err("bad map");
+        assert!(matches!(refused, Error::Settings(ConfigProblem::PathMap)));
+        assert!(app.config().client.remote_path_map.is_empty(), "unchanged");
+        let client: RuntimeSettings =
+            serde_json::from_str(r#"{"client":{"url":"127.0.0.1:1"}}"#).expect("json");
+        assert!(app.update_settings(client).await.expect("client").client);
     }
 
     #[tokio::test]
@@ -883,7 +932,7 @@ mod tests {
     #[tokio::test]
     async fn client_handle_follows_detection() {
         let (_dir, app) = testutil::state();
-        assert!(app.client().is_none());
+        assert!(app.client.get().is_none());
         let found = ClientStatus {
             kind: Some(mistarr_clients::ClientKind::Rtorrent),
             url: Some("127.0.0.1:1".into()),
@@ -894,37 +943,41 @@ mod tests {
             ..ClientStatus::default()
         };
         app.refresh_client(&found);
-        let first = app.client().expect("client");
+        let first = app.client.get().expect("client");
         app.refresh_client(&found);
-        assert!(Arc::ptr_eq(&first, &app.client().expect("client")));
+        assert!(Arc::ptr_eq(&first, &app.client.get().expect("client")));
         app.update_config(|c| {
             c.client.remote_path_map = vec![mistarr_clients::PathMapping::new("/r", "/l")];
         });
         app.refresh_client(&found);
-        assert!(!Arc::ptr_eq(&first, &app.client().expect("client")));
-        let second = app.client().expect("client");
+        assert!(!Arc::ptr_eq(&first, &app.client.get().expect("client")));
+        let second = app.client.get().expect("client");
         app.refresh_client(&ClientStatus {
             kind: None,
             url: None,
             ..found.clone()
         });
-        assert!(Arc::ptr_eq(&second, &app.client().expect("kept")));
+        assert!(Arc::ptr_eq(&second, &app.client.get().expect("kept")));
         let other = ClientStatus {
             url: Some("127.0.0.1:2".into()),
             ..found.clone()
         };
         app.refresh_client(&other);
-        assert!(Arc::ptr_eq(&second, &app.client().expect("kept")));
+        assert!(Arc::ptr_eq(&second, &app.client.get().expect("kept")));
         app.refresh_client(&ClientStatus {
             reachable: true,
             ..other
         });
-        assert!(!Arc::ptr_eq(&second, &app.client().expect("replaced")));
+        assert!(!Arc::ptr_eq(&second, &app.client.get().expect("replaced")));
     }
 
     #[test]
     fn default_options_follow_the_board() {
         let o = Options::default();
+        assert_eq!(
+            o,
+            Options::for_board(Path::new(crate::db::tempdir::RAM_TEMP_DIR))
+        );
         assert_eq!(o.corename_path, PathBuf::from("/tmp/CORENAME"));
         assert_eq!(o.corename_poll, Duration::from_secs(2));
         assert_eq!(o.command_path, PathBuf::from("/dev/MiSTer_cmd"));
@@ -936,9 +989,10 @@ mod tests {
     #[test]
     fn command_sink_is_replaceable() {
         let (_dir, app) = testutil::state();
-        assert!(!app.command_sink().present());
-        app.set_command_sink(Arc::new(mistarr_mister::launch::RecordingSink::new()));
-        assert!(app.command_sink().present());
+        assert!(!app.launch.sink().present());
+        app.launch
+            .set_sink(Arc::new(mistarr_mister::launch::RecordingSink::new()));
+        assert!(app.launch.sink().present());
     }
 
     /// The timer queues its scan on the heavy lane, so it sits behind the

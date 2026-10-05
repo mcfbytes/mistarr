@@ -227,7 +227,7 @@ impl Server {
         .expect("write");
         let mut reply = String::new();
         s.read_to_string(&mut reply).expect("read");
-        assert!(reply.starts_with("HTTP/1.1 200"), "{path}: {reply}");
+        assert!(reply.starts_with("HTTP/1.1 20"), "{path}: {reply}");
     }
 
     /// Waits until `count` jobs of `kind` finished and nothing is queued or running,

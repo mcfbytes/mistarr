@@ -17,7 +17,6 @@ use mistarr_mister::adapter::arcade::assemble::{self, PartSource};
 use mistarr_mister::adapter::arcade::mra::{self, zip_location, Mra, MraRom, ZipPath};
 use serde_json::json;
 
-use super::dat_import::prefs;
 use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::arcade::{self as rows, MraTitle, MraZip, StoredMra};
@@ -243,7 +242,7 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
         .await?;
     }
     ctx.checkpoint().await?;
-    let prefs = prefs(&config.prefs);
+    let prefs = config.prefs.select.clone();
     let (retired, live, changed) = ctx
         .app
         .db

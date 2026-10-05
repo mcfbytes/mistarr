@@ -283,7 +283,7 @@ async fn uploads_are_held_while_a_core_runs_and_the_own_limits_come_back() {
         calls,
         ["read:down", "read:up", "set:down:true/512", "set:up:true/0"]
     );
-    assert_eq!(app.client_hold(), Some(ClientHold::Uploads));
+    assert_eq!(app.client.hold(), Some(ClientHold::Uploads));
     let saved = stored(&app).await.expect("saved");
     assert_eq!(
         (saved.down, saved.up),
@@ -302,7 +302,7 @@ async fn uploads_are_held_while_a_core_runs_and_the_own_limits_come_back() {
     let calls = wait_calls(&mock, 6).await;
     assert_eq!(calls[4..], ["set:down:false/0", "set:up:true/40"]);
     assert_eq!(mock.up(), OWN, "a zero menu limit leaves the client's own");
-    assert_eq!(app.client_hold(), None);
+    assert_eq!(app.client.hold(), None);
     assert_eq!(stored(&app).await, None);
 }
 
@@ -346,7 +346,7 @@ async fn the_setting_off_leaves_uploads_to_the_core_limit() {
             "set:up:true/64"
         ]
     );
-    assert_eq!(app.client_hold(), None);
+    assert_eq!(app.client.hold(), None);
     app.gate.set_corename(Some(MENU.into()));
     let calls = wait_calls(&mock, 6).await;
     assert_eq!(calls[4..], ["set:down:false/0", "set:up:false/0"]);
@@ -378,7 +378,7 @@ async fn turning_the_setting_off_mid_game_sets_the_core_upload_limit() {
     app.limits_wake.notify_one();
     let calls = wait_calls(&mock, 5).await;
     assert_eq!(calls[4..], ["set:up:true/64"]);
-    assert_eq!(app.client_hold(), None);
+    assert_eq!(app.client.hold(), None);
     assert_eq!(
         stored(&app).await.and_then(|s| s.up),
         Some(RateLimit::default())
@@ -442,7 +442,7 @@ async fn an_unreachable_client_is_retried_until_it_answers() {
     app.gate.set_corename(Some("SNES".into()));
     tokio::time::sleep(Duration::from_millis(60)).await;
     assert!(mock.calls().is_empty());
-    assert_eq!(app.client_hold(), None);
+    assert_eq!(app.client.hold(), None);
     mock.set_unreachable(false);
     let calls = wait_calls(&mock, 4).await;
     assert_eq!(calls[2..], ["set:down:true/512", "set:up:true/0"]);
@@ -453,7 +453,7 @@ async fn an_unreachable_client_is_retried_until_it_answers() {
     mock.set_unreachable(false);
     let calls = wait_calls(&mock, 6).await;
     assert_eq!(calls[4..], ["set:down:false/0", "set:up:true/40"]);
-    assert_eq!(app.client_hold(), None);
+    assert_eq!(app.client.hold(), None);
 }
 
 #[test]
@@ -483,7 +483,7 @@ async fn a_new_client_while_held_gets_its_own_limit_saved_and_held() {
     assert_eq!(wait_calls(&second, 2).await, ["read:up", "set:up:true/0"]);
     let saved = stored(&app).await.expect("saved");
     assert_eq!((saved.client, saved.up), (other, Some(RateLimit::kbps(9))));
-    assert_eq!(app.client_hold(), Some(ClientHold::Uploads));
+    assert_eq!(app.client.hold(), Some(ClientHold::Uploads));
     assert_eq!(first.calls().len(), 3, "the old handle is not used again");
 }
 
@@ -516,18 +516,21 @@ async fn uploads_that_leave_their_hold_are_held_again() {
 #[test]
 fn the_client_entry_names_the_client_and_ignores_a_freeze() {
     let (_dir, app) = state_with(|_| {});
-    assert!(app.client_entry().is_none());
+    assert!(app.client.entry().is_none());
     app.set_client_at(nas(), Mock::new(OWN) as Arc<dyn DownloadClient>);
-    assert_eq!(app.client_entry().map(|(e, _)| e), Some(nas()));
-    assert!(app.client().is_some());
-    assert!(app.set_client_hold(Some(ClientHold::Frozen)));
-    assert!(!app.set_client_hold(Some(ClientHold::Frozen)));
-    assert!(app.client_frozen());
-    assert!(app.client().is_none(), "nothing talks to a frozen client");
-    assert!(app.client_entry().is_some());
-    assert!(app.set_client_hold(Some(ClientHold::Uploads)));
-    assert_eq!(app.client_hold(), Some(ClientHold::Uploads));
-    assert!(app.client().is_some());
+    assert_eq!(app.client.entry().map(|(e, _)| e), Some(nas()));
+    assert!(app.client.get().is_some());
+    assert!(app.client.set_hold(Some(ClientHold::Frozen)));
+    assert!(!app.client.set_hold(Some(ClientHold::Frozen)));
+    assert!(app.client.frozen());
+    assert!(
+        app.client.get().is_none(),
+        "nothing talks to a frozen client"
+    );
+    assert!(app.client.entry().is_some());
+    assert!(app.client.set_hold(Some(ClientHold::Uploads)));
+    assert_eq!(app.client.hold(), Some(ClientHold::Uploads));
+    assert!(app.client.get().is_some());
 }
 
 fn on_board(o: &mut Options) {
@@ -550,8 +553,8 @@ async fn a_client_on_the_board_is_frozen_while_a_core_runs() {
     let mut live = app.events.subscribe(None).live;
     app.gate.set_corename(Some("SNES".into()));
     wait_for("the freeze", || proc.state() == 'T').await;
-    assert_eq!(app.client_hold(), Some(ClientHold::Frozen));
-    assert!(app.client().is_none());
+    assert_eq!(app.client.hold(), Some(ClientHold::Frozen));
+    assert!(app.client.get().is_none());
     let recorded = freeze::read_file(&app.options.frozen_file, freeze::euid()).expect("read");
     assert_eq!(recorded.map(|f| f.pid), Some(proc.pid()));
     assert_eq!(
@@ -564,8 +567,8 @@ async fn a_client_on_the_board_is_frozen_while_a_core_runs() {
 
     app.gate.set_corename(Some(MENU.into()));
     wait_for("the resume", || proc.state() != 'T').await;
-    wait_for("the hold cleared", || app.client_hold().is_none()).await;
-    assert!(app.client().is_some());
+    wait_for("the hold cleared", || app.client.hold().is_none()).await;
+    assert!(app.client.get().is_some());
     assert_eq!(
         freeze::read_file(&app.options.frozen_file, freeze::euid()).expect("read"),
         None
@@ -593,7 +596,7 @@ async fn a_client_resumed_elsewhere_is_frozen_again() {
         .send(proc.pid(), Signal::Cont)
         .expect("cont");
     wait_for("the freeze again", || proc.state() == 'T').await;
-    assert_eq!(app.client_hold(), Some(ClientHold::Frozen));
+    assert_eq!(app.client.hold(), Some(ClientHold::Frozen));
 }
 
 #[tokio::test]
@@ -606,7 +609,7 @@ async fn a_process_that_is_not_the_client_is_never_frozen() {
     app.gate.set_corename(Some("SNES".into()));
     let calls = wait_calls(&mock, 3).await;
     assert_eq!(calls, ["pid", "read:up", "set:up:true/0"]);
-    assert_eq!(app.client_hold(), Some(ClientHold::Uploads));
+    assert_eq!(app.client.hold(), Some(ClientHold::Uploads));
     assert_ne!(
         freeze::stat(Path::new("/proc"), other.id())
             .expect("stat")
@@ -634,12 +637,12 @@ async fn a_frozen_client_is_resumed_at_startup_unless_a_core_still_runs() {
     app.gate.set_corename(Some("SNES".into()));
     recover_frozen(&app).await;
     assert_eq!(proc.state(), 'T', "a running core keeps it frozen");
-    assert!(app.client_frozen());
+    assert!(app.client.frozen());
 
     app.gate.set_corename(Some(MENU.into()));
     recover_frozen(&app).await;
     wait_for("the resume", || proc.state() != 'T').await;
-    assert!(!app.client_frozen());
+    assert!(!app.client.frozen());
     assert!(!app.options.frozen_file.exists());
     drop(dir);
 }
@@ -656,11 +659,11 @@ async fn shutdown_resumes_a_frozen_client() {
         proc.pid(),
     )
     .expect("freeze");
-    app.set_client_hold(Some(ClientHold::Frozen));
+    app.client.set_hold(Some(ClientHold::Frozen));
     thaw_for_shutdown(&app).await;
     wait_for("the resume", || proc.state() != 'T').await;
     assert!(!app.options.frozen_file.exists());
-    assert!(!app.client_frozen());
+    assert!(!app.client.frozen());
 }
 
 #[test]
@@ -716,7 +719,7 @@ fn frozen_client(mock: &Arc<Mock>) -> (TestDir, Arc<AppState>) {
     let (dir, app) = state_with(fast);
     Scheduler::start(&app);
     app.set_client_at(nas(), Arc::clone(mock) as Arc<dyn DownloadClient>);
-    app.set_client_hold(Some(ClientHold::Frozen));
+    app.client.set_hold(Some(ClientHold::Frozen));
     (dir, app)
 }
 
@@ -731,7 +734,7 @@ async fn a_cancel_during_a_game_waits_for_the_client_and_runs_at_the_resume() {
     assert!(mock.calls().is_empty(), "nothing reaches a frozen client");
     assert_eq!(waiting(&app).await, [Op::Deselect(source)]);
 
-    app.set_client_hold(None);
+    app.client.set_hold(None);
     replay_deferred(&app).await.expect("replay");
     assert_eq!(wait_calls(&mock, 2).await, ["stop:0b", "wanted:0b:[]"]);
     assert!(waiting(&app).await.is_empty());
@@ -760,7 +763,7 @@ async fn a_finished_torrent_is_released_at_the_resume() {
     assert!(mock.calls().is_empty());
     assert_eq!(waiting(&app).await, [Op::Release(source)]);
 
-    app.set_client_hold(None);
+    app.client.set_hold(None);
     replay_deferred(&app).await.expect("replay");
     assert_eq!(mock.calls(), ["remove:0b"]);
     let row = app
@@ -782,7 +785,7 @@ async fn seed_policies_changed_during_a_game_apply_at_the_resume() {
     assert_eq!(waiting(&app).await, [Op::Seed]);
     assert!(mock.calls().is_empty());
 
-    app.set_client_hold(None);
+    app.client.set_hold(None);
     replay_deferred(&app).await.expect("replay");
     assert_eq!(mock.calls(), ["seed:0b"]);
     assert!(waiting(&app).await.is_empty());
@@ -1002,7 +1005,7 @@ async fn no_stop_is_sent_once_shutdown_began() {
     thaw_for_shutdown(&app).await;
     assert_ne!(proc.state(), 'T');
     assert!(!app.options.frozen_file.exists());
-    assert!(!app.client_frozen());
+    assert!(!app.client.frozen());
 }
 
 #[tokio::test]
@@ -1051,7 +1054,7 @@ async fn work_kept_for_a_client_that_died_during_the_game_waits_until_it_is_back
     assert!(!crate::jobs::import::release_source(&app, source).await);
 
     mock.set_unreachable(true);
-    app.set_client_hold(None);
+    app.client.set_hold(None);
     assert!(
         replay_deferred(&app).await.is_err(),
         "a refusing client is retried"
@@ -1061,7 +1064,7 @@ async fn work_kept_for_a_client_that_died_during_the_game_waits_until_it_is_back
     let tries = app.db.read(deferred::get).await.expect("kept");
     assert!(tries.iter().all(|e| e.tries == 1), "{tries:?}");
 
-    app.clear_client();
+    app.client.clear();
     replay_deferred(&app).await.expect("no client waits");
     assert_eq!(waiting(&app).await, kept, "nothing is lost with no client");
 

@@ -1017,7 +1017,7 @@ fn bits_follow_the_known_tables() {
 
 #[test]
 fn the_default_hide_list_is_the_high_flag_bits() {
-    let hide = crate::config::PrefsConfig::default().hide;
+    let hide = crate::config::PrefsConfig::default().hidden_names();
     let bits = hide
         .iter()
         .map(|f| flag_bit(f).expect("known"))

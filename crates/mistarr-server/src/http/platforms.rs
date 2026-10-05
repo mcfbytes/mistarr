@@ -2,16 +2,14 @@
 
 use std::sync::Arc;
 
-use axum::body::Bytes;
-use axum::extract::rejection::{PathRejection, QueryRejection};
-use axum::extract::{Path, Query, State};
+use axum::extract::State;
 use axum::http::StatusCode;
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use mistarr_core::PlatformId;
 use serde::{Deserialize, Serialize};
 
-use super::{ApiError, Paging};
+use super::{ApiError, ApiJson, ApiPath, ApiQuery, Paging};
 use crate::app::AppState;
 use crate::db::dats;
 use crate::db::files::{self, UnidentifiedFile};
@@ -35,11 +33,9 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
 /// `GET /platforms/{id}/unidentified`: the files not identified, with why, by path.
 async fn unidentified(
     State(app): State<Arc<AppState>>,
-    id: Result<Path<String>, PathRejection>,
-    paging: Result<Query<Paging>, QueryRejection>,
+    ApiPath(id): ApiPath<PlatformId>,
+    ApiQuery(paging): ApiQuery<Paging>,
 ) -> Result<Json<Paged<UnidentifiedFile>>, ApiError> {
-    let id = PlatformId(path_id(id)?);
-    let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let page = paging.resolve();
     let found = app
         .db
@@ -50,9 +46,7 @@ async fn unidentified(
             files::unidentified(c, &id, page).map(Some)
         })
         .await?;
-    Ok(Json(
-        found.ok_or_else(|| ApiError::not_found("no such platform"))?,
-    ))
+    Ok(Json(found.ok_or_else(|| ApiError::no_such("platform"))?))
 }
 
 /// A platform with its catalog counts.
@@ -65,10 +59,9 @@ struct PlatformOut {
 
 async fn list(
     State(app): State<Arc<AppState>>,
-    paging: Result<Query<Paging>, QueryRejection>,
+    ApiQuery(paging): ApiQuery<Paging>,
 ) -> Result<Json<Paged<PlatformOut>>, ApiError> {
-    let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
-    let hide = app.config().prefs.hide.clone();
+    let hide = app.config().prefs.hidden_names();
     let (rows, mut counts) = app
         .db
         .read(move |c| Ok((platforms::list(c)?, titles::browse::counts(c, &hide)?)))
@@ -84,15 +77,6 @@ async fn list(
     Ok(Json(Paged { items, total }))
 }
 
-fn body<T: for<'de> Deserialize<'de>>(bytes: &Bytes) -> Result<T, ApiError> {
-    serde_json::from_slice(bytes).map_err(|e| ApiError::bad_request(e.to_string()))
-}
-
-fn path_id(id: Result<Path<String>, PathRejection>) -> Result<String, ApiError> {
-    id.map(|Path(id)| id)
-        .map_err(|e| ApiError::bad_request(e.body_text()))
-}
-
 /// `PUT /platforms/{id}` body.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,12 +86,10 @@ struct UpdateBody {
 
 async fn update(
     State(app): State<Arc<AppState>>,
-    id: Result<Path<String>, PathRejection>,
-    bytes: Bytes,
+    ApiPath(id): ApiPath<PlatformId>,
+    ApiJson(UpdateBody { enabled }): ApiJson<UpdateBody>,
 ) -> Result<Json<PlatformOut>, ApiError> {
-    let id = PlatformId(path_id(id)?);
-    let UpdateBody { enabled } = body(&bytes)?;
-    let hide = app.config().prefs.hide.clone();
+    let hide = app.config().prefs.hidden_names();
     let found = app
         .db
         .write(move |c| {
@@ -120,9 +102,7 @@ async fn update(
             Ok(platforms::find(c, &id)?.map(|row| PlatformOut { row, counts }))
         })
         .await?;
-    found
-        .map(Json)
-        .ok_or_else(|| ApiError::not_found("no such platform"))
+    found.map(Json).ok_or_else(|| ApiError::no_such("platform"))
 }
 
 /// `POST /platforms/{id}/dat` body.
@@ -137,18 +117,16 @@ struct BindBody {
 #[allow(clippy::struct_field_names)] // The JSON field names.
 struct Binding {
     dat_version_id: DatVersionId,
-    platform_id: String,
+    platform_id: PlatformId,
     job_id: JobId,
 }
 
 async fn bind(
     State(app): State<Arc<AppState>>,
-    id: Result<Path<String>, PathRejection>,
-    bytes: Bytes,
+    ApiPath(platform): ApiPath<PlatformId>,
+    ApiJson(BindBody { dat_version_id }): ApiJson<BindBody>,
 ) -> Result<(StatusCode, Json<Binding>), ApiError> {
-    let platform = path_id(id)?;
-    let BindBody { dat_version_id } = body(&bytes)?;
-    let lookup = PlatformId(platform.clone());
+    let lookup = platform.clone();
     let (known, row) = app
         .db
         .read(move |c| {
@@ -159,17 +137,17 @@ async fn bind(
         })
         .await?;
     if !known {
-        return Err(ApiError::not_found("no such platform"));
+        return Err(ApiError::no_such("platform"));
     }
-    let row = row.ok_or_else(|| ApiError::not_found("no such DAT version"))?;
+    let row = row.ok_or_else(|| ApiError::no_such("DAT version"))?;
     if row.platform_id.is_some() {
-        return Err(ApiError::bad_request("that DAT version is already bound"));
+        return Err(ApiError::bad_request("That DAT version is already bound."));
     }
     if row.retired {
-        return Err(ApiError::bad_request("that DAT version is retired"));
+        return Err(ApiError::bad_request("That DAT version is retired."));
     }
     let loaded = app.config().paths.dats().join(LOADED_DIR);
-    let job = DatImport::bind(&row, &platform, &loaded);
+    let job = DatImport::bind(&row, &platform.0, &loaded);
     let job_id = Scheduler::enqueue(&app, Arc::new(job)).await?;
     Ok((
         StatusCode::ACCEPTED,

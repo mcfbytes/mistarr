@@ -494,10 +494,10 @@ impl Job for ResolveMagnet {
         if row.state != SourceState::Resolving {
             return Ok(());
         }
-        if app.client_frozen() {
+        if app.client.frozen() {
             return Ok(());
         }
-        let Some(client) = app.client() else {
+        let Some(client) = app.client.get() else {
             return note(app, &row, SourceReason::NoClient).await;
         };
         let torrent = if let Some(existing) = row.client_id {
@@ -943,7 +943,7 @@ mod tests {
                 )
             })
             .expect("insert");
-        assert!(app.client().is_none());
+        assert!(app.client.get().is_none());
         let mut events = app.events.subscribe(None).live;
         Scheduler::run_inline(&app, Arc::new(ResolveMagnet { source_id: id }))
             .await

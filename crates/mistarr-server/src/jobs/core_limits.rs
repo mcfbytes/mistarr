@@ -368,7 +368,7 @@ pub async fn follow_gate(app: Arc<AppState>) {
         } else {
             None
         };
-        let frozen = app.client_frozen();
+        let frozen = app.client.frozen();
         if !frozen && replay_retry.is_none_or(|at: Instant| at <= Instant::now()) {
             let replayed = replay_deferred(&app).await;
             replay_retry = replay_streak.record(
@@ -444,7 +444,7 @@ async fn load(app: &AppState) -> Result<Applied, Failure> {
 /// is frozen, puts back a previous client's limits that are due.
 async fn step(app: &Arc<AppState>, a: &mut Applied) -> Result<(), Failure> {
     let held = hold(app, a).await;
-    if !app.client_frozen() {
+    if !app.client.frozen() {
         restore_previous(app, a, false).await;
     }
     held
@@ -464,7 +464,7 @@ async fn hold(app: &Arc<AppState>, a: &mut Applied) -> Result<(), Failure> {
         }
         thaw_client(app, a, frozen).await?;
     }
-    let Some((id, client)) = app.client_entry() else {
+    let Some((id, client)) = app.client.entry() else {
         if let Some(saved) = a.saved.clone() {
             set_aside(app, a, saved).await?;
         }
@@ -525,14 +525,14 @@ async fn freeze_client(
         }
         _ => return Ok(Err(FreezeError::NotFound(id.kind.to_string()))),
     };
-    let before = app.client_hold();
+    let before = app.client.hold();
     // Held first, so nothing new is sent to a process about to stop.
-    app.set_client_hold(Some(ClientHold::Frozen));
+    app.client.set_hold(Some(ClientHold::Frozen));
     let (kill, file) = (
         Kill::new(&app.options.kill),
         app.options.frozen_file.clone(),
     );
-    let (lock, stop) = (Arc::clone(&app.freeze_lock), app.shutdown_signal());
+    let (lock, stop) = (Arc::clone(&app.client.freeze_lock), app.shutdown_signal());
     let done = threads::run(label::CLIENT_FREEZE, move || {
         let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
         if *stop.borrow() {
@@ -547,15 +547,15 @@ async fn freeze_client(
             Ok(Ok(frozen))
         }
         Ok(Err(e @ (FreezeError::Kill(_) | FreezeError::ShuttingDown))) => {
-            app.set_client_hold(before);
+            app.client.set_hold(before);
             Err(failed("cannot pause the download client")(e))
         }
         Ok(Err(e)) => {
-            app.set_client_hold(before);
+            app.client.set_hold(before);
             Ok(Err(e))
         }
         Err(e) => {
-            app.set_client_hold(before);
+            app.client.set_hold(before);
             Err(e.into())
         }
     }
@@ -628,7 +628,7 @@ async fn replay_deferred(app: &Arc<AppState>) -> Result<(), Failure> {
         }
         outcome(Op::Detect, found.is_ok());
     }
-    if let Some(client) = app.client() {
+    if let Some(client) = app.client.get() {
         for op in ops {
             let ok = match op {
                 Op::Seed => apply_seed_policies(app, client.as_ref()).await,
@@ -954,7 +954,7 @@ async fn recheck_hold(app: &AppState, a: &mut Applied) {
                     "the download client was resumed elsewhere; pausing it again"
                 );
                 let (proc, kill) = (app.options.proc_dir.clone(), Kill::new(&app.options.kill));
-                let (lock, stop) = (Arc::clone(&app.freeze_lock), app.shutdown_signal());
+                let (lock, stop) = (Arc::clone(&app.client.freeze_lock), app.shutdown_signal());
                 let sent = threads::run(label::CLIENT_FREEZE, move || {
                     let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
                     if *stop.borrow() {
@@ -979,7 +979,7 @@ async fn recheck_hold(app: &AppState, a: &mut Applied) {
     if a.have.up != Some(RateLimit::HELD) {
         return;
     }
-    let Some((id, client)) = app.client_entry() else {
+    let Some((id, client)) = app.client.entry() else {
         return;
     };
     if a.client.as_ref() != Some(&id) {
@@ -1016,7 +1016,7 @@ fn current_hold(app: &AppState, a: &Applied) -> Option<ClientHold> {
         Some(ClientHold::Frozen)
     } else if pause
         && a.have.up == Some(RateLimit::HELD)
-        && a.client == app.client_entry().map(|(id, _)| id)
+        && a.client == app.client.entry().map(|(id, _)| id)
     {
         Some(ClientHold::Uploads)
     } else {
@@ -1026,7 +1026,7 @@ fn current_hold(app: &AppState, a: &Applied) -> Option<ClientHold> {
 
 /// Records how the client is held and publishes the status when that changed.
 async fn publish(app: &AppState, hold: Option<ClientHold>) {
-    if app.set_client_hold(hold) {
+    if app.client.set_hold(hold) {
         crate::status::publish(app).await;
     }
 }
@@ -1051,12 +1051,12 @@ pub async fn recover_frozen(app: &Arc<AppState>) {
             return;
         }
     };
-    app.set_client_hold(Some(ClientHold::Frozen));
+    app.client.set_hold(Some(ClientHold::Frozen));
     if app.gate.state().core_running() && app.config().transfer.pause_client_while_playing {
         return;
     }
     if resume(app, frozen).await {
-        app.set_client_hold(None);
+        app.client.set_hold(None);
     }
 }
 
@@ -1068,7 +1068,7 @@ pub async fn thaw_for_shutdown(app: &AppState) {
         app.options.proc_dir.clone(),
         Kill::new(&app.options.kill),
     );
-    let lock = Arc::clone(&app.freeze_lock);
+    let lock = Arc::clone(&app.client.freeze_lock);
     let done = threads::run(label::CLIENT_FREEZE, move || {
         let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
         let Some(frozen) = freeze::read_file(&file, freeze::euid())? else {
@@ -1079,7 +1079,7 @@ pub async fn thaw_for_shutdown(app: &AppState) {
     .await;
     match done {
         Ok(Ok(true)) => {
-            app.set_client_hold(None);
+            app.client.set_hold(None);
         }
         Ok(Ok(false)) => {}
         Ok(Err(e)) => tracing::warn!(error = %e, "cannot resume the download client"),
@@ -1094,7 +1094,7 @@ async fn resume(app: &AppState, frozen: Frozen) -> bool {
         Kill::new(&app.options.kill),
         app.options.frozen_file.clone(),
     );
-    let lock = Arc::clone(&app.freeze_lock);
+    let lock = Arc::clone(&app.client.freeze_lock);
     let done = threads::run(label::CLIENT_FREEZE, move || {
         let _one = lock.lock().unwrap_or_else(PoisonError::into_inner);
         resume_now(&proc, &kill, &file, frozen)

@@ -212,7 +212,7 @@ impl Poller {
     ///
     /// [`crate::Error::Db`] on database failure; client failures are counted instead.
     pub async fn tick(&mut self, app: &AppState) -> Result<Cadence> {
-        let Some(client) = app.client() else {
+        let Some(client) = app.client.get() else {
             return self.cadence(app).await;
         };
         if !self

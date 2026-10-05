@@ -14,13 +14,29 @@ name in `server.allowed_hosts`, where `*.name` allows every subdomain; any
 port is ignored. Refused requests answer 403 `forbidden`, checked after the
 API key. `GET`, `HEAD` and `OPTIONS` are not checked. All
 list endpoints take `?limit=&offset=` (default 100, capped at 1000) and return
-`{ items: [...], total: n }`. Errors are `{ error: { code, message } }` with an
-appropriate status; codes are `bad_request`, `unauthorized`, `forbidden`,
-`not_found`, `method_not_allowed`, `conflict`, `busy`, `not_implemented`,
-`unavailable` and `internal`. Every API answer, errors included, carries
-`Cache-Control: no-store`, so a browser or proxy never serves one again. A
-documented route whose work package has not landed answers 501
-`not_implemented`. The SPA is served
+`{ items: [...], total: n }`. A query parameter a route does not take is
+ignored; a JSON body field it does not take is a 400. An answer whose purpose
+is a job queued to do the work is 202 Accepted, naming the job in the body;
+an answer that already holds the result is 200.
+
+Errors are `{ error: { code, message } }`. Each code has one status:
+
+| Code | Status | Meaning |
+|---|---|---|
+| `bad_request` | 400 | The request itself is wrong: a path, query or body that does not parse, or a value the route refuses. |
+| `unauthorized` | 401 | The API key is missing or wrong. |
+| `forbidden` | 403 | A state-changing request another site could have sent. |
+| `not_found` | 404 | No such route or item. |
+| `method_not_allowed` | 405 | The route does not take that method. |
+| `conflict` | 409 | The item's state refuses the request. |
+| `busy` | 409 | The same action ran moments ago or is still running. |
+| `unavailable` | 503 | Something outside the server cannot take the request: the download client, MiSTer Main, memory or room on the card. |
+| `internal` | 500 | The server failed; the log has the cause. |
+
+`message` is one or more sentences for a person to read, each ending in a
+full stop, in the neutral wording of PRINCIPLES.md section 5. Every API
+answer, errors included, carries `Cache-Control: no-store`, so a browser or
+proxy never serves one again. The SPA is served
 from `/` and every unknown non-API path returns `index.html`; unknown paths
 under `/api` return 404 JSON.
 
@@ -97,15 +113,15 @@ the wizard was never finished or dismissed (`POST /system/wizard/done`,
 stored in `settings` as `wizard.dismissed`). Once it is false the SPA shows
 the incomplete steps as a checklist instead of redirecting.
 
-`/system/scan` answers `{ job_id, arcade_job_id }`. A scan of `arcade` queues
+`/system/scan` answers 202 `{ job_id, arcade_job_id }`. A scan of `arcade` queues
 no library scan, since arcade presence and verification come from the arcade
 catalogue: `job_id` is `null` and, as with a scan of every platform,
 `arcade_job_id` is the queued catalogue job when the scan covers arcade and
 there is an `_Arcade` directory or stored MRA titles to catalogue, else
 absent. Scanning any other platform sets `job_id` to its scan job and leaves
-`arcade_job_id` absent. `/system/cores` answers `{ platforms, arcade_job_id
-}`: the ids of platforms whose core is installed, and the queued arcade
-catalogue or `null`.
+`arcade_job_id` absent. `/system/cores` answers 202 `{ platforms,
+arcade_job_id }`: the ids of platforms whose core is installed, and the
+queued arcade catalogue or `null`.
 
 `/system/jobs` items: `{ id, kind, lane, payload, state, progress, reason,
 created_at, updated_at }`, where `lane` is `heavy`, `background`, `light` or
@@ -160,10 +176,13 @@ A `url_fetch` reports `{ token, phase, bytes_received, bytes_total, file }`
 
 `/system/settings` body: `{ client, limits, transfer, prefs, scan }` with the
 fields of the same sections of `mistarr.toml`; `transfer` is
-`{ pause_client_while_playing }`. PUT takes any subset of the five sections;
-each section present replaces the stored one whole, with absent fields taking
-their defaults. Other keys are a 400, as is a `remote_path_map` entry whose
-`remote` is blank or whose `local` is not an absolute path; `remote` is the
+`{ pause_client_while_playing }`. `prefs.hide` holds the flags hidden from
+the 1G1R pick and the catalog: `bios`, `beta`, `proto`, `demo`, `sample` and
+`program`; a PUT naming another is a 400, and another name in `mistarr.toml`
+or in saved settings is dropped with a warning in the log. PUT takes any
+subset of the five sections and answers with all five; each section present
+replaces the stored one whole, with absent fields taking their defaults.
+Other keys, at the top or inside a section, are a 400 naming the first; so is a `remote_path_map` entry whose `remote` is blank or whose `local` is not an absolute path; `remote` is the
 client's own spelling, so `C:\Torrents` or `C:/Torrents` is accepted. Saved values take precedence over
 the file on later starts. Changing `client` re-runs client detection; changing
 the 1G1R fields of `prefs` recomputes the picks; changing `prefs.launch`
@@ -366,7 +385,7 @@ transferring, checking or importing, with the bytes of them done.
 or a JSON body `{ magnet }`. A file that does not parse, or repeats a source
 that is already loaded, is a 400. Otherwise the file is written into
 `sources/` under its name, or `name (N)` when that is taken (409 `conflict`
-when no such name is free), and the answer is 202 with the file as
+when no such name is free, as for a DAT upload), and the answer is 202 with the file as
 `/sources/incoming` lists it ("Upload answers"); the import then emits
 `source.changed`.
 
@@ -390,8 +409,8 @@ held client. Any other update answers 200 with `job_id: null`.
 stays disabled when rebound. The answer is the updated item.
 
 `DELETE /sources/{id}` answers 204. It removes the torrent from the client
-without deleting data; a client that does not answer is a 502 and the source
-is kept. A source with a download that is queued, transferring, checking or
+without deleting data; a client that does not answer is a 503 `unavailable`
+and the source is kept. A source with a download that is queued, transferring, checking or
 importing is a 400; its other downloads are kept with `source_id` `null`.
 
 `/sources/{id}/files` items: `{ file_index, path, size, rom_id, rom_name,
@@ -430,6 +449,13 @@ soon as the writer is free, sending the usual queued `job.progress` with the
 file name as `detail`, and `reason` says what the file waits for, such as
 "Waiting for the DAT import of a.dat to finish.". A file the server placed
 never waits to stop changing.
+
+Every upload, retry and fetched file is placed the same way
+(`incoming::place`): its name, or the first free `name (N)`, is claimed with
+an exclusive create, never replacing a file, and filled by renaming the
+finished file, a hidden `.upload-*.part` or the rejected file, over it. When
+`name` and `name (1)` to `name (1000)` are all taken the answer is a 409
+`conflict`.
 
 ### Listing
 

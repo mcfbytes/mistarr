@@ -167,7 +167,7 @@ async fn a_restart_takes_over_held_jobs_instead_of_adding_more() {
     let booted = boot_with_core(tempfile::tempdir().expect("tempdir")).await;
     let first = json_of(&booted, "/api/v1/system/status").await["waiting"][0]["id"].clone();
     let r = request(booted.addr(), "POST", "/api/v1/system/cores", &[], None).await;
-    assert_eq!(r.status, 200);
+    assert_eq!(r.status, 202);
     assert_eq!(
         r.json()["arcade_job_id"],
         first,

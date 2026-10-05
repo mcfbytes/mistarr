@@ -19,6 +19,7 @@ use self::spool::{Pace, Places, Spool, Stop};
 use super::{Job, JobContext, JobKind, Lane};
 use crate::app::AppState;
 use crate::error::{Error, Result};
+use crate::incoming::place::{self, PlaceError, SourceFile};
 use crate::threads::{label, run};
 
 /// Why a fetched file was refused, whatever it turned out to be.
@@ -249,7 +250,7 @@ pub fn placed_name(hint: Option<&str>, found: Found) -> String {
         Found::Xml if is_xml => "xml",
         Found::Xml => "dat",
     };
-    crate::http::sources_file_name(given, "download", ext)
+    crate::incoming::place::file_name(given, "download", ext)
 }
 
 impl UrlFetch {
@@ -366,27 +367,30 @@ impl UrlFetch {
         let placed = match checked {
             Checked::Torrent { bytes, infohash } => {
                 drop(spool);
-                let file = crate::http::SourceFile {
+                let file = SourceFile {
                     name,
                     bytes,
                     infohash,
                     is_torrent: true,
                 };
-                crate::http::place_source(app, file)
-                    .await
-                    .map_err(|e| Error::FetchRefused(e.message))?
+                match place::place_source(app, file).await {
+                    Err(Error::Place(e @ (PlaceError::Duplicate | PlaceError::NoFreeName))) => {
+                        return Err(Error::FetchRefused(e.to_string()))
+                    }
+                    placed => placed?,
+                }
             }
             Checked::Dat { .. } => {
                 let dir = app.config().paths.dats();
                 std::fs::create_dir_all(&dir)?;
-                let part = crate::http::dat_part_path(&dir);
+                let part = place::part_path(&dir);
                 let (cancel, shutdown) = (Arc::clone(&self.cancel), app.shutdown_signal());
                 let stop: Stop = Arc::new(move || cancel.is_set() || *shutdown.borrow());
                 if let Err(e) = spool.place(part.clone(), stop).await {
                     self.stop_point(ctx)?;
                     return Err(e);
                 }
-                crate::http::place_dat_part(app, &part, &name).await?
+                place::place_part(app, &part, &name).await?
             }
         };
         let mut done = view.json("placed");

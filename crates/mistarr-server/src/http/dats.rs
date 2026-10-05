@@ -2,25 +2,26 @@
 
 use std::io::Write;
 use std::path::{Path as FsPath, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-use axum::extract::rejection::{PathRejection, QueryRejection};
-use axum::extract::{DefaultBodyLimit, Multipart, Path, Query, State};
+use axum::extract::multipart::Field;
+use axum::extract::{DefaultBodyLimit, Multipart, State};
 use axum::http::StatusCode;
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
+use mistarr_sources::intake::{REASON_SUFFIX, REJECTED_DIR};
 use serde::Serialize;
 
-use super::{ApiError, Paging};
+use super::extract::with_file;
+use super::{ApiError, ApiPath, ApiQuery, Paging};
 use crate::app::AppState;
 use crate::db::dats::{self, DatReason, DatRef, DatVersionRow};
 use crate::db::ids::DatVersionId;
 use crate::db::sql::Paged;
+use crate::incoming::place::{part_path, place_moved, place_part, PlaceError};
 use crate::incoming::IncomingFile;
 use crate::jobs::dat_import::{DatImport, Recompute};
 use crate::jobs::{JobKind, Scheduler};
-use mistarr_sources::intake::{candidates, REASON_SUFFIX, REJECTED_DIR};
 
 /// Largest accepted upload, [`crate::jobs::dat_import::MAX_DAT_BYTES`].
 #[allow(clippy::cast_possible_truncation)] // 512 MiB fits every usize the target has.
@@ -41,9 +42,8 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
 
 async fn list(
     State(app): State<Arc<AppState>>,
-    paging: Result<Query<Paging>, QueryRejection>,
+    ApiQuery(paging): ApiQuery<Paging>,
 ) -> Result<Json<Paged<DatItem>>, ApiError> {
-    let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let page = paging.resolve();
     let rows = app.db.read(move |c| dats::list(c, page)).await?;
     Ok(Json(Paged {
@@ -83,9 +83,8 @@ fn reason_text(reason: &DatReason) -> String {
 /// `GET /dats/incoming`: files in `dats/` not loaded yet, and rejected ones.
 async fn incoming(
     State(app): State<Arc<AppState>>,
-    paging: Result<Query<Paging>, QueryRejection>,
+    ApiQuery(paging): ApiQuery<Paging>,
 ) -> Result<Json<Paged<IncomingFile>>, ApiError> {
-    let Query(paging) = paging.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let dir = app.config().paths.dats();
     let all = crate::incoming::list(&app, &dir, JobKind::DatImport).await?;
     Ok(Json(paging.resolve().slice(all)))
@@ -98,77 +97,31 @@ fn accepted(name: &str) -> bool {
         .is_some_and(|e| matches!(e.as_str(), "dat" | "xml" | "zip"))
 }
 
-/// A temporary name in `dir` the watcher ignores.
-pub(crate) fn part_path(dir: &FsPath) -> PathBuf {
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let n = NEXT.fetch_add(1, Ordering::Relaxed);
-    dir.join(format!(".upload-{}-{n}.part", std::process::id()))
-}
-
+/// `POST /dats/upload`: streams the first file of the form into `dats/` and queues its import.
 async fn upload(
     State(app): State<Arc<AppState>>,
-    mut multipart: Multipart,
+    mut form: Multipart,
 ) -> Result<(StatusCode, Json<IncomingFile>), ApiError> {
     let dir = app.config().paths.dats();
-    loop {
-        let field = multipart
-            .next_field()
-            .await
-            .map_err(|e| ApiError::bad_request(e.body_text()))?
-            .ok_or_else(|| ApiError::bad_request("no file in the upload"))?;
-        let Some(name) = field
-            .file_name()
-            .and_then(|n| FsPath::new(n).file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .filter(|n| !n.starts_with('.'))
-        else {
-            continue;
-        };
+    let hidden = |n: &str| n.starts_with('.');
+    let (name, part) = with_file(&mut form, hidden, async |name: String, field: Field<'_>| {
         if !accepted(&name) {
-            return Err(ApiError::bad_request("expected a .dat, .xml or .zip file"));
+            return Err(ApiError::bad_request("Upload a .dat, .xml or .zip file."));
         }
         let part = part_path(&dir);
         if let Err(e) = write_field(field, &part).await {
             let _ = std::fs::remove_file(&part);
             return Err(e);
         }
-        let placed = place_part(&app, &part, &name).await?;
-        return Ok((StatusCode::ACCEPTED, Json(placed)));
-    }
-}
-
-/// Renames the finished `part`, a [`part_path`] of `dats/`, to `name` there, or
-/// `name (N)` when that is taken, and queues its import as an upload's.
-///
-/// # Errors
-///
-/// [`crate::Error::Io`] when the rename fails, [`crate::Error::Db`] when the job cannot
-/// be recorded.
-pub(crate) async fn place_part(
-    app: &Arc<AppState>,
-    part: &FsPath,
-    name: &str,
-) -> crate::Result<IncomingFile> {
-    let dir = app.config().paths.dats();
-    let (from, name) = (part.to_path_buf(), name.to_owned());
-    let moved = crate::threads::run(crate::threads::label::DAT_SAVE, move || {
-        let moved = move_new(&from, &dir, &name);
-        if moved.is_err() {
-            let _ = std::fs::remove_file(&from);
-        }
-        moved
+        Ok((name, part))
     })
     .await?;
-    let target = moved?;
-    let job = Arc::new(DatImport::new(&target));
-    crate::incoming::queue_placed(app, &target, JobKind::DatImport, job).await
+    let placed = place_part(&app, &part, &name).await?;
+    Ok((StatusCode::ACCEPTED, Json(placed)))
 }
 
 /// Streams one multipart field to `path`, one chunk in memory at a time.
-async fn write_field(
-    mut field: axum::extract::multipart::Field<'_>,
-    path: &FsPath,
-) -> Result<(), ApiError> {
+async fn write_field(mut field: Field<'_>, path: &FsPath) -> Result<(), ApiError> {
     let mut file = Some(std::fs::File::create(path).map_err(crate::Error::from)?);
     while let Some(chunk) = field
         .chunk()
@@ -195,54 +148,15 @@ fn rejected_file(dats: &FsPath, name: &str) -> Result<PathBuf, ApiError> {
         && !name.contains(['/', '\\'])
         && !name.ends_with(REASON_SUFFIX);
     if !plain {
-        return Err(ApiError::bad_request("not a file name in dats/rejected/"));
+        return Err(ApiError::bad_request(
+            "That is not a file name in dats/rejected/.",
+        ));
     }
     let path = dats.join(REJECTED_DIR).join(name);
     match std::fs::symlink_metadata(&path) {
         Ok(meta) if meta.is_file() => Ok(path),
-        _ => Err(ApiError::not_found("no such rejected file")),
+        _ => Err(ApiError::no_such("rejected file")),
     }
-}
-
-/// Moves `from` into `dir` under `name` or the first free variant, never replacing a
-/// file: a hard link where the file system has them, else a copy made with `create_new`,
-/// since an upload may come from another file system, unlike intake's `place` rename.
-fn move_new(from: &FsPath, dir: &FsPath, name: &str) -> std::io::Result<PathBuf> {
-    use std::io::ErrorKind;
-    for target in candidates(dir, name.as_ref()) {
-        let placed = match std::fs::hard_link(from, &target) {
-            Err(e) if e.kind() == ErrorKind::NotFound || e.kind() == ErrorKind::AlreadyExists => {
-                Err(e)
-            }
-            Err(_) => copy_new(from, &target),
-            ok => ok,
-        };
-        match placed {
-            Ok(()) => {
-                std::fs::remove_file(from)?;
-                return Ok(target);
-            }
-            Err(e) if e.kind() == ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Err(std::io::Error::new(
-        ErrorKind::AlreadyExists,
-        "no free file name",
-    ))
-}
-
-fn copy_new(from: &FsPath, to: &FsPath) -> std::io::Result<()> {
-    let mut src = std::fs::File::open(from)?;
-    let mut dst = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(to)?;
-    let copied = std::io::copy(&mut src, &mut dst).and_then(|_| dst.sync_all());
-    if copied.is_err() {
-        let _ = std::fs::remove_file(to);
-    }
-    copied
 }
 
 fn reason_of(path: &FsPath) -> PathBuf {
@@ -255,14 +169,13 @@ fn reason_of(path: &FsPath) -> PathBuf {
 /// free name, drops its reason and queues its import.
 async fn retry_rejected(
     State(app): State<Arc<AppState>>,
-    file: Result<Path<String>, PathRejection>,
+    ApiPath(name): ApiPath<String>,
 ) -> Result<(StatusCode, Json<IncomingFile>), ApiError> {
-    let Path(name) = file.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let dir = app.config().paths.dats();
     let path = rejected_file(&dir, &name)?;
-    let target = match move_new(&path, &dir, &name) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            return Err(ApiError::not_found("no such rejected file"))
+    let target = match place_moved(&path, &dir, &name) {
+        Err(PlaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::no_such("rejected file"))
         }
         moved => moved.map_err(crate::Error::from)?,
     };
@@ -275,9 +188,8 @@ async fn retry_rejected(
 /// `DELETE /dats/rejected/{file}`: deletes a rejected file and its reason.
 async fn delete_rejected(
     State(app): State<Arc<AppState>>,
-    file: Result<Path<String>, PathRejection>,
+    ApiPath(name): ApiPath<String>,
 ) -> Result<StatusCode, ApiError> {
-    let Path(name) = file.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let path = rejected_file(&app.config().paths.dats(), &name)?;
     std::fs::remove_file(&path).map_err(crate::Error::from)?;
     remove_if_present(&reason_of(&path))?;
@@ -295,17 +207,16 @@ fn remove_if_present(path: &FsPath) -> Result<(), ApiError> {
 /// queues the recompute job, which matches their files again and recomputes 1G1R.
 async fn retire(
     State(app): State<Arc<AppState>>,
-    id: Result<Path<i64>, PathRejection>,
+    ApiPath(id): ApiPath<DatVersionId>,
 ) -> Result<StatusCode, ApiError> {
-    let Path(id) = id.map_err(|e| ApiError::bad_request(e.body_text()))?;
     let row = app
         .db
         .write_tx(move |tx| {
-            let row = dats::retire(tx, DatVersionId(id), crate::unix_now())?;
+            let row = dats::retire(tx, id, crate::unix_now())?;
             Ok(row)
         })
         .await?
-        .ok_or_else(|| ApiError::not_found("no such DAT version"))?;
+        .ok_or_else(|| ApiError::no_such("DAT version"))?;
     if let Some(p) = row.platform_id {
         Scheduler::enqueue(&app, Arc::new(Recompute::new(&p.0))).await?;
         crate::jobs::remap::enqueue(&app, Some(vec![p])).await;
@@ -349,10 +260,10 @@ mod tests {
         assert!(rejected_file(dir.path(), "a.dat").is_ok());
         for bad in ["", ".a.dat", "../a.dat", "x/a.dat", "a.dat.reason.txt"] {
             let e = rejected_file(dir.path(), bad).expect_err(bad);
-            assert_eq!(e.status, StatusCode::BAD_REQUEST, "{bad}");
+            assert_eq!(e.status(), StatusCode::BAD_REQUEST, "{bad}");
         }
         let e = rejected_file(dir.path(), "b.dat").expect_err("absent");
-        assert_eq!(e.status, StatusCode::NOT_FOUND);
+        assert_eq!(e.status(), StatusCode::NOT_FOUND);
         assert!(reason_of(FsPath::new("/r/a.dat")).ends_with("a.dat.reason.txt"));
         assert!(remove_if_present(&dir.path().join("none")).is_ok());
         std::os::unix::fs::symlink(
@@ -361,41 +272,12 @@ mod tests {
         )
         .expect("symlink");
         let e = rejected_file(dir.path(), "l.dat").expect_err("a link is not a rejected file");
-        assert_eq!(e.status, StatusCode::NOT_FOUND);
+        assert_eq!(e.status(), StatusCode::NOT_FOUND);
     }
 
     #[test]
-    fn a_retried_file_never_replaces_one_of_the_same_name() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let from = dir.path().join("rejected.dat");
-        std::fs::write(&from, b"retried").expect("write");
-        std::fs::write(dir.path().join("a.dat"), b"waiting").expect("write");
-        let moved = move_new(&from, dir.path(), "a.dat").expect("move");
-        assert!(moved.ends_with("a (1).dat"));
-        assert_eq!(std::fs::read(&moved).expect("read"), b"retried");
-        assert_eq!(
-            std::fs::read(dir.path().join("a.dat")).expect("read"),
-            b"waiting"
-        );
-        assert!(!from.exists());
-        let gone = move_new(&from, dir.path(), "b.dat").expect_err("moved already");
-        assert_eq!(gone.kind(), std::io::ErrorKind::NotFound);
-        let to = dir.path().join("c.dat");
-        copy_new(&moved, &to).expect("copy");
-        assert_eq!(
-            copy_new(&moved, &to).expect_err("exists").kind(),
-            std::io::ErrorKind::AlreadyExists
-        );
-    }
-
-    #[test]
-    fn only_dat_files_are_accepted_and_parts_are_hidden() {
+    fn only_dat_files_are_accepted() {
         assert!(accepted("a.DAT") && accepted("b.xml") && accepted("c.zip"));
         assert!(!accepted("d.txt") && !accepted("dat"));
-        let p = part_path(FsPath::new("/x"));
-        assert!(p
-            .file_name()
-            .is_some_and(|n| n.to_string_lossy().starts_with('.')));
-        assert_ne!(p, part_path(FsPath::new("/x")));
     }
 }

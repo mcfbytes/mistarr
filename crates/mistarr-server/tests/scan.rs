@@ -108,7 +108,7 @@ async fn post_scan(addr: std::net::SocketAddr, platform_id: Option<&str>) -> ser
         |p| format!(r#"{{"platform_id":"{p}"}}"#),
     );
     let r = request(addr, "POST", "/api/v1/system/scan", &[], Some(&body)).await;
-    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.status, 202, "{}", r.body);
     r.json()
 }
 
