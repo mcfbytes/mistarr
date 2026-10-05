@@ -437,7 +437,7 @@ fn prepare_catalog(c: &mut rusqlite::Connection) -> Result<Prepared> {
     let (resolved, settled) = db::transact(c, |tx| {
         db::dats::refresh_families(tx)?;
         let resolved = db::dats::resolve_families(tx)?;
-        Ok((resolved, crate::jobs::scan::settle_names(tx)?))
+        Ok((resolved, crate::jobs::matching::settle_names(tx)?))
     })?;
     if settled > 0 {
         tracing::info!(settled, "misnamed files verified under the name rule");
@@ -767,6 +767,29 @@ pub(crate) mod testutil {
         pub fn ram(&self) -> &Path {
             self.ram.path()
         }
+    }
+
+    /// A zip of `members`, each `(name, bytes)` in order; a name ending in `/` is a
+    /// directory entry.
+    pub fn zip_bytes(members: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write as _;
+        let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, body) in members {
+            if name.ends_with('/') {
+                z.add_directory(*name, options).expect("directory");
+            } else {
+                z.start_file(*name, options).expect("start");
+                z.write_all(body).expect("write");
+            }
+        }
+        z.finish().expect("finish").into_inner()
+    }
+
+    /// Writes [`zip_bytes`] of `members` to `path`, creating its directory.
+    pub fn write_zip(path: &Path, members: &[(&str, &[u8])]) {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(path, zip_bytes(members)).expect("write");
     }
 
     /// App state over a fresh database with paths inside the returned directory.

@@ -7,7 +7,8 @@ Three layers. All of them run on x86-64 in CI; only the last needs a board.
 - `mistarr-core`: DAT parsing against synthetic DATs generated in the test,
   name parsing corpus, header rules, hashing against known vectors, the
   hex, digest, bencode, magnet and percent codecs, 1G1R
-  selection tables, cue parsing, and the CHD decoder: known answers worked
+  selection tables, in-memory matching of payloads to a DAT entry's roms,
+  cue parsing, and the CHD decoder: known answers worked
   out in CHD.md for the map, canonical codes and CHT2 layout, and
   `decode_budget` under 24 MiB at the header limits.
 - `mistarr-mister`: every adapter's `plan_placement` against
@@ -20,7 +21,9 @@ Three layers. All of them run on x86-64 in CI; only the last needs a board.
   asserts the exact calls, including the 409 handshake and SCGI framing.
 
 No test may contain a commercial title name, a real hash of a commercial dump,
-or a real infohash. Fixtures are generated.
+or a real infohash. Fixtures are generated. `mistarr-server`'s unit tests build
+every zip they need with `app::testutil::zip_bytes`, or `write_zip` to place one
+on disk.
 
 ## 2. Integration tests: the synthetic set
 

@@ -2,7 +2,6 @@
 //! files and matches them against loaded DATs. See `docs/ARCHITECTURE.md`
 //! "Library scan" and `docs/VERIFICATION.md` "Hashing" and "Matching order".
 
-use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io;
 use std::path::{Path, PathBuf};
@@ -14,18 +13,20 @@ use mistarr_core::hash::{
     hash_forms, hash_reader, hash_zip_member_forms, zip_member_content_crc, zip_members, HashError,
     HeaderForms, HeaderRule, ZipMember,
 };
-use mistarr_core::{HashSet as Hashes, PlatformId};
+use mistarr_core::PlatformId;
 use mistarr_mister::platforms::{self, Kind, Platform};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 use tokio::time::Instant;
 
+use super::fsutil::{all_entries, extension, stat};
+use super::matching::{self, cartridge_state, classify_disc_tracks, own_name, stored_match, Track};
+use super::progress::Throttle;
 use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::files::{self, FileState, NewFile};
-use crate::db::ids::{FileId, JobId, RomId, TitleId};
+use crate::db::ids::{FileId, JobId};
 use crate::db::platforms as platform_rows;
-use crate::db::titles::RomStatus;
 use crate::error::{Error, Result};
 use crate::events::EventKind;
 
@@ -162,34 +163,22 @@ fn discover_units(games_root: &Path, platform: &Platform) -> (Vec<Unit>, Vec<Str
     let mut top_dirs: Vec<(String, PathBuf)> = Vec::new();
     for name in top_names {
         let path = games_root.join(name);
-        match fs::metadata(&path) {
-            Ok(m) if m.is_dir() => top_dirs.push((name.to_owned(), path)),
-            Ok(_) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "cannot read directory; keeping its rows");
-                unreadable.push(name.to_owned());
-            }
+        let found = match fs::metadata(&path) {
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            found => found,
+        };
+        match readable(&path, found) {
+            Some(m) if m.is_dir() => top_dirs.push((name.to_owned(), path)),
+            Some(_) => {}
+            None => unreadable.push(name.to_owned()),
         }
     }
     let mut units = if platform.kind == Kind::Disc {
         let mut units = Vec::new();
         for (name, dir) in &top_dirs {
-            let entries = match fs::read_dir(dir) {
-                Ok(entries) => entries,
-                Err(e) => {
-                    tracing::warn!(path = %dir.display(), error = %e, "cannot read directory; keeping its rows");
-                    unreadable.push(name.clone());
-                    continue;
-                }
-            };
-            let entries = match all_entries(entries) {
-                Ok(entries) => entries,
-                Err(e) => {
-                    tracing::warn!(path = %dir.display(), error = %e, "cannot read directory; keeping its rows");
-                    unreadable.push(name.clone());
-                    continue;
-                }
+            let Some(entries) = readable(dir, fs::read_dir(dir).and_then(all_entries)) else {
+                unreadable.push(name.clone());
+                continue;
             };
             let mut has_loose_file = false;
             for entry in entries {
@@ -222,46 +211,14 @@ fn discover_units(games_root: &Path, platform: &Platform) -> (Vec<Unit>, Vec<Str
     (units, unreadable)
 }
 
-/// Throttles `file.changed` to at most 10 per second by dropping the rest;
-/// every state is already durable in `files` regardless.
-struct Throttle {
-    last: Option<Instant>,
-}
-
-impl Throttle {
-    const MIN_GAP: Duration = Duration::from_millis(100);
-
-    fn new() -> Self {
-        Self { last: None }
-    }
-
-    fn allow(&mut self) -> bool {
-        let now = Instant::now();
-        if self
-            .last
-            .is_some_and(|last| now.duration_since(last) < Self::MIN_GAP)
-        {
-            return false;
-        }
-        self.last = Some(now);
-        true
-    }
-}
-
-/// A unit's listing, or `None` with a warning when its directory cannot be read,
-/// so its rows are kept rather than pruned.
+/// What `dir` listed or stated, or `None` with a warning when it cannot be read, so its
+/// rows are kept rather than pruned.
 fn readable<T>(dir: &Path, listed: io::Result<T>) -> Option<T> {
     listed
         .map_err(|e| {
             tracing::warn!(path = %dir.display(), error = %e, "cannot read directory; keeping its rows");
         })
         .ok()
-}
-
-/// Every entry of a directory listing, or the first error: an entry that fails partway
-/// makes the whole directory unreadable, so no later file's row is pruned for it.
-pub(crate) fn all_entries<T>(entries: impl Iterator<Item = io::Result<T>>) -> io::Result<Vec<T>> {
-    entries.collect()
 }
 
 /// A regular file a unit's listing found.
@@ -288,7 +245,7 @@ fn list_files(dir: &Path) -> io::Result<Vec<ListedFile>> {
             let meta = fs::metadata(&path).ok().filter(fs::Metadata::is_file)?;
             Some(ListedFile {
                 name: e.file_name().to_string_lossy().into_owned(),
-                meta: stored_meta(&meta),
+                meta: stat(&meta),
                 path,
             })
         })
@@ -421,28 +378,6 @@ async fn report_outcome(ctx: &JobContext, pid: &PlatformId, total: usize) -> Res
     .await
 }
 
-/// A file's size and mtime, as stored in `files`.
-pub(crate) fn file_meta(path: &Path) -> io::Result<(i64, i64)> {
-    stored_meta(&fs::metadata(path)?)
-}
-
-/// The size and mtime of `meta`, as stored in `files`.
-fn stored_meta(meta: &fs::Metadata) -> io::Result<(i64, i64)> {
-    let size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
-    let mtime = meta
-        .modified()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-    Ok((size, mtime))
-}
-
-/// `path`'s extension, lowercased.
-pub(crate) fn extension(path: &Path) -> Option<String> {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .map(str::to_ascii_lowercase)
-}
-
 fn accepts_extension(platform: &Platform, ext: &str) -> bool {
     platform.load_extensions.contains(&ext) || (platform.kind == Kind::Cartridge && ext == "zip")
 }
@@ -455,6 +390,10 @@ const FLUSH_ROWS: usize = 256;
 
 /// Least time between two saves of the resume point.
 const PROGRESS_EVERY: Duration = Duration::from_secs(2);
+
+/// Least time between two `file.changed` events; the rest are dropped, since every state
+/// is already durable in `files`.
+const FILE_CHANGED_EVERY: Duration = Duration::from_millis(100);
 
 /// Whether `rel_path` lies in one of the `done` units, whose ids are its leading components.
 fn in_done_unit(rel_path: &str, done: &std::collections::HashSet<String>) -> bool {
@@ -478,7 +417,7 @@ impl<'a> Sink<'a> {
             ctx,
             platform_id: platform_id.clone(),
             rows: Vec::with_capacity(FLUSH_ROWS),
-            throttle: Throttle::new(),
+            throttle: Throttle::new(FILE_CHANGED_EVERY),
         }
     }
 
@@ -509,7 +448,7 @@ impl<'a> Sink<'a> {
             })
             .await?;
         for (_, id, state) in &written {
-            if self.throttle.allow() {
+            if self.throttle.due(std::time::Instant::now(), "file.changed") {
                 self.ctx.app.events.publish(
                     EventKind::FileChanged,
                     &json!({ "file_id": id.0, "state": state.as_str() }),
@@ -518,6 +457,69 @@ impl<'a> Sink<'a> {
         }
         Ok(())
     }
+
+    /// Settles what [`known`] decides for the file at `rel_path` of `size` and `mtime`:
+    /// true when it is to be hashed; otherwise its matched row is queued or it is skipped.
+    async fn handle_known(
+        &mut self,
+        rel_path: &str,
+        (size, mtime): (i64, i64),
+        precheck: Option<HeaderRule>,
+    ) -> Result<bool> {
+        let (pid, rel) = (self.platform_id.clone(), rel_path.to_owned());
+        let decided = self
+            .ctx
+            .app
+            .db
+            .read(move |c| known(c, &pid, &rel, size, mtime, precheck))
+            .await?;
+        match decided {
+            Known::Hash => Ok(true),
+            Known::Skip => Ok(false),
+            Known::Matched(row) => {
+                self.push(*row).await?;
+                Ok(false)
+            }
+        }
+    }
+
+    /// The row of a payload hashed under `rule` into `forms`, matched with `own_name`
+    /// as its name: a flat file's name or a zip member's leaf.
+    async fn hashed_row(
+        &self,
+        found: Found,
+        own_name: &str,
+        rule: HeaderRule,
+        forms: HeaderForms,
+    ) -> Result<NewFile> {
+        let (pid, name) = (self.platform_id.clone(), own_name.to_owned());
+        let ((rom_id, state), forms) = self
+            .ctx
+            .app
+            .db
+            .read(move |c| Ok((matching::classify(c, &pid, &name, &forms)?, forms)))
+            .await?;
+        Ok(NewFile {
+            rel_path: found.rel_path,
+            size: found.size,
+            mtime: found.mtime,
+            crc32: Some(forms.content.crc32.clone()),
+            md5: Some(forms.content.md5.clone()),
+            sha1: Some(forms.content.sha1.clone()),
+            header_rule: Some(rule.as_str().to_owned()),
+            whole: files::WholeHashes::of(rule.as_str(), &forms),
+            rom_id,
+            state,
+            reason: None,
+        })
+    }
+}
+
+/// A file or zip member the walk found, by its `files` path, size and mtime.
+struct Found {
+    rel_path: String,
+    size: i64,
+    mtime: i64,
 }
 
 /// Writes already-hashed rows, and the scan's resume point when given, in one short
@@ -543,216 +545,6 @@ fn commit_unit(
         files::save_scan_progress(tx, platform_id, done_dirs, now)?;
     }
     Ok(written)
-}
-
-/// Matches a fully hashed payload in its forms and decides its state, per
-/// `docs/DATA-MODEL.md` "files.state".
-fn classify(
-    conn: &Connection,
-    platform_id: &PlatformId,
-    actual_name: &str,
-    forms: &HeaderForms,
-) -> Result<(Option<RomId>, FileState)> {
-    let m = match_forms(
-        conn,
-        platform_id,
-        forms.whole.iter().chain([&forms.content]),
-    )?;
-    Ok(cartridge_state(platform_id, m.as_ref(), actual_name))
-}
-
-/// The rom `forms` match under `docs/VERIFICATION.md` "Matching order" in each, a caller
-/// passing the whole file before its content: the first form to match a live rom, else
-/// the first to match a retired one, so a live rom of any form wins over a retired one.
-///
-/// # Errors
-///
-/// [`Error::Db`] on SQLite failure.
-pub(crate) fn match_forms<'a>(
-    conn: &Connection,
-    platform_id: &PlatformId,
-    forms: impl IntoIterator<Item = &'a Hashes>,
-) -> Result<Option<files::RomMatch>> {
-    let forms: Vec<&Hashes> = forms.into_iter().collect();
-    let size = |h: &Hashes| i64::try_from(h.size).unwrap_or(i64::MAX);
-    for h in &forms {
-        let (sha1, md5, crc32) = (&h.sha1, &h.md5, &h.crc32);
-        if let Some(m) = files::match_live_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
-            return Ok(Some(m));
-        }
-    }
-    for h in &forms {
-        let (sha1, md5, crc32) = (&h.sha1, &h.md5, &h.crc32);
-        if let Some(m) = files::match_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
-            return Ok(Some(m));
-        }
-    }
-    Ok(None)
-}
-
-/// The rom id and state a cartridge file or zip member of `platform` named `own_name`
-/// takes from its match: `bad` for a bad dump, else `verified` or `misnamed` by [`name_fits`].
-pub(crate) fn cartridge_state(
-    platform: &PlatformId,
-    m: Option<&files::RomMatch>,
-    own_name: &str,
-) -> (Option<RomId>, FileState) {
-    let Some(m) = m else {
-        return (None, FileState::Unverified);
-    };
-    let state = if m.status == RomStatus::BadDump {
-        FileState::Bad
-    } else if name_fits(platform, &m.name, &m.game, own_name) {
-        FileState::Verified
-    } else {
-        FileState::Misnamed
-    };
-    (Some(m.rom_id), state)
-}
-
-/// Whether `own_name` is a name the adapter expects for the rom named `rom_name` of the
-/// game `game` on `platform`, per `docs/VERIFICATION.md` "File names": the rom's file
-/// name, or its stem or the game's placed name with an extension the
-/// platform loads that is the rom's, the one placement writes, or any when the platform
-/// does not load the rom's.
-///
-/// ```
-/// use mistarr_core::PlatformId;
-/// use mistarr_server::jobs::scan::name_fits;
-/// let (nes, game) = (PlatformId("nes".into()), "Example Quest (USA)");
-/// assert!(name_fits(&nes, "Example Quest (USA).nes", game, "Example Quest (USA).nes"));
-/// assert!(name_fits(&nes, "Example Quest (USA).unh", game, "Example Quest (USA).nes"));
-/// assert!(!name_fits(&nes, "Example Quest (USA).unh", game, "Example Quest (Japan).nes"));
-/// ```
-#[must_use]
-pub fn name_fits(platform: &PlatformId, rom_name: &str, game: &str, own_name: &str) -> bool {
-    let rom_name = files::basename(rom_name);
-    if rom_name == own_name {
-        return true;
-    }
-    let (Some(row), Some((own_stem, own_ext))) =
-        (platforms::by_id(&platform.0), split_extension(own_name))
-    else {
-        return false;
-    };
-    let loads = |ext: &str| {
-        row.load_extensions
-            .iter()
-            .chain(row.extension_written.iter())
-            .any(|e| e.eq_ignore_ascii_case(ext))
-    };
-    if !loads(own_ext) {
-        return false;
-    }
-    let (rom_stem, rom_ext) = split_extension(rom_name).unwrap_or((rom_name, ""));
-    let written = row
-        .extension_written
-        .is_some_and(|e| e.eq_ignore_ascii_case(own_ext));
-    let ext_fits = own_ext.eq_ignore_ascii_case(rom_ext) || written || !loads(rom_ext);
-    let placed =
-        || written && mistarr_mister::adapter::safe_name(game).is_ok_and(|g| g == own_stem);
-    ext_fits && (own_stem == rom_stem || placed())
-}
-
-/// Splits a file name at a final dot followed by what reads as an extension: one to
-/// four ASCII letters or digits, at least one a letter. `None` when there is none.
-fn split_extension(name: &str) -> Option<(&str, &str)> {
-    let (stem, ext) = name.rsplit_once('.')?;
-    let looks = !stem.is_empty()
-        && (1..=4).contains(&ext.len())
-        && ext.bytes().all(|b| b.is_ascii_alphanumeric())
-        && ext.bytes().any(|b| b.is_ascii_alphabetic());
-    looks.then_some((stem, ext))
-}
-
-/// Marks `verified` every `misnamed` cartridge file whose name [`name_fits`] its rom,
-/// as a scan would decide it now; returns how many. Disc tracks keep their state.
-///
-/// # Errors
-///
-/// [`Error::Db`] on SQLite failure.
-///
-/// ```
-/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert_eq!(mistarr_server::jobs::scan::settle_names(&conn).unwrap(), 0);
-/// ```
-pub fn settle_names(conn: &Connection) -> Result<usize> {
-    let mut settled = 0;
-    for row in files::misnamed(conn)? {
-        let disc = platforms::by_id(&row.platform_id.0).is_some_and(|p| p.kind == Kind::Disc);
-        if !disc
-            && name_fits(
-                &row.platform_id,
-                &row.rom_name,
-                &row.game,
-                own_name(&row.rel_path),
-            )
-        {
-            files::set_match(conn, row.id, Some(row.rom_id), FileState::Verified)?;
-            settled += 1;
-        }
-    }
-    Ok(settled)
-}
-
-/// The name a row's file or zip member has, compared against the rom's name.
-pub(crate) fn own_name(rel_path: &str) -> &str {
-    files::basename(rel_path.rsplit_once('#').map_or(rel_path, |(_, m)| m))
-}
-
-/// The live rom a fully hashed row's stored hashes match, per `docs/VERIFICATION.md`
-/// "Matching stored hashes"; a row without a sha1 or md5 never matches. A row with
-/// whole-file hashes that differ from its hashes tries the whole file at its size first,
-/// then its content at the size less the header. Otherwise the hashes are of the content
-/// after the row's header rule while `size` is the size on disk, so the CRC32 tier also
-/// tries the size less the header that rule strips.
-///
-/// # Errors
-///
-/// [`Error::Db`] on SQLite failure.
-pub(crate) fn stored_match(
-    conn: &Connection,
-    platform_id: &PlatformId,
-    f: &files::FileRow,
-) -> Result<Option<files::RomMatch>> {
-    if f.md5.is_none() && f.sha1.is_none() {
-        return Ok(None);
-    }
-    let hash = |h: &Option<String>| h.clone().unwrap_or_default();
-    let (sha1, md5, crc32) = (hash(&f.sha1), hash(&f.md5), hash(&f.crc32));
-    let rule = f
-        .header_rule
-        .as_deref()
-        .and_then(|n| n.parse::<HeaderRule>().ok())
-        .unwrap_or_default();
-    let header = i64::try_from(rule.header_len()).unwrap_or(0);
-    let w = &f.whole;
-    let has_whole = w.sha1.is_some() || w.md5.is_some();
-    if has_whole && (&w.sha1, &w.md5) != (&f.sha1, &f.md5) {
-        let (wsha1, wmd5, wcrc) = (hash(&w.sha1), hash(&w.md5), hash(&w.crc32));
-        if let Some(m) = files::match_live_rom(conn, platform_id, &wsha1, &wmd5, &wcrc, f.size)? {
-            return Ok(Some(m));
-        }
-        let size = f.size - header;
-        return files::match_live_rom(conn, platform_id, &sha1, &md5, &crc32, size);
-    }
-    if let Some(m) = files::match_live_rom(conn, platform_id, &sha1, &md5, &crc32, f.size)? {
-        return Ok(Some(m));
-    }
-    if has_whole {
-        // No header was found: the hashes already are the whole file's.
-        return Ok(None);
-    }
-    let stripped = match rule {
-        HeaderRule::Smc => f.size % 1024 == 512,
-        _ => header > 0 && f.size > header,
-    };
-    if !stripped || crc32.is_empty() {
-        return Ok(None);
-    }
-    // The hash tiers failed above whatever the size; only the CRC32 tier is left.
-    files::match_live_rom(conn, platform_id, "", "", &crc32, f.size - header)
 }
 
 /// What a scan does with a file it found, given the row it has for it.
@@ -781,10 +573,7 @@ fn known(
     let Some(row) = files::find_by_path(conn, platform_id, rel_path)? else {
         return Ok(Known::Hash);
     };
-    if row.size != size || row.mtime != mtime || row.state == FileState::Pending {
-        return Ok(Known::Hash);
-    }
-    if lacks_whole(&row) {
+    if !row.unchanged(size, mtime) || lacks_whole(&row) {
         return Ok(Known::Hash);
     }
     if row.rom_id.is_some() || row.state != FileState::Unverified {
@@ -865,8 +654,7 @@ async fn scan_flat_unit(
     unit_id: &str,
     dir: &Path,
 ) -> Result<Option<Vec<String>>> {
-    let (ctx, platform_id) = (sink.ctx, sink.platform_id.clone());
-    let platform_id = &platform_id;
+    let ctx = sink.ctx;
     let dir_owned = dir.to_path_buf();
     let listed = crate::threads::run(crate::threads::label::SCAN_LIST, move || {
         list_files(&dir_owned)
@@ -897,32 +685,12 @@ async fn scan_flat_unit(
         };
         if ext == "zip" {
             // A zip container has no files row of its own; its members do.
-            scan_zip_unit(
-                sink,
-                rule,
-                rule.as_str(),
-                &rel_path,
-                &path,
-                mtime,
-                &mut seen,
-            )
-            .await?;
+            scan_zip_unit(sink, rule, &rel_path, &path, mtime, &mut seen).await?;
             continue;
         }
         seen.push(rel_path.clone());
-        let (pid, relp) = (platform_id.clone(), rel_path.clone());
-        let known = ctx
-            .app
-            .db
-            .read(move |c| known(c, &pid, &relp, size, mtime, None))
-            .await?;
-        match known {
-            Known::Hash => {}
-            Known::Skip => continue,
-            Known::Matched(row) => {
-                sink.push(*row).await?;
-                continue;
-            }
+        if !sink.handle_known(&rel_path, (size, mtime), None).await? {
+            continue;
         }
         let hint = u64::try_from(size).unwrap_or(0);
         let path_owned = path.clone();
@@ -932,13 +700,12 @@ async fn scan_flat_unit(
         .await?;
         let row = match hash_result {
             Ok(forms) => {
-                let (pid2, name2, forms2) = (platform_id.clone(), name.clone(), forms.clone());
-                let (rom_id, state) = ctx
-                    .app
-                    .db
-                    .read(move |c| classify(c, &pid2, &name2, &forms2))
-                    .await?;
-                hashed_row(rel_path, size, mtime, rule.as_str(), &forms, rom_id, state)
+                let found = Found {
+                    rel_path,
+                    size,
+                    mtime,
+                };
+                sink.hashed_row(found, &name, rule, forms).await?
             }
             Err(e) => {
                 tracing::warn!(path = %path.display(), error = %e, "cannot hash file; marking unverified");
@@ -948,31 +715,6 @@ async fn scan_flat_unit(
         sink.push(row).await?;
     }
     Ok(Some(seen))
-}
-
-/// The row of a payload hashed under the rule named `rule` into `forms`.
-fn hashed_row(
-    rel_path: String,
-    size: i64,
-    mtime: i64,
-    rule: &str,
-    forms: &HeaderForms,
-    rom_id: Option<RomId>,
-    state: FileState,
-) -> NewFile {
-    NewFile {
-        rel_path,
-        size,
-        mtime,
-        crc32: Some(forms.content.crc32.clone()),
-        md5: Some(forms.content.md5.clone()),
-        sha1: Some(forms.content.sha1.clone()),
-        header_rule: Some(rule.to_owned()),
-        whole: files::WholeHashes::of(rule, forms),
-        rom_id,
-        state,
-        reason: None,
-    }
 }
 
 /// An unmatched or unreadable file's row: no hash was trusted enough to
@@ -996,7 +738,6 @@ fn unverified_row(rel_path: String, size: i64, mtime: i64, crc32: Option<String>
 async fn scan_zip_unit(
     sink: &mut Sink<'_>,
     rule: HeaderRule,
-    rule_name: &str,
     rel_path: &str,
     path: &Path,
     mtime: i64,
@@ -1030,23 +771,12 @@ async fn scan_zip_unit(
         let member_rel = format!("{rel_path}#{}", member.name);
         let member_size = i64::try_from(member.size).unwrap_or(i64::MAX);
         seen.push(member_rel.clone());
-        let (pid, mrel) = (platform_id.clone(), member_rel.clone());
         // The central directory's CRC32 is of the whole member, before any transform.
         let precheck = (rule == HeaderRule::None || rule.strips_header()).then_some(rule);
-        let known = ctx
-            .app
-            .db
-            .read(move |c| known(c, &pid, &mrel, member_size, mtime, precheck))
-            .await?;
-        match known {
-            Known::Hash => {}
-            Known::Skip => continue,
-            Known::Matched(row) => {
-                sink.push(*row).await?;
-                continue;
-            }
+        let stats = (member_size, mtime);
+        if !sink.handle_known(&member_rel, stats, precheck).await? {
+            continue;
         }
-        let basename = files::basename(&member.name).to_owned();
 
         if precheck.is_some() {
             let unit = (path, mtime, member_rel.as_str());
@@ -1064,28 +794,20 @@ async fn scan_zip_unit(
         .await?;
         let row = match hash_result {
             Ok(forms) => {
-                let (pid2, basename2, forms2) = (platform_id.clone(), basename, forms.clone());
-                let (rom_id, state) = ctx
-                    .app
-                    .db
-                    .read(move |c| classify(c, &pid2, &basename2, &forms2))
-                    .await?;
-                hashed_row(
-                    member_rel,
-                    member_size,
+                let found = Found {
+                    rel_path: member_rel,
+                    size: member_size,
                     mtime,
-                    rule_name,
-                    &forms,
-                    rom_id,
-                    state,
-                )
+                };
+                let own = files::basename(&member.name);
+                sink.hashed_row(found, own, rule, forms).await?
             }
             Err(e) => {
                 tracing::warn!(member = %member.name, error = %e, "cannot hash zip member; marking unverified");
                 let mut row =
                     unverified_row(member_rel, member_size, mtime, Some(member.crc32.clone()));
                 // The rule records the attempt, so an unchanged member is not decompressed again.
-                row.header_rule = Some(rule_name.to_owned());
+                row.header_rule = Some(rule.as_str().to_owned());
                 row
             }
         };
@@ -1136,43 +858,6 @@ async fn precheck_member(
     let mut row = unverified_row(member_rel.to_owned(), size, mtime, Some(crc));
     row.whole.crc32 = rule.strips_header().then(|| member.crc32.clone());
     Ok(Some(row))
-}
-
-/// One hashed track of a disc game directory, before the all-or-nothing rule
-/// decides its final state. `hashes` is `None` when the track could not be
-/// read; it is then always `unverified`.
-pub(crate) struct Track {
-    pub(crate) rel_path: String,
-    pub(crate) name: String,
-    pub(crate) size: i64,
-    pub(crate) mtime: i64,
-    pub(crate) hashes: Option<Hashes>,
-    pub(crate) matched: Option<files::RomMatch>,
-}
-
-/// The stored hashes of an unchanged track, reused instead of re-hashing.
-pub(crate) fn cached_hashes(
-    conn: &Connection,
-    platform_id: &PlatformId,
-    rel_path: &str,
-    size: i64,
-    mtime: i64,
-) -> Result<Option<Hashes>> {
-    let Some(row) = files::find_by_path(conn, platform_id, rel_path)? else {
-        return Ok(None);
-    };
-    if row.size != size || row.mtime != mtime || row.state == FileState::Pending {
-        return Ok(None);
-    }
-    let (Some(crc32), Some(md5), Some(sha1)) = (row.crc32, row.md5, row.sha1) else {
-        return Ok(None);
-    };
-    Ok(Some(Hashes {
-        size: u64::try_from(size).unwrap_or(0),
-        crc32,
-        md5,
-        sha1,
-    }))
 }
 
 /// Walks one disc game directory (or a platform's top directory when it
@@ -1262,7 +947,12 @@ async fn disc_track(
     let cached = ctx
         .app
         .db
-        .read(move |c| cached_hashes(c, &pid, &relp, size, mtime))
+        .read(move |c| {
+            let row = files::find_by_path(c, &pid, &relp)?;
+            Ok(row
+                .filter(|r| r.unchanged(size, mtime))
+                .and_then(|r| r.hashes()))
+        })
         .await?;
     let hashes = if let Some(h) = cached {
         Some(h)
@@ -1310,71 +1000,6 @@ async fn disc_track(
     })
 }
 
-/// Decides each track's final state from the all-or-nothing rule, evaluated
-/// once per matched title rather than once for the whole directory.
-pub(crate) fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Result<Vec<NewFile>> {
-    let mut groups: HashMap<TitleId, Vec<usize>> = HashMap::new();
-    for (i, t) in tracks.iter().enumerate() {
-        if let Some(m) = &t.matched {
-            groups.entry(m.title_id).or_default().push(i);
-        }
-    }
-    let mut complete: HashMap<TitleId, bool> = HashMap::new();
-    for (&title_id, idxs) in &groups {
-        let want = files::count_roms_for_title(conn, title_id)?;
-        let ok = i64::try_from(idxs.len()).unwrap_or(-1) == want
-            && idxs.iter().all(|&i| {
-                tracks[i]
-                    .matched
-                    .as_ref()
-                    .is_some_and(|m| m.status != RomStatus::BadDump)
-            });
-        complete.insert(title_id, ok);
-    }
-
-    let mut rows = Vec::with_capacity(tracks.len());
-    for t in tracks {
-        let (rom_id, state) = match &t.matched {
-            None => (None, FileState::Unverified),
-            Some(m) if m.status == RomStatus::BadDump => (Some(m.rom_id), FileState::Bad),
-            Some(m) => {
-                let is_complete = complete.get(&m.title_id).copied().unwrap_or(false);
-                let state = if !is_complete {
-                    FileState::Unverified
-                } else if files::basename(&m.name) == t.name {
-                    FileState::Verified
-                } else {
-                    FileState::Misnamed
-                };
-                (Some(m.rom_id), state)
-            }
-        };
-        let (crc32, md5, sha1, header_rule) = match t.hashes {
-            Some(h) => (
-                Some(h.crc32),
-                Some(h.md5),
-                Some(h.sha1),
-                Some("none".to_owned()),
-            ),
-            None => (None, None, None, None),
-        };
-        rows.push(NewFile {
-            rel_path: t.rel_path,
-            size: t.size,
-            mtime: t.mtime,
-            crc32,
-            md5,
-            sha1,
-            header_rule,
-            whole: files::WholeHashes::default(),
-            rom_id,
-            state,
-            reason: None,
-        });
-    }
-    Ok(rows)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1392,7 +1017,10 @@ mod tests {
         assert_eq!(names, ["a.nes", "b.nes"]);
         let (size, mtime) = *listed[1].meta.as_ref().expect("meta");
         assert_eq!(size, 5);
-        assert_eq!((size, mtime), file_meta(&listed[1].path).expect("stat"));
+        assert_eq!(
+            (size, mtime),
+            super::super::fsutil::file_meta(&listed[1].path).expect("stat")
+        );
         assert!(list_files(&dir.path().join("gone"))
             .expect("gone")
             .is_empty());
@@ -1408,186 +1036,6 @@ mod tests {
         assert!(in_done_unit("GBA", &done));
         assert!(!in_done_unit("PSX/Other (USA)/t.bin", &done));
         assert!(!in_done_unit("GBAX/a.gba", &done));
-    }
-
-    #[test]
-    fn file_names_fit_the_rom_or_what_placement_writes() {
-        let game = "Example Quest (USA)";
-        // (platform, rom name, file name, fits)
-        let cases = [
-            (
-                "nes",
-                "Example Quest (USA).nes",
-                "Example Quest (USA).nes",
-                true,
-            ),
-            (
-                "nes",
-                "Example Quest (USA).unh",
-                "Example Quest (USA).nes",
-                true,
-            ),
-            (
-                "nes",
-                "Example Quest (USA).unh",
-                "Example Quest (USA).NES",
-                true,
-            ),
-            (
-                "nes",
-                "Example Quest (USA).NES",
-                "Example Quest (USA).nes",
-                true,
-            ),
-            (
-                "nes",
-                "Example Quest (USA)",
-                "Example Quest (USA).nes",
-                true,
-            ),
-            (
-                "nes",
-                "sub/Example Quest (USA).nes",
-                "Example Quest (USA).nes",
-                true,
-            ),
-            ("nes", "Example Quest v1.1", "Example Quest v1.1.nes", true),
-            ("nes", "Example Quest v1.1", "Example Quest v1.nes", false),
-            (
-                "nes",
-                "Example Quest (USA).unh",
-                "Example Quest (USA).unh.zip",
-                false,
-            ),
-            (
-                "nes",
-                "Example Quest (USA).unh",
-                "Example Quest (Japan).nes",
-                false,
-            ),
-            (
-                "nes",
-                "Example Quest (USA).unh",
-                "Example Quest (USA).fds",
-                false,
-            ),
-            ("nes", "q.nes", "Example Quest (USA).nes", true),
-            ("nes", "q.nes", "Other Game (USA).nes", false),
-            (
-                "snes",
-                "Example Quest (USA).smc",
-                "Example Quest (USA).sfc",
-                true,
-            ),
-            (
-                "snes",
-                "Example Quest (USA).sfc",
-                "Example Quest (USA).smc",
-                false,
-            ),
-            ("snes", "q.smc", "Example Quest (USA).smc", false),
-            (
-                "nowhere",
-                "Example Quest (USA).unh",
-                "Example Quest (USA).nes",
-                false,
-            ),
-        ];
-        for (platform, rom, file, fits) in cases {
-            let p = PlatformId(platform.into());
-            assert_eq!(
-                name_fits(&p, rom, game, file),
-                fits,
-                "{platform}: {rom} as {file}"
-            );
-        }
-    }
-
-    #[test]
-    fn extensions_need_a_letter_and_at_most_four_characters() {
-        assert_eq!(split_extension("a.unh"), Some(("a", "unh")));
-        assert_eq!(split_extension("a.32x"), Some(("a", "32x")));
-        assert_eq!(split_extension("Example Quest v1.1"), None);
-        assert_eq!(split_extension("a (b.c d)"), None);
-        assert_eq!(split_extension("a.toolong"), None);
-        assert_eq!(split_extension(".nes"), None);
-    }
-
-    #[test]
-    fn settling_names_verifies_only_files_that_now_fit() {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        platform_rows::seed(&mut c, &platforms::PLATFORMS).expect("seed");
-        let nes = PlatformId("nes".into());
-        let h = Hashes {
-            size: 4,
-            crc32: "0a0b0c0d".into(),
-            md5: "0".repeat(32),
-            sha1: "1".repeat(40),
-        };
-        let rom = files::seed_rom_fixture(
-            &c,
-            &nes,
-            "Example Quest (USA)",
-            "Example Quest (USA).unh",
-            &h,
-            "good",
-        )
-        .expect("rom");
-        let row = |rel: &str| NewFile {
-            rel_path: rel.to_owned(),
-            size: 20,
-            mtime: 1,
-            crc32: Some(h.crc32.clone()),
-            md5: Some(h.md5.clone()),
-            sha1: Some(h.sha1.clone()),
-            header_rule: Some("ines".into()),
-            rom_id: Some(rom),
-            state: FileState::Misnamed,
-            reason: None,
-            whole: files::WholeHashes::default(),
-        };
-        let fits =
-            files::upsert_row(&c, &nes, &row("NES/q.zip#Example Quest (USA).nes"), 1).expect("row");
-        let other = files::upsert_row(&c, &nes, &row("NES/Other Name.nes"), 1).expect("row");
-        let upper =
-            files::upsert_row(&c, &nes, &row("NES/Example Quest (USA).NES"), 1).expect("row");
-        let psx = PlatformId("psx".into());
-        let track = files::seed_rom_fixture(
-            &c,
-            &psx,
-            "Example Disc (USA)",
-            "Example Disc (USA).img",
-            &h,
-            "good",
-        )
-        .expect("rom");
-        let disc = NewFile {
-            rom_id: Some(track),
-            ..row("PSX/Example Disc (USA)/Example Disc (USA).cue")
-        };
-        let disc = files::upsert_row(&c, &psx, &disc, 1).expect("row");
-        assert!(name_fits(
-            &psx,
-            "Example Disc (USA).img",
-            "Example Disc (USA)",
-            "Example Disc (USA).cue"
-        ));
-        assert_eq!(settle_names(&c).expect("settle"), 2);
-        let state = |id: FileId| files::get(&c, id).expect("get").expect("row").state;
-        assert_eq!(state(fits), FileState::Verified);
-        assert_eq!(state(upper), FileState::Verified, "upper-case extension");
-        assert_eq!(state(other), FileState::Misnamed);
-        assert_eq!(
-            state(disc),
-            FileState::Misnamed,
-            "disc tracks are left alone"
-        );
-        assert_eq!(
-            settle_names(&c).expect("settle"),
-            0,
-            "nothing left to settle"
-        );
     }
 
     #[tokio::test]
@@ -1767,43 +1215,6 @@ mod tests {
     }
 
     #[test]
-    fn a_live_rom_of_the_content_beats_a_retired_rom_of_the_whole_file() {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &platforms::PLATFORMS).expect("seed");
-        let nes = PlatformId("nes".into());
-        let mut file = b"NES\x1a".to_vec();
-        file.resize(16, 0);
-        file.extend_from_slice(b"synthetic body of a retired and a live rom");
-        let forms = hash_forms(&file[..], HeaderRule::Ines, None).expect("hash");
-        let whole = forms.whole.clone().expect("a header");
-        let retired =
-            files::seed_rom_fixture(&c, &nes, "Old (USA)", "Old (USA).nes", &whole, "good")
-                .expect("retired rom");
-        c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [retired])
-            .expect("retire");
-        let live = files::seed_rom_fixture(
-            &c,
-            &nes,
-            "New (USA)",
-            "New (USA).nes",
-            &forms.content,
-            "good",
-        )
-        .expect("live rom");
-        let (rom, _) = classify(&c, &nes, "New (USA).nes", &forms).expect("classify");
-        assert_eq!(rom, Some(live));
-        c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [live])
-            .expect("retire");
-        let (rom, _) = classify(&c, &nes, "Old (USA).nes", &forms).expect("classify");
-        assert_eq!(
-            rom,
-            Some(retired),
-            "a retired rom still matches when nothing live does"
-        );
-    }
-
-    #[test]
     fn only_stripping_rule_rows_without_the_whole_form_lack_it() {
         let row = |rule: Option<&str>, sha1: Option<&str>, whole: Option<&str>| files::FileRow {
             id: FileId(1),
@@ -1847,14 +1258,6 @@ mod tests {
         let disc = platforms::by_id("psx").expect("psx");
         assert!(!accepts_extension(disc, "zip"));
         assert!(accepts_extension(disc, "cue"));
-    }
-
-    #[test]
-    fn an_entry_error_partway_makes_the_listing_fail() {
-        let fine: Vec<io::Result<u8>> = vec![Ok(1), Ok(2)];
-        assert_eq!(all_entries(fine.into_iter()).expect("listed"), [1, 2]);
-        let broken: Vec<io::Result<u8>> = vec![Ok(1), Err(io::Error::other("EIO")), Ok(3)];
-        assert!(all_entries(broken.into_iter()).is_err());
     }
 
     #[test]
