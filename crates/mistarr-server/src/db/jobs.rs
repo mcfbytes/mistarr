@@ -300,6 +300,7 @@ pub fn find_in(
 /// jobs::insert(&conn, JobKind::Scan, &serde_json::json!({}), Lane::Heavy, 1).unwrap();
 /// assert_eq!(jobs::count_kind(&conn, JobKind::Scan).unwrap(), 1);
 /// ```
+#[cfg(any(test, feature = "test-support"))]
 pub fn count_kind(conn: &Connection, kind: JobKind) -> Result<u64> {
     Ok(
         conn.query_row("SELECT COUNT(*) FROM jobs WHERE kind = ?1", [kind], |r| {

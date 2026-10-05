@@ -1076,7 +1076,7 @@ mod tests {
         let task = tokio::spawn(watch(Arc::clone(&app)));
         tokio::time::sleep(Duration::from_millis(300)).await;
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
-        for _ in 0..200 {
+        crate::testing::eventually("the failed import to be retried", || async {
             let page = crate::db::sql::Page {
                 limit: 10,
                 offset: 0,
@@ -1087,13 +1087,10 @@ mod tests {
                 .await
                 .expect("list")
                 .items;
-            if !items.is_empty() {
-                task.abort();
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("the failed import was never retried");
+            !items.is_empty()
+        })
+        .await;
+        task.abort();
     }
 
     #[tokio::test]

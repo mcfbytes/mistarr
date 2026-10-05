@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use common::{boot, boot_with_options, config_in, options_in, request, Booted};
 use mistarr_clients::fake::{FileRoute, FileServer};
+use mistarr_server::testing::eventually;
 use serde_json::{json, Value};
 
 const DAT: &str = r#"<?xml version="1.0"?>
@@ -151,7 +152,7 @@ async fn a_dat_is_fetched_once_placed_and_never_stored() {
     assert_eq!(progress["placed"]["file"], "Example.dat");
     assert_eq!(server.hits(), [path]);
     let dats = data(&b).join("dats");
-    common::eventually("the DAT to load", || async {
+    eventually("the DAT to load", || async {
         names_in(&dats.join("loaded")) == ["Example.dat"]
     })
     .await;
@@ -230,7 +231,7 @@ async fn a_torrent_goes_to_sources_and_its_web_seeds_are_never_fetched() {
         (&progress["target"], &progress["file"]),
         (&json!("sources"), &json!("set.torrent"))
     );
-    common::eventually("the source to load", || async {
+    eventually("the source to load", || async {
         let r = request(b.addr(), "GET", "/api/v1/sources", &[], None).await;
         r.json()["total"] == 1
     })
@@ -332,7 +333,7 @@ async fn a_cancelled_fetch_leaves_no_partial_file() {
     let (status, started) = fetch(&b, &server.url("/slow.dat")).await;
     assert_eq!(status, 202);
     let id = started["job_id"].clone();
-    common::eventually("bytes to arrive", || async {
+    eventually("bytes to arrive", || async {
         let r = request(b.addr(), "GET", "/api/v1/system/jobs", &[], None).await;
         let items = r.json()["items"].as_array().cloned().unwrap_or_default();
         items.iter().any(|j| {

@@ -3,7 +3,7 @@
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn spawn(data: &Path, log: &Path) -> Child {
     let out = OpenOptions::new()
@@ -23,14 +23,11 @@ fn spawn(data: &Path, log: &Path) -> Child {
 }
 
 fn wait_for_line(log: &Path, needle: &str) {
-    let deadline = Instant::now() + Duration::from_secs(20);
-    while Instant::now() < deadline {
-        if std::fs::read_to_string(log).is_ok_and(|t| t.contains(needle)) {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    panic!("{needle:?} never logged");
+    mistarr_server::testing::eventually_blocking_within(
+        &format!("{needle:?} to be logged"),
+        Duration::from_secs(20),
+        || std::fs::read_to_string(log).is_ok_and(|t| t.contains(needle)),
+    );
 }
 
 #[test]

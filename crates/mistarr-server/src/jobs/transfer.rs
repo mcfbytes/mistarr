@@ -365,7 +365,6 @@ mod tests {
     use mistarr_sources::binding::Confidence;
     use std::path::Path;
     use std::sync::Mutex;
-    use std::time::Duration;
     use tokio::sync::Notify;
 
     /// An in-process client that records calls; `add` can wait for a release or fail.
@@ -558,12 +557,7 @@ mod tests {
         }
         run.await.expect("join").expect("run");
         assert_eq!(state_of(&app, id).await, DownloadState::Cancelled);
-        for _ in 0..200 {
-            if mock.calls().len() >= 4 {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        crate::testing::eventually("the client calls", || async { mock.calls().len() >= 4 }).await;
         assert_eq!(mock.calls(), ["add:[0]", "start", "stop", "set_wanted:[]"]);
     }
 

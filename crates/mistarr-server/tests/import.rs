@@ -6,7 +6,7 @@ mod common;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
-use common::{boot, boot_with, config_in, eventually, get, request, Booted, Sse};
+use common::{boot, boot_with, config_in, get, infohash, request, Booted, Sse};
 use mistarr_clients::fake::{FakeResponse, FakeServer};
 use mistarr_clients::SeedPolicy;
 use mistarr_core::hash::{hash_reader, HeaderRule};
@@ -21,12 +21,8 @@ use mistarr_server::db::sql::Page;
 use mistarr_server::db::titles::RomStatus;
 use mistarr_server::events::{DownloadChanged, Event};
 use mistarr_server::jobs::JobKind;
+use mistarr_server::testing::eventually;
 use serde_json::{json, Value};
-
-/// A synthetic infohash.
-fn infohash() -> String {
-    "0a".repeat(20)
-}
 
 /// The DAT header of a synthetic 32 KiB NROM cartridge.
 const INES: &str = "4E 45 53 1A 02 01 01 00 00 00 00 00 00 00 00 00";

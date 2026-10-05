@@ -21,6 +21,7 @@ use mistarr_fixture::torrent;
 use mistarr_fixture::tracker::Tracker;
 use mistarr_server::app::{self, Options, Running};
 use mistarr_server::config::{ClientChoice, Config};
+use mistarr_server::testing::eventually_within;
 use serde_json::Value;
 
 /// Comma list of daemon binaries whose absence fails the test instead of skipping it.
@@ -217,22 +218,6 @@ impl Drop for Daemon {
     }
 }
 
-/// Polls `f` every 200 ms until it returns true, failing after `limit`.
-async fn wait_for<F, Fut>(what: &str, limit: Duration, mut f: F)
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    let deadline = Instant::now() + limit;
-    while !f().await {
-        assert!(
-            Instant::now() < deadline,
-            "timed out after {limit:?} waiting for {what}"
-        );
-        tokio::time::sleep(Duration::from_millis(200)).await;
-    }
-}
-
 /// The download limit the app applies while a core runs, in KiB/s.
 const CORE_DOWN_KBPS: u32 = 7;
 /// The upload limit set while a core runs with the client not paused.
@@ -423,7 +408,7 @@ async fn seed(client: &dyn DownloadClient, metainfo: &[u8], dir: &Path, tracker:
         .await
         .expect("seeder add");
     client.start(&id).await.expect("seeder start");
-    wait_for(
+    eventually_within(
         "the seeder to verify its data",
         Duration::from_secs(60),
         || async {
@@ -437,7 +422,7 @@ async fn seed(client: &dyn DownloadClient, metainfo: &[u8], dir: &Path, tracker:
     )
     .await;
     let hash = *infohash(metainfo).as_bytes();
-    wait_for("the seeder's announce", Duration::from_secs(60), || async {
+    eventually_within("the seeder's announce", Duration::from_secs(60), || async {
         tracker.peers(&hash).iter().any(|(_, seeding)| *seeding)
     })
     .await;

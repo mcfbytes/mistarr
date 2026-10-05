@@ -82,6 +82,7 @@ parallel on the work packages in `docs/WORKPLAN.md`. Read this file, then
 ```sh
 cargo fmt --all
 cargo clippy --all-targets --all-features -- -D warnings
+cargo clippy -p mistarr-server --lib --bins -- -D warnings
 cargo test --workspace
 (cd web && npm ci && npm run check && npm run lint && npm run build && npm run size)
 (cd web && npm run e2e)

@@ -465,10 +465,9 @@ impl Config {
     /// does not exist; [`Error::Config`] when it cannot be parsed.
     ///
     /// ```
-    /// use std::path::Path;
-    /// let dir = std::env::temp_dir().join("mistarr-doc-config-load");
-    /// let c = mistarr_server::config::Config::load(None, Some(&dir)).unwrap();
-    /// assert_eq!(c.paths.data, dir);
+    /// let dir = tempfile::tempdir().unwrap();
+    /// let c = mistarr_server::config::Config::load(None, Some(dir.path())).unwrap();
+    /// assert_eq!(c.paths.data, dir.path());
     /// ```
     pub fn load(explicit: Option<&Path>, data: Option<&Path>) -> Result<Self> {
         let default_data = PathBuf::from(DEFAULT_DATA_DIR);

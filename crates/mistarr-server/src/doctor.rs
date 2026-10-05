@@ -94,7 +94,8 @@ pub fn linkage(image: &[u8]) -> io::Result<Linkage> {
 /// The error creating or removing the probe.
 ///
 /// ```
-/// assert!(mistarr_server::doctor::check_writable(&std::env::temp_dir()).is_ok());
+/// let dir = tempfile::tempdir().unwrap();
+/// assert!(mistarr_server::doctor::check_writable(dir.path()).is_ok());
 /// ```
 pub fn check_writable(dir: &Path) -> io::Result<()> {
     let probe = dir.join(".mistarr-doctor");

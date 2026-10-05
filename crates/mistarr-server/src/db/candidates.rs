@@ -33,13 +33,15 @@ text_enum! {
 
 impl MatchConfidence {
     /// A hash and the name tiers: confidences a download may act on without a guess.
+    #[cfg(any(test, feature = "test-support"))]
     pub const FIRM: [Self; 3] = [Self::Hash, Self::Name, Self::Base];
-    /// [`MatchConfidence::FIRM`] as an SQL list.
+    /// The firm confidences as an SQL list.
     pub const FIRM_SQL: &'static str = "('hash', 'name', 'base')";
 
     /// The fuzzy and size-only tiers: confidences that are guesses.
+    #[cfg(any(test, feature = "test-support"))]
     pub const GUESSED: [Self; 2] = [Self::Fuzzy, Self::Size];
-    /// [`MatchConfidence::GUESSED`] as an SQL list.
+    /// The guessed confidences as an SQL list.
     pub const GUESSED_SQL: &'static str = "('fuzzy', 'size')";
 
     /// The stored confidence of a binding match; `None` for an unmatched file.
@@ -215,6 +217,7 @@ impl Change {
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
+#[cfg(any(test, feature = "test-support"))]
 pub fn diff(
     conn: &Connection,
     source: SourceId,
@@ -521,6 +524,7 @@ pub fn drop_pair(conn: &Connection, source: SourceId, index: u32, rom: RomId) ->
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
+#[cfg(any(test, feature = "test-support"))]
 pub fn of_file(
     conn: &Connection,
     source: SourceId,

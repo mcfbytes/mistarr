@@ -20,6 +20,8 @@ jobs:
       - run: rustup toolchain install
       - run: cargo fmt --all --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
+      # The release surface, where test-support is off and modules are crate-private.
+      - run: cargo clippy -p mistarr-server --lib --bins -- -D warnings
       # chdman encodes the synthetic discs the CHD decoder is checked against.
       - run: sudo apt-get update && sudo apt-get install -y mame-tools
       - run: cargo test --workspace

@@ -6,11 +6,12 @@ mod common;
 use std::fmt::Write as _;
 use std::io::Cursor;
 
-use common::{boot, eventually, get, request, Booted};
+use common::{boot, bstr, get, request, variant_by_id, Booted};
 use mistarr_core::hash::{hash_reader, HeaderRule};
 use mistarr_server::db::downloads::DownloadState;
 use mistarr_server::db::ids::DownloadId;
 use mistarr_server::events::{DownloadChanged, Event};
+use mistarr_server::testing::eventually;
 use serde_json::{json, Value};
 
 const SIZE: usize = 262_160;
@@ -65,10 +66,6 @@ fn dat() -> String {
     )
 }
 
-fn bstr(s: &str) -> String {
-    format!("{}:{s}", s.len())
-}
-
 fn torrent() -> Vec<u8> {
     let mut list = String::from("l");
     for (file, len) in FILES {
@@ -101,14 +98,6 @@ async fn detail(b: &Booted, title: i64) -> Value {
     let r = get(b.addr(), &format!("/api/v1/titles/{title}")).await;
     assert_eq!(r.status, 200, "{}", r.body);
     r.json()
-}
-
-fn variant(detail: &Value, title: i64) -> Value {
-    detail["variants"]
-        .as_array()
-        .and_then(|v| v.iter().find(|v| v["id"] == title))
-        .cloned()
-        .unwrap_or_else(|| panic!("variant {title} in {detail}"))
 }
 
 async fn want(b: &Booted, title: i64) {
@@ -260,7 +249,7 @@ async fn both_wanted(b: &Booted) -> Wanted {
 
     let d = detail(b, parent).await;
     for title in [parent, alt] {
-        let v = variant(&d, title);
+        let v = variant_by_id(&d, title);
         assert_eq!(v["torrent_files_available"], 1, "{v}");
         let a = &v["availability"][0];
         assert_eq!(
@@ -330,9 +319,9 @@ async fn assert_alt_placed(b: &Booted, w: &Wanted) {
     assert!(!games.join(format!("NES/{PARENT}.nes")).exists());
 
     let d = detail(b, w.parent).await;
-    let a = variant(&d, w.alt);
+    let a = variant_by_id(&d, w.alt);
     assert_eq!(a["roms"][0]["file_state"], "verified", "{a}");
-    let pv = variant(&d, w.parent);
+    let pv = variant_by_id(&d, w.parent);
     assert_eq!(pv["roms"][0]["file_state"], Value::Null, "{pv}");
     assert_eq!(
         pv["torrent_files_available"], 0,

@@ -8,7 +8,8 @@ use std::io::{Cursor, Write as _};
 use std::net::SocketAddr;
 use std::time::Duration;
 
-use common::{boot_with, config_in, eventually, request, Booted};
+use common::{boot_with, config_in, request, Booted};
+use mistarr_server::testing::eventually;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 

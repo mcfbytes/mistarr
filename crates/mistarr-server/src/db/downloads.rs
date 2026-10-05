@@ -276,6 +276,7 @@ pub fn list(conn: &Connection, states: &[DownloadState], page: Page) -> Result<P
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
+#[cfg(any(test, feature = "test-support"))]
 pub fn find_by_file(
     conn: &Connection,
     source: SourceId,

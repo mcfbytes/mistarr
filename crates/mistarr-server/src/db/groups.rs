@@ -330,6 +330,7 @@ impl Drift {
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// assert!(mistarr_server::db::groups::check(&conn).unwrap().is_consistent());
 /// ```
+#[cfg(any(test, feature = "test-support"))]
 pub fn check(conn: &Connection) -> Result<Drift> {
     Ok(Drift {
         search: search_damaged(conn)?,

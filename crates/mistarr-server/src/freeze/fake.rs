@@ -30,31 +30,26 @@ impl FakeClient {
         if std::fs::hard_link(&me, &exe).is_err() {
             std::fs::copy(&me, &exe).expect("copy");
         }
-        let mut tries = 0;
-        let child = loop {
+        let mut child = None;
+        // A binary just written may still be busy for exec for a moment.
+        crate::testing::eventually_blocking("the binary to be executable", || {
             let spawned = Command::new(&exe)
                 .args(["--ignored", "--exact", "freeze::fake::fake_client_process"])
                 .env(FAKE_ENV, "1")
                 .stdout(std::process::Stdio::null())
                 .spawn();
             match spawned {
-                Ok(child) => break child,
-                // A binary just written may still be busy for exec for a moment.
-                Err(e) if e.raw_os_error() == Some(26) && tries < 50 => {
-                    tries += 1;
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(e) => panic!("spawn: {e}"),
+                Ok(c) => child = Some(c),
+                Err(e) => assert_eq!(e.raw_os_error(), Some(26), "spawn: {e}"),
             }
-        };
+            child.is_some()
+        });
+        let child = child.expect("spawned");
         // A vfork parent may resume a moment before the child's `exe` names the new program.
         let link = format!("/proc/{}/exe", child.id());
-        for _ in 0..200 {
-            if std::fs::read_link(&link).is_ok_and(|p| p.ends_with(name)) {
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        crate::testing::eventually_blocking("the child to exec", || {
+            std::fs::read_link(&link).is_ok_and(|p| p.ends_with(name))
+        });
         Self { child, _dir: dir }
     }
 
@@ -70,15 +65,9 @@ impl FakeClient {
         super::stat(Path::new("/proc"), self.pid()).expect("stat").0
     }
 
-    /// Waits up to two seconds for the process state to satisfy `want`.
+    /// Waits for the process state to satisfy `want`, failing the test when it never does.
     pub(crate) fn wait_state(&self, want: impl Fn(char) -> bool) -> char {
-        for _ in 0..200 {
-            let s = self.state();
-            if want(s) {
-                return s;
-            }
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        crate::testing::eventually_blocking("the process state", || want(self.state()));
         self.state()
     }
 }

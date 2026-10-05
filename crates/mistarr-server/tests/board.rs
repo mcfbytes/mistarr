@@ -4,14 +4,12 @@ mod common;
 
 use std::fmt::Write as _;
 use std::io::{Cursor, Write as _};
-use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
-use common::{boot_with, config_in, eventually, get, request, Booted};
-use mistarr_server::events::{EventKind, Message};
+use common::{boot_with, bstr, config_in, drop_file, json_of, request, wait_event, Booted};
+use mistarr_server::events::EventKind;
+use mistarr_server::testing::eventually;
 use serde_json::Value;
-use tokio::sync::broadcast;
 
 const SYSTEM: &str = "Nintendo - Super Nintendo Entertainment System";
 
@@ -56,35 +54,6 @@ fn zipped(name: &str, body: &str) -> Vec<u8> {
     z.finish().expect("finish").into_inner()
 }
 
-fn drop_file(dir: &Path, name: &str, bytes: &[u8]) {
-    let part = dir.join(format!(".{name}.part"));
-    std::fs::write(&part, bytes).expect("write");
-    std::fs::rename(part, dir.join(name)).expect("rename");
-}
-
-async fn wait_event(
-    rx: &mut broadcast::Receiver<Arc<Message>>,
-    kind: EventKind,
-    needle: &str,
-) -> Value {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let e = tokio::time::timeout_at(deadline, rx.recv())
-            .await
-            .unwrap_or_else(|_| panic!("no {kind:?} with {needle:?}"))
-            .expect("event");
-        if e.kind == kind && e.data.contains(needle) {
-            return serde_json::from_str(&e.data).expect("json");
-        }
-    }
-}
-
-async fn json_of(b: &Booted, path: &str) -> Value {
-    let r = get(b.addr(), path).await;
-    assert_eq!(r.status, 200, "{path}: {}", r.body);
-    r.json()
-}
-
 /// Boots with a core loaded and an `_Arcade` directory, so the arcade
 /// catalogue is queued on the heavy lane and held from the start.
 async fn boot_with_core(dir: tempfile::TempDir) -> Booted {
@@ -108,12 +77,12 @@ async fn dats_load_while_a_core_holds_the_heavy_lane() {
     let booted = boot_with_core(tempfile::tempdir().expect("tempdir")).await;
     let app = Arc::clone(&booted.running.app);
     let mut events = app.events.subscribe(None).live;
-    let status = json_of(&booted, "/api/v1/system/status").await;
+    let status = json_of(booted.addr(), "/api/v1/system/status").await;
     assert_eq!(status["paused"], true, "{status}");
     assert_eq!(status["corename"], "NES");
     assert_eq!(arcade_rows(&status["waiting"]), 1, "{status}");
 
-    let jobs = json_of(&booted, "/api/v1/system/jobs").await;
+    let jobs = json_of(booted.addr(), "/api/v1/system/jobs").await;
     let arcade = jobs["items"]
         .as_array()
         .expect("items")
@@ -141,9 +110,9 @@ async fn dats_load_while_a_core_holds_the_heavy_lane() {
     );
     let loaded = wait_event(&mut events, EventKind::DatLoaded, ".zip").await;
     assert_eq!(loaded["platform_id"], "snes", "{loaded}");
-    let titles = json_of(&booted, "/api/v1/platforms/snes/titles").await;
+    let titles = json_of(booted.addr(), "/api/v1/platforms/snes/titles").await;
     assert_eq!(titles["total"], 40);
-    let wizard = json_of(&booted, "/api/v1/system/wizard").await;
+    let wizard = json_of(booted.addr(), "/api/v1/system/wizard").await;
     assert_eq!(wizard["dats"], true);
 
     let r = request(booted.addr(), "POST", "/api/v1/system/resume", &[], None).await;
@@ -156,7 +125,7 @@ async fn dats_load_while_a_core_holds_the_heavy_lane() {
         }
     })
     .await;
-    let status = json_of(&booted, "/api/v1/system/status").await;
+    let status = json_of(booted.addr(), "/api/v1/system/status").await;
     assert_eq!(status["override"], Value::Null);
     assert_eq!(arcade_rows(&status["waiting"]), 0, "{status}");
     booted.running.shutdown().await.expect("shutdown");
@@ -165,7 +134,7 @@ async fn dats_load_while_a_core_holds_the_heavy_lane() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_restart_takes_over_held_jobs_instead_of_adding_more() {
     let booted = boot_with_core(tempfile::tempdir().expect("tempdir")).await;
-    let first = json_of(&booted, "/api/v1/system/status").await["waiting"][0]["id"].clone();
+    let first = json_of(booted.addr(), "/api/v1/system/status").await["waiting"][0]["id"].clone();
     let r = request(booted.addr(), "POST", "/api/v1/system/cores", &[], None).await;
     assert_eq!(r.status, 202);
     assert_eq!(
@@ -178,14 +147,10 @@ async fn a_restart_takes_over_held_jobs_instead_of_adding_more() {
 
     let config = config_in(dir.path());
     let again = boot_with(dir, config).await;
-    let status = json_of(&again, "/api/v1/system/status").await;
+    let status = json_of(again.addr(), "/api/v1/system/status").await;
     assert_eq!(arcade_rows(&status["waiting"]), 1, "{status}");
     assert_eq!(status["waiting"][0]["id"], first, "the same row, re-queued");
     again.running.shutdown().await.expect("shutdown");
-}
-
-fn bstr(s: &str) -> String {
-    format!("{}:{s}", s.len())
 }
 
 /// A set torrent named like a board user's: `Example_Archive/No-Intro/<system>/<title>.zip`.
@@ -221,7 +186,7 @@ async fn a_set_torrent_waits_for_its_dat_and_then_binds() {
     let name = format!("Example_Archive - No-Intro - {SYSTEM}.torrent");
     drop_file(&data.join("sources"), &name, &set_torrent(12));
     wait_event(&mut events, EventKind::SourceChanged, "unbound").await;
-    let source = &json_of(&booted, "/api/v1/sources").await["items"][0];
+    let source = &json_of(booted.addr(), "/api/v1/sources").await["items"][0];
     assert_eq!(source["suggested_platform_id"], "snes", "{source}");
     assert_eq!(source["platform_id"], Value::Null);
     assert!(
@@ -234,7 +199,7 @@ async fn a_set_torrent_waits_for_its_dat_and_then_binds() {
     let xml = no_intro_dat("20260101-000000", 12);
     drop_file(&data.join("dats"), "system.dat", xml.as_bytes());
     wait_event(&mut events, EventKind::SourceChanged, "\"bound\"").await;
-    let source = &json_of(&booted, "/api/v1/sources").await["items"][0];
+    let source = &json_of(booted.addr(), "/api/v1/sources").await["items"][0];
     assert_eq!(source["platform_id"], "snes", "{source}");
     assert_eq!(source["matched_count"], 12);
     assert_eq!(source["reason"], Value::Null);
@@ -247,10 +212,10 @@ async fn the_wizard_opens_until_dismissed_and_settings_keep_its_state() {
     let config = config_in(dir.path());
     let booted = boot_with(dir, config).await;
     let addr = booted.addr();
-    let wizard = json_of(&booted, "/api/v1/system/wizard").await;
+    let wizard = json_of(booted.addr(), "/api/v1/system/wizard").await;
     assert_eq!(wizard["open_on_start"], true);
 
-    let mut settings = json_of(&booted, "/api/v1/system/settings").await;
+    let mut settings = json_of(booted.addr(), "/api/v1/system/settings").await;
     let put = |body: String| async move {
         request(addr, "PUT", "/api/v1/system/settings", &[], Some(&body)).await
     };
@@ -271,13 +236,16 @@ async fn the_wizard_opens_until_dismissed_and_settings_keep_its_state() {
     ]);
     settings["client"]["remote_path_map"] = map.clone();
     assert_eq!(put(settings.to_string()).await.status, 200);
-    let saved = json_of(&booted, "/api/v1/system/settings").await;
+    let saved = json_of(booted.addr(), "/api/v1/system/settings").await;
     assert_eq!(saved["client"]["remote_path_map"], map);
     settings["client"]["remote_path_map"] = serde_json::json!([]);
     assert_eq!(put(settings.to_string()).await.status, 200);
-    let saved = json_of(&booted, "/api/v1/system/settings").await;
+    let saved = json_of(booted.addr(), "/api/v1/system/settings").await;
     assert_eq!(saved["client"]["remote_path_map"], serde_json::json!([]));
-    assert_eq!(json_of(&booted, "/api/v1/system/wizard").await, wizard);
+    assert_eq!(
+        json_of(booted.addr(), "/api/v1/system/wizard").await,
+        wizard
+    );
 
     let r = request(addr, "POST", "/api/v1/system/wizard/done", &[], None).await;
     assert_eq!(r.status, 200, "{}", r.body);
@@ -287,7 +255,7 @@ async fn the_wizard_opens_until_dismissed_and_settings_keep_its_state() {
     running.shutdown().await.expect("shutdown");
     let config = config_in(dir.path());
     let again = boot_with(dir, config).await;
-    let wizard = json_of(&again, "/api/v1/system/wizard").await;
+    let wizard = json_of(again.addr(), "/api/v1/system/wizard").await;
     assert_eq!(
         wizard["open_on_start"], false,
         "dismissal survives a restart"
@@ -318,7 +286,7 @@ async fn start_transmission_runs_the_opt_in_service() {
     };
     let r = start("transmission").await;
     assert_eq!(r.status, 400, "nothing installed: {}", r.body);
-    let status = json_of(&booted, "/api/v1/system/status").await;
+    let status = json_of(booted.addr(), "/api/v1/system/status").await;
     assert_eq!(status["client"]["transmission_service"], false);
 
     let init = root.join("init.d");
@@ -391,17 +359,17 @@ async fn a_rejected_dat_can_be_retried_after_a_fix_or_deleted() {
     assert_eq!(r.status, 204, "{}", r.body);
     assert!(!dats.join("rejected/junk.xml").exists());
     assert!(!dats.join("rejected/junk.xml.reason.txt").exists());
-    let listed = json_of(&booted, "/api/v1/dats/incoming").await;
+    let listed = json_of(booted.addr(), "/api/v1/dats/incoming").await;
     assert_eq!(listed["total"], 0, "{listed}");
 
-    let loaded = json_of(&booted, "/api/v1/dats").await;
+    let loaded = json_of(booted.addr(), "/api/v1/dats").await;
     let id = loaded["items"][0]["id"].as_i64().expect("id");
     let remove = format!("/api/v1/dats/{id}");
     let refused = common::request_plain(booted.addr(), "DELETE", &remove, &[], None).await;
     assert_eq!(refused.status, 403, "{}", refused.body);
     let r = request(booted.addr(), "DELETE", &remove, &[], None).await;
     assert_eq!(r.status, 204, "{}", r.body);
-    let after = json_of(&booted, "/api/v1/dats").await;
+    let after = json_of(booted.addr(), "/api/v1/dats").await;
     assert_eq!(after["items"][0]["retired"], true, "{after}");
     assert!(after["items"][0]["reason"].is_string(), "{after}");
     assert!(dats.join("loaded/fixed.dat").is_file(), "the file stays");
@@ -421,7 +389,7 @@ async fn incoming_files_show_why_they_are_not_loaded() {
     drop_file(&data.join("sources"), "broken.torrent", b"not bencode");
     wait_event(&mut events, EventKind::JobProgress, "rejected").await;
 
-    let dats = json_of(&booted, "/api/v1/dats/incoming").await;
+    let dats = json_of(booted.addr(), "/api/v1/dats/incoming").await;
     assert_eq!(dats["total"], 1, "{dats}");
     let item = &dats["items"][0];
     assert_eq!(item["file"], "notes.txt");
@@ -432,7 +400,7 @@ async fn incoming_files_show_why_they_are_not_loaded() {
             .is_some_and(|r| r.contains("not a DAT")),
         "{item}"
     );
-    let sources = json_of(&booted, "/api/v1/sources/incoming").await;
+    let sources = json_of(booted.addr(), "/api/v1/sources/incoming").await;
     let item = &sources["items"][0];
     assert_eq!(item["state"], "rejected", "{sources}");
     assert!(
@@ -443,7 +411,7 @@ async fn incoming_files_show_why_they_are_not_loaded() {
     );
 
     std::fs::write(data.join("dats/pending.dat"), b"<datafile>").expect("write");
-    let dats = json_of(&booted, "/api/v1/dats/incoming?limit=1").await;
+    let dats = json_of(booted.addr(), "/api/v1/dats/incoming?limit=1").await;
     assert_eq!(dats["total"], 2);
     assert_eq!(dats["items"][0]["file"], "pending.dat");
     assert!(matches!(

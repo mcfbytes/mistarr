@@ -236,24 +236,9 @@ fn start(mock: &Arc<Mock>) -> (TestDir, Arc<AppState>) {
 }
 
 async fn wait_calls(mock: &Mock, n: usize) -> Vec<String> {
-    for _ in 0..300 {
-        if mock.calls().len() >= n {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    crate::testing::eventually("the calls", || async { mock.calls().len() >= n }).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     mock.calls()
-}
-
-async fn wait_for(what: &str, mut f: impl FnMut() -> bool) {
-    for _ in 0..300 {
-        if f() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("timed out waiting for {what}");
 }
 
 async fn stored(app: &AppState) -> Option<SavedLimits> {
@@ -513,7 +498,7 @@ async fn uploads_that_leave_their_hold_are_held_again() {
     app.gate.set_corename(Some("SNES".into()));
     wait_calls(&mock, 2).await;
     mock.set_up(RateLimit::default());
-    wait_for("the hold again", || {
+    crate::testing::eventually("the hold again", || async {
         mock.calls()
             .iter()
             .filter(|c| *c == "set:up:true/0")
@@ -564,7 +549,7 @@ async fn a_client_on_the_board_is_frozen_while_a_core_runs() {
     let (_dir, app) = start_at(&mock, local_rtorrent(), MENU, on_board, None);
     let mut live = app.events.subscribe(None).live;
     app.gate.set_corename(Some("SNES".into()));
-    wait_for("the freeze", || proc.state() == 'T').await;
+    crate::testing::eventually("the freeze", || async { proc.state() == 'T' }).await;
     assert_eq!(app.client.hold(), Some(ClientHold::Frozen));
     assert!(app.client.get().is_none());
     let recorded = freeze::read_file(&app.options.frozen_file, freeze::euid()).expect("read");
@@ -578,8 +563,8 @@ async fn a_client_on_the_board_is_frozen_while_a_core_runs() {
     assert!(ev.data.contains(r#""client_hold":"frozen""#), "{}", ev.data);
 
     app.gate.set_corename(Some(MENU.into()));
-    wait_for("the resume", || proc.state() != 'T').await;
-    wait_for("the hold cleared", || app.client.hold().is_none()).await;
+    crate::testing::eventually("the resume", || async { proc.state() != 'T' }).await;
+    crate::testing::eventually("the hold cleared", || async { app.client.hold().is_none() }).await;
     assert!(app.client.get().is_some());
     assert_eq!(
         freeze::read_file(&app.options.frozen_file, freeze::euid()).expect("read"),
@@ -603,11 +588,11 @@ async fn a_client_resumed_elsewhere_is_frozen_again() {
         None,
     );
     app.gate.set_corename(Some("SNES".into()));
-    wait_for("the freeze", || proc.state() == 'T').await;
+    crate::testing::eventually("the freeze", || async { proc.state() == 'T' }).await;
     Kill::new(Path::new("kill"))
         .send(proc.pid(), Signal::Cont)
         .expect("cont");
-    wait_for("the freeze again", || proc.state() == 'T').await;
+    crate::testing::eventually("the freeze again", || async { proc.state() == 'T' }).await;
     assert_eq!(app.client.hold(), Some(ClientHold::Frozen));
 }
 
@@ -644,7 +629,7 @@ async fn a_frozen_client_is_resumed_at_startup_unless_a_core_still_runs() {
         proc.pid(),
     )
     .expect("freeze");
-    wait_for("the freeze", || proc.state() == 'T').await;
+    crate::testing::eventually("the freeze", || async { proc.state() == 'T' }).await;
 
     app.gate.set_corename(Some("SNES".into()));
     recover_frozen(&app).await;
@@ -653,7 +638,7 @@ async fn a_frozen_client_is_resumed_at_startup_unless_a_core_still_runs() {
 
     app.gate.set_corename(Some(MENU.into()));
     recover_frozen(&app).await;
-    wait_for("the resume", || proc.state() != 'T').await;
+    crate::testing::eventually("the resume", || async { proc.state() != 'T' }).await;
     assert!(!app.client.frozen());
     assert!(!app.options.frozen_file.exists());
     drop(dir);
@@ -673,7 +658,7 @@ async fn shutdown_resumes_a_frozen_client() {
     .expect("freeze");
     app.client.set_hold(Some(ClientHold::Frozen));
     thaw_for_shutdown(&app).await;
-    wait_for("the resume", || proc.state() != 'T').await;
+    crate::testing::eventually("the resume", || async { proc.state() != 'T' }).await;
     assert!(!app.options.frozen_file.exists());
     assert!(!app.client.frozen());
 }
@@ -825,7 +810,10 @@ async fn work_kept_before_a_restart_runs_when_the_gate_starts() {
         .expect("kept");
     let _gate = start_at_state(&mock, &app);
     assert_eq!(wait_calls(&mock, 2).await, ["stop:0b", "wanted:0b:[]"]);
-    wait_for_async(&app).await;
+    crate::testing::eventually("the kept work to go", || async {
+        waiting(&app).await.is_empty()
+    })
+    .await;
     drop(dir);
 }
 
@@ -833,16 +821,6 @@ fn start_at_state(mock: &Arc<Mock>, app: &Arc<AppState>) -> tokio::task::JoinHan
     app.set_client_at(nas(), Arc::clone(mock) as Arc<dyn DownloadClient>);
     app.gate.set_corename(Some(MENU.into()));
     tokio::spawn(follow_gate(Arc::clone(app)))
-}
-
-async fn wait_for_async(app: &AppState) {
-    for _ in 0..300 {
-        if waiting(app).await.is_empty() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("the kept work stayed");
 }
 
 #[tokio::test]
@@ -903,21 +881,21 @@ async fn limits_of_a_client_no_longer_in_use_are_set_aside_and_tried_again() {
     let (_dir, app) = start_at(&mock, nas(), "SNES", |_| {}, Some(&text));
     app.update_config(|c| c.limits.down_kbps_core = 0);
     app.limits_wake.notify_one();
-    wait_for("the new client held", || {
+    crate::testing::eventually("the new client held", || async {
         mock.calls().contains(&"set:up:true/0".to_owned())
     })
     .await;
     let now = stored(&app).await.expect("saved");
     assert_eq!((now.client, now.up), (nas(), Some(RateLimit::kbps(9))));
     let before = crate::unix_now();
-    let mut previous = Vec::new();
-    for _ in 0..300 {
-        previous = previous_list(&app).await;
-        if previous.first().is_some_and(|p| p.tries == 1) {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    crate::testing::eventually("one failed try", || async {
+        previous_list(&app)
+            .await
+            .first()
+            .is_some_and(|p| p.tries == 1)
+    })
+    .await;
+    let previous = previous_list(&app).await;
     assert_eq!(previous.len(), 1, "the old client's limits are kept");
     assert_eq!(previous[0].saved.client, gone_socket());
     assert_eq!(previous[0].tries, 1);
@@ -959,13 +937,10 @@ async fn limits_set_aside_a_day_ago_are_dropped_after_a_failed_try() {
     };
     set_previous(&app, &[stale]);
     tokio::spawn(follow_gate(Arc::clone(&app)));
-    for _ in 0..300 {
-        if previous_list(&app).await.is_empty() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("the stale limits stayed");
+    crate::testing::eventually("the stale limits to go", || async {
+        previous_list(&app).await.is_empty()
+    })
+    .await;
 }
 
 #[tokio::test]
@@ -976,19 +951,17 @@ async fn with_no_client_the_saved_limits_are_set_aside_and_taken_back() {
         .write_blocking(move |c| settings::set(c, keys::CLIENT_SAVED_LIMITS, &text))
         .expect("saved");
     tokio::spawn(follow_gate(Arc::clone(&app)));
-    for _ in 0..300 {
-        if !previous_list(&app).await.is_empty() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    crate::testing::eventually("the limits set aside", || async {
+        !previous_list(&app).await.is_empty()
+    })
+    .await;
     assert_eq!(previous_list(&app).await[0].saved.up, Some(OWN));
     assert_eq!(stored(&app).await, None);
 
     let mock = Mock::new(RateLimit::HELD);
     app.set_client_at(gone_socket(), Arc::clone(&mock) as Arc<dyn DownloadClient>);
     app.gate.set_corename(Some("SNES".into()));
-    wait_for("the hold", || {
+    crate::testing::eventually("the hold", || async {
         mock.calls().contains(&"set:up:true/0".to_owned())
     })
     .await;
@@ -1163,7 +1136,7 @@ async fn a_refused_kept_work_neither_stops_the_recheck_nor_retries_faster_than_t
     wait_calls(&mock, 2).await;
     defer(&app, Op::Seed).await;
     mock.set_up(RateLimit::default());
-    wait_for("the hold again", || {
+    crate::testing::eventually("the hold again", || async {
         mock.calls()
             .iter()
             .filter(|c| *c == "set:up:true/0")
@@ -1208,7 +1181,7 @@ async fn the_same_daemon_under_a_new_address_gets_its_own_limit_back_before_it_i
             .map(|b| b["arguments"].clone())
             .collect::<Vec<_>>()
     };
-    wait_for("the first hold", || sets().len() == 3).await;
+    crate::testing::eventually("the first hold", || async { sets().len() == 3 }).await;
     assert_eq!(
         sets()[2],
         json!({ "speed-limit-up": 0, "speed-limit-up-enabled": true })
@@ -1219,7 +1192,7 @@ async fn the_same_daemon_under_a_new_address_gets_its_own_limit_back_before_it_i
     fake.push(FakeResponse::success(json!({})));
     fake.push(FakeResponse::success(json!({})));
     app.set_client_at(at("127.0.0.1"), handle(&at("127.0.0.1")));
-    wait_for("the second hold", || sets().len() == 7).await;
+    crate::testing::eventually("the second hold", || async { sets().len() == 7 }).await;
     let calls = sets();
     assert_eq!(
         calls[3], own,
@@ -1253,12 +1226,12 @@ async fn a_refused_kept_work_does_not_spin_the_gate_while_the_client_is_frozen()
     source_in_client(&app);
     *mock.refuse_seed.lock().expect("lock") = true;
     defer(&app, Op::Seed).await;
-    wait_for("a refused try", || {
+    crate::testing::eventually("a refused try", || async {
         mock.calls().iter().any(|c| c.starts_with("seed:"))
     })
     .await;
     app.gate.set_corename(Some("SNES".into()));
-    wait_for("the freeze", || proc.state() == 'T').await;
+    crate::testing::eventually("the freeze", || async { proc.state() == 'T' }).await;
     tokio::time::sleep(Duration::from_millis(50)).await;
     let before = app.gate_passes.load(std::sync::atomic::Ordering::Relaxed);
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -1266,5 +1239,5 @@ async fn a_refused_kept_work_does_not_spin_the_gate_while_the_client_is_frozen()
     // About one pass per 100 ms recheck over half a second, not a busy loop.
     assert!(passes <= 8, "{passes} gate passes while frozen");
     app.gate.set_corename(Some(MENU.into()));
-    wait_for("the resume", || proc.state() != 'T').await;
+    crate::testing::eventually("the resume", || async { proc.state() != 'T' }).await;
 }

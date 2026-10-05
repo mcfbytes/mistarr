@@ -608,13 +608,10 @@ mod tests {
         app.fetches.bind(token, id, &app.scheduler);
         assert!(app.fetches.cancel(token, &app.scheduler));
         release.notify_one();
-        for _ in 0..500 {
-            if !app.fetches.cancel(token, &app.scheduler) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(!app.fetches.cancel(token, &app.scheduler), "token closed");
+        crate::testing::eventually("the token to close", || async {
+            !app.fetches.cancel(token, &app.scheduler)
+        })
+        .await;
         let row = app.db.read(move |c| crate::db::jobs::get(c, id)).await;
         let row = row.expect("get").expect("row");
         assert_eq!(row.state, crate::db::jobs::JobState::Failed);

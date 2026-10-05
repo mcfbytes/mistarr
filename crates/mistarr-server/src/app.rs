@@ -1049,18 +1049,15 @@ mod tests {
 
         app.gate
             .set_corename(Some(crate::jobs::watch::gate::MENU.to_owned()));
-        for _ in 0..200 {
+        crate::testing::eventually("the scan to run once the gate opened", || async {
             let row = app
                 .db
                 .read(move |c| db::jobs::get(c, id))
                 .await
                 .expect("read")
                 .expect("row");
-            if row.state == db::jobs::JobState::Done {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("scan never ran once the gate opened");
+            row.state == db::jobs::JobState::Done
+        })
+        .await;
     }
 }

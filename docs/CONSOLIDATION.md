@@ -540,13 +540,14 @@ Opus · every crate · branch `wp-69-digests-ids`
 
 Sonnet · `mistarr-server`, `tests/` · branch `wp-71-server-surface`
 
-- [ ] Server modules are `pub(crate)` by default. `app`, `config` and `cli` are
-  public, with a `testing` module behind `test-support`; doctests on items
-  that become private turn into unit tests.
-- [ ] `tests/common` holds `json_of`, `wait_event`, `drop_file`, `md5_of`,
+- [x] Server modules are `pub(crate)` unless the `test-support` feature is on,
+  which the crate's dev-dependency on itself enables for tests and doctests
+  (doctests stay). `app`, `config` and `cli` are always public, and `testing`
+  holds the `eventually` helpers.
+- [x] `tests/common` holds `json_of`, `wait_event`, `drop_file`, `md5_of`,
   `mra`, `bstr`, `variant` and `infohash`; `eventually` replaces each
   `wait_for` and every hand-written sleep loop in unit tests.
-- [ ] Every test scratch directory comes from `tempfile`.
+- [x] Every test scratch directory comes from `tempfile`.
 
 ## Wave 11
 

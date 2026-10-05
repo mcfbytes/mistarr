@@ -128,6 +128,7 @@ impl Roots {
 
     /// The scratch directory steps write to.
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn scratch(&self) -> &Path {
         &self.scratch
     }
@@ -306,6 +307,7 @@ pub fn commit(steps: &[Step], roots: &Roots) -> Result<Vec<PathBuf>, Partial> {
 /// # Errors
 ///
 /// The first failure; renames that landed stay in place.
+#[cfg(any(test, feature = "test-support"))]
 pub fn apply(steps: &[Step], roots: &Roots) -> Result<(), PlaceError> {
     if let Err(e) = prepare(steps, roots) {
         roots.rollback();

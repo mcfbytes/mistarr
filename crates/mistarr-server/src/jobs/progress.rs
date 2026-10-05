@@ -121,6 +121,7 @@ impl<R: Read, F: FnMut(u64)> CountingReader<R, F> {
 
     /// Bytes read so far.
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn count(&self) -> u64 {
         self.read
     }
@@ -162,6 +163,7 @@ impl Throttle {
 
     /// The gap this throttle keeps.
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn every(&self) -> Duration {
         self.every
     }

@@ -6,8 +6,8 @@ mod common;
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
-use common::{boot_with, config_in, eventually, get, request, Booted};
-use mistarr_core::hash::{hash_reader, HeaderRule, Md5Stream};
+use common::{boot_with, config_in, get, infohash, md5_of, mra, request, Booted};
+use mistarr_core::hash::{hash_reader, HeaderRule};
 use mistarr_core::{PlatformId, RomId};
 use mistarr_server::db::downloads::{self, DownloadState};
 use mistarr_server::db::files::{self, FileRow, FileState};
@@ -17,11 +17,8 @@ use mistarr_server::db::sources::{self, NewSource, SourceState};
 use mistarr_server::db::sql::Page;
 use mistarr_server::events::{DownloadChanged, Event};
 use mistarr_server::jobs::JobKind;
+use mistarr_server::testing::eventually;
 use serde_json::{json, Value};
-
-fn infohash() -> String {
-    "0b".repeat(20)
-}
 
 fn write(path: &Path, data: &[u8]) {
     std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
@@ -36,22 +33,6 @@ fn zip_bytes(members: &[(&str, &[u8])]) -> Vec<u8> {
         z.write_all(body).expect("write");
     }
     z.finish().expect("finish").into_inner()
-}
-
-fn md5_of(parts: &[&[u8]]) -> mistarr_core::Md5 {
-    let mut m = Md5Stream::new();
-    for p in parts {
-        m.update(p);
-    }
-    m.finish()
-}
-
-fn mra(name: &str, roms: &str) -> Vec<u8> {
-    format!(
-        "<misterromdescription><name>{name}</name><setname>exblast</setname>\
-         <rbf>excore</rbf>{roms}</misterromdescription>"
-    )
-    .into_bytes()
 }
 
 /// Boots with the given `_Arcade` files and waits for their titles and 1G1R picks:
@@ -300,7 +281,10 @@ async fn an_md5_covered_zip_is_verified_by_assembly_and_placed_whole() {
         r#"<rom index="0" zip="exblast.zip" md5="{md5}"><part name="cpu.bin"/><part name="snd.bin"/></rom>"#
     );
     let b = boot_arcade(
-        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[(
+            "Example Blaster.mra",
+            mra("Example Blaster", "exblast", &roms),
+        )],
         &[],
     )
     .await;
@@ -355,7 +339,10 @@ async fn an_md5_covered_zip_is_verified_by_assembly_and_placed_whole() {
 async fn without_an_md5_a_loaded_dat_verifies_member_by_member() {
     let roms = r#"<rom index="0" zip="exblast.zip"><part name="cpu.bin"/></rom>"#;
     let b = boot_arcade(
-        &[("Example Blaster.mra", mra("Example Blaster", roms))],
+        &[(
+            "Example Blaster.mra",
+            mra("Example Blaster", "exblast", roms),
+        )],
         &[],
     )
     .await;
@@ -409,7 +396,10 @@ async fn without_an_md5_a_loaded_dat_verifies_member_by_member() {
 async fn a_zip_the_dat_disagrees_with_is_quarantined() {
     let roms = r#"<rom index="0" zip="exblast.zip"><part name="cpu.bin"/></rom>"#;
     let b = boot_arcade(
-        &[("Example Blaster.mra", mra("Example Blaster", roms))],
+        &[(
+            "Example Blaster.mra",
+            mra("Example Blaster", "exblast", roms),
+        )],
         &[],
     )
     .await;
@@ -448,7 +438,10 @@ async fn a_zip_the_dat_disagrees_with_is_quarantined() {
 async fn with_no_hash_source_the_zip_is_placed_unverified() {
     let roms = r#"<rom index="0" zip="exblast.zip"><part name="cpu.bin"/></rom>"#;
     let b = boot_arcade(
-        &[("Example Blaster.mra", mra("Example Blaster", roms))],
+        &[(
+            "Example Blaster.mra",
+            mra("Example Blaster", "exblast", roms),
+        )],
         &[],
     )
     .await;
@@ -480,7 +473,11 @@ async fn with_no_hash_source_the_zip_is_placed_unverified() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_zip_read_from_hbmame_is_placed_there() {
     let roms = r#"<rom index="0" zip="/hbmame/examplequest.zip"><part name="q.bin"/></rom>"#;
-    let b = boot_arcade(&[("Example Quest.mra", mra("Example Quest", roms))], &[]).await;
+    let b = boot_arcade(
+        &[("Example Quest.mra", mra("Example Quest", "exblast", roms))],
+        &[],
+    )
+    .await;
     let rom = zip_rom(&b, "examplequest.zip");
     let src = source(&b);
     let body = zip_bytes(&[("q.bin", b"Q")]);
@@ -508,7 +505,10 @@ async fn a_zip_read_from_hbmame_is_placed_there() {
 async fn a_zip_without_the_members_the_mra_names_is_quarantined() {
     let roms = r#"<rom index="0" zip="exblast.zip"><part name="cpu.bin"/><part name="gone.bin"/><part name="lost.bin"/></rom>"#;
     let b = boot_arcade(
-        &[("Example Blaster.mra", mra("Example Blaster", roms))],
+        &[(
+            "Example Blaster.mra",
+            mra("Example Blaster", "exblast", roms),
+        )],
         &[],
     )
     .await;
@@ -546,7 +546,10 @@ async fn an_mra_the_assembler_cannot_build_is_refused_with_its_reason() {
         r#"<rom index="0" zip="exblast.zip" md5="{md5}"><part name="cpu.bin" map="01"/></rom>"#
     );
     let b = boot_arcade(
-        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[(
+            "Example Blaster.mra",
+            mra("Example Blaster", "exblast", &roms),
+        )],
         &[],
     )
     .await;
@@ -576,7 +579,10 @@ async fn wanting_creates_one_download_per_missing_zip() {
     let roms =
         r#"<rom index="0" zip="exblast.zip|exparent.zip|exsound.zip"><part name="a.bin"/></rom>"#;
     let b = boot_arcade(
-        &[("Example Blaster.mra", mra("Example Blaster", roms))],
+        &[(
+            "Example Blaster.mra",
+            mra("Example Blaster", "exblast", roms),
+        )],
         &[("mame/exparent.zip", zip_bytes(&[("p.bin", b"P")]))],
     )
     .await;
@@ -638,7 +644,10 @@ async fn an_md5_covered_zip_imports_whatever_a_dat_flags_it() {
     let roms =
         format!(r#"<rom index="0" zip="exblast.zip" md5="{md5}"><part name="cpu.bin"/></rom>"#);
     let b = boot_arcade(
-        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[(
+            "Example Blaster.mra",
+            mra("Example Blaster", "exblast", &roms),
+        )],
         &[],
     )
     .await;
@@ -661,7 +670,10 @@ async fn an_md5_covered_zip_imports_whatever_a_dat_flags_it() {
 async fn a_dat_bios_entry_refuses_a_zip_only_it_would_verify() {
     let roms = r#"<rom index="0" zip="exblast.zip"><part name="cpu.bin"/></rom>"#;
     let b = boot_arcade(
-        &[("Example Blaster.mra", mra("Example Blaster", roms))],
+        &[(
+            "Example Blaster.mra",
+            mra("Example Blaster", "exblast", roms),
+        )],
         &[],
     )
     .await;
@@ -692,6 +704,7 @@ async fn hbmame_zips_are_verified_only_by_an_hbmame_dat() {
                 "Example Blaster.mra",
                 mra(
                     "Example Blaster",
+                    "exblast",
                     r#"<rom index="0" zip="/hbmame/exblast.zip"><part name="cpu.bin"/></rom>"#,
                 ),
             ),
@@ -699,6 +712,7 @@ async fn hbmame_zips_are_verified_only_by_an_hbmame_dat() {
                 "Example Quest.mra",
                 mra(
                     "Example Quest",
+                    "exblast",
                     r#"<rom index="0" zip="/hbmame/examplequest.zip"><part name="q.bin"/></rom>"#,
                 ),
             ),
@@ -745,7 +759,10 @@ async fn members_read_by_a_failing_alternative_stay_unverified() {
            <rom index="0" zip="exblast.zip" md5="{right}"><part name="cpu.bin"/></rom>"#
     );
     let b = boot_arcade(
-        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[(
+            "Example Blaster.mra",
+            mra("Example Blaster", "exblast", &roms),
+        )],
         &[],
     )
     .await;
@@ -785,7 +802,10 @@ async fn two_zips_arrive(first: &str) {
              <part name="a.bin"/><part name="b.bin"/></rom>"#
     );
     let b = boot_arcade(
-        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[(
+            "Example Blaster.mra",
+            mra("Example Blaster", "exblast", &roms),
+        )],
         &[],
     )
     .await;
@@ -897,7 +917,10 @@ async fn deleting_an_imported_zip_drops_have_once_the_catalogue_reruns() {
         r#"<rom index="0" zip="exblast.zip" md5="{md5}"><part name="cpu.bin"/><part name="snd.bin"/></rom>"#
     );
     let b = boot_arcade(
-        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[(
+            "Example Blaster.mra",
+            mra("Example Blaster", "exblast", &roms),
+        )],
         &[],
     )
     .await;
@@ -930,7 +953,10 @@ async fn a_user_placed_sibling_zip_is_promoted_once_its_pair_is_imported() {
              <part name="a.bin"/><part name="b.bin"/></rom>"#
     );
     let b = boot_arcade(
-        &[("Example Blaster.mra", mra("Example Blaster", &roms))],
+        &[(
+            "Example Blaster.mra",
+            mra("Example Blaster", "exblast", &roms),
+        )],
         &[],
     )
     .await;

@@ -305,19 +305,16 @@ mod tests {
         let task = tokio::spawn(watch(Arc::clone(&app)));
         let _listener = tokio::net::TcpListener::bind(&addr).await.expect("rebind");
         app.redetect.notify_one();
-        for _ in 0..200 {
+        crate::testing::eventually("the started client to be picked up", || async {
             let st: Option<ClientStatus> = app
                 .db
                 .read(|c| settings::get_json(c, keys::CLIENT_DETECTED))
                 .await
                 .expect("read");
-            if st.is_some_and(|s| s.reachable) {
-                task.abort();
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-        panic!("the started client was never picked up");
+            st.is_some_and(|s| s.reachable)
+        })
+        .await;
+        task.abort();
     }
 
     #[tokio::test]

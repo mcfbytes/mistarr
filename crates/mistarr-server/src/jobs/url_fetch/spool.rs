@@ -134,6 +134,7 @@ impl Spool {
 
     /// Whether the file is in RAM.
     #[must_use]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn in_ram(&self) -> bool {
         self.in_ram
     }

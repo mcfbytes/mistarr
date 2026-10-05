@@ -1,12 +1,13 @@
-//! Command-line flags.
+//! Parses the command-line flags and runs the chosen subcommand.
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::app;
 use crate::config::Config;
 use crate::db::titles::browse::SearchShape;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// `mistarr [--config FILE] [--data DIR] [--listen ADDR] [serve | doctor]`.
 #[derive(Debug, Parser)]
@@ -78,6 +79,25 @@ pub enum Command {
     },
 }
 
+/// Wraps a failure with what was being done.
+trait Context<T> {
+    fn context(self, what: &str) -> Result<T>;
+    fn with_context(self, what: impl FnOnce() -> String) -> Result<T>;
+}
+
+impl<T, E: std::error::Error + Send + Sync + 'static> Context<T> for std::result::Result<T, E> {
+    fn context(self, what: &str) -> Result<T> {
+        self.with_context(|| what.to_owned())
+    }
+
+    fn with_context(self, what: impl FnOnce() -> String) -> Result<T> {
+        self.map_err(|e| Error::Command {
+            what: what(),
+            source: Box::new(e),
+        })
+    }
+}
+
 /// A `--shape` value.
 fn parse_shape(s: &str) -> std::result::Result<SearchShape, String> {
     SearchShape::from_name(s).ok_or_else(|| {
@@ -120,9 +140,141 @@ impl Cli {
     }
 }
 
+/// Runs the chosen subcommand to completion; `serve` returns after SIGINT or SIGTERM.
+///
+/// # Errors
+///
+/// Whatever the subcommand reports, with context naming what failed.
+pub fn run(cli: &Cli, out: &mut impl std::io::Write) -> Result<()> {
+    let config = cli.config()?;
+    if cli.command() == Command::ListenAddr {
+        writeln!(out, "{}", config.server.listen)?;
+        return Ok(());
+    }
+    // Set before any thread starts, so every stack and heap counts against it.
+    let data_limit = crate::memory::limit_data(config.memory.data_limit_mib)
+        .context("cannot set the memory limit")?;
+    let mut temp_refused = None;
+    let ram = std::env::var_os(crate::db::tempdir::TEMP_DIR_ENV).map_or_else(
+        || std::path::PathBuf::from(crate::db::tempdir::RAM_TEMP_DIR),
+        Into::into,
+    );
+    let options = app::Options::for_board(&ram);
+    if matches!(cli.command(), Command::Serve) {
+        let disk = config.paths.tmp();
+        let tmp = crate::db::tempdir::choose_temp_dir(&ram, &disk)
+            .with_context(|| format!("cannot create {}", disk.display()))?;
+        // Set before any thread starts, as the environment is shared.
+        std::env::set_var(crate::db::tempdir::SQLITE_TMPDIR, &tmp.dir);
+        temp_refused = tmp.refused.map(|e| (ram, e));
+    }
+    let runtime = crate::memory::runtime().context("cannot start the async runtime")?;
+
+    match cli.command() {
+        Command::BenchSeed { db, scale } => {
+            let seeded = crate::bench::seed_file(&db, scale)
+                .with_context(|| format!("cannot seed {}", db.display()))?;
+            writeln!(
+                out,
+                "{}: {} titles, {} roms, {} files",
+                db.display(),
+                seeded.titles,
+                seeded.roms,
+                seeded.files
+            )?;
+        }
+        Command::BenchSearch {
+            db,
+            platform,
+            term,
+            iterations,
+            shapes,
+        } => {
+            let shapes = if shapes.is_empty() {
+                SearchShape::ALL.to_vec()
+            } else {
+                shapes
+            };
+            let timings = crate::bench::search(&db, &platform, &term, iterations, &shapes)
+                .with_context(|| format!("cannot time searches on {}", db.display()))?;
+            writeln!(out, "{platform} {term:?}, {iterations} runs")?;
+            write!(out, "{}", crate::bench::report(&timings))?;
+        }
+        Command::Doctor {
+            hash_mib,
+            rebuild_groups,
+        } => {
+            if rebuild_groups {
+                let groups = crate::doctor::rebuild_groups(&config.paths.db())
+                    .context("cannot rebuild the title groups")?;
+                writeln!(out, "title groups rebuilt: {groups}")?;
+            }
+            runtime
+                .block_on(crate::doctor::run(&config, hash_mib, out))
+                .context("cannot write the report")?;
+        }
+        Command::ListenAddr => {}
+        Command::Serve => {
+            std::fs::create_dir_all(&config.paths.data)
+                .with_context(|| format!("cannot create {}", config.paths.data.display()))?;
+            crate::logging::init(Some(&config.paths.log())).context("cannot open the log file")?;
+            if let Some((ram, e)) = temp_refused {
+                tracing::warn!(error = %e, dir = %ram.display(), "SQLite temporary files go to the card");
+            }
+            if let Some(bytes) = data_limit {
+                tracing::info!(mib = bytes >> 20, "memory limit");
+            } else {
+                tracing::info!("no memory limit");
+            }
+            runtime.block_on(serve(config, options))?;
+        }
+    }
+    Ok(())
+}
+
+async fn serve(config: Config, options: app::Options) -> Result<()> {
+    let running = app::start(config, options).await?;
+    tracing::info!(
+        url = %format!("http://{}/", running.addr),
+        version = crate::version::version(),
+        "mistarr started"
+    );
+    wait_for_signal().await?;
+    tracing::info!("shutting down");
+    running.shutdown().await?;
+    Ok(())
+}
+
+async fn wait_for_signal() -> Result<()> {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = signal(SignalKind::terminate()).context("cannot watch SIGTERM")?;
+    tokio::select! {
+        r = tokio::signal::ctrl_c() => r.context("cannot watch SIGINT")?,
+        _ = term.recv() => {}
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listen_addr_prints_the_effective_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let cli = Cli::try_parse_from([
+            "mistarr",
+            "listen-addr",
+            "--data",
+            dir.path().to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:9",
+        ])
+        .unwrap();
+        let mut out = Vec::new();
+        run(&cli, &mut out).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "127.0.0.1:9\n");
+    }
 
     #[test]
     fn flags_parse_before_and_after_the_subcommand() {

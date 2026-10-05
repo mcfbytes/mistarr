@@ -593,6 +593,7 @@ pub fn platforms_with_dat(conn: &Connection) -> Result<Vec<PlatformId>> {
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
+#[cfg(any(test, feature = "test-support"))]
 pub fn preview(conn: &Connection, id: SourceId, max: u64) -> Result<Preview> {
     let total = sources::get(conn, id)?.map_or(0, |r| r.file_count);
     let step = sample_step(total, max);

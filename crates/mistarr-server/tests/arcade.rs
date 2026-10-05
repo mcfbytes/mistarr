@@ -6,8 +6,8 @@ use std::io::Write as _;
 use std::net::SocketAddr;
 use std::path::Path;
 
-use common::{boot_with, config_in, eventually, get, request, Booted};
-use mistarr_core::hash::Md5Stream;
+use common::{boot_with, config_in, json_of, md5_of, mra, request, variant, Booted};
+use mistarr_server::testing::eventually;
 use serde_json::Value;
 
 fn write(path: &Path, bytes: &[u8]) {
@@ -23,28 +23,6 @@ fn write_zip(path: &Path, members: &[(&str, &[u8])]) {
         z.write_all(body).expect("write");
     }
     write(path, &z.finish().expect("finish").into_inner());
-}
-
-fn md5_of(parts: &[&[u8]]) -> mistarr_core::Md5 {
-    let mut m = Md5Stream::new();
-    for p in parts {
-        m.update(p);
-    }
-    m.finish()
-}
-
-fn mra(name: &str, setname: &str, roms: &str) -> Vec<u8> {
-    format!(
-        "<?xml version=\"1.0\"?>\n<misterromdescription>\n  <name>{name}</name>\n  \
-         <setname>{setname}</setname>\n  <rbf>excore</rbf>\n{roms}\n</misterromdescription>\n"
-    )
-    .into_bytes()
-}
-
-async fn json_of(addr: SocketAddr, path: &str) -> Value {
-    let r = get(addr, path).await;
-    assert_eq!(r.status, 200, "{path}: {}", r.body);
-    r.json()
 }
 
 async fn post(addr: SocketAddr, path: &str, body: &str) -> Value {
@@ -70,24 +48,12 @@ async fn arcade_rows(addr: SocketAddr) -> Vec<(String, u64)> {
 
 async fn wait_rows(addr: SocketAddr, want: &[(&str, u64)]) {
     let want: Vec<(String, u64)> = want.iter().map(|(n, h)| ((*n).to_owned(), *h)).collect();
-    let mut last = Vec::new();
-    for _ in 0..250 {
-        last = arcade_rows(addr).await;
-        if last == want {
-            return;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    panic!("arcade rows stayed {last:?}, wanted {want:?}");
-}
-
-fn variant<'a>(detail: &'a Value, name: &str) -> &'a Value {
-    detail["variants"]
-        .as_array()
-        .expect("variants")
-        .iter()
-        .find(|v| v["name"] == name)
-        .unwrap_or_else(|| panic!("no variant {name} in {detail}"))
+    mistarr_server::testing::eventually_within(
+        &format!("arcade rows {want:?}"),
+        std::time::Duration::from_secs(10),
+        || async { arcade_rows(addr).await == want },
+    )
+    .await;
 }
 
 async fn detail_of(addr: SocketAddr, platform: &str, name: &str) -> Value {

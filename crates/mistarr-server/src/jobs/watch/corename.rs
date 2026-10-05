@@ -11,7 +11,8 @@ use super::gate::{Gate, MENU};
 /// Reads CORENAME: `MENU`, a core name, or `None` when the file cannot be read.
 ///
 /// ```
-/// let path = std::env::temp_dir().join("mistarr-doc-corename-read");
+/// let dir = tempfile::tempdir().unwrap();
+/// let path = dir.path().join("corename");
 /// std::fs::write(&path, "MENU\n").unwrap();
 /// assert_eq!(mistarr_server::jobs::watch::corename::read(&path).as_deref(), Some("MENU"));
 /// assert_eq!(mistarr_server::jobs::watch::corename::read(&path.join("absent")), None);
