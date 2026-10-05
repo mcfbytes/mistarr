@@ -1,4 +1,4 @@
-//! Polling helpers shared by unit tests and integration tests.
+//! Polling and hashing helpers shared by unit tests and integration tests.
 
 use std::future::Future;
 use std::time::{Duration, Instant};

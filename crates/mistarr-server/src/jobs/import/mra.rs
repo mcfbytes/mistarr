@@ -480,8 +480,6 @@ impl Placing<'_> {
 mod tests {
     use super::*;
     use crate::app::testutil::write_zip;
-
-
     use crate::testing::md5_of;
 
     fn at(name: &str) -> ZipPath {

@@ -1,12 +1,10 @@
-
 use super::*;
 use crate::app::testutil::{state, write_zip};
 use crate::jobs::Scheduler;
+use crate::testing::md5_of;
 
 /// Zips as `(file, members)`, each member `(name, bytes)`.
 type Zips<'a> = &'a [(&'a str, &'a [(&'a str, &'a [u8])])];
-
-use crate::testing::md5_of;
 
 fn mra_xml(name: &str, rom: &str) -> String {
     format!(
