@@ -65,8 +65,10 @@ impl Case {
 
 use Region::{Asia, Europe, Japan, Usa, World};
 
-// A flat table reads better than one split across helpers.
-#[expect(clippy::too_many_lines, reason = "One flow, read top to bottom.")]
+#[expect(
+    clippy::too_many_lines,
+    reason = "A flat table reads better than one split across helpers."
+)]
 fn explicit_cases() -> Vec<Case> {
     vec![
         case("Example Quest", "Example Quest"),

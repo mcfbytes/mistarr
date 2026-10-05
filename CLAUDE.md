@@ -65,6 +65,8 @@ parallel on the work packages in `docs/WORKPLAN.md`. Read this file, then
 - Log with `tracing`; never log file contents or hashes at info level.
 - Prefer the standard library and small, well-maintained crates. Check a
   crate's size, transitive dependencies and ARMv7 support before adding it.
+- Versions and `default-features` are set once in `[workspace.dependencies]`.
+  A crate may add features to a workspace entry, never change those two.
 
 ## Stack
 

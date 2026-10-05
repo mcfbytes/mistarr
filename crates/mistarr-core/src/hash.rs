@@ -966,6 +966,8 @@ mod tests {
         assert_eq!(members[0].crc32, "352441c2");
     }
 
+    /// Hand-assembled: the `zip` crate's writer refuses a compression method
+    /// it cannot encode, but listing must not decode anything to succeed.
     #[expect(
         clippy::cast_possible_truncation,
         reason = "Buffers here are a few dozen bytes, so length casts never truncate."
