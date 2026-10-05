@@ -51,6 +51,13 @@ contracts in this document.
 | `mistarr-fixture` | Development tool, never shipped: synthetic DATs, `.torrent` files, the synthetic set and a local tracker for the tests in TESTING.md. | core, mister, sources |
 | `web/` | Svelte 5 + Vite + TypeScript SPA. Built to `web/dist`, embedded at compile time. | API.md |
 
+`mistarr-server`'s `synth` and `bench` modules ship in the release binary on
+purpose, behind no cargo feature: the hidden `bench-seed` and `bench-search`
+subcommands (TESTING.md "Browse speed") time browse and search on the board
+itself, which a host build cannot stand in for. They hold only generated
+names, `bench-seed` writes only a new file and `bench-search` opens a
+database read-only, and neither adds a dependency.
+
 ### Key traits
 
 ```rust
@@ -396,7 +403,7 @@ payload or progress, or a log line at info; the host alone may appear at
 debug. It lives in the `url_fetch` job's memory until the job ends.
 
 1. A `magnet:` link is parsed as an upload's is and placed in `sources/` as
-   a `.magnet` file at once, through the same code (`http::place_source`).
+   a `.magnet` file at once, through the same code (`incoming::place::place_source`).
 2. Any other link must be `http` or `https`, with a host and no user name or
    password; a fragment is dropped, and spaces and other characters a
    request line cannot carry are percent-encoded. The answer is 202 with a
@@ -490,8 +497,8 @@ debug. It lives in the `url_fetch` job's memory until the job ends.
    `.torrent`), else `download`. A DAT is moved into `dats/` as an upload's
    part file, renamed in place from `<data>/tmp` or copied from RAM in
    1 MiB writes, then renamed to its name or `name (N)` and queued as an
-   upload is (`http::place_dat_part`); a torrent goes through
-   `http::place_source`, which refuses a repeat of a loaded source. From
+   upload is (`incoming::place::place_part`); a torrent goes through
+   `incoming::place::place_source`, which refuses a repeat of a loaded source. From
    there the incoming list, jobs and toasts are an upload's. A fetch never
    calls the download client, so it runs while the client is stopped for a
    core; a torrent or magnet it places lands in `sources/` and imports as
@@ -1080,7 +1087,7 @@ pause_client_while_playing = true    # stop a client on the board while a core r
 regions   = ["USA", "World", "Europe", "Japan"]
 languages = ["En"]
 prefer_latest_revision = true
-hide = ["bios", "beta", "proto", "demo", "sample", "program"]
+hide = ["bios", "beta", "proto", "demo", "sample", "program"]   # any of these six; others are dropped
 launch = true               # allow starting cores and games from the UI
 
 [sources]
@@ -1103,10 +1110,13 @@ exists, where `<data>` is `--data DIR` or `/media/fat/mistarr`; `--data`
 also overrides `paths.data` and `--listen` overrides `server.listen`. The
 `client`, `limits`, `transfer`, `prefs` and `scan` sections are editable
 through `/system/settings`; saved values live in the `settings` table and take
-precedence over the file on every start, except that settings saved without
-a `scan` or `transfer` section leave the file's in force, so a faster board
-can default `chd_tracks` on in the file. `server`, `paths`, `sources`, `jobs` and
-`memory` need a restart.
+precedence over the file on every start, section by section: a section the
+saved settings lack, as `scan` and `transfer` in settings saved before they
+existed, leaves the file's in force, so a faster board can default
+`chd_tracks` on in the file. The saved settings and a `PUT` body are one type,
+`RuntimeSettings`, with every section optional; `AppState::update_settings`
+applies one, stores the result and runs what each changed section needs.
+`server`, `paths`, `sources`, `jobs` and `memory` need a restart.
 
 A file that is not valid TOML fails startup with `config: <path>: <error>`,
 the prefix once. A key the schema above does not name is ignored, and logged
