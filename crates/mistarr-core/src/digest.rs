@@ -1,6 +1,6 @@
 //! Fixed-length digests that read and write as lowercase hex.
 
-use std::fmt::{self, Write as _};
+use std::fmt;
 use std::str::FromStr;
 
 use serde::{de, Deserialize, Deserializer, Serialize, Serializer};
@@ -76,11 +76,7 @@ impl Digest<4> {
 
 impl<const N: usize> fmt::Display for Digest<N> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        const DIGITS: &[u8; 16] = b"0123456789abcdef";
-        self.0.iter().try_for_each(|b| {
-            f.write_char(char::from(DIGITS[usize::from(b >> 4)]))?;
-            f.write_char(char::from(DIGITS[usize::from(b & 0xf)]))
-        })
+        crate::hex::write(f, &self.0)
     }
 }
 
@@ -96,15 +92,8 @@ impl<const N: usize> FromStr for Digest<N> {
     type Err = ParseDigestError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let err = ParseDigestError { digits: 2 * N };
-        let (pairs, rest) = s.as_bytes().as_chunks::<2>();
-        if pairs.len() != N || !rest.is_empty() {
-            return Err(err);
-        }
         let mut bytes = [0; N];
-        for (out, &[hi, lo]) in bytes.iter_mut().zip(pairs) {
-            *out = crate::hex::digit(hi).ok_or(err)? << 4 | crate::hex::digit(lo).ok_or(err)?;
-        }
+        crate::hex::decode_into(s, &mut bytes).ok_or(ParseDigestError { digits: 2 * N })?;
         Ok(Self(bytes))
     }
 }
@@ -272,6 +261,12 @@ mod tests {
             let h = InfoHash::from_bytes(bytes);
             prop_assert_eq!(h.to_string(), d.to_string());
             prop_assert_eq!(h.to_string().to_uppercase().parse::<InfoHash>(), Ok(h));
+        }
+
+        #[test]
+        fn parse_agrees_with_hex_decode(text in "[0-9a-fA-Fg é]{0,10}|\\PC*") {
+            let parsed = text.parse::<Crc32>().ok().map(|d| d.as_bytes().to_vec());
+            prop_assert_eq!(parsed, crate::hex::decode(&text).filter(|b| b.len() == 4));
         }
     }
 }

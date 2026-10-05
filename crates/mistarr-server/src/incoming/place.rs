@@ -32,8 +32,23 @@ pub enum PlaceError {
     #[error("Too many files with this name are waiting in the directory.")]
     NoFreeName,
     /// The file could not be written or moved.
-    #[error("The file could not be placed: {0}.")]
-    Io(#[from] io::Error),
+    #[error("The file could not be placed at {}: {source}.", path.display())]
+    Io {
+        /// The directory, the claimed name or the file being moved.
+        path: PathBuf,
+        /// The failure.
+        source: io::Error,
+    },
+}
+
+impl PlaceError {
+    /// Wraps an I/O failure on `path`.
+    fn io_at(path: &Path) -> impl FnOnce(io::Error) -> Self + '_ {
+        move |source| Self::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
 }
 
 /// A `.torrent` or `.magnet` file on its way into `sources/`.
@@ -84,7 +99,7 @@ pub fn place_unique(
     name: &str,
     write: impl FnOnce(&Path) -> io::Result<()>,
 ) -> Result<PathBuf, PlaceError> {
-    std::fs::create_dir_all(dir)?;
+    std::fs::create_dir_all(dir).map_err(PlaceError::io_at(dir))?;
     for target in candidates(dir, name.as_ref()) {
         match OpenOptions::new()
             .write(true)
@@ -93,13 +108,13 @@ pub fn place_unique(
         {
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(PlaceError::io_at(&target)(e)),
         }
         return match write(&target) {
             Ok(()) => Ok(target),
             Err(e) => {
                 let _ = std::fs::remove_file(&target);
-                Err(e.into())
+                Err(PlaceError::io_at(&target)(e))
             }
         };
     }
@@ -145,7 +160,7 @@ pub fn place(dir: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, PlaceError
 /// ```
 pub fn place_moved(from: &Path, dir: &Path, name: &str) -> Result<PathBuf, PlaceError> {
     if !from.exists() {
-        return Err(io::Error::from(io::ErrorKind::NotFound).into());
+        return Err(PlaceError::io_at(from)(io::ErrorKind::NotFound.into()));
     }
     place_unique(dir, name, |target| match std::fs::rename(from, target) {
         Err(e) if e.kind() == io::ErrorKind::CrossesDevices => copy_into(from, dir, target),
@@ -323,7 +338,11 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let err = place_unique(dir.path(), "a.dat", |_| Err(io::Error::other("full")))
             .expect_err("refused");
-        assert!(matches!(err, PlaceError::Io(_)), "{err:?}");
+        let target = dir.path().join("a.dat");
+        assert!(
+            matches!(&err, PlaceError::Io { path, .. } if *path == target),
+            "{err:?}"
+        );
         assert_eq!(std::fs::read_dir(dir.path()).expect("dir").count(), 0);
     }
 
@@ -342,7 +361,9 @@ mod tests {
         );
         assert!(!from.exists());
         let gone = place_moved(&from, dir.path(), "b.dat").expect_err("moved already");
-        assert!(matches!(gone, PlaceError::Io(e) if e.kind() == io::ErrorKind::NotFound));
+        assert!(matches!(&gone, PlaceError::Io { path, source }
+            if *path == from && source.kind() == io::ErrorKind::NotFound));
+        assert!(gone.to_string().contains("rejected.dat"), "{gone}");
         assert!(!dir.path().join("b.dat").exists());
         let to = dir.path().join("c.dat");
         std::fs::write(&to, b"").expect("claim");
@@ -412,6 +433,7 @@ mod tests {
         let gone = place_part(&app, &part, "Set.dat")
             .await
             .expect_err("no part");
-        assert!(matches!(gone, Error::Place(PlaceError::Io(_))), "{gone:?}");
+        let missing = matches!(&gone, Error::Place(PlaceError::Io { path, .. }) if *path == part);
+        assert!(missing, "{gone:?}");
     }
 }
