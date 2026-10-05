@@ -371,8 +371,9 @@ On shutdown the job stays queued and starts the image it was decoding again.
    decide; otherwise the matching directories that hold the most files
    decide, among those holding at least half of them. Two different
    platforms at the deciding level mean no suggestion. The suggestion is
-   stored, shown on the source and named in its reason. After a DAT pack
-   loads, unbound sources are bound again once: to the suggested platform
+   stored, shown on the source and named in its reason. After the catalogue
+   changes ("DAT import", the follow-up paragraph), unbound sources are
+   bound again once: to the suggested platform
    when its hit rate reaches the threshold and no other platform scores
    higher, otherwise as above. A source whose binding the user chose, a
    platform or none (`sources.user_binding`), is never bound

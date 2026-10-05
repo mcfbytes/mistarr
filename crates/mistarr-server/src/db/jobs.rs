@@ -286,39 +286,6 @@ pub fn find_in(
         .optional()?)
 }
 
-/// The oldest job of `kind` with `payload` that has not finished: queued,
-/// running or paused.
-///
-/// # Errors
-///
-/// [`crate::Error::Db`] on SQLite failure.
-///
-/// ```
-/// use mistarr_server::db::jobs::{self, JobState};
-/// use mistarr_server::jobs::{JobKind, Lane};
-/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let p = serde_json::json!({});
-/// let id = jobs::insert(&conn, JobKind::Import, &p, Lane::Heavy, 1).unwrap();
-/// jobs::set_state(&conn, id, JobState::Running, 2).unwrap();
-/// assert_eq!(jobs::find_open(&conn, JobKind::Import, &p).unwrap(), Some(id));
-/// jobs::set_state(&conn, id, JobState::Done, 3).unwrap();
-/// assert_eq!(jobs::find_open(&conn, JobKind::Import, &p).unwrap(), None);
-/// ```
-pub fn find_open(conn: &Connection, kind: JobKind, payload: &Value) -> Result<Option<JobId>> {
-    Ok(conn
-        .query_row(
-            &format!(
-                "SELECT id FROM jobs WHERE kind = ?1 AND subject = ?2
-                   AND state IN {} ORDER BY id LIMIT 1",
-                JobState::ACTIVE_SQL
-            ),
-            params![kind, subject_of(payload)],
-            |r| r.get(0),
-        )
-        .optional()?)
-}
-
 /// Number of jobs of `kind` in any state.
 ///
 /// # Errors

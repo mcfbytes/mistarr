@@ -23,7 +23,7 @@ use tokio::time::Instant;
 use super::fsutil::{all_entries, extension, stat};
 use super::matching::{self, cartridge_state, classify_disc_tracks, own_name, stored_match, Track};
 use super::progress::Throttle;
-use super::{Job, JobContext, JobKind, Lane, Scheduler};
+use super::{Dedupe, Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::files::{self, FileState, NewFile};
 use crate::db::ids::{FileId, JobId};
@@ -68,8 +68,8 @@ impl Job for ScanJob {
 }
 
 /// Enqueues a scan of `platform_id` when its games directory already exists,
-/// for a DAT that just finished loading. `None` when there is nothing to
-/// walk yet; the caller dedupes several DATs from one pack before calling.
+/// after the catalogue changes ([`super::follow_up`]). `None` when there is nothing
+/// to walk yet; the caller dedupes several DATs from one pack before calling.
 ///
 /// # Errors
 ///
@@ -137,7 +137,9 @@ async fn fan_out(ctx: &JobContext) -> Result<()> {
         let already_open = ctx
             .app
             .db
-            .read(move |c| crate::db::jobs::find_open(c, JobKind::Scan, &payload))
+            .read(move |c| {
+                crate::db::jobs::find_in(c, JobKind::Scan, &payload, Dedupe::Open.states())
+            })
             .await?
             .is_some();
         if already_open {

@@ -579,6 +579,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn move_downloads_moves_and_announces_only_those_that_may_move() {
+        let (_dir, app) = state();
+        let (_, open) = seed(&app, 1);
+        let (_, done) = seed(&app, 2);
+        app.db
+            .write(move |c| rows::cancel(c, done, 1))
+            .await
+            .expect("cancel");
+        let mut sub = app.events.subscribe(None);
+        let moved = move_downloads(&app, &[open, done], DownloadState::Failed, Some("Gone."))
+            .await
+            .expect("move");
+        assert_eq!(moved, [open]);
+        let row = app.db.read(move |c| rows::get(c, open)).await.expect("get");
+        assert_eq!(row.and_then(|r| r.error).as_deref(), Some("Gone."));
+        assert_eq!(state_of(&app, done).await, DownloadState::Cancelled);
+        let mut changed = Vec::new();
+        while let Ok(e) = sub.live.try_recv() {
+            if e.kind == EventKind::DownloadChanged {
+                changed.push(serde_json::from_str::<Value>(&e.data).expect("json"));
+            }
+        }
+        assert_eq!(changed.len(), 1, "{changed:?}");
+        assert_eq!(changed[0]["download_id"], open.0);
+        assert_eq!(changed[0]["state"], "failed");
+    }
+
+    #[tokio::test]
     async fn an_unreachable_client_during_add_stops_the_pass() {
         let (_dir, app) = state();
         let mock = Arc::new(Mock {

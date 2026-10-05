@@ -401,8 +401,8 @@ pub struct Running {
 
 impl Running {
     /// Stops accepting requests, ends SSE streams, cancels jobs at their next
-    /// checkpoint and waits up to five seconds each for the job lanes and
-    /// in-flight requests.
+    /// checkpoint, joins the watchers, which end on the shutdown signal, then
+    /// waits up to five seconds each for the job lanes and in-flight requests.
     ///
     /// # Errors
     ///
