@@ -87,7 +87,7 @@ impl Default for Options {
             corename_poll: Duration::from_secs(2),
             status_interval: Duration::from_secs(30),
             sources_poll: Duration::from_secs(10),
-            sources_min_age_secs: mistarr_sources::watch::DEFAULT_MIN_AGE_SECS,
+            sources_min_age_secs: mistarr_sources::intake::DEFAULT_MIN_AGE_SECS,
             magnet_poll: Duration::from_secs(15),
             magnet_started_poll: Duration::from_secs(2),
             dats_poll: Duration::from_secs(10),
