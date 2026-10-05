@@ -681,14 +681,9 @@ mod tests {
     use mistarr_sources::torrent::TorrentFile;
 
     use super::*;
-    use crate::db::sources::{self, fixtures::seed_rom, NewSource, SourceState};
-
-    fn conn() -> Connection {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-        c
-    }
+    use crate::db::fixtures::conn;
+    use crate::db::fixtures::{pid, seed_rom};
+    use crate::db::sources::{self, NewSource, SourceState};
 
     fn source(c: &Connection, byte: &str, state: SourceState) -> SourceId {
         let id = sources::insert(
@@ -737,8 +732,8 @@ mod tests {
     #[test]
     fn a_proof_survives_a_stale_change_and_foreign_proofs_drop() {
         let c = conn();
-        let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, &[]).expect("rom");
-        let b = seed_rom(&c, "nes", "Nova Quest (World) (Alt).nes", 16, &[]).expect("rom");
+        let a = seed_rom(&c, &pid("nes"), "Nova Quest (World).nes", 16, &[]).expect("rom");
+        let b = seed_rom(&c, &pid("nes"), "Nova Quest (World) (Alt).nes", 16, &[]).expect("rom");
         let src = source(&c, "0c", SourceState::Bound);
         assert!(stored(&c, src).expect("stored").is_empty());
         let stale = diff(
@@ -769,7 +764,15 @@ mod tests {
             [(0, Some(a), Some(MatchConfidence::Name))]
         );
         prove(&c, src, 0, b).expect("prove");
-        crate::db::downloads_import::insert_fixture(&c, a, src, 1, "bad", None).expect("bad");
+        crate::db::fixtures::download(
+            &c,
+            a,
+            src,
+            1,
+            crate::db::downloads::DownloadState::Bad,
+            None,
+        )
+        .expect("bad");
         apply(&c, src, &stale).expect("apply");
         let now = stored(&c, src).expect("stored");
         assert!(!now.is_empty());
@@ -822,8 +825,8 @@ mod tests {
     #[test]
     fn candidates_are_stored_ranked_listed_and_dropped() {
         let c = conn();
-        let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, &[]).expect("rom");
-        let b = seed_rom(&c, "nes", "Nova Quest (World) (Alt).nes", 16, &[]).expect("rom");
+        let a = seed_rom(&c, &pid("nes"), "Nova Quest (World).nes", 16, &[]).expect("rom");
+        let b = seed_rom(&c, &pid("nes"), "Nova Quest (World) (Alt).nes", 16, &[]).expect("rom");
         let src = source(&c, "0a", SourceState::Bound);
         let found = [
             (0, RomRef(b.0), Confidence::Size),
@@ -853,7 +856,15 @@ mod tests {
         assert_eq!(named.len(), 2);
         assert_eq!(named[0].1.rom_name, "Nova Quest (World).nes");
 
-        crate::db::downloads_import::insert_fixture(&c, a, src, 0, "bad", None).expect("bad");
+        crate::db::fixtures::download(
+            &c,
+            a,
+            src,
+            0,
+            crate::db::downloads::DownloadState::Bad,
+            None,
+        )
+        .expect("bad");
         assert_eq!(for_group(&c, ta).expect("group").len(), 1, "ruled out");
         let change = diff(&c, src, &stored(&c, src).expect("stored"), &[], &found).expect("diff");
         assert_eq!(change.remove, [(0, a)], "a ruled-out pair is removed");
@@ -871,8 +882,8 @@ mod tests {
     #[test]
     fn a_mapped_or_proven_pair_is_not_a_candidate_and_files_cascade() {
         let c = conn();
-        let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, &[]).expect("rom");
-        let b = seed_rom(&c, "nes", "Nova Quest (World) (Alt).nes", 16, &[]).expect("rom");
+        let a = seed_rom(&c, &pid("nes"), "Nova Quest (World).nes", 16, &[]).expect("rom");
+        let b = seed_rom(&c, &pid("nes"), "Nova Quest (World) (Alt).nes", 16, &[]).expect("rom");
         let src = source(&c, "0b", SourceState::Bound);
         let matches = [(0, Some(RomRef(a.0)), Confidence::Name)];
         let found = [
@@ -906,10 +917,10 @@ mod tests {
 
         drop_pair(&c, src, 0, b).expect("drop");
         assert_eq!(
-            crate::db::source_detail::files(
+            crate::db::views::source_detail::files(
                 &c,
                 src,
-                &crate::db::source_detail::FileQuery::default(),
+                &crate::db::views::source_detail::FileQuery::default(),
                 crate::db::sql::Page {
                     limit: 10,
                     offset: 0
@@ -928,10 +939,10 @@ mod tests {
     #[test]
     fn size_index_reads_live_roms_of_one_platform_with_their_group() {
         let c = conn();
-        let a = seed_rom(&c, "nes", "Nova Quest (World).nes", 16, &[]).expect("rom");
-        seed_rom(&c, "nes", "Boot (World).nes", 16, &["bios"]).expect("bios");
-        seed_rom(&c, "snes", "Nova Quest (World).sfc", 16, &[]).expect("snes");
-        let other = seed_rom(&c, "nes", "Other (World).nes", 8, &[]).expect("other");
+        let a = seed_rom(&c, &pid("nes"), "Nova Quest (World).nes", 16, &[]).expect("rom");
+        seed_rom(&c, &pid("nes"), "Boot (World).nes", 16, &["bios"]).expect("bios");
+        seed_rom(&c, &pid("snes"), "Nova Quest (World).sfc", 16, &[]).expect("snes");
+        let other = seed_rom(&c, &pid("nes"), "Other (World).nes", 8, &[]).expect("other");
         sources::refresh_match_keys(&c).expect("keys");
         let nes = PlatformId("nes".into());
         let index = SqlSizeIndex::new(&c, &nes);
@@ -958,7 +969,7 @@ mod tests {
         assert!(tier("x").contains("'base'"));
         assert!(not_bad("1", "2", "3").contains("b.rom_id = 1"));
         let before = rom_stamp(&c, &nes).expect("stamp");
-        seed_rom(&c, "nes", "New (World).nes", 8, &[]).expect("new");
+        seed_rom(&c, &pid("nes"), "New (World).nes", 8, &[]).expect("new");
         assert_ne!(rom_stamp(&c, &nes).expect("stamp"), before);
         let before = rom_stamp(&c, &nes).expect("stamp");
         c.execute("UPDATE dat_versions SET loaded_at = loaded_at + 1", [])

@@ -12,7 +12,6 @@ use common::{
 use mistarr_clients::fake::{FakeResponse, FakeScgiServer, FakeServer, ScgiReply};
 use mistarr_clients::xmlrpc::Value as Xml;
 use mistarr_server::config::ClientChoice;
-use mistarr_server::db::sources::fixtures::seed_rom;
 use serde_json::{json, Value};
 
 /// Transmission's answer to the existence check before start and stop.
@@ -54,9 +53,7 @@ fn seed_catalog(b: &Booted) {
         .app
         .db
         .write_blocking(|c| {
-            seed_rom(c, "nes", "Example Quest (USA).nes", 40_976, &[])?;
-            seed_rom(c, "nes", "Second Try (Japan).nes", 24_592, &[])?;
-            seed_rom(c, "nes", "Third Tale (Europe).nes", 65_552, &[])?;
+            mistarr_server::db::fixtures::catalog(c)?;
             Ok(())
         })
         .expect("seed");

@@ -12,12 +12,13 @@ use mistarr_clients::SeedPolicy;
 use mistarr_core::hash::{hash_reader, HeaderRule};
 use mistarr_core::{HashSet, PlatformId};
 use mistarr_server::db::downloads::{self, DownloadRow, DownloadState};
-use mistarr_server::db::downloads_import;
-use mistarr_server::db::files::{self, FileState, Hashed};
+use mistarr_server::db::files::{self, FileState, NewFile};
 use mistarr_server::db::ids::{DownloadId, FileId, RomId, SourceId, TitleId};
 use mistarr_server::db::imports::{self, ImportAction};
+use mistarr_server::db::roms;
 use mistarr_server::db::sources::{self, NewSource, SourceState};
 use mistarr_server::db::sql::Page;
+use mistarr_server::db::titles::RomStatus;
 use mistarr_server::events::EventKind;
 use mistarr_server::jobs::JobKind;
 use serde_json::{json, Value};
@@ -95,8 +96,12 @@ fn entry(b: &Booted, platform: &str, game: &str, rom: &str, hashes: &HashSet) ->
         .app
         .db
         .write_blocking(move |c| {
-            let rom_id = files::seed_rom_fixture(c, &pid, &game, &rom, &hashes, "good")?;
-            let title = imports::title_of_rom(c, rom_id)?.expect("title");
+            let rom_id = mistarr_server::db::fixtures::dat(&pid)
+                .title(&game)
+                .rom(&rom, &hashes, RomStatus::Good)
+                .write(c)?
+                .first_rom();
+            let title = roms::title_of_rom(c, rom_id)?.expect("title");
             Ok((title, rom_id))
         })
         .expect("seed")
@@ -131,7 +136,14 @@ fn insert(b: &Booted, rom_id: RomId, src: SourceId, index: u32, path: &Path) -> 
         .app
         .db
         .write_blocking(move |c| {
-            downloads_import::insert_fixture(c, rom_id, src, index, "importing", Some(&staged))
+            mistarr_server::db::fixtures::download(
+                c,
+                rom_id,
+                src,
+                index,
+                DownloadState::Importing,
+                Some(&staged),
+            )
         })
         .expect("download")
 }
@@ -207,22 +219,17 @@ fn existing_file(
         .app
         .db
         .write_blocking(move |c| {
-            let hashed = Hashed {
-                crc32: Some(&h.crc32),
-                md5: Some(&h.md5),
-                sha1: Some(&h.sha1),
-                header_rule: Some("ines"),
-                whole: None,
-            };
             files::upsert(
                 c,
                 &PlatformId("nes".into()),
-                &rel,
-                size,
-                1,
-                &hashed,
-                rom_id,
-                st,
+                &NewFile {
+                    rom_id,
+                    crc32: Some(h.crc32.clone()),
+                    md5: Some(h.md5.clone()),
+                    sha1: Some(h.sha1.clone()),
+                    header_rule: Some("ines".to_string()),
+                    ..NewFile::unhashed(&rel, size, 1, st)
+                },
                 1,
             )
         })
@@ -518,14 +525,12 @@ fn disc_with(b: &Booted, data: Vec<Vec<u8>>) -> (TitleId, Vec<(RomId, PathBuf)>)
         .app
         .db
         .write_blocking(move |c| {
-            let title = files::seed_title_fixture(c, &pid, "Example Disc (USA)")?;
-            let mut roms = Vec::new();
+            let mut disc = mistarr_server::db::fixtures::dat(&pid).title("Example Disc (USA)");
             for (name, h) in names.iter().zip(&hashes) {
-                roms.push(files::seed_rom_for_title_fixture(
-                    c, title, name, h, "good",
-                )?);
+                disc = disc.rom(name, h, mistarr_server::db::titles::RomStatus::Good);
             }
-            Ok((title, roms))
+            let written = disc.write(c)?;
+            Ok((written.titles[0], written.roms))
         })
         .expect("seed");
     let staged = roms
@@ -843,11 +848,12 @@ fn romset(b: &Booted, members: &[(&str, &[u8])]) -> (Vec<RomId>, PathBuf) {
         .app
         .db
         .write_blocking(move |c| {
-            let title = files::seed_title_fixture(c, &pid, "Example Set")?;
-            Ok(vec![
-                files::seed_rom_for_title_fixture(c, title, "a.rom", &ha, "good")?,
-                files::seed_rom_for_title_fixture(c, title, "b.rom", &hb, "good")?,
-            ])
+            Ok(mistarr_server::db::fixtures::dat(&pid)
+                .title("Example Set")
+                .rom("a.rom", &ha, mistarr_server::db::titles::RomStatus::Good)
+                .rom("b.rom", &hb, mistarr_server::db::titles::RomStatus::Good)
+                .write(c)?
+                .roms)
         })
         .expect("seed");
     let mut buf = Vec::new();
@@ -1187,7 +1193,14 @@ async fn a_quarantine_that_settles_the_source_releases_the_torrent() {
         .app
         .db
         .write_blocking(move |c| {
-            downloads_import::insert_fixture(c, placed, src, 0, "done", None)?;
+            mistarr_server::db::fixtures::download(
+                c,
+                placed,
+                src,
+                0,
+                mistarr_server::db::downloads::DownloadState::Done,
+                None,
+            )?;
             sources::set_seed_policy(c, src, &SeedPolicy::None)
         })
         .expect("done download");

@@ -9,6 +9,8 @@ pub mod deferred;
 pub mod downloads;
 pub mod downloads_import;
 pub mod files;
+#[cfg(any(test, feature = "test-support"))]
+pub mod fixtures;
 pub mod groups;
 pub mod ids;
 pub mod imports;
@@ -17,12 +19,14 @@ pub mod launch;
 pub mod migrate;
 pub mod platforms;
 pub mod ram;
+pub mod roms;
+pub mod scan_progress;
 pub mod settings;
-pub mod source_detail;
 pub mod sources;
 pub mod sql;
-pub mod system;
+pub mod tempdir;
 pub mod titles;
+pub mod views;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -490,7 +494,7 @@ impl HeldWriter<'_> {
     }
 
     /// Puts `new`, a complete database file already synced beside this one, in its place
-    /// with [`install_file`] and reopens both connections on whichever file then has the
+    /// with [`ram::swap::install_file`] and reopens both connections on whichever file then has the
     /// name. The reader is held throughout, so a read sees the old file or the new one.
     ///
     /// # Errors
@@ -517,7 +521,7 @@ impl HeldWriter<'_> {
         let writer = std::mem::replace(&mut *self.conn, hold_writer);
         let old_reader = std::mem::replace(&mut *reader, hold_reader);
         let closed = close_connection(old_reader).and(close_connection(writer));
-        let swapped = closed.and_then(|()| Ok(install_file(&path, new)?));
+        let swapped = closed.and_then(|()| Ok(ram::swap::install_file(&path, new)?));
         let (w, r) = reopen(&path).map_err(|e| {
             tracing::error!(error = %e, "cannot reopen the database; restart mistarr");
             Error::Reopen(Box::new(e))
@@ -541,72 +545,6 @@ pub fn sibling(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Suffix the old database file takes while [`install_file`] puts a new one in its place.
-pub const OLD_SUFFIX: &str = ".old";
-
-/// Suffix of the empty marker [`install_file`] keeps beside the database for the length
-/// of its renames, so a start after a crash that left no readable name never creates one.
-pub const SWAP_SUFFIX: &str = ".swap";
-
-/// Puts `new`, a complete database file synced beside `path`, in its place once no
-/// connection has `path` open: removes the old file's `-wal` and `-shm`, which must hold
-/// nothing unwritten, writes the `.swap` marker, renames `path` to `.old`, `new` to
-/// `path`, and removes `.old` and the marker, syncing the directory after each.
-/// [`ram::clean_stale`] finishes a swap a crash cut short; `docs/ARCHITECTURE.md` "DAT
-/// import in RAM" lists every crash point.
-///
-/// # Errors
-///
-/// The I/O failure of a removal or a rename; the old file is then back under `path`,
-/// unless renaming it back failed too, which the error names.
-pub(crate) fn install_file(path: &Path, new: &Path) -> std::io::Result<()> {
-    for suffix in ["-wal", "-shm"] {
-        remove_if_present(&sibling(path, suffix))?;
-    }
-    let old = sibling(path, OLD_SUFFIX);
-    remove_if_present(&old)?;
-    let marker = sibling(path, SWAP_SUFFIX);
-    std::fs::File::create(&marker)?.sync_all()?;
-    sync_parent(path);
-    if let Err(e) = std::fs::rename(path, &old) {
-        remove_if_present(&marker)?;
-        return Err(e);
-    }
-    sync_parent(path);
-    if let Err(e) = std::fs::rename(new, path) {
-        let back = std::fs::rename(&old, path);
-        sync_parent(path);
-        return Err(match back {
-            Ok(()) => {
-                remove_if_present(&marker)?;
-                e
-            }
-            Err(b) => std::io::Error::other(format!(
-                "{e}; the old database stays at {}: {b}",
-                old.display()
-            )),
-        });
-    }
-    sync_parent(path);
-    for leftover in [&old, &marker] {
-        if let Err(e) = std::fs::remove_file(leftover) {
-            tracing::warn!(error = %e, "cannot remove a file of the swap; the next start does");
-        }
-        sync_parent(path);
-    }
-    Ok(())
-}
-
-/// Syncs the directory holding `path`, making a rename in it durable where the mount is
-/// not `dirsync`.
-fn sync_parent(path: &Path) {
-    if let Some(dir) = path.parent() {
-        if let Err(e) = std::fs::File::open(dir).and_then(|d| d.sync_all()) {
-            tracing::warn!(error = %e, "cannot sync the database directory");
-        }
-    }
-}
-
 /// Opens both connections on the existing file `path`, never creating one.
 fn reopen_pair(path: &Path) -> Result<(Connection, Connection)> {
     if !path.is_file() {
@@ -617,14 +555,6 @@ fn reopen_pair(path: &Path) -> Result<(Connection, Connection)> {
         .into());
     }
     open_pair(path, None, false)
-}
-
-/// Removes `path`, treating a file already gone as removed.
-fn remove_if_present(path: &Path) -> std::io::Result<()> {
-    match std::fs::remove_file(path) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
-        _ => Ok(()),
-    }
 }
 
 /// Checkpoints `conn`'s WAL with TRUNCATE and says whether it is now empty; true when
@@ -834,129 +764,6 @@ pub fn count_steps(conn: &Connection, steps: &crate::migrating::Steps) -> Result
     Ok(())
 }
 
-/// The environment variable SQLite reads for its temporary file directory.
-pub const SQLITE_TMPDIR: &str = "SQLITE_TMPDIR";
-
-/// The RAM-backed directory for SQLite's temporary files, used when it can be written.
-pub const RAM_TEMP_DIR: &str = "/tmp/mistarr";
-
-/// The environment variable that names another directory in place of [`RAM_TEMP_DIR`],
-/// so tests and side-by-side servers each get their own.
-pub const TEMP_DIR_ENV: &str = "MISTARR_TEMP_DIR";
-
-/// Where SQLite's temporary files go, and why the RAM directory was refused when it was.
-#[derive(Debug)]
-pub struct TempDir {
-    /// The directory chosen.
-    pub dir: PathBuf,
-    /// Why the RAM directory could not be used; `None` when it is `dir`.
-    pub refused: Option<Error>,
-}
-
-/// Returns `ram` when it is, or can be made, a directory of mode 0700 that this user owns,
-/// is not a symlink, and takes a file, having emptied it with [`prepare_temp_dir`]; else
-/// prepares and returns `fallback`. On the card every temporary page would be written
-/// through its `sync` mount; see `docs/ARCHITECTURE.md` "Writes on a sync mount".
-///
-/// # Errors
-///
-/// [`Error::Io`] when `fallback` cannot be prepared either.
-///
-/// ```
-/// let dir = tempfile::tempdir().unwrap();
-/// let (ram, disk) = (dir.path().join("ram"), dir.path().join("disk"));
-/// let chosen = mistarr_server::db::choose_temp_dir(&ram, &disk).unwrap();
-/// assert_eq!(chosen.dir, ram);
-/// assert!(chosen.refused.is_none());
-/// ```
-pub fn choose_temp_dir(ram: &Path, fallback: &Path) -> Result<TempDir> {
-    let usable = |dir: &Path| -> Result<()> {
-        private_dir(dir)?;
-        prepare_temp_dir(dir)?;
-        let probe = dir.join(format!(".probe-{}", std::process::id()));
-        std::fs::write(&probe, b"x")?;
-        std::fs::remove_file(&probe)?;
-        Ok(())
-    };
-    match usable(ram) {
-        Ok(()) => Ok(TempDir {
-            dir: ram.to_path_buf(),
-            refused: None,
-        }),
-        Err(e) => {
-            prepare_temp_dir(fallback)?;
-            Ok(TempDir {
-                dir: fallback.to_path_buf(),
-                refused: Some(e),
-            })
-        }
-    }
-}
-
-/// Creates `dir` with mode 0700, or checks the one there is a real directory this user
-/// owns and narrows it to 0700, so no other user can read or plant temporary files.
-pub(crate) fn private_dir(dir: &Path) -> Result<()> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
-    let refuse = |why: &str| -> Result<()> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!("{} {why}", dir.display()),
-        )
-        .into())
-    };
-    let meta = match std::fs::symlink_metadata(dir) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            std::fs::DirBuilder::new()
-                .mode(0o700)
-                .recursive(true)
-                .create(dir)?;
-            std::fs::symlink_metadata(dir)?
-        }
-        other => other?,
-    };
-    if meta.file_type().is_symlink() {
-        return refuse("is a symlink");
-    }
-    if !meta.is_dir() {
-        return refuse("is not a directory");
-    }
-    if meta.uid() != rustix::process::geteuid().as_raw() {
-        return refuse("belongs to another user");
-    }
-    if meta.mode() & 0o777 != 0o700 {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    }
-    Ok(())
-}
-
-/// Creates `dir` for SQLite's temporary files and removes the files a previous run left
-/// there; the caller then points [`SQLITE_TMPDIR`] at it before any connection opens.
-///
-/// # Errors
-///
-/// [`Error::Io`] when `dir` cannot be created or listed.
-///
-/// ```
-/// let dir = std::env::temp_dir().join("mistarr-doc-sqlite-tmp");
-/// mistarr_server::db::prepare_temp_dir(&dir).unwrap();
-/// assert!(dir.is_dir());
-/// ```
-pub fn prepare_temp_dir(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
-    for entry in std::fs::read_dir(dir)?.flatten() {
-        // The frozen client's record outlives a restart so the client is resumed.
-        if entry.file_name() == crate::freeze::FROZEN_NAME {
-            continue;
-        }
-        if entry.file_type().is_ok_and(|t| t.is_file()) {
-            if let Err(e) = std::fs::remove_file(entry.path()) {
-                tracing::warn!(error = %e, "cannot remove a stale SQLite temporary file");
-            }
-        }
-    }
-    Ok(())
-}
-
 /// Opens `path` read-only with the reader's memory settings, the one way a database a
 /// server may be using is read from outside it; it never writes or migrates.
 ///
@@ -998,7 +805,7 @@ pub fn open_read_only(path: &Path) -> Result<Connection> {
 /// ```
 pub fn has_table(conn: &Connection, schema: &str, name: &str) -> Result<bool> {
     Ok(conn
-        .prepare_cached(
+        .prepare(
             "SELECT EXISTS (SELECT 1 FROM pragma_table_list
                             WHERE schema = ?1 AND name = ?2 AND type = 'table')",
         )?
@@ -1194,62 +1001,6 @@ mod tests {
             .pragma_query_value(None, "cache_size", |r| r.get(0))
             .expect("cache");
         assert_eq!(cache, -CACHE_KIB);
-    }
-
-    #[test]
-    fn temp_files_go_to_ram_when_it_can_be_written() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let disk = dir.path().join("data/tmp");
-        let ram = dir.path().join("ram");
-        let chosen = choose_temp_dir(&ram, &disk).expect("ram");
-        assert_eq!(chosen.dir, ram);
-        let mode = std::fs::metadata(&ram).expect("ram").permissions().mode();
-        assert_eq!(mode & 0o777, 0o700);
-        std::fs::write(dir.path().join("file"), b"x").expect("write");
-        let blocked = dir.path().join("file/sub");
-        let chosen = choose_temp_dir(&blocked, &disk).expect("disk");
-        assert_eq!(chosen.dir, disk);
-        assert!(chosen.refused.is_some());
-        assert!(disk.is_dir());
-    }
-
-    #[test]
-    fn a_temp_dir_that_is_a_symlink_or_open_to_others_is_refused_or_narrowed() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let disk = dir.path().join("data/tmp");
-        let target = dir.path().join("elsewhere");
-        std::fs::create_dir(&target).expect("mkdir");
-        let link = dir.path().join("link");
-        std::os::unix::fs::symlink(&target, &link).expect("symlink");
-        let chosen = choose_temp_dir(&link, &disk).expect("disk");
-        assert_eq!(chosen.dir, disk);
-        let why = chosen.refused.expect("refused").to_string();
-        assert!(why.contains("is a symlink"), "{why}");
-        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o777)).expect("chmod");
-        assert_eq!(choose_temp_dir(&target, &disk).expect("ram").dir, target);
-        let mode = std::fs::metadata(&target)
-            .expect("meta")
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o700);
-    }
-
-    #[test]
-    fn the_temp_dir_is_created_and_emptied_of_stale_files() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let tmp = dir.path().join("data/tmp");
-        prepare_temp_dir(&tmp).expect("create");
-        std::fs::write(tmp.join("etilqs_stale"), b"x").expect("write");
-        std::fs::create_dir(tmp.join("keep")).expect("mkdir");
-        prepare_temp_dir(&tmp).expect("clear");
-        let left: Vec<_> = std::fs::read_dir(&tmp)
-            .expect("list")
-            .flatten()
-            .map(|e| e.file_name())
-            .collect();
-        assert_eq!(left, ["keep"]);
     }
 
     #[test]

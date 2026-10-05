@@ -13,15 +13,16 @@ use mistarr_core::PlatformId;
 use mistarr_sources::torrent;
 use serde::{Deserialize, Deserializer, Serialize};
 
+use super::extract::with_file;
 use super::{ApiError, ApiJson, ApiPath, ApiQuery, Paging};
 use crate::app::AppState;
 use crate::db::ids::{JobId, SourceId};
 use crate::db::platforms;
-use crate::db::source_detail::{
-    self as detail, FileFilter, FileQuery, FileRow, Preview, SourceDetail,
-};
 use crate::db::sources::{self as rows, SourceReason, SourceRow, SourceState};
 use crate::db::sql::Paged;
+use crate::db::views::source_detail::{
+    self as detail, FileFilter, FileQuery, FileRow, Preview, SourceDetail,
+};
 use crate::incoming::place::{file_name, place_source, SourceFile};
 use crate::incoming::IncomingFile;
 use crate::jobs::bind_source::{BindSource, Choice};
@@ -431,7 +432,8 @@ async fn upload(
 
 /// The first file of `form`, which must be a `.torrent`, read whole, since it is parsed whole.
 async fn torrent_file(mut form: Multipart) -> Result<SourceFile, ApiError> {
-    let (name, data) = super::dats::with_file(&mut form, async |name: String, field: Field<'_>| {
+    let none = |_: &str| false;
+    let (name, data) = with_file(&mut form, none, async |name: String, field: Field<'_>| {
         let data = field.bytes().await;
         data.map(|d| (name, d))
             .map_err(|e| ApiError::bad_request(e.body_text()))
@@ -444,8 +446,8 @@ async fn torrent_file(mut form: Multipart) -> Result<SourceFile, ApiError> {
         })?;
         Ok(SourceFile {
             name: file_name(&name, "upload", "torrent"),
-            bytes: data.to_vec(),
-            infohash: *meta.infohash.as_bytes(),
+            bytes: Vec::from(data),
+            infohash: meta.infohash,
             is_torrent: true,
         })
     })
@@ -466,7 +468,7 @@ pub(super) fn magnet_file(uri: &str) -> Result<SourceFile, ApiError> {
     Ok(SourceFile {
         name: file_name(&stem, &hex, "magnet"),
         bytes: format!("{uri}\n").into_bytes(),
-        infohash: *parsed.infohash.as_bytes(),
+        infohash: parsed.infohash,
         is_torrent: false,
     })
 }

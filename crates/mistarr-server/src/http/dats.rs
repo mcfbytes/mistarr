@@ -12,6 +12,7 @@ use axum::{Json, Router};
 use mistarr_sources::intake::{REASON_SUFFIX, REJECTED_DIR};
 use serde::Serialize;
 
+use super::extract::with_file;
 use super::{ApiError, ApiPath, ApiQuery, Paging};
 use crate::app::AppState;
 use crate::db::dats::{self, DatReason, DatRef, DatVersionRow};
@@ -96,36 +97,14 @@ fn accepted(name: &str) -> bool {
         .is_some_and(|e| matches!(e.as_str(), "dat" | "xml" | "zip"))
 }
 
-/// Hands the first field of `form` that carries a file to `read`, with its base name; a
-/// field with a hidden name is skipped.
-pub(super) async fn with_file<T>(
-    form: &mut Multipart,
-    read: impl AsyncFnOnce(String, Field<'_>) -> Result<T, ApiError>,
-) -> Result<T, ApiError> {
-    loop {
-        let field = form
-            .next_field()
-            .await
-            .map_err(|e| ApiError::bad_request(e.body_text()))?
-            .ok_or_else(|| ApiError::bad_request("The upload holds no file."))?;
-        let name = field
-            .file_name()
-            .and_then(|n| FsPath::new(n).file_name())
-            .map(|n| n.to_string_lossy().into_owned())
-            .filter(|n| !n.starts_with('.'));
-        if let Some(name) = name {
-            return read(name, field).await;
-        }
-    }
-}
-
 /// `POST /dats/upload`: streams the first file of the form into `dats/` and queues its import.
 async fn upload(
     State(app): State<Arc<AppState>>,
     mut form: Multipart,
 ) -> Result<(StatusCode, Json<IncomingFile>), ApiError> {
     let dir = app.config().paths.dats();
-    let (name, part) = with_file(&mut form, async |name: String, field: Field<'_>| {
+    let hidden = |n: &str| n.starts_with('.');
+    let (name, part) = with_file(&mut form, hidden, async |name: String, field: Field<'_>| {
         if !accepted(&name) {
             return Err(ApiError::bad_request("Upload a .dat, .xml or .zip file."));
         }

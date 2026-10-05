@@ -139,13 +139,8 @@ pub fn remove(conn: &Connection, key: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::fixtures::conn;
     use crate::error::Error;
-
-    fn conn() -> Connection {
-        let mut c = Connection::open_in_memory().expect("open");
-        crate::db::migrate::apply(&mut c).expect("migrate");
-        c
-    }
 
     #[test]
     fn set_replaces() {

@@ -1,7 +1,8 @@
 //! Request extractors that refuse with [`ApiError`], and the paging every list takes.
 
 use axum::body::Bytes;
-use axum::extract::{FromRequest, FromRequestParts, Path, Query, Request};
+use axum::extract::multipart::Field;
+use axum::extract::{FromRequest, FromRequestParts, Multipart, Path, Query, Request};
 use axum::http::request::Parts;
 use serde::de::{self, DeserializeOwned, Deserializer, Visitor};
 use serde::Deserialize;
@@ -12,6 +13,30 @@ use crate::db::sql::Page;
 /// Default and maximum page size of list endpoints.
 const DEFAULT_LIMIT: u32 = 100;
 const MAX_LIMIT: u32 = 1000;
+
+/// Hands the first field of `form` that carries a file, with a base name that `skip`
+/// does not refuse, to `read` along with that name.
+pub(super) async fn with_file<T>(
+    form: &mut Multipart,
+    skip: impl Fn(&str) -> bool,
+    read: impl AsyncFnOnce(String, Field<'_>) -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    loop {
+        let field = form
+            .next_field()
+            .await
+            .map_err(|e| ApiError::bad_request(e.body_text()))?
+            .ok_or_else(|| ApiError::bad_request("The upload holds no file."))?;
+        let name = field
+            .file_name()
+            .and_then(|n| std::path::Path::new(n).file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .filter(|n| !skip(n));
+        if let Some(name) = name {
+            return read(name, field).await;
+        }
+    }
+}
 
 /// Path parameters, a 400 when they do not parse; ids arrive as their newtypes.
 #[derive(Debug, Clone, PartialEq, Eq)]

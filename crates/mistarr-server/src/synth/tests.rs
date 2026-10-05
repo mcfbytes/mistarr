@@ -1,12 +1,6 @@
 use super::*;
+use crate::db::fixtures::conn;
 use crate::db::groups;
-
-fn conn() -> Connection {
-    let mut c = Connection::open_in_memory().expect("open");
-    crate::db::migrate::apply(&mut c).expect("migrate");
-    crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
-    c
-}
 
 fn count(c: &Connection, sql: &str) -> i64 {
     c.query_row(sql, [], |r| r.get(0)).expect(sql)
