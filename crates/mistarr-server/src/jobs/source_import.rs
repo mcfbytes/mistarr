@@ -2,15 +2,16 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use mistarr_clients::{ClientError, SeedPolicy, TorrentSource};
 use mistarr_core::magnet;
 use mistarr_core::{InfoHash, PlatformId};
 use mistarr_sources::binding::{self, Binding};
+use mistarr_sources::intake::{self, StableFiles};
 use mistarr_sources::torrent;
 use mistarr_sources::torrent::TorrentFile;
-use mistarr_sources::watch::{self, Scanner};
 use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -117,21 +118,30 @@ impl Job for SourceImport {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(e.into()),
         };
-        let origin = self
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let outcome = match (self.path.extension().and_then(|e| e.to_str()), data) {
-            (_, None) => Err(TOO_LARGE.to_owned()),
-            (Some("torrent"), Some(data)) => import_torrent(&ctx.app, &origin, data).await?,
-            (Some("magnet"), Some(data)) => import_magnet(&ctx.app, &origin, &data).await?,
-            _ => Err("Only .torrent and .magnet files are read.".to_owned()),
+        let ext = self.path.extension().and_then(|e| e.to_str());
+        let planned = if data.is_some() && matches!(ext, Some("torrent" | "magnet")) {
+            Some(plan_blocking(&self.path).await?)
+        } else {
+            None
         };
-        match outcome {
+        let name_of = |p: &Path| {
+            p.file_name()
+                .map_or_else(String::new, |n| n.to_string_lossy().into_owned())
+        };
+        let origin = name_of(&self.path);
+        let stored = name_of(planned.as_deref().unwrap_or(&self.path));
+        let outcome = match (ext, data) {
+            (_, None) => Ok(Err(TOO_LARGE.to_owned())),
+            (Some("torrent"), Some(data)) => import_torrent(&ctx.app, &origin, &stored, data).await,
+            (Some("magnet"), Some(data)) => import_magnet(&ctx.app, &origin, &stored, &data).await,
+            _ => Ok(Err("Only .torrent and .magnet files are read.".to_owned())),
+        };
+        match outcome? {
             Ok(row) => {
-                if let Err(e) = move_blocking(&self.path, None).await {
-                    tracing::warn!(file = %origin, error = %e, "cannot move source into loaded/");
+                if let Some(planned) = planned {
+                    if let Err(e) = place_blocking(&self.path, planned).await {
+                        tracing::warn!(file = %origin, error = %e, "cannot move source into loaded/");
+                    }
                 }
                 ctx.progress(json!({ "file": origin, "source_id": row.id, "state": row.state }))
                     .await?;
@@ -146,7 +156,7 @@ impl Job for SourceImport {
             }
             Err(reason) => {
                 tracing::info!(file = %origin, reason, "source rejected");
-                if let Err(e) = move_blocking(&self.path, Some(reason.clone())).await {
+                if let Err(e) = reject_blocking(&self.path, &reason).await {
                     tracing::warn!(file = %origin, error = %e, "cannot move source into rejected/");
                 }
                 ctx.progress(json!({ "file": origin, "rejected": reason }))
@@ -157,15 +167,34 @@ impl Job for SourceImport {
     }
 }
 
-/// Moves into `loaded/`, or into `rejected/` with `reason`, off the async runtime.
-async fn move_blocking(path: &Path, reason: Option<String>) -> Result<()> {
+/// Picks the name `path` will have in `loaded/`, off the async runtime.
+async fn plan_blocking(path: &Path) -> Result<PathBuf> {
     let path = path.to_path_buf();
-    crate::threads::run(crate::threads::label::SOURCE_FILE, move || match reason {
-        None => watch::mark_loaded(&path),
-        Some(r) => watch::mark_rejected(&path, &r),
+    let planned = crate::threads::run(crate::threads::label::SOURCE_FILE, move || {
+        intake::plan(&path, intake::LOADED_DIR)
     })
-    .await?
-    .map_err(crate::Error::from)
+    .await??;
+    Ok(planned)
+}
+
+/// Moves `path` onto its planned name in `loaded/`, off the async runtime.
+async fn place_blocking(path: &Path, planned: PathBuf) -> Result<()> {
+    let path = path.to_path_buf();
+    crate::threads::run(crate::threads::label::SOURCE_FILE, move || {
+        intake::place(&path, &planned)
+    })
+    .await??;
+    Ok(())
+}
+
+/// Moves into `rejected/` with `reason`, off the async runtime.
+async fn reject_blocking(path: &Path, reason: &str) -> Result<()> {
+    let (path, reason) = (path.to_path_buf(), reason.to_owned());
+    crate::threads::run(crate::threads::label::SOURCE_FILE, move || {
+        intake::reject(&path, &reason)
+    })
+    .await??;
+    Ok(())
 }
 
 /// Parses and binds a `.torrent`, dropping its bytes once parsed. The inner error is a
@@ -173,6 +202,7 @@ async fn move_blocking(path: &Path, reason: Option<String>) -> Result<()> {
 async fn import_torrent(
     app: &AppState,
     origin: &str,
+    stored: &str,
     data: Vec<u8>,
 ) -> Result<Result<SourceRow, String>> {
     let meta = match torrent::parse_torrent(&data) {
@@ -182,7 +212,7 @@ async fn import_torrent(
     drop(data);
     let infohash = meta.infohash.to_string();
     let threshold = app.config().sources.bind_threshold;
-    let origin = origin.to_owned();
+    let (origin, stored) = (origin.to_owned(), stored.to_owned());
     key_new_roms(&app.db).await?;
     app.db
         .write_bulk_tx(move |tx| {
@@ -194,7 +224,7 @@ async fn import_torrent(
                     &NewSource {
                         infohash: &infohash,
                         display_name: &meta.name,
-                        origin_file: &origin,
+                        origin_file: &stored,
                         state: SourceState::Unbound,
                         reason: None,
                         added_at: crate::unix_now(),
@@ -214,6 +244,7 @@ async fn import_torrent(
 async fn import_magnet(
     app: &AppState,
     origin: &str,
+    stored: &str,
     data: &[u8],
 ) -> Result<Result<SourceRow, String>> {
     let text = String::from_utf8_lossy(data);
@@ -232,7 +263,7 @@ async fn import_magnet(
             .file_stem()
             .map_or_else(|| infohash.clone(), |s| s.to_string_lossy().into_owned())
     });
-    let origin = origin.to_owned();
+    let stored = stored.to_owned();
     app.db
         .write(move |c| {
             if rows::find_by_infohash(c, &infohash)?.is_some() {
@@ -243,7 +274,7 @@ async fn import_magnet(
                 &NewSource {
                     infohash: &infohash,
                     display_name: &name,
-                    origin_file: &origin,
+                    origin_file: &stored,
                     state: SourceState::Resolving,
                     reason: None,
                     added_at: crate::unix_now(),
@@ -575,7 +606,7 @@ async fn magnet_source(app: &AppState, row: &SourceRow) -> Option<TorrentSource>
         .config()
         .paths
         .sources()
-        .join(watch::LOADED_DIR)
+        .join(intake::LOADED_DIR)
         .join(&row.origin_file);
     let text = tokio::fs::read_to_string(&file).await.unwrap_or_default();
     let dropped = text.lines().map(str::trim).find(|l| !l.is_empty());
@@ -590,34 +621,36 @@ async fn magnet_source(app: &AppState, row: &SourceRow) -> Option<TorrentSource>
     Some(TorrentSource::Magnet { uri, infohash })
 }
 
-/// Scans `sources/` every [`crate::app::Options::sources_poll`] and enqueues
-/// one [`SourceImport`] per stable file; a file already queued is not queued twice.
+/// Whether `name` is a `.torrent` or `.magnet` file name.
+fn is_source_name(name: &str) -> bool {
+    matches!(
+        Path::new(name).extension().and_then(|e| e.to_str()),
+        Some("torrent" | "magnet")
+    )
+}
+
+/// Scans `sources/` every [`crate::app::Options::sources_poll`] and enqueues one
+/// [`SourceImport`] per stable file; see [`super::drop_watch::run`].
 pub async fn watch(app: Arc<AppState>) {
     let dir = app.config().paths.sources();
-    let mut scanner = Scanner::with_min_age_secs(app.options.sources_min_age_secs);
-    let mut tick = tokio::time::interval(app.options.sources_poll);
-    loop {
-        tick.tick().await;
-        let d = dir.clone();
-        let result = crate::threads::run(crate::threads::label::SOURCE_WATCH, move || {
-            let found = scanner.scan_once(&d);
-            (scanner, found)
-        })
-        .await;
-        let Ok((back, found)) = result else {
-            tracing::warn!("sources scan stopped");
-            return;
-        };
-        scanner = back;
-        for incoming in found {
-            let job = Arc::new(SourceImport {
-                path: incoming.path,
-            });
-            if let Err(e) = Scheduler::enqueue(&app, job).await {
-                tracing::warn!(error = %e, "cannot queue a source import");
-            }
-        }
-    }
+    let files = StableFiles::new(
+        Duration::from_secs(app.options.sources_min_age_secs),
+        is_source_name,
+    );
+    let poll = app.options.sources_poll;
+    super::drop_watch::run(
+        app,
+        dir,
+        files,
+        poll,
+        crate::threads::label::SOURCE_WATCH,
+        |path| {
+            Arc::new(SourceImport {
+                path: path.to_path_buf(),
+            })
+        },
+    )
+    .await;
 }
 
 /// Enqueues a [`ResolveMagnet`] for resolving sources: every
@@ -654,6 +687,8 @@ pub async fn resolve_pending(app: Arc<AppState>) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
     use crate::app::testutil::state;
     use crate::db::candidates::MatchConfidence;
@@ -968,6 +1003,82 @@ mod tests {
         let reason = std::fs::read_to_string(sources.join("rejected/big.torrent.reason.txt"))
             .expect("reason");
         assert!(reason.starts_with(TOO_LARGE), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn sources_dropped_under_one_name_keep_their_own_files() {
+        let (_dir, app) = state();
+        let sources = app.config().paths.sources();
+        std::fs::create_dir_all(&sources).expect("mkdir");
+        let mut uris = Vec::new();
+        for hash in ["0c", "0d"] {
+            let uri = format!("magnet:?xt=urn:btih:{}", hash.repeat(20));
+            let file = sources.join("set.magnet");
+            std::fs::write(&file, &uri).expect("write");
+            let job = Arc::new(SourceImport { path: file });
+            Scheduler::run_inline(&app, job).await.expect("run");
+            uris.push(uri);
+        }
+        let page = crate::db::sql::Page {
+            limit: 10,
+            offset: 0,
+        };
+        let items = app
+            .db
+            .read(move |c| rows::list(c, page))
+            .await
+            .expect("list")
+            .items;
+        assert_eq!(items.len(), 2);
+        let names: HashSet<_> = items.iter().map(|r| r.origin_file.clone()).collect();
+        assert_eq!(names.len(), 2, "{names:?}");
+        for row in &items {
+            let Some(TorrentSource::Magnet { uri, .. }) = magnet_source(&app, row).await else {
+                panic!("not a magnet: {row:?}");
+            };
+            assert!(uri.contains(&row.infohash), "{uri}");
+            assert!(uris.contains(&uri), "kept as dropped: {uri}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_failed_import_is_retried_by_the_watcher() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_dir, app) = crate::app::testutil::state_with(|o| {
+            o.sources_poll = Duration::from_millis(20);
+            o.sources_min_age_secs = 0;
+        });
+        let sources = app.config().paths.sources();
+        std::fs::create_dir_all(&sources).expect("mkdir");
+        let file = sources.join("late.magnet");
+        std::fs::write(&file, format!("magnet:?xt=urn:btih:{}", "0e".repeat(20))).expect("write");
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o0)).expect("chmod");
+        if std::fs::read(&file).is_ok() {
+            eprintln!("skipped: a mode-000 file is readable here (running as root)");
+            return;
+        }
+        Scheduler::start(&app);
+        let task = tokio::spawn(watch(Arc::clone(&app)));
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+        for _ in 0..200 {
+            let page = crate::db::sql::Page {
+                limit: 10,
+                offset: 0,
+            };
+            let items = app
+                .db
+                .read(move |c| rows::list(c, page))
+                .await
+                .expect("list")
+                .items;
+            if !items.is_empty() {
+                task.abort();
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the failed import was never retried");
     }
 
     #[tokio::test]

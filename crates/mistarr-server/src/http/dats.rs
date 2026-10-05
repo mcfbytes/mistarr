@@ -18,8 +18,9 @@ use crate::db::dats::{self, DatReason, DatRef, DatVersionRow};
 use crate::db::ids::DatVersionId;
 use crate::db::sql::Paged;
 use crate::incoming::IncomingFile;
-use crate::jobs::dat_import::{unique_path, DatImport, Recompute, REASON_SUFFIX, REJECTED_DIR};
+use crate::jobs::dat_import::{DatImport, Recompute};
 use crate::jobs::{JobKind, Scheduler};
+use mistarr_sources::intake::{candidates, REASON_SUFFIX, REJECTED_DIR};
 
 /// Largest accepted upload, [`crate::jobs::dat_import::MAX_DAT_BYTES`].
 #[allow(clippy::cast_possible_truncation)] // 512 MiB fits every usize the target has.
@@ -149,11 +150,16 @@ pub(crate) async fn place_part(
     name: &str,
 ) -> crate::Result<IncomingFile> {
     let dir = app.config().paths.dats();
-    let target = unique_path(&dir, name);
-    if let Err(e) = std::fs::rename(part, &target) {
-        let _ = std::fs::remove_file(part);
-        return Err(e.into());
-    }
+    let (from, name) = (part.to_path_buf(), name.to_owned());
+    let moved = crate::threads::run(crate::threads::label::DAT_SAVE, move || {
+        let moved = move_new(&from, &dir, &name);
+        if moved.is_err() {
+            let _ = std::fs::remove_file(&from);
+        }
+        moved
+    })
+    .await?;
+    let target = moved?;
     let job = Arc::new(DatImport::new(&target));
     crate::incoming::queue_placed(app, &target, JobKind::DatImport, job).await
 }
@@ -199,11 +205,11 @@ fn rejected_file(dats: &FsPath, name: &str) -> Result<PathBuf, ApiError> {
 }
 
 /// Moves `from` into `dir` under `name` or the first free variant, never replacing a
-/// file: a hard link where the file system has them, else a copy made with `create_new`.
+/// file: a hard link where the file system has them, else a copy made with `create_new`,
+/// since an upload may come from another file system, unlike intake's `place` rename.
 fn move_new(from: &FsPath, dir: &FsPath, name: &str) -> std::io::Result<PathBuf> {
     use std::io::ErrorKind;
-    loop {
-        let target = unique_path(dir, name);
+    for target in candidates(dir, name.as_ref()) {
         let placed = match std::fs::hard_link(from, &target) {
             Err(e) if e.kind() == ErrorKind::NotFound || e.kind() == ErrorKind::AlreadyExists => {
                 Err(e)
@@ -220,6 +226,10 @@ fn move_new(from: &FsPath, dir: &FsPath, name: &str) -> std::io::Result<PathBuf>
             Err(e) => return Err(e),
         }
     }
+    Err(std::io::Error::new(
+        ErrorKind::AlreadyExists,
+        "no free file name",
+    ))
 }
 
 fn copy_new(from: &FsPath, to: &FsPath) -> std::io::Result<()> {

@@ -19,8 +19,9 @@ use crate::db::ids::{DatVersionId, JobId};
 use crate::db::platforms::{self, PlatformRow};
 use crate::db::sql::Paged;
 use crate::db::titles::{self, Counts};
-use crate::jobs::dat_import::{DatImport, LOADED_DIR};
+use crate::jobs::dat_import::DatImport;
 use crate::jobs::Scheduler;
+use mistarr_sources::intake::LOADED_DIR;
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
