@@ -153,7 +153,7 @@ function bind(row: Source, platformId: string | null, automatic: boolean): numbe
   const now = nowSecs();
   const job = {
     id,
-    kind: 'bind_source',
+    kind: 'bind_source' as const,
     lane: 'background' as const,
     payload: { source_id: row.id, source_name: row.display_name },
     state: 'running' as const,
@@ -261,8 +261,6 @@ export const mockApi: Api = {
       changed.set(id, { ...changed.get(id), enabled });
       return findPlatform(id);
     }),
-  bindPlatformDat: (id, datVersionId) =>
-    reply(() => ({ dat_version_id: datVersionId, platform_id: findPlatform(id).id, job_id: nextJobId() })),
   launchCore: (id) => reply(() => ({ core: findPlatform(id).core_dir, file: null })),
 
   titles,

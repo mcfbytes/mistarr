@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { getStatus, loadStatus } from '../lib/stores/status.svelte';
+  import { applyStatus, getStatus, loadStatus } from '../lib/stores/status.svelte';
   import { showToast } from '../lib/stores/toast.svelte';
   import { api, errorMessage } from '../lib/api';
   import ClientStart from '../lib/ClientStart.svelte';
@@ -168,12 +168,7 @@
   async function togglePause(): Promise<void> {
     statusError = null;
     try {
-      if (status?.paused) {
-        await api.resume();
-      } else {
-        await api.pause();
-      }
-      await loadStatus();
+      applyStatus(await (status?.paused ? api.resume() : api.pause()));
     } catch (err) {
       statusError = errorMessage(err);
     }

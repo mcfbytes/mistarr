@@ -62,6 +62,12 @@ export interface WizardStatus {
   open_on_start: boolean;
 }
 
+/** The answer to `POST /system/scan`: the job queued for the platform, and the arcade one. */
+export interface ScanQueued {
+  job_id: number | null;
+  arcade_job_id?: number;
+}
+
 export interface CoresResult {
   platforms: string[];
   arcade_job_id: number | null;
@@ -389,9 +395,26 @@ export type JobState = 'queued' | 'running' | 'paused' | 'done' | 'failed';
 
 export type JobLane = 'heavy' | 'background' | 'light' | 'fetch';
 
+/** The kinds of background work the server queues. */
+export type JobKind =
+  | 'dat_import'
+  | 'source_import'
+  | 'scan'
+  | 'recompute_1g1r'
+  | 'arcade_catalog'
+  | 'import'
+  | 'chd_tracks'
+  | 'transfer'
+  | 'remap_sources'
+  | 'bind_source'
+  | 'detect_client'
+  | 'resolve_magnet'
+  | 'deselect'
+  | 'url_fetch';
+
 export interface Job {
   id: number;
-  kind: string;
+  kind: JobKind;
   lane: JobLane;
   payload: Record<string, unknown>;
   state: JobState;
