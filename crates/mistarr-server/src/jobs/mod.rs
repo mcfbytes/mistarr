@@ -704,12 +704,17 @@ async fn execute(
         stop,
         detail: job.detail(),
     };
-    if let Err(e) = set_state(app, id, JobState::Running).await {
-        app.scheduler.cancels().remove(&id);
-        return Err(e);
-    }
-    tracing::debug!(job = %id, kind = %ctx.kind, "job started");
-    let ran = job.run(&ctx).await;
+    // A job cancelled or shut down while it waited never starts.
+    let ran = if let Err(e) = ctx.stop.stopped() {
+        Err(e)
+    } else {
+        if let Err(e) = set_state(app, id, JobState::Running).await {
+            app.scheduler.cancels().remove(&id);
+            return Err(e);
+        }
+        tracing::debug!(job = %id, kind = %ctx.kind, "job started");
+        job.run(&ctx).await
+    };
     // Cleared before any exit below, including shutdown and a failed final write.
     app.live.clear(id);
     app.scheduler.cancels().remove(&id);
@@ -1279,5 +1284,19 @@ mod tests {
             Some(json!({ "error": "Cancelled." }))
         );
         assert!(!app.scheduler.cancel(id), "a finished job has no cancel");
+    }
+
+    #[tokio::test]
+    async fn a_job_cancelled_while_queued_never_starts() {
+        let (_dir, app) = state();
+        Scheduler::start(&app);
+        app.gate.set_override(Some(Override::Paused));
+        let (job, started, _release) = blocker(Lane::Heavy);
+        let id = Scheduler::enqueue(&app, job).await.expect("enqueue");
+        assert!(app.scheduler.cancel(id));
+        app.gate.set_override(None);
+        wait_state(&app, id, JobState::Failed).await;
+        let run = tokio::time::timeout(Duration::from_millis(50), started.notified()).await;
+        assert!(run.is_err(), "the job's run was never called");
     }
 }

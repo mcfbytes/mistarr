@@ -394,7 +394,7 @@ pub async fn rebind_waiting(app: &Arc<AppState>) -> Result<usize> {
     for row in &changed {
         if row.state == SourceState::Bound {
             bound += 1;
-            tracing::info!(source = %row.id, platform = ?row.platform_id, "source bound after a DAT loaded");
+            tracing::info!(source = %row.id, platform = ?row.platform_id, "source bound after the catalogue changed");
         }
         publish_changed(app, row);
     }

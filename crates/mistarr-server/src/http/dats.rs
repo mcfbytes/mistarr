@@ -203,8 +203,8 @@ fn remove_if_present(path: &FsPath) -> Result<(), ApiError> {
     }
 }
 
-/// `DELETE /dats/{id}`: retires a loaded version with its titles and roms, unwants them and
-/// queues the recompute job, which matches their files again and recomputes 1G1R.
+/// `DELETE /dats/{id}`: retires a loaded version with its titles and roms and unwants them.
+/// A detached task then queues the recompute and scan and binds the waiting sources.
 async fn retire(
     State(app): State<Arc<AppState>>,
     ApiPath(id): ApiPath<DatVersionId>,
@@ -218,7 +218,10 @@ async fn retire(
         .await?
         .ok_or_else(|| ApiError::no_such("DAT version"))?;
     if let Some(p) = row.platform_id {
-        crate::jobs::follow_up::catalogue_changed(&app, &[p], false).await;
+        // The rebind re-scores every unbound source, so it stays off the request.
+        tokio::spawn(
+            async move { crate::jobs::follow_up::catalogue_changed(&app, &[p], false).await },
+        );
     }
     Ok(StatusCode::NO_CONTENT)
 }

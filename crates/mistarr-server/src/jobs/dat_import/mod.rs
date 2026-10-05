@@ -562,7 +562,7 @@ fn import_all(
     let mut outcomes = Vec::with_capacity(members.len());
     let mut games = 0;
     for (done, &member) in members.iter().enumerate() {
-        check(req)?;
+        req.stop.check()?;
         // The first member follows the check that allowed the copy.
         if done > 0 {
             room(req)?;
@@ -603,17 +603,12 @@ fn import_all(
             db,
             p,
             &req.prefs,
-            &|| check(req).and_then(|()| room(req)),
+            &|| req.stop.check().and_then(|()| room(req)),
             &report,
         )?;
     }
     let loaded = outcomes.iter().any(|o| matches!(o, Outcome::Loaded(_)));
     Ok((outcomes, loaded))
-}
-
-/// [`StopToken::check`]: [`Error::Paused`] while a pause holds the lane.
-fn check(req: &Request) -> Result<()> {
-    req.stop.check()
 }
 
 /// [`Error::NoRoom`] when memory fell below the floor of a request in RAM.

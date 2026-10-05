@@ -190,9 +190,10 @@ arcade catalogue run that stores or retires titles queue the same.
 ### Library scan
 
 1. Triggered manually, on the `[jobs] scan_interval_minutes` schedule,
-   automatically for a platform once its DAT finishes loading, or a loaded
-   version of it is removed, if that platform's games directory already exists (deduped per platform, so a
-   zipped pack of several DATs queues one scan each), or once, full, the
+   automatically for a platform once its DAT finishes loading or a loaded
+   version of it is removed, if that platform's games directory already
+   exists (deduped per platform, so a zipped pack of several DATs queues one
+   scan each), or once, full, the
    first time every wizard step reports done. Walk each platform's
    `games/<Core>` directory and its other accepted directories, except
    arcade: its zips are never walked as cartridges, since presence and
@@ -694,12 +695,12 @@ scheduler-level gate, not something each job needs to know about.
 
 "Pause" (`POST /system/pause`) holds the heavy and background lanes; a DAT
 parse in progress waits at its next 200 entries, its row `paused` as a heavy
-job's is at a checkpoint. While a lane is held,
-`/system/status` lists its queued and paused jobs as `waiting`, and each of
-them carries a `reason` in `/system/jobs`, so the UI can say what waits and
-why. "Run now" (`POST /system/resume`) opens the gate
-until CORENAME changes or the heavy queue drains, whichever comes first;
-after that, new heavy work waits for the core again.
+job's is at a checkpoint. While a lane is held, `/system/status` lists its
+queued and paused jobs as `waiting`, and each of them carries a `reason` in
+`/system/jobs`, so the UI can say what waits and why. "Run now"
+(`POST /system/resume`) opens the gate until CORENAME changes or the heavy
+queue drains, whichever comes first; after that, new heavy work waits for the
+core again.
 
 Each kind states which job of the same kind and payload a new request joins
 instead of queueing another (`JobKind::dedupe`). `scan`, `arcade_catalog`,

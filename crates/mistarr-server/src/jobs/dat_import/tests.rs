@@ -1923,7 +1923,7 @@ fn memory_under_the_floor_stops_a_load_in_ram() {
         floor: Some(u64::MAX),
         ..request(false, None)
     };
-    assert!(check(&req).is_ok(), "a pause or a stop only");
+    assert!(req.stop.check().is_ok(), "a pause or a stop only");
     assert!(matches!(room(&req), Err(Error::NoRoom(_))));
     assert!(matches!(pace(&req, CANCEL_EVERY), Err(Error::NoRoom(_))));
     assert!(
@@ -1939,15 +1939,15 @@ fn a_pause_stops_an_import_that_holds_the_writer() {
         stop: StopToken::fixed(false, gate, Lane::Background),
         ..request(false, None)
     };
-    assert!(check(&req).is_ok());
+    assert!(req.stop.check().is_ok());
     let held = GateState {
         corename: None,
         manual: Some(crate::jobs::watch::gate::Override::Paused),
     };
     tx.send(held).expect("send");
-    assert!(matches!(check(&req), Err(Error::Paused)));
+    assert!(matches!(req.stop.check(), Err(Error::Paused)));
     let stopped = request(true, None);
-    assert!(matches!(check(&stopped), Err(Error::Cancelled)));
+    assert!(matches!(stopped.stop.check(), Err(Error::Cancelled)));
 }
 
 /// mistarr's rewrite of `xml`, as a fetch places it.

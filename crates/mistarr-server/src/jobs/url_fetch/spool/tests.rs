@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::*;
+use crate::jobs::stop::Cancel;
 
 fn places(dir: &Path, ram: bool) -> Places {
     Places {
@@ -14,15 +15,15 @@ fn no_rest() -> Pace {
     Arc::new(|_| Duration::ZERO)
 }
 
-/// A token for a fetch lane whose shutdown is `down`.
-fn token(down: bool) -> StopToken {
-    let (_down, shutdown) = tokio::sync::watch::channel(down);
+/// A token for a fetch lane that stops only when `cancel` is set.
+fn token(cancel: Arc<Cancel>) -> StopToken {
+    let (_down, shutdown) = tokio::sync::watch::channel(false);
     let (_gate, gate) = tokio::sync::watch::channel(crate::jobs::watch::gate::GateState::default());
-    StopToken::new(shutdown, gate, crate::jobs::Lane::Fetch, Arc::default())
+    StopToken::new(shutdown, gate, crate::jobs::Lane::Fetch, cancel)
 }
 
 fn never() -> StopToken {
-    token(false)
+    token(Arc::default())
 }
 
 /// A pace that counts its calls and never rests.
@@ -136,18 +137,39 @@ async fn a_failed_move_leaves_no_partial_copy() {
 #[tokio::test]
 async fn a_stop_while_placing_leaves_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut spool = Spool::create(places(dir.path(), true), 12, Some(10), no_rest())
+    let to = dir.path().join("placed.dat");
+    let (cancel, armed) = (Arc::new(Cancel::default()), Arc::new(AtomicUsize::new(0)));
+    let partial = Arc::new(AtomicUsize::new(0));
+    // Once armed, the rest after the first placed chunk cancels the job.
+    let pace: Pace = Arc::new({
+        let (cancel, armed, partial, to) =
+            (cancel.clone(), armed.clone(), partial.clone(), to.clone());
+        move |_| {
+            if armed.swap(0, Ordering::SeqCst) == 1 {
+                let len = std::fs::metadata(&to).map_or(0, |m| m.len());
+                partial.store(usize::try_from(len).unwrap_or(0), Ordering::SeqCst);
+                cancel.cancel();
+            }
+            Duration::ZERO
+        }
+    });
+    let mut spool = Spool::create(places(dir.path(), true), 12, Some(10), pace)
         .await
         .expect("create");
     spool.push(&body(CHUNK_BYTES * 3)).await.expect("push");
     spool.finish().await.expect("finish");
     let from = spool.path().to_path_buf();
-    let to = dir.path().join("placed.dat");
+    armed.store(1, Ordering::SeqCst);
     let e = spool
-        .place(to.clone(), token(true))
+        .place(to.clone(), token(cancel))
         .await
         .expect_err("stopped");
-    assert!(matches!(e, Error::Cancelled), "{e:?}");
+    assert!(matches!(e, Error::CancelledByUser), "{e:?}");
+    assert_eq!(
+        partial.load(Ordering::SeqCst),
+        CHUNK_BYTES,
+        "stopped mid-copy"
+    );
     assert!(!to.exists() && !from.exists());
 }
 

@@ -466,8 +466,9 @@ Opus · `mistarr-server` (`jobs/`, `status.rs`, `threads.rs`) · branch
   logs a failure with kind and detail; the hand-written enqueue-or-warn
   sites, `transfer::kick` and `remap::enqueue` go.
 - [x] `follow_up::catalogue_changed(app, platforms, recomputed)` owns the order
-  recompute, remap, CHD, scan, rebind; `dat_import`, `Recompute::run`,
-  `source_import`, `arcade` and `http/dats` call it.
+  recompute, remap, CHD, scan, rebind; `dat_import`, `arcade` and `http/dats`
+  call it. `Recompute::run` calls `follow_up::recomputed`, and
+  `source_import`'s rebind no longer queues a remap.
 - [x] `JobContext` carries a cloneable `StopToken` (shutdown, gate, lane,
   per-job cancel) with a synchronous `check()`. It replaces the DAT import's
   `Request`, `RamWatch::between` and url_fetch's `Stop`. The scheduler owns
@@ -476,8 +477,9 @@ Opus · `mistarr-server` (`jobs/`, `status.rs`, `threads.rs`) · branch
 - [x] Live progress goes through `reporter()` and the resume state through
   `progress()`; remap and scan follow the rule and stop writing a row per
   item.
-- [x] `transfer::move_downloads(app, ids, to, reason)` serves the importer, the
-  two transfer failures and poll's lost downloads.
+- [x] `transfer::move_downloads(app, ids, to, reason)` serves the importer and
+  the two transfer failures. Poll's lost downloads fail in the transaction
+  that clears the source's client id, then go through `publish_ids`.
 - [x] `spawn_watcher(app, name, fut)` gives every watcher one shutdown
   behaviour.
 - [x] One `doubling(base, n, max)` serves the three backoffs.

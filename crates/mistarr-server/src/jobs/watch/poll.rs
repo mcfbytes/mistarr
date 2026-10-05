@@ -345,11 +345,15 @@ fn client_failed(e: &ClientError) -> Option<bool> {
 /// Fails the torrent's polled downloads and forgets its client id.
 async fn lost(app: &AppState, source: SourceId, group: &[PollRow]) -> Result<Option<bool>> {
     let ids: Vec<DownloadId> = group.iter().map(|r| r.id).collect();
-    // Failed first: a client id left behind only sends the next transfer to add it again.
-    transfer::move_downloads(app, &ids, DownloadState::Failed, Some(LOST_TORRENT)).await?;
-    app.db
-        .write(move |c| sources::set_client_id(c, source, None))
+    let moved = app
+        .db
+        .write_tx(move |tx| {
+            sources::set_client_id(tx, source, None)?;
+            let now = crate::unix_now();
+            rows::move_all(tx, &ids, DownloadState::Failed, Some(LOST_TORRENT), now)
+        })
         .await?;
+    transfer::publish_ids(app, moved).await?;
     Ok(Some(true))
 }
 
