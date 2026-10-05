@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { pageUrl } from './router.svelte';
   import { onMount } from 'svelte';
   import { getWizard, loadWizard } from './stores/status.svelte';
 
@@ -26,7 +27,7 @@
         <li>{item}</li>
       {/each}
     </ul>
-    <a href="#/wizard">Open setup</a>
+    <a href={pageUrl('wizard')}>Open setup</a>
   </section>
 {/if}
 

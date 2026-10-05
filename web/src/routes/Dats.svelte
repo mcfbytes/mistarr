@@ -3,8 +3,9 @@
   import { SvelteSet } from 'svelte/reactivity';
   import { api, errorMessage } from '../lib/api';
   import { dats, markDatRemoved } from '../lib/stores/dats.svelte';
-  import { platforms } from '../lib/stores/platforms.svelte';
+  import { platformName, platforms } from '../lib/stores/platforms.svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
+  import ConfirmButton from '../lib/ConfirmButton.svelte';
   import IncomingList from '../lib/IncomingList.svelte';
   import UploadField from '../lib/UploadField.svelte';
   import UrlField from '../lib/UrlField.svelte';
@@ -12,7 +13,7 @@
 
   onMount(() => {
     void dats.load();
-    // Falls back to the id in platformName(); a miss retries at the next resync.
+    // Falls back to the id in boundName(); a miss retries at the next resync.
     void platforms.ensure();
     if (!getStatus()) {
       // Only feeds the dats-dir hint text; a miss just hides it until SSE resync.
@@ -20,7 +21,6 @@
     }
   });
 
-  let confirming = $state<number | null>(null);
   const busy = new SvelteSet<number>();
   let announcement = $state('');
 
@@ -50,7 +50,7 @@
     return out.sort(
       (a, b) =>
         Number(isCurrent(b.head)) - Number(isCurrent(a.head)) ||
-        platformName(a.head.platform_id).localeCompare(platformName(b.head.platform_id)) ||
+        boundName(a.head.platform_id).localeCompare(boundName(b.head.platform_id)) ||
         a.head.dat_name.localeCompare(b.head.dat_name)
     );
   });
@@ -64,11 +64,11 @@
     return !d.retired && d.superseded_by === null;
   }
 
-  function platformName(id: string | null): string {
+  function boundName(id: string | null): string {
     if (!id) {
       return 'Not bound';
     }
-    return platforms.items.find((p) => p.id === id)?.name ?? id;
+    return platformName(id);
   }
 
   function loadedAt(d: DatVersion): string {
@@ -86,23 +86,7 @@
     return d.version ? `${d.dat_name} version ${d.version}` : d.dat_name;
   }
 
-  async function focusButton(id: number, which: 'remove' | 'confirm'): Promise<void> {
-    await tick();
-    document.querySelector<HTMLButtonElement>(`[data-dat="${id}"][data-action="${which}"]`)?.focus();
-  }
-
-  function ask(d: DatVersion): void {
-    confirming = d.id;
-    void focusButton(d.id, 'confirm');
-  }
-
-  function keep(d: DatVersion): void {
-    confirming = null;
-    void focusButton(d.id, 'remove');
-  }
-
-  async function remove(d: DatVersion): Promise<void> {
-    confirming = null;
+  async function remove(d: DatVersion): Promise<boolean> {
     busy.add(d.id);
     announcement = `Removing ${label(d)}`;
     try {
@@ -113,9 +97,10 @@
       const key = familyKey(d);
       const headings = document.querySelectorAll<HTMLElement>('h3[data-family]');
       [...headings].find((h) => h.dataset.family === key)?.focus();
+      return true;
     } catch (err) {
       announcement = `${label(d)}: ${errorMessage(err)}`;
-      void focusButton(d.id, 'remove');
+      return false;
     } finally {
       busy.delete(d.id);
     }
@@ -154,7 +139,7 @@
             <div>
               <dt>Platform</dt>
               <dd>
-                {platformName(d.platform_id)}{#if !d.platform_id && d.suggested.length > 0}; its
+                {boundName(d.platform_id)}{#if !d.platform_id && d.suggested.length > 0}; its
                   family is loaded for {d.suggested.map(platformName).join(', ')}{/if}
               </dd>
             </div>
@@ -165,32 +150,18 @@
           </dl>
           <p class="muted file">{d.source_file}</p>
           {#if isCurrent(d)}
-            {#if confirming === d.id}
-              <div class="confirm" role="group" aria-label={`Remove ${label(d)}?`}>
-                <p>
-                  Its games leave the catalogue. Files on the card stay where they are, and a file
-                  another loaded DAT lists stays matched.
-                </p>
-                <button
-                  type="button"
-                  class="danger"
-                  data-dat={d.id}
-                  data-action="confirm"
-                  aria-label={`Remove ${label(d)} from the catalogue`}
-                  onclick={() => remove(d)}>Remove from the catalogue</button
-                >
-                <button type="button" aria-label={`Keep ${label(d)}`} onclick={() => keep(d)}>Keep</button>
-              </div>
-            {:else}
-              <button
-                type="button"
-                data-dat={d.id}
-                data-action="remove"
-                aria-label={`Remove ${label(d)}`}
-                disabled={busy.has(d.id)}
-                onclick={() => ask(d)}>{busy.has(d.id) ? 'Removing…' : 'Remove'}</button
-              >
-            {/if}
+            {#key d.id}
+              <ConfirmButton
+                name={`Remove ${label(d)}`}
+                confirmLabel="Remove from the catalogue"
+                confirmName={`Remove ${label(d)} from the catalogue`}
+                keepName={`Keep ${label(d)}`}
+                groupName={`Remove ${label(d)}?`}
+                prompt="Its games leave the catalogue. Files on the card stay where they are, and a file another loaded DAT lists stays matched."
+                busy={busy.has(d.id)}
+                onconfirm={() => remove(d)}
+              />
+            {/key}
           {/if}
           {#if f.older.length > 0}
             <details>
@@ -284,24 +255,6 @@
   .file {
     font-size: 0.8em;
     margin: 0.3em 0;
-  }
-
-  .confirm {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.4em;
-    align-items: center;
-  }
-
-  .confirm p {
-    flex-basis: 100%;
-    margin: 0;
-    font-size: 0.9em;
-  }
-
-  .danger {
-    border-color: var(--danger);
-    color: var(--danger);
   }
 
   details {

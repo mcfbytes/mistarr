@@ -12,6 +12,11 @@ export function findPlatform(id: string): Platform | undefined {
   return platforms.items.find((p) => p.id === id);
 }
 
+/** A platform's name, or its id while the platforms are not loaded. */
+export function platformName(id: string): string {
+  return findPlatform(id)?.name ?? id;
+}
+
 // Scan jobs whose outcome is awaited; it outlives the page, so a repeat answer for one job adds no second toast.
 // eslint-disable-next-line svelte/prefer-svelte-reactivity -- only event handlers read it, never markup
 export const followedScans = new Set<number>();

@@ -40,13 +40,3 @@ export async function uploadFiles(which: Watched, input: HTMLInputElement | unde
     input.value = '';
   }
 }
-
-/** Sends a magnet link; true when the server took it. */
-export async function addMagnet(uri: string): Promise<boolean> {
-  const since = Date.now();
-  const up = await attempt(() => api.addMagnet(uri));
-  if (up) {
-    received('sources', up, since);
-  }
-  return up !== undefined;
-}

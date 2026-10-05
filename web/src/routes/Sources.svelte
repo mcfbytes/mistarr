@@ -1,17 +1,17 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount } from 'svelte';
   import { sources } from '../lib/stores/sources.svelte';
-  import { platforms } from '../lib/stores/platforms.svelte';
+  import { platformName, platforms } from '../lib/stores/platforms.svelte';
   import { attempt, optimistic } from '../lib/actions';
   import { api } from '../lib/api';
   import { sourceStatus } from '../lib/status';
   import IncomingList from '../lib/IncomingList.svelte';
   import UploadField from '../lib/UploadField.svelte';
-  import MagnetField from '../lib/MagnetField.svelte';
   import UrlField from '../lib/UrlField.svelte';
   import StatusPill from '../lib/StatusPill.svelte';
   import { sourceUrl } from '../lib/router.svelte';
   import { bindingText } from '../lib/sourceDetail';
+  import ConfirmButton from '../lib/ConfirmButton.svelte';
   import ClientHeld from '../lib/ClientHeld.svelte';
   import SeedPolicySelect from '../lib/SeedPolicySelect.svelte';
   import { getStatus } from '../lib/stores/status.svelte';
@@ -24,13 +24,7 @@
   });
 
   const pausedWhilePlaying = $derived(getStatus()?.pause_client_while_playing === true);
-  let confirmingId = $state<number | null>(null);
   let removingId = $state<number | null>(null);
-
-  async function focusButton(id: number, which: 'remove' | 'confirm'): Promise<void> {
-    await tick();
-    document.querySelector<HTMLButtonElement>(`[data-source="${id}"][data-action="${which}"]`)?.focus();
-  }
 
   async function bind(id: number, platformId: string): Promise<void> {
     if (!platformId) {
@@ -79,18 +73,7 @@
     });
   }
 
-  function askRemove(id: number): void {
-    confirmingId = id;
-    void focusButton(id, 'confirm');
-  }
-
-  function keepSource(id: number): void {
-    confirmingId = null;
-    void focusButton(id, 'remove');
-  }
-
-  async function remove(id: number): Promise<void> {
-    confirmingId = null;
+  async function remove(id: number): Promise<boolean> {
     removingId = id;
     const done = await attempt(async () => {
       await api.deleteSource(id);
@@ -102,13 +85,8 @@
     if (done) {
       // The removed row is gone from the table; land focus on the heading instead of the body.
       document.getElementById('sources-heading')?.focus();
-    } else {
-      void focusButton(id, 'remove');
     }
-  }
-
-  function platformName(id: string): string {
-    return platforms.items.find((p) => p.id === id)?.name ?? id;
+    return done === true;
   }
 </script>
 
@@ -118,7 +96,7 @@
 
   <div class="card upload">
     <UploadField which="sources" label="Add a .torrent file" accept=".torrent" />
-    <MagnetField />
+    <UrlField label="Or a magnet link" placeholder="magnet:?xt=..." action="Add" pending="Adding…" note="" />
     <UrlField />
   </div>
 
@@ -193,28 +171,15 @@
                 {#if source.state !== 'disabled'}
                   <button onclick={() => disable(source.id)}>Disable</button>
                 {/if}
-                {#if confirmingId === source.id}
-                  <span class="confirm-inline" role="group" aria-label={`Remove ${source.display_name}?`}>
-                    <span class="muted">Removed from mistarr and the client; placed files stay.</span>
-                    <button
-                      type="button"
-                      class="danger"
-                      data-source={source.id}
-                      data-action="confirm"
-                      onclick={() => remove(source.id)}>Remove source</button
-                    >
-                    <button type="button" aria-label={`Keep ${source.display_name}`} onclick={() => keepSource(source.id)}>Keep</button>
-                  </span>
-                {:else}
-                  <button
-                    type="button"
-                    data-source={source.id}
-                    data-action="remove"
-                    aria-label={`Remove ${source.display_name}`}
-                    disabled={removingId === source.id}
-                    onclick={() => askRemove(source.id)}>{removingId === source.id ? 'Removing…' : 'Remove'}</button
-                  >
-                {/if}
+                <ConfirmButton
+                  name={`Remove ${source.display_name}`}
+                  confirmLabel="Remove source"
+                  keepName={`Keep ${source.display_name}`}
+                  groupName={`Remove ${source.display_name}?`}
+                  prompt="Removed from mistarr and the client; placed files stay."
+                  busy={removingId === source.id}
+                  onconfirm={() => remove(source.id)}
+                />
               </div>
             </td>
           </tr>
@@ -242,23 +207,6 @@
     font-size: 0.85em;
   }
 
-  .table-wrap {
-    overflow-x: auto;
-  }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85em;
-  }
-
-  th,
-  td {
-    text-align: left;
-    padding: 0.4em;
-    border-bottom: 1px solid var(--border);
-  }
-
   .suggest {
     display: block;
     margin-top: 0.3em;
@@ -269,36 +217,9 @@
     overflow-wrap: break-word;
   }
 
-  .tag {
-    display: inline-block;
-    font-size: 0.85em;
-    border: 1px solid var(--accent);
-    color: var(--accent);
-    border-radius: 999px;
-    padding: 0 0.5em;
-    white-space: nowrap;
-  }
-
   .row-actions {
     display: flex;
     flex-wrap: wrap;
     gap: 0.4em;
-  }
-
-  .confirm-inline {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: center;
-    gap: 0.4em;
-  }
-
-  .confirm-inline .muted {
-    flex-basis: 100%;
-    font-size: 0.85em;
-  }
-
-  .danger {
-    border-color: var(--danger);
-    color: var(--danger);
   }
 </style>

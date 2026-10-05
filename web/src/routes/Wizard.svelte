@@ -1,20 +1,19 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { navigate } from '../lib/router.svelte';
+  import { HOME_URL, navigate } from '../lib/router.svelte';
   import { api, errorMessage } from '../lib/api';
   import { attempt } from '../lib/actions';
-  import { platforms } from '../lib/stores/platforms.svelte';
+  import { platformName, platforms } from '../lib/stores/platforms.svelte';
   import { dats } from '../lib/stores/dats.svelte';
   import { getStatus, getWizard, loadStatus, loadWizard } from '../lib/stores/status.svelte';
   import { sources } from '../lib/stores/sources.svelte';
   import UploadField from '../lib/UploadField.svelte';
-  import MagnetField from '../lib/MagnetField.svelte';
   import UrlField from '../lib/UrlField.svelte';
   import IncomingList from '../lib/IncomingList.svelte';
   import ClientStart from '../lib/ClientStart.svelte';
   import HeldBanner from '../lib/HeldBanner.svelte';
   import PathMapEditor from '../lib/PathMapEditor.svelte';
-  import { cleanPathMap } from '../lib/pathmap';
+  import { saveSettings } from '../lib/settings';
   import type { Settings } from '../lib/types';
 
   let step = $state(0);
@@ -103,11 +102,7 @@
 
   async function finish(): Promise<void> {
     await dismiss();
-    navigate('/');
-  }
-
-  function platformName(id: string): string {
-    return platforms.items.find((p) => p.id === id)?.name ?? id;
+    navigate(HOME_URL);
   }
 
   async function saveClientSettings(): Promise<void> {
@@ -115,20 +110,14 @@
       return;
     }
     clientSaved = false;
-    const cleaned = cleanPathMap(settings.client.remote_path_map);
-    if ('error' in cleaned) {
-      clientError = cleaned.error;
+    clientError = null;
+    const result = await saveSettings({ client: settings.client });
+    if ('error' in result) {
+      clientError = result.error;
       return;
     }
-    clientError = null;
-    const client = { ...settings.client, remote_path_map: cleaned.map };
-    try {
-      settings = await api.putSettings({ client });
-      clientSaved = true;
-      await loadStatus();
-    } catch (err) {
-      clientError = errorMessage(err);
-    }
+    settings = result.settings;
+    clientSaved = true;
   }
 </script>
 
@@ -209,7 +198,7 @@
       <p>Drop <code>.torrent</code> or <code>.magnet</code> files here, or place them in:</p>
       <p><code>/media/fat/mistarr/sources</code></p>
       <UploadField which="sources" label="Add a .torrent file" accept=".torrent" />
-      <MagnetField />
+      <UrlField label="Or a magnet link" placeholder="magnet:?xt=..." action="Add" pending="Adding…" note="" />
       <UrlField />
       <p class="muted">Waiting in <code>sources/</code>:</p>
       <IncomingList which="sources" />
@@ -277,10 +266,6 @@
 
   .steps li.done {
     color: var(--ok);
-  }
-
-  .error {
-    color: var(--danger);
   }
 
   li {

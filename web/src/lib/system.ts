@@ -8,20 +8,6 @@ export function releaseNotesUrl(status: Pick<SystemStatus, 'version' | 'release'
   return status.release ? `${REPO_URL}/releases/tag/v${encodeURIComponent(status.version)}` : null;
 }
 
-/** "41 MB" or "12.4 GB" in decimal units, as storage is sold; "unknown" for null. */
-export function bytesText(bytes: number | null | undefined): string {
-  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) {
-    return 'unknown';
-  }
-  if (bytes >= 1e9) {
-    return `${(bytes / 1e9).toFixed(1)} GB`;
-  }
-  if (bytes >= 1e6) {
-    return `${Math.round(bytes / 1e6)} MB`;
-  }
-  return `${Math.max(0, Math.round(bytes / 1e3))} kB`;
-}
-
 /** Binary mebibytes, as `mistarr doctor` prints them. */
 function mib(bytes: number | null): string {
   return bytes === null ? 'unknown' : `${Math.round(bytes / 1_048_576)} MiB`;

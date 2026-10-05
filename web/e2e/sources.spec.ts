@@ -12,10 +12,9 @@ test('a mock with 150 sources lists all 150 over several small pages', async ({ 
 test('deleting a source asks for confirmation inline before it runs', async ({ page }) => {
   await page.goto('/#/sources');
   const row = page.locator('table tbody tr').first();
-  const trigger = row.locator('[data-action="remove"]');
-  const id = await trigger.getAttribute('data-source');
+  const trigger = row.locator('[data-confirm="ask"]');
   await trigger.click();
-  const confirm = row.locator(`[data-source="${id}"][data-action="confirm"]`);
+  const confirm = row.locator('[data-confirm="yes"]');
 
   await expect(row.getByRole('group')).toContainText('placed files stay');
   await expect(trigger).toHaveCount(0);
