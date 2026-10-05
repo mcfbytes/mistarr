@@ -4,7 +4,16 @@
   /**
    * A link box that fetches one DAT, DAT pack or torrent, or places a magnet link. It keeps
    * no history: the browser is asked not to remember or suggest, and the box empties once sent.
+   * The props reword it for a magnet-only box; an empty `note` leaves the note out.
    */
+  let {
+    label = 'Add from a URL',
+    placeholder = 'https://example.invalid/…',
+    action = 'Fetch',
+    pending = 'Sending…',
+    note = 'A DAT, a zipped DAT pack, a .torrent file or a magnet link. It is fetched once and not remembered.'
+  }: { label?: string; placeholder?: string; action?: string; pending?: string; note?: string } = $props();
+
   let link = $state('');
   let sending = $state(false);
 
@@ -26,21 +35,21 @@
 
 <form class="url" autocomplete="off" onsubmit={(e) => { e.preventDefault(); void go(); }}>
   <label>
-    Add from a URL
+    {label}
     <input
       type="text"
       inputmode="url"
       autocomplete="off"
       autocapitalize="off"
       spellcheck="false"
-      placeholder="https://example.invalid/…"
+      {placeholder}
       bind:value={link}
     />
   </label>
   <button type="submit" class="primary" aria-disabled={sending} aria-busy={sending}>
-    {#if sending}<span class="spinner" aria-hidden="true"></span>Sending…{:else}Fetch{/if}
+    {#if sending}<span class="spinner" aria-hidden="true"></span>{pending}{:else}{action}{/if}
   </button>
-  <p class="note">A DAT, a zipped DAT pack, a .torrent file or a magnet link. It is fetched once and not remembered.</p>
+  {#if note}<p class="note">{note}</p>{/if}
 </form>
 
 <style>

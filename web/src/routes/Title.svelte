@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import {
     clearDetail,
     getDetail,
@@ -29,9 +30,7 @@
   /** Art tabs whose image failed to load; a missing boxart shows the generated poster. */
   const missingArt = new SvelteSet<string>();
 
-  $effect(() => {
-    missingArt.clear();
-    tab = 'boxart';
+  onMount(() => {
     clearDetail();
     void loadTitleDetail(titleId);
   });
@@ -181,10 +180,6 @@
 </div>
 
 <style>
-  .table-wrap {
-    overflow-x: auto;
-  }
-
   .poster {
     width: 180px;
     margin-top: 0.5em;
@@ -203,18 +198,8 @@
   }
 
   table {
-    width: 100%;
-    border-collapse: collapse;
     margin-top: 1em;
     font-size: 0.9em;
-  }
-
-  th,
-  td {
-    text-align: left;
-    padding: 0.4em;
-    border-bottom: 1px solid var(--border);
-    vertical-align: top;
   }
 
   td.sources div {

@@ -8,6 +8,7 @@
   import { showToast } from './stores/toast.svelte';
   import { describeProgress, incomingStatus, jobStatus, type Shown } from './status';
   import StatusPill from './StatusPill.svelte';
+  import ConfirmButton from './ConfirmButton.svelte';
   import ProgressBar from './ProgressBar.svelte';
   import type { IncomingFile } from './types';
 
@@ -17,7 +18,6 @@
    */
   let { which, manage = false }: { which: Watched; manage?: boolean } = $props();
 
-  let confirming = $state<string | null>(null);
   const busy = new SvelteSet<string>();
   let announcement = $state('');
   let list = $state<HTMLUListElement>();
@@ -63,27 +63,9 @@
     return { shown: { status: 'waiting', label: 'Received' }, text: reason ?? 'Waiting for the import to start' };
   }
 
-  // Focuses the button `action` of the row for `file` once the list has re-rendered.
-  async function focusOn(file: string, action: string): Promise<void> {
-    await tick();
-    const rows = list?.querySelectorAll<HTMLButtonElement>(`button[data-action="${action}"]`) ?? [];
-    const target = [...rows].find((b) => b.dataset.file === file);
-    target?.focus();
-  }
-
   async function focusList(): Promise<void> {
     await tick();
     list?.focus();
-  }
-
-  function ask(f: IncomingFile): void {
-    confirming = f.file;
-    void focusOn(f.file, 'confirm');
-  }
-
-  function keep(f: IncomingFile): void {
-    confirming = null;
-    void focusOn(f.file, 'delete');
   }
 
   // Runs `call` with the file's buttons disabled; the failure is toasted and announced.
@@ -114,16 +96,14 @@
     }
   }
 
-  async function remove(f: IncomingFile): Promise<void> {
-    confirming = null;
+  async function remove(f: IncomingFile): Promise<boolean> {
     const done = await working(f, () => api.deleteRejectedDat(f.file).then(() => true));
     if (done) {
       patchIncoming(which, f.file, null);
       announcement = `${f.file} deleted.`;
       await focusList();
-    } else {
-      void focusOn(f.file, 'delete');
     }
+    return done === true;
   }
 </script>
 
@@ -151,27 +131,17 @@
               disabled={busy.has(f.file)}
               onclick={() => retry(f)}>Retry</button
             >
-            {#if confirming === f.file}
-              <button
-                type="button"
-                class="danger"
-                data-file={f.file}
-                data-action="confirm"
-                aria-label={`Delete the file ${f.file}`}
-                disabled={busy.has(f.file)}
-                onclick={() => remove(f)}>Delete the file</button
-              >
-              <button type="button" aria-label={`Keep ${f.file}`} onclick={() => keep(f)}>Keep</button>
-            {:else}
-              <button
-                type="button"
-                data-file={f.file}
-                data-action="delete"
-                aria-label={`Delete ${f.file}`}
-                disabled={busy.has(f.file)}
-                onclick={() => ask(f)}>Delete</button
-              >
-            {/if}
+            <ConfirmButton
+              label="Delete"
+              busyLabel="Delete"
+              name={`Delete ${f.file}`}
+              confirmLabel="Delete the file"
+              confirmName={`Delete the file ${f.file}`}
+              keepName={`Keep ${f.file}`}
+              groupName={`Delete ${f.file}?`}
+              busy={busy.has(f.file)}
+              onconfirm={() => remove(f)}
+            />
           </span>
         {/if}
       {:else if f.state === 'importing'}
@@ -244,11 +214,6 @@
   .actions button {
     padding: 0.3em 0.7em;
     font-size: 0.9em;
-  }
-
-  .danger {
-    border-color: var(--danger);
-    color: var(--danger);
   }
 
   .why {

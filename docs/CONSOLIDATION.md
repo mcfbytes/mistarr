@@ -436,22 +436,22 @@ Sonnet · `web/` · branch `wp-65-web-stores`
 
 Sonnet · `web/` · branch `wp-66-web-components`
 
-- [ ] `System.svelte` splits into `StatusTiles`, `AboutCard`, `SettingsForm` and
+- [x] `System.svelte` splits into `StatusTiles`, `AboutCard`, `SettingsForm` and
   a reusable `SaveBar`; the Wizard shares one `saveSettings(patch)`.
-- [ ] `SourceDetail.svelte` splits into `ReclassifyPanel` and `SourceFiles`;
+- [x] `SourceDetail.svelte` splits into `ReclassifyPanel` and `SourceFiles`;
   `loadFiles` is called by the handlers that change filter, page or search,
   so `reloadTick` and the `rowKey` effect go.
-- [ ] `ConfirmButton` serves Dats, IncomingList and Sources.
-- [ ] `JobRow` serves Activity and ActivityIndicator; `jobTitle` sits in
+- [x] `ConfirmButton` serves Dats, IncomingList and Sources.
+- [x] `JobRow` serves Activity and ActivityIndicator; `jobTitle` sits in
   `status.ts`.
-- [ ] `platformName` is exported once; `format.ts` has one byte formatter, with
+- [x] `platformName` is exported once; `format.ts` has one byte formatter, with
   the unit rule in UI.md; SourceDetail copies through `copyText`.
-- [ ] Every route with a parameter renders inside `{#key}`; the manual resets go.
-- [ ] `app.css` holds `.error`, `.tag`, `.danger`, the table base,
+- [x] Every route with a parameter renders inside `{#key}`; the manual resets go.
+- [x] `app.css` holds `.error`, `.tag`, `.danger`, the table base,
   `.table-wrap`, `.help` and a `--mono` token; the unused `.progress` rule
   and `ApiErrorBody` go; Browse uses `ProgressBar` for its indeterminate bar.
-- [ ] The magnet box is a `UrlField`; `MagnetField` and `addMagnet` go.
-- [ ] Links use the router's URL helpers; `parseHash` is a table.
+- [x] The magnet box is a `UrlField`; `MagnetField` and `addMagnet` go.
+- [x] Links use the router's URL helpers; `parseHash` is a table.
 
 ### WP-67 Job framework
 

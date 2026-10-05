@@ -1,17 +1,5 @@
 import type { DownloadState, Source, SourceFileKind, SourceFileUnmatched } from './types';
 
-/** A byte count in the largest unit that keeps it above one, such as "1.4 GB". */
-export function formatSize(bytes: number): string {
-  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let value = bytes;
-  let unit = 0;
-  while (value >= 1000 && unit < units.length - 1) {
-    value /= 1000;
-    unit += 1;
-  }
-  return unit === 0 ? `${value} B` : `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
-}
-
 /** The first and last eight characters of an infohash. */
 export function shortHash(hash: string): string {
   return hash.length > 20 ? `${hash.slice(0, 8)}…${hash.slice(-8)}` : hash;

@@ -1,68 +1,31 @@
 <script lang="ts">
-  import { onDestroy, tick, untrack } from 'svelte';
-  import { attempt, optimistic } from '../lib/actions';
-  import { debounce, DELAY_MS } from '../lib/coalesce';
+  import { onMount } from 'svelte';
   import { api, ApiError, errorMessage } from '../lib/api';
-  import { findSource, sources } from '../lib/stores/sources.svelte';
-  import { findPlatform, platforms } from '../lib/stores/platforms.svelte';
-  import { followJob, jobs } from '../lib/stores/jobs.svelte';
+  import { sources } from '../lib/stores/sources.svelte';
+  import { platformName, platforms } from '../lib/stores/platforms.svelte';
   import { showToast } from '../lib/stores/toast.svelte';
-  import { describeProgress, jobOutcome, jobStatus, sourceStatus } from '../lib/status';
-  import { confidenceLabel } from '../lib/availability';
-  import { titleUrl } from '../lib/router.svelte';
-  import {
-    bindingText,
-    downloadText,
-    formatSize,
-    kindText,
-    shortHash,
-    transferShare,
-    unmatchedText
-  } from '../lib/sourceDetail';
+  import { optimistic } from '../lib/actions';
+  import { sourceStatus } from '../lib/status';
+  import { bytesText } from '../lib/format';
+  import { copyText } from '../lib/system';
+  import { pageUrl } from '../lib/router.svelte';
+  import { bindingText, shortHash, transferShare } from '../lib/sourceDetail';
   import StatusPill from '../lib/StatusPill.svelte';
   import ProgressBar from '../lib/ProgressBar.svelte';
+  import ReclassifyPanel from '../lib/ReclassifyPanel.svelte';
+  import SourceFiles from '../lib/SourceFiles.svelte';
   import SeedPolicySelect from '../lib/SeedPolicySelect.svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
-  import type { SeedPolicy, SourceDetail, SourceFile, SourceFileFilter, SourcePreview } from '../lib/types';
+  import type { SeedPolicy, SourceDetail } from '../lib/types';
 
   const { sourceId }: { sourceId: number } = $props();
-
-  const PAGE = 50;
-  const NONE = '-';
-  const FILTERS: { value: SourceFileFilter | undefined; label: string }[] = [
-    { value: undefined, label: 'All' },
-    { value: 'matched', label: 'Matched' },
-    { value: 'unmatched', label: 'Unmatched' },
-    { value: 'wanted', label: 'Wanted' }
-  ];
 
   let detail = $state<SourceDetail | null>(null);
   let missing = $state(false);
   let loadError = $state<string | null>(null);
+  let files = $state<{ reload: () => void }>();
+  let fullHash = $state(false);
 
-  let filter = $state<SourceFileFilter | undefined>(undefined);
-  let query = $state('');
-  let applied = $state('');
-  let offset = $state(0);
-  let files = $state<SourceFile[]>([]);
-  let total = $state(0);
-  let filesLoading = $state(false);
-  let filesError = $state<string | null>(null);
-  let reloadTick = $state(0);
-  let controller: AbortController | null = null;
-
-  let panelOpen = $state(false);
-  let reclassifyButton = $state<HTMLButtonElement | null>(null);
-  let previewController: AbortController | null = null;
-  let preview = $state<SourcePreview | null>(null);
-  let previewError = $state<string | null>(null);
-  let choice = $state('');
-  let applying = $state(false);
-  let resetting = $state(false);
-  let jobId = $state<number | null>(null);
-  let stopBinding: (() => void) | null = null;
-
-  const row = $derived(findSource(sourceId));
   const status = $derived(getStatus());
   const pausedWhilePlaying = $derived(status?.pause_client_while_playing === true);
   // How the client is held while a core runs, as the list's banner says it.
@@ -74,24 +37,15 @@
         : null
   );
   const source = $derived(detail ?? null);
-  const job = $derived(jobId === null ? undefined : jobs.items.find((j) => j.id === jobId));
-  const jobView = $derived(job ? describeProgress(job.kind, job.progress) : null);
 
-  function platformName(id: string): string {
-    return findPlatform(id)?.name ?? id;
-  }
-
-  $effect(() => {
+  onMount(() => {
     // Falls back to the id in platformName(); a miss retries at the next resync.
     void platforms.ensure();
-    // Only feeds rowKey below; loadDetail() below has its own missing/loadError state.
-    if (!row) {
-      void sources.load();
-    }
     // Hides the pause-while-playing note until connected; SSE resync fills it.
     if (!getStatus()) {
       void loadStatus().catch(() => undefined);
     }
+    void loadDetail();
   });
 
   async function loadDetail(): Promise<void> {
@@ -105,104 +59,16 @@
     }
   }
 
-  // The list row changes on `source.changed`; its binding and counts moving means a re-read.
-  const rowKey = $derived(
-    JSON.stringify([
-      sourceId,
-      row?.state,
-      row?.platform_id,
-      row?.matched_count,
-      row?.user_binding,
-      row?.pending_binding,
-      row?.file_count
-    ])
-  );
-  $effect(() => {
-    if (rowKey) {
-      untrack(() => {
-        void loadDetail();
-        reloadTick += 1;
-      });
-    }
-  });
-
-  interface PageAsk {
-    filter: SourceFileFilter | undefined;
-    q: string | undefined;
-    limit: number;
-    offset: number;
+  /** Reads the detail and the file table again after the source's binding moved. */
+  function refresh(): void {
+    void loadDetail();
+    files?.reload();
   }
-
-  function currentAsk(): PageAsk {
-    return { filter, q: applied || undefined, limit: PAGE, offset };
-  }
-
-  async function loadFiles(opts: PageAsk): Promise<void> {
-    controller?.abort();
-    const c = new AbortController();
-    controller = c;
-    filesLoading = true;
-    try {
-      const page = await api.sourceFiles(sourceId, opts, c.signal);
-      if (c.signal.aborted) {
-        return;
-      }
-      files = page.items;
-      total = page.total;
-      filesError = null;
-    } catch (err) {
-      if (!c.signal.aborted) {
-        filesError = errorMessage(err);
-      }
-    } finally {
-      if (controller === c) {
-        filesLoading = false;
-      }
-    }
-  }
-
-  $effect(() => {
-    const ask = currentAsk();
-    if (reloadTick >= 0) {
-      untrack(() => void loadFiles(ask));
-    }
-  });
-
-  onDestroy(() => {
-    controller?.abort();
-    previewController?.abort();
-    applySearch.cancel();
-    stopBinding?.();
-  });
-
-  function setFilter(value: SourceFileFilter | undefined): void {
-    filter = value;
-    offset = 0;
-  }
-
-  const applySearch = debounce((value: string) => {
-    applied = value.trim();
-    offset = 0;
-  }, DELAY_MS.search);
-
-  function onSearch(value: string): void {
-    query = value;
-    applySearch(value);
-  }
-
-  let fullHash = $state(false);
 
   async function copyHash(hash: string): Promise<void> {
-    // Plain http on the LAN has no clipboard API; the whole infohash is shown to copy by hand.
-    if (!window.isSecureContext) {
-      fullHash = true;
-      showToast('This page cannot copy over plain http. The whole infohash is shown to copy.', 'info');
-      return;
-    }
-    try {
-      await navigator.clipboard.writeText(hash);
+    if (await copyText(hash)) {
       showToast('Infohash copied.', 'success');
-    } catch {
+    } else {
       fullHash = true;
       showToast('The browser did not allow copying. The whole infohash is shown to copy.');
     }
@@ -227,119 +93,10 @@
       commit: (updated) => sources.patch(sourceId, updated)
     });
   }
-
-  /** Closes Re-classify, stops its preview request and returns focus to its button. */
-  async function closePanel(): Promise<void> {
-    panelOpen = false;
-    previewController?.abort();
-    previewController = null;
-    await tick();
-    reclassifyButton?.focus();
-  }
-
-  // The preview is read once per page view; the page is rebuilt for another source.
-  async function openPanel(): Promise<void> {
-    if (panelOpen) {
-      await closePanel();
-      return;
-    }
-    panelOpen = true;
-    choice = '';
-    if (preview || previewController) {
-      return;
-    }
-    previewError = null;
-    const c = new AbortController();
-    previewController = c;
-    try {
-      const got = await api.sourcePreview(sourceId, c.signal);
-      if (!c.signal.aborted) {
-        preview = got;
-      }
-    } catch (err) {
-      if (!c.signal.aborted) {
-        previewError = errorMessage(err);
-      }
-    } finally {
-      if (previewController === c) {
-        previewController = null;
-      }
-    }
-  }
-
-  const sampled = $derived(preview !== null && preview.sampled < preview.total);
-
-  const chosenMatch = $derived(
-    choice && choice !== NONE ? (preview?.platforms.find((p) => p.platform_id === choice)?.matched ?? 0) : null
-  );
-
-  function confirmText(): string {
-    if (choice === NONE) {
-      return 'The source will have no platform and is never bound automatically. Its files keep no matches.';
-    }
-    const name = platformName(choice);
-    const about = sampled ? 'about ' : '';
-    return `Binding to ${name} would match ${about}${chosenMatch ?? 0} of ${preview?.total ?? 0} files. Its files are matched again in the background, and later DAT loads keep this choice.`;
-  }
-
-  // Once the queued binding of job `id` ends, says how it went and reads the sources again.
-  function followBinding(id: number | null): void {
-    stopBinding?.();
-    jobId = id;
-    if (id === null) {
-      return;
-    }
-    stopBinding = followJob(
-      (end) => end.id === id,
-      (end) => {
-        const payload = { source_name: detail?.display_name };
-        const text = jobOutcome({ kind: 'bind_source', state: end.state, progress: end.progress, payload }, platformName);
-        jobId = null;
-        showToast(text, end.state === 'done' ? 'success' : 'error');
-        void sources.load();
-      }
-    );
-  }
-
-  async function apply(): Promise<void> {
-    if (!choice || applying) {
-      return;
-    }
-    applying = true;
-    const platformId = choice === NONE ? null : choice;
-    const updated = await attempt(() => api.updateSource(sourceId, { platform_id: platformId }));
-    if (updated) {
-      followBinding(updated.job_id);
-      sources.patch(sourceId, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
-      void closePanel();
-      showToast(platformId ? `Binding to ${platformName(platformId)} queued.` : 'Setting the source aside queued.', 'info');
-    }
-    applying = false;
-  }
-
-  async function reset(): Promise<void> {
-    if (resetting) {
-      return;
-    }
-    resetting = true;
-    const updated = await attempt(() => api.updateSource(sourceId, { binding: 'automatic' }));
-    if (updated) {
-      followBinding(updated.job_id);
-      sources.patch(sourceId, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
-      showToast('Automatic binding queued.', 'info');
-      // Reset leaves with the user's binding; focus goes to the control that stays.
-      await tick();
-      reclassifyButton?.focus();
-    }
-    resetting = false;
-  }
-
-  const firstShown = $derived(total === 0 ? 0 : offset + 1);
-  const lastShown = $derived(Math.min(offset + PAGE, total));
 </script>
 
 <div class="page">
-  <p class="back"><a href="#/sources">Sources</a></p>
+  <p class="back"><a href={pageUrl('sources')}>Sources</a></p>
   {#if missing}
     <h1>Source not found</h1>
     <p class="muted">No source has this id. It may have been removed.</p>
@@ -354,7 +111,7 @@
 
     <section class="card head" aria-label="Overview">
       <dl>
-        <div><dt>Size</dt><dd>{formatSize(source.total_size)}</dd></div>
+        <div><dt>Size</dt><dd>{bytesText(source.total_size)}</dd></div>
         <div><dt>Files</dt><dd>{source.file_count.toLocaleString()}</dd></div>
         <div>
           <dt>Infohash</dt>
@@ -391,7 +148,7 @@
           label="Transfer of the selected files"
           view={{
             fraction: share,
-            text: `${formatSize(source.transfer.done)} of ${formatSize(source.transfer.size)}`
+            text: `${bytesText(source.transfer.done)} of ${bytesText(source.transfer.size)}`
           }}
         />
       {/if}
@@ -429,147 +186,10 @@
         <li><strong>{source.summary.wanted.toLocaleString()}</strong> wanted</li>
       </ul>
 
-      {#if jobId !== null}
-        <div class="job" aria-live="polite">
-          {#if job && jobView}
-            <ProgressBar label="Binding progress" view={jobView} />
-          {:else if job}
-            <StatusPill {...jobStatus(job)} />
-            {#if job.reason}<span class="muted">{job.reason}</span>{/if}
-          {:else}
-            <span class="muted">Binding queued.</span>
-          {/if}
-        </div>
-      {/if}
-
-      <div class="actions">
-        <button
-          bind:this={reclassifyButton}
-          aria-expanded={panelOpen}
-          aria-controls="reclassify"
-          disabled={source.file_count === 0}
-          onclick={() => void openPanel()}>Re-classify…</button
-        >
-        {#if source.user_binding}
-          <button
-            onclick={() => void reset()}
-            aria-disabled={resetting}
-            aria-busy={resetting}>{resetting ? 'Resetting…' : 'Reset to automatic'}</button
-          >
-        {/if}
-      </div>
-
-      {#if panelOpen}
-        <div id="reclassify" class="panel" role="region" aria-label="Re-classify">
-          {#if previewError}
-            <p role="alert">{previewError}</p>
-          {:else if !preview}
-            <p class="muted" aria-busy="true">Checking how each platform's DAT entries match these files…</p>
-          {:else}
-            <fieldset>
-              <legend>Bind this source to</legend>
-              {#if preview.platforms.length === 0}
-                <p class="muted">No platform has a DAT loaded.</p>
-              {/if}
-              {#each preview.platforms as p (p.platform_id)}
-                <label class="option">
-                  <input type="radio" name="bind-to" value={p.platform_id} bind:group={choice} />
-                  <span>
-                    {platformName(p.platform_id)}{#if p.platform_id === source.platform_id}&nbsp;<span class="muted">(now)</span>{/if}
-                    <span class="muted hint"
-                      >would match {sampled ? 'about ' : ''}{p.matched.toLocaleString()} of {preview.total.toLocaleString()} files</span
-                    >
-                  </span>
-                </label>
-              {/each}
-              <label class="option">
-                <input type="radio" name="bind-to" value={NONE} bind:group={choice} />
-                <span>Not a game set <span class="muted hint">no platform, never bound automatically</span></span>
-              </label>
-            </fieldset>
-            {#if choice}
-              <p class="confirm">{confirmText()}</p>
-            {/if}
-            <div class="actions">
-              <button
-                class="primary"
-                onclick={() => void apply()}
-                aria-disabled={!choice || applying}
-                aria-busy={applying}
-              >
-                {applying ? 'Applying…' : choice === NONE ? 'Set aside' : choice ? `Bind to ${platformName(choice)}` : 'Bind'}
-              </button>
-              <button onclick={() => void closePanel()}>Cancel</button>
-            </div>
-          {/if}
-        </div>
-      {/if}
+      <ReclassifyPanel {source} onchange={refresh} />
     </section>
 
-    <section class="card" aria-labelledby="files-h">
-      <h2 id="files-h">Files</h2>
-      <div class="tools">
-        <div class="chips" role="group" aria-label="Show files">
-          {#each FILTERS as f (f.label)}
-            <button class="chip" aria-pressed={filter === f.value} onclick={() => setFilter(f.value)}>{f.label}</button>
-          {/each}
-        </div>
-        <input
-          type="search"
-          placeholder="Search paths"
-          aria-label="Search paths"
-          value={query}
-          oninput={(e) => onSearch(e.currentTarget.value)}
-        />
-      </div>
-      {#if filesError}
-        <p role="alert">{filesError} <button onclick={() => void loadFiles(currentAsk())}>Retry</button></p>
-      {/if}
-      <p class="muted" aria-live="polite">
-        {#if total === 0 && !filesLoading}
-          No files to show.
-        {:else}
-          Files {firstShown.toLocaleString()}–{lastShown.toLocaleString()} of {total.toLocaleString()}
-        {/if}
-      </p>
-      <table class:busy={filesLoading} aria-busy={filesLoading}>
-        <thead>
-          <tr>
-            <th>Path</th>
-            <th>Size</th>
-            <th>Kind</th>
-            <th>DAT entry</th>
-            <th>Transfer</th>
-          </tr>
-        </thead>
-        <tbody>
-          {#each files as f (f.file_index)}
-            <tr>
-              <td class="path">{f.path}</td>
-              <td class="num">{formatSize(f.size)}</td>
-              <td>{kindText(f.kind)}</td>
-              <td>
-                {#if f.rom_name && f.title_id !== null}
-                  <a href={titleUrl(f.title_id)}>{f.rom_name}</a>
-                  {#if f.confidence}<span class="muted">({confidenceLabel(f.confidence)})</span>{/if}
-                {:else if f.candidates[0]}
-                  {@const c = f.candidates[0]}
-                  Possibly <a href={titleUrl(c.title_id)}>{c.rom_name}</a>
-                  <span class="muted">({confidenceLabel(c.confidence)})</span>
-                {:else if f.unmatched}
-                  <span class="muted">{unmatchedText(f.unmatched)}</span>
-                {/if}
-              </td>
-              <td>{f.download ? downloadText(f.download) : ''}</td>
-            </tr>
-          {/each}
-        </tbody>
-      </table>
-      <div class="pager">
-        <button disabled={offset === 0} onclick={() => (offset = Math.max(0, offset - PAGE))}>Previous</button>
-        <button disabled={offset + PAGE >= total} onclick={() => (offset += PAGE)}>Next</button>
-      </div>
-    </section>
+    <SourceFiles bind:this={files} {sourceId} />
   {/if}
 </div>
 
@@ -611,13 +231,12 @@
     margin: 0.1em 0 0;
   }
 
-  .wrap,
-  .path {
+  .wrap {
     overflow-wrap: break-word;
   }
 
   .full {
-    font-family: monospace;
+    font-family: var(--mono);
     font-size: 0.85em;
     width: 100%;
   }
@@ -628,8 +247,7 @@
     gap: 0.5em;
   }
 
-  button.small,
-  .chip {
+  button.small {
     padding: 0.25em 0.7em;
     font-size: 0.85em;
   }
@@ -657,14 +275,6 @@
     gap: 0.6em;
   }
 
-  .tag {
-    font-size: 0.8em;
-    border: 1px solid var(--accent);
-    color: var(--accent);
-    border-radius: 999px;
-    padding: 0.05em 0.6em;
-  }
-
   .counts {
     list-style: none;
     padding: 0;
@@ -672,142 +282,5 @@
     display: flex;
     flex-wrap: wrap;
     gap: 0.3em 1.2em;
-  }
-
-  .actions,
-  .pager {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.5em;
-    margin-top: 0.6em;
-  }
-
-  .job {
-    margin-top: 0.6em;
-  }
-
-  .panel {
-    margin-top: 0.8em;
-    border-top: 1px solid var(--border);
-    padding-top: 0.8em;
-  }
-
-  fieldset {
-    border: none;
-    padding: 0;
-    margin: 0;
-    display: grid;
-    gap: 0.4em;
-  }
-
-  legend {
-    margin-bottom: 0.4em;
-  }
-
-  .option {
-    display: flex;
-    gap: 0.5em;
-    align-items: baseline;
-  }
-
-  .hint {
-    display: block;
-    font-size: 0.85em;
-  }
-
-  .confirm {
-    margin: 0.8em 0 0;
-  }
-
-  .tools {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.6em;
-    align-items: center;
-    justify-content: space-between;
-  }
-
-  .chips {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0.4em;
-  }
-
-  .chip[aria-pressed='true'] {
-    background: var(--accent);
-    border-color: var(--accent);
-    color: #08101f;
-  }
-
-  input[type='search'] {
-    flex: 1 1 12em;
-    min-width: 0;
-  }
-
-  table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: 0.85em;
-    table-layout: fixed;
-  }
-
-  table.busy {
-    opacity: 0.6;
-  }
-
-  th,
-  td {
-    text-align: left;
-    padding: 0.4em;
-    border-bottom: 1px solid var(--border);
-    vertical-align: top;
-    overflow-wrap: break-word;
-  }
-
-  th:nth-child(1) {
-    width: 34%;
-  }
-
-  th:nth-child(2) {
-    width: 10%;
-  }
-
-  th:nth-child(3) {
-    width: 12%;
-  }
-
-  th:nth-child(5) {
-    width: 14%;
-  }
-
-  .num {
-    white-space: nowrap;
-  }
-
-  @media (max-width: 600px) {
-    thead {
-      display: none;
-    }
-
-    table,
-    tbody,
-    tr,
-    td {
-      display: block;
-    }
-
-    tr {
-      border-bottom: 1px solid var(--border);
-      padding: 0.4em 0;
-    }
-
-    td {
-      border: none;
-      padding: 0.1em 0;
-    }
-
-    td:empty {
-      display: none;
-    }
   }
 </style>

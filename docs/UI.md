@@ -157,13 +157,14 @@ Fetch button; a note under it says it takes a DAT, a zipped DAT pack, a
 empties once the server takes the link and keeps it when the server refuses
 it, so it can be corrected; the link is never written to storage, and a
 reload shows the box empty (PRINCIPLES.md section 2). Whatever screen it is
-on, the file goes where its content says. A magnet is received like the
-magnet box's. An http(s) link says "Fetching the file. Its progress is under
+on, the file goes where its content says. The magnet box is the same field
+labelled "Or a magnet link", with an Add button ("Adding…" while sent) and
+no note; a magnet is received as an upload. An http(s) link says "Fetching the file. Its progress is under
 Background work." and appears there and on Activity as "URL fetch: sent at
 14:02:31", the time it was sent, with "(1)", "(2)" by job when several were
 sent in the same second, and never any part of the URL; then "URL fetch:
 <file>" once the first bytes name it, with a bar of the bytes received
-("Receiving · 40% · 1.0 MiB of 2.3 MiB", or a moving band and "1.0 MiB
+("Receiving · 40% · 1.0 MB of 2.4 MB", or a moving band and "1.0 MB
 received" without a length), then "Checking the file" and "Writing to the
 card", and a Cancel button, which says "Cancelling…" and is disabled until
 the fetch ends. When it lands the toast is an upload's ("DAT received:
@@ -480,3 +481,9 @@ disconnected and reconnects with backoff.
 Follow PRINCIPLES.md section 5. Buttons say "Want", "Scan", "Bind",
 "Rename", "Play", "Start core". The empty state on Sources says: "No sources yet. Place a .torrent
 or .magnet file in `<path>` or drop one here." and nothing more.
+
+Byte counts everywhere in the web UI come from one formatter in decimal
+units: "B", "kB", "MB", "GB", "TB", with one decimal below 10 and none above
+("812 kB", "1.4 GB", "214 MB"), and "unknown" when the size is not known. The
+diagnostics text is the exception: it prints binary "MiB" as `mistarr doctor`
+does.

@@ -1,13 +1,12 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { jobs, recent as recentJobs, watchRecent } from './stores/jobs.svelte';
-  import { findPlatform } from './stores/platforms.svelte';
-  import { QUIET_KINDS, describeProgress, fetchSubject, jobDetail, jobHref, jobOutcome, jobStatus, kindLabel } from './status';
-  import FetchCancel from './FetchCancel.svelte';
+  import { platformName } from './stores/platforms.svelte';
+  import { QUIET_KINDS, jobHref, jobOutcome, jobStatus } from './status';
+  import { pageUrl } from './router.svelte';
+  import JobRow from './JobRow.svelte';
   import StatusPill from './StatusPill.svelte';
-  import ProgressBar from './ProgressBar.svelte';
   import ClientHeld from './ClientHeld.svelte';
-  import type { Job } from './types';
 
   /** The always-visible work indicator in the nav and its panel; see docs/UI.md "Activity indicator". */
   let open = $state(false);
@@ -32,20 +31,6 @@
           .filter(Boolean)
           .join(', ')
   );
-
-  function name(id: string): string {
-    return findPlatform(id)?.name ?? id;
-  }
-
-  function title(job: Job): string {
-    const detail =
-      job.kind === 'url_fetch'
-        ? fetchSubject(job, active)
-        : typeof job.payload.platform_id === 'string' && typeof job.payload.source_name !== 'string'
-          ? name(job.payload.platform_id)
-          : jobDetail(job.payload);
-    return detail ? `${kindLabel(job.kind)}: ${detail}` : kindLabel(job.kind);
-  }
 
   const relative = new Intl.RelativeTimeFormat(undefined, { numeric: 'auto' });
 
@@ -175,15 +160,7 @@
       <h3>Running</h3>
       <ul aria-label="Running">
         {#each running as job (job.id)}
-          {@const view = describeProgress(job.kind, job.progress) ?? { fraction: null, text: 'Starting' }}
-          <li>
-            <div class="row">
-              <StatusPill {...jobStatus(job)} />
-              <a href={jobHref(job)} onclick={() => hide(false)}>{title(job)}</a>
-              <FetchCancel {job} label={title(job)} compact />
-            </div>
-            <ProgressBar {view} label={`${title(job)} progress`} compact />
-          </li>
+          <li><JobRow {job} all={active} compact onnavigate={() => hide(false)} /></li>
         {/each}
       </ul>
     {/if}
@@ -192,14 +169,7 @@
       <h3>Waiting</h3>
       <ul aria-label="Waiting">
         {#each waiting as job (job.id)}
-          <li>
-            <div class="row">
-              <StatusPill {...jobStatus(job)} />
-              <a href={jobHref(job)} onclick={() => hide(false)}>{title(job)}</a>
-              <FetchCancel {job} label={title(job)} compact />
-            </div>
-            {#if job.reason}<p class="why">{job.reason}</p>{/if}
-          </li>
+          <li><JobRow {job} all={active} compact onnavigate={() => hide(false)} /></li>
         {/each}
       </ul>
     {/if}
@@ -211,7 +181,7 @@
           <li>
             <div class="row">
               <StatusPill {...jobStatus(job)} />
-              <a href={jobHref(job)} onclick={() => hide(false)}>{jobOutcome(job, name)}</a>
+              <a href={jobHref(job)} onclick={() => hide(false)}>{jobOutcome(job, platformName)}</a>
             </div>
             <p class="why">{ago(job.updated_at)}</p>
           </li>
@@ -219,7 +189,7 @@
       </ul>
     {/if}
 
-    <footer><a href="#/activity" onclick={() => hide(false)}>Open Activity</a></footer>
+    <footer><a href={pageUrl('activity')} onclick={() => hide(false)}>Open Activity</a></footer>
   </section>
 {/if}
 

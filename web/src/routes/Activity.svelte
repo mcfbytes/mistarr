@@ -2,29 +2,24 @@
   import { onMount } from 'svelte';
   import { downloads, imports, watchImports } from '../lib/stores/downloads.svelte';
   import { jobs, recent, watchRecent } from '../lib/stores/jobs.svelte';
-  import { findPlatform, platforms } from '../lib/stores/platforms.svelte';
+  import { platformName, platforms } from '../lib/stores/platforms.svelte';
   import { attempt } from '../lib/actions';
   import { api } from '../lib/api';
   import {
-    describeProgress,
     downloadStatus,
-    fetchSubject,
-    jobDetail,
-    jobHref,
     jobOutcome,
-    jobStatus,
-    kindLabel
+    jobStatus
   } from '../lib/status';
-  import FetchCancel from '../lib/FetchCancel.svelte';
+  import JobRow from '../lib/JobRow.svelte';
   import StatusPill from '../lib/StatusPill.svelte';
   import ProgressBar from '../lib/ProgressBar.svelte';
-  import type { Download, Job } from '../lib/types';
+  import type { Download } from '../lib/types';
 
   onMount(() => {
     void downloads.load();
     void imports.load();
     void jobs.load();
-    // The platform name falls back to its id in jobTitle(); it retries at the next resync.
+    // The platform name falls back to its id in the job title; it retries at the next resync.
     void platforms.ensure();
     const stopRecent = watchRecent();
     const stopImports = watchImports();
@@ -33,22 +28,6 @@
       stopImports();
     };
   });
-
-  function platformName(id: string): string {
-    return findPlatform(id)?.name ?? id;
-  }
-
-  function jobTitle(job: Job): string {
-    const pid = job.payload.platform_id;
-    const named = typeof job.payload.source_name === 'string';
-    const detail =
-      job.kind === 'url_fetch'
-        ? fetchSubject(job, jobs.items)
-        : typeof pid === 'string' && !named
-          ? platformName(pid)
-          : jobDetail(job.payload);
-    return detail ? `${kindLabel(job.kind)}: ${detail}` : kindLabel(job.kind);
-  }
 
   async function change(id: number, call: () => Promise<Download>): Promise<void> {
     const row = await attempt(call);
@@ -95,18 +74,8 @@
   {/if}
   {#if jobs.loaded || !jobs.error}
     {#each jobs.items as job (job.id)}
-      {@const view = job.state === 'running' ? describeProgress(job.kind, job.progress) : null}
       <div class="card row job" data-job={job.id}>
-        <div class="head">
-          <StatusPill {...jobStatus(job)} />
-          <a href={jobHref(job)}><strong>{jobTitle(job)}</strong></a>
-          <span class="muted">{job.lane} lane</span>
-          <FetchCancel {job} label={jobTitle(job)} />
-        </div>
-        {#if job.state === 'running'}
-          <ProgressBar view={view ?? { fraction: null, text: 'Starting' }} label={`${jobTitle(job)} progress`} />
-        {/if}
-        {#if job.reason}<p class="muted why">{job.reason}</p>{/if}
+        <JobRow {job} all={jobs.items} />
       </div>
     {:else}
       <p class="muted">No jobs queued or running.</p>
@@ -155,19 +124,10 @@
     overflow-wrap: anywhere;
   }
 
-  .why {
-    margin: 0.4em 0 0;
-    font-size: 0.85em;
-  }
-
   .actions {
     display: flex;
     gap: 0.5em;
     margin-top: 0.4em;
-  }
-
-  .error {
-    color: var(--danger);
   }
 
   .imports {

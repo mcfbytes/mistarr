@@ -59,8 +59,4 @@
   .client-start button {
     margin-right: 0.4em;
   }
-
-  .error {
-    color: var(--danger);
-  }
 </style>
