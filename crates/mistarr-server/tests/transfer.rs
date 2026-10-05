@@ -864,7 +864,7 @@ async fn a_source_with_only_finished_downloads_can_be_deleted() {
     assert_eq!(want(&b, second).await.status, 200);
     wait_state(&b, second, "transferring").await;
 
-    let done = mistarr_server::db::ids::DownloadId(
+    let done = mistarr_server::db::ids::DownloadId::new(
         download_of(&b, quest).await["id"].as_i64().expect("id"),
     );
     app.db

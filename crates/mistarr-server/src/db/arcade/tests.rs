@@ -2,11 +2,11 @@ use super::*;
 use crate::db::dats::{self, NewVersion};
 use crate::db::fixtures::conn;
 use crate::db::fixtures::pid;
-use crate::db::ids::RomId;
 use crate::db::roms::{live_zip_roms, zip_rom, zip_roms};
 use crate::db::titles::browse::Browse;
 use crate::db::titles::{self, RomInput, TitleInput};
 use mistarr_core::PlatformId;
+use mistarr_core::RomId;
 
 fn mra(c: &Connection, name: &str, zips: &[(&str, bool)]) -> TitleId {
     mra_run(c, name, zips, 1)
@@ -117,7 +117,7 @@ fn rescans_keep_ids_and_retire_what_is_gone() {
     let a = mra(&c, "Example Blaster", &[("exblast.zip", false)]);
     let b = mra(&c, "Example Quest", &[("exquest.zip", false)]);
     let d = mra(&c, "Example Racer", &[("exrace.zip", false)]);
-    c.execute("UPDATE titles SET wanted = 1 WHERE id = ?1", [a.0])
+    c.execute("UPDATE titles SET wanted = 1 WHERE id = ?1", [a.get()])
         .expect("want");
     let run = next_run(&c, &pid("arcade")).expect("run");
     assert_eq!(run, 2);
@@ -130,7 +130,7 @@ fn rescans_keep_ids_and_retire_what_is_gone() {
     let (retired, wanted): (bool, bool) = c
         .query_row(
             "SELECT (SELECT retired FROM titles WHERE id = ?1), (SELECT wanted FROM titles WHERE id = ?2)",
-            [b.0, a.0],
+            [b.get(), a.get()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .expect("row");
@@ -203,9 +203,11 @@ fn dat_loads_never_touch_mra_titles() {
     let d = dat_game(&c, "1", "exblast");
     dat_game(&c, "2", "exquest");
     let retired = |id: TitleId| -> bool {
-        c.query_row("SELECT retired FROM titles WHERE id = ?1", [id.0], |r| {
-            r.get(0)
-        })
+        c.query_row(
+            "SELECT retired FROM titles WHERE id = ?1",
+            [id.get()],
+            |r| r.get(0),
+        )
         .expect("row")
     };
     assert!(!retired(m));
@@ -251,7 +253,7 @@ fn the_browse_shows_mra_titles_alone_once_there_are_any() {
 fn scans_never_match_members_to_mra_roms() {
     let c = conn();
     mra(&c, "Example Blaster", &[("exblast.zip", true)]);
-    let pid = PlatformId("arcade".into());
+    let pid = PlatformId::new("arcade");
     let m = crate::db::roms::match_rom(
         &c,
         &pid,
@@ -352,7 +354,7 @@ fn import_reads_find_zip_roms_their_titles_and_dat_entries() {
     );
 
     let dat = dat_game(&c, "1", "exblast");
-    assert!(zip_rom(&c, RomId(0)).expect("read").is_none());
+    assert!(zip_rom(&c, RomId::new(0)).expect("read").is_none());
     assert_eq!(
         dat_entry_named(&c, &pid("arcade"), "ExBlast", false).expect("dat"),
         Some(dat)

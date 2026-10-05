@@ -121,11 +121,11 @@ async fn validate_platform(app: &AppState, id: PlatformId) -> Result<PlatformId,
         .db
         .read(move |c| platforms::find(c, &lookup))
         .await?
-        .ok_or_else(|| ApiError::no_such(&format!("platform `{}`", id.0)))?;
+        .ok_or_else(|| ApiError::no_such(&format!("platform `{}`", id.as_str())))?;
     if !row.enabled {
         return Err(ApiError::bad_request(format!(
             "The platform `{}` is disabled.",
-            id.0
+            id.as_str()
         )));
     }
     Ok(id)
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn a_queued_job_says_what_it_waits_for() {
         let row = |id, kind, state| JobRow {
-            id: JobId(id),
+            id: JobId::new(id),
             kind,
             lane: crate::jobs::Lane::Background,
             payload: serde_json::json!({ "path": "/d/a.dat" }),

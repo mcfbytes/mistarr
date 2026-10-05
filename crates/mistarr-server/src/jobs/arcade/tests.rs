@@ -516,7 +516,7 @@ async fn an_unchanged_catalogue_leaves_bound_sources_mapped() {
     };
     let stamp = || async {
         app.db
-            .read(|c| crate::db::candidates::rom_stamp(c, &PlatformId(PLATFORM.into())))
+            .read(|c| crate::db::candidates::rom_stamp(c, &PlatformId::new(PLATFORM)))
             .await
             .expect("stamp")
     };

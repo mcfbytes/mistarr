@@ -513,11 +513,7 @@ pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     }
 
     for platform in &resolved {
-        Scheduler::enqueue(
-            &app,
-            Arc::new(jobs::dat_import::Recompute::new(&platform.0)),
-        )
-        .await?;
+        Scheduler::enqueue(&app, Arc::new(jobs::dat_import::Recompute::new(platform))).await?;
     }
 
     // Step 3: download client, resumed first if a previous run left it frozen at the menu.
@@ -711,7 +707,7 @@ async fn resume_scans(app: &Arc<AppState>, unfinished: Vec<PlatformId>) -> Resul
         .into_iter()
         .filter(|id| !jobs::scan::is_arcade(id))
     {
-        tracing::info!(platform = %platform_id.0, "resuming interrupted scan");
+        tracing::info!(platform = %platform_id.as_str(), "resuming interrupted scan");
         Scheduler::enqueue(
             app,
             Arc::new(jobs::scan::ScanJob {
@@ -922,7 +918,7 @@ mod tests {
         let present: Vec<_> = rows
             .iter()
             .filter(|r| r.core_present)
-            .map(|r| r.id.0.as_str())
+            .map(|r| r.id.as_str())
             .collect();
         assert_eq!(present, ["snes"]);
     }
@@ -938,7 +934,7 @@ mod tests {
         let mut present: Vec<_> = rows
             .iter()
             .filter(|r| r.core_present)
-            .map(|r| r.id.0.as_str())
+            .map(|r| r.id.as_str())
             .collect();
         present.sort_unstable();
         assert_eq!(present, ["arcade", "ngp"]);

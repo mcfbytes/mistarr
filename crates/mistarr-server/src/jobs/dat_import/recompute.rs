@@ -105,11 +105,11 @@ pub(super) fn recompute_pass(
             tally.checked += taken;
             if taken >= REMATCH_CHUNK as usize {
                 Pass::Retired
-            } else if platforms::by_id(&platform.0).is_some_and(Platform::is_arcade) {
+            } else if platforms::by_id(platform.as_str()).is_some_and(Platform::is_arcade) {
                 // Arcade files are matched by the arcade catalogue's presence pass.
                 Pass::Picking
             } else {
-                Pass::Unmatched(FileId(0))
+                Pass::Unmatched(FileId::new(0))
             }
         }
         Pass::Unmatched(after) => {

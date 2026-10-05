@@ -94,7 +94,7 @@ async fn seed_title_with(
     tracks: &[Hashes],
 ) -> TitleId {
     let (pid, game, cue, tracks) = (
-        PlatformId(platform.into()),
+        PlatformId::new(platform.to_owned()),
         game.to_owned(),
         *cue,
         tracks.to_vec(),
@@ -164,7 +164,7 @@ async fn scan(b: &Booted, platform: &str) {
     let body = format!(r#"{{"platform_id":"{platform}"}}"#);
     let r = request(b.addr(), "POST", "/api/v1/system/scan", &[], Some(&body)).await;
     assert_eq!(r.status, 202, "{}", r.body);
-    let id = JobId(r.json()["job_id"].as_i64().expect("job_id"));
+    let id = JobId::new(r.json()["job_id"].as_i64().expect("job_id"));
     let app = &b.running.app;
     wait_for("the scan", || async move {
         app.db
@@ -179,7 +179,7 @@ async fn scan(b: &Booted, platform: &str) {
 }
 
 async fn row(app: &AppState, platform: &str, rel: &str) -> Option<FileRow> {
-    let (pid, rel) = (PlatformId(platform.into()), rel.to_owned());
+    let (pid, rel) = (PlatformId::new(platform.to_owned()), rel.to_owned());
     app.db
         .read(move |c| files::find_by_path(c, &pid, &rel))
         .await
@@ -188,7 +188,7 @@ async fn row(app: &AppState, platform: &str, rel: &str) -> Option<FileRow> {
 
 /// `(rel_path, state, reason)` of every row of `platform`, by path.
 async fn rows(app: &AppState, platform: &str) -> Vec<(String, FileState, Option<String>)> {
-    let pid = PlatformId(platform.into());
+    let pid = PlatformId::new(platform.to_owned());
     let paths = app
         .db
         .read(move |c| files::existing_paths(c, &pid))
@@ -293,7 +293,7 @@ async fn the_setting_off_reads_only_the_header_and_turning_it_on_verifies_the_tr
     assert_eq!(rows(app, "psx").await, want);
     let t1 = row(app, "psx", "PSX/G/g.chd#01").await.expect("track");
     assert_eq!(t1.sha1, Some(written.tracks[0].sha1));
-    let event = json!({ "file_id": t1.id.0, "state": "verified" }).to_string();
+    let event = json!({ "file_id": t1.id.get(), "state": "verified" }).to_string();
     assert!(
         changed.contains(&event),
         "no file.changed for a member: {changed:?}"
@@ -702,7 +702,9 @@ async fn a_recheck_while_decoding_is_paused_joins_the_run() {
 
     // A recompute puts the row behind the paused run's cursor back to pending, and its
     // enqueue joins that run, which must still reach the row.
-    let recompute = Arc::new(mistarr_server::jobs::dat_import::Recompute::new("psx"));
+    let recompute = Arc::new(mistarr_server::jobs::dat_import::Recompute::new(
+        &PlatformId::new("psx"),
+    ));
     mistarr_server::jobs::Scheduler::enqueue(app, recompute)
         .await
         .expect("enqueue");
@@ -757,7 +759,7 @@ async fn the_job_hands_the_lane_to_a_scan_between_images() {
     let body = r#"{"platform_id":"psx"}"#;
     let r = request(b.addr(), "POST", "/api/v1/system/scan", &[], Some(body)).await;
     assert_eq!(r.status, 202, "{}", r.body);
-    let scan_id = JobId(r.json()["job_id"].as_i64().expect("job_id"));
+    let scan_id = JobId::new(r.json()["job_id"].as_i64().expect("job_id"));
     app.gate.set_override(None);
     idle(app).await;
 
@@ -794,7 +796,7 @@ async fn the_job_hands_the_lane_to_a_scan_between_images() {
         finished[0].1["done"], 1,
         "the lane went to the scan after one image"
     );
-    assert!(finished[0].0 < scan_id.0 && scan_id.0 < finished[1].0);
+    assert!(finished[0].0 < scan_id.get() && scan_id.get() < finished[1].0);
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -806,7 +808,7 @@ async fn a_dat_listing_whole_chd_files_still_hashes_them_whole() {
     let (bytes, _) = to_vec(&disc("w")).expect("image");
     write(&games(&b).join("PSX/W/w.chd"), &bytes);
     let whole = hash_reader(Cursor::new(&bytes), HeaderRule::None, None).expect("hash");
-    let pid = PlatformId("psx".into());
+    let pid = PlatformId::new("psx");
     app.db
         .write(move |c| {
             mistarr_server::db::fixtures::dat(&pid)
@@ -840,7 +842,7 @@ async fn a_chd_the_size_of_a_whole_chd_rom_is_hashed_whole_once() {
         md5: "0".repeat(32).parse().expect("hex"),
         sha1: "1".repeat(40).parse().expect("hex"),
     };
-    let pid = PlatformId("psx".into());
+    let pid = PlatformId::new("psx");
     app.db
         .write(move |c| {
             mistarr_server::db::fixtures::dat(&pid)

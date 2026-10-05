@@ -124,7 +124,7 @@ async fn scan_and_wait(
     platform_id: &str,
 ) -> job_rows::JobRow {
     let body = post_scan(addr, Some(platform_id)).await;
-    let id = JobId(body["job_id"].as_i64().expect("job_id"));
+    let id = JobId::new(body["job_id"].as_i64().expect("job_id"));
     eventually("scan job to finish", || async move {
         app.db
             .read(move |c| job_rows::get(c, id))
@@ -190,9 +190,9 @@ async fn scan_matches_hashes_and_states_over_the_api() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let nes = PlatformId("nes".into());
-    let gba = PlatformId("gba".into());
-    let snes = PlatformId("snes".into());
+    let nes = PlatformId::new("nes");
+    let gba = PlatformId::new("gba");
+    let snes = PlatformId::new("snes");
 
     app.db
         .write({
@@ -280,7 +280,7 @@ async fn disc_game_is_verified_only_when_every_track_matches() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let pid = PlatformId("psx".into());
+    let pid = PlatformId::new("psx");
 
     app.db
         .write({
@@ -352,7 +352,7 @@ async fn an_interrupted_scan_resumes_at_startup() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let pid = PlatformId("megadrive".into());
+    let pid = PlatformId::new("megadrive");
 
     app.db
         .write({
@@ -445,7 +445,7 @@ async fn a_header_ruled_member_passes_the_pre_check_by_its_content_crc() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let nes = PlatformId("nes".into());
+    let nes = PlatformId::new("nes");
 
     app.db
         .write({
@@ -489,7 +489,7 @@ async fn each_loose_disc_title_verifies_independently() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let pid = PlatformId("psx".into());
+    let pid = PlatformId::new("psx");
 
     app.db
         .write({
@@ -533,7 +533,7 @@ async fn a_corrupt_zip_does_not_abort_the_platform_scan() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let gba = PlatformId("gba".into());
+    let gba = PlatformId::new("gba");
 
     app.db
         .write({
@@ -576,7 +576,7 @@ async fn zip_directory_entries_are_not_recorded_as_files() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let gba = PlatformId("gba".into());
+    let gba = PlatformId::new("gba");
 
     app.db
         .write({
@@ -616,7 +616,7 @@ async fn unchanged_disc_track_reuses_its_cached_hash() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let pid = PlatformId("psx".into());
+    let pid = PlatformId::new("psx");
     let hash = hash_of(original);
 
     app.db
@@ -679,7 +679,7 @@ async fn scan_of_a_large_file_does_not_block_other_writes() {
     let addr = booted.addr();
 
     let body = post_scan(addr, Some("gba")).await;
-    let job_id = JobId(body["job_id"].as_i64().expect("job_id"));
+    let job_id = JobId::new(body["job_id"].as_i64().expect("job_id"));
 
     let settings_body =
         r#"{"limits":{"down_kbps_menu":1,"down_kbps_core":1,"up_kbps_menu":1,"up_kbps_core":1}}"#;
@@ -840,7 +840,7 @@ async fn a_dat_loaded_after_the_first_scan_matches_the_files_already_there() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let (n64, nes) = (PlatformId("n64".into()), PlatformId("nes".into()));
+    let (n64, nes) = (PlatformId::new("n64"), PlatformId::new("nes"));
 
     scan_and_wait(app, addr, "n64").await;
     scan_and_wait(app, addr, "nes").await;
@@ -940,7 +940,7 @@ async fn a_rescan_matches_unchanged_unmatched_files_without_hashing_them() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let gb = PlatformId("gb".into());
+    let gb = PlatformId::new("gb");
 
     let first = scan_and_wait(app, addr, "gb").await;
     let progress = first.progress.expect("progress");
@@ -993,9 +993,9 @@ async fn a_rescan_matches_unchanged_unmatched_files_without_hashing_them() {
     let r = request(addr, "GET", "/api/v1/system/jobs/recent", &[], None).await;
     assert_eq!(r.status, 200, "{}", r.body);
     let recent = r.json();
-    assert_eq!(recent["items"][0]["id"], second.id.0, "newest first");
+    assert_eq!(recent["items"][0]["id"], second.id.get(), "newest first");
     assert_eq!(recent["items"][0]["progress"]["matched"], 1);
-    assert_eq!(recent["items"][1]["id"], first.id.0);
+    assert_eq!(recent["items"][1]["id"], first.id.get());
 
     booted.running.shutdown().await.expect("shutdown");
 }
@@ -1043,7 +1043,7 @@ async fn seed_gba_rom(app: &mistarr_server::app::AppState, name: &str, h: &Hashe
     let (name, h) = (name.to_owned(), *h);
     app.db
         .write(move |c| {
-            let gba = PlatformId("gba".into());
+            let gba = PlatformId::new("gba");
             mistarr_server::db::fixtures::dat(&gba)
                 .title(&name)
                 .rom(&format!("{name}.gba"), &h, RomStatus::Good)
@@ -1067,7 +1067,7 @@ async fn a_crc_only_member_is_hashed_once_a_candidate_appears_and_never_again() 
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let gba = PlatformId("gba".into());
+    let gba = PlatformId::new("gba");
     let rel = "GBA/Crc Quest (USA).zip#Crc Quest (USA).gba";
 
     scan_and_wait(app, addr, "gba").await;
@@ -1082,7 +1082,7 @@ async fn a_crc_only_member_is_hashed_once_a_candidate_appears_and_never_again() 
 
     // The candidate shares the CRC32 and size but not the sha1: the CRC32 decides nothing.
     seed_gba_rom(app, "Crc Quest (USA)", &same_crc_other_sha1(&h)).await;
-    let recompute = mistarr_server::jobs::dat_import::Recompute::new("gba");
+    let recompute = mistarr_server::jobs::dat_import::Recompute::new(&PlatformId::new("gba"));
     mistarr_server::jobs::Scheduler::run_inline(app, std::sync::Arc::new(recompute))
         .await
         .expect("recompute");
@@ -1125,7 +1125,7 @@ async fn a_member_that_fails_to_hash_is_not_retried_while_unchanged() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let gba = PlatformId("gba".into());
+    let gba = PlatformId::new("gba");
     let rel = "GBA/Odd Quest (USA).zip#Odd Quest (USA).gba";
 
     scan_and_wait(app, addr, "gba").await;
@@ -1248,7 +1248,7 @@ async fn both_forms_match(p: &HeaderPlatform, headered_dat: bool) {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let pid = PlatformId(p.id.into());
+    let pid = PlatformId::new(p.id.to_owned());
 
     let listed = |body: &[u8]| {
         if headered_dat {
@@ -1393,7 +1393,7 @@ async fn a_zip_whose_members_match_neither_form_is_not_decompressed() {
     scan_and_wait(app, addr, p.id).await;
 
     let rel = format!("{}#{}", p.rel("Stray Quest (USA).zip"), p.name("Stray"));
-    let row = find(app, &PlatformId(p.id.into()), &rel)
+    let row = find(app, &PlatformId::new(p.id.to_owned()), &rel)
         .await
         .expect("row");
     assert_eq!(
@@ -1418,7 +1418,7 @@ async fn a_zip_whose_members_match_neither_form_is_not_decompressed() {
     );
     load_dat(&booted, "nes.dat", &dat).await;
     scan_and_wait(app, addr, p.id).await;
-    let row = find(app, &PlatformId(p.id.into()), &rel)
+    let row = find(app, &PlatformId::new(p.id.to_owned()), &rel)
         .await
         .expect("row");
     assert_eq!(row.state, FileState::Verified);
@@ -1486,7 +1486,7 @@ async fn stored_forms_match_a_later_dat_in_both_directions() {
         platform_counts(addr, p.id).await["have"] == 2
     })
     .await;
-    let pid = PlatformId(p.id.into());
+    let pid = PlatformId::new(p.id.to_owned());
     for title in ["Whole", "Content"] {
         let row = find(app, &pid, &p.rel(&p.name(title))).await.expect("row");
         assert_eq!(row.state, FileState::Verified, "{title}");
@@ -1543,7 +1543,7 @@ async fn rows_hashed_before_the_whole_form_are_hashed_again_after_the_upgrade() 
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let app = &booted.running.app;
-    let pid = PlatformId(p.id.into());
+    let pid = PlatformId::new(p.id.to_owned());
     let rel = p.rel(&p.name("Upgraded"));
     let (whole, content) = (hash_of(&file), hash_of(&body));
     app.db
@@ -1623,7 +1623,7 @@ async fn a_headered_dat_after_a_headerless_one_matches_its_files_again() {
     config.paths.games = games.clone();
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let pid = PlatformId(p.id.into());
+    let pid = PlatformId::new(p.id.to_owned());
     let names = [p.name("Loose"), p.name("Member"), p.name("Gone")];
     let dat = |version: &str, hashes: [Hashes; 3]| {
         let games = [
@@ -1700,7 +1700,7 @@ async fn zipped_nes_files_matched_by_a_headerless_dat_count_as_have() {
     config.paths.games = games;
     let booted = boot_with(dir, config).await;
     let (app, addr) = (&booted.running.app, booted.addr());
-    let nes = PlatformId("nes".into());
+    let nes = PlatformId::new("nes");
 
     let dat = |marker: &str, ext: &str, hashes: &[Hashes]| {
         let roms: Vec<String> = names.iter().map(|n| format!("{n}.{ext}")).collect();

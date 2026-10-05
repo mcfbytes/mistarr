@@ -57,7 +57,7 @@ async fn launch_routes_answer_with_documented_statuses() {
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.json()["core"], "_Console/NES_20240101.rbf");
 
-    let pid = PlatformId("nes".into());
+    let pid = PlatformId::new("nes");
     let id = b
         .running
         .app

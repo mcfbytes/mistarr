@@ -112,11 +112,16 @@ fn page(
         limit: 60,
         offset: 0,
     };
-    let got =
-        titles::browse::browse_with(c, &PlatformId(platform.to_owned()), &filter, page, shape)
-            .expect("browse");
+    let got = titles::browse::browse_with(
+        c,
+        &PlatformId::new(platform.to_owned()),
+        &filter,
+        page,
+        shape,
+    )
+    .expect("browse");
     (
-        got.items.into_iter().map(|r| r.parent_id.0).collect(),
+        got.items.into_iter().map(|r| r.parent_id.get()).collect(),
         got.total,
     )
 }

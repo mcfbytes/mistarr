@@ -73,7 +73,7 @@ const COLUMNS: &str = "id, name, core_dir, kind, core_present, enabled";
 
 fn from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<PlatformRow> {
     Ok(PlatformRow {
-        id: PlatformId(r.get(0)?),
+        id: r.get(0)?,
         name: r.get(1)?,
         core_dir: r.get(2)?,
         kind: r.get(3)?,
@@ -109,12 +109,12 @@ pub fn list(conn: &Connection) -> Result<Vec<PlatformRow>> {
 /// use mistarr_core::PlatformId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(mistarr_server::db::platforms::find(&conn, &PlatformId("nes".into())).unwrap().is_none());
+/// assert!(mistarr_server::db::platforms::find(&conn, &PlatformId::new("nes")).unwrap().is_none());
 /// ```
 pub fn find(conn: &Connection, id: &PlatformId) -> Result<Option<PlatformRow>> {
     conn.query_row(
         &format!("SELECT {COLUMNS} FROM platforms WHERE id = ?1"),
-        [&id.0],
+        [&id.as_str()],
         from_row,
     )
     .optional()
@@ -132,14 +132,14 @@ pub fn find(conn: &Connection, id: &PlatformId) -> Result<Option<PlatformRow>> {
 /// use mistarr_core::PlatformId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// mistarr_server::db::platforms::set_core_present(&conn, &[PlatformId("nes".into())]).unwrap();
+/// mistarr_server::db::platforms::set_core_present(&conn, &[PlatformId::new("nes")]).unwrap();
 /// ```
 pub fn set_core_present(conn: &Connection, present: &[PlatformId]) -> Result<()> {
     conn.execute("UPDATE platforms SET core_present = 0", [])?;
     {
         let mut stmt = conn.prepare("UPDATE platforms SET core_present = 1 WHERE id = ?1")?;
         for id in present {
-            stmt.execute([&id.0])?;
+            stmt.execute([&id.as_str()])?;
         }
     }
     Ok(())
@@ -154,13 +154,13 @@ pub fn set_core_present(conn: &Connection, present: &[PlatformId]) -> Result<()>
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let nes = mistarr_core::PlatformId("nes".into());
+/// let nes = mistarr_core::PlatformId::new("nes");
 /// assert!(!mistarr_server::db::platforms::set_enabled(&conn, &nes, false).unwrap());
 /// ```
 pub fn set_enabled(conn: &Connection, id: &PlatformId, enabled: bool) -> Result<bool> {
     let n = conn.execute(
         "UPDATE platforms SET enabled = ?2 WHERE id = ?1",
-        params![id.0, enabled],
+        params![id.as_str(), enabled],
     )?;
     Ok(n > 0)
 }
@@ -184,7 +184,7 @@ mod tests {
         let rows = list(&c).expect("list");
         assert_eq!(rows.len(), PLATFORMS.len());
         assert_eq!(count(&c).expect("count"), PLATFORMS.len());
-        let nes = rows.iter().find(|r| r.id.0 == "nes").expect("nes");
+        let nes = rows.iter().find(|r| r.id.as_str() == "nes").expect("nes");
         assert_eq!(nes.core_dir, "NES");
         assert_eq!(nes.kind, "cartridge");
         assert!(nes.enabled && !nes.core_present);
@@ -194,14 +194,14 @@ mod tests {
     fn core_presence_is_replaced_and_survives_reseed() {
         let mut c = conn();
         seed(&mut c, &PLATFORMS).expect("seed");
-        set_core_present(&c, &[PlatformId("nes".into())]).expect("set");
-        set_core_present(&c, &[PlatformId("snes".into())]).expect("set");
+        set_core_present(&c, &[PlatformId::new("nes")]).expect("set");
+        set_core_present(&c, &[PlatformId::new("snes")]).expect("set");
         seed(&mut c, &PLATFORMS).expect("reseed");
         let present: Vec<_> = list(&c)
             .expect("list")
             .into_iter()
             .filter(|r| r.core_present)
-            .map(|r| r.id.0)
+            .map(|r| r.id.as_str().to_owned())
             .collect();
         assert_eq!(present, ["snes"]);
     }
@@ -210,9 +210,9 @@ mod tests {
     fn enabled_toggles() {
         let mut c = conn();
         seed(&mut c, &PLATFORMS).expect("seed");
-        assert!(set_enabled(&c, &PlatformId("nes".into()), false).expect("set"));
-        assert!(!set_enabled(&c, &PlatformId("nope".into()), false).expect("set"));
-        let nes = find(&c, &PlatformId("nes".into()))
+        assert!(set_enabled(&c, &PlatformId::new("nes"), false).expect("set"));
+        assert!(!set_enabled(&c, &PlatformId::new("nope"), false).expect("set"));
+        let nes = find(&c, &PlatformId::new("nes"))
             .expect("find")
             .expect("row");
         assert!(!nes.enabled);
@@ -222,11 +222,11 @@ mod tests {
     fn find_returns_the_row_or_none() {
         let mut c = conn();
         seed(&mut c, &PLATFORMS).expect("seed");
-        let nes = find(&c, &PlatformId("nes".into()))
+        let nes = find(&c, &PlatformId::new("nes"))
             .expect("find")
             .expect("row");
         assert_eq!(nes.core_dir, "NES");
-        assert!(find(&c, &PlatformId("no-such-platform".into()))
+        assert!(find(&c, &PlatformId::new("no-such-platform"))
             .expect("find")
             .is_none());
     }

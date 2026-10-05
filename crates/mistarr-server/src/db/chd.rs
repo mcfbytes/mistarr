@@ -325,7 +325,10 @@ pub fn has_waiting(
                AND f.reason IN (SELECT value FROM json_each(?1))
                AND (?2 IS NULL OR f.platform_id = ?2))"
         ))?
-        .query_row(params![codes, platform.map(|p| p.0.as_str())], |r| r.get(0))?)
+        .query_row(
+            params![codes, platform.map(mistarr_core::PlatformId::as_str)],
+            |r| r.get(0),
+        )?)
 }
 
 /// Follows the setting: on moves `off` rows to `pending`; off moves `pending` and
@@ -355,7 +358,7 @@ pub fn recheck_layouts(conn: &Connection, platform: &PlatformId) -> Result<usize
             "UPDATE files SET reason = 'pending'
              WHERE platform_id = ?1 AND state = 'unidentified' AND reason = 'no_layout'",
         )?
-        .execute([&platform.0])?)
+        .execute([&platform.as_str()])?)
 }
 
 /// Sets row `id`'s reason to `to` only while it is `unidentified` with reason `from`.
@@ -395,7 +398,7 @@ pub fn layout_known(conn: &Connection, platform: &PlatformId, sizes: &[u64]) -> 
              WHERE r.size = ?2 AND r.size % 2352 = 0 AND t.platform_id = ?1 AND t.source = 'dat'
                AND r.retired = 0 AND t.retired = 0 AND lower(r.name) NOT LIKE '%.cue'",
         )?
-        .query_map(params![platform.0, to_i64(first)], |r| r.get(0))?
+        .query_map(params![platform.as_str(), to_i64(first)], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let mut want: Vec<i64> = sizes.iter().map(|&s| to_i64(s)).collect();
     want.sort_unstable();
@@ -467,7 +470,7 @@ mod tests {
     use crate::db::fixtures::conn;
 
     fn psx() -> PlatformId {
-        PlatformId("psx".into())
+        PlatformId::new("psx")
     }
 
     fn id(n: u8, size: u64) -> ChdId {
@@ -600,11 +603,11 @@ mod tests {
         put(&c, &pid, &container("PSX/B/b.chd", Unidentified::NoLayout));
         put(&c, &pid, &container("PSX/C/c.chd", Unidentified::Off));
         let pending = [Unidentified::Pending];
-        assert_eq!(waiting(&c, FileId(0), 10).expect("page").len(), 1);
+        assert_eq!(waiting(&c, FileId::new(0), 10).expect("page").len(), 1);
         assert!(waiting(&c, a, 10).expect("page").is_empty());
         assert_eq!(waiting_count(&c).expect("count"), 1);
         assert!(has_waiting(&c, Some(&pid), &pending).expect("has"));
-        assert!(!has_waiting(&c, Some(&PlatformId("saturn".into())), &pending).expect("has"));
+        assert!(!has_waiting(&c, Some(&PlatformId::new("saturn")), &pending).expect("has"));
 
         assert_eq!(set_waiting(&c, false).expect("off"), 2);
         assert!(!has_waiting(&c, None, &pending).expect("has"));
@@ -612,7 +615,7 @@ mod tests {
         assert_eq!(set_waiting(&c, true).expect("on"), 3);
         assert_eq!(waiting_count(&c).expect("count"), 3);
 
-        crate::db::platforms::set_enabled(&c, &PlatformId("psx".into()), false).expect("disable");
+        crate::db::platforms::set_enabled(&c, &PlatformId::new("psx"), false).expect("disable");
         assert_eq!(
             waiting_count(&c).expect("count"),
             0,
@@ -653,7 +656,7 @@ mod tests {
         assert!(!layout_known(&c, &pid, &[4704, 2352, 2352]).expect("more"));
         assert!(!layout_known(&c, &pid, &[70, 4704, 2352]).expect("cue is not a track"));
         assert!(!layout_known(&c, &pid, &[]).expect("empty"));
-        assert!(!layout_known(&c, &PlatformId("saturn".into()), &[2352, 4704]).expect("other"));
+        assert!(!layout_known(&c, &PlatformId::new("saturn"), &[2352, 4704]).expect("other"));
     }
 
     #[test]
@@ -671,7 +674,7 @@ mod tests {
         );
         c.execute(
             "INSERT INTO import_log (at, file_id, action, detail) VALUES (0, ?1, 'placed', '{}')",
-            [bare.0],
+            [bare.get()],
         )
         .expect("log");
         let member = NewFile {

@@ -105,7 +105,7 @@ impl WaitingJob {
     /// use mistarr_server::db::jobs::{JobRow, JobState};
     /// use mistarr_server::db::ids::JobId;
     /// use mistarr_server::jobs::{JobKind, Lane};
-    /// let row = JobRow { id: JobId(1), kind: JobKind::Scan, lane: Lane::Heavy,
+    /// let row = JobRow { id: JobId::new(1), kind: JobKind::Scan, lane: Lane::Heavy,
     ///     payload: serde_json::json!({"platform_id": "nes"}), state: JobState::Queued,
     ///     progress: None, created_at: 0, updated_at: 0 };
     /// let w = mistarr_server::status::WaitingJob::from_row(&row);

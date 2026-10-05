@@ -17,12 +17,12 @@ use super::{fail, finish, Piece, Placing, Why, BIOS_REFUSED};
 use crate::db::arcade as arcade_rows;
 use crate::db::downloads::DownloadRow;
 use crate::db::files::{self, FileState};
-use crate::db::ids::RomId;
 use crate::db::imports::{self, TitleEntry};
 use crate::db::roms::{self, EntryRom};
 use crate::error::Result;
 use crate::jobs::arcade::{self, check_rom, same_zip, Check, ZipIndex, ZipSource};
 use crate::jobs::fsutil::is_zip;
+use mistarr_core::RomId;
 
 /// What the MRA says about a staged zip.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -9,10 +9,11 @@ use mistarr_mister::platforms::{self, Kind};
 use rusqlite::Connection;
 
 use crate::db::files::{self, FileRow, FileState, NewFile};
-use crate::db::ids::{RomId, TitleId};
+use crate::db::ids::TitleId;
 use crate::db::roms::{self, RomMatch};
 use crate::db::titles::RomStatus;
 use crate::error::Result;
+use mistarr_core::RomId;
 
 /// Matches a fully hashed payload in its forms and decides its state, per
 /// `docs/DATA-MODEL.md` "files.state".
@@ -92,7 +93,7 @@ pub(crate) fn cartridge_state(
 /// ```
 /// use mistarr_core::PlatformId;
 /// use mistarr_server::jobs::matching::name_fits;
-/// let (nes, game) = (PlatformId("nes".into()), "Example Quest (USA)");
+/// let (nes, game) = (PlatformId::new("nes"), "Example Quest (USA)");
 /// assert!(name_fits(&nes, "Example Quest (USA).nes", game, "Example Quest (USA).nes"));
 /// assert!(name_fits(&nes, "Example Quest (USA).unh", game, "Example Quest (USA).nes"));
 /// assert!(!name_fits(&nes, "Example Quest (USA).unh", game, "Example Quest (Japan).nes"));
@@ -103,9 +104,10 @@ pub fn name_fits(platform: &PlatformId, rom_name: &str, game: &str, own_name: &s
     if rom_name == own_name {
         return true;
     }
-    let (Some(row), Some((own_stem, own_ext))) =
-        (platforms::by_id(&platform.0), split_extension(own_name))
-    else {
+    let (Some(row), Some((own_stem, own_ext))) = (
+        platforms::by_id(platform.as_str()),
+        split_extension(own_name),
+    ) else {
         return false;
     };
     let loads = |ext: &str| {
@@ -153,7 +155,7 @@ fn split_extension(name: &str) -> Option<(&str, &str)> {
 pub fn settle_names(conn: &Connection) -> Result<usize> {
     let mut settled = 0;
     for row in files::misnamed(conn)? {
-        let disc = platforms::by_id(&row.platform_id.0).is_some_and(|p| p.kind == Kind::Disc);
+        let disc = platforms::by_id(row.platform_id.as_str()).is_some_and(|p| p.kind == Kind::Disc);
         if !disc
             && name_fits(
                 &row.platform_id,
@@ -320,7 +322,7 @@ pub(crate) fn set_matches(
     platform: &PlatformId,
     rows: &[FileRow],
 ) -> Result<usize> {
-    let disc = platforms::by_id(&platform.0).is_some_and(|p| p.kind == Kind::Disc);
+    let disc = platforms::by_id(platform.as_str()).is_some_and(|p| p.kind == Kind::Disc);
     let mut matched = 0;
     let mut units: Vec<&str> = Vec::new();
     for f in rows {
@@ -468,7 +470,7 @@ mod tests {
             ),
         ];
         for (platform, rom, file, fits) in cases {
-            let p = PlatformId(platform.into());
+            let p = PlatformId::new(platform.to_owned());
             assert_eq!(
                 name_fits(&p, rom, game, file),
                 fits,
@@ -496,10 +498,10 @@ mod tests {
 
     #[test]
     fn a_match_decides_a_cartridge_state_by_status_and_name() {
-        let nes = PlatformId("nes".into());
+        let nes = PlatformId::new("nes");
         let m = |status| RomMatch {
-            rom_id: RomId(7),
-            title_id: TitleId(1),
+            rom_id: RomId::new(7),
+            title_id: TitleId::new(1),
             name: "Example Quest (USA).nes".into(),
             status,
             game: "Example Quest (USA)".into(),
@@ -511,22 +513,22 @@ mod tests {
         );
         assert_eq!(
             cartridge_state(&nes, Some(&good), "Example Quest (USA).nes"),
-            (Some(RomId(7)), FileState::Verified)
+            (Some(RomId::new(7)), FileState::Verified)
         );
         assert_eq!(
             cartridge_state(&nes, Some(&good), "Other (USA).nes"),
-            (Some(RomId(7)), FileState::Misnamed)
+            (Some(RomId::new(7)), FileState::Misnamed)
         );
         assert_eq!(
             cartridge_state(&nes, Some(&m(RomStatus::BadDump)), "a.nes"),
-            (Some(RomId(7)), FileState::Bad)
+            (Some(RomId::new(7)), FileState::Bad)
         );
     }
 
     #[test]
     fn settling_names_verifies_only_files_that_now_fit() {
         let c = conn();
-        let nes = PlatformId("nes".into());
+        let nes = PlatformId::new("nes");
         let h = hashes();
         let rom = crate::db::fixtures::dat(&nes)
             .title("Example Quest (USA)")
@@ -551,7 +553,7 @@ mod tests {
             files::upsert(&c, &nes, &row("NES/q.zip#Example Quest (USA).nes"), 1).expect("row");
         let other = files::upsert(&c, &nes, &row("NES/Other Name.nes"), 1).expect("row");
         let upper = files::upsert(&c, &nes, &row("NES/Example Quest (USA).NES"), 1).expect("row");
-        let psx = PlatformId("psx".into());
+        let psx = PlatformId::new("psx");
         let track = crate::db::fixtures::dat(&psx)
             .title("Example Disc (USA)")
             .rom("Example Disc (USA).img", &h, RomStatus::Good)
@@ -589,7 +591,7 @@ mod tests {
     #[test]
     fn a_live_rom_of_the_content_beats_a_retired_rom_of_the_whole_file() {
         let c = conn();
-        let nes = PlatformId("nes".into());
+        let nes = PlatformId::new("nes");
         let mut file = b"NES\x1a".to_vec();
         file.resize(16, 0);
         file.extend_from_slice(b"synthetic body of a retired and a live rom");
@@ -624,7 +626,7 @@ mod tests {
     #[test]
     fn a_disc_verifies_only_when_every_track_of_its_title_matched() {
         let c = conn();
-        let psx = PlatformId("psx".into());
+        let psx = PlatformId::new("psx");
         let h = hashes();
         let rom = crate::db::fixtures::dat(&psx)
             .title("Disc (USA)")

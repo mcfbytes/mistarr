@@ -23,13 +23,14 @@ use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::chd::{self as rows, Unidentified};
 use crate::db::files::{self, FileRow, FileState, NewFile};
-use crate::db::ids::{FileId, RomId, TitleId};
+use crate::db::ids::{FileId, TitleId};
 use crate::db::roms::{self, RomMatch};
 use crate::db::settings::{self, keys};
 use crate::db::titles::RomStatus;
 use crate::error::Result;
 use crate::events::{Event, FileChanged};
 use crate::threads::{self, label};
+use mistarr_core::RomId;
 
 /// Bytes decoded between two checkpoints, a fraction of a second on the board.
 const SLICE_BYTES: u32 = 640 << 10;
@@ -560,7 +561,7 @@ pub async fn apply_setting(app: &Arc<AppState>) -> Result<()> {
 ///
 /// [`Error::Db`] when the rows cannot be read or the job recorded.
 pub async fn queue_for(app: &Arc<AppState>, platform: &PlatformId, recheck: bool) -> Result<()> {
-    let disc = mistarr_mister::platforms::by_id(&platform.0)
+    let disc = mistarr_mister::platforms::by_id(platform.as_str())
         .is_some_and(|p| p.kind == mistarr_mister::Kind::Disc);
     if !disc || !app.config().scan.chd_tracks {
         return Ok(());
@@ -621,7 +622,7 @@ impl Job for ChdTracks {
         let mut total = ctx.app.db.read(rows::waiting_count).await?;
         let mut tally = Tally::default();
         let mut live = Live::new(ctx, total);
-        let mut after = FileId(0);
+        let mut after = FileId::new(0);
         // Rows left pending this run, and whether this pass from id 0 identified any.
         let mut skipped = std::collections::HashSet::new();
         let mut progressed = false;
@@ -636,7 +637,7 @@ impl Job for ChdTracks {
                 if !progressed {
                     break;
                 }
-                (after, progressed) = (FileId(0), false);
+                (after, progressed) = (FileId::new(0), false);
                 let left = ctx.app.db.read(rows::waiting_count).await?;
                 total = tally.done + left.saturating_sub(skipped.len() as u64);
                 live.total = total;
@@ -952,7 +953,7 @@ mod tests {
     use crate::db::fixtures::conn;
 
     fn psx() -> PlatformId {
-        PlatformId("psx".into())
+        PlatformId::new("psx")
     }
 
     fn track(n: u8) -> Hashes {
@@ -1110,7 +1111,7 @@ mod tests {
     #[test]
     fn split_keeps_chd_members_apart_and_drops_unidentified_rows() {
         let row = |rel: &str, state| FileRow {
-            id: FileId(1),
+            id: FileId::new(1),
             platform_id: psx(),
             rel_path: rel.to_owned(),
             size: 1,

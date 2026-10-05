@@ -130,7 +130,7 @@ pub async fn launch_core(app: &AppState, id: &PlatformId) -> Result<Launched, Ap
         .read(move |c| platforms::find(c, &lookup))
         .await?
         .is_some();
-    let row = table::by_id(&id.0)
+    let row = table::by_id(id.as_str())
         .filter(|_| known)
         .ok_or_else(|| ApiError::no_such("platform"))?;
     if row.kind == Kind::Arcade {
@@ -189,7 +189,8 @@ fn plan_title(
         let core = relative(&mra, root);
         return Ok((Launched { core, file: None }, line));
     }
-    let row = table::by_id(&title.platform_id).ok_or_else(|| ApiError::no_such("platform"))?;
+    let row =
+        table::by_id(title.platform_id.as_str()).ok_or_else(|| ApiError::no_such("platform"))?;
     if row.launch.is_empty() {
         return Err(ApiError::conflict(
             "This entry has no MRA to start it from.",

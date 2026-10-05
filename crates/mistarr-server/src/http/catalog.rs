@@ -181,7 +181,7 @@ async fn list(
         .into_iter()
         .map(|row| {
             let name = row.pick_name.as_deref().unwrap_or(&row.name);
-            let art = platform_art(&row.platform_id.0, name);
+            let art = platform_art(row.platform_id.as_str(), name);
             GroupOut { row, art }
         })
         .collect();
@@ -237,7 +237,7 @@ async fn load_detail(app: &AppState, id: TitleId) -> Result<DetailOut, ApiError>
         .read(move |c| titles::detail::group_detail(c, id))
         .await?
         .ok_or_else(|| ApiError::no_such("title"))?;
-    let (detail, bios) = match mistarr_mister::platforms::by_id(&detail.platform_id.0) {
+    let (detail, bios) = match mistarr_mister::platforms::by_id(detail.platform_id.as_str()) {
         Some(p) if p.kind == Kind::Romset => {
             let dir = app.config().paths.games.join(p.core_dir);
             let mut detail = detail;
@@ -254,7 +254,7 @@ async fn load_detail(app: &AppState, id: TitleId) -> Result<DetailOut, ApiError>
         .variants
         .iter()
         .find(|v| v.id == shown)
-        .and_then(|v| platform_art(&detail.platform_id.0, &v.name));
+        .and_then(|v| platform_art(detail.platform_id.as_str(), &v.name));
     Ok(DetailOut { detail, art, bios })
 }
 

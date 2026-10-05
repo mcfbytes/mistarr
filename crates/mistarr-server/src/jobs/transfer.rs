@@ -360,7 +360,7 @@ mod tests {
     use crate::db::ids::TitleId;
     use crate::db::sources::{NewSource, SourceState};
     use mistarr_clients::{ClientFile, ClientInfo, TorrentStatus};
-    use mistarr_sources::binding::{Confidence, RomRef};
+    use mistarr_sources::binding::Confidence;
     use std::path::Path;
     use std::sync::Mutex;
     use std::time::Duration;
@@ -500,11 +500,11 @@ mod tests {
                     },
                 )?;
                 sources::replace_files(c, source, &meta.files)?;
-                sources::set_matches(c, source, &[(0, Some(RomRef(rom.0)), Confidence::Name)])?;
+                sources::set_matches(c, source, &[(0, Some(rom), Confidence::Name)])?;
                 let id = rows::create(
                     c,
                     &NewDownload {
-                        title_id: TitleId(title),
+                        title_id: TitleId::new(title),
                         rom_id: rom,
                         file: Some(Candidate {
                             source_id: source,
@@ -589,7 +589,7 @@ mod tests {
             }
         }
         assert_eq!(changed.len(), 1, "{changed:?}");
-        assert_eq!(changed[0]["download_id"], open.0);
+        assert_eq!(changed[0]["download_id"], open.get());
         assert_eq!(changed[0]["state"], "failed");
     }
 
@@ -637,7 +637,7 @@ mod tests {
     async fn deselect_without_a_torrent_is_a_no_op() {
         let (_dir, app) = state();
         let job = Deselect {
-            source_id: SourceId(9),
+            source_id: SourceId::new(9),
         };
         assert_eq!(job.payload(), json!({ "source_id": 9 }));
         Scheduler::run_inline(&app, Arc::new(job))
@@ -649,8 +649,8 @@ mod tests {
     async fn a_cancel_deselects_each_started_source_once() {
         let (_dir, app) = state();
         let cancelled = |id, source: Option<i64>, started| Cancelled {
-            id: DownloadId(id),
-            source_id: source.map(SourceId),
+            id: DownloadId::new(id),
+            source_id: source.map(SourceId::new),
             started,
         };
         let all = [
@@ -672,7 +672,7 @@ mod tests {
     fn change_events_carry_state_and_progress() {
         let (_dir, app) = state();
         let mut live = app.events.subscribe(None).live;
-        publish(&app, DownloadId(3), DownloadState::Checking, 1.0);
+        publish(&app, DownloadId::new(3), DownloadState::Checking, 1.0);
         let ev = live.try_recv().expect("event");
         assert_eq!(ev.kind, EventKind::DownloadChanged);
         assert_eq!(

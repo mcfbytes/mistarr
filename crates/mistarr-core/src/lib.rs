@@ -12,6 +12,7 @@ pub mod chd;
 pub mod dat;
 mod digest;
 pub mod hex;
+mod id;
 pub mod magnet;
 pub mod matching;
 pub mod naming;
@@ -19,18 +20,18 @@ mod percent;
 pub mod xml;
 
 pub use digest::{Crc32, Digest, InfoHash, Md5, ParseDigestError, Sha1};
+pub use id::{PlatformId, RomId};
 pub use percent::percent_decode;
+
+#[cfg(feature = "rusqlite")]
+#[doc(hidden)]
+pub use rusqlite as __rusqlite;
 
 /// 1G1R selection and clone-group inference.
 pub mod select;
 
 /// One-pass hashing and platform header rules.
 pub mod hash;
-
-/// Stable platform identifier, e.g. `nes`, `megadrive`, `psx`.
-/// The full table lives in `docs/PLATFORMS.md` and in `mistarr-mister`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
-pub struct PlatformId(pub String);
 
 /// The three hashes and size that identify a dump; serde writes each digest as
 /// lowercase hex.

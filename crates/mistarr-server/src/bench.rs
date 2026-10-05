@@ -86,7 +86,7 @@ pub fn search(
     shapes: &[SearchShape],
 ) -> Result<Vec<Timing>> {
     let conn = db::open_read_only(path)?;
-    let platform = &PlatformId(platform.to_owned());
+    let platform = &PlatformId::new(platform.to_owned());
     if !db::has_table(&conn, "main", "title_groups")? {
         return Err(Error::Bench(format!(
             "{} has no title_groups table; open it once with this version of mistarr",

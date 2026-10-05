@@ -307,7 +307,7 @@ fn pending_file(
 /// use mistarr_server::db::jobs::{JobRow, JobState};
 /// use mistarr_server::db::ids::JobId;
 /// use mistarr_server::jobs::{JobKind, Lane};
-/// let row = JobRow { id: JobId(1), kind: JobKind::DatImport, lane: Lane::Background,
+/// let row = JobRow { id: JobId::new(1), kind: JobKind::DatImport, lane: Lane::Background,
 ///     payload: serde_json::json!({ "path": "/d/a.dat" }), state: JobState::Running,
 ///     progress: None, created_at: 0, updated_at: 0 };
 /// let why = mistarr_server::incoming::writer_reason(&[row]);
@@ -335,7 +335,7 @@ fn dat_wait(row: &JobRow) -> String {
 /// use mistarr_server::db::jobs::{JobRow, JobState};
 /// use mistarr_server::db::ids::JobId;
 /// use mistarr_server::jobs::{JobKind, Lane};
-/// let row = |id, kind, state, path: &str| JobRow { id: JobId(id), kind,
+/// let row = |id, kind, state, path: &str| JobRow { id: JobId::new(id), kind,
 ///     lane: Lane::Background, payload: serde_json::json!({ "path": path }), state,
 ///     progress: None, created_at: 0, updated_at: 0 };
 /// let open = [row(1, JobKind::DatImport, JobState::Running, "/d/a.dat"), row(2, JobKind::DatImport, JobState::Queued, "/d/b.dat")];
@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn a_held_heavy_job_says_so() {
         let row = JobRow {
-            id: JobId(4),
+            id: JobId::new(4),
             kind: JobKind::Scan,
             lane: Lane::Heavy,
             payload: json!({ "path": "/d/x" }),
@@ -565,11 +565,11 @@ mod tests {
             &path,
             JobKind::SourceImport,
             &pending,
-            Some(JobId(999)),
+            Some(JobId::new(999)),
         )
         .await
         .expect("describe");
-        assert_eq!(ran.job_id, Some(JobId(999)));
+        assert_eq!(ran.job_id, Some(JobId::new(999)));
         assert_eq!(ran.size, 3);
         assert_eq!(ran.state, IncomingState::Importing);
     }

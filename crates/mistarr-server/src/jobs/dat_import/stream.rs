@@ -230,7 +230,7 @@ pub(super) fn export_options(
 /// The platform a DAT named `dat_name` loads into: the one being bound, else the table's.
 fn platform_for(req: &Request, dat_name: &str) -> Option<String> {
     match &req.bind {
-        Some(b) => Some(b.platform.0.clone()),
+        Some(b) => Some(b.platform.as_str().to_owned()),
         None => mistarr_mister::bind_dat_name(dat_name).map(|p| p.id.to_owned()),
     }
 }

@@ -34,11 +34,11 @@ pub const PLATFORM: &str = "arcade";
 /// [`PLATFORM`] as an id.
 ///
 /// ```
-/// assert_eq!(mistarr_server::jobs::arcade::platform().0, "arcade");
+/// assert_eq!(mistarr_server::jobs::arcade::platform().as_str(), "arcade");
 /// ```
 #[must_use]
 pub fn platform() -> PlatformId {
-    PlatformId(PLATFORM.to_owned())
+    PlatformId::new(PLATFORM)
 }
 
 /// Directory under the SD root holding the MRA files.

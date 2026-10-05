@@ -71,7 +71,8 @@ struct DetailItem {
 /// The sentence the API shows for `reason`.
 fn reason_text(reason: &SourceReason) -> String {
     let name = |p: &PlatformId| {
-        mistarr_mister::platforms::by_id(&p.0).map_or_else(|| p.0.clone(), |t| t.name.to_owned())
+        mistarr_mister::platforms::by_id(p.as_str())
+            .map_or_else(|| p.as_str().to_owned(), |t| t.name.to_owned())
     };
     match reason {
         SourceReason::NoClient => {
@@ -491,12 +492,12 @@ mod tests {
             "No platform matched 60% of the files. Pick a platform to bind it."
         );
         assert!(
-            words(SourceReason::no_match(0.6, Some(PlatformId("gb".into()))))
+            words(SourceReason::no_match(0.6, Some(PlatformId::new("gb"))))
                 .ends_with(" Its names suggest Game Boy.")
         );
         assert_eq!(
             words(SourceReason::AwaitingDat {
-                platform: PlatformId("gb".into())
+                platform: PlatformId::new("gb")
             }),
             "Looks like Game Boy. No DAT for it is loaded yet; it binds once one loads."
         );
@@ -527,7 +528,7 @@ mod tests {
 
     fn sample_row() -> SourceRow {
         SourceRow {
-            id: SourceId(1),
+            id: SourceId::new(1),
             infohash: "0a".repeat(20),
             display_name: "Synthetic Set".into(),
             origin_file: "set.torrent".into(),

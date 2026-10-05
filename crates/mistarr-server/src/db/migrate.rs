@@ -379,7 +379,7 @@ mod tests {
             .expect("query")
             .collect::<rusqlite::Result<_>>()
             .expect("rows");
-        let nes = || mistarr_core::PlatformId("nes".into());
+        let nes = || mistarr_core::PlatformId::new("nes");
         assert_eq!(
             got,
             [

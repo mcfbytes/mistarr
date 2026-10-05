@@ -4,8 +4,9 @@
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::candidates::MatchConfidence;
-use super::ids::{DownloadId, RomId, SourceId, TitleId};
+use super::ids::{DownloadId, SourceId, TitleId};
 use crate::error::Result;
+use mistarr_core::RomId;
 
 /// Every download of a title, oldest first.
 ///
@@ -205,7 +206,7 @@ mod tests {
         .expect("bad");
         assert!(!placed_any(&c, src).expect("quarantined only"));
         assert_eq!(placed_on_file(&c, src, 0, rom).expect("none"), None);
-        let detail = serde_json::json!({ "title_id": alt_title.0, "rom_id": alt });
+        let detail = serde_json::json!({ "title_id": alt_title.get(), "rom_id": alt });
         crate::db::imports::log(&c, 1, Some(bad), None, ImportAction::Placed, &detail)
             .expect("log");
         assert!(placed_any(&c, src).expect("placed as another version"));

@@ -143,7 +143,7 @@ pub fn insert(
          VALUES (?1, ?2, ?3, 'queued', ?4, ?4, ?5)",
         params![kind, payload.to_string(), subject_of(payload), now, lane],
     )?;
-    Ok(JobId(conn.last_insert_rowid()))
+    Ok(JobId::new(conn.last_insert_rowid()))
 }
 
 /// Reads one job.
@@ -157,7 +157,7 @@ pub fn insert(
 /// use mistarr_server::db::ids::JobId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(jobs::get(&conn, JobId(9)).unwrap().is_none());
+/// assert!(jobs::get(&conn, JobId::new(9)).unwrap().is_none());
 /// ```
 pub fn get(conn: &Connection, id: JobId) -> Result<Option<JobRow>> {
     Ok(conn
@@ -738,7 +738,7 @@ mod tests {
             assert_eq!(JobState::parse(s).map(JobState::as_str), Some(s));
         }
         assert!(!JobState::Queued.is_finished());
-        assert_eq!(JobId(4).to_string(), "4");
+        assert_eq!(JobId::new(4).to_string(), "4");
     }
 
     #[test]

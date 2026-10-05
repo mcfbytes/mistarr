@@ -5,9 +5,11 @@ use mistarr_core::{Crc32, Hashes, Md5, PlatformId, Sha1};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
-use super::ids::{FileId, RomId, TitleId};
+use super::ids::{FileId, TitleId};
+
 use super::sql::{self, text_enum, Page, Paged};
 use crate::error::Result;
+use mistarr_core::RomId;
 
 text_enum! {
     /// `files.state`.
@@ -78,7 +80,7 @@ impl FileRow {
     /// use mistarr_server::db::files::{FileRow, FileState, WholeHashes};
     /// use mistarr_server::db::ids::FileId;
     /// let h = mistarr_core::hash::hash_reader(&b"abc"[..], Default::default(), None).unwrap();
-    /// let mut row = FileRow { id: FileId(1), platform_id: PlatformId("nes".into()),
+    /// let mut row = FileRow { id: FileId::new(1), platform_id: PlatformId::new("nes"),
     ///     rel_path: "NES/a.nes".into(), size: 3, mtime: 1, crc32: Some(h.crc32),
     ///     md5: Some(h.md5), sha1: Some(h.sha1), header_rule: None,
     ///     whole: WholeHashes::default(), rom_id: None, state: FileState::Unverified,
@@ -104,7 +106,7 @@ impl FileRow {
     /// use mistarr_core::PlatformId;
     /// use mistarr_server::db::files::{FileRow, FileState, WholeHashes};
     /// use mistarr_server::db::ids::FileId;
-    /// let mut row = FileRow { id: FileId(1), platform_id: PlatformId("nes".into()),
+    /// let mut row = FileRow { id: FileId::new(1), platform_id: PlatformId::new("nes"),
     ///     rel_path: "NES/a.nes".into(), size: 3, mtime: 1, crc32: None, md5: None,
     ///     sha1: None, header_rule: None, whole: WholeHashes::default(), rom_id: None,
     ///     state: FileState::Unverified, scanned_at: 1, reason: None };
@@ -247,7 +249,7 @@ pub(crate) const COLUMNS: &str =
 pub(crate) fn from_row(r: &Row<'_>) -> rusqlite::Result<FileRow> {
     Ok(FileRow {
         id: r.get(0)?,
-        platform_id: PlatformId(r.get(1)?),
+        platform_id: r.get(1)?,
         rel_path: r.get(2)?,
         size: r.get(3)?,
         mtime: r.get(4)?,
@@ -282,7 +284,7 @@ pub fn find_by_path(
         .prepare_cached(&format!(
             "SELECT {COLUMNS} FROM files WHERE platform_id = ?1 AND rel_path = ?2"
         ))?
-        .query_row(params![platform_id.0, rel_path], from_row)
+        .query_row(params![platform_id.as_str(), rel_path], from_row)
         .optional()?)
 }
 
@@ -349,7 +351,7 @@ pub fn zip_member_rows(
          ORDER BY rel_path"
     ))?;
     let (from, to) = (format!("{zip_rel}#"), format!("{zip_rel}$"));
-    let rows = stmt.query_map(params![platform_id.0, from, to], from_row)?;
+    let rows = stmt.query_map(params![platform_id.as_str(), from, to], from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -371,7 +373,7 @@ pub fn zip_rows_nocase(
          WHERE platform_id = ?1 AND lower(rel_path) = ?2 ORDER BY rel_path"
     ))?;
     let bare = stmt
-        .query_map(params![platform_id.0, key], from_row)?
+        .query_map(params![platform_id.as_str(), key], from_row)?
         .collect::<rusqlite::Result<_>>()?;
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT {COLUMNS} FROM files INDEXED BY files_rel_lower
@@ -380,7 +382,7 @@ pub fn zip_rows_nocase(
     ))?;
     let (from, to) = (format!("{key}#"), format!("{key}$"));
     let members = stmt
-        .query_map(params![platform_id.0, from, to], from_row)?
+        .query_map(params![platform_id.as_str(), from, to], from_row)?
         .collect::<rusqlite::Result<_>>()?;
     Ok((bare, members))
 }
@@ -409,9 +411,10 @@ pub fn paths_under(
         "SELECT rel_path FROM files WHERE platform_id = ?1 AND rel_path > ?2 AND rel_path < ?3
          ORDER BY rel_path LIMIT ?4",
     )?;
-    let rows = stmt.query_map(params![platform_id.0, after, to, sql::to_i64(limit)], |r| {
-        r.get(0)
-    })?;
+    let rows = stmt.query_map(
+        params![platform_id.as_str(), after, to, sql::to_i64(limit)],
+        |r| r.get(0),
+    )?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -475,8 +478,8 @@ pub fn has_verified(conn: &Connection, rom_id: RomId) -> Result<bool> {
 /// use mistarr_core::PlatformId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let pid = PlatformId("arcade".into());
-/// let rom = mistarr_server::db::ids::RomId(1);
+/// let pid = PlatformId::new("arcade");
+/// let rom = mistarr_core::RomId::new(1);
 /// assert!(!mistarr_server::db::files::mark_verified(&conn, &pid, "mame/a.zip#a.bin", rom).unwrap());
 /// ```
 pub fn mark_verified(
@@ -490,7 +493,7 @@ pub fn mark_verified(
             "UPDATE files SET state = 'verified', rom_id = ?3
          WHERE platform_id = ?1 AND rel_path = ?2 AND state = 'unverified'",
         )?
-        .execute(params![platform_id.0, rel_path, rom_id])?
+        .execute(params![platform_id.as_str(), rel_path, rom_id])?
         > 0)
 }
 
@@ -505,7 +508,7 @@ pub fn mark_verified(
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// mistarr_server::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).unwrap();
-/// let psx = mistarr_core::PlatformId("psx".into());
+/// let psx = mistarr_core::PlatformId::new("psx");
 /// let row = NewFile { rel_path: "PSX/g.chd".into(), size: 9, mtime: 1, crc32: None, md5: None,
 ///     sha1: None, header_rule: Some("chd".into()), whole: Default::default(), rom_id: None,
 ///     state: FileState::Unidentified, reason: Some("off".into()) };
@@ -534,7 +537,7 @@ pub fn upsert(
         )?
         .query_row(
             params![
-                platform_id.0,
+                platform_id.as_str(),
                 row.rel_path,
                 row.size,
                 row.mtime,
@@ -561,7 +564,7 @@ pub fn upsert(
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn existing_paths(conn: &Connection, platform_id: &PlatformId) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT rel_path FROM files WHERE platform_id = ?1")?;
-    let rows = stmt.query_map([&platform_id.0], |r| r.get(0))?;
+    let rows = stmt.query_map([&platform_id.as_str()], |r| r.get(0))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -588,7 +591,7 @@ pub fn delete_paths(
             "SELECT id FROM files WHERE platform_id = ?1
                AND rel_path IN (SELECT value FROM json_each(?2))",
         )?
-        .query_map(params![platform_id.0, list], |r| r.get(0))?
+        .query_map(params![platform_id.as_str(), list], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     delete_ids(conn, &ids)
 }
@@ -604,7 +607,7 @@ pub fn delete_paths(
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// use mistarr_server::db::ids::FileId;
-/// assert_eq!(mistarr_server::db::files::delete_ids(&conn, &[FileId(1), FileId(2)]).unwrap(), 0);
+/// assert_eq!(mistarr_server::db::files::delete_ids(&conn, &[FileId::new(1), FileId::new(2)]).unwrap(), 0);
 /// ```
 pub fn delete_ids(conn: &Connection, ids: &[FileId]) -> Result<usize> {
     if ids.is_empty() {
@@ -671,7 +674,7 @@ pub struct UnidentifiedFile {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let psx = mistarr_core::PlatformId("psx".into());
+/// let psx = mistarr_core::PlatformId::new("psx");
 /// let page = mistarr_server::db::sql::Page { limit: 50, offset: 0 };
 /// let got = mistarr_server::db::files::unidentified(&conn, &psx, page).unwrap();
 /// assert!(got.items.is_empty() && got.total == 0);
@@ -686,20 +689,23 @@ pub fn unidentified(
             .prepare(
                 "SELECT COUNT(*) FROM files WHERE state = 'unidentified' AND platform_id = ?1",
             )?
-            .query_row([&platform_id.0], |r| sql::get_u64(r, 0))?;
+            .query_row([&platform_id.as_str()], |r| sql::get_u64(r, 0))?;
         let items = conn
             .prepare(
                 "SELECT rel_path, size, COALESCE(reason, 'corrupt') FROM files
                  WHERE state = 'unidentified' AND platform_id = ?1
                  ORDER BY rel_path LIMIT ?2 OFFSET ?3",
             )?
-            .query_map(params![platform_id.0, page.limit, page.offset], |r| {
-                Ok(UnidentifiedFile {
-                    rel_path: r.get(0)?,
-                    size: r.get(1)?,
-                    reason: r.get(2)?,
-                })
-            })?
+            .query_map(
+                params![platform_id.as_str(), page.limit, page.offset],
+                |r| {
+                    Ok(UnidentifiedFile {
+                        rel_path: r.get(0)?,
+                        size: r.get(1)?,
+                        reason: r.get(2)?,
+                    })
+                },
+            )?
             .collect::<rusqlite::Result<_>>()?;
         Ok(Paged { items, total })
     })
@@ -714,7 +720,7 @@ pub fn unidentified(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let nes = mistarr_core::PlatformId("nes".into());
+/// let nes = mistarr_core::PlatformId::new("nes");
 /// assert!(mistarr_server::db::files::retired_matches(&conn, &nes, 10).unwrap().is_empty());
 /// ```
 pub fn retired_matches(
@@ -734,7 +740,7 @@ pub fn retired_matches(
              WHERE f.platform_id = ?1 AND t.source = 'dat' AND (r.retired = 1 OR t.retired = 1)
              ORDER BY f.id LIMIT ?2"
         ))?
-        .query_map(params![platform_id.0, limit], from_row)?
+        .query_map(params![platform_id.as_str(), limit], from_row)?
         .collect::<rusqlite::Result<_>>()?)
 }
 
@@ -752,8 +758,8 @@ pub fn retired_matches(
 /// use mistarr_server::db::ids::FileId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let nes = mistarr_core::PlatformId("nes".into());
-/// assert!(unmatched_after(&conn, &nes, FileId(0), 10).unwrap().is_empty());
+/// let nes = mistarr_core::PlatformId::new("nes");
+/// assert!(unmatched_after(&conn, &nes, FileId::new(0), 10).unwrap().is_empty());
 /// ```
 pub fn unmatched_after(
     conn: &Connection,
@@ -768,7 +774,7 @@ pub fn unmatched_after(
                AND (sha1 IS NOT NULL OR md5 IS NOT NULL)
              ORDER BY id LIMIT ?3"
         ))?
-        .query_map(params![platform_id.0, after, limit], from_row)?
+        .query_map(params![platform_id.as_str(), after, limit], from_row)?
         .collect::<rusqlite::Result<_>>()?)
 }
 
@@ -783,7 +789,7 @@ pub fn unmatched_after(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let psx = mistarr_core::PlatformId("psx".into());
+/// let psx = mistarr_core::PlatformId::new("psx");
 /// assert!(mistarr_server::db::files::in_directory(&conn, &psx, "PSX/Example").unwrap().is_empty());
 /// ```
 pub fn in_directory(
@@ -798,7 +804,7 @@ pub fn in_directory(
             "SELECT {COLUMNS} FROM files
              WHERE platform_id = ?1 AND rel_path >= ?2 AND rel_path < ?3 ORDER BY rel_path"
         ))?
-        .query_map(params![platform_id.0, prefix, to], from_row)?
+        .query_map(params![platform_id.as_str(), prefix, to], from_row)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows
         .into_iter()
@@ -817,7 +823,7 @@ pub fn in_directory(
 /// use mistarr_server::db::ids::FileId;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// set_match(&conn, FileId(1), None, FileState::Unverified).unwrap();
+/// set_match(&conn, FileId::new(1), None, FileState::Unverified).unwrap();
 /// ```
 pub fn set_match(
     conn: &Connection,
@@ -844,7 +850,7 @@ pub fn set_match(
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let listed = (Some(mistarr_core::Crc32::from_u32(0)), None, None);
-/// let title = mistarr_server::db::ids::TitleId(1);
+/// let title = mistarr_server::db::ids::TitleId::new(1);
 /// assert_eq!(mistarr_server::db::files::unmatch_changed_rom(&conn, title, "a.nes", 4, listed).unwrap(), 0);
 /// ```
 pub fn unmatch_changed_rom(
@@ -892,7 +898,9 @@ pub fn state_counts(conn: &Connection, platform_id: &PlatformId) -> Result<State
     let mut stmt =
         conn.prepare("SELECT state, COUNT(*) FROM files WHERE platform_id = ?1 GROUP BY state")?;
     let mut counts = StateCounts::default();
-    let rows = stmt.query_map([&platform_id.0], |r| Ok((r.get(0)?, sql::get_u64(r, 1)?)))?;
+    let rows = stmt.query_map([&platform_id.as_str()], |r| {
+        Ok((r.get(0)?, sql::get_u64(r, 1)?))
+    })?;
     for row in rows {
         let (state, n) = row?;
         match state {
@@ -945,7 +953,7 @@ pub fn misnamed(conn: &Connection) -> Result<Vec<MisnamedRow>> {
     let rows = stmt.query_map([], |r| {
         Ok(MisnamedRow {
             id: r.get(0)?,
-            platform_id: PlatformId(r.get(1)?),
+            platform_id: r.get(1)?,
             rel_path: r.get(2)?,
             rom_id: r.get(3)?,
             rom_name: r.get(4)?,
@@ -982,7 +990,7 @@ mod tests {
     #[test]
     fn upsert_and_find_round_trip() {
         let c = conn();
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         let hashed = NewFile {
             crc32: Some("352441c2".parse().expect("hex")),
             header_rule: Some("ines".into()),
@@ -1012,7 +1020,7 @@ mod tests {
     #[test]
     fn delete_missing_removes_only_absent_paths() {
         let mut c = conn();
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         upsert(
             &c,
             &pid,
@@ -1038,7 +1046,7 @@ mod tests {
     #[test]
     fn delete_missing_clears_the_dangling_import_log_reference() {
         let mut c = conn();
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         let id = upsert(
             &c,
             &pid,
@@ -1048,7 +1056,7 @@ mod tests {
         .expect("insert");
         c.execute(
             "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 'placed', '{}')",
-            [id.0],
+            [id.get()],
         )
         .expect("log");
         let removed = delete_missing(&mut c, &pid, &[], &[]).expect("delete");
@@ -1062,7 +1070,7 @@ mod tests {
     #[test]
     fn zip_rows_and_directory_pages_use_key_ranges() {
         let c = conn();
-        let pid = PlatformId("arcade".into());
+        let pid = PlatformId::new("arcade");
         for rel in [
             "mame/a.zip",
             "mame/a.zip#x.bin",
@@ -1098,7 +1106,7 @@ mod tests {
     #[test]
     fn in_directory_lists_a_directory_s_own_files_by_exact_prefix() {
         let c = conn();
-        let psx = PlatformId("psx".into());
+        let psx = PlatformId::new("psx");
         let paths = [
             "PSX/Disc",
             "PSX/Disc.bin",
@@ -1120,7 +1128,7 @@ mod tests {
             )
             .expect("insert");
         }
-        let other = PlatformId("saturn".into());
+        let other = PlatformId::new("saturn");
         upsert(
             &c,
             &other,
@@ -1158,7 +1166,7 @@ mod tests {
     #[test]
     fn zip_rows_nocase_match_any_spelling() {
         let c = conn();
-        let pid = PlatformId("arcade".into());
+        let pid = PlatformId::new("arcade");
         for rel in [
             "mame/Foo.zip",
             "mame/Foo.zip#a.bin",
@@ -1182,7 +1190,7 @@ mod tests {
     #[test]
     fn restamp_keeps_hashes_and_reverify_clears_them() {
         let c = conn();
-        let pid = PlatformId("arcade".into());
+        let pid = PlatformId::new("arcade");
         let rom = dat(&pid)
             .title("exampleset")
             .rom("a", &hashes(1), RomStatus::Good)
@@ -1232,7 +1240,7 @@ mod tests {
     #[test]
     fn delete_paths_removes_a_set_and_clears_its_log_references() {
         let c = conn();
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         let gone = upsert(
             &c,
             &pid,
@@ -1257,7 +1265,7 @@ mod tests {
         for id in [gone, kept] {
             c.execute(
                 "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 'placed', '{}')",
-                [id.0],
+                [id.get()],
             )
             .expect("log");
         }
@@ -1275,13 +1283,13 @@ mod tests {
             .expect("query")
             .collect::<rusqlite::Result<_>>()
             .expect("rows");
-        assert_eq!(logged, [None, Some(kept.0)]);
+        assert_eq!(logged, [None, Some(kept.get())]);
     }
 
     #[test]
     fn delete_missing_keeps_rows_under_an_unreadable_directory() {
         let mut c = conn();
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         for rel in ["NES/a.nes", "NES/sub/b.nes", "NESX/c.nes", "d.nes"] {
             upsert(
                 &c,
@@ -1305,7 +1313,7 @@ mod tests {
     #[test]
     fn delete_missing_spans_several_batches() {
         let mut c = conn();
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         let n = DELETE_BATCH * 2 + 7;
         for i in 0..n {
             upsert(
@@ -1325,7 +1333,7 @@ mod tests {
     #[test]
     fn delete_missing_keep_lookup_is_set_based() {
         let mut c = conn();
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         for i in 0..50 {
             upsert(
                 &c,
@@ -1347,7 +1355,7 @@ mod tests {
     #[test]
     fn state_counts_group_by_state() {
         let c = conn();
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         upsert(
             &c,
             &pid,
@@ -1378,7 +1386,7 @@ mod tests {
     #[test]
     fn get_and_move_to_follow_a_rename() {
         let c = conn();
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         let id = upsert(
             &c,
             &pid,
@@ -1392,13 +1400,13 @@ mod tests {
             (row.rel_path.as_str(), row.state, row.mtime),
             ("NES/b.nes", FileState::Verified, 7)
         );
-        assert!(get(&c, FileId(999)).expect("get").is_none());
+        assert!(get(&c, FileId::new(999)).expect("get").is_none());
     }
 
     #[test]
     fn zip_members_verified_roms_and_deletes() {
         let c = conn();
-        let pid = PlatformId("neogeo".into());
+        let pid = PlatformId::new("neogeo");
         let rom = crate::db::fixtures::dat(&pid)
             .title("Example Set")
             .rom("a.rom", &hashes(3), RomStatus::Good)
@@ -1441,7 +1449,7 @@ mod tests {
     #[test]
     fn a_rom_given_other_hashes_unmatches_its_files() {
         let c = conn();
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         let h = hashes(3);
         let seeded = dat(&pid)
             .title("Moved Quest")
@@ -1514,13 +1522,13 @@ mod tests {
         for s in ["pending", "verified", "misnamed", "unverified", "bad"] {
             assert_eq!(FileState::parse(s).map(FileState::as_str), Some(s));
         }
-        assert_eq!(FileId(4).to_string(), "4");
+        assert_eq!(FileId::new(4).to_string(), "4");
     }
 
     #[test]
     fn unidentified_rows_keep_their_state_and_reason() {
         let c = conn();
-        let pid = PlatformId("psx".into());
+        let pid = PlatformId::new("psx");
         assert_eq!(
             FileState::parse("unidentified"),
             Some(FileState::Unidentified)
@@ -1594,7 +1602,7 @@ mod tests {
     #[test]
     fn delete_ids_clears_the_import_log_first() {
         let c = conn();
-        let pid = PlatformId("psx".into());
+        let pid = PlatformId::new("psx");
         let id = upsert(
             &c,
             &pid,
@@ -1604,11 +1612,11 @@ mod tests {
         .expect("upsert");
         c.execute(
             "INSERT INTO import_log (at, file_id, action, detail) VALUES (0, ?1, 'placed', '{}')",
-            [id.0],
+            [id.get()],
         )
         .expect("log");
         c.execute_batch("PRAGMA foreign_keys = ON").expect("fk");
-        assert_eq!(delete_ids(&c, &[id, FileId(999)]).expect("delete"), 1);
+        assert_eq!(delete_ids(&c, &[id, FileId::new(999)]).expect("delete"), 1);
         let logged: Option<i64> = c
             .query_row("SELECT file_id FROM import_log", [], |r| r.get(0))
             .expect("log");

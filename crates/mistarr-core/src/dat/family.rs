@@ -21,7 +21,7 @@ pub const FORMAT_MARKERS: &[&str] = &[
 /// current version of the same family on the same platform.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct DatFamily(pub String);
+pub struct DatFamily(String);
 
 impl DatFamily {
     /// The key as stored.

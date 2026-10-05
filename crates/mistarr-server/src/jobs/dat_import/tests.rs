@@ -113,7 +113,7 @@ fn bound_dats_load_titles_and_pick() {
         ],
     );
     let l = loaded(import(&c, &xml, &request(false, None)));
-    assert_eq!(l.platform, Some(PlatformId("gb".into())));
+    assert_eq!(l.platform, Some(PlatformId::new("gb")));
     assert_eq!((l.games, l.has_titles, l.retired), (2, true, 0));
     let picks = count(
         &c,
@@ -134,7 +134,7 @@ fn unbound_dats_store_only_the_version() {
 
     let bind = Bind {
         version: l.version,
-        platform: PlatformId("nes".into()),
+        platform: PlatformId::new("nes"),
         dat_name: "Test Console".into(),
         dat_version: "1".into(),
     };
@@ -145,7 +145,7 @@ fn unbound_dats_store_only_the_version() {
     );
     let bound = loaded(import(&c, &xml, &request(false, Some(bind))));
     assert_eq!(bound.version, l.version);
-    assert_eq!(bound.platform, Some(PlatformId("nes".into())));
+    assert_eq!(bound.platform, Some(PlatformId::new("nes")));
     assert_eq!(
         count(&c, "SELECT COUNT(*) FROM titles WHERE platform_id = 'nes'"),
         1
@@ -321,7 +321,7 @@ async fn the_job_moves_files_and_publishes_events() {
         .expect("row");
     assert_eq!(row.state, JobState::Done, "a vanished file is not an error");
 
-    let id = Scheduler::run_inline(&app, Arc::new(Recompute::new("gb")))
+    let id = Scheduler::run_inline(&app, Arc::new(Recompute::new(&pid("gb"))))
         .await
         .expect("run");
     let row = app
@@ -456,7 +456,7 @@ fn a_plain_db_export_takes_its_name_from_the_file() {
     )
     .expect("import");
     let l = loaded(o);
-    assert_eq!(l.platform.map(|p| p.0).as_deref(), Some("gb"));
+    assert_eq!(l.platform.as_ref().map(PlatformId::as_str), Some("gb"));
     let version: String = c
         .with(|x| Ok(x.query_row("SELECT version FROM dat_versions", [], |r| r.get(0))?))
         .expect("version");
@@ -686,14 +686,14 @@ fn binding_an_older_version_is_rejected_and_rolled_back() {
     let newer = loaded(import(&c, &v2, &request(false, None)));
     let bind_newer = Bind {
         version: newer.version,
-        platform: PlatformId("nes".into()),
+        platform: PlatformId::new("nes"),
         dat_name: "Test Console".into(),
         dat_version: "2".into(),
     };
     assert!(loaded(import(&c, &v2, &request(false, Some(bind_newer)))).has_titles);
     let bind = Bind {
         version: old.version,
-        platform: PlatformId("nes".into()),
+        platform: PlatformId::new("nes"),
         dat_name: "Test Console".into(),
         dat_version: "1".into(),
     };
@@ -726,7 +726,7 @@ fn an_unbound_version_never_blocks_binding_one_of_its_family() {
     ));
     let bind = Bind {
         version: old.version,
-        platform: PlatformId("nes".into()),
+        platform: PlatformId::new("nes"),
         dat_name: "Test Console".into(),
         dat_version: "1".into(),
     };
@@ -774,9 +774,12 @@ async fn binding_fails_loudly_and_finds_renamed_nameless_files() {
         ("odd", "odd (1).dat")
     );
 
-    let id = Scheduler::run_inline(&app, Arc::new(DatImport::bind(&newest, "nes", &loaded_dir)))
-        .await
-        .expect("run");
+    let id = Scheduler::run_inline(
+        &app,
+        Arc::new(DatImport::bind(&newest, &pid("nes"), &loaded_dir)),
+    )
+    .await
+    .expect("run");
     assert_eq!(job_state(&app, id).await.state, JobState::Done);
     let v = newest.id;
     let bound = app
@@ -785,13 +788,13 @@ async fn binding_fails_loudly_and_finds_renamed_nameless_files() {
         .await
         .expect("get")
         .expect("row");
-    assert_eq!(bound.platform_id, Some(PlatformId("nes".into())));
+    assert_eq!(bound.platform_id, Some(PlatformId::new("nes")));
 
     let mut missing = rows.iter().find(|r| r.version == "1").expect("v1").clone();
     missing.source_file = "gone.dat".into();
     let id = Scheduler::run_inline(
         &app,
-        Arc::new(DatImport::bind(&missing, "nes", &loaded_dir)),
+        Arc::new(DatImport::bind(&missing, &pid("nes"), &loaded_dir)),
     )
     .await
     .expect("run");
@@ -844,7 +847,13 @@ fn an_export_after_a_logiqx_dat_of_the_system_leaves_one_live_set() {
         ("Mock Manor (World)", None),
     ];
     let logiqx = import_at(&c, &dat(NES_LOGIQX, "20260101-000000", &games), 1);
-    assert_eq!(logiqx.platform.as_ref().map(|p| p.0.as_str()), Some("nes"));
+    assert_eq!(
+        logiqx
+            .platform
+            .as_ref()
+            .map(mistarr_core::PlatformId::as_str),
+        Some("nes")
+    );
     let stem = "Example Vendor - Nintendo Entertainment System (DB Export) (20260102-000000)";
     let export = import_export(&c, &db_export(""), stem, 2);
     assert_eq!(export.platform, logiqx.platform);
@@ -877,11 +886,11 @@ fn an_export_after_a_logiqx_dat_of_the_system_leaves_one_live_set() {
 /// as `DELETE /dats/{id}` does and recomputes; returns how many files were matched again.
 fn remove_with_files(c: &TestDb, version: DatVersionId, files: &[(&str, u32, i64)]) -> usize {
     c.with(|x| {
-        let nes = PlatformId("nes".into());
+        let nes = PlatformId::new("nes");
         let (md5, sha1) = (Md5::from_bytes([0xdd; 16]), Sha1::from_bytes([0xdd; 20]));
         for (path, crc, id) in files {
             let state = crate::db::files::FileState::Misnamed;
-            let rom = Some(crate::db::ids::RomId(*id));
+            let rom = Some(mistarr_core::RomId::new(*id));
             crate::db::files::upsert(
                 x,
                 &nes,
@@ -1021,7 +1030,7 @@ fn an_export_header_lets_placement_add_it_back() {
         head: vec![0xA9, 0x00],
         members: Vec::new(),
     };
-    let nes = mistarr_mister::adapter_for(&PlatformId("nes".into())).expect("nes");
+    let nes = mistarr_mister::adapter_for(&PlatformId::new("nes")).expect("nes");
     let plan = nes.plan_placement(&entry, &staged).expect("plan");
     assert!(
         plan.steps.contains(&mistarr_mister::Step::AddHeader {
@@ -1162,7 +1171,7 @@ fn one_family_on_two_platforms_keeps_separate_titles() {
 #[test]
 fn a_disc_track_is_matched_again_under_the_all_or_nothing_rule() {
     let c = conn();
-    let psx = PlatformId("psx".into());
+    let psx = PlatformId::new("psx");
     let h = |n: u8| mistarr_core::Hashes {
         size: 4,
         crc32: format!("{n:08x}").parse().expect("hex"),
@@ -1257,7 +1266,7 @@ fn unmatched_file(
 #[tokio::test]
 async fn recompute_matches_unmatched_files_and_updates_have() {
     let (_dir, app) = state();
-    let gb = PlatformId("gb".into());
+    let gb = PlatformId::new("gb");
     app.db
         .write_tx(move |tx| {
             let quest = ("Example Quest (USA)", "Example Quest (USA).gb");
@@ -1290,7 +1299,7 @@ async fn recompute_matches_unmatched_files_and_updates_have() {
     };
     assert_eq!(have(app.clone()).await, 0, "nothing matched yet");
 
-    let run = Scheduler::run_inline(&app, Arc::new(Recompute::new("gb")));
+    let run = Scheduler::run_inline(&app, Arc::new(Recompute::new(&pid("gb"))));
     let id = tokio::time::timeout(Duration::from_secs(30), run)
         .await
         .expect("a file that stays unmatched is read once, so the recompute ends")
@@ -1332,11 +1341,11 @@ async fn recompute_matches_unmatched_files_and_updates_have() {
 #[test]
 fn unmatched_pages_end_on_a_file_that_never_matches() {
     let c = conn();
-    let nes = PlatformId("nes".into());
+    let nes = PlatformId::new("nes");
     let (first, pages) = c
         .with(|x| {
             let first = unmatched_file(x, &nes, "NES/stray.nes", &sums(7))?;
-            let mut after = crate::db::ids::FileId(0);
+            let mut after = crate::db::ids::FileId::new(0);
             let mut pages = 0;
             loop {
                 let chunk = match_unmatched_chunk(x, &nes, after)?;
@@ -1365,7 +1374,7 @@ fn unmatched_pages_end_on_a_file_that_never_matches() {
 #[test]
 fn a_stored_crc_matches_a_headered_file_by_its_size_less_the_header() {
     let c = conn();
-    let nes = PlatformId("nes".into());
+    let nes = PlatformId::new("nes");
     let state = c
         .with(|x| {
             let rom = sums(9);
@@ -1392,7 +1401,7 @@ fn a_stored_crc_matches_a_headered_file_by_its_size_less_the_header() {
                 },
                 1,
             )?;
-            match_unmatched_chunk(x, &nes, crate::db::ids::FileId(0))?;
+            match_unmatched_chunk(x, &nes, crate::db::ids::FileId::new(0))?;
             Ok(files::get(x, id)?.map(|f| f.state))
         })
         .expect("match");
@@ -1406,7 +1415,7 @@ fn a_stored_crc_matches_a_headered_file_by_its_size_less_the_header() {
 #[test]
 fn stored_whole_and_content_forms_match_headered_and_headerless_roms() {
     let c = conn();
-    let lynx = PlatformId("lynx".into());
+    let lynx = PlatformId::new("lynx");
     let states = c
         .with(|x| {
             let title = crate::db::fixtures::dat(&lynx)
@@ -1455,7 +1464,7 @@ fn stored_whole_and_content_forms_match_headered_and_headerless_roms() {
                     1,
                 )?);
             }
-            match_unmatched_chunk(x, &lynx, crate::db::ids::FileId(0))?;
+            match_unmatched_chunk(x, &lynx, crate::db::ids::FileId::new(0))?;
             let mut states = Vec::new();
             for id in ids {
                 states.push(files::get(x, id)?.map(|f| f.state));
@@ -1478,7 +1487,7 @@ fn stored_whole_and_content_forms_match_headered_and_headerless_roms() {
 #[test]
 fn a_stored_crc_allows_for_a_copier_header_only_at_its_size() {
     let c = conn();
-    let snes = PlatformId("snes".into());
+    let snes = PlatformId::new("snes");
     let states = c
         .with(|x| {
             let rom = sums(11);
@@ -1508,7 +1517,7 @@ fn a_stored_crc_allows_for_a_copier_header_only_at_its_size() {
                     1,
                 )?);
             }
-            match_unmatched_chunk(x, &snes, crate::db::ids::FileId(0))?;
+            match_unmatched_chunk(x, &snes, crate::db::ids::FileId::new(0))?;
             let mut states = Vec::new();
             for id in ids {
                 states.push(files::get(x, id)?.map(|f| f.state));
@@ -1525,12 +1534,12 @@ fn a_stored_crc_allows_for_a_copier_header_only_at_its_size() {
 #[test]
 fn a_recompute_that_changes_nothing_writes_nothing() {
     let c = conn();
-    let nes = PlatformId("nes".into());
+    let nes = PlatformId::new("nes");
     let changes = c
         .with(|x| {
             unmatched_file(x, &nes, "NES/stray.nes", &sums(12))?;
             let before = x.total_changes();
-            match_unmatched_chunk(x, &nes, crate::db::ids::FileId(0))?;
+            match_unmatched_chunk(x, &nes, crate::db::ids::FileId::new(0))?;
             Ok(x.total_changes() - before)
         })
         .expect("page");
@@ -1573,7 +1582,7 @@ fn dump(db: &Db) -> Vec<String> {
 /// A seeded database with unmatched gb files a DAT of [`dat`] matches by CRC32 and size.
 fn with_files() -> TestDb {
     let c = conn();
-    let gb = PlatformId("gb".into());
+    let gb = PlatformId::new("gb");
     c.with(|x| {
         for n in [0, 1, 2, 9] {
             unmatched_file(x, &gb, &format!("GB/file {n}.gb"), &sums(n))?;
@@ -1600,7 +1609,7 @@ fn load_all(c: &TestDb, dats: &[String], via_ram: bool) -> Vec<Outcome> {
             let plan = ram::Plan {
                 dir: ram_dir.path().to_path_buf(),
                 floor: 0,
-                job: Some(crate::db::ids::JobId(1)),
+                job: Some(crate::db::ids::JobId::new(1)),
                 input: 0,
             };
             let ran =
@@ -1806,7 +1815,7 @@ fn a_copy_that_fills_partway_through_the_load_falls_back_with_the_card_untouched
     let plan = ram::Plan {
         dir: ram_dir.path().to_path_buf(),
         floor: 0,
-        job: Some(crate::db::ids::JobId(1)),
+        job: Some(crate::db::ids::JobId::new(1)),
         input: 0,
     };
     let req = request(false, None);
@@ -1848,7 +1857,7 @@ fn memory_falling_short_during_a_load_in_ram_falls_back_with_the_card_untouched(
     let plan = ram::Plan {
         dir: ram_dir.path().to_path_buf(),
         floor: 0,
-        job: Some(crate::db::ids::JobId(1)),
+        job: Some(crate::db::ids::JobId::new(1)),
         input: 0,
     };
     // The copy was allowed; from the first member on, no memory is ever enough.
@@ -1893,8 +1902,8 @@ async fn a_running_core_halves_the_pace_of_the_copy() {
     let (_dir, app) = state();
     let (tx, gate) = tokio::sync::watch::channel(GateState::default());
     let mut watch = RamWatch {
-        reporter: Reporter::new(Arc::clone(&app), JobId(1), JobKind::DatImport, None),
-        id: JobId(1),
+        reporter: Reporter::new(Arc::clone(&app), JobId::new(1), JobKind::DatImport, None),
+        id: JobId::new(1),
         file: "a.dat".into(),
         members: 1,
         stop: StopToken::fixed(false, gate, Lane::Background),
@@ -1987,7 +1996,7 @@ fn a_rewritten_dat_imports_to_the_same_rows() {
 #[test]
 fn a_placed_file_stays_verified_when_its_rom_is_matched_again() {
     let c = conn();
-    let snes = PlatformId("snes".into());
+    let snes = PlatformId::new("snes");
     let game = "Mock Manor (Europe) (Rev 1)";
     let row = mistarr_mister::platforms::by_id("snes").expect("snes");
     // The name the cartridge adapter places the file under.

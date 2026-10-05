@@ -98,15 +98,15 @@ pub struct Platform {
 }
 
 impl Platform {
-    /// The row's id as a [`PlatformId`].
+    /// The row's id as a [`PlatformId`], borrowing the table's text.
     ///
     /// ```
     /// let row = mistarr_mister::platforms::by_id("nes").unwrap();
-    /// assert_eq!(row.platform_id().0, "nes");
+    /// assert_eq!(row.platform_id().as_str(), "nes");
     /// ```
     #[must_use]
     pub fn platform_id(&self) -> PlatformId {
-        PlatformId(self.id.to_owned())
+        PlatformId::new(self.id)
     }
 
     /// The directory the core reads from, `root/games/<core_dir>`.
@@ -850,7 +850,7 @@ mod tests {
     fn platform_id_matches_row() {
         assert_eq!(
             by_id("psx").map(Platform::platform_id),
-            Some(PlatformId("psx".into()))
+            Some(PlatformId::new("psx"))
         );
     }
 

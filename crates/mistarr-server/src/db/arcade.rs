@@ -24,14 +24,14 @@ pub const MRA_DAT_NAME: &str = "_Arcade";
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// mistarr_server::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).unwrap();
-/// let v = mistarr_server::db::arcade::mra_version(&conn, &mistarr_core::PlatformId("arcade".into()), 1).unwrap();
-/// assert_eq!(mistarr_server::db::arcade::mra_version(&conn, &mistarr_core::PlatformId("arcade".into()), 2).unwrap(), v);
+/// let v = mistarr_server::db::arcade::mra_version(&conn, &mistarr_core::PlatformId::new("arcade"), 1).unwrap();
+/// assert_eq!(mistarr_server::db::arcade::mra_version(&conn, &mistarr_core::PlatformId::new("arcade"), 2).unwrap(), v);
 /// ```
 pub fn mra_version(conn: &Connection, platform: &PlatformId, now: i64) -> Result<DatVersionId> {
     let found: Option<DatVersionId> = conn
         .query_row(
             "SELECT id FROM dat_versions WHERE source = 'mra' AND platform_id = ?1",
-            [&platform.0],
+            [&platform.as_str()],
             |r| r.get(0),
         )
         .optional()?;
@@ -45,9 +45,9 @@ pub fn mra_version(conn: &Connection, platform: &PlatformId, now: i64) -> Result
     conn.execute(
         "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count, source)
          VALUES (?1, ?2, 'mra', ?2, ?3, 0, 'mra')",
-        params![platform.0, MRA_DAT_NAME, now],
+        params![platform.as_str(), MRA_DAT_NAME, now],
     )?;
-    Ok(DatVersionId(conn.last_insert_rowid()))
+    Ok(DatVersionId::new(conn.last_insert_rowid()))
 }
 
 /// One MRA file as a title.
@@ -101,12 +101,12 @@ pub struct MraZip<'a> {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert_eq!(mistarr_server::db::arcade::next_run(&conn, &mistarr_core::PlatformId("arcade".into())).unwrap(), 1);
+/// assert_eq!(mistarr_server::db::arcade::next_run(&conn, &mistarr_core::PlatformId::new("arcade")).unwrap(), 1);
 /// ```
 pub fn next_run(conn: &Connection, platform: &PlatformId) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT COALESCE(MAX(mra_seen), 0) + 1 FROM titles WHERE platform_id = ?1 AND source = 'mra'",
-        [&platform.0],
+        [&platform.as_str()],
         |r| r.get(0),
     )?)
 }
@@ -121,7 +121,7 @@ pub fn next_run(conn: &Connection, platform: &PlatformId) -> Result<i64> {
 /// use mistarr_server::db::{arcade, ids::TitleId};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// arcade::touch(&conn, TitleId(1), 1).unwrap();
+/// arcade::touch(&conn, TitleId::new(1), 1).unwrap();
 /// ```
 pub fn touch(conn: &Connection, id: TitleId, run: i64) -> Result<()> {
     conn.prepare_cached("UPDATE titles SET mra_seen = ?2 WHERE id = ?1")?
@@ -138,13 +138,13 @@ pub fn touch(conn: &Connection, id: TitleId, run: i64) -> Result<()> {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert_eq!(mistarr_server::db::arcade::retire_unseen(&conn, &mistarr_core::PlatformId("arcade".into()), 1).unwrap(), 0);
+/// assert_eq!(mistarr_server::db::arcade::retire_unseen(&conn, &mistarr_core::PlatformId::new("arcade"), 1).unwrap(), 0);
 /// ```
 pub fn retire_unseen(conn: &Connection, platform: &PlatformId, run: i64) -> Result<usize> {
     Ok(conn.execute(
         "UPDATE titles SET retired = 1, is_1g1r_pick = 0
          WHERE platform_id = ?1 AND source = 'mra' AND retired = 0 AND mra_seen IS NOT ?2",
-        params![platform.0, run],
+        params![platform.as_str(), run],
     )?)
 }
 
@@ -157,12 +157,12 @@ pub fn retire_unseen(conn: &Connection, platform: &PlatformId, run: i64) -> Resu
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert_eq!(mistarr_server::db::arcade::live_count(&conn, &mistarr_core::PlatformId("arcade".into())).unwrap(), 0);
+/// assert_eq!(mistarr_server::db::arcade::live_count(&conn, &mistarr_core::PlatformId::new("arcade")).unwrap(), 0);
 /// ```
 pub fn live_count(conn: &Connection, platform: &PlatformId) -> Result<u64> {
     Ok(conn.query_row(
         "SELECT COUNT(*) FROM titles WHERE platform_id = ?1 AND source = 'mra' AND retired = 0",
-        [&platform.0],
+        [&platform.as_str()],
         |r| sql::get_u64(r, 0),
     )?)
 }
@@ -178,17 +178,17 @@ pub fn live_count(conn: &Connection, platform: &PlatformId) -> Result<u64> {
 /// use mistarr_server::db::arcade;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// arcade::set_recompute_pending(&conn, &mistarr_core::PlatformId("arcade".into()), true).unwrap();
-/// assert!(arcade::recompute_pending(&conn, &mistarr_core::PlatformId("arcade".into())).unwrap());
-/// arcade::set_recompute_pending(&conn, &mistarr_core::PlatformId("arcade".into()), false).unwrap();
-/// assert!(!arcade::recompute_pending(&conn, &mistarr_core::PlatformId("arcade".into())).unwrap());
+/// arcade::set_recompute_pending(&conn, &mistarr_core::PlatformId::new("arcade"), true).unwrap();
+/// assert!(arcade::recompute_pending(&conn, &mistarr_core::PlatformId::new("arcade")).unwrap());
+/// arcade::set_recompute_pending(&conn, &mistarr_core::PlatformId::new("arcade"), false).unwrap();
+/// assert!(!arcade::recompute_pending(&conn, &mistarr_core::PlatformId::new("arcade")).unwrap());
 /// ```
 pub fn set_recompute_pending(
     conn: &Connection,
     platform: &PlatformId,
     pending: bool,
 ) -> Result<()> {
-    let key = keys::mra_recompute_pending(&platform.0);
+    let key = keys::mra_recompute_pending(platform.as_str());
     if pending {
         settings::set(conn, &key, "1")
     } else {
@@ -205,10 +205,10 @@ pub fn set_recompute_pending(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(!mistarr_server::db::arcade::recompute_pending(&conn, &mistarr_core::PlatformId("arcade".into())).unwrap());
+/// assert!(!mistarr_server::db::arcade::recompute_pending(&conn, &mistarr_core::PlatformId::new("arcade")).unwrap());
 /// ```
 pub fn recompute_pending(conn: &Connection, platform: &PlatformId) -> Result<bool> {
-    Ok(settings::get(conn, &keys::mra_recompute_pending(&platform.0))?.is_some())
+    Ok(settings::get(conn, &keys::mra_recompute_pending(platform.as_str()))?.is_some())
 }
 
 /// Stores an MRA title and its zips, reusing the MRA title of the same name so
@@ -223,13 +223,13 @@ pub fn recompute_pending(conn: &Connection, platform: &PlatformId) -> Result<boo
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// mistarr_server::db::platforms::seed(&mut conn, &mistarr_mister::platforms::PLATFORMS).unwrap();
-/// let v = arcade::mra_version(&conn, &mistarr_core::PlatformId("arcade".into()), 1).unwrap();
+/// let v = arcade::mra_version(&conn, &mistarr_core::PlatformId::new("arcade"), 1).unwrap();
 /// let t = MraTitle { name: "Example Blaster", base_name: "Example Blaster", group_key: "mra:example blaster",
 ///     regions: &[], languages: &[], revision: None, flags: &[], setname: Some("exblast"),
 ///     rbf: Some("excore"), mra_path: "Example Blaster.mra", file_stamp: "10:1", run: 1 };
 /// let zips = [MraZip { name: "exblast.zip", zip_dir: "mame", md5: None, present: false }];
-/// let id = arcade::upsert_title(&conn, &mistarr_core::PlatformId("arcade".into()), v, &t, &zips).unwrap();
-/// assert_eq!(arcade::upsert_title(&conn, &mistarr_core::PlatformId("arcade".into()), v, &t, &zips).unwrap(), id);
+/// let id = arcade::upsert_title(&conn, &mistarr_core::PlatformId::new("arcade"), v, &t, &zips).unwrap();
+/// assert_eq!(arcade::upsert_title(&conn, &mistarr_core::PlatformId::new("arcade"), v, &t, &zips).unwrap(), id);
 /// ```
 pub fn upsert_title(
     conn: &Connection,
@@ -296,7 +296,7 @@ pub struct StoredMra {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(mistarr_server::db::arcade::stored_mra(&conn, &mistarr_core::PlatformId("arcade".into()), "x.mra").unwrap().is_none());
+/// assert!(mistarr_server::db::arcade::stored_mra(&conn, &mistarr_core::PlatformId::new("arcade"), "x.mra").unwrap().is_none());
 /// ```
 pub fn stored_mra(
     conn: &Connection,
@@ -309,7 +309,7 @@ pub fn stored_mra(
              WHERE platform_id = ?1 AND source = 'mra' AND mra_path = ?2 AND retired = 0
              ORDER BY id LIMIT 1",
         )?
-        .query_row(params![platform.0, mra_path], |r| {
+        .query_row(params![platform.as_str(), mra_path], |r| {
             Ok(StoredMra {
                 id: r.get(0)?,
                 name: r.get(1)?,
@@ -329,12 +329,12 @@ pub fn stored_mra(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(!mistarr_server::db::arcade::has_titles(&conn, &mistarr_core::PlatformId("arcade".into())).unwrap());
+/// assert!(!mistarr_server::db::arcade::has_titles(&conn, &mistarr_core::PlatformId::new("arcade")).unwrap());
 /// ```
 pub fn has_titles(conn: &Connection, platform: &PlatformId) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM titles WHERE platform_id = ?1 AND source = 'mra' AND retired = 0)",
-        [&platform.0],
+        [&platform.as_str()],
         |r| r.get(0),
     )?)
 }
@@ -349,7 +349,7 @@ pub fn has_titles(conn: &Connection, platform: &PlatformId) -> Result<bool> {
 /// use mistarr_server::db::{arcade, ids::TitleId};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// arcade::set_check(&conn, TitleId(1), None, None, None).unwrap();
+/// arcade::set_check(&conn, TitleId::new(1), None, None, None).unwrap();
 /// ```
 pub fn set_check(
     conn: &Connection,
@@ -375,7 +375,7 @@ pub fn set_check(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let found = mistarr_server::db::arcade::titles_naming(&conn, &mistarr_core::PlatformId("arcade".into()), "mame", "exblast.zip");
+/// let found = mistarr_server::db::arcade::titles_naming(&conn, &mistarr_core::PlatformId::new("arcade"), "mame", "exblast.zip");
 /// assert!(found.unwrap().is_empty());
 /// ```
 pub fn titles_naming(
@@ -391,7 +391,7 @@ pub fn titles_naming(
            AND lower(COALESCE(r.zip_dir, '')) = lower(?2) AND lower(r.name) = lower(?3)
          ORDER BY t.id",
     )?;
-    let rows = stmt.query_map(params![platform.0, zip_dir, name], |r| {
+    let rows = stmt.query_map(params![platform.as_str(), zip_dir, name], |r| {
         Ok((r.get(0)?, r.get(1)?))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -407,7 +407,7 @@ pub fn titles_naming(
 /// use mistarr_server::db::{arcade, ids::TitleId};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert_eq!(arcade::set_zip_present(&conn, TitleId(1), "exblast.zip", "mame", true).unwrap(), 0);
+/// assert_eq!(arcade::set_zip_present(&conn, TitleId::new(1), "exblast.zip", "mame", true).unwrap(), 0);
 /// ```
 pub fn set_zip_present(
     conn: &Connection,
@@ -436,7 +436,7 @@ pub fn set_zip_present(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(mistarr_server::db::arcade::dat_entry_named(&conn, &mistarr_core::PlatformId("arcade".into()), "exblast", false).unwrap().is_none());
+/// assert!(mistarr_server::db::arcade::dat_entry_named(&conn, &mistarr_core::PlatformId::new("arcade"), "exblast", false).unwrap().is_none());
 /// ```
 pub fn dat_entry_named(
     conn: &Connection,
@@ -451,7 +451,7 @@ pub fn dat_entry_named(
                AND v.superseded_by IS NULL AND v.retired = 0 AND lower(t.name) = lower(?2)
                AND (instr(lower(v.dat_name), 'hbmame') > 0) = ?3
              ORDER BY t.name = ?2 DESC, t.id LIMIT 1",
-            params![platform.0, set, hbmame],
+            params![platform.as_str(), set, hbmame],
             |r| r.get(0),
         )
         .optional()?)
@@ -484,7 +484,7 @@ pub struct MraInfo {
 /// use mistarr_server::db::{arcade, ids::TitleId};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(arcade::info(&conn, TitleId(1)).unwrap().is_none());
+/// assert!(arcade::info(&conn, TitleId::new(1)).unwrap().is_none());
 /// ```
 pub fn info(conn: &Connection, id: TitleId) -> Result<Option<MraInfo>> {
     let Some(mut info) = conn

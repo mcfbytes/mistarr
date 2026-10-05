@@ -15,13 +15,14 @@ use mistarr_mister::platforms::Platform;
 use rusqlite::Connection;
 
 use crate::db::files::{self, FileRow, FileState, NewFile};
-use crate::db::ids::{FileId, RomId};
+use crate::db::ids::FileId;
 use crate::db::roms;
 use crate::db::Db;
 use crate::error::Result;
 use crate::jobs::fsutil::{all_entries, extension, file_meta};
 use crate::jobs::progress::Progress;
 use crate::jobs::JobContext;
+use mistarr_core::RomId;
 
 /// Zips stated, looked up and written per batch; each batch is one write transaction.
 const BATCH: usize = 500;

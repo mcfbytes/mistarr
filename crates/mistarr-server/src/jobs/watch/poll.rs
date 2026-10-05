@@ -76,8 +76,8 @@ pub struct Seen {
 /// use mistarr_server::db::downloads::{DownloadState, PollRow};
 /// use mistarr_server::db::ids::DownloadId;
 /// use mistarr_server::db::ids::SourceId;
-/// let row = PollRow { id: DownloadId(1), state: DownloadState::Transferring, progress: 0.0,
-///     staged_path: None, source_id: SourceId(1), file_index: 0, path: "NES/a.nes".into(),
+/// let row = PollRow { id: DownloadId::new(1), state: DownloadState::Transferring, progress: 0.0,
+///     staged_path: None, source_id: SourceId::new(1), file_index: 0, path: "NES/a.nes".into(),
 ///     infohash: "ab".into(), torrent_name: "Set".into(), single_file: false,
 ///     client_id: None, seed_policy: "none".into(), size: 4 };
 /// let p = mistarr_server::jobs::watch::poll::staged_path(Path::new("/s"), &row);
@@ -111,8 +111,8 @@ fn push_relative(out: &mut PathBuf, rel: &str) {
 /// use mistarr_core::InfoHash;
 /// use mistarr_server::db::downloads::{DownloadState, PollRow};
 /// use mistarr_server::db::ids::{DownloadId, SourceId};
-/// let row = PollRow { id: DownloadId(1), state: DownloadState::Transferring, progress: 0.0,
-///     staged_path: None, source_id: SourceId(1), file_index: 0, path: "a.nes".into(),
+/// let row = PollRow { id: DownloadId::new(1), state: DownloadState::Transferring, progress: 0.0,
+///     staged_path: None, source_id: SourceId::new(1), file_index: 0, path: "a.nes".into(),
 ///     infohash: "ab".into(), torrent_name: "a.nes".into(), single_file: true,
 ///     client_id: None, seed_policy: "none".into(), size: 4 };
 /// let st = TorrentStatus { infohash: InfoHash::from_bytes([0; 20]), state: TorrentState::Downloading,
@@ -434,11 +434,11 @@ mod tests {
 
     fn row(file_index: u32, single: bool) -> PollRow {
         PollRow {
-            id: DownloadId(7),
+            id: DownloadId::new(7),
             state: DownloadState::Transferring,
             progress: 0.5,
             staged_path: None,
-            source_id: SourceId(1),
+            source_id: SourceId::new(1),
             file_index,
             path: "Sub/../x.nes".into(),
             infohash: "cd".into(),

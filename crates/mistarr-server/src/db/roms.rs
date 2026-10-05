@@ -7,10 +7,12 @@ use mistarr_core::{Crc32, Hashes, Md5, PlatformId, Sha1};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
-use super::ids::{FileId, RomId, TitleId};
+use super::ids::{FileId, TitleId};
+
 use super::sql;
 use super::titles::RomStatus;
 use crate::error::Result;
+use mistarr_core::RomId;
 
 /// A rom a hashed file matched, per `docs/VERIFICATION.md` "Matching order".
 #[derive(Debug, Clone, PartialEq)]
@@ -65,11 +67,11 @@ fn match_tiers(
          WHERE t.platform_id = ?1 AND t.source = 'dat' AND {live}"
     );
     let tiers: [(&str, Vec<&dyn rusqlite::ToSql>); 3] = [
-        ("r.sha1 = ?2", vec![&platform_id.0, &sha1]),
-        ("r.sha1 IS NULL AND r.md5 = ?2", vec![&platform_id.0, &md5]),
+        ("r.sha1 = ?2", vec![platform_id, &sha1]),
+        ("r.sha1 IS NULL AND r.md5 = ?2", vec![platform_id, &md5]),
         (
             "r.sha1 IS NULL AND r.md5 IS NULL AND r.crc32 = ?2 AND r.size = ?3",
-            vec![&platform_id.0, &crc32, &size],
+            vec![platform_id, &crc32, &size],
         ),
     ];
     for (cond, bound) in &tiers {
@@ -112,7 +114,7 @@ pub fn match_rom(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let nes = mistarr_core::PlatformId("nes".into());
+/// let nes = mistarr_core::PlatformId::new("nes");
 /// let crc = Some(mistarr_core::Crc32::from_u32(0));
 /// assert!(mistarr_server::db::roms::match_live_rom(&conn, &nes, None, None, crc, 1).unwrap().is_none());
 /// ```
@@ -138,7 +140,7 @@ pub fn match_live_rom(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let psx = mistarr_core::PlatformId("psx".into());
+/// let psx = mistarr_core::PlatformId::new("psx");
 /// let h = mistarr_core::hash::hash_reader(&b"a"[..], Default::default(), None).unwrap();
 /// assert!(mistarr_server::db::roms::roms_matching(&conn, &psx, &h).unwrap().is_empty());
 /// ```
@@ -171,7 +173,7 @@ fn rom_match(r: &Row<'_>) -> rusqlite::Result<RomMatch> {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let title = mistarr_server::db::ids::TitleId(1);
+/// let title = mistarr_server::db::ids::TitleId::new(1);
 /// assert!(mistarr_server::db::roms::disc_roms(&conn, title).unwrap().is_empty());
 /// ```
 pub fn disc_roms(conn: &Connection, title_id: TitleId) -> Result<Vec<RomMatch>> {
@@ -194,7 +196,7 @@ pub fn disc_roms(conn: &Connection, title_id: TitleId) -> Result<Vec<RomMatch>> 
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let psx = mistarr_core::PlatformId("psx".into());
+/// let psx = mistarr_core::PlatformId::new("psx");
 /// assert!(!mistarr_server::db::roms::chd_rom_sized(&conn, &psx, 10).unwrap());
 /// ```
 pub fn chd_rom_sized(conn: &Connection, platform_id: &PlatformId, size: i64) -> Result<bool> {
@@ -205,7 +207,7 @@ pub fn chd_rom_sized(conn: &Connection, platform_id: &PlatformId, size: i64) -> 
                WHERE r.size = ?2 AND t.platform_id = ?1 AND t.source = 'dat'
                  AND r.retired = 0 AND t.retired = 0 AND lower(r.name) LIKE '%.chd')",
         )?
-        .query_row(params![platform_id.0, size], |r| r.get(0))?)
+        .query_row(params![platform_id.as_str(), size], |r| r.get(0))?)
 }
 
 /// Whether any rom of this platform has this CRC32 and size, the pre-check
@@ -226,7 +228,7 @@ pub fn crc_candidate_exists(
            SELECT 1 FROM roms r JOIN titles t ON t.id = r.title_id
            WHERE t.platform_id = ?1 AND t.source = 'dat' AND r.crc32 = ?2 AND r.size = ?3)",
         )?
-        .query_row(params![platform_id.0, crc32, size], |r| r.get(0))?)
+        .query_row(params![platform_id.as_str(), crc32, size], |r| r.get(0))?)
 }
 
 /// Number of roms belonging to a title, for the disc all-or-nothing rule.
@@ -300,7 +302,7 @@ pub fn rom(conn: &Connection, id: RomId) -> Result<Option<EntryRom>> {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let rom = mistarr_server::db::ids::RomId(1);
+/// let rom = mistarr_core::RomId::new(1);
 /// assert!(!mistarr_server::db::roms::rom_retired(&conn, rom).unwrap());
 /// ```
 pub fn rom_retired(conn: &Connection, id: RomId) -> Result<bool> {
@@ -351,7 +353,7 @@ pub struct StoredZip {
 /// use mistarr_server::db::{ids::TitleId, roms};
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(roms::zip_roms(&conn, TitleId(1)).unwrap().is_empty());
+/// assert!(roms::zip_roms(&conn, TitleId::new(1)).unwrap().is_empty());
 /// ```
 pub fn zip_roms(conn: &Connection, id: TitleId) -> Result<Vec<StoredZip>> {
     let mut stmt = conn.prepare_cached(
@@ -391,7 +393,7 @@ pub struct ZipRom {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let rom = mistarr_server::db::ids::RomId(1);
+/// let rom = mistarr_core::RomId::new(1);
 /// assert!(mistarr_server::db::roms::zip_rom(&conn, rom).unwrap().is_none());
 /// ```
 pub fn zip_rom(conn: &Connection, rom_id: RomId) -> Result<Option<ZipRom>> {
@@ -423,7 +425,7 @@ pub fn zip_rom(conn: &Connection, rom_id: RomId) -> Result<Option<ZipRom>> {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(mistarr_server::db::roms::live_zip_roms(&conn, &mistarr_core::PlatformId("arcade".into())).unwrap().is_empty());
+/// assert!(mistarr_server::db::roms::live_zip_roms(&conn, &mistarr_core::PlatformId::new("arcade")).unwrap().is_empty());
 /// ```
 pub fn live_zip_roms(
     conn: &Connection,
@@ -434,7 +436,7 @@ pub fn live_zip_roms(
          WHERE t.platform_id = ?1 AND t.source = 'mra' AND t.retired = 0 AND r.retired = 0
          ORDER BY r.id",
     )?;
-    let mut rows = stmt.query([&platform.0])?;
+    let mut rows = stmt.query([&platform.as_str()])?;
     let mut out: HashMap<String, Vec<RomId>> = HashMap::new();
     while let Some(r) = rows.next()? {
         let (dir, name, id): (String, String, RomId) = (r.get(0)?, r.get(1)?, r.get(2)?);
@@ -506,9 +508,16 @@ mod tests {
         .expect("clear sha1");
         let wrong = Some(Sha1::from_bytes([0xde; 20]));
         let crc = |n| Some(Crc32::from_u32(n));
-        let m = match_rom(&c, &nes, wrong, Some(Md5::from_bytes([0x11; 16])), crc(!0), 4)
-            .expect("match")
-            .expect("a wrong sha1 falls to the md5 of a rom with no sha1");
+        let m = match_rom(
+            &c,
+            &nes,
+            wrong,
+            Some(Md5::from_bytes([0x11; 16])),
+            crc(!0),
+            4,
+        )
+        .expect("match")
+        .expect("a wrong sha1 falls to the md5 of a rom with no sha1");
         assert_eq!(m.rom_id, other);
         c.execute("UPDATE roms SET md5 = NULL WHERE id = ?1", [other])
             .expect("clear md5");

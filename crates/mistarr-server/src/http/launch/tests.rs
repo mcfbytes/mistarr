@@ -32,7 +32,7 @@ fn recording(app: &AppState) -> Arc<RecordingSink> {
 
 /// A title on `platform` with one rom per name, each with a file in `state`.
 async fn seed(app: &AppState, platform: &str, roms: &[(&str, FileState)]) -> TitleId {
-    let pid = PlatformId(platform.to_owned());
+    let pid = PlatformId::new(platform.to_owned());
     let roms: Vec<(String, FileState)> = roms.iter().map(|(n, s)| ((*n).to_owned(), *s)).collect();
     app.db
         .write(move |c| {
@@ -163,7 +163,7 @@ async fn a_second_launch_within_the_gap_is_busy() {
     let sink = recording(&app);
     touch(dir.path(), "_Console/NES_20240101.rbf");
     let id = seed(&app, "nes", &[("NES/a.nes", FileState::Verified)]).await;
-    launch_core(&app, &PlatformId("nes".into()))
+    launch_core(&app, &PlatformId::new("nes"))
         .await
         .expect("first");
     let err = launch_title(&app, id).await.expect_err("busy");
@@ -179,12 +179,12 @@ async fn failed_launches_do_not_hold_the_gap() {
     let (dir, app) = crate::app::testutil::state_with(|o| o.launch_gap = Duration::from_secs(60));
     recording(&app);
     assert_eq!(
-        status(launch_core(&app, &PlatformId("nes".into())).await),
+        status(launch_core(&app, &PlatformId::new("nes")).await),
         StatusCode::CONFLICT
     );
     touch(dir.path(), "_Console/NES_20240101.rbf");
     assert_eq!(
-        status(launch_core(&app, &PlatformId("nes".into())).await),
+        status(launch_core(&app, &PlatformId::new("nes")).await),
         StatusCode::OK
     );
 }
@@ -241,7 +241,7 @@ async fn titles_that_cannot_start_are_conflicts() {
         StatusCode::CONFLICT
     );
     assert_eq!(
-        status(launch_title(&app, TitleId(9999)).await),
+        status(launch_title(&app, TitleId::new(9999)).await),
         StatusCode::NOT_FOUND
     );
     assert_eq!(sink.lines().len(), 1);
@@ -254,7 +254,7 @@ async fn an_mra_title_loads_its_mra() {
     let id = app
         .db
         .write(|c| {
-            let written = crate::db::fixtures::dat(&PlatformId("arcade".into()))
+            let written = crate::db::fixtures::dat(&PlatformId::new("arcade"))
                 .title("Example Blaster")
                 .rom("exb.zip", &hashes(), crate::db::titles::RomStatus::Good)
                 .write(c)?;
@@ -278,7 +278,7 @@ async fn an_mra_title_loads_its_mra() {
         .write(move |c| {
             c.execute(
                 "UPDATE titles SET mra_path = '../outside.mra' WHERE id = ?1",
-                [id.0],
+                [id.get()],
             )?;
             Ok(())
         })
@@ -289,7 +289,7 @@ async fn an_mra_title_loads_its_mra() {
         .write(move |c| {
             c.execute(
                 "UPDATE titles SET mra_path = 'Example Blaster.mra' WHERE id = ?1",
-                [id.0],
+                [id.get()],
             )?;
             Ok(())
         })
@@ -307,12 +307,12 @@ async fn a_bare_core_starts_the_newest_rbf() {
     let (dir, app) = state();
     let sink = recording(&app);
     assert_eq!(
-        status(launch_core(&app, &PlatformId("snes".into())).await),
+        status(launch_core(&app, &PlatformId::new("snes")).await),
         StatusCode::CONFLICT
     );
     touch(dir.path(), "_Console/SNES_20240101.rbf");
     touch(dir.path(), "_Console/SNES_20250101.rbf");
-    let launched = launch_core(&app, &PlatformId("snes".into()))
+    let launched = launch_core(&app, &PlatformId::new("snes"))
         .await
         .expect("launch");
     assert_eq!(launched.core, "_Console/SNES_20250101.rbf");
@@ -320,11 +320,11 @@ async fn a_bare_core_starts_the_newest_rbf() {
     let rbf = dir.path().join("_Console/SNES_20250101.rbf");
     assert_eq!(sink.lines(), [format!("load_core {}\n", rbf.display())]);
     assert_eq!(
-        status(launch_core(&app, &PlatformId("arcade".into())).await),
+        status(launch_core(&app, &PlatformId::new("arcade")).await),
         StatusCode::CONFLICT
     );
     assert_eq!(
-        status(launch_core(&app, &PlatformId("nope".into())).await),
+        status(launch_core(&app, &PlatformId::new("nope")).await),
         StatusCode::NOT_FOUND
     );
 }
@@ -333,7 +333,7 @@ async fn a_bare_core_starts_the_newest_rbf() {
 async fn an_absent_interface_is_unavailable() {
     let (dir, app) = state();
     touch(dir.path(), "_Console/SNES_20240101.rbf");
-    let err = launch_core(&app, &PlatformId("snes".into()))
+    let err = launch_core(&app, &PlatformId::new("snes"))
         .await
         .expect_err("no FIFO");
     assert_eq!(
@@ -343,7 +343,7 @@ async fn an_absent_interface_is_unavailable() {
     let sink = recording(&app);
     sink.set_outcome(FakeOutcome::NotListening);
     assert_eq!(
-        status(launch_core(&app, &PlatformId("snes".into())).await),
+        status(launch_core(&app, &PlatformId::new("snes")).await),
         StatusCode::SERVICE_UNAVAILABLE
     );
     sink.set_outcome(FakeOutcome::Absent);
@@ -360,7 +360,7 @@ async fn the_setting_turns_launching_off() {
     let sink = recording(&app);
     touch(dir.path(), "_Console/SNES_20240101.rbf");
     app.update_config(|c| c.prefs.launch = false);
-    let err = launch_core(&app, &PlatformId("snes".into()))
+    let err = launch_core(&app, &PlatformId::new("snes"))
         .await
         .expect_err("disabled");
     assert_eq!(

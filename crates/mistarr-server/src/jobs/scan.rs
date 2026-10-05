@@ -52,7 +52,7 @@ impl Job for ScanJob {
     }
 
     fn detail(&self) -> Option<String> {
-        self.platform_id.as_ref().map(|p| p.0.clone())
+        self.platform_id.as_ref().map(|p| p.as_str().to_owned())
     }
 
     fn lane(&self) -> Lane {
@@ -78,7 +78,7 @@ pub async fn enqueue_if_games_dir_exists(
     app: &Arc<AppState>,
     platform_id: &PlatformId,
 ) -> Result<Option<JobId>> {
-    let Some(platform) = platforms::by_id(&platform_id.0) else {
+    let Some(platform) = platforms::by_id(platform_id.as_str()) else {
         return Ok(None);
     };
     if platform.is_arcade() {
@@ -117,7 +117,7 @@ pub async fn enqueue_if_games_dir_exists(
 /// Whether `id` is the arcade platform, whose presence and verification come
 /// from the arcade catalogue rather than a library scan.
 pub(crate) fn is_arcade(id: &PlatformId) -> bool {
-    platforms::by_id(&id.0).is_some_and(Platform::is_arcade)
+    platforms::by_id(id.as_str()).is_some_and(Platform::is_arcade)
 }
 
 /// Enqueues one [`ScanJob`] per enabled platform, skipping the arcade platform,
@@ -265,8 +265,8 @@ fn list_files(dir: &Path) -> io::Result<Vec<ListedFile>> {
 }
 
 async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
-    let platform = platforms::by_id(&id.0)
-        .ok_or_else(|| Error::Job(format!("unknown platform `{}`", id.0)))?;
+    let platform = platforms::by_id(id.as_str())
+        .ok_or_else(|| Error::Job(format!("unknown platform `{}`", id.as_str())))?;
     if platform.is_arcade() {
         // Defensive: arcade zips are never walked as cartridges, even called directly.
         ctx.app
@@ -378,7 +378,7 @@ async fn report_outcome(ctx: &JobContext, pid: &PlatformId, total: usize) -> Res
         .read(move |c| files::state_counts(c, &id))
         .await?;
     ctx.progress(json!({
-        "platform_id": pid.0,
+        "platform_id": pid.as_str(),
         "done": total,
         "total": total,
         "matched": counts.verified + counts.misnamed + counts.bad,
@@ -1050,7 +1050,7 @@ mod tests {
     #[tokio::test]
     async fn scan_is_queued_only_when_the_games_dir_exists() {
         let (_dir, app) = state();
-        let nes = PlatformId("nes".into());
+        let nes = PlatformId::new("nes");
         assert_eq!(
             enqueue_if_games_dir_exists(&app, &nes).await.expect("run"),
             None,
@@ -1069,7 +1069,7 @@ mod tests {
             .expect("row");
         assert_eq!(row.kind, JobKind::Scan);
         assert!(
-            enqueue_if_games_dir_exists(&app, &PlatformId("no-such".into()))
+            enqueue_if_games_dir_exists(&app, &PlatformId::new("no-such"))
                 .await
                 .expect("run")
                 .is_none()
@@ -1079,7 +1079,7 @@ mod tests {
     #[tokio::test]
     async fn a_dat_triggered_scan_never_queues_for_arcade() {
         let (_dir, app) = state();
-        let arcade = PlatformId("arcade".into());
+        let arcade = PlatformId::new("arcade");
         fs::create_dir_all(app.config().paths.games.join("mame")).expect("mkdir");
         assert_eq!(
             enqueue_if_games_dir_exists(&app, &arcade)
@@ -1151,7 +1151,7 @@ mod tests {
         let (_dir, app) = state();
         let nes = app.config().paths.games.join("NES");
         fs::create_dir_all(&nes).expect("mkdir");
-        let pid = PlatformId("nes".into());
+        let pid = PlatformId::new("nes");
         app.db
             .write_blocking({
                 let pid = pid.clone();
@@ -1198,7 +1198,7 @@ mod tests {
         Scheduler::run_inline(
             &app,
             Arc::new(ScanJob {
-                platform_id: Some(PlatformId("arcade".into())),
+                platform_id: Some(PlatformId::new("arcade")),
             }),
         )
         .await
@@ -1214,10 +1214,10 @@ mod tests {
     #[tokio::test]
     async fn a_disabled_platform_is_not_queued() {
         let (_dir, app) = state();
-        let nes = PlatformId("nes".into());
+        let nes = PlatformId::new("nes");
         fs::create_dir_all(app.config().paths.games.join("NES")).expect("mkdir");
         app.db
-            .write(|c| platform_rows::set_enabled(c, &PlatformId("nes".into()), false).map(|_| ()))
+            .write(|c| platform_rows::set_enabled(c, &PlatformId::new("nes"), false).map(|_| ()))
             .await
             .expect("disable");
         assert_eq!(
@@ -1231,8 +1231,8 @@ mod tests {
     fn only_stripping_rule_rows_without_the_whole_form_lack_it() {
         let (a, b) = (Sha1::from_bytes([0xa; 20]), Sha1::from_bytes([0xb; 20]));
         let row = |rule: Option<&str>, sha1: Option<Sha1>, whole: Option<Sha1>| files::FileRow {
-            id: FileId(1),
-            platform_id: PlatformId("nes".into()),
+            id: FileId::new(1),
+            platform_id: PlatformId::new("nes"),
             rel_path: "NES/a.nes".into(),
             size: 20,
             mtime: 1,

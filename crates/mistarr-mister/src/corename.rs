@@ -65,7 +65,7 @@ pub fn read_corename(path: &Path) -> Result<CoreState> {
 /// std::fs::create_dir_all(root.join("_Console")).unwrap();
 /// std::fs::write(root.join("_Console/SNES_20240101.rbf"), b"").unwrap();
 /// let cores = mistarr_mister::corename::installed_cores(root);
-/// assert!(cores.iter().any(|c| c.name == "SNES" && c.platforms[0].0 == "snes"));
+/// assert!(cores.iter().any(|c| c.name == "SNES" && c.platforms[0].as_str() == "snes"));
 /// ```
 #[must_use]
 pub fn installed_cores(root: &Path) -> Vec<InstalledCore> {
@@ -202,7 +202,7 @@ mod tests {
         let nes = cores.iter().find(|c| c.name == "NES").expect("nes");
         assert_eq!(
             nes.platforms,
-            [PlatformId("nes".into()), PlatformId("fds".into())]
+            [PlatformId::new("nes"), PlatformId::new("fds")]
         );
         assert!(cores
             .iter()
@@ -225,12 +225,7 @@ mod tests {
         let cores = installed_cores(root);
         assert_eq!(cores.len(), 2);
         for core in &cores {
-            assert_eq!(
-                core.platforms,
-                [PlatformId("arcade".into())],
-                "{}",
-                core.name
-            );
+            assert_eq!(core.platforms, [PlatformId::new("arcade")], "{}", core.name);
         }
     }
 
@@ -244,7 +239,7 @@ mod tests {
         let ngp = cores.iter().find(|c| c.name == "JTNGP").expect("core");
         assert_eq!(
             ngp.platforms,
-            [PlatformId("arcade".into()), PlatformId("ngp".into())]
+            [PlatformId::new("arcade"), PlatformId::new("ngp")]
         );
     }
 

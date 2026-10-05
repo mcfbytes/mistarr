@@ -524,7 +524,7 @@ mod tests {
         let t = a.issue();
         assert_eq!(t, ta + 1);
         a.close(t);
-        a.bind(t, JobId(4), &scheduler);
+        a.bind(t, JobId::new(4), &scheduler);
         assert!(!a.cancel(t, &scheduler), "an ended fetch is not kept open");
     }
 

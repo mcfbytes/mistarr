@@ -1,4 +1,4 @@
-use mistarr_sources::binding::{Confidence, RomRef};
+use mistarr_sources::binding::Confidence;
 use mistarr_sources::torrent::TorrentFile;
 
 use super::*;
@@ -64,7 +64,7 @@ fn source(c: &Connection, byte: u8, files: &[(&str, u64, Option<RomId>, Confiden
     let matches: Vec<_> = files
         .iter()
         .zip(0u32..)
-        .map(|((_, _, rom, conf), i)| (i, rom.map(|r| RomRef(r.0)), *conf))
+        .map(|((_, _, rom, conf), i)| (i, *rom, *conf))
         .collect();
     sources::set_matches(c, id, &matches).expect("matches");
     id
@@ -94,7 +94,7 @@ fn states_round_trip_and_follow_the_machine() {
     assert!(!Importing.can_become(Cancelled));
     assert!(!Done.can_become(Queued) && !Cancelled.can_become(Queued));
     assert!(!Wanted.can_become(Transferring));
-    assert_eq!(DownloadId(4).to_string(), "4");
+    assert_eq!(DownloadId::new(4).to_string(), "4");
 }
 
 #[test]
@@ -152,10 +152,13 @@ fn best_file_prefers_size_then_name_then_load_then_id() {
         },
     )
     .expect("create");
-    c.execute("UPDATE downloads SET state = 'bad' WHERE id = ?1", [bad.0])
-        .expect("bad");
+    c.execute(
+        "UPDATE downloads SET state = 'bad' WHERE id = ?1",
+        [bad.get()],
+    )
+    .expect("bad");
     assert_eq!(best_file(&c, rom).expect("best"), candidate(by_size, 0));
-    assert_eq!(best_file(&c, RomId(999)).expect("best"), None);
+    assert_eq!(best_file(&c, RomId::new(999)).expect("best"), None);
 }
 
 #[test]
@@ -183,7 +186,7 @@ fn want_title_queues_or_waits_and_skips_open_and_verified_roms() {
         (row.rom_name.as_str(), row.size),
         ("Example Quest (USA).nes", 16)
     );
-    assert_eq!(row.platform_id.0, "nes");
+    assert_eq!(row.platform_id.as_str(), "nes");
 
     set_state(&c, row.id, DownloadState::Cancelled, 9).expect("cancel");
     let again = want_title(&c, title, 10).expect("want");
@@ -221,7 +224,7 @@ fn transitions_progress_and_lookups() {
     assert_eq!(queued_sources(&c).expect("queued"), [src]);
     assert_eq!(selected_indices(&c, src).expect("selected"), [0]);
     assert!(!set_state(&c, id, DownloadState::Importing, 2).expect("skip"));
-    assert!(!set_state(&c, DownloadId(99), DownloadState::Queued, 2).expect("missing"));
+    assert!(!set_state(&c, DownloadId::new(99), DownloadState::Queued, 2).expect("missing"));
     assert_eq!(
         move_all(&c, &[id], DownloadState::Transferring, None, 2).expect("start"),
         [id]
@@ -304,7 +307,7 @@ fn retry_and_cancel() {
         RetryOutcome::NotFailed(DownloadState::Queued)
     );
     assert_eq!(
-        retry(&c, DownloadId(99), 2).expect("retry"),
+        retry(&c, DownloadId::new(99), 2).expect("retry"),
         RetryOutcome::Missing
     );
     move_all(&c, &[id], DownloadState::Failed, Some("disk full"), 2).expect("fail");
@@ -336,7 +339,7 @@ fn retry_and_cancel() {
         CancelOutcome::Final(DownloadState::Cancelled)
     );
     assert_eq!(
-        cancel(&c, DownloadId(99), 7).expect("cancel"),
+        cancel(&c, DownloadId::new(99), 7).expect("cancel"),
         CancelOutcome::Missing
     );
 }

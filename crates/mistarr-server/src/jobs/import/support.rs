@@ -10,8 +10,8 @@ use mistarr_core::matching::{Payload, Rom};
 use mistarr_core::{Crc32, Hashes, Md5, Sha1};
 use mistarr_mister::PlaceRom;
 
-use crate::db::ids::RomId;
 use crate::db::roms::EntryRom;
+use mistarr_core::RomId;
 
 /// Bytes of a staged payload handed to the adapter as its head.
 const HEAD_LEN: u64 = 16;
@@ -316,7 +316,7 @@ mod tests {
 
     fn rom(id: i64, name: &str, h: &Hashes) -> EntryRom {
         EntryRom {
-            id: RomId(id),
+            id: RomId::new(id),
             name: name.into(),
             size: h.size,
             crc32: Some(h.crc32),
@@ -341,12 +341,15 @@ mod tests {
         let set = match_members(&roms, &both);
         assert!(set.is_exact());
         assert_eq!(
-            set.pairs.iter().map(|(_, r)| r.id.0).collect::<Vec<_>>(),
+            set.pairs
+                .iter()
+                .map(|(_, r)| r.id.get())
+                .collect::<Vec<_>>(),
             [2, 1]
         );
         let p = Hashed::plain(None, h);
-        let picked = pick_rom(&roms, &p, Some(RomId(2)), None, &[]).map(|r| r.id);
-        assert_eq!(picked, Some(RomId(2)));
+        let picked = pick_rom(&roms, &p, Some(RomId::new(2)), None, &[]).map(|r| r.id);
+        assert_eq!(picked, Some(RomId::new(2)));
         let odd = [member("a.bin", &h), member("c.bin", &other)];
         assert_eq!(match_members(&roms, &odd).extra, ["c.bin"]);
         let text = explain("This zip lacks members.", &odd);

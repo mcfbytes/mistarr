@@ -10,10 +10,11 @@ use common::{boot, boot_with, config_in, eventually, get, request, Booted, Sse};
 use mistarr_clients::fake::{FakeResponse, FakeServer};
 use mistarr_clients::SeedPolicy;
 use mistarr_core::hash::{hash_reader, HeaderRule};
+use mistarr_core::RomId;
 use mistarr_core::{Hashes, PlatformId};
 use mistarr_server::db::downloads::{self, DownloadRow, DownloadState};
 use mistarr_server::db::files::{self, FileState, NewFile};
-use mistarr_server::db::ids::{DownloadId, FileId, RomId, SourceId, TitleId};
+use mistarr_server::db::ids::{DownloadId, FileId, SourceId, TitleId};
 use mistarr_server::db::imports::{self, ImportAction};
 use mistarr_server::db::roms;
 use mistarr_server::db::sources::{self, NewSource, SourceState};
@@ -87,7 +88,7 @@ fn source(b: &Booted, client_id: Option<&str>) -> SourceId {
 /// Seeds one entry with one rom and returns `(title_id, rom_id)`.
 fn entry(b: &Booted, platform: &str, game: &str, rom: &str, hashes: &Hashes) -> (TitleId, RomId) {
     let (pid, game, rom, hashes) = (
-        PlatformId(platform.into()),
+        PlatformId::new(platform.to_owned()),
         game.to_owned(),
         rom.to_owned(),
         *hashes,
@@ -201,7 +202,7 @@ fn log(b: &Booted) -> Vec<imports::LogRow> {
 }
 
 fn file_at(b: &Booted, platform: &str, rel: &str) -> Option<files::FileRow> {
-    let (pid, rel) = (PlatformId(platform.into()), rel.to_owned());
+    let (pid, rel) = (PlatformId::new(platform.to_owned()), rel.to_owned());
     b.running
         .app
         .db
@@ -225,7 +226,7 @@ fn existing_file(
         .write_blocking(move |c| {
             files::upsert(
                 c,
-                &PlatformId("nes".into()),
+                &PlatformId::new("nes"),
                 &NewFile {
                     rom_id,
                     crc32: Some(h.crc32),
@@ -423,7 +424,11 @@ async fn a_transfer_whose_dat_was_removed_is_quarantined_saying_so() {
                 [title],
                 |r| r.get(0),
             )?;
-            mistarr_server::db::dats::retire(c, mistarr_server::db::ids::DatVersionId(version), 1)?;
+            mistarr_server::db::dats::retire(
+                c,
+                mistarr_server::db::ids::DatVersionId::new(version),
+                1,
+            )?;
             Ok(())
         })
         .expect("remove");
@@ -525,7 +530,7 @@ const DISC_NAMES: [&str; 3] = [
 /// Seeds a disc entry whose three tracks hold `data` and stages them.
 fn disc_with(b: &Booted, data: &[Vec<u8>]) -> (TitleId, Vec<(RomId, PathBuf)>) {
     let names = DISC_NAMES;
-    let pid = PlatformId("psx".into());
+    let pid = PlatformId::new("psx");
     let hashes: Vec<Hashes> = data.iter().map(|d| hash_of(d)).collect();
     let (title, roms) = b
         .running
@@ -639,11 +644,11 @@ async fn a_bios_entry_is_refused() {
         .app
         .db
         .read_blocking(move |c| {
-            Ok(
-                c.query_row("SELECT error FROM downloads WHERE id = ?1", [id.0], |r| {
-                    r.get(0)
-                })?,
-            )
+            Ok(c.query_row(
+                "SELECT error FROM downloads WHERE id = ?1",
+                [id.get()],
+                |r| r.get(0),
+            )?)
         })
         .expect("error");
     assert_eq!(error.as_deref(), Some("BIOS entries are never imported"));
@@ -674,7 +679,7 @@ async fn rename_gives_a_misnamed_file_its_canonical_name() {
         FileState::Misnamed,
     );
     let path = format!("/api/v1/titles/{title}/rename");
-    let body_json = json!({ "file_id": file.0 }).to_string();
+    let body_json = json!({ "file_id": file.get() }).to_string();
     let r = request(b.addr(), "POST", &path, &[], Some(&body_json)).await;
     assert_eq!(r.status, 200, "{}", r.body);
     assert_eq!(r.json()["variants"][0]["roms"][0]["file_path"], NES_TARGET);
@@ -738,7 +743,7 @@ fn row_error(b: &Booted, id: DownloadId) -> String {
 }
 
 fn set_importing(b: &Booted, ids: &[DownloadId]) {
-    let ids: Vec<i64> = ids.iter().map(|i| i.0).collect();
+    let ids: Vec<i64> = ids.iter().map(|i| i.get()).collect();
     b.running
         .app
         .db
@@ -848,7 +853,7 @@ async fn identical_tracks_of_one_disc_are_each_placed() {
 
 /// Seeds a two-rom Neo Geo entry and stages a zip of `members`.
 fn romset(b: &Booted, members: &[(&str, &[u8])]) -> (Vec<RomId>, PathBuf) {
-    let pid = PlatformId("neogeo".into());
+    let pid = PlatformId::new("neogeo");
     let (ha, hb) = (hash_of(&payload(30, 256)), hash_of(&payload(31, 128)));
     let roms = b
         .running
@@ -879,7 +884,7 @@ fn member_rows(b: &Booted) -> Vec<files::FileRow> {
         .app
         .db
         .read_blocking(|c| {
-            files::zip_member_rows(c, &PlatformId("neogeo".into()), "NeoGeo/Example Set.zip")
+            files::zip_member_rows(c, &PlatformId::new("neogeo"), "NeoGeo/Example Set.zip")
         })
         .expect("rows")
 }
@@ -904,7 +909,7 @@ async fn a_romset_is_verified_member_by_member_and_agrees_with_the_scan() {
     assert!(before.iter().all(|r| r.state == FileState::Verified));
     assert!(file_at(&b, "neogeo", "NeoGeo/Example Set.zip").is_none());
     let scan = std::sync::Arc::new(mistarr_server::jobs::scan::ScanJob {
-        platform_id: Some(PlatformId("neogeo".into())),
+        platform_id: Some(PlatformId::new("neogeo")),
     });
     mistarr_server::jobs::Scheduler::run_inline(&b.running.app, scan)
         .await
@@ -970,7 +975,10 @@ async fn a_failure_before_the_renames_changes_nothing_and_can_be_retried() {
     announce(&b, id);
     settled(&b, id, DownloadState::Done).await;
     assert!(games(&b).join(NES_TARGET).is_file());
-    assert!(!staging(&b).join(".import").join(id.0.to_string()).exists());
+    assert!(!staging(&b)
+        .join(".import")
+        .join(id.get().to_string())
+        .exists());
     b.running.shutdown().await.expect("shutdown");
 }
 
@@ -1035,7 +1043,7 @@ async fn rename_clears_a_stale_row_at_the_destination() {
     data.extend_from_slice(&body);
     let file = existing_file(&b, "NES/quest.nes", &data, Some(rom), FileState::Misnamed);
     let path = format!("/api/v1/titles/{title}/rename");
-    let body_json = json!({ "file_id": file.0 }).to_string();
+    let body_json = json!({ "file_id": file.get() }).to_string();
     let r = request(b.addr(), "POST", &path, &[], Some(&body_json)).await;
     assert_eq!(r.status, 200, "{}", r.body);
     let row = file_at(&b, "nes", NES_TARGET).expect("row");
@@ -1058,7 +1066,7 @@ async fn rename_answers_500_when_the_file_cannot_be_read() {
     let file = existing_file(&b, "NES/quest.nes", &body, Some(rom), FileState::Misnamed);
     std::fs::remove_file(games(&b).join("NES/quest.nes")).expect("rm");
     let path = format!("/api/v1/titles/{title}/rename");
-    let body_json = json!({ "file_id": file.0 }).to_string();
+    let body_json = json!({ "file_id": file.get() }).to_string();
     let r = request(b.addr(), "POST", &path, &[], Some(&body_json)).await;
     assert_eq!(r.status, 500, "{}", r.body);
     assert_eq!(r.json()["error"]["code"], "internal");

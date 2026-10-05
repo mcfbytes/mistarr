@@ -306,9 +306,9 @@ mod tests {
             .await
             .expect("retire");
         assert_eq!(status, StatusCode::NO_CONTENT);
-        let recompute = Recompute::new("nes").payload();
+        let recompute = Recompute::new(&mistarr_core::PlatformId::new("nes")).payload();
         let scan = ScanJob {
-            platform_id: Some(PlatformId("nes".into())),
+            platform_id: Some(PlatformId::new("nes")),
         }
         .payload();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);

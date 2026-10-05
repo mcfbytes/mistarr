@@ -99,7 +99,7 @@ fn add(
 fn rom(c: &Connection, title: TitleId, name: &str) -> i64 {
     c.query_row(
         "SELECT id FROM roms WHERE title_id = ?1 AND name = ?2",
-        params![title.0, name],
+        params![title.get(), name],
         |r| r.get(0),
     )
     .expect("rom")
@@ -163,7 +163,7 @@ fn plain(c: &Connection) -> DatVersionId {
 
 fn id_of(c: &Connection, name: &str) -> TitleId {
     c.query_row("SELECT id FROM titles WHERE name = ?1", [name], |r| {
-        r.get(0).map(TitleId)
+        r.get(0).map(TitleId::new)
     })
     .expect("title")
 }
@@ -193,16 +193,16 @@ fn upsert_keeps_ids_across_versions_and_retires_dropped_roms() {
     let dv: i64 = c
         .query_row(
             "SELECT dat_version_id FROM titles WHERE id = ?1",
-            [id.0],
+            [id.get()],
             |r| r.get(0),
         )
         .expect("title");
-    assert_eq!(dv, v2.0);
+    assert_eq!(dv, v2.get());
     assert_eq!(tags_of(&c, id, Tag::Regions).expect("regions"), ["Europe"]);
     let roms: Vec<(String, String, bool)> = c
         .prepare("SELECT name, status, retired FROM roms WHERE title_id = ?1 ORDER BY name")
         .expect("prepare")
-        .query_map([id.0], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .query_map([id.get()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
         .expect("query")
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
@@ -315,7 +315,7 @@ fn view_counts_a_title_once_whatever_its_roms_and_files() {
         groups::flush(c).expect("flush");
         c.query_row(
             "SELECT variants, have_verified FROM title_groups WHERE parent_id = ?1",
-            [disc.0],
+            [disc.get()],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .expect("group")
@@ -325,7 +325,7 @@ fn view_counts_a_title_once_whatever_its_roms_and_files() {
     file(&c, Some(t2), "saga/t2-old.bin", "misnamed");
     assert_eq!(have(&c), (1, 1));
     file(&c, None, "stray.bin", "unverified");
-    c.execute("UPDATE titles SET wanted = 1 WHERE id = ?1", [disc.0])
+    c.execute("UPDATE titles SET wanted = 1 WHERE id = ?1", [disc.get()])
         .expect("want");
     let counts = counts(&c, &["bios".to_owned()]).expect("counts");
     assert_eq!(
@@ -555,9 +555,11 @@ fn failing_check_and_partial_count_clone_groups_not_titles() {
     // clone group each, exactly as a catalogue run would.
     recompute_platform(&c, &pid("arcade"), &Prefs::default()).expect("recompute");
     let parent_of = |id: crate::db::ids::TitleId| -> i64 {
-        c.query_row("SELECT parent_id FROM titles WHERE id = ?1", [id.0], |r| {
-            r.get(0)
-        })
+        c.query_row(
+            "SELECT parent_id FROM titles WHERE id = ?1",
+            [id.get()],
+            |r| r.get(0),
+        )
         .expect("parent")
     };
     assert_eq!(
@@ -639,7 +641,7 @@ fn browse_filters_sorts_and_pages() {
     assert_eq!(names(&beta).0, ["Example Quest"]);
 
     let tale = id_of(&c, "Other Tale (Europe)");
-    c.execute("UPDATE titles SET wanted = 1 WHERE id = ?1", [tale.0])
+    c.execute("UPDATE titles SET wanted = 1 WHERE id = ?1", [tale.get()])
         .expect("want");
     let t2 = rom(&c, tale, "t.bin");
     file(&c, Some(t2), "t.bin", "verified");
@@ -773,7 +775,7 @@ fn detail_lists_variants_roms_files_and_sources() {
     assert_eq!(v.roms.len(), 1);
     assert_eq!(
         (v.roms[0].file_id, v.roms[0].file_state),
-        (Some(FileId(f)), Some(FileState::Misnamed))
+        (Some(FileId::new(f)), Some(FileState::Misnamed))
     );
     let beta = d
         .variants
@@ -781,8 +783,10 @@ fn detail_lists_variants_roms_files_and_sources() {
         .find(|v| v.flags == ["beta"])
         .expect("beta");
     assert!(beta.inferred && !beta.is_1g1r_pick);
-    assert!(group_detail(&c, TitleId(999)).expect("detail").is_none());
-    assert_eq!(TitleId(3).to_string(), "3");
+    assert!(group_detail(&c, TitleId::new(999))
+        .expect("detail")
+        .is_none());
+    assert_eq!(TitleId::new(3).to_string(), "3");
 }
 
 #[test]
@@ -805,7 +809,7 @@ fn want_refuses_bios_and_retired_and_unwant_cancels_queued_downloads() {
         c.execute(
             "INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, created_at, updated_at)
              VALUES (?1, ?2, 1, 0, ?3, 0, 0)",
-            params![usa.0, q, state],
+            params![usa.get(), q, state],
         )
         .expect("download");
     }
@@ -825,7 +829,7 @@ fn want_refuses_bios_and_retired_and_unwant_cancels_queued_downloads() {
     assert!(dats::retire_absent(&c, v2).expect("retire") > 0);
     assert_eq!(want(&c, tale).expect("want"), Err(WantRefused::Retired));
     assert_eq!(
-        want(&c, TitleId(999)).expect("want"),
+        want(&c, TitleId::new(999)).expect("want"),
         Err(WantRefused::Missing)
     );
 }
@@ -934,7 +938,7 @@ fn removing_a_dat_retires_its_roms_unwants_and_cancels_queued_downloads() {
         c.execute(
             "INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, created_at, updated_at)
              VALUES (?1, ?2, 1, 0, ?3, 0, 0)",
-            params![usa.0, q, state],
+            params![usa.get(), q, state],
         )
         .expect("download");
     }
@@ -995,7 +999,7 @@ fn nodes_strategy() -> impl Strategy<Value = Vec<Node>> {
             let raw = order
                 .get(i)
                 .map_or(1000 + i64::try_from(i).expect("i"), |&o| o * 3 + 1);
-            TitleId(raw)
+            TitleId::new(raw)
         };
         let mut nodes: Vec<Node> = specs
             .iter()
@@ -1267,7 +1271,7 @@ fn chained_re_rooting_keeps_every_group_apart() {
         (41, Some(10)),
         (50, Some(50)),
     ]
-    .map(|(t, g): (i64, Option<i64>)| (TitleId(t), g.map(TitleId)));
+    .map(|(t, g): (i64, Option<i64>)| (TitleId::new(t), g.map(TitleId::new)));
     assert_eq!(
         groups, want,
         "X links to A; B and N keep a group rooted at N; C keeps its own"

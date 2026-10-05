@@ -5,8 +5,9 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
-use crate::binding::{base_name, normalize_name, Confidence, RomRef};
+use crate::binding::{base_name, normalize_name, Confidence};
 use crate::torrent::TorrentFile;
+use mistarr_core::RomId;
 
 /// Most title groups one file may name by the fuzzy tier; a file naming
 /// more is ambiguous and gets no fuzzy candidate.
@@ -19,7 +20,7 @@ pub const MAX_SIZE_ONLY: usize = 4;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SizedRom {
     /// The rom.
-    pub rom: RomRef,
+    pub rom: RomId,
     /// Its `match_base`: the normalized name before the first tag.
     pub base: String,
     /// Its title's clone group, so versions of one entry count once.
@@ -177,7 +178,8 @@ pub fn signal(file: &[String], rom: &[String]) -> Signal {
 /// there are 1 to [`MAX_SIZE_ONLY`].
 ///
 /// ```
-/// use mistarr_sources::binding::{Confidence, RomRef};
+/// use mistarr_sources::binding::Confidence;
+/// use mistarr_core::RomId;
 /// use mistarr_sources::fuzzy::{candidates, SizeIndex, SizedRom};
 /// use mistarr_sources::torrent::TorrentFile;
 ///
@@ -185,14 +187,14 @@ pub fn signal(file: &[String], rom: &[String]) -> Signal {
 /// impl SizeIndex for Nova {
 ///     fn roms_of_size(&self, size: u64) -> Vec<SizedRom> {
 ///         if size != 16 { return Vec::new(); }
-///         let rom = |id, base: &str| SizedRom { rom: RomRef(id), base: base.into(), group: id };
+///         let rom = |id, base: &str| SizedRom { rom: RomId::new(id), base: base.into(), group: id };
 ///         vec![rom(1, "nova the squirrel"), rom(2, "other tale")]
 ///     }
 /// }
 /// let files = vec![TorrentFile { index: 3, path: "nova.nes".into(), size: 16 }];
 /// let unmatched: Vec<&TorrentFile> = files.iter().collect();
 /// let found = candidates(&files, &unmatched, &["nes"], &Nova);
-/// assert_eq!(found, vec![(3, RomRef(1), Confidence::Fuzzy)]);
+/// assert_eq!(found, vec![(3, RomId::new(1), Confidence::Fuzzy)]);
 /// ```
 #[must_use]
 pub fn candidates(
@@ -200,7 +202,7 @@ pub fn candidates(
     unmatched: &[&TorrentFile],
     extensions: &[&str],
     index: &dyn SizeIndex,
-) -> Vec<(u32, RomRef, Confidence)> {
+) -> Vec<(u32, RomId, Confidence)> {
     let considered = |f: &TorrentFile| f.size > 0 && has_extension(&f.path, extensions);
     let mut by_size: BTreeMap<u64, Vec<&TorrentFile>> = BTreeMap::new();
     let mut stems: HashMap<u64, u32> = HashMap::new();
@@ -331,7 +333,7 @@ impl<'r> Group<'r> {
 
     /// The roms `words` name: equal ones when there are any, else those
     /// they lead; none when they span more than [`MAX_FUZZY_GROUPS`] groups.
-    fn matches(&self, words: &[String]) -> Vec<RomRef> {
+    fn matches(&self, words: &[String]) -> Vec<RomId> {
         let lookup = |map: &HashMap<String, Vec<usize>>, k: &str| {
             map.get(k).map_or(&[][..], Vec::as_slice).to_vec()
         };
@@ -350,7 +352,7 @@ impl<'r> Group<'r> {
         if groups.len() > MAX_FUZZY_GROUPS {
             return Vec::new();
         }
-        let mut out: Vec<RomRef> = roms.iter().map(|r| r.rom).collect();
+        let mut out: Vec<RomId> = roms.iter().map(|r| r.rom).collect();
         out.sort_unstable();
         out
     }
@@ -376,7 +378,7 @@ mod tests {
 
     fn rom(id: i64, base: &str, group: i64, size: u64) -> (SizedRom, u64) {
         let r = SizedRom {
-            rom: RomRef(id),
+            rom: RomId::new(id),
             base: base.to_owned(),
             group,
         };
@@ -392,7 +394,7 @@ mod tests {
     }
 
     /// Runs [`candidates`] with every file unmatched.
-    fn run(files: &[TorrentFile], roms: &Roms) -> Vec<(u32, RomRef, Confidence)> {
+    fn run(files: &[TorrentFile], roms: &Roms) -> Vec<(u32, RomId, Confidence)> {
         let unmatched: Vec<&TorrentFile> = files.iter().collect();
         candidates(files, &unmatched, &["nes"], roms)
     }
@@ -415,8 +417,8 @@ mod tests {
         assert_eq!(
             run(&files, &nova()),
             [
-                (0, RomRef(1), Confidence::Fuzzy),
-                (0, RomRef(2), Confidence::Fuzzy)
+                (0, RomId::new(1), Confidence::Fuzzy),
+                (0, RomId::new(2), Confidence::Fuzzy)
             ]
         );
     }
@@ -479,7 +481,7 @@ mod tests {
         let names = |p: &str| -> Vec<i64> {
             run(&[file(0, p, 8), file(1, "zzz.nes", 99)], &roms)
                 .iter()
-                .map(|(_, r, _)| r.0)
+                .map(|(_, r, _)| r.get())
                 .collect()
         };
         assert_eq!(names("quest_2.nes"), [2]);
@@ -511,8 +513,8 @@ mod tests {
         assert_eq!(
             found,
             [
-                (0, RomRef(1), Confidence::Fuzzy),
-                (1, RomRef(2), Confidence::Fuzzy)
+                (0, RomId::new(1), Confidence::Fuzzy),
+                (1, RomId::new(2), Confidence::Fuzzy)
             ]
         );
         let flat = [file(0, "a/game.nes", 8), file(1, "a/game.nes", 8)];
@@ -630,7 +632,7 @@ mod tests {
             let found = run(&files, &index);
             for (i, r, confidence) in &found {
                 let f = &files[*i as usize];
-                let (ws, size) = &roms[usize::try_from(r.0).unwrap_or(0)];
+                let (ws, size) = &roms[usize::try_from(r.get()).unwrap_or(0)];
                 prop_assert_eq!(*size, f.size);
                 if *confidence == Confidence::Fuzzy {
                     prop_assert_ne!(signal(&stem_words(&f.path), &words(&ws.join(" "))), Signal::None);

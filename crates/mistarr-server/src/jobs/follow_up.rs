@@ -19,12 +19,12 @@ pub async fn catalogue_changed(app: &Arc<AppState>, platforms: &[PlatformId], re
         if recomputed {
             self::recomputed(app, platform).await;
         } else {
-            Scheduler::submit(app, Arc::new(Recompute::new(&platform.0))).await;
+            Scheduler::submit(app, Arc::new(Recompute::new(platform))).await;
         }
     }
     for platform in platforms {
         if let Err(e) = scan::enqueue_if_games_dir_exists(app, platform).await {
-            tracing::warn!(platform = %platform.0, error = %e, "cannot enqueue automatic scan");
+            tracing::warn!(platform = %platform.as_str(), error = %e, "cannot enqueue automatic scan");
         }
     }
     if platforms.is_empty() {
@@ -44,7 +44,7 @@ pub async fn recomputed(app: &Arc<AppState>, platform: &PlatformId) {
     };
     Scheduler::submit(app, Arc::new(remap)).await;
     if let Err(e) = chd::queue_for(app, platform, true).await {
-        tracing::warn!(platform = %platform.0, error = %e, "cannot queue CHD decoding");
+        tracing::warn!(platform = %platform.as_str(), error = %e, "cannot queue CHD decoding");
     }
 }
 
@@ -62,7 +62,7 @@ mod tests {
     #[tokio::test]
     async fn a_change_not_yet_recomputed_queues_the_recompute_and_the_scan() {
         let (_dir, app) = state();
-        let nes = PlatformId("nes".into());
+        let nes = PlatformId::new("nes");
         let games = app.config().paths.games.join("NES");
         std::fs::create_dir_all(&games).expect("games");
         catalogue_changed(&app, std::slice::from_ref(&nes), false).await;
@@ -73,7 +73,7 @@ mod tests {
     #[tokio::test]
     async fn a_recomputed_change_queues_the_remap_instead() {
         let (_dir, app) = state();
-        let nes = PlatformId("nes".into());
+        let nes = PlatformId::new("nes");
         catalogue_changed(&app, std::slice::from_ref(&nes), true).await;
         let found = open(&app).await;
         assert_eq!(found.len(), 1, "no games directory, so no scan");

@@ -70,7 +70,7 @@ async fn list(
     let items = items
         .into_iter()
         .map(|row| {
-            let counts = counts.remove(&row.id.0).unwrap_or_default();
+            let counts = counts.remove(row.id.as_str()).unwrap_or_default();
             PlatformOut { row, counts }
         })
         .collect();
@@ -97,7 +97,7 @@ async fn update(
                 return Ok(None);
             }
             let counts = titles::browse::counts(c, &hide)?
-                .remove(&id.0)
+                .remove(id.as_str())
                 .unwrap_or_default();
             Ok(platforms::find(c, &id)?.map(|row| PlatformOut { row, counts }))
         })
@@ -147,7 +147,7 @@ async fn bind(
         return Err(ApiError::bad_request("That DAT version is retired."));
     }
     let loaded = app.config().paths.dats().join(LOADED_DIR);
-    let job = DatImport::bind(&row, &platform.0, &loaded);
+    let job = DatImport::bind(&row, &platform, &loaded);
     let job_id = Scheduler::enqueue(&app, Arc::new(job)).await?;
     Ok((
         StatusCode::ACCEPTED,

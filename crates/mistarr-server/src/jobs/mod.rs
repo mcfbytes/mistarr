@@ -1252,7 +1252,7 @@ mod tests {
             .await
             .expect("seed");
         let job = import::ImportJob {
-            download_id: crate::db::ids::DownloadId(9),
+            download_id: crate::db::ids::DownloadId::new(9),
         };
         let joined = Scheduler::submit(&app, Arc::new(job)).await;
         assert_eq!(joined, Some(running));

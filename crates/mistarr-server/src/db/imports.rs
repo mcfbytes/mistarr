@@ -82,7 +82,7 @@ pub fn log(
         "INSERT INTO import_log (at, download_id, file_id, action, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![at, download_id, file_id, action.as_str(), detail.to_string()],
     )?;
-    Ok(ImportId(conn.last_insert_rowid()))
+    Ok(ImportId::new(conn.last_insert_rowid()))
 }
 
 /// A page of the log, newest first, and the total row count.
@@ -165,7 +165,7 @@ pub fn title_entry(conn: &Connection, id: TitleId) -> Result<Option<TitleEntry>>
         .collect::<rusqlite::Result<_>>()?;
     Ok(Some(TitleEntry {
         id,
-        platform_id: PlatformId(platform),
+        platform_id: PlatformId::new(platform),
         name,
         flags: super::titles::flags_of(conn, id)?,
         roms,
@@ -177,8 +177,8 @@ pub fn title_entry(conn: &Connection, id: TitleId) -> Result<Option<TitleEntry>>
 mod tests {
     use super::*;
     use crate::db::fixtures::conn;
-    use crate::db::ids::RomId;
     use crate::db::roms;
+    use mistarr_core::RomId;
     use serde_json::json;
 
     #[test]
@@ -261,7 +261,9 @@ mod tests {
             .expect("some")
             .roms
             .is_empty());
-        assert!(title_entry(&c, TitleId(99)).expect("entry").is_none());
-        assert!(roms::title_of_rom(&c, RomId(99)).expect("none").is_none());
+        assert!(title_entry(&c, TitleId::new(99)).expect("entry").is_none());
+        assert!(roms::title_of_rom(&c, RomId::new(99))
+            .expect("none")
+            .is_none());
     }
 }
