@@ -4,7 +4,8 @@ use std::borrow::Cow;
 use std::fmt;
 
 /// Declares a database row id: a newtype over `i64` with a private field, `new` and `get`,
-/// `Display`, ordering and transparent serde. [`row_id_sql!`] adds the SQLite conversions.
+/// `Display`, ordering and transparent serde. `row_id_sql!`, under the `rusqlite` feature,
+/// adds the SQLite conversions.
 /// The serde derives expand in the caller, which must depend on `serde` with `derive`.
 ///
 /// ```

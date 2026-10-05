@@ -1,4 +1,4 @@
-//! Polling helpers shared by unit tests and integration tests.
+//! Polling and hashing helpers shared by unit tests and integration tests.
 
 use std::future::Future;
 use std::time::{Duration, Instant};
@@ -106,5 +106,11 @@ mod tests {
             calls == 2
         });
         assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn md5_of_joins_its_parts() {
+        assert_eq!(md5_of(&[b"a", b"b"]), md5_of(&[b"ab"]));
+        assert_ne!(md5_of(&[b"a"]), md5_of(&[b"b"]));
     }
 }

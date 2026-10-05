@@ -4,5 +4,5 @@ use clap::Parser as _;
 use mistarr_server::cli::{run, Cli};
 
 fn main() -> anyhow::Result<()> {
-    Ok(run(&Cli::parse(), &mut std::io::stdout().lock())?)
+    Ok(run(&Cli::parse(), &mut std::io::stdout())?)
 }

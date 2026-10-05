@@ -163,7 +163,7 @@ sh -c 'echo $$ > /sys/fs/cgroup/mistarr/cgroup.procs; exec /path/minijail0 -T st
 ```
 
 Notes on this command line:
-- **`-I`, always.** Without it, minijail's PID-namespace init handles SIGTERM with `_exit()` (libminijail.c:3250-3260 [V]), which kills the daemon with SIGKILL. That loses rtorrent's session and skips mistarr's graceful shutdown (main.rs:121-124).
+- **`-I`, always.** Without it, minijail's PID-namespace init handles SIGTERM with `_exit()` (libminijail.c:3250-3260 [V]), which kills the daemon with SIGKILL. That loses rtorrent's session and skips mistarr's graceful shutdown (`serve` and `wait_for_signal` in `cli.rs`).
 - **Fresh read-only procfs via `-k`.** With `-I`, minijail skips its own `/proc` remount (`if (pid_namespace && !do_init)`, libminijail.c:3894,4221 [V]). The critic's `-b /proc,/proc` is wrong: it would show every host pid. Without `-I`, `-p` dies on `umount2("/proc")` in an empty view (libminijail.c:2573-2620,3160 [V]). The fresh procfs is mounted in the child after it has joined the new PID namespace [I, rig test].
 - **`/tmp` via `-k tmpfs`, not `-t`.** minijail processes `-b`/`-k` mounts before `pivot_root` and `-t` after it (libminijail.c:3150-3160 [V]), so `-t` would cover the `/tmp/CORENAME` bind. `-t` also defaults to 64 MiB [V], which would push RAM-copy migrations onto the card (ram.rs:183-195).
 - **`/etc/localtime`** is a symlink into `linux/` [V], hence the explicit bind of `/media/fat/linux/timezone`. Use `TZ` when that file is absent.

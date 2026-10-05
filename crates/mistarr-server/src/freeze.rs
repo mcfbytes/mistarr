@@ -46,9 +46,25 @@ pub enum FreezeError {
     /// `kill` failed or could not be run.
     #[error("kill: {0}")]
     Kill(String),
-    /// Reading `/proc` or the frozen file failed.
+    /// The frozen record or its directory could not be read, written or replaced.
+    #[error("{}: {source}", path.display())]
+    File {
+        /// The record, its `.new` file or its directory.
+        path: PathBuf,
+        /// The failure.
+        source: io::Error,
+    },
+    /// Reading `/proc` failed.
     #[error(transparent)]
     Io(#[from] io::Error),
+}
+
+/// Wraps an I/O failure on the record file or directory `path`.
+fn at(path: &Path) -> impl FnOnce(io::Error) -> FreezeError + '_ {
+    move |source| FreezeError::File {
+        path: path.to_path_buf(),
+        source,
+    }
 }
 
 /// A process mistarr stopped: its pid and its start time in clock ticks since
@@ -377,7 +393,7 @@ fn untrusted(file: &Path, why: &str) -> FreezeError {
 
 /// Checks `dir` is a real directory `uid` owns that no one else can use.
 fn check_dir(dir: &Path, uid: u32) -> Result<(), FreezeError> {
-    let meta = std::fs::symlink_metadata(dir)?;
+    let meta = std::fs::symlink_metadata(dir).map_err(at(dir))?;
     if !meta.file_type().is_dir() {
         return Err(untrusted(dir, "is not a directory"));
     }
@@ -393,7 +409,7 @@ fn check_dir(dir: &Path, uid: u32) -> Result<(), FreezeError> {
 /// # Errors
 ///
 /// [`FreezeError::Untrusted`] when the directory is not private to this user,
-/// [`FreezeError::Io`] when the file cannot be written.
+/// [`FreezeError::File`] when the file cannot be written.
 pub fn write_file(file: &Path, frozen: Frozen) -> Result<(), FreezeError> {
     let dir = file
         .parent()
@@ -403,14 +419,15 @@ pub fn write_file(file: &Path, frozen: Frozen) -> Result<(), FreezeError> {
     let mut name = file.as_os_str().to_owned();
     name.push(".new");
     let new = PathBuf::from(name);
-    remove_file(&new)?;
+    remove_file(&new).map_err(at(&new))?;
     let flags = OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let fd = rustix::fs::open(&new, flags, Mode::RUSR | Mode::WUSR).map_err(io::Error::from)?;
+    let fd =
+        rustix::fs::open(&new, flags, Mode::RUSR | Mode::WUSR).map_err(|e| at(&new)(e.into()))?;
     let mut out = std::fs::File::from(fd);
-    out.write_all(frozen.to_line().as_bytes())?;
-    out.sync_all()?;
-    std::fs::rename(&new, file)?;
-    Ok(())
+    out.write_all(frozen.to_line().as_bytes())
+        .and_then(|()| out.sync_all())
+        .map_err(at(&new))?;
+    std::fs::rename(&new, file).map_err(at(file))
 }
 
 /// Reads the record; `None` when there is none. Only a regular file that `uid`
@@ -419,7 +436,7 @@ pub fn write_file(file: &Path, frozen: Frozen) -> Result<(), FreezeError> {
 /// # Errors
 ///
 /// [`FreezeError::Untrusted`] for a link, another kind of file or another owner,
-/// [`FreezeError::Io`] when it cannot be read.
+/// [`FreezeError::File`] when it cannot be read.
 pub fn read_file(file: &Path, uid: u32) -> Result<Option<Frozen>, FreezeError> {
     // Non-blocking, so a planted FIFO cannot hang the open.
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
@@ -427,10 +444,10 @@ pub fn read_file(file: &Path, uid: u32) -> Result<Option<Frozen>, FreezeError> {
         Ok(fd) => fd,
         Err(Errno::NOENT) => return Ok(None),
         Err(Errno::LOOP) => return Err(untrusted(file, "is a symlink")),
-        Err(e) => return Err(io::Error::from(e).into()),
+        Err(e) => return Err(at(file)(e.into())),
     };
     let f = std::fs::File::from(fd);
-    let meta = f.metadata()?;
+    let meta = f.metadata().map_err(at(file))?;
     if !meta.file_type().is_file() {
         return Err(untrusted(file, "is not a regular file"));
     }
@@ -441,7 +458,7 @@ pub fn read_file(file: &Path, uid: u32) -> Result<Option<Frozen>, FreezeError> {
         check_dir(dir, uid)?;
     }
     let mut text = String::new();
-    f.take(64).read_to_string(&mut text)?;
+    f.take(64).read_to_string(&mut text).map_err(at(file))?;
     Ok(Frozen::parse(&text))
 }
 

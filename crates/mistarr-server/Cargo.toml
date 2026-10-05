@@ -19,7 +19,7 @@ name = "mistarr"
 path = "src/main.rs"
 
 [features]
-# Catalog fixtures, the client fakes and the recording command sink, for integration tests.
+# Public modules, testing helpers, catalog fixtures and client fakes for tests and doctests.
 test-support = ["mistarr-clients/test-support", "mistarr-mister/test-support"]
 
 [dependencies]

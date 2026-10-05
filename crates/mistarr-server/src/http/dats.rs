@@ -177,7 +177,7 @@ async fn retry_rejected(
     let dir = app.config().paths.dats();
     let path = rejected_file(&dir, &name)?;
     let target = match place_moved(&path, &dir, &name) {
-        Err(PlaceError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+        Err(PlaceError::Io { source, .. }) if source.kind() == std::io::ErrorKind::NotFound => {
             return Err(ApiError::no_such("rejected file"))
         }
         moved => moved.map_err(crate::Error::from)?,

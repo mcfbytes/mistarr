@@ -28,8 +28,8 @@ on disk.
 `mistarr-server`'s modules are crate-private except `app`, `config` and `cli`;
 the `test-support` feature, which its own dev-dependency turns on, makes them
 public for integration tests and doctests. `mistarr_server::testing` holds
-`eventually`, `eventually_within` and `eventually_blocking`, the only way a test
-waits for a state change; a fixed sleep stays only where a test proves nothing
+`eventually`, `eventually_within` and `eventually_blocking`, which unit tests use
+to wait for a state change; a fixed sleep stays only where a test proves nothing
 happens. Scratch directories come from `tempfile`. Integration tests share
 `tests/common`: the booted server and its HTTP client, and `json_of`,
 `wait_event`, `drop_file`, `md5_of`, `mra`, `bstr`, `variant` and `infohash`.
