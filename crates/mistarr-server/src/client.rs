@@ -1,11 +1,149 @@
 //! The download client handle built from detection; see `docs/DOWNLOAD-CLIENTS.md`.
 
 use std::path::Path;
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
-use mistarr_clients::{ClientKind, PathMapping};
+use mistarr_clients::{ClientKind, DownloadClient, PathMapping};
 
 use crate::config::ClientConfig;
+use crate::jobs::core_limits::ClientHold;
 use crate::jobs::detect_client::ClientStatus;
+
+/// The detected download client, how it is held for a running core, and the locks that
+/// order detection, starting and freezing it. The handle and the hold change only
+/// through methods; the locks are taken directly.
+pub struct ClientSlot {
+    handle: RwLock<Option<(ClientKey, Arc<dyn DownloadClient>)>>,
+    hold: RwLock<Option<ClientHold>>,
+    /// Held while the client is stopped or resumed for shutdown, so no stop
+    /// lands after shutdown resumed it.
+    pub freeze_lock: Arc<Mutex<()>>,
+    /// Serialises client detection so an older probe never overwrites a newer one.
+    pub detect_lock: tokio::sync::Mutex<()>,
+    /// Held while `POST /system/client/start` runs, so a second one is `busy`.
+    pub start_lock: tokio::sync::Mutex<()>,
+}
+
+impl Default for ClientSlot {
+    fn default() -> Self {
+        Self {
+            handle: RwLock::new(None),
+            hold: RwLock::new(None),
+            freeze_lock: Arc::new(Mutex::new(())),
+            detect_lock: tokio::sync::Mutex::new(()),
+            start_lock: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
+impl ClientSlot {
+    /// The client from the last detection, `None` when detection found none or while
+    /// the client is frozen for a running core, since a stopped process never answers.
+    /// It is a Transmission or rtorrent handle for the detected URL carrying
+    /// `client.remote_path_map`; take a fresh one per operation, and expect
+    /// `Unreachable` when the client is down.
+    ///
+    /// ```
+    /// assert!(mistarr_server::client::ClientSlot::default().get().is_none());
+    /// ```
+    #[must_use]
+    pub fn get(&self) -> Option<Arc<dyn DownloadClient>> {
+        if self.frozen() {
+            return None;
+        }
+        self.entry().map(|(_, c)| c)
+    }
+
+    /// The detected client and which one it is, frozen or not; only the core gate
+    /// talks to it through this.
+    ///
+    /// ```
+    /// assert!(mistarr_server::client::ClientSlot::default().entry().is_none());
+    /// ```
+    #[must_use]
+    pub fn entry(&self) -> Option<(ClientEndpoint, Arc<dyn DownloadClient>)> {
+        self.handle
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .as_ref()
+            .map(|(k, c)| (k.endpoint(), Arc::clone(c)))
+    }
+
+    /// How the client is held for a running core, if it is.
+    ///
+    /// ```
+    /// assert_eq!(mistarr_server::client::ClientSlot::default().hold(), None);
+    /// ```
+    #[must_use]
+    pub fn hold(&self) -> Option<ClientHold> {
+        *self.hold.read().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Whether the client's process is stopped for a running core.
+    ///
+    /// ```
+    /// use mistarr_server::{client::ClientSlot, jobs::core_limits::ClientHold};
+    /// let slot = ClientSlot::default();
+    /// assert!(slot.set_hold(Some(ClientHold::Frozen)) && slot.frozen());
+    /// ```
+    #[must_use]
+    pub fn frozen(&self) -> bool {
+        self.hold() == Some(ClientHold::Frozen)
+    }
+
+    /// Records how the client is held; true when that changed.
+    pub fn set_hold(&self, hold: Option<ClientHold>) -> bool {
+        let mut slot = self.hold.write().unwrap_or_else(PoisonError::into_inner);
+        std::mem::replace(&mut *slot, hold) != hold
+    }
+
+    /// Points [`ClientSlot::get`] at what `status` found under `config`, and says
+    /// whether the handle was replaced. The current handle stays unless the probe
+    /// answered from a different client, or only the path map changed; a probe that
+    /// found nothing never drops it.
+    pub fn refresh(&self, status: &ClientStatus, config: &ClientConfig) -> bool {
+        let Some(key) = ClientKey::from_detection(status, config) else {
+            return false;
+        };
+        let mut slot = self.handle.write().unwrap_or_else(PoisonError::into_inner);
+        let replace = match slot.as_ref() {
+            None => true,
+            Some((k, _)) if *k == key => false,
+            Some((k, _)) => status.reachable || (k.kind == key.kind && k.url == key.url),
+        };
+        if !replace {
+            return false;
+        }
+        let map = mistarr_clients::RemotePathMap::new(key.path_map.clone());
+        match mistarr_clients::connect(key.kind, &key.url, map) {
+            Ok(client) => {
+                *slot = Some((key, client));
+                true
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "cannot use the detected client");
+                false
+            }
+        }
+    }
+
+    /// Installs `client` as the client at `at`, for tests that script one in process.
+    #[cfg(test)]
+    pub(crate) fn set(&self, at: ClientEndpoint, client: Arc<dyn DownloadClient>) {
+        let key = ClientKey {
+            kind: at.kind,
+            url: at.url,
+            path_map: Vec::new(),
+        };
+        *self.handle.write().unwrap_or_else(PoisonError::into_inner) = Some((key, client));
+    }
+
+    /// Drops the handle, leaving no client, as before the first detection.
+    #[cfg(test)]
+    pub(crate) fn clear(&self) {
+        *self.handle.write().unwrap_or_else(PoisonError::into_inner) = None;
+    }
+}
 
 /// Which client a handle talks to: its kind and RPC URL or SCGI address.
 ///

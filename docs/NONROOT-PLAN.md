@@ -33,7 +33,7 @@ Four small root pieces stay outside every jail:
 4. **A fail-closed marker**: once a board has run jailed, nothing ever runs the daemons as root over state that jailed code wrote.
 
 **Prerequisites that are now requirements, not decisions:**
-- **API key on loopback.** A non-empty API key is required for loopback callers whenever a client runs on the board. Otherwise a jailed client is mistarr without needing any exploit (`http/mod.rs:42`, `config.rs:129`) [V].
+- **API key on loopback.** A non-empty API key is required for loopback callers whenever a client runs on the board. Otherwise a jailed client is mistarr without needing any exploit (`http/mod.rs:38`, `config.rs:120`) [V].
 - **"Isolated" requires a safe board posture.** The jail status reads "isolated" only while sshd refuses passwords, proftpd is not running, and Samba exports no public share. Root checks these at every boot. ADR 0031 records the threats: the root password is reset by each update, FTP runs as root with an anonymous block, and `[sdcard] public = yes, writable = yes` [V].
 
 **Two residual risks the user must accept on stock.** Main follows symlinks under `games/` and opens mounted images read-write as root. That is true for broker launches and for images the user picks in the OSD browser (`file_io.cpp:1660-1674`, `user_io.cpp:2223-2224`) [V]. The stock kernel lets any process that can write a directory create exFAT symlinks (`fs/exfat/namei.c:624` at `e24da58`) [V]. A compromised mistarr could therefore make Main, as root, write sector data through a planted link. Buildroot can close this with a kernel patch (section 9). On stock it needs an upstream change to Main.
@@ -138,7 +138,7 @@ Four small root pieces stay outside every jail:
 - Anchors are created only when no jail runs: at boot in S92 or `mistarr.sh start`, or after `mistarr.sh stop`.
 - The re-check "immediately before each minijail call" that the critic proposed would itself be a TOCTOU race against B. Anchoring replaces it.
 
-**Allow-list for anchor sources.** The values come from `jail.env`, written only from an interactive `install.sh` answer and never from `mistarr.toml`, which B can change through `PUT /system/settings` (http/system.rs:41 [V]).
+**Allow-list for anchor sources.** The values come from `jail.env`, written only from an interactive `install.sh` answer and never from `mistarr.toml`, which B can change through `PUT /system/settings` (http/system.rs:40 [V]).
 - **games:** `/media/fat/games`, `/media/usbN/games`, or a CIFS mount whose type is checked against `/proc/mounts`.
 - **data:** `/media/fat/mistarr` or a path below it.
 - **staging:** `<games>/.mistarr/staging`.

@@ -1,24 +1,11 @@
-use std::io::Write as _;
-
 use mistarr_core::hash::Md5Stream;
 
 use super::*;
-use crate::app::testutil::state;
+use crate::app::testutil::{state, write_zip};
 use crate::jobs::Scheduler;
 
 /// Zips as `(file, members)`, each member `(name, bytes)`.
 type Zips<'a> = &'a [(&'a str, &'a [(&'a str, &'a [u8])])];
-
-fn write_zip(path: &Path, members: &[(&str, &[u8])]) {
-    fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
-    let mut z = zip::ZipWriter::new(File::create(path).expect("create"));
-    for (name, body) in members {
-        z.start_file(*name, zip::write::SimpleFileOptions::default())
-            .expect("start");
-        z.write_all(body).expect("write");
-    }
-    z.finish().expect("finish");
-}
 
 fn md5_of(parts: &[&[u8]]) -> String {
     let mut m = Md5Stream::new();

@@ -29,7 +29,8 @@ async fn launch_routes_answer_with_documented_statuses() {
     let sink = Arc::new(RecordingSink::new());
     b.running
         .app
-        .set_command_sink(Arc::clone(&sink) as Arc<dyn CommandSink>);
+        .launch
+        .set_sink(Arc::clone(&sink) as Arc<dyn CommandSink>);
     let status = request(addr, "GET", "/api/v1/system/status", &[], None).await;
     assert_eq!(status.json()["launch"], "ready");
 

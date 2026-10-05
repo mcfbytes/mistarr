@@ -16,7 +16,8 @@ use rusqlite::Connection;
 use serde_json::json;
 use tokio::time::Instant;
 
-use super::scan::{self, Track};
+use super::fsutil::file_meta;
+use super::matching::Track;
 use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::chd::{self as rows, Unidentified};
@@ -177,8 +178,7 @@ fn known_rows(
     }
     // A layout no DAT had is checked again after a DAT load, not on every scan.
     let unchanged_no_layout = files::find_by_path(conn, platform, rel_path)?.is_some_and(|r| {
-        r.size == size
-            && r.mtime == mtime
+        r.unchanged(size, mtime)
             && r.state == FileState::Unidentified
             && r.reason.as_deref() == Some(Unidentified::NoLayout.as_str())
     });
@@ -218,12 +218,16 @@ async fn whole_file(
     let cached = ctx
         .app
         .db
-        .read(
-            move |c| match scan::cached_hashes(c, &pid, &rel, size, mtime)? {
+        .read(move |c| {
+            let row = files::find_by_path(c, &pid, &rel)?;
+            match row
+                .filter(|r| r.unchanged(size, mtime))
+                .and_then(|r| r.hashes())
+            {
                 Some(h) => Ok(Some(h)),
                 None => id.map_or(Ok(None), |id| rows::whole_hashes(c, &id, mtime)),
-            },
-        )
+            }
+        })
         .await?;
     let hashes = if let Some(h) = cached {
         h
@@ -493,7 +497,7 @@ pub(crate) fn rematch_container(
         .collect();
     tracks.sort_by_key(|(n, _)| *n);
     let numbered = tracks.iter().enumerate().all(|(i, (n, _))| *n == i + 1);
-    let hashes: Option<Vec<HashSet>> = tracks.iter().map(|(_, r)| stored(r)).collect();
+    let hashes: Option<Vec<HashSet>> = tracks.iter().map(|(_, r)| r.hashes()).collect();
     let (Some(hashes), true, Some((_, first))) = (hashes, numbered, tracks.first()) else {
         return Ok(0);
     };
@@ -523,15 +527,6 @@ pub(crate) fn rematch_container(
         .count();
     rows::replace_container(conn, platform, container, &next, now)?;
     Ok(matched)
-}
-
-fn stored(r: &FileRow) -> Option<HashSet> {
-    Some(HashSet {
-        size: u64::try_from(r.size).ok()?,
-        crc32: r.crc32.clone()?,
-        md5: r.md5.clone()?,
-        sha1: r.sha1.clone()?,
-    })
 }
 
 /// Moves waiting rows to follow `[scan] chd_tracks`, read inside the write, and queues
@@ -754,7 +749,7 @@ type Seen = Option<(ChdId, i64)>;
 /// Opens `path` and reads its header and track list; the identity when the header was read.
 fn open(path: &Path) -> std::result::Result<Ready, (Seen, ChdError)> {
     let mut file = File::open(path).map_err(|e| (None, e.into()))?;
-    let (size, mtime) = scan::file_meta(path).map_err(|e| (None, e.into()))?;
+    let (size, mtime) = file_meta(path).map_err(|e| (None, e.into()))?;
     let header = core::read_header(&mut file).map_err(|e| (None, e))?;
     let id = header.id(u64::try_from(size).unwrap_or(0));
     let layout = core::read_layout(&mut file, &header).map_err(|e| (Some((id, mtime)), e))?;

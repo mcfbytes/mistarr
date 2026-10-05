@@ -428,26 +428,16 @@ fn pack(path: &Path, target: &Target, stop: &dyn Fn() -> bool) -> Result<Checked
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write;
     use std::sync::Arc;
 
     use super::*;
+    use crate::app::testutil::zip_bytes;
     use crate::jobs::url_fetch::spool::Places;
 
     const DAT: &[u8] = br#"<?xml version="1.0"?>
 <datafile><header><name>Example System</name></header>
 <game name="Example Quest (World)"><rom name="q.bin" size="4" crc="0a0b0c0d"/></game>
 </datafile>"#;
-
-    fn zip_of(members: &[(&str, &[u8])]) -> Vec<u8> {
-        let mut z = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-        for (name, body) in members {
-            z.start_file(*name, zip::write::SimpleFileOptions::default())
-                .expect("start");
-            z.write_all(body).expect("write");
-        }
-        z.finish().expect("finish").into_inner()
-    }
 
     fn target(dir: &Path) -> Target {
         Target {
@@ -534,26 +524,26 @@ mod tests {
         let other = |r: Result<Checked, Refused>| matches!(r, Err(Refused::OtherFiles));
         assert!(other(checked(
             Found::Zip,
-            &zip_of(&[("a.dat", DAT), ("g.bin", b"rom")])
+            &zip_bytes(&[("a.dat", DAT), ("g.bin", b"rom")])
         )));
         assert!(other(checked(
             Found::Zip,
-            &zip_of(&[("readme.txt", b"hi")])
+            &zip_bytes(&[("readme.txt", b"hi")])
         )));
         assert!(refused(checked(
             Found::Zip,
-            &zip_of(&[("a.dat", DAT), ("b.dat", b"<x/>")])
+            &zip_bytes(&[("a.dat", DAT), ("b.dat", b"<x/>")])
         )));
         let mut appended = DAT.to_vec();
         appended.extend_from_slice(b"NES\x1a rom bytes");
         assert!(refused(checked(Found::Xml, &appended)));
         assert!(refused(checked(
             Found::Zip,
-            &zip_of(&[("a.dat", &appended)])
+            &zip_bytes(&[("a.dat", &appended)])
         )));
         assert!(refused(checked(
             Found::Zip,
-            &zip_of(&[("a.dat", b"not xml")])
+            &zip_bytes(&[("a.dat", b"not xml")])
         )));
         assert!(refused(checked(Found::Zip, b"PK\x03\x04 broken")));
         assert!(refused(checked(Found::Torrent, b"d4:infoi1ee")));
@@ -603,7 +593,7 @@ mod tests {
             Err(Refused::Stopped)
         ));
         let pack = dir.path().join("p.zip");
-        std::fs::write(&pack, zip_of(&[("a.dat", DAT)])).expect("write");
+        std::fs::write(&pack, zip_bytes(&[("a.dat", DAT)])).expect("write");
         assert!(matches!(
             check(Found::Zip, &pack, &t, &|| true),
             Err(Refused::Stopped)
@@ -654,7 +644,7 @@ mod tests {
         let hidden = b"NES\x1a hidden bytes the directory does not list";
         let mut padded = hidden.to_vec();
         let noisy = [DAT, b"<!-- hidden-member-comment -->"].concat();
-        let pack = zip_of(&[("a.dat", DAT), ("b.xml", &noisy)]);
+        let pack = zip_bytes(&[("a.dat", DAT), ("b.xml", &noisy)]);
         padded.extend_from_slice(&pack);
         padded.extend_from_slice(hidden);
         let (r, out) = rewritten(Found::Zip, &padded);

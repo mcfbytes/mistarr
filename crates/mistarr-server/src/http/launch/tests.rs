@@ -25,7 +25,8 @@ fn touch(root: &FsPath, rel: &str) {
 
 fn recording(app: &AppState) -> Arc<RecordingSink> {
     let sink = Arc::new(RecordingSink::new());
-    app.set_command_sink(Arc::clone(&sink) as Arc<dyn CommandSink>);
+    app.launch
+        .set_sink(Arc::clone(&sink) as Arc<dyn CommandSink>);
     sink
 }
 
@@ -48,7 +49,7 @@ async fn seed(app: &AppState, platform: &str, roms: &[(&str, FileState)]) -> Tit
 }
 
 fn status(r: Result<Launched, ApiError>) -> StatusCode {
-    r.map_or_else(|e| e.status, |_| StatusCode::OK)
+    r.map_or_else(|e| e.status(), |_| StatusCode::OK)
 }
 
 #[tokio::test]
@@ -141,7 +142,7 @@ async fn a_disc_with_a_misnamed_track_is_refused() {
     )
     .await;
     let err = launch_title(&app, id).await.expect_err("misnamed track");
-    assert_eq!(err.status, StatusCode::CONFLICT);
+    assert_eq!(err.status(), StatusCode::CONFLICT);
     assert!(sink.lines().is_empty());
 }
 
@@ -151,9 +152,14 @@ async fn a_second_launch_within_the_gap_is_busy() {
     let sink = recording(&app);
     touch(dir.path(), "_Console/NES_20240101.rbf");
     let id = seed(&app, "nes", &[("NES/a.nes", FileState::Verified)]).await;
-    launch_core(&app, "nes").await.expect("first");
+    launch_core(&app, &PlatformId("nes".into()))
+        .await
+        .expect("first");
     let err = launch_title(&app, id).await.expect_err("busy");
-    assert_eq!((err.status, err.code), (StatusCode::CONFLICT, "busy"));
+    assert_eq!(
+        (err.status(), err.code().as_str()),
+        (StatusCode::CONFLICT, "busy")
+    );
     assert_eq!(sink.lines().len(), 1);
 }
 
@@ -161,9 +167,15 @@ async fn a_second_launch_within_the_gap_is_busy() {
 async fn failed_launches_do_not_hold_the_gap() {
     let (dir, app) = crate::app::testutil::state_with(|o| o.launch_gap = Duration::from_secs(60));
     recording(&app);
-    assert_eq!(status(launch_core(&app, "nes").await), StatusCode::CONFLICT);
+    assert_eq!(
+        status(launch_core(&app, &PlatformId("nes".into())).await),
+        StatusCode::CONFLICT
+    );
     touch(dir.path(), "_Console/NES_20240101.rbf");
-    assert_eq!(status(launch_core(&app, "nes").await), StatusCode::OK);
+    assert_eq!(
+        status(launch_core(&app, &PlatformId("nes".into())).await),
+        StatusCode::OK
+    );
 }
 
 #[tokio::test]
@@ -175,10 +187,10 @@ async fn an_unwritable_launch_dir_is_an_internal_error() {
     let id = seed(&app, "nes", &[("NES/a.nes", FileState::Verified)]).await;
     let err = launch_title(&app, id).await.expect_err("no dir");
     assert_eq!(
-        (err.status, err.code),
+        (err.status(), err.code().as_str()),
         (StatusCode::INTERNAL_SERVER_ERROR, "internal")
     );
-    assert_eq!(err.message, "the launch file could not be written");
+    assert_eq!(err.message(), "The launch file could not be written.");
     assert!(sink.lines().is_empty());
 }
 
@@ -281,22 +293,24 @@ async fn a_bare_core_starts_the_newest_rbf() {
     let (dir, app) = state();
     let sink = recording(&app);
     assert_eq!(
-        status(launch_core(&app, "snes").await),
+        status(launch_core(&app, &PlatformId("snes".into())).await),
         StatusCode::CONFLICT
     );
     touch(dir.path(), "_Console/SNES_20240101.rbf");
     touch(dir.path(), "_Console/SNES_20250101.rbf");
-    let launched = launch_core(&app, "snes").await.expect("launch");
+    let launched = launch_core(&app, &PlatformId("snes".into()))
+        .await
+        .expect("launch");
     assert_eq!(launched.core, "_Console/SNES_20250101.rbf");
     assert_eq!(launched.file, None);
     let rbf = dir.path().join("_Console/SNES_20250101.rbf");
     assert_eq!(sink.lines(), [format!("load_core {}\n", rbf.display())]);
     assert_eq!(
-        status(launch_core(&app, "arcade").await),
+        status(launch_core(&app, &PlatformId("arcade".into())).await),
         StatusCode::CONFLICT
     );
     assert_eq!(
-        status(launch_core(&app, "nope").await),
+        status(launch_core(&app, &PlatformId("nope".into())).await),
         StatusCode::NOT_FOUND
     );
 }
@@ -305,15 +319,17 @@ async fn a_bare_core_starts_the_newest_rbf() {
 async fn an_absent_interface_is_unavailable() {
     let (dir, app) = state();
     touch(dir.path(), "_Console/SNES_20240101.rbf");
-    let err = launch_core(&app, "snes").await.expect_err("no FIFO");
+    let err = launch_core(&app, &PlatformId("snes".into()))
+        .await
+        .expect_err("no FIFO");
     assert_eq!(
-        (err.status, err.code),
+        (err.status(), err.code().as_str()),
         (StatusCode::SERVICE_UNAVAILABLE, "unavailable")
     );
     let sink = recording(&app);
     sink.set_outcome(FakeOutcome::NotListening);
     assert_eq!(
-        status(launch_core(&app, "snes").await),
+        status(launch_core(&app, &PlatformId("snes".into())).await),
         StatusCode::SERVICE_UNAVAILABLE
     );
     sink.set_outcome(FakeOutcome::Absent);
@@ -330,8 +346,13 @@ async fn the_setting_turns_launching_off() {
     let sink = recording(&app);
     touch(dir.path(), "_Console/SNES_20240101.rbf");
     app.update_config(|c| c.prefs.launch = false);
-    let err = launch_core(&app, "snes").await.expect_err("disabled");
-    assert_eq!((err.status, err.code), (StatusCode::CONFLICT, "conflict"));
+    let err = launch_core(&app, &PlatformId("snes".into()))
+        .await
+        .expect_err("disabled");
+    assert_eq!(
+        (err.status(), err.code().as_str()),
+        (StatusCode::CONFLICT, "conflict")
+    );
     assert!(sink.lines().is_empty());
 }
 
@@ -339,19 +360,19 @@ async fn the_setting_turns_launching_off() {
 fn command_errors_map_to_statuses() {
     use mistarr_mister::Error as E;
     assert_eq!(
-        command_error(E::NotListening).status,
+        command_error(E::NotListening).status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(
-        command_error(E::CommandBusy).status,
+        command_error(E::CommandBusy).status(),
         StatusCode::SERVICE_UNAVAILABLE
     );
     assert_eq!(
-        command_error(E::UnsafePath("x".into())).status,
+        command_error(E::UnsafePath("x".into())).status(),
         StatusCode::CONFLICT
     );
     assert_eq!(
-        command_error(E::MissingHeader).status,
+        command_error(E::MissingHeader).status(),
         StatusCode::INTERNAL_SERVER_ERROR
     );
     assert_eq!(

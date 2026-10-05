@@ -1,6 +1,6 @@
 //! Serves `web/dist` embedded at build time, falling back to `index.html`.
 
-use axum::http::{header, HeaderValue, Method, StatusCode, Uri};
+use axum::http::{header, HeaderValue, Method, Uri};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
@@ -19,15 +19,10 @@ const PLACEHOLDER: &str = "<!doctype html><meta charset=utf-8><title>mistarr</ti
 pub(super) async fn serve(method: Method, uri: Uri) -> Response {
     let path = uri.path();
     if path == "/api" || path.starts_with("/api/") {
-        return ApiError::not_found("no such API route").into_response();
+        return ApiError::no_such("API route").into_response();
     }
     if method != Method::GET && method != Method::HEAD {
-        return ApiError::new(
-            StatusCode::METHOD_NOT_ALLOWED,
-            "method_not_allowed",
-            "only GET and HEAD are served outside the API",
-        )
-        .into_response();
+        return ApiError::method_not_allowed().into_response();
     }
     let name = path.trim_start_matches('/');
     if !name.is_empty() {
@@ -89,6 +84,7 @@ fn content_type(name: &str) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
 
     #[test]
     fn content_types_by_extension() {

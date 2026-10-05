@@ -43,13 +43,20 @@ contracts in this document.
 
 | Crate | Responsibility | Depends on |
 |---|---|---|
-| `mistarr-core` | Domain types. DAT parser for Logiqx XML and No-Intro DB exports. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of files to DAT entries. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. The codecs every crate shares: hex, `Digest` values (`Crc32`, `Md5`, `Sha1`, `InfoHash`), bencode, magnet links, percent-decoding, and the capped XML reader. | none |
+| `mistarr-core` | Domain types. DAT parser for Logiqx XML and No-Intro DB exports. Catalog model with parent/clone groups. Hashing (CRC32, MD5, SHA1 in one streaming pass). Matching of hashed files and zip members to the roms of one DAT entry in memory (`matching`, over its `Rom` and `Payload` traits); the server finds a file's rom in the catalogue in SQL and decides its state in `jobs::matching`. 1G1R selection with region and revision preferences. Header detection and stripping for hashing. Cue sheet parsing. The codecs every crate shares: hex, `Digest` values (`Crc32`, `Md5`, `Sha1`, `InfoHash`), bencode, magnet links, percent-decoding, and the capped XML reader. | none |
 | `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk, built on core's header constants, byte-order detection and XML reader. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
 | `mistarr-sources` | Intake of dropped files: `StableFiles` reports a file once its mtime is old enough and its size held across two polls, once per size and mtime, and forgets files that are gone; `plan` picks a free name in `loaded/` without creating it, so the database can store it, and `place` then moves the file there by hard link, or by a rename after a name check where the file system has no hard links; `accept` and `reject` move a file into `loaded/` or `rejected/` under a free name picked with `create_new`, and `reject` writes `<name>.reason.txt` holding `reason\n`. `.torrent` parsing into a file list, over core's bencode. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
 | `mistarr-clients` | `DownloadClient` trait and `connect`, which builds the client for a detected kind and address. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping, both ways, inside each client. The one GET of a URL the user supplies, over hyper and rustls (`fetch`). Torrents arrive already parsed: a `TorrentSource` carries the infohash and file count, and `ClientTorrentId` wraps core's `InfoHash`. | core |
 | `mistarr-server` | The binary. axum HTTP server, SQLite via `rusqlite` (bundled), job scheduler, SSE event bus, embedded SPA via `rust-embed`, config, first-run wizard state, CLI flags. | all |
 | `mistarr-fixture` | Development tool, never shipped: synthetic DATs, `.torrent` files, the synthetic set and a local tracker for the tests in TESTING.md. | core, mister, sources |
 | `web/` | Svelte 5 + Vite + TypeScript SPA. Built to `web/dist`, embedded at compile time. | API.md |
+
+`mistarr-server`'s `synth` and `bench` modules ship in the release binary on
+purpose, behind no cargo feature: the hidden `bench-seed` and `bench-search`
+subcommands (TESTING.md "Browse speed") time browse and search on the board
+itself, which a host build cannot stand in for. They hold only generated
+names, `bench-seed` writes only a new file and `bench-search` opens a
+database read-only, and neither adds a dependency.
 
 ### Key traits
 
@@ -93,6 +100,7 @@ pub fn hash_reader<R: Read>(r: R, rule: HeaderRule, size_hint: Option<u64>) -> i
 pub fn hash_forms<R: Read>(r: R, rule: HeaderRule, size_hint: Option<u64>) -> io::Result<HeaderForms>; // content, and the whole file when a header was stripped
 pub fn parse_dat(xml: &[u8]) -> Result<Dat>;
 pub fn select_1g1r(group: &[DatGame], prefs: &Prefs) -> Option<&DatGame>;
+pub fn match_members<'a, R: Rom, P: Payload>(roms: &'a [R], members: &'a [P]) -> SetMatch<'a, P, R>; // pick_rom for one payload
 ```
 
 ## Runtime flows
@@ -396,7 +404,7 @@ payload or progress, or a log line at info; the host alone may appear at
 debug. It lives in the `url_fetch` job's memory until the job ends.
 
 1. A `magnet:` link is parsed as an upload's is and placed in `sources/` as
-   a `.magnet` file at once, through the same code (`http::place_source`).
+   a `.magnet` file at once, through the same code (`incoming::place::place_source`).
 2. Any other link must be `http` or `https`, with a host and no user name or
    password; a fragment is dropped, and spaces and other characters a
    request line cannot carry are percent-encoded. The answer is 202 with a
@@ -490,8 +498,8 @@ debug. It lives in the `url_fetch` job's memory until the job ends.
    `.torrent`), else `download`. A DAT is moved into `dats/` as an upload's
    part file, renamed in place from `<data>/tmp` or copied from RAM in
    1 MiB writes, then renamed to its name or `name (N)` and queued as an
-   upload is (`http::place_dat_part`); a torrent goes through
-   `http::place_source`, which refuses a repeat of a loaded source. From
+   upload is (`incoming::place::place_part`); a torrent goes through
+   `incoming::place::place_source`, which refuses a repeat of a loaded source. From
    there the incoming list, jobs and toasts are an upload's. A fetch never
    calls the download client, so it runs while the client is stopped for a
    core; a torrent or magnet it places lands in `sources/` and imports as
@@ -1080,7 +1088,7 @@ pause_client_while_playing = true    # stop a client on the board while a core r
 regions   = ["USA", "World", "Europe", "Japan"]
 languages = ["En"]
 prefer_latest_revision = true
-hide = ["bios", "beta", "proto", "demo", "sample", "program"]
+hide = ["bios", "beta", "proto", "demo", "sample", "program"]   # any of these six; others are dropped with a warning
 launch = true               # allow starting cores and games from the UI
 
 [sources]
@@ -1103,10 +1111,13 @@ exists, where `<data>` is `--data DIR` or `/media/fat/mistarr`; `--data`
 also overrides `paths.data` and `--listen` overrides `server.listen`. The
 `client`, `limits`, `transfer`, `prefs` and `scan` sections are editable
 through `/system/settings`; saved values live in the `settings` table and take
-precedence over the file on every start, except that settings saved without
-a `scan` or `transfer` section leave the file's in force, so a faster board
-can default `chd_tracks` on in the file. `server`, `paths`, `sources`, `jobs` and
-`memory` need a restart.
+precedence over the file on every start, section by section: a section the
+saved settings lack, as `scan` and `transfer` in settings saved before they
+existed, leaves the file's in force, so a faster board can default
+`chd_tracks` on in the file. The saved settings and a `PUT` body are one type,
+`RuntimeSettings`, with every section optional; `AppState::update_settings`
+applies one, stores the result and runs what each changed section needs.
+`server`, `paths`, `sources`, `jobs` and `memory` need a restart.
 
 A file that is not valid TOML fails startup with `config: <path>: <error>`,
 the prefix once. A key the schema above does not name is ignored, and logged

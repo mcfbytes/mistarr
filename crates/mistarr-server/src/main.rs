@@ -24,7 +24,7 @@ fn main() -> anyhow::Result<()> {
     let mut temp_refused = None;
     let ram = std::env::var_os(db::TEMP_DIR_ENV)
         .map_or_else(|| std::path::PathBuf::from(db::RAM_TEMP_DIR), Into::into);
-    let frozen_file = ram.join(mistarr_server::freeze::FROZEN_NAME);
+    let options = Options::for_board(&ram);
     if matches!(cli.command(), Command::Serve) {
         let disk = config.paths.tmp();
         let tmp = db::choose_temp_dir(&ram, &disk)
@@ -91,20 +91,13 @@ fn main() -> anyhow::Result<()> {
             } else {
                 tracing::info!("no memory limit");
             }
-            runtime.block_on(serve(config, frozen_file))?;
+            runtime.block_on(serve(config, options))?;
         }
     }
     Ok(())
 }
 
-async fn serve(
-    config: mistarr_server::config::Config,
-    frozen_file: std::path::PathBuf,
-) -> anyhow::Result<()> {
-    let options = Options {
-        frozen_file,
-        ..Options::default()
-    };
+async fn serve(config: mistarr_server::config::Config, options: Options) -> anyhow::Result<()> {
     let running = app::start(config, options).await?;
     tracing::info!(
         url = %format!("http://{}/", running.addr),

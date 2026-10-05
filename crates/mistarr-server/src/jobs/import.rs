@@ -15,6 +15,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use mistarr_clients::{ClientError, SeedPolicy};
 use mistarr_core::hash::HeaderRule;
+use mistarr_core::matching::{leaf, match_members, pick_rom, Payload as _};
 use mistarr_core::PlatformId;
 use mistarr_mister::platforms::{self, Kind, Platform};
 use mistarr_mister::{
@@ -26,9 +27,11 @@ use tokio::sync::broadcast::error::RecvError;
 use self::place::{Partial, PlaceError, Roots};
 pub use self::rename::{rename, RenameError};
 use self::support::{
-    explain, file_name, hash_item, is_zip, leaf, locate, match_members, pick_rom, place_rom,
-    quarantine, read_head, rel_string, report, Hashed,
+    explain, file_name, hash_item, locate, place_rom, quarantine, read_head, rel_string, report,
+    Hashed,
 };
+use super::fsutil::{is_zip, stat};
+use super::matching::match_forms;
 use super::{transfer, Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::candidates;
@@ -200,17 +203,6 @@ async fn fail(app: &AppState, ids: &[DownloadId], reason: &str) -> Result<()> {
     finish(app, ids, DownloadState::Failed, Some(reason)).await
 }
 
-/// `(size, mtime)` as `files` stores them.
-fn stat(meta: &fs::Metadata) -> (i64, i64) {
-    let size = i64::try_from(meta.len()).unwrap_or(i64::MAX);
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map_or(0, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX));
-    (size, mtime)
-}
-
 async fn import(ctx: &JobContext, id: DownloadId) -> Result<()> {
     let app = &ctx.app;
     let Some(row) = app.db.read(move |c| downloads::get(c, id)).await? else {
@@ -366,6 +358,26 @@ fn different_version(other: &str) -> String {
     format!("the file in this source is a different version: {other}")
 }
 
+/// What an import's closing transaction changed, announced by [`Placing::settle`].
+#[derive(Debug, Default)]
+struct Closed {
+    /// Downloads that ended `done`.
+    done: Vec<DownloadId>,
+    /// Files placed, replaced or kept, with what happened to each.
+    files: Vec<(FileId, ImportAction)>,
+    /// What settling a download elsewhere or quarantining it changed.
+    settled: Settled,
+}
+
+impl Closed {
+    fn settled(settled: Settled) -> Self {
+        Self {
+            settled,
+            ..Self::default()
+        }
+    }
+}
+
 /// Announces what settling a download elsewhere changed and fetches the
 /// wanted rom again when it found another file.
 async fn after_settle(app: &Arc<AppState>, settled: Settled) {
@@ -373,7 +385,7 @@ async fn after_settle(app: &Arc<AppState>, settled: Settled) {
         transfer::publish(app, id, DownloadState::Bad, 1.0);
     }
     if !settled.cancelled.is_empty() {
-        crate::http::downloads::after_cancel(app, &settled.cancelled).await;
+        transfer::after_cancel(app, &settled.cancelled).await;
     }
     if let Some((id, state)) = settled.again {
         transfer::publish(app, id, state, 0.0);
@@ -475,7 +487,7 @@ impl Placing<'_> {
             .read(move |c| {
                 let mut other = None;
                 for a in &list {
-                    if let Some(m) = super::scan::match_forms(c, &pid, a.forms())? {
+                    if let Some(m) = match_forms(c, &pid, a.forms())? {
                         let title = imports::title_entry(c, m.title_id)?;
                         other = title.map(|t| (t.id, t.name, m.name));
                         break;
@@ -542,24 +554,18 @@ impl Placing<'_> {
             (None, None) => "the file matches no DAT entry and was quarantined".to_owned(),
         };
         let (source, redirect) = (self.source.id, self.redirect.clone());
-        let settled = self
-            .app()
-            .db
-            .write_tx(move |tx| {
-                let quarantined = Quarantined {
-                    row,
-                    rom_id,
-                    source,
-                    redirect: redirect.as_ref(),
-                    reason: &reason,
-                    detail: &detail,
-                };
-                let settled = quarantined.record(tx, crate::unix_now())?;
-                Ok(settled)
-            })
-            .await?;
-        after_settle(self.app(), settled).await;
-        Ok(())
+        self.settle(move |tx, now| {
+            let quarantined = Quarantined {
+                row,
+                rom_id,
+                source,
+                redirect: redirect.as_ref(),
+                reason: &reason,
+                detail: &detail,
+            };
+            Ok(Closed::settled(quarantined.record(tx, now)?))
+        })
+        .await
     }
 
     /// A cartridge download: one staged file, or one member of a staged zip.
@@ -651,7 +657,7 @@ impl Placing<'_> {
             .db
             .read(move |c| {
                 for a in list {
-                    let Some(m) = super::scan::match_forms(c, &pid, a.forms())? else {
+                    let Some(m) = match_forms(c, &pid, a.forms())? else {
                         continue;
                     };
                     let other = m.title_id;
@@ -732,25 +738,12 @@ impl Placing<'_> {
             "reason": "the library already holds this version",
         });
         let (id, redirect) = (row.id, redirect.clone());
-        let settled = self
-            .app()
-            .db
-            .write_tx(move |tx| {
-                let now = crate::unix_now();
-                imports::log(
-                    tx,
-                    now,
-                    Some(id),
-                    Some(file),
-                    ImportAction::SkippedExisting,
-                    &detail,
-                )?;
-                let settled = redirect.settle(tx, id, now)?;
-                Ok(settled)
-            })
-            .await?;
-        after_settle(self.app(), settled).await;
-        Ok(())
+        self.settle(move |tx, now| {
+            let action = ImportAction::SkippedExisting;
+            imports::log(tx, now, Some(id), Some(file), action, &detail)?;
+            Ok(Closed::settled(redirect.settle(tx, id, now)?))
+        })
+        .await
     }
 
     /// The entry of the same group a download of this file placed or kept,
@@ -781,16 +774,8 @@ impl Placing<'_> {
         let mut redirect = Redirect::new(&other.name, row, self.source.id, None);
         redirect.0.placed = false;
         let id = row.id;
-        let settled = self
-            .app()
-            .db
-            .write_tx(move |tx| {
-                let settled = redirect.settle(tx, id, crate::unix_now())?;
-                Ok(settled)
-            })
-            .await?;
-        after_settle(self.app(), settled).await;
-        Ok(())
+        self.settle(move |tx, now| Ok(Closed::settled(redirect.settle(tx, id, now)?)))
+            .await
     }
 
     /// A romset or arcade download: a zip whose every member must be a rom of
@@ -1115,24 +1100,15 @@ impl Placing<'_> {
                 fail(app, ids, &reason).await.map(|()| false)
             }
             Ok(Placed::All(stats)) => {
-                let (done, settled) = self
-                    .record(targets, &stats, pieces, ids, true, note)
+                self.record(targets, &stats, pieces, ids, true, note)
                     .await?;
-                if self.redirect.is_some() {
-                    self.announce(&[], &done);
-                    after_settle(app, settled).await;
-                } else {
-                    self.announce(ids, &done);
-                }
                 Ok(true)
             }
             Ok(Placed::Partly(stats, error)) => {
                 let total = targets.len();
                 let landed = stats.len();
-                let (done, _) = self
-                    .record(targets, &stats, pieces, ids, false, note)
+                self.record(targets, &stats, pieces, ids, false, note)
                     .await?;
-                self.announce(&[], &done);
                 let reason = format!(
                     "placement stopped after {landed} of {total} files ({error}); retry to finish"
                 );
@@ -1224,7 +1200,7 @@ impl Placing<'_> {
     }
 
     /// Writes `files` rows the scanner would write for every landed target,
-    /// `import_log`, and, when `complete`, the downloads, in one transaction.
+    /// `import_log`, and, when `complete`, the downloads, through [`Self::settle`].
     async fn record(
         &self,
         targets: Vec<Target>,
@@ -1233,7 +1209,7 @@ impl Placing<'_> {
         ids: &[DownloadId],
         complete: bool,
         note: Option<Value>,
-    ) -> Result<(Vec<(FileId, ImportAction)>, Settled)> {
+    ) -> Result<()> {
         let scope = Scope {
             pid: self.pid(),
             rule: self.platform.header_rule.as_str(),
@@ -1242,33 +1218,46 @@ impl Placing<'_> {
             note,
         };
         let (ids, redirect) = (ids.to_vec(), self.redirect.clone());
-        self.app()
+        self.settle(move |tx, now| {
+            let mut closed = Closed::default();
+            for t in &targets {
+                record_target(tx, &scope, t, &pieces, now, &mut closed.files)?;
+            }
+            match (&redirect, complete) {
+                (Some(r), true) => {
+                    for id in &ids {
+                        let s = r.settle(tx, *id, now)?;
+                        closed.settled.moved.extend(s.moved);
+                        closed.settled.cancelled.extend(s.cancelled);
+                        closed.settled.again = closed.settled.again.or(s.again);
+                    }
+                }
+                (None, true) => {
+                    downloads::move_all(tx, &ids, DownloadState::Done, None, now)?;
+                    prove_single(tx, &pieces)?;
+                    closed.done = ids;
+                }
+                (_, false) => {}
+            }
+            Ok(closed)
+        })
+        .await
+    }
+
+    /// Runs `write` in one transaction and announces what it closed: the downloads that
+    /// ended `done` and the files placed, then what settling moved, fetching again.
+    async fn settle<F>(&self, write: F) -> Result<()>
+    where
+        F: FnOnce(&rusqlite::Connection, i64) -> Result<Closed> + Send + 'static,
+    {
+        let closed = self
+            .app()
             .db
-            .write_tx(move |tx| {
-                let now = crate::unix_now();
-                let mut done = Vec::new();
-                for t in &targets {
-                    record_target(tx, &scope, t, &pieces, now, &mut done)?;
-                }
-                let mut settled = Settled::default();
-                match (&redirect, complete) {
-                    (Some(r), true) => {
-                        for id in &ids {
-                            let s = r.settle(tx, *id, now)?;
-                            settled.moved.extend(s.moved);
-                            settled.cancelled.extend(s.cancelled);
-                            settled.again = settled.again.or(s.again);
-                        }
-                    }
-                    (None, true) => {
-                        downloads::move_all(tx, &ids, DownloadState::Done, None, now)?;
-                        prove_single(tx, &pieces)?;
-                    }
-                    (_, false) => {}
-                }
-                Ok((done, settled))
-            })
-            .await
+            .write_tx(move |tx| write(tx, crate::unix_now()))
+            .await?;
+        self.announce(&closed.done, &closed.files);
+        after_settle(self.app(), closed.settled).await;
+        Ok(())
     }
 
     /// Releases the source's torrent once its downloads settled; see [`release_source`].
@@ -1312,7 +1301,7 @@ pub async fn release_source(app: &Arc<AppState>, source_id: SourceId) -> bool {
         return true;
     }
     if let Some(client_id) = &source.client_id {
-        let Some(client) = app.client() else {
+        let Some(client) = app.client.get() else {
             crate::jobs::core_limits::defer(app, Op::Release(source_id)).await;
             return false;
         };
@@ -1588,8 +1577,9 @@ fn apply_plan(
     let mut stats = HashMap::new();
     for to in &landed {
         let path = roots.library(to)?;
-        let meta = fs::metadata(&path).map_err(|source| PlaceError::Io { path, source })?;
-        stats.insert(rel_string(to), stat(&meta));
+        let stats_of = fs::metadata(&path).and_then(|m| stat(&m));
+        let got = stats_of.map_err(|source| PlaceError::Io { path, source })?;
+        stats.insert(rel_string(to), got);
     }
     if let Some(error) = error {
         return Ok(Placed::Partly(stats, error));

@@ -350,63 +350,63 @@ Opus · `mistarr-server` (`http/`, `app.rs`, `config.rs`, `incoming.rs`,
 `status.rs`, `client.rs`, `main.rs`), `web/` for the 202 change · branch
 `wp-63-http-shell`
 
-- [ ] `incoming/place.rs` holds `SourceFile`, `place_source`, `place`,
+- [x] `incoming/place.rs` holds `SourceFile`, `place_source`, `place`,
   `file_name`, `part_path` and `place_part`, returning
   `PlaceError { Duplicate, NoFreeName, Io }`. Jobs import from it, never from
   `http`; `after_cancel` moves to `jobs/transfer.rs`; the `http` re-exports go.
-- [ ] One `place_unique(dir, name, write)` with `create_new` and a cap, one
+- [x] One `place_unique(dir, name, write)` with `create_new` and a cap, one
   `part_path` and a `PART_PREFIX` constant.
-- [ ] Source uploads stream through axum `Multipart` as DAT uploads do; the
+- [x] Source uploads stream through axum `Multipart` as DAT uploads do; the
   hand-written `multipart_file` and `find` go.
-- [ ] `ApiPath`, `ApiQuery` and `ApiJson` extractors reject with `ApiError`;
+- [x] `ApiPath`, `ApiQuery` and `ApiJson` extractors reject with `ApiError`;
   `OptionalJson<T: Default>` has one empty-body rule. The per-module id
   helpers go and ids are extracted as newtypes.
-- [ ] `ApiError` has a `#[non_exhaustive]` `Code` enum whose `status` and
+- [x] `ApiError` has a `#[non_exhaustive]` `Code` enum whose `status` and
   `as_str` match API.md; `ApiError::new` is private; constructors include
   `no_such(what)`. `From<Error>` maps actionable variants, such as `NoRoom`
   to 503. The 502 answered with code `internal` goes.
-- [ ] API error messages follow one style under PRINCIPLES.md section 5.
-- [ ] Settings: `RuntimeSettings` with every field optional is also the patch
+- [x] API error messages follow one style under PRINCIPLES.md section 5.
+- [x] Settings: `RuntimeSettings` with every field optional is also the patch
   type, so `SettingsPatch` and `overlay` go. `PrefsConfig` flattens core's
   `Prefs`, with `HiddenFlag::from_name` in core. `update_settings` owns the
   side effects and returns what changed; the handler is a few lines.
-- [ ] `AppState` groups client state in a `ClientSlot` in `client.rs` and
+- [x] `AppState` groups client state in a `ClientSlot` in `client.rs` and
   launch state in a `LaunchSlot`, with one visibility rule for fields.
-- [ ] `open_db` splits into `clean_leftovers` and opening, returning a
+- [x] `open_db` splits into `clean_leftovers` and opening, returning a
   `Startup` struct instead of tuples; `Options::for_board(ram_dir)` is used by
   `main`.
-- [ ] `platforms::list` uses `Page::slice`; query structs share one `paging()`;
+- [x] `platforms::list` uses `Page::slice`; query structs share one `paging()`;
   bodies deny unknown fields and queries allow them.
-- [ ] API.md states that an answer whose purpose is a queued job is 202;
+- [x] API.md states that an answer whose purpose is a queued job is 202;
   `POST /system/scan` and `/system/cores` follow it, and the web client too.
-- [ ] `http/stubs.rs` and its API.md sentence go.
-- [ ] `synth` and `bench` sit behind a cargo feature, or ARCHITECTURE.md says
+- [x] `http/stubs.rs` and its API.md sentence go.
+- [x] `synth` and `bench` sit behind a cargo feature, or ARCHITECTURE.md says
   why they ship.
-- [ ] `Binding.platform_id` and the platform path extractor are `PlatformId`.
+- [x] `Binding.platform_id` and the platform path extractor are `PlatformId`.
 
 ### WP-64 Matching and scan
 
 Opus · `mistarr-server` (`jobs/`), `mistarr-core` · branch `wp-64-matching`
 
-- [ ] `jobs/matching.rs` holds `name_fits`, `cartridge_state`, `stored_match`,
+- [x] `jobs/matching.rs` holds `name_fits`, `cartridge_state`, `stored_match`,
   `match_forms`, `Track`, `classify_disc_tracks`, `set_matches` and
   `own_name`. `dat_import`, `chd` and `arcade/presence` call `matching::`,
   never `scan::`.
-- [ ] `FileRow::hashes()` and `FileRow::unchanged(size, mtime)`;
+- [x] `FileRow::hashes()` and `FileRow::unchanged(size, mtime)`;
   `dat_import::stored_hashes`, `chd::stored` and the repeated unchanged-row
   test in `scan.rs` go.
-- [ ] `rom_matches`, `pick_rom` and `match_members` move to
+- [x] `rom_matches`, `pick_rom` and `match_members` move to
   `mistarr_core::matching`; the server keeps only the SQL tier.
-- [ ] `scan.rs` uses one `hashed_row` and one `handle_known` for flat files and
+- [x] `scan.rs` uses one `hashed_row` and one `handle_known` for flat files and
   zip members, `progress::Throttle` instead of its own, and one helper for an
   unreadable directory.
-- [ ] `jobs/fsutil.rs` holds `all_entries`, `file_meta`, `extension`, `stat` and
+- [x] `jobs/fsutil.rs` holds `all_entries`, `file_meta`, `extension`, `stat` and
   `is_zip`; the copies in `import.rs` and `support.rs` go.
-- [ ] `dat_import.rs` splits into `dat_import/` modules for streaming and the
+- [x] `dat_import.rs` splits into `dat_import/` modules for streaming and the
   recompute.
-- [ ] `import.rs` `quarantine_with`, `disc` and `place_plan` end in one shared
+- [x] `import.rs` `quarantine_with`, `disc` and `place_plan` end in one shared
   `settle` step.
-- [ ] Unit tests share one `zip_bytes` in `app::testutil`; the six zip writers
+- [x] Unit tests share one `zip_bytes` in `app::testutil`; the six zip writers
   go.
 
 ### WP-65 Web stores

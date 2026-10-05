@@ -71,6 +71,54 @@ pub struct FileRow {
     pub reason: Option<String>,
 }
 
+impl FileRow {
+    /// The row's hashes when it is fully hashed: CRC32, MD5 and SHA1 all stored.
+    ///
+    /// ```
+    /// use mistarr_core::PlatformId;
+    /// use mistarr_server::db::files::{FileRow, FileState, WholeHashes};
+    /// use mistarr_server::db::ids::FileId;
+    /// let mut row = FileRow { id: FileId(1), platform_id: PlatformId("nes".into()),
+    ///     rel_path: "NES/a.nes".into(), size: 3, mtime: 1, crc32: Some("0".into()),
+    ///     md5: Some("1".into()), sha1: Some("2".into()), header_rule: None,
+    ///     whole: WholeHashes::default(), rom_id: None, state: FileState::Unverified,
+    ///     scanned_at: 1, reason: None };
+    /// assert_eq!(row.hashes().map(|h| h.size), Some(3));
+    /// row.md5 = None;
+    /// assert!(row.hashes().is_none());
+    /// ```
+    #[must_use]
+    pub fn hashes(&self) -> Option<mistarr_core::HashSet> {
+        Some(mistarr_core::HashSet {
+            size: u64::try_from(self.size).ok()?,
+            crc32: self.crc32.clone()?,
+            md5: self.md5.clone()?,
+            sha1: self.sha1.clone()?,
+        })
+    }
+
+    /// Whether the file on disk is still the one this row holds: the same size and mtime,
+    /// and the row is not `pending`, so a scan need not hash it again.
+    ///
+    /// ```
+    /// use mistarr_core::PlatformId;
+    /// use mistarr_server::db::files::{FileRow, FileState, WholeHashes};
+    /// use mistarr_server::db::ids::FileId;
+    /// let mut row = FileRow { id: FileId(1), platform_id: PlatformId("nes".into()),
+    ///     rel_path: "NES/a.nes".into(), size: 3, mtime: 1, crc32: None, md5: None,
+    ///     sha1: None, header_rule: None, whole: WholeHashes::default(), rom_id: None,
+    ///     state: FileState::Unverified, scanned_at: 1, reason: None };
+    /// assert!(row.unchanged(3, 1));
+    /// assert!(!row.unchanged(3, 2));
+    /// row.state = FileState::Pending;
+    /// assert!(!row.unchanged(3, 1));
+    /// ```
+    #[must_use]
+    pub fn unchanged(&self, size: i64, mtime: i64) -> bool {
+        self.size == size && self.mtime == mtime && self.state != FileState::Pending
+    }
+}
+
 /// A file found on disk and hashed, ready to be matched and written by the
 /// scan job. `rom_id` and `state` are already decided.
 #[derive(Debug, Clone)]

@@ -1,10 +1,19 @@
 use std::fmt::Write as _;
-use std::io::{Cursor, Write as _};
+use std::io::Cursor;
 
+use std::collections::HashMap;
+
+use mistarr_core::dat::export_parents;
+use rusqlite::Connection;
+
+use super::recompute::*;
+use super::stream::*;
 use super::*;
-use crate::app::testutil::state;
+use crate::app::testutil::{state, zip_bytes};
+use crate::db::dats::NewVersion;
 use crate::db::files::FileState;
 use crate::db::jobs::{self as rows, JobState};
+use crate::db::{files, titles};
 
 /// A database in its own temporary directory, dropped with it.
 struct TestDb {
@@ -86,18 +95,6 @@ fn rom_header_attributes_are_stored() {
         .with(|x| Ok(x.query_row("SELECT header FROM roms", [], |r| r.get(0))?))
         .expect("header");
     assert_eq!(header.as_deref(), Some("4E 45 53 1A"));
-}
-
-#[test]
-fn prefs_map_known_hide_flags() {
-    let cfg = PrefsConfig {
-        hide: vec!["bios".into(), "unl".into()],
-        regions: vec!["Japan".into()],
-        ..PrefsConfig::default()
-    };
-    let p = prefs(&cfg);
-    assert_eq!(p.hide, [HiddenFlag::Bios]);
-    assert_eq!(p.regions, ["Japan"]);
 }
 
 #[test]
@@ -245,27 +242,17 @@ fn a_long_import_stops_on_shutdown() {
     assert_eq!(count(&c, "SELECT COUNT(*) FROM titles"), 0);
 }
 
-fn zip_of(members: &[(&str, &str)]) -> Vec<u8> {
-    let mut z = zip::ZipWriter::new(Cursor::new(Vec::new()));
-    for (name, body) in members {
-        z.start_file(*name, zip::write::SimpleFileOptions::default())
-            .expect("start");
-        z.write_all(body.as_bytes()).expect("write");
-    }
-    z.finish().expect("finish").into_inner()
-}
-
 #[test]
 fn members_are_listed_by_extension() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pack = dir.path().join("p.zip");
     std::fs::write(
         &pack,
-        zip_of(&[("a.dat", ""), ("b.XML", ""), ("c.txt", "")]),
+        zip_bytes(&[("a.dat", b""), ("b.XML", b""), ("c.txt", b"")]),
     )
     .expect("write");
     assert_eq!(list_members(&pack).expect("members").len(), 2);
-    std::fs::write(&pack, zip_of(&[("c.txt", "")])).expect("write");
+    std::fs::write(&pack, zip_bytes(&[("c.txt", b"")])).expect("write");
     assert!(list_members(&pack).is_err());
     std::fs::write(&pack, b"not a zip").expect("write");
     assert!(list_members(&pack).expect_err("bad").contains("zip"));
@@ -284,7 +271,11 @@ async fn the_job_moves_files_and_publishes_events() {
     let mut events = app.events.subscribe(None).live;
     let pack = dats_dir.join("pack.zip");
     let gb = dat("Maker - Game Boy", "1", &[("Example Quest (USA)", None)]);
-    std::fs::write(&pack, zip_of(&[("gb.dat", &gb), ("bad.dat", "<x/>")])).expect("write");
+    std::fs::write(
+        &pack,
+        zip_bytes(&[("gb.dat", gb.as_bytes()), ("bad.dat", b"<x/>")]),
+    )
+    .expect("write");
     let id = Scheduler::run_inline(&app, Arc::new(DatImport::new(&pack)))
         .await
         .expect("run");
@@ -377,7 +368,11 @@ async fn a_zipped_db_export_loads_headerless_roms_with_clones() {
     let stem = "Example Vendor - Nintendo Entertainment System (DB Export) (20260101-000000)";
     let pack = dats_dir.join(format!("{stem}.zip"));
     let member = format!("{stem}.xml");
-    std::fs::write(&pack, zip_of(&[(&member, &db_export("20260101-000000"))])).expect("write");
+    std::fs::write(
+        &pack,
+        zip_bytes(&[(&member, db_export("20260101-000000").as_bytes())]),
+    )
+    .expect("write");
     let id = Scheduler::run_inline(&app, Arc::new(DatImport::new(&pack)))
         .await
         .expect("run");
@@ -1857,7 +1852,7 @@ fn the_ram_budget_counts_every_member_uncompressed() {
     let (one, two) = ("y".repeat(3000), "z".repeat(500));
     std::fs::write(
         &zipped,
-        zip_of(&[("1.dat", one.as_str()), ("2.xml", two.as_str())]),
+        zip_bytes(&[("1.dat", one.as_bytes()), ("2.xml", two.as_bytes())]),
     )
     .expect("write");
     let members = list_members(&zipped).expect("members");

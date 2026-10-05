@@ -555,12 +555,7 @@ mod tests {
 
     #[test]
     fn unzip_extracts_one_member_into_scratch() {
-        let mut buf = Vec::new();
-        let mut z = zip::ZipWriter::new(Cursor::new(&mut buf));
-        z.start_file("inner/a.bin", zip::write::SimpleFileOptions::default())
-            .expect("start");
-        z.write_all(b"payload").expect("write");
-        z.finish().expect("finish");
+        let buf = crate::app::testutil::zip_bytes(&[("inner/a.bin", b"payload")]);
         let t = tree("set.zip", &buf);
         let r = roots(&t);
         let step = Step::Unzip {
