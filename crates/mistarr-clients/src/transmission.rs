@@ -16,7 +16,7 @@ use tokio::sync::Mutex;
 use crate::http::{self, Endpoint, Headers};
 use crate::wanted::Wanted;
 use crate::{
-    ClientError, ClientFile, ClientInfo, ClientKind, ClientTorrentId, Direction, DownloadClient,
+    ClientFile, ClientInfo, ClientKind, ClientTorrentId, Direction, DownloadClient, Error,
     FileProgress, RateLimit, RemotePathMap, Result, SeedPolicy, TorrentSource, TorrentState,
     TorrentStatus,
 };
@@ -51,7 +51,7 @@ const LOCAL_ERROR: i64 = 3;
 /// let t = Transmission::new(Transmission::DEFAULT_URL)?
 ///     .with_credentials("user", "pass")
 ///     .with_timeout(Duration::from_secs(10));
-/// # Ok::<(), mistarr_clients::ClientError>(())
+/// # Ok::<(), mistarr_clients::Error>(())
 /// ```
 pub struct Transmission {
     endpoint: Endpoint,
@@ -102,7 +102,7 @@ impl Transmission {
     /// No request is made until the first operation.
     ///
     /// # Errors
-    /// [`ClientError::Protocol`] if `url` is not an `http://` URL.
+    /// [`Error::Protocol`] if `url` is not an `http://` URL.
     ///
     /// ```
     /// use mistarr_clients::Transmission;
@@ -124,7 +124,7 @@ impl Transmission {
     /// ```
     /// let t = mistarr_clients::Transmission::new("http://127.0.0.1:9091/transmission/rpc")?
     ///     .with_credentials("user", "secret");
-    /// # Ok::<(), mistarr_clients::ClientError>(())
+    /// # Ok::<(), mistarr_clients::Error>(())
     /// ```
     #[must_use]
     pub fn with_credentials(mut self, user: &str, password: &str) -> Self {
@@ -139,7 +139,7 @@ impl Transmission {
     /// use std::time::Duration;
     /// let t = mistarr_clients::Transmission::new("http://127.0.0.1:9091/transmission/rpc")?
     ///     .with_timeout(Duration::from_secs(5));
-    /// # Ok::<(), mistarr_clients::ClientError>(())
+    /// # Ok::<(), mistarr_clients::Error>(())
     /// ```
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -154,7 +154,7 @@ impl Transmission {
     /// use mistarr_clients::{PathMapping, RemotePathMap, Transmission};
     /// let t = Transmission::new(Transmission::DEFAULT_URL)?
     ///     .with_path_map(RemotePathMap::new(vec![PathMapping::new("/srv", "/media/fat")]));
-    /// # Ok::<(), mistarr_clients::ClientError>(())
+    /// # Ok::<(), mistarr_clients::Error>(())
     /// ```
     #[must_use]
     pub fn with_path_map(mut self, path_map: RemotePathMap) -> Self {
@@ -189,20 +189,20 @@ impl Transmission {
             let resp = http::post(&self.endpoint, headers, body.clone(), self.timeout).await?;
             match resp.status {
                 409 => {
-                    let id = resp.session_id.ok_or_else(|| {
-                        ClientError::protocol("409 without X-Transmission-Session-Id")
-                    })?;
+                    let id = resp
+                        .session_id
+                        .ok_or_else(|| Error::protocol("409 without X-Transmission-Session-Id"))?;
                     *session = Some(id);
                 }
-                401 | 403 => return Err(ClientError::Auth),
+                401 | 403 => return Err(Error::Auth),
                 200 => return parse_reply(&resp.body),
-                status => return Err(ClientError::protocol(format!("HTTP status {status}"))),
+                status => return Err(Error::protocol(format!("HTTP status {status}"))),
             }
         }
-        Err(ClientError::protocol("session id rejected after renewal"))
+        Err(Error::protocol("session id rejected after renewal"))
     }
 
-    /// `torrent-get` for one torrent read as `T`; [`ClientError::NotFound`] if absent.
+    /// `torrent-get` for one torrent read as `T`; [`Error::NotFound`] if absent.
     async fn get_one<T: DeserializeOwned>(
         &self,
         session: &mut Option<String>,
@@ -212,8 +212,8 @@ impl Transmission {
         let args = json!({ "ids": [id], "fields": fields });
         let reply: Torrents<T> = self.rpc_as(session, "torrent-get", args).await?;
         match reply.torrents {
-            Some(list) => list.into_iter().next().ok_or(ClientError::NotFound),
-            None => Err(ClientError::protocol("torrent-get without torrents")),
+            Some(list) => list.into_iter().next().ok_or(Error::NotFound),
+            None => Err(Error::protocol("torrent-get without torrents")),
         }
     }
 
@@ -286,7 +286,7 @@ impl Transmission {
         if applied {
             Ok(())
         } else {
-            Err(ClientError::protocol("file selection was not applied"))
+            Err(Error::protocol("file selection was not applied"))
         }
     }
 
@@ -332,7 +332,7 @@ impl DownloadClient for Transmission {
         let version = reply
             .get("version")
             .and_then(Value::as_str)
-            .ok_or_else(|| ClientError::protocol("session-get without version"))?;
+            .ok_or_else(|| Error::protocol("session-get without version"))?;
         Ok(ClientInfo {
             kind: ClientKind::Transmission,
             version: version.to_owned(),
@@ -350,7 +350,7 @@ impl DownloadClient for Transmission {
         let dir = self.path_map.to_remote(download_dir);
         let dir = dir
             .to_str()
-            .ok_or_else(|| ClientError::protocol("download dir is not UTF-8"))?;
+            .ok_or_else(|| Error::protocol("download dir is not UTF-8"))?;
         let mut args = Map::new();
         args.insert("download-dir".into(), json!(dir));
         args.insert("paused".into(), json!(true));
@@ -381,7 +381,7 @@ impl DownloadClient for Transmission {
         let (id, fresh) = match (reply.get("torrent-added"), reply.get("torrent-duplicate")) {
             (Some(added), _) => (torrent_id(added)?, true),
             (None, Some(dup)) => (torrent_id(dup)?, false),
-            (None, None) => return Err(ClientError::protocol("torrent-add without torrent-added")),
+            (None, None) => return Err(Error::protocol("torrent-add without torrent-added")),
         };
         let sent_with_add = fresh && known_count.is_some_and(|c| c <= Self::LARGE_TORRENT_FILES);
         if !sent_with_add {
@@ -404,7 +404,7 @@ impl DownloadClient for Transmission {
         let mut session = self.session.lock().await;
         let count = self.wanted_flags(&mut session, id).await?.len();
         if count == 0 {
-            return Err(ClientError::MetadataPending);
+            return Err(Error::MetadataPending);
         }
         wanted.check(count)?;
         self.apply_selection(&mut session, id, count, &wanted).await
@@ -457,9 +457,9 @@ impl DownloadClient for Transmission {
         match (reply.get(enabled).and_then(Value::as_bool), kbps) {
             (Some(enabled), Some(kbps)) => Ok(RateLimit {
                 enabled,
-                kbps: u32::try_from(kbps).map_err(ClientError::protocol)?,
+                kbps: u32::try_from(kbps).map_err(Error::protocol)?,
             }),
-            _ => Err(ClientError::protocol(format!("session-get without {rate}"))),
+            _ => Err(Error::protocol(format!("session-get without {rate}"))),
         }
     }
 
@@ -487,11 +487,9 @@ impl DownloadClient for Transmission {
         match (reply.get(ALT_ENABLED).and_then(Value::as_bool), kbps) {
             (Some(enabled), Some(kbps)) => Ok(Some(RateLimit {
                 enabled,
-                kbps: u32::try_from(kbps).map_err(ClientError::protocol)?,
+                kbps: u32::try_from(kbps).map_err(Error::protocol)?,
             })),
-            _ => Err(ClientError::protocol(format!(
-                "session-get without {ALT_UP}"
-            ))),
+            _ => Err(Error::protocol(format!("session-get without {ALT_UP}"))),
         }
     }
 
@@ -529,10 +527,10 @@ fn parse_reply<T: DeserializeOwned + Default>(body: &[u8]) -> Result<T> {
     }
     match serde_json::from_slice::<Reply<T>>(body) {
         Ok(reply) if reply.result == "success" => Ok(reply.arguments),
-        Ok(reply) => Err(ClientError::Protocol(reply.result)),
+        Ok(reply) => Err(Error::Protocol(reply.result)),
         Err(e) => match serde_json::from_slice::<Head>(body) {
-            Ok(head) if head.result != "success" => Err(ClientError::Protocol(head.result)),
-            _ => Err(ClientError::protocol(e)),
+            Ok(head) if head.result != "success" => Err(Error::Protocol(head.result)),
+            _ => Err(Error::protocol(e)),
         },
     }
 }
@@ -554,10 +552,10 @@ fn torrent_id(entry: &Value) -> Result<ClientTorrentId> {
     let hash = entry
         .get("hashString")
         .and_then(Value::as_str)
-        .ok_or_else(|| ClientError::protocol("added torrent without hashString"))?;
+        .ok_or_else(|| Error::protocol("added torrent without hashString"))?;
     hash.parse::<InfoHash>()
         .map(ClientTorrentId::new)
-        .map_err(|_| ClientError::protocol(format!("bad hashString {hash:?}")))
+        .map_err(|_| Error::protocol(format!("bad hashString {hash:?}")))
 }
 
 /// A flag Transmission sends as a boolean or, in older versions, as 0 or 1.
@@ -624,7 +622,7 @@ impl RawListing {
     /// Transmission prefixes each file of a multi-file torrent with the torrent's name.
     fn into_files(self) -> Result<Vec<ClientFile>> {
         if self.files.is_empty() {
-            return Err(ClientError::MetadataPending);
+            return Err(Error::MetadataPending);
         }
         let prefix = format!("{}/", self.name);
         Ok(self
@@ -655,7 +653,7 @@ impl RawTorrent {
         let infohash: InfoHash = self
             .hash_string
             .parse()
-            .map_err(|_| ClientError::protocol(format!("bad hashString {:?}", self.hash_string)))?;
+            .map_err(|_| Error::protocol(format!("bad hashString {:?}", self.hash_string)))?;
         // With nothing left every wanted file is whole, so its size is what the client has.
         let all_done = self.left_until_done == Some(0);
         let files = self
@@ -681,11 +679,7 @@ impl RawTorrent {
                 3 | 5 => TorrentState::Queued,
                 4 => TorrentState::Downloading,
                 6 => TorrentState::Seeding,
-                other => {
-                    return Err(ClientError::protocol(format!(
-                        "unknown torrent status {other}"
-                    )))
-                }
+                other => return Err(Error::protocol(format!("unknown torrent status {other}"))),
             }
         };
         #[expect(

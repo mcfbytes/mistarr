@@ -7,6 +7,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::{Error, Result};
+
 /// Subdirectory an accepted file is moved into.
 pub const LOADED_DIR: &str = "loaded";
 /// Subdirectory a rejected file is moved into.
@@ -106,9 +108,12 @@ pub fn candidates<'a>(dir: &'a Path, name: &'a OsStr) -> impl Iterator<Item = Pa
     (0..=ATTEMPTS).map(move |n| numbered(dir, name, n))
 }
 
-/// The error for a name that no candidate could take.
-fn exhausted() -> io::Error {
-    io::Error::new(io::ErrorKind::AlreadyExists, "no free file name")
+/// The error for `dir` when no candidate name in it could be taken.
+fn exhausted(dir: &Path) -> Error {
+    Error::io_at(dir)(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "no free file name",
+    ))
 }
 
 /// Moves `path` into `loaded/` beside it, under its name or the first free
@@ -118,8 +123,8 @@ fn exhausted() -> io::Error {
 ///
 /// # Errors
 ///
-/// [`io::Error`] when the directory cannot be made, no name is free, or the
-/// move fails.
+/// [`Error::Io`] naming the directory that cannot be made or has no free name,
+/// or the file that cannot be moved.
 ///
 /// ```
 /// let dir = tempfile::tempdir().unwrap();
@@ -129,7 +134,7 @@ fn exhausted() -> io::Error {
 /// assert_eq!(moved, dir.path().join("loaded/a.torrent"));
 /// assert!(!file.exists());
 /// ```
-pub fn accept(path: &Path) -> io::Result<PathBuf> {
+pub fn accept(path: &Path) -> Result<PathBuf> {
     let target = claim(path, LOADED_DIR)?;
     move_onto(path, &target)?;
     Ok(target)
@@ -141,8 +146,8 @@ pub fn accept(path: &Path) -> io::Result<PathBuf> {
 ///
 /// # Errors
 ///
-/// [`io::Error`] when the directory cannot be made, no name is free, or the
-/// move or the reason write fails.
+/// [`Error::Io`] naming the directory that cannot be made or has no free name,
+/// the file that cannot be moved, or the reason file that cannot be written.
 ///
 /// ```
 /// let dir = tempfile::tempdir().unwrap();
@@ -152,20 +157,21 @@ pub fn accept(path: &Path) -> io::Result<PathBuf> {
 /// let reason = std::fs::read_to_string(dir.path().join("rejected/a.torrent.reason.txt")).unwrap();
 /// assert_eq!(reason, "malformed\n");
 /// ```
-pub fn reject(path: &Path, reason: &str) -> io::Result<PathBuf> {
+pub fn reject(path: &Path, reason: &str) -> Result<PathBuf> {
     let target = claim(path, REJECTED_DIR)?;
     move_onto(path, &target)?;
     let mut sidecar = target.clone().into_os_string();
     sidecar.push(REASON_SUFFIX);
-    fs::write(sidecar, format!("{reason}\n"))?;
+    let sidecar = PathBuf::from(sidecar);
+    fs::write(&sidecar, format!("{reason}\n")).map_err(Error::io_at(&sidecar))?;
     Ok(target)
 }
 
 /// Creates an empty file for `path`'s name in `subdir` beside it with
 /// `create_new`, so a concurrent writer cannot take the same name.
-fn claim(path: &Path, subdir: &str) -> io::Result<PathBuf> {
+fn claim(path: &Path, subdir: &str) -> Result<PathBuf> {
     let dir = path.parent().unwrap_or_else(|| Path::new(".")).join(subdir);
-    fs::create_dir_all(&dir)?;
+    fs::create_dir_all(&dir).map_err(Error::io_at(&dir))?;
     let name = file_name(path)?;
     for target in candidates(&dir, name) {
         match OpenOptions::new()
@@ -175,22 +181,26 @@ fn claim(path: &Path, subdir: &str) -> io::Result<PathBuf> {
         {
             Ok(_) => return Ok(target),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
+            Err(e) => return Err(Error::io_at(&target)(e)),
         }
     }
-    Err(exhausted())
+    Err(exhausted(&dir))
 }
 
 /// Moves `path` onto a path from [`claim`], removing the claim when the move fails.
-fn move_onto(path: &Path, claimed: &Path) -> io::Result<()> {
-    fs::rename(path, claimed).inspect_err(|_| {
-        let _ = fs::remove_file(claimed);
-    })
+fn move_onto(path: &Path, claimed: &Path) -> Result<()> {
+    fs::rename(path, claimed)
+        .inspect_err(|_| {
+            let _ = fs::remove_file(claimed);
+        })
+        .map_err(Error::io_at(path))
 }
 
-fn file_name(path: &Path) -> io::Result<&OsStr> {
-    path.file_name()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "path has no file name"))
+fn file_name(path: &Path) -> Result<&OsStr> {
+    path.file_name().ok_or_else(|| {
+        let e = io::Error::new(io::ErrorKind::InvalidInput, "path has no file name");
+        Error::io_at(path)(e)
+    })
 }
 
 /// The first name for `path` in `subdir` beside it that is free now, without
@@ -198,7 +208,7 @@ fn file_name(path: &Path) -> io::Result<&OsStr> {
 ///
 /// # Errors
 ///
-/// [`io::Error`] when the directory cannot be made or no name is free.
+/// [`Error::Io`] naming the directory that cannot be made or has no free name.
 ///
 /// ```
 /// let dir = tempfile::tempdir().unwrap();
@@ -208,18 +218,18 @@ fn file_name(path: &Path) -> io::Result<&OsStr> {
 /// mistarr_sources::intake::place(&file, &planned).unwrap();
 /// assert_eq!(std::fs::read(planned).unwrap(), b"data");
 /// ```
-pub fn plan(path: &Path, subdir: &str) -> io::Result<PathBuf> {
+pub fn plan(path: &Path, subdir: &str) -> Result<PathBuf> {
     let dir = path.parent().unwrap_or_else(|| Path::new(".")).join(subdir);
-    fs::create_dir_all(&dir)?;
+    fs::create_dir_all(&dir).map_err(Error::io_at(&dir))?;
     let name = file_name(path)?;
     for target in candidates(&dir, name) {
         match fs::symlink_metadata(&target) {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(target),
-            Err(e) => return Err(e),
+            Err(e) => return Err(Error::io_at(&target)(e)),
             Ok(_) => {}
         }
     }
-    Err(exhausted())
+    Err(exhausted(&dir))
 }
 
 /// Moves `path` onto a name from [`plan`]. A hard link never replaces a file;
@@ -228,26 +238,20 @@ pub fn plan(path: &Path, subdir: &str) -> io::Result<PathBuf> {
 ///
 /// # Errors
 ///
-/// [`io::Error`] of kind `AlreadyExists` when the name was taken since
-/// [`plan`], or when the move fails.
-pub fn place(path: &Path, planned: &Path) -> io::Result<()> {
+/// [`Error::Io`] naming `planned`, of kind `AlreadyExists`, when the name was
+/// taken since [`plan`], or naming `path` when the move fails.
+pub fn place(path: &Path, planned: &Path) -> Result<()> {
     match fs::hard_link(path, planned) {
-        Ok(()) => fs::remove_file(path),
-        Err(e)
-            if matches!(
-                e.kind(),
-                io::ErrorKind::NotFound | io::ErrorKind::AlreadyExists
-            ) =>
-        {
-            Err(e)
-        }
+        Ok(()) => fs::remove_file(path).map_err(Error::io_at(path)),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(Error::io_at(planned)(e)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Err(Error::io_at(path)(e)),
         Err(_) => {
             match fs::symlink_metadata(planned) {
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => return Err(e),
-                Ok(_) => return Err(io::ErrorKind::AlreadyExists.into()),
+                Err(e) => return Err(Error::io_at(planned)(e)),
+                Ok(_) => return Err(Error::io_at(planned)(io::ErrorKind::AlreadyExists.into())),
             }
-            fs::rename(path, planned)
+            fs::rename(path, planned).map_err(Error::io_at(path))
         }
     }
 }
@@ -275,6 +279,14 @@ mod tests {
 
     fn any(_: &str) -> bool {
         true
+    }
+
+    /// The kind and path of an [`Error::Io`].
+    fn io(e: Error) -> (io::ErrorKind, PathBuf) {
+        match e {
+            Error::Io { path, source } => (source.kind(), path),
+            other => panic!("not an I/O error: {other}"),
+        }
     }
 
     fn backdate(path: &Path, age: Duration) {
@@ -427,8 +439,11 @@ mod tests {
     #[test]
     fn a_failed_move_leaves_no_placeholder() {
         let dir = tempfile::tempdir().unwrap();
-        let err = accept(&dir.path().join("gone.torrent")).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::NotFound);
+        let gone = dir.path().join("gone.torrent");
+        assert_eq!(
+            io(accept(&gone).unwrap_err()),
+            (io::ErrorKind::NotFound, gone)
+        );
         assert_eq!(
             fs::read_dir(dir.path().join(LOADED_DIR)).unwrap().count(),
             0
@@ -461,12 +476,9 @@ mod tests {
         for taken in candidates(&loaded, OsStr::new("a.dat")) {
             fs::write(taken, b"").unwrap();
         }
-        let err = claim(&file, LOADED_DIR).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
-        assert_eq!(
-            plan(&file, LOADED_DIR).unwrap_err().kind(),
-            io::ErrorKind::AlreadyExists
-        );
+        let full = (io::ErrorKind::AlreadyExists, loaded);
+        assert_eq!(io(claim(&file, LOADED_DIR).unwrap_err()), full);
+        assert_eq!(io(plan(&file, LOADED_DIR).unwrap_err()), full);
     }
 
     #[test]
@@ -481,8 +493,8 @@ mod tests {
             0
         );
         fs::write(&planned, b"old").unwrap();
-        let err = place(&file, &planned).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+        let err = io(place(&file, &planned).unwrap_err());
+        assert_eq!(err, (io::ErrorKind::AlreadyExists, planned.clone()));
         assert_eq!(fs::read(&planned).unwrap(), b"old");
         assert!(file.exists());
         assert_eq!(
@@ -509,7 +521,7 @@ mod tests {
 
     #[test]
     fn a_path_without_a_file_name_is_invalid() {
-        let err = accept(Path::new("/")).unwrap_err();
-        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let err = io(accept(Path::new("/")).unwrap_err());
+        assert_eq!(err, (io::ErrorKind::InvalidInput, PathBuf::from("/")));
     }
 }

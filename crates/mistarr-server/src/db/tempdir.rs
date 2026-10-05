@@ -31,7 +31,7 @@ pub struct TempDir {
 ///
 /// # Errors
 ///
-/// [`Error::Io`] when `fallback` cannot be prepared either.
+/// [`Error::File`] naming `fallback` when it cannot be prepared either.
 ///
 /// ```
 /// let dir = tempfile::tempdir().unwrap();
@@ -45,8 +45,8 @@ pub fn choose_temp_dir(ram: &Path, fallback: &Path) -> Result<TempDir> {
         private_dir(dir)?;
         prepare_temp_dir(dir)?;
         let probe = dir.join(format!(".probe-{}", std::process::id()));
-        std::fs::write(&probe, b"x")?;
-        std::fs::remove_file(&probe)?;
+        std::fs::write(&probe, b"x").map_err(crate::Error::io_at(&probe))?;
+        std::fs::remove_file(&probe).map_err(crate::Error::io_at(&probe))?;
         Ok(())
     };
     match usable(ram) {
@@ -81,7 +81,7 @@ pub(crate) fn private_dir(dir: &Path) -> Result<()> {
                 .mode(0o700)
                 .recursive(true)
                 .create(dir)?;
-            std::fs::symlink_metadata(dir)?
+            std::fs::symlink_metadata(dir).map_err(crate::Error::io_at(dir))?
         }
         other => other?,
     };
@@ -95,7 +95,8 @@ pub(crate) fn private_dir(dir: &Path) -> Result<()> {
         return refuse("belongs to another user");
     }
     if meta.mode() & 0o777 != 0o700 {
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+            .map_err(crate::Error::io_at(dir))?;
     }
     Ok(())
 }
@@ -105,7 +106,7 @@ pub(crate) fn private_dir(dir: &Path) -> Result<()> {
 ///
 /// # Errors
 ///
-/// [`Error::Io`] when `dir` cannot be created or listed.
+/// [`Error::File`] naming `dir` when it cannot be created or listed.
 ///
 /// ```
 /// let dir = std::env::temp_dir().join("mistarr-doc-sqlite-tmp");
@@ -113,8 +114,11 @@ pub(crate) fn private_dir(dir: &Path) -> Result<()> {
 /// assert!(dir.is_dir());
 /// ```
 pub fn prepare_temp_dir(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
-    for entry in std::fs::read_dir(dir)?.flatten() {
+    std::fs::create_dir_all(dir).map_err(crate::Error::io_at(dir))?;
+    for entry in std::fs::read_dir(dir)
+        .map_err(crate::Error::io_at(dir))?
+        .flatten()
+    {
         // The frozen client's record outlives a restart so the client is resumed.
         if entry.file_name() == crate::freeze::FROZEN_NAME {
             continue;

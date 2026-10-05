@@ -662,7 +662,8 @@ fn read_and_missing_zips() {
     let mra = read(&path).expect("read");
     std::fs::write(dir.join("EXBLAST.ZIP"), b"").expect("write");
     assert_eq!(missing_zips(&mra, dir), ["exparent.zip", "exsound.zip"]);
-    assert!(matches!(read(&dir.join("absent.mra")), Err(Error::Io(_))));
+    let absent = dir.join("absent.mra");
+    assert!(matches!(read(&absent), Err(Error::Io { path, .. }) if path == absent));
 }
 
 #[test]

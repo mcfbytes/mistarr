@@ -46,7 +46,7 @@ pub struct InstalledCore {
 /// assert_eq!(read_corename(&path).unwrap(), CoreState::Running("SNES".into()));
 /// ```
 pub fn read_corename(path: &Path) -> Result<CoreState> {
-    let raw = std::fs::read_to_string(path)?;
+    let raw = std::fs::read_to_string(path).map_err(crate::Error::io_at(path))?;
     let name = raw.trim_matches(|c: char| c.is_whitespace() || c == '\0');
     Ok(if name.is_empty() || name == "MENU" {
         CoreState::Menu

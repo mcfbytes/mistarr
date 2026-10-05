@@ -3,7 +3,7 @@
 
 use sha1::{Digest, Sha1};
 
-use crate::error::SourceError;
+use crate::{Error, Result};
 use mistarr_core::bencode::{BencodeError, Raw};
 use mistarr_core::InfoHash;
 
@@ -44,7 +44,7 @@ pub struct TorrentMeta {
 ///
 /// # Errors
 ///
-/// Returns [`SourceError`] when `data` is not valid bencode, has no `info`
+/// Returns [`Error`] when `data` is not valid bencode, has no `info`
 /// dict, is missing a required field, or is a v2-only layout.
 ///
 /// ```
@@ -53,26 +53,26 @@ pub struct TorrentMeta {
 /// // bencode encoder; a bare top-level dict without `info` is rejected here.
 /// assert!(parse_torrent(b"d4:infoi1ee").is_err());
 /// ```
-pub fn parse_torrent(data: &[u8]) -> Result<TorrentMeta, SourceError> {
+pub fn parse_torrent(data: &[u8]) -> Result<TorrentMeta> {
     let (info, info_bytes) = info_of(data)?;
     let name = info
         .get("name")
         .and_then(Raw::as_str)
-        .ok_or(SourceError::BadField("info.name"))?
+        .ok_or(Error::BadField("info.name"))?
         .to_owned();
     let is_private = info.get("private").and_then(Raw::as_int) == Some(1);
 
     let files = match (info.get("files"), info.get("length")) {
         (Some(list @ Raw::List(_)), _) => parse_multi_file(list)?,
         (_, Some(Raw::Int(length))) => parse_single_file(&name, length)?,
-        _ if info.get("file tree").is_some() => return Err(SourceError::V2Only),
-        _ => return Err(SourceError::BadField("info.files/length")),
+        _ if info.get("file tree").is_some() => return Err(Error::V2Only),
+        _ => return Err(Error::BadField("info.files/length")),
     };
 
     let total_size = files
         .iter()
         .try_fold(0u64, |sum, f| sum.checked_add(f.size))
-        .ok_or(SourceError::BadField("info.files.length"))?;
+        .ok_or(Error::BadField("info.files.length"))?;
     let infohash = InfoHash::from_bytes(Sha1::digest(info_bytes).into());
 
     Ok(TorrentMeta {
@@ -96,13 +96,13 @@ pub fn parse_torrent(data: &[u8]) -> Result<TorrentMeta, SourceError> {
 /// assert_eq!(h.to_string().len(), 40);
 /// assert!(mistarr_sources::torrent::infohash(b"d4:infoi1ee").is_err());
 /// ```
-pub fn infohash(data: &[u8]) -> Result<InfoHash, SourceError> {
+pub fn infohash(data: &[u8]) -> Result<InfoHash> {
     let (_, info_bytes) = info_of(data)?;
     Ok(InfoHash::from_bytes(Sha1::digest(info_bytes).into()))
 }
 
 /// The `info` dict of a whole `.torrent` and its encoded bytes.
-fn info_of(data: &[u8]) -> Result<(Raw<'_>, &[u8]), SourceError> {
+fn info_of(data: &[u8]) -> Result<(Raw<'_>, &[u8])> {
     let (top, len) = Raw::parse(data)?;
     if !matches!(top, Raw::Dict(_)) {
         return Err(BencodeError::Malformed(0).into());
@@ -114,15 +114,15 @@ fn info_of(data: &[u8]) -> Result<(Raw<'_>, &[u8]), SourceError> {
         .entries()
         .find(|(key, _, _)| *key == b"info")
         .map(|(_, value, bytes)| (value, bytes))
-        .ok_or(SourceError::MissingInfoDict)?;
+        .ok_or(Error::MissingInfoDict)?;
     if !matches!(info, Raw::Dict(_)) {
-        return Err(SourceError::MissingInfoDict);
+        return Err(Error::MissingInfoDict);
     }
     Ok((info, info_bytes))
 }
 
-fn parse_single_file(name: &str, length: i64) -> Result<Vec<TorrentFile>, SourceError> {
-    let size = u64::try_from(length).map_err(|_| SourceError::BadField("info.length"))?;
+fn parse_single_file(name: &str, length: i64) -> Result<Vec<TorrentFile>> {
+    let size = u64::try_from(length).map_err(|_| Error::BadField("info.length"))?;
     Ok(vec![TorrentFile {
         index: 0,
         path: name.to_owned(),
@@ -131,18 +131,17 @@ fn parse_single_file(name: &str, length: i64) -> Result<Vec<TorrentFile>, Source
 }
 
 /// Reads `info.files` straight from the encoded list, one [`TorrentFile`] per entry.
-fn parse_multi_file(list: Raw<'_>) -> Result<Vec<TorrentFile>, SourceError> {
+fn parse_multi_file(list: Raw<'_>) -> Result<Vec<TorrentFile>> {
     let mut files = Vec::new();
     for (i, entry) in list.items().enumerate() {
-        let index = u32::try_from(i).map_err(|_| SourceError::BadField("info.files"))?;
+        let index = u32::try_from(i).map_err(|_| Error::BadField("info.files"))?;
         let length = entry
             .get("length")
             .and_then(Raw::as_int)
-            .ok_or(SourceError::BadField("info.files[].length"))?;
-        let size =
-            u64::try_from(length).map_err(|_| SourceError::BadField("info.files[].length"))?;
+            .ok_or(Error::BadField("info.files[].length"))?;
+        let size = u64::try_from(length).map_err(|_| Error::BadField("info.files[].length"))?;
         let Some(segments @ Raw::List(_)) = entry.get("path") else {
-            return Err(SourceError::BadField("info.files[].path"));
+            return Err(Error::BadField("info.files[].path"));
         };
         let mut path = String::new();
         for (n, segment) in segments.items().enumerate() {
@@ -152,7 +151,7 @@ fn parse_multi_file(list: Raw<'_>) -> Result<Vec<TorrentFile>, SourceError> {
             path.push_str(
                 segment
                     .as_str()
-                    .ok_or(SourceError::BadField("info.files[].path[]"))?,
+                    .ok_or(Error::BadField("info.files[].path[]"))?,
             );
         }
         files.push(TorrentFile { index, path, size });
@@ -304,15 +303,12 @@ mod tests {
             .field("file tree", DictBuilder::new().build())
             .build();
         let data = DictBuilder::new().field("info", info).build();
-        assert!(matches!(parse_torrent(&data), Err(SourceError::V2Only)));
+        assert!(matches!(parse_torrent(&data), Err(Error::V2Only)));
     }
 
     #[test]
     fn rejects_missing_info() {
-        assert!(matches!(
-            parse_torrent(b"de"),
-            Err(SourceError::MissingInfoDict)
-        ));
+        assert!(matches!(parse_torrent(b"de"), Err(Error::MissingInfoDict)));
     }
 
     #[test]
@@ -320,7 +316,7 @@ mod tests {
         let files: Vec<(Vec<&str>, i64)> = (0..3).map(|_| (vec!["a.bin"], i64::MAX)).collect();
         assert!(matches!(
             parse_torrent(&multi_file_torrent("Example Set", &files)),
-            Err(SourceError::BadField("info.files.length"))
+            Err(Error::BadField("info.files.length"))
         ));
     }
 

@@ -5,7 +5,9 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use mistarr_clients::{ClientError, DownloadClient, SeedPolicy, TorrentState, TorrentStatus};
+use mistarr_clients::{
+    DownloadClient, Error as ClientError, SeedPolicy, TorrentState, TorrentStatus,
+};
 
 use crate::app::{AppState, Options};
 use crate::db::downloads::{self as rows, DownloadState, Observed, PollRow};

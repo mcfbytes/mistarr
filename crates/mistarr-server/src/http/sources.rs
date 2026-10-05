@@ -7,7 +7,7 @@ use axum::extract::{DefaultBodyLimit, FromRequest, Multipart, Request, State};
 use axum::http::{header, StatusCode};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use mistarr_clients::ClientError;
+use mistarr_clients::Error as ClientError;
 use mistarr_core::magnet;
 use mistarr_core::PlatformId;
 use mistarr_sources::torrent;

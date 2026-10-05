@@ -125,7 +125,7 @@ async fn upload(
 
 /// Streams one multipart field to `path`, one chunk in memory at a time.
 async fn write_field(mut field: Field<'_>, path: &FsPath) -> Result<(), ApiError> {
-    let mut file = Some(std::fs::File::create(path).map_err(crate::Error::from)?);
+    let mut file = Some(std::fs::File::create(path).map_err(crate::Error::io_at(path))?);
     while let Some(chunk) = field
         .chunk()
         .await
@@ -194,7 +194,7 @@ async fn delete_rejected(
     ApiPath(name): ApiPath<String>,
 ) -> Result<StatusCode, ApiError> {
     let path = rejected_file(&app.config().paths.dats(), &name)?;
-    std::fs::remove_file(&path).map_err(crate::Error::from)?;
+    std::fs::remove_file(&path).map_err(crate::Error::io_at(&path))?;
     remove_if_present(&reason_of(&path))?;
     Ok(StatusCode::NO_CONTENT)
 }

@@ -10,7 +10,7 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use crate::rtorrent::RC_MARKER;
-use crate::{ClientError, ClientKind, Result};
+use crate::{ClientKind, Error, Result};
 
 /// `errno` for exec of a file another process still has open for writing.
 const ETXTBSY: i32 = 26;
@@ -122,19 +122,20 @@ impl Launcher {
     ///
     /// # Errors
     ///
-    /// [`ClientError::Launch`] when the client is not installed, its start
+    /// [`Error::Launch`] when the client is not installed, its start
     /// command fails or overruns, or rtorrent exits at once;
-    /// [`ClientError::Io`] when a file cannot be written.
+    /// [`Error::Io`] naming a file or directory that cannot be written.
     pub fn start(&self, kind: ClientKind) -> Result<()> {
         let installed = self.installed();
         match kind {
             ClientKind::Transmission if installed.transmission_service => {
-                std::fs::create_dir_all(&self.transmission_opt_in)?;
+                std::fs::create_dir_all(&self.transmission_opt_in)
+                    .map_err(Error::io_at(&self.transmission_opt_in))?;
                 self.run(Command::new(&self.transmission_init).arg("start"))
             }
             ClientKind::Transmission if installed.transmission_on_path => {
                 let config = self.data_dir.join("transmission");
-                std::fs::create_dir_all(&config)?;
+                std::fs::create_dir_all(&config).map_err(Error::io_at(&config))?;
                 let mut cmd = Command::new("transmission-daemon");
                 cmd.arg("--config-dir")
                     .arg(&config)
@@ -144,7 +145,8 @@ impl Launcher {
             }
             ClientKind::Rtorrent if installed.rtorrent_on_path => {
                 let rc = self.write_rc()?;
-                std::fs::create_dir_all(self.data_dir.join("rtorrent-session"))?;
+                let session = self.data_dir.join("rtorrent-session");
+                std::fs::create_dir_all(&session).map_err(Error::io_at(&session))?;
                 let nice = on_path("nice", self.search_path().as_deref());
                 let mut cmd = if nice {
                     let mut c = Command::new("nice");
@@ -157,7 +159,7 @@ impl Launcher {
                     .arg(format!("import=\"{}\"", rc.display()));
                 self.spawn_detached(&mut cmd)
             }
-            _ => Err(ClientError::Launch(format!("{kind} is not installed"))),
+            _ => Err(Error::Launch(format!("{kind} is not installed"))),
         }
     }
 
@@ -166,27 +168,29 @@ impl Launcher {
     fn write_rc(&self) -> Result<PathBuf> {
         let data = self.data_dir.to_string_lossy();
         if data.contains('"') {
-            return Err(ClientError::Launch(
+            return Err(Error::Launch(
                 "the data directory's path contains a double quote".into(),
             ));
         }
-        std::fs::create_dir_all(&self.data_dir)?;
+        std::fs::create_dir_all(&self.data_dir).map_err(Error::io_at(&self.data_dir))?;
         let rc = self.data_dir.join("rtorrent.rc");
         let owned = std::fs::read_to_string(&rc).is_ok_and(|t| !t.contains(RC_MARKER));
         if !owned {
-            std::fs::write(&rc, rtorrent_rc(&self.data_dir))?;
+            std::fs::write(&rc, rtorrent_rc(&self.data_dir)).map_err(Error::io_at(&rc))?;
         }
         Ok(rc)
     }
 
     /// Opens the start log for appending and returns it with its current length.
     fn open_log(&self) -> Result<(File, u64)> {
-        std::fs::create_dir_all(&self.data_dir)?;
+        std::fs::create_dir_all(&self.data_dir).map_err(Error::io_at(&self.data_dir))?;
+        let path = self.data_dir.join(START_LOG);
         let log = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.data_dir.join(START_LOG))?;
-        let from = log.metadata()?.len();
+            .open(&path)
+            .map_err(Error::io_at(&path))?;
+        let from = log.metadata().map_err(Error::io_at(&path))?.len();
         Ok((log, from))
     }
 
@@ -212,9 +216,10 @@ impl Launcher {
             cmd.env("PATH", path);
         }
         let (log, from) = self.open_log()?;
-        cmd.stdin(Stdio::null())
-            .stdout(log.try_clone()?)
-            .stderr(log);
+        let out = log
+            .try_clone()
+            .map_err(Error::io_at(&self.data_dir.join(START_LOG)))?;
+        cmd.stdin(Stdio::null()).stdout(out).stderr(log);
         let mut tries = 0u64;
         loop {
             match cmd.spawn() {
@@ -224,7 +229,7 @@ impl Launcher {
                     tries += 1;
                     std::thread::sleep(Duration::from_millis(20 * tries));
                 }
-                Err(e) => return Err(ClientError::Launch(e.to_string())),
+                Err(e) => return Err(Error::Launch(e.to_string())),
             }
         }
     }
@@ -235,14 +240,14 @@ impl Launcher {
         let (mut child, from) = self.spawn(cmd)?;
         match wait_for(&mut child, self.timeout)? {
             Some(status) if status.success() => Ok(()),
-            Some(status) => Err(ClientError::Launch(format!(
+            Some(status) => Err(Error::Launch(format!(
                 "start command {status}: {}",
                 self.log_tail(from)
             ))),
             None => {
                 let _ = child.kill();
                 let _ = child.wait();
-                Err(ClientError::Launch(format!(
+                Err(Error::Launch(format!(
                     "start command still running after {} s",
                     self.timeout.as_secs()
                 )))
@@ -256,7 +261,7 @@ impl Launcher {
         cmd.process_group(0);
         let (mut child, from) = self.spawn(cmd)?;
         if let Some(status) = wait_for(&mut child, self.timeout.min(RTORRENT_SETTLE))? {
-            return Err(ClientError::Launch(format!(
+            return Err(Error::Launch(format!(
                 "rtorrent exited ({status}): {}",
                 self.log_tail(from)
             )));
@@ -273,7 +278,8 @@ impl Launcher {
 fn wait_for(child: &mut Child, limit: Duration) -> Result<Option<ExitStatus>> {
     let until = Instant::now() + limit;
     loop {
-        if let Some(status) = child.try_wait()? {
+        let polled = child.try_wait();
+        if let Some(status) = polled.map_err(|e| Error::Launch(e.to_string()))? {
             return Ok(Some(status));
         }
         if Instant::now() >= until {
@@ -350,7 +356,7 @@ mod tests {
         let l = launcher(dir.path());
         assert_eq!(l.installed(), Installed::default());
         for kind in [ClientKind::Transmission, ClientKind::Rtorrent] {
-            assert!(matches!(l.start(kind), Err(ClientError::Launch(_))));
+            assert!(matches!(l.start(kind), Err(Error::Launch(_))));
         }
     }
 
@@ -509,7 +515,7 @@ mod tests {
         script(&dir.path().join("bin"), "rtorrent", "exec /bin/sleep 3");
         assert!(matches!(
             l.start(ClientKind::Rtorrent),
-            Err(ClientError::Launch(_))
+            Err(Error::Launch(_))
         ));
     }
 

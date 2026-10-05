@@ -11,6 +11,7 @@ pub mod bencode;
 pub mod chd;
 pub mod dat;
 mod digest;
+mod error;
 pub mod hex;
 mod id;
 pub mod magnet;
@@ -20,6 +21,7 @@ mod percent;
 pub mod xml;
 
 pub use digest::{Crc32, Digest, InfoHash, Md5, ParseDigestError, Sha1};
+pub use error::{Error, Result};
 pub use id::{PlatformId, RomId};
 pub use percent::percent_decode;
 

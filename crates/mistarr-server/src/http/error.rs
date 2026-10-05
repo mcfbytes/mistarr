@@ -320,7 +320,7 @@ mod tests {
         assert_eq!(code(PlaceError::NoFreeName.into()), Code::Conflict);
         let io = PlaceError::Io(std::io::Error::other("x"));
         assert_eq!(code(io.into()), Code::Internal);
-        let refused = mistarr_clients::ClientError::NotFound;
+        let refused = mistarr_clients::Error::NotFound;
         assert_eq!(code(refused.into()), Code::Unavailable);
         assert_eq!(code(Main::CommandBusy.into()), Code::Unavailable);
         assert_eq!(code(Main::UnsafePath("x".into()).into()), Code::Conflict);

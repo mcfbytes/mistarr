@@ -355,11 +355,12 @@ pub fn write_mgl(dir: &Path, doc: &str) -> Result<PathBuf> {
         match OpenOptions::new().write(true).create_new(true).open(&path) {
             Ok(file) => break (path, file),
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(Error::io_at(&path)(e)),
         }
     };
-    file.write_all(doc.as_bytes())?;
-    file.sync_all()?;
+    file.write_all(doc.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(Error::io_at(&path))?;
     prune_mgl(dir);
     Ok(path)
 }
@@ -456,17 +457,22 @@ impl CommandSink for FifoSink {
         let fd = rustix::fs::open(&self.path, flags, Mode::empty()).map_err(|e| match e {
             Errno::NOENT | Errno::NOTDIR => Error::CommandAbsent,
             Errno::NXIO => Error::NotListening,
-            e => Error::Io(e.into()),
+            e => Error::io_at(&self.path)(e.into()),
         })?;
         let mut file = File::from(fd);
-        if !file.metadata()?.file_type().is_fifo() {
+        if !file
+            .metadata()
+            .map_err(Error::io_at(&self.path))?
+            .file_type()
+            .is_fifo()
+        {
             return Err(Error::CommandAbsent);
         }
         match file.write(line.as_bytes()) {
             Ok(n) if n == line.len() => Ok(()),
             Ok(_) => Err(Error::CommandBusy),
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => Err(Error::CommandBusy),
-            Err(e) => Err(Error::Io(e)),
+            Err(e) => Err(Error::io_at(&self.path)(e)),
         }
     }
 }

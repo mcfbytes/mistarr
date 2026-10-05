@@ -118,6 +118,17 @@ read with `as_str`; one from the platform table borrows the table's text, so
 `Platform::platform_id` does not allocate. `mistarr-mister` re-exports it.
 `InfoHash`, `ClientTorrentId` and `DatFamily` follow the same rule.
 
+### Errors
+
+Every crate has `crate::Error`, a `thiserror` enum, and `Result<T, E = Error>`.
+Core's `Error` wraps its module errors, which its functions return; core reads
+streams and owns no files, so none of its errors names a path. In `mister`,
+`sources` and `clients` the I/O variant is `Io { path, source }`, built with
+`Error::io_at(path)`. The server's `Error::File { path, source }` is the same
+for a file or directory, and `Error::Io` holds a failure with no file, such as
+a socket or a thread; `Error::io()` reads the I/O error of either. The server
+names a client's error `ClientError` where it imports it beside its own.
+
 ## Runtime flows
 
 ### Startup

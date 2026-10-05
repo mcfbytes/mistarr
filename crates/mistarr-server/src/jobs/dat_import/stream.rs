@@ -102,7 +102,7 @@ fn with_member<T>(
     (phase, meter): (&str, Option<&Meter>),
     f: impl FnOnce(&mut dyn BufRead, &str) -> Result<T>,
 ) -> Result<std::result::Result<T, String>> {
-    let file = File::open(path)?;
+    let file = File::open(path).map_err(crate::Error::io_at(path))?;
     let report = |read: u64, total: u64| {
         if let Some(m) = meter {
             m.bytes(phase, read, total);

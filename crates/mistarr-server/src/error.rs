@@ -62,13 +62,13 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     /// The download client refused or failed a request.
     #[error(transparent)]
-    Client(#[from] mistarr_clients::ClientError),
+    Client(#[from] mistarr_clients::Error),
     /// A URL fetch failed; the message never names the URL.
     #[error(transparent)]
     Fetched(#[from] mistarr_clients::fetch::FetchError),
     /// A source file could not be read, parsed or moved.
     #[error(transparent)]
-    Source(#[from] mistarr_sources::SourceError),
+    Source(#[from] mistarr_sources::Error),
     /// Main refused a command or the command interface failed.
     #[error(transparent)]
     Mister(#[from] mistarr_mister::Error),
@@ -108,7 +108,15 @@ pub enum Error {
     /// A file was not placed in a watched directory.
     #[error(transparent)]
     Place(#[from] crate::incoming::place::PlaceError),
-    /// File system access failed.
+    /// A named file or directory could not be read, written, created or removed.
+    #[error("{}: {source}", path.display())]
+    File {
+        /// The file or directory involved.
+        path: std::path::PathBuf,
+        /// The underlying error.
+        source: std::io::Error,
+    },
+    /// An operating system call with no file of its own failed.
     #[error(transparent)]
     Io(#[from] std::io::Error),
     /// A benchmark command refused its database file.
@@ -132,6 +140,36 @@ impl From<rusqlite::Error> for Error {
     }
 }
 
+impl Error {
+    /// Wraps an I/O error as [`Error::File`] naming `path`.
+    ///
+    /// ```
+    /// use std::path::Path;
+    /// let e = mistarr_server::Error::io_at(Path::new("/d/x"))(std::io::Error::other("no"));
+    /// assert_eq!(e.to_string(), "/d/x: no");
+    /// ```
+    pub fn io_at(path: &std::path::Path) -> impl FnOnce(std::io::Error) -> Self + '_ {
+        move |source| Self::File {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
+    /// The I/O error inside [`Error::Io`] or [`Error::File`].
+    ///
+    /// ```
+    /// let e = mistarr_server::Error::from(std::io::Error::other("no"));
+    /// assert_eq!(e.io().map(std::io::Error::kind), Some(std::io::ErrorKind::Other));
+    /// ```
+    #[must_use]
+    pub fn io(&self) -> Option<&std::io::Error> {
+        match self {
+            Self::Io(source) | Self::File { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
+
 /// Result alias for this crate.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 
@@ -148,7 +186,7 @@ mod tests {
         assert!(e.to_string().starts_with("migration 3 failed"));
         let json = serde_json::from_str::<u8>("x").map_err(Error::from);
         assert!(json.is_err_and(|e| e.to_string().starts_with("JSON: ")));
-        let client = Error::from(mistarr_clients::ClientError::NotFound);
+        let client = Error::from(mistarr_clients::Error::NotFound);
         assert_eq!(
             client.to_string(),
             "torrent not found in the download client"
@@ -173,6 +211,10 @@ mod tests {
         assert!(matches!(Error::from(stored), Error::Stored { key, .. } if key == "t.c"));
         let other = rusqlite::Error::InvalidQuery;
         assert!(matches!(Error::from(other), Error::Db(_)));
+        let file = Error::io_at("/d/a.db".as_ref())(std::io::Error::other("gone"));
+        assert_eq!(file.to_string(), "/d/a.db: gone");
+        assert_eq!(file.io().map(ToString::to_string).as_deref(), Some("gone"));
+        assert!(Error::Cancelled.io().is_none());
         let reopen = Error::Reopen(Box::new(Error::NoRoom("full".into())));
         assert_eq!(
             reopen.to_string(),

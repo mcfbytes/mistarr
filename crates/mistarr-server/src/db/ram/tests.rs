@@ -410,7 +410,10 @@ fn a_swap_refuses_a_file_it_cannot_rename_and_keeps_the_old_one() {
     let (dir, db) = card(1024);
     let missing = dir.path().join("absent.new");
     let r = db.hold_writer_blocking(|h| h.replace_file(&missing));
-    assert!(matches!(r, Err(Error::Io(_))), "{r:?}");
+    assert!(
+        matches!(r, Err(Error::File { ref path, .. }) if *path == missing),
+        "{r:?}"
+    );
     assert_eq!(get(&db, "k").as_deref(), Some("old"));
     db.write_blocking(|c| settings::set(c, "k", "kept"))
         .expect("reopened on the old file");

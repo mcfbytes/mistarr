@@ -12,7 +12,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 
-use crate::ClientError;
+use crate::Error;
 
 /// Largest response body accepted; a `torrent-get` of a 10 000 file torrent
 /// is a few MiB.
@@ -30,8 +30,8 @@ pub(crate) struct Endpoint {
 
 impl Endpoint {
     /// Parses an `http://host[:port]/path` URL; other schemes are rejected.
-    pub(crate) fn parse(url: &str) -> Result<Self, ClientError> {
-        let bad = |why: &str| ClientError::protocol(format!("invalid client url {url:?}: {why}"));
+    pub(crate) fn parse(url: &str) -> Result<Self, Error> {
+        let bad = |why: &str| Error::protocol(format!("invalid client url {url:?}: {why}"));
         let uri: Uri = url.parse().map_err(|_| bad("not a URL"))?;
         if uri.scheme_str() != Some("http") {
             return Err(bad("only http:// is supported"));
@@ -93,20 +93,19 @@ pub(crate) async fn post(
     headers: Headers<'_>,
     body: Bytes,
     timeout: Duration,
-) -> Result<Response, ClientError> {
+) -> Result<Response, Error> {
     tokio::time::timeout(timeout, exchange(endpoint, headers, body))
         .await
-        .map_err(|_| ClientError::Unreachable(format!("{} timed out", endpoint.authority)))?
+        .map_err(|_| Error::Unreachable(format!("{} timed out", endpoint.authority)))?
 }
 
 async fn exchange(
     endpoint: &Endpoint,
     headers: Headers<'_>,
     body: Bytes,
-) -> Result<Response, ClientError> {
-    let unreachable = |e: &dyn std::fmt::Display| {
-        ClientError::Unreachable(format!("{}: {e}", endpoint.authority))
-    };
+) -> Result<Response, Error> {
+    let unreachable =
+        |e: &dyn std::fmt::Display| Error::Unreachable(format!("{}: {e}", endpoint.authority));
     let stream = TcpStream::connect(&endpoint.authority)
         .await
         .map_err(|e| unreachable(&e))?;
@@ -123,7 +122,7 @@ async fn exchange(
     }
     let req = req
         .body(Full::new(body))
-        .map_err(|e| ClientError::protocol(format!("building request: {e}")))?;
+        .map_err(|e| Error::protocol(format!("building request: {e}")))?;
 
     let resp = sender
         .send_request(req)
@@ -138,7 +137,7 @@ async fn exchange(
         .await
         .map_err(|e| {
             if e.is::<http_body_util::LengthLimitError>() {
-                ClientError::protocol(format!("response larger than {MAX_BODY} bytes"))
+                Error::protocol(format!("response larger than {MAX_BODY} bytes"))
             } else {
                 unreachable(&e)
             }
@@ -242,6 +241,6 @@ mod tests {
         )
         .await
         .expect_err("no answer");
-        assert!(matches!(err, ClientError::Unreachable(_)), "{err:?}");
+        assert!(matches!(err, Error::Unreachable(_)), "{err:?}");
     }
 }

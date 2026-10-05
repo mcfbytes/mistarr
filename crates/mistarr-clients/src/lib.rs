@@ -28,7 +28,7 @@ pub mod xmlrpc;
 #[cfg(not(any(test, feature = "test-support")))]
 mod xmlrpc;
 
-pub use error::ClientError;
+pub use error::Error;
 pub use path_map::{PathMapping, RemotePathMap};
 pub use rtorrent::Rtorrent;
 pub use transmission::Transmission;
@@ -39,7 +39,7 @@ pub use transmission::Transmission;
 /// fn check(r: mistarr_clients::Result<()>) -> bool { r.is_ok() }
 /// assert!(check(Ok(())));
 /// ```
-pub type Result<T, E = ClientError> = std::result::Result<T, E>;
+pub type Result<T, E = Error> = std::result::Result<T, E>;
 
 /// Seeding policy for one source, chosen by the user (PRINCIPLES.md §4).
 ///
@@ -281,12 +281,12 @@ impl fmt::Display for ClientTorrentId {
 }
 
 /// Reads a stored id in either case. Text that is not an infohash names no
-/// torrent in any client, so it fails as [`ClientError::NotFound`].
+/// torrent in any client, so it fails as [`Error::NotFound`].
 impl FromStr for ClientTorrentId {
-    type Err = ClientError;
+    type Err = Error;
 
     fn from_str(s: &str) -> Result<Self> {
-        s.parse().map(Self).map_err(|_| ClientError::NotFound)
+        s.parse().map(Self).map_err(|_| Error::NotFound)
     }
 }
 
@@ -295,7 +295,7 @@ impl FromStr for ClientTorrentId {
 /// No request is made until the first operation.
 ///
 /// # Errors
-/// [`ClientError::Protocol`] when `url` does not suit `kind`.
+/// [`Error::Protocol`] when `url` does not suit `kind`.
 ///
 /// ```
 /// use mistarr_clients::{connect, ClientKind, RemotePathMap};
@@ -489,7 +489,7 @@ impl TorrentStatus {
 /// One torrent client, driven over its RPC. Implementations serialise their
 /// calls, so at most one RPC is in flight per client (ARCHITECTURE.md budgets).
 ///
-/// Operations that name a torrent return [`ClientError::NotFound`] when the
+/// Operations that name a torrent return [`Error::NotFound`] when the
 /// client does not have it.
 ///
 /// ```no_run
@@ -529,7 +529,7 @@ pub trait DownloadClient: Send + Sync {
     ) -> Result<ClientTorrentId>;
 
     /// Replaces the set of wanted files; every other file is deselected.
-    /// Returns [`ClientError::MetadataPending`] for a magnet without metadata.
+    /// Returns [`Error::MetadataPending`] for a magnet without metadata.
     async fn set_wanted(&self, id: &ClientTorrentId, wanted: &[u32]) -> Result<()>;
 
     /// Applies a seeding policy to a torrent already in the client.
@@ -545,7 +545,7 @@ pub trait DownloadClient: Send + Sync {
     async fn status(&self, id: &ClientTorrentId) -> Result<TorrentStatus>;
 
     /// Lists the torrent's files with their paths, for binding a magnet once
-    /// the client has its metadata. [`ClientError::MetadataPending`] until then.
+    /// the client has its metadata. [`Error::MetadataPending`] until then.
     async fn files(&self, id: &ClientTorrentId) -> Result<Vec<ClientFile>>;
 
     /// Removes the torrent from the client, deleting its data if asked.
@@ -585,7 +585,7 @@ mod tests {
         assert_eq!("CD".repeat(20).parse::<ClientTorrentId>().ok(), Some(id));
         for bad in ["", "not-a-hash", &"cd".repeat(19)] {
             let err = bad.parse::<ClientTorrentId>().expect_err(bad);
-            assert!(matches!(err, ClientError::NotFound), "{err:?}");
+            assert!(matches!(err, Error::NotFound), "{err:?}");
         }
         let json = serde_json::to_string(&id).expect("json");
         assert_eq!(json, format!("\"{}\"", "cd".repeat(20)));
@@ -605,7 +605,7 @@ mod tests {
             (ClientKind::Rtorrent, "http://127.0.0.1:9091/"),
         ] {
             let err = connect(kind, url, none()).err();
-            assert!(matches!(err, Some(ClientError::Protocol(_))), "{kind}");
+            assert!(matches!(err, Some(Error::Protocol(_))), "{kind}");
         }
     }
 }

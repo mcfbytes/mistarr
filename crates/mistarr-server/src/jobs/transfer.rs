@@ -3,7 +3,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mistarr_clients::{ClientError, ClientTorrentId, DownloadClient, SeedPolicy, TorrentSource};
+use mistarr_clients::{
+    ClientTorrentId, DownloadClient, Error as ClientError, SeedPolicy, TorrentSource,
+};
 use mistarr_sources::torrent;
 use serde_json::{json, Value};
 use tokio::sync::broadcast::error::RecvError;

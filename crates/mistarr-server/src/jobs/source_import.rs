@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use mistarr_clients::{ClientError, SeedPolicy, TorrentSource};
+use mistarr_clients::{Error as ClientError, SeedPolicy, TorrentSource};
 use mistarr_core::magnet;
 use mistarr_core::{InfoHash, PlatformId};
 use mistarr_sources::binding::{self, Binding};

@@ -8,7 +8,7 @@ use std::time::Duration;
 use tokio::time::Instant;
 
 use mistarr_clients::{
-    ClientError, ClientKind, Direction, DownloadClient, RateLimit, RemotePathMap,
+    ClientKind, Direction, DownloadClient, Error as ClientError, RateLimit, RemotePathMap,
 };
 use serde::{Deserialize, Serialize};
 

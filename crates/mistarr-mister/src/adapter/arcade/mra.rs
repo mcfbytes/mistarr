@@ -285,7 +285,9 @@ fn tag_key(name: &str) -> String {
 /// Parses MRA markup from `input`; inline part bytes are kept in [`Part::data`], or with
 /// `file` set, left in that file as [`Part::inline`] so no payload is held.
 fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra> {
-    let bom = skip_bom(&mut input)?;
+    // Only a file can fail to read; markup in memory has no path to name.
+    let io_err = |e| Error::io_at(file.map_or(Path::new(""), |f| f))(e);
+    let bom = skip_bom(&mut input).map_err(io_err)?;
     // The reader caps true nesting, one level per Start/End; end-tag recovery
     // below instead drains several entries at once from `open`.
     let mut reader = CappedReader::new(input, MAX_EVENT_BYTES, MAX_DEPTH);
@@ -305,7 +307,8 @@ fn parse_from<R: BufRead>(mut input: R, file: Option<&Arc<Path>>) -> Result<Mra>
         {
             if part.name.is_none() {
                 // Uncapped: a raw hex run may run past one event's cap.
-                take_text(reader.input_mut(), hex, keep.then_some(&mut part.data))?;
+                take_text(reader.input_mut(), hex, keep.then_some(&mut part.data))
+                    .map_err(io_err)?;
             }
         }
         let before = bom + reader.position();
@@ -493,8 +496,8 @@ pub const PARSER_VERSION: u32 = 4;
 /// assert_eq!(mistarr_mister::adapter::arcade::mra::read(&path).unwrap().zips, ["exblast.zip"]);
 /// ```
 pub fn read(path: &Path) -> Result<Mra> {
-    let file = std::fs::File::open(path)?;
-    if file.metadata()?.len() > MAX_MRA_BYTES {
+    let file = std::fs::File::open(path).map_err(Error::io_at(path))?;
+    if file.metadata().map_err(Error::io_at(path))?.len() > MAX_MRA_BYTES {
         return Err(too_big());
     }
     let mut limited = BufReader::new(file.take(MAX_MRA_BYTES + 1));

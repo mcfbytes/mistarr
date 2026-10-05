@@ -353,7 +353,7 @@ impl UrlFetch {
             }
             Checked::Dat { .. } => {
                 let dir = app.config().paths.dats();
-                std::fs::create_dir_all(&dir)?;
+                std::fs::create_dir_all(&dir).map_err(crate::Error::io_at(&dir))?;
                 let part = place::part_path(&dir);
                 spool.place(part.clone(), ctx.stop.clone()).await?;
                 place::place_part(app, &part, &name).await?
@@ -426,7 +426,10 @@ fn pace(app: &AppState) -> Pace {
 /// A card that filled up during a fetch, as the fetch's error.
 fn card_full(e: Error) -> Error {
     match e {
-        Error::Io(io) if io.kind() == std::io::ErrorKind::StorageFull => {
+        e if e
+            .io()
+            .is_some_and(|io| io.kind() == std::io::ErrorKind::StorageFull) =>
+        {
             Error::FetchRefused(CARD_FULL.to_owned())
         }
         e => e,

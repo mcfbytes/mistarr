@@ -2,7 +2,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::{ClientError, Result};
+use crate::{Error, Result};
 
 /// Wanted file indices, deduplicated and in ascending order.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -18,7 +18,7 @@ impl Wanted {
     pub(crate) fn check(&self, file_count: usize) -> Result<()> {
         match self.0.last() {
             Some(&index) if usize::try_from(index).unwrap_or(usize::MAX) >= file_count => {
-                Err(ClientError::FileIndex { index, file_count })
+                Err(Error::FileIndex { index, file_count })
             }
             _ => Ok(()),
         }
@@ -66,7 +66,7 @@ mod tests {
         assert!(w.check(4).is_ok());
         assert!(matches!(
             w.check(3),
-            Err(ClientError::FileIndex {
+            Err(Error::FileIndex {
                 index: 3,
                 file_count: 3
             })

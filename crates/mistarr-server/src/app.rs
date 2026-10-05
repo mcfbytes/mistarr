@@ -479,12 +479,12 @@ fn saved_settings(db: &Db) -> Result<Option<RuntimeSettings>> {
 /// # Errors
 ///
 /// [`Error::AlreadyRunning`] when another server uses the data directory,
-/// [`Error::Io`] when a directory cannot be created or the address cannot be
-/// bound, [`Error::Db`] or [`Error::Migration`] when the database cannot be opened.
+/// [`Error::File`] naming a directory that cannot be created, [`Error::Io`] when
+/// the address cannot be bound, [`Error::Db`] or [`Error::Migration`] when the database cannot be opened.
 pub async fn start(mut config: Config, options: Options) -> Result<Running> {
     // Step 1, loading the config, is the caller's.
     for dir in config.paths.layout() {
-        std::fs::create_dir_all(&dir)?;
+        std::fs::create_dir_all(&dir).map_err(crate::Error::io_at(&dir))?;
     }
     let lock = crate::lock::InstanceLock::acquire(&config.paths.data)?;
 

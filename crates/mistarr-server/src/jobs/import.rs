@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use mistarr_clients::{ClientError, SeedPolicy};
+use mistarr_clients::{Error as ClientError, SeedPolicy};
 use mistarr_core::hash::HeaderRule;
 use mistarr_core::matching::{leaf, match_members, pick_rom, Payload as _};
 use mistarr_core::PlatformId;

@@ -109,7 +109,7 @@ async fn second_conflict_is_a_protocol_error() {
     fake.push(FakeResponse::session_conflict("a"));
     fake.push(FakeResponse::session_conflict("b"));
     let err = client.probe().await.expect_err("rejected");
-    assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
+    assert!(matches!(err, Error::Protocol(_)), "{err:?}");
     assert_eq!(fake.requests().len(), 2);
 }
 
@@ -118,7 +118,7 @@ async fn conflict_without_header_is_a_protocol_error() {
     let (fake, client) = setup().await;
     fake.push(FakeResponse::new(409));
     let err = client.probe().await.expect_err("rejected");
-    assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
+    assert!(matches!(err, Error::Protocol(_)), "{err:?}");
 }
 
 #[tokio::test]
@@ -126,7 +126,7 @@ async fn unauthorised_maps_to_auth() {
     let (fake, client) = setup().await;
     fake.push(FakeResponse::new(401));
     let err = client.probe().await.expect_err("rejected");
-    assert!(matches!(err, ClientError::Auth), "{err:?}");
+    assert!(matches!(err, Error::Auth), "{err:?}");
 }
 
 #[tokio::test]
@@ -135,7 +135,7 @@ async fn unexpected_status_maps_to_protocol() {
     fake.push(FakeResponse::new(500));
     let err = client.probe().await.expect_err("rejected");
     assert!(
-        matches!(err, ClientError::Protocol(ref m) if m.contains("500")),
+        matches!(err, Error::Protocol(ref m) if m.contains("500")),
         "{err:?}"
     );
 }
@@ -146,7 +146,7 @@ async fn failure_result_maps_to_protocol() {
     fake.push(FakeResponse::failure("invalid or corrupt torrent file"));
     let err = client.probe().await.expect_err("rejected");
     assert!(
-        matches!(err, ClientError::Protocol(ref m) if m == "invalid or corrupt torrent file"),
+        matches!(err, Error::Protocol(ref m) if m == "invalid or corrupt torrent file"),
         "{err:?}"
     );
 }
@@ -160,7 +160,7 @@ async fn connection_refused_maps_to_unreachable() {
     drop(listener);
     let client = Transmission::new(&format!("http://{addr}/transmission/rpc")).expect("url");
     let err = client.probe().await.expect_err("refused");
-    assert!(matches!(err, ClientError::Unreachable(_)), "{err:?}");
+    assert!(matches!(err, Error::Unreachable(_)), "{err:?}");
 }
 
 #[tokio::test]
@@ -295,7 +295,7 @@ async fn add_large_torrent_fails_when_selection_did_not_apply() {
         )
         .await
         .expect_err("not applied");
-    assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
+    assert!(matches!(err, Error::Protocol(_)), "{err:?}");
 }
 
 fn duplicate(byte: u8) -> FakeResponse {
@@ -428,7 +428,7 @@ async fn set_seed_policy_unknown_torrent_is_not_found() {
         .set_seed_policy(&id(0xe3), SeedPolicy::Client)
         .await
         .expect_err("missing");
-    assert!(matches!(err, ClientError::NotFound), "{err:?}");
+    assert!(matches!(err, Error::NotFound), "{err:?}");
     assert_eq!(fake.requests().len(), 1);
 }
 
@@ -447,7 +447,7 @@ async fn add_rejects_out_of_range_index_before_calling() {
     assert!(
         matches!(
             err,
-            ClientError::FileIndex {
+            Error::FileIndex {
                 index: 2,
                 file_count: 2
             }
@@ -554,7 +554,7 @@ async fn set_wanted_without_metadata_is_pending() {
         .set_wanted(&id(0xb3), &[0])
         .await
         .expect_err("pending");
-    assert!(matches!(err, ClientError::MetadataPending), "{err:?}");
+    assert!(matches!(err, Error::MetadataPending), "{err:?}");
 }
 
 #[tokio::test]
@@ -565,7 +565,7 @@ async fn set_wanted_unknown_torrent_is_not_found() {
         .set_wanted(&id(0xb4), &[0])
         .await
         .expect_err("missing");
-    assert!(matches!(err, ClientError::NotFound), "{err:?}");
+    assert!(matches!(err, Error::NotFound), "{err:?}");
 }
 
 #[tokio::test]
@@ -601,7 +601,7 @@ async fn start_unknown_torrent_is_not_found() {
     let (fake, client) = setup().await;
     fake.push(FakeResponse::success(json!({ "torrents": [] })));
     let err = client.start(&id(0xc3)).await.expect_err("missing");
-    assert!(matches!(err, ClientError::NotFound), "{err:?}");
+    assert!(matches!(err, Error::NotFound), "{err:?}");
     assert_eq!(fake.requests().len(), 1);
 }
 
@@ -696,12 +696,12 @@ async fn status_unknown_torrent_is_not_found() {
     let (fake, client) = setup().await;
     fake.push(FakeResponse::success(json!({ "torrents": [] })));
     let err = client.status(&id(0xd2)).await.expect_err("missing");
-    assert!(matches!(err, ClientError::NotFound), "{err:?}");
+    assert!(matches!(err, Error::NotFound), "{err:?}");
 }
 
 fn convert(torrent: Value) -> Result<TorrentStatus> {
     serde_json::from_value::<RawTorrent>(torrent)
-        .map_err(ClientError::protocol)
+        .map_err(Error::protocol)
         .and_then(RawTorrent::into_status)
 }
 
@@ -743,7 +743,7 @@ fn special_ratios_are_mapped() {
 fn bad_hashes_are_rejected() {
     let mut t = status_torrent(4, 0);
     t["hashString"] = json!("short");
-    assert!(matches!(convert(t), Err(ClientError::Protocol(_))));
+    assert!(matches!(convert(t), Err(Error::Protocol(_))));
 }
 
 #[tokio::test]
@@ -822,7 +822,7 @@ async fn files_strip_the_torrent_name_and_wait_for_metadata() {
     fake.push(FakeResponse::success(json!({ "torrents": [] })));
     assert!(matches!(
         client.files(&id(1)).await,
-        Err(ClientError::MetadataPending)
+        Err(Error::MetadataPending)
     ));
     let files = client.files(&id(1)).await.expect("files");
     let listed: Vec<(u32, &str, u64)> = files
@@ -832,10 +832,7 @@ async fn files_strip_the_torrent_name_and_wait_for_metadata() {
     assert_eq!(listed, vec![(0, "Sub/a.bin", 4), (1, "b.bin", 8)]);
     let single = client.files(&id(2)).await.expect("files");
     assert_eq!(single[0].path, "one.bin");
-    assert!(matches!(
-        client.files(&id(3)).await,
-        Err(ClientError::NotFound)
-    ));
+    assert!(matches!(client.files(&id(3)).await, Err(Error::NotFound)));
     assert_eq!(
         fake.bodies()[0],
         rpc(
@@ -864,9 +861,9 @@ fn replies_parse_into_types_and_report_failures() {
     let failed = parse_reply::<Torrents<RawTorrent>>(
         br#"{"result":"no such method","arguments":{"torrents":7}}"#,
     );
-    assert!(matches!(failed, Err(ClientError::Protocol(m)) if m == "no such method"));
+    assert!(matches!(failed, Err(Error::Protocol(m)) if m == "no such method"));
     let garbled = parse_reply::<Torrents<RawTorrent>>(br#"{"result":"success","arguments":[]}"#);
-    assert!(matches!(garbled, Err(ClientError::Protocol(_))));
+    assert!(matches!(garbled, Err(Error::Protocol(_))));
 }
 
 #[tokio::test]
@@ -949,7 +946,7 @@ async fn a_session_without_the_limit_is_a_protocol_error() {
         .rate_limit(Direction::Up)
         .await
         .expect_err("incomplete");
-    assert!(matches!(err, ClientError::Protocol(_)), "{err:?}");
+    assert!(matches!(err, Error::Protocol(_)), "{err:?}");
 }
 
 #[tokio::test]
@@ -1026,7 +1023,7 @@ async fn an_added_torrent_without_a_valid_hash_is_a_protocol_error() {
         .await
         .expect_err("bad hash");
     assert!(
-        matches!(err, ClientError::Protocol(ref m) if m.contains("hashString")),
+        matches!(err, Error::Protocol(ref m) if m.contains("hashString")),
         "{err:?}"
     );
 }
