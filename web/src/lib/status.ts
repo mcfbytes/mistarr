@@ -296,7 +296,7 @@ export function describeProgress(kind: string, p: Record<string, unknown> | null
     const total = num(p.total);
     if (done !== null && total !== null && total > 0) {
       fraction = Math.min(1, done / total);
-      parts.push(`${done.toLocaleString()} of ${total.toLocaleString()} files`);
+      parts.push(`${done.toLocaleString()} of ${total.toLocaleString()} folders`);
     }
   } else if (kind === 'chd_tracks') {
     const read = num(p.bytes_done);

@@ -47,6 +47,17 @@ test('a rejected DAT toasts its reason', async ({ page }) => {
   await expect(toasts(page, 'Bad sample.dat was rejected: not a DAT')).toBeVisible();
 });
 
+test('a running scan counts the folders it has walked on its card', async ({ page }) => {
+  await page.goto('/#/');
+  await setMockKnob(page, 'scanJobId', 74);
+  await setMockKnob(page, 'scanDirs', 4);
+  const card = page.locator('.card').filter({ hasText: '240 titles' });
+  await card.getByRole('button', { name: 'Scan' }).click();
+  const bar = card.getByRole('progressbar', { name: /^Scan of / });
+  await expect(bar).toHaveAttribute('aria-valuetext', '25% · 1 of 4 folders');
+  await expect(card.getByText('25% · 1 of 4 folders', { exact: true })).toBeVisible();
+});
+
 test('two scans of one platform each toast their own outcome', async ({ page }) => {
   await page.goto('/#/');
   const card = page.locator('.card').filter({ hasText: '240 titles' });
