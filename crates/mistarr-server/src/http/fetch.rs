@@ -82,13 +82,7 @@ async fn start(
     })?;
     let job = UrlFetch::new(&app, url);
     let token = job.token();
-    let job_id = match Scheduler::enqueue_within(&app, Arc::new(job), QUEUE_WAIT, ()).await {
-        Ok(id) => id,
-        Err(e) => {
-            app.fetches.close(token);
-            return Err(e.into());
-        }
-    };
+    let job_id = Scheduler::enqueue_within(&app, Arc::new(job), QUEUE_WAIT, ()).await?;
     if let Some(id) = job_id {
         app.fetches.bind(token, id, &app.scheduler);
     }

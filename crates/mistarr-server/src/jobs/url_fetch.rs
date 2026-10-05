@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -131,9 +131,11 @@ impl Fetches {
 
 /// Fetches one URL once and places the file as an upload would. The URL lives only in
 /// this value: the payload holds the token, and progress the file name once known.
+/// Dropping it closes the token, whether or not the job ran.
 pub struct UrlFetch {
     url: FetchUrl,
     token: u64,
+    app: Weak<AppState>,
 }
 
 /// What a [`UrlFetch`] stores as its payload: the token, never the URL.
@@ -146,9 +148,13 @@ impl UrlFetch {
     /// A fetch of `url` with a token from `app`'s fetches, to [`Fetches::bind`]
     /// once it is queued.
     #[must_use]
-    pub fn new(app: &AppState, url: FetchUrl) -> Self {
+    pub fn new(app: &Arc<AppState>, url: FetchUrl) -> Self {
         let token = app.fetches.issue();
-        Self { url, token }
+        Self {
+            url,
+            token,
+            app: Arc::downgrade(app),
+        }
     }
 
     /// The token `DELETE /fetch/{token}` cancels it by.
@@ -463,9 +469,15 @@ impl Job for UrlFetch {
 
     async fn run(&self, ctx: &JobContext) -> Result<()> {
         ctx.app.fetches.bind(self.token, ctx.id, &ctx.app.scheduler);
-        let ran = self.fetch(ctx).await.map_err(card_full);
-        ctx.app.fetches.close(self.token);
-        ran
+        self.fetch(ctx).await.map_err(card_full)
+    }
+}
+
+impl Drop for UrlFetch {
+    fn drop(&mut self) {
+        if let Some(app) = self.app.upgrade() {
+            app.fetches.close(self.token);
+        }
     }
 }
 
@@ -554,6 +566,53 @@ mod tests {
             assert_eq!(row.progress, Some(json!({ "error": "Cancelled." })));
             assert!(!app.fetches.cancel(token, &app.scheduler), "closed");
         }
+    }
+
+    /// Holds the fetch lane until released.
+    struct Hold(Arc<tokio::sync::Notify>);
+
+    #[async_trait]
+    impl Job for Hold {
+        fn kind(&self) -> JobKind {
+            JobKind::UrlFetch
+        }
+        fn lane(&self) -> Lane {
+            Lane::Fetch
+        }
+        async fn run(&self, _ctx: &JobContext) -> Result<()> {
+            self.0.notified().await;
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_fetch_cancelled_while_queued_closes_its_token() {
+        let (_dir, app) = crate::app::testutil::state();
+        Scheduler::start(&app);
+        let release = Arc::new(tokio::sync::Notify::new());
+        Scheduler::enqueue(&app, Arc::new(Hold(Arc::clone(&release))))
+            .await
+            .expect("hold");
+        let url = FetchUrl::parse("https://example.invalid/set.dat").expect("url");
+        let job = UrlFetch::new(&app, url);
+        let token = job.token();
+        let id = Scheduler::enqueue(&app, Arc::new(job))
+            .await
+            .expect("queue");
+        app.fetches.bind(token, id, &app.scheduler);
+        assert!(app.fetches.cancel(token, &app.scheduler));
+        release.notify_one();
+        for _ in 0..500 {
+            if !app.fetches.cancel(token, &app.scheduler) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(!app.fetches.cancel(token, &app.scheduler), "token closed");
+        let row = app.db.read(move |c| crate::db::jobs::get(c, id)).await;
+        let row = row.expect("get").expect("row");
+        assert_eq!(row.state, crate::db::jobs::JobState::Failed);
+        assert_eq!(row.progress, Some(json!({ "error": "Cancelled." })));
     }
 
     #[test]

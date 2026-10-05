@@ -1,5 +1,5 @@
 //! The work that follows a change to the catalogue, queued in one order; see
-//! `docs/ARCHITECTURE.md` "DAT import" step 3.
+//! `docs/ARCHITECTURE.md` "DAT import", the follow-up paragraph.
 
 use std::sync::Arc;
 

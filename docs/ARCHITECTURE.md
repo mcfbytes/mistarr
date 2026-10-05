@@ -417,8 +417,9 @@ debug. It lives in the `url_fetch` job's memory until the job ends.
    password; a fragment is dropped, and spaces and other characters a
    request line cannot carry are percent-encoded. The answer is 202 with a
    token, which starts at a random per-run nonce so a page open across a
-   restart never matches an old one, and is open for `DELETE` once the job
-   is queued; a `url_fetch` job on the `fetch` lane holds the URL.
+   restart never matches an old one, and is open for `DELETE` until the job
+   ends, whether or not it started; a `url_fetch` job on the `fetch` lane
+   holds the URL.
 3. The job resolves the host, connects (15 s for the lookup, TCP and TLS
    together), sends one GET and follows up to 5 HTTP redirects of that
    request, the only URLs besides the typed one it ever requests

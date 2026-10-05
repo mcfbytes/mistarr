@@ -129,8 +129,8 @@ created_at, updated_at }`, where `lane` is `heavy`, `background`, `light` or
 `paused`, and `reason` says why a job is not running: on a held lane, such as
 `"Paused while NES is running"` or `"Paused by the user"`; for a queued job,
 what it waits for, as for incoming files ("Incoming files"); else `null`. A
-running job's `progress` is its latest live progress ("Live progress") when
-it has one. A failed job's `progress` is `{ error }`. `/system/jobs/recent` answers `{
+running or paused job's `progress` is its latest live progress ("Live
+progress") when it has one. A failed job's `progress` is `{ error }`. `/system/jobs/recent` answers `{
 items, total }` in the same item shape, newest first, with `state` `done` or
 `failed` and `reason` `null`. A finished scan's `progress` is `{ platform_id,
 done, total, matched, unmatched, unidentified }` (ARCHITECTURE.md "Library

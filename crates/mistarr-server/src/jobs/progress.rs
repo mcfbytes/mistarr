@@ -104,7 +104,7 @@ impl Throttle {
     }
 }
 
-/// The latest live progress of each running job, never written to the database.
+/// The latest live progress of each running or paused job, never written to the database.
 #[derive(Debug, Default)]
 pub struct LiveProgress {
     jobs: Mutex<HashMap<JobId, Value>>,
@@ -127,7 +127,8 @@ impl LiveProgress {
         self.lock().remove(&id);
     }
 
-    /// Replaces the stored progress of each running row with its live progress, if any.
+    /// Replaces the stored progress of each running or paused row with its live progress,
+    /// if any.
     ///
     /// ```
     /// use mistarr_server::db::jobs::{JobRow, JobState};
@@ -144,7 +145,8 @@ impl LiveProgress {
     /// ```
     pub fn overlay(&self, rows: &mut [JobRow]) {
         let jobs = self.lock();
-        for row in rows.iter_mut().filter(|r| r.state == JobState::Running) {
+        let open = |r: &&mut JobRow| matches!(r.state, JobState::Running | JobState::Paused);
+        for row in rows.iter_mut().filter(open) {
             if let Some(p) = jobs.get(&row.id) {
                 row.progress = Some(p.clone());
             }
