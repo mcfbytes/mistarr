@@ -28,17 +28,17 @@ Rules for these packages, on top of the ones in WORKPLAN.md:
   - [x] WP-54 Parser limits in mister · Sonnet
   - [x] WP-55 Server errors and blocking · Opus
   - [x] WP-56 Config load and validation · Sonnet
-- [ ] **Wave 5**: merge order 57, 58, 59, 60
-  - [ ] WP-57 Clients on core codecs · Opus · after 53
-  - [ ] WP-58 Mister on core · Opus · after 53, 54
-  - [ ] WP-59 One intake for dropped files · Sonnet · after 53, 55
-  - [ ] WP-60 Database types · Opus · after 55
-  - [ ] WP-61 Web mock at the API boundary · Opus · after 52
-- [ ] **Wave 6**: merge order 62, 63, 64
-  - [ ] WP-62 Database layout and fixtures · Sonnet · after 60
-  - [ ] WP-63 HTTP shell · Opus · after 56, 57, 60
-  - [ ] WP-64 Matching and scan · Opus · after 58, 59, 60
-  - [ ] WP-65 Web stores · Sonnet · after 61
+- [x] **Wave 5**: merge order 57, 58, 59, 60
+  - [x] WP-57 Clients on core codecs · Opus · after 53
+  - [x] WP-58 Mister on core · Opus · after 53, 54
+  - [x] WP-59 One intake for dropped files · Sonnet · after 53, 55
+  - [x] WP-60 Database types · Opus · after 55
+  - [x] WP-61 Web mock at the API boundary · Opus · after 52
+- [x] **Wave 6**: merge order 62, 63, 64
+  - [x] WP-62 Database layout and fixtures · Sonnet · after 60
+  - [x] WP-63 HTTP shell · Opus · after 56, 57, 60
+  - [x] WP-64 Matching and scan · Opus · after 58, 59, 60
+  - [x] WP-65 Web stores · Sonnet · after 61
 - [ ] **Wave 7**
   - [ ] WP-66 Web components and styles · Sonnet · after 65
   - [ ] WP-67 Job framework · Opus · after 63, 64
@@ -259,36 +259,36 @@ Sonnet · `mistarr-sources`, server `jobs/dat_import.rs`,
 
 Opus · `mistarr-server` · branch `wp-60-db-types`
 
-- [ ] `db/ids.rs` has an `id!` macro emitting the struct, one derive set,
+- [x] `db/ids.rs` has an `id!` macro emitting the struct, one derive set,
   `Display`, `ToSql`, `FromSql` and transparent serde, for `FileId`,
   `TitleId`, `SourceId`, `JobId`, `DownloadId`, `DatVersionId` and a new
   `RomId`. No database function or row carries a bare `i64` id.
-- [ ] A `text_enum!` macro emits `as_str`, `ALL`, `ToSql` and a `FromSql` that
+- [x] A `text_enum!` macro emits `as_str`, `ALL`, `ToSql` and a `FromSql` that
   fails on unknown text, for `FileState`, `JobState`, `SourceState`,
   `DownloadState`, `Lane`, title source, rom status and confidence. The four
   different fallbacks for unknown text go.
-- [ ] Sets of states are named once: `DownloadState::OPEN` and `SELECTED`,
+- [x] Sets of states are named once: `DownloadState::OPEN` and `SELECTED`,
   `JobState::ACTIVE` and `FINISHED`, each with an SQL fragment a unit test
   checks against the array. The second constant named `OPEN`, in
   `source_detail.rs`, and about 20 literal lists go; `RECENT_KINDS` is bound,
   not interpolated.
-- [ ] `JobRow.kind` and `lane` are typed; `status::hold_reason` takes a `Lane`.
-- [ ] `db/sql.rs` holds `to_u64`, `to_i64` and `get_u64`; the six local
+- [x] `JobRow.kind` and `lane` are typed; `status::hold_reason` takes a `Lane`.
+- [x] `db/sql.rs` holds `to_u64`, `to_i64` and `get_u64`; the six local
   conversion helpers go.
-- [ ] Lists are bound one way, with `json_each`; `groups::placeholders` goes.
-- [ ] Every JSON failure maps to `Error::Stored`; nothing substitutes `"[]"`.
-- [ ] `Page { limit, offset }` and `Paged<T> { items, total }`; the count and
+- [x] Lists are bound one way, with `json_each`; `groups::placeholders` goes.
+- [x] Every JSON failure maps to `Error::Stored`; nothing substitutes `"[]"`.
+- [x] `Page { limit, offset }` and `Paged<T> { items, total }`; the count and
   the page run in one read transaction; `files::unidentified` takes its
   arguments in the same order as every other pager.
-- [ ] The file upsert uses `RETURNING id`.
-- [ ] `has_table` takes a schema and is used everywhere; every read-only open
+- [x] The file upsert uses `RETURNING id`.
+- [x] `has_table` takes a schema and is used everywhere; every read-only open
   goes through `open_read_only`; one `BUSY_TIMEOUT` constant.
-- [ ] The arcade recompute flag goes through `settings::keys` and
+- [x] The arcade recompute flag goes through `settings::keys` and
   `settings::set`.
-- [ ] `sources.reason` and the DAT replaced and older reasons are stored as
+- [x] `sources.reason` and the DAT replaced and older reasons are stored as
   codes with parameters and worded in `http/`; migration 0021 rewrites stored
   prose to codes.
-- [ ] `db/plans.rs` passes unchanged in intent.
+- [x] `db/plans.rs` passes unchanged in intent.
 
 ### WP-61 Web mock at the API boundary
 
@@ -316,32 +316,32 @@ Merge order: 62, 63, 64.
 
 Sonnet · `mistarr-server` (`db/`, tests) · branch `wp-62-db-layout`
 
-- [ ] `files.rs` splits into `files.rs` (the `files` table), `roms.rs` and
+- [x] `files.rs` splits into `files.rs` (the `files` table), `roms.rs` and
   `scan_progress.rs`. `roms.rs` has one `match_tiers` behind `match_rom`,
   `match_live_rom` and `roms_matching`, and the rom lookups from `files.rs`,
   `imports.rs`, `downloads_import.rs` and `arcade.rs`.
-- [ ] `NewFile` is the one input for a file row; `Hashed`, `Columns` and the
+- [x] `NewFile` is the one input for a file row; `Hashed`, `Columns` and the
   many-argument `upsert` go.
-- [ ] `titles.rs` becomes `titles/` with `mod.rs`, `recompute.rs`, `browse.rs`
+- [x] `titles.rs` becomes `titles/` with `mod.rs`, `recompute.rs`, `browse.rs`
   and `detail.rs`.
-- [ ] One `put_title` serves the DAT and MRA `upsert_title`.
-- [ ] `platforms::find(&PlatformId)` with `COLUMNS` and `from_row`;
+- [x] One `put_title` serves the DAT and MRA `upsert_title`.
+- [x] `platforms::find(&PlatformId)` with `COLUMNS` and `from_row`;
   `platforms::get` and `sources::platform_exists` go; `titles` and `arcade`
   take `&PlatformId`.
-- [ ] `db::fixtures`, gated by `test` or `test-support`, has `conn()`,
+- [x] `db::fixtures`, gated by `test` or `test-support`, has `conn()`,
   `catalog()` and a builder `dat(pid).title(name).rom(name, hashes, status)`
   returning typed ids. The `seed_*_fixture` families and the 16 `conn()`
   copies go; no fixture ships in a release build.
-- [ ] The temp-directory code leaves `db/mod.rs` for `tempdir.rs`;
+- [x] The temp-directory code leaves `db/mod.rs` for `tempdir.rs`;
   `install_file`, `sync_parent` and `remove_if_present` move to
   `db/ram/swap.rs`; `ram.rs` uses the memory and free-space readers in
   `status.rs`.
-- [ ] `settle_elsewhere` and `want_again` move to `downloads.rs`. DATA-MODEL.md
+- [x] `settle_elsewhere` and `want_again` move to `downloads.rs`. DATA-MODEL.md
   states the rule: table modules own writes, and read-only composite views
   sit in `db/views/`.
-- [ ] Migration tests use `apply_through(conn, n)` and seed old schemas with
+- [x] Migration tests use `apply_through(conn, n)` and seed old schemas with
   SQL written for that version.
-- [ ] The statement rule is written in DATA-MODEL.md and applied:
+- [x] The statement rule is written in DATA-MODEL.md and applied:
   `prepare_cached` for statements run per row, `prepare` for one-shot reads.
 
 ### WP-63 HTTP shell
@@ -413,19 +413,19 @@ Opus · `mistarr-server` (`jobs/`), `mistarr-core` · branch `wp-64-matching`
 
 Sonnet · `web/` · branch `wp-65-web-stores`
 
-- [ ] `ListStore<T>` in `stores/list.svelte.ts` with `items`, `total`,
+- [x] `ListStore<T>` in `stores/list.svelte.ts` with `items`, `total`,
   `loaded`, `error`, `load()` over every page, `ensure()`, `patch()` and
   `reloadSoon()`, used by every list store. Consumers read `store.items`, and
   the `getX`/`$derived(getX())` pairs go. Titles keeps its own store.
-- [ ] `coalesce(fn, ms, { leading })` in `lib/coalesce.ts`, with every delay
+- [x] `coalesce(fn, ms, { leading })` in `lib/coalesce.ts`, with every delay
   constant in one place, replaces the six timers; one search debounce.
-- [ ] `optimistic({ apply, revert, call, commit })` and `attempt(fn)` in
+- [x] `optimistic({ apply, revert, call, commit })` and `attempt(fn)` in
   `lib/actions.ts` replace the copied try, rollback and toast blocks.
-- [ ] `followJob(match, onEnd)` replaces `pendingScans`, `pendingFetches`, the
+- [x] `followJob(match, onEnd)` replaces `pendingScans`, `pendingFetches`, the
   uploads' early notes and SourceDetail's bind effect; `jobOutcome` moves to
   `status.ts` and the two label maps merge.
-- [ ] Every busy set is a `SvelteSet`.
-- [ ] `api.ts`: `updateSource` uses `SeedPolicy` and `SourceState`; `Job.kind`
+- [x] Every busy set is a `SvelteSet`.
+- [x] `api.ts`: `updateSource` uses `SeedPolicy` and `SourceState`; `Job.kind`
   is a `JobKind` union; `scan` returns a named type; `bindPlatformDat`,
   `Binding` and `Uploaded` go; `EventSubscriber` uses `headers()`; pause and
   resume both apply the status they return.

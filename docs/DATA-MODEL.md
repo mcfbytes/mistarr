@@ -457,14 +457,14 @@ that wins 1G1R under default preferences.
 `titles.group_root` is the effective clone group, the one column every
 grouping reads: browse, `title_groups`, group detail, want and unwant, 1G1R
 and the platform counts. The triggers keep it equal to `parent_id` whenever
-`parent_id` is written. `titles::recompute_platform` rebuilds it from scratch
-for the platform: every title back to its `parent_id`, then each title that
-another live DAT on the platform lists with the same roms linked to that
-title's group (VERIFICATION.md "DAT families"). Only single titles link, so
-`parent_id` always holds each DAT's own parent/clone data. When a group's root
-links away, the members it leaves take their lowest live id as their root, so
-a group's id is always a title whose `group_root` is itself. A group's members
-are the titles whose `group_root` is its id.
+`parent_id` is written. `titles::recompute::recompute_platform` rebuilds it
+from scratch for the platform: every title back to its `parent_id`, then each
+title that another live DAT on the platform lists with the same roms linked to
+that title's group (VERIFICATION.md "DAT families"). Only single titles link,
+so `parent_id` always holds each DAT's own parent/clone data. When a group's
+root links away, the members it leaves take their lowest live id as their
+root, so a group's id is always a title whose `group_root` is itself. A
+group's members are the titles whose `group_root` is its id.
 
 ## Derived tables
 

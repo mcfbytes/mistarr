@@ -250,14 +250,14 @@ but the browsed platforms. The plan test, the browse benchmark, the random
 write test and `mistarr bench-seed` all use it.
 
 `crates/mistarr-server/tests/browse.rs` seeds the full catalogue and checks
-the default page equals the reference aggregation query's and is at least
-five times faster. It then times every search shape (`titles::SearchShape`)
+the default page equals the reference aggregation query's and is at least five
+times faster. It then times every search shape (`titles::browse::SearchShape`)
 on the NES, SNES and PSX sets for a rare word, common trigrams, two-letter
 terms below the trigram length, a word common elsewhere but rare on the
-browsed platform, and no search, asserts every shape returns the same page
-and total, and prints the table. The default shape's worst case must stay
-under 100 ms, in debug builds too. Host timings do not rank the shapes the
-way the board does, so the default follows the real-DAT board numbers in
+browsed platform, and no search, asserts every shape returns the same page and
+total, and prints the table. The default shape's worst case must stay under
+100 ms, in debug builds too. Host timings do not rank the shapes the way the
+board does, so the default follows the real-DAT board numbers in
 ARCHITECTURE.md "Resource budgets", and the plan tests assert it asks
 `title_search` for the platform's phrase:
 
