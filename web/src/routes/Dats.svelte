@@ -150,16 +150,18 @@
           </dl>
           <p class="muted file">{d.source_file}</p>
           {#if isCurrent(d)}
-            <ConfirmButton
-              name={`Remove ${label(d)}`}
-              confirmLabel="Remove from the catalogue"
-              confirmName={`Remove ${label(d)} from the catalogue`}
-              keepName={`Keep ${label(d)}`}
-              groupName={`Remove ${label(d)}?`}
-              prompt="Its games leave the catalogue. Files on the card stay where they are, and a file another loaded DAT lists stays matched."
-              busy={busy.has(d.id)}
-              onconfirm={() => remove(d)}
-            />
+            {#key d.id}
+              <ConfirmButton
+                name={`Remove ${label(d)}`}
+                confirmLabel="Remove from the catalogue"
+                confirmName={`Remove ${label(d)} from the catalogue`}
+                keepName={`Keep ${label(d)}`}
+                groupName={`Remove ${label(d)}?`}
+                prompt="Its games leave the catalogue. Files on the card stay where they are, and a file another loaded DAT lists stays matched."
+                busy={busy.has(d.id)}
+                onconfirm={() => remove(d)}
+              />
+            {/key}
           {/if}
           {#if f.older.length > 0}
             <details>

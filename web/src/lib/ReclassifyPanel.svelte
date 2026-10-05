@@ -13,9 +13,9 @@
 
   /**
    * The Re-classify and Reset buttons of a source, the platform preview they open and the
-   * progress of the binding they queue; `onchange` runs when the source's binding has moved.
+   * progress of the binding they queue.
    */
-  const { source, onchange }: { source: SourceDetail; onchange: () => void } = $props();
+  const { source }: { source: SourceDetail } = $props();
 
   const NONE = '-';
 
@@ -105,7 +105,6 @@
         jobId = null;
         showToast(text, end.state === 'done' ? 'success' : 'error');
         void sources.load();
-        onchange();
       }
     );
   }
@@ -120,7 +119,6 @@
     if (updated) {
       followBinding(updated.job_id);
       sources.patch(source.id, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
-      onchange();
       void closePanel();
       showToast(platformId ? `Binding to ${platformName(platformId)} queued.` : 'Setting the source aside queued.', 'info');
     }
@@ -136,7 +134,6 @@
     if (updated) {
       followBinding(updated.job_id);
       sources.patch(source.id, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
-      onchange();
       showToast('Automatic binding queued.', 'info');
       // Reset leaves with the user's binding; focus goes to the control that stays.
       await tick();

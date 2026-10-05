@@ -208,7 +208,7 @@
         <li><strong>{detail.summary.wanted.toLocaleString()}</strong> wanted</li>
       </ul>
 
-      <ReclassifyPanel source={detail} onchange={refresh} />
+      <ReclassifyPanel source={detail} />
     </section>
 
     <SourceFiles bind:this={files} {sourceId} />

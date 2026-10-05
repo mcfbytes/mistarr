@@ -1,4 +1,4 @@
-const UNITS = ["B", "kB", "MB", "GB", "TB"];
+const UNITS = ['B', 'kB', 'MB', 'GB', 'TB'];
 
 /**
  * A byte count in decimal units, such as "812 kB" or "1.4 GB": one decimal below 10, none above.
@@ -6,13 +6,13 @@ const UNITS = ["B", "kB", "MB", "GB", "TB"];
  */
 export function bytesText(bytes: number | null | undefined): string {
   if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) {
-    return "unknown";
+    return 'unknown';
   }
   let value = Math.max(0, bytes);
   let unit = 0;
   while (
     unit < UNITS.length - 1 &&
-    (value >= 1000 || roundedText(value, unit) === "1000")
+    (value >= 1000 || roundedText(value, unit) === '1000')
   ) {
     value /= 1000;
     unit += 1;
