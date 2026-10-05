@@ -3,7 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use mistarr_clients::{ClientKind, PathMapping};
-use mistarr_core::select::Prefs;
+use mistarr_core::select::{HiddenFlag, Prefs};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -42,6 +42,10 @@ pub struct Config {
     /// a config key. [`Config::log_problems`] logs these once the caller can.
     #[serde(skip)]
     pub(crate) unknown_keys: Vec<String>,
+    /// The `[prefs] hide` names `load` dropped for not being a [`HiddenFlag`], kept
+    /// like `unknown_keys` until [`Config::log_problems`] logs them.
+    #[serde(skip)]
+    pub(crate) dropped_flags: Vec<String>,
 }
 
 /// `[scan]`: how the library scan identifies files.
@@ -396,6 +400,25 @@ pub struct RuntimeSettings {
     pub transfer: Option<TransferConfig>,
 }
 
+impl RuntimeSettings {
+    /// Reads settings saved as JSON, logging each `prefs.hide` name it drops.
+    ///
+    /// # Errors
+    ///
+    /// The JSON error when `value` does not hold runtime settings.
+    ///
+    /// ```
+    /// use mistarr_server::config::RuntimeSettings;
+    /// let v = serde_json::json!({ "prefs": { "hide": ["demo", "unl"] } });
+    /// let saved = RuntimeSettings::from_saved(v).unwrap();
+    /// assert_eq!(saved.prefs.unwrap().hidden_names(), ["demo"]);
+    /// ```
+    pub fn from_saved(value: serde_json::Value) -> serde_json::Result<Self> {
+        warn_dropped_flags(&dropped_flags(&value), "saved settings");
+        serde_json::from_value(value)
+    }
+}
+
 impl Config {
     /// Parses TOML text; absent fields take their defaults. An unknown key is
     /// logged as a warning naming it and otherwise ignored.
@@ -410,8 +433,9 @@ impl Config {
     /// assert_eq!(c.limits.down_kbps_core, 512);
     /// ```
     pub fn parse(text: &str) -> Result<Self, toml::de::Error> {
-        let (config, unknown) = Self::parse_reporting(text)?;
+        let (mut config, unknown) = Self::parse_reporting(text)?;
         warn_unknown_keys(&unknown);
+        warn_dropped_flags(&std::mem::take(&mut config.dropped_flags), CONFIG_FILE);
         Ok(config)
     }
 
@@ -420,8 +444,13 @@ impl Config {
     fn parse_reporting(text: &str) -> Result<(Self, Vec<String>), toml::de::Error> {
         let de = toml::Deserializer::parse(text)?;
         let mut unknown = Vec::new();
-        let config = serde_ignored::deserialize(de, |path| unknown.push(path.to_string()))?;
-        unknown.extend(unknown_prefs_keys(text));
+        let mut config: Self =
+            serde_ignored::deserialize(de, |path| unknown.push(path.to_string()))?;
+        let prefs = prefs_table(text);
+        unknown.extend(unknown_prefs_keys(&prefs));
+        let hide = prefs.get("hide").and_then(toml::Value::as_array);
+        config.dropped_flags =
+            unknown_flags(hide.into_iter().flatten().filter_map(toml::Value::as_str));
         Ok((config, unknown))
     }
 
@@ -467,11 +496,12 @@ impl Config {
         Ok(config)
     }
 
-    /// Logs and clears the unknown keys, then logs each [`ConfigProblem`]
-    /// whose fields a runtime settings overlay cannot move. Needs a
-    /// `tracing` subscriber.
+    /// Logs and clears the unknown keys and dropped hidden flags, then logs each
+    /// [`ConfigProblem`] whose fields a runtime settings overlay cannot move. Needs
+    /// a `tracing` subscriber.
     pub(crate) fn log_problems(&mut self) {
         warn_unknown_keys(&std::mem::take(&mut self.unknown_keys));
+        warn_dropped_flags(&std::mem::take(&mut self.dropped_flags), CONFIG_FILE);
         for problem in self.validate() {
             if !problem.overlay_can_move() {
                 tracing::warn!("{}", problem.message());
@@ -598,22 +628,73 @@ fn client_path_map_ok(client: &ClientConfig) -> bool {
     client.remote_path_map.iter().all(path_map_entry_ok)
 }
 
-/// The `[prefs]` keys of `text` no field of [`PrefsConfig`] claims, which `serde_ignored`
-/// cannot see past the flattened [`Prefs`]; the known names come from its JSON form.
-fn unknown_prefs_keys(text: &str) -> Vec<String> {
+/// The `[prefs]` table of `text`, empty when it has none or `text` is not TOML.
+fn prefs_table(text: &str) -> toml::Table {
     #[derive(Deserialize)]
     struct Sections {
         #[serde(default)]
         prefs: toml::Table,
     }
-    let (Ok(Sections { prefs }), Ok(known)) = (
-        toml::from_str::<Sections>(text),
-        serde_json::to_value(PrefsConfig::default()),
-    ) else {
+    toml::from_str::<Sections>(text).map_or_else(|_| toml::Table::new(), |s| s.prefs)
+}
+
+/// The keys of `prefs` no field of [`PrefsConfig`] claims, which `serde_ignored` cannot
+/// see past the flattened [`Prefs`]; the known names come from its JSON form.
+fn unknown_prefs_keys(prefs: &toml::Table) -> Vec<String> {
+    let Ok(known) = serde_json::to_value(PrefsConfig::default()) else {
         return Vec::new();
     };
     let unclaimed = prefs.keys().filter(|k| known.get(k.as_str()).is_none());
     unclaimed.map(|k| format!("prefs.{k}")).collect()
+}
+
+/// The names that are not a [`HiddenFlag`], which reading a `hide` list drops.
+fn unknown_flags<'a>(names: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let unknown = names
+        .into_iter()
+        .filter(|n| HiddenFlag::from_name(n).is_none());
+    unknown.map(str::to_owned).collect()
+}
+
+/// The `prefs.hide` names of `value`, a [`RuntimeSettings`] as JSON, that are not a
+/// [`HiddenFlag`] and so are dropped when it is read.
+///
+/// ```
+/// let v = serde_json::json!({ "prefs": { "hide": ["demo", "unl"] } });
+/// assert_eq!(mistarr_server::config::dropped_flags(&v), ["unl"]);
+/// ```
+#[must_use]
+pub fn dropped_flags(value: &serde_json::Value) -> Vec<String> {
+    let hide = value
+        .pointer("/prefs/hide")
+        .and_then(serde_json::Value::as_array);
+    unknown_flags(
+        hide.into_iter()
+            .flatten()
+            .filter_map(serde_json::Value::as_str),
+    )
+}
+
+/// The names of [`HiddenFlag::ALL`] as a sentence lists them.
+///
+/// ```
+/// let names = mistarr_server::config::hideable_flags();
+/// assert_eq!(names, "bios, beta, proto, demo, sample and program");
+/// ```
+#[must_use]
+pub fn hideable_flags() -> String {
+    let names = HiddenFlag::ALL.map(HiddenFlag::as_flag_name);
+    match names.split_last() {
+        Some((last, rest)) => format!("{} and {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
+/// Logs each `prefs.hide` name `origin` held that was dropped for not being a [`HiddenFlag`].
+fn warn_dropped_flags(names: &[String], origin: &str) {
+    for name in names {
+        tracing::warn!(flag = %name, origin, "hidden flag dropped: only {} can be hidden", hideable_flags());
+    }
 }
 
 /// Logs each key [`Config::parse_reporting`] found and no field claimed.
@@ -917,6 +998,14 @@ mod tests {
         assert_eq!(c.prefs.select.languages, ["En"]);
         assert_eq!(c.prefs.hidden_names(), ["beta", "proto"]);
         assert!(!c.prefs.launch);
+        let (dropping, _) =
+            Config::parse_reporting("[prefs]\nhide = [\"pirate\", \"demo\", \"unl\"]")
+                .expect("parse");
+        assert_eq!(dropping.dropped_flags, ["pirate", "unl"]);
+        assert!(Config::parse("[prefs]\nhide = [\"unl\"]")
+            .expect("parse")
+            .dropped_flags
+            .is_empty());
         let json = serde_json::to_value(&c.prefs).expect("json");
         assert_eq!(json["hide"], serde_json::json!(["beta", "proto"]));
         assert_eq!(json["launch"], false);

@@ -178,11 +178,11 @@ A `url_fetch` reports `{ token, phase, bytes_received, bytes_total, file }`
 fields of the same sections of `mistarr.toml`; `transfer` is
 `{ pause_client_while_playing }`. `prefs.hide` holds the flags hidden from
 the 1G1R pick and the catalog: `bios`, `beta`, `proto`, `demo`, `sample` and
-`program`; other names are dropped when saved. PUT takes any subset of the
-five sections and answers with all five;
-each section present replaces the stored one whole, with absent fields taking
-their defaults. Other keys are a 400, as is a `remote_path_map` entry whose
-`remote` is blank or whose `local` is not an absolute path; `remote` is the
+`program`; a PUT naming another is a 400, and another name in `mistarr.toml`
+or in saved settings is dropped with a warning in the log. PUT takes any
+subset of the five sections and answers with all five; each section present
+replaces the stored one whole, with absent fields taking their defaults.
+Other keys are a 400, as is a `remote_path_map` entry whose `remote` is blank or whose `local` is not an absolute path; `remote` is the
 client's own spelling, so `C:\Torrents` or `C:/Torrents` is accepted. Saved values take precedence over
 the file on later starts. Changing `client` re-runs client detection; changing
 the 1G1R fields of `prefs` recomputes the picks; changing `prefs.launch`

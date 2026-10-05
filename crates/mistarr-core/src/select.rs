@@ -27,6 +27,16 @@ pub enum HiddenFlag {
 }
 
 impl HiddenFlag {
+    /// Every hidden flag, in the order the documented default `hide` list names them.
+    pub const ALL: [HiddenFlag; 6] = [
+        HiddenFlag::Bios,
+        HiddenFlag::Beta,
+        HiddenFlag::Proto,
+        HiddenFlag::Demo,
+        HiddenFlag::Sample,
+        HiddenFlag::Program,
+    ];
+
     /// The lowercase flag name as it appears in [`Variant::flags`].
     ///
     /// ```
@@ -54,16 +64,9 @@ impl HiddenFlag {
     /// ```
     #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
-        [
-            HiddenFlag::Bios,
-            HiddenFlag::Beta,
-            HiddenFlag::Proto,
-            HiddenFlag::Demo,
-            HiddenFlag::Sample,
-            HiddenFlag::Program,
-        ]
-        .into_iter()
-        .find(|f| f.as_flag_name().eq_ignore_ascii_case(name))
+        Self::ALL
+            .into_iter()
+            .find(|f| f.as_flag_name().eq_ignore_ascii_case(name))
     }
 }
 
@@ -110,14 +113,7 @@ impl Default for Prefs {
                 .collect(),
             languages: vec!["En".to_string()],
             prefer_latest_revision: true,
-            hide: vec![
-                HiddenFlag::Bios,
-                HiddenFlag::Beta,
-                HiddenFlag::Proto,
-                HiddenFlag::Demo,
-                HiddenFlag::Sample,
-                HiddenFlag::Program,
-            ],
+            hide: HiddenFlag::ALL.to_vec(),
         }
     }
 }
@@ -362,6 +358,7 @@ mod tests {
         let p: Prefs = serde_json::from_str(r#"{"hide":["demo","unl"]}"#).expect("prefs");
         assert_eq!(p.hide, [HiddenFlag::Demo]);
         assert_eq!(p.regions, Prefs::default().regions);
+        assert_eq!(Prefs::default().hide, HiddenFlag::ALL);
     }
 
     #[test]

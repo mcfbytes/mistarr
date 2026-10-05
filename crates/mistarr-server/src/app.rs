@@ -438,7 +438,7 @@ pub struct Startup {
 
 /// Seeds the platforms, refreshes DAT family keys and leaves one current version per
 /// family; returns those with the saved runtime settings, or why they cannot be read.
-fn prepare_catalog(db: Db) -> Result<(Startup, Result<Option<RuntimeSettings>>)> {
+fn prepare_catalog(db: Db) -> Result<(Startup, Result<Option<serde_json::Value>>)> {
     db.write_blocking(|c| {
         let added = db::platforms::seed(c, &mistarr_mister::platforms::PLATFORMS)?;
         if added > 0 {
@@ -453,7 +453,7 @@ fn prepare_catalog(db: Db) -> Result<(Startup, Result<Option<RuntimeSettings>>)>
         if settled > 0 {
             tracing::info!(settled, "misnamed files verified under the name rule");
         }
-        let stored = settings::get_json::<RuntimeSettings>(c, keys::RUNTIME);
+        let stored = settings::get_json::<serde_json::Value>(c, keys::RUNTIME);
         Ok((unfinished_scans, resolved, stored))
     })
     .map(|(unfinished_scans, resolved, stored)| {
@@ -606,7 +606,14 @@ pub(crate) fn open_db(config: &mut Config) -> Result<Startup> {
         None => Db::open(&path)?,
     };
     let (startup, stored) = prepare_catalog(db)?;
-    match stored {
+    let saved = match stored {
+        Ok(value) => value
+            .map(RuntimeSettings::from_saved)
+            .transpose()
+            .map_err(Error::from),
+        Err(e) => Err(e),
+    };
+    match saved {
         Ok(Some(saved)) => config.apply(&saved),
         Ok(None) => {}
         Err(e) => {

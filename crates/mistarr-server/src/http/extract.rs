@@ -79,8 +79,16 @@ async fn body<S: Send + Sync>(req: Request, state: &S) -> Result<Bytes, ApiError
 
 /// `bytes` as JSON `T`, the parser's complaint in a 400 when it is not.
 fn parse<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ApiError> {
-    serde_json::from_slice(bytes)
-        .map_err(|e| ApiError::bad_request(format!("The body is not valid: {e}")))
+    serde_json::from_slice(bytes).map_err(|e| invalid(&e))
+}
+
+/// A body read as [`serde_json::Value`] as `T`, refused as [`ApiJson`] refuses one.
+pub(crate) fn from_value<T: DeserializeOwned>(value: serde_json::Value) -> Result<T, ApiError> {
+    serde_json::from_value(value).map_err(|e| invalid(&e))
+}
+
+fn invalid(e: &serde_json::Error) -> ApiError {
+    ApiError::bad_request(format!("The body is not valid: {e}"))
 }
 
 /// `?limit=&offset=` of list endpoints; a query struct embeds it with `#[serde(flatten)]`.
@@ -194,6 +202,10 @@ mod tests {
         }
         let refused = OptionalJson::<Body1>::from_request(post(r#"{"b":1}"#), &()).await;
         assert!(refused.is_err(), "bodies deny unknown fields");
+        let b: Body1 = from_value(serde_json::json!({ "a": 2 })).expect("value");
+        assert_eq!(b.a, Some(2));
+        let e = from_value::<Body1>(serde_json::json!({ "b": 1 })).expect_err("unknown");
+        assert_eq!(e.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]

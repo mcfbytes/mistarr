@@ -1087,7 +1087,7 @@ pause_client_while_playing = true    # stop a client on the board while a core r
 regions   = ["USA", "World", "Europe", "Japan"]
 languages = ["En"]
 prefer_latest_revision = true
-hide = ["bios", "beta", "proto", "demo", "sample", "program"]   # any of these six; others are dropped
+hide = ["bios", "beta", "proto", "demo", "sample", "program"]   # any of these six; others are dropped with a warning
 launch = true               # allow starting cores and games from the UI
 
 [sources]

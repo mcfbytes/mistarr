@@ -329,6 +329,22 @@ async fn settings_from_file_are_editable_and_persist() {
     .await;
     assert_eq!(r.status, 400);
     assert_eq!(r.json()["error"]["code"], "bad_request");
+    let unl = r#"{"prefs":{"hide":["demo","unl"]}}"#;
+    let r = request(addr, "PUT", "/api/v1/system/settings", &[], Some(unl)).await;
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert!(r.json()["error"]["message"]
+        .as_str()
+        .is_some_and(|m| m.contains("\"unl\"")));
+    let r = request(
+        addr,
+        "PUT",
+        "/api/v1/system/settings",
+        &[],
+        Some(r#"{"prefs":{"hide":["Demo"]}}"#),
+    )
+    .await;
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["prefs"]["hide"], serde_json::json!(["demo"]));
 
     let dir = booted.dir;
     booted.running.shutdown().await.expect("shutdown");
