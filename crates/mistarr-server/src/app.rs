@@ -573,7 +573,8 @@ fn clean_leftovers(config: &Config) -> Result<bool> {
 ///
 /// # Errors
 ///
-/// [`Error::Io`] when leftovers cannot be removed or a cut-short swap left no database,
+/// [`Error::File`] naming the file a leftover removal or a cut-short swap's rename failed
+/// on, [`Error::Io`] when that swap's copy fails its check or it left no database,
 /// [`Error::SchemaTooNew`], [`Error::Migration`] or [`Error::Db`] when it cannot be opened.
 pub(crate) fn open_db(config: &mut Config) -> Result<Startup> {
     if let Some(dir) = std::env::var_os(crate::db::tempdir::SQLITE_TMPDIR) {

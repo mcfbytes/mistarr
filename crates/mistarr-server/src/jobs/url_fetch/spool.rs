@@ -94,8 +94,8 @@ impl Spool {
     ///
     /// # Errors
     ///
-    /// [`Error::Io`] when no file can be created, of kind `StorageFull` when the card
-    /// lacks room for `length`.
+    /// [`Error::File`] naming the directory or file that cannot be created, and
+    /// [`Error::Io`] of kind `StorageFull` when the card lacks room for `length`.
     pub async fn create(
         places: Places,
         token: u64,
