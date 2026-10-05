@@ -523,15 +523,15 @@ Haiku · every `Cargo.toml`, crate roots · branch `wp-70-workspace-lints`
 
 Opus · every crate · branch `wp-69-digests-ids`
 
-- [ ] `core::HashSet` is `Hashes`, and `Hashes` and `DatRom` hold `Digest`
+- [x] `core::HashSet` is `Hashes`, and `Hashes` and `DatRom` hold `Digest`
   values instead of hex strings, in memory and at crate boundaries.
   ARCHITECTURE.md's hash section matches.
-- [ ] Every id newtype follows one idiom with a private field. `PlatformId`
+- [x] Every id newtype follows one idiom with a private field. `PlatformId`
   does not allocate per call; `RomRef` is the server's `RomId`;
   `LaunchTitle.platform_id` is typed; one crate re-exports `PlatformId`.
-- [ ] Every crate has `crate::Error` and `Result<T, E = Error>`; an I/O
+- [x] Every crate has `crate::Error` and `Result<T, E = Error>`; an I/O
   variant carries the path wherever the caller can act on it.
-- [ ] The pull request states the change in peak memory of a large synthetic
+- [x] The pull request states the change in peak memory of a large synthetic
   DAT import.
 
 ## Wave 10
