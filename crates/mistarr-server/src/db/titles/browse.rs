@@ -251,7 +251,7 @@ pub(super) fn browse_clause(
             "SELECT EXISTS (SELECT 1 FROM titles
              WHERE platform_id = ?1 AND source = 'mra' AND retired = 0)",
         )?
-        .query_row([&platform.as_str()], |r| r.get(0))?;
+        .query_row([platform], |r| r.get(0))?;
     if mra {
         clause.and("g.source = 'mra'", []);
     }

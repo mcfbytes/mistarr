@@ -29,6 +29,17 @@ impl DatFamily {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// The key as stored, without a copy.
+    ///
+    /// ```
+    /// let key = mistarr_core::dat::family_key("Example System (2)");
+    /// assert_eq!(key.into_string(), "example system");
+    /// ```
+    #[must_use]
+    pub fn into_string(self) -> String {
+        self.0
+    }
 }
 
 impl fmt::Display for DatFamily {

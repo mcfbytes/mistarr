@@ -154,7 +154,7 @@ struct Decision {
 }
 
 fn decide(conn: &Connection, v: &NewVersion<'_>) -> Result<Decision> {
-    let family = family_key(v.dat_name).as_str().to_owned();
+    let family = family_key(v.dat_name).into_string();
     let existing: Option<(DatVersionId, Option<String>)> = conn
         .query_row(
             "SELECT id, platform_id FROM dat_versions
@@ -501,7 +501,7 @@ pub fn refresh_families(conn: &Connection) -> Result<usize> {
     let mut stmt = conn.prepare("UPDATE dat_versions SET family = ?2 WHERE id = ?1")?;
     let mut changed = 0;
     for (id, name, stored) in rows {
-        let key = family_key(&name).as_str().to_owned();
+        let key = family_key(&name).into_string();
         if key != stored {
             changed += stmt.execute(params![id, key])?;
         }

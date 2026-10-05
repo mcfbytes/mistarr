@@ -1,5 +1,6 @@
 use std::time::{Duration, SystemTime};
 
+use mistarr_core::RomId;
 use rusqlite::params;
 
 use super::*;
@@ -8,7 +9,6 @@ use crate::app::AppState;
 use crate::db::titles::RomStatus;
 use crate::jobs::arcade::{ArcadeCatalog, ARCADE_DIR};
 use crate::jobs::Scheduler;
-use mistarr_core::RomId;
 
 fn hashes() -> mistarr_core::Hashes {
     mistarr_core::Hashes {

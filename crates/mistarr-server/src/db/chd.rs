@@ -358,7 +358,7 @@ pub fn recheck_layouts(conn: &Connection, platform: &PlatformId) -> Result<usize
             "UPDATE files SET reason = 'pending'
              WHERE platform_id = ?1 AND state = 'unidentified' AND reason = 'no_layout'",
         )?
-        .execute([&platform.as_str()])?)
+        .execute([platform])?)
 }
 
 /// Sets row `id`'s reason to `to` only while it is `unidentified` with reason `from`.
@@ -398,7 +398,7 @@ pub fn layout_known(conn: &Connection, platform: &PlatformId, sizes: &[u64]) -> 
              WHERE r.size = ?2 AND r.size % 2352 = 0 AND t.platform_id = ?1 AND t.source = 'dat'
                AND r.retired = 0 AND t.retired = 0 AND lower(r.name) NOT LIKE '%.cue'",
         )?
-        .query_map(params![platform.as_str(), to_i64(first)], |r| r.get(0))?
+        .query_map(params![platform, to_i64(first)], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let mut want: Vec<i64> = sizes.iter().map(|&s| to_i64(s)).collect();
     want.sort_unstable();

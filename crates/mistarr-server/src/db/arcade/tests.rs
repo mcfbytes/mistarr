@@ -5,8 +5,7 @@ use crate::db::fixtures::pid;
 use crate::db::roms::{live_zip_roms, zip_rom, zip_roms};
 use crate::db::titles::browse::Browse;
 use crate::db::titles::{self, RomInput, TitleInput};
-use mistarr_core::PlatformId;
-use mistarr_core::RomId;
+use mistarr_core::{PlatformId, RomId};
 
 fn mra(c: &Connection, name: &str, zips: &[(&str, bool)]) -> TitleId {
     mra_run(c, name, zips, 1)

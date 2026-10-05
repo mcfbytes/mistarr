@@ -5,9 +5,10 @@ use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 
+use mistarr_core::RomId;
+
 use crate::binding::{base_name, normalize_name, Confidence};
 use crate::torrent::TorrentFile;
-use mistarr_core::RomId;
 
 /// Most title groups one file may name by the fuzzy tier; a file naming
 /// more is ambiguous and gets no fuzzy candidate.

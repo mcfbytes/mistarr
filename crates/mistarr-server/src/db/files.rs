@@ -1,7 +1,7 @@
 //! The `files` table; the files rows are matched to roms by `roms` and scanned against
 //! `scan_progress`. See `docs/DATA-MODEL.md` "files" and "files.state".
 
-use mistarr_core::{Crc32, Hashes, Md5, PlatformId, Sha1};
+use mistarr_core::{Crc32, Hashes, Md5, PlatformId, RomId, Sha1};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
@@ -9,7 +9,6 @@ use super::ids::{FileId, TitleId};
 
 use super::sql::{self, text_enum, Page, Paged};
 use crate::error::Result;
-use mistarr_core::RomId;
 
 text_enum! {
     /// `files.state`.
@@ -284,7 +283,7 @@ pub fn find_by_path(
         .prepare_cached(&format!(
             "SELECT {COLUMNS} FROM files WHERE platform_id = ?1 AND rel_path = ?2"
         ))?
-        .query_row(params![platform_id.as_str(), rel_path], from_row)
+        .query_row(params![platform_id, rel_path], from_row)
         .optional()?)
 }
 
@@ -351,7 +350,7 @@ pub fn zip_member_rows(
          ORDER BY rel_path"
     ))?;
     let (from, to) = (format!("{zip_rel}#"), format!("{zip_rel}$"));
-    let rows = stmt.query_map(params![platform_id.as_str(), from, to], from_row)?;
+    let rows = stmt.query_map(params![platform_id, from, to], from_row)?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -373,7 +372,7 @@ pub fn zip_rows_nocase(
          WHERE platform_id = ?1 AND lower(rel_path) = ?2 ORDER BY rel_path"
     ))?;
     let bare = stmt
-        .query_map(params![platform_id.as_str(), key], from_row)?
+        .query_map(params![platform_id, key], from_row)?
         .collect::<rusqlite::Result<_>>()?;
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT {COLUMNS} FROM files INDEXED BY files_rel_lower
@@ -382,7 +381,7 @@ pub fn zip_rows_nocase(
     ))?;
     let (from, to) = (format!("{key}#"), format!("{key}$"));
     let members = stmt
-        .query_map(params![platform_id.as_str(), from, to], from_row)?
+        .query_map(params![platform_id, from, to], from_row)?
         .collect::<rusqlite::Result<_>>()?;
     Ok((bare, members))
 }
@@ -411,10 +410,9 @@ pub fn paths_under(
         "SELECT rel_path FROM files WHERE platform_id = ?1 AND rel_path > ?2 AND rel_path < ?3
          ORDER BY rel_path LIMIT ?4",
     )?;
-    let rows = stmt.query_map(
-        params![platform_id.as_str(), after, to, sql::to_i64(limit)],
-        |r| r.get(0),
-    )?;
+    let rows = stmt.query_map(params![platform_id, after, to, sql::to_i64(limit)], |r| {
+        r.get(0)
+    })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -493,7 +491,7 @@ pub fn mark_verified(
             "UPDATE files SET state = 'verified', rom_id = ?3
          WHERE platform_id = ?1 AND rel_path = ?2 AND state = 'unverified'",
         )?
-        .execute(params![platform_id.as_str(), rel_path, rom_id])?
+        .execute(params![platform_id, rel_path, rom_id])?
         > 0)
 }
 
@@ -537,7 +535,7 @@ pub fn upsert(
         )?
         .query_row(
             params![
-                platform_id.as_str(),
+                platform_id,
                 row.rel_path,
                 row.size,
                 row.mtime,
@@ -564,7 +562,7 @@ pub fn upsert(
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn existing_paths(conn: &Connection, platform_id: &PlatformId) -> Result<Vec<String>> {
     let mut stmt = conn.prepare("SELECT rel_path FROM files WHERE platform_id = ?1")?;
-    let rows = stmt.query_map([&platform_id.as_str()], |r| r.get(0))?;
+    let rows = stmt.query_map([platform_id], |r| r.get(0))?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
@@ -591,7 +589,7 @@ pub fn delete_paths(
             "SELECT id FROM files WHERE platform_id = ?1
                AND rel_path IN (SELECT value FROM json_each(?2))",
         )?
-        .query_map(params![platform_id.as_str(), list], |r| r.get(0))?
+        .query_map(params![platform_id, list], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     delete_ids(conn, &ids)
 }
@@ -689,23 +687,20 @@ pub fn unidentified(
             .prepare(
                 "SELECT COUNT(*) FROM files WHERE state = 'unidentified' AND platform_id = ?1",
             )?
-            .query_row([&platform_id.as_str()], |r| sql::get_u64(r, 0))?;
+            .query_row([platform_id], |r| sql::get_u64(r, 0))?;
         let items = conn
             .prepare(
                 "SELECT rel_path, size, COALESCE(reason, 'corrupt') FROM files
                  WHERE state = 'unidentified' AND platform_id = ?1
                  ORDER BY rel_path LIMIT ?2 OFFSET ?3",
             )?
-            .query_map(
-                params![platform_id.as_str(), page.limit, page.offset],
-                |r| {
-                    Ok(UnidentifiedFile {
-                        rel_path: r.get(0)?,
-                        size: r.get(1)?,
-                        reason: r.get(2)?,
-                    })
-                },
-            )?
+            .query_map(params![platform_id, page.limit, page.offset], |r| {
+                Ok(UnidentifiedFile {
+                    rel_path: r.get(0)?,
+                    size: r.get(1)?,
+                    reason: r.get(2)?,
+                })
+            })?
             .collect::<rusqlite::Result<_>>()?;
         Ok(Paged { items, total })
     })
@@ -740,7 +735,7 @@ pub fn retired_matches(
              WHERE f.platform_id = ?1 AND t.source = 'dat' AND (r.retired = 1 OR t.retired = 1)
              ORDER BY f.id LIMIT ?2"
         ))?
-        .query_map(params![platform_id.as_str(), limit], from_row)?
+        .query_map(params![platform_id, limit], from_row)?
         .collect::<rusqlite::Result<_>>()?)
 }
 
@@ -774,7 +769,7 @@ pub fn unmatched_after(
                AND (sha1 IS NOT NULL OR md5 IS NOT NULL)
              ORDER BY id LIMIT ?3"
         ))?
-        .query_map(params![platform_id.as_str(), after, limit], from_row)?
+        .query_map(params![platform_id, after, limit], from_row)?
         .collect::<rusqlite::Result<_>>()?)
 }
 
@@ -804,7 +799,7 @@ pub fn in_directory(
             "SELECT {COLUMNS} FROM files
              WHERE platform_id = ?1 AND rel_path >= ?2 AND rel_path < ?3 ORDER BY rel_path"
         ))?
-        .query_map(params![platform_id.as_str(), prefix, to], from_row)?
+        .query_map(params![platform_id, prefix, to], from_row)?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows
         .into_iter()
@@ -898,9 +893,7 @@ pub fn state_counts(conn: &Connection, platform_id: &PlatformId) -> Result<State
     let mut stmt =
         conn.prepare("SELECT state, COUNT(*) FROM files WHERE platform_id = ?1 GROUP BY state")?;
     let mut counts = StateCounts::default();
-    let rows = stmt.query_map([&platform_id.as_str()], |r| {
-        Ok((r.get(0)?, sql::get_u64(r, 1)?))
-    })?;
+    let rows = stmt.query_map([platform_id], |r| Ok((r.get(0)?, sql::get_u64(r, 1)?)))?;
     for row in rows {
         let (state, n) = row?;
         match state {

@@ -234,13 +234,13 @@ pub(crate) fn put_title(
                    AND +t.source = 'dat' AND +t.platform_id = ?3
                  ORDER BY d.id = ?2 DESC, d.loaded_at DESC LIMIT 1",
             )?
-            .query_row(params![put.name, version, platform.as_str()], |r| r.get(0))
+            .query_row(params![put.name, version, platform], |r| r.get(0))
             .optional()?,
         TitleSource::Mra => conn
             .prepare_cached(
                 "SELECT id FROM titles WHERE platform_id = ?1 AND source = 'mra' AND name = ?2",
             )?
-            .query_row(params![platform.as_str(), put.name], |r| r.get(0))
+            .query_row(params![platform, put.name], |r| r.get(0))
             .optional()?,
     };
     let mra = put.mra.as_ref();
@@ -254,7 +254,7 @@ pub(crate) fn put_title(
         )?
         .execute(params![
             id,
-            platform.as_str(),
+            platform,
             version,
             put.base_name,
             put.revision,
@@ -277,7 +277,7 @@ pub(crate) fn put_title(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, COALESCE(?14, 0))",
         )?
         .execute(params![
-            platform.as_str(),
+            platform,
             version,
             put.name,
             put.base_name,

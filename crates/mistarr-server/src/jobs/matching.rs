@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use mistarr_core::hash::{HeaderForms, HeaderRule};
-use mistarr_core::{Hashes, PlatformId};
+use mistarr_core::{Hashes, PlatformId, RomId};
 use mistarr_mister::platforms::{self, Kind};
 use rusqlite::Connection;
 
@@ -13,7 +13,6 @@ use crate::db::ids::TitleId;
 use crate::db::roms::{self, RomMatch};
 use crate::db::titles::RomStatus;
 use crate::error::Result;
-use mistarr_core::RomId;
 
 /// Matches a fully hashed payload in its forms and decides its state, per
 /// `docs/DATA-MODEL.md` "files.state".

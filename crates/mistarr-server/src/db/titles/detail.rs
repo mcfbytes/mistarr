@@ -1,6 +1,6 @@
 //! One group's detail and the want and unwant writes; see `docs/API.md` "Titles".
 
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, RomId};
 use rusqlite::{Connection, OptionalExtension, Row};
 use serde::Serialize;
 
@@ -11,7 +11,6 @@ use crate::db::files::FileState;
 use crate::db::ids::{DatVersionId, FileId, TitleId};
 use crate::db::sql;
 use crate::error::Result;
-use mistarr_core::RomId;
 
 /// A rom of a variant with the best file on disk for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

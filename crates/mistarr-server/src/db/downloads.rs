@@ -1,7 +1,7 @@
 //! The `downloads` table and its state machine; see `docs/DATA-MODEL.md`.
 
 use mistarr_clients::ClientTorrentId;
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, RomId};
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
@@ -10,7 +10,6 @@ use super::ids::{DatVersionId, DownloadId, SourceId, TitleId};
 use super::sources;
 use super::sql::{self, text_enum, Page, Paged};
 use crate::error::Result;
-use mistarr_core::RomId;
 
 text_enum! {
     /// `downloads.state`.

@@ -1,7 +1,7 @@
 //! The `sources` and `torrent_files` tables, and the [`DatIndex`] binding reads roms through.
 
 use mistarr_clients::{ClientTorrentId, SeedPolicy};
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, RomId};
 use mistarr_sources::binding::{self, Confidence, DatIndex};
 use mistarr_sources::torrent::TorrentFile;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -12,7 +12,6 @@ use super::downloads::DownloadState;
 use super::ids::SourceId;
 use super::sql::{self, text_enum, Page, Paged};
 use crate::error::Result;
-use mistarr_core::RomId;
 
 /// Roms given match keys per statement batch in [`refresh_match_keys`].
 const KEY_BATCH: u32 = 1000;
@@ -484,7 +483,7 @@ pub fn list_on_platforms(conn: &Connection, platforms: &[PlatformId]) -> Result<
     )?;
     let mut out: Vec<SourceId> = Vec::new();
     for p in platforms {
-        let ids = stmt.query_map([&p.as_str()], |r| r.get::<_, SourceId>(0))?;
+        let ids = stmt.query_map([p], |r| r.get::<_, SourceId>(0))?;
         out.extend(ids.collect::<rusqlite::Result<Vec<_>>>()?);
     }
     out.sort_unstable();
@@ -583,7 +582,7 @@ pub fn platform_has_dat(conn: &Connection, platform: &PlatformId) -> Result<bool
     Ok(conn
         .query_row(
             "SELECT 1 FROM titles WHERE platform_id = ?1 AND retired = 0 AND source = 'dat' LIMIT 1",
-            [&platform.as_str()],
+            [platform],
             |_| Ok(()),
         )
         .optional()?

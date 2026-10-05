@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use mistarr_clients::{Error as ClientError, SeedPolicy};
 use mistarr_core::hash::HeaderRule;
 use mistarr_core::matching::{leaf, match_members, pick_rom, Payload as _};
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, RomId};
 use mistarr_mister::platforms::{self, Kind, Platform};
 use mistarr_mister::{
     adapter_for, CoreAdapter, DatEntry, PlacementPlan, StagedFile, StagedKind, StagedMember, Step,
@@ -47,7 +47,6 @@ use crate::db::titles::RomStatus;
 use crate::db::{downloads_import, ids::TitleId};
 use crate::error::Result;
 use crate::events::{Event, EventKind, ImportDone};
-use mistarr_core::RomId;
 
 /// Why a BIOS entry is never imported, from `docs/PRINCIPLES.md` section 3.
 const BIOS_REFUSED: &str = "BIOS entries are never imported";

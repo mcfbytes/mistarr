@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, RomId};
 use mistarr_sources::binding::Confidence;
 use mistarr_sources::fuzzy::{SizeIndex, SizedRom};
 use rusqlite::{params, Connection};
@@ -13,7 +13,6 @@ use super::ids::{SourceId, TitleId};
 
 use super::sql::{self, text_enum};
 use crate::error::Result;
-use mistarr_core::RomId;
 
 text_enum! {
     /// `torrent_files.confidence` and `torrent_candidates.confidence`: how a file was
@@ -373,7 +372,7 @@ pub fn drop_foreign_proofs(
            SELECT 1 FROM roms r JOIN titles t ON t.id = r.title_id
            WHERE r.id = torrent_files.rom_id AND t.platform_id = ?2
              AND r.retired = 0 AND t.retired = 0)",
-        params![source, platform.as_str()],
+        params![source, platform],
     )?)
 }
 
@@ -411,7 +410,7 @@ pub fn rom_stamp(conn: &Connection, platform: &PlatformId) -> Result<String> {
         "SELECT COALESCE(group_concat(id || '@' || loaded_at, ','), '')
          FROM (SELECT id, loaded_at FROM dat_versions
                WHERE platform_id = ?1 AND retired = 0 AND source != 'mra' ORDER BY id)",
-        [&platform.as_str()],
+        [platform],
         |r| r.get(0),
     )?;
     let mut stmt = conn.prepare_cached(
@@ -419,7 +418,7 @@ pub fn rom_stamp(conn: &Connection, platform: &PlatformId) -> Result<String> {
          FROM roms r JOIN titles t ON t.id = r.title_id
          WHERE t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0",
     )?;
-    let mut rows = stmt.query([&platform.as_str()])?;
+    let mut rows = stmt.query([platform])?;
     let (mut count, mut sum) = (0u64, 0u64);
     while let Some(r) = rows.next()? {
         let (rom, group): (RomId, TitleId) = (r.get(0)?, r.get(1)?);
@@ -659,7 +658,7 @@ impl SizeIndex for SqlSizeIndex<'_> {
             let size = sql::to_i64(size);
             let bare = bare.map_or(size, sql::to_i64);
 
-            let rows = stmt.query_map(params![self.platform.as_str(), size, bare], |r| {
+            let rows = stmt.query_map(params![self.platform, size, bare], |r| {
                 Ok(SizedRom {
                     rom: RomId::new(r.get(0)?),
                     base: r.get(1)?,

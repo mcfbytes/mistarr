@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mistarr_core::hash::{zip_members, HashError};
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, RomId};
 use mistarr_mister::launch::split_zip_member;
 use mistarr_mister::platforms::Platform;
 use rusqlite::Connection;
@@ -22,7 +22,6 @@ use crate::error::Result;
 use crate::jobs::fsutil::{all_entries, extension, file_meta};
 use crate::jobs::progress::Progress;
 use crate::jobs::JobContext;
-use mistarr_core::RomId;
 
 /// Zips stated, looked up and written per batch; each batch is one write transaction.
 const BATCH: usize = 500;

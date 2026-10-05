@@ -16,7 +16,7 @@ pub fn get(conn: &Connection, platform_id: &PlatformId) -> Result<Vec<String>> {
     Ok(conn
         .query_row(
             "SELECT done_dirs FROM scan_progress WHERE platform_id = ?1",
-            [&platform_id.as_str()],
+            [platform_id],
             |r| sql::get_json(r, 0, "scan_progress.done_dirs"),
         )
         .optional()?
@@ -40,7 +40,7 @@ pub fn save(
         "INSERT INTO scan_progress (platform_id, done_dirs, updated_at) VALUES (?1, ?2, ?3)
          ON CONFLICT(platform_id) DO UPDATE SET done_dirs = excluded.done_dirs, updated_at = excluded.updated_at",
     )?
-    .execute(params![platform_id.as_str(), json, now])?;
+    .execute(params![platform_id, json, now])?;
     Ok(())
 }
 
@@ -52,7 +52,7 @@ pub fn save(
 pub fn clear(conn: &Connection, platform_id: &PlatformId) -> Result<()> {
     conn.execute(
         "DELETE FROM scan_progress WHERE platform_id = ?1",
-        [&platform_id.as_str()],
+        [platform_id],
     )?;
     Ok(())
 }

@@ -93,7 +93,7 @@ fn grouped(
     mut each: impl FnMut(&[Candidate]),
 ) -> Result<()> {
     let mut stmt = conn.prepare(sql)?;
-    let mut rows = stmt.query([&platform.as_str()])?;
+    let mut rows = stmt.query([platform])?;
     let mut key: Option<String> = None;
     let mut group = Vec::new();
     while let Some(r) = rows.next()? {
@@ -203,7 +203,7 @@ fn store_picks(conn: &Connection, platform: &PlatformId, mut picks: Vec<TitleId>
         .prepare_cached(
             "SELECT id FROM titles WHERE platform_id = ?1 AND is_1g1r_pick = 1 ORDER BY id",
         )?
-        .query_map([&platform.as_str()], |r| r.get(0))?
+        .query_map([platform], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let mut set = conn.prepare_cached("UPDATE titles SET is_1g1r_pick = ?2 WHERE id = ?1")?;
     for &id in current.iter().filter(|id| picks.binary_search(id).is_err()) {
@@ -230,7 +230,7 @@ fn link_shared_titles(conn: &Connection, platform: &PlatformId) -> Result<()> {
              WHERE platform_id = ?1 AND source = 'dat' AND retired = 0 AND superseded_by IS NULL
              ORDER BY game_count DESC, id",
         )?
-        .query_map([&platform.as_str()], |r| r.get(0))?
+        .query_map([platform], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let (largest, mut rest) = match versions.split_first() {
         Some((&largest, rest)) if !rest.is_empty() => (largest, rest.to_vec()),
@@ -238,7 +238,7 @@ fn link_shared_titles(conn: &Connection, platform: &PlatformId) -> Result<()> {
             conn.execute(
                 "UPDATE titles SET group_root = parent_id
                  WHERE platform_id = ?1 AND group_root IS NOT parent_id",
-                [&platform.as_str()],
+                [platform],
             )?;
             return Ok(());
         }
@@ -314,7 +314,7 @@ fn group_nodes(conn: &Connection, platform: &PlatformId) -> Result<Vec<Node>> {
         .prepare_cached(
             "SELECT id, parent_id, group_root, retired = 0 FROM titles WHERE platform_id = ?1",
         )?
-        .query_map([&platform.as_str()], |r| {
+        .query_map([platform], |r| {
             Ok(Node {
                 id: r.get(0)?,
                 target: r.get(1)?,
@@ -328,7 +328,7 @@ fn group_nodes(conn: &Connection, platform: &PlatformId) -> Result<Vec<Node>> {
          FROM titles r JOIN titles m ON m.group_root = r.id
          WHERE r.platform_id = ?1 AND m.platform_id IS NOT ?1",
     )?;
-    let away = away.query_map([&platform.as_str()], |r| {
+    let away = away.query_map([platform], |r| {
         let root: Option<TitleId> = r.get(1)?;
         Ok(Node {
             id: r.get(0)?,
@@ -391,7 +391,7 @@ fn each_signature(
            AND t.platform_id = ?2
          ORDER BY t.id",
     )?;
-    let mut rows = stmt.query(params![version, platform.as_str()])?;
+    let mut rows = stmt.query(params![version, platform])?;
     // Per title: id, parent, sum of key hashes, rom count, whether every rom had a key.
     let mut open: Option<(TitleId, TitleId, u64, u64, bool)> = None;
     let mut settle = |t: Option<(TitleId, TitleId, u64, u64, bool)>| {

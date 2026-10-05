@@ -117,8 +117,22 @@ impl<const N: usize> Serialize for Digest<N> {
 
 impl<'de, const N: usize> Deserialize<'de> for Digest<N> {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let text = std::borrow::Cow::<'de, str>::deserialize(deserializer)?;
-        text.parse().map_err(de::Error::custom)
+        deserializer.deserialize_str(HexVisitor)
+    }
+}
+
+/// Parses the hex text in place, so reading a digest allocates nothing.
+struct HexVisitor<const N: usize>;
+
+impl<const N: usize> de::Visitor<'_> for HexVisitor<N> {
+    type Value = Digest<N>;
+
+    fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} hex digits", 2 * N)
+    }
+
+    fn visit_str<E: de::Error>(self, s: &str) -> Result<Self::Value, E> {
+        s.parse().map_err(E::custom)
     }
 }
 
@@ -220,6 +234,9 @@ mod tests {
         let json = serde_json::to_string(&md5).expect("json");
         assert_eq!(json, format!("\"{}\"", "cd".repeat(16)));
         assert_eq!(serde_json::from_str::<Md5>(&json).expect("md5"), md5);
+        let read = serde_json::from_reader::<_, Md5>(json.as_bytes()).expect("read");
+        assert_eq!(read, md5);
+        assert!(serde_json::from_str::<Md5>("7").is_err());
         let h = InfoHash::from_bytes([0xef; 20]);
         let json = serde_json::to_string(&h).expect("json");
         assert_eq!(json, format!("\"{}\"", "ef".repeat(20)));

@@ -1,6 +1,6 @@
 //! Reads behind a source's detail view: its file page, summary, DATs and re-classify preview.
 
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, RomId};
 use mistarr_mister::platforms::{self, Kind};
 use mistarr_sources::binding;
 use mistarr_sources::torrent::TorrentFile;
@@ -13,7 +13,6 @@ use crate::db::ids::{DatVersionId, DownloadId, SourceId, TitleId};
 use crate::db::sources::{self, SourceRow, SqlDatIndex};
 use crate::db::sql::{self, get_u64, Page, Paged};
 use crate::error::Result;
-use mistarr_core::RomId;
 
 /// A file that holds a matched rom or a candidate rom, as `matched_count` counts it.
 const HAS_MATCH: &str = "(f.rom_id IS NOT NULL OR EXISTS (SELECT 1 FROM torrent_candidates c

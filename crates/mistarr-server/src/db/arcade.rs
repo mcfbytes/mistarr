@@ -31,7 +31,7 @@ pub fn mra_version(conn: &Connection, platform: &PlatformId, now: i64) -> Result
     let found: Option<DatVersionId> = conn
         .query_row(
             "SELECT id FROM dat_versions WHERE source = 'mra' AND platform_id = ?1",
-            [&platform.as_str()],
+            [platform],
             |r| r.get(0),
         )
         .optional()?;
@@ -45,7 +45,7 @@ pub fn mra_version(conn: &Connection, platform: &PlatformId, now: i64) -> Result
     conn.execute(
         "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count, source)
          VALUES (?1, ?2, 'mra', ?2, ?3, 0, 'mra')",
-        params![platform.as_str(), MRA_DAT_NAME, now],
+        params![platform, MRA_DAT_NAME, now],
     )?;
     Ok(DatVersionId::new(conn.last_insert_rowid()))
 }
@@ -106,7 +106,7 @@ pub struct MraZip<'a> {
 pub fn next_run(conn: &Connection, platform: &PlatformId) -> Result<i64> {
     Ok(conn.query_row(
         "SELECT COALESCE(MAX(mra_seen), 0) + 1 FROM titles WHERE platform_id = ?1 AND source = 'mra'",
-        [&platform.as_str()],
+        [platform],
         |r| r.get(0),
     )?)
 }
@@ -144,7 +144,7 @@ pub fn retire_unseen(conn: &Connection, platform: &PlatformId, run: i64) -> Resu
     Ok(conn.execute(
         "UPDATE titles SET retired = 1, is_1g1r_pick = 0
          WHERE platform_id = ?1 AND source = 'mra' AND retired = 0 AND mra_seen IS NOT ?2",
-        params![platform.as_str(), run],
+        params![platform, run],
     )?)
 }
 
@@ -162,7 +162,7 @@ pub fn retire_unseen(conn: &Connection, platform: &PlatformId, run: i64) -> Resu
 pub fn live_count(conn: &Connection, platform: &PlatformId) -> Result<u64> {
     Ok(conn.query_row(
         "SELECT COUNT(*) FROM titles WHERE platform_id = ?1 AND source = 'mra' AND retired = 0",
-        [&platform.as_str()],
+        [platform],
         |r| sql::get_u64(r, 0),
     )?)
 }
@@ -309,7 +309,7 @@ pub fn stored_mra(
              WHERE platform_id = ?1 AND source = 'mra' AND mra_path = ?2 AND retired = 0
              ORDER BY id LIMIT 1",
         )?
-        .query_row(params![platform.as_str(), mra_path], |r| {
+        .query_row(params![platform, mra_path], |r| {
             Ok(StoredMra {
                 id: r.get(0)?,
                 name: r.get(1)?,
@@ -334,7 +334,7 @@ pub fn stored_mra(
 pub fn has_titles(conn: &Connection, platform: &PlatformId) -> Result<bool> {
     Ok(conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM titles WHERE platform_id = ?1 AND source = 'mra' AND retired = 0)",
-        [&platform.as_str()],
+        [platform],
         |r| r.get(0),
     )?)
 }
@@ -391,7 +391,7 @@ pub fn titles_naming(
            AND lower(COALESCE(r.zip_dir, '')) = lower(?2) AND lower(r.name) = lower(?3)
          ORDER BY t.id",
     )?;
-    let rows = stmt.query_map(params![platform.as_str(), zip_dir, name], |r| {
+    let rows = stmt.query_map(params![platform, zip_dir, name], |r| {
         Ok((r.get(0)?, r.get(1)?))
     })?;
     Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -451,7 +451,7 @@ pub fn dat_entry_named(
                AND v.superseded_by IS NULL AND v.retired = 0 AND lower(t.name) = lower(?2)
                AND (instr(lower(v.dat_name), 'hbmame') > 0) = ?3
              ORDER BY t.name = ?2 DESC, t.id LIMIT 1",
-            params![platform.as_str(), set, hbmame],
+            params![platform, set, hbmame],
             |r| r.get(0),
         )
         .optional()?)

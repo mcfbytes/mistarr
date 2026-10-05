@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mistarr_core::chd::{self as core, ChdError, ChdId, Decoder, Header, Layout, Step};
 use mistarr_core::hash::{hash_reader, HeaderRule};
-use mistarr_core::{Hashes, PlatformId};
+use mistarr_core::{Hashes, PlatformId, RomId};
 use mistarr_mister::launch::split_chd_member;
 use rusqlite::Connection;
 use serde_json::json;
@@ -30,7 +30,6 @@ use crate::db::titles::RomStatus;
 use crate::error::Result;
 use crate::events::{Event, FileChanged};
 use crate::threads::{self, label};
-use mistarr_core::RomId;
 
 /// Bytes decoded between two checkpoints, a fraction of a second on the board.
 const SLICE_BYTES: u32 = 640 << 10;

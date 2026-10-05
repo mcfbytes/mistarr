@@ -1,7 +1,7 @@
 //! Synthetic catalog rows standing in for the DAT import; compiled for tests and the
 //! `test-support` feature only.
 
-use mistarr_core::{Hashes, PlatformId};
+use mistarr_core::{Hashes, PlatformId, RomId};
 use rusqlite::{params, Connection};
 
 use super::downloads::DownloadState;
@@ -9,7 +9,6 @@ use super::ids::{DatVersionId, DownloadId, SourceId, TitleId};
 use super::sql;
 use super::titles::RomStatus;
 use crate::error::Result;
-use mistarr_core::RomId;
 
 /// A migrated in-memory database with the platform table seeded.
 ///
@@ -66,18 +65,18 @@ pub fn seed_rom(
         "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
          VALUES (?1, ?1 || ' test', '1', 'test.dat', 0, 0)
          ON CONFLICT (dat_name, version) DO NOTHING",
-        [&platform.as_str()],
+        [platform],
     )?;
     let dat: i64 = conn.query_row(
         "SELECT id FROM dat_versions WHERE dat_name = ?1 || ' test'",
-        [&platform.as_str()],
+        [platform],
         |r| r.get(0),
     )?;
     let title = rom_name.rsplit_once('.').map_or(rom_name, |(t, _)| t);
     conn.execute(
         "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
          VALUES (?1, ?2, ?3, ?3)",
-        params![platform.as_str(), dat, title],
+        params![platform, dat, title],
     )?;
     let title_id = TitleId::new(conn.last_insert_rowid());
     let flags: Vec<String> = flags.iter().map(|f| (*f).to_owned()).collect();
@@ -186,7 +185,7 @@ impl Dat {
         conn.execute(
             "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
              VALUES (?1, 'fixture', ?2, 'fixture.dat', 0, ?3)",
-            params![self.platform.as_str(), version.to_string(), i64::try_from(self.titles.len()).unwrap_or(i64::MAX)],
+            params![self.platform, version.to_string(), i64::try_from(self.titles.len()).unwrap_or(i64::MAX)],
         )?;
         let dat_version = DatVersionId::new(conn.last_insert_rowid());
         let mut written = Written {
@@ -198,7 +197,7 @@ impl Dat {
             conn.execute(
                 "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
                  VALUES (?1, ?2, ?3, ?3)",
-                params![self.platform.as_str(), dat_version, name],
+                params![self.platform, dat_version, name],
             )?;
             let title = TitleId::new(conn.last_insert_rowid());
             conn.execute("UPDATE titles SET parent_id = ?1 WHERE id = ?1", [title])?;

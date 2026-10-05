@@ -1,12 +1,12 @@
 //! The `downloads` reads the importer needs beyond [`super::downloads`]; see
 //! `docs/ARCHITECTURE.md` "Import".
 
+use mistarr_core::RomId;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::candidates::MatchConfidence;
 use super::ids::{DownloadId, SourceId, TitleId};
 use crate::error::Result;
-use mistarr_core::RomId;
 
 /// Every download of a title, oldest first.
 ///

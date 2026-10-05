@@ -7,11 +7,10 @@ use std::path::{Component, Path, PathBuf};
 
 use mistarr_core::hash::{hash_forms, hash_zip_member_forms, zip_members, HashError, HeaderRule};
 use mistarr_core::matching::{Payload, Rom};
-use mistarr_core::{Crc32, Hashes, Md5, Sha1};
+use mistarr_core::{Crc32, Hashes, Md5, RomId, Sha1};
 use mistarr_mister::PlaceRom;
 
 use crate::db::roms::EntryRom;
-use mistarr_core::RomId;
 
 /// Bytes of a staged payload handed to the adapter as its head.
 const HEAD_LEN: u64 = 16;

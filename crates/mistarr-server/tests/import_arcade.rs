@@ -8,8 +8,7 @@ use std::path::{Path, PathBuf};
 
 use common::{boot_with, config_in, eventually, get, request, Booted};
 use mistarr_core::hash::{hash_reader, HeaderRule, Md5Stream};
-use mistarr_core::PlatformId;
-use mistarr_core::RomId;
+use mistarr_core::{PlatformId, RomId};
 use mistarr_server::db::downloads::{self, DownloadState};
 use mistarr_server::db::files::{self, FileRow, FileState};
 use mistarr_server::db::ids::{DownloadId, SourceId, TitleId};

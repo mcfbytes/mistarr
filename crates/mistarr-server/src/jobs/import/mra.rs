@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use mistarr_core::matching::match_members;
+use mistarr_core::RomId;
 use mistarr_mister::adapter::arcade::assemble::PartSource as _;
 use mistarr_mister::adapter::arcade::mra::{
     self, zip_location, Mra, MraRom, Part, RomItem, ZipPath,
@@ -22,7 +23,6 @@ use crate::db::roms::{self, EntryRom};
 use crate::error::Result;
 use crate::jobs::arcade::{self, check_rom, same_zip, Check, ZipIndex, ZipSource};
 use crate::jobs::fsutil::is_zip;
-use mistarr_core::RomId;
 
 /// What the MRA says about a staged zip.
 #[derive(Debug, Clone, PartialEq, Eq)]

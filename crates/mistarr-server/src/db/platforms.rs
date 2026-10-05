@@ -114,7 +114,7 @@ pub fn list(conn: &Connection) -> Result<Vec<PlatformRow>> {
 pub fn find(conn: &Connection, id: &PlatformId) -> Result<Option<PlatformRow>> {
     conn.query_row(
         &format!("SELECT {COLUMNS} FROM platforms WHERE id = ?1"),
-        [&id.as_str()],
+        [id],
         from_row,
     )
     .optional()
@@ -139,7 +139,7 @@ pub fn set_core_present(conn: &Connection, present: &[PlatformId]) -> Result<()>
     {
         let mut stmt = conn.prepare("UPDATE platforms SET core_present = 1 WHERE id = ?1")?;
         for id in present {
-            stmt.execute([&id.as_str()])?;
+            stmt.execute([id])?;
         }
     }
     Ok(())
@@ -160,7 +160,7 @@ pub fn set_core_present(conn: &Connection, present: &[PlatformId]) -> Result<()>
 pub fn set_enabled(conn: &Connection, id: &PlatformId, enabled: bool) -> Result<bool> {
     let n = conn.execute(
         "UPDATE platforms SET enabled = ?2 WHERE id = ?1",
-        params![id.as_str(), enabled],
+        params![id, enabled],
     )?;
     Ok(n > 0)
 }

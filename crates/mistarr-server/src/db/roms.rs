@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 
-use mistarr_core::{Crc32, Hashes, Md5, PlatformId, Sha1};
+use mistarr_core::{Crc32, Hashes, Md5, PlatformId, RomId, Sha1};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
@@ -12,7 +12,6 @@ use super::ids::{FileId, TitleId};
 use super::sql;
 use super::titles::RomStatus;
 use crate::error::Result;
-use mistarr_core::RomId;
 
 /// A rom a hashed file matched, per `docs/VERIFICATION.md` "Matching order".
 #[derive(Debug, Clone, PartialEq)]
@@ -207,7 +206,7 @@ pub fn chd_rom_sized(conn: &Connection, platform_id: &PlatformId, size: i64) -> 
                WHERE r.size = ?2 AND t.platform_id = ?1 AND t.source = 'dat'
                  AND r.retired = 0 AND t.retired = 0 AND lower(r.name) LIKE '%.chd')",
         )?
-        .query_row(params![platform_id.as_str(), size], |r| r.get(0))?)
+        .query_row(params![platform_id, size], |r| r.get(0))?)
 }
 
 /// Whether any rom of this platform has this CRC32 and size, the pre-check
@@ -228,7 +227,7 @@ pub fn crc_candidate_exists(
            SELECT 1 FROM roms r JOIN titles t ON t.id = r.title_id
            WHERE t.platform_id = ?1 AND t.source = 'dat' AND r.crc32 = ?2 AND r.size = ?3)",
         )?
-        .query_row(params![platform_id.as_str(), crc32, size], |r| r.get(0))?)
+        .query_row(params![platform_id, crc32, size], |r| r.get(0))?)
 }
 
 /// Number of roms belonging to a title, for the disc all-or-nothing rule.
@@ -436,7 +435,7 @@ pub fn live_zip_roms(
          WHERE t.platform_id = ?1 AND t.source = 'mra' AND t.retired = 0 AND r.retired = 0
          ORDER BY r.id",
     )?;
-    let mut rows = stmt.query([&platform.as_str()])?;
+    let mut rows = stmt.query([platform])?;
     let mut out: HashMap<String, Vec<RomId>> = HashMap::new();
     while let Some(r) = rows.next()? {
         let (dir, name, id): (String, String, RomId) = (r.get(0)?, r.get(1)?, r.get(2)?);
