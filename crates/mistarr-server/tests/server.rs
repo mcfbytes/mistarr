@@ -2,7 +2,7 @@
 
 mod common;
 
-use common::{boot, boot_with, config_in, eventually, get, request, Sse};
+use common::{boot, boot_with, config_in, get, request, Sse};
 use mistarr_server::cli::Cli;
 use mistarr_server::db::files::FileState;
 use mistarr_server::db::ids::{FileId, SourceId, TitleId};
@@ -10,6 +10,7 @@ use mistarr_server::db::imports::ImportAction;
 use mistarr_server::db::sources::SourceState;
 use mistarr_server::db::{self, migrate, Db};
 use mistarr_server::events::{DatRejected, Event, FileChanged, ImportDone, SourceChanged};
+use mistarr_server::testing::eventually;
 use serde_json::json;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

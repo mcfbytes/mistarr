@@ -25,6 +25,15 @@ or a real infohash. Fixtures are generated. `mistarr-server`'s unit tests build
 every zip they need with `app::testutil::zip_bytes`, or `write_zip` to place one
 on disk.
 
+`mistarr-server`'s modules are crate-private except `app`, `config` and `cli`;
+the `test-support` feature, which its own dev-dependency turns on, makes them
+public for integration tests and doctests. `mistarr_server::testing` holds
+`eventually`, `eventually_within` and `eventually_blocking`, the only way a test
+waits for a state change; a fixed sleep stays only where a test proves nothing
+happens. Scratch directories come from `tempfile`. Integration tests share
+`tests/common`: the booted server and its HTTP client, and `json_of`,
+`wait_event`, `drop_file`, `md5_of`, `mra`, `bstr`, `variant` and `infohash`.
+
 ## 2. Integration tests: the synthetic set
 
 The `mistarr-fixture` crate builds everything at test time; nothing is

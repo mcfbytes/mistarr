@@ -7,12 +7,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use common::{
-    boot, boot_with_options, config_in, eventually, get, options_in, request, request_bytes,
-    Booted, Sse,
+    boot, boot_with_options, bstr, config_in, get, options_in, request, request_bytes, Booted, Sse,
 };
 use mistarr_clients::fake::{FakeResponse, FakeScgiServer, FakeServer, ScgiReply};
 use mistarr_clients::xmlrpc::Value as Xml;
 use mistarr_server::config::ClientChoice;
+use mistarr_server::testing::eventually;
 use serde_json::{json, Value};
 
 /// Transmission's answer to the existence check before start and stop.
@@ -23,10 +23,6 @@ fn exists() -> FakeResponse {
 /// A synthetic infohash of one repeated byte.
 fn hash(byte: u8) -> String {
     format!("{byte:02x}").repeat(20)
-}
-
-fn bstr(s: &str) -> String {
-    format!("{}:{s}", s.len())
 }
 
 /// A synthetic multi-file `.torrent` whose files sit under a subdirectory.

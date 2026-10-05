@@ -5,13 +5,17 @@
 use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use mistarr_core::hash::Md5Stream;
 use mistarr_server::app::{self, Options, Running};
 use mistarr_server::config::Config;
+use mistarr_server::events::{EventKind, Message};
+use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpSocket, TcpStream};
+use tokio::sync::broadcast;
 
 pub struct Booted {
     pub dir: tempfile::TempDir,
@@ -294,17 +298,80 @@ impl Sse {
     }
 }
 
-/// Polls `f` until it returns true, failing after five seconds.
-pub async fn eventually<F, Fut>(what: &str, mut f: F)
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    for _ in 0..250 {
-        if f().await {
-            return;
+/// Writes under a dotfile name and renames, as a copy tool that finishes would.
+pub fn drop_file(dir: &Path, name: &str, bytes: &[u8]) {
+    let part = dir.join(format!(".{name}.part"));
+    std::fs::write(&part, bytes).expect("write");
+    std::fs::rename(part, dir.join(name)).expect("rename");
+}
+
+/// Waits for an event of `kind` whose data contains `needle`, and returns its data.
+pub async fn wait_event(
+    rx: &mut broadcast::Receiver<Arc<Message>>,
+    kind: EventKind,
+    needle: &str,
+) -> Value {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let e = tokio::time::timeout_at(deadline, rx.recv())
+            .await
+            .unwrap_or_else(|_| panic!("no {kind:?} with {needle:?}"))
+            .expect("event");
+        if e.kind == kind && e.data.contains(needle) {
+            return serde_json::from_str(&e.data).expect("json");
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    panic!("timed out waiting for {what}");
+}
+
+/// GETs `path` and returns its JSON body, asserting a 200.
+pub async fn json_of(addr: SocketAddr, path: &str) -> Value {
+    let r = get(addr, path).await;
+    assert_eq!(r.status, 200, "{path}: {}", r.body);
+    r.json()
+}
+
+/// The MD5 of `parts` read as one stream.
+pub fn md5_of(parts: &[&[u8]]) -> mistarr_core::Md5 {
+    let mut m = Md5Stream::new();
+    for p in parts {
+        m.update(p);
+    }
+    m.finish()
+}
+
+/// A MiSTer Recorder description of set `setname` with `roms` as its body.
+pub fn mra(name: &str, setname: &str, roms: &str) -> Vec<u8> {
+    format!(
+        "<?xml version=\"1.0\"?>\n<misterromdescription>\n  <name>{name}</name>\n  \
+         <setname>{setname}</setname>\n  <rbf>excore</rbf>\n{roms}\n</misterromdescription>\n"
+    )
+    .into_bytes()
+}
+
+/// A bencoded byte string.
+pub fn bstr(s: &str) -> String {
+    format!("{}:{s}", s.len())
+}
+
+/// The variant of `detail` called `name`.
+pub fn variant<'a>(detail: &'a Value, name: &str) -> &'a Value {
+    detail["variants"]
+        .as_array()
+        .expect("variants")
+        .iter()
+        .find(|v| v["name"] == name)
+        .unwrap_or_else(|| panic!("no variant {name} in {detail}"))
+}
+
+/// The variant of `detail` with title id `id`.
+pub fn variant_by_id(detail: &Value, id: i64) -> &Value {
+    detail["variants"]
+        .as_array()
+        .and_then(|v| v.iter().find(|v| v["id"] == id))
+        .unwrap_or_else(|| panic!("variant {id} in {detail}"))
+}
+
+/// A fixed, synthetic infohash in hex.
+pub fn infohash() -> String {
+    "0b".repeat(20)
 }

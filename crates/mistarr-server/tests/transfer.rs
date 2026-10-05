@@ -5,7 +5,7 @@ mod common;
 use std::fmt::Write as _;
 use std::time::Duration;
 
-use common::{boot_with, config_in, eventually, get, request, Booted};
+use common::{boot_with, bstr, config_in, get, request, Booted};
 use mistarr_clients::fake::{FakeResponse, FakeScgiServer, FakeServer, ScgiReply};
 use mistarr_clients::xmlrpc::Value as Xml;
 use mistarr_server::config::ClientChoice;
@@ -15,12 +15,9 @@ use mistarr_server::db::sql::Page;
 use mistarr_server::events::{EventKind, Message};
 use mistarr_server::jobs::watch::poll::{Cadence, Poller};
 use mistarr_server::jobs::{Job, JobContext, JobKind, Lane, Scheduler};
+use mistarr_server::testing::eventually;
 use serde_json::{json, Value};
 use tokio::sync::broadcast::Receiver;
-
-fn bstr(s: &str) -> String {
-    format!("{}:{s}", s.len())
-}
 
 /// A synthetic multi-file `.torrent` whose files sit under `NES/`.
 fn torrent(name: &str, files: &[(&str, u64)]) -> Vec<u8> {

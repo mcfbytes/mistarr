@@ -5,16 +5,15 @@ mod common;
 use std::fmt::Write as _;
 use std::io::{Cursor, Write as _};
 use std::net::SocketAddr;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use common::{boot, eventually, get, request, Booted};
-use mistarr_server::events::{EventKind, Message};
+use common::{boot, drop_file, get, json_of, request, variant, wait_event, Booted};
+use mistarr_server::events::EventKind;
+use mistarr_server::testing::eventually;
 use serde_json::{json, Value};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::broadcast;
 
 /// A Logiqx DAT; each game is `(name, roms)`.
 fn dat(name: &str, version: &str, games: &[(&str, &[&str])]) -> String {
@@ -55,37 +54,6 @@ fn dats_dir(b: &Booted) -> std::path::PathBuf {
     b.dir.path().join("data/dats")
 }
 
-/// Writes under a dotfile name and renames, as a copy tool that finishes would.
-fn drop_file(dir: &Path, name: &str, bytes: &[u8]) {
-    let part = dir.join(format!(".{name}.part"));
-    std::fs::write(&part, bytes).expect("write");
-    std::fs::rename(part, dir.join(name)).expect("rename");
-}
-
-/// Waits for an event of `kind` whose data contains `needle`.
-async fn wait_event(
-    rx: &mut broadcast::Receiver<Arc<Message>>,
-    kind: EventKind,
-    needle: &str,
-) -> Value {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    loop {
-        let e = tokio::time::timeout_at(deadline, rx.recv())
-            .await
-            .unwrap_or_else(|_| panic!("no {kind:?} with {needle:?}"))
-            .expect("event");
-        if e.kind == kind && e.data.contains(needle) {
-            return serde_json::from_str(&e.data).expect("json");
-        }
-    }
-}
-
-async fn json_of(addr: SocketAddr, path: &str) -> Value {
-    let r = get(addr, path).await;
-    assert_eq!(r.status, 200, "{path}: {}", r.body);
-    r.json()
-}
-
 async fn send(addr: SocketAddr, method: &str, path: &str, body: &str) -> common::Response {
     request(addr, method, path, &[], Some(body)).await
 }
@@ -97,15 +65,6 @@ fn names(page: &Value) -> Vec<String> {
         .iter()
         .map(|i| i["base_name"].as_str().expect("name").to_owned())
         .collect()
-}
-
-fn variant<'a>(detail: &'a Value, name: &str) -> &'a Value {
-    detail["variants"]
-        .as_array()
-        .expect("variants")
-        .iter()
-        .find(|v| v["name"] == name)
-        .unwrap_or_else(|| panic!("no variant {name}"))
 }
 
 /// Posts one file as `multipart/form-data`.

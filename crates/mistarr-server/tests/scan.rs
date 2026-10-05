@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 use std::io::Cursor;
 use std::path::Path;
 
-use common::{boot_with, config_in, eventually, request, Sse};
+use common::{boot_with, config_in, request, Sse};
 use mistarr_core::hash::{hash_reader, HeaderRule};
 use mistarr_core::{Crc32, Hashes, PlatformId};
 use mistarr_server::db::files::{self, FileState, NewFile};
@@ -17,6 +17,7 @@ use mistarr_server::db::jobs::{self as job_rows, JobState};
 use mistarr_server::db::scan_progress;
 use mistarr_server::db::titles::RomStatus;
 use mistarr_server::jobs::JobKind;
+use mistarr_server::testing::eventually;
 
 fn write(path: &Path, data: &[u8]) {
     std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");

@@ -21,6 +21,7 @@ use mistarr_server::db::titles::RomStatus;
 use mistarr_server::events::EventKind;
 use mistarr_server::jobs::watch::gate::Override;
 use mistarr_server::jobs::{JobKind, Lane};
+use mistarr_server::testing::eventually_within;
 use serde_json::json;
 use tokio::sync::broadcast::error::TryRecvError;
 
@@ -123,18 +124,6 @@ async fn put_setting(b: &Booted, on: bool) {
     assert_eq!(r.json()["scan"]["chd_tracks"], on);
 }
 
-async fn wait_for<F, Fut>(what: &str, mut f: F)
-where
-    F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = bool>,
-{
-    let start = Instant::now();
-    while !f().await {
-        assert!(start.elapsed() < WAIT, "timed out waiting for {what}");
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-}
-
 async fn count(app: &AppState, sql: &str) -> i64 {
     let sql = sql.to_owned();
     app.db
@@ -145,7 +134,7 @@ async fn count(app: &AppState, sql: &str) -> i64 {
 
 /// Waits until no job is queued, running or paused.
 async fn idle(app: &AppState) {
-    wait_for("the queues to drain", || async {
+    eventually_within("the queues to drain", WAIT, || async {
         count(
             app,
             &format!(
@@ -166,7 +155,7 @@ async fn scan(b: &Booted, platform: &str) {
     assert_eq!(r.status, 202, "{}", r.body);
     let id = JobId::new(r.json()["job_id"].as_i64().expect("job_id"));
     let app = &b.running.app;
-    wait_for("the scan", || async move {
+    eventually_within("the scan", WAIT, || async move {
         app.db
             .read(move |c| job_rows::get(c, id))
             .await
@@ -433,7 +422,7 @@ async fn load_dat_in_background(b: &Booted, file: &str, xml: &str) {
     mistarr_server::jobs::Scheduler::enqueue(app, job)
         .await
         .expect("enqueue");
-    wait_for("the background lane", || async {
+    eventually_within("the background lane", WAIT, || async {
         count(
             app,
             &format!(
@@ -455,7 +444,7 @@ async fn load_dat(b: &Booted, file: &str, xml: &str) {
     let id = mistarr_server::jobs::Scheduler::enqueue(app, job)
         .await
         .expect("enqueue");
-    wait_for("the DAT import", || async move {
+    eventually_within("the DAT import", WAIT, || async move {
         app.db
             .read(move |c| job_rows::get(c, id))
             .await
@@ -611,7 +600,7 @@ async fn decoding(app: &AppState, file: &str) -> JobId {
 }
 
 async fn wait_state(app: &AppState, id: JobId, want: JobState) {
-    wait_for("the job state", || async move {
+    eventually_within("the job state", WAIT, || async move {
         app.db
             .read(move |c| job_rows::get(c, id))
             .await
@@ -645,7 +634,7 @@ async fn a_held_gate_pauses_decoding_and_turning_off_stops_it() {
         "paused mid-image"
     );
     app.gate.set_override(None);
-    wait_for("the first image", || async {
+    eventually_within("the first image", WAIT, || async {
         row(app, "psx", "PSX/L/l.chd#01").await.is_some()
     })
     .await;
@@ -708,7 +697,7 @@ async fn a_recheck_while_decoding_is_paused_joins_the_run() {
     mistarr_server::jobs::Scheduler::enqueue(app, recompute)
         .await
         .expect("enqueue");
-    wait_for("the recheck", || async {
+    eventually_within("the recheck", WAIT, || async {
         row(app, "psx", "PSX/A/a.chd")
             .await
             .is_some_and(|r| r.reason.as_deref() == Some("pending"))
