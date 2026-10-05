@@ -1,6 +1,5 @@
 <script lang="ts">
-  import { cancelFetch, fetchToken } from './fetch';
-  import { isCancelling } from './stores/jobs.svelte';
+  import { cancelFetch, fetchToken, isCancelling } from './fetch';
   import type { Job } from './types';
 
   /** A URL fetch's Cancel button, disabled and saying so while the cancel is pending. */

@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
+  import { SvelteSet } from 'svelte/reactivity';
   import { api, errorMessage } from './api';
-  import { getIncoming, loadIncoming, patchIncoming, scheduleIncoming, type Watched } from './stores/incoming.svelte';
+  import { incoming, patchIncoming, type Watched } from './stores/incoming.svelte';
   import { addUpload, dismissUpload, getUploads } from './stores/uploads.svelte';
-  import { getFinishedJob, getJobs } from './stores/jobs.svelte';
+  import { getFinishedJob, jobs } from './stores/jobs.svelte';
   import { showToast } from './stores/toast.svelte';
   import { describeProgress, incomingStatus, jobStatus, type Shown } from './status';
   import StatusPill from './StatusPill.svelte';
@@ -17,15 +18,15 @@
   let { which, manage = false }: { which: Watched; manage?: boolean } = $props();
 
   let confirming = $state<string | null>(null);
-  let busy = $state<Set<string>>(new Set());
+  const busy = new SvelteSet<string>();
   let announcement = $state('');
   let list = $state<HTMLUListElement>();
 
   onMount(() => {
-    void loadIncoming(which).catch(() => undefined);
+    void incoming(which).load();
   });
 
-  const files = $derived(getIncoming(which));
+  const files = $derived(incoming(which).items);
   const pendingNames = $derived(new Set(files.map((f) => f.file)));
   const uploads = $derived(getUploads(which).filter((u) => !pendingNames.has(u.file)));
   const canManage = $derived(manage && which === 'dats');
@@ -36,7 +37,7 @@
 
   /** A running file's progress: the job store's live value, else the list's. */
   function progressOf(f: IncomingFile): Record<string, unknown> | null {
-    const job = f.job_id === null ? undefined : getJobs().find((j) => j.id === f.job_id);
+    const job = f.job_id === null ? undefined : jobs.items.find((j) => j.id === f.job_id);
     return job?.progress ?? f.progress;
   }
 
@@ -52,7 +53,7 @@
     if (done?.state === 'failed') {
       return { shown: { status: 'failed', label: 'Failed' }, text: 'See Activity for the reason' };
     }
-    const open = jobId === null ? undefined : getJobs().find((j) => j.id === jobId);
+    const open = jobId === null ? undefined : jobs.items.find((j) => j.id === jobId);
     if (open) {
       return { shown: jobStatus(open), text: open.reason ?? '' };
     }
@@ -60,10 +61,6 @@
       return { shown: { status: 'done', label: 'Finished' }, text: 'The lists below show the result' };
     }
     return { shown: { status: 'waiting', label: 'Received' }, text: reason ?? 'Waiting for the import to start' };
-  }
-
-  function setBusy(file: string, on: boolean): void {
-    busy = new Set(on ? [...busy, file] : [...busy].filter((f) => f !== file));
   }
 
   // Focuses the button `action` of the row for `file` once the list has re-rendered.
@@ -89,39 +86,43 @@
     void focusOn(f.file, 'delete');
   }
 
-  // Moves the file back into dats/; the list shows it waiting until the next read.
-  async function retry(f: IncomingFile): Promise<void> {
-    setBusy(f.file, true);
+  // Runs `call` with the file's buttons disabled; the failure is toasted and announced.
+  async function working<T>(f: IncomingFile, call: () => Promise<T>): Promise<T | undefined> {
+    busy.add(f.file);
     try {
-      const up = await api.retryRejectedDat(f.file);
-      addUpload({ kind: which, file: up.file, jobId: up.job_id, reason: up.reason });
-      patchIncoming(which, f.file, null);
-      patchIncoming(which, up.file, up);
-      scheduleIncoming(which);
-      announcement = `${f.file} queued to load again.`;
-      await focusList();
+      return await call();
     } catch (err) {
       showToast(`${f.file}: ${errorMessage(err)}`);
       announcement = `${f.file}: ${errorMessage(err)}`;
+      return undefined;
     } finally {
-      setBusy(f.file, false);
+      busy.delete(f.file);
+    }
+  }
+
+  // Moves the file back into dats/; the list shows it waiting until the next read.
+  async function retry(f: IncomingFile): Promise<void> {
+    const since = Date.now();
+    const up = await working(f, () => api.retryRejectedDat(f.file));
+    if (up) {
+      addUpload({ kind: which, file: up.file, jobId: up.job_id, reason: up.reason }, since);
+      patchIncoming(which, f.file, null);
+      patchIncoming(which, up.file, up);
+      incoming(which).reloadSoon();
+      announcement = `${f.file} queued to load again.`;
+      await focusList();
     }
   }
 
   async function remove(f: IncomingFile): Promise<void> {
     confirming = null;
-    setBusy(f.file, true);
-    try {
-      await api.deleteRejectedDat(f.file);
+    const done = await working(f, () => api.deleteRejectedDat(f.file).then(() => true));
+    if (done) {
       patchIncoming(which, f.file, null);
       announcement = `${f.file} deleted.`;
       await focusList();
-    } catch (err) {
-      showToast(`${f.file}: ${errorMessage(err)}`);
-      announcement = `${f.file}: ${errorMessage(err)}`;
+    } else {
       void focusOn(f.file, 'delete');
-    } finally {
-      setBusy(f.file, false);
     }
   }
 </script>

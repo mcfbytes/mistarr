@@ -1,45 +1,34 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
-  import { findPlatform, getPlatforms, loadPlatforms, patchPlatform } from '../lib/stores/platforms.svelte';
-  import { getJobs, trackScan } from '../lib/stores/jobs.svelte';
-  import { describeProgress, jobStatus } from '../lib/status';
+  import { findPlatform, followedScans, platforms } from '../lib/stores/platforms.svelte';
+  import { followJob, jobs } from '../lib/stores/jobs.svelte';
+  import { attempt, optimistic } from '../lib/actions';
+  import { describeProgress, jobOutcome, jobStatus } from '../lib/status';
   import StatusPill from '../lib/StatusPill.svelte';
   import ProgressBar from '../lib/ProgressBar.svelte';
   import { platformUrl } from '../lib/router.svelte';
-  import { api, errorMessage } from '../lib/api';
+  import { api } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
   import SetupHints from '../lib/SetupHints.svelte';
   import PlatformArt from '../lib/PlatformArt.svelte';
   import UnidentifiedList from '../lib/UnidentifiedList.svelte';
   import type { Job, PlatformCounts } from '../lib/types';
 
-  let platformsError = $state<string | null>(null);
-
-  async function loadPlatformsList(): Promise<void> {
-    try {
-      await loadPlatforms();
-      platformsError = null;
-    } catch (err) {
-      platformsError = errorMessage(err);
-    }
-  }
-
   onMount(() => {
-    void loadPlatformsList();
+    void platforms.load();
   });
 
-  const platforms = $derived(getPlatforms());
-  const present = $derived(platforms.filter((p) => p.core_present && p.enabled));
-  const absent = $derived(platforms.filter((p) => !p.core_present));
-  const disabled = $derived(platforms.filter((p) => p.core_present && !p.enabled));
+  const present = $derived(platforms.items.filter((p) => p.core_present && p.enabled));
+  const absent = $derived(platforms.items.filter((p) => !p.core_present));
+  const disabled = $derived(platforms.items.filter((p) => p.core_present && !p.enabled));
 
   const scanning = new SvelteSet<string>();
 
   // The open scan of each platform, shown on its card.
   const scans: Map<string, Job> = $derived(
     new Map(
-      getJobs()
+      jobs.items
         .filter((j) => j.kind === 'scan' && typeof j.payload.platform_id === 'string')
         .map((j) => [j.payload.platform_id as string, j])
     )
@@ -70,37 +59,42 @@
       return;
     }
     scanning.add(id);
-    try {
-      const queued = await api.scan(id);
-      showToast(`Scan of ${platformName(id)} queued`, 'info');
-      const jobId = queued.job_id ?? queued.arcade_job_id;
-      if (jobId != null) {
-        trackScan(jobId, id);
-      }
-    } catch (err) {
-      showToast(errorMessage(err));
-    } finally {
-      scanning.delete(id);
+    const queued = await attempt(() => api.scan(id));
+    scanning.delete(id);
+    if (!queued) {
+      return;
+    }
+    showToast(`Scan of ${platformName(id)} queued`, 'info');
+    const jobId = queued.job_id ?? queued.arcade_job_id;
+    if (jobId != null && !followedScans.has(jobId)) {
+      followedScans.add(jobId);
+      followJob(
+        (end) => end.id === jobId,
+        (end) => {
+          followedScans.delete(jobId);
+          const text = jobOutcome({ ...end, kind: 'scan', payload: { platform_id: id } }, platformName);
+          showToast(text, end.state === 'done' ? 'success' : 'error');
+        }
+      );
     }
   }
 
   async function setEnabled(id: string, enabled: boolean): Promise<void> {
-    patchPlatform(id, { enabled });
-    try {
-      await api.setPlatform(id, enabled);
-    } catch (err) {
-      patchPlatform(id, { enabled: !enabled });
-      showToast(errorMessage(err));
-    }
+    await optimistic({
+      apply: () => platforms.patch(id, { enabled }),
+      revert: () => platforms.patch(id, { enabled: !enabled }),
+      call: () => api.setPlatform(id, enabled)
+    });
   }
 </script>
 
 <div class="page">
   <h1>Platforms</h1>
   <SetupHints />
-  {#if platformsError}
-    <p role="alert">{platformsError} <button type="button" onclick={() => void loadPlatformsList()}>Retry</button></p>
-  {:else}
+  {#if platforms.error}
+    <p role="alert">{platforms.error} <button type="button" onclick={() => void platforms.load()}>Retry</button></p>
+  {/if}
+  {#if platforms.loaded || !platforms.error}
     <div class="grid">
       {#each present as platform (platform.id)}
         {@const job = scans.get(platform.id)}

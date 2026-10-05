@@ -1,37 +1,26 @@
 import { api } from '../api';
-import { readAllPages } from '../paging';
+import { DELAY_MS } from '../coalesce';
 import type { IncomingFile } from '../types';
+import { ListStore } from './list.svelte';
 
 export type Watched = 'dats' | 'sources';
 
-let lists = $state<Record<Watched, IncomingFile[]>>({ dats: [], sources: [] });
-const timers: Record<Watched, ReturnType<typeof setTimeout> | undefined> = { dats: undefined, sources: undefined };
+// Events arrive in bursts while a pack loads; one re-read per burst is enough.
+const reload = { ms: DELAY_MS.incoming };
 
-export function getIncoming(which: Watched): IncomingFile[] {
+const lists: Record<Watched, ListStore<IncomingFile>> = {
+  dats: new ListStore((limit, offset) => api.datsIncoming(limit, offset), (f) => f.file, { reload }),
+  sources: new ListStore((limit, offset) => api.sourcesIncoming(limit, offset), (f) => f.file, { reload })
+};
+
+/** The files waiting in `dats/` or `sources/`. */
+export function incoming(which: Watched): ListStore<IncomingFile> {
   return lists[which];
-}
-
-export async function loadIncoming(which: Watched): Promise<void> {
-  const items =
-    which === 'dats'
-      ? await readAllPages((limit, offset) => api.datsIncoming(limit, offset), (f) => f.file)
-      : await readAllPages((limit, offset) => api.sourcesIncoming(limit, offset), (f) => f.file);
-  lists = { ...lists, [which]: items };
 }
 
 /** Replaces or removes one listed file until the next read of the list. */
 export function patchIncoming(which: Watched, file: string, next: IncomingFile | null): void {
-  const rest = lists[which].filter((f) => f.file !== file);
-  lists = { ...lists, [which]: next ? [next, ...rest] : rest };
-}
-
-// Events arrive in bursts while a pack loads; one re-read per burst is enough.
-export function scheduleIncoming(which: Watched): void {
-  if (timers[which]) {
-    return;
-  }
-  timers[which] = setTimeout(() => {
-    timers[which] = undefined;
-    void loadIncoming(which).catch(() => undefined);
-  }, 300);
+  const store = lists[which];
+  const rest = store.items.filter((f) => f.file !== file);
+  store.items = next ? [next, ...rest] : rest;
 }

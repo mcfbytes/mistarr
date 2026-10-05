@@ -250,14 +250,14 @@ but the browsed platforms. The plan test, the browse benchmark, the random
 write test and `mistarr bench-seed` all use it.
 
 `crates/mistarr-server/tests/browse.rs` seeds the full catalogue and checks
-the default page equals the reference aggregation query's and is at least
-five times faster. It then times every search shape (`titles::SearchShape`)
+the default page equals the reference aggregation query's and is at least five
+times faster. It then times every search shape (`titles::browse::SearchShape`)
 on the NES, SNES and PSX sets for a rare word, common trigrams, two-letter
 terms below the trigram length, a word common elsewhere but rare on the
-browsed platform, and no search, asserts every shape returns the same page
-and total, and prints the table. The default shape's worst case must stay
-under 100 ms, in debug builds too. Host timings do not rank the shapes the
-way the board does, so the default follows the real-DAT board numbers in
+browsed platform, and no search, asserts every shape returns the same page and
+total, and prints the table. The default shape's worst case must stay under
+100 ms, in debug builds too. Host timings do not rank the shapes the way the
+board does, so the default follows the real-DAT board numbers in
 ARCHITECTURE.md "Resource budgets", and the plan tests assert it asks
 `title_search` for the platform's phrase:
 
@@ -316,6 +316,11 @@ set with `setMockKnob` in `web/e2e/helpers.ts`, and push SSE events with
 - `settingsFail`: `true` makes the settings load fail.
 - `sourceCount` and `pageCap`: synthetic extra sources, and a smaller page cap
   so a store reads several pages.
+- `noSources` and `noDats`: `true` starts the mock with none of them.
+- `scanJobId`: the job id the mock's `POST /platforms/{id}/scan` answers with, so a
+  test can end it with a `job.progress` event; unset answers no job.
+- `platformsFail`: `true` makes reading platforms fail.
+- `setPlatformFail`: `true` makes enabling or disabling a platform fail.
 - `savedSettings`: written by the mock with the last settings it was sent.
 - `titlesSettled`: written by the mock, how many title requests per `search#page`
   it has answered or cut short, so a test can wait out a slow one.

@@ -1,5 +1,6 @@
-import { api, errorMessage } from './api';
-import { scheduleIncoming, type Watched } from './stores/incoming.svelte';
+import { attempt } from './actions';
+import { api } from './api';
+import { incoming, type Watched } from './stores/incoming.svelte';
 import { showToast } from './stores/toast.svelte';
 import { addUpload } from './stores/uploads.svelte';
 import { uploadNoun } from './status';
@@ -15,11 +16,11 @@ export function receivedText(up: Pick<IncomingFile, 'file' | 'state' | 'reason'>
   return `${uploadNoun(up.file)} received: ${up.file}. ${next}`;
 }
 
-/** Follows a received file as a session upload and says so. */
-export function received(which: Watched, up: IncomingFile): void {
-  addUpload({ kind: which, file: up.file, jobId: up.job_id, reason: up.reason });
+/** Follows a received file as a session upload and says so; `since` is when its request began. */
+export function received(which: Watched, up: IncomingFile, since: number): void {
+  addUpload({ kind: which, file: up.file, jobId: up.job_id, reason: up.reason }, since);
   showToast(receivedText(up), 'info');
-  scheduleIncoming(which);
+  incoming(which).reloadSoon();
 }
 
 /**
@@ -29,11 +30,10 @@ export function received(which: Watched, up: IncomingFile): void {
 export async function uploadFiles(which: Watched, input: HTMLInputElement | undefined): Promise<void> {
   const files = Array.from(input?.files ?? []);
   for (const file of files) {
-    try {
-      const up = which === 'dats' ? await api.uploadDat(file) : await api.uploadSource(file);
-      received(which, up);
-    } catch (err) {
-      showToast(`${file.name}: ${errorMessage(err)}`, 'error');
+    const since = Date.now();
+    const up = await attempt(() => (which === 'dats' ? api.uploadDat(file) : api.uploadSource(file)), `${file.name}: `);
+    if (up) {
+      received(which, up, since);
     }
   }
   if (input) {
@@ -43,12 +43,10 @@ export async function uploadFiles(which: Watched, input: HTMLInputElement | unde
 
 /** Sends a magnet link; true when the server took it. */
 export async function addMagnet(uri: string): Promise<boolean> {
-  try {
-    const up = await api.addMagnet(uri);
-    received('sources', up);
-    return true;
-  } catch (err) {
-    showToast(errorMessage(err), 'error');
-    return false;
+  const since = Date.now();
+  const up = await attempt(() => api.addMagnet(uri));
+  if (up) {
+    received('sources', up, since);
   }
+  return up !== undefined;
 }

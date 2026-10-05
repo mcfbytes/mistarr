@@ -11,6 +11,8 @@ import type {
   Launched,
   Paged,
   Platform,
+  ScanQueued,
+  SeedPolicy,
   Settings,
   SettingsPatch,
   Source,
@@ -18,6 +20,7 @@ import type {
   SourceFile,
   SourceFileFilter,
   SourcePreview,
+  SourceState,
   SourceUpdated,
   UnidentifiedFile,
   SseEvent,
@@ -51,10 +54,10 @@ export function setApiKey(key: string | null): void {
   }
 }
 
-function headers(isFormData: boolean, extra?: Record<string, string>): Record<string, string> {
+function headers(json: boolean, extra?: Record<string, string>): Record<string, string> {
   const key = getApiKey();
   return {
-    ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
+    ...(json ? { 'Content-Type': 'application/json' } : {}),
     'X-Mistarr': '1',
     ...(key ? { 'X-Api-Key': key } : {}),
     ...extra
@@ -80,7 +83,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const isFormData = init?.body instanceof FormData;
   const res = await fetch(`${BASE}${path}`, {
     ...init,
-    headers: { ...headers(isFormData), ...(init?.headers as Record<string, string> | undefined) }
+    headers: { ...headers(!isFormData), ...(init?.headers as Record<string, string> | undefined) }
   });
   if (!res.ok) {
     const body = (await res.json().catch(() => null)) as { error?: { code: string; message: string } } | null;
@@ -103,19 +106,10 @@ function query(params: Record<string, string | number | boolean | undefined>): s
   return s ? `?${s}` : '';
 }
 
-/** An upload's answer: the file as the incoming list shows it; see docs/API.md "Upload answers". */
-export type Uploaded = IncomingFile;
-
-export interface Binding {
-  dat_version_id: number;
-  platform_id: string;
-  job_id: number;
-}
-
 export const api = {
   status: (): Promise<SystemStatus> => request('/system/status'),
   wizard: (): Promise<WizardStatus> => request('/system/wizard'),
-  scan: (platformId?: string): Promise<{ job_id: number | null; arcade_job_id?: number }> =>
+  scan: (platformId?: string): Promise<ScanQueued> =>
     request('/system/scan', { method: 'POST', body: JSON.stringify({ platform_id: platformId }) }),
   cores: (): Promise<CoresResult> => request('/system/cores', { method: 'POST' }),
   pause: (): Promise<SystemStatus> => request('/system/pause', { method: 'POST' }),
@@ -140,8 +134,6 @@ export const api = {
     request(`/platforms/${id}/unidentified${query({ offset, limit })}`),
   setPlatform: (id: string, enabled: boolean): Promise<Platform> =>
     request(`/platforms/${id}`, { method: 'PUT', body: JSON.stringify({ enabled }) }),
-  bindPlatformDat: (id: string, datVersionId: number): Promise<Binding> =>
-    request(`/platforms/${id}/dat`, { method: 'POST', body: JSON.stringify({ dat_version_id: datVersionId }) }),
   launchCore: (id: string): Promise<Launched> => request(`/platforms/${id}/launch-core`, { method: 'POST' }),
 
   titles: (
@@ -162,30 +154,30 @@ export const api = {
 
   dats: (limit: number, offset: number): Promise<Paged<DatVersion>> =>
     request(`/dats${query({ limit, offset })}`),
-  uploadDat: (file: File): Promise<Uploaded> => {
+  uploadDat: (file: File): Promise<IncomingFile> => {
     const form = new FormData();
     form.append('file', file);
     return request('/dats/upload', { method: 'POST', body: form });
   },
   deleteDat: (id: number): Promise<void> => request(`/dats/${id}`, { method: 'DELETE' }),
-  retryRejectedDat: (file: string): Promise<Uploaded> =>
+  retryRejectedDat: (file: string): Promise<IncomingFile> =>
     request(`/dats/rejected/${encodeURIComponent(file)}/retry`, { method: 'POST' }),
   deleteRejectedDat: (file: string): Promise<void> =>
     request(`/dats/rejected/${encodeURIComponent(file)}`, { method: 'DELETE' }),
 
   sources: (limit: number, offset: number): Promise<Paged<Source>> => request(`/sources${query({ limit, offset })}`),
-  uploadSource: (file: File): Promise<Uploaded> => {
+  uploadSource: (file: File): Promise<IncomingFile> => {
     const form = new FormData();
     form.append('file', file);
     return request('/sources/upload', { method: 'POST', body: form });
   },
-  addMagnet: (magnet: string): Promise<Uploaded> =>
+  addMagnet: (magnet: string): Promise<IncomingFile> =>
     request('/sources/upload', { method: 'POST', body: JSON.stringify({ magnet }) }),
   fetchUrl: (url: string): Promise<FetchStarted> => request('/fetch', { method: 'POST', body: JSON.stringify({ url }) }),
   cancelFetch: (token: number): Promise<void> => request(`/fetch/${token}`, { method: 'DELETE' }),
   updateSource: (
     id: number,
-    patch: { platform_id?: string | null; binding?: 'automatic'; seed_policy?: string; state?: string }
+    patch: { platform_id?: string | null; binding?: 'automatic'; seed_policy?: SeedPolicy; state?: SourceState }
   ): Promise<SourceUpdated> => request(`/sources/${id}`, { method: 'PUT', body: JSON.stringify(patch) }),
   deleteSource: (id: number): Promise<void> => request(`/sources/${id}`, { method: 'DELETE' }),
   source: (id: number): Promise<SourceDetail> => request(`/sources/${id}`),
@@ -255,16 +247,9 @@ export class EventSubscriber implements EventStream {
       return;
     }
     this.controller = new AbortController();
-    const key = getApiKey();
-    const reqHeaders: Record<string, string> = {};
-    if (this.lastEventId) {
-      reqHeaders['Last-Event-ID'] = this.lastEventId;
-    }
-    if (key) {
-      reqHeaders['X-Api-Key'] = key;
-    }
+    const resume = this.lastEventId ? { 'Last-Event-ID': this.lastEventId } : undefined;
     try {
-      const res = await fetch(`${BASE}/events`, { headers: reqHeaders, signal: this.controller.signal });
+      const res = await fetch(`${BASE}/events`, { headers: headers(false, resume), signal: this.controller.signal });
       if (!res.ok || !res.body) {
         throw new Error(`events stream failed: ${res.status}`);
       }

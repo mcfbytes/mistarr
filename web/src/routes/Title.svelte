@@ -7,10 +7,11 @@
     loadTitleDetail,
     setDetail
   } from '../lib/stores/titles.svelte';
-  import { api, errorMessage } from '../lib/api';
+  import { attempt } from '../lib/actions';
+  import { api } from '../lib/api';
   import { showToast } from '../lib/stores/toast.svelte';
   import { getStatus, loadStatus } from '../lib/stores/status.svelte';
-  import { findPlatform, loadPlatforms, platformsLoaded } from '../lib/stores/platforms.svelte';
+  import { findPlatform, platforms } from '../lib/stores/platforms.svelte';
   import { canPlay, launchBlocker } from '../lib/launch';
   import { availabilityLine } from '../lib/availability';
   import { chdMemberLabel } from '../lib/unidentified';
@@ -60,55 +61,24 @@
       });
     }
     // A miss leaves platform kind/core-missing unknown until the next resync.
-    if (!platformsLoaded()) {
-      void loadPlatforms().catch(() => undefined);
-    }
+    void platforms.ensure();
   });
 
-  async function play(variantId: number): Promise<void> {
+  // Disables the buttons while `call` is out; a failure is toasted.
+  async function working(call: () => Promise<void>): Promise<void> {
     busy = true;
-    try {
+    await attempt(call);
+    busy = false;
+  }
+
+  const play = (variantId: number): Promise<void> =>
+    working(async () => {
       await api.launchTitle(variantId);
       showToast('Started on the MiSTer.', 'success');
-    } catch (err) {
-      showToast(errorMessage(err));
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function want(variantId: number): Promise<void> {
-    busy = true;
-    try {
-      setDetail(await api.want(titleId, variantId));
-    } catch (err) {
-      showToast(errorMessage(err));
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function unwant(): Promise<void> {
-    busy = true;
-    try {
-      setDetail(await api.unwant(titleId));
-    } catch (err) {
-      showToast(errorMessage(err));
-    } finally {
-      busy = false;
-    }
-  }
-
-  async function rename(fileId: number): Promise<void> {
-    busy = true;
-    try {
-      setDetail(await api.rename(titleId, fileId));
-    } catch (err) {
-      showToast(errorMessage(err));
-    } finally {
-      busy = false;
-    }
-  }
+    });
+  const want = (variantId: number): Promise<void> => working(async () => setDetail(await api.want(titleId, variantId)));
+  const unwant = (): Promise<void> => working(async () => setDetail(await api.unwant(titleId)));
+  const rename = (fileId: number): Promise<void> => working(async () => setDetail(await api.rename(titleId, fileId)));
 
 </script>
 

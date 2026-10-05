@@ -55,8 +55,8 @@ let state: MockState | null = null;
 /** The mock server's state, built on first use once the page's knobs are set. */
 export function mock(): MockState {
   state ??= {
-    dats: fixtureDats.map((d) => ({ ...d })),
-    sources: mockSources(),
+    dats: mockKnob<boolean>('noDats', false) ? [] : fixtureDats.map((d) => ({ ...d })),
+    sources: mockKnob<boolean>('noSources', false) ? [] : mockSources(),
     incoming: { dats: [...fixtureIncomingDats], sources: [...fixtureIncomingSources] },
     jobs: mockScenario() === 'busy' ? structuredClone(fixtureJobs) : [],
     recent: mockScenario() === 'idle' ? [] : structuredClone(fixtureRecentJobs),

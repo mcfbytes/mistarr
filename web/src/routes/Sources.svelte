@@ -1,9 +1,9 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { getSources, loadSources, patchSource } from '../lib/stores/sources.svelte';
-  import { getPlatforms, loadPlatforms } from '../lib/stores/platforms.svelte';
-  import { api, errorMessage } from '../lib/api';
-  import { showToast } from '../lib/stores/toast.svelte';
+  import { sources } from '../lib/stores/sources.svelte';
+  import { platforms } from '../lib/stores/platforms.svelte';
+  import { attempt, optimistic } from '../lib/actions';
+  import { api } from '../lib/api';
   import { sourceStatus } from '../lib/status';
   import IncomingList from '../lib/IncomingList.svelte';
   import UploadField from '../lib/UploadField.svelte';
@@ -17,26 +17,13 @@
   import { getStatus } from '../lib/stores/status.svelte';
   import type { SeedPolicy } from '../lib/types';
 
-  let sourcesError = $state<string | null>(null);
-
-  async function loadSourcesList(): Promise<void> {
-    try {
-      await loadSources();
-      sourcesError = null;
-    } catch (err) {
-      sourcesError = errorMessage(err);
-    }
-  }
-
   onMount(() => {
-    void loadSourcesList();
+    void sources.load();
     // The bind dropdown just shows no platforms on a miss; it retries at the next resync.
-    void loadPlatforms().catch(() => undefined);
+    void platforms.ensure();
   });
 
-  const sources = $derived(getSources());
   const pausedWhilePlaying = $derived(getStatus()?.pause_client_while_playing === true);
-  const platforms = $derived(getPlatforms());
   let confirmingId = $state<number | null>(null);
   let removingId = $state<number | null>(null);
 
@@ -49,47 +36,47 @@
     if (!platformId) {
       return;
     }
-    const prev = sources.find((s) => s.id === id);
+    const prev = sources.items.find((s) => s.id === id);
     const pending = { automatic: false, platform_id: platformId };
-    patchSource(id, { user_binding: true, pending_binding: pending });
-    try {
+    await optimistic({
+      apply: () => sources.patch(id, { user_binding: true, pending_binding: pending }),
+      revert: () => {
+        if (prev) {
+          sources.patch(id, { user_binding: prev.user_binding, pending_binding: prev.pending_binding });
+        }
+      },
       // The binding runs as a job; `source.changed` brings the bound row once it ends.
-      const row = await api.updateSource(id, { platform_id: platformId });
-      patchSource(id, { user_binding: row.user_binding, pending_binding: row.pending_binding });
-    } catch (err) {
-      if (prev) {
-        patchSource(id, { user_binding: prev.user_binding, pending_binding: prev.pending_binding });
-      }
-      showToast(errorMessage(err));
-    }
+      call: () => api.updateSource(id, { platform_id: platformId }),
+      commit: (row) => sources.patch(id, { user_binding: row.user_binding, pending_binding: row.pending_binding })
+    });
   }
 
   async function setSeedPolicy(id: number, policy: SeedPolicy): Promise<void> {
-    const prev = sources.find((s) => s.id === id);
-    patchSource(id, { seed_policy: policy });
-    try {
-      const row = await api.updateSource(id, { seed_policy: policy });
-      patchSource(id, row);
-    } catch (err) {
-      if (prev) {
-        patchSource(id, { seed_policy: prev.seed_policy });
-      }
-      showToast(errorMessage(err));
-    }
+    const prev = sources.items.find((s) => s.id === id);
+    await optimistic({
+      apply: () => sources.patch(id, { seed_policy: policy }),
+      revert: () => {
+        if (prev) {
+          sources.patch(id, { seed_policy: prev.seed_policy });
+        }
+      },
+      call: () => api.updateSource(id, { seed_policy: policy }),
+      commit: (row) => sources.patch(id, row)
+    });
   }
 
   async function disable(id: number): Promise<void> {
-    const prev = sources.find((s) => s.id === id);
-    patchSource(id, { state: 'disabled' });
-    try {
-      const row = await api.updateSource(id, { state: 'disabled' });
-      patchSource(id, row);
-    } catch (err) {
-      if (prev) {
-        patchSource(id, { state: prev.state });
-      }
-      showToast(errorMessage(err));
-    }
+    const prev = sources.items.find((s) => s.id === id);
+    await optimistic({
+      apply: () => sources.patch(id, { state: 'disabled' }),
+      revert: () => {
+        if (prev) {
+          sources.patch(id, { state: prev.state });
+        }
+      },
+      call: () => api.updateSource(id, { state: 'disabled' }),
+      commit: (row) => sources.patch(id, row)
+    });
   }
 
   function askRemove(id: number): void {
@@ -105,21 +92,23 @@
   async function remove(id: number): Promise<void> {
     confirmingId = null;
     removingId = id;
-    try {
+    const done = await attempt(async () => {
       await api.deleteSource(id);
-      await loadSourcesList();
+      sources.patch(id, null);
+      void sources.load();
+      return true;
+    });
+    removingId = null;
+    if (done) {
       // The removed row is gone from the table; land focus on the heading instead of the body.
       document.getElementById('sources-heading')?.focus();
-    } catch (err) {
-      showToast(errorMessage(err));
+    } else {
       void focusButton(id, 'remove');
-    } finally {
-      removingId = null;
     }
   }
 
   function platformName(id: string): string {
-    return platforms.find((p) => p.id === id)?.name ?? id;
+    return platforms.items.find((p) => p.id === id)?.name ?? id;
   }
 </script>
 
@@ -136,11 +125,12 @@
   <h2>Waiting in <code>sources/</code></h2>
   <IncomingList which="sources" />
 
-  {#if sourcesError}
-    <p role="alert">{sourcesError} <button type="button" onclick={() => void loadSourcesList()}>Retry</button></p>
-  {:else if sources.length === 0}
+  {#if sources.error}
+    <p role="alert">{sources.error} <button type="button" onclick={() => void sources.load()}>Retry</button></p>
+  {:else if sources.items.length === 0}
     <p>No sources yet. Place a .torrent or .magnet file in <code>/media/fat/mistarr/sources</code> or drop one here.</p>
-  {:else}
+  {/if}
+  {#if sources.items.length > 0}
     <div class="table-wrap">
     <table>
       <thead>
@@ -156,7 +146,7 @@
         </tr>
       </thead>
       <tbody>
-        {#each sources as source (source.id)}
+        {#each sources.items as source (source.id)}
           <tr>
             <td><a href={sourceUrl(source.id)} class="name">{source.display_name}</a></td>
             <td>
@@ -172,7 +162,7 @@
                   onchange={(e) => bind(source.id, e.currentTarget.value)}
                 >
                   <option value="">Choose platform</option>
-                  {#each platforms as p (p.id)}
+                  {#each platforms.items as p (p.id)}
                     <option value={p.id}>{p.name}</option>
                   {/each}
                 </select>

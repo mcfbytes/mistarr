@@ -153,7 +153,7 @@ function bind(row: Source, platformId: string | null, automatic: boolean): numbe
   const now = nowSecs();
   const job = {
     id,
-    kind: 'bind_source',
+    kind: 'bind_source' as const,
     lane: 'background' as const,
     payload: { source_id: row.id, source_name: row.display_name },
     state: 'running' as const,
@@ -204,7 +204,11 @@ function updateSource(id: number, patch: SourcePatch): SourceUpdated {
 export const mockApi: Api = {
   status: () => reply(status),
   wizard: () => reply(wizard),
-  scan: () => reply(() => ({ job_id: null }), 400),
+  scan: () =>
+    reply(() => {
+      const id = mockKnob<number>('scanJobId', -1);
+      return { job_id: id >= 0 ? id : null };
+    }, 400),
   cores: () => reply(() => fixtureCores),
   pause: () =>
     reply(() => {
@@ -251,18 +255,25 @@ export const mockApi: Api = {
       return s.settings;
     }),
 
-  platforms: (limit, offset) => reply(() => paged(platforms(), limit, offset)),
+  platforms: (limit, offset) =>
+    reply(() => {
+      if (mockKnob<boolean>('platformsFail', false)) {
+        throw new ApiError('internal', 'The platforms could not be read.', 500);
+      }
+      return paged(platforms(), limit, offset);
+    }),
   unidentified: (id, offset, limit) =>
     reply(() => paged(Object.hasOwn(fixtureUnidentified, id) ? (fixtureUnidentified[id] ?? []) : [], limit, offset)),
   setPlatform: (id, enabled) =>
     reply(() => {
+      if (mockKnob<boolean>('setPlatformFail', false)) {
+        throw new ApiError('internal', 'The platform could not be saved.', 500);
+      }
       findPlatform(id);
       const changed = mock().platforms;
       changed.set(id, { ...changed.get(id), enabled });
       return findPlatform(id);
     }),
-  bindPlatformDat: (id, datVersionId) =>
-    reply(() => ({ dat_version_id: datVersionId, platform_id: findPlatform(id).id, job_id: nextJobId() })),
   launchCore: (id) => reply(() => ({ core: findPlatform(id).core_dir, file: null })),
 
   titles,
@@ -333,7 +344,7 @@ export const mockApi: Api = {
         throw new ApiError('bad_request', 'Only http, https and magnet links are accepted.', 400);
       }
       const { token, id } = startFetch(url);
-      return { token, job_id: id, target: null, file: null };
+      return { token, job_id: /busy/.test(url) ? null : id, target: null, file: null };
     }, 600),
   cancelFetch: (token) => reply(() => cancelFetch(token), 800),
   updateSource: (id, patch) => reply(() => updateSource(id, patch)),

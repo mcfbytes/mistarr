@@ -1,3 +1,4 @@
+import { DAT_FILE, followJob, jobIdFor, type JobEnd } from './jobs.svelte';
 import type { Watched } from './incoming.svelte';
 import { showToast } from './toast.svelte';
 
@@ -11,90 +12,85 @@ export interface Upload {
   reason: string | null;
   /** Set by a resync, after which its finishing event may have been missed. */
   stale?: boolean;
-  /** Set once a toast has said how its import ended. */
-  announced?: boolean;
 }
 
 let uploads = $state<Upload[]>([]);
+// Stops following each upload's ending; keyed by kind and file.
+// eslint-disable-next-line svelte/prefer-svelte-reactivity -- only event handlers read it, never markup
+const following = new Map<string, () => void>();
 
-/** What events said about a file before its upload's answer arrived, kept briefly. */
-interface Early {
-  at: number;
-  jobId?: number;
-  /** Present once its import ended: `null` when it loaded, else why it was rejected. */
-  outcome?: string | null;
-}
-
-// Plain, not reactive: nothing renders from it.
-let early: Record<string, Early | undefined> = {};
-const EARLY_KEEP_MS = 30_000;
-
-function earlyKey(kind: Watched, file: string): string {
+function followKey(kind: Watched, file: string): string {
   return `${kind}/${file}`;
 }
 
-// Notes an event for an upload whose answer has not arrived yet.
-function noteEarly(kind: Watched, file: string, note: Partial<Early>): void {
-  const now = Date.now();
-  early = Object.fromEntries(Object.entries(early).filter(([, e]) => e && now - e.at <= EARLY_KEEP_MS));
-  const key = earlyKey(kind, file);
-  early[key] = { ...early[key], ...note, at: now };
+/** Why an import ended in rejection: `null` when it loaded. */
+function rejection(end: JobEnd): string | null {
+  if (end.state === 'failed') {
+    return typeof end.progress?.error === 'string' ? end.progress.error : 'see Activity';
+  }
+  return typeof end.progress?.rejected === 'string' ? end.progress.rejected : null;
 }
 
+/** The uploads shown for `kind`, newest first. */
 export function getUploads(kind: Watched): Upload[] {
   return uploads.filter((u) => u.kind === kind);
 }
 
 /**
- * Follows an upload; a queued job or an outcome its events reported before the
- * server's answer arrived is applied to it at once.
+ * Follows an upload and says once how its import ended: a DAT's from `dat.loaded` or
+ * `dat.rejected`, a source's from its job. An ending heard since `since`, when the request
+ * began, counts even if it came before the answer; an earlier attempt's does not.
  */
-export function addUpload(upload: Upload): void {
-  const key = earlyKey(upload.kind, upload.file);
-  const seen = early[key];
-  early[key] = undefined;
-  const fresh = seen !== undefined && Date.now() - seen.at <= EARLY_KEEP_MS ? seen : undefined;
-  const rest = uploads.filter((u) => !(u.kind === upload.kind && u.file === upload.file));
-  uploads = [{ ...upload, jobId: upload.jobId ?? fresh?.jobId ?? null }, ...rest].slice(0, 10);
-  if (fresh?.outcome !== undefined) {
-    announceUpload(upload.kind, upload.file, fresh.outcome);
+export function addUpload(upload: Upload, since: number): void {
+  const { kind, file } = upload;
+  const key = followKey(kind, file);
+  following.get(key)?.();
+  const rest = uploads.filter((u) => !(u.kind === kind && u.file === file));
+  const jobId = upload.jobId ?? jobIdFor(kind === 'dats' ? 'dat_import' : 'source_import', file, since);
+  const next = [{ ...upload, jobId }, ...rest];
+  for (const gone of next.slice(10)) {
+    stopFollowing(gone.kind, gone.file);
   }
+  uploads = next.slice(0, 10);
+  // followJob may call onEnd before it returns, which the compiler cannot see.
+  let over = false as boolean;
+  const stop = followJob(
+    (end) => end.detail === file && end.kind === (kind === 'dats' ? DAT_FILE : 'source_import'),
+    (end) => {
+      over = true;
+      following.delete(key);
+      const why = rejection(end);
+      if (why !== null) {
+        showToast(`${file} was rejected: ${why}`, 'error');
+      } else {
+        showToast(kind === 'dats' ? `${file} loaded.` : `${file} added as a source.`, 'success');
+      }
+    },
+    since
+  );
+  if (!over) {
+    following.set(key, stop);
+  }
+}
+
+function stopFollowing(kind: Watched, file: string): void {
+  const key = followKey(kind, file);
+  following.get(key)?.();
+  following.delete(key);
 }
 
 /** Gives an upload received before its job was recorded the job the server queued for it. */
 export function resolveUpload(kind: Watched, file: string, jobId: number): void {
-  if (!uploads.some((u) => u.kind === kind && u.file === file)) {
-    noteEarly(kind, file, { jobId });
-    return;
-  }
   uploads = uploads.map((u) => (u.kind === kind && u.file === file && u.jobId === null ? { ...u, jobId } : u));
 }
 
-/**
- * Says once how the import of uploaded file `file` ended: in `dats/` from `dat.loaded` or
- * `dat.rejected`, in `sources/` from its job's stored progress; `reason` is why it was rejected.
- */
-export function announceUpload(kind: Watched, file: string, reason: string | null): void {
-  const up = uploads.find((u) => u.kind === kind && u.file === file);
-  if (!up) {
-    noteEarly(kind, file, { outcome: reason });
-    return;
-  }
-  if (up.announced) {
-    return;
-  }
-  uploads = uploads.map((u) => (u.kind === kind && u.file === file ? { ...u, announced: true } : u));
-  if (reason !== null) {
-    showToast(`${file} was rejected: ${reason}`, 'error');
-  } else {
-    showToast(kind === 'dats' ? `${file} loaded.` : `${file} added as a source.`, 'success');
-  }
-}
-
+/** Marks every upload as possibly out of date after a resync. */
 export function markUploadsStale(): void {
   uploads = uploads.map((u) => ({ ...u, stale: true }));
 }
 
+/** Stops following an upload and drops it from the list. */
 export function dismissUpload(kind: Watched, file: string): void {
+  stopFollowing(kind, file);
   uploads = uploads.filter((u) => !(u.kind === kind && u.file === file));
 }

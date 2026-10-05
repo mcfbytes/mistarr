@@ -1,4 +1,4 @@
-import type { DownloadState, IncomingFile, Job, SourceState } from './types';
+import type { DownloadState, IncomingFile, Job, JobKind, JobState, SourceState } from './types';
 
 /** The fixed status vocabulary every job, file and transfer is shown in; see docs/UI.md. */
 export type WorkStatus = 'queued' | 'running' | 'waiting' | 'paused' | 'done' | 'failed';
@@ -77,26 +77,86 @@ export function downloadStatus(state: DownloadState): Shown {
   return map[state];
 }
 
-const KIND_LABEL: Record<string, string> = {
-  dat_import: 'DAT import',
-  source_import: 'Source import',
-  scan: 'Scan',
-  recompute_1g1r: 'Matching',
-  arcade_catalog: 'Arcade catalogue',
-  import: 'Import',
-  chd_tracks: 'CHD tracks',
-  transfer: 'Transfer',
-  remap_sources: 'Source matching',
-  bind_source: 'Source binding',
-  detect_client: 'Client check',
-  resolve_magnet: 'Magnet lookup',
-  deselect: 'Transfer stop',
-  url_fetch: 'URL fetch'
+/** What a job is called, and how a line about its end names it. */
+interface JobLabel {
+  name: string;
+  /** The subject of an outcome line, such as "Scan of NES"; `name` when absent. */
+  subject?: (job: OutcomeJob, where: string) => string;
+}
+
+const fileOf = (job: OutcomeJob): string => (typeof job.payload?.path === 'string' ? (job.payload.path.split('/').pop() ?? '') : '');
+
+const JOB_LABEL: Record<JobKind, JobLabel> = {
+  dat_import: { name: 'DAT import', subject: (j) => `DAT ${fileOf(j)}`.trim() },
+  source_import: { name: 'Source import', subject: (j) => `Source ${fileOf(j)}`.trim() },
+  scan: { name: 'Scan', subject: (_, where) => `Scan of ${where}` },
+  recompute_1g1r: { name: 'Matching', subject: (_, where) => `Matching for ${where}` },
+  arcade_catalog: { name: 'Arcade catalogue' },
+  import: { name: 'Import' },
+  chd_tracks: { name: 'CHD tracks' },
+  transfer: { name: 'Transfer' },
+  remap_sources: { name: 'Source matching' },
+  bind_source: {
+    name: 'Source binding',
+    subject: (j) => `Binding of ${typeof j.payload?.source_name === 'string' ? j.payload.source_name : ''}`.trim()
+  },
+  detect_client: { name: 'Client check' },
+  resolve_magnet: { name: 'Magnet lookup' },
+  deselect: { name: 'Transfer stop' },
+  url_fetch: { name: 'URL fetch' }
 };
 
+function labelOf(kind: string): JobLabel | undefined {
+  return (JOB_LABEL as Partial<Record<string, JobLabel>>)[kind];
+}
+
 export function kindLabel(kind: string): string {
-  const label = KIND_LABEL[kind] ?? kind.replace(/_/g, ' ');
+  const label = labelOf(kind)?.name ?? kind.replace(/_/g, ' ');
   return label.charAt(0).toUpperCase() + label.slice(1);
+}
+
+/** What a finished job left behind, enough to say how it ended. */
+export interface OutcomeJob {
+  kind: string;
+  state: JobState;
+  payload?: Record<string, unknown>;
+  progress: Record<string, unknown> | null;
+}
+
+/** One line saying what a finished job did, such as "Scan of NES: 10 matched, 2 unmatched". */
+export function jobOutcome(job: OutcomeJob, platformName: (id: string) => string): string {
+  const p = job.progress ?? {};
+  const pid = typeof job.payload?.platform_id === 'string' ? job.payload.platform_id : null;
+  const where = pid ? platformName(pid) : 'every platform';
+  if (job.kind === 'url_fetch') {
+    const name = typeof p.file === 'string' ? ` of ${p.file}` : '';
+    if (job.state === 'failed') {
+      return typeof p.error === 'string' ? `URL fetch failed: ${p.error}` : 'URL fetch failed';
+    }
+    return typeof p.target === 'string' ? `URL fetch${name}: placed in ${p.target}/` : `URL fetch${name}: done`;
+  }
+  const label = labelOf(job.kind)?.subject?.(job, where) ?? kindLabel(job.kind);
+  if (job.state === 'failed') {
+    return typeof p.error === 'string' ? `${label} failed: ${p.error}` : `${label} failed`;
+  }
+  if (job.kind === 'scan' && typeof p.matched === 'number' && typeof p.unmatched === 'number') {
+    const unidentified = typeof p.unidentified === 'number' && p.unidentified > 0 ? p.unidentified : 0;
+    const tail = unidentified > 0 ? `, ${unidentified} not identified` : '';
+    return `${label}: ${p.matched} matched, ${p.unmatched} unmatched${tail}`;
+  }
+  if (job.kind === 'chd_tracks' && typeof p.verified === 'number') {
+    return `${label}: ${p.verified} verified, ${Number(p.unmatched ?? 0)} unmatched, ${Number(p.not_identified ?? 0)} not identified`;
+  }
+  if (job.kind === 'recompute_1g1r' && typeof p.matched === 'number') {
+    return `${label}: ${p.matched} files newly matched`;
+  }
+  if (job.kind === 'bind_source' && typeof p.matched === 'number' && typeof p.total === 'number') {
+    return `${label}: ${p.matched} of ${p.total} files matched`;
+  }
+  if (job.kind === 'dat_import' && typeof p.games === 'number') {
+    return `${label}: ${p.games} games read`;
+  }
+  return `${label}: done`;
 }
 
 /** The file name or platform a job is about, from its payload. */

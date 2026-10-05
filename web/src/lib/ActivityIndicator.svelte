@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
-  import { getJobs, getRecentJobs, jobOutcome, loadJobs, watchRecent } from './stores/jobs.svelte';
+  import { jobs, recent as recentJobs, watchRecent } from './stores/jobs.svelte';
   import { findPlatform } from './stores/platforms.svelte';
-  import { QUIET_KINDS, describeProgress, fetchSubject, jobDetail, jobHref, jobStatus, kindLabel } from './status';
+  import { QUIET_KINDS, describeProgress, fetchSubject, jobDetail, jobHref, jobOutcome, jobStatus, kindLabel } from './status';
   import FetchCancel from './FetchCancel.svelte';
   import StatusPill from './StatusPill.svelte';
   import ProgressBar from './ProgressBar.svelte';
@@ -17,14 +17,14 @@
   let stopRecent: (() => void) | null = null;
 
   onMount(() => {
-    void loadJobs().catch(() => undefined);
+    void jobs.load();
     return () => stopRecent?.();
   });
 
-  const active = $derived(getJobs().filter((j) => !QUIET_KINDS.has(j.kind)));
+  const active = $derived(jobs.items.filter((j) => !QUIET_KINDS.has(j.kind)));
   const running = $derived(active.filter((j) => j.state === 'running'));
   const waiting = $derived(active.filter((j) => j.state !== 'running'));
-  const recent = $derived(getRecentJobs().slice(0, 5));
+  const recent = $derived(recentJobs.items.slice(0, 5));
   const summary = $derived(
     active.length === 0
       ? 'nothing running'

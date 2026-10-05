@@ -1,27 +1,17 @@
 import { api } from '../api';
-import { readAllPages } from '../paging';
 import type { Platform } from '../types';
+import { ListStore } from './list.svelte';
 
-let platforms = $state<Platform[]>([]);
-let loaded = $state(false);
-
-export function getPlatforms(): Platform[] {
-  return platforms;
-}
-
-export function platformsLoaded(): boolean {
-  return loaded;
-}
-
-export async function loadPlatforms(): Promise<void> {
-  platforms = await readAllPages((limit, offset) => api.platforms(limit, offset), (p) => p.id);
-  loaded = true;
-}
+/** Every platform, with its counts. */
+export const platforms = new ListStore<Platform>(
+  (limit, offset) => api.platforms(limit, offset),
+  (p) => p.id
+);
 
 export function findPlatform(id: string): Platform | undefined {
-  return platforms.find((p) => p.id === id);
+  return platforms.items.find((p) => p.id === id);
 }
 
-export function patchPlatform(id: string, patch: Partial<Platform>): void {
-  platforms = platforms.map((p) => (p.id === id ? { ...p, ...patch } : p));
-}
+// Scan jobs whose outcome is awaited; it outlives the page, so a repeat answer for one job adds no second toast.
+// eslint-disable-next-line svelte/prefer-svelte-reactivity -- only event handlers read it, never markup
+export const followedScans = new Set<number>();

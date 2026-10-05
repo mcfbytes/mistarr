@@ -1,11 +1,13 @@
 <script lang="ts">
   import { onDestroy, tick, untrack } from 'svelte';
+  import { attempt, optimistic } from '../lib/actions';
+  import { debounce, DELAY_MS } from '../lib/coalesce';
   import { api, ApiError, errorMessage } from '../lib/api';
-  import { findSource, loadSources, patchSource } from '../lib/stores/sources.svelte';
-  import { findPlatform, loadPlatforms, platformsLoaded } from '../lib/stores/platforms.svelte';
-  import { getFinishedJob, getJobs, jobOutcome } from '../lib/stores/jobs.svelte';
+  import { findSource, sources } from '../lib/stores/sources.svelte';
+  import { findPlatform, platforms } from '../lib/stores/platforms.svelte';
+  import { followJob, jobs } from '../lib/stores/jobs.svelte';
   import { showToast } from '../lib/stores/toast.svelte';
-  import { describeProgress, jobStatus, sourceStatus } from '../lib/status';
+  import { describeProgress, jobOutcome, jobStatus, sourceStatus } from '../lib/status';
   import { confidenceLabel } from '../lib/availability';
   import { titleUrl } from '../lib/router.svelte';
   import {
@@ -48,7 +50,6 @@
   let filesError = $state<string | null>(null);
   let reloadTick = $state(0);
   let controller: AbortController | null = null;
-  let searchTimer: ReturnType<typeof setTimeout> | null = null;
 
   let panelOpen = $state(false);
   let reclassifyButton = $state<HTMLButtonElement | null>(null);
@@ -59,6 +60,7 @@
   let applying = $state(false);
   let resetting = $state(false);
   let jobId = $state<number | null>(null);
+  let stopBinding: (() => void) | null = null;
 
   const row = $derived(findSource(sourceId));
   const status = $derived(getStatus());
@@ -72,7 +74,7 @@
         : null
   );
   const source = $derived(detail ?? null);
-  const job = $derived(jobId === null ? undefined : getJobs().find((j) => j.id === jobId));
+  const job = $derived(jobId === null ? undefined : jobs.items.find((j) => j.id === jobId));
   const jobView = $derived(job ? describeProgress(job.kind, job.progress) : null);
 
   function platformName(id: string): string {
@@ -81,12 +83,10 @@
 
   $effect(() => {
     // Falls back to the id in platformName(); a miss retries at the next resync.
-    if (!platformsLoaded()) {
-      void loadPlatforms().catch(() => undefined);
-    }
+    void platforms.ensure();
     // Only feeds rowKey below; loadDetail() below has its own missing/loadError state.
     if (!row) {
-      void loadSources().catch(() => undefined);
+      void sources.load();
     }
     // Hides the pause-while-playing note until connected; SSE resync fills it.
     if (!getStatus()) {
@@ -171,9 +171,8 @@
   onDestroy(() => {
     controller?.abort();
     previewController?.abort();
-    if (searchTimer) {
-      clearTimeout(searchTimer);
-    }
+    applySearch.cancel();
+    stopBinding?.();
   });
 
   function setFilter(value: SourceFileFilter | undefined): void {
@@ -181,15 +180,14 @@
     offset = 0;
   }
 
+  const applySearch = debounce((value: string) => {
+    applied = value.trim();
+    offset = 0;
+  }, DELAY_MS.search);
+
   function onSearch(value: string): void {
     query = value;
-    if (searchTimer) {
-      clearTimeout(searchTimer);
-    }
-    searchTimer = setTimeout(() => {
-      applied = query.trim();
-      offset = 0;
-    }, 250);
+    applySearch(value);
   }
 
   let fullHash = $state(false);
@@ -212,22 +210,22 @@
 
   async function setSeedPolicy(policy: SeedPolicy): Promise<void> {
     const prev = detail?.seed_policy;
-    patchSource(sourceId, { seed_policy: policy });
-    if (detail) {
-      detail = { ...detail, seed_policy: policy };
-    }
-    try {
-      const updated = await api.updateSource(sourceId, { seed_policy: policy });
-      patchSource(sourceId, updated);
-    } catch (err) {
-      if (prev !== undefined) {
-        patchSource(sourceId, { seed_policy: prev });
-        if (detail) {
-          detail = { ...detail, seed_policy: prev };
-        }
+    const set = (value: string): void => {
+      sources.patch(sourceId, { seed_policy: value });
+      if (detail) {
+        detail = { ...detail, seed_policy: value };
       }
-      showToast(errorMessage(err));
-    }
+    };
+    await optimistic({
+      apply: () => set(policy),
+      revert: () => {
+        if (prev !== undefined) {
+          set(prev);
+        }
+      },
+      call: () => api.updateSource(sourceId, { seed_policy: policy }),
+      commit: (updated) => sources.patch(sourceId, updated)
+    });
   }
 
   /** Closes Re-classify, stops its preview request and returns focus to its button. */
@@ -284,23 +282,39 @@
     return `Binding to ${name} would match ${about}${chosenMatch ?? 0} of ${preview?.total ?? 0} files. Its files are matched again in the background, and later DAT loads keep this choice.`;
   }
 
+  // Once the queued binding of job `id` ends, says how it went and reads the sources again.
+  function followBinding(id: number | null): void {
+    stopBinding?.();
+    jobId = id;
+    if (id === null) {
+      return;
+    }
+    stopBinding = followJob(
+      (end) => end.id === id,
+      (end) => {
+        const payload = { source_name: detail?.display_name };
+        const text = jobOutcome({ kind: 'bind_source', state: end.state, progress: end.progress, payload }, platformName);
+        jobId = null;
+        showToast(text, end.state === 'done' ? 'success' : 'error');
+        void sources.load();
+      }
+    );
+  }
+
   async function apply(): Promise<void> {
     if (!choice || applying) {
       return;
     }
     applying = true;
     const platformId = choice === NONE ? null : choice;
-    try {
-      const updated = await api.updateSource(sourceId, { platform_id: platformId });
-      jobId = updated.job_id;
-      patchSource(sourceId, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
+    const updated = await attempt(() => api.updateSource(sourceId, { platform_id: platformId }));
+    if (updated) {
+      followBinding(updated.job_id);
+      sources.patch(sourceId, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
       void closePanel();
       showToast(platformId ? `Binding to ${platformName(platformId)} queued.` : 'Setting the source aside queued.', 'info');
-    } catch (err) {
-      showToast(errorMessage(err));
-    } finally {
-      applying = false;
     }
+    applying = false;
   }
 
   async function reset(): Promise<void> {
@@ -308,37 +322,17 @@
       return;
     }
     resetting = true;
-    try {
-      const updated = await api.updateSource(sourceId, { binding: 'automatic' });
-      jobId = updated.job_id;
-      patchSource(sourceId, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
+    const updated = await attempt(() => api.updateSource(sourceId, { binding: 'automatic' }));
+    if (updated) {
+      followBinding(updated.job_id);
+      sources.patch(sourceId, { user_binding: updated.user_binding, pending_binding: updated.pending_binding });
       showToast('Automatic binding queued.', 'info');
       // Reset leaves with the user's binding; focus goes to the control that stays.
       await tick();
       reclassifyButton?.focus();
-    } catch (err) {
-      showToast(errorMessage(err));
-    } finally {
-      resetting = false;
     }
+    resetting = false;
   }
-
-  // Once the queued binding finishes, say how it went and read the source again.
-  $effect(() => {
-    if (jobId === null) {
-      return;
-    }
-    const done = getFinishedJob(jobId);
-    if (!done) {
-      return;
-    }
-    const text = jobOutcome({ kind: 'bind_source', state: done.state, progress: done.progress, payload: { source_name: detail?.display_name } }, platformName);
-    untrack(() => {
-      jobId = null;
-      showToast(text, done.state === 'done' ? 'success' : 'error');
-      void loadSources().catch(() => undefined);
-    });
-  });
 
   const firstShown = $derived(total === 0 ? 0 : offset + 1);
   const lastShown = $derived(Math.min(offset + PAGE, total));
