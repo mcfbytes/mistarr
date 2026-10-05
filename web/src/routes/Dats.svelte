@@ -143,7 +143,8 @@
     <p role="alert">{dats.error} <button type="button" onclick={() => void dats.load()}>Retry</button></p>
   {:else if dats.items.length === 0}
     <p class="muted">No DAT loaded yet.</p>
-  {:else}
+  {/if}
+  {#if dats.loaded || !dats.error}
     <ul class="families" aria-label="Loaded DATs">
       {#each families as f (f.key)}
         {@const d = f.head}

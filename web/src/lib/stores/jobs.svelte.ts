@@ -124,7 +124,7 @@ export function resyncRecent(): Promise<void> {
   return recentWatchers === 0 && followers.size === 0 ? Promise.resolve() : recent.load();
 }
 
-// After a resync the events that finished jobs may be lost; forget what is known.
+/** After a resync the events that finished jobs may be lost; forgets what is known. */
 export function resetFinished(): void {
   ended = [];
   fetchJobs.clear();
@@ -135,6 +135,7 @@ export function isRunning(id: number): boolean {
   return jobs.items.some((j) => j.id === id && j.state === 'running');
 }
 
+/** Applies a progress event to the open jobs, the recent list and the followers. */
 export function applyJobProgress(
   id: number,
   kind: string,

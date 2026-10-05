@@ -31,6 +31,7 @@ function rejection(end: JobEnd): string | null {
   return typeof end.progress?.rejected === 'string' ? end.progress.rejected : null;
 }
 
+/** The uploads shown for `kind`, newest first. */
 export function getUploads(kind: Watched): Upload[] {
   return uploads.filter((u) => u.kind === kind);
 }
@@ -83,10 +84,12 @@ export function resolveUpload(kind: Watched, file: string, jobId: number): void 
   uploads = uploads.map((u) => (u.kind === kind && u.file === file && u.jobId === null ? { ...u, jobId } : u));
 }
 
+/** Marks every upload as possibly out of date after a resync. */
 export function markUploadsStale(): void {
   uploads = uploads.map((u) => ({ ...u, stale: true }));
 }
 
+/** Stops following an upload and drops it from the list. */
 export function dismissUpload(kind: Watched, file: string): void {
   stopFollowing(kind, file);
   uploads = uploads.filter((u) => !(u.kind === kind && u.file === file));

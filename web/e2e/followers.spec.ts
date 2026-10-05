@@ -77,8 +77,36 @@ test('a failed re-read shows its error with Retry even after an earlier read suc
   });
   const alert = page.getByRole('alert').filter({ hasText: 'The platforms could not be read.' });
   await expect(alert).toBeVisible();
+  await expect(card).toBeVisible();
   await setMockKnob(page, 'platformsFail', null);
   await alert.getByRole('button', { name: 'Retry' }).click();
   await expect(alert).toHaveCount(0);
+  await expect(card).toBeVisible();
+});
+
+test('a scan answered with the same job after leaving the page toasts once', async ({ page }) => {
+  await page.goto('/#/');
+  await setMockKnob(page, 'scanJobId', 73);
+  const scan = () => page.locator('.card').filter({ hasText: '240 titles' }).getByRole('button', { name: 'Scan' });
+  await scan().click();
+  await expect(scan()).toBeEnabled();
+  await page.goto('/#/activity');
+  await page.goto('/#/');
+  await scan().click();
+  await expect(scan()).toBeEnabled();
+  await emitEvent(page, {
+    name: 'job.progress',
+    data: { id: 73, kind: 'scan', state: 'done', progress: { matched: 73, unmatched: 0 } }
+  });
+  await expect(page.locator('.toasts').getByText(/: 73 matched, 0 unmatched$/)).toHaveCount(1);
+});
+
+test('a platform that fails to save returns to the enabled grid with a toast', async ({ page }) => {
+  await page.goto('/#/');
+  const card = page.locator('.card').filter({ hasText: '240 titles' });
+  await expect(card).toBeVisible();
+  await setMockKnob(page, 'setPlatformFail', true);
+  await card.getByRole('button', { name: 'Disable' }).click();
+  await expect(page.locator('.toasts').getByText('The platform could not be saved.')).toBeVisible();
   await expect(card).toBeVisible();
 });

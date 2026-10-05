@@ -204,7 +204,11 @@ function updateSource(id: number, patch: SourcePatch): SourceUpdated {
 export const mockApi: Api = {
   status: () => reply(status),
   wizard: () => reply(wizard),
-  scan: () => reply(() => ({ job_id: mockKnob<number>('scanJobId', -1) >= 0 ? mockKnob<number>('scanJobId', -1) : null }), 400),
+  scan: () =>
+    reply(() => {
+      const id = mockKnob<number>('scanJobId', -1);
+      return { job_id: id >= 0 ? id : null };
+    }, 400),
   cores: () => reply(() => fixtureCores),
   pause: () =>
     reply(() => {
@@ -262,6 +266,9 @@ export const mockApi: Api = {
     reply(() => paged(Object.hasOwn(fixtureUnidentified, id) ? (fixtureUnidentified[id] ?? []) : [], limit, offset)),
   setPlatform: (id, enabled) =>
     reply(() => {
+      if (mockKnob<boolean>('setPlatformFail', false)) {
+        throw new ApiError('internal', 'The platform could not be saved.', 500);
+      }
       findPlatform(id);
       const changed = mock().platforms;
       changed.set(id, { ...changed.get(id), enabled });

@@ -64,7 +64,8 @@
   <h2>Downloads</h2>
   {#if downloads.error}
     <p role="alert">{downloads.error} <button type="button" onclick={() => void downloads.load()}>Retry</button></p>
-  {:else}
+  {/if}
+  {#if downloads.loaded || !downloads.error}
     {#each downloads.items as d (d.id)}
       <div class="card row">
         <div class="head">
@@ -91,7 +92,8 @@
   <h2>Jobs</h2>
   {#if jobs.error}
     <p role="alert">{jobs.error} <button type="button" onclick={() => void jobs.load()}>Retry</button></p>
-  {:else}
+  {/if}
+  {#if jobs.loaded || !jobs.error}
     {#each jobs.items as job (job.id)}
       {@const view = job.state === 'running' ? describeProgress(job.kind, job.progress) : null}
       <div class="card row job" data-job={job.id}>
@@ -127,7 +129,8 @@
   <h2>Imports</h2>
   {#if imports.error}
     <p role="alert">{imports.error} <button type="button" onclick={() => void imports.load()}>Retry</button></p>
-  {:else}
+  {/if}
+  {#if imports.loaded || !imports.error}
     <ul class="imports">
       {#each imports.items as entry (entry.id)}
         <li>{entry.action}</li>

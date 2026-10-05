@@ -129,7 +129,8 @@
     <p role="alert">{sources.error} <button type="button" onclick={() => void sources.load()}>Retry</button></p>
   {:else if sources.items.length === 0}
     <p>No sources yet. Place a .torrent or .magnet file in <code>/media/fat/mistarr/sources</code> or drop one here.</p>
-  {:else}
+  {/if}
+  {#if sources.loaded || !sources.error}
     <div class="table-wrap">
     <table>
       <thead>

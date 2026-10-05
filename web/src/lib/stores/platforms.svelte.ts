@@ -11,3 +11,7 @@ export const platforms = new ListStore<Platform>(
 export function findPlatform(id: string): Platform | undefined {
   return platforms.items.find((p) => p.id === id);
 }
+
+// Scan jobs whose outcome is awaited; it outlives the page, so a repeat answer for one job adds no second toast.
+// eslint-disable-next-line svelte/prefer-svelte-reactivity -- only event handlers read it, never markup
+export const followedScans = new Set<number>();

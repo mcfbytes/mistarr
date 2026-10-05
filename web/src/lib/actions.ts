@@ -13,7 +13,8 @@ export interface Optimistic<T> {
 export async function optimistic<T>({ apply, revert, call, commit }: Optimistic<T>): Promise<boolean> {
   apply();
   try {
-    commit?.(await call());
+    const result = await call();
+    commit?.(result);
     return true;
   } catch (err) {
     revert();

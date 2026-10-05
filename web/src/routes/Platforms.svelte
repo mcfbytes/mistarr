@@ -1,7 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { SvelteSet } from 'svelte/reactivity';
-  import { findPlatform, platforms } from '../lib/stores/platforms.svelte';
+  import { findPlatform, followedScans, platforms } from '../lib/stores/platforms.svelte';
   import { followJob, jobs } from '../lib/stores/jobs.svelte';
   import { attempt, optimistic } from '../lib/actions';
   import { describeProgress, jobOutcome, jobStatus } from '../lib/status';
@@ -24,9 +24,6 @@
   const disabled = $derived(platforms.items.filter((p) => p.core_present && !p.enabled));
 
   const scanning = new SvelteSet<string>();
-  // Scan jobs whose outcome is awaited; a repeat answer for one job adds no second toast.
-  // eslint-disable-next-line svelte/prefer-svelte-reactivity -- only event handlers read it, never markup
-  const followed = new Set<number>();
 
   // The open scan of each platform, shown on its card.
   const scans: Map<string, Job> = $derived(
@@ -69,12 +66,12 @@
     }
     showToast(`Scan of ${platformName(id)} queued`, 'info');
     const jobId = queued.job_id ?? queued.arcade_job_id;
-    if (jobId != null && !followed.has(jobId)) {
-      followed.add(jobId);
+    if (jobId != null && !followedScans.has(jobId)) {
+      followedScans.add(jobId);
       followJob(
         (end) => end.id === jobId,
         (end) => {
-          followed.delete(jobId);
+          followedScans.delete(jobId);
           const text = jobOutcome({ ...end, kind: 'scan', payload: { platform_id: id } }, platformName);
           showToast(text, end.state === 'done' ? 'success' : 'error');
         }
@@ -96,7 +93,8 @@
   <SetupHints />
   {#if platforms.error}
     <p role="alert">{platforms.error} <button type="button" onclick={() => void platforms.load()}>Retry</button></p>
-  {:else}
+  {/if}
+  {#if platforms.loaded || !platforms.error}
     <div class="grid">
       {#each present as platform (platform.id)}
         {@const job = scans.get(platform.id)}
