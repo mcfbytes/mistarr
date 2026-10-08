@@ -281,8 +281,8 @@ download client on the board while a core runs (DOWNLOAD-CLIENTS.md "Core
 gate") and resumes it when it shuts down; `stop` and `install.sh` also
 resume a client recorded in `/tmp/mistarr/client.frozen` (under
 `MISTARR_TEMP_DIR` when that is set), since a daemon killed after 20 s
-cannot. They act only on a regular file of their own user in a 0700
-directory, and signal only an `rtorrent` or `transmission-daemon` process
+cannot. They act only on a regular file of their own user, or of the
+account the daemon drops to ("Privileges"), in a 0700 directory of the same owner, and signal only an `rtorrent` or `transmission-daemon` process
 that still has the recorded start time. `install.sh` resumes it only once the
 launcher stopped mistarr, or no mistarr runs.
 
@@ -295,6 +295,77 @@ the client's own come back once they no longer apply.
 `[jobs] scan_interval_minutes` in `mistarr.toml` defaults to 1440: a daily
 rescan of the whole library. Set it to 0 to disable the timer and rely on the
 automatic and manual scans instead; the change needs a restart.
+
+## Privileges
+
+Started as root, the server moves into a mount view of its own and switches
+to its own account before it creates its RAM directory or starts a thread
+(`crates/mistarr-server/src/harden.rs`). `doctor` and the hidden subcommands
+keep the ids and mounts they were started with.
+
+- **Mount view.** In a private mount namespace (`crates/mistarr-server/src/harden/jail.rs`), the data
+  directory, the games directory, `/tmp` and the mounts below them stay
+  writable. On the mount they live on, usually the card, every other entry is
+  bound over itself read-only: `linux/`, `Scripts/`, `config/`, `saves/`, the
+  core folders, the `MiSTer` binary and the rest. Every other mount, `/`,
+  `/etc`, `/proc`, `/sys` and `/dev` among them, is remounted read-only. All
+  of them are `nosuid,nodev`, so no device node opens but `/dev/null`,
+  `/dev/zero`, `/dev/full`, `/dev/random`, `/dev/urandom` and `/dev/tty`,
+  which are bound back. `/dev/MiSTer_cmd` is a FIFO, which `nodev` and a
+  read-only mount do not refuse. `CAP_DAC_OVERRIDE` does not pass a
+  read-only mount, and undoing the view takes `CAP_SYS_ADMIN`, which the
+  server no longer has; `/proc/<pid>/root` of a process outside it is refused
+  without `CAP_SYS_PTRACE`. Nothing done in the view reaches the host's
+  mounts, and a disk mounted after the start is not seen until a restart.
+  Where the kernel refuses the namespace the log says the view is
+  unavailable and the server runs without it; `MISTARR_JAIL=off` skips it.
+
+- **Account.** The `mistarr` entry of `/etc/passwd`, else uid and gid 8420,
+  with no supplementary groups. `MISTARR_USER` names another account, as a
+  user name or `uid[:gid]`; `MISTARR_USER=root` keeps root and every
+  capability, and the log warns. An update of either image replaces `/etc`,
+  so `mistarr.sh start` adds `mistarr:x:8420:` to `/etc/group` and a
+  `mistarr` user with uid 8420 to `/etc/passwd` whenever neither the name nor
+  the id is there (`MISTARR_ETC` names another directory, for tests). Where
+  `/etc` cannot be written the ids are the same and `ps` shows a number.
+- **Capabilities.** The card is exFAT, where every file is root's with mode
+  0755, so the server keeps `CAP_DAC_OVERRIDE` to write it. It also keeps
+  `CAP_KILL`, to stop a client run by another user while a core runs
+  (Buildroot_MiSTer runs Transmission as uid 8422), and `CAP_NET_BIND_SERVICE`
+  only when `server.listen` names a port below 1024. The bounding set holds
+  nothing else. Only `CAP_DAC_OVERRIDE` is ambient, so rtorrent and the other
+  programs the server starts can write staging and gain nothing more.
+- **`no_new_privs`** is set, so no setuid program the server runs gains
+  anything, and the process is not dumpable, so a client sharing its uid
+  cannot trace it or read its memory.
+- **Seccomp.** Where the kernel has seccomp filters, one answers `EPERM` to
+  calls neither the server nor its clients make, which are kernel attack
+  surface or need a dropped capability: io_uring, BPF, perf events,
+  userfaultfd, keyrings, ptrace and cross-process memory access, mounts and
+  namespaces, modules and kexec, swap, reboot and clock setting (`DENIED` in
+  `harden.rs`). A call made under another architecture ends the process. It
+  is a deny list, so a library that starts using a new call keeps working.
+  The stock MiSTer kernel has no seccomp; the log then says the filter is
+  unavailable and the server runs on. `MISTARR_SECCOMP=off` skips it.
+- **Handover.** A `/tmp/mistarr` a root run left, and the files in it, are
+  given to the account first, so the frozen client's record is still read.
+
+The log's `dropped root` line gives the ids, the capabilities and the state
+of the view and the filter, and a warning names each mount or entry left
+writable; `grep -E 'Uid|Cap|NoNewPrivs|Seccomp' /proc/<pid>/status` and
+`/proc/<pid>/mountinfo` show the same from the board.
+
+This takes away most of root: sysctls, modules, mounts, `/dev/mem` and raw
+disks, network configuration and raw sockets, tracing other processes,
+changing owners and ids, and writing the system or the card outside the
+server's own directories. What the account can still write: the data and
+games directories, which hold the database and the library by design,
+`/tmp`, and new names at the top of the mount the games live on. That mount
+stays writable so staging and the library share it, as placement renames
+between them; an existing entry there cannot be changed, but a file Main or
+a script would read only if present, such as an ini that does not exist yet,
+can be created. `docs/NONROOT-PLAN.md` proposes a stricter jail around the
+clients.
 
 ## Runtime checks on the board
 

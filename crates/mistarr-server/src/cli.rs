@@ -160,7 +160,23 @@ pub fn run(cli: &Cli, out: &mut impl std::io::Write) -> Result<()> {
         Into::into,
     );
     let options = app::Options::for_board(&ram);
+    let mut hardened = None;
     if matches!(cli.command(), Command::Serve) {
+        // Before the RAM directory is made and before any thread, as ids and capabilities are per thread.
+        hardened = Some(
+            crate::harden::for_server(
+                &config.server.listen,
+                &ram,
+                vec![
+                    config.paths.data.clone(),
+                    config.paths.games.clone(),
+                    PathBuf::from("/tmp"),
+                    config.memory.import_dir.clone(),
+                    ram.clone(),
+                ],
+            )
+            .context("cannot drop root")?,
+        );
         let disk = config.paths.tmp();
         let tmp = crate::db::tempdir::choose_temp_dir(&ram, &disk)
             .with_context(|| format!("cannot create {}", disk.display()))?;
@@ -218,6 +234,9 @@ pub fn run(cli: &Cli, out: &mut impl std::io::Write) -> Result<()> {
             std::fs::create_dir_all(&config.paths.data)
                 .with_context(|| format!("cannot create {}", config.paths.data.display()))?;
             crate::logging::init(Some(&config.paths.log())).context("cannot open the log file")?;
+            if let Some(report) = &hardened {
+                report.log();
+            }
             if let Some((ram, e)) = temp_refused {
                 tracing::warn!(error = %e, dir = %ram.display(), "SQLite temporary files go to the card");
             }

@@ -47,7 +47,7 @@ contracts in this document.
 | `mistarr-mister` | The DAT-name to `games/<Core>` table. `CoreAdapter` trait and implementations for every quirk, built on core's header constants, byte-order detection and XML reader. `/tmp/CORENAME` watcher. Installed-core detection from `_Console`, `_Computer`, `_Arcade` and `_Other`. MRA parsing for arcade wanted lists. MGL building and the `CommandSink` that hands `load_core` commands to MiSTer Main. | core |
 | `mistarr-sources` | Intake of dropped files: `StableFiles` reports a file once its mtime is old enough and its size held across two polls, once per size and mtime, and forgets files that are gone; `plan` picks a free name in `loaded/` without creating it, so the database can store it, and `place` then moves the file there by hard link, or by a rename after a name check where the file system has no hard links; `accept` and `reject` move a file into `loaded/` or `rejected/` under a free name picked with `create_new`, and `reject` writes `<name>.reason.txt` holding `reason\n`. `.torrent` parsing into a file list, over core's bencode. Binding a torrent to a platform by name and size overlap with loaded DATs. Mapping torrent file indices to DAT entries. | core |
 | `mistarr-clients` | `DownloadClient` trait and `connect`, which builds the client for a detected kind and address. Transmission JSON-RPC implementation. rtorrent XML-RPC over SCGI implementation. Client detection and, for rtorrent on stock, launch with a generated rc. Remote path mapping, both ways, inside each client. The one GET of a URL the user supplies, over hyper and rustls (`fetch`). Torrents arrive already parsed: a `TorrentSource` carries the infohash and file count, and `ClientTorrentId` wraps core's `InfoHash`. | core |
-| `mistarr-server` | The binary. axum HTTP server, SQLite via `rusqlite` (bundled), job scheduler, SSE event bus, embedded SPA via `rust-embed`, config, first-run wizard state, CLI flags. | all |
+| `mistarr-server` | The binary. axum HTTP server, SQLite via `rusqlite` (bundled), job scheduler, SSE event bus, embedded SPA via `rust-embed`, config, first-run wizard state, CLI flags. Dropping root at startup into a private mount view through `rustix`, and a seccomp filter through `seccompiler` (`harden`, DEPLOYMENT.md "Privileges"). | all |
 | `mistarr-fixture` | Development tool, never shipped: synthetic DATs, `.torrent` files, the synthetic set, a CHD v5 writer and bin/cue sets for CHD tests, and a local tracker for the tests in TESTING.md. | core, mister, sources |
 | `web/` | Svelte 5 + Vite + TypeScript SPA. Built to `web/dist`, embedded at compile time. | API.md |
 
@@ -135,7 +135,9 @@ names a client's error `ClientError` where it imports it beside its own.
 
 ### Startup
 
-1. Load config from `/media/fat/mistarr/mistarr.toml`, or defaults.
+1. Load config from `/media/fat/mistarr/mistarr.toml`, or defaults. Started
+   as root, enter the private mount view and drop to the `mistarr` account
+   before any thread starts (DEPLOYMENT.md "Privileges").
 2. Open or create SQLite at `/media/fat/mistarr/mistarr.db`, run migrations,
    on a copy in RAM when memory allows ("DAT import in RAM").
    Read CORENAME once, so the gate is closed from the start while a core is
@@ -825,7 +827,8 @@ at most 15 bytes (`threads::label`: `db-read`, `db-write`, `hash`,
 `scan-list`, `zip-list`, `dat-import`, `dat-save`, `source-file`,
 `source-watch`, `dat-watch`, `import`, `rename`, `arcade`, `romsets`,
 `launch`, `detect`, `incoming`, `io-class`, `chd-header`, `chd-decode`,
-`client-freeze`, `fetch`) and puts the pool name back when it ends; the
+`client-freeze`, `fetch`) with `PR_SET_NAME`, since `/proc` is read-only in
+the mount view (DEPLOYMENT.md "Privileges"), and puts the pool name back when it ends; the
 thread that reaps a started rtorrent is `rtorrent-reap`, the one that
 rewrites `mistarr.migrating` while migrations run is `db-migrate`, and a
 torrent's data is deleted under `torrent-delete`. The board's BusyBox

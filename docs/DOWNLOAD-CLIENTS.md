@@ -51,6 +51,10 @@ directory now exists the image also starts the daemon at every boot;
 removing the directory undoes that. Without the init script,
 `transmission-daemon` is run with `--config-dir /media/fat/mistarr/transmission`
 and `--download-dir /media/fat/mistarr/staging`, and daemonizes itself.
+The init script needs root and `/media/fat/linux` is read-only to mistarr
+once it dropped root (DEPLOYMENT.md "Privileges"), so there the start fails;
+create the directory and run `/etc/init.d/S92transmission start` as root, and
+the image starts the daemon at every boot after.
 
 "Start rtorrent" writes the managed rc to `rtorrent.rc` in the data
 directory, creates `rtorrent-session/` beside it and starts
@@ -209,6 +213,8 @@ pause with it.
    client's uploads are held instead, as for a client elsewhere, until the menu.
 2. No signal is sent to a process whose `/proc/<pid>/exe` is not `rtorrent`
    or `transmission-daemon`, whether stopping, stopping again or resuming.
+   For a client of another user, whose `exe` link mistarr cannot read once it
+   dropped root, the first word of its command line is checked instead.
 3. Before SIGSTOP, the pid and its start time from `/proc/<pid>/stat` are
    recorded in `client.frozen` in mistarr's private RAM directory,
    `/tmp/mistarr` or `MISTARR_TEMP_DIR`, which is mode 0700 and owned by
@@ -216,7 +222,8 @@ pause with it.
    without following links, synced and renamed into place; it is read only
    when it is a regular file of that user, in that directory, and not a
    link. SIGCONT is sent only while the pid still has that start time, so a
-   reused pid is never signalled. Signals go through the `kill` program.
+   reused pid is never signalled. mistarr sends the signals itself, so the
+   `CAP_KILL` it keeps after dropping root reaches a client of another user.
 4. While the client is stopped mistarr never calls it, since a stopped
    process never answers, and removing a source that is in the client is
    refused until the menu. Polling, transfers and magnet lookups wait and

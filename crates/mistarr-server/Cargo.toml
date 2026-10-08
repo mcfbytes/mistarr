@@ -38,7 +38,9 @@ clap.workspace = true
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 rusqlite = { workspace = true, features = ["bundled", "backup", "hooks"] }
 rust-embed = "8"
-rustix = { workspace = true, features = ["process"] }
+rustix = { workspace = true, features = ["process", "thread", "mount"] }
+seccompiler = { version = "0.5", default-features = false }
+libc = "0.2"
 serde_ignored = "0.1"
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "sync", "time", "fs", "signal", "macros"] }
 toml = { version = "1", default-features = false, features = ["std", "serde", "parse"] }

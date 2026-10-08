@@ -15,6 +15,10 @@ PORT="${MISTARR_PORT:-8420}"
 # Where mistarr records a download client it stopped while a core runs.
 FROZEN="${MISTARR_FROZEN:-${MISTARR_TEMP_DIR:-/tmp/mistarr}/client.frozen}"
 PROCDIR="${MISTARR_PROC:-/proc}"
+ETCDIR="${MISTARR_ETC:-/etc}"
+# The account the daemon drops to from root; see docs/DEPLOYMENT.md "Privileges".
+RUN_USER="${MISTARR_USER:-mistarr}"
+RUN_ID=8420
 # Resolved absolute path to this script, wherever it was invoked from.
 SELF=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 NAME=$(basename "$0")
@@ -184,6 +188,7 @@ start_locked() {
         return 1
     fi
     rm -f "$PIDFILE"
+    ensure_account
     (supervise) </dev/null >/dev/null 2>&1 &
     sup=$!
     echo "$sup" > "$SUPERFILE"
@@ -222,16 +227,47 @@ owner_mode() {
     fi
 }
 
+# Prints the uid the daemon drops to, resolving RUN_USER as the daemon does.
+daemon_uid() {
+    case "$RUN_USER" in
+        root) echo 0 ;;
+        [0-9]*) echo "${RUN_USER%%:*}" ;;
+        *)
+            id=$(grep "^$RUN_USER:" "$ETCDIR/passwd" 2>/dev/null | cut -d: -f3 | head -n1)
+            [ -z "$id" ] && [ "$RUN_USER" = mistarr ] && id=$RUN_ID
+            echo "$id"
+            ;;
+    esac
+}
+
+# Appends line $2 to file $1, after a newline when the file lacks a final one.
+append_line() {
+    last=$(tail -c 1 "$1")
+    { [ -n "$last" ] && echo; echo "$2"; } >> "$1"
+}
+
+# Adds the mistarr user and group, which an image update drops with the rest
+# of /etc; without them the daemon still runs as uid and gid RUN_ID.
+ensure_account() {
+    [ "$RUN_USER" = mistarr ] || return 0
+    taken() { grep -q "^$2:\|^[^:]*:[^:]*:$RUN_ID:" "$ETCDIR/$1" 2>/dev/null; }
+    { taken group mistarr || append_line "$ETCDIR/group" "mistarr:x:$RUN_ID:"; } 2>/dev/null
+    { taken passwd mistarr \
+        || append_line "$ETCDIR/passwd" "mistarr:x:$RUN_ID:$RUN_ID:mistarr:/nonexistent:/bin/false"; } 2>/dev/null
+    return 0
+}
+
 # Resumes a download client mistarr stopped for a running core, when the
 # recorded pid still names that process; see docs/DOWNLOAD-CLIENTS.md.
 thaw_client() {
     [ -e "$FROZEN" ] || [ -L "$FROZEN" ] || return 0
     fdir=$(dirname "$FROZEN")
-    me=$(id -u)
-    # Only a record mistarr wrote: a regular file of this user in its private directory.
+    owner=$(owner_mode "$FROZEN" | cut -d' ' -f1)
+    # Only a record mistarr wrote: a regular file of this user, or of the account
+    # the daemon drops to, in a private directory of the same owner.
     if [ -L "$FROZEN" ] || [ ! -f "$FROZEN" ] || [ -L "$fdir" ] \
-        || [ "$(owner_mode "$FROZEN" | cut -d' ' -f1)" != "$me" ] \
-        || [ "$(owner_mode "$fdir")" != "$me drwx------" ]; then
+        || { [ "$owner" != "$(id -u)" ] && [ "$owner" != "$(daemon_uid)" ]; } \
+        || [ "$(owner_mode "$fdir")" != "$owner drwx------" ]; then
         echo "ignoring $FROZEN: not a record mistarr wrote" >&2
         return 0
     fi
