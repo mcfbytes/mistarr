@@ -702,7 +702,7 @@ async fn status_unknown_torrent_is_not_found() {
 fn convert(torrent: Value) -> Result<TorrentStatus> {
     serde_json::from_value::<RawTorrent>(torrent)
         .map_err(Error::protocol)
-        .and_then(RawTorrent::into_status)
+        .and_then(|t| t.into_status(None))
 }
 
 #[test]
@@ -1025,5 +1025,148 @@ async fn an_added_torrent_without_a_valid_hash_is_a_protocol_error() {
     assert!(
         matches!(err, Error::Protocol(ref m) if m.contains("hashString")),
         "{err:?}"
+    );
+}
+
+#[test]
+fn checked_bytes_count_only_the_checked_pieces_a_file_overlaps() {
+    // Pieces of 4 bytes; a file of 8 bytes at offset 2 touches pieces 0, 1 and 2.
+    assert_eq!(checked_bytes(&[0b1110_0000], 4, 2, 8), 8);
+    assert_eq!(checked_bytes(&[0b0100_0000], 4, 2, 8), 4);
+    assert_eq!(checked_bytes(&[0b1010_0000], 4, 2, 8), 4);
+    assert_eq!(checked_bytes(&[], 4, 2, 8), 0);
+    assert_eq!(checked_bytes(&[0xff], 4, 3, 0), 0);
+    assert_eq!(checked_bytes(&[0xff], 0, 0, 5), 0);
+    assert_eq!(
+        checked_bytes(&[0, 0b0000_0001], 4, 60, 4),
+        4,
+        "piece 15 is the low bit"
+    );
+}
+
+proptest::proptest! {
+    #[test]
+    fn checked_bytes_match_a_byte_by_byte_count(
+        have in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..8),
+        piece_size in 1u64..20,
+        offset in 0u64..200,
+        length in 0u64..200,
+    ) {
+        let set = |p: u64| {
+            usize::try_from(p / 8).ok().and_then(|i| have.get(i)).is_some_and(|b| b & (0x80 >> (p % 8)) != 0)
+        };
+        let want = (offset..offset + length).filter(|&b| set(b / piece_size)).count() as u64;
+        proptest::prop_assert_eq!(checked_bytes(&have, piece_size, offset, length), want);
+    }
+}
+
+/// Three files in one 16-byte piece, only the middle one wanted, as a small game
+/// between two others in a large-piece set.
+fn shared_piece(pieces: &str, middle_done: u64) -> Value {
+    json!({
+        "id": 1, "hashString": hash(0xe1), "status": 4, "leftUntilDone": 6,
+        "error": 0, "errorString": "",
+        "fileStats": [
+            { "bytesCompleted": 0, "wanted": false, "priority": 0 },
+            { "bytesCompleted": middle_done, "wanted": true, "priority": 0 },
+            { "bytesCompleted": 6, "wanted": false, "priority": 0 },
+        ],
+        "rateDownload": 0, "rateUpload": 0, "uploadRatio": 0.0, "isFinished": false,
+        "pieces": pieces, "pieceSize": 16,
+    })
+}
+
+#[test]
+fn a_file_is_not_done_until_its_shared_piece_passed_its_check() {
+    let lengths = [6u64, 4, 6];
+    let parse = |t| serde_json::from_value::<RawTorrent>(t).expect("raw");
+    // Its own 4 bytes are in, but the piece still lacks the first file's bytes.
+    let st = parse(shared_piece("AA==", 4))
+        .into_status(Some(&lengths))
+        .expect("status");
+    assert_eq!(st.files[1].bytes_done, 3);
+    assert!(!st.file_done(1, 4));
+    // Piece 0 checked: the file is whole.
+    let st = parse(shared_piece("gA==", 4))
+        .into_status(Some(&lengths))
+        .expect("status");
+    assert_eq!(st.files[1].bytes_done, 4);
+    assert!(st.file_done(1, 4));
+    // A length list that does not fit the torrent is not used.
+    let st = parse(shared_piece("AA==", 4))
+        .into_status(Some(&[6, 4]))
+        .expect("status");
+    assert_eq!(st.files[1].bytes_done, 4);
+    let bad = parse(shared_piece("not base64!", 4)).into_status(Some(&lengths));
+    assert!(matches!(bad, Err(Error::Protocol(_))), "{bad:?}");
+}
+
+#[tokio::test]
+async fn file_lengths_are_read_once_per_torrent() {
+    let (fake, client) = setup().await;
+    let listing = json!({ "torrents": [{ "name": "set", "files": [
+        { "name": "set/a.zip", "length": 6 },
+        { "name": "set/b.zip", "length": 4 },
+        { "name": "set/c.zip", "length": 6 },
+    ] }] });
+    fake.push(FakeResponse::success(
+        json!({ "torrents": [shared_piece("AA==", 4)] }),
+    ));
+    fake.push(FakeResponse::success(listing));
+    fake.push(FakeResponse::success(
+        json!({ "torrents": [shared_piece("gA==", 4)] }),
+    ));
+    let first = client.status(&id(0xe1)).await.expect("status");
+    assert!(!first.file_done(1, 4));
+    let second = client.status(&id(0xe1)).await.expect("status");
+    assert!(second.file_done(1, 4));
+    let fields: Vec<Value> = fake
+        .bodies()
+        .iter()
+        .map(|b| b["arguments"]["fields"].clone())
+        .collect();
+    assert_eq!(
+        fields,
+        vec![
+            json!(STATUS_FIELDS),
+            json!(["name", "files"]),
+            json!(STATUS_FIELDS)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_magnet_without_metadata_reports_what_it_received() {
+    let (fake, client) = setup().await;
+    let mut t = shared_piece("AA==", 4);
+    t["fileStats"] = json!([]);
+    fake.push(FakeResponse::success(json!({ "torrents": [t] })));
+    fake.push(FakeResponse::success(
+        json!({ "torrents": [{ "name": "m", "files": [] }] }),
+    ));
+    let st = client.status(&id(0xe1)).await.expect("status");
+    assert!(st.files.is_empty());
+}
+
+#[tokio::test]
+async fn a_listing_it_cannot_read_falls_back_to_received_bytes_once() {
+    let (fake, client) = setup().await;
+    fake.push(FakeResponse::success(
+        json!({ "torrents": [shared_piece("AA==", 4)] }),
+    ));
+    fake.push(FakeResponse::success(
+        json!({ "torrents": [{ "name": "set", "files": 7 }] }),
+    ));
+    fake.push(FakeResponse::success(
+        json!({ "torrents": [shared_piece("AA==", 4)] }),
+    ));
+    for _ in 0..2 {
+        let st = client.status(&id(0xe1)).await.expect("status");
+        assert_eq!(st.files[1].bytes_done, 4);
+    }
+    assert_eq!(
+        fake.requests().len(),
+        3,
+        "the listing is not asked for again"
     );
 }

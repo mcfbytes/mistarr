@@ -344,7 +344,8 @@ pub enum TorrentState {
 pub struct FileProgress {
     /// Index in the torrent's file list.
     pub index: u32,
-    /// Bytes of this file the client has verified.
+    /// Bytes of this file the client has; it equals the size only once every
+    /// piece the file touches has passed the client's check.
     pub bytes_done: u64,
     /// Size of the file in bytes; `None` when the client's status leaves sizes to
     /// [`DownloadClient::files`] and the metainfo, as Transmission's does for an unfinished torrent.

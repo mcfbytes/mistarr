@@ -1,6 +1,8 @@
 //! Transmission over JSON-RPC; see `docs/DOWNLOAD-CLIENTS.md` "Transmission".
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -22,8 +24,10 @@ use crate::{
 };
 
 /// Fields requested by [`DownloadClient::status`]: `fileStats` without `files`, whose
-/// names would make a large torrent's reply exceed the body limit on every poll.
-const STATUS_FIELDS: [&str; 11] = [
+/// names would make a large torrent's reply exceed the body limit on every poll, and
+/// `pieces`, the pieces that passed their check, since `bytesCompleted` counts blocks
+/// received before their piece is checked.
+const STATUS_FIELDS: [&str; 13] = [
     "id",
     "hashString",
     "status",
@@ -35,7 +39,12 @@ const STATUS_FIELDS: [&str; 11] = [
     "rateUpload",
     "uploadRatio",
     "isFinished",
+    "pieces",
+    "pieceSize",
 ];
+
+/// Torrents whose file lengths [`Transmission`] keeps; past it the cache starts over.
+const LENGTHS_CACHED: usize = 64;
 
 /// Transmission's `error` value for a local error, which stops the torrent.
 const LOCAL_ERROR: i64 = 3;
@@ -59,6 +68,8 @@ pub struct Transmission {
     timeout: Duration,
     path_map: RemotePathMap,
     session: Mutex<Option<String>>,
+    /// File lengths per torrent, read once from `files` to place files on pieces.
+    lengths: Mutex<HashMap<InfoHash, Arc<[u64]>>>,
 }
 
 impl std::fmt::Debug for Transmission {
@@ -116,6 +127,7 @@ impl Transmission {
             timeout: Self::DEFAULT_TIMEOUT,
             path_map: RemotePathMap::default(),
             session: Mutex::new(None),
+            lengths: Mutex::new(HashMap::new()),
         })
     }
 
@@ -203,6 +215,30 @@ impl Transmission {
     }
 
     /// `torrent-get` for one torrent read as `T`; [`Error::NotFound`] if absent.
+    /// The torrent's file lengths, from the cache or `files`; `None` while a magnet
+    /// has no metadata. A reply refused as malformed or too large is kept as no
+    /// lengths, so the torrent falls back to received bytes instead of failing each poll.
+    async fn file_lengths(&self, id: &ClientTorrentId, hash: &str) -> Result<Option<Arc<[u64]>>> {
+        let Ok(infohash) = hash.parse::<InfoHash>() else {
+            return Ok(None);
+        };
+        if let Some(found) = self.lengths.lock().await.get(&infohash) {
+            return Ok(Some(Arc::clone(found)));
+        }
+        let lengths: Arc<[u64]> = match DownloadClient::files(self, id).await {
+            Ok(files) => files.iter().map(|f| f.size).collect(),
+            Err(Error::MetadataPending) => return Ok(None),
+            Err(Error::Protocol(_)) => Arc::from([]),
+            Err(e) => return Err(e),
+        };
+        let mut cache = self.lengths.lock().await;
+        if cache.len() >= LENGTHS_CACHED {
+            cache.clear();
+        }
+        cache.insert(infohash, Arc::clone(&lengths));
+        Ok(Some(lengths))
+    }
+
     async fn get_one<T: DeserializeOwned>(
         &self,
         session: &mut Option<String>,
@@ -428,7 +464,11 @@ impl DownloadClient for Transmission {
         let mut session = self.session.lock().await;
         let raw: RawTorrent = self.get_one(&mut session, id, &STATUS_FIELDS).await?;
         drop(session);
-        raw.into_status()
+        let lengths = match raw.pieces {
+            Some(_) => self.file_lengths(id, &raw.hash_string).await?,
+            None => None,
+        };
+        raw.into_status(lengths.as_deref())
     }
 
     async fn files(&self, id: &ClientTorrentId) -> Result<Vec<ClientFile>> {
@@ -603,6 +643,26 @@ struct RawTorrent {
     upload_ratio: f64,
     #[serde(default)]
     is_finished: bool,
+    /// Base64 bitfield, high bit first, of the pieces that passed their check.
+    #[serde(default)]
+    pieces: Option<String>,
+    #[serde(default)]
+    piece_size: u64,
+}
+
+/// Bytes of the file at `offset` with `length` that lie in pieces set in `have`.
+fn checked_bytes(have: &[u8], piece_size: u64, offset: u64, length: u64) -> u64 {
+    if length == 0 || piece_size == 0 {
+        return 0;
+    }
+    let end = offset + length;
+    (offset / piece_size..=(end - 1) / piece_size)
+        .filter(|&p| {
+            let byte = usize::try_from(p / 8).ok().and_then(|i| have.get(i));
+            byte.is_some_and(|b| b & (0x80 >> (p % 8)) != 0)
+        })
+        .map(|p| end.min((p + 1) * piece_size) - offset.max(p * piece_size))
+        .sum()
 }
 
 #[derive(Deserialize)]
@@ -649,23 +709,46 @@ struct RawFileStat {
 }
 
 impl RawTorrent {
-    fn into_status(self) -> Result<TorrentStatus> {
+    /// With `pieces` and every file's length, a file's bytes are held one short of
+    /// its length until all its pieces passed their check, as a piece shared with
+    /// a file still downloading is not checked when this file's own blocks are in.
+    fn into_status(self, lengths: Option<&[u64]>) -> Result<TorrentStatus> {
         let infohash: InfoHash = self
             .hash_string
             .parse()
             .map_err(|_| Error::protocol(format!("bad hashString {:?}", self.hash_string)))?;
         // With nothing left every wanted file is whole, so its size is what the client has.
         let all_done = self.left_until_done == Some(0);
+        let have = match (&self.pieces, lengths) {
+            (Some(text), Some(l)) if l.len() == self.file_stats.len() => {
+                let bits = BASE64
+                    .decode(text)
+                    .map_err(|_| Error::protocol("pieces is not base64"))?;
+                Some((bits, l))
+            }
+            _ => None,
+        };
+        let mut offset = 0u64;
         let files = self
             .file_stats
             .into_iter()
             .zip(0u32..)
             .map(|(stat, index)| {
                 let wanted = stat.wanted.into_bool();
+                let mut bytes_done = stat.bytes_completed;
+                let length = have
+                    .as_ref()
+                    .and_then(|(_, l)| l.get(index as usize).copied());
+                if let (Some((bits, _)), Some(length)) = (&have, length) {
+                    if checked_bytes(bits, self.piece_size, offset, length) < length {
+                        bytes_done = bytes_done.min(length.saturating_sub(1));
+                    }
+                    offset += length;
+                }
                 FileProgress {
                     index,
-                    bytes_done: stat.bytes_completed,
-                    size: (wanted && all_done).then_some(stat.bytes_completed),
+                    bytes_done,
+                    size: (wanted && all_done).then_some(bytes_done),
                     wanted,
                 }
             })
