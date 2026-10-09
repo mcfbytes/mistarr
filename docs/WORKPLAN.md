@@ -29,6 +29,7 @@ code. Guidance:
 | Opus | Parsers with many edge cases, protocol clients, adapters with per-platform quirks, server assembly, anything touching the DownloadClient or CoreAdapter contracts |
 | Sonnet | Well-specified pure logic with a clear test table, the SPA shell, hashing, build tooling |
 | Haiku | Mechanical work: CI config, grep gates, scripts, doc table updates, renames |
+| Flash | DeepSeek Flash through `claude-deepseek`: changes of 100 to 400 lines whose task file names the files, tests and commands; reviewed by Sonnet or stronger before its pull request |
 
 ## Wave 0: foundation
 
@@ -129,6 +130,23 @@ Each package's acceptance is its task list in CONSOLIDATION.md, every box ticked
 | WP-69 | Digests, names and ids across crates | Opus | 62, 68, 70 | every crate |
 | WP-71 | Server surface and test helpers | Sonnet | 69 | `mistarr-server` |
 | WP-72 | Docs sweep | Haiku | 71 | `docs/` |
+
+## Wave 12: second board test
+
+Findings from loading 58 DATs and 55 torrents on the board. WP-75 and
+WP-78 to WP-81 run in parallel; WP-76 waits for its core facts.
+
+| WP | Name | Model | Depends | Acceptance |
+|---|---|---|---|---|
+| WP-75 | Source file names | Flash | none | The Sources list shows each source's dropped file name, less its `.torrent` or `.magnet` extension, under the display name when the two differ, and the remove, keep and seed-policy labels add the file name when two listed sources share a display name; the mock holds two sources with one display name; Playwright covers both rows. |
+| WP-76 | More console platforms | Opus, then Flash | none | Platform rows for Odyssey2, Astrocade, Channel F, Gamate, CreatiVision, Arcadia, VC 4000, Adventure Vision, My Vision and PV-1000, each with the core name, games directory, load extensions and MGL file index taken from the core's own CONF_STR and marked verify until a board run confirms them; their No-Intro DAT names bind; Game & Watch stays unbound, since its cores load converted artwork sets that no DAT lists; PLATFORMS.md lists each. |
+| WP-77 | Batch DAT imports in RAM | Opus | 43 | When several DAT imports are queued, one copy in RAM applies as many of them as its need allows and writes the database back once; each DAT keeps its own job, progress, outcome and rejection, and one that fails is rejected alone while the batch goes on; the need sums the batch's DATs and falls back to a smaller batch, then to the card; tests count one write-back for a batch of small DATs and compare every row with the same DATs imported one at a time. |
+| WP-78 | Import mode notice and card mount advice | Flash | 43 | `/system/status` adds `dat_import_in_ram` (`possible`, `need_mib`, `available_mib`, `floor_mib`, from `db::ram::need` for the current database and a 1 MiB DAT) and `card_sync_mount` (whether `/proc/mounts` mounts the data directory `sync`); System shows a notice while imports in RAM are not possible, and, on a `sync` card, says that lifting `sync` speeds up imports on the card at the cost of more loss on a power cut; DEPLOYMENT.md says the same; unit tests cover the mount parsing and the notice's numbers. |
+| WP-79 | Clear rejection reasons | Flash | none | A dropped or uploaded DAT, torrent or magnet that is empty is rejected as empty; one whose first bytes are an HTML document is rejected as a web page from a failed download; a damaged zip is rejected as damaged or incomplete with the library's detail only at debug; no reason repeats a phrase; tests cover each reason for DATs, torrents and magnets; DATS.md "Rejections" lists them. |
+| WP-80 | Source imports in Activity | Flash | 40 | `/system/jobs/recent` lists `source_import` and `bind_source` jobs and folds each run of consecutive finished jobs of one kind and outcome into one item with its `count` and first and last times, still 10 items; Activity shows a folded run as "50 sources imported" or "12 DATs loaded" linking to Sources or DATs; API.md, db and plan tests, and a Playwright mock test. |
+| WP-81 | Indexes for source and platform reads | Flash | 49 | A migration adds `torrent_files(source_id, rom_id)`, `roms(id, title_id)`, `titles(id, dat_version_id)` and a covering `title_groups` index for the platform counts, and rebuilds `roms_match_name` and `roms_match_base` with `title_id` appended; source detail counts matched files from the index and reads paths only for unmatched ones, its DATs query and `/sources` matched counts read index pages only, and results are unchanged; plan tests assert each. |
+| WP-82 | Source preview in one query per chunk | Opus | 81 | `GET /sources/{id}/preview` scores each chunk of sampled files with one statement over a `file_index` range or a bound key list, joined to the covering match indexes and grouped by platform, in place of two lookups per file; binding and preview share one scoring rule, held equal to the per-file path by a proptest; a plan test shows index seeks only; nothing is cached or stored. |
+| WP-83 | Normalised columns | Opus, then Flash | 81, 82 | DATA-MODEL.md names every text column that holds an enumeration or a repeated key (platform ids, states, sources, confidences, job kinds, hashes), its integer or blob form and the migration order; one package per table then converts it with a migration and typed accessors behind an unchanged API, each holding every row equal across the migration in a test and recording the seeded catalogue's database size before and after. |
 
 ## Suggested fan-out
 
