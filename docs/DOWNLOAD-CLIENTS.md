@@ -95,16 +95,24 @@ array as "all files". An empty list is never sent to mean "none".
 | add | `torrent-add` with `metainfo` (base64 .torrent) or `filename` (magnet), `download-dir`, `paused: true`, `files-unwanted` = all indices except wanted, file count taken from the metainfo. For torrents with more than 2000 files, add without a selection, then `torrent-set` `files-unwanted: []` (all off), then `torrent-set` `files-wanted` with the wanted list, then verify the `wanted` field with `torrent-get`. For a magnet, read `wanted` after adding and apply the selection the same way if metadata is present. A `torrent-duplicate` reply still gets the selection (via `torrent-set`) and the seed policy, so a retried add repairs a half-applied one. |
 | set_wanted | `torrent-get` `wanted` for the file count, then `torrent-set` with `files-wanted` / `files-unwanted`, using the large-torrent sequence above past 2000 files |
 | start / stop | `torrent-get` `id` to confirm the torrent exists, then `torrent-start` / `torrent-stop` |
-| status | `torrent-get` fields `id, hashString, status, leftUntilDone, error, errorString, fileStats, rateDownload, rateUpload, uploadRatio, isFinished`; not `files`, whose names would put a 100 000-file torrent's reply over the 16 MiB body limit on every poll |
+| status | `torrent-get` fields `id, hashString, status, leftUntilDone, error, errorString, fileStats, rateDownload, rateUpload, uploadRatio, isFinished, pieces, pieceSize`; not `files`, whose names would put a 100 000-file torrent's reply over the 16 MiB body limit on every poll |
 | files | `torrent-get` fields `name, files`; an empty `files` list is "metadata pending". A multi-file torrent's file names start with `<name>/`, which is stripped |
 | remove | `torrent-get` `id`, then `torrent-remove` with `delete-local-data` |
 | rate limits | Per direction. Read: `session-get` `speed-limit-down, speed-limit-down-enabled`, or the same for up. Set: `session-set` both fields as given, so a limit read with its switch off keeps its rate. Held: `speed-limit-up: 0` with `speed-limit-up-enabled: true`, which Transmission keeps as zero. |
 | seed policy | On add and `set_seed_policy` (after a `torrent-get` `id` existence check): `torrent-set` `seedRatioMode: 1` (use this torrent's limit) with `seedRatioLimit` N for "until ratio N". "None" sends `seedRatioMode: 2` (unlimited), so a session ratio limit never stops the torrent and only the poller does. "Client default" sends `seedRatioMode: 0` (session default), skipped on a fresh add where it is already 0. |
 
 `fileStats[i].bytesCompleted` divided by the file's size from the metainfo
-(`torrent_files.size`) is the per-file progress. A file is complete when
-equal and the torrent is not in `status = 1` or `2` (waiting to check,
-checking). The status carries no sizes, except that with `leftUntilDone = 0`
+(`torrent_files.size`) is the per-file progress. `bytesCompleted` counts
+blocks received, and a piece is checked, and its files lose the `.part`
+suffix, only once all its blocks are in. A small file sharing a large piece
+with a file still downloading therefore has all its bytes before its piece
+is checked. So the client also reads `pieces`, the base64 bitfield of the
+pieces that passed their check, and places each file on pieces using the
+lengths from `files`, fetched once per torrent and kept for up to 64
+torrents. A file with an unchecked piece reports at most its size less one
+byte. A listing Transmission cannot send, such as one over the body limit,
+leaves that torrent on received bytes alone. A file is complete when the two are equal and the torrent is not in
+`status = 1` or `2` (waiting to check, checking). The status carries no sizes, except that with `leftUntilDone = 0`
 every wanted file is whole and reports its `bytesCompleted` as its size,
 which is what the seed-policy stop reads.
 
