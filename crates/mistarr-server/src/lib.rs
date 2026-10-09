@@ -31,6 +31,10 @@ pub mod freeze;
 #[cfg(not(feature = "test-support"))]
 pub(crate) mod freeze;
 #[cfg(feature = "test-support")]
+pub mod harden;
+#[cfg(not(feature = "test-support"))]
+pub(crate) mod harden;
+#[cfg(feature = "test-support")]
 pub mod http;
 #[cfg(not(feature = "test-support"))]
 pub(crate) mod http;
