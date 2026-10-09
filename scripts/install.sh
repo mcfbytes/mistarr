@@ -18,6 +18,9 @@ DB="$INSTALL_DIR/mistarr.db"
 DB_PREV="$DB.prev"
 # Where mistarr records a download client it stopped while a core runs.
 FROZEN="${MISTARR_FROZEN:-${MISTARR_TEMP_DIR:-/tmp/mistarr}/client.frozen}"
+ETCDIR="${MISTARR_ETC:-/etc}"
+# The account the daemon drops to from root; see docs/DEPLOYMENT.md "Privileges".
+RUN_USER="${MISTARR_USER:-mistarr}"
 PROCDIR="${MISTARR_PROC:-/proc}"
 # Written once a rollback set is complete; a set without it is never restored.
 PREV_OK="$PREV.ok"
@@ -413,16 +416,30 @@ owner_mode() {
     fi
 }
 
+# Prints the uid the daemon drops to, resolving RUN_USER as the daemon does.
+daemon_uid() {
+    case "$RUN_USER" in
+        root) echo 0 ;;
+        [0-9]*) echo "${RUN_USER%%:*}" ;;
+        *)
+            id=$(grep "^$RUN_USER:" "$ETCDIR/passwd" 2>/dev/null | cut -d: -f3 | head -n1)
+            [ -z "$id" ] && [ "$RUN_USER" = mistarr ] && id=8420
+            echo "$id"
+            ;;
+    esac
+}
+
 # Resumes a download client mistarr stopped for a running core, when the
 # recorded pid still names that process; see docs/DOWNLOAD-CLIENTS.md.
 thaw_client() {
     [ -e "$FROZEN" ] || [ -L "$FROZEN" ] || return 0
     fdir=$(dirname "$FROZEN")
-    me=$(id -u)
-    # Only a record mistarr wrote: a regular file of this user in its private directory.
+    owner=$(owner_mode "$FROZEN" | cut -d' ' -f1)
+    # Only a record mistarr wrote: a regular file of this user, or of the account
+    # the daemon drops to, in a private directory of the same owner.
     if [ -L "$FROZEN" ] || [ ! -f "$FROZEN" ] || [ -L "$fdir" ] \
-        || [ "$(owner_mode "$FROZEN" | cut -d' ' -f1)" != "$me" ] \
-        || [ "$(owner_mode "$fdir")" != "$me drwx------" ]; then
+        || { [ "$owner" != "$(id -u)" ] && [ "$owner" != "$(daemon_uid)" ]; } \
+        || [ "$(owner_mode "$fdir")" != "$owner drwx------" ]; then
         echo "ignoring $FROZEN: not a record mistarr wrote" >&2
         return 0
     fi

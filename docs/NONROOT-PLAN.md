@@ -1,7 +1,8 @@
 # Non-root plan: mistarr, Transmission and rtorrent
 
 A proposal for running mistarr and its BitTorrent clients as non-root users on
-MiSTer. It is not implemented. File and line references are to mistarr at
+MiSTer. It is not implemented; the server's own drop to a non-root account
+in a private mount view is in DEPLOYMENT.md "Privileges". File and line references are to mistarr at
 `c08f4d3`, Buildroot_MiSTer at `ba25ce1`, minijail `main` at
 `linux-v2026.05.18`, Main_MiSTer at `57276f0` and Linux-Kernel_MiSTer at
 `e24da58`. "Critic gap N" refers to the adversarial review this plan absorbed;

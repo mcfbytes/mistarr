@@ -247,7 +247,8 @@ impl Signal {
     }
 }
 
-/// Sends signals through the `kill` program, which `BusyBox` provides.
+/// Sends signals: in-process for the bare name `kill`, so the `CAP_KILL` the
+/// server keeps after dropping root applies, else through the named program.
 #[derive(Debug, Clone)]
 pub struct Kill {
     program: PathBuf,
@@ -270,8 +271,20 @@ impl Kill {
     ///
     /// # Errors
     ///
-    /// [`FreezeError::Kill`] when `kill` cannot run or exits with an error.
+    /// [`FreezeError::Kill`] when the signal fails, or `kill` cannot run or exits with an error.
     pub fn send(&self, pid: u32, signal: Signal) -> Result<(), FreezeError> {
+        if self.program == Path::new("kill") {
+            let target = i32::try_from(pid)
+                .ok()
+                .and_then(rustix::process::Pid::from_raw)
+                .ok_or(FreezeError::Gone(pid))?;
+            let sig = match signal {
+                Signal::Stop => rustix::process::Signal::STOP,
+                Signal::Cont => rustix::process::Signal::CONT,
+            };
+            return rustix::process::kill_process(target, sig)
+                .map_err(|e| FreezeError::Kill(e.to_string()));
+        }
         let out = Command::new(&self.program)
             .args([signal.arg(), &pid.to_string()])
             .stdin(Stdio::null())
@@ -300,16 +313,14 @@ fn exe_name(name: &str) -> &str {
     name.strip_suffix(" (deleted)").unwrap_or(name)
 }
 
-/// Checks that `pid` runs a download client, by the file its `exe` link names.
+/// Checks that `pid` runs a download client, by [`process_name`]: the `exe`
+/// link, or the command line of a client run by another user.
 ///
 /// # Errors
 ///
 /// [`FreezeError::NotClient`] when it runs anything else or cannot be read.
 pub fn check_client(proc: &Path, pid: u32) -> Result<(), FreezeError> {
-    let exe = std::fs::read_link(proc.join(pid.to_string()).join("exe"))
-        .map_err(|_| FreezeError::NotClient(pid))?;
-    let name = exe.file_name().map(|n| n.to_string_lossy().into_owned());
-    if name.is_some_and(|n| CLIENT_NAMES.contains(&exe_name(&n))) {
+    if process_name(proc, pid).is_some_and(|n| CLIENT_NAMES.contains(&n.as_str())) {
         Ok(())
     } else {
         Err(FreezeError::NotClient(pid))

@@ -16,9 +16,11 @@ while :; do sleep 1; done
 STUB
 chmod +x "$root/mistarr/mistarr"
 
+mkdir -p "$root/etc"
 MISTARR_ROOT="$root"
 MISTARR_RUNDIR="$root/run"
-export MISTARR_ROOT MISTARR_RUNDIR
+MISTARR_ETC="$root/etc"
+export MISTARR_ROOT MISTARR_RUNDIR MISTARR_ETC
 
 fail=0
 
@@ -310,6 +312,28 @@ expect "$(cat "$root/prio" 2>/dev/null)" "nice -n 10 $root/mistarr/mistarr" \
     "the daemon runs under nice -n 10 and no ionice"
 "$script" stop >/dev/null
 rm -f "$fakebin/nice" "$fakebin/ionice"
+
+# start puts back the mistarr user and group an image update dropped, once.
+printf 'root:x:0:0:root:/root:/bin/sh' > "$root/etc/passwd"
+printf 'root:x:0:\n' > "$root/etc/group"
+"$script" start >/dev/null
+"$script" stop >/dev/null
+"$script" start >/dev/null
+"$script" stop >/dev/null
+expect "$(cat "$root/etc/passwd")" "root:x:0:0:root:/root:/bin/sh
+mistarr:x:8420:8420:mistarr:/nonexistent:/bin/false" "start adds the mistarr user once"
+expect "$(cat "$root/etc/group")" "root:x:0:
+mistarr:x:8420:" "start adds the mistarr group once"
+printf 'other:x:8420:8420::/:/bin/false\n' > "$root/etc/passwd"
+: > "$root/etc/group"
+MISTARR_USER=media "$script" start >/dev/null
+"$script" stop >/dev/null
+expect "$(cat "$root/etc/group")" "" "another account name adds nothing"
+"$script" start >/dev/null
+"$script" stop >/dev/null
+expect "$(cat "$root/etc/passwd")" "other:x:8420:8420::/:/bin/false" \
+    "a uid already taken is not added again"
+rm -f "$root/etc/passwd" "$root/etc/group"
 
 # stop resumes a client a daemon left stopped, only while its pid is the same client.
 start_of() { sed 's/.*) //' "/proc/$1/stat" | cut -d' ' -f20; }

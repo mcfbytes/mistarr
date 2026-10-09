@@ -206,8 +206,10 @@ fn get_comm() -> Option<String> {
 
 #[cfg(target_os = "linux")]
 fn set_comm(name: &str) {
-    // procfs truncates past 15 bytes; a failure only leaves the old name.
-    let _ = std::fs::write("/proc/thread-self/comm", name);
+    // The kernel truncates past 15 bytes; a failure only leaves the old name.
+    if let Ok(name) = std::ffi::CString::new(name) {
+        let _ = rustix::thread::set_name(&name);
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
