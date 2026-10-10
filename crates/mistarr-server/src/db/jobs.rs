@@ -382,16 +382,36 @@ pub fn fail_unreadable(conn: &Connection, error: &str, now: i64) -> Result<usize
 }
 
 /// The kinds `/system/jobs/recent` lists: work a user starts or waits on.
-pub const RECENT_KINDS: [JobKind; 6] = [
+pub const RECENT_KINDS: [JobKind; 8] = [
     JobKind::Scan,
     JobKind::ArcadeCatalog,
     JobKind::DatImport,
     JobKind::Recompute,
     JobKind::Import,
     JobKind::UrlFetch,
+    JobKind::SourceImport,
+    JobKind::BindSource,
 ];
 
-/// Up to `limit` finished jobs of [`RECENT_KINDS`], most recently updated first.
+/// Finished rows one page of [`recent_finished`] reads.
+const RECENT_PAGE: u32 = 50;
+
+/// A finished job, or a run of consecutive finished jobs of one kind and outcome
+/// folded into one: the newest row's fields, the run's size and the oldest row's
+/// `updated_at`.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecentRun {
+    /// The run's newest row.
+    pub row: JobRow,
+    /// Rows in the run, 1 when it stands alone.
+    pub count: u32,
+    /// The run's oldest row's `updated_at`, equal to `row.updated_at` when alone.
+    pub first_updated_at: i64,
+}
+
+/// Up to `limit` items of [`RECENT_KINDS`], most recently updated first. Consecutive
+/// rows of one kind that ended the same way fold into one [`RecentRun`]; scans and
+/// recomputes of different platforms stay apart.
 ///
 /// # Errors
 ///
@@ -405,19 +425,72 @@ pub const RECENT_KINDS: [JobKind; 6] = [
 /// let id = jobs::insert(&conn, JobKind::Scan, &serde_json::json!({}), Lane::Heavy, 1).unwrap();
 /// assert!(jobs::recent_finished(&conn, 5).unwrap().is_empty());
 /// jobs::set_state(&conn, id, jobs::JobState::Done, 2).unwrap();
-/// assert_eq!(jobs::recent_finished(&conn, 5).unwrap()[0].id, id);
+/// let runs = jobs::recent_finished(&conn, 5).unwrap();
+/// assert_eq!((runs[0].row.id, runs[0].count), (id, 1));
 /// ```
-pub fn recent_finished(conn: &Connection, limit: u32) -> Result<Vec<JobRow>> {
+pub fn recent_finished(conn: &Connection, limit: u32) -> Result<Vec<RecentRun>> {
+    let kinds = sql::json_list(&RECENT_KINDS)?;
+    sql::snapshot(conn, |c| {
+        let mut runs: Vec<RecentRun> = Vec::new();
+        let mut offset = 0;
+        loop {
+            let rows = recent_page(c, &kinds, RECENT_PAGE, offset)?;
+            let last_page = rows.len() < RECENT_PAGE as usize;
+            for row in rows {
+                match runs.last_mut() {
+                    Some(run) if same_run(&run.row, &row) => {
+                        run.count += 1;
+                        run.first_updated_at = row.updated_at;
+                    }
+                    _ => runs.push(RecentRun {
+                        first_updated_at: row.updated_at,
+                        row,
+                        count: 1,
+                    }),
+                }
+            }
+            // A full page may hold one run's start and another's end; only a filled
+            // limit or the last page ends the read.
+            if last_page || runs.len() >= limit as usize {
+                break;
+            }
+            offset += RECENT_PAGE;
+        }
+        runs.truncate(limit as usize);
+        Ok(runs)
+    })
+}
+
+/// One page of finished [`RECENT_KINDS`] rows, most recently updated first.
+fn recent_page(conn: &Connection, kinds: &str, limit: u32, offset: u32) -> Result<Vec<JobRow>> {
     select(
         conn,
         &format!(
             "SELECT {COLUMNS} FROM jobs
              WHERE state IN {} AND kind IN (SELECT value FROM json_each(?1))
-             ORDER BY updated_at DESC, id DESC LIMIT ?2",
+             ORDER BY updated_at DESC, id DESC LIMIT ?2 OFFSET ?3",
             JobState::FINISHED_SQL
         ),
-        params![sql::json_list(&RECENT_KINDS)?, limit],
+        params![kinds, limit, offset],
     )
+}
+
+/// Whether `next` continues the run whose newest row is `last`: the same kind and
+/// outcome, and the same platform for kinds whose payload names one.
+fn same_run(last: &JobRow, next: &JobRow) -> bool {
+    last.kind == next.kind
+        && last.state == next.state
+        && fold_platform(last.kind, &last.payload) == fold_platform(next.kind, &next.payload)
+}
+
+/// The `platform_id` of a kind whose payload names a platform, which keeps runs of
+/// different platforms apart.
+fn fold_platform(kind: JobKind, payload: &Value) -> Option<&Value> {
+    if matches!(kind, JobKind::Scan | JobKind::Recompute) {
+        payload.get("platform_id")
+    } else {
+        None
+    }
 }
 
 /// Open jobs on `lane`, oldest first.
@@ -812,16 +885,151 @@ mod tests {
         assert!(get(&c, lane).is_err() && get(&c, payload).is_err());
         assert_eq!(fail_unreadable(&c, "unreadable", 2).expect("fail"), 2);
         let recent = recent_finished(&c, 10).expect("recent");
-        let ids = recent.iter().map(|r| r.id).collect::<Vec<_>>();
+        let ids = recent.iter().map(|r| r.row.id).collect::<Vec<_>>();
         assert_eq!(ids, [payload, lane, done]);
+        assert!(recent.iter().all(|r| r.count == 1), "no two fold together");
         assert_eq!(
-            (recent[0].lane, &recent[0].payload),
+            (recent[0].row.lane, &recent[0].row.payload),
             (Lane::Heavy, &json!({}))
         );
         assert_eq!(
-            (recent[1].lane, &recent[1].payload),
+            (recent[1].row.lane, &recent[1].row.payload),
             (Lane::Light, &json!({"a": 1}))
         );
-        assert_eq!(recent[0].progress, Some(json!({ "error": "unreadable" })));
+        assert_eq!(
+            recent[0].row.progress,
+            Some(json!({ "error": "unreadable" }))
+        );
+    }
+
+    /// Inserts a job of `kind` with `payload` and finishes it in `state` at `at`.
+    fn finished(c: &Connection, kind: JobKind, payload: &Value, state: JobState, at: i64) -> JobId {
+        let id = insert(c, kind, payload, Lane::Background, at).expect("insert");
+        set_state(c, id, state, at).expect("state");
+        id
+    }
+
+    #[test]
+    fn consecutive_source_imports_fold_into_one_run() {
+        let c = conn();
+        let import = |name: &str| json!({ "path": format!("/s/{name}.torrent") });
+        for i in 0..12 {
+            finished(
+                &c,
+                JobKind::SourceImport,
+                &import("old"),
+                JobState::Done,
+                100 + i,
+            );
+        }
+        finished(
+            &c,
+            JobKind::DatImport,
+            &json!({"path": "/d/a.dat"}),
+            JobState::Done,
+            200,
+        );
+        for i in 0..3 {
+            finished(
+                &c,
+                JobKind::SourceImport,
+                &import("new"),
+                JobState::Done,
+                300 + i,
+            );
+        }
+        let runs = recent_finished(&c, 10).expect("recent");
+        let counts: Vec<u32> = runs.iter().map(|r| r.count).collect();
+        assert_eq!(counts, [3, 1, 12], "newest run first");
+        assert_eq!(
+            (runs[0].first_updated_at, runs[0].row.updated_at),
+            (300, 302)
+        );
+        assert_eq!(runs[1].row.kind, JobKind::DatImport);
+        assert_eq!(
+            (runs[1].first_updated_at, runs[1].row.updated_at),
+            (200, 200),
+            "a lone item spans one instant"
+        );
+        assert_eq!(runs[2].first_updated_at, 100);
+    }
+
+    #[test]
+    fn a_failed_row_splits_a_run() {
+        let c = conn();
+        let import = json!({ "path": "/s/a.torrent" });
+        finished(&c, JobKind::SourceImport, &import, JobState::Done, 1);
+        finished(&c, JobKind::SourceImport, &import, JobState::Done, 2);
+        finished(&c, JobKind::SourceImport, &import, JobState::Failed, 3);
+        finished(&c, JobKind::SourceImport, &import, JobState::Done, 4);
+        let runs = recent_finished(&c, 10).expect("recent");
+        let counts: Vec<u32> = runs.iter().map(|r| r.count).collect();
+        assert_eq!(counts, [1, 1, 2], "the failed row ends the run below it");
+        assert_eq!(runs[1].row.state, JobState::Failed);
+        assert_eq!(runs[2].row.state, JobState::Done);
+    }
+
+    #[test]
+    fn scans_of_different_platforms_stay_apart() {
+        let c = conn();
+        for (id, at) in [("nes", 1), ("nes", 2), ("snes", 3), ("snes", 4)] {
+            finished(
+                &c,
+                JobKind::Scan,
+                &json!({"platform_id": id}),
+                JobState::Done,
+                at,
+            );
+        }
+        let runs = recent_finished(&c, 10).expect("recent");
+        let counts: Vec<u32> = runs.iter().map(|r| r.count).collect();
+        assert_eq!(counts, [2, 2]);
+        assert_eq!(runs[0].row.payload["platform_id"], "snes");
+        assert_eq!(runs[1].row.payload["platform_id"], "nes");
+    }
+
+    #[test]
+    fn the_limit_caps_items_not_rows() {
+        let c = conn();
+        for i in 0..30 {
+            finished(
+                &c,
+                JobKind::SourceImport,
+                &json!({"path": "/s/a.torrent"}),
+                JobState::Done,
+                i,
+            );
+        }
+        for i in 0..20 {
+            finished(
+                &c,
+                JobKind::DatImport,
+                &json!({"path": "/d/a.dat"}),
+                JobState::Done,
+                100 + i,
+            );
+        }
+        let runs = recent_finished(&c, 2).expect("recent");
+        let counts: Vec<u32> = runs.iter().map(|r| r.count).collect();
+        assert_eq!(counts, [20, 30], "two items cover all fifty rows");
+    }
+
+    #[test]
+    fn a_run_longer_than_one_read_page_folds_whole() {
+        let c = conn();
+        let rows = RECENT_PAGE + 5;
+        for i in 0..rows {
+            finished(
+                &c,
+                JobKind::SourceImport,
+                &json!({"path": "/s/a.torrent"}),
+                JobState::Done,
+                i64::from(i),
+            );
+        }
+        let runs = recent_finished(&c, 10).expect("recent");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].count, rows);
+        assert_eq!(runs[0].first_updated_at, 0);
     }
 }

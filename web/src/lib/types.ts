@@ -422,6 +422,10 @@ export interface Job {
   reason: string | null;
   created_at: number;
   updated_at: number;
+  /** Rows in a run of finished jobs folded into one; from `/system/jobs/recent`. */
+  count?: number;
+  /** The run's oldest `updated_at`; from `/system/jobs/recent`. */
+  first_updated_at?: number;
 }
 
 export interface PathMapping {

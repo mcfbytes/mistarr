@@ -128,6 +128,18 @@ test('status pills show on Sources and Activity', async ({ page }) => {
   await expect(page.locator('[data-status="done"]').first()).toBeVisible();
 });
 
+test('a folded run of source imports reads how many and links to Sources', async ({ page }) => {
+  await page.goto('/#/activity');
+  const row = page
+    .getByRole('list', { name: 'Recent jobs' })
+    .getByRole('listitem')
+    .filter({ hasText: 'sources imported' });
+  await expect(row).toHaveCount(1);
+  const link = row.getByRole('link', { name: '2 sources imported' });
+  await expect(link).toBeVisible();
+  await expect(link).toHaveAttribute('href', '#/sources');
+});
+
 test('the sources table fits its page on a desktop and scrolls whole on a phone', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto('/#/sources');
