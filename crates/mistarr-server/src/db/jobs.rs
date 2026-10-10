@@ -410,8 +410,8 @@ pub struct RecentRun {
 }
 
 /// Up to `limit` items of [`RECENT_KINDS`], most recently updated first. Consecutive
-/// rows of one kind that ended the same way fold into one [`RecentRun`]; scans and
-/// recomputes of different platforms stay apart.
+/// rows of one kind that ended the same way fold into one [`RecentRun`], read whole even
+/// across pages; scans and recomputes of different platforms stay apart.
 ///
 /// # Errors
 ///
@@ -449,9 +449,9 @@ pub fn recent_finished(conn: &Connection, limit: u32) -> Result<Vec<RecentRun>> 
                     }),
                 }
             }
-            // A full page may hold one run's start and another's end; only a filled
-            // limit or the last page ends the read.
-            if last_page || runs.len() >= limit as usize {
+            // A page may split a run, so only a run started beyond the limit, which closes
+            // the last wanted one, or the last page ends the read.
+            if last_page || runs.len() > limit as usize {
                 break;
             }
             offset += RECENT_PAGE;
@@ -1012,6 +1012,40 @@ mod tests {
         let runs = recent_finished(&c, 2).expect("recent");
         let counts: Vec<u32> = runs.iter().map(|r| r.count).collect();
         assert_eq!(counts, [20, 30], "two items cover all fifty rows");
+    }
+
+    #[test]
+    fn a_run_at_the_limit_folds_whole_across_a_page() {
+        let c = conn();
+        let dat: u32 = 45;
+        let source: u32 = 30;
+        for i in 0..source {
+            finished(
+                &c,
+                JobKind::SourceImport,
+                &json!({"path": "/s/a.torrent"}),
+                JobState::Done,
+                i64::from(i),
+            );
+        }
+        for i in 0..dat {
+            finished(
+                &c,
+                JobKind::DatImport,
+                &json!({"path": "/d/a.dat"}),
+                JobState::Done,
+                100 + i64::from(i),
+            );
+        }
+        assert!(
+            RECENT_PAGE > dat && RECENT_PAGE < dat + source,
+            "the page must hold the DAT run and only part of the source run"
+        );
+        let runs = recent_finished(&c, 2).expect("recent");
+        let counts: Vec<u32> = runs.iter().map(|r| r.count).collect();
+        assert_eq!(counts, [dat, source], "the second run spans two reads");
+        assert_eq!(runs[1].row.updated_at, 29);
+        assert_eq!(runs[1].first_updated_at, 0, "its oldest row");
     }
 
     #[test]
