@@ -535,6 +535,25 @@ export const fixtureSources: Source[] = [
     suggested_platform_id: 'gb',
     user_binding: false,
     pending_binding: null
+  },
+  {
+    id: 3,
+    infohash: '2'.repeat(40),
+    display_name: 'Example bundle one',
+    origin_file: 'example-bundle-one-extras.torrent',
+    platform_id: 'nes',
+    bind_score: 0.9,
+    state: 'bound',
+    reason: null,
+    seed_policy: 'none',
+    file_count: 12,
+    matched_count: 11,
+    total_size: 40_000_000,
+    client_id: null,
+    added_at: 1_770_030_000,
+    suggested_platform_id: 'nes',
+    user_binding: false,
+    pending_binding: null
   }
 ];
 
