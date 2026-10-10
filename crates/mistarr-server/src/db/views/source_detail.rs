@@ -344,16 +344,23 @@ pub fn detail(conn: &Connection, id: SourceId) -> Result<Option<SourceDetail>> {
         return Ok(None);
     };
     let platform = source.platform_id.as_ref().map(PlatformId::as_str);
-    let mut summary = Summary::default();
+    let mut summary = Summary {
+        matched: conn.query_row(
+            "SELECT COUNT(*) FROM torrent_files WHERE source_id = ?1 AND rom_id IS NOT NULL",
+            [id],
+            |r| get_u64(r, 0),
+        )?,
+        ..Summary::default()
+    };
+    // A file with no matched rom is a candidate, an extra or nothing, by its path alone.
     let mut stmt = conn.prepare(&format!(
-        "SELECT f.path, f.rom_id IS NOT NULL, {HAS_MATCH} FROM torrent_files f WHERE f.source_id = ?1"
+        "SELECT f.path, {HAS_MATCH} FROM torrent_files f
+         WHERE f.source_id = ?1 AND f.rom_id IS NULL"
     ))?;
     let mut rows = stmt.query([id])?;
     while let Some(r) = rows.next()? {
-        let (path, rom, any): (String, bool, bool) = (r.get(0)?, r.get(1)?, r.get(2)?);
-        let slot = if rom {
-            &mut summary.matched
-        } else if any {
+        let (path, any): (String, bool) = (r.get(0)?, r.get(1)?);
+        let slot = if any {
             &mut summary.candidates
         } else if file_kind(&path, platform) == FileKind::Extra {
             &mut summary.extra
@@ -371,8 +378,9 @@ pub fn detail(conn: &Connection, id: SourceId) -> Result<Option<SourceDetail>> {
     let dats = conn
         .prepare(
             "SELECT d.id, d.dat_name, d.version, COUNT(*) AS n
-             FROM torrent_files f JOIN roms r ON r.id = f.rom_id
-             JOIN titles t ON t.id = r.title_id JOIN dat_versions d ON d.id = t.dat_version_id
+             FROM torrent_files f JOIN roms r INDEXED BY roms_id_title ON r.id = f.rom_id
+             JOIN titles t INDEXED BY titles_id_dat ON t.id = r.title_id
+             JOIN dat_versions d ON d.id = t.dat_version_id
              WHERE f.source_id = ?1 GROUP BY d.id ORDER BY n DESC, d.id",
         )?
         .query_map([id], |r| {
@@ -698,6 +706,104 @@ mod tests {
             }
         );
         assert!(detail(&c, SourceId::new(99)).expect("detail").is_none());
+    }
+
+    /// A source with a matched file in each of two DAT versions, a candidate, an extra
+    /// and an unmatched file: the summary and the DAT list equal the full walk over
+    /// `torrent_files` and its DAT join, written out below as the reference.
+    #[test]
+    fn detail_agrees_with_the_full_walk_over_the_files() {
+        let c = conn();
+        let (id, first) = source(&c);
+        c.execute_batch(
+            "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at,
+               game_count)
+             VALUES ('nes', 'second test', '2', 'second.dat', 0, 0);
+             INSERT INTO titles (platform_id, dat_version_id, name, base_name)
+             VALUES ('nes', (SELECT id FROM dat_versions WHERE dat_name = 'second test'),
+                     'Third Try', 'Third Try');
+             INSERT INTO roms (title_id, name, size, status)
+             VALUES ((SELECT id FROM titles WHERE name = 'Third Try'),
+                     'Third Try (USA).nes', 32, 'good');",
+        )
+        .expect("second dat");
+        let second: RomId = c
+            .query_row(
+                "SELECT id FROM roms WHERE name = 'Third Try (USA).nes'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("second rom");
+        c.execute(
+            "INSERT INTO torrent_files (source_id, file_index, path, size)
+             VALUES (?1, 4, 'Set/Third Try (USA).nes', 32)",
+            [id],
+        )
+        .expect("file");
+        sources::set_matches(&c, id, &[(4, Some(second), Confidence::Name)]).expect("match");
+        assert_ne!(first, second);
+
+        // The full walk over every file row and its DAT join, as the reference.
+        let mut walked = Summary::default();
+        let mut stmt = c
+            .prepare(
+                "SELECT f.path, f.rom_id IS NOT NULL,
+                        (f.rom_id IS NOT NULL OR EXISTS (SELECT 1 FROM torrent_candidates c
+                          WHERE c.source_id = f.source_id AND c.file_index = f.file_index))
+                 FROM torrent_files f WHERE f.source_id = ?1",
+            )
+            .expect("prepare");
+        let mut rows = stmt.query([id]).expect("query");
+        while let Some(r) = rows.next().expect("row") {
+            let (path, rom, any): (String, bool, bool) = (
+                r.get(0).expect("path"),
+                r.get(1).expect("rom"),
+                r.get(2).expect("any"),
+            );
+            let slot = if rom {
+                &mut walked.matched
+            } else if any {
+                &mut walked.candidates
+            } else if file_kind(&path, Some("nes")) == FileKind::Extra {
+                &mut walked.extra
+            } else {
+                &mut walked.unmatched
+            };
+            *slot += 1;
+        }
+        let dats: Vec<DatShare> = c
+            .prepare(
+                "SELECT d.id, d.dat_name, d.version, COUNT(*) AS n
+                 FROM torrent_files f JOIN roms r ON r.id = f.rom_id
+                 JOIN titles t ON t.id = r.title_id JOIN dat_versions d ON d.id = t.dat_version_id
+                 WHERE f.source_id = ?1 GROUP BY d.id ORDER BY n DESC, d.id",
+            )
+            .expect("prepare")
+            .query_map([id], |r| {
+                Ok(DatShare {
+                    dat_version_id: r.get(0).expect("id"),
+                    dat_name: r.get(1).expect("name"),
+                    version: r.get(2).expect("version"),
+                    matched: get_u64(r, 3).expect("n"),
+                })
+            })
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        assert_eq!(
+            (
+                walked.matched,
+                walked.candidates,
+                walked.unmatched,
+                walked.extra
+            ),
+            (2, 1, 1, 1)
+        );
+        assert_eq!(dats.len(), 2, "one matched file per DAT version");
+
+        let d = detail(&c, id).expect("detail").expect("some");
+        assert_eq!(d.summary, walked);
+        assert_eq!(d.dats, dats);
     }
 
     #[test]
