@@ -255,9 +255,10 @@ pub struct NewSource<'a> {
 const COLUMNS: &str = "s.id, s.infohash, s.display_name, s.origin_file, s.platform_id,
     s.bind_score, s.state, s.reason, s.seed_policy, s.file_count, s.total_size,
     s.client_id, s.added_at,
-    (SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id
-       AND (f.rom_id IS NOT NULL OR EXISTS (SELECT 1 FROM torrent_candidates c
-             WHERE c.source_id = f.source_id AND c.file_index = f.file_index))),
+    ((SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id AND f.rom_id IS NOT NULL)
+     + (SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id AND f.rom_id IS NULL
+          AND EXISTS (SELECT 1 FROM torrent_candidates c
+                WHERE c.source_id = f.source_id AND c.file_index = f.file_index))),
     s.suggested_platform_id, s.user_binding, s.bind_pending";
 
 /// Reads a `client_id` column; text that is not an infohash names no torrent.
@@ -849,7 +850,8 @@ impl DatIndex for SqlDatIndex<'_> {
 
     fn by_base_name_and_size(&self, base_name: &str, size: u64) -> Vec<(PlatformId, RomId)> {
         self.lookup(
-            "SELECT t.platform_id, r.id FROM roms r JOIN titles t ON t.id = r.title_id
+            "SELECT t.platform_id, r.id
+             FROM roms r INDEXED BY roms_match_base JOIN titles t ON t.id = r.title_id
              WHERE r.match_base = ?1 AND r.size = ?2 AND t.retired = 0
                AND NOT EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.flag = 'bios')
              ORDER BY r.id",
@@ -1040,6 +1042,59 @@ mod tests {
         assert!(delete(&c, id).expect("delete"));
         assert!(!delete(&c, id).expect("delete again"));
         assert_eq!(files(&c, id, 10, 0).expect("files").total, 0);
+    }
+
+    /// A file with a candidate and no matched rom counts as matched, as the statement
+    /// that read every row counted it, in `get` and in `list`.
+    #[test]
+    fn a_candidate_only_file_counts_as_matched() {
+        let c = conn();
+        let rom = seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
+        let other = seed_rom(&c, &pid("nes"), "Second Try (Japan).nes", 24, &[]).expect("rom");
+        let id = insert(&c, &new(&"05".repeat(20), SourceState::Bound)).expect("insert");
+        let set = [
+            file(0, "Sub/Example Quest (USA).nes", 16),
+            file(1, "Sub/Second Guess (USA).nes", 24),
+            file(2, "Sub/Unlisted (USA).nes", 8),
+        ];
+        replace_files(&c, id, &set).expect("files");
+        set_matches(
+            &c,
+            id,
+            &[
+                (0, Some(rom), Confidence::Name),
+                (1, None, Confidence::Unmatched),
+            ],
+        )
+        .expect("matches");
+        c.execute(
+            "INSERT INTO torrent_candidates (source_id, file_index, rom_id, confidence)
+             VALUES (?1, 1, ?2, 'fuzzy')",
+            params![id, other],
+        )
+        .expect("candidate");
+        // The count the two new ones add up to, counted the way it was before.
+        let walked: u64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = ?1
+                   AND (f.rom_id IS NOT NULL OR EXISTS (SELECT 1 FROM torrent_candidates c
+                         WHERE c.source_id = f.source_id AND c.file_index = f.file_index))",
+                [id],
+                |r| sql::get_u64(r, 0),
+            )
+            .expect("count");
+        assert_eq!(walked, 2, "the match and the candidate");
+        let row = get(&c, id).expect("get").expect("row");
+        assert_eq!(row.matched_count, walked);
+        let page = list(
+            &c,
+            Page {
+                limit: 10,
+                offset: 0,
+            },
+        )
+        .expect("list");
+        assert_eq!(page.items[0].matched_count, walked);
     }
 
     #[test]
