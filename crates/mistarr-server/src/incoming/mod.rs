@@ -1,6 +1,7 @@
 //! Files in a watched directory that are not loaded yet; `docs/API.md` "Incoming files".
 
 pub mod place;
+pub mod reject;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

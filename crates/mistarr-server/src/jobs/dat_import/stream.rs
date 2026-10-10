@@ -20,6 +20,7 @@ use crate::db::dats::{self, NewVersion};
 use crate::db::titles;
 use crate::db::Db;
 use crate::error::{Error, Result};
+use crate::incoming::reject::DAMAGED_ZIP_REASON;
 use crate::jobs::progress::CountingReader;
 
 /// Games read between checks for shutdown.
@@ -117,11 +118,17 @@ fn with_member<T>(
         Member::Zip(index) => {
             let mut archive = match zip::ZipArchive::new(BufReader::new(file)) {
                 Ok(a) => a,
-                Err(e) => return Ok(Err(format!("invalid zip archive: {e}"))),
+                Err(e) => {
+                    tracing::debug!(error = %e, "cannot read a zip archive");
+                    return Ok(Err(DAMAGED_ZIP_REASON.to_owned()));
+                }
             };
             let entry = match archive.by_index(index) {
                 Ok(e) => e,
-                Err(e) => return Ok(Err(format!("invalid zip archive: {e}"))),
+                Err(e) => {
+                    tracing::debug!(error = %e, "cannot read a zip member");
+                    return Ok(Err(DAMAGED_ZIP_REASON.to_owned()));
+                }
             };
             let name = entry.name().to_owned();
             let total = entry.size();
