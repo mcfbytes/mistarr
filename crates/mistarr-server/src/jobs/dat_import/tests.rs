@@ -300,6 +300,26 @@ async fn empty_page_and_damaged_files_get_clear_reasons() {
 }
 
 #[tokio::test]
+async fn other_extensions_keep_the_extension_reason() {
+    let (_dir, app) = state();
+    let dats = app.config().paths.dats();
+    std::fs::create_dir_all(&dats).expect("mkdir");
+    let cases: [(&str, &[u8]); 2] = [("empty.txt", b""), ("page.html", b"<!DOCTYPE html><html>")];
+    for (name, body) in cases {
+        let path = dats.join(name);
+        std::fs::write(&path, body).expect("write");
+        Scheduler::run_inline(&app, Arc::new(DatImport::new(&path)))
+            .await
+            .expect("run");
+        assert!(!path.exists(), "{name}");
+        let text =
+            std::fs::read_to_string(dats.join("rejected").join(format!("{name}.reason.txt")))
+                .expect("reason");
+        assert!(text.contains("not a DAT"), "{name}: {text}");
+    }
+}
+
+#[tokio::test]
 async fn the_job_moves_files_and_publishes_events() {
     let (_dir, app) = state();
     let dats_dir = app.config().paths.dats();

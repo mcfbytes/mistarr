@@ -715,28 +715,29 @@ fn stem(path: &Path) -> String {
 
 /// The DATs a file holds, or why it is not a DAT file.
 fn list_members(path: &Path) -> std::result::Result<Vec<Member>, String> {
+    let ext = extension(path).unwrap_or_default();
+    if !matches!(ext.as_str(), "dat" | "xml" | "zip") {
+        return Err("not a DAT: expected a .dat, .xml or .zip file".to_owned());
+    }
     if let Some(reason) = reject::obvious_reason_at(path) {
         return Err(reason.to_owned());
     }
-    match extension(path).unwrap_or_default().as_str() {
-        "dat" | "xml" => Ok(vec![Member::Plain]),
-        "zip" => {
-            let file = File::open(path).map_err(|e| e.to_string())?;
-            let archive = zip::ZipArchive::new(BufReader::new(file)).map_err(|e| {
-                tracing::debug!(error = %e, "cannot read a zip archive");
-                DAMAGED_ZIP_REASON.to_owned()
-            })?;
-            let members: Vec<_> = (0..archive.len())
-                .filter(|&i| archive.name_for_index(i).is_some_and(is_dat_name))
-                .map(Member::Zip)
-                .collect();
-            if members.is_empty() {
-                return Err("zip archive contains no .dat or .xml files".to_owned());
-            }
-            Ok(members)
-        }
-        _ => Err("not a DAT: expected a .dat, .xml or .zip file".to_owned()),
+    if ext != "zip" {
+        return Ok(vec![Member::Plain]);
     }
+    let file = File::open(path).map_err(|e| e.to_string())?;
+    let archive = zip::ZipArchive::new(BufReader::new(file)).map_err(|e| {
+        tracing::debug!(error = %e, "cannot read a zip archive");
+        DAMAGED_ZIP_REASON.to_owned()
+    })?;
+    let members: Vec<_> = (0..archive.len())
+        .filter(|&i| archive.name_for_index(i).is_some_and(is_dat_name))
+        .map(Member::Zip)
+        .collect();
+    if members.is_empty() {
+        return Err("zip archive contains no .dat or .xml files".to_owned());
+    }
+    Ok(members)
 }
 
 fn is_dat_name(name: &str) -> bool {
