@@ -109,6 +109,7 @@ CREATE TABLE titles (                   -- one per <game>; the browse unit
   UNIQUE (dat_version_id, name)
 );
 CREATE INDEX titles_platform_base ON titles(platform_id, base_name);
+CREATE INDEX titles_id_dat ON titles(id, dat_version_id);   -- a matched rom's DAT version, without the table row
 CREATE INDEX titles_parent ON titles(parent_id);
 CREATE INDEX titles_group_root ON titles(group_root);
 CREATE TRIGGER titles_group_root_insert AFTER INSERT ON titles
@@ -160,8 +161,9 @@ CREATE TABLE roms (                     -- one per <rom>; the file unit
 CREATE INDEX roms_sha1 ON roms(sha1);
 CREATE INDEX roms_md5  ON roms(md5) WHERE sha1 IS NULL;
 CREATE INDEX roms_crc  ON roms(crc32, size);
-CREATE INDEX roms_match_name ON roms(match_name);
-CREATE INDEX roms_match_base ON roms(match_base, size) WHERE match_base IS NOT NULL;
+CREATE INDEX roms_match_name ON roms(match_name, title_id);
+CREATE INDEX roms_match_base ON roms(match_base, size, title_id) WHERE match_base IS NOT NULL;
+CREATE INDEX roms_id_title ON roms(id, title_id);   -- a matched file's title, without the table row
 CREATE INDEX roms_size ON roms(size) WHERE match_base IS NOT NULL;
 CREATE INDEX roms_chd_size ON roms(size) WHERE lower(name) LIKE '%.chd';   -- a scanned .chd hashed whole
 CREATE INDEX roms_track_size ON roms(size) WHERE size % 2352 = 0;        -- a CHD's rebuilt track sizes
@@ -216,6 +218,7 @@ CREATE TABLE torrent_files (
   PRIMARY KEY (source_id, file_index)
 );
 CREATE INDEX torrent_files_rom ON torrent_files(rom_id);
+CREATE INDEX torrent_files_source_rom ON torrent_files(source_id, rom_id);   -- a source's matched and unmatched counts
 
 CREATE TABLE torrent_candidates (       -- further roms a file may be; one file, many roms
   source_id     INTEGER NOT NULL,
@@ -500,6 +503,7 @@ CREATE INDEX title_groups_name ON title_groups(platform_id, base_name COLLATE NO
 CREATE INDEX title_groups_have ON title_groups(platform_id, (have_verified > 0) DESC, base_name COLLATE NOCASE, parent_id);
 CREATE INDEX title_groups_recent ON title_groups(platform_id, newest_id DESC);
 CREATE INDEX title_groups_split ON title_groups(platform_id, parent_id) WHERE split;
+CREATE INDEX title_groups_counts ON title_groups(platform_id, lean_flags, source, have_verified, wanted);
 
 CREATE TABLE title_groups_dirty (parent_id INTEGER PRIMARY KEY);   -- groups a write changed
 CREATE TABLE known_flags (name TEXT PRIMARY KEY, bit INTEGER NOT NULL) WITHOUT ROWID;
@@ -563,14 +567,26 @@ both.
 Every hot read (browse, counts, title detail, launch, want, best file, the
 sources, downloads, jobs and import lists) seeks through an index. The
 exceptions are inherent or bounded: the platform counts read every group
-once and MRA titles through `titles_mra_path`, unfiltered totals count a
-whole table, and pages in id order stop at their limit. The test
+once, though only the columns `title_groups_counts` holds, MRA titles
+through `titles_mra_path`, unfiltered totals count a whole table, and pages
+in id order stop at their limit. The test
 `db::plans::hot_reads_walk_indexes_not_growing_tables` prints each plan and
 fails on any other scan.
 
-Each rom index serves one lookup, and a DAT load writes into every index
-whose key its roms carry, at random places (ARCHITECTURE.md "Writes on a
-sync mount"), so an index holds only the roms its lookup can return:
+The reads behind `GET /sources` and `GET /sources/{id}` walk indexes of their
+own. `torrent_files_source_rom` holds a source's files in `rom_id` order, so
+the matched count is its `rom_id IS NOT NULL` range, the paths and candidate
+checks of the detail's summary are the `rom_id IS NULL` range, and each
+`EXISTS` probe is a `torrent_candidates` primary-key seek. The DAT list then
+follows `roms_id_title` to a matched rom's title and `titles_id_dat` to that
+title's DAT version, so no `roms` or `titles` row is read. The test
+`db::plans::source_detail_seeks_the_source_files_and_downloads` asserts each
+seek, and `db::plans::platform_counts_read_the_covering_group_index` asserts
+the covering group index.
+
+Each index in this table serves one lookup and holds only the roms that
+lookup can return; a DAT load writes into every one whose key its roms
+carry, at random places (ARCHITECTURE.md "Writes on a sync mount"):
 
 | Index | Lookup | Rows |
 |---|---|---|
@@ -583,10 +599,16 @@ sync mount"), so an index holds only the roms its lookup can return:
 | `roms_chd_size` | whether a scanned `.chd` has the size of a DAT's `.chd` rom | roms named `*.chd` |
 | `roms_track_size` | the titles a CHD's track sizes can match before it is decoded | roms of whole 2352-byte sectors |
 
+`roms_id_title` and `titles_id_dat` are no lookup index: both are keyed by an
+increasing id, so a load appends to them and a read follows a `roms` or
+`titles` row by its key.
+
 A load inserts its roms with `match_name` and `match_base` NULL; binding
 keys them (`sources::refresh_match_keys`) in one transaction before it reads
-them. `db::plans::rom_lookups_and_directory_tracks_seek_their_own_index`
-asserts each lookup, the partial ones included, seeks its index, and that a
-disc directory's tracks (`files::in_directory`) are one range of the
+them, and both keys carry `title_id`, so a lookup reads a matched rom's
+title alongside its id.
+`db::plans::rom_lookups_and_directory_tracks_seek_their_own_index` asserts
+each lookup, the partial ones included, seeks its index, and that a disc
+directory's tracks (`files::in_directory`) are one range of the
 `(platform_id, rel_path)` key.
 
