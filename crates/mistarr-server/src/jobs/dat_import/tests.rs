@@ -268,6 +268,58 @@ fn members_are_listed_by_extension() {
 }
 
 #[tokio::test]
+async fn empty_page_and_damaged_files_get_clear_reasons() {
+    use crate::incoming::reject::{DAMAGED_ZIP_REASON, EMPTY_REASON, WEB_PAGE_REASON};
+    let (_dir, app) = state();
+    let dats = app.config().paths.dats();
+    std::fs::create_dir_all(&dats).expect("mkdir");
+    let good = dat("Maker - Game Boy", "1", &[("Example Quest (USA)", None)]);
+    let zip = zip_bytes(&[("gb.dat", good.as_bytes())]);
+    let cut = zip.get(..40).expect("zip is longer than 40 bytes").to_vec();
+    let cases: [(&str, Vec<u8>, &str); 3] = [
+        ("empty.dat", Vec::new(), EMPTY_REASON),
+        (
+            "page.zip",
+            b"<!DOCTYPE html><html>".to_vec(),
+            WEB_PAGE_REASON,
+        ),
+        ("cut.zip", cut, DAMAGED_ZIP_REASON),
+    ];
+    for (name, body, reason) in cases {
+        let path = dats.join(name);
+        std::fs::write(&path, &body).expect("write");
+        Scheduler::run_inline(&app, Arc::new(DatImport::new(&path)))
+            .await
+            .expect("run");
+        assert!(!path.exists(), "{name}");
+        let text =
+            std::fs::read_to_string(dats.join("rejected").join(format!("{name}.reason.txt")))
+                .expect("reason");
+        assert_eq!(text.trim(), reason, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn other_extensions_keep_the_extension_reason() {
+    let (_dir, app) = state();
+    let dats = app.config().paths.dats();
+    std::fs::create_dir_all(&dats).expect("mkdir");
+    let cases: [(&str, &[u8]); 2] = [("empty.txt", b""), ("page.html", b"<!DOCTYPE html><html>")];
+    for (name, body) in cases {
+        let path = dats.join(name);
+        std::fs::write(&path, body).expect("write");
+        Scheduler::run_inline(&app, Arc::new(DatImport::new(&path)))
+            .await
+            .expect("run");
+        assert!(!path.exists(), "{name}");
+        let text =
+            std::fs::read_to_string(dats.join("rejected").join(format!("{name}.reason.txt")))
+                .expect("reason");
+        assert!(text.contains("not a DAT"), "{name}: {text}");
+    }
+}
+
+#[tokio::test]
 async fn the_job_moves_files_and_publishes_events() {
     let (_dir, app) = state();
     let dats_dir = app.config().paths.dats();

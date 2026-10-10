@@ -377,6 +377,28 @@ fn hot_reads_walk_indexes_not_growing_tables() {
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
 
+/// The platform counts scan the group index that holds the summary columns their
+/// hide list and their sums read, so `GET /platforms` never touches the table.
+#[test]
+fn platform_counts_read_the_covering_group_index() {
+    let c = seeded();
+    let hide = crate::config::PrefsConfig::default().hidden_names();
+    let statements = traced(&c, |c| {
+        drop(titles::browse::counts(c, &hide).expect("counts"));
+    });
+    let counts: Vec<&String> = statements
+        .iter()
+        .filter(|s| s.contains("FROM title_groups g"))
+        .collect();
+    assert_eq!(counts.len(), 1, "{statements:?}");
+    let plan = plan(&c, counts[0]);
+    assert!(
+        plan.iter()
+            .any(|l| l.contains("COVERING INDEX title_groups_counts")),
+        "{plan:?}"
+    );
+}
+
 /// The lines of every plan `name` runs whose statement contains `sql`.
 fn plan_of(reads: &[(&str, String, Vec<String>)], name: &str, sql: &str) -> Vec<String> {
     let lines: Vec<String> = reads
@@ -416,7 +438,7 @@ fn title_detail_seeks_torrent_rows_by_rom() {
 #[test]
 fn source_detail_seeks_the_source_files_and_downloads() {
     let reads = hot_reads();
-    for name in ["source files", "source file filters", "source detail"] {
+    for name in ["source files", "source file filters"] {
         let plan = plan_of(&reads, name, "torrent_files f");
         let has = |p: &str| plan.iter().any(|l| l.contains(p));
         assert!(
@@ -425,6 +447,34 @@ fn source_detail_seeks_the_source_files_and_downloads() {
         );
         assert!(!has("SCAN f"), "{name}: {plan:?}");
     }
+    // The detail counts the files with a matched rom from the index, and reads a
+    // path and the candidate check only for the files without one.
+    let plan = plan_of(&reads, "source detail", "rom_id IS NOT NULL");
+    assert!(
+        plan.iter()
+            .any(|l| l.contains("COVERING INDEX torrent_files_source_rom")),
+        "{plan:?}"
+    );
+    let plan = plan_of(&reads, "source detail", "f.rom_id IS NULL");
+    assert!(
+        plan.iter()
+            .any(|l| l.contains("torrent_files_source_rom (source_id=? AND rom_id=?)")),
+        "{plan:?}"
+    );
+    // Its DATs come from index pages: the rom's title, then the title's DAT version.
+    let plan = plan_of(&reads, "source detail", "JOIN roms r INDEXED BY");
+    let has = |p: &str| plan.iter().any(|l| l.contains(p));
+    assert!(has("roms_id_title (id=?)"), "{plan:?}");
+    assert!(has("titles_id_dat (id=?)"), "{plan:?}");
+    assert!(!has("SEARCH r USING INTEGER PRIMARY KEY"), "{plan:?}");
+    // The sources list counts each source's matched files the same way.
+    let plan = plan_of(&reads, "sources list", "torrent_files f");
+    let has = |p: &str| plan.iter().any(|l| l.contains(p));
+    assert!(has("COVERING INDEX torrent_files_source_rom"), "{plan:?}");
+    assert!(
+        has("torrent_files_source_rom (source_id=? AND rom_id=?)"),
+        "{plan:?}"
+    );
     for name in ["source files", "source file filters"] {
         let plan = plan_of(&reads, name, "LEFT JOIN downloads d");
         let seek = "downloads_source (source_id=? AND file_index=?)";

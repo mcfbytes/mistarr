@@ -996,7 +996,12 @@ async fn a_rescan_matches_unchanged_unmatched_files_without_hashing_them() {
     let recent = r.json();
     assert_eq!(recent["items"][0]["id"], second.id.get(), "newest first");
     assert_eq!(recent["items"][0]["progress"]["matched"], 1);
-    assert_eq!(recent["items"][1]["id"], first.id.get());
+    assert_eq!(recent["total"], 1, "one folded item");
+    assert_eq!(
+        recent["items"][0]["count"], 2,
+        "two scans of one platform fold into one item"
+    );
+    assert_eq!(recent["items"][0]["first_updated_at"], first.updated_at);
 
     booted.running.shutdown().await.expect("shutdown");
 }

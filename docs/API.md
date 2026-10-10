@@ -51,7 +51,7 @@ under `/api` return 404 JSON.
 | POST | `/system/cores` | Detect installed cores again, for the wizard's detected-cores step. |
 | POST | `/system/pause` / `/system/resume` | Manual scheduler gate, overrides CORENAME until CORENAME next changes; `pause` holds the heavy and background lanes; `resume` ("Run now") also ends once the heavy queue drains. Returns the status body. |
 | GET | `/system/jobs` | Queued, running and paused jobs with progress. |
-| GET | `/system/jobs/recent` | The last 10 finished jobs, such as scans, arcade catalogues, DAT imports, recomputes, CHD decoding, imports and URL fetches. |
+| GET | `/system/jobs/recent` | The last 10 finished jobs, such as scans, arcade catalogues, DAT imports, recomputes, CHD decoding, imports, source imports, source binds and URL fetches. |
 | POST | `/system/client/start` | Start an installed client that is not running: `{ kind }`, `transmission` or `rtorrent`. Returns the status body. |
 | GET | `/system/settings` / PUT | The config subset that is editable at runtime. |
 
@@ -142,7 +142,11 @@ what it waits for, as for incoming files ("Incoming files"); else `null`. A
 running or paused job's `progress` is its latest live progress ("Live
 progress") when it has one. A failed job's `progress` is `{ error }`. `/system/jobs/recent` answers `{
 items, total }` in the same item shape, newest first, with `state` `done` or
-`failed` and `reason` `null`. A finished scan's `progress` is `{ platform_id,
+`failed` and `reason` `null`; a run of consecutive items of one kind that ended
+the same way is folded into its newest item, which adds `count`, the rows in the
+run (1 when it stands alone), and `first_updated_at`, its oldest row's
+`updated_at`, while scans and recomputes of different platforms never fold
+together. A finished scan's `progress` is `{ platform_id,
 done, total, matched, unmatched, unidentified }` (ARCHITECTURE.md "Library
 scan"); a recompute's is `{ groups, picks, matched }`, `matched` counting
 files it gave a rom; a `chd_tracks` job's is `{ done, total, verified,

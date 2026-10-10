@@ -130,7 +130,9 @@ progress bars, imports log, queued and running jobs, each with its status
 pill, what it is about linked to the page that owns it, its lane, its
 progress bar while running and its reason while it waits, and a Recent list
 of the last finished jobs from `/system/jobs/recent`, one line each with
-its pill, outcome and time. A running `chd_tracks` job's bar follows the
+its pill, outcome and time; a folded run of one kind reads as one line, such
+as "50 sources imported" linked to the page that owns it, with the span from
+the run's first to its last time. A running `chd_tracks` job's bar follows the
 image being decoded ("45% · g.chd · image 2 of 5") and its outcome reads "CHD
 tracks: 3 verified, 1 unmatched, 1 not identified". Live over SSE.
 
