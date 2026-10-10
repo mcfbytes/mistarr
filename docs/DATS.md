@@ -141,13 +141,15 @@ no games`, is about that member of a zip.
 | Reason | Meaning and what to do |
 |---|---|
 | `not a DAT: expected a .dat, .xml or .zip file` | The extension is not one mistarr reads. Rename it if it is XML. |
+| `The file is empty.` | The file holds no bytes. Copy or download it again. |
+| `This is a web page, not a DAT or torrent file. The download probably failed; download it again.` | The file is an HTML page, usually an error page saved under a `.dat`, `.xml`, `.zip`, `.torrent` or `.magnet` name. |
 | `root element is <…>; expected a Logiqx DAT (<datafile>) or a No-Intro DB export (<header> followed by <datafile>)` | The file is XML but neither form, such as some other XML document. |
 | `invalid XML at byte N: …` | The XML is malformed at that byte offset, or a name or value there is not UTF-8. Comments and ignored elements may hold any bytes. |
 | `file ends before </datafile>` | The file is cut short, usually by an interrupted copy or download. Copy it again. |
 | `DAT contains no games` | The file parses but lists no entries. |
 | `<rom> in game "…" has no name attribute` | A required attribute is missing on that entry. The element may also be `<file>`, or `<game>` with an empty game name when a game has no name. |
 | `game "…" has invalid crc value "…"` | A size, hash or status is not in the expected form; a hash must have its full length in hex. |
-| `invalid zip archive: …` | The zip cannot be read. |
+| `This zip file is damaged or incomplete. Download it again.` | The zip cannot be read, usually because a download or copy stopped early. |
 | `zip archive contains no .dat or .xml files` | The zip holds nothing to load. |
 
 A DAT whose entries are all fine but whose name binds to no platform is not

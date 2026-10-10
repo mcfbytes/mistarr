@@ -30,6 +30,7 @@ use crate::db::ram::{self, Ram};
 use crate::db::Db;
 use crate::error::{Error, Result};
 use crate::events::{DatLoaded, DatRejected, Event};
+use crate::incoming::reject::{self, DAMAGED_ZIP_REASON};
 
 /// Largest DAT or DAT pack an upload or a URL fetch accepts; daily packs of every
 /// system fit well inside.
@@ -714,12 +715,17 @@ fn stem(path: &Path) -> String {
 
 /// The DATs a file holds, or why it is not a DAT file.
 fn list_members(path: &Path) -> std::result::Result<Vec<Member>, String> {
+    if let Some(reason) = reject::obvious_reason_at(path) {
+        return Err(reason.to_owned());
+    }
     match extension(path).unwrap_or_default().as_str() {
         "dat" | "xml" => Ok(vec![Member::Plain]),
         "zip" => {
             let file = File::open(path).map_err(|e| e.to_string())?;
-            let archive = zip::ZipArchive::new(BufReader::new(file))
-                .map_err(|e| format!("invalid zip archive: {e}"))?;
+            let archive = zip::ZipArchive::new(BufReader::new(file)).map_err(|e| {
+                tracing::debug!(error = %e, "cannot read a zip archive");
+                DAMAGED_ZIP_REASON.to_owned()
+            })?;
             let members: Vec<_> = (0..archive.len())
                 .filter(|&i| archive.name_for_index(i).is_some_and(is_dat_name))
                 .map(Member::Zip)

@@ -26,6 +26,7 @@ use crate::db::sources::{
 };
 use crate::error::Result;
 use crate::events::{Event, SourceChanged};
+use crate::incoming::reject;
 
 /// Rejection reason for a second copy of a loaded source.
 pub const DUPLICATE: &str = "A source with the same content is already loaded.";
@@ -126,8 +127,16 @@ impl Job for SourceImport {
         let stored = name_of(planned.as_deref().unwrap_or(&self.path));
         let outcome = match (ext, data) {
             (_, None) => Ok(Err(TOO_LARGE.to_owned())),
-            (Some("torrent"), Some(data)) => import_torrent(&ctx.app, &origin, &stored, data).await,
-            (Some("magnet"), Some(data)) => import_magnet(&ctx.app, &origin, &stored, &data).await,
+            (Some(kind @ ("torrent" | "magnet")), Some(data)) => {
+                let head = &data[..data.len().min(reject::HEAD_BYTES)];
+                if let Some(reason) = reject::obvious_reason(head, data.len() as u64) {
+                    Ok(Err(reason.to_owned()))
+                } else if kind == "torrent" {
+                    import_torrent(&ctx.app, &origin, &stored, data).await
+                } else {
+                    import_magnet(&ctx.app, &origin, &stored, &data).await
+                }
+            }
             _ => Ok(Err("Only .torrent and .magnet files are read.".to_owned())),
         };
         match outcome? {
@@ -1001,6 +1010,34 @@ mod tests {
         let reason = std::fs::read_to_string(sources.join("rejected/broken.magnet.reason.txt"))
             .expect("reason");
         assert!(reason.starts_with("Not a valid .magnet file"), "{reason}");
+    }
+
+    #[tokio::test]
+    async fn empty_and_web_page_sources_get_clear_reasons() {
+        use crate::incoming::reject::{EMPTY_REASON, WEB_PAGE_REASON};
+        let (_dir, app) = state();
+        let sources = app.config().paths.sources();
+        std::fs::create_dir_all(&sources).expect("mkdir");
+        let cases: [(&str, &[u8], &str); 3] = [
+            ("empty.torrent", b"", EMPTY_REASON),
+            (
+                "page.torrent",
+                b"<!DOCTYPE html><html><body>error</body></html>",
+                WEB_PAGE_REASON,
+            ),
+            ("empty.magnet", b"", EMPTY_REASON),
+        ];
+        for (name, body, reason) in cases {
+            let path = sources.join(name);
+            std::fs::write(&path, body).expect("write");
+            Scheduler::run_inline(&app, Arc::new(SourceImport { path: path.clone() }))
+                .await
+                .expect("run");
+            assert!(!path.exists(), "{name}");
+            let text = std::fs::read_to_string(sources.join(format!("rejected/{name}.reason.txt")))
+                .expect("reason");
+            assert_eq!(text.trim(), reason, "{name}");
+        }
     }
 
     #[tokio::test]
