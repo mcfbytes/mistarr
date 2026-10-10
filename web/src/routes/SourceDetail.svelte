@@ -10,6 +10,7 @@
   import { copyText } from '../lib/system';
   import { pageUrl } from '../lib/router.svelte';
   import { bindingText, shortHash, transferShare } from '../lib/sourceDetail';
+  import { fileLabel } from '../lib/sourceName';
   import StatusPill from '../lib/StatusPill.svelte';
   import ProgressBar from '../lib/ProgressBar.svelte';
   import ReclassifyPanel from '../lib/ReclassifyPanel.svelte';
@@ -130,6 +131,9 @@
     <p class="muted" aria-busy="true">Loading…</p>
   {:else}
     <h1>{detail.display_name}</h1>
+    {#if fileLabel(detail.origin_file) !== detail.display_name}
+      <p class="muted file">{fileLabel(detail.origin_file)}</p>
+    {/if}
 
     <section class="card head" aria-label="Overview">
       <dl>
@@ -225,6 +229,11 @@
   }
 
   h1 {
+    overflow-wrap: break-word;
+  }
+
+  .file {
+    margin: -0.2em 0 0.9em;
     overflow-wrap: break-word;
   }
 
