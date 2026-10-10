@@ -292,14 +292,34 @@ fn job_reason(gate: &GateState, row: &JobRow, open: &[JobRow]) -> Option<String>
 /// Finished jobs `/system/jobs/recent` lists.
 const RECENT_JOBS: u32 = 10;
 
-async fn recent_jobs(State(app): State<Arc<AppState>>) -> Result<Json<Paged<JobItem>>, ApiError> {
-    let rows = app
+/// A `/system/jobs/recent` item: a finished job, or a folded run of them, with the
+/// newest row's fields.
+#[derive(Debug, Serialize)]
+struct RecentItem {
+    #[serde(flatten)]
+    row: JobRow,
+    reason: Option<String>,
+    /// Rows in the run, 1 when it stands alone.
+    count: u32,
+    /// The run's oldest row's `updated_at`.
+    first_updated_at: i64,
+}
+
+async fn recent_jobs(
+    State(app): State<Arc<AppState>>,
+) -> Result<Json<Paged<RecentItem>>, ApiError> {
+    let runs = app
         .db
         .read(|c| jobs::recent_finished(c, RECENT_JOBS))
         .await?;
-    let items = rows
+    let items = runs
         .into_iter()
-        .map(|row| JobItem { row, reason: None })
+        .map(|run| RecentItem {
+            row: run.row,
+            reason: None,
+            count: run.count,
+            first_updated_at: run.first_updated_at,
+        })
         .collect();
     Ok(Json(Paged::all(items)))
 }

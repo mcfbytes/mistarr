@@ -830,6 +830,28 @@ export const fixtureJobs: Job[] = [
 
 export const fixtureRecentJobs: Job[] = [
   {
+    id: 8,
+    kind: 'source_import',
+    lane: 'background',
+    payload: { path: '/media/fat/mistarr/sources/Example bundle three.torrent' },
+    state: 'done',
+    progress: { file: 'Example bundle three.torrent', source_id: 4, state: 'bound' },
+    reason: null,
+    created_at: 1_770_031_700,
+    updated_at: 1_770_031_710
+  },
+  {
+    id: 7,
+    kind: 'source_import',
+    lane: 'background',
+    payload: { path: '/media/fat/mistarr/sources/Example bundle one.torrent' },
+    state: 'done',
+    progress: { file: 'Example bundle one.torrent', source_id: 2, state: 'bound' },
+    reason: null,
+    created_at: 1_770_031_600,
+    updated_at: 1_770_031_610
+  },
+  {
     id: 5,
     kind: 'dat_import',
     lane: 'background',

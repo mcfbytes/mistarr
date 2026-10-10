@@ -30,7 +30,7 @@ import {
   scenarioStatus,
   scenarioWizard
 } from './fixtures';
-import { cancelFetch, openJob, runJob, startFetch, startProgress } from './jobs';
+import { cancelFetch, foldRecent, openJob, runJob, startFetch, startProgress } from './jobs';
 import { mockKnob, recordKnob } from './knobs';
 import { mock, nextJobId, notFound, nowSecs, paged, reply, wire, type Watched } from './state';
 
@@ -231,7 +231,7 @@ export const mockApi: Api = {
       return status();
     }),
   jobs: (limit, offset) => reply(() => paged(mock().jobs, limit, offset)),
-  recentJobs: (limit, offset) => reply(() => paged(mock().recent, limit, offset)),
+  recentJobs: (limit, offset) => reply(() => paged(foldRecent(mock().recent), limit, offset)),
   wizardDone: () =>
     reply(() => {
       const s = mock();

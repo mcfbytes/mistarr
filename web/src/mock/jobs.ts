@@ -151,3 +151,30 @@ export function cancelFetch(token: number): void {
     finish(id, 'failed', { error: FETCH_CANCELLED });
   }
 }
+
+/** Kinds whose payload names a platform, so runs of different platforms stay apart. */
+const PER_PLATFORM = new Set(['scan', 'recompute_1g1r']);
+
+/** Whether `next` continues the run whose newest row is `last`. */
+function sameRun(last: Job, next: Job): boolean {
+  return (
+    last.kind === next.kind &&
+    last.state === next.state &&
+    (!PER_PLATFORM.has(next.kind) || last.payload.platform_id === next.payload.platform_id)
+  );
+}
+
+/** `recent`, newest first, runs of one kind and outcome folded as `/system/jobs/recent` folds them. */
+export function foldRecent(recent: readonly Job[]): Job[] {
+  const folded: Job[] = [];
+  for (const row of recent) {
+    const last = folded[folded.length - 1];
+    if (last && sameRun(last, row)) {
+      last.count = (last.count ?? 1) + 1;
+      last.first_updated_at = row.updated_at;
+    } else {
+      folded.push({ ...row, count: 1, first_updated_at: row.updated_at });
+    }
+  }
+  return folded;
+}

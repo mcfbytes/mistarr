@@ -141,6 +141,19 @@ export function jobOutcome(job: OutcomeJob, platformName: (id: string) => string
   if (job.state === 'failed') {
     return typeof p.error === 'string' ? `${label} failed: ${p.error}` : `${label} failed`;
   }
+  if (job.kind === 'source_import') {
+    const file = typeof p.file === 'string' ? p.file : fileOf(job);
+    const subject = file ? `Source ${file}` : kindLabel(job.kind);
+    if (typeof p.rejected === 'string') {
+      return `${subject} not loaded: ${p.rejected}`;
+    }
+    return typeof p.state === 'string' ? `${subject}: ${p.state}` : `${subject}: done`;
+  }
+  if (job.kind === 'bind_source') {
+    return typeof p.matched === 'number' && typeof p.total === 'number'
+      ? `${label}: ${p.matched} of ${p.total} files matched`
+      : `${label}: done`;
+  }
   if (job.kind === 'scan' && typeof p.matched === 'number' && typeof p.unmatched === 'number') {
     const unidentified = typeof p.unidentified === 'number' && p.unidentified > 0 ? p.unidentified : 0;
     const tail = unidentified > 0 ? `, ${unidentified} not identified` : '';
@@ -152,13 +165,44 @@ export function jobOutcome(job: OutcomeJob, platformName: (id: string) => string
   if (job.kind === 'recompute_1g1r' && typeof p.matched === 'number') {
     return `${label}: ${p.matched} files newly matched`;
   }
-  if (job.kind === 'bind_source' && typeof p.matched === 'number' && typeof p.total === 'number') {
-    return `${label}: ${p.matched} of ${p.total} files matched`;
-  }
   if (job.kind === 'dat_import' && typeof p.games === 'number') {
     return `${label}: ${p.games} games read`;
   }
   return `${label}: done`;
+}
+
+/** A folded run's line and the page that owns it. */
+export interface RunOutcome {
+  text: string;
+  href: string;
+}
+
+/**
+ * What a run of `job.count` finished jobs of one kind left behind, such as "50 sources
+ * imported", linked to the page that owns it; other kinds keep the newest row's outcome.
+ */
+export function runOutcome(job: Job, platformName: (id: string) => string): RunOutcome {
+  const n = job.count ?? 1;
+  const failed = job.state === 'failed';
+  if (job.kind === 'source_import') {
+    return {
+      text: failed ? `${n} source imports failed` : `${n} sources imported`,
+      href: pageUrl('sources')
+    };
+  }
+  if (job.kind === 'bind_source') {
+    return {
+      text: failed ? `${n} source binds failed` : `${n} sources bound`,
+      href: pageUrl('sources')
+    };
+  }
+  if (job.kind === 'dat_import') {
+    return {
+      text: failed ? `${n} DAT imports failed` : `${n} DATs loaded`,
+      href: pageUrl('dats')
+    };
+  }
+  return { text: `${n} × ${jobOutcome(job, platformName)}`, href: jobHref(job) };
 }
 
 /** The file name or platform a job is about, from its payload. */
