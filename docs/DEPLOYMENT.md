@@ -120,6 +120,15 @@ from outside during an import is lost when the copy replaces the file.
 `mistarr doctor --rebuild-groups` refuses to run while the server holds the
 data directory's lock.
 
+The System tab shows a notice when an import cannot run in RAM, with the
+memory available, the copy's need and the floor kept free, so a slow import
+on the card is explained rather than silent. The SD card is mounted `sync`
+(ARCHITECTURE.md "Writes on a sync mount"), which flushes every write to it
+before it returns and makes an import on the card slower again; mounting it
+without `sync` speeds imports up, at the cost that a power loss can lose
+more recent changes. The notice adds a sentence when the card is mounted
+this way.
+
 [DATS.md](DATS.md) explains the DAT formats mistarr loads, what happens to a
 file dropped into `dats/` or uploaded on the DATs screen, and what each
 rejection reason means.

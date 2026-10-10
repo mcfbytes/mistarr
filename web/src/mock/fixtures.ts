@@ -381,7 +381,9 @@ export const fixtureStatus: SystemStatus = {
   mem_total_bytes: 507_000_000,
   mem_available_bytes: 214_000_000,
   launch: 'ready',
-  chd_decode_bytes_per_sec: 1_200_000
+  chd_decode_bytes_per_sec: 1_200_000,
+  dat_import_in_ram: { possible: true, need_mib: 41, available_mib: 204, floor_mib: 128 },
+  card_sync_mount: false
 };
 
 /**

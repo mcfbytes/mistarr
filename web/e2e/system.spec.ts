@@ -270,3 +270,23 @@ test('a failed settings load shows an error with Retry, not a hidden section', a
   await expect(page.getByRole('navigation', { name: 'Settings sections' })).toBeVisible();
   await expect(alert).toHaveCount(0);
 });
+
+test('a DAT import that must run on the card is explained, with the sync warning', async ({ page }) => {
+  await setMockKnob(page, 'status', {
+    dat_import_in_ram: { possible: false, need_mib: 396, available_mib: 320, floor_mib: 128 },
+    card_sync_mount: true
+  });
+  await page.goto('/#/system');
+  const notice = page.getByRole('status').filter({ hasText: 'DAT imports run on the card' });
+  await expect(notice).toContainText(
+    'DAT imports run on the card, which is slower: a copy of the database in memory needs 396 MiB plus 128 MiB kept free, and 320 MiB is free.'
+  );
+  await expect(notice).toContainText(
+    'The SD card is mounted with sync, which makes imports on the card slower still. Mounting it without sync speeds them up, but more recent changes can be lost if the power is cut.'
+  );
+});
+
+test('no card-import notice when memory allows a copy in RAM', async ({ page }) => {
+  await page.goto('/#/system');
+  await expect(page.getByText('DAT imports run on the card')).toHaveCount(0);
+});

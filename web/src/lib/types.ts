@@ -22,6 +22,13 @@ export interface WaitingJob {
 
 export type PauseReason = 'core' | 'manual' | null;
 export type LaunchState = 'ready' | 'disabled' | 'unavailable';
+/** Whether a DAT import can run on a copy of the database in memory now, and the figures behind it. */
+export interface DatImportInRam {
+  possible: boolean;
+  need_mib: number;
+  available_mib: number;
+  floor_mib: number;
+}
 export type Override = 'paused' | 'running' | null;
 export type ClientHold = 'uploads' | 'frozen' | null;
 
@@ -52,6 +59,10 @@ export interface SystemStatus {
   launch: LaunchState;
   /** Decoded CHD bytes per second on the last image, null before the first. */
   chd_decode_bytes_per_sec: number | null;
+  /** Whether a DAT import runs on a copy of the database in memory now. */
+  dat_import_in_ram: DatImportInRam;
+  /** Whether the mount holding the data directory carries the `sync` option. */
+  card_sync_mount: boolean;
 }
 
 export interface WizardStatus {

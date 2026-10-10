@@ -44,7 +44,7 @@ under `/api` return 404 JSON.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/system/status` | Version and commit, uptime, client kind and reachability, CORENAME, paused state, how the download client is held, disk free and size, RSS, memory total and available, CHD decoding speed. |
+| GET | `/system/status` | Version and commit, uptime, client kind and reachability, CORENAME, paused state, how the download client is held, disk free and size, RSS, memory total and available, whether a DAT import would run in memory, whether the card is mounted `sync`, CHD decoding speed. |
 | GET | `/system/wizard` | Which first-run steps are complete. |
 | POST | `/system/wizard/done` | The user finished or dismissed the wizard; it stops opening by itself. Returns the wizard body. |
 | POST | `/system/scan` | Enqueue a library scan. Body `{ platform_id? }`. |
@@ -69,7 +69,9 @@ under `/api` return 404 JSON.
   "disk_free_bytes": 1000000, "disk_total_bytes": 32000000,
   "dats_dir": "/media/fat/mistarr/dats",
   "rss_bytes": 1000000, "mem_total_bytes": 507000000, "mem_available_bytes": 214000000,
-  "launch": "ready", "chd_decode_bytes_per_sec": null
+  "launch": "ready", "chd_decode_bytes_per_sec": null,
+  "dat_import_in_ram": { "possible": true, "need_mib": 72, "available_mib": 204, "floor_mib": 128 },
+  "card_sync_mount": true
 }
 ```
 
@@ -104,6 +106,14 @@ from `/proc/meminfo`, `null` where it cannot be read.
 `chd_decode_bytes_per_sec` is the speed of the last CHD decode, decoded
 bytes per second of decoding time with pauses left out, or `null` before the
 first.
+`dat_import_in_ram` says whether a DAT import would run on a copy of the
+database in memory now: `possible` is `need_mib + floor_mib` at most
+`available_mib`, `need_mib` is what a copy of the database's current size
+needs for a 1 MiB DAT (ARCHITECTURE.md "DAT import in RAM"), `available_mib`
+is `MemAvailable` and `floor_mib` is `[memory] import_floor_mib`. When it is
+false every import runs on the card. `card_sync_mount` says whether the mount
+holding the data directory carries the `sync` option, which makes an import
+on the card slower.
 
 `/system/wizard` body: `{ paths, dats, client, sources, open_on_start }`, all
 booleans. `paths` is true when the games directory exists, `dats` when any DAT
