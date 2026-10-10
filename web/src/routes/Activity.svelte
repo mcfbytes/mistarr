@@ -8,12 +8,13 @@
   import {
     downloadStatus,
     jobOutcome,
-    jobStatus
+    jobStatus,
+    runOutcome
   } from '../lib/status';
   import JobRow from '../lib/JobRow.svelte';
   import StatusPill from '../lib/StatusPill.svelte';
   import ProgressBar from '../lib/ProgressBar.svelte';
-  import type { Download } from '../lib/types';
+  import type { Download, Job } from '../lib/types';
 
   onMount(() => {
     void downloads.load();
@@ -34,6 +35,13 @@
     if (row) {
       downloads.patch(id, row);
     }
+  }
+
+  /** The span a folded run covers, in the list's muted time style; one time when it is a second. */
+  function timeRange(job: Job): string {
+    const first = new Date((job.first_updated_at ?? job.updated_at) * 1000).toLocaleString();
+    const last = new Date(job.updated_at * 1000).toLocaleString();
+    return first === last ? last : `${first} – ${last}`;
   }
 </script>
 
@@ -83,12 +91,18 @@
   {/if}
 
   <h2>Recent</h2>
-  <ul class="imports" aria-live="polite">
+  <ul class="imports" aria-live="polite" aria-label="Recent jobs">
     {#each recent.items as job (job.id)}
       <li>
         <StatusPill {...jobStatus(job)} />
-        <span class:error={job.state === 'failed'}>{jobOutcome(job, platformName)}</span>
-        <span class="muted">{new Date(job.updated_at * 1000).toLocaleString()}</span>
+        {#if (job.count ?? 1) > 1}
+          {@const run = runOutcome(job, platformName)}
+          <a class:error={job.state === 'failed'} href={run.href}>{run.text}</a>
+          <span class="muted">{timeRange(job)}</span>
+        {:else}
+          <span class:error={job.state === 'failed'}>{jobOutcome(job, platformName)}</span>
+          <span class="muted">{new Date(job.updated_at * 1000).toLocaleString()}</span>
+        {/if}
       </li>
     {:else}
       <li class="muted">No finished jobs yet.</li>
