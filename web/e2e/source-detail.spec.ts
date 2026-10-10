@@ -3,7 +3,8 @@ import { expect, test, type Page } from '@playwright/test';
 /** Opens the detail of the fixture source "Example bundle one" from the Sources list, by keyboard. */
 async function openFromList(page: Page): Promise<void> {
   await page.goto('/?mock=idle#/sources');
-  const link = page.getByRole('link', { name: 'Example bundle one' });
+  // Source 1's own link, since a second row shares its name.
+  const link = page.locator('a[href="#/sources/1"]');
   await link.focus();
   await page.keyboard.press('Enter');
   await expect(page).toHaveURL(/#\/sources\/1$/);
@@ -30,6 +31,11 @@ test('a source opens from the list with the keyboard and shows what it holds', a
 
   await page.goBack();
   await expect(page).toHaveURL(/#\/sources$/);
+});
+
+test('the detail page shows the file label under the heading', async ({ page }) => {
+  await openFromList(page);
+  await expect(page.locator('h1 + p')).toHaveText('example-bundle-one');
 });
 
 test('the file table pages, filters and searches', async ({ page }) => {
@@ -95,7 +101,7 @@ test('re-classify previews, runs as a job and marks the source as set by you', a
 
   await page.goBack();
   await expect(page).toHaveURL(/#\/sources$/);
-  const row = page.getByRole('row').filter({ hasText: 'Example bundle one' });
+  const row = page.getByRole('row').filter({ has: page.locator('a[href="#/sources/1"]') });
   await expect(row).toContainText('megadrive');
   await expect(row.getByText('Set by you')).toBeVisible();
 });

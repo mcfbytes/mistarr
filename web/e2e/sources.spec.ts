@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 import { setMockKnob } from './helpers';
 
 test('a mock with 150 sources lists all 150 over several small pages', async ({ page }) => {
-  await setMockKnob(page, 'sourceCount', 148);
+  await setMockKnob(page, 'sourceCount', 147);
   // Forces the store to loop several times instead of fitting in one page.
   await setMockKnob(page, 'pageCap', 40);
   await page.goto('/#/sources');
@@ -25,6 +25,21 @@ test('deleting a source asks for confirmation inline before it runs', async ({ p
   await expect(confirm).toHaveCount(0);
   await expect(trigger).toBeVisible();
   await expect(trigger).toBeFocused();
+});
+
+test('two sources sharing a name are told apart by their file label', async ({ page }) => {
+  await page.goto('/#/sources');
+  const rows = page.getByRole('row').filter({ hasText: 'Example bundle one' });
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText('example-bundle-one');
+  await expect(rows.nth(0)).not.toContainText('example-bundle-one-extras');
+  await expect(rows.nth(1)).toContainText('example-bundle-one-extras');
+  await expect(
+    page.getByRole('button', { name: 'Remove Example bundle one (example-bundle-one)', exact: true })
+  ).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Remove Example bundle one (example-bundle-one-extras)', exact: true })
+  ).toBeVisible();
 });
 
 test('with no sources the page shows its empty text and no table', async ({ page }) => {

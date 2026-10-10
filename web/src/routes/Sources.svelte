@@ -15,7 +15,8 @@
   import ClientHeld from '../lib/ClientHeld.svelte';
   import SeedPolicySelect from '../lib/SeedPolicySelect.svelte';
   import { getStatus } from '../lib/stores/status.svelte';
-  import type { SeedPolicy } from '../lib/types';
+  import { fileLabel } from '../lib/sourceName';
+  import type { SeedPolicy, Source } from '../lib/types';
 
   onMount(() => {
     void sources.load();
@@ -25,6 +26,16 @@
 
   const pausedWhilePlaying = $derived(getStatus()?.pause_client_while_playing === true);
   let removingId = $state<number | null>(null);
+
+  /** Whether another listed source carries the same display name. */
+  function sharedName(source: Source): boolean {
+    return sources.items.some((o) => o.id !== source.id && o.display_name === source.display_name);
+  }
+
+  /** The name a row's controls say; a name another row also has carries the file label. */
+  function controlName(source: Source): string {
+    return sharedName(source) ? `${source.display_name} (${fileLabel(source.origin_file)})` : source.display_name;
+  }
 
   async function bind(id: number, platformId: string): Promise<void> {
     if (!platformId) {
@@ -126,7 +137,16 @@
       <tbody>
         {#each sources.items as source (source.id)}
           <tr>
-            <td><a href={sourceUrl(source.id)} class="name">{source.display_name}</a></td>
+            <td class="name-cell">
+              <a
+                href={sourceUrl(source.id)}
+                class="name"
+                aria-label={sharedName(source) ? controlName(source) : undefined}>{source.display_name}</a
+              >
+              {#if fileLabel(source.origin_file) !== source.display_name}
+                <span class="muted">{fileLabel(source.origin_file)}</span>
+              {/if}
+            </td>
             <td>
               {#if source.pending_binding}
                 <span class="muted">{bindingText(source, platformName)}</span>
@@ -160,7 +180,7 @@
             <td>
               <SeedPolicySelect
                 policy={source.seed_policy}
-                label={`Seed policy of ${source.display_name}`}
+                label={`Seed policy of ${controlName(source)}`}
                 onpick={(p: SeedPolicy) => setSeedPolicy(source.id, p)}
               />
               {#if pausedWhilePlaying}<span class="muted seed-note">Paused while a core runs</span>{/if}
@@ -172,10 +192,10 @@
                   <button onclick={() => disable(source.id)}>Disable</button>
                 {/if}
                 <ConfirmButton
-                  name={`Remove ${source.display_name}`}
+                  name={`Remove ${controlName(source)}`}
                   confirmLabel="Remove source"
-                  keepName={`Keep ${source.display_name}`}
-                  groupName={`Remove ${source.display_name}?`}
+                  keepName={`Keep ${controlName(source)}`}
+                  groupName={`Remove ${controlName(source)}?`}
                   prompt="Removed from mistarr and the client; placed files stay."
                   busy={removingId === source.id}
                   onconfirm={() => remove(source.id)}
@@ -198,7 +218,8 @@
   }
 
   .reason,
-  .seed-note {
+  .seed-note,
+  .name-cell .muted {
     display: block;
     margin-top: 0.2em;
   }

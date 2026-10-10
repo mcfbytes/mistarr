@@ -146,7 +146,9 @@ seed policy the note "Paused while a core runs" while the setting is on (see
 Unbound sources have a platform picker and, when the names suggest one, a
 "Bind to" button for the suggested platform. The name links to the source's
 detail, and a "Set by you" tag beside the platform marks a binding the user
-chose. Above the table, the upload control, the magnet box and the URL
+chose. Where a source's file name differs from its name, the file name shows
+beneath it in dimmed text, and when two rows share a name the row's controls
+name the file too. Above the table, the upload control, the magnet box and the URL
 field, then the files still in `sources/` and this session's uploads, as in
 the wizard.
 
