@@ -114,7 +114,7 @@ pub enum DatError {
     #[error("the DB export's parent index is larger than {} MiB", MAX_INDEX_BYTES >> 20)]
     IndexTooLarge,
     /// The zip container could not be read.
-    #[error("invalid zip archive: {0}")]
+    #[error("damaged zip archive: {0}")]
     Zip(#[from] zip::result::ZipError),
     /// A zip pack has no `.dat` or `.xml` members.
     #[error("zip archive contains no .dat or .xml files")]

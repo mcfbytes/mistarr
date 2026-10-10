@@ -542,6 +542,13 @@ mod tests {
         assert!(sql("roms_size").ends_with("WHERE match_base IS NOT NULL"));
         assert!(sql("roms_match_base").ends_with("WHERE match_base IS NOT NULL"));
         assert!(!sql("roms_sha1").contains("WHERE"));
+        assert!(sql("roms_match_name").ends_with("(match_name, title_id)"));
+        assert!(sql("roms_match_base").contains("size, title_id) WHERE"));
+        assert!(sql("torrent_files_source_rom").ends_with("(source_id, rom_id)"));
+        assert!(sql("roms_id_title").ends_with("(id, title_id)"));
+        assert!(sql("titles_id_dat").ends_with("(id, dat_version_id)"));
+        assert!(sql("title_groups_counts")
+            .ends_with("(platform_id, lean_flags, source, have_verified, wanted)"));
         assert!(!names(&conn, "table").iter().any(|n| n == "dat_stage"));
         conn.execute_batch(
             "INSERT INTO platforms (id, name, core_dir, kind) VALUES ('p', 'P', 'P', 'cartridge');
