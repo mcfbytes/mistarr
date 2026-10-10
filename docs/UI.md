@@ -250,8 +250,10 @@ scheduler (a Running, Paused or Held for the core pill, the jobs waiting,
 and Pause, Resume or Run now), memory (mistarr's RSS, with a meter of the
 board's memory in use and `MemAvailable` of `MemTotal`), storage (free
 space, with a meter of the data directory's filesystem in use) and uptime.
-Meters warn past 85 % for memory and 90 % for storage. Live over the SSE
-`status` event.
+Meters warn past 85 % for memory and 90 % for storage. When memory is too
+short for an import in RAM, a notice under the tiles says the import runs on
+the card, with the numbers, and adds a sentence when the card is mounted
+`sync`. Live over the SSE `status` event.
 
 An About block shows the version with a Copy button, a Release or
 Development build pill, the commit, a link to the release's notes on the

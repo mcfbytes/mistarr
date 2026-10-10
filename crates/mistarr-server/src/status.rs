@@ -1,6 +1,8 @@
 //! The `/system/status` body and the host measurements it reports.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
@@ -17,6 +19,10 @@ use crate::jobs::{JobKind, Lane};
 
 /// `GET /system/status` and the `status` event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "One bool per independent status field is the JSON shape."
+)]
 pub struct Status {
     /// The version string from [`crate::version::version`].
     pub version: &'static str,
@@ -60,6 +66,24 @@ pub struct Status {
     pub launch: LaunchState,
     /// CHD decoding speed measured on the last image, `None` before the first.
     pub chd_decode_bytes_per_sec: Option<u64>,
+    /// Whether a DAT import can run on a copy of the database in memory now.
+    pub dat_import_in_ram: DatImportInRam,
+    /// Whether the mount holding the data directory carries the `sync` option.
+    pub card_sync_mount: bool,
+}
+
+/// Whether a DAT import can run on a copy of the database in memory now, and the memory
+/// figures behind that, as `/system/status` reports them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct DatImportInRam {
+    /// Whether `MemAvailable` covers the copy's need plus the floor now.
+    pub possible: bool,
+    /// MiB a copy of a database of the current size needs, rounding up.
+    pub need_mib: u64,
+    /// MiB of `MemAvailable` now, rounding up.
+    pub available_mib: u64,
+    /// `[memory] import_floor_mib`, kept available on top of the copy.
+    pub floor_mib: u64,
 }
 
 /// Whether the launch routes can start anything, as `/system/status` reports it.
@@ -193,6 +217,9 @@ pub async fn snapshot(app: &AppState) -> Status {
             None
         });
     let mem = meminfo();
+    let db_size = std::fs::metadata(app.db.path()).map_or(0, |m| m.len());
+    let import = dat_import_in_ram(db_size, mem.available, config.memory.import_floor_mib);
+    let card_sync_mount = card_sync_mount(&config.paths.data);
     let disk = disk_space(&config.paths.data);
     Status {
         version: crate::version::version(),
@@ -215,7 +242,90 @@ pub async fn snapshot(app: &AppState) -> Status {
         mem_available_bytes: mem.available,
         launch: launch_state(app),
         chd_decode_bytes_per_sec: chd_rate,
+        dat_import_in_ram: import,
+        card_sync_mount,
     }
+}
+
+/// Bytes in a mebibyte, for the MiB figures the import check and its status report.
+const MIB: u64 = 1024 * 1024;
+
+/// Whether a `db_size`-byte database can be copied into RAM now: `MemAvailable` must
+/// cover [`crate::db::ram::need`] for a 1 MiB DAT plus `floor_mib`. Unreadable memory
+/// counts as none, so an import would run on the card.
+fn dat_import_in_ram(db_size: u64, available: Option<u64>, floor_mib: u64) -> DatImportInRam {
+    let need = crate::db::ram::need(db_size, 1 << 20);
+    let floor = floor_mib.saturating_mul(MIB);
+    let available = available.unwrap_or(0);
+    DatImportInRam {
+        possible: need.saturating_add(floor) <= available,
+        need_mib: need.div_ceil(MIB),
+        available_mib: available.div_ceil(MIB),
+        floor_mib,
+    }
+}
+
+/// Whether the mount entry covering `path` in the text of `/proc/mounts` carries the
+/// `sync` option. The entry whose mount point is the longest prefix of `path` wins,
+/// matching whole path components only, so `/media/fat2` is not under `/media/fat`.
+fn mount_is_sync(mounts: &str, path: &Path) -> bool {
+    let mut best: Option<(usize, bool)> = None;
+    for line in mounts.lines() {
+        let mut fields = line.split_whitespace();
+        let (Some(_device), Some(mount), Some(_fstype), Some(options)) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let mount = unescape_mount(mount);
+        if !path.starts_with(Path::new(&mount)) {
+            continue;
+        }
+        let sync = options.split(',').any(|o| o == "sync");
+        if best.is_none_or(|(longest, _)| mount.len() > longest) {
+            best = Some((mount.len(), sync));
+        }
+    }
+    best.is_some_and(|(_, sync)| sync)
+}
+
+/// Decodes the octal escapes `/proc/mounts` writes in a mount point, such as `\040`
+/// for a space.
+fn unescape_mount(field: &str) -> String {
+    let mut out = String::with_capacity(field.len());
+    let mut chars = field.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        let digits: String = chars.by_ref().take(3).collect();
+        if let Ok(byte) = u8::from_str_radix(&digits, 8) {
+            out.push(char::from(byte));
+        } else {
+            out.push('\\');
+            out.push_str(&digits);
+        }
+    }
+    out
+}
+
+/// Whether the mount holding `path` carries the `sync` option, from one read of
+/// `/proc/mounts` kept in memory for a minute; `false` when it cannot be read.
+fn card_sync_mount(path: &Path) -> bool {
+    static CACHE: Mutex<Option<(PathBuf, Instant, bool)>> = Mutex::new(None);
+    const FRESH: Duration = Duration::from_secs(60);
+    let mut cache = CACHE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((cached, read_at, sync)) = cache.as_ref() {
+        if cached.as_path() == path && read_at.elapsed() < FRESH {
+            return *sync;
+        }
+    }
+    let sync = std::fs::read_to_string("/proc/mounts").is_ok_and(|m| mount_is_sync(&m, path));
+    *cache = Some((path.to_path_buf(), Instant::now(), sync));
+    sync
 }
 
 /// Which first-run steps are complete, per `docs/API.md` "System".
@@ -431,5 +541,63 @@ mod tests {
         assert_eq!(launch_state(&app), LaunchState::Ready);
         app.update_config(|c| c.prefs.launch = false);
         assert_eq!(launch_state(&app), LaunchState::Disabled);
+    }
+
+    #[test]
+    fn mount_is_sync_accepts_sync_beside_dirsync() {
+        let mounts = "dev /media/fat exfat rw,sync,dirsync 0 0\n";
+        assert!(mount_is_sync(mounts, Path::new("/media/fat/mistarr")));
+    }
+
+    #[test]
+    fn mount_is_sync_ignores_dirsync_alone() {
+        let mounts = "dev /media/fat exfat rw,dirsync,noatime 0 0\n";
+        assert!(!mount_is_sync(mounts, Path::new("/media/fat/mistarr")));
+    }
+
+    #[test]
+    fn mount_is_sync_picks_the_longest_mount_point() {
+        let outer = "dev /media/fat exfat rw,sync 0 0\ndev /media/fat/mistarr tmpfs rw 0 0\n";
+        assert!(!mount_is_sync(outer, Path::new("/media/fat/mistarr/x")));
+        let inner = "dev /media/fat exfat rw 0 0\ndev /media/fat/mistarr tmpfs rw,sync 0 0\n";
+        assert!(mount_is_sync(inner, Path::new("/media/fat/mistarr/x")));
+    }
+
+    #[test]
+    fn mount_is_sync_needs_whole_path_components() {
+        let mounts = "dev /media/fat exfat rw,sync 0 0\n";
+        assert!(!mount_is_sync(mounts, Path::new("/media/fat2/mistarr")));
+        assert!(mount_is_sync(mounts, Path::new("/media/fat")));
+    }
+
+    #[test]
+    fn mount_is_sync_decodes_escaped_mount_points() {
+        let mounts = "dev /media/my\\040fat exfat rw,sync 0 0\n";
+        assert!(mount_is_sync(mounts, Path::new("/media/my fat/mistarr")));
+        assert!(!mount_is_sync(mounts, Path::new("/media/my-fat/mistarr")));
+    }
+
+    #[test]
+    fn mount_is_sync_on_empty_text_is_not_sync() {
+        assert!(!mount_is_sync("", Path::new("/media/fat")));
+        assert!(!mount_is_sync("malformed\n", Path::new("/")));
+    }
+
+    #[test]
+    fn dat_import_in_ram_refuses_when_memory_is_short() {
+        // A 100 MiB database needs 100 + 50 + 6 + 32 = 188 MiB for a 1 MiB DAT.
+        let r = dat_import_in_ram(100 << 20, Some(300 << 20), 128);
+        assert!(!r.possible);
+        assert_eq!(r.need_mib, 188);
+        assert_eq!(r.available_mib, 300);
+        assert_eq!(r.floor_mib, 128);
+    }
+
+    #[test]
+    fn dat_import_in_ram_allows_a_roomy_board() {
+        let r = dat_import_in_ram(100 << 20, Some(1 << 30), 128);
+        assert!(r.possible);
+        assert_eq!(r.need_mib, 188);
+        assert_eq!(r.floor_mib, 128);
     }
 }
