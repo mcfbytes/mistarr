@@ -709,10 +709,10 @@ mod tests {
     }
 
     /// A source with a matched file in each of two DAT versions, a candidate, an extra
-    /// and an unmatched file: the summary and the DAT list are what the statements that
-    /// read every `torrent_files` row returned.
+    /// and an unmatched file: the summary and the DAT list equal the full walk over
+    /// `torrent_files` and its DAT join, written out below as the reference.
     #[test]
-    fn detail_agrees_with_the_statements_that_walked_every_file() {
+    fn detail_agrees_with_the_full_walk_over_the_files() {
         let c = conn();
         let (id, first) = source(&c);
         c.execute_batch(
@@ -743,7 +743,7 @@ mod tests {
         sources::set_matches(&c, id, &[(4, Some(second), Confidence::Name)]).expect("match");
         assert_ne!(first, second);
 
-        // The statements the summary and the DAT list each replaced, kept as the reference.
+        // The full walk over every file row and its DAT join, as the reference.
         let mut walked = Summary::default();
         let mut stmt = c
             .prepare(

@@ -1044,8 +1044,8 @@ mod tests {
         assert_eq!(files(&c, id, 10, 0).expect("files").total, 0);
     }
 
-    /// A file with a candidate and no matched rom counts as matched, as the statement
-    /// that read every row counted it, in `get` and in `list`.
+    /// A file with a candidate and no matched rom counts as matched in `get` and in
+    /// `list`, as the full walk over the source's files counts it.
     #[test]
     fn a_candidate_only_file_counts_as_matched() {
         let c = conn();
@@ -1073,7 +1073,7 @@ mod tests {
             params![id, other],
         )
         .expect("candidate");
-        // The count the two new ones add up to, counted the way it was before.
+        // The full walk over every file row, as the reference for the split count.
         let walked: u64 = c
             .query_row(
                 "SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = ?1

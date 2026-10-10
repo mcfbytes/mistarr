@@ -579,15 +579,14 @@ the matched count is its `rom_id IS NOT NULL` range, the paths and candidate
 checks of the detail's summary are the `rom_id IS NULL` range, and each
 `EXISTS` probe is a `torrent_candidates` primary-key seek. The DAT list then
 follows `roms_id_title` to a matched rom's title and `titles_id_dat` to that
-title's DAT version, so it reads index pages instead of the `roms` and
-`titles` rows. The test
+title's DAT version, so no `roms` or `titles` row is read. The test
 `db::plans::source_detail_seeks_the_source_files_and_downloads` asserts each
 seek, and `db::plans::platform_counts_read_the_covering_group_index` asserts
 the covering group index.
 
-Each rom index serves one lookup, and a DAT load writes into every index
-whose key its roms carry, at random places (ARCHITECTURE.md "Writes on a
-sync mount"), so an index holds only the roms its lookup can return:
+Each index in this table serves one lookup and holds only the roms that
+lookup can return; a DAT load writes into every one whose key its roms
+carry, at random places (ARCHITECTURE.md "Writes on a sync mount"):
 
 | Index | Lookup | Rows |
 |---|---|---|
@@ -599,6 +598,10 @@ sync mount"), so an index holds only the roms its lookup can return:
 | `roms_size` | the fuzzy and size-only candidates, which read only keyed roms | roms binding has keyed |
 | `roms_chd_size` | whether a scanned `.chd` has the size of a DAT's `.chd` rom | roms named `*.chd` |
 | `roms_track_size` | the titles a CHD's track sizes can match before it is decoded | roms of whole 2352-byte sectors |
+
+`roms_id_title` and `titles_id_dat` are no lookup index: both are keyed by an
+increasing id, so a load appends to them and a read follows a `roms` or
+`titles` row by its key.
 
 A load inserts its roms with `match_name` and `match_base` NULL; binding
 keys them (`sources::refresh_match_keys`) in one transaction before it reads
