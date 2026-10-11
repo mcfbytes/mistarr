@@ -116,6 +116,11 @@ pub fn apply(conn: &mut Connection) -> Result<Vec<u32>> {
 ///
 /// As [`apply`].
 pub(crate) fn apply_through(conn: &mut Connection, last: u32) -> Result<Vec<u32>> {
+    apply_list(conn, MIGRATIONS, last)
+}
+
+/// [`apply_through`] over the migrations given, so a test can apply migrations of its own.
+fn apply_list(conn: &mut Connection, migrations: &[Migration], last: u32) -> Result<Vec<u32>> {
     check_supported(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS schema_version (
@@ -126,30 +131,93 @@ pub(crate) fn apply_through(conn: &mut Connection, last: u32) -> Result<Vec<u32>
     )?;
     let current = current_version(conn)?;
     let mut applied = Vec::new();
-    for m in MIGRATIONS
+    for m in migrations
         .iter()
         .filter(|m| m.version > current && m.version <= last)
     {
-        let fail = |source| Error::Migration {
-            version: m.version,
-            source,
-        };
-        let tx = conn.transaction().map_err(fail)?;
-        tx.execute_batch(m.sql).map_err(fail)?;
-        flush_groups(&tx).map_err(|e| match e {
-            Error::Db(source) => fail(source),
-            other => other,
-        })?;
-        tx.execute(
-            "INSERT INTO schema_version (version, name, applied_at) VALUES (?1, ?2, ?3)",
-            params![m.version, m.name, crate::unix_now()],
-        )
-        .map_err(fail)?;
-        tx.commit().map_err(fail)?;
+        apply_one(conn, m)?;
         tracing::info!(version = m.version, name = m.name, "applied migration");
         applied.push(m.version);
     }
     Ok(applied)
+}
+
+/// The marker line that runs a migration with foreign keys switched off.
+const FOREIGN_KEYS_OFF: &str = "-- foreign_keys: off";
+
+/// Whether a migration's SQL opens with the [`FOREIGN_KEYS_OFF`] marker line.
+fn wants_foreign_keys_off(sql: &str) -> bool {
+    sql.split('\n')
+        .next()
+        .is_some_and(|line| line.trim_end() == FOREIGN_KEYS_OFF)
+}
+
+/// Whether the connection enforces foreign keys right now.
+fn foreign_keys_on(conn: &Connection) -> rusqlite::Result<bool> {
+    conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+}
+
+/// The table holding the first orphan row `PRAGMA foreign_key_check` reports, if any.
+fn foreign_key_violation(conn: &Connection) -> rusqlite::Result<Option<String>> {
+    let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
+    let mut rows = stmt.query([])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(row.get(0)?)),
+        None => Ok(None),
+    }
+}
+
+/// Applies one migration, switching foreign keys off around its transaction when marked.
+///
+/// SQLite ignores the pragma inside a transaction, so the switch brackets the transaction
+/// and restores the connection's earlier value on the success and every failure path.
+fn apply_one(conn: &mut Connection, m: &Migration) -> Result<()> {
+    let fail = |source| Error::Migration {
+        version: m.version,
+        source,
+    };
+    if !wants_foreign_keys_off(m.sql) {
+        return apply_in(conn, m, false);
+    }
+    let before = foreign_keys_on(conn).map_err(fail)?;
+    conn.pragma_update(None, "foreign_keys", false)
+        .map_err(fail)?;
+    let outcome = apply_in(conn, m, true);
+    if let Err(source) = conn.pragma_update(None, "foreign_keys", before) {
+        if outcome.is_ok() {
+            return Err(fail(source));
+        }
+    }
+    outcome
+}
+
+/// Applies one migration in its own transaction, checking foreign keys when `check_fk`.
+fn apply_in(conn: &mut Connection, m: &Migration, check_fk: bool) -> Result<()> {
+    let fail = |source| Error::Migration {
+        version: m.version,
+        source,
+    };
+    let tx = conn.transaction().map_err(fail)?;
+    tx.execute_batch(m.sql).map_err(fail)?;
+    flush_groups(&tx).map_err(|e| match e {
+        Error::Db(source) => fail(source),
+        other => other,
+    })?;
+    if check_fk {
+        if let Some(table) = foreign_key_violation(&tx).map_err(fail)? {
+            return Err(Error::ForeignKeyCheck {
+                version: m.version,
+                table,
+            });
+        }
+    }
+    tx.execute(
+        "INSERT INTO schema_version (version, name, applied_at) VALUES (?1, ?2, ?3)",
+        params![m.version, m.name, crate::unix_now()],
+    )
+    .map_err(fail)?;
+    tx.commit().map_err(fail)?;
+    Ok(())
 }
 
 /// Builds the `title_groups` rows a migration's writes left dirty, once the table exists.
@@ -720,5 +788,202 @@ mod tests {
             .query_row("SELECT file_id FROM import_log", [], |r| r.get(0))
             .expect("log");
         assert_eq!(file_id, None);
+    }
+
+    const PARENT_AND_CHILD: &str = "\
+CREATE TABLE parent (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES parent(id),
+                    note TEXT NOT NULL);
+CREATE INDEX parent_name ON parent (name);";
+
+    const REBUILD_PARENT: &str = "-- foreign_keys: off
+DROP INDEX parent_name;
+CREATE TABLE parent_new (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+INSERT INTO parent_new (id, name) SELECT id, name FROM parent ORDER BY id;
+DROP TABLE parent;
+ALTER TABLE parent_new RENAME TO parent;
+CREATE INDEX parent_name ON parent (name);";
+
+    const ORPHANING_REBUILD: &str = "-- foreign_keys: off
+DROP INDEX parent_name;
+CREATE TABLE parent_new (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+INSERT INTO parent_new (id, name) SELECT id, name FROM parent WHERE id = 1 ORDER BY id;
+DROP TABLE parent;
+ALTER TABLE parent_new RENAME TO parent;
+CREATE INDEX parent_name ON parent (name);";
+
+    const PARENT_CHILD_AND_TRIGGER: &str = "\
+CREATE TABLE parent (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES parent(id),
+                    note TEXT NOT NULL);
+CREATE TABLE child_log (child_id INTEGER NOT NULL, parent_name TEXT NOT NULL);
+CREATE TRIGGER child_logs_parent AFTER INSERT ON child
+BEGIN
+  INSERT INTO child_log (child_id, parent_name)
+    SELECT NEW.id, p.name FROM parent p WHERE p.id = NEW.parent_id;
+END;";
+
+    const REBUILD_AROUND_TRIGGER: &str = "-- foreign_keys: off
+DROP TRIGGER child_logs_parent;
+CREATE TABLE parent_new (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+INSERT INTO parent_new (id, name) SELECT id, name FROM parent ORDER BY id;
+DROP TABLE parent;
+ALTER TABLE parent_new RENAME TO parent;
+CREATE TRIGGER child_logs_parent AFTER INSERT ON child
+BEGIN
+  INSERT INTO child_log (child_id, parent_name)
+    SELECT NEW.id, p.name FROM parent p WHERE p.id = NEW.parent_id;
+END;";
+
+    fn two_migrations(create: &'static str, rebuild: &'static str) -> [Migration; 2] {
+        [
+            Migration {
+                version: 1,
+                name: "parent_and_child",
+                sql: create,
+            },
+            Migration {
+                version: 2,
+                name: "rebuild_parent",
+                sql: rebuild,
+            },
+        ]
+    }
+
+    fn foreign_keys(conn: &Connection) -> bool {
+        conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+            .expect("pragma")
+    }
+
+    fn column(conn: &Connection, sql: &str) -> Vec<String> {
+        let mut stmt = conn.prepare(sql).expect("prepare");
+        stmt.query_map([], |r| r.get(0))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows")
+    }
+
+    /// Applies `create`, seeds two parents and their children, then applies `rebuild`.
+    fn seed_and_rebuild(
+        create: &'static str,
+        rebuild: &'static str,
+    ) -> (Connection, Result<Vec<u32>>) {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys on");
+        let migs = two_migrations(create, rebuild);
+        assert_eq!(apply_list(&mut conn, &migs, 1).expect("schema"), [1]);
+        conn.execute_batch(
+            "INSERT INTO parent (id, name) VALUES (1, 'One'), (2, 'Two');
+             INSERT INTO child (id, parent_id, note) VALUES (1, 1, 'a'), (2, 2, 'b');",
+        )
+        .expect("rows");
+        let outcome = apply_list(&mut conn, &migs, u32::MAX);
+        (conn, outcome)
+    }
+
+    #[test]
+    fn a_marked_migration_rebuilds_a_parent_table_under_its_children() {
+        let (conn, outcome) = seed_and_rebuild(PARENT_AND_CHILD, REBUILD_PARENT);
+        assert_eq!(outcome.expect("rebuild"), [2]);
+        assert_eq!(current_version(&conn).expect("version"), 2);
+        assert_eq!(
+            column(&conn, "SELECT name FROM parent ORDER BY id"),
+            ["One", "Two"]
+        );
+        assert_eq!(
+            column(
+                &conn,
+                "SELECT p.name FROM child c JOIN parent p ON p.id = c.parent_id ORDER BY c.id"
+            ),
+            ["One", "Two"],
+            "the child rows still reach their parent"
+        );
+        assert!(foreign_keys(&conn), "the pragma is back on after commit");
+    }
+
+    #[test]
+    fn a_marked_migration_that_orphans_a_child_row_rolls_back() {
+        let (conn, outcome) = seed_and_rebuild(PARENT_AND_CHILD, ORPHANING_REBUILD);
+        match outcome {
+            Err(Error::ForeignKeyCheck { version, table }) => {
+                assert_eq!(version, 2);
+                assert_eq!(table, "child", "the failure names the offending table");
+            }
+            other => panic!("expected a foreign key failure, got {other:?}"),
+        }
+        assert_eq!(current_version(&conn).expect("version"), 1, "not recorded");
+        assert_eq!(
+            column(&conn, "SELECT name FROM parent ORDER BY id"),
+            ["One", "Two"],
+            "the old table and its rows are intact"
+        );
+        assert_eq!(
+            column(&conn, "SELECT note FROM child ORDER BY id"),
+            ["a", "b"]
+        );
+        assert!(foreign_keys(&conn), "the pragma is back on after rollback");
+    }
+
+    #[test]
+    fn an_unmarked_migration_still_enforces_foreign_keys() {
+        let (conn, outcome) = seed_and_rebuild(
+            PARENT_AND_CHILD,
+            "INSERT INTO child (id, parent_id, note) VALUES (3, 9, 'c');",
+        );
+        match outcome {
+            Err(Error::Migration { version, .. }) => assert_eq!(version, 2),
+            other => panic!("expected a migration error, got {other:?}"),
+        }
+        assert_eq!(
+            column(&conn, "SELECT note FROM child ORDER BY id"),
+            ["a", "b"]
+        );
+        assert!(foreign_keys(&conn), "the pragma is untouched");
+    }
+
+    #[test]
+    fn a_rebuild_drops_and_recreates_a_trigger_naming_the_table() {
+        let (conn, outcome) = seed_and_rebuild(PARENT_CHILD_AND_TRIGGER, REBUILD_AROUND_TRIGGER);
+        assert_eq!(outcome.expect("rebuild"), [2]);
+        assert!(names(&conn, "trigger")
+            .iter()
+            .any(|n| n == "child_logs_parent"));
+        conn.execute(
+            "INSERT INTO child (id, parent_id, note) VALUES (3, 1, 'c')",
+            [],
+        )
+        .expect("child");
+        assert_eq!(
+            column(&conn, "SELECT parent_name FROM child_log ORDER BY child_id"),
+            ["One", "Two", "One"],
+            "the trigger fires again after the rebuild"
+        );
+    }
+
+    #[test]
+    fn only_an_exact_first_line_asks_for_foreign_keys_off() {
+        assert!(wants_foreign_keys_off(
+            "-- foreign_keys: off\nCREATE TABLE t (i);"
+        ));
+        assert!(wants_foreign_keys_off(
+            "-- foreign_keys: off\r\nCREATE TABLE t (i);"
+        ));
+        assert!(wants_foreign_keys_off("-- foreign_keys: off"));
+        assert!(wants_foreign_keys_off(
+            "-- foreign_keys: off \nCREATE TABLE t (i);"
+        ));
+        assert!(!wants_foreign_keys_off(
+            "-- foreign_keys: off to rebuild\nCREATE TABLE t (i);"
+        ));
+        assert!(!wants_foreign_keys_off(
+            "CREATE TABLE t (i);\n-- foreign_keys: off\n"
+        ));
+        assert!(!wants_foreign_keys_off(
+            "--foreign_keys: off\nCREATE TABLE t (i);"
+        ));
+        assert!(!wants_foreign_keys_off(
+            "-- foreign_keys: OFF\nCREATE TABLE t (i);"
+        ));
     }
 }

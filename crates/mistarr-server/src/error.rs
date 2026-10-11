@@ -31,6 +31,14 @@ pub enum Error {
         /// The SQLite error.
         source: rusqlite::Error,
     },
+    /// A migration's foreign key check found an orphan row; its transaction rolls back.
+    #[error("migration {version} would leave a row in `{table}` referencing a missing one")]
+    ForeignKeyCheck {
+        /// The migration number.
+        version: u32,
+        /// The table the first offending row is in.
+        table: String,
+    },
     /// The database was migrated by a newer mistarr; its contents are left unchanged.
     #[error(
         "database schema version {found} is newer than this mistarr supports ({supported}); \
@@ -192,6 +200,14 @@ mod tests {
             source: rusqlite::Error::InvalidQuery,
         };
         assert!(e.to_string().starts_with("migration 3 failed"));
+        let orphan = Error::ForeignKeyCheck {
+            version: 4,
+            table: "roms".into(),
+        };
+        assert_eq!(
+            orphan.to_string(),
+            "migration 4 would leave a row in `roms` referencing a missing one"
+        );
         let json = serde_json::from_str::<u8>("x").map_err(Error::from);
         assert!(json.is_err_and(|e| e.to_string().starts_with("JSON: ")));
         let client = Error::from(mistarr_clients::Error::NotFound);
