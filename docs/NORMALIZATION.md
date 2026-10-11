@@ -357,7 +357,10 @@ Differences that are not seeks: subquery numbers, aliases, and the order of the 
 The highest migration is 0022; WP-82 and WP-85 add none. Wave 13 is meant to
 ship as one release, and each table is rebuilt in exactly one file, so a release
 cut between two files still rebuilds no table twice. A package that joins a file
-edits it while it is unreleased; once released, a file is never edited.
+edits it while it is unreleased; once released, a file is never edited. A file
+counts as released once any build containing it has run on the board or shipped
+in a release; wave 13 builds go to the board only after the wave's last file
+merges, unless the orchestrator freezes the files merged so far.
 
 | File | Packages | Tables rebuilt | Also |
 |---|---|---|---|
@@ -437,6 +440,8 @@ WP-91 follows WP-77. WP-82 lands before WP-86.
 - [ ] P12's views in `0023_shared_views.sql`, defined over the current columns, with the reads in `crates/mistarr-server/src/db/` moved onto them where they repeat a shape.
 - [ ] A plan test per hot read through a view: same index seeks as the written-out join, no `MATERIALIZE` or `CO-ROUTINE` step.
 - [ ] Later packages change a view's body rather than every read.
+- [ ] Every read keeps its predicates exactly: a read moves onto a view only when the view adds none (DATA-MODEL.md "Views"); binding by name and by base and size read `rom_view` with the title's retired flag and the bios flag, not `live_rom_view`.
+- Open, not decided here: whether retired roms of live titles should bind. That is a behaviour change and needs its own package.
 
 ## Conflicts with wave 12
 

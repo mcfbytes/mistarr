@@ -892,6 +892,7 @@ SELECT r.id, r.title_id, r.name, r.size, r.crc32, r.md5, r.sha1,
        r.header, r.zip_dir, r.present,
        t.name AS title_name, t.dat_version_id, t.source AS title_source,
        t.platform_id AS platform_key, t.platform_id AS platform, t.group_root, t.parent_id,
+       t.retired AS title_retired,
        (r.retired = 0 AND t.retired = 0) AS live,
        EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = r.title_id AND f.flag = 'bios') AS bios
 FROM roms r JOIN titles t ON t.id = r.title_id;
@@ -945,6 +946,11 @@ Rules for reads through them:
   covering `roms_id_title` and `titles_id_dat`) stays on the tables; the
   base-and-size read orders by `+id` through live_rom_view instead.
 - Writes go to the tables.
+- A read moves onto a view only when its set of predicates stays identical.
+  live_rom_view (live rom, live title, no bios flag) serves the reads with exactly
+  that set, such as the size candidates. Binding by name and by base and size
+  test only the title's retired flag and the bios flag, so they read rom_view
+  with title_retired = 0 AND NOT bios and keep binding retired roms of live titles.
 
 The plan test runs each hot read through its view beside the same read
 written out over the tables. It compares the SEARCH and SCAN steps as a
