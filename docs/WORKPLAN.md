@@ -170,6 +170,16 @@ file gives the order and the migration grouping.
 | WP-90 | Tag tables | Opus | 89 | `mistarr-server` |
 | WP-91 | Compact write-back | Opus | 77, 86 | `mistarr-server` |
 
+## Wave 14: local network only
+
+Starts after wave 13. The design step decides how much belongs here and how
+much in the board image, since filtering peers may need firewall rights that
+mistarr does not hold.
+
+| WP | Name | Model | Depends | Acceptance |
+|---|---|---|---|---|
+| WP-95 | Local network only for the torrent clients | Opus | 91 | A setting, off by default, limits the managed rtorrent and Transmission to peers on the local network over IPv4 and IPv6 (private, link-local and unique local ranges), with local peer discovery kept working; the design names the rights each client and the board need and moves any firewall part to the board image's own plan; tests cover the address ranges and each client's settings; DEPLOYMENT.md and the Settings page say what the option does and does not block. |
+
 ## Suggested fan-out
 
 Wave 1 is eight independent agents. Wave 2 needs WP-09 first, then six in
