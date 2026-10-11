@@ -32,7 +32,8 @@ retires roms and titles, `chd` and `sources` update `files` and `roms` in step
 with their own rows, and `candidates` updates `torrent_files`; downloads are
 cancelled through `downloads`, `arcade::mra_version` writes `dat_versions`, and
 `files::delete_ids` clears `import_log`.
-Read-only composite views over several tables sit in `db/views/`. Rom
+Read-only composite views over several tables sit in `db/views/`; reads
+that repeat a row shape go through the SQL views of "Views" below. Rom
 lookups, the SHA1, MD5 then CRC32 and size tiers among them, are in `roms`;
 `titles` and `arcade` write the rom rows.
 A platform is named by a `PlatformId` in the `titles`, `arcade`, `roms`, `files`
@@ -629,7 +630,8 @@ The schema above is the one the migrations build. Wave 13 moves every table to
 the forms below; NORMALIZATION.md holds the measurements, the migration files
 ("Migration grouping"; each table below names its file's number and packages)
 and each package's tasks.
-Column and view names here are plain text, since most do not exist yet.
+Column names here are plain text, since most do not exist yet; the views
+under "Views" exist and are named in code font.
 
 Forms:
 
@@ -892,7 +894,9 @@ Each view is a projection: no aggregate, DISTINCT, LIMIT, window
 function or compound select, so SQLite flattens it into the query that reads
 it. A decode that needs another table's row (a platform slug, a directory
 path) is a scalar subquery, not a join, so a view of one table stays one table
-and may sit on the right of a LEFT JOIN. Bodies over the 0022 columns:
+and may sit on the right of a LEFT JOIN. Migration `0023_shared_views.sql`
+creates them over the current columns; they store no rows, so the synthetic
+catalogue's database size is unchanged:
 
 ```sql
 CREATE VIEW rom_view AS
@@ -926,12 +930,18 @@ FROM torrent_files f;
 CREATE VIEW file_view AS
 SELECT f.id, f.platform_id AS platform_key, f.platform_id AS platform, f.rel_path, f.size,
        f.mtime, f.crc32, f.md5, f.sha1, f.crc32 AS crc32_hex, f.md5 AS md5_hex,
-       f.sha1 AS sha1_hex, f.crc32_whole AS crc32_whole_hex, f.md5_whole AS md5_whole_hex,
-       f.sha1_whole AS sha1_whole_hex, f.header_rule, f.header_rule AS header_rule_text,
+       f.sha1 AS sha1_hex, f.header_rule, f.header_rule AS header_rule_text,
        f.rom_id, f.state, f.state AS state_text, f.scanned_at, f.reason,
        f.reason AS reason_text
 FROM files f;
 ```
+
+Each body drops its view first, so the migration can run again over a schema
+stepped back. `file_view` leaves out the whole-file hashes: no read takes them
+through it, and a view naming a column makes `ALTER TABLE … DROP COLUMN` fail,
+which the migration test of `files.crc32_whole` relies on. For the same reason a
+migration that rebuilds, renames or drops a column of a table a view names drops
+those views first and creates them again after.
 
 Each conversion changes only the bodies, keeping the column names:
 
@@ -949,21 +959,32 @@ Each conversion changes only the bodies, keeping the column names:
 Rules for reads through them:
 - A lookup by hash or by code compares the stored column (sha1, status), never
   hex or text column of a view, which no index serves.
-- rom_view is a join, so it never sits on the right of a LEFT JOIN: SQLite then
+- `rom_view` is a join, so it never sits on the right of a LEFT JOIN: SQLite then
   materializes the whole view. Such a read joins roms and titles and spells the
   full-name expression.
-- `INDEXED BY` cannot name a view. A read that needs it (the source DAT list's
-  covering `roms_id_title` and `titles_id_dat`) stays on the tables; the
-  base-and-size read orders by `+id` through live_rom_view instead.
+- `INDEXED BY` cannot name a view, and it makes a lost index an error rather than
+  a planner choice. A read that needs it stays on the tables: the source DAT
+  list's covering `roms_id_title` and `titles_id_dat`, binding's base-and-size
+  lookup and the preview's base tier on `roms_match_base`, the CHD size and
+  track-layout lookups, and the case-insensitive zip rows.
 - Writes go to the tables.
 - A read moves onto a view only when its set of predicates stays identical.
-  live_rom_view (live rom, live title, no bios flag) serves the reads with exactly
-  that set, such as the size candidates. Binding by name and by base and size
-  test only the title's retired flag and the bios flag, so they read rom_view
-  with title_retired = 0 AND NOT bios and keep binding retired roms of live titles.
+  `live_rom_view` (live rom, live title, no bios flag) serves the reads with exactly
+  that set, such as the size candidates. Binding tests only the title's retired
+  flag and the bios flag, so it keeps binding retired roms of live titles. Its
+  lookup by name and the preview's statement stay on the tables with the base
+  tier, so binding's predicate has one definition in `db/sources.rs`.
+- A read that orders by a column a view does not carry stays on the tables: the
+  shared-title signatures order by `titles.id`, which `rom_view` exposes only as
+  `roms.title_id`, and sort without the titles index.
+- A read whose statement text a plan test selects stays on the tables: the
+  source files page and its path search, and the directory tracks of
+  `files::in_directory`. Reads of a whole file row stay too, as `file_view` has
+  no whole-file hashes.
 
-The plan test runs each hot read through its view beside the same read
-written out over the tables. It compares the SEARCH and SCAN steps as a
-multiset of index and constraint, with aliases, LEFT-JOIN markers and subquery
-numbers left out, so a scalar-subquery seek equals the join seek it replaces;
-it fails on a step only one side has and on any MATERIALIZE or CO-ROUTINE step.
+The plan test in `crates/mistarr-server/src/db/plans/shared_views.rs` runs each
+read through a view beside the same read written out over the tables. It
+compares the SEARCH, SCAN and temp B-tree steps as a multiset of index and
+constraint, with aliases, LEFT-JOIN markers and subquery numbers left out, so a
+scalar-subquery seek equals the join seek it replaces; it fails on a step only
+one side has and on any MATERIALIZE or CO-ROUTINE step.

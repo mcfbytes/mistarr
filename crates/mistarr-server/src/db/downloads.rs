@@ -161,10 +161,11 @@ pub struct DownloadRow {
     pub updated_at: i64,
 }
 
-const COLUMNS: &str = "d.id, d.title_id, t.name, t.platform_id, d.rom_id, r.name, r.size,
+const COLUMNS: &str = "d.id, d.title_id, t.name, t.platform, d.rom_id, r.name, r.size,
     d.source_id, d.file_index, d.state, d.progress, d.staged_path, d.error, d.created_at,
     d.updated_at";
-const FROM: &str = "downloads d JOIN titles t ON t.id = d.title_id JOIN roms r ON r.id = d.rom_id";
+const FROM: &str =
+    "downloads d JOIN title_view t ON t.id = d.title_id JOIN roms r ON r.id = d.rom_id";
 
 fn from_row(r: &Row<'_>) -> rusqlite::Result<DownloadRow> {
     Ok(DownloadRow {
@@ -501,7 +502,7 @@ pub struct Candidate {
 pub fn best_file(conn: &Connection, rom: RomId) -> Result<Option<Candidate>> {
     let platform: Option<String> = conn
         .query_row(
-            "SELECT t.platform_id FROM roms r JOIN titles t ON t.id = r.title_id WHERE r.id = ?1",
+            "SELECT r.platform FROM rom_view r WHERE r.id = ?1",
             [rom],
             |r| r.get(0),
         )
@@ -740,7 +741,7 @@ pub fn polled(conn: &Connection) -> Result<Vec<PollRow>> {
                     s.file_count = 1 AND tf.path = s.display_name, s.client_id, s.seed_policy, tf.size
              FROM downloads d
              JOIN sources s ON s.id = d.source_id
-             JOIN torrent_files tf ON tf.source_id = d.source_id AND tf.file_index = d.file_index
+             JOIN torrent_file_view tf ON tf.source_id = d.source_id AND tf.file_index = d.file_index
              WHERE d.state IN {}
              ORDER BY d.source_id, d.id",
             DownloadState::STARTED_SQL

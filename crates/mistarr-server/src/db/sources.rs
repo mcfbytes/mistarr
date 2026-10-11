@@ -729,7 +729,8 @@ pub fn set_matches(
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn torrent_files(conn: &Connection, id: SourceId) -> Result<Vec<TorrentFile>> {
     let mut stmt = conn.prepare(
-        "SELECT file_index, path, size FROM torrent_files WHERE source_id = ?1 ORDER BY file_index",
+        "SELECT file_index, path, size FROM torrent_file_view WHERE source_id = ?1
+         ORDER BY file_index",
     )?;
     let files = stmt
         .query_map([id], |r| {

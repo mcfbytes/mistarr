@@ -437,10 +437,10 @@ WP-91 follows WP-77. WP-82 lands before WP-86.
 - [ ] One package per table group, each holding every row equal across its migration: WP-93a files and chd_failures codes in 0024; WP-93b sources and downloads in 0025; WP-93c titles, dat_versions and title_groups codes in 0026; WP-93d jobs, import_log, settings in 0028 and the STRICT `dat_stage`.
 
 ### WP-94 Shared views
-- [ ] P12's views in `0023_shared_views.sql`, defined over the current columns, with the reads in `crates/mistarr-server/src/db/` moved onto them where they repeat a shape.
-- [ ] A plan test per hot read through a view: same index seeks as the written-out join, no `MATERIALIZE` or `CO-ROUTINE` step.
-- [ ] Later packages change a view's body rather than every read.
-- [ ] Every read keeps its predicates exactly: a read moves onto a view only when the view adds none (DATA-MODEL.md "Views"); binding by name and by base and size read `rom_view` with the title's retired flag and the bios flag, not `live_rom_view`.
+- [x] P12's views in `0023_shared_views.sql`, defined over the current columns, with the reads in `crates/mistarr-server/src/db/` moved onto them where they repeat a shape.
+- [x] A plan test per hot read through a view: same index seeks as the written-out join, no `MATERIALIZE` or `CO-ROUTINE` step.
+- [x] Later packages change the reads on a view through its body; the reads DATA-MODEL.md "Views" keeps on the tables change directly.
+- [x] Every read keeps its predicates exactly: a read moves onto a view only when the view adds none (DATA-MODEL.md "Views"); binding by name and by base and size read `rom_view` with the title's retired flag and the bios flag, not `live_rom_view`.
 - Open, not decided here: whether retired roms of live titles should bind. That is a behaviour change and needs its own package.
 
 ## Conflicts with wave 12

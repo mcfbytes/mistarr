@@ -69,15 +69,15 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
         e.wanted = sql::get_u64(r, 3)?;
     }
     let mut stmt = conn.prepare(
-        "SELECT platform_id, COUNT(*) FROM files
-         WHERE state = 'unverified' AND platform_id <> 'arcade' GROUP BY platform_id",
+        "SELECT platform, COUNT(*) FROM file_view
+         WHERE state = 'unverified' AND platform <> 'arcade' GROUP BY platform",
     )?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
         out.entry(r.get(0)?).or_default().unmatched_files = sql::get_u64(r, 1)?;
     }
     let mut stmt = conn.prepare(
-        "SELECT platform_id, COUNT(*) FROM files WHERE state = 'unidentified' GROUP BY platform_id",
+        "SELECT platform, COUNT(*) FROM file_view WHERE state = 'unidentified' GROUP BY platform",
     )?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {

@@ -354,7 +354,7 @@ pub fn detail(conn: &Connection, id: SourceId) -> Result<Option<SourceDetail>> {
     };
     // A file with no matched rom is a candidate, an extra or nothing, by its path alone.
     let mut stmt = conn.prepare(&format!(
-        "SELECT f.path, {HAS_MATCH} FROM torrent_files f
+        "SELECT f.path, {HAS_MATCH} FROM torrent_file_view f
          WHERE f.source_id = ?1 AND f.rom_id IS NULL"
     ))?;
     let mut rows = stmt.query([id])?;
@@ -484,7 +484,7 @@ pub fn sample_files(
 ) -> Result<Vec<TorrentFile>> {
     let files = conn
         .prepare_cached(
-            "SELECT file_index, path, size FROM torrent_files
+            "SELECT file_index, path, size FROM torrent_file_view
              WHERE source_id = ?1 AND file_index > ?2 AND file_index % ?3 = 0
              ORDER BY file_index LIMIT ?4",
         )?

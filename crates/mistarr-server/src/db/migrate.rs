@@ -270,7 +270,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_has_every_table_and_only_the_search_source_view() {
+    fn schema_has_every_table_and_only_the_known_views() {
         let mut conn = Connection::open_in_memory().expect("open");
         apply(&mut conn).expect("apply");
         let tables = names(&conn, "table");
@@ -295,7 +295,15 @@ mod tests {
         ] {
             assert!(tables.iter().any(|n| n == t), "missing table {t}");
         }
-        assert_eq!(names(&conn, "view"), ["title_search_source"]);
+        let views = [
+            "file_view",
+            "live_rom_view",
+            "rom_view",
+            "title_search_source",
+            "title_view",
+            "torrent_file_view",
+        ];
+        assert_eq!(names(&conn, "view"), views);
         let rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM title_groups", [], |r| r.get(0))
             .expect("group query");

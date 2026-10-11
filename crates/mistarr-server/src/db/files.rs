@@ -684,13 +684,13 @@ pub fn unidentified(
     sql::snapshot(conn, |conn| {
         let total = conn
             .prepare(
-                "SELECT COUNT(*) FROM files WHERE state = 'unidentified' AND platform_id = ?1",
+                "SELECT COUNT(*) FROM file_view WHERE state = 'unidentified' AND platform_key = ?1",
             )?
             .query_row([platform_id], |r| sql::get_u64(r, 0))?;
         let items = conn
             .prepare(
-                "SELECT rel_path, size, COALESCE(reason, 'corrupt') FROM files
-                 WHERE state = 'unidentified' AND platform_id = ?1
+                "SELECT rel_path, size, COALESCE(reason_text, 'corrupt') FROM file_view
+                 WHERE state = 'unidentified' AND platform_key = ?1
                  ORDER BY rel_path LIMIT ?2 OFFSET ?3",
             )?
             .query_map(params![platform_id, page.limit, page.offset], |r| {
@@ -729,9 +729,9 @@ pub fn retired_matches(
         .join(", ");
     Ok(conn
         .prepare_cached(&format!(
-            "SELECT {cols} FROM files f JOIN roms r ON r.id = f.rom_id
-             JOIN titles t ON t.id = r.title_id
-             WHERE f.platform_id = ?1 AND t.source = 'dat' AND (r.retired = 1 OR t.retired = 1)
+            "SELECT {cols} FROM files f JOIN rom_view r ON r.id = f.rom_id
+             WHERE f.platform_id = ?1 AND r.title_source = 'dat'
+               AND (r.retired = 1 OR r.title_retired = 1)
              ORDER BY f.id LIMIT ?2"
         ))?
         .query_map(params![platform_id, limit], from_row)?
@@ -889,8 +889,8 @@ pub struct StateCounts {
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn state_counts(conn: &Connection, platform_id: &PlatformId) -> Result<StateCounts> {
-    let mut stmt =
-        conn.prepare("SELECT state, COUNT(*) FROM files WHERE platform_id = ?1 GROUP BY state")?;
+    let mut stmt = conn
+        .prepare("SELECT state, COUNT(*) FROM file_view WHERE platform_key = ?1 GROUP BY state")?;
     let mut counts = StateCounts::default();
     let rows = stmt.query_map([platform_id], |r| Ok((r.get(0)?, sql::get_u64(r, 1)?)))?;
     for row in rows {
@@ -938,8 +938,8 @@ pub struct MisnamedRow {
 /// ```
 pub fn misnamed(conn: &Connection) -> Result<Vec<MisnamedRow>> {
     let mut stmt = conn.prepare(
-        "SELECT f.id, f.platform_id, f.rel_path, r.id, r.name, t.name
-         FROM files f JOIN roms r ON r.id = f.rom_id JOIN titles t ON t.id = r.title_id
+        "SELECT f.id, f.platform, f.rel_path, r.id, r.name, r.title_name
+         FROM file_view f JOIN rom_view r ON r.id = f.rom_id
          WHERE f.state = 'misnamed' ORDER BY f.id",
     )?;
     let rows = stmt.query_map([], |r| {
