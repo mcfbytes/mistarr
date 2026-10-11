@@ -21,7 +21,9 @@ use serde_json::{json, Value};
 use tokio::time::Instant;
 
 use super::fsutil::{all_entries, extension, stat};
-use super::matching::{self, cartridge_state, classify_disc_tracks, own_name, stored_match, Track};
+use super::matching::{
+    self, cartridge_state, classify_disc_tracks, own_name, set_matches, stored_match, Track,
+};
 use super::progress::{Progress, Throttle};
 use super::{Dedupe, Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
@@ -552,6 +554,12 @@ fn commit_unit(
             row.reason = Some(super::chd::settle(reason, chd_on).to_owned());
         }
         let id = files::upsert(tx, platform_id, &row, now)?;
+        // A DAT load may have retired the rom this file was matched to since it was read.
+        if row.rom_id.is_some() {
+            if let Some(stale) = files::retired_match_of(tx, id)? {
+                set_matches(tx, platform_id, &[stale])?;
+            }
+        }
         written.push((row.rel_path, id, row.state));
     }
     if let Some(done_dirs) = done_dirs {
@@ -1187,6 +1195,35 @@ mod tests {
             .read_blocking(move |c| files::find_by_path(c, &pid, "NES/a.nes"))
             .expect("find");
         assert!(kept.is_some(), "an unreadable directory prunes nothing");
+    }
+
+    #[test]
+    fn a_row_written_against_a_retired_rom_is_matched_again() {
+        use crate::db::fixtures::{conn, pid, seed_rom};
+        let c = conn();
+        let nes = pid("nes");
+        let sha1 = Sha1::from_bytes([7; 20]);
+        let old = seed_rom(&c, &nes, "Old Quest (USA).nes", 8, &[]).expect("old");
+        let live = seed_rom(&c, &nes, "New Quest (USA).unh", 8, &[]).expect("live");
+        for id in [old, live] {
+            c.execute(
+                "UPDATE roms SET sha1 = ?2 WHERE id = ?1",
+                rusqlite::params![id, sha1],
+            )
+            .expect("sha1");
+        }
+        c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [old])
+            .expect("retire");
+        let row = NewFile {
+            sha1: Some(sha1),
+            rom_id: Some(old),
+            ..NewFile::unhashed("NES/Old Quest (USA).nes", 8, 1, FileState::Verified)
+        };
+        commit_unit(&c, &nes, vec![row], None, 1, false).expect("commit");
+        let found = files::find_by_path(&c, &nes, "NES/Old Quest (USA).nes")
+            .expect("find")
+            .expect("row");
+        assert_eq!(found.rom_id, Some(live));
     }
 
     #[tokio::test]
