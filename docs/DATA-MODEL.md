@@ -936,11 +936,12 @@ SELECT f.id, f.platform_id AS platform_key, f.platform_id AS platform, f.rel_pat
 FROM files f;
 ```
 
-Each body drops its view first, so the file runs again after a test steps the
-schema back. `file_view` leaves out the whole-file hashes: no read takes them
+Each body drops its view first, so the migration can run again over a schema
+stepped back. `file_view` leaves out the whole-file hashes: no read takes them
 through it, and a view naming a column makes `ALTER TABLE … DROP COLUMN` fail,
-which the migration test of `files.crc32_whole` relies on. The files rebuild adds
-them as hex columns.
+which the migration test of `files.crc32_whole` relies on. For the same reason a
+migration that rebuilds, renames or drops a column of a table a view names drops
+those views first and creates them again after.
 
 Each conversion changes only the bodies, keeping the column names:
 
@@ -976,10 +977,10 @@ Rules for reads through them:
 - A read that orders by a column a view does not carry stays on the tables: the
   shared-title signatures order by `titles.id`, which `rom_view` exposes only as
   `roms.title_id`, and sort without the titles index.
-- A read whose statement text an older plan test selects stays on the tables
-  until that test moves: the source files page and its path search, and the
-  directory tracks of `files::in_directory`. Reads of a whole file row stay too,
-  as `file_view` has no whole-file hashes yet.
+- A read whose statement text a plan test selects stays on the tables: the
+  source files page and its path search, and the directory tracks of
+  `files::in_directory`. Reads of a whole file row stay too, as `file_view` has
+  no whole-file hashes.
 
 The plan test in `crates/mistarr-server/src/db/plans/shared_views.rs` runs each
 read through a view beside the same read written out over the tables. It
