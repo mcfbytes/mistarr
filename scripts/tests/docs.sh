@@ -18,7 +18,8 @@ external='no_new_privs pivot_root oom_score_adj uevent_helper core_pattern exfat
 absent='web/dist docs/SANDBOX.md'
 
 for doc in docs/*.md; do
-    [ "$doc" = docs/CONSOLIDATION.md ] && continue
+    # Task lists name the code their packages will add.
+    case "$doc" in docs/CONSOLIDATION.md | docs/NORMALIZATION.md) continue ;; esac
     # shellcheck disable=SC2016 # the backticks are literal
     grep -noE '`[^`]+`' "$doc" | while IFS=: read -r line tok; do
         tok=${tok#\`}
