@@ -181,9 +181,9 @@ CREATE INDEX roms_size ON roms(size) WHERE match_name IS NOT NULL;
 - **Plans:** `SEARCH r USING INDEX roms_match_base (<expr>=? AND size=?)`.
   - On 3.46 the expression index is **not covering**, with the predicate on the column or on the expression. Each hit reads its roms row (about 6 hits per lookup).
   - x86 time is equal (0.012 to 0.014 s per 3,000 lookups, against 0.011 s covering).
-  - Decide with WP-82's board bench; if the base tier is hot there, keep the column.
+  - Decide with the board figures of `mistarr bench-preview` (TESTING.md "Preview speed"): the expression index when the base tier takes under 18% of the preview's board time (`base%total`, at most 5% slower), else keep the column. DATA-MODEL.md "P2 outcomes" gives both forms.
 - **Code:**
-  - One `const MATCH_BASE: &str` holding the expression, used by `SqlDatIndex` and WP-82's statement.
+  - The `match_base!` macro in `db/sources.rs` holds the expression for `SqlDatIndex` and the preview's statement; it is a macro so both stay `concat!` literals.
   - `key_batch` writes only `match_name`.
   - The `candidates` size-index predicate and the plan tests change.
 
@@ -216,7 +216,7 @@ BEGIN SELECT RAISE(ABORT, 'titles.name never changes'); END;
   - A `code_enum!` beside `text_enum!` in `db/sql.rs`: ToSql/FromSql use the integer code; `as_str`, `Display` and serde keep the text, so the API is unchanged.
   - A `const fn sql(self) -> &'static str` gives literals for `format!`.
   - `RomStatus` has 4 SQL literal sites.
-- **Enums on other tables:** not converted (see Rejected). Their Rust enums already refuse unknown text on read.
+- **Enums on other tables:** P11, each in the file that rebuilds its table.
 
 ### P5 torrent_files
 ```sql
@@ -257,9 +257,9 @@ CREATE TABLE tags (id INTEGER PRIMARY KEY, kind INTEGER NOT NULL CHECK (kind BET
 - **Why:** 3,551 flag strings and 204 regions are stored once; one table replaces `known_flags` and `known_regions`. Saved 0.69 MiB (2.71 → 2.02).
 - **Code:**
   - `groups.rs` bit computation and `visible()`.
-  - Browse region filter (NOCASE becomes `UNIQUE (kind, name COLLATE NOCASE)` for regions).
+  - Browse region filter: `UNIQUE (kind, name)` stays exact, as flags are, and an index on `(kind, name COLLATE NOCASE)` finds every spelling of a region.
   - `detail.rs` lists, `store_lists`, and the bios checks.
-  - Known tags take fixed ids, so `f.flag = 'bios'` becomes `tag_id = <bios id>`.
+  - Known tags take fixed ids, so `f.flag = 'bios'` becomes `tag_id = 4`.
 
 ### P8 Compact write-back (`db::ram`)
 - **Change:** after an import or migration in RAM, when free pages exceed 25% of the copy and `MemAvailable` covers floor + copy + live pages, run `VACUUM INTO <dir>/compact.db` and write that back instead of the copy.
@@ -280,24 +280,44 @@ CREATE TABLE platforms (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE, ...) 
 - **Why:** the slug is stored once, so a rename is one row and every reference is a checked integer. The biggest indexes (`titles_group`, `title_groups_*`, the `files` autoindex) lead with a 1-byte integer instead of a text compare. Measured about 0.95 MiB on titles, title_groups and files.
 - **Ids:** the platform table seeds fixed ids that are never reused, so migrations, fixtures and tests agree across installs.
 - **Code:** about 250 SQL lines name a platform column. `PlatformId` stays the slug newtype at the API and crate boundaries; a `PlatformKey` integer newtype crosses `db` functions, resolved once per request. Reads that only display the slug go through P12's views and keep their SQL.
-- **Order:** folded into the rebuilds that already rewrite the same tables (titles and title_groups in WP-89, files in WP-86), so no table is rebuilt twice. WP-83 fixes the grouping.
+- **Order:** folded into the rebuilds that already rewrite the same tables (titles, title_groups and dat_versions in 0026, files and scan_progress in 0024, sources in 0025), so no table is rebuilt twice; "Migration grouping" has the files.
+- **Between files:** 0024 first runs `ALTER TABLE platforms RENAME COLUMN id TO slug`, which re-points every child's foreign key at `platforms(slug)`, then rebuilds platforms with the integer id and `slug` UNIQUE. Children not yet converted keep their slug text, checked against `platforms(slug)`, until their own file. Prototyped on the 0022 schema: `foreign_key_check` is clean and a wrong slug is still refused.
 
 ### P11 Minimal types
 SQLite stores each record as a header of serial types followed by the values. An integer takes 1, 2, 3, 4, 6 or 8 bytes by its value, the integers 0 and 1 and NULL take no bytes beyond their header byte, and text and blobs take their length. Nothing compresses rows further, so the type choice is the lever:
 - every enumeration column is an integer code through a `code_enum!` beside `text_enum!`, on small tables too (jobs kind, lane and state; downloads, sources, import_log, dat_versions, `files.state`, `files.header_rule`, `titles.source`, `title_groups.source`), about 0.6 MiB in all, and integer compares in every filter;
 - booleans are 0/1 with a CHECK, never text;
-- an absent value is NULL, not `''` or a sentinel (`titles.group_key`, `jobs.subject`, `dat_versions.family` default to `''` today);
+- an absent value is NULL, not `''` or a sentinel; `titles.group_key`, `jobs.subject` and `dat_versions.family` are computed keys always written, where `''` is a value (an empty payload, a name with nothing to match on), so they stay NOT NULL and only lose the `''` default;
+- a text that packs an enum with a parameter splits in two: `sources.seed_policy` into a code and `seed_ratio`, `sources.bind_pending` into a code and `bind_platform`;
 - times are integer Unix seconds and sizes integers, never REAL or text;
 - every table is STRICT, so a value of the wrong type is refused on write.
-P12's views decode codes to their text with `CASE`, so the CLI and the API keep reading words.
+P12's views decode codes to their text with `CASE`, so the CLI and the API keep reading words. DATA-MODEL.md "Column forms" gives every column's form and CHECK and the value tables.
 
 ### P12 Shared views for read shapes
 SQLite flattens a view whose body has no aggregate, DISTINCT, LIMIT, window function or compound select into the outer query, so a read through such a view plans exactly like the written-out join. Views:
 - `rom_view`: a rom with its full name (P3's tail rule), hex hashes (`lower(hex(sha1))`), status text, the title's platform slug, and its live and BIOS state;
 - `live_rom_view`: roms of live, non-BIOS titles, the predicate binding, candidates and the size index repeat;
 - `title_view`: a title with its platform slug and source text;
-- `torrent_file_view`: a torrent file with its full path (`d.path || f.leaf`) and confidence text.
-Rules: lookups by hash compare the BLOB column of the table, never a view's hex expression, which no index serves; writes go to the tables; every view lives in a migration and in DATA-MODEL.md; a plan test runs each hot read through its view and fails on a `MATERIALIZE` or `CO-ROUTINE` step or a lost index.
+- `torrent_file_view`: a torrent file with its full path (`d.path || f.leaf`) and confidence text;
+- `file_view`: a library file with hex hashes, state, header rule and reason text, and its platform slug, for the reads and the files migration test.
+Rules: lookups by hash compare the BLOB column of the table, never a view's hex expression, which no index serves; writes go to the tables; every view lives in a migration and in DATA-MODEL.md; a plan test runs each hot read through its view and fails on a `MATERIALIZE` or `CO-ROUTINE` step or a lost index. DATA-MODEL.md "Views" has the columns, the bodies over 0022 and the plan-test rule.
+
+**Flattening, checked** on the 0022 schema built from the migrations and on a prototype of the target forms (Python sqlite3 3.46.1), each read through its view against the same read written out:
+
+| Read | Through the view |
+|---|---|
+| sha1 and crc tiers, a title's disc roms, title detail roms (`rom_view`) | same seeks |
+| bind by name, size candidates (`live_rom_view`, a view over `rom_view`) | same seeks |
+| bind base+size, `ORDER BY +id` through `live_rom_view` | same `roms_match_base` seek as `INDEXED BY`, on 0022 and with P2's expression index |
+| chd rom sized, no `INDEXED BY` | picks `roms_chd_size` |
+| title variants, MRA path (`title_view`); directory tracks, unverified counts (`file_view`) | same seeks |
+| source files page and path search (`torrent_file_view`, directory by scalar subquery) | same seeks; the directory seek shows as a correlated scalar subquery |
+| `torrent_file_view` and `title_view` with a scalar-subquery slug on the right of a LEFT JOIN | same seeks |
+| rom by title and full name (P3 prototype) | covering `roms_title_name (title_id=?)` and the titles PK |
+| `rom_view` on the right of a LEFT JOIN | **`MATERIALIZE rom_view`**, a scan of roms and an automatic index: a view that is a join is not flattened there |
+| source DAT list through `rom_view` | loses the covering `roms_id_title` and `titles_id_dat` (PK seeks instead): `INDEXED BY` cannot name a view |
+
+Differences that are not seeks: subquery numbers, aliases, and the order of the bios probe and the titles seek in a view over a view. A rebuild must drop the views naming its table first: `ALTER TABLE … RENAME` fails on a view naming the dropped table.
 
 ### Hot reads before and after (EXPLAIN QUERY PLAN, composite prototype)
 
@@ -332,6 +352,32 @@ Rules: lookups by hash compare the BLOB column of the table, never a view's hex 
 | Merging `roms_track_size` into `roms_size` | 1.12 MiB | Different predicates: tracks must be found before binding keys roms |
 | Not changed, by design | | `match_name`, `base_name`, `group_key`: Rust-only derivations, written once and indexed. `title_groups` is the existing derived table. `sources.file_count` and `total_size` are written once from the torrent. |
 
+## Migration grouping
+
+The highest migration is 0022; WP-82 and WP-85 add none. Wave 13 is meant to
+ship as one release, and each table is rebuilt in exactly one file, so a release
+cut between two files still rebuilds no table twice. A package that joins a file
+edits it while it is unreleased; once released, a file is never edited. A file
+counts as released once any build containing it has run on the board or shipped
+in a release; wave 13 builds go to the board only after the wave's last file
+merges, unless the orchestrator freezes the files merged so far.
+
+| File | Packages | Tables rebuilt | Also |
+|---|---|---|---|
+| `0023_shared_views.sql` | WP-94 | none | the five views over the 0022 columns |
+| `0024_hashes_and_platform_keys.sql` | WP-86, WP-87, WP-92 (schema and files part), WP-93a | platforms, roms, files, chd_tracks, chd_whole, chd_failures, scan_progress | children re-pointed at `platforms(slug)`; `titles_name_fixed`; the `roms_*_groups` and `files_*_groups` triggers and the views over roms and files recreated |
+| `0025_torrent_paths.sql` | WP-88, WP-92 (sources), WP-93b | sources, torrent_files, torrent_candidates, downloads; new torrent_dirs | `torrent_file_view` recreated |
+| `0026_titles_and_groups.sql` | WP-89, WP-92 (titles), WP-93c | dat_versions, titles, title_groups, title_groups_dirty | every titles trigger, `titles_name_fixed`, `title_search_source` and the views over titles recreated; the fts content keeps the slug, so it is not rebuilt |
+| `0027_tags.sql` | WP-90 | title_flags, title_regions, title_languages; new tags; drops known_flags, known_regions | their group triggers and `rom_view` recreated |
+| `0028_small_tables.sql` | WP-93d | jobs, import_log, settings | |
+
+Every file after 0023 starts with `-- foreign_keys: off` (P9) and drops the
+views and other tables' triggers that name a table before rebuilding it. A
+code column is filled with `CASE` over the value table. A `jobs` row whose kind,
+state or lane is outside its table is deleted first, as jobs are transient; any
+other text outside its table fails the CHECK and rolls the file back, as the
+Rust enums already refuse it on read.
+
 ## Packages
 
 Order: WP-83, then WP-85 and WP-94, then WP-86 with WP-87 and the files part of
@@ -339,11 +385,11 @@ WP-92, then WP-88, WP-89 with the titles part of WP-92, and WP-93, then WP-90;
 WP-91 follows WP-77. WP-82 lands before WP-86.
 
 ### WP-83 Column forms: design
-- [ ] DATA-MODEL.md "Column forms": every column of every table with its target form (kept TEXT, BLOB(n), integer code with its value table, title tail, interned key, dropped, expression index), its CHECK, and STRICT or WITHOUT ROWID per table.
-- [ ] The P2 decision, from WP-82's board bench of the base tier.
-- [ ] The migration grouping: which packages share one migration file per release, so each table rebuilds once (P10 folded into WP-86 and WP-89).
-- [ ] The views of P12 with their columns, and the plan-test rule for them.
-- [ ] Docs only; no code.
+- [x] DATA-MODEL.md "Column forms": every column of every table with its target form (kept TEXT, BLOB(n), integer code with its value table, title tail, interned key, dropped, expression index), its CHECK, and STRICT or WITHOUT ROWID per table.
+- [ ] The P2 decision, from WP-82's board bench of the base tier: under 18% of the preview takes the expression index, else the column stays (DATA-MODEL.md "P2 outcomes").
+- [x] The migration grouping: which packages share one migration file per release, so each table rebuilds once (P10 folded into WP-86 and WP-89).
+- [x] The views of P12 with their columns, and the plan-test rule for them.
+- [x] Docs only; no code.
 
 ### WP-85 Rebuild-safe migrations
 - [ ] A migration whose first line is `-- foreign_keys: off` runs with foreign keys off and is rolled back when `PRAGMA foreign_key_check` returns a row; keys are on again after commit and after failure.
@@ -352,28 +398,28 @@ WP-91 follows WP-77. WP-82 lands before WP-86.
 - [ ] `crates/mistarr-server/migrations/README.md` documents the marker.
 
 ### WP-86 Hash blobs and the roms rebuild
-- [ ] One migration rebuilds roms (P1, P2 as WP-83 decides, P4, STRICT and CHECKs, peak-free order) and files, chd_tracks, chd_whole and chd_failures with BLOB hashes, with P10's platform key on files.
+- [ ] One migration, `0024_hashes_and_platform_keys.sql`, rebuilds roms (P1, P2 as WP-83 decides, P4, STRICT and CHECKs, peak-free order) and files, chd_tracks, chd_whole and chd_failures with BLOB hashes, with P10's platform key on files.
 - [ ] `Digest<N>` binds and reads BLOB(N); `RomStatus` is a `code_enum!`.
 - [ ] A migration test seeds 0022 rows (NULL hashes, MRA roms, baddump, unkeyed roms) and holds every row equal through `hex()` and the status text.
 - [ ] Plan tests green; ARCHITECTURE.md sync-write and memory tables measured again.
 
 ### WP-87 Rom names as title tails
-- [ ] P3 in WP-86's migration while it is unreleased: `own_name`, the unique index on title, flag and name, and the trigger that refuses a title rename.
+- [ ] P3 in `0024_hashes_and_platform_keys.sql` while it is unreleased: `own_name`, the unique index on title, flag and name, and the trigger that refuses a title rename.
 - [ ] One full-name expression for every read and one split function for both upserts.
 - [ ] Tests: every rom's full name equal across the migration, a rom equal to its title name kept whole, arcade zip and disc member names, upserts idempotent, API output byte-identical in the HTTP tests.
 
 ### WP-88 Torrent paths and confidence codes
-- [ ] P5: interned directories per source, torrent_files WITHOUT ROWID, integer confidence on torrent_files and torrent_candidates.
+- [ ] P5 in `0025_torrent_paths.sql`: interned directories per source, torrent_files WITHOUT ROWID, integer confidence on torrent_files and torrent_candidates.
 - [ ] Paths round-trip in a migration test; source detail search, staged paths and downloads unchanged in their tests.
 - [ ] A plan test asserts the primary-key range and the directory seek.
 
 ### WP-89 Group names from titles, unused title indexes
-- [ ] P6 in one migration with P10's platform key on titles and title_groups.
-- [ ] Browse reads the root title's name; the rename trigger is recreated.
+- [ ] P6 in `0026_titles_and_groups.sql`, a rebuild of titles and title_groups with P10's platform key on both and on dat_versions.
+- [ ] Browse reads the root title's name; the rename trigger, the other titles triggers and `titles_name_fixed` are recreated.
 - [ ] No plan names the dropped indexes; group rows equal across the migration, less the name.
 
 ### WP-90 Tag tables
-- [ ] P7: one tag table with fixed ids for the known flags and regions, link tables by tag id, the known-flag and known-region tables folded in.
+- [ ] P7 in `0027_tags.sql`: one tag table with fixed ids for the known flags and regions, link tables by tag id, the known-flag and known-region tables folded in.
 - [ ] Groups' bit columns equal for every group across the migration; browse visibility tests unchanged; `mistarr doctor` finds no drift.
 
 ### WP-91 Compact write-back
@@ -382,24 +428,26 @@ WP-91 follows WP-77. WP-82 lands before WP-86.
 - [ ] ARCHITECTURE.md "DAT import in RAM" describes it.
 
 ### WP-92 Integer platform ids
-- [ ] P10: the platform table with fixed integer ids and the slug, and the `PlatformKey` newtype.
+- [ ] P10: the platform table with fixed integer ids (DATA-MODEL.md "Platform ids"), the slug and the kind code in `0024_hashes_and_platform_keys.sql`, children re-pointed at `platforms(slug)` until their own file, and the `PlatformKey` newtype.
 - [ ] Every platform column becomes the integer key, in the rebuild WP-83 assigns it to; the slug crosses the API unchanged.
 - [ ] Split into one package per module after the schema part lands, each small enough for Flash.
 
 ### WP-93 Minimal types
 - [ ] P11 on every table not rebuilt by another package: integer codes through `code_enum!`, 0/1 booleans with CHECK, NULL for absent values, STRICT.
-- [ ] One package per table group, each holding every row equal across its migration.
+- [ ] One package per table group, each holding every row equal across its migration: WP-93a files and chd_failures codes in 0024; WP-93b sources and downloads in 0025; WP-93c titles, dat_versions and title_groups codes in 0026; WP-93d jobs, import_log, settings in 0028 and the STRICT `dat_stage`.
 
 ### WP-94 Shared views
-- [ ] P12's views in a migration, defined over the current columns, with the reads in `crates/mistarr-server/src/db/` moved onto them where they repeat a shape.
+- [ ] P12's views in `0023_shared_views.sql`, defined over the current columns, with the reads in `crates/mistarr-server/src/db/` moved onto them where they repeat a shape.
 - [ ] A plan test per hot read through a view: same index seeks as the written-out join, no `MATERIALIZE` or `CO-ROUTINE` step.
 - [ ] Later packages change a view's body rather than every read.
+- [ ] Every read keeps its predicates exactly: a read moves onto a view only when the view adds none (DATA-MODEL.md "Views"); binding by name and by base and size read `rom_view` with the title's retired flag and the bios flag, not `live_rom_view`.
+- Open, not decided here: whether retired roms of live titles should bind. That is a behaviour change and needs its own package.
 
 ## Conflicts with wave 12
 
 - **WP-82:**
   - It must not add a match key column to torrent_files; it binds a key list.
-  - It edits `SqlDatIndex` and adds a statement over `roms_match_name`/`roms_match_base`, which P2 and P3 later touch. Land WP-82 first, and have WP-86 change both statements through the `MATCH_BASE` constant.
+  - It edits `SqlDatIndex` and adds a statement over `roms_match_name`/`roms_match_base`, which P2 and P3 later touch. Land WP-82 first, and have WP-86 change both statements through the `match_base!` macro.
   - Its bench decides P2.
   - P5 changes its sample read (`file_index, path, size` becomes a join with `torrent_dirs`), so WP-88 depends on WP-82.
 - **WP-77:**
@@ -422,7 +470,7 @@ Measured on x86 in memory (Python sqlite3 3.46.1) from the board start (118.5 Mi
 | WP-87 as a second rebuild | ~0.5 s | ≤ 118.5 | ~10 s | another ~14 min, hence fold it into WP-86 |
 | files + chd rebuild (in WP-86) | 0.03 s | reuses free pages | < 1 s | ~1k writes |
 | WP-88 torrent_files | 0.30 s | reuses free pages | ~5 s | ~1.3k pages, ~4k writes, ~2 min |
-| WP-89 drop column and indexes | 0.01 s | DROP COLUMN rewrites title_groups (2.9 MiB) | < 1 s | ~2.2k writes, ~1 min |
+| WP-89 with P10: titles and title_groups rebuild | not measured | reuses free pages | ~2 s (estimate) | ~4.3k pages, ~13k writes, ~5 min (estimate) |
 | WP-90 tags | 0.05 s | reuses free pages | ~1 s | ~1.5k writes |
 | Compaction (WP-91, VACUUM INTO) | 0.18 to 0.32 s | + 79.0 MiB second file | ~5 s | none extra |
 

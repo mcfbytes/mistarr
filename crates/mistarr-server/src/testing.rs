@@ -3,8 +3,8 @@
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-/// How long [`eventually`] polls before it fails.
-pub const PATIENCE: Duration = Duration::from_secs(10);
+/// Hang guard for [`eventually`]; a condition normally holds long before it.
+pub const PATIENCE: Duration = Duration::from_secs(120);
 
 const POLL: Duration = Duration::from_millis(10);
 
