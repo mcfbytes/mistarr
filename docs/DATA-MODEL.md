@@ -612,3 +612,342 @@ each lookup, the partial ones included, seeks its index, and that a disc
 directory's tracks (`files::in_directory`) are one range of the
 `(platform_id, rel_path)` key.
 
+
+## Column forms
+
+The schema above is the one the migrations build. Wave 13 moves every table to
+the forms below; NORMALIZATION.md holds the measurements, the migration files
+("Migration grouping"; each table below names its file's number and packages)
+and each package's tasks.
+Column and view names here are plain text, since most do not exist yet.
+
+Forms:
+
+| Form | Meaning |
+|---|---|
+| kept | type and meaning unchanged |
+| BLOB n | the digest's bytes, declared BLOB with CHECK (length(x) = n); STRICT has no BLOB(n) type |
+| code | INTEGER from the value table named, decoded by a code enum in Rust and by CASE in the views |
+| 0/1 | INTEGER NOT NULL with CHECK (x IN (0, 1)) |
+| key | INTEGER referencing another table's id: platform keys reference platforms(id) |
+| tail | roms.name after its title's name when own_name is 0 |
+| dropped | the column goes; where its value went is in the row |
+
+Every table is STRICT. A JSON column stays TEXT. A computed key that is
+always written (titles.group_key, jobs.subject, dat_versions.family) stays
+NOT NULL and loses its `''` default, since `''` is a value it can take, not an
+absent one. `schema_version` stays as `migrate.rs` creates it, before any
+migration runs; the `title_search` virtual table cannot be STRICT and keeps its
+columns.
+
+### Tables
+
+**platforms**: STRICT, rowid; 0024, WP-92.
+
+| Column | Form | CHECK |
+|---|---|---|
+| id | key: INTEGER PRIMARY KEY, fixed per slug ("Platform ids") | |
+| slug | new: TEXT NOT NULL UNIQUE, the 0022 id | |
+| name, core_dir | kept TEXT NOT NULL | |
+| kind | code, "Platform kinds" | BETWEEN 0 AND 3 |
+| core_present, enabled | 0/1 | IN (0, 1) |
+
+**dat_versions**: STRICT, rowid; 0026, WP-92 and WP-93.
+
+| Column | Form | CHECK |
+|---|---|---|
+| id, dat_name, version, source_file, loaded_at, superseded_by | kept | |
+| platform_id | becomes platform: key, NULL while unbound | |
+| game_count | kept | >= 0 |
+| retired | 0/1 | IN (0, 1) |
+| source | code, "Title sources" | IN (0, 1) |
+| family | kept TEXT NOT NULL, no default | |
+
+Index dat_versions_family on (family, platform).
+
+**titles**: STRICT, rowid; 0026, WP-89, WP-92 and WP-93.
+
+| Column | Form | CHECK |
+|---|---|---|
+| id, dat_version_id, base_name, parent_id, group_root | kept | |
+| platform_id | becomes platform: key, NOT NULL | |
+| name | kept; the trigger titles_name_fixed refuses a change (P3) | |
+| revision, clone_of, setname, rbf, mra_path, mra_detail, mra_stamp, mra_file_stamp | kept TEXT, NULL when absent | |
+| is_1g1r_pick, wanted, retired, inferred | 0/1 | IN (0, 1) |
+| group_key | kept TEXT NOT NULL, no default | |
+| source | code, "Title sources" | IN (0, 1) |
+| mra_check | code, "MRA checks", NULL when not run | BETWEEN 0 AND 3 |
+| mra_seen | kept | |
+
+Indexes: UNIQUE (dat_version_id, name), `titles_id_dat` and `titles_group_root`
+kept; `titles_group` on (platform, inferred, group_key); `titles_source` on
+(platform, source); `titles_mra_path` on (platform, mra_path) WHERE source = 1;
+`titles_parent` and `titles_platform_base` dropped (P6).
+
+**title_flags, title_regions, title_languages**: STRICT, WITHOUT ROWID; 0027, WP-90.
+
+| Column | Form | CHECK |
+|---|---|---|
+| title_id | kept | |
+| pos | kept | >= 0 |
+| flag, region, language | become tag_id: key to tags(id) | |
+
+Primary key (title_id, tag_id); index (tag_id, title_id).
+
+**tags** (new): STRICT, rowid; 0027, WP-90.
+
+| Column | Form | CHECK |
+|---|---|---|
+| id | INTEGER PRIMARY KEY, fixed for known tags ("Tag ids"), the next free id otherwise | |
+| kind | code, "Tag kinds" | BETWEEN 0 AND 2 |
+| name | TEXT NOT NULL, verbatim | |
+| bit | INTEGER, the summary bit of a known flag or region, NULL otherwise | bit > 0 |
+
+UNIQUE (kind, name), and an index on (kind, name COLLATE NOCASE) for the browse
+region filter, which may match several spellings. `known_flags` and
+`known_regions` are dropped: their rows are the tags with a bit.
+
+**roms**: STRICT, rowid; 0024, WP-86 and WP-87.
+
+| Column | Form | CHECK |
+|---|---|---|
+| id, title_id, match_name, header, zip_dir | kept | |
+| own_name | new 0/1: 0 when name is a tail | IN (0, 1) |
+| name | tail when own_name is 0, else the full name | own_name = 1 OR name <> '' |
+| size | kept | >= 0 |
+| crc32, md5, sha1 | BLOB 4, 16, 20; NULL when the DAT gives none | length 4, 16, 20 |
+| status | code, "Rom statuses", default 2 | BETWEEN 0 AND 3 |
+| match_base | per the P2 outcome: kept, or dropped for an expression index over match_name | |
+| retired, present | 0/1 | IN (0, 1) |
+
+Indexes: UNIQUE (title_id, name) becomes roms_title_name UNIQUE (title_id,
+own_name, name); `roms_sha1`, `roms_md5`, `roms_crc` keep their columns over
+BLOBs; `roms_match_base` and `roms_size` follow the P2 outcome; the others are
+kept, the `.chd` predicate still on the stored name, which keeps the extension.
+
+**files**: STRICT, rowid; 0024, WP-86, WP-92 and WP-93.
+
+| Column | Form | CHECK |
+|---|---|---|
+| id, rel_path, size, mtime, rom_id, scanned_at | kept | |
+| platform_id | becomes platform: key, NOT NULL | |
+| crc32, md5, sha1, crc32_whole, md5_whole, sha1_whole | BLOB 4, 16, 20 | length 4, 16, 20 |
+| header_rule | code, "Header rules", NULL as in 0022 | BETWEEN 0 AND 6 |
+| state | code, "File states" | BETWEEN 0 AND 5 |
+| reason | code, "Unidentified reasons" | BETWEEN 0 AND 16, and reason IS NULL OR state = 5 |
+
+Indexes keep their columns, with platform for platform_id.
+
+**sources**: STRICT, rowid; 0025, WP-92 and WP-93.
+
+| Column | Form | CHECK |
+|---|---|---|
+| id, display_name, origin_file, client_id, added_at, map_stamp | kept | |
+| infohash | kept TEXT NOT NULL UNIQUE: not bound through a digest, and a value that does not parse is the `bad_infohash` reason | |
+| platform_id, suggested_platform_id | become platform, suggested_platform: keys, NULL when none | |
+| bind_score | kept REAL | BETWEEN 0 AND 1 |
+| state | code, "Source states" | BETWEEN 0 AND 3 |
+| reason | kept JSON; platform slugs inside stay slugs | |
+| seed_policy | code, "Seed policies", default 0 | BETWEEN 0 AND 2 |
+| seed_ratio | new REAL: the N of `ratio:N` | (seed_policy = 1) = (seed_ratio IS NOT NULL), seed_ratio > 0 |
+| file_count, total_size | kept | >= 0 |
+| user_binding | 0/1 | IN (0, 1) |
+| bind_pending | code, "Pending bindings", NULL when none | BETWEEN 0 AND 2 |
+| bind_platform | new key: the platform of `platform:<id>` | (bind_pending IS 2) = (bind_platform IS NOT NULL) |
+
+**torrent_dirs** (new): STRICT, rowid; 0025, WP-88. Columns id, source_id
+(cascading from sources), path (`dir/` with its slash, `''` at the top), with
+UNIQUE (source_id, path).
+
+**torrent_files**: STRICT, WITHOUT ROWID; 0025, WP-88.
+
+| Column | Form | CHECK |
+|---|---|---|
+| source_id, file_index, size, rom_id | kept; primary key (source_id, file_index) | |
+| path | dropped for dir_id (key to torrent_dirs) and leaf (TEXT); the path is the dir's path then the leaf | |
+| confidence | code, "Match confidences", NULL when unmatched | BETWEEN 0 AND 2 |
+
+**torrent_candidates**: STRICT, WITHOUT ROWID; 0025, WP-88. confidence is a
+code, "Match confidences", CHECK BETWEEN 1 AND 4; the other columns are kept.
+
+**downloads**: STRICT, rowid; 0025, WP-93. state is a code, "Download states",
+CHECK BETWEEN 0 AND 8; progress stays REAL with CHECK BETWEEN 0 AND 1; the other
+columns are kept.
+
+**import_log**: STRICT, rowid; 0028, WP-93. action is a code, "Import actions",
+CHECK BETWEEN 0 AND 4; the other columns are kept.
+
+**settings**: STRICT, WITHOUT ROWID; 0028, WP-93. Columns kept.
+
+**chd_tracks, chd_whole**: STRICT, WITHOUT ROWID; 0024, WP-86. chd_sha1 and
+sha1 are BLOB 20, md5 BLOB 16, crc32 BLOB 4; chd_tracks.track has CHECK
+(track >= 1); the other columns are kept.
+
+**chd_failures**: STRICT, WITHOUT ROWID; 0024, WP-86 and WP-93. chd_sha1 is
+BLOB 20; reason is a code, "Unidentified reasons", CHECK BETWEEN 0 AND 16.
+
+**jobs**: STRICT, rowid; 0028, WP-93.
+
+| Column | Form | CHECK |
+|---|---|---|
+| id, payload, progress, created_at, updated_at | kept | |
+| kind | code, "Job kinds" | BETWEEN 0 AND 13 |
+| state | code, "Job states" | BETWEEN 0 AND 4 |
+| lane | code, "Job lanes", default 2 | BETWEEN 0 AND 3 |
+| subject | kept TEXT NOT NULL, no default | |
+
+**scan_progress**: STRICT, rowid; 0024, WP-92. platform_id becomes platform,
+the INTEGER PRIMARY KEY referencing platforms(id); done_dirs keeps its `'[]'`
+default, an empty JSON list.
+
+**title_groups**: STRICT, WITHOUT ROWID; 0026, WP-89, WP-92 and WP-93.
+
+| Column | Form | CHECK |
+|---|---|---|
+| parent_id, base_name, pick_id, newest_id, lean_flags, unflagged_regions, flag_union, region_union | kept | |
+| platform_id | becomes platform: INTEGER, no foreign key, as a derived table | |
+| name | dropped (P6): browse reads the root title's | |
+| variants, have_verified, wanted | kept counts | >= 0 |
+| has_pick, split | 0/1 | IN (0, 1) |
+| source | code, "Title sources" | IN (0, 1) |
+
+**title_groups_dirty**: STRICT; 0026, WP-89. Column kept.
+
+**title_search**: the fts5 table keeps the slug between 0x1F sentinels, so its
+content does not change; `title_search_source` and the title triggers read the
+slug from platforms.
+
+**dat_stage**: the TEMP table becomes STRICT where `dat_stage.rs` creates it; WP-93.
+
+### P2 outcomes
+
+WP-82's board bench gives the base tier's share of the source preview. The
+expression index reads a roms row per hit, measured up to 27% slower per
+lookup on x86, so it slows the preview by at most 5% when that share is under
+18%.
+
+| Share | roms.match_base | `roms_match_base` | `roms_size` |
+|---|---|---|---|
+| under 18% | dropped | ((the base expression over match_name), size, title_id) WHERE match_name IS NOT NULL | (size) WHERE match_name IS NOT NULL |
+| 18% or more | kept TEXT, NULL until keyed | (match_base, size, title_id) WHERE match_base IS NOT NULL | (size) WHERE match_base IS NOT NULL |
+
+The base expression is match_name cut before its first `(` and right-trimmed.
+Either way the base-and-size read orders by `+r.id` (P0).
+
+### Value tables
+
+A code keeps its meaning for good: a new variant takes the next number and a
+retired number is never reused. Each table lists the Rust enum's text in
+code order.
+
+| Table | Enum | Codes |
+|---|---|---|
+| Rom statuses | `RomStatus` | good 0, baddump 1, nodump 2, verified 3 |
+| File states | `FileState` | pending 0, verified 1, misnamed 2, unverified 3, bad 4, unidentified 5 |
+| Header rules | `HeaderRule`, plus chd for CHD members | none 0, ines 1, smc 2, a78 3, lnx 4, n64 5, chd 6 |
+| Unidentified reasons | `Unidentified`, then `Unidentifiable` | off 0, pending 1, no_layout 2, unreadable 3, not_chd 4, version 5, parent 6, not_cd 7, too_large 8, codec 9, gdrom 10, old_layout 11, cooked 12, pregap 13, corrupt 14, checksum 15, no_checksum 16 |
+| Match confidences | `MatchConfidence` | hash 0, name 1, base 2, fuzzy 3, size 4 |
+| Title sources | `TitleSource` | dat 0, mra 1 |
+| MRA checks | the arcade job's `Check` | match 0, refused 1, missing_part 2, mismatch 3; a failing check is 2 or more |
+| Platform kinds | `Kind` of the platform table | cartridge 0, disc 1, romset 2, arcade 3 |
+| Source states | `SourceState` | resolving 0, unbound 1, bound 2, disabled 3 |
+| Seed policies | `SeedPolicy` | none 0, ratio 1, client 2 |
+| Pending bindings | `BindChoice` | automatic 0, none 1, platform 2 |
+| Download states | `DownloadState` | wanted 0, queued 1, transferring 2, checking 3, importing 4, done 5, bad 6, failed 7, cancelled 8 |
+| Import actions | `ImportAction` | placed 0, replaced 1, quarantined 2, skipped_existing 3, renamed 4 |
+| Job kinds | `JobKind` | scan 0, import 1, detect_client 2, dat_import 3, recompute_1g1r 4, source_import 5, resolve_magnet 6, transfer 7, deselect 8, arcade_catalog 9, chd_tracks 10, remap_sources 11, bind_source 12, url_fetch 13 |
+| Job states | `JobState` | queued 0, running 1, paused 2, done 3, failed 4 |
+| Job lanes | `Lane` | heavy 0, background 1, light 2, fetch 3 |
+| Tag kinds | | flag 0, region 1, language 2 |
+
+**Platform ids**, in the order of the binary's platform table; a platform added
+later takes the next id:
+
+| Ids | Slugs |
+|---|---|
+| 1 to 11 | nes, fds, snes, n64, gb, gbc, gba, megadrive, s32x, sms, gg |
+| 12 to 22 | sg1000, pce, sgx, atari2600, atari5200, atari7800, lynx, coleco, intv, ws, wsc |
+| 23 to 33 | ngp, vectrex, pokemini, sv, psx, saturn, megacd, pcecd, neocd, neogeo, arcade |
+
+A slug in the database that the binary's table does not list keeps its row
+with an id from 1000 up, in slug order.
+
+**Tag ids**: the known flags take 1 to 9 in bit order (unl, pirate, baddump,
+bios, beta, proto, demo, sample, program) and the known regions 10 to 31 in bit
+order (World first, Latin America last), so bios is tag 4.
+
+### Views
+
+Each view is a projection: no aggregate, DISTINCT, LIMIT, window
+function or compound select, so SQLite flattens it into the query that reads
+it. A decode that needs another table's row (a platform slug, a directory
+path) is a scalar subquery, not a join, so a view of one table stays one table
+and may sit on the right of a LEFT JOIN. Bodies over the 0022 columns:
+
+```sql
+CREATE VIEW rom_view AS
+SELECT r.id, r.title_id, r.name, r.size, r.crc32, r.md5, r.sha1,
+       r.crc32 AS crc32_hex, r.md5 AS md5_hex, r.sha1 AS sha1_hex,
+       r.status, r.status AS status_text, r.match_name, r.match_base, r.retired,
+       r.header, r.zip_dir, r.present,
+       t.name AS title_name, t.dat_version_id, t.source AS title_source,
+       t.platform_id AS platform_key, t.platform_id AS platform, t.group_root, t.parent_id,
+       (r.retired = 0 AND t.retired = 0) AS live,
+       EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = r.title_id AND f.flag = 'bios') AS bios
+FROM roms r JOIN titles t ON t.id = r.title_id;
+
+CREATE VIEW live_rom_view AS
+SELECT * FROM rom_view WHERE live AND NOT bios;
+
+CREATE VIEW title_view AS
+SELECT t.id, t.platform_id AS platform_key, t.platform_id AS platform, t.dat_version_id,
+       t.name, t.base_name, t.parent_id, t.group_root, t.revision, t.is_1g1r_pick, t.wanted,
+       t.retired, t.clone_of, t.group_key, t.inferred, t.source, t.source AS source_text,
+       t.setname, t.rbf, t.mra_path, t.mra_check, t.mra_check AS mra_check_text,
+       t.mra_detail, t.mra_stamp, t.mra_file_stamp, t.mra_seen
+FROM titles t;
+
+CREATE VIEW torrent_file_view AS
+SELECT f.source_id, f.file_index, f.path, f.size, f.rom_id, f.confidence,
+       f.confidence AS confidence_text
+FROM torrent_files f;
+
+CREATE VIEW file_view AS
+SELECT f.id, f.platform_id AS platform_key, f.platform_id AS platform, f.rel_path, f.size,
+       f.mtime, f.crc32, f.md5, f.sha1, f.crc32 AS crc32_hex, f.md5 AS md5_hex,
+       f.sha1 AS sha1_hex, f.crc32_whole AS crc32_whole_hex, f.md5_whole AS md5_whole_hex,
+       f.sha1_whole AS sha1_whole_hex, f.header_rule, f.header_rule AS header_rule_text,
+       f.rom_id, f.state, f.state AS state_text, f.scanned_at, f.reason,
+       f.reason AS reason_text
+FROM files f;
+```
+
+Each conversion changes only the bodies, keeping the column names:
+
+| Column | Body after its conversion |
+|---|---|
+| rom_view.name | CASE WHEN r.own_name THEN r.name ELSE t.name \|\| r.name END |
+| the hex columns | lower(hex(x)) of the stored column |
+| status_text, source_text, mra_check_text, state_text, header_rule_text, reason_text, confidence_text | CASE over the value table |
+| platform_key | the platform column |
+| platform | (SELECT p.slug FROM platforms p WHERE p.id = t.platform) |
+| rom_view.match_base | the base expression, when P2 drops the column |
+| torrent_file_view.path | (SELECT d.path FROM torrent_dirs d WHERE d.id = f.dir_id) \|\| f.leaf |
+| rom_view.bios | the same EXISTS on f.tag_id = 4 |
+
+Rules for reads through them:
+- A lookup by hash or by code compares the stored column (sha1, status), never
+  hex or text column of a view, which no index serves.
+- rom_view is a join, so it never sits on the right of a LEFT JOIN: SQLite then
+  materializes the whole view. Such a read joins roms and titles and spells the
+  full-name expression.
+- `INDEXED BY` cannot name a view. A read that needs it (the source DAT list's
+  covering `roms_id_title` and `titles_id_dat`) stays on the tables; the
+  base-and-size read orders by `+id` through live_rom_view instead.
+- Writes go to the tables.
+
+The plan test runs each hot read through its view beside the same read
+written out over the tables. It compares the SEARCH and SCAN steps as a
+multiset of index and constraint, with aliases, LEFT-JOIN markers and subquery
+numbers left out, so a scalar-subquery seek equals the join seek it replaces;
+it fails on a step only one side has and on any MATERIALIZE or CO-ROUTINE step.
