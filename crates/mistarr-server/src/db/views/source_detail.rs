@@ -216,18 +216,20 @@ fn files_in(
         .map(str::trim)
         .filter(|q| !q.is_empty())
         .map(str::to_ascii_lowercase);
-    let search = "(?2 IS NULL OR instr(lower(f.path), ?2) > 0)";
+    let search = "(?2 IS NULL OR instr(lower(td.path || f.leaf), ?2) > 0)";
     let total = conn.query_row(
         &format!(
-            "SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = ?1 AND {search}{filter}"
+            "SELECT COUNT(*) FROM torrent_files f JOIN torrent_dirs td ON td.id = f.dir_id
+             WHERE f.source_id = ?1 AND {search}{filter}"
         ),
         params![id, q],
         |r| get_u64(r, 0),
     )?;
     let mut stmt = conn.prepare(&format!(
-        "SELECT f.file_index, f.path, f.size, f.rom_id, r.name, r.title_id, f.confidence,
-                d.id, d.state, d.progress
-         FROM torrent_files f LEFT JOIN roms r ON r.id = f.rom_id
+        "SELECT f.file_index, td.path || f.leaf, f.size, f.rom_id, r.name, r.title_id,
+                f.confidence, d.id, d.state, d.progress
+         FROM torrent_files f JOIN torrent_dirs td ON td.id = f.dir_id
+         LEFT JOIN roms r ON r.id = f.rom_id
          LEFT JOIN downloads d ON d.id = (SELECT MAX(x.id) FROM downloads x
            WHERE x.source_id = f.source_id AND x.file_index = f.file_index)
          WHERE f.source_id = ?1 AND {search}{filter}
@@ -667,8 +669,8 @@ mod tests {
         sources::set_matches(c, id, &[(0, Some(a), Confidence::Name)]).expect("m");
         c.execute(
             "INSERT INTO torrent_candidates (source_id, file_index, rom_id, confidence)
-             VALUES (?1, 1, ?2, 'fuzzy')",
-            params![id, b],
+             VALUES (?1, 1, ?2, ?3)",
+            params![id, b, MatchConfidence::Fuzzy],
         )
         .expect("candidate");
         (id, a)
@@ -739,8 +741,9 @@ mod tests {
             )
             .expect("second rom");
         c.execute(
-            "INSERT INTO torrent_files (source_id, file_index, path, size)
-             VALUES (?1, 4, 'Set/Third Try (USA).nes', 32)",
+            "INSERT INTO torrent_files (source_id, file_index, dir_id, leaf, size)
+             VALUES (?1, 4, (SELECT id FROM torrent_dirs WHERE source_id = ?1 AND path = 'Set/'),
+                     'Third Try (USA).nes', 32)",
             [id],
         )
         .expect("file");
@@ -751,10 +754,11 @@ mod tests {
         let mut walked = Summary::default();
         let mut stmt = c
             .prepare(
-                "SELECT f.path, f.rom_id IS NOT NULL,
+                "SELECT td.path || f.leaf, f.rom_id IS NOT NULL,
                         (f.rom_id IS NOT NULL OR EXISTS (SELECT 1 FROM torrent_candidates c
                           WHERE c.source_id = f.source_id AND c.file_index = f.file_index))
-                 FROM torrent_files f WHERE f.source_id = ?1",
+                 FROM torrent_files f JOIN torrent_dirs td ON td.id = f.dir_id
+                 WHERE f.source_id = ?1",
             )
             .expect("prepare");
         let mut rows = stmt.query([id]).expect("query");

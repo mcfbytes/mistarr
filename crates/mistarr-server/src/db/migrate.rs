@@ -115,7 +115,8 @@ pub fn apply(conn: &mut Connection) -> Result<Vec<u32>> {
 /// # Errors
 ///
 /// As [`apply`].
-pub(crate) fn apply_through(conn: &mut Connection, last: u32) -> Result<Vec<u32>> {
+#[cfg(any(test, feature = "test-support"))]
+pub fn apply_through(conn: &mut Connection, last: u32) -> Result<Vec<u32>> {
     apply_list(conn, MIGRATIONS, last)
 }
 
@@ -157,14 +158,23 @@ fn foreign_keys_on(conn: &Connection) -> rusqlite::Result<bool> {
     conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))
 }
 
-/// The table holding the first orphan row `PRAGMA foreign_key_check` reports, if any.
-fn foreign_key_violation(conn: &Connection) -> rusqlite::Result<Option<String>> {
+/// One orphan row as `PRAGMA foreign_key_check` reports it: table, rowid, parent, fkid.
+type Violation = (String, Option<i64>, String, i64);
+
+/// Every orphan row `PRAGMA foreign_key_check` reports.
+fn foreign_key_violations(conn: &Connection) -> rusqlite::Result<Vec<Violation>> {
     let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
     let mut rows = stmt.query([])?;
-    match rows.next()? {
-        Some(row) => Ok(Some(row.get(0)?)),
-        None => Ok(None),
+    let mut out = Vec::new();
+    while let Some(row) = rows.next()? {
+        out.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
     }
+    Ok(out)
+}
+
+/// The table of the first orphan `after` reports that `before` did not.
+fn added_violation<'v>(before: &[Violation], after: &'v [Violation]) -> Option<&'v Violation> {
+    after.iter().find(|v| !before.contains(v))
 }
 
 /// Applies one migration, switching foreign keys off around its transaction when marked.
@@ -192,22 +202,31 @@ fn apply_one(conn: &mut Connection, m: &Migration) -> Result<()> {
 }
 
 /// Applies one migration in its own transaction, checking foreign keys when `check_fk`.
+///
+/// A check that fails only on a row the migration added, since an orphan the database
+/// already holds is not this migration's to fix.
 fn apply_in(conn: &mut Connection, m: &Migration, check_fk: bool) -> Result<()> {
     let fail = |source| Error::Migration {
         version: m.version,
         source,
     };
     let tx = conn.transaction().map_err(fail)?;
+    let before = if check_fk {
+        foreign_key_violations(&tx).map_err(fail)?
+    } else {
+        Vec::new()
+    };
     tx.execute_batch(m.sql).map_err(fail)?;
     flush_groups(&tx).map_err(|e| match e {
         Error::Db(source) => fail(source),
         other => other,
     })?;
     if check_fk {
-        if let Some(table) = foreign_key_violation(&tx).map_err(fail)? {
+        let after = foreign_key_violations(&tx).map_err(fail)?;
+        if let Some((table, ..)) = added_violation(&before, &after) {
             return Err(Error::ForeignKeyCheck {
                 version: m.version,
-                table,
+                table: table.clone(),
             });
         }
     }
@@ -294,6 +313,7 @@ mod tests {
             "title_groups",
             "title_groups_dirty",
             "titles",
+            "torrent_dirs",
             "torrent_files",
         ] {
             assert!(tables.iter().any(|n| n == t), "missing table {t}");
@@ -953,6 +973,235 @@ mod tests {
         }
     }
 
+    /// Platforms, one DAT version with two roms and two sources, for the torrent tables.
+    fn seed_torrents(conn: &Connection) {
+        conn.execute_batch(
+            "INSERT INTO platforms (id, name, core_dir, kind, enabled)
+               VALUES ('nes', 'NES', 'NES', 'cartridge', 1);
+             INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
+                                       game_count)
+               VALUES (1, 'nes', 'Test', '1', 't.dat', 0, 2);
+             INSERT INTO titles (id, platform_id, dat_version_id, name, base_name)
+               VALUES (1, 'nes', 1, 'Example', 'Example');
+             INSERT INTO roms (id, title_id, name, size)
+               VALUES (1, 1, 'a.nes', 8), (2, 1, 'b.nes', 16);
+             INSERT INTO sources (id, infohash, display_name, origin_file, state, added_at)
+               VALUES (1, 'aa', 'Nested Set', 'a.torrent', 'bound', 0),
+                      (2, 'bb', 'Other Set', 'b.torrent', 'bound', 0);",
+        )
+        .expect("catalog");
+    }
+
+    /// The files and candidates of the 0024 schema: every path shape and confidence word.
+    fn seed_torrent_rows(conn: &Connection) {
+        conn.execute_batch(
+            "INSERT INTO torrent_files (source_id, file_index, path, size, rom_id, confidence)
+               VALUES (1, 0, 'Nested/Sub/Example Quest (USA).nes', 8, 1, 'hash'),
+                      (1, 1, 'Top.nes', 16, NULL, NULL),
+                      (1, 2, 'Sét/Ünïcode/но́ва.nes', 8, 2, 'name'),
+                      (1, 3, 'Nested/Second (Japan).nes', 16, NULL, 'base'),
+                      (2, 0, 'Other/readme.txt', 4, NULL, NULL);
+             INSERT INTO torrent_candidates (source_id, file_index, rom_id, confidence)
+               VALUES (1, 0, 2, 'fuzzy'), (1, 1, 1, 'size'), (1, 1, 2, 'name'),
+                      (1, 3, 1, 'base'), (2, 0, 1, 'size');",
+        )
+        .expect("rows");
+    }
+
+    #[test]
+    fn torrent_paths_become_directories_and_codes_with_every_row_kept() {
+        use crate::db::candidates::MatchConfidence;
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys");
+        apply_through(&mut conn, 24).expect("older migrations");
+        seed_torrents(&conn);
+        seed_torrent_rows(&conn);
+        let files_before = file_rows(&conn, "f.path", "f.confidence");
+        let candidates_before = candidate_rows(&conn, "confidence");
+
+        assert_eq!(
+            apply_through(&mut conn, 25).expect("the torrent-paths migration"),
+            [25]
+        );
+
+        // The view decodes the code to the word the API shows.
+        let mut stmt = conn
+            .prepare(
+                "SELECT f.confidence, v.confidence_text
+                 FROM torrent_files f JOIN torrent_file_view v
+                   ON v.source_id = f.source_id AND v.file_index = f.file_index",
+            )
+            .expect("prepare");
+        let decoded = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, Option<MatchConfidence>>(0)?,
+                    r.get::<_, Option<String>>(1)?,
+                ))
+            })
+            .expect("query")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("rows");
+        assert_eq!(decoded.len(), files_before.len());
+        for (code, text) in decoded {
+            assert_eq!(
+                code.map(|c| c.as_str().to_owned()),
+                text,
+                "the stored code and the view agree"
+            );
+        }
+        assert_eq!(
+            file_rows(
+                &conn,
+                "v.path",
+                "CASE f.confidence WHEN 0 THEN 'hash' WHEN 1 THEN 'name'
+                                    WHEN 2 THEN 'base' END"
+            ),
+            files_before,
+            "every file row is kept"
+        );
+        assert_eq!(
+            candidate_rows(
+                &conn,
+                "CASE confidence WHEN 1 THEN 'name' WHEN 2 THEN 'base'
+                                 WHEN 3 THEN 'fuzzy' WHEN 4 THEN 'size' END"
+            ),
+            candidates_before,
+            "every candidate row is kept"
+        );
+        assert_eq!(
+            column(
+                &conn,
+                "SELECT path FROM torrent_dirs ORDER BY source_id, path"
+            ),
+            ["", "Nested/", "Nested/Sub/", "Sét/Ünïcode/", "Other/"],
+            "one row per distinct directory, the top level as ''"
+        );
+        let codes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM torrent_candidates WHERE confidence IN (1, 2, 3, 4)",
+                [],
+                |r| r.get(0),
+            )
+            .expect("codes");
+        assert_eq!(codes, 5, "every candidate code is inside its CHECK");
+        let sql = |name: &str| -> String {
+            conn.query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [name],
+                |r| r.get(0),
+            )
+            .expect(name)
+        };
+        assert!(
+            sql("torrent_dirs").contains("STRICT"),
+            "{}",
+            sql("torrent_dirs")
+        );
+        assert!(
+            sql("torrent_files").contains("STRICT, WITHOUT ROWID"),
+            "{}",
+            sql("torrent_files")
+        );
+        assert!(
+            sql("torrent_candidates").contains("STRICT, WITHOUT ROWID"),
+            "{}",
+            sql("torrent_candidates")
+        );
+        assert_eq!(column(&conn, "PRAGMA integrity_check"), ["ok"]);
+        assert!(column(&conn, "PRAGMA foreign_key_check").is_empty());
+    }
+
+    #[test]
+    fn a_torrent_file_label_outside_the_value_table_maps_or_fails() {
+        use crate::db::candidates::MatchConfidence;
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply_through(&mut conn, 24).expect("older migrations");
+        seed_torrents(&conn);
+        conn.execute(
+            "INSERT INTO torrent_files (source_id, file_index, path, size, rom_id, confidence)
+             VALUES (1, 0, 'Nested/Top.nes', 8, 1, 'size')",
+            [],
+        )
+        .expect("file");
+        assert_eq!(apply_through(&mut conn, 25).expect("migrate"), [25]);
+        let code: i64 = conn
+            .query_row("SELECT confidence FROM torrent_files", [], |r| r.get(0))
+            .expect("code");
+        assert_eq!(
+            code,
+            MatchConfidence::Base.code(),
+            "the size-only tier is the base tier"
+        );
+
+        // A word the value table does not hold fails the CHECK and rolls back whole.
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply_through(&mut conn, 24).expect("older migrations");
+        seed_torrents(&conn);
+        conn.execute(
+            "INSERT INTO torrent_files (source_id, file_index, path, size, rom_id, confidence)
+             VALUES (1, 0, 'Nested/Top.nes', 8, 1, 'bogus')",
+            [],
+        )
+        .expect("file");
+        let before = current_version(&conn).expect("version");
+        match apply_through(&mut conn, 25) {
+            Err(Error::Migration { version, .. }) => assert_eq!(version, 25),
+            other => panic!("expected a migration error, got {other:?}"),
+        }
+        assert_eq!(
+            column(&conn, "SELECT path FROM torrent_files"),
+            ["Nested/Top.nes"],
+            "the path column and its row are intact"
+        );
+        assert_eq!(
+            current_version(&conn).expect("version"),
+            before,
+            "not recorded"
+        );
+    }
+
+    /// One file row: its keys, whole path, size, rom and confidence word.
+    type TorrentFileRow = (i64, i64, String, i64, Option<i64>, Option<String>);
+
+    /// Every file row, reading the whole path from `path` and the word from `word`.
+    fn file_rows(conn: &Connection, path: &str, word: &str) -> Vec<TorrentFileRow> {
+        conn.prepare(&format!(
+            "SELECT f.source_id, f.file_index, {path}, f.size, f.rom_id, {word}
+             FROM torrent_files f JOIN torrent_file_view v
+               ON v.source_id = f.source_id AND v.file_index = f.file_index
+             ORDER BY f.source_id, f.file_index"
+        ))
+        .expect("prepare")
+        .query_map([], |r| {
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
+        })
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows")
+    }
+
+    /// Every candidate row as `(source_id, file_index, rom_id, confidence word)`.
+    fn candidate_rows(conn: &Connection, word: &str) -> Vec<(i64, i64, i64, String)> {
+        conn.prepare(&format!(
+            "SELECT source_id, file_index, rom_id, {word} FROM torrent_candidates
+             ORDER BY source_id, file_index, rom_id"
+        ))
+        .expect("prepare")
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows")
+    }
+
     const PARENT_AND_CHILD: &str = "\
 CREATE TABLE parent (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
 CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES parent(id),
@@ -1062,6 +1311,54 @@ END;";
             ["One", "Two"],
             "the child rows still reach their parent"
         );
+        assert!(foreign_keys(&conn), "the pragma is back on after commit");
+    }
+
+    const PARENT_CHILD_WITH_NOTE: &str = "\
+CREATE TABLE parent (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES parent(id),
+                    note TEXT NOT NULL);
+CREATE TABLE note (id INTEGER PRIMARY KEY, text TEXT NOT NULL);
+CREATE INDEX note_text ON note (text);";
+
+    const REBUILD_NOTE: &str = "-- foreign_keys: off
+DROP INDEX note_text;
+CREATE TABLE note_new (id INTEGER PRIMARY KEY, text TEXT NOT NULL);
+INSERT INTO note_new (id, text) SELECT id, text FROM note ORDER BY id;
+DROP TABLE note;
+ALTER TABLE note_new RENAME TO note;
+CREATE INDEX note_text ON note (text);";
+
+    #[test]
+    fn an_orphan_the_database_already_holds_does_not_stop_a_marked_migration() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys on");
+        let migs = two_migrations(PARENT_CHILD_WITH_NOTE, REBUILD_NOTE);
+        assert_eq!(apply_list(&mut conn, &migs, 1).expect("schema"), [1]);
+        conn.pragma_update(None, "foreign_keys", false)
+            .expect("keys off");
+        conn.execute_batch(
+            "INSERT INTO parent (id, name) VALUES (1, 'One');
+             INSERT INTO child (id, parent_id, note) VALUES (1, 1, 'a');
+             DELETE FROM parent WHERE id = 1;
+             INSERT INTO note (id, text) VALUES (1, 'n');",
+        )
+        .expect("rows");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys on");
+
+        assert_eq!(
+            apply_list(&mut conn, &migs, u32::MAX).expect("rebuild"),
+            [2],
+            "an unrelated table's orphan is not this migration's to fix"
+        );
+        assert_eq!(
+            column(&conn, "SELECT note FROM child"),
+            ["a"],
+            "the orphan stays as it was"
+        );
+        assert_eq!(column(&conn, "SELECT text FROM note"), ["n"]);
         assert!(foreign_keys(&conn), "the pragma is back on after commit");
     }
 
