@@ -134,7 +134,8 @@ Each package's acceptance is its task list in CONSOLIDATION.md, every box ticked
 ## Wave 12: second board test
 
 Findings from loading 58 DATs and 55 torrents on the board. WP-75 and
-WP-78 to WP-81 run in parallel; WP-76 waits for its core facts.
+WP-78 to WP-81 run in parallel; WP-76 waits for its core facts. The
+normalisation the board's catalogue showed is wave 13.
 
 | WP | Name | Model | Depends | Acceptance |
 |---|---|---|---|---|
@@ -145,9 +146,39 @@ WP-78 to WP-81 run in parallel; WP-76 waits for its core facts.
 | WP-79 | Clear rejection reasons | Flash | none | A dropped or uploaded DAT, torrent or magnet that is empty is rejected as empty; one whose first bytes are an HTML document is rejected as a web page from a failed download; a damaged zip is rejected as damaged or incomplete with the library's detail only at debug; no reason repeats a phrase; tests cover each reason for DATs, torrents and magnets; DATS.md "Rejections" lists them. |
 | WP-80 | Source imports in Activity | Flash | 40 | `/system/jobs/recent` lists `source_import` and `bind_source` jobs and folds each run of consecutive finished jobs of one kind and outcome into one item with its `count` and first and last times, still 10 items; Activity shows a folded run as "50 sources imported" or "12 DATs loaded" linking to Sources or DATs; API.md, db and plan tests, and a Playwright mock test. |
 | WP-81 | Indexes for source and platform reads | Flash | 49 | A migration adds `torrent_files(source_id, rom_id)`, `roms(id, title_id)`, `titles(id, dat_version_id)` and a covering `title_groups` index for the platform counts, and rebuilds `roms_match_name` and `roms_match_base` with `title_id` appended; source detail counts matched files from the index and reads paths only for unmatched ones, its DATs query and `/sources` matched counts read index pages only, and results are unchanged; plan tests assert each. |
-| WP-82 | Source preview in one query per chunk | Opus | 81 | `GET /sources/{id}/preview` scores each chunk of sampled files with one statement over a `file_index` range or a bound key list, joined to the covering match indexes and grouped by platform, in place of two lookups per file; binding and preview share one scoring rule, held equal to the per-file path by a proptest; a plan test shows index seeks only; nothing is cached or stored. |
-| WP-83 | Normalised columns | Opus, then Flash | 81, 82 | DATA-MODEL.md names every text column that holds an enumeration or a repeated key (platform ids, states, sources, confidences, job kinds, hashes), its integer or blob form and the migration order; one package per table then converts it with a migration and typed accessors behind an unchanged API, each holding every row equal across the migration in a test and recording the seeded catalogue's database size before and after. |
+| WP-82 | Source preview in one query per chunk | Opus | 81 | `GET /sources/{id}/preview` scores each chunk of sampled files with one statement over a `file_index` range or a bound key list, joined to the covering match indexes and grouped by platform, in place of two lookups per file; binding and preview share one scoring rule, held equal to the per-file path by a proptest; the base-and-size lookup keeps `roms_match_base` when sizes repeat, as its plan test seeds; keys are bound as a list, never stored on torrent_files; a plan test shows index seeks only; a board bench records the base tier's share of the preview for NORMALIZATION.md P2; nothing is cached or stored. |
 | WP-84 | Import test under load | Sonnet | none | `a_failure_before_the_renames_changes_nothing_and_can_be_retried` in `tests/import.rs` waits on its download through a condition, not a fixed 10 s timeout, and passes in 20 consecutive full `cargo test --workspace` runs on a loaded machine. |
+
+## Wave 13: normalised schema
+
+Compact, checked column forms for the long tables, measured on the board's
+database after wave 12: about 27% smaller with the same index seeks. Each
+package's acceptance is its task list in NORMALIZATION.md, every box ticked; that
+file gives the order and the migration grouping.
+
+| WP | Name | Model | Depends | Crates |
+|---|---|---|---|---|
+| WP-83 | Column forms: design | Opus | 81, 82 | `docs/` |
+| WP-85 | Rebuild-safe migrations | Flash | 83 | `mistarr-server` |
+| WP-94 | Shared views | Opus | 83, 85 | `mistarr-server` |
+| WP-86 | Hash blobs and the roms rebuild | Opus | 82, 85, 94 | `mistarr-core`, `mistarr-server` |
+| WP-87 | Rom names as title tails | Opus | 86 | `mistarr-server` |
+| WP-92 | Integer platform ids | Opus, then Flash | 85, 94 | `mistarr-core`, `mistarr-server` |
+| WP-88 | Torrent paths and confidence codes | Flash | 82, 85, 94 | `mistarr-server` |
+| WP-89 | Group names from titles, unused title indexes | Flash | 85, 92 | `mistarr-server` |
+| WP-93 | Minimal types | Flash | 85, 94 | `mistarr-server` |
+| WP-90 | Tag tables | Opus | 89 | `mistarr-server` |
+| WP-91 | Compact write-back | Opus | 77, 86 | `mistarr-server` |
+
+## Wave 14: local network only
+
+Starts after wave 13. The design step decides how much belongs here and how
+much in the board image, since filtering peers may need firewall rights that
+mistarr does not hold.
+
+| WP | Name | Model | Depends | Acceptance |
+|---|---|---|---|---|
+| WP-95 | Local network only for the torrent clients | Opus | 91 | A setting, off by default, limits the managed rtorrent and Transmission to peers on the local network over IPv4 and IPv6 (private, link-local and unique local ranges), with local peer discovery kept working; the design names the rights each client and the board need and moves any firewall part to the board image's own plan; tests cover the address ranges and each client's settings; DEPLOYMENT.md and the Settings page say what the option does and does not block. |
 
 ## Suggested fan-out
 
