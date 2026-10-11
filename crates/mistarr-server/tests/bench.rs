@@ -1,4 +1,4 @@
-//! Runs the built binary's hidden `bench-seed` and `bench-search` subcommands.
+//! Runs the built binary's hidden `bench-seed`, `bench-search` and `bench-preview` subcommands.
 
 use std::path::Path;
 use std::process::{Command, Output};
@@ -102,4 +102,42 @@ fn bench_seed_writes_a_new_file_and_bench_search_times_every_shape() {
     );
     assert!(!none.status.success());
     assert!(!missing.exists());
+}
+
+#[test]
+fn bench_preview_times_each_source_and_its_base_tier() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("bench.db");
+    let db_arg = db.to_string_lossy().into_owned();
+    let seed = mistarr(
+        dir.path(),
+        &["bench-seed", "--db", &db_arg, "--scale", "0.01"],
+    );
+    assert!(seed.status.success());
+    let c = rusqlite::Connection::open(&db).expect("open");
+    c.execute_batch(
+        "INSERT INTO sources (infohash, display_name, origin_file, state, added_at)
+           VALUES ('0c', 'Synthetic Preview', 'p.torrent', 'unbound', 0);
+         INSERT INTO torrent_files (source_id, file_index, path, size)
+           SELECT 1, id - 1, 'Set/' || name, size FROM roms ORDER BY id LIMIT 600;
+         UPDATE sources SET file_count = 600;",
+    )
+    .expect("source");
+    drop(c);
+    let run = mistarr(
+        dir.path(),
+        &["bench-preview", "--db", &db_arg, "--iterations", "2"],
+    );
+    assert!(
+        run.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let text = String::from_utf8(run.stdout).expect("utf8");
+    let row = text
+        .lines()
+        .find(|l| l.starts_with("1 "))
+        .unwrap_or_else(|| panic!("{text}"));
+    assert_eq!(row.split_whitespace().nth(1), Some("600"), "{text}");
+    assert!(text.contains("base%total"), "{text}");
 }

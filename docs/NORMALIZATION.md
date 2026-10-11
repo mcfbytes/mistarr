@@ -181,9 +181,9 @@ CREATE INDEX roms_size ON roms(size) WHERE match_name IS NOT NULL;
 - **Plans:** `SEARCH r USING INDEX roms_match_base (<expr>=? AND size=?)`.
   - On 3.46 the expression index is **not covering**, with the predicate on the column or on the expression. Each hit reads its roms row (about 6 hits per lookup).
   - x86 time is equal (0.012 to 0.014 s per 3,000 lookups, against 0.011 s covering).
-  - Decide with WP-82's board bench; if the base tier is hot there, keep the column.
+  - Decide with the board figures of `mistarr bench-preview` (TESTING.md "Preview speed"); if the base tier is hot there, keep the column.
 - **Code:**
-  - One `const MATCH_BASE: &str` holding the expression, used by `SqlDatIndex` and WP-82's statement.
+  - The `match_base!` macro in `db/sources.rs` holds the expression for `SqlDatIndex` and the preview's statement; it is a macro so both stay `concat!` literals.
   - `key_batch` writes only `match_name`.
   - The `candidates` size-index predicate and the plan tests change.
 

@@ -52,11 +52,12 @@ contracts in this document.
 | `web/` | Svelte 5 + Vite + TypeScript SPA. Built to `web/dist`, embedded at compile time. | API.md |
 
 `mistarr-server`'s `synth` and `bench` modules ship in the release binary on
-purpose, behind no cargo feature: the hidden `bench-seed` and `bench-search`
-subcommands (TESTING.md "Browse speed") time browse and search on the board
-itself, which a host build cannot stand in for. They hold only generated
-names, `bench-seed` writes only a new file and `bench-search` opens a
-database read-only, and neither adds a dependency.
+purpose, behind no cargo feature: the hidden `bench-seed`, `bench-search` and
+`bench-preview` subcommands (TESTING.md "Browse speed" and "Preview speed")
+time browse, search and the source preview on the board itself, which a host
+build cannot stand in for. They hold only generated names, `bench-seed`
+writes only a new file, the others open a database read-only, and none adds
+a dependency.
 
 ### Key traits
 

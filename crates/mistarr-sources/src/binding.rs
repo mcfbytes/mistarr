@@ -85,12 +85,47 @@ fn leaf_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// The keys binding looks a torrent file up by: its file name through
+/// [`normalize_name`], and its size. The base name is [`base_name`] of the name.
+///
+/// ```
+/// use mistarr_sources::binding::MatchKeys;
+/// use mistarr_sources::torrent::TorrentFile;
+/// let file = TorrentFile { index: 0, path: "Set/Example Quest (USA).nes".into(), size: 16 };
+/// let keys = MatchKeys::of(&file);
+/// assert_eq!((keys.name.as_str(), keys.base(), keys.size), ("example quest (usa)", "example quest", 16));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchKeys {
+    /// The normalized file name, compared with a rom's normalized name.
+    pub name: String,
+    /// The file's size, compared with a rom's size in the base-name tier.
+    pub size: u64,
+}
+
+impl MatchKeys {
+    /// The keys of `file`.
+    #[must_use]
+    pub fn of(file: &TorrentFile) -> Self {
+        Self {
+            name: normalize_name(leaf_name(&file.path)),
+            size: file.size,
+        }
+    }
+
+    /// The base name, compared with a rom's base name in the base-name tier.
+    #[must_use]
+    pub fn base(&self) -> &str {
+        base_name(&self.name)
+    }
+}
+
 fn candidates_for(
     file: &TorrentFile,
     index: &dyn DatIndex,
 ) -> Vec<(PlatformId, RomId, Confidence)> {
-    let normalized = normalize_name(leaf_name(&file.path));
-    let name_matches = index.by_normalized_name(&normalized);
+    let keys = MatchKeys::of(file);
+    let name_matches = index.by_normalized_name(&keys.name);
     let matched_platforms: HashSet<PlatformId> =
         name_matches.iter().map(|(p, _)| p.clone()).collect();
 
@@ -101,7 +136,7 @@ fn candidates_for(
 
     // A platform already matched by name keeps that stronger match; only
     // platforms with no name match fall back to base name plus size.
-    let size_matches = index.by_base_name_and_size(base_name(&normalized), file.size);
+    let size_matches = index.by_base_name_and_size(keys.base(), keys.size);
     candidates.extend(
         size_matches
             .into_iter()
@@ -109,6 +144,43 @@ fn candidates_for(
             .map(|(p, r)| (p, r, Confidence::Base)),
     );
     candidates
+}
+
+/// How many of `files` each platform matches, by platform id: a file counts once for
+/// a platform when one of its roms matches by name, or by base name and size. This is
+/// the scoring rule binding and the source preview share.
+///
+/// ```
+/// use mistarr_sources::binding::{platform_hits, DatIndex};
+/// use mistarr_sources::torrent::TorrentFile;
+/// use mistarr_core::{PlatformId, RomId};
+///
+/// struct Both;
+/// impl DatIndex for Both {
+///     fn by_normalized_name(&self, _: &str) -> Vec<(PlatformId, RomId)> {
+///         vec![(PlatformId::new("nes"), RomId::new(1))]
+///     }
+///     fn by_base_name_and_size(&self, _: &str, _: u64) -> Vec<(PlatformId, RomId)> {
+///         vec![(PlatformId::new("nes"), RomId::new(2)), (PlatformId::new("snes"), RomId::new(3))]
+///     }
+/// }
+/// let files = vec![TorrentFile { index: 0, path: "a.nes".into(), size: 1 }];
+/// assert_eq!(platform_hits(&files, &Both), [(PlatformId::new("nes"), 1), (PlatformId::new("snes"), 1)]);
+/// ```
+#[must_use]
+pub fn platform_hits(files: &[TorrentFile], index: &dyn DatIndex) -> Vec<(PlatformId, usize)> {
+    let mut hits: HashMap<PlatformId, usize> = HashMap::new();
+    for file in files {
+        let mut seen: HashSet<PlatformId> = HashSet::new();
+        for (platform, _, _) in candidates_for(file, index) {
+            if seen.insert(platform.clone()) {
+                *hits.entry(platform).or_insert(0) += 1;
+            }
+        }
+    }
+    let mut out: Vec<(PlatformId, usize)> = hits.into_iter().collect();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
 }
 
 /// The hit rate (fraction of `files` with at least one match) for every
@@ -136,17 +208,8 @@ pub fn score_platforms(files: &[TorrentFile], index: &dyn DatIndex) -> Vec<(Plat
     if files.is_empty() {
         return Vec::new();
     }
-    let mut hits: HashMap<PlatformId, usize> = HashMap::new();
-    for file in files {
-        let mut seen: HashSet<PlatformId> = HashSet::new();
-        for (platform, _, _) in candidates_for(file, index) {
-            if seen.insert(platform.clone()) {
-                *hits.entry(platform).or_insert(0) += 1;
-            }
-        }
-    }
     let total = files.len() as f32;
-    let mut scored: Vec<(PlatformId, f32)> = hits
+    let mut scored: Vec<(PlatformId, f32)> = platform_hits(files, index)
         .into_iter()
         .map(|(p, n)| (p, n as f32 / total))
         .collect();
