@@ -149,7 +149,7 @@ impl TitleEntry {
 pub fn title_entry(conn: &Connection, id: TitleId) -> Result<Option<TitleEntry>> {
     let Some((platform, name, source)): Option<(String, String, TitleSource)> = conn
         .query_row(
-            "SELECT platform_id, name, source FROM titles WHERE id = ?1",
+            "SELECT platform, name, source FROM title_view WHERE id = ?1",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )

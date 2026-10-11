@@ -371,9 +371,8 @@ pub fn drop_foreign_proofs(
     Ok(conn.execute(
         "UPDATE torrent_files SET rom_id = NULL, confidence = NULL
          WHERE source_id = ?1 AND confidence = 'hash' AND NOT EXISTS (
-           SELECT 1 FROM roms r JOIN titles t ON t.id = r.title_id
-           WHERE r.id = torrent_files.rom_id AND t.platform_id = ?2
-             AND r.retired = 0 AND t.retired = 0)",
+           SELECT 1 FROM rom_view r
+           WHERE r.id = torrent_files.rom_id AND r.platform_key = ?2 AND r.live)",
         params![source, platform],
     )?)
 }
@@ -416,9 +415,8 @@ pub fn rom_stamp(conn: &Connection, platform: &PlatformId) -> Result<String> {
         |r| r.get(0),
     )?;
     let mut stmt = conn.prepare_cached(
-        "SELECT r.id, COALESCE(t.group_root, t.id)
-         FROM roms r JOIN titles t ON t.id = r.title_id
-         WHERE t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0",
+        "SELECT r.id, COALESCE(r.group_root, r.title_id) FROM rom_view r
+         WHERE r.platform_key = ?1 AND r.live",
     )?;
     let mut rows = stmt.query([platform])?;
     let (mut count, mut sum) = (0u64, 0u64);
@@ -649,12 +647,9 @@ impl SizeIndex for SqlSizeIndex<'_> {
     fn roms_of_size(&self, size: u64) -> Vec<SizedRom> {
         let run = || -> rusqlite::Result<Vec<SizedRom>> {
             let mut stmt = self.conn.prepare_cached(
-                "SELECT r.id, r.match_base, COALESCE(t.group_root, t.parent_id, t.id)
-                 FROM roms r JOIN titles t ON t.id = r.title_id
-                 WHERE r.size IN (?2, ?3) AND t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0
-                   AND r.match_base IS NOT NULL
-                   AND NOT EXISTS (SELECT 1 FROM title_flags f
-                                   WHERE f.title_id = t.id AND f.flag = 'bios')
+                "SELECT r.id, r.match_base, COALESCE(r.group_root, r.parent_id, r.title_id)
+                 FROM live_rom_view r
+                 WHERE r.size IN (?2, ?3) AND r.platform_key = ?1 AND r.match_base IS NOT NULL
                  ORDER BY r.id",
             )?;
             let bare = size.checked_sub(self.header).filter(|_| self.header > 0);

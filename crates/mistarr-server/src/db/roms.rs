@@ -50,19 +50,17 @@ fn match_tiers(
     let live = if scope == Scope::Best {
         ""
     } else {
-        "r.retired = 0 AND t.retired = 0 AND "
+        "r.live AND "
     };
     let order = if scope == Scope::AllLive {
         " ORDER BY r.id"
     } else {
-        " ORDER BY (r.retired = 0 AND t.retired = 0) DESC,
-         d.superseded_by IS NULL DESC, d.id DESC LIMIT 1"
+        " ORDER BY r.live DESC, d.superseded_by IS NULL DESC, d.id DESC LIMIT 1"
     };
     let select = format!(
-        "SELECT r.id, r.title_id, r.name, r.status, t.name
-         FROM roms r JOIN titles t ON t.id = r.title_id
-         JOIN dat_versions d ON d.id = t.dat_version_id
-         WHERE t.platform_id = ?1 AND t.source = 'dat' AND {live}"
+        "SELECT r.id, r.title_id, r.name, r.status, r.title_name
+         FROM rom_view r JOIN dat_versions d ON d.id = r.dat_version_id
+         WHERE r.platform_key = ?1 AND r.title_source = 'dat' AND {live}"
     );
     let tiers: [(&str, Vec<&dyn rusqlite::ToSql>); 3] = [
         ("r.sha1 = ?2", vec![platform_id, &sha1]),
@@ -177,8 +175,8 @@ fn rom_match(r: &Row<'_>) -> rusqlite::Result<RomMatch> {
 pub fn disc_roms(conn: &Connection, title_id: TitleId) -> Result<Vec<RomMatch>> {
     Ok(conn
         .prepare_cached(
-            "SELECT r.id, r.title_id, r.name, r.status, t.name FROM roms r JOIN titles t ON t.id = r.title_id
-             WHERE r.title_id = ?1 AND r.retired = 0 AND t.retired = 0 ORDER BY r.id",
+            "SELECT r.id, r.title_id, r.name, r.status, r.title_name FROM rom_view r
+             WHERE r.title_id = ?1 AND r.live ORDER BY r.id",
         )?
         .query_map([title_id], rom_match)?
         .collect::<rusqlite::Result<_>>()?)
@@ -223,8 +221,8 @@ pub fn crc_candidate_exists(
     Ok(conn
         .prepare_cached(
             "SELECT EXISTS(
-           SELECT 1 FROM roms r JOIN titles t ON t.id = r.title_id
-           WHERE t.platform_id = ?1 AND t.source = 'dat' AND r.crc32 = ?2 AND r.size = ?3)",
+           SELECT 1 FROM rom_view r
+           WHERE r.platform_key = ?1 AND r.title_source = 'dat' AND r.crc32 = ?2 AND r.size = ?3)",
         )?
         .query_row(params![platform_id, crc32, size], |r| r.get(0))?)
 }
@@ -306,8 +304,7 @@ pub fn rom(conn: &Connection, id: RomId) -> Result<Option<EntryRom>> {
 pub fn rom_retired(conn: &Connection, id: RomId) -> Result<bool> {
     Ok(conn
         .query_row(
-            "SELECT r.retired = 1 OR t.retired = 1 FROM roms r JOIN titles t ON t.id = r.title_id
-             WHERE r.id = ?1",
+            "SELECT r.retired = 1 OR r.title_retired = 1 FROM rom_view r WHERE r.id = ?1",
             [id],
             |r| r.get(0),
         )
@@ -430,9 +427,8 @@ pub fn live_zip_roms(
     platform: &PlatformId,
 ) -> Result<HashMap<String, Vec<RomId>>> {
     let mut stmt = conn.prepare(
-        "SELECT COALESCE(r.zip_dir, ''), r.name, r.id FROM roms r JOIN titles t ON t.id = r.title_id
-         WHERE t.platform_id = ?1 AND t.source = 'mra' AND t.retired = 0 AND r.retired = 0
-         ORDER BY r.id",
+        "SELECT COALESCE(r.zip_dir, ''), r.name, r.id FROM rom_view r
+         WHERE r.platform_key = ?1 AND r.title_source = 'mra' AND r.live ORDER BY r.id",
     )?;
     let mut rows = stmt.query([platform])?;
     let mut out: HashMap<String, Vec<RomId>> = HashMap::new();

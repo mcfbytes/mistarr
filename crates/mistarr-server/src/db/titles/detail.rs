@@ -171,7 +171,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
     };
     let Some((platform, base_name)): Option<(String, String)> = conn
         .query_row(
-            "SELECT platform_id, base_name FROM titles WHERE id = ?1",
+            "SELECT platform, base_name FROM title_view WHERE id = ?1",
             [gid],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -182,7 +182,7 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
     let mut stmt = conn.prepare(
         "SELECT t.id, t.name, t.revision, t.is_1g1r_pick,
                 t.wanted, t.retired, t.inferred, t.dat_version_id, t.source
-         FROM titles t WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
+         FROM title_view t WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
          ORDER BY t.retired, t.is_1g1r_pick DESC, t.name",
     )?;
     let mut variants: Vec<VariantRow> = stmt
@@ -192,13 +192,13 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
     let mut stmt = conn.prepare(
         "SELECT r.title_id, r.id, r.name, r.size, r.crc32, r.md5, r.sha1, r.status,
                 f.id, f.state, f.rel_path
-         FROM titles t JOIN roms r ON r.title_id = t.id AND r.retired = 0
+         FROM rom_view r
          LEFT JOIN files f ON f.id = (
            SELECT x.id FROM files x WHERE x.rom_id = r.id
            ORDER BY CASE x.state WHEN 'verified' THEN 0 WHEN 'misnamed' THEN 1
                                  WHEN 'bad' THEN 2 ELSE 3 END, x.id
            LIMIT 1)
-         WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
+         WHERE r.retired = 0 AND (r.group_root = ?1 OR (r.title_id = ?1 AND r.group_root IS NULL))
          ORDER BY r.title_id, r.name",
     )?;
     let mut rows = stmt.query([gid])?;

@@ -729,7 +729,8 @@ pub fn set_matches(
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn torrent_files(conn: &Connection, id: SourceId) -> Result<Vec<TorrentFile>> {
     let mut stmt = conn.prepare(
-        "SELECT file_index, path, size FROM torrent_files WHERE source_id = ?1 ORDER BY file_index",
+        "SELECT file_index, path, size FROM torrent_file_view WHERE source_id = ?1
+         ORDER BY file_index",
     )?;
     let files = stmt
         .query_map([id], |r| {
@@ -840,21 +841,17 @@ impl<'c> SqlDatIndex<'c> {
 impl DatIndex for SqlDatIndex<'_> {
     fn by_normalized_name(&self, name: &str) -> Vec<(PlatformId, RomId)> {
         self.lookup(
-            "SELECT t.platform_id, r.id FROM roms r JOIN titles t ON t.id = r.title_id
-             WHERE r.match_name = ?1 AND t.retired = 0
-               AND NOT EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.flag = 'bios')
-             ORDER BY r.id",
+            "SELECT r.platform, r.id FROM rom_view r
+             WHERE r.match_name = ?1 AND r.title_retired = 0 AND NOT r.bios ORDER BY r.id",
             [name],
         )
     }
 
     fn by_base_name_and_size(&self, base_name: &str, size: u64) -> Vec<(PlatformId, RomId)> {
         self.lookup(
-            "SELECT t.platform_id, r.id
-             FROM roms r INDEXED BY roms_match_base JOIN titles t ON t.id = r.title_id
-             WHERE r.match_base = ?1 AND r.size = ?2 AND t.retired = 0
-               AND NOT EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.flag = 'bios')
-             ORDER BY r.id",
+            "SELECT r.platform, r.id FROM rom_view r
+             WHERE r.match_base = ?1 AND r.size = ?2 AND r.title_retired = 0 AND NOT r.bios
+             ORDER BY +r.id",
             params![base_name, sql::to_i64(size)],
         )
     }

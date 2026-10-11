@@ -27,7 +27,7 @@ pub fn for_title(conn: &Connection, title_id: TitleId) -> Result<Vec<DownloadId>
 pub fn torrent_path(conn: &Connection, source_id: SourceId, index: u32) -> Result<Option<String>> {
     Ok(conn
         .query_row(
-            "SELECT path FROM torrent_files WHERE source_id = ?1 AND file_index = ?2",
+            "SELECT path FROM torrent_file_view WHERE source_id = ?1 AND file_index = ?2",
             params![source_id, index],
             |r| r.get(0),
         )
@@ -70,7 +70,7 @@ pub fn placed_on_file(
         .query_row(
             "SELECT json_extract(l.detail, '$.title_id') FROM import_log l
              JOIN downloads d ON d.id = l.download_id
-             JOIN torrent_files f ON f.source_id = d.source_id AND f.file_index = d.file_index
+             JOIN torrent_file_view f ON f.source_id = d.source_id AND f.file_index = d.file_index
              WHERE d.source_id = ?1 AND d.file_index = ?2 AND lower(f.path) NOT LIKE '%.zip'
                AND l.action IN ('placed', 'replaced', 'skipped_existing')
                AND json_extract(l.detail, '$.rom_id') != ?3

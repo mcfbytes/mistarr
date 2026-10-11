@@ -17,6 +17,8 @@ use super::views::source_detail;
 use super::{candidates, chd, files, groups, imports, jobs, launch, roms, sources};
 use crate::jobs::{JobKind, Lane};
 
+mod shared_views;
+
 /// The first page of a list as the API's default asks for it.
 const FIFTY: Page = Page {
     limit: 50,
