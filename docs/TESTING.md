@@ -336,6 +336,25 @@ set with `setMockKnob` in `web/e2e/helpers.ts`, and push SSE events with
 - `titlesSettled`: written by the mock, how many title requests per `search#page`
   it has answered or cut short, so a test can wait out a slow one.
 
+### Preview speed
+
+`bench-preview` opens a database read-only and times the re-classify
+preview (`GET /sources/{id}/preview`) of each source with files, or of
+`--source`, over `--iterations` runs after a warm-up, printing medians in
+milliseconds: the sample reads, the key derivation, the scoring statements,
+and the same chunks scored by the name tier alone and the base-name and size
+tier alone. `base%total` is the base tier's share of the whole preview, and
+`base%scored` its share of the scoring; NORMALIZATION.md P2 is decided from
+them on the board, with the server stopped so the timings are its own:
+
+```sh
+mistarr bench-preview --db /media/fat/mistarr/mistarr.db --iterations 10
+```
+
+`db::plans::a_preview_runs_two_statements_per_chunk` holds the statement
+count, and `db::sources` holds the one statement equal to binding's
+per-file lookups by a proptest.
+
 ## 3. End-to-end on a board with real, open-licensed content
 
 For manual verification on a DE10-Nano, use homebrew whose licence permits

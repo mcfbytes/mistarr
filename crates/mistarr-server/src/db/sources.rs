@@ -812,6 +812,124 @@ pub fn key_batch(conn: &Connection) -> Result<usize> {
     Ok(batch.len())
 }
 
+/// A rom's base name as SQL over the roms alias `r`, for every statement that compares
+/// it, so the column and its index change in one place.
+macro_rules! match_base {
+    () => {
+        "r.match_base"
+    };
+}
+
+/// The predicate on the titles alias `t` that keeps roms binding may match: titles
+/// neither retired nor BIOS.
+macro_rules! live_title {
+    () => {
+        "t.retired = 0
+         AND NOT EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.flag = 'bios')"
+    };
+}
+
+/// One row per bound key and platform a rom matches it on by name. The key list is a
+/// JSON array of `[name, base, size]`, and a key is its position in it.
+macro_rules! name_tier {
+    () => {
+        concat!(
+            "SELECT json_each.key AS file, t.platform_id AS platform_id
+             FROM json_each(?1)
+             JOIN roms r ON r.match_name = json_extract(json_each.value, '$[0]')
+             JOIN titles t ON t.id = r.title_id
+             WHERE ",
+            live_title!()
+        )
+    };
+}
+
+/// As `name_tier!`, by base name and size, through `roms_match_base` whatever the
+/// sizes, which a lookup ordered by rom id would otherwise trade for `roms_size`.
+macro_rules! base_tier {
+    () => {
+        concat!(
+            "SELECT json_each.key AS file, t.platform_id AS platform_id
+             FROM json_each(?1)
+             JOIN roms r INDEXED BY roms_match_base
+               ON ",
+            match_base!(),
+            " = json_extract(json_each.value, '$[1]')
+              AND r.size = json_extract(json_each.value, '$[2]')
+             JOIN titles t ON t.id = r.title_id
+             WHERE ",
+            live_title!()
+        )
+    };
+}
+
+/// Which name tiers [`platform_hits`] scores.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Tiers {
+    /// Name, and base name with size: binding's rule.
+    All,
+    /// Name alone.
+    Name,
+    /// Base name with size alone.
+    Base,
+}
+
+impl Tiers {
+    fn sql(self) -> &'static str {
+        match self {
+            Self::All => concat!(
+                "SELECT platform_id, COUNT(DISTINCT file) FROM (",
+                name_tier!(),
+                " UNION ALL ",
+                base_tier!(),
+                ") GROUP BY platform_id ORDER BY platform_id"
+            ),
+            Self::Name => concat!(
+                "SELECT platform_id, COUNT(DISTINCT file) FROM (",
+                name_tier!(),
+                ") GROUP BY platform_id ORDER BY platform_id"
+            ),
+            Self::Base => concat!(
+                "SELECT platform_id, COUNT(DISTINCT file) FROM (",
+                base_tier!(),
+                ") GROUP BY platform_id ORDER BY platform_id"
+            ),
+        }
+    }
+}
+
+/// `keys` as the JSON list [`platform_hits`] binds.
+fn key_list(keys: &[binding::MatchKeys]) -> Result<String> {
+    let rows: Vec<(&str, &str, i64)> = keys
+        .iter()
+        .map(|k| (k.name.as_str(), k.base(), sql::to_i64(k.size)))
+        .collect();
+    Ok(serde_json::to_string(&rows)?)
+}
+
+/// How many of `keys` each platform matches under `tiers`, by platform id, in one
+/// statement over the keys bound as a list; with [`Tiers::All`] it equals
+/// [`binding::platform_hits`] through [`SqlDatIndex`]. Reads only and stores nothing.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn platform_hits(
+    conn: &Connection,
+    keys: &[binding::MatchKeys],
+    tiers: Tiers,
+) -> Result<Vec<(PlatformId, u64)>> {
+    if keys.is_empty() {
+        return Ok(Vec::new());
+    }
+    let hits = conn
+        .prepare_cached(tiers.sql())?
+        .query_map([key_list(keys)?], |r| Ok((r.get(0)?, sql::get_u64(r, 1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(hits)
+}
+
 /// Binding's view of the catalog: roms of titles that are neither retired nor
 /// BIOS, looked up by the keys [`refresh_match_keys`] stores. Query failures read as no match.
 pub struct SqlDatIndex<'c> {
@@ -841,17 +959,27 @@ impl<'c> SqlDatIndex<'c> {
 impl DatIndex for SqlDatIndex<'_> {
     fn by_normalized_name(&self, name: &str) -> Vec<(PlatformId, RomId)> {
         self.lookup(
-            "SELECT r.platform, r.id FROM rom_view r
-             WHERE r.match_name = ?1 AND r.title_retired = 0 AND NOT r.bios ORDER BY r.id",
+            concat!(
+                "SELECT t.platform_id, r.id FROM roms r JOIN titles t ON t.id = r.title_id
+                 WHERE r.match_name = ?1 AND ",
+                live_title!(),
+                " ORDER BY r.id"
+            ),
             [name],
         )
     }
 
     fn by_base_name_and_size(&self, base_name: &str, size: u64) -> Vec<(PlatformId, RomId)> {
         self.lookup(
-            "SELECT r.platform, r.id FROM rom_view r
-             WHERE r.match_base = ?1 AND r.size = ?2 AND r.title_retired = 0 AND NOT r.bios
-             ORDER BY +r.id",
+            concat!(
+                "SELECT t.platform_id, r.id
+                 FROM roms r INDEXED BY roms_match_base JOIN titles t ON t.id = r.title_id
+                 WHERE ",
+                match_base!(),
+                " = ?1 AND r.size = ?2 AND ",
+                live_title!(),
+                " ORDER BY r.id"
+            ),
             params![base_name, sql::to_i64(size)],
         )
     }
@@ -1113,6 +1241,87 @@ mod tests {
         );
         assert!(index.by_base_name_and_size("other tale", 33).is_empty());
         assert!(index.by_normalized_name("boot code (world)").is_empty());
+    }
+
+    #[test]
+    fn platform_hits_count_each_file_once_per_platform_and_tier() {
+        let c = conn();
+        seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 16, &[]).expect("rom");
+        seed_rom(&c, &pid("nes"), "Example Quest (Europe).nes", 16, &[]).expect("rom");
+        seed_rom(&c, &pid("snes"), "Example Quest (Japan).sfc", 16, &[]).expect("rom");
+        seed_rom(&c, &pid("gb"), "Example Quest (USA).gb", 16, &["bios"]).expect("rom");
+        refresh_match_keys(&c).expect("keys");
+        let keys: Vec<binding::MatchKeys> = [
+            file(0, "Set/Example Quest (USA).nes", 16),
+            file(1, "Set/Example Quest (Beta).nes", 16),
+            file(2, "Set/Example Quest (Beta).nes", 17),
+        ]
+        .iter()
+        .map(binding::MatchKeys::of)
+        .collect();
+        let hits = |tiers| platform_hits(&c, &keys, tiers).expect("hits");
+        let snes = PlatformId::new("snes");
+        assert_eq!(hits(Tiers::All), [(nes(), 2), (snes.clone(), 2)]);
+        assert_eq!(hits(Tiers::Name), [(nes(), 1)]);
+        assert_eq!(hits(Tiers::Base), [(nes(), 2), (snes, 2)]);
+        assert!(platform_hits(&c, &[], Tiers::All).expect("none").is_empty());
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig {
+            cases: 48,
+            failure_persistence: None,
+            ..proptest::prelude::ProptestConfig::default()
+        })]
+
+        /// The preview's one statement scores a chunk exactly as binding's per-file
+        /// lookups do, over roms with shared names, bases and sizes, BIOS and retired.
+        #[test]
+        fn one_statement_scores_as_the_per_file_lookups(
+            roms in proptest::collection::vec(
+                ("[ab]{1,2}", 0u8..3, 0u8..3, 1u64..3, 0u8..6), 1..14),
+            files in proptest::collection::vec(("[ab]{1,2}", 0u8..4, 1u64..3), 0..14),
+        ) {
+            const TAGS: [&str; 4] = ["", " (USA)", " (Europe)", " (Beta)"];
+            const PLATFORMS: [&str; 3] = ["nes", "snes", "gb"];
+            let c = conn();
+            let mut seeded = std::collections::HashSet::new();
+            for (name, tag, p, size, kind) in &roms {
+                let rom_name = format!("{name}{}.bin", TAGS[usize::from(*tag)]);
+                // A DAT names each title once.
+                if !seeded.insert((rom_name.clone(), *p)) {
+                    continue;
+                }
+                let flags: &[&str] = if *kind == 0 { &["bios"] } else { &[] };
+                let id = seed_rom(&c, &pid(PLATFORMS[usize::from(*p)]), &rom_name, *size, flags)
+                    .expect("rom");
+                if *kind == 1 {
+                    c.execute(
+                        "UPDATE titles SET retired = 1
+                         WHERE id = (SELECT title_id FROM roms WHERE id = ?1)",
+                        [id],
+                    )
+                    .expect("retire");
+                }
+            }
+            refresh_match_keys(&c).expect("keys");
+            let files: Vec<TorrentFile> = files
+                .iter()
+                .enumerate()
+                .map(|(i, (name, tag, size))| {
+                    let path = format!("Set/{name}{}.bin", TAGS[usize::from(*tag)]);
+                    file(u32::try_from(i).unwrap_or(0), &path, *size)
+                })
+                .collect();
+            let keys: Vec<binding::MatchKeys> = files.iter().map(binding::MatchKeys::of).collect();
+            let per_file: Vec<(PlatformId, u64)> =
+                binding::platform_hits(&files, &SqlDatIndex::new(&c))
+                    .into_iter()
+                    .map(|(p, n)| (p, n as u64))
+                    .collect();
+            let statement = platform_hits(&c, &keys, Tiers::All).expect("hits");
+            proptest::prop_assert_eq!(statement, per_file);
+        }
     }
 
     #[test]

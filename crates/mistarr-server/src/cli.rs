@@ -77,6 +77,19 @@ pub enum Command {
         #[arg(long = "shape", value_parser = parse_shape)]
         shapes: Vec<SearchShape>,
     },
+    /// Time source previews and their base-name tier on a database file, opened read-only.
+    #[command(hide = true)]
+    BenchPreview {
+        /// Database file to read.
+        #[arg(long, value_name = "PATH")]
+        db: PathBuf,
+        /// Source id to preview; every source with files when omitted.
+        #[arg(long)]
+        source: Option<i64>,
+        /// Timed runs per source.
+        #[arg(long, default_value_t = 10)]
+        iterations: u32,
+    },
 }
 
 /// Wraps a failure with what was being done.
@@ -140,6 +153,54 @@ impl Cli {
     }
 }
 
+/// Runs one of the hidden benchmark subcommands.
+fn run_bench(command: Command, out: &mut impl std::io::Write) -> Result<()> {
+    match command {
+        Command::BenchSeed { db, scale } => {
+            let seeded = crate::bench::seed_file(&db, scale)
+                .with_context(|| format!("cannot seed {}", db.display()))?;
+            writeln!(
+                out,
+                "{}: {} titles, {} roms, {} files",
+                db.display(),
+                seeded.titles,
+                seeded.roms,
+                seeded.files
+            )?;
+        }
+        Command::BenchSearch {
+            db,
+            platform,
+            term,
+            iterations,
+            shapes,
+        } => {
+            let shapes = if shapes.is_empty() {
+                SearchShape::ALL.to_vec()
+            } else {
+                shapes
+            };
+            let timings = crate::bench::search(&db, &platform, &term, iterations, &shapes)
+                .with_context(|| format!("cannot time searches on {}", db.display()))?;
+            writeln!(out, "{platform} {term:?}, {iterations} runs")?;
+            write!(out, "{}", crate::bench::report(&timings))?;
+        }
+        Command::BenchPreview {
+            db,
+            source,
+            iterations,
+        } => {
+            let source = source.map(crate::db::ids::SourceId::new);
+            let timings = crate::bench::preview(&db, source, iterations)
+                .with_context(|| format!("cannot time previews on {}", db.display()))?;
+            writeln!(out, "{iterations} runs, median")?;
+            write!(out, "{}", crate::bench::preview_report(&timings))?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 /// Runs the chosen subcommand to completion; `serve` returns after SIGINT or SIGTERM.
 ///
 /// # Errors
@@ -187,35 +248,9 @@ pub fn run(cli: &Cli, out: &mut impl std::io::Write) -> Result<()> {
     let runtime = crate::memory::runtime().context("cannot start the async runtime")?;
 
     match cli.command() {
-        Command::BenchSeed { db, scale } => {
-            let seeded = crate::bench::seed_file(&db, scale)
-                .with_context(|| format!("cannot seed {}", db.display()))?;
-            writeln!(
-                out,
-                "{}: {} titles, {} roms, {} files",
-                db.display(),
-                seeded.titles,
-                seeded.roms,
-                seeded.files
-            )?;
-        }
-        Command::BenchSearch {
-            db,
-            platform,
-            term,
-            iterations,
-            shapes,
-        } => {
-            let shapes = if shapes.is_empty() {
-                SearchShape::ALL.to_vec()
-            } else {
-                shapes
-            };
-            let timings = crate::bench::search(&db, &platform, &term, iterations, &shapes)
-                .with_context(|| format!("cannot time searches on {}", db.display()))?;
-            writeln!(out, "{platform} {term:?}, {iterations} runs")?;
-            write!(out, "{}", crate::bench::report(&timings))?;
-        }
+        bench @ (Command::BenchSeed { .. }
+        | Command::BenchSearch { .. }
+        | Command::BenchPreview { .. }) => run_bench(bench, out)?,
         Command::Doctor {
             hash_mib,
             rebuild_groups,
@@ -359,6 +394,17 @@ mod tests {
             "grep"
         ])
         .is_err());
+        let cli =
+            Cli::try_parse_from(["mistarr", "bench-preview", "--db", "m.db", "--source", "3"])
+                .expect("parse");
+        assert_eq!(
+            cli.command(),
+            Command::BenchPreview {
+                db: "m.db".into(),
+                source: Some(3),
+                iterations: 10
+            }
+        );
         let cli = Cli::try_parse_from(["mistarr", "bench-seed", "--db", "s.db"]).expect("parse");
         assert_eq!(
             cli.command(),

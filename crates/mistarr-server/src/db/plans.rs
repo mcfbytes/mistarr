@@ -313,7 +313,7 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
 }
 
 /// The whole-table walks the hot reads may make, each bounded or inherent.
-const ALLOWED_SCANS: [(&str, &str); 18] = [
+const ALLOWED_SCANS: [(&str, &str); 19] = [
     // The sort over one group's availability rows, which the union gathers by rom.
     ("title detail", "SCAN (subquery-"),
     // A refresh walks at most one chunk of the dirty list and that chunk's grouped rows.
@@ -338,6 +338,8 @@ const ALLOWED_SCANS: [(&str, &str); 18] = [
     ("crc candidate", "SCAN CONSTANT ROW"),
     // The platform table is the fixed list the binary seeds, a few dozen rows.
     ("reclassify preview", "SCAN p"),
+    // The grouping reads the rows the chunk's key list matched, at most a few per key.
+    ("reclassify preview", "SCAN (subquery-"),
     ("chd lookups", "SCAN CONSTANT ROW"),
 ];
 
@@ -544,17 +546,7 @@ fn rom_lookups_and_directory_tracks_seek_their_own_index() {
 #[test]
 fn base_and_size_lookup_keeps_its_index_when_sizes_repeat() {
     use mistarr_sources::binding::DatIndex as _;
-    let c = crate::db::fixtures::conn();
-    let nes = pid("nes");
-    for i in 0..200 {
-        let id = crate::db::fixtures::seed_rom(&c, &nes, &format!("Example {i}.nes"), 16, &[])
-            .expect("rom");
-        c.execute(
-            "UPDATE roms SET match_name = ?1, match_base = ?1 WHERE id = ?2",
-            rusqlite::params![format!("example {i}"), id],
-        )
-        .expect("keys");
-    }
+    let c = repeated_sizes();
     let statements = traced(&c, |c| {
         drop(sources::SqlDatIndex::new(c).by_base_name_and_size("example 7", 16));
     });
@@ -579,4 +571,133 @@ fn recent_jobs_sort_only_finished_rows() {
     let plan = plan_of(&reads, "recent jobs", "FROM jobs");
     let seek = "SEARCH jobs USING INDEX jobs_state (state=?)";
     assert!(plan.iter().any(|l| l.starts_with(seek)), "{plan:?}");
+}
+
+/// A source of 8 000 files named after the synthetic catalogue's roms in turn, half of
+/// them renamed to match only by base name and size.
+fn previewed_source(c: &Connection) -> SourceId {
+    let roms: Vec<(String, u64)> = c
+        .prepare("SELECT name, size FROM roms ORDER BY id")
+        .expect("prepare")
+        .query_map([], |r| Ok((r.get(0)?, super::sql::get_u64(r, 1)?)))
+        .expect("roms")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows");
+    let files: Vec<mistarr_sources::torrent::TorrentFile> = (0..8_000)
+        .map(|i| (i, &roms[i % roms.len()]))
+        .map(|(i, (name, size))| mistarr_sources::torrent::TorrentFile {
+            index: u32::try_from(i).expect("index"),
+            path: if i % 2 == 0 {
+                format!("Set/{name}")
+            } else {
+                format!(
+                    "Set/{} (Alt).bin",
+                    mistarr_sources::binding::base_name(name)
+                )
+            },
+            size: *size,
+        })
+        .collect();
+    let id = sources::insert(
+        c,
+        &sources::NewSource {
+            infohash: &"0b".repeat(20),
+            display_name: "Synthetic Preview",
+            origin_file: "preview.torrent",
+            state: sources::SourceState::Bound,
+            reason: None,
+            added_at: 0,
+        },
+    )
+    .expect("source");
+    sources::replace_files(c, id, &files).expect("files");
+    id
+}
+
+/// A preview of 4 000 sampled files runs a fixed handful of statements per chunk,
+/// not a lookup per file.
+#[test]
+fn a_preview_runs_two_statements_per_chunk() {
+    let c = seeded();
+    sources::refresh_match_keys(&c).expect("keys");
+    let id = previewed_source(&c);
+    let mut found = None;
+    let statements = traced(&c, |c| {
+        found = Some(source_detail::preview(c, id, source_detail::PREVIEW_SAMPLE).expect("p"));
+    });
+    let p = found.expect("preview");
+    let chunks = p.sampled.div_ceil(u64::from(source_detail::PREVIEW_CHUNK));
+    eprintln!(
+        "{} statements for {} sampled files",
+        statements.len(),
+        p.sampled
+    );
+    assert_eq!(p.sampled, source_detail::PREVIEW_SAMPLE);
+    assert!(p.platforms.iter().any(|m| m.matched > 0), "{p:?}");
+    // The source row, a sample read and a scoring statement per full chunk, the empty
+    // read that ends the sample, and the DAT platforms.
+    assert_eq!(statements.len() as u64, 2 * chunks + 3, "{statements:#?}");
+    let scored = statements
+        .iter()
+        .filter(|s| s.contains("json_each"))
+        .count();
+    assert_eq!(scored as u64, chunks);
+}
+
+/// Seeds 200 keyed `nes` roms of one size, as real DATs repeat sizes.
+fn repeated_sizes() -> Connection {
+    let c = crate::db::fixtures::conn();
+    let nes = pid("nes");
+    for i in 0..200 {
+        let id = crate::db::fixtures::seed_rom(&c, &nes, &format!("Example {i}.nes"), 16, &[])
+            .expect("rom");
+        c.execute(
+            "UPDATE roms SET match_name = ?1, match_base = ?1 WHERE id = ?2",
+            rusqlite::params![format!("example {i}"), id],
+        )
+        .expect("keys");
+    }
+    c
+}
+
+/// The preview's statement seeks the covering match indexes from the bound key list,
+/// the base tier through `roms_match_base` when sizes repeat, and walks no table.
+#[test]
+fn the_preview_statement_seeks_the_match_indexes_when_sizes_repeat() {
+    let c = repeated_sizes();
+    let keys = [mistarr_sources::binding::MatchKeys {
+        name: "example 7".into(),
+        size: 16,
+    }];
+    let mut hits = Vec::new();
+    let statements = traced(&c, |c| {
+        hits = sources::platform_hits(c, &keys, sources::Tiers::All).expect("hits");
+    });
+    assert_eq!(hits, [(pid("nes"), 1)]);
+    let sql = statements
+        .iter()
+        .find(|s| s.contains("json_each"))
+        .expect("traced statement");
+    let found = plan(&c, sql);
+    eprintln!("{}", found.join("\n"));
+    let has = |p: &str| found.iter().any(|l| l.contains(p));
+    assert!(
+        has("COVERING INDEX roms_match_name (match_name=?)"),
+        "{found:?}"
+    );
+    assert!(
+        has("COVERING INDEX roms_match_base (match_base=? AND size=?)"),
+        "{found:?}"
+    );
+    assert!(
+        has("titles (id=?) ") || has("INTEGER PRIMARY KEY (rowid=?)"),
+        "{found:?}"
+    );
+    for line in &found {
+        let walk = line.starts_with("SCAN ")
+            && !line.starts_with("SCAN json_each VIRTUAL TABLE")
+            && !line.starts_with("SCAN (subquery-");
+        assert!(!walk, "{line} in {found:?}");
+        assert!(!line.contains("roms_size"), "{found:?}");
+    }
 }

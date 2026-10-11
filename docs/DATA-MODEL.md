@@ -4,7 +4,10 @@ SQLite, WAL mode, one writer. Migrations are numbered SQL files in
 `crates/mistarr-server/migrations/` applied at startup; this page shows the
 schema after all of them. A binary refuses to open a database whose
 `schema_version` records a migration newer than any it embeds, and leaves its
-contents unchanged; see "Rollback" in [DEPLOYMENT.md](DEPLOYMENT.md). All
+contents unchanged; see "Rollback" in [DEPLOYMENT.md](DEPLOYMENT.md). A
+migration whose first line is `-- foreign_keys: off` runs with foreign keys
+off and must leave `PRAGMA foreign_key_check` clean; see
+`crates/mistarr-server/migrations/README.md` for the rebuild rule. All
 timestamps are Unix seconds. All hashes are stored as lowercase hex text so
 they can be compared with DAT values without conversion; in memory they are
 `mistarr_core` digests, which bind and read as that text with core's
@@ -608,6 +611,13 @@ A load inserts its roms with `match_name` and `match_base` NULL; binding
 keys them (`sources::refresh_match_keys`) in one transaction before it reads
 them, and both keys carry `title_id`, so a lookup reads a matched rom's
 title alongside its id.
+The source preview binds a chunk's keys as one JSON list (`json_each`) and
+seeks both match indexes from it in one statement grouped by platform
+(`sources::platform_hits`), the same rule as binding's per-file lookups;
+nothing derived from a torrent file is stored. The base-name expression is
+the `match_base!` macro in `db/sources.rs`, which both statements share, and
+both name `roms_match_base` with `INDEXED BY`, since repeated sizes would
+otherwise draw the planner to `roms_size`.
 `db::plans::rom_lookups_and_directory_tracks_seek_their_own_index` asserts
 each lookup, the partial ones included, seeks its index, and that a disc
 directory's tracks (`files::in_directory`) are one range of the
@@ -951,19 +961,25 @@ Rules for reads through them:
 - `rom_view` is a join, so it never sits on the right of a LEFT JOIN: SQLite then
   materializes the whole view. Such a read joins roms and titles and spells the
   full-name expression.
-- `INDEXED BY` cannot name a view. A read that needs it (the source DAT list's
-  covering `roms_id_title` and `titles_id_dat`, the CHD size and track-layout
-  lookups, the case-insensitive zip rows) stays on the tables; the base-and-size
-  read orders by `+id` through `rom_view` instead and keeps `roms_match_base`.
+- `INDEXED BY` cannot name a view, and it makes a lost index an error rather than
+  a planner choice. A read that needs it stays on the tables: the source DAT
+  list's covering `roms_id_title` and `titles_id_dat`, binding's base-and-size
+  lookup and the preview's base tier on `roms_match_base`, the CHD size and
+  track-layout lookups, and the case-insensitive zip rows.
 - Writes go to the tables.
 - A read moves onto a view only when its set of predicates stays identical.
   `live_rom_view` (live rom, live title, no bios flag) serves the reads with exactly
-  that set, such as the size candidates. Binding by name and by base and size
-  test only the title's retired flag and the bios flag, so they read `rom_view`
-  with `title_retired = 0 AND NOT bios` and keep binding retired roms of live titles.
+  that set, such as the size candidates. Binding tests only the title's retired
+  flag and the bios flag, so it keeps binding retired roms of live titles. Its
+  lookup by name and the preview's statement stay on the tables with the base
+  tier, so binding's predicate has one definition in `db/sources.rs`.
 - A read that orders by a column a view does not carry stays on the tables: the
   shared-title signatures order by `titles.id`, which `rom_view` exposes only as
   `roms.title_id`, and sort without the titles index.
+- A read whose statement text an older plan test selects stays on the tables
+  until that test moves: the source files page and its path search, and the
+  directory tracks of `files::in_directory`. Reads of a whole file row stay too,
+  as `file_view` has no whole-file hashes yet.
 
 The plan test in `crates/mistarr-server/src/db/plans/shared_views.rs` runs each
 read through a view beside the same read written out over the tables. It

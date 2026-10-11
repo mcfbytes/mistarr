@@ -181,9 +181,9 @@ CREATE INDEX roms_size ON roms(size) WHERE match_name IS NOT NULL;
 - **Plans:** `SEARCH r USING INDEX roms_match_base (<expr>=? AND size=?)`.
   - On 3.46 the expression index is **not covering**, with the predicate on the column or on the expression. Each hit reads its roms row (about 6 hits per lookup).
   - x86 time is equal (0.012 to 0.014 s per 3,000 lookups, against 0.011 s covering).
-  - Decide with WP-82's board bench: the expression index when the base tier takes under 18% of the preview's board time (at most 5% slower), else keep the column. DATA-MODEL.md "P2 outcomes" gives both forms.
+  - Decide with the board figures of `mistarr bench-preview` (TESTING.md "Preview speed"): the expression index when the base tier takes under 18% of the preview's board time (`base%total`, at most 5% slower), else keep the column. DATA-MODEL.md "P2 outcomes" gives both forms.
 - **Code:**
-  - One `const MATCH_BASE: &str` holding the expression, used by `SqlDatIndex` and WP-82's statement.
+  - The `match_base!` macro in `db/sources.rs` holds the expression for `SqlDatIndex` and the preview's statement; it is a macro so both stay `concat!` literals.
   - `key_batch` writes only `match_name`.
   - The `candidates` size-index predicate and the plan tests change.
 
@@ -439,7 +439,7 @@ WP-91 follows WP-77. WP-82 lands before WP-86.
 ### WP-94 Shared views
 - [x] P12's views in `0023_shared_views.sql`, defined over the current columns, with the reads in `crates/mistarr-server/src/db/` moved onto them where they repeat a shape.
 - [x] A plan test per hot read through a view: same index seeks as the written-out join, no `MATERIALIZE` or `CO-ROUTINE` step.
-- [x] Later packages change a view's body rather than every read.
+- [x] Later packages change the reads on a view through its body; the reads DATA-MODEL.md "Views" keeps on the tables change directly.
 - [x] Every read keeps its predicates exactly: a read moves onto a view only when the view adds none (DATA-MODEL.md "Views"); binding by name and by base and size read `rom_view` with the title's retired flag and the bios flag, not `live_rom_view`.
 - Open, not decided here: whether retired roms of live titles should bind. That is a behaviour change and needs its own package.
 
@@ -447,7 +447,7 @@ WP-91 follows WP-77. WP-82 lands before WP-86.
 
 - **WP-82:**
   - It must not add a match key column to torrent_files; it binds a key list.
-  - It edits `SqlDatIndex` and adds a statement over `roms_match_name`/`roms_match_base`, which P2 and P3 later touch. Land WP-82 first, and have WP-86 change both statements through the `MATCH_BASE` constant.
+  - It edits `SqlDatIndex` and adds a statement over `roms_match_name`/`roms_match_base`, which P2 and P3 later touch. Land WP-82 first, and have WP-86 change both statements through the `match_base!` macro.
   - Its bench decides P2.
   - P5 changes its sample read (`file_index, path, size` becomes a join with `torrent_dirs`), so WP-88 depends on WP-82.
 - **WP-77:**

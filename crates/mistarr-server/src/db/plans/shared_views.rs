@@ -84,7 +84,6 @@ fn steps(c: &Connection, sql: &str) -> Vec<String> {
 }
 
 /// The same read over the tables: written out, or the view statement with names swapped.
-#[derive(Clone)]
 enum Out {
     Sql(String),
     Swap(&'static [(&'static str, &'static str)]),
@@ -111,27 +110,6 @@ fn tiers(live: &str, order: &str) -> Vec<Out> {
 const LIVE: &str = "r.retired = 0 AND t.retired = 0 AND ";
 const BEST: &str = " ORDER BY (r.retired = 0 AND t.retired = 0) DESC,
          d.superseded_by IS NULL DESC, d.id DESC LIMIT 1";
-
-/// The binding lookups by name and by base and size, written out.
-fn binding() -> Vec<Out> {
-    vec![
-        Out::Sql(
-            "SELECT t.platform_id, r.id FROM roms r JOIN titles t ON t.id = r.title_id
-             WHERE r.match_name = ?1 AND t.retired = 0
-               AND NOT EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.flag = 'bios')
-             ORDER BY r.id"
-                .into(),
-        ),
-        Out::Sql(
-            "SELECT t.platform_id, r.id
-             FROM roms r INDEXED BY roms_match_base JOIN titles t ON t.id = r.title_id
-             WHERE r.match_base = ?1 AND r.size = ?2 AND t.retired = 0
-               AND NOT EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.flag = 'bios')
-             ORDER BY r.id"
-                .into(),
-        ),
-    ]
-}
 
 /// The rom reads through `rom_view` and `live_rom_view`, each with its written-out form.
 #[expect(clippy::too_many_lines, reason = "one entry per read")]
@@ -208,16 +186,6 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
                  ORDER BY r.id"
                     .into(),
             )],
-        ),
-        (
-            "binding lookups",
-            Box::new(|c| {
-                use mistarr_sources::binding::DatIndex as _;
-                let index = sources::SqlDatIndex::new(c);
-                drop(index.by_normalized_name("example quest.nes"));
-                drop(index.by_base_name_and_size("example quest", 16));
-            }),
-            binding(),
         ),
         (
             "size candidates",
@@ -343,7 +311,7 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
                 let max = source_detail::PREVIEW_SAMPLE;
                 drop(source_detail::preview(c, SourceId::new(1), max).expect("preview"));
             }),
-            [vec![Out::Swap(TORRENT_FILES)], binding()].concat(),
+            vec![Out::Swap(TORRENT_FILES)],
         ),
         (
             "torrent file reads",

@@ -10,7 +10,7 @@ use serde::Serialize;
 use crate::db::candidates::{FileCandidate, MatchConfidence};
 use crate::db::downloads::DownloadState;
 use crate::db::ids::{DatVersionId, DownloadId, SourceId, TitleId};
-use crate::db::sources::{self, SourceRow, SqlDatIndex};
+use crate::db::sources::{self, SourceRow};
 use crate::db::sql::{self, get_u64, Page, Paged};
 use crate::error::Result;
 
@@ -469,20 +469,20 @@ pub struct PreviewChunk {
     pub last: Option<u32>,
 }
 
-/// Scores up to `limit` of the source's files after index `after` whose index is a
-/// multiple of `step`, as binding's name tiers do. Reads only.
+/// Up to `limit` of the source's files after index `after` whose index is a multiple of
+/// `step`, in index order: one chunk of a preview's even sample.
 ///
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn preview_chunk(
+pub fn sample_files(
     conn: &Connection,
     id: SourceId,
     after: Option<u32>,
     step: u32,
     limit: u32,
-) -> Result<PreviewChunk> {
-    let files: Vec<TorrentFile> = conn
+) -> Result<Vec<TorrentFile>> {
+    let files = conn
         .prepare_cached(
             "SELECT file_index, path, size FROM torrent_file_view
              WHERE source_id = ?1 AND file_index > ?2 AND file_index % ?3 = 0
@@ -499,23 +499,27 @@ pub fn preview_chunk(
             },
         )?
         .collect::<rusqlite::Result<_>>()?;
-    let n = files.len();
-    let hits = binding::score_platforms(&files, &SqlDatIndex::new(conn))
-        .into_iter()
-        .map(|(p, rate)| {
-            #[expect(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                clippy::cast_precision_loss,
-                reason = "Rates are hits over a chunk's file count, far below 2^24, so this restores the count."
-            )]
-            let hit = (f64::from(rate) * n as f64).round() as u64;
-            (p, hit)
-        })
-        .collect();
+    Ok(files)
+}
+
+/// Scores the files [`sample_files`] reads as binding's name tiers do, with one
+/// statement over their keys. Reads only.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub fn preview_chunk(
+    conn: &Connection,
+    id: SourceId,
+    after: Option<u32>,
+    step: u32,
+    limit: u32,
+) -> Result<PreviewChunk> {
+    let files = sample_files(conn, id, after, step, limit)?;
+    let keys: Vec<binding::MatchKeys> = files.iter().map(binding::MatchKeys::of).collect();
     Ok(PreviewChunk {
-        files: n as u64,
-        hits,
+        files: files.len() as u64,
+        hits: sources::platform_hits(conn, &keys, sources::Tiers::All)?,
         last: files.last().map(|f| f.index),
     })
 }
@@ -863,6 +867,36 @@ mod tests {
             .items;
 
         assert_eq!(rows[2].unmatched, Some(Unmatched::Unbound));
+    }
+
+    #[test]
+    fn sample_files_step_through_the_source_in_chunks() {
+        let c = conn();
+        let (id, _) = source(&c);
+        let more: Vec<TorrentFile> = (0..10)
+            .map(|i| file(i, &format!("Set/Nova (World) {i}.bin"), 16))
+            .collect();
+        sources::replace_files(&c, id, &more).expect("files");
+        let indices = |after, step, limit| {
+            sample_files(&c, id, after, step, limit)
+                .expect("sample")
+                .iter()
+                .map(|f| f.index)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(indices(None, 3, 2), [0, 3]);
+        assert_eq!(indices(Some(3), 3, 2), [6, 9]);
+        assert!(
+            indices(Some(9), 3, 2).is_empty(),
+            "the read that ends the sample"
+        );
+        assert_eq!(
+            indices(None, 0, 3),
+            [0, 1, 2],
+            "a zero step reads every file"
+        );
+        let first = sample_files(&c, id, None, 1, 1).expect("sample");
+        assert_eq!(first, [file(0, "Set/Nova (World) 0.bin", 16)]);
     }
 
     #[test]
