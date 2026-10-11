@@ -85,8 +85,8 @@ async fn scan_job_count(b: &Booted, want: serde_json::Value) -> i64 {
         .db
         .read(move |c| {
             Ok(c.query_row(
-                "SELECT COUNT(*) FROM jobs WHERE kind = 'scan' AND payload = ?1",
-                [want.to_string()],
+                "SELECT COUNT(*) FROM jobs WHERE kind = ?1 AND payload = ?2",
+                rusqlite::params![mistarr_server::jobs::JobKind::Scan, want.to_string()],
                 |r| r.get(0),
             )?)
         })

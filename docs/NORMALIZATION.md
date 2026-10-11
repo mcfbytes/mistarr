@@ -371,12 +371,14 @@ merges, unless the orchestrator freezes the files merged so far.
 | `0027_tags.sql` | WP-90 | title_flags, title_regions, title_languages; new tags; drops known_flags, known_regions | their group triggers and `rom_view` recreated |
 | `0028_small_tables.sql` | WP-93d | jobs, import_log, settings | |
 
-Every file after 0023 starts with `-- foreign_keys: off` (P9) and drops the
-views and other tables' triggers that name a table before rebuilding it. A
-code column is filled with `CASE` over the value table. A `jobs` row whose kind,
-state or lane is outside its table is deleted first, as jobs are transient; any
-other text outside its table fails the CHECK and rolls the file back, as the
-Rust enums already refuse it on read.
+A file whose rebuild drops a table another table references starts with
+`-- foreign_keys: off` (P9) and is held to `foreign_key_check` before its commit;
+a rebuild of a table nothing references is safe without the marker. A rebuild
+drops the views and other tables' triggers that name a table first. A code column
+is filled with `CASE` over the value table. A `jobs` row whose kind, state or lane
+is outside its table is deleted first, as jobs are transient; any other text
+outside its table fails the CHECK and rolls the file back, as the Rust enums
+already refuse it on read.
 
 ## Packages
 

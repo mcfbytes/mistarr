@@ -10,6 +10,7 @@ use common::{boot, bstr, get, request, variant_by_id, Booted};
 use mistarr_core::hash::{hash_reader, HeaderRule};
 use mistarr_server::db::downloads::DownloadState;
 use mistarr_server::db::ids::DownloadId;
+use mistarr_server::db::imports::ImportAction;
 use mistarr_server::events::{DownloadChanged, Event};
 use mistarr_server::testing::eventually;
 use serde_json::{json, Value};
@@ -143,7 +144,9 @@ fn logged(b: &Booted, id: i64) -> Vec<String> {
         .read_blocking(move |c| {
             let mut stmt =
                 c.prepare("SELECT action FROM import_log WHERE download_id = ?1 ORDER BY id")?;
-            let rows = stmt.query_map([id], |r| r.get(0))?;
+            let rows = stmt.query_map([id], |r| {
+                r.get::<_, ImportAction>(0).map(|a| a.as_str().to_owned())
+            })?;
             Ok(rows.collect::<rusqlite::Result<Vec<String>>>()?)
         })
         .expect("log")

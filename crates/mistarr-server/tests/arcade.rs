@@ -295,8 +295,11 @@ async fn a_manual_arcade_scan_queues_only_the_catalogue() {
         .db
         .read_blocking(|c| {
             Ok(c.query_row(
-                "SELECT COUNT(*) FROM jobs WHERE kind = 'scan' AND payload = ?1",
-                [serde_json::json!({ "platform_id": "arcade" }).to_string()],
+                "SELECT COUNT(*) FROM jobs WHERE kind = ?1 AND payload = ?2",
+                rusqlite::params![
+                    mistarr_server::jobs::JobKind::Scan,
+                    serde_json::json!({ "platform_id": "arcade" }).to_string()
+                ],
                 |r| r.get(0),
             )?)
         })

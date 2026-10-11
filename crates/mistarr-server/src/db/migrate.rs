@@ -250,6 +250,9 @@ pub fn current_version(conn: &Connection) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::imports::ImportAction;
+    use crate::db::jobs::JobState;
+    use crate::jobs::{JobKind, Lane};
 
     fn names(conn: &Connection, kind: &str) -> Vec<String> {
         let mut stmt = conn
@@ -564,7 +567,7 @@ mod tests {
         insert("arcade", "mame/C.ZIP#c.bin", None);
         insert("nes", "NES/c.zip#c.nes", None);
         conn.execute(
-            "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 'placed', '{}')",
+            "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 0, '{}')",
             [stale],
         )
         .expect("log");
@@ -654,10 +657,10 @@ mod tests {
         conn.execute("DELETE FROM schema_version WHERE version = ?1", [latest()])
             .expect("forget the last migration");
         drop(conn);
-        assert_eq!(
-            pending(&path).expect("pending"),
-            Some((latest() - 1, latest()))
-        );
+        // The wave's numbers may leave a gap below the last file, so what the database
+        // then records is the highest migration it still holds.
+        let previous = MIGRATIONS[MIGRATIONS.len() - 2].version;
+        assert_eq!(pending(&path).expect("pending"), Some((previous, latest())));
     }
 
     #[test]
@@ -776,7 +779,7 @@ mod tests {
         insert("psx", "PSX/G/g.bin", None);
         insert("nes", "NES/odd.chd", None);
         conn.execute(
-            "INSERT INTO import_log (at, file_id, action, detail) VALUES (0, ?1, 'placed', '{}')",
+            "INSERT INTO import_log (at, file_id, action, detail) VALUES (0, ?1, 0, '{}')",
             [logged],
         )
         .expect("log");
@@ -796,6 +799,158 @@ mod tests {
             .query_row("SELECT file_id FROM import_log", [], |r| r.get(0))
             .expect("log");
         assert_eq!(file_id, None);
+    }
+
+    /// Seeds jobs of every kind, state and lane plus three rows outside the value
+    /// tables, a log row per action and two settings, and returns the jobs that stay.
+    fn seed_small_tables(conn: &Connection) -> Vec<(JobKind, JobState, Lane)> {
+        let (states, lanes) = (JobState::ALL, Lane::ALL);
+        let mut want = Vec::new();
+        for (i, kind) in JobKind::ALL.iter().enumerate() {
+            let (state, lane) = (states[i % states.len()], lanes[i % lanes.len()]);
+            let at = i64::try_from(i).expect("index");
+            conn.execute(
+                "INSERT INTO jobs (kind, payload, subject, state, created_at, updated_at, lane)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+                params![
+                    kind.as_str(),
+                    format!("{{\"i\":{i}}}"),
+                    format!("i\u{1f}{i}"),
+                    state.as_str(),
+                    at,
+                    lane.as_str()
+                ],
+            )
+            .expect("job");
+            want.push((*kind, state, lane));
+        }
+        for (kind, state, lane) in [
+            ("nope", "queued", "heavy"),
+            ("scan", "nope", "heavy"),
+            ("scan", "queued", "nope"),
+        ] {
+            conn.execute(
+                "INSERT INTO jobs (kind, payload, subject, state, created_at, updated_at, lane)
+                 VALUES (?1, '{}', '', ?2, 0, 0, ?3)",
+                params![kind, state, lane],
+            )
+            .expect("bad job");
+        }
+        for (i, action) in ImportAction::ALL.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO import_log (at, download_id, file_id, action, detail)
+                 VALUES (?1, NULL, NULL, ?2, ?3)",
+                params![
+                    i64::try_from(i).expect("index"),
+                    action.as_str(),
+                    format!("{{\"a\":{i}}}")
+                ],
+            )
+            .expect("log");
+        }
+        conn.execute_batch(
+            "INSERT INTO settings (key, value) VALUES ('a', '1'), ('b', '{\"x\": 2}');",
+        )
+        .expect("settings");
+        want
+    }
+
+    #[test]
+    fn small_tables_move_to_codes_and_strict_with_every_row_kept() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        // As the board opens: keys on, so the rebuild runs the way it will there.
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys");
+        // The file this test checks is 0028; the numbers below it are the wave's, and
+        // may be a gap while the packages that own them are still in flight.
+        apply_through(&mut conn, 27).expect("older migrations");
+        let want = seed_small_tables(&conn);
+
+        assert!(apply(&mut conn).expect("apply").contains(&28));
+
+        let jobs: Vec<(JobKind, JobState, Lane, Option<String>, i64)> = conn
+            .prepare("SELECT kind, state, lane, progress, created_at FROM jobs ORDER BY id")
+            .expect("prepare")
+            .query_map([], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        let got: Vec<(JobKind, JobState, Lane)> = jobs
+            .iter()
+            .map(|(k, s, l, p, _)| {
+                assert_eq!(*p, None, "progress is kept");
+                (*k, *s, *l)
+            })
+            .collect();
+        assert_eq!(got, want, "every job keeps its kind, state and lane");
+        assert_eq!(
+            jobs.iter().map(|(_, _, _, _, at)| *at).collect::<Vec<_>>(),
+            (0..i64::try_from(JobKind::ALL.len()).expect("count")).collect::<Vec<_>>(),
+            "the bad rows are gone and no other row moved"
+        );
+
+        let log: Vec<(ImportAction, String)> = conn
+            .prepare("SELECT action, detail FROM import_log ORDER BY id")
+            .expect("prepare")
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows");
+        let mut want_log = Vec::new();
+        for (i, action) in ImportAction::ALL.iter().enumerate() {
+            want_log.push((*action, format!("{{\"a\":{i}}}")));
+        }
+        assert_eq!(log, want_log, "every log row keeps its action and detail");
+
+        assert_eq!(
+            column(
+                &conn,
+                "SELECT key || '=' || value FROM settings ORDER BY key"
+            ),
+            ["a=1", "b={\"x\": 2}"],
+            "settings rows are kept"
+        );
+
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .expect("integrity");
+        assert_eq!(integrity, "ok");
+        let orphans: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .expect("foreign keys");
+        assert_eq!(orphans, 0);
+        let sql = |name: &str| -> String {
+            conn.query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [name],
+                |r| r.get(0),
+            )
+            .expect(name)
+        };
+        for table in ["jobs", "import_log"] {
+            assert!(sql(table).contains("STRICT"), "{table} is not STRICT");
+        }
+        assert!(
+            sql("settings").contains("STRICT, WITHOUT ROWID"),
+            "{}",
+            sql("settings")
+        );
+        assert_eq!(
+            column(
+                &conn,
+                "SELECT \"table\" FROM pragma_foreign_key_list('import_log') ORDER BY 1"
+            ),
+            ["downloads", "files"],
+            "import_log keeps its foreign keys"
+        );
+        let indexes = names(&conn, "index");
+        for index in ["jobs_subject", "jobs_state", "import_log_file"] {
+            assert!(indexes.iter().any(|n| n == index), "missing index {index}");
+        }
     }
 
     const PARENT_AND_CHILD: &str = "\

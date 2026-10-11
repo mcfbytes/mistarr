@@ -201,11 +201,25 @@ fn verified_members(container: &str, tracks: usize) -> Vec<(String, FileState, O
 }
 
 async fn chd_jobs(app: &AppState) -> i64 {
-    count(app, "SELECT COUNT(*) FROM jobs WHERE kind = 'chd_tracks'").await
+    count(
+        app,
+        &format!(
+            "SELECT COUNT(*) FROM jobs WHERE kind = {}",
+            JobKind::ChdTracks.code()
+        ),
+    )
+    .await
 }
 
 async fn scan_jobs(app: &AppState) -> i64 {
-    count(app, "SELECT COUNT(*) FROM jobs WHERE kind = 'scan'").await
+    count(
+        app,
+        &format!(
+            "SELECT COUNT(*) FROM jobs WHERE kind = {}",
+            JobKind::Scan.code()
+        ),
+    )
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -426,7 +440,8 @@ async fn load_dat_in_background(b: &Booted, file: &str, xml: &str) {
         count(
             app,
             &format!(
-                "SELECT COUNT(*) FROM jobs WHERE lane = 'background' AND state IN {}",
+                "SELECT COUNT(*) FROM jobs WHERE lane = {} AND state IN {}",
+                Lane::Background.code(),
                 JobState::ACTIVE_SQL
             ),
         )
@@ -763,9 +778,11 @@ async fn the_job_hands_the_lane_to_a_scan_between_images() {
     let finished: Vec<(i64, serde_json::Value)> = app
         .db
         .read(|c| {
-            let mut stmt = c.prepare(
-                "SELECT id, progress FROM jobs WHERE kind = 'chd_tracks' AND state = 'done' ORDER BY id",
-            )?;
+            let mut stmt = c.prepare(&format!(
+                "SELECT id, progress FROM jobs WHERE kind = {} AND state = {} ORDER BY id",
+                JobKind::ChdTracks.code(),
+                JobState::Done.code()
+            ))?;
             let rows = stmt
                 .query_map([], |r| {
                     let p: String = r.get(1)?;

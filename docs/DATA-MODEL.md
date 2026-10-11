@@ -84,7 +84,7 @@ CREATE INDEX dat_versions_family ON dat_versions(family, platform_id);
 CREATE TEMP TABLE dat_stage (     -- the DAT being imported, parsed outside the write lock and applied at once
   seq  INTEGER PRIMARY KEY,
   game TEXT NOT NULL              -- one parsed game with its roms, as JSON
-);
+) STRICT;
 
 CREATE TABLE titles (                   -- one per <game>; the browse unit
   id            INTEGER PRIMARY KEY,
@@ -258,12 +258,12 @@ CREATE TABLE import_log (
   at            INTEGER NOT NULL,
   download_id   INTEGER REFERENCES downloads(id),
   file_id       INTEGER REFERENCES files(id),
-  action        TEXT NOT NULL,         -- 'placed' | 'replaced' | 'quarantined' | 'skipped_existing' | 'renamed'
+  action        INTEGER NOT NULL CHECK (action BETWEEN 0 AND 4),   -- "Import actions"
   detail        TEXT NOT NULL          -- json
-);
+) STRICT;
 CREATE INDEX import_log_file ON import_log(file_id);
 
-CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT, WITHOUT ROWID;
 CREATE TABLE chd_tracks (                     -- rebuilt .bin hashes of a CHD's tracks, keyed by content
   chd_sha1 TEXT NOT NULL,                     -- header combined SHA1, verified by the decode
   chd_size INTEGER NOT NULL,
@@ -295,15 +295,15 @@ CREATE TABLE chd_whole (                      -- whole-file hashes of CHDs a DAT
 
 CREATE TABLE jobs (
   id            INTEGER PRIMARY KEY,
-  kind          TEXT NOT NULL,         -- 'scan' | 'import' | 'detect_client' | 'dat_import' | 'recompute_1g1r' | 'source_import' | 'resolve_magnet' | 'transfer' | 'deselect' | 'arcade_catalog' | 'chd_tracks' | 'remap_sources' | 'bind_source' | 'url_fetch'
+  kind          INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 13),   -- "Job kinds"
   payload       TEXT NOT NULL,         -- json
-  state         TEXT NOT NULL,         -- 'queued' | 'running' | 'paused' | 'done' | 'failed'
+  state         INTEGER NOT NULL CHECK (state BETWEEN 0 AND 4),   -- "Job states"
   progress      TEXT,                  -- json, job specific
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL,
-  lane          TEXT NOT NULL DEFAULT 'light',  -- 'heavy' | 'background' | 'light' | 'fetch'
-  subject       TEXT NOT NULL DEFAULT ''        -- dedupe key: payload fields as name 0x1F value, sorted, joined by 0x1E
-);
+  lane          INTEGER NOT NULL DEFAULT 2 CHECK (lane BETWEEN 0 AND 3),  -- "Job lanes"
+  subject       TEXT NOT NULL          -- dedupe key: payload fields as name 0x1F value, sorted, joined by 0x1E
+) STRICT;
 CREATE INDEX jobs_subject ON jobs(kind, subject, state);
 CREATE INDEX jobs_state ON jobs(state, id);
 ```
