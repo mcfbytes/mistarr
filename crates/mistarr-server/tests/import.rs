@@ -179,6 +179,20 @@ async fn settled(b: &Booted, id: DownloadId, want: DownloadState) -> DownloadRow
     download(b, id)
 }
 
+/// Waits until no import job is open, so a re-announce is not absorbed by the finished run.
+async fn imports_closed(b: &Booted) {
+    eventually("the import jobs to close", || async {
+        let open = b
+            .running
+            .app
+            .db
+            .read_blocking(mistarr_server::db::jobs::open_rows)
+            .expect("jobs");
+        open.iter().all(|j| j.kind != JobKind::Import)
+    })
+    .await;
+}
+
 fn log(b: &Booted) -> Vec<imports::LogRow> {
     b.running
         .app
@@ -966,6 +980,7 @@ async fn a_failure_before_the_renames_changes_nothing_and_can_be_retried() {
     assert_eq!(std::fs::read(&staged).expect("untouched"), body);
     assert!(!games(&b).join(NES_TARGET).exists());
     std::fs::remove_file(&blocker).expect("rm");
+    imports_closed(&b).await;
     set_importing(&b, &[id]);
     announce(&b, id);
     settled(&b, id, DownloadState::Done).await;
@@ -1010,6 +1025,7 @@ async fn renames_that_landed_are_kept_and_a_retry_finishes() {
     }
     assert!(tracks[2].1.exists());
     std::fs::remove_dir_all(&blocker).expect("rm");
+    imports_closed(&b).await;
     set_importing(&b, &ids);
     announce(&b, ids[0]);
     for id in &ids {
