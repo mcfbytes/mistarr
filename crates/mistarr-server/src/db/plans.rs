@@ -537,6 +537,38 @@ fn rom_lookups_and_directory_tracks_seek_their_own_index() {
     );
 }
 
+/// Real DATs repeat sizes in the thousands, where `roms_size` would also serve the
+/// `ORDER BY r.id`; the base-and-size binding lookup still seeks its covering index.
+#[test]
+fn base_and_size_lookup_keeps_its_index_when_sizes_repeat() {
+    use mistarr_sources::binding::DatIndex as _;
+    let c = crate::db::fixtures::conn();
+    let nes = pid("nes");
+    for i in 0..200 {
+        let id = crate::db::fixtures::seed_rom(&c, &nes, &format!("Example {i}.nes"), 16, &[])
+            .expect("rom");
+        c.execute(
+            "UPDATE roms SET match_name = ?1, match_base = ?1 WHERE id = ?2",
+            rusqlite::params![format!("example {i}"), id],
+        )
+        .expect("keys");
+    }
+    let statements = traced(&c, |c| {
+        drop(sources::SqlDatIndex::new(c).by_base_name_and_size("example 7", 16));
+    });
+    let sql = statements
+        .iter()
+        .find(|s| s.contains("r.match_base = "))
+        .expect("traced lookup");
+    let found = plan(&c, sql);
+    assert!(
+        found
+            .iter()
+            .any(|l| l.contains("COVERING INDEX roms_match_base (match_base=? AND size=?)")),
+        "{found:?}"
+    );
+}
+
 /// The recent jobs seek finished rows by state and sort only those, which the scheduler's
 /// prune keeps to a few hundred, so they need no index of their own.
 #[test]
