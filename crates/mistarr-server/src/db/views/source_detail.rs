@@ -870,6 +870,36 @@ mod tests {
     }
 
     #[test]
+    fn sample_files_step_through_the_source_in_chunks() {
+        let c = conn();
+        let (id, _) = source(&c);
+        let more: Vec<TorrentFile> = (0..10)
+            .map(|i| file(i, &format!("Set/Nova (World) {i}.bin"), 16))
+            .collect();
+        sources::replace_files(&c, id, &more).expect("files");
+        let indices = |after, step, limit| {
+            sample_files(&c, id, after, step, limit)
+                .expect("sample")
+                .iter()
+                .map(|f| f.index)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(indices(None, 3, 2), [0, 3]);
+        assert_eq!(indices(Some(3), 3, 2), [6, 9]);
+        assert!(
+            indices(Some(9), 3, 2).is_empty(),
+            "the read that ends the sample"
+        );
+        assert_eq!(
+            indices(None, 0, 3),
+            [0, 1, 2],
+            "a zero step reads every file"
+        );
+        let first = sample_files(&c, id, None, 1, 1).expect("sample");
+        assert_eq!(first, [file(0, "Set/Nova (World) 0.bin", 16)]);
+    }
+
+    #[test]
     fn a_large_source_is_previewed_from_an_even_sample_scaled_up() {
         let c = conn();
         let (id, _) = source(&c);

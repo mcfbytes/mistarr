@@ -648,6 +648,36 @@ mod tests {
     }
 
     #[test]
+    fn match_keys_take_the_leaf_name_and_size() {
+        let of = |path: &str, size| {
+            MatchKeys::of(&TorrentFile {
+                index: 3,
+                path: path.to_owned(),
+                size,
+            })
+        };
+        let keys = of("Set/Disc/Nova (World) (Rev 1).bin", 40);
+        assert_eq!(keys.name, "nova (world) (rev 1)");
+        assert_eq!(keys.size, 40);
+        assert_eq!(of("Nova.bin", 8).name, "nova");
+    }
+
+    #[test]
+    fn match_keys_base_cuts_before_the_first_tag() {
+        let base = |path: &str| {
+            let keys = MatchKeys::of(&TorrentFile {
+                index: 0,
+                path: path.to_owned(),
+                size: 1,
+            });
+            keys.base().to_owned()
+        };
+        assert_eq!(base("Set/Nova Quest (World) (Rev 1).bin"), "nova quest");
+        assert_eq!(base("Set/Nova Quest.bin"), "nova quest");
+        assert_eq!(base("Set/(Beta).bin"), "");
+    }
+
+    #[test]
     fn normalize_matches_pre_download_matching_spec() {
         assert_eq!(
             normalize_name("Example Quest (USA).nes"),
