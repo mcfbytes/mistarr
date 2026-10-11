@@ -451,7 +451,8 @@ paths containing it, ignoring ASCII case; `total` counts what they keep.
 matched }] }` for every platform with a loaded DAT, most matched first: a
 read-only dry run of the binding's name tiers, the count the automatic
 classifier's hit rate comes from. It reads at most 4 000 evenly spaced files,
-500 per read so other requests get the database's one reader in between;
+500 per read so other requests get the database's one reader in between, and
+scores each read's files with one statement over their match keys;
 when `sampled` is below `total` each count is scaled up from the sample and
 is approximate. The SPA asks for it once per page view, when the user first
 opens Re-classify.

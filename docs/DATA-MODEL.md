@@ -607,6 +607,13 @@ A load inserts its roms with `match_name` and `match_base` NULL; binding
 keys them (`sources::refresh_match_keys`) in one transaction before it reads
 them, and both keys carry `title_id`, so a lookup reads a matched rom's
 title alongside its id.
+The source preview binds a chunk's keys as one JSON list (`json_each`) and
+seeks both match indexes from it in one statement grouped by platform
+(`sources::platform_hits`), the same rule as binding's per-file lookups;
+nothing derived from a torrent file is stored. The base-name expression is
+the `match_base!` macro in `db/sources.rs`, which both statements share, and
+both name `roms_match_base` with `INDEXED BY`, since repeated sizes would
+otherwise draw the planner to `roms_size`.
 `db::plans::rom_lookups_and_directory_tracks_seek_their_own_index` asserts
 each lookup, the partial ones included, seeks its index, and that a disc
 directory's tracks (`files::in_directory`) are one range of the
