@@ -738,6 +738,35 @@ pub fn retired_matches(
         .collect::<rusqlite::Result<_>>()?)
 }
 
+/// File `id` when it is matched to a retired rom of a DAT, or one of a retired title.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let id = mistarr_server::db::ids::FileId::new(1);
+/// assert!(mistarr_server::db::files::retired_match_of(&conn, id).unwrap().is_none());
+/// ```
+pub fn retired_match_of(conn: &Connection, id: FileId) -> Result<Option<FileRow>> {
+    let cols = COLUMNS
+        .split(", ")
+        .map(|c| format!("f.{c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(conn
+        .prepare_cached(&format!(
+            "SELECT {cols} FROM files f JOIN rom_view r ON r.id = f.rom_id
+             WHERE f.id = ?1 AND r.title_source = 'dat'
+               AND (r.retired = 1 OR r.title_retired = 1)"
+        ))?
+        .query_map([id], from_row)?
+        .next()
+        .transpose()?)
+}
+
 /// Up to `limit` files on `platform_id` with an id above `after` that no rom matches:
 /// `rom_id` NULL, `unverified`, and fully hashed, with a stored sha1 or md5; a CRC32
 /// alone never decides a match. Ordered by id, so a caller pages with the last id it

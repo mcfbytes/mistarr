@@ -25,8 +25,8 @@ Rules for these packages, on top of the ones in WORKPLAN.md:
 ## Progress
 
 - [ ] **Wave 13**: after wave 12
-  - [ ] WP-83 Column forms: design · Opus
-  - [ ] WP-85 Rebuild-safe migrations · Flash
+  - [x] WP-83 Column forms: design · Opus
+  - [x] WP-85 Rebuild-safe migrations · Flash
   - [ ] WP-86 Hash blobs and the roms rebuild · Opus
   - [ ] WP-87 Rom names as title tails · Opus
   - [ ] WP-88 Torrent paths and confidence codes · Flash
@@ -35,7 +35,7 @@ Rules for these packages, on top of the ones in WORKPLAN.md:
   - [ ] WP-91 Compact write-back · Opus
   - [ ] WP-92 Integer platform ids · Opus, then Flash
   - [ ] WP-93 Minimal types · Flash
-  - [ ] WP-94 Shared views · Opus
+  - [x] WP-94 Shared views · Opus
 
 ## Measurements
 
@@ -133,7 +133,7 @@ Savings are measured against the baseline: each change is rebuilt alone, then va
 |---|---|---|---|---|
 | P0 | Base+size lookup keeps `roms_match_base` on repeated sizes | 30x faster lookup | tiny | **Done**: WP-81's `INDEXED BY` and a plan test with repeated sizes |
 | P1 | Hashes as BLOB(4/16/20) in roms, files, chd_tracks, chd_whole, chd_failures | 9.02 roms + 0.48 files/chd | medium | **Recommend** |
-| P2 | Drop `roms.match_base`; index the SQL expression over `match_name` | 3.53 | small | **Recommend if** WP-82's board bench allows (loses covering) |
+| P2 | Drop `roms.match_base`; index the SQL expression over `match_name` | 3.53 | small | **Not taken**: the board bench puts the base tier at 20 to 25% of a large source's preview, so the column stays |
 | P3 | `roms.name` as the tail after the title's name, with `own_name` flag | 9.93 | medium-high | **Recommend** |
 | P4 | `roms.status` integer code; STRICT and CHECK on every rebuilt table | 0.66 | small, inside P1 | **Recommend** |
 | P5 | torrent_files WITHOUT ROWID, `torrent_dirs` interning, integer confidence (candidates too) | 2.86 + 0.05 | small-medium | **Recommend** |
@@ -182,6 +182,7 @@ CREATE INDEX roms_size ON roms(size) WHERE match_name IS NOT NULL;
   - On 3.46 the expression index is **not covering**, with the predicate on the column or on the expression. Each hit reads its roms row (about 6 hits per lookup).
   - x86 time is equal (0.012 to 0.014 s per 3,000 lookups, against 0.011 s covering).
   - Decide with the board figures of `mistarr bench-preview` (TESTING.md "Preview speed"): the expression index when the base tier takes under 18% of the preview's board time (`base%total`, at most 5% slower), else keep the column. DATA-MODEL.md "P2 outcomes" gives both forms.
+  - Board result (55 sources, 3 runs, median): `base%total` 20.1 to 24.6% for the 13 sources sampling over 1,000 files, 11 to 34% over all; the column stays.
 - **Code:**
   - The `match_base!` macro in `db/sources.rs` holds the expression for `SqlDatIndex` and the preview's statement; it is a macro so both stay `concat!` literals.
   - `key_batch` writes only `match_name`.
@@ -354,13 +355,16 @@ Differences that are not seeks: subquery numbers, aliases, and the order of the 
 
 ## Migration grouping
 
-The highest migration is 0022; WP-82 and WP-85 add none. Wave 13 is meant to
+0023 has run on the board and is released; the files below it are frozen and
+the rest start at 0024. Wave 13 is meant to
 ship as one release, and each table is rebuilt in exactly one file, so a release
 cut between two files still rebuilds no table twice. A package that joins a file
 edits it while it is unreleased; once released, a file is never edited. A file
 counts as released once any build containing it has run on the board or shipped
 in a release; wave 13 builds go to the board only after the wave's last file
-merges, unless the orchestrator freezes the files merged so far.
+merges, unless the orchestrator freezes the files merged so far. A database at a
+version never runs a lower number, so no build holding a file goes to the board
+while a lower-numbered file of the wave is still unmerged.
 
 | File | Packages | Tables rebuilt | Also |
 |---|---|---|---|
@@ -388,19 +392,19 @@ WP-91 follows WP-77. WP-82 lands before WP-86.
 
 ### WP-83 Column forms: design
 - [x] DATA-MODEL.md "Column forms": every column of every table with its target form (kept TEXT, BLOB(n), integer code with its value table, title tail, interned key, dropped, expression index), its CHECK, and STRICT or WITHOUT ROWID per table.
-- [ ] The P2 decision, from WP-82's board bench of the base tier: under 18% of the preview takes the expression index, else the column stays (DATA-MODEL.md "P2 outcomes").
+- [x] The P2 decision, from WP-82's board bench of the base tier (20 to 25%, so the column stays): under 18% of the preview takes the expression index, else the column stays (DATA-MODEL.md "P2 outcomes").
 - [x] The migration grouping: which packages share one migration file per release, so each table rebuilds once (P10 folded into WP-86 and WP-89).
 - [x] The views of P12 with their columns, and the plan-test rule for them.
 - [x] Docs only; no code.
 
 ### WP-85 Rebuild-safe migrations
-- [ ] A migration whose first line is `-- foreign_keys: off` runs with foreign keys off and is rolled back when `PRAGMA foreign_key_check` returns a row; keys are on again after commit and after failure.
-- [ ] Tests: a parent table rebuilt under its children passes; an orphan fails and rolls back; the pragma state after each.
-- [ ] Each rebuild drops and recreates the triggers of other tables that name the rebuilt one.
-- [ ] `crates/mistarr-server/migrations/README.md` documents the marker.
+- [x] A migration whose first line is `-- foreign_keys: off` runs with foreign keys off and is rolled back when `PRAGMA foreign_key_check` returns a row; keys are on again after commit and after failure.
+- [x] Tests: a parent table rebuilt under its children passes; an orphan fails and rolls back; the pragma state after each.
+- [x] Each rebuild drops and recreates the triggers of other tables that name the rebuilt one.
+- [x] `crates/mistarr-server/migrations/README.md` documents the marker.
 
 ### WP-86 Hash blobs and the roms rebuild
-- [ ] One migration, `0024_hashes_and_platform_keys.sql`, rebuilds roms (P1, P2 as WP-83 decides, P4, STRICT and CHECKs, peak-free order) and files, chd_tracks, chd_whole and chd_failures with BLOB hashes, with P10's platform key on files.
+- [ ] One migration, `0024_hashes_and_platform_keys.sql`, rebuilds roms (P1, `match_base` kept per P2, P4, STRICT and CHECKs, peak-free order) and files, chd_tracks, chd_whole and chd_failures with BLOB hashes, with P10's platform key on files.
 - [ ] `Digest<N>` binds and reads BLOB(N); `RomStatus` is a `code_enum!`.
 - [ ] A migration test seeds 0022 rows (NULL hashes, MRA roms, baddump, unkeyed roms) and holds every row equal through `hex()` and the status text.
 - [ ] Plan tests green; ARCHITECTURE.md sync-write and memory tables measured again.

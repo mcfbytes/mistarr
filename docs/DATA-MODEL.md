@@ -856,6 +856,9 @@ lookup on x86, so it slows the preview by at most 5% when that share is under
 The base expression is match_name cut before its first `(` and right-trimmed.
 Either way the base-and-size read orders by `+r.id` (P0).
 
+The board bench gives 20 to 25% for every large source, so roms.match_base
+stays: the second row.
+
 ### Value tables
 
 A code keeps its meaning for good: a new variant takes the next number and a
