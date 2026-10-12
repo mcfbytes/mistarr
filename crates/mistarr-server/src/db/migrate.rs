@@ -1,5 +1,7 @@
 //! Numbered migrations from `migrations/`, recorded in `schema_version`.
 
+use std::collections::BTreeMap;
+
 use rusqlite::{params, Connection};
 
 use crate::error::{Error, Result};
@@ -158,23 +160,33 @@ fn foreign_keys_on(conn: &Connection) -> rusqlite::Result<bool> {
     conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0))
 }
 
-/// One orphan row as `PRAGMA foreign_key_check` reports it: table, rowid, parent, fkid.
-type Violation = (String, Option<i64>, String, i64);
+/// A kind of orphan row: the table, the parent table and the foreign key it breaks.
+type OrphanKind = (String, String, i64);
 
-/// Every orphan row `PRAGMA foreign_key_check` reports.
-fn foreign_key_violations(conn: &Connection) -> rusqlite::Result<Vec<Violation>> {
+/// How many orphan rows of each kind `PRAGMA foreign_key_check` reports.
+///
+/// A rowid cannot be part of the kind: it is NULL in a `WITHOUT ROWID` table, and a
+/// rebuild that moves a table to one keeps every row under a different identity.
+fn foreign_key_violations(conn: &Connection) -> rusqlite::Result<BTreeMap<OrphanKind, usize>> {
     let mut stmt = conn.prepare("PRAGMA foreign_key_check")?;
     let mut rows = stmt.query([])?;
-    let mut out = Vec::new();
+    let mut out: BTreeMap<OrphanKind, usize> = BTreeMap::new();
     while let Some(row) = rows.next()? {
-        out.push((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?));
+        *out.entry((row.get(0)?, row.get(2)?, row.get(3)?))
+            .or_default() += 1;
     }
     Ok(out)
 }
 
-/// The table of the first orphan `after` reports that `before` did not.
-fn added_violation<'v>(before: &[Violation], after: &'v [Violation]) -> Option<&'v Violation> {
-    after.iter().find(|v| !before.contains(v))
+/// The table of the first kind of orphan `after` holds more of than `before`, if any.
+fn added_violation<'m>(
+    before: &BTreeMap<OrphanKind, usize>,
+    after: &'m BTreeMap<OrphanKind, usize>,
+) -> Option<&'m str> {
+    after
+        .iter()
+        .find(|(kind, count)| **count > before.get(*kind).copied().unwrap_or(0))
+        .map(|(kind, _)| kind.0.as_str())
 }
 
 /// Applies one migration, switching foreign keys off around its transaction when marked.
@@ -203,8 +215,8 @@ fn apply_one(conn: &mut Connection, m: &Migration) -> Result<()> {
 
 /// Applies one migration in its own transaction, checking foreign keys when `check_fk`.
 ///
-/// A check that fails only on a row the migration added, since an orphan the database
-/// already holds is not this migration's to fix.
+/// The check fails only on more orphans of a kind than the database held, since an
+/// orphan it already holds is not this migration's to fix.
 fn apply_in(conn: &mut Connection, m: &Migration, check_fk: bool) -> Result<()> {
     let fail = |source| Error::Migration {
         version: m.version,
@@ -214,7 +226,7 @@ fn apply_in(conn: &mut Connection, m: &Migration, check_fk: bool) -> Result<()> 
     let before = if check_fk {
         foreign_key_violations(&tx).map_err(fail)?
     } else {
-        Vec::new()
+        BTreeMap::new()
     };
     tx.execute_batch(m.sql).map_err(fail)?;
     flush_groups(&tx).map_err(|e| match e {
@@ -223,10 +235,10 @@ fn apply_in(conn: &mut Connection, m: &Migration, check_fk: bool) -> Result<()> 
     })?;
     if check_fk {
         let after = foreign_key_violations(&tx).map_err(fail)?;
-        if let Some((table, ..)) = added_violation(&before, &after) {
+        if let Some(table) = added_violation(&before, &after) {
             return Err(Error::ForeignKeyCheck {
                 version: m.version,
-                table: table.clone(),
+                table: table.to_owned(),
             });
         }
     }
@@ -1360,6 +1372,95 @@ CREATE INDEX note_text ON note (text);";
         );
         assert_eq!(column(&conn, "SELECT text FROM note"), ["n"]);
         assert!(foreign_keys(&conn), "the pragma is back on after commit");
+    }
+
+    const PARENT_AND_ROWID_CHILD: &str = "\
+CREATE TABLE parent (id INTEGER PRIMARY KEY, name TEXT NOT NULL);
+CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER NOT NULL REFERENCES parent(id),
+                    note TEXT NOT NULL) STRICT;
+CREATE INDEX child_parent ON child (parent_id);";
+
+    const REBUILD_CHILD_WITHOUT_ROWID: &str = "-- foreign_keys: off
+DROP INDEX child_parent;
+CREATE TABLE child_new (id INTEGER NOT NULL, parent_id INTEGER NOT NULL REFERENCES parent(id),
+                        note TEXT NOT NULL, PRIMARY KEY (id)) STRICT, WITHOUT ROWID;
+INSERT INTO child_new (id, parent_id, note) SELECT id, parent_id, note FROM child ORDER BY id;
+DROP TABLE child;
+ALTER TABLE child_new RENAME TO child;
+CREATE INDEX child_parent ON child (parent_id);";
+
+    #[test]
+    fn an_orphan_a_rebuilt_rowid_table_held_is_not_one_the_migration_added() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys on");
+        let migs = two_migrations(PARENT_AND_ROWID_CHILD, REBUILD_CHILD_WITHOUT_ROWID);
+        assert_eq!(apply_list(&mut conn, &migs, 1).expect("schema"), [1]);
+        conn.pragma_update(None, "foreign_keys", false)
+            .expect("keys off");
+        conn.execute_batch(
+            "INSERT INTO parent (id, name) VALUES (1, 'One'), (2, 'Two');
+             INSERT INTO child (id, parent_id, note) VALUES (1, 1, 'a'), (2, 2, 'b');
+             DELETE FROM parent WHERE id = 2;",
+        )
+        .expect("rows");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys on");
+
+        assert_eq!(
+            apply_list(&mut conn, &migs, u32::MAX).expect("rebuild"),
+            [2],
+            "the row it held before the rebuild is no new orphan"
+        );
+        assert_eq!(
+            column(&conn, "SELECT note FROM child ORDER BY id"),
+            ["a", "b"]
+        );
+        let orphans: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |r| {
+                r.get(0)
+            })
+            .expect("orphans");
+        assert_eq!(orphans, 1, "the orphan is still there, as it was before");
+        assert!(foreign_keys(&conn));
+    }
+
+    #[test]
+    fn a_migration_that_adds_a_second_orphan_of_the_same_kind_rolls_back() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys on");
+        // The second migration orphans another child of the same parent and key.
+        let migs = two_migrations(
+            PARENT_AND_CHILD,
+            "-- foreign_keys: off
+DELETE FROM parent WHERE id = 3;",
+        );
+        assert_eq!(apply_list(&mut conn, &migs, 1).expect("schema"), [1]);
+        conn.pragma_update(None, "foreign_keys", false)
+            .expect("keys off");
+        conn.execute_batch(
+            "INSERT INTO parent (id, name) VALUES (1, 'One'), (2, 'Two'), (3, 'Three');
+             INSERT INTO child (id, parent_id, note) VALUES (1, 1, 'a'), (2, 2, 'b'), (3, 3, 'c');
+             DELETE FROM parent WHERE id = 2;",
+        )
+        .expect("rows");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys on");
+
+        match apply_list(&mut conn, &migs, u32::MAX) {
+            Err(Error::ForeignKeyCheck { version, table }) => {
+                assert_eq!((version, table.as_str()), (2, "child"));
+            }
+            other => panic!("expected a foreign key failure, got {other:?}"),
+        }
+        assert_eq!(
+            column(&conn, "SELECT name FROM parent ORDER BY id"),
+            ["One", "Three"],
+            "the parent the migration would have orphaned is back"
+        );
+        assert_eq!(current_version(&conn).expect("version"), 1, "not recorded");
+        assert!(foreign_keys(&conn), "the pragma is back on after rollback");
     }
 
     #[test]

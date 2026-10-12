@@ -694,6 +694,12 @@ pub fn replace_files(conn: &Connection, id: SourceId, files: &[TorrentFile]) -> 
         };
         stmt.execute(params![id, f.index, dir_id, leaf, sql::to_i64(f.size)])?;
     }
+    // A directory the new tree does not use goes with the files that did.
+    conn.execute(
+        "DELETE FROM torrent_dirs WHERE source_id = ?1
+           AND id NOT IN (SELECT dir_id FROM torrent_files WHERE source_id = ?1)",
+        [id],
+    )?;
     let mut proven = conn.prepare_cached(
         "UPDATE torrent_files SET rom_id = ?6, confidence = ?7
          WHERE source_id = ?1 AND file_index = ?2 AND size = ?5
@@ -1223,6 +1229,24 @@ mod tests {
             )
             .expect("dirs");
         assert_eq!(dirs, 0, "the source's directories go with it");
+    }
+
+    #[test]
+    fn a_re_import_keeps_only_the_directories_its_files_use() {
+        let c = conn();
+        let id = insert(&c, &new(&"06".repeat(20), SourceState::Bound)).expect("insert");
+        let dirs = |id| {
+            c.prepare("SELECT path FROM torrent_dirs WHERE source_id = ?1 ORDER BY path")
+                .expect("prepare")
+                .query_map([id], |r| r.get(0))
+                .expect("query")
+                .collect::<rusqlite::Result<Vec<String>>>()
+                .expect("rows")
+        };
+        replace_files(&c, id, &[file(0, "One/a.nes", 8), file(1, "Two/b.nes", 8)]).expect("files");
+        assert_eq!(dirs(id), ["One/", "Two/"]);
+        replace_files(&c, id, &[file(0, "One/a.nes", 8)]).expect("re-import");
+        assert_eq!(dirs(id), ["One/"], "the tree that is gone leaves nothing");
     }
 
     /// A file with a candidate and no matched rom counts as matched in `get` and in
