@@ -6,6 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::candidates::MatchConfidence;
 use super::ids::{DownloadId, SourceId, TitleId};
+use super::imports::ImportAction;
 use crate::error::Result;
 
 /// Every download of a title, oldest first.
@@ -72,10 +73,17 @@ pub fn placed_on_file(
              JOIN downloads d ON d.id = l.download_id
              JOIN torrent_file_view f ON f.source_id = d.source_id AND f.file_index = d.file_index
              WHERE d.source_id = ?1 AND d.file_index = ?2 AND lower(f.path) NOT LIKE '%.zip'
-               AND l.action IN ('placed', 'replaced', 'skipped_existing')
+               AND l.action IN (?4, ?5, ?6)
                AND json_extract(l.detail, '$.rom_id') != ?3
              ORDER BY l.id DESC LIMIT 1",
-            params![source, index, rom],
+            params![
+                source,
+                index,
+                rom,
+                ImportAction::Placed,
+                ImportAction::Replaced,
+                ImportAction::SkippedExisting
+            ],
             |r| r.get::<_, Option<TitleId>>(0),
         )
         .optional()?
@@ -111,8 +119,13 @@ pub fn placed_any(conn: &Connection, source: SourceId) -> Result<bool> {
         "SELECT EXISTS (SELECT 1 FROM downloads d WHERE d.source_id = ?1
            AND (d.state = 'done' OR (d.state = 'bad' AND EXISTS (
                  SELECT 1 FROM import_log l WHERE l.download_id = d.id
-                   AND l.action IN ('placed', 'replaced', 'skipped_existing')))))",
-        [source],
+                   AND l.action IN (?2, ?3, ?4)))))",
+        params![
+            source,
+            ImportAction::Placed,
+            ImportAction::Replaced,
+            ImportAction::SkippedExisting
+        ],
         |r| r.get(0),
     )?)
 }

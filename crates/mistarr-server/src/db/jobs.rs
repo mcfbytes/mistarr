@@ -5,36 +5,36 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::ids::JobId;
-use super::sql::{self, text_enum, Page, Paged};
+use super::sql::{self, code_enum, Page, Paged};
 use crate::error::Result;
 use crate::jobs::{JobKind, Lane};
 
-text_enum! {
+code_enum! {
     /// `jobs.state`.
     pub enum JobState {
         /// Waiting for its lane.
-        Queued = "queued",
+        Queued = ("queued", 0),
         /// Executing.
-        Running = "running",
+        Running = ("running", 1),
         /// Waiting at the scheduler gate.
-        Paused = "paused",
+        Paused = ("paused", 2),
         /// Finished successfully.
-        Done = "done",
+        Done = ("done", 3),
         /// Finished with an error, or interrupted by a shutdown.
-        Failed = "failed",
+        Failed = ("failed", 4),
     }
 }
 
 impl JobState {
     /// States of a job that has not finished.
     pub const ACTIVE: [Self; 3] = [Self::Queued, Self::Running, Self::Paused];
-    /// [`JobState::ACTIVE`] as an SQL list.
-    pub const ACTIVE_SQL: &'static str = "('queued', 'running', 'paused')";
+    /// [`JobState::ACTIVE`] as an SQL list of codes.
+    pub const ACTIVE_SQL: &'static str = "(0, 1, 2)";
 
     /// States of a finished job.
     pub const FINISHED: [Self; 2] = [Self::Done, Self::Failed];
-    /// [`JobState::FINISHED`] as an SQL list.
-    pub const FINISHED_SQL: &'static str = "('done', 'failed')";
+    /// [`JobState::FINISHED`] as an SQL list of codes.
+    pub const FINISHED_SQL: &'static str = "(3, 4)";
 
     /// True for `done` and `failed`.
     ///
@@ -140,8 +140,15 @@ pub fn insert(
 ) -> Result<JobId> {
     conn.execute(
         "INSERT INTO jobs (kind, payload, subject, state, created_at, updated_at, lane)
-         VALUES (?1, ?2, ?3, 'queued', ?4, ?4, ?5)",
-        params![kind, payload.to_string(), subject_of(payload), now, lane],
+         VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6)",
+        params![
+            kind,
+            payload.to_string(),
+            subject_of(payload),
+            JobState::Queued,
+            now,
+            lane
+        ],
     )?;
     Ok(JobId::new(conn.last_insert_rowid()))
 }
@@ -276,11 +283,13 @@ pub fn find_in(
     payload: &Value,
     states: &[JobState],
 ) -> Result<Option<JobId>> {
+    // The column holds codes, so the bound list holds codes too, not the enum's words.
+    let codes = sql::json_list(&states.iter().map(|s| s.code()).collect::<Vec<_>>())?;
     Ok(conn
         .query_row(
             "SELECT id FROM jobs WHERE kind = ?1 AND subject = ?2
                AND state IN (SELECT value FROM json_each(?3)) ORDER BY id LIMIT 1",
-            params![kind, subject_of(payload), sql::json_list(states)?],
+            params![kind, subject_of(payload), codes],
             |r| r.get(0),
         )
         .optional()?)
@@ -429,7 +438,8 @@ pub struct RecentRun {
 /// assert_eq!((runs[0].row.id, runs[0].count), (id, 1));
 /// ```
 pub fn recent_finished(conn: &Connection, limit: u32) -> Result<Vec<RecentRun>> {
-    let kinds = sql::json_list(&RECENT_KINDS)?;
+    // The column holds codes, so the bound list holds codes too, not the enum's words.
+    let kinds = sql::json_list(&RECENT_KINDS.iter().map(|k| k.code()).collect::<Vec<_>>())?;
     sql::snapshot(conn, |c| {
         let mut runs: Vec<RecentRun> = Vec::new();
         let mut offset = 0;
@@ -536,9 +546,9 @@ pub fn open_in_lane(conn: &Connection, lane: Lane) -> Result<Vec<JobRow>> {
 pub fn queued_other_in_lane(conn: &Connection, lane: Lane, except_kind: JobKind) -> Result<bool> {
     Ok(conn
         .prepare_cached(
-            "SELECT EXISTS(SELECT 1 FROM jobs WHERE state = 'queued' AND lane = ?1 AND kind <> ?2)",
+            "SELECT EXISTS(SELECT 1 FROM jobs WHERE state = ?1 AND lane = ?2 AND kind <> ?3)",
         )?
-        .query_row(params![lane, except_kind], |r| r.get(0))?)
+        .query_row(params![JobState::Queued, lane, except_kind], |r| r.get(0))?)
 }
 
 /// Finishes a job as `failed` with `{ error }` as its progress.
@@ -580,8 +590,8 @@ pub fn fail(conn: &Connection, id: JobId, error: &str, now: i64) -> Result<()> {
 /// ```
 pub fn requeue(conn: &Connection, id: JobId, lane: Lane, now: i64) -> Result<()> {
     conn.execute(
-        "UPDATE jobs SET state = 'queued', lane = ?2, updated_at = ?3 WHERE id = ?1",
-        params![id, lane, now],
+        "UPDATE jobs SET state = ?2, lane = ?3, updated_at = ?4 WHERE id = ?1",
+        params![id, JobState::Queued, lane, now],
     )?;
     Ok(())
 }
@@ -817,11 +827,18 @@ mod tests {
 
     #[test]
     fn state_sets_match_their_sql() {
-        let text = |states: &[JobState]| {
-            sql::text_list(&states.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+        let codes = |states: &[JobState]| {
+            format!(
+                "({})",
+                states
+                    .iter()
+                    .map(|s| s.code().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
         };
-        assert_eq!(JobState::ACTIVE_SQL, text(&JobState::ACTIVE));
-        assert_eq!(JobState::FINISHED_SQL, text(&JobState::FINISHED));
+        assert_eq!(JobState::ACTIVE_SQL, codes(&JobState::ACTIVE));
+        assert_eq!(JobState::FINISHED_SQL, codes(&JobState::FINISHED));
         for s in JobState::ALL {
             assert_ne!(JobState::ACTIVE.contains(s), s.is_finished(), "{s}");
         }
@@ -837,10 +854,13 @@ mod tests {
             get(&c, id),
             Err(crate::Error::Stored { ref key, .. }) if key == "jobs.payload"
         ));
-        c.execute(
-            "UPDATE jobs SET payload = '{}', kind = 'nope' WHERE id = ?1",
-            [id],
-        )
+        // A code the table's CHECK refuses is written with the check off, as a build
+        // that widened the CHECK and stored it would leave it.
+        c.execute_batch(&format!(
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE jobs SET payload = '{{}}', kind = 99 WHERE id = {id};
+             PRAGMA ignore_check_constraints = OFF;"
+        ))
         .expect("unknown kind");
         assert!(matches!(get(&c, id), Err(crate::Error::Db(_))));
     }
@@ -854,10 +874,13 @@ mod tests {
         let json = insert(&c, JobKind::Scan, &json!({"a": 3}), Lane::Heavy, 1).expect("insert");
         let unknown_done = insert(&c, JobKind::Scan, &json!({"a": 4}), Lane::Heavy, 1).expect("x");
         c.execute_batch(&format!(
-            "UPDATE jobs SET kind = 'nope' WHERE id IN ({kind}, {unknown_done});
-             UPDATE jobs SET lane = 'nope' WHERE id = {lane};
+            "PRAGMA ignore_check_constraints = ON;
+             UPDATE jobs SET kind = 99 WHERE id IN ({kind}, {unknown_done});
+             UPDATE jobs SET lane = 99 WHERE id = {lane};
+             PRAGMA ignore_check_constraints = OFF;
              UPDATE jobs SET progress = '{{' WHERE id = {json};
-             UPDATE jobs SET state = 'done' WHERE id = {unknown_done};"
+             UPDATE jobs SET state = {} WHERE id = {unknown_done};",
+            JobState::Done.code()
         ))
         .expect("corrupt");
         assert!(open_rows(&c).is_err());
@@ -877,9 +900,12 @@ mod tests {
         let lane = insert(&c, JobKind::Import, &json!({"a": 1}), Lane::Heavy, 1).expect("x");
         let payload = insert(&c, JobKind::DatImport, &json!({"a": 2}), Lane::Heavy, 1).expect("x");
         c.execute_batch(&format!(
-            "UPDATE jobs SET state = 'done' WHERE id = {done};
-             UPDATE jobs SET lane = 'nope' WHERE id = {lane};
-             UPDATE jobs SET payload = '{{' WHERE id = {payload};"
+            "UPDATE jobs SET state = {} WHERE id = {done};
+             PRAGMA ignore_check_constraints = ON;
+             UPDATE jobs SET lane = 99 WHERE id = {lane};
+             PRAGMA ignore_check_constraints = OFF;
+             UPDATE jobs SET payload = '{{' WHERE id = {payload};",
+            JobState::Done.code()
         ))
         .expect("corrupt");
         assert!(get(&c, lane).is_err() && get(&c, payload).is_err());

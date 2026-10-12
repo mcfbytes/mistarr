@@ -462,15 +462,20 @@ fn import_row(app: &Arc<AppState>, rel: &str, mtime: i64, rom: RomId) -> i64 {
     let member = format!("{rel}#a.bin");
     app.db
         .write_blocking(move |c| {
-                        let id = files::upsert(c, &pid(), &NewFile {
-rom_id: Some(rom),
-crc32: Some("0000abcd".parse().expect("hex")),
-md5: Some("0123456789abcdef0123456789abcdef".parse().expect("hex")),
-header_rule: Some("none".to_string()),
-..NewFile::unhashed(&member, 1, mtime, FileState::Verified)
-}, 1)?;
+            let id = files::upsert(
+                c,
+                &pid(),
+                &NewFile {
+                    rom_id: Some(rom),
+                    crc32: Some("0000abcd".parse().expect("hex")),
+                    md5: Some("0123456789abcdef0123456789abcdef".parse().expect("hex")),
+                    header_rule: Some("none".to_string()),
+                    ..NewFile::unhashed(&member, 1, mtime, FileState::Verified)
+                },
+                1,
+            )?;
             c.execute(
-                "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 'placed', '{}')",
+                "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 0, '{}')",
                 [id.get()],
             )?;
             Ok(id.get())

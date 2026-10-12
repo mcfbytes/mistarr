@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 use mistarr_core::bencode::{self, Value};
 use mistarr_core::hash::Md5Stream;
 use mistarr_server::db::jobs::JobState;
+use mistarr_server::jobs::JobKind;
 
 use serde_json::{json, Value as Json};
 
@@ -249,6 +250,7 @@ impl Server {
 
     fn finished(&self, kind: &str, count: usize) -> Option<Vec<(String, Json)>> {
         let conn = mistarr_server::db::open_read_only(&self.db).ok()?;
+        let kind = JobKind::parse(kind)?;
         let open: i64 = conn
             .query_row(
                 &format!(
@@ -270,7 +272,7 @@ impl Server {
             .query_map([kind], |r| {
                 let progress: String = r.get(1)?;
                 Ok((
-                    r.get(0)?,
+                    r.get::<_, JobState>(0)?.as_str().to_owned(),
                     serde_json::from_str(&progress).unwrap_or(Json::Null),
                 ))
             })
@@ -1026,11 +1028,17 @@ fn a_url_fetch_stays_under_budget() {
                 c.query_row(
                     &format!(
                         "SELECT state, COALESCE(progress, 'null') FROM jobs
-                         WHERE kind = 'url_fetch' AND state IN {}",
+                         WHERE kind = {} AND state IN {}",
+                        JobKind::UrlFetch.code(),
                         JobState::FINISHED_SQL
                     ),
                     [],
-                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                    |r| {
+                        Ok((
+                            r.get::<_, JobState>(0)?.as_str().to_owned(),
+                            r.get::<_, String>(1)?,
+                        ))
+                    },
                 )
                 .ok()
             });

@@ -36,7 +36,7 @@ use self::stop::{Cancel, StopToken};
 use crate::app::AppState;
 use crate::db::ids::JobId;
 use crate::db::jobs::{self as rows, JobState};
-use crate::db::sql::text_enum;
+use crate::db::sql::code_enum;
 use crate::error::{Error, Result};
 use crate::events::{Event, JobProgress};
 
@@ -49,51 +49,51 @@ pub const INTERRUPTED: &str = "interrupted by a restart";
 /// Error recorded on an unfinished job whose row this version cannot read.
 pub const UNREADABLE: &str = "not readable by this version";
 
-text_enum! {
+code_enum! {
     /// Which serial queue a job runs on: `jobs.lane`.
     pub enum Lane {
         /// Hashing, scanning, placing files: one at a time, held by the gate.
-        Heavy = "heavy",
+        Heavy = ("heavy", 0),
         /// DAT and source parsing: one at a time, held only by a manual pause, yielding while a core runs.
-        Background = "background",
+        Background = ("background", 1),
         /// Client polling, detection and transfers: one at a time, never held.
-        Light = "light",
+        Light = ("light", 2),
         /// Fetches of a URL the user supplied: one at a time, never held.
-        Fetch = "fetch",
+        Fetch = ("fetch", 3),
     }
 }
 
-text_enum! {
+code_enum! {
     /// What a job does: `jobs.kind`.
     pub enum JobKind {
         /// [`scan::ScanJob`].
-        Scan = "scan",
+        Scan = ("scan", 0),
         /// [`import::ImportJob`].
-        Import = "import",
+        Import = ("import", 1),
         /// [`detect_client::DetectClient`].
-        DetectClient = "detect_client",
+        DetectClient = ("detect_client", 2),
         /// [`dat_import::DatImport`].
-        DatImport = "dat_import",
+        DatImport = ("dat_import", 3),
         /// [`dat_import::Recompute`].
-        Recompute = "recompute_1g1r",
+        Recompute = ("recompute_1g1r", 4),
         /// [`source_import::SourceImport`].
-        SourceImport = "source_import",
+        SourceImport = ("source_import", 5),
         /// [`source_import::ResolveMagnet`].
-        ResolveMagnet = "resolve_magnet",
+        ResolveMagnet = ("resolve_magnet", 6),
         /// [`transfer::Transfer`].
-        Transfer = "transfer",
+        Transfer = ("transfer", 7),
         /// [`transfer::Deselect`].
-        Deselect = "deselect",
+        Deselect = ("deselect", 8),
         /// [`arcade::ArcadeCatalog`].
-        ArcadeCatalog = "arcade_catalog",
+        ArcadeCatalog = ("arcade_catalog", 9),
         /// [`chd::ChdTracks`].
-        ChdTracks = "chd_tracks",
+        ChdTracks = ("chd_tracks", 10),
         /// [`remap::RemapSources`].
-        RemapSources = "remap_sources",
+        RemapSources = ("remap_sources", 11),
         /// [`bind_source::BindSource`].
-        BindSource = "bind_source",
+        BindSource = ("bind_source", 12),
         /// [`url_fetch::UrlFetch`].
-        UrlFetch = "url_fetch",
+        UrlFetch = ("url_fetch", 13),
     }
 }
 
@@ -1114,7 +1114,13 @@ mod tests {
                 let repeat = rows::insert(c, JobKind::DatImport, &path, Lane::Heavy, 1)?;
                 let poll = rows::insert(c, JobKind::DetectClient, &json!({}), Lane::Light, 1)?;
                 let nope = rows::insert(c, JobKind::Scan, &json!({"n": 1}), Lane::Heavy, 1)?;
-                c.execute("UPDATE jobs SET kind = 'nope' WHERE id = ?1", [nope])?;
+                // A code the table's CHECK refuses, written with the check off: a kind
+                // this binary does not list, as a build that widened the CHECK leaves.
+                c.execute_batch(&format!(
+                    "PRAGMA ignore_check_constraints = ON;
+                     UPDATE jobs SET kind = 99 WHERE id = {nope};
+                     PRAGMA ignore_check_constraints = OFF;"
+                ))?;
                 Ok((scan, repeat, poll, nope))
             })
             .await
@@ -1135,7 +1141,7 @@ mod tests {
                 Ok(c.query_row(
                     "SELECT state, progress FROM jobs WHERE id = ?1",
                     [nope],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                    |r| Ok((r.get::<_, JobState>(0)?.as_str().to_owned(), r.get(1)?)),
                 )?)
             })
             .await

@@ -670,7 +670,7 @@ mod tests {
             },
         );
         c.execute(
-            "INSERT INTO import_log (at, file_id, action, detail) VALUES (0, ?1, 'placed', '{}')",
+            "INSERT INTO import_log (at, file_id, action, detail) VALUES (0, ?1, 0, '{}')",
             [bare.get()],
         )
         .expect("log");

@@ -8,43 +8,24 @@ use serde_json::Value;
 
 use super::ids::{DownloadId, FileId, ImportId, TitleId};
 use super::roms::{rom_row, EntryRom, ROM_COLUMNS};
-use super::sql::{self, Page, Paged};
+use super::sql::{self, code_enum, Page, Paged};
 use super::titles::TitleSource;
 use crate::error::Result;
 
-/// `import_log.action`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case")]
-#[non_exhaustive]
-pub enum ImportAction {
-    /// Moved into `games/` where nothing was.
-    Placed,
-    /// Moved into `games/` over a file that was not verified.
-    Replaced,
-    /// Hash mismatch; moved to `staging/quarantine/`.
-    Quarantined,
-    /// A verified copy was already in place; the new file was discarded.
-    SkippedExisting,
-    /// A misnamed file was given its canonical name in place.
-    Renamed,
-}
-
-impl ImportAction {
-    /// The column value.
-    ///
-    /// ```
-    /// use mistarr_server::db::imports::ImportAction;
-    /// assert_eq!(ImportAction::SkippedExisting.as_str(), "skipped_existing");
-    /// ```
-    #[must_use]
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Placed => "placed",
-            Self::Replaced => "replaced",
-            Self::Quarantined => "quarantined",
-            Self::SkippedExisting => "skipped_existing",
-            Self::Renamed => "renamed",
-        }
+code_enum! {
+    /// `import_log.action`.
+    #[non_exhaustive]
+    pub enum ImportAction {
+        /// Moved into `games/` where nothing was.
+        Placed = ("placed", 0),
+        /// Moved into `games/` over a file that was not verified.
+        Replaced = ("replaced", 1),
+        /// Hash mismatch; moved to `staging/quarantine/`.
+        Quarantined = ("quarantined", 2),
+        /// A verified copy was already in place; the new file was discarded.
+        SkippedExisting = ("skipped_existing", 3),
+        /// A misnamed file was given its canonical name in place.
+        Renamed = ("renamed", 4),
     }
 }
 
@@ -80,7 +61,7 @@ pub fn log(
 ) -> Result<ImportId> {
     conn.execute(
         "INSERT INTO import_log (at, download_id, file_id, action, detail) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![at, download_id, file_id, action.as_str(), detail.to_string()],
+        params![at, download_id, file_id, action, detail.to_string()],
     )?;
     Ok(ImportId::new(conn.last_insert_rowid()))
 }
@@ -107,7 +88,7 @@ pub fn list(conn: &Connection, page: Page) -> Result<Paged<LogRow>> {
                     at: r.get(1)?,
                     download_id: r.get(2)?,
                     file_id: r.get(3)?,
-                    action: r.get(4)?,
+                    action: r.get::<_, ImportAction>(4)?.as_str().to_owned(),
                     detail: sql::get_json(r, 5, "import_log.detail")?,
                 })
             })?
