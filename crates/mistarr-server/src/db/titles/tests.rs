@@ -757,9 +757,11 @@ fn detail_lists_variants_roms_files_and_sources() {
          VALUES ('00', 'n', 'a.torrent', 'bound', 0);",
     )
     .expect("source");
+    c.execute_batch("INSERT INTO torrent_dirs (source_id, path) VALUES (1, '')")
+        .expect("torrent dir");
     c.execute(
-        "INSERT INTO torrent_files (source_id, file_index, path, size, rom_id)
-         VALUES (1, 0, 'q.bin', 4, ?1)",
+        "INSERT INTO torrent_files (source_id, file_index, dir_id, leaf, size, rom_id)
+         VALUES (1, 0, (SELECT id FROM torrent_dirs WHERE source_id = 1 AND path = ''), 'q.bin', 4, ?1)",
         [q_rom],
     )
     .expect("torrent file");

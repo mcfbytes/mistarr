@@ -118,8 +118,11 @@ fn bench_preview_times_each_source_and_its_base_tier() {
     c.execute_batch(
         "INSERT INTO sources (infohash, display_name, origin_file, state, added_at)
            VALUES ('0c', 'Synthetic Preview', 'p.torrent', 'unbound', 0);
-         INSERT INTO torrent_files (source_id, file_index, path, size)
-           SELECT 1, id - 1, 'Set/' || name, size FROM roms ORDER BY id LIMIT 600;
+         INSERT INTO torrent_dirs (source_id, path) VALUES (1, 'Set/');
+         INSERT INTO torrent_files (source_id, file_index, dir_id, leaf, size)
+           SELECT 1, id - 1,
+                  (SELECT id FROM torrent_dirs WHERE source_id = 1 AND path = 'Set/'),
+                  name, size FROM roms ORDER BY id LIMIT 600;
          UPDATE sources SET file_count = 600;",
     )
     .expect("source");

@@ -1546,55 +1546,40 @@ async fn rows_hashed_before_the_whole_form_are_hashed_again_after_the_upgrade() 
     let (size, mtime) = meta(&path);
 
     let mut config = config_in(dir.path());
-    config.paths.games = games.clone();
-    let booted = boot_with(dir, config).await;
-    let app = &booted.running.app;
+    config.paths.games = games;
     let pid = PlatformId::new(p.id.to_owned());
     let rel = p.rel(&p.name("Upgraded"));
     let (whole, content) = (hash_of(&file), hash_of(&body));
-    app.db
-        .write({
-            let (pid, rel, whole, content) = (pid.clone(), rel.clone(), whole, content);
-            let name = p.name("Upgraded");
-            move |c| {
-                mistarr_server::db::fixtures::dat(&pid)
-                    .title("Upgraded Quest (USA)")
-                    .rom(&name, &whole, RomStatus::Good)
-                    .write(c)?;
-                // The stripped form alone, as a scan stored it before the whole-file columns.
-                files::upsert(
-                    c,
-                    &pid,
-                    &NewFile {
-                        crc32: Some(content.crc32),
-                        md5: Some(content.md5),
-                        sha1: Some(content.sha1),
-                        header_rule: Some("ines".to_string()),
-                        ..NewFile::unhashed(&rel, size, mtime, FileState::Unverified)
-                    },
-                    1,
-                )
-                .map(|_| ())
-            }
-        })
-        .await
-        .expect("seed");
-    let dir = booted.dir;
-    booted.running.shutdown().await.expect("shutdown");
+    // The database as a scan left it before the whole-file columns, at schema 19.
+    std::fs::create_dir_all(&config.paths.data).expect("data dir");
+    {
+        let mut db = rusqlite::Connection::open(config.paths.db()).expect("open");
+        mistarr_server::db::migrate::apply_through(&mut db, 19).expect("older schema");
+        mistarr_server::db::platforms::seed(&mut db, &mistarr_mister::platforms::PLATFORMS)
+            .expect("platforms");
+        mistarr_server::db::fixtures::dat(&pid)
+            .title("Upgraded Quest (USA)")
+            .rom(&p.name("Upgraded"), &whole, RomStatus::Good)
+            .write(&db)
+            .expect("dat");
+        // The stripped form alone, as a scan stored it before the whole-file columns.
+        db.execute(
+            "INSERT INTO files (platform_id, rel_path, size, mtime, crc32, md5, sha1,
+                                header_rule, state, scanned_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'ines', 'unverified', 0)",
+            rusqlite::params![
+                &pid,
+                &rel,
+                size,
+                mtime,
+                content.crc32,
+                content.md5,
+                content.sha1
+            ],
+        )
+        .expect("file");
+    }
 
-    // Back to the schema before the whole-file columns, so booting runs that migration.
-    let db = rusqlite::Connection::open(config_in(dir.path()).paths.db()).expect("open");
-    db.execute_batch(
-        "ALTER TABLE files DROP COLUMN crc32_whole;
-         ALTER TABLE files DROP COLUMN md5_whole;
-         ALTER TABLE files DROP COLUMN sha1_whole;
-         DELETE FROM schema_version WHERE version >= 20;",
-    )
-    .expect("downgrade");
-    drop(db);
-
-    let mut config = config_in(dir.path());
-    config.paths.games = games;
     let upgraded = boot_with(dir, config).await;
     let app = &upgraded.running.app;
     eventually("the scan queued by the upgrade to match the file", || {

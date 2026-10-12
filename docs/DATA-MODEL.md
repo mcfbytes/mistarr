@@ -212,15 +212,23 @@ CREATE TABLE sources (                  -- one per torrent the user dropped in
 );
 CREATE INDEX sources_state ON sources(state);
 
+CREATE TABLE torrent_dirs (             -- a directory each of a source's files shares
+  id            INTEGER PRIMARY KEY,
+  source_id     INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+  path          TEXT NOT NULL,         -- 'dir/' with its slash, '' at the top level
+  UNIQUE (source_id, path)
+) STRICT;
+
 CREATE TABLE torrent_files (
   source_id     INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
   file_index    INTEGER NOT NULL,
-  path          TEXT NOT NULL,         -- inside the torrent, without the torrent's name
+  dir_id        INTEGER NOT NULL REFERENCES torrent_dirs(id),
+  leaf          TEXT NOT NULL,         -- the text after the path's last '/'
   size          INTEGER NOT NULL,
   rom_id        INTEGER REFERENCES roms(id),   -- best name match, or the rom a hash proved; may be NULL
-  confidence    TEXT,                  -- 'hash' | 'name' | 'base', NULL when unmatched
+  confidence    INTEGER CHECK (confidence BETWEEN 0 AND 2),  -- "Match confidences", NULL when unmatched
   PRIMARY KEY (source_id, file_index)
-);
+) STRICT, WITHOUT ROWID;
 CREATE INDEX torrent_files_rom ON torrent_files(rom_id);
 CREATE INDEX torrent_files_source_rom ON torrent_files(source_id, rom_id);   -- a source's matched and unmatched counts
 
@@ -228,11 +236,11 @@ CREATE TABLE torrent_candidates (       -- further roms a file may be; one file,
   source_id     INTEGER NOT NULL,
   file_index    INTEGER NOT NULL,
   rom_id        INTEGER NOT NULL REFERENCES roms(id),
-  confidence    TEXT NOT NULL,         -- 'name' | 'base' | 'fuzzy' | 'size'
+  confidence    INTEGER NOT NULL CHECK (confidence BETWEEN 1 AND 4),   -- "Match confidences"
   PRIMARY KEY (source_id, file_index, rom_id),
   FOREIGN KEY (source_id, file_index)
     REFERENCES torrent_files(source_id, file_index) ON DELETE CASCADE
-) WITHOUT ROWID;
+) STRICT, WITHOUT ROWID;
 CREATE INDEX torrent_candidates_rom ON torrent_candidates(rom_id);
 
 CREATE TABLE downloads (
@@ -370,8 +378,9 @@ cancelled   (from wanted, queued, transferring or checking)
 
 `staged_path` is `<paths.data>/staging/<infohash>/<name>/<path>` for a
 multi-file torrent, where `<name>` is `sources.display_name` and `<path>` is
-`torrent_files.path`, and `<paths.data>/staging/<infohash>/<path>` for a
-single-file one. It is the path mistarr sees, after the remote path map.
+the file's path inside the torrent, and
+`<paths.data>/staging/<infohash>/<path>` for a single-file one. It is the
+path mistarr sees, after the remote path map.
 
 ### files.state
 
@@ -579,9 +588,10 @@ fails on any other scan.
 
 The reads behind `GET /sources` and `GET /sources/{id}` walk indexes of their
 own. `torrent_files_source_rom` holds a source's files in `rom_id` order, so
-the matched count is its `rom_id IS NOT NULL` range, the paths and candidate
-checks of the detail's summary are the `rom_id IS NULL` range, and each
-`EXISTS` probe is a `torrent_candidates` primary-key seek. The DAT list then
+the matched count is its `rom_id IS NOT NULL` range, and each `EXISTS` probe
+is a `torrent_candidates` primary-key seek. A file without a rom is one seek
+of `torrent_files_rom`, whose key carries the table's primary key columns, so
+the range stays the source's own unmatched rows. The DAT list then
 follows `roms_id_title` to a matched rom's title and `titles_id_dat` to that
 title's DAT version, so no `roms` or `titles` row is read. The test
 `db::plans::source_detail_seeks_the_source_files_and_downloads` asserts each
@@ -926,8 +936,11 @@ SELECT t.id, t.platform_id AS platform_key, t.platform_id AS platform, t.dat_ver
 FROM titles t;
 
 CREATE VIEW torrent_file_view AS
-SELECT f.source_id, f.file_index, f.path, f.size, f.rom_id, f.confidence,
-       f.confidence AS confidence_text
+SELECT f.source_id, f.file_index,
+       (SELECT d.path FROM torrent_dirs d WHERE d.id = f.dir_id) || f.leaf AS path,
+       f.size, f.rom_id, f.confidence,
+       CASE f.confidence WHEN 0 THEN 'hash' WHEN 1 THEN 'name' WHEN 2 THEN 'base' END
+         AS confidence_text
 FROM torrent_files f;
 
 CREATE VIEW file_view AS
@@ -952,11 +965,10 @@ Each conversion changes only the bodies, keeping the column names:
 |---|---|
 | rom_view.name | CASE WHEN r.own_name THEN r.name ELSE t.name \|\| r.name END |
 | the hex columns | lower(hex(x)) of the stored column |
-| status_text, source_text, mra_check_text, state_text, header_rule_text, reason_text, confidence_text | CASE over the value table |
+| status_text, source_text, mra_check_text, state_text, header_rule_text, reason_text | CASE over the value table |
 | platform_key | the platform column |
 | platform | (SELECT p.slug FROM platforms p WHERE p.id = t.platform) |
 | rom_view.match_base | the base expression, when P2 drops the column |
-| torrent_file_view.path | (SELECT d.path FROM torrent_dirs d WHERE d.id = f.dir_id) \|\| f.leaf |
 | rom_view.bios | the same EXISTS on f.tag_id = 4 |
 
 Rules for reads through them:

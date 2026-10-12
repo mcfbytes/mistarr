@@ -63,8 +63,10 @@ fn seeded() -> Connection {
     c.execute_batch(
         "INSERT INTO sources (infohash, display_name, origin_file, platform_id, state, added_at)
            VALUES ('00', 'Synthetic', 's.torrent', 'nes', 'bound', 0);
-         INSERT INTO torrent_files (source_id, file_index, path, size, rom_id)
-           VALUES (1, 0, 'track.bin', 16, 1);
+         INSERT INTO torrent_dirs (source_id, path) VALUES (1, '');
+         INSERT INTO torrent_files (source_id, file_index, dir_id, leaf, size, rom_id)
+           VALUES (1, 0, (SELECT id FROM torrent_dirs WHERE source_id = 1 AND path = ''),
+                   'track.bin', 16, 1);
          INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, created_at, updated_at)
            VALUES (1, 1, 1, 0, 'transferring', 0, 0);",
     )
@@ -446,8 +448,12 @@ fn source_detail_seeks_the_source_files_and_downloads() {
         let plan = plan_of(&reads, name, "torrent_files f");
         let has = |p: &str| plan.iter().any(|l| l.contains(p));
         assert!(
-            has("SEARCH f USING INDEX sqlite_autoindex_torrent_files_1 (source_id=?)"),
+            has("SEARCH f USING PRIMARY KEY (source_id=?)"),
             "{name}: {plan:?}"
+        );
+        assert!(
+            has("SEARCH td USING INTEGER PRIMARY KEY (rowid=?)"),
+            "{name} reads each path through its directory: {plan:?}"
         );
         assert!(!has("SCAN f"), "{name}: {plan:?}");
     }
@@ -459,24 +465,30 @@ fn source_detail_seeks_the_source_files_and_downloads() {
             .any(|l| l.contains("COVERING INDEX torrent_files_source_rom")),
         "{plan:?}"
     );
+    // A file without a rom is one seek of `torrent_files_rom`, whose key holds the
+    // table's primary key columns, so the range is the source's own unmatched rows.
     let plan = plan_of(&reads, "source detail", "f.rom_id IS NULL");
     assert!(
-        plan.iter()
-            .any(|l| l.contains("torrent_files_source_rom (source_id=? AND rom_id=?)")),
+        plan.iter().any(
+            |l| l.contains("SEARCH f USING INDEX torrent_files_rom (rom_id=? AND source_id=?)")
+        ),
         "{plan:?}"
     );
-    // Its DATs come from index pages: the rom's title, then the title's DAT version.
+    // Its DATs come from index pages: a source's files in rom order, the rom's title,
+    // then the title's DAT version.
     let plan = plan_of(&reads, "source detail", "JOIN roms r INDEXED BY");
     let has = |p: &str| plan.iter().any(|l| l.contains(p));
+    assert!(has("COVERING INDEX torrent_files_source_rom"), "{plan:?}");
     assert!(has("roms_id_title (id=?)"), "{plan:?}");
     assert!(has("titles_id_dat (id=?)"), "{plan:?}");
     assert!(!has("SEARCH r USING INTEGER PRIMARY KEY"), "{plan:?}");
-    // The sources list counts each source's matched files the same way.
+    // The sources list counts each source's matched files the same way, and the
+    // unmatched ones the same source-only range as the detail's summary.
     let plan = plan_of(&reads, "sources list", "torrent_files f");
     let has = |p: &str| plan.iter().any(|l| l.contains(p));
     assert!(has("COVERING INDEX torrent_files_source_rom"), "{plan:?}");
     assert!(
-        has("torrent_files_source_rom (source_id=? AND rom_id=?)"),
+        has("COVERING INDEX torrent_files_rom (rom_id=? AND source_id=?)"),
         "{plan:?}"
     );
     for name in ["source files", "source file filters"] {

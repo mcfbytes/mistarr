@@ -89,7 +89,29 @@ enum Out {
     Swap(&'static [(&'static str, &'static str)]),
 }
 
-const TORRENT_FILES: &[(&str, &str)] = &[("torrent_file_view", "torrent_files")];
+/// `torrent_file_view` written over `torrent_files`: the table's name and, for each
+/// reference to its `path`, the directory decode the body spells.
+const TORRENT_FILES: &[(&str, &str)] = &[
+    ("torrent_file_view", "torrent_files"),
+    (
+        "tf.path",
+        "(SELECT d.path FROM torrent_dirs d WHERE d.id = tf.dir_id) || tf.leaf",
+    ),
+    (
+        "f.path",
+        "(SELECT d.path FROM torrent_dirs d WHERE d.id = f.dir_id) || f.leaf",
+    ),
+    (
+        "file_index, path, size",
+        "file_index, (SELECT d.path FROM torrent_dirs d WHERE d.id = torrent_files.dir_id)
+                            || torrent_files.leaf, size",
+    ),
+    (
+        "SELECT path FROM torrent_files",
+        "SELECT (SELECT d.path FROM torrent_dirs d WHERE d.id = torrent_files.dir_id)
+                || torrent_files.leaf FROM torrent_files",
+    ),
+];
 
 fn tiers(live: &str, order: &str) -> Vec<Out> {
     let select = format!(
@@ -223,7 +245,7 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
             }),
             vec![Out::Sql(
                 "UPDATE torrent_files SET rom_id = NULL, confidence = NULL
-                 WHERE source_id = ?1 AND confidence = 'hash' AND NOT EXISTS (
+                 WHERE source_id = ?1 AND confidence = ?3 AND NOT EXISTS (
                    SELECT 1 FROM roms r JOIN titles t ON t.id = r.title_id
                    WHERE r.id = torrent_files.rom_id AND t.platform_id = ?2
                      AND r.retired = 0 AND t.retired = 0)"
