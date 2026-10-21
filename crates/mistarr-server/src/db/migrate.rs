@@ -109,7 +109,7 @@ pub fn check_supported(conn: &Connection) -> Result<u32> {
 /// assert!(mistarr_server::db::migrate::apply(&mut conn).unwrap().is_empty());
 /// ```
 pub fn apply(conn: &mut Connection) -> Result<Vec<u32>> {
-    apply_through(conn, u32::MAX)
+    apply_list(conn, MIGRATIONS, u32::MAX)
 }
 
 /// [`apply`] stopping after migration `last`, so a test can seed the schema of that version.
