@@ -94,6 +94,104 @@ macro_rules! text_enum {
 
 pub(crate) use text_enum;
 
+/// Declares an enum stored as an integer code, with `ALL`, `as_str`, `code`, `parse`,
+/// `Display`, SQL and serde conversions from one table of `Variant = ("text", code)`
+/// pairs. The code is what the column holds and the text is what the API shows.
+/// Reading a code the table does not list fails with [`UnknownCode`].
+macro_rules! code_enum {
+    (
+        $(#[$meta:meta])*
+        $vis:vis enum $name:ident {
+            $( $(#[$vmeta:meta])* $variant:ident = ($text:literal, $code:literal), )+
+        }
+    ) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        $vis enum $name {
+            $( $(#[$vmeta])* $variant, )+
+        }
+
+        impl $name {
+            /// Every value, in declaration order.
+            #[cfg(any(test, feature = "test-support"))]
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            /// The column text.
+            #[must_use]
+            pub const fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $text,)+
+                }
+            }
+
+            /// The stored integer code.
+            #[must_use]
+            pub const fn code(self) -> i64 {
+                match self {
+                    $(Self::$variant => $code,)+
+                }
+            }
+
+            /// The value whose column text is `text`.
+            #[must_use]
+            pub fn parse(text: &str) -> Option<Self> {
+                match text {
+                    $($text => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl rusqlite::types::ToSql for $name {
+            fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+                Ok(rusqlite::types::ToSqlOutput::from(self.code()))
+            }
+        }
+
+        impl rusqlite::types::FromSql for $name {
+            fn column_result(
+                value: rusqlite::types::ValueRef<'_>,
+            ) -> rusqlite::types::FromSqlResult<Self> {
+                let code = value.as_i64()?;
+                match code {
+                    $($code => Ok(Self::$variant),)+
+                    _ => Err(rusqlite::types::FromSqlError::Other(Box::new(
+                        $crate::db::sql::UnknownCode {
+                            column: stringify!($name),
+                            code,
+                        },
+                    ))),
+                }
+            }
+        }
+
+        impl serde::Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+                s.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> serde::Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(
+                d: D,
+            ) -> std::result::Result<Self, D::Error> {
+                let text = String::deserialize(d)?;
+                Self::parse(&text).ok_or_else(|| {
+                    serde::de::Error::unknown_variant(&text, &[$($text),+])
+                })
+            }
+        }
+    };
+}
+
+pub(crate) use code_enum;
+
 /// Column text a [`text_enum!`] type does not list.
 #[derive(Debug, thiserror::Error)]
 #[error("unknown {column} `{text}`")]
@@ -102,6 +200,16 @@ pub struct UnknownText {
     pub column: &'static str,
     /// The text read.
     pub text: String,
+}
+
+/// Column code a [`code_enum!`] type does not list.
+#[derive(Debug, thiserror::Error)]
+#[error("unknown {column} code {code}")]
+pub struct UnknownCode {
+    /// The type that read it.
+    pub column: &'static str,
+    /// The code read.
+    pub code: i64,
 }
 
 /// `values` as an SQL list of quoted text, `('a', 'b')`, for checking a set's fragment.
@@ -388,6 +496,41 @@ mod tests {
         let parsed: Shade = serde_json::from_str("\"dark\"").expect("parse");
         assert_eq!(parsed, Shade::Dark);
         assert!(serde_json::from_str::<Shade>("\"dim\"").is_err());
+    }
+
+    code_enum! {
+        /// A test enum.
+        enum Level {
+            /// Low.
+            Low = ("low", 0),
+            /// High.
+            High = ("high", 3),
+        }
+    }
+
+    #[test]
+    fn code_enums_round_trip_and_refuse_unknown_codes() {
+        assert_eq!(Level::ALL, [Level::Low, Level::High]);
+        assert_eq!((Level::Low.code(), Level::High.code()), (0, 3));
+        for l in Level::ALL {
+            assert_eq!(Level::parse(l.as_str()), Some(*l));
+        }
+        assert_eq!(Level::High.to_string(), "high");
+        let c = Connection::open_in_memory().expect("open");
+        for l in Level::ALL {
+            let back: Level = c
+                .query_row("SELECT ?1", [*l], |r| r.get(0))
+                .expect("round trip");
+            assert_eq!(back, *l);
+        }
+        let err = c
+            .query_row("SELECT 9", [], |r| r.get::<_, Level>(0))
+            .expect_err("unknown code");
+        assert!(err.to_string().contains("unknown Level code 9"), "{err}");
+        assert_eq!(serde_json::to_string(&Level::Low).expect("json"), "\"low\"");
+        let parsed: Level = serde_json::from_str("\"high\"").expect("parse");
+        assert_eq!(parsed, Level::High);
+        assert!(serde_json::from_str::<Level>("\"dim\"").is_err());
     }
 
     #[test]

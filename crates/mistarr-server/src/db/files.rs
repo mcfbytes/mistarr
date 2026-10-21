@@ -1076,7 +1076,7 @@ mod tests {
         )
         .expect("insert");
         c.execute(
-            "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 'placed', '{}')",
+            "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 0, '{}')",
             [id.get()],
         )
         .expect("log");
@@ -1285,7 +1285,7 @@ mod tests {
         .expect("c");
         for id in [gone, kept] {
             c.execute(
-                "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 'placed', '{}')",
+                "INSERT INTO import_log (at, file_id, action, detail) VALUES (1, ?1, 0, '{}')",
                 [id.get()],
             )
             .expect("log");
@@ -1632,7 +1632,7 @@ mod tests {
         )
         .expect("upsert");
         c.execute(
-            "INSERT INTO import_log (at, file_id, action, detail) VALUES (0, ?1, 'placed', '{}')",
+            "INSERT INTO import_log (at, file_id, action, detail) VALUES (0, ?1, 0, '{}')",
             [id.get()],
         )
         .expect("log");

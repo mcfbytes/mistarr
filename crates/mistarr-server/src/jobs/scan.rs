@@ -1125,8 +1125,8 @@ mod tests {
                 app.db
                     .read(move |c| {
                         Ok(c.query_row(
-                            "SELECT COUNT(*) FROM jobs WHERE kind = 'scan' AND payload = ?1",
-                            [payload.to_string()],
+                            "SELECT COUNT(*) FROM jobs WHERE kind = ?1 AND payload = ?2",
+                            rusqlite::params![JobKind::Scan, payload.to_string()],
                             |r| r.get::<_, i64>(0),
                         )?)
                     })

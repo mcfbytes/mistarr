@@ -60,7 +60,7 @@ fn ensure(conn: &Connection) -> Result<()> {
         // Takes effect only before the temporary database holds its first table.
         conn.execute_batch(
             "PRAGMA temp.auto_vacuum = FULL;
-             CREATE TEMP TABLE dat_stage (seq INTEGER PRIMARY KEY, game TEXT NOT NULL)",
+             CREATE TEMP TABLE dat_stage (seq INTEGER PRIMARY KEY, game TEXT NOT NULL) STRICT",
         )?;
     }
     Ok(())
@@ -169,6 +169,28 @@ mod tests {
                 header: None,
             }],
         }
+    }
+
+    #[test]
+    fn the_stage_table_is_strict_and_refuses_a_wrong_type() {
+        let c = crate::db::fixtures::conn();
+        clear(&c).expect("clear");
+        let sql: String = c
+            .query_row(
+                "SELECT sql FROM sqlite_temp_master WHERE name = 'dat_stage'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("schema");
+        assert!(sql.contains("STRICT"), "{sql}");
+        assert!(
+            c.execute(
+                "INSERT INTO temp.dat_stage (seq, game) VALUES (1, x'00')",
+                []
+            )
+            .is_err(),
+            "a blob is refused where the JSON text goes"
+        );
     }
 
     #[test]
