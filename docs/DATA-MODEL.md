@@ -889,7 +889,7 @@ code order.
 |---|---|---|
 | Rom statuses | `RomStatus` | good 0, baddump 1, nodump 2, verified 3 |
 | File states | `FileState` | pending 0, verified 1, misnamed 2, unverified 3, bad 4, unidentified 5 |
-| Header rules | `HeaderRule`, plus chd for CHD members | none 0, ines 1, smc 2, a78 3, lnx 4, n64 5, chd 6 |
+| Header rules | `StoredRule` (`crates/mistarr-server/src/db/files.rs`): the names of `HeaderRule`, plus chd for CHD members | none 0, ines 1, smc 2, a78 3, lnx 4, n64 5, chd 6 |
 | Unidentified reasons | `Unidentified`, then `Unidentifiable` | off 0, pending 1, no_layout 2, unreadable 3, not_chd 4, version 5, parent 6, not_cd 7, too_large 8, codec 9, gdrom 10, old_layout 11, cooked 12, pregap 13, corrupt 14, checksum 15, no_checksum 16 |
 | Match confidences | `MatchConfidence` | hash 0, name 1, base 2, fuzzy 3, size 4 |
 | Title sources | `TitleSource` | dat 0, mra 1 |

@@ -23,8 +23,8 @@ DROP INDEX IF EXISTS roms_size;
 DROP INDEX IF EXISTS roms_chd_size;
 DROP INDEX IF EXISTS roms_track_size;
 
--- A hash text that is not hex gives an empty blob, which the length CHECK refuses,
--- so the file rolls back instead of storing NULL; a wrong width fails the same way.
+-- An empty hash text is NULL; text that is not hex gives an empty blob, which the length
+-- CHECK refuses, so the file rolls back; a wrong width fails the same way.
 CREATE TABLE roms_new (
   id         INTEGER PRIMARY KEY,
   title_id   INTEGER NOT NULL REFERENCES titles(id),
@@ -55,9 +55,9 @@ SELECT r.id, r.title_id,
               AND substr(r.name, 1, length(t.name)) = t.name
             THEN substr(r.name, length(t.name) + 1) ELSE r.name END,
        r.size,
-       CASE WHEN r.crc32 IS NULL THEN NULL ELSE COALESCE(unhex(r.crc32), x'') END,
-       CASE WHEN r.md5 IS NULL THEN NULL ELSE COALESCE(unhex(r.md5), x'') END,
-       CASE WHEN r.sha1 IS NULL THEN NULL ELSE COALESCE(unhex(r.sha1), x'') END,
+       CASE WHEN NULLIF(r.crc32, '') IS NULL THEN NULL ELSE COALESCE(unhex(r.crc32), x'') END,
+       CASE WHEN NULLIF(r.md5, '') IS NULL THEN NULL ELSE COALESCE(unhex(r.md5), x'') END,
+       CASE WHEN NULLIF(r.sha1, '') IS NULL THEN NULL ELSE COALESCE(unhex(r.sha1), x'') END,
        CASE r.status WHEN 'good' THEN 0 WHEN 'baddump' THEN 1 WHEN 'nodump' THEN 2
                      WHEN 'verified' THEN 3 ELSE -1 END,
        r.retired, r.match_name, r.match_base, r.header, r.zip_dir, r.present
@@ -104,9 +104,9 @@ CREATE TABLE files_new (
 INSERT INTO files_new (id, platform_id, rel_path, size, mtime, crc32, md5, sha1, header_rule,
                        rom_id, state, scanned_at, reason, crc32_whole, md5_whole, sha1_whole)
 SELECT id, platform_id, rel_path, size, mtime,
-       CASE WHEN crc32 IS NULL THEN NULL ELSE COALESCE(unhex(crc32), x'') END,
-       CASE WHEN md5 IS NULL THEN NULL ELSE COALESCE(unhex(md5), x'') END,
-       CASE WHEN sha1 IS NULL THEN NULL ELSE COALESCE(unhex(sha1), x'') END,
+       CASE WHEN NULLIF(crc32, '') IS NULL THEN NULL ELSE COALESCE(unhex(crc32), x'') END,
+       CASE WHEN NULLIF(md5, '') IS NULL THEN NULL ELSE COALESCE(unhex(md5), x'') END,
+       CASE WHEN NULLIF(sha1, '') IS NULL THEN NULL ELSE COALESCE(unhex(sha1), x'') END,
        CASE WHEN header_rule IS NULL THEN NULL
             WHEN header_rule = 'none' THEN 0 WHEN header_rule = 'ines' THEN 1
             WHEN header_rule = 'smc' THEN 2 WHEN header_rule = 'a78' THEN 3
@@ -127,9 +127,9 @@ SELECT id, platform_id, rel_path, size, mtime,
             WHEN reason = 'cooked' THEN 12 WHEN reason = 'pregap' THEN 13
             WHEN reason = 'corrupt' THEN 14 WHEN reason = 'checksum' THEN 15
             WHEN reason = 'no_checksum' THEN 16 ELSE -1 END,
-       CASE WHEN crc32_whole IS NULL THEN NULL ELSE COALESCE(unhex(crc32_whole), x'') END,
-       CASE WHEN md5_whole IS NULL THEN NULL ELSE COALESCE(unhex(md5_whole), x'') END,
-       CASE WHEN sha1_whole IS NULL THEN NULL ELSE COALESCE(unhex(sha1_whole), x'') END
+       CASE WHEN NULLIF(crc32_whole, '') IS NULL THEN NULL ELSE COALESCE(unhex(crc32_whole), x'') END,
+       CASE WHEN NULLIF(md5_whole, '') IS NULL THEN NULL ELSE COALESCE(unhex(md5_whole), x'') END,
+       CASE WHEN NULLIF(sha1_whole, '') IS NULL THEN NULL ELSE COALESCE(unhex(sha1_whole), x'') END
 FROM files ORDER BY id;
 
 DROP TABLE files;
