@@ -424,11 +424,14 @@ async fn wizard_and_jobs_report_state() {
     assert_eq!(w["open_on_start"], true);
     assert!(w["paths"].is_boolean());
 
-    let jobs = get(addr, "/api/v1/system/jobs?limit=10&offset=0")
-        .await
-        .json();
-    assert_eq!(jobs["total"], 0);
-    assert_eq!(jobs["items"], json!([]));
+    // Every start queues a re-map, which leaves the list once it finds nothing to do.
+    eventually("the startup jobs to leave the list", || async {
+        let jobs = get(addr, "/api/v1/system/jobs?limit=10&offset=0")
+            .await
+            .json();
+        jobs["total"] == 0 && jobs["items"] == json!([])
+    })
+    .await;
     let r = get(addr, "/api/v1/system/jobs?limit=x").await;
     assert_eq!(r.status, 400);
 
