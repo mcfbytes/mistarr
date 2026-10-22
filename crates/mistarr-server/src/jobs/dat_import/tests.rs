@@ -2531,13 +2531,15 @@ async fn queued_dat_jobs_run_as_one_batch_each_with_its_own_job() {
         row.progress.as_ref().map(|p| p["done"].clone()),
         Some(json!(1))
     );
-    let left = app
-        .scheduler
-        .taken
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .len();
-    assert_eq!(left, 0, "every lane skipped the job taken from it");
+    // A lane skips a taken job when it reaches it, which may be after the job row ends.
+    crate::testing::eventually("every lane to skip the job taken from it", || async {
+        app.scheduler
+            .taken
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    })
+    .await;
 }
 
 fn count_rows(app: &AppState, sql: &'static str) -> i64 {
