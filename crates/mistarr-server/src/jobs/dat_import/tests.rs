@@ -2160,6 +2160,72 @@ fn run_batch(c: &TestDb, entries: &[batch::Entry]) -> (Vec<batch::End>, usize, r
     }
 }
 
+/// Records every phase of the runs it watches.
+#[derive(Default)]
+struct Phases(Vec<ram::Phase>);
+
+impl ram::Watch for Phases {
+    fn phase(&mut self, phase: ram::Phase) {
+        self.0.push(phase);
+    }
+
+    fn between(&mut self, _: ram::Phase) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_batch_with_many_free_pages_is_compacted_before_it_is_written_back() {
+    let c = conn();
+    c.with(|x| {
+        x.execute_batch("CREATE TABLE spare (id INTEGER PRIMARY KEY, v BLOB)")?;
+        let mut add = x.prepare("INSERT INTO spare (v) VALUES (zeroblob(65536))")?;
+        for _ in 0..96 {
+            add.execute([])?;
+        }
+        drop(add);
+        x.execute_batch("DROP TABLE spare")?;
+        x.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+        Ok(())
+    })
+    .expect("free pages");
+    let size = std::fs::metadata(c.db.path()).expect("stat").len();
+    let entries = [
+        entry(
+            c.dir.path(),
+            0,
+            &dat("Maker - Game Boy", "1", &[("Example Quest (USA)", None)]),
+        ),
+        entry(
+            c.dir.path(),
+            1,
+            &dat("Maker - Game Boy", "2", &[("Mock Manor (USA)", None)]),
+        ),
+    ];
+    let ram_dir = crate::db::testutil::ram_dir();
+    let plan = ram::Plan {
+        dir: ram_dir.path().to_path_buf(),
+        floor: 0,
+        job: Some(JobId::new(1)),
+        input: 0,
+    };
+    let mut phases = Phases::default();
+    let ran =
+        c.db.hold_writer_blocking(|h| {
+            ram::run(h, &plan, &mut phases, |db| {
+                batch::import_batch(db, &entries, &mut |_, _, _, _| Ok(()))
+            })
+        })
+        .expect("run");
+    let Ram::Done(ends, _) = ran else {
+        panic!("fell back: {ran:?}");
+    };
+    assert!(ends.iter().all(loads));
+    assert!(phases.0.contains(&ram::Phase::Compacting), "{:?}", phases.0);
+    let after = std::fs::metadata(c.db.path()).expect("stat").len();
+    assert!(after < size, "{after} bytes after {size}");
+}
+
 fn loads(end: &batch::End) -> bool {
     matches!(end, batch::End::Imported(o) if matches!(o[..], [Outcome::Loaded(_)]))
 }
@@ -2465,13 +2531,15 @@ async fn queued_dat_jobs_run_as_one_batch_each_with_its_own_job() {
         row.progress.as_ref().map(|p| p["done"].clone()),
         Some(json!(1))
     );
-    let left = app
-        .scheduler
-        .taken
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .len();
-    assert_eq!(left, 0, "every lane skipped the job taken from it");
+    // A lane skips a taken job when it reaches it, which may be after the job row ends.
+    crate::testing::eventually("every lane to skip the job taken from it", || async {
+        app.scheduler
+            .taken
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .is_empty()
+    })
+    .await;
 }
 
 fn count_rows(app: &AppState, sql: &'static str) -> i64 {

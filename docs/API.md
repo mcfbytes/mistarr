@@ -176,7 +176,8 @@ the bytes read never moves backwards. An import on a copy of the database
 in RAM (ARCHITECTURE.md "DAT import in RAM") also reports `{ file, members,
 phase }` with `phase` `copying the database to memory` before those,
 `matching` (with `checked` and `matched`) and `picking` while it recomputes
-the platforms it loaded, and `writing the database to the card` after them,
+the platforms it loaded, `compacting the database` when it compacts, and
+`writing the database to the card` after them,
 and stores `{ file, members,
 done, games, phase: "importing" }` on the copy after each DAT, which the swap
 keeps. Several queued imports on one copy report the same way, each on its
