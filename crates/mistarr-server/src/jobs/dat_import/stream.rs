@@ -132,7 +132,13 @@ fn with_member<T>(
                     return Ok(Err(DAMAGED_ZIP_REASON.to_owned()));
                 }
             };
-            let name = entry.name().to_owned();
+            let name = match entry.name() {
+                Ok(n) => n.into_owned(),
+                Err(e) => {
+                    tracing::debug!(error = %e, "cannot read a zip member name");
+                    return Ok(Err(DAMAGED_ZIP_REASON.to_owned()));
+                }
+            };
             let total = entry.size();
             let counted = CountingReader::new(entry, |n| report(n, total));
             let out = f(&mut BufReader::new(counted), &name);

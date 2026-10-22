@@ -775,7 +775,11 @@ fn list_members(path: &Path) -> std::result::Result<Vec<Member>, String> {
         DAMAGED_ZIP_REASON.to_owned()
     })?;
     let members: Vec<_> = (0..archive.len())
-        .filter(|&i| archive.name_for_index(i).is_some_and(is_dat_name))
+        .filter(|&i| {
+            archive
+                .name_for_index(i)
+                .is_some_and(|name| name.is_ok_and(|n| is_dat_name(&n)))
+        })
         .map(Member::Zip)
         .collect();
     if members.is_empty() {
