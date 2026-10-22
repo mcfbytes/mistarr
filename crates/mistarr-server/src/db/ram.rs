@@ -48,6 +48,10 @@ const MIB: u64 = 1024 * 1024;
 /// The compacted copy's file name inside the working directory.
 const COMPACT_NAME: &str = "compact.db";
 
+/// Memory beyond the twin's pages that a compaction needs: the page caches of the
+/// `VACUUM` connection and slack. The copy is not counted: it is in `MemAvailable` already.
+const COMPACT_MARGIN_BYTES: u64 = 16 * MIB;
+
 /// Free pages, in percent of the copy's pages, above which the copy is compacted.
 const COMPACT_ABOVE_PERCENT: u64 = 25;
 
@@ -511,6 +515,10 @@ fn compact(copy: &Path, work_dir: &Path, floor: u64, started: &mut dyn FnMut()) 
                 after_mib = after.div_ceil(MIB),
                 "compacted the database before writing it back"
             );
+            // The twin is whole and closed; the copy would only hold RAM through the write-back.
+            for suffix in ["", "-journal", "-wal", "-shm"] {
+                let _ = fs::remove_file(sibling(copy, suffix));
+            }
             work_dir.join(COMPACT_NAME)
         }
         Ok(None) => copy.to_path_buf(),
@@ -547,7 +555,7 @@ fn compacted(
     }
     let live = (pages - free).saturating_mul(size);
     let before = pages.saturating_mul(size);
-    compaction_refusal(budget, floor, before, live)?;
+    compaction_refusal(budget, floor, live)?;
     let want = ["user_version", "application_id", "page_size", "auto_vacuum"];
     let mut kept = Vec::new();
     for name in want {
@@ -578,18 +586,15 @@ fn compacted(
     Ok(Some((before, after)))
 }
 
-/// Why `budget` cannot hold a compacted twin of `live` bytes beside the `copy_bytes`
-/// copy while keeping `floor` bytes of memory available, or `Ok` when it can.
-fn compaction_refusal(
-    budget: &Budget,
-    floor: u64,
-    copy_bytes: u64,
-    live: u64,
-) -> std::result::Result<(), String> {
+/// Why `budget` cannot hold a compacted twin of `live` bytes while keeping `floor` bytes
+/// of memory available, or `Ok` when it can. The copy, already in RAM, is not charged.
+fn compaction_refusal(budget: &Budget, floor: u64, live: u64) -> std::result::Result<(), String> {
     let Some(available) = budget.available else {
         return Err("the memory available cannot be read".to_owned());
     };
-    let want = floor.saturating_add(copy_bytes).saturating_add(live);
+    let want = floor
+        .saturating_add(live)
+        .saturating_add(COMPACT_MARGIN_BYTES);
     if available < want {
         return Err(format!(
             "{} MiB of memory available, {} MiB needed to compact",

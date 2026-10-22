@@ -1065,6 +1065,7 @@ fn the_compacted_file_keeps_its_header_and_goes_back_one_write_per_mebibyte() {
     let whole = file_len(&copy).expect("len");
     let source = compact(&copy, &work, 0, &mut || {});
     assert_eq!(source, work.join(COMPACT_NAME));
+    assert!(!copy.exists(), "the copy no longer holds RAM");
     let size = file_len(&source).expect("len");
     assert!(size * 2 < whole, "{size} of {whole} bytes");
     let c = Connection::open(&source).expect("open");
@@ -1214,14 +1215,20 @@ fn the_compaction_check_names_what_is_short() {
         ram_room: Some(100 * MIB),
         card_room: None,
     };
-    assert_eq!(
-        compaction_refusal(&roomy, 128 * MIB, 100 * MIB, 70 * MIB),
-        Ok(())
-    );
-    assert!(compaction_refusal(&roomy, 128 * MIB, 110 * MIB, 70 * MIB)
-        .is_err_and(|e| e.contains("308 MiB needed")));
-    assert!(compaction_refusal(&roomy, 0, 100 * MIB, 101 * MIB)
-        .is_err_and(|e| e.contains("100 MiB free")));
+    let need = 128 * MIB + 70 * MIB + COMPACT_MARGIN_BYTES;
+    assert_eq!(compaction_refusal(&roomy, 128 * MIB, 70 * MIB), Ok(()));
+    let exact = Budget {
+        available: Some(need),
+        ..roomy
+    };
+    assert_eq!(compaction_refusal(&exact, 128 * MIB, 70 * MIB), Ok(()));
+    let under = Budget {
+        available: Some(need - 1),
+        ..roomy
+    };
+    assert!(compaction_refusal(&under, 128 * MIB, 70 * MIB)
+        .is_err_and(|e| e.contains("214 MiB needed")));
+    assert!(compaction_refusal(&roomy, 0, 101 * MIB).is_err_and(|e| e.contains("100 MiB free")));
 }
 
 #[test]
@@ -1252,4 +1259,42 @@ fn a_startup_migration_compacts_the_free_pages_it_finds() {
         .expect("free");
     assert_eq!(free, 0);
     assert_eq!(fs::read_dir(ram.path()).map_or(0, Iterator::count), 0);
+}
+
+/// Every table's rows and the schema of the database at `path`.
+fn dump_file(path: &Path) -> Vec<String> {
+    let c = Connection::open(path).expect("open");
+    dump(&c)
+}
+
+#[test]
+fn the_real_schema_survives_compaction() {
+    let ram = testutil::ram_dir();
+    let work = ram.path().join("work");
+    fs::create_dir_all(&work).expect("work dir");
+    let copy = work.join(COPY_NAME);
+    at_version(&copy, super::super::migrate::latest(), 0.02);
+    let c = Connection::open(&copy).expect("open");
+    churn(&c, 6).expect("churn");
+    let live: i64 = c
+        .query_row("SELECT COUNT(*) FROM titles", [], |r| r.get(0))
+        .expect("count");
+    assert!(live > 0, "the catalogue has titles");
+    c.execute("DELETE FROM titles WHERE id % 3 = 0", []).ok();
+    super::super::wal_emptied(&c).expect("checkpoint");
+    c.close().expect("close");
+    let before = dump_file(&copy);
+    let source = compact(&copy, &work, 0, &mut || {});
+    assert_eq!(source, work.join(COMPACT_NAME), "compacted");
+    let c = Connection::open(&source).expect("open");
+    let ok: String = c
+        .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+        .expect("integrity");
+    assert_eq!(ok, "ok");
+    c.execute(
+        "INSERT INTO title_search(title_search) VALUES('integrity-check')",
+        [],
+    )
+    .expect("the search index matches its content");
+    assert_eq!(dump(&c), before);
 }
