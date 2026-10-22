@@ -314,44 +314,74 @@ impl Job for DatImport {
             Some(Err(e)) => return Err(e.into()),
         };
         let stored = file_name(&target);
+        let mut lead = batch::Item {
+            job: self.clone(),
+            members,
+            target,
+            size: 0,
+        };
+        let followers = self.take_batch(ctx, &mut lead).await?;
+        if !followers.is_empty() {
+            match batch::run(ctx, lead.clone(), followers).await? {
+                batch::Ran::Ended(result) => return result,
+                batch::Ran::Alone => {}
+            }
+        }
         let Imported {
             outcomes,
             recomputed,
-        } = self.import_members(ctx, &members, &stored).await?;
-        let mut loaded = Vec::new();
-        let mut reasons = Vec::new();
-        for o in outcomes {
-            match o {
-                Outcome::Loaded(l) => loaded.push(l),
-                Outcome::Rejected(r) => reasons.push(r),
-                Outcome::Skipped => {}
-            }
+        } = self.import_members(ctx, &lead.members, &stored).await?;
+        let loaded = settle(&ctx.app, &self.path, &file, lead.target, outcomes).await?;
+        if !loaded.is_empty() {
+            follow_up_load(&ctx.app, &loaded, recomputed).await;
         }
-        if loaded.is_empty() {
-            return reject(&ctx.app, &self.path, &file, &reasons.join("\n")).await;
-        }
-        let (path, planned) = (self.path.clone(), target);
-        crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
-            intake::place(&path, &planned)
-        })
-        .await??;
-        for reason in &reasons {
-            publish_rejected(&ctx.app, &file, reason);
-        }
-        for l in &loaded {
-            tracing::info!(
-                file,
-                version = %l.version,
-                games = l.games,
-                titles = l.has_titles,
-                retired = l.retired,
-                "DAT loaded"
-            );
-            publish_loaded(&ctx.app, l, &file);
-        }
-        follow_up_load(&ctx.app, &loaded, recomputed).await;
         Ok(())
     }
+}
+
+/// Moves a file whose members `outcomes` say how they ended to `dats/loaded/` as `planned`
+/// when any loaded, else to `dats/rejected/` with their reasons; publishes `dat.loaded`
+/// and `dat.rejected` for each member, and returns those that loaded.
+async fn settle(
+    app: &AppState,
+    path: &Path,
+    file: &str,
+    planned: PathBuf,
+    outcomes: Vec<Outcome>,
+) -> Result<Vec<Loaded>> {
+    let mut loaded = Vec::new();
+    let mut reasons = Vec::new();
+    for o in outcomes {
+        match o {
+            Outcome::Loaded(l) => loaded.push(l),
+            Outcome::Rejected(r) => reasons.push(r),
+            Outcome::Skipped => {}
+        }
+    }
+    if loaded.is_empty() {
+        reject(app, path, file, &reasons.join("\n")).await?;
+        return Ok(loaded);
+    }
+    let path = path.to_path_buf();
+    crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
+        intake::place(&path, &planned)
+    })
+    .await??;
+    for reason in &reasons {
+        publish_rejected(app, file, reason);
+    }
+    for l in &loaded {
+        tracing::info!(
+            file,
+            version = %l.version,
+            games = l.games,
+            titles = l.has_titles,
+            retired = l.retired,
+            "DAT loaded"
+        );
+        publish_loaded(app, l, file);
+    }
+    Ok(loaded)
 }
 
 impl DatImport {
@@ -576,19 +606,40 @@ fn import_all(
         outcomes.push(outcome);
         progress(db, done + 1, games)?;
     }
-    let mut platforms: Vec<&PlatformId> = Vec::new();
-    for o in &outcomes {
+    let platforms = loaded_platforms(&outcomes);
+    let stop = || req.stop.check().and_then(|()| room(req));
+    recompute_platforms(db, &platforms, &req.prefs, &stop, req.meter.as_ref())?;
+    let loaded = outcomes.iter().any(|o| matches!(o, Outcome::Loaded(_)));
+    Ok((outcomes, loaded))
+}
+
+/// The platforms `outcomes` loaded titles into, each once, in order.
+fn loaded_platforms<'a>(outcomes: impl IntoIterator<Item = &'a Outcome>) -> Vec<PlatformId> {
+    let mut platforms: Vec<PlatformId> = Vec::new();
+    for o in outcomes {
         if let Outcome::Loaded(Loaded {
             platform: Some(p), ..
         }) = o
         {
-            if !platforms.contains(&p) {
-                platforms.push(p);
+            if !platforms.contains(p) {
+                platforms.push(p.clone());
             }
         }
     }
+    platforms
+}
+
+/// Recomputes each of `platforms` on the copy `db`, as the queued recompute would,
+/// calling `stop` between steps and reporting through `meter`.
+fn recompute_platforms(
+    db: &Db,
+    platforms: &[PlatformId],
+    prefs: &Prefs,
+    stop: &dyn Fn() -> Result<()>,
+    meter: Option<&Meter>,
+) -> Result<()> {
     let report = |pass: Pass, tally: &Tally| {
-        if let Some(m) = &req.meter {
+        if let Some(m) = meter {
             m.reporter.report(pass.label(), || {
                 m.value(pass.label(), None)
                     .with("checked", tally.checked)
@@ -597,16 +648,9 @@ fn import_all(
         }
     };
     for p in platforms {
-        recompute_blocking(
-            db,
-            p,
-            &req.prefs,
-            &|| req.stop.check().and_then(|()| room(req)),
-            &report,
-        )?;
+        recompute_blocking(db, p, prefs, stop, &report)?;
     }
-    let loaded = outcomes.iter().any(|o| matches!(o, Outcome::Loaded(_)));
-    Ok((outcomes, loaded))
+    Ok(())
 }
 
 /// [`Error::NoRoom`] when memory fell below the floor of a request in RAM.
@@ -888,6 +932,7 @@ pub async fn watch(app: Arc<AppState>) {
     .await;
 }
 
+mod batch;
 mod recompute;
 mod stream;
 #[cfg(test)]

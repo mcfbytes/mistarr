@@ -2317,7 +2317,7 @@ DELETE FROM parent WHERE id = 3;",
         let bad = [
             "UPDATE roms SET sha1 = 'zz00000000000000000000000000000000000001'",
             "UPDATE roms SET sha1 = '00000001'",
-            "UPDATE roms SET md5 = ''",
+            "UPDATE roms SET md5 = 'zz'",
             "UPDATE roms SET crc32 = 'aabbccddee'",
             "UPDATE roms SET status = 'great'",
             "UPDATE roms SET retired = 2",
@@ -2381,6 +2381,26 @@ DELETE FROM parent WHERE id = 3;",
         assert_eq!(
             column(&conn, "SELECT lower(hex(crc32)) FROM roms"),
             ["aabbccdd"]
+        );
+        let (conn, outcome) = hash_migration_with(
+            "UPDATE roms SET md5 = '', sha1 = '';
+             UPDATE files SET md5 = '', crc32_whole = '';",
+        );
+        assert_eq!(outcome.expect("migrate"), [24], "empty hash text passes");
+        assert_eq!(
+            column(
+                &conn,
+                "SELECT CAST(md5 IS NULL AS TEXT) || CAST(sha1 IS NULL AS TEXT) FROM roms"
+            ),
+            ["11"],
+            "an empty hash text becomes NULL"
+        );
+        assert_eq!(
+            column(
+                &conn,
+                "SELECT CAST(md5 IS NULL AS TEXT) || CAST(crc32_whole IS NULL AS TEXT) FROM files"
+            ),
+            ["11"]
         );
     }
 

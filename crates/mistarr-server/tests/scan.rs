@@ -1567,7 +1567,7 @@ async fn rows_hashed_before_the_whole_form_are_hashed_again_after_the_upgrade() 
             )
             .expect("platforms");
         }
-        // Schema 19 stores hashes as hex text, which the fixtures no longer write.
+        // Schema 19 stores hex text and the fixtures write BLOBs.
         db.execute_batch(&format!(
             "INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
                                        game_count)
