@@ -9,7 +9,9 @@ use mistarr_sources::fuzzy::{SizeIndex, SizedRom};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
+use super::downloads::DownloadState;
 use super::ids::{SourceId, TitleId};
+use super::sources::SourceState;
 use super::sql::{self, code_enum};
 use crate::error::Result;
 
@@ -80,7 +82,7 @@ pub(crate) fn tier(column: &str) -> String {
 
 /// True when a `bad` download already tried this file for this rom.
 const NOT_BAD: &str = "NOT EXISTS (SELECT 1 FROM downloads b
-    WHERE b.rom_id = {rom} AND b.state = 'bad' AND b.source_id = {src} AND b.file_index = {idx})";
+    WHERE b.rom_id = {rom} AND b.state = {bad} AND b.source_id = {src} AND b.file_index = {idx})";
 
 /// [`NOT_BAD`] over the given columns.
 pub(crate) fn not_bad(rom: &str, src: &str, idx: &str) -> String {
@@ -88,6 +90,7 @@ pub(crate) fn not_bad(rom: &str, src: &str, idx: &str) -> String {
         .replace("{rom}", rom)
         .replace("{src}", src)
         .replace("{idx}", idx)
+        .replace("{bad}", DownloadState::Bad.sql())
 }
 
 /// What a mapping of a source must respect, beyond its per-file matches,
@@ -148,10 +151,11 @@ pub fn stored(conn: &Connection, source: SourceId) -> Result<Stored> {
     while let Some(r) = rows.next()? {
         out.candidates.insert((r.get(0)?, r.get(1)?), r.get(2)?);
     }
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare_cached(&format!(
         "SELECT file_index, rom_id FROM downloads
-         WHERE source_id = ?1 AND state = 'bad' AND file_index IS NOT NULL",
-    )?;
+         WHERE source_id = ?1 AND state = {} AND file_index IS NOT NULL",
+        DownloadState::Bad.sql()
+    ))?;
     let mut rows = stmt.query([source])?;
     while let Some(r) = rows.next()? {
         out.bad.insert((r.get(0)?, r.get(1)?));
@@ -574,7 +578,7 @@ pub fn for_group(conn: &Connection, parent: TitleId) -> Result<Vec<(TitleId, Ava
            {group}
            JOIN torrent_files tf ON tf.rom_id = r.id
            JOIN torrent_dirs td ON td.id = tf.dir_id
-           JOIN sources s ON s.id = tf.source_id AND +s.state = 'bound'
+           JOIN sources s ON s.id = tf.source_id AND +s.state = {bound}
            WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)) AND {bad_tf}
            UNION ALL
            SELECT t.id, c.source_id, s.display_name, c.file_index, td.path || tf.leaf,
@@ -583,13 +587,14 @@ pub fn for_group(conn: &Connection, parent: TitleId) -> Result<Vec<(TitleId, Ava
            JOIN torrent_candidates c ON c.rom_id = r.id
            JOIN torrent_files tf ON tf.source_id = c.source_id AND tf.file_index = c.file_index
            JOIN torrent_dirs td ON td.id = tf.dir_id
-           JOIN sources s ON s.id = c.source_id AND +s.state = 'bound'
+           JOIN sources s ON s.id = c.source_id AND +s.state = {bound}
            WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)) AND {bad_c}
          )
          ORDER BY title_id, {rank}, source_id, file_index, rom_id",
         bad_tf = not_bad("r.id", "tf.source_id", "tf.file_index"),
         bad_c = not_bad("r.id", "c.source_id", "c.file_index"),
         rank = rank("confidence"),
+        bound = SourceState::Bound.sql(),
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt

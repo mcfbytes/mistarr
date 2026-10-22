@@ -113,6 +113,7 @@ macro_rules! code_enum {
 
         impl $name {
             /// Every value, in declaration order.
+            #[allow(dead_code, reason = "Only some code enums list their values in tests.")]
             #[cfg(any(test, feature = "test-support"))]
             pub const ALL: &'static [Self] = &[$(Self::$variant),+];
 

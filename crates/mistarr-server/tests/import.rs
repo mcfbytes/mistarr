@@ -761,7 +761,7 @@ fn set_importing(b: &Booted, ids: &[DownloadId]) {
         .write_blocking(move |c| {
             for id in ids {
                 c.execute(
-                    "UPDATE downloads SET state = 'importing', error = NULL WHERE id = ?1",
+                    "UPDATE downloads SET state = 4, error = NULL WHERE id = ?1",
                     [id],
                 )?;
             }

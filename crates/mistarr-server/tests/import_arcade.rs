@@ -867,7 +867,7 @@ async fn two_zips_arrive(first: &str) {
             .db
             .write_blocking(move |c| {
                 c.execute(
-                    "UPDATE downloads SET state = 'importing', source_id = ?2, file_index = ?3,
+                    "UPDATE downloads SET state = 4, source_id = ?2, file_index = ?3,
                        staged_path = ?4 WHERE id = ?1",
                     rusqlite::params![download.get(), src.get(), index, staged],
                 )?;
