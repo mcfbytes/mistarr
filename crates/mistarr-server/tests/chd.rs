@@ -672,11 +672,7 @@ async fn a_held_gate_pauses_decoding_and_turning_off_stops_it() {
         (m.state, m.reason.as_deref()),
         (FileState::Unidentified, Some("off"))
     );
-    let waiting = count(
-        app,
-        "SELECT COUNT(*) FROM files WHERE reason IN ('pending', 'no_layout')",
-    )
-    .await;
+    let waiting = count(app, "SELECT COUNT(*) FROM files WHERE reason IN (1, 2)").await;
     assert_eq!(waiting, 0);
     b.running.shutdown().await.expect("shutdown");
 }

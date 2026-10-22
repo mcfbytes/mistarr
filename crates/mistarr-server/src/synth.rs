@@ -6,6 +6,8 @@ use std::fmt::Write as _;
 
 use rusqlite::{params, Connection};
 
+use crate::db::files::FileState;
+use crate::db::titles::RomStatus;
 use crate::db::{self, titles};
 use crate::error::Result;
 
@@ -429,7 +431,7 @@ fn seed_console(
     )?;
     let mut rom = c.prepare_cached(
         "INSERT INTO roms (title_id, name, size, crc32, md5, sha1, status, header, zip_dir, present)
-         VALUES (?1, ?2, ?3, ?4, substr(?5, 9), ?5, ?6, ?7, ?8, ?9)",
+         VALUES (?1, ?2, ?3, unhex(?4), unhex(substr(?5, 9)), unhex(?5), ?6, ?7, ?8, ?9)",
     )?;
     let mut file = c.prepare_cached(
         "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
@@ -534,7 +536,11 @@ fn seed_console(
                     i64::try_from(size).unwrap_or(0),
                     (!mra).then(|| rng.hex(8)),
                     (!mra).then(|| rng.hex(40)),
-                    if mra { "nodump" } else { "good" },
+                    if mra {
+                        RomStatus::NoDump
+                    } else {
+                        RomStatus::Good
+                    },
                     (console.layout == Layout::Headered).then(|| "0".repeat(32)),
                     mra.then_some("mame"),
                     mra && rng.chance(30),
@@ -543,9 +549,9 @@ fn seed_console(
                 out.roms += 1;
                 if files_here && (v == 0 || rng.chance(20)) {
                     let state = match rng.below(20) {
-                        0 => "misnamed",
-                        1 => "bad",
-                        _ => "verified",
+                        0 => FileState::Misnamed,
+                        1 => FileState::Bad,
+                        _ => FileState::Verified,
                     };
                     file.execute(params![
                         console.id,
@@ -565,7 +571,7 @@ fn seed_console(
                 format!("{}/unmatched {group}.bin", console.id),
                 1_024,
                 Option::<i64>::None,
-                "unverified"
+                FileState::Unverified
             ])?;
             out.files += 1;
         }

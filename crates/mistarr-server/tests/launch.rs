@@ -99,7 +99,7 @@ async fn launch_routes_answer_with_documented_statuses() {
         .app
         .db
         .write(|c| {
-            c.execute("UPDATE files SET state = 'verified'", [])?;
+            c.execute("UPDATE files SET state = 1", [])?;
             Ok(())
         })
         .await

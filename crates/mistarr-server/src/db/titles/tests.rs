@@ -105,7 +105,7 @@ fn rom(c: &Connection, title: TitleId, name: &str) -> i64 {
     .expect("rom")
 }
 
-fn file(c: &Connection, rom: Option<i64>, path: &str, state: &str) -> i64 {
+fn file(c: &Connection, rom: Option<i64>, path: &str, state: FileState) -> i64 {
     c.execute(
         "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
          VALUES ('gb', ?1, 4, 0, ?2, ?3, 0)",
@@ -199,7 +199,7 @@ fn upsert_keeps_ids_across_versions_and_retires_dropped_roms() {
         .expect("title");
     assert_eq!(dv, v2.get());
     assert_eq!(tags_of(&c, id, Tag::Regions).expect("regions"), ["Europe"]);
-    let roms: Vec<(String, String, bool)> = c
+    let roms: Vec<(String, RomStatus, bool)> = c
         .prepare("SELECT name, status, retired FROM roms WHERE title_id = ?1 ORDER BY name")
         .expect("prepare")
         .query_map([id.get()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
@@ -209,8 +209,8 @@ fn upsert_keeps_ids_across_versions_and_retires_dropped_roms() {
     assert_eq!(
         roms,
         [
-            ("a.bin".to_owned(), "baddump".to_owned(), false),
-            ("b.bin".to_owned(), "good".to_owned(), true)
+            ("a.bin".to_owned(), RomStatus::BadDump, false),
+            ("b.bin".to_owned(), RomStatus::Good, true)
         ]
     );
     assert_eq!(dats::retire_absent(&c, v2).expect("retire"), 0);
@@ -309,8 +309,8 @@ fn view_counts_a_title_once_whatever_its_roms_and_files() {
     link_parents(&c, v, true).expect("link");
     let t1 = rom(&c, disc, "Example Saga (USA) (Track 1).bin");
     let t2 = rom(&c, disc, "Example Saga (USA) (Track 2).bin");
-    file(&c, Some(t1), "saga/t1.bin", "verified");
-    file(&c, Some(t1), "copy/t1.bin", "verified");
+    file(&c, Some(t1), "saga/t1.bin", FileState::Verified);
+    file(&c, Some(t1), "copy/t1.bin", FileState::Verified);
     let have = |c: &Connection| -> (i64, i64) {
         groups::flush(c).expect("flush");
         c.query_row(
@@ -321,10 +321,10 @@ fn view_counts_a_title_once_whatever_its_roms_and_files() {
         .expect("group")
     };
     assert_eq!(have(&c), (1, 0), "one track of two is not a verified game");
-    file(&c, Some(t2), "saga/t2.bin", "verified");
-    file(&c, Some(t2), "saga/t2-old.bin", "misnamed");
+    file(&c, Some(t2), "saga/t2.bin", FileState::Verified);
+    file(&c, Some(t2), "saga/t2-old.bin", FileState::Misnamed);
     assert_eq!(have(&c), (1, 1));
-    file(&c, None, "stray.bin", "unverified");
+    file(&c, None, "stray.bin", FileState::Unverified);
     c.execute("UPDATE titles SET wanted = 1 WHERE id = ?1", [disc.get()])
         .expect("want");
     let counts = counts(&c, &["bios".to_owned()]).expect("counts");
@@ -644,7 +644,7 @@ fn browse_filters_sorts_and_pages() {
     c.execute("UPDATE titles SET wanted = 1 WHERE id = ?1", [tale.get()])
         .expect("want");
     let t2 = rom(&c, tale, "t.bin");
-    file(&c, Some(t2), "t.bin", "verified");
+    file(&c, Some(t2), "t.bin", FileState::Verified);
     let wanted = Browse {
         wanted: Tri::Yes,
         ..base.clone()
@@ -751,7 +751,7 @@ fn detail_lists_variants_roms_files_and_sources() {
     plain(&c);
     let usa = id_of(&c, "Example Quest (USA)");
     let q_rom = rom(&c, usa, "q.bin");
-    let f = file(&c, Some(q_rom), "Example Quest.gb", "misnamed");
+    let f = file(&c, Some(q_rom), "Example Quest.gb", FileState::Misnamed);
     c.execute_batch(
         "INSERT INTO sources (infohash, display_name, origin_file, state, added_at)
          VALUES ('00', 'n', 'a.torrent', 'bound', 0);",
@@ -1086,8 +1086,9 @@ fn store_catalogue(c: &Connection, counts: [i64; 3], games: &[GameSpec], ids: &[
         .expect("parent");
         for (k, key) in g.roms.iter().enumerate() {
             c.execute(
-                "INSERT INTO roms (title_id, name, size, sha1) VALUES (?1, ?2, 4, ?3)",
-                params![id, format!("r{k}"), key.map(|k| format!("{k:02x}"))],
+                "INSERT INTO roms (title_id, name, size, sha1)
+                 VALUES (?1, ?2, 4, CASE WHEN ?3 IS NULL THEN NULL ELSE unhex(printf('%040x', ?3)) END)",
+                params![id, format!("r{k}"), key.map(i64::from)],
             )
             .expect("rom");
         }
@@ -1127,7 +1128,9 @@ fn reference_groups(c: &Connection) -> Vec<(TitleId, Option<TitleId>)> {
     for row in &mut rows {
         let keys: Vec<Option<String>> = c
             .prepare(
-                "SELECT COALESCE(sha1, md5, crc32 || ':' || size) FROM roms
+                "SELECT COALESCE(NULLIF(lower(hex(sha1)), ''), NULLIF(lower(hex(md5)), ''),
+                                 CASE WHEN crc32 IS NOT NULL
+                                      THEN lower(hex(crc32)) || ':' || size END) FROM roms
                  WHERE title_id = ?1 AND retired = 0",
             )
             .expect("prepare")
@@ -1260,8 +1263,9 @@ fn chained_re_rooting_keeps_every_group_apart() {
                   (10, 'nes', 3, 'N', 'N'), (11, 'nes', 3, 'C', 'C');
          UPDATE titles SET parent_id = CASE id WHEN 41 THEN 40 WHEN 11 THEN 10 ELSE id END;
          INSERT INTO roms (title_id, name, size, sha1)
-           VALUES (50, 'a', 4, 'aa'), (40, 'x', 4, 'aa'), (41, 'b', 4, 'bb'),
-                  (10, 'n', 4, 'bb'), (11, 'c', 4, 'cc');",
+           VALUES (50, 'a', 4, unhex(printf('%040x', 170))), (40, 'x', 4, unhex(printf('%040x', 170))),
+                  (41, 'b', 4, unhex(printf('%040x', 187))), (10, 'n', 4, unhex(printf('%040x', 187))),
+                  (11, 'c', 4, unhex(printf('%040x', 204)));",
     )
     .expect("rows");
     recompute_nes(&mut c);

@@ -4,6 +4,7 @@
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension};
 
+use super::files::FileState;
 use crate::error::Result;
 
 /// Flags with their own bit in the group summary, in bit order; `known_flags` holds the same.
@@ -144,7 +145,7 @@ fn select(scope: Scope) -> String {
                        AND ((r.present = 1
                              AND COALESCE(t.mra_check, '') NOT IN ('mismatch', 'missing_part'))
                             OR EXISTS (SELECT 1 FROM files f
-                                       WHERE f.rom_id = r.id AND f.state = 'verified')))
+                                       WHERE f.rom_id = r.id AND f.state = {verified})))
                       AS roms_verified
              FROM titles t WHERE t.retired = 0 AND t.group_root IS NOT NULL AND {members}
            ) v
@@ -167,7 +168,8 @@ fn select(scope: Scope) -> String {
                   {unflagged_regions} AS unflagged_regions,
                   {flag_union} AS flag_union, {region_union} AS region_union
            FROM b GROUP BY b.parent_id
-         ) u ON u.parent_id = g.parent_id"
+         ) u ON u.parent_id = g.parent_id",
+        verified = FileState::Verified.sql()
     )
 }
 

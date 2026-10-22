@@ -5,7 +5,7 @@ use mistarr_core::PlatformId;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::ids::{DatVersionId, TitleId};
-use super::sql::{self, text_enum};
+use super::sql::{self, code_enum, text_enum};
 
 use crate::error::Result;
 
@@ -19,17 +19,17 @@ text_enum! {
     }
 }
 
-text_enum! {
+code_enum! {
     /// `roms.status`: the DAT's dump status of a rom.
     pub enum RomStatus {
         /// A good dump, the DAT's default.
-        Good = "good",
+        Good = ("good", 0),
         /// A known bad dump.
-        BadDump = "baddump",
+        BadDump = ("baddump", 1),
         /// No known dump; hashes are usually absent.
-        NoDump = "nodump",
+        NoDump = ("nodump", 2),
         /// A dump the DAT marks verified.
-        Verified = "verified",
+        Verified = ("verified", 3),
     }
 }
 

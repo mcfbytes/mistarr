@@ -125,21 +125,26 @@ impl<const N: usize> de::Visitor<'_> for HexVisitor<N> {
     }
 }
 
-/// Stored as lowercase hex text; a column that is not that hex fails to read.
+/// Stored as the digest's `N` bytes in a BLOB; any other value fails to read.
 #[cfg(feature = "rusqlite")]
 impl<const N: usize> rusqlite::types::ToSql for Digest<N> {
     fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
-        Ok(self.to_string().into())
+        Ok(rusqlite::types::ToSqlOutput::Borrowed(
+            rusqlite::types::ValueRef::Blob(&self.0),
+        ))
     }
 }
 
 #[cfg(feature = "rusqlite")]
 impl<const N: usize> rusqlite::types::FromSql for Digest<N> {
     fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
-        value
-            .as_str()?
-            .parse()
-            .map_err(|e| rusqlite::types::FromSqlError::Other(Box::new(e)))
+        let blob = value.as_blob()?;
+        <[u8; N]>::try_from(blob).map(Self).map_err(|_| {
+            rusqlite::types::FromSqlError::InvalidBlobSize {
+                expected_size: N,
+                blob_size: blob.len(),
+            }
+        })
     }
 }
 
@@ -238,17 +243,23 @@ mod tests {
 
     #[cfg(feature = "rusqlite")]
     #[test]
-    fn sql_stores_lowercase_hex_and_refuses_anything_else() {
+    fn sql_stores_the_bytes_and_refuses_any_other_value() {
         let c = rusqlite::Connection::open_in_memory().expect("open");
         let d = Sha1::from_bytes([0xab; 20]);
-        let text: String = c.query_row("SELECT ?1", [d], |r| r.get(0)).expect("text");
-        assert_eq!(text, "ab".repeat(20));
-        let back: Sha1 = c
-            .query_row("SELECT upper(?1)", [d], |r| r.get(0))
-            .expect("back");
+        let blob: Vec<u8> = c.query_row("SELECT ?1", [d], |r| r.get(0)).expect("blob");
+        assert_eq!(blob, vec![0xab; 20]);
+        let hex: String = c
+            .query_row("SELECT lower(hex(?1))", [d], |r| r.get(0))
+            .expect("hex");
+        assert_eq!(hex, "ab".repeat(20));
+        let back: Sha1 = c.query_row("SELECT ?1", [d], |r| r.get(0)).expect("back");
         assert_eq!(back, d);
         assert!(c
-            .query_row("SELECT 'zz'", [], |r| r.get::<_, Md5>(0))
+            .query_row("SELECT x'abab'", [], |r| r.get::<_, Md5>(0))
+            .is_err());
+        assert!(c
+            .query_row("SELECT 'abababababababababababababababab'", [], |r| r
+                .get::<_, Md5>(0))
             .is_err());
         assert!(c.query_row("SELECT 7", [], |r| r.get::<_, Md5>(0)).is_err());
     }

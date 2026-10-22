@@ -8,10 +8,12 @@ contents unchanged; see "Rollback" in [DEPLOYMENT.md](DEPLOYMENT.md). A
 migration whose first line is `-- foreign_keys: off` runs with foreign keys
 off and must leave `PRAGMA foreign_key_check` clean; see
 `crates/mistarr-server/migrations/README.md` for the rebuild rule. All
-timestamps are Unix seconds. All hashes are stored as lowercase hex text so
-they can be compared with DAT values without conversion; in memory they are
-`mistarr_core` digests, which bind and read as that text with core's
-`rusqlite` feature.
+timestamps are Unix seconds. All hashes are stored as BLOBs of their digest's
+bytes (CRC32 4, MD5 16, SHA1 20), checked by `length()` in every table that
+holds one, so a hex string written by mistarr's own code is refused; in memory
+they are `mistarr_core` digests, which bind and read as that blob with core's
+`rusqlite` feature, and the API and the views write them as lowercase hex.
+`sources.infohash` stays hex text.
 
 JSON may stage data or carry opaque blobs; nothing filters or joins on JSON.
 The JSON columns are `dat_stage.game`, `scan_progress.done_dirs`,
@@ -151,17 +153,19 @@ CREATE TABLE roms (                     -- one per <rom>; the file unit
   id            INTEGER PRIMARY KEY,
   title_id      INTEGER NOT NULL REFERENCES titles(id),
   name          TEXT NOT NULL,         -- filename in the DAT, may include a subdir for discs
-  size          INTEGER NOT NULL,
-  crc32         TEXT, md5 TEXT, sha1 TEXT,
-  status        TEXT NOT NULL DEFAULT 'nodump',   -- 'good' | 'baddump' | 'nodump' | 'verified'
+  size          INTEGER NOT NULL CHECK (size >= 0),
+  crc32         BLOB CHECK (length(crc32) = 4),
+  md5           BLOB CHECK (length(md5) = 16),
+  sha1          BLOB CHECK (length(sha1) = 20),
+  status        INTEGER NOT NULL DEFAULT 2 CHECK (status BETWEEN 0 AND 3),   -- "Rom statuses"
+  retired       INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0, 1)),   -- no longer listed by the title's DAT entry
   match_name    TEXT,                  -- normalised leaf name for pre-download matching, filled by binding
   match_base    TEXT,                  -- base name of match_name
-  retired       INTEGER NOT NULL DEFAULT 0,       -- no longer listed by the title's DAT entry
   header        TEXT,                  -- the DAT's header attribute, verbatim: hex bytes an adapter may prepend
   zip_dir       TEXT,                  -- MRA roms: directory under games/ holding the zip
-  present       INTEGER NOT NULL DEFAULT 0,       -- MRA roms: the zip was on disk at the last catalogue run or import
+  present       INTEGER NOT NULL DEFAULT 0 CHECK (present IN (0, 1)),   -- MRA roms: the zip was on disk at the last catalogue run or import
   UNIQUE (title_id, name)
-);
+) STRICT;
 CREATE INDEX roms_sha1 ON roms(sha1);
 CREATE INDEX roms_md5  ON roms(md5) WHERE sha1 IS NULL;
 CREATE INDEX roms_crc  ON roms(crc32, size);
@@ -178,15 +182,20 @@ CREATE TABLE files (                    -- what is on disk under games/
   rel_path      TEXT NOT NULL,         -- relative to games/, e.g. 'NES/a.zip#b.nes' for a zip member, 'mame/a.zip' for an arcade presence row, 'PSX/G/g.chd#01' or 'PSX/G/g.chd#cue' for a CHD member
   size          INTEGER NOT NULL,
   mtime         INTEGER NOT NULL,
-  crc32 TEXT, md5 TEXT, sha1 TEXT,
-  header_rule   TEXT,                  -- the rule it was hashed, or last failed to hash, under; NULL for a zip member known by its CRC32 alone
+  crc32         BLOB CHECK (length(crc32) = 4),
+  md5           BLOB CHECK (length(md5) = 16),
+  sha1          BLOB CHECK (length(sha1) = 20),
+  header_rule   INTEGER CHECK (header_rule BETWEEN 0 AND 6),   -- "Header rules": the rule it was hashed, or last failed to hash, under; NULL for a zip member known by its CRC32 alone
   rom_id        INTEGER REFERENCES roms(id),
-  state         TEXT NOT NULL,         -- 'verified' | 'unverified' | 'misnamed' | 'bad' | 'pending' | 'unidentified'
+  state         INTEGER NOT NULL CHECK (state BETWEEN 0 AND 5),   -- "File states", see "files.state"
   scanned_at    INTEGER NOT NULL,
-  reason        TEXT,                  -- why an 'unidentified' row is not identified; NULL otherwise
-  crc32_whole TEXT, md5_whole TEXT, sha1_whole TEXT,  -- rule ines, a78 or lnx: the whole file's hashes, header included; equal to crc32/md5/sha1 when no header was found; NULL under other rules
-  UNIQUE (platform_id, rel_path)
-);
+  reason        INTEGER CHECK (reason BETWEEN 0 AND 16),   -- "Unidentified reasons": why an unidentified row is not identified; NULL otherwise
+  crc32_whole   BLOB CHECK (length(crc32_whole) = 4),
+  md5_whole     BLOB CHECK (length(md5_whole) = 16),
+  sha1_whole    BLOB CHECK (length(sha1_whole) = 20),   -- rule ines, a78 or lnx: the whole file's hashes, header included; equal to crc32/md5/sha1 when no header was found; NULL under other rules
+  UNIQUE (platform_id, rel_path),
+  CHECK (reason IS NULL OR state = 5)
+) STRICT;
 CREATE INDEX files_rom ON files(rom_id);
 CREATE INDEX files_state ON files(state, platform_id);
 CREATE INDEX files_rel_lower ON files(platform_id, lower(rel_path));   -- arcade rows match zips ignoring case
@@ -273,32 +282,36 @@ CREATE INDEX import_log_file ON import_log(file_id);
 
 CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL) STRICT, WITHOUT ROWID;
 CREATE TABLE chd_tracks (                     -- rebuilt .bin hashes of a CHD's tracks, keyed by content
-  chd_sha1 TEXT NOT NULL,                     -- header combined SHA1, verified by the decode
+  chd_sha1 BLOB NOT NULL CHECK (length(chd_sha1) = 20),   -- header combined SHA1, verified by the decode
   chd_size INTEGER NOT NULL,
-  track    INTEGER NOT NULL,                  -- 1-based
-  size     INTEGER NOT NULL,                  -- rebuilt track length
-  crc32 TEXT NOT NULL, md5 TEXT NOT NULL, sha1 TEXT NOT NULL,
+  track    INTEGER NOT NULL CHECK (track >= 1),           -- 1-based
+  size     INTEGER NOT NULL,                              -- rebuilt track length
+  crc32    BLOB NOT NULL CHECK (length(crc32) = 4),
+  md5      BLOB NOT NULL CHECK (length(md5) = 16),
+  sha1     BLOB NOT NULL CHECK (length(sha1) = 20),
   PRIMARY KEY (chd_sha1, chd_size, track)
-) WITHOUT ROWID;
+) STRICT, WITHOUT ROWID;
 CREATE INDEX chd_tracks_sha1 ON chd_tracks(sha1);   -- finds the image of member rows whose size is not stored
 
 CREATE TABLE chd_failures (                   -- CHDs that cannot be identified, so they are not decoded again
-  chd_sha1  TEXT NOT NULL,
+  chd_sha1  BLOB NOT NULL CHECK (length(chd_sha1) = 20),
   chd_size  INTEGER NOT NULL,
   mtime     INTEGER NOT NULL,                 -- of the file that failed; a rewritten file is retried
-  reason    TEXT NOT NULL,                    -- a files.reason code
+  reason    INTEGER NOT NULL CHECK (reason BETWEEN 0 AND 16),   -- a files.reason code
   decoder   INTEGER NOT NULL,                 -- decoder version; an older one is retried
   failed_at INTEGER NOT NULL,
   PRIMARY KEY (chd_sha1, chd_size, mtime)
-) WITHOUT ROWID;
+) STRICT, WITHOUT ROWID;
 
 CREATE TABLE chd_whole (                      -- whole-file hashes of CHDs a DAT's `.chd` rom size had hashed
-  chd_sha1 TEXT NOT NULL,
+  chd_sha1 BLOB NOT NULL CHECK (length(chd_sha1) = 20),
   chd_size INTEGER NOT NULL,
   mtime    INTEGER NOT NULL,                  -- of the file hashed
-  crc32 TEXT NOT NULL, md5 TEXT NOT NULL, sha1 TEXT NOT NULL,
+  crc32    BLOB NOT NULL CHECK (length(crc32) = 4),
+  md5      BLOB NOT NULL CHECK (length(md5) = 16),
+  sha1     BLOB NOT NULL CHECK (length(sha1) = 20),
   PRIMARY KEY (chd_sha1, chd_size, mtime)
-) WITHOUT ROWID;
+) STRICT, WITHOUT ROWID;
 -- They outlive the files they describe, so a moved image is identified without a decode.
 
 CREATE TABLE jobs (
@@ -383,6 +396,9 @@ the file's path inside the torrent, and
 path mistarr sees, after the remote path map.
 
 ### files.state
+
+The column holds the code of "File states"; the words below are what the API,
+the events and the views show.
 
 - `pending`: seen, not yet hashed.
 - `verified`: hash matches a rom and the filename is what the adapter expects
@@ -908,14 +924,21 @@ function or compound select, so SQLite flattens it into the query that reads
 it. A decode that needs another table's row (a platform slug, a directory
 path) is a scalar subquery, not a join, so a view of one table stays one table
 and may sit on the right of a LEFT JOIN. Migration `0023_shared_views.sql`
-creates them over the current columns; they store no rows, so the synthetic
-catalogue's database size is unchanged:
+creates them over the columns of the time and `0024_hashes_and_platform_keys.sql`
+creates `rom_view`, `live_rom_view` and `file_view` again over the BLOB hashes and
+the codes; they store no rows, so the synthetic catalogue's database size is
+unchanged by them. `rom_view` and `file_view` read as below, and
+the other views read as in the 0023 file and their later files:
 
 ```sql
 CREATE VIEW rom_view AS
 SELECT r.id, r.title_id, r.name, r.size, r.crc32, r.md5, r.sha1,
-       r.crc32 AS crc32_hex, r.md5 AS md5_hex, r.sha1 AS sha1_hex,
-       r.status, r.status AS status_text, r.match_name, r.match_base, r.retired,
+       NULLIF(lower(hex(r.crc32)), '') AS crc32_hex, NULLIF(lower(hex(r.md5)), '') AS md5_hex,
+       NULLIF(lower(hex(r.sha1)), '') AS sha1_hex,
+       r.status,
+       CASE r.status WHEN 0 THEN 'good' WHEN 1 THEN 'baddump' WHEN 2 THEN 'nodump'
+                     WHEN 3 THEN 'verified' END AS status_text,
+       r.match_name, r.match_base, r.retired,
        r.header, r.zip_dir, r.present,
        t.name AS title_name, t.dat_version_id, t.source AS title_source,
        t.platform_id AS platform_key, t.platform_id AS platform, t.group_root, t.parent_id,
@@ -945,10 +968,24 @@ FROM torrent_files f;
 
 CREATE VIEW file_view AS
 SELECT f.id, f.platform_id AS platform_key, f.platform_id AS platform, f.rel_path, f.size,
-       f.mtime, f.crc32, f.md5, f.sha1, f.crc32 AS crc32_hex, f.md5 AS md5_hex,
-       f.sha1 AS sha1_hex, f.header_rule, f.header_rule AS header_rule_text,
-       f.rom_id, f.state, f.state AS state_text, f.scanned_at, f.reason,
-       f.reason AS reason_text
+       f.mtime, f.crc32, f.md5, f.sha1,
+       NULLIF(lower(hex(f.crc32)), '') AS crc32_hex, NULLIF(lower(hex(f.md5)), '') AS md5_hex,
+       NULLIF(lower(hex(f.sha1)), '') AS sha1_hex,
+       f.header_rule,
+       CASE f.header_rule WHEN 0 THEN 'none' WHEN 1 THEN 'ines' WHEN 2 THEN 'smc'
+                          WHEN 3 THEN 'a78' WHEN 4 THEN 'lnx' WHEN 5 THEN 'n64'
+                          WHEN 6 THEN 'chd' END AS header_rule_text,
+       f.rom_id, f.state,
+       CASE f.state WHEN 0 THEN 'pending' WHEN 1 THEN 'verified' WHEN 2 THEN 'misnamed'
+                    WHEN 3 THEN 'unverified' WHEN 4 THEN 'bad' WHEN 5 THEN 'unidentified'
+                    END AS state_text,
+       f.scanned_at, f.reason,
+       CASE f.reason WHEN 0 THEN 'off' WHEN 1 THEN 'pending' WHEN 2 THEN 'no_layout'
+                     WHEN 3 THEN 'unreadable' WHEN 4 THEN 'not_chd' WHEN 5 THEN 'version'
+                     WHEN 6 THEN 'parent' WHEN 7 THEN 'not_cd' WHEN 8 THEN 'too_large'
+                     WHEN 9 THEN 'codec' WHEN 10 THEN 'gdrom' WHEN 11 THEN 'old_layout'
+                     WHEN 12 THEN 'cooked' WHEN 13 THEN 'pregap' WHEN 14 THEN 'corrupt'
+                     WHEN 15 THEN 'checksum' WHEN 16 THEN 'no_checksum' END AS reason_text
 FROM files f;
 ```
 
@@ -964,7 +1001,7 @@ Each conversion changes only the bodies, keeping the column names:
 | Column | Body after its conversion |
 |---|---|
 | rom_view.name | CASE WHEN r.own_name THEN r.name ELSE t.name \|\| r.name END |
-| the hex columns | lower(hex(x)) of the stored column |
+| the hex columns | NULLIF(lower(hex(x)), '') of the stored column, since `hex(NULL)` is `''` and an absent hash stays NULL |
 | status_text, source_text, mra_check_text, state_text, header_rule_text, reason_text | CASE over the value table |
 | platform_key | the platform column |
 | platform | (SELECT p.slug FROM platforms p WHERE p.id = t.platform) |
@@ -1003,3 +1040,16 @@ compares the SEARCH, SCAN and temp B-tree steps as a multiset of index and
 constraint, with aliases, LEFT-JOIN markers and subquery numbers left out, so a
 scalar-subquery seek equals the join seek it replaces; it fails on a step only
 one side has and on any MATERIALIZE or CO-ROUTINE step.
+
+### Measured sizes
+
+`mistarr bench-seed` writes the synthetic catalogue (42 000 titles, 82 037
+roms, 13 263 files) into a new file:
+
+| Step | Database | `roms` table | `roms_sha1` |
+|---|---|---|---|
+| before the hash migration (0023 with 0025 and 0028) | 49 373 184 bytes | 11.4 MiB | 4.2 MiB |
+| after it | 43 311 104 bytes | 7.8 MiB | 2.4 MiB |
+
+The file shrinks by 6.06 MB (12.3%): hashes are half the width, and the status
+and flag columns are small integers.

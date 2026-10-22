@@ -56,9 +56,10 @@ pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
                         COALESCE(t.mra_check, '') IN ('mismatch', 'missing_part'),
                         (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0
                            AND EXISTS (SELECT 1 FROM files f
-                                       WHERE f.rom_id = r.id AND f.state = 'verified'))
+                                       WHERE f.rom_id = r.id AND f.state = {verified}))
                  FROM titles t WHERE t.id = ?1",
-                loadable = FileState::LOADABLE_SQL
+                loadable = FileState::LOADABLE_SQL,
+                verified = FileState::Verified.sql()
             ),
             [id],
             |r| {
@@ -94,9 +95,11 @@ pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
     let mut stmt = conn.prepare(&format!(
         "SELECT f.rel_path FROM roms r JOIN files f ON f.rom_id = r.id
          WHERE r.title_id = ?1 AND r.retired = 0 AND f.state IN {loadable}
-         ORDER BY CASE f.state WHEN 'verified' THEN 0 WHEN 'misnamed' THEN 1 ELSE 2 END,
+         ORDER BY CASE f.state WHEN {verified} THEN 0 WHEN {misnamed} THEN 1 ELSE 2 END,
                   r.name, f.id",
-        loadable = FileState::LOADABLE_SQL
+        loadable = FileState::LOADABLE_SQL,
+        verified = FileState::Verified.sql(),
+        misnamed = FileState::Misnamed.sql()
     ))?;
     title.files = stmt
         .query_map([id], |r| r.get(0))?

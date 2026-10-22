@@ -31,7 +31,7 @@ FROM (
   FROM (
     SELECT t.platform_id, t.parent_id, t.id, t.wanted, t.is_1g1r_pick,
            COUNT(DISTINCT r.id) AS roms,
-           COUNT(DISTINCT CASE WHEN f.state = 'verified'
+           COUNT(DISTINCT CASE WHEN f.state = 1
                                  OR (r.present = 1
                                      AND COALESCE(t.mra_check, '') NOT IN ('mismatch', 'missing_part'))
                                THEN r.id END) AS roms_verified

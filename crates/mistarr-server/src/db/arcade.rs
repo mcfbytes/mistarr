@@ -8,7 +8,7 @@ use serde::Serialize;
 use super::ids::{DatVersionId, TitleId};
 use super::settings::{self, keys};
 use super::sql;
-use super::titles::{put_title, MraColumns, PutTitle, TitleSource};
+use super::titles::{put_title, MraColumns, PutTitle, RomStatus, TitleSource};
 use crate::error::Result;
 
 /// The `dat_versions.dat_name` every MRA title hangs off; the row has `source = 'mra'`.
@@ -257,12 +257,13 @@ pub fn upsert_title(
         }),
     };
     let (id, _) = put_title(conn, platform, version, &put)?;
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare_cached(&format!(
         "INSERT INTO roms (title_id, name, size, md5, status, zip_dir, present, retired)
-         VALUES (?1, ?2, 0, ?3, 'good', ?4, ?5, 0)
+         VALUES (?1, ?2, 0, ?3, {}, ?4, ?5, 0)
          ON CONFLICT(title_id, name) DO UPDATE SET md5 = excluded.md5, zip_dir = excluded.zip_dir,
            present = excluded.present, retired = 0",
-    )?;
+        RomStatus::Good.sql()
+    ))?;
     let mut seen: Vec<&str> = Vec::with_capacity(zips.len());
     for z in zips {
         if seen.iter().any(|s| s.eq_ignore_ascii_case(z.name)) {

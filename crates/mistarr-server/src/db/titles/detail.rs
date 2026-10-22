@@ -189,18 +189,21 @@ pub fn group_detail(conn: &Connection, id: TitleId) -> Result<Option<GroupDetail
         .query_map([gid], variant_row)?
         .collect::<rusqlite::Result<_>>()?;
     fill_lists(conn, gid, &mut variants)?;
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT r.title_id, r.id, r.name, r.size, r.crc32, r.md5, r.sha1, r.status,
                 f.id, f.state, f.rel_path
          FROM rom_view r
          LEFT JOIN files f ON f.id = (
            SELECT x.id FROM files x WHERE x.rom_id = r.id
-           ORDER BY CASE x.state WHEN 'verified' THEN 0 WHEN 'misnamed' THEN 1
-                                 WHEN 'bad' THEN 2 ELSE 3 END, x.id
+           ORDER BY CASE x.state WHEN {verified} THEN 0 WHEN {misnamed} THEN 1
+                                 WHEN {bad} THEN 2 ELSE 3 END, x.id
            LIMIT 1)
          WHERE r.retired = 0 AND (r.group_root = ?1 OR (r.title_id = ?1 AND r.group_root IS NULL))
          ORDER BY r.title_id, r.name",
-    )?;
+        verified = FileState::Verified.sql(),
+        misnamed = FileState::Misnamed.sql(),
+        bad = FileState::Bad.sql()
+    ))?;
     let mut rows = stmt.query([gid])?;
     while let Some(r) = rows.next()? {
         let title: TitleId = r.get(0)?;

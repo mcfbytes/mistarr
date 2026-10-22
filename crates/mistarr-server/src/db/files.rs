@@ -5,33 +5,70 @@ use mistarr_core::{Crc32, Hashes, Md5, PlatformId, RomId, Sha1};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
+use super::chd::{ReasonWord, Unidentified};
 use super::ids::{FileId, TitleId};
-use super::sql::{self, text_enum, Page, Paged};
+use super::sql::{self, code_enum, Page, Paged};
 use crate::error::Result;
 
-text_enum! {
+code_enum! {
     /// `files.state`.
     pub enum FileState {
         /// Seen, not yet hashed.
-        Pending = "pending",
+        Pending = ("pending", 0),
         /// Hash matches a rom and the filename is what the adapter expects.
-        Verified = "verified",
+        Verified = ("verified", 1),
         /// Hash matches a rom, name differs.
-        Misnamed = "misnamed",
+        Misnamed = ("misnamed", 2),
         /// No rom matches in any loaded DAT.
-        Unverified = "unverified",
+        Unverified = ("unverified", 3),
         /// Matches a rom flagged `baddump`.
-        Bad = "bad",
+        Bad = ("bad", 4),
         /// A disc image whose tracks are not identified yet or cannot be; `reason` says why.
-        Unidentified = "unidentified",
+        Unidentified = ("unidentified", 5),
     }
 }
 
 impl FileState {
     /// States whose file holds its rom's content, which a launch may load.
     pub const LOADABLE: [Self; 3] = [Self::Verified, Self::Misnamed, Self::Bad];
-    /// [`FileState::LOADABLE`] as an SQL list.
-    pub const LOADABLE_SQL: &'static str = "('verified', 'misnamed', 'bad')";
+    /// [`FileState::LOADABLE`] as an SQL list of codes.
+    pub const LOADABLE_SQL: &'static str = "(1, 2, 4)";
+}
+
+code_enum! {
+    /// `files.header_rule`: a core's header rule by name, or `chd` for the members of a CHD.
+    pub enum StoredRule {
+        /// Hashed whole.
+        None = ("none", 0),
+        /// iNES header skipped.
+        Ines = ("ines", 1),
+        /// SMC copier header skipped.
+        Smc = ("smc", 2),
+        /// Atari 7800 header skipped.
+        A78 = ("a78", 3),
+        /// Atari Lynx header skipped.
+        Lnx = ("lnx", 4),
+        /// Nintendo 64 byte order normalized.
+        N64 = ("n64", 5),
+        /// A CHD container or member row.
+        Chd = ("chd", 6),
+    }
+}
+
+/// A header rule word bound as its integer code; a word the table does not list is refused.
+struct RuleWord<'a>(&'a str);
+
+impl rusqlite::types::ToSql for RuleWord<'_> {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        StoredRule::parse(self.0)
+            .map(|r| rusqlite::types::ToSqlOutput::from(r.code()))
+            .ok_or_else(|| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(sql::UnknownText {
+                    column: "StoredRule",
+                    text: self.0.to_owned(),
+                }))
+            })
+    }
 }
 
 /// One `files` row.
@@ -254,7 +291,9 @@ pub(crate) fn from_row(r: &Row<'_>) -> rusqlite::Result<FileRow> {
         crc32: r.get(5)?,
         md5: r.get(6)?,
         sha1: r.get(7)?,
-        header_rule: r.get(8)?,
+        header_rule: r
+            .get::<_, Option<StoredRule>>(8)?
+            .map(|rule| rule.as_str().to_owned()),
         whole: WholeHashes {
             crc32: r.get(13)?,
             md5: r.get(14)?,
@@ -263,7 +302,9 @@ pub(crate) fn from_row(r: &Row<'_>) -> rusqlite::Result<FileRow> {
         rom_id: r.get(9)?,
         state: r.get(10)?,
         scanned_at: r.get(11)?,
-        reason: r.get(12)?,
+        reason: r
+            .get::<_, Option<Unidentified>>(12)?
+            .map(|reason| reason.as_str().to_owned()),
     })
 }
 
@@ -445,10 +486,10 @@ pub fn reverify(
     conn.prepare_cached(
         "UPDATE files SET size = ?2, mtime = ?3, crc32 = ?4, md5 = NULL, sha1 = NULL,
                           header_rule = NULL, crc32_whole = NULL, md5_whole = NULL,
-                          sha1_whole = NULL, state = 'unverified', scanned_at = ?5
+                          sha1_whole = NULL, state = ?6, scanned_at = ?5
          WHERE id = ?1",
     )?
-    .execute(params![id, size, mtime, crc32, now])?;
+    .execute(params![id, size, mtime, crc32, now, FileState::Unverified])?;
     Ok(())
 }
 
@@ -459,8 +500,8 @@ pub fn reverify(
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn has_verified(conn: &Connection, rom_id: RomId) -> Result<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM files WHERE rom_id = ?1 AND state = 'verified')",
-        [rom_id],
+        "SELECT EXISTS(SELECT 1 FROM files WHERE rom_id = ?1 AND state = ?2)",
+        params![rom_id, FileState::Verified],
         |r| r.get(0),
     )?)
 }
@@ -487,10 +528,16 @@ pub fn mark_verified(
 ) -> Result<bool> {
     Ok(conn
         .prepare_cached(
-            "UPDATE files SET state = 'verified', rom_id = ?3
-         WHERE platform_id = ?1 AND rel_path = ?2 AND state = 'unverified'",
+            "UPDATE files SET state = ?4, rom_id = ?3
+         WHERE platform_id = ?1 AND rel_path = ?2 AND state = ?5",
         )?
-        .execute(params![platform_id, rel_path, rom_id])?
+        .execute(params![
+            platform_id,
+            rel_path,
+            rom_id,
+            FileState::Verified,
+            FileState::Unverified
+        ])?
         > 0)
 }
 
@@ -541,11 +588,11 @@ pub fn upsert(
                 row.crc32,
                 row.md5,
                 row.sha1,
-                row.header_rule,
+                row.header_rule.as_deref().map(RuleWord),
                 row.rom_id,
                 row.state,
                 now,
-                row.reason,
+                row.reason.as_deref().map(ReasonWord),
                 row.whole.crc32,
                 row.whole.md5,
                 row.whole.sha1,
@@ -683,23 +730,31 @@ pub fn unidentified(
 ) -> Result<Paged<UnidentifiedFile>> {
     sql::snapshot(conn, |conn| {
         let total = conn
-            .prepare(
-                "SELECT COUNT(*) FROM file_view WHERE state = 'unidentified' AND platform_key = ?1",
-            )?
-            .query_row([platform_id], |r| sql::get_u64(r, 0))?;
+            .prepare("SELECT COUNT(*) FROM file_view WHERE state = ?2 AND platform_key = ?1")?
+            .query_row(params![platform_id, FileState::Unidentified], |r| {
+                sql::get_u64(r, 0)
+            })?;
         let items = conn
             .prepare(
                 "SELECT rel_path, size, COALESCE(reason_text, 'corrupt') FROM file_view
-                 WHERE state = 'unidentified' AND platform_key = ?1
+                 WHERE state = ?4 AND platform_key = ?1
                  ORDER BY rel_path LIMIT ?2 OFFSET ?3",
             )?
-            .query_map(params![platform_id, page.limit, page.offset], |r| {
-                Ok(UnidentifiedFile {
-                    rel_path: r.get(0)?,
-                    size: r.get(1)?,
-                    reason: r.get(2)?,
-                })
-            })?
+            .query_map(
+                params![
+                    platform_id,
+                    page.limit,
+                    page.offset,
+                    FileState::Unidentified
+                ],
+                |r| {
+                    Ok(UnidentifiedFile {
+                        rel_path: r.get(0)?,
+                        size: r.get(1)?,
+                        reason: r.get(2)?,
+                    })
+                },
+            )?
             .collect::<rusqlite::Result<_>>()?;
         Ok(Paged { items, total })
     })
@@ -793,9 +848,10 @@ pub fn unmatched_after(
     Ok(conn
         .prepare_cached(&format!(
             "SELECT {COLUMNS} FROM files
-             WHERE platform_id = ?1 AND state = 'unverified' AND rom_id IS NULL AND id > ?2
+             WHERE platform_id = ?1 AND state = {} AND rom_id IS NULL AND id > ?2
                AND (sha1 IS NOT NULL OR md5 IS NOT NULL)
-             ORDER BY id LIMIT ?3"
+             ORDER BY id LIMIT ?3",
+            FileState::Unverified.sql()
         ))?
         .query_map(params![platform_id, after, limit], from_row)?
         .collect::<rusqlite::Result<_>>()?)
@@ -886,13 +942,23 @@ pub fn unmatch_changed_rom(
     Ok(conn
         .prepare_cached(
             "UPDATE files SET rom_id = NULL, state = CASE WHEN sha1 IS NOT NULL OR md5 IS NOT NULL
-                                                  THEN 'unverified' ELSE 'pending' END
+                                                  THEN ?7 ELSE ?8 END
              WHERE rom_id = (SELECT id FROM roms WHERE title_id = ?1 AND name = ?2
                                AND (size IS NOT ?3 OR crc32 IS NOT ?4 OR md5 IS NOT ?5
                                     OR sha1 IS NOT ?6))
-               AND NOT (header_rule IS 'chd' AND sha1 IS NULL AND md5 IS NULL)",
+               AND NOT (header_rule IS ?9 AND sha1 IS NULL AND md5 IS NULL)",
         )?
-        .execute(params![title_id, name, size, crc32, md5, sha1])?)
+        .execute(params![
+            title_id,
+            name,
+            size,
+            crc32,
+            md5,
+            sha1,
+            FileState::Unverified,
+            FileState::Pending,
+            StoredRule::Chd
+        ])?)
 }
 
 /// File counts by state for one platform, for the platforms card.
@@ -966,11 +1032,12 @@ pub struct MisnamedRow {
 /// assert!(mistarr_server::db::files::misnamed(&conn).unwrap().is_empty());
 /// ```
 pub fn misnamed(conn: &Connection) -> Result<Vec<MisnamedRow>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT f.id, f.platform, f.rel_path, r.id, r.name, r.title_name
          FROM file_view f JOIN rom_view r ON r.id = f.rom_id
-         WHERE f.state = 'misnamed' ORDER BY f.id",
-    )?;
+         WHERE f.state = {} ORDER BY f.id",
+        FileState::Misnamed.sql()
+    ))?;
     let rows = stmt.query_map([], |r| {
         Ok(MisnamedRow {
             id: r.get(0)?,
@@ -1004,8 +1071,8 @@ mod tests {
 
     #[test]
     fn loadable_matches_its_sql() {
-        let text: Vec<&str> = FileState::LOADABLE.iter().map(|s| s.as_str()).collect();
-        assert_eq!(FileState::LOADABLE_SQL, crate::db::sql::text_list(&text));
+        let codes: Vec<&str> = FileState::LOADABLE.iter().map(|s| s.sql()).collect();
+        assert_eq!(FileState::LOADABLE_SQL, format!("({})", codes.join(", ")));
     }
 
     #[test]
