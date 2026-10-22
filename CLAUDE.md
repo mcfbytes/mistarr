@@ -59,7 +59,8 @@ parallel on the work packages in `docs/WORKPLAN.md`. Read this file, then
 - Every public function has a unit test. Property tests with `proptest` for
   parsers. Fixtures are synthetic and generated in the test.
 - SQL lives in `crates/mistarr-server/src/db/` as typed functions, not
-  scattered strings. Migrations are numbered files in `migrations/`.
+  scattered strings. Migrations are numbered files in `migrations/`; a
+  migration's PR also regenerates `schema/`.
 - Log with `tracing`; never log file contents or hashes at info level.
 - Prefer the standard library and small, well-maintained crates. Check a
   crate's size, transitive dependencies and ARMv7 support before adding it.
