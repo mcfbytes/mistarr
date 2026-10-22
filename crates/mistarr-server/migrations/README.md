@@ -1,7 +1,8 @@
 Numbered SQL migrations, `NNNN_name.sql`, applied in order at startup and
 recorded in `schema_version`. `build.rs` picks up every file here; add a new
 number rather than editing one that has shipped. `docs/DATA-MODEL.md` shows
-the schema after every migration.
+the schema after every migration. A migration's pull request also regenerates
+`crates/mistarr-server/schema/`, the exact current DDL; see its `README.md`.
 
 A migration whose first line is exactly `-- foreign_keys: off` runs with foreign
 keys off, and must add no row to `PRAGMA foreign_key_check`. To rebuild a

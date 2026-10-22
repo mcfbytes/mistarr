@@ -25,6 +25,16 @@ or a real infohash. Fixtures are generated. `mistarr-server`'s unit tests build
 every zip they need with `app::testutil::zip_bytes`, or `write_zip` to place one
 on disk.
 
+`tests/schema.rs` renders the schema the migrations produce, one file per table
+and view, and fails when `crates/mistarr-server/schema/` differs, names the
+files, and prints the command that rewrites them:
+
+```sh
+MISTARR_WRITE_SCHEMA=1 cargo test -p mistarr-server --test schema
+```
+
+Write mode needs the value to be exactly `1`; any other value compares.
+
 `mistarr-server`'s modules are crate-private except `app`, `config` and `cli`;
 the `test-support` feature, which its own dev-dependency turns on, makes them
 public for integration tests and doctests. `mistarr_server::testing` holds
