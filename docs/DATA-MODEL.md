@@ -3,11 +3,13 @@
 SQLite, WAL mode, one writer. Migrations are numbered SQL files in
 `crates/mistarr-server/migrations/` applied at startup; this page shows the
 schema after all of them. The exact current DDL, one generated file per
-table and view, is in `crates/mistarr-server/schema/`; this page explains it.
-A binary refuses to open a database whose `schema_version` records a
-migration newer than any it embeds, and leaves its contents unchanged; see "Rollback" in [DEPLOYMENT.md](DEPLOYMENT.md). A
-migration whose first line is `-- foreign_keys: off` runs with foreign keys
-off and must leave `PRAGMA foreign_key_check` clean; see
+table and view, is in `crates/mistarr-server/schema/`; the `CREATE` blocks
+below are annotated excerpts that may leave out indexes and triggers. A binary
+refuses to open a database whose `schema_version` records a migration newer
+than any it embeds, and leaves its contents unchanged; see "Rollback" in
+[DEPLOYMENT.md](DEPLOYMENT.md). A migration whose first line is
+`-- foreign_keys: off` runs with foreign keys off and must leave
+`PRAGMA foreign_key_check` clean; see
 `crates/mistarr-server/migrations/README.md` for the rebuild rule. All
 timestamps are Unix seconds. All hashes are stored as BLOBs of their digest's
 bytes (CRC32 4, MD5 16, SHA1 20), checked by `length()` in every table that

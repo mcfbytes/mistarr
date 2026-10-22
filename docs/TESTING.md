@@ -33,6 +33,8 @@ files, and prints the command that rewrites them:
 MISTARR_WRITE_SCHEMA=1 cargo test -p mistarr-server --test schema
 ```
 
+Write mode needs the value to be exactly `1`; any other value compares.
+
 `mistarr-server`'s modules are crate-private except `app`, `config` and `cli`;
 the `test-support` feature, which its own dev-dependency turns on, makes them
 public for integration tests and doctests. `mistarr_server::testing` holds

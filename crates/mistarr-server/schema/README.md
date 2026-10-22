@@ -1,3 +1,4 @@
 Generated from the migrations by `tests/schema.rs`; never edit by hand. One file
 per table (with its indexes and triggers) and per view.
-Regenerate after a migration: `MISTARR_WRITE_SCHEMA=1 cargo test -p mistarr-server --test schema`.
+Regenerate after a migration (write mode needs the value exactly `1`):
+`MISTARR_WRITE_SCHEMA=1 cargo test -p mistarr-server --test schema`.
