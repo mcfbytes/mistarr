@@ -2101,3 +2101,636 @@ fn a_placed_file_stays_verified_when_its_rom_is_matched_again() {
         "the placed name fits, so rename has nothing to do"
     );
 }
+
+/// Counts the write-backs of the runs it watches.
+#[derive(Default)]
+struct WriteBacks(usize);
+
+impl ram::Watch for WriteBacks {
+    fn phase(&mut self, phase: ram::Phase) {
+        if phase == ram::Phase::Writing {
+            self.0 += 1;
+        }
+    }
+
+    fn between(&mut self, _: ram::Phase) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// File number `i` of a batch holding `xml`, as the work on the copy sees it.
+fn entry(dir: &std::path::Path, i: usize, xml: &str) -> batch::Entry {
+    let path = dir.join(format!("{i}.dat"));
+    std::fs::write(&path, xml).expect("write");
+    let mut req = request(false, None);
+    req.now = i64::try_from(i).expect("small") + 1;
+    batch::Entry {
+        id: JobId::new(req.now),
+        file: format!("{i}.dat"),
+        path,
+        members: vec![Member::Plain],
+        req,
+    }
+}
+
+/// Runs `entries` as one batch on a copy in RAM that is swapped in, counting write-backs.
+fn run_batch(c: &TestDb, entries: &[batch::Entry]) -> (Vec<batch::End>, usize, ram::Report) {
+    let ram_dir = crate::db::testutil::ram_dir();
+    let plan = ram::Plan {
+        dir: ram_dir.path().to_path_buf(),
+        floor: 0,
+        job: Some(JobId::new(1)),
+        input: 0,
+    };
+    let mut backs = WriteBacks::default();
+    let ran =
+        c.db.hold_writer_blocking(|h| {
+            ram::run(h, &plan, &mut backs, |db| {
+                batch::import_batch(db, entries, &mut |_, _, _, _| Ok(()))
+            })
+        })
+        .expect("run");
+    match ran {
+        Ram::Done(ends, report) => (ends, backs.0, report),
+        Ram::Fallback(reason) => panic!("fell back: {reason:?}"),
+    }
+}
+
+fn loads(end: &batch::End) -> bool {
+    matches!(end, batch::End::Imported(o) if matches!(o[..], [Outcome::Loaded(_)]))
+}
+
+#[test]
+fn a_batch_stores_the_rows_of_the_same_dats_imported_one_at_a_time() {
+    let (gb, nes) = ("Maker - Game Boy", "Maker - Nintendo Entertainment System");
+    let quest = [("Example Quest (USA)", None), ("Mock Manor (USA)", None)];
+    let cases: Vec<(&str, Vec<String>)> = vec![
+        (
+            "platforms and an unbound DAT",
+            vec![
+                dat(gb, "1", &quest),
+                dat(nes, "1", &[("Sample Tale (World)", None)]),
+                dat("Test Console", "1", &[("Example Quest (USA)", None)]),
+            ],
+        ),
+        (
+            "a newer version in the same batch",
+            vec![
+                dat(
+                    gb,
+                    "1",
+                    &[
+                        ("Example Quest (USA)", None),
+                        ("Mock Manor (USA)", None),
+                        ("Sample Tale (USA)", None),
+                    ],
+                ),
+                dat(
+                    gb,
+                    "2",
+                    &[("Sample Tale (USA)", None), ("Example Quest (USA)", None)],
+                ),
+                dat(nes, "1", &quest),
+            ],
+        ),
+        (
+            "clones across a batch",
+            vec![
+                dat(
+                    gb,
+                    "1",
+                    &[
+                        ("Example Quest (USA)", None),
+                        ("Example Quest (Japan)", Some("Example Quest (USA)")),
+                    ],
+                ),
+                dat(nes, "1", &[("Mock Manor (Europe)", None)]),
+            ],
+        ),
+        (
+            "a rejected DAT between two others",
+            vec![
+                dat(gb, "1", &quest),
+                "<datafile><game".to_owned(),
+                dat(nes, "1", &quest),
+            ],
+        ),
+    ];
+    for (name, dats) in cases {
+        let (one_by_one, batched) = (with_files(), with_files());
+        let a = load_all(&one_by_one, &dats, false);
+        let entries: Vec<_> = dats
+            .iter()
+            .enumerate()
+            .map(|(i, xml)| entry(batched.dir.path(), i, xml))
+            .collect();
+        let (ends, backs, _) = run_batch(&batched, &entries);
+        let b: Vec<Outcome> = ends
+            .into_iter()
+            .flat_map(|e| match e {
+                batch::End::Imported(o) => o,
+                batch::End::Failed(e) | batch::End::Dirty(e) => panic!("{name}: {e}"),
+            })
+            .collect();
+        assert_eq!(a, b, "{name}: outcomes");
+        assert_eq!(backs, 1, "{name}: one write-back");
+        assert_eq!(dump(&one_by_one.db), dump(&batched.db), "{name}: rows");
+    }
+}
+
+#[test]
+fn ten_small_dats_cost_one_write_back() {
+    let names = [
+        "Maker - Game Boy",
+        "Maker - Nintendo Entertainment System",
+        "Test Console",
+    ];
+    let dats: Vec<String> = (0..10)
+        .map(|i| {
+            let game = format!("Example Quest {i} (USA)");
+            dat(names[i % 3], &i.to_string(), &[(game.as_str(), None)])
+        })
+        .collect();
+    let batched = with_files();
+    let entries: Vec<_> = dats
+        .iter()
+        .enumerate()
+        .map(|(i, xml)| entry(batched.dir.path(), i, xml))
+        .collect();
+    let (ends, backs, report) = run_batch(&batched, &entries);
+    assert!(ends.iter().all(loads));
+    assert_eq!(backs, 1);
+    let alone = with_files();
+    let (mut backs_alone, mut writes_alone) = (0, Some(0));
+    for (i, xml) in dats.iter().enumerate() {
+        let one = [entry(alone.dir.path(), i, xml)];
+        let (_, n, r) = run_batch(&alone, &one);
+        backs_alone += n;
+        writes_alone = writes_alone.zip(r.card_writes).map(|(a, b)| a + b);
+    }
+    assert_eq!(backs_alone, 10);
+    assert_eq!(dump(&batched.db), dump(&alone.db), "the same rows");
+    if let (Some(batch), Some(each)) = (report.card_writes, writes_alone) {
+        assert!(batch < each, "{batch} card writes against {each}");
+    }
+}
+
+#[test]
+fn one_bad_dat_in_a_batch_is_rejected_alone() {
+    let (gb, nes) = ("Maker - Game Boy", "Maker - Nintendo Entertainment System");
+    let quest = [("Example Quest (USA)", None)];
+    let c = with_files();
+    let dir = c.dir.path();
+    let mut entries = vec![
+        entry(dir, 0, &dat(gb, "1", &quest)),
+        entry(dir, 1, "<datafile><game"),
+        entry(dir, 2, &dat(nes, "1", &quest)),
+        entry(dir, 3, &dat(nes, "2", &quest)),
+        entry(dir, 4, &dat(gb, "2", &quest)),
+    ];
+    // File 2 vanishes before its turn; file 3 is cancelled by the user.
+    std::fs::remove_file(&entries[2].path).expect("remove");
+    let cancel = Arc::new(crate::jobs::stop::Cancel::default());
+    cancel.cancel();
+    let (_down, shutdown) = tokio::sync::watch::channel(false);
+    let (_gate, gate) = tokio::sync::watch::channel(GateState::default());
+    entries[3].req.stop = StopToken::new(shutdown.clone(), gate, Lane::Background, cancel);
+    let (ends, backs, _) = run_batch(&c, &entries);
+    assert_eq!(backs, 1);
+    assert!(loads(&ends[0]) && loads(&ends[4]), "{ends:?}");
+    assert!(
+        matches!(&ends[1], batch::End::Imported(o) if matches!(o[..], [Outcome::Rejected(_)])),
+        "{ends:?}"
+    );
+    assert!(
+        matches!(&ends[2], batch::End::Failed(Error::File { .. })),
+        "{ends:?}"
+    );
+    assert!(
+        matches!(&ends[3], batch::End::Failed(Error::CancelledByUser)),
+        "{ends:?}"
+    );
+    let alone = with_files();
+    let kept = [
+        entry(alone.dir.path(), 0, &dat(gb, "1", &quest)),
+        entry(alone.dir.path(), 4, &dat(gb, "2", &quest)),
+    ];
+    run_batch(&alone, &kept);
+    assert_eq!(
+        dump(&c.db),
+        dump(&alone.db),
+        "only the two good DATs are in"
+    );
+}
+
+#[test]
+fn a_shutdown_in_a_batch_ends_it_with_the_card_untouched() {
+    let c = with_files();
+    let quest = [("Example Quest (USA)", None)];
+    let mut entries = vec![
+        entry(c.dir.path(), 0, &dat("Maker - Game Boy", "1", &quest)),
+        entry(c.dir.path(), 1, &dat("Maker - Game Boy", "2", &quest)),
+    ];
+    entries[1].req.stop = StopToken::open(true, Lane::Background);
+    let before = dump(&c.db);
+    let ram_dir = crate::db::testutil::ram_dir();
+    let plan = ram::Plan {
+        dir: ram_dir.path().to_path_buf(),
+        floor: 0,
+        job: Some(JobId::new(1)),
+        input: 0,
+    };
+    let ran = c.db.hold_writer_blocking(|h| {
+        ram::run(h, &plan, &mut (), |db| {
+            batch::import_batch(db, &entries, &mut |_, _, _, _| Ok(()))
+        })
+    });
+    assert!(matches!(ran, Err(Error::Cancelled)), "{ran:?}");
+    assert_eq!(dump(&c.db), before, "the first DAT never reached the card");
+    assert_eq!(
+        std::fs::read_dir(ram_dir.path()).map_or(0, Iterator::count),
+        0
+    );
+}
+
+/// A DAT file at `path` that claims to be `bytes` long, mostly holes.
+fn huge_dat(path: &std::path::Path, bytes: u64) {
+    let file = File::create(path).expect("create");
+    std::io::Write::write_all(
+        &mut &file,
+        dat("Maker - Game Boy", "9", &[("Example Quest (USA)", None)]).as_bytes(),
+    )
+    .expect("head");
+    file.set_len(bytes).expect("sparse");
+}
+
+async fn queue(app: &Arc<AppState>, path: &std::path::Path) -> JobId {
+    Scheduler::enqueue(app, Arc::new(DatImport::new(path)))
+        .await
+        .expect("enqueue")
+}
+
+fn drop_dat(app: &AppState, name: &str, xml: &str) -> PathBuf {
+    let dir = app.config().paths.dats();
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let path = dir.join(name);
+    std::fs::write(&path, xml).expect("write");
+    path
+}
+
+#[tokio::test]
+async fn queued_dat_jobs_run_as_one_batch_each_with_its_own_job() {
+    let (_dir, app) = state();
+    let quest = [("Example Quest (USA)", None)];
+    let files = [
+        drop_dat(&app, "a.dat", &dat("Maker - Game Boy", "1", &quest)),
+        drop_dat(
+            &app,
+            "b.dat",
+            &dat("Maker - Nintendo Entertainment System", "1", &quest),
+        ),
+        drop_dat(&app, "c.dat", "<datafile><game"),
+        drop_dat(&app, "d.dat", &dat("Test Console", "1", &quest)),
+    ];
+    Scheduler::start(&app);
+    app.gate
+        .set_override(Some(crate::jobs::watch::gate::Override::Paused));
+    let mut events = app.events.subscribe(None).live;
+    let mut ids = Vec::new();
+    for f in &files {
+        ids.push(queue(&app, f).await);
+    }
+    app.gate.set_override(None);
+    crate::testing::eventually("every job to end", || async {
+        let ids = ids.clone();
+        let states: Vec<JobState> = app
+            .db
+            .read(move |c| {
+                ids.iter()
+                    .map(|&i| Ok(rows::get(c, i)?.expect("row").state))
+                    .collect()
+            })
+            .await
+            .expect("states");
+        states.iter().all(|s| *s == JobState::Done)
+    })
+    .await;
+    let mut copying = std::collections::HashSet::new();
+    let (mut last_copy, mut first_done) = (None, None);
+    let mut loaded = 0;
+    let mut n = 0;
+    while let Ok(e) = events.try_recv() {
+        n += 1;
+        let body: Value = serde_json::from_str(&e.data).unwrap_or(Value::Null);
+        match e.kind {
+            EventKind::DatLoaded => loaded += 1,
+            EventKind::JobProgress if body["kind"] == "dat_import" => {
+                if body["progress"]["phase"] == "copying the database to memory" {
+                    copying.insert(body["id"].as_i64());
+                    last_copy = Some(n);
+                }
+                if body["state"] == "done" && first_done.is_none() {
+                    first_done = Some(n);
+                }
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(copying.len(), 4, "every job shows the copy");
+    assert!(
+        last_copy < first_done,
+        "no job ends before the copy is made: one batch"
+    );
+    assert_eq!(loaded, 3, "the three that loaded each publish");
+    let dats = app.config().paths.dats();
+    for name in ["a.dat", "b.dat", "d.dat"] {
+        assert!(dats.join("loaded").join(name).is_file(), "{name}");
+    }
+    assert!(dats.join("rejected").join("c.dat").is_file());
+    assert!(dats.join("rejected").join("c.dat.reason.txt").is_file());
+    let versions = count_rows(&app, "SELECT COUNT(*) FROM dat_versions");
+    assert_eq!(versions, 3);
+    assert_eq!(count_kind(&app, JobKind::Recompute), 0);
+    assert_eq!(
+        count_kind(&app, JobKind::RemapSources),
+        2,
+        "one per platform"
+    );
+    let row = job_row(&app, ids[1]);
+    assert_eq!(
+        row.progress.as_ref().map(|p| p["done"].clone()),
+        Some(json!(1))
+    );
+    let left = app
+        .scheduler
+        .taken
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len();
+    assert_eq!(left, 0, "every lane skipped the job taken from it");
+}
+
+fn count_rows(app: &AppState, sql: &'static str) -> i64 {
+    app.db
+        .read_blocking(|c| Ok(c.query_row(sql, [], |r| r.get(0))?))
+        .expect("count")
+}
+
+#[tokio::test]
+async fn a_need_too_large_for_the_batch_leaves_the_rest_queued() {
+    let (_dir, app) = state();
+    let quest = [("Example Quest (USA)", None)];
+    let lead = drop_dat(&app, "a.dat", &dat("Maker - Game Boy", "1", &quest));
+    let cancelled = drop_dat(&app, "b.dat", &dat("Maker - Game Boy", "2", &quest));
+    let fits = drop_dat(&app, "c.dat", &dat("Maker - Game Boy", "3", &quest));
+    let huge = app.config().paths.dats().join("d.dat");
+    huge_dat(&huge, 1 << 38);
+    let after = drop_dat(&app, "e.dat", &dat("Maker - Game Boy", "4", &quest));
+    let (cancelled_id, fits_id, huge_id, after_id) = (
+        queue(&app, &cancelled).await,
+        queue(&app, &fits).await,
+        queue(&app, &huge).await,
+        queue(&app, &after).await,
+    );
+    assert!(app.scheduler.cancel(cancelled_id));
+    let id = Scheduler::run_inline(&app, Arc::new(DatImport::new(&lead)))
+        .await
+        .expect("run");
+    assert_eq!(job_row(&app, id).state, JobState::Done);
+    assert_eq!(job_row(&app, fits_id).state, JobState::Done, "it fit");
+    for left_out in [cancelled_id, huge_id, after_id] {
+        assert_eq!(job_row(&app, left_out).state, JobState::Queued);
+    }
+    let loaded = app.config().paths.dats().join("loaded");
+    assert!(loaded.join("a.dat").is_file() && loaded.join("c.dat").is_file());
+    assert!(
+        !loaded.join("e.dat").exists(),
+        "dropped from the end of the batch"
+    );
+    assert_eq!(count_rows(&app, "SELECT COUNT(*) FROM dat_versions"), 2);
+}
+
+#[tokio::test]
+async fn a_batch_the_copy_cannot_take_goes_back_to_the_queue() {
+    let (dir, app) = state();
+    let plain = dir.path().join("plain");
+    std::fs::create_dir_all(&plain).expect("mkdir");
+    app.update_config(|c| c.memory.import_dir.clone_from(&plain));
+    let quest = [("Example Quest (USA)", None)];
+    let lead = drop_dat(&app, "a.dat", &dat("Maker - Game Boy", "1", &quest));
+    let other = drop_dat(&app, "b.dat", &dat("Maker - Game Boy", "2", &quest));
+    let other_id = queue(&app, &other).await;
+    let id = Scheduler::run_inline(&app, Arc::new(DatImport::new(&lead)))
+        .await
+        .expect("run");
+    let row = job_row(&app, id);
+    assert_eq!(row.state, JobState::Done, "{:?}", row.progress);
+    assert_eq!(
+        row.progress.as_ref().map(|p| p["phase"].clone()),
+        Some(json!(IN_PLACE))
+    );
+    assert_eq!(job_row(&app, other_id).state, JobState::Queued);
+    assert!(other.is_file(), "its own turn is still to come");
+    assert_eq!(count_rows(&app, "SELECT COUNT(*) FROM dat_versions"), 1);
+    let taken = app
+        .scheduler
+        .taken
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len();
+    assert_eq!(taken, 0, "its lane will run it");
+}
+
+#[test]
+fn halt_ignores_the_cancel_of_one_job_but_not_the_lane_or_the_server() {
+    let cancelled = Arc::new(crate::jobs::stop::Cancel::default());
+    cancelled.cancel();
+    let (_down, shutdown) = tokio::sync::watch::channel(false);
+    let (gate_tx, gate) = tokio::sync::watch::channel(GateState::default());
+    let req = Request {
+        stop: StopToken::new(shutdown, gate, Lane::Background, cancelled),
+        ..request(false, None)
+    };
+    assert!(batch::halt(&req).is_ok());
+    gate_tx
+        .send(GateState {
+            corename: None,
+            manual: Some(crate::jobs::watch::gate::Override::Paused),
+        })
+        .expect("gate");
+    assert!(matches!(batch::halt(&req), Err(Error::Paused)));
+    let down = Request {
+        stop: StopToken::open(true, Lane::Background),
+        ..request(false, None)
+    };
+    assert!(matches!(batch::halt(&down), Err(Error::Cancelled)));
+}
+
+#[tokio::test]
+async fn a_file_failing_after_a_member_loaded_leaves_nothing_of_it_in_the_copy() {
+    let (_dir, app) = state();
+    let quest = [("Example Quest (USA)", None)];
+    let lead = drop_dat(
+        &app,
+        "a.dat",
+        &dat("Maker - Nintendo Entertainment System", "1", &quest),
+    );
+    let big: Vec<String> = (0..20_000).map(|i| format!("Game {i} (USA)")).collect();
+    let big: Vec<(&str, Option<&str>)> = big.iter().map(|n| (n.as_str(), None)).collect();
+    let pack = app.config().paths.dats().join("p.zip");
+    let (one, two) = (
+        dat("Maker - Game Boy", "7", &quest),
+        dat("Maker - Game Boy", "8", &big),
+    );
+    crate::app::testutil::write_zip(
+        &pack,
+        &[("1.dat", one.as_bytes()), ("2.dat", two.as_bytes())],
+    );
+    let last = drop_dat(&app, "z.dat", &dat("Test Console", "1", &quest));
+    let (pack_id, last_id) = (queue(&app, &pack).await, queue(&app, &last).await);
+    let mut events = app.events.subscribe(None).live;
+    let watcher = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            while let Ok(e) = events.recv().await {
+                let body: Value = serde_json::from_str(&e.data).unwrap_or(Value::Null);
+                if body["id"] == pack_id.get() && body["progress"]["done"] == 1 {
+                    app.scheduler.cancel(pack_id);
+                    return;
+                }
+            }
+        })
+    };
+    let id = Scheduler::run_inline(&app, Arc::new(DatImport::new(&lead)))
+        .await
+        .expect("run");
+    watcher.abort();
+    assert_eq!(job_row(&app, id).state, JobState::Done);
+    assert_eq!(job_row(&app, last_id).state, JobState::Done);
+    let row = job_row(&app, pack_id);
+    assert_eq!(row.state, JobState::Failed, "{:?}", row.progress);
+    assert!(pack.is_file(), "the file stays in dats/");
+    let names: Vec<String> = app
+        .db
+        .read_blocking(|c| {
+            let mut q = c.prepare("SELECT dat_name FROM dat_versions ORDER BY id")?;
+            let rows = q.query_map([], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .expect("names");
+    assert_eq!(names.len(), 2, "{names:?}: only the two good files");
+    assert!(!names.iter().any(|n| n == "Maker - Game Boy"));
+}
+
+#[test]
+fn a_cancelled_lead_ends_the_batch_after_its_file() {
+    let c = with_files();
+    let quest = [("Example Quest (USA)", None)];
+    let mut entries = vec![
+        entry(c.dir.path(), 0, &dat("Maker - Game Boy", "1", &quest)),
+        entry(c.dir.path(), 1, &dat("Maker - Game Boy", "2", &quest)),
+    ];
+    let cancel = Arc::new(crate::jobs::stop::Cancel::default());
+    cancel.cancel();
+    let (_down, shutdown) = tokio::sync::watch::channel(false);
+    let (_gate, gate) = tokio::sync::watch::channel(GateState::default());
+    entries[0].req.stop = StopToken::new(shutdown, gate, Lane::Background, cancel);
+    let imported = std::cell::Cell::new(0);
+    let before = dump(&c.db);
+    let ram_dir = crate::db::testutil::ram_dir();
+    let plan = ram::Plan {
+        dir: ram_dir.path().to_path_buf(),
+        floor: 0,
+        job: Some(JobId::new(1)),
+        input: 0,
+    };
+    let ran = c.db.hold_writer_blocking(|h| {
+        ram::run(h, &plan, &mut (), |db| {
+            batch::import_batch(db, &entries, &mut |_, e, _, _| {
+                imported.set(imported.get() + usize::from(e.id == JobId::new(2)));
+                Ok(())
+            })
+        })
+    });
+    assert!(matches!(ran, Err(Error::CancelledByUser)), "{ran:?}");
+    assert_eq!(imported.get(), 0, "the follower was not imported");
+    assert_eq!(dump(&c.db), before);
+}
+
+#[tokio::test]
+async fn a_cancelled_follower_is_left_to_its_lane_and_fails_there() {
+    let (_dir, app) = state();
+    let quest = [("Example Quest (USA)", None)];
+    let a = drop_dat(&app, "a.dat", &dat("Maker - Game Boy", "1", &quest));
+    let b = drop_dat(&app, "b.dat", &dat("Maker - Game Boy", "2", &quest));
+    Scheduler::start(&app);
+    app.gate
+        .set_override(Some(crate::jobs::watch::gate::Override::Paused));
+    let (a_id, b_id) = (queue(&app, &a).await, queue(&app, &b).await);
+    assert!(app.scheduler.cancel(b_id));
+    app.gate.set_override(None);
+    crate::testing::eventually("both jobs to end", || async {
+        let states = app
+            .db
+            .read(move |c| Ok([rows::get(c, a_id)?, rows::get(c, b_id)?]))
+            .await
+            .expect("rows");
+        states[0]
+            .as_ref()
+            .is_some_and(|r| r.state == JobState::Done)
+            && states[1]
+                .as_ref()
+                .is_some_and(|r| r.state == JobState::Failed)
+    })
+    .await;
+    assert!(b.is_file(), "the cancelled file stays in dats/");
+    assert_eq!(count_rows(&app, "SELECT COUNT(*) FROM dat_versions"), 1);
+}
+
+#[tokio::test]
+async fn a_manual_pause_in_a_batch_waits_and_the_batch_starts_again() {
+    let (_dir, app) = state();
+    let quest = [("Example Quest (USA)", None)];
+    let files = [
+        drop_dat(&app, "a.dat", &dat("Maker - Game Boy", "1", &quest)),
+        drop_dat(&app, "b.dat", &dat("Maker - Game Boy", "2", &quest)),
+    ];
+    Scheduler::start(&app);
+    app.gate
+        .set_override(Some(crate::jobs::watch::gate::Override::Paused));
+    let mut events = app.events.subscribe(None).live;
+    let (a_id, b_id) = (queue(&app, &files[0]).await, queue(&app, &files[1]).await);
+    app.gate.set_override(None);
+    while let Ok(e) = events.recv().await {
+        let body: Value = serde_json::from_str(&e.data).unwrap_or(Value::Null);
+        if body["progress"]["phase"] == "copying the database to memory" {
+            app.gate
+                .set_override(Some(crate::jobs::watch::gate::Override::Paused));
+            break;
+        }
+    }
+    crate::testing::eventually("the follower to show the pause", || async {
+        app.db
+            .read(move |c| Ok(rows::get(c, b_id)?.map(|r| r.state)))
+            .await
+            .expect("row")
+            == Some(JobState::Paused)
+    })
+    .await;
+    app.gate.set_override(None);
+    crate::testing::eventually("both jobs to end", || async {
+        let ids = [a_id, b_id];
+        let states = app
+            .db
+            .read(move |c| {
+                ids.iter()
+                    .map(|&i| Ok(rows::get(c, i)?.map(|r| r.state)))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .await
+            .expect("rows");
+        states.iter().all(|s| *s == Some(JobState::Done))
+    })
+    .await;
+    assert_eq!(count_rows(&app, "SELECT COUNT(*) FROM dat_versions"), 2);
+}

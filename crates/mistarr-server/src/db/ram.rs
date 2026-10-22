@@ -255,6 +255,52 @@ pub fn refusal(budget: &Budget, size: u64, input: u64, floor: u64) -> Option<Str
     }
 }
 
+/// How many of the first `inputs` (uncompressed DAT bytes of each file, in order) one
+/// copy of a `size`-byte database can load together under `budget` keeping `floor` bytes
+/// available: the most whose summed input [`refusal`] accepts, and at least 1, since a
+/// single file the copy cannot hold is left to [`run`] to fall back on the card.
+///
+/// ```
+/// use mistarr_server::db::ram::{fit, Budget};
+/// let budget = Budget { available: Some(400 << 20), ram_room: Some(400 << 20), card_room: Some(1 << 30) };
+/// let sizes = [10 << 20; 8];
+/// assert_eq!(fit(&budget, 40 << 20, 128 << 20, &sizes), 3);
+/// assert_eq!(fit(&budget, 40 << 20, 128 << 20, &[500 << 20]), 1);
+/// assert_eq!(fit(&budget, 40 << 20, 128 << 20, &[]), 0);
+/// ```
+#[must_use]
+pub fn fit(budget: &Budget, size: u64, floor: u64, inputs: &[u64]) -> usize {
+    let mut total = 0u64;
+    let mut count = 0;
+    for &input in inputs {
+        total = total.saturating_add(input);
+        if count > 0 && refusal(budget, size, total, floor).is_some() {
+            break;
+        }
+        count += 1;
+    }
+    count
+}
+
+/// [`fit`] under the memory and room [`Budget::read`] finds for a copy in `dir` of the
+/// database file `db`.
+///
+/// # Errors
+///
+/// [`Error::Io`] when `db` cannot be measured.
+///
+/// ```
+/// let dir = tempfile::tempdir().unwrap();
+/// let db = dir.path().join("m.db");
+/// std::fs::write(&db, b"x").unwrap();
+/// let n = mistarr_server::db::ram::fit_now(dir.path(), &db, u64::MAX, &[1, 1]).unwrap();
+/// assert_eq!(n, 1, "no memory is enough above the floor, so only the first file");
+/// ```
+pub fn fit_now(dir: &Path, db: &Path, floor: u64, inputs: &[u64]) -> Result<usize> {
+    let size = file_len(db)?;
+    Ok(fit(&Budget::read(dir, db), size, floor, inputs))
+}
+
 /// Why `dir` cannot hold a copy of the database `db`, or `None` when it can: it must be,
 /// or become, a private directory as SQLite's temporary one is, on tmpfs or ramfs, and
 /// not on the file system holding `db`.
