@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use serde_json::json;
 
 use super::downloads::{self, DownloadState};
-use super::fixtures::{key, pid};
+use super::fixtures::{key, pid, platform_ref};
 use super::ids::{SourceId, TitleId};
 use super::sql::Page;
 use super::titles;
@@ -119,7 +119,7 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
                 let nes = mistarr_core::PlatformId::new("nes");
                 let (sha1, md5) = (Sha1::from_bytes([0; 20]), Md5::from_bytes([0; 16]));
                 let crc = Some(Crc32::from_u32(0));
-                roms::match_live_rom(c, &nes, Some(sha1), Some(md5), crc, 16).expect("match");
+                roms::match_live_rom(c, key(&nes), Some(sha1), Some(md5), crc, 16).expect("match");
             }),
         ),
         (
@@ -134,7 +134,8 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             "crc candidate",
             Box::new(|c| {
                 let nes = mistarr_core::PlatformId::new("nes");
-                roms::crc_candidate_exists(c, &nes, Crc32::from_u32(0), 16).expect("candidate");
+                roms::crc_candidate_exists(c, key(&nes), Crc32::from_u32(0), 16)
+                    .expect("candidate");
             }),
         ),
         (
@@ -151,7 +152,7 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             Box::new(|c| {
                 use mistarr_sources::fuzzy::SizeIndex as _;
                 let nes = mistarr_core::PlatformId::new("nes");
-                drop(candidates::SqlSizeIndex::new(c, &nes).roms_of_size(40_976));
+                drop(candidates::SqlSizeIndex::new(c, &platform_ref(&nes)).roms_of_size(40_976));
             }),
         ),
         (
@@ -165,8 +166,8 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             "chd lookups",
             Box::new(|c| {
                 let psx = mistarr_core::PlatformId::new("psx");
-                roms::chd_rom_sized(c, &psx, 4_704).expect("chd rom");
-                chd::layout_known(c, &psx, &[4_704]).expect("layout");
+                roms::chd_rom_sized(c, key(&psx), 4_704).expect("chd rom");
+                chd::layout_known(c, key(&psx), &[4_704]).expect("layout");
             }),
         ),
     ]
@@ -211,6 +212,7 @@ fn source_reads() -> Vec<(&'static str, Read<'static>)> {
 }
 
 /// Every hot read with the plan of each statement it runs.
+#[expect(clippy::too_many_lines, reason = "one entry per read")]
 fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
     let c = seeded();
     let hide: Vec<String> = ["bios", "beta"].map(str::to_owned).to_vec();
@@ -229,7 +231,10 @@ fn hot_reads() -> Vec<(&'static str, String, Vec<String>)> {
                     limit: 60,
                     offset: 0,
                 };
-                drop(titles::browse::browse(c, &pid("nes"), &search, page).expect("browse"));
+                drop(
+                    titles::browse::browse(c, &platform_ref(&pid("nes")), &search, page)
+                        .expect("browse"),
+                );
             }),
         ),
         (
@@ -531,8 +536,59 @@ fn source_detail_seeks_the_source_files_and_downloads() {
         "{plan:?}"
     );
     let plan = plan_of(&reads, "reclassify preview", "FROM platforms p");
-    let seek = "titles_source (platform_id=? AND source=?)";
+    let seek = "titles_source (platform=? AND source=?)";
     assert!(plan.iter().any(|l| l.contains(seek)), "{plan:?}");
+}
+
+/// The browse page reads the group's root title by primary key, not by a scan or an index.
+#[test]
+fn the_browse_page_seeks_the_root_title_by_primary_key() {
+    let reads = hot_reads();
+    let plan = plan_of(&reads, "browse", "JOIN titles p");
+    assert!(
+        plan.iter()
+            .any(|l| l.contains("SEARCH p USING INTEGER PRIMARY KEY (rowid=?)")),
+        "{plan:?}"
+    );
+}
+
+/// No hot read names an index the rebuild dropped.
+#[test]
+fn no_plan_names_a_dropped_titles_index() {
+    for (name, sql, plan) in hot_reads() {
+        for line in &plan {
+            assert!(
+                !line.contains("titles_parent") && !line.contains("titles_platform_base"),
+                "{name}: {line} in {sql}"
+            );
+        }
+    }
+}
+
+/// A platform's recompute reads its titles by the platform's group keys and sources.
+#[test]
+fn recompute_seeks_the_platform_group_and_source_indexes() {
+    let c = seeded();
+    let statements = traced(&c, |c| {
+        titles::recompute::recompute_platform(
+            c,
+            key(&pid("nes")),
+            &mistarr_core::select::Prefs::default(),
+        )
+        .expect("recompute");
+    });
+    let plans: Vec<String> = statements
+        .iter()
+        .filter(|s| !s.trim_start().to_ascii_uppercase().starts_with("SAVEPOINT"))
+        .flat_map(|s| plan(&c, s))
+        .collect();
+    let has = |p: &str| plans.iter().any(|l| l.contains(p));
+    assert!(has("titles_group (platform=?"), "{plans:?}");
+    assert!(has("titles_source (platform=?"), "{plans:?}");
+    assert!(
+        !has("titles_parent") && !has("titles_platform_base"),
+        "{plans:?}"
+    );
 }
 
 /// The group refresh reaches titles by group root and files by rom.

@@ -147,7 +147,7 @@ fn unbound_dats_store_only_the_version() {
     assert_eq!(bound.version, l.version);
     assert_eq!(bound.platform, Some(PlatformId::new("nes")));
     assert_eq!(
-        count(&c, "SELECT COUNT(*) FROM titles WHERE platform_id = 'nes'"),
+        count(&c, "SELECT COUNT(*) FROM titles WHERE platform = (SELECT id FROM platforms WHERE slug = 'nes')"),
         1
     );
 }
@@ -443,7 +443,7 @@ async fn a_zipped_db_export_loads_headerless_roms_with_clones() {
         .db
         .read(|c| {
             Ok(c.query_row(
-                "SELECT dat_name, version, platform_id FROM dat_versions",
+                "SELECT dat_name, version, (SELECT slug FROM platforms WHERE id = platform) FROM dat_versions",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )?)
@@ -959,7 +959,7 @@ fn remove_with_files(c: &TestDb, version: DatVersionId, files: &[(&str, u32, i64
         }
         dats::retire(x, version, 1)?;
         let matched = rematch_chunk(x, &nes)?;
-        titles::recompute::recompute_platform(x, &pid("nes"), &Prefs::default())?;
+        titles::recompute::recompute_platform(x, key(&pid("nes")), &Prefs::default())?;
         Ok(matched)
     })
     .expect("remove")
@@ -1203,19 +1203,25 @@ fn one_family_on_two_platforms_keeps_separate_titles() {
                         dat_name: "Example Vendor - Example Handheld",
                         version,
                         source_file: "h.dat",
-                        platform: Some(platform),
+                        platform: Some(key(&pid(platform))),
                         now: 1,
                     },
                 )?;
                 assert!(v.current, "{platform}");
-                ids.push(titles::upsert_title(x, &pid(platform), v.id, &t, &[])?);
+                ids.push(titles::upsert_title(
+                    x,
+                    &crate::db::fixtures::platform_ref(&pid(platform)),
+                    v.id,
+                    &t,
+                    &[],
+                )?);
             }
             Ok(ids)
         })
         .expect("titles");
     assert_ne!(ids[0], ids[1]);
     assert_eq!(
-        count(&c, "SELECT COUNT(*) FROM titles WHERE platform_id = 'gb'"),
+        count(&c, "SELECT COUNT(*) FROM titles WHERE platform = (SELECT id FROM platforms WHERE slug = 'gb')"),
         1
     );
 }
@@ -1333,7 +1339,7 @@ async fn recompute_matches_unmatched_files_and_updates_have() {
                 .title(manor.0)
                 .rom(manor.1, &sums(2), RomStatus::Good)
                 .write(tx)?;
-            titles::recompute::recompute_platform(tx, &pid("gb"), &Prefs::default())?;
+            titles::recompute::recompute_platform(tx, key(&pid("gb")), &Prefs::default())?;
             // More strays than one chunk, so the cursor pages past files that never match.
             for n in 0..300 {
                 unmatched_file(tx, &gb, &format!("GAMEBOY/stray {n}.gb"), &sums(1000 + n))?;
@@ -1345,7 +1351,7 @@ async fn recompute_matches_unmatched_files_and_updates_have() {
         .await
         .expect("seed");
     let have = |app: Arc<AppState>| async move {
-        let sql = "SELECT SUM(have_verified) FROM title_groups WHERE platform_id = 'gb'";
+        let sql = "SELECT SUM(have_verified) FROM title_groups WHERE platform = (SELECT id FROM platforms WHERE slug = 'gb')";
         app.db
             .read(move |c| Ok(c.query_row(sql, [], |r| r.get::<_, i64>(0))?))
             .await

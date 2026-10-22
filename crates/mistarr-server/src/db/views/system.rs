@@ -3,6 +3,7 @@
 use rusqlite::Connection;
 
 use crate::db::sql::get_u64;
+use crate::db::titles::TitleSource;
 use crate::error::Result;
 
 /// Row counts that decide which wizard steps are complete.
@@ -28,7 +29,10 @@ pub struct WizardCounts {
 /// ```
 pub fn wizard_counts(conn: &Connection) -> Result<WizardCounts> {
     Ok(conn.query_row(
-        "SELECT (SELECT COUNT(*) FROM dat_versions WHERE source = 'dat'), (SELECT COUNT(*) FROM sources)",
+        &format!(
+            "SELECT (SELECT COUNT(*) FROM dat_versions WHERE source = {}), (SELECT COUNT(*) FROM sources)",
+            TitleSource::Dat.sql()
+        ),
         [],
         |r| {
             Ok(WizardCounts {
@@ -49,8 +53,8 @@ mod tests {
         crate::db::migrate::apply(&mut c).expect("migrate");
         assert_eq!(wizard_counts(&c).expect("counts"), WizardCounts::default());
         c.execute_batch(
-            "INSERT INTO dat_versions (dat_name, version, source_file, loaded_at, game_count)
-             VALUES ('Test Console', '1', 'a.dat', 0, 0);
+            "INSERT INTO dat_versions (family, dat_name, version, source_file, loaded_at, game_count)
+             VALUES ('', 'Test Console', '1', 'a.dat', 0, 0);
              INSERT INTO sources (infohash, display_name, origin_file, state, added_at)
              VALUES ('00', 'n', 'a.torrent', 1, 0);",
         )

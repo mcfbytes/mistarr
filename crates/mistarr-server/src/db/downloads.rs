@@ -10,6 +10,7 @@ use super::files::FileState;
 use super::ids::{DatVersionId, DownloadId, SourceId, TitleId};
 use super::sources;
 use super::sql::{self, code_enum, Page, Paged};
+use super::titles::TitleSource;
 use crate::error::Result;
 
 code_enum! {
@@ -872,9 +873,10 @@ pub(crate) fn cancel_unstarted_in_dat_version(
         &format!(
             "UPDATE downloads SET state = {}, updated_at = ?2
              WHERE state IN {} AND title_id IN
-               (SELECT id FROM titles WHERE dat_version_id = ?1 AND source = 'dat')",
+               (SELECT id FROM titles WHERE dat_version_id = ?1 AND source = {})",
             DownloadState::Cancelled.sql(),
-            DownloadState::UNSTARTED_SQL
+            DownloadState::UNSTARTED_SQL,
+            TitleSource::Dat.sql()
         ),
         params![dat_version, now],
     )?;

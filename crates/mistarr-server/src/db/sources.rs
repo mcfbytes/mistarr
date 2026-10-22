@@ -14,6 +14,7 @@ use super::downloads::DownloadState;
 use super::ids::SourceId;
 use super::platforms;
 use super::sql::{self, code_enum, Page, Paged};
+use super::titles::TitleSource;
 use crate::error::{Error, Result};
 
 /// Roms given match keys per statement batch in [`refresh_match_keys`].
@@ -624,10 +625,13 @@ pub fn set_map_stamp(conn: &Connection, id: SourceId, stamp: Option<&str>) -> Re
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn platform_has_dat(conn: &Connection, platform: &PlatformId) -> Result<bool> {
+pub fn platform_has_dat(conn: &Connection, platform: PlatformKey) -> Result<bool> {
     Ok(conn
         .query_row(
-            "SELECT 1 FROM titles WHERE platform_id = ?1 AND retired = 0 AND source = 'dat' LIMIT 1",
+            &format!(
+                "SELECT 1 FROM titles WHERE platform = ?1 AND retired = 0 AND source = {} LIMIT 1",
+                TitleSource::Dat.sql()
+            ),
             [platform],
             |_| Ok(()),
         )
@@ -936,7 +940,7 @@ macro_rules! live_title {
 macro_rules! name_tier {
     () => {
         concat!(
-            "SELECT json_each.key AS file, t.platform_id AS platform_id
+            "SELECT json_each.key AS file, t.platform AS platform
              FROM json_each(?1)
              JOIN roms r ON r.match_name = json_extract(json_each.value, '$[0]')
              JOIN titles t ON t.id = r.title_id
@@ -951,7 +955,7 @@ macro_rules! name_tier {
 macro_rules! base_tier {
     () => {
         concat!(
-            "SELECT json_each.key AS file, t.platform_id AS platform_id
+            "SELECT json_each.key AS file, t.platform AS platform
              FROM json_each(?1)
              JOIN roms r INDEXED BY roms_match_base
                ON ",
@@ -981,21 +985,21 @@ impl Tiers {
     fn sql(self) -> &'static str {
         match self {
             Self::All => concat!(
-                "SELECT platform_id, COUNT(DISTINCT file) FROM (",
+                "SELECT (SELECT p.slug FROM platforms p WHERE p.id = platform) AS slug, COUNT(DISTINCT file) FROM (",
                 name_tier!(),
                 " UNION ALL ",
                 base_tier!(),
-                ") GROUP BY platform_id ORDER BY platform_id"
+                ") GROUP BY platform ORDER BY slug"
             ),
             Self::Name => concat!(
-                "SELECT platform_id, COUNT(DISTINCT file) FROM (",
+                "SELECT (SELECT p.slug FROM platforms p WHERE p.id = platform) AS slug, COUNT(DISTINCT file) FROM (",
                 name_tier!(),
-                ") GROUP BY platform_id ORDER BY platform_id"
+                ") GROUP BY platform ORDER BY slug"
             ),
             Self::Base => concat!(
-                "SELECT platform_id, COUNT(DISTINCT file) FROM (",
+                "SELECT (SELECT p.slug FROM platforms p WHERE p.id = platform) AS slug, COUNT(DISTINCT file) FROM (",
                 base_tier!(),
-                ") GROUP BY platform_id ORDER BY platform_id"
+                ") GROUP BY platform ORDER BY slug"
             ),
         }
     }
@@ -1062,7 +1066,7 @@ impl DatIndex for SqlDatIndex<'_> {
     fn by_normalized_name(&self, name: &str) -> Vec<(PlatformId, RomId)> {
         self.lookup(
             concat!(
-                "SELECT t.platform_id, r.id FROM roms r JOIN titles t ON t.id = r.title_id
+                "SELECT (SELECT p.slug FROM platforms p WHERE p.id = t.platform), r.id FROM roms r JOIN titles t ON t.id = r.title_id
                  WHERE r.match_name = ?1 AND ",
                 live_title!(),
                 " ORDER BY r.id"
@@ -1074,7 +1078,7 @@ impl DatIndex for SqlDatIndex<'_> {
     fn by_base_name_and_size(&self, base_name: &str, size: u64) -> Vec<(PlatformId, RomId)> {
         self.lookup(
             concat!(
-                "SELECT t.platform_id, r.id
+                "SELECT (SELECT p.slug FROM platforms p WHERE p.id = t.platform), r.id
                  FROM roms r INDEXED BY roms_match_base JOIN titles t ON t.id = r.title_id
                  WHERE ",
                 match_base!(),
@@ -1090,7 +1094,7 @@ impl DatIndex for SqlDatIndex<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::fixtures::{conn, pid, seed_rom};
+    use crate::db::fixtures::{conn, key, pid, seed_rom};
     use crate::db::testutil;
     use crate::db::views::source_detail::{self, FileRow};
 
@@ -1136,9 +1140,9 @@ mod tests {
         assert_eq!(list_unbound(&c).expect("list"), [(a, Some(nes()))]);
         let row = get(&c, a).expect("get").expect("row");
         assert_eq!(row.suggested_platform_id, Some(nes()));
-        assert!(!platform_has_dat(&c, &nes()).expect("dat"));
+        assert!(!platform_has_dat(&c, key(&nes())).expect("dat"));
         seed_rom(&c, &pid("nes"), "Example Quest (USA).nes", 1, &[]).expect("seed");
-        assert!(platform_has_dat(&c, &nes()).expect("dat"));
+        assert!(platform_has_dat(&c, key(&nes())).expect("dat"));
         set_suggestion(&c, a, None).expect("clear");
         assert_eq!(list_unbound(&c).expect("list"), [(a, None)]);
         assert!(list_on_platforms(&c, &[nes()]).expect("on").is_empty());

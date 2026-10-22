@@ -1,12 +1,14 @@
 //! The `dat_versions` table and supersession; see `docs/ARCHITECTURE.md` "DAT import".
 
 use mistarr_core::dat::{family_key, version_order};
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, PlatformKey};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
 use super::ids::DatVersionId;
+use super::platforms::PlatformRef;
 use super::sql::{self, Page, Paged};
+use super::titles::TitleSource;
 
 use crate::error::Result;
 
@@ -61,13 +63,23 @@ pub struct DatRef {
     pub version: String,
 }
 
-const COLUMNS: &str = "d.id, d.platform_id, d.dat_name, d.version, d.source_file, d.loaded_at,
+/// The `source` code of a DAT version in SQL text.
+const DAT: &str = TitleSource::Dat.sql();
+
+/// The select list and tables that [`from_row`] reads.
+fn columns() -> String {
+    format!(
+        "d.id, (SELECT p.slug FROM platforms p WHERE p.id = d.platform), d.dat_name,
+    d.version, d.source_file, d.loaded_at,
     d.superseded_by, d.game_count, d.retired, d.family, s.dat_name, s.version, s.loaded_at,
-    CASE WHEN d.platform_id IS NULL THEN (
-      SELECT group_concat(DISTINCT o.platform_id) FROM dat_versions o
-      WHERE o.family = d.family AND o.platform_id IS NOT NULL AND o.retired = 0
-        AND o.superseded_by IS NULL AND o.source = 'dat') END
-    FROM dat_versions d LEFT JOIN dat_versions s ON s.id = d.superseded_by";
+    CASE WHEN d.platform IS NULL THEN (
+      SELECT group_concat(slug) FROM (
+        SELECT DISTINCT p.slug FROM dat_versions o JOIN platforms p ON p.id = o.platform
+        WHERE o.family = d.family AND o.retired = 0 AND o.superseded_by IS NULL AND o.source = {DAT}
+        ORDER BY p.slug)) END
+    FROM dat_versions d LEFT JOIN dat_versions s ON s.id = d.superseded_by"
+    )
+}
 
 fn from_row(r: &Row<'_>) -> rusqlite::Result<DatVersionRow> {
     let dat_name: String = r.get(2)?;
@@ -126,7 +138,7 @@ pub struct NewVersion<'a> {
     pub source_file: &'a str,
     /// Platform from binding; `None` inherits the platform the family is bound to when
     /// that is exactly one, else the version stays unbound.
-    pub platform: Option<&'a str>,
+    pub platform: Option<PlatformKey>,
     /// Unix seconds.
     pub now: i64,
 }
@@ -137,7 +149,7 @@ pub struct VersionPlan {
     /// The stored row.
     pub id: DatVersionId,
     /// The platform the row is bound to after the upsert.
-    pub platform_id: Option<PlatformId>,
+    pub platform: Option<PlatformRef>,
     /// True when this version is now the newest of its family on its platform; its titles
     /// should be loaded.
     pub current: bool,
@@ -147,36 +159,36 @@ pub struct VersionPlan {
 struct Decision {
     family: String,
     existing: Option<DatVersionId>,
-    inherited: Option<String>,
-    platform: Option<String>,
+    inherited: Option<PlatformKey>,
+    platform: Option<PlatformKey>,
     current: bool,
     superseded_by: Option<DatVersionId>,
 }
 
 fn decide(conn: &Connection, v: &NewVersion<'_>) -> Result<Decision> {
     let family = family_key(v.dat_name).into_string();
-    let existing: Option<(DatVersionId, Option<String>)> = conn
+    let existing: Option<(DatVersionId, Option<PlatformKey>)> = conn
         .query_row(
-            "SELECT id, platform_id FROM dat_versions
-             WHERE dat_name = ?1 AND version = ?2 AND source = 'dat'",
-            params![v.dat_name, v.version],
+            "SELECT id, platform FROM dat_versions
+             WHERE dat_name = ?1 AND version = ?2 AND source = ?3",
+            params![v.dat_name, v.version, TitleSource::Dat],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
     let inherited = if let Some(p) = v.platform {
-        Some(p.to_owned())
+        Some(p)
     } else {
         sole_platform(conn, &family)?
     };
     let (existing, stored) = existing.map_or((None, None), |(id, p)| (Some(id), p));
-    let platform = inherited.clone().or(stored);
+    let platform = inherited.or(stored);
     let newest: Option<(DatVersionId, String)> = conn
         .query_row(
             "SELECT id, version FROM dat_versions
-             WHERE family = ?1 AND platform_id IS ?2 AND superseded_by IS NULL AND retired = 0
-               AND id IS NOT ?3 AND source = 'dat'
+             WHERE family = ?1 AND platform IS ?2 AND superseded_by IS NULL AND retired = 0
+               AND id IS NOT ?3 AND source = ?4
              ORDER BY loaded_at DESC, id DESC LIMIT 1",
-            params![family, platform, existing],
+            params![family, platform, existing, TitleSource::Dat],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
@@ -199,16 +211,16 @@ fn decide(conn: &Connection, v: &NewVersion<'_>) -> Result<Decision> {
 }
 
 /// The platform `family` is bound to when it is exactly one.
-fn sole_platform(conn: &Connection, family: &str) -> Result<Option<String>> {
-    let bound: Vec<String> = conn
+fn sole_platform(conn: &Connection, family: &str) -> Result<Option<PlatformKey>> {
+    let bound: Vec<PlatformKey> = conn
         .prepare_cached(
-            "SELECT DISTINCT platform_id FROM dat_versions
-             WHERE family = ?1 AND platform_id IS NOT NULL AND retired = 0 AND source = 'dat'",
+            "SELECT DISTINCT platform FROM dat_versions
+             WHERE family = ?1 AND platform IS NOT NULL AND retired = 0 AND source = ?2",
         )?
-        .query_map([family], |r| r.get(0))?
+        .query_map(params![family, TitleSource::Dat], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(match bound.as_slice() {
-        [only] => Some(only.clone()),
+        [only] => Some(*only),
         _ => None,
     })
 }
@@ -236,9 +248,13 @@ fn not_older(new: &str, current: &str) -> bool {
 /// let v = NewVersion { dat_name: "Test Console", version: "1", source_file: "a.dat", platform: None, now: 1 };
 /// assert_eq!(plan_version(&conn, &v).unwrap(), (None, true));
 /// ```
-pub fn plan_version(conn: &Connection, v: &NewVersion<'_>) -> Result<(Option<PlatformId>, bool)> {
+pub fn plan_version(conn: &Connection, v: &NewVersion<'_>) -> Result<(Option<PlatformRef>, bool)> {
     let d = decide(conn, v)?;
-    Ok((d.platform.map(PlatformId::new), d.current))
+    let platform = match d.platform {
+        Some(key) => PlatformRef::by_key(conn, key)?,
+        None => None,
+    };
+    Ok((platform, d.current))
 }
 
 /// Inserts or refreshes the `(dat_name, version)` row and applies supersession within
@@ -269,7 +285,7 @@ pub fn upsert_version(conn: &Connection, v: &NewVersion<'_>) -> Result<VersionPl
     let id = if let Some(id) = existing {
         conn.execute(
             "UPDATE dat_versions SET source_file = ?2, loaded_at = ?3,
-               platform_id = COALESCE(?4, platform_id), superseded_by = ?5, retired = 0,
+               platform = COALESCE(?4, platform), superseded_by = ?5, retired = 0,
                family = ?6
              WHERE id = ?1",
             params![id, v.source_file, v.now, inherited, superseded_by, family],
@@ -277,7 +293,7 @@ pub fn upsert_version(conn: &Connection, v: &NewVersion<'_>) -> Result<VersionPl
         id
     } else {
         conn.execute(
-            "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at,
+            "INSERT INTO dat_versions (platform, dat_name, version, source_file, loaded_at,
                superseded_by, game_count, family)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7)",
             params![
@@ -292,22 +308,26 @@ pub fn upsert_version(conn: &Connection, v: &NewVersion<'_>) -> Result<VersionPl
         )?;
         DatVersionId::new(conn.last_insert_rowid())
     };
-    let platform_id: Option<String> = conn.query_row(
-        "SELECT platform_id FROM dat_versions WHERE id = ?1",
+    let platform: Option<PlatformKey> = conn.query_row(
+        "SELECT platform FROM dat_versions WHERE id = ?1",
         [id],
         |r| r.get(0),
     )?;
     if current {
         conn.execute(
             "UPDATE dat_versions SET superseded_by = ?1
-             WHERE family = ?2 AND platform_id IS ?3 AND id != ?1 AND superseded_by IS NULL
-               AND source = 'dat'",
-            params![id, family, platform_id],
+             WHERE family = ?2 AND platform IS ?3 AND id != ?1 AND superseded_by IS NULL
+               AND source = ?4",
+            params![id, family, platform, TitleSource::Dat],
         )?;
     }
+    let platform = match platform {
+        Some(key) => PlatformRef::by_key(conn, key)?,
+        None => None,
+    };
     Ok(VersionPlan {
         id,
-        platform_id: platform_id.map(PlatformId::new),
+        platform,
         current,
     })
 }
@@ -335,9 +355,18 @@ pub fn set_game_count(conn: &Connection, id: DatVersionId, count: u64) -> Result
     Ok(())
 }
 
-/// Marks the live titles of version `id` pending before it is loaded again, so
+/// The connection's list of titles [`begin_load`] retired until the load stores them again;
+/// a title that is still retired afterwards was dropped by the load.
+fn pending_table(conn: &Connection) -> Result<()> {
+    conn.execute_batch(
+        "CREATE TEMP TABLE IF NOT EXISTS load_pending (title_id INTEGER PRIMARY KEY) STRICT",
+    )?;
+    Ok(())
+}
+
+/// Retires the live titles of version `id` and remembers them before it is loaded again, so
 /// [`retire_absent`] can tell the entries a reload of the same version dropped.
-/// Pending titles the load stores become live again. Run both in one transaction.
+/// Titles the load stores become live again. Run both in one transaction.
 ///
 /// # Errors
 ///
@@ -351,9 +380,16 @@ pub fn set_game_count(conn: &Connection, id: DatVersionId, count: u64) -> Result
 /// assert_eq!(dats::begin_load(&conn, DatVersionId::new(1)).unwrap(), 0);
 /// ```
 pub fn begin_load(conn: &Connection, id: DatVersionId) -> Result<usize> {
+    pending_table(conn)?;
+    conn.execute("DELETE FROM temp.load_pending", [])?;
+    conn.execute(
+        "INSERT INTO temp.load_pending (title_id)
+         SELECT id FROM titles WHERE dat_version_id = ?1 AND retired = 0 AND source = ?2",
+        params![id, TitleSource::Dat],
+    )?;
     Ok(conn.execute(
-        "UPDATE titles SET retired = 2 WHERE dat_version_id = ?1 AND retired = 0 AND source = 'dat'",
-        [id],
+        "UPDATE titles SET retired = 1 WHERE id IN (SELECT title_id FROM temp.load_pending)",
+        [],
     )?)
 }
 
@@ -373,18 +409,21 @@ pub fn begin_load(conn: &Connection, id: DatVersionId) -> Result<usize> {
 /// assert_eq!(dats::retire_absent(&conn, id).unwrap(), 0);
 /// ```
 pub fn retire_absent(conn: &Connection, id: DatVersionId) -> Result<usize> {
+    pending_table(conn)?;
     let others = conn.execute(
         "UPDATE titles SET retired = 1, is_1g1r_pick = 0
-         WHERE retired = 0 AND source = 'dat' AND dat_version_id IN (
+         WHERE retired = 0 AND source = ?2 AND dat_version_id IN (
            SELECT o.id FROM dat_versions o
-           JOIN dat_versions n ON n.family = o.family AND n.platform_id IS o.platform_id
-           WHERE n.id = ?1 AND o.id != ?1 AND o.source = 'dat')",
-        [id],
+           JOIN dat_versions n ON n.family = o.family AND n.platform IS o.platform
+           WHERE n.id = ?1 AND o.id != ?1 AND o.source = ?2)",
+        params![id, TitleSource::Dat],
     )?;
     let pending = conn.execute(
-        "UPDATE titles SET retired = 1, is_1g1r_pick = 0 WHERE dat_version_id = ?1 AND retired = 2 AND source = 'dat'",
-        [id],
+        "UPDATE titles SET is_1g1r_pick = 0
+         WHERE retired = 1 AND id IN (SELECT title_id FROM temp.load_pending)",
+        [],
     )?;
+    conn.execute("DELETE FROM temp.load_pending", [])?;
     Ok(others + pending)
 }
 
@@ -404,19 +443,21 @@ pub fn retire_absent(conn: &Connection, id: DatVersionId) -> Result<usize> {
 /// assert!(dats::retire(&conn, DatVersionId::new(1), 0).unwrap().is_none());
 /// ```
 pub fn retire(conn: &Connection, id: DatVersionId, now: i64) -> Result<Option<DatVersionRow>> {
-    const OWN: &str = "SELECT id FROM titles WHERE dat_version_id = ?1 AND source = 'dat'";
+    let own = format!("SELECT id FROM titles WHERE dat_version_id = ?1 AND source = {DAT}");
     let Some(row) = get(conn, id)? else {
         return Ok(None);
     };
     conn.execute("UPDATE dat_versions SET retired = 1 WHERE id = ?1", [id])?;
     super::downloads::cancel_unstarted_in_dat_version(conn, id, now)?;
     conn.execute(
-        &format!("UPDATE roms SET retired = 1 WHERE title_id IN ({OWN})"),
+        &format!("UPDATE roms SET retired = 1 WHERE title_id IN ({own})"),
         [id],
     )?;
     conn.execute(
-        "UPDATE titles SET retired = 1, is_1g1r_pick = 0, wanted = 0
-         WHERE dat_version_id = ?1 AND source = 'dat'",
+        &format!(
+            "UPDATE titles SET retired = 1, is_1g1r_pick = 0, wanted = 0
+             WHERE dat_version_id = ?1 AND source = {DAT}"
+        ),
         [id],
     )?;
     Ok(Some(row))
@@ -438,7 +479,7 @@ pub fn retire(conn: &Connection, id: DatVersionId, now: i64) -> Result<Option<Da
 pub fn get(conn: &Connection, id: DatVersionId) -> Result<Option<DatVersionRow>> {
     Ok(conn
         .query_row(
-            &format!("SELECT {COLUMNS} WHERE d.id = ?1 AND d.source = 'dat'"),
+            &format!("SELECT {} WHERE d.id = ?1 AND d.source = {DAT}", columns()),
             [id],
             from_row,
         )
@@ -462,13 +503,14 @@ pub fn get(conn: &Connection, id: DatVersionId) -> Result<Option<DatVersionRow>>
 pub fn list(conn: &Connection, page: Page) -> Result<Paged<DatVersionRow>> {
     sql::snapshot(conn, |conn| {
         let total = conn.query_row(
-            "SELECT COUNT(*) FROM dat_versions WHERE source = 'dat'",
+            &format!("SELECT COUNT(*) FROM dat_versions WHERE source = {DAT}"),
             [],
             |r| sql::get_u64(r, 0),
         )?;
         let mut stmt = conn.prepare(&format!(
-            "SELECT {COLUMNS} WHERE d.source = 'dat' ORDER BY d.loaded_at DESC, d.id DESC
-             LIMIT ?1 OFFSET ?2"
+            "SELECT {} WHERE d.source = {DAT} ORDER BY d.loaded_at DESC, d.id DESC
+             LIMIT ?1 OFFSET ?2",
+            columns()
         ))?;
         let items = stmt
             .query_map(params![page.limit, page.offset], from_row)?
@@ -488,8 +530,8 @@ pub fn list(conn: &Connection, page: Page) -> Result<Paged<DatVersionRow>> {
 /// use mistarr_server::db::dats;
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// conn.execute("INSERT INTO dat_versions (dat_name, version, source_file, loaded_at, game_count)
-///   VALUES ('Example (Headered)', '1', 'a.dat', 1, 0)", []).unwrap();
+/// conn.execute("INSERT INTO dat_versions (dat_name, version, source_file, loaded_at, game_count, family)
+///   VALUES ('Example (Headered)', '1', 'a.dat', 1, 0, '')", []).unwrap();
 /// assert_eq!(dats::refresh_families(&conn).unwrap(), 1);
 /// assert_eq!(dats::refresh_families(&conn).unwrap(), 0);
 /// ```
@@ -524,12 +566,12 @@ pub fn refresh_families(conn: &Connection) -> Result<usize> {
 /// assert!(mistarr_server::db::dats::resolve_families(&conn).unwrap().is_empty());
 /// ```
 pub fn resolve_families(conn: &Connection) -> Result<Vec<PlatformId>> {
-    let live: Vec<(DatVersionId, String, Option<String>, String)> = conn
-        .prepare(
-            "SELECT id, family, platform_id, version FROM dat_versions
-             WHERE source = 'dat' AND retired = 0 AND superseded_by IS NULL
-             ORDER BY family, platform_id, loaded_at, id",
-        )?
+    let live: Vec<(DatVersionId, String, Option<PlatformKey>, String)> = conn
+        .prepare(&format!(
+            "SELECT id, family, platform, version FROM dat_versions
+             WHERE source = {DAT} AND retired = 0 AND superseded_by IS NULL
+             ORDER BY family, platform, loaded_at, id"
+        ))?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
         .collect::<rusqlite::Result<_>>()?;
     let mut changed: Vec<PlatformId> = Vec::new();
@@ -557,13 +599,15 @@ pub fn resolve_families(conn: &Connection) -> Result<Vec<PlatformId>> {
                 [*id, winner.0],
             )?;
             conn.execute(
-                "UPDATE titles SET retired = 1, is_1g1r_pick = 0
-                 WHERE dat_version_id = ?1 AND retired = 0 AND source = 'dat'",
+                &format!(
+                    "UPDATE titles SET retired = 1, is_1g1r_pick = 0
+                     WHERE dat_version_id = ?1 AND retired = 0 AND source = {DAT}"
+                ),
                 [*id],
             )?;
         }
-        if let Some(p) = platform {
-            changed.push(PlatformId::new(p.clone()));
+        if let Some(p) = platform.and_then(|k| PlatformRef::by_key(conn, k).transpose()) {
+            changed.push(p?.id);
         }
     }
     changed.dedup();
@@ -573,23 +617,23 @@ pub fn resolve_families(conn: &Connection) -> Result<Vec<PlatformId>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::fixtures::conn;
+    use crate::db::fixtures::{conn, key, pid, platform_ref};
 
     fn new<'a>(version: &'a str, platform: Option<&'a str>, now: i64) -> NewVersion<'a> {
         NewVersion {
             dat_name: "Maker - Game Boy",
             version,
             source_file: "gb.dat",
-            platform,
+            platform: platform.map(|p| key(&pid(p))),
             now,
         }
     }
 
     fn title(c: &Connection, version: DatVersionId, name: &str) -> i64 {
         c.execute(
-            "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
-             VALUES ('gb', ?1, ?2, ?2)",
-            params![version.get(), name],
+            "INSERT INTO titles (platform, dat_version_id, name, base_name, group_key)
+             VALUES (?3, ?1, ?2, ?2, '')",
+            params![version.get(), name, key(&pid("gb"))],
         )
         .expect("insert");
         c.last_insert_rowid()
@@ -600,10 +644,10 @@ mod tests {
         let c = conn();
         let v1 = upsert_version(&c, &new("2", Some("gb"), 1)).expect("v1");
         assert!(v1.current);
-        assert_eq!(v1.platform_id, Some(PlatformId::new("gb")));
+        assert_eq!(v1.platform, Some(platform_ref(&pid("gb"))));
         let v2 = upsert_version(&c, &new("3", None, 2)).expect("v2");
         assert!(v2.current);
-        assert_eq!(v2.platform_id, v1.platform_id, "binding is inherited");
+        assert_eq!(v2.platform, v1.platform, "binding is inherited");
         assert_eq!(row_of(&c, v1.id).superseded_by, Some(v2.id));
         let old = upsert_version(&c, &new("1", None, 3)).expect("old");
         assert!(!old.current);
@@ -692,7 +736,7 @@ mod tests {
         let other = upsert_version(
             &c,
             &NewVersion {
-                platform: Some("gb"),
+                platform: Some(key(&pid("gb"))),
                 ..named(logiqx, "20260401", 6)
             },
         )
@@ -721,7 +765,7 @@ mod tests {
         )
         .expect("unbound");
         assert_eq!(
-            unbound.platform_id, None,
+            unbound.platform, None,
             "a family on two platforms is not inherited"
         );
         let row = row_of(&c, unbound.id);
@@ -787,9 +831,10 @@ mod tests {
             ("Example Samples - Example System", "1", 3),
         ] {
             c.execute(
-                "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
-                 VALUES ('nes', ?1, ?2, 'a.dat', ?3, 1)",
-                params![name, version, at],
+                "INSERT INTO dat_versions (platform, dat_name, version, source_file, loaded_at,
+                                           game_count, family)
+                 VALUES (?4, ?1, ?2, 'a.dat', ?3, 1, '')",
+                params![name, version, at, key(&pid("nes"))],
             )
             .expect("insert");
         }
@@ -815,8 +860,8 @@ mod tests {
     fn families_are_refreshed_from_names() {
         let c = conn();
         c.execute(
-            "INSERT INTO dat_versions (dat_name, version, source_file, loaded_at, game_count)
-             VALUES ('Example (DB Export)', '1', 'a.xml', 1, 0)",
+            "INSERT INTO dat_versions (dat_name, version, source_file, loaded_at, game_count, family)
+             VALUES ('Example (DB Export)', '1', 'a.xml', 1, 0, '')",
             [],
         )
         .expect("insert");
@@ -845,7 +890,7 @@ mod tests {
             },
         )
         .expect("v");
-        assert_eq!(v.platform_id, None);
+        assert_eq!(v.platform, None);
         set_game_count(&c, v.id, 3).expect("count");
         let row = row_of(&c, v.id);
         assert_eq!((row.game_count, row.platform_id), (3, None));

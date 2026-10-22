@@ -2,11 +2,12 @@ use super::browse::*;
 use super::detail::*;
 use super::recompute::*;
 use super::*;
+use crate::db::arcade::Check;
 use crate::db::dats::{self, NewVersion};
 use crate::db::downloads::DownloadState;
 use crate::db::files::FileState;
 use crate::db::fixtures::conn;
-use crate::db::fixtures::pid;
+use crate::db::fixtures::{key, pid, platform_ref};
 use crate::db::groups;
 use crate::db::ids::FileId;
 use crate::db::sql::Page;
@@ -35,8 +36,13 @@ fn browse(
     offset: u32,
 ) -> Result<(Vec<GroupRow>, u64)> {
     groups::flush(c)?;
-    super::browse::browse(c, &pid(platform), filter, Page { limit, offset })
-        .map(|p| (p.items, p.total))
+    super::browse::browse(
+        c,
+        &platform_ref(&pid(platform)),
+        filter,
+        Page { limit, offset },
+    )
+    .map(|p| (p.items, p.total))
 }
 
 /// [`super::counts`] after the same refresh.
@@ -52,7 +58,7 @@ fn version(c: &Connection, v: &str) -> DatVersionId {
             dat_name: DAT,
             version: v,
             source_file: "gb.dat",
-            platform: Some("gb"),
+            platform: Some(key(&pid("gb"))),
             now: v.parse().unwrap_or(0),
         },
     )
@@ -94,7 +100,7 @@ fn add(
             header: None,
         })
         .collect();
-    upsert_title(c, &pid("gb"), v, &t, &roms).expect("upsert")
+    upsert_title(c, &platform_ref(&pid("gb")), v, &t, &roms).expect("upsert")
 }
 
 fn rom(c: &Connection, title: TitleId, name: &str) -> i64 {
@@ -158,7 +164,7 @@ fn plain(c: &Connection) -> DatVersionId {
     );
     add(c, v, "Other Tale (Europe)", None, &[("t.bin", "good")]);
     link_parents(c, v, false).expect("link");
-    recompute_platform(c, &pid("gb"), &Prefs::default()).expect("recompute");
+    recompute_platform(c, key(&pid("gb")), &Prefs::default()).expect("recompute");
     v
 }
 
@@ -259,7 +265,7 @@ fn inferred_groups_elect_a_parent_and_picks_follow_prefs() {
         regions: vec!["Japan".into()],
         ..Prefs::default()
     };
-    let r = recompute_platform(&c, &pid("gb"), &japan).expect("recompute");
+    let r = recompute_platform(&c, key(&pid("gb")), &japan).expect("recompute");
     assert_eq!((r.groups, r.picks), (3, 2));
     assert_eq!(
         pick_names(&c),
@@ -271,7 +277,7 @@ fn inferred_groups_elect_a_parent_and_picks_follow_prefs() {
         prefer_latest_revision: false,
         ..Prefs::default()
     };
-    recompute_platform(&c, &pid("gb"), &oldest).expect("recompute");
+    recompute_platform(&c, key(&pid("gb")), &oldest).expect("recompute");
     assert_eq!(pick_names(&c)[0], "Example Quest (USA)");
 }
 
@@ -289,7 +295,7 @@ fn bad_dumps_lose_the_pick() {
         &[("q.bin", "good")],
     );
     link_parents(&c, v, false).expect("link");
-    recompute_platform(&c, &pid("gb"), &Prefs::default()).expect("recompute");
+    recompute_platform(&c, key(&pid("gb")), &Prefs::default()).expect("recompute");
     assert_eq!(pick_names(&c), ["Example Quest (USA) (Alt)"]);
 }
 
@@ -375,11 +381,11 @@ fn arcade_title_grouped<'a>(
 #[test]
 fn counts_report_arcade_sets_failing_check_or_partly_present() {
     let c = conn();
-    let v = crate::db::arcade::mra_version(&c, &pid("arcade"), 1).expect("version");
+    let v = crate::db::arcade::mra_version(&c, key(&pid("arcade")), 1).expect("version");
     // A complete set whose md5 check failed.
     let mismatched = crate::db::arcade::upsert_title(
         &c,
-        &pid("arcade"),
+        key(&pid("arcade")),
         v,
         &arcade_title("Example Blaster", "exblast"),
         &[crate::db::arcade::MraZip {
@@ -390,11 +396,11 @@ fn counts_report_arcade_sets_failing_check_or_partly_present() {
         }],
     )
     .expect("upsert");
-    crate::db::arcade::set_check(&c, mismatched, Some("mismatch"), None, None).expect("check");
+    crate::db::arcade::set_check(&c, mismatched, Some(Check::Mismatch), None, None).expect("check");
     // A set naming two zips, only one of them present.
     crate::db::arcade::upsert_title(
         &c,
-        &pid("arcade"),
+        key(&pid("arcade")),
         v,
         &arcade_title("Example Quest", "exquest"),
         &[
@@ -416,7 +422,7 @@ fn counts_report_arcade_sets_failing_check_or_partly_present() {
     // A fully present, matching set: neither failing nor partial.
     let matched = crate::db::arcade::upsert_title(
         &c,
-        &pid("arcade"),
+        key(&pid("arcade")),
         v,
         &arcade_title("Example Homebrew", "exhb"),
         &[crate::db::arcade::MraZip {
@@ -427,7 +433,7 @@ fn counts_report_arcade_sets_failing_check_or_partly_present() {
         }],
     )
     .expect("upsert");
-    crate::db::arcade::set_check(&c, matched, Some("match"), None, None).expect("check");
+    crate::db::arcade::set_check(&c, matched, Some(Check::Match), None, None).expect("check");
 
     let counts = counts(&c, &[]).expect("counts");
     let arcade = counts.get("arcade").expect("arcade");
@@ -441,10 +447,10 @@ fn counts_report_arcade_sets_failing_check_or_partly_present() {
 #[test]
 fn counts_read_zero_for_an_unchecked_mra_title_with_its_zip_absent() {
     let c = conn();
-    let v = crate::db::arcade::mra_version(&c, &pid("arcade"), 1).expect("version");
+    let v = crate::db::arcade::mra_version(&c, key(&pid("arcade")), 1).expect("version");
     crate::db::arcade::upsert_title(
         &c,
-        &pid("arcade"),
+        key(&pid("arcade")),
         v,
         &arcade_title("Example Blaster", "exblast"),
         &[crate::db::arcade::MraZip {
@@ -473,10 +479,10 @@ fn counts_read_zero_for_an_unchecked_mra_title_with_its_zip_absent() {
 #[test]
 fn a_refused_check_does_not_count_as_failing() {
     let c = conn();
-    let v = crate::db::arcade::mra_version(&c, &pid("arcade"), 1).expect("version");
+    let v = crate::db::arcade::mra_version(&c, key(&pid("arcade")), 1).expect("version");
     let t = crate::db::arcade::upsert_title(
         &c,
-        &pid("arcade"),
+        key(&pid("arcade")),
         v,
         &arcade_title("Example Blaster", "exblast"),
         &[crate::db::arcade::MraZip {
@@ -487,7 +493,7 @@ fn a_refused_check_does_not_count_as_failing() {
         }],
     )
     .expect("upsert");
-    crate::db::arcade::set_check(&c, t, Some("refused"), None, None).expect("check");
+    crate::db::arcade::set_check(&c, t, Some(Check::Refused), None, None).expect("check");
 
     let counts = counts(&c, &[]).expect("counts");
     let arcade = counts.get("arcade").expect("arcade");
@@ -503,7 +509,7 @@ fn a_refused_check_does_not_count_as_failing() {
 #[test]
 fn failing_check_and_partial_count_clone_groups_not_titles() {
     let c = conn();
-    let v = crate::db::arcade::mra_version(&c, &pid("arcade"), 1).expect("version");
+    let v = crate::db::arcade::mra_version(&c, key(&pid("arcade")), 1).expect("version");
     let zip = |name: &'static str, present: bool| crate::db::arcade::MraZip {
         name,
         zip_dir: "mame",
@@ -515,37 +521,37 @@ fn failing_check_and_partial_count_clone_groups_not_titles() {
     // plus a mismatched alternate.
     let main = crate::db::arcade::upsert_title(
         &c,
-        &pid("arcade"),
+        key(&pid("arcade")),
         v,
         &arcade_title_grouped("Example Blaster", "exblast", "mra:example blaster"),
         &[zip("exblast.zip", true)],
     )
     .expect("upsert");
-    crate::db::arcade::set_check(&c, main, Some("match"), None, None).expect("check");
+    crate::db::arcade::set_check(&c, main, Some(Check::Match), None, None).expect("check");
     let alt = crate::db::arcade::upsert_title(
         &c,
-        &pid("arcade"),
+        key(&pid("arcade")),
         v,
         &arcade_title_grouped("Example Blaster (set 2)", "exblast2", "mra:example blaster"),
         &[zip("exblast2.zip", true)],
     )
     .expect("upsert");
-    crate::db::arcade::set_check(&c, alt, Some("mismatch"), None, None).expect("check");
+    crate::db::arcade::set_check(&c, alt, Some(Check::Mismatch), None, None).expect("check");
 
     // Group 2 (group_key "mra:example quest"): no have-verified variant, one
     // failing and one partly present.
     let failing = crate::db::arcade::upsert_title(
         &c,
-        &pid("arcade"),
+        key(&pid("arcade")),
         v,
         &arcade_title_grouped("Example Quest", "exquest", "mra:example quest"),
         &[zip("exquest.zip", true)],
     )
     .expect("upsert");
-    crate::db::arcade::set_check(&c, failing, Some("missing_part"), None, None).expect("check");
+    crate::db::arcade::set_check(&c, failing, Some(Check::MissingPart), None, None).expect("check");
     let partial = crate::db::arcade::upsert_title(
         &c,
-        &pid("arcade"),
+        key(&pid("arcade")),
         v,
         &arcade_title_grouped("Example Quest (set 2)", "exquest2", "mra:example quest"),
         &[zip("exquest2.zip", true), zip("exquest2b.zip", false)],
@@ -554,7 +560,7 @@ fn failing_check_and_partial_count_clone_groups_not_titles() {
 
     // The real grouping path: matching group_key clusters both pairs into one
     // clone group each, exactly as a catalogue run would.
-    recompute_platform(&c, &pid("arcade"), &Prefs::default()).expect("recompute");
+    recompute_platform(&c, key(&pid("arcade")), &Prefs::default()).expect("recompute");
     let parent_of = |id: crate::db::ids::TitleId| -> i64 {
         c.query_row(
             "SELECT parent_id FROM titles WHERE id = ?1",
@@ -664,7 +670,7 @@ fn browse_filters_sorts_and_pages() {
     let v2 = version(&c, "2");
     add(&c, v2, "Newer Tale (USA)", None, &[]);
     link_parents(&c, v2, false).expect("link");
-    recompute_platform(&c, &pid("gb"), &Prefs::default()).expect("recompute");
+    recompute_platform(&c, key(&pid("gb")), &Prefs::default()).expect("recompute");
     let recent = Browse {
         sort: Sort::Recent,
         ..base
@@ -737,7 +743,7 @@ fn a_group_is_bios_only_when_every_live_variant_is_flagged_bios() {
         &[("b.bin", "good")],
     );
     link_parents(&c, v, false).expect("link");
-    recompute_platform(&c, &pid("gb"), &Prefs::default()).expect("recompute");
+    recompute_platform(&c, key(&pid("gb")), &Prefs::default()).expect("recompute");
     let tale = bios_of(&c).into_iter().find(|(n, _)| n == "Other Tale");
     assert_eq!(
         tale,
@@ -855,7 +861,8 @@ fn browse_walks_an_index_in_every_sort_order() {
                 sort,
                 ..Browse::default()
             };
-            let clause = browse_clause(&c, &pid("gb"), &filter, shape).expect("clause");
+            let clause =
+                browse_clause(&c, &platform_ref(&pid("gb")), &filter, shape).expect("clause");
             let args = clause
                 .args
                 .iter()
@@ -908,7 +915,9 @@ fn every_search_shape_finds_the_same_groups() {
         };
         let pages: Vec<_> = SearchShape::ALL
             .into_iter()
-            .map(|s| browse_with(&c, &pid(platform), &filter, SIXTY, s).expect("browse"))
+            .map(|s| {
+                browse_with(&c, &platform_ref(&pid(platform)), &filter, SIXTY, s).expect("browse")
+            })
             .collect();
         assert!(pages.windows(2).all(|w| w[0] == w[1]), "{platform} {q}");
     }
@@ -920,7 +929,7 @@ fn every_search_shape_finds_the_same_groups() {
                 "SELECT COUNT(*) FROM title_search
                  WHERE title_search MATCH 'platform : \"' || char(31) || ?1 || char(31) || '\"'"
             ),
-            count("SELECT COUNT(*) FROM titles WHERE platform_id = ?1"),
+            count("SELECT COUNT(*) FROM titles WHERE platform = (SELECT id FROM platforms WHERE slug = ?1)"),
             "{platform}"
         );
     }
@@ -1065,16 +1074,16 @@ fn catalogue_strategy() -> impl Strategy<Value = ([i64; 3], Vec<GameSpec>, Vec<i
 fn store_catalogue(c: &Connection, counts: [i64; 3], games: &[GameSpec], ids: &[i64]) {
     for (v, count) in counts.iter().enumerate() {
         c.execute(
-            "INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at, game_count)
-             VALUES (?1, 'nes', 'Test ' || ?1, '1', 't.dat', 0, ?2)",
+            "INSERT INTO dat_versions (id, platform, family, dat_name, version, source_file, loaded_at, game_count)
+             VALUES (?1, (SELECT id FROM platforms WHERE slug = 'nes'), '', 'Test ' || ?1, '1', 't.dat', 0, ?2)",
             params![i64::try_from(v + 1).expect("v"), count],
         )
         .expect("version");
     }
     for (g, &id) in games.iter().zip(ids) {
         c.execute(
-            "INSERT INTO titles (id, platform_id, dat_version_id, name, base_name, retired)
-             VALUES (?1, 'nes', ?2, 'G' || ?1, 'G', ?3)",
+            "INSERT INTO titles (id, platform, group_key, dat_version_id, name, base_name, retired)
+             VALUES (?1, (SELECT id FROM platforms WHERE slug = 'nes'), '', ?2, 'G' || ?1, 'G', ?3)",
             params![id, i64::try_from(g.version + 1).expect("v"), g.retired],
         )
         .expect("title");
@@ -1112,7 +1121,7 @@ type RefTitle = (TitleId, Option<TitleId>, i64, bool, Option<Vec<String>>);
 fn reference_groups(c: &Connection) -> Vec<(TitleId, Option<TitleId>)> {
     let versions: Vec<i64> = c
         .prepare(
-            "SELECT id FROM dat_versions WHERE platform_id = 'nes' AND source = 'dat'
+            "SELECT id FROM dat_versions WHERE platform = (SELECT id FROM platforms WHERE slug = 'nes') AND source = 0
                AND retired = 0 AND superseded_by IS NULL ORDER BY game_count DESC, id",
         )
         .expect("prepare")
@@ -1123,7 +1132,7 @@ fn reference_groups(c: &Connection) -> Vec<(TitleId, Option<TitleId>)> {
     let mut rows: Vec<RefTitle> = c
         .prepare(
             "SELECT id, parent_id, dat_version_id, retired = 0 FROM titles
-             WHERE platform_id = 'nes' ORDER BY id",
+             WHERE platform = (SELECT id FROM platforms WHERE slug = 'nes') ORDER BY id",
         )
         .expect("prepare")
         .query_map([], |r| {
@@ -1189,7 +1198,7 @@ fn reference_groups(c: &Connection) -> Vec<(TitleId, Option<TitleId>)> {
 }
 
 fn stored_groups(c: &Connection) -> Vec<(TitleId, Option<TitleId>)> {
-    c.prepare("SELECT id, group_root FROM titles WHERE platform_id = 'nes' ORDER BY id")
+    c.prepare("SELECT id, group_root FROM titles WHERE platform = (SELECT id FROM platforms WHERE slug = 'nes') ORDER BY id")
         .expect("prepare")
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
         .expect("query")
@@ -1206,7 +1215,7 @@ fn recompute_nes(c: &mut Connection) -> (i64, i64) {
     };
     let tx = c.transaction().expect("tx");
     let before = changes(&tx);
-    recompute_platform(&tx, &pid("nes"), &Prefs::default()).expect("recompute");
+    recompute_platform(&tx, key(&pid("nes")), &Prefs::default()).expect("recompute");
     let written = changes(&tx) - before;
     let dirty: i64 = tx
         .query_row("SELECT COUNT(*) FROM title_groups_dirty", [], |r| r.get(0))
@@ -1262,12 +1271,12 @@ proptest! {
 fn chained_re_rooting_keeps_every_group_apart() {
     let mut c = conn();
     c.execute_batch(
-        "INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at, game_count)
-           VALUES (1, 'nes', 'Test A', '1', 'a.dat', 0, 9), (2, 'nes', 'Test B', '1', 'b.dat', 0, 2),
-                  (3, 'nes', 'Test C', '1', 'c.dat', 0, 2);
-         INSERT INTO titles (id, platform_id, dat_version_id, name, base_name)
-           VALUES (50, 'nes', 1, 'A', 'A'), (40, 'nes', 2, 'X', 'X'), (41, 'nes', 2, 'B', 'B'),
-                  (10, 'nes', 3, 'N', 'N'), (11, 'nes', 3, 'C', 'C');
+        "INSERT INTO dat_versions (id, platform, family, dat_name, version, source_file, loaded_at, game_count)
+           VALUES (1, (SELECT id FROM platforms WHERE slug = 'nes'), '', 'Test A', '1', 'a.dat', 0, 9), (2, (SELECT id FROM platforms WHERE slug = 'nes'), '', 'Test B', '1', 'b.dat', 0, 2),
+                  (3, (SELECT id FROM platforms WHERE slug = 'nes'), '', 'Test C', '1', 'c.dat', 0, 2);
+         INSERT INTO titles (id, platform, group_key, dat_version_id, name, base_name)
+           VALUES (50, (SELECT id FROM platforms WHERE slug = 'nes'), '', 1, 'A', 'A'), (40, (SELECT id FROM platforms WHERE slug = 'nes'), '', 2, 'X', 'X'), (41, (SELECT id FROM platforms WHERE slug = 'nes'), '', 2, 'B', 'B'),
+                  (10, (SELECT id FROM platforms WHERE slug = 'nes'), '', 3, 'N', 'N'), (11, (SELECT id FROM platforms WHERE slug = 'nes'), '', 3, 'C', 'C');
          UPDATE titles SET parent_id = CASE id WHEN 41 THEN 40 WHEN 11 THEN 10 ELSE id END;
          INSERT INTO roms (title_id, name, size, sha1)
            VALUES (50, 'a', 4, unhex(printf('%040x', 170))), (40, 'x', 4, unhex(printf('%040x', 170))),

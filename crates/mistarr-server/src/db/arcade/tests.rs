@@ -1,7 +1,7 @@
 use super::*;
 use crate::db::dats::{self, NewVersion};
 use crate::db::fixtures::conn;
-use crate::db::fixtures::pid;
+use crate::db::fixtures::{key, pid, platform_ref};
 use crate::db::roms::{live_zip_roms, zip_rom, zip_roms};
 use crate::db::titles::browse::Browse;
 use crate::db::titles::{self, RomInput, TitleInput};
@@ -12,12 +12,12 @@ fn mra(c: &Connection, name: &str, zips: &[(&str, bool)]) -> TitleId {
 }
 
 fn mra_run(c: &Connection, name: &str, zips: &[(&str, bool)], run: i64) -> TitleId {
-    let v = mra_version(c, &pid("arcade"), 1).expect("version");
-    let key = format!("mra:{}", name.to_lowercase());
+    let v = mra_version(c, key(&pid("arcade")), 1).expect("version");
+    let group = format!("mra:{}", name.to_lowercase());
     let t = MraTitle {
         name,
         base_name: name,
-        group_key: &key,
+        group_key: &group,
         regions: &[],
         languages: &[],
         revision: None,
@@ -37,13 +37,13 @@ fn mra_run(c: &Connection, name: &str, zips: &[(&str, bool)], run: i64) -> Title
             present,
         })
         .collect();
-    upsert_title(c, &pid("arcade"), v, &t, &zips).expect("upsert")
+    upsert_title(c, key(&pid("arcade")), v, &t, &zips).expect("upsert")
 }
 
 fn recompute(c: &Connection) {
     titles::recompute::recompute_platform(
         c,
-        &pid("arcade"),
+        key(&pid("arcade")),
         &mistarr_core::select::Prefs::default(),
     )
     .expect("recompute");
@@ -55,7 +55,7 @@ fn browse(c: &Connection) -> Vec<(String, u64)> {
         limit: 100,
         offset: 0,
     };
-    titles::browse::browse(c, &pid("arcade"), &Browse::default(), page)
+    titles::browse::browse(c, &platform_ref(&pid("arcade")), &Browse::default(), page)
         .expect("browse")
         .items
         .into_iter()
@@ -88,11 +88,11 @@ fn have_follows_zip_presence_and_the_md5_check() {
     assert_eq!(info.missing_zips, ["mame/exparent2.zip"]);
     assert_eq!(info.rbf.as_deref(), Some("excore"));
 
-    set_check(&c, full, Some("mismatch"), Some("rom 0"), Some("s")).expect("check");
+    set_check(&c, full, Some(Check::Mismatch), Some("rom 0"), Some("s")).expect("check");
     assert_eq!(browse(&c)[0].1, 0);
-    set_check(&c, full, Some("refused"), None, Some("s")).expect("check");
+    set_check(&c, full, Some(Check::Refused), None, Some("s")).expect("check");
     assert_eq!(browse(&c)[0].1, 1);
-    let stored = stored_mra(&c, &pid("arcade"), "Example.mra")
+    let stored = stored_mra(&c, key(&pid("arcade")), "Example.mra")
         .expect("stored")
         .expect("title");
     assert_eq!(stored.id, full);
@@ -118,14 +118,17 @@ fn rescans_keep_ids_and_retire_what_is_gone() {
     let d = mra(&c, "Example Racer", &[("exrace.zip", false)]);
     c.execute("UPDATE titles SET wanted = 1 WHERE id = ?1", [a.get()])
         .expect("want");
-    let run = next_run(&c, &pid("arcade")).expect("run");
+    let run = next_run(&c, key(&pid("arcade"))).expect("run");
     assert_eq!(run, 2);
     assert_eq!(
         mra_run(&c, "Example Blaster", &[("exblast.zip", true)], run),
         a
     );
     touch(&c, d, run).expect("touch");
-    assert_eq!(retire_unseen(&c, &pid("arcade"), run).expect("retire"), 1);
+    assert_eq!(
+        retire_unseen(&c, key(&pid("arcade")), run).expect("retire"),
+        1
+    );
     let (retired, wanted): (bool, bool) = c
         .query_row(
             "SELECT (SELECT retired FROM titles WHERE id = ?1), (SELECT wanted FROM titles WHERE id = ?2)",
@@ -134,9 +137,9 @@ fn rescans_keep_ids_and_retire_what_is_gone() {
         )
         .expect("row");
     assert!(retired && wanted);
-    assert_eq!(live_count(&c, &pid("arcade")).expect("count"), 2);
-    assert!(has_titles(&c, &pid("arcade")).expect("has"));
-    assert_eq!(next_run(&c, &pid("arcade")).expect("run"), 3);
+    assert_eq!(live_count(&c, key(&pid("arcade"))).expect("count"), 2);
+    assert!(has_titles(&c, key(&pid("arcade"))).expect("has"));
+    assert_eq!(next_run(&c, key(&pid("arcade"))).expect("run"), 3);
 }
 
 #[test]
@@ -164,7 +167,7 @@ fn dat_game(c: &Connection, version: &str, name: &str) -> TitleId {
             dat_name: "MAME",
             version,
             source_file: "mame.dat",
-            platform: Some("arcade"),
+            platform: Some(key(&pid("arcade"))),
             now: version.parse().unwrap_or(0),
         },
     )
@@ -190,7 +193,7 @@ fn dat_game(c: &Connection, version: &str, name: &str) -> TitleId {
         status: titles::RomStatus::Good,
         header: None,
     };
-    let id = titles::upsert_title(c, &pid("arcade"), v, &t, &[rom]).expect("upsert");
+    let id = titles::upsert_title(c, &platform_ref(&pid("arcade")), v, &t, &[rom]).expect("upsert");
     dats::retire_absent(c, v).expect("retire");
     id
 }
@@ -211,7 +214,7 @@ fn dat_loads_never_touch_mra_titles() {
     };
     assert!(!retired(m));
     assert!(retired(d));
-    let mra_version = mra_version(&c, &pid("arcade"), 2).expect("version");
+    let mra_version = mra_version(&c, key(&pid("arcade")), 2).expect("version");
     assert!(dats::get(&c, mra_version).expect("get").is_none());
     assert!(dats::retire(&c, mra_version, 1).expect("retire").is_none());
     assert!(!retired(m));
@@ -255,7 +258,7 @@ fn scans_never_match_members_to_mra_roms() {
     let pid = PlatformId::new("arcade");
     let m = crate::db::roms::match_rom(
         &c,
-        &pid,
+        key(&pid),
         Some(mistarr_core::Sha1::from_bytes([0; 20])),
         "0123456789abcdef0123456789abcdef".parse().ok(),
         Some(mistarr_core::Crc32::from_u32(0)),
@@ -328,13 +331,13 @@ fn import_reads_find_zip_roms_their_titles_and_dat_entries() {
         ),
         (main, "exblast.zip", "mame", "Example.mra")
     );
-    let live = live_zip_roms(&c, &pid("arcade")).expect("live zips");
+    let live = live_zip_roms(&c, key(&pid("arcade"))).expect("live zips");
     let naming = live.get("mame/exblast.zip").expect("named");
     assert_eq!(naming.len(), 2, "both titles' roms, whatever their case");
     assert_eq!(naming[0], rom, "lowest first");
     assert!(live.contains_key("mame/exparent.zip"));
     assert!(!live.contains_key("mame/nosuch.zip"));
-    let naming = titles_naming(&c, &pid("arcade"), "MAME", "EXBLAST.zip").expect("naming");
+    let naming = titles_naming(&c, key(&pid("arcade")), "MAME", "EXBLAST.zip").expect("naming");
     assert_eq!(
         naming.iter().map(|(t, _)| *t).collect::<Vec<_>>(),
         [main, alt]
@@ -355,19 +358,19 @@ fn import_reads_find_zip_roms_their_titles_and_dat_entries() {
     let dat = dat_game(&c, "1", "exblast");
     assert!(zip_rom(&c, RomId::new(0)).expect("read").is_none());
     assert_eq!(
-        dat_entry_named(&c, &pid("arcade"), "ExBlast", false).expect("dat"),
+        dat_entry_named(&c, key(&pid("arcade")), "ExBlast", false).expect("dat"),
         Some(dat)
     );
     assert_eq!(
-        dat_entry_named(&c, &pid("arcade"), "exblast", true).expect("dat"),
+        dat_entry_named(&c, key(&pid("arcade")), "exblast", true).expect("dat"),
         None
     );
     assert_eq!(
-        dat_entry_named(&c, &pid("arcade"), "exquest", false).expect("dat"),
+        dat_entry_named(&c, key(&pid("arcade")), "exquest", false).expect("dat"),
         None
     );
     assert_eq!(
-        dat_entry_named(&c, &pid("arcade"), "Example Blaster", false).expect("dat"),
+        dat_entry_named(&c, key(&pid("arcade")), "Example Blaster", false).expect("dat"),
         None
     );
 }
@@ -395,7 +398,8 @@ fn zip_members_store_the_tail_after_the_title_name_and_stay_idempotent() {
         .map(|z| z.name)
         .collect();
     assert_eq!(names, ["Example Blaster.zip", "exblast.zip"]);
-    let found = titles_naming(&c, &pid("arcade"), "mame", "EXAMPLE BLASTER.ZIP").expect("naming");
+    let found =
+        titles_naming(&c, key(&pid("arcade")), "mame", "EXAMPLE BLASTER.ZIP").expect("naming");
     assert_eq!(
         found.len(),
         1,

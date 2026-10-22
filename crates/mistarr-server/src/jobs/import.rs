@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use mistarr_clients::{Error as ClientError, SeedPolicy};
 use mistarr_core::hash::HeaderRule;
 use mistarr_core::matching::{leaf, match_members, pick_rom, Payload as _};
-use mistarr_core::{PlatformId, PlatformKey, RomId};
+use mistarr_core::{PlatformKey, RomId};
 use mistarr_mister::platforms::{self, Kind, Platform};
 use mistarr_mister::{
     adapter_for, CoreAdapter, DatEntry, PlacementPlan, StagedFile, StagedKind, StagedMember, Step,
@@ -377,10 +377,6 @@ impl Placing<'_> {
         &self.ctx.app
     }
 
-    fn pid(&self) -> PlatformId {
-        self.platform.platform_id()
-    }
-
     fn rule(&self) -> HeaderRule {
         self.platform.header_rule
     }
@@ -457,14 +453,14 @@ impl Placing<'_> {
         actual: &[Hashed],
         why: Option<Why>,
     ) -> Result<()> {
-        let (pid, list) = (self.pid(), actual.to_vec());
+        let (pid, list) = (self.key, actual.to_vec());
         let (expected, other, removed) = self
             .app()
             .db
             .read(move |c| {
                 let mut other = None;
                 for a in &list {
-                    if let Some(m) = match_forms(c, &pid, a.forms())? {
+                    if let Some(m) = match_forms(c, pid, a.forms())? {
                         let title = imports::title_entry(c, m.title_id)?;
                         other = title.map(|t| (t.id, t.name, m.name));
                         break;
@@ -625,12 +621,12 @@ impl Placing<'_> {
     /// The first staged payload that is a live rom of another live, non-BIOS
     /// entry in the wanted entry's clone group, with that entry.
     async fn other_version(&self, actual: &[Hashed]) -> Result<Option<(Hashed, TitleEntry)>> {
-        let (pid, wanted, list) = (self.pid(), self.entry.id, actual.to_vec());
+        let (pid, wanted, list) = (self.key, self.entry.id, actual.to_vec());
         self.app()
             .db
             .read(move |c| {
                 for a in list {
-                    let Some(m) = match_forms(c, &pid, a.forms())? else {
+                    let Some(m) = match_forms(c, pid, a.forms())? else {
                         continue;
                     };
                     let other = m.title_id;

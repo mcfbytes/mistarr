@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
+use mistarr_core::dat::family_key;
 use rusqlite::{params, Connection};
 
 use crate::db::files::FileState;
@@ -406,20 +407,33 @@ fn seed_console(
     out: &mut Seeded,
 ) -> Result<()> {
     let mra = console.layout == Layout::Mra;
-    let (dat_name, source) = if mra {
-        ("_Arcade".to_owned(), "mra")
+    let dat_name = if mra {
+        "_Arcade".to_owned()
     } else {
-        (format!("{} (synthetic)", console.id), "dat")
+        format!("{} (synthetic)", console.id)
     };
     let total = scaled(console, scale);
+    let platform: i64 = c.query_row(
+        "SELECT id FROM platforms WHERE slug = ?1",
+        [console.id],
+        |r| r.get(0),
+    )?;
+    let source = i64::from(mra);
     c.execute(
-        "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count, source)
-         VALUES (?1, ?2, '1', 'synthetic.dat', 0, ?3, ?4)",
-        params![console.id, dat_name, i64::try_from(total).unwrap_or(0), source],
+        "INSERT INTO dat_versions (platform, dat_name, version, source_file, loaded_at,
+                                   game_count, source, family)
+         VALUES (?1, ?2, '1', 'synthetic.dat', 0, ?3, ?4, ?5)",
+        params![
+            platform,
+            dat_name,
+            i64::try_from(total).unwrap_or(0),
+            source,
+            family_key(&dat_name).into_string()
+        ],
     )?;
     let version = c.last_insert_rowid();
     let mut title = c.prepare_cached(
-        "INSERT INTO titles (platform_id, dat_version_id, name, base_name, parent_id, revision,
+        "INSERT INTO titles (platform, dat_version_id, name, base_name, parent_id, revision,
                              is_1g1r_pick, wanted, group_key, inferred, source, setname, mra_path)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
     )?;
@@ -429,31 +443,12 @@ fn seed_console(
     let mut language = c.prepare_cached(
         "INSERT INTO title_languages (title_id, pos, language) VALUES (?1, ?2, ?3)",
     )?;
-    // Schemas without `own_name` store whole names; the WHERE keeps `?10` bound.
-    let tails = c
-        .prepare("SELECT 1 FROM pragma_table_info('roms') WHERE name = 'own_name'")?
-        .exists([])?;
-    let mut rom = c.prepare_cached(if tails {
+    let mut rom = c.prepare_cached(
         "INSERT INTO roms (title_id, own_name, name, size, crc32, md5, sha1, status, header, zip_dir, present)
-         VALUES (?1, ?10, ?2, ?3, unhex(?4), unhex(substr(?5, 9)), unhex(?5), ?6, ?7, ?8, ?9)"
-    } else {
-        "INSERT INTO roms (title_id, name, size, crc32, md5, sha1, status, header, zip_dir, present)
-         SELECT ?1, ?2, ?3, unhex(?4), unhex(substr(?5, 9)), unhex(?5), ?6, ?7, ?8, ?9
-         WHERE ?10 IS NOT NULL"
-    })?;
-    // Schemas without `files.platform` name the column `platform_id` and hold the slug.
-    let keyed: i64 = c.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'platform'",
-        [],
-        |r| r.get(0),
+         VALUES (?1, ?10, ?2, ?3, unhex(?4), unhex(substr(?5, 9)), unhex(?5), ?6, ?7, ?8, ?9)",
     )?;
-    let file = if keyed > 0 {
-        "INSERT INTO files (platform, rel_path, size, mtime, rom_id, state, scanned_at)
-         VALUES ((SELECT id FROM platforms WHERE slug = ?1), ?2, ?3, 0, ?4, ?5, 0)"
-    } else {
-        "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
-         VALUES (?1, ?2, ?3, 0, ?4, ?5, 0)"
-    };
+    let file = "INSERT INTO files (platform, rel_path, size, mtime, rom_id, state, scanned_at)
+         VALUES ((SELECT id FROM platforms WHERE slug = ?1), ?2, ?3, 0, ?4, ?5, 0)";
     let browsed = BROWSED.contains(&console.id);
     let mut names = HashSet::new();
     let mut made = 0;
@@ -514,7 +509,7 @@ fn seed_console(
                 let _ = write!(name, " ({}{})", f[..1].to_uppercase(), &f[1..]);
             }
             title.execute(params![
-                console.id,
+                platform,
                 version,
                 name,
                 base,
@@ -524,7 +519,7 @@ fn seed_console(
                 rng.chance(1),
                 format!("{}{}", if mra { "mra:" } else { "" }, base.to_lowercase()),
                 mra,
-                if mra { "mra" } else { "dat" },
+                source,
                 mra.then(|| format!("{setname}{v}")),
                 mra.then(|| format!("{base} ({region}).mra")),
             ])?;
@@ -547,11 +542,7 @@ fn seed_console(
             };
             for r in rom_names {
                 let size = if mra { 0 } else { 4_096 + rng.below(1 << 20) };
-                let (own_name, stored) = if tails {
-                    crate::db::sql::rom_name_parts(&name, &r)
-                } else {
-                    (true, r.as_str())
-                };
+                let (own_name, stored) = crate::db::sql::rom_name_parts(&name, &r);
                 rom.execute(params![
                     id,
                     stored,

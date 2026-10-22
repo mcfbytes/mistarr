@@ -349,7 +349,7 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
     let live = Arc::new(
         ctx.app
             .db
-            .read(|c| roms::live_zip_roms(c, &super::platform()))
+            .read(|c| roms::live_zip_roms(c, super::key(c)?))
             .await?,
     );
     let listed: Vec<(&'static str, io::Result<Vec<String>>)> =

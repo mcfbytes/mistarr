@@ -8,6 +8,7 @@ use serde::Serialize;
 use super::chd::{ReasonWord, Unidentified};
 use super::ids::{FileId, TitleId};
 use super::sql::{self, code_enum, Page, Paged};
+use super::titles::TitleSource;
 use crate::error::Result;
 
 code_enum! {
@@ -770,9 +771,10 @@ pub fn retired_matches(
     Ok(conn
         .prepare_cached(&format!(
             "SELECT {cols} FROM files f JOIN rom_view r ON r.id = f.rom_id
-             WHERE f.platform = ?1 AND r.title_source = 'dat'
+             WHERE f.platform = ?1 AND r.title_source = {}
                AND (r.retired = 1 OR r.title_retired = 1)
-             ORDER BY f.id LIMIT ?2"
+             ORDER BY f.id LIMIT ?2",
+            TitleSource::Dat.sql()
         ))?
         .query_map(params![platform, limit], from_row)?
         .collect::<rusqlite::Result<_>>()?)
@@ -799,8 +801,9 @@ pub fn retired_match_of(conn: &Connection, id: FileId) -> Result<Option<FileRow>
     Ok(conn
         .prepare_cached(&format!(
             "SELECT {cols} FROM files f JOIN rom_view r ON r.id = f.rom_id
-             WHERE f.id = ?1 AND r.title_source = 'dat'
-               AND (r.retired = 1 OR r.title_retired = 1)"
+             WHERE f.id = ?1 AND r.title_source = {}
+               AND (r.retired = 1 OR r.title_retired = 1)",
+            TitleSource::Dat.sql()
         ))?
         .query_map([id], from_row)?
         .next()

@@ -4,6 +4,7 @@
 use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension};
 
+use super::arcade::Check;
 use super::files::FileState;
 use crate::error::Result;
 
@@ -57,7 +58,7 @@ const KNOWN_FLAG_MASK: i64 = (1 << KNOWN_FLAGS.len()) - 1;
 const FLUSH_CHUNK: i64 = 4096;
 
 /// The columns of `title_groups`, in table order.
-const COLUMNS: &str = "parent_id, platform_id, base_name, name, variants, have_verified, wanted,
+const COLUMNS: &str = "parent_id, platform, base_name, variants, have_verified, wanted,
     has_pick, pick_id, newest_id, source, lean_flags, unflagged_regions, flag_union, region_union,
     split";
 
@@ -128,28 +129,28 @@ fn select(scope: Scope) -> String {
     let flag_union = or_all("b.fb", KNOWN_FLAGS.len());
     let region_union = or_all("b.rb", KNOWN_REGIONS.len());
     format!(
-        "SELECT g.parent_id, g.platform_id, p.base_name, p.name, g.variants, g.have_verified,
+        "SELECT g.parent_id, g.platform, p.base_name, g.variants, g.have_verified,
                 g.wanted, g.has_pick, g.pick_id, g.newest_id, p.source,
                 u.lean_flags, u.unflagged_regions, u.flag_union, u.region_union,
-                p.platform_id <> g.platform_id
+                p.platform <> g.platform
          FROM (
-           SELECT v.platform_id, v.parent_id, COUNT(*) AS variants,
+           SELECT v.platform, v.parent_id, COUNT(*) AS variants,
                   SUM(v.roms > 0 AND v.roms_verified = v.roms) AS have_verified,
                   SUM(v.wanted) AS wanted, MAX(v.is_1g1r_pick) AS has_pick,
                   MAX(CASE WHEN v.is_1g1r_pick = 1 THEN v.id END) AS pick_id,
                   MAX(v.id) AS newest_id
            FROM (
-             SELECT t.platform_id, t.group_root AS parent_id, t.id, t.wanted, t.is_1g1r_pick,
+             SELECT t.platform, t.group_root AS parent_id, t.id, t.wanted, t.is_1g1r_pick,
                     (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0) AS roms,
                     (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0
                        AND ((r.present = 1
-                             AND COALESCE(t.mra_check, '') NOT IN ('mismatch', 'missing_part'))
+                             AND COALESCE(t.mra_check, 0) < {failing})
                             OR EXISTS (SELECT 1 FROM files f INDEXED BY files_rom
                                        WHERE f.rom_id = r.id AND f.state = {verified})))
                       AS roms_verified
              FROM titles t WHERE t.retired = 0 AND t.group_root IS NOT NULL AND {members}
            ) v
-           GROUP BY v.platform_id, v.parent_id
+           GROUP BY v.platform, v.parent_id
          ) g
          JOIN titles p ON p.id = g.parent_id
          JOIN (
@@ -169,7 +170,8 @@ fn select(scope: Scope) -> String {
                   {flag_union} AS flag_union, {region_union} AS region_union
            FROM b GROUP BY b.parent_id
          ) u ON u.parent_id = g.parent_id",
-        verified = FileState::Verified.sql()
+        verified = FileState::Verified.sql(),
+        failing = Check::MissingPart.sql()
     )
 }
 

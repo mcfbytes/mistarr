@@ -9,6 +9,7 @@ use mistarr_sources::binding::MatchKeys;
 
 use crate::config::PrefsConfig;
 use crate::db::ids::SourceId;
+use crate::db::platforms::PlatformRef;
 use crate::db::sources::{self, Tiers};
 use crate::db::sql::Page;
 use crate::db::titles;
@@ -90,7 +91,9 @@ pub fn search(
     shapes: &[SearchShape],
 ) -> Result<Vec<Timing>> {
     let conn = db::open_read_only(path)?;
-    let platform = &PlatformId::new(platform.to_owned());
+    let slug = PlatformId::new(platform.to_owned());
+    let platform = &PlatformRef::resolve(&conn, &slug)?
+        .ok_or_else(|| Error::Bench(format!("{slug} is not a platform in {}", path.display())))?;
     if !db::has_table(&conn, "main", "title_groups")? {
         return Err(Error::Bench(format!(
             "{} has no title_groups table; open it once with this version of mistarr",

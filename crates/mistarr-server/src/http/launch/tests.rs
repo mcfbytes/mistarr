@@ -261,7 +261,7 @@ async fn an_mra_title_loads_its_mra() {
                 .write(c)?;
             let (t, rom) = (written.titles[0], written.first_rom());
             c.execute(
-                "UPDATE titles SET source = 'mra', mra_path = 'Example Blaster.mra' WHERE id = ?1",
+                "UPDATE titles SET source = 1, mra_path = 'Example Blaster.mra' WHERE id = ?1",
                 [t],
             )?;
             c.execute("UPDATE roms SET present = 1 WHERE id = ?1", [rom])?;

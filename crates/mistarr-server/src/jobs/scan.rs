@@ -13,7 +13,7 @@ use mistarr_core::hash::{
     hash_forms, hash_reader, hash_zip_member_forms, zip_member_content_crc, zip_members, HashError,
     HeaderForms, HeaderRule, ZipMember,
 };
-use mistarr_core::{Crc32, PlatformId};
+use mistarr_core::{Crc32, PlatformId, PlatformKey};
 use mistarr_mister::platforms::{self, Kind, Platform};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
@@ -510,7 +510,7 @@ impl<'a> Sink<'a> {
         rule: HeaderRule,
         forms: HeaderForms,
     ) -> Result<NewFile> {
-        let (pid, name) = (self.platform.id.clone(), own_name.to_owned());
+        let (pid, name) = (self.platform.clone(), own_name.to_owned());
         let ((rom_id, state), forms) = self
             .ctx
             .app
@@ -609,13 +609,13 @@ fn known(
             (Some(rule), Some(crc)) if row.header_rule.is_none() => {
                 let whole = row.whole.crc32.unwrap_or(crc);
                 let content = (whole != crc).then_some(crc);
-                member_candidate(conn, &platform.id, rule, whole, content, size)?
+                member_candidate(conn, platform.key, rule, whole, content, size)?
             }
             _ => false,
         };
         return Ok(if candidate { Known::Hash } else { Known::Skip });
     }
-    let Some(m) = stored_match(conn, &platform.id, &row)? else {
+    let Some(m) = stored_match(conn, platform.key, &row)? else {
         return Ok(Known::Skip);
     };
     let (rom_id, state) = cartridge_state(&platform.id, Some(&m), own_name(rel_path));
@@ -653,20 +653,20 @@ fn lacks_whole(row: &files::FileRow) -> bool {
 /// and the size less that header.
 fn member_candidate(
     conn: &Connection,
-    platform_id: &PlatformId,
+    platform: PlatformKey,
     rule: HeaderRule,
     whole: Crc32,
     content: Option<Crc32>,
     size: i64,
 ) -> Result<bool> {
-    if roms::crc_candidate_exists(conn, platform_id, whole, size)? {
+    if roms::crc_candidate_exists(conn, platform, whole, size)? {
         return Ok(true);
     }
     let Some(content) = content else {
         return Ok(false);
     };
     let header = i64::try_from(rule.header_len()).unwrap_or(0);
-    roms::crc_candidate_exists(conn, platform_id, content, size - header)
+    roms::crc_candidate_exists(conn, platform, content, size - header)
 }
 
 /// Walks one cartridge, romset or arcade directory, handing each row to `sink`, and
@@ -864,11 +864,11 @@ async fn precheck_member(
         None
     };
     let size = i64::try_from(member.size).unwrap_or(i64::MAX);
-    let (pid, whole) = (platform.id.clone(), member.crc32);
+    let (pid, whole) = (platform.key, member.crc32);
     let candidate = ctx
         .app
         .db
-        .read(move |c| member_candidate(c, &pid, rule, whole, content_crc, size))
+        .read(move |c| member_candidate(c, pid, rule, whole, content_crc, size))
         .await?;
     if candidate {
         return Ok(None);
@@ -992,13 +992,13 @@ async fn disc_track(
     };
     let matched = match &hashes {
         Some(h) => {
-            let (pid2, h2) = (platform.id.clone(), *h);
+            let (pid2, h2) = (platform.key, *h);
             ctx.app
                 .db
                 .read(move |c| {
                     roms::match_rom(
                         c,
-                        &pid2,
+                        pid2,
                         Some(h2.sha1),
                         Some(h2.md5),
                         Some(h2.crc32),

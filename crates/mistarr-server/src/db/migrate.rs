@@ -253,8 +253,9 @@ fn apply_in(conn: &mut Connection, m: &Migration, check_fk: bool) -> Result<()> 
     Ok(())
 }
 
-/// The first migration after which `groups::flush` matches the schema: it reads file states as codes.
-const FLUSH_FROM: u32 = 24;
+/// The first migration after which `groups::flush` matches the schema: it reads titles by platform
+/// key and codes. Earlier files leave the dirty list for this one to flush.
+const FLUSH_FROM: u32 = 26;
 
 /// Builds the `title_groups` rows a migration's writes left dirty, once the table exists.
 fn flush_groups(conn: &Connection) -> Result<()> {
@@ -668,13 +669,13 @@ mod tests {
         assert!(sql("roms_id_title").ends_with("(id, title_id)"));
         assert!(sql("titles_id_dat").ends_with("(id, dat_version_id)"));
         assert!(sql("title_groups_counts")
-            .ends_with("(platform_id, lean_flags, source, have_verified, wanted)"));
+            .ends_with("(platform, lean_flags, source, have_verified, wanted)"));
         assert!(!names(&conn, "table").iter().any(|n| n == "dat_stage"));
         conn.execute_batch(
             "INSERT INTO platforms (slug, name, core_dir, kind) VALUES ('p', 'P', 'P', 0);
-             INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
-               VALUES ('p', 'd', '1', 'd.dat', 0, 1);
-             INSERT INTO titles (platform_id, dat_version_id, name, base_name) VALUES ('p', 1, 't', 't');
+             INSERT INTO dat_versions (platform, family, dat_name, version, source_file, loaded_at, game_count)
+               VALUES (1, '', 'd', '1', 'd.dat', 0, 1);
+             INSERT INTO titles (platform, group_key, dat_version_id, name, base_name) VALUES (1, '', 1, 't', 't');
              INSERT INTO roms (title_id, name, size, md5, sha1) VALUES (1, 'a', 4, unhex(printf('%032x', 1)), unhex(printf('%040x', 1)));
              INSERT INTO roms (title_id, name, size, md5) VALUES (1, 'b', 4, unhex(printf('%032x', 2)));",
         )
@@ -2648,11 +2649,11 @@ DELETE FROM parent WHERE id = 3;",
         conn.execute_batch(
             "INSERT INTO platforms (id, slug, name, core_dir, kind, enabled)
                VALUES (1, 'nes', 'NES', 'NES', 0, 1);
-             INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
+             INSERT INTO dat_versions (id, platform, family, dat_name, version, source_file, loaded_at,
                                        game_count)
-               VALUES (1, 'nes', 'Example NES', '1', 'n.dat', 0, 1);
-             INSERT INTO titles (id, platform_id, dat_version_id, name, base_name, parent_id)
-               VALUES (1, 'nes', 1, 'Nova (World)', 'Nova', 1);
+               VALUES (1, 1, '', 'Example NES', '1', 'n.dat', 0, 1);
+             INSERT INTO titles (id, platform, group_key, dat_version_id, name, base_name, parent_id)
+               VALUES (1, 1, '', 1, 'Nova (World)', 'Nova', 1);
              INSERT INTO roms (title_id, own_name, name, size) VALUES (1, 0, '.nes', 4);",
         )
         .expect("rows");
@@ -2689,11 +2690,11 @@ DELETE FROM parent WHERE id = 3;",
         conn.execute_batch(
             "INSERT INTO platforms (slug, name, core_dir, kind, enabled)
                VALUES ('nes', 'NES', 'NES', 0, 1);
-             INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
+             INSERT INTO dat_versions (id, platform, family, dat_name, version, source_file, loaded_at,
                                        game_count)
-               VALUES (1, 'nes', 'Example NES', '1', 'n.dat', 0, 1);
-             INSERT INTO titles (id, platform_id, dat_version_id, name, base_name, parent_id)
-               VALUES (1, 'nes', 1, 'Example Quest (USA)', 'Example Quest', 1);
+               VALUES (1, 1, '', 'Example NES', '1', 'n.dat', 0, 1);
+             INSERT INTO titles (id, platform, group_key, dat_version_id, name, base_name, parent_id)
+               VALUES (1, 1, '', 1, 'Example Quest (USA)', 'Example Quest', 1);
              INSERT INTO roms (id, title_id, name, size) VALUES (1, 1, 'a.nes', 4);
              DELETE FROM title_groups_dirty;",
         )
@@ -2856,5 +2857,313 @@ DELETE FROM parent WHERE id = 3;",
         assert!(!wants_foreign_keys_off(
             "-- foreign_keys: OFF\nCREATE TABLE t (i);"
         ));
+    }
+
+    /// The version-25 rows the titles-and-groups tests migrate: bound and unbound DAT versions,
+    /// titles of both sources with every MRA check, optional texts set and NULL, a split group,
+    /// a retired title with tags, verified and failing arcade titles and a verified file.
+    fn seed_titles_v25(conn: &Connection) {
+        conn.execute_batch(
+            "INSERT INTO platforms (id, slug, name, core_dir, kind, enabled) VALUES
+               (1, 'nes', 'NES', 'NES', 0, 1), (2, 'arcade', 'Arcade', 'Arcade', 3, 1);
+             INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
+                                       superseded_by, game_count, retired, source, family) VALUES
+               (1, 'nes', 'Example NES', '1', 'n.dat', 5, NULL, 4, 0, 'dat', 'example nes'),
+               (2, 'arcade', '_Arcade', '1', 'mra', 6, NULL, 6, 0, 'mra', '_Arcade'),
+               (3, NULL, 'Unbound Pack', '1', 'u.dat', 7, NULL, 0, 1, 'dat', 'unbound pack');
+             INSERT INTO titles (id, platform_id, dat_version_id, name, base_name, parent_id,
+                                 revision, is_1g1r_pick, wanted, retired, clone_of, group_key,
+                                 inferred, source, setname, rbf, mra_path, mra_check, mra_detail,
+                                 mra_stamp, mra_file_stamp, mra_seen) VALUES
+               (1, 'nes', 1, 'Nova Quest (USA)', 'Nova Quest', 1, NULL, 1, 1, 0, NULL,
+                'nova quest', 0, 'dat', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+               (2, 'nes', 1, 'Nova Quest (Japan)', 'Nova Quest', 1, 'A', 0, 0, 0,
+                'Nova Quest (USA)', 'nova quest', 1, 'dat', NULL, NULL, NULL, NULL, NULL, NULL,
+                NULL, NULL),
+               (3, 'nes', 1, 'Nova Quest (Beta)', 'Nova Quest', 1, NULL, 0, 0, 1, NULL,
+                'nova quest', 0, 'dat', NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+               (4, 'nes', 1, 'Solo', 'Solo', 4, NULL, 0, 0, 0, NULL, 'solo', 0, 'dat', NULL,
+                NULL, NULL, NULL, NULL, NULL, NULL, NULL),
+               (5, 'arcade', 2, 'Example Blaster', 'Example Blaster', 5, NULL, 0, 1, 0, NULL,
+                'mra:example blaster', 0, 'mra', 'exb', 'blaster', 'a.mra', 'match', NULL, 's1',
+                'f1', 3),
+               (6, 'arcade', 2, 'Example Racer', 'Example Racer', 6, NULL, 0, 0, 0, NULL,
+                'mra:example racer', 0, 'mra', 'exr', 'racer', 'b.mra', 'refused', 'no zip', 's2',
+                'f2', 3),
+               (7, 'arcade', 2, 'Example Puzzle', 'Example Puzzle', 7, NULL, 0, 0, 0, NULL,
+                'mra:example puzzle', 0, 'mra', 'exp', 'puzzle', 'c.mra', 'missing_part',
+                'part', 's3', 'f3', 3),
+               (8, 'arcade', 2, 'Example Shooter', 'Example Shooter', 8, NULL, 0, 0, 0, NULL,
+                'mra:example shooter', 0, 'mra', 'exs', 'shooter', 'd.mra', 'mismatch', 'md5',
+                's4', 'f4', 3),
+               (9, 'arcade', 2, 'Example Maze', 'Example Maze', 9, NULL, 0, 0, 0, NULL,
+                'mra:example maze', 0, 'mra', 'exm', 'maze', 'e.mra', NULL, NULL, NULL, NULL, 3),
+               (10, 'arcade', 2, 'Blaster Clone', 'Blaster Clone', 1, NULL, 0, 0, 0, NULL,
+                'mra:blaster clone', 0, 'mra', NULL, NULL, 'f.mra', 'match', NULL, NULL, NULL,
+                NULL);
+             UPDATE titles SET group_root = 4 WHERE id = 4;
+             INSERT INTO title_flags (title_id, pos, flag) VALUES (2, 0, 'beta'), (3, 0, 'unl');
+             INSERT INTO title_regions (title_id, pos, region) VALUES
+               (1, 0, 'USA'), (2, 0, 'Japan'), (3, 0, 'Europe');
+             INSERT INTO roms (id, title_id, name, size, present) VALUES
+               (1, 1, 'Nova Quest (USA).nes', 4, 0), (2, 5, 'exb.zip', 4, 1),
+               (3, 6, 'exr.zip', 4, 1), (4, 7, 'exp.zip', 4, 1), (5, 8, 'exs.zip', 4, 1),
+               (6, 9, 'exm.zip', 4, 1);
+             INSERT INTO files (platform, rel_path, size, mtime, rom_id, state, scanned_at)
+               VALUES (1, 'Nova Quest (USA).nes', 4, 0, 1, 1, 0);",
+        )
+        .expect("rows");
+    }
+
+    const TITLES_BEFORE: &str =
+        "SELECT id, platform_id, dat_version_id, name, base_name, parent_id,
+        group_root, revision, is_1g1r_pick, wanted, retired, clone_of, group_key, inferred, source,
+        setname, rbf, mra_path, mra_check, mra_detail, mra_stamp, mra_file_stamp, mra_seen
+        FROM titles ORDER BY id";
+    const TITLES_AFTER: &str = "SELECT id, platform, dat_version_id, name, base_name, parent_id,
+        group_root, revision, is_1g1r_pick, wanted, retired, clone_of, group_key, inferred,
+        source_text, setname, rbf, mra_path, mra_check_text, mra_detail, mra_stamp,
+        mra_file_stamp, mra_seen FROM title_view ORDER BY id";
+    const VERSIONS_BEFORE: &str = "SELECT id, platform_id, dat_name, version, source_file,
+        loaded_at, superseded_by, game_count, retired, source, family FROM dat_versions ORDER BY id";
+    const VERSIONS_AFTER: &str = "SELECT id, (SELECT slug FROM platforms WHERE id = platform),
+        dat_name, version, source_file, loaded_at, superseded_by, game_count, retired,
+        CASE source WHEN 0 THEN 'dat' WHEN 1 THEN 'mra' END, family
+        FROM dat_versions ORDER BY id";
+    const GROUPS_BEFORE: &str = "SELECT parent_id, platform_id, base_name, variants, have_verified,
+        wanted, has_pick, pick_id, newest_id, source, lean_flags, unflagged_regions, flag_union,
+        region_union, split FROM title_groups ORDER BY parent_id, platform_id";
+    const GROUPS_AFTER: &str = "SELECT parent_id, (SELECT slug FROM platforms WHERE id = platform),
+        base_name, variants, have_verified, wanted, has_pick, pick_id, newest_id,
+        CASE source WHEN 0 THEN 'dat' WHEN 1 THEN 'mra' END, lean_flags, unflagged_regions,
+        flag_union, region_union, split FROM title_groups ORDER BY parent_id, 2";
+
+    /// Writes `groups`, rows of [`GROUPS_AFTER`], into the version-25 `title_groups`.
+    fn store_v25_groups(conn: &Connection, groups: &[Vec<String>]) {
+        for g in groups {
+            conn.execute(
+                "INSERT INTO title_groups (parent_id, platform_id, base_name, name, variants,
+                   have_verified, wanted, has_pick, pick_id, newest_id, source, lean_flags,
+                   unflagged_regions, flag_union, region_union, split)
+                 SELECT ?1, ?2, ?3, (SELECT name FROM titles WHERE id = ?1), ?4, ?5, ?6, ?7,
+                        CASE ?8 WHEN 'NULL' THEN NULL ELSE ?8 END, ?9, ?10, ?11, ?12, ?13, ?14, ?15",
+                rusqlite::params_from_iter(g),
+            )
+            .expect("group");
+        }
+    }
+
+    /// Asserts the four tables 0026 rebuilds are STRICT.
+    fn assert_strict(conn: &Connection) {
+        for table in [
+            "dat_versions",
+            "titles",
+            "title_groups",
+            "title_groups_dirty",
+        ] {
+            let strict: i64 = conn
+                .query_row(
+                    "SELECT strict FROM pragma_table_list WHERE schema = 'main' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .expect(table);
+            assert_eq!(strict, 1, "{table} is STRICT");
+        }
+    }
+
+    #[test]
+    fn titles_and_groups_take_platform_keys_and_codes_with_every_row_kept() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys");
+        apply_through(&mut conn, 25).expect("older migrations");
+        seed_titles_v25(&conn);
+        // The groups a migrated copy computes stand in as the version-25 table's rows.
+        let copy = dir.path().join("copy.db");
+        conn.execute("VACUUM INTO ?1", [copy.to_string_lossy()])
+            .expect("copy");
+        let mut truth = Connection::open(&copy).expect("open copy");
+        assert_eq!(apply_through(&mut truth, 26).expect("migrate"), [26]);
+        let groups = dump(&truth, GROUPS_AFTER);
+        assert_eq!(groups.len(), 8, "{groups:?}");
+        assert!(groups
+            .iter()
+            .any(|g| g[0] == "1" && g[1] == "arcade" && g[14] == "1"));
+        conn.execute_batch("DELETE FROM title_groups; DELETE FROM title_groups_dirty;")
+            .expect("clear");
+        store_v25_groups(&conn, &groups);
+        // Root 4 is stale and dirty, so the flush repairs it; root 5 is stale and clean.
+        conn.execute_batch(
+            "UPDATE title_groups SET variants = 9 WHERE parent_id = 4;
+             UPDATE title_groups SET variants = 7 WHERE parent_id = 5;
+             DELETE FROM title_groups_dirty;
+             INSERT INTO title_groups_dirty (parent_id) VALUES (4);",
+        )
+        .expect("stale");
+        let titles = dump(&conn, TITLES_BEFORE);
+        let versions = dump(&conn, VERSIONS_BEFORE);
+        let mut groups_before = dump(&conn, GROUPS_BEFORE);
+        let search_before = dump(
+            &conn,
+            "SELECT id, base_name, platform FROM title_search_source ORDER BY id",
+        );
+
+        assert_eq!(apply_through(&mut conn, 26).expect("migrate"), [26]);
+
+        assert_eq!(dump(&conn, TITLES_AFTER), titles, "every title is kept");
+        assert_eq!(
+            dump(&conn, VERSIONS_AFTER),
+            versions,
+            "every DAT version is kept"
+        );
+        let repaired = groups.iter().find(|g| g[0] == "4").expect("root 4");
+        let slot = groups_before
+            .iter()
+            .position(|g| g[0] == "4")
+            .expect("stale 4");
+        groups_before[slot].clone_from(repaired);
+        assert_eq!(
+            dump(&conn, GROUPS_AFTER),
+            groups_before,
+            "groups equal, less the name"
+        );
+        assert_eq!(
+            dump(
+                &conn,
+                "SELECT id, base_name, platform FROM title_search_source ORDER BY id"
+            ),
+            search_before,
+            "the search content keeps the slug"
+        );
+        assert!(dump(&conn, "SELECT 1 FROM title_groups_dirty").is_empty());
+        assert_strict(&conn);
+        let dropped = names(&conn, "index");
+        assert!(!dropped
+            .iter()
+            .any(|n| n == "titles_parent" || n == "titles_platform_base"));
+        assert!(
+            !column(&conn, "SELECT name FROM pragma_table_info('title_groups')")
+                .iter()
+                .any(|n| n == "name")
+        );
+        assert!(
+            !crate::db::groups::check(&conn)
+                .expect("check")
+                .is_consistent(),
+            "the clean stale group stays as it was"
+        );
+        conn.execute(
+            "UPDATE title_groups SET variants = 1 WHERE parent_id = 5",
+            [],
+        )
+        .expect("repair");
+        assert!(crate::db::groups::check(&conn)
+            .expect("check")
+            .is_consistent());
+        conn.execute(
+            "INSERT INTO title_search (title_search) VALUES ('integrity-check')",
+            [],
+        )
+        .expect("fts integrity-check");
+        assert_eq!(column(&conn, "PRAGMA integrity_check"), ["ok"]);
+        assert!(column(&conn, "PRAGMA foreign_key_check").is_empty());
+    }
+
+    #[test]
+    fn the_title_triggers_behave_as_before_after_the_rebuild() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys");
+        apply_through(&mut conn, 25).expect("older migrations");
+        seed_titles_v25(&conn);
+        apply_through(&mut conn, 26).expect("migrate");
+        let first = |conn: &Connection, sql: &str| -> Vec<String> {
+            dump(conn, sql).into_iter().map(|r| r[0].clone()).collect()
+        };
+        let dirty = |conn: &Connection| -> Vec<String> {
+            first(
+                conn,
+                "SELECT parent_id FROM title_groups_dirty ORDER BY parent_id",
+            )
+        };
+        let found = |conn: &Connection, term: &str| -> Vec<String> {
+            let sql = format!(
+                "SELECT rowid FROM title_search WHERE title_search MATCH 'base_name : \"{term}\"' ORDER BY rowid"
+            );
+            first(conn, &sql)
+        };
+        let clean = |conn: &Connection| {
+            crate::db::groups::flush(conn).expect("flush");
+            assert!(dirty(conn).is_empty());
+        };
+
+        conn.execute(
+            "UPDATE titles SET base_name = 'Nova Deluxe' WHERE id = 2",
+            [],
+        )
+        .expect("rename");
+        assert_eq!(dirty(&conn), ["2"], "a rename marks the title's own root");
+        assert_eq!(found(&conn, "Deluxe"), ["2"]);
+        assert!(found(&conn, "Quest").iter().all(|id| id != "2"));
+        clean(&conn);
+        let refused = conn.execute("UPDATE titles SET name = 'Changed' WHERE id = 1", []);
+        assert!(refused.is_err(), "titles.name never changes");
+        conn.execute("UPDATE titles SET platform = 2 WHERE id = 4", [])
+            .expect("move");
+        assert_eq!(dirty(&conn), ["4"]);
+        let moved = first(
+            &conn,
+            "SELECT rowid FROM title_search WHERE title_search MATCH 'platform : \"' || char(31) || 'arcade' || char(31) || '\"' AND rowid = 4",
+        );
+        assert_eq!(
+            moved,
+            ["4"],
+            "the search follows a title to its new platform"
+        );
+        clean(&conn);
+        conn.execute("UPDATE titles SET source = 1 WHERE id = 4", [])
+            .expect("source");
+        assert_eq!(dirty(&conn), ["4"]);
+        clean(&conn);
+        conn.execute(
+            "INSERT INTO titles (platform, dat_version_id, name, base_name, group_key, parent_id)
+             VALUES (1, 1, 'Fresh (USA)', 'Fresh', 'fresh', 1)",
+            [],
+        )
+        .expect("insert");
+        assert_eq!(
+            dirty(&conn),
+            ["1", "11"],
+            "an insert marks its root and itself"
+        );
+        assert_eq!(found(&conn, "Fresh"), ["11"]);
+        clean(&conn);
+        conn.execute(
+            "INSERT INTO title_flags (title_id, pos, flag) VALUES (1, 0, 'proto')",
+            [],
+        )
+        .expect("flag");
+        assert_eq!(dirty(&conn), ["1"]);
+        clean(&conn);
+        conn.execute(
+            "INSERT INTO files (platform, rel_path, size, mtime, rom_id, state, scanned_at)
+             VALUES (2, 'exr.zip', 4, 0, 3, 1, 0)",
+            [],
+        )
+        .expect("file");
+        assert_eq!(dirty(&conn), ["6"], "a verified file marks its rom's group");
+        clean(&conn);
+        conn.execute("DELETE FROM roms WHERE title_id = 11", [])
+            .expect("roms");
+        conn.execute("DELETE FROM titles WHERE id = 11", [])
+            .expect("delete");
+        assert_eq!(dirty(&conn), ["1", "11"]);
+        assert!(found(&conn, "Fresh").is_empty());
+        clean(&conn);
+        assert!(crate::db::groups::check(&conn)
+            .expect("check")
+            .is_consistent());
     }
 }

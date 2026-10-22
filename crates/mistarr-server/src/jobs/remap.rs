@@ -18,8 +18,16 @@ use super::{Job, JobContext, JobKind, Lane};
 use crate::app::AppState;
 use crate::db::candidates::{self, Change, SqlSizeIndex};
 use crate::db::ids::SourceId;
+use crate::db::platforms::PlatformRef;
 use crate::db::sources::{self as rows, SqlDatIndex};
-use crate::error::Result;
+use crate::error::{Error, Result};
+
+/// The row of `platform`, which a bound source's platform always has.
+fn platform_ref(conn: &Connection, platform: &PlatformId) -> Result<PlatformRef> {
+    PlatformRef::resolve(conn, platform)?.ok_or_else(|| {
+        Error::Job("The source's platform is missing from the platform list.".into())
+    })
+}
 
 /// Rows written per transaction when a source is mapped again.
 const CHUNK: usize = 2_000;
@@ -66,10 +74,11 @@ pub fn plan(
     platform: &PlatformId,
     files: &[TorrentFile],
 ) -> Result<Planned> {
-    let stamp = candidates::rom_stamp(conn, platform)?;
+    let resolved = platform_ref(conn, platform)?;
+    let stamp = candidates::rom_stamp(conn, resolved.key)?;
     let mapping = binding::map_files(files, platform, &SqlDatIndex::new(conn));
     let stored = candidates::stored(conn, id)?;
-    plan_mapping(conn, id, platform, files, mapping, &stored, stamp)
+    plan_mapping(conn, id, &resolved, files, mapping, &stored, stamp)
 }
 
 /// [`plan`] from a mapping already worked out. The name-tier matches are
@@ -78,7 +87,7 @@ pub fn plan(
 fn plan_mapping(
     conn: &Connection,
     id: SourceId,
-    platform: &PlatformId,
+    platform: &PlatformRef,
     files: &[TorrentFile],
     mapping: binding::Mapping,
     stored: &candidates::Stored,
@@ -103,12 +112,12 @@ fn plan_mapping(
 /// `extra` with the fuzzy and size-only candidates of `unmatched` added.
 fn guesses(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: &PlatformRef,
     files: &[TorrentFile],
     unmatched: &[&TorrentFile],
     mut extra: Vec<(u32, mistarr_core::RomId, binding::Confidence)>,
 ) -> Vec<(u32, mistarr_core::RomId, binding::Confidence)> {
-    let extensions = fuzzy_extensions(platform);
+    let extensions = fuzzy_extensions(&platform.id);
     let size_index = SqlSizeIndex::new(conn, platform);
     extra.extend(fuzzy::candidates(
         files,
@@ -152,8 +161,9 @@ pub fn store_mapping(
     files: &[TorrentFile],
     mapping: binding::Mapping,
 ) -> Result<usize> {
-    candidates::drop_foreign_proofs(conn, id, platform)?;
-    let stamp = candidates::rom_stamp(conn, platform)?;
+    let resolved = platform_ref(conn, platform)?;
+    candidates::drop_foreign_proofs(conn, id, resolved.key)?;
+    let stamp = candidates::rom_stamp(conn, resolved.key)?;
     let stored = candidates::stored(conn, id)?;
     let hits = if stored.is_empty() {
         let unmatched = mapping.unmatched(files);
@@ -162,11 +172,11 @@ pub fn store_mapping(
         matches.retain(|(_, rom, _)| rom.is_some());
         rows::set_matches(conn, id, &matches)?;
         drop(matches);
-        let found = guesses(conn, platform, files, &unmatched, extra);
+        let found = guesses(conn, &resolved, files, &unmatched, extra);
         candidates::apply(conn, id, &candidates::diff_candidates(&stored, &[], &found))?;
         hits
     } else {
-        let planned = plan_mapping(conn, id, platform, files, mapping, &stored, stamp.clone())?;
+        let planned = plan_mapping(conn, id, &resolved, files, mapping, &stored, stamp.clone())?;
         candidates::apply(conn, id, &planned.change)?;
         planned.hits
     };
@@ -216,7 +226,8 @@ pub async fn remap_one(app: &AppState, id: SourceId) -> Result<bool> {
             let Some(platform) = row.platform_id.clone() else {
                 return Ok(None);
             };
-            let fresh = rows::map_stamp(c, id)? == Some(candidates::rom_stamp(c, &platform)?);
+            let key = platform_ref(c, &platform)?.key;
+            let fresh = rows::map_stamp(c, id)? == Some(candidates::rom_stamp(c, key)?);
             Ok((!fresh).then_some((row, platform)))
         })
         .await?;
@@ -227,7 +238,7 @@ pub async fn remap_one(app: &AppState, id: SourceId) -> Result<bool> {
     let p = platform.clone();
     app.db
         .write_tx(move |tx| {
-            candidates::drop_foreign_proofs(tx, id, &p)?;
+            candidates::drop_foreign_proofs(tx, id, platform_ref(tx, &p)?.key)?;
             Ok(())
         })
         .await?;
@@ -354,7 +365,7 @@ pub fn stale(conn: &Connection, ids: &[SourceId]) -> Result<Vec<SourceId>> {
             continue;
         };
         if !stamps.contains_key(&platform) {
-            let current = candidates::rom_stamp(conn, &platform)?;
+            let current = candidates::rom_stamp(conn, platform_ref(conn, &platform)?.key)?;
             stamps.insert(platform.clone(), current);
         }
         if stamp.as_ref() != stamps.get(&platform) {
@@ -385,7 +396,7 @@ mod tests {
 
     use super::*;
     use crate::app::testutil::state;
-    use crate::db::fixtures::{pid, seed_rom};
+    use crate::db::fixtures::{key, pid, seed_rom};
     use crate::db::sources::{NewSource, SourceState};
     use crate::jobs::Scheduler;
     use mistarr_core::RomId;
@@ -455,7 +466,7 @@ mod tests {
             .write_blocking(|c| {
                 let a = source(c, &"2b".repeat(20), &[file(0, "a.nes", 16)]);
                 let b = source(c, &"2c".repeat(20), &[file(0, "b.nes", 16)]);
-                let stamp = candidates::rom_stamp(c, &PlatformId::new("nes"))?;
+                let stamp = candidates::rom_stamp(c, key(&PlatformId::new("nes")))?;
                 rows::set_map_stamp(c, a, Some(&stamp))?;
                 Ok((a, b))
             })
@@ -552,15 +563,15 @@ mod tests {
             .write_blocking(|c| {
                 let a = seed_rom(c, &pid("nes"), "Nova Quest (World).nes", 16, &[])?;
                 c.execute(
-                    "INSERT INTO dat_versions (platform_id, dat_name, version, source_file,
+                    "INSERT INTO dat_versions (platform, family, dat_name, version, source_file,
                                                loaded_at, game_count)
-                     VALUES ('nes', 'Other Vendor - Example', '1', 'o.dat', 0, 1)",
+                     VALUES ((SELECT id FROM platforms WHERE slug = 'nes'), '', 'Other Vendor - Example', '1', 'o.dat', 0, 1)",
                     [],
                 )?;
                 let other = c.last_insert_rowid();
                 c.execute(
-                    "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
-                     VALUES ('nes', ?1, 'Nova Quest (World)', 'Nova Quest')",
+                    "INSERT INTO titles (platform, group_key, dat_version_id, name, base_name)
+                     VALUES ((SELECT id FROM platforms WHERE slug = 'nes'), '', ?1, 'Nova Quest (World)', 'Nova Quest')",
                     [other],
                 )?;
                 let title = c.last_insert_rowid();

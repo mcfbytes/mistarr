@@ -1,7 +1,7 @@
 //! Tests of the import in RAM: the chunked copy, the check, the swap and every way out.
 
 use super::*;
-use crate::db::fixtures::pid;
+use crate::db::fixtures::{key, pid, platform_ref};
 use crate::db::settings;
 use crate::db::testutil;
 
@@ -713,8 +713,10 @@ fn at_version(path: &Path, version: u32, scale: f64) {
             .expect("platform");
         }
     }
-    // The synthetic catalogue writes columns present in every version tested here.
-    crate::synth::seed(&mut c, scale, 1).expect("synth");
+    // The synthetic catalogue writes the columns of the current schema.
+    if version >= 26 {
+        crate::synth::seed(&mut c, scale, 1).expect("synth");
+    }
     super::super::wal_emptied(&c).expect("checkpoint");
 }
 
@@ -845,7 +847,7 @@ fn load_games(
         dat_name: dat,
         version: "1",
         source_file: "a.dat",
-        platform: Some(platform),
+        platform: Some(key(&pid(platform))),
         now: 1,
     };
     let version = dats::upsert_version(&tx, &v)?.id;
@@ -860,12 +862,12 @@ fn load_games(
             revision: None,
             flags: &[],
         };
-        titles::upsert_title(&tx, &pid(platform), version, &t, &[])?;
+        titles::upsert_title(&tx, &platform_ref(&pid(platform)), version, &t, &[])?;
     }
     titles::recompute::link_parents(&tx, version, true)?;
     titles::recompute::recompute_platform(
         &tx,
-        &pid(platform),
+        key(&pid(platform)),
         &mistarr_core::select::Prefs::default(),
     )?;
     crate::db::commit(tx)
@@ -881,9 +883,11 @@ fn found(db: &Db, platform: &str, q: Option<&str>) -> u64 {
         limit: 10,
         offset: 0,
     };
-    db.read_blocking(|c| crate::db::titles::browse::browse(c, &pid(platform), &filter, page))
-        .expect("browse")
-        .total
+    db.read_blocking(|c| {
+        crate::db::titles::browse::browse(c, &platform_ref(&pid(platform)), &filter, page)
+    })
+    .expect("browse")
+    .total
 }
 
 #[test]
