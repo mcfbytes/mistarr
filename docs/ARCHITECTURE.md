@@ -1010,7 +1010,11 @@ of the database in RAM and write it back whole (`db::ram`):
    the twin as above, and writes it back and swaps it in with the same
    write-back. A refusal or failure there leaves the swapped, uncompacted
    file, which is valid, and is logged at info; it never fails the job or the
-   migration that succeeded. A crash during it is a crash of an ordinary swap.
+   migration that succeeded, except when the swap leaves no connection open
+   (`Reopen`), which fails like the first swap's. A cancel or pause during
+   its write-back stops it, removes the `.new` copy and lets the job end as
+   succeeded, its work being on the card. A crash during it is a crash of an
+   ordinary swap.
    Whichever file is chosen is written to `mistarr.db.new` beside the
    database in writes of exactly 1 MiB, then synced; the card must have room
    for it, and the log at info gives the sizes before and after compacting.

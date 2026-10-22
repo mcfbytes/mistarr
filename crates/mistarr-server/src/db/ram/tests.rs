@@ -1313,6 +1313,23 @@ fn the_real_schema_survives_compaction() {
     assert_eq!(dump(&c), before);
 }
 
+/// [`compact_with`] on the real memory.
+fn compact(copy: &Path, work_dir: &Path, floor: u64, started: &mut dyn FnMut()) -> PathBuf {
+    compact_with(copy, work_dir, floor, &mut live_budget, started).0
+}
+
+/// [`compacted_from`] on the database at `copy`, with the reason as text.
+fn compacted(
+    copy: &Path,
+    out: &Path,
+    floor: u64,
+    budget: &Budget,
+    started: &mut dyn FnMut(),
+) -> std::result::Result<Option<(u64, u64)>, String> {
+    let conn = Connection::open(copy).map_err(|e| format!("cannot open the copy: {e}"))?;
+    compacted_from(&conn, out, floor, budget, started).map_err(Declined::reason)
+}
+
 fn roomy() -> Budget {
     Budget {
         available: Some(u64::MAX),
@@ -1388,6 +1405,8 @@ fn a_copy_refused_for_memory_is_compacted_from_the_card_after_the_swap() {
     assert!(after * 2 < copy_bytes, "{after} of {copy_bytes} bytes");
     assert_eq!(db.read_blocking(|c| Ok(dump(c))).expect("dump"), rows);
     assert_eq!(free_pages(&db), 0);
+    let counted_here = Path::new("/proc/thread-self/io").exists();
+    assert_eq!(report.card_writes.is_some(), counted_here);
     if let Some(writes) = report.card_writes {
         let chunks = (copy_bytes + after).div_ceil(CHUNK_BYTES as u64);
         assert!(writes >= chunks && writes <= chunks + 24, "{writes} writes");
@@ -1532,4 +1551,77 @@ fn a_startup_migration_whose_second_check_fails_keeps_the_migrated_file() {
     drop(c);
     assert_eq!(titles(&db), rows);
     assert_eq!(fs::read_dir(ram.path()).map_or(0, Iterator::count), 0);
+}
+
+/// Seeds a card database, makes a verified twin of it in `ram` and runs `swap_twin` on it
+/// through `install` while the writer is held; returns the result and the twin's size.
+fn second_swap(
+    ram: &Path,
+    db: &Db,
+    install: impl FnOnce(&mut HeldWriter<'_>, &Path) -> Result<()>,
+) -> Result<Option<u64>> {
+    db.write_blocking(|c| churn(c, 6)).expect("churn");
+    db.hold_writer_blocking(|h| {
+        let work = ram.join("work");
+        fs::create_dir_all(&work).expect("work dir");
+        let Twin::Made(twin, _, _) =
+            twin_of(h.conn(), &work, 0, &mut |_: &Path| roomy(), &mut || {})
+        else {
+            panic!("no twin");
+        };
+        let path = h.path().to_path_buf();
+        let mut install = Some(install);
+        swap_twin(&path, &twin, &mut || Ok(()), &mut |n| {
+            (install.take().expect("once"))(h, n)
+        })
+    })
+}
+
+#[test]
+fn a_second_swap_whose_install_fails_leaves_the_first_file_and_no_new_file() {
+    let ram = testutil::ram_dir();
+    let (_dir, db) = card(CHUNK_BYTES);
+    let r = second_swap(ram.path(), &db, |_, n| {
+        Err(Error::io_at(n)(io::Error::other("refused")))
+    });
+    assert!(matches!(r, Ok(None)), "{r:?}");
+    assert!(!sibling(db.path(), NEW_SUFFIX).exists());
+    assert!(db.read_blocking(|c| settings::get(c, "k")).is_ok());
+}
+
+#[test]
+fn a_second_swap_whose_reopen_fails_is_an_error() {
+    let ram = testutil::ram_dir();
+    let (_dir, db) = card(CHUNK_BYTES);
+    let r = second_swap(ram.path(), &db, |h, n| {
+        let full = rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL),
+            None,
+        );
+        h.replace_with(n, |_| Err(full.into()))
+    });
+    assert!(matches!(r, Err(Error::Reopen(_))), "{r:?}");
+    assert!(!sibling(db.path(), NEW_SUFFIX).exists());
+}
+
+#[test]
+fn a_stop_during_the_second_write_back_leaves_the_file_and_no_error() {
+    let ram = testutil::ram_dir();
+    let (_dir, db) = card(CHUNK_BYTES);
+    db.write_blocking(|c| churn(c, 6)).expect("churn");
+    let r = db.hold_writer_blocking(|h| {
+        let work = ram.path().join("work");
+        fs::create_dir_all(&work).expect("work dir");
+        let Twin::Made(twin, _, _) =
+            twin_of(h.conn(), &work, 0, &mut |_: &Path| roomy(), &mut || {})
+        else {
+            panic!("no twin");
+        };
+        let path = h.path().to_path_buf();
+        swap_twin(&path, &twin, &mut || Err(Error::Cancelled), &mut |n| {
+            h.replace_file(n)
+        })
+    });
+    assert!(matches!(r, Ok(None)), "{r:?}");
+    assert!(!sibling(db.path(), NEW_SUFFIX).exists());
 }

@@ -385,7 +385,9 @@ pub fn memory_left(floor: u64) -> Result<()> {
 ///
 /// Whatever `watch` or `work` fails with, such as [`Error::Cancelled`], or the I/O or
 /// SQLite failure that stopped a step, with the card file untouched;
-/// [`Error::Reopen`] when the swap left no connection open, never a fallback.
+/// [`Error::Reopen`] or [`Error::Poisoned`] when a swap, the first or that of a later
+/// compaction, left no connection open, never a fallback. A compaction after the swap
+/// that stops any other way leaves the written-back file and no error.
 pub fn run<T>(
     held: &mut HeldWriter<'_>,
     plan: &Plan,
@@ -501,7 +503,7 @@ fn run_with<T>(
     report.card_writes = first.zip(back).map(|(a, b)| a + b);
     if deferred {
         remove_files(&copy);
-        compact_held(held, &work_dir.0, plan.floor, probe, watch, &mut report);
+        compact_held(held, &work_dir.0, plan.floor, probe, watch, &mut report)?;
     }
     report.write_back = started.elapsed();
     drop(work_dir);
@@ -520,7 +522,8 @@ fn card_refusal(path: &Path, bytes: u64) -> Option<String> {
 }
 
 /// Compacts the card file `held` writes after the swap and swaps the twin in, adding
-/// its size and writes to `report`; any refusal or failure leaves the file as it is.
+/// its size and writes to `report`; any refusal or failure leaves the file as it is,
+/// except [`Error::Reopen`] and [`Error::Poisoned`], which leave no usable connection.
 fn compact_held(
     held: &mut HeldWriter<'_>,
     work_dir: &Path,
@@ -528,13 +531,13 @@ fn compact_held(
     probe: Probe<'_>,
     watch: &mut dyn Watch,
     report: &mut Report,
-) {
+) -> Result<()> {
     let path = held.path().to_path_buf();
     let twin = twin_of(held.conn(), work_dir, floor, probe, &mut || {
         watch.phase(Phase::Compacting);
     });
     let Twin::Made(twin, before, after) = twin else {
-        return;
+        return Ok(());
     };
     watch.phase(Phase::Writing);
     let (swapped, extra) = counted(|| {
@@ -545,7 +548,7 @@ fn compact_held(
             &mut |n| held.replace_file(n),
         )
     });
-    if let Some(bytes) = swapped {
+    if let Some(bytes) = swapped? {
         log_compacted(
             before,
             after,
@@ -554,6 +557,7 @@ fn compact_held(
         report.bytes = bytes;
         report.card_writes = report.card_writes.zip(extra).map(|(a, b)| a + b);
     }
+    Ok(())
 }
 
 /// The memory and room a compaction may use, read afresh on each call.
@@ -679,27 +683,8 @@ fn compact_with(
     }
 }
 
-/// [`compact_with`] on the real memory, for tests.
-#[cfg(test)]
-fn compact(copy: &Path, work_dir: &Path, floor: u64, started: &mut dyn FnMut()) -> PathBuf {
-    compact_with(copy, work_dir, floor, &mut live_budget, started).0
-}
-
-/// Compacts `copy` into `out` when worth it and affordable under `budget`, returning the
-/// sizes before and after, or `None` when the free pages are few. `Err` names why not.
-#[cfg(test)]
-fn compacted(
-    copy: &Path,
-    out: &Path,
-    floor: u64,
-    budget: &Budget,
-    started: &mut dyn FnMut(),
-) -> std::result::Result<Option<(u64, u64)>, String> {
-    let conn = Connection::open(copy).map_err(|e| format!("cannot open the copy: {e}"))?;
-    compacted_from(&conn, out, floor, budget, started).map_err(Declined::reason)
-}
-
-/// Compacts the database `conn` reads into `out`, as [`compacted`] does.
+/// Compacts the database `conn` reads into `out` when worth it and affordable under
+/// `budget`, returning the sizes before and after, or `None` when the free pages are few.
 fn compacted_from(
     conn: &Connection,
     out: &Path,
@@ -775,6 +760,32 @@ fn write_swap(
     install(new).map(|()| true)
 }
 
+/// Compacts the card file at `db` after its swap, as [`compact_held`] does where no
+/// connection of ours exists; every failure, `Reopen` included, is a warning.
+fn compact_card(db: &Path, work_dir: &Path, floor: u64, probe: Probe<'_>, report: &mut Report) {
+    let Some((twin, before, after)) = twin_from_card(db, work_dir, floor, probe) else {
+        return;
+    };
+    let (swapped, extra) = counted(|| {
+        swap_twin(db, &twin, &mut || Ok(()), &mut |n| {
+            swap::install_file(db, n)
+        })
+    });
+    match swapped {
+        Ok(Some(bytes)) => {
+            log_compacted(
+                before,
+                after,
+                "compacted the database after writing it back",
+            );
+            report.bytes = bytes;
+            report.card_writes = report.card_writes.zip(extra).map(|(a, b)| a + b);
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!(error = %e, "not compacting the database"),
+    }
+}
+
 /// Opens the card database `db`, compacts it into the working directory and closes it
 /// again, so the swap finds no connection of ours.
 fn twin_from_card(
@@ -803,31 +814,42 @@ fn twin_from_card(
 }
 
 /// Writes the verified `twin` of the database at `path` back and swaps it in through
-/// `install`, returning its size. Any refusal or failure leaves the file at `path` as it
-/// is and is logged at info, so a succeeded import or migration never fails by it.
+/// `install`, returning its size. A refusal, a failure, or a stop by `between` such as a
+/// cancel leaves the file at `path` as it is, logged at info, so a succeeded import or
+/// migration is not undone.
+///
+/// # Errors
+///
+/// [`Error::Reopen`] and [`Error::Poisoned`], which leave connections that fail every
+/// statement.
 fn swap_twin(
     path: &Path,
     twin: &Path,
     between: &mut dyn FnMut() -> Result<()>,
     install: &mut dyn FnMut(&Path) -> Result<()>,
-) -> Option<u64> {
-    let bytes = file_len(twin).ok()?;
+) -> Result<Option<u64>> {
+    let Ok(bytes) = file_len(twin) else {
+        return Ok(None);
+    };
     if let Some(reason) = card_refusal(path, bytes) {
         tracing::info!(reason, "not compacting the database");
-        return None;
+        return Ok(None);
     }
     let new = sibling(path, NEW_SUFFIX);
     match write_swap(path, twin, &new, between, install) {
-        Ok(true) => Some(bytes),
+        Ok(true) => Ok(Some(bytes)),
         Ok(false) => {
             remove_new(&new);
             tracing::info!(reason = SHARED, "not compacting the database");
-            None
+            Ok(None)
         }
         Err(e) => {
             remove_new(&new);
+            if matches!(e, Error::Reopen(_) | Error::Poisoned) {
+                return Err(e);
+            }
             tracing::info!(error = %e, "not compacting the database");
-            None
+            Ok(None)
         }
     }
 }
@@ -1036,23 +1058,7 @@ fn migrate_with(
     report.card_writes = first.zip(back).map(|(a, b)| a + b);
     if deferred {
         remove_files(&copy);
-        let twin = twin_from_card(db, &work_dir.0, plan.floor, probe);
-        if let Some((twin, before, after)) = twin {
-            let (swapped, extra) = counted(|| {
-                swap_twin(db, &twin, &mut || Ok(()), &mut |n| {
-                    swap::install_file(db, n)
-                })
-            });
-            if let Some(bytes) = swapped {
-                log_compacted(
-                    before,
-                    after,
-                    "compacted the database after writing it back",
-                );
-                report.bytes = bytes;
-                report.card_writes = report.card_writes.zip(extra).map(|(a, b)| a + b);
-            }
-        }
+        compact_card(db, &work_dir.0, plan.floor, probe, &mut report);
     }
     report.write_back = started.elapsed();
     Ok(Some(report))
