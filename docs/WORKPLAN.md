@@ -182,6 +182,17 @@ mistarr does not hold.
 |---|---|---|---|---|
 | WP-95 | Local network only for the torrent clients | Opus | 91 | A setting, off by default, limits the managed rtorrent and Transmission to peers on the local network over IPv4 and IPv6 (private, link-local and unique local ranges), with local peer discovery kept working; the design names the rights each client and the board need and moves any firewall part to the board image's own plan; tests cover the address ranges and each client's settings; DEPLOYMENT.md and the Settings page say what the option does and does not block. |
 
+## Wave 15: browsing what the board plays
+
+Starts after wave 13. Each package begins with a design note in its own
+doc section and a measurement on the board's catalogue; the rows say what
+must be true at the end, not how.
+
+| WP | Name | Model | Depends | Acceptance |
+|---|---|---|---|---|
+| WP-100 | Disc sets as one entry | Opus | 89 | A multi-disc game that a DAT lists as one title per disc (`Example Quest (Europe) (Disc 1)` to `(Disc 3)`) shows in browse and title detail as one set per region, with the discs listed inside it; the variant count, wanted, have and the pick count sets, not discs; a set is had only when every disc is; the design note gives the measured number of disc titles and sets on the board's disc platforms, where the set key comes from (DAT names, serials, or both) and what happens to sets with a missing or extra disc; no change to how files match roms. |
+| WP-101 | Arcade limited to what the board plays | Opus | | The Arcade section lists what the installed MiSTer can run from its MRAs, not every MRA file found: the design note measures on the board how the arcade titles split (main folder and `_alternatives`, MRAs whose core is not installed, checks never run, the MRAs skipped by the reader), compares that with what the MiSTer menu offers, and decides what is a title, what is a variant of one, and what is hidden; browse counts and title detail follow that decision; tests cover each class with synthetic MRAs. |
+
 ## Suggested fan-out
 
 Wave 1 is eight independent agents. Wave 2 needs WP-09 first, then six in
