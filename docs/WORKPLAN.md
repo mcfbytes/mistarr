@@ -169,6 +169,7 @@ file gives the order and the migration grouping.
 | WP-93 | Minimal types | Flash | 85, 94 | `mistarr-server` |
 | WP-90 | Tag tables | Opus | 89 | `mistarr-server` |
 | WP-91 | Compact write-back | Opus | 77, 86 | `mistarr-server` |
+| WP-96 | Sync writes measured again | Sonnet | 86 | `docs/` |
 
 ## Wave 14: local network only
 

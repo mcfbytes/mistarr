@@ -27,15 +27,16 @@ Rules for these packages, on top of the ones in WORKPLAN.md:
 - [ ] **Wave 13**: after wave 12
   - [x] WP-83 Column forms: design · Opus
   - [x] WP-85 Rebuild-safe migrations · Flash
-  - [ ] WP-86 Hash blobs and the roms rebuild · Opus
-  - [ ] WP-87 Rom names as title tails · Opus
-  - [ ] WP-88 Torrent paths and confidence codes · Flash
-  - [ ] WP-89 Group names from titles, unused title indexes · Flash
-  - [ ] WP-90 Tag tables · Opus
-  - [ ] WP-91 Compact write-back · Opus
-  - [ ] WP-92 Integer platform ids · Opus, then Flash
-  - [ ] WP-93 Minimal types · Flash
+  - [x] WP-86 Hash blobs and the roms rebuild · Opus
+  - [x] WP-87 Rom names as title tails · Opus
+  - [x] WP-88 Torrent paths and confidence codes · Flash
+  - [x] WP-89 Group names from titles, unused title indexes · Flash
+  - [x] WP-90 Tag tables · Opus
+  - [x] WP-91 Compact write-back · Opus
+  - [x] WP-92 Integer platform ids · Opus, then Flash
+  - [x] WP-93 Minimal types · Flash
   - [x] WP-94 Shared views · Opus
+  - [ ] WP-96 Sync writes measured again · Sonnet
 
 ## Measurements
 
@@ -406,43 +407,43 @@ WP-91 follows WP-77. WP-82 lands before WP-86.
 - [x] `crates/mistarr-server/migrations/README.md` documents the marker.
 
 ### WP-86 Hash blobs and the roms rebuild
-- [ ] One migration, `0024_hashes_and_platform_keys.sql`, rebuilds roms (P1, `match_base` kept per P2, P4, STRICT and CHECKs, peak-free order) and files, chd_tracks, chd_whole and chd_failures with BLOB hashes, with P10's platform key on files.
-- [ ] `Digest<N>` binds and reads BLOB(N); `RomStatus` is a `code_enum!`.
-- [ ] A migration test seeds 0022 rows (NULL hashes, MRA roms, baddump, unkeyed roms) and holds every row equal through `hex()` and the status text.
-- [ ] Plan tests green; ARCHITECTURE.md sync-write and memory tables measured again.
+- [x] One migration, `0024_hashes_and_platform_keys.sql`, rebuilds roms (P1, `match_base` kept per P2, P4, STRICT and CHECKs, peak-free order) and files, chd_tracks, chd_whole and chd_failures with BLOB hashes, with P10's platform key on files.
+- [x] `Digest<N>` binds and reads BLOB(N); `RomStatus` is a `code_enum!`.
+- [x] A migration test seeds 0022 rows (NULL hashes, MRA roms, baddump, unkeyed roms) and holds every row equal through `hex()` and the status text.
+- [x] Plan tests green; ARCHITECTURE.md memory table measured again (the sync-write table is WP-96).
 
 ### WP-87 Rom names as title tails
-- [ ] P3 in `0024_hashes_and_platform_keys.sql` while it is unreleased: `own_name`, the unique index on title, flag and name, and the trigger that refuses a title rename.
-- [ ] One full-name expression for every read and one split function for both upserts.
-- [ ] Tests: every rom's full name equal across the migration, a rom equal to its title name kept whole, arcade zip and disc member names, upserts idempotent, API output byte-identical in the HTTP tests.
+- [x] P3 in `0024_hashes_and_platform_keys.sql` while it is unreleased: `own_name`, the unique index on title, flag and name, and the trigger that refuses a title rename.
+- [x] One full-name expression for every read and one split function for both upserts.
+- [x] Tests: every rom's full name equal across the migration, a rom equal to its title name kept whole, arcade zip and disc member names, upserts idempotent, API output byte-identical in the HTTP tests.
 
 ### WP-88 Torrent paths and confidence codes
-- [ ] P5 in `0025_torrent_paths.sql`: interned directories per source, torrent_files WITHOUT ROWID, integer confidence on torrent_files and torrent_candidates.
-- [ ] Paths round-trip in a migration test; source detail search, staged paths and downloads unchanged in their tests.
-- [ ] A plan test asserts the primary-key range and the directory seek.
+- [x] P5 in `0025_torrent_paths.sql`: interned directories per source, torrent_files WITHOUT ROWID, integer confidence on torrent_files and torrent_candidates.
+- [x] Paths round-trip in a migration test; source detail search, staged paths and downloads unchanged in their tests.
+- [x] A plan test asserts the primary-key range and the directory seek.
 
 ### WP-89 Group names from titles, unused title indexes
-- [ ] P6 in `0026_titles_and_groups.sql`, a rebuild of titles and title_groups with P10's platform key on both and on dat_versions.
-- [ ] Browse reads the root title's name; the rename trigger, the other titles triggers and `titles_name_fixed` are recreated.
-- [ ] No plan names the dropped indexes; group rows equal across the migration, less the name.
+- [x] P6 in `0026_titles_and_groups.sql`, a rebuild of titles and title_groups with P10's platform key on both and on dat_versions.
+- [x] Browse reads the root title's name; the rename trigger, the other titles triggers and `titles_name_fixed` are recreated.
+- [x] No plan names the dropped indexes; group rows equal across the migration, less the name.
 
 ### WP-90 Tag tables
-- [ ] P7 in `0027_tags.sql`: one tag table with fixed ids for the known flags and regions, link tables by tag id, the known-flag and known-region tables folded in.
-- [ ] Groups' bit columns equal for every group across the migration; browse visibility tests unchanged; `mistarr doctor` finds no drift.
+- [x] P7 in `0027_tags.sql`: one tag table with fixed ids for the known flags and regions, link tables by tag id, the known-flag and known-region tables folded in.
+- [x] Groups' bit columns equal for every group across the migration; browse visibility tests unchanged; `mistarr doctor` finds no drift.
 
 ### WP-91 Compact write-back
-- [ ] P8 in the copy-in-RAM path for imports and migrations, with its own memory check.
-- [ ] A test drops a large table in the copy and gets a smaller card file with identical rows; card writes stay about one per MiB.
-- [ ] ARCHITECTURE.md "DAT import in RAM" describes it.
+- [x] P8 in the copy-in-RAM path for imports and migrations, with its own memory check.
+- [x] A test drops a large table in the copy and gets a smaller card file with identical rows; card writes stay about one per MiB.
+- [x] ARCHITECTURE.md "DAT import in RAM" describes it.
 
 ### WP-92 Integer platform ids
-- [ ] P10: the platform table with fixed integer ids (DATA-MODEL.md "Platform ids"), the slug and the kind code in `0024_hashes_and_platform_keys.sql`, children re-pointed at `platforms(slug)` until their own file, and the `PlatformKey` newtype.
-- [ ] Every platform column becomes the integer key, in the rebuild WP-83 assigns it to; the slug crosses the API unchanged.
-- [ ] Split into one package per module after the schema part lands, each small enough for Flash.
+- [x] P10: the platform table with fixed integer ids (DATA-MODEL.md "Platform ids"), the slug and the kind code in `0024_hashes_and_platform_keys.sql`, children re-pointed at `platforms(slug)` until their own file, and the `PlatformKey` newtype.
+- [x] Every platform column becomes the integer key, in the rebuild WP-83 assigns it to; the slug crosses the API unchanged.
+- [x] Split into one package per module after the schema part lands, each small enough for Flash.
 
 ### WP-93 Minimal types
-- [ ] P11 on every table not rebuilt by another package: integer codes through `code_enum!`, 0/1 booleans with CHECK, NULL for absent values, STRICT.
-- [ ] One package per table group, each holding every row equal across its migration: WP-93a files and chd_failures codes in 0024; WP-93b sources and downloads in 0025; WP-93c titles, dat_versions and title_groups codes in 0026; WP-93d jobs, import_log, settings in 0028 and the STRICT `dat_stage`.
+- [x] P11 on every table not rebuilt by another package: integer codes through `code_enum!`, 0/1 booleans with CHECK, NULL for absent values, STRICT.
+- [x] One package per table group, each holding every row equal across its migration: WP-93a files and chd_failures codes in 0024; WP-93b sources and downloads in 0025; WP-93c titles, dat_versions and title_groups codes in 0026; WP-93d jobs, import_log, settings in 0028 and the STRICT `dat_stage`.
 
 ### WP-94 Shared views
 - [x] P12's views in `0023_shared_views.sql`, defined over the current columns, with the reads in `crates/mistarr-server/src/db/` moved onto them where they repeat a shape.
@@ -450,6 +451,9 @@ WP-91 follows WP-77. WP-82 lands before WP-86.
 - [x] Later packages change the reads on a view through its body; the reads DATA-MODEL.md "Views" keeps on the tables change directly.
 - [x] Every read keeps its predicates exactly: a read moves onto a view only when the view adds none (DATA-MODEL.md "Views"); binding by name and by base and size read `rom_view` with the title's retired flag and the bios flag, not `live_rom_view`.
 - Open, not decided here: whether retired roms of live titles should bind. That is a behaviour change and needs its own package.
+
+### WP-96 Sync writes measured again
+- [ ] `sync_writes_on_the_bench_catalogue` run on a Linux host with per-thread I/O accounting (`/proc/thread-self/io`), and ARCHITECTURE.md "Writes on a sync mount" updated to the wave-13 schema.
 
 ## Conflicts with wave 12
 
@@ -481,6 +485,8 @@ Measured on x86 in memory (Python sqlite3 3.46.1) from the board start (118.5 Mi
 | WP-89 with P10: titles and title_groups rebuild | not measured | reuses free pages | ~2 s (estimate) | ~4.3k pages, ~13k writes, ~5 min (estimate) |
 | WP-90 tags | 0.05 s | reuses free pages | ~1 s | ~1.5k writes |
 | Compaction (WP-91, VACUUM INTO) | 0.18 to 0.32 s | + 79.0 MiB second file | ~5 s | none extra |
+
+**On the board** (schema 23, 124 MiB, 146k roms and 47k titles, a PSX core loaded): 0024 to 0028 apply in RAM in 47.5 s. With the copy on tmpfs, 204 MiB is available against the 225 MiB compaction needs, so the copy is written back and the card file compacted after the swap: 119 → 79 MiB, 198 card writes, write-back 15.8 s. Integrity and foreign keys are clean, and the largest source preview takes 0.78 s, as before the wave.
 
 **In RAM** (the normal path, `db::ram::migrate_in_ram`):
 - Copy-in reads 118.5 MiB (6 to 12 s).
