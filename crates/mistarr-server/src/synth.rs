@@ -429,10 +429,18 @@ fn seed_console(
     let mut language = c.prepare_cached(
         "INSERT INTO title_languages (title_id, pos, language) VALUES (?1, ?2, ?3)",
     )?;
-    let mut rom = c.prepare_cached(
+    // Schemas from before the name tails have no `own_name`; the WHERE keeps `?10` bound.
+    let tails = c
+        .prepare("SELECT 1 FROM pragma_table_info('roms') WHERE name = 'own_name'")?
+        .exists([])?;
+    let mut rom = c.prepare_cached(if tails {
+        "INSERT INTO roms (title_id, own_name, name, size, crc32, md5, sha1, status, header, zip_dir, present)
+         VALUES (?1, ?10, ?2, ?3, unhex(?4), unhex(substr(?5, 9)), unhex(?5), ?6, ?7, ?8, ?9)"
+    } else {
         "INSERT INTO roms (title_id, name, size, crc32, md5, sha1, status, header, zip_dir, present)
-         VALUES (?1, ?2, ?3, unhex(?4), unhex(substr(?5, 9)), unhex(?5), ?6, ?7, ?8, ?9)",
-    )?;
+         SELECT ?1, ?2, ?3, unhex(?4), unhex(substr(?5, 9)), unhex(?5), ?6, ?7, ?8, ?9
+         WHERE ?10 IS NOT NULL"
+    })?;
     let mut file = c.prepare_cached(
         "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
          VALUES (?1, ?2, ?3, 0, ?4, ?5, 0)",
@@ -530,9 +538,14 @@ fn seed_console(
             };
             for r in rom_names {
                 let size = if mra { 0 } else { 4_096 + rng.below(1 << 20) };
+                let (own_name, stored) = if tails {
+                    crate::db::sql::rom_name_parts(&name, &r)
+                } else {
+                    (true, r.as_str())
+                };
                 rom.execute(params![
                     id,
-                    r,
+                    stored,
                     i64::try_from(size).unwrap_or(0),
                     (!mra).then(|| rng.hex(8)),
                     (!mra).then(|| rng.hex(40)),
@@ -544,6 +557,7 @@ fn seed_console(
                     (console.layout == Layout::Headered).then(|| "0".repeat(32)),
                     mra.then_some("mame"),
                     mra && rng.chance(30),
+                    own_name,
                 ])?;
                 let rom_id = c.last_insert_rowid();
                 out.roms += 1;

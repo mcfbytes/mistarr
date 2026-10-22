@@ -416,6 +416,34 @@ fn plan_of(reads: &[(&str, String, Vec<String>)], name: &str, sql: &str) -> Vec<
     lines
 }
 
+/// A rom found by its full name is one title's range of `roms_title_name` plus the title's
+/// primary key; the source files page reads the title of each page row by primary key.
+#[test]
+fn full_name_reads_seek_one_titles_roms_and_its_row() {
+    let reads = hot_reads();
+    let plan = plan_of(&reads, "changed rom", "UPDATE files");
+    let has = |p: &str| plan.iter().any(|l| l.contains(p));
+    assert!(
+        has("SEARCH r USING COVERING INDEX roms_title_name (title_id=?)")
+            || has("SEARCH r USING INDEX roms_title_name (title_id=?)"),
+        "{plan:?}"
+    );
+    assert!(
+        has("SEARCH t USING INTEGER PRIMARY KEY (rowid=?)"),
+        "{plan:?}"
+    );
+    let plan = plan_of(&reads, "source files", "LEFT JOIN titles t");
+    let has = |p: &str| plan.iter().any(|l| l.contains(p));
+    assert!(
+        has("SEARCH t USING INTEGER PRIMARY KEY (rowid=?)"),
+        "{plan:?}"
+    );
+    assert!(
+        has("SEARCH r USING INTEGER PRIMARY KEY (rowid=?)"),
+        "{plan:?}"
+    );
+}
+
 /// Title detail reaches torrent files and candidates through the group's roms, never
 /// by walking a bound source's files.
 #[test]
@@ -589,7 +617,7 @@ fn recent_jobs_sort_only_finished_rows() {
 /// them renamed to match only by base name and size.
 fn previewed_source(c: &Connection) -> SourceId {
     let roms: Vec<(String, u64)> = c
-        .prepare("SELECT name, size FROM roms ORDER BY id")
+        .prepare("SELECT name, size FROM rom_view ORDER BY id")
         .expect("prepare")
         .query_map([], |r| Ok((r.get(0)?, super::sql::get_u64(r, 1)?)))
         .expect("roms")

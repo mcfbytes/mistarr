@@ -5,6 +5,7 @@ use rusqlite::{Connection, OptionalExtension};
 
 use super::files::FileState;
 use super::ids::TitleId;
+use super::sql::ROM_NAME;
 use super::titles::TitleSource;
 use crate::error::Result;
 
@@ -93,10 +94,12 @@ pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
             with_file == roms
         };
     let mut stmt = conn.prepare(&format!(
-        "SELECT f.rel_path FROM roms r JOIN files f ON f.rom_id = r.id
+        "SELECT f.rel_path FROM roms r JOIN titles t ON t.id = r.title_id
+         JOIN files f ON f.rom_id = r.id
          WHERE r.title_id = ?1 AND r.retired = 0 AND f.state IN {loadable}
          ORDER BY CASE f.state WHEN {verified} THEN 0 WHEN {misnamed} THEN 1 ELSE 2 END,
-                  r.name, f.id",
+                  {rom_name}, f.id",
+        rom_name = ROM_NAME,
         loadable = FileState::LOADABLE_SQL,
         verified = FileState::Verified.sql(),
         misnamed = FileState::Misnamed.sql()

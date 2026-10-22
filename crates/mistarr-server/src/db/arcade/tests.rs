@@ -371,3 +371,41 @@ fn import_reads_find_zip_roms_their_titles_and_dat_entries() {
         None
     );
 }
+
+#[test]
+fn zip_members_store_the_tail_after_the_title_name_and_stay_idempotent() {
+    let c = conn();
+    let zips = [("Example Blaster.zip", false), ("exblast.zip", true)];
+    let id = mra(&c, "Example Blaster", &zips);
+    let stored = |c: &Connection| -> Vec<(i64, String)> {
+        c.prepare("SELECT own_name, name FROM roms WHERE title_id = ?1 ORDER BY id")
+            .expect("prepare")
+            .query_map([id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .expect("query")
+            .collect::<rusqlite::Result<_>>()
+            .expect("rows")
+    };
+    let expected = vec![(0, ".zip".to_owned()), (1, "exblast.zip".to_owned())];
+    assert_eq!(stored(&c), expected);
+    assert_eq!(mra(&c, "Example Blaster", &zips), id);
+    assert_eq!(stored(&c), expected, "a second run adds no row");
+    let names: Vec<String> = zip_roms(&c, id)
+        .expect("zips")
+        .into_iter()
+        .map(|z| z.name)
+        .collect();
+    assert_eq!(names, ["Example Blaster.zip", "exblast.zip"]);
+    let found = titles_naming(&c, &pid("arcade"), "mame", "EXAMPLE BLASTER.ZIP").expect("naming");
+    assert_eq!(
+        found.len(),
+        1,
+        "a tail name is found by its full name, any case"
+    );
+    let missing = |c: &Connection| info(c, id).expect("info").expect("title").missing_zips;
+    assert_eq!(missing(&c), ["mame/Example Blaster.zip"]);
+    assert_eq!(
+        set_zip_present(&c, id, "example blaster.zip", "mame", true).expect("set"),
+        1
+    );
+    assert!(missing(&c).is_empty());
+}

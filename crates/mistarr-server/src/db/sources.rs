@@ -852,8 +852,11 @@ pub fn refresh_match_keys(conn: &Connection) -> Result<usize> {
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn key_batch(conn: &Connection) -> Result<usize> {
-    let mut select =
-        conn.prepare_cached("SELECT id, name FROM roms WHERE match_name IS NULL LIMIT ?1")?;
+    let mut select = conn.prepare_cached(&format!(
+        "SELECT r.id, {} FROM roms r JOIN titles t ON t.id = r.title_id
+         WHERE r.match_name IS NULL LIMIT ?1",
+        sql::ROM_NAME
+    ))?;
     let mut update =
         conn.prepare_cached("UPDATE roms SET match_name = ?2, match_base = ?3 WHERE id = ?1")?;
     let batch: Vec<(RomId, String)> = select

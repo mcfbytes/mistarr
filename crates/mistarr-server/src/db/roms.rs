@@ -260,7 +260,14 @@ pub struct EntryRom {
     pub header: Option<String>,
 }
 
-pub(crate) const ROM_COLUMNS: &str = "id, name, size, crc32, md5, sha1, status, header";
+/// The select of a rom's [`EntryRom`] columns over aliases `r` and `t`, ending before `WHERE`.
+pub(crate) fn rom_select() -> String {
+    format!(
+        "SELECT r.id, {}, r.size, r.crc32, r.md5, r.sha1, r.status, r.header
+         FROM roms r JOIN titles t ON t.id = r.title_id",
+        sql::ROM_NAME
+    )
+}
 
 pub(crate) fn rom_row(r: &Row<'_>) -> rusqlite::Result<EntryRom> {
     Ok(EntryRom {
@@ -282,11 +289,7 @@ pub(crate) fn rom_row(r: &Row<'_>) -> rusqlite::Result<EntryRom> {
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn rom(conn: &Connection, id: RomId) -> Result<Option<EntryRom>> {
     Ok(conn
-        .query_row(
-            &format!("SELECT {ROM_COLUMNS} FROM roms WHERE id = ?1"),
-            [id],
-            rom_row,
-        )
+        .query_row(&format!("{} WHERE r.id = ?1", rom_select()), [id], rom_row)
         .optional()?)
 }
 
@@ -352,10 +355,12 @@ pub struct StoredZip {
 /// assert!(roms::zip_roms(&conn, TitleId::new(1)).unwrap().is_empty());
 /// ```
 pub fn zip_roms(conn: &Connection, id: TitleId) -> Result<Vec<StoredZip>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT name, COALESCE(zip_dir, ''), present, md5 IS NOT NULL FROM roms
-         WHERE title_id = ?1 AND retired = 0 ORDER BY id",
-    )?;
+    let mut stmt = conn.prepare_cached(&format!(
+        "SELECT {}, COALESCE(r.zip_dir, ''), r.present, r.md5 IS NOT NULL
+             FROM roms r JOIN titles t ON t.id = r.title_id
+             WHERE r.title_id = ?1 AND r.retired = 0 ORDER BY r.id",
+        sql::ROM_NAME
+    ))?;
     let rows = stmt.query_map([id], |r| {
         Ok(StoredZip {
             name: r.get(0)?,
@@ -395,9 +400,12 @@ pub struct ZipRom {
 pub fn zip_rom(conn: &Connection, rom_id: RomId) -> Result<Option<ZipRom>> {
     Ok(conn
         .query_row(
-            "SELECT t.id, r.name, COALESCE(r.zip_dir, ''), COALESCE(t.mra_path, '')
-             FROM roms r JOIN titles t ON t.id = r.title_id
-             WHERE r.id = ?1 AND t.source = 'mra'",
+            &format!(
+                "SELECT t.id, {}, COALESCE(r.zip_dir, ''), COALESCE(t.mra_path, '')
+                 FROM roms r JOIN titles t ON t.id = r.title_id
+                 WHERE r.id = ?1 AND t.source = 'mra'",
+                sql::ROM_NAME
+            ),
             [rom_id],
             |r| {
                 Ok(ZipRom {
