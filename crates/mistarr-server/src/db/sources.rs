@@ -243,41 +243,6 @@ pub enum BindChoice {
     Automatic,
 }
 
-impl BindChoice {
-    /// The `sources.bind_pending` text.
-    ///
-    /// ```
-    /// use mistarr_core::PlatformId;
-    /// use mistarr_server::db::sources::BindChoice;
-    /// let nes = BindChoice::Platform(PlatformId::new("nes"));
-    /// assert_eq!(nes.to_text(), "platform:nes");
-    /// assert_eq!(BindChoice::parse("platform:nes"), Some(nes));
-    /// assert_eq!(BindChoice::parse("none"), Some(BindChoice::Ignore));
-    /// assert_eq!(BindChoice::parse("x"), None);
-    /// ```
-    #[must_use]
-    pub fn to_text(&self) -> String {
-        match self {
-            Self::Platform(p) => format!("platform:{}", p.as_str()),
-            Self::Ignore => "none".to_owned(),
-            Self::Automatic => "automatic".to_owned(),
-        }
-    }
-
-    /// Parses the `sources.bind_pending` text.
-    #[must_use]
-    pub fn parse(text: &str) -> Option<Self> {
-        match text {
-            "none" => Some(Self::Ignore),
-            "automatic" => Some(Self::Automatic),
-            other => other
-                .strip_prefix("platform:")
-                .filter(|p| !p.is_empty())
-                .map(|p| Self::Platform(PlatformId::new(p.to_owned()))),
-        }
-    }
-}
-
 /// Serialises as `{ automatic, platform_id }`, `platform_id` null for [`BindChoice::Ignore`].
 impl Serialize for BindChoice {
     fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
@@ -1540,6 +1505,22 @@ mod tests {
         assert_eq!(seed_from_text("ratio:0"), None);
         assert_eq!(seed_from_text("ratio:inf"), None);
         assert_eq!(seed_from_text("sometimes"), None);
+    }
+
+    #[test]
+    fn seed_and_bind_codes_round_trip() {
+        for kind in SeedKind::ALL {
+            assert_eq!(SeedKind::parse(kind.as_str()), Some(*kind));
+        }
+        for kind in BindKind::ALL {
+            assert_eq!(BindKind::parse(kind.as_str()), Some(*kind));
+        }
+        let mut seed: Vec<i64> = SeedKind::ALL.iter().map(|k| k.code()).collect();
+        seed.sort_unstable();
+        assert_eq!(seed, [0, 1, 2]);
+        let mut bind: Vec<i64> = BindKind::ALL.iter().map(|k| k.code()).collect();
+        bind.sort_unstable();
+        assert_eq!(bind, [0, 1, 2]);
     }
 
     #[test]

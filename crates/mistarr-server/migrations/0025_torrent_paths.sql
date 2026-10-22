@@ -48,7 +48,10 @@ SELECT id, infohash, display_name, origin_file,
        user_binding, map_stamp,
        CASE WHEN bind_pending IS NULL THEN NULL
             WHEN bind_pending = 'automatic' THEN 0 WHEN bind_pending = 'none' THEN 1
-            WHEN bind_pending LIKE 'platform:%' THEN 2 ELSE -1 END,
+            WHEN bind_pending LIKE 'platform:%' THEN
+              CASE WHEN EXISTS (SELECT 1 FROM platforms p
+                                WHERE p.slug = substr(s.bind_pending, 10)) THEN 2 END
+            ELSE -1 END,
        CASE WHEN bind_pending LIKE 'platform:%'
             THEN (SELECT p.id FROM platforms p WHERE p.slug = substr(s.bind_pending, 10)) END
 FROM sources s ORDER BY id;

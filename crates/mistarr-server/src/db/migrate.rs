@@ -291,9 +291,8 @@ mod tests {
     use crate::db::downloads::DownloadState;
     use crate::db::imports::ImportAction;
     use crate::db::jobs::JobState;
-    use crate::db::sources::{seed_text, BindChoice, BindKind, SourceState};
+    use crate::db::sources::{seed_text, BindKind, SourceState};
     use crate::jobs::{JobKind, Lane};
-    use mistarr_core::PlatformId;
 
     fn names(conn: &Connection, kind: &str) -> Vec<String> {
         let mut stmt = conn
@@ -1246,7 +1245,11 @@ mod tests {
                  (3, 'cc', 'Bound', 'c.torrent', 'nes', 0.75, 'bound', NULL, 'ratio:1.5', 4, 64,
                   'ff', 12, NULL, 1, '1:2:3', 'platform:snes'),
                  (4, 'dd', 'Disabled', 'd.torrent', 'snes', 1.0, 'disabled', NULL, 'ratio:2.0',
-                  1, 8, NULL, 13, 'snes', 0, NULL, 'none');
+                  1, 8, NULL, 13, 'snes', 0, NULL, 'none'),
+                 (5, 'ee', 'Unbound ratio', 'e.torrent', 'snes', 0.5, 'unbound', NULL, 'ratio:1.0',
+                  3, 24, NULL, 14, 'nes', 0, NULL, 'platform:nes'),
+                 (6, 'ff', 'Disabled half', 'f.torrent', NULL, NULL, 'disabled', NULL, 'ratio:0.5',
+                  2, 16, NULL, 15, NULL, 0, NULL, NULL);
              INSERT INTO downloads (id, title_id, rom_id, source_id, file_index, state, progress,
                                     staged_path, error, created_at, updated_at)
                VALUES
@@ -1258,7 +1261,11 @@ mod tests {
                  (6, 1, 1, 3, 0, 'done', 1, NULL, NULL, 0, 5),
                  (7, 1, 1, 3, 0, 'bad', 1, NULL, 'different file', 0, 6),
                  (8, 1, 1, 3, 0, 'failed', 0.5, NULL, 'network', 0, 7),
-                 (9, 1, 1, 3, 0, 'cancelled', 0, NULL, NULL, 0, 8);",
+                 (9, 1, 1, 3, 0, 'cancelled', 0, NULL, NULL, 0, 8);
+             INSERT INTO torrent_files (source_id, file_index, path, size, rom_id, confidence)
+               VALUES (3, 0, 'Set/a.nes', 8, 1, NULL);
+             INSERT INTO import_log (id, at, download_id, file_id, action, detail)
+               VALUES (1, 0, 6, NULL, 'placed', '{}');",
         )
         .expect("seed");
     }
@@ -1315,11 +1322,11 @@ mod tests {
             let seed = seed_text(r.get(8)?, r.get(9)?);
             let pending = match r.get::<_, Option<BindKind>>(17)? {
                 None => None,
-                Some(BindKind::Automatic) => Some(BindChoice::Automatic.to_text()),
-                Some(BindKind::Ignore) => Some(BindChoice::Ignore.to_text()),
+                Some(BindKind::Automatic) => Some("automatic".to_owned()),
+                Some(BindKind::Ignore) => Some("none".to_owned()),
                 Some(BindKind::Platform) => r
                     .get::<_, Option<String>>(18)?
-                    .map(|p| BindChoice::Platform(PlatformId::new(p)).to_text()),
+                    .map(|p| format!("platform:{p}")),
             };
             Ok(SourceSnap {
                 id: r.get(0)?,
@@ -1412,7 +1419,7 @@ mod tests {
         seed_sources_and_downloads(&conn);
         let sources = sources_before(&conn);
         let downloads = downloads_before(&conn);
-        assert_eq!(sources.len(), 4, "every source state and policy form");
+        assert_eq!(sources.len(), 6, "every source state and policy form");
         assert_eq!(downloads.len(), 9, "every download state");
 
         assert_eq!(apply_through(&mut conn, 25).expect("the migration"), [25]);
@@ -1447,7 +1454,7 @@ mod tests {
                 |r| r.get(0),
             )
             .expect("codes");
-        assert_eq!(codes, 4, "every source code is inside its CHECK");
+        assert_eq!(codes, 6, "every source code is inside its CHECK");
         let codes: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM downloads WHERE state BETWEEN 0 AND 8
@@ -1458,6 +1465,36 @@ mod tests {
             .expect("codes");
         assert_eq!(codes, 9, "every download code is inside its CHECK");
         assert_eq!(column(&conn, "PRAGMA integrity_check"), ["ok"]);
+        assert!(column(&conn, "PRAGMA foreign_key_check").is_empty());
+    }
+
+    #[test]
+    fn a_dangling_pending_platform_becomes_no_binding() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply_through(&mut conn, 24).expect("older migrations");
+        conn.execute_batch(
+            "INSERT INTO platforms (id, slug, name, core_dir, kind, enabled)
+               VALUES (1, 'nes', 'NES', 'NES', 0, 1);
+             INSERT INTO sources (id, infohash, display_name, origin_file, state, added_at,
+                                  user_binding, bind_pending)
+               VALUES (1, 'aa', 'Dangling', 'a.torrent', 'unbound', 0, 1, 'platform:nowhere');",
+        )
+        .expect("seed");
+
+        assert_eq!(apply_through(&mut conn, 25).expect("the migration"), [25]);
+
+        let (pending, platform): (Option<i64>, Option<i64>) = conn
+            .query_row(
+                "SELECT bind_pending, bind_platform FROM sources WHERE id = 1",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .expect("row");
+        assert_eq!(
+            (pending, platform),
+            (None, None),
+            "an unknown platform leaves no pending binding"
+        );
         assert!(column(&conn, "PRAGMA foreign_key_check").is_empty());
     }
 
