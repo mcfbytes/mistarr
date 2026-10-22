@@ -1,12 +1,13 @@
 //! The progress file a start writes while it migrates the database; see `docs/DEPLOYMENT.md` "Upgrading".
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use crate::db::ram::{Phase, Watch};
 use crate::error::Result;
 
 /// The file's name in the data directory; `scripts/install.sh` reads it.
@@ -27,13 +28,16 @@ pub type Steps = Arc<AtomicU64>;
 
 /// Keeps `<data>/mistarr.migrating` current until dropped, then removes it. Each line
 /// names the versions, the [`Steps`] count and the WAL's size, which grows while a commit
-/// writes its pages, so it changes only while the migration moves.
+/// writes its pages, so it changes only while the migration moves. While the database is
+/// compacted afterwards the line names that phase, and the count moves with the
+/// compaction's statements and each chunk it writes.
 #[derive(Debug)]
 pub struct Migrating {
     stop: Option<Sender<()>>,
     thread: Option<JoinHandle<()>>,
     path: PathBuf,
     steps: Steps,
+    phase: Arc<AtomicU8>,
 }
 
 impl Migrating {
@@ -68,13 +72,17 @@ impl Migrating {
         let path = data.join(FILE);
         let steps = Steps::default();
         let count = Arc::clone(&steps);
+        let phase = Arc::new(AtomicU8::new(0));
+        let named = Arc::clone(&phase);
         let mut wal = db.as_os_str().to_owned();
         wal.push("-wal");
         let wal = PathBuf::from(wal);
         let line = move || {
             let n = count.load(Ordering::Relaxed);
             let size = std::fs::metadata(&wal).map_or(0, |m| m.len());
-            format!("migrating from {from} to {to}: steps {n} wal {size}\n")
+            let phase = Phase::from_code(named.load(Ordering::Relaxed))
+                .map_or_else(String::new, |p| format!("{}: ", p.label()));
+            format!("migrating from {from} to {to}: {phase}steps {n} wal {size}\n")
         };
         std::fs::write(&path, line()).map_err(crate::Error::io_at(&path))?;
         let (stop, stopped) = mpsc::channel::<()>();
@@ -93,13 +101,48 @@ impl Migrating {
             thread: Some(thread),
             path,
             steps,
+            phase,
         })
+    }
+
+    /// The phase the line names, `None` between phases.
+    #[cfg(test)]
+    #[must_use]
+    pub fn phase_now(&self) -> Option<Phase> {
+        Phase::from_code(self.phase.load(Ordering::Relaxed))
     }
 
     /// The counter the migrating connection bumps; the file reports it.
     #[must_use]
     pub fn steps(&self) -> Steps {
         Arc::clone(&self.steps)
+    }
+}
+
+/// Names the phase in the file while it runs and counts each chunk written, so the file
+/// changes while the database is compacted; `None` hears nothing.
+impl Watch for Option<&Migrating> {
+    fn phase(&mut self, phase: Phase) {
+        if let Some(m) = self {
+            m.phase.store(phase.code(), Ordering::Relaxed);
+        }
+    }
+
+    fn finished(&mut self) {
+        if let Some(m) = self {
+            m.phase.store(0, Ordering::Relaxed);
+        }
+    }
+
+    fn steps(&self) -> Option<&Steps> {
+        self.map(|m| &m.steps)
+    }
+
+    fn between(&mut self, _: Phase) -> Result<()> {
+        if let Some(m) = self {
+            m.steps.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
     }
 }
 
@@ -165,6 +208,33 @@ mod tests {
         );
         drop(m);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_compaction_names_its_phase_while_it_runs_and_clears_it_after() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let m = Migrating::begin_every(dir.path(), &dir.path().join("m.db"), (3, 4), TICK)
+            .expect("begin");
+        let mut watch = Some(&m);
+        watch.phase(Phase::Compacting);
+        watch.between(Phase::Writing).expect("between");
+        let seen = lines(&dir.path().join(FILE), 2);
+        assert!(
+            seen.iter()
+                .all(|l| l == "migrating from 3 to 4: compacting the database: steps 1 wal 0\n"),
+            "{seen:?}"
+        );
+        assert_eq!(m.phase_now(), Some(Phase::Compacting));
+        assert!(watch.steps().is_some());
+        watch.finished();
+        assert_eq!(m.phase_now(), None);
+        let seen = lines(&dir.path().join(FILE), 1);
+        assert_eq!(seen[0], "migrating from 3 to 4: steps 1 wal 0\n");
+        let mut none: Option<&Migrating> = None;
+        none.phase(Phase::Compacting);
+        none.finished();
+        assert!(none.steps().is_none());
+        assert!(none.between(Phase::Writing).is_ok());
     }
 
     #[test]

@@ -214,7 +214,10 @@ While migrations run, the server keeps `mistarr.migrating` in the data
 directory, rewritten every 5 s from its `db-migrate` thread with the
 versions, a step count that SQLite advances every 10 000 instructions
 the migrating connection runs, and the size of the WAL, which grows while a
-commit writes its pages; it is removed once they are applied. The rewrite
+commit writes its pages; when memory was too short for the migration to run in
+RAM and the file is compacted afterwards, the line names "compacting the
+database" and the count moves with it; it is removed once the start is past
+both. The rewrite
 itself moves neither, so the line stays the same while the migration makes
 no progress; the log says
 "migrating the database". While that file exists and keeps changing, the

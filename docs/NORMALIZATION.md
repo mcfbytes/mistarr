@@ -269,6 +269,7 @@ CREATE TABLE tags (id INTEGER PRIMARY KEY, kind INTEGER NOT NULL CHECK (kind BET
 - **Why:** dropped tables leave free pages; without this the card keeps 118.5 MiB holding 28 to 53 MiB of free pages.
 - **Measured:** VACUUM takes 0.18 to 0.32 s on x86, ending at 79.0 MiB.
 - **After the swap:** on the 487 MB board the copy (119 MiB) and its twin (79 MiB) never fit together (203 MiB available, 225 MiB needed), so the check is made again once the copy is gone (322 MiB available) and the twin is made from the card file with `VACUUM INTO`, then written back and swapped like any write-back. A refusal leaves the swapped file as it is. Without it the card file keeps 40 MiB of free pages and every later import copies and writes back 119 MiB instead of 79.
+- **After a migration in place:** when memory is too short for the copy (329 MiB available against 338 MiB needed), the startup migration runs on the card file (0024 to 0028, 129 s) and leaves 32% free pages (38 MiB of 119). Before the server opens its connections it closes the file and compacts it from the card as above: 338 MiB is then available against the 223 MiB (floor 128, live 79, margin 16) the check needs. The check is not made when another process holds the file, a reader kept the WAL, or the card lacks room for a second copy.
 
 ### P9 Rebuild-safe migrations
 - **Problem:** migrations run inside a transaction with `foreign_keys` ON, where the pragma cannot be changed. `DROP TABLE roms` then fails on its children.
@@ -488,7 +489,7 @@ Measured on x86 in memory (Python sqlite3 3.46.1) from the board start (118.5 Mi
 
 **On the board** (schema 23, 124 MiB, 146k roms and 47k titles, a PSX core loaded): 0024 to 0028 apply in RAM in 47.5 s. With the copy on tmpfs, 204 MiB is available against the 225 MiB compaction needs, so the copy is written back and the card file compacted after the swap: 119 → 79 MiB, 198 card writes, write-back 15.8 s. Integrity and foreign keys are clean, and the largest source preview takes 0.78 s, as before the wave.
 
-**In RAM** (the normal path, `db::ram::migrate_in_ram`):
+**In RAM** (the normal path, `db::ram::migrate_at_start`):
 - Copy-in reads 118.5 MiB (6 to 12 s).
 - Memory peak: the copy (118.5) + rollback journal + CREATE INDEX sorter in `/tmp/mistarr`.
   - Journal: estimated under 10 MiB, since freed pages are reused as freelist leaves; in-place rewrites are files 2.1 and title_groups 2.9.

@@ -100,10 +100,43 @@ impl Phase {
     }
 }
 
+impl Phase {
+    /// The phase as a nonzero byte, 0 being no phase, for a counter shared between threads.
+    pub(crate) fn code(self) -> u8 {
+        match self {
+            Self::Copying => 1,
+            Self::Importing => 2,
+            Self::Compacting => 3,
+            Self::Writing => 4,
+        }
+    }
+
+    /// The phase [`Phase::code`] gave `code`, or `None` for 0 and anything unknown.
+    pub(crate) fn from_code(code: u8) -> Option<Self> {
+        [
+            Self::Copying,
+            Self::Importing,
+            Self::Compacting,
+            Self::Writing,
+        ]
+        .into_iter()
+        .find(|p| p.code() == code)
+    }
+}
+
 /// What [`run`] tells its caller as it goes, and asks between steps.
 pub trait Watch {
     /// Called as `phase` starts.
     fn phase(&mut self, phase: Phase);
+
+    /// Called when the work that announced phases is over, whatever came of it.
+    fn finished(&mut self) {}
+
+    /// The counter a connection of the work bumps as it runs, for a caller whose progress
+    /// report moves with it.
+    fn steps(&self) -> Option<&crate::migrating::Steps> {
+        None
+    }
 
     /// Called between copy steps and written chunks of `phase`; an error stops [`run`]
     /// there, with the card file untouched unless the swap already ran.
@@ -233,39 +266,96 @@ pub fn need(size: u64, input: u64) -> u64 {
 /// ```
 #[must_use]
 pub fn refusal(budget: &Budget, size: u64, input: u64, floor: u64) -> Option<String> {
+    refusal_cause(budget, size, input, floor).map(|r| r.reason)
+}
+
+/// What kept a copy from being made, and the words for the log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    /// The shortage.
+    pub cause: Cause,
+    /// The measurements behind it.
+    pub reason: String,
+}
+
+/// What a copy in RAM ran short of.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Cause {
+    /// `MemAvailable` over the floor.
+    Memory,
+    /// Free bytes in the memory directory.
+    MemoryDir,
+    /// Room beside the database for the second copy.
+    Card,
+}
+
+/// [`refusal`] with its cause, checked in the order memory, memory directory, card.
+///
+/// ```
+/// use mistarr_server::db::ram::{refusal_cause, Budget, Cause};
+/// let roomy = Budget { available: Some(1 << 30), ram_room: Some(1 << 30), card_room: Some(1 << 30) };
+/// assert_eq!(refusal_cause(&roomy, 40 << 20, 0, 128 << 20), None);
+/// let card = Budget { card_room: Some(0), ..roomy };
+/// assert_eq!(refusal_cause(&card, 40 << 20, 0, 128 << 20).map(|r| r.cause), Some(Cause::Card));
+/// let dir = Budget { ram_room: Some(0), ..roomy };
+/// assert_eq!(refusal_cause(&dir, 40 << 20, 0, 128 << 20).map(|r| r.cause), Some(Cause::MemoryDir));
+/// assert_eq!(refusal_cause(&roomy, 40 << 20, 0, 1 << 30).map(|r| r.cause), Some(Cause::Memory));
+/// ```
+#[must_use]
+pub fn refusal_cause(budget: &Budget, size: u64, input: u64, floor: u64) -> Option<Refused> {
     let need = need(size, input);
     let mib = |b: u64| b.div_ceil(MIB);
     let Some(available) = budget.available else {
-        return Some("the memory available cannot be read".to_owned());
+        return Some(refused(
+            Cause::Memory,
+            "the memory available cannot be read".to_owned(),
+        ));
     };
     if available < need.saturating_add(floor) {
-        return Some(format!(
-            "{} MiB of memory available, {} MiB needed: {} for the copy and {} kept free",
-            mib(available),
-            mib(need.saturating_add(floor)),
-            mib(need),
-            mib(floor)
+        return Some(refused(
+            Cause::Memory,
+            format!(
+                "{} MiB of memory available, {} MiB needed: {} for the copy and {} kept free",
+                mib(available),
+                mib(need.saturating_add(floor)),
+                mib(need),
+                mib(floor)
+            ),
         ));
     }
     match budget.ram_room {
-        None => return Some("the free space in the memory directory cannot be read".to_owned()),
+        None => {
+            let why = "the free space in the memory directory cannot be read".to_owned();
+            return Some(refused(Cause::MemoryDir, why));
+        }
         Some(room) if room < need => {
-            return Some(format!(
-                "{} MiB free in the memory directory, {} MiB needed",
-                mib(room),
-                mib(need)
-            ))
+            return Some(refused(
+                Cause::MemoryDir,
+                format!(
+                    "{} MiB free in the memory directory, {} MiB needed",
+                    mib(room),
+                    mib(need)
+                ),
+            ));
         }
         Some(_) => {}
     }
     match budget.card_room {
-        Some(room) if room < size.saturating_add(CHUNK_BYTES as u64) => Some(format!(
-            "{} MiB free on the card, {} MiB needed for a second copy of the database",
-            mib(room),
-            mib(size) + 1
+        Some(room) if room < size.saturating_add(CHUNK_BYTES as u64) => Some(refused(
+            Cause::Card,
+            format!(
+                "{} MiB free on the card, {} MiB needed for a second copy of the database",
+                mib(room),
+                mib(size) + 1
+            ),
         )),
         _ => None,
     }
+}
+
+fn refused(cause: Cause, reason: String) -> Refused {
+    Refused { cause, reason }
 }
 
 /// How many of the first `inputs` (uncompressed DAT bytes of each file, in order) one
@@ -761,23 +851,49 @@ fn write_swap(
 }
 
 /// Compacts the card file at `db` after its swap, as [`compact_held`] does where no
-/// connection of ours exists; every failure, `Reopen` included, is a warning.
-fn compact_card(db: &Path, work_dir: &Path, floor: u64, probe: Probe<'_>, report: &mut Report) {
-    let Some((twin, before, after)) = twin_from_card(db, work_dir, floor, probe) else {
+/// connection of ours exists; every failure, `Reopen` included, is a warning. `watch`
+/// hears the phases and each written chunk, then [`Watch::finished`]; its
+/// [`Watch::steps`] count the `VACUUM`'s progress. `message` is the line logged once
+/// the twin is in place.
+fn compact_card(
+    db: &Path,
+    work_dir: &Path,
+    floor: u64,
+    probe: Probe<'_>,
+    watch: &mut dyn Watch,
+    report: &mut Report,
+    message: &str,
+) {
+    compact_card_phases(db, work_dir, floor, probe, watch, report, message);
+    watch.finished();
+}
+
+fn compact_card_phases(
+    db: &Path,
+    work_dir: &Path,
+    floor: u64,
+    probe: Probe<'_>,
+    watch: &mut dyn Watch,
+    report: &mut Report,
+    message: &str,
+) {
+    let steps = watch.steps().cloned();
+    let Some((twin, before, after)) =
+        twin_from_card(db, work_dir, floor, probe, steps.as_ref(), &mut || {
+            watch.phase(Phase::Compacting);
+        })
+    else {
         return;
     };
+    watch.phase(Phase::Writing);
     let (swapped, extra) = counted(|| {
-        swap_twin(db, &twin, &mut || Ok(()), &mut |n| {
+        swap_twin(db, &twin, &mut || watch.between(Phase::Writing), &mut |n| {
             swap::install_file(db, n)
         })
     });
     match swapped {
         Ok(Some(bytes)) => {
-            log_compacted(
-                before,
-                after,
-                "compacted the database after writing it back",
-            );
+            log_compacted(before, after, message);
             report.bytes = bytes;
             report.card_writes = report.card_writes.zip(extra).map(|(a, b)| a + b);
         }
@@ -793,6 +909,8 @@ fn twin_from_card(
     work_dir: &Path,
     floor: u64,
     probe: Probe<'_>,
+    steps: Option<&crate::migrating::Steps>,
+    started: &mut dyn FnMut(),
 ) -> Option<(PathBuf, u64, u64)> {
     let conn =
         match Connection::open(db).and_then(|c| c.busy_timeout(super::BUSY_TIMEOUT).map(|()| c)) {
@@ -802,7 +920,12 @@ fn twin_from_card(
                 return None;
             }
         };
-    let twin = twin_of(&conn, work_dir, floor, probe, &mut || {});
+    if let Some(steps) = steps {
+        if let Err(e) = super::count_steps(&conn, steps) {
+            tracing::info!(error = %e, "cannot count the compaction's progress");
+        }
+    }
+    let twin = twin_of(&conn, work_dir, floor, probe, started);
     if let Err(e) = super::close_connection(conn) {
         tracing::info!(error = %e, "not compacting the database");
         return None;
@@ -955,45 +1078,142 @@ pub fn held_elsewhere(db: &Path) -> bool {
     false
 }
 
+/// How a startup migration in RAM ended when it did not fail.
+enum Outcome {
+    /// Migrated in RAM and swapped in.
+    Ran(Report),
+    /// Nothing pending, or something other than memory stood in the way.
+    Left,
+    /// Memory or room in the memory directory was too short to copy the database.
+    Short,
+}
+
+/// What a startup migration did, from [`migrate_at_start`].
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum Migrated {
+    /// Nothing was migrated here; the server's open applies what is pending.
+    Nothing,
+    /// Migrated in RAM and written back.
+    Ram(Report),
+    /// Memory was too short for a copy, so the card file was migrated in place, and then
+    /// compacted when worth it and affordable; `report.bytes` is its size afterwards.
+    InPlace {
+        /// Size of the migrated card file before any compaction.
+        before: u64,
+        /// What the migration and the compaction cost.
+        report: Report,
+    },
+    /// Memory was too short for a copy and the migration of the card file failed. Opening
+    /// the database would only run it again and fail the same way, so the start ends
+    /// with this error.
+    Failed(Error),
+}
+
 /// Applies pending migrations to a copy of `db` in RAM and swaps it in, as a DAT import
 /// does; run at startup before any connection of the server opens, under the data
-/// directory's lock. `None` when nothing is pending, there is no database yet, or memory,
-/// room or another process holding the file stand in the way, for which it logs why; the
-/// server's open then migrates the card file itself.
+/// directory's lock. When only memory or room in the memory directory kept the copy from
+/// being made, the card file is migrated in place, through a writer and a reader that
+/// are closed again, and compacted as after a write-back: free pages above
+/// [`COMPACT_ABOVE_PERCENT`], the budget read afresh, `VACUUM INTO` the working
+/// directory, verification, write-back and swap. [`Migrated::Nothing`] when nothing is
+/// pending, there is no database yet, or another process holding the file, a reader
+/// keeping the WAL or the card's room stand in the way, for which it logs why; the
+/// server's open then migrates the card file itself. `watch` hears the phases and each
+/// chunk written by a compaction, and its [`Watch::steps`] move with the migration.
+/// A refusal or failure of a compaction leaves the migrated file and is logged.
 ///
 /// # Errors
 ///
-/// [`Error::SchemaTooNew`] before anything is written, else the failure of a step, with
-/// the card file untouched unless a failed swap left `.old`, which the next start restores.
-pub fn migrate_in_ram(
-    db: &Path,
-    plan: &Plan,
-    steps: Option<&crate::migrating::Steps>,
-) -> Result<Option<Report>> {
-    migrate_with(db, plan, steps, &mut live_budget)
+/// [`Error::SchemaTooNew`] before anything is written, else the failure of a step of the
+/// copy, with the card file untouched unless a failed swap left `.old`, which the next
+/// start restores. A failed migration of the card file is [`Migrated::Failed`].
+pub fn migrate_at_start(db: &Path, plan: &Plan, watch: &mut dyn Watch) -> Result<Migrated> {
+    migrate_at_start_with(db, plan, watch, &mut live_budget)
 }
 
-/// [`migrate_in_ram`] reading the memory for a compaction through `probe`, which tests script.
-fn migrate_with(
+/// [`migrate_at_start`] reading the memory for a compaction through `probe`.
+fn migrate_at_start_with(
     db: &Path,
     plan: &Plan,
-    steps: Option<&crate::migrating::Steps>,
+    watch: &mut dyn Watch,
     probe: Probe<'_>,
-) -> Result<Option<Report>> {
+) -> Result<Migrated> {
+    match migrate_outcome(db, plan, watch, probe)? {
+        Outcome::Ran(report) => Ok(Migrated::Ram(report)),
+        Outcome::Left => Ok(Migrated::Nothing),
+        Outcome::Short => Ok(migrate_on_card(db, plan, watch, probe)),
+    }
+}
+
+/// Migrates the card file `db` through a writer and a reader, closes them and compacts it.
+fn migrate_on_card(db: &Path, plan: &Plan, watch: &mut dyn Watch, probe: Probe<'_>) -> Migrated {
+    let started = Instant::now();
+    let (opened, first) = counted(|| match watch.steps() {
+        Some(steps) => Db::open_counting(db, steps),
+        None => Db::open(db),
+    });
+    let opened = match opened {
+        Ok(opened) => opened,
+        Err(e) => return Migrated::Failed(e),
+    };
+    if let Err(e) = opened.close() {
+        tracing::warn!(error = %e, "migrating the database in place");
+        return Migrated::Nothing;
+    }
+    let before = file_len(db).unwrap_or(0);
+    let mut report = Report {
+        bytes: before,
+        card_writes: first,
+        work: started.elapsed(),
+        ..Report::default()
+    };
+    let started = Instant::now();
+    match WorkDir::create(&plan.dir, db, plan.job) {
+        Ok(work_dir) => {
+            let message = "compacted the database migrated in place";
+            compact_card(
+                db,
+                &work_dir.0,
+                plan.floor,
+                probe,
+                watch,
+                &mut report,
+                message,
+            );
+        }
+        Err(e) => tracing::info!(error = %e, "not compacting the database"),
+    }
+    report.write_back = started.elapsed();
+    Migrated::InPlace { before, report }
+}
+
+/// The copy-in-RAM half of [`migrate_at_start`], saying whether memory was what stopped it.
+fn migrate_outcome(
+    db: &Path,
+    plan: &Plan,
+    watch: &mut dyn Watch,
+    probe: Probe<'_>,
+) -> Result<Outcome> {
+    let steps = watch.steps().cloned();
     if !db.is_file() {
-        return Ok(None);
+        return Ok(Outcome::Left);
     }
     let conn = Connection::open(db)?;
     conn.busy_timeout(super::BUSY_TIMEOUT)?;
     let found = super::migrate::check_supported(&conn)?;
     if found == 0 || found >= super::migrate::latest() {
-        return Ok(None);
+        return Ok(Outcome::Left);
     }
     let mut report = Report::default();
     let (emptied, first) = counted(|| super::wal_emptied(&conn));
     let skip = |reason: &str| {
         tracing::info!(reason, "migrating the database in place");
-        Ok(None)
+        Ok(Outcome::Left)
+    };
+    let short = |reason: &str| {
+        tracing::info!(reason, "migrating the database in place");
+        Ok(Outcome::Short)
     };
     if !emptied? {
         return skip("a reader kept the database's WAL from being emptied");
@@ -1005,8 +1225,12 @@ fn migrate_with(
         return skip(&reason);
     }
     let size = file_len(db)?;
-    if let Some(reason) = refusal(&Budget::read(&plan.dir, db), size, 0, plan.floor) {
-        return skip(&reason);
+    let budget = Budget::read(&plan.dir, db);
+    if let Some(refused) = refusal_cause(&budget, size, 0, plan.floor) {
+        return match refused.cause {
+            Cause::Card => skip(&refused.reason),
+            Cause::Memory | Cause::MemoryDir => short(&refused.reason),
+        };
     }
     let Ok(work_dir) = WorkDir::create(&plan.dir, db, plan.job) else {
         return skip("the memory directory cannot be made");
@@ -1016,14 +1240,15 @@ fn migrate_with(
     let copied = copy_in(&conn, &copy, &mut ());
     super::close_connection(conn)?;
     if let Err(reason) = full_as_reason(copied, "copying")? {
-        return skip(&reason);
+        return short(&reason);
     }
     report.copy_in = started.elapsed();
     let started = Instant::now();
-    if let Err(reason) =
-        full_as_reason(Db::open_copy(&copy, steps).and_then(Db::close), "migrating")?
-    {
-        return skip(&reason);
+    if let Err(reason) = full_as_reason(
+        Db::open_copy(&copy, steps.as_ref()).and_then(Db::close),
+        "migrating",
+    )? {
+        return short(&reason);
     }
     report.work = started.elapsed();
     let started = Instant::now();
@@ -1058,10 +1283,12 @@ fn migrate_with(
     report.card_writes = first.zip(back).map(|(a, b)| a + b);
     if deferred {
         remove_files(&copy);
-        compact_card(db, &work_dir.0, plan.floor, probe, &mut report);
+        let message = "compacted the database after writing it back";
+        let floor = plan.floor;
+        compact_card(db, &work_dir.0, floor, probe, watch, &mut report, message);
     }
     report.write_back = started.elapsed();
-    Ok(Some(report))
+    Ok(Outcome::Ran(report))
 }
 
 /// `r`, with running out of memory or room turned into the reason for a fallback.

@@ -527,9 +527,10 @@ fn migration_writes_on_the_bench_catalogue() {
         input: 0,
     };
     let start = std::time::Instant::now();
-    let r = ram::migrate_in_ram(&copy, &plan, None)
-        .expect("migrate")
-        .expect("in RAM");
+    let ram::Migrated::Ram(r) = ram::migrate_at_start(&copy, &plan, &mut ()).expect("migrate")
+    else {
+        panic!("not migrated in RAM");
+    };
     eprintln!(
         "in RAM: {:?} card writes of {} bytes, {:?}",
         r.card_writes,
