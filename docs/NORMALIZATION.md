@@ -190,7 +190,7 @@ CREATE INDEX roms_size ON roms(size) WHERE match_name IS NOT NULL;
 
 ### P3 Rom names as title-name tails
 ```sql
-own_name INTEGER NOT NULL CHECK (own_name IN (0, 1)),  -- 0: full name is titles.name || name
+own_name INTEGER NOT NULL DEFAULT 1 CHECK (own_name IN (0, 1)),  -- 0: full name is titles.name || name
 name     TEXT NOT NULL,
 CREATE UNIQUE INDEX roms_title_name ON roms(title_id, own_name, name);   -- replaces UNIQUE(title_id, name)
 CREATE TRIGGER titles_name_fixed BEFORE UPDATE OF name ON titles WHEN NEW.name IS NOT OLD.name

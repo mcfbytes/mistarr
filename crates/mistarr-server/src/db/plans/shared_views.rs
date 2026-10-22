@@ -9,6 +9,7 @@ use rusqlite::trace::{TraceEvent, TraceEventCodes};
 use rusqlite::Connection;
 
 use super::super::ids::{DownloadId, SourceId, TitleId};
+use super::super::sql::ROM_NAME;
 use super::super::views::source_detail;
 use super::super::{candidates, downloads, downloads_import, files, imports, roms, sources};
 use super::super::{fixtures::pid, titles};
@@ -115,7 +116,7 @@ const TORRENT_FILES: &[(&str, &str)] = &[
 
 fn tiers(live: &str, order: &str) -> Vec<Out> {
     let select = format!(
-        "SELECT r.id, r.title_id, r.name, r.status, t.name
+        "SELECT r.id, r.title_id, {ROM_NAME}, r.status, t.name
          FROM roms r JOIN titles t ON t.id = r.title_id
          JOIN dat_versions d ON d.id = t.dat_version_id
          WHERE t.platform_id = ?1 AND t.source = 'dat' AND {live}"
@@ -169,11 +170,10 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
         (
             "disc roms",
             Box::new(|c| drop(roms::disc_roms(c, TitleId::new(1)).expect("roms"))),
-            vec![Out::Sql(
-                "SELECT r.id, r.title_id, r.name, r.status, t.name FROM roms r JOIN titles t ON t.id = r.title_id
+            vec![Out::Sql(format!(
+                "SELECT r.id, r.title_id, {ROM_NAME}, r.status, t.name FROM roms r JOIN titles t ON t.id = r.title_id
                  WHERE r.title_id = ?1 AND r.retired = 0 AND t.retired = 0 ORDER BY r.id"
-                    .into(),
-            )],
+            ))],
         ),
         (
             "crc candidate",
@@ -202,12 +202,11 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
         (
             "live zips",
             Box::new(|c| drop(roms::live_zip_roms(c, &pid("arcade")).expect("zips"))),
-            vec![Out::Sql(
-                "SELECT COALESCE(r.zip_dir, ''), r.name, r.id FROM roms r JOIN titles t ON t.id = r.title_id
+            vec![Out::Sql(format!(
+                "SELECT COALESCE(r.zip_dir, ''), {ROM_NAME}, r.id FROM roms r JOIN titles t ON t.id = r.title_id
                  WHERE t.platform_id = ?1 AND t.source = 'mra' AND t.retired = 0 AND r.retired = 0
                  ORDER BY r.id"
-                    .into(),
-            )],
+            ))],
         ),
         (
             "size candidates",
@@ -289,8 +288,8 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
                      ORDER BY t.retired, t.is_1g1r_pick DESC, t.name"
                         .into(),
                 ),
-                Out::Sql(
-                    "SELECT r.title_id, r.id, r.name, r.size, r.crc32, r.md5, r.sha1, r.status,
+                Out::Sql(format!(
+                    "SELECT r.title_id, r.id, {ROM_NAME}, r.size, r.crc32, r.md5, r.sha1, r.status,
                             f.id, f.state, f.rel_path
                      FROM titles t JOIN roms r ON r.title_id = t.id AND r.retired = 0
                      LEFT JOIN files f ON f.id = (
@@ -299,9 +298,8 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
                                              WHEN 4 THEN 2 ELSE 3 END, x.id
                        LIMIT 1)
                      WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
-                     ORDER BY r.title_id, r.name"
-                        .into(),
-                ),
+                     ORDER BY r.title_id, {ROM_NAME}"
+                )),
             ],
         ),
         (
@@ -318,8 +316,8 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
                 drop(downloads::get(c, DownloadId::new(1)).expect("get"));
             }),
             vec![
-                Out::Swap(&[("title_view t", "titles t"), ("t.platform,", "t.platform_id,")]),
-                Out::Swap(&[("title_view t", "titles t"), ("t.platform,", "t.platform_id,")]),
+                Out::Swap(&[("title_view dt", "titles dt"), ("dt.platform,", "dt.platform_id,")]),
+                Out::Swap(&[("title_view dt", "titles dt"), ("dt.platform,", "dt.platform_id,")]),
             ],
         ),
         (
@@ -381,12 +379,11 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
                      WHERE f.platform_id = ?1 AND t.source = 'dat' AND (r.retired = 1 OR t.retired = 1)
                      ORDER BY f.id LIMIT ?2"
                 )),
-                Out::Sql(
-                    "SELECT f.id, f.platform_id, f.rel_path, r.id, r.name, t.name
+                Out::Sql(format!(
+                    "SELECT f.id, f.platform_id, f.rel_path, r.id, {ROM_NAME}, t.name
                      FROM files f JOIN roms r ON r.id = f.rom_id JOIN titles t ON t.id = r.title_id
                      WHERE f.state = 2 ORDER BY f.id"
-                        .into(),
-                ),
+                )),
             ],
         ),
         (

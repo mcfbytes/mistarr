@@ -112,8 +112,7 @@ fn zip_rom(b: &Booted, zip: &str) -> RomId {
         .db
         .read_blocking(move |c| {
             Ok(c.query_row(
-                "SELECT r.id FROM roms r JOIN titles t ON t.id = r.title_id
-                 WHERE t.source = 'mra' AND r.name = ?1",
+                "SELECT r.id FROM rom_view r WHERE r.title_source = 'mra' AND r.name = ?1",
                 [zip],
                 |r| r.get(0),
             )?)

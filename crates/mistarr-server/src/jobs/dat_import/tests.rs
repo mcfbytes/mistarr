@@ -460,7 +460,7 @@ async fn a_zipped_db_export_loads_headerless_roms_with_clones() {
         .db
         .read(|c| {
             let mut stmt = c.prepare(
-                "SELECT t.name, r.name, r.size, lower(hex(r.sha1)),
+                "SELECT t.name, CASE WHEN r.own_name THEN r.name ELSE t.name || r.name END, r.size, lower(hex(r.sha1)),
                         (SELECT json_group_array(language) FROM
                           (SELECT language FROM title_languages WHERE title_id = t.id ORDER BY pos)),
                         t.parent_id = p.id

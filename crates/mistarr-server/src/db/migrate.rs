@@ -1813,7 +1813,7 @@ DELETE FROM parent WHERE id = 3;",
         use crate::db::titles::RomStatus;
         let mut roms = dump(
             conn,
-            "SELECT r.id, r.title_id, r.name, r.size, v.crc32_hex, v.md5_hex, v.sha1_hex, r.status,
+            "SELECT r.id, r.title_id, v.name, r.size, v.crc32_hex, v.md5_hex, v.sha1_hex, r.status,
                     r.retired, r.match_name, r.match_base, r.header, r.zip_dir, r.present
              FROM roms r JOIN rom_view v ON v.id = r.id ORDER BY r.id",
         );
@@ -2024,6 +2024,117 @@ DELETE FROM parent WHERE id = 3;",
         assert_eq!(column(&conn, "PRAGMA integrity_check"), ["ok"]);
         assert!(column(&conn, "PRAGMA foreign_key_check").is_empty());
         assert!(foreign_keys(&conn), "the pragma is back on");
+    }
+
+    #[test]
+    fn rom_names_become_tails_with_every_full_name_kept() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys");
+        apply_through(&mut conn, 23).expect("older migrations");
+        conn.execute_batch(
+            "INSERT INTO platforms (id, name, core_dir, kind, enabled) VALUES
+               ('psx', 'PSX', 'PSX', 'disc', 1), ('arcade', 'Arcade', 'Arcade', 'arcade', 1);
+             INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
+                                       game_count) VALUES
+               (1, 'psx', 'Example Discs', '1', 'd.dat', 0, 3),
+               (2, 'arcade', 'Example Arcade', '1', 'a.dat', 0, 1);
+             INSERT INTO titles (id, platform_id, dat_version_id, name, base_name) VALUES
+               (1, 'psx', 1, 'Disc Sample (USA)', 'Disc Sample'),
+               (2, 'psx', 1, 'Café Nova', 'Café Nova'),
+               (3, 'psx', 1, 'Plain', 'Plain'),
+               (4, 'arcade', 2, 'Example Blaster', 'Example Blaster');
+             INSERT INTO roms (id, title_id, name, size) VALUES
+               (1, 1, 'Disc Sample (USA)', 1),
+               (2, 1, 'Disc Sample (USA).cue', 1),
+               (3, 1, 'Disc Sample (USA) (Track 1).bin', 1),
+               (4, 1, 'Disc Sample (USA)/disc 1.chd', 1),
+               (5, 1, 'Other Name.bin', 1),
+               (6, 1, 'disc sample (usa).bin', 1),
+               (7, 1, 'Disc Sample', 1),
+               (8, 2, 'Café Nova.nes', 1),
+               (9, 2, 'Café.nes', 1),
+               (10, 2, 'Cafe\u{301} Nova.nes', 1),
+               (11, 3, 'Plain', 1),
+               (12, 3, 'PlainX', 1),
+               (13, 4, 'exblast.zip', 1),
+               (14, 4, 'Example Blaster.zip', 1);",
+        )
+        .expect("rows");
+        let before = dump(&conn, "SELECT id, name FROM roms ORDER BY id");
+
+        assert_eq!(apply_through(&mut conn, 24).expect("migrate"), [24]);
+
+        assert_eq!(
+            dump(&conn, "SELECT id, name FROM rom_view ORDER BY id"),
+            before,
+            "every full name is kept"
+        );
+        let stored = dump(&conn, "SELECT id, own_name, name FROM roms ORDER BY id");
+        let expected = [
+            (1, "1", "Disc Sample (USA)"),
+            (2, "0", ".cue"),
+            (3, "0", " (Track 1).bin"),
+            (4, "0", "/disc 1.chd"),
+            (5, "1", "Other Name.bin"),
+            (6, "1", "disc sample (usa).bin"),
+            (7, "1", "Disc Sample"),
+            (8, "0", ".nes"),
+            (9, "1", "Caf\u{e9}.nes"),
+            (10, "1", "Cafe\u{301} Nova.nes"),
+            (11, "1", "Plain"),
+            (12, "0", "X"),
+            (13, "1", "exblast.zip"),
+            (14, "0", ".zip"),
+        ];
+        let expected: Vec<Vec<String>> = expected
+            .iter()
+            .map(|(id, own, name)| vec![id.to_string(), (*own).to_owned(), (*name).to_owned()])
+            .collect();
+        assert_eq!(stored, expected, "the tail keeps the extension");
+        assert_eq!(column(&conn, "PRAGMA integrity_check"), ["ok"]);
+        assert!(column(&conn, "PRAGMA foreign_key_check").is_empty());
+    }
+
+    #[test]
+    fn the_rom_name_constraints_refuse_what_a_tail_cannot_be() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        conn.execute_batch(
+            "INSERT INTO platforms (id, name, core_dir, kind, enabled)
+               VALUES ('nes', 'NES', 'NES', 'cartridge', 1);
+             INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
+                                       game_count)
+               VALUES (1, 'nes', 'Example NES', '1', 'n.dat', 0, 1);
+             INSERT INTO titles (id, platform_id, dat_version_id, name, base_name, parent_id)
+               VALUES (1, 'nes', 1, 'Nova (World)', 'Nova', 1);
+             INSERT INTO roms (title_id, own_name, name, size) VALUES (1, 0, '.nes', 4);",
+        )
+        .expect("rows");
+        let refuses = |sql: &str| conn.execute(sql, []).is_err();
+        assert!(refuses(
+            "INSERT INTO roms (title_id, own_name, name, size) VALUES (1, 0, '', 4)"
+        ));
+        assert!(refuses(
+            "INSERT INTO roms (title_id, own_name, name, size) VALUES (1, 2, 'a', 4)"
+        ));
+        assert!(
+            refuses("INSERT INTO roms (title_id, own_name, name, size) VALUES (1, 0, '.nes', 4)"),
+            "a tail is unique within its title"
+        );
+        conn.execute(
+            "INSERT INTO roms (title_id, own_name, name, size) VALUES (1, 1, '.nes', 4)",
+            [],
+        )
+        .expect("the same text as a whole name is another rom");
+        assert!(refuses("UPDATE titles SET name = 'Nova (Japan)'"));
+        conn.execute("UPDATE titles SET name = name, base_name = 'Nova 2'", [])
+            .expect("a write that keeps the name passes");
+        assert_eq!(
+            column(&conn, "SELECT name FROM titles"),
+            ["Nova (World)"],
+            "the refused rename changed nothing"
+        );
     }
 
     #[test]
