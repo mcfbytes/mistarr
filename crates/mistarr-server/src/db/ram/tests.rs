@@ -1312,3 +1312,224 @@ fn the_real_schema_survives_compaction() {
     .expect("the search index matches its content");
     assert_eq!(dump(&c), before);
 }
+
+fn roomy() -> Budget {
+    Budget {
+        available: Some(u64::MAX),
+        ram_room: Some(u64::MAX),
+        card_room: None,
+    }
+}
+
+fn short() -> Budget {
+    Budget {
+        available: Some(0),
+        ..roomy()
+    }
+}
+
+/// Runs an import on a fresh card database whose copy ends with many free pages, reading
+/// the memory through `probe`; returns the rows and the copy's size.
+fn import_with(ram: &Path, db: &Db, probe: Probe<'_>) -> (Vec<String>, u64, Script, Report) {
+    let mut watch = Script::default();
+    let out = db
+        .hold_writer_blocking(|h| {
+            run_with(
+                h,
+                &plan(ram),
+                &mut watch,
+                |copy| {
+                    copy.write_blocking(|c| churn(c, 6))?;
+                    let rows = copy.read_blocking(|c| Ok(dump(c)))?;
+                    Ok(((rows, file_len(copy.path())?), true))
+                },
+                probe,
+            )
+        })
+        .expect("run");
+    let Ram::Done((rows, copy_bytes), report) = out else {
+        panic!("fell back: {out:?}");
+    };
+    (rows, copy_bytes, watch, report)
+}
+
+fn free_pages(db: &Db) -> i64 {
+    db.read_blocking(|c| Ok(c.pragma_query_value(None, "freelist_count", |r| r.get(0))?))
+        .expect("free")
+}
+
+#[test]
+fn a_copy_refused_for_memory_is_compacted_from_the_card_after_the_swap() {
+    let ram = testutil::ram_dir();
+    let (_dir, db) = card(CHUNK_BYTES);
+    let mut calls = 0;
+    let mut probe = |_: &Path| {
+        calls += 1;
+        if calls == 1 {
+            short()
+        } else {
+            roomy()
+        }
+    };
+    let (rows, copy_bytes, watch, report) = import_with(ram.path(), &db, &mut probe);
+    assert_eq!(calls, 2, "the memory is checked again after the swap");
+    assert_eq!(
+        watch.phases,
+        [
+            Phase::Copying,
+            Phase::Importing,
+            Phase::Writing,
+            Phase::Compacting,
+            Phase::Writing
+        ]
+    );
+    let after = file_len(db.path()).expect("len");
+    assert_eq!(report.bytes, after);
+    assert!(after * 2 < copy_bytes, "{after} of {copy_bytes} bytes");
+    assert_eq!(db.read_blocking(|c| Ok(dump(c))).expect("dump"), rows);
+    assert_eq!(free_pages(&db), 0);
+    if let Some(writes) = report.card_writes {
+        let chunks = (copy_bytes + after).div_ceil(CHUNK_BYTES as u64);
+        assert!(writes >= chunks && writes <= chunks + 24, "{writes} writes");
+    }
+    assert_clean(ram.path(), &db);
+}
+
+#[test]
+fn a_second_check_that_fails_leaves_the_written_back_card_file() {
+    let ram = testutil::ram_dir();
+    let (_dir, db) = card(CHUNK_BYTES);
+    let mut calls = 0;
+    let mut probe = |_: &Path| {
+        calls += 1;
+        short()
+    };
+    let (rows, copy_bytes, watch, _) = import_with(ram.path(), &db, &mut probe);
+    assert_eq!(calls, 2);
+    assert_eq!(watch.phases.last(), Some(&Phase::Writing));
+    assert_eq!(watch.phases.len(), 3, "no second compaction began");
+    assert!(file_len(db.path()).expect("len") * 10 > copy_bytes * 9);
+    assert!(free_pages(&db) > 0);
+    assert_eq!(db.read_blocking(|c| Ok(dump(c))).expect("dump"), rows);
+    assert_clean(ram.path(), &db);
+}
+
+#[test]
+fn a_vacuum_failing_after_the_swap_leaves_the_card_file() {
+    let ram = testutil::ram_dir();
+    let (_dir, db) = card(CHUNK_BYTES);
+    let mut calls = 0;
+    let mut probe = |dir: &Path| {
+        calls += 1;
+        if calls == 1 {
+            return short();
+        }
+        fs::write(dir.join(COMPACT_NAME), b"in the way").expect("blocker");
+        roomy()
+    };
+    let (rows, copy_bytes, watch, _) = import_with(ram.path(), &db, &mut probe);
+    assert_eq!(calls, 2);
+    assert_eq!(watch.phases.last(), Some(&Phase::Compacting));
+    assert!(file_len(db.path()).expect("len") * 10 > copy_bytes * 9);
+    assert!(free_pages(&db) > 0);
+    assert_eq!(db.read_blocking(|c| Ok(dump(c))).expect("dump"), rows);
+    assert_clean(ram.path(), &db);
+}
+
+#[test]
+fn a_copy_compacted_before_the_write_back_is_not_compacted_again() {
+    let ram = testutil::ram_dir();
+    let (_dir, db) = card(CHUNK_BYTES);
+    let mut calls = 0;
+    let mut probe = |_: &Path| {
+        calls += 1;
+        roomy()
+    };
+    let (_, _, watch, _) = import_with(ram.path(), &db, &mut probe);
+    assert_eq!(calls, 1);
+    assert_eq!(
+        watch
+            .phases
+            .iter()
+            .filter(|p| **p == Phase::Compacting)
+            .count(),
+        1
+    );
+    assert_eq!(free_pages(&db), 0);
+}
+
+#[test]
+fn a_startup_migration_refused_compaction_compacts_after_the_swap() {
+    let ram = testutil::ram_dir();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("m.db");
+    at_version(&db, super::super::migrate::latest() - 1, 0.01);
+    let c = Connection::open(&db).expect("open");
+    churn(&c, 6).expect("churn");
+    super::super::wal_emptied(&c).expect("checkpoint");
+    c.close().expect("close");
+    let before = (titles(&db), file_len(&db).expect("len"));
+    let mut calls = 0;
+    let mut probe = |_: &Path| {
+        calls += 1;
+        if calls == 1 {
+            short()
+        } else {
+            roomy()
+        }
+    };
+    let report = migrate_with(&db, &plan(ram.path()), None, &mut probe)
+        .expect("migrate")
+        .expect("ran in RAM");
+    assert_eq!(calls, 2);
+    assert_eq!(report.bytes, file_len(&db).expect("len"));
+    assert!(
+        report.bytes * 2 < before.1,
+        "{} of {}",
+        report.bytes,
+        before.1
+    );
+    assert_eq!(titles(&db), before.0);
+    let c = Connection::open(&db).expect("open");
+    let free: i64 = c
+        .pragma_query_value(None, "freelist_count", |r| r.get(0))
+        .expect("free");
+    assert_eq!(free, 0);
+    assert_eq!(fs::read_dir(ram.path()).map_or(0, Iterator::count), 0);
+    assert!(!sibling(&db, NEW_SUFFIX).exists());
+}
+
+#[test]
+fn a_startup_migration_whose_second_check_fails_keeps_the_migrated_file() {
+    let ram = testutil::ram_dir();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("m.db");
+    let latest = super::super::migrate::latest();
+    at_version(&db, latest - 1, 0.01);
+    let c = Connection::open(&db).expect("open");
+    churn(&c, 6).expect("churn");
+    super::super::wal_emptied(&c).expect("checkpoint");
+    c.close().expect("close");
+    let rows = titles(&db);
+    let mut calls = 0;
+    let mut probe = |_: &Path| {
+        calls += 1;
+        short()
+    };
+    migrate_with(&db, &plan(ram.path()), None, &mut probe)
+        .expect("migrate")
+        .expect("ran in RAM");
+    assert_eq!(calls, 2);
+    let c = Connection::open(&db).expect("open");
+    assert_eq!(
+        super::super::migrate::current_version(&c).expect("version"),
+        latest
+    );
+    let free: i64 = c
+        .pragma_query_value(None, "freelist_count", |r| r.get(0))
+        .expect("free");
+    assert!(free > 0);
+    drop(c);
+    assert_eq!(titles(&db), rows);
+    assert_eq!(fs::read_dir(ram.path()).map_or(0, Iterator::count), 0);
+}

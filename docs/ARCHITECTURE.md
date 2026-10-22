@@ -1001,6 +1001,16 @@ of the database in RAM and write it back whole (`db::ram`):
    This memory check is its own: short of memory or room, with too few free
    pages, or if `VACUUM` or the checks fail, the copy is written back as it
    is and the log at info says why, so compacting never fails a write-back.
+   Where the copy and its twin never fit together, as on the 487 MB board
+   (203 MiB available beside a 119 MiB copy, 225 MiB needed for a 79 MiB
+   twin), a copy refused for memory or room is compacted from the card file
+   after the swap: still holding the write turn and the writer, the run
+   makes the same checks again, now that the copy is gone (322 MiB available),
+   runs `VACUUM INTO` the working directory from the card database, verifies
+   the twin as above, and writes it back and swaps it in with the same
+   write-back. A refusal or failure there leaves the swapped, uncompacted
+   file, which is valid, and is logged at info; it never fails the job or the
+   migration that succeeded. A crash during it is a crash of an ordinary swap.
    Whichever file is chosen is written to `mistarr.db.new` beside the
    database in writes of exactly 1 MiB, then synced; the card must have room
    for it, and the log at info gives the sizes before and after compacting.
