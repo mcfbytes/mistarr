@@ -1280,7 +1280,13 @@ fn the_real_schema_survives_compaction() {
         .query_row("SELECT COUNT(*) FROM titles", [], |r| r.get(0))
         .expect("count");
     assert!(live > 0, "the catalogue has titles");
-    c.execute("DELETE FROM titles WHERE id % 3 = 0", []).ok();
+    // Free pages are what matters here, not the rows the deleted titles leave dangling.
+    c.pragma_update(None, "foreign_keys", false)
+        .expect("keys off");
+    let gone = c
+        .execute("DELETE FROM titles WHERE id % 3 = 0", [])
+        .expect("delete titles");
+    assert!(gone > 0, "some titles are deleted");
     super::super::wal_emptied(&c).expect("checkpoint");
     c.close().expect("close");
     let before = dump_file(&copy);
