@@ -61,14 +61,14 @@ fn seeded() -> Connection {
     let mut c = crate::db::fixtures::conn();
     crate::synth::seed(&mut c, 0.01, 4).expect("catalogue");
     c.execute_batch(
-        "INSERT INTO sources (infohash, display_name, origin_file, platform_id, state, added_at)
-           VALUES ('00', 'Synthetic', 's.torrent', 'nes', 'bound', 0);
+        "INSERT INTO sources (infohash, display_name, origin_file, platform, state, added_at)
+           VALUES ('00', 'Synthetic', 's.torrent', 1, 2, 0);
          INSERT INTO torrent_dirs (source_id, path) VALUES (1, '');
          INSERT INTO torrent_files (source_id, file_index, dir_id, leaf, size, rom_id)
            VALUES (1, 0, (SELECT id FROM torrent_dirs WHERE source_id = 1 AND path = ''),
                    'track.bin', 16, 1);
          INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, created_at, updated_at)
-           VALUES (1, 1, 1, 0, 'transferring', 0, 0);",
+           VALUES (1, 1, 1, 0, 2, 0, 0);",
     )
     .expect("sources");
     jobs::insert(

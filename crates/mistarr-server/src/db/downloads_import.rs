@@ -5,6 +5,7 @@ use mistarr_core::RomId;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::candidates::MatchConfidence;
+use super::downloads::DownloadState;
 use super::ids::{DownloadId, SourceId, TitleId};
 use super::imports::ImportAction;
 use crate::error::Result;
@@ -116,10 +117,14 @@ pub fn guessed(conn: &Connection, source: SourceId, index: u32, rom: RomId) -> R
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn placed_any(conn: &Connection, source: SourceId) -> Result<bool> {
     Ok(conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM downloads d WHERE d.source_id = ?1
-           AND (d.state = 'done' OR (d.state = 'bad' AND EXISTS (
-                 SELECT 1 FROM import_log l WHERE l.download_id = d.id
-                   AND l.action IN (?2, ?3, ?4)))))",
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM downloads d WHERE d.source_id = ?1
+               AND (d.state = {} OR (d.state = {} AND EXISTS (
+                     SELECT 1 FROM import_log l WHERE l.download_id = d.id
+                       AND l.action IN (?2, ?3, ?4)))))",
+            DownloadState::Done.sql(),
+            DownloadState::Bad.sql()
+        ),
         params![
             source,
             ImportAction::Placed,

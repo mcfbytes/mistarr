@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use mistarr_clients::{ClientTorrentId, SeedPolicy};
-use mistarr_core::{PlatformId, RomId};
+use mistarr_core::{PlatformId, PlatformKey, RomId};
 use mistarr_sources::binding::{self, Confidence, DatIndex};
 use mistarr_sources::torrent::TorrentFile;
 use rusqlite::{params, Connection, OptionalExtension, Row};
@@ -12,24 +12,80 @@ use serde::{Deserialize, Serialize};
 use super::candidates::MatchConfidence;
 use super::downloads::DownloadState;
 use super::ids::SourceId;
-use super::sql::{self, text_enum, Page, Paged};
-use crate::error::Result;
+use super::platforms;
+use super::sql::{self, code_enum, Page, Paged};
+use crate::error::{Error, Result};
 
 /// Roms given match keys per statement batch in [`refresh_match_keys`].
 const KEY_BATCH: u32 = 1000;
 
-text_enum! {
+code_enum! {
     /// `sources.state`; the machine is in `docs/DATA-MODEL.md`.
     pub enum SourceState {
         /// A magnet whose file list the client has not fetched yet.
-        Resolving = "resolving",
+        Resolving = ("resolving", 0),
         /// File list known, no platform reached the threshold.
-        Unbound = "unbound",
+        Unbound = ("unbound", 1),
         /// Attached to a platform.
-        Bound = "bound",
+        Bound = ("bound", 2),
         /// Turned off by the user.
-        Disabled = "disabled",
+        Disabled = ("disabled", 3),
     }
+}
+
+code_enum! {
+    /// `sources.seed_policy`, which carries the ratio in `sources.seed_ratio`.
+    pub(crate) enum SeedKind {
+        /// Stop once every wanted file is imported.
+        None = ("none", 0),
+        /// Seed until the client reports a ratio.
+        Ratio = ("ratio", 1),
+        /// Leave seeding to the client.
+        Client = ("client", 2),
+    }
+}
+
+code_enum! {
+    /// `sources.bind_pending`, which carries the platform in `sources.bind_platform`.
+    pub(crate) enum BindKind {
+        /// Whatever automatic binding decides.
+        Automatic = ("automatic", 0),
+        /// Not a game set.
+        Ignore = ("none", 1),
+        /// The platform in `sources.bind_platform`.
+        Platform = ("platform", 2),
+    }
+}
+
+/// A [`SeedPolicy`] read from its row code and ratio.
+fn seed_from_columns(kind: SeedKind, ratio: Option<f32>) -> SeedPolicy {
+    match kind {
+        SeedKind::None => SeedPolicy::None,
+        SeedKind::Ratio => SeedPolicy::Ratio {
+            ratio: ratio.unwrap_or_default(),
+        },
+        SeedKind::Client => SeedPolicy::Client,
+    }
+}
+
+/// The `seed_policy` text of a row code and ratio.
+pub(crate) fn seed_text(kind: SeedKind, ratio: Option<f32>) -> String {
+    seed_to_text(&seed_from_columns(kind, ratio))
+}
+
+/// The row code and ratio of a [`SeedPolicy`].
+fn seed_columns(policy: &SeedPolicy) -> (SeedKind, Option<f32>) {
+    match policy {
+        SeedPolicy::None => (SeedKind::None, None),
+        SeedPolicy::Ratio { ratio } => (SeedKind::Ratio, Some(*ratio)),
+        SeedPolicy::Client => (SeedKind::Client, None),
+    }
+}
+
+/// The key of `platform`, which must have a row.
+fn platform_key(conn: &Connection, platform: &PlatformId) -> Result<PlatformKey> {
+    platforms::key(conn, platform)?
+        .ok_or_else(|| Error::Job(format!("unknown platform `{}`", platform.as_str())))
 }
 
 /// The `sources.seed_policy` text: `none`, `client` or `ratio:N`.
@@ -254,18 +310,29 @@ pub struct NewSource<'a> {
     pub added_at: i64,
 }
 
-const COLUMNS: &str = "s.id, s.infohash, s.display_name, s.origin_file, s.platform_id,
-    s.bind_score, s.state, s.reason, s.seed_policy, s.file_count, s.total_size,
+const COLUMNS: &str = "s.id, s.infohash, s.display_name, s.origin_file,
+    (SELECT p.slug FROM platforms p WHERE p.id = s.platform),
+    s.bind_score, s.state, s.reason, s.seed_policy, s.seed_ratio, s.file_count, s.total_size,
     s.client_id, s.added_at,
     ((SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id AND f.rom_id IS NOT NULL)
      + (SELECT COUNT(*) FROM torrent_files f WHERE f.source_id = s.id AND f.rom_id IS NULL
           AND EXISTS (SELECT 1 FROM torrent_candidates c
                 WHERE c.source_id = f.source_id AND c.file_index = f.file_index))),
-    s.suggested_platform_id, s.user_binding, s.bind_pending";
+    (SELECT p.slug FROM platforms p WHERE p.id = s.suggested_platform), s.user_binding,
+    s.bind_pending, (SELECT p.slug FROM platforms p WHERE p.id = s.bind_platform)";
 
 /// Reads a `client_id` column; text that is not an infohash names no torrent.
 pub(crate) fn client_id(r: &Row<'_>, i: usize) -> rusqlite::Result<Option<ClientTorrentId>> {
     Ok(r.get::<_, Option<String>>(i)?.and_then(|s| s.parse().ok()))
+}
+
+/// A pending binding read from its row code and platform slug.
+fn pending_binding(kind: Option<BindKind>, platform: Option<String>) -> Option<BindChoice> {
+    match kind? {
+        BindKind::Automatic => Some(BindChoice::Automatic),
+        BindKind::Ignore => Some(BindChoice::Ignore),
+        BindKind::Platform => platform.map(|p| BindChoice::Platform(PlatformId::new(p))),
+    }
 }
 
 fn from_row(r: &Row<'_>) -> rusqlite::Result<SourceRow> {
@@ -278,18 +345,15 @@ fn from_row(r: &Row<'_>) -> rusqlite::Result<SourceRow> {
         bind_score: r.get(5)?,
         state: r.get(6)?,
         reason: r.get(7)?,
-        seed_policy: r.get(8)?,
-        file_count: sql::get_u64(r, 9)?,
-        total_size: sql::get_u64(r, 10)?,
-        client_id: client_id(r, 11)?,
-        added_at: r.get(12)?,
-        matched_count: sql::get_u64(r, 13)?,
-        suggested_platform_id: r.get(14)?,
-        user_binding: r.get(15)?,
-        pending_binding: r
-            .get::<_, Option<String>>(16)?
-            .as_deref()
-            .and_then(BindChoice::parse),
+        seed_policy: seed_to_text(&seed_from_columns(r.get(8)?, r.get(9)?)),
+        file_count: sql::get_u64(r, 10)?,
+        total_size: sql::get_u64(r, 11)?,
+        client_id: client_id(r, 12)?,
+        added_at: r.get(13)?,
+        matched_count: sql::get_u64(r, 14)?,
+        suggested_platform_id: r.get(15)?,
+        user_binding: r.get(16)?,
+        pending_binding: pending_binding(r.get(17)?, r.get(18)?),
     })
 }
 
@@ -368,11 +432,10 @@ pub fn list(conn: &Connection, page: Page) -> Result<Paged<SourceRow>> {
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn list_resolving(conn: &Connection) -> Result<Vec<(SourceId, bool)>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, client_id IS NOT NULL FROM sources WHERE state = 'resolving' ORDER BY id",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT id, client_id IS NOT NULL FROM sources WHERE state = ?1 ORDER BY id")?;
     let ids = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map([SourceState::Resolving], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(ids)
 }
@@ -405,9 +468,10 @@ pub fn set_suggestion(
     id: SourceId,
     platform: Option<&PlatformId>,
 ) -> Result<()> {
+    let key = platform.map(|p| platform_key(conn, p)).transpose()?;
     conn.execute(
-        "UPDATE sources SET suggested_platform_id = ?2 WHERE id = ?1",
-        params![id, platform],
+        "UPDATE sources SET suggested_platform = ?2 WHERE id = ?1",
+        params![id, key],
     )?;
     Ok(())
 }
@@ -433,9 +497,14 @@ pub fn set_user_binding(conn: &Connection, id: SourceId, chosen: bool) -> Result
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn request_binding(conn: &Connection, id: SourceId, choice: &BindChoice) -> Result<()> {
+    let (kind, platform) = match choice {
+        BindChoice::Automatic => (BindKind::Automatic, None),
+        BindChoice::Ignore => (BindKind::Ignore, None),
+        BindChoice::Platform(p) => (BindKind::Platform, Some(platform_key(conn, p)?)),
+    };
     conn.execute(
-        "UPDATE sources SET bind_pending = ?2, user_binding = ?3 WHERE id = ?1",
-        params![id, choice.to_text(), *choice != BindChoice::Automatic],
+        "UPDATE sources SET bind_pending = ?2, bind_platform = ?3, user_binding = ?4 WHERE id = ?1",
+        params![id, kind, platform, *choice != BindChoice::Automatic],
     )?;
     Ok(())
 }
@@ -446,16 +515,21 @@ pub fn request_binding(conn: &Connection, id: SourceId, choice: &BindChoice) -> 
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn take_binding(conn: &Connection, id: SourceId) -> Result<Option<BindChoice>> {
-    let text: Option<String> = conn
+    let (kind, platform) = conn
         .query_row(
-            "SELECT bind_pending FROM sources WHERE id = ?1",
+            "SELECT s.bind_pending,
+                    (SELECT p.slug FROM platforms p WHERE p.id = s.bind_platform)
+             FROM sources s WHERE s.id = ?1",
             [id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?
-        .flatten();
-    conn.execute("UPDATE sources SET bind_pending = NULL WHERE id = ?1", [id])?;
-    Ok(text.as_deref().and_then(BindChoice::parse))
+        .unwrap_or((None, None));
+    conn.execute(
+        "UPDATE sources SET bind_pending = NULL, bind_platform = NULL WHERE id = ?1",
+        [id],
+    )?;
+    Ok(pending_binding(kind, platform))
 }
 
 /// Unbound sources whose binding the user did not choose, with their
@@ -466,11 +540,11 @@ pub fn take_binding(conn: &Connection, id: SourceId) -> Result<Option<BindChoice
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn list_unbound(conn: &Connection) -> Result<Vec<(SourceId, Option<PlatformId>)>> {
     let mut stmt = conn.prepare(
-        "SELECT id, suggested_platform_id FROM sources
-         WHERE state = 'unbound' AND user_binding = 0 ORDER BY id",
+        "SELECT id, (SELECT p.slug FROM platforms p WHERE p.id = s.suggested_platform)
+         FROM sources s WHERE state = ?1 AND user_binding = 0 ORDER BY id",
     )?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map([SourceState::Unbound], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(rows)
 }
@@ -481,12 +555,16 @@ pub fn list_unbound(conn: &Connection) -> Result<Vec<(SourceId, Option<PlatformI
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn list_on_platforms(conn: &Connection, platforms: &[PlatformId]) -> Result<Vec<SourceId>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT id FROM sources WHERE platform_id = ?1 AND state != 'resolving' ORDER BY id",
-    )?;
+    let mut stmt = conn
+        .prepare_cached("SELECT id FROM sources WHERE platform = ?1 AND state != ?2 ORDER BY id")?;
     let mut out: Vec<SourceId> = Vec::new();
     for p in platforms {
-        let ids = stmt.query_map([p], |r| r.get::<_, SourceId>(0))?;
+        let Some(key) = platforms::key(conn, p)? else {
+            continue;
+        };
+        let ids = stmt.query_map(params![key, SourceState::Resolving], |r| {
+            r.get::<_, SourceId>(0)
+        })?;
         out.extend(ids.collect::<rusqlite::Result<Vec<_>>>()?);
     }
     out.sort_unstable();
@@ -500,11 +578,10 @@ pub fn list_on_platforms(conn: &Connection, platforms: &[PlatformId]) -> Result<
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn list_mapped(conn: &Connection) -> Result<Vec<SourceId>> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM sources WHERE platform_id IS NOT NULL AND state != 'resolving' ORDER BY id",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id FROM sources WHERE platform IS NOT NULL AND state != ?1 ORDER BY id")?;
     let ids = stmt
-        .query_map([], |r| r.get(0))?
+        .query_map([SourceState::Resolving], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(ids)
 }
@@ -517,13 +594,13 @@ pub fn list_mapped(conn: &Connection) -> Result<Vec<SourceId>> {
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn list_in_client(conn: &Connection) -> Result<Vec<(SourceId, ClientTorrentId, SeedPolicy)>> {
     let mut stmt = conn.prepare(
-        "SELECT id, client_id, seed_policy FROM sources WHERE client_id IS NOT NULL ORDER BY id",
+        "SELECT id, client_id, seed_policy, seed_ratio FROM sources
+         WHERE client_id IS NOT NULL ORDER BY id",
     )?;
     let rows = stmt
         .query_map([], |r| {
-            let (id, policy) = (r.get(0)?, r.get::<_, String>(2)?);
-            let seed = seed_from_text(&policy).unwrap_or(SeedPolicy::None);
-            Ok(client_id(r, 1)?.map(|cid| (id, cid, seed)))
+            let (id, policy) = (r.get(0)?, seed_from_columns(r.get(2)?, r.get(3)?));
+            Ok(client_id(r, 1)?.map(|cid| (id, cid, policy)))
         })?
         .filter_map(Result::transpose)
         .collect::<rusqlite::Result<_>>()?;
@@ -556,7 +633,8 @@ pub fn mapped_against(
 ) -> Result<Option<(PlatformId, Option<String>)>> {
     Ok(conn
         .query_row(
-            "SELECT platform_id, map_stamp FROM sources WHERE id = ?1 AND platform_id IS NOT NULL",
+            "SELECT p.slug, s.map_stamp FROM sources s JOIN platforms p ON p.id = s.platform
+             WHERE s.id = ?1 AND s.platform IS NOT NULL",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
@@ -611,9 +689,10 @@ pub fn set_reason(conn: &Connection, id: SourceId, reason: Option<&SourceReason>
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn set_seed_policy(conn: &Connection, id: SourceId, policy: &SeedPolicy) -> Result<()> {
+    let (kind, ratio) = seed_columns(policy);
     conn.execute(
-        "UPDATE sources SET seed_policy = ?2 WHERE id = ?1",
-        params![id, seed_to_text(policy)],
+        "UPDATE sources SET seed_policy = ?2, seed_ratio = ?3 WHERE id = ?1",
+        params![id, kind, ratio],
     )?;
     Ok(())
 }
@@ -646,9 +725,10 @@ pub fn set_binding(
     platform: Option<&PlatformId>,
     score: Option<f64>,
 ) -> Result<()> {
+    let key = platform.map(|p| platform_key(conn, p)).transpose()?;
     conn.execute(
-        "UPDATE sources SET platform_id = ?2, bind_score = ?3 WHERE id = ?1",
-        params![id, platform, score],
+        "UPDATE sources SET platform = ?2, bind_score = ?3 WHERE id = ?1",
+        params![id, key, score],
     )?;
     Ok(())
 }

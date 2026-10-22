@@ -288,9 +288,12 @@ mod tests {
     use std::fmt::Write as _;
 
     use super::*;
+    use crate::db::downloads::DownloadState;
     use crate::db::imports::ImportAction;
     use crate::db::jobs::JobState;
+    use crate::db::sources::{seed_text, BindChoice, BindKind, SourceState};
     use crate::jobs::{JobKind, Lane};
+    use mistarr_core::PlatformId;
 
     fn names(conn: &Connection, kind: &str) -> Vec<String> {
         let mut stmt = conn
@@ -1179,6 +1182,283 @@ mod tests {
             before,
             "not recorded"
         );
+    }
+
+    /// Every source column the 0025 rebuild converts, decoded to its words and slugs.
+    #[derive(Debug, PartialEq)]
+    struct SourceSnap {
+        id: i64,
+        infohash: String,
+        display_name: String,
+        origin_file: String,
+        platform: Option<String>,
+        bind_score: Option<f64>,
+        state: String,
+        reason: Option<String>,
+        seed_policy: String,
+        file_count: i64,
+        total_size: i64,
+        client_id: Option<String>,
+        added_at: i64,
+        suggested_platform: Option<String>,
+        user_binding: bool,
+        map_stamp: Option<String>,
+        bind_pending: Option<String>,
+    }
+
+    /// Every download column, with its state word.
+    #[derive(Debug, PartialEq)]
+    struct DownloadSnap {
+        id: i64,
+        title_id: i64,
+        rom_id: i64,
+        source_id: Option<i64>,
+        file_index: Option<i64>,
+        state: String,
+        progress: f64,
+        staged_path: Option<String>,
+        error: Option<String>,
+        created_at: i64,
+        updated_at: i64,
+    }
+
+    /// Sources in every state, seed policy and pending binding form, and downloads in
+    /// every state, on the 0024 schema.
+    fn seed_sources_and_downloads(conn: &Connection) {
+        conn.execute_batch(
+            "INSERT INTO platforms (id, slug, name, core_dir, kind, enabled)
+               VALUES (1, 'nes', 'NES', 'NES', 0, 1), (2, 'snes', 'SNES', 'SNES', 0, 1);
+             INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
+                                       game_count)
+               VALUES (1, 'nes', 'Test', '1', 't.dat', 0, 1);
+             INSERT INTO titles (id, platform_id, dat_version_id, name, base_name)
+               VALUES (1, 'nes', 1, 'Example', 'Example');
+             INSERT INTO roms (id, title_id, name, size) VALUES (1, 1, 'a.nes', 8);
+             INSERT INTO sources (id, infohash, display_name, origin_file, platform_id, bind_score,
+                                  state, reason, seed_policy, file_count, total_size, client_id,
+                                  added_at, suggested_platform_id, user_binding, map_stamp,
+                                  bind_pending)
+               VALUES
+                 (1, 'aa', 'Resolving', 'a.torrent', NULL, NULL, 'resolving',
+                  '{\"code\":\"no_client\"}', 'none', 0, 0, NULL, 10, NULL, 0, NULL, NULL),
+                 (2, 'bb', 'Unbound', 'b.torrent', NULL, NULL, 'unbound', NULL, 'client', 2, 32,
+                  NULL, 11, 'nes', 0, NULL, 'automatic'),
+                 (3, 'cc', 'Bound', 'c.torrent', 'nes', 0.75, 'bound', NULL, 'ratio:1.5', 4, 64,
+                  'ff', 12, NULL, 1, '1:2:3', 'platform:snes'),
+                 (4, 'dd', 'Disabled', 'd.torrent', 'snes', 1.0, 'disabled', NULL, 'ratio:2.0',
+                  1, 8, NULL, 13, 'snes', 0, NULL, 'none');
+             INSERT INTO downloads (id, title_id, rom_id, source_id, file_index, state, progress,
+                                    staged_path, error, created_at, updated_at)
+               VALUES
+                 (1, 1, 1, NULL, NULL, 'wanted', 0, NULL, NULL, 0, 0),
+                 (2, 1, 1, 3, 0, 'queued', 0.25, NULL, NULL, 0, 1),
+                 (3, 1, 1, 3, 0, 'transferring', 0.5, NULL, NULL, 0, 2),
+                 (4, 1, 1, 3, 0, 'checking', 1, NULL, NULL, 0, 3),
+                 (5, 1, 1, 3, 0, 'importing', 1, 'staging/a.nes', NULL, 0, 4),
+                 (6, 1, 1, 3, 0, 'done', 1, NULL, NULL, 0, 5),
+                 (7, 1, 1, 3, 0, 'bad', 1, NULL, 'different file', 0, 6),
+                 (8, 1, 1, 3, 0, 'failed', 0.5, NULL, 'network', 0, 7),
+                 (9, 1, 1, 3, 0, 'cancelled', 0, NULL, NULL, 0, 8);",
+        )
+        .expect("seed");
+    }
+
+    /// The source rows of the 0024 schema, as their stored words and slugs.
+    fn sources_before(conn: &Connection) -> Vec<SourceSnap> {
+        conn.prepare(
+            "SELECT id, infohash, display_name, origin_file, platform_id, bind_score, state,
+                    reason, seed_policy, file_count, total_size, client_id, added_at,
+                    suggested_platform_id, user_binding, map_stamp, bind_pending
+             FROM sources ORDER BY id",
+        )
+        .expect("prepare")
+        .query_map([], |r| {
+            Ok(SourceSnap {
+                id: r.get(0)?,
+                infohash: r.get(1)?,
+                display_name: r.get(2)?,
+                origin_file: r.get(3)?,
+                platform: r.get(4)?,
+                bind_score: r.get(5)?,
+                state: r.get(6)?,
+                reason: r.get(7)?,
+                seed_policy: r.get(8)?,
+                file_count: r.get(9)?,
+                total_size: r.get(10)?,
+                client_id: r.get(11)?,
+                added_at: r.get(12)?,
+                suggested_platform: r.get(13)?,
+                user_binding: r.get(14)?,
+                map_stamp: r.get(15)?,
+                bind_pending: r.get(16)?,
+            })
+        })
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows")
+    }
+
+    /// The source rows after the rebuild, decoded to the same words and slugs.
+    fn sources_after(conn: &Connection) -> Vec<SourceSnap> {
+        conn.prepare(
+            "SELECT id, infohash, display_name, origin_file,
+                    (SELECT p.slug FROM platforms p WHERE p.id = s.platform), bind_score, state,
+                    reason, seed_policy, seed_ratio, file_count, total_size, client_id, added_at,
+                    (SELECT p.slug FROM platforms p WHERE p.id = s.suggested_platform),
+                    user_binding, map_stamp, bind_pending,
+                    (SELECT p.slug FROM platforms p WHERE p.id = s.bind_platform)
+             FROM sources s ORDER BY id",
+        )
+        .expect("prepare")
+        .query_map([], |r| {
+            let state: SourceState = r.get(6)?;
+            let seed = seed_text(r.get(8)?, r.get(9)?);
+            let pending = match r.get::<_, Option<BindKind>>(17)? {
+                None => None,
+                Some(BindKind::Automatic) => Some(BindChoice::Automatic.to_text()),
+                Some(BindKind::Ignore) => Some(BindChoice::Ignore.to_text()),
+                Some(BindKind::Platform) => r
+                    .get::<_, Option<String>>(18)?
+                    .map(|p| BindChoice::Platform(PlatformId::new(p)).to_text()),
+            };
+            Ok(SourceSnap {
+                id: r.get(0)?,
+                infohash: r.get(1)?,
+                display_name: r.get(2)?,
+                origin_file: r.get(3)?,
+                platform: r.get(4)?,
+                bind_score: r.get(5)?,
+                state: state.as_str().to_owned(),
+                reason: r.get(7)?,
+                seed_policy: seed,
+                file_count: r.get(10)?,
+                total_size: r.get(11)?,
+                client_id: r.get(12)?,
+                added_at: r.get(13)?,
+                suggested_platform: r.get(14)?,
+                user_binding: r.get(15)?,
+                map_stamp: r.get(16)?,
+                bind_pending: pending,
+            })
+        })
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows")
+    }
+
+    /// The download rows of the 0024 schema, as their stored state words.
+    fn downloads_before(conn: &Connection) -> Vec<DownloadSnap> {
+        conn.prepare(
+            "SELECT id, title_id, rom_id, source_id, file_index, state, progress, staged_path,
+                    error, created_at, updated_at
+             FROM downloads ORDER BY id",
+        )
+        .expect("prepare")
+        .query_map([], |r| {
+            Ok(DownloadSnap {
+                id: r.get(0)?,
+                title_id: r.get(1)?,
+                rom_id: r.get(2)?,
+                source_id: r.get(3)?,
+                file_index: r.get(4)?,
+                state: r.get(5)?,
+                progress: r.get(6)?,
+                staged_path: r.get(7)?,
+                error: r.get(8)?,
+                created_at: r.get(9)?,
+                updated_at: r.get(10)?,
+            })
+        })
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows")
+    }
+
+    /// The download rows after the rebuild, decoded to the same state words.
+    fn downloads_after(conn: &Connection) -> Vec<DownloadSnap> {
+        conn.prepare(
+            "SELECT id, title_id, rom_id, source_id, file_index, state, progress, staged_path,
+                    error, created_at, updated_at
+             FROM downloads ORDER BY id",
+        )
+        .expect("prepare")
+        .query_map([], |r| {
+            let state: DownloadState = r.get(5)?;
+            Ok(DownloadSnap {
+                id: r.get(0)?,
+                title_id: r.get(1)?,
+                rom_id: r.get(2)?,
+                source_id: r.get(3)?,
+                file_index: r.get(4)?,
+                state: state.as_str().to_owned(),
+                progress: r.get(6)?,
+                staged_path: r.get(7)?,
+                error: r.get(8)?,
+                created_at: r.get(9)?,
+                updated_at: r.get(10)?,
+            })
+        })
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows")
+    }
+
+    #[test]
+    fn source_and_download_codes_with_every_row_kept() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys");
+        apply_through(&mut conn, 24).expect("older migrations");
+        seed_sources_and_downloads(&conn);
+        let sources = sources_before(&conn);
+        let downloads = downloads_before(&conn);
+        assert_eq!(sources.len(), 4, "every source state and policy form");
+        assert_eq!(downloads.len(), 9, "every download state");
+
+        assert_eq!(apply_through(&mut conn, 25).expect("the migration"), [25]);
+
+        assert_eq!(
+            sources_after(&conn),
+            sources,
+            "every source row is kept through its words and slugs"
+        );
+        assert_eq!(
+            downloads_after(&conn),
+            downloads,
+            "every download row is kept through its state word"
+        );
+        let sql = |name: &str| -> String {
+            conn.query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [name],
+                |r| r.get(0),
+            )
+            .expect(name)
+        };
+        for table in ["sources", "downloads"] {
+            assert!(sql(table).contains("STRICT"), "{}", sql(table));
+        }
+        let codes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sources WHERE state BETWEEN 0 AND 3
+                   AND seed_policy BETWEEN 0 AND 2 AND user_binding IN (0, 1)
+                   AND (bind_pending IS NULL OR bind_pending BETWEEN 0 AND 2)",
+                [],
+                |r| r.get(0),
+            )
+            .expect("codes");
+        assert_eq!(codes, 4, "every source code is inside its CHECK");
+        let codes: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM downloads WHERE state BETWEEN 0 AND 8
+                   AND progress BETWEEN 0 AND 1",
+                [],
+                |r| r.get(0),
+            )
+            .expect("codes");
+        assert_eq!(codes, 9, "every download code is inside its CHECK");
+        assert_eq!(column(&conn, "PRAGMA integrity_check"), ["ok"]);
+        assert!(column(&conn, "PRAGMA foreign_key_check").is_empty());
     }
 
     /// One file row: its keys, whole path, size, rom and confidence word.

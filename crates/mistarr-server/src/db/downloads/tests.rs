@@ -17,19 +17,20 @@ fn title_of(c: &Connection, rom: RomId) -> TitleId {
 
 #[test]
 fn state_sets_match_their_sql() {
-    let text = |states: &[DownloadState]| {
-        crate::db::sql::text_list(&states.iter().map(|s| s.as_str()).collect::<Vec<_>>())
+    let codes = |states: &[DownloadState]| {
+        let list: Vec<String> = states.iter().map(|s| s.code().to_string()).collect();
+        format!("({})", list.join(", "))
     };
-    assert_eq!(DownloadState::OPEN_SQL, text(&DownloadState::OPEN));
-    assert_eq!(DownloadState::SELECTED_SQL, text(&DownloadState::SELECTED));
-    assert_eq!(DownloadState::STARTED_SQL, text(&DownloadState::STARTED));
+    assert_eq!(DownloadState::OPEN_SQL, codes(&DownloadState::OPEN));
+    assert_eq!(DownloadState::SELECTED_SQL, codes(&DownloadState::SELECTED));
+    assert_eq!(DownloadState::STARTED_SQL, codes(&DownloadState::STARTED));
     assert_eq!(
         DownloadState::CANCELLABLE_SQL,
-        text(&DownloadState::CANCELLABLE)
+        codes(&DownloadState::CANCELLABLE)
     );
     assert_eq!(
         DownloadState::UNSTARTED_SQL,
-        text(&DownloadState::UNSTARTED)
+        codes(&DownloadState::UNSTARTED)
     );
     for s in DownloadState::ALL {
         assert_ne!(DownloadState::OPEN.contains(s), s.is_terminal(), "{s}");
@@ -152,11 +153,8 @@ fn best_file_prefers_size_then_name_then_load_then_id() {
         },
     )
     .expect("create");
-    c.execute(
-        "UPDATE downloads SET state = 'bad' WHERE id = ?1",
-        [bad.get()],
-    )
-    .expect("bad");
+    c.execute("UPDATE downloads SET state = 6 WHERE id = ?1", [bad.get()])
+        .expect("bad");
     assert_eq!(best_file(&c, rom).expect("best"), candidate(by_size, 0));
     assert_eq!(best_file(&c, RomId::new(999)).expect("best"), None);
 }
@@ -609,7 +607,7 @@ fn a_rom_is_wanted_again_only_while_nothing_holds_it() {
         None,
         "one is open"
     );
-    c.execute("UPDATE downloads SET state = 'bad' WHERE id = ?1", [open])
+    c.execute("UPDATE downloads SET state = 6 WHERE id = ?1", [open])
         .expect("bad");
     let (again, state) = want_again(&c, bad, "n", 1)
         .expect("again")

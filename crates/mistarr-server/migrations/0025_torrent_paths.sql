@@ -1,8 +1,97 @@
 -- foreign_keys: off
--- Torrent paths interned per source as a directory plus a leaf, and match
--- confidences as integer codes; see docs/NORMALIZATION.md "P5 torrent_files".
+-- Torrent paths interned as directories and leaves, source and download
+-- codes, and integer confidences; see docs/NORMALIZATION.md P5 and P11.
 
 DROP VIEW IF EXISTS torrent_file_view;
+
+DROP INDEX IF EXISTS sources_state;
+
+CREATE TABLE sources_new (
+  id                 INTEGER PRIMARY KEY,
+  infohash           TEXT NOT NULL UNIQUE,
+  display_name       TEXT NOT NULL,
+  origin_file        TEXT NOT NULL,
+  platform           INTEGER REFERENCES platforms(id),
+  bind_score         REAL CHECK (bind_score BETWEEN 0 AND 1),
+  state              INTEGER NOT NULL CHECK (state BETWEEN 0 AND 3),
+  reason             TEXT,
+  seed_policy        INTEGER NOT NULL DEFAULT 0 CHECK (seed_policy BETWEEN 0 AND 2),
+  seed_ratio         REAL CHECK ((seed_policy = 1) = (seed_ratio IS NOT NULL)),
+  file_count         INTEGER NOT NULL DEFAULT 0 CHECK (file_count >= 0),
+  total_size         INTEGER NOT NULL DEFAULT 0 CHECK (total_size >= 0),
+  client_id          TEXT,
+  added_at           INTEGER NOT NULL,
+  suggested_platform INTEGER REFERENCES platforms(id),
+  user_binding       INTEGER NOT NULL DEFAULT 0 CHECK (user_binding IN (0, 1)),
+  map_stamp          TEXT,
+  bind_pending       INTEGER CHECK (bind_pending BETWEEN 0 AND 2),
+  bind_platform      INTEGER REFERENCES platforms(id),
+  CHECK (seed_policy <> 1 OR seed_ratio > 0),
+  CHECK ((bind_pending IS 2) = (bind_platform IS NOT NULL))
+) STRICT;
+
+INSERT INTO sources_new (id, infohash, display_name, origin_file, platform, bind_score, state,
+                         reason, seed_policy, seed_ratio, file_count, total_size, client_id,
+                         added_at, suggested_platform, user_binding, map_stamp, bind_pending,
+                         bind_platform)
+SELECT id, infohash, display_name, origin_file,
+       (SELECT p.id FROM platforms p WHERE p.slug = s.platform_id),
+       bind_score,
+       CASE state WHEN 'resolving' THEN 0 WHEN 'unbound' THEN 1 WHEN 'bound' THEN 2
+                  WHEN 'disabled' THEN 3 ELSE -1 END,
+       reason,
+       CASE WHEN seed_policy = 'none' THEN 0 WHEN seed_policy = 'client' THEN 2
+            WHEN seed_policy LIKE 'ratio:%' THEN 1 ELSE -1 END,
+       CASE WHEN seed_policy LIKE 'ratio:%' THEN CAST(substr(seed_policy, 7) AS REAL) END,
+       file_count, total_size, client_id, added_at,
+       (SELECT p.id FROM platforms p WHERE p.slug = s.suggested_platform_id),
+       user_binding, map_stamp,
+       CASE WHEN bind_pending IS NULL THEN NULL
+            WHEN bind_pending = 'automatic' THEN 0 WHEN bind_pending = 'none' THEN 1
+            WHEN bind_pending LIKE 'platform:%' THEN 2 ELSE -1 END,
+       CASE WHEN bind_pending LIKE 'platform:%'
+            THEN (SELECT p.id FROM platforms p WHERE p.slug = substr(s.bind_pending, 10)) END
+FROM sources s ORDER BY id;
+
+DROP TABLE sources;
+ALTER TABLE sources_new RENAME TO sources;
+CREATE INDEX sources_state ON sources(state);
+
+DROP INDEX IF EXISTS downloads_state;
+DROP INDEX IF EXISTS downloads_source;
+DROP INDEX IF EXISTS downloads_rom;
+DROP INDEX IF EXISTS downloads_recent;
+
+CREATE TABLE downloads_new (
+  id          INTEGER PRIMARY KEY,
+  title_id    INTEGER NOT NULL REFERENCES titles(id),
+  rom_id      INTEGER NOT NULL REFERENCES roms(id),
+  source_id   INTEGER REFERENCES sources(id) ON DELETE SET NULL,
+  file_index  INTEGER,
+  state       INTEGER NOT NULL CHECK (state BETWEEN 0 AND 8),
+  progress    REAL NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 1),
+  staged_path TEXT,
+  error       TEXT,
+  created_at  INTEGER NOT NULL,
+  updated_at  INTEGER NOT NULL
+) STRICT;
+
+INSERT INTO downloads_new (id, title_id, rom_id, source_id, file_index, state, progress,
+                           staged_path, error, created_at, updated_at)
+SELECT id, title_id, rom_id, source_id, file_index,
+       CASE state WHEN 'wanted' THEN 0 WHEN 'queued' THEN 1 WHEN 'transferring' THEN 2
+                  WHEN 'checking' THEN 3 WHEN 'importing' THEN 4 WHEN 'done' THEN 5
+                  WHEN 'bad' THEN 6 WHEN 'failed' THEN 7 WHEN 'cancelled' THEN 8
+                  ELSE -1 END,
+       progress, staged_path, error, created_at, updated_at
+FROM downloads ORDER BY id;
+
+DROP TABLE downloads;
+ALTER TABLE downloads_new RENAME TO downloads;
+CREATE INDEX downloads_state ON downloads(state);
+CREATE INDEX downloads_source ON downloads(source_id, file_index);
+CREATE INDEX downloads_rom ON downloads(rom_id);
+CREATE INDEX downloads_recent ON downloads(updated_at DESC, id DESC);
 
 DROP INDEX IF EXISTS torrent_files_rom;
 DROP INDEX IF EXISTS torrent_files_source_rom;
