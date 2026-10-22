@@ -11,7 +11,7 @@ use crate::db::candidates::{FileCandidate, MatchConfidence};
 use crate::db::downloads::DownloadState;
 use crate::db::ids::{DatVersionId, DownloadId, SourceId, TitleId};
 use crate::db::sources::{self, SourceRow};
-use crate::db::sql::{self, get_u64, Page, Paged};
+use crate::db::sql::{self, get_u64, Page, Paged, ROM_NAME};
 use crate::error::Result;
 
 /// A file that holds a matched rom or a candidate rom, as `matched_count` counts it.
@@ -226,10 +226,12 @@ fn files_in(
         |r| get_u64(r, 0),
     )?;
     let mut stmt = conn.prepare(&format!(
-        "SELECT f.file_index, td.path || f.leaf, f.size, f.rom_id, r.name, r.title_id,
+        "SELECT f.file_index, td.path || f.leaf, f.size, f.rom_id,
+                {ROM_NAME}, r.title_id,
                 f.confidence, d.id, d.state, d.progress
          FROM torrent_files f JOIN torrent_dirs td ON td.id = f.dir_id
          LEFT JOIN roms r ON r.id = f.rom_id
+         LEFT JOIN titles t ON t.id = r.title_id
          LEFT JOIN downloads d ON d.id = (SELECT MAX(x.id) FROM downloads x
            WHERE x.source_id = f.source_id AND x.file_index = f.file_index)
          WHERE f.source_id = ?1 AND {search}{filter}

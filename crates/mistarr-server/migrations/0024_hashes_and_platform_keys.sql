@@ -28,6 +28,7 @@ DROP INDEX IF EXISTS roms_track_size;
 CREATE TABLE roms_new (
   id         INTEGER PRIMARY KEY,
   title_id   INTEGER NOT NULL REFERENCES titles(id),
+  own_name   INTEGER NOT NULL DEFAULT 1 CHECK (own_name IN (0, 1)),
   name       TEXT NOT NULL,
   size       INTEGER NOT NULL CHECK (size >= 0),
   crc32      BLOB CHECK (length(crc32) = 4),
@@ -40,22 +41,31 @@ CREATE TABLE roms_new (
   header     TEXT,
   zip_dir    TEXT,
   present    INTEGER NOT NULL DEFAULT 0 CHECK (present IN (0, 1)),
-  UNIQUE (title_id, name)
+  CHECK (own_name = 1 OR name <> '')
 ) STRICT;
 
-INSERT INTO roms_new (id, title_id, name, size, crc32, md5, sha1, status, retired,
+-- own_name = 0 stores the text after the title's name, only when the full name starts
+-- with that name and is longer.
+INSERT INTO roms_new (id, title_id, own_name, name, size, crc32, md5, sha1, status, retired,
                       match_name, match_base, header, zip_dir, present)
-SELECT id, title_id, name, size,
-       CASE WHEN NULLIF(crc32, '') IS NULL THEN NULL ELSE COALESCE(unhex(crc32), x'') END,
-       CASE WHEN NULLIF(md5, '') IS NULL THEN NULL ELSE COALESCE(unhex(md5), x'') END,
-       CASE WHEN NULLIF(sha1, '') IS NULL THEN NULL ELSE COALESCE(unhex(sha1), x'') END,
-       CASE status WHEN 'good' THEN 0 WHEN 'baddump' THEN 1 WHEN 'nodump' THEN 2
-                   WHEN 'verified' THEN 3 ELSE -1 END,
-       retired, match_name, match_base, header, zip_dir, present
-FROM roms ORDER BY id;
+SELECT r.id, r.title_id,
+       CASE WHEN length(r.name) > length(t.name)
+              AND substr(r.name, 1, length(t.name)) = t.name THEN 0 ELSE 1 END,
+       CASE WHEN length(r.name) > length(t.name)
+              AND substr(r.name, 1, length(t.name)) = t.name
+            THEN substr(r.name, length(t.name) + 1) ELSE r.name END,
+       r.size,
+       CASE WHEN NULLIF(r.crc32, '') IS NULL THEN NULL ELSE COALESCE(unhex(r.crc32), x'') END,
+       CASE WHEN NULLIF(r.md5, '') IS NULL THEN NULL ELSE COALESCE(unhex(r.md5), x'') END,
+       CASE WHEN NULLIF(r.sha1, '') IS NULL THEN NULL ELSE COALESCE(unhex(r.sha1), x'') END,
+       CASE r.status WHEN 'good' THEN 0 WHEN 'baddump' THEN 1 WHEN 'nodump' THEN 2
+                     WHEN 'verified' THEN 3 ELSE -1 END,
+       r.retired, r.match_name, r.match_base, r.header, r.zip_dir, r.present
+FROM roms r LEFT JOIN titles t ON t.id = r.title_id ORDER BY r.id;
 
 DROP TABLE roms;
 ALTER TABLE roms_new RENAME TO roms;
+CREATE UNIQUE INDEX roms_title_name ON roms(title_id, own_name, name);
 CREATE INDEX roms_sha1 ON roms(sha1);
 CREATE INDEX roms_md5 ON roms(md5) WHERE sha1 IS NULL;
 CREATE INDEX roms_crc ON roms(crc32, size);
@@ -292,8 +302,14 @@ WHEN OLD.rom_id IS NOT NULL AND OLD.state = 1 BEGIN
       AND t.group_root NOT IN (SELECT parent_id FROM title_groups_dirty);
 END;
 
+CREATE TRIGGER titles_name_fixed BEFORE UPDATE OF name ON titles
+WHEN NEW.name IS NOT OLD.name BEGIN
+  SELECT RAISE(ABORT, 'titles.name never changes');
+END;
+
 CREATE VIEW rom_view AS
-SELECT r.id, r.title_id, r.name, r.size, r.crc32, r.md5, r.sha1,
+SELECT r.id, r.title_id,
+       CASE WHEN r.own_name THEN r.name ELSE t.name || r.name END AS name, r.size, r.crc32, r.md5, r.sha1,
        NULLIF(lower(hex(r.crc32)), '') AS crc32_hex, NULLIF(lower(hex(r.md5)), '') AS md5_hex,
        NULLIF(lower(hex(r.sha1)), '') AS sha1_hex,
        r.status,

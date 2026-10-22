@@ -122,7 +122,7 @@ fn bench_preview_times_each_source_and_its_base_tier() {
          INSERT INTO torrent_files (source_id, file_index, dir_id, leaf, size)
            SELECT 1, id - 1,
                   (SELECT id FROM torrent_dirs WHERE source_id = 1 AND path = 'Set/'),
-                  name, size FROM roms ORDER BY id LIMIT 600;
+                  name, size FROM rom_view ORDER BY id LIMIT 600;
          UPDATE sources SET file_count = 600;",
     )
     .expect("source");

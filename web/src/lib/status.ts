@@ -292,6 +292,7 @@ const PHASE_TEXT: Record<string, string> = {
   matching: 'Matching files on the card',
   binding: 'Matching files to DAT entries',
   'copying the database to memory': 'Copying the database to memory',
+  'compacting the database': 'Compacting the database',
   'writing the database to the card': 'Writing the database to the card',
   importing: 'Importing',
   'importing in place': 'Importing in place',

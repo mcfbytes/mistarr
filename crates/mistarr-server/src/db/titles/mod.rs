@@ -351,16 +351,17 @@ pub fn upsert_title(
         }
     }
     let mut stmt = conn.prepare_cached(
-        "INSERT INTO roms (title_id, name, size, crc32, md5, sha1, status, header, retired)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 0)
-         ON CONFLICT(title_id, name) DO UPDATE SET size = excluded.size, crc32 = excluded.crc32,
+        "INSERT INTO roms (title_id, own_name, name, size, crc32, md5, sha1, status, header, retired)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0)
+         ON CONFLICT(title_id, own_name, name) DO UPDATE SET size = excluded.size, crc32 = excluded.crc32,
            md5 = excluded.md5, sha1 = excluded.sha1, status = excluded.status,
            header = excluded.header, retired = 0",
     )?;
     for r in roms {
         let size = sql::to_i64(r.size);
+        let (own, stored) = sql::rom_name_parts(t.name, r.name);
         stmt.execute(params![
-            id, r.name, size, r.crc32, r.md5, r.sha1, r.status, r.header
+            id, own, stored, size, r.crc32, r.md5, r.sha1, r.status, r.header
         ])?;
     }
     Ok(id)

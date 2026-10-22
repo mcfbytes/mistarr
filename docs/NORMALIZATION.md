@@ -190,7 +190,7 @@ CREATE INDEX roms_size ON roms(size) WHERE match_name IS NOT NULL;
 
 ### P3 Rom names as title-name tails
 ```sql
-own_name INTEGER NOT NULL CHECK (own_name IN (0, 1)),  -- 0: full name is titles.name || name
+own_name INTEGER NOT NULL DEFAULT 1 CHECK (own_name IN (0, 1)),  -- 0: full name is titles.name || name
 name     TEXT NOT NULL,
 CREATE UNIQUE INDEX roms_title_name ON roms(title_id, own_name, name);   -- replaces UNIQUE(title_id, name)
 CREATE TRIGGER titles_name_fixed BEFORE UPDATE OF name ON titles WHEN NEW.name IS NOT OLD.name
@@ -263,7 +263,7 @@ CREATE TABLE tags (id INTEGER PRIMARY KEY, kind INTEGER NOT NULL CHECK (kind BET
   - Known tags take fixed ids, so `f.flag = 'bios'` becomes `tag_id = 4`.
 
 ### P8 Compact write-back (`db::ram`)
-- **Change:** after an import or migration in RAM, when free pages exceed 25% of the copy and `MemAvailable` covers floor + copy + live pages, run `VACUUM INTO <dir>/compact.db` and write that back instead of the copy.
+- **Change:** after an import or migration in RAM, when free pages exceed 25% of the copy and `MemAvailable` covers floor + live pages + 16 MiB (the copy is in it already), run `VACUUM INTO <dir>/compact.db` and write that back instead of the copy.
 - **Why:** dropped tables leave free pages; without this the card keeps 118.5 MiB holding 28 to 53 MiB of free pages.
 - **Measured:** VACUUM takes 0.18 to 0.32 s on x86, ending at 79.0 MiB.
 
@@ -486,7 +486,7 @@ Measured on x86 in memory (Python sqlite3 3.46.1) from the board start (118.5 Mi
   - Journal: estimated under 10 MiB, since freed pages are reused as freelist leaves; in-place rewrites are files 2.1 and title_groups 2.9.
   - Sorter: estimated under 10 MiB, the largest key set being about 7 MiB.
   - Total about **140 MiB**, inside `need(118.5) = 210 MiB`, so `MemAvailable` ≥ 338 MiB with the 128 MiB floor.
-- Compaction needs another 79 MiB, so WP-91 checks memory separately and skips it when short.
+- Compaction needs another 79 MiB on tmpfs, so WP-91 checks memory separately (`MemAvailable` ≥ floor + 79 + 16 MiB, the copy being in it already) and skips it when short; the copy is deleted once the compacted file is whole.
 - Write-back: 79 MiB compacted, or 118.5 MiB not, at 10 to 20 MB/s, which is about one card write per MiB plus 8.
 - Total roughly 0.5 to 1 minute.
 - After compaction, later DAT imports need about 59 MiB less (`need(79.0) = 150.5 MiB`) and write back 39.5 MiB less each.

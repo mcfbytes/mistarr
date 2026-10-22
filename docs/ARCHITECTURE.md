@@ -983,11 +983,27 @@ of the database in RAM and write it back whole (`db::ram`):
    load writes. The follow-up is the platform's re-map. The job's progress
    goes to the copy's job row and out as `job.progress`, with the phases
    "copying the database to memory", the load's own, "matching" and
-   "picking" for the recompute, and "writing the database to the card". A
+   "picking" for the recompute, "compacting the database" when it compacts,
+   and "writing the database to the card". A
    file that loads nothing is not written back.
-5. The copy is closed, put back in WAL mode so the card file opens without a
-   write, and written to `mistarr.db.new` beside the database in writes of
-   exactly 1 MiB, then synced.
+5. The copy is closed and put back in WAL mode so the card file opens
+   without a write. When its free pages exceed 25% of its pages, which
+   migrations and imports that rebuild or drop tables leave, and
+   `MemAvailable`, which already excludes the copy, covers `import_floor_mib`,
+   the live pages (the pages less the free ones, at the page size) and 16 MiB
+   for the `VACUUM` connection, and the memory directory has the live pages
+   free, the phase "compacting the database" runs `VACUUM INTO` a `compact.db` beside the copy, which is put in WAL
+   mode and must keep the copy's `user_version`, `application_id`, page size
+   and `auto_vacuum`; it is written back in the copy's place, so the card
+   file, and every later copy and write-back, shrinks to the live pages. The
+   copy is removed from the memory directory once the compacted file is whole,
+   so only one of them is held through the write-back.
+   This memory check is its own: short of memory or room, with too few free
+   pages, or if `VACUUM` or the checks fail, the copy is written back as it
+   is and the log at info says why, so compacting never fails a write-back.
+   Whichever file is chosen is written to `mistarr.db.new` beside the
+   database in writes of exactly 1 MiB, then synced; the card must have room
+   for it, and the log at info gives the sizes before and after compacting.
 6. The swap waits, up to 30 s, until no other process has the database or
    its `-wal` or `-shm` open, from `/proc/<pid>/fd`. SQLite in such a
    process, closing its last connection to the old file, would remove the

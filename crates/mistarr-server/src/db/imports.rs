@@ -7,7 +7,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use super::ids::{DownloadId, FileId, ImportId, TitleId};
-use super::roms::{rom_row, EntryRom, ROM_COLUMNS};
+use super::roms::{rom_row, rom_select, EntryRom};
 use super::sql::{self, code_enum, Page, Paged};
 use super::titles::TitleSource;
 use crate::error::Result;
@@ -139,7 +139,8 @@ pub fn title_entry(conn: &Connection, id: TitleId) -> Result<Option<TitleEntry>>
         return Ok(None);
     };
     let mut stmt = conn.prepare(&format!(
-        "SELECT {ROM_COLUMNS} FROM roms WHERE title_id = ?1 AND retired = 0 ORDER BY id"
+        "{} WHERE r.title_id = ?1 AND r.retired = 0 ORDER BY r.id",
+        rom_select()
     ))?;
     let roms = stmt
         .query_map([id], rom_row)?

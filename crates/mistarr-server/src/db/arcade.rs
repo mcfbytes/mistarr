@@ -258,9 +258,9 @@ pub fn upsert_title(
     };
     let (id, _) = put_title(conn, platform, version, &put)?;
     let mut stmt = conn.prepare_cached(&format!(
-        "INSERT INTO roms (title_id, name, size, md5, status, zip_dir, present, retired)
-         VALUES (?1, ?2, 0, ?3, {}, ?4, ?5, 0)
-         ON CONFLICT(title_id, name) DO UPDATE SET md5 = excluded.md5, zip_dir = excluded.zip_dir,
+        "INSERT INTO roms (title_id, own_name, name, size, md5, status, zip_dir, present, retired)
+         VALUES (?1, ?2, ?3, 0, ?4, {}, ?5, ?6, 0)
+         ON CONFLICT(title_id, own_name, name) DO UPDATE SET md5 = excluded.md5, zip_dir = excluded.zip_dir,
            present = excluded.present, retired = 0",
         RomStatus::Good.sql()
     ))?;
@@ -270,7 +270,8 @@ pub fn upsert_title(
             continue;
         }
         seen.push(z.name);
-        stmt.execute(params![id, z.name, z.md5, z.zip_dir, z.present])?;
+        let (own, stored) = sql::rom_name_parts(t.name, z.name);
+        stmt.execute(params![id, own, stored, z.md5, z.zip_dir, z.present])?;
     }
     Ok(id)
 }
@@ -385,13 +386,14 @@ pub fn titles_naming(
     zip_dir: &str,
     name: &str,
 ) -> Result<Vec<(TitleId, String)>> {
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare_cached(&format!(
         "SELECT DISTINCT t.id, COALESCE(t.mra_path, '') FROM titles t
          JOIN roms r ON r.title_id = t.id AND r.retired = 0
          WHERE t.platform_id = ?1 AND t.source = 'mra' AND t.retired = 0
-           AND lower(COALESCE(r.zip_dir, '')) = lower(?2) AND lower(r.name) = lower(?3)
+           AND lower(COALESCE(r.zip_dir, '')) = lower(?2) AND lower({}) = lower(?3)
          ORDER BY t.id",
-    )?;
+        sql::ROM_NAME
+    ))?;
     let rows = stmt.query_map(params![platform, zip_dir, name], |r| {
         Ok((r.get(0)?, r.get(1)?))
     })?;
@@ -418,11 +420,12 @@ pub fn set_zip_present(
     present: bool,
 ) -> Result<usize> {
     Ok(conn
-        .prepare_cached(
-            "UPDATE roms SET present = ?4
-             WHERE title_id = ?1 AND retired = 0 AND lower(name) = lower(?2)
-               AND lower(COALESCE(zip_dir, '')) = lower(?3)",
-        )?
+        .prepare_cached(&format!(
+            "UPDATE roms AS r SET present = ?4 FROM titles t
+             WHERE t.id = r.title_id AND r.title_id = ?1 AND r.retired = 0
+               AND lower({}) = lower(?2) AND lower(COALESCE(r.zip_dir, '')) = lower(?3)",
+            sql::ROM_NAME
+        ))?
         .execute(params![title, name, zip_dir, present])?)
 }
 
@@ -508,10 +511,12 @@ pub fn info(conn: &Connection, id: TitleId) -> Result<Option<MraInfo>> {
     else {
         return Ok(None);
     };
-    let mut stmt = conn.prepare(
-        "SELECT CASE WHEN COALESCE(zip_dir, '') = '' THEN name ELSE zip_dir || '/' || name END
-         FROM roms WHERE title_id = ?1 AND retired = 0 AND present = 0 ORDER BY id",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT CASE WHEN COALESCE(r.zip_dir, '') = '' THEN {name} ELSE r.zip_dir || '/' || {name} END
+         FROM roms r JOIN titles t ON t.id = r.title_id
+         WHERE r.title_id = ?1 AND r.retired = 0 AND r.present = 0 ORDER BY r.id",
+        name = sql::ROM_NAME
+    ))?;
     info.missing_zips = stmt
         .query_map([id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;

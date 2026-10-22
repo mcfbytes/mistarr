@@ -643,7 +643,7 @@ fn apply(c: &Connection, op: &Op, seq: &mut u32) {
         Op::Rename { title: t, base } => {
             if let Some(t) = title(t) {
                 run(
-                    "UPDATE titles SET base_name = ?2, name = ?2 || ' #' || id WHERE id = ?1",
+                    "UPDATE titles SET base_name = ?2 WHERE id = ?1",
                     &[&t, &BASES[base]],
                 );
             }

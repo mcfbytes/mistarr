@@ -98,7 +98,7 @@ fn add(
 
 fn rom(c: &Connection, title: TitleId, name: &str) -> i64 {
     c.query_row(
-        "SELECT id FROM roms WHERE title_id = ?1 AND name = ?2",
+        "SELECT id FROM rom_view WHERE title_id = ?1 AND name = ?2",
         params![title.get(), name],
         |r| r.get(0),
     )
@@ -1284,4 +1284,55 @@ fn chained_re_rooting_keeps_every_group_apart() {
     );
     assert_eq!(groups, reference_groups(&c));
     assert_eq!(recompute_nes(&mut c), (0, 0));
+}
+
+fn stored_names(c: &Connection, title: TitleId) -> Vec<(i64, String)> {
+    c.prepare("SELECT own_name, name FROM roms WHERE title_id = ?1 ORDER BY id")
+        .expect("prepare")
+        .query_map([title.get()], |r| Ok((r.get(0)?, r.get(1)?)))
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows")
+}
+
+#[test]
+fn upserted_roms_store_the_tail_after_the_title_name_and_stay_idempotent() {
+    let c = conn();
+    let v = version(&c, "1");
+    let names = [
+        "Nova (World)",
+        "Nova (World).gb",
+        "Nova (World)/disc 1.chd",
+        "Other.gb",
+        "Nova (Wor",
+        "Nova (World)Z.gb",
+    ];
+    let roms: Vec<(&str, &str)> = names.iter().map(|n| (*n, "good")).collect();
+    let id = add(&c, v, "Nova (World)", None, &roms);
+    let expected = vec![
+        (1, "Nova (World)".to_owned()),
+        (0, ".gb".to_owned()),
+        (0, "/disc 1.chd".to_owned()),
+        (1, "Other.gb".to_owned()),
+        (1, "Nova (Wor".to_owned()),
+        (0, "Z.gb".to_owned()),
+    ];
+    assert_eq!(stored_names(&c, id), expected);
+    let full: Vec<String> = c
+        .prepare("SELECT name FROM rom_view WHERE title_id = ?1 ORDER BY id")
+        .expect("prepare")
+        .query_map([id.get()], |r| r.get(0))
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows");
+    assert_eq!(full, names);
+    let again = add(&c, v, "Nova (World)", None, &roms);
+    assert_eq!(again, id);
+    assert_eq!(stored_names(&c, id), expected, "a second load adds no row");
+    let live: i64 = c
+        .query_row("SELECT COUNT(*) FROM roms WHERE retired = 0", [], |r| {
+            r.get(0)
+        })
+        .expect("count");
+    assert_eq!(live, 6);
 }

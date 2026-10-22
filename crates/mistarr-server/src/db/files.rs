@@ -921,14 +921,16 @@ pub fn unmatch_changed_rom(
     (crc32, md5, sha1): (Option<Crc32>, Option<Md5>, Option<Sha1>),
 ) -> Result<usize> {
     Ok(conn
-        .prepare_cached(
+        .prepare_cached(&format!(
             "UPDATE files SET rom_id = NULL, state = CASE WHEN sha1 IS NOT NULL OR md5 IS NOT NULL
                                                   THEN ?7 ELSE ?8 END
-             WHERE rom_id = (SELECT id FROM roms WHERE title_id = ?1 AND name = ?2
-                               AND (size IS NOT ?3 OR crc32 IS NOT ?4 OR md5 IS NOT ?5
-                                    OR sha1 IS NOT ?6))
+             WHERE rom_id = (SELECT r.id FROM roms r JOIN titles t ON t.id = r.title_id
+                             WHERE r.title_id = ?1 AND {} = ?2
+                               AND (r.size IS NOT ?3 OR r.crc32 IS NOT ?4 OR r.md5 IS NOT ?5
+                                    OR r.sha1 IS NOT ?6))
                AND NOT (header_rule IS ?9 AND sha1 IS NULL AND md5 IS NULL)",
-        )?
+            super::sql::ROM_NAME
+        ))?
         .execute(params![
             title_id,
             name,

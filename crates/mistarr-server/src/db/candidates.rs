@@ -447,10 +447,12 @@ pub fn of_files(
     to: u32,
 ) -> Result<Vec<(u32, FileCandidate)>> {
     let mut stmt = conn.prepare(&format!(
-        "SELECT c.file_index, c.rom_id, r.name, r.title_id, c.confidence
+        "SELECT c.file_index, c.rom_id, {}, r.title_id, c.confidence
          FROM torrent_candidates c JOIN roms r ON r.id = c.rom_id
+         JOIN titles t ON t.id = r.title_id
          WHERE c.source_id = ?1 AND c.file_index BETWEEN ?2 AND ?3
          ORDER BY c.file_index, {}, c.rom_id",
+        sql::ROM_NAME,
         rank("c.confidence")
     ))?;
     let rows = stmt

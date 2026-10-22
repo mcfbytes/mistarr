@@ -468,9 +468,48 @@ pub fn snapshot<T>(conn: &Connection, f: impl FnOnce(&Connection) -> Result<T>) 
     f(&tx)
 }
 
+/// A rom's full name over the aliases `r` (roms) and `t` (its title).
+pub(crate) const ROM_NAME: &str = "CASE WHEN r.own_name THEN r.name ELSE t.name || r.name END";
+
+/// Splits a rom's full name for storage: `(own_name, stored)`. The stored text is the part
+/// after `title` when the name starts with it and is longer, else the whole name.
+///
+/// ```
+/// use mistarr_server::db::sql::rom_name_parts;
+/// assert_eq!(rom_name_parts("Nova", "Nova.nes"), (false, ".nes"));
+/// assert_eq!(rom_name_parts("Nova", "Nova"), (true, "Nova"));
+/// ```
+#[must_use]
+pub fn rom_name_parts<'a>(title: &str, name: &'a str) -> (bool, &'a str) {
+    match name.strip_prefix(title) {
+        Some(tail) if !tail.is_empty() => (false, tail),
+        _ => (true, name),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rom_names_split_after_the_title_name() {
+        assert_eq!(
+            rom_name_parts("Nova (World)", "Nova (World).bin"),
+            (false, ".bin")
+        );
+        assert_eq!(
+            rom_name_parts("Nova (World)", "Nova (World)"),
+            (true, "Nova (World)")
+        );
+        assert_eq!(rom_name_parts("Nova", "Other.bin"), (true, "Other.bin"));
+        assert_eq!(rom_name_parts("Nova", "Nov"), (true, "Nov"));
+        assert_eq!(rom_name_parts("Nova", "nova.bin"), (true, "nova.bin"));
+        assert_eq!(
+            rom_name_parts("Café", "Café/dísc 1.chd"),
+            (false, "/dísc 1.chd")
+        );
+        assert_eq!(rom_name_parts("", "a.bin"), (false, "a.bin"));
+    }
 
     text_enum! {
         /// A test enum.

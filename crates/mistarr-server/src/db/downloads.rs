@@ -162,11 +162,16 @@ pub struct DownloadRow {
     pub updated_at: i64,
 }
 
-const COLUMNS: &str = "d.id, d.title_id, t.name, t.platform, d.rom_id, r.name, r.size,
+fn columns() -> String {
+    format!(
+        "d.id, d.title_id, dt.name, dt.platform, d.rom_id, {}, r.size,
     d.source_id, d.file_index, d.state, d.progress, d.staged_path, d.error, d.created_at,
-    d.updated_at";
-const FROM: &str =
-    "downloads d JOIN title_view t ON t.id = d.title_id JOIN roms r ON r.id = d.rom_id";
+    d.updated_at",
+        sql::ROM_NAME
+    )
+}
+const FROM: &str = "downloads d JOIN title_view dt ON dt.id = d.title_id
+    JOIN roms r ON r.id = d.rom_id JOIN titles t ON t.id = r.title_id";
 
 fn from_row(r: &Row<'_>) -> rusqlite::Result<DownloadRow> {
     Ok(DownloadRow {
@@ -235,7 +240,7 @@ pub fn create(conn: &Connection, d: &NewDownload) -> Result<DownloadId> {
 pub fn get(conn: &Connection, id: DownloadId) -> Result<Option<DownloadRow>> {
     Ok(conn
         .query_row(
-            &format!("SELECT {COLUMNS} FROM {FROM} WHERE d.id = ?1"),
+            &format!("SELECT {} FROM {FROM} WHERE d.id = ?1", columns()),
             [id],
             from_row,
         )
@@ -263,8 +268,9 @@ pub fn list(conn: &Connection, states: &[DownloadState], page: Page) -> Result<P
         )?;
         let items = c
             .prepare(&format!(
-                "SELECT {COLUMNS} FROM {FROM} WHERE {filter}
-                 ORDER BY d.updated_at DESC, d.id DESC LIMIT ?2 OFFSET ?3"
+                "SELECT {} FROM {FROM} WHERE {filter}
+                 ORDER BY d.updated_at DESC, d.id DESC LIMIT ?2 OFFSET ?3",
+                columns()
             ))?
             .query_map(params![list, page.limit, page.offset], from_row)?
             .collect::<rusqlite::Result<_>>()?;
@@ -287,8 +293,9 @@ pub fn find_by_file(
     Ok(conn
         .query_row(
             &format!(
-                "SELECT {COLUMNS} FROM {FROM} WHERE d.source_id = ?1 AND d.file_index = ?2
+                "SELECT {} FROM {FROM} WHERE d.source_id = ?1 AND d.file_index = ?2
                  ORDER BY d.state IN {} DESC, d.id DESC LIMIT 1",
+                columns(),
                 DownloadState::OPEN_SQL
             ),
             params![source, index],
@@ -643,8 +650,9 @@ pub fn of_source(
 ) -> Result<Vec<DownloadRow>> {
     let rows = conn
         .prepare(&format!(
-            "SELECT {COLUMNS} FROM {FROM}
-             WHERE d.source_id = ?1 AND d.state IN (SELECT value FROM json_each(?2)) ORDER BY d.id"
+            "SELECT {} FROM {FROM}
+             WHERE d.source_id = ?1 AND d.state IN (SELECT value FROM json_each(?2)) ORDER BY d.id",
+            columns()
         ))?
         .query_map(params![source, sql::json_list(states)?], from_row)?
         .collect::<rusqlite::Result<_>>()?;
