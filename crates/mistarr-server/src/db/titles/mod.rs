@@ -118,21 +118,19 @@ impl Tag {
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub(crate) fn tag_id(conn: &Connection, tag: Tag, name: &str) -> Result<i64> {
-    if let Some(id) = conn
-        .prepare_cached("SELECT id FROM tags WHERE kind = ?1 AND name = ?2")?
-        .query_row(params![tag, name], |r| r.get(0))
-        .optional()?
-    {
-        return Ok(id);
-    }
     let bit = match tag {
         Tag::Flags => super::groups::flag_bit(name),
         Tag::Regions => super::groups::region_bit(name),
         Tag::Languages => None,
     };
-    conn.prepare_cached("INSERT INTO tags (kind, name, bit) VALUES (?1, ?2, ?3)")?
-        .execute(params![tag, name, bit])?;
-    Ok(conn.last_insert_rowid())
+    conn.prepare_cached(
+        "INSERT INTO tags (kind, name, bit) VALUES (?1, ?2, ?3) ON CONFLICT (kind, name) DO NOTHING",
+    )?
+    .execute(params![tag, name, bit])?;
+    let id = conn
+        .prepare_cached("SELECT id FROM tags WHERE kind = ?1 AND name = ?2")?
+        .query_row(params![tag, name], |r| r.get(0))?;
+    Ok(id)
 }
 
 /// Title `id`'s `tag` values in order.

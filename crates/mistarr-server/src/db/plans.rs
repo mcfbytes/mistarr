@@ -797,3 +797,23 @@ fn the_preview_statement_seeks_the_match_indexes_when_sizes_repeat() {
         assert!(!line.contains("roms_size"), "{found:?}");
     }
 }
+
+/// The browse region filter finds every spelling through the NOCASE tag index, and the
+/// bios probe seeks a title's flags by primary key.
+#[test]
+fn tag_reads_seek_the_tag_indexes() {
+    let reads = hot_reads();
+    let region = plan_of(&reads, "browse", "COLLATE NOCASE");
+    assert!(
+        region
+            .iter()
+            .any(|l| l.contains("USING COVERING INDEX tags_kind_nocase (kind=? AND name=?)")),
+        "{region:?}"
+    );
+    let bios = plan_of(&reads, "browse", "f.tag_id = 4");
+    assert!(
+        bios.iter()
+            .any(|l| l.contains("SEARCH f USING PRIMARY KEY (title_id=? AND tag_id=?)")),
+        "{bios:?}"
+    );
+}
