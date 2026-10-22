@@ -260,6 +260,7 @@ CREATE TABLE tags (id INTEGER PRIMARY KEY, kind INTEGER NOT NULL CHECK (kind BET
   - `groups.rs` bit computation and `visible()`.
   - Browse region filter: `UNIQUE (kind, name)` stays exact, as flags are, and an index on `(kind, name COLLATE NOCASE)` finds every spelling of a region.
   - `detail.rs` lists, `store_lists`, and the bios checks.
+  - A spelling of a known region that differs in case is a tag of its own with the known region's bit, so the group bits stay equal.
   - Known tags take fixed ids, so `f.flag = 'bios'` becomes `tag_id = 4`.
 
 ### P8 Compact write-back (`db::ram`)

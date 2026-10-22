@@ -931,7 +931,7 @@ macro_rules! match_base {
 macro_rules! live_title {
     () => {
         "t.retired = 0
-         AND NOT EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.flag = 'bios')"
+         AND NOT EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.tag_id = 4)"
     };
 }
 

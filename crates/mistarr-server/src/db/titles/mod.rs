@@ -88,31 +88,58 @@ pub struct RomInput<'a> {
     pub header: Option<&'a str>,
 }
 
-/// A title's list stored in its own table, one row per value in DAT order.
-#[derive(Debug, Clone, Copy)]
-pub(super) enum Tag {
-    Flags,
-    Regions,
-    Languages,
+code_enum! {
+    /// `tags.kind`: which of a title's lists a tag belongs to.
+    pub enum Tag {
+        /// A flag such as `beta` or `bios`.
+        Flags = ("flag", 0),
+        /// A region name.
+        Regions = ("region", 1),
+        /// A language code.
+        Languages = ("language", 2),
+    }
 }
 
 impl Tag {
-    /// The table and its value column.
-    fn table(self) -> (&'static str, &'static str) {
+    /// The table linking titles to tags of this kind.
+    fn table(self) -> &'static str {
         match self {
-            Self::Flags => ("title_flags", "flag"),
-            Self::Regions => ("title_regions", "region"),
-            Self::Languages => ("title_languages", "language"),
+            Self::Flags => "title_flags",
+            Self::Regions => "title_regions",
+            Self::Languages => "title_languages",
         }
     }
 }
 
+/// The id of the `tag` named `name`, inserting it when it is new. A known flag or region
+/// (a region ignoring ASCII case) carries its summary bit.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+pub(crate) fn tag_id(conn: &Connection, tag: Tag, name: &str) -> Result<i64> {
+    let bit = match tag {
+        Tag::Flags => super::groups::flag_bit(name),
+        Tag::Regions => super::groups::region_bit(name),
+        Tag::Languages => None,
+    };
+    conn.prepare_cached(
+        "INSERT INTO tags (kind, name, bit) VALUES (?1, ?2, ?3) ON CONFLICT (kind, name) DO NOTHING",
+    )?
+    .execute(params![tag, name, bit])?;
+    let id = conn
+        .prepare_cached("SELECT id FROM tags WHERE kind = ?1 AND name = ?2")?
+        .query_row(params![tag, name], |r| r.get(0))?;
+    Ok(id)
+}
+
 /// Title `id`'s `tag` values in order.
 fn tags_of(conn: &Connection, id: TitleId, tag: Tag) -> Result<Vec<String>> {
-    let (table, column) = tag.table();
+    let table = tag.table();
     let rows = conn
         .prepare_cached(&format!(
-            "SELECT {column} FROM {table} WHERE title_id = ?1 ORDER BY pos"
+            "SELECT g.name FROM {table} x JOIN tags g ON g.id = x.tag_id
+             WHERE x.title_id = ?1 ORDER BY x.pos"
         ))?
         .query_map([id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -135,14 +162,14 @@ fn store_tags(conn: &Connection, id: TitleId, tag: Tag, values: &[String]) -> Re
     {
         return Ok(());
     }
-    let (table, column) = tag.table();
+    let table = tag.table();
     conn.prepare_cached(&format!("DELETE FROM {table} WHERE title_id = ?1"))?
         .execute([id])?;
     let mut insert = conn.prepare_cached(&format!(
-        "INSERT INTO {table} (title_id, pos, {column}) VALUES (?1, ?2, ?3)"
+        "INSERT INTO {table} (title_id, pos, tag_id) VALUES (?1, ?2, ?3)"
     ))?;
     for (pos, v) in wanted.iter().enumerate() {
-        insert.execute(params![id, sql::to_i64(pos), v])?;
+        insert.execute(params![id, sql::to_i64(pos), tag_id(conn, tag, v)?])?;
     }
     Ok(())
 }

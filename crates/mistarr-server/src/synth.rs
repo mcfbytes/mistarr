@@ -438,11 +438,6 @@ fn seed_console(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
     )?;
     let mut parent_of = c.prepare_cached("UPDATE titles SET parent_id = id WHERE id = ?1")?;
-    let mut tag =
-        c.prepare_cached("INSERT INTO title_regions (title_id, pos, region) VALUES (?1, 0, ?2)")?;
-    let mut language = c.prepare_cached(
-        "INSERT INTO title_languages (title_id, pos, language) VALUES (?1, ?2, ?3)",
-    )?;
     let mut rom = c.prepare_cached(
         "INSERT INTO roms (title_id, own_name, name, size, crc32, md5, sha1, status, header, zip_dir, present)
          VALUES (?1, ?10, ?2, ?3, unhex(?4), unhex(substr(?5, 9)), unhex(?5), ?6, ?7, ?8, ?9)",
@@ -528,11 +523,15 @@ fn seed_console(
                 parent = id;
                 parent_of.execute([id])?;
             }
+            let languages: Vec<String> = langs.split(',').map(str::to_owned).collect();
+            titles::store_lists(
+                c,
+                crate::db::ids::TitleId::new(id),
+                &[region.to_owned()],
+                &languages,
+                &[],
+            )?;
             titles::set_flags(c, crate::db::ids::TitleId::new(id), &flags)?;
-            tag.execute(params![id, region])?;
-            for (pos, l) in langs.split(',').enumerate() {
-                language.execute(params![id, i64::try_from(pos).unwrap_or(0), l])?;
-            }
             let rom_names: Vec<String> = match console.layout {
                 Layout::Cartridge | Layout::Headered => vec![format!("{name}.bin")],
                 Layout::Disc(max) => std::iter::once(format!("{name}.cue"))

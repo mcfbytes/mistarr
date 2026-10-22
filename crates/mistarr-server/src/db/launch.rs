@@ -47,7 +47,7 @@ pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
         .query_row(
             &format!(
                 "SELECT (SELECT p.slug FROM platforms p WHERE p.id = t.platform),
-                        EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.flag = 'bios'),
+                        EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.tag_id = 4),
                         t.source, t.mra_path,
                         (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0),
                         (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0

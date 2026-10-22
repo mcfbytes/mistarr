@@ -58,14 +58,17 @@ const REFERENCE_BROWSE_WHERE: &str = "
     AND (?4 = 'any' OR (?4 = 'yes') = (g.wanted > 0))
     AND EXISTS (
       SELECT 1 FROM titles v WHERE v.group_root = g.parent_id AND v.retired = 0
-        AND NOT EXISTS (SELECT 1 FROM (SELECT flag AS value FROM title_flags WHERE title_id = v.id) f
+        AND NOT EXISTS (SELECT 1 FROM (SELECT k.name AS value FROM title_flags x JOIN tags k ON k.id = x.tag_id
+                                  WHERE x.title_id = v.id) f
                         WHERE f.value IN (SELECT value FROM json_each(?5)))
-        AND (?6 IS NULL OR EXISTS (SELECT 1 FROM (SELECT region AS value FROM title_regions
-                                                  WHERE title_id = v.id) r
+        AND (?6 IS NULL OR EXISTS (SELECT 1 FROM (SELECT k.name AS value FROM title_regions x
+                                                  JOIN tags k ON k.id = x.tag_id
+                                                  WHERE x.title_id = v.id) r
                                    WHERE r.value = ?6 COLLATE NOCASE))
         AND NOT EXISTS (SELECT 1 FROM json_each(?7) w
-                        WHERE NOT EXISTS (SELECT 1 FROM (SELECT flag AS value FROM title_flags
-                                                         WHERE title_id = v.id) f
+                        WHERE NOT EXISTS (SELECT 1 FROM (SELECT k.name AS value FROM title_flags x
+                                                         JOIN tags k ON k.id = x.tag_id
+                                                         WHERE x.title_id = v.id) f
                                           WHERE f.value = w.value)))";
 
 const REFERENCE_MRA_ONLY: &str =
@@ -237,7 +240,7 @@ fn reference_browse(
                     g.variants, g.have_verified, g.wanted, g.has_pick,
                     NOT EXISTS (SELECT 1 FROM titles v WHERE v.group_root = g.parent_id
                         AND v.retired = 0 AND NOT EXISTS (SELECT 1 FROM title_flags f
-                            WHERE f.title_id = v.id AND f.flag = 'bios'))
+                            WHERE f.title_id = v.id AND f.tag_id = 4))
              FROM reference_groups g LEFT JOIN titles k ON k.id = g.pick_id
              WHERE {REFERENCE_BROWSE_WHERE} AND {REFERENCE_MRA_ONLY} ORDER BY {order} LIMIT ?8 OFFSET ?9"
         ))
@@ -276,7 +279,8 @@ fn reference_counts(c: &Connection, hidden: &[String]) -> HashMap<String, (u64, 
              WHERE {REFERENCE_MRA_ONLY} AND EXISTS (
                SELECT 1 FROM titles v WHERE v.group_root = g.parent_id AND v.retired = 0
                  AND NOT EXISTS (SELECT 1 FROM title_flags f
-                                 WHERE f.title_id = v.id AND f.flag IN (SELECT value FROM json_each(?1))))
+                                 WHERE f.title_id = v.id AND f.tag_id IN (SELECT k.id FROM tags k
+                                                         WHERE k.kind = 0 AND k.name IN (SELECT value FROM json_each(?1)))))
              GROUP BY g.platform"
         ))
         .expect("prepare");
@@ -993,7 +997,7 @@ fn refresh_rebuild_and_check_agree() {
 fn bits_follow_the_known_tables() {
     let c = conn();
     let flags: Vec<(String, i64)> = c
-        .prepare("SELECT name, bit FROM known_flags ORDER BY bit")
+        .prepare("SELECT name, bit FROM tags WHERE kind = 0 AND bit IS NOT NULL ORDER BY bit")
         .expect("prepare")
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
         .expect("query")
@@ -1005,7 +1009,7 @@ fn bits_follow_the_known_tables() {
         .collect();
     assert_eq!(flags, want);
     let regions: Vec<(String, i64)> = c
-        .prepare("SELECT name, bit FROM known_regions ORDER BY bit")
+        .prepare("SELECT name, bit FROM tags WHERE kind = 1 AND bit IS NOT NULL ORDER BY bit")
         .expect("prepare")
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
         .expect("query")
@@ -1166,7 +1170,7 @@ fn the_migration_builds_the_table_from_existing_rows() {
     assert_eq!(before.len(), 2);
     assert!(check(&c).expect("check").is_consistent());
     let flags: Vec<(i64, String)> = c
-        .prepare("SELECT title_id, flag FROM title_flags ORDER BY title_id")
+        .prepare("SELECT x.title_id, k.name FROM title_flags x JOIN tags k ON k.id = x.tag_id ORDER BY x.title_id")
         .expect("prepare")
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
         .expect("query")

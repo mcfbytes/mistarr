@@ -48,7 +48,8 @@ const REFERENCE_WHERE: &str = "g.platform = ?1
     AND EXISTS (
       SELECT 1 FROM titles v WHERE v.parent_id = g.parent_id AND v.retired = 0
         AND NOT EXISTS (SELECT 1 FROM title_flags f
-                        WHERE f.title_id = v.id AND f.flag IN (SELECT value FROM json_each(?2))))";
+                        WHERE f.title_id = v.id AND f.tag_id IN (SELECT k.id FROM tags k
+                                                         WHERE k.kind = 0 AND k.name IN (SELECT value FROM json_each(?2)))))";
 
 /// The median of `runs` timings of `f`, with its last result.
 fn time<T>(runs: usize, mut f: impl FnMut() -> T) -> (Duration, T) {
@@ -352,7 +353,7 @@ fn measure_dat_load_and_index_size() {
     let summary = size_of(dir.path(), "DROP TABLE title_groups");
     let lists = size_of(
         dir.path(),
-        "DROP TABLE title_flags; DROP TABLE title_regions; DROP TABLE title_languages",
+        "DROP TABLE title_flags; DROP TABLE title_regions; DROP TABLE title_languages; DROP TABLE tags",
     );
     let total = std::fs::metadata(dir.path().join("browse.db"))
         .expect("size")

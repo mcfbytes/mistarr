@@ -254,8 +254,9 @@ fn apply_in(conn: &mut Connection, m: &Migration, check_fk: bool) -> Result<()> 
 }
 
 /// The first migration after which `groups::flush` matches the schema: it reads titles by platform
-/// key and codes. Earlier files leave the dirty list for this one to flush.
-const FLUSH_FROM: u32 = 26;
+/// key and codes, and flags and regions through `tags`. Earlier files leave the dirty list for this
+/// one to flush.
+const FLUSH_FROM: u32 = 27;
 
 /// Builds the `title_groups` rows a migration's writes left dirty, once the table exists.
 fn flush_groups(conn: &Connection) -> Result<()> {
@@ -2985,7 +2986,7 @@ DELETE FROM parent WHERE id = 3;",
         conn.execute("VACUUM INTO ?1", [copy.to_string_lossy()])
             .expect("copy");
         let mut truth = Connection::open(&copy).expect("open copy");
-        assert_eq!(apply_through(&mut truth, 26).expect("migrate"), [26]);
+        assert_eq!(apply_through(&mut truth, 27).expect("migrate"), [26, 27]);
         let groups = dump(&truth, GROUPS_AFTER);
         assert_eq!(groups.len(), 8, "{groups:?}");
         assert!(groups
@@ -3010,7 +3011,7 @@ DELETE FROM parent WHERE id = 3;",
             "SELECT id, base_name, platform FROM title_search_source ORDER BY id",
         );
 
-        assert_eq!(apply_through(&mut conn, 26).expect("migrate"), [26]);
+        assert_eq!(apply_through(&mut conn, 27).expect("migrate"), [26, 27]);
 
         assert_eq!(dump(&conn, TITLES_AFTER), titles, "every title is kept");
         assert_eq!(
@@ -3071,6 +3072,215 @@ DELETE FROM parent WHERE id = 3;",
         assert!(column(&conn, "PRAGMA foreign_key_check").is_empty());
     }
 
+    /// The three lists of every title as `(title, pos, text)`, read from the version-26 tables.
+    const LISTS_BEFORE: [&str; 3] = [
+        "SELECT title_id, pos, flag FROM title_flags ORDER BY title_id, pos",
+        "SELECT title_id, pos, region FROM title_regions ORDER BY title_id, pos",
+        "SELECT title_id, pos, language FROM title_languages ORDER BY title_id, pos",
+    ];
+    /// The same lists read through `tags`.
+    const LISTS_AFTER: [&str; 3] = [
+        "SELECT x.title_id, x.pos, g.name FROM title_flags x JOIN tags g ON g.id = x.tag_id
+         ORDER BY x.title_id, x.pos",
+        "SELECT x.title_id, x.pos, g.name FROM title_regions x JOIN tags g ON g.id = x.tag_id
+         ORDER BY x.title_id, x.pos",
+        "SELECT x.title_id, x.pos, g.name FROM title_languages x JOIN tags g ON g.id = x.tag_id
+         ORDER BY x.title_id, x.pos",
+    ];
+
+    /// The group bit columns computed from the lists' texts in plain Rust, keyed by
+    /// `(parent_id, platform)`, as `[lean_flags, unflagged_regions, flag_union, region_union]`;
+    /// the bits cover every live variant of the root, on any platform.
+    fn group_bits_from_texts(conn: &Connection) -> BTreeMap<(i64, i64), [i64; 4]> {
+        use crate::db::groups::{flag_bit, region_bit, OTHER};
+        let mask = (1_i64 << 9) - 1;
+        let texts = |sql: &str| -> BTreeMap<i64, Vec<String>> {
+            let mut out: BTreeMap<i64, Vec<String>> = BTreeMap::new();
+            for r in dump(conn, sql) {
+                out.entry(r[0].parse().expect("id"))
+                    .or_default()
+                    .push(r[2].clone());
+            }
+            out
+        };
+        let flags = texts(LISTS_BEFORE[0]);
+        let regions = texts(LISTS_BEFORE[1]);
+        let bits = |list: Option<&Vec<String>>, of: fn(&str) -> Option<i64>| -> i64 {
+            list.map_or(0, |l| {
+                l.iter().fold(0, |acc, n| acc | of(n).unwrap_or(OTHER))
+            })
+        };
+        let mut roots: BTreeMap<i64, [i64; 4]> = BTreeMap::new();
+        let mut keys = Vec::new();
+        for t in dump(
+            conn,
+            "SELECT id, group_root, platform FROM titles
+             WHERE retired = 0 AND group_root IS NOT NULL ORDER BY id",
+        ) {
+            let (id, root, platform): (i64, i64, i64) = (
+                t[0].parse().expect("id"),
+                t[1].parse().expect("root"),
+                t[2].parse().expect("platform"),
+            );
+            let fb = bits(flags.get(&id), flag_bit);
+            let rb = bits(regions.get(&id), region_bit);
+            keys.push((root, platform));
+            let row = roots.entry(root).or_insert([i64::MAX, 0, 0, 0]);
+            row[0] = row[0].min(fb & mask);
+            if fb & mask == 0 {
+                row[1] |= rb;
+            }
+            row[2] |= fb;
+            row[3] |= rb;
+        }
+        keys.into_iter().map(|k| (k, roots[&k.0])).collect()
+    }
+
+    /// Unknown flags, case variants, positions out of tag order and a bios title.
+    fn seed_lists_v26(conn: &Connection) {
+        conn.execute_batch(
+            "DELETE FROM title_flags; DELETE FROM title_regions;
+             INSERT INTO title_flags (title_id, pos, flag) VALUES
+               (1, 0, 'BIOS'), (1, 1, 'zeta'), (1, 2, 'unl'),
+               (2, 0, 'beta'), (2, 1, 'Beta'), (3, 0, 'unl'), (3, 1, 'alpha'),
+               (4, 0, 'bios'), (4, 1, 'proto'), (7, 0, 'pirate'), (8, 0, 'program');
+             INSERT INTO title_regions (title_id, pos, region) VALUES
+               (1, 0, 'USA'), (1, 1, 'usa'), (1, 2, 'Atlantis'),
+               (2, 0, 'Japan'), (2, 1, 'World'), (3, 0, 'Europe'), (3, 1, 'Aaa Land'),
+               (4, 0, 'uK'), (4, 1, 'Latin America'), (5, 0, 'Latin america'),
+               (7, 0, 'Japan'), (8, 0, 'Zed');
+             INSERT INTO title_languages (title_id, pos, language) VALUES
+               (1, 0, 'fr'), (1, 1, 'en'), (2, 0, 'ja'), (2, 1, 'en'), (2, 2, 'EN'),
+               (4, 0, 'zz');",
+        )
+        .expect("lists");
+    }
+
+    /// Asserts the known tags' ids and bits, the other tags' order and the STRICT tables.
+    fn assert_tag_tables(conn: &Connection) {
+        let names = |sql: &str| column(conn, sql);
+        assert_eq!(
+            names("SELECT name FROM tags WHERE id BETWEEN 1 AND 9 ORDER BY id"),
+            crate::db::groups::KNOWN_FLAGS
+        );
+        assert_eq!(
+            names("SELECT name FROM tags WHERE id BETWEEN 10 AND 31 ORDER BY id"),
+            crate::db::groups::KNOWN_REGIONS
+        );
+        assert_eq!(
+            dump(
+                conn,
+                "SELECT id, kind, name, bit FROM tags WHERE id IN (4, 10, 31) OR id > 31
+                 ORDER BY id"
+            )
+            .iter()
+            .map(|r| r.join("|"))
+            .collect::<Vec<_>>(),
+            [
+                "4|0|bios|8",
+                "10|1|World|1",
+                "31|1|Latin America|2097152",
+                "32|0|BIOS|NULL",
+                "33|0|Beta|NULL",
+                "34|0|alpha|NULL",
+                "35|0|zeta|NULL",
+                "36|1|Aaa Land|NULL",
+                "37|1|Atlantis|NULL",
+                "38|1|Latin america|2097152",
+                "39|1|Zed|NULL",
+                "40|1|uK|1048576",
+                "41|1|usa|2",
+                "42|2|EN|NULL",
+                "43|2|en|NULL",
+                "44|2|fr|NULL",
+                "45|2|ja|NULL",
+                "46|2|zz|NULL",
+            ],
+            "known tags keep their ids and bits; the rest follow by kind and name"
+        );
+        let nocase = column(
+            conn,
+            "SELECT g.name FROM tags g WHERE g.kind = 1 AND g.name = 'UK' COLLATE NOCASE
+             ORDER BY g.name",
+        );
+        assert_eq!(nocase, ["UK", "uK"]);
+        for table in ["tags", "title_flags", "title_regions", "title_languages"] {
+            let strict: i64 = conn
+                .query_row(
+                    "SELECT strict FROM pragma_table_list WHERE schema = 'main' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .expect(table);
+            assert_eq!(strict, 1, "{table} is STRICT");
+        }
+        assert!(column(
+            conn,
+            "SELECT name FROM sqlite_master WHERE name LIKE 'known_%'"
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn tags_hold_every_list_and_every_group_bit_unchanged() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys");
+        apply_through(&mut conn, 25).expect("older migrations");
+        seed_titles_v25(&conn);
+        conn.execute_batch(
+            "INSERT INTO roms (id, title_id, name, size, present) VALUES (7, 4, 'bios.bin', 4, 1);",
+        )
+        .expect("rom");
+        assert_eq!(apply_through(&mut conn, 26).expect("migrate"), [26]);
+        seed_lists_v26(&conn);
+        let lists: Vec<_> = LISTS_BEFORE.iter().map(|q| dump(&conn, q)).collect();
+        assert_eq!(lists.iter().map(Vec::len).collect::<Vec<_>>(), [11, 12, 6]);
+        let bits = group_bits_from_texts(&conn);
+        assert!(bits.len() >= 6, "{bits:?}");
+        assert!(dump(&conn, "SELECT 1 FROM live_rom_view WHERE id = 7").is_empty());
+
+        assert_eq!(apply_through(&mut conn, 27).expect("migrate"), [27]);
+
+        for (before, after) in lists.iter().zip(LISTS_AFTER) {
+            assert_eq!(&dump(&conn, after), before, "{after}");
+        }
+        let groups: BTreeMap<(i64, i64), [i64; 4]> = dump(
+            &conn,
+            "SELECT parent_id, platform, lean_flags, unflagged_regions, flag_union, region_union
+             FROM title_groups",
+        )
+        .into_iter()
+        .map(|r| {
+            let n = |i: usize| r[i].parse::<i64>().expect("number");
+            ((n(0), n(1)), [n(2), n(3), n(4), n(5)])
+        })
+        .collect();
+        assert_eq!(groups, bits, "every group's bit columns are kept");
+        assert!(dump(&conn, "SELECT 1 FROM title_groups_dirty").is_empty());
+        assert!(crate::db::groups::check(&conn)
+            .expect("check")
+            .is_consistent());
+        assert_eq!(
+            dump(&conn, "SELECT id, bios FROM rom_view WHERE title_id = 4"),
+            vec![vec!["7".to_owned(), "1".to_owned()]],
+            "the bios probe reads tag 4"
+        );
+        assert!(dump(&conn, "SELECT 1 FROM live_rom_view WHERE id = 7").is_empty());
+        assert!(dump(&conn, "SELECT 1 FROM rom_view WHERE title_id = 1 AND bios").is_empty());
+        assert_tag_tables(&conn);
+        assert_eq!(column(&conn, "PRAGMA integrity_check"), ["ok"]);
+        assert!(column(&conn, "PRAGMA foreign_key_check").is_empty());
+        conn.execute(
+            "UPDATE title_groups SET lean_flags = 1 WHERE parent_id = 1",
+            [],
+        )
+        .expect("drift");
+        assert!(!crate::db::groups::check(&conn)
+            .expect("check")
+            .is_consistent());
+    }
+
     #[test]
     fn the_title_triggers_behave_as_before_after_the_rebuild() {
         let mut conn = Connection::open_in_memory().expect("open");
@@ -3078,7 +3288,7 @@ DELETE FROM parent WHERE id = 3;",
             .expect("keys");
         apply_through(&mut conn, 25).expect("older migrations");
         seed_titles_v25(&conn);
-        apply_through(&mut conn, 26).expect("migrate");
+        apply_through(&mut conn, 27).expect("migrate");
         let first = |conn: &Connection, sql: &str| -> Vec<String> {
             dump(conn, sql).into_iter().map(|r| r[0].clone()).collect()
         };
@@ -3141,7 +3351,7 @@ DELETE FROM parent WHERE id = 3;",
         assert_eq!(found(&conn, "Fresh"), ["11"]);
         clean(&conn);
         conn.execute(
-            "INSERT INTO title_flags (title_id, pos, flag) VALUES (1, 0, 'proto')",
+            "INSERT INTO title_flags (title_id, pos, tag_id) VALUES (1, 0, 6)",
             [],
         )
         .expect("flag");
