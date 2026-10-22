@@ -181,12 +181,21 @@ test('a modifier or middle click on a link opens elsewhere without asking', asyn
     asked = true;
     void d.dismiss();
   });
+  // The browser decides whether a tab opens; what the page owes is to leave the click alone.
+  context.on('page', (p) => void p.close());
+  await page.evaluate(() => {
+    const w = window as unknown as { prevented: boolean[] };
+    w.prevented = [];
+    const note = (e: MouseEvent) => void w.prevented.push(e.defaultPrevented);
+    window.addEventListener('click', note);
+    window.addEventListener('auxclick', note);
+  });
   const link = page.getByRole('link', { name: 'Platforms' });
-  for (const click of [{ modifiers: ['ControlOrMeta' as const] }, { button: 'middle' as const }]) {
-    const opened = context.waitForEvent('page');
-    await link.click(click);
-    await (await opened).close();
-  }
+  await link.click({ modifiers: ['ControlOrMeta'] });
+  await link.click({ button: 'middle' });
+  const prevented = await page.evaluate(() => (window as unknown as { prevented: boolean[] }).prevented);
+  expect(prevented.length).toBeGreaterThanOrEqual(2);
+  expect(prevented).not.toContain(true);
   expect(asked).toBe(false);
   await expect(page).toHaveURL(/#\/system$/);
   await expect(page.getByRole('region', { name: 'Unsaved changes' })).toBeVisible();
