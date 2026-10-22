@@ -6,6 +6,7 @@ use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
 use super::candidates;
+use super::files::FileState;
 use super::ids::{DatVersionId, DownloadId, SourceId, TitleId};
 use super::sources;
 use super::sql::{self, text_enum, Page, Paged};
@@ -558,9 +559,10 @@ pub fn want_title(
         .prepare(&format!(
             "SELECT r.id FROM roms r WHERE r.title_id = ?1 AND r.retired = 0
                AND r.present = 0
-               AND NOT EXISTS (SELECT 1 FROM files f WHERE f.rom_id = r.id AND f.state = 'verified')
+               AND NOT EXISTS (SELECT 1 FROM files f WHERE f.rom_id = r.id AND f.state = {})
                AND NOT EXISTS (SELECT 1 FROM downloads d WHERE d.rom_id = r.id AND d.state IN {})
              ORDER BY r.id",
+            FileState::Verified.sql(),
             DownloadState::OPEN_SQL
         ))?
         .query_map([title], |r| r.get(0))?
@@ -918,8 +920,9 @@ pub fn want_again(
     let open: bool = conn.query_row(
         &format!(
             "SELECT (SELECT wanted = 0 OR retired = 1 FROM titles WHERE id = ?1)
-                 OR EXISTS (SELECT 1 FROM files WHERE rom_id = ?2 AND state = 'verified')
+                 OR EXISTS (SELECT 1 FROM files WHERE rom_id = ?2 AND state = {})
                  OR EXISTS (SELECT 1 FROM downloads WHERE rom_id = ?2 AND state IN {})",
+            FileState::Verified.sql(),
             DownloadState::OPEN_SQL
         ),
         params![row.title_id, row.rom_id],

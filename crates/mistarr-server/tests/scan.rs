@@ -1557,11 +1557,28 @@ async fn rows_hashed_before_the_whole_form_are_hashed_again_after_the_upgrade() 
         mistarr_server::db::migrate::apply_through(&mut db, 19).expect("older schema");
         mistarr_server::db::platforms::seed(&mut db, &mistarr_mister::platforms::PLATFORMS)
             .expect("platforms");
-        mistarr_server::db::fixtures::dat(&pid)
-            .title("Upgraded Quest (USA)")
-            .rom(&p.name("Upgraded"), &whole, RomStatus::Good)
-            .write(&db)
-            .expect("dat");
+        // Schema 19 stores hex text and the fixtures write BLOBs.
+        db.execute_batch(&format!(
+            "INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
+                                       game_count)
+               VALUES (1, '{id}', 'Example NES', '1', 'nes.dat', 0, 1);
+             INSERT INTO titles (id, platform_id, dat_version_id, name, base_name, parent_id)
+               VALUES (1, '{id}', 1, 'Upgraded Quest (USA)', 'Upgraded Quest', 1);",
+            id = p.id
+        ))
+        .expect("dat");
+        db.execute(
+            "INSERT INTO roms (title_id, name, size, crc32, md5, sha1, status)
+             VALUES (1, ?1, ?2, ?3, ?4, ?5, 'good')",
+            rusqlite::params![
+                p.name("Upgraded"),
+                i64::try_from(whole.size).expect("size"),
+                whole.crc32.to_string(),
+                whole.md5.to_string(),
+                whole.sha1.to_string()
+            ],
+        )
+        .expect("rom");
         // The stripped form alone, as a scan stored it before the whole-file columns.
         db.execute(
             "INSERT INTO files (platform_id, rel_path, size, mtime, crc32, md5, sha1,
@@ -1572,9 +1589,9 @@ async fn rows_hashed_before_the_whole_form_are_hashed_again_after_the_upgrade() 
                 &rel,
                 size,
                 mtime,
-                content.crc32,
-                content.md5,
-                content.sha1
+                content.crc32.to_string(),
+                content.md5.to_string(),
+                content.sha1.to_string()
             ],
         )
         .expect("file");

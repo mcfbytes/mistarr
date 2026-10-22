@@ -132,6 +132,15 @@ macro_rules! code_enum {
                 }
             }
 
+            /// The code as an SQL integer literal, for statements built with `format!`.
+            #[must_use]
+            #[allow(dead_code, reason = "Only some code enums are spelled into a statement.")]
+            pub const fn sql(self) -> &'static str {
+                match self {
+                    $(Self::$variant => stringify!($code),)+
+                }
+            }
+
             /// The value whose column text is `text`.
             #[must_use]
             pub fn parse(text: &str) -> Option<Self> {
@@ -512,6 +521,7 @@ mod tests {
     fn code_enums_round_trip_and_refuse_unknown_codes() {
         assert_eq!(Level::ALL, [Level::Low, Level::High]);
         assert_eq!((Level::Low.code(), Level::High.code()), (0, 3));
+        assert_eq!((Level::Low.sql(), Level::High.sql()), ("0", "3"));
         for l in Level::ALL {
             assert_eq!(Level::parse(l.as_str()), Some(*l));
         }

@@ -34,7 +34,7 @@ FROM (
   FROM (
     SELECT t.platform_id, t.group_root AS parent_id, t.id, t.wanted, t.is_1g1r_pick,
            COUNT(DISTINCT r.id) AS roms,
-           COUNT(DISTINCT CASE WHEN f.state = 'verified'
+           COUNT(DISTINCT CASE WHEN f.state = 1
                                  OR (r.present = 1
                                      AND COALESCE(t.mra_check, '') NOT IN ('mismatch', 'missing_part'))
                                THEN r.id END) AS roms_verified
@@ -302,7 +302,7 @@ const BASES: [&str; 6] = [
     "Échelle",
 ];
 const CHECKS: [Option<&str>; 4] = [None, Some("match"), Some("mismatch"), Some("missing_part")];
-const STATES: [&str; 5] = ["verified", "unverified", "misnamed", "bad", "pending"];
+const STATES: [i64; 5] = [1, 3, 2, 4, 0];
 
 fn pick(pool: &[&str], mask: u8) -> Vec<String> {
     pool.iter()
@@ -1223,8 +1223,9 @@ fn linking_across_dats_and_retiring_one_keeps_the_table_equal_to_the_reference()
                   (20, 'nes', 3, 'Alpha Quest (World)', 'Alpha Quest', 20),
                   (21, 'nes', 3, 'Alpha Quest (Europe)', 'Alpha Quest', 20);
          INSERT INTO roms (title_id, name, size, sha1)
-           VALUES (10, 'a.nes', 4, 'aa'), (11, 'b.nes', 4, 'bb'), (12, 'c.nes', 4, 'cc'),
-                  (20, 'a.nes', 4, 'aa'), (21, 'd.nes', 4, 'dd');",
+           VALUES (10, 'a.nes', 4, unhex(printf('%040x', 170))), (11, 'b.nes', 4, unhex(printf('%040x', 187))),
+                  (12, 'c.nes', 4, unhex(printf('%040x', 204))), (20, 'a.nes', 4, unhex(printf('%040x', 170))),
+                  (21, 'd.nes', 4, unhex(printf('%040x', 221)));",
     )
     .expect("rows");
     titles::recompute::recompute_platform(&tx, &pid("nes"), &Prefs::default()).expect("recompute");

@@ -550,7 +550,7 @@ async fn an_unchanged_import_row_is_never_downgraded() {
         )],
         "the import row stays verified and the presence row gives way"
     );
-    let md5: Option<String> = app
+    let md5: Option<mistarr_core::Md5> = app
         .db
         .read_blocking(|c| Ok(c.query_row("SELECT md5 FROM files", [], |r| r.get(0))?))
         .expect("md5");

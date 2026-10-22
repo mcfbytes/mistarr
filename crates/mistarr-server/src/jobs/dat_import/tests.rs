@@ -460,7 +460,7 @@ async fn a_zipped_db_export_loads_headerless_roms_with_clones() {
         .db
         .read(|c| {
             let mut stmt = c.prepare(
-                "SELECT t.name, r.name, r.size, r.sha1,
+                "SELECT t.name, r.name, r.size, lower(hex(r.sha1)),
                         (SELECT json_group_array(language) FROM
                           (SELECT language FROM title_languages WHERE title_id = t.id ORDER BY pos)),
                         t.parent_id = p.id
@@ -1017,7 +1017,7 @@ fn an_add_on_dat_coexists_and_shares_groups_by_rom() {
     assert_eq!(
         count(
             &c,
-            "SELECT COUNT(*) FROM files WHERE rom_id IS NULL AND state = 'unverified'"
+            "SELECT COUNT(*) FROM files WHERE rom_id IS NULL AND state = 3"
         ),
         1,
         "a file only the removed DAT listed becomes unmatched"
@@ -1269,7 +1269,9 @@ fn a_disc_track_is_matched_again_under_the_all_or_nothing_rule() {
                     "SELECT f.state, t.name = 'Example Disc (USA) (Rev 1)' FROM files f
                      JOIN roms r ON r.id = f.rom_id JOIN titles t ON t.id = r.title_id",
                 )?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .query_map([], |r| {
+                    Ok((r.get::<_, FileState>(0)?.as_str().to_owned(), r.get(1)?))
+                })?
                 .collect::<rusqlite::Result<_>>()?;
             Ok(rows)
         })
@@ -1370,7 +1372,9 @@ async fn recompute_matches_unmatched_files_and_updates_have() {
             let sql =
                 "SELECT rel_path, state FROM files WHERE rom_id IS NOT NULL ORDER BY rel_path";
             Ok(c.prepare(sql)?
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .query_map([], |r| {
+                    Ok((r.get(0)?, r.get::<_, FileState>(1)?.as_str().to_owned()))
+                })?
                 .collect::<rusqlite::Result<_>>()?)
         })
         .await

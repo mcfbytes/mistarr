@@ -229,10 +229,12 @@ fn apply_in(conn: &mut Connection, m: &Migration, check_fk: bool) -> Result<()> 
         BTreeMap::new()
     };
     tx.execute_batch(m.sql).map_err(fail)?;
-    flush_groups(&tx).map_err(|e| match e {
-        Error::Db(source) => fail(source),
-        other => other,
-    })?;
+    if m.version >= FLUSH_FROM {
+        flush_groups(&tx).map_err(|e| match e {
+            Error::Db(source) => fail(source),
+            other => other,
+        })?;
+    }
     if check_fk {
         let after = foreign_key_violations(&tx).map_err(fail)?;
         if let Some(table) = added_violation(&before, &after) {
@@ -250,6 +252,9 @@ fn apply_in(conn: &mut Connection, m: &Migration, check_fk: bool) -> Result<()> 
     tx.commit().map_err(fail)?;
     Ok(())
 }
+
+/// The first migration after which `groups::flush` matches the schema: it reads file states as codes.
+const FLUSH_FROM: u32 = 24;
 
 /// Builds the `title_groups` rows a migration's writes left dirty, once the table exists.
 fn flush_groups(conn: &Connection) -> Result<()> {
@@ -280,6 +285,8 @@ pub fn current_version(conn: &Connection) -> Result<u32> {
 
 #[cfg(test)]
 mod tests {
+    use std::fmt::Write as _;
+
     use super::*;
     use crate::db::imports::ImportAction;
     use crate::db::jobs::JobState;
@@ -666,8 +673,8 @@ mod tests {
              INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
                VALUES ('p', 'd', '1', 'd.dat', 0, 1);
              INSERT INTO titles (platform_id, dat_version_id, name, base_name) VALUES ('p', 1, 't', 't');
-             INSERT INTO roms (title_id, name, size, md5, sha1) VALUES (1, 'a', 4, 'm1', 's1');
-             INSERT INTO roms (title_id, name, size, md5) VALUES (1, 'b', 4, 'm2');",
+             INSERT INTO roms (title_id, name, size, md5, sha1) VALUES (1, 'a', 4, unhex(printf('%032x', 1)), unhex(printf('%040x', 1)));
+             INSERT INTO roms (title_id, name, size, md5) VALUES (1, 'b', 4, unhex(printf('%032x', 2)));",
         )
         .expect("rows");
         let entries: i64 = conn
@@ -1519,6 +1526,653 @@ DELETE FROM parent WHERE id = 3;",
             column(&conn, "SELECT parent_name FROM child_log ORDER BY child_id"),
             ["One", "Two", "One"],
             "the trigger fires again after the rebuild"
+        );
+    }
+
+    /// The reason words of `files.reason` in code order, as the 0023 schema stored them.
+    const REASON_WORDS: [&str; 17] = [
+        "off",
+        "pending",
+        "no_layout",
+        "unreadable",
+        "not_chd",
+        "version",
+        "parent",
+        "not_cd",
+        "too_large",
+        "codec",
+        "gdrom",
+        "old_layout",
+        "cooked",
+        "pregap",
+        "corrupt",
+        "checksum",
+        "no_checksum",
+    ];
+
+    /// `n` as `digits` hex digits.
+    fn digits(n: u64, digits: usize) -> String {
+        format!("{n:0digits$x}")
+    }
+
+    /// Platforms, DATs, titles and roms of every shape the 0023 schema allows, plus
+    /// files, CHD cache rows and failures, with hashes as the text it stored.
+    fn seed_hashes(conn: &Connection) {
+        seed_catalogue(conn);
+        seed_roms(conn);
+        seed_files(conn);
+        seed_chd(conn);
+    }
+
+    /// Platforms, DAT versions and titles for the rows below.
+    fn seed_catalogue(conn: &Connection) {
+        conn.execute_batch(
+            "INSERT INTO platforms (id, name, core_dir, kind, enabled) VALUES
+               ('nes', 'NES', 'NES', 'cartridge', 1), ('psx', 'PSX', 'PSX', 'disc', 1),
+               ('arcade', 'Arcade', 'arcade', 'arcade', 1);
+             INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
+                                       game_count, source)
+               VALUES (1, 'nes', 'Example NES', '1', 'n.dat', 0, 2, 'dat'),
+                      (2, 'psx', 'Example Discs', '1', 'd.dat', 0, 1, 'dat'),
+                      (3, 'arcade', '_Arcade', '1', '_Arcade', 0, 1, 'mra');
+             INSERT INTO titles (id, platform_id, dat_version_id, name, base_name, parent_id, source)
+               VALUES (1, 'nes', 1, 'Example Quest (USA)', 'Example Quest', 1, 'dat'),
+                      (2, 'nes', 1, 'Nova (World)', 'Nova', 2, 'dat'),
+                      (3, 'psx', 2, 'Disc Sample (USA)', 'Disc Sample', 3, 'dat'),
+                      (4, 'arcade', 3, 'Sample Cabinet', 'Sample Cabinet', 4, 'mra');",
+        )
+        .expect("catalogue");
+    }
+
+    /// A rom of each shape: no hashes, partial hashes, mixed case, MRA zips.
+    fn seed_roms(conn: &Connection) {
+        let (crc, md5, sha1) = (
+            digits(0x0a0b_0c0d, 8),
+            digits(0xfeed, 32),
+            digits(0xbeef, 40),
+        );
+        let (crc_up, md5_up) = (crc.to_uppercase(), digits(0xabcd, 32).to_uppercase());
+        let (c7, s9) = (digits(7, 8), digits(9, 40));
+        let (c1, m2, s3) = (digits(1, 8), digits(2, 32), digits(3, 40));
+        conn.execute_batch(&format!(
+            "INSERT INTO roms (id, title_id, name, size, crc32, md5, sha1, status, retired,
+                               match_name, match_base, zip_dir, present) VALUES
+             (1, 1, 'Example Quest (USA).nes', 16, '{crc_up}', '{md5}', '{sha1}', 'good', 0,
+              'example quest (usa).nes', 'example quest', NULL, 0),
+             (2, 1, 'unkeyed.nes', 0, NULL, NULL, NULL, 'nodump', 0, NULL, NULL, NULL, 0),
+             (3, 2, 'Nova (World).nes', 32, '{c7}', NULL, NULL, 'baddump', 1,
+              'nova (world).nes', 'nova', NULL, 0),
+             (4, 2, 'nova alt.nes', 48, NULL, NULL, '{s9}', 'verified', 0,
+              'nova alt.nes', NULL, NULL, 0),
+             (5, 3, 'Disc Sample (USA).cue', 100, NULL, NULL, NULL, 'good', 0, NULL, NULL, NULL, 0),
+             (6, 3, 'Disc Sample (USA) (Track 1).bin', 2352, '{c1}', '{m2}', '{s3}', 'verified', 0,
+              NULL, NULL, NULL, 0),
+             (7, 4, 'samplecab.zip', 0, NULL, '{md5_up}', NULL, 'good', 0, NULL, NULL, 'mame', 1),
+             (8, 4, 'samplecab2.zip', 0, NULL, NULL, NULL, 'nodump', 0, NULL, NULL, 'mame', 0);"
+        ))
+        .expect("roms");
+    }
+
+    /// A file in every state under every header rule, with and without hashes.
+    fn seed_files(conn: &Connection) {
+        let rules = [
+            Some("none"),
+            Some("ines"),
+            Some("smc"),
+            Some("a78"),
+            Some("lnx"),
+            Some("n64"),
+            Some("chd"),
+            None,
+        ];
+        let states = [
+            "pending",
+            "verified",
+            "misnamed",
+            "unverified",
+            "bad",
+            "unidentified",
+        ];
+        for (i, rule) in rules.iter().enumerate() {
+            let state = states[i % 5];
+            conn.execute(
+                "INSERT INTO files (platform_id, rel_path, size, mtime, crc32, md5, sha1, header_rule,
+                                    rom_id, state, scanned_at, crc32_whole, md5_whole, sha1_whole)
+                 VALUES ('nes', ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?3, ?10, ?11, ?12)",
+                params![
+                    format!("NES/f{i}.nes"),
+                    i64::try_from(100 + i).expect("size"),
+                    i64::try_from(i).expect("time"),
+                    (i % 3 != 2).then(|| digits(i as u64 + 1, 8).to_uppercase()),
+                    (i % 3 == 0).then(|| digits(i as u64 + 1, 32)),
+                    (i % 3 == 0).then(|| digits(i as u64 + 1, 40)),
+                    rule,
+                    (i % 2 == 0).then_some(1),
+                    state,
+                    (i % 4 == 1).then(|| digits(i as u64 + 50, 8)),
+                    (i % 4 == 1).then(|| digits(i as u64 + 50, 32)),
+                    (i % 4 == 1).then(|| digits(i as u64 + 50, 40)),
+                ],
+            )
+            .expect("file");
+        }
+        for state in states {
+            conn.execute(
+                "INSERT INTO files (platform_id, rel_path, size, mtime, state, scanned_at)
+                 VALUES ('psx', ?1, 1, 1, ?2, 1)",
+                params![format!("PSX/{state}.bin"), state],
+            )
+            .expect("file");
+        }
+    }
+
+    /// The CHD images of the 0023 schema: reasons, track hashes, whole hashes and failures.
+    fn seed_chd(conn: &Connection) {
+        for (i, reason) in REASON_WORDS.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO files (platform_id, rel_path, size, mtime, header_rule, state, scanned_at, reason)
+                 VALUES ('psx', ?1, 1, 1, 'chd', 'unidentified', 1, ?2)",
+                params![format!("PSX/r{i:02}.chd"), reason],
+            )
+            .expect("file");
+            conn.execute(
+                "INSERT INTO chd_failures (chd_sha1, chd_size, mtime, reason, decoder, failed_at)
+                 VALUES (?1, ?2, 5, ?3, 1, ?4)",
+                params![
+                    digits(0x1000 + i as u64, 40),
+                    i64::try_from(i).expect("size"),
+                    reason,
+                    i64::try_from(i * 7).expect("time")
+                ],
+            )
+            .expect("failure");
+        }
+        for i in 1..=3_u64 {
+            conn.execute(
+                "INSERT INTO chd_tracks (chd_sha1, chd_size, track, size, crc32, md5, sha1)
+                 VALUES (?1, 10, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    digits(0x2000, 40),
+                    i64::try_from(i).expect("track"),
+                    2352 * i64::try_from(i).expect("n"),
+                    digits(i, 8),
+                    digits(i + 10, 32),
+                    digits(i + 20, 40)
+                ],
+            )
+            .expect("track");
+        }
+        conn.execute(
+            "INSERT INTO chd_tracks (chd_sha1, chd_size, track, size, crc32, md5, sha1)
+             VALUES (?1, 11, 1, 2352, ?2, ?3, ?4)",
+            params![
+                digits(0x2001, 40),
+                digits(5, 8),
+                digits(6, 32),
+                digits(7, 40)
+            ],
+        )
+        .expect("track");
+        for (i, mtime) in [3_i64, 4].into_iter().enumerate() {
+            conn.execute(
+                "INSERT INTO chd_whole (chd_sha1, chd_size, mtime, crc32, md5, sha1)
+                 VALUES (?1, 10, ?2, ?3, ?4, ?5)",
+                params![
+                    digits(0x3000, 40),
+                    mtime,
+                    digits(i as u64 + 1, 8),
+                    digits(i as u64 + 2, 32),
+                    digits(i as u64 + 3, 40)
+                ],
+            )
+            .expect("whole");
+        }
+    }
+
+    /// Every row of `sql`, each column as text; a BLOB as lowercase hex and NULL as `NULL`.
+    fn dump(conn: &Connection, sql: &str) -> Vec<Vec<String>> {
+        use rusqlite::types::ValueRef;
+        let mut stmt = conn.prepare(sql).expect("prepare");
+        let n = stmt.column_count();
+        stmt.query_map([], |r| {
+            (0..n)
+                .map(|i| {
+                    Ok(match r.get_ref(i)? {
+                        ValueRef::Null => "NULL".to_owned(),
+                        ValueRef::Integer(v) => v.to_string(),
+                        ValueRef::Real(v) => v.to_string(),
+                        ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+                        ValueRef::Blob(b) => b.iter().fold(String::new(), |mut hex, x| {
+                            let _ = write!(hex, "{x:02x}");
+                            hex
+                        }),
+                    })
+                })
+                .collect()
+        })
+        .expect("query")
+        .collect::<rusqlite::Result<_>>()
+        .expect("rows")
+    }
+
+    /// `column` of every row of `dump` rewritten from its code to its word by `word`.
+    fn decode(rows: &mut [Vec<String>], column: usize, word: impl Fn(i64) -> Option<&'static str>) {
+        for row in rows {
+            if row[column] != "NULL" {
+                let code = row[column].parse().expect("code");
+                row[column] = word(code).expect("a code in the table").to_owned();
+            }
+        }
+    }
+
+    /// The rows of the tables the migration rebuilds, read as text before it runs.
+    struct HashRows {
+        roms: Vec<Vec<String>>,
+        files: Vec<Vec<String>>,
+        tracks: Vec<Vec<String>>,
+        whole: Vec<Vec<String>>,
+        failures: Vec<Vec<String>>,
+    }
+
+    /// The 0023 rows of the rebuilt tables with hashes as lowercase text and words as words.
+    fn hash_rows_before(conn: &Connection) -> HashRows {
+        HashRows {
+            roms: dump(
+                conn,
+                "SELECT id, title_id, name, size, lower(crc32), lower(md5), lower(sha1), status,
+                        retired, match_name, match_base, header, zip_dir, present
+                 FROM roms ORDER BY id",
+            ),
+            files: dump(
+                conn,
+                "SELECT id, platform_id, rel_path, size, mtime, lower(crc32), lower(md5),
+                        lower(sha1), header_rule, rom_id, state, scanned_at, reason,
+                        lower(crc32_whole), lower(md5_whole), lower(sha1_whole)
+                 FROM files ORDER BY id",
+            ),
+            tracks: dump(
+                conn,
+                "SELECT lower(chd_sha1), chd_size, track, size, lower(crc32), lower(md5), lower(sha1)
+                 FROM chd_tracks ORDER BY lower(chd_sha1), chd_size, track",
+            ),
+            whole: dump(
+                conn,
+                "SELECT lower(chd_sha1), chd_size, mtime, lower(crc32), lower(md5), lower(sha1)
+                 FROM chd_whole ORDER BY lower(chd_sha1), chd_size, mtime",
+            ),
+            failures: dump(
+                conn,
+                "SELECT lower(chd_sha1), chd_size, mtime, reason, decoder, failed_at
+                 FROM chd_failures ORDER BY lower(chd_sha1), chd_size, mtime",
+            ),
+        }
+    }
+
+    /// Holds every rom equal to its 0023 row through `hex()` and the status word.
+    fn check_roms(conn: &Connection, before: &[Vec<String>]) {
+        use crate::db::titles::RomStatus;
+        let mut roms = dump(
+            conn,
+            "SELECT r.id, r.title_id, r.name, r.size, v.crc32_hex, v.md5_hex, v.sha1_hex, r.status,
+                    r.retired, r.match_name, r.match_base, r.header, r.zip_dir, r.present
+             FROM roms r JOIN rom_view v ON v.id = r.id ORDER BY r.id",
+        );
+        let status = |c| RomStatus::ALL.iter().find(|s| s.code() == c);
+        decode(&mut roms, 7, |c| status(c).map(|s| s.as_str()));
+        assert_eq!(roms, before, "every rom keeps its hashes, status and flags");
+        for row in dump(conn, "SELECT status, status_text FROM rom_view ORDER BY id") {
+            let word = status(row[0].parse().expect("code")).map(|s| s.as_str());
+            assert_eq!(word, Some(row[1].as_str()), "the view decodes the code");
+        }
+    }
+
+    /// Holds every file equal to its 0023 row, with rule, state and reason as words.
+    fn check_files(conn: &Connection, before: &[Vec<String>]) {
+        use crate::db::chd::Unidentified;
+        use crate::db::files::{FileState, StoredRule};
+        let rule = |c| {
+            StoredRule::ALL
+                .iter()
+                .find(|r| r.code() == c)
+                .map(|r| r.as_str())
+        };
+        let state = |c| {
+            FileState::ALL
+                .iter()
+                .find(|s| s.code() == c)
+                .map(|s| s.as_str())
+        };
+        let reason = |c| Unidentified::from_stored(c).map(Unidentified::as_str);
+        let mut files = dump(
+            conn,
+            "SELECT f.id, f.platform_id, f.rel_path, f.size, f.mtime, v.crc32_hex, v.md5_hex,
+                    v.sha1_hex, f.header_rule, f.rom_id, f.state, f.scanned_at, f.reason,
+                    NULLIF(lower(hex(f.crc32_whole)), ''), NULLIF(lower(hex(f.md5_whole)), ''),
+                    NULLIF(lower(hex(f.sha1_whole)), '')
+             FROM files f JOIN file_view v ON v.id = f.id ORDER BY f.id",
+        );
+        decode(&mut files, 8, rule);
+        decode(&mut files, 10, state);
+        decode(&mut files, 12, reason);
+        assert_eq!(
+            files, before,
+            "every file keeps its hashes, rule, state and reason"
+        );
+        let view = dump(
+            conn,
+            "SELECT header_rule, header_rule_text, state, state_text, reason, reason_text
+             FROM file_view ORDER BY id",
+        );
+        let text = |code: &str, words: &dyn Fn(i64) -> Option<&'static str>| {
+            code.parse()
+                .ok()
+                .and_then(words)
+                .unwrap_or("NULL")
+                .to_owned()
+        };
+        for row in view {
+            assert_eq!(text(&row[0], &rule), row[1], "header rule text");
+            assert_eq!(text(&row[2], &state), row[3], "state text");
+            assert_eq!(text(&row[4], &reason), row[5], "reason text");
+        }
+        for (i, word) in REASON_WORDS.iter().enumerate() {
+            let code = Unidentified::parse(word).expect("a reason").code();
+            assert_eq!(code, i64::try_from(i).expect("code"), "{word}");
+        }
+    }
+
+    /// Holds the CHD failures, tracks and whole hashes equal to their 0023 rows.
+    fn check_chd(conn: &Connection, before: &HashRows) {
+        use crate::db::chd::Unidentified;
+        let mut failures = dump(
+            conn,
+            "SELECT lower(hex(chd_sha1)), chd_size, mtime, reason, decoder, failed_at
+             FROM chd_failures ORDER BY chd_sha1, chd_size, mtime",
+        );
+        decode(&mut failures, 3, |c| {
+            Unidentified::from_stored(c).map(Unidentified::as_str)
+        });
+        assert_eq!(failures, before.failures, "every failure keeps its reason");
+        let tracks = dump(
+            conn,
+            "SELECT lower(hex(chd_sha1)), chd_size, track, size, lower(hex(crc32)),
+                    lower(hex(md5)), lower(hex(sha1))
+             FROM chd_tracks ORDER BY chd_sha1, chd_size, track",
+        );
+        assert_eq!(tracks, before.tracks);
+        let whole = dump(
+            conn,
+            "SELECT lower(hex(chd_sha1)), chd_size, mtime, lower(hex(crc32)),
+                    lower(hex(md5)), lower(hex(sha1))
+             FROM chd_whole ORDER BY chd_sha1, chd_size, mtime",
+        );
+        assert_eq!(whole, before.whole);
+    }
+
+    /// Holds the hash columns to BLOBs of their width, the tables STRICT, and the
+    /// indexes, triggers and views back.
+    fn check_forms(conn: &Connection) {
+        let widths = [("crc32", 4), ("md5", 16), ("sha1", 20)];
+        let whole = [("crc32_whole", 4), ("md5_whole", 16), ("sha1_whole", 20)];
+        for (table, columns) in [
+            ("roms", widths),
+            ("files", widths),
+            ("files", whole),
+            ("chd_tracks", widths),
+            ("chd_whole", widths),
+        ] {
+            for (column, width) in columns {
+                let wrong: i64 = conn
+                    .query_row(
+                        &format!(
+                            "SELECT COUNT(*) FROM {table} WHERE NOT (typeof({column}) = 'null'
+                               OR (typeof({column}) = 'blob' AND length({column}) = {width}))"
+                        ),
+                        [],
+                        |r| r.get(0),
+                    )
+                    .expect("types");
+                assert_eq!(wrong, 0, "{table}.{column}");
+            }
+        }
+        let nulls: i64 = conn
+            .query_row("SELECT COUNT(*) FROM roms WHERE sha1 IS NULL", [], |r| {
+                r.get(0)
+            })
+            .expect("nulls");
+        assert_eq!(nulls, 5, "a rom with no hash keeps NULL, not an empty blob");
+        for table in ["roms", "files", "chd_tracks", "chd_whole", "chd_failures"] {
+            let sql: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .expect(table);
+            assert!(sql.contains("STRICT"), "{table} is not STRICT");
+            assert_eq!(
+                sql.contains("WITHOUT ROWID"),
+                table.starts_with("chd_"),
+                "{table}"
+            );
+        }
+        let indexes = names(conn, "index");
+        for index in [
+            "roms_sha1",
+            "roms_md5",
+            "roms_crc",
+            "roms_match_name",
+            "roms_match_base",
+            "roms_id_title",
+            "roms_size",
+            "roms_chd_size",
+            "roms_track_size",
+            "files_rom",
+            "files_state",
+            "files_rel_lower",
+            "chd_tracks_sha1",
+        ] {
+            assert!(indexes.iter().any(|n| n == index), "missing index {index}");
+        }
+        let triggers = names(conn, "trigger");
+        for trigger in [
+            "roms_insert_groups",
+            "roms_update_groups",
+            "roms_delete_groups",
+            "files_insert_groups",
+            "files_update_groups",
+            "files_delete_groups",
+        ] {
+            assert!(
+                triggers.iter().any(|n| n == trigger),
+                "missing trigger {trigger}"
+            );
+        }
+        assert_eq!(
+            names(conn, "view"),
+            [
+                "file_view",
+                "live_rom_view",
+                "rom_view",
+                "title_search_source",
+                "title_view",
+                "torrent_file_view"
+            ]
+        );
+    }
+
+    #[test]
+    fn hashes_become_blobs_and_codes_with_every_row_kept() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        // As the board opens: keys on, so the rebuild runs the way it will there.
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys");
+        apply_through(&mut conn, 23).expect("older migrations");
+        seed_hashes(&conn);
+        let before = hash_rows_before(&conn);
+        assert_eq!((before.roms.len(), before.files.len()), (8, 8 + 6 + 17));
+
+        assert_eq!(
+            apply_through(&mut conn, 24).expect("the hash migration"),
+            [24]
+        );
+
+        check_roms(&conn, &before.roms);
+        check_files(&conn, &before.files);
+        check_chd(&conn, &before);
+        check_forms(&conn);
+        assert_eq!(column(&conn, "PRAGMA integrity_check"), ["ok"]);
+        assert!(column(&conn, "PRAGMA foreign_key_check").is_empty());
+        assert!(foreign_keys(&conn), "the pragma is back on");
+    }
+
+    #[test]
+    fn the_group_triggers_follow_verified_files_after_the_rebuild() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        apply(&mut conn).expect("apply");
+        conn.execute_batch(
+            "INSERT INTO platforms (id, name, core_dir, kind, enabled)
+               VALUES ('nes', 'NES', 'NES', 'cartridge', 1);
+             INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
+                                       game_count)
+               VALUES (1, 'nes', 'Example NES', '1', 'n.dat', 0, 1);
+             INSERT INTO titles (id, platform_id, dat_version_id, name, base_name, parent_id)
+               VALUES (1, 'nes', 1, 'Example Quest (USA)', 'Example Quest', 1);
+             INSERT INTO roms (id, title_id, name, size) VALUES (1, 1, 'a.nes', 4);
+             DELETE FROM title_groups_dirty;",
+        )
+        .expect("rows");
+        let dirty = |conn: &Connection| -> i64 {
+            conn.query_row("SELECT COUNT(*) FROM title_groups_dirty", [], |r| r.get(0))
+                .expect("dirty")
+        };
+        conn.execute("INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at) VALUES ('nes', 'a.nes', 4, 0, 1, 3, 0)", [])
+            .expect("unverified file");
+        assert_eq!(dirty(&conn), 0, "an unverified file changes no group");
+        conn.execute("UPDATE files SET state = 1", [])
+            .expect("verify");
+        assert_eq!(dirty(&conn), 1, "a verified file marks its group");
+        conn.execute("DELETE FROM title_groups_dirty", [])
+            .expect("clear");
+        conn.execute("DELETE FROM files", []).expect("delete");
+        assert_eq!(dirty(&conn), 1, "removing it marks the group again");
+    }
+
+    /// Applies 0023, seeds one rom, runs `extra` against the 0023 schema and applies 0024.
+    fn hash_migration_with(extra: &str) -> (Connection, Result<Vec<u32>>) {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys");
+        apply_through(&mut conn, 23).expect("older migrations");
+        conn.execute_batch(
+            "INSERT INTO platforms (id, name, core_dir, kind, enabled)
+               VALUES ('psx', 'PSX', 'PSX', 'disc', 1);
+             INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
+                                       game_count)
+               VALUES (1, 'psx', 'Example Discs', '1', 'd.dat', 0, 1);
+             INSERT INTO titles (id, platform_id, dat_version_id, name, base_name)
+               VALUES (1, 'psx', 1, 'Disc Sample (USA)', 'Disc Sample');
+             INSERT INTO roms (id, title_id, name, size, crc32, md5, sha1, status)
+               VALUES (1, 1, 'Disc.cue', 4, 'aabbccdd', '00000000000000000000000000000001',
+                       '0000000000000000000000000000000000000001', 'good');
+             INSERT INTO files (id, platform_id, rel_path, size, mtime, state, scanned_at)
+               VALUES (1, 'psx', 'PSX/a.bin', 4, 0, 'pending', 0);",
+        )
+        .expect("rows");
+        conn.execute_batch(extra).expect("bad row");
+        let outcome = apply_through(&mut conn, 24);
+        (conn, outcome)
+    }
+
+    #[test]
+    fn text_a_blob_or_a_code_cannot_hold_fails_the_migration_and_rolls_it_back() {
+        let bad = [
+            "UPDATE roms SET sha1 = 'zz00000000000000000000000000000000000001'",
+            "UPDATE roms SET sha1 = '00000001'",
+            "UPDATE roms SET md5 = 'zz'",
+            "UPDATE roms SET crc32 = 'aabbccddee'",
+            "UPDATE roms SET status = 'great'",
+            "UPDATE roms SET retired = 2",
+            "UPDATE roms SET present = -1",
+            "UPDATE roms SET size = -1",
+            "UPDATE files SET md5 = 'abcd'",
+            "UPDATE files SET sha1_whole = 'not hex at all, but forty characters long'",
+            "UPDATE files SET state = 'lost'",
+            "UPDATE files SET header_rule = 'weird'",
+            "UPDATE files SET state = 'unidentified', reason = 'odd'",
+            "UPDATE files SET state = 'verified', reason = 'off'",
+            "INSERT INTO chd_tracks VALUES ('abcd', 1, 1, 1, 'aabbccdd',
+               '00000000000000000000000000000001', '0000000000000000000000000000000000000001')",
+            "INSERT INTO chd_tracks VALUES ('0000000000000000000000000000000000000001', 1, 0, 1,
+               'aabbccdd', '00000000000000000000000000000001',
+               '0000000000000000000000000000000000000001')",
+            "INSERT INTO chd_whole VALUES ('0000000000000000000000000000000000000001', 1, 1,
+               'aabbccdd', 'xyz', '0000000000000000000000000000000000000001')",
+            "INSERT INTO chd_failures VALUES ('0000000000000000000000000000000000000001', 1, 1,
+               'strange', 1, 1)",
+        ];
+        for extra in bad {
+            let (conn, outcome) = hash_migration_with(extra);
+            match outcome {
+                Err(Error::Migration { version, .. }) => assert_eq!(version, 24, "{extra}"),
+                other => panic!("expected a migration error for {extra}, got {other:?}"),
+            }
+            assert_eq!(current_version(&conn).expect("version"), 23, "{extra}");
+            assert_eq!(
+                column(
+                    &conn,
+                    "SELECT name FROM sqlite_master WHERE name = 'roms_new'"
+                ),
+                Vec::<String>::new(),
+                "{extra}: the half-built table is gone"
+            );
+            let strict: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE name = 'roms' AND sql LIKE '%STRICT%'",
+                    [],
+                    |r| r.get(0),
+                )
+                .expect("schema");
+            assert_eq!(strict, 0, "{extra}: roms is still the 0023 table");
+            assert_eq!(
+                column(&conn, "SELECT CAST(COUNT(*) AS TEXT) FROM files"),
+                ["1"],
+                "{extra}"
+            );
+            assert!(foreign_keys(&conn), "{extra}: keys are on again");
+        }
+        let (conn, outcome) = hash_migration_with(
+            "UPDATE roms SET crc32 = 'AABBCCDD';
+             UPDATE files SET state = 'unidentified', reason = 'off', header_rule = 'chd';",
+        );
+        assert_eq!(
+            outcome.expect("migrate"),
+            [24],
+            "upper case hex and valid codes pass"
+        );
+        assert_eq!(
+            column(&conn, "SELECT lower(hex(crc32)) FROM roms"),
+            ["aabbccdd"]
+        );
+        let (conn, outcome) = hash_migration_with(
+            "UPDATE roms SET md5 = '', sha1 = '';
+             UPDATE files SET md5 = '', crc32_whole = '';",
+        );
+        assert_eq!(outcome.expect("migrate"), [24], "empty hash text passes");
+        assert_eq!(
+            column(
+                &conn,
+                "SELECT CAST(md5 IS NULL AS TEXT) || CAST(sha1 IS NULL AS TEXT) FROM roms"
+            ),
+            ["11"],
+            "an empty hash text becomes NULL"
+        );
+        assert_eq!(
+            column(
+                &conn,
+                "SELECT CAST(md5 IS NULL AS TEXT) || CAST(crc32_whole IS NULL AS TEXT) FROM files"
+            ),
+            ["11"]
         );
     }
 

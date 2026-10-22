@@ -295,8 +295,8 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
                      FROM titles t JOIN roms r ON r.title_id = t.id AND r.retired = 0
                      LEFT JOIN files f ON f.id = (
                        SELECT x.id FROM files x WHERE x.rom_id = r.id
-                       ORDER BY CASE x.state WHEN 'verified' THEN 0 WHEN 'misnamed' THEN 1
-                                             WHEN 'bad' THEN 2 ELSE 3 END, x.id
+                       ORDER BY CASE x.state WHEN 1 THEN 0 WHEN 2 THEN 1
+                                             WHEN 4 THEN 2 ELSE 3 END, x.id
                        LIMIT 1)
                      WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
                      ORDER BY r.title_id, r.name"
@@ -363,12 +363,12 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
             }),
             vec![
                 Out::Sql(
-                    "SELECT COUNT(*) FROM files WHERE state = 'unidentified' AND platform_id = ?1"
+                    "SELECT COUNT(*) FROM files WHERE state = 5 AND platform_id = ?1"
                         .into(),
                 ),
                 Out::Sql(
-                    "SELECT rel_path, size, COALESCE(reason, 'corrupt') FROM files
-                     WHERE state = 'unidentified' AND platform_id = ?1
+                    "SELECT rel_path, size, COALESCE(reason, 14) FROM files
+                     WHERE state = 5 AND platform_id = ?1
                      ORDER BY rel_path LIMIT ?2 OFFSET ?3"
                         .into(),
                 ),
@@ -384,7 +384,7 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
                 Out::Sql(
                     "SELECT f.id, f.platform_id, f.rel_path, r.id, r.name, t.name
                      FROM files f JOIN roms r ON r.id = f.rom_id JOIN titles t ON t.id = r.title_id
-                     WHERE f.state = 'misnamed' ORDER BY f.id"
+                     WHERE f.state = 2 ORDER BY f.id"
                         .into(),
                 ),
             ],
@@ -395,11 +395,11 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
             vec![
                 Out::Sql(
                     "SELECT platform_id, COUNT(*) FROM files
-                     WHERE state = 'unverified' AND platform_id <> 'arcade' GROUP BY platform_id"
+                     WHERE state = 3 AND platform_id <> 'arcade' GROUP BY platform_id"
                         .into(),
                 ),
                 Out::Sql(
-                    "SELECT platform_id, COUNT(*) FROM files WHERE state = 'unidentified' GROUP BY platform_id"
+                    "SELECT platform_id, COUNT(*) FROM files WHERE state = 5 GROUP BY platform_id"
                         .into(),
                 ),
             ],

@@ -1109,12 +1109,11 @@ keyed, 6 844 times in place and 62 in RAM
 load on a tenth of the catalogue to one write per MiB plus 16.
 
 A 50 MiB Logiqx DAT of about 198 000 games with every hash, loaded into an
-empty database, peaks at 257 MiB in RAM against a need of 332 MiB
+empty database, peaks at 249 MiB in RAM against a need of 332 MiB
 (`tests/memory.rs`, which samples the files in the working directory and in
 SQLite's temporary directory, and those the server holds open there,
-deleted ones included): the copy reaches 145 MiB, the file it becomes, and
-the stage's temporary files 121 MiB. That is 5.1 bytes per byte of DAT for
-the tersest DATs, hence the factor of six; a verbose DB export takes about
+deleted ones included); the database it becomes is 166 MiB. That is 5.0 bytes
+per byte of DAT for the tersest DATs, hence the factor of six; a verbose DB export takes about
 one. `MemAvailable` is read again just before the stage is applied, the
 step in which both grow at once. A WAL in place of the rollback journal
 takes the copy alone to 253 MiB on the same load.

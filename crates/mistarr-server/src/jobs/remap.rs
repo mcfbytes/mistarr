@@ -566,7 +566,7 @@ mod tests {
                 let title = c.last_insert_rowid();
                 c.execute(
                     "INSERT INTO roms (title_id, name, size, status)
-                     VALUES (?1, 'Nova Quest (World).nes', 16, 'good')",
+                     VALUES (?1, 'Nova Quest (World).nes', 16, 0)",
                     [title],
                 )?;
                 let b = c.last_insert_rowid();

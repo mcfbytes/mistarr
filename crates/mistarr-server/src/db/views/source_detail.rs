@@ -730,7 +730,7 @@ mod tests {
                      'Third Try', 'Third Try');
              INSERT INTO roms (title_id, name, size, status)
              VALUES ((SELECT id FROM titles WHERE name = 'Third Try'),
-                     'Third Try (USA).nes', 32, 'good');",
+                     'Third Try (USA).nes', 32, 0);",
         )
         .expect("second dat");
         let second: RomId = c

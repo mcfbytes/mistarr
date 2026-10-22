@@ -7,6 +7,7 @@ use mistarr_core::{Crc32, Hashes, Md5, PlatformId, RomId, Sha1};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
+use super::files::FileState;
 use super::ids::{FileId, TitleId};
 use super::sql;
 use super::titles::RomStatus;
@@ -449,8 +450,8 @@ pub fn live_zip_roms(
 pub fn verified_file(conn: &Connection, rom: RomId) -> Result<Option<FileId>> {
     Ok(conn
         .query_row(
-            "SELECT id FROM files WHERE rom_id = ?1 AND state = 'verified' ORDER BY id LIMIT 1",
-            [rom],
+            "SELECT id FROM files WHERE rom_id = ?1 AND state = ?2 ORDER BY id LIMIT 1",
+            params![rom, FileState::Verified],
             |r| r.get(0),
         )
         .optional()?)
@@ -497,7 +498,7 @@ mod tests {
             .first_rom();
         c.execute(
             "UPDATE roms SET sha1 = NULL, md5 = ?2, crc32 = ?3 WHERE id = ?1",
-            params![other, "1".repeat(32), "00000001"],
+            params![other, Md5::from_bytes([0x11; 16]), Crc32::from_u32(1)],
         )
         .expect("clear sha1");
         let wrong = Some(Sha1::from_bytes([0xde; 20]));

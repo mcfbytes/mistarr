@@ -1154,8 +1154,8 @@ fn chd_identification_stays_under_budget() {
     server.wait_jobs("dat_import", 1);
     server.post("/system/scan", "{\"platform_id\":\"psx\"}");
     let rows = server.wait_jobs("chd_tracks", 1);
-    let verified = server
-        .count("SELECT COUNT(*) FROM files WHERE rel_path LIKE '%.chd#%' AND state = 'verified'");
+    let verified =
+        server.count("SELECT COUNT(*) FROM files WHERE rel_path LIKE '%.chd#%' AND state = 1");
     let peak = server.stop("chd_tracks");
     assert!(rows.iter().all(|(s, _)| s == "done"), "{rows:?}");
     assert_eq!(usize::try_from(verified).expect("count"), members);
