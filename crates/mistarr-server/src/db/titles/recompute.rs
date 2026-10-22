@@ -115,8 +115,13 @@ fn grouped(
     Ok(())
 }
 
-const BAD_DUMP: &str =
-    "EXISTS (SELECT 1 FROM roms r WHERE r.title_id = t.id AND r.retired = 0 AND r.status = 'baddump')";
+/// The SQL test for a title with a live rom the DAT flags `baddump`.
+fn bad_dump() -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM roms r WHERE r.title_id = t.id AND r.retired = 0 AND r.status = {})",
+        super::RomStatus::BadDump.sql()
+    )
+}
 
 /// Re-elects inferred clone parents under default preferences, recomputes each title's
 /// effective group (`group_root`) so titles that different DAT versions list with the same
@@ -144,9 +149,10 @@ pub fn recompute_platform(
     grouped(
         conn,
         &format!(
-            "SELECT t.group_key, t.id, t.name, {BAD_DUMP} FROM titles t
+            "SELECT t.group_key, t.id, t.name, {} FROM titles t
              WHERE t.platform_id = ?1 AND t.inferred = 1 AND t.retired = 0
-             ORDER BY t.group_key, t.id"
+             ORDER BY t.group_key, t.id",
+            bad_dump()
         ),
         platform,
         |group| {
@@ -177,8 +183,9 @@ pub fn recompute_platform(
     grouped(
         conn,
         &format!(
-            "SELECT CAST(t.group_root AS TEXT), t.id, t.name, {BAD_DUMP} FROM titles t
-             WHERE t.platform_id = ?1 AND t.retired = 0 ORDER BY t.group_root, t.id"
+            "SELECT CAST(t.group_root AS TEXT), t.id, t.name, {} FROM titles t
+             WHERE t.platform_id = ?1 AND t.retired = 0 ORDER BY t.group_root, t.id",
+            bad_dump()
         ),
         platform,
         |group| {
@@ -385,7 +392,7 @@ fn each_signature(
 ) -> Result<()> {
     use std::hash::{DefaultHasher, Hash, Hasher};
     let mut stmt = conn.prepare_cached(
-        "SELECT t.id, t.parent_id, COALESCE(r.sha1, r.md5, r.crc32 || ':' || r.size)
+        "SELECT t.id, t.parent_id, COALESCE(r.sha1, r.md5, CAST(r.crc32 || CAST(r.size AS BLOB) AS BLOB))
          FROM titles t JOIN roms r ON r.title_id = t.id AND r.retired = 0
          WHERE t.dat_version_id = ?1 AND t.retired = 0 AND t.source = 'dat'
            AND t.platform_id = ?2
@@ -403,7 +410,7 @@ fn each_signature(
     };
     while let Some(r) = rows.next()? {
         let (id, parent): (TitleId, TitleId) = (r.get(0)?, r.get(1)?);
-        let key: Option<String> = r.get(2)?;
+        let key: Option<Vec<u8>> = r.get(2)?;
         if open.is_none_or(|o| o.0 != id) {
             settle(open.take());
             open = Some((id, parent, 0, 0, true));

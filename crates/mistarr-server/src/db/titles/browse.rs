@@ -7,6 +7,7 @@ use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use serde::Serialize;
 
+use crate::db::files::FileState;
 use crate::db::groups::{self, Clause};
 use crate::db::ids::TitleId;
 use crate::db::sql::{self, Page, Paged};
@@ -68,17 +69,19 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
         e.have = sql::get_u64(r, 2)?;
         e.wanted = sql::get_u64(r, 3)?;
     }
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT platform, COUNT(*) FROM file_view
-         WHERE state = 'unverified' AND platform <> 'arcade' GROUP BY platform",
-    )?;
+         WHERE state = {} AND platform <> 'arcade' GROUP BY platform",
+        FileState::Unverified.sql()
+    ))?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
         out.entry(r.get(0)?).or_default().unmatched_files = sql::get_u64(r, 1)?;
     }
-    let mut stmt = conn.prepare(
-        "SELECT platform, COUNT(*) FROM file_view WHERE state = 'unidentified' GROUP BY platform",
-    )?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT platform, COUNT(*) FROM file_view WHERE state = {} GROUP BY platform",
+        FileState::Unidentified.sql()
+    ))?;
     let mut rows = stmt.query([])?;
     while let Some(r) = rows.next()? {
         out.entry(r.get(0)?).or_default().unidentified_files = sql::get_u64(r, 1)?;

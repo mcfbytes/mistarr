@@ -63,6 +63,91 @@ impl Unidentified {
     }
 }
 
+/// Every reason with its `files.reason` code, in code order.
+const CODES: [(Unidentified, i64); 17] = [
+    (Unidentified::Off, 0),
+    (Unidentified::Pending, 1),
+    (Unidentified::NoLayout, 2),
+    (Unidentified::Unreadable, 3),
+    (Unidentified::Chd(Unidentifiable::NotChd), 4),
+    (Unidentified::Chd(Unidentifiable::Version), 5),
+    (Unidentified::Chd(Unidentifiable::Parent), 6),
+    (Unidentified::Chd(Unidentifiable::NotCd), 7),
+    (Unidentified::Chd(Unidentifiable::TooLarge), 8),
+    (Unidentified::Chd(Unidentifiable::Codec), 9),
+    (Unidentified::Chd(Unidentifiable::GdRom), 10),
+    (Unidentified::Chd(Unidentifiable::OldLayout), 11),
+    (Unidentified::Chd(Unidentifiable::Cooked), 12),
+    (Unidentified::Chd(Unidentifiable::PregapMissing), 13),
+    (Unidentified::Chd(Unidentifiable::Corrupt), 14),
+    (Unidentified::Chd(Unidentifiable::Checksum), 15),
+    (Unidentified::Chd(Unidentifiable::NoChecksum), 16),
+];
+
+impl Unidentified {
+    /// The integer `files.reason` and `chd_failures.reason` hold; a reason the table does
+    /// not list, which core may add, is stored as `corrupt`.
+    ///
+    /// ```
+    /// use mistarr_server::db::chd::Unidentified;
+    /// assert_eq!(Unidentified::Off.code(), 0);
+    /// assert_eq!(Unidentified::Pending.code(), 1);
+    /// ```
+    #[must_use]
+    pub fn code(self) -> i64 {
+        CODES
+            .iter()
+            .find(|(r, _)| *r == self)
+            .map_or(14, |(_, c)| *c)
+    }
+
+    /// The reason stored as `code`, `None` for a code the table does not list.
+    ///
+    /// ```
+    /// use mistarr_server::db::chd::Unidentified;
+    /// assert_eq!(Unidentified::from_stored(2), Some(Unidentified::NoLayout));
+    /// assert_eq!(Unidentified::from_stored(17), None);
+    /// ```
+    #[must_use]
+    pub fn from_stored(code: i64) -> Option<Self> {
+        CODES.iter().find(|(_, c)| *c == code).map(|(r, _)| *r)
+    }
+}
+
+impl rusqlite::types::ToSql for Unidentified {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Ok(rusqlite::types::ToSqlOutput::from(self.code()))
+    }
+}
+
+impl rusqlite::types::FromSql for Unidentified {
+    fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
+        let code = value.as_i64()?;
+        Self::from_stored(code).ok_or_else(|| {
+            rusqlite::types::FromSqlError::Other(Box::new(sql::UnknownCode {
+                column: "Unidentified",
+                code,
+            }))
+        })
+    }
+}
+
+/// A reason word bound as its integer code; a word the table does not list is refused.
+pub(crate) struct ReasonWord<'a>(pub &'a str);
+
+impl rusqlite::types::ToSql for ReasonWord<'_> {
+    fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
+        Unidentified::parse(self.0)
+            .map(|r| rusqlite::types::ToSqlOutput::from(r.code()))
+            .ok_or_else(|| {
+                rusqlite::Error::ToSqlConversionFailure(Box::new(sql::UnknownText {
+                    column: "Unidentified",
+                    text: self.0.to_owned(),
+                }))
+            })
+    }
+}
+
 impl Serialize for Unidentified {
     fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
         s.serialize_str(self.as_str())
@@ -192,7 +277,7 @@ pub fn find_id(conn: &Connection, tracks: &[Hashes]) -> Result<Option<ChdId>> {
     let Some(first) = tracks.first() else {
         return Ok(None);
     };
-    let found: Vec<(String, i64)> = conn
+    let found: Vec<(Sha1, i64)> = conn
         .prepare_cached(
             "SELECT chd_sha1, chd_size FROM chd_tracks
              WHERE sha1 = ?1 AND track = 1 AND size = ?2 ORDER BY chd_sha1, chd_size",
@@ -202,9 +287,6 @@ pub fn find_id(conn: &Connection, tracks: &[Hashes]) -> Result<Option<ChdId>> {
         })?
         .collect::<rusqlite::Result<_>>()?;
     for (sha1, size) in found {
-        let Ok(sha1) = sha1.parse::<Sha1>() else {
-            continue;
-        };
         let id = ChdId {
             sha1,
             size: sql::to_u64(size),
@@ -224,7 +306,7 @@ pub fn find_id(conn: &Connection, tracks: &[Hashes]) -> Result<Option<ChdId>> {
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn failure(conn: &Connection, id: &ChdId, mtime: i64) -> Result<Option<(Unidentifiable, u32)>> {
-    let row: Option<(String, u32)> = conn
+    let row: Option<(Unidentified, u32)> = conn
         .prepare_cached(
             "SELECT reason, decoder FROM chd_failures
              WHERE chd_sha1 = ?1 AND chd_size = ?2 AND mtime = ?3",
@@ -233,8 +315,11 @@ pub fn failure(conn: &Connection, id: &ChdId, mtime: i64) -> Result<Option<(Unid
             Ok((r.get(0)?, r.get(1)?))
         })
         .optional()?;
-    Ok(row.map(|(code, decoder)| {
-        let reason = Unidentifiable::from_code(&code).unwrap_or(Unidentifiable::Corrupt);
+    Ok(row.map(|(reason, decoder)| {
+        let reason = match reason {
+            Unidentified::Chd(r) => r,
+            _ => Unidentifiable::Corrupt,
+        };
         (reason, decoder)
     }))
 }
@@ -263,7 +348,7 @@ pub fn store_failure(
         id.sha1,
         to_i64(id.size),
         mtime,
-        reason.code(),
+        Unidentified::Chd(reason),
         mistarr_core::chd::DECODER_VERSION,
         now
     ])?;
@@ -271,8 +356,13 @@ pub fn store_failure(
 }
 
 /// The `unidentified` rows `f` of enabled disc platforms `p`; callers add conditions.
-const WAITING_FROM: &str = "FROM files f JOIN platforms p ON p.id = f.platform_id
-     WHERE f.state = 'unidentified' AND p.kind = 'disc' AND p.enabled = 1";
+fn waiting_from() -> String {
+    format!(
+        "FROM files f JOIN platforms p ON p.id = f.platform_id
+         WHERE f.state = {} AND p.kind = 'disc' AND p.enabled = 1",
+        FileState::Unidentified.sql()
+    )
+}
 
 /// Up to `limit` `pending` rows of enabled disc platforms with an id above `after`, by id.
 ///
@@ -287,8 +377,10 @@ pub fn waiting(conn: &Connection, after: FileId, limit: u32) -> Result<Vec<FileR
         .join(", ");
     Ok(conn
         .prepare_cached(&format!(
-            "SELECT {cols} {WAITING_FROM} AND f.reason = 'pending' AND f.id > ?1
-             ORDER BY f.id LIMIT ?2"
+            "SELECT {cols} {} AND f.reason = {} AND f.id > ?1
+             ORDER BY f.id LIMIT ?2",
+            waiting_from(),
+            Unidentified::Pending.code()
         ))?
         .query_map(params![after, limit], files::from_row)?
         .collect::<rusqlite::Result<_>>()?)
@@ -302,7 +394,9 @@ pub fn waiting(conn: &Connection, after: FileId, limit: u32) -> Result<Vec<FileR
 pub fn waiting_count(conn: &Connection) -> Result<u64> {
     Ok(conn
         .prepare_cached(&format!(
-            "SELECT COUNT(*) {WAITING_FROM} AND f.reason = 'pending'"
+            "SELECT COUNT(*) {} AND f.reason = {}",
+            waiting_from(),
+            Unidentified::Pending.code()
         ))?
         .query_row([], |r| sql::get_u64(r, 0))?)
 }
@@ -317,13 +411,14 @@ pub fn has_waiting(
     platform: Option<&PlatformId>,
     reasons: &[Unidentified],
 ) -> Result<bool> {
-    let codes: Vec<&str> = reasons.iter().map(|r| r.as_str()).collect();
+    let codes: Vec<i64> = reasons.iter().map(|r| r.code()).collect();
     let codes = sql::json_list(&codes)?;
     Ok(conn
         .prepare_cached(&format!(
-            "SELECT EXISTS(SELECT 1 {WAITING_FROM}
+            "SELECT EXISTS(SELECT 1 {}
                AND f.reason IN (SELECT value FROM json_each(?1))
-               AND (?2 IS NULL OR f.platform_id = ?2))"
+               AND (?2 IS NULL OR f.platform_id = ?2))",
+            waiting_from()
         ))?
         .query_row(params![codes, platform], |r| r.get(0))?)
 }
@@ -335,13 +430,21 @@ pub fn has_waiting(
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn set_waiting(conn: &Connection, on: bool) -> Result<usize> {
+    let (off, pending, no_layout) = (
+        Unidentified::Off.code(),
+        Unidentified::Pending.code(),
+        Unidentified::NoLayout.code(),
+    );
+    let state = FileState::Unidentified.sql();
     let sql = if on {
-        "UPDATE files SET reason = 'pending' WHERE state = 'unidentified' AND reason = 'off'"
+        format!("UPDATE files SET reason = {pending} WHERE state = {state} AND reason = {off}")
     } else {
-        "UPDATE files SET reason = 'off'
-         WHERE state = 'unidentified' AND reason IN ('pending', 'no_layout')"
+        format!(
+            "UPDATE files SET reason = {off}
+             WHERE state = {state} AND reason IN ({pending}, {no_layout})"
+        )
     };
-    Ok(conn.prepare_cached(sql)?.execute([])?)
+    Ok(conn.prepare_cached(&sql)?.execute([])?)
 }
 
 /// Moves the `no_layout` rows of `platform` back to `pending`, after its DATs changed.
@@ -351,10 +454,13 @@ pub fn set_waiting(conn: &Connection, on: bool) -> Result<usize> {
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn recheck_layouts(conn: &Connection, platform: &PlatformId) -> Result<usize> {
     Ok(conn
-        .prepare_cached(
-            "UPDATE files SET reason = 'pending'
-             WHERE platform_id = ?1 AND state = 'unidentified' AND reason = 'no_layout'",
-        )?
+        .prepare_cached(&format!(
+            "UPDATE files SET reason = {}
+                 WHERE platform_id = ?1 AND state = {} AND reason = {}",
+            Unidentified::Pending.code(),
+            FileState::Unidentified.sql(),
+            Unidentified::NoLayout.code()
+        ))?
         .execute([platform])?)
 }
 
@@ -371,10 +477,11 @@ pub fn set_reason_if(
     to: Unidentified,
 ) -> Result<bool> {
     Ok(conn
-        .prepare_cached(
-            "UPDATE files SET reason = ?3 WHERE id = ?1 AND state = 'unidentified' AND reason = ?2",
-        )?
-        .execute(params![id, from.as_str(), to.as_str()])?
+        .prepare_cached(&format!(
+            "UPDATE files SET reason = ?3 WHERE id = ?1 AND state = {} AND reason = ?2",
+            FileState::Unidentified.sql()
+        ))?
+        .execute(params![id, from, to])?
         > 0)
 }
 

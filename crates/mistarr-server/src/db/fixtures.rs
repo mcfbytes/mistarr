@@ -82,8 +82,8 @@ pub fn seed_rom(
     let flags: Vec<String> = flags.iter().map(|f| (*f).to_owned()).collect();
     super::titles::set_flags(conn, title_id, &flags)?;
     conn.execute(
-        "INSERT INTO roms (title_id, name, size, status) VALUES (?1, ?2, ?3, 'good')",
-        params![title_id, rom_name, sql::to_i64(size)],
+        "INSERT INTO roms (title_id, name, size, status) VALUES (?1, ?2, ?3, ?4)",
+        params![title_id, rom_name, sql::to_i64(size), RomStatus::Good],
     )?;
     Ok(RomId::new(conn.last_insert_rowid()))
 }
