@@ -438,31 +438,12 @@ fn seed_console(
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
     )?;
     let mut parent_of = c.prepare_cached("UPDATE titles SET parent_id = id WHERE id = ?1")?;
-    // Schemas without `own_name` store whole names; the WHERE keeps `?10` bound.
-    let tails = c
-        .prepare("SELECT 1 FROM pragma_table_info('roms') WHERE name = 'own_name'")?
-        .exists([])?;
-    let mut rom = c.prepare_cached(if tails {
+    let mut rom = c.prepare_cached(
         "INSERT INTO roms (title_id, own_name, name, size, crc32, md5, sha1, status, header, zip_dir, present)
-         VALUES (?1, ?10, ?2, ?3, unhex(?4), unhex(substr(?5, 9)), unhex(?5), ?6, ?7, ?8, ?9)"
-    } else {
-        "INSERT INTO roms (title_id, name, size, crc32, md5, sha1, status, header, zip_dir, present)
-         SELECT ?1, ?2, ?3, unhex(?4), unhex(substr(?5, 9)), unhex(?5), ?6, ?7, ?8, ?9
-         WHERE ?10 IS NOT NULL"
-    })?;
-    // Schemas without `files.platform` name the column `platform_id` and hold the slug.
-    let keyed: i64 = c.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'platform'",
-        [],
-        |r| r.get(0),
+         VALUES (?1, ?10, ?2, ?3, unhex(?4), unhex(substr(?5, 9)), unhex(?5), ?6, ?7, ?8, ?9)",
     )?;
-    let file = if keyed > 0 {
-        "INSERT INTO files (platform, rel_path, size, mtime, rom_id, state, scanned_at)
-         VALUES ((SELECT id FROM platforms WHERE slug = ?1), ?2, ?3, 0, ?4, ?5, 0)"
-    } else {
-        "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
-         VALUES (?1, ?2, ?3, 0, ?4, ?5, 0)"
-    };
+    let file = "INSERT INTO files (platform, rel_path, size, mtime, rom_id, state, scanned_at)
+         VALUES ((SELECT id FROM platforms WHERE slug = ?1), ?2, ?3, 0, ?4, ?5, 0)";
     let browsed = BROWSED.contains(&console.id);
     let mut names = HashSet::new();
     let mut made = 0;
@@ -560,11 +541,7 @@ fn seed_console(
             };
             for r in rom_names {
                 let size = if mra { 0 } else { 4_096 + rng.below(1 << 20) };
-                let (own_name, stored) = if tails {
-                    crate::db::sql::rom_name_parts(&name, &r)
-                } else {
-                    (true, r.as_str())
-                };
+                let (own_name, stored) = crate::db::sql::rom_name_parts(&name, &r);
                 rom.execute(params![
                     id,
                     stored,

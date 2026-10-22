@@ -20,8 +20,13 @@ const HAS_MATCH: &str = "(f.rom_id IS NOT NULL OR EXISTS (SELECT 1 FROM torrent_
     WHERE c.source_id = f.source_id AND c.file_index = f.file_index))";
 
 /// A file with a download that was not cancelled.
-const HAS_DOWNLOAD: &str = "EXISTS (SELECT 1 FROM downloads w
-    WHERE w.source_id = f.source_id AND w.file_index = f.file_index AND w.state != 'cancelled')";
+fn has_download() -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM downloads w
+         WHERE w.source_id = f.source_id AND w.file_index = f.file_index AND w.state != {})",
+        DownloadState::Cancelled.sql()
+    )
+}
 
 /// Which files of a source a page lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +62,7 @@ impl FileFilter {
         match self {
             Self::Matched => HAS_MATCH.to_owned(),
             Self::Unmatched => format!("NOT {HAS_MATCH}"),
-            Self::Wanted => HAS_DOWNLOAD.to_owned(),
+            Self::Wanted => has_download(),
         }
     }
 }
@@ -178,9 +183,11 @@ pub struct FileRow {
 
 fn platform_of(conn: &Connection, id: SourceId) -> Result<Option<String>> {
     Ok(conn
-        .query_row("SELECT platform_id FROM sources WHERE id = ?1", [id], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT p.slug FROM sources s JOIN platforms p ON p.id = s.platform WHERE s.id = ?1",
+            [id],
+            |r| r.get(0),
+        )
         .optional()?
         .flatten())
 }
@@ -375,8 +382,11 @@ pub fn detail(conn: &Connection, id: SourceId) -> Result<Option<SourceDetail>> {
         *slot += 1;
     }
     summary.wanted = conn.query_row(
-        "SELECT COUNT(DISTINCT file_index) FROM downloads
-         WHERE source_id = ?1 AND file_index IS NOT NULL AND state != 'cancelled'",
+        &format!(
+            "SELECT COUNT(DISTINCT file_index) FROM downloads
+             WHERE source_id = ?1 AND file_index IS NOT NULL AND state != {}",
+            DownloadState::Cancelled.sql()
+        ),
         [id],
         |r| get_u64(r, 0),
     )?;
@@ -687,7 +697,7 @@ mod tests {
         c.execute(
             "INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, progress,
                created_at, updated_at)
-             SELECT title_id, id, ?1, 0, 'transferring', 0.5, 0, 0 FROM roms WHERE id = ?2",
+             SELECT title_id, id, ?1, 0, 2, 0.5, 0, 0 FROM roms WHERE id = ?2",
             params![id, rom],
         )
         .expect("download");
@@ -853,7 +863,7 @@ mod tests {
         assert_eq!(page(Some(FileFilter::Wanted), None, 10, 0), (vec![], 0));
         c.execute(
             "INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, created_at, updated_at)
-             SELECT title_id, id, ?1, 0, 'queued', 0, 0 FROM roms WHERE id = ?2",
+             SELECT title_id, id, ?1, 0, 1, 0, 0 FROM roms WHERE id = ?2",
             params![id, rom],
         )
         .expect("download");

@@ -42,8 +42,8 @@ DROP INDEX IF EXISTS title_groups_recent;
 DROP INDEX IF EXISTS title_groups_split;
 DROP INDEX IF EXISTS title_groups_counts;
 
--- An unbound version keeps a NULL platform; a source text or code outside its table gives -1,
--- which the CHECK refuses, so the file rolls back.
+-- An unbound version keeps a NULL platform. A source text outside its table gives -1, which the
+-- CHECK refuses; a slug without a platform row gives -1, which the foreign key check refuses.
 CREATE TABLE dat_versions_new (
   id            INTEGER PRIMARY KEY,
   platform      INTEGER REFERENCES platforms(id),
@@ -65,7 +65,7 @@ SELECT d.id,
        CASE WHEN d.platform_id IS NULL THEN NULL
             ELSE COALESCE((SELECT p.id FROM platforms p WHERE p.slug = d.platform_id), -1) END,
        d.dat_name, d.version, d.source_file, d.loaded_at, d.superseded_by, d.game_count,
-       d.retired,
+       CASE WHEN d.retired = 0 THEN 0 ELSE 1 END,
        CASE d.source WHEN 'dat' THEN 0 WHEN 'mra' THEN 1 ELSE -1 END,
        d.family
 FROM dat_versions d ORDER BY d.id;
@@ -107,7 +107,8 @@ INSERT INTO titles_new (id, platform, dat_version_id, name, base_name, parent_id
                         setname, rbf, mra_path, mra_check, mra_detail, mra_stamp,
                         mra_file_stamp, mra_seen, group_root)
 SELECT t.id, (SELECT p.id FROM platforms p WHERE p.slug = t.platform_id), t.dat_version_id,
-       t.name, t.base_name, t.parent_id, t.revision, t.is_1g1r_pick, t.wanted, t.retired,
+       t.name, t.base_name, t.parent_id, t.revision, t.is_1g1r_pick, t.wanted,
+       CASE WHEN t.retired = 0 THEN 0 ELSE 1 END,
        t.clone_of, t.group_key, t.inferred,
        CASE t.source WHEN 'dat' THEN 0 WHEN 'mra' THEN 1 ELSE -1 END,
        t.setname, t.rbf, t.mra_path,

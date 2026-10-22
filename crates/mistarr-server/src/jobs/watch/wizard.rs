@@ -73,7 +73,7 @@ mod tests {
                     "INSERT INTO dat_versions (family, dat_name, version, source_file, loaded_at, game_count)
                      VALUES ('', 'Test Console', '1', 'a.dat', 0, 0);
                      INSERT INTO sources (infohash, display_name, origin_file, state, added_at)
-                     VALUES ('00', 'n', 'a.torrent', 'unbound', 0);",
+                     VALUES ('00', 'n', 'a.torrent', 1, 0);",
                 )?;
                 let status = ClientStatus {
                     kind: Some(ClientKind::Transmission),

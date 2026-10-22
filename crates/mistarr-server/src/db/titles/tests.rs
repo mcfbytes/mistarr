@@ -4,6 +4,7 @@ use super::recompute::*;
 use super::*;
 use crate::db::arcade::Check;
 use crate::db::dats::{self, NewVersion};
+use crate::db::downloads::DownloadState;
 use crate::db::files::FileState;
 use crate::db::fixtures::conn;
 use crate::db::fixtures::{key, pid, platform_ref};
@@ -760,7 +761,7 @@ fn detail_lists_variants_roms_files_and_sources() {
     let f = file(&c, Some(q_rom), "Example Quest.gb", FileState::Misnamed);
     c.execute_batch(
         "INSERT INTO sources (infohash, display_name, origin_file, state, added_at)
-         VALUES ('00', 'n', 'a.torrent', 'bound', 0);",
+         VALUES ('00', 'n', 'a.torrent', 2, 0);",
     )
     .expect("source");
     c.execute_batch("INSERT INTO torrent_dirs (source_id, path) VALUES (1, '')")
@@ -810,10 +811,10 @@ fn want_refuses_bios_and_retired_and_unwant_cancels_queued_downloads() {
     let q = rom(&c, usa, "q.bin");
     c.execute_batch(
         "INSERT INTO sources (infohash, display_name, origin_file, state, added_at)
-         VALUES ('00', 'n', 'a.torrent', 'bound', 0);",
+         VALUES ('00', 'n', 'a.torrent', 2, 0);",
     )
     .expect("source");
-    for state in ["queued", "transferring"] {
+    for state in [DownloadState::Queued, DownloadState::Transferring] {
         c.execute(
             "INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, created_at, updated_at)
              VALUES (?1, ?2, 1, 0, ?3, 0, 0)",
@@ -822,14 +823,15 @@ fn want_refuses_bios_and_retired_and_unwant_cancels_queued_downloads() {
         .expect("download");
     }
     assert_eq!(unwant_group(&c, rev, 5).expect("unwant"), 2);
-    let states: Vec<String> = c
+    let states: Vec<DownloadState> = c
         .prepare("SELECT state FROM downloads ORDER BY id")
         .expect("prepare")
         .query_map([], |r| r.get(0))
         .expect("query")
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
-    assert_eq!(states, ["cancelled", "transferring"]);
+    let words: Vec<&str> = states.iter().map(|s| s.as_str()).collect();
+    assert_eq!(words, ["cancelled", "transferring"]);
 
     let tale = id_of(&c, "Other Tale (Europe)");
     let v2 = version(&c, "2");
@@ -942,10 +944,14 @@ fn removing_a_dat_retires_its_roms_unwants_and_cancels_queued_downloads() {
     let q = rom(&c, usa, "q.bin");
     c.execute_batch(
         "INSERT INTO sources (infohash, display_name, origin_file, state, added_at)
-         VALUES ('00', 'n', 'a.torrent', 'bound', 0);",
+         VALUES ('00', 'n', 'a.torrent', 2, 0);",
     )
     .expect("source");
-    for state in ["queued", "wanted", "transferring"] {
+    for state in [
+        DownloadState::Queued,
+        DownloadState::Wanted,
+        DownloadState::Transferring,
+    ] {
         c.execute(
             "INSERT INTO downloads (title_id, rom_id, source_id, file_index, state, created_at, updated_at)
              VALUES (?1, ?2, 1, 0, ?3, 0, 0)",
@@ -960,14 +966,15 @@ fn removing_a_dat_retires_its_roms_unwants_and_cancels_queued_downloads() {
         count("SELECT COUNT(*) FROM titles WHERE wanted = 1 OR retired = 0"),
         0
     );
-    let states: Vec<String> = c
+    let states: Vec<DownloadState> = c
         .prepare("SELECT state FROM downloads ORDER BY id")
         .expect("prepare")
         .query_map([], |r| r.get(0))
         .expect("query")
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
-    assert_eq!(states, ["cancelled", "cancelled", "transferring"]);
+    let words: Vec<&str> = states.iter().map(|s| s.as_str()).collect();
+    assert_eq!(words, ["cancelled", "cancelled", "transferring"]);
 }
 
 /// The reference for [`reroot`], one title at a time: a title keeps its group unless that
