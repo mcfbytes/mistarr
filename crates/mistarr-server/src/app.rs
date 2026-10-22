@@ -633,12 +633,7 @@ fn migrate_in_ram(config: &Config, progress: Option<&crate::migrating::Migrating
         input: 0,
     };
     let mut watch = progress;
-    match db::ram::migrate_at_start(
-        &config.paths.db(),
-        &plan,
-        progress.map(crate::migrating::Migrating::steps).as_ref(),
-        &mut watch,
-    ) {
+    match db::ram::migrate_at_start(&config.paths.db(), &plan, &mut watch) {
         Ok(db::ram::Migrated::Ram(r)) => tracing::info!(
             mib = r.bytes.div_ceil(1024 * 1024),
             card_writes = r.card_writes,
@@ -654,8 +649,9 @@ fn migrate_in_ram(config: &Config, progress: Option<&crate::migrating::Migrating
             compact_ms = r.write_back.as_millis(),
             "database migrated in place"
         ),
-        Ok(_) => {}
-        Err(e @ Error::SchemaTooNew { .. }) => return Err(e),
+        Ok(db::ram::Migrated::Nothing) => {}
+        // A failed migration on the card file would fail the same way when opened.
+        Ok(db::ram::Migrated::Failed(e)) | Err(e @ Error::SchemaTooNew { .. }) => return Err(e),
         // A swap that could not put the old file back; opening would create an empty one.
         Err(e) if !config.paths.db().exists() => return Err(e),
         Err(e) => tracing::warn!(error = %e, "migrating the database in place"),

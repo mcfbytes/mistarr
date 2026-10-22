@@ -1018,7 +1018,7 @@ of the database in RAM and write it back whole (`db::ram`):
    A startup migration that was refused for memory or room in the memory
    directory (not for another process holding the file, a reader keeping the
    WAL, or the card lacking room for a second copy) is applied to the card
-   file with one connection, which is closed, and the file is then compacted
+   file through a writer and a reader, which are closed, and the file is then compacted
    from the card by the same steps, still before the server opens its
    connections or answers HTTP: more than 25% free pages, the memory check
    read afresh, `VACUUM INTO`, verification, write-back and swap, with the
@@ -1028,8 +1028,11 @@ of the database in RAM and write it back whole (`db::ram`):
    compaction needs. `mistarr.migrating` stays present through it, names
    "compacting the database" and keeps changing with the `VACUUM`'s
    statements and each chunk written, so the installer's no-progress timeout
-   cannot fire; the log at info gives the sizes before and after and the card
-   writes.
+   cannot fire, and drops the name once the compaction is over; the compaction
+   after a migration in RAM reports the same way. The log at info gives the
+   sizes before and after and the card writes. A migration of the card file
+   that fails ends the start with its error, since opening would only run it
+   again.
    Whichever file is chosen is written to `mistarr.db.new` beside the
    database in writes of exactly 1 MiB, then synced; the card must have room
    for it, and the log at info gives the sizes before and after compacting.
