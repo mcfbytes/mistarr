@@ -175,7 +175,7 @@ fn hand_off(b: &Booted, id: i64, staged: &str) {
         .db
         .write_blocking(move |c| {
             c.execute(
-                "UPDATE downloads SET state = 'importing', progress = 1, staged_path = ?2
+                "UPDATE downloads SET state = 4, progress = 1, staged_path = ?2
                  WHERE id = ?1",
                 rusqlite::params![id, staged],
             )?;

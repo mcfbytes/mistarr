@@ -210,24 +210,28 @@ CREATE TABLE scan_progress (            -- resumable per-platform library scan s
 ) STRICT;
 
 CREATE TABLE sources (                  -- one per torrent the user dropped in
-  id            INTEGER PRIMARY KEY,
-  infohash      TEXT NOT NULL UNIQUE,
-  display_name  TEXT NOT NULL,         -- torrent name field
-  origin_file   TEXT NOT NULL,         -- name of the file under sources/loaded/
-  platform_id   TEXT REFERENCES platforms(id),   -- NULL while unbound
-  bind_score    REAL,                  -- hit rate that produced the binding
-  state         TEXT NOT NULL,         -- 'resolving' | 'unbound' | 'bound' | 'disabled'
-  reason        TEXT,                  -- json: why it is resolving or unbound, as a code the API words; see "sources.state"
-  seed_policy   TEXT NOT NULL DEFAULT 'none',   -- 'none' | 'ratio:1.0' | 'client'
-  file_count    INTEGER NOT NULL DEFAULT 0,
-  total_size    INTEGER NOT NULL DEFAULT 0,
-  client_id     TEXT,                  -- id in the download client once added, else NULL
-  added_at      INTEGER NOT NULL,
-  suggested_platform_id TEXT REFERENCES platforms(id),  -- guessed from the torrent's names, no DAT needed
-  user_binding  INTEGER NOT NULL DEFAULT 0,  -- 1 when the user chose the binding, a platform or none; automatic binding never changes it
-  map_stamp     TEXT,                  -- the platform's live DAT versions and roms the files were last mapped against
-  bind_pending  TEXT                   -- the binding asked for and not applied yet: 'automatic' | 'none' | 'platform:<id>'
-);
+  id                 INTEGER PRIMARY KEY,
+  infohash           TEXT NOT NULL UNIQUE,
+  display_name       TEXT NOT NULL,    -- torrent name field
+  origin_file        TEXT NOT NULL,    -- name of the file under sources/loaded/
+  platform           INTEGER REFERENCES platforms(id),   -- NULL while unbound
+  bind_score         REAL CHECK (bind_score BETWEEN 0 AND 1),   -- hit rate that produced the binding
+  state              INTEGER NOT NULL CHECK (state BETWEEN 0 AND 3),   -- "Source states", see "sources.state"
+  reason             TEXT,             -- json: why it is resolving or unbound, as a code the API words; see "sources.state"
+  seed_policy        INTEGER NOT NULL DEFAULT 0 CHECK (seed_policy BETWEEN 0 AND 2),   -- "Seed policies"
+  seed_ratio         REAL CHECK ((seed_policy = 1) = (seed_ratio IS NOT NULL)),   -- the N of ratio:N
+  file_count         INTEGER NOT NULL DEFAULT 0 CHECK (file_count >= 0),
+  total_size         INTEGER NOT NULL DEFAULT 0 CHECK (total_size >= 0),
+  client_id          TEXT,             -- id in the download client once added, else NULL
+  added_at           INTEGER NOT NULL,
+  suggested_platform INTEGER REFERENCES platforms(id),   -- guessed from the torrent's names, no DAT needed
+  user_binding       INTEGER NOT NULL DEFAULT 0 CHECK (user_binding IN (0, 1)),   -- 1 when the user chose the binding, a platform or none; automatic binding never changes it
+  map_stamp          TEXT,             -- the platform's live DAT versions and roms the files were last mapped against
+  bind_pending       INTEGER CHECK (bind_pending BETWEEN 0 AND 2),   -- "Pending bindings"
+  bind_platform      INTEGER REFERENCES platforms(id),   -- the platform of a platform:<id> choice
+  CHECK (seed_policy <> 1 OR seed_ratio > 0),
+  CHECK ((bind_pending IS 2) = (bind_platform IS NOT NULL))
+) STRICT;
 CREATE INDEX sources_state ON sources(state);
 
 CREATE TABLE torrent_dirs (             -- a directory each of a source's files shares
@@ -267,13 +271,13 @@ CREATE TABLE downloads (
   rom_id        INTEGER NOT NULL REFERENCES roms(id),
   source_id     INTEGER REFERENCES sources(id) ON DELETE SET NULL,  -- NULL while 'wanted' or once the source is deleted
   file_index    INTEGER,                         -- NULL while 'wanted'
-  state         TEXT NOT NULL,         -- see state machine
-  progress      REAL NOT NULL DEFAULT 0,         -- 0 to 1
+  state         INTEGER NOT NULL CHECK (state BETWEEN 0 AND 8),   -- "Download states", see state machine
+  progress      REAL NOT NULL DEFAULT 0 CHECK (progress BETWEEN 0 AND 1),   -- 0 to 1
   staged_path   TEXT,                  -- local path of the finished file, set on 'importing'
   error         TEXT,                  -- why it failed, shown to the user
   created_at    INTEGER NOT NULL,
   updated_at    INTEGER NOT NULL
-);
+) STRICT;
 CREATE INDEX downloads_state ON downloads(state);
 CREATE INDEX downloads_source ON downloads(source_id, file_index);
 CREATE INDEX downloads_rom ON downloads(rom_id);

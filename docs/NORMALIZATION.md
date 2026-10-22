@@ -214,7 +214,7 @@ BEGIN SELECT RAISE(ABORT, 'titles.name never changes'); END;
 ### P4 `status` codes, STRICT and CHECK
 - **Change:** `status INTEGER NOT NULL CHECK (status BETWEEN 0 AND 3)` (good 0, baddump 1, nodump 2, verified 3), plus 0/1 CHECKs on the flag columns, in the P1 rebuild at no extra rewrite.
 - **Code:**
-  - A `code_enum!` beside `text_enum!` in `db/sql.rs`: ToSql/FromSql use the integer code; `as_str`, `Display` and serde keep the text, so the API is unchanged.
+  - A `code_enum!` in `db/sql.rs`: ToSql/FromSql use the integer code; `as_str`, `Display` and serde keep the text, so the API is unchanged.
   - A `const fn sql(self) -> &'static str` gives literals for `format!`.
   - `RomStatus` has 4 SQL literal sites.
 - **Enums on other tables:** P11, each in the file that rebuilds its table.
@@ -286,7 +286,7 @@ CREATE TABLE platforms (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE, ...) 
 
 ### P11 Minimal types
 SQLite stores each record as a header of serial types followed by the values. An integer takes 1, 2, 3, 4, 6 or 8 bytes by its value, the integers 0 and 1 and NULL take no bytes beyond their header byte, and text and blobs take their length. Nothing compresses rows further, so the type choice is the lever:
-- every enumeration column is an integer code through a `code_enum!` beside `text_enum!`, on small tables too (jobs kind, lane and state; downloads, sources, import_log, dat_versions, `files.state`, `files.header_rule`, `titles.source`, `title_groups.source`), about 0.6 MiB in all, and integer compares in every filter;
+- every enumeration column is an integer code through a `code_enum!`, on small tables too (jobs kind, lane and state; downloads, sources, import_log, dat_versions, `files.state`, `files.header_rule`, `titles.source`, `title_groups.source`), about 0.6 MiB in all, and integer compares in every filter;
 - booleans are 0/1 with a CHECK, never text;
 - an absent value is NULL, not `''` or a sentinel; `titles.group_key`, `jobs.subject` and `dat_versions.family` are computed keys always written, where `''` is a value (an empty payload, a name with nothing to match on), so they stay NOT NULL and only lose the `''` default;
 - a text that packs an enum with a parameter splits in two: `sources.seed_policy` into a code and `seed_ratio`, `sources.bind_pending` into a code and `bind_platform`;

@@ -6,94 +6,6 @@ use serde::Serialize;
 
 use crate::error::{Error, Result};
 
-/// Declares an enum stored as text, with `ALL`, `as_str`, `parse`, `Display`, SQL and
-/// serde conversions from one table of `Variant = "text"` pairs. Reading text the table
-/// does not list fails with [`UnknownText`].
-macro_rules! text_enum {
-    (
-        $(#[$meta:meta])*
-        $vis:vis enum $name:ident {
-            $( $(#[$vmeta:meta])* $variant:ident = $text:literal, )+
-        }
-    ) => {
-        $(#[$meta])*
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-        $vis enum $name {
-            $( $(#[$vmeta])* $variant, )+
-        }
-
-        impl $name {
-            /// Every value, in declaration order.
-            #[cfg(any(test, feature = "test-support"))]
-            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
-
-            /// The column text.
-            #[must_use]
-            pub const fn as_str(self) -> &'static str {
-                match self {
-                    $(Self::$variant => $text,)+
-                }
-            }
-
-            /// The value whose column text is `text`.
-            #[must_use]
-            pub fn parse(text: &str) -> Option<Self> {
-                match text {
-                    $($text => Some(Self::$variant),)+
-                    _ => None,
-                }
-            }
-        }
-
-        impl std::fmt::Display for $name {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str(self.as_str())
-            }
-        }
-
-        impl rusqlite::types::ToSql for $name {
-            fn to_sql(&self) -> rusqlite::Result<rusqlite::types::ToSqlOutput<'_>> {
-                Ok(rusqlite::types::ToSqlOutput::from(self.as_str()))
-            }
-        }
-
-        impl rusqlite::types::FromSql for $name {
-            fn column_result(
-                value: rusqlite::types::ValueRef<'_>,
-            ) -> rusqlite::types::FromSqlResult<Self> {
-                let text = value.as_str()?;
-                Self::parse(text).ok_or_else(|| {
-                    rusqlite::types::FromSqlError::Other(Box::new(
-                        $crate::db::sql::UnknownText {
-                            column: stringify!($name),
-                            text: text.to_owned(),
-                        },
-                    ))
-                })
-            }
-        }
-
-        impl serde::Serialize for $name {
-            fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-                s.serialize_str(self.as_str())
-            }
-        }
-
-        impl<'de> serde::Deserialize<'de> for $name {
-            fn deserialize<D: serde::Deserializer<'de>>(
-                d: D,
-            ) -> std::result::Result<Self, D::Error> {
-                let text = String::deserialize(d)?;
-                Self::parse(&text).ok_or_else(|| {
-                    serde::de::Error::unknown_variant(&text, &[$($text),+])
-                })
-            }
-        }
-    };
-}
-
-pub(crate) use text_enum;
-
 /// Declares an enum stored as an integer code, with `ALL`, `as_str`, `code`, `parse`,
 /// `Display`, SQL and serde conversions from one table of `Variant = ("text", code)`
 /// pairs. The code is what the column holds and the text is what the API shows.
@@ -113,6 +25,7 @@ macro_rules! code_enum {
 
         impl $name {
             /// Every value, in declaration order.
+            #[allow(dead_code, reason = "Only some code enums list their values in tests.")]
             #[cfg(any(test, feature = "test-support"))]
             pub const ALL: &'static [Self] = &[$(Self::$variant),+];
 
@@ -201,7 +114,7 @@ macro_rules! code_enum {
 
 pub(crate) use code_enum;
 
-/// Column text a [`text_enum!`] type does not list.
+/// Column text a stored enumeration does not list.
 #[derive(Debug, thiserror::Error)]
 #[error("unknown {column} `{text}`")]
 pub struct UnknownText {
@@ -509,41 +422,6 @@ mod tests {
             (false, "/dísc 1.chd")
         );
         assert_eq!(rom_name_parts("", "a.bin"), (false, "a.bin"));
-    }
-
-    text_enum! {
-        /// A test enum.
-        enum Shade {
-            /// Light.
-            Light = "light",
-            /// Dark.
-            Dark = "dark",
-        }
-    }
-
-    #[test]
-    fn text_enums_round_trip_and_refuse_unknown_text() {
-        assert_eq!(Shade::ALL, [Shade::Light, Shade::Dark]);
-        for s in Shade::ALL {
-            assert_eq!(Shade::parse(s.as_str()), Some(*s));
-        }
-        assert_eq!(Shade::Dark.to_string(), "dark");
-        let c = Connection::open_in_memory().expect("open");
-        let back: Shade = c
-            .query_row("SELECT ?1", [Shade::Dark], |r| r.get(0))
-            .expect("round trip");
-        assert_eq!(back, Shade::Dark);
-        let err = c
-            .query_row("SELECT 'dim'", [], |r| r.get::<_, Shade>(0))
-            .expect_err("unknown text");
-        assert!(err.to_string().contains("unknown Shade `dim`"), "{err}");
-        assert_eq!(
-            serde_json::to_string(&Shade::Light).expect("json"),
-            "\"light\""
-        );
-        let parsed: Shade = serde_json::from_str("\"dark\"").expect("parse");
-        assert_eq!(parsed, Shade::Dark);
-        assert!(serde_json::from_str::<Shade>("\"dim\"").is_err());
     }
 
     code_enum! {

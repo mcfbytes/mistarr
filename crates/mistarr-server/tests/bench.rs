@@ -117,7 +117,7 @@ fn bench_preview_times_each_source_and_its_base_tier() {
     let c = rusqlite::Connection::open(&db).expect("open");
     c.execute_batch(
         "INSERT INTO sources (infohash, display_name, origin_file, state, added_at)
-           VALUES ('0c', 'Synthetic Preview', 'p.torrent', 'unbound', 0);
+           VALUES ('0c', 'Synthetic Preview', 'p.torrent', 1, 0);
          INSERT INTO torrent_dirs (source_id, path) VALUES (1, 'Set/');
          INSERT INTO torrent_files (source_id, file_index, dir_id, leaf, size)
            SELECT 1, id - 1,
