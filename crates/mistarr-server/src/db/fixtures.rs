@@ -1,11 +1,12 @@
 //! Synthetic catalog rows standing in for the DAT import; compiled for tests and the
 //! `test-support` feature only.
 
-use mistarr_core::{Hashes, PlatformId, RomId};
+use mistarr_core::{Hashes, PlatformId, PlatformKey, RomId};
 use rusqlite::{params, Connection};
 
 use super::downloads::DownloadState;
 use super::ids::{DatVersionId, DownloadId, SourceId, TitleId};
+use super::platforms::PlatformRef;
 use super::sql;
 use super::titles::RomStatus;
 use crate::error::Result;
@@ -27,6 +28,29 @@ pub fn conn() -> Connection {
 #[must_use]
 pub fn pid(id: &str) -> PlatformId {
     PlatformId::new(id.to_owned())
+}
+
+/// The fixed key of platform `id`.
+///
+/// # Panics
+///
+/// When the binary's platform table does not list `id`.
+#[must_use]
+pub fn key(id: &PlatformId) -> PlatformKey {
+    super::platforms::fixed_key(id.as_str()).expect("a platform with a fixed key")
+}
+
+/// Platform `id` as a request holds it, with its fixed key.
+///
+/// # Panics
+///
+/// When the binary's platform table does not list `id`.
+#[must_use]
+pub fn platform_ref(id: &PlatformId) -> PlatformRef {
+    PlatformRef {
+        id: id.clone(),
+        key: key(id),
+    }
 }
 
 /// The three roms of the standard `nes` catalog, in id order: `(rom name, size)`.

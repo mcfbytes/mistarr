@@ -57,13 +57,14 @@ written for that version.
 
 ```sql
 CREATE TABLE platforms (
-  id            TEXT PRIMARY KEY,      -- stable slug, e.g. 'nes', 'megadrive', 'psx'
+  id            INTEGER PRIMARY KEY,   -- fixed per slug, see "Platform ids"; never reused
+  slug          TEXT NOT NULL UNIQUE,  -- stable slug, e.g. 'nes', 'megadrive', 'psx'
   name          TEXT NOT NULL,         -- display name
   core_dir      TEXT NOT NULL,         -- 'NES', 'Genesis', 'PSX'  (relative to games/)
-  kind          TEXT NOT NULL,         -- 'cartridge' | 'disc' | 'romset' | 'arcade'
-  core_present  INTEGER NOT NULL DEFAULT 0,
-  enabled       INTEGER NOT NULL DEFAULT 1
-);
+  kind          INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 3),   -- "Platform kinds"
+  core_present  INTEGER NOT NULL DEFAULT 0 CHECK (core_present IN (0, 1)),
+  enabled       INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
+) STRICT;
 
 CREATE TABLE dat_versions (
   id            INTEGER PRIMARY KEY,
@@ -178,7 +179,7 @@ CREATE INDEX roms_track_size ON roms(size) WHERE size % 2352 = 0;        -- a CH
 
 CREATE TABLE files (                    -- what is on disk under games/
   id            INTEGER PRIMARY KEY,
-  platform_id   TEXT NOT NULL REFERENCES platforms(id),
+  platform      INTEGER NOT NULL REFERENCES platforms(id),
   rel_path      TEXT NOT NULL,         -- relative to games/, e.g. 'NES/a.zip#b.nes' for a zip member, 'mame/a.zip' for an arcade presence row, 'PSX/G/g.chd#01' or 'PSX/G/g.chd#cue' for a CHD member
   size          INTEGER NOT NULL,
   mtime         INTEGER NOT NULL,
@@ -193,12 +194,18 @@ CREATE TABLE files (                    -- what is on disk under games/
   crc32_whole   BLOB CHECK (length(crc32_whole) = 4),
   md5_whole     BLOB CHECK (length(md5_whole) = 16),
   sha1_whole    BLOB CHECK (length(sha1_whole) = 20),   -- rule ines, a78 or lnx: the whole file's hashes, header included; equal to crc32/md5/sha1 when no header was found; NULL under other rules
-  UNIQUE (platform_id, rel_path),
+  UNIQUE (platform, rel_path),
   CHECK (reason IS NULL OR state = 5)
 ) STRICT;
 CREATE INDEX files_rom ON files(rom_id);
-CREATE INDEX files_state ON files(state, platform_id);
-CREATE INDEX files_rel_lower ON files(platform_id, lower(rel_path));   -- arcade rows match zips ignoring case
+CREATE INDEX files_state ON files(state, platform);
+CREATE INDEX files_rel_lower ON files(platform, lower(rel_path));   -- arcade rows match zips ignoring case
+
+CREATE TABLE scan_progress (            -- resumable per-platform library scan state
+  platform      INTEGER PRIMARY KEY REFERENCES platforms(id),
+  done_dirs     TEXT NOT NULL DEFAULT '[]',   -- json array of directories already committed
+  updated_at    INTEGER NOT NULL
+) STRICT;
 
 CREATE TABLE sources (                  -- one per torrent the user dropped in
   id            INTEGER PRIMARY KEY,
@@ -614,6 +621,10 @@ title's DAT version, so no `roms` or `titles` row is read. The test
 seek, and `db::plans::platform_counts_read_the_covering_group_index` asserts
 the covering group index.
 
+A read that matches files by `rom_id` and one `state` names `files_rom` with
+`INDEXED BY`: with an integer platform in `files_state`, the planner would
+otherwise walk every file of that state for each rom.
+
 Each index in this table serves one lookup and holds only the roms that
 lookup can return; a DAT load writes into every one whose key its roms
 carry, at random places (ARCHITECTURE.md "Writes on a sync mount"):
@@ -647,7 +658,7 @@ otherwise draw the planner to `roms_size`.
 `db::plans::rom_lookups_and_directory_tracks_seek_their_own_index` asserts
 each lookup, the partial ones included, seeks its index, and that a disc
 directory's tracks (`files::in_directory`) are one range of the
-`(platform_id, rel_path)` key.
+`(platform, rel_path)` key.
 
 
 ## Column forms
@@ -911,7 +922,13 @@ later takes the next id:
 | 23 to 33 | ngp, vectrex, pokemini, sv, psx, saturn, megacd, pcecd, neocd, neogeo, arcade |
 
 A slug in the database that the binary's table does not list keeps its row
-with an id from 1000 up, in slug order.
+with an id from 1000 up, in slug order. A file or scan row that names a slug
+with no platform row gets one, so every key resolves. `FIXED_KEYS` in
+`db/platforms.rs` holds the ids in Rust, a unit test holds it equal to the
+binary's table, and the startup sync inserts a missing platform with its id.
+The API, events and `titles` keep the slug (`PlatformId`); a `db` function over
+`files` or `scan_progress` takes a `PlatformKey`, which the caller resolves once
+with `db::platforms::key` or `PlatformRef`.
 
 **Tag ids**: the known flags take 1 to 9 in bit order (unl, pirate, baddump,
 bios, beta, proto, demo, sample, program) and the known regions 10 to 31 in bit
@@ -967,7 +984,8 @@ SELECT f.source_id, f.file_index,
 FROM torrent_files f;
 
 CREATE VIEW file_view AS
-SELECT f.id, f.platform_id AS platform_key, f.platform_id AS platform, f.rel_path, f.size,
+SELECT f.id, f.platform AS platform_key,
+       (SELECT p.slug FROM platforms p WHERE p.id = f.platform) AS platform, f.rel_path, f.size,
        f.mtime, f.crc32, f.md5, f.sha1,
        NULLIF(lower(hex(f.crc32)), '') AS crc32_hex, NULLIF(lower(hex(f.md5)), '') AS md5_hex,
        NULLIF(lower(hex(f.sha1)), '') AS sha1_hex,
@@ -1003,7 +1021,7 @@ Each conversion changes only the bodies, keeping the column names:
 | rom_view.name | CASE WHEN r.own_name THEN r.name ELSE t.name \|\| r.name END |
 | the hex columns | NULLIF(lower(hex(x)), '') of the stored column, since `hex(NULL)` is `''` and an absent hash stays NULL |
 | status_text, source_text, mra_check_text, state_text, header_rule_text, reason_text | CASE over the value table |
-| platform_key | the platform column |
+| platform_key | the platform column; `rom_view` and `title_view` keep the slug (`t.platform_id`) until `titles` converts, so reads through them filter by slug and seek the same `titles` indexes |
 | platform | (SELECT p.slug FROM platforms p WHERE p.id = t.platform) |
 | rom_view.match_base | the base expression, when P2 drops the column |
 | rom_view.bios | the same EXISTS on f.tag_id = 4 |

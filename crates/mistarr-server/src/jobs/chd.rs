@@ -24,6 +24,7 @@ use crate::app::AppState;
 use crate::db::chd::{self as rows, Unidentified};
 use crate::db::files::{self, FileRow, FileState, NewFile};
 use crate::db::ids::{FileId, TitleId};
+use crate::db::platforms::{self as platform_rows, PlatformRef};
 use crate::db::roms::{self, RomMatch};
 use crate::db::settings::{self, keys};
 use crate::db::titles::RomStatus;
@@ -73,7 +74,7 @@ pub(crate) struct ScannedChd {
 /// [`Error::Db`] on SQLite failure, [`Error::Task`] when a blocking task fails.
 pub(crate) async fn scan_file(
     ctx: &JobContext,
-    platform: &PlatformId,
+    platform: &PlatformRef,
     rel_path: &str,
     path: &Path,
     meta: std::io::Result<(i64, i64)>,
@@ -106,7 +107,7 @@ pub(crate) async fn scan_file(
         .as_ref()
         .ok()
         .map(|h| h.id(u64::try_from(size).unwrap_or(0)));
-    let pid = platform.clone();
+    let pid = platform.id.clone();
     if ctx
         .app
         .db
@@ -157,7 +158,7 @@ pub(crate) async fn scan_file(
 /// or a container row `pending`, which [`settle`] resolves against the setting when written.
 fn known_rows(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: &PlatformRef,
     rel_path: &str,
     size: i64,
     mtime: i64,
@@ -170,7 +171,7 @@ fn known_rows(
             mtime,
             tracks: &tracks,
         };
-        return classify_chd(conn, platform, &m);
+        return classify_chd(conn, &platform.id, &m);
     }
     if let Some((reason, decoder)) = rows::failure(conn, id, mtime)? {
         if decoder >= core::DECODER_VERSION {
@@ -179,7 +180,7 @@ fn known_rows(
         }
     }
     // A layout no DAT had is checked again after a DAT load, not on every scan.
-    let unchanged_no_layout = files::find_by_path(conn, platform, rel_path)?.is_some_and(|r| {
+    let unchanged_no_layout = files::find_by_path(conn, platform.key, rel_path)?.is_some_and(|r| {
         r.unchanged(size, mtime)
             && r.state == FileState::Unidentified
             && r.reason.as_deref() == Some(Unidentified::NoLayout.as_str())
@@ -206,7 +207,7 @@ struct Whole<'a> {
 /// identity and mtime, so an unchanged file is not read whole again.
 async fn whole_file(
     ctx: &JobContext,
-    platform: &PlatformId,
+    platform: &PlatformRef,
     f: Whole<'_>,
 ) -> Result<Option<Track>> {
     let Whole {
@@ -216,12 +217,12 @@ async fn whole_file(
         mtime,
         id,
     } = f;
-    let (pid, rel) = (platform.clone(), rel_path.to_owned());
+    let (pid, rel) = (platform.key, rel_path.to_owned());
     let cached = ctx
         .app
         .db
         .read(move |c| {
-            let row = files::find_by_path(c, &pid, &rel)?;
+            let row = files::find_by_path(c, pid, &rel)?;
             match row
                 .filter(|r| r.unchanged(size, mtime))
                 .and_then(|r| r.hashes())
@@ -247,7 +248,7 @@ async fn whole_file(
             }
         }
     };
-    let (pid, h) = (platform.clone(), hashes);
+    let (pid, h) = (platform.id.clone(), hashes);
     let matched = ctx
         .app
         .db
@@ -488,11 +489,11 @@ pub(crate) fn split_disc_rows(rows: Vec<FileRow>) -> (Vec<FileRow>, BTreeSet<Str
 /// [`Error::Db`] on SQLite failure.
 pub(crate) fn rematch_container(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: &PlatformRef,
     container: &str,
     now: i64,
 ) -> Result<usize> {
-    let members = files::zip_member_rows(conn, platform, container)?;
+    let members = files::zip_member_rows(conn, platform.key, container)?;
     let mut tracks: Vec<(usize, &FileRow)> = members
         .iter()
         .filter_map(|r| track_number(&r.rel_path).map(|n| (n, r)))
@@ -521,13 +522,13 @@ pub(crate) fn rematch_container(
         mtime: first.mtime,
         tracks: &hashes,
     };
-    let next = classify_chd(conn, platform, &m)?;
+    let next = classify_chd(conn, &platform.id, &m)?;
     let matched = tracks
         .iter()
         .zip(&next)
         .filter(|((_, old), new)| old.rom_id.is_none() && new.rom_id.is_some())
         .count();
-    rows::replace_container(conn, platform, container, &next, now)?;
+    rows::replace_container(conn, platform.key, container, &next, now)?;
     Ok(matched)
 }
 
@@ -569,10 +570,13 @@ pub async fn queue_for(app: &Arc<AppState>, platform: &PlatformId, recheck: bool
     let waiting = app
         .db
         .write(move |c| {
+            let Some(key) = platform_rows::key(c, &pid)? else {
+                return Ok(false);
+            };
             if recheck {
-                rows::recheck_layouts(c, &pid)?;
+                rows::recheck_layouts(c, key)?;
             }
-            rows::has_waiting(c, Some(&pid), &[Unidentified::Pending])
+            rows::has_waiting(c, Some(key), &[Unidentified::Pending])
         })
         .await?;
     if waiting {
@@ -721,12 +725,12 @@ impl Live {
         }
     }
 
-    fn report(&self, row: &FileRow, bytes: (u64, u64)) {
+    fn report(&self, row: &FileRow, platform: &PlatformId, bytes: (u64, u64)) {
         self.reporter.report("decoding", || {
             Progress::default()
                 .units(self.done, self.total)
                 .bytes(bytes.0, Some(bytes.1))
-                .with("platform_id", &row.platform_id)
+                .with("platform_id", platform)
                 .with("file", files::basename(&row.rel_path))
         });
     }
@@ -764,6 +768,15 @@ fn open(path: &Path) -> std::result::Result<Ready, (Seen, ChdError)> {
 
 /// Identifies one waiting image: cache, layout pre-filter, then a decode in slices.
 async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcome> {
+    let key = row.platform;
+    let Some(platform) = ctx
+        .app
+        .db
+        .read(move |c| PlatformRef::by_key(c, key))
+        .await?
+    else {
+        return Ok(Outcome::Skipped);
+    };
     let path = ctx.app.config().paths.games.join(&row.rel_path);
     let opened = threads::run(label::CHD_HEADER, move || open(&path)).await?;
     let ready = match opened {
@@ -777,9 +790,9 @@ async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcom
         .read(move |c| rows::cached_tracks(c, &id))
         .await?
     {
-        return record(ctx, row, Opened::from(&ready), tracks, None).await;
+        return record(ctx, row, &platform, Opened::from(&ready), tracks, None).await;
     }
-    let (pid, sizes) = (row.platform_id.clone(), ready.layout.track_sizes());
+    let (pid, sizes) = (platform.id.clone(), ready.layout.track_sizes());
     if !ctx
         .app
         .db
@@ -828,7 +841,7 @@ async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcom
                     done.saturating_mul(hunk_bytes).min(bytes_total),
                     bytes_total,
                 );
-                live.report(row, bytes);
+                live.report(row, &platform.id, bytes);
             }
             Ok(Step::Done) => break,
             Err(e) => return failed(ctx, row, Some((id, mtime)), &e).await,
@@ -847,7 +860,7 @@ async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcom
     )]
     let rate = (bytes_total as f64 / secs) as u64;
     let image = Opened { id, size, mtime };
-    record(ctx, row, image, tracks, Some(rate)).await
+    record(ctx, row, &platform, image, tracks, Some(rate)).await
 }
 
 /// The identity, size and mtime of an image whose tracks are known.
@@ -871,12 +884,13 @@ impl From<&Ready> for Opened {
 async fn record(
     ctx: &JobContext,
     row: &FileRow,
+    platform: &PlatformRef,
     image: Opened,
     tracks: Vec<Hashes>,
     rate: Option<u64>,
 ) -> Result<Outcome> {
     let Opened { id, size, mtime } = image;
-    let (pid, container) = (row.platform_id.clone(), row.rel_path.clone());
+    let (pid, container) = (platform.clone(), row.rel_path.clone());
     let written = ctx
         .app
         .db
@@ -888,9 +902,9 @@ async fn record(
                 mtime,
                 tracks: &tracks,
             };
-            let members = classify_chd(tx, &pid, &m)?;
+            let members = classify_chd(tx, &pid.id, &m)?;
             let changed =
-                rows::replace_container(tx, &pid, &container, &members, crate::unix_now())?;
+                rows::replace_container(tx, pid.key, &container, &members, crate::unix_now())?;
             if let Some(rate) = rate {
                 settings::set_json(tx, keys::CHD_RATE, &rate)?;
             }
@@ -949,7 +963,7 @@ fn file_changed(ctx: &JobContext, id: FileId, state: FileState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::fixtures::conn;
+    use crate::db::fixtures::{conn, key, platform_ref};
 
     fn psx() -> PlatformId {
         PlatformId::new("psx")
@@ -1111,7 +1125,7 @@ mod tests {
     fn split_keeps_chd_members_apart_and_drops_unidentified_rows() {
         let row = |rel: &str, state| FileRow {
             id: FileId::new(1),
-            platform_id: psx(),
+            platform: key(&psx()),
             rel_path: rel.to_owned(),
             size: 1,
             mtime: 1,
@@ -1146,9 +1160,9 @@ mod tests {
         };
         rows::store_tracks(&c, &id, &tracks).expect("cache");
         let before = classify(&c, &tracks);
-        rows::replace_container(&c, &psx(), "PSX/G/g.chd", &before, 1).expect("write");
+        rows::replace_container(&c, key(&psx()), "PSX/G/g.chd", &before, 1).expect("write");
         assert_eq!(
-            rematch_container(&c, &psx(), "PSX/G/g.chd", 2).expect("rematch"),
+            rematch_container(&c, &platform_ref(&psx()), "PSX/G/g.chd", 2).expect("rematch"),
             0
         );
 
@@ -1161,10 +1175,10 @@ mod tests {
             ],
         );
         assert_eq!(
-            rematch_container(&c, &psx(), "PSX/G/g.chd", 3).expect("rematch"),
+            rematch_container(&c, &platform_ref(&psx()), "PSX/G/g.chd", 3).expect("rematch"),
             2
         );
-        let cue = files::find_by_path(&c, &psx(), "PSX/G/g.chd#cue")
+        let cue = files::find_by_path(&c, key(&psx()), "PSX/G/g.chd#cue")
             .expect("find")
             .expect("cue row");
         assert_eq!(
@@ -1174,10 +1188,10 @@ mod tests {
 
         c.execute("UPDATE roms SET retired = 1", [])
             .expect("retire");
-        rematch_container(&c, &psx(), "PSX/G/g.chd", 4).expect("rematch");
-        let cue = files::find_by_path(&c, &psx(), "PSX/G/g.chd#cue").expect("find");
+        rematch_container(&c, &platform_ref(&psx()), "PSX/G/g.chd", 4).expect("rematch");
+        let cue = files::find_by_path(&c, key(&psx()), "PSX/G/g.chd#cue").expect("find");
         assert!(cue.is_none(), "a retired set loses its cue row");
-        let t1 = files::find_by_path(&c, &psx(), "PSX/G/g.chd#01")
+        let t1 = files::find_by_path(&c, key(&psx()), "PSX/G/g.chd#01")
             .expect("find")
             .expect("track");
         assert_eq!((t1.rom_id, t1.state), (None, FileState::Unverified));

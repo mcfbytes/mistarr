@@ -40,10 +40,10 @@ async fn unidentified(
     let found = app
         .db
         .read(move |c| {
-            if platforms::find(c, &id)?.is_none() {
+            let Some(row) = platforms::find(c, &id)? else {
                 return Ok(None);
-            }
-            files::unidentified(c, &id, page).map(Some)
+            };
+            files::unidentified(c, row.key, page).map(Some)
         })
         .await?;
     Ok(Json(found.ok_or_else(|| ApiError::no_such("platform"))?))

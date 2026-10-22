@@ -444,12 +444,12 @@ impl Placing<'_> {
         if rows.is_empty() {
             return Ok(());
         }
-        let pid = self.pid();
+        let pid = self.key;
         self.app()
             .db
             .write_tx(move |tx| {
                 for (rel, rom) in &rows {
-                    files::mark_verified(tx, &pid, rel, *rom)?;
+                    files::mark_verified(tx, pid, rel, *rom)?;
                 }
                 Ok(())
             })

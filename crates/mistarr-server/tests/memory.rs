@@ -754,7 +754,7 @@ fn arcade_presence_pass_stays_under_budget() {
     let started = Instant::now();
     let rows = server.wait_jobs("arcade_catalog", 1);
     let took = started.elapsed();
-    let files = server.count("SELECT COUNT(*) FROM files WHERE platform_id = 'arcade'");
+    let files = server.count("SELECT COUNT(*) FROM files WHERE platform = 33");
     let peak = server.stop("arcade_presence");
     let (state, progress) = &rows[0];
     println!("progress: {progress}, catalogue with presence pass took {took:?}");

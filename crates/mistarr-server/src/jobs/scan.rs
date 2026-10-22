@@ -29,7 +29,7 @@ use super::{Dedupe, Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::files::{self, FileState, NewFile};
 use crate::db::ids::{FileId, JobId};
-use crate::db::platforms as platform_rows;
+use crate::db::platforms::{self as platform_rows, PlatformRef};
 use crate::db::roms;
 use crate::db::scan_progress;
 use crate::error::{Error, Result};
@@ -269,19 +269,22 @@ fn list_files(dir: &Path) -> io::Result<Vec<ListedFile>> {
 async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     let platform = platforms::by_id(id.as_str())
         .ok_or_else(|| Error::Job(format!("unknown platform `{}`", id.as_str())))?;
+    let slug = id.clone();
+    let pid = ctx
+        .app
+        .db
+        .read(move |c| PlatformRef::resolve(c, &slug))
+        .await?
+        .ok_or_else(|| Error::Job(format!("unknown platform `{}`", id.as_str())))?;
     if platform.is_arcade() {
         // Defensive: arcade zips are never walked as cartridges, even called directly.
         ctx.app
             .db
-            .write({
-                let id = id.clone();
-                move |c| scan_progress::clear(c, &id)
-            })
+            .write(move |c| scan_progress::clear(c, pid.key))
             .await?;
         return Ok(());
     }
     let games_root = ctx.app.config().paths.games.clone();
-    let pid = id.clone();
     let (units, mut unreadable) =
         crate::threads::run(crate::threads::label::SCAN_LIST, move || {
             discover_units(&games_root, platform)
@@ -293,7 +296,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         .db
         .read({
             let pid = pid.clone();
-            move |c| files::existing_paths(c, &pid)
+            move |c| files::existing_paths(c, pid.key)
         })
         .await?;
     let done = ctx
@@ -301,7 +304,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         .db
         .read({
             let pid = pid.clone();
-            move |c| scan_progress::get(c, &pid)
+            move |c| scan_progress::get(c, pid.key)
         })
         .await?;
 
@@ -350,7 +353,7 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
         reporter.report("scanning", || {
             Progress::default()
                 .units(done_set.len(), total)
-                .with("platform_id", &pid)
+                .with("platform_id", &pid.id)
                 .with("dir", &unit.id)
         });
     }
@@ -359,28 +362,28 @@ async fn scan_platform(ctx: &JobContext, id: &PlatformId) -> Result<()> {
     let (pid3, keep2) = (pid.clone(), keep);
     ctx.app
         .db
-        .write(move |c| files::delete_missing(c, &pid3, &keep2, &unreadable))
+        .write(move |c| files::delete_missing(c, pid3.key, &keep2, &unreadable))
         .await?;
     let pid4 = pid.clone();
     ctx.app
         .db
-        .write(move |c| scan_progress::clear(c, &pid4))
+        .write(move |c| scan_progress::clear(c, pid4.key))
         .await?;
-    super::chd::queue_for(&ctx.app, &pid, false).await?;
+    super::chd::queue_for(&ctx.app, &pid.id, false).await?;
     report_outcome(ctx, &pid, total).await
 }
 
 /// Stores the scan's final progress: the platform's files with a rom state, those left
 /// `unverified` and those `unidentified`, per `docs/ARCHITECTURE.md` "Library scan".
-async fn report_outcome(ctx: &JobContext, pid: &PlatformId, total: usize) -> Result<()> {
-    let id = pid.clone();
+async fn report_outcome(ctx: &JobContext, pid: &PlatformRef, total: usize) -> Result<()> {
+    let key = pid.key;
     let counts = ctx
         .app
         .db
-        .read(move |c| files::state_counts(c, &id))
+        .read(move |c| files::state_counts(c, key))
         .await?;
     ctx.progress(json!({
-        "platform_id": pid.as_str(),
+        "platform_id": pid.id.as_str(),
         "done": total,
         "total": total,
         "matched": counts.verified + counts.misnamed + counts.bad,
@@ -418,16 +421,16 @@ fn in_done_unit(rel_path: &str, done: &std::collections::HashSet<String>) -> boo
 /// Hashed rows waiting to be written, and the `file.changed` throttle.
 struct Sink<'a> {
     ctx: &'a JobContext,
-    platform_id: PlatformId,
+    platform: PlatformRef,
     rows: Vec<NewFile>,
     throttle: Throttle,
 }
 
 impl<'a> Sink<'a> {
-    fn new(ctx: &'a JobContext, platform_id: &PlatformId) -> Self {
+    fn new(ctx: &'a JobContext, platform: &PlatformRef) -> Self {
         Self {
             ctx,
-            platform_id: platform_id.clone(),
+            platform: platform.clone(),
             rows: Vec::with_capacity(FLUSH_ROWS),
             throttle: Throttle::new(FILE_CHANGED_EVERY),
         }
@@ -448,7 +451,7 @@ impl<'a> Sink<'a> {
             return Ok(());
         }
         let rows = std::mem::replace(&mut self.rows, Vec::with_capacity(FLUSH_ROWS));
-        let (pid, now) = (self.platform_id.clone(), crate::unix_now());
+        let (pid, now) = (self.platform.clone(), crate::unix_now());
         let app = Arc::clone(&self.ctx.app);
         let written = self
             .ctx
@@ -481,7 +484,7 @@ impl<'a> Sink<'a> {
         (size, mtime): (i64, i64),
         precheck: Option<HeaderRule>,
     ) -> Result<bool> {
-        let (pid, rel) = (self.platform_id.clone(), rel_path.to_owned());
+        let (pid, rel) = (self.platform.clone(), rel_path.to_owned());
         let decided = self
             .ctx
             .app
@@ -507,7 +510,7 @@ impl<'a> Sink<'a> {
         rule: HeaderRule,
         forms: HeaderForms,
     ) -> Result<NewFile> {
-        let (pid, name) = (self.platform_id.clone(), own_name.to_owned());
+        let (pid, name) = (self.platform.id.clone(), own_name.to_owned());
         let ((rom_id, state), forms) = self
             .ctx
             .app
@@ -542,7 +545,7 @@ struct Found {
 /// CHD waiting to be decoded is written `pending` or `off` as `chd_on`, read in this write, says.
 fn commit_unit(
     tx: &Connection,
-    platform_id: &PlatformId,
+    platform: &PlatformRef,
     rows: Vec<NewFile>,
     done_dirs: Option<&[String]>,
     now: i64,
@@ -553,17 +556,17 @@ fn commit_unit(
         if let Some(reason) = row.reason.as_deref() {
             row.reason = Some(super::chd::settle(reason, chd_on).to_owned());
         }
-        let id = files::upsert(tx, platform_id, &row, now)?;
+        let id = files::upsert(tx, platform.key, &row, now)?;
         // A DAT load may have retired the rom this file was matched to since it was read.
         if row.rom_id.is_some() {
             if let Some(stale) = files::retired_match_of(tx, id)? {
-                set_matches(tx, platform_id, &[stale])?;
+                set_matches(tx, platform, &[stale])?;
             }
         }
         written.push((row.rel_path, id, row.state));
     }
     if let Some(done_dirs) = done_dirs {
-        scan_progress::save(tx, platform_id, done_dirs, now)?;
+        scan_progress::save(tx, platform.key, done_dirs, now)?;
     }
     Ok(written)
 }
@@ -585,13 +588,13 @@ enum Known {
 /// [`member_candidate`] finds a rom for it.
 fn known(
     conn: &Connection,
-    platform_id: &PlatformId,
+    platform: &PlatformRef,
     rel_path: &str,
     size: i64,
     mtime: i64,
     precheck: Option<HeaderRule>,
 ) -> Result<Known> {
-    let Some(row) = files::find_by_path(conn, platform_id, rel_path)? else {
+    let Some(row) = files::find_by_path(conn, platform.key, rel_path)? else {
         return Ok(Known::Hash);
     };
     if !row.unchanged(size, mtime) || lacks_whole(&row) {
@@ -606,16 +609,16 @@ fn known(
             (Some(rule), Some(crc)) if row.header_rule.is_none() => {
                 let whole = row.whole.crc32.unwrap_or(crc);
                 let content = (whole != crc).then_some(crc);
-                member_candidate(conn, platform_id, rule, whole, content, size)?
+                member_candidate(conn, &platform.id, rule, whole, content, size)?
             }
             _ => false,
         };
         return Ok(if candidate { Known::Hash } else { Known::Skip });
     }
-    let Some(m) = stored_match(conn, platform_id, &row)? else {
+    let Some(m) = stored_match(conn, &platform.id, &row)? else {
         return Ok(Known::Skip);
     };
-    let (rom_id, state) = cartridge_state(platform_id, Some(&m), own_name(rel_path));
+    let (rom_id, state) = cartridge_state(&platform.id, Some(&m), own_name(rel_path));
     Ok(Known::Matched(Box::new(NewFile {
         rel_path: row.rel_path,
         size,
@@ -764,8 +767,8 @@ async fn scan_zip_unit(
     mtime: i64,
     seen: &mut Vec<String>,
 ) -> Result<()> {
-    let (ctx, platform_id) = (sink.ctx, sink.platform_id.clone());
-    let platform_id = &platform_id;
+    let (ctx, platform) = (sink.ctx, sink.platform.clone());
+    let platform = &platform;
     let path_owned = path.to_path_buf();
     let listed: std::result::Result<Vec<ZipMember>, HashError> =
         crate::threads::run(crate::threads::label::ZIP_LIST, move || {
@@ -801,7 +804,7 @@ async fn scan_zip_unit(
 
         if precheck.is_some() {
             let unit = (path, mtime, member_rel.as_str());
-            if let Some(row) = precheck_member(ctx, platform_id, rule, unit, &member).await? {
+            if let Some(row) = precheck_member(ctx, platform, rule, unit, &member).await? {
                 sink.push(row).await?;
                 continue;
             }
@@ -841,7 +844,7 @@ async fn scan_zip_unit(
 /// Under a stripping rule the member's content CRC32 comes from its header alone.
 async fn precheck_member(
     ctx: &JobContext,
-    platform_id: &PlatformId,
+    platform: &PlatformRef,
     rule: HeaderRule,
     (path, mtime, member_rel): (&Path, i64, &str),
     member: &ZipMember,
@@ -861,7 +864,7 @@ async fn precheck_member(
         None
     };
     let size = i64::try_from(member.size).unwrap_or(i64::MAX);
-    let (pid, whole) = (platform_id.clone(), member.crc32);
+    let (pid, whole) = (platform.id.clone(), member.crc32);
     let candidate = ctx
         .app
         .db
@@ -883,7 +886,7 @@ async fn precheck_member(
 /// complete one, per `docs/VERIFICATION.md` "For disc games".
 async fn scan_disc_unit(
     ctx: &JobContext,
-    platform_id: &PlatformId,
+    platform: &PlatformRef,
     unit_id: &str,
     dir: &Path,
 ) -> Result<Option<(Vec<NewFile>, Vec<String>)>> {
@@ -909,7 +912,7 @@ async fn scan_disc_unit(
         }
         let rel_path = format!("{unit_id}/{name}");
         if ext == "chd" {
-            let got = super::chd::scan_file(ctx, platform_id, &rel_path, &path, meta).await?;
+            let got = super::chd::scan_file(ctx, platform, &rel_path, &path, meta).await?;
             seen.extend(got.seen);
             match got.whole {
                 Some(track) => tracks.push(track),
@@ -934,7 +937,7 @@ async fn scan_disc_unit(
             }
         };
         seen.push(rel_path.clone());
-        tracks.push(disc_track(ctx, platform_id, &path, rel_path, name, size, mtime).await?);
+        tracks.push(disc_track(ctx, platform, &path, rel_path, name, size, mtime).await?);
     }
     if tracks.is_empty() {
         return Ok(Some((chd_rows, seen)));
@@ -952,19 +955,19 @@ async fn scan_disc_unit(
 /// Hashes one disc track, or reuses its stored hashes when unchanged, and finds its rom.
 async fn disc_track(
     ctx: &JobContext,
-    platform_id: &PlatformId,
+    platform: &PlatformRef,
     path: &Path,
     rel_path: String,
     name: String,
     size: i64,
     mtime: i64,
 ) -> Result<Track> {
-    let (pid, relp) = (platform_id.clone(), rel_path.clone());
+    let (pid, relp) = (platform.key, rel_path.clone());
     let cached = ctx
         .app
         .db
         .read(move |c| {
-            let row = files::find_by_path(c, &pid, &relp)?;
+            let row = files::find_by_path(c, pid, &relp)?;
             Ok(row
                 .filter(|r| r.unchanged(size, mtime))
                 .and_then(|r| r.hashes()))
@@ -989,7 +992,7 @@ async fn disc_track(
     };
     let matched = match &hashes {
         Some(h) => {
-            let (pid2, h2) = (platform_id.clone(), *h);
+            let (pid2, h2) = (platform.id.clone(), *h);
             ctx.app
                 .db
                 .read(move |c| {
@@ -1020,6 +1023,7 @@ async fn disc_track(
 mod tests {
     use super::*;
     use crate::app::testutil::state;
+    use crate::db::fixtures::{key, platform_ref};
     use crate::db::jobs as job_rows;
     use mistarr_core::Sha1;
 
@@ -1166,7 +1170,7 @@ mod tests {
                 move |c| {
                     files::upsert(
                         c,
-                        &pid,
+                        key(&pid),
                         &NewFile::unhashed("NES/a.nes", 1, 1, FileState::Verified),
                         1,
                     )
@@ -1192,7 +1196,7 @@ mod tests {
         }
         let kept = app
             .db
-            .read_blocking(move |c| files::find_by_path(c, &pid, "NES/a.nes"))
+            .read_blocking(move |c| files::find_by_path(c, key(&pid), "NES/a.nes"))
             .expect("find");
         assert!(kept.is_some(), "an unreadable directory prunes nothing");
     }
@@ -1219,8 +1223,8 @@ mod tests {
             rom_id: Some(old),
             ..NewFile::unhashed("NES/Old Quest (USA).nes", 8, 1, FileState::Verified)
         };
-        commit_unit(&c, &nes, vec![row], None, 1, false).expect("commit");
-        let found = files::find_by_path(&c, &nes, "NES/Old Quest (USA).nes")
+        commit_unit(&c, &platform_ref(&nes), vec![row], None, 1, false).expect("commit");
+        let found = files::find_by_path(&c, key(&nes), "NES/Old Quest (USA).nes")
             .expect("find")
             .expect("row");
         assert_eq!(found.rom_id, Some(live));
@@ -1269,7 +1273,7 @@ mod tests {
         let (a, b) = (Sha1::from_bytes([0xa; 20]), Sha1::from_bytes([0xb; 20]));
         let row = |rule: Option<&str>, sha1: Option<Sha1>, whole: Option<Sha1>| files::FileRow {
             id: FileId::new(1),
-            platform_id: PlatformId::new("nes"),
+            platform: key(&PlatformId::new("nes")),
             rel_path: "NES/a.nes".into(),
             size: 20,
             mtime: 1,

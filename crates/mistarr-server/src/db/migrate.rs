@@ -669,7 +669,7 @@ mod tests {
             .ends_with("(platform_id, lean_flags, source, have_verified, wanted)"));
         assert!(!names(&conn, "table").iter().any(|n| n == "dat_stage"));
         conn.execute_batch(
-            "INSERT INTO platforms (id, name, core_dir, kind) VALUES ('p', 'P', 'P', 'cartridge');
+            "INSERT INTO platforms (slug, name, core_dir, kind) VALUES ('p', 'P', 'P', 0);
              INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
                VALUES ('p', 'd', '1', 'd.dat', 0, 1);
              INSERT INTO titles (platform_id, dat_version_id, name, base_name) VALUES ('p', 1, 't', 't');
@@ -995,8 +995,8 @@ mod tests {
     /// Platforms, one DAT version with two roms and two sources, for the torrent tables.
     fn seed_torrents(conn: &Connection) {
         conn.execute_batch(
-            "INSERT INTO platforms (id, name, core_dir, kind, enabled)
-               VALUES ('nes', 'NES', 'NES', 'cartridge', 1);
+            "INSERT INTO platforms (slug, name, core_dir, kind, enabled)
+               VALUES ('nes', 'NES', 'NES', 0, 1);
              INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
                                        game_count)
                VALUES (1, 'nes', 'Test', '1', 't.dat', 0, 2);
@@ -1845,7 +1845,7 @@ DELETE FROM parent WHERE id = 3;",
         let reason = |c| Unidentified::from_stored(c).map(Unidentified::as_str);
         let mut files = dump(
             conn,
-            "SELECT f.id, f.platform_id, f.rel_path, f.size, f.mtime, v.crc32_hex, v.md5_hex,
+            "SELECT f.id, v.platform, f.rel_path, f.size, f.mtime, v.crc32_hex, v.md5_hex,
                     v.sha1_hex, f.header_rule, f.rom_id, f.state, f.scanned_at, f.reason,
                     NULLIF(lower(hex(f.crc32_whole)), ''), NULLIF(lower(hex(f.md5_whole)), ''),
                     NULLIF(lower(hex(f.sha1_whole)), '')
@@ -2026,13 +2026,241 @@ DELETE FROM parent WHERE id = 3;",
         assert!(foreign_keys(&conn), "the pragma is back on");
     }
 
+    /// Every platform of the binary's table and two slugs outside it, with rows on several
+    /// of them in the tables that name a platform, in the 0023 shape.
+    fn seed_platform_rows(conn: &Connection) {
+        use mistarr_mister::platforms::PLATFORMS;
+        for p in &PLATFORMS {
+            conn.execute(
+                "INSERT INTO platforms (id, name, core_dir, kind, core_present, enabled)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    p.id,
+                    p.name,
+                    p.core_dir,
+                    p.kind.as_str(),
+                    p.id == "snes",
+                    p.id != "gg"
+                ],
+            )
+            .expect("platform");
+        }
+        conn.execute_batch(
+            "INSERT INTO platforms (id, name, core_dir, kind)
+               VALUES ('zeta', 'Zeta', 'Zeta', 'romset'), ('alpha', 'Alpha', 'Alpha', 'disc');
+             INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
+                                       game_count, source)
+               VALUES (1, 'nes', 'Example NES', '1', 'n.dat', 0, 1, 'dat'),
+                      (2, 'alpha', 'Example Alpha', '1', 'a.dat', 0, 1, 'dat'),
+                      (3, NULL, 'Unbound', '1', 'u.dat', 0, 0, 'dat');
+             INSERT INTO titles (id, platform_id, dat_version_id, name, base_name, parent_id, source)
+               VALUES (1, 'nes', 1, 'Example Quest (USA)', 'Example Quest', 1, 'dat'),
+                      (2, 'alpha', 2, 'Nova (World)', 'Nova', 2, 'dat');
+             INSERT INTO sources (id, infohash, display_name, origin_file, state, added_at,
+                                  platform_id, suggested_platform_id)
+               VALUES (1, 'aa', 'Set A', 'a.torrent', 'bound', 0, 'nes', NULL),
+                      (2, 'bb', 'Set B', 'b.torrent', 'unbound', 0, NULL, 'zeta');
+             INSERT INTO files (id, platform_id, rel_path, size, mtime, state, scanned_at)
+               VALUES (1, 'nes', 'NES/a.nes', 4, 1, 'verified', 1),
+                      (2, 'nes', 'NES/b.nes', 5, 2, 'pending', 2),
+                      (3, 'alpha', 'Alpha/g.bin', 6, 3, 'unverified', 3),
+                      (4, 'psx', 'PSX/d.bin', 7, 4, 'misnamed', 4),
+                      (5, 'arcade', 'mame/x.zip', 8, 5, 'verified', 5);
+             INSERT INTO scan_progress (platform_id, done_dirs, updated_at)
+               VALUES ('nes', '[\"NES\"]', 9), ('zeta', '[]', 10), ('psx', '[\"PSX/D\"]', 11);",
+        )
+        .expect("rows");
+    }
+
+    /// The rows a platform key must not change, as the slug names them.
+    const PLATFORM_FILES: &str = "SELECT f.id, f.platform_id, f.rel_path, f.size, f.mtime, f.state,
+                f.scanned_at FROM files f ORDER BY f.id";
+    const PLATFORM_CHILDREN: [&str; 3] = [
+        "SELECT id, platform_id, dat_name FROM dat_versions ORDER BY id",
+        "SELECT id, platform_id, dat_version_id, name FROM titles ORDER BY id",
+        "SELECT id, platform_id, suggested_platform_id FROM sources ORDER BY id",
+    ];
+
+    #[test]
+    fn platforms_take_fixed_keys_and_files_and_scans_follow_them() {
+        use crate::db::platforms::{fixed_key, KindCode};
+        use mistarr_core::PlatformKey;
+        use mistarr_mister::platforms::PLATFORMS;
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys");
+        apply_through(&mut conn, 23).expect("older migrations");
+        seed_platform_rows(&conn);
+        let files_before = dump(&conn, PLATFORM_FILES);
+        let scans_before = dump(
+            &conn,
+            "SELECT platform_id, done_dirs, updated_at FROM scan_progress ORDER BY platform_id",
+        );
+        let children_before: Vec<_> = PLATFORM_CHILDREN.iter().map(|q| dump(&conn, q)).collect();
+        let mut platforms_before = dump(
+            &conn,
+            "SELECT id, name, core_dir, kind, core_present, enabled FROM platforms ORDER BY id",
+        );
+        assert_eq!(platforms_before.len(), PLATFORMS.len() + 2);
+
+        assert_eq!(apply_through(&mut conn, 24).expect("the migration"), [24]);
+
+        let mut after = dump(
+            &conn,
+            "SELECT slug, name, core_dir, kind, core_present, enabled FROM platforms ORDER BY slug",
+        );
+        decode(&mut after, 3, |c| {
+            KindCode::ALL
+                .iter()
+                .find(|k| k.code() == c)
+                .map(|k| k.as_str())
+        });
+        platforms_before.sort();
+        after.sort();
+        assert_eq!(
+            after, platforms_before,
+            "every platform row keeps its columns"
+        );
+        for (at, p) in PLATFORMS.iter().enumerate() {
+            let key: i64 = conn
+                .query_row("SELECT id FROM platforms WHERE slug = ?1", [p.id], |r| {
+                    r.get(0)
+                })
+                .expect("key");
+            assert_eq!(Some(key), fixed_key(p.id).map(PlatformKey::get), "{}", p.id);
+            assert_eq!(key, i64::try_from(at).expect("slot") + 1, "{}", p.id);
+        }
+        assert_eq!(
+            column(
+                &conn,
+                "SELECT slug || '=' || id FROM platforms WHERE id >= 1000 ORDER BY id"
+            ),
+            ["alpha=1000", "zeta=1001"],
+            "a slug outside the table takes 1000 up, in slug order"
+        );
+
+        let files_after = dump(
+            &conn,
+            "SELECT f.id, v.platform, f.rel_path, f.size, f.mtime, v.state_text, f.scanned_at
+             FROM files f JOIN file_view v ON v.id = f.id ORDER BY f.id",
+        );
+        assert_eq!(
+            files_after, files_before,
+            "every file keeps its row through the slug"
+        );
+        let keyed = dump(
+            &conn,
+            "SELECT f.id, f.platform = p.id FROM files f JOIN platforms p ON p.slug = (
+               SELECT v.platform FROM file_view v WHERE v.id = f.id) ORDER BY f.id",
+        );
+        assert!(keyed.iter().all(|r| r[1] == "1"), "{keyed:?}");
+        assert_eq!(
+            dump(
+                &conn,
+                "SELECT p.slug, s.done_dirs, s.updated_at
+                 FROM scan_progress s JOIN platforms p ON p.id = s.platform ORDER BY p.slug"
+            ),
+            scans_before
+                .iter()
+                .map(|r| vec![r[0].clone(), r[1].clone(), r[2].clone()])
+                .collect::<Vec<_>>(),
+            "every scan row keeps its directories"
+        );
+        for (query, before) in PLATFORM_CHILDREN.iter().zip(&children_before) {
+            assert_eq!(&dump(&conn, query), before, "{query}");
+        }
+        assert_eq!(column(&conn, "PRAGMA integrity_check"), ["ok"]);
+        assert!(column(&conn, "PRAGMA foreign_key_check").is_empty());
+        assert!(foreign_keys(&conn), "the pragma is back on");
+        for table in ["platforms", "files", "scan_progress"] {
+            let sql: String = conn
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |r| r.get(0),
+                )
+                .expect(table);
+            assert!(sql.contains("STRICT"), "{table}");
+        }
+    }
+
+    #[test]
+    fn a_platform_key_or_slug_the_table_lacks_is_refused() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", true)
+            .expect("keys");
+        apply_through(&mut conn, 23).expect("older migrations");
+        seed_platform_rows(&conn);
+        apply_through(&mut conn, 24).expect("the migration");
+        assert!(conn
+            .execute(
+                "INSERT INTO files (platform, rel_path, size, mtime, state, scanned_at)
+                 VALUES (999, 'x', 1, 1, 0, 1)",
+                [],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO scan_progress (platform, updated_at) VALUES (999, 1)",
+                []
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at,
+                                           game_count, source)
+                 VALUES ('nowhere', 'd', '1', 'd.dat', 0, 0, 'dat')",
+                [],
+            )
+            .is_err());
+        conn.execute(
+            "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at,
+                                       game_count, source)
+             VALUES ('zeta', 'd', '1', 'd.dat', 0, 0, 'dat')",
+            [],
+        )
+        .expect("a slug of the table is accepted");
+        assert!(conn
+            .execute(
+                "UPDATE sources SET platform_id = 'nowhere' WHERE id = 1",
+                []
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn a_file_naming_a_platform_the_table_lacks_gets_a_row_to_key_by() {
+        let mut conn = Connection::open_in_memory().expect("open");
+        conn.pragma_update(None, "foreign_keys", false)
+            .expect("keys");
+        apply_through(&mut conn, 23).expect("older migrations");
+        conn.execute_batch(
+            "INSERT INTO files (platform_id, rel_path, size, mtime, state, scanned_at)
+               VALUES ('gb', 'a.gb', 4, 0, 'pending', 0), ('nowhere', 'b.gb', 4, 0, 'pending', 0);
+             INSERT INTO scan_progress (platform_id, updated_at) VALUES ('gb', 1);",
+        )
+        .expect("orphans");
+        apply_through(&mut conn, 24).expect("the migration");
+        assert_eq!(
+            column(
+                &conn,
+                "SELECT f.rel_path || '=' || p.slug FROM files f
+                 JOIN platforms p ON p.id = f.platform ORDER BY f.rel_path"
+            ),
+            ["a.gb=gb", "b.gb=nowhere"]
+        );
+        let ids = column(&conn, "SELECT slug || '=' || id FROM platforms ORDER BY id");
+        assert_eq!(ids, ["gb=5", "nowhere=1000"]);
+        assert!(column(&conn, "PRAGMA foreign_key_check").is_empty());
+    }
+
     #[test]
     fn the_group_triggers_follow_verified_files_after_the_rebuild() {
         let mut conn = Connection::open_in_memory().expect("open");
         apply(&mut conn).expect("apply");
         conn.execute_batch(
-            "INSERT INTO platforms (id, name, core_dir, kind, enabled)
-               VALUES ('nes', 'NES', 'NES', 'cartridge', 1);
+            "INSERT INTO platforms (slug, name, core_dir, kind, enabled)
+               VALUES ('nes', 'NES', 'NES', 0, 1);
              INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,
                                        game_count)
                VALUES (1, 'nes', 'Example NES', '1', 'n.dat', 0, 1);
@@ -2046,7 +2274,7 @@ DELETE FROM parent WHERE id = 3;",
             conn.query_row("SELECT COUNT(*) FROM title_groups_dirty", [], |r| r.get(0))
                 .expect("dirty")
         };
-        conn.execute("INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at) VALUES ('nes', 'a.nes', 4, 0, 1, 3, 0)", [])
+        conn.execute("INSERT INTO files (platform, rel_path, size, mtime, rom_id, state, scanned_at) VALUES (1, 'a.nes', 4, 0, 1, 3, 0)", [])
             .expect("unverified file");
         assert_eq!(dirty(&conn), 0, "an unverified file changes no group");
         conn.execute("UPDATE files SET state = 1", [])

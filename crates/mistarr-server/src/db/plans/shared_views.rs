@@ -11,7 +11,10 @@ use rusqlite::Connection;
 use super::super::ids::{DownloadId, SourceId, TitleId};
 use super::super::views::source_detail;
 use super::super::{candidates, downloads, downloads_import, files, imports, roms, sources};
-use super::super::{fixtures::pid, titles};
+use super::super::{
+    fixtures::{key, pid},
+    titles,
+};
 use super::{seeded, Read, FIFTY};
 
 thread_local! {
@@ -356,33 +359,33 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
             "file reads",
             Box::new(|c| {
                 let nes = pid("nes");
-                drop(files::unidentified(c, &nes, FIFTY).expect("unidentified"));
-                files::state_counts(c, &nes).expect("counts");
-                drop(files::retired_matches(c, &nes, 10).expect("retired"));
+                drop(files::unidentified(c, key(&nes), FIFTY).expect("unidentified"));
+                files::state_counts(c, key(&nes)).expect("counts");
+                drop(files::retired_matches(c, key(&nes), 10).expect("retired"));
                 drop(files::misnamed(c).expect("misnamed"));
             }),
             vec![
                 Out::Sql(
-                    "SELECT COUNT(*) FROM files WHERE state = 5 AND platform_id = ?1"
+                    "SELECT COUNT(*) FROM files WHERE state = 5 AND platform = ?1"
                         .into(),
                 ),
                 Out::Sql(
                     "SELECT rel_path, size, COALESCE(reason, 14) FROM files
-                     WHERE state = 5 AND platform_id = ?1
+                     WHERE state = 5 AND platform = ?1
                      ORDER BY rel_path LIMIT ?2 OFFSET ?3"
                         .into(),
                 ),
                 Out::Sql(
-                    "SELECT state, COUNT(*) FROM files WHERE platform_id = ?1 GROUP BY state".into(),
+                    "SELECT state, COUNT(*) FROM files WHERE platform = ?1 GROUP BY state".into(),
                 ),
                 Out::Sql(format!(
                     "SELECT {file_cols} FROM files f JOIN roms r ON r.id = f.rom_id
                      JOIN titles t ON t.id = r.title_id
-                     WHERE f.platform_id = ?1 AND t.source = 'dat' AND (r.retired = 1 OR t.retired = 1)
+                     WHERE f.platform = ?1 AND t.source = 'dat' AND (r.retired = 1 OR t.retired = 1)
                      ORDER BY f.id LIMIT ?2"
                 )),
                 Out::Sql(
-                    "SELECT f.id, f.platform_id, f.rel_path, r.id, r.name, t.name
+                    "SELECT f.id, (SELECT p.slug FROM platforms p WHERE p.id = f.platform), f.rel_path, r.id, r.name, t.name
                      FROM files f JOIN roms r ON r.id = f.rom_id JOIN titles t ON t.id = r.title_id
                      WHERE f.state = 2 ORDER BY f.id"
                         .into(),
@@ -394,12 +397,16 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
             Box::new(|c| drop(titles::browse::counts(c, &[]).expect("counts"))),
             vec![
                 Out::Sql(
-                    "SELECT platform_id, COUNT(*) FROM files
-                     WHERE state = 3 AND platform_id <> 'arcade' GROUP BY platform_id"
+                    "SELECT (SELECT p.slug FROM platforms p WHERE p.id = platform), COUNT(*)
+                     FROM files
+                     WHERE state = 3
+                       AND platform <> (SELECT a.id FROM platforms a WHERE a.slug = 'arcade')
+                     GROUP BY platform"
                         .into(),
                 ),
                 Out::Sql(
-                    "SELECT platform_id, COUNT(*) FROM files WHERE state = 5 GROUP BY platform_id"
+                    "SELECT (SELECT p.slug FROM platforms p WHERE p.id = platform), COUNT(*)
+                     FROM files WHERE state = 5 GROUP BY platform"
                         .into(),
                 ),
             ],

@@ -727,8 +727,8 @@ fn apply(c: &Connection, op: &Op, seq: &mut u32) {
             *seq += 1;
             let r = r.and_then(rom);
             run(
-                "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
-                 VALUES ('gb', ?1, 4, 0, ?2, ?3, 0)",
+                "INSERT INTO files (platform, rel_path, size, mtime, rom_id, state, scanned_at)
+                 VALUES (5, ?1, 4, 0, ?2, ?3, 0)",
                 &[&format!("f{seq}"), &r, &STATES[state]],
             );
         }

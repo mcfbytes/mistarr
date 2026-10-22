@@ -194,8 +194,8 @@ fn want_title_queues_or_waits_and_skips_open_and_verified_roms() {
     assert_eq!(again[0].1, DownloadState::Queued);
     set_state(&c, again[0].0, DownloadState::Cancelled, 11).expect("cancel");
     c.execute(
-        "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
-         VALUES ('nes', 'a.nes', 16, 0, ?1, 1, 0)",
+        "INSERT INTO files (platform, rel_path, size, mtime, rom_id, state, scanned_at)
+         VALUES (1, 'a.nes', 16, 0, ?1, 1, 0)",
         [rom],
     )
     .expect("file");
@@ -619,8 +619,8 @@ fn a_rom_is_wanted_again_only_while_nothing_holds_it() {
     cancel(&c, again, 1).expect("cancel");
     assert_eq!(crate::db::roms::verified_file(&c, rom).expect("none"), None);
     c.execute(
-        "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
-         VALUES ('nes', 'Example Quest (USA).nes', 10, 0, ?1, 1, 0)",
+        "INSERT INTO files (platform, rel_path, size, mtime, rom_id, state, scanned_at)
+         VALUES (1, 'Example Quest (USA).nes', 10, 0, ?1, 1, 0)",
         [rom],
     )
     .expect("file");

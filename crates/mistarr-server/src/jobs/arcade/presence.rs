@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use mistarr_core::hash::{zip_members, HashError};
-use mistarr_core::{PlatformId, RomId};
+use mistarr_core::{PlatformKey, RomId};
 use mistarr_mister::launch::split_zip_member;
 use mistarr_mister::platforms::Platform;
 use rusqlite::Connection;
@@ -180,7 +180,7 @@ fn decide(
 fn plan_batch(
     db: &Db,
     games: &Path,
-    pid: &PlatformId,
+    pid: PlatformKey,
     live: &HashMap<String, Vec<RomId>>,
     dir: &str,
     names: &[String],
@@ -239,7 +239,7 @@ fn recheck(games: &Path, rc: Recheck, out: &mut Changes) {
 /// Applies one batch's changes in the caller's transaction, one per batch; returns rows recorded and removed.
 fn write_changes(
     tx: &Connection,
-    pid: &PlatformId,
+    pid: PlatformKey,
     changes: &Changes,
     now: i64,
 ) -> Result<(usize, usize)> {
@@ -289,7 +289,7 @@ fn gone(games: &Path, dir: &str, names: &[String], page: Vec<String>) -> Vec<Str
 /// only while a page is read.
 async fn prune_dir(
     ctx: &JobContext,
-    pid: &PlatformId,
+    pid: PlatformKey,
     games: &Path,
     dir: &'static str,
     names: Arc<Vec<String>>,
@@ -298,11 +298,11 @@ async fn prune_dir(
     let mut pruned = 0;
     loop {
         ctx.checkpoint().await?;
-        let (p, from) = (pid.clone(), after.clone());
+        let from = after.clone();
         let page = ctx
             .app
             .db
-            .read(move |c| files::paths_under(c, &p, dir, &from, PRUNE_PAGE))
+            .read(move |c| files::paths_under(c, pid, dir, &from, PRUNE_PAGE))
             .await?;
         let Some(last) = page.last() else {
             break;
@@ -315,12 +315,11 @@ async fn prune_dir(
         })
         .await?;
         if !doomed.is_empty() {
-            let p = pid.clone();
             pruned += ctx
                 .app
                 .db
                 .write_tx(move |tx| {
-                    let n = files::delete_paths(tx, &p, &doomed)?;
+                    let n = files::delete_paths(tx, pid, &doomed)?;
                     Ok(n)
                 })
                 .await?;
@@ -371,7 +370,14 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
             Err(e) => tracing::warn!(dir, error = %e, "cannot list zips; keeping their rows"),
         }
     }
-    let pid = super::platform();
+    let Some(pid) = ctx
+        .app
+        .db
+        .read(|c| crate::db::platforms::key(c, &super::platform()))
+        .await?
+    else {
+        return Ok(Stats::default());
+    };
     let mut stats = Stats {
         zips: listing.iter().map(|(_, n)| n.len()).sum(),
         ..Stats::default()
@@ -385,19 +391,19 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
             let (db, g, p, l, b) = (
                 ctx.app.db.clone(),
                 games.clone(),
-                pid.clone(),
+                pid,
                 Arc::clone(&live),
                 batch.to_vec(),
             );
             let changes = crate::threads::run(crate::threads::label::ARCADE, move || {
-                plan_batch(&db, &g, &p, &l, dir, &b)
+                plan_batch(&db, &g, p, &l, dir, &b)
             })
             .await??;
-            let (p, now) = (pid.clone(), crate::unix_now());
+            let (p, now) = (pid, crate::unix_now());
             let (recorded, dropped) = ctx
                 .app
                 .db
-                .write_tx(move |tx| write_changes(tx, &p, &changes, now))
+                .write_tx(move |tx| write_changes(tx, p, &changes, now))
                 .await?;
             stats.recorded += recorded;
             stats.pruned += dropped;
@@ -408,7 +414,7 @@ pub(super) async fn run(ctx: &JobContext) -> Result<Stats> {
                     .with("presence_total", stats.zips)
             });
         }
-        stats.pruned += prune_dir(ctx, &pid, &games, dir, Arc::clone(names)).await?;
+        stats.pruned += prune_dir(ctx, pid, &games, dir, Arc::clone(names)).await?;
     }
     Ok(stats)
 }

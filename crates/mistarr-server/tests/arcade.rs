@@ -316,7 +316,7 @@ async fn a_manual_arcade_scan_queues_only_the_catalogue() {
         .db
         .read_blocking(|c| {
             Ok(c.query_row(
-                "SELECT COUNT(*) FROM files WHERE platform_id = 'arcade' AND rom_id IS NULL",
+                "SELECT COUNT(*) FROM files WHERE platform = 33 AND rom_id IS NULL",
                 [],
                 |r| r.get(0),
             )?)

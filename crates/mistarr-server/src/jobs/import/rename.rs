@@ -3,6 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use mistarr_core::PlatformId;
 use mistarr_mister::{adapter_for, DatEntry, StagedFile, StagedKind, Step};
 use serde_json::json;
 
@@ -14,6 +15,7 @@ use crate::db::files::{self, FileRow, FileState};
 use crate::db::ids::FileId;
 use crate::db::ids::TitleId;
 use crate::db::imports::{self, ImportAction, TitleEntry};
+use crate::db::platforms::PlatformRef;
 use crate::db::roms::{self, EntryRom};
 use crate::error::Error;
 use crate::events::{Event, ImportDone};
@@ -49,19 +51,19 @@ type Outcome<T> = std::result::Result<T, RenameError>;
 ///
 /// [`RenameError`] naming why the file was not renamed.
 pub async fn rename(app: &AppState, group: TitleId, file_id: FileId) -> Outcome<String> {
-    let (file, entry, rom) = subject(app, group, file_id).await?;
+    let (file, platform, entry, rom) = subject(app, group, file_id).await?;
     let games = app.config().paths.games.clone();
-    let to = canonical_path(&file, &entry, &rom, &games).await?;
+    let to = canonical_path(&file, &platform.id, &entry, &rom, &games).await?;
     let (from_rel, to_rel) = (file.rel_path.clone(), rel_string(&to));
     if from_rel == to_rel {
         return Err(RenameError::Refused(
             "the file already has its canonical name".into(),
         ));
     }
-    let (pid, dest) = (file.platform_id.clone(), to_rel.clone());
+    let (pid, dest) = (platform.key, to_rel.clone());
     let stale = app
         .db
-        .read(move |c| files::find_by_path(c, &pid, &dest))
+        .read(move |c| files::find_by_path(c, pid, &dest))
         .await?;
     let on_disk = games.join(&to);
     let taken = crate::threads::run(crate::threads::label::RENAME, move || on_disk.exists());
@@ -110,11 +112,14 @@ async fn subject(
     app: &AppState,
     group: TitleId,
     file_id: FileId,
-) -> Outcome<(FileRow, TitleEntry, EntryRom)> {
+) -> Outcome<(FileRow, PlatformRef, TitleEntry, EntryRom)> {
     let found = app
         .db
         .read(move |c| {
             let Some(file) = files::get(c, file_id)? else {
+                return Ok(None);
+            };
+            let Some(platform) = PlatformRef::by_key(c, file.platform)? else {
                 return Ok(None);
             };
             let title = match file.rom_id {
@@ -122,15 +127,15 @@ async fn subject(
                 None => None,
             };
             let Some(title) = title else {
-                return Ok(Some((file, None)));
+                return Ok(Some((file, platform, None)));
             };
             if crate::db::titles::browse::group_of(c, title)? != Some(group) {
                 return Ok(None);
             }
-            Ok(Some((file, imports::title_entry(c, title)?)))
+            Ok(Some((file, platform, imports::title_entry(c, title)?)))
         })
         .await?;
-    let Some((file, entry)) = found else {
+    let Some((file, platform, entry)) = found else {
         return Err(RenameError::NotFound);
     };
     if file.state != FileState::Misnamed {
@@ -154,18 +159,19 @@ async fn subject(
         .find(|r| Some(r.id) == file.rom_id)
         .cloned()
         .ok_or_else(|| RenameError::Refused("the file's rom is retired from its DAT".into()))?;
-    Ok((file, entry, rom))
+    Ok((file, platform, entry, rom))
 }
 
 /// The library path the adapter gives `file`, refusing a plan that needs
 /// more than a rename.
 async fn canonical_path(
     file: &FileRow,
+    platform: &PlatformId,
     entry: &TitleEntry,
     rom: &EntryRom,
     games: &Path,
 ) -> Outcome<PathBuf> {
-    let adapter = adapter_for(&file.platform_id)
+    let adapter = adapter_for(platform)
         .ok_or_else(|| RenameError::Refused("the file's platform has no adapter".into()))?;
     let current = games.join(&file.rel_path);
     let path = current.clone();

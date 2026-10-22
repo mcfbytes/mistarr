@@ -9,7 +9,7 @@ use super::stream::*;
 use super::*;
 use crate::db::dat_stage::{StagedGame, StagedRom};
 use crate::db::files::{FileState, NewFile};
-use crate::db::fixtures::pid;
+use crate::db::fixtures::{key, pid};
 use crate::db::ids::FileId;
 use crate::db::{dat_stage, files, titles};
 
@@ -129,7 +129,7 @@ fn catalogue(dir: &Path, scale: f64, unmatched: usize, dat: &[Track]) -> Db {
             let path = format!("{}/{}", t.dir, t.name);
             files::upsert(
                 &tx,
-                &psx,
+                key(&psx),
                 &NewFile {
                     crc32: Some(t.crc32),
                     md5: Some(t.md5),

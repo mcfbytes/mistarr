@@ -107,8 +107,8 @@ fn rom(c: &Connection, title: TitleId, name: &str) -> i64 {
 
 fn file(c: &Connection, rom: Option<i64>, path: &str, state: FileState) -> i64 {
     c.execute(
-        "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
-         VALUES ('gb', ?1, 4, 0, ?2, ?3, 0)",
+        "INSERT INTO files (platform, rel_path, size, mtime, rom_id, state, scanned_at)
+         VALUES (5, ?1, 4, 0, ?2, ?3, 0)",
         params![path, rom, state],
     )
     .expect("file");

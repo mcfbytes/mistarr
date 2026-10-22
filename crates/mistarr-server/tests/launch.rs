@@ -80,7 +80,7 @@ async fn launch_routes_answer_with_documented_statuses() {
             let (t, rom) = (written.titles[0], written.first_rom());
             files::upsert(
                 c,
-                &pid,
+                mistarr_server::db::fixtures::key(&pid),
                 &NewFile {
                     rom_id: Some(rom),
                     ..NewFile::unhashed("NES/a.nes", 4, 0, FileState::Pending)

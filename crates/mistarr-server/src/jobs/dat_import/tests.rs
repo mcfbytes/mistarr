@@ -13,7 +13,7 @@ use super::*;
 use crate::app::testutil::{state, zip_bytes};
 use crate::db::dats::NewVersion;
 use crate::db::files::{FileState, NewFile};
-use crate::db::fixtures::pid;
+use crate::db::fixtures::{key, pid};
 use crate::db::jobs::{self as rows, JobState};
 use crate::db::titles::RomStatus;
 use crate::db::{files, titles};
@@ -945,7 +945,7 @@ fn remove_with_files(c: &TestDb, version: DatVersionId, files: &[(&str, u32, i64
             let rom = Some(mistarr_core::RomId::new(*id));
             crate::db::files::upsert(
                 x,
-                &nes,
+                key(&nes),
                 &NewFile {
                     rom_id: rom,
                     crc32: Some(Crc32::from_u32(*crc)),
@@ -1250,7 +1250,7 @@ fn a_disc_track_is_matched_again_under_the_all_or_nothing_rule() {
                 let path = format!("PSX/Example Disc (USA)/{}", track(n));
                 files::upsert(
                     x,
-                    &psx,
+                    key(&psx),
                     &NewFile {
                         rom_id: Some(rom),
                         crc32: Some(sums.crc32),
@@ -1305,7 +1305,7 @@ fn unmatched_file(
 ) -> Result<crate::db::ids::FileId> {
     files::upsert(
         c,
-        platform,
+        key(platform),
         &NewFile {
             crc32: Some(sums.crc32),
             md5: Some(sums.md5),
@@ -1447,7 +1447,7 @@ fn a_stored_crc_matches_a_headered_file_by_its_size_less_the_header() {
             let unverified = FileState::Unverified;
             let id = files::upsert(
                 x,
-                &nes,
+                key(&nes),
                 &NewFile {
                     crc32: Some(rom.crc32),
                     md5: Some(rom.md5),
@@ -1508,7 +1508,7 @@ fn stored_whole_and_content_forms_match_headered_and_headerless_roms() {
             for (path, content, whole) in &rows {
                 ids.push(files::upsert(
                     x,
-                    &lynx,
+                    key(&lynx),
                     &NewFile {
                         crc32: Some(content.crc32),
                         md5: Some(content.md5),
@@ -1562,7 +1562,7 @@ fn a_stored_crc_allows_for_a_copier_header_only_at_its_size() {
             for (path, size) in [("SNES/Copier Quest (USA).sfc", 1536), ("SNES/b.sfc", 1040)] {
                 ids.push(files::upsert(
                     x,
-                    &snes,
+                    key(&snes),
                     &NewFile {
                         crc32: Some(rom.crc32),
                         md5: Some(rom.md5),
@@ -2077,7 +2077,7 @@ fn a_placed_file_stays_verified_when_its_rom_is_matched_again() {
             let rel = format!("SNES/{placed}");
             let file = files::upsert(
                 x,
-                &snes,
+                key(&snes),
                 &NewFile {
                     rom_id: Some(old),
                     crc32: Some(sums.crc32),
