@@ -170,6 +170,7 @@ file gives the order and the migration grouping.
 | WP-90 | Tag tables | Opus | 89 | `mistarr-server` |
 | WP-91 | Compact write-back | Opus | 77, 86 | `mistarr-server` |
 | WP-96 | Sync writes measured again | Sonnet | 86 | `docs/` |
+| WP-98 | Compact after an in-place migration | Sonnet | 91 | `mistarr-server` |
 
 ## Wave 14: local network only
 

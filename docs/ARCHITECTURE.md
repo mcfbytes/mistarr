@@ -1015,6 +1015,21 @@ of the database in RAM and write it back whole (`db::ram`):
    its write-back stops it, removes the `.new` copy and lets the job end as
    succeeded, its work being on the card. A crash during it is a crash of an
    ordinary swap.
+   A startup migration that was refused for memory or room in the memory
+   directory (not for another process holding the file, a reader keeping the
+   WAL, or the card lacking room for a second copy) is applied to the card
+   file with one connection, which is closed, and the file is then compacted
+   from the card by the same steps, still before the server opens its
+   connections or answers HTTP: more than 25% free pages, the memory check
+   read afresh, `VACUUM INTO`, verification, write-back and swap, with the
+   same refusals. On the 487 MB board, 329 MiB available against 338 MiB
+   needed for the copy sent 0024 to 0028 to the card file (129 s, 119 MiB with
+   32% free pages), after which 338 MiB available covered the 223 MiB a
+   compaction needs. `mistarr.migrating` stays present through it, names
+   "compacting the database" and keeps changing with the `VACUUM`'s
+   statements and each chunk written, so the installer's no-progress timeout
+   cannot fire; the log at info gives the sizes before and after and the card
+   writes.
    Whichever file is chosen is written to `mistarr.db.new` beside the
    database in writes of exactly 1 MiB, then synced; the card must have room
    for it, and the log at info gives the sizes before and after compacting.

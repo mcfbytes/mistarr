@@ -1625,3 +1625,192 @@ fn a_stop_during_the_second_write_back_leaves_the_file_and_no_error() {
     assert!(matches!(r, Ok(None)), "{r:?}");
     assert!(!sibling(db.path(), NEW_SUFFIX).exists());
 }
+
+/// A card database one migration behind with many free pages, its WAL emptied.
+fn behind_with_free_pages(db: &Path) {
+    at_version(db, super::super::migrate::latest() - 1, 0.01);
+    let c = Connection::open(db).expect("open");
+    churn(&c, 6).expect("churn");
+    super::super::wal_emptied(&c).expect("checkpoint");
+    c.close().expect("close");
+}
+
+/// A plan whose floor no memory meets, so the copy is declined for memory.
+fn starved(ram: &Path) -> Plan {
+    Plan {
+        floor: u64::MAX / 2,
+        ..plan(ram)
+    }
+}
+
+fn start(db: &Path, plan: &Plan, probe: Probe<'_>) -> Migrated {
+    migrate_at_start_with(db, plan, None, &mut (), probe).expect("migrate")
+}
+
+fn assert_whole(db: &Path, rows: i64) {
+    let c = Connection::open(db).expect("open");
+    let mode: String = c
+        .pragma_query_value(None, "journal_mode", |r| r.get(0))
+        .expect("mode");
+    assert_eq!(mode, "wal");
+    let ok: String = c
+        .pragma_query_value(None, "integrity_check", |r| r.get(0))
+        .expect("check");
+    assert_eq!(ok, "ok");
+    assert_eq!(
+        super::super::migrate::current_version(&c).expect("version"),
+        super::super::migrate::latest()
+    );
+    drop(c);
+    assert_eq!(titles(db), rows);
+}
+
+#[test]
+fn a_migration_declined_for_memory_is_compacted_when_the_second_check_passes() {
+    let ram = testutil::ram_dir();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("m.db");
+    behind_with_free_pages(&db);
+    let (rows, size) = (titles(&db), file_len(&db).expect("len"));
+    let mut calls = 0;
+    let mut probe = |_: &Path| {
+        calls += 1;
+        roomy()
+    };
+    let Migrated::InPlace { before, report } = start(&db, &starved(ram.path()), &mut probe) else {
+        panic!("not migrated in place");
+    };
+    assert_eq!(calls, 1);
+    assert!(before >= size);
+    assert_eq!(report.bytes, file_len(&db).expect("len"));
+    assert!(report.bytes * 2 < before, "{} of {before}", report.bytes);
+    assert_whole(&db, rows);
+    let free: i64 = Connection::open(&db)
+        .expect("open")
+        .pragma_query_value(None, "freelist_count", |r| r.get(0))
+        .expect("free");
+    assert_eq!(free, 0);
+    assert!(!sibling(&db, NEW_SUFFIX).exists());
+    assert_eq!(fs::read_dir(ram.path()).map_or(0, Iterator::count), 0);
+}
+
+#[test]
+fn a_second_check_that_fails_leaves_the_card_file_migrated_and_uncompacted() {
+    let ram = testutil::ram_dir();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("m.db");
+    behind_with_free_pages(&db);
+    let rows = titles(&db);
+    let mut calls = 0;
+    let mut probe = |_: &Path| {
+        calls += 1;
+        short()
+    };
+    let Migrated::InPlace { before, report } = start(&db, &starved(ram.path()), &mut probe) else {
+        panic!("not migrated in place");
+    };
+    assert_eq!(calls, 1);
+    assert_eq!(report.bytes, before);
+    assert_eq!(file_len(&db).expect("len"), before);
+    assert_whole(&db, rows);
+    assert_eq!(fs::read_dir(ram.path()).map_or(0, Iterator::count), 0);
+}
+
+#[test]
+fn a_migration_declined_because_another_process_holds_the_file_is_not_compacted() {
+    let ram = testutil::ram_dir();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("m.db");
+    behind_with_free_pages(&db);
+    let before = sha1(&db);
+    let child = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(File::open(&db).expect("open"))
+        .spawn()
+        .expect("sleep");
+    let _child = KillOnDrop(child);
+    crate::testing::eventually_blocking("a child holding the file to be seen", || {
+        held_elsewhere(&db)
+    });
+    let mut calls = 0;
+    let mut probe = |_: &Path| {
+        calls += 1;
+        roomy()
+    };
+    let out = start(&db, &starved(ram.path()), &mut probe);
+    assert!(matches!(out, Migrated::Nothing), "{out:?}");
+    assert_eq!(calls, 0);
+    assert_eq!(sha1(&db), before, "left for the open to migrate");
+}
+
+#[test]
+fn a_start_with_nothing_pending_does_not_compact() {
+    let ram = testutil::ram_dir();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("m.db");
+    at_version(&db, super::super::migrate::latest(), 0.01);
+    let c = Connection::open(&db).expect("open");
+    churn(&c, 6).expect("churn");
+    super::super::wal_emptied(&c).expect("checkpoint");
+    c.close().expect("close");
+    let before = sha1(&db);
+    let mut calls = 0;
+    let mut probe = |_: &Path| {
+        calls += 1;
+        roomy()
+    };
+    let out = start(&db, &starved(ram.path()), &mut probe);
+    assert!(matches!(out, Migrated::Nothing), "{out:?}");
+    assert_eq!(calls, 0);
+    assert_eq!(sha1(&db), before);
+}
+
+/// Records whether the progress file exists at each call, then passes the call on.
+struct Spy<'a> {
+    file: PathBuf,
+    seen: Vec<bool>,
+    inner: Option<&'a crate::migrating::Migrating>,
+}
+
+impl Watch for Spy<'_> {
+    fn phase(&mut self, phase: Phase) {
+        self.seen.push(self.file.is_file());
+        self.inner.phase(phase);
+    }
+
+    fn between(&mut self, phase: Phase) -> Result<()> {
+        self.seen.push(self.file.is_file());
+        self.inner.between(phase)
+    }
+}
+
+#[test]
+fn the_progress_file_is_present_and_moving_while_the_card_file_is_compacted() {
+    let ram = testutil::ram_dir();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("m.db");
+    behind_with_free_pages(&db);
+    let latest = super::super::migrate::latest();
+    let m = crate::migrating::Migrating::begin(dir.path(), &db, latest - 1, latest)
+        .expect("progress file");
+    let mut spy = Spy {
+        file: dir.path().join(crate::migrating::FILE),
+        seen: Vec::new(),
+        inner: Some(&m),
+    };
+    let steps = m.steps();
+    let mut probe = |_: &Path| roomy();
+    let out = migrate_at_start_with(
+        &db,
+        &starved(ram.path()),
+        Some(&steps),
+        &mut spy,
+        &mut probe,
+    )
+    .expect("migrate");
+    assert!(matches!(out, Migrated::InPlace { .. }), "{out:?}");
+    assert!(spy.seen.len() >= 2, "{:?}", spy.seen);
+    assert!(spy.seen.iter().all(|&present| present), "{:?}", spy.seen);
+    assert!(steps.load(std::sync::atomic::Ordering::Relaxed) > 0);
+    assert!(spy.file.is_file(), "removed only when the start is past it");
+}

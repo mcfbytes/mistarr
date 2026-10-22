@@ -623,7 +623,8 @@ pub(crate) fn open_db(config: &mut Config) -> Result<Startup> {
 }
 
 /// Runs pending migrations on a copy of the database in RAM when memory allows, so an
-/// index rebuild reaches the card as whole MiB writes; `Db::open` migrates what is left.
+/// index rebuild reaches the card as whole MiB writes. When only memory was short, the card
+/// file is migrated in place and compacted here; `Db::open` migrates what is left.
 fn migrate_in_ram(config: &Config, progress: Option<&crate::migrating::Migrating>) -> Result<()> {
     let plan = db::ram::Plan {
         dir: config.memory.import_dir.clone(),
@@ -631,19 +632,29 @@ fn migrate_in_ram(config: &Config, progress: Option<&crate::migrating::Migrating
         job: None,
         input: 0,
     };
-    match db::ram::migrate_in_ram(
+    let mut watch = progress;
+    match db::ram::migrate_at_start(
         &config.paths.db(),
         &plan,
         progress.map(crate::migrating::Migrating::steps).as_ref(),
+        &mut watch,
     ) {
-        Ok(Some(r)) => tracing::info!(
+        Ok(db::ram::Migrated::Ram(r)) => tracing::info!(
             mib = r.bytes.div_ceil(1024 * 1024),
             card_writes = r.card_writes,
             migrate_ms = r.work.as_millis(),
             write_ms = r.write_back.as_millis(),
             "database migrated in RAM"
         ),
-        Ok(None) => {}
+        Ok(db::ram::Migrated::InPlace { before, report: r }) => tracing::info!(
+            before_mib = before.div_ceil(1024 * 1024),
+            after_mib = r.bytes.div_ceil(1024 * 1024),
+            card_writes = r.card_writes,
+            migrate_ms = r.work.as_millis(),
+            compact_ms = r.write_back.as_millis(),
+            "database migrated in place"
+        ),
+        Ok(_) => {}
         Err(e @ Error::SchemaTooNew { .. }) => return Err(e),
         // A swap that could not put the old file back; opening would create an empty one.
         Err(e) if !config.paths.db().exists() => return Err(e),

@@ -3,10 +3,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
+use crate::db::ram::{Phase, Watch};
 use crate::error::Result;
 
 /// The file's name in the data directory; `scripts/install.sh` reads it.
@@ -27,13 +28,16 @@ pub type Steps = Arc<AtomicU64>;
 
 /// Keeps `<data>/mistarr.migrating` current until dropped, then removes it. Each line
 /// names the versions, the [`Steps`] count and the WAL's size, which grows while a commit
-/// writes its pages, so it changes only while the migration moves.
+/// writes its pages, so it changes only while the migration moves. While the database is
+/// compacted afterwards the line names that phase, and the count moves with the
+/// compaction's statements and each chunk it writes.
 #[derive(Debug)]
 pub struct Migrating {
     stop: Option<Sender<()>>,
     thread: Option<JoinHandle<()>>,
     path: PathBuf,
     steps: Steps,
+    phase: Arc<Mutex<&'static str>>,
 }
 
 impl Migrating {
@@ -68,13 +72,21 @@ impl Migrating {
         let path = data.join(FILE);
         let steps = Steps::default();
         let count = Arc::clone(&steps);
+        let phase = Arc::new(Mutex::new(""));
+        let named = Arc::clone(&phase);
         let mut wal = db.as_os_str().to_owned();
         wal.push("-wal");
         let wal = PathBuf::from(wal);
         let line = move || {
             let n = count.load(Ordering::Relaxed);
             let size = std::fs::metadata(&wal).map_or(0, |m| m.len());
-            format!("migrating from {from} to {to}: steps {n} wal {size}\n")
+            let phase = named.lock().map_or("", |p| *p);
+            let phase = if phase.is_empty() {
+                String::new()
+            } else {
+                format!("{phase}: ")
+            };
+            format!("migrating from {from} to {to}: {phase}steps {n} wal {size}\n")
         };
         std::fs::write(&path, line()).map_err(crate::Error::io_at(&path))?;
         let (stop, stopped) = mpsc::channel::<()>();
@@ -93,6 +105,7 @@ impl Migrating {
             thread: Some(thread),
             path,
             steps,
+            phase,
         })
     }
 
@@ -100,6 +113,26 @@ impl Migrating {
     #[must_use]
     pub fn steps(&self) -> Steps {
         Arc::clone(&self.steps)
+    }
+}
+
+/// Names the phase in the file and counts each chunk written, so the file changes while
+/// the database is compacted; `None` hears nothing.
+impl Watch for Option<&Migrating> {
+    fn phase(&mut self, phase: Phase) {
+        if let Some(m) = self {
+            if let Ok(mut name) = m.phase.lock() {
+                *name = phase.label();
+            }
+            m.steps.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn between(&mut self, _: Phase) -> Result<()> {
+        if let Some(m) = self {
+            m.steps.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(())
     }
 }
 
@@ -165,6 +198,25 @@ mod tests {
         );
         drop(m);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn a_compaction_names_its_phase_and_moves_the_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let m = Migrating::begin_every(dir.path(), &dir.path().join("m.db"), (3, 4), TICK)
+            .expect("begin");
+        let mut watch = Some(&m);
+        watch.phase(Phase::Compacting);
+        watch.between(Phase::Writing).expect("between");
+        let seen = lines(&dir.path().join(FILE), 2);
+        assert!(
+            seen.iter()
+                .all(|l| l == "migrating from 3 to 4: compacting the database: steps 2 wal 0\n"),
+            "{seen:?}"
+        );
+        let mut none: Option<&Migrating> = None;
+        none.phase(Phase::Compacting);
+        assert!(none.between(Phase::Writing).is_ok());
     }
 
     #[test]
