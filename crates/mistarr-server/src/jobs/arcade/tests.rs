@@ -184,7 +184,7 @@ fn zip_directories_are_found_case_insensitively() {
 }
 
 /// Builds `games/mame` with the zips and returns the index and a verify result.
-fn verify_with(zips: Zips<'_>, rom: &str) -> Option<(&'static str, Option<String>)> {
+fn verify_with(zips: Zips<'_>, rom: &str) -> Option<(Check, Option<String>)> {
     let dir = tempfile::tempdir().expect("tempdir");
     for (zip, members) in zips {
         write_zip(&dir.path().join("mame").join(zip), members);
@@ -210,20 +210,23 @@ fn verify_assembles_parts_and_compares_the_md5() {
         ("exblast.zip", &[("CPU.BIN", b"CPU0extra")]),
         ("exparent.zip", &[("gfx.bin", b"23")]),
     ];
-    assert_eq!(verify_with(zips, &rom), Some(("match", None)));
+    assert_eq!(verify_with(zips, &rom), Some((Check::Match, None)));
 
     let bad = rom.replace(&md5.to_string(), &md5_of(&[b"other"]).to_string());
     let (state, detail) = verify_with(zips, &bad).expect("checked");
-    assert_eq!(state, "mismatch");
+    assert_eq!(state, Check::Mismatch);
     assert!(detail.is_some_and(|d| d.contains("rom 0")));
 
     let short: Zips<'_> = &[("exblast.zip", &[("cpu.bin", b"CPU0")])];
     let (state, detail) = verify_with(short, &rom).expect("checked");
-    assert_eq!(state, "missing_part");
+    assert_eq!(state, Check::MissingPart);
     assert!(detail.is_some_and(|d| d.contains("gfx.bin")));
 
     let refused = format!(r#"<rom index="0" zip="exblast.zip" md5="{md5}"><group/></rom>"#);
-    assert_eq!(verify_with(zips, &refused).map(|v| v.0), Some("refused"));
+    assert_eq!(
+        verify_with(zips, &refused).map(|v| v.0),
+        Some(Check::Refused)
+    );
 
     let unchecked = r#"<rom index="0" zip="exblast.zip"><part name="cpu.bin"/></rom>"#;
     assert_eq!(verify_with(zips, unchecked), None);
@@ -238,7 +241,7 @@ fn one_matching_alternative_of_an_index_is_enough() {
            <rom index="1" zip="exblast.zip" md5="{good}"><part name="cpu.bin"/></rom>"#
     );
     let zips: Zips<'_> = &[("exblast.zip", &[("cpu.bin", b"CPU0extra")])];
-    assert_eq!(verify_with(zips, &rom), Some(("match", None)));
+    assert_eq!(verify_with(zips, &rom), Some((Check::Match, None)));
 }
 
 #[tokio::test]
@@ -279,7 +282,7 @@ async fn the_job_stores_retires_and_checks() {
         .await
         .expect("info")
         .expect("mra");
-    assert_eq!(info.md5_check.as_deref(), Some("match"));
+    assert_eq!(info.md5_check, Some(Check::Match));
     assert!(info.missing_zips.is_empty());
     assert_eq!(info.setname.as_deref(), Some("exblast"));
 
@@ -311,7 +314,7 @@ async fn the_job_stores_retires_and_checks() {
         .await
         .expect("info")
         .expect("mra");
-    assert_eq!(info.md5_check.as_deref(), Some("mismatch"));
+    assert_eq!(info.md5_check, Some(Check::Mismatch));
 
     fs::remove_file(arcade.join("Example Blaster.mra")).expect("rm");
     assert!(enqueue_if_relevant(&app).await.expect("enqueue").is_some());
@@ -354,7 +357,7 @@ async fn run(app: &Arc<AppState>) -> serde_json::Value {
 async fn stored(app: &Arc<AppState>, rel: &str) -> Option<rows::StoredMra> {
     let rel = rel.to_owned();
     app.db
-        .read(move |c| rows::stored_mra(c, &platform(), &rel))
+        .read(move |c| rows::stored_mra(c, super::key(c)?, &rel))
         .await
         .expect("stored")
 }
@@ -406,7 +409,7 @@ async fn an_unreadable_mra_keeps_its_title_and_check() {
             .expect("mra")
             .md5_check
     };
-    assert_eq!(check(app.clone()).await.as_deref(), Some("match"));
+    assert_eq!(check(app.clone()).await, Some(Check::Match));
     fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
     if File::open(&path).is_ok() {
         return;
@@ -416,20 +419,20 @@ async fn an_unreadable_mra_keeps_its_title_and_check() {
         &[("cpu.bin", b"CPU0"), ("x", b"")],
     );
     run(&app).await;
-    assert_eq!(check(app.clone()).await.as_deref(), Some("match"));
+    assert_eq!(check(app.clone()).await, Some(Check::Match));
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).expect("chmod");
     fs::write(&path, b"").expect("truncate");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).expect("chmod");
     run(&app).await;
     assert!(stored(&app, "Example Blaster.mra").await.is_some());
-    assert_eq!(check(app.clone()).await.as_deref(), Some("match"));
+    assert_eq!(check(app.clone()).await, Some(Check::Match));
 }
 
 async fn picks(app: &Arc<AppState>) -> i64 {
     app.db
         .read(|c| {
             Ok(c.query_row(
-                "SELECT COUNT(*) FROM titles WHERE platform_id = 'arcade' AND is_1g1r_pick = 1",
+                "SELECT COUNT(*) FROM titles WHERE platform = (SELECT id FROM platforms WHERE slug = 'arcade') AND is_1g1r_pick = 1",
                 [],
                 |r| r.get(0),
             )?)
@@ -451,8 +454,9 @@ async fn a_run_stopped_after_storing_leaves_the_picks_to_the_next() {
     let (version, run_no) = app
         .db
         .write(|c| {
-            let v = rows::mra_version(c, &platform(), 1)?;
-            Ok((v, rows::next_run(c, &platform())?))
+            let key = super::key(c)?;
+            let v = rows::mra_version(c, key, 1)?;
+            Ok((v, rows::next_run(c, key)?))
         })
         .await
         .expect("version");
@@ -507,7 +511,7 @@ async fn an_unchanged_catalogue_leaves_bound_sources_mapped() {
     };
     let stamp = || async {
         app.db
-            .read(|c| crate::db::candidates::rom_stamp(c, &PlatformId::new(PLATFORM)))
+            .read(|c| crate::db::candidates::rom_stamp(c, super::key(c)?))
             .await
             .expect("stamp")
     };

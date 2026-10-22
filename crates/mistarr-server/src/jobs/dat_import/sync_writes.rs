@@ -178,7 +178,7 @@ fn recompute(db: &Db) {
         }
     }
     db.write_tx_blocking(|tx| {
-        titles::recompute::recompute_platform(tx, &pid("psx"), &Prefs::default())?;
+        titles::recompute::recompute_platform(tx, key(&pid("psx")), &Prefs::default())?;
         Ok(())
     })
     .expect("recompute");

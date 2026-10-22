@@ -1,13 +1,12 @@
 //! Browse and search speed on the synthetic full catalogue; see `docs/TESTING.md`
 //! "Browse speed". Run with `--nocapture` to print the timings.
 
-use mistarr_server::db::fixtures::pid;
+use mistarr_server::db::fixtures::{key, pid, platform_ref};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use mistarr_core::naming::{group_key, parse_name};
-use mistarr_core::PlatformId;
 use mistarr_server::db::dat_stage::{self, StagedGame, StagedRom};
 use mistarr_server::db::sql::Page;
 use mistarr_server::db::titles::browse::{Browse, SearchShape, Sort, SEARCH_SHAPE};
@@ -21,31 +20,31 @@ const HIDE: [&str; 6] = ["bios", "beta", "proto", "demo", "sample", "program"];
 
 /// The reference aggregation query for `title_groups`, computed per request.
 const REFERENCE: &str = "CREATE TEMP VIEW reference_groups AS
-SELECT g.parent_id, g.platform_id, p.base_name, p.name,
+SELECT g.parent_id, g.platform, p.base_name, p.name,
        g.variants, g.have_verified, g.wanted, g.has_pick, g.pick_id, g.newest_id
 FROM (
-  SELECT v.platform_id, v.parent_id, COUNT(*) AS variants,
+  SELECT v.platform, v.parent_id, COUNT(*) AS variants,
          SUM(v.roms > 0 AND v.roms_verified = v.roms) AS have_verified,
          SUM(v.wanted) AS wanted, MAX(v.is_1g1r_pick) AS has_pick,
          MAX(CASE WHEN v.is_1g1r_pick = 1 THEN v.id END) AS pick_id, MAX(v.id) AS newest_id
   FROM (
-    SELECT t.platform_id, t.parent_id, t.id, t.wanted, t.is_1g1r_pick,
+    SELECT t.platform, t.parent_id, t.id, t.wanted, t.is_1g1r_pick,
            COUNT(DISTINCT r.id) AS roms,
            COUNT(DISTINCT CASE WHEN f.state = 1
                                  OR (r.present = 1
-                                     AND COALESCE(t.mra_check, '') NOT IN ('mismatch', 'missing_part'))
+                                     AND COALESCE(t.mra_check, 0) < 2)
                                THEN r.id END) AS roms_verified
     FROM titles t
     LEFT JOIN roms r ON r.title_id = t.id AND r.retired = 0
     LEFT JOIN files f ON f.rom_id = r.id
     WHERE t.retired = 0
-    GROUP BY t.platform_id, t.parent_id, t.id
+    GROUP BY t.platform, t.parent_id, t.id
   ) v
-  GROUP BY v.platform_id, v.parent_id
+  GROUP BY v.platform, v.parent_id
 ) g
 JOIN titles p ON p.id = g.parent_id;";
 
-const REFERENCE_WHERE: &str = "g.platform_id = ?1
+const REFERENCE_WHERE: &str = "g.platform = ?1
     AND EXISTS (
       SELECT 1 FROM titles v WHERE v.parent_id = g.parent_id AND v.retired = 0
         AND NOT EXISTS (SELECT 1 FROM title_flags f
@@ -78,7 +77,7 @@ fn reference_browse(c: &Connection, platform: &str) -> (Vec<i64>, u64) {
     let total: i64 = c
         .query_row(
             &format!("SELECT COUNT(*) FROM reference_groups g WHERE {REFERENCE_WHERE}"),
-            params![platform, hidden],
+            params![key(&pid(platform)).get(), hidden],
             |r| r.get(0),
         )
         .expect("reference total");
@@ -88,7 +87,7 @@ fn reference_browse(c: &Connection, platform: &str) -> (Vec<i64>, u64) {
              ORDER BY g.base_name COLLATE NOCASE, g.parent_id LIMIT 60"
         ))
         .expect("prepare")
-        .query_map(params![platform, hidden], |r| r.get(0))
+        .query_map(params![key(&pid(platform)).get(), hidden], |r| r.get(0))
         .expect("query")
         .collect::<rusqlite::Result<_>>()
         .expect("rows");
@@ -112,14 +111,8 @@ fn page(
         limit: 60,
         offset: 0,
     };
-    let got = titles::browse::browse_with(
-        c,
-        &PlatformId::new(platform.to_owned()),
-        &filter,
-        page,
-        shape,
-    )
-    .expect("browse");
+    let got = titles::browse::browse_with(c, &platform_ref(&pid(platform)), &filter, page, shape)
+        .expect("browse");
     (
         got.items.into_iter().map(|r| r.parent_id.get()).collect(),
         got.total,
@@ -270,17 +263,17 @@ fn load(c: &mut Connection, maintained: bool) -> Duration {
         dat_name: "Synthetic - Super",
         version: "1",
         source_file: "s.dat",
-        platform: Some("snes"),
+        platform: Some(key(&pid("snes"))),
         now: 1,
     };
     let plan = dats::upsert_version(&tx, &v).expect("version");
     dats::begin_load(&tx, plan.id).expect("begin");
-    dat_stage::apply(&tx, &pid("snes"), plan.id).expect("apply");
+    dat_stage::apply(&tx, &platform_ref(&pid("snes")), plan.id).expect("apply");
     titles::recompute::link_parents(&tx, plan.id, false).expect("link");
     dats::retire_absent(&tx, plan.id).expect("retire");
     titles::recompute::recompute_platform(
         &tx,
-        &pid("snes"),
+        key(&pid("snes")),
         &mistarr_core::select::Prefs::default(),
     )
     .expect("recompute");

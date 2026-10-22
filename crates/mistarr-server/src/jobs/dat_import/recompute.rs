@@ -134,7 +134,9 @@ pub(super) fn recompute_pass(
             }
         }
         Pass::Picking => {
-            tally.picked = titles::recompute::recompute_platform(tx, platform, prefs)?;
+            if let Some(p) = PlatformRef::resolve(tx, platform)? {
+                tally.picked = titles::recompute::recompute_platform(tx, p.key, prefs)?;
+            }
             Pass::Done
         }
         Pass::Done => Pass::Done,

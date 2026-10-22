@@ -13,10 +13,12 @@ use mistarr_core::dat::{
 };
 use mistarr_core::hash::HeaderRule;
 use mistarr_core::naming::{group_key, parse_name};
+use mistarr_core::{PlatformId, PlatformKey};
 
 use super::{phase, room, stem, Loaded, Member, Meter, Outcome, Request, YIELD_FOR};
 use crate::db::dat_stage::{self, StagedGame, StagedRom};
 use crate::db::dats::{self, NewVersion};
+use crate::db::platforms as platform_rows;
 use crate::db::titles;
 use crate::db::Db;
 use crate::error::{Error, Result};
@@ -264,6 +266,14 @@ fn open_stream<R: BufRead>(
     Ok((stream, id))
 }
 
+/// The key of the platform a DAT's header or request binds it to, `None` when unbound or unknown.
+fn bound_platform(db: &Db, slug: Option<String>) -> Result<Option<PlatformKey>> {
+    match slug {
+        Some(slug) => db.read_blocking(|c| platform_rows::key(c, &PlatformId::new(slug))),
+        None => Ok(None),
+    }
+}
+
 /// Streams one DAT into `dat_stage` in chunks of [`STAGE_CHUNK`] games, each
 /// its own short write, then applies it in one transaction so readers see the
 /// old titles or the new ones, never a mix. A parse error becomes
@@ -295,11 +305,12 @@ pub(super) fn import_stream<R: BufRead>(
             return Ok(Outcome::Skipped);
         }
     }
+    let bound_key = bound_platform(db, bound)?;
     let new = NewVersion {
         dat_name: &dat_name,
         version: &version,
         source_file: &req.source_file,
-        platform: bound.as_deref(),
+        platform: bound_key,
         now: req.now,
     };
     let newer = || {
@@ -353,7 +364,7 @@ pub(super) fn import_stream<R: BufRead>(
         if req.bind.is_some() && !plan.current {
             return Ok(newer());
         }
-        let platform = plan.platform_id.clone().filter(|_| plan.current && staging);
+        let platform = plan.platform.clone().filter(|_| plan.current && staging);
         if let Some(p) = &platform {
             phase(req, "storing");
             dats::begin_load(&tx, plan.id)?;
@@ -365,14 +376,14 @@ pub(super) fn import_stream<R: BufRead>(
             titles::recompute::link_parents(&tx, plan.id, clone_of)?;
             retired = dats::retire_absent(&tx, plan.id)?;
             phase(req, "picking");
-            titles::recompute::recompute_platform(&tx, p, &req.prefs)?;
+            titles::recompute::recompute_platform(&tx, p.key, &req.prefs)?;
         }
         dat_stage::clear(&tx)?;
         phase(req, "refreshing");
         crate::db::commit(tx)?;
         Ok(Outcome::Loaded(Loaded {
             version: plan.id,
-            platform: plan.platform_id,
+            platform: plan.platform.map(|p| p.id),
             games,
             has_titles: platform.is_some(),
             retired,

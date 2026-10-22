@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 use super::{ApiError, ApiJson, ApiPath, ApiQuery, OptionalJson, Paging};
 use crate::app::AppState;
 use crate::db::ids::{FileId, TitleId};
+use crate::db::platforms::PlatformRef;
 use crate::db::sql::Paged;
 use crate::db::titles;
 use crate::db::titles::browse::{Browse, GroupRow, Sort, Tri};
@@ -170,10 +171,11 @@ async fn list(
     let Paged { items, total } = app
         .db
         .read(move |c| {
-            if platforms::find(c, &id)?.is_none() {
+            let Some(row) = platforms::find(c, &id)? else {
                 return Ok(None);
-            }
-            titles::browse::browse(c, &id, &filter, page).map(Some)
+            };
+            let platform = PlatformRef { id, key: row.key };
+            titles::browse::browse(c, &platform, &filter, page).map(Some)
         })
         .await?
         .ok_or_else(|| ApiError::no_such("platform"))?;

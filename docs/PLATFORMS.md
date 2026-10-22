@@ -204,7 +204,7 @@ accumulated output to bound, but still well inside the board's shared
 budget.
 
 The arcade catalogue job (ARCHITECTURE.md "Arcade catalogue") turns each MRA
-into one `arcade` title with `source = 'mra'`: `<name>`, `<setname>` and
+into one `arcade` title with the mra source: `<name>`, `<setname>` and
 `<rbf>` are kept, the name is parsed for regions and flags like a DAT name,
 and titles group by base name among MRA titles only, so an `_alternatives`
 MRA is a variant of its main one. Each zip named by any `zip` attribute

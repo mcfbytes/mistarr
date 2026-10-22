@@ -12,6 +12,7 @@ use crate::db::downloads::DownloadState;
 use crate::db::ids::{DatVersionId, DownloadId, SourceId, TitleId};
 use crate::db::sources::{self, SourceRow};
 use crate::db::sql::{self, get_u64, Page, Paged, ROM_NAME};
+use crate::db::titles::TitleSource;
 use crate::error::Result;
 
 /// A file that holds a matched rom or a candidate rom, as `matched_count` counts it.
@@ -592,11 +593,12 @@ impl PreviewTally {
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn platforms_with_dat(conn: &Connection) -> Result<Vec<PlatformId>> {
     let ids = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT p.slug FROM platforms p WHERE EXISTS (SELECT 1 FROM titles t
-               WHERE t.platform_id = p.slug AND t.source = 'dat' AND t.retired = 0)
-             ORDER BY p.slug",
-        )?
+                   WHERE t.platform = p.id AND t.source = {} AND t.retired = 0)
+                 ORDER BY p.slug",
+            TitleSource::Dat.sql()
+        ))?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     Ok(ids)
@@ -724,11 +726,11 @@ mod tests {
         let c = conn();
         let (id, first) = source(&c);
         c.execute_batch(
-            "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at,
+            "INSERT INTO dat_versions (platform, family, dat_name, version, source_file, loaded_at,
                game_count)
-             VALUES ('nes', 'second test', '2', 'second.dat', 0, 0);
-             INSERT INTO titles (platform_id, dat_version_id, name, base_name)
-             VALUES ('nes', (SELECT id FROM dat_versions WHERE dat_name = 'second test'),
+             VALUES ((SELECT id FROM platforms WHERE slug = 'nes'), '', 'second test', '2', 'second.dat', 0, 0);
+             INSERT INTO titles (platform, group_key, dat_version_id, name, base_name)
+             VALUES ((SELECT id FROM platforms WHERE slug = 'nes'), '', (SELECT id FROM dat_versions WHERE dat_name = 'second test'),
                      'Third Try', 'Third Try');
              INSERT INTO roms (title_id, name, size, status)
              VALUES ((SELECT id FROM titles WHERE name = 'Third Try'),

@@ -2,7 +2,7 @@
 //! be identified. See `docs/VERIFICATION.md` "CHD images" and `docs/DATA-MODEL.md`.
 
 use mistarr_core::chd::{ChdId, Unidentifiable};
-use mistarr_core::{Crc32, Hashes, Md5, PlatformId, PlatformKey, Sha1};
+use mistarr_core::{Crc32, Hashes, Md5, PlatformKey, Sha1};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Serialize, Serializer};
 
@@ -10,6 +10,7 @@ use super::files::{self, FileRow, FileState, NewFile};
 use super::ids::{FileId, TitleId};
 use super::platforms::KindCode;
 use super::sql::{self, to_i64};
+use super::titles::TitleSource;
 use crate::error::Result;
 
 /// Why a CHD's `files` row is `unidentified`: the stable code stored in `files.reason`.
@@ -493,17 +494,18 @@ pub fn set_reason_if(
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn layout_known(conn: &Connection, platform: &PlatformId, sizes: &[u64]) -> Result<bool> {
+pub fn layout_known(conn: &Connection, platform: PlatformKey, sizes: &[u64]) -> Result<bool> {
     let Some(&first) = sizes.first() else {
         return Ok(false);
     };
     let titles: Vec<TitleId> = conn
-        .prepare_cached(
+        .prepare_cached(&format!(
             "SELECT DISTINCT r.title_id FROM roms r INDEXED BY roms_track_size
              JOIN titles t ON t.id = r.title_id
-             WHERE r.size = ?2 AND r.size % 2352 = 0 AND t.platform_id = ?1 AND t.source = 'dat'
+             WHERE r.size = ?2 AND r.size % 2352 = 0 AND t.platform = ?1 AND t.source = {}
                AND r.retired = 0 AND t.retired = 0 AND lower(r.name) NOT LIKE '%.cue'",
-        )?
+            TitleSource::Dat.sql()
+        ))?
         .query_map(params![platform, to_i64(first)], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let mut want: Vec<i64> = sizes.iter().map(|&s| to_i64(s)).collect();
@@ -574,6 +576,7 @@ pub fn replace_container(
 mod tests {
     use super::*;
     use crate::db::fixtures::{conn, key};
+    use mistarr_core::PlatformId;
 
     fn psx() -> PlatformId {
         PlatformId::new("psx")
@@ -756,13 +759,13 @@ mod tests {
             disc = disc.rom(name, &t, crate::db::titles::RomStatus::Good);
         }
         disc.write(&c).expect("disc");
-        assert!(layout_known(&c, &pid, &[2352, 4704]).expect("known"));
-        assert!(layout_known(&c, &pid, &[4704, 2352]).expect("known"));
-        assert!(!layout_known(&c, &pid, &[4704]).expect("fewer"));
-        assert!(!layout_known(&c, &pid, &[4704, 2352, 2352]).expect("more"));
-        assert!(!layout_known(&c, &pid, &[70, 4704, 2352]).expect("cue is not a track"));
-        assert!(!layout_known(&c, &pid, &[]).expect("empty"));
-        assert!(!layout_known(&c, &PlatformId::new("saturn"), &[2352, 4704]).expect("other"));
+        assert!(layout_known(&c, key(&pid), &[2352, 4704]).expect("known"));
+        assert!(layout_known(&c, key(&pid), &[4704, 2352]).expect("known"));
+        assert!(!layout_known(&c, key(&pid), &[4704]).expect("fewer"));
+        assert!(!layout_known(&c, key(&pid), &[4704, 2352, 2352]).expect("more"));
+        assert!(!layout_known(&c, key(&pid), &[70, 4704, 2352]).expect("cue is not a track"));
+        assert!(!layout_known(&c, key(&pid), &[]).expect("empty"));
+        assert!(!layout_known(&c, key(&PlatformId::new("saturn")), &[2352, 4704]).expect("other"));
     }
 
     #[test]

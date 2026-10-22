@@ -13,7 +13,7 @@ use super::super::sql::ROM_NAME;
 use super::super::views::source_detail;
 use super::super::{candidates, downloads, downloads_import, files, imports, roms, sources};
 use super::super::{
-    fixtures::{key, pid},
+    fixtures::{key, pid, platform_ref},
     titles,
 };
 use super::{seeded, Read, FIFTY};
@@ -122,7 +122,7 @@ fn tiers(live: &str, order: &str) -> Vec<Out> {
         "SELECT r.id, r.title_id, {ROM_NAME}, r.status, t.name
          FROM roms r JOIN titles t ON t.id = r.title_id
          JOIN dat_versions d ON d.id = t.dat_version_id
-         WHERE t.platform_id = ?1 AND t.source = 'dat' AND {live}"
+         WHERE t.platform = ?1 AND t.source = 0 AND {live}"
     );
     [
         "r.sha1 = ?2",
@@ -149,7 +149,7 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
         (
             "best match",
             Box::new(move |c| {
-                drop(roms::match_rom(c, &pid("nes"), zero.0, zero.1, zero.2, 16).expect("match"));
+                drop(roms::match_rom(c, key(&pid("nes")), zero.0, zero.1, zero.2, 16).expect("match"));
             }),
             tiers("", BEST),
         ),
@@ -157,7 +157,7 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
             "stored match",
             Box::new(move |c| {
                 let nes = pid("nes");
-                drop(roms::match_live_rom(c, &nes, zero.0, zero.1, zero.2, 16).expect("match"));
+                drop(roms::match_live_rom(c, key(&nes), zero.0, zero.1, zero.2, 16).expect("match"));
             }),
             tiers(LIVE, BEST),
         ),
@@ -166,7 +166,7 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
             Box::new(|c| {
                 let h = mistarr_core::hash::hash_reader(&b"a"[..], HeaderRule::default(), None)
                     .expect("hash");
-                drop(roms::roms_matching(c, &pid("nes"), &h).expect("matching"));
+                drop(roms::roms_matching(c, key(&pid("nes")), &h).expect("matching"));
             }),
             tiers(LIVE, " ORDER BY r.id"),
         ),
@@ -182,12 +182,12 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
             "crc candidate",
             Box::new(|c| {
                 let crc = Crc32::from_u32(0);
-                roms::crc_candidate_exists(c, &pid("nes"), crc, 16).expect("candidate");
+                roms::crc_candidate_exists(c, key(&pid("nes")), crc, 16).expect("candidate");
             }),
             vec![Out::Sql(
                 "SELECT EXISTS(
                    SELECT 1 FROM roms r JOIN titles t ON t.id = r.title_id
-                   WHERE t.platform_id = ?1 AND t.source = 'dat' AND r.crc32 = ?2 AND r.size = ?3)"
+                   WHERE t.platform = ?1 AND t.source = 0 AND r.crc32 = ?2 AND r.size = ?3)"
                     .into(),
             )],
         ),
@@ -204,10 +204,10 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
         ),
         (
             "live zips",
-            Box::new(|c| drop(roms::live_zip_roms(c, &pid("arcade")).expect("zips"))),
+            Box::new(|c| drop(roms::live_zip_roms(c, key(&pid("arcade"))).expect("zips"))),
             vec![Out::Sql(format!(
                 "SELECT COALESCE(r.zip_dir, ''), {ROM_NAME}, r.id FROM roms r JOIN titles t ON t.id = r.title_id
-                 WHERE t.platform_id = ?1 AND t.source = 'mra' AND t.retired = 0 AND r.retired = 0
+                 WHERE t.platform = ?1 AND t.source = 1 AND t.retired = 0 AND r.retired = 0
                  ORDER BY r.id"
             ))],
         ),
@@ -216,12 +216,12 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
             Box::new(|c| {
                 use mistarr_sources::fuzzy::SizeIndex as _;
                 let nes = pid("nes");
-                drop(candidates::SqlSizeIndex::new(c, &nes).roms_of_size(40_976));
+                drop(candidates::SqlSizeIndex::new(c, &platform_ref(&nes)).roms_of_size(40_976));
             }),
             vec![Out::Sql(
                 "SELECT r.id, r.match_base, COALESCE(t.group_root, t.parent_id, t.id)
                  FROM roms r JOIN titles t ON t.id = r.title_id
-                 WHERE r.size IN (?2, ?3) AND t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0
+                 WHERE r.size IN (?2, ?3) AND t.platform = ?1 AND r.retired = 0 AND t.retired = 0
                    AND r.match_base IS NOT NULL
                    AND NOT EXISTS (SELECT 1 FROM title_flags f
                                    WHERE f.title_id = t.id AND f.flag = 'bios')
@@ -231,11 +231,11 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
         ),
         (
             "rom stamp",
-            Box::new(|c| drop(candidates::rom_stamp(c, &pid("nes")).expect("stamp"))),
+            Box::new(|c| drop(candidates::rom_stamp(c, key(&pid("nes"))).expect("stamp"))),
             vec![Out::Sql(
                 "SELECT r.id, COALESCE(t.group_root, t.id)
                  FROM roms r JOIN titles t ON t.id = r.title_id
-                 WHERE t.platform_id = ?1 AND r.retired = 0 AND t.retired = 0"
+                 WHERE t.platform = ?1 AND r.retired = 0 AND t.retired = 0"
                     .into(),
             )],
         ),
@@ -243,13 +243,13 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
             "foreign proofs",
             Box::new(|c| {
                 let nes = pid("nes");
-                candidates::drop_foreign_proofs(c, SourceId::new(1), &nes).expect("drop");
+                candidates::drop_foreign_proofs(c, SourceId::new(1), key(&nes)).expect("drop");
             }),
             vec![Out::Sql(
                 "UPDATE torrent_files SET rom_id = NULL, confidence = NULL
                  WHERE source_id = ?1 AND confidence = ?3 AND NOT EXISTS (
                    SELECT 1 FROM roms r JOIN titles t ON t.id = r.title_id
-                   WHERE r.id = torrent_files.rom_id AND t.platform_id = ?2
+                   WHERE r.id = torrent_files.rom_id AND t.platform = ?2
                      AND r.retired = 0 AND t.retired = 0)"
                     .into(),
             )],
@@ -260,7 +260,7 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
                 downloads::best_file(c, RomId::new(1)).expect("best");
             }),
             vec![Out::Sql(
-                "SELECT t.platform_id FROM roms r JOIN titles t ON t.id = r.title_id WHERE r.id = ?1"
+                "SELECT (SELECT p.slug FROM platforms p WHERE p.id = t.platform) FROM roms r JOIN titles t ON t.id = r.title_id WHERE r.id = ?1"
                     .into(),
             )],
         ),
@@ -283,7 +283,7 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
                 drop(titles::detail::group_detail(c, TitleId::new(1)).expect("detail"));
             }),
             vec![
-                Out::Sql("SELECT platform_id, base_name FROM titles WHERE id = ?1".into()),
+                Out::Sql("SELECT (SELECT p.slug FROM platforms p WHERE p.id = platform), base_name FROM titles WHERE id = ?1".into()),
                 Out::Sql(
                     "SELECT t.id, t.name, t.revision, t.is_1g1r_pick,
                             t.wanted, t.retired, t.inferred, t.dat_version_id, t.source
@@ -309,7 +309,7 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
             "title entry",
             Box::new(|c| drop(imports::title_entry(c, TitleId::new(1)).expect("entry"))),
             vec![Out::Sql(
-                "SELECT platform_id, name, source FROM titles WHERE id = ?1".into(),
+                "SELECT (SELECT p.slug FROM platforms p WHERE p.id = platform), name, source FROM titles WHERE id = ?1".into(),
             )],
         ),
         (
@@ -319,8 +319,8 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
                 drop(downloads::get(c, DownloadId::new(1)).expect("get"));
             }),
             vec![
-                Out::Swap(&[("title_view dt", "titles dt"), ("dt.platform,", "dt.platform_id,")]),
-                Out::Swap(&[("title_view dt", "titles dt"), ("dt.platform,", "dt.platform_id,")]),
+                Out::Swap(&[("title_view dt", "titles dt"), ("dt.platform,", "(SELECT p.slug FROM platforms p WHERE p.id = dt.platform),")]),
+                Out::Swap(&[("title_view dt", "titles dt"), ("dt.platform,", "(SELECT p.slug FROM platforms p WHERE p.id = dt.platform),")]),
             ],
         ),
         (
@@ -379,7 +379,7 @@ fn other_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
                 Out::Sql(format!(
                     "SELECT {file_cols} FROM files f JOIN roms r ON r.id = f.rom_id
                      JOIN titles t ON t.id = r.title_id
-                     WHERE f.platform = ?1 AND t.source = 'dat' AND (r.retired = 1 OR t.retired = 1)
+                     WHERE f.platform = ?1 AND t.source = 0 AND (r.retired = 1 OR t.retired = 1)
                      ORDER BY f.id LIMIT ?2"
                 )),
                 Out::Sql(format!(

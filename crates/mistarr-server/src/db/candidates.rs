@@ -3,14 +3,16 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use mistarr_core::{PlatformId, RomId};
+use mistarr_core::{PlatformId, PlatformKey, RomId};
 use mistarr_sources::binding::Confidence;
 use mistarr_sources::fuzzy::{SizeIndex, SizedRom};
 use rusqlite::{params, Connection};
 use serde::Serialize;
 
 use super::ids::{SourceId, TitleId};
+use super::platforms::PlatformRef;
 use super::sql::{self, code_enum};
+use super::titles::TitleSource;
 use crate::error::Result;
 
 code_enum! {
@@ -363,7 +365,7 @@ pub fn apply(conn: &Connection, source: SourceId, change: &Change) -> Result<()>
 pub fn drop_foreign_proofs(
     conn: &Connection,
     source: SourceId,
-    platform: &PlatformId,
+    platform: PlatformKey,
 ) -> Result<usize> {
     Ok(conn.execute(
         "UPDATE torrent_files SET rom_id = NULL, confidence = NULL
@@ -403,11 +405,14 @@ pub fn prove(conn: &Connection, source: SourceId, index: u32, rom: RomId) -> Res
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn rom_stamp(conn: &Connection, platform: &PlatformId) -> Result<String> {
+pub fn rom_stamp(conn: &Connection, platform: PlatformKey) -> Result<String> {
     let versions: String = conn.query_row(
-        "SELECT COALESCE(group_concat(id || '@' || loaded_at, ','), '')
-         FROM (SELECT id, loaded_at FROM dat_versions
-               WHERE platform_id = ?1 AND retired = 0 AND source != 'mra' ORDER BY id)",
+        &format!(
+            "SELECT COALESCE(group_concat(id || '@' || loaded_at, ','), '')
+             FROM (SELECT id, loaded_at FROM dat_versions
+                   WHERE platform = ?1 AND retired = 0 AND source != {} ORDER BY id)",
+            TitleSource::Mra.sql()
+        ),
         [platform],
         |r| r.get(0),
     )?;
@@ -616,7 +621,7 @@ pub fn for_group(conn: &Connection, parent: TitleId) -> Result<Vec<(TitleId, Ava
 /// group. Query failures read as no rom.
 pub struct SqlSizeIndex<'c> {
     conn: &'c Connection,
-    platform: &'c PlatformId,
+    platform: PlatformKey,
     header: u64,
 }
 
@@ -624,11 +629,11 @@ impl<'c> SqlSizeIndex<'c> {
     /// An index over `conn` for `platform`; call
     /// [`super::sources::refresh_match_keys`] on it first.
     #[must_use]
-    pub fn new(conn: &'c Connection, platform: &'c PlatformId) -> Self {
+    pub fn new(conn: &'c Connection, platform: &PlatformRef) -> Self {
         Self {
             conn,
-            platform,
-            header: header_len(platform),
+            platform: platform.key,
+            header: header_len(&platform.id),
         }
     }
 }
@@ -681,7 +686,7 @@ mod tests {
 
     use super::*;
     use crate::db::fixtures::conn;
-    use crate::db::fixtures::{pid, seed_rom};
+    use crate::db::fixtures::{key, pid, platform_ref, seed_rom};
     use crate::db::sources::{self, NewSource, SourceState};
 
     fn source(c: &Connection, byte: &str, state: SourceState) -> SourceId {
@@ -780,10 +785,10 @@ mod tests {
         );
         let snes = PlatformId::new("snes");
         assert_eq!(
-            drop_foreign_proofs(&c, src, &PlatformId::new("nes")).expect("nes"),
+            drop_foreign_proofs(&c, src, key(&PlatformId::new("nes"))).expect("nes"),
             0
         );
-        assert_eq!(drop_foreign_proofs(&c, src, &snes).expect("snes"), 1);
+        assert_eq!(drop_foreign_proofs(&c, src, key(&snes)).expect("snes"), 1);
         assert!(stored(&c, src).expect("stored").proven.is_empty());
     }
 
@@ -939,7 +944,7 @@ mod tests {
         let other = seed_rom(&c, &pid("nes"), "Other (World).nes", 8, &[]).expect("other");
         sources::refresh_match_keys(&c).expect("keys");
         let nes = PlatformId::new("nes");
-        let index = SqlSizeIndex::new(&c, &nes);
+        let index = SqlSizeIndex::new(&c, &platform_ref(&nes));
         let group = title_of(&c, a).get();
         assert_eq!(
             index.roms_of_size(16),
@@ -966,25 +971,25 @@ mod tests {
         assert_eq!(rank("x"), "x IS NULL, x", "a NULL confidence sorts last");
         assert!(tier("x").contains("IN (0, 1, 2)"));
         assert!(not_bad("1", "2", "3").contains("b.rom_id = 1"));
-        let before = rom_stamp(&c, &nes).expect("stamp");
+        let before = rom_stamp(&c, key(&nes)).expect("stamp");
         seed_rom(&c, &pid("nes"), "New (World).nes", 8, &[]).expect("new");
-        assert_ne!(rom_stamp(&c, &nes).expect("stamp"), before);
-        let before = rom_stamp(&c, &nes).expect("stamp");
+        assert_ne!(rom_stamp(&c, key(&nes)).expect("stamp"), before);
+        let before = rom_stamp(&c, key(&nes)).expect("stamp");
         c.execute("UPDATE dat_versions SET loaded_at = loaded_at + 1", [])
             .expect("reload");
         assert_ne!(
-            rom_stamp(&c, &nes).expect("stamp"),
+            rom_stamp(&c, key(&nes)).expect("stamp"),
             before,
             "a reload that updates roms in place moves the stamp"
         );
-        let before = rom_stamp(&c, &nes).expect("stamp");
+        let before = rom_stamp(&c, key(&nes)).expect("stamp");
         c.execute(
             "UPDATE titles SET group_root = ?1 WHERE id = ?2",
             [group, root],
         )
         .expect("regroup");
         assert_ne!(
-            rom_stamp(&c, &nes).expect("stamp"),
+            rom_stamp(&c, key(&nes)).expect("stamp"),
             before,
             "a regroup moves it"
         );
@@ -1009,14 +1014,14 @@ mod tests {
             let n = roms.len();
             let id = |i: usize| i64::try_from(i + 1).expect("id");
             c.execute(
-                "INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at, game_count)
-                 VALUES (1, 'nes', 'Test', '1', 't.dat', 0, 0)",
+                "INSERT INTO dat_versions (id, platform, family, dat_name, version, source_file, loaded_at, game_count)
+                 VALUES (1, (SELECT id FROM platforms WHERE slug = 'nes'), '', 'Test', '1', 't.dat', 0, 0)",
                 [],
             ).expect("version");
             for i in 0..n {
                 c.execute(
-                    "INSERT INTO titles (id, platform_id, dat_version_id, name, base_name)
-                     VALUES (?1, 'nes', 1, 'T' || ?1, 'T')",
+                    "INSERT INTO titles (id, platform, group_key, dat_version_id, name, base_name)
+                     VALUES (?1, (SELECT id FROM platforms WHERE slug = 'nes'), '', 1, 'T' || ?1, 'T')",
                     [id(i)],
                 ).expect("title");
             }
@@ -1040,12 +1045,12 @@ mod tests {
             let (ra, rb) = (root(a), root(b));
             proptest::prop_assume!(ra != rb);
             let nes = PlatformId::new("nes");
-            let before = rom_stamp(&c, &nes).expect("stamp");
+            let before = rom_stamp(&c, key(&nes)).expect("stamp");
             c.execute("UPDATE titles SET group_root = ?2 WHERE id = ?1", params![a, rb])
                 .expect("swap");
             c.execute("UPDATE titles SET group_root = ?2 WHERE id = ?1", params![b, ra])
                 .expect("swap");
-            proptest::prop_assert_ne!(rom_stamp(&c, &nes).expect("stamp"), before);
+            proptest::prop_assert_ne!(rom_stamp(&c, key(&nes)).expect("stamp"), before);
         }
     }
 }

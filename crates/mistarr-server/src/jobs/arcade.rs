@@ -12,21 +12,23 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use mistarr_core::naming::{group_key, parse_name};
-use mistarr_core::{Md5, PlatformId};
+use mistarr_core::{Md5, PlatformId, PlatformKey};
 use mistarr_mister::adapter::arcade::assemble::{self, PartSource};
 use mistarr_mister::adapter::arcade::mra::{self, zip_location, Mra, MraRom, ZipPath};
 use serde_json::json;
 
 use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
+pub(super) use crate::db::arcade::Check;
 use crate::db::arcade::{self as rows, MraTitle, MraZip, StoredMra};
 use crate::db::ids::DatVersionId;
 use crate::db::ids::JobId;
 use crate::db::ids::TitleId;
+use crate::db::platforms as platform_rows;
 use crate::db::roms::{self, StoredZip};
 use crate::db::titles;
 use crate::db::Db;
-use crate::error::Result;
+use crate::error::{Error, Result};
 
 /// The platform MRA titles belong to.
 pub const PLATFORM: &str = "arcade";
@@ -39,6 +41,12 @@ pub const PLATFORM: &str = "arcade";
 #[must_use]
 pub fn platform() -> PlatformId {
     PlatformId::new(PLATFORM)
+}
+
+/// The arcade platform's key, which every catalogue write needs.
+pub(crate) fn key(conn: &rusqlite::Connection) -> Result<PlatformKey> {
+    platform_rows::key(conn, &platform())?
+        .ok_or_else(|| Error::Job("The arcade platform is missing from the platform list.".into()))
 }
 
 /// Directory under the SD root holding the MRA files.
@@ -81,7 +89,13 @@ impl Job for ArcadeCatalog {
 /// [`Error::Db`] when the job cannot be recorded.
 pub async fn enqueue_if_relevant(app: &Arc<AppState>) -> Result<Option<JobId>> {
     let dir = app.config().paths.root.join(ARCADE_DIR);
-    let known = app.db.read(|c| rows::has_titles(c, &platform())).await?;
+    let known = app
+        .db
+        .read(|c| match platform_rows::key(c, &platform())? {
+            Some(key) => rows::has_titles(c, key),
+            None => Ok(false),
+        })
+        .await?;
     let listed = crate::threads::run(crate::threads::label::ARCADE, move || dir.is_dir());
     if !known && !listed.await? {
         return Ok(None);
@@ -118,7 +132,7 @@ struct Zip {
 }
 
 /// An md5 check outcome as stored: the check and its detail, `None` when none applies.
-type Outcome = Option<(&'static str, Option<String>)>;
+type Outcome = Option<(Check, Option<String>)>;
 
 /// What a batch writes for one MRA file.
 enum Title {
@@ -194,8 +208,9 @@ async fn catalogue(ctx: &JobContext) -> Result<()> {
         .app
         .db
         .write(|c| {
-            let version = rows::mra_version(c, &platform(), crate::unix_now())?;
-            Ok((version, rows::next_run(c, &platform())?))
+            let key = key(c)?;
+            let version = rows::mra_version(c, key, crate::unix_now())?;
+            Ok((version, rows::next_run(c, key)?))
         })
         .await?;
     let mut pass = Pass::default();
@@ -275,10 +290,10 @@ fn scan_batch(
     batch: &[Listed],
     pass: &mut Pass,
 ) -> Result<Vec<Item>> {
-    let pid = platform();
+    let pid = db.read_blocking(key)?;
     let mut items = Vec::with_capacity(batch.len());
     for listed in batch {
-        let stored = db.read_blocking(|c| rows::stored_mra(c, &pid, &listed.rel))?;
+        let stored = db.read_blocking(|c| rows::stored_mra(c, pid, &listed.rel))?;
         if let Some(s) = stored
             .as_ref()
             .filter(|s| s.file_stamp.as_deref() == Some(listed.stamp.as_str()))
@@ -414,13 +429,13 @@ fn settle_titles(
     run: i64,
     prefs: &mistarr_core::select::Prefs,
 ) -> Result<(usize, u64, bool)> {
-    let pid = platform();
-    let retired = rows::retire_unseen(tx, &pid, run)?;
-    let live = rows::live_count(tx, &pid)?;
+    let (pid, key) = (platform(), key(tx)?);
+    let retired = rows::retire_unseen(tx, key, run)?;
+    let live = rows::live_count(tx, key)?;
     crate::db::dats::set_game_count(tx, version, live)?;
     let changed = retired > 0 || rows::recompute_pending(tx, &pid)?;
     if changed {
-        titles::recompute::recompute_platform(tx, &pid, prefs)?;
+        titles::recompute::recompute_platform(tx, key, prefs)?;
         rows::set_recompute_pending(tx, &pid, false)?;
     }
     Ok((retired, live, changed))
@@ -439,6 +454,7 @@ fn store_batch(
     {
         rows::set_recompute_pending(tx, &platform(), true)?;
     }
+    let platform_key = key(tx)?;
     for Item { title, check } in items {
         let id = match title {
             Title::Stored {
@@ -482,7 +498,7 @@ fn store_batch(
                         present: z.on_disk.is_some(),
                     })
                     .collect();
-                rows::upsert_title(tx, &platform(), version, &title, &rom_zips)?
+                rows::upsert_title(tx, platform_key, version, &title, &rom_zips)?
             }
             Title::Kept { id, present } => {
                 rows::touch(tx, id, run)?;
@@ -832,32 +848,12 @@ fn member_index(
     by_crc
 }
 
-/// Outcome of the md5 check, worst first when several `<rom>` indexes disagree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(super) enum Check {
-    Match,
-    Refused,
-    MissingPart,
-    Mismatch,
-}
-
-impl Check {
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::Match => "match",
-            Self::Refused => "refused",
-            Self::MissingPart => "missing_part",
-            Self::Mismatch => "mismatch",
-        }
-    }
-}
-
 /// Checks every `<rom>` of `mra` that carries an md5. A `<rom>` index passes when any of
 /// its alternatives matches, as MiSTer keeps the first valid rom 0. `None` when nothing is checkable.
-fn verify(mra: &Mra, index: &ZipIndex) -> Option<(&'static str, Option<String>)> {
+fn verify(mra: &Mra, index: &ZipIndex) -> Option<(Check, Option<String>)> {
     let mut src = ZipSource::new(index, None);
     let roms = mra.roms.iter().filter(|r| !r.zips.is_empty());
-    verify_roms(roms, &mut src).map(|(c, d)| (c.as_str(), d))
+    verify_roms(roms, &mut src)
 }
 
 /// The md5 check of one `<rom>` against `expected`, with why it did not match.
@@ -909,7 +905,7 @@ pub(super) struct Refreshed {
     id: TitleId,
     /// Each zip it names, `(file, dir, present)`.
     zips: Vec<(String, String, bool)>,
-    check: Option<(&'static str, Option<String>)>,
+    check: Option<(Check, Option<String>)>,
     stamp: Option<String>,
 }
 

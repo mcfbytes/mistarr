@@ -1,11 +1,11 @@
 //! `dat_stage`: the games of the DAT being imported, parsed and stored in chunks in a
 //! TEMP table, then applied in one transaction; see `docs/ARCHITECTURE.md` "DAT import".
 
-use mistarr_core::PlatformId;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 use super::ids::DatVersionId;
+use super::platforms::PlatformRef;
 use super::sql;
 use super::titles::{self, RomInput, RomStatus, TitleInput};
 use crate::error::Result;
@@ -107,7 +107,7 @@ pub fn append(conn: &Connection, games: &[StagedGame]) -> Result<()> {
 ///
 /// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Stored`] for a row
 /// that does not read back.
-pub fn apply(conn: &Connection, platform: &PlatformId, version: DatVersionId) -> Result<u64> {
+pub fn apply(conn: &Connection, platform: &PlatformRef, version: DatVersionId) -> Result<u64> {
     ensure(conn)?;
     let mut stmt = conn.prepare("SELECT game FROM temp.dat_stage ORDER BY seq")?;
     let mut staged = stmt.query([])?;
@@ -147,7 +147,7 @@ pub fn apply(conn: &Connection, platform: &PlatformId, version: DatVersionId) ->
 mod tests {
     use super::*;
     use crate::db::dats::{upsert_version, NewVersion};
-    use crate::db::fixtures::pid;
+    use crate::db::fixtures::{key, pid, platform_ref};
 
     fn game(name: &str) -> StagedGame {
         StagedGame {
@@ -200,13 +200,13 @@ mod tests {
             dat_name: "Maker - Game Boy",
             version: "1",
             source_file: "gb.dat",
-            platform: Some("gb"),
+            platform: Some(key(&pid("gb"))),
             now: 1,
         };
         let id = upsert_version(&c, &v).expect("version").id;
         append(&c, &[game("Example Quest (USA)")]).expect("append");
         append(&c, &[game("Other Tale (USA)")]).expect("append");
-        assert_eq!(apply(&c, &pid("gb"), id).expect("apply"), 2);
+        assert_eq!(apply(&c, &platform_ref(&pid("gb")), id).expect("apply"), 2);
         let names: Vec<String> = c
             .prepare("SELECT name FROM titles ORDER BY id")
             .expect("prepare")
@@ -216,7 +216,7 @@ mod tests {
             .expect("rows");
         assert_eq!(names, ["Example Quest (USA)", "Other Tale (USA)"]);
         clear(&c).expect("clear");
-        assert_eq!(apply(&c, &pid("gb"), id).expect("apply"), 0);
+        assert_eq!(apply(&c, &platform_ref(&pid("gb")), id).expect("apply"), 0);
         let in_main = crate::db::has_table(&c, "main", "dat_stage").expect("schema");
         assert!(!in_main, "the stage never reaches the database file");
     }

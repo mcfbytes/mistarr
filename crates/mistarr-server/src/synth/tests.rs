@@ -58,9 +58,7 @@ fn common_trigrams_span_every_platform_and_placed_words_do_not() {
     for term in ["the", "sta", "man"] {
         let platforms = count(
             &c,
-            &format!(
-                "SELECT COUNT(DISTINCT platform_id) FROM titles WHERE base_name LIKE '%{term}%'"
-            ),
+            &format!("SELECT COUNT(DISTINCT platform) FROM titles WHERE base_name LIKE '%{term}%'"),
         );
         assert!(platforms >= 25, "{term} on {platforms} platforms");
     }
@@ -68,7 +66,7 @@ fn common_trigrams_span_every_platform_and_placed_words_do_not() {
         let here = count(
             &c,
             &format!(
-                "SELECT COUNT(*) FROM title_groups WHERE platform_id = '{p}' AND base_name LIKE '%{ELSEWHERE}%'"
+                "SELECT COUNT(*) FROM title_groups WHERE platform = (SELECT id FROM platforms WHERE slug = '{p}') AND base_name LIKE '%{ELSEWHERE}%'"
             ),
         );
         assert_eq!(here, 1, "{p}");
@@ -85,7 +83,7 @@ fn common_trigrams_span_every_platform_and_placed_words_do_not() {
     assert!((1..=60).contains(&rare), "{rare}");
     let arcade = count(
         &c,
-        "SELECT COUNT(*) FROM titles WHERE platform_id = 'arcade' AND source <> 'mra'",
+        "SELECT COUNT(*) FROM titles WHERE platform = (SELECT id FROM platforms WHERE slug = 'arcade') AND source <> 1",
     );
     assert_eq!(arcade, 0);
 }

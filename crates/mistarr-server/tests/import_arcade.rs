@@ -91,7 +91,7 @@ fn title_id(b: &Booted, name: &str) -> TitleId {
         .db
         .read_blocking(move |c| {
             Ok(c.query_row(
-                "SELECT id FROM titles WHERE source = 'mra' AND name = ?1",
+                "SELECT id FROM titles WHERE source = 1 AND name = ?1",
                 [name],
                 |r| r.get(0),
             )?)
@@ -112,7 +112,7 @@ fn zip_rom(b: &Booted, zip: &str) -> RomId {
         .db
         .read_blocking(move |c| {
             Ok(c.query_row(
-                "SELECT r.id FROM rom_view r WHERE r.title_source = 'mra' AND r.name = ?1",
+                "SELECT r.id FROM rom_view r WHERE r.title_source = 1 AND r.name = ?1",
                 [zip],
                 |r| r.get(0),
             )?)

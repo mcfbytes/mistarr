@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 
 use mistarr_core::hash::{HeaderForms, HeaderRule};
-use mistarr_core::{Hashes, PlatformId, RomId};
+use mistarr_core::{Hashes, PlatformId, PlatformKey, RomId};
 use mistarr_mister::platforms::{self, Kind};
 use rusqlite::Connection;
 
@@ -23,16 +23,16 @@ use crate::error::Result;
 /// [`crate::error::Error::Db`] on SQLite failure.
 pub(crate) fn classify(
     conn: &Connection,
-    platform_id: &PlatformId,
+    platform: &PlatformRef,
     actual_name: &str,
     forms: &HeaderForms,
 ) -> Result<(Option<RomId>, FileState)> {
     let m = match_forms(
         conn,
-        platform_id,
+        platform.key,
         forms.whole.iter().chain([&forms.content]),
     )?;
-    Ok(cartridge_state(platform_id, m.as_ref(), actual_name))
+    Ok(cartridge_state(&platform.id, m.as_ref(), actual_name))
 }
 
 /// The rom `forms` match under `docs/VERIFICATION.md` "Matching order" in each, a caller
@@ -44,20 +44,20 @@ pub(crate) fn classify(
 /// [`crate::error::Error::Db`] on SQLite failure.
 pub(crate) fn match_forms<'a>(
     conn: &Connection,
-    platform_id: &PlatformId,
+    platform: PlatformKey,
     forms: impl IntoIterator<Item = &'a Hashes>,
 ) -> Result<Option<RomMatch>> {
     let forms: Vec<&Hashes> = forms.into_iter().collect();
     let size = |h: &Hashes| i64::try_from(h.size).unwrap_or(i64::MAX);
     for h in &forms {
         let (sha1, md5, crc32) = (Some(h.sha1), Some(h.md5), Some(h.crc32));
-        if let Some(m) = roms::match_live_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
+        if let Some(m) = roms::match_live_rom(conn, platform, sha1, md5, crc32, size(h))? {
             return Ok(Some(m));
         }
     }
     for h in &forms {
         let (sha1, md5, crc32) = (Some(h.sha1), Some(h.md5), Some(h.crc32));
-        if let Some(m) = roms::match_rom(conn, platform_id, sha1, md5, crc32, size(h))? {
+        if let Some(m) = roms::match_rom(conn, platform, sha1, md5, crc32, size(h))? {
             return Ok(Some(m));
         }
     }
@@ -188,7 +188,7 @@ pub(crate) fn own_name(rel_path: &str) -> &str {
 /// [`crate::error::Error::Db`] on SQLite failure.
 pub(crate) fn stored_match(
     conn: &Connection,
-    platform_id: &PlatformId,
+    platform: PlatformKey,
     f: &FileRow,
 ) -> Result<Option<RomMatch>> {
     if f.md5.is_none() && f.sha1.is_none() {
@@ -204,13 +204,13 @@ pub(crate) fn stored_match(
     let w = &f.whole;
     let has_whole = w.sha1.is_some() || w.md5.is_some();
     if has_whole && (w.sha1, w.md5) != (f.sha1, f.md5) {
-        if let Some(m) = roms::match_live_rom(conn, platform_id, w.sha1, w.md5, w.crc32, f.size)? {
+        if let Some(m) = roms::match_live_rom(conn, platform, w.sha1, w.md5, w.crc32, f.size)? {
             return Ok(Some(m));
         }
         let size = f.size - header;
-        return roms::match_live_rom(conn, platform_id, sha1, md5, crc32, size);
+        return roms::match_live_rom(conn, platform, sha1, md5, crc32, size);
     }
-    if let Some(m) = roms::match_live_rom(conn, platform_id, sha1, md5, crc32, f.size)? {
+    if let Some(m) = roms::match_live_rom(conn, platform, sha1, md5, crc32, f.size)? {
         return Ok(Some(m));
     }
     if has_whole {
@@ -225,7 +225,7 @@ pub(crate) fn stored_match(
         return Ok(None);
     }
     // The hash tiers failed above whatever the size; only the CRC32 tier is left.
-    roms::match_live_rom(conn, platform_id, None, None, crc32, f.size - header)
+    roms::match_live_rom(conn, platform, None, None, crc32, f.size - header)
 }
 
 /// One hashed track of a disc game directory, before the all-or-nothing rule
@@ -332,7 +332,7 @@ pub(crate) fn set_matches(
             }
             continue;
         }
-        let m = stored_match(conn, &platform.id, f)?;
+        let m = stored_match(conn, platform.key, f)?;
         let (rom, state) = cartridge_state(&platform.id, m.as_ref(), own_name(&f.rel_path));
         matched += usize::from(f.rom_id.is_none() && rom.is_some());
         set_changed(conn, f, rom, state)?;
@@ -351,7 +351,7 @@ pub(crate) fn set_matches(
                 size: f.size,
                 mtime: f.mtime,
                 hashes: f.hashes(),
-                matched: stored_match(conn, &platform.id, f)?,
+                matched: stored_match(conn, platform.key, f)?,
             });
         }
         for (f, t) in rows.iter().zip(classify_disc_tracks(conn, tracks)?) {
@@ -374,7 +374,7 @@ fn set_changed(conn: &Connection, f: &FileRow, rom: Option<RomId>, state: FileSt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::fixtures::{conn, key};
+    use crate::db::fixtures::{conn, key, platform_ref};
     use mistarr_core::hash::hash_forms;
 
     fn hashes() -> Hashes {
@@ -612,11 +612,13 @@ mod tests {
             .write(&c)
             .expect("live rom")
             .first_rom();
-        let (rom, _) = classify(&c, &nes, "New (USA).nes", &forms).expect("classify");
+        let (rom, _) =
+            classify(&c, &platform_ref(&nes), "New (USA).nes", &forms).expect("classify");
         assert_eq!(rom, Some(live));
         c.execute("UPDATE roms SET retired = 1 WHERE id = ?1", [live])
             .expect("retire");
-        let (rom, _) = classify(&c, &nes, "Old (USA).nes", &forms).expect("classify");
+        let (rom, _) =
+            classify(&c, &platform_ref(&nes), "Old (USA).nes", &forms).expect("classify");
         assert_eq!(
             rom,
             Some(retired),
@@ -635,7 +637,9 @@ mod tests {
             .write(&c)
             .expect("rom")
             .first_rom();
-        let m = match_forms(&c, &psx, [&h]).expect("match").expect("a rom");
+        let m = match_forms(&c, key(&psx), [&h])
+            .expect("match")
+            .expect("a rom");
         assert_eq!(m.rom_id, rom);
         let track = |name: &str, matched: Option<RomMatch>| Track {
             rel_path: format!("PSX/Disc (USA)/{name}"),

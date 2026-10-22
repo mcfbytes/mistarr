@@ -85,11 +85,13 @@ pub fn seed_rom(
     size: u64,
     flags: &[&str],
 ) -> Result<RomId> {
+    let key = super::platforms::key(conn, platform)?.ok_or(rusqlite::Error::QueryReturnedNoRows)?;
     conn.execute(
-        "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
-         VALUES (?1, ?1 || ' test', '1', 'test.dat', 0, 0)
+        "INSERT INTO dat_versions (platform, dat_name, version, source_file, loaded_at, game_count,
+                                   family)
+         VALUES (?1, ?2 || ' test', '1', 'test.dat', 0, 0, '')
          ON CONFLICT (dat_name, version) DO NOTHING",
-        [platform],
+        params![key, platform],
     )?;
     let dat: i64 = conn.query_row(
         "SELECT id FROM dat_versions WHERE dat_name = ?1 || ' test'",
@@ -98,9 +100,9 @@ pub fn seed_rom(
     )?;
     let title = rom_name.rsplit_once('.').map_or(rom_name, |(t, _)| t);
     conn.execute(
-        "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
-         VALUES (?1, ?2, ?3, ?3)",
-        params![platform, dat, title],
+        "INSERT INTO titles (platform, dat_version_id, name, base_name, group_key)
+         VALUES (?1, ?2, ?3, ?3, '')",
+        params![key, dat, title],
     )?;
     let title_id = TitleId::new(conn.last_insert_rowid());
     let flags: Vec<String> = flags.iter().map(|f| (*f).to_owned()).collect();
@@ -206,10 +208,16 @@ impl Dat {
     pub fn write(self, conn: &Connection) -> Result<Written> {
         let version: i64 =
             conn.query_row("SELECT COUNT(*) + 1 FROM dat_versions", [], |r| r.get(0))?;
+        let platform = key(&self.platform);
         conn.execute(
-            "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count)
-             VALUES (?1, 'fixture', ?2, 'fixture.dat', 0, ?3)",
-            params![self.platform, version.to_string(), i64::try_from(self.titles.len()).unwrap_or(i64::MAX)],
+            "INSERT INTO dat_versions (platform, dat_name, version, source_file, loaded_at,
+                                       game_count, family)
+             VALUES (?1, 'fixture', ?2, 'fixture.dat', 0, ?3, '')",
+            params![
+                platform,
+                version.to_string(),
+                i64::try_from(self.titles.len()).unwrap_or(i64::MAX)
+            ],
         )?;
         let dat_version = DatVersionId::new(conn.last_insert_rowid());
         let mut written = Written {
@@ -219,9 +227,9 @@ impl Dat {
         };
         for (name, roms) in &self.titles {
             conn.execute(
-                "INSERT INTO titles (platform_id, dat_version_id, name, base_name)
-                 VALUES (?1, ?2, ?3, ?3)",
-                params![self.platform, dat_version, name],
+                "INSERT INTO titles (platform, dat_version_id, name, base_name, group_key)
+                 VALUES (?1, ?2, ?3, ?3, '')",
+                params![platform, dat_version, name],
             )?;
             let title = TitleId::new(conn.last_insert_rowid());
             conn.execute("UPDATE titles SET parent_id = ?1 WHERE id = ?1", [title])?;

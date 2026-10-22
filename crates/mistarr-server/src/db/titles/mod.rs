@@ -1,21 +1,23 @@
 //! The `titles` and `roms` tables, clone groups, 1G1R picks and the browse
 //! query over `title_groups`; see `docs/DATA-MODEL.md` and `docs/VERIFICATION.md`.
 
-use mistarr_core::PlatformId;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::ids::{DatVersionId, TitleId};
-use super::sql::{self, code_enum, text_enum};
+use mistarr_core::PlatformKey;
+
+use super::platforms::PlatformRef;
+use super::sql::{self, code_enum};
 
 use crate::error::Result;
 
-text_enum! {
-    /// `titles.source` and `dat_versions.source`: where a title was read from.
+code_enum! {
+    /// `titles.source`, `dat_versions.source` and `title_groups.source`: where a title was read from.
     pub enum TitleSource {
         /// An entry of a DAT file.
-        Dat = "dat",
+        Dat = ("dat", 0),
         /// An arcade title read from an MRA file.
-        Mra = "mra",
+        Mra = ("mra", 1),
     }
 }
 
@@ -221,7 +223,7 @@ pub(crate) struct PutTitle<'a> {
 /// store again. Returns the id and whether the title existed.
 pub(crate) fn put_title(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: PlatformKey,
     version: DatVersionId,
     put: &PutTitle<'_>,
 ) -> Result<(TitleId, bool)> {
@@ -231,23 +233,29 @@ pub(crate) fn put_title(
                 // Unary plus keeps the lookup on (dat_version_id, name), not a platform-wide index.
                 "SELECT t.id FROM dat_versions d JOIN titles t ON t.dat_version_id = d.id AND t.name = ?1
                  WHERE d.family = (SELECT family FROM dat_versions WHERE id = ?2)
-                   AND +t.source = 'dat' AND +t.platform_id = ?3
+                   AND +t.source = ?4 AND +t.platform = ?3
                  ORDER BY d.id = ?2 DESC, d.loaded_at DESC LIMIT 1",
             )?
-            .query_row(params![put.name, version, platform], |r| r.get(0))
+            .query_row(
+                params![put.name, version, platform, TitleSource::Dat],
+                |r| r.get(0),
+            )
             .optional()?,
         TitleSource::Mra => conn
             .prepare_cached(
-                "SELECT id FROM titles WHERE platform_id = ?1 AND source = 'mra' AND name = ?2",
+                "SELECT id FROM titles WHERE platform = ?1 AND source = ?3 AND name = ?2",
             )?
-            .query_row(params![platform, put.name], |r| r.get(0))
+            .query_row(
+                params![platform, put.name, TitleSource::Mra],
+                |r| r.get(0),
+            )
             .optional()?,
     };
     let mra = put.mra.as_ref();
     let inferred = mra.map(|_| true);
     let id = if let Some(id) = existing {
         conn.prepare_cached(
-            "UPDATE titles SET platform_id = ?2, dat_version_id = ?3, base_name = ?4, revision = ?5,
+            "UPDATE titles SET platform = ?2, dat_version_id = ?3, base_name = ?4, revision = ?5,
                clone_of = ?6, group_key = ?7, setname = ?8, rbf = ?9, mra_path = ?10,
                mra_file_stamp = ?11, mra_seen = ?12, inferred = COALESCE(?13, inferred), retired = 0
              WHERE id = ?1",
@@ -272,7 +280,7 @@ pub(crate) fn put_title(
         id
     } else {
         conn.prepare_cached(
-            "INSERT INTO titles (platform_id, dat_version_id, name, base_name, revision, clone_of,
+            "INSERT INTO titles (platform, dat_version_id, name, base_name, revision, clone_of,
                group_key, source, setname, rbf, mra_path, mra_file_stamp, mra_seen, inferred)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, COALESCE(?14, 0))",
         )?
@@ -318,12 +326,14 @@ pub(crate) fn put_title(
 /// let version = dats::upsert_version(&conn, &v).unwrap().id;
 /// let t = titles::TitleInput { name: "Example Quest (USA)", base_name: "Example Quest",
 ///     group_key: "example quest", clone_of: None, regions: &[], languages: &[], revision: None, flags: &[] };
-/// let id = titles::upsert_title(&conn, &mistarr_core::PlatformId::new("gb"), version, &t, &[]).unwrap();
-/// assert_eq!(titles::upsert_title(&conn, &mistarr_core::PlatformId::new("gb"), version, &t, &[]).unwrap(), id);
+/// let gb = mistarr_server::db::platforms::PlatformRef::resolve(&conn, &mistarr_core::PlatformId::new("gb"))
+///     .unwrap().unwrap();
+/// let id = titles::upsert_title(&conn, &gb, version, &t, &[]).unwrap();
+/// assert_eq!(titles::upsert_title(&conn, &gb, version, &t, &[]).unwrap(), id);
 /// ```
 pub fn upsert_title(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: &PlatformRef,
     version: DatVersionId,
     t: &TitleInput<'_>,
     roms: &[RomInput<'_>],
@@ -340,8 +350,8 @@ pub fn upsert_title(
         flags: t.flags,
         mra: None,
     };
-    let (id, existed) = put_title(conn, platform, version, &put)?;
-    let arcade = mistarr_mister::platforms::by_id(platform.as_str())
+    let (id, existed) = put_title(conn, platform.key, version, &put)?;
+    let arcade = mistarr_mister::platforms::by_id(platform.id.as_str())
         .is_some_and(mistarr_mister::platforms::Platform::is_arcade);
     if existed && !arcade {
         for r in roms {

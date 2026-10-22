@@ -777,9 +777,8 @@ fn arcade_catalogue_stays_under_budget() {
 
     let server = Server::start(dir.path());
     let rows = server.wait_jobs("arcade_catalog", 1);
-    let titles = server.count("SELECT COUNT(*) FROM titles WHERE source = 'mra' AND retired = 0");
-    let matched =
-        server.count("SELECT COUNT(*) FROM titles WHERE source = 'mra' AND mra_check = 'match'");
+    let titles = server.count("SELECT COUNT(*) FROM titles WHERE source = 1 AND retired = 0");
+    let matched = server.count("SELECT COUNT(*) FROM titles WHERE source = 1 AND mra_check = 0");
     let peak = server.stop("arcade_catalog, first run");
     let (state, progress) = &rows[0];
     println!("progress: {progress}");
@@ -839,8 +838,7 @@ fn large_inline_mras_stay_under_budget() {
 
     let server = Server::start(dir.path());
     let rows = server.wait_jobs("arcade_catalog", 1);
-    let matched =
-        server.count("SELECT COUNT(*) FROM titles WHERE source = 'mra' AND mra_check = 'match'");
+    let matched = server.count("SELECT COUNT(*) FROM titles WHERE source = 1 AND mra_check = 0");
     let peak = server.stop("arcade_catalog, large inline MRAs");
     let (state, progress) = &rows[0];
     println!("progress: {progress}");

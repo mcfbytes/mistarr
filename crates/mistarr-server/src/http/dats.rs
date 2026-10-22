@@ -295,7 +295,7 @@ mod tests {
                     dat_name: "Example Console",
                     version: "1",
                     source_file: "a.dat",
-                    platform: Some("nes"),
+                    platform: crate::db::platforms::fixed_key("nes"),
                     now: 1,
                 };
                 Ok(dats::upsert_version(tx, &v)?.id)

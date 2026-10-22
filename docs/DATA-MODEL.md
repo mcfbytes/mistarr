@@ -68,19 +68,19 @@ CREATE TABLE platforms (
 
 CREATE TABLE dat_versions (
   id            INTEGER PRIMARY KEY,
-  platform_id   TEXT REFERENCES platforms(id),   -- NULL while unbound
+  platform      INTEGER REFERENCES platforms(id),   -- NULL while unbound
   dat_name      TEXT NOT NULL,         -- <header><name>
   version       TEXT NOT NULL,         -- <header><version>
   source_file   TEXT NOT NULL,         -- basename as dropped
   loaded_at     INTEGER NOT NULL,
   superseded_by INTEGER REFERENCES dat_versions(id),
-  game_count    INTEGER NOT NULL,
-  retired       INTEGER NOT NULL DEFAULT 0,   -- set by DELETE /dats/{id}
-  source        TEXT NOT NULL DEFAULT 'dat',  -- 'dat' | 'mra': the one row MRA titles belong to
-  family        TEXT NOT NULL DEFAULT '',     -- dat::family_key of dat_name, refreshed at open
+  game_count    INTEGER NOT NULL CHECK (game_count >= 0),
+  retired       INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0, 1)),   -- set by DELETE /dats/{id}
+  source        INTEGER NOT NULL DEFAULT 0 CHECK (source IN (0, 1)),    -- "Title sources": the one row MRA titles belong to
+  family        TEXT NOT NULL,         -- dat::family_key of dat_name, refreshed at open
   UNIQUE (dat_name, version)
-);
-CREATE INDEX dat_versions_family ON dat_versions(family, platform_id);
+) STRICT;
+CREATE INDEX dat_versions_family ON dat_versions(family, platform);
 -- family: dat::family_key of dat_name, rewritten from the names at every start.
 
 -- The writer connection's own, created on first use; never in the database file.
@@ -91,41 +91,39 @@ CREATE TEMP TABLE dat_stage (     -- the DAT being imported, parsed outside the 
 
 CREATE TABLE titles (                   -- one per <game>; the browse unit
   id            INTEGER PRIMARY KEY,
-  platform_id   TEXT NOT NULL REFERENCES platforms(id),
+  platform      INTEGER NOT NULL REFERENCES platforms(id),
   dat_version_id INTEGER NOT NULL REFERENCES dat_versions(id),
   name          TEXT NOT NULL,         -- full DAT game name
   base_name     TEXT NOT NULL,         -- name with region/rev/lang tags stripped
   parent_id     INTEGER REFERENCES titles(id),   -- clone group root in its own DAT, self if parent
-  group_root    INTEGER REFERENCES titles(id),   -- effective clone group; see "Effective groups"
   revision      TEXT,
-  is_1g1r_pick  INTEGER NOT NULL DEFAULT 0,
-  wanted        INTEGER NOT NULL DEFAULT 0,
-  retired       INTEGER NOT NULL DEFAULT 0,
+  is_1g1r_pick  INTEGER NOT NULL DEFAULT 0 CHECK (is_1g1r_pick IN (0, 1)),
+  wanted        INTEGER NOT NULL DEFAULT 0 CHECK (wanted IN (0, 1)),
+  retired       INTEGER NOT NULL DEFAULT 0 CHECK (retired IN (0, 1)),
   clone_of      TEXT,                  -- the DAT's cloneof, verbatim
-  group_key     TEXT NOT NULL DEFAULT '',   -- naming::group_key of the name
-  inferred      INTEGER NOT NULL DEFAULT 0, -- parent chosen by group_key, not cloneof
-  source        TEXT NOT NULL DEFAULT 'dat', -- 'dat' | 'mra': an MRA title is never retired by a DAT
+  group_key     TEXT NOT NULL,         -- naming::group_key of the name
+  inferred      INTEGER NOT NULL DEFAULT 0 CHECK (inferred IN (0, 1)),   -- parent chosen by group_key, not cloneof
+  source        INTEGER NOT NULL DEFAULT 0 CHECK (source IN (0, 1)),     -- "Title sources": an MRA title is never retired by a DAT
   setname       TEXT,                  -- MRA <setname>
   rbf           TEXT,                  -- MRA <rbf>
   mra_path      TEXT,                  -- MRA file relative to _Arcade
-  mra_check     TEXT,                  -- md5 check: 'match' | 'mismatch' | 'missing_part' | 'refused', NULL when not run
+  mra_check     INTEGER CHECK (mra_check BETWEEN 0 AND 3),   -- "MRA checks", NULL when not run
   mra_detail    TEXT,                  -- why the check did not match
   mra_stamp     TEXT,                  -- MRA and zip sizes and mtimes the check ran against
   mra_file_stamp TEXT,                 -- MRA parser version, file size and mtime when the title was last stored from it
   mra_seen      INTEGER,               -- the arcade catalogue run that last found the MRA file
+  group_root    INTEGER REFERENCES titles(id),   -- effective clone group; see "Effective groups"
   UNIQUE (dat_version_id, name)
-);
-CREATE INDEX titles_platform_base ON titles(platform_id, base_name);
+) STRICT;
 CREATE INDEX titles_id_dat ON titles(id, dat_version_id);   -- a matched rom's DAT version, without the table row
-CREATE INDEX titles_parent ON titles(parent_id);
 CREATE INDEX titles_group_root ON titles(group_root);
 CREATE TRIGGER titles_group_root_insert AFTER INSERT ON titles
 BEGIN UPDATE titles SET group_root = NEW.parent_id WHERE id = NEW.id; END;
 CREATE TRIGGER titles_group_root_parent AFTER UPDATE OF parent_id ON titles
 BEGIN UPDATE titles SET group_root = NEW.parent_id WHERE id = NEW.id; END;
-CREATE INDEX titles_group ON titles(platform_id, inferred, group_key);
-CREATE INDEX titles_source ON titles(platform_id, source);
-CREATE INDEX titles_mra_path ON titles(platform_id, mra_path) WHERE source = 'mra';
+CREATE INDEX titles_group ON titles(platform, inferred, group_key);
+CREATE INDEX titles_source ON titles(platform, source);
+CREATE INDEX titles_mra_path ON titles(platform, mra_path) WHERE source = 1;
 
 -- A title's regions, languages and flags, in name order (`pos`).
 CREATE TABLE title_flags (             -- bios, beta, proto, demo, sample, unl, ...
@@ -477,10 +475,10 @@ its `dat_versions` row; binding it re-reads the file from `dats/loaded/`.
 
 ### MRA titles
 
-Arcade titles read from MRA files have `source = 'mra'` and all belong to
-one `dat_versions` row with `source = 'mra'` and `dat_name` `_Arcade`, which
+Arcade titles read from MRA files have `source = 1` (mra) and all belong to
+one `dat_versions` row with `source = 1` and `dat_name` `_Arcade`, which
 `/dats`, the wizard and DAT loads never see. DAT supersession, reloads and
-`DELETE /dats/{id}` only retire `source = 'dat'` titles; an MRA title is
+`DELETE /dats/{id}` only retire `source = 0` (dat) titles; an MRA title is
 retired when a catalogue run no longer finds its MRA, and revived, with its
 id and `wanted`, when the MRA returns. Each run takes the next `mra_seen`
 number and stamps every title whose MRA it finds, so the titles it did not
@@ -494,7 +492,7 @@ entries.
 
 `parent_id` comes from `clone_of` when the DAT has any `cloneof`, else the
 titles are `inferred` and every live inferred title of the platform is
-regrouped by `(platform_id, group_key)` after each load, electing the parent
+regrouped by `(platform, group_key)` after each load, electing the parent
 that wins 1G1R under default preferences.
 
 ### Effective groups
@@ -522,35 +520,36 @@ title, rom and file of a platform per request.
 ```sql
 CREATE TABLE title_groups (
   parent_id     INTEGER NOT NULL,
-  platform_id   TEXT NOT NULL,
-  base_name     TEXT NOT NULL,         -- the root title's
-  name          TEXT NOT NULL,         -- the root title's
+  platform      INTEGER NOT NULL REFERENCES platforms(id),
+  base_name     TEXT NOT NULL,         -- the root title's; its name is read from the root title
   variants      INTEGER NOT NULL,
   have_verified INTEGER NOT NULL,
   wanted        INTEGER NOT NULL,
   has_pick      INTEGER NOT NULL,
   pick_id       INTEGER,
   newest_id     INTEGER NOT NULL,
-  source        TEXT NOT NULL,         -- the root title's: 'dat' | 'mra'
+  source        INTEGER NOT NULL,      -- the root title's, "Title sources"
   lean_flags    INTEGER NOT NULL,      -- least known-flag bits of a live variant
   unflagged_regions INTEGER NOT NULL,  -- region bits of the variants with no known flag
   flag_union    INTEGER NOT NULL,      -- flag bits of every live variant
   region_union  INTEGER NOT NULL,      -- region bits of every live variant
   split         INTEGER NOT NULL,      -- the root title is on another platform
-  PRIMARY KEY (parent_id, platform_id)
-) WITHOUT ROWID;
-CREATE INDEX title_groups_name ON title_groups(platform_id, base_name COLLATE NOCASE, parent_id);
-CREATE INDEX title_groups_have ON title_groups(platform_id, (have_verified > 0) DESC, base_name COLLATE NOCASE, parent_id);
-CREATE INDEX title_groups_recent ON title_groups(platform_id, newest_id DESC);
-CREATE INDEX title_groups_split ON title_groups(platform_id, parent_id) WHERE split;
-CREATE INDEX title_groups_counts ON title_groups(platform_id, lean_flags, source, have_verified, wanted);
+  PRIMARY KEY (parent_id, platform)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX title_groups_name ON title_groups(platform, base_name COLLATE NOCASE, parent_id);
+CREATE INDEX title_groups_have ON title_groups(platform, (have_verified > 0) DESC, base_name COLLATE NOCASE, parent_id);
+CREATE INDEX title_groups_recent ON title_groups(platform, newest_id DESC);
+CREATE INDEX title_groups_split ON title_groups(platform, parent_id) WHERE split;
+CREATE INDEX title_groups_counts ON title_groups(platform, lean_flags, source, have_verified, wanted);
 
-CREATE TABLE title_groups_dirty (parent_id INTEGER PRIMARY KEY);   -- groups a write changed
+CREATE TABLE title_groups_dirty (parent_id INTEGER PRIMARY KEY) STRICT;   -- groups a write changed
 CREATE TABLE known_flags (name TEXT PRIMARY KEY, bit INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE known_regions (name TEXT PRIMARY KEY COLLATE NOCASE, bit INTEGER NOT NULL) WITHOUT ROWID;
 
-CREATE VIEW title_search_source AS      -- the platform id between 0x1F sentinels
-  SELECT id, base_name, char(31) || platform_id || char(31) AS platform FROM titles;
+CREATE VIEW title_search_source AS      -- the platform slug between 0x1F sentinels
+  SELECT t.id, t.base_name,
+         char(31) || (SELECT p.slug FROM platforms p WHERE p.id = t.platform) || char(31) AS platform
+  FROM titles t;
 CREATE VIRTUAL TABLE title_search USING fts5(
   base_name, platform, content = 'title_search_source', content_rowid = 'id',
   tokenize = 'trigram');
@@ -968,7 +967,9 @@ SELECT r.id, r.title_id,
        r.match_name, r.match_base, r.retired,
        r.header, r.zip_dir, r.present,
        t.name AS title_name, t.dat_version_id, t.source AS title_source,
-       t.platform_id AS platform_key, t.platform_id AS platform, t.group_root, t.parent_id,
+       t.platform AS platform_key,
+       (SELECT p.slug FROM platforms p WHERE p.id = t.platform) AS platform,
+       t.group_root, t.parent_id,
        t.retired AS title_retired,
        (r.retired = 0 AND t.retired = 0) AS live,
        EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = r.title_id AND f.flag = 'bios') AS bios
@@ -978,10 +979,14 @@ CREATE VIEW live_rom_view AS
 SELECT * FROM rom_view WHERE live AND NOT bios;
 
 CREATE VIEW title_view AS
-SELECT t.id, t.platform_id AS platform_key, t.platform_id AS platform, t.dat_version_id,
+SELECT t.id, t.platform AS platform_key,
+       (SELECT p.slug FROM platforms p WHERE p.id = t.platform) AS platform, t.dat_version_id,
        t.name, t.base_name, t.parent_id, t.group_root, t.revision, t.is_1g1r_pick, t.wanted,
-       t.retired, t.clone_of, t.group_key, t.inferred, t.source, t.source AS source_text,
-       t.setname, t.rbf, t.mra_path, t.mra_check, t.mra_check AS mra_check_text,
+       t.retired, t.clone_of, t.group_key, t.inferred, t.source,
+       CASE t.source WHEN 0 THEN 'dat' WHEN 1 THEN 'mra' END AS source_text,
+       t.setname, t.rbf, t.mra_path, t.mra_check,
+       CASE t.mra_check WHEN 0 THEN 'match' WHEN 1 THEN 'refused' WHEN 2 THEN 'missing_part'
+                        WHEN 3 THEN 'mismatch' END AS mra_check_text,
        t.mra_detail, t.mra_stamp, t.mra_file_stamp, t.mra_seen
 FROM titles t;
 
@@ -1031,7 +1036,7 @@ Each conversion changes only the bodies, keeping the column names:
 | rom_view.name | CASE WHEN r.own_name THEN r.name ELSE t.name \|\| r.name END |
 | the hex columns | NULLIF(lower(hex(x)), '') of the stored column, since `hex(NULL)` is `''` and an absent hash stays NULL |
 | status_text, source_text, mra_check_text, state_text, header_rule_text, reason_text | CASE over the value table |
-| platform_key | the platform column; `rom_view` and `title_view` keep the slug (`t.platform_id`) until `titles` converts, so reads through them filter by slug and seek the same `titles` indexes |
+| platform_key | the platform column, so a read filters by key and seeks the `titles` indexes |
 | platform | (SELECT p.slug FROM platforms p WHERE p.id = t.platform) |
 | rom_view.match_base | the base expression, when P2 drops the column |
 | rom_view.bios | the same EXISTS on f.tag_id = 4 |
@@ -1076,6 +1081,6 @@ roms, 13 263 files) into a new file:
 
 | Database | `roms` table | `roms_sha1` | `roms_title_name` |
 |---|---|---|---|
-| 39 473 152 bytes | 6.1 MiB | 2.4 MiB | 2.0 MiB |
+| 35 647 488 bytes | 6.1 MiB | 2.4 MiB | 2.0 MiB |
 
 79 537 of the 82 037 roms store only the text after their title's name.

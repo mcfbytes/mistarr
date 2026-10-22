@@ -216,7 +216,7 @@ async fn both_wanted(b: &Booted) -> Wanted {
         app.db
             .read(|c| {
                 Ok(c.query_row(
-                    "SELECT COUNT(*) FROM titles WHERE platform_id = 'nes' AND retired = 0",
+                    "SELECT COUNT(*) FROM titles WHERE platform = (SELECT id FROM platforms WHERE slug = 'nes') AND retired = 0",
                     [],
                     |r| r.get::<_, i64>(0),
                 )?)

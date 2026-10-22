@@ -21,6 +21,7 @@ use super::{Job, JobContext, JobKind, Lane, Scheduler};
 use crate::app::AppState;
 use crate::db::candidates;
 use crate::db::ids::SourceId;
+use crate::db::platforms::PlatformRef;
 use crate::db::sources::{
     self as rows, NewSource, SourceReason, SourceRow, SourceState, SqlDatIndex,
 };
@@ -349,7 +350,11 @@ fn unbound_explained(conn: &Connection, id: SourceId, threshold: f32) -> Result<
     let Some(platform) = suggested else {
         return Ok(SourceReason::no_match(threshold, None));
     };
-    if rows::platform_has_dat(conn, &platform)? {
+    let has_dat = match PlatformRef::resolve(conn, &platform)? {
+        Some(p) => rows::platform_has_dat(conn, p.key)?,
+        None => false,
+    };
+    if has_dat {
         Ok(SourceReason::no_match(threshold, Some(platform)))
     } else {
         Ok(SourceReason::AwaitingDat { platform })

@@ -3,15 +3,19 @@
 
 use std::collections::HashMap;
 
-use mistarr_core::{Crc32, Hashes, Md5, PlatformId, RomId, Sha1};
+use mistarr_core::{Crc32, Hashes, Md5, PlatformKey, RomId, Sha1};
 use rusqlite::{params, Connection, OptionalExtension, Row};
 use serde::Serialize;
 
 use super::files::FileState;
 use super::ids::{FileId, TitleId};
 use super::sql;
-use super::titles::RomStatus;
+use super::titles::{RomStatus, TitleSource};
 use crate::error::Result;
+
+/// The `source` code of DAT titles and of MRA titles in SQL text.
+const DAT: &str = TitleSource::Dat.sql();
+const MRA: &str = TitleSource::Mra.sql();
 
 /// A rom a hashed file matched, per `docs/VERIFICATION.md` "Matching order".
 #[derive(Debug, Clone, PartialEq)]
@@ -43,7 +47,7 @@ enum Scope {
 /// what `scope` admits from the first tier with a match.
 fn match_tiers(
     conn: &Connection,
-    platform_id: &PlatformId,
+    platform: PlatformKey,
     (sha1, md5, crc32): (Option<Sha1>, Option<Md5>, Option<Crc32>),
     size: i64,
     scope: Scope,
@@ -61,14 +65,14 @@ fn match_tiers(
     let select = format!(
         "SELECT r.id, r.title_id, r.name, r.status, r.title_name
          FROM rom_view r JOIN dat_versions d ON d.id = r.dat_version_id
-         WHERE r.platform_key = ?1 AND r.title_source = 'dat' AND {live}"
+         WHERE r.platform_key = ?1 AND r.title_source = {DAT} AND {live}"
     );
     let tiers: [(&str, Vec<&dyn rusqlite::ToSql>); 3] = [
-        ("r.sha1 = ?2", vec![platform_id, &sha1]),
-        ("r.sha1 IS NULL AND r.md5 = ?2", vec![platform_id, &md5]),
+        ("r.sha1 = ?2", vec![&platform, &sha1]),
+        ("r.sha1 IS NULL AND r.md5 = ?2", vec![&platform, &md5]),
         (
             "r.sha1 IS NULL AND r.md5 IS NULL AND r.crc32 = ?2 AND r.size = ?3",
-            vec![platform_id, &crc32, &size],
+            vec![&platform, &crc32, &size],
         ),
     ];
     for (cond, bound) in &tiers {
@@ -92,13 +96,13 @@ fn match_tiers(
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn match_rom(
     conn: &Connection,
-    platform_id: &PlatformId,
+    platform: PlatformKey,
     sha1: Option<Sha1>,
     md5: Option<Md5>,
     crc32: Option<Crc32>,
     size: i64,
 ) -> Result<Option<RomMatch>> {
-    let found = match_tiers(conn, platform_id, (sha1, md5, crc32), size, Scope::Best)?;
+    let found = match_tiers(conn, platform, (sha1, md5, crc32), size, Scope::Best)?;
     Ok(found.into_iter().next())
 }
 
@@ -111,23 +115,23 @@ pub fn match_rom(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let nes = mistarr_core::PlatformId::new("nes");
+/// let nes = mistarr_server::db::platforms::fixed_key("nes").unwrap();
 /// let crc = Some(mistarr_core::Crc32::from_u32(0));
-/// assert!(mistarr_server::db::roms::match_live_rom(&conn, &nes, None, None, crc, 1).unwrap().is_none());
+/// assert!(mistarr_server::db::roms::match_live_rom(&conn, nes, None, None, crc, 1).unwrap().is_none());
 /// ```
 pub fn match_live_rom(
     conn: &Connection,
-    platform_id: &PlatformId,
+    platform: PlatformKey,
     sha1: Option<Sha1>,
     md5: Option<Md5>,
     crc32: Option<Crc32>,
     size: i64,
 ) -> Result<Option<RomMatch>> {
-    let found = match_tiers(conn, platform_id, (sha1, md5, crc32), size, Scope::BestLive)?;
+    let found = match_tiers(conn, platform, (sha1, md5, crc32), size, Scope::BestLive)?;
     Ok(found.into_iter().next())
 }
 
-/// Every live rom of a live DAT title on `platform_id` that `hashes` matches at the first
+/// Every live rom of a live DAT title on `platform` that `hashes` matches at the first
 /// tier with any match: SHA1, then MD5, then CRC32 and size; ordered by rom id.
 ///
 /// # Errors
@@ -137,18 +141,18 @@ pub fn match_live_rom(
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let psx = mistarr_core::PlatformId::new("psx");
+/// let psx = mistarr_server::db::platforms::fixed_key("psx").unwrap();
 /// let h = mistarr_core::hash::hash_reader(&b"a"[..], Default::default(), None).unwrap();
-/// assert!(mistarr_server::db::roms::roms_matching(&conn, &psx, &h).unwrap().is_empty());
+/// assert!(mistarr_server::db::roms::roms_matching(&conn, psx, &h).unwrap().is_empty());
 /// ```
 pub fn roms_matching(
     conn: &Connection,
-    platform_id: &PlatformId,
+    platform: PlatformKey,
     hashes: &Hashes,
 ) -> Result<Vec<RomMatch>> {
     let size = sql::to_i64(hashes.size);
     let by = (Some(hashes.sha1), Some(hashes.md5), Some(hashes.crc32));
-    match_tiers(conn, platform_id, by, size, Scope::AllLive)
+    match_tiers(conn, platform, by, size, Scope::AllLive)
 }
 
 fn rom_match(r: &Row<'_>) -> rusqlite::Result<RomMatch> {
@@ -183,7 +187,7 @@ pub fn disc_roms(conn: &Connection, title_id: TitleId) -> Result<Vec<RomMatch>> 
         .collect::<rusqlite::Result<_>>()?)
 }
 
-/// Whether a live DAT rom on `platform_id` is a whole `.chd` file of `size` bytes, so a
+/// Whether a live DAT rom on `platform` is a whole `.chd` file of `size` bytes, so a
 /// `.chd` of that size is hashed whole before its header is read.
 ///
 /// # Errors
@@ -193,18 +197,18 @@ pub fn disc_roms(conn: &Connection, title_id: TitleId) -> Result<Vec<RomMatch>> 
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// let psx = mistarr_core::PlatformId::new("psx");
-/// assert!(!mistarr_server::db::roms::chd_rom_sized(&conn, &psx, 10).unwrap());
+/// let psx = mistarr_server::db::platforms::fixed_key("psx").unwrap();
+/// assert!(!mistarr_server::db::roms::chd_rom_sized(&conn, psx, 10).unwrap());
 /// ```
-pub fn chd_rom_sized(conn: &Connection, platform_id: &PlatformId, size: i64) -> Result<bool> {
+pub fn chd_rom_sized(conn: &Connection, platform: PlatformKey, size: i64) -> Result<bool> {
     Ok(conn
-        .prepare_cached(
+        .prepare_cached(&format!(
             "SELECT EXISTS(
                SELECT 1 FROM roms r INDEXED BY roms_chd_size JOIN titles t ON t.id = r.title_id
-               WHERE r.size = ?2 AND t.platform_id = ?1 AND t.source = 'dat'
-                 AND r.retired = 0 AND t.retired = 0 AND lower(r.name) LIKE '%.chd')",
-        )?
-        .query_row(params![platform_id, size], |r| r.get(0))?)
+               WHERE r.size = ?2 AND t.platform = ?1 AND t.source = {DAT}
+                 AND r.retired = 0 AND t.retired = 0 AND lower(r.name) LIKE '%.chd')"
+        ))?
+        .query_row(params![platform, size], |r| r.get(0))?)
 }
 
 /// Whether any rom of this platform has this CRC32 and size, the pre-check
@@ -215,17 +219,17 @@ pub fn chd_rom_sized(conn: &Connection, platform_id: &PlatformId, size: i64) -> 
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn crc_candidate_exists(
     conn: &Connection,
-    platform_id: &PlatformId,
+    platform: PlatformKey,
     crc32: Crc32,
     size: i64,
 ) -> Result<bool> {
     Ok(conn
-        .prepare_cached(
+        .prepare_cached(&format!(
             "SELECT EXISTS(
            SELECT 1 FROM rom_view r
-           WHERE r.platform_key = ?1 AND r.title_source = 'dat' AND r.crc32 = ?2 AND r.size = ?3)",
-        )?
-        .query_row(params![platform_id, crc32, size], |r| r.get(0))?)
+           WHERE r.platform_key = ?1 AND r.title_source = {DAT} AND r.crc32 = ?2 AND r.size = ?3)"
+        ))?
+        .query_row(params![platform, crc32, size], |r| r.get(0))?)
 }
 
 /// Number of roms belonging to a title, for the disc all-or-nothing rule.
@@ -403,7 +407,7 @@ pub fn zip_rom(conn: &Connection, rom_id: RomId) -> Result<Option<ZipRom>> {
             &format!(
                 "SELECT t.id, {}, COALESCE(r.zip_dir, ''), COALESCE(t.mra_path, '')
                  FROM roms r JOIN titles t ON t.id = r.title_id
-                 WHERE r.id = ?1 AND t.source = 'mra'",
+                 WHERE r.id = ?1 AND t.source = {MRA}",
                 sql::ROM_NAME
             ),
             [rom_id],
@@ -429,16 +433,16 @@ pub fn zip_rom(conn: &Connection, rom_id: RomId) -> Result<Option<ZipRom>> {
 /// ```
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
-/// assert!(mistarr_server::db::roms::live_zip_roms(&conn, &mistarr_core::PlatformId::new("arcade")).unwrap().is_empty());
+/// assert!(mistarr_server::db::roms::live_zip_roms(&conn, mistarr_server::db::platforms::fixed_key("arcade").unwrap()).unwrap().is_empty());
 /// ```
 pub fn live_zip_roms(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: PlatformKey,
 ) -> Result<HashMap<String, Vec<RomId>>> {
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "SELECT COALESCE(r.zip_dir, ''), r.name, r.id FROM rom_view r
-         WHERE r.platform_key = ?1 AND r.title_source = 'mra' AND r.live ORDER BY r.id",
-    )?;
+         WHERE r.platform_key = ?1 AND r.title_source = {MRA} AND r.live ORDER BY r.id"
+    ))?;
     let mut rows = stmt.query([platform])?;
     let mut out: HashMap<String, Vec<RomId>> = HashMap::new();
     while let Some(r) = rows.next()? {
@@ -468,8 +472,9 @@ pub fn verified_file(conn: &Connection, rom: RomId) -> Result<Option<FileId>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::fixtures::{conn, dat, pid};
+    use crate::db::fixtures::{conn, dat, key, pid};
     use mistarr_core::Hashes;
+    use mistarr_core::PlatformId;
 
     fn hashes(size: u64) -> Hashes {
         Hashes {
@@ -492,7 +497,7 @@ mod tests {
             .rom("Example Quest (USA).nes", &h, RomStatus::Good)
             .write(&c)
             .expect("seed");
-        let m = match_rom(&c, &nes, Some(h.sha1), Some(h.md5), Some(h.crc32), 3)
+        let m = match_rom(&c, key(&nes), Some(h.sha1), Some(h.md5), Some(h.crc32), 3)
             .expect("match")
             .expect("found");
         assert_eq!(m.name, "Example Quest (USA).nes");
@@ -513,7 +518,7 @@ mod tests {
         let crc = |n| Some(Crc32::from_u32(n));
         let m = match_rom(
             &c,
-            &nes,
+            key(&nes),
             wrong,
             Some(Md5::from_bytes([0x11; 16])),
             crc(!0),
@@ -524,11 +529,11 @@ mod tests {
         assert_eq!(m.rom_id, other);
         c.execute("UPDATE roms SET md5 = NULL WHERE id = ?1", [other])
             .expect("clear md5");
-        let m = match_rom(&c, &nes, wrong, None, crc(1), 4)
+        let m = match_rom(&c, key(&nes), wrong, None, crc(1), 4)
             .expect("match")
             .expect("crc32 and size match a rom with neither");
         assert_eq!(m.rom_id, other);
-        assert!(match_rom(&c, &nes, wrong, None, crc(1), 5)
+        assert!(match_rom(&c, key(&nes), wrong, None, crc(1), 5)
             .expect("match")
             .is_none());
     }
@@ -553,7 +558,7 @@ mod tests {
             [new.dat_version, old.dat_version],
         )
         .expect("supersede");
-        let m = match_rom(&c, &nes, Some(h.sha1), Some(h.md5), Some(h.crc32), 3)
+        let m = match_rom(&c, key(&nes), Some(h.sha1), Some(h.md5), Some(h.crc32), 3)
             .expect("match")
             .expect("found");
         assert_eq!(m.name, "New Pick.nes");
@@ -574,10 +579,12 @@ mod tests {
             [gone.titles[0]],
         )
         .expect("retire");
-        let any =
-            || match_rom(&c, &nes, Some(h.sha1), Some(h.md5), Some(h.crc32), 3).expect("match");
+        let any = || {
+            match_rom(&c, key(&nes), Some(h.sha1), Some(h.md5), Some(h.crc32), 3).expect("match")
+        };
         let live = || {
-            match_live_rom(&c, &nes, Some(h.sha1), Some(h.md5), Some(h.crc32), 3).expect("match")
+            match_live_rom(&c, key(&nes), Some(h.sha1), Some(h.md5), Some(h.crc32), 3)
+                .expect("match")
         };
         assert_eq!(any().expect("retired still matches").name, "Gone Quest.nes");
         assert!(live().is_none(), "a retired rom is not live");
@@ -600,9 +607,9 @@ mod tests {
             .rom("a.nes", &h, RomStatus::Good)
             .write(&c)
             .expect("seed");
-        assert!(crc_candidate_exists(&c, &nes, h.crc32, 3).expect("exists"));
-        assert!(!crc_candidate_exists(&c, &nes, h.crc32, 4).expect("size"));
-        assert!(!crc_candidate_exists(&c, &pid("snes"), h.crc32, 3).expect("platform"));
+        assert!(crc_candidate_exists(&c, key(&nes), h.crc32, 3).expect("exists"));
+        assert!(!crc_candidate_exists(&c, key(&nes), h.crc32, 4).expect("size"));
+        assert!(!crc_candidate_exists(&c, key(&pid("snes")), h.crc32, 3).expect("platform"));
     }
 
     #[test]
@@ -637,7 +644,7 @@ mod tests {
         let (a, b) = (seeded.titles[0], seeded.titles[1]);
         let (ra, rb) = (seeded.roms[0], seeded.roms[1]);
         let ids = |hashes: &Hashes, platform: &PlatformId| -> Vec<RomId> {
-            roms_matching(&c, platform, hashes)
+            roms_matching(&c, key(platform), hashes)
                 .expect("match")
                 .iter()
                 .map(|m| m.rom_id)
@@ -677,8 +684,8 @@ mod tests {
             .rom("Disc.bin", &hashes(8192), RomStatus::Good)
             .write(&c)
             .expect("seed");
-        assert!(chd_rom_sized(&c, &psx, 4096).expect("sized"));
-        assert!(!chd_rom_sized(&c, &psx, 8192).expect("a bin is not a chd"));
-        assert!(!chd_rom_sized(&c, &pid("saturn"), 4096).expect("other platform"));
+        assert!(chd_rom_sized(&c, key(&psx), 4096).expect("sized"));
+        assert!(!chd_rom_sized(&c, key(&psx), 8192).expect("a bin is not a chd"));
+        assert!(!chd_rom_sized(&c, key(&pid("saturn")), 4096).expect("other platform"));
     }
 }

@@ -7,17 +7,27 @@ use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use serde::Serialize;
 
+use crate::db::arcade::Check;
 use crate::db::files::FileState;
 use crate::db::groups::{self, Clause};
 use crate::db::ids::TitleId;
+use crate::db::platforms::PlatformRef;
 use crate::db::sql::{self, Page, Paged};
+use crate::db::titles::TitleSource;
 use crate::error::Result;
 
 /// Keeps a group of `title_groups g` only when its parent is an MRA title or its platform
 /// has no live MRA title, so a platform with MRAs browses its MRA catalogue alone.
-const MRA_ONLY: &str = "(g.source = 'mra' OR g.platform_id NOT IN (
-    SELECT p.slug FROM platforms p WHERE EXISTS (
-      SELECT 1 FROM titles m WHERE m.platform_id = p.slug AND m.source = 'mra' AND m.retired = 0)))";
+fn mra_only() -> String {
+    format!(
+        "(g.source = {MRA} OR g.platform NOT IN (
+    SELECT p.id FROM platforms p WHERE EXISTS (
+      SELECT 1 FROM titles m WHERE m.platform = p.id AND m.source = {MRA} AND m.retired = 0)))"
+    )
+}
+
+/// The `source` code of MRA titles in SQL text.
+const MRA: &str = TitleSource::Mra.sql();
 
 /// Catalog counts of one platform for `GET /platforms`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
@@ -55,11 +65,12 @@ pub struct Counts {
 pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Counts>> {
     let mut out: HashMap<String, Counts> = HashMap::new();
     let mut clause = Clause::default();
-    clause.and(MRA_ONLY, []);
+    clause.and(&mra_only(), []);
     groups::visible(&mut clause, hidden, None, &[]);
     let mut stmt = conn.prepare(&format!(
-        "SELECT g.platform_id, COUNT(*), SUM(g.have_verified > 0), SUM(g.wanted > 0)
-         FROM title_groups g WHERE {} GROUP BY g.platform_id",
+        "SELECT (SELECT p.slug FROM platforms p WHERE p.id = g.platform), COUNT(*),
+                SUM(g.have_verified > 0), SUM(g.wanted > 0)
+         FROM title_groups g WHERE {} GROUP BY g.platform",
         clause.sql()
     ))?;
     let mut rows = stmt.query(params_from_iter(&clause.args))?;
@@ -91,26 +102,27 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
     }
     // Per visible MRA title, failing its md5 check or partly present, by clone group;
     // a group with a have-verified variant in title_groups counts as neither.
-    let mut stmt = conn.prepare(
+    let mut stmt = conn.prepare(&format!(
         "WITH mra AS (
-           SELECT t.platform_id, t.group_root AS parent_id,
-                  MAX(COALESCE(t.mra_check IN ('mismatch', 'missing_part'), 0)) AS any_failing,
+           SELECT t.platform, t.group_root AS parent_id,
+                  MAX(COALESCE(t.mra_check >= {failing}, 0)) AS any_failing,
                   MAX(EXISTS (SELECT 1 FROM roms r
                               WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 1)
                       AND EXISTS (SELECT 1 FROM roms r
                                   WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 0)) AS any_partial
            FROM titles t
-           WHERE t.source = 'mra' AND t.retired = 0
+           WHERE t.source = {MRA} AND t.retired = 0
              AND NOT EXISTS (SELECT 1 FROM title_flags f
                              WHERE f.title_id = t.id AND f.flag IN (SELECT value FROM json_each(?1)))
-           GROUP BY t.platform_id, t.group_root
+           GROUP BY t.platform, t.group_root
          )
-         SELECT g.platform_id,
+         SELECT (SELECT p.slug FROM platforms p WHERE p.id = g.platform),
                 COALESCE(SUM(m.any_failing AND g.have_verified = 0), 0),
                 COALESCE(SUM(m.any_partial AND g.have_verified = 0), 0)
-         FROM mra m JOIN title_groups g ON g.platform_id = m.platform_id AND g.parent_id = m.parent_id
-         GROUP BY g.platform_id",
-    )?;
+         FROM mra m JOIN title_groups g ON g.platform = m.platform AND g.parent_id = m.parent_id
+         GROUP BY g.platform",
+        failing = Check::MissingPart.sql()
+    ))?;
     let mut rows = stmt.query([sql::json_list(hidden)?])?;
     while let Some(r) = rows.next()? {
         let e = out.entry(r.get(0)?).or_default();
@@ -243,23 +255,20 @@ pub const SEARCH_SHAPE: SearchShape = SearchShape::FtsPlatform;
 /// The conditions of a browse request on `platform`, over `title_groups g`.
 pub(super) fn browse_clause(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: &PlatformRef,
     filter: &Browse,
     shape: SearchShape,
 ) -> Result<Clause> {
     let mut clause = Clause::default();
-    clause.and(
-        "g.platform_id = ?",
-        [Value::Text(platform.as_str().to_owned())],
-    );
+    clause.and("g.platform = ?", [Value::Integer(platform.key.get())]);
     let mra: bool = conn
-        .prepare(
+        .prepare(&format!(
             "SELECT EXISTS (SELECT 1 FROM titles
-             WHERE platform_id = ?1 AND source = 'mra' AND retired = 0)",
-        )?
-        .query_row([platform], |r| r.get(0))?;
+             WHERE platform = ?1 AND source = {MRA} AND retired = 0)"
+        ))?
+        .query_row([platform.key], |r| r.get(0))?;
     if mra {
-        clause.and("g.source = 'mra'", []);
+        clause.and(&format!("g.source = {MRA}"), []);
     }
     if let Some(q) = filter.q.as_deref().map(str::trim).filter(|q| !q.is_empty()) {
         if q.chars().count() >= TRIGRAM {
@@ -271,10 +280,10 @@ pub(super) fn browse_clause(
                     [
                         Value::Text(format!(
                             "platform : \"\u{1f}{}\u{1f}\" AND base_name : {}",
-                            platform.as_str(),
+                            platform.id.as_str(),
                             phrase(q)
                         )),
-                        Value::Text(platform.as_str().to_owned()),
+                        Value::Integer(platform.key.get()),
                     ],
                 ),
             }
@@ -313,13 +322,15 @@ pub(super) fn page_sql(clause: &Clause, sort: Sort) -> String {
     };
     // Only groups with a BIOS variant look at their variants' flags.
     format!(
-        "SELECT g.parent_id, g.platform_id, g.base_name, g.name, g.pick_id, k.name,
+        "SELECT g.parent_id, (SELECT s.slug FROM platforms s WHERE s.id = g.platform), g.base_name,
+                p.name, g.pick_id, k.name,
                 g.variants, g.have_verified, g.wanted, g.has_pick,
                 CASE WHEN g.flag_union & {bios} = 0 THEN 0 ELSE NOT EXISTS (
                     SELECT 1 FROM titles v WHERE v.group_root = g.parent_id AND v.retired = 0
                     AND NOT EXISTS (SELECT 1 FROM title_flags f
                                     WHERE f.title_id = v.id AND f.flag = 'bios')) END
-         FROM title_groups g LEFT JOIN titles k ON k.id = g.pick_id
+         FROM title_groups g JOIN titles p ON p.id = g.parent_id
+         LEFT JOIN titles k ON k.id = g.pick_id
          WHERE {} ORDER BY {order} LIMIT ? OFFSET ?",
         clause.sql(),
         bios = groups::BIOS_BIT
@@ -337,7 +348,7 @@ const SEARCH: &str = "g.parent_id IN (SELECT rowid FROM title_search WHERE title
 /// parent is elsewhere, found through the partial `title_groups_split` index.
 const SEARCH_PLATFORM: &str = "g.parent_id IN (
     SELECT rowid FROM title_search WHERE title_search MATCH ?
-    UNION ALL SELECT s.parent_id FROM title_groups s WHERE s.platform_id = ? AND s.split)";
+    UNION ALL SELECT s.parent_id FROM title_groups s WHERE s.platform = ? AND s.split)";
 
 /// `q` as one FTS5 phrase, so every character is literal.
 fn phrase(q: &str) -> String {
@@ -369,13 +380,16 @@ fn like_pattern(q: &str) -> String {
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let page = Page { limit: 10, offset: 0 };
-/// let nes = mistarr_core::PlatformId::new("nes");
+/// let nes = mistarr_server::db::platforms::PlatformRef {
+///     id: mistarr_core::PlatformId::new("nes"),
+///     key: mistarr_server::db::platforms::fixed_key("nes").unwrap(),
+/// };
 /// let got = browse(&conn, &nes, &Browse::default(), page).unwrap();
 /// assert!(got.items.is_empty() && got.total == 0);
 /// ```
 pub fn browse(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: &PlatformRef,
     filter: &Browse,
     page: Page,
 ) -> Result<Paged<GroupRow>> {
@@ -395,12 +409,16 @@ pub fn browse(
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let filter = Browse { q: Some("quest".into()), ..Browse::default() };
 /// let page = Page { limit: 10, offset: 0 };
-/// let got = browse_with(&conn, &mistarr_core::PlatformId::new("nes"), &filter, page, SearchShape::Like).unwrap();
+/// let nes = mistarr_server::db::platforms::PlatformRef {
+///     id: mistarr_core::PlatformId::new("nes"),
+///     key: mistarr_server::db::platforms::fixed_key("nes").unwrap(),
+/// };
+/// let got = browse_with(&conn, &nes, &filter, page, SearchShape::Like).unwrap();
 /// assert!(got.items.is_empty() && got.total == 0);
 /// ```
 pub fn browse_with(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: &PlatformRef,
     filter: &Browse,
     page: Page,
     shape: SearchShape,
@@ -410,7 +428,7 @@ pub fn browse_with(
 
 fn browse_in(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: &PlatformRef,
     filter: &Browse,
     page: Page,
     shape: SearchShape,

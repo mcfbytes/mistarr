@@ -316,7 +316,7 @@ fn lookup(
     };
     let hbmame = z.zip_dir.eq_ignore_ascii_case("hbmame");
     let set = set_name(&z.name);
-    let dat = match arcade_rows::dat_entry_named(c, &arcade::platform(), set, hbmame)? {
+    let dat = match arcade_rows::dat_entry_named(c, arcade::key(c)?, set, hbmame)? {
         Some(t) => imports::title_entry(c, t)?,
         None => None,
     };
@@ -462,7 +462,7 @@ impl Placing<'_> {
         let (dir, file) = (zip.dir.clone(), zip.file.clone());
         let titles = app
             .db
-            .read(move |c| arcade_rows::titles_naming(c, &arcade::platform(), &dir, &file))
+            .read(move |c| arcade_rows::titles_naming(c, arcade::key(c)?, &dir, &file))
             .await?;
         let arcade_dir = app.config().paths.root.join(arcade::ARCADE_DIR);
         let games = self.games.clone();

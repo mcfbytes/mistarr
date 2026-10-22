@@ -5,12 +5,16 @@ use std::collections::HashMap;
 
 use mistarr_core::naming::{parse_name, ParsedName};
 use mistarr_core::select::{infer_groups, select_1g1r, Prefs, Variant};
-use mistarr_core::PlatformId;
+use mistarr_core::PlatformKey;
 use rusqlite::{params, Connection};
 
 use crate::db::ids::{DatVersionId, TitleId};
 use crate::db::sql;
+use crate::db::titles::TitleSource;
 use crate::error::Result;
+
+/// The `source` code of a DAT title in SQL text.
+const DAT: &str = TitleSource::Dat.sql();
 
 /// Sets clone parents for the titles of `version`. With `use_clone_of` each
 /// title's parent is the game its `cloneof` names, else itself; without it the
@@ -89,7 +93,7 @@ fn variants(group: &[Candidate]) -> Vec<Variant> {
 fn grouped(
     conn: &Connection,
     sql: &str,
-    platform: &PlatformId,
+    platform: PlatformKey,
     mut each: impl FnMut(&[Candidate]),
 ) -> Result<()> {
     let mut stmt = conn.prepare(sql)?;
@@ -136,12 +140,12 @@ fn bad_dump() -> String {
 /// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
 /// mistarr_server::db::migrate::apply(&mut conn).unwrap();
 /// let prefs = mistarr_core::select::Prefs::default();
-/// let r = mistarr_server::db::titles::recompute::recompute_platform(&conn, &mistarr_core::PlatformId::new("nes"), &prefs).unwrap();
+/// let r = mistarr_server::db::titles::recompute::recompute_platform(&conn, mistarr_core::PlatformKey::new(1), &prefs).unwrap();
 /// assert_eq!(r.groups, 0);
 /// ```
 pub fn recompute_platform(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: PlatformKey,
     prefs: &Prefs,
 ) -> Result<Recomputed> {
     let defaults = Prefs::default();
@@ -150,7 +154,7 @@ pub fn recompute_platform(
         conn,
         &format!(
             "SELECT t.group_key, t.id, t.name, {} FROM titles t
-             WHERE t.platform_id = ?1 AND t.inferred = 1 AND t.retired = 0
+             WHERE t.platform = ?1 AND t.inferred = 1 AND t.retired = 0
              ORDER BY t.group_key, t.id",
             bad_dump()
         ),
@@ -184,7 +188,7 @@ pub fn recompute_platform(
         conn,
         &format!(
             "SELECT CAST(t.group_root AS TEXT), t.id, t.name, {} FROM titles t
-             WHERE t.platform_id = ?1 AND t.retired = 0 ORDER BY t.group_root, t.id",
+             WHERE t.platform = ?1 AND t.retired = 0 ORDER BY t.group_root, t.id",
             bad_dump()
         ),
         platform,
@@ -203,12 +207,12 @@ pub fn recompute_platform(
 
 /// Sets `is_1g1r_pick` on exactly `picks` among `platform`'s titles, writing only the
 /// rows that change so unchanged groups stay clean.
-fn store_picks(conn: &Connection, platform: &PlatformId, mut picks: Vec<TitleId>) -> Result<()> {
+fn store_picks(conn: &Connection, platform: PlatformKey, mut picks: Vec<TitleId>) -> Result<()> {
     picks.sort_unstable();
     picks.dedup();
     let current: Vec<TitleId> = conn
         .prepare_cached(
-            "SELECT id FROM titles WHERE platform_id = ?1 AND is_1g1r_pick = 1 ORDER BY id",
+            "SELECT id FROM titles WHERE platform = ?1 AND is_1g1r_pick = 1 ORDER BY id",
         )?
         .query_map([platform], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -230,13 +234,13 @@ fn store_picks(conn: &Connection, platform: &PlatformId, mut picks: Vec<TitleId>
 /// members left behind by a root that linked away take their lowest live id as root.
 /// The groups are worked out in memory and only rows whose `group_root` changes are
 /// written, so a recompute that changes nothing leaves every group clean.
-fn link_shared_titles(conn: &Connection, platform: &PlatformId) -> Result<()> {
+fn link_shared_titles(conn: &Connection, platform: PlatformKey) -> Result<()> {
     let versions: Vec<DatVersionId> = conn
-        .prepare_cached(
+        .prepare_cached(&format!(
             "SELECT id FROM dat_versions
-             WHERE platform_id = ?1 AND source = 'dat' AND retired = 0 AND superseded_by IS NULL
-             ORDER BY game_count DESC, id",
-        )?
+             WHERE platform = ?1 AND source = {DAT} AND retired = 0 AND superseded_by IS NULL
+             ORDER BY game_count DESC, id"
+        ))?
         .query_map([platform], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let (largest, mut rest) = match versions.split_first() {
@@ -244,7 +248,7 @@ fn link_shared_titles(conn: &Connection, platform: &PlatformId) -> Result<()> {
         _ => {
             conn.execute(
                 "UPDATE titles SET group_root = parent_id
-                 WHERE platform_id = ?1 AND group_root IS NOT parent_id",
+                 WHERE platform = ?1 AND group_root IS NOT parent_id",
                 [platform],
             )?;
             return Ok(());
@@ -270,7 +274,7 @@ fn link_shared_titles(conn: &Connection, platform: &PlatformId) -> Result<()> {
 /// equal those of a title in `largest`, or of a title in an earlier version of `rest`.
 fn shared_links(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: PlatformKey,
     largest: DatVersionId,
     rest: &[DatVersionId],
 ) -> Result<Vec<(TitleId, TitleId)>> {
@@ -316,10 +320,10 @@ pub(super) struct Node {
 
 /// Every title of `platform` with `target` at its `parent_id`, and every title elsewhere
 /// in a group a title of `platform` roots with `target` at that group, sorted by id.
-fn group_nodes(conn: &Connection, platform: &PlatformId) -> Result<Vec<Node>> {
+fn group_nodes(conn: &Connection, platform: PlatformKey) -> Result<Vec<Node>> {
     let mut nodes: Vec<Node> = conn
         .prepare_cached(
-            "SELECT id, parent_id, group_root, retired = 0 FROM titles WHERE platform_id = ?1",
+            "SELECT id, parent_id, group_root, retired = 0 FROM titles WHERE platform = ?1",
         )?
         .query_map([platform], |r| {
             Ok(Node {
@@ -333,7 +337,7 @@ fn group_nodes(conn: &Connection, platform: &PlatformId) -> Result<Vec<Node>> {
     let mut away = conn.prepare_cached(
         "SELECT m.id, m.group_root, m.retired = 0
          FROM titles r JOIN titles m ON m.group_root = r.id
-         WHERE r.platform_id = ?1 AND m.platform_id IS NOT ?1",
+         WHERE r.platform = ?1 AND m.platform IS NOT ?1",
     )?;
     let away = away.query_map([platform], |r| {
         let root: Option<TitleId> = r.get(1)?;
@@ -386,18 +390,18 @@ pub(super) fn reroot(nodes: &mut [Node]) {
 /// with roms that all carry a hash; the signature hashes the rom keys whatever their order.
 fn each_signature(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: PlatformKey,
     version: DatVersionId,
     mut each: impl FnMut(TitleId, TitleId, u64),
 ) -> Result<()> {
     use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare_cached(&format!(
         "SELECT t.id, t.parent_id, COALESCE(r.sha1, r.md5, CAST(r.crc32 || CAST(r.size AS BLOB) AS BLOB))
          FROM titles t JOIN roms r ON r.title_id = t.id AND r.retired = 0
-         WHERE t.dat_version_id = ?1 AND t.retired = 0 AND t.source = 'dat'
-           AND t.platform_id = ?2
-         ORDER BY t.id",
-    )?;
+         WHERE t.dat_version_id = ?1 AND t.retired = 0 AND t.source = {DAT}
+           AND t.platform = ?2
+         ORDER BY t.id"
+    ))?;
     let mut rows = stmt.query(params![version, platform])?;
     // Per title: id, parent, sum of key hashes, rom count, whether every rom had a key.
     let mut open: Option<(TitleId, TitleId, u64, u64, bool)> = None;

@@ -3,6 +3,7 @@
 use mistarr_core::PlatformId;
 use rusqlite::{Connection, OptionalExtension};
 
+use super::arcade::Check;
 use super::files::FileState;
 use super::ids::TitleId;
 use super::sql::ROM_NAME;
@@ -45,7 +46,7 @@ pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
     let row = conn
         .query_row(
             &format!(
-                "SELECT t.platform_id,
+                "SELECT (SELECT p.slug FROM platforms p WHERE p.id = t.platform),
                         EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = t.id AND f.flag = 'bios'),
                         t.source, t.mra_path,
                         (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0),
@@ -54,13 +55,14 @@ pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
                                        WHERE f.rom_id = r.id AND f.state IN {loadable})),
                         (SELECT COUNT(*) FROM roms r
                          WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 1),
-                        COALESCE(t.mra_check, '') IN ('mismatch', 'missing_part'),
+                        COALESCE(t.mra_check, 0) >= {failing},
                         (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0
                            AND EXISTS (SELECT 1 FROM files f INDEXED BY files_rom
                                        WHERE f.rom_id = r.id AND f.state = {verified}))
                  FROM titles t WHERE t.id = ?1",
                 loadable = FileState::LOADABLE_SQL,
-                verified = FileState::Verified.sql()
+                verified = FileState::Verified.sql(),
+                failing = Check::MissingPart.sql()
             ),
             [id],
             |r| {
@@ -202,7 +204,7 @@ mod tests {
             .expect("blaster");
         let (t, rom) = (blaster.titles[0], blaster.first_rom());
         c.execute(
-            "UPDATE titles SET source = 'mra', mra_path = 'Example Blaster.mra' WHERE id = ?1",
+            "UPDATE titles SET source = 1, mra_path = 'Example Blaster.mra' WHERE id = ?1",
             [t],
         )
         .expect("mra");
@@ -212,11 +214,8 @@ mod tests {
         c.execute("UPDATE roms SET present = 1 WHERE id = ?1", [rom])
             .expect("present");
         assert!(title(&c, t).expect("read").expect("title").complete);
-        c.execute(
-            "UPDATE titles SET mra_check = 'mismatch' WHERE id = ?1",
-            [t],
-        )
-        .expect("check");
+        c.execute("UPDATE titles SET mra_check = 3 WHERE id = ?1", [t])
+            .expect("check");
         assert!(!title(&c, t).expect("read").expect("title").complete);
     }
 

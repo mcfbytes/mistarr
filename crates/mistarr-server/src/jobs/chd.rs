@@ -10,7 +10,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use mistarr_core::chd::{self as core, ChdError, ChdId, Decoder, Header, Layout, Step};
 use mistarr_core::hash::{hash_reader, HeaderRule};
-use mistarr_core::{Hashes, PlatformId, RomId};
+use mistarr_core::{Hashes, PlatformId, PlatformKey, RomId};
 use mistarr_mister::launch::split_chd_member;
 use rusqlite::Connection;
 use serde_json::json;
@@ -107,11 +107,11 @@ pub(crate) async fn scan_file(
         .as_ref()
         .ok()
         .map(|h| h.id(u64::try_from(size).unwrap_or(0)));
-    let pid = platform.id.clone();
+    let pid = platform.key;
     if ctx
         .app
         .db
-        .read(move |c| roms::chd_rom_sized(c, &pid, size))
+        .read(move |c| roms::chd_rom_sized(c, pid, size))
         .await?
     {
         let file = Whole {
@@ -171,7 +171,7 @@ fn known_rows(
             mtime,
             tracks: &tracks,
         };
-        return classify_chd(conn, &platform.id, &m);
+        return classify_chd(conn, platform.key, &m);
     }
     if let Some((reason, decoder)) = rows::failure(conn, id, mtime)? {
         if decoder >= core::DECODER_VERSION {
@@ -248,13 +248,13 @@ async fn whole_file(
             }
         }
     };
-    let (pid, h) = (platform.id.clone(), hashes);
+    let (pid, h) = (platform.key, hashes);
     let matched = ctx
         .app
         .db
         .write(move |c| {
             let size = i64::try_from(h.size).unwrap_or(i64::MAX);
-            let m = roms::match_rom(c, &pid, Some(h.sha1), Some(h.md5), Some(h.crc32), size)?;
+            let m = roms::match_rom(c, pid, Some(h.sha1), Some(h.md5), Some(h.crc32), size)?;
             if let (None, Some(id)) = (&m, id) {
                 rows::store_whole_hashes(c, &id, mtime, &h)?;
             }
@@ -326,7 +326,7 @@ fn is_cue(name: &str) -> bool {
 /// and the rest `unverified`; with no such entry every track is `unverified`.
 pub(crate) fn classify_chd(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: PlatformKey,
     m: &ChdMembers<'_>,
 ) -> Result<Vec<NewFile>> {
     let mut cands = Vec::with_capacity(m.tracks.len());
@@ -522,7 +522,7 @@ pub(crate) fn rematch_container(
         mtime: first.mtime,
         tracks: &hashes,
     };
-    let next = classify_chd(conn, &platform.id, &m)?;
+    let next = classify_chd(conn, platform.key, &m)?;
     let matched = tracks
         .iter()
         .zip(&next)
@@ -792,11 +792,11 @@ async fn identify(ctx: &JobContext, row: &FileRow, live: &Live) -> Result<Outcom
     {
         return record(ctx, row, &platform, Opened::from(&ready), tracks, None).await;
     }
-    let (pid, sizes) = (platform.id.clone(), ready.layout.track_sizes());
+    let (pid, sizes) = (platform.key, ready.layout.track_sizes());
     if !ctx
         .app
         .db
-        .read(move |c| rows::layout_known(c, &pid, &sizes))
+        .read(move |c| rows::layout_known(c, pid, &sizes))
         .await?
     {
         set_reason(ctx, row.id, Unidentified::NoLayout).await?;
@@ -902,7 +902,7 @@ async fn record(
                 mtime,
                 tracks: &tracks,
             };
-            let members = classify_chd(tx, &pid.id, &m)?;
+            let members = classify_chd(tx, pid.key, &m)?;
             let changed =
                 rows::replace_container(tx, pid.key, &container, &members, crate::unix_now())?;
             if let Some(rate) = rate {
@@ -1002,7 +1002,7 @@ mod tests {
             mtime: 7,
             tracks,
         };
-        classify_chd(c, &psx(), &m).expect("classify")
+        classify_chd(c, key(&psx()), &m).expect("classify")
     }
 
     fn summary(rows: &[NewFile]) -> Vec<(String, Option<RomId>, FileState)> {

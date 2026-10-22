@@ -4,6 +4,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
+use mistarr_core::dat::family_key;
 use rusqlite::{params, Connection};
 
 use crate::db::files::FileState;
@@ -406,20 +407,33 @@ fn seed_console(
     out: &mut Seeded,
 ) -> Result<()> {
     let mra = console.layout == Layout::Mra;
-    let (dat_name, source) = if mra {
-        ("_Arcade".to_owned(), "mra")
+    let dat_name = if mra {
+        "_Arcade".to_owned()
     } else {
-        (format!("{} (synthetic)", console.id), "dat")
+        format!("{} (synthetic)", console.id)
     };
     let total = scaled(console, scale);
+    let platform: i64 = c.query_row(
+        "SELECT id FROM platforms WHERE slug = ?1",
+        [console.id],
+        |r| r.get(0),
+    )?;
+    let source = i64::from(mra);
     c.execute(
-        "INSERT INTO dat_versions (platform_id, dat_name, version, source_file, loaded_at, game_count, source)
-         VALUES (?1, ?2, '1', 'synthetic.dat', 0, ?3, ?4)",
-        params![console.id, dat_name, i64::try_from(total).unwrap_or(0), source],
+        "INSERT INTO dat_versions (platform, dat_name, version, source_file, loaded_at,
+                                   game_count, source, family)
+         VALUES (?1, ?2, '1', 'synthetic.dat', 0, ?3, ?4, ?5)",
+        params![
+            platform,
+            dat_name,
+            i64::try_from(total).unwrap_or(0),
+            source,
+            family_key(&dat_name).into_string()
+        ],
     )?;
     let version = c.last_insert_rowid();
     let mut title = c.prepare_cached(
-        "INSERT INTO titles (platform_id, dat_version_id, name, base_name, parent_id, revision,
+        "INSERT INTO titles (platform, dat_version_id, name, base_name, parent_id, revision,
                              is_1g1r_pick, wanted, group_key, inferred, source, setname, mra_path)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
     )?;
@@ -514,7 +528,7 @@ fn seed_console(
                 let _ = write!(name, " ({}{})", f[..1].to_uppercase(), &f[1..]);
             }
             title.execute(params![
-                console.id,
+                platform,
                 version,
                 name,
                 base,
@@ -524,7 +538,7 @@ fn seed_console(
                 rng.chance(1),
                 format!("{}{}", if mra { "mra:" } else { "" }, base.to_lowercase()),
                 mra,
-                if mra { "mra" } else { "dat" },
+                source,
                 mra.then(|| format!("{setname}{v}")),
                 mra.then(|| format!("{base} ({region}).mra")),
             ])?;
