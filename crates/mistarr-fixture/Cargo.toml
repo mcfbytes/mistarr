@@ -37,4 +37,4 @@ proptest.workspace = true
 claxon.workspace = true
 md-5.workspace = true
 crc32fast.workspace = true
-chd = { version = "0.3.4", default-features = false, features = ["std", "cd_full", "verify_block_crc"] }
+chd = { version = "0.4.0", default-features = false, features = ["std", "cd_full", "verify_block_crc"] }
