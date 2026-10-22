@@ -358,10 +358,11 @@ fn pack(path: &Path, target: &Target, stop: &dyn Fn() -> bool) -> Result<Checked
         let Some(name) = archive.name_for_index(i) else {
             continue;
         };
+        let name = name.map_err(not_zip)?;
         if name.ends_with('/') {
             continue;
         }
-        if !is_dat_member(name) {
+        if !is_dat_member(&name) {
             return Err(Refused::OtherFiles);
         }
         members.push(i);
@@ -391,7 +392,7 @@ fn pack(path: &Path, target: &Target, stop: &dyn Fn() -> bool) -> Result<Checked
     let rewritten = (|| -> Result<(), Refused> {
         for &i in &members {
             let member = archive.by_index(i).map_err(not_zip)?;
-            let name = member.name().to_owned();
+            let name = member.name().map_err(not_zip)?.into_owned();
             writer.start_file(name, options).map_err(|e| match e {
                 zip::result::ZipError::Io(e) => write_error(e),
                 e => not_zip(e),

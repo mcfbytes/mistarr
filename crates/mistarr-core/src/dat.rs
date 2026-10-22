@@ -1121,7 +1121,11 @@ pub struct DatPack<R: Read + Seek> {
 pub fn parse_dat_pack<R: Read + Seek>(reader: R) -> Result<DatPack<R>, DatError> {
     let archive = zip::ZipArchive::new(reader)?;
     let members: Vec<usize> = (0..archive.len())
-        .filter(|&i| archive.name_for_index(i).is_some_and(is_dat_member))
+        .filter(|&i| {
+            archive
+                .name_for_index(i)
+                .is_some_and(|name| name.is_ok_and(|n| is_dat_member(&n)))
+        })
         .collect();
     if members.is_empty() {
         return Err(DatError::EmptyPack);
@@ -1176,7 +1180,7 @@ impl<R: Read + Seek> DatPack<R> {
 
     /// Parses one member, reading a DB export twice so its clones are linked.
     fn read_member(&mut self, index: usize) -> Result<PackMember, DatError> {
-        let file_name = self.archive.by_index(index)?.name().to_owned();
+        let file_name = self.archive.by_index(index)?.name()?.into_owned();
         let in_member = |source| DatError::Member {
             member: file_name.clone(),
             source: Box::new(source),
