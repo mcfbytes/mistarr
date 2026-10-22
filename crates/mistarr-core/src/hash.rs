@@ -551,7 +551,7 @@ pub fn zip_members<R: Read + Seek>(r: R) -> Result<Vec<ZipMember>, HashError> {
         // unsupported method or an encrypted member still yields metadata.
         let file = archive.by_index_raw(i)?;
         members.push(ZipMember {
-            name: file.name().to_string(),
+            name: file.name()?.into_owned(),
             size: file.size(),
             crc32: Crc32::from_u32(file.crc32()),
         });

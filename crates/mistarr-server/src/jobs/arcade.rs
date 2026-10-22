@@ -818,7 +818,8 @@ impl PartSource for ZipSource<'_> {
             return Ok(None);
         };
         let file = archive.by_index(i).map_err(io::Error::other)?;
-        self.read.push((path, file.name().to_owned()));
+        let name = file.name().map_err(io::Error::other)?.into_owned();
+        self.read.push((path, name));
         Ok(Some(Box::new(file)))
     }
 }
@@ -838,7 +839,7 @@ fn member_index(
         let Ok(f) = archive.by_index_raw(i) else {
             continue;
         };
-        if f.name().to_lowercase() == lower {
+        if f.name().is_ok_and(|n| n.to_lowercase() == lower) {
             return Some(i);
         }
         if by_crc.is_none() && crc == Some(f.crc32()) {
