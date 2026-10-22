@@ -429,7 +429,7 @@ fn seed_console(
     let mut language = c.prepare_cached(
         "INSERT INTO title_languages (title_id, pos, language) VALUES (?1, ?2, ?3)",
     )?;
-    // Schemas from before the name tails have no `own_name`; the WHERE keeps `?10` bound.
+    // Schemas without `own_name` store whole names; the WHERE keeps `?10` bound.
     let tails = c
         .prepare("SELECT 1 FROM pragma_table_info('roms') WHERE name = 'own_name'")?
         .exists([])?;

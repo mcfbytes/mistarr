@@ -754,7 +754,7 @@ region filter, which may match several spellings. `known_flags` and
 | Column | Form | CHECK |
 |---|---|---|
 | id, title_id, match_name, header, zip_dir | kept | |
-| own_name | new 0/1, default 1: 0 when name is a tail, which holds only when the full name starts with the title's name and is longer | IN (0, 1) |
+| own_name | new 0/1: 0 when name is a tail, which holds only when the full name starts with the title's name and is longer; the default 1 means a whole name, and every writer splits through `rom_name_parts` | IN (0, 1) |
 | name | tail when own_name is 0, else the full name | own_name = 1 OR name <> '' |
 | size | kept | >= 0 |
 | crc32, md5, sha1 | BLOB 4, 16, 20; NULL when the DAT gives none | length 4, 16, 20 |
@@ -766,6 +766,8 @@ Indexes: UNIQUE (title_id, name) becomes roms_title_name UNIQUE (title_id,
 own_name, name); `roms_sha1`, `roms_md5`, `roms_crc` keep their columns over
 BLOBs; `roms_match_base` and `roms_size` follow the P2 outcome; the others are
 kept, the `.chd` predicate still on the stored name, which keeps the extension.
+The `.chd` and `.cue` predicates on the stored name assume a title's name never
+ends inside a rom's extension.
 
 **files**: STRICT, rowid; 0024, WP-86, WP-92 and WP-93.
 
@@ -1052,13 +1054,8 @@ one side has and on any MATERIALIZE or CO-ROUTINE step.
 `mistarr bench-seed` writes the synthetic catalogue (42 000 titles, 82 037
 roms, 13 263 files) into a new file:
 
-| Step | Database | `roms` table | `roms_sha1` |
+| Database | `roms` table | `roms_sha1` | `roms_title_name` |
 |---|---|---|---|
-| before the hash migration (0023 with 0025 and 0028) | 49 373 184 bytes | 11.4 MiB | 4.2 MiB |
-| after it | 43 311 104 bytes | 7.8 MiB | 2.4 MiB |
-| after rom names become tails | 39 473 152 bytes | 6.1 MiB | 2.4 MiB |
+| 39 473 152 bytes | 6.1 MiB | 2.4 MiB | 2.0 MiB |
 
-The hash migration shrinks the file by 6.06 MB (12.3%): hashes are half the
-width, and the status and flag columns are small integers. Tails save 3.84 MB
-more (8.9%): 79 537 of the 82 037 roms store only the text after their title's
-name, and `roms_title_name` is 2.0 MiB.
+79 537 of the 82 037 roms store only the text after their title's name.
