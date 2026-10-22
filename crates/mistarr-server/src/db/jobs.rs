@@ -344,6 +344,52 @@ pub fn open_rows(conn: &Connection) -> Result<Vec<JobRow>> {
     )
 }
 
+/// The queued jobs of `kind`, oldest first.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Stored`] on unparseable JSON.
+///
+/// ```
+/// use mistarr_server::db::jobs;
+/// use mistarr_server::jobs::{JobKind, Lane};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// jobs::insert(&conn, JobKind::Scan, &serde_json::json!({}), Lane::Heavy, 1).unwrap();
+/// assert_eq!(jobs::queued_of_kind(&conn, JobKind::Scan).unwrap().len(), 1);
+/// assert!(jobs::queued_of_kind(&conn, JobKind::Import).unwrap().is_empty());
+/// ```
+pub fn queued_of_kind(conn: &Connection, kind: JobKind) -> Result<Vec<JobRow>> {
+    select(
+        conn,
+        &format!("SELECT {COLUMNS} FROM jobs WHERE kind = ?1 AND state = ?2 ORDER BY id"),
+        params![kind, JobState::Queued],
+    )
+}
+
+/// Marks a queued job `running`; false, with the row unchanged, when it is not queued.
+///
+/// # Errors
+///
+/// [`crate::Error::Db`] on SQLite failure.
+///
+/// ```
+/// use mistarr_server::db::jobs;
+/// use mistarr_server::jobs::{JobKind, Lane};
+/// let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+/// mistarr_server::db::migrate::apply(&mut conn).unwrap();
+/// let id = jobs::insert(&conn, JobKind::Scan, &serde_json::json!({}), Lane::Heavy, 1).unwrap();
+/// assert!(jobs::claim_queued(&conn, id, 2).unwrap());
+/// assert!(!jobs::claim_queued(&conn, id, 3).unwrap());
+/// ```
+pub fn claim_queued(conn: &Connection, id: JobId, now: i64) -> Result<bool> {
+    let n = conn.execute(
+        "UPDATE jobs SET state = ?2, updated_at = ?3 WHERE id = ?1 AND state = ?4",
+        params![id, JobState::Running, now, JobState::Queued],
+    )?;
+    Ok(n == 1)
+}
+
 /// Fails, with `error`, every queued, running or paused job whose row this binary
 /// cannot read: a kind or lane it does not list, or JSON that does not parse. A lane
 /// it does not list becomes `light` and a payload that does not parse becomes `{}`, so

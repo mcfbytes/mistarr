@@ -1103,6 +1103,50 @@ one. `MemAvailable` is read again just before the stage is applied, the
 step in which both grow at once. A WAL in place of the rollback journal
 takes the copy alone to 253 MiB on the same load.
 
+#### A batch of queued imports
+
+Ten small DATs dropped together would cost ten copies and ten write-backs,
+so a `dat_import` job that starts takes every other queued `dat_import` job
+of a dropped file with it, in queue order, and applies them on one copy.
+Binding requests are not taken; neither is a file that is gone, cannot be
+listed, or whose job was cancelled while it waited. Those stay queued and
+run on their own turn, which rejects the ones that are not DATs.
+
+- **The need** is the formula of step 2 with the sum of the batch's
+  uncompressed DAT sizes. The job reads it before taking anyone, adds the
+  DATs in queue order while the need fits the memory, the memory directory
+  and the card, and leaves the rest queued for the next turn; the first DAT
+  always counts, so a batch of one is the import above, falling back to the
+  card as it does. A batch that the copy then refuses for any other
+  reason, or runs short of room in, is put back in the queue and the first
+  DAT runs alone.
+- **Each DAT keeps its own job**: the taken jobs are marked `running`
+  before the copy, their lanes skip them, and each reports its own phases,
+  stores its own progress on the copy after each member, publishes its own
+  `dat.loaded` and `dat.rejected` and ends `done` or `failed` on its own.
+  The file of each goes to `dats/loaded/` or `dats/rejected/` with its
+  reason after the swap, as for a single import.
+- **Failure is per DAT.** A member that does not parse or apply rolls back
+  its own transaction and is rejected with its reason while the batch goes
+  on. A DAT whose job the user cancels, or whose file cannot be read, fails
+  that job alone; its stage is emptied and nothing of it stays in the copy.
+  The copy is written back once, and only if some DAT loaded.
+- **The recompute and follow-up run once per platform** that any DAT of the
+  batch loaded, on the copy after the last load, and the follow-up (re-map,
+  scan, CHD decoding, source binding) is queued once for the batch.
+- **Stops end the whole batch.** Shutdown and a cancel of the job that
+  started it, during the copy or the write-back, end the run with the card
+  file untouched, as for a single import: that job ends as the stop says and
+  the taken ones go back to `queued`. A manual pause drops the copy, waits
+  and starts the batch again. Memory under the floor or a full copy puts the
+  taken jobs back in the queue and the job that started runs alone, in
+  RAM if it fits, else on the card. The cancel of another job waits for its
+  turn on the copy.
+- **A process killed mid-batch** leaves the file as it was and the taken jobs
+  `running`. The start puts every unfinished `dat_import` job back on its
+  lane, whose file is still in `dats/`; a kill after the swap and before a
+  file is placed repeats that file's import, as for a single job.
+
 ## Configuration
 
 `mistarr.toml`, all optional:

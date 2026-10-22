@@ -19,7 +19,7 @@ pub mod transfer;
 pub mod url_fetch;
 pub mod watch;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -296,6 +296,7 @@ pub struct Scheduler {
     lanes: Mutex<Vec<JoinHandle<()>>>,
     alive: Arc<AtomicUsize>,
     cancels: Mutex<HashMap<JobId, Arc<Cancel>>>,
+    taken: Mutex<HashSet<JobId>>,
 }
 
 /// Decrements the live-lane count when a lane task ends or is aborted.
@@ -330,6 +331,7 @@ impl Scheduler {
             lanes: Mutex::new(Vec::new()),
             alive: Arc::new(AtomicUsize::new(0)),
             cancels: Mutex::new(HashMap::new()),
+            taken: Mutex::new(HashSet::new()),
         }
     }
 
@@ -466,6 +468,36 @@ impl Scheduler {
         Arc::clone(self.cancels().entry(id).or_default())
     }
 
+    /// Marks job `id`, still waiting on its lane, as run by the job in front of it: its
+    /// lane skips it when it reaches it, until [`Scheduler::untake`].
+    pub(crate) fn take(&self, id: JobId) {
+        self.taken
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(id);
+    }
+
+    /// Hands job `id` back to its lane after [`Scheduler::take`].
+    pub(crate) fn untake(&self, id: JobId) {
+        self.taken
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id);
+    }
+
+    /// Whether job `id` was taken, which forgets it: the lane that reaches it skips it.
+    fn skip(&self, id: JobId) -> bool {
+        self.taken
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .remove(&id)
+    }
+
+    /// Whether job `id` was asked to stop and has not finished.
+    pub(crate) fn cancelled(&self, id: JobId) -> bool {
+        self.cancels().get(&id).is_some_and(|c| c.is_set())
+    }
+
     /// Hands an already recorded job to its lane.
     fn dispatch(&self, id: JobId, job: Arc<dyn Job>) -> Result<()> {
         let lane = job.lane();
@@ -517,6 +549,9 @@ async fn lane(
         let Some(Queued { id, job, cancel }) = next else {
             break;
         };
+        if app.scheduler.skip(id) {
+            continue;
+        }
         tokio::select! {
             () = app.gate.wait_free(lane) => {}
             _ = stop.wait_for(|s| *s) => break,
@@ -675,6 +710,25 @@ fn decode(kind: JobKind, payload: &Value) -> Option<Arc<dyn Job>> {
     }
 }
 
+/// The context job `id` runs under on `lane`.
+pub(crate) fn context(
+    app: &Arc<AppState>,
+    id: JobId,
+    job: &dyn Job,
+    lane: Lane,
+    cancel: Arc<Cancel>,
+) -> JobContext {
+    let stop = StopToken::new(app.shutdown_signal(), app.gate.subscribe(), lane, cancel)
+        .marking(app.db.clone(), id);
+    JobContext {
+        id,
+        kind: job.kind(),
+        app: Arc::clone(app),
+        stop,
+        detail: job.detail(),
+    }
+}
+
 /// Runs one job and records its outcome; only bookkeeping failures are returned.
 async fn execute(
     app: &Arc<AppState>,
@@ -683,15 +737,7 @@ async fn execute(
     lane: Lane,
     cancel: Arc<Cancel>,
 ) -> Result<()> {
-    let stop = StopToken::new(app.shutdown_signal(), app.gate.subscribe(), lane, cancel)
-        .marking(app.db.clone(), id);
-    let ctx = JobContext {
-        id,
-        kind: job.kind(),
-        app: Arc::clone(app),
-        stop,
-        detail: job.detail(),
-    };
+    let ctx = context(app, id, job, lane, cancel);
     // A job cancelled or shut down while it waited never starts.
     let ran = if let Err(e) = ctx.stop.stopped() {
         Err(e)
@@ -703,6 +749,13 @@ async fn execute(
         tracing::debug!(job = %id, kind = %ctx.kind, "job started");
         job.run(&ctx).await
     };
+    conclude(app, &ctx, ran).await
+}
+
+/// Records how the job of `ctx` ended, `ran` being the result of its run; only
+/// bookkeeping failures are returned.
+pub(crate) async fn conclude(app: &Arc<AppState>, ctx: &JobContext, ran: Result<()>) -> Result<()> {
+    let id = ctx.id;
     // Cleared before any exit below, including shutdown and a failed final write.
     app.live.clear(id);
     app.scheduler.cancels().remove(&id);
@@ -1099,6 +1152,35 @@ mod tests {
         assert_eq!(first, again);
         app.begin_shutdown();
         app.scheduler.stop(Duration::from_secs(2)).await;
+    }
+
+    #[tokio::test]
+    async fn reconcile_requeues_every_job_of_a_dat_batch_left_running() {
+        let (dir, app) = state();
+        let ids = app
+            .db
+            .write(move |c| {
+                let mut ids = Vec::new();
+                for (name, state) in [
+                    ("a.dat", JobState::Running),
+                    ("b.dat", JobState::Running),
+                    ("c.dat", JobState::Queued),
+                ] {
+                    let payload = json!({ "path": dir.path().join(name) });
+                    let id = rows::insert(c, JobKind::DatImport, &payload, Lane::Background, 1)?;
+                    rows::set_state(c, id, state, 2)?;
+                    ids.push(id);
+                }
+                Ok(ids)
+            })
+            .await
+            .expect("rows");
+        let done = reconcile(&app).await.expect("reconcile");
+        assert_eq!((done.requeued, done.failed, done.dropped), (3, 0, 0));
+        for id in ids {
+            let row = app.db.read(move |c| rows::get(c, id)).await.expect("get");
+            assert_eq!(row.expect("row").state, JobState::Queued);
+        }
     }
 
     #[tokio::test]
