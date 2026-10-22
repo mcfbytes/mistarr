@@ -1128,14 +1128,15 @@ run on their own turn, which rejects the ones that are not DATs.
   reason after the swap, as for a single import.
 - **Failure is per DAT.** A member that does not parse or apply rolls back
   its own transaction and is rejected with its reason while the batch goes
-  on. A DAT whose job the user cancels, or whose file cannot be read, fails
-  that job alone; its stage is emptied and nothing of it stays in the copy.
-  The copy is written back once, and only if some DAT loaded.
+  on. A file whose job the user cancels, or that cannot be read, fails that
+  job alone and nothing of it stays: when it fails after one of its members
+  loaded, the copy is dropped, the job fails, and the batch starts again
+  without it. The copy is written back once, and only if some DAT loaded.
 - **The recompute and follow-up run once per platform** that any DAT of the
   batch loaded, on the copy after the last load, and the follow-up (re-map,
   scan, CHD decoding, source binding) is queued once for the batch.
 - **Stops end the whole batch.** Shutdown and a cancel of the job that
-  started it, during the copy or the write-back, end the run with the card
+  started it, in the copy, after any file or in the write-back, end the run with the card
   file untouched, as for a single import: that job ends as the stop says and
   the taken ones go back to `queued`. A manual pause drops the copy, waits
   and starts the batch again. Memory under the floor or a full copy puts the

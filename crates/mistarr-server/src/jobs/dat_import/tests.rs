@@ -2229,7 +2229,7 @@ fn a_batch_stores_the_rows_of_the_same_dats_imported_one_at_a_time() {
             .into_iter()
             .flat_map(|e| match e {
                 batch::End::Imported(o) => o,
-                batch::End::Failed(e) => panic!("{name}: {e}"),
+                batch::End::Failed(e) | batch::End::Dirty(e) => panic!("{name}: {e}"),
             })
             .collect();
         assert_eq!(a, b, "{name}: outcomes");
@@ -2564,4 +2564,173 @@ fn halt_ignores_the_cancel_of_one_job_but_not_the_lane_or_the_server() {
         ..request(false, None)
     };
     assert!(matches!(batch::halt(&down), Err(Error::Cancelled)));
+}
+
+#[tokio::test]
+async fn a_file_failing_after_a_member_loaded_leaves_nothing_of_it_in_the_copy() {
+    let (_dir, app) = state();
+    let quest = [("Example Quest (USA)", None)];
+    let lead = drop_dat(
+        &app,
+        "a.dat",
+        &dat("Maker - Nintendo Entertainment System", "1", &quest),
+    );
+    let big: Vec<String> = (0..20_000).map(|i| format!("Game {i} (USA)")).collect();
+    let big: Vec<(&str, Option<&str>)> = big.iter().map(|n| (n.as_str(), None)).collect();
+    let pack = app.config().paths.dats().join("p.zip");
+    let (one, two) = (
+        dat("Maker - Game Boy", "7", &quest),
+        dat("Maker - Game Boy", "8", &big),
+    );
+    crate::app::testutil::write_zip(
+        &pack,
+        &[("1.dat", one.as_bytes()), ("2.dat", two.as_bytes())],
+    );
+    let last = drop_dat(&app, "z.dat", &dat("Test Console", "1", &quest));
+    let (pack_id, last_id) = (queue(&app, &pack).await, queue(&app, &last).await);
+    let mut events = app.events.subscribe(None).live;
+    let watcher = {
+        let app = Arc::clone(&app);
+        tokio::spawn(async move {
+            while let Ok(e) = events.recv().await {
+                let body: Value = serde_json::from_str(&e.data).unwrap_or(Value::Null);
+                if body["id"] == pack_id.get() && body["progress"]["done"] == 1 {
+                    app.scheduler.cancel(pack_id);
+                    return;
+                }
+            }
+        })
+    };
+    let id = Scheduler::run_inline(&app, Arc::new(DatImport::new(&lead)))
+        .await
+        .expect("run");
+    watcher.abort();
+    assert_eq!(job_row(&app, id).state, JobState::Done);
+    assert_eq!(job_row(&app, last_id).state, JobState::Done);
+    let row = job_row(&app, pack_id);
+    assert_eq!(row.state, JobState::Failed, "{:?}", row.progress);
+    assert!(pack.is_file(), "the file stays in dats/");
+    let names: Vec<String> = app
+        .db
+        .read_blocking(|c| {
+            let mut q = c.prepare("SELECT dat_name FROM dat_versions ORDER BY id")?;
+            let rows = q.query_map([], |r| r.get(0))?;
+            Ok(rows.collect::<rusqlite::Result<_>>()?)
+        })
+        .expect("names");
+    assert_eq!(names.len(), 2, "{names:?}: only the two good files");
+    assert!(!names.iter().any(|n| n == "Maker - Game Boy"));
+}
+
+#[test]
+fn a_cancelled_lead_ends_the_batch_after_its_file() {
+    let c = with_files();
+    let quest = [("Example Quest (USA)", None)];
+    let mut entries = vec![
+        entry(c.dir.path(), 0, &dat("Maker - Game Boy", "1", &quest)),
+        entry(c.dir.path(), 1, &dat("Maker - Game Boy", "2", &quest)),
+    ];
+    let cancel = Arc::new(crate::jobs::stop::Cancel::default());
+    cancel.cancel();
+    let (_down, shutdown) = tokio::sync::watch::channel(false);
+    let (_gate, gate) = tokio::sync::watch::channel(GateState::default());
+    entries[0].req.stop = StopToken::new(shutdown, gate, Lane::Background, cancel);
+    let imported = std::cell::Cell::new(0);
+    let before = dump(&c.db);
+    let ram_dir = crate::db::testutil::ram_dir();
+    let plan = ram::Plan {
+        dir: ram_dir.path().to_path_buf(),
+        floor: 0,
+        job: Some(JobId::new(1)),
+        input: 0,
+    };
+    let ran = c.db.hold_writer_blocking(|h| {
+        ram::run(h, &plan, &mut (), |db| {
+            batch::import_batch(db, &entries, &mut |_, e, _, _| {
+                imported.set(imported.get() + usize::from(e.id == JobId::new(2)));
+                Ok(())
+            })
+        })
+    });
+    assert!(matches!(ran, Err(Error::CancelledByUser)), "{ran:?}");
+    assert_eq!(imported.get(), 0, "the follower was not imported");
+    assert_eq!(dump(&c.db), before);
+}
+
+#[tokio::test]
+async fn a_cancelled_follower_is_left_to_its_lane_and_fails_there() {
+    let (_dir, app) = state();
+    let quest = [("Example Quest (USA)", None)];
+    let a = drop_dat(&app, "a.dat", &dat("Maker - Game Boy", "1", &quest));
+    let b = drop_dat(&app, "b.dat", &dat("Maker - Game Boy", "2", &quest));
+    Scheduler::start(&app);
+    app.gate
+        .set_override(Some(crate::jobs::watch::gate::Override::Paused));
+    let (a_id, b_id) = (queue(&app, &a).await, queue(&app, &b).await);
+    assert!(app.scheduler.cancel(b_id));
+    app.gate.set_override(None);
+    crate::testing::eventually("both jobs to end", || async {
+        let states = app
+            .db
+            .read(move |c| Ok([rows::get(c, a_id)?, rows::get(c, b_id)?]))
+            .await
+            .expect("rows");
+        states[0]
+            .as_ref()
+            .is_some_and(|r| r.state == JobState::Done)
+            && states[1]
+                .as_ref()
+                .is_some_and(|r| r.state == JobState::Failed)
+    })
+    .await;
+    assert!(b.is_file(), "the cancelled file stays in dats/");
+    assert_eq!(count_rows(&app, "SELECT COUNT(*) FROM dat_versions"), 1);
+}
+
+#[tokio::test]
+async fn a_manual_pause_in_a_batch_waits_and_the_batch_starts_again() {
+    let (_dir, app) = state();
+    let quest = [("Example Quest (USA)", None)];
+    let files = [
+        drop_dat(&app, "a.dat", &dat("Maker - Game Boy", "1", &quest)),
+        drop_dat(&app, "b.dat", &dat("Maker - Game Boy", "2", &quest)),
+    ];
+    Scheduler::start(&app);
+    app.gate
+        .set_override(Some(crate::jobs::watch::gate::Override::Paused));
+    let mut events = app.events.subscribe(None).live;
+    let (a_id, b_id) = (queue(&app, &files[0]).await, queue(&app, &files[1]).await);
+    app.gate.set_override(None);
+    while let Ok(e) = events.recv().await {
+        let body: Value = serde_json::from_str(&e.data).unwrap_or(Value::Null);
+        if body["progress"]["phase"] == "copying the database to memory" {
+            app.gate
+                .set_override(Some(crate::jobs::watch::gate::Override::Paused));
+            break;
+        }
+    }
+    crate::testing::eventually("the follower to show the pause", || async {
+        app.db
+            .read(move |c| Ok(rows::get(c, b_id)?.map(|r| r.state)))
+            .await
+            .expect("row")
+            == Some(JobState::Paused)
+    })
+    .await;
+    app.gate.set_override(None);
+    crate::testing::eventually("both jobs to end", || async {
+        let ids = [a_id, b_id];
+        let states = app
+            .db
+            .read(move |c| {
+                ids.iter()
+                    .map(|&i| Ok(rows::get(c, i)?.map(|r| r.state)))
+                    .collect::<Result<Vec<_>>>()
+            })
+            .await
+            .expect("rows");
+        states.iter().all(|s| *s == Some(JobState::Done))
+    })
+    .await;
+    assert_eq!(count_rows(&app, "SELECT COUNT(*) FROM dat_versions"), 2);
 }

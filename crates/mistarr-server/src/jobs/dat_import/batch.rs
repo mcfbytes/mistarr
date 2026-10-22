@@ -43,8 +43,11 @@ impl Item {
 pub(super) enum End {
     /// Every member was read; their outcomes.
     Imported(Vec<Outcome>),
-    /// The file's own job stopped or failed; nothing of it is in the copy.
+    /// The file's own job stopped or failed before any member loaded.
     Failed(Error),
+    /// The file's job failed after some member loaded, which only dropping the copy
+    /// undoes; the batch stops there and its copy is not written back.
+    Dirty(Error),
 }
 
 /// One file as the work on the copy sees it.
@@ -76,21 +79,30 @@ pub(super) fn import_batch(
 ) -> Result<(Vec<End>, bool)> {
     let mut ends = Vec::with_capacity(entries.len());
     for (i, entry) in entries.iter().enumerate() {
-        let end = match import_entry(db, entry, i == 0, stored) {
-            Ok(outcomes) => End::Imported(outcomes),
+        let mut outcomes = Vec::with_capacity(entry.members.len());
+        let end = match import_entry(db, entry, i == 0, stored, &mut outcomes) {
+            Ok(()) => End::Imported(outcomes),
             Err(e) if local(&e) => {
                 if let Err(c) = db.write_blocking(|c| dat_stage::clear(c)) {
                     tracing::warn!(error = %c, "cannot empty the DAT stage");
+                }
+                if outcomes.iter().any(|o| matches!(o, Outcome::Loaded(_))) {
+                    ends.push(End::Dirty(e));
+                    return Ok((ends, false));
                 }
                 End::Failed(e)
             }
             Err(e) => return Err(e),
         };
         ends.push(end);
+        // The job that started the batch ends it where it is cancelled.
+        if let Err(Error::CancelledByUser) = entries[0].req.stop.stopped() {
+            return Err(Error::CancelledByUser);
+        }
     }
     let platforms = loaded_platforms(ends.iter().flat_map(|e| match e {
         End::Imported(o) => o.as_slice(),
-        End::Failed(_) => &[],
+        End::Failed(_) | End::Dirty(_) => &[],
     }));
     if let Some(first) = entries.first() {
         let stop = || halt(&first.req);
@@ -113,9 +125,9 @@ fn import_entry(
     entry: &Entry,
     first: bool,
     stored: &mut dyn FnMut(&Db, &Entry, usize, u64) -> Result<()>,
-) -> Result<Vec<Outcome>> {
+    outcomes: &mut Vec<Outcome>,
+) -> Result<()> {
     let req = &entry.req;
-    let mut outcomes = Vec::with_capacity(entry.members.len());
     let mut games = 0;
     for (done, &member) in entry.members.iter().enumerate() {
         req.stop.check()?;
@@ -133,7 +145,7 @@ fn import_entry(
         outcomes.push(outcome);
         stored(db, entry, done + 1, games)?;
     }
-    Ok(outcomes)
+    Ok(())
 }
 
 /// [`Request::stop`]'s check, except that the cancel of the file's own job does not stop
@@ -224,17 +236,20 @@ impl DatImport {
         );
         let (path, members) = (self.path.clone(), lead.members.clone());
         let (size, listed) = crate::threads::run(crate::threads::label::DAT_IMPORT, move || {
-            let listed: Vec<(JobId, Item)> = candidates.into_iter().filter_map(prepare).collect();
             let mut sizes = vec![members_size(&path, &members)];
-            sizes.extend(listed.iter().map(|(_, i)| i.size));
-            let fit = ram::fit_now(&dir, &db, floor, &sizes).unwrap_or(1);
-            (
-                sizes[0],
-                listed
-                    .into_iter()
-                    .take(fit.saturating_sub(1))
-                    .collect::<Vec<_>>(),
-            )
+            let mut listed: Vec<(JobId, Item)> = Vec::new();
+            for found in candidates.into_iter().filter_map(prepare) {
+                sizes.push(found.1.size);
+                match ram::fit_now(&dir, &db, floor, &sizes) {
+                    Ok(n) if n == sizes.len() => listed.push(found),
+                    Ok(_) => break,
+                    Err(e) => {
+                        tracing::warn!(error = %e, "cannot measure the memory for a DAT batch");
+                        break;
+                    }
+                }
+            }
+            (sizes[0], listed)
         })
         .await?;
         lead.size = size;
@@ -296,14 +311,34 @@ pub(super) async fn run(
         items.push(item);
         contexts.push(follower);
     }
-    let all: Vec<&JobContext> = std::iter::once(ctx).chain(contexts.iter()).collect();
-    let ends = match attempt(&items, &all).await {
-        Ok(Some(ends)) => ends,
-        outcome => {
+    let ends = loop {
+        let all: Vec<&JobContext> = std::iter::once(ctx).chain(contexts.iter()).collect();
+        let ends = match attempt(&items, &all).await {
+            Ok(Some(ends)) => ends,
+            outcome => {
+                release(&contexts).await;
+                return outcome.map(|_| Ran::Alone);
+            }
+        };
+        if !matches!(ends.last(), Some(End::Dirty(_))) {
+            break ends;
+        }
+        let at = ends.len() - 1;
+        let Some(End::Dirty(e)) = ends.into_iter().last() else {
+            continue;
+        };
+        // Its earlier members are in the dropped copy: it fails, the rest start over.
+        if at == 0 {
             release(&contexts).await;
-            return outcome.map(|_| Ran::Alone);
+            return Ok(Ran::Ended(Err(e)));
+        }
+        items.remove(at);
+        let failed = contexts.remove(at - 1);
+        if let Err(c) = conclude(&ctx.app, &failed, Err(e)).await {
+            tracing::warn!(job = %failed.id, error = %c, "cannot record job state");
         }
     };
+    let all: Vec<&JobContext> = std::iter::once(ctx).chain(contexts.iter()).collect();
     let mut loaded = Vec::new();
     let mut results = Vec::with_capacity(ends.len());
     for ((item, job), end) in items.iter().zip(&all).zip(ends) {
@@ -318,7 +353,7 @@ pub(super) async fn run(
             )
             .await
             .map(|l| loaded.extend(l)),
-            End::Failed(e) => Err(e),
+            End::Failed(e) | End::Dirty(e) => Err(e),
         });
     }
     if !loaded.is_empty() {

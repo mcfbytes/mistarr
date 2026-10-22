@@ -1154,6 +1154,23 @@ mod tests {
         app.scheduler.stop(Duration::from_secs(2)).await;
     }
 
+    #[test]
+    fn a_taken_job_is_skipped_once_and_a_released_one_is_not() {
+        let sched = Scheduler::new();
+        let (a, b) = (JobId::new(1), JobId::new(2));
+        sched.take(a);
+        sched.take(b);
+        sched.untake(b);
+        assert!(!sched.skip(b), "released");
+        assert!(sched.skip(a), "taken");
+        assert!(!sched.skip(a), "skipped once");
+        let cancel = sched.open(a);
+        assert!(!sched.cancelled(a));
+        cancel.cancel();
+        assert!(sched.cancelled(a));
+        assert!(!sched.cancelled(b), "unknown jobs are not cancelled");
+    }
+
     #[tokio::test]
     async fn reconcile_requeues_every_job_of_a_dat_batch_left_running() {
         let (dir, app) = state();
