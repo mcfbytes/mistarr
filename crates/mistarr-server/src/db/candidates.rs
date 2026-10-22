@@ -10,24 +10,24 @@ use rusqlite::{params, Connection};
 use serde::Serialize;
 
 use super::ids::{SourceId, TitleId};
-use super::sql::{self, text_enum};
+use super::sql::{self, code_enum};
 use crate::error::Result;
 
-text_enum! {
+code_enum! {
     /// `torrent_files.confidence` and `torrent_candidates.confidence`: how a file was
     /// paired with a rom, strongest first, so the derived order ranks them.
     #[derive(PartialOrd, Ord)]
     pub enum MatchConfidence {
         /// The file's hashes proved it; only `torrent_files` holds it.
-        Hash = "hash",
+        Hash = ("hash", 0),
         /// Exact or normalized name.
-        Name = "name",
+        Name = ("name", 1),
         /// Base name and size.
-        Base = "base",
+        Base = ("base", 2),
         /// Size, and names sharing their significant words.
-        Fuzzy = "fuzzy",
+        Fuzzy = ("fuzzy", 3),
         /// Size alone, under the narrow size-only rule.
-        Size = "size",
+        Size = ("size", 4),
     }
 }
 
@@ -35,14 +35,14 @@ impl MatchConfidence {
     /// A hash and the name tiers: confidences a download may act on without a guess.
     #[cfg(any(test, feature = "test-support"))]
     pub const FIRM: [Self; 3] = [Self::Hash, Self::Name, Self::Base];
-    /// The firm confidences as an SQL list.
-    pub const FIRM_SQL: &'static str = "('hash', 'name', 'base')";
+    /// The firm confidences as an SQL list of their codes, strongest first.
+    pub const FIRM_SQL: &'static str = "(0, 1, 2)";
 
     /// The fuzzy and size-only tiers: confidences that are guesses.
     #[cfg(any(test, feature = "test-support"))]
     pub const GUESSED: [Self; 2] = [Self::Fuzzy, Self::Size];
-    /// The guessed confidences as an SQL list.
-    pub const GUESSED_SQL: &'static str = "('fuzzy', 'size')";
+    /// The guessed confidences as an SQL list of their codes.
+    pub const GUESSED_SQL: &'static str = "(3, 4)";
 
     /// The stored confidence of a binding match; `None` for an unmatched file.
     ///
@@ -64,9 +64,11 @@ impl MatchConfidence {
     }
 }
 
-/// Orders a `confidence` column from strongest to weakest: hash, name, base, fuzzy, size.
-pub(crate) const RANK: &str = "CASE {c} WHEN 'hash' THEN 0 WHEN 'name' THEN 1 WHEN 'base' THEN 2
-    WHEN 'fuzzy' THEN 3 WHEN 'size' THEN 4 ELSE 5 END";
+/// Orders a `confidence` column from strongest to weakest: its code runs strongest
+/// first, and a NULL confidence sorts last.
+pub(crate) fn rank(column: &str) -> String {
+    format!("{column} IS NULL, {column}")
+}
 
 /// 0 when the column `column` holds a [`MatchConfidence::FIRM`] confidence, 1 otherwise.
 pub(crate) fn tier(column: &str) -> String {
@@ -74,11 +76,6 @@ pub(crate) fn tier(column: &str) -> String {
         "CASE WHEN {column} IN {} THEN 0 ELSE 1 END",
         MatchConfidence::FIRM_SQL
     )
-}
-
-/// [`RANK`] over the column `column`.
-pub(crate) fn rank(column: &str) -> String {
-    RANK.replace("{c}", column)
 }
 
 /// True when a `bad` download already tried this file for this rom.
@@ -129,10 +126,10 @@ impl Stored {
 pub fn stored(conn: &Connection, source: SourceId) -> Result<Stored> {
     let proven = conn
         .prepare_cached(
-            "SELECT file_index FROM torrent_files WHERE source_id = ?1 AND confidence = 'hash'
+            "SELECT file_index FROM torrent_files WHERE source_id = ?1 AND confidence = ?2
              ORDER BY file_index",
         )?
-        .query_map([source], |r| r.get(0))?
+        .query_map(params![source, MatchConfidence::Hash], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
     let matched = conn.query_row(
         "SELECT EXISTS (SELECT 1 FROM torrent_files WHERE source_id = ?1 AND rom_id IS NOT NULL)",
@@ -332,10 +329,10 @@ pub fn diff_candidates(
 pub fn apply(conn: &Connection, source: SourceId, change: &Change) -> Result<()> {
     let mut update = conn.prepare_cached(
         "UPDATE torrent_files SET rom_id = ?3, confidence = ?4
-         WHERE source_id = ?1 AND file_index = ?2 AND confidence IS NOT 'hash'",
+         WHERE source_id = ?1 AND file_index = ?2 AND confidence IS NOT ?5",
     )?;
     for (i, rom, confidence) in &change.matches {
-        update.execute(params![source, i, rom, confidence])?;
+        update.execute(params![source, i, rom, confidence, MatchConfidence::Hash])?;
     }
     let mut remove = conn.prepare_cached(
         "DELETE FROM torrent_candidates WHERE source_id = ?1 AND file_index = ?2 AND rom_id = ?3",
@@ -347,12 +344,12 @@ pub fn apply(conn: &Connection, source: SourceId, change: &Change) -> Result<()>
         "INSERT OR REPLACE INTO torrent_candidates (source_id, file_index, rom_id, confidence)
          SELECT ?1, ?2, ?3, ?4 WHERE EXISTS (SELECT 1 FROM torrent_files
                                              WHERE source_id = ?1 AND file_index = ?2
-                                               AND confidence IS NOT 'hash')
+                                               AND confidence IS NOT ?5)
            AND {}",
         not_bad("?3", "?1", "?2")
     ))?;
     for (i, rom, confidence) in &change.add {
-        add.execute(params![source, i, rom, confidence])?;
+        add.execute(params![source, i, rom, confidence, MatchConfidence::Hash])?;
     }
     Ok(())
 }
@@ -370,10 +367,10 @@ pub fn drop_foreign_proofs(
 ) -> Result<usize> {
     Ok(conn.execute(
         "UPDATE torrent_files SET rom_id = NULL, confidence = NULL
-         WHERE source_id = ?1 AND confidence = 'hash' AND NOT EXISTS (
+         WHERE source_id = ?1 AND confidence = ?3 AND NOT EXISTS (
            SELECT 1 FROM rom_view r
            WHERE r.id = torrent_files.rom_id AND r.platform_key = ?2 AND r.live)",
-        params![source, platform],
+        params![source, platform, MatchConfidence::Hash],
     )?)
 }
 
@@ -569,17 +566,21 @@ pub fn for_group(conn: &Connection, parent: TitleId) -> Result<Vec<(TitleId, Ava
     // Unary `+` keeps `sources_state` out, so the plan starts from the group, not every source.
     let sql = format!(
         "SELECT title_id, source_id, display_name, file_index, path, rom_id, confidence FROM (
-           SELECT t.id AS title_id, tf.source_id, s.display_name, tf.file_index, tf.path,
+           SELECT t.id AS title_id, tf.source_id, s.display_name, tf.file_index,
+                  td.path || tf.leaf AS path,
                   r.id AS rom_id, tf.confidence
            {group}
            JOIN torrent_files tf ON tf.rom_id = r.id
+           JOIN torrent_dirs td ON td.id = tf.dir_id
            JOIN sources s ON s.id = tf.source_id AND +s.state = 'bound'
            WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)) AND {bad_tf}
            UNION ALL
-           SELECT t.id, c.source_id, s.display_name, c.file_index, tf.path, r.id, c.confidence
+           SELECT t.id, c.source_id, s.display_name, c.file_index, td.path || tf.leaf,
+                  r.id, c.confidence
            {group}
            JOIN torrent_candidates c ON c.rom_id = r.id
            JOIN torrent_files tf ON tf.source_id = c.source_id AND tf.file_index = c.file_index
+           JOIN torrent_dirs td ON td.id = tf.dir_id
            JOIN sources s ON s.id = c.source_id AND +s.state = 'bound'
            WHERE (t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)) AND {bad_c}
          )
@@ -798,13 +799,14 @@ mod tests {
 
     #[test]
     fn confidence_sets_match_their_sql() {
-        let text = |set: &[MatchConfidence]| {
-            sql::text_list(&set.iter().map(|c| c.as_str()).collect::<Vec<_>>())
+        let codes = |set: &[MatchConfidence]| {
+            let codes: Vec<String> = set.iter().map(|c| c.code().to_string()).collect();
+            format!("({})", codes.join(", "))
         };
-        assert_eq!(MatchConfidence::FIRM_SQL, text(&MatchConfidence::FIRM));
+        assert_eq!(MatchConfidence::FIRM_SQL, codes(&MatchConfidence::FIRM));
         assert_eq!(
             MatchConfidence::GUESSED_SQL,
-            text(&MatchConfidence::GUESSED)
+            codes(&MatchConfidence::GUESSED)
         );
         for c in MatchConfidence::ALL {
             assert_ne!(
@@ -959,8 +961,8 @@ mod tests {
             "the effective group"
         );
         assert_eq!(header_len(&PlatformId::new("snes")), 512);
-        assert!(rank("x").contains("WHEN 'fuzzy' THEN 3"));
-        assert!(tier("x").contains("'base'"));
+        assert_eq!(rank("x"), "x IS NULL, x", "a NULL confidence sorts last");
+        assert!(tier("x").contains("IN (0, 1, 2)"));
         assert!(not_bad("1", "2", "3").contains("b.rom_id = 1"));
         let before = rom_stamp(&c, &nes).expect("stamp");
         seed_rom(&c, &pid("nes"), "New (World).nes", 8, &[]).expect("new");

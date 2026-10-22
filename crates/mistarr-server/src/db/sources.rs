@@ -1,5 +1,7 @@
 //! The `sources` and `torrent_files` tables, and the [`DatIndex`] binding reads roms through.
 
+use std::collections::HashMap;
+
 use mistarr_clients::{ClientTorrentId, SeedPolicy};
 use mistarr_core::{PlatformId, RomId};
 use mistarr_sources::binding::{self, Confidence, DatIndex};
@@ -661,24 +663,60 @@ pub fn set_binding(
 pub fn replace_files(conn: &Connection, id: SourceId, files: &[TorrentFile]) -> Result<()> {
     let proofs: Vec<(u32, String, i64, RomId)> = conn
         .prepare_cached(
-            "SELECT file_index, path, size, rom_id FROM torrent_files
-             WHERE source_id = ?1 AND confidence = 'hash' AND rom_id IS NOT NULL",
+            "SELECT f.file_index, td.path || f.leaf, f.size, f.rom_id
+             FROM torrent_files f JOIN torrent_dirs td ON td.id = f.dir_id
+             WHERE f.source_id = ?1 AND f.confidence = ?2 AND f.rom_id IS NOT NULL",
         )?
-        .query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .query_map(params![id, MatchConfidence::Hash], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+        })?
         .collect::<rusqlite::Result<_>>()?;
     conn.execute("DELETE FROM torrent_files WHERE source_id = ?1", [id])?;
+    let mut add_dir = conn
+        .prepare_cached("INSERT OR IGNORE INTO torrent_dirs (source_id, path) VALUES (?1, ?2)")?;
+    let mut find_dir =
+        conn.prepare_cached("SELECT id FROM torrent_dirs WHERE source_id = ?1 AND path = ?2")?;
     let mut stmt = conn.prepare_cached(
-        "INSERT INTO torrent_files (source_id, file_index, path, size) VALUES (?1, ?2, ?3, ?4)",
+        "INSERT INTO torrent_files (source_id, file_index, dir_id, leaf, size)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
     )?;
+    // One lookup per distinct directory, whose row is stored once per source.
+    let mut seen: HashMap<&str, i64> = HashMap::new();
     for f in files {
-        stmt.execute(params![id, f.index, f.path, sql::to_i64(f.size)])?;
+        let (directory, leaf) = split_path(&f.path);
+        let dir_id = if let Some(found) = seen.get(directory) {
+            *found
+        } else {
+            add_dir.execute(params![id, directory])?;
+            let found = find_dir.query_row(params![id, directory], |r| r.get(0))?;
+            seen.insert(directory, found);
+            found
+        };
+        stmt.execute(params![id, f.index, dir_id, leaf, sql::to_i64(f.size)])?;
     }
+    // A directory the new tree does not use goes with the files that did.
+    conn.execute(
+        "DELETE FROM torrent_dirs WHERE source_id = ?1
+           AND id NOT IN (SELECT dir_id FROM torrent_files WHERE source_id = ?1)",
+        [id],
+    )?;
     let mut proven = conn.prepare_cached(
-        "UPDATE torrent_files SET rom_id = ?5, confidence = 'hash'
-         WHERE source_id = ?1 AND file_index = ?2 AND path = ?3 AND size = ?4",
+        "UPDATE torrent_files SET rom_id = ?6, confidence = ?7
+         WHERE source_id = ?1 AND file_index = ?2 AND size = ?5
+           AND dir_id = (SELECT id FROM torrent_dirs WHERE source_id = ?1 AND path = ?3)
+           AND leaf = ?4",
     )?;
     for (index, path, size, rom) in proofs {
-        proven.execute(params![id, index, path, size, rom])?;
+        let (directory, leaf) = split_path(&path);
+        proven.execute(params![
+            id,
+            index,
+            directory,
+            leaf,
+            size,
+            rom,
+            MatchConfidence::Hash
+        ])?;
     }
     let total: u64 = files.iter().map(|f| f.size).sum();
     conn.execute(
@@ -686,6 +724,22 @@ pub fn replace_files(conn: &Connection, id: SourceId, files: &[TorrentFile]) -> 
         params![id, sql::to_i64(files.len()), sql::to_i64(total)],
     )?;
     Ok(())
+}
+
+/// A torrent path as its directory and leaf: the directory is everything through the
+/// last `/`, `''` for a top-level file, and the leaf is the text after it.
+///
+/// ```
+/// use mistarr_server::db::sources::split_path;
+/// assert_eq!(split_path("Set/Sub/pack.nes"), ("Set/Sub/", "pack.nes"));
+/// assert_eq!(split_path("pack.nes"), ("", "pack.nes"));
+/// ```
+#[must_use]
+pub fn split_path(path: &str) -> (&str, &str) {
+    match path.rfind('/') {
+        Some(at) => (&path[..=at], &path[at + 1..]),
+        None => ("", path),
+    }
 }
 
 /// Forgets every file's matched rom and confidence, hash proofs included.
@@ -1167,6 +1221,32 @@ mod tests {
         assert!(delete(&c, id).expect("delete"));
         assert!(!delete(&c, id).expect("delete again"));
         assert_eq!(files(&c, id, 10, 0).expect("files").total, 0);
+        let dirs: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM torrent_dirs WHERE source_id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .expect("dirs");
+        assert_eq!(dirs, 0, "the source's directories go with it");
+    }
+
+    #[test]
+    fn a_re_import_keeps_only_the_directories_its_files_use() {
+        let c = conn();
+        let id = insert(&c, &new(&"06".repeat(20), SourceState::Bound)).expect("insert");
+        let dirs = |id| {
+            c.prepare("SELECT path FROM torrent_dirs WHERE source_id = ?1 ORDER BY path")
+                .expect("prepare")
+                .query_map([id], |r| r.get(0))
+                .expect("query")
+                .collect::<rusqlite::Result<Vec<String>>>()
+                .expect("rows")
+        };
+        replace_files(&c, id, &[file(0, "One/a.nes", 8), file(1, "Two/b.nes", 8)]).expect("files");
+        assert_eq!(dirs(id), ["One/", "Two/"]);
+        replace_files(&c, id, &[file(0, "One/a.nes", 8)]).expect("re-import");
+        assert_eq!(dirs(id), ["One/"], "the tree that is gone leaves nothing");
     }
 
     /// A file with a candidate and no matched rom counts as matched in `get` and in
@@ -1194,8 +1274,8 @@ mod tests {
         .expect("matches");
         c.execute(
             "INSERT INTO torrent_candidates (source_id, file_index, rom_id, confidence)
-             VALUES (?1, 1, ?2, 'fuzzy')",
-            params![id, other],
+             VALUES (?1, 1, ?2, ?3)",
+            params![id, other, MatchConfidence::Fuzzy],
         )
         .expect("candidate");
         // The full walk over every file row, as the reference for the split count.
@@ -1392,6 +1472,30 @@ mod tests {
             MatchConfidence::of(Confidence::Size),
             Some(MatchConfidence::Size)
         );
+    }
+
+    #[test]
+    fn a_path_splits_into_its_directory_and_leaf() {
+        assert_eq!(split_path(""), ("", ""));
+        assert_eq!(split_path("Set/Sub/pack.nes"), ("Set/Sub/", "pack.nes"));
+        assert_eq!(split_path("pack.nes"), ("", "pack.nes"));
+        assert_eq!(
+            split_path("Set 1.0/pack (USA) v1.2.nes"),
+            ("Set 1.0/", "pack (USA) v1.2.nes")
+        );
+        assert_eq!(
+            split_path("Sét/Ünïcode/но́ва.nes"),
+            ("Sét/Ünïcode/", "но́ва.nes")
+        );
+        assert_eq!(split_path("Set/"), ("Set/", ""));
+        for path in ["", "a", "a/b", "Set/1.0/x.nes", "Sét/но́ва.nes"] {
+            let (directory, leaf) = split_path(path);
+            assert_eq!(
+                format!("{directory}{leaf}"),
+                path,
+                "{path} does not round trip"
+            );
+        }
     }
 
     #[test]

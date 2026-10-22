@@ -231,7 +231,7 @@ mod tests {
         assert_eq!(placed_on_file(&c, src, 0, alt).expect("own rom"), None);
         assert_eq!(placed_on_file(&c, src, 1, rom).expect("other file"), None);
         c.execute(
-            "UPDATE torrent_files SET path = 'Set/pack.ZIP' WHERE source_id = ?1",
+            "UPDATE torrent_files SET leaf = 'pack.ZIP' WHERE source_id = ?1",
             [src],
         )
         .expect("zip");
