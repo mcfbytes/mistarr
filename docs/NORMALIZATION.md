@@ -267,6 +267,7 @@ CREATE TABLE tags (id INTEGER PRIMARY KEY, kind INTEGER NOT NULL CHECK (kind BET
 - **Change:** after an import or migration in RAM, when free pages exceed 25% of the copy and `MemAvailable` covers floor + live pages + 16 MiB (the copy is in it already), run `VACUUM INTO <dir>/compact.db` and write that back instead of the copy.
 - **Why:** dropped tables leave free pages; without this the card keeps 118.5 MiB holding 28 to 53 MiB of free pages.
 - **Measured:** VACUUM takes 0.18 to 0.32 s on x86, ending at 79.0 MiB.
+- **After the swap:** on the 487 MB board the copy (119 MiB) and its twin (79 MiB) never fit together (203 MiB available, 225 MiB needed), so the check is made again once the copy is gone (322 MiB available) and the twin is made from the card file with `VACUUM INTO`, then written back and swapped like any write-back. A refusal leaves the swapped file as it is. Without it the card file keeps 40 MiB of free pages and every later import copies and writes back 119 MiB instead of 79.
 
 ### P9 Rebuild-safe migrations
 - **Problem:** migrations run inside a transaction with `foreign_keys` ON, where the pragma cannot be changed. `DROP TABLE roms` then fails on its children.
