@@ -1345,3 +1345,104 @@ fn upserted_roms_store_the_tail_after_the_title_name_and_stay_idempotent() {
         .expect("count");
     assert_eq!(live, 6);
 }
+
+#[test]
+fn the_region_filter_matches_every_spelling_through_the_nocase_index() {
+    let c = conn();
+    let v = plain(&c);
+    let names = |region: &str| -> Vec<String> {
+        let f = Browse {
+            region: Some(region.into()),
+            ..Browse::default()
+        };
+        let (rows, _) = browse(&c, "gb", &f, 10, 0).expect("browse");
+        rows.into_iter().map(|r| r.base_name).collect()
+    };
+    let before = names("europe");
+    for (name, spelling) in [
+        ("Spelled Tale (Europe)", "EUROPE"),
+        ("Spelled Tale Two (Europe)", "europe"),
+    ] {
+        let id = add(&c, v, name, None, &[("s.bin", "good")]);
+        store_lists(&c, id, &[spelling.to_owned()], &[], &[]).expect("lists");
+    }
+    let after = names("Europe");
+    assert_eq!(after.len(), before.len() + 2, "{after:?}");
+    assert!(after.contains(&"Spelled Tale".to_owned()), "{after:?}");
+    assert!(after.contains(&"Spelled Tale Two".to_owned()), "{after:?}");
+    let plan: String = c
+        .prepare(
+            "EXPLAIN QUERY PLAN SELECT g.id FROM tags g WHERE g.kind = 1 AND g.name = ? COLLATE NOCASE",
+        )
+        .expect("prepare")
+        .query_map(["x"], |r| r.get::<_, String>(3))
+        .expect("query")
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .expect("rows")
+        .join("\n");
+    assert!(plan.contains("tags_kind_nocase"), "{plan}");
+}
+
+#[test]
+fn tags_are_looked_up_or_inserted_with_their_bits() {
+    let c = conn();
+    let bios = tag_id(&c, Tag::Flags, "bios").expect("bios");
+    assert_eq!(bios, 4, "bios is tag 4");
+    assert_eq!(tag_id(&c, Tag::Flags, "bios").expect("again"), bios);
+    let kinds = [Tag::Flags, Tag::Regions, Tag::Languages];
+    let ids: Vec<i64> = kinds
+        .iter()
+        .map(|k| tag_id(&c, *k, "Example").expect("new"))
+        .collect();
+    assert!(ids.iter().all(|i| *i > 31), "{ids:?}");
+    assert_eq!(
+        ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        3
+    );
+    let bit = |name: &str| -> Option<i64> {
+        let id = tag_id(&c, Tag::Regions, name).expect("region");
+        c.query_row("SELECT bit FROM tags WHERE id = ?1", [id], |r| r.get(0))
+            .expect("bit")
+    };
+    assert_eq!(bit("USA"), Some(2));
+    assert_eq!(bit("usa"), Some(2), "a case variant carries the known bit");
+    assert_eq!(bit("Atlantis"), None);
+    let flag_bit = |name: &str| -> Option<i64> {
+        let id = tag_id(&c, Tag::Flags, name).expect("flag");
+        c.query_row("SELECT bit FROM tags WHERE id = ?1", [id], |r| r.get(0))
+            .expect("bit")
+    };
+    assert_eq!(flag_bit("beta"), Some(16));
+    assert_eq!(flag_bit("Beta"), None, "flags are matched exactly");
+}
+
+#[test]
+fn a_bios_title_is_found_by_the_bios_probe() {
+    let c = conn();
+    let v = version(&c, "1");
+    let bios = add(
+        &c,
+        v,
+        "Example System (World) (BIOS)",
+        None,
+        &[("b.bin", "good")],
+    );
+    assert_eq!(flags_of(&c, bios).expect("flags"), ["bios"]);
+    assert_eq!(want(&c, bios).expect("want"), Err(WantRefused::Bios));
+    let probed: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM rom_view WHERE title_id = ?1 AND bios",
+            [bios],
+            |r| r.get(0),
+        )
+        .expect("probe");
+    assert_eq!(probed, 1);
+    let live: i64 = c
+        .query_row(
+            "SELECT COUNT(*) FROM live_rom_view WHERE title_id = ?1",
+            [bios],
+            |r| r.get(0),
+        )
+        .expect("live");
+    assert_eq!(live, 0);
+}

@@ -125,28 +125,39 @@ CREATE INDEX titles_group ON titles(platform, inferred, group_key);
 CREATE INDEX titles_source ON titles(platform, source);
 CREATE INDEX titles_mra_path ON titles(platform, mra_path) WHERE source = 1;
 
--- A title's regions, languages and flags, in name order (`pos`).
+-- Flags, regions and languages as rows of one table. Known flags take ids 1 to 9 and known
+-- regions 10 to 31 in bit order; any other text takes the next id.
+CREATE TABLE tags (
+  id            INTEGER PRIMARY KEY,
+  kind          INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 2),   -- flag 0, region 1, language 2
+  name          TEXT NOT NULL,         -- verbatim, case kept
+  bit           INTEGER CHECK (bit > 0),   -- the summary bit of a known flag or region
+  UNIQUE (kind, name)
+) STRICT;
+CREATE INDEX tags_kind_nocase ON tags(kind, name COLLATE NOCASE);
+
+-- A title's flags, regions and languages, in name order (`pos`).
 CREATE TABLE title_flags (             -- bios, beta, proto, demo, sample, unl, ...
   title_id      INTEGER NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
-  pos           INTEGER NOT NULL,
-  flag          TEXT NOT NULL,
-  PRIMARY KEY (title_id, flag)
-) WITHOUT ROWID;
-CREATE INDEX title_flags_flag ON title_flags(flag, title_id);
-CREATE TABLE title_regions (
+  pos           INTEGER NOT NULL CHECK (pos >= 0),
+  tag_id        INTEGER NOT NULL REFERENCES tags(id),
+  PRIMARY KEY (title_id, tag_id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX title_flags_tag ON title_flags(tag_id, title_id);
+CREATE TABLE title_regions (           -- same columns, regions
   title_id      INTEGER NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
-  pos           INTEGER NOT NULL,
-  region        TEXT NOT NULL,
-  PRIMARY KEY (title_id, region)
-) WITHOUT ROWID;
-CREATE INDEX title_regions_region ON title_regions(region COLLATE NOCASE, title_id);
-CREATE TABLE title_languages (
+  pos           INTEGER NOT NULL CHECK (pos >= 0),
+  tag_id        INTEGER NOT NULL REFERENCES tags(id),
+  PRIMARY KEY (title_id, tag_id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX title_regions_tag ON title_regions(tag_id, title_id);
+CREATE TABLE title_languages (         -- same columns, languages
   title_id      INTEGER NOT NULL REFERENCES titles(id) ON DELETE CASCADE,
-  pos           INTEGER NOT NULL,
-  language      TEXT NOT NULL,
-  PRIMARY KEY (title_id, language)
-) WITHOUT ROWID;
-CREATE INDEX title_languages_language ON title_languages(language, title_id);
+  pos           INTEGER NOT NULL CHECK (pos >= 0),
+  tag_id        INTEGER NOT NULL REFERENCES tags(id),
+  PRIMARY KEY (title_id, tag_id)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX title_languages_tag ON title_languages(tag_id, title_id);
 
 CREATE TABLE roms (                     -- one per <rom>; the file unit
   id            INTEGER PRIMARY KEY,
@@ -543,8 +554,6 @@ CREATE INDEX title_groups_split ON title_groups(platform, parent_id) WHERE split
 CREATE INDEX title_groups_counts ON title_groups(platform, lean_flags, source, have_verified, wanted);
 
 CREATE TABLE title_groups_dirty (parent_id INTEGER PRIMARY KEY) STRICT;   -- groups a write changed
-CREATE TABLE known_flags (name TEXT PRIMARY KEY, bit INTEGER NOT NULL) WITHOUT ROWID;
-CREATE TABLE known_regions (name TEXT PRIMARY KEY COLLATE NOCASE, bit INTEGER NOT NULL) WITHOUT ROWID;
 
 CREATE VIEW title_search_source AS      -- the platform slug between 0x1F sentinels
   SELECT t.id, t.base_name,
@@ -562,8 +571,8 @@ live rom has a `verified` file, or for an MRA title is present with no failed
 md5 check, `wanted` the wanted live titles, and
 `newest_id` orders groups by when their newest entry first appeared.
 
-The summary columns are bit sets: each flag in `known_flags` and each region
-in `known_regions` has a bit, and `1 << 62` stands for any other value. The
+The summary columns are bit sets: each known flag and each known region (the
+`tags` rows with a `bit`) has a bit, and `1 << 62` stands for any other value. The
 flags `prefs.hide` holds by default (bios, beta, proto, demo, sample,
 program) take the highest known bits, so `lean_flags`, the smallest
 known-flag value of any live variant, is free of them exactly when some
@@ -753,7 +762,7 @@ Primary key (title_id, tag_id); index (tag_id, title_id).
 | id | INTEGER PRIMARY KEY, fixed for known tags ("Tag ids"), the next free id otherwise | |
 | kind | code, "Tag kinds" | BETWEEN 0 AND 2 |
 | name | TEXT NOT NULL, verbatim | |
-| bit | INTEGER, the summary bit of a known flag or region, NULL otherwise | bit > 0 |
+| bit | INTEGER, the summary bit of a known flag or region, NULL otherwise; a spelling of a known region that differs in case carries the same bit | bit > 0 |
 
 UNIQUE (kind, name), and an index on (kind, name COLLATE NOCASE) for the browse
 region filter, which may match several spellings. `known_flags` and
@@ -950,7 +959,8 @@ path) is a scalar subquery, not a join, so a view of one table stays one table
 and may sit on the right of a LEFT JOIN. Migration `0023_shared_views.sql`
 creates them over the columns of the time and `0024_hashes_and_platform_keys.sql`
 creates `rom_view`, `live_rom_view` and `file_view` again over the BLOB hashes and
-the codes; they store no rows, so the synthetic catalogue's database size is
+the codes, and `0027_tags.sql` creates the first two again with the bios probe on tag 4;
+they store no rows, so the synthetic catalogue's database size is
 unchanged by them. `rom_view` and `file_view` read as below, and
 the other views read as in the 0023 file and their later files:
 
@@ -972,7 +982,7 @@ SELECT r.id, r.title_id,
        t.group_root, t.parent_id,
        t.retired AS title_retired,
        (r.retired = 0 AND t.retired = 0) AS live,
-       EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = r.title_id AND f.flag = 'bios') AS bios
+       EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = r.title_id AND f.tag_id = 4) AS bios
 FROM roms r JOIN titles t ON t.id = r.title_id;
 
 CREATE VIEW live_rom_view AS
@@ -1039,7 +1049,7 @@ Each conversion changes only the bodies, keeping the column names:
 | platform_key | the platform column, so a read filters by key and seeks the `titles` indexes |
 | platform | (SELECT p.slug FROM platforms p WHERE p.id = t.platform) |
 | rom_view.match_base | the base expression, when P2 drops the column |
-| rom_view.bios | the same EXISTS on f.tag_id = 4 |
+| rom_view.bios | EXISTS on `title_flags` with f.tag_id = 4 |
 
 Rules for reads through them:
 - A lookup by hash or by code compares the stored column (sha1, status), never
@@ -1081,6 +1091,6 @@ roms, 13 263 files) into a new file:
 
 | Database | `roms` table | `roms_sha1` | `roms_title_name` |
 |---|---|---|---|
-| 35 647 488 bytes | 6.1 MiB | 2.4 MiB | 2.0 MiB |
+| 34 820 096 bytes | 6.1 MiB | 2.4 MiB | 2.0 MiB |
 
 79 537 of the 82 037 roms store only the text after their title's name.

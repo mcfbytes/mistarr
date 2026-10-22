@@ -224,7 +224,7 @@ fn rom_reads() -> Vec<(&'static str, Read<'static>, Vec<Out>)> {
                  WHERE r.size IN (?2, ?3) AND t.platform = ?1 AND r.retired = 0 AND t.retired = 0
                    AND r.match_base IS NOT NULL
                    AND NOT EXISTS (SELECT 1 FROM title_flags f
-                                   WHERE f.title_id = t.id AND f.flag = 'bios')
+                                   WHERE f.title_id = t.id AND f.tag_id = 4)
                  ORDER BY r.id"
                     .into(),
             )],

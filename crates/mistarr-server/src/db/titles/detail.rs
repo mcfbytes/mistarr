@@ -131,9 +131,10 @@ fn variant_row(r: &Row<'_>) -> rusqlite::Result<VariantRow> {
 /// Fills the regions, languages and flags of the variants of the group rooted at `gid`.
 fn fill_lists(conn: &Connection, gid: TitleId, variants: &mut [VariantRow]) -> Result<()> {
     for tag in [Tag::Regions, Tag::Languages, Tag::Flags] {
-        let (table, column) = tag.table();
+        let table = tag.table();
         let mut stmt = conn.prepare_cached(&format!(
-            "SELECT x.title_id, x.{column} FROM titles t JOIN {table} x ON x.title_id = t.id
+            "SELECT x.title_id, g.name FROM titles t JOIN {table} x ON x.title_id = t.id
+             JOIN tags g ON g.id = x.tag_id
              WHERE t.group_root = ?1 OR (t.id = ?1 AND t.group_root IS NULL)
              ORDER BY x.title_id, x.pos"
         ))?;
@@ -274,7 +275,7 @@ pub enum WantRefused {
 pub fn want(conn: &Connection, id: TitleId) -> Result<std::result::Result<(), WantRefused>> {
     let row: Option<(bool, bool)> = conn
         .query_row(
-            "SELECT retired, EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = titles.id AND f.flag = 'bios')
+            "SELECT retired, EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = titles.id AND f.tag_id = 4)
              FROM titles WHERE id = ?1",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?)),

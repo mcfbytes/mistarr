@@ -112,8 +112,9 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
                                   WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 0)) AS any_partial
            FROM titles t
            WHERE t.source = {MRA} AND t.retired = 0
-             AND NOT EXISTS (SELECT 1 FROM title_flags f
-                             WHERE f.title_id = t.id AND f.flag IN (SELECT value FROM json_each(?1)))
+             AND NOT EXISTS (SELECT 1 FROM title_flags f JOIN tags g ON g.id = f.tag_id
+                             WHERE f.title_id = t.id
+                               AND g.name IN (SELECT value FROM json_each(?1)))
            GROUP BY t.platform, t.group_root
          )
          SELECT (SELECT p.slug FROM platforms p WHERE p.id = g.platform),
@@ -328,7 +329,7 @@ pub(super) fn page_sql(clause: &Clause, sort: Sort) -> String {
                 CASE WHEN g.flag_union & {bios} = 0 THEN 0 ELSE NOT EXISTS (
                     SELECT 1 FROM titles v WHERE v.group_root = g.parent_id AND v.retired = 0
                     AND NOT EXISTS (SELECT 1 FROM title_flags f
-                                    WHERE f.title_id = v.id AND f.flag = 'bios')) END
+                                    WHERE f.title_id = v.id AND f.tag_id = 4)) END
          FROM title_groups g JOIN titles p ON p.id = g.parent_id
          LEFT JOIN titles k ON k.id = g.pick_id
          WHERE {} ORDER BY {order} LIMIT ? OFFSET ?",

@@ -461,8 +461,9 @@ async fn a_zipped_db_export_loads_headerless_roms_with_clones() {
         .read(|c| {
             let mut stmt = c.prepare(
                 "SELECT t.name, CASE WHEN r.own_name THEN r.name ELSE t.name || r.name END, r.size, lower(hex(r.sha1)),
-                        (SELECT json_group_array(language) FROM
-                          (SELECT language FROM title_languages WHERE title_id = t.id ORDER BY pos)),
+                        (SELECT json_group_array(name) FROM
+                          (SELECT k.name FROM title_languages x JOIN tags k ON k.id = x.tag_id
+                           WHERE x.title_id = t.id ORDER BY x.pos)),
                         t.parent_id = p.id
                  FROM roms r JOIN titles t ON t.id = r.title_id
                  JOIN titles p ON p.name = 'Example Quest (Japan)' ORDER BY t.name",
@@ -638,8 +639,9 @@ fn archive_status_adds_the_stage_flags_a_name_lacks() {
         let name = name.to_owned();
         c.with(move |x| {
             Ok(x.query_row(
-                "SELECT (SELECT json_group_array(flag) FROM
-                       (SELECT flag FROM title_flags WHERE title_id = t.id ORDER BY pos))
+                "SELECT (SELECT json_group_array(name) FROM
+                       (SELECT k.name FROM title_flags x JOIN tags k ON k.id = x.tag_id
+                        WHERE x.title_id = t.id ORDER BY x.pos))
                      FROM titles t WHERE t.name = ?1",
                 [name],
                 |r| r.get(0),

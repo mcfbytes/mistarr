@@ -8,7 +8,7 @@ use super::arcade::Check;
 use super::files::FileState;
 use crate::error::Result;
 
-/// Flags with their own bit in the group summary, in bit order; `known_flags` holds the same.
+/// Flags with their own bit in the group summary, in bit order; the flag tags 1 to 9 hold the same.
 /// The flags `prefs.hide` holds by default come last, in [`HIDDEN_BY_DEFAULT`].
 pub const KNOWN_FLAGS: [&str; 9] = [
     "unl", "pirate", "baddump", "bios", "beta", "proto", "demo", "sample", "program",
@@ -22,7 +22,7 @@ pub const BIOS_BIT: i64 = 1 << 3;
 pub const HIDDEN_BY_DEFAULT: i64 = KNOWN_FLAG_MASK & !0b111;
 
 /// Regions with their own bit in the group summary, in bit order, matched ignoring
-/// ASCII case; `known_regions` holds the same.
+/// ASCII case; the region tags 10 to 31 hold the same.
 pub const KNOWN_REGIONS: [&str; 22] = [
     "World",
     "USA",
@@ -157,11 +157,10 @@ fn select(scope: Scope) -> String {
            WITH b AS MATERIALIZED (
              SELECT t.group_root AS parent_id,
                     (SELECT COALESCE(SUM(DISTINCT COALESCE(k.bit, {OTHER})), 0)
-                     FROM title_flags f LEFT JOIN known_flags k ON k.name = f.flag
+                     FROM title_flags f JOIN tags k ON k.id = f.tag_id
                      WHERE f.title_id = t.id) AS fb,
                     (SELECT COALESCE(SUM(DISTINCT COALESCE(k.bit, {OTHER})), 0)
-                     FROM title_regions r
-                     LEFT JOIN known_regions k ON k.name = r.region COLLATE NOCASE
+                     FROM title_regions r JOIN tags k ON k.id = r.tag_id
                      WHERE r.title_id = t.id) AS rb
              FROM titles t WHERE t.retired = 0 AND t.group_root IS NOT NULL AND {parents}
            )
@@ -488,8 +487,9 @@ pub(crate) fn visible(
     let mut args = Vec::new();
     if !hidden.is_empty() {
         variant.push_str(
-            " AND NOT EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = v.id
-                              AND f.flag IN (SELECT value FROM json_each(?)))",
+            " AND NOT EXISTS (SELECT 1 FROM title_flags f JOIN tags g ON g.id = f.tag_id
+                              WHERE f.title_id = v.id
+                              AND g.name IN (SELECT value FROM json_each(?)))",
         );
         let list = serde_json::Value::from(hidden.to_vec()).to_string();
         args.push(Value::Text(list));
@@ -497,13 +497,16 @@ pub(crate) fn visible(
     if let Some(r) = region {
         variant.push_str(
             " AND EXISTS (SELECT 1 FROM title_regions r
-                          WHERE r.title_id = v.id AND r.region = ? COLLATE NOCASE)",
+                          WHERE r.title_id = v.id
+                            AND r.tag_id IN (SELECT g.id FROM tags g
+                                             WHERE g.kind = 1 AND g.name = ? COLLATE NOCASE))",
         );
         args.push(Value::Text(r.to_owned()));
     }
     for flag in required {
         variant.push_str(
-            " AND EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = v.id AND f.flag = ?)",
+            " AND EXISTS (SELECT 1 FROM title_flags f WHERE f.title_id = v.id
+                          AND f.tag_id = (SELECT g.id FROM tags g WHERE g.kind = 0 AND g.name = ?))",
         );
         args.push(Value::Text(flag.clone()));
     }
