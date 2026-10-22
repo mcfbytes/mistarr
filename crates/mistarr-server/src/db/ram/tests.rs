@@ -932,3 +932,324 @@ impl Drop for KillOnDrop {
         let _ = self.0.wait();
     }
 }
+
+/// Every table's rows in rowid order where it has one, and the schema, as text.
+fn dump(c: &Connection) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut schema = c
+        .prepare("SELECT type, name, tbl_name, COALESCE(sql, '') FROM sqlite_master ORDER BY name")
+        .expect("schema");
+    let rows = schema
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .expect("rows");
+    let mut tables = Vec::new();
+    for row in rows {
+        let (kind, name, sql) = row.expect("row");
+        out.push(format!("{kind} {name} {sql}"));
+        if kind == "table" && !name.starts_with("sqlite_") {
+            tables.push((name, sql.to_uppercase().contains("WITHOUT ROWID")));
+        }
+    }
+    for (name, without_rowid) in tables {
+        let head = if without_rowid { "" } else { "rowid, " };
+        let order = if without_rowid { "1" } else { "rowid" };
+        let Ok(mut stmt) = c.prepare(&format!("SELECT {head}* FROM \"{name}\" ORDER BY {order}"))
+        else {
+            continue;
+        };
+        let width = stmt.column_count();
+        let mut rows = stmt.query([]).expect("query");
+        while let Some(r) = rows.next().expect("next") {
+            let cells: Vec<String> = (0..width)
+                .map(|i| format!("{:?}", r.get_ref(i).expect("cell")))
+                .collect();
+            out.push(format!("{name}: {}", cells.join("|")));
+        }
+    }
+    out
+}
+
+/// Fills a table of about `mib` MiB, with a rowid-only table beside it that loses every
+/// other row, then drops the big one: most of the file is free pages.
+fn churn(c: &Connection, mib: usize) -> Result<()> {
+    c.execute_batch(
+        "CREATE TABLE big (id INTEGER PRIMARY KEY, v BLOB);
+         CREATE TABLE loose (a, b);
+         WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 200)
+           INSERT INTO loose (a, b) SELECT i, 'row ' || i FROM n;
+         DELETE FROM loose WHERE a % 2 = 0;",
+    )?;
+    let mut add = c.prepare("INSERT INTO big (v) VALUES (zeroblob(65536))")?;
+    for _ in 0..mib * 16 {
+        add.execute([])?;
+    }
+    drop(add);
+    c.execute_batch("DROP TABLE big")?;
+    Ok(())
+}
+
+/// A finished copy in WAL mode in a new directory in RAM, with `mib` MiB of free pages.
+fn fragmented(ram: &Path, mib: usize) -> (PathBuf, PathBuf) {
+    let work = ram.join("work");
+    fs::create_dir_all(&work).expect("work dir");
+    let copy = work.join(COPY_NAME);
+    let c = Connection::open(&copy).expect("open");
+    c.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))
+        .expect("wal");
+    c.pragma_update(None, "user_version", 41).expect("version");
+    c.pragma_update(None, "application_id", 7).expect("id");
+    churn(&c, mib).expect("churn");
+    super::super::wal_emptied(&c).expect("checkpoint");
+    c.close().expect("close");
+    (work, copy)
+}
+
+#[test]
+fn a_copy_with_many_free_pages_goes_back_compacted_with_identical_rows() {
+    let ram = testutil::ram_dir();
+    let (_dir, db) = card(CHUNK_BYTES);
+    let mut watch = Script::default();
+    let out = db
+        .hold_writer_blocking(|h| {
+            run(h, &plan(ram.path()), &mut watch, |copy| {
+                copy.write_blocking(|c| churn(c, 6))?;
+                let rows = copy.read_blocking(|c| Ok(dump(c)))?;
+                let size = file_len(copy.path())?;
+                Ok(((rows, size), true))
+            })
+        })
+        .expect("run");
+    let Ram::Done((rows, copy_bytes), report) = out else {
+        panic!("fell back: {out:?}");
+    };
+    assert_eq!(
+        watch.phases,
+        [
+            Phase::Copying,
+            Phase::Importing,
+            Phase::Compacting,
+            Phase::Writing
+        ]
+    );
+    let after = file_len(db.path()).expect("len");
+    assert_eq!(report.bytes, after);
+    assert!(after * 2 < copy_bytes, "{after} of {copy_bytes} bytes");
+    assert_eq!(db.read_blocking(|c| Ok(dump(c))).expect("dump"), rows);
+    let (free, mode, loose): (i64, String, i64) = db
+        .read_blocking(|c| {
+            Ok((
+                c.pragma_query_value(None, "freelist_count", |r| r.get(0))?,
+                c.pragma_query_value(None, "journal_mode", |r| r.get(0))?,
+                c.query_row("SELECT MAX(rowid) FROM loose", [], |r| r.get(0))?,
+            ))
+        })
+        .expect("read");
+    assert_eq!((free, mode.as_str(), loose), (0, "wal", 199));
+    if let Some(writes) = report.card_writes {
+        let chunks = report.bytes.div_ceil(CHUNK_BYTES as u64);
+        assert!(writes >= chunks && writes <= chunks + 12, "{writes} writes");
+    }
+    assert_clean(ram.path(), &db);
+}
+
+#[test]
+fn the_compacted_file_keeps_its_header_and_goes_back_one_write_per_mebibyte() {
+    let ram = testutil::ram_dir();
+    let (work, copy) = fragmented(ram.path(), 6);
+    let whole = file_len(&copy).expect("len");
+    let source = compact(&copy, &work, 0, &mut || {});
+    assert_eq!(source, work.join(COMPACT_NAME));
+    let size = file_len(&source).expect("len");
+    assert!(size * 2 < whole, "{size} of {whole} bytes");
+    let c = Connection::open(&source).expect("open");
+    let read = |name: &str| -> i64 { c.pragma_query_value(None, name, |r| r.get(0)).expect(name) };
+    assert_eq!(read("user_version"), 41);
+    assert_eq!(read("application_id"), 7);
+    assert_eq!(read("freelist_count"), 0);
+    let mode: String = c
+        .pragma_query_value(None, "journal_mode", |r| r.get(0))
+        .expect("mode");
+    assert_eq!(mode, "wal");
+    drop(c);
+    let mut sink = Counting::default();
+    let mut from = File::open(&source).expect("open");
+    let n = copy_durable(&mut from, &mut sink, &mut || Ok(())).expect("copy");
+    assert_eq!(n, size);
+    assert_eq!(sink.writes.len() as u64, size.div_ceil(CHUNK_BYTES as u64));
+}
+
+#[test]
+fn a_copy_with_few_free_pages_is_written_back_as_it_is() {
+    let ram = testutil::ram_dir();
+    let work = ram.path().join("work");
+    fs::create_dir_all(&work).expect("work dir");
+    let copy = work.join(COPY_NAME);
+    let c = Connection::open(&copy).expect("open");
+    c.execute_batch(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, v BLOB);
+         INSERT INTO t (v) VALUES (zeroblob(400000));",
+    )
+    .expect("fill");
+    c.close().expect("close");
+    let mut announced = false;
+    let source = compact(&copy, &work, 0, &mut || announced = true);
+    assert_eq!(source, copy);
+    assert!(!announced && !work.join(COMPACT_NAME).exists());
+}
+
+#[test]
+fn a_copy_just_under_the_threshold_is_not_compacted() {
+    let ram = testutil::ram_dir();
+    let work = ram.path().join("work");
+    fs::create_dir_all(&work).expect("work dir");
+    let copy = work.join(COPY_NAME);
+    let c = Connection::open(&copy).expect("open");
+    c.execute_batch(
+        "CREATE TABLE a (id INTEGER PRIMARY KEY, v BLOB);
+         CREATE TABLE b (id INTEGER PRIMARY KEY, v BLOB);
+         INSERT INTO a (v) VALUES (zeroblob(4096 * 80));
+         INSERT INTO b (v) VALUES (zeroblob(4096 * 20));
+         DROP TABLE b;",
+    )
+    .expect("fill");
+    let (pages, free): (i64, i64) = (
+        c.pragma_query_value(None, "page_count", |r| r.get(0))
+            .expect("pages"),
+        c.pragma_query_value(None, "freelist_count", |r| r.get(0))
+            .expect("free"),
+    );
+    assert!(free > 0 && free * 4 <= pages, "{free} of {pages}");
+    c.close().expect("close");
+    let budget = Budget {
+        available: Some(u64::MAX),
+        ram_room: Some(u64::MAX),
+        card_room: None,
+    };
+    let r = compacted(&copy, &work.join(COMPACT_NAME), 0, &budget, &mut || {});
+    assert_eq!(r, Ok(None));
+}
+
+#[test]
+fn short_memory_or_room_skips_compaction_and_leaves_the_copy() {
+    let ram = testutil::ram_dir();
+    let (work, copy) = fragmented(ram.path(), 4);
+    let before = sha1(&copy);
+    let roomy = Budget {
+        available: Some(1 << 40),
+        ram_room: Some(1 << 40),
+        card_room: None,
+    };
+    let out = work.join(COMPACT_NAME);
+    let cases = [
+        (
+            Budget {
+                available: None,
+                ..roomy
+            },
+            "cannot be read",
+        ),
+        (
+            Budget {
+                available: Some(MIB),
+                ..roomy
+            },
+            "MiB of memory available",
+        ),
+        (
+            Budget {
+                ram_room: Some(0),
+                ..roomy
+            },
+            "free in the memory directory",
+        ),
+        (
+            Budget {
+                ram_room: None,
+                ..roomy
+            },
+            "cannot be read",
+        ),
+    ];
+    for (budget, want) in cases {
+        let mut announced = false;
+        let r = compacted(&copy, &out, 0, &budget, &mut || announced = true);
+        assert!(
+            matches!(&r, Err(why) if why.contains(want)),
+            "{want}: {r:?}"
+        );
+        assert!(!announced && !out.exists());
+    }
+    let floor = u64::MAX / 2;
+    assert_eq!(compact(&copy, &work, floor, &mut || {}), copy);
+    assert_eq!(sha1(&copy), before);
+}
+
+#[test]
+fn a_failing_vacuum_falls_back_to_the_copy() {
+    let ram = testutil::ram_dir();
+    let (work, copy) = fragmented(ram.path(), 4);
+    fs::write(work.join(COMPACT_NAME), b"in the way").expect("blocker");
+    let mut announced = false;
+    let source = compact(&copy, &work, 0, &mut || announced = true);
+    assert!(announced, "the compaction started");
+    assert_eq!(source, copy);
+    assert!(!work.join(COMPACT_NAME).exists(), "no partial file is left");
+    let c = Connection::open(&copy).expect("the copy still opens");
+    let loose: i64 = c
+        .query_row("SELECT COUNT(*) FROM loose", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(loose, 100);
+}
+
+#[test]
+fn the_compaction_check_names_what_is_short() {
+    let roomy = Budget {
+        available: Some(300 * MIB),
+        ram_room: Some(100 * MIB),
+        card_room: None,
+    };
+    assert_eq!(
+        compaction_refusal(&roomy, 128 * MIB, 100 * MIB, 70 * MIB),
+        Ok(())
+    );
+    assert!(compaction_refusal(&roomy, 128 * MIB, 110 * MIB, 70 * MIB)
+        .is_err_and(|e| e.contains("308 MiB needed")));
+    assert!(compaction_refusal(&roomy, 0, 100 * MIB, 101 * MIB)
+        .is_err_and(|e| e.contains("100 MiB free")));
+}
+
+#[test]
+fn a_startup_migration_compacts_the_free_pages_it_finds() {
+    let ram = testutil::ram_dir();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = dir.path().join("m.db");
+    at_version(&db, super::super::migrate::latest() - 1, 0.01);
+    let c = Connection::open(&db).expect("open");
+    churn(&c, 6).expect("churn");
+    super::super::wal_emptied(&c).expect("checkpoint");
+    c.close().expect("close");
+    let before = (titles(&db), file_len(&db).expect("len"));
+    let report = migrate_in_ram(&db, &plan(ram.path()), None)
+        .expect("migrate")
+        .expect("ran in RAM");
+    assert_eq!(report.bytes, file_len(&db).expect("len"));
+    assert!(
+        report.bytes * 2 < before.1,
+        "{} of {} bytes",
+        report.bytes,
+        before.1
+    );
+    assert_eq!(titles(&db), before.0);
+    let c = Connection::open(&db).expect("open");
+    let free: i64 = c
+        .pragma_query_value(None, "freelist_count", |r| r.get(0))
+        .expect("free");
+    assert_eq!(free, 0);
+    assert_eq!(fs::read_dir(ram.path()).map_or(0, Iterator::count), 0);
+}

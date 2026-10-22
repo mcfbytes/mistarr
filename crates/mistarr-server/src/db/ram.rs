@@ -45,6 +45,12 @@ const BUSY_WAIT: Duration = Duration::from_millis(50);
 
 const MIB: u64 = 1024 * 1024;
 
+/// The compacted copy's file name inside the working directory.
+const COMPACT_NAME: &str = "compact.db";
+
+/// Free pages, in percent of the copy's pages, above which the copy is compacted.
+const COMPACT_ABOVE_PERCENT: u64 = 25;
+
 /// Where the copy goes and how much memory must stay available beside it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Plan {
@@ -66,6 +72,8 @@ pub enum Phase {
     Copying,
     /// The work runs on the copy.
     Importing,
+    /// The copy is rewritten without its free pages, before the write-back.
+    Compacting,
     /// The copy is written back to the card and swapped in.
     Writing,
 }
@@ -82,6 +90,7 @@ impl Phase {
         match self {
             Self::Copying => "copying the database to memory",
             Self::Importing => "importing",
+            Self::Compacting => "compacting the database",
             Self::Writing => "writing the database to the card",
         }
     }
@@ -359,7 +368,8 @@ pub fn memory_left(floor: u64) -> Result<()> {
 }
 
 /// Copies the database `held` writes into RAM, runs `work` on the copy and, when `work`
-/// asks for it by returning `true` beside its value, writes the copy back beside the
+/// asks for it by returning `true` beside its value, writes the copy, compacted when it
+/// holds many free pages and memory allows, back beside the
 /// database in [`CHUNK_BYTES`] writes, syncs it and swaps it in with
 /// [`HeldWriter::replace_file`]. Until the swap the card file is never written, except
 /// by the checkpoint that empties its WAL first. The working directory goes on every
@@ -436,9 +446,12 @@ pub fn run<T>(
         return Ok(Ram::Done(value, report));
     }
 
-    watch.phase(Phase::Writing);
     let started = Instant::now();
-    let bytes = file_len(&copy)?;
+    let source = compact(&copy, &work_dir.0, plan.floor, &mut || {
+        watch.phase(Phase::Compacting);
+    });
+    watch.phase(Phase::Writing);
+    let bytes = file_len(&source)?;
     let card_room = path.parent().and_then(status::free_bytes);
     if card_room.is_some_and(|room| room < bytes.saturating_add(CHUNK_BYTES as u64)) {
         return Ok(Ram::fallback(
@@ -451,7 +464,7 @@ pub fn run<T>(
     }
     let new = sibling(&path, NEW_SUFFIX);
     let (written, back) = counted(|| {
-        write_new(&copy, &new, &mut || watch.between(Phase::Writing))?;
+        write_new(&source, &new, &mut || watch.between(Phase::Writing))?;
         if !wait_unshared(&path, &mut || watch.between(Phase::Writing))? {
             return Ok(false);
         }
@@ -479,6 +492,120 @@ pub fn run<T>(
     report.card_writes = first.zip(back).map(|(a, b)| a + b);
     drop(work_dir);
     Ok(Ram::Done(value, report))
+}
+
+/// The file to write back for the finished `copy` in `work_dir`: a compacted twin when
+/// the copy's free pages exceed [`COMPACT_ABOVE_PERCENT`] and memory and room cover it,
+/// else `copy` itself. `started` is called just before the compaction runs. Any failure
+/// leaves `copy` as the answer, so compacting never fails a write-back.
+fn compact(copy: &Path, work_dir: &Path, floor: u64, started: &mut dyn FnMut()) -> PathBuf {
+    let budget = Budget {
+        available: status::mem_available_bytes(),
+        ram_room: status::free_bytes(work_dir),
+        card_room: None,
+    };
+    match compacted(copy, &work_dir.join(COMPACT_NAME), floor, &budget, started) {
+        Ok(Some((before, after))) => {
+            tracing::info!(
+                before_mib = before.div_ceil(MIB),
+                after_mib = after.div_ceil(MIB),
+                "compacted the database before writing it back"
+            );
+            work_dir.join(COMPACT_NAME)
+        }
+        Ok(None) => copy.to_path_buf(),
+        Err(reason) => {
+            tracing::info!(reason, "writing the database back without compacting it");
+            let _ = fs::remove_file(work_dir.join(COMPACT_NAME));
+            copy.to_path_buf()
+        }
+    }
+}
+
+/// Compacts `copy` into `out` when worth it and affordable under `budget`, returning the
+/// sizes before and after, or `None` when the free pages are few. `Err` names why not.
+fn compacted(
+    copy: &Path,
+    out: &Path,
+    floor: u64,
+    budget: &Budget,
+    started: &mut dyn FnMut(),
+) -> std::result::Result<Option<(u64, u64)>, String> {
+    let conn = Connection::open(copy).map_err(|e| format!("cannot open the copy: {e}"))?;
+    let pragma = |name: &str| -> std::result::Result<i64, String> {
+        conn.pragma_query_value(None, name, |r| r.get(0))
+            .map_err(|e| format!("cannot read {name}: {e}"))
+    };
+    let (pages, free, size) = (
+        u64::try_from(pragma("page_count")?).unwrap_or(0),
+        u64::try_from(pragma("freelist_count")?).unwrap_or(0),
+        u64::try_from(pragma("page_size")?).unwrap_or(0),
+    );
+    if free.saturating_mul(100) <= pages.saturating_mul(COMPACT_ABOVE_PERCENT) {
+        tracing::info!(free, pages, "the copy has too few free pages to compact");
+        return Ok(None);
+    }
+    let live = (pages - free).saturating_mul(size);
+    let before = pages.saturating_mul(size);
+    compaction_refusal(budget, floor, before, live)?;
+    let want = ["user_version", "application_id", "page_size", "auto_vacuum"];
+    let mut kept = Vec::new();
+    for name in want {
+        kept.push(pragma(name)?);
+    }
+    started();
+    let target = out.to_str().ok_or("the working directory is not text")?;
+    conn.execute("VACUUM INTO ?1", [target])
+        .map_err(|e| format!("VACUUM failed: {e}"))?;
+    drop(conn);
+    // The copy is in WAL mode, so the card file opens without a write.
+    let twin = Connection::open(out).map_err(|e| format!("cannot open the compacted copy: {e}"))?;
+    twin.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))
+        .map_err(|e| format!("cannot set WAL mode on the compacted copy: {e}"))?;
+    for (name, was) in want.iter().zip(&kept) {
+        let now: i64 = twin
+            .pragma_query_value(None, name, |r| r.get(0))
+            .map_err(|e| format!("cannot read {name} of the compacted copy: {e}"))?;
+        if now != *was {
+            return Err(format!("{name} changed from {was} to {now}"));
+        }
+    }
+    twin.close()
+        .map_err(|(_, e)| format!("cannot close the compacted copy: {e}"))?;
+    let after = fs::metadata(out)
+        .map_err(|e| format!("cannot measure it: {e}"))?
+        .len();
+    Ok(Some((before, after)))
+}
+
+/// Why `budget` cannot hold a compacted twin of `live` bytes beside the `copy_bytes`
+/// copy while keeping `floor` bytes of memory available, or `Ok` when it can.
+fn compaction_refusal(
+    budget: &Budget,
+    floor: u64,
+    copy_bytes: u64,
+    live: u64,
+) -> std::result::Result<(), String> {
+    let Some(available) = budget.available else {
+        return Err("the memory available cannot be read".to_owned());
+    };
+    let want = floor.saturating_add(copy_bytes).saturating_add(live);
+    if available < want {
+        return Err(format!(
+            "{} MiB of memory available, {} MiB needed to compact",
+            available / MIB,
+            want.div_ceil(MIB)
+        ));
+    }
+    match budget.ram_room {
+        Some(room) if room >= live => Ok(()),
+        Some(room) => Err(format!(
+            "{} MiB free in the memory directory, {} MiB needed to compact",
+            room / MIB,
+            live.div_ceil(MIB)
+        )),
+        None => Err("the free space in the memory directory cannot be read".to_owned()),
+    }
 }
 
 /// Why a swap did not happen while another process kept the database open.
@@ -617,7 +744,8 @@ pub fn migrate_in_ram(
     }
     report.work = started.elapsed();
     let started = Instant::now();
-    let bytes = file_len(&copy)?;
+    let source = compact(&copy, &work_dir.0, plan.floor, &mut || {});
+    let bytes = file_len(&source)?;
     if status::free_bytes(db.parent().unwrap_or(Path::new(".")))
         .is_some_and(|room| room < bytes.saturating_add(CHUNK_BYTES as u64))
     {
@@ -625,7 +753,7 @@ pub fn migrate_in_ram(
     }
     let new = sibling(db, NEW_SUFFIX);
     let (written, back) = counted(|| {
-        write_new(&copy, &new, &mut || Ok(()))?;
+        write_new(&source, &new, &mut || Ok(()))?;
         if !wait_unshared(db, &mut || Ok(()))? {
             return Ok(false);
         }
