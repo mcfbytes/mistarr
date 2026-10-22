@@ -215,7 +215,9 @@ fn file_at(b: &Booted, platform: &str, rel: &str) -> Option<files::FileRow> {
     b.running
         .app
         .db
-        .read_blocking(move |c| files::find_by_path(c, &pid, &rel))
+        .read_blocking(move |c| {
+            files::find_by_path(c, mistarr_server::db::fixtures::key(&pid), &rel)
+        })
         .expect("files")
 }
 
@@ -235,7 +237,7 @@ fn existing_file(
         .write_blocking(move |c| {
             files::upsert(
                 c,
-                &PlatformId::new("nes"),
+                mistarr_server::db::fixtures::key(&PlatformId::new("nes")),
                 &NewFile {
                     rom_id,
                     crc32: Some(h.crc32),
@@ -893,7 +895,11 @@ fn member_rows(b: &Booted) -> Vec<files::FileRow> {
         .app
         .db
         .read_blocking(|c| {
-            files::zip_member_rows(c, &PlatformId::new("neogeo"), "NeoGeo/Example Set.zip")
+            files::zip_member_rows(
+                c,
+                mistarr_server::db::fixtures::key(&PlatformId::new("neogeo")),
+                "NeoGeo/Example Set.zip",
+            )
         })
         .expect("rows")
 }

@@ -152,7 +152,7 @@ async fn find(
 ) -> Option<files::FileRow> {
     let (pid, rel) = (pid.clone(), rel.to_owned());
     app.db
-        .read(move |c| files::find_by_path(c, &pid, &rel))
+        .read(move |c| files::find_by_path(c, mistarr_server::db::fixtures::key(&pid), &rel))
         .await
         .expect("read")
 }
@@ -372,7 +372,7 @@ async fn an_interrupted_scan_resumes_at_startup() {
                 let now = mistarr_server::unix_now();
                 files::upsert(
                     c,
-                    &pid,
+                    mistarr_server::db::fixtures::key(&pid),
                     &NewFile {
                         crc32: Some(a_hash.crc32),
                         md5: Some(a_hash.md5),
@@ -382,7 +382,12 @@ async fn an_interrupted_scan_resumes_at_startup() {
                     },
                     now,
                 )?;
-                scan_progress::save(c, &pid, &["Genesis".to_owned()], now)
+                scan_progress::save(
+                    c,
+                    mistarr_server::db::fixtures::key(&pid),
+                    &["Genesis".to_owned()],
+                    now,
+                )
             }
         })
         .await
@@ -406,7 +411,7 @@ async fn an_interrupted_scan_resumes_at_startup() {
                 .db
                 .read({
                     let pid2 = pid2.clone();
-                    move |c| scan_progress::get(c, &pid2)
+                    move |c| scan_progress::get(c, mistarr_server::db::fixtures::key(&pid2))
                 })
                 .await
                 .is_ok_and(|d| d.is_empty());
@@ -733,7 +738,7 @@ async fn scan_rejects_unknown_or_disabled_platforms() {
 
     app.db
         .write(|c| {
-            c.execute("UPDATE platforms SET enabled = 0 WHERE id = 'nes'", [])?;
+            c.execute("UPDATE platforms SET enabled = 0 WHERE slug = 'nes'", [])?;
             Ok(())
         })
         .await
@@ -1555,8 +1560,13 @@ async fn rows_hashed_before_the_whole_form_are_hashed_again_after_the_upgrade() 
     {
         let mut db = rusqlite::Connection::open(config.paths.db()).expect("open");
         mistarr_server::db::migrate::apply_through(&mut db, 19).expect("older schema");
-        mistarr_server::db::platforms::seed(&mut db, &mistarr_mister::platforms::PLATFORMS)
+        for row in &mistarr_mister::platforms::PLATFORMS {
+            db.execute(
+                "INSERT INTO platforms (id, name, core_dir, kind) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![row.id, row.name, row.core_dir, row.kind.as_str()],
+            )
             .expect("platforms");
+        }
         // Schema 19 stores hex text and the fixtures write BLOBs.
         db.execute_batch(&format!(
             "INSERT INTO dat_versions (id, platform_id, dat_name, version, source_file, loaded_at,

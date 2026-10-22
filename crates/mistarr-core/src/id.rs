@@ -89,6 +89,15 @@ row_id! {
 #[cfg(feature = "rusqlite")]
 row_id_sql!(GroupId);
 
+row_id! {
+    /// A `platforms.id`: the integer a converted table's platform column holds. A
+    /// [`PlatformId`] resolves to one once per request.
+    PlatformKey
+}
+
+#[cfg(feature = "rusqlite")]
+row_id_sql!(PlatformKey);
+
 /// Stable platform identifier, e.g. `nes`, `megadrive`, `psx`. The full table lives in
 /// `docs/PLATFORMS.md` and in `mistarr-mister`; an id from that table borrows its text.
 ///
@@ -161,6 +170,8 @@ mod tests {
         assert_eq!(RomId::new(5).to_string(), "5");
         let id: RomId = serde_json::from_str("9").expect("json");
         assert_eq!(id.get(), 9);
+        assert_eq!(PlatformKey::new(33).to_string(), "33");
+        assert!(PlatformKey::new(1) < PlatformKey::new(1000));
     }
 
     #[cfg(feature = "rusqlite")]
@@ -171,6 +182,10 @@ mod tests {
             .query_row("SELECT ?1", [RomId::new(7)], |r| r.get(0))
             .expect("rom");
         assert_eq!(back, RomId::new(7));
+        let key: PlatformKey = c
+            .query_row("SELECT ?1", [PlatformKey::new(3)], |r| r.get(0))
+            .expect("key");
+        assert_eq!(key.get(), 3);
         assert!(c
             .query_row("SELECT 'x'", [], |r| r.get::<_, RomId>(0))
             .is_err());

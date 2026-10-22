@@ -144,7 +144,7 @@ fn select(scope: Scope) -> String {
                     (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0
                        AND ((r.present = 1
                              AND COALESCE(t.mra_check, '') NOT IN ('mismatch', 'missing_part'))
-                            OR EXISTS (SELECT 1 FROM files f
+                            OR EXISTS (SELECT 1 FROM files f INDEXED BY files_rom
                                        WHERE f.rom_id = r.id AND f.state = {verified})))
                       AS roms_verified
              FROM titles t WHERE t.retired = 0 AND t.group_root IS NOT NULL AND {members}

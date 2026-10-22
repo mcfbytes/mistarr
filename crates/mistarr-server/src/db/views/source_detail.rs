@@ -593,9 +593,9 @@ impl PreviewTally {
 pub fn platforms_with_dat(conn: &Connection) -> Result<Vec<PlatformId>> {
     let ids = conn
         .prepare(
-            "SELECT p.id FROM platforms p WHERE EXISTS (SELECT 1 FROM titles t
-               WHERE t.platform_id = p.id AND t.source = 'dat' AND t.retired = 0)
-             ORDER BY p.id",
+            "SELECT p.slug FROM platforms p WHERE EXISTS (SELECT 1 FROM titles t
+               WHERE t.platform_id = p.slug AND t.source = 'dat' AND t.retired = 0)
+             ORDER BY p.slug",
         )?
         .query_map([], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;

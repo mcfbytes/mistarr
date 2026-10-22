@@ -170,7 +170,7 @@ async fn scan(b: &Booted, platform: &str) {
 async fn row(app: &AppState, platform: &str, rel: &str) -> Option<FileRow> {
     let (pid, rel) = (PlatformId::new(platform.to_owned()), rel.to_owned());
     app.db
-        .read(move |c| files::find_by_path(c, &pid, &rel))
+        .read(move |c| files::find_by_path(c, mistarr_server::db::fixtures::key(&pid), &rel))
         .await
         .expect("find")
 }
@@ -180,7 +180,7 @@ async fn rows(app: &AppState, platform: &str) -> Vec<(String, FileState, Option<
     let pid = PlatformId::new(platform.to_owned());
     let paths = app
         .db
-        .read(move |c| files::existing_paths(c, &pid))
+        .read(move |c| files::existing_paths(c, mistarr_server::db::fixtures::key(&pid)))
         .await
         .expect("paths");
     let mut out = Vec::new();

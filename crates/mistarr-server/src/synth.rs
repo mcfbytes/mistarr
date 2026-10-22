@@ -441,10 +441,19 @@ fn seed_console(
          SELECT ?1, ?2, ?3, unhex(?4), unhex(substr(?5, 9)), unhex(?5), ?6, ?7, ?8, ?9
          WHERE ?10 IS NOT NULL"
     })?;
-    let mut file = c.prepare_cached(
-        "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
-         VALUES (?1, ?2, ?3, 0, ?4, ?5, 0)",
+    // Schemas without `files.platform` name the column `platform_id` and hold the slug.
+    let keyed: i64 = c.query_row(
+        "SELECT COUNT(*) FROM pragma_table_info('files') WHERE name = 'platform'",
+        [],
+        |r| r.get(0),
     )?;
+    let file = if keyed > 0 {
+        "INSERT INTO files (platform, rel_path, size, mtime, rom_id, state, scanned_at)
+         VALUES ((SELECT id FROM platforms WHERE slug = ?1), ?2, ?3, 0, ?4, ?5, 0)"
+    } else {
+        "INSERT INTO files (platform_id, rel_path, size, mtime, rom_id, state, scanned_at)
+         VALUES (?1, ?2, ?3, 0, ?4, ?5, 0)"
+    };
     let browsed = BROWSED.contains(&console.id);
     let mut names = HashSet::new();
     let mut made = 0;
@@ -567,7 +576,7 @@ fn seed_console(
                         1 => FileState::Bad,
                         _ => FileState::Verified,
                     };
-                    file.execute(params![
+                    c.prepare_cached(file)?.execute(params![
                         console.id,
                         format!("{}/{r}", console.id),
                         i64::try_from(size).unwrap_or(0),
@@ -580,7 +589,7 @@ fn seed_console(
             out.titles += 1;
         }
         if !mra && rng.chance(2) {
-            file.execute(params![
+            c.prepare_cached(file)?.execute(params![
                 console.id,
                 format!("{}/unmatched {group}.bin", console.id),
                 1_024,

@@ -119,6 +119,8 @@ counts, are core's; the server's other row ids
 `ImportId`) are in `db/ids.rs`. `PlatformId` is core's, built with `new` and
 read with `as_str`; one from the platform table borrows the table's text, so
 `Platform::platform_id` does not allocate. `mistarr-mister` re-exports it.
+`PlatformKey` is the `platforms.id` integer that converted tables hold; a
+request resolves its `PlatformId` to one once (`db::platforms::PlatformRef`).
 `InfoHash`, `ClientTorrentId` and `DatFamily` follow the same rule.
 
 ### Errors
@@ -891,7 +893,7 @@ At 25 ms a write, the load's 77 723 card writes of the first row take about
 32 minutes on the board and the 5 785 of the second about 2.4 minutes. The
 4.7 s of the first row's recompute is a lookup of each disc directory's
 tracks that reads every file row of the platform; `files::in_directory`
-seeks one directory's range of the `(platform_id, rel_path)` key instead.
+seeks one directory's range of the `(platform, rel_path)` key instead.
 `load_writes_alone` in the same module holds a 450-game load on a tenth of
 the catalogue under 1 500 writes to the database and WAL (about 1 300; 2 000
 with a 1 MiB cache), in a test process of its own since the heap limit is

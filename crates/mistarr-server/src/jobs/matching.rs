@@ -10,6 +10,7 @@ use rusqlite::Connection;
 
 use crate::db::files::{self, FileRow, FileState, NewFile};
 use crate::db::ids::TitleId;
+use crate::db::platforms::PlatformRef;
 use crate::db::roms::{self, RomMatch};
 use crate::db::titles::RomStatus;
 use crate::error::Result;
@@ -318,10 +319,10 @@ pub(crate) fn classify_disc_tracks(conn: &Connection, tracks: Vec<Track>) -> Res
 /// [`crate::error::Error::Db`] on SQLite failure.
 pub(crate) fn set_matches(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: &PlatformRef,
     rows: &[FileRow],
 ) -> Result<usize> {
-    let disc = platforms::by_id(platform.as_str()).is_some_and(|p| p.kind == Kind::Disc);
+    let disc = platforms::by_id(platform.id.as_str()).is_some_and(|p| p.kind == Kind::Disc);
     let mut matched = 0;
     let mut units: Vec<&str> = Vec::new();
     for f in rows {
@@ -331,14 +332,14 @@ pub(crate) fn set_matches(
             }
             continue;
         }
-        let m = stored_match(conn, platform, f)?;
-        let (rom, state) = cartridge_state(platform, m.as_ref(), own_name(&f.rel_path));
+        let m = stored_match(conn, &platform.id, f)?;
+        let (rom, state) = cartridge_state(&platform.id, m.as_ref(), own_name(&f.rel_path));
         matched += usize::from(f.rom_id.is_none() && rom.is_some());
         set_changed(conn, f, rom, state)?;
     }
     for dir in units {
         let (rows, containers) =
-            super::chd::split_disc_rows(files::in_directory(conn, platform, dir)?);
+            super::chd::split_disc_rows(files::in_directory(conn, platform.key, dir)?);
         for c in containers {
             matched += super::chd::rematch_container(conn, platform, &c, crate::unix_now())?;
         }
@@ -350,7 +351,7 @@ pub(crate) fn set_matches(
                 size: f.size,
                 mtime: f.mtime,
                 hashes: f.hashes(),
-                matched: stored_match(conn, platform, f)?,
+                matched: stored_match(conn, &platform.id, f)?,
             });
         }
         for (f, t) in rows.iter().zip(classify_disc_tracks(conn, tracks)?) {
@@ -373,7 +374,7 @@ fn set_changed(conn: &Connection, f: &FileRow, rom: Option<RomId>, state: FileSt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::fixtures::conn;
+    use crate::db::fixtures::{conn, key};
     use mistarr_core::hash::hash_forms;
 
     fn hashes() -> Hashes {
@@ -548,10 +549,11 @@ mod tests {
             reason: None,
             whole: files::WholeHashes::default(),
         };
-        let fits =
-            files::upsert(&c, &nes, &row("NES/q.zip#Example Quest (USA).nes"), 1).expect("row");
-        let other = files::upsert(&c, &nes, &row("NES/Other Name.nes"), 1).expect("row");
-        let upper = files::upsert(&c, &nes, &row("NES/Example Quest (USA).NES"), 1).expect("row");
+        let fits = files::upsert(&c, key(&nes), &row("NES/q.zip#Example Quest (USA).nes"), 1)
+            .expect("row");
+        let other = files::upsert(&c, key(&nes), &row("NES/Other Name.nes"), 1).expect("row");
+        let upper =
+            files::upsert(&c, key(&nes), &row("NES/Example Quest (USA).NES"), 1).expect("row");
         let psx = PlatformId::new("psx");
         let track = crate::db::fixtures::dat(&psx)
             .title("Example Disc (USA)")
@@ -563,7 +565,7 @@ mod tests {
             rom_id: Some(track),
             ..row("PSX/Example Disc (USA)/Example Disc (USA).cue")
         };
-        let disc = files::upsert(&c, &psx, &disc, 1).expect("row");
+        let disc = files::upsert(&c, key(&psx), &disc, 1).expect("row");
         assert!(name_fits(
             &psx,
             "Example Disc (USA).img",

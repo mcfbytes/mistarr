@@ -8,7 +8,7 @@ use rusqlite::Connection;
 use serde_json::json;
 
 use super::downloads::{self, DownloadState};
-use super::fixtures::pid;
+use super::fixtures::{key, pid};
 use super::ids::{SourceId, TitleId};
 use super::sql::Page;
 use super::titles;
@@ -108,7 +108,7 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             Box::new(|c| {
                 let nes = mistarr_core::PlatformId::new("nes");
                 drop(
-                    files::unmatched_after(c, &nes, super::ids::FileId::new(0), 256)
+                    files::unmatched_after(c, key(&nes), super::ids::FileId::new(0), 256)
                         .expect("unmatched"),
                 );
             }),
@@ -158,7 +158,7 @@ fn matching_reads() -> Vec<(&'static str, Read<'static>)> {
             "directory tracks",
             Box::new(|c| {
                 let psx = mistarr_core::PlatformId::new("psx");
-                drop(files::in_directory(c, &psx, "psx/Example Disc").expect("tracks"));
+                drop(files::in_directory(c, key(&psx), "psx/Example Disc").expect("tracks"));
             }),
         ),
         (
@@ -577,7 +577,7 @@ fn rom_lookups_and_directory_tracks_seek_their_own_index() {
     expect(
         "directory tracks",
         "FROM files",
-        "sqlite_autoindex_files_1 (platform_id=? AND rel_path>? AND rel_path<?)",
+        "sqlite_autoindex_files_1 (platform=? AND rel_path>? AND rel_path<?)",
     );
 }
 

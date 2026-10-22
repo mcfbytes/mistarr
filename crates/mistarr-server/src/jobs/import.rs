@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use mistarr_clients::{Error as ClientError, SeedPolicy};
 use mistarr_core::hash::HeaderRule;
 use mistarr_core::matching::{leaf, match_members, pick_rom, Payload as _};
-use mistarr_core::{PlatformId, RomId};
+use mistarr_core::{PlatformId, PlatformKey, RomId};
 use mistarr_mister::platforms::{self, Kind, Platform};
 use mistarr_mister::{
     adapter_for, CoreAdapter, DatEntry, PlacementPlan, StagedFile, StagedKind, StagedMember, Step,
@@ -40,6 +40,7 @@ use crate::db::downloads::{self, DownloadRow, DownloadState, Elsewhere, Settled}
 use crate::db::files::{self, FileRow, FileState, NewFile};
 use crate::db::ids::{DownloadId, FileId, SourceId};
 use crate::db::imports::{self, ImportAction, TitleEntry};
+use crate::db::platforms as platform_rows;
 use crate::db::roms::{self, EntryRom};
 use crate::db::sources::{self, SourceRow};
 use crate::db::sql::Page;
@@ -204,12 +205,17 @@ async fn import(ctx: &JobContext, id: DownloadId) -> Result<()> {
     ) else {
         return fail(app, &[id], "the entry's platform has no adapter").await;
     };
+    let slug = entry.platform_id.clone();
+    let Some(key) = app.db.read(move |c| platform_rows::key(c, &slug)).await? else {
+        return fail(app, &[id], "the entry's platform is not in the catalog").await;
+    };
     let config = app.config();
     let placing = Placing {
         ctx,
         staging: config.paths.staging(),
         games: config.paths.games.clone(),
         platform,
+        key,
         adapter,
         source: &source,
         entry: &entry,
@@ -287,6 +293,7 @@ struct Placing<'a> {
     staging: PathBuf,
     games: PathBuf,
     platform: &'static Platform,
+    key: PlatformKey,
     adapter: &'static dyn CoreAdapter,
     source: &'a SourceRow,
     entry: &'a TitleEntry,
@@ -678,6 +685,7 @@ impl Placing<'_> {
             staging: self.staging.clone(),
             games: self.games.clone(),
             platform: self.platform,
+            key: self.key,
             adapter: self.adapter,
             source: self.source,
             entry: other,
@@ -1124,15 +1132,15 @@ impl Placing<'_> {
             let rel = rel_string(to);
             let exists = exists(&self.games.join(to)).await?;
             let whole_zip = whole.is_some_and(|w| w == from);
-            let (pid, r) = (self.pid(), rel.clone());
+            let (pid, r) = (self.key, rel.clone());
             let rows = self
                 .app()
                 .db
                 .read(move |c| {
                     if whole_zip {
-                        files::zip_member_rows(c, &pid, &r)
+                        files::zip_member_rows(c, pid, &r)
                     } else {
-                        Ok(files::find_by_path(c, &pid, &r)?.into_iter().collect())
+                        Ok(files::find_by_path(c, pid, &r)?.into_iter().collect())
                     }
                 })
                 .await?;
@@ -1178,7 +1186,7 @@ impl Placing<'_> {
         note: Option<Value>,
     ) -> Result<()> {
         let scope = Scope {
-            pid: self.pid(),
+            platform: self.key,
             rule: self.platform.header_rule.as_str(),
             title: self.entry.id,
             stats: stats.clone(),
@@ -1372,7 +1380,7 @@ fn prove_single(tx: &rusqlite::Connection, pieces: &[Piece]) -> Result<()> {
 
 /// What [`record_target`] needs beyond the target itself.
 struct Scope {
-    pid: PlatformId,
+    platform: PlatformKey,
     rule: &'static str,
     title: TitleId,
     stats: HashMap<String, (i64, i64)>,
@@ -1448,7 +1456,7 @@ fn record_target(
     };
     if t.whole_zip {
         let keep: Vec<String> = owned.iter().map(|p| member_rel(p)).collect();
-        for old in files::zip_member_rows(tx, &scope.pid, &t.rel)? {
+        for old in files::zip_member_rows(tx, scope.platform, &t.rel)? {
             if !keep.contains(&old.rel_path) {
                 files::delete(tx, old.id)?;
             }
@@ -1473,7 +1481,7 @@ fn record_target(
             rom_id: Some(p.rom.id),
             ..NewFile::unhashed(&rel, size, mtime, file_state(p, t.whole_zip))
         };
-        let id = files::upsert(tx, &scope.pid, &row, now)?;
+        let id = files::upsert(tx, scope.platform, &row, now)?;
         let mut detail = log_detail(scope, p, &rel);
         let action = match &t.decision {
             Decision::Replace(prev) => {

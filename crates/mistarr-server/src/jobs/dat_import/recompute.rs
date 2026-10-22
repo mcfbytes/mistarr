@@ -8,6 +8,7 @@ use rusqlite::Connection;
 
 use crate::db::files;
 use crate::db::ids::FileId;
+use crate::db::platforms::PlatformRef;
 use crate::db::titles;
 use crate::db::Db;
 use crate::error::Result;
@@ -25,8 +26,11 @@ pub(super) const REMATCH_CHUNK: u32 = 256;
 ///
 /// [`Error::Db`] on SQLite failure.
 pub(super) fn rematch_chunk(conn: &Connection, platform: &PlatformId) -> Result<usize> {
-    let orphans = files::retired_matches(conn, platform, REMATCH_CHUNK)?;
-    set_matches(conn, platform, &orphans)?;
+    let Some(platform) = PlatformRef::resolve(conn, platform)? else {
+        return Ok(0);
+    };
+    let orphans = files::retired_matches(conn, platform.key, REMATCH_CHUNK)?;
+    set_matches(conn, &platform, &orphans)?;
     Ok(orphans.len())
 }
 
@@ -53,8 +57,15 @@ pub(super) fn match_unmatched_chunk(
     platform: &PlatformId,
     after: FileId,
 ) -> Result<UnmatchedChunk> {
-    let rows = files::unmatched_after(conn, platform, after, REMATCH_CHUNK)?;
-    let matched = set_matches(conn, platform, &rows)?;
+    let Some(platform) = PlatformRef::resolve(conn, platform)? else {
+        return Ok(UnmatchedChunk {
+            read: 0,
+            last: after,
+            matched: 0,
+        });
+    };
+    let rows = files::unmatched_after(conn, platform.key, after, REMATCH_CHUNK)?;
+    let matched = set_matches(conn, &platform, &rows)?;
     Ok(UnmatchedChunk {
         read: rows.len(),
         last: rows.last().map_or(after, |f| f.id),

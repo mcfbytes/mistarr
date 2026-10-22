@@ -1,7 +1,7 @@
 //! The `scan_progress` table: the directories a platform's interrupted scan already
 //! committed. See `docs/DATA-MODEL.md` "`scan_progress`".
 
-use mistarr_core::PlatformId;
+use mistarr_core::{PlatformId, PlatformKey};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::sql;
@@ -12,11 +12,11 @@ use crate::error::Result;
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure, [`crate::Error::Stored`] on unparseable JSON.
-pub fn get(conn: &Connection, platform_id: &PlatformId) -> Result<Vec<String>> {
+pub fn get(conn: &Connection, platform: PlatformKey) -> Result<Vec<String>> {
     Ok(conn
         .query_row(
-            "SELECT done_dirs FROM scan_progress WHERE platform_id = ?1",
-            [platform_id],
+            "SELECT done_dirs FROM scan_progress WHERE platform = ?1",
+            [platform],
             |r| sql::get_json(r, 0, "scan_progress.done_dirs"),
         )
         .optional()?
@@ -31,16 +31,16 @@ pub fn get(conn: &Connection, platform_id: &PlatformId) -> Result<Vec<String>> {
 /// be written as JSON.
 pub fn save(
     conn: &Connection,
-    platform_id: &PlatformId,
+    platform: PlatformKey,
     done_dirs: &[String],
     now: i64,
 ) -> Result<()> {
     let json = sql::to_json("scan_progress.done_dirs", done_dirs)?;
     conn.prepare_cached(
-        "INSERT INTO scan_progress (platform_id, done_dirs, updated_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT(platform_id) DO UPDATE SET done_dirs = excluded.done_dirs, updated_at = excluded.updated_at",
+        "INSERT INTO scan_progress (platform, done_dirs, updated_at) VALUES (?1, ?2, ?3)
+         ON CONFLICT(platform) DO UPDATE SET done_dirs = excluded.done_dirs, updated_at = excluded.updated_at",
     )?
-    .execute(params![platform_id, json, now])?;
+    .execute(params![platform, json, now])?;
     Ok(())
 }
 
@@ -49,11 +49,8 @@ pub fn save(
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn clear(conn: &Connection, platform_id: &PlatformId) -> Result<()> {
-    conn.execute(
-        "DELETE FROM scan_progress WHERE platform_id = ?1",
-        [platform_id],
-    )?;
+pub fn clear(conn: &Connection, platform: PlatformKey) -> Result<()> {
+    conn.execute("DELETE FROM scan_progress WHERE platform = ?1", [platform])?;
     Ok(())
 }
 
@@ -64,7 +61,9 @@ pub fn clear(conn: &Connection, platform_id: &PlatformId) -> Result<()> {
 ///
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn platforms_with_progress(conn: &Connection) -> Result<Vec<PlatformId>> {
-    let mut stmt = conn.prepare("SELECT platform_id FROM scan_progress")?;
+    let mut stmt = conn.prepare(
+        "SELECT p.slug FROM scan_progress s JOIN platforms p ON p.id = s.platform ORDER BY p.slug",
+    )?;
     let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
     Ok(rows
         .collect::<rusqlite::Result<Vec<_>>>()?
@@ -81,15 +80,15 @@ mod tests {
     #[test]
     fn progress_round_trips_and_clears() {
         let c = conn();
-        let pid = PlatformId::new("nes");
-        assert!(get(&c, &pid).expect("empty").is_empty());
-        save(&c, &pid, &["NES".to_owned()], 5).expect("save");
-        assert_eq!(get(&c, &pid).expect("get"), ["NES".to_owned()]);
+        let pid = crate::db::platforms::fixed_key("nes").expect("key");
+        assert!(get(&c, pid).expect("empty").is_empty());
+        save(&c, pid, &["NES".to_owned()], 5).expect("save");
+        assert_eq!(get(&c, pid).expect("get"), ["NES".to_owned()]);
         let got = platforms_with_progress(&c).expect("list");
         assert_eq!(got.len(), 1);
-        assert_eq!(got[0].as_str(), pid.as_str());
-        clear(&c, &pid).expect("clear");
-        assert!(get(&c, &pid).expect("empty").is_empty());
+        assert_eq!(got[0].as_str(), "nes");
+        clear(&c, pid).expect("clear");
+        assert!(get(&c, pid).expect("empty").is_empty());
         assert!(platforms_with_progress(&c).expect("list").is_empty());
     }
 }

@@ -76,13 +76,54 @@ CREATE INDEX roms_size ON roms(size) WHERE match_base IS NOT NULL;
 CREATE INDEX roms_chd_size ON roms(size) WHERE lower(name) LIKE '%.chd';
 CREATE INDEX roms_track_size ON roms(size) WHERE size % 2352 = 0;
 
+-- A file or scan row naming a platform the table lacks gets a row, so its key resolves.
+INSERT INTO platforms (id, name, core_dir, kind)
+SELECT s, s, s, 'cartridge'
+FROM (SELECT platform_id AS s FROM files UNION SELECT platform_id FROM scan_progress)
+WHERE s NOT IN (SELECT id FROM platforms);
+
+-- Children keep their slug text, checked against platforms(slug), until their own file.
+ALTER TABLE platforms RENAME COLUMN id TO slug;
+
+CREATE TABLE platforms_new (
+  id           INTEGER PRIMARY KEY,
+  slug         TEXT NOT NULL UNIQUE,
+  name         TEXT NOT NULL,
+  core_dir     TEXT NOT NULL,
+  kind         INTEGER NOT NULL CHECK (kind BETWEEN 0 AND 3),
+  core_present INTEGER NOT NULL DEFAULT 0 CHECK (core_present IN (0, 1)),
+  enabled      INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1))
+) STRICT;
+
+-- The fixed ids of docs/DATA-MODEL.md "Platform ids"; a slug outside them takes 1000 up.
+INSERT INTO platforms_new (id, slug, name, core_dir, kind, core_present, enabled)
+WITH fixed (slug, id) AS (VALUES
+  ('nes', 1), ('fds', 2), ('snes', 3), ('n64', 4), ('gb', 5), ('gbc', 6), ('gba', 7),
+  ('megadrive', 8), ('s32x', 9), ('sms', 10), ('gg', 11), ('sg1000', 12), ('pce', 13),
+  ('sgx', 14), ('atari2600', 15), ('atari5200', 16), ('atari7800', 17), ('lynx', 18),
+  ('coleco', 19), ('intv', 20), ('ws', 21), ('wsc', 22), ('ngp', 23), ('vectrex', 24),
+  ('pokemini', 25), ('sv', 26), ('psx', 27), ('saturn', 28), ('megacd', 29), ('pcecd', 30),
+  ('neocd', 31), ('neogeo', 32), ('arcade', 33)
+)
+SELECT COALESCE((SELECT f.id FROM fixed f WHERE f.slug = p.slug),
+                999 + (SELECT COUNT(*) FROM platforms o
+                       WHERE o.slug NOT IN (SELECT slug FROM fixed) AND o.slug <= p.slug)),
+       p.slug, p.name, p.core_dir,
+       CASE p.kind WHEN 'cartridge' THEN 0 WHEN 'disc' THEN 1 WHEN 'romset' THEN 2
+                   WHEN 'arcade' THEN 3 ELSE -1 END,
+       p.core_present, p.enabled
+FROM platforms p ORDER BY 1;
+
+DROP TABLE platforms;
+ALTER TABLE platforms_new RENAME TO platforms;
+
 DROP INDEX IF EXISTS files_rom;
 DROP INDEX IF EXISTS files_state;
 DROP INDEX IF EXISTS files_rel_lower;
 
 CREATE TABLE files_new (
   id          INTEGER PRIMARY KEY,
-  platform_id TEXT NOT NULL REFERENCES platforms(id),
+  platform    INTEGER NOT NULL REFERENCES platforms(id),
   rel_path    TEXT NOT NULL,
   size        INTEGER NOT NULL,
   mtime       INTEGER NOT NULL,
@@ -97,13 +138,13 @@ CREATE TABLE files_new (
   crc32_whole BLOB CHECK (length(crc32_whole) = 4),
   md5_whole   BLOB CHECK (length(md5_whole) = 16),
   sha1_whole  BLOB CHECK (length(sha1_whole) = 20),
-  UNIQUE (platform_id, rel_path),
+  UNIQUE (platform, rel_path),
   CHECK (reason IS NULL OR state = 5)
 ) STRICT;
 
-INSERT INTO files_new (id, platform_id, rel_path, size, mtime, crc32, md5, sha1, header_rule,
+INSERT INTO files_new (id, platform, rel_path, size, mtime, crc32, md5, sha1, header_rule,
                        rom_id, state, scanned_at, reason, crc32_whole, md5_whole, sha1_whole)
-SELECT id, platform_id, rel_path, size, mtime,
+SELECT id, (SELECT p.id FROM platforms p WHERE p.slug = files.platform_id), rel_path, size, mtime,
        CASE WHEN NULLIF(crc32, '') IS NULL THEN NULL ELSE COALESCE(unhex(crc32), x'') END,
        CASE WHEN NULLIF(md5, '') IS NULL THEN NULL ELSE COALESCE(unhex(md5), x'') END,
        CASE WHEN NULLIF(sha1, '') IS NULL THEN NULL ELSE COALESCE(unhex(sha1), x'') END,
@@ -135,8 +176,21 @@ FROM files ORDER BY id;
 DROP TABLE files;
 ALTER TABLE files_new RENAME TO files;
 CREATE INDEX files_rom ON files(rom_id);
-CREATE INDEX files_state ON files(state, platform_id);
-CREATE INDEX files_rel_lower ON files(platform_id, lower(rel_path));
+CREATE INDEX files_state ON files(state, platform);
+CREATE INDEX files_rel_lower ON files(platform, lower(rel_path));
+
+CREATE TABLE scan_progress_new (
+  platform   INTEGER PRIMARY KEY REFERENCES platforms(id),
+  done_dirs  TEXT NOT NULL DEFAULT '[]',
+  updated_at INTEGER NOT NULL
+) STRICT;
+
+INSERT INTO scan_progress_new (platform, done_dirs, updated_at)
+SELECT (SELECT p.id FROM platforms p WHERE p.slug = s.platform_id), s.done_dirs, s.updated_at
+FROM scan_progress s ORDER BY 1;
+
+DROP TABLE scan_progress;
+ALTER TABLE scan_progress_new RENAME TO scan_progress;
 
 DROP INDEX IF EXISTS chd_tracks_sha1;
 
@@ -274,7 +328,8 @@ CREATE VIEW live_rom_view AS
 SELECT * FROM rom_view WHERE live AND NOT bios;
 
 CREATE VIEW file_view AS
-SELECT f.id, f.platform_id AS platform_key, f.platform_id AS platform, f.rel_path, f.size,
+SELECT f.id, f.platform AS platform_key,
+       (SELECT p.slug FROM platforms p WHERE p.id = f.platform) AS platform, f.rel_path, f.size,
        f.mtime, f.crc32, f.md5, f.sha1,
        NULLIF(lower(hex(f.crc32)), '') AS crc32_hex, NULLIF(lower(hex(f.md5)), '') AS md5_hex,
        NULLIF(lower(hex(f.sha1)), '') AS sha1_hex,

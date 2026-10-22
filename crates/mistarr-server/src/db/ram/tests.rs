@@ -702,12 +702,16 @@ fn at_version(path: &Path, version: u32, scale: f64) {
     let mut c = Connection::open(path).expect("open");
     c.pragma_update(None, "journal_mode", "WAL").expect("wal");
     crate::db::migrate::apply_through(&mut c, version).expect("migrate");
-    for p in &mistarr_mister::platforms::PLATFORMS {
-        c.execute(
-            "INSERT INTO platforms (id, name, core_dir, kind) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![p.id, p.name, p.core_dir, p.kind.as_str()],
-        )
-        .expect("platform");
+    if version >= 24 {
+        crate::db::platforms::seed(&mut c, &mistarr_mister::platforms::PLATFORMS).expect("seed");
+    } else {
+        for p in &mistarr_mister::platforms::PLATFORMS {
+            c.execute(
+                "INSERT INTO platforms (id, name, core_dir, kind) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![p.id, p.name, p.core_dir, p.kind.as_str()],
+            )
+            .expect("platform");
+        }
     }
     // The synthetic catalogue writes columns present in every version tested here.
     crate::synth::seed(&mut c, scale, 1).expect("synth");

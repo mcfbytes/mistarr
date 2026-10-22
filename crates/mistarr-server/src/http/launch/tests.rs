@@ -7,6 +7,7 @@ use mistarr_mister::launch::{FakeOutcome, RecordingSink};
 use super::*;
 use crate::app::testutil::state;
 use crate::db::files::{self, FileState, NewFile};
+use crate::db::fixtures::key;
 
 fn hashes() -> Hashes {
     Hashes {
@@ -45,7 +46,7 @@ async fn seed(app: &AppState, platform: &str, roms: &[(&str, FileState)]) -> Tit
             for ((rel, st), rom) in roms.iter().zip(&written.roms) {
                 files::upsert(
                     c,
-                    &pid,
+                    key(&pid),
                     &NewFile {
                         rom_id: Some(*rom),
                         ..NewFile::unhashed(rel, 4, 0, *st)

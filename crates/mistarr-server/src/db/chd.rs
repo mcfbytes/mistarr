@@ -2,12 +2,13 @@
 //! be identified. See `docs/VERIFICATION.md` "CHD images" and `docs/DATA-MODEL.md`.
 
 use mistarr_core::chd::{ChdId, Unidentifiable};
-use mistarr_core::{Crc32, Hashes, Md5, PlatformId, Sha1};
+use mistarr_core::{Crc32, Hashes, Md5, PlatformId, PlatformKey, Sha1};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Serialize, Serializer};
 
 use super::files::{self, FileRow, FileState, NewFile};
 use super::ids::{FileId, TitleId};
+use super::platforms::KindCode;
 use super::sql::{self, to_i64};
 use crate::error::Result;
 
@@ -358,9 +359,10 @@ pub fn store_failure(
 /// The `unidentified` rows `f` of enabled disc platforms `p`; callers add conditions.
 fn waiting_from() -> String {
     format!(
-        "FROM files f JOIN platforms p ON p.id = f.platform_id
-         WHERE f.state = {} AND p.kind = 'disc' AND p.enabled = 1",
-        FileState::Unidentified.sql()
+        "FROM files f JOIN platforms p ON p.id = f.platform
+         WHERE f.state = {} AND p.kind = {} AND p.enabled = 1",
+        FileState::Unidentified.sql(),
+        KindCode::Disc.sql()
     )
 }
 
@@ -408,7 +410,7 @@ pub fn waiting_count(conn: &Connection) -> Result<u64> {
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn has_waiting(
     conn: &Connection,
-    platform: Option<&PlatformId>,
+    platform: Option<PlatformKey>,
     reasons: &[Unidentified],
 ) -> Result<bool> {
     let codes: Vec<i64> = reasons.iter().map(|r| r.code()).collect();
@@ -417,7 +419,7 @@ pub fn has_waiting(
         .prepare_cached(&format!(
             "SELECT EXISTS(SELECT 1 {}
                AND f.reason IN (SELECT value FROM json_each(?1))
-               AND (?2 IS NULL OR f.platform_id = ?2))",
+               AND (?2 IS NULL OR f.platform = ?2))",
             waiting_from()
         ))?
         .query_row(params![codes, platform], |r| r.get(0))?)
@@ -452,11 +454,11 @@ pub fn set_waiting(conn: &Connection, on: bool) -> Result<usize> {
 /// # Errors
 ///
 /// [`crate::Error::Db`] on SQLite failure.
-pub fn recheck_layouts(conn: &Connection, platform: &PlatformId) -> Result<usize> {
+pub fn recheck_layouts(conn: &Connection, platform: PlatformKey) -> Result<usize> {
     Ok(conn
         .prepare_cached(&format!(
             "UPDATE files SET reason = {}
-                 WHERE platform_id = ?1 AND state = {} AND reason = {}",
+                 WHERE platform = ?1 AND state = {} AND reason = {}",
             Unidentified::Pending.code(),
             FileState::Unidentified.sql(),
             Unidentified::NoLayout.code()
@@ -531,7 +533,7 @@ pub fn layout_known(conn: &Connection, platform: &PlatformId, sizes: &[u64]) -> 
 /// [`crate::Error::Db`] on SQLite failure.
 pub fn replace_container(
     conn: &Connection,
-    platform: &PlatformId,
+    platform: PlatformKey,
     container: &str,
     rows: &[NewFile],
     now: i64,
@@ -571,7 +573,7 @@ pub fn replace_container(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::fixtures::conn;
+    use crate::db::fixtures::{conn, key};
 
     fn psx() -> PlatformId {
         PlatformId::new("psx")
@@ -610,11 +612,11 @@ mod tests {
     }
 
     fn put(c: &Connection, pid: &PlatformId, row: &NewFile) -> FileId {
-        files::upsert(c, pid, row, 1).expect("upsert")
+        files::upsert(c, key(pid), row, 1).expect("upsert")
     }
 
     fn reason_of(c: &Connection, rel: &str) -> Option<String> {
-        files::find_by_path(c, &psx(), rel)
+        files::find_by_path(c, key(&psx()), rel)
             .expect("find")
             .and_then(|r| r.reason)
     }
@@ -710,8 +712,8 @@ mod tests {
         assert_eq!(waiting(&c, FileId::new(0), 10).expect("page").len(), 1);
         assert!(waiting(&c, a, 10).expect("page").is_empty());
         assert_eq!(waiting_count(&c).expect("count"), 1);
-        assert!(has_waiting(&c, Some(&pid), &pending).expect("has"));
-        assert!(!has_waiting(&c, Some(&PlatformId::new("saturn")), &pending).expect("has"));
+        assert!(has_waiting(&c, Some(key(&pid)), &pending).expect("has"));
+        assert!(!has_waiting(&c, Some(key(&PlatformId::new("saturn"))), &pending).expect("has"));
 
         assert_eq!(set_waiting(&c, false).expect("off"), 2);
         assert!(!has_waiting(&c, None, &pending).expect("has"));
@@ -737,7 +739,7 @@ mod tests {
         assert!(set_reason_if(&c, a, p, n).expect("set"));
         assert!(!set_reason_if(&c, a, p, Unidentified::Off).expect("skip"));
         assert_eq!(reason_of(&c, "PSX/A/a.chd").as_deref(), Some("no_layout"));
-        assert_eq!(recheck_layouts(&c, &pid).expect("recheck"), 1);
+        assert_eq!(recheck_layouts(&c, key(&pid)).expect("recheck"), 1);
         assert_eq!(reason_of(&c, "PSX/A/a.chd").as_deref(), Some("pending"));
     }
 
@@ -790,15 +792,23 @@ mod tests {
             reason: None,
             ..container("x", Unidentified::Off)
         };
-        let written = replace_container(&c, &pid, "PSX/G/g.chd", std::slice::from_ref(&member), 5)
-            .expect("replace");
+        let written = replace_container(
+            &c,
+            key(&pid),
+            "PSX/G/g.chd",
+            std::slice::from_ref(&member),
+            5,
+        )
+        .expect("replace");
         for gone in ["PSX/G/g.chd", "PSX/G/g.chd#cue"] {
             assert!(
-                files::find_by_path(&c, &pid, gone).expect("find").is_none(),
+                files::find_by_path(&c, key(&pid), gone)
+                    .expect("find")
+                    .is_none(),
                 "{gone}"
             );
         }
-        let got = files::find_by_path(&c, &pid, "PSX/G/g.chd#01")
+        let got = files::find_by_path(&c, key(&pid), "PSX/G/g.chd#01")
             .expect("find")
             .expect("member");
         assert_eq!(
@@ -810,9 +820,9 @@ mod tests {
             .expect("log");
         assert_eq!(logged, None);
         assert_eq!(written, vec![(got.id, FileState::Unverified)]);
-        let again = replace_container(&c, &pid, "PSX/G/g.chd", &[member], 9).expect("again");
+        let again = replace_container(&c, key(&pid), "PSX/G/g.chd", &[member], 9).expect("again");
         assert!(again.is_empty(), "an unchanged row is not reported");
-        let kept = files::find_by_path(&c, &pid, "PSX/G/g.chd#01")
+        let kept = files::find_by_path(&c, key(&pid), "PSX/G/g.chd#01")
             .expect("find")
             .expect("member");
         assert_eq!(kept.scanned_at, 5, "an unchanged row is not written");

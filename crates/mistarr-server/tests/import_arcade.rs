@@ -221,7 +221,13 @@ fn rows(b: &Booted, zip_rel: &str) -> Vec<FileRow> {
     b.running
         .app
         .db
-        .read_blocking(move |c| files::zip_member_rows(c, &PlatformId::new("arcade"), &zip_rel))
+        .read_blocking(move |c| {
+            files::zip_member_rows(
+                c,
+                mistarr_server::db::fixtures::key(&PlatformId::new("arcade")),
+                &zip_rel,
+            )
+        })
         .expect("rows")
 }
 
@@ -231,7 +237,13 @@ fn presence(b: &Booted, zip_rel: &str) -> Option<(FileState, Option<RomId>)> {
     b.running
         .app
         .db
-        .read_blocking(move |c| files::find_by_path(c, &PlatformId::new("arcade"), &zip_rel))
+        .read_blocking(move |c| {
+            files::find_by_path(
+                c,
+                mistarr_server::db::fixtures::key(&PlatformId::new("arcade")),
+                &zip_rel,
+            )
+        })
         .expect("row")
         .map(|r| (r.state, r.rom_id))
 }

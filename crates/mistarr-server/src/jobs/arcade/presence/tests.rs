@@ -1,11 +1,12 @@
 use std::time::{Duration, SystemTime};
 
-use mistarr_core::RomId;
+use mistarr_core::{PlatformId, RomId};
 use rusqlite::params;
 
 use super::*;
 use crate::app::testutil::{state, write_zip};
 use crate::app::AppState;
+use crate::db::fixtures::key;
 use crate::db::titles::RomStatus;
 use crate::jobs::arcade::{ArcadeCatalog, ARCADE_DIR};
 use crate::jobs::Scheduler;
@@ -48,7 +49,7 @@ fn zip(rel: &str, size: i64, mtime: i64) -> Zip {
 fn row(id: i64, rel: &str, size: i64, mtime: i64, rom: Option<i64>, state: FileState) -> FileRow {
     FileRow {
         id: FileId::new(id),
-        platform_id: pid(),
+        platform: key(&pid()),
         rel_path: rel.to_owned(),
         size,
         mtime,
@@ -317,7 +318,7 @@ fn plan_and_write_a_batch_against_the_database() {
             let verified = FileState::Verified;
             files::upsert(
                 c,
-                &p,
+                key(&p),
                 &NewFile {
                     rom_id: Some(rom),
                     ..NewFile::unhashed("mame/b.zip#a.bin", 1, b_mtime, verified)
@@ -334,19 +335,19 @@ fn plan_and_write_a_batch_against_the_database() {
         "b.zip".to_owned(),
         "gone.zip".to_owned(),
     ];
-    let out = plan_batch(&app.db, &games, &p, &live, "mame", &names).expect("plan");
+    let out = plan_batch(&app.db, &games, key(&p), &live, "mame", &names).expect("plan");
     assert_eq!(out.record.len(), 1, "names match case-insensitively");
     assert_eq!(out.record[0].0.rel, "mame/A.zip");
     assert!(out.drop.is_empty() && out.restamp.is_empty() && out.reverify.is_empty());
 
     let (recorded, dropped) = app
         .db
-        .write_tx_blocking(|tx| write_changes(tx, &p, &out, 2))
+        .write_tx_blocking(|tx| write_changes(tx, key(&p), &out, 2))
         .expect("write");
     assert_eq!((recorded, dropped), (1, 0));
     let written = app
         .db
-        .read_blocking(|c| files::find_by_path(c, &p, "mame/A.zip"))
+        .read_blocking(|c| files::find_by_path(c, key(&p), "mame/A.zip"))
         .expect("find")
         .expect("row");
     assert_eq!(written.rom_id, Some(rom));
@@ -432,7 +433,7 @@ fn arcade_rows(app: &Arc<AppState>) -> Vec<(String, FileState, Option<RomId>, i6
         .read_blocking(|c| {
             let mut stmt = c.prepare(
                 "SELECT rel_path, state, rom_id, mtime FROM files
-                 WHERE platform_id = 'arcade' ORDER BY rel_path",
+                 WHERE platform = 33 ORDER BY rel_path",
             )?;
             let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
             Ok(rows.collect::<rusqlite::Result<_>>()?)
@@ -464,7 +465,7 @@ fn import_row(app: &Arc<AppState>, rel: &str, mtime: i64, rom: RomId) -> i64 {
         .write_blocking(move |c| {
             let id = files::upsert(
                 c,
-                &pid(),
+                key(&pid()),
                 &NewFile {
                     rom_id: Some(rom),
                     crc32: Some("0000abcd".parse().expect("hex")),
@@ -720,7 +721,7 @@ async fn a_zip_two_mras_name_keeps_the_promotion_either_gave() {
         .expect("rom");
     let promoted = app
         .db
-        .write_blocking(move |c| files::mark_verified(c, &pid(), "mame/exparent.zip", highest))
+        .write_blocking(move |c| files::mark_verified(c, key(&pid()), "mame/exparent.zip", highest))
         .expect("promote");
     assert!(
         promoted,

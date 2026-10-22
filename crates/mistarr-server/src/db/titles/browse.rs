@@ -16,8 +16,8 @@ use crate::error::Result;
 /// Keeps a group of `title_groups g` only when its parent is an MRA title or its platform
 /// has no live MRA title, so a platform with MRAs browses its MRA catalogue alone.
 const MRA_ONLY: &str = "(g.source = 'mra' OR g.platform_id NOT IN (
-    SELECT p.id FROM platforms p WHERE EXISTS (
-      SELECT 1 FROM titles m WHERE m.platform_id = p.id AND m.source = 'mra' AND m.retired = 0)))";
+    SELECT p.slug FROM platforms p WHERE EXISTS (
+      SELECT 1 FROM titles m WHERE m.platform_id = p.slug AND m.source = 'mra' AND m.retired = 0)))";
 
 /// Catalog counts of one platform for `GET /platforms`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
@@ -70,8 +70,10 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
         e.wanted = sql::get_u64(r, 3)?;
     }
     let mut stmt = conn.prepare(&format!(
-        "SELECT platform, COUNT(*) FROM file_view
-         WHERE state = {} AND platform <> 'arcade' GROUP BY platform",
+        "SELECT (SELECT p.slug FROM platforms p WHERE p.id = platform_key), COUNT(*)
+         FROM file_view
+         WHERE state = {} AND platform_key <> (SELECT a.id FROM platforms a WHERE a.slug = 'arcade')
+         GROUP BY platform_key",
         FileState::Unverified.sql()
     ))?;
     let mut rows = stmt.query([])?;
@@ -79,7 +81,8 @@ pub fn counts(conn: &Connection, hidden: &[String]) -> Result<HashMap<String, Co
         out.entry(r.get(0)?).or_default().unmatched_files = sql::get_u64(r, 1)?;
     }
     let mut stmt = conn.prepare(&format!(
-        "SELECT platform, COUNT(*) FROM file_view WHERE state = {} GROUP BY platform",
+        "SELECT (SELECT p.slug FROM platforms p WHERE p.id = platform_key), COUNT(*)
+         FROM file_view WHERE state = {} GROUP BY platform_key",
         FileState::Unidentified.sql()
     ))?;
     let mut rows = stmt.query([])?;

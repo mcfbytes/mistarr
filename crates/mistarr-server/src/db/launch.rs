@@ -50,13 +50,13 @@ pub fn title(conn: &Connection, id: TitleId) -> Result<Option<LaunchTitle>> {
                         t.source, t.mra_path,
                         (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0),
                         (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0
-                           AND EXISTS (SELECT 1 FROM files f
+                           AND EXISTS (SELECT 1 FROM files f INDEXED BY files_rom
                                        WHERE f.rom_id = r.id AND f.state IN {loadable})),
                         (SELECT COUNT(*) FROM roms r
                          WHERE r.title_id = t.id AND r.retired = 0 AND r.present = 1),
                         COALESCE(t.mra_check, '') IN ('mismatch', 'missing_part'),
                         (SELECT COUNT(*) FROM roms r WHERE r.title_id = t.id AND r.retired = 0
-                           AND EXISTS (SELECT 1 FROM files f
+                           AND EXISTS (SELECT 1 FROM files f INDEXED BY files_rom
                                        WHERE f.rom_id = r.id AND f.state = {verified}))
                  FROM titles t WHERE t.id = ?1",
                 loadable = FileState::LOADABLE_SQL,
@@ -116,7 +116,7 @@ mod tests {
 
     use super::*;
     use crate::db::files::{self, NewFile};
-    use crate::db::fixtures::{conn, dat};
+    use crate::db::fixtures::{conn, dat, key};
     use crate::db::titles::RomStatus;
     use mistarr_core::RomId;
 
@@ -132,7 +132,7 @@ mod tests {
     fn file(c: &Connection, pid: &PlatformId, rel: &str, rom: RomId, state: FileState) {
         files::upsert(
             c,
-            pid,
+            key(pid),
             &NewFile {
                 rom_id: Some(rom),
                 ..NewFile::unhashed(rel, 4, 0, state)
