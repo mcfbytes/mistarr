@@ -84,6 +84,10 @@ CREATE INDEX dat_versions_family ON dat_versions(family, platform);
 -- family: dat::family_key of dat_name, rewritten from the names at every start.
 
 -- The writer connection's own, created on first use; never in the database file.
+CREATE TEMP TABLE load_pending (  -- titles of the DAT being loaded not yet seen in it, cleared per load
+  title_id INTEGER PRIMARY KEY
+) STRICT;
+
 CREATE TEMP TABLE dat_stage (     -- the DAT being imported, parsed outside the write lock and applied at once
   seq  INTEGER PRIMARY KEY,
   game TEXT NOT NULL              -- one parsed game with its roms, as JSON
@@ -524,7 +528,7 @@ title, rom and file of a platform per request.
 ```sql
 CREATE TABLE title_groups (
   parent_id     INTEGER NOT NULL,
-  platform      INTEGER NOT NULL REFERENCES platforms(id),
+  platform      INTEGER NOT NULL,      -- a platform key; no foreign key, as a derived table
   base_name     TEXT NOT NULL,         -- the root title's; its name is read from the root title
   variants      INTEGER NOT NULL,
   have_verified INTEGER NOT NULL,
